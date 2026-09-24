@@ -68,10 +68,12 @@ const (
 	initTempDir = "/tmp"
 )
 
-// The keys of a claim's Secret that the runtime fills itself.
+// The keys of a claim's Secret that the runtime fills itself: the boot token and the provisioning
+// token for every claim, and the Dispatch bearer when Dispatch is configured.
 const (
 	bootTokenKey      = "LEGION_BOOT_TOKEN"
 	provisionTokenKey = "LEGION_PROVISION_TOKEN"
+	dispatchTokenKey  = "DISPATCH_TOKEN"
 )
 
 // The labels every object of a claim carries: the Sandbox, its pod template (the only place the

@@ -487,7 +487,8 @@ func (r *Runtime) Suspend(ctx context.Context, loc runtime.Locator) error {
 	newerRelaunch := ok && recorded.Incarnation != loc.Incarnation
 	switch {
 	case pod != nil && string(pod.UID) == loc.Incarnation:
-		if err := r.stopGracefully(ctx, loc, s); err != nil {
+		r.shutdown(ctx, loc)
+		if err := r.setMode(ctx, s, modeSuspended); err != nil {
 			return fmt.Errorf("suspend %s: %w", loc.Claim, err)
 		}
 	case pod != nil && newerRelaunch && string(pod.UID) == recorded.Incarnation, pod == nil && newerRelaunch:
@@ -510,13 +511,6 @@ func (r *Runtime) Suspend(ctx context.Context, loc runtime.Locator) error {
 	}
 	r.forgetIf(loc)
 	return nil
-}
-
-// stopGracefully sends the claim's connection a shutdown frame while its pod still runs, waits up
-// to the termination grace for the pod to end, and suspends the Sandbox.
-func (r *Runtime) stopGracefully(ctx context.Context, loc runtime.Locator, s *sandbox) error {
-	r.shutdown(ctx, loc)
-	return r.setMode(ctx, s, modeSuspended)
 }
 
 // shutdown asks the agent loc records to end its own process, while that process is still the

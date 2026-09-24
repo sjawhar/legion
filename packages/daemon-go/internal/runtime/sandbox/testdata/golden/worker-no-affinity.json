@@ -177,12 +177,12 @@
                 "value": "legion-implement[bot]"
               },
               {
-                "name": "LEGION_BOOT_TOKEN_FILE",
-                "value": "/var/run/legion/boot/LEGION_BOOT_TOKEN"
-              },
-              {
                 "name": "ENVOY_TOKEN_FILE",
                 "value": "/var/run/legion/boot/ENVOY_TOKEN"
+              },
+              {
+                "name": "LEGION_BOOT_TOKEN_FILE",
+                "value": "/var/run/legion/boot/LEGION_BOOT_TOKEN"
               }
             ],
             "image": "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
@@ -367,12 +367,12 @@
               "defaultMode": 288,
               "items": [
                 {
-                  "key": "LEGION_BOOT_TOKEN",
-                  "path": "LEGION_BOOT_TOKEN"
-                },
-                {
                   "key": "ENVOY_TOKEN",
                   "path": "ENVOY_TOKEN"
+                },
+                {
+                  "key": "LEGION_BOOT_TOKEN",
+                  "path": "LEGION_BOOT_TOKEN"
                 }
               ],
               "secretName": "legion-legion-legion-208-tester-boot"

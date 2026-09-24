@@ -66,11 +66,11 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	if prev != nil {
 		r.log.Info("sandbox runtime: relaunching", "claim", spec.Claim, "previous", prev.Incarnation, "resume", l.resumeFile != "")
 	}
-	s, created, err := r.ensureSandbox(ctx, l)
+	s, err := r.ensureSandbox(ctx, l)
 	if err != nil {
 		return fail("ensure its sandbox", err)
 	}
-	if !created && s.mode() != modeSuspended {
+	if s.mode() != modeSuspended {
 		if err := r.setMode(ctx, s, modeSuspended); err != nil {
 			return fail("suspend its sandbox", err)
 		}
@@ -89,7 +89,7 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	}
 	// Minted now, not before the waits: an installation token can be handed out with minutes left.
 	// Bounded like an API call, since the tree's launch turn is held while it runs.
-	owner, _, _ := strings.Cut(l.repo, "/")
+	owner, _, _ := strings.Cut(l.spec.Repository, "/")
 	minting, cancel := call(ctx)
 	provisionToken, err := r.tokens.Token(minting, owner)
 	cancel()
@@ -127,19 +127,20 @@ func (r *Runtime) suspendFailedLaunch(ctx context.Context, token claim.Token, s 
 	}
 }
 
-// ensureSandbox is the claim's Sandbox read from the API, created Suspended when absent. One being
-// deleted is waited out first, bounded by the boot timeout; one by the claim's name that is not
-// this project's is a refusal.
-func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, bool, error) {
+// ensureSandbox is the claim's Sandbox read from the API, created Suspended when absent, with a
+// template the Running patch replaces before any pod exists. One being deleted is waited out
+// first, bounded by the boot timeout; one by the claim's name that is not this project's is a
+// refusal.
+func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, error) {
 	deadline := time.Now().Add(r.bootTimeout)
 	for {
 		getting, cancel := call(ctx)
 		u, err := r.sandboxClient().Get(getting, l.name, metav1.GetOptions{})
 		cancel()
 		if apierrors.IsNotFound(err) {
-			manifest, err := encodeSandbox(r.sandboxManifest(l, r.treePodScheduled(l)))
+			manifest, err := encodeSandbox(r.sandboxManifest(l, false))
 			if err != nil {
-				return nil, false, err
+				return nil, err
 			}
 			creating, cancel := call(ctx)
 			createdObject, err := r.sandboxClient().Create(creating, manifest, metav1.CreateOptions{})
@@ -148,23 +149,22 @@ func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, bool, 
 				continue
 			}
 			if err != nil {
-				return nil, false, err
+				return nil, err
 			}
-			created, err := decodeSandbox(createdObject)
-			return created, true, err
+			return decodeSandbox(createdObject)
 		}
 		if err != nil {
-			return nil, false, err
+			return nil, err
 		}
 		s, err := decodeSandbox(u)
 		if err != nil {
-			return nil, false, err
+			return nil, err
 		}
 		if s.Labels[labelProject] != r.project {
-			return nil, false, fmt.Errorf("sandbox %s exists but is not project %s's (%s=%q)", l.name, r.project, labelProject, s.Labels[labelProject])
+			return nil, fmt.Errorf("sandbox %s exists but is not project %s's (%s=%q)", l.name, r.project, labelProject, s.Labels[labelProject])
 		}
 		if s.DeletionTimestamp == nil {
-			return s, false, nil
+			return s, nil
 		}
 		r.log.Info("sandbox runtime: waiting out a sandbox being deleted", "sandbox", l.name, "uid", s.UID)
 		gone := func() (bool, error) {
@@ -177,7 +177,7 @@ func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, bool, 
 			return err == nil && current.GetUID() != s.UID, err
 		}
 		if err := r.await(ctx, time.Until(deadline), fmt.Sprintf("sandbox %s (uid %s) to be deleted", l.name, s.UID), gone); err != nil {
-			return nil, false, err
+			return nil, err
 		}
 	}
 }
@@ -233,15 +233,15 @@ func (r *Runtime) awaitNewPod(ctx context.Context, s *sandbox, old map[types.UID
 	return found, err
 }
 
-// writeSecret makes the claim's Secret hold this launch's boot token, provisioning token, and the
-// launch's secrets, owned by the Sandbox so garbage collection deletes it with the Sandbox (decision
-// 6). It is written while the Sandbox is Suspended, so no pod ever waits on a missing Secret or
+// writeSecret makes the claim's Secret hold this launch's provisioning token and its secrets, the
+// boot token among them, owned by the Sandbox so garbage collection deletes it with the Sandbox
+// (decision 6). It is written while the Sandbox is Suspended, so no pod ever waits on a missing Secret or
 // starts on the previous generation's token. A Secret left owned by an earlier Sandbox of the same
 // name is replaced, not updated: the collector may already be deleting it.
 func (r *Runtime) writeSecret(ctx context.Context, s *sandbox, l launch, provisionToken string) error {
 	ctx, cancel := call(ctx)
 	defer cancel()
-	data := map[string][]byte{bootTokenKey: []byte(l.spec.BootToken), provisionTokenKey: []byte(provisionToken)}
+	data := map[string][]byte{provisionTokenKey: []byte(provisionToken)}
 	for name, value := range l.secrets {
 		data[name] = []byte(value)
 	}

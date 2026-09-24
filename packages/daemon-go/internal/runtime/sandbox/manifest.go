@@ -51,10 +51,6 @@ const (
 // The pod runs as the image's legion user.
 const podUser = 1000
 
-// dispatchTokenKey is the claim Secret's key for the Dispatch bearer, which the runtime writes
-// into every claim's Secret when Dispatch is configured, beside the boot and provisioning tokens.
-const dispatchTokenKey = "DISPATCH_TOKEN"
-
 // runtimeOwned are the main container's variables the runtime sets itself: exactly the names
 // mainEnvironment sets (TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime), which the
 // shared validator refuses in a spec's Env and as a secret's pointer.
@@ -64,38 +60,40 @@ var runtimeOwned = map[string]bool{
 	"LEGION_STATE_DIR": true, "LEGION_WORKSPACE": true, "ENVOY_NATS_URL": true, "ENVOY_URL": true,
 	"DISPATCH_URL": true, "LEGION_MODEL_GATEWAY_URL": true, "LEGION_GH_PATH": true,
 	"LEGION_GIT_PATH": true, "LEGION_JJ_PATH": true, "LEGION_CREDENTIAL_HELPER": true, "PATH": true,
-	"PI_SHELL_PREFIX":     true,
-	"GIT_TERMINAL_PROMPT": true, "XDG_CONFIG_HOME": true, "XDG_CACHE_HOME": true,
-	"XDG_DATA_HOME": true, "XDG_STATE_HOME": true, "POD_UID": true, "LEGION_BOOT_TOKEN_FILE": true,
-	"DISPATCH_TOKEN_FILE": true,
+	"PI_SHELL_PREFIX": true, "GIT_TERMINAL_PROMPT": true, "XDG_CONFIG_HOME": true,
+	"XDG_CACHE_HOME": true, "XDG_DATA_HOME": true, "XDG_STATE_HOME": true, "POD_UID": true,
+	bootTokenKey + "_FILE": true, dispatchTokenKey + "_FILE": true,
 }
 
 // launch is one relaunch's inputs, checked and resolved before anything touches the cluster.
 type launch struct {
 	spec runtime.SpawnSpec
 	name string
-	// repo is the repository workspace-init provisions, and workspace the issue's workspace it
-	// provisions on the tree volume (workspace.Location under TreeRoot).
-	repo, workspace string
-	// secrets are the claim Secret's keys beside the boot and provisioning tokens, each reaching
-	// the main container as a `<NAME>_FILE` pointer: the spec's, and the Dispatch bearer when
-	// Dispatch is configured.
+	// workspace is the issue's workspace workspace-init provisions on the tree volume
+	// (workspace.Location under TreeRoot).
+	workspace string
+	// secrets are the claim Secret's keys beside the provisioning token, each reaching the main
+	// container as a `<NAME>_FILE` pointer: the boot token, the spec's, and the Dispatch bearer
+	// when Dispatch is configured.
 	secrets map[string]string
-	// root is the tree's root claim, whose Sandbox owns the tree volume; isRoot is spec.Claim
+	// root is the tree's root claim, whose Sandbox owns the tree volume; isRoot is spec's claim
 	// being it.
 	root   claim.Token
 	isRoot bool
 	// prompt is the one --append-system-prompt value.
 	prompt string
-	// resumeFile is the recorded session in the main container's path; "" for a Spawn.
-	resumeFile string
+	// resumeFile is the recorded session in the main container's path, and initResumeFile the same
+	// file in the init container's; both "" for a Spawn.
+	resumeFile, initResumeFile string
 }
 
 // prepare checks spec and resolves everything a launch needs from it, reading the prompt files on
 // the daemon's disk, so a launch that cannot be honoured is refused before any API call: the
 // shared refusal (runtime.ValidateSpawnSpec), then the sandbox's own. A pod provisions its
-// workspace from a repository, so a spec with none is refused, and so is a secret named for a key
-// the runtime writes into the claim's Secret itself.
+// workspace from a repository, so a spec with none is refused, and so is a secret named for the
+// provisioning token, the one key the runtime writes whose pointer the worker container is never
+// told (the boot token's and the Dispatch bearer's pointers are runtime-owned, so the shared
+// refusal already covers them).
 func (r *Runtime) prepare(spec runtime.SpawnSpec) (launch, error) {
 	if err := runtime.ValidateSpawnSpec(spec, runtimeOwned); err != nil {
 		return launch{}, err
@@ -103,10 +101,8 @@ func (r *Runtime) prepare(spec runtime.SpawnSpec) (launch, error) {
 	refuse := func(format string, args ...any) error {
 		return fmt.Errorf("sandbox launch %s: "+format, append([]any{spec.Claim}, args...)...)
 	}
-	for _, name := range sortedKeys(spec.Secrets) {
-		if name == bootTokenKey || name == provisionTokenKey || name == dispatchTokenKey {
-			return launch{}, refuse("secret %s is a key the runtime writes itself", name)
-		}
+	if _, ok := spec.Secrets[provisionTokenKey]; ok {
+		return launch{}, refuse("secret %s is a key the runtime writes itself", provisionTokenKey)
 	}
 	if spec.Repository == "" {
 		return launch{}, refuse("no repository: a pod's init container provisions the issue's workspace from one")
@@ -124,18 +120,19 @@ func (r *Runtime) prepare(spec runtime.SpawnSpec) (launch, error) {
 		return launch{}, refuse("%v", err)
 	}
 	secrets := maps.Clone(spec.Secrets)
+	if secrets == nil {
+		secrets = map[string]string{}
+	}
+	secrets[bootTokenKey] = spec.BootToken
 	if r.dispatchToken != "" {
-		if secrets == nil {
-			secrets = map[string]string{}
-		}
 		secrets[dispatchTokenKey] = r.dispatchToken
 	}
 	l := launch{
-		spec: spec, name: SandboxName(spec.Claim), repo: spec.Repository, workspace: working.Dir, secrets: secrets,
-		root: root, isRoot: root == spec.Claim, prompt: prompt,
+		spec: spec, name: SandboxName(spec.Claim), workspace: working.Dir, secrets: secrets,
+		root: root, isRoot: claim.IsTreeArchitect(spec.Role, spec.Issue, spec.Tree), prompt: prompt,
 	}
 	if spec.ResumeSessionFile != "" {
-		if _, err := initSessionPath(spec.ResumeSessionFile); err != nil {
+		if l.initResumeFile, err = initSessionPath(spec.ResumeSessionFile); err != nil {
 			return launch{}, refuse("%v", err)
 		}
 		l.resumeFile = spec.ResumeSessionFile
@@ -276,7 +273,7 @@ func (r *Runtime) podTemplate(l launch, affinity bool) podTemplate {
 			Name:  initContainer,
 			Image: r.image,
 			Command: []string{
-				legion, "workspace-init", "--issue", l.spec.Issue, "--repo", l.repo, "--root", TreeRoot,
+				legion, "workspace-init", "--issue", l.spec.Issue, "--repo", l.spec.Repository, "--root", TreeRoot,
 				"--credential-helper", helper,
 			},
 			Env:        r.initEnvironment(l),
@@ -361,7 +358,7 @@ func kubeletLiteral(c *corev1.Container) {
 // directories: the main container's state directory, the init container's TMPDIR, and the XDG
 // config home both containers share.
 func (r *Runtime) volumes(l launch) []corev1.Volume {
-	boot := []corev1.KeyToPath{{Key: bootTokenKey, Path: bootTokenKey}}
+	var boot []corev1.KeyToPath
 	for _, name := range sortedKeys(l.secrets) {
 		boot = append(boot, corev1.KeyToPath{Key: name, Path: name})
 	}
@@ -417,9 +414,8 @@ func (r *Runtime) initEnvironment(l launch) []corev1.EnvVar {
 		{Name: "LEGION_PROVISION_TOKEN_FILE", Value: ProvisionDir + "/" + provisionTokenKey},
 		{Name: "LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS", Value: strconv.FormatInt(r.initWaitSeconds(), 10)},
 	}
-	if l.resumeFile != "" {
-		path, _ := initSessionPath(l.resumeFile) // checked by prepare
-		env = append(env, corev1.EnvVar{Name: "LEGION_RESUME_SESSION_FILE", Value: path})
+	if l.initResumeFile != "" {
+		env = append(env, corev1.EnvVar{Name: "LEGION_RESUME_SESSION_FILE", Value: l.initResumeFile})
 	}
 	if l.spec.WorkspaceRecoveredFrom != "" {
 		env = append(env, corev1.EnvVar{Name: "LEGION_WORKSPACE_RECOVERED_FROM", Value: l.spec.WorkspaceRecoveredFrom})
@@ -480,7 +476,6 @@ func (r *Runtime) mainEnvironment(l launch, credentialHelper string) []corev1.En
 	for _, name := range sortedKeys(spec.Env) {
 		add(name, spec.Env[name])
 	}
-	add("LEGION_BOOT_TOKEN_FILE", BootDir+"/"+bootTokenKey)
 	for _, name := range sortedKeys(l.secrets) {
 		add(name+"_FILE", BootDir+"/"+name)
 	}
