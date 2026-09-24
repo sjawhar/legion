@@ -108,8 +108,8 @@ func TestConditionalDocumentEditDoesNotOverwriteWriterDuringTableAnchorCheck(t *
 				t.Fatalf("begin edit transaction: %v", err)
 			}
 			defer conditionalTx.Rollback(context.Background())
-			joined, collector := joinTx(context.Background(), conditionalTx)
-			defer service.DiscardLiveWrites(collector)
+			joined, ledger := service.Join(context.Background(), conditionalTx)
+			defer ledger.Discard()
 			result := make(chan error, 1)
 			var precondition *model.EditPrecondition
 			if test.precondition {
@@ -147,16 +147,15 @@ func TestConditionalDocumentEditDoesNotOverwriteWriterDuringTableAnchorCheck(t *
 				if err := conditionalTx.Rollback(context.Background()); err != nil {
 					t.Fatalf("rollback stale conditional edit: %v", err)
 				}
-				service.DiscardLiveWrites(collector)
+				ledger.Discard()
 			} else {
 				if err != nil {
 					t.Fatalf("unconditional edit: %v", err)
 				}
-				if err := conditionalTx.Commit(context.Background()); err != nil {
+				if err := ledger.commit(context.Background()); err != nil {
 					t.Fatalf("commit unconditional edit: %v", err)
 				}
-				service.CreditLiveWrites(collector)
-				service.PublishLiveWrites(collector)
+				ledger.publish()
 			}
 			if err := service.Evict(context.Background(), artifactID); err != nil {
 				t.Fatalf("evict resident document: %v", err)

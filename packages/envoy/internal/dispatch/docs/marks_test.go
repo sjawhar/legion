@@ -57,7 +57,7 @@ func TestMarkQuoteJoinsTheCallerTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	joined, collector := joinTx(context.Background(), tx)
+	joined, ledger := service.Join(context.Background(), tx)
 	if _, err := service.MarkQuote(joined, artifactID, MarkSpec{
 		Kind: MarkComment,
 		ID:   "c1",
@@ -71,7 +71,7 @@ func TestMarkQuoteJoinsTheCallerTransaction(t *testing.T) {
 	if err := tx.Rollback(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	service.DiscardLiveWrites(collector)
+	ledger.Discard()
 	if _, _, ok := pmdoc.FindMark(liveTree(t, service, artifactID), "proofComment", "c1"); ok {
 		t.Fatal("rolled-back mark reached the room")
 	}
@@ -412,17 +412,16 @@ func TestProjectMarkRearmsPendingSettlement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin projection transaction: %v", err)
 	}
-	joined, collector := joinTx(context.Background(), tx)
+	joined, ledger := service.Join(context.Background(), tx)
 	if err := service.ProjectMark(joined, artifactID, "c1", MarkRecord{
 		Kind: "comment", By: "user:alice", CreatedAt: "2026-09-10T00:00:00Z", Text: "note",
 	}, model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("project mark: %v", err)
 	}
-	if err := tx.Commit(context.Background()); err != nil {
+	if err := ledger.commit(context.Background()); err != nil {
 		t.Fatalf("commit projection transaction: %v", err)
 	}
-	service.CreditLiveWrites(collector)
-	service.PublishLiveWrites(collector)
+	ledger.publish()
 	waitFor(t, time.Second, "settled projection version for after", func() bool {
 		var markdown string
 		var named bool
@@ -450,7 +449,7 @@ func TestTransactionalMarkWritesSettleWithoutAVersion(t *testing.T) {
 		t.Fatalf("begin comment transaction: %v", err)
 	}
 	defer tx.Rollback(context.Background())
-	ctx, collector := joinTx(context.Background(), tx)
+	ctx, ledger := service.Join(context.Background(), tx)
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	if _, err := service.MarkQuote(ctx, artifactID, MarkSpec{Kind: MarkComment, ID: "c1", By: alice}, "quick", nil); err != nil {
 		t.Fatalf("mark quote: %v", err)
@@ -460,11 +459,10 @@ func TestTransactionalMarkWritesSettleWithoutAVersion(t *testing.T) {
 	}, alice); err != nil {
 		t.Fatalf("project mark: %v", err)
 	}
-	if err := tx.Commit(context.Background()); err != nil {
+	if err := ledger.commit(context.Background()); err != nil {
 		t.Fatalf("commit comment transaction: %v", err)
 	}
-	service.CreditLiveWrites(collector)
-	service.PublishLiveWrites(collector)
+	ledger.publish()
 	settleCurrentGeneration(t, service, artifactID)
 	assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 1, 0)
 }

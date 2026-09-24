@@ -37,9 +37,9 @@ type versionWrite struct {
 // changes. Outside a transaction it writes the room directly, and the room's update observer
 // credits actor with it (recordConnectedActors). Joined to a transaction it writes that
 // transaction's fork of the room (see liveWrite), appends the update inside the transaction,
-// and leaves the room to PublishLiveWrites and the credit to CreditLiveWrites, so a transaction
-// that does not commit never reaches the room, a browser or a version's authors.
-func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.Actor, mutate func(*crdt.Doc, func(func(*crdt.Transaction))) (bool, error)) error {
+// and leaves the room and the credit to its ledger's Commit, so a transaction that does not
+// commit never reaches the room, a browser or a version's authors.
+func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.Actor, mutate func(*crdt.Doc, func(func(*crdt.Transaction))) error) error {
 	if s.shuttingDown(artifactID) {
 		return ErrServiceUnavailable
 	}
@@ -53,7 +53,7 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 		// ygo re-panics callback failures after unregistering its update observer; that
 		// unregister needs the same document mutex and masks the originating failure.
 		defer recoverMutation(artifactID, &mutateErr)
-		_, mutateErr = mutate(doc, transact)
+		mutateErr = mutate(doc, transact)
 	})
 	if mutateErr != nil {
 		return mutateErr
@@ -71,12 +71,8 @@ func recoverMutation(room string, err *error) {
 
 // applyJoined is applyLive joined to tx. It returns websocket.ErrNoChanges when mutate wrote
 // nothing, as the room's Apply does.
-func (s *Service) applyJoined(ctx context.Context, tx pgx.Tx, artifactID string, actor model.Actor, mutate func(*crdt.Doc, func(func(*crdt.Transaction))) (bool, error)) error {
-	collector := eventCollector(ctx)
-	if collector == nil {
-		return errLiveWriteNeedsCollector
-	}
-	write, err := s.joinLiveWrite(ctx, tx, collector, artifactID)
+func (s *Service) applyJoined(ctx context.Context, tx pgx.Tx, artifactID string, actor model.Actor, mutate func(*crdt.Doc, func(func(*crdt.Transaction))) error) error {
+	write, err := s.joinLiveWrite(ctx, ledgerFrom(ctx), artifactID)
 	if err != nil {
 		return err
 	}
@@ -84,6 +80,14 @@ func (s *Service) applyJoined(ctx context.Context, tx pgx.Tx, artifactID string,
 	if err != nil {
 		return err
 	}
+	// An operation that does not reach the end below leaves the fork holding changes its
+	// transaction never recorded; the next operation rebuilds it.
+	recorded := false
+	defer func() {
+		if !recorded {
+			write.fork = nil
+		}
+	}()
 	before, err := treeOf(fork)
 	if err != nil {
 		return err
@@ -92,7 +96,7 @@ func (s *Service) applyJoined(ctx context.Context, tx pgx.Tx, artifactID string,
 	unsubscribe := fork.OnUpdate(func(update []byte, _ any) {
 		updates = append(updates, append([]byte(nil), update...))
 	})
-	changed, mutateErr := func() (changed bool, err error) {
+	mutateErr := func() (err error) {
 		defer recoverMutation(artifactID, &err)
 		return mutate(fork, func(inner func(*crdt.Transaction)) { fork.Transact(inner) })
 	}()
@@ -102,9 +106,6 @@ func (s *Service) applyJoined(ctx context.Context, tx pgx.Tx, artifactID string,
 	}
 	if len(updates) == 0 {
 		return websocket.ErrNoChanges
-	}
-	if !changed {
-		return nil
 	}
 	tree, err := treeOf(fork)
 	if err != nil {
@@ -129,6 +130,7 @@ func (s *Service) applyJoined(ctx context.Context, tx pgx.Tx, artifactID string,
 		return fmt.Errorf("refresh transactional document anchors: %w", err)
 	}
 	write.updates = append(write.updates, update)
+	recorded = true
 	if contentChanged {
 		s.creditLiveWrite(write, actor)
 	}
@@ -182,33 +184,33 @@ func (s *Service) SeedText(ctx context.Context, tx pgx.Tx, artifactID, markdown 
 // ReplaceText replaces the entire live document tree so connected clients
 // receive document uploads as a regular server-side transaction.
 func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, actor model.Actor) (string, error) {
-	anchors, err := s.openAnchoredMarks(ctx, artifactID)
+	anchors, err := s.openAnchoredMarks(ctx, s.queryFrom(ctx), artifactID)
 	if err != nil {
 		return "", err
 	}
 	var canonical string
 	var unchanged bool
-	err = s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) (bool, error) {
+	err = s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
 		current, err := treeOf(doc)
 		if err != nil {
-			return false, err
+			return err
 		}
 		target, err := parseInput(markdown)
 		if err != nil {
-			return false, err
+			return err
 		}
 		currentMarkdown, err := renderTree(current)
 		if err != nil {
-			return false, err
+			return err
 		}
 		canonical, err = renderTree(target)
 		if err != nil {
-			return false, err
+			return err
 		}
 		if currentMarkdown == canonical {
 			unchanged = true
-			return false, nil
+			return nil
 		}
 		type reanchor struct {
 			mark   anchoredMark
@@ -223,7 +225,7 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 			}
 			attrs, found := pmdoc.MarkAttrs(current, mark.markType, mark.anchor.MarkID)
 			if !found {
-				return false, fmt.Errorf("%w: mark %q is missing attributes", ErrDocSchema, mark.anchor.MarkID)
+				return fmt.Errorf("%w: mark %q is missing attributes", ErrDocSchema, mark.anchor.MarkID)
 			}
 			reanchors = append(reanchors, reanchor{mark: mark, range_: range_, attrs: attrs})
 		}
@@ -246,9 +248,9 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 			}
 		})
 		if updateErr != nil {
-			return false, updateErr
+			return updateErr
 		}
-		return true, nil
+		return nil
 	})
 	if unchanged && errors.Is(err, websocket.ErrNoChanges) {
 		return canonical, nil
@@ -259,94 +261,79 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 	return canonical, nil
 }
 
-// Text returns the rendered document, loading and rendering persisted state
-// when the document room is not resident.
+// Text returns the rendered document the caller sees (readDocument).
 func (s *Service) Text(ctx context.Context, artifactID string) (string, error) {
-	if err := s.awaitRoomRecovery(ctx, artifactID); err != nil {
-		return "", err
-	}
-	doc, err := s.joinedFork(ctx, artifactID)
-	if err != nil {
-		return "", err
-	}
-	if doc == nil {
-		doc = s.srv.GetDoc(artifactID)
-	}
-	if doc != nil {
+	var markdown string
+	err := s.readDocument(ctx, artifactID, func(doc *crdt.Doc) error {
+		if doc == nil {
+			return nil
+		}
 		tree, err := treeOf(doc)
 		if err != nil {
-			return "", err
+			return err
 		}
-		return renderTree(tree)
-	}
-	loaded, err := s.persistence.Load(ctx, artifactID)
-	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return "", err
-		}
-		s.failRoom(artifactID, err)
-		return "", fmt.Errorf("%w: %w", ErrServiceUnavailable, err)
-	}
-	if len(loaded.Update) == 0 {
-		return "", nil
-	}
-	doc = crdt.New()
-	if err := crdt.ApplyUpdateV1(doc, loaded.Update, nil); err != nil {
-		s.failRoom(artifactID, fmt.Errorf("decode live document: %w", err))
-		return "", fmt.Errorf("%w: decode live document: %w", ErrServiceUnavailable, err)
-	}
-	tree, err := treeOf(doc)
+		markdown, err = renderTree(tree)
+		return err
+	})
 	if err != nil {
 		return "", err
 	}
-	return renderTree(tree)
+	return markdown, nil
 }
 
 // TextWithToken returns canonical markdown and a token over its full Proof tree,
 // including inline marks that canonical Markdown does not render.
 func (s *Service) TextWithToken(ctx context.Context, artifactID string) (string, string, error) {
-	if err := s.awaitRoomRecovery(ctx, artifactID); err != nil {
-		return "", "", err
-	}
-	fork, err := s.joinedFork(ctx, artifactID)
+	var markdown, token string
+	err := s.readDocument(ctx, artifactID, func(doc *crdt.Doc) error {
+		if doc == nil {
+			return nil
+		}
+		var err error
+		markdown, token, err = renderTokenTree(doc)
+		return err
+	})
 	if err != nil {
 		return "", "", err
 	}
-	if fork != nil {
-		return renderTokenTree(fork)
-	}
-	if s.srv.GetDoc(artifactID) == nil {
-		loaded, err := s.persistence.Load(ctx, artifactID)
-		if err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return "", "", err
-			}
-			s.failRoom(artifactID, err)
-			return "", "", fmt.Errorf("%w: %w", ErrServiceUnavailable, err)
-		}
-		if len(loaded.Update) == 0 {
-			return "", "", nil
-		}
-		doc := crdt.New()
-		if err := crdt.ApplyUpdateV1(doc, loaded.Update, nil); err != nil {
-			s.failRoom(artifactID, fmt.Errorf("decode live document: %w", err))
-			return "", "", fmt.Errorf("%w: decode live document: %w", ErrServiceUnavailable, err)
-		}
-		return renderTokenTree(doc)
-	}
-
-	var markdown, token string
-	var readErr error
-	err = s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
-		markdown, token, readErr = renderTokenTree(doc)
-	})
-	if readErr != nil {
-		return "", "", readErr
-	}
-	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
-		return "", "", err
-	}
 	return markdown, token, nil
+}
+
+// readDocument runs read against the document the caller sees without loading or writing its
+// room, so it also reads a closed issue's document: the calling transaction's fork when it has
+// one (joinRead), else the resident room, else the persisted document. A document with
+// no persisted state is read as nil.
+func (s *Service) readDocument(ctx context.Context, artifactID string, read func(*crdt.Doc) error) error {
+	if err := s.awaitRoomRecovery(ctx, artifactID); err != nil {
+		return err
+	}
+	fork, err := s.joinRead(ctx, artifactID)
+	if err != nil {
+		return err
+	}
+	if fork != nil {
+		return read(fork)
+	}
+	if doc := s.srv.GetDoc(artifactID); doc != nil {
+		return read(doc)
+	}
+	loaded, err := s.persistence.Load(ctx, artifactID)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+		s.failRoom(artifactID, err)
+		return fmt.Errorf("%w: %w", ErrServiceUnavailable, err)
+	}
+	if len(loaded.Update) == 0 {
+		return read(nil)
+	}
+	doc := crdt.New()
+	if err := crdt.ApplyUpdateV1(doc, loaded.Update, nil); err != nil {
+		s.failRoom(artifactID, fmt.Errorf("decode live document: %w", err))
+		return fmt.Errorf("%w: decode live document: %w", ErrServiceUnavailable, err)
+	}
+	return read(doc)
 }
 
 func renderTokenTree(doc *crdt.Doc) (string, string, error) {
@@ -417,7 +404,7 @@ func (s *Service) TextWithBlocks(ctx context.Context, artifactID string) (string
 	if readErr != nil {
 		return "", nil, readErr
 	}
-	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return "", nil, err
 		}
@@ -453,9 +440,9 @@ func (s *Service) SnapshotVersion(ctx context.Context, tx pgx.Tx, artifactID str
 	return VersionResult{Version: result.version, Wrote: true, Changes: result.changes}, nil
 }
 
-// CommitVersion clears authors consumed by a version only after its enclosing
-// transaction has committed.
-func (s *Service) CommitVersion(artifactID string, version model.Version) {
+// commitVersion clears authors consumed by a version only after its enclosing transaction has
+// committed (Ledger.Commit, or NamedVersion's own transaction).
+func (s *Service) commitVersion(artifactID string, version model.Version) {
 	state := s.room(artifactID)
 	state.mu.Lock()
 	defer state.mu.Unlock()
@@ -498,7 +485,7 @@ func (s *Service) prevalidateLiveOperations(ctx context.Context, artifactID stri
 	if planErr != nil {
 		return nil, planErr
 	}
-	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+	if err != nil {
 		return nil, err
 	}
 	return snapshots, nil
@@ -663,14 +650,10 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 	if !joined {
 		return 0, &ErrInvalidPrecondition{Reason: "requires an enclosing transaction"}
 	}
-	collector := eventCollector(ctx)
-	if collector == nil {
-		return 0, errLiveWriteNeedsCollector
-	}
 	// The live document's locks, in their order (see liveWrite): its owner row and, once the
 	// room has recovered from any failure, its writer slot; then, with the room loaded, its
 	// advisory lock, held from before the precondition is read.
-	if _, err := s.joinLiveWrite(ctx, tx, collector, artifactID); err != nil {
+	if _, err := s.joinLiveWrite(ctx, ledgerFrom(ctx), artifactID); err != nil {
 		return 0, err
 	}
 	if err := s.warmLiveDocument(ctx, artifactID); err != nil {
@@ -692,7 +675,7 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 		if checkErr != nil {
 			return 0, checkErr
 		}
-		if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+		if err != nil {
 			return 0, fmt.Errorf("check empty document edit precondition: %w", err)
 		}
 		return 0, nil
@@ -710,7 +693,7 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 	if err := lockTableAnchorRows(ctx, tx, artifactID, snapshots); err != nil {
 		return 0, err
 	}
-	err = s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) (bool, error) {
+	err = s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
 		var mutationErr error
 		transact(func(transaction *crdt.Transaction) {
@@ -750,9 +733,9 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 			mutationErr = pmdoc.Update(transaction, fragment, next)
 		})
 		if mutationErr != nil {
-			return false, mutationErr
+			return mutationErr
 		}
-		return true, nil
+		return nil
 	})
 	if err != nil {
 		var quoteNotFound *ErrQuoteNotFound
@@ -770,29 +753,29 @@ func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, 
 	if len(ops) == 0 {
 		return 0, nil
 	}
-	err := s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) (bool, error) {
+	err := s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
 		tree, err := treeOf(doc)
 		if err != nil {
-			return false, err
+			return err
 		}
 		pmdoc.EnsureBlockIDs(tree)
 		next, err := s.applyOperations(ctx, artifactID, tree, ops)
 		if err != nil {
-			return false, err
+			return err
 		}
 		pmdoc.EnsureBlockIDs(next)
 		if err := validateAskBlocks(next); err != nil {
-			return false, &ErrInvalidAskBlock{Reason: err}
+			return &ErrInvalidAskBlock{Reason: err}
 		}
 		var updateErr error
 		transact(func(transaction *crdt.Transaction) {
 			updateErr = pmdoc.Update(transaction, fragment, next)
 		})
 		if updateErr != nil {
-			return false, updateErr
+			return updateErr
 		}
-		return true, nil
+		return nil
 	})
 	if err != nil {
 		var quoteNotFound *ErrQuoteNotFound
@@ -812,27 +795,27 @@ func (s *Service) SetBlockAttributes(
 	attributes map[string]any,
 	actor model.Actor,
 ) error {
-	err := s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) (bool, error) {
+	err := s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
 		tree, err := treeOf(doc)
 		if err != nil {
-			return false, err
+			return err
 		}
 		next, err := pmdoc.SetBlockAttributes(tree, blockID, pmdoc.Attrs(attributes))
 		if err != nil {
-			return false, err
+			return err
 		}
 		if next.EqualWithBlockIDs(tree) {
-			return false, nil
+			return nil
 		}
 		var updateErr error
 		transact(func(transaction *crdt.Transaction) {
 			updateErr = pmdoc.Update(transaction, fragment, next)
 		})
 		if updateErr != nil {
-			return false, updateErr
+			return updateErr
 		}
-		return true, nil
+		return nil
 	})
 	if err != nil {
 		return fmt.Errorf("set live block attributes: %w", err)
@@ -842,8 +825,8 @@ func (s *Service) SetBlockAttributes(
 
 // NamedVersion records the live document as a deliberately named immutable version.
 func (s *Service) NamedVersion(ctx context.Context, artifactID, summary string, actor model.Actor) (VersionResult, error) {
-	if _, joined := txFromContext(ctx); !joined && eventCollector(ctx) == nil {
-		ctx = WithEventCollector(ctx, NewEventCollector())
+	if ledgerFrom(ctx) == nil {
+		ctx = withLedger(ctx, &Ledger{service: s})
 	}
 	tree, markdown, capture, authors, err := s.captureLiveTextAndAuthors(ctx, artifactID, &actor)
 	if err != nil {
@@ -875,8 +858,8 @@ func (s *Service) NamedVersion(ctx context.Context, artifactID, summary string, 
 		return VersionResult{}, err
 	}
 	if !joinedTransaction {
-		s.CommitVersion(artifactID, written.Version)
-		for _, event := range eventCollector(ctx).Events() {
+		s.commitVersion(artifactID, written.Version)
+		for _, event := range ledgerFrom(ctx).Events() {
 			s.events.Publish(event)
 		}
 	}
@@ -915,7 +898,7 @@ func (s *Service) recordLastActor(room string, actor model.Actor) {
 }
 
 func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, actor *model.Actor) (*pmdoc.Node, string, versionPending, []model.Actor, error) {
-	fork, err := s.joinedFork(ctx, room)
+	fork, err := s.joinRead(ctx, room)
 	if err != nil {
 		return nil, "", versionPending{}, nil, err
 	}
@@ -1057,6 +1040,9 @@ func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID, mar
 	}
 	if write.capture != nil {
 		s.rememberPendingVersion(artifactID, version, *write.capture)
+		if ledger := ledgerFrom(ctx); ledger != nil && ledger.tx == tx {
+			ledger.recordVersion(artifactID, version)
+		}
 	}
 	return versionWriteResult{version: version, changes: changes}, nil
 }

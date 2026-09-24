@@ -51,8 +51,8 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	documentCtx, documentEvents := documentMutationContext(r.Context(), tx)
-	defer s.deps.Docs.DiscardLiveWrites(documentEvents)
+	documentCtx, ledger := s.deps.Docs.Join(r.Context(), tx)
+	defer ledger.Discard()
 	comment, err := s.lockedComment(r.Context(), tx, r.PathValue("id"))
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -114,11 +114,11 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if err := s.commitDocumentMutation(r.Context(), tx, documentEvents); err != nil {
+	if err := ledger.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publishDocumentEvents(documentEvents, event)
+	s.publishDocumentEvents(ledger, event)
 	WriteJSON(w, http.StatusOK, comment)
 }
 
@@ -148,8 +148,8 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	documentCtx, documentEvents := documentMutationContext(r.Context(), tx)
-	defer s.deps.Docs.DiscardLiveWrites(documentEvents)
+	documentCtx, ledger := s.deps.Docs.Join(r.Context(), tx)
+	defer ledger.Discard()
 	comment, err := s.lockedComment(r.Context(), tx, r.PathValue("id"))
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -215,11 +215,11 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if err := s.commitDocumentMutation(r.Context(), tx, documentEvents); err != nil {
+	if err := ledger.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publishDocumentEvents(documentEvents, event)
+	s.publishDocumentEvents(ledger, event)
 	WriteJSON(w, http.StatusOK, comment)
 }
 
@@ -249,8 +249,8 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		return
 	}
 	defer tx.Rollback(r.Context())
-	documentCtx, documentEvents := documentMutationContext(r.Context(), tx)
-	defer s.deps.Docs.DiscardLiveWrites(documentEvents)
+	documentCtx, ledger := s.deps.Docs.Join(r.Context(), tx)
+	defer ledger.Discard()
 	comment, err := s.lockedComment(r.Context(), tx, r.PathValue("id"))
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -337,11 +337,11 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 					s.writeHandlerError(w, err)
 					return
 				}
-				if err := s.commitDocumentMutation(r.Context(), tx, documentEvents); err != nil {
+				if err := ledger.Commit(r.Context()); err != nil {
 					s.writeHandlerError(w, err)
 					return
 				}
-				s.publishDocumentEvents(documentEvents)
+				s.publishDocumentEvents(ledger)
 				s.writeHandlerError(w, markErr)
 				return
 			}
@@ -388,7 +388,6 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		}
 	}
 	events := make([]model.Event, 0, 2)
-	var version *model.Version
 	if action == "accept" {
 		// Accepting a suggestion is a decision, so it names the version it produced; the
 		// transactional apply never schedules a settle (R30), so this is the only version write.
@@ -401,7 +400,6 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 			s.writeHandlerError(w, err)
 			return
 		}
-		version = &named.Version
 		diff, err := s.namedVersionDiff(r.Context(), tx, comment.Anchor.ArtifactID, named.Version)
 		if err != nil {
 			s.writeHandlerError(w, err)
@@ -437,13 +435,10 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		return
 	}
 	events = append(events, event)
-	if err := s.commitDocumentMutation(r.Context(), tx, documentEvents); err != nil {
+	if err := ledger.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if version != nil {
-		s.deps.Docs.CommitVersion(comment.Anchor.ArtifactID, *version)
-	}
-	s.publishDocumentEvents(documentEvents, events...)
+	s.publishDocumentEvents(ledger, events...)
 	WriteJSON(w, http.StatusOK, comment)
 }

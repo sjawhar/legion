@@ -77,8 +77,8 @@ func TestConditionalEditDoesNotInvertTheRoomLockOrder(t *testing.T) {
 		t.Fatalf("begin first transaction: %v", err)
 	}
 	defer txOne.Rollback(context.Background())
-	joinedOne, collectorOne := joinTx(ctx, txOne)
-	defer service.DiscardLiveWrites(collectorOne)
+	joinedOne, ledgerOne := service.Join(ctx, txOne)
+	defer ledgerOne.Discard()
 	if _, err := service.ApplyOps(joinedOne, id, []model.EditOp{{
 		Op: "replace", Find: "first", With: "FIRST",
 	}}, alice, &model.EditPrecondition{Document: token}); err != nil {
@@ -92,8 +92,8 @@ func TestConditionalEditDoesNotInvertTheRoomLockOrder(t *testing.T) {
 	defer txTwo.Rollback(context.Background())
 	secondDone := make(chan error, 1)
 	go func() {
-		joinedTwo, collectorTwo := joinTx(ctx, txTwo)
-		defer service.DiscardLiveWrites(collectorTwo)
+		joinedTwo, ledgerTwo := service.Join(ctx, txTwo)
+		defer ledgerTwo.Discard()
 		_, err := service.ApplyOps(joinedTwo, id, []model.EditOp{{
 			Op: "replace", Find: "second", With: "SECOND",
 		}}, bob, &model.EditPrecondition{Document: token})

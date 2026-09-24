@@ -123,12 +123,11 @@ type roomState struct {
 	unrecorded      map[pmdoc.MarkRef]time.Time
 	durableAppends  atomic.Int64
 	gen             uint64
-	suppressSettle  int
-	// settleDeferred records a settlement asked for while suppressSettle held it off; the last
-	// release arms it.
-	settleDeferred bool
-	// liveWriter is the open transaction writing this document (see liveWrite), or nil.
+	// liveWriter is the open transaction writing this document (see liveWrite), or nil. While
+	// it is set no settlement is armed; settleDeferred records one that was stopped or asked for
+	// meanwhile, which finishing the write arms.
 	liveWriter     *liveWrite
+	settleDeferred bool
 	settleFailures int
 	closed         bool
 	failed         error
@@ -199,6 +198,31 @@ func (s *Service) prepareSuppressedPersistence(room string) *suppressSlot {
 	}
 	s.suppressed[room] = append(s.suppressed[room], slot)
 	return slot
+}
+
+// applyCaptured runs mutate on room's live document, whose transactions it tags with origin,
+// and returns the updates the room recorded for that origin, in order: the bytes the room's
+// persistence observer is handed, which a suppression slot must match. A mutation that changes
+// nothing is no error.
+func (s *Service) applyCaptured(ctx context.Context, room string, origin any, mutate func(*crdt.Doc) error) ([][]byte, error) {
+	var updates [][]byte
+	var mutationErr error
+	err := s.srv.Apply(ctx, room, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+		unsubscribe := doc.OnUpdate(func(update []byte, updateOrigin any) {
+			if updateOrigin == origin {
+				updates = append(updates, append([]byte(nil), update...))
+			}
+		})
+		defer unsubscribe()
+		mutationErr = mutate(doc)
+	})
+	if mutationErr != nil {
+		return nil, mutationErr
+	}
+	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+		return nil, err
+	}
+	return updates, nil
 }
 
 func (s *Service) finishSuppressedPersistence(slot *suppressSlot, update []byte) {
@@ -459,7 +483,7 @@ func (s *Service) scheduleSettleAfterLocked(room string, state *roomState, delay
 	if s.stopping.Load() || s.shuttingDown(room) || state.closed || state.failed != nil {
 		return
 	}
-	if state.suppressSettle > 0 {
+	if state.liveWriter != nil {
 		state.settleDeferred = true
 		return
 	}
@@ -689,8 +713,8 @@ func (s *Service) settleRoom(room string, generation uint64) {
 	generation = state.gen
 	state.mu.Unlock()
 
-	eventCollector := NewEventCollector()
-	ctx := store.WithTransactionTracking(WithEventCollector(context.Background(), eventCollector))
+	ledger := &Ledger{service: s}
+	ctx := store.WithTransactionTracking(withLedger(context.Background(), ledger))
 	tx, err := s.store.Pool.Begin(ctx)
 	if err != nil {
 		s.retrySettle(room, generation, fmt.Errorf("begin document transaction: %w", err))
@@ -751,24 +775,13 @@ func (s *Service) settleRoom(room string, generation uint64) {
 	if stamped > 0 {
 		slot = s.prepareSuppressedPersistence(room)
 		origin := &identityClosureOrigin{}
-		var mutationErr error
-		err = s.srv.Apply(ctx, room, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
-			unsubscribe := doc.OnUpdate(func(update []byte, updateOrigin any) {
-				if updateOrigin == origin {
-					updates = append(updates, append([]byte(nil), update...))
-				}
-			})
-			defer unsubscribe()
-			tree, stamped, mutationErr = ensureBlockIDsInDocument(doc, origin)
+		updates, err = s.applyCaptured(ctx, room, origin, func(doc *crdt.Doc) error {
+			var stampErr error
+			tree, stamped, stampErr = ensureBlockIDsInDocument(doc, origin)
+			return stampErr
 		})
-		if errors.Is(err, websocket.ErrNoChanges) {
-			err = nil
-		}
-		if mutationErr != nil || err != nil {
+		if err != nil {
 			s.cancelSuppressedPersistence(room, slot)
-			if mutationErr != nil {
-				err = mutationErr
-			}
 			if errors.Is(err, ErrDocSchema) {
 				slog.Error("dispatch: settle document outside Proof schema", "room", room, "error", err)
 				return
@@ -851,30 +864,18 @@ func (s *Service) settleRoom(room string, generation uint64) {
 			slot = s.prepareSuppressedPersistence(room)
 		}
 		origin := &identityClosureOrigin{}
-		var mutationErr error
-		err = s.srv.Apply(ctx, room, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
-			unsubscribe := doc.OnUpdate(func(update []byte, updateOrigin any) {
-				if updateOrigin == origin {
-					updates = append(updates, append([]byte(nil), update...))
-				}
-			})
-			defer unsubscribe()
+		reconciled, err := s.applyCaptured(ctx, room, origin, func(doc *crdt.Doc) error {
 			fragment := doc.GetXmlFragment(fragmentName)
-			mutationErr = doc.TransactE(func(transaction *crdt.Transaction) error {
+			return doc.TransactE(func(transaction *crdt.Transaction) error {
 				return pmdoc.Update(transaction, fragment, tree)
 			}, origin)
 		})
-		if errors.Is(err, websocket.ErrNoChanges) {
-			err = nil
-		}
-		if mutationErr != nil || err != nil {
+		if err != nil {
 			s.cancelSuppressedPersistence(room, slot)
-			if mutationErr != nil {
-				err = mutationErr
-			}
 			s.failRoom(room, fmt.Errorf("write reconciled typed blocks: %w", err))
 			return
 		}
+		updates = append(updates, reconciled...)
 		stamped = 1
 	}
 
@@ -974,7 +975,7 @@ func (s *Service) settleRoom(room string, generation uint64) {
 			s.retrySettle(room, generation, writeErr)
 			return
 		}
-		published = append(published, eventCollector.Events()...)
+		published = append(published, ledger.Events()...)
 		// A document body cites nodes whose rows carry a backlink count, so the version event
 		// names what this settle moved exactly as a message or comment write does.
 		versionEvent := model.Event{
@@ -1147,29 +1148,14 @@ func (s *Service) backfillBlockIDs(ctx context.Context, artifactID string) Block
 	backfillCtx := withOwnerVerified(ctx)
 	slot := s.prepareSuppressedPersistence(artifactID)
 	origin := &identityClosureOrigin{}
-	var updates [][]byte
-	var mutationErr error
-	err := s.srv.Apply(backfillCtx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
-		unsubscribe := doc.OnUpdate(func(update []byte, updateOrigin any) {
-			if updateOrigin == origin {
-				updates = append(updates, append([]byte(nil), update...))
-			}
-		})
-		defer unsubscribe()
-		_, report.Stamped, mutationErr = ensureBlockIDsInDocument(doc, origin)
+	updates, err := s.applyCaptured(backfillCtx, artifactID, origin, func(doc *crdt.Doc) error {
+		var stampErr error
+		_, report.Stamped, stampErr = ensureBlockIDsInDocument(doc, origin)
+		return stampErr
 	})
-	if errors.Is(err, websocket.ErrNoChanges) {
-		err = nil
-	}
-
-	if mutationErr != nil {
-		s.cancelSuppressedPersistence(artifactID, slot)
-		report.Err = fmt.Errorf("stamp document: %w", mutationErr)
-		return report
-	}
 	if err != nil {
 		s.cancelSuppressedPersistence(artifactID, slot)
-		report.Err = fmt.Errorf("open document: %w", err)
+		report.Err = fmt.Errorf("stamp document: %w", err)
 		return report
 	}
 	if report.Stamped == 0 {

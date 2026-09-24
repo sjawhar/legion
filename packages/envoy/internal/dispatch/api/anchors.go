@@ -43,11 +43,11 @@ func (s *server) resolveAnchor(ctx context.Context, tx pgx.Tx, owner owner, inpu
 
 	anchor := model.Anchor{ArtifactID: artifact.ID}
 	var anchored docs.Anchored
-	// Both document calls run inside this handler's transaction and read through it.
-	txCtx := docs.WithTx(ctx, tx)
+	// ctx is joined to this handler's transaction (Docs.Join), so both document calls run
+	// inside it and read through it.
 	if input.Quote != nil {
 		anchor.MarkID = rowID
-		anchored, err = s.deps.Docs.MarkQuote(txCtx, artifact.ID, docs.MarkSpec{
+		anchored, err = s.deps.Docs.MarkQuote(ctx, artifact.ID, docs.MarkSpec{
 			Kind: kind,
 			ID:   rowID,
 			By:   actor,
@@ -57,7 +57,7 @@ func (s *server) resolveAnchor(ctx context.Context, tx pgx.Tx, owner owner, inpu
 		}
 	} else {
 		anchor.MarkID = *input.MarkID
-		anchored, err = s.deps.Docs.VerifyMark(txCtx, artifact.ID, kind, anchor.MarkID)
+		anchored, err = s.deps.Docs.VerifyMark(ctx, artifact.ID, kind, anchor.MarkID)
 		if err != nil {
 			return nil, "", nil, err
 		}

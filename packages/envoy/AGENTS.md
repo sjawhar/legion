@@ -45,16 +45,15 @@ anchor marks are stripped (`pmdoc.StripAnchorMarks` + `Equal`, the one measure t
 observer and a transactional live write in `applyLive` both apply) - and settlement writes a version
 only when a content-class row lies past the latest version's `doc_update_version` cursor or ask
 reconciliation changed something, so a comment's quote mark or margin projection never versions a
-document. A document operation joined to an API transaction (`documentMutationContext`) never
-writes the room: it runs on the transaction's fork of the room's document (`docs/livewrite.go`),
-appends its update inside the transaction, and reads through the same fork. The room applies and
-broadcasts the update only when the handler calls `publishDocumentEvents` after the commit, and a
-handler defers `Docs.DiscardLiveWrites` on the collector so a transaction that does not commit
-leaves the room, every connected browser, every version and the durable document as they were.
-The write's actor, and the browsers connected when it changed the content, become the room's
-pending authors only once the commit returns (`commitDocumentMutation` calls
-`Docs.CreditLiveWrites` before the handler's `CommitVersion`), and a version the transaction writes
-itself names them.
+document. A handler joins its document operations to its transaction with `Docs.Join`, which
+returns the transaction's ledger (`docs/ledger.go`), the only way to give a document operation a
+transaction. A joined operation never writes the room: it runs on the transaction's fork of the
+room's document (`docs/livewrite.go`), appends its update inside the transaction, and reads through
+the same fork. The handler ends the transaction with `ledger.Commit`, which commits, credits the
+writes' authors to their rooms (the actor, and the browsers connected when it changed the
+content), releases the authors a version the transaction wrote named, and only then applies and
+broadcasts the updates; it defers `ledger.Discard`, so a transaction that does not commit leaves
+the room, every connected browser, every version and the durable document as they were.
 While a transaction's write to a document is open it holds that room's writer slot, so another
 transaction's joined operation on the document waits for it to be published or discarded, and it
 holds off the room's settlement, which runs once the write is published or discarded. The docs

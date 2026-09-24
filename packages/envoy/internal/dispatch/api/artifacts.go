@@ -310,17 +310,15 @@ func (s *server) storeArtifact(
 	if input.summary != "" {
 		summaryValue = input.summary
 	}
-	var documentEvents *docs.EventCollector
+	documentCtx, ledger := s.deps.Docs.Join(r.Context(), tx)
+	defer ledger.Discard()
 	var documentMarkdown string
 	var documentChanges model.ReferenceChanges
 	if kind == "doc" {
-		ctx, collector := documentMutationContext(r.Context(), tx)
-		defer s.deps.Docs.DiscardLiveWrites(collector)
-		documentEvents = collector
 		if created {
-			documentMarkdown, err = s.deps.Docs.SeedText(ctx, tx, artifact.ID, string(input.content), actor)
+			documentMarkdown, err = s.deps.Docs.SeedText(documentCtx, tx, artifact.ID, string(input.content), actor)
 		} else {
-			documentMarkdown, err = s.deps.Docs.ReplaceText(ctx, artifact.ID, string(input.content), actor)
+			documentMarkdown, err = s.deps.Docs.ReplaceText(documentCtx, artifact.ID, string(input.content), actor)
 		}
 		if err != nil {
 			s.writeHandlerError(w, err)
@@ -393,7 +391,7 @@ func (s *server) storeArtifact(
 			r.Context(), tx, "POST /api/v1/issues/{key}/artifacts", *target.IssueKey, actor, "", *issueStatus,
 		)
 	}
-	if err := s.commitDocumentMutation(r.Context(), tx, documentEvents); err != nil {
+	if err := ledger.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -403,7 +401,7 @@ func (s *server) storeArtifact(
 		// document's ask blocks are indexed and its block ids repaired.
 		s.deps.Docs.ScheduleSettlement(artifact.ID)
 	}
-	s.publishDocumentEvents(documentEvents, event)
+	s.publishDocumentEvents(ledger, event)
 	var decisionBlocks *int
 	if kind == "doc" {
 		decisionBlocks = countAskBlocks(documentMarkdown)
@@ -622,8 +620,8 @@ func (s *server) createNamedVersion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "NOT_DOCUMENT", http.StatusBadRequest, "artifact is not a document")
 		return
 	}
-	documentCtx, documentEvents := documentMutationContext(r.Context(), tx)
-	defer s.deps.Docs.DiscardLiveWrites(documentEvents)
+	documentCtx, ledger := s.deps.Docs.Join(r.Context(), tx)
+	defer ledger.Discard()
 	named, err := s.deps.Docs.NamedVersion(documentCtx, artifact.ID, summary, actor)
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -648,12 +646,11 @@ func (s *server) createNamedVersion(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if err := s.commitDocumentMutation(r.Context(), tx, documentEvents); err != nil {
+	if err := ledger.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.deps.Docs.CommitVersion(artifact.ID, version)
-	s.publishDocumentEvents(documentEvents, event)
+	s.publishDocumentEvents(ledger, event)
 	WriteJSON(w, http.StatusCreated, version)
 }
 
@@ -704,8 +701,8 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	documentCtx, documentEvents := documentMutationContext(r.Context(), tx)
-	defer s.deps.Docs.DiscardLiveWrites(documentEvents)
+	documentCtx, ledger := s.deps.Docs.Join(r.Context(), tx)
+	defer ledger.Discard()
 	applied, err := s.deps.Docs.ApplyOps(documentCtx, artifact.ID, input.Ops, actor, input.Precondition)
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -763,19 +760,18 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 			r.Context(), tx, "POST /api/v1/artifacts/{id}/edits", *artifact.IssueKey, actor, "", *status,
 		)
 	}
-	if err := s.commitDocumentMutation(r.Context(), tx, documentEvents); err != nil {
+	if err := ledger.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
 	var version *model.Version
 	if written != nil {
 		version = &written.Version
-		s.deps.Docs.CommitVersion(artifact.ID, written.Version)
 	}
 	if applied > 0 {
 		s.deps.Docs.ScheduleSettlement(artifact.ID)
 	}
-	s.publishDocumentEvents(documentEvents, published...)
+	s.publishDocumentEvents(ledger, published...)
 	WriteJSON(w, http.StatusOK, withAdvice(map[string]any{"applied": applied, "version": version}, advice))
 }
 

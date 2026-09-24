@@ -60,8 +60,8 @@ func TestSettlementBetweenCommitAndPublishWaitsForTheWrite(t *testing.T) {
 	if _, _, err := lockArtifactOwner(ctx, tx, artifactID); err != nil {
 		t.Fatalf("lock document owner: %v", err)
 	}
-	joined, collector := joinTx(ctx, tx)
-	defer service.DiscardLiveWrites(collector)
+	joined, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	if _, err := service.ApplyOps(joined, artifactID, []model.EditOp{{Op: "replace", Find: "before", With: "after"}}, alice, nil); err != nil {
 		t.Fatalf("apply joined edit: %v", err)
@@ -71,17 +71,16 @@ func TestSettlementBetweenCommitAndPublishWaitsForTheWrite(t *testing.T) {
 	}
 	// A browser types while the edit's transaction is open.
 	editLiveTree(t, service, artifactID, appendBlocks(t, "typed"))
-	if err := tx.Commit(ctx); err != nil {
+	if err := ledger.commit(ctx); err != nil {
 		t.Fatalf("commit edit transaction: %v", err)
 	}
-	service.CreditLiveWrites(collector)
 	close(resume)
 	select {
 	case <-settled:
 	case <-time.After(10 * time.Second):
 		t.Fatal("paused settlement did not finish")
 	}
-	service.PublishLiveWrites(collector)
+	ledger.publish()
 	settleCurrentGeneration(t, service, artifactID)
 
 	var markdown string
@@ -106,14 +105,14 @@ func TestFailedLiveWritesReloadTheDurableDocument(t *testing.T) {
 		t.Fatalf("begin edit transaction: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	joined, collector := joinTx(ctx, tx)
+	joined, ledger := service.Join(ctx, tx)
 	if _, err := service.ApplyOps(joined, artifactID, []model.EditOp{{Op: "replace", Find: "before", With: "after"}}, model.Actor{Kind: "user", ID: "alice"}, nil); err != nil {
 		t.Fatalf("apply joined edit: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("commit edit transaction: %v", err)
 	}
-	service.FailLiveWrites(collector, errors.New("commit outcome unknown"))
+	ledger.fail(errors.New("commit outcome unknown"))
 	if got, err := service.Text(ctx, artifactID); err != nil || got != "after\n" {
 		t.Fatalf("document after failing its live write = %q (%v), want the committed text", got, err)
 	}
@@ -129,7 +128,7 @@ func TestARolledBackWriteIsNoAuthorOfTheNextVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin edit transaction: %v", err)
 	}
-	joined, collector := joinTx(ctx, tx)
+	joined, ledger := service.Join(ctx, tx)
 	rolledBack := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
 	if _, err := service.ReplaceText(joined, artifactID, "rolled back", rolledBack); err != nil {
 		t.Fatalf("replace text in the transaction: %v", err)
@@ -137,7 +136,7 @@ func TestARolledBackWriteIsNoAuthorOfTheNextVersion(t *testing.T) {
 	if err := tx.Rollback(ctx); err != nil {
 		t.Fatalf("roll back edit transaction: %v", err)
 	}
-	service.DiscardLiveWrites(collector)
+	ledger.Discard()
 
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	if _, err := service.ReplaceText(ctx, artifactID, "after", alice); err != nil {
@@ -178,8 +177,8 @@ func TestAJoinedWriteCreditsConnectedBrowsersOnItsOwnVersionOnly(t *testing.T) {
 	if _, _, err := lockArtifactOwner(ctx, tx, artifactID); err != nil {
 		t.Fatalf("lock document owner: %v", err)
 	}
-	joined, collector := joinTx(ctx, tx)
-	defer service.DiscardLiveWrites(collector)
+	joined, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
 	writer := model.Actor{Kind: "user", ID: "bob"}
 	if _, err := service.ApplyOps(joined, artifactID, []model.EditOp{{Op: "replace", Find: "before", With: "during"}}, writer, nil); err != nil {
 		t.Fatalf("apply joined edit: %v", err)
@@ -188,12 +187,10 @@ func TestAJoinedWriteCreditsConnectedBrowsersOnItsOwnVersionOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("snapshot joined edit: %v", err)
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := ledger.commit(ctx); err != nil {
 		t.Fatalf("commit edit transaction: %v", err)
 	}
-	service.CreditLiveWrites(collector)
-	service.CommitVersion(artifactID, snapshot.Version)
-	service.PublishLiveWrites(collector)
+	ledger.publish()
 	if want := []model.Actor{browser, writer}; !reflect.DeepEqual(snapshot.Version.Authors, want) {
 		t.Fatalf("joined edit's version authors = %#v, want %v", snapshot.Version.Authors, want)
 	}
@@ -239,8 +236,8 @@ func TestAWriteOpenedDuringRoomRecoveryHoldsOffTheRecoveredRoom(t *testing.T) {
 		t.Fatalf("begin edit transaction: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	joined, collector := joinTx(ctx, tx)
-	defer service.DiscardLiveWrites(collector)
+	joined, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
 	edited := make(chan error, 1)
 	go func() {
 		_, err := service.ReplaceText(joined, artifactID, "after", model.Actor{Kind: "user", ID: "alice"})
@@ -260,12 +257,11 @@ func TestAWriteOpenedDuringRoomRecoveryHoldsOffTheRecoveredRoom(t *testing.T) {
 		t.Fatal("joined edit did not finish once the room could recover")
 	}
 	editLiveTree(t, service, artifactID, appendBlocks(t, "typed"))
-	if err := tx.Commit(ctx); err != nil {
+	if err := ledger.commit(ctx); err != nil {
 		t.Fatalf("commit edit transaction: %v", err)
 	}
-	service.CreditLiveWrites(collector)
 	settleCurrentGeneration(t, service, artifactID)
-	service.PublishLiveWrites(collector)
+	ledger.publish()
 	settleCurrentGeneration(t, service, artifactID)
 
 	var markdown string

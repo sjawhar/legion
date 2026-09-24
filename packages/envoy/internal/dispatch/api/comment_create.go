@@ -375,8 +375,8 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	}
 	tx, status, route := start.tx, start.status, start.route
 	defer tx.Rollback(r.Context())
-	documentCtx, documentEvents := documentMutationContext(r.Context(), tx)
-	defer s.deps.Docs.DiscardLiveWrites(documentEvents)
+	documentCtx, ledger := s.deps.Docs.Join(r.Context(), tx)
+	defer ledger.Discard()
 	threadTarget, err := s.normalizeCommentThreadTarget(r.Context(), tx, owner, input)
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -622,14 +622,11 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 			r.Context(), tx, "POST /api/v1/issues/{key}/comments", *owner.IssueKey, actor, "", *status,
 		)
 	}
-	if err := s.commitDocumentMutation(r.Context(), tx, documentEvents); err != nil {
+	if err := ledger.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if snapshot != nil {
-		s.deps.Docs.CommitVersion(anchor.ArtifactID, snapshot.Version)
-	}
-	s.publishDocumentEvents(documentEvents, events...)
+	s.publishDocumentEvents(ledger, events...)
 	for _, mention := range resolvedMentions {
 		attempt, err := s.deliverResolvedCommentMention(r.Context(), comment, event, mention, actor, true)
 		if err != nil {

@@ -355,9 +355,8 @@ func (s *Service) updateChangesMarkdown(room string, doc *crdt.Doc) bool {
 
 // recordConnectedActors credits an observed content change to the room's connected peers, who
 // all join `pending`. A service mutation (origin registered by serviceTransact) is credited to
-// its actor as well, who becomes `lastActor`. A committed transaction's live write, applied by
-// PublishLiveWrites, was credited when the transaction committed (CreditLiveWrites) and is not
-// credited again. Any other update is a browser edit by one of the peers, so when exactly one
+// its actor as well, who becomes `lastActor`. A committed transaction's live write, which
+// Ledger.Commit applies, was credited when the transaction committed and is not credited again. Any other update is a browser edit by one of the peers, so when exactly one
 // peer is connected it is the latest edit source and replaces `lastActor`, and otherwise the
 // edit cannot be pinned on a single peer and no older actor may stand in for it.
 func (s *Service) recordConnectedActors(room string, origin any) {
