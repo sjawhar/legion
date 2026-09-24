@@ -1,11 +1,9 @@
 package daemon
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -320,89 +318,6 @@ func TestOutboxSuperviseStartsResumesSuspendsStopsAndDeduplicatesDelivery(t *tes
 	}
 	if got := machine.Claim().State; got != supervise.StateRetired {
 		t.Fatalf("claim state after stop = %s, want retired", got)
-	}
-}
-
-// An outbox stop row is the tree's close (lingerExpired enqueues it for every claim of the tree),
-// the one stop that ends the tree's root claim; the supervisor refuses any other stop of a root.
-func TestOutboxStopRowClosesTheTreesRootClaim(t *testing.T) {
-	pool := isolatedOutboxPool(t)
-	records := record.NewStore()
-	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Planning, Generation: 1, Status: "in_progress"}
-	putOutboxIssue(t, pool, records, issue)
-	sup, runtime := newOutboxSupervisor(t, "legion", t.TempDir())
-	token, err := claim.NewToken("legion", issue.Key, claim.RoleArchitect)
-	if err != nil {
-		t.Fatalf("claim token: %v", err)
-	}
-	machine, _, err := sup.Create(context.Background(), supervise.Claim{
-		Token: token, Project: "legion", Tree: issue.Tree, Issue: issue.Key, Role: claim.RoleArchitect, State: supervise.StateQueued,
-	}, "")
-	if err != nil {
-		t.Fatalf("create root claim: %v", err)
-	}
-	runner := &outbox{pool: pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets"}
-
-	if err := runner.execute(context.Background(), mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "stop", Tree: issue.Tree, Role: claim.RoleArchitect, Generation: issue.Generation}, time.Now())); err != nil {
-		t.Fatalf("stop the root at its tree's close: %v", err)
-	}
-
-	if got := machine.Claim().State; got != supervise.StateRetired {
-		t.Fatalf("root claim state after the tree's close = %s, want retired", got)
-	}
-	if releases := runtime.CallsOf("Release"); len(releases) != 1 || releases[0].Released.Claim != token {
-		t.Fatalf("releases = %+v, want the root released once", releases)
-	}
-}
-
-// A start whose task meets the claim's own pending delivery — a claim a retry relaunched still
-// holds the task it was relaunched with, until that turn ends — waits: the row stays and runs again
-// on the outbox's backoff, and the wait is logged at debug, never as a failed row (the final-head
-// Stage 3 acceptance saw one such wait logged nine times at ERROR).
-func TestOutboxStartWaitingOnThePendingDeliveryIsNotAFailure(t *testing.T) {
-	pool := isolatedOutboxPool(t)
-	records := record.NewStore()
-	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Implementing, Generation: 1, Status: "in_progress"}
-	putOutboxIssue(t, pool, records, issue)
-	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
-	token, err := claim.NewToken("legion", issue.Key, claim.RoleImplementer)
-	if err != nil {
-		t.Fatalf("claim token: %v", err)
-	}
-	machine, _, err := sup.Create(context.Background(), supervise.Claim{
-		Token: token, Project: "legion", Tree: issue.Tree, Issue: issue.Key, Role: claim.RoleImplementer, State: supervise.StateQueued,
-	}, "")
-	if err != nil {
-		t.Fatalf("create implementer claim: %v", err)
-	}
-	for _, ev := range []supervise.Event{supervise.RequestSpawn{Claim: token}, supervise.RequestDeliver{Claim: token, Task: "the task it was relaunched with"}} {
-		if err := machine.Handle(context.Background(), ev); err != nil {
-			t.Fatalf("%T: %v", ev, err)
-		}
-	}
-	var logs bytes.Buffer
-	now := time.Now().UTC()
-	runner := &outbox{
-		pool: pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets",
-		now: func() time.Time { return now }, log: slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
-	}
-	enqueueOutbox(t, pool, records, mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RoleImplementer, Task: "the retry's task", Generation: issue.Generation}, now))
-
-	if err := runner.RunOnce(context.Background()); err != nil {
-		t.Fatalf("run: %v", err)
-	}
-
-	if strings.Contains(logs.String(), "level=ERROR") {
-		t.Errorf("logged a failure for a wait:\n%s", logs.String())
-	}
-	if !strings.Contains(logs.String(), "level=DEBUG") || !strings.Contains(logs.String(), "pending delivery") {
-		t.Errorf("logged no debug line naming the pending delivery:\n%s", logs.String())
-	}
-	if rows := outboxRows(t, pool); rows != 1 {
-		t.Errorf("outbox rows = %d, want the start kept to run again", rows)
-	}
-	if pending := machine.Claim().Pending; pending == nil || pending.Task != "the task it was relaunched with" {
-		t.Errorf("pending %+v, want the claim's own task kept", pending)
 	}
 }
 

@@ -654,19 +654,16 @@ func suspend(m *Machine, ctx context.Context, _ Event) error {
 }
 
 // suspended moves the claim to suspended: its session kept, and the process it stopped let go for
-// the resume to wait out. The claim is persisted first — revoking the stopped agent's capability,
-// in memory even when the write fails — and only then is the finished phase's unconfirmed task
-// retired (settle); a retirement that fails is reported, and the claim's next decision retires it
-// before anything else.
+// the resume to wait out. It only persists — revoking the stopped agent's capability, in memory
+// even when the write fails. The finished phase's unconfirmed task is retired after it by settle,
+// which Handle runs after every row; a retirement that fails is reported, and the claim's next
+// decision retires it before anything else.
 func (m *Machine) suspended(ctx context.Context) error {
 	m.disarmAll()
 	m.forgetSend()
 	m.letGo()
 	m.claim.State = StateSuspended
-	if err := m.persist(ctx); err != nil {
-		return err
-	}
-	return m.settle(ctx)
+	return m.persist(ctx)
 }
 
 func resume(m *Machine, ctx context.Context, _ Event) error { return m.launch(ctx) }
