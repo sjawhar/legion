@@ -61,11 +61,16 @@ default.
   `testnats.JetStream` both did; under load a create took 17-43 s. Start the container without a
   deadline (`context.Background()` or `t.Context()`), as the other envoy packages and daemon-go's
   own `workflowNATS` do, and bound only the behavior under test or the readiness wait after it.
+- **Nothing reaps a test container but the test.** The envoy-go recipe runs with
+  `TESTCONTAINERS_RYUK_DISABLED=true`, so every shared container needs its own `TestMain`
+  teardown, and a started container needs its cleanup registered before the start's error is
+  checked (#1300).
 - **Bun's 5 s per-test timeout covered `jj` processes.** At first it was six `jj git init` runs, one
   per role. The per-role tests now share one workspace. A test that checks jj config still runs
   four jj processes, `jj git init` among them. When bun times a test out it kills the test's
-  dangling subprocess, so that process's stderr is empty; the helper names the exit code and
-  signal instead. `legion.test.ts` runs one `jj git init` in `beforeAll` and copies that
+  dangling subprocess, so that process's stderr is empty, so the config helpers report
+  `jj config list failed: ` or `jj config set failed: ` with nothing after it; the template's init
+  names the exit code and signal instead. `legion.test.ts` runs one `jj git init` in `beforeAll` and copies that
   repository per workspace, so only the jj calls a test exists to check count against its
   budget. `.jj/repo/store/git_target` is relative, so a copy is a valid repository.
 

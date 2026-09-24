@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/testnats"
+	"github.com/testcontainers/testcontainers-go"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
 
@@ -50,10 +51,10 @@ func setupTestEnv(t *testing.T, options ...testEnvOption) *testEnv {
 
 	// Start real NATS with JetStream
 	ctr, err := tcnats.Run(ctx, testnats.Image)
+	testcontainers.CleanupContainer(t, ctr)
 	if err != nil {
 		t.Fatalf("failed to start NATS: %v", err)
 	}
-	t.Cleanup(func() { ctr.Terminate(ctx) })
 
 	uri, err := ctr.ConnectionString(ctx)
 	if err != nil {

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/testcontainers/testcontainers-go"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 
 	"github.com/sjawhar/envoy/internal/bus"
@@ -28,10 +29,10 @@ import (
 func TestEndToEndCheckRunToChecks(t *testing.T) {
 	ctx := context.Background()
 	ctr, err := tcnats.Run(ctx, testnats.Image)
+	testcontainers.CleanupContainer(t, ctr)
 	if err != nil {
 		t.Fatalf("start nats: %v", err)
 	}
-	defer ctr.Terminate(ctx)
 	uri, err := ctr.ConnectionString(ctx)
 	if err != nil {
 		t.Fatalf("nats uri: %v", err)

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,6 +25,7 @@ import (
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/testnats"
+	"github.com/testcontainers/testcontainers-go"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
 
@@ -31,6 +33,8 @@ var (
 	sharedListenerNATSOnce sync.Once
 	sharedListenerNATSURI  string
 	sharedListenerNATSErr  error
+	// sharedListenerNATSContainer is the container the tests share, which TestMain terminates.
+	sharedListenerNATSContainer *tcnats.NATSContainer
 )
 
 func sharedListenerTestNATSURI(t *testing.T) string {
@@ -39,10 +43,15 @@ func sharedListenerTestNATSURI(t *testing.T) string {
 		ctx := context.Background()
 		ctr, err := tcnats.Run(ctx, testnats.Image)
 		if err != nil {
-			sharedListenerNATSErr = err
+			sharedListenerNATSErr = errors.Join(err, testcontainers.TerminateContainer(ctr))
 			return
 		}
 		sharedListenerNATSURI, sharedListenerNATSErr = ctr.ConnectionString(ctx)
+		if sharedListenerNATSErr != nil {
+			sharedListenerNATSErr = errors.Join(sharedListenerNATSErr, testcontainers.TerminateContainer(ctr))
+			return
+		}
+		sharedListenerNATSContainer = ctr
 	})
 	if sharedListenerNATSErr != nil {
 		t.Fatalf("failed to start shared NATS: %v", sharedListenerNATSErr)
@@ -1999,10 +2008,10 @@ func TestBoundDurableConsumerIsNotStolen(t *testing.T) {
 func TestStartListenerSubscriptionMigratesLegacyDurableConsumer(t *testing.T) {
 	ctx := context.Background()
 	ctr, err := tcnats.Run(ctx, testnats.Image)
+	testcontainers.CleanupContainer(t, ctr)
 	if err != nil {
 		t.Fatalf("start NATS: %v", err)
 	}
-	t.Cleanup(func() { _ = ctr.Terminate(ctx) })
 	uri, err := ctr.ConnectionString(ctx)
 	if err != nil {
 		t.Fatalf("NATS connection string: %v", err)
@@ -3601,10 +3610,10 @@ func setupTestNATS(t *testing.T) *bus.Client {
 	t.Helper()
 	ctx := context.Background()
 	ctr, err := tcnats.Run(ctx, testnats.Image)
+	testcontainers.CleanupContainer(t, ctr)
 	if err != nil {
 		t.Fatalf("failed to start NATS: %v", err)
 	}
-	t.Cleanup(func() { _ = ctr.Terminate(ctx) })
 	uri, err := ctr.ConnectionString(ctx)
 	if err != nil {
 		t.Fatalf("connection string: %v", err)
@@ -3614,4 +3623,19 @@ func setupTestNATS(t *testing.T) *bus.Client {
 		t.Fatalf("bus connect: %v", err)
 	}
 	return client
+}
+
+// TestMain terminates the NATS container this package's tests share once they have all run.
+// Nothing else would: CI disables Ryuk, and without it a container outlives the test binary.
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if sharedListenerNATSContainer != nil {
+		if err := testcontainers.TerminateContainer(sharedListenerNATSContainer); err != nil {
+			fmt.Fprintf(os.Stderr, "terminate the shared NATS container: %v\n", err)
+			if code == 0 {
+				code = 1
+			}
+		}
+	}
+	os.Exit(code)
 }

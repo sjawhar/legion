@@ -19,10 +19,10 @@ import (
 
 func TestTailPrintsEnvelopesOnTheSubject(t *testing.T) {
 	container, err := tcnats.Run(context.Background(), testnats.Image, testcontainers.WithCmd("-DV", "-js", "-m", "8222"))
+	testcontainers.CleanupContainer(t, container)
 	if err != nil {
 		t.Fatalf("start NATS: %v", err)
 	}
-	t.Cleanup(func() { _ = container.Terminate(context.Background()) })
 	url, err := container.ConnectionString(context.Background())
 	if err != nil {
 		t.Fatalf("get NATS connection string: %v", err)

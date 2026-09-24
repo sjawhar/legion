@@ -1,14 +1,12 @@
 package session_test
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -18,32 +16,7 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	session "github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
-	"github.com/sjawhar/envoy/internal/testnats"
-	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
-
-var (
-	sharedNATSOnce sync.Once
-	sharedNATSURI  string
-	sharedNATSErr  error
-)
-
-func sharedTestNATSURI(t *testing.T) string {
-	t.Helper()
-	sharedNATSOnce.Do(func() {
-		ctx := context.Background()
-		ctr, err := tcnats.Run(ctx, testnats.Image)
-		if err != nil {
-			sharedNATSErr = err
-			return
-		}
-		sharedNATSURI, sharedNATSErr = ctr.ConnectionString(ctx)
-	})
-	if sharedNATSErr != nil {
-		t.Fatalf("failed to start shared NATS: %v", sharedNATSErr)
-	}
-	return sharedNATSURI
-}
 
 func clearSessionBucket(t *testing.T, conn *natsgo.Conn) {
 	t.Helper()
@@ -58,7 +31,7 @@ func clearSessionBucket(t *testing.T, conn *natsgo.Conn) {
 
 func setupNATS(t *testing.T) *bus.Client {
 	t.Helper()
-	client, err := bus.Connect([]string{sharedTestNATSURI(t)}, bus.WithReplicas(1))
+	client, err := bus.Connect([]string{session.SharedTestNATSURI(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("failed to connect bus: %v", err)
 	}

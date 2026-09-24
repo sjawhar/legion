@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,6 +17,7 @@ import (
 
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/testnats"
+	"github.com/testcontainers/testcontainers-go"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
 
@@ -283,6 +285,8 @@ var (
 	sharedNATSOnce sync.Once
 	sharedNATSURI  string
 	sharedNATSErr  error
+	// sharedNATSContainer is the container the tests share, which TestMain terminates.
+	sharedNATSContainer *tcnats.NATSContainer
 )
 
 func sharedTestNATSURI(t *testing.T) string {
@@ -290,10 +294,15 @@ func sharedTestNATSURI(t *testing.T) string {
 	sharedNATSOnce.Do(func() {
 		ctr, err := tcnats.Run(context.Background(), testnats.Image)
 		if err != nil {
-			sharedNATSErr = err
+			sharedNATSErr = errors.Join(err, testcontainers.TerminateContainer(ctr))
 			return
 		}
 		sharedNATSURI, sharedNATSErr = ctr.ConnectionString(context.Background())
+		if sharedNATSErr != nil {
+			sharedNATSErr = errors.Join(sharedNATSErr, testcontainers.TerminateContainer(ctr))
+			return
+		}
+		sharedNATSContainer = ctr
 	})
 	if sharedNATSErr != nil {
 		t.Fatalf("failed to start shared NATS: %v", sharedNATSErr)
@@ -504,20 +513,17 @@ func TestWatch_PropagatesPurge(t *testing.T) {
 func TestMatch_IndependentOfKVAfterStartup(t *testing.T) {
 	ctx := context.Background()
 	ctr, err := tcnats.Run(ctx, testnats.Image)
+	testcontainers.CleanupContainer(t, ctr)
 	if err != nil {
 		t.Fatalf("failed to start NATS: %v", err)
 	}
 	uri, err := ctr.ConnectionString(ctx)
 	if err != nil {
-		ctr.Terminate(ctx)
 		t.Fatalf("failed to get URI: %v", err)
 	}
 	conn := testnats.Connect(t, uri)
-	// Safety net: double-close and double-terminate are no-ops
-	t.Cleanup(func() {
-		conn.Close()
-		ctr.Terminate(ctx)
-	})
+	// Safety net: a double close is a no-op.
+	t.Cleanup(conn.Close)
 
 	// Pre-populate and open
 	js, err := conn.JetStream()
@@ -2022,4 +2028,19 @@ type historyFailKeyValue struct {
 
 func (kv *historyFailKeyValue) History(string, ...natsgo.WatchOpt) ([]natsgo.KeyValueEntry, error) {
 	return nil, kv.err
+}
+
+// TestMain terminates the NATS container this package's tests share once they have all run.
+// Nothing else would: CI disables Ryuk, and without it a container outlives the test binary.
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if sharedNATSContainer != nil {
+		if err := testcontainers.TerminateContainer(sharedNATSContainer); err != nil {
+			fmt.Fprintf(os.Stderr, "terminate the shared NATS container: %v\n", err)
+			if code == 0 {
+				code = 1
+			}
+		}
+	}
+	os.Exit(code)
 }
