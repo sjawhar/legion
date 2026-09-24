@@ -371,9 +371,10 @@ func TestWorkspaceInitRefusesBeforeTouchingTheVolume(t *testing.T) {
 }
 
 // A fresh tree volume: the shared clone and the issue's jj workspace on its bookmark, the clone's
-// credential helper the one named, the gh shim first on a pod's PATH, the two directories the main
-// container mounts, one log line naming the workspace — and the repository lock free once it is
-// done, so the next pod's init container never waits on a finished one.
+// credential helper the one named, the gh shim first on a pod's PATH and no tmux pane's `legion`
+// launcher (a pod's PATH names the image's legion), the two directories the main container
+// mounts, one log line naming the workspace — and the repository lock free once it is done, so the
+// next pod's init container never waits on a finished one.
 func TestWorkspaceInitProvisionsTheIssueWorkspace(t *testing.T) {
 	v := newTreeVolume(t).withRemote(t)
 	v.setenv(t)
@@ -405,6 +406,9 @@ func TestWorkspaceInitProvisionsTheIssueWorkspace(t *testing.T) {
 	if body, err := os.ReadFile(shim); err != nil || !strings.Contains(string(body), `exec legion gh -- "$@"`) ||
 		!strings.Contains(string(body), "'"+filepath.Join(v.root, "worker-bin")+":'") {
 		t.Fatalf("the gh shim is %q (%v), want it to strip its own directory and exec legion gh", body, err)
+	}
+	if _, err := os.Stat(filepath.Join(v.root, "bin")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the tree volume holds a legion launcher directory (%v), want only the gh shim", err)
 	}
 	for _, dir := range []string{"sessions", "gh"} {
 		if info, err := os.Stat(filepath.Join(v.root, dir)); err != nil || !info.IsDir() {

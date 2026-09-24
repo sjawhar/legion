@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
+	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
@@ -222,7 +223,7 @@ func panePairs(spec runtime.SpawnSpec, in paneInputs, files []secretFile) []stri
 	for _, name := range slices.Sorted(maps.Keys(in.tools)) {
 		add(name, in.tools[name])
 	}
-	add("PI_SHELL_PREFIX", shellprefix.For(WorkerBinDir(in.stateDir), LegionBinDir(in.stateDir)))
+	add("PI_SHELL_PREFIX", shellprefix.For(workerbin.Dir(in.stateDir), workerbin.LauncherDir(in.stateDir)))
 	add("GIT_TERMINAL_PROMPT", "0")
 	for _, dir := range xdgDirectories(in.stateDir) {
 		add(dir[0], dir[1])
@@ -377,7 +378,7 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 	if spec.Env["PATH"] != "" {
 		path = spec.Env["PATH"]
 	}
-	path = workerPath(path, r.stateDir)
+	path = workerbin.Path(path, r.stateDir)
 	inner := innerCommand(r.ompPrefix, r.ompInvocation, spec.ResumeSessionFile, spec.Prompt)
 	command := shimShellCommand(r.socket, path, workDir, r.legion, r.streamAddress, files[0].path, r.providerEnvDir, inner)
 	pairs := panePairs(spec, paneInputs{

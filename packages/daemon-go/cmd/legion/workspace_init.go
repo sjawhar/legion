@@ -19,7 +19,7 @@ import (
 
 	legionclaim "github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
-	"github.com/sjawhar/legion/daemon/internal/runtime/tmux"
+	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
@@ -111,16 +111,12 @@ func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper stri
 	if err != nil {
 		return err
 	}
-	executable, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("resolve this legion executable for the gh shim: %w", err)
-	}
 	cloneDir, err := workspace.CloneDir(root, repo)
 	if err != nil {
 		return err
 	}
 
-	if err := tmux.InstallWorkerBin(root, executable); err != nil {
+	if err := workerbin.InstallGh(root); err != nil {
 		return err
 	}
 	for _, dir := range []string{"sessions", "gh"} {

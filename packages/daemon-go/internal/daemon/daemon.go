@@ -34,6 +34,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/tmux"
+	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/stream"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
@@ -166,7 +167,7 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 		st.Close()
 		return fmt.Errorf("resolve this daemon's executable for the pane legion launcher: %w", err)
 	}
-	if err := tmux.InstallWorkerBin(cfg.StateDir, executable); err != nil {
+	if err := workerbin.Install(cfg.StateDir, executable); err != nil {
 		workflow.stop()
 		st.Close()
 		return err

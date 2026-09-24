@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
 )
 
 // paneEnvAllowList is every variable a pane process reads from the daemon's own environment,
@@ -110,7 +111,7 @@ func PaneEnvironment(environ []string, stateDir string) map[string]string {
 		}
 		env[name] = value
 	}
-	env["PATH"] = workerPath(env["PATH"], stateDir)
+	env["PATH"] = workerbin.Path(env["PATH"], stateDir)
 	for _, dir := range xdgDirectories(stateDir) {
 		env[dir[0]] = dir[1]
 	}

@@ -1,4 +1,4 @@
-package tmux
+package workerbin
 
 import (
 	"os"
@@ -13,12 +13,12 @@ import (
 // Oh My Pi's bash tool sources the operator's rc file and snapshots the PATH it leaves, so an rc
 // that prepends its own directories (this devbox's dotfiles shims, with their own gh) lands them
 // ahead of worker-bin. The prefix Oh My Pi runs before every command, `${PI_SHELL_PREFIX} <command>`
-// in its persistent shell, puts this daemon's two directories back in front, and running it again
+// in its persistent shell, puts the two installed directories back in front, and running it again
 // leaves PATH as it was.
 func TestShellPrefixResolvesLegionsGhAndLegionAheadOfAnRcsDirectories(t *testing.T) {
-	stateDir := filepath.Join(t.TempDir(), "state dir")
-	if err := InstallWorkerBin(stateDir, "/opt/legion"); err != nil {
-		t.Fatalf("InstallWorkerBin: %v", err)
+	root := filepath.Join(t.TempDir(), "state dir")
+	if err := Install(root, "/opt/legion"); err != nil {
+		t.Fatalf("Install: %v", err)
 	}
 	rc := t.TempDir()
 	for _, name := range []string{"gh", "legion"} {
@@ -26,8 +26,8 @@ func TestShellPrefixResolvesLegionsGhAndLegionAheadOfAnRcsDirectories(t *testing
 			t.Fatal(err)
 		}
 	}
-	snapshot := strings.Join([]string{rc, WorkerBinDir(stateDir), LegionBinDir(stateDir), "/usr/bin", "/bin"}, ":")
-	prefix := shellprefix.For(WorkerBinDir(stateDir), LegionBinDir(stateDir))
+	snapshot := strings.Join([]string{rc, Dir(root), LauncherDir(root), "/usr/bin", "/bin"}, ":")
+	prefix := shellprefix.For(Dir(root), LauncherDir(root))
 	script := "PATH=" + shellprefix.Literal(snapshot) + "\n" +
 		prefix + " command -v gh\n" +
 		prefix + " command -v legion\n" +
@@ -37,18 +37,18 @@ func TestShellPrefixResolvesLegionsGhAndLegionAheadOfAnRcsDirectories(t *testing
 	if err != nil {
 		t.Fatalf("bash: %v: %s", err, out)
 	}
-	want := filepath.Join(WorkerBinDir(stateDir), "gh") + "\n" + filepath.Join(LegionBinDir(stateDir), "legion") + "\nstable\n"
+	want := filepath.Join(Dir(root), "gh") + "\n" + filepath.Join(LauncherDir(root), "legion") + "\nstable\n"
 	if string(out) != want {
 		t.Fatalf("resolved\n%s\nwant\n%s", out, want)
 	}
 }
 
-func TestInstallWorkerBinInstallsPrivateExecutableGhShim(t *testing.T) {
-	stateDir := t.TempDir()
-	if err := InstallWorkerBin(stateDir, "/opt/legion"); err != nil {
-		t.Fatalf("InstallWorkerBin: %v", err)
+func TestInstallGhInstallsAPrivateExecutableShimAndNoLauncher(t *testing.T) {
+	root := t.TempDir()
+	if err := InstallGh(root); err != nil {
+		t.Fatalf("InstallGh: %v", err)
 	}
-	bin := filepath.Join(stateDir, "worker-bin")
+	bin := filepath.Join(root, "worker-bin")
 	if info, err := os.Stat(bin); err != nil {
 		t.Fatalf("worker-bin: %v", err)
 	} else if info.Mode().Perm() != 0o700 {
@@ -68,18 +68,7 @@ func TestInstallWorkerBinInstallsPrivateExecutableGhShim(t *testing.T) {
 	if string(contents) != want {
 		t.Fatalf("gh shim = %q, want %q", contents, want)
 	}
-}
-
-func TestPaneEnvironmentPutsWorkerBinAndTheLauncherFirstExactlyOnce(t *testing.T) {
-	stateDir := "/var/lib/legion"
-	workerBin := filepath.Join(stateDir, "worker-bin")
-	env := PaneEnvironment([]string{
-		"PATH=" + workerBin + ":/usr/local/bin:" + filepath.Join(stateDir, "bin") + ":" + workerBin + ":/usr/bin",
-	}, stateDir)
-	if got, want := env["PATH"], workerBin+":"+filepath.Join(stateDir, "bin")+":/usr/local/bin:/usr/bin"; got != want {
-		t.Fatalf("PATH = %q, want %q", got, want)
-	}
-	if strings.Count(env["PATH"], workerBin) != 1 {
-		t.Fatalf("PATH = %q carries worker-bin more than once", env["PATH"])
+	if _, err := os.Stat(LauncherDir(root)); !os.IsNotExist(err) {
+		t.Fatalf("InstallGh installed a launcher directory (%v)", err)
 	}
 }

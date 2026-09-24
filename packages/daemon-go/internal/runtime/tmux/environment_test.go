@@ -321,3 +321,17 @@ func TestResolveOmpInvocation(t *testing.T) {
 		})
 	}
 }
+
+func TestPaneEnvironmentPutsWorkerBinAndTheLauncherFirstExactlyOnce(t *testing.T) {
+	stateDir := "/var/lib/legion"
+	workerBin := filepath.Join(stateDir, "worker-bin")
+	env := PaneEnvironment([]string{
+		"PATH=" + workerBin + ":/usr/local/bin:" + filepath.Join(stateDir, "bin") + ":" + workerBin + ":/usr/bin",
+	}, stateDir)
+	if got, want := env["PATH"], workerBin+":"+filepath.Join(stateDir, "bin")+":/usr/local/bin:/usr/bin"; got != want {
+		t.Fatalf("PATH = %q, want %q", got, want)
+	}
+	if strings.Count(env["PATH"], workerBin) != 1 {
+		t.Fatalf("PATH = %q carries worker-bin more than once", env["PATH"])
+	}
+}
