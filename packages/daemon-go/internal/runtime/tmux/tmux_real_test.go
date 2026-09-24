@@ -1414,3 +1414,62 @@ func TestRealTmuxPaneResolvesThisDaemonsLegionCLI(t *testing.T) {
 		t.Fatalf("legion after the gh shim's PATH edit = %q (%v), want %s", out, err, launcher)
 	}
 }
+
+// Releasing a claim lets go of everything the runtime watches for it, whether or not its process
+// could be stopped: the daemon retires a worker whose agent reported its exit even when its pane
+// could not be stopped, and ends a tree's root with a Release of no locator even when the root's
+// exit Suspend failed. Either pane is then the orphan sweep's, never kept alive by the watch until
+// it ends itself. A claim still known keeps its pane: an in-flight launch has no locator yet.
+func TestRealTmuxAReleasedClaimsPaneIsTheSweeps(t *testing.T) {
+	r := newRig(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	worker, err := r.rt.Spawn(ctx, r.spec("legion-t-LEGION-5-tester", "LEGION-3", "LEGION-5", claim.RoleTester))
+	if err != nil {
+		t.Fatalf("Spawn worker: %v", err)
+	}
+	root, err := r.rt.Spawn(ctx, r.spec("legion-t-LEGION-3-architect", "LEGION-3", "LEGION-3", claim.RoleArchitect))
+	if err != nil {
+		t.Fatalf("Spawn root: %v", err)
+	}
+	launching, err := r.rt.Spawn(ctx, r.spec("legion-t-LEGION-6-planner", "LEGION-3", "LEGION-6", claim.RoleTester))
+	if err != nil {
+		t.Fatalf("Spawn launching: %v", err)
+	}
+	// Every pane lookup fails while the worker is released and the root suspended.
+	run := r.rt.run
+	r.rt.run = func(ctx context.Context, argv []string) (result, error) {
+		if verb(argv) == "list-panes" && slices.Contains(argv, "-t") {
+			return result{}, errors.New("tmux list-panes: server not answering")
+		}
+		return run(ctx, argv)
+	}
+	if err := r.rt.Release(ctx, runtime.Known{Claim: worker.Claim, Locator: &worker}); err == nil {
+		t.Fatal("the worker's release succeeded with no pane lookup")
+	}
+	if err := r.rt.Suspend(ctx, root); err == nil {
+		t.Fatal("the root's suspend succeeded with no pane lookup")
+	}
+	r.rt.run = run
+	// The tree closes: its root is released with no locator, since its claim was suspended.
+	if err := r.rt.Release(ctx, runtime.Known{Claim: root.Claim}); err != nil {
+		t.Fatalf("Release of the suspended root: %v", err)
+	}
+	for _, loc := range []runtime.Locator{worker, root} {
+		if obs := probe(t, r.rt, loc); obs.Kind != runtime.Alive {
+			t.Fatalf("%s's pane is not running before the sweep: %+v", loc.Claim, obs)
+		}
+	}
+	// Both claims are retired now; the launch is known with no locator.
+	if err := r.rt.ReconcileOrphans(ctx, []runtime.Known{{Claim: launching.Claim}}, 0); err != nil {
+		t.Fatalf("ReconcileOrphans: %v", err)
+	}
+	for _, loc := range []runtime.Locator{worker, root} {
+		if obs := probe(t, r.rt, loc); obs.Kind != runtime.Gone {
+			t.Errorf("%s's pane survived the sweep after its claim was released: %+v", loc.Claim, obs)
+		}
+	}
+	if obs := probe(t, r.rt, launching); obs.Kind != runtime.Alive {
+		t.Errorf("the in-flight launch's pane did not survive the sweep: %+v", obs)
+	}
+}

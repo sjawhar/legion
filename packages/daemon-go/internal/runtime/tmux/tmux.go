@@ -28,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -381,6 +382,17 @@ func (r *Runtime) untrack(loc runtime.Locator) {
 	delete(r.tracked, loc.Incarnation)
 }
 
+// untrackClaim stops watching every process of the claim.
+func (r *Runtime) untrackClaim(token claim.Token) {
+	r.trackedMu.Lock()
+	defer r.trackedMu.Unlock()
+	for incarnation, entry := range r.tracked {
+		if entry.locator.Claim == token {
+			delete(r.tracked, incarnation)
+		}
+	}
+}
+
 // trackedProcesses is every watched process, ordered by claim then incarnation, so a sweep and a
 // window choice visit them the same way every time.
 func (r *Runtime) trackedProcesses() []trackedProcess {
@@ -406,12 +418,18 @@ func (r *Runtime) Suspend(ctx context.Context, loc runtime.Locator) error {
 }
 
 // Release ends the claim. A pane holds nothing of a claim but its process, so a claim with no
-// locator — suspended, failed, never launched — has nothing to release, and one with a locator is
-// released by stopping that process within the stop grace.
+// locator — suspended, failed, never launched — has no process to stop, and one with a locator is
+// released by stopping that process within the stop grace. What the runtime holds for the claim
+// is its watch, and Release lets go of all of it whether or not the stop succeeds: a pane Release
+// could not stop, or one a failed Suspend left running before the claim's Release with no locator,
+// is then the orphan sweep's once the daemon retires the claim, never protected by the watch until
+// it ends itself. A claim the daemon still knows with its locator — a stop the operator will ask
+// again — is watched again at the next sweep, which adopts every located known claim.
 func (r *Runtime) Release(ctx context.Context, k runtime.Known) error {
 	if err := k.Validate(); err != nil {
 		return fmt.Errorf("release: %w", err)
 	}
+	defer r.untrackClaim(k.Claim)
 	if k.Locator == nil {
 		return nil
 	}
