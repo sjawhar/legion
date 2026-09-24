@@ -25,11 +25,12 @@ type profile struct {
 		} `yaml:"providers"`
 	}
 	Config struct {
-		EnabledModels     []string            `yaml:"enabledModels"`
-		DisabledProviders []string            `yaml:"disabledProviders"`
-		ModelRoles        map[string]string   `yaml:"modelRoles"`
-		Retry             map[string]any      `yaml:"retry"`
-		FallbackChains    map[string][]string `yaml:"-"`
+		EnabledModels     []string          `yaml:"enabledModels"`
+		DisabledProviders []string          `yaml:"disabledProviders"`
+		ModelRoles        map[string]string `yaml:"modelRoles"`
+		Retry             struct {
+			FallbackChains map[string][]string `yaml:"fallbackChains"`
+		} `yaml:"retry"`
 	}
 }
 
@@ -57,13 +58,6 @@ func readProfile(t *testing.T, home string) profile {
 		}
 		if err := yaml.Unmarshal(raw, into); err != nil {
 			t.Fatalf("%s is not YAML: %v\n%s", file, err, raw)
-		}
-	}
-	chains, _ := p.Config.Retry["fallbackChains"].(map[string]any)
-	p.Config.FallbackChains = map[string][]string{}
-	for model, next := range chains {
-		for _, selector := range next.([]any) {
-			p.Config.FallbackChains[model] = append(p.Config.FallbackChains[model], selector.(string))
 		}
 	}
 	return p
@@ -118,7 +112,7 @@ func TestInstallRoutesTheProfileThroughTheGateway(t *testing.T) {
 			if names(p.Config.ModelRoles["default"]) != DefaultModel {
 				t.Errorf("the default role runs %s, want DefaultModel %s", p.Config.ModelRoles["default"], DefaultModel)
 			}
-			for from, chain := range p.Config.FallbackChains {
+			for from, chain := range p.Config.Retry.FallbackChains {
 				for _, to := range append([]string{from}, chain...) {
 					if !declared[names(to)] {
 						t.Errorf("the fallback chain %s names %s, which models.yml does not declare", from, to)

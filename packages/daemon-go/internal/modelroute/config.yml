@@ -3,9 +3,9 @@
 # named here is served, through the model gateway.
 #
 # The gateway is the one model route, and Oh My Pi falls back from a failing provider without a word:
-# with the gateway key failing and nothing pinned, a turn answered from Amazon Bedrock on the node's
-# instance role (amazon-bedrock/us.anthropic.claude-opus-4-8, exit 0; the 4b.14 lane saw the same on
-# the devbox). enabledModels holds every session's own model to the gateway's aliases, so a process
+# with the gateway key failing and nothing pinned, a turn answers from Amazon Bedrock on the host's
+# instance role (amazon-bedrock/us.anthropic.claude-opus-4-8, exit 0; omp_test.go reproduces it).
+# enabledModels holds every session's own model to the gateway's aliases, so a process
 # without the key refuses to start, naming the key command's failure. Subagents and retries choose
 # from every enabled provider instead, so each one a pod could use without the gateway is disabled:
 # Amazon Bedrock twice and Vertex (ambient cloud credentials are their key), Google (a key in the

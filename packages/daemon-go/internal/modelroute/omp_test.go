@@ -46,10 +46,10 @@ type gateway struct {
 	token string
 
 	mu       sync.Mutex
-	requests []seen
+	requests []request
 }
 
-type seen struct {
+type request struct {
 	path   string
 	header http.Header
 	body   map[string]any
@@ -68,7 +68,7 @@ func (g *gateway) serve(w http.ResponseWriter, r *http.Request) {
 	var body map[string]any
 	_ = json.Unmarshal(raw, &body)
 	g.mu.Lock()
-	g.requests = append(g.requests, seen{r.URL.Path, r.Header.Clone(), body})
+	g.requests = append(g.requests, request{r.URL.Path, r.Header.Clone(), body})
 	g.mu.Unlock()
 	model, _ := body["model"].(string)
 	switch {
@@ -99,10 +99,10 @@ func (g *gateway) serve(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (g *gateway) seen() []seen {
+func (g *gateway) seen() []request {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return append([]seen(nil), g.requests...)
+	return append([]request(nil), g.requests...)
 }
 
 // pod is one Oh My Pi environment: a HOME whose profile Install routed through gateway, keyed by
@@ -183,7 +183,7 @@ func TestTheRouteOnTheRealOhMyPi(t *testing.T) {
 		}
 		// Oh My Pi also lists the provider's models (GET /anthropic/v1/models) before the turn;
 		// every request, that one included, goes to the gateway with the token.
-		var messages []seen
+		var messages []request
 		for _, r := range gw.seen() {
 			if r.header.Get("X-Api-Key") != "gateway-token-1" {
 				t.Errorf("a request to %s carries another x-api-key than the token file's value", r.path)
