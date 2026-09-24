@@ -29,8 +29,6 @@ function linkedDocs(): { browser: Y.Doc; server: Y.Doc } {
   return { browser, server };
 }
 
-const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
-
 function replaceSuggestion(status: "pending" | "accepted"): StoredMark {
   return {
     by: "human:bob",
@@ -61,7 +59,6 @@ test("bindRemoteMarks keeps an accepted suggestion's text when its projection ar
     handle.setMarkdown("The quick brown fox");
     handle.applyRemoteMarks({ "suggestion-1": replaceSuggestion("pending") });
     server.getMap("marks").set("suggestion-1", replaceSuggestion("pending"));
-    await settle();
     unbind = bindRemoteMarks(browser, handle);
     const text = (server.getXmlFragment("prosemirror").get(0) as Y.XmlElement).get(0) as Y.XmlText;
     const delta = text.toDelta() as { attributes?: Record<string, unknown>; insert: string }[];
@@ -77,7 +74,6 @@ test("bindRemoteMarks keeps an accepted suggestion's text when its projection ar
       );
       server.getMap("marks").set("suggestion-1", replaceSuggestion("accepted"));
     });
-    await settle();
 
     expect(handle.view.state.doc.textContent).toBe("The quick red fox");
     expect(text.toString()).toBe("The quick red fox");

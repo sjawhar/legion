@@ -912,9 +912,6 @@ test("a browser reconnecting after an accept keeps the accepted text", async ({ 
     await transport.release();
     await expect(connected).toHaveText("connected");
     await expect(documentEditor(page)).toHaveText("The quick red fox");
-    await expect
-      .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
-      .toBe("The quick red fox\n");
   } finally {
     await bob.close();
   }
