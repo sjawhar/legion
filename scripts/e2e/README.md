@@ -4,7 +4,10 @@ Each script here runs real binaries built from the checkout against real depende
 and fails loudly on the first step that does not hold. Some are a stage's gate for the Go
 coordinator — unit tests do not gate a stage, these do; others prove one capability end to end
 against the world it will run in. A later stage's script lands beside these; `lib/` holds what
-the stage scripts share.
+the stage scripts share: standalone helpers they run, and the files they source
+([`lib/rig.sh`](#librigsh), [`lib/workflow.sh`](#libworkflowsh),
+[`lib/namespace-rig.sh`](#libnamespace-rigsh)), which `shellcheck` follows from this directory
+through `scripts/e2e/.shellcheckrc`.
 
 | script | proves |
 | :--- | :--- |
@@ -226,8 +229,12 @@ shell, a pane, an argv, or the transcript.
 The script stands up a scratch Postgres, NATS, Envoy listener, native Dispatch server, and a
 subscribe-only production-Envoy GitHub bridge in one temporary directory. It installs this
 checkout's plugin in an isolated OMP profile and runs the Go daemon with a separate state
-directory, private tmux server, ephemeral ports, a root-only Dispatch project, `admission_cap: 2`,
-`review_round_cap: 3`, and the root design gate armed.
+directory, private tmux server, ports from [`lib/free-port.sh`](#libfree-portsh), a root-only
+Dispatch project, `admission_cap: 2`, `review_round_cap: 3`, and the root design gate armed. Its
+host-side helpers are [`lib/rig.sh`](#librigsh), and the workflow's vocabulary (Dispatch, the
+daemon's state, the agents, the proof human, the handoff checks) is
+[`lib/workflow.sh`](#libworkflowsh); the script defines only its runtime's reads, its scratch
+services, its production guards, and its checks.
 
 Production is off limits, and the proof checks that rather than assuming it. Every registered
 pane's OMP environment must carry `DISPATCH_URL`, `DISPATCH_TOKEN_FILE`, `ENVOY_URL`, and
@@ -246,10 +253,13 @@ It proves admission order and slotless children, then drives a root from `todo` 
 architect's spec and gate registration, the human approval, planner, implementer pull request,
 tester, reviewer, retro, merger READY, the ordinary human squash merge, production check, and
 architect sign-off. It also proves three changes-requested rounds, each naming one concrete
-correction the spec permits (a distinct line appended to the smoke file, checked on the pull
-request) and reaching testing only on that round's own implementer handoff (the handoff fact of every implementing round is checked,
-and the commit carrying every planner, implementer, and tester handoff is authored and committed
-by that role's own App, read from the issue's workspace),
+correction the spec permits (a distinct line appended to the smoke file, the one product file the
+implementer's pull request changed, which the run records and requires to be exactly one; the
+correction counts only in that file's patch on the pull request) and reaching testing only on
+that round's own implementer handoff (the daemon's phase record must hold the implementer's
+handoff for that round when the issue reaches testing, and the commit carrying every planner,
+implementer, and tester handoff is authored and committed by that role's own App, read from the
+issue's workspace),
 and `pr-blocked`, READY refusing after a later spec version until a human approves it, a held
 worker after its launch budget and the architect's retry relaunching it, restart during
 implementation, a pending status write while Dispatch is down, and the Go pane's
@@ -367,11 +377,13 @@ The checks, in order, each printing what it observed and then `CHECK <name>: PAS
 
 Everything the run creates carries the project label `s4a-<UTC timestamp>-<4 hex>`, and the
 claim tokens carry the same value without its dashes. The harness appends each Sandbox's name to
-a record before the Sandbox can exist. On any exit the `EXIT` trap refuses to act on a project
-without the `s4a-` prefix, deletes every recorded Sandbox by its exact name and then the Sandboxes
-labelled with that exact project (never by label existence), waits for the owned Secrets, pods and
-PVCs to follow, deletes by the same exact label any still left, and runs `namespace-clean` when the
-harness did not get to it. Nothing outside `legion` is touched.
+a record before the Sandbox can exist. On any exit the `EXIT` trap runs
+[`lib/namespace-rig.sh`](#libnamespace-rigsh)'s teardown: it refuses to act on a project without
+the `s4a-` prefix, deletes every recorded Sandbox by its exact name and then the Sandboxes
+labelled with that exact project (never by label existence), waits for the owned Secrets, pods
+and PVCs to follow, deletes by the same exact label any Secret or PVC still left after 90
+listings, and runs `namespace-clean` when the harness did not get to it. Nothing outside `legion`
+is touched.
 
 What the run had to learn about production:
 
@@ -451,7 +463,8 @@ Two notes on what the script had to learn about its own surface:
 ## lib/free-port.sh
 
 Prints one TCP port that nothing listens on, for a stage proof to hand a binary that binds it
-later. Stage 1, Stage 2 and `verifiers-staging-token.sh` take their ports from it.
+later. Stage 1, Stage 2, Stage 3 (through [`lib/rig.sh`](#librigsh)'s `pick_port`) and
+`verifiers-staging-token.sh` take their ports from it.
 
 ```sh
 port=$(bash scripts/e2e/lib/free-port.sh)                  # → 20000 ≤ port < first ephemeral port
@@ -655,3 +668,90 @@ Every run also carries its own negative control: the first session holding a tur
 `--control` with that one turn rewritten as `amazon-bedrock/us.anthropic.claude-opus-4-8`, and the
 same check must refuse the copy, or the run exits 1 (`the negative control passed`). An argument
 refusal exits 2.
+
+## lib/rig.sh
+
+The host-side helpers a stage proof sources for its rig: bounded waits, ports, the processes the
+run starts, and their teardown. Stage 3 sources it.
+
+```sh
+. "$root/scripts/e2e/lib/rig.sh"     # sourced, never run
+```
+
+The caller sets `root` (the checkout), `work` (the run's scratch directory: every process whose
+working directory or command line names it is the run's), `evidence` (each service started by
+`start_process` logs to `$evidence/logs/<name>.log`) and `timeout_hook` (empty, or a function a
+timed-out wait runs before it fails), and defines `note` and `fail`, which exits.
+
+| function | does |
+| :--- | :--- |
+| `until_true SECONDS WHAT CMD…` | runs CMD every half second until it succeeds; after SECONDS it runs `timeout_hook` and fails naming WHAT. A guard that writes `$evidence/pane-endpoint-violation.txt` makes the next wait abort, naming the violation |
+| `pick_port VAR` | assigns VAR a port from [`lib/free-port.sh`](#libfree-portsh) that no earlier pick of the run returned. It assigns in place: a command substitution would run it in a subshell and lose the run's set of picks |
+| `start_process NAME CMD…` | starts CMD in the background, appending to NAME's log, and sets `NAME_pid` |
+| `log_size NAME` | the size of NAME's log, the offset `await_start` reads a start's own lines from |
+| `await_start NAME PID OFFSET SECONDS WHAT CMD…` | waits, bounded, for CMD to succeed while PID lives. It returns 2 when the service exited on `address already in use` after OFFSET, the one race a pick before the bind cannot close, so the caller picks again; any other exit fails naming the log |
+| `stop_pid PID` | TERM, then KILL after 10 s; best effort, so a failed cleanup never hides the check that failed |
+| `run_processes` | prints every pid whose working directory or command line names `$work` |
+
+## lib/workflow.sh
+
+The vocabulary of a stage proof that drives Dispatch issues through the Go daemon's workflow with
+real agents: Dispatch, the daemon's state, each phase's worker, the smoke repository's pull request
+under the proof human, the handoffs the daemon accepted, the notices, and the negative controls.
+Stage 3 sources it after [`lib/rig.sh`](#librigsh).
+
+```sh
+. "$root/scripts/e2e/lib/workflow.sh"     # sourced, never run
+```
+
+The caller sets `work` (holding `dispatch-token`, `legion.yaml` and `operator-token`),
+`evidence`, `project` (the Dispatch project; the daemon writes as `legion-daemon:<project>`),
+`repo`, `port_dispatch`, `port_daemon`, `pg_container` (the daemon's Postgres), and, once they
+exist, `pr_number` and `smoke_file` (the one product file the pull request's first implementation
+changed). It defines `note`, `pass` and `fail`, and the runtime seam, the only reads that depend on
+where an agent runs:
+
+| seam | the caller's definition |
+| :--- | :--- |
+| `assert_claim_endpoints ISSUE ROLE` | fails the check when the claim's process could reach a service outside the rig; every instruction runs it first |
+| `claim_session_text ISSUE ROLE` | prints the claim's session file, and fails when there is none |
+| `workspace_jj ISSUE ARGS…` | runs `jj ARGS…` in the issue's workspace |
+
+Every wait for an issue to reach one phase is `wait_for_phase ISSUE PHASE [SECONDS]`: 600 s, unless
+the phase's worker runs a whole loop (a correction round, the retro) and the caller passes its own
+bound. `round_correction_pushed ROUND` accepts the round's line only as an addition in
+`smoke_file`'s patch, never in a notes file or in a `.legion/` handoff that quotes it.
+
+The handoff checks read the daemon's phase record (the `phases` table joined to `issues`), not the
+ids of the facts it processed, so they hold whatever format a handoff event id takes. A role's
+`handoff_commit` is the commit its last accepted completion reported, and the daemon empties it
+when a transition starts that role on a new phase (`clearHandoff`,
+`packages/daemon-go/internal/workflow/effects.go`); the implementer's `rounds` counts its returns
+to implementing. Read right after the transition a completion caused, a role's non-empty
+`handoff_commit` is that phase's own: `assert_round_handoff ISSUE ROUND` (testing reached on the
+implementer's completion of that round; implementing moves to testing only once that handoff is
+recorded), `assert_handoff_committer ISSUE ROLE PHASE ROUND` (that commit is authored and committed
+by the role's own App, read with `workspace_jj`), `retro_reported` (the implementer's handoff while
+the issue is merging or awaiting merge), and `production_check_reported` (the implementer's handoff
+in production check or done).
+
+## lib/namespace-rig.sh
+
+The namespace rig of a stage proof that runs pods in a shared cluster namespace. Stage 4a sources
+it.
+
+```sh
+. "$root/scripts/e2e/lib/namespace-rig.sh"     # sourced, never run
+```
+
+The caller sets `operator` (the admin kubectl context), `namespace`, `project` (the run's
+`legion.dev/project` label), `project_prefix` (the prefix every run project of the proof carries,
+`s4a-`), `record` (a file with one Sandbox name per line), `work`, `evidence`, and `torn_down` and
+`compared` empty; it defines `begin`, `note`, `pass` and `fail`, which exits.
+
+| function | does |
+| :--- | :--- |
+| `op ARGS…` | `kubectl --context $operator -n $namespace ARGS…` |
+| `snapshot FILE` | writes the namespace's Sandboxes, Secrets, PVCs and pods that carry the run's project label or none, sorted |
+| `teardown` | runs once and never fails. It refuses a project without `project_prefix`, so a mistyped project cannot select another run's objects; deletes every recorded Sandbox by name, then the Sandboxes labelled with that exact project; then lists the project's objects every 2 s, up to 150 listings, until none is left. Secrets and PVCs the Sandboxes' own deletion has not taken by the 90th listing are deleted by that exact label once, on the first listing from then on that answers; three failed listings in a row end the wait, naming the context and its error |
+| `namespace_clean` | the check `namespace-clean`: a fresh snapshot, written to `$evidence/namespace-after.txt`, must equal `$evidence/namespace-before.txt` |
