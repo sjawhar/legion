@@ -86,13 +86,30 @@ func runVersion(_ context.Context, _ []string, stdout, _ io.Writer) int {
 	return 0
 }
 
-func runStart(ctx context.Context, args []string, _, stderr io.Writer) int {
+func runStart(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := newFlags("start", stderr)
 	configPath := flags.String("config", defaultConfigPath, "path to legion.yaml")
+	checkConfig := flags.Bool("check-config", false, "validate the configuration, run none of its key commands, and exit without starting")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
+	if *checkConfig {
+		return checkStartConfig(*configPath, stdout, stderr)
+	}
 	return start(ctx, *configPath, stderr)
+}
+
+// checkStartConfig is `legion start --check-config`: every refusal the configuration's read at
+// boot makes, through the loader that runs neither GitHub App's private_key_command nor any
+// secretsd read, and nothing else — no store, no team, no process.
+func checkStartConfig(configPath string, stdout, stderr io.Writer) int {
+	cfg, err := config.LoadForValidation(configPath, nil)
+	if err != nil {
+		fmt.Fprintf(stderr, "legion start: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "Config OK: project=%s\n", cfg.Project)
+	return 0
 }
 
 // start runs a legion in this process until its context is done. The registry entry is this
@@ -167,7 +184,8 @@ func runStop(_ context.Context, args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	cfg, err := config.Load(*configPath, nil)
+	// The file names the team and nothing else here, so its App key commands do not run.
+	cfg, err := config.LoadForValidation(*configPath, nil)
 	if err != nil {
 		fmt.Fprintf(stderr, "legion stop: %v\n", err)
 		return 1
@@ -270,7 +288,8 @@ func runState(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 // the port. --port on its own reads a daemon on this box without a configuration to load, which
 // is how a proof script reads a legion whose file it did not write. A wildcard bind is dialled
 // the same way `legion status` dials it — one rule for both commands that read a configured
-// bind.
+// bind. The file is read by the validating loader: finding an address is no reason to run both
+// GitHub Apps' private_key_command, which config.Load does on every read.
 func stateAddress(configPath string, port int) (string, error) {
 	if configPath == "" && port != 0 {
 		return net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), nil
@@ -278,7 +297,7 @@ func stateAddress(configPath string, port int) (string, error) {
 	if configPath == "" {
 		configPath = defaultConfigPath
 	}
-	cfg, err := config.Load(configPath, nil)
+	cfg, err := config.LoadForValidation(configPath, nil)
 	if err != nil {
 		return "", err
 	}

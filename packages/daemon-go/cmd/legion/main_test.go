@@ -312,3 +312,121 @@ func TestStateInAPaneReadsTheDaemonItNamesAndPrintsTheIssueRecord(t *testing.T) 
 		}
 	}
 }
+
+// workflowConfig writes a Stage 3 configuration whose two GitHub Apps read their keys through a
+// private_key_command that leaves marker behind and fails: a command that ran it is seen twice
+// over, in the marker and in the refusal.
+func workflowConfig(t *testing.T, port int, extra string) (path, marker string) {
+	t.Helper()
+	dir := t.TempDir()
+	marker = filepath.Join(dir, "private-key-command-ran")
+	command := "touch " + marker + "; exit 1"
+	body := fmt.Sprintf(`project: DEMO
+port: %d
+postgres_dsn: postgres://legion:legion@127.0.0.1:1/legion
+state_dir: %s
+dispatch_url: https://dispatch.test
+projects:
+  DEMO: { repo: acme/widgets }
+github_apps:
+  implement: { app_id: "1", private_key_command: %q }
+  review: { app_id: "2", private_key_command: %q }
+%s`, port, filepath.Join(dir, "state"), command, command, extra)
+	path = filepath.Join(dir, "legion.yaml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write the config: %v", err)
+	}
+	return path, marker
+}
+
+// `legion start --check-config` validates the file the way boot does, says so, and exits: no App
+// key command runs, no store is opened (the configured Postgres is unreachable), and no team is
+// taken.
+func TestStartCheckConfigValidatesAndStartsNothing(t *testing.T) {
+	legions := legionState(t)
+	config, marker := workflowConfig(t, 13370, "")
+
+	var out, errb bytes.Buffer
+	code := run(context.Background(), []string{"legion", "start", "--config", config, "--check-config"}, &out, &errb)
+	if code != 0 {
+		t.Fatalf("legion start --check-config = %d, stderr %q", code, errb.String())
+	}
+	if out.String() != "Config OK: project=DEMO\n" {
+		t.Fatalf("stdout = %q, want \"Config OK: project=DEMO\\n\"", out.String())
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("the private_key_command ran (marker stat: %v)", err)
+	}
+	if _, found, err := registry.Find(legions, "DEMO"); err != nil || found {
+		t.Fatalf("registry.Find = %v, %v, want no entry: a check takes no team", found, err)
+	}
+}
+
+// Every broken variant is refused naming its key, and the command exits non-zero.
+func TestStartCheckConfigNamesTheBrokenKey(t *testing.T) {
+	legionState(t)
+	for _, variant := range []struct{ extra, says string }{
+		{"worker_cap: 3\n", "worker_cap"},
+		{"admission_cap: 0\n", "admission_cap"},
+		{"gates: { design: sometimes }\n", "gates.design"},
+		{"envoy_url: not a url\n", "envoy_url"},
+	} {
+		config, marker := workflowConfig(t, 13370, variant.extra)
+		var out, errb bytes.Buffer
+		code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
+		if code != 1 {
+			t.Fatalf("%q: exit code = %d, want 1; stdout %q stderr %q", variant.extra, code, out.String(), errb.String())
+		}
+		if !strings.Contains(errb.String(), variant.says) {
+			t.Fatalf("%q: stderr = %q, want it to name %s", variant.extra, errb.String(), variant.says)
+		}
+		if _, err := os.Stat(marker); !os.IsNotExist(err) {
+			t.Fatalf("%q: the private_key_command ran (marker stat: %v)", variant.extra, err)
+		}
+	}
+}
+
+// `legion state --config` reads where the file says the daemon answers, and nothing else of it:
+// both GitHub Apps' private_key_command would fail, and the state is read all the same, with
+// neither command run.
+func TestStateConfigRunsNoPrivateKeyCommand(t *testing.T) {
+	served := `{"daemon":{"project":"DEMO","schemaVersion":7,"boots":1,"firstBootAt":"2026-09-23T00:00:00Z","startedAt":"2026-09-23T00:00:00Z"},` +
+		`"admission":{"cap":2,"active":[],"waiting":[]},"issues":{},"pendingStatusWrites":[]}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(served))
+	}))
+	defer server.Close()
+	port, err := strconv.Atoi(server.URL[strings.LastIndex(server.URL, ":")+1:])
+	if err != nil {
+		t.Fatalf("read the test server's port: %v", err)
+	}
+	config, marker := workflowConfig(t, port, "")
+
+	var out, errb bytes.Buffer
+	if code := run(context.Background(), []string{"legion", "state", "--config", config, "--json"}, &out, &errb); code != 0 {
+		t.Fatalf("legion state --config = %d, stderr %q", code, errb.String())
+	}
+	if out.String() != served {
+		t.Fatalf("stdout = %q, want the state served", out.String())
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("the private_key_command ran (marker stat: %v)", err)
+	}
+}
+
+// `legion stop` needs the file only for the team it names, so it runs neither App's key command
+// either: the answer is about the registry, never the key command's failure.
+func TestStopRunsNoPrivateKeyCommand(t *testing.T) {
+	legionState(t)
+	config, marker := workflowConfig(t, 13370, "")
+
+	var out, errb bytes.Buffer
+	code := run(context.Background(), []string{"legion", "stop", "--config", config}, &out, &errb)
+	if code != 1 || !strings.Contains(errb.String(), "no legion is registered for DEMO") {
+		t.Fatalf("legion stop = %d, stderr %q, want 1 naming the unregistered team", code, errb.String())
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("the private_key_command ran (marker stat: %v)", err)
+	}
+}
