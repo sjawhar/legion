@@ -4,11 +4,13 @@ import (
 	"context"
 	"net"
 	"reflect"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/testnats"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
@@ -365,5 +367,78 @@ func TestEnsureStreamWithConfigUpdatesSubjectsWhenExistingStreamDiffers(t *testi
 	}
 	if !reflect.DeepEqual(js.config.Subjects, desiredConfig.Subjects) {
 		t.Fatalf("stream subjects = %v, want %v", js.config.Subjects, desiredConfig.Subjects)
+	}
+}
+
+// Several deployments ensure one stream: the listener and Dispatch run from one image but deploy
+// separately, and a rollback or a restart during a rollout starts a binary compiled with a
+// different subject list. Whichever starts must leave every subject the other still needs.
+func TestConnectKeepsTheSubjectsAnotherDeploymentOfTheStreamNeeds(t *testing.T) {
+	ctx := context.Background()
+	ctr, err := tcnats.Run(ctx, testnats.Image)
+	if err != nil {
+		t.Fatalf("start NATS: %v", err)
+	}
+	t.Cleanup(func() { _ = ctr.Terminate(ctx) })
+	uri, err := ctr.ConnectionString(ctx)
+	if err != nil {
+		t.Fatalf("NATS connection string: %v", err)
+	}
+	// The other deployment was compiled before notifications.legion.> existed and carries a
+	// subject this binary does not know.
+	other := *streamCfg
+	other.Subjects = []string{"notifications.retired.>"}
+	for _, subject := range streamCfg.Subjects {
+		if subject != "notifications.legion.>" {
+			other.Subjects = append(other.Subjects, subject)
+		}
+	}
+	otherConn := testnats.Connect(t, uri)
+	t.Cleanup(otherConn.Close)
+	otherJS, err := otherConn.JetStream()
+	if err != nil {
+		t.Fatalf("open the other deployment's JetStream: %v", err)
+	}
+	if err := ensureStreamWithConfig(otherJS, &other); err != nil {
+		t.Fatalf("the other deployment creates the stream: %v", err)
+	}
+
+	client, err := Connect([]string{uri})
+	if err != nil {
+		t.Fatalf("this binary connects: %v", err)
+	}
+	t.Cleanup(client.Close)
+	assertStreamSubjectsInclude(t, client.JS(), append([]string{"notifications.retired.>"}, streamCfg.Subjects...))
+
+	// The other deployment restarts while this binary is still live.
+	if err := ensureStreamWithConfig(otherJS, &other); err != nil {
+		t.Fatalf("the other deployment restarts: %v", err)
+	}
+	assertStreamSubjectsInclude(t, client.JS(), append([]string{"notifications.retired.>"}, streamCfg.Subjects...))
+	notice := contracts.Envelope{
+		EventID:        "notice-skew",
+		Source:         "agent",
+		SourceEventID:  "notice-skew",
+		Topic:          "notifications.legion.omp.LEGION-208",
+		DedupeKey:      "legion-outbox:skew",
+		IssuedAt:       contracts.NowMillis(),
+		PayloadSummary: "notice published after the other deployment restarted",
+		TraceID:        "notice-skew",
+	}
+	if err := client.Publish(notice); err != nil {
+		t.Fatalf("publish a Legion notice after the other deployment restarted: %v", err)
+	}
+}
+
+func assertStreamSubjectsInclude(t *testing.T, js nats.JetStreamContext, want []string) {
+	t.Helper()
+	info, err := js.StreamInfo(Stream)
+	if err != nil {
+		t.Fatalf("read stream: %v", err)
+	}
+	for _, subject := range want {
+		if !slices.Contains(info.Config.Subjects, subject) {
+			t.Fatalf("stream subjects = %v, missing %q", info.Config.Subjects, subject)
+		}
 	}
 }
