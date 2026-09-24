@@ -715,29 +715,33 @@ func main() {
 		return nil
 	}
 	monitorCtx, monitorCancel := context.WithCancel(context.Background())
-	go runSelfHealthMonitor(
-		monitorCtx,
-		logger,
-		func() error {
-			return checkSelfHealth(registry, sessions, ciStore, durableProbe)
-		},
-		func(err error) bool {
-			return isUnrecoverableSelfHealthFailure(err, client, sessions, ciStore)
-		},
-		func() error {
-			return rebuildListenerDependencies(
-				client,
-				sessions,
-				ciStore,
-				durableProbe,
-				consumer,
-				jetStreamDeliveryHandler(deliveryConfig),
-			)
-		},
-		func() { _ = syscall.Kill(os.Getpid(), syscall.SIGTERM) },
-		30*time.Second,
-		3,
-	)
+	monitorDone := make(chan struct{})
+	go func() {
+		defer close(monitorDone)
+		runSelfHealthMonitor(
+			monitorCtx,
+			logger,
+			func() error {
+				return checkSelfHealth(registry, sessions, ciStore, durableProbe)
+			},
+			func(err error) bool {
+				return isUnrecoverableSelfHealthFailure(err, client, sessions, ciStore)
+			},
+			func() error {
+				return rebuildListenerDependencies(
+					client,
+					sessions,
+					ciStore,
+					durableProbe,
+					consumer,
+					jetStreamDeliveryHandler(deliveryConfig),
+				)
+			},
+			func() { _ = syscall.Kill(os.Getpid(), syscall.SIGTERM) },
+			30*time.Second,
+			3,
+		)
+	}()
 
 	// Phase 7: Block until SIGTERM/SIGINT or fatal error.
 	sig := make(chan os.Signal, 1)
@@ -762,10 +766,16 @@ func main() {
 		logger.Warn("http shutdown error", slog.String("error", err.Error()))
 	}
 
-	// 3. NATS — stop the session registry's watcher first, so the drain closing its subscription
-	// reads as the shutdown it is rather than a watcher failure; then drain in-flight deliveries
-	// without reconnecting, but never let a blocked NATS request pin the process after its HTTP
-	// listener is gone.
+	// 3. NATS — wait (within the HTTP deadline) for a self-health rebuild the monitor may still be
+	// running, so nothing re-subscribes or re-watches during the drain. Retire the session
+	// registry's watcher, so the drain ending its subscription reads as the shutdown it is rather
+	// than a watcher failure; then drain in-flight deliveries without reconnecting, but never let a
+	// blocked NATS request pin the process after its HTTP listener is gone.
+	select {
+	case <-monitorDone:
+	case <-shutdownCtx.Done():
+		logger.Warn("self-health monitor still running at shutdown")
+	}
 	sessions.StopWatch()
 	if err := client.Drain(10 * time.Second); err != nil {
 		logger.Warn("nats drain error", slog.String("error", err.Error()))

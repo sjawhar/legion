@@ -443,9 +443,11 @@ func (c *Client) onClosed() {
 }
 
 func (c *Client) onReconnect(nc *nats.Conn) {
-	// A reconnect while Drain runs belongs to a process that is shutting down: re-subscribing it
-	// is what the drain is there to prevent.
+	// A reconnect while Drain runs belongs to a process that is shutting down: nats.go has re-sent
+	// the draining subscriptions, and nothing will drain them now, so close the connection rather
+	// than hand deliveries to a process that is exiting.
 	if c.stopped() {
+		nc.Close()
 		return
 	}
 	c.mu.Lock()
@@ -582,6 +584,11 @@ func (c *Client) SubOK() bool {
 // connection, or re-subscribing.
 var errStopped = errors.New("bus: client is stopped")
 
+// stop stops the client: recovery ends, and nothing dials, installs a connection or re-subscribes.
+func (c *Client) stop() {
+	c.closeOnce.Do(func() { close(c.stopCh) })
+}
+
 func (c *Client) stopped() bool {
 	select {
 	case <-c.stopCh:
@@ -593,7 +600,7 @@ func (c *Client) stopped() bool {
 
 // Close stops any recovery goroutine and closes the underlying NATS connection.
 func (c *Client) Close() {
-	c.closeOnce.Do(func() { close(c.stopCh) })
+	c.stop()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.Conn != nil {
@@ -602,15 +609,17 @@ func (c *Client) Close() {
 }
 
 // Drain stops the client and drains it, letting the deliveries already in their handlers finish,
-// and closes the connection itself once timeout passes, so a blocked drain cannot keep a process
-// alive. It stops the client first, so neither the drain's close nor a recovery already under way
-// reconnects or re-subscribes a process that is shutting down. It then drains the delivery
-// subscriptions while the connection still accepts new ones: a handler finishing its delivery may
-// subscribe (RequestCoreTo's receipt inbox), which a draining connection refuses. Only then does
-// it drain the connection, whose Drain only starts the drain, and wait for it to close itself.
+// and the connection is closed when Drain returns, at the latest once timeout passes, so a blocked
+// drain cannot keep a process alive. It stops the client first, so neither the drain's close nor a
+// recovery already under way reconnects or re-subscribes a process that is shutting down. It then
+// drains the delivery subscriptions while the connection still accepts new ones: a handler
+// finishing its delivery may subscribe (RequestCoreTo's receipt inbox), which a draining
+// connection refuses. Only then does it drain the connection, whose Drain only starts the drain,
+// and wait for it to close itself. A connection that is reconnecting is closed at once: nothing it
+// sends reaches the server, so no subscription would drain and a reconnect would re-send them.
 func (c *Client) Drain(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
-	c.closeOnce.Do(func() { close(c.stopCh) })
+	c.stop()
 	c.subscriptionsMu.Lock()
 	var delivering []*nats.Subscription
 	for _, subscription := range c.subscriptions {
@@ -622,10 +631,13 @@ func (c *Client) Drain(timeout time.Duration) error {
 	c.mu.Lock()
 	conn := c.Conn
 	c.mu.Unlock()
+	defer conn.Close()
+	if conn.IsReconnecting() {
+		return fmt.Errorf("drain NATS: %w", nats.ErrConnectionReconnecting)
+	}
 	waitUntil := func(done func() bool) error {
 		for !done() {
 			if !time.Now().Before(deadline) {
-				conn.Close()
 				return fmt.Errorf("drain NATS: %w", context.DeadlineExceeded)
 			}
 			time.Sleep(10 * time.Millisecond)
@@ -634,7 +646,6 @@ func (c *Client) Drain(timeout time.Duration) error {
 	}
 	for _, subscription := range delivering {
 		if err := subscription.Drain(); err != nil {
-			conn.Close()
 			return err
 		}
 	}
@@ -644,7 +655,6 @@ func (c *Client) Drain(timeout time.Duration) error {
 		}
 	}
 	if err := conn.Drain(); err != nil {
-		conn.Close()
 		return err
 	}
 	return waitUntil(conn.IsClosed)
@@ -684,6 +694,10 @@ func (c *Client) recover() {
 				return
 			}
 			if err == nil {
+				if c.stopped() {
+					slog.Info("envoy nats recovery cancelled")
+					return
+				}
 				c.mu.Lock()
 				conn := c.Conn
 				c.mu.Unlock()

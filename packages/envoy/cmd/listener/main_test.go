@@ -1986,6 +1986,19 @@ func TestBoundDurableConsumerIsNotStolen(t *testing.T) {
 		t.Fatalf("first subscribe failed: %v", err)
 	}
 	t.Cleanup(func() { _ = firstSub.Unsubscribe(); _ = first.JS().DeleteConsumer(bus.Stream, consumer) })
+	// Subscribe returns before the server has processed the SUB, and the consumer is push-bound
+	// only once it has; the property under test is about a consumer that is already bound.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		info, err := first.JS().ConsumerInfo(bus.Stream, consumer)
+		if err == nil && info.PushBound {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the first listener's consumer never became push-bound: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 
 	second, err := bus.Connect([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
 	if err != nil {
