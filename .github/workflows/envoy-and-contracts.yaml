@@ -186,6 +186,19 @@ jobs:
         run: |
           mise env --json
           jj --version
+      # extensions/legion-phase-stall-omp.test.ts runs the pinned Oh My Pi against stand-ins and
+      # refuses on GitHub Actions without one. The pin is read from omp-pin.ts, the repository's one
+      # copy of it, and installed through the mise above.
+      - name: Install the pinned Oh My Pi
+        env:
+          MISE_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          pin=$(sed -n 's/^export const OMP_FORK_PIN = "\(.*\)";$/\1/p' packages/daemon/src/daemon/omp-pin.ts)
+          test -n "$pin"
+          "$HOME/.local/bin/mise" install "$pin"
+          omp="$("$HOME/.local/bin/mise" where "$pin")/bin/omp"
+          "$omp" --version
+          echo "LEGION_TEST_OMP=$omp" >> "$GITHUB_ENV"
       - run: bun install --frozen-lockfile
       - name: Build contracts for pi-envoy
         run: bun run build
