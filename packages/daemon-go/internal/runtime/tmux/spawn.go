@@ -355,7 +355,7 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 		if _, err := os.Stat(spec.ResumeSessionFile); err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				verb := "respawning"
-				if spec.Issue == spec.Tree && spec.Role == claim.RoleArchitect {
+				if claim.IsTreeArchitect(spec.Role, spec.Issue, spec.Tree) {
 					verb = "resurrecting"
 				}
 				return runtime.Locator{}, fmt.Errorf("Refusing to start %s fresh while %s: recorded OMP session file is missing: %s",
