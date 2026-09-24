@@ -167,8 +167,6 @@ type liveClaim struct {
 	loc, last *runtime.Locator
 }
 
-func (c *liveClaim) located() *runtime.Locator { return c.loc }
-
 // minted is one boot token the harness minted, for one generation of one claim.
 type minted struct {
 	claim claim.Token
@@ -1904,13 +1902,7 @@ func (r *liveRig) checkReAdopt() error {
 	if err := r.startRuntime(); err != nil {
 		return err
 	}
-	var known []runtime.Known
-	for _, c := range r.claims {
-		if c.state == stateNone || c.state == stateReleased {
-			continue
-		}
-		known = append(known, runtime.Known{Claim: c.token, Locator: c.located()})
-	}
+	known := r.known(nil)
 	if err := r.rt.ReconcileOrphans(r.ctx, known, time.Hour); err != nil {
 		return err
 	}
@@ -1976,7 +1968,7 @@ func (r *liveRig) known(skip *liveClaim) []runtime.Known {
 		if c == skip || c.state == stateNone || c.state == stateReleased {
 			continue
 		}
-		out = append(out, runtime.Known{Claim: c.token, Locator: c.located()})
+		out = append(out, runtime.Known{Claim: c.token, Locator: c.loc})
 	}
 	return out
 }
@@ -2041,7 +2033,7 @@ func (r *liveRig) checkReleaseTree() error {
 		if c.state == stateNone || c.state == stateReleased {
 			continue
 		}
-		loc := c.located()
+		loc := c.loc
 		if err := r.rt.Release(r.ctx, c.token, loc, liveGrace); err != nil {
 			return fmt.Errorf("Release(%s): %w", c.name, err)
 		}
