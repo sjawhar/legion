@@ -552,7 +552,7 @@ func (s *server) requireOpenIssue(ctx context.Context, tx pgx.Tx, key string) (s
 	var status string
 	var open bool
 	if err := tx.QueryRow(ctx, `
-		select status, closed_at is null from issues where key = $1 for update
+		select status, closed_at is null from issues where key = $1 for no key update
 	`, key).Scan(&status, &open); err != nil {
 		return "", err
 	}

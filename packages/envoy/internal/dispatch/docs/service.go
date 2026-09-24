@@ -79,6 +79,18 @@ type Service struct {
 	// reads it. Nil outside tests; tests use it to evict the room in that window.
 	afterSettleWarm func(room string)
 	settleWG        sync.WaitGroup
+	// evictWG counts the forced evictions failRoomLocked spawns. They flush the room through
+	// the store, so shutdown joins them before it closes.
+	evictWG sync.WaitGroup
+	// gateMu makes "is the service stopping?" and the Add that follows it one step, against
+	// Shutdown's store. sync.WaitGroup panics if an Add from zero lands while a Wait is
+	// registered, and without this the check and the Add straddle the store.
+	//
+	// Lock order: a room's mu is taken BEFORE this - failRoomLocked and
+	// scheduleSettleAfterLocked both run under it - so nothing may take a room's mu while
+	// holding this one. Shutdown therefore holds it around the stopping store alone, never
+	// across the rooms.Range that locks each room.
+	gateMu          sync.Mutex
 	nextSettleTimer atomic.Uint64
 	timerMu         sync.Mutex
 	// timers reserve their ID before creating an immediate timer, whose callback
@@ -130,7 +142,10 @@ type artifactOwner struct {
 	Name     string
 }
 
-// lockArtifactOwner loads an artifact's owner, then locks that owner row.
+// lockArtifactOwner loads an artifact's owner, then locks that owner row: the artifact itself
+// for a project document, its issue otherwise. The lock is `for no key update`, so it
+// serialises this writer against every other writer that takes it without blocking the
+// `for key share` a child insert takes - see lockDocumentRoom for why that is the rule.
 func lockArtifactOwner(ctx context.Context, tx pgx.Tx, artifactID string) (artifactOwner, bool, error) {
 	var owner artifactOwner
 	if err := tx.QueryRow(ctx, `
@@ -142,7 +157,7 @@ func lockArtifactOwner(ctx context.Context, tx pgx.Tx, artifactID string) (artif
 	if owner.IssueKey == nil {
 		var exists bool
 		if err := tx.QueryRow(ctx, `
-			select true from artifacts where id = $1 and issue_key is null for update
+			select true from artifacts where id = $1 and issue_key is null for no key update
 		`, artifactID).Scan(&exists); err != nil {
 			return artifactOwner{}, false, fmt.Errorf("lock document artifact: %w", err)
 		}
@@ -150,7 +165,7 @@ func lockArtifactOwner(ctx context.Context, tx pgx.Tx, artifactID string) (artif
 	}
 	var open bool
 	if err := tx.QueryRow(ctx, `
-		select closed_at is null from issues where key = $1 for update
+		select closed_at is null from issues where key = $1 for no key update
 	`, *owner.IssueKey).Scan(&open); err != nil {
 		return artifactOwner{}, false, fmt.Errorf("lock document issue: %w", err)
 	}
@@ -406,11 +421,14 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	select {
 	case <-settled:
 	case <-ctx.Done():
-		s.stopping.Store(true)
+		s.stopAccepting()
 		return ctx.Err()
 	}
-	s.stopping.Store(true)
+	s.stopAccepting()
 	s.waitSettles(ctx)
+	// A room that failed evicts itself on its own goroutine, and that eviction flushes the
+	// room through the store, so it has to finish before the store can go.
+	s.waitEvictions(ctx)
 	if err := drainCtx.Err(); err != nil {
 		return err
 	}
@@ -435,10 +453,14 @@ func (s *Service) scheduleSettleAfterLocked(room string, state *roomState, delay
 	if s.stopping.Load() || s.shuttingDown(room) || state.closed || state.failed != nil || state.suppressSettle > 0 {
 		return
 	}
+	// The advisory read above skips the work; this one registers the timer against Shutdown's
+	// store, so the Add cannot land after waitSettles has begun.
+	if !s.addUnlessStopping(&s.settleWG) {
+		return
+	}
 	state.gen++
 	generation := state.gen
 	s.stopSettleTimer(state.settle)
-	s.settleWG.Add(1)
 	timerID := s.nextSettleTimer.Add(1)
 	s.registerSettleTimer(timerID)
 	timer := time.AfterFunc(delay, func() {
@@ -999,11 +1021,11 @@ func currentUpdateCursor(ctx context.Context, tx pgx.Tx, artifactID string) (int
 
 func (s *Service) lockSettlementCursor(ctx context.Context, tx pgx.Tx, room string) error {
 	if !s.shuttingDown(room) {
-		if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext($1))`, room); err != nil {
-			return err
-		}
-		return nil
+		return lockDocumentRoom(ctx, tx, room)
 	}
+	// Shutdown will not wait behind a live writer, so it try-locks the room instead of blocking
+	// on it, and gives up after the deadline rather than queueing. That is what makes this
+	// branch safe: it never joins a lock queue, so it can never be a party to a cycle.
 	deadline := time.NewTimer(100 * time.Millisecond)
 	defer deadline.Stop()
 	for {
@@ -1168,10 +1190,42 @@ func (s *Service) backfillBlockIDs(ctx context.Context, artifactID string) Block
 	return report
 }
 
+// addUnlessStopping registers one worker with group unless Shutdown has already begun, and
+// reports whether it did. The check and the Add are one step against Shutdown's stopping store
+// (gateMu), so an Add can never follow the Wait that store precedes.
+func (s *Service) addUnlessStopping(group *sync.WaitGroup) bool {
+	s.gateMu.Lock()
+	defer s.gateMu.Unlock()
+	if s.stopping.Load() {
+		return false
+	}
+	group.Add(1)
+	return true
+}
+
+// stopAccepting closes the gate: after it returns, no addUnlessStopping registers a worker, so a
+// Wait that follows cannot race an Add. It holds gateMu around the store alone - never across
+// work that locks a room, which would invert the room-then-gate order.
+func (s *Service) stopAccepting() {
+	s.gateMu.Lock()
+	defer s.gateMu.Unlock()
+	s.stopping.Store(true)
+}
+
 func (s *Service) waitSettles(ctx context.Context) {
+	waitGroup(ctx, &s.settleWG)
+}
+
+func (s *Service) waitEvictions(ctx context.Context) {
+	waitGroup(ctx, &s.evictWG)
+}
+
+// waitGroup blocks until wg drains or ctx ends, so a bounded shutdown never waits forever on
+// work it cannot cancel.
+func waitGroup(ctx context.Context, wg *sync.WaitGroup) {
 	done := make(chan struct{})
 	go func() {
-		s.settleWG.Wait()
+		wg.Wait()
 		close(done)
 	}()
 	select {
@@ -1264,7 +1318,15 @@ func (s *Service) failRoomLocked(room string, state *roomState, cause error) {
 	state.gen++
 	s.stopSettleTimer(state.settle)
 	s.purgeSuppressedPersistence(room)
+	// Shutdown joins the evictions it did not cause. The consequence differs from settleWG's
+	// gate, which skips the work as well as the waiting: this eviction runs either way, because
+	// awaitRoomRecovery blocks every reader of a failed room on the close(done) below, and a
+	// gated eviction that never ran would strand them. Only the joining is skipped.
+	tracked := s.addUnlessStopping(&s.evictWG)
 	go func() {
+		if tracked {
+			defer s.evictWG.Done()
+		}
 		_ = s.evictRoom(room, state)
 		close(done)
 	}()

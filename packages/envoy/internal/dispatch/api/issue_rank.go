@@ -109,7 +109,7 @@ func rankBoundary(ctx context.Context, q queryer, project, issueKey, raw string)
 		neighborProject string
 		neighborRank    string
 	)
-	if err := q.QueryRow(ctx, `select project_key, rank from issues where key = $1 for update`, key).Scan(&neighborProject, &neighborRank); err != nil {
+	if err := q.QueryRow(ctx, `select project_key, rank from issues where key = $1 for no key update`, key).Scan(&neighborProject, &neighborRank); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", errorf(http.StatusBadRequest, "RANK_INPUT", "rank neighbor does not exist")
 		}
