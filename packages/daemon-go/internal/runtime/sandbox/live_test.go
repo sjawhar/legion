@@ -37,6 +37,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -95,6 +96,9 @@ const (
 	// liveSettle is how long a check keeps listening for observations it must not see.
 	liveSettle = 2*liveProbeInterval + 5*time.Second
 )
+
+// liveTreeVolume is the tree volume's size, the daemon configuration's default.
+var liveTreeVolume = resource.MustParse("20Gi")
 
 // liveScheduling is the run's scheduling, as the 4b daemon's configuration sets it
 // (runtime.kubernetes.scheduling.node_selector). Every pod of a tree requires the node of the tree's
@@ -581,11 +585,12 @@ func (r *liveRig) startRuntime() error {
 		return fmt.Errorf("the worker stream cannot bind %s: %v; the port's holder: %s", address, err, strings.TrimSpace(string(holder)))
 	}
 	rt, err := New(ctx, r.rc, Options{
-		Namespace: r.env.namespace, Project: r.env.project, Image: r.env.image, StorageClass: "gp2", Scheduling: liveScheduling,
-		StreamURL: address,
-		Tools:     Tools{GH: "/usr/local/bin/gh", Git: "/usr/bin/git", JJ: "/usr/local/bin/jj", Legion: "/opt/legion/go/bin/legion"},
-		Gateway:   liveGateway,
-		Agent:     stubAgent, BootTimeout: liveBootTimeout, BootIntervals: liveBootIntervals,
+		Namespace: r.env.namespace, Project: r.env.project, Image: r.env.image, StorageClass: "gp2", TreeVolume: liveTreeVolume,
+		Scheduling: liveScheduling,
+		StreamURL:  address,
+		Tools:      Tools{GH: "/usr/local/bin/gh", Git: "/usr/bin/git", JJ: "/usr/local/bin/jj", Legion: "/opt/legion/go/bin/legion"},
+		Gateway:    liveGateway,
+		Agent:      stubAgent, BootTimeout: liveBootTimeout, BootIntervals: liveBootIntervals,
 		TerminationGrace: liveGrace, ProbeInterval: liveProbeInterval, AdoptTimeout: liveAdoptTimeout,
 		Tokens: r.tokens, Conns: ln, Log: r.log,
 	})
