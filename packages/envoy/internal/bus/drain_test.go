@@ -184,3 +184,66 @@ func TestAPublishAfterDrainDoesNotReconnect(t *testing.T) {
 		t.Fatal("a publish after Drain reconnected the client")
 	}
 }
+
+// A delivery subscription whose handler outlasts the deadline does not hold the drain: Drain waits
+// for the subscriptions it drains only until the deadline, then closes the connection.
+func TestDrainClosesAtItsDeadlineWhileADeliverySubscriptionDrains(t *testing.T) {
+	_, uri := startNATS(t)
+	client, err := bus.Connect([]string{uri})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(client.Close)
+	started := make(chan struct{}, 1)
+	if _, err := client.SubscribeCore("notifications.role.drain-deadline", func(*natsgo.Msg) {
+		started <- struct{}{}
+		time.Sleep(10 * time.Second)
+	}, "drain-deadline"); err != nil {
+		t.Fatalf("role subscribe: %v", err)
+	}
+	if err := client.Conn.Publish("notifications.role.drain-deadline", nil); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the delivery never reached its handler")
+	}
+	began := time.Now()
+	err = client.Drain(300 * time.Millisecond)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("drain error = %v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(began); elapsed > 2*time.Second {
+		t.Fatalf("Drain returned after %s, want about its 300ms deadline", elapsed)
+	}
+	if !client.Conn.IsClosed() {
+		t.Fatal("Drain returned at its deadline with the connection still open")
+	}
+}
+
+// A drain that starts while the connection is reconnecting closes it at once: nothing sent while
+// reconnecting reaches the server, so a drained subscription would keep its server-side SUB (a
+// reconnect re-sends it) and the drain would only run out its deadline.
+func TestDrainWhileReconnectingClosesAtOnce(t *testing.T) {
+	ctr, uri := startRestartableNATS(t)
+	client, err := bus.Connect([]string{uri})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(client.Close)
+	if _, err := client.SubscribeCore("notifications.role.drain-reconnecting", func(*natsgo.Msg) {}, "drain-reconnecting"); err != nil {
+		t.Fatalf("role subscribe: %v", err)
+	}
+	stopNATS(t, ctr)
+	waitFor(t, 15*time.Second, "the client to start reconnecting", func() bool { return client.Conn.IsReconnecting() })
+
+	began := time.Now()
+	_ = client.Drain(5 * time.Second)
+	if elapsed := time.Since(began); elapsed > time.Second {
+		t.Fatalf("Drain took %s while reconnecting, want it to close at once", elapsed)
+	}
+	if !client.Conn.IsClosed() {
+		t.Fatal("Drain returned with the reconnecting connection still open")
+	}
+}
