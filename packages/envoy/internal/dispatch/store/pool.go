@@ -196,12 +196,44 @@ func (p *Pool) guard(ctx context.Context) error {
 	return ErrNestedAcquire
 }
 
-// Query runs a query on a pooled connection.
+// Query runs a query on a pooled connection. The rows hold that connection until they close,
+// so the caller counts as holding one for as long as they are open: a cursor is the one way to
+// hold a connection without a transaction, and work done inside the loop - a publish, a
+// follower lookup, a write per row - is exactly the shape that wedges the pool.
 func (p *Pool) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
 	if err := p.guard(ctx); err != nil {
 		return nil, err
 	}
-	return p.pool.Query(ctx, sql, args...)
+	rows, err := p.pool.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, err
+	}
+	state, tracked := ctx.Value(holdingKey{}).(*holding)
+	if !tracked {
+		return rows, nil
+	}
+	state.connection.Store(true)
+	return &trackedRows{Rows: rows, release: func() { state.connection.Store(false) }}, nil
+}
+
+// trackedRows clears the caller's mark when its cursor closes, by Close or by a Next that runs
+// out of rows, which is when pgx hands the connection back.
+type trackedRows struct {
+	pgx.Rows
+	release func()
+}
+
+func (r *trackedRows) Close() {
+	defer r.release()
+	r.Rows.Close()
+}
+
+func (r *trackedRows) Next() bool {
+	if r.Rows.Next() {
+		return true
+	}
+	r.release()
+	return false
 }
 
 // QueryRow runs a single-row query on a pooled connection.

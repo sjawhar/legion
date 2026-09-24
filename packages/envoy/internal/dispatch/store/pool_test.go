@@ -77,6 +77,50 @@ func TestPoolRefusesASecondConnectionInsideATransaction(t *testing.T) {
 	}
 }
 
+// An open cursor is a held connection too: pgx hands it back when the rows close, so work
+// inside the loop competes with the caller's own cursor for the pool.
+func TestPoolRefusesASecondConnectionInsideAnOpenCursor(t *testing.T) {
+	database := openTestStore(t)
+	ctx := WithTransactionTracking(context.Background())
+
+	rows, err := database.Pool.Query(ctx, "select generate_series(1, 3)")
+	if err != nil {
+		t.Fatalf("open the cursor: %v", err)
+	}
+	// A cursor a failed assertion left open holds its connection, and t.Cleanup's pool close
+	// waits for it: without this the test would hang the package instead of naming itself.
+	defer rows.Close()
+	if !rows.Next() {
+		t.Fatalf("read the first row: %v", rows.Err())
+	}
+	var one int
+	if err := database.Pool.QueryRow(ctx, "select 1").Scan(&one); !errors.Is(err, ErrNestedAcquire) {
+		t.Fatalf("pool read inside an open cursor: %v, want ErrNestedAcquire", err)
+	}
+	if _, err := database.Pool.Exec(ctx, "select 1"); !errors.Is(err, ErrNestedAcquire) {
+		t.Fatalf("pool statement inside an open cursor: %v, want ErrNestedAcquire", err)
+	}
+	if _, err := database.Pool.Begin(ctx); !errors.Is(err, ErrNestedAcquire) {
+		t.Fatalf("transaction inside an open cursor: %v, want ErrNestedAcquire", err)
+	}
+
+	rows.Close()
+	if err := database.Pool.QueryRow(ctx, "select 1").Scan(&one); err != nil {
+		t.Fatalf("pool read after the cursor closed: %v", err)
+	}
+
+	drained, err := database.Pool.Query(ctx, "select generate_series(1, 2)")
+	if err != nil {
+		t.Fatalf("open the second cursor: %v", err)
+	}
+	defer drained.Close()
+	for drained.Next() {
+	}
+	if err := database.Pool.QueryRow(ctx, "select 1").Scan(&one); err != nil {
+		t.Fatalf("pool read after the cursor ran out: %v", err)
+	}
+}
+
 // A durable document append holds its connection directly, outside any transaction of this
 // pool's, and takes the room's advisory lock on it. A second connection under that is the same
 // deadlock, so the same refusal covers it.

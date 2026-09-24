@@ -151,15 +151,16 @@ append holding the owner row; on the live path the loser was `failRoom`, which e
 and dropped the update. With the level fixed but the order broken, a project-document upload that
 took the room lock before its event's owner lock deadlocked against a settlement holding that row.
 
-**One transaction, one connection.** No transaction on the shared pool (`store.Pool`) ever
-acquires a second connection from it while it is open. A transaction holds its connection until
-it commits, and a caller that asks for another one while holding a row or advisory lock waits
-for a connection only the callers queued behind that lock can release. At production's pool -
-one Fargate task at `cpu="512"`, pgx's default `max(4, NumCPU)`, so four - two anchored writes
-and two settlements of that issue's other documents are enough, and only
-`pg_terminate_backend` recovers it. Rationing connections does not fix it: the queue behind one
-writer's issue lock is unbounded (a settlement per document, every issue-owned event append,
-the architecture importer).
+**One caller, one connection.** Nothing holding a connection of the shared pool (`store.Pool`)
+- a transaction, or an open cursor, which holds its connection until it closes - acquires a
+second one from it, and nothing a connection-holder waits for needs one either. A transaction
+holds its connection until it commits, and a caller that asks for another one while holding a
+row or advisory lock waits for a connection only the callers queued behind that lock can
+release. At production's pool - one Fargate task at `cpu="512"`, pgx's default `max(4, NumCPU)`,
+so four - two anchored writes and two settlements of that issue's other documents are enough,
+and only `pg_terminate_backend` recovers it. Rationing connections does not fix it: the queue
+behind one writer's issue lock is unbounded (a settlement per document, every issue-owned event
+append, the architecture importer).
 
 The rule enforces itself. `store.Pool` keeps the pgx pool private and every way it hands out a
 connection - `Query`, `QueryRow`, `Exec`, `Ping`, `Acquire`, `AcquireFunc`, `AcquireAllIdle`,
@@ -173,26 +174,35 @@ and settlement, the architecture importer's `Sync`, the outbox publisher's `Run`
 exception: `docs.SetIssueClosed` takes its caller's context so the pool sees it even though it
 runs after that caller has committed. A durable append holds its connection directly rather
 than through a transaction, so `withRoomLock` marks its context with `store.HoldsConnection`
-for as long as it holds that connection and the room's advisory lock. A refusal logs its stack
-once per call site, so a caller that trips it in a loop cannot flood the log; the error itself
-is returned every time. `store/pool_test.go` and `api/anchored_write_concurrency_test.go` hold
-the halves: the refusal on every guarded method, concurrent anchored writes, and two
-settlements queued behind one held write on a four-connection pool.
+for as long as it holds that connection and the room's advisory lock, and `Query` marks the
+caller for as long as its rows are open, so a cursor counts as the held connection it is. A
+refusal logs its stack once per call site, so a caller that trips it in a loop cannot flood the
+log; the error itself is returned every time. `store/pool_test.go` and
+`api/anchored_write_concurrency_test.go` hold the halves: the refusal on every guarded method,
+concurrent anchored writes, and two settlements queued behind one held write on a
+four-connection pool.
 
 Work that genuinely needs its own connection while a transaction is open does not take it from
 the shared one. A cold document room loads on the rooms pool (`store.Pool.Rooms`, four
 connections, opened on demand and closed with the pool that owns it): that load is deliberately
 outside the writer's transaction, because the room outlives the request and its updates must
-not roll back with it, and loading takes no lock, so it always finishes. It belongs to the
-store rather than to each `PgVersioned`, so a caller that constructs one to read a document
-borrows those connections instead of opening more. Everything else reads through the
-transaction it is already inside: the document's issue state (`issueOpen`), table anchor checks
-(`rejectLiveTableAnchors`, `rejectUnindexedTableMarks`), recorded mark refs, and the suggestion
-kind and browser-mark verification the comment routes ask for while their transaction is open.
-Settlement marks its injections owner-verified (`withOwnerVerified`) because it has already read
-and locked the owner row in its own transaction, so `allowInject` does not read it again. A
-handler that must read outside its transaction commits or rolls back first - `issue_create.go`
-rolls back at the duplicate-external branch before it opens the advice transaction.
+not roll back with it. Everything the load needs comes from that pool, `onLoadDocument`'s issue
+read included - a writer holding a connection and the issue's row lock waits for the load, so a
+load that waited for the shared pool would close the same cycle without a transaction of its
+own. The pool belongs to the store rather than to each `PgVersioned`, so a caller that
+constructs one to read a document borrows those connections instead of opening more, and it is
+deliberately unguarded: a load taken under an open transaction must be served, not refused.
+
+Everywhere else a read runs through the transaction it is already inside: the issue state an
+anchored write checks before it stamps its mark (`issueOpen` through `queryFrom`), table anchor
+checks (`rejectLiveTableAnchors`, `rejectUnindexedTableMarks`), recorded mark refs, and the
+suggestion kind and browser-mark verification the comment routes ask for while their
+transaction is open. Settlement marks its injections owner-verified (`withOwnerVerified`)
+because it has already read and locked the owner row in its own transaction, so `allowInject`
+does not read it again. A handler that must read outside its transaction commits or rolls back
+first - `issue_create.go` rolls back at the duplicate-external branch before it opens the advice
+transaction - and a scan that publishes drains its rows first (`scanPendingEvents`,
+`listDocumentRooms`), because an open cursor holds its connection until it closes.
 
 Table row and column deletion records a mark snapshot during prevalidation, then locks the
 corresponding ask/comment rows with `FOR SHARE` in the edit transaction before its token check and

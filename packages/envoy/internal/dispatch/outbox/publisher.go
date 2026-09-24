@@ -100,7 +100,59 @@ func scan(ctx context.Context, deps Deps) {
 	}
 }
 
+// pendingEvent is one row of a scan, read out before anything is published: an open cursor
+// holds its pooled connection until it closes, so publishing - a network round trip, a
+// follower lookup, and a write per event - inside the loop would hold one of the pool's four
+// connections across all of it. The rows are drained first and the work done after.
+type pendingEvent struct {
+	event        model.Event
+	attempts     int
+	destinations []string
+	slug         string
+	route        *string
+	decodeErr    error
+}
+
 func scanBatch(ctx context.Context, deps Deps) (int, bool, error) {
+	pending, err := scanPendingEvents(ctx, deps)
+	if err != nil {
+		return 0, false, err
+	}
+
+	blocked := false
+	for _, item := range pending {
+		if item.decodeErr != nil {
+			slog.Error("dispatch outbox: decode event", "event_id", item.event.ID, "error", item.decodeErr)
+			if err := scheduleRetry(ctx, deps, item.event.ID, item.attempts); err != nil {
+				slog.Error("dispatch outbox: schedule retry", "event_id", item.event.ID, "error", err)
+				blocked = true
+			}
+			continue
+		}
+		if err := publish(
+			ctx, deps, item.event, item.slug, item.route, publishedDestinationSet(item.destinations),
+		); err != nil {
+			slog.Error("dispatch outbox: publish event", "event_id", item.event.ID, "error", err)
+			if err := scheduleRetry(ctx, deps, item.event.ID, item.attempts); err != nil {
+				slog.Error("dispatch outbox: schedule retry", "event_id", item.event.ID, "error", err)
+				blocked = true
+			}
+			continue
+		}
+		if _, err := deps.Store.Pool.Exec(ctx, `
+			update events set published_at = now(), next_attempt_at = null where id = $1 and published_at is null
+		`, item.event.ID); err != nil {
+			slog.Error("dispatch outbox: mark event published", "event_id", item.event.ID, "error", err)
+			if err := scheduleRetry(ctx, deps, item.event.ID, item.attempts); err != nil {
+				slog.Error("dispatch outbox: schedule retry", "event_id", item.event.ID, "error", err)
+			}
+			blocked = true
+		}
+	}
+	return len(pending), blocked, nil
+}
+
+func scanPendingEvents(ctx context.Context, deps Deps) ([]pendingEvent, error) {
 	rows, err := deps.Store.Pool.Query(ctx, `
 		select e.id, e.issue_key, e.artifact_id::text, coalesce(e.project_key, i.project_key, ar.project_key, ''), e.seq,
 		       e.type, e.actor, e.notify, e.created_at, e.payload, e.attempt_count, e.published_destinations,
@@ -116,78 +168,43 @@ func scanBatch(ctx context.Context, deps Deps) (int, bool, error) {
 		limit $1
 	`, batchSize)
 	if err != nil {
-		return 0, false, fmt.Errorf("select unpublished events: %w", err)
+		return nil, fmt.Errorf("select unpublished events: %w", err)
 	}
 	defer rows.Close()
 
-	count := 0
-	blocked := false
+	var pending []pendingEvent
 	for rows.Next() {
-		count++
-		var event model.Event
+		var item pendingEvent
 		var actor, payload []byte
-		var slug string
-		var route *string
-		var attempts int
-		var destinations []string
 		if err := rows.Scan(
-			&event.ID,
-			&event.IssueKey,
-			&event.ArtifactID,
-			&event.Project,
-			&event.Seq,
-			&event.Type,
+			&item.event.ID,
+			&item.event.IssueKey,
+			&item.event.ArtifactID,
+			&item.event.Project,
+			&item.event.Seq,
+			&item.event.Type,
 			&actor,
-			&event.Notify,
-			&event.CreatedAt,
+			&item.event.Notify,
+			&item.event.CreatedAt,
 			&payload,
-			&attempts,
-			&destinations,
-			&slug,
-			&route,
+			&item.attempts,
+			&item.destinations,
+			&item.slug,
+			&item.route,
 		); err != nil {
-			slog.Error("dispatch outbox: read event", "error", err)
-			blocked = true
-			continue
+			return nil, fmt.Errorf("read event: %w", err)
 		}
-		if err := json.Unmarshal(actor, &event.Actor); err != nil {
-			slog.Error("dispatch outbox: decode event actor", "event_id", event.ID, "error", err)
-			if err := scheduleRetry(ctx, deps, event.ID, attempts); err != nil {
-				slog.Error("dispatch outbox: schedule retry", "event_id", event.ID, "error", err)
-				blocked = true
-			}
-			continue
+		if err := json.Unmarshal(actor, &item.event.Actor); err != nil {
+			item.decodeErr = fmt.Errorf("decode event actor: %w", err)
+		} else if err := json.Unmarshal(payload, &item.event.Payload); err != nil {
+			item.decodeErr = fmt.Errorf("decode event payload: %w", err)
 		}
-		if err := json.Unmarshal(payload, &event.Payload); err != nil {
-			slog.Error("dispatch outbox: decode event payload", "event_id", event.ID, "error", err)
-			if err := scheduleRetry(ctx, deps, event.ID, attempts); err != nil {
-				slog.Error("dispatch outbox: schedule retry", "event_id", event.ID, "error", err)
-				blocked = true
-			}
-			continue
-		}
-		if err := publish(ctx, deps, event, slug, route, publishedDestinationSet(destinations)); err != nil {
-			slog.Error("dispatch outbox: publish event", "event_id", event.ID, "error", err)
-			if err := scheduleRetry(ctx, deps, event.ID, attempts); err != nil {
-				slog.Error("dispatch outbox: schedule retry", "event_id", event.ID, "error", err)
-				blocked = true
-			}
-			continue
-		}
-		if _, err := deps.Store.Pool.Exec(ctx, `
-			update events set published_at = now(), next_attempt_at = null where id = $1 and published_at is null
-		`, event.ID); err != nil {
-			slog.Error("dispatch outbox: mark event published", "event_id", event.ID, "error", err)
-			if err := scheduleRetry(ctx, deps, event.ID, attempts); err != nil {
-				slog.Error("dispatch outbox: schedule retry", "event_id", event.ID, "error", err)
-			}
-			blocked = true
-		}
+		pending = append(pending, item)
 	}
 	if err := rows.Err(); err != nil {
-		return count, blocked, fmt.Errorf("iterate unpublished events: %w", err)
+		return nil, fmt.Errorf("iterate unpublished events: %w", err)
 	}
-	return count, blocked, nil
+	return pending, nil
 }
 
 func scheduleRetry(ctx context.Context, deps Deps, eventID int64, attempts int) error {
