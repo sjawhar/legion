@@ -719,9 +719,10 @@ func retry(m *Machine, ctx context.Context, _ Event) error {
 // runtime holds for the tree — under a sandbox, the tree volume. Any other stop of it is refused.
 //
 // The operator's own close is asked of TreeClosable here rather than by its caller, so the answer
-// and the stop it decides are one critical section. The workflow's close is not asked: it stops
-// every claim of a tree whose linger expired, and the issue record it still holds for that tree is
-// exactly what TreeClosable refuses on.
+// and the stop it decides sit together rather than a round trip apart; it does not lock the record
+// it reads. The workflow's close is not asked at all: it stops every claim of a tree whose linger
+// expired, and the issue record it still holds for that tree is exactly what TreeClosable refuses
+// on.
 func stop(m *Machine, ctx context.Context, ev Event) error {
 	request := ev.(RequestStop)
 	if m.claim.treeRoot() && !request.TreeClose {

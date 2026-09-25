@@ -135,7 +135,11 @@ func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config) error 
 // phaseHolds answers supervise's Deps.PhaseHolds from the issue record: a task is enqueued for the
 // phase its issue was in, so once the issue is in another role's phase a delivery still queued for
 // this one is stale and is dropped rather than sent. An architect's task belongs to no phase and
-// always holds. An issue the daemon no longer records holds nothing.
+// always holds.
+//
+// So does a claim on an issue the daemon does not record. The workflow never deletes an issue, so
+// there is no record only for a claim the workflow never made — the operator's own spawn, whose
+// task is not the workflow's to judge and whose issue key need not be one at all.
 func phaseHolds(pool *pgxpool.Pool, records record.Store) func(context.Context, supervise.Claim) (bool, error) {
 	return func(ctx context.Context, c supervise.Claim) (bool, error) {
 		if c.Role == claim.RoleArchitect {
@@ -150,7 +154,7 @@ func phaseHolds(pool *pgxpool.Pool, records record.Store) func(context.Context, 
 			return false, fmt.Errorf("read %s for the phase of %s: %w", c.Issue, c.Token, err)
 		}
 		if issue == nil {
-			return false, nil
+			return true, nil
 		}
 		return workflow.RoleFor(issue.Phase) == c.Role, nil
 	}

@@ -735,7 +735,7 @@ func TestTerminalReplayAppliesPersistedReadyFactOnce(t *testing.T) {
 
 // The predicate supervise asks before it sends a queued task: the issue's phase names one role,
 // and a task queued for a role the issue has moved past is not sent. An architect's task is of no
-// phase, and an issue the daemon does not record holds nothing.
+// phase, and a claim on an issue the daemon does not record is not the workflow's to judge.
 func TestPhaseHoldsAnswersFromTheIssuesCurrentPhase(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
@@ -756,7 +756,9 @@ func TestPhaseHoldsAnswersFromTheIssuesCurrentPhase(t *testing.T) {
 		{name: "the phase's own role", claim: claimOf(claim.RoleImplementer, "LEGION-208"), want: true},
 		{name: "a role the issue has moved past", claim: claimOf(claim.RoleTester, "LEGION-208"), want: false},
 		{name: "the architect, whose task is of no phase", claim: claimOf(claim.RoleArchitect, "LEGION-208"), want: true},
-		{name: "an issue with no record", claim: claimOf(claim.RoleImplementer, "LEGION-999"), want: false},
+		// The workflow never deletes an issue, so no record means the claim is not the workflow's:
+		// an operator spawn, whose task the workflow has no standing to drop.
+		{name: "a claim the workflow never made", claim: claimOf(claim.RoleImplementer, "LEGION-999"), want: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := holds(context.Background(), tc.claim)

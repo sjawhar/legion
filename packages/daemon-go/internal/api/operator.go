@@ -239,9 +239,9 @@ func stopEvent(_ http.ResponseWriter, _ *http.Request, c supervise.Claim) (super
 // Sandbox and the tree volume would stay for good. A workflow issue's tree is the workflow's to
 // close, and a worker's claim is stopped, not closed.
 //
-// Whether a workflow issue backs the tree is the supervisor's TreeClosable to answer, inside the
-// machine's own critical section; reading it here would leave a window in which an issue recorded
-// for the tree loses its root claim to this close.
+// Whether a workflow issue backs the tree is the supervisor's TreeClosable to answer, where the
+// answer and the close it decides sit together; the refusal an operator sees is the same one this
+// handler used to write.
 func (s *server) closeEvent(w http.ResponseWriter, _ *http.Request, c supervise.Claim) (supervise.Event, bool) {
 	if !claim.IsTreeArchitect(c.Role, c.Issue, c.Tree) {
 		writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf("close refused: %s is not its tree's root claim; stop it instead", c.Token)))
