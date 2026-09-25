@@ -86,8 +86,15 @@ not exist. In order:
      <listed> to <now> while it was being tracked; workspace <dir> was not created. Provision
      again: the next provisioning starts at origin's branch as it is then.`).
 
-   The two twins' refusals are the same words, apart from TypeScript's closing periods. See the
-   companion table in `jj-bookmark-facts-verified-on-0-44-0-and-0-45-1.md` for why this read and
+   The Go twin's printed ways out carry `--ignore-working-copy` (`jj bookmark set|delete|forget
+   … --ignore-working-copy -R <clone>`), so an operator running one from their shell takes no
+   snapshot of the shared clone and runs no working-copy filter a tree planted there; the
+   TypeScript twin, which no deployment runs, keeps the text without it. In Go, a local bookmark
+   conflicted with a deletion, whose origin row is tracked with no commit (GitHub deleted
+   the branch after the bookmark moved on without a push), is set aside instead of refused when no
+   commit in `<removed>..<added>` is described: the local bookmark is deleted, one line logs the
+   set-aside ids (they stay visible, the clone never abandoning unreachable commits), and the
+   workspace starts at main. See the companion table in `jj-bookmark-facts-verified-on-0-44-0-and-0-45-1.md` for why this read and
    not `bookmarks(exact:…)`, `present()`, a bare `jj bookmark list`, or any template that reads
    `normal_target`.
 2. The add revision, as `jj workspace add … --revision <commit id>`, **the id, never the name**:
@@ -95,9 +102,13 @@ not exist. In order:
    - with no local bookmark and an **untracked** origin row (a fresh clone tracks `main` alone,
      so a branch another clone pushed is only such a row), that row's commit, after
      `jj bookmark track legion/<KEY>@origin` and the read that confirms it;
-   - with neither (a brand-new issue, or a merged branch GitHub deleted), `main`.
+   - with neither (a brand-new issue, or a merged branch GitHub deleted), `main`: in Go, read with
+     the same template and added by its commit id, and refused by name when it is absent (a
+     repository whose default branch is another) or conflicted; TypeScript still adds `main` by
+     name.
 3. `git worktree prune`, then the add. On `already registered|exists` (jj still registers the
-   workspace but its directory is gone): flag-free `jj workspace forget <name> -R <clone>`, prune,
+   workspace but its directory is gone): `jj workspace forget <name> -R <clone>` (Go adds
+   `--ignore-working-copy`), prune,
    the same add again at the same revision. A brand-new workspace and a forgotten registration
    start from the same resolution — the two paths no longer differ in where they start.
 4. `jj bookmark set legion/<KEY> -r @` in the new workspace **only when nothing resolved**; one

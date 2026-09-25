@@ -128,6 +128,18 @@ leaving the workspace **registered** (`jj workspace list` shows it) with its **d
 and its working copy parented on the root commit `000000000000`. Resolve to a commit id first and
 add by id; never let `add` be the thing that discovers the name is bad.
 
+The same holds for `main`: a clone of a repository whose default branch is another has no `main`
+bookmark, and `--revision main` registers the workspace before it fails. The Go `createWorkspace`
+resolves `main` with the rows template too and adds its id.
+
+`jj workspace add` also refuses `--ignore-working-copy`, on both binaries, after the same
+registration: `Created workspace in "…"`, then `Error: This command must be able to update the
+working copy.` / `Hint: Don't use --ignore-working-copy.`, exit 1, the workspace registered and
+its directory created. So the add is the one jj command on a shared clone that snapshots the
+clone's own working copy. Every other command run against it (`-R <clone>`) takes the flag: the
+fetch, `jj workspace forget`, `jj bookmark set|delete|forget|track`, `jj config
+get|set|list|unset`, and the reads.
+
 ## `jj workspace forget` takes only workspace names
 
 `jj workspace forget [WORKSPACES]...` — no `--cleanup`, no `--force`, on 0.44.0 and 0.45.1 alike
