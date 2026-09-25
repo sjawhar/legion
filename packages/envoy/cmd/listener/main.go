@@ -77,7 +77,9 @@ const (
 
 // applyListenerConsumerPolicy stamps the canonical consumer policy onto
 // config. Shared by the create and drift-correction paths so the policy has
-// exactly one definition.
+// exactly one definition. The idle heartbeat is not part of it: the create
+// path starts from a zero config, so a durable the listener creates has none,
+// and startListenerSubscription refuses an existing durable that has one.
 func applyListenerConsumerPolicy(config *nats.ConsumerConfig, subjects []string) {
 	config.FilterSubject = ""
 	config.FilterSubjects = subjects
@@ -86,11 +88,12 @@ func applyListenerConsumerPolicy(config *nats.ConsumerConfig, subjects []string)
 	config.MaxAckPending = consumerMaxAckPending
 	config.MaxDeliver = consumerMaxDeliver
 	config.InactiveThreshold = consumerInactiveThreshold
-	config.Heartbeat = 0
 }
 
 // listenerConsumerPolicyDrifted reports whether a consumer's server-side
-// config diverges from the canonical policy.
+// config diverges from the canonical policy. It leaves the heartbeat out on
+// purpose: NATS cannot change a consumer's heartbeat in place, so a durable
+// that has one is refused before this check runs, never corrected.
 func listenerConsumerPolicyDrifted(config nats.ConsumerConfig, subjects []string) bool {
 	return config.FilterSubject != "" ||
 		!slices.Equal(config.FilterSubjects, subjects) ||
