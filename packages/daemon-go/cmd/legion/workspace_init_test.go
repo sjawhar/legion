@@ -17,19 +17,9 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
-
-// testMainEnv makes this package's test binary the real `legion`: with it set, TestMain is main()
-// — its argv, its signal handling, its exit status — so a test can run workspace-init as separate
-// processes contending for one tree volume, the way two pods' init containers do.
-const testMainEnv = "LEGION_CMD_TEST_MAIN"
-
-func TestMain(m *testing.M) {
-	if os.Getenv(testMainEnv) == "1" {
-		main()
-	}
-	os.Exit(m.Run())
-}
 
 // winitWait bounds every wait a workspace-init test makes on another process, so a broken lock
 // fails the test instead of hanging it.
@@ -38,12 +28,17 @@ const winitWait = 30 * time.Second
 const winitRepo = "acme/widgets"
 
 // fakeJJ is the jj first on the tree volume's PATH. It records every invocation as one line,
-// "<WINIT_TAG> <argv>", and runs the real jj — except that a clone of github.com/acme/widgets
-// clones the local bare remote, and with WINIT_HOLD set it first writes the provisioning token file
-// the clone was handed to the directory's `held` fifo and waits on its `release` fifo. A fresh
-// provisioning's first command is that clone, so a process held there is holding the repository
-// lock, with its one-shot credential in place.
+// "<WINIT_TAG> <argv>" without the runner's leading --config pin, and runs the real jj with that
+// pin — except that a clone of github.com/acme/widgets clones the local bare remote, and with
+// WINIT_HOLD set it first writes the provisioning token file the clone was handed to the
+// directory's `held` fifo and waits on its `release` fifo. A fresh provisioning's first command is
+// that clone, so a process held there is holding the repository lock, with its one-shot credential
+// in place. The local bare remote stands in for github.com, so its file transport joins the https
+// the runner allows.
 const fakeJJ = `#!/bin/sh
+pin=
+case "$1" in --config=*) pin=$1; shift ;; esac
+[ -z "${GIT_ALLOW_PROTOCOL+set}" ] || export GIT_ALLOW_PROTOCOL="$GIT_ALLOW_PROTOCOL:file"
 printf '%s %s\n' "$WINIT_TAG" "$*" >> "$WINIT_JJ_LOG"
 if [ "$1 $2 $3" = "git clone https://github.com/acme/widgets" ]; then
 	if [ -n "$WINIT_HOLD" ]; then
@@ -51,14 +46,15 @@ if [ "$1 $2 $3" = "git clone https://github.com/acme/widgets" ]; then
 		read _ < "$WINIT_HOLD/release"
 	fi
 	shift 3
-	exec "$WINIT_REAL_JJ" git clone "$WINIT_REMOTE" "$@"
+	exec "$WINIT_REAL_JJ" ${pin:+"$pin"} git clone "$WINIT_REMOTE" "$@"
 fi
-exec "$WINIT_REAL_JJ" "$@"
+exec "$WINIT_REAL_JJ" ${pin:+"$pin"} "$@"
 `
 
 // treeVolume is one tree volume and what workspace-init runs against it: the provisioning token
-// file, a PATH whose jj clones a local bare remote in place of github.com/acme/widgets, and a
-// TMPDIR standing in for the init container's own filesystem.
+// file, a PATH whose jj clones a local bare remote in place of github.com/acme/widgets, a TMPDIR
+// standing in for the init container's own filesystem, and, as in a pod, a jj config home that
+// starts empty and no user configuration.
 type treeVolume struct {
 	root, token, jjLog, realJJ, tmp string
 	env                             map[string]string
@@ -101,6 +97,8 @@ func newTreeVolume(t *testing.T) *treeVolume {
 		"WINIT_HOLD":                  "",
 		"JJ_USER":                     "Legion test",
 		"JJ_EMAIL":                    "legion-test@example.invalid",
+		"XDG_CONFIG_HOME":             filepath.Join(dir, "config"),
+		"JJ_CONFIG":                   filepath.Join(dir, "no-user-config.toml"),
 	}
 	return v
 }
@@ -248,6 +246,14 @@ func TestWorkspaceInitRefusesBeforeTouchingTheVolume(t *testing.T) {
 			says: func(*treeVolume) string { return `--repo must be <owner>/<name> (got "acme")` },
 		},
 		{
+			name: "a --repo with a .. segment",
+			args: func(v *treeVolume) []string {
+				return []string{"--issue", "LEGION-42", "--repo", "../x", "--root", v.root, "--credential-helper", "x"}
+			},
+			code: 1,
+			says: func(*treeVolume) string { return `workspace repository "../x" has a ".." segment` },
+		},
+		{
 			name: "no --credential-helper",
 			args: func(v *treeVolume) []string { return v.args("LEGION-42")[:6] },
 			code: 1,
@@ -363,9 +369,10 @@ func TestWorkspaceInitRefusesBeforeTouchingTheVolume(t *testing.T) {
 }
 
 // A fresh tree volume: the shared clone and the issue's jj workspace on its bookmark, the clone's
-// credential helper the one named, the gh shim first on a pod's PATH, the two directories the main
-// container mounts, one log line naming the workspace — and the repository lock free once it is
-// done, so the next pod's init container never waits on a finished one.
+// credential helper the one named, the gh shim first on a pod's PATH and no tmux pane's `legion`
+// launcher (a pod's PATH names the image's legion), the two directories the main container
+// mounts, one log line naming the workspace — and the repository lock free once it is done, so the
+// next pod's init container never waits on a finished one.
 func TestWorkspaceInitProvisionsTheIssueWorkspace(t *testing.T) {
 	v := newTreeVolume(t).withRemote(t)
 	v.setenv(t)
@@ -397,6 +404,9 @@ func TestWorkspaceInitProvisionsTheIssueWorkspace(t *testing.T) {
 	if body, err := os.ReadFile(shim); err != nil || !strings.Contains(string(body), `exec legion gh -- "$@"`) ||
 		!strings.Contains(string(body), "'"+filepath.Join(v.root, "worker-bin")+":'") {
 		t.Fatalf("the gh shim is %q (%v), want it to strip its own directory and exec legion gh", body, err)
+	}
+	if _, err := os.Stat(filepath.Join(v.root, "bin")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the tree volume holds a legion launcher directory (%v), want only the gh shim", err)
 	}
 	for _, dir := range []string{"sessions", "gh"} {
 		if info, err := os.Stat(filepath.Join(v.root, dir)); err != nil || !info.IsDir() {
@@ -492,6 +502,24 @@ func TestWorkspaceInitRecordsTheRecoveryMarker(t *testing.T) {
 	at, err := time.Parse("2006-01-02T15:04:05.000Z", marker["recoveredAt"])
 	if err != nil || at.Before(before) || at.After(after) {
 		t.Fatalf("recoveredAt %q (%v), want an ISO instant in milliseconds, UTC, during the run", marker["recoveredAt"], err)
+	}
+}
+
+// The recovery marker's jj log runs under the same checked runner as provisioning, so a jj that
+// outlives the budget is reported as timed out, naming the command, never as an exit status.
+func TestWorkspaceInitReportsATimedOutRecoveryMarkerCommand(t *testing.T) {
+	jj := filepath.Join(t.TempDir(), "jj")
+	if err := os.WriteFile(jj, []byte("#!/bin/sh\nexec sleep 5\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := workspace.NewRunner(100*time.Millisecond, map[string]string{"jj": jj, "git": git})
+	err = writeRecoveryMarker(context.Background(), run, t.TempDir(), "legion/LEGION-42")
+	if err == nil || !strings.Contains(err.Error(), "command timed out: jj log -r @ --no-graph -T commit_id") {
+		t.Fatalf("writeRecoveryMarker = %v, want the timed-out jj log named", err)
 	}
 }
 

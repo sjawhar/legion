@@ -1,7 +1,8 @@
 // Package shellprefix builds PI_SHELL_PREFIX, the shell command Oh My Pi's bash tool runs before
 // each of the agent's commands (`<prefix> <command>`, in its persistent shell). Every runtime
 // hands its agents one, over the directories that process's own `gh` and `legion` live in: a tmux
-// pane's under the daemon's state directory, a pod's in the worker image.
+// pane's under the daemon's state directory, a pod's in the worker image. Its quoting, Literal, is
+// also what the scripts the workerbin package installs quote with.
 package shellprefix
 
 import (

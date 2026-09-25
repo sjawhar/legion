@@ -60,10 +60,10 @@ func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client,
 		pool: pool, records: records, dispatch: client, notices: publisher, supervisor: supervisor, tokens: tokens,
 		handlers: handlers, project: project, stateDir: stateDir, repo: configured.Repo, log: log, now: time.Now,
 		provision: func(ctx context.Context, request workspace.Request) (workspace.Workspace, error) {
-			return workspace.Provision(ctx, workspace.NewRunner(5*time.Minute, tools), request)
+			return workspace.Provision(ctx, workspace.NewRunner(workspace.CommandTimeout, tools), request)
 		},
 		remove: func(ctx context.Context, working workspace.Workspace) error {
-			return workspace.Remove(ctx, workspace.NewRunner(5*time.Minute, tools), working)
+			return workspace.Remove(ctx, workspace.NewRunner(workspace.CommandTimeout, tools), working)
 		},
 	}
 }
@@ -364,6 +364,7 @@ func (r *outbox) provisionWorkspace(ctx context.Context, issue record.Issue) err
 	}
 	if _, err := r.provision(ctx, workspace.Request{
 		StateDir: r.stateDir, Repo: r.repo, Issue: issue.Key, Token: lease.Token, CredentialHelper: credentialHelper(r.stateDir),
+		CredentialDir: r.stateDir,
 	}); err != nil {
 		return fmt.Errorf("provision workspace for %s: %w", issue.Key, err)
 	}

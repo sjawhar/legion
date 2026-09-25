@@ -66,8 +66,8 @@ clusters.
 **The image is the branch's, by digest.** `legion gh -- workflow run worker-image.yaml --ref
 legion/<KEY>` builds the branch head; off `main` the workflow publishes
 `ghcr.io/sjawhar/legion-worker:sha-<short>` **only** — `tag_release` is `true` only on
-`refs/heads/main` with a `cli_version`, so no `cli-v*` release body is edited, and the ECR
-mirror step skips every non-main run. Read the digest from the run's summary and pin it in *both*
+`refs/heads/main` with a `cli_version`, so no `cli-v*` release body is edited. Read the digest
+from the run's summary and pin it in *both*
 places — the overlay's kustomize `images:` and `runtime.kubernetes.image` in the overlay's
 `legion.yaml`. The probe pod is your first assertion: its log must read `probe-image: OK (…)
 … daemon-api-version=<the branch's LEGION_DAEMON_API_VERSION>`; with the branch's contract

@@ -1,7 +1,6 @@
 package workspace
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -16,13 +15,15 @@ import (
 
 const testTimeout = 30 * time.Second
 
-// recordingRunner executes real jj and git commands but replaces only the GitHub clone URL with
-// the local bare remote. That keeps provisioning's argv and credential environment observable
-// while the fixture never reaches a network.
+// recordingRunner runs every command through the production runner, NewRunner, with the real jj
+// and git, but replaces the GitHub clone URL with the local bare remote. That keeps
+// provisioning's argv and credential environment observable, and what the runner adds to every
+// process in force, while the fixture never reaches a network.
 type recordingRunner struct {
 	t       *testing.T
 	remote  string
 	timeout time.Duration
+	runner  Runner
 
 	mu        sync.Mutex
 	commands  []Command
@@ -54,7 +55,7 @@ func (r *recordingRunner) Run(ctx context.Context, command Command) (Result, err
 	if isClone(actual.Argv) {
 		actual.Argv[3] = r.remote
 	}
-	return executeCommand(ctx, actual)
+	return r.runner.Run(ctx, actual)
 }
 
 func (r *recordingRunner) Calls() []Command {
@@ -67,29 +68,26 @@ func isClone(argv []string) bool {
 	return len(argv) == 5 && argv[0] == "jj" && argv[1] == "git" && argv[2] == "clone"
 }
 
-func executeCommand(ctx context.Context, command Command) (Result, error) {
-	commandCtx, cancel := context.WithTimeout(ctx, command.Timeout)
-	defer cancel()
-
-	child := exec.CommandContext(commandCtx, command.Argv[0], command.Argv[1:]...)
-	child.Dir = command.Dir
-	child.Env = append(os.Environ(), "JJ_USER=Legion test", "JJ_EMAIL=legion-test@example.invalid")
-	child.Env = append(child.Env, command.Env...)
-	var stdout, stderr bytes.Buffer
-	child.Stdout = &stdout
-	child.Stderr = &stderr
-	err := child.Run()
-	result := Result{Stdout: stdout.String(), Stderr: stderr.String()}
-	if err == nil {
-		return result, nil
+// testTools are the git and jj the tests' runner starts, resolved from PATH as boot resolves them.
+// The jj is a wrapper that adds git's file transport to whatever allow-list the runner set: the
+// local bare remote stands in for github.com, which the runner reaches over https alone.
+func testTools(t *testing.T) map[string]string {
+	t.Helper()
+	tools := map[string]string{}
+	for _, tool := range []string{"git", "jj"} {
+		path, err := exec.LookPath(tool)
+		if err != nil {
+			t.Fatalf("provisioning's tests drive a real %s: %v", tool, err)
+		}
+		tools[tool] = path
 	}
-	var exited *exec.ExitError
-	if errors.As(err, &exited) {
-		result.ExitCode = exited.ExitCode()
-		result.TimedOut = errors.Is(commandCtx.Err(), context.DeadlineExceeded)
-		return result, nil
+	wrapper := filepath.Join(t.TempDir(), "jj")
+	script := "#!/bin/sh\n[ -z \"${GIT_ALLOW_PROTOCOL+set}\" ] || export GIT_ALLOW_PROTOCOL=\"$GIT_ALLOW_PROTOCOL:file\"\nexec '" + tools["jj"] + "' \"$@\"\n"
+	if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
 	}
-	return result, err
+	tools["jj"] = wrapper
+	return tools
 }
 
 func localBareRemote(t *testing.T) string {
@@ -118,19 +116,49 @@ func runSetup(t *testing.T, dir string, argv ...string) string {
 	return string(output)
 }
 
+// newLocalRunner is a runner against a fresh local bare remote. jj reads no configuration of the
+// user's who runs the tests: its user configuration is empty and its config home, where jj keeps a
+// repository's configuration, is the test's own, as in a pod's init container.
 func newLocalRunner(t *testing.T) *recordingRunner {
 	t.Helper()
-	return &recordingRunner{t: t, remote: localBareRemote(t), timeout: testTimeout}
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", home)
+	t.Setenv("JJ_CONFIG", filepath.Join(home, "no-user-config.toml"))
+	t.Setenv("JJ_USER", "Legion test")
+	t.Setenv("JJ_EMAIL", "legion-test@example.invalid")
+	return &recordingRunner{t: t, remote: localBareRemote(t), timeout: testTimeout, runner: NewRunner(testTimeout, testTools(t))}
 }
 
+// provisionRequest is a host provisioning's request, the tmux runtime's: the one-shot credential
+// goes under the state directory.
 func provisionRequest(t *testing.T) Request {
 	t.Helper()
+	state := filepath.Join(t.TempDir(), "state")
 	return Request{
-		StateDir:         filepath.Join(t.TempDir(), "state"),
+		StateDir:         state,
 		Repo:             "acme/widgets",
 		Issue:            "WIDGETS-42",
 		Token:            "test-installation-token",
 		CredentialHelper: "!/opt/legion/bin/legion credential",
+		CredentialDir:    state,
+	}
+}
+
+// Where the one-shot credential goes is every caller's decision: a pod's init container must name
+// its own filesystem, never the tree volume that is its state directory. A request that names no
+// credential directory is refused before provisioning runs anything or touches the state directory.
+func TestProvisionRequiresACredentialDirectory(t *testing.T) {
+	run := newLocalRunner(t)
+	req := provisionRequest(t)
+	req.CredentialDir = ""
+	if _, err := Provision(context.Background(), run, req); err == nil || !strings.Contains(err.Error(), "workspace credential directory is required") {
+		t.Fatalf("Provision = %v, want the missing credential directory refused", err)
+	}
+	if calls := run.Calls(); len(calls) != 0 {
+		t.Errorf("Provision ran %#v before refusing", calls)
+	}
+	if _, err := os.Stat(req.StateDir); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("Provision touched the state directory before refusing: %v", err)
 	}
 }
 
@@ -427,7 +455,22 @@ func TestLocationMatchesProvisionedWorkspacePath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Location: %v", err)
 	}
-	if working.Dir != "/state/workspaces/acme/widgets/widgets-42" || working.Bookmark != "legion/WIDGETS-42" {
-		t.Fatalf("Location = %#v, want workspace path and bookmark", working)
+	if working.Dir != "/state/workspaces/acme/widgets/widgets-42" || working.Bookmark != "legion/WIDGETS-42" ||
+		working.Clone != "/state/repos/github.com/acme/widgets" {
+		t.Fatalf("Location = %#v, want workspace path, bookmark, and shared clone", working)
+	}
+}
+
+// A `.` or `..` segment would put the shared clone somewhere else under the state directory, and
+// provisioning removes an incomplete clone there (`--repo ../..` removed the tree volume's root):
+// every path the package derives from a repository refuses one, naming it.
+func TestARepositoryWithADotSegmentIsRefused(t *testing.T) {
+	for _, tc := range []struct{ repo, segment string }{
+		{"../x", ".."}, {"acme/..", ".."}, {"./..", "."}, {"../..", ".."}, {"acme/.", "."},
+	} {
+		want := `workspace repository "` + tc.repo + `" has a "` + tc.segment + `" segment`
+		if _, err := Location("/state", tc.repo, "WIDGETS-42"); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("Location(%q) = %v, want an error naming %q", tc.repo, err, want)
+		}
 	}
 }

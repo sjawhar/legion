@@ -32,13 +32,12 @@ on:
   # of a Dockerfile change still gets it. A `push` trigger filters on the pushed commits alone and left
   # a PR head with no image check (LEGION-23 tester round 1). The provisioning code the init container
   # runs (`legion workspace-init`, `@legion/workspace`) is part of the image's behaviour, so a change to
-  # it builds the image it is proven on (LEGION-178). So is the Go `legion` a Sandbox pod runs: its
-  # command package, the worker shim and the wire it speaks, workspace-init's provisioning, and the
-  # launch probes `legion probe-image` runs in the final step and in the Go daemon's probe Sandbox,
-  # the model route the shim and the probe write into the image's profile (`internal/modelroute`),
-  # and the round trip the probe makes through it (`modelprobe.go`); and so are the Go build inputs,
-  # since the image compiles the Go `legion` at go.work's Go version — a PR that raises it past the
-  # build stage's image must fail here, not in the next image build.
+  # it builds the image it is proven on (LEGION-178). So is the whole Go module the image compiles the
+  # Go `legion` from — the command a Sandbox pod runs, the probes `legion probe-image` runs in the final
+  # step and in the Go daemon's probe Sandbox, and every package they import — named whole, because a
+  # hand-kept list of those packages already missed one; and so are the Go build inputs, since the
+  # image compiles at go.work's Go version — a PR that raises it past the build stage's image must fail
+  # here, not in the next image build.
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened]
@@ -49,21 +48,9 @@ on:
       - packages/workspace/**
       - .github/workflows/worker-image.yaml
       - packages/pi-envoy/roles/**
-      - packages/daemon-go/cmd/legion/**
-      - packages/daemon-go/internal/shim/**
-      - packages/daemon-go/internal/shimwire/**
-      - packages/daemon-go/internal/workspace/**
-      - packages/daemon-go/internal/bootprobe/**
-      - packages/daemon-go/internal/daemon/bootgate.go
-      - packages/daemon-go/internal/daemon/modelprobe.go
-      - packages/daemon-go/internal/modelroute/**
-      - packages/daemon-go/internal/daemon/*.mjs
-      - packages/daemon-go/internal/api/version.go
-      - packages/daemon-go/internal/runtime/tmux/prompt.go
+      - packages/daemon-go/**
       - go.work
       - go.work.sum
-      - packages/daemon-go/go.mod
-      - packages/daemon-go/go.sum
       - packages/envoy/go.mod
       - packages/envoy/go.sum
 
@@ -72,7 +59,6 @@ on:
 permissions:
   contents: write # gh release edit
   packages: write # ghcr.io push
-  id-token: write # solely for the optional ECR mirror's aws-actions/configure-aws-credentials OIDC
 
 jobs:
   build:
@@ -181,56 +167,3 @@ jobs:
           # shellcheck disable=SC2016 # literal Markdown backticks, no expansion wanted
           printf '\n\n## Worker image\n\n`%s@%s`\n' "$IMAGE" "$DIGEST" >> body.md
           gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --notes-file body.md
-
-      - name: Decide ECR mirror
-        id: ecr
-        env:
-          AWS_ECR_PUBLISH_ROLE_ARN: ${{ vars.AWS_ECR_PUBLISH_ROLE_ARN }}
-          AWS_ECR_REGISTRY: ${{ vars.AWS_ECR_REGISTRY }}
-          AWS_REGION: ${{ vars.AWS_REGION }}
-        run: |
-          # main only, before the variable checks: the publish role trusts refs/heads/main alone, so a PR
-          # or non-main dispatch run would fail AssumeRole after the GHCR push — and would mirror a sha-
-          # image nobody pins. Repository variables are visible to same-repo pull_request runs.
-          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-            echo "ECR mirror skipped: not a main run" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          missing=""
-          [ -n "$AWS_ECR_PUBLISH_ROLE_ARN" ] || missing="$missing AWS_ECR_PUBLISH_ROLE_ARN"
-          [ -n "$AWS_ECR_REGISTRY" ] || missing="$missing AWS_ECR_REGISTRY"
-          [ -n "$AWS_REGION" ] || missing="$missing AWS_REGION"
-          if [ -n "$missing" ]; then
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-            for v in $missing; do echo "ECR mirror skipped: $v unset" >> "$GITHUB_STEP_SUMMARY"; done
-          else
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      - uses: aws-actions/configure-aws-credentials@v4
-        if: steps.ecr.outputs.enabled == 'true'
-        with:
-          role-to-assume: ${{ vars.AWS_ECR_PUBLISH_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION }}
-
-      - name: Mirror to ECR
-        if: steps.ecr.outputs.enabled == 'true'
-        env:
-          ECR_REGISTRY: ${{ vars.AWS_ECR_REGISTRY }}
-          AWS_REGION: ${{ vars.AWS_REGION }}
-          DIGEST: ${{ steps.build.outputs.digest }}
-          TAGS: ${{ steps.meta.outputs.tags }}
-        run: |
-          aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
-          # Manifest copy by digest (agent-c's mechanism); the GHCR digest stays authoritative.
-          printf '%s\n' "$TAGS" | while read -r tag; do
-            [ -n "$tag" ] || continue
-            docker buildx imagetools create --tag "${ECR_REGISTRY}/legion-worker:${tag##*:}" "${IMAGE}@${DIGEST}"
-          done
-          echo "Mirrored to \`${ECR_REGISTRY}/legion-worker\` with the same tags; the GHCR digest \`${DIGEST}\` remains authoritative." >> "$GITHUB_STEP_SUMMARY"
-
-      - name: ECR mirror failure note
-        if: failure() && steps.ecr.outputs.enabled == 'true' && steps.build.outcome == 'success'
-        run: |
-          echo "ECR mirror failed after the GHCR push succeeded. The GHCR digest above is authoritative; retry the mirror by re-running the failed jobs (\`gh run rerun ${GITHUB_RUN_ID} --failed --repo ${GITHUB_REPOSITORY}\`) or pushing the branch again." >> "$GITHUB_STEP_SUMMARY"

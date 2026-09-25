@@ -430,7 +430,10 @@ jobs:
       - name: Install tmux
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends tmux
       # The workspace tests drive a real jj, and the daemon resolves jj at boot and refuses to
-      # start without it. The same pinned jj the pi-envoy job installs.
+      # start without it. The same pinned jj the pi-envoy job installs, but the binary itself on
+      # PATH, as the worker image installs it, never a mise shim: the provisioning tests give jj a
+      # fresh XDG_CONFIG_HOME, as a pod's init container has, and a shim looks its version up in
+      # the mise configuration under it ("No version is set for shim: jj").
       - name: Install jj
         env:
           MISE_VERSION: v2026.8.12
@@ -438,10 +441,9 @@ jobs:
         run: |
           curl https://mise.run | sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          echo "$HOME/.local/share/mise/shims" >> "$GITHUB_PATH"
-          "$HOME/.local/bin/mise" use -g github:jj-vcs/jj@0.44.0
+          install -m 0755 "$("$HOME/.local/bin/mise" x github:jj-vcs/jj@0.44.0 -- sh -c 'command -v jj')" "$HOME/.local/bin/jj"
       - name: Verify jj
-        run: jj --version
+        run: command -v jj && jj --version
       # internal/modelroute's route test runs the Oh My Pi the worker image ships against a stand-in
       # for the model gateway, and refuses on GitHub Actions without one. The pin is read from
       # omp-pin.ts, the repository's one copy of it, installed through the mise above

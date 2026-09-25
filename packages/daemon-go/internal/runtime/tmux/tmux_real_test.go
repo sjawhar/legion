@@ -31,6 +31,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
@@ -1372,8 +1373,8 @@ func TestRealTmuxOMPGetsTheConfiguredDispatchURLAndTokenFile(t *testing.T) {
 func TestRealTmuxPaneResolvesThisDaemonsLegionCLI(t *testing.T) {
 	ctx := context.Background()
 	r := newRig(t)
-	if err := InstallWorkerBin(r.stateDir, r.legion); err != nil {
-		t.Fatalf("InstallWorkerBin: %v", err)
+	if err := workerbin.Install(r.stateDir, r.legion); err != nil {
+		t.Fatalf("workerbin.Install: %v", err)
 	}
 	decoy := t.TempDir()
 	if err := os.WriteFile(filepath.Join(decoy, "legion"), []byte("#!/bin/sh\necho decoy-legion\n"), 0o755); err != nil {

@@ -21,6 +21,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 	"github.com/sjawhar/legion/daemon/internal/runtime/tmux"
+	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
 )
 
 const controllerUsage = "usage: legion controller start --config <controller.yaml> [--daemon-url <url>]"
@@ -137,7 +138,7 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	if err != nil {
 		return 0, fmt.Errorf("resolve the legion executable the controller's launcher runs: %w", err)
 	}
-	if err := tmux.InstallWorkerBin(stateDir, executable); err != nil {
+	if err := workerbin.Install(stateDir, executable); err != nil {
 		return 0, err
 	}
 	instructionsFile := ""
@@ -185,7 +186,7 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 // legion launcher first in the agent's bash tool as on every Go pane. Secrets travel as
 // `<NAME>_FILE` pointers only. Later pairs replace any inherited value of the same name.
 func controllerEnvironment(cfg config.ControllerConfig, stateDir, token, secretFile string) [][2]string {
-	workerBin, bin := tmux.WorkerBinDir(stateDir), tmux.LegionBinDir(stateDir)
+	workerBin, bin := workerbin.Dir(stateDir), workerbin.LauncherDir(stateDir)
 	separator := string(filepath.ListSeparator)
 	env := [][2]string{
 		{"LEGION_CONTROLLER", "1"},
