@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -110,11 +111,33 @@ func Roles(rolesDir string) (string, error) {
 	return string(raw), err
 }
 
-// AddEncoded adds the references Roles encoded, refusing an encoding it cannot read.
+// AddEncoded adds the references Roles encoded, refusing anything but that encoding: an object
+// holding every kind, and no other key, each kind's names (possibly none) each with the files that
+// name it. An encoding that read as no references would let the probe pass without resolving the
+// role prompts, so a daemon and an image that disagree on it refuse instead.
 func (names Names) AddEncoded(raw string) error {
+	refuse := func(why string) error {
+		return fmt.Errorf("the role prompt references %q are not promptrefs.Roles' encoding: %s", raw, why)
+	}
 	var encoded map[string]map[string][]string
 	if err := json.Unmarshal([]byte(raw), &encoded); err != nil {
-		return fmt.Errorf("the role prompt references %q are not promptrefs.Roles' encoding: %w", raw, err)
+		return refuse(err.Error())
+	}
+	for key := range encoded {
+		if !slices.Contains(variable[:], key) {
+			return refuse("unknown kind " + key)
+		}
+	}
+	for _, kind := range Kinds {
+		named := encoded[kind.Variable()]
+		if named == nil {
+			return refuse("no " + kind.Variable())
+		}
+		for _, name := range slices.Sorted(maps.Keys(named)) {
+			if len(named[name]) == 0 {
+				return refuse(kind.Variable() + " name " + name + " is named by no file")
+			}
+		}
 	}
 	for _, kind := range Kinds {
 		for name, files := range encoded[kind.Variable()] {
