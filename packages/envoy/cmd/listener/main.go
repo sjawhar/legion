@@ -77,9 +77,10 @@ const (
 
 // applyListenerConsumerPolicy stamps the canonical consumer policy onto
 // config. Shared by the create and drift-correction paths so the policy has
-// exactly one definition. The idle heartbeat is not part of it: the create
-// path starts from a zero config, so a durable the listener creates has none,
-// and startListenerSubscription refuses an existing durable that has one.
+// exactly one definition. The policy has no idle heartbeat: the create path
+// starts from a zero config, so a durable the listener creates has none.
+// listenerDurableRefusal refuses an existing durable whose heartbeat or ack
+// policy differs, since NATS cannot change either in place.
 func applyListenerConsumerPolicy(config *nats.ConsumerConfig, subjects []string) {
 	config.FilterSubject = ""
 	config.FilterSubjects = subjects
@@ -91,13 +92,13 @@ func applyListenerConsumerPolicy(config *nats.ConsumerConfig, subjects []string)
 }
 
 // listenerConsumerPolicyDrifted reports whether a consumer's server-side
-// config diverges from the canonical policy. It leaves the heartbeat out on
-// purpose: NATS cannot change a consumer's heartbeat in place, so a durable
-// that has one is refused before this check runs, never corrected.
+// config diverges from the canonical policy in a setting NATS can update. The
+// heartbeat and the ack policy are not among them: NATS cannot change either in
+// place, so a durable where they differ is refused before this check runs,
+// never corrected.
 func listenerConsumerPolicyDrifted(config nats.ConsumerConfig, subjects []string) bool {
 	return config.FilterSubject != "" ||
 		!slices.Equal(config.FilterSubjects, subjects) ||
-		config.AckPolicy != nats.AckExplicitPolicy ||
 		config.AckWait != consumerAckWait ||
 		config.MaxAckPending != consumerMaxAckPending ||
 		config.MaxDeliver != consumerMaxDeliver ||
@@ -113,6 +114,38 @@ func listenerConsumerPolicyDrifted(config nats.ConsumerConfig, subjects []string
 // drain paths trigger exactly that — silently resetting the durable cursor.
 // The config drift-correction also stamps consumerInactiveThreshold onto
 // consumers created before the threshold existed.
+// errListenerDurableRefused marks a durable startListenerSubscription will not bind however often
+// it is asked: no retry can succeed, so the listener's startup exits at once.
+var errListenerDurableRefused = errors.New("listener durable refused")
+
+// listenerDurableRefusal refuses an existing durable carrying a setting the listener's consumer
+// policy fixes and NATS cannot change in place, so the drift correction could never apply it:
+//   - An idle heartbeat. The bus logs nats.ErrConsumerNotActive at WARN because only KV watchers'
+//     ordered consumers report it, and only while disconnected; a heartbeat here would make a
+//     stalled durable report that same WARN.
+//   - An ack policy other than explicit. The delivery handler acks each message or NAKs it for a
+//     delayed retry, one at a time; under ack all, a later message's ack would also ack an earlier
+//     one still waiting for its retry.
+//
+// Recreating the durable would drop its cursor, so the listener leaves it to an operator, and the
+// refusal says how to recreate it without replaying the stream.
+func listenerDurableRefusal(consumer string, config nats.ConsumerConfig) error {
+	var setting string
+	switch {
+	case config.Heartbeat != 0:
+		setting = fmt.Sprintf("an idle heartbeat of %s", config.Heartbeat)
+	case config.AckPolicy != nats.AckExplicitPolicy:
+		setting = fmt.Sprintf("ack policy %s", config.AckPolicy)
+	default:
+		return nil
+	}
+	return fmt.Errorf("%w: durable consumer %s has %s, which the listener's consumer policy forbids and NATS cannot change in place; "+
+		"deleting it lets the listener recreate it at deliver policy all, which replays every retained message, "+
+		"so to keep its cursor recreate it from its own config without that setting, at deliver policy by_start_sequence "+
+		"with opt_start_seq one past its ack_floor.stream_seq (packages/envoy/AGENTS.md, Operational notes)",
+		errListenerDurableRefused, consumer, setting)
+}
+
 func startListenerSubscription(client *bus.Client, consumer string, handler nats.MsgHandler) (*nats.Subscription, error) {
 	subjects := bus.StreamSubjects()
 	info, err := client.JS().ConsumerInfo(bus.Stream, consumer)
@@ -132,17 +165,16 @@ func startListenerSubscription(client *bus.Client, consumer string, handler nats
 		}
 	case err != nil:
 		return nil, err
-	case info.Config.Heartbeat != 0:
-		// The bus logs nats.ErrConsumerNotActive at WARN because only KV watchers' ordered
-		// consumers report it, and only while disconnected; a heartbeat here would make a stalled
-		// durable report that same WARN. NATS cannot change a consumer's heartbeat in place, and
-		// recreating the durable would drop its cursor, so the listener leaves it to an operator.
-		return nil, fmt.Errorf("durable consumer %s has an idle heartbeat of %s, which the listener's consumer policy forbids; delete it to let the listener recreate it without one", consumer, info.Config.Heartbeat)
-	case listenerConsumerPolicyDrifted(info.Config, subjects):
-		config := info.Config
-		applyListenerConsumerPolicy(&config, subjects)
-		if _, err := client.JS().UpdateConsumer(bus.Stream, &config); err != nil {
+	default:
+		if err := listenerDurableRefusal(consumer, info.Config); err != nil {
 			return nil, err
+		}
+		if listenerConsumerPolicyDrifted(info.Config, subjects) {
+			config := info.Config
+			applyListenerConsumerPolicy(&config, subjects)
+			if _, err := client.JS().UpdateConsumer(bus.Stream, &config); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return client.Subscribe(
@@ -642,7 +674,9 @@ func main() {
 	// binding ("consumer is already bound"), so retry with backoff until the
 	// old listener's delivery interest clears; never delete the consumer to
 	// steal the binding — that resets the durable cursor and replays the full
-	// retention window to every subscriber.
+	// retention window to every subscriber. A refused durable is not retried:
+	// no retry can bind it, and while the loop retried, /healthz would answer
+	// 200 "starting" and a rolling deploy would take this task for healthy.
 	deliveryConfig := listenerDeliveryHandlerConfig{
 		client:            client,
 		forwardRole:       client.RequestCoreTo,
@@ -664,6 +698,11 @@ func main() {
 		sub, err = startListenerSubscription(client, consumer, jetStreamDeliveryHandler(deliveryConfig))
 		if err == nil {
 			break
+		}
+		if errors.Is(err, errListenerDurableRefused) {
+			logger.Error("subscribe refused, shutting down", slog.String("error", err.Error()))
+			client.Conn.Close()
+			os.Exit(1)
 		}
 		if attempt == 10 {
 			logger.Error("subscribe failed after max attempts, shutting down",
