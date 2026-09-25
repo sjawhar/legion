@@ -761,8 +761,9 @@ export async function getComparedPaths(
     throw new GitHubAPIError(`compare ${range} answered an unexpected shape`);
   const paths: string[] = [];
   for (const file of files) {
-    const filename = recordValue(file)?.filename;
-    const previous = recordValue(file)?.previous_filename;
+    const entry = recordValue(file);
+    const filename = entry?.filename;
+    const previous = entry?.previous_filename;
     if (typeof filename !== "string" || (previous !== undefined && typeof previous !== "string")) {
       throw new GitHubAPIError(`compare ${range} answered an unexpected shape`);
     }

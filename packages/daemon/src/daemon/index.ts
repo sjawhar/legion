@@ -437,7 +437,7 @@ async function startDaemonLocked(
   const [reviewAppLogin, ...otherLogins] = reviewLogins;
   if (reviewAppLogin === undefined || otherLogins.length > 0) {
     throw new Error(
-      `the review App's token leases named ${reviewLogins.size === 0 ? "no bot login" : `${[...reviewLogins].join(", ")}`}; the reducers need exactly one`
+      `the review App's token leases named ${reviewLogins.size === 0 ? "no bot login" : [...reviewLogins].join(", ")}; the reducers need exactly one`
     );
   }
   const reducerConfig = { ...config, reviewAppLogin };
