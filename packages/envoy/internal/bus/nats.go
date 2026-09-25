@@ -178,7 +178,9 @@ func connectWithContext(ctx context.Context, name string, urls []string, reconne
 		if deadline, ok := ctx.Deadline(); ok {
 			remaining := time.Until(deadline)
 			if remaining <= 0 {
-				return nil, ctx.Err()
+				// Not ctx.Err(): the deadline can pass before the context's timer marks it done,
+				// and a nil error here would hand the caller a nil connection to use.
+				return nil, context.DeadlineExceeded
 			}
 			if remaining < next.Timeout {
 				next.Timeout = remaining
