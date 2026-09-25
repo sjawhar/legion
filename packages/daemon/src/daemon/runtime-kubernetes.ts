@@ -850,7 +850,8 @@ export class KubernetesRuntime implements Runtime {
  *   then the image's PATH; `legion gh` strips it again (`pathWithoutWorkerBin`).
  * - `GH_CONFIG_DIR`: `<volume>/gh`, written by `gh` itself.
  * - `LEGION_GRANT_FILE`: under the memory-backed `grant` emptyDir; the pi-envoy extension writes
- *   it before every bash command, `legion credential`/`gh`/`handoff complete` read it.
+ *   it before every bash command and every tool call Oh My Pi serves with `gh`,
+ *   `legion credential`/`gh`/`handoff complete` read it.
  * - `LEGION_STATE_DIR`: the volume (the extension's jj attribution overlay lives under it).
  * - `LEGION_CREDENTIAL_HELPER`: the value `workspace-init` wrote into the clone's git config.
  * - `DISPATCH_TOKEN_FILE` (only when the spec carried one): the providers Secret's

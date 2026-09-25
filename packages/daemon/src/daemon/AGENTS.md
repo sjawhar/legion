@@ -310,7 +310,8 @@ are daemon configuration read from the daemon's own environment; they are not pa
 Every root, worker, and controller pane also carries the credential pane environment
 (`ProcessManager.credentialProcessEnvironment`) for its whole life — never per command:
 `LEGION_GRANT_FILE=<state_dir>/secrets/<role token>-grant` (`grantSecretName`), the 0600 file the
-pi-envoy extension writes each bash command's freshly minted grant to before the command runs and
+pi-envoy extension writes a freshly minted grant to before each bash command and each tool call Oh
+My Pi serves with `gh` (a `pr://`/`issue://` read, its `github` tool) and
 `legion credential`/`legion gh`/`legion handoff complete` read ahead of `LEGION_GRANT` — the daemon
 never writes it, only names it here and prunes it with the pane's boot-token file when the locator
 clears (`trackProcessSecrets`; the boot prune seeds the name from the live locator, so a grant file

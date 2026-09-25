@@ -48,6 +48,13 @@ smoke_file=
 timeout_hook=
 gate_artifact=
 gate_version=
+# The idle pr:// read in flight: its pull request's Created timestamp, and the role, issue,
+# instruction label and previous grant time its timeout diagnostics read.
+idle_created=
+idle_role=
+idle_issue=
+idle_label=
+idle_previous=
 prod_baseline=
 prod_dispatch_url=
 prod_envoy_url=${STAGE3_PRODUCTION_ENVOY_URL:-http://127.0.0.1:9020}
@@ -445,13 +452,81 @@ assert_ready_gate_closed() {
   ' "$file" >/dev/null
 }
 
+# ---- a pr:// read long after the agent's last grant (LEGION-262) ---------------------------------
+# omp_grant_file ISSUE ROLE prints the LEGION_GRANT_FILE the role's OMP process carries, if any:
+# the pane names it at launch, so it is in the environment Oh My Pi copied when it started.
+omp_grant_file() {
+  local pane_pid omp
+  pane_pid=$(claim_pane_pid "$1" "$2") || return 1
+  omp=$(omp_descendant "$pane_pid") || return 1
+  pane_value "$omp" LEGION_GRANT_FILE
+}
+grant_older_than() { [ $(($(date +%s) - $(stat -c %Y "$1"))) -gt "$2" ]; }
+# capture_idle_read ISSUE ROLE LABEL PREVIOUS OUT writes the evidence assert_idle_pr_read judges:
+# the agent's previous grant time (epoch seconds, or null for none), the pull request's Created
+# timestamp, and every session entry after the one that delivered the instruction LABEL names.
+capture_idle_read() {
+  claim_session_text "$1" "$2" | jq -s --arg label "$3" --argjson previous "$4" --arg created "$idle_created" '
+    (map(tostring | contains($label)) | index(true)) as $at
+    | {previousGrantAt: $previous, created: $created, entries: (if $at == null then [] else .[($at + 1):] end)}' >"$5"
+}
+# assert_idle_pr_read FILE: after the instruction, the first tool call that could have minted a
+# grant (bash, the github tool, the legion tool, or any path naming pr:// or issue://) is a read of
+# a pr:// URL; its result is no error and shows the pull request's Created line; and it came more
+# than 60 s after the agent's previous grant was written, or the agent had none.
+assert_idle_pr_read() {
+  jq -e '
+    .previousGrantAt as $previous | .created as $created | .entries as $entries
+    | [$entries[] | select(.type == "message" and .message.role == "assistant") | .timestamp as $ts
+       | .message.content[]? | select(.type == "toolCall") | . + {ts: $ts}] as $calls
+    | ([$calls[] | .name == "bash" or .name == "github" or .name == "legion"
+        or ([.arguments.path?, (.arguments.paths? // [])[]?]
+          | any(.[]; type == "string" and test("(^|[\\s;,\"])(pr|issue)://"; "i")))] | index(true)) as $first
+    | if $first == null then false else
+        $calls[$first] as $read
+        | ([$entries[] | select(.type == "message" and .message.role == "toolResult" and .message.toolCallId == $read.id)] | first) as $result
+        | $read.name == "read" and ($read.arguments.path | test("^\\s*pr://"; "i"))
+          and $result != null and ($result.message.isError | not)
+          and ($result.message.content | tostring | contains("Created: " + $created))
+          and ($previous == null or (($read.ts | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) - $previous > 60))
+      end
+  ' "$1" >/dev/null
+}
+# idle_pr_read ISSUE ROLE waits until the role's last grant is over 60 s old, has it read the
+# pull request through its read tool with no bash command first, and judges the transcript.
+idle_pr_read() {
+  local issue=$1 role=$2 grant previous=null label
+  grant=$(omp_grant_file "$issue" "$role") || fail "$role pane on $issue has no OMP process"
+  if [ -n "$grant" ] && [ -e "$grant" ]; then
+    until_true 120 "$role's last grant on $issue to be over 65 s old" grant_older_than "$grant" 65
+    previous=$(stat -c %Y "$grant")
+  fi
+  label="Stage 3 idle read proof ($role)"
+  idle_role=$role idle_issue=$issue idle_label=$label idle_previous=$previous
+  send_agent "$issue" "$role" "$label: run no bash command. Use your read tool on pr://$repo/$pr_number and reply with one line: READ-PR-CREATED= followed by the Created timestamp that read shows. Wait after reporting."
+  timeout_hook=idle_read_diagnostics
+  until_true 240 "$role on $issue to report the pull request's Created line from its read" \
+    session_contains "$issue" "$role" "READ-PR-CREATED=$idle_created"
+  timeout_hook=
+  capture_idle_read "$issue" "$role" "$label" "$previous" "$evidence/idle-read-$role.json"
+  assert_idle_pr_read "$evidence/idle-read-$role.json" ||
+    fail "$role on $issue reported the Created line, but not from a pr:// read made over 60 s after its last grant with no bash command first ($evidence/idle-read-$role.json)"
+  [ -n "$grant" ] || fail "$role's OMP process on $issue carries no LEGION_GRANT_FILE"
+  note "$role read pr://$repo/$pr_number $([ "$previous" = null ] && printf 'with no grant before it' || printf '%s s after its previous grant' "$(($(stat -c %Y "$grant") - previous))"), no bash command first; OMP carries LEGION_GRANT_FILE=$grant"
+}
+# idle_read_diagnostics keeps what the agent's read returned when the Created line never came.
+idle_read_diagnostics() {
+  capture_idle_read "$idle_issue" "$idle_role" "$idle_label" "$idle_previous" "$evidence/idle-read-$idle_role.json"
+  note "$idle_role's pr:// read results: $(jq -c '[.entries[] | select(.type == "message" and .message.role == "toolResult" and .message.toolName == "read") | {isError: .message.isError, text: (.message.content | tostring | .[0:300])}]' "$evidence/idle-read-$idle_role.json")"
+}
+
 begin prerequisites
 for tool in go docker jq curl ss tmux bun mise secrets gh shellcheck jj hawk-token; do command -v "$tool" >/dev/null || fail "$tool is required"; done
 # STAGE3_FROM is a development aid for iterating on the later scenarios against a fresh rig; a run
 # with it set is never the proof and never prints PASS. `held` skips the first issue's workflow:
 # the proof human closes that root, freeing its admission slot as its sign-off would, and the
-# credential check reads STAGE3_PR (default: the newest smoke pull request) in place of its pull
-# request. `restart` also skips the held-worker scenario. STAGE3_UNTIL=rework is the other
+# credential and idle-read checks read STAGE3_PR (default: the newest smoke pull request) in place
+# of its pull request. `restart` also skips the held-worker scenario. STAGE3_UNTIL=rework is the other
 # development aid: it drives the first issue through its review rounds and the final review, then
 # skips every later scenario.
 from=${STAGE3_FROM:-}
@@ -835,6 +910,36 @@ restart_scenarios() {
   until_true 240 "the implementer pane to read the pull request" session_contains "$restart_issue" implementer "CRED-PR=https://github.com/$repo/pull/$pr_number"
   until_true 240 "the real Go pane bash tool to refuse gh pr merge" session_contains "$restart_issue" implementer "CRED-MERGE=Legion never merges a pull request"
   note "real implementer pane resolved gh from $state/worker-bin, viewed pull request #$pr_number as legion-implementer[bot], and its plain gh pr merge was refused"
+  pass
+
+  begin idle-pr-read
+  # Oh My Pi serves a pr:// read by running gh with the environment it copied when it started, and
+  # a grant lives 60 s (internal/credential/grants.go), so a read long after an agent's last bash
+  # command works only when the pane named LEGION_GRANT_FILE from OMP's start and the plugin mints
+  # a grant for the read itself (LEGION-262: a root architect signed off without the pull request
+  # read it tried). The implementer and the root architect each read after their last grant is over
+  # 60 s old, with no bash command first; the Created line only the read's own output carries.
+  idle_created=$(gh -R "$repo" pr view "$pr_number" --json createdAt --jq .createdAt)
+  idle_pr_read "$restart_issue" implementer
+  idle_pr_read "$restart_issue" architect
+  # The controls corrupt the implementer's captured read three ways, each one clause: the read
+  # refused as it was before LEGION-262, the read inside its previous grant's lifetime, and a bash
+  # command (which mints) before it.
+  idle_src="$evidence/idle-read-implementer.json"
+  jq '(.entries[] | select(.type == "message" and .message.role == "toolResult" and .message.toolName == "read"))
+    |= (.message.isError = true | .message.content = [{type: "text", text: "legion gh: Unable to redeem LEGION_GRANT: LEGION_GRANT_FILE is missing (and LEGION_GRANT is unset)"}])' \
+    "$idle_src" >"$evidence/idle-read-refused-negative.json"
+  expect_failure idle-read-refused assert_idle_pr_read "$evidence/idle-read-refused-negative.json"
+  jq '([.entries[] | select(.type == "message" and .message.role == "assistant")
+        | select(any(.message.content[]?; .type == "toolCall" and .name == "read" and (.arguments.path | test("^\\s*pr://"; "i"))))
+        | .timestamp] | first | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) as $read
+    | .previousGrantAt = $read - 30' "$idle_src" >"$evidence/idle-read-within-grant-negative.json"
+  expect_failure idle-read-within-grant assert_idle_pr_read "$evidence/idle-read-within-grant-negative.json"
+  jq '.entries = [{type: "message", timestamp: (.entries[0].timestamp // "1970-01-01T00:00:00.000Z"),
+      message: {role: "assistant", content: [{type: "toolCall", id: "negative-bash", name: "bash", arguments: {command: "legion gh -- pr view"}}]}}] + .entries' \
+    "$idle_src" >"$evidence/idle-read-after-bash-negative.json"
+  expect_failure idle-read-after-bash assert_idle_pr_read "$evidence/idle-read-after-bash-negative.json"
+  assert_idle_pr_read "$idle_src" || fail "the idle-read assertion did not restore after its negative controls"
   pass
 
   begin pending-dispatch-status-write

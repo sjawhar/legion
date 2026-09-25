@@ -671,7 +671,9 @@ func TestRealTmuxLifecycle(t *testing.T) {
 		t.Fatalf("GetState = (%+v, %v)", state, err)
 	}
 
-	// The pane ran `sh -c`, and its OMP runs under the environment the runtime promises.
+	// The pane ran `sh -c`, and its OMP runs under the environment the runtime promises: the grant
+	// file's pointer included, from OMP's start, since Oh My Pi copies its own environment once for
+	// every `gh` it runs to resolve a pr:// or issue:// read (LEGION-262).
 	pid := panePid(t, loc)
 	if argv := procCmdline(pid); len(argv) < 2 || argv[0] != "/bin/sh" || argv[1] != "-c" {
 		t.Errorf("the pane's process is %q, want /bin/sh -c", argv)
@@ -697,6 +699,7 @@ func TestRealTmuxLifecycle(t *testing.T) {
 		"ENVOY_NATS_URL":         "nats://127.0.0.1:4222",
 		"ENVOY_URL":              "http://127.0.0.1:9020",
 		"GIT_TERMINAL_PROMPT":    "0",
+		"LEGION_GRANT_FILE":      filepath.Join(secrets, string(spec.Claim)+"-grant"),
 		"LEGION_BOOT_TOKEN_FILE": filepath.Join(secrets, string(spec.Claim)),
 		"ENVOY_TOKEN_FILE":       filepath.Join(secrets, string(spec.Claim)+"-envoy_token"),
 	} {

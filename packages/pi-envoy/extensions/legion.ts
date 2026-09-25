@@ -156,7 +156,25 @@ const callReadyWithRetry = async (label: string, call: () => Promise<void>): Pro
   }
 };
 
-async function wrapBashWithGrant(
+/** A `pr://` or `issue://` URL anywhere Oh My Pi's path pipeline finds one: alone, inside one pair
+ * of outer double quotes (which it strips), or as one entry of a list split on `;`, `,`, or
+ * whitespace. Its internal-URL router resolves either scheme, in any case, by running `gh`. */
+const GH_RESOLVED_URL = /(?:^|[\s;,"])(?:pr|issue):\/\//i;
+
+/** Whether a tool call runs something that redeems the pane's grant: a `bash` command (`legion`,
+ * `jj git push`, the `gh` shim), Oh My Pi's `github` tool, and any tool whose `path` or `paths`
+ * names a `pr://` or `issue://` URL (`read`, `grep`, `glob`, `ast_grep`, `ast_edit` all resolve
+ * internal URLs). Oh My Pi serves the last two by running `gh`, which on a Legion pane is the shim
+ * that runs `legion gh`. A grant lives 60 seconds, so a call that reaches `gh` long after the
+ * pane's last bash command needs its own. */
+function needsGrant({ toolName, input }: ToolCallEvent): boolean {
+  if (toolName === "bash") return typeof input.command === "string";
+  if (toolName === "github") return true;
+  const paths = Array.isArray(input.paths) ? input.paths : [input.path];
+  return paths.some((entry) => typeof entry === "string" && GH_RESOLVED_URL.test(entry));
+}
+
+async function wrapWithGrant(
   mint: () => Promise<GrantResponse>
 ): Promise<ToolCallEventResult | undefined> {
   try {
@@ -979,8 +997,7 @@ export default function legionExtension(pi: PiApi): void {
         return { block: true, reason: "the merger only verifies and reports" };
       }
     }
-    if (toolCall.toolName !== "bash" || typeof toolCall.input.command !== "string")
-      return undefined;
+    if (!needsGrant(toolCall)) return undefined;
     // The shared wrapper mints through the caller's client, then writes the grant to the pane's
     // `LEGION_GRANT_FILE`, which `legion` reads ahead of `LEGION_GRANT`. The host writes a hook's
     // revised `input` back into the assistant message (text the model imitates — LEGION-12), and a
@@ -995,7 +1012,7 @@ export default function legionExtension(pi: PiApi): void {
       // authenticated by the controller capability) and is wrapped exactly like a worker. The
       // client is recovery-less: no recovery token exists for the controller.
       if (controllerSession.isClaimedSession(sessionID)) {
-        return wrapBashWithGrant(() => controllerSession.mintGrant(sessionID));
+        return wrapWithGrant(() => controllerSession.mintGrant(sessionID));
       }
       // A worker (root or phase) whose own boot handshake has not completed yet has no
       // capability to mint a grant with, so it is blocked. A controller that has not yet
@@ -1009,7 +1026,7 @@ export default function legionExtension(pi: PiApi): void {
       }
       return undefined;
     }
-    return wrapBashWithGrant(() =>
+    return wrapWithGrant(() =>
       process.env.LEGION_DAEMON_API === "go"
         ? goRoleDaemon().grant({
             tree: active.tree,

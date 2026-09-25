@@ -76,10 +76,11 @@ func testSpec() runtime.SpawnSpec {
 }
 
 // The pane's -e pairs, in the one order: the pairs every Legion pane carries (the shipped set,
-// processes.ts:4562-4579, less what Stage 3 adds, plus LEGION_DAEMON_API=go), the XDG base
-// directories under `<state_dir>/home` explicitly, the caller's own variables sorted, then one
-// `<NAME>_FILE` pointer per secret — the boot token's first. PATH is never a pair: tmux would
-// discard it (LEGION-91); the shell command exports it. No secret value is in any pair.
+// processes.ts:4562-4579, less what Stage 3 adds, plus LEGION_DAEMON_API=go), the grant file the
+// pi-envoy extension writes before each command that redeems a grant, the XDG base directories
+// under `<state_dir>/home` explicitly, the caller's own variables sorted, then one `<NAME>_FILE`
+// pointer per secret — the boot token's first. PATH is never a pair: tmux would discard it
+// (LEGION-91); the shell command exports it. No secret value is in any pair.
 func TestPanePairs(t *testing.T) {
 	spec := testSpec()
 	in := paneInputs{
@@ -105,6 +106,7 @@ func TestPanePairs(t *testing.T) {
 		"-e", "ENVOY_URL=http://127.0.0.1:9020",
 		"-e", "PI_SHELL_PREFIX=PATH='/state/worker-bin:/state/bin:'${PATH#'/state/worker-bin:/state/bin:'} &&",
 		"-e", "GIT_TERMINAL_PROMPT=0",
+		"-e", "LEGION_GRANT_FILE=/state/secrets/legion-omp-LEGION-43-tester-grant",
 		"-e", "XDG_CONFIG_HOME=/state/home/.config",
 		"-e", "XDG_CACHE_HOME=/state/home/.cache",
 		"-e", "XDG_DATA_HOME=/state/home/.local/share",

@@ -2717,6 +2717,63 @@ describe("Legion OMP extension", () => {
       },
     });
   });
+  test("mints a grant before every tool call Oh My Pi serves by running gh, and before no other", async () => {
+    const workspace = await createJjWorkspace();
+    let minted = 0;
+    const { toolCall, context, grantFile } = await bootWorker({
+      role: "implementer",
+      workspace,
+      extraRoutes: (url) => {
+        if (url.pathname === "/legion/v1/grants") {
+          minted++;
+          return Response.json({
+            grantId: `grant-${minted}`,
+            expiresAt: "2099-01-01T00:00:00.000Z",
+          });
+        }
+        return undefined;
+      },
+    });
+
+    // Oh My Pi resolves `pr://` and `issue://` through its internal-URL router, which runs `gh`,
+    // from every tool that takes a path (the scheme in any case; a list split on `;`, `,`, or
+    // whitespace; one pair of outer double quotes stripped), and its `github` tool runs `gh` for
+    // every op. On a Legion pane `gh` is the shim that runs `legion gh`, which redeems the grant
+    // file; a grant lives 60 seconds, so each of these mints its own.
+    const served = [
+      { toolName: "read", input: { path: "pr://acme/widgets/7" } },
+      { toolName: "read", input: { path: "issue://7:1-20" } },
+      { toolName: "grep", input: { pattern: "fix", path: "src; PR://acme/widgets/7" } },
+      { toolName: "glob", input: { path: "issue://acme/widgets" } },
+      { toolName: "ast_edit", input: { ops: [], paths: ["src/a.ts", "pr://7"] } },
+      { toolName: "read", input: { path: "src, pr://acme/widgets/7" } },
+      { toolName: "grep", input: { pattern: "fix", path: "src issue://acme/widgets/8" } },
+      { toolName: "read", input: { path: '"pr://acme/widgets/7"' } },
+      { toolName: "github", input: { op: "pr_view", pr: "7" } },
+    ];
+    for (const [index, call] of served.entries()) {
+      await expect(
+        toolCall({ ...call, toolCallId: `call-gh-served-${index}` }, context)
+      ).resolves.toBeUndefined();
+      expect({ call, minted }).toEqual({ call, minted: index + 1 });
+    }
+    expect(await grantFileContents(grantFile)).toEqual({
+      grant: `grant-${served.length}`,
+      mode: 0o600,
+    });
+
+    // A read of a file, or of a GitHub URL (fetched over HTTP, never through gh), redeems nothing.
+    const unserved = [
+      { toolName: "read", input: { path: "src/pr-view.ts" } },
+      { toolName: "read", input: { path: "https://github.com/acme/widgets/pull/7" } },
+      { toolName: "grep", input: { pattern: "pr://", path: "src" } },
+      { toolName: "read", input: { path: "skill://pr-review" } },
+    ];
+    for (const [index, call] of unserved.entries()) {
+      await toolCall({ ...call, toolCallId: `call-gh-unserved-${index}` }, context);
+    }
+    expect(minted).toBe(served.length);
+  });
   /**
    * Fixture note: `createPi().on` keeps every registered handler and its aggregate returns the
    * last non-undefined result, mirroring the host's `emitToolCall`, which also never chains one
@@ -2799,6 +2856,30 @@ describe("Legion OMP extension", () => {
     // The atomic rename leaves exactly the named file: no `<file>.<pid>.<uuid>` residue.
     expect(await readdir(secretsDir)).toEqual([path.basename(grantFile)]);
   });
+  test("creates the grant file's missing directory 0700, as an Agent Sandbox pod's empty state volume has none", async () => {
+    const workspace = await createJjWorkspace();
+    const { toolCall, context, secretsDir } = await bootWorker({
+      role: "implementer",
+      workspace,
+      extraRoutes: (url) => {
+        if (url.pathname === "/legion/v1/grants") {
+          return Response.json({ grantId: "grant-1", expiresAt: "2099-01-01T00:00:00.000Z" });
+        }
+        return undefined;
+      },
+    });
+    const grantFile = path.join(secretsDir, "state", "secrets", "x-grant");
+    process.env.LEGION_GRANT_FILE = grantFile;
+
+    await expect(
+      toolCall(
+        { toolName: "bash", toolCallId: "call-new-dir", input: { command: "jj git push" } },
+        context
+      )
+    ).resolves.toBeUndefined();
+    expect(await grantFileContents(grantFile)).toEqual({ grant: "grant-1", mode: 0o600 });
+    expect((await stat(path.dirname(grantFile))).mode & 0o777).toBe(0o700);
+  });
   test("blocks the command naming the path when the grant file cannot be written", async () => {
     const requests: { readonly path: string; readonly body: unknown }[] = [];
     const workspace = await createJjWorkspace();
@@ -2813,7 +2894,10 @@ describe("Legion OMP extension", () => {
         return undefined;
       },
     });
-    const unwritable = path.join(secretsDir, "missing-dir", "x-grant");
+    // A regular file where the grant file's directory should be: no directory can be made there.
+    const notADirectory = path.join(secretsDir, "not-a-directory");
+    await writeFile(notADirectory, "", { mode: 0o600 });
+    const unwritable = path.join(notADirectory, "secrets", "x-grant");
     process.env.LEGION_GRANT_FILE = unwritable;
 
     await expect(
@@ -2823,11 +2907,14 @@ describe("Legion OMP extension", () => {
       )
     ).resolves.toEqual({
       block: true,
-      reason: expect.stringContaining(`LEGION_GRANT_FILE ${unwritable} could not be written`),
+      reason: expect.stringMatching(
+        new RegExp(
+          `^LEGION_GRANT_FILE ${unwritable.replaceAll(".", "\\.")} could not be written: .*ENOTDIR`
+        )
+      ),
     });
     // Mint-then-write: the grant was minted (one wasted 60 s grant), nothing ran under a stale one.
     expect(requests.filter((request) => request.path === "/legion/v1/grants")).toHaveLength(1);
-
     // A relative pointer (an operator's own export) is refused before any temp file could land
     // in OMP's cwd — the issue workspace.
     process.env.LEGION_GRANT_FILE = "relative/x-grant";
@@ -4875,10 +4962,11 @@ describe("Legion OMP extension", () => {
 });
 
 /** A pane the Go daemon launched: `LEGION_DAEMON_API=go`, the identity variables the tmux runtime
- * sets (`packages/daemon-go/internal/runtime/tmux/spawn.go`'s `panePairs`), and the boot token as a
- * 0600 file behind `LEGION_BOOT_TOKEN_FILE`. The stub answers the Go daemon's claim routes and 404s
- * every other daemon path exactly as the Go daemon's catch-all does, so a TypeScript route the
- * extension reached is visible in `requests` and never mistaken for a success. */
+ * sets (`packages/daemon-go/internal/runtime/tmux/spawn.go`'s `panePairs`), the boot token as a
+ * 0600 file behind `LEGION_BOOT_TOKEN_FILE`, and `LEGION_GRANT_FILE` naming `<claim>-grant` beside
+ * it. The stub answers the Go daemon's claim routes and 404s every other daemon path exactly as the
+ * Go daemon's catch-all does, so a TypeScript route the extension reached is visible in `requests`
+ * and never mistaken for a success. */
 async function goPane(options: {
   readonly role: LegionRole;
   readonly tree: IssueKey;
@@ -4930,6 +5018,7 @@ async function goPane(options: {
   process.env.LEGION_ROLE = options.role;
   process.env.LEGION_WORKSPACE = "/tmp/legion-workspace";
   process.env.LEGION_STATE_DIR = stateDir;
+  process.env.LEGION_GRANT_FILE = grantFile;
 
   const requests: { readonly path: string; readonly body: unknown }[] = [];
   let readyAttempts = 0;
@@ -5139,6 +5228,79 @@ describe("the Go daemon's pane (LEGION_DAEMON_API=go)", () => {
     expect(
       secretFiles.filter((name) => name.startsWith(`${path.basename(pane.grantFile)}.`))
     ).toEqual([]);
+  });
+
+  test("a root architect's read of pr:// mints its own Go claim grant first", async () => {
+    const pane = await goPane({
+      role: "architect",
+      tree: "REPO-42",
+      issue: "REPO-42",
+      sessionId: "ses_go_root_read",
+    });
+    await pane.start();
+    const toolCall = pane.handlers.get("tool_call");
+    if (toolCall === undefined) throw new Error("Go pane tool_call handler was not registered");
+
+    // The call a root architect makes before its sign-off, with no bash command before it.
+    await expect(
+      toolCall(
+        { toolName: "read", toolCallId: "go-root-read", input: { path: "pr://acme/widgets/179" } },
+        pane.context
+      )
+    ).resolves.toBeUndefined();
+
+    expect(await grantFileContents(pane.grantFile)).toEqual({ grant: "go-grant-1", mode: 0o600 });
+    expect(
+      daemonRequests(pane.requests).filter((request) => request.path === "/legion/v1/grants")
+    ).toEqual([
+      {
+        path: "/legion/v1/grants",
+        body: {
+          sessionId: "ses_go_root_read",
+          secret: pane.registration.secret,
+          tree: "REPO-42",
+          issue: "REPO-42",
+        },
+      },
+    ]);
+  });
+
+  test("a Go pane's grant goes to the file the pane names; a pane that names none is refused", async () => {
+    const pane = await goPane({
+      role: "implementer",
+      tree: "REPO-42",
+      issue: "REPO-43",
+      sessionId: "ses_go_named_grant",
+    });
+    // Oh My Pi copies its environment once for every `gh` it runs, before the claim registers, so
+    // the pointer has to be the pane's own from process start; the extension never makes one up.
+    const named = path.join(path.dirname(pane.grantFile), "named-by-the-pane");
+    process.env.LEGION_GRANT_FILE = named;
+    await pane.start();
+    const toolCall = pane.handlers.get("tool_call");
+    if (toolCall === undefined) throw new Error("Go pane tool_call handler was not registered");
+
+    await expect(
+      toolCall(
+        { toolName: "bash", toolCallId: "go-named", input: { command: "legion state" } },
+        pane.context
+      )
+    ).resolves.toBeUndefined();
+    expect(process.env.LEGION_GRANT_FILE).toBe(named);
+    expect(await grantFileContents(named)).toEqual({ grant: "go-grant-1", mode: 0o600 });
+    await expect(access(pane.grantFile)).rejects.toThrow("ENOENT");
+
+    delete process.env.LEGION_GRANT_FILE;
+    await expect(
+      toolCall(
+        { toolName: "bash", toolCallId: "go-unnamed", input: { command: "legion state" } },
+        pane.context
+      )
+    ).resolves.toEqual({
+      block: true,
+      reason:
+        "LEGION_GRANT_FILE is not set on this pane: the daemon that launched it predates this plugin; restart the daemon on the matching release",
+    });
   });
 
   test("the Go client is chosen only by LEGION_DAEMON_API=go; any other value boots through the TypeScript client", async () => {

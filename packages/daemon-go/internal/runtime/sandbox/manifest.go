@@ -67,9 +67,9 @@ var runtimeOwned = map[string]bool{
 	"LEGION_STATE_DIR": true, "LEGION_WORKSPACE": true, "ENVOY_NATS_URL": true, "ENVOY_URL": true,
 	"DISPATCH_URL": true, modelroute.EnvURL: true, "LEGION_GH_PATH": true,
 	"LEGION_GIT_PATH": true, "LEGION_JJ_PATH": true, "LEGION_CREDENTIAL_HELPER": true, "PATH": true,
-	"PI_SHELL_PREFIX": true, "GIT_TERMINAL_PROMPT": true, "XDG_CONFIG_HOME": true,
-	"XDG_CACHE_HOME": true, "XDG_DATA_HOME": true, "XDG_STATE_HOME": true, "POD_UID": true,
-	bootTokenKey + "_FILE": true, dispatchTokenKey + "_FILE": true,
+	"PI_SHELL_PREFIX": true, "GIT_TERMINAL_PROMPT": true, "LEGION_GRANT_FILE": true,
+	"XDG_CONFIG_HOME": true, "XDG_CACHE_HOME": true, "XDG_DATA_HOME": true, "XDG_STATE_HOME": true,
+	"POD_UID": true, bootTokenKey + "_FILE": true, dispatchTokenKey + "_FILE": true,
 }
 
 // launch is one relaunch's inputs, checked and resolved before anything touches the cluster.
@@ -469,8 +469,9 @@ func (r *Runtime) initWaitSeconds() int64 {
 // mainEnvironment is the pane contract with a pod's values (decision 10): the variables every
 // tmux pane is told (runtime/tmux/spawn.go, panePairs) and the model gateway's URL, which the
 // image's Oh My Pi profile routes its provider to, then the spec's own, then one `<NAME>_FILE`
-// pointer per secret into the boot projection. POD_UID is the pod's own incarnation, from the
-// downward API.
+// pointer per secret into the boot projection. LEGION_GRANT_FILE names runtime.GrantFile on the
+// state volume, which is empty at start: the extension makes its directory. POD_UID is the pod's
+// own incarnation, from the downward API.
 func (r *Runtime) mainEnvironment(l launch, credentialHelper string) []corev1.EnvVar {
 	spec := l.spec
 	var env []corev1.EnvVar
@@ -504,6 +505,7 @@ func (r *Runtime) mainEnvironment(l launch, credentialHelper string) []corev1.En
 	add("PATH", workerBin+":"+legionDir+":"+imagePath)
 	add("PI_SHELL_PREFIX", shellprefix.For(workerBin, legionDir))
 	add("GIT_TERMINAL_PROMPT", "0")
+	add("LEGION_GRANT_FILE", runtime.GrantFile(StateDir, spec.Claim))
 	env = append(env, xdgEnvironment()...)
 	env = append(env, corev1.EnvVar{Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{
 		FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"},

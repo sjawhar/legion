@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -16,6 +17,17 @@ var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // IsEnvName reports whether name is one a shell accepts as an environment variable's.
 func IsEnvName(name string) bool { return envName.MatchString(name) }
+
+// GrantFile is the file an agent's LEGION_GRANT_FILE names under a runtime's state directory:
+// `<state_dir>/secrets/<claim>-grant` — under tmux beside the claim's other secret files, which the
+// daemon prunes it with, and in a pod on the worker container's memory-backed state volume. Every
+// runtime names it in the agent's environment from the process's start, because Oh My Pi copies
+// that environment once for every `gh` it runs to serve a pr:// or issue:// read, and none writes
+// it: the pi-envoy extension writes a fresh grant there before each tool call that redeems one, and
+// `legion credential`, `legion gh` and `legion handoff complete` read it.
+func GrantFile(stateDir string, token claim.Token) string {
+	return filepath.Join(stateDir, "secrets", string(token)+"-grant")
+}
 
 // ValidateSpawnSpec is the refusal every runtime makes before anything touches its disk, its
 // server, or its cluster: a spec it could not honour exactly. runtimeOwned is the runtime's own

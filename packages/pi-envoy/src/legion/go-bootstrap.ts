@@ -1,4 +1,3 @@
-import path from "node:path";
 import { messageFor } from "@legion/envoy-client/errors";
 import { legionNoticeSubject, type LegionRole } from "@legion/contracts";
 import pkg from "../../package.json";
@@ -181,7 +180,6 @@ export async function bootstrapGoClaim(
     try {
       const stateDir = requiredEnvironment(process.env, "LEGION_STATE_DIR");
       await exportJjSessionAttribution(sessionFile, stateDir);
-      process.env.LEGION_GRANT_FILE = path.join(stateDir, "secrets", `${claim.claimToken}-grant`);
       state.setCapability({
         kind: "phase-worker",
         sessionID,

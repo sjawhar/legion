@@ -498,7 +498,7 @@ Volumes and mounts:
 | `providers` | Secret `legion-<project>-providers` (read-only) | `/var/run/legion/providers` | main |
 | `boot` | the per-pod Secret, one key per secret the daemon delivers: `LEGION_BOOT_TOKEN`, and `ENVOY_TOKEN` when the daemon has an Envoy bearer (read-only) | `/var/run/legion/boot` | main |
 | `provision` | the per-pod Secret, key `LEGION_PROVISION_TOKEN` (read-only) | `/var/run/legion/provision` | init only |
-| `grant` | memory-backed `emptyDir` (1Mi) | `/var/run/legion/grant` | main — where the extension writes each bash command's grant |
+| `grant` | memory-backed `emptyDir` (1Mi) | `/var/run/legion/grant` | main — where the extension writes the grant it mints before each bash command and each tool call Oh My Pi serves with `gh` |
 
 The main container's environment is the same set of variables a tmux pane carries, with every value
 that was a daemon-machine path re-pointed at its pod location:

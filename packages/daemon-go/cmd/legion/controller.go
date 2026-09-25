@@ -217,7 +217,7 @@ func controllerEnvironment(cfg config.ControllerConfig, stateDir, token, secretF
 		{"GH_TOKEN", ""},
 		{"GITHUB_TOKEN", ""},
 		{"GH_HOST", ""},
-		{"LEGION_GRANT_FILE", filepath.Join(stateDir, "secrets", token+"-grant")},
+		{"LEGION_GRANT_FILE", runtime.GrantFile(stateDir, legionclaim.Token(token))},
 	}
 	if cfg.DispatchURL != "" {
 		env = append(env, [2]string{"DISPATCH_URL", cfg.DispatchURL}, [2]string{"DISPATCH_TOKEN_FILE", cfg.DispatchTokenFile})

@@ -161,6 +161,10 @@
                 "value": "0"
               },
               {
+                "name": "LEGION_GRANT_FILE",
+                "value": "/var/run/legion/state/secrets/legion-legion-legion-208-tester-grant"
+              },
+              {
                 "name": "XDG_CONFIG_HOME",
                 "value": "/home/legion/.config"
               },

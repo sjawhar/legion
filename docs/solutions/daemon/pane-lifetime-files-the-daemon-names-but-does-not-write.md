@@ -26,8 +26,9 @@ related_issues:
 pane launches and pruned when the pane's locator clears
 ([secret-file-pointer-precedence](../integration-patterns/secret-file-pointer-precedence.md)).
 LEGION-54 added a second file with a different author: `<role token>-grant`, named on the pane as
-`LEGION_GRANT_FILE` at spawn, **written by the pi-envoy extension** before each bash command and
-each `handoff_complete` tool call, read by `legion credential`/`legion gh`/`legion handoff complete`,
+`LEGION_GRANT_FILE` at spawn, **written by the pi-envoy extension** before each bash command, each
+`handoff_complete` tool call, and each tool call Oh My Pi serves by running `gh` (a `pr://` or
+`issue://` read, its `github` tool; LEGION-262), read by `legion credential`/`legion gh`/`legion handoff complete`,
 and pruned by the daemon exactly like the boot token. The daemon never writes it and cannot know
 when it first appears. That changes three things about how the lifecycle is kept; they are the
 reusable part.
