@@ -239,9 +239,10 @@ func replayGitHubDecision(input json.RawMessage) ([]byte, error) {
 			deleted = true
 		}
 	case "push":
+		login := decoded.Config.ReviewAppLogin
 		pr = ApplyPush(pr, stringValue(payload, "after"), ClassifyPush(PushPayload{
 			ChangedPaths: optionalString(payload, "changed_paths"), ChangedPathsTruncated: optionalString(payload, "changed_paths_truncated"),
-		}))
+		}), login != "" && stringValue(payload, "pusher") == login)
 	case "review":
 		pr = ApplyReview(pr, lowerASCII(stringValue(payload, "state")), stringValue(payload, "commit_id"))
 	case "checks":
@@ -352,6 +353,7 @@ type fixturePullRequest struct {
 	Reconciled          bool                 `json:"ciReconciled"`
 	PendingPush         *record.PendingPush  `json:"pendingPush"`
 	HeadCounted         *bool                `json:"headCounted"`
+	PlannedRed          bool                 `json:"plannedRed"`
 }
 
 func (fixture fixturePullRequest) record() record.PullRequest {
@@ -379,7 +381,7 @@ func (fixture fixturePullRequest) record() record.PullRequest {
 		HeadUpdatedAt: timestampJSON(fixture.HeadUpdatedAt), HeadUpdatedAtSource: fixture.HeadUpdatedAtSource, Verdict: fixture.Verdict,
 		Failing: append([]string{}, fixture.Failing...), FailingStatuses: append([]string{}, fixture.FailingStatuses...), ReviewDecision: fixture.ReviewDecision,
 		FixAttempts: fixture.FixAttempts, BlockedAttempts: blocked, CheckRuns: checkRuns, Generation: generation, Snapshot: snapshot,
-		Reconciled: fixture.Reconciled, PendingPush: fixture.PendingPush, HeadCounted: headCounted}
+		Reconciled: fixture.Reconciled, PendingPush: fixture.PendingPush, HeadCounted: headCounted, PlannedRed: fixture.PlannedRed}
 }
 
 type fixtureHeadClock struct {
@@ -442,6 +444,7 @@ type fixtureGithubInput struct {
 		Projects map[string]struct {
 			Repo string `json:"repo"`
 		} `json:"projects"`
+		ReviewAppLogin string `json:"reviewAppLogin"`
 	} `json:"config"`
 }
 

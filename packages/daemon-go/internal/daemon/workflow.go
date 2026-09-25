@@ -73,14 +73,19 @@ var appMintRetry = bootprobe.Retry{Initial: 5 * time.Second, Max: 30 * time.Seco
 // mintAtBoot mints the implement and then the review App token for owner, as one attempt run again
 // after a failure GitHub reports as its own trouble (appauth.TransientError); any other failure is
 // refused at once. The token manager keeps a lease it minted, so an attempt after the implement
-// token passed asks GitHub only for the review token.
-func mintAtBoot(ctx context.Context, tokens appauth.Tokens, owner string, log *slog.Logger) error {
-	return bootprobe.Run(ctx, "GitHub App tokens mint", appMintRetry, log, func(ctx context.Context) bootprobe.Outcome {
+// token passed asks GitHub only for the review token. It returns the review App's bot login from
+// its lease: the engine judges a push by its pusher against it, so one App configured for both
+// roles would make every implementer push the review App's and count no fix attempt, and is
+// refused.
+func mintAtBoot(ctx context.Context, tokens appauth.Tokens, owner string, log *slog.Logger) (string, error) {
+	logins := map[appauth.AppRole]string{}
+	err := bootprobe.Run(ctx, "GitHub App tokens mint", appMintRetry, log, func(ctx context.Context) bootprobe.Outcome {
 		attempt, cancel := context.WithTimeout(ctx, appMintAttempt)
 		defer cancel()
 		for _, role := range []appauth.AppRole{appauth.Implement, appauth.Review} {
-			_, err := tokens.Token(attempt, role, owner)
+			lease, err := tokens.Token(attempt, role, owner)
 			if err == nil {
+				logins[role] = lease.Identity.Name
 				continue
 			}
 			err = fmt.Errorf("mint %s GitHub App token at boot: %w", role, err)
@@ -92,6 +97,13 @@ func mintAtBoot(ctx context.Context, tokens appauth.Tokens, owner string, log *s
 		}
 		return bootprobe.Outcome{Passed: true}
 	})
+	if err != nil {
+		return "", err
+	}
+	if logins[appauth.Review] == "" || logins[appauth.Review] == logins[appauth.Implement] {
+		return "", fmt.Errorf("the review App's token lease names bot login %q and the implement App's %q; the workflow needs two different Apps", logins[appauth.Review], logins[appauth.Implement])
+	}
+	return logins[appauth.Review], nil
 }
 
 func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, projectID string, log *slog.Logger, suppliedTokens appauth.Tokens) (*workflowRuntime, error) {
@@ -107,13 +119,14 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	if tokens == nil {
 		tokens = appauth.New(cfg.GitHubApps, appauth.Options{})
 	}
-	if err := mintAtBoot(ctx, tokens, owner, log); err != nil {
+	reviewAppLogin, err := mintAtBoot(ctx, tokens, owner, log)
+	if err != nil {
 		return nil, err
 	}
 	log.Info("legion workflow boot stage", "stage", "appauth")
 	// The database is shared by every project's daemon: the workflow reads this project's issues.
 	records := projectRecords{Store: record.NewStore(), project: cfg.Project}
-	engine := workflow.New(records, engineConfig(cfg), log)
+	engine := workflow.New(records, engineConfig(cfg, reviewAppLogin), log)
 	admission := admit.New(records, cfg.AdmissionCap, cfg.Project, log)
 	return &workflowRuntime{
 		pool: st.Pool(), records: records, engine: engine, admission: admission,
@@ -123,11 +136,12 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	}, nil
 }
 
-// engineConfig is the workflow engine's configuration from the daemon's.
-func engineConfig(cfg config.Config) workflow.Config {
+// engineConfig is the workflow engine's configuration from the daemon's and the review App's bot
+// login from its boot lease.
+func engineConfig(cfg config.Config, reviewAppLogin string) workflow.Config {
 	return workflow.Config{
 		Project: cfg.Project, DesignGate: cfg.Gates.Design, ReviewRoundCap: cfg.ReviewRoundCap,
-		MaxFixAttempts: cfg.MaxFixAttempts, Linger: cfg.Linger,
+		MaxFixAttempts: cfg.MaxFixAttempts, Linger: cfg.Linger, ReviewAppLogin: reviewAppLogin,
 	}
 }
 

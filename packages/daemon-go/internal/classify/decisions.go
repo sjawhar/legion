@@ -2,19 +2,25 @@ package classify
 
 import "github.com/sjawhar/legion/daemon/internal/record"
 
-// AdvancePullRequestHead applies the shipped resetPrHead decision to a new observed head. A red
-// prior verdict counts once unless the matching push was handoff-only; all head-scoped state is
-// reset regardless of its source.
+// AdvancePullRequestHead applies the shipped resetPrHead fix-attempt decision to a new observed
+// head. A red prior verdict counts once, unless the red was planned (PlannedRed: the review App's
+// red tests) or the matching push was handoff-only or the review App's. A code-changing head
+// decides the planned mark (the review App's sets it, anyone else's clears it); a handoff-only
+// head, or one whose push has not arrived (ApplyPush settles it), carries it. All other
+// head-scoped state is reset regardless of its source.
 func AdvancePullRequestHead(pr record.PullRequest, headSHA string) record.PullRequest {
-	handoffOnly := pr.PendingPush != nil && pr.PendingPush.SHA == headSHA && pr.PendingPush.HandoffOnly
+	var pending *record.PendingPush
 	if pr.PendingPush != nil && pr.PendingPush.SHA == headSHA {
-		pr.PendingPush = nil
+		pending, pr.PendingPush = pr.PendingPush, nil
 	}
-	if pr.Verdict == "red" && !handoffOnly {
+	if pr.Verdict == "red" && !pr.PlannedRed && (pending == nil || (!pending.HandoffOnly && !pending.ByReviewApp)) {
 		pr.FixAttempts++
 		pr.HeadCounted = headSHA
 	} else {
 		pr.HeadCounted = ""
+	}
+	if pending != nil && !pending.HandoffOnly {
+		pr.PlannedRed = pending.ByReviewApp
 	}
 	pr.HeadSHA = headSHA
 	pr.Verdict = ""
@@ -28,11 +34,15 @@ func AdvancePullRequestHead(pr record.PullRequest, headSHA string) record.PullRe
 	return pr
 }
 
-// ApplyPush stores a new-head push classification or takes back exactly the current head's
-// counted fix attempt when its late push is handoff-only.
-func ApplyPush(pr record.PullRequest, after string, classification PushClassification) record.PullRequest {
+// ApplyPush stores a new-head push classification or, for the current head, settles its planned
+// mark and takes back exactly its counted fix attempt when the late push is handoff-only or the
+// review App's (byReviewApp: its pusher is the review App's bot login).
+func ApplyPush(pr record.PullRequest, after string, classification PushClassification, byReviewApp bool) record.PullRequest {
 	if pr.HeadSHA == after {
-		if classification.HandoffOnly && pr.HeadCounted == after {
+		if !classification.HandoffOnly {
+			pr.PlannedRed = byReviewApp
+		}
+		if (classification.HandoffOnly || byReviewApp) && pr.HeadCounted == after {
 			if pr.BlockedAttempts == pr.FixAttempts {
 				pr.BlockedAttempts = 0
 			}
@@ -41,7 +51,7 @@ func ApplyPush(pr record.PullRequest, after string, classification PushClassific
 		}
 		return pr
 	}
-	pr.PendingPush = &record.PendingPush{SHA: after, HandoffOnly: classification.HandoffOnly, Unknown: classification.Unknown}
+	pr.PendingPush = &record.PendingPush{SHA: after, HandoffOnly: classification.HandoffOnly, Unknown: classification.Unknown, ByReviewApp: byReviewApp}
 	return pr
 }
 

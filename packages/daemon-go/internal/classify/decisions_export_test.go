@@ -24,7 +24,7 @@ func TestAdvancePullRequestHeadCountsRedFixAndConsumesHandoffClassification(t *t
 
 func TestApplyPushTakesBackOnlyTheCurrentHandoffOnlyCount(t *testing.T) {
 	counted := record.PullRequest{HeadSHA: "head", Verdict: "", FixAttempts: 3, BlockedAttempts: 3, HeadCounted: "head"}
-	got := ApplyPush(counted, "head", PushClassification{HandoffOnly: true})
+	got := ApplyPush(counted, "head", PushClassification{HandoffOnly: true}, false)
 	if got.FixAttempts != 2 || got.BlockedAttempts != 0 || got.HeadCounted != "" {
 		t.Fatalf("handoff-only take-back = %#v, want decremented unblocked head", got)
 	}
