@@ -268,6 +268,7 @@ func runState(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		state.Daemon.StartedAt.Format(time.RFC3339), state.Daemon.FirstBootAt.Format(time.RFC3339))
 	fmt.Fprintf(stdout, "admission: %d active, %d waiting, cap %d; %d issues\n",
 		len(state.Admission.Active), len(state.Admission.Waiting), state.Admission.Cap, len(state.Issues))
+	fmt.Fprintln(stdout, pendingSummary(state.PendingStatusWrites))
 	// In a pane, the issue record is what a relaunched worker re-reads.
 	if key := os.Getenv("LEGION_ISSUE"); key != "" {
 		issue, ok := state.Issues[key]
@@ -283,6 +284,22 @@ func runState(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		fmt.Fprintf(stdout, "issue %s:\n%s\n", key, record)
 	}
 	return 0
+}
+
+// pendingSummary is the one line an operator reads for the Dispatch status writes the daemon has
+// not finished: how many wait, and why the oldest — the one its issue's later writes wait behind —
+// has not landed.
+func pendingSummary(pending []api.PendingStatusWrite) string {
+	if len(pending) == 0 {
+		return "pending Dispatch status writes: none"
+	}
+	oldest := pending[0]
+	next := oldest.NextAt.UTC().Format(time.RFC3339)
+	if oldest.Attempts == 0 {
+		return fmt.Sprintf("pending Dispatch status writes: %d; the oldest, for %s, has not run yet, next at %s", len(pending), oldest.Issue, next)
+	}
+	return fmt.Sprintf("pending Dispatch status writes: %d; the oldest, for %s, has failed %d attempts, next at %s: %s",
+		len(pending), oldest.Issue, oldest.Attempts, next, oldest.LastError)
 }
 
 // stateAddress is where a daemon answers: the configured bind and port, with --port overriding

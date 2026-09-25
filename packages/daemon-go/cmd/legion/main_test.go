@@ -443,3 +443,47 @@ func TestStopRunsNoPrivateKeyCommand(t *testing.T) {
 		t.Fatalf("the private_key_command ran (marker stat: %v)", err)
 	}
 }
+
+// An operator reading plain `legion state` during a Dispatch outage is told how many status writes
+// wait and why the oldest has not landed: the count, the oldest's issue, its attempts, its next
+// attempt and its last error, on one line. With none waiting the line says so.
+func TestPlainStateSummarizesThePendingStatusWrites(t *testing.T) {
+	daemon := `"daemon":{"project":"LEGION","schemaVersion":6,"boots":1,"firstBootAt":"2026-09-23T00:00:00Z","startedAt":"2026-09-23T00:00:00Z"},` +
+		`"admission":{"cap":2,"active":[],"waiting":[]},"issues":{}`
+	for _, tc := range []struct {
+		name, pending, want string
+	}{
+		{
+			name: "two waiting",
+			pending: `[{"issue":"LEGION-208","payload":{"status":"testing"},"attempts":3,"nextAt":"2026-09-23T00:01:04Z","lastError":"Dispatch unavailable"},` +
+				`{"issue":"LEGION-209","payload":{"status":"retro"},"attempts":0,"nextAt":"2026-09-23T00:00:30Z"}]`,
+			want: "pending Dispatch status writes: 2; the oldest, for LEGION-208, has failed 3 attempts, next at 2026-09-23T00:01:04Z: Dispatch unavailable\n",
+		},
+		{
+			name:    "oldest not yet attempted",
+			pending: `[{"issue":"LEGION-209","payload":{"status":"retro"},"attempts":0,"nextAt":"2026-09-23T00:00:30Z"}]`,
+			want:    "pending Dispatch status writes: 1; the oldest, for LEGION-209, has not run yet, next at 2026-09-23T00:00:30Z\n",
+		},
+		{name: "none", pending: `[]`, want: "pending Dispatch status writes: none\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			served := "{" + daemon + `,"pendingStatusWrites":` + tc.pending + "}"
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(served))
+			}))
+			defer server.Close()
+			t.Chdir(t.TempDir())
+			t.Setenv("LEGION_DAEMON_URL", server.URL)
+			t.Setenv("LEGION_ISSUE", "")
+
+			var out, errb bytes.Buffer
+			if code := run(context.Background(), []string{"legion", "state"}, &out, &errb); code != 0 {
+				t.Fatalf("legion state = %d, stderr %q", code, errb.String())
+			}
+			if !strings.Contains(out.String(), tc.want) {
+				t.Fatalf("legion state printed %q, want the line %q", out.String(), tc.want)
+			}
+		})
+	}
+}
