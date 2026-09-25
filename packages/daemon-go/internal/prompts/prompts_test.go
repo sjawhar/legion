@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 )
@@ -20,6 +21,9 @@ func TestComposeOrdersSharedRolePartsBeforeTheGoDaemonPart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	// Every operation the Go tool gives an architect besides register_gate
+	// (packages/pi-envoy/src/legion/go-tools.ts), which a prompt that never names it leaves unused.
+	architectOperations := []string{"`release_children`", "`park_child`", "`rerun_child`", "`request_backward_move`", "`retry_or_escalate`", "`sign_off`", "`read_record`"}
 
 	for _, tc := range []struct {
 		name     string
@@ -29,8 +33,8 @@ func TestComposeOrdersSharedRolePartsBeforeTheGoDaemonPart(t *testing.T) {
 		goPart   string
 		contains []string
 	}{
-		{"root architect", claim.RoleArchitect, true, []string{"architect-root.md"}, "architect-root.md", []string{"Do not schedule a phase or call `spawn_worker`", "`register_gate`, `release_children`, `request_backward_move`, `retry_or_escalate`, `sign_off`, and `read_record`"}},
-		{"sub-architect", claim.RoleArchitect, false, []string{"architect.md"}, "architect.md", []string{"Do not schedule a phase or call `spawn_worker`", "`release_children`, `request_backward_move`, `retry_or_escalate`, `sign_off`, and `read_record`", "`register_gate` refuses a child issue"}},
+		{"root architect", claim.RoleArchitect, true, []string{"architect-root.md"}, "architect-root.md", append([]string{"Do not schedule a phase or call `spawn_worker`", "`register_gate`"}, architectOperations...)},
+		{"sub-architect", claim.RoleArchitect, false, []string{"architect.md"}, "architect.md", append([]string{"Do not schedule a phase or call `spawn_worker`", "`register_gate` refuses a child issue"}, architectOperations...)},
 		{"planner", claim.RolePlanner, false, []string{"core/common.md", "core/planner.md", "mechanics/headless.md", "planner.md"}, "planner.md", []string{`op: "handoff_complete"`}},
 		{"implementer", claim.RoleImplementer, false, []string{"core/common.md", "core/implementer.md", "mechanics/headless.md", "implementer.md"}, "implementer.md", []string{`op: "handoff_complete"`}},
 		{"tester", claim.RoleTester, false, []string{"core/common.md", "core/tester.md", "mechanics/headless.md", "tester.md"}, "tester.md", []string{`op: "handoff_complete"`, `verdict: "pass"`, `verdict: "fail"`}},
@@ -91,27 +95,45 @@ func TestNewRefusesEveryMissingSharedRolePrompt(t *testing.T) {
 	}
 }
 
-// Prompt files can survive a daemon restart. Re-materializing the embedded parts must not erase a
-// locally retained version because the role prompt was specified to be written once.
-func TestNewWritesEmbeddedGoPartOnlyOnce(t *testing.T) {
+// A state directory outlives the daemon binary that wrote its Go parts, so a boot of a newer daemon
+// finds the older daemon's words there. A part whose content is not the running binary's is
+// rewritten: a prompt that contradicts the daemon's own behaviour (who posts READY) is the defect,
+// and nothing treats these files as the operator's to edit (the operator's text is `instructions`).
+// A part already holding the running binary's content is left as it is, so an ordinary restart
+// writes nothing.
+func TestNewRewritesAGoPartTheRunningDaemonDidNotWrite(t *testing.T) {
 	rolesDir := completeRolesDir(t)
 	stateDir := t.TempDir()
 	if _, err := New(rolesDir, stateDir); err != nil {
 		t.Fatalf("first New: %v", err)
 	}
-	part := filepath.Join(stateDir, "prompts", "go", "tester.md")
-	if err := os.WriteFile(part, []byte("retained prompt\n"), 0o600); err != nil {
-		t.Fatalf("replace generated part: %v", err)
+	stale := filepath.Join(stateDir, "prompts", "go", "merger.md")
+	current := filepath.Join(stateDir, "prompts", "go", "tester.md")
+	if err := os.WriteFile(stale, []byte("an older daemon's merger prompt\n"), 0o600); err != nil {
+		t.Fatalf("write the older part: %v", err)
+	}
+	written := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	if err := os.Chtimes(current, written, written); err != nil {
+		t.Fatalf("date the current part: %v", err)
 	}
 	if _, err := New(rolesDir, stateDir); err != nil {
 		t.Fatalf("second New: %v", err)
 	}
-	got, err := os.ReadFile(part)
-	if err != nil {
-		t.Fatalf("read retained part: %v", err)
+	for _, name := range []string{"merger.md", "tester.md"} {
+		want, err := goParts.ReadFile("go/" + name)
+		if err != nil {
+			t.Fatalf("read embedded %s: %v", name, err)
+		}
+		got, err := os.ReadFile(filepath.Join(stateDir, "prompts", "go", name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		if string(got) != string(want) {
+			t.Errorf("%s after the second New = %q, want the running daemon's part", name, got)
+		}
 	}
-	if string(got) != "retained prompt\n" {
-		t.Errorf("generated part after second New = %q, want retained content", got)
+	if info, err := os.Stat(current); err != nil || !info.ModTime().Equal(written) {
+		t.Errorf("the part already holding the running daemon's content was written again: %v %v", info.ModTime(), err)
 	}
 }
 

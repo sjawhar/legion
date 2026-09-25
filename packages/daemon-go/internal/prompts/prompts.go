@@ -2,6 +2,7 @@
 package prompts
 
 import (
+	"bytes"
 	"embed"
 	"fmt"
 	"os"
@@ -102,8 +103,13 @@ func CheckRolePrompts(rolesDir string) error {
 }
 
 // New validates the complete shared role bundle (CheckRolePrompts), then writes each embedded
-// Go-specific prompt once below stateDir. The caller constructs it during daemon boot; retaining
-// the generated files gives a resumed pane the same prompt even after a restart.
+// Go-specific prompt below stateDir wherever the file there does not already hold it. The caller
+// constructs it during daemon boot. The files stay across restarts, since a resumed pane reads its
+// prompt from the same path, and they hold the running daemon's words: a state directory outlives
+// the binary that wrote it, and a part an older daemon wrote would tell agents what that daemon
+// did (who posts READY, which operations exist). The daemon owns these files; an operator's own
+// text is the deployment `instructions`. A part already holding the embedded content is not
+// written, so an ordinary restart changes nothing.
 func New(rolesDir, stateDir string) (*Composer, error) {
 	if err := CheckRolePrompts(rolesDir); err != nil {
 		return nil, err
@@ -114,15 +120,16 @@ func New(rolesDir, stateDir string) (*Composer, error) {
 		return nil, fmt.Errorf("create Go daemon prompt directory %s: %w", goDir, err)
 	}
 	for _, name := range []string{"architect-root.md", "architect.md", "planner.md", "implementer.md", "tester.md", "reviewer.md", "merger.md"} {
-		path := filepath.Join(goDir, name)
-		if _, err := os.Lstat(path); err == nil {
-			continue
-		} else if !os.IsNotExist(err) {
-			return nil, fmt.Errorf("inspect Go daemon prompt %s: %w", path, err)
-		}
 		body, err := goParts.ReadFile(filepath.Join("go", name))
 		if err != nil {
 			return nil, fmt.Errorf("read embedded Go daemon prompt %s: %w", name, err)
+		}
+		path := filepath.Join(goDir, name)
+		written, err := os.ReadFile(path)
+		if err == nil && bytes.Equal(written, body) {
+			continue
+		} else if err != nil && !os.IsNotExist(err) {
+			return nil, fmt.Errorf("inspect Go daemon prompt %s: %w", path, err)
 		}
 		if err := os.WriteFile(path, body, 0o600); err != nil {
 			return nil, fmt.Errorf("write Go daemon prompt %s: %w", path, err)
