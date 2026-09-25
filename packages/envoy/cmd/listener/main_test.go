@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -3801,11 +3800,9 @@ func TestSelfHealthRebuildsAnInterestWatcherThatEndedWhileConnected(t *testing.T
 	if _, err := other.Upsert(store.Interest{SessionID: "ses_after_rebuild", MachineID: "m1"}, []string{"notifications.rebuilt"}); err != nil {
 		t.Fatalf("write an interest after the rebuild: %v", err)
 	}
+	// Match reads only the cache, which is what delivery reads; Get would fall back to KV on a miss.
 	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if got, err := registry.Get("ses_after_rebuild"); err == nil && slices.Contains(got.Topics, "notifications.rebuilt") {
-			break
-		}
+	for len(registry.Match("m1", "notifications.rebuilt")) == 0 {
 		if time.Now().After(deadline) {
 			t.Fatal("the rebuilt registry's cache never saw an interest written after the rebuild")
 		}
