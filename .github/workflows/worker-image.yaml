@@ -37,7 +37,10 @@ on:
   # step and in the Go daemon's probe Sandbox, and every package they import — named whole, because a
   # hand-kept list of those packages already missed one; and so are the Go build inputs, since the
   # image compiles at go.work's Go version — a PR that raises it past the build stage's image must fail
-  # here, not in the next image build.
+  # here, not in the next image build. And so is the plugin the image installs, skills and agent
+  # definitions included: the final step's `legion probe-image` is the one pre-merge check that
+  # resolves every task agent and skill Legion's prompts name against what the plugin ships, so a PR
+  # that names one nothing ships fails here instead of merging and publishing the plugin.
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened]
@@ -47,7 +50,8 @@ on:
       - packages/daemon/src/cli/workspace-init.ts
       - packages/workspace/**
       - .github/workflows/worker-image.yaml
-      - packages/pi-envoy/roles/**
+      - packages/pi-envoy/**
+      - skills/**
       - packages/daemon-go/**
       - go.work
       - go.work.sum

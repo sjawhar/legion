@@ -241,9 +241,9 @@ concerns the local pointer stepping from the empty child to its described parent
 the described commit must hold exactly the paths you named.
 
 Related: a planner's, tester's, reviewer's, or architect's local commit in the shared workspace rides along on the
-implementer's next push — those roles act as the review App, which has no `contents` permission, and their `jj git
-push` is refused with `remote: Repository not found.` (not the REST API's `Resource not accessible by integration`;
-`../legion/one-role-keyed-table-decides-which-github-app-acts.md`). Verify with `jj log` that the commit is an
+implementer's next push — those roles act as the review App and never push (`../legion/one-role-keyed-table-decides-which-github-app-acts.md`;
+the `remote: Repository not found.` GitHub gave such a push before 2026-09-25 is gone, since App 3202653 now holds
+`contents: write`). Verify with `jj log` that the commit is an
 ancestor before building on it. On LEGION-131 (#1106) the tester's `test: record handoff` and the reviewer's
 `review: record handoff` sat unpushed above the implementer's reviewed head `9f55687a` until the implementer's
 `.legion/` deletion push carried all three; the architect's instruction named both commits and said "do not rewrite

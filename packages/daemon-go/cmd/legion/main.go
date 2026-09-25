@@ -102,9 +102,14 @@ func runStart(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 
 // checkStartConfig is `legion start --check-config`: every refusal the configuration's read at
 // boot makes, through the loader that runs neither GitHub App's private_key_command nor any
-// secretsd read, and nothing else — no store, no team, no process.
+// secretsd read, then the Sandbox runtime's refusal of an operator pod colliding with Legion's own
+// (sandbox.CheckPod, through daemon.CheckOperatorPod), and nothing else — no store, no team, no
+// process.
 func checkStartConfig(configPath string, stdout, stderr io.Writer) int {
 	cfg, err := config.LoadForValidation(configPath, nil)
+	if err == nil {
+		err = daemon.CheckOperatorPod(cfg)
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "legion start: %v\n", err)
 		return 1

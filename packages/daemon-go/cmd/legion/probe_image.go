@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -14,7 +13,8 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/daemon"
-	"github.com/sjawhar/legion/daemon/internal/modelroute"
+	"github.com/sjawhar/legion/daemon/internal/podsafety"
+	"github.com/sjawhar/legion/daemon/internal/prompts"
 )
 
 // digits is what --go-daemon-api-version accepts before it is read as a number.
@@ -28,18 +28,17 @@ var digits = regexp.MustCompile(`^[0-9]+$`)
 // (daemon.ProbeImage) and, when every one passes, prints bootprobe.OKLine; a failure is the
 // probe's message, exit 1, so a broken image never publishes. Unlike the TypeScript command, the
 // contract is always checked: bare, against this binary's own GoDaemonAPIVersion, which the
-// plugin packed from the same commit must declare. In the probe Sandbox, which the daemon routes
-// through the model gateway as it does every worker (LEGION_MODEL_GATEWAY_URL), it first writes
-// the route into the image's profile, as the worker shim does (modelroute.Install), then makes one
-// model round trip through it, and names the model that answered on the OK line, exiting
-// bootprobe.TransientExit when the gateway could not answer; the build has no gateway, makes no
-// round trip, and prints no model.
+// plugin packed from the same commit must declare. With --pod-safety, which the probe Sandbox
+// passes, the probes run Oh My Pi on the pod's baseline as a worker's shim starts it
+// (podsafety.Apply), its overlay written to a fresh temporary directory: the probe pod mounts no
+// state volume.
 func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := newFlags("probe-image", stderr)
 	omp := flags.String("omp", "", "the OMP executable to probe (default: $LEGION_OMP_PATH)")
 	contract := flags.String("go-daemon-api-version", strconv.Itoa(api.GoDaemonAPIVersion),
 		"the Go daemon API contract the image's pi-legion-envoy must declare (the daemon's probe Sandbox passes its own)")
 	pluginRoot := flags.String("plugin-root", "", "the plugin directory a pod loads as its one explicit extension; the load probe runs the same way")
+	podSafety := flags.Bool("pod-safety", false, "run the probes on a pod's baseline (internal/podsafety), as a pod's shim starts Oh My Pi")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
@@ -65,34 +64,37 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 		fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
 		return 1
 	}
-	installed, err := modelroute.Install(os.Environ())
+	rolesDir, err := prompts.ResolveRolePromptsDir(os.LookupEnv)
 	if err != nil {
 		fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
 		return 1
 	}
+	environ := os.Environ()
+	if *podSafety {
+		state, err := os.MkdirTemp("", "legion-probe-image-")
+		if err == nil {
+			defer os.RemoveAll(state)
+			environ, err = podsafety.Apply(environ, state)
+		}
+		if err != nil {
+			fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
+			return 1
+		}
+	}
 	env := map[string]string{}
-	for _, pair := range installed.Environ {
+	for _, pair := range environ {
 		if name, value, ok := strings.Cut(pair, "="); ok {
 			env[name] = value
 		}
 	}
-	route, model := installed.Route, ""
-	if route != "" {
-		model = modelroute.DefaultModel
-	}
 	err = daemon.ProbeImage(ctx, daemon.ImageProbe{
-		Omp: invocation, Contract: expected, Env: env, WorkDir: workDir, Model: model, Route: route, KeyFile: installed.KeyFile,
-		PluginRoot: *pluginRoot,
-		Log:        slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
+		Omp: invocation, Contract: expected, Env: env, WorkDir: workDir, PluginRoot: *pluginRoot, RolesDir: rolesDir,
+		Log: slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
 	})
-	if unavailable := (*daemon.ModelRouteUnavailable)(nil); errors.As(err, &unavailable) {
-		fmt.Fprintf(stderr, "legion probe-image: %v (transient: the daemon's probe runs again)\n", err)
-		return bootprobe.TransientExit
-	}
 	if err != nil {
 		fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
 		return 1
 	}
-	fmt.Fprintln(stdout, bootprobe.OKLine(invocation, model, expected))
+	fmt.Fprintln(stdout, bootprobe.OKLine(invocation, expected))
 	return 0
 }

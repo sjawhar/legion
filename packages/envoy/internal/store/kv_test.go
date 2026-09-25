@@ -588,7 +588,7 @@ func coldRegistry(t *testing.T, conn *natsgo.Conn) (*Registry, natsgo.KeyValue) 
 	if err != nil {
 		t.Fatalf("failed to create role KV bucket: %v", err)
 	}
-	return &Registry{kv: kv, roleKV: roleKV, cache: map[string]Interest{}}, kv
+	return &Registry{kv: kv, roleKV: roleKV, now: time.Now, cache: map[string]Interest{}}, kv
 }
 
 func TestGet_ColdCacheFallsBackToKV(t *testing.T) {
@@ -2035,4 +2035,33 @@ func TestMain(m *testing.M) {
 		}
 	}
 	os.Exit(code)
+}
+
+// The registry's clock stamps what it records: an interest's UpdatedAt and a role claim's
+// ClaimedAt come from the clock Open was given, as the grace window does.
+func TestTheRegistryClockStampsWhatItRecords(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	at := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
+	reg, err := Open(conn, WithReplicas(1), withTestBuckets(t), WithClock(func() time.Time { return at }))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	interest, err := reg.Upsert(Interest{SessionID: "ses_clock", MachineID: "m1"}, []string{"notifications.agent.ses_clock"})
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if interest.UpdatedAt != at.UnixMilli() {
+		t.Fatalf("interest UpdatedAt = %d, want the registry clock's %d", interest.UpdatedAt, at.UnixMilli())
+	}
+	if _, err := reg.SetRole("ses_clock", "m1", "clock-role", false); err != nil {
+		t.Fatalf("set role: %v", err)
+	}
+	claim, err := reg.RoleClaim("clock-role")
+	if err != nil {
+		t.Fatalf("role claim: %v", err)
+	}
+	if claim.ClaimedAt != at.UnixMilli() {
+		t.Fatalf("role ClaimedAt = %d, want the registry clock's %d", claim.ClaimedAt, at.UnixMilli())
+	}
 }

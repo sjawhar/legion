@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
+	"slices"
 	"strconv"
 	"time"
 
@@ -36,9 +38,9 @@ var workerImageTools = sandbox.Tools{GH: "/usr/local/bin/gh", Git: "/usr/bin/git
 
 // imageProbeRetry is how often the daemon tries its worker image again after an attempt that said
 // nothing definitive: the daemon's backoff, bounded like `legion probe-image`'s at six attempts.
-// The probe pod answers a failure it cannot tell from the network the same way every time (exit 75),
-// so an unbounded retry would hold a deterministic refusal, such as a memory limit too small for
-// the turn, as a boot that never ends.
+// Its transient outcomes (a pod that never finished, a kubelet failure) can repeat for a reason no
+// wait changes, such as a memory limit too small for Oh My Pi, so an unbounded retry would hold a
+// deterministic refusal as a boot that never ends.
 var imageProbeRetry = bootprobe.Image
 
 // prepareSandbox is what Agent Sandbox needs before anything is opened (C1's translation, C3):
@@ -46,8 +48,8 @@ var imageProbeRetry = bootprobe.Image
 // configuration becomes, the worker stream on tcp://<bind>:<worker_stream_port> (the address
 // every pod's shim dials), and the image probe. None of the host's own agent machinery runs: no Oh
 // My Pi invocation or plugin gate (the image probe proves the image's), no Dispatch token file (a
-// pod reads its bearer from its claim's Secret), no provider keys (a pod reaches the model through
-// the gateway alone), and no host gh, git, or jj (a pod runs the image's).
+// pod reads its bearer from its claim's Secret), no secretsd provider keys (a pod mounts its keys
+// from the providers Secret), and no host gh, git, or jj (a pod runs the image's).
 func prepareSandbox(cfg config.Config, log *slog.Logger, o overrides, dispatchToken string, p *plan) error {
 	k := *cfg.Runtime.Kubernetes
 	rc, err := kubeClient(k)
@@ -55,6 +57,9 @@ func prepareSandbox(cfg config.Config, log *slog.Logger, o overrides, dispatchTo
 		return err
 	}
 	p.stream = "tcp://" + net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.WorkerStreamPort))
+	if err := CheckOperatorPod(cfg); err != nil {
+		return err
+	}
 	opts, err := sandboxOptions(cfg, k, p.project, p.stream, dispatchToken, log)
 	if err != nil {
 		return err
@@ -70,7 +75,7 @@ func prepareSandbox(cfg config.Config, log *slog.Logger, o overrides, dispatchTo
 			return fmt.Errorf("the image probe needs the Agent Sandbox runtime, not %T", rt)
 		}
 		return sandboxed.ProbeImage(ctx, sandbox.ImageProbe{
-			Contract: api.GoDaemonAPIVersion, StateDir: cfg.StateDir, Budget: imageProbeBudget(cfg.SlowCommandTimeout),
+			Contract: api.GoDaemonAPIVersion, StateDir: cfg.StateDir, Budget: cfg.SlowCommandTimeout,
 			Retry: imageProbeRetry, APIServer: rc.Host,
 		})
 	}
@@ -137,11 +142,11 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, stream, dis
 		Resources:  resources,
 		StreamURL:  stream,
 		DaemonURL:  cfg.DaemonURL, EnvoyURL: cfg.EnvoyURL, DispatchURL: cfg.DispatchURL, DispatchToken: dispatchToken,
-		NATSURLs: cfg.NatsURLs,
-		Tools:    workerImageTools,
-		Gateway: sandbox.Gateway{
-			URL: k.Gateway.URL, Audience: k.Gateway.Audience, ServiceAccount: k.Gateway.ServiceAccount, TokenExpiry: k.Gateway.TokenExpiry,
-		},
+		NATSURLs:         cfg.NatsURLs,
+		Tools:            workerImageTools,
+		Pod:              sandbox.Pod(k.Pod),
+		ProviderKeys:     providerSecretKeys(cfg.ProviderKeys),
+		LaunchSecrets:    launchSecretNames(cfg),
 		BootTimeout:      cfg.WorkerBootTimeout,
 		BootIntervals:    cfg.WorkerBootRegistrationDeadlineIntervals,
 		TerminationGrace: cfg.WorkerStopTimeout,
@@ -149,6 +154,36 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, stream, dis
 		AdoptTimeout:     cfg.SlowCommandTimeout,
 		Log:              log,
 	}, nil
+}
+
+// CheckOperatorPod is the Sandbox runtime's refusal of an operator pod or provider key that
+// collides with Legion's own (sandbox.CheckPod) over the configuration, run before anything is
+// opened: boot runs it, and so does `legion start --check-config`, which starts no runtime.
+func CheckOperatorPod(cfg config.Config) error {
+	if cfg.Runtime.Kubernetes == nil {
+		return nil
+	}
+	return sandbox.CheckPod(sandbox.Pod(cfg.Runtime.Kubernetes.Pod), providerSecretKeys(cfg.ProviderKeys),
+		workerImageTools, launchSecretNames(cfg))
+}
+
+// launchSecretNames are the names of the secrets every launch's spec carries (launchSecrets), which
+// the runtime refuses the operator's pod and a provider key for.
+func launchSecretNames(cfg config.Config) []string {
+	return slices.Sorted(maps.Keys(launchSecrets(cfg)))
+}
+
+// providerSecretKeys are provider_keys as the runtime takes them: each variable Oh My Pi reads,
+// to the key of the providers Secret that holds it; nil when the file names none.
+func providerSecretKeys(keys []config.ProviderKey) map[string]string {
+	if len(keys) == 0 {
+		return nil
+	}
+	secretKeys := make(map[string]string, len(keys))
+	for _, key := range keys {
+		secretKeys[key.Env] = key.Secret
+	}
+	return secretKeys
 }
 
 // roleRequirements is one role's configured requests and limits as a container's, refusing a
@@ -225,12 +260,4 @@ func (t implementTokens) Token(ctx context.Context, owner string) (string, error
 		return "", err
 	}
 	return lease.Token, nil
-}
-
-// imageProbeBudget is one image-probe attempt's wait for the probe pod: the slow-command budget
-// for the pod's start and its launch probes, with the pod's model turn, which `legion probe-image`
-// bounds on its own (modelTurnTimeout), on top, so the attempt outlasts the turn however the budget
-// is configured.
-func imageProbeBudget(slowCommand time.Duration) time.Duration {
-	return slowCommand + modelTurnTimeout
 }

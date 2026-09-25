@@ -151,13 +151,7 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 	if workflow != nil {
 		plan.identity = workflow.identity
 	}
-	rolesDir, err := prompts.ResolveRolePromptsDir(os.LookupEnv)
-	if err != nil {
-		workflow.stop()
-		st.Close()
-		return fmt.Errorf("resolve role prompts: %w", err)
-	}
-	plan.prompts, err = prompts.New(rolesDir, cfg.StateDir)
+	plan.prompts, err = prompts.New(plan.rolesDir, cfg.StateDir)
 	if err != nil {
 		workflow.stop()
 		st.Close()
@@ -305,6 +299,9 @@ type plan struct {
 	// dispatchToken is the Dispatch bearer dispatch_token_file names; "" without Dispatch.
 	dispatchToken string
 	prompts       *prompts.Composer
+	// rolesDir is the role prompts directory (prompts.ResolveRolePromptsDir), resolved before the
+	// gate, which resolves every task agent and skill its prompts name.
+	rolesDir string
 	// stream is the worker stream's address: the listener binds it, and every agent's shim dials it.
 	stream     string
 	newRuntime runtimeFactory
@@ -340,12 +337,12 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 		return plan{}, err
 	}
 	secrets := map[string]string{}
-	if cfg.EnvoyTokenFile != "" {
-		envoyToken, err := config.ReadSecretPointer("envoy_token_file", cfg.EnvoyTokenFile)
+	for name, pointer := range launchSecrets(cfg) {
+		value, err := config.ReadSecretPointer(pointer.key, pointer.file)
 		if err != nil {
 			return plan{}, err
 		}
-		secrets["ENVOY_TOKEN"] = envoyToken
+		secrets[name] = value
 	}
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 		return plan{}, fmt.Errorf("create state directory %s: %w", cfg.StateDir, err)
@@ -371,9 +368,13 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 	if orphanSweep == 0 {
 		orphanSweep = orphanSweepInterval
 	}
+	rolesDir, err := prompts.ResolveRolePromptsDir(os.LookupEnv)
+	if err != nil {
+		return plan{}, fmt.Errorf("resolve role prompts: %w", err)
+	}
 	p := plan{
 		project: project, operatorToken: operatorToken, secrets: secrets, instructions: instructions,
-		dispatchToken: dispatchToken, clock: clock, orphanSweep: orphanSweep,
+		dispatchToken: dispatchToken, rolesDir: rolesDir, clock: clock, orphanSweep: orphanSweep,
 	}
 	switch cfg.Runtime.Name {
 	case "tmux":
@@ -387,6 +388,18 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 		return plan{}, err
 	}
 	return p, nil
+}
+
+// secretPointer is a configuration key naming a secret's file, and the file.
+type secretPointer struct{ key, file string }
+
+// launchSecrets are the secrets every launch's spec carries (specs.SpawnSpec), each by its name and
+// the key and file the configuration reads it from: the Envoy bearer, when the daemon has one.
+func launchSecrets(cfg config.Config) map[string]secretPointer {
+	if cfg.EnvoyTokenFile == "" {
+		return nil
+	}
+	return map[string]secretPointer{"ENVOY_TOKEN": {"envoy_token_file", cfg.EnvoyTokenFile}}
 }
 
 // prepareTmux is what panes on this host need: the OMP invocation every pane runs and the plugin
@@ -414,6 +427,7 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 			timeout:    cfg.SlowCommandTimeout,
 			retry:      bootprobe.Daemon,
 			contract:   api.GoDaemonAPIVersion,
+			rolesDir:   p.rolesDir,
 			log:        log,
 		}.verify
 		log.Info("legion daemon resolved OMP invocation for boot probes and panes", "invocation", invocation)
@@ -546,7 +560,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 	sup.deps = supervise.Deps{
 		Runtime: rt,
 		Conns:   listener,
-		Store:   pruning(tokens.Recording(st), filepath.Join(cfg.StateDir, secretsDir), log),
+		Store:   pruning(tokens.Recording(st), runtime.SecretsDir(cfg.StateDir), log),
 		Specs: specs{
 			stateDir: cfg.StateDir, project: p.project, instructions: p.instructions, secrets: p.secrets, repo: repo, prompts: p.prompts,
 			identity: p.identity,
@@ -589,7 +603,7 @@ func (s *supervision) start(boot context.Context) error {
 	if err != nil {
 		return err
 	}
-	pruneAllBut(filepath.Join(s.cfg.StateDir, secretsDir), s.claims, s.log)
+	pruneAllBut(runtime.SecretsDir(s.cfg.StateDir), s.claims, s.log)
 	if s.reconcileBootOrphans(boot) {
 		s.launchUnfinished(unfinished)
 	} else if len(unfinished) > 0 {

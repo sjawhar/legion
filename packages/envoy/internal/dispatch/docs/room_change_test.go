@@ -105,7 +105,7 @@ func TestAnAnchorWhoseQuoteTheRoomDeletedIsOrphanedByTheVersionWrite(t *testing.
 	}
 	editLiveTree(t, service, artifactID, dropBlock(t, "the anchored quote paragraph"))
 
-	if _, err := service.SnapshotVersion(joinedCtx, tx, artifactID, alice); err != nil {
+	if _, err := service.SnapshotVersion(joinedCtx, artifactID, alice); err != nil {
 		t.Fatalf("snapshot version: %v", err)
 	}
 	var encoded []byte

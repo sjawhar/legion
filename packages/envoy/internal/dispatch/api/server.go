@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -78,8 +79,11 @@ type DepsInput struct {
 	DefaultProject  string
 	ServerURL       string
 	EnvoyURL        string
-	Docs            docs.API
-	Events          *events.Broker
+	// EnvoyTimeout replaces the listener client's window. Zero keeps the client's own default;
+	// a test exercising a receipt timeout sets a short one rather than waiting that out.
+	EnvoyTimeout time.Duration
+	Docs         docs.API
+	Events       *events.Broker
 	// App is the loaded GitHub App credentials (nil when unconfigured);
 	// GitHubAPIBase overrides the GitHub API origin (DISPATCH_GITHUB_API_BASE).
 	App              *auth.AppConfig
@@ -111,7 +115,11 @@ func NewDeps(input DepsInput) (Deps, error) {
 	}
 	var envoyClient *envoy.Client
 	if envoyURL := strings.TrimSpace(input.EnvoyURL); envoyURL != "" {
-		envoyClient = envoy.New(envoyURL)
+		var options []envoy.Option
+		if input.EnvoyTimeout > 0 {
+			options = append(options, envoy.WithTimeout(input.EnvoyTimeout))
+		}
+		envoyClient = envoy.New(envoyURL, options...)
 	}
 	github, err := githubapp.New(input.App, input.GitHubAPIBase)
 	if err != nil {
@@ -260,6 +268,11 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 	var invalidAskBlock *docs.ErrInvalidAskBlock
 	if errors.As(err, &invalidAskBlock) {
 		writeError(w, "INVALID_ASK_BLOCK", http.StatusBadRequest, invalidAskBlock.Error())
+		return
+	}
+	var unrepresentableAsk *docs.ErrAskBlockUnrepresentable
+	if errors.As(err, &unrepresentableAsk) {
+		writeError(w, "ASK_BLOCK_TEXT", http.StatusBadRequest, unrepresentableAsk.Error())
 		return
 	}
 	var invalidOp *docs.ErrInvalidOp
@@ -545,14 +558,6 @@ func (s *server) publish(events ...model.Event) {
 	for _, event := range events {
 		s.deps.Events.Publish(event)
 	}
-}
-
-// publishDocumentEvents publishes the events a committed transaction's document operations
-// appended (ledger.Events), then events. Handlers call it once ledger.Commit has returned, which
-// has already applied the transaction's live document writes to their rooms.
-func (s *server) publishDocumentEvents(ledger *docs.Ledger, events ...model.Event) {
-	s.publish(ledger.Events()...)
-	s.publish(events...)
 }
 
 func (s *server) begin(ctx context.Context) (pgx.Tx, error) {

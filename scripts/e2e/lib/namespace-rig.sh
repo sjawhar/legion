@@ -25,12 +25,16 @@
 # run's process group, where a Ctrl-C reaches it).
 op() { timeout --foreground 300 kubectl --context "$operator" -n "$namespace" "$@"; }
 
-# snapshot FILE: the namespace's Sandboxes, Secrets, PVCs, and pods that carry this run's project
-# label or no project label at all, as the operator sees them.
+# kinds are what a run creates: the runtime's Sandboxes, their Secrets, PVCs and pods, and the
+# ConfigMaps an operator's pod mounts.
+kinds=sandboxes,secrets,pvc,pods,configmaps
+
+# snapshot FILE: the namespace's objects of those kinds that carry this run's project label or no
+# project label at all, as the operator sees them.
 snapshot() {
   {
-    op get sandboxes,secrets,pvc,pods -l '!legion.dev/project' -o name
-    op get sandboxes,secrets,pvc,pods -l "legion.dev/project=$run_label" -o name
+    op get "$kinds" -l '!legion.dev/project' -o name
+    op get "$kinds" -l "legion.dev/project=$run_label" -o name
   } | sort >"$1"
 }
 
@@ -60,8 +64,10 @@ teardown() {
     done < <(sort -u "$record")
   fi
   op delete sandboxes -l "legion.dev/project=$run_label" --ignore-not-found --wait=false || true
+  # No Sandbox owns an operator's ConfigMap; a pod still mounting it keeps its files until it goes.
+  op delete configmaps -l "legion.dev/project=$run_label" --ignore-not-found --wait=false || true
   for i in $(seq 1 150); do
-    if ! left=$(op get sandboxes,secrets,pvc,pods -l "legion.dev/project=$run_label" -o name 2>"$work/teardown.err"); then
+    if ! left=$(op get "$kinds" -l "legion.dev/project=$run_label" -o name 2>"$work/teardown.err"); then
       # A transient API error is waited out; three in a row mean the context cannot answer.
       failures=$((failures + 1))
       if [ "$failures" -ge 3 ]; then
@@ -92,6 +98,6 @@ namespace_clean() {
   if ! diff -u "$evidence/namespace-before.txt" "$evidence/namespace-after.txt"; then
     fail "namespace $namespace differs from its snapshot (restricted to project $run_label and unlabelled objects)"
   fi
-  note "[operator] $(wc -l <"$evidence/namespace-after.txt") objects before and after, identical (unlabelled or project $run_label; sandboxes, secrets, pvc, pods)"
+  note "[operator] $(wc -l <"$evidence/namespace-after.txt") objects before and after, identical (unlabelled or project $run_label; $kinds)"
   pass
 }

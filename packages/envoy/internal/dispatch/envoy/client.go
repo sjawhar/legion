@@ -8,15 +8,24 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
 // ErrUnavailable reports that the Envoy listener could not serve a request.
 var ErrUnavailable = errors.New("envoy listener unavailable")
+
+// ErrReceiptTimeout reports a send the listener never answered within the client's window. It
+// is the one failure that says nothing about whether the message landed: the listener publishes
+// the envelope before it answers (cmd/listener/api.go), so the agent may already hold it. Only
+// the send path returns it; a resolution lookup that times out sent nothing.
+var ErrReceiptTimeout = errors.New("envoy listener did not answer the send in time")
 
 // ErrNotFound reports that the listener has no record of the requested session.
 var ErrNotFound = errors.New("envoy listener: session not found")
@@ -49,10 +58,13 @@ type SendInput struct {
 	ExpectsReply   string
 }
 
-// SendResult identifies the listener envelope emitted for a successful delivery.
+// SendResult identifies the listener envelope emitted for a successful delivery. Duplicate
+// reports that the stream already held this message, so nothing new reached the agent; the
+// envelope id then names an envelope JetStream discarded.
 type SendResult struct {
 	EnvelopeID string
 	Recipient  string
+	Duplicate  bool
 }
 
 // Client reads live session metadata from the Envoy listener.
@@ -62,15 +74,32 @@ type Client struct {
 	httpClient *http.Client
 }
 
+// defaultTimeout is the window every listener call gets. A send that misses it is
+// ErrReceiptTimeout rather than a plain failure, because the envelope may already be published.
+const defaultTimeout = 5 * time.Second
+
+// Option configures a Client.
+type Option func(*Client)
+
+// WithTimeout replaces the window every listener call gets. Tests use it to exercise a receipt
+// timeout without waiting out the production window.
+func WithTimeout(timeout time.Duration) Option {
+	return func(c *Client) { c.httpClient.Timeout = timeout }
+}
+
 // New returns a client for an Envoy listener's HTTP control API.
-func New(baseURL string) *Client {
-	return &Client{
+func New(baseURL string, options ...Option) *Client {
+	client := &Client{
 		baseURL:  strings.TrimSuffix(baseURL, "/"),
 		apiToken: os.Getenv("ENVOY_TOKEN"),
 		httpClient: &http.Client{
-			Timeout: 5 * time.Second,
+			Timeout: defaultTimeout,
 		},
 	}
+	for _, option := range options {
+		option(client)
+	}
+	return client
 }
 
 func (c *Client) authorize(request *http.Request) {
@@ -271,6 +300,13 @@ func (c *Client) Send(ctx context.Context, input SendInput) (SendResult, error) 
 	if err != nil {
 		return SendResult{}, fmt.Errorf("encode POST /v1/messages/send body: %w", err)
 	}
+	// written records that this client finished putting the request on the wire, which is what
+	// separates a listener that went quiet (the envelope may be published) from a connection
+	// that never came up (nothing was). Both surface as the same client-timeout error.
+	var written atomic.Bool
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		WroteRequest: func(info httptrace.WroteRequestInfo) { written.Store(info.Err == nil) },
+	})
 	request, err := http.NewRequestWithContext(
 		ctx, http.MethodPost, c.baseURL+"/v1/messages/send", bytes.NewReader(body),
 	)
@@ -281,7 +317,7 @@ func (c *Client) Send(ctx context.Context, input SendInput) (SendResult, error) 
 	c.authorize(request)
 	response, err := c.httpClient.Do(request)
 	if err != nil {
-		return SendResult{}, fmt.Errorf("%w: POST /v1/messages/send: %v", ErrUnavailable, err)
+		return SendResult{}, sendTransportError(err, written.Load())
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
@@ -290,11 +326,30 @@ func (c *Client) Send(ctx context.Context, input SendInput) (SendResult, error) 
 	var result struct {
 		EnvelopeID string `json:"event_id"`
 		Recipient  string `json:"recipient"`
+		Duplicate  bool   `json:"duplicate"`
 	}
 	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
 		return SendResult{}, fmt.Errorf("%w: decode POST /v1/messages/send response: %v", ErrUnavailable, err)
 	}
-	return SendResult{EnvelopeID: result.EnvelopeID, Recipient: result.Recipient}, nil
+	return SendResult{
+		EnvelopeID: result.EnvelopeID, Recipient: result.Recipient, Duplicate: result.Duplicate,
+	}, nil
+}
+
+// sendTransportError classifies what stopped a send from being answered. Only a request this
+// client finished writing can have reached the listener, and only that one may be
+// ErrReceiptTimeout - the class that tells a human the message may already have been published
+// and a same-mode retry is therefore safe. A connect that timed out wrote nothing, and reports
+// the same "Client.Timeout exceeded while awaiting headers" text as a listener that went quiet,
+// so the text cannot tell them apart; requestWritten can. The cause is wrapped, not formatted,
+// so a caller can ask the same question again.
+func sendTransportError(err error, requestWritten bool) error {
+	var timeout net.Error
+	timedOut := errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &timeout) && timeout.Timeout())
+	if requestWritten && timedOut {
+		return fmt.Errorf("%w: %w: POST /v1/messages/send: %w", ErrUnavailable, ErrReceiptTimeout, err)
+	}
+	return fmt.Errorf("%w: POST /v1/messages/send: %w", ErrUnavailable, err)
 }
 
 func listenerResponseError(response *http.Response) error {

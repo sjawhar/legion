@@ -37,7 +37,7 @@ import {
 } from "../../theme/classes";
 import { ClaimChip } from "../issue/ClaimChip";
 import { PriorityControl } from "../issue/PriorityControl";
-import { referenceTriggerProps, refPreview } from "../refs/RefPreview";
+import { closeRefPreview, referenceTriggerProps } from "../refs/RefPreview";
 import { buildDispatchReference, buildIssuePath } from "../refs/routes";
 import { useKeymap, useKeymapScope } from "../shell/keymap";
 import { closestMatching } from "../shell/roving";
@@ -277,7 +277,7 @@ export function IssueBoard({
   // the click that would dismiss an open card after the drop is the one swallowed above - so a
   // lift closes the card (open or still pending) itself.
   const liftCard = () => {
-    refPreview.close();
+    closeRefPreview();
     setDragging(true);
   };
   const landCard = () => {

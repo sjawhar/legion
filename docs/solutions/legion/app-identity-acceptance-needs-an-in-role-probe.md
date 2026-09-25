@@ -77,6 +77,6 @@ instead of passing the phase (the `legion-worker` skill's production-like-surfac
 ## Related
 
 - [external-red-and-phase-ownership](../daemon/external-red-and-phase-ownership.md) §3 — why the
-  review App can reply but neither resolve nor push, the reply grammar, and the GraphQL facts.
+  review App can reply but not resolve, who pushes, the reply grammar, and the GraphQL facts.
 - [worker-pane-shell-gotchas](worker-pane-shell-gotchas.md) §13 — the pane's `legion` is the
   deployed build; a new subcommand is exercised live as `bun packages/daemon/src/cli/index.ts …`.

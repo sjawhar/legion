@@ -118,6 +118,7 @@ func Location(stateDir, repository, issue string) (Workspace, error) {
 		Dir:      filepath.Join(stateDir, "workspaces", owner, repo, strings.ToLower(issue)),
 		Bookmark: Bookmark(issue),
 		Clone:    filepath.Join(stateDir, "repos", "github.com", owner, repo),
+		Repo:     owner + "/" + repo,
 	}, nil
 }
 

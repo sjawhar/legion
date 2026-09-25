@@ -316,7 +316,7 @@ func (s *server) storeArtifact(
 	var documentChanges model.ReferenceChanges
 	if kind == "doc" {
 		if created {
-			documentMarkdown, err = s.deps.Docs.SeedText(documentCtx, tx, artifact.ID, string(input.content), actor)
+			documentMarkdown, err = s.deps.Docs.SeedText(documentCtx, artifact.ID, string(input.content), actor)
 		} else {
 			documentMarkdown, err = s.deps.Docs.ReplaceText(documentCtx, artifact.ID, string(input.content), actor)
 		}
@@ -401,7 +401,7 @@ func (s *server) storeArtifact(
 		// document's ask blocks are indexed and its block ids repaired.
 		s.deps.Docs.ScheduleSettlement(artifact.ID)
 	}
-	s.publishDocumentEvents(ledger, event)
+	s.publish(event)
 	var decisionBlocks *int
 	if kind == "doc" {
 		decisionBlocks = countAskBlocks(documentMarkdown)
@@ -659,7 +659,7 @@ func (s *server) createNamedVersion(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publishDocumentEvents(ledger, event)
+	s.publish(event)
 	WriteJSON(w, http.StatusCreated, version)
 }
 
@@ -731,7 +731,7 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 			}
 			written = &namedVersion
 		} else {
-			snapshot, err := s.deps.Docs.SnapshotVersion(documentCtx, tx, artifact.ID, actor)
+			snapshot, err := s.deps.Docs.SnapshotVersion(documentCtx, artifact.ID, actor)
 			if err != nil {
 				s.writeHandlerError(w, err)
 				return
@@ -782,7 +782,7 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 	if edit.Applied > 0 {
 		s.deps.Docs.ScheduleSettlement(artifact.ID)
 	}
-	s.publishDocumentEvents(ledger, published...)
+	s.publish(published...)
 	unchanged := edit.Unchanged
 	if unchanged == nil {
 		unchanged = []int{}

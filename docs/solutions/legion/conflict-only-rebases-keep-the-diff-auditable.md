@@ -71,7 +71,7 @@ moved before deciding a conflict is new.
 
 `jj rebase -s 'roots(main@origin..@)' -d main@origin` moves the whole chain — plan doc, plan
 handoff, fix, comment sweep, every later handoff — so the push carries other roles' unpushed
-commits (the review App cannot push). Resolve inside the working copy and `jj squash --from @
+commits (only the implementer pushes). Resolve inside the working copy and `jj squash --from @
 --into <owning commit> <paths>` so each resolution lands in the commit that owns the file; the
 descendants re-apply. The rules for what the resolution may contain:
 

@@ -37,10 +37,7 @@ func TestListenerSIGTERMIsAnOrderedShutdown(t *testing.T) {
 	_, uri := testnats.Start(t)
 	testnats.Connect(t, uri).Close()
 
-	binary := filepath.Join(t.TempDir(), "envoy-listener")
-	if out, err := exec.Command("go", "build", "-o", binary, ".").CombinedOutput(); err != nil {
-		t.Fatalf("build the listener: %v\n%s", err, out)
-	}
+	binary := buildListener(t)
 	publisher := testnats.Connect(t, uri)
 	t.Cleanup(publisher.Close)
 
@@ -124,6 +121,16 @@ func TestListenerSIGTERMIsAnOrderedShutdown(t *testing.T) {
 			t.Fatalf("run %d: no role message in flight at the signal reached the holder:\n%s", run, afterSignal)
 		}
 	}
+}
+
+// buildListener builds this package's listener binary into the test's temporary directory.
+func buildListener(t *testing.T) string {
+	t.Helper()
+	binary := filepath.Join(t.TempDir(), "envoy-listener")
+	if out, err := exec.Command("go", "build", "-o", binary, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build the listener: %v\n%s", err, out)
+	}
+	return binary
 }
 
 // postListener calls a listener /v1 route as the test's shared-token caller and requires a 200.

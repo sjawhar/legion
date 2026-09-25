@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -153,12 +154,12 @@ func TestWorkerShimBridgesTheChildAndExitsWithItsStatus(t *testing.T) {
 	}
 }
 
-// In a pod (LEGION_MODEL_GATEWAY_URL set) the shim writes the model route into the Oh My Pi
-// profile before it spawns the agent, and hands the agent the profile's pins as its settings
-// overlay (PI_CONFIG_FILES), so the agent's first model call goes to the gateway whatever the
-// repository's own settings say; a
-// gateway it cannot route is refused naming the variable, before anything is dialled or spawned.
-func TestWorkerShimRoutesThePodsProfileBeforeItSpawns(t *testing.T) {
+// With --pod-safety (the Sandbox runtime passes it; a pane never does) the shim starts the agent on
+// the pod's baseline: the overlay written under LEGION_STATE_DIR and named first in
+// PI_CONFIG_FILES, ahead of the operator's, and the baseline variables where the pod leaves them
+// unset. Without it the agent starts on the environment it always had. With --pod-safety and no
+// state directory the shim refuses naming it, before anything is dialled or spawned.
+func TestWorkerShimStartsAPodsAgentOnTheBaselineAndAPanesAsBefore(t *testing.T) {
 	dir := t.TempDir()
 	socket := filepath.Join(dir, "s")
 	ln, err := net.Listen("unix", socket)
@@ -170,53 +171,73 @@ func TestWorkerShimRoutesThePodsProfileBeforeItSpawns(t *testing.T) {
 	if err := os.WriteFile(token, []byte("boot-token\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("OMP_PROFILE", "legion")
-	// An overlay the pod already names stays, before the pins, which come last and so win.
+	state := t.TempDir()
 	t.Setenv("PI_CONFIG_FILES", "/etc/operator.yml")
-	models := filepath.Join(home, ".omp", "profiles", "legion", "agent", "models.yml")
+	t.Setenv("OTEL_SDK_DISABLED", "")
+	t.Setenv("LEGION_STATE_DIR", "")
 	marker := filepath.Join(dir, "spawned")
-	args := []string{"legion", "worker-shim", "--connect", "unix://" + socket, "--boot-token-file", token, "--",
-		"sh", "-c", `touch "$0"; grep -qx '    baseUrl: https://middleman.legion.internal/anthropic' "$1" && [ "$PI_CONFIG_FILES" = "/etc/operator.yml:$2" ] && exit 7; exit 8`,
-		marker, models, filepath.Join(home, ".omp", "profiles", "legion", "agent", "config.yml")}
+	check := `touch "$0"; [ "$PI_CONFIG_FILES" = "$1" ] && [ "${OTEL_SDK_DISABLED-unset}" = "$2" ] && exit 7; echo "PI_CONFIG_FILES=$PI_CONFIG_FILES OTEL_SDK_DISABLED=${OTEL_SDK_DISABLED-unset}" >&2; exit 8`
+	shim := func(podSafety bool, overlays, otel string) []string {
+		args := []string{"legion", "worker-shim", "--connect", "unix://" + socket, "--boot-token-file", token}
+		if podSafety {
+			args = append(args, "--pod-safety")
+		}
+		return append(args, "--", "sh", "-c", check, marker, overlays, otel)
+	}
+	acknowledge := func() chan error {
+		daemon := make(chan error, 1)
+		go func() {
+			daemon <- func() error {
+				conn, err := ln.Accept()
+				if err != nil {
+					return err
+				}
+				defer conn.Close()
+				if _, err := shimwire.NewReader(conn).ReadLine(); err != nil {
+					return err
+				}
+				if err := shimwire.NewWriter(conn).WriteFrame(shimwire.HelloAck{}); err != nil {
+					return err
+				}
+				// Held open until the shim closes it: a stream the daemon drops is one the shim
+				// dials again, which would outlive the agent's exit.
+				_, err = io.Copy(io.Discard, conn)
+				return err
+			}()
+		}()
+		return daemon
+	}
 
-	t.Setenv("LEGION_MODEL_GATEWAY_URL", "middleman.legion.internal")
 	var stdout, stderr bytes.Buffer
-	if code := run(context.Background(), args, &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), "LEGION_MODEL_GATEWAY_URL") {
-		t.Fatalf("an unroutable gateway: exit %d, stderr %q; want exit 1 naming the variable", code, stderr.String())
+	if code := run(context.Background(), shim(true, "", ""), &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), "LEGION_STATE_DIR") {
+		t.Fatalf("--pod-safety with no state directory: exit %d, stderr %q; want exit 1 naming LEGION_STATE_DIR", code, stderr.String())
 	}
 	if _, err := os.Stat(marker); err == nil {
-		t.Fatal("the agent was spawned under a gateway the shim could not route")
+		t.Fatal("the agent was spawned with no baseline to start it on")
 	}
 	_ = ln.(*net.UnixListener).SetDeadline(time.Now().Add(20 * time.Millisecond))
 	if conn, err := ln.Accept(); err == nil {
 		_ = conn.Close()
-		t.Fatal("the shim dialled the daemon under a gateway it could not route")
+		t.Fatal("the shim dialled the daemon with no baseline to start the agent on")
 	}
 	_ = ln.(*net.UnixListener).SetDeadline(time.Time{})
 
-	t.Setenv("LEGION_MODEL_GATEWAY_URL", "https://middleman.legion.internal")
-	daemon := make(chan error, 1)
-	go func() {
-		daemon <- func() error {
-			conn, err := ln.Accept()
-			if err != nil {
-				return err
-			}
-			defer conn.Close()
-			if _, err := shimwire.NewReader(conn).ReadLine(); err != nil {
-				return err
-			}
-			return shimwire.NewWriter(conn).WriteFrame(shimwire.HelloAck{})
-		}()
-	}()
-	stdout.Reset()
-	stderr.Reset()
-	if code := run(context.Background(), args, &stdout, &stderr); code != 7 {
-		t.Fatalf("exit %d, want 7: the agent found the profile routed through the gateway, and the pins as its overlay, when it started; stderr: %s", code, stderr.String())
-	}
-	if err := <-daemon; err != nil {
-		t.Fatalf("the daemon side: %v", err)
+	t.Setenv("LEGION_STATE_DIR", state)
+	for name, tc := range map[string]struct {
+		podSafety      bool
+		overlays, otel string
+	}{
+		"a pod":  {true, filepath.Join(state, "podsafety-overlay.yml") + ":/etc/operator.yml", "true"},
+		"a pane": {false, "/etc/operator.yml", ""},
+	} {
+		daemon := acknowledge()
+		stdout.Reset()
+		stderr.Reset()
+		if code := run(context.Background(), shim(tc.podSafety, tc.overlays, tc.otel), &stdout, &stderr); code != 7 {
+			t.Fatalf("%s: exit %d, want 7: the agent starts with PI_CONFIG_FILES %q and OTEL_SDK_DISABLED %q; stderr: %s", name, code, tc.overlays, tc.otel, stderr.String())
+		}
+		if err := <-daemon; err != nil {
+			t.Fatalf("%s: the daemon side: %v", name, err)
+		}
 	}
 }

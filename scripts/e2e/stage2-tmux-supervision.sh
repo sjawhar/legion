@@ -325,6 +325,16 @@ OMP_PROFILE=$profile omp plugin list --json |
   fail "the plugin did not come back enabled"
 pass
 
+begin gate-refuses-a-missing-skill
+# The gate's load probe resolves every skill Legion's prompts load through the pane's own Oh My Pi.
+# The installed plugin without the rubric its thermonuclear-deep-review agent loads is refused,
+# naming the skill and the agent definition that loads it.
+mv "$work/plugin/dist/skills/thermonuclear-deep-review" "$work/rubric.aside"
+expect_refusal missing-skill "finds no skill thermonuclear-deep-review (loaded by agents/thermonuclear-deep-review.md)"
+mv "$work/rubric.aside" "$work/plugin/dist/skills/thermonuclear-deep-review"
+[ -f "$work/plugin/dist/skills/thermonuclear-deep-review/SKILL.md" ] || fail "the rubric was not restored"
+pass
+
 # ---- one real agent: register, claim its role, ready ----------------------------------------------
 
 begin architect-registers-and-is-ready
@@ -477,13 +487,17 @@ pass
 
 begin unregistered-agent-retired-at-the-deadline
 # A second daemon whose OMP answers the plugin gate and otherwise never runs the plugin: its pane's
-# process lives and its agent never registers. The deadline is worker_boot_timeout_seconds ×
-# worker_boot_registration_deadline_intervals = 10 s.
+# process lives and its agent never registers. The gate also asks the load probe for the task agents
+# and skills Legion's prompts name (LEGION_PROMPT_AGENTS, LEGION_PROMPT_SKILLS), and the stub
+# answers that they resolve, as the real Oh My Pi does for this checkout's plugin. The deadline is
+# worker_boot_timeout_seconds × worker_boot_registration_deadline_intervals = 10 s.
 cat >"$work/stub/omp" <<EOF
 #!/bin/sh
 if [ "\$1" = models ]; then
   echo LEGION_PLUGIN_LOADED=yes >&2
   echo "LEGION_PLUGIN_LOADED_FROM=file://$work/plugin/dist/legion.js" >&2
+  [ -n "\${LEGION_PROMPT_AGENTS:-}" ] && echo LEGION_PROMPT_AGENTS=resolved >&2
+  [ -n "\${LEGION_PROMPT_SKILLS:-}" ] && echo LEGION_PROMPT_SKILLS=resolved >&2
   exit 0
 fi
 exec sleep 3600

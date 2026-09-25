@@ -93,10 +93,10 @@ func TestConditionalEditDoesNotInvertTheRoomLockOrder(t *testing.T) {
 	secondDone := make(chan error, 1)
 	go func() {
 		joinedTwo, ledgerTwo := service.Join(ctx, txTwo)
-		defer ledgerTwo.Discard()
 		_, err := service.ApplyOps(joinedTwo, id, []model.EditOp{{
 			Op: "replace", Find: "second", With: "SECOND",
 		}}, bob, &model.EditPrecondition{Document: token})
+		ledgerTwo.Discard()
 		secondDone <- err
 	}()
 	// The second edit takes the document's owner row first (see liveWrite), so it waits there,
@@ -105,7 +105,7 @@ func TestConditionalEditDoesNotInvertTheRoomLockOrder(t *testing.T) {
 
 	snapshotDone := make(chan error, 1)
 	go func() {
-		_, err := service.SnapshotVersion(joinedOne, txOne, id, alice)
+		_, err := service.SnapshotVersion(joinedOne, id, alice)
 		snapshotDone <- err
 	}()
 
@@ -118,6 +118,22 @@ func TestConditionalEditDoesNotInvertTheRoomLockOrder(t *testing.T) {
 		t.Fatalf("second edit returned before first transaction released its lock: %v", err)
 	case <-time.After(15 * time.Second):
 		t.Fatal("lock-order inversion: a conditional edit holds the document mutex while waiting for the advisory lock another writer holds")
+	}
+
+	// txTwo's connection belongs to the second edit until ApplyOps returns, so the deferred
+	// rollback may not run under it. Ending the first transaction and its write lets the edit
+	// through: its owner row, then the writer slot, then the unchanged document's token.
+	if err := txOne.Rollback(ctx); err != nil {
+		t.Fatalf("roll back the first transaction: %v", err)
+	}
+	ledgerOne.Discard()
+	select {
+	case err := <-secondDone:
+		if err != nil {
+			t.Fatalf("second edit once the first transaction ended: %v", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("second edit did not finish once the first transaction ended")
 	}
 }
 

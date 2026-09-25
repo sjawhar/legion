@@ -29,19 +29,18 @@ type Scheduling struct {
 // runs (/opt/legion/go/bin/legion), whose directory also leads the pod's PATH.
 type Tools struct{ GH, Git, JJ, Legion string }
 
-// Gateway is the model gateway every pod reaches the models through (LEGION-208 Stage 4b plan,
-// decision 1: LEGION-199's design A′). A pod runs as ServiceAccount, and the kubelet projects it a
-// token for Audience, rotated before TokenExpiry passes, which Oh My Pi presents to URL as its key:
-// no provider key reaches a pod.
-type Gateway struct {
-	URL, Audience, ServiceAccount string
-	// TokenExpiry is the projected token's lifetime, at least minTokenExpiry; the kubelet rotates
-	// the token at 80% of it.
-	TokenExpiry time.Duration
+// Pod is what the operator adds to every pod Legion runs, the image probe's included
+// (runtime.kubernetes.pod): variables and volume mounts for the agent's container (the worker's,
+// or the probe's), never an init container, the volumes those mounts name, beside Legion's own, and
+// the ServiceAccount the pods run as, the namespace's default when unset. A variable's value reaches the
+// process as written: the kubelet's `$(NAME)` expansion does not apply (kubeletLiteral). CheckPod
+// refuses a name or path of Legion's own or the worker image's.
+type Pod struct {
+	Env            map[string]string
+	Volumes        []corev1.Volume
+	VolumeMounts   []corev1.VolumeMount
+	ServiceAccount string
 }
-
-// minTokenExpiry is the shortest projected service account token the API server issues.
-const minTokenExpiry = 10 * time.Minute
 
 // ProvisionTokens mints the installation token a pod's workspace-fetch container clones the
 // repository with, for a repository owner.
@@ -77,7 +76,17 @@ type Options struct {
 	// NATSURLs are ENVOY_NATS_URL, comma-joined; none leaves it unset.
 	NATSURLs []string
 	Tools    Tools
-	Gateway  Gateway
+	// Pod is the operator's pod configuration, added to every worker pod and to the probe pod.
+	Pod Pod
+	// ProviderKeys maps each variable Oh My Pi reads to the key of the providers Secret
+	// (ProvidersSecretName) that holds its value. With any, every pod mounts exactly those keys at
+	// ProvidersDir and the worker's shim exports them into Oh My Pi's environment alone; with none,
+	// no pod mounts the Secret.
+	ProviderKeys map[string]string
+	// LaunchSecrets are the secrets every launch's spec carries (runtime.SpawnSpec.Secrets), by
+	// name, each reaching the agent as a `<NAME>_FILE` pointer, which CheckPod refuses the operator's
+	// pod and a provider key.
+	LaunchSecrets []string
 	// Agent is the command the shim wraps, before the Oh My Pi arguments the runtime appends
 	// (`--no-extensions --extension <plugin>`, `--resume`, `--mode rpc`,
 	// `--append-system-prompt`); Oh My Pi itself when nil.

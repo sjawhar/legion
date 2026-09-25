@@ -170,6 +170,7 @@ The checks, in order, each printing what it observed (`== <check>` … `ok <chec
 | :--- | :--- |
 | `gate-refuses-another-contract` | edits the installed (unpacked) manifest to declare the next `goDaemonApiVersion`; `legion start` refuses naming both numbers; the manifest is put back byte for byte |
 | `gate-refuses-a-disabled-plugin` | `omp plugin disable`; `legion start` refuses with "installed but not loaded by omp"; `omp plugin enable` |
+| `gate-refuses-a-missing-skill` | the installed plugin's `dist/skills/thermonuclear-deep-review` moved aside; `legion start` refuses with "finds no skill thermonuclear-deep-review (loaded by agents/thermonuclear-deep-review.md)"; the rubric put back |
 | `architect-registers-and-is-ready` | `legion start` passes the gate (its log line); `legion claims spawn` of a root architect whose role prompt says to reply `ready` and wait; the claim reaches `ready` and the daemon logged its registration at contract 1 |
 | `envoy-role-held` | `GET /v1/roles/<claim token>` on the listener names the claim's session as holder |
 | `ready-in-state` | `legion state --json` shows the issue's architect `ready`, with that session and a tmux locator |
@@ -332,6 +333,16 @@ the harness reads into memory. The harness decodes it there and mints the implem
 installation token in process. The key is written to no file, appears in no argv, and reaches no
 other process; only the installation token enters each claim's Secret.
 
+Every pod carries the operator fixture's pod,
+[`fixtures/operator-route/pod.yml`](fixtures/operator-route/pod.yml), read through the daemon's
+own loader (`config.ReadPodFile`): ServiceAccount `legion-worker`, one projected token for
+audience `middleman-legion`, and a ConfigMap holding the fixture's `models.yml` (anthropic through
+production's middleman, keyed by that token) and `overlay.yml` (the roles, and every other
+provider disabled). Legion holds none of it. Before the harness runs, the script creates the
+run's own copy of that ConfigMap as the operator, `legion-operator-route-<project>`, labelled
+with the run's project; the harness points the pods at it, so another run in the namespace can
+neither see nor delete this one's route.
+
 | input | default | meaning |
 | :--- | :--- | :--- |
 | `LEGION_E2E_RUNTIME_CONTEXT` | required | the kubeconfig context of the Legion daemon's restricted identity (`legion-daemon@production`: the IAM role `production-legion-daemon`, group `legion-daemon`) |
@@ -366,10 +377,11 @@ The checks, in order, each printing what it observed and then `CHECK <name>: PAS
 | `identity` | refuses to start unless the runtime context is set and authenticates as someone other than the operator; a SelfSubjectReview shows the assumed `…legion-daemon` role in group `legion-daemon`; `list secrets -n legion` is 403; a SelfSubjectRulesReview (`can-i --list`) in every namespace finds no grant beyond the plan's; access reviews, which reach EKS's webhook authorizer that a rules review cannot enumerate, deny every kind of impersonation, `serviceaccounts/token`, pod create and exec, secret list and create, PVC get, nodes, RBAC create/update/patch/escalate/bind, and Sandboxes outside `legion`, beside two positive controls |
 | `installed` | `CheckInstalled` with production's `InstallRef` passes under the `resourceNames` grants |
 | `boot-refusal-negative` | `CheckInstalled` naming `legion-no-such-controller` refuses, naming that Deployment and the 403 the `resourceNames` grant answers, without blaming the CRD |
-| `image-probe` | `ProbeImage` on the image under test passes, its log confirms `go-daemon-api-version` equal to the daemon's contract and names `model-gateway=anthropic/claude-fable-5-1-legion` (the probe pod's round trip through production's middleman as `legion-worker`, which needs agent-c's Legion model access applied on production), and the probe Sandbox is deleted |
+| `image-probe` | `ProbeImage` on the image under test, its probe pod carrying the operator's pod, passes; its log confirms `go-daemon-api-version` equal to the daemon's contract, and the probe Sandbox is deleted |
 | `root-ready` | Spawn of the root: its Sandbox Ready, the returned incarnation the pod's uid, the init log (`pods/log`) carrying `workspace-init: /legion/workspaces/sjawhar/legion-smoke/s4a-1 on legion/S4A-1`, and a hello registered at generation 1 with that generation's token |
 | `gvisor` | `uname -r` in the root pod is gVisor's emulated kernel (`…-gvisor`), not the node's, and the pod's `runtimeClassName` is `gvisor` |
-| `gateway-token` | the root pod runs as ServiceAccount `legion-worker` with `automountServiceAccountToken: false`; the one projected token at `/var/run/legion/gateway/token` is a JWT for audience `middleman-legion` within the configured lifetime, read into the harness's memory and only its claims printed |
+| `operator-token` | the root pod runs as the fixture's ServiceAccount with `automountServiceAccountToken: false` and no API server token; the fixture's one projected token, at its mount, is a JWT for the fixture's audience, subject the pod's ServiceAccount, and exactly the fixture's lifetime, read into the harness's memory and only its claims printed |
+| `pod-baseline` | the stub agent the root's shim started (read from `/proc/<pid>/environ`) has `PI_CONFIG_FILES` = the pod baseline's overlay on the state volume, then the operator's; `OTEL_SDK_DISABLED=true`, `PI_AUTO_QA=0`, `PI_CONFIG_DIR=.omp`, `OMP_SESSION_STORAGE=file`, and the operator's other variables; the shim itself (pid 1) has the operator's `PI_CONFIG_FILES` alone; the overlay is mode `444`; and the image's `omp config get compaction.remoteEndpoint`, run under the agent's environment in a repository whose `.omp/config.yml` sets it, reads `""` |
 | `adopt-working-copy` | `AdoptWorkingCopy` with the implement App's bot identity; `jj log -r @ -T author` in `$LEGION_WORKSPACE` shows it |
 | `worker-colocated` | a worker spawned while the root runs requires the tree's node (podAffinity on `legion.dev/tree`, topology `kubernetes.io/hostname`) and runs there |
 | `suspend` | Suspend of the worker: when it returns the runtime's watch no longer holds the claim; Sandbox `Suspended`, pod gone, tree PVC `Bound`, `Probe(recorded)` gone; over the settle window Observe delivers no observation of the worker evaluated after Suspend returned (an observation's `At` is stamped as its evaluation ends, and Observe re-reads the recorded incarnation before it sends) |
@@ -383,15 +395,15 @@ The checks, in order, each printing what it observed and then `CHECK <name>: PAS
 | `re-adopt` | the listener and runtime closed, one worker killed while none runs, then a fresh listener and `sandbox.New` with `ReconcileOrphans(known)`: the living claims are alive with their recorded incarnations and unchanged pods and Sandbox generations, the killed one is gone with its recorded uid, and every living shim says hello again with its current token |
 | `orphan-sweep` | a running claim left out of `known` survives a sweep with a 1-hour grace and is deleted by one with a 1-second grace; the suspended claim's Sandbox and every known one survive both |
 | `release-tree` | Release of every claim, the suspended one with a nil locator: no Sandbox, `-boot` Secret, pod, or tree PVC of the run is left |
-| `namespace-clean` | the script's last step, after the teardown and outside the harness: the namespace's Sandboxes, Secrets, PVCs and pods that carry the run's project label or none are exactly the snapshot taken before the run |
+| `namespace-clean` | the script's last step, after the teardown and outside the harness: the namespace's Sandboxes, Secrets, PVCs, pods and ConfigMaps that carry the run's project label or none are exactly the snapshot taken before the run |
 
 Everything the run creates carries the project label `s4a-<UTC timestamp>-<4 hex>`, and the
 claim tokens carry the same value without its dashes. The harness appends each Sandbox's name to
 a record before the Sandbox can exist. On any exit the `EXIT` trap runs
 [`lib/namespace-rig.sh`](#libnamespace-rigsh)'s teardown: it refuses to act on a project without
 the `s4a-` prefix, deletes every recorded Sandbox by its exact name and then the Sandboxes
-labelled with that exact project (never by label existence), waits for the owned Secrets, pods
-and PVCs to follow, deletes by the same exact label any Secret or PVC still left after 90
+labelled with that exact project (never by label existence) and the run's ConfigMap by the same
+label, waits for the owned Secrets, pods and PVCs to follow, deletes by the same exact label any Secret or PVC still left after 90
 listings, and runs `namespace-clean` when the harness did not get to it. Nothing outside `legion`
 is touched.
 
@@ -944,6 +956,6 @@ key), and either `label_prefix` (the prefix every run label of the proof carries
 | function | does |
 | :--- | :--- |
 | `op ARGS…` | `kubectl --context $operator -n $namespace ARGS…`, bounded at 300 s (`timeout --foreground`, so a Ctrl-C still reaches kubectl) |
-| `snapshot FILE` | writes the namespace's Sandboxes, Secrets, PVCs and pods that carry the run's project label or none, sorted |
-| `teardown` | runs once and never fails. It refuses a label without `label_prefix`, or other than `label_exact`, so a mistyped label cannot select another run's objects; deletes every recorded Sandbox by name, then the Sandboxes labelled with that exact project; then lists the project's objects every 2 s, up to 150 listings, until none is left. Secrets and PVCs the Sandboxes' own deletion has not taken by the 90th listing are deleted by that exact label once, on the first listing from then on that answers; three failed listings in a row end the wait, naming the context and its error |
+| `snapshot FILE` | writes the namespace's Sandboxes, Secrets, PVCs, pods and ConfigMaps (`kinds`) that carry the run's project label or none, sorted |
+| `teardown` | runs once and never fails. It refuses a label without `label_prefix`, or other than `label_exact`, so a mistyped label cannot select another run's objects; deletes every recorded Sandbox by name, then the Sandboxes and ConfigMaps labelled with that exact project; then lists the project's objects every 2 s, up to 150 listings, until none is left. Secrets and PVCs the Sandboxes' own deletion has not taken by the 90th listing are deleted by that exact label once, on the first listing from then on that answers; three failed listings in a row end the wait, naming the context and its error |
 | `namespace_clean` | the check `namespace-clean`: a fresh snapshot, written to `$evidence/namespace-after.txt`, must equal `$evidence/namespace-before.txt` |

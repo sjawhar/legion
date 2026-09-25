@@ -11,16 +11,20 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
+	"github.com/sjawhar/legion/daemon/internal/runtime/sandbox"
 )
 
 // kubernetesConfig is testConfig under runtime: kubernetes, its client a kubeconfig whose current
@@ -31,7 +35,6 @@ func kubernetesConfig(t *testing.T, server string) config.Config {
 	cfg.Runtime = config.Runtime{Name: "kubernetes", Kubernetes: &config.Kubernetes{
 		Namespace: "legion", Image: "ghcr.io/sjawhar/legion-worker@sha256:" + strings.Repeat("a", 64),
 		StorageClass: "gp2", TreeVolume: "20Gi", Kubeconfig: writeKubeconfig(t, server, "test"),
-		Gateway: config.Gateway{URL: "https://gateway.example.test", Audience: "middleman-legion", ServiceAccount: "legion-worker", TokenExpiry: 10 * time.Minute},
 	}}
 	return cfg
 }
@@ -210,6 +213,74 @@ func TestAKubernetesDaemonRefusesAConfigurationTheClusterWouldRefuseLater(t *tes
 				t.Fatalf("prepare = %v, want a refusal containing %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// A Kubernetes daemon refuses, before its boot, an operator pod that collides with Legion's own —
+// a mount at Legion's boot projection (the LEGION-270 plan's negative control), and a provider key
+// the pointer to the daemon's Envoy bearer names — so no pod is ever built with it.
+func TestAKubernetesDaemonRefusesAnOperatorPodCollidingWithLegionsBeforeItsBoot(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*config.Config)
+		want   string
+	}{
+		{
+			name: "a mount at Legion's boot projection",
+			change: func(cfg *config.Config) {
+				cfg.Runtime.Kubernetes.Pod = config.PodConfig{
+					Volumes:      []corev1.Volume{{Name: "creds", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "legion-creds"}}}},
+					VolumeMounts: []corev1.VolumeMount{{Name: "creds", MountPath: "/var/run/legion/boot", ReadOnly: true}},
+				}
+			},
+			want: "runtime.kubernetes.pod.volume_mounts[0].mount_path /var/run/legion/boot overlaps /var/run/legion/boot, which Legion mounts in every pod: a mount may be neither at, under, nor above one of Legion's",
+		},
+		{
+			name: "a provider key the Envoy bearer's pointer names",
+			change: func(cfg *config.Config) {
+				cfg.ProviderKeys = []config.ProviderKey{{Env: "ENVOY_TOKEN", Secret: "envoy"}}
+			},
+			want: "provider_keys names ENVOY_TOKEN, whose pointer ENVOY_TOKEN_FILE every launch sets (the pointer to the launch secret ENVOY_TOKEN): the shim skips a key whose pointer the pod sets",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := kubernetesConfig(t, "https://127.0.0.1:1")
+			cfg.EnvoyTokenFile = filepath.Join(t.TempDir(), "envoy-token")
+			if err := os.WriteFile(cfg.EnvoyTokenFile, []byte("envoy-bearer\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			tc.change(&cfg)
+			if _, err := prepare(cfg, quietLogger(), overrides{}); err == nil || err.Error() != tc.want {
+				t.Fatalf("prepare = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// runtime.kubernetes.pod and provider_keys reach the runtime's Options, each piece of the pod
+// as configured and each provider key as its variable's Secret key: the manifests the runtime
+// builds from them are the sandbox package's to test, and this is the one place the daemon hands
+// them over.
+func TestTheOperatorsPodReachesTheSandboxRuntime(t *testing.T) {
+	cfg := kubernetesConfig(t, "https://127.0.0.1:1")
+	cfg.ProviderKeys = []config.ProviderKey{{Env: "ANTHROPIC_API_KEY", Secret: "anthropic"}}
+	pod := config.PodConfig{
+		Env:            map[string]string{"PI_CONFIG_FILES": "/etc/legion-operator/overlay.yml"},
+		ServiceAccount: "legion-worker",
+		Volumes:        []corev1.Volume{{Name: "creds", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "legion-creds"}}}},
+		VolumeMounts:   []corev1.VolumeMount{{Name: "creds", MountPath: "/etc/legion-operator/creds", ReadOnly: true}},
+	}
+	cfg.Runtime.Kubernetes.Pod = pod
+	opts, err := sandboxOptions(cfg, *cfg.Runtime.Kubernetes, "test", "tcp://10.0.0.5:13371", "", quietLogger())
+	if err != nil {
+		t.Fatalf("sandboxOptions: %v", err)
+	}
+	want := sandbox.Pod{Env: pod.Env, Volumes: pod.Volumes, VolumeMounts: pod.VolumeMounts, ServiceAccount: pod.ServiceAccount}
+	if !reflect.DeepEqual(opts.Pod, want) {
+		t.Errorf("the runtime's Pod is %+v, want %+v", opts.Pod, want)
+	}
+	if keys := map[string]string{"ANTHROPIC_API_KEY": "anthropic"}; !reflect.DeepEqual(opts.ProviderKeys, keys) {
+		t.Errorf("the runtime's ProviderKeys are %v, want %v", opts.ProviderKeys, keys)
 	}
 }
 

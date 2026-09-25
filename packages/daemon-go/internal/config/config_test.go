@@ -755,12 +755,12 @@ func TestLoadRefuses(t *testing.T) {
 			// the provider's own variable (GEMINI_API_KEY), so the one shape says both.
 			name: "provider_keys as a list",
 			body: minimalFile + "provider_keys: [GEMINI_API_KEY_TESTS]\n",
-			want: "provider_keys must be a mapping of the variable OMP reads to the secretsd key that holds it, e.g. {GEMINI_API_KEY: GEMINI_API_KEY_TESTS}",
+			want: "provider_keys must be a mapping of the variable OMP reads to the key that holds it (a secretsd key; under runtime kubernetes, a key of the providers Secret), e.g. {GEMINI_API_KEY: GEMINI_API_KEY_TESTS}",
 		},
 		{
 			name: "provider_keys a scalar",
 			body: minimalFile + "provider_keys: GEMINI_API_KEY_TESTS\n",
-			want: "provider_keys must be a mapping of the variable OMP reads to the secretsd key that holds it, e.g. {GEMINI_API_KEY: GEMINI_API_KEY_TESTS}",
+			want: "provider_keys must be a mapping of the variable OMP reads to the key that holds it (a secretsd key; under runtime kubernetes, a key of the providers Secret), e.g. {GEMINI_API_KEY: GEMINI_API_KEY_TESTS}",
 		},
 		{
 			name: "provider_keys with a variable that is not a variable name",
@@ -770,12 +770,12 @@ func TestLoadRefuses(t *testing.T) {
 		{
 			name: "provider_keys with a command where the secretsd key goes",
 			body: minimalFile + "provider_keys: {GEMINI_API_KEY: \"secrets get GEMINI_API_KEY_TESTS\"}\n",
-			want: `provider_keys value "secrets get GEMINI_API_KEY_TESTS" for GEMINI_API_KEY (the secretsd key name) must be an environment variable name (letters, digits, and underscores, not starting with a digit)`,
+			want: `provider_keys value "secrets get GEMINI_API_KEY_TESTS" for GEMINI_API_KEY (the key that holds it) must be an environment variable name (letters, digits, and underscores, not starting with a digit)`,
 		},
 		{
 			name: "provider_keys with a secretsd key that is not a string",
 			body: minimalFile + "provider_keys: {GEMINI_API_KEY: [GEMINI_API_KEY_TESTS]}\n",
-			want: `provider_keys value for GEMINI_API_KEY (the secretsd key name) must be a string`,
+			want: `provider_keys value for GEMINI_API_KEY (the key that holds it) must be a string`,
 		},
 		{
 			name: "provider_keys naming one variable twice",

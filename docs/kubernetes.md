@@ -49,7 +49,10 @@ The daemon refuses to serve unless its OMP exposes `pi.agents` and actually load
 plugin is broken fails instead of publishing. Its final step runs the Go `legion version`, requiring the
 commit the workflow built, then the Go `legion probe-image`: the same three probes, run by the Go
 daemon's own code (`packages/daemon-go/internal/daemon/bootgate.go`), with the plugin held to the Go
-daemon API contract (`legion.goDaemonApiVersion`), printing
+daemon API contract (`legion.goDaemonApiVersion`) and every task agent and skill Legion's prompts
+name (`task(agent="…")`, `skill://…`) resolved by name through the same launch (the plugin ships
+`oracle`, `thermonuclear-deep-review` and `thermonuclear-code-quality` in `agents/`, and the pair's
+rubrics and `ce-simplify-code` with Legion's other skills in `dist/skills`), printing
 `probe-image: OK (/opt/omp/bin/omp) session-storage=probed go-daemon-api-version=<N>`. The in-cluster
 TypeScript daemon runs `legion probe-image` in a one-shot pod against the configured digest
 ([The probe pod](#the-probe-pod)); the Go daemon's Agent Sandbox runtime runs the Go command in a probe
@@ -84,8 +87,9 @@ cache (`cache-from: type=gha`, `cache-to: type=gha,mode=max`), pushed with the w
 — no third-party builder, no project variable, no extra credential. It runs (1) from `release.yaml` after
 the `cli` job on every `main` push that touches the daemon, the plugin, or the Go module and its build
 inputs (below), (2) on every head of a pull request against `main` whose diff touches any of
-`packages/daemon/docker/**`, the OMP pin (`packages/daemon/src/daemon/omp-pin.ts`), the role prompts
-(`packages/pi-envoy/roles/**`), the code a pod runs, the Go build inputs, or the workflow itself — building
+`packages/daemon/docker/**`, the OMP pin (`packages/daemon/src/daemon/omp-pin.ts`), the plugin the image
+installs (`packages/pi-envoy/**`, its role prompts and agent definitions included) and the skills it ships
+(`skills/**`), the code a pod runs, the Go build inputs, or the workflow itself — building
 the PR head and publishing `sha-` only — and
 (3) by `gh workflow run worker-image.yaml --ref <ref>` once the workflow exists on `main`. What a pod
 executes is part of the image's behaviour, so a change to it builds the image it is proven on: the
@@ -466,12 +470,21 @@ and resource allowance. Nothing in this mode uses a Job, a StatefulSet, or `acti
 This section is the TypeScript daemon's. The Go coordinator (`packages/daemon-go`, LEGION-208)
 reads the same `runtime.kubernetes` key with different rules, and refuses the examples below as
 written: its runtime selects the Legion pool itself, so `scheduling.node_selector` may not set
-`legion.dev/pool`; `resources` is keyed by role, with no `role_profiles`; `storage_class` and the
-`gateway` block (`url`, `audience`, `service_account`, `token_expiry_seconds`, 600 to 3600) are
-required; `bind` must be an address pods reach, never `0.0.0.0` or loopback, since every pod
+`legion.dev/pool`; `resources` is keyed by role, with no `role_profiles`; `storage_class` is
+required, and a `gateway` block is refused as removed (LEGION-270: a pod's model route is the
+operator's `pod` below); `bind` must be an address pods reach, never `0.0.0.0` or loopback, since every pod
 dials the worker stream at `tcp://<bind>:<worker_stream_port>`; and no Legion URL a pod is handed
 (`daemon_url`, `envoy_url`, `dispatch_url`, each `nats_urls` entry) may name a loopback or
-unspecified host (`packages/daemon-go/internal/config/kubernetes.go`).
+unspecified host (`packages/daemon-go/internal/config/kubernetes.go`). It also reads
+`runtime.kubernetes.pod` — `env`, `volumes` (each one `secret`, `config_map`, or `projected`
+source), `volume_mounts` (read-only unless `read_only: false`), and `service_account` — which it
+adds to every pod, the image probe's included, refusing any name or path of Legion's own or the
+worker image's; and under it `provider_keys` maps each variable Oh My Pi reads to a key of the
+providers Secret below, which every pod then mounts, those keys alone, for the shim to export.
+Legion holds no model route: everything a pod's Oh My Pi needs to reach a model — a `models.yml`,
+a settings overlay in `PI_CONFIG_FILES`, a token — is the operator's, through `pod` and
+`provider_keys`. `scripts/e2e/fixtures/operator-route/` is one such operator's (the Go live
+harnesses': the Hawk model gateway, keyed by a projected ServiceAccount token).
 
 `runtime` is either the scalar `tmux` (the default) or a mapping whose single key selects the
 Kubernetes runtime and carries its settings:

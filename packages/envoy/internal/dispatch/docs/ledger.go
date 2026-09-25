@@ -2,6 +2,7 @@ package docs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -17,12 +18,17 @@ import (
 // and publishes the writes to their rooms, in that order. Discard, which callers defer right
 // after Join, drops whatever a transaction that did not commit left behind.
 //
-// Document settlement, and a named version written outside a caller's transaction, collect
-// their events in a ledger with no transaction.
+// Settlement's operations run in a transaction of its own, which no caller joined, so its ledger
+// carries no `tx` and marks itself `settling` instead. A named version no caller joined makes its
+// own transaction too (NamedVersion's withTx), and collects its events in a ledger that is
+// neither joined nor settling.
 type Ledger struct {
 	service *Service
 	tx      pgx.Tx
-	events  []model.Event
+	// settling marks settlement's ledger, whose operations run inside settlement's own
+	// transaction although no caller joined it.
+	settling bool
+	events   []model.Event
 	// live holds, per document, the writes this transaction made to it; order is the order it
 	// first wrote them in.
 	live     map[string]*liveWrite
@@ -37,11 +43,25 @@ type ledgerVersion struct {
 
 type ledgerContextKey struct{}
 
+// errUnjoined refuses a transactional operation called outside Join: its writes would reach no
+// ledger, so their authors would never be credited or released.
+var errUnjoined = errors.New("docs: the operation needs a transaction joined with Service.Join")
+
 // Join joins the document operations run with the returned context to tx, recording what they
 // produce in the returned ledger.
 func (s *Service) Join(ctx context.Context, tx pgx.Tx) (context.Context, *Ledger) {
 	ledger := &Ledger{service: s, tx: tx}
 	return withLedger(ctx, ledger), ledger
+}
+
+// inTransaction reports whether the operations recording into l run inside an open database
+// transaction that this ledger knows about: one a caller joined, or settlement's own. Such an
+// operation fails on a failed room rather than waiting for its recovery (awaitRoomRecovery). An
+// operation that runs inside a transaction without joining it is invisible here and still
+// waits, which is the hang this rule exists to stop, so a handler joins (Docs.Join) and passes
+// the context Join returned.
+func (l *Ledger) inTransaction() bool {
+	return l != nil && (l.tx != nil || l.settling)
 }
 
 func withLedger(ctx context.Context, ledger *Ledger) context.Context {
@@ -67,24 +87,26 @@ func collectEvent(ctx context.Context, event model.Event) {
 	}
 }
 
-// Events returns the events the transaction's document operations appended, for the caller to
-// publish once Commit has returned.
-func (l *Ledger) Events() []model.Event {
-	if l == nil {
-		return nil
-	}
-	return l.events
-}
-
 // Commit commits the transaction, then credits, releases and publishes what its document
-// operations recorded (see Ledger). When the commit returns an error its outcome is unknown, so
-// the rooms the transaction wrote are failed and reload the durable document.
+// operations recorded (see Ledger), and last publishes the events they appended, so a caller's
+// own events, published after Commit returns, follow them. When the commit returns an error its
+// outcome is unknown, so the rooms the transaction wrote are failed and reload the durable
+// document.
 func (l *Ledger) Commit(ctx context.Context) error {
 	if err := l.commit(ctx); err != nil {
 		return err
 	}
 	l.publish()
+	l.publishEvents()
 	return nil
+}
+
+// publishEvents publishes the events this ledger's document operations appended, in the order
+// they appended them.
+func (l *Ledger) publishEvents() {
+	for _, event := range l.events {
+		l.service.events.Publish(event)
+	}
 }
 
 // commit is Commit up to the publish. Another transaction can run between the two, and tests

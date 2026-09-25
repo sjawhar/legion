@@ -91,9 +91,17 @@ func (s *server) messageDeliveryRoute(ctx context.Context, message model.Message
 // listener send, so the send holds no pooled connection. The locked rows re-verify the
 // recipient the resolution was taken for: the attempt's own for a resumed attempt, the
 // message's target for a new one.
+//
+// The idempotency key is scoped to the message and the mode, so resuming a stranded attempt
+// under a DIFFERENT mode would publish a second frame under one attempt number: the row would
+// name one mode while the agent had been sent two. A mode change therefore settles the stranded
+// attempt rather than resuming it, and opens an attempt of its own pinned to the session that
+// attempt named - the recipient the resolution was taken for, whatever the message's target
+// says now.
 func (s *server) recordPendingMessageDelivery(
 	ctx context.Context,
 	message model.Message,
+	actor model.Actor,
 	resolved ResolvedMention,
 	replyThread *messageReplyThread,
 ) (pendingMessageDelivery, error) {
@@ -104,7 +112,7 @@ func (s *server) recordPendingMessageDelivery(
 	defer tx.Rollback(ctx)
 	// The issue is locked before the message row and the attempt rows, the order every other
 	// message transaction takes them in, so the two halves of a delivery cannot deadlock
-	// against each other.
+	// against each other. It is also the receipt owner a supersede below appends against.
 	if message.IssueKey != nil {
 		if _, err := s.requireOpenIssue(ctx, tx, *message.IssueKey); err != nil {
 			return pendingMessageDelivery{}, err
@@ -115,36 +123,68 @@ func (s *server) recordPendingMessageDelivery(
 		return pendingMessageDelivery{}, err
 	}
 	pending := pendingMessageDelivery{resolved: resolved}
-	var pinned string
+	var stranded model.MessageDelivery
 	var lapsed bool
 	err = tx.QueryRow(ctx, `
-		select attempt, session_id, `+claimLapsed+`
+		select attempt, delivery, session_id, `+claimLapsed+`
 		from message_deliveries
 		where message_id = $1 and state = 'pending'
 		order by attempt
 		limit 1
 		for update
-	`, message.ID).Scan(&pending.attempt, &pinned, &lapsed)
+	`, message.ID).Scan(&stranded.Attempt, &stranded.Delivery, &stranded.SessionID, &lapsed)
+	var superseded *model.Event
 	switch {
 	case err != nil && !errors.Is(err, pgx.ErrNoRows):
 		return pendingMessageDelivery{}, err
 	case err == nil && lapsed:
-		// Nobody holds this attempt, or whoever claimed it never came back, so this send takes
-		// it under its original number - and so its original idempotency key, which the
-		// listener deduplicates against a send that did land, rather than delivering the
-		// message a second time. It keeps the recipient its row names; only an attempt
-		// stranded before anything was resolved, whose row names none, goes to the message's
-		// target. Either way the resolution has to have been taken for that recipient.
+		// Nobody holds this attempt, or whoever claimed it never came back. It keeps the
+		// recipient its row names; only an attempt stranded before anything was resolved,
+		// whose row names none, goes to the message's target. Either way the resolution has
+		// to have been taken for that recipient.
 		recipient := target
-		if pinned != "" {
-			recipient = "session:" + pinned
+		if stranded.SessionID != "" {
+			recipient = "session:" + stranded.SessionID
 		}
 		if recipient != resolved.Target {
 			return pendingMessageDelivery{}, errStaleResolution
 		}
-		// An attempt that already names a session keeps it; one stranded before anything was
-		// resolved takes the recipient this resolution found, so the row names the session its
-		// frame is going to either way and that session can answer it.
+		if stranded.SessionID != "" && stranded.Delivery != resolved.Delivery {
+			// A different mode: this send may not ride on that attempt's key. Settle it,
+			// append the receipt its row now owes - the dashboard's attempt history is built
+			// from receipts alone, so a row settled without one never reads failed there -
+			// and open an attempt of this send's own, pinned to the same session.
+			stranded.MessageID, stranded.State = message.ID, "failed"
+			failure := supersededByModeChangeText
+			stranded.Error = &failure
+			// claimed_at moves with the settle, exactly as the resume branch below moves it:
+			// it is how a sender still holding the old claim learns the row is no longer its
+			// own. Without it, a sender that returns after its lease lapsed still reads
+			// `mine`, and if the agent answered the frame it already held it would append a
+			// SECOND message.delivery receipt for this attempt.
+			if err := tx.QueryRow(ctx, `
+				update message_deliveries set state = 'failed', error = $3, claimed_at = now()
+				where message_id = $1 and attempt = $2 and state = 'pending'
+				returning attempt
+			`, message.ID, stranded.Attempt, failure).Scan(&stranded.Attempt); err != nil {
+				return pendingMessageDelivery{}, err
+			}
+			receipt, err := s.appendEvent(ctx, tx, messageDeliveryReceipt(message, actor, stranded, resolved.title))
+			if err != nil {
+				return pendingMessageDelivery{}, err
+			}
+			superseded = &receipt
+			if err := s.insertMessageDeliveryAttempt(ctx, tx, message.ID, resolved, &pending); err != nil {
+				return pendingMessageDelivery{}, err
+			}
+			break
+		}
+		// The same mode: resume it under its original number, and so its original
+		// idempotency key, which the stream deduplicates against a send that did land. An
+		// attempt that already names a session keeps it; one stranded before anything was
+		// resolved takes the recipient this resolution found, so the row names the session
+		// its frame is going to either way and that session can answer it.
+		pending.attempt = stranded.Attempt
 		if err := tx.QueryRow(ctx, `
 			update message_deliveries
 			set delivery = $3, session_id = coalesce(nullif(session_id, ''), $4), claimed_at = now()
@@ -161,16 +201,7 @@ func (s *server) recordPendingMessageDelivery(
 		if target != resolved.Target {
 			return pendingMessageDelivery{}, errStaleResolution
 		}
-		if err := tx.QueryRow(ctx, `
-			insert into message_deliveries (message_id, attempt, delivery, session_id, state, claimed_at)
-			values (
-				$1,
-				(select coalesce(max(attempt), 0) + 1 from message_deliveries where message_id = $1),
-				$2, $3, 'pending', now()
-			)
-			returning attempt, claimed_at
-		`, message.ID, resolved.Delivery, resolved.attemptSessionID,
-		).Scan(&pending.attempt, &pending.claimedAt); err != nil {
+		if err := s.insertMessageDeliveryAttempt(ctx, tx, message.ID, resolved, &pending); err != nil {
 			return pendingMessageDelivery{}, err
 		}
 	}
@@ -199,7 +230,33 @@ func (s *server) recordPendingMessageDelivery(
 	if err := tx.Commit(ctx); err != nil {
 		return pendingMessageDelivery{}, err
 	}
+	if superseded != nil {
+		s.publish(*superseded)
+	}
 	return pending, nil
+}
+
+// supersededByModeChangeText is what a stranded attempt records when a retry in another mode
+// takes over: that mode is a different idempotency key, so the new send is genuinely a second
+// delivery, and this attempt's own fate was never learned.
+const supersededByModeChangeText = "superseded by a retry in another mode; it may already have been delivered"
+
+// insertMessageDeliveryAttempt opens an attempt of this send's own, under the recipient the
+// resolution was taken for. The message row is locked by the caller, so the highest attempt
+// cannot move between reading it and inserting beside it.
+func (s *server) insertMessageDeliveryAttempt(
+	ctx context.Context, tx pgx.Tx, messageID string, resolved ResolvedMention, pending *pendingMessageDelivery,
+) error {
+	return tx.QueryRow(ctx, `
+		insert into message_deliveries (message_id, attempt, delivery, session_id, state, claimed_at)
+		values (
+			$1,
+			(select coalesce(max(attempt), 0) + 1 from message_deliveries where message_id = $1),
+			$2, $3, 'pending', now()
+		)
+		returning attempt, claimed_at
+	`, messageID, resolved.Delivery, resolved.attemptSessionID,
+	).Scan(&pending.attempt, &pending.claimedAt)
 }
 
 // messageDeliveryReceipt is the message.delivery receipt an attempt row owes, read off that
@@ -215,7 +272,7 @@ func messageDeliveryReceipt(
 		model.MessageDeliveryEventPayload{
 			MessageID: attempt.MessageID, Attempt: attempt.Attempt, Delivery: attempt.Delivery,
 			SessionID: attempt.SessionID, Target: messageTarget(message.Target), Title: title,
-			State: attempt.State, Error: receiptError(attempt.Error),
+			State: attempt.State, Duplicate: attempt.Duplicate, Error: receiptError(attempt.Error),
 		})
 }
 
@@ -227,21 +284,22 @@ func (s *server) completeMessageDelivery(
 	actor model.Actor,
 	pending pendingMessageDelivery,
 	envelopeID *string,
+	duplicate bool,
 	deliveryError string,
 ) (model.MessageDelivery, error) {
 	state, failure := deliveryOutcome(deliveryError)
 	// The receipt this send owes, read off the row it is about to write.
 	receipt := messageDeliveryReceipt(message, actor, model.MessageDelivery{
 		MessageID: message.ID, Attempt: pending.attempt, Delivery: pending.resolved.Delivery,
-		SessionID: pending.resolved.attemptSessionID, State: state, Error: failure,
+		SessionID: pending.resolved.attemptSessionID, State: state, Duplicate: duplicate, Error: failure,
 	}, pending.resolved.title)
 	return settleDeliveryAttempt(ctx, s, receipt,
 		func(ctx context.Context, tx pgx.Tx) (model.MessageDelivery, error) {
 			return scanMessageDelivery(tx.QueryRow(ctx, `
-				update message_deliveries set envelope_id = $4, state = $5, error = $6
+				update message_deliveries set envelope_id = $4, state = $5, error = $6, duplicate = $7
 				where message_id = $1 and attempt = $2 and state = 'pending' and claimed_at = $3
 				returning `+messageDeliveryColumns,
-				message.ID, pending.attempt, pending.claimedAt, envelopeID, state, failure,
+				message.ID, pending.attempt, pending.claimedAt, envelopeID, state, failure, duplicate,
 			))
 		},
 		func(ctx context.Context, tx pgx.Tx) (model.MessageDelivery, bool, *string, error) {
@@ -280,7 +338,7 @@ func (s *server) deliverMessage(
 			return s.resolveMentionTargets(ctx, []string{route}, delivery)[0], nil
 		},
 		func(ctx context.Context, resolved ResolvedMention) (pendingMessageDelivery, error) {
-			return s.recordPendingMessageDelivery(ctx, message, resolved, replyThread)
+			return s.recordPendingMessageDelivery(ctx, message, actor, resolved, replyThread)
 		},
 		errorf(http.StatusConflict, "MESSAGE_TARGET_CHANGED",
 			"the message's target changed while this delivery was being recorded"),
@@ -288,10 +346,13 @@ func (s *server) deliverMessage(
 	if err != nil {
 		return model.MessageDelivery{}, err
 	}
-	envelopeID, deliveryError := s.sendResolvedDelivery(
-		ctx, pending.resolved, message.Body, message.ID+":"+fmt.Sprint(pending.attempt), urgency, pending.frame,
+	// The key is scoped to the message and the mode, stable across every attempt of that pair,
+	// so a retry of a send that already landed is a duplicate the stream drops. The listener
+	// scopes it further by recipient, which is what lets a role's new holder still be reached.
+	envelopeID, duplicate, deliveryError := s.sendResolvedDelivery(
+		ctx, pending.resolved, message.Body, message.ID+":"+pending.resolved.Delivery, urgency, pending.frame,
 	)
-	return s.completeMessageDelivery(ctx, message, actor, pending, envelopeID, deliveryError)
+	return s.completeMessageDelivery(ctx, message, actor, pending, envelopeID, duplicate, deliveryError)
 }
 
 func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
@@ -456,7 +517,7 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 
 // messageDeliveryColumns is the message_deliveries select list scanMessageDelivery reads, in
 // scan order.
-const messageDeliveryColumns = `message_id::text, attempt, delivery, session_id, envelope_id, state, error, reply_id::text, created_at`
+const messageDeliveryColumns = `message_id::text, attempt, delivery, session_id, envelope_id, duplicate, state, error, reply_id::text, created_at`
 
 // scanMessageDelivery decodes one messageDeliveryColumns row; extra receives any columns
 // selected after them.
@@ -464,7 +525,7 @@ func scanMessageDelivery(row pgx.Row, extra ...any) (model.MessageDelivery, erro
 	var delivery model.MessageDelivery
 	fields := []any{
 		&delivery.MessageID, &delivery.Attempt, &delivery.Delivery, &delivery.SessionID, &delivery.EnvelopeID,
-		&delivery.State, &delivery.Error, &delivery.ReplyID, &delivery.CreatedAt,
+		&delivery.Duplicate, &delivery.State, &delivery.Error, &delivery.ReplyID, &delivery.CreatedAt,
 	}
 	if err := row.Scan(append(fields, extra...)...); err != nil {
 		return model.MessageDelivery{}, err

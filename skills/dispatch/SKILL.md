@@ -92,8 +92,9 @@ A spec has two readers: the human who decides reads the **Summary** and **New si
 
 - The spec is the issue's one primary document. Extend it in place — a new version that keeps the
   human's own text — never a second "spec" artifact beside it.
-- No hedging ("might", "could consider"). No TBD, TODO, or placeholders: an open item is either
-  an ask block or a question for the platform PO whose ruling becomes a Requirement (see
+- No hedging ("might", "could consider"). No TBD, TODO, or placeholders: an open item is an ask
+  block, a technical decision your lane makes and records as a Requirement, or, for a contract
+  between two lanes or a halt condition, a question for the platform PO (see
   [Before you ask](#before-you-ask) under Asking).
 - Keep each section to one screen; work that exceeds one screen per section is two specs.
 - Update the spec as decisions land: the spec is the record, comments are the discussion.
@@ -281,9 +282,13 @@ eval_id? What's an R4 model header? What exactly is the question or uncertainty 
 production import). Every `dispatch_ask` passes three gates first:
 
 1. **Does it need his authority, taste, or risk appetite?** This is the bar for a decision
-   written as an `:::ask` block in context ([Decision blocks](#decision-blocks)). Schema shapes,
-   table layouts, field names, migration internals, and contracts between lanes do not: they go to
-   the platform PO over Envoy, who rules.
+   written as an `:::ask` block in context ([Decision blocks](#decision-blocks)). Technical
+   decisions inside your outcome do not: schema shapes, table layouts, field names, and migration
+   internals are your lane's to decide and record in the spec. Two things still go to the
+   platform PO over Envoy: a contract between two lanes, and a halt condition (a change to IAM,
+   deletion or exposure of production data, anything that reaches a customer). The PO takes those
+   to Sami as a Dispatch ask; you do not open one yourself, even as a permission ask under gate 2
+   (Sami, 2026-09-25, AGENTC-34 §12).
 2. **Is there genuine uncertainty?** If not, it is a plan you execute. The one legitimate ask
    without uncertainty is permission for an action only a human can authorise — a production
    write, an external send, a console action — and then the question is that action in one
@@ -381,11 +386,13 @@ It returns the imported commit, or the recorded error when the model was rejecte
 
 Before saying you are waiting for human input, call `dispatch_open_asks`. With no arguments it lists this session's active asks across open issues and project documents, including whether the human or agent owes the next reply. With `dispatch_open_asks({ project })` it lists every open ask in that project — on its issues and on its documents, whoever authored them — which is how you audit what a whole project is waiting on rather than just your own asks.
 
-**Unsettled product shape needs a decision before implementation.** When a page, navigation entry, table key, customer-scoping rule, or persisted sidecar would set product shape that Sami has not already settled, send a one-line ask before the first implementation commit. A platform-PO schema or contract ruling does not settle product shape. This does not turn a user-specified decision or routine implementation into an approval request; it is inferred from AGENTC-186's 2026-09-16 retro (platform PO, 2026-09-17).
+**Unsettled product shape needs a decision before implementation.** When a page, navigation entry, table key, customer-scoping rule, or persisted sidecar would set product shape that Sami has not already settled, send a one-line ask before the first implementation commit. A lane's schema decision or a platform-PO contract ruling does not settle product shape. This does not turn a user-specified decision or routine implementation into an approval request; it is inferred from AGENTC-186's 2026-09-16 retro (platform PO, 2026-09-17).
 
 **Anything that needs the human is an ask, or it does not exist.** An approval, a credential,
 a setting only they can change, a review click, a conflict between two of their own rules - if
-your work waits on it, open a `dispatch_ask` the moment you know, the action as the question.
+your work waits on it, open a `dispatch_ask` the moment you know, the action as the question. The
+exception is a halt condition from [Before you ask](#before-you-ask) gate 1, which goes to the
+platform PO over Envoy instead.
 Never write it into a spec, a comment reply, a message, or a
 pull-request body: nothing in those paths reaches the human's Inbox, and a human who is not
 reading your document does not know they are the blocker. Before asking, try to remove the
@@ -417,10 +424,16 @@ At least one field besides `ask` is required. Use this only while the same decis
 log and invalidates any answer draft against the prior `edited_at` revision, so the human sees the new wording and explicitly reconfirms.
 An answered or resolved ask cannot be edited. If the decision is moot or superseded, retract the old ask and open a new one.
 
-An ask that lives as an `ask` block in a document takes its question and options from the document, so edit those with
-`dispatch_doc_edit` (`replace` on the block's text, or `delete`/`insert` on its option items), never with `dispatch_edit_ask`: the
-next document save reasserts the block's text over whatever `dispatch_edit_ask` wrote, and that reversal is logged as an edit by
-the document's saver. `dispatch_edit_ask` is for asks opened with `dispatch_ask` that have no block.
+An ask that lives as an `ask` block in a document keeps its question and options in the block, and `dispatch_edit_ask` writes the
+block along with the row, so the edit stands and the document reads the same. It changes only the fields you name: pass `urgency`
+alone and the question's own wording, formatting, links and comment anchors are untouched. Pass `question` or `options` and that part
+is rewritten, so anchors inside the text you replaced move as they would for any document edit. Either way it is a document edit: it
+writes a new version, which on a spec awaiting approval closes the design gate until the new version is approved. Editing the block
+with `dispatch_doc_edit` works too and is the way to change anything else about it, including adding formatting to a question.
+Re-sending a field unchanged rewrites nothing, so retrying the whole ask is safe.
+Two shapes the block cannot carry are refused outright, naming the field and writing nothing: an option label containing `": "`,
+which is what separates a label from its description, and a question with a line beginning `:::`. Blank lines separate paragraphs;
+a single newline is kept as a line break.
 
 An ask stays open until a human answers, unless its question no longer needs that answer. Retract a moot or superseded question, or
 self-resolve one after finding the answer:
@@ -432,7 +445,10 @@ dispatch_resolve_ask({
 })
 ```
 Use `retracted` when the question is obsolete and `resolved` when you found the answer. Include the reason because the question remains
-in its Conversation card and reply thread. Resolution is not an answer: it never records a human decision, and an answered ask cannot be
+in its Conversation card and reply thread; a reason beginning `removed from the document in version` is refused, because that is how a
+retraction the document's own settlement wrote is recognised. Resolving a block ask records it in the block too, so it stays resolved
+however the document moves afterwards — while deleting the block from the document is the other way to close one, and putting the block
+back reopens it. Resolution is not an answer: it never records a human decision, and an answered ask cannot be
 resolved. A human may reply to an open or answered ask; so may you, e.g. after finding the answer — use `reply_to_ask` on
 `dispatch_comment` (mutually exclusive with `reply_to`).
 A review comment you opened has its own closer, `dispatch_resolve_comment` — see
@@ -596,6 +612,20 @@ survive moves and retyping.
 `retype` turns the paragraph or typed block with `block` into the named typed `type` in place. It keeps the
 block id, keeps a typed block's body, and uses `attributes` for client-owned typed attributes. Use it when
 an existing paragraph is the question that should become a decision.
+
+### A document that is reloading
+
+These calls can answer `DOC_SERVICE_UNAVAILABLE` (HTTP 503), because each writes a document inside its
+transaction: `dispatch_doc_edit`; `dispatch_ask` and `dispatch_comment` on a quote; a `dispatch_comment` reply
+in a thread whose first comment is anchored; `dispatch_suggest`; `dispatch_resolve_comment` on an anchored
+comment; `dispatch_artifact` replacing a document that already exists; and, on an ask that lives in a `:::ask`
+block, `dispatch_edit_ask` and `dispatch_resolve_ask`, which write that block. Creating an issue with a spec,
+uploading a new document, `dispatch_request_approval` and `dispatch_message` never answer it, and neither do
+`dispatch_edit_ask` and `dispatch_resolve_ask` on an ask that has no block. It means that document's live room
+failed and is reloading from its durable copy, so the server refused rather than wait for it; your call wrote
+nothing and the document is intact. Nothing retries it for you: the Dispatch client hands a 503 straight back.
+Wait a few seconds and make the same call again. A second refusal in a row is worth telling your human about,
+with the document's reference.
 
 ## Typed blocks
 

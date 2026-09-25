@@ -689,3 +689,77 @@ func TestRenderTableAutolinkPreservesHref(t *testing.T) {
 		t.Fatal("Parse(Render(Parse(table))) changed the autolink href")
 	}
 }
+
+// Every mark the schema allows that the rendering does not write is an anchor, and no anchor may
+// change the markdown, whichever one a later schema adds: the loop reads markTypes, so a new
+// invisible mark is covered here the day it exists.
+func TestNoUnrenderedSchemaMarkChangesTheMarkdown(t *testing.T) {
+	const head, marked, tail = "Use snake_", "case here. see [x]", "(y)"
+	whole := &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{
+		{Type: "text", Text: head + marked + tail},
+	}}}}
+	want, err := Render(whole)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for markType := range markTypes {
+		if renderedMarkTypes[markType] {
+			continue
+		}
+		t.Run(markType, func(t *testing.T) {
+			marks := []Mark{{Type: markType, Attrs: Attrs{"id": "m1", "by": "user:alice"}}}
+			split := &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{
+				{Type: "text", Text: head},
+				{Type: "text", Text: marked, Marks: marks},
+				{Type: "text", Text: tail},
+			}}}}
+			markdown, err := Render(split)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if markdown != want {
+				t.Fatalf("Render() with a %s mark = %q, want the unmarked %q", markType, markdown, want)
+			}
+		})
+	}
+}
+
+// An anchor mark renders nothing, but one that starts or ends inside a word splits the word's
+// text into two runs. The rendering is the same as if the mark were not there: an escape is
+// decided over the whole run, so `snake_case` is never written `snake\_case`.
+func TestRenderIsTheSameWhereverAnAnchorMarkSplitsText(t *testing.T) {
+	comment := []Mark{{Type: "proofComment", Attrs: Attrs{"id": "c1", "by": "user:alice"}}}
+	ask := []Mark{{Type: "dispatchAsk", Attrs: Attrs{"id": "a1", "by": "user:alice"}}}
+	for _, test := range []struct {
+		name string
+		runs []*Node
+		want string
+	}{
+		{
+			name: "a comment on the end of a word",
+			runs: []*Node{{Type: "text", Text: "Use snake_"}, {Type: "text", Text: "case", Marks: comment}, {Type: "text", Text: " here."}},
+			want: "Use snake_case here.\n",
+		},
+		{
+			name: "a comment ending between a link's brackets and its target",
+			runs: []*Node{{Type: "text", Text: "see [x]", Marks: comment}, {Type: "text", Text: "(y) here."}},
+			want: "see \\[x]\\(y) here.\n",
+		},
+		{
+			name: "an ask on the start of a word",
+			runs: []*Node{{Type: "text", Text: "Rename the "}, {Type: "text", Text: "user", Marks: ask}, {Type: "text", Text: "_id column."}},
+			want: "Rename the user_id column.\n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			doc := &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: test.runs}}}
+			markdown, err := Render(doc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if markdown != test.want {
+				t.Fatalf("Render() = %q, want %q", markdown, test.want)
+			}
+		})
+	}
+}

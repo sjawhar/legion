@@ -304,7 +304,9 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	if input.Spec != nil && strings.TrimSpace(*input.Spec) != "" {
 		markdown = *input.Spec
 	}
-	markdown, err = s.deps.Docs.SeedText(r.Context(), tx, artifactID, markdown, actor)
+	documentCtx, ledger := s.deps.Docs.Join(r.Context(), tx)
+	defer ledger.Discard()
+	markdown, err = s.deps.Docs.SeedText(documentCtx, artifactID, markdown, actor)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -348,7 +350,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	advice := s.writeAdvice(
 		r.Context(), tx, "POST /api/v1/issues", key, actor, "", issue.Status,
 	)
-	if err := tx.Commit(r.Context()); err != nil {
+	if err := ledger.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}

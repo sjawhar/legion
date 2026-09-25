@@ -25,8 +25,10 @@ events to the right session.
 | Webhook config         | `internal/webhook/config.go`                     | ENVOY_WEBHOOKS parsing, startup validation         |
 | Listener behavior      | `cmd/listener/main.go`                    | subscribe/match/deliver flow                       |
 | NATS client            | `internal/bus/nats.go`                    | reconnect/self-heal logic                          |
+| Stream subjects        | `internal/bus/stream.go`                  | `ENVOY_NOTIFICATIONS` subject reconciliation at start |
 | Session delivery       | `internal/session/session.go`             | hot delivery via prompt_async                      |
 | Interest storage       | `internal/store/kv.go`                    | JetStream KV subscriptions                         |
+| KV cache watchers      | `internal/kvwatch/kvwatch.go`             | one watcher lifecycle for the interest, session and CI caches |
 | Topic matching         | `internal/routing/match.go`               | wildcard matching                                  |
 | Envelope normalization | `internal/contracts/*.go`                 | generated contract + source-specific normalization |
 | Native Dispatch workspace | `cmd/dispatch/`, `internal/dispatch/` | HTTP API, Postgres store, documents, and event outbox |
@@ -40,28 +42,63 @@ captured update in the same Postgres transaction as any resulting version and ev
 and compares canonical markdown. `envoy-dispatch backfill-block-ids` runs that closure across every
 document. Every write path that changes a document queues that closer once its transaction commits: a live edit (`POST /api/v1/artifacts/{id}/edits`), an uploaded document version (`POST /api/v1/issues/{key}/artifacts`, `POST /api/v1/projects/{key}/artifacts`), and a spec seeded at issue creation - so ask blocks written by any of them become asks without waiting for a later live change. The closer attributes the asks it indexes to the room's most recent mutating actor (`roomState.lastActor`, set by every edit, replacement and seed) when no pending author remains - an edit's own version write has already consumed `pending` by the time settlement runs. A free-text ask block (no bullet list) carries `options: []` on the wire, never JSON null.
 
-Each `doc_updates` row records `content_changed` - whether the update changed the document once
-anchor marks are stripped (`pmdoc.StripAnchorMarks` + `Equal`, the one measure the room's update
-observer and a transactional live write in `applyLive` both apply) - and settlement writes a version
-only when a content-class row lies past the latest version's `doc_update_version` cursor or ask
-reconciliation changed something, so a comment's quote mark or margin projection never versions a
-document. A handler joins its document operations to its transaction with `Docs.Join`, which
-returns the transaction's ledger (`docs/ledger.go`), the only way to give a document operation a
-transaction. A joined operation never writes the room: it runs on the transaction's fork of the
-room's document (`docs/livewrite.go`), appends its update inside the transaction, and reads through
-the same fork. The handler ends the transaction with `ledger.Commit`, which commits, credits the
-writes' authors to their rooms (the actor, and the browsers connected when it changed the
-content), releases the authors a version the transaction wrote named, and only then applies and
-broadcasts the updates; it defers `ledger.Discard`, so a transaction that does not commit leaves
-the room, every connected browser, every version and the durable document as they were.
+Each `doc_updates` row records `content_changed` - whether the update changed the document's
+rendered markdown, the only document content a version stores (`pmdoc.Render` of the tree before and
+after; the one measure the room's update observer, `updateChangesMarkdown`, and a transactional live
+write in `applyLive` both apply) - and settlement writes a version only when a content-class row
+lies past the latest version's `doc_update_version` cursor or ask reconciliation changed something.
+An update that changes only what no rendering carries therefore versions no document by that route:
+a margin projection, the attributes a reader's browser editor derives on its own - each heading's
+`id` when it opens the document, and each ordered list item's `label` and `listType` on the first
+keyboard caret move or edit - or a comment's, suggestion's or ask's anchor mark, wherever it splits
+the text it covers. Routes that write a version on request do so whatever changed, so each can write
+a version whose markdown equals the previous one's and stale an approval pinned to it: an upload to
+an existing document (`POST /api/v1/issues/{key}/artifacts`,
+`POST /api/v1/projects/{key}/artifacts`) always inserts one; `POST /artifacts/{id}/versions` and
+accepting a suggestion always name one through `NamedVersion`; and `POST /edits` names one through
+`NamedVersion` when it is sent with a `summary` and its `changed` is true. That `changed` comes from
+`nodeToken`, which counts marks, so an edit that only drops an anchor qualifies. Without a `summary`
+that edit writes nothing, because `SnapshotVersion` compares renderings. LEGION-260's follow-up
+holds the fix: the edit route writes a version only when the rendered markdown changed, keeping
+`changed` as what it reports to the agent, and the upload route is weighed by the same rule.
+`pmdoc.Render` renders a document without its anchor marks, so an escape is decided over a whole run
+and `snake_case` never becomes `snake\_case` because a mark starts inside it; an anchored comment's
+or ask's `SnapshotVersion` compares that same rendering with the latest version's markdown, so
+marking a quote writes no version either - except at most once per document whose latest version an
+earlier server stored with markdown this server would render differently - an escape an anchor had
+split, whether one it did not need (`user\_id`) or one it was missing (`see [x](y)`, which parses
+back as a link), and, since #1326, a block marker in a paragraph line that now takes an escape
+(`## not a heading` renders `\## not a heading`), with or without an anchor in the document. The
+next snapshot of such a document writes today's rendering of that text, and when the stored version
+was approved it leaves the approval stale until a human approves the new one. A browser is credited
+as a version's author only for browser edits made while it is connected (`creditContentChange`),
+another browser's as well as its own, since a browser edit cannot be pinned on one connected peer;
+opening a document or an agent's edit credits it nothing, so a reader whose editor changes nothing
+the rendering carries causes no version and cannot stale an approval.
+A handler joins its document operations to its transaction with `Docs.Join`, which returns the
+transaction's ledger (`docs/ledger.go`), the only way to give a document operation a transaction:
+`SeedText` and `SnapshotVersion` take theirs from the ledger and refuse a context that was not
+joined. A joined operation never writes the room: it runs on the transaction's fork of the room's
+document (`docs/livewrite.go`), appends its update inside the transaction, and reads through the
+same fork. The handler ends the transaction with `ledger.Commit`, which commits, credits the
+writes' actor to their rooms, releases the authors a version the transaction wrote named, then
+applies and broadcasts the updates, and last publishes the events its document operations
+appended, ahead of the handler's own; it defers `ledger.Discard`, so a transaction that does not
+commit leaves the room, every connected browser, every version and the durable document as they
+were.
+
 While a transaction's write to a document is open it holds that room's writer slot, so another
 transaction's joined operation on the document waits for it to be published or discarded, and it
 holds off the room's settlement, which runs once the write is published or discarded. The docs
 layer takes a document's locks in one order, wherever a handler starts: the owner row
-(`lockArtifactOwner`), then the writer slot, recovering a failed room first, then the advisory lock;
-a joined read takes the owner row before it waits for the slot. The slot is in memory, where
-Postgres cannot see a wait for it, so no transaction may wait for it while holding a lock its holder
-still needs, nor the advisory lock that a failed room's eviction needs to compact.
+(`lockArtifactOwner`), then the writer slot, then the advisory lock; a joined read takes the owner
+row before it waits for the slot. The slot is in memory, where Postgres cannot see a wait for it, so
+no transaction may wait for it while holding a lock its holder still needs. A failed room's eviction
+flushes and compacts under the advisory lock, so no transaction waits for a failed room to recover
+either: a document operation inside a transaction (a handler's, or settlement's own) that meets one
+fails with `ErrServiceUnavailable` (`503 DOC_SERVICE_UNAVAILABLE`), the transaction rolls back, and
+the caller retries once the room has reloaded; so does a write whose room fails before its first
+append, since the reloaded room may lack it.
 
 Successful Dispatch writes on an issue may return top-level `advice` with the issue status, the
 count of session-authored messages/comments/asks since the last human event, and the calling
@@ -307,15 +344,53 @@ step of a delivery holds a connection across another.
 A claim outlives its sender by a minute, which Postgres judges (`claimLapsed`) against the
 `claimed_at` Postgres itself wrote, so no task's clock skew can read a live claim as lapsed or
 leave a stranded attempt unresumable. A retry beside a live claim takes an attempt of its own;
-one beside an abandoned claim resumes the original attempt under its original number, whose
-idempotency key (`<comment>:<target>:<attempt>`, `<message>:<attempt>`) makes a send that did
-land a duplicate the listener drops. A resumed attempt keeps the recipient it was opened for -
-a comment attempt its pinned session or its resolve error, a message attempt the session its row
-names - because that is the session the listener deduplicated the key for and the one holding
+one beside an abandoned claim resumes the original attempt under its original number. A resumed
+attempt keeps the recipient it was opened for - a comment attempt its pinned session or its
+resolve error, a message attempt the session its row names - because that is the session holding
 the frame; a role that has moved since is reached by an attempt of its own rather than by
 re-pointing this one, and only whether the original recipient can still receive the mode is
 re-derived. An attempt stranded before anything was resolved has no recipient to keep and is
 resolved afresh under that same number, never reported undeliverable unsent.
+
+The idempotency key carries no attempt number: it is `<message>:<mode>` and
+`<comment>:<target>:<mode>`, stable across every attempt of that pair. The listener prefixes the
+recipient (`agent.<session>.<key>`) and the JetStream MsgId appends the topic, so the key's real
+scope is **(message, mode, recipient session)**, and a retry of a send that already landed is a
+duplicate JetStream drops before the agent's subject ever sees it. That is what makes a retry
+after a receipt timeout safe: the listener publishes the envelope before it answers, so an
+answer that misses the client's window says nothing about whether the message landed, and only
+the same key can be recognised as the repeat it is. **This holds for as long as the stream's
+duplicate window, which equals its retention by construction (both are `streamDuplicateWindow`,
+`internal/bus/nats.go`) and is reconciled on every `bus.Connect` by `ensureStreamWithConfig`.**
+A retry in a DIFFERENT mode is a different key and genuinely does deliver again, which is what
+the dashboard's retry row says: its **Retry** re-sends the attempt's own mode, and the two
+mode-change actions say "instead". A mode change never rides on a stranded attempt - resuming it
+would publish a second frame under one attempt number - so the claim transaction settles that
+attempt `failed` ("superseded by a retry in another mode"), moves its `claimed_at` so the
+original sender stops owning it, appends its own `message.delivery` receipt, and opens a new
+attempt pinned to the session the stranded row named.
+
+**The window is one number, and the promise expires with it.** `DELIVERY_DUPLICATE_WINDOW_MS` in
+`packages/contracts` is the single literal: `contracts.DeliveryDuplicateWindow` is generated from
+it for Go, and the dashboard reads it directly. Past that window the stream holds neither the
+message nor its MsgId, so a same-mode retry publishes a second frame - which is why the row
+stores only the CAUSE of a receipt timeout and never the advice. Every delivery surface composes
+the advice through one predicate, `isSafeRetry` in
+`packages/dispatch/web/src/features/conversation/delivery.ts`: it shows the "retrying is safe"
+sentence, and offers the same-mode **Retry** at all, only for a failed attempt inside the window
+that is not itself a duplicate - and it reads a negative age as young, because `created_at` is
+Postgres-stamped while the browser supplies `now`. The mode-change actions are not gated: they
+always deliver. Their clause ("sending in a different mode delivers it again") is added only
+for a receipt timeout, the one cause whose send may already have reached the recipient;
+`RECEIPT_TIMEOUT_CAUSE` in `packages/contracts` is that cause's single literal, generated into
+Go as `contracts.ReceiptTimeoutCause` so the string Dispatch stores and the string the
+dashboard keys on cannot drift.
+
+An attempt the stream recognised records `duplicate` and no envelope id: it reached the listener
+and put nothing new on the recipient's subject, so it reads as "already delivered" rather than as
+a fresh send. The flag rides the attempt read, the `message.delivery` payload and the comment
+delivery payload, and every surface that renders an attempt - the targeted-message card, the
+comment thread's mention list, and the issue event feed - reads it.
 
 Because the attempt is committed `pending` before its send and names the session that send is
 going to, the session can answer or refuse the frame while it is still in flight - and can answer
@@ -367,6 +442,28 @@ type or attribute, or requiring a new attribute requires a document migration an
 
 `ask` blocks are indexed at settlement: their body and client-owned attributes update the ask row,
 the row restores server-owned answer state into the block, and removal retracts the indexed ask.
+The block is therefore the source of truth for an ask's **text** (question, options, `multiple`,
+`urgency`) and the row for its **lifecycle** (`state`, `answer`, `resolution`), so a route that
+changes either writes both: `PATCH /api/v1/asks/{id}` on a block ask writes the block through
+the document ledger and then takes the row's values from what the block parses back to, and
+`POST /api/v1/asks/{id}/resolve` writes the block's `state`. An edit writes only the fields it
+names: the row holds the question as plain text, so rebuilding the whole body from it would
+flatten an untouched question's formatting and links and mint fresh ids for the paragraphs a
+comment anchors into. Naming `urgency` or `multiple` alone therefore goes through the attribute
+path and leaves every child node, mark and inner block id exactly as it was; naming `question`
+or `options` replaces that part with what the markdown pipeline parses, so it carries the same
+list attributes any other document write gives it, and anchors inside the text actually replaced
+are affected as they are by any document edit. A field named but unchanged is not rewritten, so
+an idempotent retry of the whole ask writes nothing, versions nothing and keeps every anchor.
+Text the block cannot carry unchanged is refused `400 ASK_BLOCK_TEXT` naming the field, with
+nothing written - an option label containing `": "`, which separates a label from its
+description, or a question with a line beginning `:::`, which would leave the canonical markdown
+unparseable. A single newline is
+carried as a hard break; surrounding whitespace is trimmed, as the parser trims it.
+Settlement retracts an ask whose block left the document in its own name,
+`{kind: "system", id: "document-settlement"}`, and restores only a retraction it wrote - a
+person's or a session's retract stands however the document moves, which is why `resolve`
+refuses a caller reason beginning `removed from the document in version`.
 An invalid browser-edited ask retains its indexed ask, carries the server-owned `invalid` parse-error
 attribute, and emits `block.invalid`; repairing its body clears `invalid` before updating the ask row.
 An answered block carries `state`, `answered_by`, `answered_at`, `selected`, and `answer` in
@@ -423,9 +520,9 @@ Dispatch treats an agent endpoint and bearer token as one trust-bound configurat
 
 ## Operational notes
 
-- Health endpoints reflect dependency health, not just process liveness. `/healthz` returns `degraded` for transient JetStream/KV probe failures and `unhealthy` for NATS loss, a stopped session or CI KV watcher, or a missing durable consumer.
-- NATS reconnects indefinitely, in place: the bus starts from `nats.GetDefaultOptions` (reconnect, client pings, drain and flusher timeouts), so the connection object and every JetStream or KV handle taken from it survive a server restart. A publish while reconnecting waits for the reconnect within its own deadline (5 s for a publish, 2 s for a role-lane forward), and reconnect attempts run every second. The reconnect buffer is off, so a publish that fails was not sent. Every reconnect recreates the session and CI KV watchers; the self-health monitor also rebuilds those watchers and a missing durable consumer while NATS is connected.
-- Only a terminal failure that remains after three consecutive recovery intervals self-terminates the listener. Shutdown stops HTTP first (up to ten seconds), waits within that window for a self-health rebuild still running, retires the session registry's watcher (`StopWatch`, final and without a server request), and drains NATS through `bus.Client.Drain`. The drain stops the client first, so it never reconnects or re-subscribes, and lets deliveries already in their handlers finish, role-lane forwards included. It is bounded to ten seconds, and a connection that is reconnecting is closed at once. It logs completion and exits non-zero so Docker's restart policy can restore it. A runtime must therefore allow about twenty seconds after SIGTERM: the compose file sets `stop_grace_period: 30s`, and ECS's default `stopTimeout` is 30 seconds.
+- Health endpoints reflect dependency health, not just process liveness. `/healthz` returns `degraded` for transient JetStream/KV probe failures and `unhealthy` for NATS loss, a stopped interest, session or CI KV watcher, or a missing durable consumer.
+- NATS reconnects indefinitely, in place: the bus starts from `nats.GetDefaultOptions` (reconnect, client pings, drain and flusher timeouts), so the connection object and every JetStream or KV handle taken from it survive a server restart. A publish while reconnecting waits for the reconnect within its own deadline (5 s for a publish, 2 s for a role-lane forward), and reconnect attempts run every second. The reconnect buffer is off, so a publish that fails was not sent. A subscription nats.go re-sent on the reconnected connection is kept as it is; one on a replaced connection is bound again. Every reconnect recreates the interest, session and CI KV watchers on the reconnected connection, because a server restart loses their ordered consumers and nats.go would replace them only after missed heartbeats; while NATS is connected, the self-health monitor also rebuilds those watchers and a missing durable consumer when a probe finds a stopped watcher, a closed KV handle or a lost consumer. All three watchers share one lifecycle (`internal/kvwatch`): a rewatch opens the bucket on the connection it is given, so a store bound to a replaced connection moves to the new one, a watcher that ends on its own records the terminal error `/healthz` and self-health read, and a stopped watcher arms nothing. A watcher reporting `consumer not active` during the gap is logged at WARN.
+- Only a terminal failure that remains after three consecutive recovery intervals self-terminates the listener. Shutdown stops HTTP first (up to ten seconds), waits within that window for a self-health rebuild still running, retires the interest, session and CI KV watchers (`StopWatch`, final and without a server request, so a reconnect hook still running cannot arm one), and drains NATS through `bus.Client.Drain`. The drain stops the client first, so it never reconnects or re-subscribes, and lets deliveries already in their handlers finish, role-lane forwards included. It is bounded to ten seconds, and a connection that is reconnecting is closed at once. It logs completion and exits non-zero so Docker's restart policy can restore it. A runtime must therefore allow about twenty seconds after SIGTERM: the compose file sets `stop_grace_period: 30s`, and ECS's default `stopTimeout` is 30 seconds.
 - If a session is not live in the registry, delivery fails and the message is NAK'd for retry (up to MaxDeliver attempts over the stream's MaxAge window).
 - The `ENVOY_NOTIFICATIONS` duplicate window is 72 hours, matching the retained notification lifetime. Startup reconciles that setting with `UpdateStream`, so a Dispatch outbox retry after a post-publish crash cannot create another retained message while the original remains available.
 - Every `bus.Connect` caller (the listener, Dispatch, `natstail` and the MCP server, including the on-prem fleet's listeners and any ad-hoc run pointed at production's NATS) reconciles `ENVOY_NOTIFICATIONS`'s subjects at start by adding its own to the deployed list. Once every writer runs a build with this reconciliation, a restart during a rollout cannot drop a subject another deployment needs, except when two writers with different lists start within one read-update round trip (JetStream's stream update has no compare-and-swap). A start removes a deployed subject only when it overlaps a role lane (`notifications.role.>` or its exceptions twin) or one of the binary's own subjects (a widened, narrowed or split subject, which JetStream refuses beside it). In the second case the binary's shape wins, and a WARN names the dropped subject and every subject that replaced it. Each start also logs, at INFO, the deployed subjects it keeps without compiling them, which is the list the retire step works from. Retiring a subject is an operator step once no deployment compiled with it can start: `nats stream edit ENVOY_NOTIFICATIONS --subjects=... -f` (`docs/solutions/envoy/nats-jetstream-stream-ensure-only-adds-subjects.md`).
@@ -435,7 +532,7 @@ Dispatch treats an agent endpoint and bearer token as one trust-bound configurat
 
 | Endpoint | Method | Contract |
 | --- | --- | --- |
-| `/v1/messages/send` | POST | Sends to a live `target_session`. Dispatch uses `source: "dispatch"`, an idempotency key, and a `payload` JSON string whose frame is `{event, delivery}`; the response is the envelope plus `recipient` with the full target session ID. |
+| `/v1/messages/send` | POST | Sends to a live `target_session`. Dispatch uses `source: "dispatch"`, an idempotency key, and a `payload` JSON string whose frame is `{event, delivery}`; the response is the envelope plus `recipient` with the full target session ID, and `duplicate: true` when JetStream already held this message. Only a `source: "dispatch"` send carries a MsgId, so only it can ever answer `duplicate`; the field is omitted (read as false) otherwise, which is also what an older listener answers. It means "the stream already held this MsgId", which includes the publish path's own reconnect retry whose first attempt landed and lost its acknowledgement. |
 | `/v1/messages/publish` | POST | Publishes a non-agent topic. An optional `dedupe_key` is used verbatim as the envelope's dedupe key (how a re-sent copy stays recognisable to the receiver's own dedupe); it is mutually exclusive with `idempotency_key` — both present is a 400 whose `expected` names both fields — it may not begin with the reserved forward mark `envoy.role.forward.` (a 400 naming `dedupe_key`; the role arbiter drops such an envelope on sight, so accepting it would be a 200 for a message that vanishes), and an empty string is absent; without either key the key is minted. A `notifications.role.<role>` topic requires a live holder and returns that session ID in `holder`. Its 404 adds `reason: "unclaimed"` for a role with no claim, or `reason: "holder_lapsed"` with the prior `holder`, `claim_released`, and a `last_seen` timestamp when the final heartbeat remains in its one-TTL diagnostic window. |
 | `/v1/roles/<role>` | GET | Returns the live role holder, including its capabilities and `last_seen`. A 404 has `reason: "unclaimed"` when no role claim exists; for an absent holder it has `reason: "holder_lapsed"` with the prior holder's ID, whether this lookup released the claim, and any final last-seen time retained for one TTL. |
 | `/v1/roles/set` | POST | Claims a role for a live session and registers its role topic. Last-claim-wins by default. With `"soft": true` the claim lands only if the role is unheld, already this session's, held by a session that is no longer live, or held by the declared `previous_session_id` (the id a fork/branch continues); any other live holder answers `409 {error, role, holder}` and nothing changes. |
@@ -466,7 +563,9 @@ targeted roots newest first with their deliveries and reply chains (a reply in t
 its own deliveries). Dispatch resolves a role holder
 and checks the selected session's capabilities for every attempt, then makes the synchronous
 listener send; `POST /api/v1/messages/{id}/deliveries` creates an explicit retry attempt (same
-callers, same `actor` rule for bearers). The targeted session alone uses
+callers, same `actor` rule for bearers) in the `delivery` mode it names - the attempt's own mode
+is the retry that cannot deliver the message twice, another mode is a genuine second delivery.
+The targeted session alone uses
 `POST /api/v1/messages/{id}/reply` for the attempt's automatic BTW response; an ordinary agent
 reply uses `dispatch_message({ in_reply_to })` on the same open issue.
 

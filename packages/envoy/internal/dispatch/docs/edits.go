@@ -368,7 +368,12 @@ type editBatch struct {
 // outcome is the batch's verdict, taken once the caller has stamped the block ids the write
 // carries. It compares nodeToken, the same semantic identity the precondition machinery uses:
 // canonical markdown renders no anchor mark, so a batch that orphans a human's comment anchor
-// while leaving the words alone is a change, and gets its version.
+// while leaving the words alone is a change here. Whether it becomes a version is the caller's:
+// with a summary the edit route names one through NamedVersion, which versions unconditionally,
+// so such a batch writes a version whose markdown equals the previous one's and stales an
+// approval pinned to it; without a summary SnapshotVersion compares renderings and writes
+// nothing. LEGION-260's follow-up makes the route version on the rendered markdown and keep
+// this verdict as its report to the agent.
 func (b editBatch) outcome(applied int) (EditOutcome, error) {
 	after, err := nodeToken(b.tree)
 	if err != nil {

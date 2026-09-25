@@ -1,7 +1,13 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import { type FakeSession, getSentMessages, setLiveSessions, setSessionSendStatus } from "./agents";
-import { createComment, createIssue, createProject, createProjectDocument } from "./api";
+import {
+  createComment,
+  createIssue,
+  createProject,
+  createProjectDocument,
+  retryCommentDelivery,
+} from "./api";
 import { barAction, documentEditor, selectEditorText } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -111,6 +117,10 @@ test("E7b and Retry: removing a prefilled mention creates a plain reply, and ret
   browser,
 }) => {
   await setLiveSessions([planner]);
+  // The mention's first delivery has to FAIL for a retry to be offered at all: a same-mode
+  // retry of a delivery that landed is a duplicate the stream drops, so the row no longer
+  // carries a Retry (LEGION-271).
+  await setSessionSendStatus("planner", 404);
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Reply behavior" });
   const parent = await createComment(issue.key, {
@@ -118,7 +128,6 @@ test("E7b and Retry: removing a prefilled mention creates a plain reply, and ret
     delivery: "steer",
     mentions: [{ target: "session:planner" }],
   });
-  await setSessionSendStatus("planner", 404);
   const alice = await asUser(browser, "alice");
 
   try {
@@ -151,6 +160,43 @@ test("E7b and Retry: removing a prefilled mention creates a plain reply, and ret
       delivery: "steer",
       target: "session:planner",
     });
+  } finally {
+    await alice.close();
+  }
+});
+
+// LEGION-271. A mention retried in its own mode inside the stream's duplicate window reaches the
+// agent no second time: Dispatch records the attempt `sent` with `duplicate`, and the row must
+// say so. Reading the state alone would tell a human the mention was delivered when nothing left
+// the listener - the same false "it was delivered" the targeted-message card was changed to
+// avoid. The stand-in listener models the stream's suppression, so this renders the real path.
+test("a duplicated mention delivery says the listener already had it, and offers no safe retry", async ({
+  browser,
+}) => {
+  await setLiveSessions([planner]);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Duplicate mention" });
+  const comment = await createComment(issue.key, {
+    body: "@Planner take a look",
+    delivery: "steer",
+    mentions: [{ target: "session:planner" }],
+  });
+  // The same mention, the same mode: the stand-in recognises the repeated key exactly as
+  // JetStream would and answers `duplicate`.
+  await retryCommentDelivery(comment.id, { delivery: "steer", target: "session:planner" });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const deliveries = page.getByRole("list", { name: "Mention deliveries" });
+    await expect(deliveries).toContainText(
+      "Delivered; the listener already had this message, so it wasn't sent again"
+    );
+    // The promise belongs to a retry that can still be made safely; this attempt already
+    // reached the listener, so neither the sentence nor the button may appear for it.
+    await expect(deliveries).not.toContainText("Retry won't deliver it twice");
+    await expect(deliveries.getByRole("button", { name: "Retry" })).toHaveCount(0);
   } finally {
     await alice.close();
   }

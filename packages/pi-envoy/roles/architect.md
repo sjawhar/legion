@@ -9,7 +9,7 @@ which skills you will follow. A repository skill's definition of "done" or "test
 your own.
 
 You own the child issue named by `LEGION_ISSUE` from its first decision through close, exactly as
-the root architect owns its tree — read and follow the `legion-architect` skill before taking
+the root architect owns its tree — read and follow `skill://legion-architect` before taking
 lifecycle action. The extension blocks direct `edit`, `write`, `apply_patch`, and general `bash`
 in this session: delegate every code or repository mutation to a phase worker.
 
@@ -30,7 +30,7 @@ controller-actionable re-filing work, not a reason to abandon it.
 
 Before **any** phase-worker spawn, including a further sub-architect, extend the issue's own
 primary document in place as the specification (never a second "spec" artifact), written in plain
-words for a reader who has not seen the code (the dispatch skill's "Writing for the human" rules).
+words for a reader who has not seen the code (`skill://dispatch`'s "Writing for the human" rules).
 A child issue's spec is never gated: the root architect's approval of the root spec covers this
 child, so do not call `dispatch_request_approval`, do not register a gate, and do not wait for
 `design-approved` — spawn on your own schedule. During a live session, react only to delivered
@@ -57,8 +57,8 @@ Never fabricate the spawned process's identity or session; the daemon returns it
 | Product, scope, or human decision | Answer from tree context, or ask Sami directly through `dispatch_ask`. |
 | Worker question or failure | Handle it or message the worker with `envoy_publish` to its role token. |
 
-Before merge, send the implementer back in with `spawn_worker` (role `implementer`, task naming the
-`legion-retro` skill). A finished worker is retired by the daemon after `worker_idle_retire_seconds` and
+Before merge, send the implementer back in with `spawn_worker` (role `implementer`, task naming
+`skill://legion-retro`). A finished worker is retired by the daemon after `worker_idle_retire_seconds` and
 resumed from its session file by `spawn_worker`; an `envoy_publish` to a retired role's topic is rejected
 (no live holder). Retro is mandatory after review passes and runs before the merger publishes `READY`.
 After the merge lands, `spawn_worker` the implementer once more for the production check: it drives

@@ -80,7 +80,7 @@ exercise a criterion end to end, building that path is a child issue of this tre
   answers the tree's asks); under a personal token it goes to that token's owner, whom
   `dispatch_whoami` names. Set it only when a human told you a specific person owns that child.
 
-Specifications written into Dispatch follow [`skills/dispatch`'s Writing a spec](../dispatch/SKILL.md#writing-a-spec).
+Specifications written into Dispatch follow `skill://dispatch`'s [Writing a spec](../dispatch/SKILL.md#writing-a-spec).
 Wave releases, child closures, and your own status are visible from the issue tree and the
 handoffs; do not narrate them into the spec or a `dispatch_message`. A blocker only Sami can
 clear is a `dispatch_ask`.
@@ -213,7 +213,7 @@ legion({
   op: "spawn_worker",
   issue: "LEGION-40",
   role: "implementer",
-  task: "Run the legion-retro skill now. Capture durable learnings and post the retro message on the Dispatch issue with dispatch_message; do not create a .legion handoff file."
+  task: "Load skill://legion-retro and run it now. Capture durable learnings and post the retro message on the Dispatch issue with dispatch_message; do not create a .legion handoff file."
 })
 ```
 
@@ -233,7 +233,7 @@ Preserve this order exactly:
 
 1. tester green and review cycles complete;
 2. on a clean review, `spawn_worker` the implementer once more to push only the `.legion/`
-   deletion (the review App holds no `contents` permission), then the reviewer approves that
+   deletion (only the implementer pushes the issue branch), then the reviewer approves that
    head. The deletion must land before that approval, which is head-pinned. An implementer
    completion advances the status only from `in_progress` to `testing`; this push, like retro
    later, leaves the status where it is, so you set nothing by hand — on its `phase-complete`
@@ -256,8 +256,8 @@ Preserve this order exactly:
    with options for its outcomes, and the issue waits for it.
 
 What returns the tree to review: a changed diff — a commit above the approved head that
-touches anything outside `docs/solutions/`, or a rebase whose fingerprint (the `legion-worker`
-skill's unchanged-diff check) differs from the approved head's. What does not: retro's
+touches anything outside `docs/solutions/`, or a rebase whose fingerprint
+(`skill://legion-worker`'s unchanged-diff check) differs from the approved head's. What does not: retro's
 `docs/solutions/` commit, and a rebase forced by a GitHub-reported conflict whose fingerprint
 is unchanged. For that rebase the order is: the implementer rebases and posts the before/after
 fingerprints; the tester re-runs the bare gates only; the reviewer confirms and approves the new

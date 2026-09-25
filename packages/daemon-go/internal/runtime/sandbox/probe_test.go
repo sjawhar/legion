@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,7 +23,6 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
-	"github.com/sjawhar/legion/daemon/internal/modelroute"
 )
 
 // The probe Sandbox testImage gets in testProject: the project, then the digest's first 12 hex.
@@ -187,16 +185,15 @@ func wantContains(t *testing.T, err error, wants ...string) {
 	}
 }
 
-// okLine is the OK line an image prints when every probe passed, its round trip through the
-// gateway answered by the profile's default model, confirming contract.
+// okLine is the OK line an image prints when every probe passed, confirming contract.
 func okLine(contract int) string {
-	return bootprobe.OKLine("/opt/omp/bin/omp", modelroute.DefaultModel, contract)
+	return bootprobe.OKLine("/opt/omp/bin/omp", contract)
 }
 
 // The probe is a Sandbox named for the project and the image, running the image's Go `legion
 // probe-image` with the daemon's contract on the Legion pool; it passes on the OK line confirming
-// that contract and naming the model that answered its round trip through the gateway, and it
-// deletes its Sandbox when it is done.
+// that contract — which names no model: Legion's probe makes no model round trip — and it deletes
+// its Sandbox when it is done.
 func TestProbeImagePassesOnTheOKLineConfirmingTheContract(t *testing.T) {
 	g := newProbeRig(t, nil)
 	g.succeeds("[legion] OMP pi.agents probe failed transiently\n" + okLine(3) + "\n")
@@ -221,8 +218,7 @@ func TestProbeImagePassesOnTheOKLineConfirmingTheContract(t *testing.T) {
 }
 
 // A pod that ran is judged by its log: only a Succeeded pod whose OK line confirms this daemon's
-// contract and a model round trip through the gateway passes, and every other ending is an answer
-// no retry changes — so the probe runs once.
+// contract passes, and every other ending is an answer no retry changes — so the probe runs once.
 func TestProbeImageRefusesWhatTheProbePodAnswered(t *testing.T) {
 	for _, testCase := range []struct {
 		name  string
@@ -241,8 +237,6 @@ func TestProbeImageRefusesWhatTheProbePodAnswered(t *testing.T) {
 			[]string{"without confirming Go daemon API contract 3 (its legion CLI predates the check)"}},
 		{"another contract", func(g *probeRig) { g.succeeds(okLine(2)) },
 			[]string{"confirmed Go daemon API contract 2, this daemon requires 3"}},
-		{"no model round trip", func(g *probeRig) { g.succeeds(bootprobe.OKLine("/opt/omp/bin/omp", "", 3)) },
-			[]string{"Succeeded without a model round trip through the gateway", "its pod had no " + modelroute.EnvURL}},
 		{"an image name the kubelet cannot use", func(g *probeRig) { g.waits("InvalidImageName") },
 			[]string{"container probe waiting: InvalidImageName"}},
 		{"an image the node may never pull", func(g *probeRig) { g.waits("ErrImageNeverPull") },
@@ -279,10 +273,10 @@ func TestProbeImageRetriesAProbeThatNeverFinished(t *testing.T) {
 			[]string{"probe pod " + probeSandboxName + " still Pending after 300ms (container probe waiting: ImagePullBackOff)"}},
 		{"no pod at all", func(g *probeRig) { g.hold.Store(true) },
 			[]string{"probe sandbox " + probeSandboxName + " has no pod after 300ms"}},
-		// A pod whose model turn outlasts the attempt: what it logged so far names the gateway.
-		{"a pod still in its model turn", func(g *probeRig) {
+		// A pod whose probe outlasts the attempt: what it logged so far is quoted.
+		{"a pod still probing", func(g *probeRig) {
 			g.with(func() {
-				g.log = "probe-image: pi.agents answered\nprobe-image: a model turn through https://middleman.legion.internal is waiting"
+				g.log = "probe-image: pi.agents answered\nprobe-image: the load probe is waiting"
 			})
 			g.finishes(func(p *corev1.Pod) {
 				p.Status = corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{
@@ -290,7 +284,7 @@ func TestProbeImageRetriesAProbeThatNeverFinished(t *testing.T) {
 				}}}
 			})
 		}, []string{"probe pod " + probeSandboxName + " still Running after 300ms", "log tail: probe-image: pi.agents answered",
-			"a model turn through https://middleman.legion.internal is waiting"}},
+			"the load probe is waiting"}},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			g := newProbeRig(t, nil)
@@ -355,21 +349,6 @@ func TestProbeImageRetriesAPodTheKubeletFailed(t *testing.T) {
 			}
 			g.eventually("the probe Sandbox to be deleted", func() bool { return g.sandbox(probeSandboxName) == nil })
 		})
-	}
-}
-
-// A probe container that exits bootprobe.TransientExit could not reach the model gateway for a
-// reason that says nothing about the image (overloaded, unreachable): the probe runs again, and
-// gives up only when its retry does, quoting what the pod said.
-func TestProbeImageRetriesAProbeTheGatewayCouldNotAnswer(t *testing.T) {
-	g := newProbeRig(t, nil)
-	g.ends(corev1.PodFailed, bootprobe.TransientExit, "legion probe-image: the model round trip through OMP profile legion, routed to https://middleman.legion.internal/anthropic: ended error: 529 overloaded (transient: the daemon's probe runs again)")
-
-	err := g.probe(probeOptions(t))
-
-	wantContains(t, err, "never completed within its retry budget (2 attempts)", "pod "+probeSandboxName+" Failed", "exit code 75", "529 overloaded")
-	if n := g.creates.Load(); n != 2 {
-		t.Errorf("ran the probe %d times, want the retry's 2", n)
 	}
 }
 
@@ -531,8 +510,8 @@ func TestProbeImageRemembersAPassPerImageContractAndProbePod(t *testing.T) {
 			return newProbeRig(t, nil, withOptions(func(o *Options) { o.Tools.Legion = "/opt/legion/bin/legion" })).
 				succeeds(okLine(3)), p
 		},
-		"another gateway": func() (*probeRig, ImageProbe) {
-			return newProbeRig(t, nil, withOptions(func(o *Options) { o.Gateway.URL = "https://middleman-staging.legion.internal" })).
+		"another operator pod": func() (*probeRig, ImageProbe) {
+			return newProbeRig(t, nil, withOptions(func(o *Options) { o.Pod.Env = map[string]string{"PI_CONFIG_FILES": "/etc/legion-operator/overlay.yml"} })).
 				succeeds(okLine(3)), p
 		},
 		"another placement": func() (*probeRig, ImageProbe) {
@@ -632,45 +611,19 @@ func TestProbeNameIsTheProjectAndTheImage(t *testing.T) {
 	}
 }
 
-// The probe pod reaches the model gateway exactly as a worker's does (C6), so its round trip
-// proves what every worker will run: the Gateway's ServiceAccount with the API server's own token
-// unmounted, one volume, the gateway token gatewayTokenVolume projects, mounted where the image's
-// profile reads its key (modelroute.TokenFile), and the worker's LEGION_MODEL_GATEWAY_URL, which
-// the image's `legion probe-image` writes the profile's route from.
-func TestTheProbePodReachesTheGatewayAsAWorkerDoes(t *testing.T) {
+// The probe container is told the operator's variables as written, as a worker's container is,
+// although the kubelet expands `$(NAME)` and `$$` in a container's env values (kubeletLiteral).
+func TestTheProbeIsToldTheOperatorsVariablesAsWritten(t *testing.T) {
 	opts := goldenOptions()
-	// A `$$` in the URL is one the kubelet would turn into `$` in a container it did not escape.
-	opts.Gateway.URL = "https://middleman.legion.internal/a$$b"
+	literal := "/etc/legion-operator/$(HOME)/a$$b.yml"
+	opts.Pod.Env = map[string]string{"PI_CONFIG_FILES": literal}
 	r, err := configure(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	pod := r.probeManifest(probeSandboxName, 3, corev1.ResourceRequirements{}, time.Now()).Spec.PodTemplate.Spec
-	worker := podOf(t, r, workerSpec(t), false)
-	volume, mount := gatewayTokenVolume(opts.Gateway)
-
-	if pod.ServiceAccountName != opts.Gateway.ServiceAccount || pod.ServiceAccountName != worker.ServiceAccountName {
-		t.Errorf("serviceAccountName = %q, want the worker's %q", pod.ServiceAccountName, worker.ServiceAccountName)
-	}
-	if pod.AutomountServiceAccountToken == nil || *pod.AutomountServiceAccountToken {
-		t.Error("the API server's service account token is mounted")
-	}
-	if !reflect.DeepEqual(pod.Volumes, []corev1.Volume{volume}) {
-		t.Errorf("volumes = %+v, want the gateway token's alone, %+v", pod.Volumes, volume)
-	}
-	probe := pod.Containers[0]
-	if !reflect.DeepEqual(probe.VolumeMounts, []corev1.VolumeMount{mount}) {
-		t.Errorf("the probe container mounts %+v, want %+v", probe.VolumeMounts, mount)
-	}
-	if token := mount.MountPath + "/" + volume.Projected.Sources[0].ServiceAccountToken.Path; token != modelroute.TokenFile {
-		t.Errorf("the pod's gateway token is %s, but the image's profile reads its key from %s", token, modelroute.TokenFile)
-	}
-	got, want := envOf(probe)[modelroute.EnvURL], envOf(worker.Containers[0])[modelroute.EnvURL]
-	if got != want {
-		t.Errorf("the probe container's %s = %q, want the worker's %q", modelroute.EnvURL, got, want)
-	}
-	if seen := kubeExpand(got, envOf(probe)); seen != opts.Gateway.URL {
-		t.Errorf("the probe process is told %s = %q, want the configured %q", modelroute.EnvURL, seen, opts.Gateway.URL)
+	env := envOf(r.probeManifest(probeSandboxName, 3, corev1.ResourceRequirements{}, time.Now()).Spec.PodTemplate.Spec.Containers[0])
+	if seen := kubeExpand(env["PI_CONFIG_FILES"], env); seen != literal {
+		t.Errorf("the probe process is told PI_CONFIG_FILES = %q, want %q", seen, literal)
 	}
 }
 

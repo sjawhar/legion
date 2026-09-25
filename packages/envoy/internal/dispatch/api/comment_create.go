@@ -626,7 +626,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publishDocumentEvents(ledger, events...)
+	s.publish(events...)
 	for _, mention := range resolvedMentions {
 		attempt, err := s.deliverResolvedCommentMention(r.Context(), comment, event, mention, actor, true)
 		if err != nil {

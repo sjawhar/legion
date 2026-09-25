@@ -23,7 +23,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
-	"github.com/sjawhar/legion/daemon/internal/modelroute"
 )
 
 // The image probe (the in-cluster boot probe, packages/daemon/src/daemon/worker-image-probe.ts,
@@ -77,8 +76,8 @@ type ImageProbe struct {
 	// for a kind cluster and for production, and a pass on one proves nothing on the other.
 	APIServer string
 	// Resources are the probe container's requests and limits (the TypeScript probe used the
-	// `small` profile): it runs Oh My Pi four times, the last a model turn through the gateway, and
-	// exits. None when zero.
+	// `small` profile): it runs Oh My Pi three times (pi.agents, the plugin's load, the
+	// session-storage setting) and exits. None when zero.
 	Resources corev1.ResourceRequirements
 }
 
@@ -142,8 +141,8 @@ func probeName(project, hex string) string {
 // environment and volumes, the ServiceAccount, the scheduling, the resources and the security
 // context — with the tolerations sorted, since Kubernetes reads them as a set
 // (schedulingFingerprint, worker-image-probe.ts:77-99). A pull from another registry at the same
-// digest, another probe command, or another way of reaching the model gateway proves nothing a
-// pass under the old one did, so any change to the pod probes again.
+// digest, another probe command, or another operator pod (the variables, volumes, and account it
+// adds) proves nothing a pass under the old one did, so any change to the pod probes again.
 func (r *Runtime) probePodFingerprint(apiServer string, pod corev1.PodSpec) string {
 	pod.Tolerations = slices.Clone(pod.Tolerations)
 	slices.SortFunc(pod.Tolerations, func(a, b corev1.Toleration) int {
@@ -426,8 +425,8 @@ func (r *Runtime) createProbe(ctx context.Context, name, digest string, manifest
 
 // unfinished is the detail of an attempt whose pod did not finish within the budget: the pod's
 // phase, its container's waiting reason, its events, and what its probe container logged so far,
-// which names the model gateway a turn still waits on — or, with no pod, the Sandbox's Ready
-// condition, where the controller reports why it made none.
+// which names the probe it was in — or, with no pod, the Sandbox's Ready condition, where the
+// controller reports why it made none.
 func (r *Runtime) unfinished(ctx context.Context, name string, uid types.UID, budget time.Duration) string {
 	pod := r.storedPod(name)
 	if !ownedBy(pod, uid) {
@@ -479,20 +478,14 @@ func (r *Runtime) probeLog(ctx context.Context, name string) (string, error) {
 
 // judge is the verdict a finished probe pod's log gives (judgeProbeLog, worker-image-probe.ts:
 // 470-508). A Failed pod here is one whose probe container exited on its own (kubeletFailure has
-// ruled out the rest): the image's refusal, unless it exited bootprobe.TransientExit (the model
-// gateway could not answer), which is run again. The OK line must confirm this daemon's contract: an
+// ruled out the rest): the image's refusal. The OK line must confirm this daemon's contract: an
 // image whose CLI predates the Go contract check prints none, having checked no contract, and is
-// refused, not waved through; one that confirmed another contract is refused naming both. It must
-// also name the model that answered the image's round trip through the gateway: a line without
-// one is an image that made none, whose CLI predates the round trip or whose pod was not routed.
+// refused, not waved through; one that confirmed another contract is refused naming both.
 func (r *Runtime) judge(name, digest string, pod *corev1.Pod, logTail string, contract int) bootprobe.Outcome {
 	if pod.Status.Phase == corev1.PodFailed {
 		ended := ""
 		for _, status := range pod.Status.ContainerStatuses {
 			if t := status.State.Terminated; status.Name == probeContainer && t != nil {
-				if t.ExitCode == bootprobe.TransientExit {
-					return bootprobe.Outcome{Detail: fmt.Sprintf("pod %s Failed: its probe could not reach an answer for a reason that says nothing about the image (exit code %d) — log tail: %s", name, t.ExitCode, logTail)}
-				}
 				ended = fmt.Sprintf(" (container %s terminated: %s, exit code %d)", probeContainer, t.Reason, t.ExitCode)
 			}
 		}
@@ -508,12 +501,7 @@ func (r *Runtime) judge(name, digest string, pod *corev1.Pod, logTail string, co
 	if confirmed != contract {
 		return imageRefusal(digest, "pod %s Succeeded but confirmed Go daemon API contract %d, this daemon requires %d — log tail: %s", name, confirmed, contract, logTail)
 	}
-	model, ok := bootprobe.ConfirmedModel(logTail)
-	if !ok {
-		return imageRefusal(digest, "pod %s Succeeded without a model round trip through the gateway (its legion CLI predates the round trip, or its pod had no %s) — log tail: %s",
-			name, modelroute.EnvURL, logTail)
-	}
-	r.log.Info("sandbox runtime: the worker image passed its probe", "image", r.image, "sandbox", name, "model", model, "log", logTail)
+	r.log.Info("sandbox runtime: the worker image passed its probe", "image", r.image, "sandbox", name, "log", logTail)
 	return bootprobe.Outcome{Passed: true}
 }
 
@@ -534,21 +522,21 @@ type probeSpec struct {
 
 // probeManifest is the probe Sandbox: Running from the start (it holds no Secret to write first),
 // deleted by the controller at shutdown, placed exactly as every worker is placed — the Legion
-// pool, gVisor, the configured scheduling — with the workers' pod security, reaching the model
-// gateway as every worker does (C6: the Gateway's ServiceAccount, gatewayTokenVolume, and
-// LEGION_MODEL_GATEWAY_URL), and a single container running the image's Go `legion probe-image`
-// against contract, loading the plugin from the root a pod loads it from (--plugin-root), with a
-// round trip through that route. Its command and env are escaped
-// against the kubelet's expansion as every worker container's are (kubeletLiteral).
+// pool, gVisor, the configured scheduling — with the workers' pod security and what the operator
+// adds to every pod (its ServiceAccount, volumes, mounts, and variables, and the providers
+// Secret's configured keys), and a single container running the image's Go `legion probe-image`
+// against contract on the pod's baseline (--pod-safety), loading the plugin from the root a pod
+// loads it from (--plugin-root). Its command and env are escaped against the kubelet's expansion as
+// every worker container's are (kubeletLiteral).
 func (r *Runtime) probeManifest(name string, contract int, resources corev1.ResourceRequirements, shutdown time.Time) probeSandbox {
 	labels := map[string]string{labelProject: r.project, labelProbe: "image"}
-	gateway, gatewayMount := gatewayTokenVolume(r.gateway)
+	providers, providersMounts := r.providers()
 	container := corev1.Container{
 		Name:            probeContainer,
 		Image:           r.image,
-		Command:         []string{r.tools.Legion, "probe-image", "--go-daemon-api-version", strconv.Itoa(contract), "--plugin-root", legionPlugin},
-		Env:             []corev1.EnvVar{{Name: modelroute.EnvURL, Value: r.gateway.URL}},
-		VolumeMounts:    []corev1.VolumeMount{gatewayMount},
+		Command:         []string{r.tools.Legion, "probe-image", "--go-daemon-api-version", strconv.Itoa(contract), "--plugin-root", legionPlugin, "--pod-safety"},
+		Env:             r.operatorEnv(),
+		VolumeMounts:    slices.Concat(providersMounts, r.pod.VolumeMounts),
 		Resources:       resources,
 		SecurityContext: restrictedContainer(),
 	}
@@ -566,7 +554,7 @@ func (r *Runtime) probeManifest(name string, contract int, resources corev1.Reso
 					RestartPolicy:                 corev1.RestartPolicyNever,
 					TerminationGracePeriodSeconds: new(int64(probeTerminationGrace)),
 					AutomountServiceAccountToken:  new(false),
-					ServiceAccountName:            r.gateway.ServiceAccount,
+					ServiceAccountName:            r.pod.ServiceAccount,
 					EnableServiceLinks:            new(false),
 					SecurityContext: &corev1.PodSecurityContext{
 						RunAsNonRoot: new(true), RunAsUser: new(int64(podUser)), RunAsGroup: new(int64(podUser)), FSGroup: new(int64(podUser)),
@@ -575,7 +563,7 @@ func (r *Runtime) probeManifest(name string, contract int, resources corev1.Reso
 					NodeSelector:      r.nodeSelector(),
 					Tolerations:       r.tolerations(),
 					PriorityClassName: r.scheduling.PriorityClass,
-					Volumes:           []corev1.Volume{gateway},
+					Volumes:           slices.Concat(providers, r.pod.Volumes),
 					Containers:        []corev1.Container{container},
 				},
 			},

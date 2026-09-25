@@ -2,11 +2,13 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/url"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
@@ -491,6 +493,58 @@ func TestAskWritesNameChangedTargets(t *testing.T) {
 	}
 	requireReferencesChanged(t, handler, source.Key, "ask.edited", askID, want)
 	requireIssueBacklinkCount(t, handler, target.Key, 1)
+}
+
+// An open page refreshes from the live stream, which carries each event as its handler published
+// it, not as the log stored it: an ask citing an issue must name that issue there too, or the
+// cited issue's header keeps its old count until something unrelated refetches it.
+func TestAnOpenedAskPublishesWhatItsQuestionCites(t *testing.T) {
+	handler, _, deps := newTestServer(t, testServerOptions{})
+	createReferenceAPIProject(t, handler, "CORE")
+	createReferenceAPIProject(t, handler, "OPS")
+	target := createReferenceAPIIssue(t, handler, "CORE")
+	source := createReferenceAPIIssue(t, handler, "OPS")
+	published, unsubscribe := deps.Events.Subscribe()
+	defer unsubscribe()
+
+	opened := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+source.Key+"/asks", map[string]any{
+		"question": "Does dispatch://" + target.Key + " ship first?",
+	}, "alice")
+	if opened.Code != http.StatusCreated {
+		t.Fatalf("open a citing ask: status=%d body=%s", opened.Code, opened.Body.String())
+	}
+	askID := decodeBody[writtenRecord](t, opened).ID
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case event := <-published:
+			if event.Type != "ask.opened" {
+				continue
+			}
+			encoded, err := json.Marshal(event.Payload)
+			if err != nil {
+				t.Fatalf("encode published payload: %v", err)
+			}
+			var payload struct {
+				ID                string                   `json:"id"`
+				OpenedEventID     *int64                   `json:"opened_event_id"`
+				ReferencesChanged []model.ChangedReference `json:"references_changed"`
+			}
+			if err := json.Unmarshal(encoded, &payload); err != nil {
+				t.Fatalf("decode published payload: %v", err)
+			}
+			want := []model.ChangedReference{{Kind: "issue", ID: target.Key}}
+			if payload.ID != askID || !reflect.DeepEqual(payload.ReferencesChanged, want) {
+				t.Fatalf("published ask.opened = %s, want ask %s naming %#v", encoded, askID, want)
+			}
+			if payload.OpenedEventID == nil || *payload.OpenedEventID != event.ID {
+				t.Fatalf("published ask.opened opened_event_id = %v, want the event's own id %d", payload.OpenedEventID, event.ID)
+			}
+			return
+		case <-deadline:
+			t.Fatal("no ask.opened event was published")
+		}
+	}
 }
 
 // POST /api/v1/issues seeds the new issue's spec document from the request and indexes it in the

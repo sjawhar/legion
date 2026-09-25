@@ -209,7 +209,7 @@ func TestAnEditRefreshesItsAnchorsOncePerTransaction(t *testing.T) {
 	}}, alice, nil); err != nil {
 		t.Fatalf("joined edit: %v", err)
 	}
-	if _, err := service.SnapshotVersion(joinedCtx, tx, artifactID, alice); err != nil {
+	if _, err := service.SnapshotVersion(joinedCtx, artifactID, alice); err != nil {
 		t.Fatalf("snapshot version: %v", err)
 	}
 	if passes := counter.count.Load(); passes != anchorRefreshPasses {
@@ -217,7 +217,7 @@ func TestAnEditRefreshesItsAnchorsOncePerTransaction(t *testing.T) {
 	}
 
 	refreshes := 0
-	for _, event := range ledger.Events() {
+	for _, event := range ledger.events {
 		if event.Type == "ask.anchor_refreshed" {
 			refreshes++
 		}
@@ -251,12 +251,12 @@ func TestAnEditAnnouncesEachChangedAnchorOnce(t *testing.T) {
 	}}, alice, nil); err != nil {
 		t.Fatalf("joined edit: %v", err)
 	}
-	if _, err := service.SnapshotVersion(joinedCtx, tx, artifactID, alice); err != nil {
+	if _, err := service.SnapshotVersion(joinedCtx, artifactID, alice); err != nil {
 		t.Fatalf("snapshot version: %v", err)
 	}
 
 	refreshes := 0
-	for _, event := range ledger.Events() {
+	for _, event := range ledger.events {
 		if event.Type == "ask.anchor_refreshed" {
 			refreshes++
 		}

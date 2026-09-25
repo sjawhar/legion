@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -306,6 +308,232 @@ func TestSettleRendersTreeAndWritesVersion(t *testing.T) {
 	if markdown != "after\n" || version.Named {
 		t.Fatalf("version 2 = %q named=%v", markdown, version.Named)
 	}
+}
+
+// The browser editor derives attributes that no rendering carries: every heading's id, slugged
+// from its text as soon as it opens the document (Milkdown's syncHeadingIdPlugin), and every
+// ordered list item's label and list type, rewritten on the first keyboard caret move or edit
+// (syncListOrderPlugin). The server parses headings with an empty id and every list item as a
+// bullet. A version records the rendered markdown alone, so such an update changes nothing a
+// version records: it credits no connected reader and settles without a version, which would
+// otherwise stale an approval.
+func TestAttributesTheEditorDerivesSettleWithoutAVersion(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		markdown string
+		edit     func(*pmdoc.Node) *pmdoc.Node
+	}{
+		{name: "heading ids", markdown: "## Database\n\nUse SQLite", edit: setHeadingID("database")},
+		{name: "ordered list labels", markdown: "## Plan\n\n1. First step.\n2. Second step.", edit: labelOrderedListItems},
+		{name: "ordered list starting at 3", markdown: "3. Third step.\n4. Fourth step.", edit: labelOrderedListItems},
+		{name: "ordered list inside bullets", markdown: "- Outer\n  1. Inner one.\n  2. Inner two.", edit: labelOrderedListItems},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			service.settle = time.Hour
+			seedServiceText(t, service, artifactID, test.markdown)
+			alignLatestVersionWithUpdates(t, service, artifactID)
+			reader := model.Actor{Kind: "user", ID: "bob"}
+			service.addConnection(artifactID, service.nextConnection.Add(1), reader)
+
+			editLiveTree(t, service, artifactID, test.edit)
+			settleCurrentGeneration(t, service, artifactID)
+
+			assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 1, 0)
+			if pending := pendingAuthors(service, artifactID); len(pending) != 0 {
+				t.Fatalf("pending authors = %v, want none (reader %v changed nothing)", pending, reader)
+			}
+		})
+	}
+}
+
+// A comment or suggestion marked on part of an identifier changes no version's markdown, whether
+// the mark reaches the room directly, where the room's update observer classifies it, or through
+// a transaction that then snapshots the document, as an anchored comment's handler does. Either
+// way the document keeps its one version, and the marker is credited with nothing.
+func TestAMarkInsideAWordWritesNoVersion(t *testing.T) {
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	// snapshot marks the quote when mark is set, then versions the document, in one transaction,
+	// as an anchored comment's handler does.
+	snapshot := func(t *testing.T, service *Service, artifactID string, mark *MarkSpec) VersionResult {
+		t.Helper()
+		tx, err := service.store.Pool.Begin(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback(context.Background())
+		ctx, ledger := service.Join(context.Background(), tx)
+		defer ledger.Discard()
+		if mark != nil {
+			if _, err := service.MarkQuote(ctx, artifactID, *mark, "case", nil); err != nil {
+				t.Fatalf("mark: %v", err)
+			}
+		}
+		result, err := service.SnapshotVersion(ctx, artifactID, alice)
+		if err != nil {
+			t.Fatalf("snapshot: %v", err)
+		}
+		if err := ledger.Commit(context.Background()); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		return result
+	}
+	for _, kind := range []MarkKind{MarkComment, MarkSuggestion} {
+		for _, joined := range []bool{false, true} {
+			name := string(kind) + ", direct"
+			if joined {
+				name = string(kind) + ", in a transaction that snapshots"
+			}
+			t.Run(name, func(t *testing.T) {
+				service, artifactID := newTestService(t)
+				service.settle = time.Hour
+				seedServiceText(t, service, artifactID, "Use snake_case here.")
+				// Version 2 is the seeded text, so the latest version and the document agree.
+				if baseline := snapshot(t, service, artifactID, nil); baseline.Version.Number != 2 {
+					t.Fatalf("baseline version = %d, want 2", baseline.Version.Number)
+				}
+				alignLatestVersionWithUpdates(t, service, artifactID)
+				spec := MarkSpec{Kind: kind, ID: "m1", By: alice}
+
+				if joined {
+					if result := snapshot(t, service, artifactID, &spec); result.Wrote {
+						t.Errorf("snapshot after the mark wrote version %d", result.Version.Number)
+					}
+				} else if _, err := service.MarkQuote(context.Background(), artifactID, spec, "case", nil); err != nil {
+					t.Fatalf("mark: %v", err)
+				}
+				settleCurrentGeneration(t, service, artifactID)
+
+				assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 2, 0)
+				if pending := pendingAuthors(service, artifactID); len(pending) != 0 {
+					t.Fatalf("pending authors = %v, want none (a mark is not content)", pending)
+				}
+			})
+		}
+	}
+}
+
+// Renaming a heading changes its text, and the editor re-derives its id with it: that is a real
+// edit, versioned and credited to the reader connected when it happened.
+func TestRenamingAHeadingIsVersionedAndCredited(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "## Database\n\nUse SQLite")
+	alignLatestVersionWithUpdates(t, service, artifactID)
+	reader := model.Actor{Kind: "user", ID: "bob"}
+	service.addConnection(artifactID, service.nextConnection.Add(1), reader)
+
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		return setHeadingID("storage")(replaceRun("Database", "Storage")(tree))
+	})
+	settleCurrentGeneration(t, service, artifactID)
+
+	version := waitForDocumentVersion(t, service.store, artifactID, 2)
+	var markdown string
+	if err := service.store.Pool.QueryRow(context.Background(), `select markdown from artifact_versions where artifact_id = $1 and number = 2`, artifactID).Scan(&markdown); err != nil {
+		t.Fatalf("read version 2: %v", err)
+	}
+	if markdown != "## Storage\n\nUse SQLite\n" || !reflect.DeepEqual(version.Authors, []model.Actor{reader}) {
+		t.Fatalf("version 2 = %q by %v, want the renamed heading by %v", markdown, version.Authors, reader)
+	}
+}
+
+// A browser that has a document open and changes nothing is no author of an agent's edit: the
+// version written for it names only the agent, whether the edit reaches the room directly or
+// through a committed transaction, and whether the reader left before it or is still connected.
+func TestAReaderIsNoAuthorOfAnAgentsVersion(t *testing.T) {
+	agent := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
+	edit := []model.EditOp{{Op: "replace", Find: "before", With: "after"}}
+	for _, test := range []struct {
+		name         string
+		readerLeaves bool
+		joined       bool
+	}{
+		{name: "reader left, direct edit", readerLeaves: true},
+		{name: "reader connected, direct edit"},
+		{name: "reader connected, transactional edit", joined: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			service.settle = time.Hour
+			seedServiceText(t, service, artifactID, "before")
+			alignLatestVersionWithUpdates(t, service, artifactID)
+			reader := model.Actor{Kind: "user", ID: "bob"}
+			connectionID := service.nextConnection.Add(1)
+			service.addConnection(artifactID, connectionID, reader)
+			if test.readerLeaves {
+				service.removeConnection(artifactID, connectionID)
+			}
+
+			if test.joined {
+				tx, err := service.store.Pool.Begin(context.Background())
+				if err != nil {
+					t.Fatalf("begin agent edit: %v", err)
+				}
+				defer tx.Rollback(context.Background())
+				joinedCtx, ledger := service.Join(context.Background(), tx)
+				defer ledger.Discard()
+				if _, err := service.ApplyOps(joinedCtx, artifactID, edit, agent, nil); err != nil {
+					t.Fatalf("agent edit: %v", err)
+				}
+				if err := ledger.Commit(context.Background()); err != nil {
+					t.Fatalf("commit agent edit: %v", err)
+				}
+			} else if _, err := service.ApplyOps(context.Background(), artifactID, edit, agent, nil); err != nil {
+				t.Fatalf("agent edit: %v", err)
+			}
+			settleCurrentGeneration(t, service, artifactID)
+
+			version := waitForDocumentVersion(t, service.store, artifactID, 2)
+			if !reflect.DeepEqual(version.Authors, []model.Actor{agent}) {
+				t.Fatalf("version 2 authors = %v, want only the agent %v (reader %v changed nothing)", version.Authors, agent, reader)
+			}
+		})
+	}
+}
+
+func pendingAuthors(service *Service, artifactID string) []model.Actor {
+	state := service.room(artifactID)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return actorSlice(state.pending)
+}
+
+// setHeadingID returns a live edit that gives every heading id, as the editor's heading plugin
+// does for a heading whose text slugs to id.
+func setHeadingID(id string) func(*pmdoc.Node) *pmdoc.Node {
+	return func(tree *pmdoc.Node) *pmdoc.Node {
+		for _, block := range tree.Children {
+			if block.Type == "heading" {
+				block.Attrs["id"] = id
+			}
+		}
+		return tree
+	}
+}
+
+// labelOrderedListItems is the live edit the editor's list plugin makes on the first keyboard caret
+// move or edit: every item of an ordered list is labelled with its number and typed as ordered.
+func labelOrderedListItems(node *pmdoc.Node) *pmdoc.Node {
+	if node.Type == "ordered_list" {
+		start := 1
+		switch order := node.Attrs["order"].(type) {
+		case int:
+			start = order
+		case int64:
+			start = int(order)
+		case float64:
+			start = int(order)
+		}
+		for index, item := range node.Children {
+			item.Attrs["label"] = fmt.Sprintf("%d.", start+index)
+			item.Attrs["listType"] = "ordered"
+		}
+	}
+	for _, child := range node.Children {
+		labelOrderedListItems(child)
+	}
+	return node
 }
 
 func TestSettleStampsPersistedLegacyProofDocument(t *testing.T) {
@@ -633,6 +861,37 @@ func TestBackfillStampsClosedIssueDocument(t *testing.T) {
 	}
 	if repairs := pmdoc.BlockIDRepairCount(persistedProofTree(t, database, artifactID)); repairs != 0 {
 		t.Fatalf("backfill persisted document with %d unstamped blocks", repairs)
+	}
+}
+
+// A closed issue's document stays readable: GET /blocks reads it as GET /text does
+// (readDocument), rather than asking the room, whose inject gate refuses a closed issue, and
+// failing the room over that refusal.
+func TestAClosedIssuesDocumentReadsItsBlocksWithoutFailingItsRoom(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "before")
+	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Hour})
+	t.Cleanup(func() {
+		if err := service.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown document service: %v", err)
+		}
+	})
+	seedServiceText(t, service, artifactID, "before")
+	liveTree(t, service, artifactID)
+	if _, err := database.Pool.Exec(context.Background(), `update issues set closed_at = now() where key = 'DOC-1'`); err != nil {
+		t.Fatalf("close document issue: %v", err)
+	}
+	service.SetIssueClosed(context.Background(), "DOC-1", true)
+
+	markdown, blocks, err := service.TextWithBlocks(context.Background(), artifactID)
+	if err != nil {
+		t.Fatalf("read a closed issue's blocks: %v", err)
+	}
+	if markdown != "before\n" || len(blocks) != 1 {
+		t.Fatalf("closed document = %q with %d blocks, want %q with one", markdown, len(blocks), "before\n")
+	}
+	if err := service.roomFailure(artifactID); err != nil {
+		t.Fatalf("reading a closed issue's blocks failed its room: %v", err)
 	}
 }
 
@@ -983,15 +1242,14 @@ func snapshotAndCommitVersion(t *testing.T, service *Service, artifactID string,
 		t.Fatalf("begin snapshot transaction: %v", err)
 	}
 	defer tx.Rollback(context.Background())
-	versionResult, err := service.SnapshotVersion(context.Background(), tx, artifactID, actor)
-	version := versionResult.Version
-	if err != nil {
+	snapshotCtx, ledger := service.Join(context.Background(), tx)
+	defer ledger.Discard()
+	if _, err := service.SnapshotVersion(snapshotCtx, artifactID, actor); err != nil {
 		t.Fatalf("snapshot version: %v", err)
 	}
-	if err := tx.Commit(context.Background()); err != nil {
+	if err := ledger.Commit(context.Background()); err != nil {
 		t.Fatalf("commit snapshot transaction: %v", err)
 	}
-	service.commitVersion(artifactID, version)
 }
 
 // settleCurrentGeneration runs the room's settlement at its current generation once every live
@@ -1589,13 +1847,6 @@ func (s *Service) recordActor(room string, actor model.Actor) {
 	state.mu.Unlock()
 }
 
-// joined joins document operations to tx the way an API handler does, for a test that commits
-// tx itself.
-func joined(service *Service, tx pgx.Tx) context.Context {
-	ctx, _ := service.Join(context.Background(), tx)
-	return ctx
-}
-
 func seedServiceText(t *testing.T, service *Service, artifactID, markdown string) {
 	t.Helper()
 	tx, err := service.store.Pool.Begin(context.Background())
@@ -1603,10 +1854,12 @@ func seedServiceText(t *testing.T, service *Service, artifactID, markdown string
 		t.Fatalf("begin seed text: %v", err)
 	}
 	defer tx.Rollback(context.Background())
-	if _, err := service.SeedText(context.Background(), tx, artifactID, markdown, model.Actor{Kind: "user", ID: "seed"}); err != nil {
+	seedCtx, ledger := service.Join(context.Background(), tx)
+	defer ledger.Discard()
+	if _, err := service.SeedText(seedCtx, artifactID, markdown, model.Actor{Kind: "user", ID: "seed"}); err != nil {
 		t.Fatalf("seed service text: %v", err)
 	}
-	if err := tx.Commit(context.Background()); err != nil {
+	if err := ledger.Commit(context.Background()); err != nil {
 		t.Fatalf("commit seed text: %v", err)
 	}
 }

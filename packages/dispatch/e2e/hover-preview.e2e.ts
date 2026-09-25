@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
 
 import { REF_PREVIEW_CLOSE_DELAY_MS } from "../web/src/features/refs/ref-preview-timing";
 import { createComment, createIssue, createProject, patchIssue } from "./api";
@@ -13,6 +13,15 @@ const agent = {
 test.beforeEach(async () => {
   await resetDatabase();
 });
+
+/** Hold the page's clock still, so a check about the close delay cannot race it. `pauseAt` takes
+ * a time on the page's own installed clock, and the Node process's `Date.now()` can already be
+ * behind that clock, which would ask it to move backwards: a lead of `+ 1` ms failed 11 runs of
+ * 12, and a second is past any skew. No close is armed at any call site, so the jump to that
+ * moment fires no timer. */
+async function pauseClock(page: Page): Promise<void> {
+  await page.clock.pauseAt(Date.now() + 1000);
+}
 
 async function seedReference() {
   await createProject({ key: "CORE", name: "Core" });
@@ -83,6 +92,7 @@ test("hovering a board card previews the issue and moving onto the card keeps it
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
+    await page.clock.install();
     await page.goto("/projects/CORE");
     await page.getByRole("button", { name: "Board" }).click();
     const todo = page.getByRole("region", { name: "Todo" });
@@ -116,21 +126,112 @@ test("hovering a board card previews the issue and moving onto the card keeps it
     await link.hover();
     await expect(card).toBeVisible();
     // `hover()` moves the pointer in one step, straight from the reference onto the card. A close
-    // that move armed would run on the page's timers, so the check does too: a page timer set
-    // after the move, for twice REF_PREVIEW_CLOSE_DELAY_MS, fires after any close timer the move
-    // started, however starved the renderer is, and the card must still be there.
+    // that move armed would run on the page's timers, so the check drives those timers: with the
+    // clock held still the pointer's travel takes no page time at all, and advancing it past
+    // twice REF_PREVIEW_CLOSE_DELAY_MS fires any close the move started.
+    await pauseClock(page);
     await card.hover();
-    const openAfterCloseDelay = await page.evaluate(
-      (delay) =>
-        new Promise<boolean>((resolve) => {
-          setTimeout(() => resolve(document.getElementById("ref-preview") !== null), delay);
-        }),
-      REF_PREVIEW_CLOSE_DELAY_MS * 2
-    );
-    expect(openAfterCloseDelay).toBe(true);
+    await page.clock.runFor(REF_PREVIEW_CLOSE_DELAY_MS * 2);
+    await expect(card).toBeVisible();
+    await page.clock.resume();
     await card.getByRole("link").click();
     await expect(page).toHaveURL(new RegExp(`/issues/${target.key}(/|$)`));
     await expect(page.getByRole("tooltip")).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a card survives a held-button drag that leaves its reference and comes back", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name === "iphone", "a held mouse button is not a touch gesture");
+  const { source } = await seedReference();
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    // The gesture below takes longer than the close delay on a loaded machine, so the page's
+    // clock is the test's: paused for the drag, then advanced past the delay deliberately.
+    // Wall-clock timing would race the timer this test is about.
+    await page.clock.install();
+    await page.goto(`/issues/${source.key}/conversation`);
+    const turns = page.getByRole("list", { name: "Conversation turns" });
+    const link = turns.getByRole("link", { name: "Hover target" });
+    await expect(link).toBeVisible();
+    await link.hover();
+    const card = page.getByRole("tooltip");
+    await expect(card).toBeVisible();
+    await pauseClock(page);
+
+    // The press lands on the text beside the reference, not on the reference: pressing the link
+    // itself starts Chromium's native link drag, which stops delivering boundary events. The
+    // press point is inside the turn's own collapsed button, so Chromium paints no selection
+    // either - what this pins is the rule the handler reads, a pointer returning to the anchor
+    // with a button held, whatever the drag means to the page.
+    const box = await link.boundingBox();
+    if (box === null) {
+      throw new Error("reference is not visible");
+    }
+    const beside = { x: box.x - 8, y: box.y + box.height / 2 };
+    await page.mouse.move(beside.x, beside.y);
+    await page.mouse.down();
+    await page.mouse.move(beside.x, box.y + box.height + 40, { steps: 4 });
+    // Back up the same column and only then right onto the link: the card hangs below the
+    // reference, so a diagonal return crosses it and the card's own re-entry would cancel the
+    // close instead of the anchor's. This path stays clear of the card at every step, so the
+    // cancel can only come from the anchor - which holds only while the card is left-aligned
+    // with its reference, so the column is checked rather than assumed (`PreviewCard` clamps a
+    // card near the right edge leftwards, and that one would sit under this column).
+    expect((await card.boundingBox())?.x ?? 0).toBeGreaterThan(beside.x);
+    await page.mouse.move(beside.x, beside.y, { steps: 4 });
+    await page.mouse.move(box.x + box.width / 2, beside.y, { steps: 4 });
+    await expect(card).toBeVisible();
+    await page.clock.runFor(REF_PREVIEW_CLOSE_DELAY_MS * 2);
+    await expect(card).toBeVisible();
+    await page.mouse.up();
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a card survives a held-button move from the card back onto its reference", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name === "iphone", "a held mouse button is not a touch gesture");
+  const { source } = await seedReference();
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.clock.install();
+    await page.goto(`/issues/${source.key}/conversation`);
+    const turns = page.getByRole("list", { name: "Conversation turns" });
+    const link = turns.getByRole("link", { name: "Hover target" });
+    await expect(link).toBeVisible();
+    await link.hover();
+    const card = page.getByRole("tooltip");
+    await expect(card).toBeVisible();
+    await pauseClock(page);
+
+    // The other end of the same zone. The press starts beside the reference, because pressing
+    // the card's own link starts Chromium's native link drag and boundary events stop; from
+    // there the pointer travels over the card and steps straight back onto the reference, which
+    // is one crossing inside the zone (`pointerout` from the card naming the anchor, then
+    // `pointerover` on the anchor with the button held). Nothing may arm a close.
+    const box = await link.boundingBox();
+    const cardBox = await card.boundingBox();
+    if (box === null || cardBox === null) {
+      throw new Error("reference or card is not visible");
+    }
+    const beside = { x: box.x - 8, y: box.y + box.height / 2 };
+    await page.mouse.move(beside.x, beside.y);
+    await page.mouse.down();
+    await page.mouse.move(beside.x, cardBox.y + cardBox.height / 2, { steps: 4 });
+    await page.mouse.move(box.x + box.width / 2, cardBox.y + cardBox.height / 2, { steps: 4 });
+    await page.mouse.move(box.x + box.width / 2, cardBox.y + 4, { steps: 2 });
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.clock.runFor(REF_PREVIEW_CLOSE_DELAY_MS * 2);
+    await expect(card).toBeVisible();
+    await page.mouse.up();
   } finally {
     await alice.close();
   }

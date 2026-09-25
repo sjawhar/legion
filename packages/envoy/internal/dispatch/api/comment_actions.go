@@ -118,7 +118,7 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publishDocumentEvents(ledger, event)
+	s.publish(event)
 	WriteJSON(w, http.StatusOK, comment)
 }
 
@@ -219,7 +219,7 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publishDocumentEvents(ledger, event)
+	s.publish(event)
 	WriteJSON(w, http.StatusOK, comment)
 }
 
@@ -341,7 +341,6 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 					s.writeHandlerError(w, err)
 					return
 				}
-				s.publishDocumentEvents(ledger)
 				s.writeHandlerError(w, markErr)
 				return
 			}
@@ -439,6 +438,6 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publishDocumentEvents(ledger, events...)
+	s.publish(events...)
 	WriteJSON(w, http.StatusOK, comment)
 }

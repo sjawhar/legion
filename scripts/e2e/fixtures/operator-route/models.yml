@@ -1,25 +1,21 @@
-# Written by the Go `legion` (packages/daemon-go/internal/modelroute) when Oh My Pi starts in a Legion
-# pod, from the pod's LEGION_MODEL_GATEWAY_URL: Oh My Pi reads a baseUrl literally, so the gateway the
-# daemon names is written out here at start rather than carried in the image.
-#
-# anthropic is routed to the model gateway (middleman) and keyed by the pod's projected ServiceAccount
-# token. The gateway reads the key from x-api-key; Oh My Pi caches the command's value for the process
-# and runs it again on a 401, so the token the kubelet rotated is read on the first refusal.
-# `auth: apiKey` makes these custom models plain API-key callers: without it Oh My Pi sends an
-# anthropic-messages custom model in its Claude Code OAuth shape (a billing header in the system
-# prompt, a claude-cli user agent, the oauth beta).
+# The live harnesses' operator route (pod.yml mounts this file into the image's Oh My Pi profile):
+# anthropic through the Hawk model gateway (middleman), keyed by the pod's projected
+# ServiceAccount token. The gateway reads the key from x-api-key; Oh My Pi caches the command's
+# value for the process and runs it again on a 401, so the token the kubelet rotated is read on
+# the first refusal. `auth: apiKey` makes these custom models plain API-key callers: without it Oh
+# My Pi sends an anthropic-messages custom model in its Claude Code OAuth shape.
 #
 # The models are the gateway's `-legion` aliases (agent-c's LEGION_MODEL_ALIAS_NAMES), the only
-# names the gateway serves a Legion pod's token. Oh My Pi finds no catalog entry for an aliased id,
-# so each carries its model's catalog metadata (Oh My Pi's bundled catalog at the pinned fork).
+# names the gateway serves a legion-worker token. Oh My Pi finds no catalog entry for an aliased id,
+# so each carries its model's catalog metadata.
 providers:
   anthropic:
-    baseUrl: {{yaml .BaseURL}}
+    baseUrl: https://middleman.hawk.internal.trajectorylabs.com/anthropic
     auth: apiKey
     api: anthropic-messages
-    apiKey: {{yaml .KeyCommand}}
+    apiKey: "!cat /var/run/operator/token"
     headers:
-      X-Api-Key: {{yaml .KeyCommand}}
+      X-Api-Key: "!cat /var/run/operator/token"
     models:
       - id: claude-fable-5-1-legion
         name: Claude Fable 5.1 (Legion gateway)

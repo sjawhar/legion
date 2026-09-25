@@ -1,3 +1,4 @@
+import type { MessageDeliveryMode } from "@legion/contracts";
 import type { ReactNode } from "react";
 
 import { secondaryButtonBorder, textSecondaryOnSurface } from "../../theme/classes";
@@ -6,7 +7,12 @@ import { Avatar } from "./Avatar";
 import type { Author } from "./authors";
 import { ReplyButton } from "./ReplyButton";
 import { ReplyQuote } from "./ReplyQuote";
-import { DeliveryRetry, DeliveryStatus, type TargetedMessageAttempt } from "./TargetedMessageCard";
+import {
+  DeliveryRetry,
+  DeliveryStatus,
+  offersSafeRetry,
+  type TargetedMessageAttempt,
+} from "./TargetedMessageCard";
 
 /** A turn's action icons - copy-reference, Reply, Pin - beside its body: a row on desktop, a
  *  column on the phone so three 44 px targets do not squeeze the text to a sliver. The column
@@ -36,9 +42,10 @@ interface ReplyDelivery {
   readonly answeredBy?: string;
   readonly attempts: readonly TargetedMessageAttempt[];
   readonly retry?: {
+    readonly canAside: boolean;
     readonly canBtw: boolean;
     readonly canSteer: boolean;
-    readonly onRetry: (delivery: "btw" | "steer") => void;
+    readonly onRetry: (delivery: MessageDeliveryMode) => void;
     readonly retrying: boolean;
   };
   readonly targetName: string;
@@ -92,14 +99,21 @@ export function ReplyTurn({
             <DeliveryStatus
               answeredBy={delivery.answeredBy}
               deliveries={delivery.attempts}
+              retryOffered={offersSafeRetry(
+                delivery.attempts,
+                delivery.answeredBy === undefined && delivery.retry !== undefined
+              )}
               targetName={delivery.targetName}
             />
             {delivery.answeredBy === undefined && delivery.retry !== undefined ? (
               <DeliveryRetry
+                canAside={delivery.retry.canAside}
                 canBtw={delivery.retry.canBtw}
                 canSteer={delivery.retry.canSteer}
+                mode={delivery.attempts.at(-1)?.delivery ?? "steer"}
                 onRetry={delivery.retry.onRetry}
                 retrying={delivery.retry.retrying}
+                sameModeRetry={offersSafeRetry(delivery.attempts, true)}
                 targetName={delivery.targetName}
               />
             ) : null}

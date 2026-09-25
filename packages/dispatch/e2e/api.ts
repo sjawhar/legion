@@ -13,6 +13,7 @@ import type {
   AskFollower,
   AskRead,
   Comment,
+  CommentDelivery,
   CreateAgentMessageInput,
   CreateArtifactInput,
   CreateAskInput,
@@ -273,6 +274,10 @@ export function createComment(
 
 export function acceptSuggestion(id: string, options: ApiOptions = {}): Promise<Comment> {
   return request<Comment>(`/api/v1/comments/${encodeURIComponent(id)}/accept`, "POST", {}, options);
+}
+
+export function rejectSuggestion(id: string, options: ApiOptions = {}): Promise<Comment> {
+  return request<Comment>(`/api/v1/comments/${encodeURIComponent(id)}/reject`, "POST", {}, options);
 }
 
 export function editComment(
@@ -551,6 +556,20 @@ export function getArchitecture(
     `/api/v1/projects/${encodeURIComponent(project)}/architecture`,
     "GET",
     undefined,
+    options
+  );
+}
+
+/** Retry one comment mention's delivery, the endpoint the "Mention deliveries" Retry posts to. */
+export function retryCommentDelivery(
+  comment: string,
+  input: { delivery: "aside" | "btw" | "steer"; target: string },
+  options: ApiOptions = {}
+): Promise<CommentDelivery> {
+  return request<CommentDelivery>(
+    `/api/v1/comments/${encodeURIComponent(comment)}/deliveries`,
+    "POST",
+    input,
     options
   );
 }

@@ -43,7 +43,7 @@ type GitHubApp struct {
 }
 
 // GitHubApps holds the two App identities Legion needs. Review and implement are distinct because
-// only the implement App has repository contents permission.
+// the implement App's roles are the ones the workflow lets push and resolve review threads.
 type GitHubApps struct {
 	Implement GitHubApp
 	Review    GitHubApp

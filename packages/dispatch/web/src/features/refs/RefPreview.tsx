@@ -67,25 +67,15 @@ function clearTimers(): void {
   window.clearTimeout(closeTimer);
 }
 
-function scheduleClose(anchor: HTMLElement): void {
-  window.clearTimeout(closeTimer);
-  closeTimer = window.setTimeout(() => {
-    if (state?.target.anchor === anchor) {
-      setState(undefined);
-    }
-  }, REF_PREVIEW_CLOSE_DELAY_MS);
-}
-
 /** The one hover card's controller. Module-level on purpose: "one card at a time" is a single
- * piece of state, and `RefPreviewHost` drives it from document-level listeners. */
-export const refPreview = {
-  /** Hover began on anchor: open its card after the delay unless the pointer leaves first. A
-   * hover returning from the card to its own anchor only cancels the pending close. */
+ * piece of state, and `RefPreviewHost` drives it from document-level listeners. Every transition
+ * but `close` is private because it is only correct once the caller has judged the event against
+ * `inHoverZone`, which `attachTriggers` alone does; `closeRefPreview` is the whole outside
+ * surface. */
+const refPreview = {
+  /** Hover began on an anchor outside the hover zone: open its card after the delay unless the
+   * pointer leaves first. */
   hoverStart(anchor: HTMLElement, route: DispatchReferenceRoute): void {
-    if (state?.target.anchor === anchor) {
-      window.clearTimeout(closeTimer);
-      return;
-    }
     clearTimers();
     const target: PreviewTarget = { anchor, route };
     setState({ phase: "pending", target });
@@ -95,8 +85,10 @@ export const refPreview = {
       }
     }, REF_PREVIEW_OPEN_DELAY_MS);
   },
-  hoverEnd(anchor: HTMLElement): void {
-    if (state?.target.anchor !== anchor) {
+  /** The pointer left the hover zone: a card that has not opened yet is abandoned, and an open
+   * one closes after the bridge delay unless the pointer comes back. */
+  leave(): void {
+    if (state === undefined) {
       return;
     }
     if (state.phase === "pending") {
@@ -104,7 +96,14 @@ export const refPreview = {
       setState(undefined);
       return;
     }
-    scheduleClose(anchor);
+    // No in-flight check when this fires: every transition that changes the target clears this
+    // timer first, and `reenter` cancels it outright, so whatever is open is what it closes.
+    window.clearTimeout(closeTimer);
+    closeTimer = window.setTimeout(() => setState(undefined), REF_PREVIEW_CLOSE_DELAY_MS);
+  },
+  /** The pointer came back into the hover zone before the bridge delay ran out. */
+  reenter(): void {
+    window.clearTimeout(closeTimer);
   },
   /** Keyboard focus opens the card at once. */
   focus(anchor: HTMLElement, route: DispatchReferenceRoute): void {
@@ -115,14 +114,6 @@ export const refPreview = {
     if (state?.target.anchor === anchor) {
       clearTimers();
       setState(undefined);
-    }
-  },
-  cardEnter(): void {
-    window.clearTimeout(closeTimer);
-  },
-  cardLeave(): void {
-    if (state !== undefined) {
-      scheduleClose(state.target.anchor);
     }
   },
   /** The anchor moved (the page scrolled under a keyboard-opened card): measure it again. */
@@ -136,6 +127,12 @@ export const refPreview = {
     setState(undefined);
   },
 };
+
+/** Close the hover card from outside this module: a surface that takes the pointer over (the
+ * board's drag lift) closes it rather than driving the hover transitions itself. */
+export function closeRefPreview(): void {
+  refPreview.close();
+}
 
 function subscribe(notify: () => void): () => void {
   subscribers.add(notify);
@@ -160,6 +157,14 @@ function cardContains(node: EventTarget | null): boolean {
   return node instanceof Element && node.closest(`#${CARD_ID}`) !== null;
 }
 
+/** The one region the pointer may roam without closing the card: the current target's anchor -
+ * the open card's, or the one a pending hover is waiting on - and the card itself. Every pointer
+ * transition is judged against this predicate, in the document listeners alone, so no close
+ * depends on the order in which two event systems see one `pointerout`. */
+function inHoverZone(node: EventTarget | null): boolean {
+  return state !== undefined && (triggerOf(node) === state.target.anchor || cardContains(node));
+}
+
 function routeOf(trigger: HTMLElement): DispatchReferenceRoute | undefined {
   const reference =
     trigger.getAttribute("data-dispatch-ref") ?? trigger.getAttribute("data-dispatch-href");
@@ -171,6 +176,14 @@ function routeOf(trigger: HTMLElement): DispatchReferenceRoute | undefined {
  * alike, which come and go outside React's knowledge. Returns the detach function. */
 function attachTriggers(): () => void {
   const onPointerOver = (event: PointerEvent) => {
+    // Inside the zone there is nothing to open: a pointer arriving from outside it only cancels
+    // the close its leaving armed, whatever kind of pointer it is.
+    if (inHoverZone(event.target)) {
+      if (!inHoverZone(event.relatedTarget)) {
+        refPreview.reenter();
+      }
+      return;
+    }
     // No card on touch (a tap follows the link), and none while a button is held (a
     // drag-selection passing over a link is not a hover).
     if (event.pointerType === "touch" || event.buttons !== 0) {
@@ -186,16 +199,8 @@ function attachTriggers(): () => void {
     }
   };
   const onPointerOut = (event: PointerEvent) => {
-    const trigger = triggerOf(event.target);
-    // A pointer moving straight onto the card is not leaving: React enters the card from this
-    // same event before it reaches the document, so a close armed here would outlive that
-    // enter and shut the card under the pointer.
-    if (
-      trigger !== null &&
-      trigger !== triggerOf(event.relatedTarget) &&
-      !cardContains(event.relatedTarget)
-    ) {
-      refPreview.hoverEnd(trigger);
+    if (inHoverZone(event.target) && !inHoverZone(event.relatedTarget)) {
+      refPreview.leave();
     }
   };
   const onFocusIn = (event: FocusEvent) => {
@@ -400,8 +405,6 @@ function PreviewCard({ target }: { target: PreviewTarget }): ReactNode {
     <div
       className={`fixed top-0 left-0 z-[60] w-80 max-w-[calc(100vw-1rem)] rounded-xl border p-3 text-sm shadow-lg ${card}`}
       id={CARD_ID}
-      onPointerEnter={refPreview.cardEnter}
-      onPointerLeave={refPreview.cardLeave}
       ref={element}
       role="tooltip"
     >

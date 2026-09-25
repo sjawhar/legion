@@ -632,7 +632,7 @@ func loadAnchorRefreshedCommentMentions(ctx context.Context, tx pgx.Tx, id strin
 
 func loadAnchorRefreshedCommentDeliveries(ctx context.Context, tx pgx.Tx, id string) ([]model.CommentDelivery, error) {
 	rows, err := tx.Query(ctx, `
-		select comment_id::text, target, attempt, delivery, session_id, envelope_id, state, error, resolve_error, reply_id::text, created_at
+		select comment_id::text, target, attempt, delivery, session_id, envelope_id, duplicate, state, error, resolve_error, reply_id::text, created_at
 		from comment_deliveries
 		where comment_id = $1
 		order by target, attempt
@@ -646,7 +646,8 @@ func loadAnchorRefreshedCommentDeliveries(ctx context.Context, tx pgx.Tx, id str
 		delivery := model.CommentDelivery{}
 		if err := rows.Scan(
 			&delivery.CommentID, &delivery.Target, &delivery.Attempt, &delivery.Delivery, &delivery.SessionID,
-			&delivery.EnvelopeID, &delivery.State, &delivery.Error, &delivery.ResolveError, &delivery.ReplyID, &delivery.CreatedAt,
+			&delivery.EnvelopeID, &delivery.Duplicate, &delivery.State, &delivery.Error, &delivery.ResolveError,
+			&delivery.ReplyID, &delivery.CreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan refreshed comment %q delivery: %w", id, err)
 		}

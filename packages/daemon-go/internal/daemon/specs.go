@@ -61,7 +61,7 @@ func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnS
 		if err != nil {
 			return runtime.SpawnSpec{}, fmt.Errorf("the git identity of %s: %w", c.Token, err)
 		}
-		env = gitIdentityEnv(id)
+		env = id.Env()
 	}
 	spec := runtime.SpawnSpec{
 		Env:     env,
@@ -77,17 +77,6 @@ func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnS
 		spec.WorkspaceRecoveredFrom = workspace.Bookmark(c.Issue)
 	}
 	return spec, nil
-}
-
-// gitIdentityEnv is the six variables that make a process commit as id: JJ_USER/JJ_EMAIL, which
-// jj reads over every config scope, and the Git author and committer pairs for plain git
-// (packages/daemon/src/daemon/github-app-env.ts:46-58).
-func gitIdentityEnv(id runtime.GitIdentity) map[string]string {
-	return map[string]string{
-		"JJ_USER": id.Name, "JJ_EMAIL": id.Email,
-		"GIT_AUTHOR_NAME": id.Name, "GIT_AUTHOR_EMAIL": id.Email,
-		"GIT_COMMITTER_NAME": id.Name, "GIT_COMMITTER_EMAIL": id.Email,
-	}
 }
 
 // rolePromptPaths keeps an explicit operator prompt as a narrow test override. Every ordinary

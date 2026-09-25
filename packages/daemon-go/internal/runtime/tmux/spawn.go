@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -137,7 +138,7 @@ type secretFile struct {
 // names every file its pane holds (runtime-tmux.ts:619-635, secrets.ts:63-69). The boot token's
 // pointer is LEGION_BOOT_TOKEN_FILE and comes first; the rest follow sorted by name.
 func secretFiles(stateDir string, spec runtime.SpawnSpec) []secretFile {
-	dir := filepath.Join(stateDir, "secrets")
+	dir := runtime.SecretsDir(stateDir)
 	files := []secretFile{{name: "LEGION_BOOT_TOKEN", path: filepath.Join(dir, string(spec.Claim)), value: spec.BootToken}}
 	for _, name := range sortedKeys(spec.Secrets) {
 		files = append(files, secretFile{
@@ -153,7 +154,7 @@ func secretFiles(stateDir string, spec runtime.SpawnSpec) []secretFile {
 // on every write — a directory's mkdir mode is masked and ignored when it exists, and a file's is
 // applied only on create (secrets.ts:83-98). The caller owns the files' lifetimes.
 func writeSecretFiles(stateDir string, files []secretFile) error {
-	dir := filepath.Join(stateDir, "secrets")
+	dir := runtime.SecretsDir(stateDir)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
@@ -182,14 +183,11 @@ func WriteDispatchTokenFile(stateDir, token string) (string, error) {
 	return WriteSecretFile(stateDir, DispatchTokenFileName, token)
 }
 
-// SecretFilePath is where WriteSecretFile writes the secret name: `<stateDir>/secrets/<name>`.
-func SecretFilePath(stateDir, name string) string { return filepath.Join(stateDir, "secrets", name) }
-
-// WriteSecretFile writes value as SecretFilePath, a 0600 file in the 0700 secrets directory, and
-// returns its path: what a process outside a pane (`legion controller start`'s controller secret)
-// is handed as a `<NAME>_FILE` pointer, never the value.
+// WriteSecretFile writes value as runtime.SecretFilePath, a 0600 file in the 0700 secrets
+// directory, and returns its path: what a process outside a pane (`legion controller start`'s
+// controller secret) is handed as a `<NAME>_FILE` pointer, never the value.
 func WriteSecretFile(stateDir, name, value string) (string, error) {
-	path := SecretFilePath(stateDir, name)
+	path := runtime.SecretFilePath(stateDir, name)
 	if err := writeSecretFiles(stateDir, []secretFile{{name: name, path: path, value: value}}); err != nil {
 		return "", err
 	}
@@ -423,6 +421,9 @@ func (r *Runtime) openPane(ctx context.Context, spec runtime.SpawnSpec, pane []s
 	if err != nil {
 		return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
 	}
+	if err := r.awaitPaneCommand(ctx, report); err != nil {
+		return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
+	}
 	ticks, alive, err := r.startTicks(report.pid)
 	if err != nil {
 		return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
@@ -440,6 +441,33 @@ func (r *Runtime) openPane(ctx context.Context, spec runtime.SpawnSpec, pane []s
 	}
 	r.track(loc, spec.Issue)
 	return loc, nil
+}
+
+// awaitPaneCommand waits, bounded by the command timeout, until the pane's process runs the pane's
+// command. tmux reports a new pane's pid at fork, and until that child execs its command it is a
+// copy of the server, which a probe reads as not running OMP; supervision takes that for a death
+// and relaunches the claim over its still-starting process (LEGION-274). A process that exits
+// meanwhile is left to the caller's identity read, which reports it; one still the server's copy
+// when the bound runs out is killed, so no process the daemon never recorded runs on.
+func (r *Runtime) awaitPaneCommand(ctx context.Context, report paneReport) error {
+	deadline := time.Now().Add(r.commandTimeout)
+	for {
+		fork, err := r.serverFork(report.pid)
+		if err != nil || !fork {
+			return err
+		}
+		if time.Now().After(deadline) {
+			if res, err := r.run(ctx, killPaneArgv(r.socket, report.pane)); err != nil || res.exitCode != 0 && !paneGoneStderr.MatchString(res.stderr) {
+				r.log.Warn("tmux runtime: could not kill a pane that never started its command", "pane", report.pane, "err", err, "stderr", res.stderr)
+			}
+			return fmt.Errorf("pane %s pid %d did not start its command within %s", report.pane, report.pid, r.commandTimeout)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 }
 
 // refuseLiveIncarnation refuses a launch for a claim whose watched process still runs: one claim,

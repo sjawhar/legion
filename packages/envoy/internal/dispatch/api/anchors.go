@@ -67,7 +67,7 @@ func (s *server) resolveAnchor(ctx context.Context, tx pgx.Tx, owner owner, inpu
 		anchor.BlockID = &anchored.BlockID
 	}
 
-	snapshot, err := s.deps.Docs.SnapshotVersion(ctx, tx, artifact.ID, actor)
+	snapshot, err := s.deps.Docs.SnapshotVersion(ctx, artifact.ID, actor)
 	if err != nil {
 		return &anchor, artifact.Name, nil, err
 	}
