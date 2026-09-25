@@ -38,7 +38,7 @@
 
 dispatch_url() { printf '%s' "$dispatch_base"; }
 dispatch_get() {
-  curl -fsS --max-time 20 -H "@$work/dispatch-auth-header" "$(dispatch_url)/api/v1/$1"
+  curl -sS --fail-with-body --max-time 20 -H "@$work/dispatch-auth-header" "$(dispatch_url)/api/v1/$1"
 }
 # dispatch_events ISSUE prints the issue's whole event log, paging past Dispatch's 200-event limit.
 dispatch_events() {
@@ -61,16 +61,16 @@ dispatch_human() {
     body=$(jq -c --arg id "$dispatch_actor" '. + {actor: {kind: "session", id: $id}}' <<<"$body")
   fi
   if [ -n "$body" ]; then
-    curl -fsS --max-time 20 -X "$method" -H "@$work/dispatch-human-header" -H 'content-type: application/json' \
+    curl -sS --fail-with-body --max-time 20 -X "$method" -H "@$work/dispatch-human-header" -H 'content-type: application/json' \
       --data "$body" "$(dispatch_url)/api/v1/$path"
   else
-    curl -fsS --max-time 20 -X "$method" -H "@$work/dispatch-human-header" "$(dispatch_url)/api/v1/$path"
+    curl -sS --fail-with-body --max-time 20 -X "$method" -H "@$work/dispatch-human-header" "$(dispatch_url)/api/v1/$path"
   fi
 }
 new_issue() {
   local title=$1 parent=${2:-} payload
   payload=$(jq -cn --arg project "$project" --arg title "$title" --arg parent "$parent" \
-    'if $parent == "" then {project:$project,title:$title} else {project:$project,title:$title,parent:$parent} end')
+    'if $parent == "" then {project:$project,title:$title,force:true} else {project:$project,title:$title,parent:$parent,force:true} end')
   dispatch_human POST issues "$payload" | jq -er .key
 }
 set_status() { dispatch_human PATCH "issues/$1" "$(jq -cn --arg status "$2" '{status:$status}')" >/dev/null; }
