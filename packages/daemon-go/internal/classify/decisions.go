@@ -82,10 +82,12 @@ func ApplyReview(pr record.PullRequest, state, commitID string) record.PullReque
 	return pr
 }
 
-// BlockFixAttempt marks and reports one exhausted fix-attempt count. A zero BlockedAttempts means
-// no count has been reported, because fix attempts begin at one before they can exhaust a positive cap.
+// BlockFixAttempt marks and reports one exhausted fix-attempt count when the settlement just
+// applied is red, as the shipped reducer decides pr-blocked on ci-settled-red alone: a green head
+// at an exhausted count is the fix that worked. A zero BlockedAttempts means no count has been
+// reported, because fix attempts begin at one before they can exhaust a positive cap.
 func BlockFixAttempt(pr record.PullRequest, cap int) (record.PullRequest, bool) {
-	if cap <= 0 || pr.FixAttempts < cap || pr.BlockedAttempts == pr.FixAttempts {
+	if cap <= 0 || pr.Verdict != "red" || pr.FixAttempts < cap || pr.BlockedAttempts == pr.FixAttempts {
 		return pr, false
 	}
 	pr.BlockedAttempts = pr.FixAttempts

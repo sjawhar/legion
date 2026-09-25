@@ -247,9 +247,8 @@ func replayGitHubDecision(input json.RawMessage) ([]byte, error) {
 		pr = ApplyReview(pr, lowerASCII(stringValue(payload, "state")), stringValue(payload, "commit_id"))
 	case "checks":
 		candidate := SettlementCandidate{CheckRuns: attemptRuns(payload), Generation: int64(numberValue(payload, "generation")), Snapshot: stringValue(payload, "snapshot"), Verdict: stringValue(payload, "verdict"), Failing: stringSlice(payload, "failing")}
-		pr, _ = ApplySettlement(pr, candidate)
-		if pr.Verdict == "red" {
-			pr, _ = BlockFixAttempt(pr, 3)
+		if settled, applied := ApplySettlement(pr, candidate); applied {
+			pr, _ = BlockFixAttempt(settled, 3)
 		}
 	}
 	result := map[string]any{}
