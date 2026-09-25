@@ -12,7 +12,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/sjawhar/legion/daemon/internal/config"
-	"github.com/sjawhar/legion/daemon/internal/podsafety"
 )
 
 // CheckPod refuses, naming both, an operator variable the runtime, the worker image, or every
@@ -194,14 +193,5 @@ func TestImageEnvIsWhatTheWorkerImageSets(t *testing.T) {
 	slices.Sort(set)
 	if len(set) == 0 || !slices.Equal(set, imageEnv) {
 		t.Errorf("the worker image's final stage sets %v, and imageEnv is %v", set, imageEnv)
-	}
-}
-
-// sessionPlacing names variables of the pod baseline, whose setter CheckPod names as the baseline.
-func TestSessionPlacingVariablesAreTheBaselines(t *testing.T) {
-	for _, name := range sessionPlacing {
-		if !slices.Contains(podsafety.Variables(), name) {
-			t.Errorf("%s is in sessionPlacing, and the pod baseline sets %v", name, podsafety.Variables())
-		}
 	}
 }

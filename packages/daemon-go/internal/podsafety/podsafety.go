@@ -31,29 +31,42 @@ const OverlayFile = "podsafety-overlay.yml"
 // repository's .omp/config.yml, and a later one outranks an earlier one.
 const settingsOverlays = "PI_CONFIG_FILES"
 
+// placesSessions is why an operator's pod may not set a variable that decides where Oh My Pi keeps
+// a session: a pod keeps its sessions as files on the tree volume, where a resume reads them.
+const placesSessions = "it decides where Oh My Pi keeps the session a resume reads"
+
 // baseline are the variables Apply sets where the pod's environment leaves them unset or empty,
-// which is when Oh My Pi would fill them from the working directory's .env.
-var baseline = []struct{ name, value string }{
+// which is when Oh My Pi would fill them from the working directory's .env, each with why an
+// operator's pod may not set it instead (Variable.Reserved), when it may not.
+var baseline = []struct{ name, value, reserved string }{
 	// The OpenTelemetry SDK exports logs, traces, and metrics to OTEL_EXPORTER_OTLP_ENDPOINT.
-	{"OTEL_SDK_DISABLED", "true"},
+	{"OTEL_SDK_DISABLED", "true", ""},
 	// Outranks dev.autoqa, which pushes tool-issue reports.
-	{"PI_AUTO_QA", "0"},
+	{"PI_AUTO_QA", "0", ""},
 	// Names the config root Oh My Pi's agent directory is joined under (.omp in the image), which
-	// chooses the models.yml and profile it reads: no settings overlay outranks it.
-	{"PI_CONFIG_DIR", ".omp"},
+	// chooses the models.yml and profile it reads, and the sessions under it: no settings overlay
+	// outranks it.
+	{"PI_CONFIG_DIR", ".omp", placesSessions},
 	// Outranks session.storage, and with OMP_SESSION_SQL_DSN_FILE would write the conversation to
-	// a database the repository names.
-	{"OMP_SESSION_STORAGE", "file"},
+	// a database the repository names; `file` keeps each session a file.
+	{"OMP_SESSION_STORAGE", "file", placesSessions},
 }
 
-// Variables are the variables Apply sets: the settings overlays it composes, and each baseline
-// variable.
-func Variables() []string {
-	names := []string{settingsOverlays}
+// Variable is one variable Apply sets. Reserved, when set, is why an operator's pod may not set it
+// itself: Apply yields to the pod's own value, which for such a variable would give away something
+// the runtime relies on. The operator may set every other one, and the operator's value is kept.
+type Variable struct {
+	Name, Reserved string
+}
+
+// Variables are the variables Apply sets: the settings overlays it composes, ahead of the
+// operator's, and each baseline variable.
+func Variables() []Variable {
+	variables := []Variable{{Name: settingsOverlays}}
 	for _, v := range baseline {
-		names = append(names, v.name)
+		variables = append(variables, Variable{Name: v.name, Reserved: v.reserved})
 	}
-	return names
+	return variables
 }
 
 // Apply is environ as a pod's Oh My Pi starts with it: the overlay written read-only to
