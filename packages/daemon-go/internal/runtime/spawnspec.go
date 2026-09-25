@@ -18,15 +18,27 @@ var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 // IsEnvName reports whether name is one a shell accepts as an environment variable's.
 func IsEnvName(name string) bool { return envName.MatchString(name) }
 
-// GrantFile is the file an agent's LEGION_GRANT_FILE names under a runtime's state directory:
-// `<state_dir>/secrets/<claim>-grant` — under tmux beside the claim's other secret files, which the
-// daemon prunes it with, and in a pod on the worker container's memory-backed state volume. Every
+// SecretsDir is `<state_dir>/secrets`, where secret files live under a state directory. Under a
+// daemon's state directory the daemon prunes it (internal/daemon/secrets.go): a claim's files go
+// when the claim is written with no process, and at boot every regular file that no claim with a
+// process owns goes, except the Dispatch token file; subdirectories are never pruned. So a claim's
+// file is named for its claim token (`<claim>` or `<claim>-<name>`, as GrantFile is), and a file
+// the daemon holds across claims is a subdirectory (config.ProviderEnvDir) or is kept by name in
+// boot's prune. In a Sandbox pod it is on the worker container's memory-backed state volume, which
+// goes with the pod.
+func SecretsDir(stateDir string) string { return filepath.Join(stateDir, "secrets") }
+
+// SecretFilePath is the secret file name in SecretsDir: `<state_dir>/secrets/<name>`.
+func SecretFilePath(stateDir, name string) string { return filepath.Join(SecretsDir(stateDir), name) }
+
+// GrantFile is the file an agent's LEGION_GRANT_FILE names: `<state_dir>/secrets/<claim>-grant`,
+// under tmux beside the claim's other secret files, which the daemon prunes it with. Every
 // runtime names it in the agent's environment from the process's start, because Oh My Pi copies
 // that environment once for every `gh` it runs to serve a pr:// or issue:// read, and none writes
 // it: the pi-envoy extension writes a fresh grant there before each tool call that redeems one, and
 // `legion credential`, `legion gh` and `legion handoff complete` read it.
 func GrantFile(stateDir string, token claim.Token) string {
-	return filepath.Join(stateDir, "secrets", string(token)+"-grant")
+	return SecretFilePath(stateDir, string(token)+"-grant")
 }
 
 // ValidateSpawnSpec is the refusal every runtime makes before anything touches its disk, its

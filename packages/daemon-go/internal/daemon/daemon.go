@@ -546,7 +546,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 	sup.deps = supervise.Deps{
 		Runtime: rt,
 		Conns:   listener,
-		Store:   pruning(tokens.Recording(st), filepath.Join(cfg.StateDir, secretsDir), log),
+		Store:   pruning(tokens.Recording(st), runtime.SecretsDir(cfg.StateDir), log),
 		Specs: specs{
 			stateDir: cfg.StateDir, project: p.project, instructions: p.instructions, secrets: p.secrets, repo: repo, prompts: p.prompts,
 			identity: p.identity,
@@ -589,7 +589,7 @@ func (s *supervision) start(boot context.Context) error {
 	if err != nil {
 		return err
 	}
-	pruneAllBut(filepath.Join(s.cfg.StateDir, secretsDir), s.claims, s.log)
+	pruneAllBut(runtime.SecretsDir(s.cfg.StateDir), s.claims, s.log)
 	if s.reconcileBootOrphans(boot) {
 		s.launchUnfinished(unfinished)
 	} else if len(unfinished) > 0 {

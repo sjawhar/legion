@@ -2762,9 +2762,11 @@ describe("Legion OMP extension", () => {
       mode: 0o600,
     });
 
-    // A read of a file, or of a GitHub URL (fetched over HTTP, never through gh), redeems nothing.
+    // A read of a file, or of a GitHub URL (fetched over HTTP, never through gh), redeems nothing,
+    // and neither does a path whose `pr://` follows no separator: Oh My Pi reads it as a file.
     const unserved = [
       { toolName: "read", input: { path: "src/pr-view.ts" } },
+      { toolName: "read", input: { path: "docs/pr://x" } },
       { toolName: "read", input: { path: "https://github.com/acme/widgets/pull/7" } },
       { toolName: "grep", input: { pattern: "pr://", path: "src" } },
       { toolName: "read", input: { path: "skill://pr-review" } },
@@ -2936,7 +2938,7 @@ describe("Legion OMP extension", () => {
     const blocked = {
       block: true,
       reason:
-        "LEGION_GRANT_FILE is not set on this pane: the daemon that launched it predates this plugin; restart the daemon on the matching release",
+        "LEGION_GRANT_FILE is not set on this pane: the daemon that launched it predates this plugin; relaunch the pane from a daemon on the matching release (a daemon restart keeps a live pane as it was launched)",
     };
 
     delete process.env.LEGION_GRANT_FILE;
@@ -5299,7 +5301,7 @@ describe("the Go daemon's pane (LEGION_DAEMON_API=go)", () => {
     ).resolves.toEqual({
       block: true,
       reason:
-        "LEGION_GRANT_FILE is not set on this pane: the daemon that launched it predates this plugin; restart the daemon on the matching release",
+        "LEGION_GRANT_FILE is not set on this pane: the daemon that launched it predates this plugin; relaunch the pane from a daemon on the matching release (a daemon restart keeps a live pane as it was launched)",
     });
   });
 

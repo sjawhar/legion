@@ -10,13 +10,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
 // ProviderEnvDir is the daemon-held directory of provider keys, under the state directory's
 // secrets: one 0600 file per key, named for the key. Every pane's shim is pointed at it
 // (`--provider-env-dir`) and exports each file into OMP's environment alone.
 func ProviderEnvDir(stateDir string) string {
-	return filepath.Join(stateDir, "secrets", "provider-env")
+	return filepath.Join(runtime.SecretsDir(stateDir), "provider-env")
 }
 
 // MaterializeProviderKeys resolves each provider key and writes its value to a file in

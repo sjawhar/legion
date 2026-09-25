@@ -14,10 +14,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
-// secretsDir is where the runtime writes a pane's secret files, under the state directory: the
-// boot token as `<claim token>`, every other secret as `<claim token>-<name>`.
-const secretsDir = "secrets"
-
 // pruning is store with a claim's secret files removed whenever the claim is written with no
 // process — suspended, failed, retired, or between one launch and the next. The runtime writes a
 // pane's files and never removes them; the daemon, which knows when a claim's process ends, does

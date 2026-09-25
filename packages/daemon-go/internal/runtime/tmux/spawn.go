@@ -137,7 +137,7 @@ type secretFile struct {
 // names every file its pane holds (runtime-tmux.ts:619-635, secrets.ts:63-69). The boot token's
 // pointer is LEGION_BOOT_TOKEN_FILE and comes first; the rest follow sorted by name.
 func secretFiles(stateDir string, spec runtime.SpawnSpec) []secretFile {
-	dir := filepath.Join(stateDir, "secrets")
+	dir := runtime.SecretsDir(stateDir)
 	files := []secretFile{{name: "LEGION_BOOT_TOKEN", path: filepath.Join(dir, string(spec.Claim)), value: spec.BootToken}}
 	for _, name := range sortedKeys(spec.Secrets) {
 		files = append(files, secretFile{
@@ -153,7 +153,7 @@ func secretFiles(stateDir string, spec runtime.SpawnSpec) []secretFile {
 // on every write — a directory's mkdir mode is masked and ignored when it exists, and a file's is
 // applied only on create (secrets.ts:83-98). The caller owns the files' lifetimes.
 func writeSecretFiles(stateDir string, files []secretFile) error {
-	dir := filepath.Join(stateDir, "secrets")
+	dir := runtime.SecretsDir(stateDir)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
@@ -182,14 +182,11 @@ func WriteDispatchTokenFile(stateDir, token string) (string, error) {
 	return WriteSecretFile(stateDir, DispatchTokenFileName, token)
 }
 
-// SecretFilePath is where WriteSecretFile writes the secret name: `<stateDir>/secrets/<name>`.
-func SecretFilePath(stateDir, name string) string { return filepath.Join(stateDir, "secrets", name) }
-
-// WriteSecretFile writes value as SecretFilePath, a 0600 file in the 0700 secrets directory, and
-// returns its path: what a process outside a pane (`legion controller start`'s controller secret)
-// is handed as a `<NAME>_FILE` pointer, never the value.
+// WriteSecretFile writes value as runtime.SecretFilePath, a 0600 file in the 0700 secrets
+// directory, and returns its path: what a process outside a pane (`legion controller start`'s
+// controller secret) is handed as a `<NAME>_FILE` pointer, never the value.
 func WriteSecretFile(stateDir, name, value string) (string, error) {
-	path := SecretFilePath(stateDir, name)
+	path := runtime.SecretFilePath(stateDir, name)
 	if err := writeSecretFiles(stateDir, []secretFile{{name: name, path: path, value: value}}); err != nil {
 		return "", err
 	}
