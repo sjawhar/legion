@@ -69,6 +69,8 @@ fail() { printf 'FAIL %s: %s\n' "$check" "$*" >&2; exit 1; }
 . "$root/scripts/e2e/lib/rig.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/workflow.sh
 . "$root/scripts/e2e/lib/workflow.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/built-revision.sh
+. "$root/scripts/e2e/lib/built-revision.sh"
 
 # collect_transcripts copies every OMP session the rig's profile wrote into the evidence directory
 # before the isolated profile is removed.
@@ -571,6 +573,9 @@ begin rig
 chmod 0600 "$work"/*token "$work/envoy-auth-header" "$work/postgres-password"
 (cd "$root/packages/daemon-go" && go build -o "$work/legion" ./cmd/legion)
 (cd "$root/packages/envoy" && go build -o "$work/envoy-listener" ./cmd/listener && go build -o "$work/envoy-dispatch" ./cmd/dispatch)
+# The head under proof, on the run's own log: a run reports for whatever the workspace held when it
+# built, and a comment naming the head is written by hand.
+built_from "$root" "$work/legion" "$work/envoy-listener" "$work/envoy-dispatch"
 docker ps >/dev/null
 # Docker assigns the containers' host ports when it binds them, so neither can lose a race.
 docker run -d --name "$pg_container" --mount type=tmpfs,destination=/var/lib/postgresql/data \

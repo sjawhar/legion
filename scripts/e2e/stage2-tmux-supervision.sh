@@ -241,11 +241,9 @@ envoy_port=$(bash "$root/scripts/e2e/lib/free-port.sh" "$port" "$deadline_port")
 (cd "$root/packages/daemon-go" && go build -o "$work/legion" ./cmd/legion)
 (cd "$root/packages/envoy" && go build -o "$work/envoy-listener" ./cmd/listener)
 # The binary under proof, checkable after the run: the source it was built from and its hash.
-if command -v jj >/dev/null && jj -R "$root" root >/dev/null 2>&1; then
-  source_revision="$(jj -R "$root" log -r @ --no-graph -T 'commit_id ++ if(empty, " (working copy: no changes)", " (working copy has changes)")') on $(jj -R "$root" log -r @- --no-graph -T 'commit_id')"
-else
-  source_revision=$(git -C "$root" rev-parse HEAD)
-fi
+# shellcheck source-path=SCRIPTDIR source=lib/built-revision.sh
+. "$root/scripts/e2e/lib/built-revision.sh"
+source_revision=$(built_revision "$root")
 note "built legion from $source_revision; sha256 $(sha256sum "$work/legion" | cut -d' ' -f1)"
 # What a changed working copy holds, so a run on one (a negative control) says what it ran.
 if [ "${source_revision#*working copy has changes}" != "$source_revision" ]; then
