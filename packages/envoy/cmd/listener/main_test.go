@@ -2157,8 +2157,14 @@ func TestBoundDurableConsumerIsNotStolen(t *testing.T) {
 	}
 	t.Cleanup(second.Close)
 
-	if _, err := startListenerSubscription(second, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() }); err == nil {
+	_, err = startListenerSubscription(second, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
+	if err == nil {
 		t.Fatal("second listener bound a consumer that was already push-bound")
+	}
+	// A bind race is retried at startup until the old listener lets go; a refusal would make every
+	// replacement in a rolling deploy exit while the task it replaces still holds the binding.
+	if errors.Is(err, errListenerDurableRefused) {
+		t.Fatalf("a bind race was classified as a refusal, so startup would exit instead of retrying: %v", err)
 	}
 	info, err := first.JS().ConsumerInfo(bus.Stream, consumer)
 	if err != nil {

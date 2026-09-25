@@ -105,15 +105,6 @@ func listenerConsumerPolicyDrifted(config nats.ConsumerConfig, subjects []string
 		config.InactiveThreshold != consumerInactiveThreshold
 }
 
-// startListenerSubscription preserves the durable consumer so restarts resume
-// from the last ACKed non-role message instead of skipping pending work.
-//
-// The consumer is always created server-side and then bound, never created by
-// js.Subscribe: the client library deletes consumers it created itself on
-// Unsubscribe()/Drain(), and both the bus reconnect recovery and the SIGTERM
-// drain paths trigger exactly that — silently resetting the durable cursor.
-// The config drift-correction also stamps consumerInactiveThreshold onto
-// consumers created before the threshold existed.
 // errListenerDurableRefused marks a durable startListenerSubscription will not bind however often
 // it is asked: no retry can succeed, so the listener's startup exits at once.
 var errListenerDurableRefused = errors.New("listener durable refused")
@@ -146,6 +137,15 @@ func listenerDurableRefusal(consumer string, config nats.ConsumerConfig) error {
 		errListenerDurableRefused, consumer, setting)
 }
 
+// startListenerSubscription preserves the durable consumer so restarts resume
+// from the last ACKed non-role message instead of skipping pending work.
+//
+// The consumer is always created server-side and then bound, never created by
+// js.Subscribe: the client library deletes consumers it created itself on
+// Unsubscribe()/Drain(), and both the bus reconnect recovery and the SIGTERM
+// drain paths trigger exactly that — silently resetting the durable cursor.
+// The config drift-correction also stamps consumerInactiveThreshold onto
+// consumers created before the threshold existed.
 func startListenerSubscription(client *bus.Client, consumer string, handler nats.MsgHandler) (*nats.Subscription, error) {
 	subjects := bus.StreamSubjects()
 	info, err := client.JS().ConsumerInfo(bus.Stream, consumer)
