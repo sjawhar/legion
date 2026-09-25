@@ -489,6 +489,7 @@ LEGSMOKE. Either list being non-empty fails the run.
 | `node-release` | after the pool's consolidation, tree 1's node is gone while its Sandboxes stay Suspended and its volume Bound |
 | `close` | at linger expiry tree 1's Sandboxes and tree volume are deleted |
 | `re-admission` | tree 1 set todo again reports workspace-lost and relaunches a fresh architect |
+| `operator-close` | `legion claims close` on the Sandbox runtime: the close of re-admitted tree 1's live root is refused 409, and its claims, Sandboxes and pods are unchanged; an operator-spawned tree closes with its worker live, the root and the worker are retired, and the tree's Sandboxes, pods and volume are gone |
 | `pod-shape` | every Sandbox pod was shape-checked (gVisor, the gateway's ServiceAccount and one projected token, the pool, Pod Security restricted, split provisioning, no token in the environment or argv) |
 | `pod-watch-verdict` | the pod watch saw no termination the run cannot account for, and the memory hog was OOMKilled |
 | `hygiene` | the daemon stopped, the namespace is clean, and the run's consumers are gone |
