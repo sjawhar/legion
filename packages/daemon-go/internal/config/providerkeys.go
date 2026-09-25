@@ -18,7 +18,7 @@ import (
 // secrets: one 0600 file per key, named for the key. Every pane's shim is pointed at it
 // (`--provider-env-dir`) and exports each file into OMP's environment alone.
 func ProviderEnvDir(stateDir string) string {
-	return runtime.SecretFilePath(stateDir, "provider-env")
+	return filepath.Join(runtime.SecretsDir(stateDir), "provider-env")
 }
 
 // MaterializeProviderKeys resolves each provider key and writes its value to a file in
