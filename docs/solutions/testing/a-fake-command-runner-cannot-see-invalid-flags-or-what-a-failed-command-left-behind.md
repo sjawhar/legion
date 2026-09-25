@@ -86,11 +86,14 @@ which the `test` job already installs. Four details that mattered:
 The spec first named `present(legion/<KEY>)` for resolving the bookmark. Verified on both
 binaries, it exits 1 on a conflicted bookmark instead of listing two commits — so the code's
 "more than one commit → refuse" branch would have been reachable only from the fake runner and
-never from a real repository. The implementation uses `bookmarks(exact:legion/<KEY>)`, which
-lists one commit id per target, and the real-jj conflicted test constructs an actual conflict
-(two `bookmark set`s from one operation, one `--at-op`; the next command reconciles) and asserts
-the refusal names both ids. When a fake-runner test scripts an output shape, prove a real binary
-produces it; otherwise the branch it defends is fiction.
+never from a real repository. #1023 used `bookmarks(exact:legion/<KEY>)`, which lists one commit id
+per target, and the real-jj conflicted test constructs an actual conflict (two `bookmark set`s
+from one operation, one `--at-op`; the next command reconciles) and asserts the refusal names both
+ids. That revset in turn lists a conflict whose other side is a deletion as one commit, so
+LEGION-286 reads the bookmark with a templated `jj bookmark list` instead, and its real-jj tests
+build that conflict and a racing-fetch conflict of the origin row the same way. When a fake-runner
+test scripts an output shape, prove a real binary produces it; otherwise the branch it defends is
+fiction.
 
 ## The negative control is the old code, not a commented-out assertion
 

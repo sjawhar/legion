@@ -993,12 +993,12 @@ describe("ProcessManager", () => {
       ["jj", "git", "fetch", "-R", repo],
       [
         "jj",
-        "log",
-        "-r",
-        "bookmarks(exact:legion/LEGION-42)",
-        "--no-graph",
+        "bookmark",
+        "list",
+        "--all-remotes",
+        "exact:legion/LEGION-42",
         "-T",
-        'commit_id ++ "\n"',
+        'if(remote, remote, "local") ++ "|" ++ if(present, "1", "0") ++ "|" ++ if(conflict, "1", "0") ++ "|" ++ if(tracked, "1", "0") ++ "|" ++ added_targets.map(|c| c.commit_id()).join(",") ++ "|" ++ removed_targets.map(|c| c.commit_id()).join(",") ++ "\\n"',
         "--ignore-working-copy",
         "-R",
         repo,
@@ -2738,6 +2738,8 @@ describe("ProcessManager", () => {
         if (command[3] === "list-panes" && command.includes("%7")) {
           return { stdout: "%7 12345\n", exitCode: 0 };
         }
+        // Provisioning's commands: no bookmark rows, so the workspace starts at main.
+        if (command[0] === "jj" || command[0] === "git") return { stdout: "", exitCode: 0 };
         return { stdout: "sjawhar-legion-42\n", exitCode: 0 };
       },
     });
