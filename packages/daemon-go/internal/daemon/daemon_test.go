@@ -76,6 +76,12 @@ func testConfig(t *testing.T) config.Config {
 		t.Fatalf("write the operator token: %v", err)
 	}
 	port := freePort(t)
+	// Under kubernetes the worker stream is a TCP listener, so its port is one found free too: the
+	// API port's neighbour may be any process's.
+	stream := freePort(t)
+	for stream == port {
+		stream = freePort(t)
+	}
 	return config.Config{
 		Project:                                 "TEST" + randomSuffix(t),
 		Port:                                    port,
@@ -85,7 +91,7 @@ func testConfig(t *testing.T) config.Config {
 		Runtime:                                 config.Runtime{Name: "tmux"},
 		AdmissionCap:                            4,
 		DaemonURL:                               "http://127.0.0.1:" + strconv.Itoa(port),
-		WorkerStreamPort:                        port + 1,
+		WorkerStreamPort:                        stream,
 		WorkerBootTimeout:                       120 * time.Second,
 		WorkerBootRegistrationDeadlineIntervals: 3,
 		WorkerRPCTimeout:                        5 * time.Second,
