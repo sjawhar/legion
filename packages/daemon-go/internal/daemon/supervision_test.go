@@ -256,8 +256,8 @@ func TestRunFeedsTheStreamAndTheSweepIntoTheClaimsMachine(t *testing.T) {
 		t.Fatalf("the state shows the architect as %+v, want the idle claim with its nested locator", architectView)
 	}
 
-	// OMP taking back a prompt it acknowledged is a stream event of its own, and it costs the
-	// claim a prompt failure.
+	// OMP taking back a prompt it acknowledged is a stream event of its own: the task returns to
+	// waiting under a new id, and nothing is charged — the agent is in a turn of its own.
 	if status, body := d.request(http.MethodPost, "/legion/v1/operator/claims/"+string(token)+"/deliver",
 		api.DeliverRequest{Task: "Say it again."}, true); status != http.StatusOK {
 		t.Fatalf("deliver = %d; body %s", status, body)
@@ -268,8 +268,12 @@ func TestRunFeedsTheStreamAndTheSweepIntoTheClaimsMachine(t *testing.T) {
 		c := d.claim(token)
 		return c.Pending != nil && c.Pending.DeliveredAt != nil
 	})
-	sh.send(shimwire.Response{ID: second.ID, Command: shimwire.TypePrompt, Success: false, Error: "Agent is busy"})
-	eventually(t, "the late refusal to be charged", func() bool { return d.claim(token).Budgets.PromptFailures == 1 })
+	acknowledged := d.claim(token).Pending.ID
+	sh.send(shimwire.Response{ID: second.ID, Command: shimwire.TypePrompt, Success: false, Error: "Agent is already processing. Use steer() or followUp() to queue messages, or wait for completion."})
+	eventually(t, "the refused task to return to waiting", func() bool {
+		c := d.claim(token)
+		return c.Pending != nil && c.Pending.ID != acknowledged && c.Budgets.PromptFailures == 0
+	})
 
 	// The sweep finding the process gone relaunches the recorded session.
 	loc := d.claim(token).Locator
@@ -763,8 +767,8 @@ func TestEveryStreamEventMapsToItsSuperviseEvent(t *testing.T) {
 		{stream.Hello{Claim: token, Generation: 3}, supervise.StreamHello{Claim: token, Generation: 3}},
 		{stream.TurnStart{Claim: token, DeliveryID: "d1"}, supervise.StreamTurnStart{Claim: token, DeliveryID: "d1"}},
 		{stream.TurnEnd{Claim: token}, supervise.StreamTurnEnd{Claim: token}},
-		{stream.LateRefusal{Claim: token, DeliveryID: "d1", Error: "Agent is busy"},
-			supervise.StreamLateRefusal{Claim: token, DeliveryID: "d1", Error: "Agent is busy"}},
+		{stream.LateRefusal{Claim: token, DeliveryID: "d1", Error: "Agent is already processing. Use steer() or followUp() to queue messages, or wait for completion."},
+			supervise.StreamLateRefusal{Claim: token, DeliveryID: "d1", Error: "Agent is already processing. Use steer() or followUp() to queue messages, or wait for completion."}},
 		{stream.Closed{Claim: token}, supervise.StreamClosed{Claim: token}},
 	}
 	for _, testCase := range cases {

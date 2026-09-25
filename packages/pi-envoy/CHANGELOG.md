@@ -16,6 +16,13 @@
 
 ### Changed
 
+- `legion.goDaemonApiVersion` is 6. Contract 6 adds `phase` to a claim's pending delivery on
+  `/legion/v1/state` (the issue phase the task was queued for; absent for an operator's or an
+  architect's task, which belong to none) and `unrecorded` as the phase and status the state route
+  reads for an issue the workflow does not record. The phase-backward request takes the workflow's
+  phases alone, so `unrecorded` is not one of its values. The handoff completion request is
+  unchanged; the daemon now attributes each completion to the run of the task the worker took and
+  refuses one whose run the issue has left, or one from a claim that has taken no task.
 - `legion.goDaemonApiVersion` is 5. Contract 5 adds `LEGION_GRANT_FILE` to the Go daemon's pane environment (tmux panes and Sandbox pods alike); the extension no longer sets it itself once the claim registers. Install this release before starting a Go daemon that requires contract 5; its boot gate refuses a plugin that declares 4, and this release on a pane a daemon at 4 launched refuses every bash command and every call Oh My Pi serves with `gh` with `LEGION_GRANT_FILE is not set on this pane`, until the pane is relaunched from a daemon at 5 (a restarted daemon re-adopts a live pane as it was launched).
 - `legion.goDaemonApiVersion` is 4. Contract 4 adds the Go daemon's operator-launched controller: `POST /legion/v1/controller/secret`, the controller registration on `claims/register`, the `/grants` controller-session form, and `controllerLocator` on `/legion/v1/state`. Install this release before starting a Go daemon that requires contract 4; its boot gate refuses a plugin that declares 3.
 - `legion.daemonApiVersion` is 7. Contract 7 removes `/gh-token` merge intent because Legion never

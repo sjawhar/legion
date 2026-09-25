@@ -30,11 +30,17 @@ import (
 // Phase is the issue phase the task was queued for, which is what says whether the task is still
 // the work to do: it is carried here, persisted, because the id is rewritten by that rotation and
 // the task text is the workflow's to write. A delivery of no phase — an operator's own, an
-// architect's — is never dropped for the phase its issue reaches. It is still retired with a
-// suspension, like any unconfirmed delivery (settle).
+// architect's — is never dropped for the phase its issue reaches, and a suspension does not take
+// it either: it waits the suspension out and goes on the resume (settle).
 type Delivery struct {
-	ID          string
-	Task        string
+	ID   string
+	Task string
+	// Generation is the issue generation this task belongs to, from the start row that queued it.
+	// A start delivers to whatever process the claim already has — a live worker is not
+	// relaunched — so the pane's own environment names the run it was launched for, which may be
+	// an earlier one. The work a worker reports is the task it was given, and this is that task's
+	// run. Zero for a task of no run: an operator's own, an architect's.
+	Generation  uint64
 	Phase       phase.Phase
 	QueuedAt    time.Time
 	DeliveredAt time.Time
@@ -70,7 +76,7 @@ func (m *Machine) queue(ctx context.Context, request RequestDeliver) error {
 	if id == "" {
 		id = rand.Text()
 	}
-	d := Delivery{ID: id, Task: task, Phase: request.Phase, QueuedAt: m.deps.Clock.Now()}
+	d := Delivery{ID: id, Task: task, Phase: request.Phase, Generation: request.Generation, QueuedAt: m.deps.Clock.Now()}
 	if err := m.deps.Store.PutDelivery(ctx, m.claim.Token, d); err != nil {
 		return err
 	}
@@ -107,12 +113,25 @@ func (m *Machine) sendPending(ctx context.Context) error {
 	if !holds {
 		m.log.Info("supervise: the issue has left the phase this task was queued for; it is dropped rather than sent",
 			"delivery", p.ID, "issue", m.claim.Issue, "queuedFor", p.Phase)
+		if err := m.retirePending(ctx); err != nil {
+			return err
+		}
 		// The question a restart left — whether the turn the agent may be in is the pending
-		// delivery's — goes with the delivery it was about. Left armed with nothing pending, the
-		// next task takes the agent's own turn as its own: confirmed, never prompted, and retired
-		// at that turn's end.
-		m.askFirst = false
-		return m.retirePending(ctx)
+		// delivery's — is answered here rather than dropped with the delivery it was about.
+		// Left armed with nothing pending, it would make the next task the running turn's:
+		// confirmed, never prompted. Discarded, it leaves the claim ready while its agent works,
+		// and the next task is prompted into a busy agent and charged for it. So the agent is
+		// asked, and a turn of its own moves the claim to working, confirming nothing: the next
+		// task waits for that turn to end.
+		if m.askFirst {
+			m.askFirst = false
+			if m.streaming(ctx, conn) {
+				m.log.Info("supervise: the agent is in a turn of its own after its task was dropped", "claim", m.claim.Token)
+				m.claim.State = StateWorking
+				return m.persist(ctx)
+			}
+		}
+		return nil
 	}
 	if m.askFirst {
 		m.askFirst = false
@@ -126,31 +145,51 @@ func (m *Machine) sendPending(ctx context.Context) error {
 	return nil
 }
 
-// phaseHolds asks whether the issue is still in the phase this task was queued for. A daemon with
-// no workflow configured supplies no answer, and every delivery holds.
+// phaseHolds asks whether the issue is still in the phase this task was queued for. A delivery
+// that names no phase is nobody's to drop — an operator's own, an architect's — and is never put
+// to the answer at all, so the exemption this package documents is this package's own rather
+// than a promise every implementation has to keep. A daemon with no workflow configured supplies
+// no answer, and every delivery holds.
 func (m *Machine) phaseHolds(ctx context.Context, d Delivery) (bool, error) {
-	if m.deps.PhaseHolds == nil {
+	if m.deps.PhaseHolds == nil || d.Phase == "" {
 		return true, nil
 	}
-	holds, err := m.deps.PhaseHolds(ctx, m.claim, d)
+	holds, err := m.deps.PhaseHolds(ctx, m.claim.Issue, d.Phase)
 	if err != nil {
 		return false, fmt.Errorf("read the phase of %s: %w", m.claim.Token, err)
 	}
 	return holds, nil
 }
 
-// retirePending drops the pending delivery without sending it. The claim keeps its state: the
-// task is stale, not the agent.
+// retirePending drops the pending delivery, and is the one place a delivery ends: settle calls it
+// for a delivery whose life is over, and sendPending for a task the issue's phase has left behind.
+// The claim keeps its state — the task is stale, not the agent.
+//
+// A confirmed task of a run leaves the run behind it: the worker goes on working it in whatever
+// turn comes next — one an Envoy notice starts, with no delivery of its own — and its completion
+// belongs to that run. Only a delivery whose turn actually ran moves it, so a confirmation taken
+// back by a busy refusal never does, and only a task of a run: an operator's task carries no
+// generation and leaves the run the claim is serving alone. Every retire of a confirmed task of a
+// run writes the row, the second task of one run included: the write is unconditional on the
+// value, not a diff.
+//
+// The claim goes with the delete, in the store's one transaction, and is durable there rather
+// than left for the claim's next write: the wait that follows can be hours long — a tester on CI,
+// a merger on a person — and a daemon that crashed between the two writes, or was restarted in
+// that wait, rebuilds the machine from the store, where a run left unwritten would refuse the
+// completion the worker's next turn reports.
 func (m *Machine) retirePending(ctx context.Context) error {
 	p := m.claim.Pending
-	if p == nil {
-		return nil
+	retired := m.claim
+	retired.Pending = nil
+	if !p.ConfirmedAt.IsZero() && p.Generation != 0 {
+		retired.ServingGeneration = p.Generation
 	}
-	if err := m.deps.Store.RetireDelivery(ctx, m.claim.Token, p.ID); err != nil {
+	if err := m.deps.Store.RetireDelivery(ctx, retired, p.ID); err != nil {
 		return err
 	}
-	m.claim.Pending = nil
-	return m.persist(ctx)
+	m.claim = retired
+	return nil
 }
 
 // streaming asks the agent whether a turn is in flight. An agent that cannot say is taken as not
@@ -229,38 +268,57 @@ func (m *Machine) confirm(ctx context.Context) error {
 // settle retires a delivery whose life is over, and runs around every decision, so that two things
 // hold however the claim got where it is — the turn ending, a suspension, a death — and hold again
 // at once for a claim restored from a store a crash left in between: a confirmed delivery lives
-// exactly as long as its turn, and a suspended claim holds no delivery at all. A suspension ends
-// the claim's phase, so the task it leaves is the finished phase's; the next resume is handed its
-// new phase's task, never that one.
+// exactly as long as its turn, and a suspended claim holds no task the suspension finished.
+//
+// A suspension ends the claim's phase, so a task queued for a phase is the finished phase's and
+// goes with it; the next resume is handed its new phase's task, never that one. A task of no
+// phase is not the workflow's to end: an operator asked for it and was answered 200, and a phase
+// change they had no part in must not take it. It waits out the suspension and goes on the resume.
 func (m *Machine) settle(ctx context.Context) error {
 	p := m.claim.Pending
 	if p == nil {
 		return nil
 	}
 	turnOver := !p.ConfirmedAt.IsZero() && m.claim.State != StateWorking
-	if !turnOver && m.claim.State != StateSuspended {
+	suspended := m.claim.State == StateSuspended && p.Phase != ""
+	if !turnOver && !suspended {
 		return nil
 	}
-	if err := m.deps.Store.RetireDelivery(ctx, m.claim.Token, p.ID); err != nil {
-		return err
-	}
-	m.claim.Pending = nil
-	return nil
+	return m.retirePending(ctx)
 }
 
-// promptFailed is an acknowledged prompt that did not become the delivery's turn: no turn within
-// the bound, or a refusal after the acknowledgement. The delivery is taken back — unconfirmed if a
-// turn had confirmed it, under a new id so that the retry is a new prompt rather than an echo the
-// shim answers from its record — and one prompt failure is charged. The retry is not made on the
-// spot, where a merely slow agent would be prompted into a refusal: the next sweep, hello, turn
-// end, or ready sends it.
-func (m *Machine) promptFailed(ctx context.Context, why string) error {
+// promptFailed is a prompt that was acknowledged and then came to nothing: the wait for its turn
+// ran out, or Oh My Pi answered it a failure with no turn of its own running. The task goes back
+// to waiting and the prompt is charged, so an agent that never takes one walks its budget to the
+// relaunch and the retirement. read says whether the agent may have read it: the bound's caller
+// passes true, since the turn that has not started may still be this task's, and a refusal passes
+// false, since a prompt the agent answered a failure never ran.
+func (m *Machine) promptFailed(ctx context.Context, why string, read bool) error {
+	if err := m.takeBackPending(ctx, read); err != nil {
+		return err
+	}
+	return m.chargePrompt(ctx, why)
+}
+
+// taskRead and taskUnread say whether the agent may have read a task being taken back: the task
+// keeps its delivered mark when it may have been read, which is what lets a completion reported
+// from a turn the daemon did not deliver be attributed to it.
+const (
+	taskRead   = true
+	taskUnread = false
+)
+
+// takeBackPending returns the pending delivery to waiting: unconfirmed if a turn had confirmed
+// it, under a new id so the retry is a new prompt rather than an echo the shim answers from its
+// record, and with the wait for its turn disarmed. A task taken back unread loses the mark, so
+// nothing the worker reports from whatever turn follows belongs to it.
+func (m *Machine) takeBackPending(ctx context.Context, read bool) error {
 	m.disarm(TimerTurn)
 	p := m.claim.Pending
 	p.ID = rand.Text()
 	p.ConfirmedAt = time.Time{}
-	if err := m.deps.Store.PutDelivery(ctx, m.claim.Token, *p); err != nil {
-		return err
+	if !read {
+		p.DeliveredAt = time.Time{}
 	}
-	return m.chargePrompt(ctx, why)
+	return m.deps.Store.PutDelivery(ctx, m.claim.Token, *p)
 }

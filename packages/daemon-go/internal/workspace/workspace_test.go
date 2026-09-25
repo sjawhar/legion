@@ -624,16 +624,6 @@ func TestRemoveForgetsTheWorkspace(t *testing.T) {
 	}
 }
 
-func TestAdoptWorkingCopyCommandMatchesTheShippedRevset(t *testing.T) {
-	got := AdoptWorkingCopyCommand("/state/workspaces/acme/widgets/widgets-42")
-	want := []string{
-		"jj", "metaedit", "--update-author", "-r", `@ & description(exact:"")`, "-R", "/state/workspaces/acme/widgets/widgets-42",
-	}
-	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
-		t.Errorf("AdoptWorkingCopyCommand = %#v, want %#v", got, want)
-	}
-}
-
 func TestLocationMatchesProvisionedWorkspacePath(t *testing.T) {
 	working, err := Location("/state", "acme/widgets", "WIDGETS-42")
 	if err != nil {

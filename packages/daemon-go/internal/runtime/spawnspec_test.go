@@ -38,6 +38,13 @@ func TestValidateSpawnSpecRefusesWhatNoRuntimeCouldHonour(t *testing.T) {
 		{"an issue that is a path", func(s *SpawnSpec) { s.Issue = "../../etc" }, `spawn legion-omp-legion-43-tester: issue "../../etc" is not an issue key`},
 		{"a tree that is not an issue key", func(s *SpawnSpec) { s.Tree = "legion-42" }, `spawn legion-omp-legion-43-tester: tree "legion-42" is not an issue key`},
 		{"a role no claim is on", func(s *SpawnSpec) { s.Role = "controller" }, `spawn legion-omp-legion-43-tester: "controller" is not a role`},
+		// The token is derived from the project, issue and role, and every runtime names the
+		// agent's workspace, Secret and pod after it. A spec whose token is another claim's would
+		// run this claim's work under that one's name, with that one's credentials beside it.
+		{"a claim token of another issue", func(s *SpawnSpec) { s.Claim = "legion-omp-legion-99-tester" },
+			`spawn legion-omp-legion-99-tester: the claim token of omp/LEGION-43/tester is legion-omp-legion-43-tester`},
+		{"a claim token of another role", func(s *SpawnSpec) { s.Claim = "legion-omp-legion-43-planner" },
+			`spawn legion-omp-legion-43-planner: the claim token of omp/LEGION-43/tester is legion-omp-legion-43-tester`},
 		{"no role prompt", func(s *SpawnSpec) { s.Prompt.RolePromptPaths = nil }, "spawn legion-omp-legion-43-tester: no role prompt"},
 		{"an Env name that is not a variable name", func(s *SpawnSpec) { s.Env["BAD NAME"] = "x" }, `spawn legion-omp-legion-43-tester: Env name "BAD NAME" is not an environment variable name`},
 		{"a variable the runtime sets", func(s *SpawnSpec) { s.Env["LEGION_TREE"] = "OTHER-1" }, "spawn legion-omp-legion-43-tester: Env sets LEGION_TREE, which the runtime sets itself"},

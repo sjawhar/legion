@@ -25,6 +25,10 @@ type IssueSummary struct {
 	Status string
 	Parent *string
 	Rank   string
+	// LastSeq is how far Dispatch's own event log for the issue has run. A record whose applied
+	// sequence is behind it has events still to come on the stream, which carry the actor this
+	// snapshot does not.
+	LastSeq int64
 }
 
 // Issue is the workflow data from Dispatch's issue-detail route.

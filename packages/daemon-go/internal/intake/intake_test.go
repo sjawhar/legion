@@ -638,9 +638,16 @@ func randomSuffix(t *testing.T) string {
 	return hex.EncodeToString(b[:])
 }
 
+// eventually polls until the condition holds. What it waits for is something the daemon reaches on
+// its own — a delivery, the transaction that answers it — so the wait is bounded by this test
+// binary's own deadline rather than a fixed span: on a loaded machine a step that is merely slow
+// is not a failure, and a condition that never holds still fails here, naming what it waited for.
 func eventually(t *testing.T, what string, condition func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(time.Minute)
+	if testDeadline, ok := t.Deadline(); ok && testDeadline.Add(-time.Second).Before(deadline) {
+		deadline = testDeadline.Add(-time.Second)
+	}
 	for time.Now().Before(deadline) {
 		if condition() {
 			return

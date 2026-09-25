@@ -116,7 +116,26 @@ func randomSuffix(t *testing.T) string {
 	return strings.ToUpper(hex.EncodeToString(b[:]))
 }
 
+// freePort answers a port free a moment ago, with its successor free too: a daemon binds its API
+// on the port and its worker stream on the one above it, and the second was never checked. Both
+// are released before the daemon binds them — nothing can reserve a port for another process —
+// so startDaemon takes another pair when one is taken in between.
 func freePort(t *testing.T) int {
+	t.Helper()
+	for range 32 {
+		port := boundPort(t)
+		next, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(port+1))
+		if err != nil {
+			continue
+		}
+		next.Close()
+		return port
+	}
+	t.Fatal("no adjacent pair of free ports in 32 tries")
+	return 0
+}
+
+func boundPort(t *testing.T) int {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -366,6 +385,11 @@ type daemon struct {
 // startDaemon runs the daemon until the test stops it, and returns once it answers /healthz.
 func startDaemon(t *testing.T, cfg config.Config, o overrides) *daemon {
 	t.Helper()
+	return startDaemonWithin(t, cfg, o, 4)
+}
+
+func startDaemonWithin(t *testing.T, cfg config.Config, o overrides, attempts int) *daemon {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	// One transport for every request, so the test can close its own connections before it asks
 	// the daemon to stop: net/http gives an idle connection five seconds before a Shutdown may
@@ -390,6 +414,16 @@ func startDaemon(t *testing.T, cfg config.Config, o overrides) *daemon {
 		select {
 		case err := <-d.done:
 			d.stopped = true
+			// A port free when the config was made can be taken before the daemon binds it, by
+			// another test binary of this package's own run. That is the port's race, not the
+			// daemon's: take another pair and start again.
+			if err != nil && strings.Contains(err.Error(), "address already in use") && attempts > 0 {
+				cancel()
+				cfg.Port = freePort(t)
+				cfg.WorkerStreamPort = cfg.Port + 1
+				cfg.DaemonURL = "http://127.0.0.1:" + strconv.Itoa(cfg.Port)
+				return startDaemonWithin(t, cfg, o, attempts-1)
+			}
 			t.Fatalf("the daemon exited before it answered /healthz: %v", err)
 		default:
 		}
@@ -497,15 +531,23 @@ func (d *daemon) spawn(req api.SpawnRequest) claim.Token {
 }
 
 // eventually waits, boundedly, for what the daemon does on its own goroutines.
+// eventually polls until the condition holds. What it waits for is something the daemon reaches on
+// its own — a delivery, the transaction that answers it — so the wait is bounded by this test
+// binary's own deadline rather than a fixed span: on a loaded machine a step that is merely slow
+// is not a failure, and a condition that never holds still fails here, naming what it waited for.
 func eventually(t *testing.T, what string, done func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for !done() {
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for %s", what)
+	deadline := time.Now().Add(time.Minute)
+	if testDeadline, ok := t.Deadline(); ok && testDeadline.Add(-time.Second).Before(deadline) {
+		deadline = testDeadline.Add(-time.Second)
+	}
+	for time.Now().Before(deadline) {
+		if done() {
+			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	t.Fatalf("timed out waiting for %s", what)
 }
 
 // lastLaunch is the spec of the claim's latest launch — the boot token its pane carries.

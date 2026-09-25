@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"time"
@@ -138,6 +139,17 @@ func (r *outbox) RunOnce(ctx context.Context) error {
 			} else {
 				r.log.Error("outbox row failed", "row", row.ID, "kind", row.Kind, "error", err)
 			}
+			if refusal, permanent := permanentStatusRefusal(row, err); permanent {
+				// An issue's status writes run one at a time, so a row Dispatch will refuse
+				// identically forever would hold every later status of that issue behind it. It is
+				// finished instead, and the board follows the workflow again from the next one.
+				r.log.Error("outbox status write refused by Dispatch and dropped; the issue's later writes go on",
+					"row", row.ID, "issue", row.Issue, "status", refusal.Status, "code", refusal.Code, "error", err)
+				if err := r.finish(ctx, row); err != nil {
+					r.log.Error("outbox row finish not recorded; it runs again when its lease expires", "row", row.ID, "error", err)
+				}
+				continue
+			}
 			if retryErr := r.retry(ctx, row, err); retryErr != nil {
 				r.log.Error("outbox row retry not recorded; it runs again when its lease expires", "row", row.ID, "error", retryErr)
 			}
@@ -177,6 +189,36 @@ func retryBackoff(attempts int) time.Duration {
 		attempts = 6
 	}
 	return time.Second << attempts
+}
+
+// permanentStatusRefusal is a Dispatch status write that will be refused the same way however many
+// times it is made: the issue is gone, or the status is one Dispatch will not take. Only a status
+// row is judged — it is the kind that fences an issue's later writes — and only a refusal Dispatch
+// itself made, which is a 4xx carrying one of its error codes.
+//
+// Everything else is the outage this outbox exists to ride out: every 5xx, every transport
+// failure, "come back later" (408, 429), a codeless 4xx from whatever sits in front of Dispatch,
+// and a credential answer (401, 403). A revoked or expired token says nothing about the write —
+// an operator restores it and the same body is taken — so reading one as permanent would drop
+// every later status of that issue for good.
+func permanentStatusRefusal(row record.OutboxRow, err error) (*dispatch.Error, bool) {
+	if row.Kind != record.OutboxKindDispatchStatus {
+		return nil, false
+	}
+	var refusal *dispatch.Error
+	if !errors.As(err, &refusal) {
+		return nil, false
+	}
+	switch {
+	case refusal.Code == "",
+		refusal.Status < 400 || refusal.Status >= 500,
+		refusal.Status == http.StatusRequestTimeout,
+		refusal.Status == http.StatusTooManyRequests,
+		refusal.Status == http.StatusUnauthorized,
+		refusal.Status == http.StatusForbidden:
+		return nil, false
+	}
+	return refusal, true
 }
 
 func (r *outbox) execute(ctx context.Context, row record.OutboxRow) error {
@@ -300,6 +342,13 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 	machine, found := r.supervisor.Machine(token)
 	switch payload.Op {
 	case "start":
+		// The claim remembers the newest start run against it, so a stop written before this one
+		// is finished rather than acted on however late it arrives (see "suspend" below).
+		if found {
+			if err := machine.StartedBy(ctx, row.ID); err != nil {
+				return fmt.Errorf("record the start of claim %s: %w", token, err)
+			}
+		}
 		if !found {
 			if err := r.provisionWorkspace(ctx, issue); err != nil {
 				return err
@@ -340,7 +389,7 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		if payload.Task != "" {
 			// The row's phase, already held to the issue's above, travels with the delivery: it is
 			// what says the task is still the work to do once the delivery has outlived its id.
-			if err := machine.Handle(ctx, supervise.RequestDeliver{Claim: token, Task: payload.Task, Phase: payload.Phase,
+			if err := machine.Handle(ctx, supervise.RequestDeliver{Claim: token, Task: payload.Task, Phase: payload.Phase, Generation: payload.Generation,
 				ID: fmt.Sprintf("%s%d", outboxDeliveryPrefix, row.ID)}); err != nil {
 				return fmt.Errorf("deliver to claim %s: %w", token, err)
 			}
@@ -362,6 +411,17 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		switch machine.Claim().State {
 		case supervise.StateFailed, supervise.StateRetired:
 			// The claim runs nothing, so there is nothing to suspend.
+			return nil
+		}
+		// A stop ends the run it was written for. A newer start has already replaced that run, so
+		// this stop is superseded: acting on it would suspend the run that start began and retire
+		// the task with it, leaving the phase with nobody in it. It is finished instead, whatever
+		// the retry timing was — the runtime may have refused it for minutes. A row with no id of
+		// its own is not older than anything: the store gives every row one, and an unknown id
+		// must not silently drop a stop.
+		if last := machine.Claim().LastStartRow; row.ID > 0 && row.ID < last {
+			r.log.Info("outbox stop superseded by a newer start; finished without acting",
+				"row", row.ID, "issue", issue.Key, "role", payload.Role, "start-row", last)
 			return nil
 		}
 		if err := machine.Handle(ctx, supervise.RequestSuspend{Claim: token}); err != nil {

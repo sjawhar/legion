@@ -39,6 +39,11 @@ func tmuxClaim(token claim.Token) supervise.Claim {
 		BootTokenHash:   supervise.HashBootToken("boot-" + string(token)),
 		CapabilityHash:  []byte{0xca, 0xfe, 0x01},
 		UncertainStreak: 3,
+		// The two columns a restart reads to fence a stop and to attribute a completion: a daemon
+		// that rebuilt this claim without them would suspend a run that had already replaced the
+		// one its stop names, and refuse the completion of the worker it is waiting on.
+		LastStartRow:      7,
+		ServingGeneration: 4,
 	}
 }
 
@@ -57,7 +62,8 @@ func sameClaim(t *testing.T, got, want supervise.Claim) {
 	if gotPending == nil {
 		return
 	}
-	if gotPending.ID != wantPending.ID || gotPending.Task != wantPending.Task || gotPending.Phase != wantPending.Phase {
+	if gotPending.ID != wantPending.ID || gotPending.Task != wantPending.Task ||
+		gotPending.Phase != wantPending.Phase || gotPending.Generation != wantPending.Generation {
 		t.Errorf("pending delivery read back = %+v, want %+v", *gotPending, *wantPending)
 	}
 	for _, field := range []struct {
@@ -94,6 +100,7 @@ func TestAClaimRoundTripsWithItsLocatorAndDelivery(t *testing.T) {
 		ID:          "delivery-1",
 		Task:        "implement the plan",
 		Phase:       phase.Implementing,
+		Generation:  4,
 		QueuedAt:    at(1),
 		DeliveredAt: at(2),
 	}
@@ -259,10 +266,10 @@ func TestADeliveryIsPutConfirmedAndRetired(t *testing.T) {
 	c.Pending = &delivery
 	sameClaim(t, onlyClaim(t, store), c)
 
-	if err := store.RetireDelivery(ctx, c.Token, delivery.ID); err != nil {
+	c.Pending = nil
+	if err := store.RetireDelivery(ctx, c, delivery.ID); err != nil {
 		t.Fatalf("retire delivery: %v", err)
 	}
-	c.Pending = nil
 	sameClaim(t, onlyClaim(t, store), c)
 }
 
@@ -280,7 +287,11 @@ func TestRetireDeliveryRefusesADeliveryTheClaimDoesNotHold(t *testing.T) {
 		t.Fatalf("put delivery: %v", err)
 	}
 
-	err := store.RetireDelivery(ctx, c.Token, "delivery-old")
+	// The claim the refused retire carries is rolled back with it: the delivery and the run the
+	// claim serves move together or not at all.
+	stale := c
+	stale.ServingGeneration = 99
+	err := store.RetireDelivery(ctx, stale, "delivery-old")
 	if err == nil {
 		t.Fatal("retired a delivery the claim does not hold")
 	}
