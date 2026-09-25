@@ -57,32 +57,39 @@ type workflowRuntime struct {
 	failed chan error
 }
 
-// appMintAttempt bounds one boot mint of a GitHub App token: installation discovery, the exchange
-// and the bot identity lookups each answer in well under a second, so an attempt that runs this
-// long is a request GitHub never answered.
-var appMintAttempt = 20 * time.Second
+// appMintAttempt bounds one attempt at the boot's App tokens, both Apps' mints: installation
+// discovery, the exchange and the bot identity lookups each answer in well under a second, so an
+// attempt that runs this long holds a request GitHub never answered.
+var appMintAttempt = 15 * time.Second
 
-// appMintRetry is the wait between boot mints that failed transiently: 5 s doubling to a minute,
-// five attempts, about three minutes at worst, after which GitHub's trouble refuses the boot with
-// the last failure named.
-var appMintRetry = bootprobe.Retry{Initial: 5 * time.Second, Max: time.Minute, Attempts: 5}
+// appMintRetry is the wait between attempts that failed transiently: 5 s doubling to 30 s, five
+// attempts. At worst the boot waits 2 min 20 s (five 15 s attempts and 65 s between them) before it
+// refuses, naming the last failure. The API listens only after the mint, so /healthz is refused
+// meanwhile; the rest of a boot takes a second or two, which leaves a boot that passes on the last
+// attempt inside the 180 s Stage 3 gives a daemon to answer /healthz.
+var appMintRetry = bootprobe.Retry{Initial: 5 * time.Second, Max: 30 * time.Second, Attempts: 5}
 
-// mintAtBoot mints role's token for owner, running it again after a failure GitHub reports as its
-// own trouble (appauth.TransientError); any other failure is refused at once.
-func mintAtBoot(ctx context.Context, tokens appauth.Tokens, role appauth.AppRole, owner string, log *slog.Logger) error {
-	return bootprobe.Run(ctx, string(role)+" GitHub App token mint", appMintRetry, log, func(ctx context.Context) bootprobe.Outcome {
+// mintAtBoot mints the implement and then the review App token for owner, as one attempt run again
+// after a failure GitHub reports as its own trouble (appauth.TransientError); any other failure is
+// refused at once. The token manager keeps a lease it minted, so an attempt after the implement
+// token passed asks GitHub only for the review token.
+func mintAtBoot(ctx context.Context, tokens appauth.Tokens, owner string, log *slog.Logger) error {
+	return bootprobe.Run(ctx, "GitHub App tokens mint", appMintRetry, log, func(ctx context.Context) bootprobe.Outcome {
 		attempt, cancel := context.WithTimeout(ctx, appMintAttempt)
 		defer cancel()
-		_, err := tokens.Token(attempt, role, owner)
-		var transient *appauth.TransientError
-		switch {
-		case err == nil:
-			return bootprobe.Outcome{Passed: true}
-		case errors.As(err, &transient):
-			return bootprobe.Outcome{Detail: err.Error()}
-		default:
+		for _, role := range []appauth.AppRole{appauth.Implement, appauth.Review} {
+			_, err := tokens.Token(attempt, role, owner)
+			if err == nil {
+				continue
+			}
+			err = fmt.Errorf("mint %s GitHub App token at boot: %w", role, err)
+			var transient *appauth.TransientError
+			if errors.As(err, &transient) {
+				return bootprobe.Outcome{Detail: err.Error()}
+			}
 			return bootprobe.Outcome{Refusal: err}
 		}
+		return bootprobe.Outcome{Passed: true}
 	})
 }
 
@@ -99,10 +106,8 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	if tokens == nil {
 		tokens = appauth.New(cfg.GitHubApps, appauth.Options{})
 	}
-	for _, role := range []appauth.AppRole{appauth.Implement, appauth.Review} {
-		if err := mintAtBoot(ctx, tokens, role, owner, log); err != nil {
-			return nil, fmt.Errorf("mint %s GitHub App token at boot: %w", role, err)
-		}
+	if err := mintAtBoot(ctx, tokens, owner, log); err != nil {
+		return nil, err
 	}
 	log.Info("legion workflow boot stage", "stage", "appauth")
 	// The database is shared by every project's daemon: the workflow reads this project's issues.

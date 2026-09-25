@@ -193,3 +193,26 @@ func TestABootRefusesADefinitiveGitHubAnswerAtOnce(t *testing.T) {
 		t.Errorf("installation discoveries by App = %v, want the implement App's one: a 401 is not asked again", got)
 	}
 }
+
+// Both Apps' tokens share one retry budget, so a boot waits at most appMintRetry before it refuses,
+// however the failures fall between the two mints. Here the implement App's discovery fails twice
+// and then answers, and the review App's never does: the budget's three attempts are spent before
+// the review token is asked for more than once. With a budget per App the boot would wait both out,
+// twice as long, which is what outlasted Stage 3's wait for /healthz.
+func TestABootGivesBothAppTokensOneRetryBudget(t *testing.T) {
+	quickAppMints(t)
+	tokens, standIn := appTokens(t, func(w http.ResponseWriter, r *http.Request, app string, n int) {
+		if app == "1" && n > 2 {
+			installed(w)
+			return
+		}
+		http.Error(w, "{}", http.StatusBadGateway)
+	})
+	err := bootsOrExits(t, workflowConfig(t, workflowNATS(t)), tokens, 60*time.Second)
+	if err == nil || !strings.Contains(err.Error(), "retry budget (3 attempts)") || !strings.Contains(err.Error(), "mint review GitHub App token at boot") {
+		t.Fatalf("boot = %v, want the refusal after the one budget's three attempts, naming the review mint", err)
+	}
+	if got := standIn.Discoveries(); !maps.Equal(got, map[string]int{"1": 3, "2": 1}) {
+		t.Errorf("installation discoveries by App = %v, want the implement App's three and the review App's one", got)
+	}
+}

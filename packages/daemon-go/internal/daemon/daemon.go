@@ -44,8 +44,10 @@ import (
 const (
 	// bootTimeout bounds the work between the plugin gate passing and the API listening: an
 	// unreachable Postgres refuses in milliseconds, but a reachable one that never answers must
-	// not leave the daemon hanging with nothing on stderr. The gate itself is not bounded by it —
-	// it waits out host load for as long as that lasts (pluginGate).
+	// not leave the daemon hanging with nothing on stderr. The gate is not bounded by it — it waits
+	// out host load for as long as that lasts (pluginGate) — nor are the GitHub App tokens' mint
+	// and the image probe, which wait out GitHub's and the cluster's transient trouble within
+	// retries of their own (appMintRetry, imageProbeRetry); the work after each has a budget anew.
 	bootTimeout = 30 * time.Second
 	// shutdownTimeout bounds each half of the exit — draining the API, then stamping the boot.
 	shutdownTimeout = 10 * time.Second
@@ -104,8 +106,8 @@ type overrides struct {
 // ctx decides one thing: how long the daemon serves. The boot record and its stamp are the
 // daemon's own bookkeeping and run on a context the shutdown did not cancel, so a signal that
 // arrives mid-startup still leaves a recorded, stamped boot rather than a row with no end. A
-// signal that arrives while the plugin gate or the image probe waits ends the daemon there,
-// cleanly: it has served nothing and records nothing.
+// signal that arrives while the plugin gate, the GitHub App tokens' mint, or the image probe waits
+// ends the daemon there, cleanly: it has served nothing and records nothing.
 func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	return run(ctx, cfg, log, overrides{})
 }

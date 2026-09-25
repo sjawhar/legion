@@ -273,42 +273,61 @@ func TestTokensDeduplicatesConcurrentRequests(t *testing.T) {
 	}
 }
 
-// GitHub's trouble is transient and its answers are not: a request GitHub never answered, a 5xx,
-// or a 429 may pass when it is made again, and a boot waits it out; any other status, or an owner
-// the App is not installed on, is refused at once. The boot's retry reads nothing else.
+// GitHub's trouble is transient and its answers are not: a request GitHub never answered or whose
+// body stopped mid-read, a 5xx, or a rate limit (a 429, or a 403 that says it is one) may pass when
+// it is made again, and a boot waits it out; any other status, a body that is not the JSON asked
+// for, or an owner the App is not installed on is refused at once. The boot's retry reads nothing
+// else.
 func TestGitHubsTroubleIsTransientAndItsAnswersAreNot(t *testing.T) {
 	_, privatePEM := testAppKey(t)
+	status := func(code int, header ...string) http.HandlerFunc {
+		return func(w http.ResponseWriter, _ *http.Request) {
+			for i := 0; i+1 < len(header); i += 2 {
+				w.Header().Set(header[i], header[i+1])
+			}
+			http.Error(w, "{}", code)
+		}
+	}
+	installed := func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, `[{"id":77,"account":{"login":"acme"}}]`) }
 	for _, tc := range []struct {
 		name      string
-		discovery int // 0 answers the installation list
-		exchange  int // 0 answers with a token
+		discovery http.HandlerFunc
+		exchange  http.HandlerFunc // nil answers with a token
 		transient bool
 	}{
-		{name: "discovery 502", discovery: http.StatusBadGateway, transient: true},
-		{name: "discovery 429", discovery: http.StatusTooManyRequests, transient: true},
-		{name: "discovery 401", discovery: http.StatusUnauthorized},
-		{name: "exchange 500", exchange: http.StatusInternalServerError, transient: true},
-		{name: "exchange 422", exchange: http.StatusUnprocessableEntity},
-		{name: "discovery never answers", discovery: -1, transient: true},
-		{name: "not installed on the owner", discovery: -2},
+		{name: "discovery 502", discovery: status(http.StatusBadGateway), transient: true},
+		{name: "discovery 429", discovery: status(http.StatusTooManyRequests), transient: true},
+		{name: "discovery 403 out of rate limit", discovery: status(http.StatusForbidden, "X-RateLimit-Remaining", "0"), transient: true},
+		{name: "discovery 403 with retry-after", discovery: status(http.StatusForbidden, "Retry-After", "60"), transient: true},
+		{name: "discovery 403", discovery: status(http.StatusForbidden, "X-RateLimit-Remaining", "4999")},
+		{name: "discovery 401", discovery: status(http.StatusUnauthorized)},
+		{name: "discovery never answers", discovery: func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() }, transient: true},
+		{name: "discovery body cut off mid-read", discovery: func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Length", "1000")
+			fmt.Fprint(w, `[{"id":77,`)
+			w.(http.Flusher).Flush()
+			conn, _, err := http.NewResponseController(w).Hijack()
+			if err != nil {
+				t.Errorf("hijack: %v", err)
+				return
+			}
+			conn.Close()
+		}, transient: true},
+		{name: "discovery body not JSON", discovery: func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, `<html>`) }},
+		{name: "not installed on the owner", discovery: func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `[{"id":77,"account":{"login":"someone-else"}}]`)
+		}},
+		{name: "exchange 500", discovery: installed, exchange: status(http.StatusInternalServerError), transient: true},
+		{name: "exchange 422", discovery: installed, exchange: status(http.StatusUnprocessableEntity)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
 				case "/app/installations":
-					switch tc.discovery {
-					case 0:
-						fmt.Fprint(w, `[{"id":77,"account":{"login":"acme"}}]`)
-					case -1:
-						<-r.Context().Done()
-					case -2:
-						fmt.Fprint(w, `[{"id":77,"account":{"login":"someone-else"}}]`)
-					default:
-						http.Error(w, "{}", tc.discovery)
-					}
+					tc.discovery(w, r)
 				case "/app/installations/77/access_tokens":
-					if tc.exchange != 0 {
-						http.Error(w, "{}", tc.exchange)
+					if tc.exchange != nil {
+						tc.exchange(w, r)
 						return
 					}
 					fmt.Fprintf(w, `{"token":"installation-1","expires_at":%q}`, time.Now().Add(time.Hour).Format(time.RFC3339))
