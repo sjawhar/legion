@@ -46,7 +46,7 @@ func TestThePromptReferenceProbeOnTheRealOhMyPi(t *testing.T) {
 			dir := t.TempDir()
 			home := filepath.Join(dir, "home")
 			mkdir(t, home)
-			root := testPlugin(t, dir, testCase.agent, testCase.rubric)
+			root := referencePlugin(t, dir, testCase.agent, testCase.rubric)
 			agentDir := filepath.Join(home, ".omp", "profiles", "legion", "agent")
 			mkdir(t, agentDir)
 			for name, content := range map[string]string{

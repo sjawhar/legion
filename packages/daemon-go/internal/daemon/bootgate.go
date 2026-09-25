@@ -25,6 +25,8 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/omplaunch"
+	"github.com/sjawhar/legion/daemon/internal/runtime/tmux"
+	workershim "github.com/sjawhar/legion/daemon/internal/shim"
 )
 
 // pluginLoadProbe is the Oh My Pi extension the load probe hands `omp models`: the shipped probe
@@ -32,10 +34,11 @@ import (
 // `legion.ts` set its load marker (`Symbol.for("legion.pi-envoy.legion-loaded")`,
 // packages/pi-envoy/extensions/legion.ts) — which only a plugin Oh My Pi actually loaded has done
 // — and, beside it, the marker's value: the `import.meta.url` of that `legion.ts`, where the plugin
-// loaded from. Given LEGION_PROMPT_AGENTS and LEGION_PROMPT_SKILLS (promptKinds), it also resolves
+// loaded from. Given LEGION_PROMPT_AGENTS and LEGION_PROMPT_SKILLS (promptrefs), it also resolves
 // those task agents and skills through Oh My Pi's own discovery over the launch's extension roots,
 // as the task tool resolves an agent's name and a `skill://` read a skill's, and prints which it
-// could not find.
+// could not find; and, unless LEGION_SKIP_AGENT_MODELS is set, whether each of those agents runs
+// on its own model as the task tool would select and resolve it.
 //
 //go:embed probe.mjs
 var pluginLoadProbe []byte
@@ -77,7 +80,8 @@ const (
 // and refuses a plugin that does not declare the gate's contract; the load probe runs Oh My Pi the
 // way a pane does and refuses a plugin it did not load — installed but disabled, or not
 // registered — or one it loaded from another root than the manifest the contract probe read, and
-// refuses, by name, a task agent or a skill Legion's prompts name that the same Oh My Pi cannot find.
+// refuses, by name, a task agent or a skill Legion's prompts name that the same Oh My Pi cannot
+// find, and a task agent it would not run on the agent's own model.
 //
 // Inside the worker image the same gate is `legion probe-image` (ProbeImage), which adds the two
 // probes only the image runs: pi.agents and the session-storage setting.
@@ -102,15 +106,12 @@ type pluginGate struct {
 	// probe reads that root's manifest. Empty on tmux, where a pane loads the installed plugin
 	// through discovery.
 	pluginRoot string
-	// rolesDir is the role prompts directory (prompts.ResolveRolePromptsDir): the task agents and
-	// skills its prompts name are resolved beside the plugin's. Empty resolves the plugin's alone.
-	rolesDir string
+	// roleReferences are the task agents and skills the role prompts the probed Oh My Pi is handed
+	// name (promptrefs.Roles), resolved beside the plugin's own. Empty resolves the plugin's alone.
+	roleReferences string
 	// skipAgentModels leaves the prompt-named task agents' models unresolved (ImageProbe's
 	// SkipAgentModels); every other gate holds each agent to its own model.
 	skipAgentModels bool
-	// roleReferences, when set, are the references of the role prompts the probed Oh My Pi is
-	// handed (ImageProbe's RoleReferences), resolved in place of rolesDir's.
-	roleReferences string
 	// stdin is each probe's standard input; nil is /dev/null. When it is a terminal this process
 	// holds the foreground of, each attempt runs as the terminal's foreground job, and its stderr
 	// is also copied to echo, so a launch prefix's prompt is seen and can be answered (terminalJob).
@@ -120,6 +121,29 @@ type pluginGate struct {
 	// gate's, which the image probe also is.
 	name string
 	log  *slog.Logger
+}
+
+// gateEnvironment is the environment a pane's Oh My Pi runs with, which the boot gate probes under:
+// the pane environment, and each provider key the pane's shim exports from providerEnvDir as the
+// shim exports it (shim.ReadProviderEnv), so a task agent whose model's key comes only through a
+// provider key resolves as it will in a pane.
+func gateEnvironment(environ []string, stateDir, providerEnvDir string) (map[string]string, error) {
+	env := tmux.PaneEnvironment(environ, stateDir)
+	if providerEnvDir == "" {
+		return env, nil
+	}
+	pairs, err := workershim.ReadProviderEnv(providerEnvDir, func(name string) (string, bool) {
+		value, ok := env[name]
+		return value, ok
+	})
+	if err != nil {
+		return nil, fmt.Errorf("boot gate: %w", err)
+	}
+	for _, pair := range pairs {
+		name, value, _ := strings.Cut(pair, "=")
+		env[name] = value
+	}
+	return env, nil
 }
 
 // label is the name the gate's errors begin with.
@@ -141,20 +165,16 @@ func (g pluginGate) verify(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	rolesDir := g.rolesDir
-	if g.roleReferences != "" {
-		rolesDir = ""
-	}
-	names, err := promptReferences(lane.manifest, plugin.skills, rolesDir)
+	names, err := promptReferences(lane.manifest, plugin.skills)
 	if err != nil {
 		return err
 	}
 	if g.roleReferences != "" {
-		if err := names.addEncoded(g.roleReferences); err != nil {
+		if err := names.AddEncoded(g.roleReferences); err != nil {
 			return fmt.Errorf("%s: %w", g.label(), err)
 		}
 	}
-	check := promptCheck{names: names, agentModels: !g.skipAgentModels}
+	check := promptCheck{names: names, skipAgentModels: g.skipAgentModels}
 	loadedFrom, err := g.loadedFrom(ctx, lane, lane.notLoaded(plugin.version), check)
 	if err != nil {
 		return err
@@ -416,10 +436,10 @@ func readPluginManifest(manifest, installInto string, contract int) (pluginManif
 // retry, and answers where the plugin loaded from: Oh My Pi, launched as a pane or a pod launches
 // it — through the launch prefix, under the gate's environment, with its XDG directories created
 // first as a spawn creates them — lists its models with the probe extension added in lane's way,
-// and passes only when the probe saw the plugin's load marker and found every task agent and skill
-// check names (none for the controller probe). notLoaded is the refusal for an Oh My Pi that
-// answered without loading it. The classification is the shipped one (killedOutcome, :94-122,
-// :348-360).
+// and passes only when the probe saw the plugin's load marker, found every task agent and skill
+// check names (none for the controller probe), and answered that each of those agents runs on its
+// own model (unless the gate skips that). notLoaded is the refusal for an Oh My Pi that answered
+// without loading it. The classification is the shipped one (killedOutcome, :94-122, :348-360).
 func (g pluginGate) loadedFrom(ctx context.Context, lane pluginLane, notLoaded error, check promptCheck) (string, error) {
 	for _, name := range []string{"XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"} {
 		if dir := g.env[name]; dir != "" {
@@ -726,16 +746,13 @@ type ImageProbe struct {
 	// and the contract probe reads that root's manifest, so the probe certifies the lane a pod
 	// uses. A relative root is resolved against this process's working directory.
 	PluginRoot string
-	// RolesDir is the role prompts directory (prompts.ResolveRolePromptsDir): the load probe resolves
-	// the task agents and skills its prompts name beside the plugin's.
-	RolesDir string
+	// RoleReferences are the task agents and skills the role prompts a pod is handed name
+	// (promptrefs.Roles): the daemon's own, which it inlines into every Sandbox pod, or the image's
+	// when the command is given none.
+	RoleReferences string
 	// SkipAgentModels leaves the task agents' models unresolved: the image build's probe, which runs
 	// with none of the operator's model configuration.
 	SkipAgentModels bool
-	// RoleReferences are the task agents and skills the daemon's own role prompts name
-	// (RolePromptReferences), which a Sandbox pod is handed in place of the image's: set, they are
-	// resolved instead of RolesDir's.
-	RoleReferences string
 }
 
 // defaultProbeTimeout is each image-probe and controller-probe attempt's budget: the default
@@ -756,7 +773,7 @@ func ProbeImage(ctx context.Context, p ImageProbe) error {
 	return pluginGate{
 		env: p.Env, workDir: p.WorkDir, invocation: p.Omp, timeout: defaultProbeTimeout,
 		retry: bootprobe.Image, contract: p.Contract,
-		pluginRoot: p.PluginRoot, rolesDir: p.RolesDir, skipAgentModels: p.SkipAgentModels, roleReferences: p.RoleReferences,
+		pluginRoot: p.PluginRoot, roleReferences: p.RoleReferences, skipAgentModels: p.SkipAgentModels,
 		log: p.Log,
 	}.verifyImage(ctx)
 }

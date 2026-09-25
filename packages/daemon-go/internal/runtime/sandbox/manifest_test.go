@@ -153,7 +153,7 @@ func TestTheOperatorsPodIsSentInFieldsTheSandboxCRDDeclares(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	probe, err := encodeProbe(r.probeManifest("legion-probe", ImageProbe{Contract: 5}, time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)))
+	probe, err := encodeProbe(r.probeManifest("legion-probe", ImageProbe{Contract: 5, RoleReferences: testRoleReferences}, time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)))
 	if err != nil {
 		t.Fatal(err)
 	}

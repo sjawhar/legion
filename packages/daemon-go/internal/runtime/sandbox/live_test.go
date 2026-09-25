@@ -69,6 +69,7 @@ var liveChecks = []liveCheck{
 	{"gvisor", (*liveRig).checkGVisor},
 	{"operator-token", (*liveRig).checkOperatorToken},
 	{"pod-baseline", (*liveRig).checkPodBaseline},
+	{"provider-key", (*liveRig).checkProviderKey},
 	{"adopt-working-copy", (*liveRig).checkAdoptWorkingCopy},
 	{"worker-colocated", (*liveRig).checkWorkerColocated},
 	{"suspend", (*liveRig).checkSuspend},
@@ -106,6 +107,13 @@ const (
 // NodePool's own floor, karpenter.k8s.aws/instance-cpu Gt 3 (agent-c #20006), is what makes that
 // node a 4-vCPU one with room for the tree while no pod requests anything (Stage 4b decision 2).
 var liveTreeVolume = resource.MustParse("20Gi")
+
+// The run's one provider key: the variable its agents' Oh My Pi gets, and the key of the providers
+// Secret (ProvidersSecretName) the script creates for the run, holding a value no model route reads.
+const (
+	liveProviderKey        = "STAGE4A_PROVIDER_KEY"
+	liveProvidersSecretKey = "stage4a"
+)
 
 // fixtureConfigMap is the ConfigMap the operator fixture's pod.yml names; each run creates its own
 // copy, named for its project (LEGION_E2E_OPERATOR_CONFIGMAP), since Stage 4b's driver shares the
@@ -610,10 +618,11 @@ func (r *liveRig) startRuntime() error {
 	}
 	rt, err := New(ctx, r.rc, Options{
 		Namespace: r.env.namespace, Project: r.env.project, Image: r.env.image, StorageClass: "gp2", TreeVolume: liveTreeVolume,
-		StreamURL: address,
-		Tools:     Tools{GH: "/usr/local/bin/gh", Git: "/usr/bin/git", JJ: "/usr/local/bin/jj", Legion: "/opt/legion/go/bin/legion"},
-		Pod:       r.pod,
-		Agent:     stubAgent, BootTimeout: liveBootTimeout, BootIntervals: liveBootIntervals,
+		StreamURL:    address,
+		Tools:        Tools{GH: "/usr/local/bin/gh", Git: "/usr/bin/git", JJ: "/usr/local/bin/jj", Legion: "/opt/legion/go/bin/legion"},
+		Pod:          r.pod,
+		ProviderKeys: map[string]string{liveProviderKey: liveProvidersSecretKey},
+		Agent:        stubAgent, BootTimeout: liveBootTimeout, BootIntervals: liveBootIntervals,
 		TerminationGrace: liveGrace, ProbeInterval: liveProbeInterval, AdoptTimeout: liveAdoptTimeout,
 		Tokens: r.tokens, Conns: ln, Log: r.log,
 	})

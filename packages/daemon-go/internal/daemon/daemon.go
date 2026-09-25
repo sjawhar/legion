@@ -33,12 +33,12 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/omplaunch"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/projection"
+	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/tmux"
 	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
-	workershim "github.com/sjawhar/legion/daemon/internal/shim"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/stream"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
@@ -322,8 +322,10 @@ type plan struct {
 	dispatchToken string
 	prompts       *prompts.Composer
 	// rolesDir is the role prompts directory (prompts.ResolveRolePromptsDir), resolved before the
-	// gate, which resolves every task agent and skill its prompts name.
-	rolesDir string
+	// gate, and roleReferences the task agents and skills its prompts name (promptrefs.Roles), which
+	// the gate on either runtime resolves beside the plugin's own.
+	rolesDir       string
+	roleReferences string
 	// stream is the worker stream's address: the listener binds it, and every agent's shim dials it.
 	stream     string
 	newRuntime runtimeFactory
@@ -394,9 +396,13 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 	if err != nil {
 		return plan{}, fmt.Errorf("resolve role prompts: %w", err)
 	}
+	roleReferences, err := promptrefs.Roles(rolesDir)
+	if err != nil {
+		return plan{}, err
+	}
 	p := plan{
 		project: project, operatorToken: operatorToken, secrets: secrets, instructions: instructions,
-		dispatchToken: dispatchToken, rolesDir: rolesDir, clock: clock, orphanSweep: orphanSweep,
+		dispatchToken: dispatchToken, rolesDir: rolesDir, roleReferences: roleReferences, clock: clock, orphanSweep: orphanSweep,
 	}
 	switch cfg.Runtime.Name {
 	case "tmux":
@@ -460,23 +466,6 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 	if err != nil {
 		return err
 	}
-	if p.newRuntime == nil {
-		env, err := gateEnvironment(os.Environ(), cfg.StateDir, providerEnvDir)
-		if err != nil {
-			return err
-		}
-		p.gate = pluginGate{
-			env:        env,
-			workDir:    cfg.StateDir,
-			invocation: invocation,
-			prefix:     cfg.OmpLaunchPrefix,
-			timeout:    cfg.SlowCommandTimeout,
-			retry:      bootprobe.Daemon,
-			contract:   api.GoDaemonAPIVersion,
-			rolesDir:   p.rolesDir,
-			log:        log,
-		}.verify
-	}
 	// Only a configuration with a repository runs Legion's own gh, git, and jj.
 	if _, ok := cfg.Projects[cfg.Project]; ok {
 		if p.tools, err = resolveTools(func(name string) (string, bool) { return envValue(environ, name) }); err != nil {
@@ -484,32 +473,24 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 		}
 	}
 	if p.newRuntime == nil {
+		env, err := gateEnvironment(os.Environ(), cfg.StateDir, providerEnvDir)
+		if err != nil {
+			return err
+		}
+		p.gate = pluginGate{
+			env:            env,
+			workDir:        cfg.StateDir,
+			invocation:     invocation,
+			prefix:         cfg.OmpLaunchPrefix,
+			timeout:        cfg.SlowCommandTimeout,
+			retry:          bootprobe.Daemon,
+			contract:       api.GoDaemonAPIVersion,
+			roleReferences: p.roleReferences,
+			log:            log,
+		}.verify
 		p.newRuntime = tmuxRuntime(cfg, p.project, invocation, providerEnvDir, dispatchTokenFile, p.tools, log)
 	}
 	return nil
-}
-
-// gateEnvironment is the environment a pane's Oh My Pi runs with, which the boot gate probes under:
-// the pane environment, and each provider key the pane's shim exports from providerEnvDir as the
-// shim exports it (shim.ReadProviderEnv), so a task agent whose model's key comes only through a
-// provider key resolves as it will in a pane.
-func gateEnvironment(environ []string, stateDir, providerEnvDir string) (map[string]string, error) {
-	env := tmux.PaneEnvironment(environ, stateDir)
-	if providerEnvDir == "" {
-		return env, nil
-	}
-	pairs, err := workershim.ReadProviderEnv(providerEnvDir, func(name string) (string, bool) {
-		value, ok := env[name]
-		return value, ok
-	})
-	if err != nil {
-		return nil, fmt.Errorf("boot gate: %w", err)
-	}
-	for _, pair := range pairs {
-		name, value, _ := strings.Cut(pair, "=")
-		env[name] = value
-	}
-	return env, nil
 }
 
 // tmuxRuntime builds the tmux runtime over the worker stream: the listener is its connection

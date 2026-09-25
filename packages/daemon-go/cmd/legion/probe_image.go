@@ -14,6 +14,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/daemon"
 	"github.com/sjawhar/legion/daemon/internal/podsafety"
+	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
 	"github.com/sjawhar/legion/daemon/internal/shim"
 )
@@ -39,7 +40,8 @@ var digits = regexp.MustCompile(`^[0-9]+$`)
 // shim starts Oh My Pi (podsafety.Apply), its overlay written to a fresh temporary directory since
 // the probe pod mounts no state volume; with --provider-env-dir, each provider key exported after
 // it as the shim exports them (shim.ReadProviderEnv); and with --role-references, the references
-// of the role prompts the daemon inlines into its pods, resolved in place of the image's roles.
+// of the role prompts the daemon inlines into its pods (promptrefs.Roles), resolved beside the
+// plugin's own. Without it the image's own role prompts are encoded and resolved the same way.
 func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := newFlags("probe-image", stderr)
 	omp := flags.String("omp", "", "the OMP executable to probe (default: $LEGION_OMP_PATH)")
@@ -79,10 +81,18 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 		fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
 		return 1
 	}
-	rolesDir, err := prompts.ResolveRolePromptsDir(os.LookupEnv)
-	if err != nil {
-		fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
-		return 1
+	// The role prompts a pod is handed: the daemon's, when it passes their references, else the
+	// image's own.
+	references := *roleReferences
+	if references == "" {
+		rolesDir, err := prompts.ResolveRolePromptsDir(os.LookupEnv)
+		if err == nil {
+			references, err = promptrefs.Roles(rolesDir)
+		}
+		if err != nil {
+			fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
+			return 1
+		}
 	}
 	environ := os.Environ()
 	if *podSafety {
@@ -111,8 +121,8 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 		}
 	}
 	err = daemon.ProbeImage(ctx, daemon.ImageProbe{
-		Omp: invocation, Contract: expected, Env: env, WorkDir: workDir, PluginRoot: *pluginRoot, RolesDir: rolesDir,
-		SkipAgentModels: *skipAgentModels, RoleReferences: *roleReferences,
+		Omp: invocation, Contract: expected, Env: env, WorkDir: workDir, PluginRoot: *pluginRoot,
+		RoleReferences: references, SkipAgentModels: *skipAgentModels,
 		Log: slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
 	})
 	if err != nil {
