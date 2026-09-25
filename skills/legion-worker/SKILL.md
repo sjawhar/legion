@@ -189,8 +189,9 @@ comments live on that path too, so edit them with `gh pr comment`) — printing
 `Legion issues live on Dispatch; use dispatch_message or dispatch_comment on <your LEGION_ISSUE>`:
 Legion never reads or writes a GitHub issue (LEGION-78). `pr comment`, `pr review`,
 `api …/pulls/…`, `api graphql`, and issue reads are unaffected. The credential reaches `legion`
-through the file `$LEGION_GRANT_FILE` names, written before each of your bash commands by the
-extension (and by the `legion` tool before its `handoff_complete`); never `cat`, `echo`, copy, or
+through the file `$LEGION_GRANT_FILE` names, written by the extension before each of your bash
+commands and before each `read`/`grep` of a `pr://` or `issue://` URL (and by the `legion` tool
+before its `handoff_complete`); never `cat`, `echo`, copy, or
 `export` it — `legion credential`, `legion gh`, `jj git push`, and `handoff_complete` read it
 themselves. The file is the pane's, not the
 command's: a `task` subagent, an `eval` subprocess, or a background job in your pane reads the

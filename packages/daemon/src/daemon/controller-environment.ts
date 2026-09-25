@@ -4,7 +4,8 @@ import { workerBinDir } from "./worker-bin";
 
 /** The credential environment a root, worker, or controller process carries for life — never per
  * command. `LEGION_GRANT_FILE` names the 0600 file under `<state_dir>/secrets` the pi-envoy
- * extension writes each bash command's freshly minted grant to (and `legion credential`,
+ * extension writes a freshly minted grant to before each bash command and each tool call Oh My Pi
+ * serves with `gh` (and `legion credential`,
  * `legion gh`, and `legion handoff complete` read ahead of `LEGION_GRANT`); the daemon only names
  * it here and prunes it with the pane's boot-token file (`trackProcessSecrets`). PATH puts
  * `<state_dir>/worker-bin` (the `gh` shim `index.ts` installs at startup) first exactly once:

@@ -187,8 +187,8 @@ function runLegion(
 
 /**
  * Runs one handoff action. `handoff_complete` redeems a grant: `mintGrant` mints a fresh one,
- * which is written to the pane's `LEGION_GRANT_FILE` exactly as the bash hook writes one before a
- * shell command, and the command reads it there; once it exits 0, `onPhaseCompleted` is told the
+ * which is written to the pane's `LEGION_GRANT_FILE` exactly as the tool-call hook writes one before
+ * a shell command, and the command reads it there; once it exits 0, `onPhaseCompleted` is told the
  * session's phase is complete. The result carries the command's output and its exit code
  * (`details.exitCode`); a non-zero exit is an error result.
  */

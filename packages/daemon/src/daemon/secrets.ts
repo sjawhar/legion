@@ -40,8 +40,9 @@ export function secretFilePath(stateDir: string, name: string): string {
 }
 
 /** The grant file a pane's `LEGION_GRANT_FILE` names: `<role token>-grant`. The daemon never
- * writes it — the pi-envoy extension does, before each of the pane's bash commands, with the grant
- * it minted for that command — but the daemon names it on the pane and prunes it exactly like the
+ * writes it — the pi-envoy extension does, before each of the pane's bash commands and each tool
+ * call Oh My Pi serves with `gh`, with the grant it minted for that call — but the daemon names it
+ * on the pane and prunes it exactly like the
  * pane's boot-token file, for as long as the pane's locator lives. */
 export function grantSecretName(roleToken: string): string {
   return `${roleToken}-grant`;

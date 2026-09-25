@@ -101,9 +101,10 @@ function daemonUrl(env: NodeJS.ProcessEnv, explicit?: string): string {
 
 /** The grant `legion gh`, `legion credential`, `legion handoff complete`, and `legion threads
  * resolve` (without `--gh`) redeem: `LEGION_GRANT_FILE` (the file the daemon names on every pane
- * and the pi-envoy extension writes before each bash command runs — never command text or the bash
- * tool's `env`, see LEGION-12 and LEGION-52) ahead of `LEGION_GRANT`, an operator's own manual
- * export. `withoutGrant` ends the no-grant refusal with a command's own way to run without one. */
+ * and the pi-envoy extension writes before each bash command and each tool call Oh My Pi serves
+ * with `gh` — never command text or the bash tool's `env`, see LEGION-12 and LEGION-52) ahead of
+ * `LEGION_GRANT`, an operator's own manual export. `withoutGrant` ends the no-grant refusal with a
+ * command's own way to run without one. */
 function grantFrom(env: NodeJS.ProcessEnv, withoutGrant = ""): string {
   const file = env.LEGION_GRANT_FILE;
   if (file !== undefined) {
@@ -123,7 +124,7 @@ function grantFrom(env: NodeJS.ProcessEnv, withoutGrant = ""): string {
   const grant = env.LEGION_GRANT;
   if (!grant) {
     throw new CliError(
-      `LEGION_GRANT_FILE is missing (and LEGION_GRANT is unset): the Legion daemon names the grant file on every pane and the pi-envoy extension writes it before each bash command runs${withoutGrant}`
+      `LEGION_GRANT_FILE is missing (and LEGION_GRANT is unset): the Legion daemon names the grant file on every pane and the pi-envoy extension writes it before each bash command and each tool call Oh My Pi serves with gh${withoutGrant}`
     );
   }
   return grant;
