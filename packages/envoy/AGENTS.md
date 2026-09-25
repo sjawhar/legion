@@ -367,6 +367,19 @@ type or attribute, or requiring a new attribute requires a document migration an
 
 `ask` blocks are indexed at settlement: their body and client-owned attributes update the ask row,
 the row restores server-owned answer state into the block, and removal retracts the indexed ask.
+The block is therefore the source of truth for an ask's **text** (question, options, `multiple`,
+`urgency`) and the row for its **lifecycle** (`state`, `answer`, `resolution`), so a route that
+changes either writes both: `PATCH /api/v1/asks/{id}` on a block ask writes the block through
+the document ledger and then takes the row's values from what the block parses back to, and
+`POST /api/v1/asks/{id}/resolve` writes the block's `state`. Text the block cannot carry
+unchanged is refused `400 ASK_BLOCK_TEXT` naming the field, with nothing written - an option
+label containing `": "`, which separates a label from its description, or a question with a line
+beginning `:::`, which would leave the canonical markdown unparseable. A single newline is
+carried as a hard break; surrounding whitespace is trimmed, as the parser trims it.
+Settlement retracts an ask whose block left the document in its own name,
+`{kind: "system", id: "document-settlement"}`, and restores only a retraction it wrote - a
+person's or a session's retract stands however the document moves, which is why `resolve`
+refuses a caller reason beginning `removed from the document in version`.
 An invalid browser-edited ask retains its indexed ask, carries the server-owned `invalid` parse-error
 attribute, and emits `block.invalid`; repairing its body clears `invalid` before updating the ask row.
 An answered block carries `state`, `answered_by`, `answered_at`, `selected`, and `answer` in

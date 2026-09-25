@@ -372,7 +372,11 @@ export const dispatchToolSpecs = [
     description:
       "Edit an open question in place. Use it to correct or refine the same decision; retract the " +
       "old ask and open a new one when the decision itself changes. Previous text remains in the " +
-      "event log. Only the asking session can edit it; answered or resolved asks cannot be edited.",
+      "event log. Only the asking session can edit it; answered or resolved asks cannot be edited. " +
+      "An ask that lives as an `ask` block in a document is rewritten in the document too, so the " +
+      "edit writes a document version and closes a spec's design gate until that version is " +
+      'approved; an option label containing ": " and a question with a line beginning ":::" are ' +
+      "refused, naming the field, because the block cannot carry them unchanged.",
     arguments: (z) => ({
       ask: z
         .string()
@@ -422,7 +426,10 @@ export const dispatchToolSpecs = [
       reason: "A newer question supersedes this one.",
     },
     description:
-      "Retract an open question that is moot or resolve one after finding the answer. This closes the question without answering it.",
+      "Retract an open question that is moot or resolve one after finding the answer. This closes " +
+      "the question without answering it. An ask that lives as an `ask` block in a document is " +
+      'closed in the document too. A reason beginning "removed from the document in version" is ' +
+      "refused: that marks a retraction the document's own settlement wrote.",
     arguments: (z) => ({
       ask: z
         .string()
