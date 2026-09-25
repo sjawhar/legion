@@ -156,9 +156,10 @@ const callReadyWithRetry = async (label: string, call: () => Promise<void>): Pro
   }
 };
 
-/** A `pr://` or `issue://` URL, alone or as one entry of a `;`-delimited path list: Oh My Pi's
- * internal-URL router resolves either scheme, in any case, by running `gh`. */
-const GH_RESOLVED_URL = /(?:^|;)\s*(?:pr|issue):\/\//i;
+/** A `pr://` or `issue://` URL anywhere Oh My Pi's path pipeline finds one: alone, inside one pair
+ * of outer double quotes (which it strips), or as one entry of a list split on `;`, `,`, or
+ * whitespace. Its internal-URL router resolves either scheme, in any case, by running `gh`. */
+const GH_RESOLVED_URL = /(?:^|[\s;,"])(?:pr|issue):\/\//i;
 
 /** Whether a tool call runs something that redeems the pane's grant: a `bash` command (`legion`,
  * `jj git push`, the `gh` shim), Oh My Pi's `github` tool, and any tool whose `path` or `paths`

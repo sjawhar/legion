@@ -2736,15 +2736,19 @@ describe("Legion OMP extension", () => {
     });
 
     // Oh My Pi resolves `pr://` and `issue://` through its internal-URL router, which runs `gh`,
-    // from every tool that takes a path (a `;` list included, the scheme in any case), and its
-    // `github` tool runs `gh` for every op. On a Legion pane `gh` is the shim that runs `legion gh`,
-    // which redeems the grant file; a grant lives 60 seconds, so each of these mints its own.
+    // from every tool that takes a path (the scheme in any case; a list split on `;`, `,`, or
+    // whitespace; one pair of outer double quotes stripped), and its `github` tool runs `gh` for
+    // every op. On a Legion pane `gh` is the shim that runs `legion gh`, which redeems the grant
+    // file; a grant lives 60 seconds, so each of these mints its own.
     const served = [
       { toolName: "read", input: { path: "pr://acme/widgets/7" } },
       { toolName: "read", input: { path: "issue://7:1-20" } },
       { toolName: "grep", input: { pattern: "fix", path: "src; PR://acme/widgets/7" } },
       { toolName: "glob", input: { path: "issue://acme/widgets" } },
       { toolName: "ast_edit", input: { ops: [], paths: ["src/a.ts", "pr://7"] } },
+      { toolName: "read", input: { path: "src, pr://acme/widgets/7" } },
+      { toolName: "grep", input: { pattern: "fix", path: "src issue://acme/widgets/8" } },
+      { toolName: "read", input: { path: '"pr://acme/widgets/7"' } },
       { toolName: "github", input: { op: "pr_view", pr: "7" } },
     ];
     for (const [index, call] of served.entries()) {

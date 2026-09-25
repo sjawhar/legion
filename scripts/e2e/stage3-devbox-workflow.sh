@@ -481,7 +481,7 @@ assert_idle_pr_read() {
        | .message.content[]? | select(.type == "toolCall") | . + {ts: $ts}] as $calls
     | ([$calls[] | .name == "bash" or .name == "github" or .name == "legion"
         or ([.arguments.path?, (.arguments.paths? // [])[]?]
-          | any(.[]; type == "string" and test("(^|;)\\s*(pr|issue)://"; "i")))] | index(true)) as $first
+          | any(.[]; type == "string" and test("(^|[\\s;,\"])(pr|issue)://"; "i")))] | index(true)) as $first
     | if $first == null then false else
         $calls[$first] as $read
         | ([$entries[] | select(.type == "message" and .message.role == "toolResult" and .message.toolCallId == $read.id)] | first) as $result
