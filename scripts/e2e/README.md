@@ -473,12 +473,15 @@ and the proof human. Event times are compared as instants, not strings.
 It also audits the Envoy interests the run's sessions held, which are sampled every 5 s and at
 every checkpoint while the daemon runs. The run fails when:
 - a registered session has no sample the listener answered;
-- the listener failed to answer any sample;
+- the listener left one session's samples unanswered 3 times in a row. That leaves a gap of at
+  least 20 s against the sampler's 5 s. One or two failures in a row are a blip, kept in
+  `interests-outcomes.txt`, and their count is in the checkpoint's note;
 - any sampled topic falls outside the run.
 
-Three controls show the audit can fail. The verdict is given a synthetic outside issue and must
+Four controls show the audit can fail. The verdict is given a synthetic outside issue and must
 refuse it. The interest filter is given the run's samples plus one outside topic and must catch
-it. The collector, on the run's real
+it. The unanswered-sample rule passes two failures in a row and fails three. The collector, on the
+run's real
 window, is given one actor that did write outside LEGSMOKE, and must find that actor's events. An
 event is dated by Dispatch's `created_at`; one without it stops the audit, never counts as older.
 

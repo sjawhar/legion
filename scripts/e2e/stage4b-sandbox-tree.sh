@@ -683,13 +683,14 @@ production_audit() {
     printf '"the production issues outside %s could not be read"\n' "$project" >"$evidence/production-issues-touched-outside.json"
   # Envoy lists no roles, and a session's interests leave the listener with it, so the run samples
   # its sessions' interests every 5 s and at every checkpoint while its daemon runs. A registered
-  # session with no sample the listener answered leaves the audit unable to vouch for it, and so
-  # does a sample the listener did not answer: either fails the audit.
-  local sampled unvouched outside
+  # session with no sample the listener answered leaves the audit unable to vouch for it, and so do
+  # three unanswered samples of one session in a row (interests_unanswered): either fails the audit.
+  local sampled unvouched unanswered outside
   sampled=$(jq -s -c '[.[].session_id] | unique' "$evidence/interests.jsonl" 2>/dev/null) || sampled='[]'
   unvouched=$(jq -c --argjson sampled "$sampled" '[.[] | select(. as $s | $sampled | index($s) | not)]' <<<"$sessions")
-  if [ -s "$evidence/interests-errors.txt" ]; then
-    jq -R -s -c '[{"the Envoy listener did not answer a sample": (split("\n") | map(select(. != "")))}]' "$evidence/interests-errors.txt" >"$evidence/production-interests-outside.json"
+  unanswered=$(interests_unanswered "$evidence/interests-outcomes.txt") || unanswered='"the interest sample outcomes could not be read"'
+  if [ "$unanswered" != "[]" ]; then
+    jq -c 'if type == "string" then [.] else [{"sessions the Envoy listener left unanswered for 3 samples in a row": .}] end' <<<"$unanswered" >"$evidence/production-interests-outside.json"
   elif [ "$unvouched" != "[]" ]; then
     jq -c '[{"registered sessions with no interest sample": .}]' <<<"$unvouched" >"$evidence/production-interests-outside.json"
   elif outside=$(interests_outside "$evidence/interests.jsonl"); then
@@ -731,26 +732,49 @@ find_outside_writer() {
   fail "$(wc -w <<<"$keys") issues outside $project were updated since $prod_baseline, and none of their events reads as since then"
 }
 # interests_sample LABEL appends the Envoy interests of every session the run has registered so far
-# to $evidence/interests.jsonl, each line labelled. A session no longer registered answers 404 and
-# adds nothing; any other answer, or none, goes to $evidence/interests-errors.txt, which fails the
-# audit, so an unreadable listener never reads as a clean sample.
+# to $evidence/interests.jsonl, each line labelled, and each attempt's outcome to
+# $evidence/interests-outcomes.txt as "TIME SESSION ok|absent|error DETAIL". A session no longer
+# registered answers 404 (absent). No answer, or any other, is an error, so an unreadable listener
+# never reads as a clean sample.
 interests_sample() {
-  local session code tmp=$work/interest.$BASHPID.json
+  local session code now tmp=$work/interest.$BASHPID.json
   for session in $(jq -R -r 'fromjson? | select(.msg == "api: claim registered") | .session' "$daemon_log" | sort -u); do
+    now=$(date -u +%FT%T.%3NZ)
     if ! code=$(curl -sS --max-time 20 -o "$tmp" -w '%{http_code}' -H "@$work/envoy-auth-header" "$envoy_url/v1/interests/$session" 2>&1); then
-      printf '%s %s unreachable: %s\n' "$(date -u +%FT%TZ)" "$session" "$code" >>"$evidence/interests-errors.txt"
+      printf '%s %s error unreachable: %s\n' "$now" "$session" "$(tr '\n' ' ' <<<"$code")" >>"$evidence/interests-outcomes.txt"
       continue
     fi
     case "$code" in
-      200) jq -c --arg at "$1" --arg time "$(date -u +%FT%TZ)" '{at: $at, time: $time} + .' "$tmp" >>"$evidence/interests.jsonl" ;;
-      404) ;;
-      *) printf '%s %s answered %s: %s\n' "$(date -u +%FT%TZ)" "$session" "$code" "$(head -c 200 "$tmp")" >>"$evidence/interests-errors.txt" ;;
+      200)
+        jq -c --arg at "$1" --arg time "$now" '{at: $at, time: $time} + .' "$tmp" >>"$evidence/interests.jsonl"
+        printf '%s %s ok\n' "$now" "$session" >>"$evidence/interests-outcomes.txt"
+        ;;
+      404) printf '%s %s absent\n' "$now" "$session" >>"$evidence/interests-outcomes.txt" ;;
+      *) printf '%s %s error answered %s: %s\n' "$now" "$session" "$code" "$(head -c 200 "$tmp" | tr '\n' ' ')" >>"$evidence/interests-outcomes.txt" ;;
     esac
   done
+}
+# interests_unanswered OUTCOMES prints, as one JSON array, each session whose samples went
+# unanswered 3 or more times in a row, with its longest such run. The sampler leaves 5 s between a
+# session's samples in any case; one or two failures widen that gap to 10 or 15 s, a blip the
+# evidence keeps; a third in a row is a listener not answering for that session, which the audit
+# cannot vouch past. An ok or absent answer ends a run.
+interests_unanswered() {
+  awk -v limit=3 '
+    $3 == "error" {
+      run[$2]++
+      if (run[$2] == 1) from[$2] = $1
+      if (run[$2] > worst[$2]) { worst[$2] = run[$2]; wfrom[$2] = from[$2]; wto[$2] = $1; wlast[$2] = $0 }
+      next
+    }
+    { run[$2] = 0 }
+    END { for (s in worst) if (worst[s] >= limit) printf "%s\t%d\t%s\t%s\t%s\n", s, worst[s], wfrom[s], wto[s], wlast[s] }
+  ' "$1" | jq -R -s -c '[split("\n")[] | select(. != "") | split("\t") | {session: .[0], consecutive: (.[1] | tonumber), from: .[2], to: .[3], last: .[4]}]'
 }
 # start_interests_sampler samples every 5 s while the daemon runs, besides every checkpoint's pass,
 # so a session that registers and ends between two checkpoints is still seen.
 start_interests_sampler() {
+  : >>"$evidence/interests-outcomes.txt"
   (
     trap - EXIT ERR
     set +e
@@ -1417,6 +1441,16 @@ caught=$(interests_outside "$evidence/controls/interests-outside.jsonl")
 jq -e 'any(.[]; .topic == "notifications.dispatch.issue.AGENTC-1")' <<<"$caught" >/dev/null ||
   fail "the interest filter let an outside topic through: $caught"
 note "the interest filter's control: an added topic outside the run (notifications.dispatch.issue.AGENTC-1) is caught"
+# The unanswered-sample rule: a blip passes, a listener that stops answering fails.
+printf '%s\n' "t1 control ok" "t2 control error unreachable: timeout" "t3 control ok" "t4 control error answered 503: busy" \
+  "t5 control error answered 503: busy" "t6 control absent" >"$evidence/controls/interests-outcomes-transient.txt"
+printf '%s\n' "t1 control ok" "t2 control error unreachable: timeout" "t3 control error answered 503: busy" \
+  "t4 control error unreachable: timeout" "t5 control ok" >"$evidence/controls/interests-outcomes-sustained.txt"
+[ "$(interests_unanswered "$evidence/controls/interests-outcomes-transient.txt")" = "[]" ] ||
+  fail "two unanswered samples in a row failed the sample rule, which only three in a row do"
+[ "$(interests_unanswered "$evidence/controls/interests-outcomes-sustained.txt" | jq length)" = 1 ] ||
+  fail "three unanswered samples in a row passed the sample rule"
+note "the unanswered-sample rule's controls: two failures in a row pass, three fail; this run had $(grep -c ' error ' "$evidence/interests-outcomes.txt") unanswered samples of $(grep -c . "$evidence/interests-outcomes.txt")"
 # The collector itself, on real data: an actor that did write outside LEGSMOKE during the run,
 # counted as one of the run's writers, must be found. Nothing is written for it.
 find_outside_writer
