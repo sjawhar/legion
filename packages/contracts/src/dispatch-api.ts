@@ -1478,6 +1478,20 @@ export interface CreateAgentMessageInput {
   readonly in_reply_to?: string;
 }
 
+/** The targeted session's answer to one delivery attempt of a message
+ *  (`POST /api/v1/messages/{id}/reply`). It is the only route that carries a reply into an
+ *  issue-less conversation - a human's direct message to a session - because every other message
+ *  route hangs its message off an issue. The server accepts it only from a bearer whose `actor`
+ *  is the session the attempt was delivered to, and threads the reply under the message it
+ *  answers. Only the answering form is modelled here; a host that could not deliver the frame
+ *  reports that failure through its own delivery reply, not through a Dispatch tool. */
+export interface MessageReplyInput {
+  readonly body: string;
+  /** The delivery attempt being answered; attempts count from 1. */
+  readonly attempt: number;
+  readonly actor: Actor;
+}
+
 interface CreateArtifactOptions {
   readonly name: string;
   readonly summary?: string;

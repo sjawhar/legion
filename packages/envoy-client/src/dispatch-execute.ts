@@ -83,6 +83,7 @@ type ToolArguments = {
   readonly labels?: unknown;
   readonly external_links?: unknown;
   readonly ops?: unknown;
+  readonly in_reply_to?: unknown;
 } & Record<string, unknown>;
 
 type ExecutorEnvironment = {
@@ -897,6 +898,21 @@ async function resolveOwnerArguments(
       owner: issue === undefined ? null : { kind: "issue", issue },
     };
   }
+  // A session answering a human's direct message names only the message it answers, by its bare
+  // id: that conversation belongs to no issue, so there is no owner to resolve and LEGION_ISSUE
+  // would attach the reply to an unrelated one. The `dispatch_message` case sends that call
+  // through POST /api/v1/messages/{id}/reply, the one route that carries a reply without an
+  // issue, and this is the only way it is left without an owner. A
+  // `dispatch://KEY/message/<id>` names the issue its message lives on, so it is not a direct
+  // message and keeps the issue path.
+  const replyTarget = args.in_reply_to;
+  if (
+    tool === "dispatch_message" &&
+    typeof replyTarget === "string" &&
+    !replyTarget.startsWith("dispatch://")
+  ) {
+    return { args, ref, owner: null };
+  }
   const legionIssue = env.LEGION_ISSUE;
   if (!legionIssue) {
     problems.push(ownerRequiredProblem);
@@ -1525,7 +1541,8 @@ export async function executeDispatchTool(
             issue.input === undefined) ||
           (issue.code === "custom" &&
             issue.path.length === 0 &&
-            issue.message.startsWith("Exactly one of issue and project is required"))
+            (issue.message.startsWith("Exactly one of issue and project is required") ||
+              issue.message.startsWith("issue is required unless in_reply_to")))
         )
     );
     problems.push(...formatZodIssues(issues, schema));
@@ -2063,9 +2080,39 @@ export async function executeDispatchTool(
     }
     case "dispatch_message": {
       const inReplyTo = messageInReplyTo(args);
+      const body = stringArg(args, "body");
+      if (owner === null && inReplyTo !== undefined) {
+        // No owner beside an `in_reply_to`: `resolveOwnerArguments` left it that way because the
+        // caller named only the message it answers, which is a human's direct message to this
+        // session - a conversation with no issue to post into. `POST /messages/{id}/reply` is
+        // the route for it, and it names the delivery attempt being answered. A direct message
+        // is delivered as attempt 1 when it is created, and a later retry never retires that
+        // row, so 1 is the attempt this session was handed. Dispatch takes the reply as proof
+        // the message arrived whatever that attempt's receipt says.
+        const reply = await client.messageReply(inReplyTo, { body, attempt: 1, actor });
+        // One reply per delivery: an attempt that already carries one is answered with the
+        // reply Dispatch stored, at 200, and nothing is posted. The stored body is how that
+        // reads apart from a fresh one - often the host's own automatic BTW answer, sent
+        // before the model got here - so say what happened instead of reporting a send that
+        // did not occur. A resend of byte-identical text is indistinguishable and harmless:
+        // the thread holds exactly the one reply either way.
+        if (reply.body !== body) {
+          return {
+            text:
+              `Message ${inReplyTo} was already answered by message ${reply.id}; Dispatch kept ` +
+              "that reply and posted nothing. Wait for their next message rather than answering " +
+              "this one again.",
+            details: { message: reply.id, in_reply_to: inReplyTo, posted: false },
+          };
+        }
+        return {
+          text: `Replied to message ${inReplyTo} with message ${reply.id}`,
+          details: { message: reply.id, in_reply_to: inReplyTo, posted: true },
+        };
+      }
       const issueKey = issue();
       const message = await client.message(issueKey, {
-        body: stringArg(args, "body"),
+        body,
         ...(inReplyTo === undefined ? {} : { in_reply_to: inReplyTo }),
         actor,
       });

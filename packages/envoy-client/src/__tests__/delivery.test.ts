@@ -482,7 +482,7 @@ describe("renderInbound dispatch events", () => {
     }
   });
 
-  test("renders an issue-less targeted BTW with a delivery reply address", () => {
+  test("renders an issue-less targeted BTW with a reply address and an issue-less reply hint", () => {
     const frame = JSON.parse(targetedDispatchPayload) as {
       event: { issue_key: string | null; payload: { issue_key: string | null; target: string } };
     };
@@ -511,7 +511,12 @@ describe("renderInbound dispatch events", () => {
       replyFields: {},
       issueKey: null,
     });
-    expect(decoded.envoy.reply_with).toBeUndefined();
+    // The conversation has no issue, so the hint names only the message the answer threads
+    // under; `dispatch_message` takes that shape and replies through the delivery route.
+    expect(decoded.envoy.reply_with).toEqual({
+      tool: "dispatch_message",
+      args: { in_reply_to: targetedMessageID, body: "..." },
+    });
   });
 
   test("keeps rendering a targeted Dispatch message when its payload grows", () => {
