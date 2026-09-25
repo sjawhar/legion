@@ -2089,3 +2089,34 @@ func TestRewatchOntoARecreatedBucketRefillsTheCache(t *testing.T) {
 		t.Fatalf("the cache kept a session the recreated bucket does not hold: %v", got)
 	}
 }
+
+// A Rewatch that cannot open the role bucket on the new connection moves nothing: the interest
+// watcher and both bucket handles stay on the connection they were on, so the registry keeps
+// working there instead of writing interests through one connection and roles through another.
+func TestARewatchThatCannotOpenTheRoleBucketMovesNothing(t *testing.T) {
+	first, closeFirst := connectNATS(t)
+	defer closeFirst()
+	reg, err := Open(first, WithReplicas(1), withTestBuckets(t))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(reg.StopWatch)
+	js, err := first.JetStream()
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	if err := js.DeleteKeyValue(testBuckets(t).roles); err != nil {
+		t.Fatalf("delete the role bucket: %v", err)
+	}
+	second, closeSecond := connectNATS(t)
+	if err := reg.Rewatch(second); err == nil {
+		t.Fatal("Rewatch onto a connection without the role bucket succeeded")
+	}
+	closeSecond()
+	if _, err := reg.Upsert(Interest{SessionID: "ses_still_first", MachineID: "m1"}, []string{"notifications.agent.x"}); err != nil {
+		t.Fatalf("Upsert after the failed Rewatch: %v; the interest handle moved to the closed connection", err)
+	}
+	if err := reg.WatchErr(); err != nil {
+		t.Fatalf("WatchErr after the failed Rewatch: %v; the interest watcher moved to the closed connection", err)
+	}
+}

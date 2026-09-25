@@ -3,6 +3,7 @@ package kvwatch_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -323,10 +324,28 @@ func TestStopMakesTheEndSilentAndRewatchANoOp(t *testing.T) {
 // has replaced the watcher, its late deliveries are dropped and the new watcher's scan delivers
 // each key once. Without that, a watcher replaced for a recreated bucket would apply old-bucket
 // entries after the reset that emptied the cache for the new one.
+//
+// The first watcher's apply of late1 is held while late2..late41 queue in its updates. The Rewatch
+// arms its watcher (the bucket's stream gains a consumer) and then waits for that apply, because
+// the switch takes applyMu. Every other apply takes 10 ms, so once late1's is released the first
+// watcher applies at most an entry or two before the Rewatch, blocked for far longer than
+// sync.Mutex's 1 ms starvation threshold, is handed the lock; every entry the first watcher
+// delivers after the switch must be dropped.
 func TestAReplacedWatchersBufferedEntryIsDropped(t *testing.T) {
 	_, uri := testnats.Start(t)
-	_, kv := bucket(t, uri)
+	firstConn, kv := bucket(t, uri)
 	secondConn, _ := bucket(t, uri)
+	js, err := firstConn.JetStream()
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	consumers := func() int {
+		info, err := js.StreamInfo("KV_kvwatch-test")
+		if err != nil {
+			t.Fatalf("stream info: %v", err)
+		}
+		return info.State.Consumers
+	}
 
 	var mu sync.Mutex
 	counts := map[string]int{}
@@ -348,6 +367,8 @@ func TestAReplacedWatchersBufferedEntryIsDropped(t *testing.T) {
 				close(entered)
 				<-release
 			}
+		} else {
+			time.Sleep(10 * time.Millisecond)
 		}
 		mu.Lock()
 		counts[entry.Key()]++
@@ -370,19 +391,133 @@ func TestAReplacedWatchersBufferedEntryIsDropped(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the first watcher never applied late1")
 	}
-	// late2 waits in the first watcher's updates while its apply of late1 is held.
-	if _, err := kv.Put("late2", []byte("2")); err != nil {
-		t.Fatalf("put late2: %v", err)
+	const queued = 40
+	keys := make([]string, 0, queued)
+	for i := range queued {
+		key := fmt.Sprintf("late%d", i+2)
+		keys = append(keys, key)
+		if _, err := kv.Put(key, []byte("1")); err != nil {
+			t.Fatalf("put %s: %v", key, err)
+		}
 	}
+	// The keys wait in the first watcher's updates while its apply of late1 is held.
 	time.Sleep(300 * time.Millisecond)
-	if _, err := w.Rewatch(secondConn); err != nil {
-		t.Fatalf("Rewatch: %v", err)
-	}
+	before := consumers()
+	rewatched := make(chan error, 1)
+	go func() {
+		_, err := w.Rewatch(secondConn)
+		rewatched <- err
+	}()
+	eventually(t, "the Rewatch's watcher", func() bool { return consumers() > before })
+	time.Sleep(300 * time.Millisecond)
 	releaseApply()
+	select {
+	case err := <-rewatched:
+		if err != nil {
+			t.Fatalf("Rewatch: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Rewatch never returned")
+	}
 
-	eventually(t, "the new watcher's scan to apply late2", func() bool { return count("late2") > 0 })
+	last := keys[len(keys)-1]
+	eventually(t, "the new watcher's scan to apply "+last, func() bool { return count(last) > 0 })
 	time.Sleep(300 * time.Millisecond)
-	if got := count("late2"); got != 1 {
-		t.Fatalf("late2 applied %d times, want once: the replaced watcher's buffered copy reached the cache", got)
+	once := 0
+	for _, key := range keys {
+		switch got := count(key); got {
+		case 1:
+			once++
+		case 2:
+		default:
+			t.Fatalf("%s applied %d times, want once by the new watcher's scan and at most once before the switch", key, got)
+		}
+	}
+	if once == 0 {
+		t.Fatalf("every one of %d queued keys was applied twice: the replaced watcher's buffered copies reached the cache", queued)
+	}
+}
+
+// slowStopKV hands out watchers whose Stop waits until released, standing in for the consumer
+// delete that nats.go's Unsubscribe sends for a library-created consumer.
+type slowStopKV struct {
+	natsgo.KeyValue
+	entered, release chan struct{}
+}
+
+func (k *slowStopKV) WatchAll(opts ...natsgo.WatchOpt) (natsgo.KeyWatcher, error) {
+	w, err := k.KeyValue.WatchAll(opts...)
+	if err != nil {
+		return nil, err
+	}
+	return &slowStopWatcher{KeyWatcher: w, entered: k.entered, release: k.release}, nil
+}
+
+type slowStopWatcher struct {
+	natsgo.KeyWatcher
+	entered, release chan struct{}
+	once             sync.Once
+}
+
+func (w *slowStopWatcher) Stop() error {
+	w.once.Do(func() { close(w.entered) })
+	<-w.release
+	return w.KeyWatcher.Stop()
+}
+
+// Two Rewatches overlap after the bucket was recreated -- the bus's reconnect hook and the
+// listener's self-health rebuild both rewatch, and nothing serializes them. A sees the new stream
+// and is still stopping the replaced watcher when B arms its own and applies the new bucket's scan.
+// The new bucket's key stays in the cache, after exactly one reset: B's watcher never delivers it
+// again, and Err stays nil, so nothing would repair a reset that ran after B's scan.
+func TestConcurrentRewatchesOntoARecreatedBucketKeepTheNewKeys(t *testing.T) {
+	_, uri := testnats.Start(t)
+	conn, kv := bucket(t, uri)
+	if _, err := kv.Put("ghost", []byte("1")); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	slow := &slowStopKV{KeyValue: kv, entered: make(chan struct{}), release: make(chan struct{})}
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(slow.release) }) }
+	t.Cleanup(release)
+	into := newSeen()
+	w := kvwatch.New("test cache", slow, into.apply, into.reset)
+	w.Start()
+	eventually(t, "the ghost key", func() bool { return into.has("ghost") })
+
+	js, err := conn.JetStream()
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	if err := js.DeleteKeyValue("kvwatch-test"); err != nil {
+		t.Fatalf("delete bucket: %v", err)
+	}
+	recreated, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: "kvwatch-test"})
+	if err != nil {
+		t.Fatalf("recreate bucket: %v", err)
+	}
+	if _, err := recreated.Put("fresh", []byte("1")); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+
+	doneA := make(chan error, 1)
+	go func() { _, err := w.Rewatch(conn); doneA <- err }()
+	select {
+	case <-slow.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Rewatch A never stopped the replaced watcher")
+	}
+	if _, err := w.Rewatch(conn); err != nil {
+		t.Fatalf("Rewatch B: %v", err)
+	}
+	eventually(t, "B's scan", func() bool { return into.has("fresh") })
+	release()
+	if err := <-doneA; err != nil {
+		t.Fatalf("Rewatch A: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if !into.has("fresh") || into.has("ghost") || into.resetCount() != 1 {
+		t.Fatalf("fresh %v, ghost %v, resets %d, Err %v: want the new bucket's key kept after one reset",
+			into.has("fresh"), into.has("ghost"), into.resetCount(), w.Err())
 	}
 }

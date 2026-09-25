@@ -279,13 +279,11 @@ func (r *Registry) deleteInterest(sessionID string) error {
 // the server no longer has. The listener's reconnect hook calls this, so the cache follows the
 // bucket from the reconnect on.
 func (r *Registry) Rewatch(conn *nats.Conn) error {
-	kv, err := r.watcher.Rewatch(conn)
-	if err != nil {
-		return err
+	// The role bucket opens first, so a failure leaves both handles on the previous connection
+	// rather than the interests on conn and the roles behind.
+	if conn == nil {
+		return errors.New("interest registry: no connection")
 	}
-	r.kvMu.Lock()
-	r.kv = kv
-	r.kvMu.Unlock()
 	js, err := conn.JetStream(nats.MaxWait(10 * time.Second))
 	if err != nil {
 		return fmt.Errorf("open role registry JetStream: %w", err)
@@ -294,7 +292,12 @@ func (r *Registry) Rewatch(conn *nats.Conn) error {
 	if err != nil {
 		return fmt.Errorf("open role KV bucket: %w", err)
 	}
+	kv, err := r.watcher.Rewatch(conn)
+	if err != nil {
+		return err
+	}
 	r.kvMu.Lock()
+	r.kv = kv
 	r.roleKV = roleKV
 	r.kvMu.Unlock()
 	return nil

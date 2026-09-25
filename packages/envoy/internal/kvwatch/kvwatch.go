@@ -28,7 +28,7 @@ type Watcher struct {
 	readyOnce sync.Once
 
 	// applyMu serializes apply and reset, and lets watch wait out an entry already being applied
-	// by the watcher it replaces.
+	// by the watcher it replaces. It is taken before mu.
 	applyMu sync.Mutex
 
 	// first is the handle Start watches.
@@ -166,7 +166,11 @@ func (w *Watcher) Stop() {
 }
 
 // watch arms a watcher on kv and replaces the current one. The replaced watcher is stopped, and an
-// entry it still delivers is dropped.
+// entry it still delivers is dropped. The switch to the new watcher and, for a recreated bucket,
+// the cache reset happen under applyMu, so no apply runs between them: an apply the replaced
+// watcher already started finishes first, and a watch that switches after this one computes
+// recreated against the new stream and applies only after the reset. Two Rewatches do overlap,
+// the bus's reconnect hook and the listener's self-health rebuild.
 func (w *Watcher) watch(kv nats.KeyValue) error {
 	if kv == nil {
 		return errors.New(w.name + ": KV unavailable")
@@ -185,6 +189,7 @@ func (w *Watcher) watch(kv nats.KeyValue) error {
 	if err != nil {
 		return err
 	}
+	w.applyMu.Lock()
 	w.mu.Lock()
 	if w.stopped {
 		// Stop ran while WatchAll was starting. Stopping this watcher would be a server request
@@ -192,6 +197,7 @@ func (w *Watcher) watch(kv nats.KeyValue) error {
 		// updates are read and dropped, since nats.go blocks a watcher whose 256-entry buffer is
 		// full and a drain waits for every pending message to be delivered.
 		w.mu.Unlock()
+		w.applyMu.Unlock()
 		go func() {
 			for range watcher.Updates() {
 			}
@@ -206,17 +212,17 @@ func (w *Watcher) watch(kv nats.KeyValue) error {
 	w.stream = stream
 	w.err = nil
 	w.mu.Unlock()
+	if recreated {
+		w.reset()
+	}
+	w.applyMu.Unlock()
+	if recreated {
+		slog.Info(w.name+" bucket was recreated; its cache is refilled from the new bucket",
+			slog.String("bucket", w.bucket))
+	}
 	if previous != nil {
 		// Stop reports a consumer the server has lost to its caller, never at ERROR.
 		_ = previous.Stop()
-	}
-	if recreated {
-		// The generation has moved, so no entry from the replaced watcher is applied after this.
-		w.applyMu.Lock()
-		w.reset()
-		w.applyMu.Unlock()
-		slog.Info(w.name+" bucket was recreated; its cache is refilled from the new bucket",
-			slog.String("bucket", w.bucket))
 	}
 	go w.consume(watcher, generation)
 	return nil
