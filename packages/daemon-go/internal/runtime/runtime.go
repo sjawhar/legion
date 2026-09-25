@@ -22,16 +22,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 )
 
-// ControllerLaunch says which side starts the interactive controller: the daemon opens it in a
-// pane it owns ("daemon", tmux), or the operator starts it on their own machine against the
-// daemon's API ("operator", a cluster the operator has no terminal in).
-type ControllerLaunch string
-
-const (
-	ControllerLaunchDaemon   ControllerLaunch = "daemon"
-	ControllerLaunchOperator ControllerLaunch = "operator"
-)
-
 // Runtime is what the supervisor has instead of a process table. Every method is about one
 // agent's process, addressed by the locator the runtime itself minted, except `Release`, which is
 // about a claim whether or not a process runs for it, and `Observe` and `ReconcileOrphans`, which
@@ -85,8 +75,6 @@ type Runtime interface {
 	// with, in the place the working copy actually lives (which under a sandbox is not a
 	// directory the daemon can see).
 	AdoptWorkingCopy(ctx context.Context, loc Locator, id GitIdentity) error
-	// ControllerLaunch says which side starts the controller under this runtime.
-	ControllerLaunch() ControllerLaunch
 	// ProvisionsWorkspaces is whether the runtime provisions each claim's workspace where its
 	// process runs (a pod's init containers, on the tree volume). When it does, the daemon
 	// provisions and removes none on its own host.

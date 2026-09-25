@@ -266,10 +266,6 @@ func lookPath(command, searchPath string) (string, error) {
 // Socket is the private server's socket and session name, `legion-<project>`.
 func (r *Runtime) Socket() string { return r.socket }
 
-// ControllerLaunch is "daemon": under tmux the daemon opens the interactive controller in a pane
-// of its own server.
-func (r *Runtime) ControllerLaunch() runtime.ControllerLaunch { return runtime.ControllerLaunchDaemon }
-
 // ProvisionsWorkspaces is false: a pane runs in a workspace the daemon provisioned under its own
 // state directory before the launch.
 func (r *Runtime) ProvisionsWorkspaces() bool { return false }

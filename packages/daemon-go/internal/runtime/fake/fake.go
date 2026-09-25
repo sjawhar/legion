@@ -53,8 +53,6 @@ type ProbeResult struct {
 
 // Runtime is the fake. The zero value is not usable; call NewRuntime.
 type Runtime struct {
-	// Launch is what ControllerLaunch answers. NewRuntime sets it to "daemon", the tmux answer.
-	Launch runtime.ControllerLaunch
 	// InPod is what ProvisionsWorkspaces answers: false, the tmux answer, unless a test sets it.
 	InPod bool
 	// Now stamps the observations the fake mints. NewRuntime sets it to time.Now; a test with a
@@ -75,7 +73,6 @@ type Runtime struct {
 // NewRuntime is a fake ready to record: no script, controller launched by the daemon, real time.
 func NewRuntime() *Runtime {
 	fake := &Runtime{
-		Launch:   runtime.ControllerLaunchDaemon,
 		Now:      time.Now,
 		failures: map[string]error{},
 	}
@@ -325,13 +322,6 @@ func (r *Runtime) ProvisionsWorkspaces() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.InPod
-}
-
-func (r *Runtime) ControllerLaunch() runtime.ControllerLaunch {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.calls = append(r.calls, Call{Method: "ControllerLaunch"})
-	return r.Launch
 }
 
 // mint is the locator an unscripted spawn or resume hands back: tmux-shaped, because that is a

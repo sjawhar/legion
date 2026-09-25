@@ -26,6 +26,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/controller"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
@@ -802,7 +803,53 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 	if workflow != nil {
 		group.Go(func() error { return workflow.run(serving) })
 	}
+	group.Go(func() error {
+		watchController(serving, st, cfg, p, s.log)
+		return nil
+	})
 	return group.Wait()
+}
+
+// watchController is the daemon's one line about the controller it never launches, under either
+// runtime (the shipped logControllerNotRegistered, packages/daemon/src/daemon/processes.ts:
+// 2891-2904): every sweep interval it reads the project's controller record, and when no session
+// holds it, or the Envoy role registry says the session is gone, it says so and how to start one,
+// at most once per worker boot timeout. The Prober logs why each Gone or Unknown verdict was
+// reached; Unknown is never a death verdict, so it says nothing more.
+func watchController(ctx context.Context, st *store.Store, cfg config.Config, p plan, log *slog.Logger) {
+	prober := controller.NewProber(controller.ProberOptions{
+		EnvoyURL: cfg.EnvoyURL, EnvoyToken: p.secrets["ENVOY_TOKEN"], Project: p.project, BootTimeout: cfg.WorkerBootTimeout, Log: log,
+	})
+	ticker := time.NewTicker(p.orphanSweep)
+	defer ticker.Stop()
+	var logged time.Time
+	for {
+		record, _, err := st.Controller(ctx, p.project)
+		liveness := controller.Gone
+		switch {
+		case err != nil:
+			liveness = controller.Unknown
+			if ctx.Err() == nil {
+				log.Warn("controller: read its record", "error", err)
+			}
+		case record.Registered():
+			liveness = prober.Probe(ctx, record.Session)
+		}
+		switch liveness {
+		case controller.Alive:
+			logged = time.Time{}
+		case controller.Gone:
+			if logged.IsZero() || time.Since(logged) >= cfg.WorkerBootTimeout {
+				log.Warn("controller not registered; run legion controller start", "project", cfg.Project)
+				logged = time.Now()
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 // source answers the state route out of the daemon's own store: the daemon itself, the cap it
@@ -866,13 +913,11 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 		StartedAt:     s.startedAt,
 	}
 	state.Admission.Cap = s.admissionCap
-	controller, found, err := s.store.ControllerTx(ctx, tx, s.projectToken)
+	controller, _, err := s.store.ControllerTx(ctx, tx, s.projectToken)
 	if err != nil {
 		return api.State{}, err
 	}
-	if found {
-		state.ControllerLocator = api.ControllerLocatorOf(s.runtime, controller)
-	}
+	state.ControllerLocator = api.ControllerLocatorOf(s.runtime, controller)
 	return state, nil
 }
 
