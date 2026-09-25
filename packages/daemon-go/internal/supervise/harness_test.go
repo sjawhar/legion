@@ -18,15 +18,16 @@ import (
 )
 
 const (
-	testToken   claim.Token = "legion-LEGION-209-implementer"
-	rootToken   claim.Token = "legion-LEGION-208-architect"
-	testBoot                = 120 * time.Second
-	testRPC                 = 5 * time.Second
-	testProbe               = 30 * time.Second
-	intervals               = 3
-	deadline                = testBoot * intervals
-	session                 = "ses_implementer"
-	sessionFile             = "/state/sessions/implementer.jsonl"
+	testToken     claim.Token = "legion-LEGION-209-implementer"
+	rootToken     claim.Token = "legion-LEGION-208-architect"
+	testBoot                  = 120 * time.Second
+	testRPC                   = 5 * time.Second
+	testProbe                 = 30 * time.Second
+	testStopGrace             = 60 * time.Second
+	intervals                 = 3
+	deadline                  = testBoot * intervals
+	session                   = "ses_implementer"
+	sessionFile               = "/state/sessions/implementer.jsonl"
 )
 
 var epoch = time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
@@ -302,6 +303,7 @@ func testTimeouts() Timeouts {
 		RegistrationIntervals: intervals,
 		RPC:                   testRPC,
 		Probe:                 testProbe,
+		Stop:                  testStopGrace,
 	}
 }
 

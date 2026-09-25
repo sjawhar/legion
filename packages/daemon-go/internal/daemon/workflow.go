@@ -21,6 +21,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/notify"
+	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/store"
@@ -152,6 +153,27 @@ func phaseHolds(pool *pgxpool.Pool, records record.Store) func(context.Context, 
 			return true, nil
 		}
 		return issue.Phase == d.Phase, nil
+	}
+}
+
+// suspendApplies answers supervise's Deps.SuspendApplies from the issue record: a transition's
+// suspend stopped a role because the issue left the phases that role works, so once the issue is
+// back in one of them the role has been handed its work again and the suspend must not stop it
+// there. It is the workflow's one predicate (workflow.SuspendApplies), asked here because the
+// machine asks it where the stop happens — for an agent in a turn, a turn after the row ran.
+//
+// A claim on an issue the daemon does not record is the operator's own spawn, whose suspend is
+// nobody's to drop.
+func suspendApplies(pool *pgxpool.Pool, records record.Store) func(context.Context, string, phase.Phase) (bool, error) {
+	return func(ctx context.Context, key string, leaves phase.Phase) (bool, error) {
+		issue, err := recordedIssue(ctx, pool, records, key)
+		if err != nil {
+			return false, fmt.Errorf("read %s for the phase its suspend leaves: %w", key, err)
+		}
+		if issue == nil {
+			return true, nil
+		}
+		return workflow.SuspendApplies(leaves, issue.Phase), nil
 	}
 }
 

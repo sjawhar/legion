@@ -77,6 +77,8 @@ const (
 	TimerTurn TimerKind = "turn"
 	// TimerProbe is the re-probe of an uncertain process.
 	TimerProbe TimerKind = "probe"
+	// TimerSuspend bounds a suspension waiting for the turn it arrived during to end.
+	TimerSuspend TimerKind = "suspend"
 )
 
 // Timer is a timer the machine armed, firing.
@@ -115,7 +117,14 @@ type RequestReady struct {
 }
 
 // RequestSuspend stops the claim's process and keeps its session.
-type RequestSuspend struct{ Claim claim.Token }
+type RequestSuspend struct {
+	Claim claim.Token
+	// Leaves is the phase a transition's suspend ends, empty for a linger's, a leave's, and an
+	// operator's own. It travels to the machine because the question it answers — whether the
+	// issue is back in a phase this role works — is asked where the stop happens, which for a
+	// suspension that waits for a turn is a turn later than where the row ran.
+	Leaves phase.Phase
+}
 
 // RequestResume relaunches a suspended claim's session.
 type RequestResume struct{ Claim claim.Token }
@@ -206,6 +215,7 @@ const (
 	onDeadline      eventKind = timerPrefix + eventKind(TimerRegistration)
 	onTurnTimer     eventKind = timerPrefix + eventKind(TimerTurn)
 	onProbeTimer    eventKind = timerPrefix + eventKind(TimerProbe)
+	onSuspendTimer  eventKind = timerPrefix + eventKind(TimerSuspend)
 	onSpawn         eventKind = "request_spawn"
 	onRegister      eventKind = "request_register"
 	onReady         eventKind = "request_ready"
@@ -383,7 +393,8 @@ func fillTable(t *builder) {
 	t.ignore(onTurnStart, "the agent is not ready, so no delivery is in flight", unready...)
 	t.ignore(onTurnStart, noProcess, gone...)
 
-	t.row(onTurnEnd, "the turn ended", turnEnded, []ClaimState{StateIdle, StateWorking}, StateWorking)
+	// A suspension that was waiting for this turn runs here, so suspended is one of its ends.
+	t.row(onTurnEnd, "the turn ended", turnEnded, []ClaimState{StateIdle, StateWorking, StateSuspended}, StateWorking)
 	t.ignore(onTurnEnd, "no turn is in flight", prompted...)
 	t.ignore(onTurnEnd, "the agent is not ready, so no turn of a delivery is in flight", unready...)
 	t.ignore(onTurnEnd, noProcess, gone...)
@@ -441,6 +452,12 @@ func fillTable(t *builder) {
 	t.row(onSuspend, "suspend: stop the process, keep the session", suspend, []ClaimState{StateSuspended},
 		StateRegistered, StateReady, StateWorking, StateIdle)
 	t.row(onSuspend, "already suspended", nothingToDo, nil, StateSuspended)
+
+	t.row(onSuspendTimer, "the turn did not end within the stop grace; suspend anyway", suspendWaitedOut,
+		[]ClaimState{StateSuspended}, StateWorking)
+	t.ignore(onSuspendTimer, "no suspension is waiting for a turn in this state",
+		StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected, StateRegistered, StateReady,
+		StateIdle, StateSuspended, StateFailed, StateRetired)
 	t.ignore(onSuspend, notRegistered,
 		StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected)
 	t.ignore(onSuspend, failedClaim, StateFailed)
@@ -626,6 +643,9 @@ func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 func turnEnded(m *Machine, ctx context.Context, _ Event) error {
 	m.askFirst = false
 	m.claim.State = StateIdle
+	if m.suspending {
+		return m.runArmedSuspension(ctx)
+	}
 	if err := m.persist(ctx); err != nil {
 		return err
 	}
@@ -713,7 +733,60 @@ func reready(m *Machine, ctx context.Context, _ Event) error { return m.sendPend
 // still pending unconfirmed (acknowledged and then refused, or lost to the transport) is retired
 // with it (settle): the next resume is started with its new phase's task, never handed the
 // finished one's.
-func suspend(m *Machine, ctx context.Context, _ Event) error {
+// suspend stops the process and keeps the session, unless the agent is in a turn: a phase ends by
+// its worker reporting it and the daemon suspends that worker as it records the report, so the
+// running turn is the one that made that call. Stopping it there ends the transcript mid-call and
+// a resumed session comes back holding a call with no answer, the call that said the phase was
+// done. The suspension is armed instead, runs at the turn's end, and is bounded by the same grace
+// the runtime gives a process to end itself, so a turn that never ends still suspends.
+func suspend(m *Machine, ctx context.Context, ev Event) error {
+	leaves := phase.Phase("")
+	if request, ok := ev.(RequestSuspend); ok {
+		leaves = request.Leaves
+	}
+	if m.claim.State == StateWorking {
+		if !m.suspending {
+			m.suspending, m.suspendingLeaves = true, leaves
+			m.arm(TimerSuspend, m.deps.Timeouts.Stop, "")
+			m.log.Info("supervise: the agent is in a turn; the suspension waits for it to end",
+				"claim", m.claim.Token, "leaves", leaves)
+		}
+		return nil
+	}
+	return m.suspendIfItApplies(ctx, leaves)
+}
+
+// suspendWaitedOut is the bound on that wait running out: the turn is still going, and the claim
+// is suspended anyway, which is what the daemon asked for.
+func suspendWaitedOut(m *Machine, ctx context.Context, _ Event) error {
+	m.log.Warn("supervise: the turn did not end within the stop grace; suspending anyway", "claim", m.claim.Token)
+	return m.runArmedSuspension(ctx)
+}
+
+// runArmedSuspension acts on a suspension that was waiting for a turn.
+func (m *Machine) runArmedSuspension(ctx context.Context) error {
+	leaves := m.suspendingLeaves
+	m.suspending, m.suspendingLeaves = false, ""
+	m.disarm(TimerSuspend)
+	return m.suspendIfItApplies(ctx, leaves)
+}
+
+// suspendIfItApplies stops the process unless the issue has come back to a phase this role works
+// while the suspend was on its way. The question is the workflow's one predicate, asked here
+// rather than where the row ran: an armed suspension acts a whole turn later, and by then the
+// answer the outbox read may be a phase old.
+func (m *Machine) suspendIfItApplies(ctx context.Context, leaves phase.Phase) error {
+	if m.deps.SuspendApplies != nil {
+		applies, err := m.deps.SuspendApplies(ctx, m.claim.Issue, leaves)
+		if err != nil {
+			return fmt.Errorf("read the phase of %s: %w", m.claim.Issue, err)
+		}
+		if !applies {
+			m.log.Info("supervise: the issue is back in a phase this role works; the suspend is dropped",
+				"claim", m.claim.Token, "issue", m.claim.Issue, "leaves", leaves)
+			return nil
+		}
+	}
 	if err := m.suspendProcess(ctx); err != nil {
 		return fmt.Errorf("suspend %s: %w", m.claim.Token, err)
 	}

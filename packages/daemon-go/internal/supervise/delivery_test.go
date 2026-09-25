@@ -714,3 +714,69 @@ func TestDroppingATaskForItsPhaseAlsoDropsTheQuestionARestartLeft(t *testing.T) 
 		t.Fatalf("pending = %+v, want the operator's task unconfirmed: the agent's own turn is not its delivery's", p)
 	}
 }
+
+// A phase ends by its worker reporting it, and the daemon suspends that worker as soon as it
+// records the report — while the turn that made the report is still running, so Oh My Pi is
+// stopped before it writes the tool result of the call that reported it. The transcript then ends
+// mid-call, and a session resumed from it comes back holding a call with no answer: the call that
+// said the phase was done. The suspension waits for that turn to end.
+func TestASuspensionWaitsForTheTurnThatIsRunning(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateReady)
+	h.must(StreamTurnStart{Claim: testToken})
+	h.wantState(StateWorking)
+
+	h.must(RequestSuspend{Claim: testToken})
+
+	h.wantState(StateWorking)
+	if suspends := h.rt.CallsOf("Suspend"); len(suspends) != 0 {
+		t.Fatalf("the runtime was asked to suspend %d times while the turn ran, want none", len(suspends))
+	}
+
+	h.must(StreamTurnEnd{Claim: testToken})
+
+	h.wantState(StateSuspended)
+	if suspends := h.rt.CallsOf("Suspend"); len(suspends) != 1 {
+		t.Fatalf("the runtime was asked to suspend %d times after the turn ended, want once", len(suspends))
+	}
+}
+
+// A turn that never ends must not hold a suspension for ever: the wait is bounded by the same
+// grace the runtime gives a process to end itself, and when it runs out the process is stopped as
+// it was before.
+func TestASuspensionWaitingOnATurnIsBounded(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateReady)
+	h.must(StreamTurnStart{Claim: testToken})
+	h.must(RequestSuspend{Claim: testToken})
+	h.wantState(StateWorking)
+
+	h.advance(testStopGrace)
+
+	h.wantState(StateSuspended)
+	if suspends := h.rt.CallsOf("Suspend"); len(suspends) != 1 {
+		t.Fatalf("the runtime was asked to suspend %d times when the wait ran out, want once", len(suspends))
+	}
+}
+
+// An armed suspension serves the process it arrived for. A pane that dies takes that process with
+// it, and the claim comes back at a new generation with a new agent doing new work: the old
+// suspension must not stop it when that agent's first turn ends. Every other stale supervise
+// effect is fenced by generation; this one is dropped with the process it was armed for.
+func TestAnArmedSuspensionDoesNotActOnTheNextGeneration(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateReady)
+	h.must(StreamTurnStart{Claim: testToken})
+	h.must(RequestSuspend{Claim: testToken})
+	h.wantState(StateWorking)
+
+	h.observe(runtime.Gone)
+	h.relaunched()
+	h.must(StreamTurnStart{Claim: testToken})
+	h.must(StreamTurnEnd{Claim: testToken})
+
+	h.wantState(StateIdle)
+	if suspends := h.rt.CallsOf("Suspend"); len(suspends) != 0 {
+		t.Fatalf("the runtime was asked to suspend %d times, want none: the process it was armed for is gone", len(suspends))
+	}
+}

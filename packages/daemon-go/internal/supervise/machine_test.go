@@ -444,6 +444,12 @@ func TestSuspendKeepsTheSessionAndDropsTheLocator(t *testing.T) {
 			loc := h.locator()
 
 			h.must(RequestSuspend{Claim: testToken})
+			if state == StateWorking {
+				// The agent is in a turn, so the stop waits for it to end: see
+				// TestASuspensionWaitsForTheTurnThatIsRunning.
+				h.wantCalls("Suspend", 0)
+				h.must(StreamTurnEnd{Claim: testToken})
+			}
 
 			if suspend := h.wantCalls("Suspend", 1)[0]; suspend.Locator != loc {
 				t.Errorf("suspended %+v, want %+v", suspend.Locator, loc)

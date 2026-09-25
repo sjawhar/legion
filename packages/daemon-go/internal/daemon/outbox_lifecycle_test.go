@@ -289,6 +289,10 @@ func TestASameRoleBackwardMoveNeverStopsTheWorkerInItsNewPhase(t *testing.T) {
 	}
 	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
 	sup.deps.PhaseHolds = phaseHolds(pool, records)
+	// The suspend's own question is the machine's now, asked where it stops the process
+	// (LEGION-283): this move leaves a phase the implementer still works, so the suspend the
+	// transition queues is dropped there rather than skipped by the engine.
+	sup.deps.SuspendApplies = suspendApplies(pool, records)
 	clock := time.Now()
 	engine := workflow.New(records, workflow.Config{Project: "legion"}, quietLogger())
 	runner := &outbox{
@@ -396,6 +400,9 @@ func TestASuspendFromBeforeItsRoleWasHandedWorkAgainNeverActs(t *testing.T) {
 	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"}
 	putOutboxIssue(t, pool, records, issue)
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	// The suspend's own question — is the issue back in a phase this role works — is the
+	// machine's, asked where it stops the process (LEGION-283).
+	sup.deps.SuspendApplies = suspendApplies(pool, records)
 	token, err := claim.NewToken("legion", issue.Key, claim.RoleImplementer)
 	if err != nil {
 		t.Fatal(err)

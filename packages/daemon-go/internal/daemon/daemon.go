@@ -574,6 +574,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 	if cfg.DispatchURL != "" {
 		sup.deps.PhaseHolds = phaseHolds(st.Pool(), record.NewStore())
 		sup.deps.TreeClosable = treeClosable(st.Pool(), record.NewStore())
+		sup.deps.SuspendApplies = suspendApplies(st.Pool(), record.NewStore())
 	}
 	return &supervision{
 		cfg: cfg, log: log, plan: p, stream: listener, runtime: rt, supervisor: sup, tokens: tokens, claims: claims,

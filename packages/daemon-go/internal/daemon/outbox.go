@@ -20,7 +20,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
-	"github.com/sjawhar/legion/daemon/internal/workflow"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
@@ -348,21 +347,16 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		if !found {
 			return nil
 		}
-		// A transition's suspend, retried after the issue came back to a phase its role works,
-		// would stop the worker in the phase it now serves. The phase is read before the suspend
-		// acts, not in one transaction with it: a transition committing in between costs one
-		// suspend, which that transition's own start then resumes.
-		if !workflow.SuspendApplies(payload.Leaves, issue.Phase) {
-			r.log.Info("outbox suspend of a role the issue is back in; finished without acting", "row", row.ID, "issue", issue.Key,
-				"leaves", payload.Leaves, "phase", issue.Phase, "role", payload.Role)
-			return nil
-		}
 		switch machine.Claim().State {
 		case supervise.StateFailed, supervise.StateRetired:
 			// The claim runs nothing, so there is nothing to suspend.
 			return nil
 		}
-		if err := machine.Handle(ctx, supervise.RequestSuspend{Claim: token}); err != nil {
+		// The phase this suspend ends travels with it. Whether the suspend still applies — the
+		// issue may have come back to a phase its role works, where stopping the worker would
+		// take the phase it now serves — is asked by the machine at the moment it stops the
+		// process, which for an agent in a turn is a turn later than this row.
+		if err := machine.Handle(ctx, supervise.RequestSuspend{Claim: token, Leaves: payload.Leaves}); err != nil {
 			return fmt.Errorf("suspend claim %s: %w", token, err)
 		}
 		return nil

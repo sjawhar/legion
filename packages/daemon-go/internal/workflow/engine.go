@@ -618,18 +618,16 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	if err := e.clearHandoff(ctx, tx, issue.Key, RoleFor(row.To)); err != nil {
 		return err
 	}
-	// A move between two phases of one role (the implementer's implementing, retro, and production
-	// check, a backward move the worker itself asks for in its own turn) suspends nothing: the
-	// worker's launch does not depend on its phase, so it finishes that turn and the start hands it
-	// the new phase's task once the turn is over. A suspend queued here could fail, be retried after
-	// that task was sent, and stop the worker in the phase it now serves.
-	leaving, starting := RoleFor(from), RoleFor(row.To)
-	if leaving != starting {
-		if err := e.suspend(ctx, tx, issue, leaving, from); err != nil {
-			return err
-		}
+	// The suspend is stamped with the phase it leaves, and SuspendApplies decides on it: a move
+	// between two phases of one role (the implementer's implementing, retro and production check,
+	// a backward move the worker asks for in its own turn) leaves a phase that role still works,
+	// so the suspend is dropped where it would have acted rather than skipped here. One rule, in
+	// one place, covering the retry that arrives after the new phase's task was sent as well as
+	// the move itself.
+	if err := e.suspend(ctx, tx, issue, RoleFor(from), from); err != nil {
+		return err
 	}
-	if err := e.start(ctx, tx, issue, starting, task(issue, handoff, pr, reason)); err != nil {
+	if err := e.start(ctx, tx, issue, RoleFor(row.To), task(issue, handoff, pr, reason)); err != nil {
 		return err
 	}
 	if err := e.notice(ctx, tx, issue.Key, record.Notice{Kind: "phase-finished", Role: RoleFor(from), Phase: from, Summary: handoff.Verdict}); err != nil {

@@ -593,6 +593,14 @@ func TestAResumedWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *test
 			// Inside that turn the implementer finishes round 2, and the transition suspends it.
 			apply("handoff:implementer:implementing:2", intake.HandoffComplete{Issue: issue.Key, Role: claim.RoleImplementer, Claim: implementer, Commit: "impl-round-2"})
 			due("the move to testing")
+			// The suspension waits for the turn that reported the completion: stopping the agent
+			// inside it would end the transcript on the `handoff_complete` call, unanswered.
+			if got := machine.Claim().State; got != supervise.StateWorking {
+				t.Fatalf("during the reporting turn the implementer is %s, want working", got)
+			}
+			if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: implementer}); err != nil {
+				t.Fatalf("end the reporting turn: %v", err)
+			}
 			if got := machine.Claim().State; got != supervise.StateSuspended {
 				t.Fatalf("after round 2 the implementer is %s, want suspended", got)
 			}

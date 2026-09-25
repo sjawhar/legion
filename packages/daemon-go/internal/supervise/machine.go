@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -145,6 +146,9 @@ type Timeouts struct {
 	RPC time.Duration
 	// Probe is how soon an uncertain process is probed again (probe_interval_seconds).
 	Probe time.Duration
+	// Stop bounds a suspension waiting for the turn it arrived during to end
+	// (worker_stop_timeout_seconds, the same grace the runtime gives a process to end itself).
+	Stop time.Duration
 }
 
 // Deps is what a machine is built from.
@@ -173,6 +177,12 @@ type Deps struct {
 	// govern it at all: a task an operator delivered by hand is not the workflow's to drop. nil
 	// holds every delivery.
 	PhaseHolds func(ctx context.Context, c Claim, d Delivery) (bool, error)
+	// SuspendApplies is whether a suspend still applies, asked with the phase that suspend ends
+	// (workflow.SuspendApplies over the issue's current phase). It is asked where the stop
+	// happens rather than where the row runs, because an armed suspension waits out a whole turn
+	// before it acts. A daemon with no workflow configured supplies no answer, and every suspend
+	// applies.
+	SuspendApplies func(ctx context.Context, issue string, leaves phase.Phase) (bool, error)
 	// TreeClosable answers whether the operator may close this claim's tree: false refuses the
 	// close, and an error is the read itself failing, which the caller sees as a failure rather
 	// than a refusal. It is asked only for the operator's own close — the workflow's linger close
@@ -259,6 +269,14 @@ type Machine struct {
 	// a re-send, should that send fail.
 	send            *sending
 	helloDuringSend bool
+	// suspending is a suspension waiting for the turn it arrived during to end, carrying the
+	// phase that suspend ends (record.SuperviseRequest.Leaves, empty for a linger's or a leave's).
+	// A phase ends by its worker reporting it and the daemon suspends that worker as it records
+	// the report, so the turn still running is the one that made the call: stopping it there ends
+	// the transcript mid-call, and the resumed session comes back holding a call with no answer —
+	// the call that said the phase was done.
+	suspending       bool
+	suspendingLeaves phase.Phase
 	// askFirst is a restored claim whose agent an earlier daemon was talking to: a pending
 	// delivery it may already have sent, or a turn it saw start and may not have seen end. The
 	// machine asks the agent (get_state) before it acts on either.
@@ -646,6 +664,9 @@ func (m *Machine) retire(ctx context.Context) error {
 func (m *Machine) letGo() {
 	m.disarmAll()
 	m.forgetSend()
+	// A suspension waiting for a turn served the process being let go: the next generation's
+	// agent does new work, and the old suspension is not its answer.
+	m.suspending, m.suspendingLeaves = false, ""
 	if m.claim.Locator != nil {
 		m.previous, m.claim.Locator = m.claim.Locator, nil
 	}
