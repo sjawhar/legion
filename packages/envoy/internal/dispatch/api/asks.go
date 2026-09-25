@@ -268,7 +268,6 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		return
 	}
 	ask.OpenedEventID = &event.ID
-	event.Payload = ask
 	events = append(events, event)
 	var advice *writeAdvice
 	if owner.IssueKey != nil && status != nil {
