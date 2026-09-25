@@ -31,12 +31,14 @@ until_true() {
 # survives.
 picked_ports=
 pick_port() {
-  local port
+  # The local's name is one no caller passes: `local port` would shadow a caller's own `port`, and
+  # printf -v would then assign the local rather than the caller's variable.
+  local _picked_port
   # The picks are separate arguments: word splitting is the point.
   # shellcheck disable=SC2086
-  port=$(bash "$root/scripts/e2e/lib/free-port.sh" $picked_ports) || fail "no free port for $1 (the reason is above)"
-  picked_ports="$picked_ports $port"
-  printf -v "$1" '%s' "$port"
+  _picked_port=$(bash "$root/scripts/e2e/lib/free-port.sh" $picked_ports) || fail "no free port for $1 (the reason is above)"
+  picked_ports="$picked_ports $_picked_port"
+  printf -v "$1" '%s' "$_picked_port"
 }
 
 log_size() { stat -c %s "$evidence/logs/$1.log" 2>/dev/null || printf '0\n'; }
