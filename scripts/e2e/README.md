@@ -522,11 +522,11 @@ because `prepack.sh` copies `../../skills` and the bundle resolves `@legion/*` t
 1. save `packages/pi-envoy/package.json` and arm an `EXIT` trap that copies it back byte-identical
    (`.github/workflows/release.yaml:359`);
 2. rewrite `omp.extensions` to `["dist/envoy.js","dist/legion.js"]` with `jq` (`release.yaml:360-362`,
-   `packages/daemon/docker/worker.Dockerfile:68-69`);
+   `packages/daemon/docker/worker.Dockerfile:74-75`);
 3. `bun pm pack`, whose `prepack` builds `dist/` (`release.yaml:364-367`, `packages/pi-envoy/scripts/prepack.sh`);
 4. copy the saved manifest back and check it byte for byte (`release.yaml:379-384`);
-5. unpack the tarball into `<dir>` (`worker.Dockerfile:64-66, :71-72`);
-6. `OMP_PROFILE=<name> omp plugin install <dir>` (`worker.Dockerfile:186`);
+5. unpack the tarball into `<dir>` (`worker.Dockerfile:70-72, :77-78`);
+6. `OMP_PROFILE=<name> omp plugin install <dir>` (`worker.Dockerfile:192`);
 7. `OMP_PROFILE=<name> omp plugin list --json` must show the plugin at the checkout's version,
    enabled, and resolving to `<dir>`.
 
