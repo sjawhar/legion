@@ -201,10 +201,36 @@ func newControllerStart(t *testing.T, d *controllerDaemon, opts controllerOption
 	}
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_STATE_HOME", "")
+	t.Setenv("XDG_DATA_HOME", "")
+	t.Setenv("OMP_PROFILE", "")
+	t.Setenv("PI_CONFIG_DIR", "")
+	t.Setenv("PI_CODING_AGENT_DIR", "")
 	t.Setenv("PATH", "/usr/bin:/bin:/opt/x/worker-bin")
 	t.Setenv("LEGION_OMP_PATH", omp)
 	t.Setenv("LEGION_ROLE_PROMPTS_DIR", prompts.SourceRolePromptsDir())
+	c.installPlugin(api.GoDaemonAPIVersion)
 	return c
+}
+
+// installPlugin installs, in the operator's default Oh My Pi profile, a pi-legion-envoy manifest
+// declaring contract.
+func (c *operatorMachine) installPlugin(contract int) {
+	c.t.Helper()
+	c.installPluginAt(filepath.Join(c.home, ".omp"), contract)
+}
+
+// installPluginAt installs a pi-legion-envoy manifest declaring contract under the Oh My Pi data
+// root root.
+func (c *operatorMachine) installPluginAt(root string, contract int) {
+	c.t.Helper()
+	dir := filepath.Join(root, "plugins", "node_modules", "@sjawhar", "pi-legion-envoy")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		c.t.Fatal(err)
+	}
+	manifest := fmt.Sprintf(`{"name":"@sjawhar/pi-legion-envoy","version":"9.9.9","legion":{"goDaemonApiVersion":%d}}`, contract)
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(manifest), 0o600); err != nil {
+		c.t.Fatal(err)
+	}
 }
 
 func (c *operatorMachine) write(name, contents string, mode os.FileMode) {
@@ -505,11 +531,16 @@ func TestControllerStartDaemonURLOverridesTheFile(t *testing.T) {
 	}
 }
 
-// A 403 names the URL and the likely cause; nothing is written and nothing launched.
+// A 403 names the URL and the one cause the route has: every Go daemon serves it, since none boots
+// without operator_token_file. Nothing is written and nothing launched.
 func TestControllerStartRefusedByTheDaemonWritesNothing(t *testing.T) {
 	d := newControllerDaemon(t)
 	c := newControllerStart(t, d, controllerOptions{tokenContents: "not-the-operator-token\n"})
-	c.refused(d.url + "/legion/v1/controller/secret answered 403: Invalid operator token — the operator token does not match the daemon's operator_token_file, or this daemon has none configured")
+	code, _, errb := c.run()
+	want := d.url + "/legion/v1/controller/secret answered 403: Invalid operator token — the operator token does not match the daemon's operator_token_file\n"
+	if code != 1 || !strings.HasSuffix(errb, want) {
+		t.Fatalf("legion controller start = %d, stderr %q; want 1 and a refusal ending %q", code, errb, want)
+	}
 	c.wantNothingLaunchedOrWritten(c.defaultDir)
 }
 
@@ -597,6 +628,29 @@ func TestControllerStartRefusesLocallyBeforeTheRequest(t *testing.T) {
 		c.wantNoSecretRequest()
 		c.wantNothingLaunchedOrWritten(c.defaultDir)
 	})
+	// The mint revokes the incumbent controller, so an Oh My Pi whose plugin would refuse the Go
+	// controller at session start is found before it: a second start from a profile nobody
+	// updated leaves the working controller alone.
+	t.Run("a plugin in the operator's Oh My Pi profile that speaks another contract, naming both", func(t *testing.T) {
+		d := newControllerDaemon(t)
+		c := newControllerStart(t, d, controllerOptions{})
+		c.installPlugin(api.GoDaemonAPIVersion - 1)
+		manifest := filepath.Join(c.home, ".omp", "plugins", "node_modules", "@sjawhar", "pi-legion-envoy", "package.json")
+		c.refused(fmt.Sprintf("pi-legion-envoy at %s (package 9.9.9) speaks Go daemon API contract %d; this daemon requires %d.",
+			manifest, api.GoDaemonAPIVersion-1, api.GoDaemonAPIVersion))
+		c.wantNoSecretRequest()
+		c.wantNothingLaunchedOrWritten(c.defaultDir)
+	})
+	t.Run("no plugin in the operator's Oh My Pi profile", func(t *testing.T) {
+		d := newControllerDaemon(t)
+		c := newControllerStart(t, d, controllerOptions{})
+		if err := os.RemoveAll(filepath.Join(c.home, ".omp")); err != nil {
+			t.Fatal(err)
+		}
+		c.refused("pi-legion-envoy manifest at " + filepath.Join(c.home, ".omp", "plugins", "node_modules", "@sjawhar", "pi-legion-envoy", "package.json") + " could not be read")
+		c.wantNoSecretRequest()
+		c.wantNothingLaunchedOrWritten(c.defaultDir)
+	})
 	t.Run("an unknown key, naming it and the example", func(t *testing.T) {
 		d := newControllerDaemon(t)
 		c := newControllerStart(t, d, controllerOptions{lines: []string{
@@ -607,6 +661,65 @@ func TestControllerStartRefusesLocallyBeforeTheRequest(t *testing.T) {
 		c.refused("deploy/kubernetes/daemon/controller.yaml.example")
 		c.wantNoSecretRequest()
 	})
+}
+
+// The contract check reads the manifest Oh My Pi loads under the operator's process environment,
+// which the controller's Oh My Pi inherits (@oh-my-pi/pi-utils dirs.ts: getBaseConfigRoot,
+// DirResolver's constructor, resolveActiveAgentDirOverride, getPluginsDir); it cannot see a dotenv
+// file Oh My Pi reads itself or a launch prefix, and no row sets either. Each row installs the
+// release Oh My Pi loads where it loads it, and a plugin speaking another contract at the root a
+// wrong resolution would read: the controller starts only when the check read the first. An
+// honoured PI_CODING_AGENT_DIR moves the plugins only by turning the XDG data root off, so with
+// none it changes nothing; PI_CONFIG_DIR moves the config root, and an XDG data root still wins.
+// A relative agent directory is resolved where the controller's Oh My Pi runs, the controller's
+// state directory's `controller`. An Oh My Pi running under a profile hands its children
+// PI_CODING_AGENT_DIR set to that profile's agent directory, which Oh My Pi ignores, so an operator
+// starting from inside one is not refused.
+func TestControllerStartChecksThePluginOhMyPiLoads(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// env names variables beyond HOME; "<home>" in a value is the operator's home directory.
+		env map[string]string
+		// loaded is the root Oh My Pi loads the plugin from, stale the one a wrong resolution reads,
+		// both relative to the home directory; "" installs nothing there.
+		loaded, stale string
+	}{
+		{name: "PI_CODING_AGENT_DIR honoured with no XDG data root",
+			env: map[string]string{"PI_CODING_AGENT_DIR": "<home>/elsewhere"}, loaded: ".omp"},
+		{name: "PI_CODING_AGENT_DIR honoured with an XDG data root",
+			env: map[string]string{"PI_CODING_AGENT_DIR": "<home>/elsewhere", "XDG_DATA_HOME": "<home>/xdg"}, loaded: ".omp", stale: "xdg/omp"},
+		{name: "PI_CONFIG_DIR with no XDG data root",
+			env: map[string]string{"PI_CONFIG_DIR": ".omp-alt"}, loaded: ".omp-alt", stale: ".omp"},
+		{name: "PI_CONFIG_DIR with an XDG data root",
+			env: map[string]string{"PI_CONFIG_DIR": ".omp-alt", "XDG_DATA_HOME": "<home>/xdg"}, loaded: "xdg/omp", stale: ".omp"},
+		{name: "a named profile, which ignores PI_CODING_AGENT_DIR",
+			env: map[string]string{"OMP_PROFILE": "work", "PI_CODING_AGENT_DIR": "<home>/.omp/profiles/work/agent"}, loaded: ".omp/profiles/work", stale: ".omp"},
+		{name: "PI_PROFILE's agent directory under the default profile",
+			env: map[string]string{"PI_PROFILE": "work", "PI_CODING_AGENT_DIR": "<home>/.omp/profiles/work/agent", "XDG_DATA_HOME": "<home>/xdg"}, loaded: "xdg/omp", stale: ".omp"},
+		{name: "a relative PI_CODING_AGENT_DIR, resolved in the controller's directory",
+			env: map[string]string{"PI_CODING_AGENT_DIR": "agent", "XDG_DATA_HOME": "<home>/xdg"}, loaded: ".omp", stale: "xdg/omp"},
+		{name: "a relative PI_CODING_AGENT_DIR that names the config root's own agent directory from the controller's",
+			env: map[string]string{"PI_CODING_AGENT_DIR": "../../../../../.omp/agent", "XDG_DATA_HOME": "<home>/xdg"}, loaded: "xdg/omp", stale: ".omp"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newControllerDaemon(t)
+			c := newControllerStart(t, d, controllerOptions{})
+			if err := os.RemoveAll(filepath.Join(c.home, ".omp")); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PI_PROFILE", "")
+			for name, value := range tc.env {
+				t.Setenv(name, strings.ReplaceAll(value, "<home>", c.home))
+			}
+			c.installPluginAt(filepath.Join(c.home, tc.loaded), api.GoDaemonAPIVersion)
+			if tc.stale != "" {
+				c.installPluginAt(filepath.Join(c.home, tc.stale), api.GoDaemonAPIVersion-1)
+			}
+			if code, _, errb := c.run(); code != 0 || !c.launched() {
+				t.Fatalf("legion controller start = %d (launched %t), stderr %q; want the controller started", code, c.launched(), errb)
+			}
+		})
+	}
 }
 
 // `project: sjawhar/Legion`, copied from the daemon's legion.yaml, names the daemon's own token in

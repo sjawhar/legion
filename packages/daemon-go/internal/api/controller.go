@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -23,6 +24,22 @@ type ControllerStore interface {
 // controller's Oh My Pi registers with.
 type ControllerSecretResponse struct {
 	Secret string `json:"secret"`
+}
+
+// ControllerRole is the role a controller registration names: the operator's controller, which
+// holds no claim — the operator launches it and nothing supervises it — so it is no claim.Role.
+const ControllerRole = "controller"
+
+// ControllerRegisterResponse is `POST /legion/v1/claims/register`'s answer to a session that
+// registered with the controller capability: the project's controller role token
+// (claim.ControllerToken), ControllerRole, the capability's generation, and the secret its
+// controller grants authenticate with. It has no tree and no issue; a claim's registration is
+// claim.RegisterResponse.
+type ControllerRegisterResponse struct {
+	ClaimToken claim.Token `json:"claimToken"`
+	Role       string      `json:"role"`
+	Generation uint64      `json:"generation"`
+	Secret     string      `json:"secret"`
 }
 
 // controllerSecret is `legion controller start`'s one daemon call (the shipped
@@ -57,9 +74,11 @@ func (s *server) controllerSecret(w http.ResponseWriter, r *http.Request) {
 
 // registerController is a registration whose token is no launch's boot token: it registers
 // req's session as the project's controller when the token is the current controller capability,
-// and answers the one refusal an unknown token gets otherwise. The registration is issued a secret
-// of its own, persisted by its hash before this answers, which the session's controller grants
-// authenticate with.
+// and answers the one refusal an unknown token gets otherwise. No boot gate checks the operator's
+// Oh My Pi — the daemon gates only the panes it launches — so a controller whose plugin speaks
+// another Go daemon API contract is refused here, naming both, and nothing is recorded. The
+// registration is issued a secret of its own, persisted by its hash before this answers, which
+// the session's controller grants authenticate with.
 func (s *server) registerController(w http.ResponseWriter, r *http.Request, req claim.RegisterRequest) {
 	ctx := context.WithoutCancel(r.Context())
 	s.controllerMu.Lock()
@@ -72,6 +91,13 @@ func (s *server) registerController(w http.ResponseWriter, r *http.Request, req 
 	}
 	if !found || subtle.ConstantTimeCompare(record.CapabilityHash, capabilityHash(req.BootToken)) != 1 {
 		writeJSON(w, claim.InvalidBootToken.Status, claim.InvalidBootToken)
+		return
+	}
+	if req.PluginContract != GoDaemonAPIVersion {
+		s.log.Warn("api: refused a controller registration: its plugin speaks another Go daemon API contract",
+			"session", req.SessionID, "pluginContract", req.PluginContract, "goDaemonApiVersion", GoDaemonAPIVersion)
+		writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf(
+			"pi-legion-envoy speaks Go daemon API contract %d; this daemon requires %d", req.PluginContract, GoDaemonAPIVersion)))
 		return
 	}
 	secret := rand.Text()
@@ -87,10 +113,10 @@ func (s *server) registerController(w http.ResponseWriter, r *http.Request, req 
 	}
 	token := claim.ControllerToken(s.project)
 	s.log.Info("api: controller registered", "claim", token, "generation", record.Generation,
-		"session", req.SessionID, "agent", req.AgentID, "pluginContract", req.PluginContract)
-	writeJSON(w, http.StatusOK, claim.RegisterResponse{
+		"session", req.SessionID, "agent", req.AgentID)
+	writeJSON(w, http.StatusOK, ControllerRegisterResponse{
 		ClaimToken: token,
-		Role:       claim.RoleController,
+		Role:       ControllerRole,
 		Generation: record.Generation,
 		Secret:     secret,
 	})

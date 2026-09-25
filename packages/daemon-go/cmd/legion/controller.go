@@ -15,6 +15,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/api"
 	legionclaim "github.com/sjawhar/legion/daemon/internal/claim" // main_test.go's `claim` helper holds the bare name
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/daemon"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
 	"github.com/sjawhar/legion/daemon/internal/registry"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -52,10 +53,14 @@ func runController(ctx context.Context, args []string, stdout, stderr io.Writer)
 // packages/daemon/src/cli/controller-start.ts:262-384). In order, and nothing is written or
 // launched until the daemon has answered: read the strict operator-side file; refuse an operator
 // token file others can read, and a blank or unreadable Envoy or Dispatch token file, a role-prompt
-// bundle missing a file, an instructions file that is missing or blank, and an Oh My Pi invocation
-// that does not resolve; fetch the controller secret with the operator token as a bearer (the
-// daemon mints a fresh capability and revokes the previous controller's); write it 0600 under the
-// local state directory beside the gh shim, the `legion` launcher, and the deployment instructions;
+// bundle missing a file, an instructions file that is missing or blank, an Oh My Pi invocation
+// that does not resolve, and a pi-legion-envoy manifest, at the plugin root this process's
+// environment names, that does not speak this binary's Go daemon API contract (it would refuse the
+// controller at session start; a dotenv file Oh My Pi reads itself or the launch prefix can move
+// that root, which this check does not see: daemon.VerifyPluginContract);
+// fetch the controller secret with the operator token as a bearer (the daemon mints a fresh
+// capability and revokes the previous controller's); write it 0600 under the local state
+// directory beside the gh shim, the `legion` launcher, and the deployment instructions;
 // then run Oh My Pi interactive — the launch prefix and the resolved invocation, one joined
 // `--append-system-prompt`, no `--resume`, no `--mode rpc` — in the foreground with the shared
 // controller environment, and answer its exit code.
@@ -71,7 +76,7 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	if err != nil {
 		return 0, err
 	}
-	operatorToken, err := readOperatorTokenFile(cfg.OperatorTokenFile)
+	operatorToken, err := config.ReadOperatorTokenFile("operator_token_file", cfg.OperatorTokenFile)
 	if err != nil {
 		return 0, err
 	}
@@ -105,12 +110,6 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	if err != nil {
 		return 0, err
 	}
-
-	secret, err := fetchControllerSecret(ctx, cfg.DaemonURL, operatorToken)
-	if err != nil {
-		return 0, err
-	}
-
 	stateDir := cfg.StateDir
 	if stateDir == "" {
 		home, err := os.UserHomeDir()
@@ -119,6 +118,16 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 		}
 		stateDir = filepath.Join(filepath.Dir(registry.Path(nil, home)), cfg.Project+"-controller")
 	}
+	controllerDir := filepath.Join(stateDir, "controller")
+	if _, err := daemon.VerifyPluginContract(processEnvironment(), controllerDir, api.GoDaemonAPIVersion); err != nil {
+		return 0, err
+	}
+
+	secret, err := fetchControllerSecret(ctx, cfg.DaemonURL, operatorToken)
+	if err != nil {
+		return 0, err
+	}
+
 	token := string(legionclaim.ControllerToken(cfg.Project))
 	secretFile, err := tmux.WriteSecretFile(stateDir, token, secret)
 	if err != nil {
@@ -137,7 +146,6 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 			return 0, err
 		}
 	}
-	controllerDir := filepath.Join(stateDir, "controller")
 	if err := os.MkdirAll(controllerDir, 0o700); err != nil {
 		return 0, fmt.Errorf("create %s: %w", controllerDir, err)
 	}
@@ -208,45 +216,16 @@ func controllerEnvironment(cfg config.ControllerConfig, stateDir, token, secretF
 	return env
 }
 
-// readOperatorTokenFile is the operator token: a regular file readable by its owner only, trimmed
-// non-empty contents. It is refused before anything is fetched or written — the token is the one
-// thing that buys a controller secret, and a group- or world-readable copy is a second way in
-// (packages/daemon/src/cli/controller-start.ts:177-199).
-func readOperatorTokenFile(file string) (string, error) {
-	info, err := os.Stat(file)
-	if err != nil {
-		return "", fmt.Errorf("operator_token_file names %s, which could not be read: %w", file, err)
-	}
-	if !info.Mode().IsRegular() {
-		return "", fmt.Errorf("operator_token_file names %s, which is not a regular file", file)
-	}
-	if mode := info.Mode().Perm(); mode&0o077 != 0 {
-		return "", fmt.Errorf("operator_token_file %s is readable by its group or others (mode %#o); chmod 0600 it", file, mode)
-	}
-	return config.ReadSecretPointer("operator_token_file", file)
-}
-
 // fetchControllerSecret is `POST /legion/v1/controller/secret` with the operator token as a
 // bearer. A failed request names the daemon URL and never tries another address; a refusal
 // quotes the daemon's `error` (packages/daemon/src/cli/controller-start.ts:214-260).
 func fetchControllerSecret(ctx context.Context, daemonURL, operatorToken string) (string, error) {
 	url := daemonURL + "/legion/v1/controller/secret"
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader("{}"))
-	if err != nil {
-		return "", fmt.Errorf("%s: %w", url, err)
-	}
-	request.Header.Set("Authorization", "Bearer "+operatorToken)
-	request.Header.Set("Content-Type", "application/json")
-	response, err := http.DefaultClient.Do(request)
+	status, body, err := operator{base: daemonURL, bearer: operatorToken}.do(ctx, http.MethodPost, "/legion/v1/controller/secret", struct{}{})
 	if err != nil {
 		return "", fmt.Errorf("could not reach the Legion daemon at %s: %v; is the port-forward running? (never falls back to another address)", daemonURL, err)
 	}
-	defer response.Body.Close()
-	body, err := io.ReadAll(response.Body)
-	if err != nil {
-		return "", fmt.Errorf("read %s's answer: %w", url, err)
-	}
-	if response.StatusCode/100 != 2 {
+	if status/100 != 2 {
 		detail := strings.TrimSpace(string(body))
 		var refusal struct {
 			Error string `json:"error"`
@@ -255,10 +234,10 @@ func fetchControllerSecret(ctx context.Context, daemonURL, operatorToken string)
 			detail = refusal.Error
 		}
 		hint := ""
-		if response.StatusCode == http.StatusForbidden {
-			hint = " — the operator token does not match the daemon's operator_token_file, or this daemon has none configured"
+		if status == http.StatusForbidden {
+			hint = " — the operator token does not match the daemon's operator_token_file"
 		}
-		return "", fmt.Errorf("%s answered %d: %s%s", url, response.StatusCode, detail, hint)
+		return "", fmt.Errorf("%s answered %d: %s%s", url, status, detail, hint)
 	}
 	var answer api.ControllerSecretResponse
 	if err := json.Unmarshal(body, &answer); err != nil {

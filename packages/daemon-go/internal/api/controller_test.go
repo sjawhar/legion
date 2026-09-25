@@ -1,9 +1,8 @@
 package api
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -35,6 +34,19 @@ func (h *harness) mintedSecret() string {
 	return answer.Secret
 }
 
+// registeredController registers session with the controller capability and returns what the
+// controller learned.
+func (h *harness) registeredController(capability, session string) ControllerRegisterResponse {
+	h.t.Helper()
+	recorder := h.register(capability, session)
+	if recorder.Code != http.StatusOK {
+		h.t.Fatalf("register %s with the controller capability = %d, want 200; body %s", session, recorder.Code, recorder.Body)
+	}
+	var response ControllerRegisterResponse
+	decodeInto(h.t, recorder, &response)
+	return response
+}
+
 func (h *harness) controllerSessionGrant(session, secret string) *httptest.ResponseRecorder {
 	h.t.Helper()
 	return h.request(http.MethodPost, "/legion/v1/grants", GrantRequest{SessionID: session, Secret: secret}, nil)
@@ -64,22 +76,9 @@ func TestAControllerRegistersWithTheMintedCapability(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("register with the controller capability = %d; body %s", recorder.Code, recorder.Body)
 	}
-	var wire map[string]any
-	if err := json.Unmarshal(recorder.Body.Bytes(), &wire); err != nil {
-		t.Fatalf("decode %s: %v", recorder.Body, err)
-	}
-	for _, absent := range []string{"tree", "issue"} {
-		if _, present := wire[absent]; present {
-			t.Fatalf("the controller's registration carries %q: %s", absent, recorder.Body)
-		}
-	}
-	var registration claim.RegisterResponse
-	decoder := json.NewDecoder(bytes.NewReader(recorder.Body.Bytes()))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&registration); err != nil {
-		t.Fatalf("decode %s: %v", recorder.Body, err)
-	}
-	if registration.ClaimToken != claim.ControllerToken(testProject) || registration.Role != claim.RoleController ||
+	var registration ControllerRegisterResponse
+	decodeInto(t, recorder, &registration)
+	if registration.ClaimToken != claim.ControllerToken(testProject) || registration.Role != ControllerRole ||
 		registration.Generation != 1 || registration.Secret == "" || registration.Secret == capability {
 		t.Fatalf("registration = %+v, want %s, role controller, generation 1, and a secret of its own",
 			registration, claim.ControllerToken(testProject))
@@ -91,11 +90,29 @@ func TestAControllerRegistersWithTheMintedCapability(t *testing.T) {
 	}
 }
 
+// The operator's Oh My Pi is checked by no boot gate — the daemon gates only its own panes — so the
+// registration holds the controller's plugin to this daemon's contract, naming both, and records
+// no registration for a plugin that speaks another.
+func TestAControllerSpeakingAnotherContractIsRefusedNamingBoth(t *testing.T) {
+	h := newHarness(t)
+	capability := h.mintedSecret()
+	recorder := h.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
+		BootToken: capability, SessionID: "ses_controller", OmpSessionFile: "/sessions/ses_controller.jsonl",
+		AgentID: "agent-ses_controller", PluginContract: GoDaemonAPIVersion + 1,
+	}, nil)
+	wantRefusal(t, recorder, http.StatusConflict, fmt.Sprintf(
+		"pi-legion-envoy speaks Go daemon API contract %d; this daemon requires %d", GoDaemonAPIVersion+1, GoDaemonAPIVersion))
+	record, found, err := h.store.Controller(context.Background(), testProject)
+	if err != nil || !found || record.Registered() {
+		t.Fatalf("controller record = %+v, %v, %v, want the capability minted and no session registered", record, found, err)
+	}
+}
+
 // The registered session mints controller grants with its registration secret, and nothing else
 // does: another session, or another secret, is refused as the claim form refuses them.
 func TestTheRegisteredControllerMintsControllerGrants(t *testing.T) {
 	h := newCredentialHarness(t, &tokenSource{})
-	registration := h.registered(h.mintedSecret(), "ses_controller")
+	registration := h.registeredController(h.mintedSecret(), "ses_controller")
 
 	recorder := h.controllerSessionGrant("ses_controller", registration.Secret)
 	if recorder.Code != http.StatusOK {
@@ -121,7 +138,7 @@ func TestTheRegisteredControllerMintsControllerGrants(t *testing.T) {
 func TestASecondControllerSecretRevokesTheFirst(t *testing.T) {
 	h, _, statuses := newArchitectHarness(t, nil, nil)
 	first := h.mintedSecret()
-	registration := h.registered(first, "ses_first")
+	registration := h.registeredController(first, "ses_first")
 	recorder := h.controllerSessionGrant("ses_first", registration.Secret)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("first controller's grant = %d; body %s", recorder.Code, recorder.Body)
@@ -140,7 +157,7 @@ func TestASecondControllerSecretRevokesTheFirst(t *testing.T) {
 		t.Fatalf("Dispatch writes = %+v, want none from a revoked controller grant", statuses.writes)
 	}
 
-	replacement := h.registered(second, "ses_second")
+	replacement := h.registeredController(second, "ses_second")
 	if replacement.Generation != 2 {
 		t.Fatalf("second registration generation = %d, want 2", replacement.Generation)
 	}

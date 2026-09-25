@@ -196,8 +196,8 @@ export const LegionGoRegisterResponse = z.strictObject({
 
 export type LegionGoRegistration = z.output<typeof LegionGoRegisterResponse>;
 
-/** `claim.RegisterResponse` for a session that registered with the controller capability (the
- * `bootToken` of `POST /legion/v1/claims/register` is the secret `legion controller start`
+/** `api.ControllerRegisterResponse`, for a session that registered with the controller capability
+ * (the `bootToken` of `POST /legion/v1/claims/register` is the secret `legion controller start`
  * fetched): the project's controller role token, the role `controller`, the capability's
  * generation, and the secret its controller grants authenticate with. No tree, no issue. */
 export const LegionGoControllerRegisterResponse = z.strictObject({

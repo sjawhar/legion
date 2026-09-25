@@ -2,9 +2,11 @@ package config
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 // DeploymentInstructionsFile is the copy of the operator's instructions every pane's prompt reads,
@@ -26,6 +28,42 @@ func ReadSecretPointer(variable, file string) (string, error) {
 		return "", fmt.Errorf("%s names %s, which is empty", variable, file)
 	}
 	return secret, nil
+}
+
+// ReadOperatorTokenFile is the operator bearer the file names — `variable` is the key or flag as
+// the operator wrote it (`operator_token_file`, `--operator-token-file`). The bearer buys a
+// controller capability and opens every operator route, so a group- or other-readable copy is a
+// second way in: the file is opened once, and the open descriptor must be a regular file whose
+// mode grants its group and others nothing before its trimmed, non-empty contents are read from
+// that same descriptor, so nothing swapped in between a check and a read is ever read
+// (packages/daemon/src/cli/controller-start.ts:177-199, which stats and reads separately). The
+// open does not block, so a FIFO is refused rather than waited on. The contents never appear in an
+// error.
+func ReadOperatorTokenFile(variable, file string) (string, error) {
+	f, err := os.OpenFile(file, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return "", fmt.Errorf("%s names %s, which could not be read: %w", variable, file, err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return "", fmt.Errorf("%s names %s, which could not be read: %w", variable, file, err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("%s names %s, which is not a regular file", variable, file)
+	}
+	if mode := info.Mode().Perm(); mode&0o077 != 0 {
+		return "", fmt.Errorf("%s %s is readable by its group or others (mode %#o); chmod 0600 it", variable, file, mode)
+	}
+	contents, err := io.ReadAll(f)
+	if err != nil {
+		return "", fmt.Errorf("%s names %s, which could not be read: %w", variable, file, err)
+	}
+	token := strings.TrimSpace(string(contents))
+	if token == "" {
+		return "", fmt.Errorf("%s names %s, which is empty", variable, file)
+	}
+	return token, nil
 }
 
 // ReadDeploymentInstructions is the operator's instructions file, refused naming the operator's

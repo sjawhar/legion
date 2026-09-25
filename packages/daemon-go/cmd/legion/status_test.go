@@ -93,12 +93,13 @@ func TestStatusWithTheOperatorTokenFileFindsTheDaemonFromTheConfiguration(t *tes
 	}
 }
 
-// The wrong bearer is the daemon's refusal, printed; no status request follows.
+// The wrong bearer is the daemon's refusal, printed as every operator command prints one; no
+// status request follows.
 func TestStatusWithAWrongOperatorTokenIsRefusedAndSetsNothing(t *testing.T) {
 	d := newControllerDaemon(t)
 	tokenFile := writeFile(t, "operator-token", "not-the-operator-token\n")
 	code, _, errb := issueStatus(t, "LEGSMOKE-3", "backlog", "--operator-token-file", tokenFile, "--port", strconv.Itoa(d.port))
-	if code != 1 || !strings.Contains(errb, "legion status: daemon returned 403: ") || !strings.Contains(errb, "INVALID_OPERATOR_TOKEN") {
+	if code != 1 || errb != "legion status: the daemon answered 403 Forbidden: Invalid operator token\n" {
 		t.Fatalf("legion status = %d, stderr %q; want the 403 refusal", code, errb)
 	}
 	if requests := d.requests(); len(requests) != 1 || requests[0].path != "/legion/v1/grants" {
@@ -117,6 +118,23 @@ func TestStatusRefusesAnOperatorTokenFileItCannotRead(t *testing.T) {
 	code, _, errb := issueStatus(t, "LEGSMOKE-3", "backlog", "--operator-token-file", absent, "--port", strconv.Itoa(d.port))
 	if code != 1 || !strings.Contains(errb, fmt.Sprintf("--operator-token-file names %s, which could not be read", absent)) {
 		t.Fatalf("legion status = %d, stderr %q", code, errb)
+	}
+	if n := len(d.requests()); n != 0 {
+		t.Fatalf("%d requests reached the daemon, want none", n)
+	}
+}
+
+// The operator token file is held to `legion controller start`'s rule: one its group or others
+// can read is refused naming the path and the mode, and the daemon is never reached.
+func TestStatusRefusesAGroupReadableOperatorTokenFile(t *testing.T) {
+	d := newControllerDaemon(t)
+	tokenFile := writeFile(t, "operator-token", controllerOperatorToken+"\n")
+	if err := os.Chmod(tokenFile, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	code, _, errb := issueStatus(t, "LEGSMOKE-3", "backlog", "--operator-token-file", tokenFile, "--port", strconv.Itoa(d.port))
+	if want := "--operator-token-file " + tokenFile + " is readable by its group or others (mode 0640); chmod 0600 it"; code != 1 || !strings.Contains(errb, want) {
+		t.Fatalf("legion status = %d, stderr %q; want 1 and %q", code, errb, want)
 	}
 	if n := len(d.requests()); n != 0 {
 		t.Fatalf("%d requests reached the daemon, want none", n)

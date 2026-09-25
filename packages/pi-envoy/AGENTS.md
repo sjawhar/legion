@@ -119,15 +119,24 @@ keeps its claim for resumption.
 
 The Go daemon launches no controller: the operator starts one with `legion controller start`, which
 fetches the controller capability with the operator's bearer and runs Oh My Pi with
-`LEGION_CONTROLLER=1`, `LEGION_DAEMON_API=go`, and `LEGION_CONTROLLER_SECRET_FILE`. That session
+`LEGION_CONTROLLER=1`, `LEGION_DAEMON_API=go`, and `LEGION_CONTROLLER_SECRET_FILE`. No boot gate
+checks the operator's machine, so the plugin's contract is held there twice: before its one daemon
+call, `legion controller start` reads the manifest at the plugin root its own environment names
+(the boot gate's contract probe; it cannot see a dotenv file Oh My Pi reads itself or the launch
+prefix, and runs no load probe) and refuses one whose `goDaemonApiVersion` is not its own — the
+mint revokes the incumbent controller, so a stale profile is found first —
+and the daemon refuses a controller registration whose `pluginContract` is not its
+`GoDaemonAPIVersion` with 409, naming both. That session
 goes through the controller session (`src/legion/controller-session.ts`) with the Go adapter
 (`goControllerDaemon`, `go-bootstrap.ts`), not `bootstrapGoClaim`, and gets no Go `legion` tool:
-`claims/register` with the capability in place of a boot token, then the Envoy role
+`claims/register` with the capability in place of a boot token, answered with
+`api.ControllerRegisterResponse` (`LegionGoControllerRegisterResponse`), then the Envoy role
 `legion-<project>-controller`, then a controller grant per bash command from the `/grants`
 controller-session form with the secret the registration was issued. A later
 `legion controller start` mints a new capability, so the earlier session's grants stop working.
 `legion status <issue> <status>` in that session reads the grant file; from an operator shell it
-takes `--operator-token-file`, which buys a controller grant over the operator's bearer.
+takes `--operator-token-file`, which buys a controller grant over the operator's bearer and, like
+`legion claims`, is refused when its group or others can read it.
 
 ## Phase workers' handoff actions and the phase-stall follow-up
 

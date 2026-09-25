@@ -234,15 +234,10 @@ func runState(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		return 2
 	}
 
-	// A pane has no legion.yaml; it has the daemon's URL, which the daemon names on every pane.
-	address := daemonURL()
-	if _, pane := os.LookupEnv("LEGION_DAEMON_URL"); !pane || *configPath != "" || *port != 0 {
-		configured, err := stateAddress(*configPath, *port)
-		if err != nil {
-			fmt.Fprintf(stderr, "legion state: %v\n", err)
-			return 1
-		}
-		address = "http://" + configured
+	address, err := daemonAddress(*configPath, *port)
+	if err != nil {
+		fmt.Fprintf(stderr, "legion state: %v\n", err)
+		return 1
 	}
 	body, err := get(ctx, address+"/legion/v1/state")
 	if err != nil {
@@ -481,6 +476,18 @@ func newFlags(name string, stderr io.Writer) *flag.FlagSet {
 	flags := flag.NewFlagSet("legion "+name, flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	return flags
+}
+
+// processEnvironment is this process's environment by name, the last entry for a name winning as
+// it does for a child the process starts.
+func processEnvironment() map[string]string {
+	env := map[string]string{}
+	for _, pair := range os.Environ() {
+		if name, value, ok := strings.Cut(pair, "="); ok {
+			env[name] = value
+		}
+	}
+	return env
 }
 
 func main() {
