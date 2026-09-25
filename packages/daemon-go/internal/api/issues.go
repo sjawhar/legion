@@ -1,11 +1,6 @@
 package api
 
-import (
-	"errors"
-	"net/http"
-
-	"github.com/sjawhar/legion/daemon/internal/dispatch"
-)
+import "net/http"
 
 type IssueStatusRequest struct {
 	GrantID string `json:"grantId"`
@@ -33,18 +28,7 @@ func (s *server) issueStatus(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusForbidden, "CONTROLLER_REQUIRED", "issue status requires a controller grant")
 		return
 	}
-	if s.dispatch == nil {
-		writeFailure(w, http.StatusInternalServerError, "DISPATCH_UNAVAILABLE", "Dispatch is unavailable")
-		return
+	if s.setDispatchStatus(w, r, req.Issue, req.Status) {
+		writeJSON(w, http.StatusOK, IssueStatusResponse{})
 	}
-	if err := s.dispatch.SetStatus(r.Context(), req.Issue, req.Status); err != nil {
-		var dispatchError *dispatch.Error
-		if errors.As(err, &dispatchError) {
-			writeFailure(w, http.StatusBadGateway, dispatchError.Code, dispatchError.Message)
-			return
-		}
-		writeFailure(w, http.StatusBadGateway, "DISPATCH_FAILED", "Dispatch status update failed")
-		return
-	}
-	writeJSON(w, http.StatusOK, IssueStatusResponse{})
 }

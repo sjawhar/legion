@@ -28,6 +28,8 @@ const OPERATIONS: Readonly<Record<GoLegionToolRole, readonly string[]>> = {
     "request_backward_move",
     "retry_or_escalate",
     "sign_off",
+    "park_child",
+    "rerun_child",
     "read_record",
   ],
   "phase-worker": ["request_backward_move", "read_record"],
@@ -39,6 +41,8 @@ const OPERATION_FIELDS: Readonly<Record<string, readonly string[]>> = {
   request_backward_move: ["to", "reason"],
   retry_or_escalate: ["issue", "decision"],
   sign_off: ["issue"],
+  park_child: ["issue"],
+  rerun_child: ["issue"],
   read_record: ["issue"],
 };
 
@@ -54,6 +58,8 @@ function toolSchema(pi: PiApi): unknown {
       "request_backward_move",
       "retry_or_escalate",
       "sign_off",
+      "park_child",
+      "rerun_child",
       "read_record",
       ...HANDOFF_OPERATIONS,
     ]),
@@ -205,6 +211,13 @@ export function createGoLegionTool(deps: {
               grantId,
               issue: requiredString(parameters, operation, "issue"),
             });
+            return jsonSuccess({});
+          }
+          case "park_child":
+          case "rerun_child": {
+            const grantId = await grantFor(client, active);
+            const request = { grantId, issue: requiredString(parameters, operation, "issue") };
+            await (operation === "park_child" ? client.childPark(request) : client.childRerun(request));
             return jsonSuccess({});
           }
           default:

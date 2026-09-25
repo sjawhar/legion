@@ -3,6 +3,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import {
+  LegionGoChildRequest,
   LegionGoControllerGrantRequest,
   LegionGoControllerRegisterResponse,
   LegionGoControllerSecretResponse,
@@ -52,6 +53,8 @@ const schemas: Record<string, z.ZodType> = {
   "phase-backward.json": LegionGoEmptyResponse,
   "phase-retry.json": LegionGoEmptyResponse,
   "signoff.json": LegionGoEmptyResponse,
+  "child-park.json": LegionGoEmptyResponse,
+  "child-rerun.json": LegionGoEmptyResponse,
   // No route answers this one: it is the contract number the Go daemon's boot gate requires of the
   // installed plugin (`internal/api/version.go`), and the plugin's own test pins its manifest's
   // `legion.goDaemonApiVersion` to it.
@@ -119,6 +122,7 @@ test("every Stage 3 workflow request has a strict schema", () => {
       { grantId: "grant-208", issue: "LEGION-208", decision: "retry" },
     ],
     ["signoff", LegionGoSignOffRequest, { grantId: "grant-208", issue: "LEGION-208" }],
+    ["child", LegionGoChildRequest, { grantId: "grant-208", issue: "LEGION-209" }],
   ];
 
   for (const [name, schema, request] of requests) {
