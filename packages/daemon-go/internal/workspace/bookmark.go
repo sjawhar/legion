@@ -15,13 +15,18 @@ var registeredWorkspace = regexp.MustCompile(`(?i)already (?:registered|exists)`
 // workspace: a conflicted bookmark must not leave a registered working copy behind.
 //
 // The workspace starts at the issue's bookmark legion/<KEY> when it resolves to one commit. When no
-// local bookmark exists but origin has the branch, the branch is the issue's own, pushed from
-// another clone before this workspace existed: a repository's fixture, or the branch a tree pushed
-// before its volume was lost. A fresh clone tracks main alone, so such a branch is only a remote
-// row; it is tracked, and the workspace starts at it, so its commits are there and the issue's next
-// push moves it. The TypeScript twin starts such a workspace at main (LEGION-286). Only when
-// neither exists — a brand-new issue, or a merged branch GitHub deleted, which leaves no remote row
-// — does the workspace start at main, with the bookmark created on it.
+// local bookmark exists, origin's row decides:
+//   - An untracked row is the issue's own branch, pushed from another clone before this workspace
+//     existed: a repository's fixture, or the branch a tree pushed before its volume was lost. A
+//     fresh clone tracks main alone, so such a branch is only a remote row. It is tracked, which
+//     creates the local bookmark at its commit, and the workspace starts there, so its commits are
+//     there and the issue's next push moves it.
+//   - A tracked row with no local bookmark is a local deletion (`jj bookmark delete` in the shared
+//     clone) never pushed, where tracking changes nothing. It is refused by name: restoring the
+//     bookmark and forgetting it are the operator's two ways out, and either one's result
+//     provisions.
+//   - No row at all is a brand-new issue, or a merged branch GitHub deleted. The workspace starts
+//     at main, with the bookmark created on it.
 func createWorkspace(ctx context.Context, run Runner, workspace Workspace) error {
 	cloneDir := workspace.Clone
 	workspaceName := filepath.Base(workspace.Dir)
@@ -31,20 +36,24 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace) error
 	}
 	if len(commits) == 0 {
 		remote := workspace.Bookmark + "@origin"
-		remoteCommits, err := bookmarkCommits(ctx, run, cloneDir, `remote_bookmarks(exact:"`+workspace.Bookmark+`", exact:"origin")`, "Remote bookmark "+remote, workspace.Dir)
+		pattern := `exact:"` + workspace.Bookmark + `", exact:"origin"`
+		tracked, err := bookmarkCommits(ctx, run, cloneDir, "tracked_remote_bookmarks("+pattern+")", "Remote bookmark "+remote, workspace.Dir)
 		if err != nil {
 			return err
 		}
-		if len(remoteCommits) == 1 {
+		if len(tracked) == 1 {
+			return fmt.Errorf("Bookmark %s was deleted in the shared clone %s and the deletion never pushed, while %s is tracked at %s; workspace %s was not created. Restore it with `jj bookmark set %s -r %s -R %s`, or drop it with `jj bookmark forget %s -R %s`",
+				workspace.Bookmark, cloneDir, remote, tracked[0], workspace.Dir, workspace.Bookmark, remote, cloneDir, workspace.Bookmark, cloneDir)
+		}
+		untracked, err := bookmarkCommits(ctx, run, cloneDir, "untracked_remote_bookmarks("+pattern+")", "Remote bookmark "+remote, workspace.Dir)
+		if err != nil {
+			return err
+		}
+		if len(untracked) == 1 {
 			if _, err := RunChecked(ctx, run, []string{"jj", "bookmark", "track", remote, "-R", cloneDir}, nil, ""); err != nil {
 				return err
 			}
-			if commits, err = bookmarkCommits(ctx, run, cloneDir, "bookmarks(exact:"+workspace.Bookmark+")", "Bookmark "+workspace.Bookmark, workspace.Dir); err != nil {
-				return err
-			}
-			if len(commits) != 1 || commits[0] != remoteCommits[0] {
-				return fmt.Errorf("tracking %s left bookmark %s at %v, want %s; workspace %s was not created", remote, workspace.Bookmark, commits, remoteCommits[0], workspace.Dir)
-			}
+			commits = untracked
 		}
 	}
 	if err := os.MkdirAll(filepath.Dir(workspace.Dir), 0o700); err != nil {

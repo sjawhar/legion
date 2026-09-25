@@ -657,6 +657,63 @@ func TestProvisionAfterTheMergedBranchIsDeletedStartsFromMain(t *testing.T) {
 	}
 }
 
+// A local legion/<KEY> deleted in the shared clone (`jj bookmark delete`) and never pushed leaves
+// origin's row tracked with no local bookmark. Tracking it changes nothing, and starting at main
+// would put a second branch beside the remote's, which the next push would drop. Provisioning
+// refuses that state by name, every time, before anything is registered. Forgetting the bookmark,
+// one of the two ways out the refusal names, leaves an untracked row after the next fetch, which
+// is adopted.
+func TestProvisionRefusesALocalDeletionNeverPushed(t *testing.T) {
+	run := newLocalRunner(t)
+	req := provisionRequest(t)
+	first, err := Provision(context.Background(), run, req)
+	if err != nil {
+		t.Fatalf("initial provision: %v", err)
+	}
+	clone := filepath.Join(req.StateDir, "repos", "github.com", "acme", "widgets")
+	if err := os.WriteFile(filepath.Join(first.Dir, "pushed.txt"), []byte("pushed work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runSetup(t, first.Dir, "jj", "describe", "-m", "pushed work")
+	pushed := strings.TrimSpace(runSetup(t, first.Dir, "jj", "log", "-r", first.Bookmark, "--no-graph", "-T", "commit_id"))
+	runSetup(t, clone, "jj", "git", "push", "--remote", "origin", "--bookmark", first.Bookmark)
+	runSetup(t, clone, "jj", "bookmark", "delete", first.Bookmark)
+	runSetup(t, clone, "jj", "workspace", "forget", strings.ToLower(req.Issue), "-R", clone)
+	if err := os.RemoveAll(first.Dir); err != nil {
+		t.Fatal(err)
+	}
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		before := len(run.Calls())
+		_, err := Provision(context.Background(), run, req)
+		if err == nil || !strings.Contains(err.Error(), "Bookmark legion/WIDGETS-42 was deleted in the shared clone") ||
+			!strings.Contains(err.Error(), "jj bookmark set legion/WIDGETS-42 -r legion/WIDGETS-42@origin") ||
+			!strings.Contains(err.Error(), "jj bookmark forget legion/WIDGETS-42") {
+			t.Fatalf("attempt %d: provision error = %v, want the local deletion refused with both ways out", attempt, err)
+		}
+		for _, call := range run.Calls()[before:] {
+			if commandWith(call.Argv, "jj", "workspace", "add") || commandWith(call.Argv, "jj", "bookmark", "track") {
+				t.Errorf("attempt %d ran %q", attempt, call.Argv)
+			}
+		}
+		if _, statErr := os.Stat(first.Dir); !errors.Is(statErr, os.ErrNotExist) {
+			t.Errorf("attempt %d created the workspace directory: %v", attempt, statErr)
+		}
+		if listed := runSetup(t, clone, "jj", "workspace", "list", "-R", clone); strings.Contains(listed, strings.ToLower(req.Issue)+":") {
+			t.Errorf("attempt %d registered the workspace:\n%s", attempt, listed)
+		}
+	}
+
+	runSetup(t, clone, "jj", "bookmark", "forget", first.Bookmark, "-R", clone)
+	working, err := Provision(context.Background(), run, req)
+	if err != nil {
+		t.Fatalf("provision after the bookmark was forgotten: %v", err)
+	}
+	if parent := strings.TrimSpace(runSetup(t, working.Dir, "jj", "log", "-r", "@-", "--no-graph", "-T", "commit_id", "--ignore-working-copy")); parent != pushed {
+		t.Errorf("after the forget the workspace's @- is %s, want the pushed %s", parent, pushed)
+	}
+}
+
 func TestProvisionForgetsRegisteredMissingWorkspace(t *testing.T) {
 	run := newLocalRunner(t)
 	req := provisionRequest(t)
