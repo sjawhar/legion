@@ -671,6 +671,42 @@ func TestControllerStartRefusesLocallyBeforeTheRequest(t *testing.T) {
 	})
 }
 
+// An Oh My Pi running under a profile hands its children PI_CODING_AGENT_DIR set to that profile's
+// agent directory, and Oh My Pi ignores the variable whenever a named profile is active, or when
+// the value is the agent directory of the profile PI_PROFILE names (@oh-my-pi/pi-utils dirs.ts
+// resolveActiveAgentDirOverride, resolvePreProfileAgentDir). An operator starting the controller
+// from inside such a session is not refused: the contract check reads the manifest that Oh My Pi
+// loads, and the controller starts.
+func TestControllerStartAcceptsTheAgentDirectoryAProfileHandsDown(t *testing.T) {
+	for _, tc := range []struct {
+		name, ompProfile, piProfile, pluginProfile string
+	}{
+		{name: "a named profile is active", ompProfile: "work", pluginProfile: "work"},
+		{name: "PI_PROFILE's agent directory under the default profile", piProfile: "work"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newControllerDaemon(t)
+			c := newControllerStart(t, d, controllerOptions{})
+			t.Setenv("OMP_PROFILE", tc.ompProfile)
+			t.Setenv("PI_PROFILE", tc.piProfile)
+			t.Setenv("PI_CODING_AGENT_DIR", filepath.Join(c.home, ".omp", "profiles", "work", "agent"))
+			if tc.pluginProfile != "" {
+				dir := filepath.Join(c.home, ".omp", "profiles", tc.pluginProfile, "plugins", "node_modules", "@sjawhar", "pi-legion-envoy")
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				manifest := fmt.Sprintf(`{"name":"@sjawhar/pi-legion-envoy","version":"9.9.9","legion":{"goDaemonApiVersion":%d}}`, api.GoDaemonAPIVersion)
+				if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(manifest), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if code, _, errb := c.run(); code != 0 || !c.launched() {
+				t.Fatalf("legion controller start = %d (launched %t), stderr %q; want the controller started", code, c.launched(), errb)
+			}
+		})
+	}
+}
+
 // `project: sjawhar/Legion`, copied from the daemon's legion.yaml, names the daemon's own token in
 // the state directory, the secret file, the grant file, and LEGION_PROJECT.
 func TestControllerStartSanitizesTheProjectAsTheDaemonDoes(t *testing.T) {

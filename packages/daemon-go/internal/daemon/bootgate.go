@@ -139,28 +139,20 @@ var (
 //
 // PI_CONFIG_DIR and PI_CODING_AGENT_DIR move the roots in Oh My Pi too (:281-283, :315-322), and
 // this resolution does not follow them: neither is on the pane's allow-list, so no pane carries
-// one, and VerifyPluginContract refuses an environment that sets either.
+// one, and VerifyPluginContract refuses an environment in which Oh My Pi would honor either.
 func pluginManifestPath(env map[string]string) (string, string, error) {
 	requested, set := env["OMP_PROFILE"]
 	if !set {
 		requested = env["PI_PROFILE"]
 	}
-	profile := strings.TrimSpace(requested)
-	if profile == "default" {
-		profile = ""
-	}
-	if profile != "" && (profile == "." || profile == ".." || strings.HasSuffix(profile, ".") ||
-		!profileName.MatchString(profile) || windowsReservedProfile.MatchString(profile)) {
+	profile, valid := normalizeProfile(requested)
+	if !valid {
 		return "", "", fmt.Errorf(`Invalid OMP profile %q in the environment Oh My Pi starts under. Profile names must match %s, cannot be "." or "..", cannot end with ".", and cannot be a Windows reserved device name (CON, PRN, AUX, NUL, COM0-9, LPT0-9, or any of those with an extension).`,
 			requested, profileName)
 	}
-	home := env["HOME"]
-	if home == "" {
-		account, err := user.Current()
-		if err != nil {
-			return "", "", fmt.Errorf("resolve the home directory Oh My Pi reads its plugins under: HOME is not set, and %w", err)
-		}
-		home = account.HomeDir
+	home, err := ompHome(env)
+	if err != nil {
+		return "", "", err
 	}
 	root := filepath.Join(home, ".omp")
 	if profile != "" {
@@ -178,6 +170,33 @@ func pluginManifestPath(env map[string]string) (string, string, error) {
 	return filepath.Join(root, "plugins", "node_modules", "@sjawhar", "pi-legion-envoy", "package.json"), profile, nil
 }
 
+// normalizeProfile is a profile name as Oh My Pi reads it (normalizeProfileName): trimmed, with an
+// empty name or "default" the default profile, "", and a name Oh My Pi would refuse not valid.
+func normalizeProfile(requested string) (string, bool) {
+	profile := strings.TrimSpace(requested)
+	if profile == "default" {
+		profile = ""
+	}
+	if profile != "" && (profile == "." || profile == ".." || strings.HasSuffix(profile, ".") ||
+		!profileName.MatchString(profile) || windowsReservedProfile.MatchString(profile)) {
+		return "", false
+	}
+	return profile, true
+}
+
+// ompHome is the home directory Oh My Pi started under env reads its roots under: HOME, else the
+// account's, as `os.homedir()` answers.
+func ompHome(env map[string]string) (string, error) {
+	if home := env["HOME"]; home != "" {
+		return home, nil
+	}
+	account, err := user.Current()
+	if err != nil {
+		return "", fmt.Errorf("resolve the home directory Oh My Pi reads its plugins under: HOME is not set, and %w", err)
+	}
+	return account.HomeDir, nil
+}
+
 // profileWords names a profile the way a refusal tells the operator where to install.
 func profileWords(profile string) string {
 	if profile == "" {
@@ -191,22 +210,38 @@ func profileWords(profile string) string {
 // contract (verifyPluginContract). `legion controller start` runs it on the operator's own
 // environment before its one daemon call, since no boot gate checks the operator's machine and the
 // mint it asks for revokes the incumbent controller. That environment is inherited whole by the
-// controller's Oh My Pi, so an environment that sets PI_CONFIG_DIR or PI_CODING_AGENT_DIR, which
-// move the directories Oh My Pi reads its plugins from and which pluginManifestPath does not
-// follow, is refused naming the variable: the probe would otherwise vouch for, or refuse, a
-// manifest that Oh My Pi never loads. Oh My Pi reads an empty value as unset, and so does this. It
-// answers the package version.
+// controller's Oh My Pi, so a variable that moves the directories Oh My Pi reads its plugins from,
+// which pluginManifestPath does not follow, is refused naming it wherever Oh My Pi would honor it:
+// the probe would otherwise vouch for, or refuse, a manifest that Oh My Pi never loads. Oh My Pi
+// honors PI_CONFIG_DIR whenever it is non-empty. It honors PI_CODING_AGENT_DIR only under the
+// default profile, and not when the value is the agent directory of the profile PI_PROFILE names —
+// the value an Oh My Pi running under that profile hands its children (dirs.ts
+// resolveActiveAgentDirOverride, resolvePreProfileAgentDir), which an operator starting the
+// controller from inside such a session carries. It answers the package version.
 func VerifyPluginContract(env map[string]string, contract int) (string, error) {
-	for _, name := range []string{"PI_CONFIG_DIR", "PI_CODING_AGENT_DIR"} {
-		if value := env[name]; value != "" {
-			return "", fmt.Errorf("%s is set (%s): it moves the directories Oh My Pi reads its plugins from, which this contract check does not follow. Unset it, and select the plugin root with OMP_PROFILE, HOME or XDG_DATA_HOME", name, value)
-		}
+	if value := env["PI_CONFIG_DIR"]; value != "" {
+		return "", movedPluginRoot("PI_CONFIG_DIR", value)
 	}
 	manifest, profile, err := pluginManifestPath(env)
 	if err != nil {
 		return "", err
 	}
+	if value := env["PI_CODING_AGENT_DIR"]; value != "" && profile == "" {
+		home, err := ompHome(env)
+		if err != nil {
+			return "", err
+		}
+		handedDown, valid := normalizeProfile(env["PI_PROFILE"])
+		if !valid || handedDown == "" || value != filepath.Join(home, ".omp", "profiles", handedDown, "agent") {
+			return "", movedPluginRoot("PI_CODING_AGENT_DIR", value)
+		}
+	}
 	return verifyPluginContract(manifest, profile, contract)
+}
+
+// movedPluginRoot refuses a variable that moves where Oh My Pi reads its plugins from.
+func movedPluginRoot(name, value string) error {
+	return fmt.Errorf("%s is set (%s): it moves the directories Oh My Pi reads its plugins from, which this contract check does not follow. Unset it, and select the plugin root with OMP_PROFILE, HOME or XDG_DATA_HOME", name, value)
 }
 
 // verifyPluginContract is the contract probe (verifyLegionPluginContract, boot-probes.ts:267-298,
