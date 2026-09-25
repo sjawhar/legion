@@ -52,21 +52,20 @@ export interface KubernetesScheduling {
   priorityClassName?: string;
 }
 
-/** `runtime.kubernetes`: the Kubernetes runtime's configuration block, file-only (no
- * `LEGION_KUBERNETES_*` environment keys). Carried by `DaemonConfig.runtime` when its `name` is
+/** The Kubernetes runtime's configuration, once `runtime.kubernetes` in legion.yaml. The loader
+ * now refuses that block, naming the Go daemon (LEGION-286), so only a caller that builds
+ * `DaemonConfig` directly produces one; it is carried by `DaemonConfig.runtime` when its `name` is
  * `"kubernetes"`. */
 export interface KubernetesRuntimeConfig {
   namespace: string;
-  /** `runtime.kubernetes.image`, digest-pinned (`parseImageDigestRef`). */
+  /** The worker image, digest-pinned. */
   image: ImageDigestRef;
   storageClass?: string;
-  /** `runtime.kubernetes.tree_volume`; default "20Gi". */
+  /** The tree volume's size, a Kubernetes quantity. */
   treeVolume: string;
-  /** Absolute path (a relative file value is resolved against the config file's directory);
-   * absent = in-cluster service-account credentials. */
+  /** Absolute path; absent = in-cluster service-account credentials. */
   kubeconfig?: string;
-  /** `runtime.kubernetes.session_store` + `session_dsn_secret` (`parseSessionStore`); default
-   * `{ kind: "pvc" }`. */
+  /** Where each pod's session lives. */
   sessionStore: SessionStore;
   resources: Record<ResourceProfileName, RoleResources>;
   roleProfiles: Record<LegionRole, ResourceProfileName>;
@@ -105,10 +104,10 @@ export interface DaemonConfig {
   project: string;
   legionId: string;
   port: number;
-  /** Which `Runtime` (`runtime.ts`) starts, probes, and stops Legion processes: `tmux` (the
-   * default: panes on the daemon's private tmux server) or `kubernetes` (pods), the latter
-   * carrying its `runtime.kubernetes` block -- one value, so a kubernetes runtime without its
-   * block cannot be expressed. */
+  /** Which `Runtime` (`runtime.ts`) starts, probes, and stops Legion processes: `tmux`, panes on
+   * the daemon's private tmux server, the one runtime the loader accepts; or `kubernetes`, pods,
+   * carrying its configuration, which only a `DaemonConfig` built directly has, since the loader
+   * refuses `runtime: kubernetes` naming the Go daemon. */
   runtime: RuntimeConfig;
   /** The daemon API URL every spawned process is told (`LEGION_DAEMON_URL`), normalized with no
    * trailing slash. Under tmux it is always `http://127.0.0.1:<port>` — the default, and the only
@@ -296,9 +295,10 @@ const MAX_TIMER_HOURS = Math.floor(MAX_TIMER_SECONDS / 3600);
 /** Also the per-attempt budget `legion probe-image` uses (`IMAGE_PROBE_TIMEOUT_MS`). */
 export const DEFAULT_SLOW_COMMAND_TIMEOUT_SECONDS = 300;
 
-/** The refusal every source of `runtime: kubernetes` (the file, `LEGION_RUNTIME`, a programmatic
- * override) gets, before anything else in the file is read: the Go daemon (`packages/daemon-go`)
- * is the one that runs on Kubernetes. */
+/** The refusal every source of `runtime: kubernetes` gets: the Go daemon (`packages/daemon-go`)
+ * is the one that runs on Kubernetes. The file's forms get it before anything else in the file is
+ * read (loadConfigFromFile); `LEGION_RUNTIME` and a programmatic override when the configuration
+ * resolves (resolveDaemonConfig), after the file is read. */
 const KUBERNETES_REFUSAL =
   "is refused: the TypeScript daemon no longer runs on Kubernetes; use the Go daemon (packages/daemon-go)";
 
