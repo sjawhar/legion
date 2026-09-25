@@ -1029,6 +1029,22 @@ note "the kept transcripts hold the same: ${kept%%, every one*}"
 pass
 
 begin cleanup-is-complete
+# The proof opens a pull request for every proof it drives and merges only the one the human-merge
+# check merges, so a run that ends any other way — and every run, for the proofs it never merges —
+# leaves branches and open pull requests on the smoke repository. They outlive the run, and the
+# next run's smoke-main check reads them. Every one of this run's own is closed here, named by the
+# branch prefix the daemon gives this project, so a lane running beside this one is untouched.
+mine=$(gh -R "$repo" pr list --state open --json number,headRefName \
+  --jq "[.[] | select(.headRefName | startswith(\"legion/$project-\")) | .number] | .[]")
+for pr in $mine; do
+  gh -R "$repo" pr close "$pr" --delete-branch >/dev/null 2>&1 ||
+    fail "the run's open pull request $repo#$pr could not be closed"
+done
+left=$(gh -R "$repo" pr list --state open --json headRefName \
+  --jq "[.[] | select(.headRefName | startswith(\"legion/$project-\"))] | length")
+[ "$left" = 0 ] || fail "$left of this run's pull requests are still open on $repo"
+note "closed $(printf '%s' "$mine" | grep -c . || true) of this run's pull requests on $repo, branches deleted"
+
 # The isolated OMP profile and the scratch work directory go last, once the transcripts are kept.
 rm -rf "$HOME/.omp/profiles/$profile"
 [ ! -e "$HOME/.omp/profiles/$profile" ] || fail "the isolated OMP profile remains"

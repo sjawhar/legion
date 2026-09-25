@@ -309,8 +309,12 @@ Dispatch, listener, and bridge logs, the model key command and its log of every 
 (`model-gateway/`), state captures, negative-control outputs, the pane endpoint checks, and the
 production audit. A passing run's last three checks stop every process, kill the private tmux
 server and remove both containers (`services-stopped`), check the model route
-(`model-turns-through-the-gateway`), and remove the isolated OMP profile and the scratch work
-directory, the agents' workspaces with it (`cleanup-is-complete`); each shows what it removed gone.
+(`model-turns-through-the-gateway`), and close every pull request the run still has open on the
+smoke repository — its own, by the `legion/<project>-` branch prefix — before removing the
+isolated OMP profile and the scratch work directory, the agents' workspaces with it
+(`cleanup-is-complete`); each shows what it removed gone. The proof merges only the pull request
+its human-merge check merges, so the held-worker and outbox proofs are open when the run reaches
+here, and a run that ends early leaves whatever it had opened.
 On any exit the `EXIT` trap does the same teardown, except that a failure keeps the scratch work
 directory and prints its path.
 
