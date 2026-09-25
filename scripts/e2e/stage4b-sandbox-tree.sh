@@ -66,6 +66,12 @@ dispatch_actor=legion-e2e4b-proof-human-$$
 envoy_url=http://envoy-listener.internal.trajectorylabs.com:9020
 nats_url=nats://nats.internal.trajectorylabs.com:4222
 gateway_url=https://middleman.hawk.internal.trajectorylabs.com
+# The operator's pod configuration (scripts/e2e/fixtures/operator-route): the model route, overlay,
+# ServiceAccount and projected token every pod carries. Legion holds none of it. The run creates its
+# own copy of the ConfigMap the fixture mounts, labelled with the run's label, which the teardown
+# deletes with the rest.
+fixture=$root/scripts/e2e/fixtures/operator-route
+route_configmap=legion-operator-route-$run_label
 port_daemon=13370
 port_worker_stream=13371
 stream=ENVOY_NOTIFICATIONS
@@ -220,7 +226,7 @@ workspace_jj() {
   pod=$(tree_pod "$(issue_tree "$issue")") || return 1
   pod_exec "$pod" jj -R "/legion/workspaces/$repo/${issue,,}" "$@"
 }
-# assert_claim_endpoints ISSUE ROLE: the claim's pod names production's services and the gateway,
+# assert_claim_endpoints ISSUE ROLE: the claim's pod names production's services,
 # and its Oh My Pi has no Anthropic key: a turn off that route, or a pod reaching another rig, would
 # not be this proof.
 assert_claim_endpoints() {
@@ -237,12 +243,11 @@ pod_endpoint_mismatch() {
     printf 'no readable spec\n'
     return 0
   }
-  for name in DISPATCH_URL ENVOY_URL ENVOY_NATS_URL LEGION_MODEL_GATEWAY_URL LEGION_DAEMON_URL; do
+  for name in DISPATCH_URL ENVOY_URL ENVOY_NATS_URL LEGION_DAEMON_URL; do
     case "$name" in
       DISPATCH_URL) want=$dispatch_base ;;
       ENVOY_URL) want=$envoy_url ;;
       ENVOY_NATS_URL) want=$nats_url ;;
-      LEGION_MODEL_GATEWAY_URL) want=$gateway_url ;;
       LEGION_DAEMON_URL) want="http://$host:$port_daemon" ;;
     esac
     got=$(sed -n "s/^$name=//p" <<<"$env")
@@ -312,12 +317,19 @@ runtime:
     storage_class: gp2
     kubeconfig: $runtime_kubeconfig
     context: $runtime_context
-    gateway:
-      url: $gateway_url
-      audience: middleman-legion
-      service_account: legion-worker
-      token_expiry_seconds: 600
+    pod:
 EOF
+  # The operator fixture's pod, its ConfigMap reference pointed at the run's own copy.
+  sed -e 's/^/      /' -e "s/name: legion-operator-route\$/name: $route_configmap/" "$fixture/pod.yml" >>"$work/legion.yaml"
+  grep -qF "name: $route_configmap" "$work/legion.yaml" || fail "the fixture's pod.yml mounts no ConfigMap legion-operator-route"
+}
+# create_route_configmap is the operator's step before any pod runs: the fixture's models.yml and
+# overlay.yml in the ConfigMap the run's pods mount.
+create_route_configmap() {
+  op create configmap "$route_configmap" --from-file=models.yml="$fixture/models.yml" --from-file=overlay.yml="$fixture/overlay.yml" \
+    --dry-run=client -o yaml | kubectl label --local -f - "legion.dev/project=$run_label" -o yaml | op create -f - >/dev/null ||
+    fail "the operator could not create ConfigMap $route_configmap"
+  note "[operator] ConfigMap $route_configmap: models.yml and overlay.yml from $fixture, label legion.dev/project=$run_label"
 }
 start_daemon() {
   env -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -u GH_AGENT_APP_PRIVATE_KEY_B64 \
@@ -426,7 +438,8 @@ hog_oomkilled() {
 # ---- the pod-shape watcher (checkpoint pod-shape) --------------------------------------------------
 
 # check_pod_shape POD UID prints each way the pod departs from the shape every Sandbox pod has, or
-# nothing: gVisor, the gateway's ServiceAccount and its one projected token, the pool, the restricted
+# nothing: gVisor, the operator's ServiceAccount and its one projected token, the run's own copy of
+# the operator's route ConfigMap mounted where the profile reads models.yml, the pool, the restricted
 # security context, no token value in a container's environment, command or args, and 4b.6b's split
 # provisioning (the provisioning token only in workspace-fetch, the feed read-only in workspace-init,
 # no provision directory in the worker).
@@ -436,14 +449,18 @@ check_pod_shape() {
     echo "the pod's spec could not be read"
     return
   }
-  jq -r '
+  jq -r --arg route "$route_configmap" '
     .spec as $s
     | (if $s.runtimeClassName != "gvisor" then "runtimeClassName \($s.runtimeClassName)" else empty end),
       (if $s.serviceAccountName != "legion-worker" then "serviceAccountName \($s.serviceAccountName)" else empty end),
       (if $s.automountServiceAccountToken != false then "automountServiceAccountToken \($s.automountServiceAccountToken)" else empty end),
       (if ([$s.volumes[] | select(.projected) | .projected.sources[] | select(.serviceAccountToken)] | length) != 1
         or ([$s.volumes[] | select(.projected) | .projected.sources[] | select(.serviceAccountToken) | .serviceAccountToken.audience] != ["middleman-legion"])
-        then "the projected gateway token source is not the one middleman-legion token" else empty end),
+        then "the projected token source of the operator pod is not the one middleman-legion token" else empty end),
+      ([$s.volumes[] | select(.configMap.name == $route) | .name] as $route_volumes
+        | if ($route_volumes | length) != 1 then "no one volume of the route ConfigMap \($route)"
+          elif ([$s.containers[] | select(.name == "worker") | .volumeMounts[]? | select(.name == $route_volumes[0] and .mountPath == "/home/legion/.omp/profiles/legion/agent/models.yml")] | length) != 1
+          then "the worker does not mount models.yml of \($route) where the profile reads it" else empty end),
       (if $s.nodeSelector["legion.dev/pool"] != "legion" then "nodeSelector \($s.nodeSelector)" else empty end),
       (if ([$s.tolerations[]? | select(.key == "legion.dev/pool")] | length) == 0 then "no legion.dev/pool toleration" else empty end),
       # Pod Security "restricted": non-root and RuntimeDefault seccomp may be set on the pod; the
@@ -811,7 +828,7 @@ imds=$(curl -sf -m 5 -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec
   fail "instance metadata is unreachable; the daemon binds the devbox's private address, read from it"
 host=$(curl -sf -m 5 -H "X-aws-ec2-metadata-token: $imds" http://169.254.169.254/latest/meta-data/local-ipv4) || fail "instance metadata has no local-ipv4"
 unset imds
-leftover=$(op get sandboxes,pods,pvc -l "legion.dev/project=$run_label" -o name 2>&1) || fail "the operator context cannot list namespace $namespace: $leftover"
+leftover=$(op get sandboxes,pods,pvc,configmaps -l "legion.dev/project=$run_label" -o name 2>&1) || fail "the operator context cannot list namespace $namespace: $leftover"
 [ -z "$leftover" ] || fail "namespace $namespace already holds objects labelled legion.dev/project=$run_label, which another run left or owns: $(tr '\n' ' ' <<<"$leftover")"
 stale_consumers=$(bun "$root/scripts/e2e/lib/nats-stream.ts" consumers "$nats_url" "$stream" "legion-go-$project-") ||
   fail "production NATS $stream could not list its consumers"
@@ -936,6 +953,7 @@ EOF
 write_legion_config
 out=$("$work/legion" start --check-config --config "$work/legion.yaml" 2>&1) || fail "legion start --check-config refused the proof's config: $out"
 note "$out"
+create_route_configmap
 production_baseline
 start_daemon
 start_interests_sampler
@@ -1077,12 +1095,17 @@ pass
 begin review-pair
 # The reviewer's two review passes are the image's thermonuclear agents, dispatched by name, and each
 # must have run: a delivered background result names the agent as completed, and the subagent's own
-# session, beside the reviewer's, ends in an accepted yield. A missing agent is refused to the model
+# session, beside the reviewer's, ends in an accepted yield, every turn on the review target. A missing agent is refused to the model
 # as "Unknown agent", an agent whose declared model the pod cannot resolve fails "No model
 # selected", and a model that substitutes the bundled reviewer still posts a verdict, which looks
 # the same from outside. tree-moved recorded the dispatches (record_pair); each failure below
 # quotes them.
 stem=$(cat "$evidence/review-pair/session-stem")
+# Both agents declare @review, which the operator's overlay maps. The task executor runs a subagent
+# on its parent's model when the subagent's own does not resolve, silently, so each pair session's
+# turns must all be on the fixture's review target.
+review_target=$(sed -n 's/^  review: \([^:]*\).*/\1/p' "$fixture/overlay.yml")
+[ -n "$review_target" ] || fail "the operator fixture's overlay.yml maps no review role"
 for agent in $pair_agents; do
   d=$evidence/review-pair/$agent.json
   [ "$(jq '.calls | length' "$d")" -gt 0 ] || fail "the reviewer dispatched no task naming $agent"
@@ -1095,7 +1118,10 @@ for agent in $pair_agents; do
   [ -s "$sub" ] || fail "$agent's session $stem/$id.jsonl is not beside the reviewer's"
   jq -R -s -e '[split("\n")[] | fromjson? | select(.type == "message" and .message.role == "toolResult" and .message.toolName == "yield" and .message.isError == false)] | length > 0' "$sub" >/dev/null ||
     fail "$agent's session $id holds no accepted yield"
-  note "$agent ran as $id: its delivery says completed and its session ends in an accepted yield"
+  models=$(jq -R -s -c '[split("\n")[] | fromjson? | select(.type == "message" and .message.role == "assistant") | "\(.message.provider)/\(.message.model)"] | unique' "$sub")
+  [ "$models" = "$(jq -cn --arg m "$review_target" '[$m]')" ] ||
+    fail "$agent's session $id ran on $models, not only the fixture's review target $review_target"
+  note "$agent ran as $id on $review_target: its delivery says completed and its session ends in an accepted yield"
 done
 pass
 
@@ -1112,20 +1138,21 @@ note "architect, planner, implementer, tester and reviewer on $tree1 each comple
 pass
 
 begin token-rotation
-# A pod's projected gateway token rotates within its 600 s expiry, and a model turn after the
-# rotation still goes through the gateway. The architect's pod is the longest-lived.
+# A pod's projected operator token (pod.yml: expiration_seconds 3600, which the kubelet renews at
+# 80 %, 2880 s after the pod's start) rotates, and a model turn after the rotation still goes through
+# the gateway's aliases. The architect's pod is the longest-lived.
 pod=$(claim_sandbox "$tree1" architect)
 pod_uid=$(op get pod "$pod" -o jsonpath='{.metadata.uid}')
 # token_hash prints the token file's sha256, or fails: an exec that did not answer is never a hash.
-token_hash() { pod_exec "$pod" sha256sum /var/run/legion/gateway/token | cut -d' ' -f1 | grep -xE '[0-9a-f]{64}'; }
-first=$(token_hash) || fail "the architect pod $pod's gateway token could not be read"
+token_hash() { pod_exec "$pod" sha256sum /var/run/operator/token | cut -d' ' -f1 | grep -xE '[0-9a-f]{64}'; }
+first=$(token_hash) || fail "the architect pod $pod's operator token could not be read"
 started=$(date +%s)
 token_rotated() {
   local now
   now=$(token_hash) || return 1
   [ "$now" != "$first" ]
 }
-until_true 900 "the architect pod's gateway token to rotate" token_rotated
+until_true 3600 "the architect pod's operator token to rotate" token_rotated
 now_uid=$(op get pod "$pod" -o jsonpath='{.metadata.uid}')
 [ "$now_uid" = "$pod_uid" ] || fail "the architect's pod was replaced during the wait ($pod_uid -> $now_uid), so the new token is another pod's, not a rotation"
 rotated=$(date -u +%FT%TZ)

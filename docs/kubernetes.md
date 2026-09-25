@@ -320,11 +320,11 @@ runtime:
       priority_class: legion
     resources:                  # optional; a role absent here gets no requests or limits
       tester: { limits: { memory: 8Gi } }
-    gateway:                    # required: a pod reaches the model only through the gateway
-      url: https://middleman.hawk.internal.trajectorylabs.com
-      audience: middleman-legion
+    pod:                        # the operator's: env, volumes, mounts, ServiceAccount (below)
       service_account: legion-worker
-      token_expiry_seconds: 600
+      env: { PI_CONFIG_FILES: /etc/legion-operator/overlay.yml }
+      volumes: [...]
+      volume_mounts: [...]
 bind: <the daemon host's own address>   # pods dial tcp://<bind>:<worker_stream_port>
 worker_stream_port: 13371
 daemon_url: http://<the daemon host's own address>:13370
@@ -333,14 +333,23 @@ daemon_url: http://<the daemon host's own address>:13370
 `packages/daemon-go/internal/config/kubernetes.go` reads the block and refuses, naming the key:
 - anything it does not model: `role_profiles`, since each role's requests and limits go under
   `resources`;
+- `gateway`, removed with LEGION-270: a pod's model route is the operator's `pod`;
 - an image that is not pinned by digest;
 - `session_store: postgres` until Stage 6, since a pod's session lives on the tree volume, and a
   `session_dsn_secret` under `pvc`.
 
+Legion holds no model route. `pod` is the operator's: `env`, `volumes` (each a `secret`,
+`config_map` or `projected` source), `volume_mounts` and `service_account`, added to every pod, the
+image probe's included, and refused where they name a path or variable of Legion's own or the
+worker image's. `provider_keys` names keys of the providers Secret, which every pod mounts, those
+keys alone, for the shim to export. `scripts/e2e/fixtures/operator-route/` is one operator's: the
+Hawk model gateway, keyed by a projected ServiceAccount token, with a `models.yml`, a settings
+overlay, and the pod that mounts them; the Stage 4a and 4b proofs run on it, each with its own copy
+of its ConfigMap.
+
 Under `runtime: kubernetes` it also requires `daemon_url`, `envoy_url`, `nats_urls`,
 `envoy_token_file`, `operator_token_file`, `dispatch_url`, `github_apps` and `projects`. It refuses
-`omp_invocation`, `omp_launch_prefix` and `provider_keys`: every pod runs the worker image's Oh My
-Pi, and no provider key reaches a pod. Every address a pod is handed must be one a pod can reach, so
+`omp_invocation` and `omp_launch_prefix`: every pod runs the worker image's Oh My Pi. Every address a pod is handed must be one a pod can reach, so
 `bind`, `daemon_url`, `envoy_url`, `dispatch_url` and each `nats_urls` entry may be neither loopback
 nor the unspecified address. `legion start --check-config` runs all of it without starting the
 daemon or running a key command.
@@ -362,14 +371,13 @@ The tree volume is the root Sandbox's `volumeClaimTemplates` entry, and each wor
 references that claim by name. The main container mounts it at `/legion`, and again at Oh My Pi's
 sessions directory through a `subPath`, so a session survives its pod. The claim's Secret is
 projected twice: its boot half into the worker, read-only, and its provisioning half into
-`workspace-fetch` alone. The gateway volume holds one projected ServiceAccount token (`audience`,
-`token_expiry_seconds`) at `/var/run/legion/gateway`, read-only. State, `/tmp` and the XDG config
-home are in-memory.
+`workspace-fetch` alone. The operator's volumes and mounts join the worker's, and the providers
+Secret's configured keys when there are any. State, `/tmp` and the XDG config home are in-memory.
 
 Every pod runs:
 - with `runtimeClassName: gvisor`;
-- with `serviceAccountName` set to the gateway's ServiceAccount and `automountServiceAccountToken:
-  false`;
+- with `serviceAccountName` set to the operator's `pod.service_account` (the namespace's default
+  when it names none) and `automountServiceAccountToken: false`;
 - under Pod Security "restricted": non-root user 1000 on the pod, and on each container no
   privilege escalation, ALL capabilities dropped and the RuntimeDefault seccomp profile;
 - on the Legion pool, with its node selector and toleration;
