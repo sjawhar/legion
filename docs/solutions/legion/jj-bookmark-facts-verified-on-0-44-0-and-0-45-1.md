@@ -95,11 +95,16 @@ What that means for a caller that needs "exactly one commit or stop":
 
 ## One templated `jj bookmark list` reads every row's state
 
-Reproduced on 2026-09-25 on both binaries, identical (LEGION-286). `exact:` fails one state: a
-local deletion never pushed, followed by origin's branch moving and a fetch. jj keeps the local
-bookmark as a conflict with a deleted side (`- <pushed> + <moved>`), which `bookmarks(exact:)`
-resolves to `<moved>` **alone**, one line, so "one commit" does not mean "not conflicted". A
-template over the rows reads each state's flags directly:
+Reproduced on 2026-09-25 on both binaries, identical (LEGION-286). A revset cannot see a
+**conflict with a deleted side**. When a row's two sides diverge and one of them is a deletion, jj
+keeps the row conflicted (`- <base> + <other side>`). `bookmarks(exact:)` for a local row, and
+`untracked_remote_bookmarks()` for an untracked remote row, then list the
+other side's commit **alone**, one line, so "one commit" does not mean "not conflicted". Three
+ways to get there are below: a local deletion followed by origin moving, a local move followed by
+the remote deleting the branch, and two racing fetches of an untracked row where one sees it move
+and one sees it deleted (constructed with `jj --at-op <op> git fetch` twice from one operation; a
+later fetch sets the row to the remote's state again). A template over the rows reads each state's
+flags directly:
 
 `jj bookmark list --all-remotes exact:legion/X -T 'if(remote, remote, "local") ++ "|" ++ if(present, "1", "0") ++ "|" ++ if(conflict, "1", "0") ++ "|" ++ if(tracked, "1", "0") ++ "|" ++ added_targets.map(|c| c.commit_id()).join(",") ++ "|" ++ removed_targets.map(|c| c.commit_id()).join(",") ++ "\n"'`
 
@@ -109,7 +114,9 @@ template over the rows reads each state's flags directly:
 | only an untracked `@origin` row (another clone pushed it) | `origin\|1\|0\|0\|<A>\|` |
 | normal, tracked | `local\|1\|0\|0\|<A>\|`, `git\|1\|0\|1\|<A>\|`, `origin\|1\|0\|1\|<A>\|` |
 | local deleted, never pushed | `local\|0\|0\|0\|\|`, `origin\|1\|0\|1\|<A>\|` |
-| local deleted, then origin moved to `<B>` and a fetch | `local\|1\|1\|0\|<B>\|<A>`, `origin\|1\|0\|1\|<B>\|` |
+| local deleted, then origin moved to `<B>` and a fetch | `local\|1\|1\|0\|<B>\|<A>`, `origin\|1\|0\|1\|<B>\|`; `bookmarks(exact:)` lists `<B>` alone |
+| local moved to `<B>`, never pushed, then the branch deleted on the remote and a fetch | `local\|1\|1\|0\|<B>\|<A>`, `origin\|0\|0\|1\|\|`; `bookmarks(exact:)` lists `<B>` alone |
+| untracked `@origin` at `<A>`; racing fetches, one sees `<B>`, one sees the branch deleted | `origin\|1\|1\|0\|<B>\|<A>`; `untracked_remote_bookmarks()` lists `<B>` alone |
 
 The separator is `|`, not a space, because the reader trims each line, which would drop an empty last field.
 The Go `createWorkspace` (`packages/daemon-go/internal/workspace/bookmark.go`) switches on these

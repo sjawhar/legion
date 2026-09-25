@@ -784,21 +784,40 @@ func TestProvisionRefusesALocalDeletionNeverPushed(t *testing.T) {
 	}
 }
 
-// A local deletion never pushed, and then origin's branch moving (a human's push, GitHub's Update
-// branch): the next fetch leaves the local bookmark conflicted, its one side the deletion, which
-// `bookmarks(exact:)` resolves to origin's new commit alone. Provisioning refuses the conflict by
+// A bookmark whose two sides diverged, one of them a deletion, is conflicted after the next fetch,
+// and `bookmarks(exact:)` resolves it to the other side's commit alone: a local deletion never
+// pushed and then origin's branch moving (a human's push, GitHub's Update branch), or a local move
+// never pushed and then the branch deleted on GitHub (a merge). Provisioning refuses the conflict by
 // name, with both targets, every time, before anything is registered.
-func TestProvisionRefusesALocalDeletionAfterOriginMoved(t *testing.T) {
-	l := pushedThenLost(t, "pushed.txt")
-	runSetup(t, l.clone, "jj", "bookmark", "delete", l.first.Bookmark)
-	moved := pushRemoteBranch(t, l.run.remote, l.first.Bookmark, "moved.txt")
-	for attempt := 1; attempt <= 2; attempt++ {
-		refusal := l.refusedBeforeAnything(t, attempt)
-		for _, want := range []string{"Bookmark legion/WIDGETS-42 is conflicted (adds " + moved + "; removes " + l.pushed + ")", "jj bookmark set legion/WIDGETS-42 -r <commit> -R " + l.clone} {
-			if !strings.Contains(refusal, want) {
-				t.Errorf("attempt %d: the refusal lacks %q:\n%s", attempt, want, refusal)
+func TestProvisionRefusesAConflictWithADeletedSide(t *testing.T) {
+	for _, diverge := range []struct {
+		name string
+		// diverges the two sides of l's bookmark, returning the commit that survives as added
+		sides func(t *testing.T, l lostWorkspace) string
+	}{
+		{"deleted locally, then origin moved", func(t *testing.T, l lostWorkspace) string {
+			runSetup(t, l.clone, "jj", "bookmark", "delete", l.first.Bookmark)
+			return pushRemoteBranch(t, l.run.remote, l.first.Bookmark, "moved.txt")
+		}},
+		{"moved locally, then deleted on GitHub", func(t *testing.T, l lostWorkspace) string {
+			runSetup(t, l.clone, "jj", "new", "--no-edit", l.first.Bookmark, "-m", "never pushed", "--ignore-working-copy")
+			runSetup(t, l.clone, "jj", "bookmark", "set", l.first.Bookmark, "-r", l.first.Bookmark+"+", "--ignore-working-copy")
+			runSetup(t, l.req.StateDir, "git", "--git-dir="+l.run.remote, "update-ref", "-d", "refs/heads/"+l.first.Bookmark)
+			return commitOf(t, l.clone, l.first.Bookmark)
+		}},
+	} {
+		t.Run(diverge.name, func(t *testing.T) {
+			l := pushedThenLost(t, "pushed.txt")
+			added := diverge.sides(t, l)
+			for attempt := 1; attempt <= 2; attempt++ {
+				refusal := l.refusedBeforeAnything(t, attempt)
+				for _, want := range []string{"Bookmark legion/WIDGETS-42 is conflicted (adds " + added + "; removes " + l.pushed + ")", "jj bookmark set legion/WIDGETS-42 -r <commit> -R " + l.clone} {
+					if !strings.Contains(refusal, want) {
+						t.Errorf("attempt %d: the refusal lacks %q:\n%s", attempt, want, refusal)
+					}
+				}
 			}
-		}
+		})
 	}
 }
 
