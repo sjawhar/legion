@@ -765,7 +765,11 @@ func (c *Client) restoreSubscriptions() error {
 	}
 	for index := range c.subscriptions {
 		subscription := &c.subscriptions[index]
-		if subscription.handler == nil {
+		// A reconnect in place leaves a subscription valid: nats.go has already re-sent its SUB, so
+		// it delivers as it did. Unsubscribing it to bind again would race the server's release of
+		// the consumer's push binding, which refuses the new bind while it still sees the old one.
+		// One on a replaced connection is invalid and is bound again.
+		if subscription.handler == nil || subscription.active.IsValid() {
 			continue
 		}
 		slog.Info("envoy nats resubscribing", slog.String("subject", subscription.subject))
