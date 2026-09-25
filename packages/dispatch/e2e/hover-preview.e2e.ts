@@ -144,6 +144,10 @@ test("a card survives a selection drag that leaves its reference and comes back"
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
+    // The gesture below takes longer than the close delay on a loaded machine, so the page's
+    // clock is the test's: paused for the drag, then advanced past the delay deliberately.
+    // Wall-clock timing would race the timer this test is about.
+    await page.clock.install();
     await page.goto(`/issues/${source.key}/conversation`);
     const turns = page.getByRole("list", { name: "Conversation turns" });
     const link = turns.getByRole("link", { name: "Hover target" });
@@ -151,6 +155,7 @@ test("a card survives a selection drag that leaves its reference and comes back"
     await link.hover();
     const card = page.getByRole("tooltip");
     await expect(card).toBeVisible();
+    await page.clock.pauseAt(Date.now() + 1000);
 
     // The press lands on the text beside the reference, not on the reference: pressing the link
     // itself starts Chromium's native link drag, which stops delivering boundary events. A
@@ -166,15 +171,9 @@ test("a card survives a selection drag that leaves its reference and comes back"
     await page.mouse.down();
     await page.mouse.move(beside.x, box.y + box.height + 40, { steps: 4 });
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 4 });
-    const openAfterCloseDelay = await page.evaluate(
-      (delay) =>
-        new Promise<boolean>((resolve) => {
-          setTimeout(() => resolve(document.getElementById("ref-preview") !== null), delay);
-        }),
-      REF_PREVIEW_CLOSE_DELAY_MS * 2
-    );
+    await page.clock.runFor(REF_PREVIEW_CLOSE_DELAY_MS * 2);
+    await expect(card).toBeVisible();
     await page.mouse.up();
-    expect(openAfterCloseDelay).toBe(true);
   } finally {
     await alice.close();
   }
