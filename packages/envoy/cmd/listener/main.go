@@ -86,6 +86,7 @@ func applyListenerConsumerPolicy(config *nats.ConsumerConfig, subjects []string)
 	config.MaxAckPending = consumerMaxAckPending
 	config.MaxDeliver = consumerMaxDeliver
 	config.InactiveThreshold = consumerInactiveThreshold
+	config.Heartbeat = 0
 }
 
 // listenerConsumerPolicyDrifted reports whether a consumer's server-side
@@ -128,6 +129,12 @@ func startListenerSubscription(client *bus.Client, consumer string, handler nats
 		}
 	case err != nil:
 		return nil, err
+	case info.Config.Heartbeat != 0:
+		// The bus logs nats.ErrConsumerNotActive at WARN because only KV watchers' ordered
+		// consumers report it, and only while disconnected; a heartbeat here would make a stalled
+		// durable report that same WARN. NATS cannot change a consumer's heartbeat in place, and
+		// recreating the durable would drop its cursor, so the listener leaves it to an operator.
+		return nil, fmt.Errorf("durable consumer %s has an idle heartbeat of %s, which the listener's consumer policy forbids; delete it to let the listener recreate it without one", consumer, info.Config.Heartbeat)
 	case listenerConsumerPolicyDrifted(info.Config, subjects):
 		config := info.Config
 		applyListenerConsumerPolicy(&config, subjects)
