@@ -165,17 +165,21 @@ func listenerDurableRefusal(consumer string, config nats.ConsumerConfig) error {
 		errListenerDurableRefused, consumer, strings.Join(settings, " and "), without)
 }
 
-// checkListenerDurable returns listenerDurableRefusal's answer for the machine's existing durable,
-// nil when it has none, and the lookup's error when NATS cannot say.
-func checkListenerDurable(client *bus.Client, consumer string) error {
+// listenerDurable reads the machine's durable. It returns a nil info when there is none,
+// listenerDurableRefusal's error when the listener's policy cannot use the one there is, and the
+// lookup's error when NATS cannot say.
+func listenerDurable(client *bus.Client, consumer string) (*nats.ConsumerInfo, error) {
 	info, err := client.JS().ConsumerInfo(bus.Stream, consumer)
 	if errors.Is(err, nats.ErrConsumerNotFound) {
-		return nil
+		return nil, nil
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return listenerDurableRefusal(consumer, info.Config)
+	if err := listenerDurableRefusal(consumer, info.Config); err != nil {
+		return nil, err
+	}
+	return info, nil
 }
 
 // startListenerSubscription preserves the durable consumer so restarts resume
@@ -189,9 +193,11 @@ func checkListenerDurable(client *bus.Client, consumer string) error {
 // consumers created before the threshold existed.
 func startListenerSubscription(client *bus.Client, consumer string, handler nats.MsgHandler) (*nats.Subscription, error) {
 	subjects := bus.StreamSubjects()
-	info, err := client.JS().ConsumerInfo(bus.Stream, consumer)
+	info, err := listenerDurable(client, consumer)
 	switch {
-	case errors.Is(err, nats.ErrConsumerNotFound):
+	case err != nil:
+		return nil, err
+	case info == nil:
 		// The deliver subject is a random inbox, not a derivable name: on a
 		// shared NATS account a predictable subject would let any client
 		// hold interest on it — shadow-reading deliveries and making the
@@ -204,14 +210,10 @@ func startListenerSubscription(client *bus.Client, consumer string, handler nats
 		if _, err := client.JS().AddConsumer(bus.Stream, &config); err != nil {
 			return nil, err
 		}
-	case err != nil:
-		return nil, err
 	default:
-		if err := listenerDurableRefusal(consumer, info.Config); err != nil {
-			return nil, err
-		}
 		// Only a field the policy writes can differ: the copy shares every other one, the
-		// server-set metadata included, and the refusal above has already fixed the ack policy.
+		// server-set metadata included, and listenerDurable has already refused any ack policy
+		// but explicit.
 		corrected := info.Config
 		applyListenerConsumerPolicy(&corrected, subjects)
 		if !reflect.DeepEqual(corrected, info.Config) {
@@ -608,7 +610,7 @@ func main() {
 	// The durable is checked here, before the cache warm-ups below (up to 30 s each), so a refused
 	// one ends the start within the NATS connect. A lookup that fails is left to the subscribe
 	// loop, which retries it.
-	if err := checkListenerDurable(client, consumer); errors.Is(err, errListenerDurableRefused) {
+	if _, err := listenerDurable(client, consumer); errors.Is(err, errListenerDurableRefused) {
 		exitRefused(err)
 	} else if err != nil {
 		logger.Warn("durable consumer check failed; the subscribe retries it", slog.String("consumer", consumer), slog.String("error", err.Error()))
