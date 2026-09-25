@@ -113,6 +113,12 @@ func localBareRemote(t *testing.T) string {
 // provisioning's processes alone.
 func runSetup(t *testing.T, dir string, argv ...string) string {
 	t.Helper()
+	return runSetupWith(t, dir, nil, argv...)
+}
+
+// runSetupWith is runSetup with env added to the command's environment.
+func runSetupWith(t *testing.T, dir string, env []string, argv ...string) string {
+	t.Helper()
 	command := exec.Command(argv[0], argv[1:]...)
 	command.Dir = dir
 	for _, entry := range os.Environ() {
@@ -121,11 +127,19 @@ func runSetup(t *testing.T, dir string, argv ...string) string {
 		}
 	}
 	command.Env = append(command.Env, "JJ_USER=Legion test", "JJ_EMAIL=legion-test@example.invalid")
+	command.Env = append(command.Env, env...)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("%s: %v\n%s", strings.Join(argv, " "), err, output)
 	}
 	return string(output)
+}
+
+// fromOrigin runs a fixture command that reaches origin, https://github.com/acme/widgets in a
+// provisioned clone, at run's local bare remote instead.
+func fromOrigin(t *testing.T, run *recordingRunner, dir string, argv ...string) string {
+	t.Helper()
+	return runSetupWith(t, dir, []string{"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=url." + run.remote + ".insteadOf", "GIT_CONFIG_VALUE_0=https://github.com/acme/widgets"}, argv...)
 }
 
 // newLocalRunner is a runner against a fresh local bare remote. jj reads no configuration of the
@@ -550,14 +564,35 @@ func TestProvisionUsesBookmarkCommitAndRefusesConflictBeforeWorkspaceAdd(t *test
 	})
 }
 
-// pushRemoteBranch pushes branch to the bare remote from a clone of its own: one commit on main
-// adding file. It returns the commit's id.
+// commitOf is the commit id rev names in dir's repository, read without a snapshot.
+func commitOf(t *testing.T, dir, rev string) string {
+	t.Helper()
+	return strings.TrimSpace(runSetup(t, dir, "jj", "log", "-r", rev, "--no-graph", "-T", "commit_id", "--ignore-working-copy"))
+}
+
+// feedRequest is req provisioned as a pod provisions it: from a feed a fresh Fetch filled, with no
+// credential.
+func feedRequest(t *testing.T, run *recordingRunner, req Request) Request {
+	t.Helper()
+	fetch := fetchRequest(t)
+	if _, err := Fetch(context.Background(), run, fetch); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	return Request{StateDir: req.StateDir, Repo: req.Repo, Issue: req.Issue, CredentialHelper: req.CredentialHelper, Feed: fetch.Feed}
+}
+
+// pushRemoteBranch pushes one commit adding file to branch on the bare remote, from a clone of its
+// own: on top of the branch when the remote has it, on main otherwise. It returns the commit's id.
 func pushRemoteBranch(t *testing.T, remote, branch, file string) string {
 	t.Helper()
 	scratch := t.TempDir()
 	runSetup(t, scratch, "git", "clone", "--quiet", remote, "other")
 	other := filepath.Join(scratch, "other")
-	runSetup(t, other, "git", "checkout", "--quiet", "-b", branch)
+	if exec.Command("git", "-C", other, "rev-parse", "--verify", "--quiet", "origin/"+branch).Run() == nil {
+		runSetup(t, other, "git", "checkout", "--quiet", branch)
+	} else {
+		runSetup(t, other, "git", "checkout", "--quiet", "-b", branch)
+	}
 	if err := os.WriteFile(filepath.Join(other, file), []byte("pushed from another clone\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -565,6 +600,70 @@ func pushRemoteBranch(t *testing.T, remote, branch, file string) string {
 	runSetup(t, other, "git", "-c", "user.email=legion-test@example.invalid", "-c", "user.name=Legion test", "commit", "--quiet", "-m", "pushed from another clone")
 	runSetup(t, other, "git", "push", "--quiet", "origin", branch)
 	return strings.TrimSpace(runSetup(t, other, "git", "rev-parse", "HEAD"))
+}
+
+// lostWorkspace is an issue whose workspace pushed its work from the shared clone and was then lost,
+// as a tree whose volume went loses it: forgotten, its directory gone, the clone kept.
+type lostWorkspace struct {
+	run    *recordingRunner
+	req    Request
+	first  Workspace
+	clone  string
+	pushed string
+}
+
+// pushedThenLost provisions legion/WIDGETS-42 on the host's path, commits file there, pushes the
+// bookmark from the shared clone, and loses the workspace.
+func pushedThenLost(t *testing.T, file string) lostWorkspace {
+	t.Helper()
+	run := newLocalRunner(t)
+	req := provisionRequest(t)
+	first, err := Provision(context.Background(), run, req)
+	if err != nil {
+		t.Fatalf("initial provision: %v", err)
+	}
+	clone := filepath.Join(req.StateDir, "repos", "github.com", "acme", "widgets")
+	if err := os.WriteFile(filepath.Join(first.Dir, file), []byte("pushed work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runSetup(t, first.Dir, "jj", "describe", "-m", "pushed work")
+	pushed := commitOf(t, first.Dir, first.Bookmark)
+	runSetup(t, clone, "jj", "git", "push", "--remote", "origin", "--bookmark", first.Bookmark)
+	runSetup(t, clone, "jj", "workspace", "forget", strings.ToLower(req.Issue), "-R", clone)
+	if err := os.RemoveAll(first.Dir); err != nil {
+		t.Fatal(err)
+	}
+	return lostWorkspace{run: run, req: req, first: first, clone: clone, pushed: pushed}
+}
+
+// refusedBeforeAnything provisions the lost workspace's issue and returns the refusal, failing the
+// test when provisioning succeeds or when it added, tracked, created or registered anything first.
+func (l lostWorkspace) refusedBeforeAnything(t *testing.T, attempt int) string {
+	t.Helper()
+	before := len(l.run.Calls())
+	_, err := Provision(context.Background(), l.run, l.req)
+	if err == nil {
+		t.Fatalf("attempt %d provisioned", attempt)
+	}
+	nothingProvisioned(t, l.run, before, l.first, fmt.Sprintf("attempt %d", attempt), "jj", "bookmark", "track")
+	return err.Error()
+}
+
+// nothingProvisioned fails the test when a call after the first before ran `jj workspace add` or
+// starts with also, or when workspace's directory or registration exists; what names the attempt.
+func nothingProvisioned(t *testing.T, run *recordingRunner, before int, workspace Workspace, what string, also ...string) {
+	t.Helper()
+	for _, call := range run.Calls()[before:] {
+		if commandWith(call.Argv, "jj", "workspace", "add") || len(also) > 0 && commandWith(call.Argv, also...) {
+			t.Errorf("%s ran %q", what, call.Argv)
+		}
+	}
+	if _, statErr := os.Stat(workspace.Dir); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("%s created the workspace directory: %v", what, statErr)
+	}
+	if listed := runSetup(t, workspace.Clone, "jj", "workspace", "list", "-R", workspace.Clone); strings.Contains(listed, filepath.Base(workspace.Dir)+":") {
+		t.Errorf("%s registered the workspace:\n%s", what, listed)
+	}
 }
 
 // An issue branch another clone pushed before the issue's first workspace existed — a repository's
@@ -579,11 +678,7 @@ func TestProvisionAdoptsAnIssueBranchOnlyTheRemoteHas(t *testing.T) {
 			pushed := pushRemoteBranch(t, run.remote, "legion/WIDGETS-42", "fixture.txt")
 			req := provisionRequest(t)
 			if path == "feed" {
-				fetch := fetchRequest(t)
-				if _, err := Fetch(context.Background(), run, fetch); err != nil {
-					t.Fatalf("Fetch: %v", err)
-				}
-				req = Request{StateDir: req.StateDir, Repo: req.Repo, Issue: req.Issue, CredentialHelper: req.CredentialHelper, Feed: fetch.Feed}
+				req = feedRequest(t, run, req)
 			}
 			working, err := Provision(context.Background(), run, req)
 			if err != nil {
@@ -592,10 +687,10 @@ func TestProvisionAdoptsAnIssueBranchOnlyTheRemoteHas(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(working.Dir, "fixture.txt")); err != nil {
 				t.Errorf("the workspace does not hold the branch the remote already had: %v", err)
 			}
-			if parent := strings.TrimSpace(runSetup(t, working.Dir, "jj", "log", "-r", "@-", "--no-graph", "-T", "commit_id", "--ignore-working-copy")); parent != pushed {
+			if parent := commitOf(t, working.Dir, "@-"); parent != pushed {
 				t.Errorf("the workspace's @- is %s, want the remote branch's %s", parent, pushed)
 			}
-			if local := strings.TrimSpace(runSetup(t, working.Dir, "jj", "log", "-r", `bookmarks(exact:"legion/WIDGETS-42")`, "--no-graph", "-T", "commit_id", "--ignore-working-copy")); local != pushed {
+			if local := commitOf(t, working.Dir, `bookmarks(exact:"legion/WIDGETS-42")`); local != pushed {
 				t.Errorf("the local legion/WIDGETS-42 is %q, want the remote's %s", local, pushed)
 			}
 
@@ -604,12 +699,7 @@ func TestProvisionAdoptsAnIssueBranchOnlyTheRemoteHas(t *testing.T) {
 			}
 			runSetup(t, working.Dir, "jj", "describe", "-m", "the implementer's change")
 			runSetup(t, working.Dir, "jj", "bookmark", "set", "legion/WIDGETS-42", "-r", "@")
-			push := exec.Command("jj", "git", "push", "--bookmark", "legion/WIDGETS-42")
-			push.Dir = working.Dir
-			push.Env = append(os.Environ(), "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=url."+run.remote+".insteadOf", "GIT_CONFIG_VALUE_0=https://github.com/acme/widgets")
-			if output, err := push.CombinedOutput(); err != nil {
-				t.Fatalf("the issue's push of legion/WIDGETS-42: %v\n%s", err, output)
-			}
+			fromOrigin(t, run, working.Dir, "jj", "git", "push", "--bookmark", "legion/WIDGETS-42")
 			parents := strings.TrimSpace(runSetup(t, req.StateDir, "git", "--git-dir="+run.remote, "log", "-1", "--format=%P", "legion/WIDGETS-42"))
 			if parents != pushed {
 				t.Errorf("after the push the remote branch's head has parents %q, want the adopted %s", parents, pushed)
@@ -622,130 +712,176 @@ func TestProvisionAdoptsAnIssueBranchOnlyTheRemoteHas(t *testing.T) {
 // provisioned after that — its directory gone, as when a tree's volume is lost — starts from main
 // as a brand-new issue's does, and the merged branch is not brought back.
 func TestProvisionAfterTheMergedBranchIsDeletedStartsFromMain(t *testing.T) {
-	run := newLocalRunner(t)
-	req := provisionRequest(t)
-	first, err := Provision(context.Background(), run, req)
-	if err != nil {
-		t.Fatalf("initial provision: %v", err)
-	}
-	clone := filepath.Join(req.StateDir, "repos", "github.com", "acme", "widgets")
-	if err := os.WriteFile(filepath.Join(first.Dir, "merged.txt"), []byte("merged work\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	runSetup(t, first.Dir, "jj", "describe", "-m", "merged work")
-	merged := strings.TrimSpace(runSetup(t, first.Dir, "jj", "log", "-r", first.Bookmark, "--no-graph", "-T", "commit_id"))
-	runSetup(t, clone, "jj", "git", "push", "--remote", "origin", "--bookmark", first.Bookmark)
-	runSetup(t, req.StateDir, "git", "--git-dir="+run.remote, "branch", "-D", first.Bookmark)
-	runSetup(t, clone, "jj", "workspace", "forget", strings.ToLower(req.Issue), "-R", clone)
-	if err := os.RemoveAll(first.Dir); err != nil {
-		t.Fatal(err)
-	}
+	l := pushedThenLost(t, "merged.txt")
+	runSetup(t, l.req.StateDir, "git", "--git-dir="+l.run.remote, "branch", "-D", l.first.Bookmark)
 
-	second, err := Provision(context.Background(), run, req)
+	second, err := Provision(context.Background(), l.run, l.req)
 	if err != nil {
 		t.Fatalf("provision after the merged branch was deleted: %v", err)
 	}
-	main := strings.TrimSpace(runSetup(t, clone, "jj", "log", "-r", "main@origin", "--no-graph", "-T", "commit_id", "--ignore-working-copy"))
-	if parent := strings.TrimSpace(runSetup(t, second.Dir, "jj", "log", "-r", "@-", "--no-graph", "-T", "commit_id", "--ignore-working-copy")); parent != main {
+	if parent, main := commitOf(t, second.Dir, "@-"), commitOf(t, l.clone, "main@origin"); parent != main {
 		t.Errorf("the new workspace's @- is %s, want main's %s", parent, main)
 	}
 	if _, err := os.Stat(filepath.Join(second.Dir, "merged.txt")); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("the new workspace holds the merged branch's file: %v", err)
 	}
-	if local := strings.TrimSpace(runSetup(t, second.Dir, "jj", "log", "-r", `bookmarks(exact:"legion/WIDGETS-42")`, "--no-graph", "-T", "commit_id", "--ignore-working-copy")); local == merged || local == "" {
-		t.Errorf("the local legion/WIDGETS-42 is %q: want it created on the new working copy, never the merged %s", local, merged)
+	if local := commitOf(t, second.Dir, `bookmarks(exact:"legion/WIDGETS-42")`); local == l.pushed || local == "" {
+		t.Errorf("the local legion/WIDGETS-42 is %q: want it created on the new working copy, never the merged %s", local, l.pushed)
 	}
+}
+
+// codeSpan is the refusal's backticked command that starts with prefix, failing the test when the
+// refusal names none.
+func codeSpan(t *testing.T, refusal, prefix string) string {
+	t.Helper()
+	spans := strings.Split(refusal, "`")
+	for i := 1; i < len(spans); i += 2 {
+		if strings.HasPrefix(spans[i], prefix) {
+			return spans[i]
+		}
+	}
+	t.Fatalf("the refusal names no `%s …`:\n%s", prefix, refusal)
+	return ""
+}
+
+// githubDelete is how a refusal names deleting an acme/widgets branch on GitHub.
+const githubDelete = "gh api -X DELETE repos/acme/widgets/git/refs/heads/"
+
+// runWayOut runs the refusal's backticked command that starts with prefix, exactly as written but
+// for a `<commit>` placeholder, which becomes commit, and returns it. A GitHub deletion is GitHub's
+// side of it: the ref the command names leaves the remote.
+func (l lostWorkspace) runWayOut(t *testing.T, refusal, prefix, commit string) string {
+	t.Helper()
+	command := strings.ReplaceAll(codeSpan(t, refusal, prefix), "<commit>", commit)
+	if ref, ok := strings.CutPrefix(command, githubDelete); ok {
+		runSetup(t, l.req.StateDir, "git", "--git-dir="+l.run.remote, "update-ref", "-d", "refs/heads/"+ref)
+	} else {
+		runSetup(t, l.clone, strings.Fields(command)...)
+	}
+	return command
 }
 
 // A local legion/<KEY> deleted in the shared clone (`jj bookmark delete`) and never pushed leaves
 // origin's row tracked with no local bookmark. Tracking it changes nothing, and starting at main
 // would put a second branch beside the remote's, which the next push would drop. Provisioning
 // refuses that state by name, every time, before anything is registered, and each of the three
-// ways out the refusal names provisions as it says: restoring the bookmark and cancelling the
-// deletion start at origin's branch, and deleting the branch on GitHub starts at main.
+// ways out, run exactly as the refusal writes it, provisions as it says: restoring the bookmark and
+// cancelling the deletion start at origin's branch, and deleting the branch on GitHub starts at
+// main.
 func TestProvisionRefusesALocalDeletionNeverPushed(t *testing.T) {
 	for _, way := range []struct {
 		name       string
-		argv       func(bookmark string) []string
+		command    string
 		atPushed   bool
 		remoteGone bool
 	}{
-		{"restore", func(b string) []string { return []string{"jj", "bookmark", "set", b, "-r", b + "@origin"} }, true, false},
-		{"cancel the deletion", func(b string) []string { return []string{"jj", "bookmark", "forget", b} }, true, false},
-		{"delete the branch on GitHub", nil, false, true},
+		{"restore", "jj bookmark set", true, false},
+		{"cancel the deletion", "jj bookmark forget", true, false},
+		{"delete the branch on GitHub", githubDelete, false, true},
 	} {
 		t.Run(way.name, func(t *testing.T) {
-			run := newLocalRunner(t)
-			req := provisionRequest(t)
-			first, err := Provision(context.Background(), run, req)
-			if err != nil {
-				t.Fatalf("initial provision: %v", err)
-			}
-			clone := filepath.Join(req.StateDir, "repos", "github.com", "acme", "widgets")
-			if err := os.WriteFile(filepath.Join(first.Dir, "pushed.txt"), []byte("pushed work\n"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			runSetup(t, first.Dir, "jj", "describe", "-m", "pushed work")
-			pushed := strings.TrimSpace(runSetup(t, first.Dir, "jj", "log", "-r", first.Bookmark, "--no-graph", "-T", "commit_id"))
-			runSetup(t, clone, "jj", "git", "push", "--remote", "origin", "--bookmark", first.Bookmark)
-			runSetup(t, clone, "jj", "bookmark", "delete", first.Bookmark)
-			runSetup(t, clone, "jj", "workspace", "forget", strings.ToLower(req.Issue), "-R", clone)
-			if err := os.RemoveAll(first.Dir); err != nil {
-				t.Fatal(err)
-			}
-
+			l := pushedThenLost(t, "pushed.txt")
+			runSetup(t, l.clone, "jj", "bookmark", "delete", l.first.Bookmark)
+			var refusal string
 			for attempt := 1; attempt <= 2; attempt++ {
-				before := len(run.Calls())
-				_, err := Provision(context.Background(), run, req)
-				if err == nil {
-					t.Fatalf("attempt %d provisioned a local deletion never pushed", attempt)
-				}
-				for _, want := range []string{
-					"Bookmark legion/WIDGETS-42 was deleted in the shared clone",
-					"Restore it: `jj bookmark set legion/WIDGETS-42 -r legion/WIDGETS-42@origin -R " + clone + "`",
-					"Cancel the deletion, and the next provisioning adopts origin's branch: `jj bookmark forget legion/WIDGETS-42 -R " + clone + "`",
-					"Start from main instead: delete the branch on GitHub (the pull request's Delete branch button, or `gh api -X DELETE repos/acme/widgets/git/refs/heads/legion/WIDGETS-42`), and the next provisioning starts at main",
-				} {
-					if !strings.Contains(err.Error(), want) {
-						t.Errorf("attempt %d: the refusal lacks %q:\n%v", attempt, want, err)
-					}
-				}
-				for _, call := range run.Calls()[before:] {
-					if commandWith(call.Argv, "jj", "workspace", "add") || commandWith(call.Argv, "jj", "bookmark", "track") {
-						t.Errorf("attempt %d ran %q", attempt, call.Argv)
-					}
-				}
-				if _, statErr := os.Stat(first.Dir); !errors.Is(statErr, os.ErrNotExist) {
-					t.Errorf("attempt %d created the workspace directory: %v", attempt, statErr)
-				}
-				if listed := runSetup(t, clone, "jj", "workspace", "list", "-R", clone); strings.Contains(listed, strings.ToLower(req.Issue)+":") {
-					t.Errorf("attempt %d registered the workspace:\n%s", attempt, listed)
+				refusal = l.refusedBeforeAnything(t, attempt)
+				if !strings.Contains(refusal, "Bookmark legion/WIDGETS-42 was deleted in the shared clone") {
+					t.Fatalf("attempt %d: the refusal does not name the local deletion:\n%s", attempt, refusal)
 				}
 			}
 
-			if way.argv != nil {
-				runSetup(t, clone, append(way.argv(first.Bookmark), "-R", clone)...)
-			} else {
-				// GitHub's side of the branch deletion: the branch leaves the remote.
-				runSetup(t, req.StateDir, "git", "--git-dir="+run.remote, "branch", "-D", first.Bookmark)
-			}
-			working, err := Provision(context.Background(), run, req)
+			command := l.runWayOut(t, refusal, way.command, "")
+			working, err := Provision(context.Background(), l.run, l.req)
 			if err != nil {
-				t.Fatalf("provision after %s: %v", way.name, err)
+				t.Fatalf("provision after `%s`: %v", command, err)
 			}
-			parent := strings.TrimSpace(runSetup(t, working.Dir, "jj", "log", "-r", "@-", "--no-graph", "-T", "commit_id", "--ignore-working-copy"))
-			main := strings.TrimSpace(runSetup(t, clone, "jj", "log", "-r", "main@origin", "--no-graph", "-T", "commit_id", "--ignore-working-copy"))
+			parent, main := commitOf(t, working.Dir, "@-"), commitOf(t, l.clone, "main@origin")
 			switch {
-			case way.atPushed && parent != pushed:
-				t.Errorf("after %s the workspace's @- is %s, want origin's branch %s", way.name, parent, pushed)
+			case way.atPushed && parent != l.pushed:
+				t.Errorf("after `%s` the workspace's @- is %s, want origin's branch %s", command, parent, l.pushed)
 			case !way.atPushed && parent != main:
-				t.Errorf("after %s the workspace's @- is %s, want main's %s", way.name, parent, main)
+				t.Errorf("after `%s` the workspace's @- is %s, want main's %s", command, parent, main)
 			}
-			remote := strings.TrimSpace(runSetup(t, req.StateDir, "git", "--git-dir="+run.remote, "branch", "--list", first.Bookmark))
+			remote := strings.TrimSpace(runSetup(t, l.req.StateDir, "git", "--git-dir="+l.run.remote, "branch", "--list", l.first.Bookmark))
 			if gone := remote == ""; gone != way.remoteGone {
-				t.Errorf("after %s origin's %s is %q; want gone: %v", way.name, first.Bookmark, remote, way.remoteGone)
+				t.Errorf("after `%s` origin's %s is %q; want gone: %v", command, l.first.Bookmark, remote, way.remoteGone)
 			}
 		})
+	}
+}
+
+// A bookmark whose sides diverged is conflicted after the next fetch: a local deletion never pushed
+// and then origin's branch moving (a human's push, GitHub's Update branch), a local move never
+// pushed and then the branch deleted on GitHub (a merge), or a local move never pushed while origin
+// moved. With a deleted side, `bookmarks(exact:)` resolves it to the other side's commit alone.
+// Provisioning refuses the conflict by name, with its sides, every time, before anything is
+// registered, and each of its two ways out, every command of it run in order exactly as the refusal
+// writes it, provisions as it says: keeping an added commit starts there, and starting from main
+// (deleting the branch on GitHub while origin has it, then the local bookmark) starts at main.
+func TestProvisionRefusesALocalConflictAndItsWaysOutHold(t *testing.T) {
+	moveLocally := func(t *testing.T, l lostWorkspace) string {
+		runSetup(t, l.clone, "jj", "new", "--no-edit", l.first.Bookmark, "-m", "never pushed", "--ignore-working-copy")
+		runSetup(t, l.clone, "jj", "bookmark", "set", l.first.Bookmark, "-r", l.first.Bookmark+"+", "--ignore-working-copy")
+		return commitOf(t, l.clone, l.first.Bookmark)
+	}
+	for _, diverge := range []struct {
+		name string
+		// diverges the sides of l's bookmark, returning the commit to keep and the refusal's sides
+		sides func(t *testing.T, l lostWorkspace) (string, string)
+		// fromMain is the refusal's commands, in order, that start from main in this state
+		fromMain []string
+	}{
+		{"deleted locally, then origin moved", func(t *testing.T, l lostWorkspace) (string, string) {
+			runSetup(t, l.clone, "jj", "bookmark", "delete", l.first.Bookmark)
+			moved := pushRemoteBranch(t, l.run.remote, l.first.Bookmark, "moved.txt")
+			return moved, "(adds " + moved + "; removes " + l.pushed + "), one side a deletion"
+		}, []string{githubDelete, "jj bookmark delete"}},
+		{"moved locally, then deleted on GitHub", func(t *testing.T, l lostWorkspace) (string, string) {
+			local := moveLocally(t, l)
+			runSetup(t, l.req.StateDir, "git", "--git-dir="+l.run.remote, "update-ref", "-d", "refs/heads/"+l.first.Bookmark)
+			return local, "(adds " + local + "; removes " + l.pushed + "), one side a deletion"
+		}, []string{"jj bookmark delete"}},
+		{"moved locally while origin moved", func(t *testing.T, l lostWorkspace) (string, string) {
+			local := moveLocally(t, l)
+			moved := pushRemoteBranch(t, l.run.remote, l.first.Bookmark, "moved.txt")
+			return local, "(adds " + local + ", " + moved + "; removes " + l.pushed + ")"
+		}, []string{githubDelete, "jj bookmark delete"}},
+	} {
+		for _, way := range []struct {
+			name     string
+			commands []string
+			atKept   bool
+		}{
+			{"keep an added commit", []string{"jj bookmark set"}, true},
+			{"start from main", diverge.fromMain, false},
+		} {
+			t.Run(diverge.name+"/"+way.name, func(t *testing.T) {
+				l := pushedThenLost(t, "pushed.txt")
+				keep, sides := diverge.sides(t, l)
+				var refusal string
+				for attempt := 1; attempt <= 2; attempt++ {
+					refusal = l.refusedBeforeAnything(t, attempt)
+					if want := "Bookmark legion/WIDGETS-42 is conflicted " + sides + ";"; !strings.Contains(refusal, want) {
+						t.Fatalf("attempt %d: the refusal lacks %q:\n%s", attempt, want, refusal)
+					}
+				}
+				var ran []string
+				for _, prefix := range way.commands {
+					ran = append(ran, l.runWayOut(t, refusal, prefix, keep))
+				}
+				working, err := Provision(context.Background(), l.run, l.req)
+				if err != nil {
+					t.Fatalf("provision after %q: %v", ran, err)
+				}
+				parent, main := commitOf(t, working.Dir, "@-"), commitOf(t, l.clone, "main@origin")
+				switch {
+				case way.atKept && parent != keep:
+					t.Errorf("after %q the workspace's @- is %s, want the kept %s", ran, parent, keep)
+				case !way.atKept && parent != main:
+					t.Errorf("after %q the workspace's @- is %s, want main's %s", ran, parent, main)
+				}
+			})
+		}
 	}
 }
 
