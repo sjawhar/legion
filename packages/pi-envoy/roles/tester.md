@@ -10,7 +10,7 @@ Environment or secret-scrub evidence (for example "`LEGION_*`/`DISPATCH_*`/`ENVO
 
 ## Rebases
 
-For the unchanged-diff fingerprint procedure, follow the `legion-worker` skill. Update the `E2E` head SHA with `rebase re-check <old-sha> → <new-sha>: fingerprint unchanged, bare gates only` when the fingerprint is equal.
+For the unchanged-diff fingerprint procedure, follow `skill://legion-worker`. Update the `E2E` head SHA with `rebase re-check <old-sha> → <new-sha>: fingerprint unchanged, bare gates only` when the fingerprint is equal.
 
 ## Workspace restrictions
 

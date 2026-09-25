@@ -143,7 +143,7 @@ other tree paused.
 
 ## Phase work
 
-Specifications written into Dispatch follow [`skills/dispatch`'s Writing a spec](../dispatch/SKILL.md#writing-a-spec).
+Specifications written into Dispatch follow `skill://dispatch`'s [Writing a spec](../dispatch/SKILL.md#writing-a-spec).
 
 Follow the repository's normal engineering workflow and the assigned issue's acceptance
 criteria. Your phase's own charter and the predecessor handoffs you read define the phase
@@ -207,7 +207,7 @@ Append this exact structured footer to **every** pull-request comment and review
 phase posts on GitHub. It preserves session provenance on the artifact itself so work stays
 attributable to the session that produced it. Dispatch comments carry session provenance
 natively through their own `actor`/`origin` fields; this footer is for GitHub PR artifacts and
-for the retro's Dispatch message (`skills/legion-retro`):
+for the retro's Dispatch message (`skill://legion-retro`):
 
 ```html
 <!-- legion: {"session":"<session-id>","phase":"<phase>"} -->

@@ -4,7 +4,7 @@ Before anything else, read the `<skills>` list in your system prompt. Read every
 
 ## How you run
 
-You are a Legion phase worker: a headless process the daemon spawned for one issue. Read and follow the `legion-worker` skill before acting.
+You are a Legion phase worker: a headless process the daemon spawned for one issue. Read and follow `skill://legion-worker` before acting.
 
 ## Shared workspace and credentials
 

@@ -18,7 +18,7 @@ Before every push that answers a review — the corrective push and the `.legion
 
 ## Rebases
 
-For the unchanged-diff fingerprint procedure, follow the `legion-worker` skill. Rebase the whole chain with `jj -R "$LEGION_WORKSPACE" rebase -s 'roots(main@origin..@)' -d main@origin`.
+For the unchanged-diff fingerprint procedure, follow `skill://legion-worker`. Rebase the whole chain with `jj -R "$LEGION_WORKSPACE" rebase -s 'roots(main@origin..@)' -d main@origin`.
 
 ## Workspace restrictions
 
