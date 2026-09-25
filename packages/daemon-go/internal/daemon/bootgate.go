@@ -676,7 +676,11 @@ type ControllerProbe struct {
 	// Stdin is the operator's standard input, which the controller then reads: a launch prefix
 	// like `secrets` scopes a human-tier grant by the terminal it runs on, and refuses a stdin that
 	// is not one. When it is the terminal the command runs at, each attempt runs as its foreground
-	// job, so a prefix may also read it (a PIN) or change its modes.
+	// job, so a prefix may also read it (a PIN) or change its modes. The prefix must keep its
+	// command in that job: one that moves it into a foreground process group of its own (`sudo`
+	// under `use_pty`, anything with job control) takes the terminal's Ctrl-C away from the
+	// attempt's recording shell, and a Ctrl-C the command then answers with exit 0 passes the
+	// probe and mints. `secrets` execs its command and keeps it there.
 	Stdin io.Reader
 	// Stderr also receives each foreground attempt's stderr, where a prefix's prompt goes.
 	Stderr io.Writer

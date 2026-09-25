@@ -622,7 +622,7 @@ It exits non-zero, printing the reason on stderr and nothing on stdout, when:
 ## lib/built-from.sh
 
 Prints what a stage proof ran, so a run can be tied to a commit after its scratch directory, and
-the binary in it, are gone. Stage 1, Stage 3, Stage 4a and Stage 4b print it through their own
+the binary in it, are gone. Stage 1, Stage 2, Stage 3, Stage 4a and Stage 4b print it through their own
 `note`.
 
 ```sh
