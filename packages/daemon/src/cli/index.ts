@@ -650,7 +650,8 @@ export const handoffCommand = defineCommand({
           "Report phase completion to this issue's architect. Authenticates exactly like " +
           "`legion gh`/`legion credential`: reads the grant from LEGION_GRANT_FILE (the 0600 " +
           "file the daemon names on the pane and the pi-envoy extension writes before each bash " +
-          "command; LEGION_GRANT is the manual fallback) and redeems it for this worker's " +
+          "command, each `handoff_complete`, and each tool call Oh My Pi serves with gh; " +
+          "LEGION_GRANT is the manual fallback) and redeems it for this worker's " +
           "issue/role/session — never a live session secret in the request.",
       },
       args: {
