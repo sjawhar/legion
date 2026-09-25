@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -59,59 +60,17 @@ type RoleResources struct{ Requests, Limits Quantities }
 type Quantities struct{ CPU, Memory, EphemeralStorage string }
 
 // PodConfig is `runtime.kubernetes.pod`, what the operator adds to every pod Legion runs, the image
-// probe's included: variables and volume mounts for the agent's container, the volumes they mount,
-// and the ServiceAccount the pods run as. It passes through as written: the loader refuses a shape
-// no pod could carry, the daemon's boot a name or path of Legion's own or the worker image's
-// (daemon.CheckOperatorPod), and the API server the rest when it creates the image probe's pod,
-// which carries it, at boot.
+// probe's included, in the API's own types: variables and volume mounts for the agent's container,
+// the volumes they mount (each a Secret, a ConfigMap, or a projection of ServiceAccount tokens,
+// Secrets, and ConfigMaps), and the ServiceAccount the pods run as. It passes through as written:
+// the loader refuses a shape no pod could carry, the daemon's boot a name or path of Legion's own
+// or the worker image's (daemon.CheckOperatorPod), and the API server the rest when it creates the
+// image probe's pod, which carries it, at boot.
 type PodConfig struct {
 	Env            map[string]string
-	Volumes        []PodVolume
-	VolumeMounts   []PodMount
+	Volumes        []corev1.Volume
+	VolumeMounts   []corev1.VolumeMount
 	ServiceAccount string
-}
-
-// PodVolume is one `pod.volumes` entry: its name and exactly one source.
-type PodVolume struct {
-	Name      string
-	Secret    *ObjectSource
-	ConfigMap *ObjectSource
-	Projected *ProjectedSource
-}
-
-// ObjectSource is a Secret or ConfigMap by name, with the keys it projects as files; every key,
-// each a file of its own name, when Items is empty.
-type ObjectSource struct {
-	Name  string
-	Items []KeyPath
-}
-
-// KeyPath is one projected key and the file it becomes.
-type KeyPath struct{ Key, Path string }
-
-// ProjectedSource is a projected volume's sources, in order.
-type ProjectedSource struct{ Sources []Projection }
-
-// Projection is one projected source: exactly one of the three kinds a pod may project.
-type Projection struct {
-	ServiceAccountToken *TokenProjection
-	Secret              *ObjectSource
-	ConfigMap           *ObjectSource
-}
-
-// TokenProjection is the pod's ServiceAccount token for Audience ("" is the API server's own),
-// living ExpirationSeconds (0 is the API server's default), at Path in the volume.
-type TokenProjection struct {
-	Audience          string
-	ExpirationSeconds int64
-	Path              string
-}
-
-// PodMount is one `pod.volume_mounts` entry: a volume of `pod.volumes` at MountPath in the agent's
-// container, only its SubPath when one is set, and read-only unless the file sets `read_only: false`.
-type PodMount struct {
-	Volume, MountPath, SubPath string
-	ReadOnly                   bool
 }
 
 // Gateway is how a pod reaches the model: the model gateway's base URL, and the service account
@@ -271,7 +230,7 @@ func readPodEnv(value *yaml.Node) (map[string]string, error) {
 }
 
 // readPodVolumes is `pod.volumes`: each named once, with exactly one source.
-func readPodVolumes(value *yaml.Node) ([]PodVolume, error) {
+func readPodVolumes(value *yaml.Node) ([]corev1.Volume, error) {
 	const key = podKey + ".volumes"
 	if value == nil {
 		return nil, nil
@@ -280,7 +239,7 @@ func readPodVolumes(value *yaml.Node) ([]PodVolume, error) {
 		return nil, fmt.Errorf("%s must be an array", key)
 	}
 	named := map[string]bool{}
-	volumes := make([]PodVolume, 0, len(value.Content))
+	volumes := make([]corev1.Volume, 0, len(value.Content))
 	for index, entry := range value.Content {
 		field := fmt.Sprintf("%s[%d]", key, index)
 		if entry.Kind != yaml.MappingNode {
@@ -290,7 +249,7 @@ func readPodVolumes(value *yaml.Node) ([]PodVolume, error) {
 		if err != nil {
 			return nil, err
 		}
-		var volume PodVolume
+		var volume corev1.Volume
 		if volume.Name, err = requiredString(fields["name"], field+".name", ""); err != nil {
 			return nil, err
 		}
@@ -301,11 +260,17 @@ func readPodVolumes(value *yaml.Node) ([]PodVolume, error) {
 			return nil, fmt.Errorf("%s must set exactly one of secret, config_map, projected", field)
 		}
 		named[volume.Name] = true
+		var name string
+		var items []corev1.KeyToPath
 		switch {
 		case fields["secret"] != nil:
-			volume.Secret, err = readObjectSource(fields["secret"], field+".secret")
+			if name, items, err = readObjectSource(fields["secret"], field+".secret"); err == nil {
+				volume.Secret = &corev1.SecretVolumeSource{SecretName: name, Items: items}
+			}
 		case fields["config_map"] != nil:
-			volume.ConfigMap, err = readObjectSource(fields["config_map"], field+".config_map")
+			if name, items, err = readObjectSource(fields["config_map"], field+".config_map"); err == nil {
+				volume.ConfigMap = &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: name}, Items: items}
+			}
 		default:
 			volume.Projected, err = readProjected(fields["projected"], field+".projected")
 		}
@@ -329,50 +294,51 @@ func setCount(fields map[string]*yaml.Node, names ...string) int {
 }
 
 // readObjectSource is a Secret or ConfigMap source: its name, and the keys it projects, each with
-// the file it becomes.
-func readObjectSource(value *yaml.Node, key string) (*ObjectSource, error) {
+// the file it becomes; every key, each a file of its own name, when it lists none.
+func readObjectSource(value *yaml.Node, key string) (string, []corev1.KeyToPath, error) {
 	if value.Kind != yaml.MappingNode {
-		return nil, fmt.Errorf("%s must be a mapping", key)
+		return "", nil, fmt.Errorf("%s must be a mapping", key)
 	}
 	fields, err := members(value, key, "name", "items")
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
-	source := &ObjectSource{}
-	if source.Name, err = requiredString(fields["name"], key+".name", ""); err != nil {
-		return nil, err
+	name, err := requiredString(fields["name"], key+".name", "")
+	if err != nil {
+		return "", nil, err
 	}
 	items := fields["items"]
 	if items == nil {
-		return source, nil
+		return name, nil, nil
 	}
 	if items.Kind != yaml.SequenceNode {
-		return nil, fmt.Errorf("%s.items must be an array", key)
+		return "", nil, fmt.Errorf("%s.items must be an array", key)
 	}
+	var projected []corev1.KeyToPath
 	for index, entry := range items.Content {
 		field := fmt.Sprintf("%s.items[%d]", key, index)
 		if entry.Kind != yaml.MappingNode {
-			return nil, fmt.Errorf("%s must be a mapping", field)
+			return "", nil, fmt.Errorf("%s must be a mapping", field)
 		}
 		item, err := members(entry, field, "key", "path")
 		if err != nil {
-			return nil, err
+			return "", nil, err
 		}
-		var projected KeyPath
-		if projected.Key, err = requiredString(item["key"], field+".key", ""); err != nil {
-			return nil, err
+		var one corev1.KeyToPath
+		if one.Key, err = requiredString(item["key"], field+".key", ""); err != nil {
+			return "", nil, err
 		}
-		if projected.Path, err = requiredString(item["path"], field+".path", ""); err != nil {
-			return nil, err
+		if one.Path, err = requiredString(item["path"], field+".path", ""); err != nil {
+			return "", nil, err
 		}
-		source.Items = append(source.Items, projected)
+		projected = append(projected, one)
 	}
-	return source, nil
+	return name, projected, nil
 }
 
 // readProjected is a projected volume: one or more sources, each exactly one of a ServiceAccount
 // token, a Secret, or a ConfigMap.
-func readProjected(value *yaml.Node, key string) (*ProjectedSource, error) {
+func readProjected(value *yaml.Node, key string) (*corev1.ProjectedVolumeSource, error) {
 	if value.Kind != yaml.MappingNode {
 		return nil, fmt.Errorf("%s must be a mapping", key)
 	}
@@ -387,7 +353,7 @@ func readProjected(value *yaml.Node, key string) (*ProjectedSource, error) {
 	case sources == nil || len(sources.Content) == 0:
 		return nil, fmt.Errorf("%s.sources must name at least one source", key)
 	}
-	projected := &ProjectedSource{}
+	projected := &corev1.ProjectedVolumeSource{}
 	for index, entry := range sources.Content {
 		field := fmt.Sprintf("%s.sources[%d]", key, index)
 		if entry.Kind != yaml.MappingNode {
@@ -400,14 +366,20 @@ func readProjected(value *yaml.Node, key string) (*ProjectedSource, error) {
 		if setCount(kinds, "service_account_token", "secret", "config_map") != 1 {
 			return nil, fmt.Errorf("%s must set exactly one of service_account_token, secret, config_map", field)
 		}
-		var source Projection
+		var source corev1.VolumeProjection
+		var name string
+		var items []corev1.KeyToPath
 		switch {
 		case kinds["service_account_token"] != nil:
 			source.ServiceAccountToken, err = readTokenProjection(kinds["service_account_token"], field+".service_account_token")
 		case kinds["secret"] != nil:
-			source.Secret, err = readObjectSource(kinds["secret"], field+".secret")
+			if name, items, err = readObjectSource(kinds["secret"], field+".secret"); err == nil {
+				source.Secret = &corev1.SecretProjection{LocalObjectReference: corev1.LocalObjectReference{Name: name}, Items: items}
+			}
 		default:
-			source.ConfigMap, err = readObjectSource(kinds["config_map"], field+".config_map")
+			if name, items, err = readObjectSource(kinds["config_map"], field+".config_map"); err == nil {
+				source.ConfigMap = &corev1.ConfigMapProjection{LocalObjectReference: corev1.LocalObjectReference{Name: name}, Items: items}
+			}
 		}
 		if err != nil {
 			return nil, err
@@ -418,8 +390,9 @@ func readProjected(value *yaml.Node, key string) (*ProjectedSource, error) {
 }
 
 // readTokenProjection is a projected ServiceAccount token: the file it is written to, and the
-// audience and lifetime it is issued for when set.
-func readTokenProjection(value *yaml.Node, key string) (*TokenProjection, error) {
+// audience and lifetime it is issued for when set (the API server's own audience and default
+// lifetime when not).
+func readTokenProjection(value *yaml.Node, key string) (*corev1.ServiceAccountTokenProjection, error) {
 	if value.Kind != yaml.MappingNode {
 		return nil, fmt.Errorf("%s must be a mapping", key)
 	}
@@ -427,7 +400,7 @@ func readTokenProjection(value *yaml.Node, key string) (*TokenProjection, error)
 	if err != nil {
 		return nil, err
 	}
-	token := &TokenProjection{}
+	token := &corev1.ServiceAccountTokenProjection{}
 	if token.Path, err = requiredString(fields["path"], key+".path", ""); err != nil {
 		return nil, err
 	}
@@ -441,14 +414,15 @@ func readTokenProjection(value *yaml.Node, key string) (*TokenProjection, error)
 	case expiry != nil && *expiry <= 0:
 		return nil, fmt.Errorf("%s.expiration_seconds must be a positive integer", key)
 	case expiry != nil:
-		token.ExpirationSeconds = int64(*expiry)
+		seconds := int64(*expiry)
+		token.ExpirationSeconds = &seconds
 	}
 	return token, nil
 }
 
 // readPodMounts is `pod.volume_mounts`: each a volume of `pod.volumes` at a clean absolute path no
 // other mount of the operator's takes.
-func readPodMounts(value *yaml.Node, volumes []PodVolume) ([]PodMount, error) {
+func readPodMounts(value *yaml.Node, volumes []corev1.Volume) ([]corev1.VolumeMount, error) {
 	const key = podKey + ".volume_mounts"
 	if value == nil {
 		return nil, nil
@@ -461,7 +435,7 @@ func readPodMounts(value *yaml.Node, volumes []PodVolume) ([]PodMount, error) {
 		declared[volume.Name] = true
 	}
 	mountedBy := map[string]string{}
-	mounts := make([]PodMount, 0, len(value.Content))
+	mounts := make([]corev1.VolumeMount, 0, len(value.Content))
 	for index, entry := range value.Content {
 		field := fmt.Sprintf("%s[%d]", key, index)
 		if entry.Kind != yaml.MappingNode {
@@ -471,12 +445,12 @@ func readPodMounts(value *yaml.Node, volumes []PodVolume) ([]PodMount, error) {
 		if err != nil {
 			return nil, err
 		}
-		mount := PodMount{ReadOnly: true}
-		if mount.Volume, err = requiredString(fields["volume"], field+".volume", ""); err != nil {
+		mount := corev1.VolumeMount{ReadOnly: true}
+		if mount.Name, err = requiredString(fields["volume"], field+".volume", ""); err != nil {
 			return nil, err
 		}
-		if !declared[mount.Volume] {
-			return nil, fmt.Errorf("%s.volume %s names no volume of %s.volumes", field, mount.Volume, podKey)
+		if !declared[mount.Name] {
+			return nil, fmt.Errorf("%s.volume %s names no volume of %s.volumes", field, mount.Name, podKey)
 		}
 		if mount.MountPath, err = requiredString(fields["mount_path"], field+".mount_path", ""); err != nil {
 			return nil, err

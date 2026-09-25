@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+
 	"github.com/sjawhar/legion/daemon/internal/claim"
 )
 
@@ -131,22 +133,25 @@ provider_keys: {ANTHROPIC_API_KEY: anthropic_api_key}
 				"GEMINI_API_KEY_FILE": "/var/run/operator/gemini",
 			},
 			ServiceAccount: "legion-worker",
-			Volumes: []PodVolume{
-				{Name: "operator-config", ConfigMap: &ObjectSource{Name: "legion-operator", Items: []KeyPath{
-					{Key: "models.yml", Path: "models.yml"}, {Key: "overlay.yml", Path: "overlay.yml"},
+			Volumes: []corev1.Volume{
+				{Name: "operator-config", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "legion-operator"},
+					Items:                []corev1.KeyToPath{{Key: "models.yml", Path: "models.yml"}, {Key: "overlay.yml", Path: "overlay.yml"}},
 				}}},
-				{Name: "operator-token", Projected: &ProjectedSource{Sources: []Projection{
-					{ServiceAccountToken: &TokenProjection{Audience: "middleman-legion", ExpirationSeconds: 3600, Path: "token"}},
-					{Secret: &ObjectSource{Name: "legion-operator-ca", Items: []KeyPath{{Key: "ca.crt", Path: "ca.crt"}}}},
-					{ConfigMap: &ObjectSource{Name: "legion-operator-routes"}},
-				}}},
-				{Name: "operator-creds", Secret: &ObjectSource{Name: "legion-operator-creds"}},
+				{Name: "operator-token", VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{Sources: []corev1.VolumeProjection{
+					{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{Audience: "middleman-legion", ExpirationSeconds: new(int64(3600)), Path: "token"}},
+					{Secret: &corev1.SecretProjection{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "legion-operator-ca"}, Items: []corev1.KeyToPath{{Key: "ca.crt", Path: "ca.crt"}},
+					}},
+					{ConfigMap: &corev1.ConfigMapProjection{LocalObjectReference: corev1.LocalObjectReference{Name: "legion-operator-routes"}}},
+				}}}},
+				{Name: "operator-creds", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "legion-operator-creds"}}},
 			},
-			VolumeMounts: []PodMount{
-				{Volume: "operator-config", MountPath: "/home/legion/.omp/profiles/legion/agent/models.yml", SubPath: "models.yml", ReadOnly: true},
-				{Volume: "operator-config", MountPath: "/etc/legion-operator/overlay.yml", SubPath: "overlay.yml", ReadOnly: true},
-				{Volume: "operator-token", MountPath: "/var/run/operator", ReadOnly: true},
-				{Volume: "operator-creds", MountPath: "/etc/legion-operator/creds"},
+			VolumeMounts: []corev1.VolumeMount{
+				{Name: "operator-config", MountPath: "/home/legion/.omp/profiles/legion/agent/models.yml", SubPath: "models.yml", ReadOnly: true},
+				{Name: "operator-config", MountPath: "/etc/legion-operator/overlay.yml", SubPath: "overlay.yml", ReadOnly: true},
+				{Name: "operator-token", MountPath: "/var/run/operator", ReadOnly: true},
+				{Name: "operator-creds", MountPath: "/etc/legion-operator/creds"},
 			},
 		},
 	}}

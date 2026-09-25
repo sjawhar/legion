@@ -148,7 +148,9 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, stream, dis
 		Gateway: sandbox.Gateway{
 			URL: k.Gateway.URL, Audience: k.Gateway.Audience, ServiceAccount: k.Gateway.ServiceAccount, TokenExpiry: k.Gateway.TokenExpiry,
 		},
-		Pod:              sandboxPod(k.Pod),
+		Pod: sandbox.Pod{
+			Env: k.Pod.Env, Volumes: k.Pod.Volumes, VolumeMounts: k.Pod.VolumeMounts, ServiceAccount: k.Pod.ServiceAccount,
+		},
 		ProviderKeys:     providerSecretKeys(cfg.ProviderKeys),
 		BootTimeout:      cfg.WorkerBootTimeout,
 		BootIntervals:    cfg.WorkerBootRegistrationDeadlineIntervals,
@@ -245,59 +247,6 @@ func checkOperatorPod(pod config.PodConfig, keys []config.ProviderKey, secrets m
 func overlaps(a, b string) bool {
 	under := func(child, parent string) bool { return parent == "/" || strings.HasPrefix(child, parent+"/") }
 	return a == b || under(a, b) || under(b, a)
-}
-
-// sandboxPod is runtime.kubernetes.pod as the runtime's Pod: each volume with its one source, a
-// projected token's unset lifetime left to the API server's default, and each mount as written.
-func sandboxPod(configured config.PodConfig) sandbox.Pod {
-	pod := sandbox.Pod{Env: configured.Env, ServiceAccount: configured.ServiceAccount}
-	for _, v := range configured.Volumes {
-		volume := corev1.Volume{Name: v.Name}
-		switch {
-		case v.Secret != nil:
-			volume.Secret = &corev1.SecretVolumeSource{SecretName: v.Secret.Name, Items: keyPaths(v.Secret.Items)}
-		case v.ConfigMap != nil:
-			volume.ConfigMap = &corev1.ConfigMapVolumeSource{
-				LocalObjectReference: corev1.LocalObjectReference{Name: v.ConfigMap.Name}, Items: keyPaths(v.ConfigMap.Items),
-			}
-		case v.Projected != nil:
-			volume.Projected = &corev1.ProjectedVolumeSource{}
-			for _, s := range v.Projected.Sources {
-				var source corev1.VolumeProjection
-				switch {
-				case s.ServiceAccountToken != nil:
-					token := &corev1.ServiceAccountTokenProjection{Audience: s.ServiceAccountToken.Audience, Path: s.ServiceAccountToken.Path}
-					if seconds := s.ServiceAccountToken.ExpirationSeconds; seconds != 0 {
-						token.ExpirationSeconds = &seconds
-					}
-					source.ServiceAccountToken = token
-				case s.Secret != nil:
-					source.Secret = &corev1.SecretProjection{
-						LocalObjectReference: corev1.LocalObjectReference{Name: s.Secret.Name}, Items: keyPaths(s.Secret.Items),
-					}
-				case s.ConfigMap != nil:
-					source.ConfigMap = &corev1.ConfigMapProjection{
-						LocalObjectReference: corev1.LocalObjectReference{Name: s.ConfigMap.Name}, Items: keyPaths(s.ConfigMap.Items),
-					}
-				}
-				volume.Projected.Sources = append(volume.Projected.Sources, source)
-			}
-		}
-		pod.Volumes = append(pod.Volumes, volume)
-	}
-	for _, m := range configured.VolumeMounts {
-		pod.VolumeMounts = append(pod.VolumeMounts, corev1.VolumeMount{Name: m.Volume, MountPath: m.MountPath, SubPath: m.SubPath, ReadOnly: m.ReadOnly})
-	}
-	return pod
-}
-
-// keyPaths are a source's configured items as the API's.
-func keyPaths(items []config.KeyPath) []corev1.KeyToPath {
-	var paths []corev1.KeyToPath
-	for _, item := range items {
-		paths = append(paths, corev1.KeyToPath{Key: item.Key, Path: item.Path})
-	}
-	return paths
 }
 
 // providerSecretKeys are provider_keys as the runtime takes them: each variable Oh My Pi reads,

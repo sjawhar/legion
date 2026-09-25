@@ -230,8 +230,8 @@ func TestAKubernetesDaemonRefusesAnOperatorPodCollidingWithLegionsBeforeItsBoot(
 			name: "a mount at Legion's boot projection",
 			change: func(cfg *config.Config) {
 				cfg.Runtime.Kubernetes.Pod = config.PodConfig{
-					Volumes:      []config.PodVolume{{Name: "creds", Secret: &config.ObjectSource{Name: "legion-creds"}}},
-					VolumeMounts: []config.PodMount{{Volume: "creds", MountPath: "/var/run/legion/boot", ReadOnly: true}},
+					Volumes:      []corev1.Volume{{Name: "creds", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "legion-creds"}}}},
+					VolumeMounts: []corev1.VolumeMount{{Name: "creds", MountPath: "/var/run/legion/boot", ReadOnly: true}},
 				}
 			},
 			want: "runtime.kubernetes.pod.volume_mounts[0].mount_path /var/run/legion/boot overlaps /var/run/legion/boot, which Legion mounts in every pod: a mount may be neither at, under, nor above one of Legion's",
@@ -265,8 +265,8 @@ func TestAKubernetesDaemonRefusesAnOperatorPodCollidingWithLegionsBeforeItsBoot(
 func TestCheckOperatorPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 	mountAt := func(path string) config.PodConfig {
 		return config.PodConfig{
-			Volumes:      []config.PodVolume{{Name: "creds", Secret: &config.ObjectSource{Name: "legion-creds"}}},
-			VolumeMounts: []config.PodMount{{Volume: "creds", MountPath: path, ReadOnly: true}},
+			Volumes:      []corev1.Volume{{Name: "creds", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "legion-creds"}}}},
+			VolumeMounts: []corev1.VolumeMount{{Name: "creds", MountPath: path, ReadOnly: true}},
 		}
 	}
 	overlaps := func(path, owned, owner string) string {
@@ -290,8 +290,8 @@ func TestCheckOperatorPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 			want: "runtime.kubernetes.pod.env sets JJ_USER, which every launch sets itself (the git identity the role's GitHub App commits as)"},
 		{name: "a variable pointing at a launch secret", pod: config.PodConfig{Env: map[string]string{"ENVOY_TOKEN_FILE": "/etc/envoy"}},
 			want: "runtime.kubernetes.pod.env sets ENVOY_TOKEN_FILE, which every launch sets itself (the pointer to the launch secret ENVOY_TOKEN)"},
-		{name: "a volume Legion names", pod: config.PodConfig{Volumes: []config.PodVolume{
-			{Name: "creds", Secret: &config.ObjectSource{Name: "legion-creds"}}, {Name: "boot", Secret: &config.ObjectSource{Name: "a"}},
+		{name: "a volume Legion names", pod: config.PodConfig{Volumes: []corev1.Volume{
+			{Name: "creds", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "legion-creds"}}}, {Name: "boot", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "a"}}},
 		}}, want: "runtime.kubernetes.pod.volumes[1].name boot is a volume Legion puts in every pod"},
 		{name: "a mount at a path Legion mounts", pod: mountAt("/var/run/legion/boot"),
 			want: overlaps("/var/run/legion/boot", "/var/run/legion/boot", "Legion's")},
@@ -320,16 +320,18 @@ func TestCheckOperatorPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		{name: "an operator pod beside Legion's", pod: config.PodConfig{
 			Env:            map[string]string{"PI_CONFIG_FILES": "/etc/legion-operator/overlay.yml", "CLAUDE_CODE_USE_FOUNDRY": "0"},
 			ServiceAccount: "legion-worker",
-			Volumes: []config.PodVolume{
-				{Name: "operator-config", ConfigMap: &config.ObjectSource{Name: "legion-operator"}},
-				{Name: "operator-token", Projected: &config.ProjectedSource{Sources: []config.Projection{
-					{ServiceAccountToken: &config.TokenProjection{Audience: "middleman-legion", ExpirationSeconds: 3600, Path: "token"}},
+			Volumes: []corev1.Volume{
+				{Name: "operator-config", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "legion-operator"},
 				}}},
+				{Name: "operator-token", VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{Sources: []corev1.VolumeProjection{
+					{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{Audience: "middleman-legion", ExpirationSeconds: new(int64(3600)), Path: "token"}},
+				}}}},
 			},
-			VolumeMounts: []config.PodMount{
-				{Volume: "operator-config", MountPath: "/home/legion/.omp/profiles/legion/agent/models.yml", SubPath: "models.yml", ReadOnly: true},
-				{Volume: "operator-config", MountPath: "/etc/legion-operator/overlay.yml", SubPath: "overlay.yml", ReadOnly: true},
-				{Volume: "operator-token", MountPath: "/var/run/operator", ReadOnly: true},
+			VolumeMounts: []corev1.VolumeMount{
+				{Name: "operator-config", MountPath: "/home/legion/.omp/profiles/legion/agent/models.yml", SubPath: "models.yml", ReadOnly: true},
+				{Name: "operator-config", MountPath: "/etc/legion-operator/overlay.yml", SubPath: "overlay.yml", ReadOnly: true},
+				{Name: "operator-token", MountPath: "/var/run/operator", ReadOnly: true},
 			},
 		}, keys: []config.ProviderKey{{Env: "ANTHROPIC_API_KEY", Secret: "anthropic"}}},
 	} {
@@ -345,62 +347,27 @@ func TestCheckOperatorPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 	}
 }
 
-// runtime.kubernetes.pod and provider_keys reach the runtime as the pod spec's own pieces: each
-// volume with its one source and items, a projected token's unset lifetime left to the API server
-// (a zero one is refused at pod creation), each mount's read-only flag as configured, and each
-// provider key's variable to its Secret key.
-func TestTheOperatorsPodReachesTheSandboxRuntimeAsThePodSpecsPieces(t *testing.T) {
+// runtime.kubernetes.pod and provider_keys reach the runtime's Options, each piece of the pod
+// as configured and each provider key as its variable's Secret key: the manifests the runtime
+// builds from them are the sandbox package's to test, and this is the one place the daemon hands
+// them over.
+func TestTheOperatorsPodReachesTheSandboxRuntime(t *testing.T) {
 	cfg := kubernetesConfig(t, "https://127.0.0.1:1")
 	cfg.ProviderKeys = []config.ProviderKey{{Env: "ANTHROPIC_API_KEY", Secret: "anthropic"}}
-	cfg.Runtime.Kubernetes.Pod = config.PodConfig{
+	pod := config.PodConfig{
 		Env:            map[string]string{"PI_CONFIG_FILES": "/etc/legion-operator/overlay.yml"},
 		ServiceAccount: "legion-worker",
-		Volumes: []config.PodVolume{
-			{Name: "creds", Secret: &config.ObjectSource{Name: "legion-creds", Items: []config.KeyPath{{Key: "a", Path: "b"}}}},
-			{Name: "settings", ConfigMap: &config.ObjectSource{Name: "legion-operator"}},
-			{Name: "token", Projected: &config.ProjectedSource{Sources: []config.Projection{
-				{ServiceAccountToken: &config.TokenProjection{Audience: "operator", ExpirationSeconds: 3600, Path: "token"}},
-				{ServiceAccountToken: &config.TokenProjection{Path: "default-token"}},
-				{Secret: &config.ObjectSource{Name: "legion-ca", Items: []config.KeyPath{{Key: "ca.crt", Path: "ca.crt"}}}},
-				{ConfigMap: &config.ObjectSource{Name: "legion-routes"}},
-			}}},
-		},
-		VolumeMounts: []config.PodMount{
-			{Volume: "settings", MountPath: "/etc/legion-operator/overlay.yml", SubPath: "overlay.yml", ReadOnly: true},
-			{Volume: "creds", MountPath: "/etc/legion-operator/creds"},
-		},
+		Volumes:        []corev1.Volume{{Name: "creds", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "legion-creds"}}}},
+		VolumeMounts:   []corev1.VolumeMount{{Name: "creds", MountPath: "/etc/legion-operator/creds", ReadOnly: true}},
 	}
+	cfg.Runtime.Kubernetes.Pod = pod
 	opts, err := sandboxOptions(cfg, *cfg.Runtime.Kubernetes, "test", "tcp://10.0.0.5:13371", "", quietLogger())
 	if err != nil {
 		t.Fatalf("sandboxOptions: %v", err)
 	}
-	hour := int64(3600)
-	want := sandbox.Pod{
-		Env:            map[string]string{"PI_CONFIG_FILES": "/etc/legion-operator/overlay.yml"},
-		ServiceAccount: "legion-worker",
-		Volumes: []corev1.Volume{
-			{Name: "creds", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
-				SecretName: "legion-creds", Items: []corev1.KeyToPath{{Key: "a", Path: "b"}},
-			}}},
-			{Name: "settings", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
-				LocalObjectReference: corev1.LocalObjectReference{Name: "legion-operator"},
-			}}},
-			{Name: "token", VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{Sources: []corev1.VolumeProjection{
-				{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{Audience: "operator", ExpirationSeconds: &hour, Path: "token"}},
-				{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{Path: "default-token"}},
-				{Secret: &corev1.SecretProjection{
-					LocalObjectReference: corev1.LocalObjectReference{Name: "legion-ca"}, Items: []corev1.KeyToPath{{Key: "ca.crt", Path: "ca.crt"}},
-				}},
-				{ConfigMap: &corev1.ConfigMapProjection{LocalObjectReference: corev1.LocalObjectReference{Name: "legion-routes"}}},
-			}}}},
-		},
-		VolumeMounts: []corev1.VolumeMount{
-			{Name: "settings", MountPath: "/etc/legion-operator/overlay.yml", SubPath: "overlay.yml", ReadOnly: true},
-			{Name: "creds", MountPath: "/etc/legion-operator/creds"},
-		},
-	}
+	want := sandbox.Pod{Env: pod.Env, Volumes: pod.Volumes, VolumeMounts: pod.VolumeMounts, ServiceAccount: pod.ServiceAccount}
 	if !reflect.DeepEqual(opts.Pod, want) {
-		t.Errorf("the runtime's Pod is\n%+v\nwant\n%+v", opts.Pod, want)
+		t.Errorf("the runtime's Pod is %+v, want %+v", opts.Pod, want)
 	}
 	if keys := map[string]string{"ANTHROPIC_API_KEY": "anthropic"}; !reflect.DeepEqual(opts.ProviderKeys, keys) {
 		t.Errorf("the runtime's ProviderKeys are %v, want %v", opts.ProviderKeys, keys)
