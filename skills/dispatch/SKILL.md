@@ -609,15 +609,16 @@ an existing paragraph is the question that should become a decision.
 ### A document that is reloading
 
 These calls can answer `DOC_SERVICE_UNAVAILABLE` (HTTP 503), because each writes a document inside its
-transaction: `dispatch_doc_edit`; `dispatch_ask` and `dispatch_comment` on a quote or a decision block; a
-`dispatch_comment` reply in a thread whose first comment is anchored; `dispatch_suggest`;
-`dispatch_resolve_comment`; `dispatch_resolve_ask` for an ask that lives in a decision block; and
-`dispatch_artifact` replacing a document that already exists. Creating an issue with a spec, uploading a new
-document, `dispatch_edit_ask`, `dispatch_request_approval` and `dispatch_message` never answer it. It means
-that document's live room failed and is reloading from its durable copy, so the server refused rather than
-wait for it; your call wrote nothing and the document is intact. Nothing retries it for you: the Dispatch
-client hands a 503 straight back. Wait a few seconds and make the same call again. A second refusal in a row
-is worth telling your human about, with the document's reference.
+transaction: `dispatch_doc_edit`; `dispatch_ask` and `dispatch_comment` on a quote; a `dispatch_comment` reply
+in a thread whose first comment is anchored; `dispatch_suggest`; `dispatch_resolve_comment` on an anchored
+comment; `dispatch_artifact` replacing a document that already exists; and, on an ask that lives in a `:::ask`
+block, `dispatch_edit_ask` and `dispatch_resolve_ask`, which write that block. Creating an issue with a spec,
+uploading a new document, `dispatch_request_approval` and `dispatch_message` never answer it, and neither do
+`dispatch_edit_ask` and `dispatch_resolve_ask` on an ask that has no block. It means that document's live room
+failed and is reloading from its durable copy, so the server refused rather than wait for it; your call wrote
+nothing and the document is intact. Nothing retries it for you: the Dispatch client hands a 503 straight back.
+Wait a few seconds and make the same call again. A second refusal in a row is worth telling your human about,
+with the document's reference.
 
 ## Typed blocks
 

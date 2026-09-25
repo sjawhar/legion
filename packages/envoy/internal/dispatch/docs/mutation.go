@@ -91,6 +91,10 @@ func (s *Service) applyJoined(ctx context.Context, artifactID string, actor mode
 	defer func() {
 		if !recorded && len(updates) > 0 {
 			write.fork, write.forkedFrom = nil, nil
+			// The rendering describes that fork, so it goes with it. forkLive's rebuild drops
+			// it too; keeping the two lines that abandon a fork together is what covers an
+			// operation that recorded the rendering and then failed to version.
+			write.dropRendering()
 		}
 	}()
 	before, err := treeOf(fork)

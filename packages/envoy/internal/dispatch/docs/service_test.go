@@ -369,7 +369,7 @@ func TestAMarkInsideAWordWritesNoVersion(t *testing.T) {
 				t.Fatalf("mark: %v", err)
 			}
 		}
-		result, err := service.SnapshotVersion(ctx, tx, artifactID, alice)
+		result, err := service.SnapshotVersion(ctx, artifactID, alice)
 		if err != nil {
 			t.Fatalf("snapshot: %v", err)
 		}
