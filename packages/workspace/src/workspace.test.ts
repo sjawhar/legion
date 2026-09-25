@@ -163,6 +163,22 @@ function resolveBookmarkCommand(bookmark: string, repoCloneDir: string): string[
     repoCloneDir,
   ];
 }
+/** The command `createWorkspace` runs when no local bookmark resolved: every `legion/<KEY>@origin`
+ * row with its tracking, one per line. */
+function originRowsCommand(bookmark: string, repoCloneDir: string): string[] {
+  return [
+    "jj",
+    "bookmark",
+    "list",
+    "--all-remotes",
+    `exact:${bookmark}`,
+    "-T",
+    'if(remote == "origin", if(tracked, "tracked", "untracked") ++ " " ++ normal_target.commit_id() ++ "\n")',
+    "--ignore-working-copy",
+    "-R",
+    repoCloneDir,
+  ];
+}
 /** The read provisioning runs after the clone step and before every fetch: the clone's per-repo
  * `git.abandon-unreachable-commits` setting (LEGION-84). */
 function readKeepUnreachableCommitsCommand(repoCloneDir: string): string[] {
@@ -354,6 +370,7 @@ describe("provisionIssueWorkspace", () => {
       writeKeepUnreachableCommitsCommand(repoCloneDir),
       ["jj", "git", "fetch", "-R", repoCloneDir],
       resolveBookmarkCommand(bookmark, repoCloneDir),
+      originRowsCommand(bookmark, repoCloneDir),
       ["git", `--git-dir=${repoCloneDir}/.git`, "worktree", "prune"],
       workspaceAddCommand(workspaceDir, "widgets-42", "main", repoCloneDir),
       ["jj", "bookmark", "set", bookmark, "-r", "@"],
@@ -362,7 +379,7 @@ describe("provisionIssueWorkspace", () => {
     ]);
     // The bookmark is created in the new workspace, on its own working copy — and a brand-new
     // issue has no bookmark to miss, so nothing is logged.
-    const bookmarkSet = calls.find((call) => call.cmd[1] === "bookmark");
+    const bookmarkSet = calls.find((call) => call.cmd[1] === "bookmark" && call.cmd[2] === "set");
     expect(bookmarkSet?.opts?.cwd).toBe(workspaceDir);
     expect(logged).toEqual([]);
     // Every provisioning command runs under the slow budget, not the runner's generic default.
@@ -1212,6 +1229,168 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     }
   }, 60_000);
 
+  /** Puts `legion/WIDGETS-42` on origin at a commit carrying `fixture.txt`, pushed from the rig's
+   * clone as another clone would have pushed it, and returns that commit. The local bookmark is
+   * left for the caller to remove the way its case needs. */
+  async function pushIssueBranch(
+    jj: Awaited<ReturnType<typeof realJjRig>>["jj"],
+    commitOf: Awaited<ReturnType<typeof realJjRig>>["commitOf"],
+    repoCloneDir: string
+  ): Promise<string> {
+    const bookmark = "legion/WIDGETS-42";
+    await jj(["new", "main", "-m", "the issue's pushed work"], { cwd: repoCloneDir });
+    await writeFile(path.join(repoCloneDir, "fixture.txt"), "pushed from another clone\n", "utf8");
+    await jj(["bookmark", "create", bookmark, "-r", "@"], { cwd: repoCloneDir });
+    await jj(["new"], { cwd: repoCloneDir });
+    await jj(
+      ["git", "push", "--remote", "origin", "--bookmark", bookmark, "--allow-empty-description"],
+      {
+        cwd: repoCloneDir,
+      }
+    );
+    return commitOf(bookmark);
+  }
+
+  test("adopts an issue branch only origin has: tracks it and adds the workspace at its commit", async () => {
+    for (const { name, command } of JJ_BINARIES) {
+      const stateDir = path.join(await temporaryDirectory(), "state");
+      const { repoCloneDir, workspaceDir, calls, jj, commitOf, deps } = await realJjRig(
+        command,
+        stateDir
+      );
+      const bookmark = "legion/WIDGETS-42";
+      const pushed = await pushIssueBranch(jj, commitOf, repoCloneDir);
+      // The clone knows the branch only as an untracked origin row: the shape a fresh clone has for
+      // a branch another clone pushed (a repository's fixture, or a tree's branch before its volume
+      // was lost).
+      await jj(["bookmark", "forget", bookmark], { cwd: repoCloneDir });
+      expect(
+        (await jj(["bookmark", "list", "--all-remotes", bookmark], { cwd: repoCloneDir })).stdout,
+        name
+      ).toStartWith(`${bookmark}@origin:`);
+
+      await expect(provisionIssueWorkspace("WIDGETS-42", deps)).resolves.toEqual({
+        repoCloneDir,
+        workspaceDir,
+        bookmark,
+      });
+      // The workspace starts on the branch, its pushed file is there, and the local bookmark is the
+      // origin row, tracked, so the issue's next push moves it rather than diverging from it.
+      expect(await commitOf("@-", workspaceDir), name).toBe(pushed);
+      expect(existsSync(path.join(workspaceDir, "fixture.txt")), name).toBeTrue();
+      expect(await commitOf(bookmark), name).toBe(pushed);
+      expect(
+        (await jj(["bookmark", "list", "--tracked", bookmark], { cwd: repoCloneDir })).stdout,
+        name
+      ).toContain(`${bookmark}: `);
+      expect(
+        calls.filter((cmd) => cmd[1] === "bookmark" && cmd[2] !== "list"),
+        name
+      ).toEqual([["jj", "bookmark", "track", `${bookmark}@origin`, "-R", repoCloneDir]]);
+    }
+  }, 60_000);
+
+  test("refuses by name a tracked origin row with no local bookmark, before any workspace add", async () => {
+    for (const { name, command } of JJ_BINARIES) {
+      const stateDir = path.join(await temporaryDirectory(), "state");
+      const { repoCloneDir, workspaceDir, remoteDir, calls, jj, commitOf, deps } = await realJjRig(
+        command,
+        stateDir
+      );
+      const bookmark = "legion/WIDGETS-42";
+      await pushIssueBranch(jj, commitOf, repoCloneDir);
+      // A local deletion never pushed: only a `jj bookmark delete` leaves this shape, and
+      // `jj bookmark track` is a no-op on it.
+      await jj(["bookmark", "delete", bookmark], { cwd: repoCloneDir });
+
+      await expect(provisionIssueWorkspace("WIDGETS-42", deps), name).rejects.toThrow(
+        `Bookmark ${bookmark} was deleted in ${repoCloneDir} but the deletion was never pushed: origin still has ${bookmark}@origin, tracked. Workspace ${workspaceDir} was not created.`
+      );
+      await expect(provisionIssueWorkspace("WIDGETS-42", deps), name).rejects.toThrow(
+        `\`jj bookmark set ${bookmark} -r ${bookmark}@origin -R ${repoCloneDir}\``
+      );
+      await expect(provisionIssueWorkspace("WIDGETS-42", deps), name).rejects.toThrow(
+        `\`jj bookmark forget ${bookmark} -R ${repoCloneDir}\``
+      );
+      await expect(provisionIssueWorkspace("WIDGETS-42", deps), name).rejects.toThrow(
+        `\`jj git push --remote origin --bookmark ${bookmark} -R ${repoCloneDir}\``
+      );
+      expect(
+        calls.some((cmd) => cmd[1] === "workspace" && cmd[2] === "add"),
+        name
+      ).toBeFalse();
+      expect(existsSync(workspaceDir), name).toBeFalse();
+      expect((await jj(["workspace", "list", "-R", repoCloneDir])).stdout, name).not.toContain(
+        "widgets-42:"
+      );
+
+      // The third way out, followed: another issue's deletion is pending in the same clone, and
+      // the named push deletes this issue's branch alone; the next provisioning starts at main.
+      await jj(["new", "main", "-m", "another issue's work"], { cwd: repoCloneDir });
+      await jj(["bookmark", "create", "legion/WIDGETS-43", "-r", "@"], { cwd: repoCloneDir });
+      await jj(["new"], { cwd: repoCloneDir });
+      await jj(
+        [
+          "git",
+          "push",
+          "--remote",
+          "origin",
+          "--bookmark",
+          "legion/WIDGETS-43",
+          "--allow-empty-description",
+        ],
+        { cwd: repoCloneDir }
+      );
+      await jj(["bookmark", "delete", "legion/WIDGETS-43"], { cwd: repoCloneDir });
+      await jj(["git", "push", "--remote", "origin", "--bookmark", bookmark, "-R", repoCloneDir]);
+      const branches = await runCommand([
+        SYSTEM_GIT,
+        `--git-dir=${remoteDir}/.git`,
+        "branch",
+        "--format=%(refname:short)",
+      ]);
+      expect(branches.stdout.split("\n"), name).toContain("legion/WIDGETS-43");
+      expect(branches.stdout.split("\n"), name).not.toContain(bookmark);
+      await expect(provisionIssueWorkspace("WIDGETS-42", deps), name).resolves.toEqual({
+        repoCloneDir,
+        workspaceDir,
+        bookmark,
+      });
+      expect(await commitOf("@-", workspaceDir), name).toBe(await commitOf("main"));
+    }
+  }, 60_000);
+
+  test("starts a merged issue's workspace at main when GitHub deleted its branch, and brings none of the branch back", async () => {
+    for (const { name, command } of JJ_BINARIES) {
+      const stateDir = path.join(await temporaryDirectory(), "state");
+      const { repoCloneDir, workspaceDir, remoteDir, jj, commitOf, deps } = await realJjRig(
+        command,
+        stateDir
+      );
+      const bookmark = "legion/WIDGETS-42";
+      await pushIssueBranch(jj, commitOf, repoCloneDir);
+      // The pull request merged and GitHub deleted the branch: provisioning's fetch drops the local
+      // bookmark that still matched it, and no origin row is left (LEGION-28, LEGION-84).
+      const deleted = await runCommand([
+        SYSTEM_GIT,
+        `--git-dir=${remoteDir}/.git`,
+        "branch",
+        "-D",
+        bookmark,
+      ]);
+      expect(deleted.exitCode, `${name}: ${deleted.stderr}`).toBe(0);
+
+      await expect(provisionIssueWorkspace("WIDGETS-42", deps)).resolves.toEqual({
+        repoCloneDir,
+        workspaceDir,
+        bookmark,
+      });
+      expect(await commitOf("@-", workspaceDir), name).toBe(await commitOf("main"));
+      expect(existsSync(path.join(workspaceDir, "fixture.txt")), name).toBeFalse();
+      expect(await commitOf(bookmark), name).toBe(await commitOf("@", workspaceDir));
+    }
+  }, 60_000);
+
   test("refuses to create a workspace on a conflicted bookmark and leaves no directory behind, on consecutive attempts", async () => {
     for (const { name, command } of JJ_BINARIES) {
       const stateDir = path.join(await temporaryDirectory(), "state");
@@ -1391,6 +1570,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       writeKeepUnreachableCommitsCommand(repoCloneDir),
       ["jj", "git", "fetch", "-R", repoCloneDir],
       resolveBookmarkCommand("legion/WIDGETS-42", repoCloneDir),
+      originRowsCommand("legion/WIDGETS-42", repoCloneDir),
       ["git", `--git-dir=${gitDir}`, "worktree", "prune"],
       workspaceAddCommand(workspaceDir, "widgets-42", "main", repoCloneDir),
       ["jj", "workspace", "forget", "widgets-42", "-R", repoCloneDir],

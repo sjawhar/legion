@@ -20,10 +20,11 @@ export interface WorkspaceSpec {
   readonly repoCloneDir: string;
   readonly workspaceDir: string;
   /** `legion/<KEY>`: created by `createWorkspace` on the fresh working copy when the workspace is
-   * created and no bookmark resolved (a resolving bookmark is where the workspace is created
-   * instead), moved only by the implementer's push, and never re-created on an existing workspace
-   * — so absent on one whose pull request has merged, since the fetch deletes it. The daemon does
-   * not read this field. */
+   * created and neither the bookmark nor an untracked origin row of it resolved (a resolving
+   * bookmark is where the workspace is created instead, and an origin row is tracked and used),
+   * moved only by the implementer's push, and never re-created on an existing workspace — so
+   * absent on one whose pull request has merged, since the fetch deletes it. The daemon does not
+   * read this field. */
   readonly bookmark: string;
 }
 
@@ -196,8 +197,9 @@ async function ensureRepoClone(
 }
 
 /** Creates the issue workspace on top of its bookmark `legion/<KEY>` when that bookmark resolves
- * to exactly one commit, or at `main` — creating the bookmark on the fresh working copy — when it
- * resolves to none. This is the one place provisioning creates that bookmark. A workspace that
+ * to exactly one commit; on origin's branch, tracked, when only an untracked `legion/<KEY>@origin`
+ * row exists (`adoptOriginBranch`); or at `main` — creating the bookmark on the fresh working copy
+ * — when neither does. This is the one place provisioning creates that bookmark. A workspace that
  * already exists gets no `jj bookmark` command at all (see `provisionIssueWorkspace`): after
  * a pull request merges and GitHub deletes its branch, the fetch drops the tracked local bookmark
  * that still matched it, and creating it again would put the issue's branch on whatever the
@@ -249,7 +251,8 @@ async function createWorkspace(
       `Bookmark ${bookmark} is conflicted (${commits.join(", ")}); workspace ${workspaceDir} was not created. Resolve it with \`jj bookmark set ${bookmark} -r <commit> -R ${repoCloneDir}\`.`
     );
   }
-  const bookmarkCommit = commits[0];
+  const bookmarkCommit =
+    commits[0] ?? (await adoptOriginBranch(deps, repoCloneDir, workspaceDir, bookmark));
 
   await mkdir(path.dirname(workspaceDir), { recursive: true });
   const gitDir = path.join(repoCloneDir, ".git");
@@ -293,6 +296,57 @@ async function createWorkspace(
     );
   }
   await runChecked(deps, ["jj", "bookmark", "set", bookmark, "-r", "@"], { cwd: workspaceDir });
+}
+
+/** The issue's branch as origin has it, for an issue with no local bookmark: the commit of an
+ * **untracked** `legion/<KEY>@origin` row, after tracking it, so the workspace starts on the
+ * branch and the local bookmark is the remote's. A fresh clone tracks `main` alone, so a branch
+ * another clone pushed (a repository's fixture, a tree's branch before its volume was lost) is
+ * only such a row; left alone, the workspace would start at `main` and the bookmark created there
+ * would diverge from the remote, and the issue's next push would refuse (LEGION-286). A **tracked**
+ * row with no local bookmark is a local deletion never pushed (only a `jj bookmark delete` leaves
+ * it, and `jj bookmark track` does nothing to it): it is refused, naming the ways out, before
+ * anything is added. No row at all (a brand-new issue, or a merged branch GitHub deleted, whose
+ * fetch dropped the bookmark with it) is `undefined`: the workspace starts at `main`, and none of
+ * a deleted branch comes back (LEGION-28, LEGION-84). One `jj bookmark list` reads every origin
+ * row of the bookmark with its tracking, on jj 0.44 and 0.45. */
+async function adoptOriginBranch(
+  deps: ProvisionIssueWorkspaceDeps,
+  repoCloneDir: string,
+  workspaceDir: string,
+  bookmark: string
+): Promise<string | undefined> {
+  const listArgs = [
+    "jj",
+    "bookmark",
+    "list",
+    "--all-remotes",
+    `exact:${bookmark}`,
+    "-T",
+    'if(remote == "origin", if(tracked, "tracked", "untracked") ++ " " ++ normal_target.commit_id() ++ "\n")',
+    "--ignore-working-copy",
+    "-R",
+    repoCloneDir,
+  ];
+  const listed = await run(deps, listArgs);
+  if (listed.exitCode !== 0) {
+    throw new Error(
+      `Remote bookmark ${bookmark}@origin could not be read; workspace ${workspaceDir} was not created.\n${commandFailure(listed, listArgs).message}`
+    );
+  }
+  const row = listed.stdout.split("\n").find((line) => line.trim() !== "");
+  if (row === undefined) return undefined;
+  const [tracking, commit] = row.trim().split(" ");
+  if (tracking === "tracked") {
+    throw new Error(
+      `Bookmark ${bookmark} was deleted in ${repoCloneDir} but the deletion was never pushed: origin still has ${bookmark}@origin, tracked. Workspace ${workspaceDir} was not created. ` +
+        `Restore the bookmark with \`jj bookmark set ${bookmark} -r ${bookmark}@origin -R ${repoCloneDir}\`, ` +
+        `or drop the deletion with \`jj bookmark forget ${bookmark} -R ${repoCloneDir}\`, which leaves origin's branch for the next provisioning to adopt; ` +
+        `to start the issue from main instead, push the deletion of this one branch with \`jj git push --remote origin --bookmark ${bookmark} -R ${repoCloneDir}\` (\`--deleted\` would push every pending deletion in the clone, other issues' branches included).`
+    );
+  }
+  await runChecked(deps, ["jj", "bookmark", "track", `${bookmark}@origin`, "-R", repoCloneDir]);
+  return commit;
 }
 
 /** Removes a repository-scoped jj `user.name`/`user.email` from the shared clone. `--repo` on a
@@ -410,9 +464,10 @@ export async function provisionIssueWorkspace(
   const gitDir = path.join(repoCloneDir, ".git");
   // The design's PR ↔ issue linkage: branch `legion/<KEY>` (`reducers.ts`'s `issueForBranch`
   // matches exactly this pattern for a Dispatch key). `createWorkspace` alone touches it: it
-  // creates the workspace on the bookmark's one commit, or at `main` creating the bookmark when
-  // none resolved, and stops before registering anything when the bookmark is conflicted or
-  // unresolvable. A workspace that already exists gets no bookmark command here — present or
+  // creates the workspace on the bookmark's one commit, on origin's branch (tracked) when only an
+  // untracked `legion/<KEY>@origin` row exists, or at `main` creating the bookmark when neither
+  // does, and stops before registering anything when the bookmark is conflicted or unresolvable,
+  // or deleted locally with the deletion never pushed. A workspace that already exists gets no bookmark command here — present or
   // absent, the bookmark is left exactly as the fetch and the workers left it. The fetch may
   // delete the bookmark together with its merged remote branch, but it never abandons the branch's
   // commits or rewrites a workspace's working copy: `git.abandon-unreachable-commits` is `false`

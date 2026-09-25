@@ -1003,6 +1003,19 @@ describe("ProcessManager", () => {
         "-R",
         repo,
       ],
+      // No local bookmark resolved: the origin rows, whose absence starts the workspace at main.
+      [
+        "jj",
+        "bookmark",
+        "list",
+        "--all-remotes",
+        "exact:legion/LEGION-42",
+        "-T",
+        'if(remote == "origin", if(tracked, "tracked", "untracked") ++ " " ++ normal_target.commit_id() ++ "\n")',
+        "--ignore-working-copy",
+        "-R",
+        repo,
+      ],
       ["git", `--git-dir=${repo}/.git`, "worktree", "prune"],
       [
         "jj",
