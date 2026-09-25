@@ -190,7 +190,14 @@ function attachTriggers(): () => void {
   };
   const onPointerOut = (event: PointerEvent) => {
     const trigger = triggerOf(event.target);
-    if (trigger !== null && trigger !== triggerOf(event.relatedTarget)) {
+    // A pointer moving straight onto the card is not leaving: React enters the card from this
+    // same event before it reaches the document, so a close armed here would outlive that
+    // enter and shut the card under the pointer.
+    if (
+      trigger !== null &&
+      trigger !== triggerOf(event.relatedTarget) &&
+      !cardContains(event.relatedTarget)
+    ) {
       refPreview.hoverEnd(trigger);
     }
   };
