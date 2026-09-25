@@ -76,13 +76,45 @@ export function githubGraphql(fetch: Fetch, token: string): GraphqlCall {
         `GitHub GraphQL request failed (${response.status}): ${await response.text()}`
       );
     }
-    const payload = (await response.json()) as { data?: T; errors?: Array<{ message: string }> };
-    if (payload.errors && payload.errors.length > 0) {
-      throw new CliError(payload.errors.map((error) => error.message).join("; "));
-    }
-    if (payload.data == null) throw new CliError("GitHub GraphQL response carried no data");
-    return payload.data;
+    return graphqlData<T>(await response.json());
   };
+}
+
+/** Runs `gh` with `args`, `stdin` on its standard input, and `env` as its whole environment. */
+export type RunGh = (
+  args: string[],
+  stdin: string,
+  env: NodeJS.ProcessEnv
+) => Promise<{ exitCode: number; stdout: string; stderr: string }>;
+
+/** One GraphQL call through the caller's own `gh` (`gh api graphql --input -`), for a session
+ * outside a Legion pane, which has no grant to redeem. GH_REPO names the repository, so a `gh`
+ * that picks its credential by repository (the devbox shim routes to that owner's GitHub App)
+ * authenticates for it. A non-zero exit rejects with a CliError carrying gh's own message. */
+export function ghGraphql(runGh: RunGh, env: NodeJS.ProcessEnv, repo: GitHubRepo): GraphqlCall {
+  return async <T>(query: string, variables: Record<string, unknown>): Promise<T> => {
+    const result = await runGh(
+      ["api", "graphql", "--input", "-"],
+      JSON.stringify({ query, variables }),
+      { ...env, GH_REPO: `${repo.owner}/${repo.name}` }
+    );
+    if (result.exitCode !== 0) {
+      const message = result.stderr.trim() || result.stdout.trim();
+      throw new CliError(`gh api graphql failed (exit ${result.exitCode}): ${message}`);
+    }
+    return graphqlData<T>(JSON.parse(result.stdout));
+  };
+}
+
+/** A GraphQL response's `data`, or a CliError with its `errors[]` messages (a GraphQL-level
+ * refusal such as `Resource not accessible by integration`). */
+function graphqlData<T>(response: unknown): T {
+  const payload = response as { data?: T; errors?: Array<{ message: string }> };
+  if (payload.errors && payload.errors.length > 0) {
+    throw new CliError(payload.errors.map((error) => error.message).join("; "));
+  }
+  if (payload.data == null) throw new CliError("GitHub GraphQL response carried no data");
+  return payload.data;
 }
 
 /** The reviewer's acceptance reply form: the comment's first non-blank line begins `Accepted:`

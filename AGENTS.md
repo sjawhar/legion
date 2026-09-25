@@ -52,7 +52,7 @@ legion stop <team>                   # Stop swarm
 legion restart <team>                # Restart daemon, preserve worker sessions
 legion legions                       # List registered Legion daemons
 legion gh -- <args>                  # Run gh with a session-bound GitHub token; every merge-shaped invocation is refused for every role (Legion never merges)
-legion threads resolve --pr <n> --repo <owner>/<repo>  # Implementer before every push that answers a review, merger before READY: resolves each unresolved review thread whose newest comment is its opener's `Accepted:` reply (the review App cannot); exits 1 naming a thread GitHub refuses
+legion threads resolve --pr <n> --repo <owner>/<repo> [--gh]  # Implementer before every push that answers a review, merger before READY: resolves each unresolved review thread whose newest comment is its opener's `Accepted:` reply (the review App cannot); exits 1 naming a thread GitHub refuses. In a Legion pane it authenticates with the pane's grant file; a session outside a Legion pane (no grant) adds `--gh`, which applies the same rule through its own `gh` with `GH_REPO` set to `--repo`, so it runs from any directory (TypeScript CLI, the `legion` release installed outside panes)
 legion credential                    # Git credential helper for Legion grants
 legion state                         # Read daemon state
 legion handoff write|read            # Write/read structured handoff data on the issue branch; workers run them through the `legion` tool's `handoff_write` and `handoff_read`; `write` takes its JSON object from `--data` or, when that is omitted, from stdin (both CLIs), so no handoff hits the 128 KiB cap on one argv string

@@ -44,9 +44,11 @@ import { CliError } from "./errors";
 import { isGhMergeIntent } from "./gh-merge-intent";
 import {
   type Fetch,
+  ghGraphql,
   githubGraphql,
   parsePullNumber,
   parseRepo,
+  type RunGh,
   resolveAcceptedThreads,
 } from "./review-threads";
 import { readSecretPointer } from "./secret-pointer";
@@ -64,6 +66,7 @@ interface GhCommandDeps extends GrantRedemptionDeps {
 }
 
 interface ThreadsResolveCommandDeps extends GrantRedemptionDeps {
+  runGh: RunGh;
   log(line: string): void;
 }
 
@@ -129,6 +132,22 @@ async function spawnGh(args: string[], env: NodeJS.ProcessEnv): Promise<number> 
   child.once("error", completion.reject);
   child.once("close", (code) => completion.resolve(code ?? 1));
   return completion.promise;
+}
+
+async function runGh(
+  args: string[],
+  stdin: string,
+  env: NodeJS.ProcessEnv
+): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  const child = Bun.spawn(["gh", ...args], { env, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+  child.stdin.write(stdin);
+  child.stdin.end();
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  return { exitCode, stdout, stderr };
 }
 
 /** The `gh issue` verbs that write to a GitHub issue. Reads (`view`, `list`, `status`) are not
@@ -278,14 +297,18 @@ export async function cmdGh(args: string[], deps: GhCommandDeps): Promise<void> 
  * resolve a thread or push to its branch; the review App is neither by design (`pull_requests:
  * write`, no `contents`), so the threads it opens are resolved here by the implementer — before
  * every push that answers a review — and by the merger once more before READY. Both flags are
- * validated before any grant is redeemed. */
+ * validated before any grant is redeemed. With `gh`, a session outside a Legion pane, which has
+ * no grant, applies the same rule through its own `gh` (`ghGraphql`), from any directory: GH_REPO
+ * names the repository a routed `gh` would otherwise read from a checkout. */
 export async function cmdThreadsResolve(
-  options: { repo: string; pr: string },
+  options: { repo: string; pr: string; gh?: boolean },
   deps: ThreadsResolveCommandDeps
 ): Promise<void> {
   const repo = parseRepo(options.repo);
   const number = parsePullNumber(options.pr);
-  const graphql = githubGraphql(deps.fetch, await redeemGitHubToken(deps));
+  const graphql = options.gh
+    ? ghGraphql(deps.runGh, deps.env, repo)
+    : githubGraphql(deps.fetch, await redeemGitHubToken(deps));
   await resolveAcceptedThreads(graphql, repo, number, deps.log);
 }
 
@@ -725,12 +748,17 @@ const threadsResolveCommand = defineCommand({
   args: {
     pr: { type: "string", required: true, description: "Pull request number" },
     repo: { type: "string", required: true, description: "Repository as <owner>/<name>" },
+    gh: {
+      type: "boolean",
+      description:
+        "Authenticate with your own gh instead of a Legion grant: for a session outside a Legion pane",
+    },
   },
   run: ({ args }) =>
     runCli(() =>
       cmdThreadsResolve(
-        { repo: args.repo as string, pr: args.pr as string },
-        { env: process.env, fetch, log: (line) => console.log(line) }
+        { repo: args.repo as string, pr: args.pr as string, gh: args.gh === true },
+        { env: process.env, fetch, runGh, log: (line) => console.log(line) }
       )
     ),
 });

@@ -63,6 +63,34 @@ function fakeGitHub(
   return { fetch, requests, graphqlBodies, resolved };
 }
 
+/** The grant path never runs gh. */
+const noGh = async (): Promise<never> => {
+  throw new Error("the grant path ran gh");
+};
+
+/** A caller's own `gh` for `--gh`: `gh api graphql --input -` served from the same pages and
+ * mutation as `fakeGitHub`, recording each call's argv and GH_REPO. */
+function fakeGh(pages: Record<string, unknown>, mutation: (threadId: string) => unknown) {
+  const calls: Array<{ args: string[]; ghRepo: string | undefined }> = [];
+  const resolved: string[] = [];
+  const runGh = async (args: string[], stdin: string, env: NodeJS.ProcessEnv) => {
+    calls.push({ args, ghRepo: env.GH_REPO });
+    const body = JSON.parse(stdin) as { query: string; variables: Record<string, unknown> };
+    if (body.query.includes("resolveReviewThread")) {
+      const threadId = body.variables.threadId as string;
+      resolved.push(threadId);
+      return { exitCode: 0, stdout: JSON.stringify(mutation(threadId)), stderr: "" };
+    }
+    return { exitCode: 0, stdout: JSON.stringify(pages[String(body.variables.after)]), stderr: "" };
+  };
+  return { runGh, calls, resolved };
+}
+
+/** No daemon and no GitHub API from the CLI itself: `--gh` reaches GitHub only through `gh`. */
+const noFetch = async (): Promise<never> => {
+  throw new Error("--gh fetched");
+};
+
 describe("legion threads resolve", () => {
   it("resolves exactly the unresolved threads whose newest comment is the opener's Accepted: reply, across pages", async () => {
     const reviewer = "legion-reviewer";
@@ -112,7 +140,12 @@ describe("legion threads resolve", () => {
 
     await cmdThreadsResolve(
       { repo: "sjawhar/legion", pr: "993" },
-      { env: { LEGION_GRANT: "grant-123" }, fetch: github.fetch, log: (line) => lines.push(line) }
+      {
+        env: { LEGION_GRANT: "grant-123" },
+        fetch: github.fetch,
+        runGh: noGh,
+        log: (line) => lines.push(line),
+      }
     );
 
     expect(github.resolved).toEqual(["T1", "T5"]);
@@ -156,7 +189,12 @@ describe("legion threads resolve", () => {
     await expect(
       cmdThreadsResolve(
         { repo: "sjawhar/legion", pr: "993" },
-        { env: { LEGION_GRANT: "grant-123" }, fetch: github.fetch, log: (line) => lines.push(line) }
+        {
+          env: { LEGION_GRANT: "grant-123" },
+          fetch: github.fetch,
+          runGh: noGh,
+          log: (line) => lines.push(line),
+        }
       )
     ).rejects.toEqual(
       expect.objectContaining({
@@ -174,7 +212,12 @@ describe("legion threads resolve", () => {
     await expect(
       cmdThreadsResolve(
         { repo: "sjawhar/legion", pr: "993" },
-        { env: { LEGION_GRANT: "grant-123" }, fetch: github.fetch, log: () => undefined }
+        {
+          env: { LEGION_GRANT: "grant-123" },
+          fetch: github.fetch,
+          runGh: noGh,
+          log: () => undefined,
+        }
       )
     ).rejects.toEqual(
       // The CLI includes the status and daemon refusal message.
@@ -206,7 +249,12 @@ describe("legion threads resolve", () => {
 
     await cmdThreadsResolve(
       { repo: "sjawhar/legion", pr: "993" },
-      { env: { LEGION_GRANT: "grant-123" }, fetch: github.fetch, log: (line) => lines.push(line) }
+      {
+        env: { LEGION_GRANT: "grant-123" },
+        fetch: github.fetch,
+        runGh: noGh,
+        log: (line) => lines.push(line),
+      }
     );
 
     expect(lines).toEqual(["no unresolved threads"]);
@@ -224,10 +272,68 @@ describe("legion threads resolve", () => {
         cmdThreadsResolve(options, {
           env: { LEGION_GRANT: "grant-123" },
           fetch: github.fetch,
+          runGh: noGh,
           log: () => undefined,
         })
       ).rejects.toEqual(expect.objectContaining({ message, code: 1 }));
       expect(github.requests).toEqual([]);
     }
+  });
+
+  it("--gh applies the same rule through the caller's gh, with no grant and from any directory", async () => {
+    const reviewer = "legion-reviewer";
+    const gh = fakeGh(
+      {
+        null: page(
+          [
+            thread("T1", 1, reviewer, { login: reviewer, body: "Accepted: fixed in abc1234" }),
+            // The implementer's own `Accepted:` is not the opener's acceptance: refused.
+            thread("T2", 2, reviewer, { login: "sjawhar-agent", body: "Accepted: fixed" }),
+            thread("T3", 3, reviewer, { login: reviewer, body: "Still open: the test pins text." }),
+          ],
+          null
+        ),
+      },
+      resolvedOk
+    );
+    const lines: string[] = [];
+
+    await cmdThreadsResolve(
+      { repo: "sjawhar/legion", pr: "993", gh: true },
+      { env: {}, fetch: noFetch, runGh: gh.runGh, log: (line) => lines.push(line) }
+    );
+
+    expect(gh.resolved).toEqual(["T1"]);
+    expect(lines).toEqual([
+      `resolved ${PR}1`,
+      `left open ${PR}2 — newest reply by sjawhar-agent is not an acceptance`,
+      `left open ${PR}3 — newest reply by legion-reviewer is not an acceptance`,
+    ]);
+    // GH_REPO on every call: a routed gh outside a checkout has no other owner to route on.
+    expect(gh.calls).toEqual([
+      { args: ["api", "graphql", "--input", "-"], ghRepo: "sjawhar/legion" },
+      { args: ["api", "graphql", "--input", "-"], ghRepo: "sjawhar/legion" },
+    ]);
+  });
+
+  it("--gh exits 1 with gh's own message when gh fails, resolving nothing", async () => {
+    const runGh = async () => ({
+      exitCode: 4,
+      stdout: "",
+      stderr: "gh: To use GitHub CLI in automation, set the GH_TOKEN environment variable.\n",
+    });
+
+    await expect(
+      cmdThreadsResolve(
+        { repo: "sjawhar/legion", pr: "993", gh: true },
+        { env: {}, fetch: noFetch, runGh, log: () => undefined }
+      )
+    ).rejects.toEqual(
+      expect.objectContaining({
+        message:
+          "gh api graphql failed (exit 4): gh: To use GitHub CLI in automation, set the GH_TOKEN environment variable.",
+        code: 1,
+      })
+    );
   });
 });
