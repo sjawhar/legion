@@ -582,20 +582,29 @@ func TestProvisionRefusesALocalConflictAndItsWaysOutHold(t *testing.T) {
 // A workspace with no issue branch starts at main, resolved to one commit before the add: a
 // `jj workspace add --revision main` jj cannot resolve registers the workspace on the root commit
 // and creates its directory before it fails, and the next provisioning would adopt that empty
-// workspace. A clone with no main (a repository whose default branch is another) and a
-// conflicted main are refused by name, every time, with nothing added.
+// workspace. A clone with no main (a repository whose default branch is another), a main deleted
+// in the shared clone while origin's is tracked, and a conflicted main are refused by name, every
+// time, with nothing added; the last two print a way out, which, run as printed, lets the next
+// provisioning start at origin's main.
 func TestProvisionRefusesAWorkspaceWithNoBranchWhenMainDoesNotResolve(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		// unresolve leaves main unresolvable in clone and answers the refusals provisioning may
 		// give, `{dir}` standing for the workspace directory.
 		unresolve func(t *testing.T, run *recordingRunner, clone string) []string
+		// wayOut begins the refusal's way out; "" for a refusal that prints none.
+		wayOut string
 	}{
 		{"main absent", func(t *testing.T, run *recordingRunner, clone string) []string {
 			runSetup(t, clone, "git", "--git-dir="+run.remote, "update-ref", "-d", "refs/heads/main")
 			return []string{"Bookmark main is not in the shared clone " + clone + "; workspace {dir} was not created. An issue with no branch starts at main, so the repository's default branch must be main"}
-		}},
-		{"main conflicted", func(t *testing.T, run *recordingRunner, clone string) []string {
+		}, ""},
+		{"main deleted in the shared clone", func(t *testing.T, run *recordingRunner, clone string) []string {
+			origin := commitOf(t, clone, "main@origin")
+			runSetup(t, clone, "jj", "bookmark", "delete", "main", "--ignore-working-copy", "-R", clone)
+			return []string{"Bookmark main was deleted in the shared clone " + clone + " while main@origin is tracked at " + origin + "; workspace {dir} was not created. Restore it: `jj bookmark set main -r main@origin --ignore-working-copy -R " + clone + "`, and the next provisioning starts there"}
+		}, "jj bookmark set main"},
+		{"main conflicted by two local moves", func(t *testing.T, run *recordingRunner, clone string) []string {
 			base := commitOf(t, clone, "main")
 			var sides []string
 			for _, label := range []string{"first", "second"} {
@@ -608,10 +617,10 @@ func TestProvisionRefusesAWorkspaceWithNoBranchWhenMainDoesNotResolve(t *testing
 			}
 			var refusals []string
 			for _, adds := range [][]string{sides, {sides[1], sides[0]}} {
-				refusals = append(refusals, "Bookmark main is conflicted (adds "+strings.Join(adds, ", ")+"; removes "+base+"); workspace {dir} was not created. Keep origin's: `jj bookmark set main -r main@origin --ignore-working-copy -R "+clone+"`, and the next provisioning starts there")
+				refusals = append(refusals, "Bookmark main is conflicted (adds "+strings.Join(adds, ", ")+"; removes "+base+"); workspace {dir} was not created. Keep origin's: `jj bookmark set main -r main@origin --allow-backwards --ignore-working-copy -R "+clone+"`, and the next provisioning starts there")
 			}
 			return refusals
-		}},
+		}, "jj bookmark set main"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			run := newLocalRunner(t)
@@ -629,13 +638,27 @@ func TestProvisionRefusesAWorkspaceWithNoBranchWhenMainDoesNotResolve(t *testing
 			for i := range refusals {
 				refusals[i] = strings.ReplaceAll(refusals[i], "{dir}", next.Dir)
 			}
+			var refusal string
 			for attempt := 1; attempt <= 2; attempt++ {
 				before := len(run.Calls())
 				_, err := Provision(context.Background(), run, req)
 				if err == nil || !slices.Contains(refusals, err.Error()) {
 					t.Fatalf("attempt %d: %v\nwant one of %q", attempt, err, refusals)
 				}
+				refusal = err.Error()
 				nothingProvisioned(t, run, before, next, fmt.Sprintf("attempt %d", attempt))
+			}
+			if tc.wayOut == "" {
+				return
+			}
+			l := lostWorkspace{run: run, req: req, first: first, clone: first.Clone}
+			command := l.runWayOut(t, refusal, tc.wayOut, "")
+			working, err := Provision(context.Background(), run, req)
+			if err != nil {
+				t.Fatalf("provision after %q: %v", command, err)
+			}
+			if at, origin := commitOf(t, working.Dir, "@-"), commitOf(t, first.Clone, "main@origin"); at != origin {
+				t.Errorf("after %q the workspace starts at %s, want origin's main %s", command, at, origin)
 			}
 		})
 	}
@@ -653,10 +676,15 @@ func TestProvisionStartsAtMainWhenAMergedBranchWasMovedOntoNothingDescribed(t *t
 		name      string
 		described []bool // the commits the local move adds, oldest first: described or not
 		setAside  bool
+		// mainDeleted deletes main in the shared clone as well, so main does not resolve: the
+		// provisioning is refused before anything is set aside or logged, and, once main is
+		// restored as the refusal prints, the next one sets the move aside.
+		mainDeleted bool
 	}{
-		{"an undescribed child adding only an empty file", []bool{false}, true},
-		{"a described child", []bool{true}, false},
-		{"an undescribed child on a described one", []bool{true, false}, false},
+		{"an undescribed child adding only an empty file", []bool{false}, true, false},
+		{"a described child", []bool{true}, false, false},
+		{"an undescribed child on a described one", []bool{true, false}, false, false},
+		{"an undescribed child, with main deleted in the shared clone", []bool{false}, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			l := pushedThenLost(t, "pushed.txt")
@@ -694,6 +722,17 @@ func TestProvisionStartsAtMainWhenAMergedBranchWasMovedOntoNothingDescribed(t *t
 					t.Errorf("logged %q", logged)
 				}
 				return
+			}
+			if tc.mainDeleted {
+				runSetup(t, l.clone, "jj", "bookmark", "delete", "main", "--ignore-working-copy", "-R", l.clone)
+				_, err := Provision(context.Background(), l.run, l.req)
+				if err == nil || !strings.HasPrefix(err.Error(), "Bookmark main was deleted in the shared clone ") {
+					t.Fatalf("provision with main deleted: %v, want main's refusal", err)
+				}
+				if len(logged) != 0 {
+					t.Fatalf("a provisioning that started nothing logged %q", logged)
+				}
+				l.runWayOut(t, err.Error(), "jj bookmark set main", "")
 			}
 			working, err := Provision(context.Background(), l.run, l.req)
 			if err != nil {

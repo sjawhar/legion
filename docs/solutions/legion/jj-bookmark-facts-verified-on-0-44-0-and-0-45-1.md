@@ -128,6 +128,14 @@ leaving the workspace **registered** (`jj workspace list` shows it) with its **d
 and its working copy parented on the root commit `000000000000`. Resolve to a commit id first and
 add by id; never let `add` be the thing that discovers the name is bad.
 
+## `jj bookmark set` refuses a sideways move off two local moves
+
+A bookmark conflicted by two local moves from one base (two divergent operations each setting it
+to a different child) is not moved back to its remote's commit by `jj bookmark set <name> -r
+<name>@origin`: both binaries exit 1 with `Error: Refusing to move bookmark backwards or sideways:
+<name>` and the hint to add `--allow-backwards`, which takes it (`Moved 1 bookmarks to …`). A way
+out that restores a bookmark to its remote from such a conflict carries the flag.
+
 The same holds for `main`: a clone of a repository whose default branch is another has no `main`
 bookmark, and `--revision main` registers the workspace before it fails. The Go `createWorkspace`
 resolves `main` with the rows template too and adds its id.

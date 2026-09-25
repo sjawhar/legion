@@ -73,8 +73,15 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 		}
 	}
 	var revision string
+	fromMain := false
 	switch {
 	case setAside != nil:
+		// main first: a main that does not resolve refuses before anything is set aside, so the
+		// one line naming the set-aside commits is never a start that did not happen.
+		fromMain = true
+		if revision, err = mainCommit(ctx, run, workspace); err != nil {
+			return err
+		}
 		if _, err := RunChecked(ctx, run, []string{"jj", "bookmark", "delete", workspace.Bookmark, "--ignore-working-copy", "-R", cloneDir}, nil, ""); err != nil {
 			return err
 		}
@@ -116,8 +123,8 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 				remote, revision, listed(now.added), workspace.Dir)
 		}
 	}
-	fromMain := revision == ""
-	if fromMain {
+	if revision == "" {
+		fromMain = true
 		if revision, err = mainCommit(ctx, run, workspace); err != nil {
 			return err
 		}
@@ -185,18 +192,23 @@ func undescribedMove(ctx context.Context, run Runner, workspace Workspace, local
 
 // mainCommit is the commit a workspace with no issue branch starts at: main's, resolved to one
 // commit id as the issue bookmark is, since a `jj workspace add --revision main` jj cannot resolve
-// still registers the workspace, parented on the root commit, before it reports the error. An
-// absent main (a repository whose default branch is another) or a conflicted one is refused by
-// name before anything is added.
+// still registers the workspace, parented on the root commit, before it reports the error. Each
+// main that does not resolve is refused by name before anything is added: a conflicted one, with
+// origin's to keep (`--allow-backwards`, since jj refuses to move a bookmark sideways off two
+// local moves); one deleted in the shared clone while origin's is tracked, with origin's to
+// restore; and an absent one, a repository whose default branch is another.
 func mainCommit(ctx context.Context, run Runner, workspace Workspace) (string, error) {
 	rows, err := readBookmark(ctx, run, workspace, "main")
 	if err != nil {
 		return "", err
 	}
-	switch main := rows.local; {
+	switch main, origin := rows.local, rows.origin; {
 	case main.conflict:
-		return "", fmt.Errorf("Bookmark main is conflicted %s; workspace %s was not created. Keep origin's: `jj bookmark set main -r main@origin --ignore-working-copy -R %s`, and the next provisioning starts there",
+		return "", fmt.Errorf("Bookmark main is conflicted %s; workspace %s was not created. Keep origin's: `jj bookmark set main -r main@origin --allow-backwards --ignore-working-copy -R %s`, and the next provisioning starts there",
 			main.sides(), workspace.Dir, workspace.Clone)
+	case !main.present && origin.present && origin.tracked && !origin.conflict:
+		return "", fmt.Errorf("Bookmark main was deleted in the shared clone %s while main@origin is tracked at %s; workspace %s was not created. Restore it: `jj bookmark set main -r main@origin --ignore-working-copy -R %[1]s`, and the next provisioning starts there",
+			workspace.Clone, origin.added[0], workspace.Dir)
 	case !main.present:
 		return "", fmt.Errorf("Bookmark main is not in the shared clone %s; workspace %s was not created. An issue with no branch starts at main, so the repository's default branch must be main",
 			workspace.Clone, workspace.Dir)
