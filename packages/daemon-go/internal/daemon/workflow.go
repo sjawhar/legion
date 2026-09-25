@@ -132,25 +132,27 @@ func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config) error 
 	return err
 }
 
-// phaseHolds answers supervise's Deps.PhaseHolds from the issue record: a task is enqueued for the
-// phase its issue was in, so once the issue is in another role's phase a delivery still queued for
-// this one is stale and is dropped rather than sent. An architect's task belongs to no phase and
-// always holds.
+// phaseHolds answers supervise's Deps.PhaseHolds from the issue record: a task carries the phase
+// it was queued for, so once the issue is in another phase a delivery still queued for that one is
+// finished work and is dropped rather than sent. The phase is compared, not the role that works
+// it: one role runs several phases — the implementer runs implementing, retro and the production
+// check — and a task written for the first is not the work of the third.
 //
-// Only a task the workflow itself queued is judged. The outbox mints every one of those with an
-// id it owns (outboxDeliveryPrefix), so a task an operator delivered by hand through the API is
-// held whatever phase its issue is in: the operator asked for that delivery, was answered 200, and
-// dropping it would make the work silently not happen.
+// A delivery of no phase holds. Only the workflow names one, so an operator's delivery made by
+// hand through the API is held whatever phase its issue is in: the operator asked for it, was
+// answered 200, and dropping it would make the work silently not happen. An architect's task
+// belongs to no phase and names none for the same reason.
+//
+// Nothing else on the delivery would answer this: the id is rotated by a prompt retry, and the
+// task text is the workflow's prose. The phase is typed data, persisted with the delivery, and no
+// path rewrites it.
 //
 // A claim on an issue the daemon does not record holds too. The workflow never deletes an issue,
 // so there is no record only for a claim the workflow never made — the operator's own spawn, whose
 // issue key need not be an issue key at all.
 func phaseHolds(pool *pgxpool.Pool, records record.Store) func(context.Context, supervise.Claim, supervise.Delivery) (bool, error) {
 	return func(ctx context.Context, c supervise.Claim, d supervise.Delivery) (bool, error) {
-		if !strings.HasPrefix(d.ID, outboxDeliveryPrefix) {
-			return true, nil
-		}
-		if c.Role == claim.RoleArchitect {
+		if d.Phase == "" {
 			return true, nil
 		}
 		var issue *record.Issue
@@ -164,16 +166,17 @@ func phaseHolds(pool *pgxpool.Pool, records record.Store) func(context.Context, 
 		if issue == nil {
 			return true, nil
 		}
-		return workflow.RoleFor(issue.Phase) == c.Role, nil
+		return issue.Phase == d.Phase, nil
 	}
 }
 
 // treeClosable answers supervise's Deps.TreeClosable: a tree a workflow issue backs closes when
-// its linger expires, never on an operator's close of its root claim. The machine asks it inside
-// it where the close is decided rather than a round trip before it, and only for the operator's own
-// close — the workflow's linger close holds that same record. It is not a lock on what it reads:
-// admission and the engine commit issue records in their own transactions and take no machine lock,
-// so one can still land between this answer and the retire.
+// its linger expires, never on an operator's close of its root claim. The machine asks it where
+// the close is decided rather than a round trip before it, and only for the operator's own close:
+// the workflow's linger close holds that same issue record, so asking would refuse exactly the
+// closes the workflow is entitled to make. It is not a lock on what it reads: admission and the
+// engine commit issue records in their own transactions and take no machine lock, so one can
+// still land between this answer and the retire.
 func treeClosable(pool *pgxpool.Pool, records record.Store) func(context.Context, supervise.Claim) (bool, error) {
 	return func(ctx context.Context, c supervise.Claim) (bool, error) {
 		var issue *record.Issue

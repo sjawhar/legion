@@ -115,7 +115,7 @@ func TestAClaimWithNoProcessDropsTheSessionTheLostVolumeHeld(t *testing.T) {
 		{StateSuspended, func(h *harness) { h.reach(StateSuspended) }, RequestResume{Claim: testToken}},
 		{StateRetired, func(h *harness) {
 			h.reach(StateIdle)
-			h.must(RequestStop{Claim: testToken, TreeClose: true})
+			h.must(RequestTreeClose{Claim: testToken})
 		}, RequestRetry{Claim: testToken}},
 		{StateFailed, func(h *harness) {
 			h.reach(StateReady)

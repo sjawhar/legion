@@ -784,6 +784,10 @@ func claimOf(ev Event) claim.Token {
 		return ev.Claim
 	case RequestStop:
 		return ev.Claim
+	case RequestTreeClose:
+		return ev.Claim
+	case RequestOperatorClose:
+		return ev.Claim
 	case RequestRetry:
 		return ev.Claim
 	case RequestDeliver:

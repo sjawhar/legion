@@ -247,7 +247,7 @@ func (s *server) closeEvent(w http.ResponseWriter, _ *http.Request, c supervise.
 		writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf("close refused: %s is not its tree's root claim; stop it instead", c.Token)))
 		return nil, false
 	}
-	return supervise.RequestStop{Claim: c.Token, TreeClose: true, Operator: true}, true
+	return supervise.RequestOperatorClose{Claim: c.Token}, true
 }
 
 // list answers every claim the daemon supervises, in token order.

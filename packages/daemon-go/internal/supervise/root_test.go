@@ -161,7 +161,7 @@ func TestTreeCloseReleasesASuspendedRootWithNoLocator(t *testing.T) {
 	h.must(RequestExit{Claim: rootToken, Generation: h.generation(), Session: session, Reason: "tree waiting"})
 	h.wantState(StateSuspended)
 
-	h.must(RequestStop{Claim: rootToken, TreeClose: true})
+	h.must(RequestTreeClose{Claim: rootToken})
 
 	wantReleasedWithNoLocator(t, h, rootToken)
 	h.wantState(StateRetired)
@@ -175,7 +175,7 @@ func TestTreeCloseReleasesALiveRoot(t *testing.T) {
 			h.reach(state)
 			loc := h.locator()
 
-			h.must(RequestStop{Claim: rootToken, TreeClose: true})
+			h.must(RequestTreeClose{Claim: rootToken})
 
 			if released := h.wantCalls("Release", 1)[0].Released; released.Claim != rootToken || released.Locator == nil || *released.Locator != loc {
 				t.Errorf("released %+v, want %s at %+v", released, rootToken, loc)

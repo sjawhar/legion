@@ -152,7 +152,7 @@ func TestRegisterOnARetiredClaimIsRefusedWithTheMachinesReason(t *testing.T) {
 	h := newHarness(t)
 	token, boot := h.launch("LEGION-208", claim.RoleArchitect)
 	m, _ := h.supervisor.Machine(token)
-	if err := m.Handle(h.ctx, supervise.RequestStop{Claim: token, TreeClose: true}); err != nil {
+	if err := m.Handle(h.ctx, supervise.RequestTreeClose{Claim: token}); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
 

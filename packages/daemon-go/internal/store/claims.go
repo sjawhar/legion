@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
@@ -22,7 +23,7 @@ var _ supervise.Store = (*Store)(nil)
 const claimSelect = `select c.token, c.project, c.tree, c.issue, c.role, c.generation, c.session,
 	c.session_file, c.locator, c.state, c.launch_failures, c.prompt_failures, c.prompt_retires,
 	c.boot_token_hash, c.capability_hash, c.uncertain_streak, c.workspace_lost,
-	d.delivery_id, d.task, d.queued_at, d.delivered_at, d.confirmed_at
+	d.delivery_id, d.task, d.phase, d.queued_at, d.delivered_at, d.confirmed_at
 	from claims c left join pending_task_deliveries d on d.claim_token = c.token`
 
 // PutClaim writes a claim, replacing the row its token names. The pending delivery is not part of
@@ -103,11 +104,11 @@ func (s *Store) ClaimByBootTokenHash(ctx context.Context, hash []byte) (supervis
 // one. A token no claim carries is refused.
 func (s *Store) PutDelivery(ctx context.Context, token claim.Token, d supervise.Delivery) error {
 	_, err := s.pool.Exec(ctx, `insert into pending_task_deliveries (claim_token, delivery_id, task,
-		queued_at, delivered_at, confirmed_at) values ($1, $2, $3, $4, $5, $6)
+		phase, queued_at, delivered_at, confirmed_at) values ($1, $2, $3, $4, $5, $6, $7)
 		on conflict (claim_token) do update set delivery_id = excluded.delivery_id,
-		task = excluded.task, queued_at = excluded.queued_at,
+		task = excluded.task, phase = excluded.phase, queued_at = excluded.queued_at,
 		delivered_at = excluded.delivered_at, confirmed_at = excluded.confirmed_at`,
-		string(token), d.ID, d.Task, d.QueuedAt, instant(d.DeliveredAt), instant(d.ConfirmedAt),
+		string(token), d.ID, d.Task, string(d.Phase), d.QueuedAt, instant(d.DeliveredAt), instant(d.ConfirmedAt),
 	)
 	if err != nil {
 		return fmt.Errorf("put delivery %s on %s: %w", d.ID, token, err)
@@ -138,13 +139,14 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 		generation          int64
 		locator             []byte
 		deliveryID, task    *string
+		deliveryPhase       *string
 		queuedAt, delivered *time.Time
 		confirmed           *time.Time
 	)
 	err := row.Scan(&token, &c.Project, &c.Tree, &c.Issue, &role, &generation, &c.Session,
 		&c.SessionFile, &locator, &state, &c.Budgets.LaunchFailures, &c.Budgets.PromptFailures,
 		&c.Budgets.PromptRetires, &c.BootTokenHash, &c.CapabilityHash, &c.UncertainStreak, &c.WorkspaceLost,
-		&deliveryID, &task, &queuedAt, &delivered, &confirmed)
+		&deliveryID, &task, &deliveryPhase, &queuedAt, &delivered, &confirmed)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return supervise.Claim{}, err
 	}
@@ -167,6 +169,7 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 		c.Pending = &supervise.Delivery{
 			ID:          *deliveryID,
 			Task:        *task,
+			Phase:       phase.Phase(deref(deliveryPhase)),
 			QueuedAt:    *queuedAt,
 			DeliveredAt: orZero(delivered),
 			ConfirmedAt: orZero(confirmed),
@@ -188,4 +191,13 @@ func orZero(t *time.Time) time.Time {
 		return time.Time{}
 	}
 	return *t
+}
+
+// deref is a nullable text column as its Go value: a column the schema defaults to the empty
+// string is null only for a row written before that column existed.
+func deref(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }

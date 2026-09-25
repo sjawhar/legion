@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/phase"
 
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
@@ -25,9 +26,15 @@ import (
 // answers it without a second turn. The id is kept across a send that failed in transit, so a
 // retry is recognised, and rotated after a prompt that was acknowledged and started no turn, so
 // the retry is a new prompt rather than an echo of the acknowledged one.
+//
+// Phase is the issue phase the task was queued for, which is what says whether the task is still
+// the work to do: it is carried here, persisted, because the id is rewritten by that rotation and
+// the task text is the workflow's to write. A delivery of no phase — an operator's own, an
+// architect's — is held whatever phase its issue reaches.
 type Delivery struct {
 	ID          string
 	Task        string
+	Phase       phase.Phase
 	QueuedAt    time.Time
 	DeliveredAt time.Time
 	ConfirmedAt time.Time
@@ -48,9 +55,11 @@ func pendingID(p *Delivery) string {
 	return p.ID
 }
 
-// queue gives the claim a task. An outbox repeats its row id after a crash before FinishOutbox;
-// the same task and id are therefore accepted without changing the persisted delivery.
-func (m *Machine) queue(ctx context.Context, task, id string) error {
+// queue gives the claim the task a deliver request carries, with the phase it was queued for. An
+// outbox repeats its row id after a crash before FinishOutbox; the same task and id are therefore
+// accepted without changing the persisted delivery.
+func (m *Machine) queue(ctx context.Context, request RequestDeliver) error {
+	id, task := request.ID, request.Task
 	if pending := m.claim.Pending; pending != nil {
 		if id != "" && pending.ID == id && pending.Task == task {
 			return nil
@@ -60,7 +69,7 @@ func (m *Machine) queue(ctx context.Context, task, id string) error {
 	if id == "" {
 		id = rand.Text()
 	}
-	d := Delivery{ID: id, Task: task, QueuedAt: m.deps.Clock.Now()}
+	d := Delivery{ID: id, Task: task, Phase: request.Phase, QueuedAt: m.deps.Clock.Now()}
 	if err := m.deps.Store.PutDelivery(ctx, m.claim.Token, d); err != nil {
 		return err
 	}

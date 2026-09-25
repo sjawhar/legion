@@ -25,8 +25,9 @@ import (
 
 const (
 	outboxBatchSize = 32
-	// outboxDeliveryPrefix marks a delivery the outbox queued, so the daemon can tell the
-	// workflow's own tasks from one an operator delivered by hand.
+	// outboxDeliveryPrefix namespaces a delivery id the outbox mints from its row id, so a row's
+	// id cannot collide with a minted one. What a delivery is for is its phase, not its id: the
+	// id is rotated by a prompt retry.
 	outboxDeliveryPrefix = "outbox:"
 	outboxLease          = 30 * time.Second
 	outboxPoll           = 100 * time.Millisecond
@@ -322,7 +323,10 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 			}
 		}
 		if payload.Task != "" {
-			if err := machine.Handle(ctx, supervise.RequestDeliver{Claim: token, Task: payload.Task, ID: fmt.Sprintf("%s%d", outboxDeliveryPrefix, row.ID)}); err != nil {
+			// The row's phase, already held to the issue's above, travels with the delivery: it is
+			// what says the task is still the work to do once the delivery has outlived its id.
+			if err := machine.Handle(ctx, supervise.RequestDeliver{Claim: token, Task: payload.Task, Phase: payload.Phase,
+				ID: fmt.Sprintf("%s%d", outboxDeliveryPrefix, row.ID)}); err != nil {
 				return fmt.Errorf("deliver to claim %s: %w", token, err)
 			}
 		}
@@ -344,7 +348,7 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		if !found {
 			return nil
 		}
-		if err := machine.Handle(ctx, supervise.RequestStop{Claim: token, TreeClose: true}); err != nil {
+		if err := machine.Handle(ctx, supervise.RequestTreeClose{Claim: token}); err != nil {
 			return fmt.Errorf("close the tree of claim %s: %w", token, err)
 		}
 		return nil

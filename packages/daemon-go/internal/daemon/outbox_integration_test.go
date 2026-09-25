@@ -20,8 +20,10 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	legionstore "github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
 func TestOutboxLeaseLetsOnlyOneRunnerExecuteDueRow(t *testing.T) {
@@ -472,7 +474,7 @@ func TestTheWorkflowsTreeCloseIsNotPutToTheOperatorsPredicate(t *testing.T) {
 	}
 
 	// The operator's close of a tree a workflow issue backs is refused, and changes nothing.
-	operatorClose := machine.Handle(context.Background(), supervise.RequestStop{Claim: token, TreeClose: true, Operator: true})
+	operatorClose := machine.Handle(context.Background(), supervise.RequestOperatorClose{Claim: token})
 	var refused *supervise.RefusedError
 	if !errors.As(operatorClose, &refused) || !strings.Contains(refused.Error(), "closes when its linger expires") {
 		t.Fatalf("operator close = %v, want the workflow-tree refusal", operatorClose)
@@ -493,6 +495,95 @@ func TestTheWorkflowsTreeCloseIsNotPutToTheOperatorsPredicate(t *testing.T) {
 	}
 	if releases := runtime.CallsOf("Release"); len(releases) != 1 || releases[0].Released.Claim != token {
 		t.Fatalf("releases = %+v, want the root released once", releases)
+	}
+}
+
+// The daemon wires phaseHolds into every claim's machine, and one path a delivery takes rewrites
+// the delivery: a prompt acknowledged and then refused is taken back under a new id
+// (supervise.promptFailed). That is exactly the state a late foreign turn leaves behind, which is
+// the state this drop exists for, so the workflow's own task must still be dropped after the
+// rewrite once its issue has left the phase the task was queued for. A predicate that reads
+// anything the retry rewrites answers this wrong in production and green in a test that skips it.
+func TestAWorkflowTaskIsDroppedAfterItsRetryRewritesTheDelivery(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	ctx := context.Background()
+	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Implementing, Generation: 1, Status: "in_progress"}
+	putOutboxIssue(t, pool, records, issue)
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	sup.deps.PhaseHolds = phaseHolds(pool, records) // exactly what daemon.go wires in production
+	token, err := claim.NewToken("legion", issue.Key, claim.RoleImplementer)
+	if err != nil {
+		t.Fatalf("claim token: %v", err)
+	}
+	machine, _, err := sup.Create(ctx, supervise.Claim{
+		Token: token, Project: "legion", Tree: issue.Tree, Issue: issue.Key, Role: claim.RoleImplementer, State: supervise.StateQueued,
+	}, "")
+	if err != nil {
+		t.Fatalf("create the implementer claim: %v", err)
+	}
+	conn := fake.NewConn()
+	sup.deps.Conns.(*fake.Conns).Register(token, conn)
+	runner := &outbox{
+		pool: pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets",
+		log: quietLogger(),
+		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
+			return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-208"}, nil
+		},
+	}
+
+	// The workflow starts the implementer on its phase, through the outbox row that mints the
+	// delivery the daemon owns.
+	if err := runner.execute(ctx, mustOutboxRow(t, issue.Key, record.SuperviseRequest{
+		Op: "start", Tree: issue.Tree, Role: claim.RoleImplementer, Generation: 1, Phase: phase.Implementing,
+		Task: "Continue Workflow. Issue: LEGION-208. Phase: implementing.",
+	}, time.Now())); err != nil {
+		t.Fatalf("start the implementer on its phase: %v", err)
+	}
+	generation := machine.Claim().Generation
+	for _, ev := range []supervise.Event{
+		supervise.StreamHello{Claim: token, Generation: generation},
+		supervise.RequestRegister{Claim: token, Generation: generation, Session: "ses-impl", SessionFile: "/tmp/impl.jsonl"},
+		supervise.RequestReady{Claim: token, Generation: generation, Session: "ses-impl"},
+	} {
+		if err := machine.Handle(ctx, ev); err != nil {
+			t.Fatalf("handle %T: %v", ev, err)
+		}
+	}
+	eventually(t, "the phase's task to be acknowledged", func() bool {
+		p := machine.Claim().Pending
+		return p != nil && !p.DeliveredAt.IsZero()
+	})
+	queued := machine.Claim().Pending.ID
+
+	// A turn the task did not start, and the agent then refusing the prompt it had acknowledged:
+	// the delivery is taken back under a new id, and the foreign turn ends.
+	if err := machine.Handle(ctx, supervise.StreamTurnStart{Claim: token}); err != nil {
+		t.Fatalf("start the foreign turn: %v", err)
+	}
+	if err := machine.Handle(ctx, supervise.StreamLateRefusal{Claim: token, DeliveryID: queued,
+		Error: "Agent is already processing. Use steer() or followUp() to queue messages, or wait for completion."}); err != nil {
+		t.Fatalf("refuse the acknowledged prompt: %v", err)
+	}
+	if rotated := machine.Claim().Pending; rotated == nil || rotated.ID == queued {
+		t.Fatalf("pending delivery after the refusal = %+v, want it kept under a new id", rotated)
+	}
+
+	// The phase ends while the retry waits: the work the task asks for is done.
+	putOutboxIssue(t, pool, records, record.Issue{
+		Key: issue.Key, Project: issue.Project, Tree: issue.Tree, Title: issue.Title, Phase: phase.Testing, Generation: 1, Status: "testing",
+	})
+	prompts := len(conn.Prompts())
+
+	if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: token}); err != nil {
+		t.Fatalf("end the foreign turn: %v", err)
+	}
+
+	if got := machine.Claim().Pending; got != nil {
+		t.Fatalf("the finished phase's task is still pending as %+v, want it dropped", got)
+	}
+	if got := len(conn.Prompts()) - prompts; got != 0 {
+		t.Fatalf("the finished worker was handed its own finished task %d more times, want none", got)
 	}
 }
 
