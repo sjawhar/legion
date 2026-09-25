@@ -6,8 +6,8 @@
 // it spawns the agent, `legion probe-image` before its model round trip — from two embedded files:
 // config.yml, which pins every role, subagent and retry to the gateway's aliases, and
 // models.yml.tmpl, which routes the anthropic provider to the gateway and keys it with the pod's
-// projected token. The pins also reach Oh My Pi as a settings overlay (Installed.Environ), which
-// outranks the settings of the repository the agent works in.
+// projected token. Install also answers the environment Oh My Pi must start with, which carries the
+// pins as a settings overlay that outranks the settings of the repository the agent works in.
 package modelroute
 
 import (
@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"text/template"
 
@@ -30,8 +31,8 @@ const (
 	// EnvURL is the variable a pod's main container carries the gateway's base URL in
 	// (sandbox.mainEnvironment); its anthropic route is <URL>/anthropic.
 	EnvURL = "LEGION_MODEL_GATEWAY_URL"
-	// TokenFile is the pod's projected gateway token (sandbox.GatewayDir), which the profile's key
-	// command reads.
+	// TokenFile is the pod's projected gateway token, which the profile's key command reads; the
+	// Sandbox runtime's gatewayTokenVolume mounts the token here.
 	TokenFile = "/var/run/legion/gateway/token"
 	// DefaultModel is the model config.yml's default role runs: every phase worker's own session,
 	// and the one the image probe's round trip must be answered by.
@@ -48,10 +49,12 @@ var (
 	profileName = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 )
 
-// Installed is what Install wrote: the anthropic route, <gateway>/anthropic, and the profile's
-// config.yml, which holds the pins. The zero value is no route installed.
+// Installed is what Install wrote: the anthropic route, <gateway>/anthropic, and the token file the
+// profile's key command reads; and Environ, the environment the Oh My Pi it starts runs with. With
+// nothing installed, Route and KeyFile are empty and Environ is the environment unchanged.
 type Installed struct {
-	Route, Pins string
+	Route, KeyFile string
+	Environ        []string
 }
 
 // pinsVariable is Oh My Pi's settings-overlay path list. Oh My Pi resolves settings as defaults,
@@ -92,28 +95,24 @@ var podVariables = []podVariable{
 	{"PI_AUTO_QA", "0", true},
 }
 
-// Environ is environ as the Oh My Pi it starts gets it: with the pins last among the settings
-// overlays (PI_CONFIG_FILES; later files win), so for every single-value or list setting the pins
-// hold — disabledProviders, enabledModels, retry.modelFallback, the endpoints Oh My Pi posts to on
-// its own, and each role they name — a repository's own settings cannot override them, and with
-// podVariables held, so a repository's .env cannot set those variables. That holds the variables
-// podVariables lists and no other path from the workspace into the process. A record merges key by
-// key, so a repository can add keys the pins do not set (another fallback chain, another role);
-// fallback is off in the pins for that reason. It is environ unchanged when nothing was installed
-// (a tmux pane, the image build).
-func (i Installed) Environ(environ []string) []string {
-	if i.Pins == "" {
-		return environ
-	}
+// pinned is environ as the Oh My Pi it starts gets it: with pins, the profile's config.yml, last
+// among the settings overlays (PI_CONFIG_FILES; later files win), so for every single-value or list
+// setting the pins hold — disabledProviders, enabledModels, retry.modelFallback, the endpoints Oh My
+// Pi posts to on its own, and each role they name — a repository's own settings cannot override
+// them, and with podVariables held, so a repository's .env cannot set those variables. That holds
+// the variables podVariables lists and no other path from the workspace into the process. A record
+// merges key by key, so a repository can add keys the pins do not set (another fallback chain,
+// another role); fallback is off in the pins for that reason.
+func pinned(environ []string, pins string) []string {
 	out := make([]string, 0, len(environ)+len(podVariables)+1)
-	overlays := i.Pins
+	overlays := pins
 	pods := map[string]string{}
 	for _, pair := range environ {
 		name, value, _ := strings.Cut(pair, "=")
 		switch {
 		case name == pinsVariable:
 			if value != "" {
-				overlays = value + string(os.PathListSeparator) + i.Pins
+				overlays = value + string(os.PathListSeparator) + pins
 			}
 		case slices.ContainsFunc(podVariables, func(v podVariable) bool { return v.name == name }):
 			pods[name] = value
@@ -131,22 +130,30 @@ func (i Installed) Environ(environ []string) []string {
 	return append(out, pinsVariable+"="+overlays)
 }
 
-// Install writes the model route into the Oh My Pi profile the environment names
-// (<HOME>/.omp/profiles/<OMP_PROFILE>/agent: config.yml and models.yml, replacing either) when the
-// environment names a gateway, and answers what it wrote. Without LEGION_MODEL_GATEWAY_URL — a
-// tmux pane, the image build — it leaves the profile alone and answers the zero Installed. A
-// gateway that is not an http(s) base URL, or a profile it cannot locate, is refused naming the
-// variable, with nothing written.
-func Install(lookup func(string) (string, bool)) (Installed, error) {
-	return InstallKeyedBy(lookup, TokenFile)
+// Install writes the model route into the Oh My Pi profile environ names
+// (<HOME>/.omp/profiles/<OMP_PROFILE>/agent: config.yml and models.yml, replacing either) when
+// environ names a gateway, and answers what it wrote, with the environment the Oh My Pi it starts
+// must run with (pinned). Without LEGION_MODEL_GATEWAY_URL — a tmux pane, the image build — it
+// leaves the profile alone and answers environ unchanged. A gateway that is not an http(s) base URL,
+// or a profile it cannot locate, is refused naming the variable, with nothing written.
+func Install(environ []string) (Installed, error) {
+	return InstallKeyedBy(environ, TokenFile)
 }
 
 // InstallKeyedBy is Install keyed by the token at tokenFile rather than the pod's: the real-binary
 // tests, here and in internal/daemon, run Oh My Pi on the route with a token file they can write.
-func InstallKeyedBy(lookup func(string) (string, bool), tokenFile string) (Installed, error) {
+func InstallKeyedBy(environ []string, tokenFile string) (Installed, error) {
+	lookup := func(name string) (string, bool) {
+		for _, pair := range environ {
+			if key, value, _ := strings.Cut(pair, "="); key == name {
+				return value, true
+			}
+		}
+		return "", false
+	}
 	raw, set := lookup(EnvURL)
 	if !set {
-		return Installed{}, nil
+		return Installed{Environ: environ}, nil
 	}
 	route, err := AnthropicRoute(raw)
 	if err != nil {
@@ -168,11 +175,12 @@ func InstallKeyedBy(lookup func(string) (string, bool), tokenFile string) (Insta
 			return Installed{}, fmt.Errorf("write the profile's model route: %w", err)
 		}
 	}
-	return Installed{Route: route, Pins: filepath.Join(agent, "config.yml")}, nil
+	return Installed{Route: route, KeyFile: tokenFile, Environ: pinned(environ, filepath.Join(agent, "config.yml"))}, nil
 }
 
 // AnthropicRoute is the gateway's anthropic route, <gateway>/anthropic, for a gateway base URL that
-// is http(s) with a host and carries no credentials, query or fragment. A base URL has no use for
+// is http(s) with a hostname, a port in 1-65535 if it names one, and no credentials, query or
+// fragment. A base URL has no use for
 // an `@`, so one anywhere is refused as credentials. A malformed value can hold a password
 // anywhere, so no refusal quotes the value or url.Parse's error: each names EnvURL and the rule
 // the value broke. The shim and `legion probe-image` refuse to start on a URL it refuses, and the
@@ -188,12 +196,21 @@ func AnthropicRoute(raw string) (string, error) {
 	switch {
 	case err != nil:
 		return "", fmt.Errorf("%s does not parse as a URL", EnvURL)
-	case (u.Scheme != "http" && u.Scheme != "https") || u.Host == "":
+	case (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "":
 		return "", fmt.Errorf("%s is not an http(s) URL with a host", EnvURL)
+	case u.Port() != "" && !validPort(u.Port()):
+		return "", fmt.Errorf("%s names a port outside 1-65535", EnvURL)
 	case u.RawQuery != "" || u.Fragment != "" || strings.ContainsAny(raw, "?#"):
 		return "", fmt.Errorf("%s carries a query or fragment: it must be the gateway's base URL", EnvURL)
 	}
 	return u.JoinPath("anthropic").String(), nil
+}
+
+// validPort reports whether port, the digits url.Parse accepted after the host's colon, is a TCP
+// port.
+func validPort(port string) bool {
+	n, err := strconv.Atoi(port)
+	return err == nil && n >= 1 && n <= 65535
 }
 
 // agentDir is Oh My Pi's agent directory for the named profile under HOME

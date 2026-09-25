@@ -78,7 +78,8 @@ type Options struct {
 	Tools    Tools
 	Gateway  Gateway
 	// Agent is the command the shim wraps, before the Oh My Pi arguments the runtime appends
-	// (`--resume`, `--mode rpc`, `--append-system-prompt`); Oh My Pi itself when nil.
+	// (`--no-extensions --extension <plugin>`, `--resume`, `--mode rpc`,
+	// `--append-system-prompt`); Oh My Pi itself when nil.
 	Agent []string
 	// BootTimeout bounds each wait of a relaunch, and is how long a pod may stay unscheduled
 	// before it counts as gone (worker_boot_timeout_seconds).

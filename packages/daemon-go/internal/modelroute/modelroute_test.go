@@ -41,11 +41,13 @@ func environment(t *testing.T, gateway string) map[string]string {
 	return map[string]string{"HOME": t.TempDir(), "OMP_PROFILE": "legion", EnvURL: gateway}
 }
 
-func lookup(env map[string]string) func(string) (string, bool) {
-	return func(name string) (string, bool) {
-		value, ok := env[name]
-		return value, ok
+// environ is env as a process environment, NAME=value in name order.
+func environ(env map[string]string) []string {
+	var out []string
+	for _, name := range slices.Sorted(maps.Keys(env)) {
+		out = append(out, name+"="+env[name])
 	}
+	return out
 }
 
 func readProfile(t *testing.T, home string) profile {
@@ -77,11 +79,11 @@ func TestInstallRoutesTheProfileThroughTheGateway(t *testing.T) {
 		t.Run(gateway, func(t *testing.T) {
 			env := environment(t, gateway)
 
-			installed, err := Install(lookup(env))
+			installed, err := Install(environ(env))
 
 			pins := filepath.Join(env["HOME"], ".omp", "profiles", "legion", "agent", "config.yml")
-			if err != nil || installed != (Installed{Route: base, Pins: pins}) {
-				t.Fatalf("Install = %+v, %v; want the route %s and the pins %s", installed, err, base, pins)
+			if err != nil || installed.Route != base || installed.KeyFile != TokenFile || !slices.Contains(installed.Environ, pinsVariable+"="+pins) {
+				t.Fatalf("Install = %+v, %v; want the route %s, the key file %s, and the pins %s as an overlay", installed, err, base, TokenFile, pins)
 			}
 			p := readProfile(t, env["HOME"])
 			anthropic, ok := p.Models.Providers["anthropic"]
@@ -135,10 +137,10 @@ func TestInstallLeavesTheProfileAloneWithoutAGateway(t *testing.T) {
 	env := environment(t, "")
 	delete(env, EnvURL)
 
-	installed, err := Install(lookup(env))
+	installed, err := Install(environ(env))
 
-	if err != nil || installed != (Installed{}) {
-		t.Fatalf("Install = %+v, %v; want nothing installed", installed, err)
+	if err != nil || installed.Route != "" || installed.KeyFile != "" || !slices.Equal(installed.Environ, environ(env)) {
+		t.Fatalf("Install = %+v, %v; want nothing installed and the environment unchanged", installed, err)
 	}
 	if _, err := os.Stat(filepath.Join(env["HOME"], ".omp")); !os.IsNotExist(err) {
 		t.Errorf("Install wrote under HOME without a gateway: %v", err)
@@ -163,15 +165,19 @@ func TestInstallRefusesWhatItCannotRoute(t *testing.T) {
 		"the default profile":  {func(env map[string]string) { env["OMP_PROFILE"] = "default" }, "OMP_PROFILE names no profile"},
 		"a path as a profile":  {func(env map[string]string) { env["OMP_PROFILE"] = "../legion" }, `OMP_PROFILE "../legion" is not a profile name`},
 		"a gateway on a space": {func(env map[string]string) { env[EnvURL] = "https://middle man.internal" }, EnvURL + " does not parse as a URL"},
+		// url.Parse gives `http://:8080` the Host ":8080", with no hostname.
+		"a port and no hostname": {func(env map[string]string) { env[EnvURL] = "http://:8080" }, EnvURL + " is not an http(s) URL with a host"},
+		"port 0":                 {func(env map[string]string) { env[EnvURL] = "https://middleman.internal:0" }, EnvURL + " names a port outside 1-65535"},
+		"port 65536":             {func(env map[string]string) { env[EnvURL] = "https://middleman.internal:65536" }, EnvURL + " names a port outside 1-65535"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			env := environment(t, "https://middleman.internal")
 			home := env["HOME"]
 			testCase.edit(env)
 
-			installed, err := Install(lookup(env))
+			installed, err := Install(environ(env))
 
-			if err == nil || installed != (Installed{}) || !strings.Contains(err.Error(), testCase.want) {
+			if err == nil || installed.Route != "" || installed.Environ != nil || !strings.Contains(err.Error(), testCase.want) {
 				t.Fatalf("Install = %+v, %v; want a refusal saying %q", installed, err, testCase.want)
 			}
 			if strings.Contains(err.Error(), "secret") {
@@ -188,35 +194,37 @@ func TestInstallRefusesWhatItCannotRoute(t *testing.T) {
 }
 
 // The Oh My Pi a pod starts gets the pins as its last settings overlay, so they outrank the
-// repository's settings and any overlay the pod already names; with nothing installed (a tmux
-// pane) its environment is unchanged.
-func TestEnvironPutsThePinsLastAmongTheOverlays(t *testing.T) {
-	installed := Installed{Route: "https://gw/anthropic", Pins: "/home/legion/.omp/profiles/legion/agent/config.yml"}
+// repository's settings and any overlay the pod already names, with the variables a repository's
+// .env could fill held.
+func TestInstallPutsThePinsLastAmongTheOverlays(t *testing.T) {
 	held := []string{"PI_CONFIG_DIR=.omp", "CLAUDE_CODE_USE_FOUNDRY=0", "OMP_SESSION_STORAGE=file", "OTEL_SDK_DISABLED=true", "PI_AUTO_QA=0"}
-	with := func(pairs ...string) []string {
-		return append(append([]string{"HOME=/home/legion"}, held...), pairs...)
-	}
 	for name, testCase := range map[string]struct {
 		environ []string
-		want    []string
+		// want is what follows the pod's own HOME, OMP_PROFILE and gateway; <pins> stands for the
+		// profile's config.yml.
+		want []string
 	}{
-		"no overlay yet":   {[]string{"HOME=/home/legion"}, with("PI_CONFIG_FILES=" + installed.Pins)},
-		"an overlay set":   {[]string{"PI_CONFIG_FILES=/etc/omp.yml", "HOME=/home/legion"}, with("PI_CONFIG_FILES=/etc/omp.yml:" + installed.Pins)},
-		"an empty one set": {[]string{"PI_CONFIG_FILES=", "HOME=/home/legion"}, with("PI_CONFIG_FILES=" + installed.Pins)},
+		"no overlay yet":   {nil, append(held, "PI_CONFIG_FILES=<pins>")},
+		"an overlay set":   {[]string{"PI_CONFIG_FILES=/etc/omp.yml"}, append(held, "PI_CONFIG_FILES=/etc/omp.yml:<pins>")},
+		"an empty one set": {[]string{"PI_CONFIG_FILES="}, append(held, "PI_CONFIG_FILES=<pins>")},
 		// Another config root, or Foundry, OTLP export or auto-QA on, in the pod's own environment are
 		// held all the same.
-		"held variables on": {[]string{"PI_CONFIG_DIR=elsewhere", "CLAUDE_CODE_USE_FOUNDRY=1", "OTEL_SDK_DISABLED=false", "PI_AUTO_QA=1", "HOME=/home/legion"}, with("PI_CONFIG_FILES=" + installed.Pins)},
+		"held variables on": {[]string{"PI_CONFIG_DIR=elsewhere", "CLAUDE_CODE_USE_FOUNDRY=1", "OTEL_SDK_DISABLED=false", "PI_AUTO_QA=1"}, append(held, "PI_CONFIG_FILES=<pins>")},
 		// A pod environment that names its own session store keeps it; an empty one gets file.
-		"its own session store":  {[]string{"OMP_SESSION_STORAGE=sql", "HOME=/home/legion"}, []string{"HOME=/home/legion", held[0], held[1], "OMP_SESSION_STORAGE=sql", held[3], held[4], "PI_CONFIG_FILES=" + installed.Pins}},
-		"an empty session store": {[]string{"OMP_SESSION_STORAGE=", "HOME=/home/legion"}, with("PI_CONFIG_FILES=" + installed.Pins)},
+		"its own session store":  {[]string{"OMP_SESSION_STORAGE=sql"}, []string{held[0], held[1], "OMP_SESSION_STORAGE=sql", held[3], held[4], "PI_CONFIG_FILES=<pins>"}},
+		"an empty session store": {[]string{"OMP_SESSION_STORAGE="}, append(held, "PI_CONFIG_FILES=<pins>")},
 	} {
-		if got := installed.Environ(testCase.environ); !slices.Equal(got, testCase.want) {
-			t.Errorf("%s: Environ = %q, want %q", name, got, testCase.want)
+		env := environment(t, "https://gw")
+		own := environ(env)
+		pins := filepath.Join(env["HOME"], ".omp", "profiles", "legion", "agent", "config.yml")
+		var want []string
+		for _, pair := range append(slices.Clone(own), testCase.want...) {
+			want = append(want, strings.Replace(pair, "<pins>", pins, 1))
 		}
-	}
-	unchanged := []string{"HOME=/home/ubuntu", "PI_CONFIG_FILES=/etc/omp.yml"}
-	if got := (Installed{}).Environ(unchanged); !slices.Equal(got, unchanged) {
-		t.Errorf("Environ with nothing installed = %q, want %q", got, unchanged)
+		installed, err := Install(append(own, testCase.environ...))
+		if err != nil || !slices.Equal(installed.Environ, want) {
+			t.Errorf("%s: Install = %q, %v; want %q", name, installed.Environ, err, want)
+		}
 	}
 }
 

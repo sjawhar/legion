@@ -351,7 +351,7 @@ func TestProbeImageRetriesAPodTheKubeletFailed(t *testing.T) {
 // gives up only when its retry does, quoting what the pod said.
 func TestProbeImageRetriesAProbeTheGatewayCouldNotAnswer(t *testing.T) {
 	g := newProbeRig(t, nil)
-	g.ends(corev1.PodFailed, bootprobe.TransientExit, "legion probe-image: the model round trip through OMP profile legion, routed to https://middleman.legion.internal/anthropic, ended error: 529 overloaded (transient: the daemon's probe runs again)")
+	g.ends(corev1.PodFailed, bootprobe.TransientExit, "legion probe-image: the model round trip through OMP profile legion, routed to https://middleman.legion.internal/anthropic: ended error: 529 overloaded (transient: the daemon's probe runs again)")
 
 	err := g.probe(probeOptions(t))
 

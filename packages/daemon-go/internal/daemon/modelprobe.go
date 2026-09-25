@@ -2,8 +2,10 @@ package daemon
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -25,11 +27,9 @@ const modelTurnTimeout = 90 * time.Second
 
 // modelTurnOverlay is the `--config` overlay the round trip runs under. Oh My Pi's retries are cut
 // to two, each waited at most 5 s, so an overloaded or unreachable gateway ends the turn inside
-// modelTurnTimeout as the default alias's own error. The profile's pins already turn model
-// fallback off (modelroute's config.yml); the overlay says so again, so the probe judges the
-// default alias's own answer whatever the profile holds.
+// modelTurnTimeout as the default alias's own error; the profile's pins (modelroute's config.yml)
+// keep model fallback off, so that error is the default alias's own.
 const modelTurnOverlay = `retry:
-  modelFallback: false
   maxRetries: 2
   maxDelayMs: 5000
 `
@@ -74,7 +74,7 @@ func (g pluginGate) verifyModelRoute(ctx context.Context) error {
 	}
 	launch := tmux.WithOmpLaunchPrefix(g.prefix, g.invocation)
 	script := `exec ` + launch + ` -p --mode json --config "$1" --no-session --no-tools --no-extensions --no-skills --no-rules --no-lsp --no-title "$2"`
-	through := fmt.Sprintf("the model round trip through %s, routed to %s,", profileWords(strings.TrimSpace(g.env["OMP_PROFILE"])), g.route)
+	through := fmt.Sprintf("the model round trip through %s, routed to %s", profileWords(strings.TrimSpace(g.env["OMP_PROFILE"])), g.route)
 	turn := g
 	turn.timeout = min(g.timeout, modelTurnTimeout)
 	r, err := turn.run(ctx, script, overlay, modelPrompt)
@@ -82,10 +82,10 @@ func (g pluginGate) verifyModelRoute(ctx context.Context) error {
 		return fmt.Errorf("boot gate: run the model round trip: %w", err)
 	}
 	answer, answered := lastAnswer(r.stdout)
-	unavailable := func(detail string) error { return &ModelRouteUnavailable{Detail: through + " " + detail} }
+	unavailable := func(detail string) error { return &ModelRouteUnavailable{Detail: through + ": " + detail} }
 	switch {
 	case answered && answer.Provider+"/"+answer.Model != g.model:
-		return fmt.Errorf("%s was answered by %s/%s, not %s: the profile reaches a model past the gateway", through, answer.Provider, answer.Model, g.model)
+		return fmt.Errorf("%s: answered by %s/%s, not %s: the profile reaches a model past the gateway", through, answer.Provider, answer.Model, g.model)
 	case answered && answer.StopReason == "error" && definitiveStatus(answer.ErrorMessage):
 		return fmt.Errorf("%s: the gateway refused it: %s", through, answer.ErrorMessage)
 	case answered && (answer.StopReason == "error" || answer.StopReason == "aborted"):
@@ -95,11 +95,16 @@ func (g pluginGate) verifyModelRoute(ctx context.Context) error {
 	case r.timedOut:
 		return unavailable(r.killed(launch, turn.timeout))
 	case r.exit == 0:
-		return fmt.Errorf("%s answered nothing (launch command %q exited 0)%s", through, launch, stderrTail(r))
-	case strings.Contains(r.stderr, "No API key found"), strings.Contains(r.stderr, "No model available"):
-		// Oh My Pi starts on the pinned alias even when the profile's key command fails, and exits
-		// naming the provider it has no key for; with no enabled model at all it names enabledModels.
-		return fmt.Errorf("%s found no usable model: the profile's key command failed, or no enabled model has a key%s", through, stderrTail(r))
+		return fmt.Errorf("%s: answered nothing (launch command %q exited 0)%s", through, launch, stderrTail(r))
+	}
+	// Oh My Pi starts on the pinned alias even when the profile's key command fails, and exits naming
+	// the provider it has no key for; with no enabled model at all it names enabledModels. Either is
+	// the image's fault, so the refusal says what to look at rather than quoting Bun's dump.
+	if line := ompError(r.stderr, "No API key found"); line != "" {
+		return fmt.Errorf("%s: the profile's key command gave no key: it reads %s, which %s (Oh My Pi: %s)", through, g.keyFile, keyFileState(g.keyFile), line)
+	}
+	if line := ompError(r.stderr, "No model available"); line != "" {
+		return fmt.Errorf("%s: found no usable model: the profile's models.yml gives no enabled model a key (Oh My Pi: %s)", through, line)
 	}
 	return unavailable(fmt.Sprintf("launch command %q exited %d before answering%s", launch, r.exit, stderrTail(r)))
 }
@@ -137,6 +142,34 @@ func definitiveStatus(message string) bool {
 		return false
 	}
 	return status >= 400 && status < 500 && status != 408 && status != 409 && status != 429
+}
+
+// keyFileState is what the probe, which runs beside the file, finds at the key file the profile's
+// command reads: Oh My Pi says only that it got no key, and an absent file, one this user cannot
+// read, and an empty one are three different things for the operator to fix.
+func keyFileState(path string) string {
+	switch raw, err := os.ReadFile(path); {
+	case errors.Is(err, os.ErrNotExist):
+		return "is missing"
+	case err != nil:
+		return "cannot be read"
+	case len(bytes.TrimSpace(raw)) == 0:
+		return "is empty"
+	default:
+		return "holds a key, so the key command itself failed"
+	}
+}
+
+// ompError is the line of Oh My Pi's stderr that is its own error beginning with prefix, less the
+// "error: " Bun prints before an uncaught one, or "" when there is none. It reads whole lines: the
+// source excerpt Bun prints above an uncaught error holds the same words mid-line.
+func ompError(stderr, prefix string) string {
+	for line := range strings.Lines(stderr) {
+		if line = strings.TrimPrefix(strings.TrimSpace(line), "error: "); strings.HasPrefix(line, prefix) {
+			return line
+		}
+	}
+	return ""
 }
 
 // stderrTail is the run's stderr tail as a refusal quotes it: ": <tail>", or nothing.

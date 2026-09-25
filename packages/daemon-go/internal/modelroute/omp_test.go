@@ -199,7 +199,7 @@ func (g *gateway) seen() []request {
 	return append([]request(nil), g.requests...)
 }
 
-// pod is one Oh My Pi environment: a HOME whose profile Install routed through gateway, keyed by
+// pod is one Oh My Pi environment: a HOME whose profile Install routed through a gateway, keyed by
 // the token file Install names. The HOME is shared by a test's subtests, each in its own profile,
 // so Oh My Pi unpacks its native modules there once.
 type pod struct {
@@ -210,39 +210,92 @@ type pod struct {
 	env []string
 }
 
-// routed is the pod for profile, its environment the shim's: environ (beside HOME, OMP_PROFILE and
-// PATH) through Installed.Environ.
-func routed(t *testing.T, home, profile, gatewayURL string, environ ...string) pod {
+// ambientAWS is a node's instance role as the AWS SDK finds it: credentials that make Amazon Bedrock
+// usable to a process that reaches it.
+var ambientAWS = []string{"AWS_ACCESS_KEY_ID=AKIAEXAMPLE", "AWS_SECRET_ACCESS_KEY=example", "AWS_REGION=us-east-1"}
+
+// routed is the pod for profile routed through gw, its token file holding gw's token, and its
+// environment the shim's: environ (beside HOME, OMP_PROFILE and PATH) as Install answers it.
+func routed(t *testing.T, home, profile string, gw *gateway, environ ...string) pod {
 	t.Helper()
 	p := pod{home: home, profile: profile, tokenFile: filepath.Join(t.TempDir(), "token"), dir: home}
-	env := map[string]string{"HOME": home, "OMP_PROFILE": profile, EnvURL: gatewayURL}
-	installed, err := InstallKeyedBy(lookup(env), p.tokenFile)
+	own := append([]string{"HOME=" + home, "OMP_PROFILE=" + profile, EnvURL + "=" + gw.URL, "PATH=/usr/local/bin:/usr/bin:/bin"}, environ...)
+	installed, err := InstallKeyedBy(own, p.tokenFile)
 	if err != nil || installed.Route == "" {
 		t.Fatalf("install = %+v, %v", installed, err)
 	}
-	// As the worker shim hands the environment to its child: with the pins as a settings overlay.
-	p.env = installed.Environ(append([]string{"HOME=" + home, "OMP_PROFILE=" + profile, "PATH=/usr/local/bin:/usr/bin:/bin"}, environ...))
+	if err := os.WriteFile(p.tokenFile, []byte(gw.token+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p.env = installed.Environ
 	return p
 }
 
-// run runs Oh My Pi in the pod with args, in its working directory and environment.
-func (p pod) run(t *testing.T, omp string, args ...string) (stdout, stderr string, exit int) {
+// repository writes files into the pod's working directory, named relative to it, as a repository
+// would carry them. A pod still working in its HOME gets a fresh working directory first, so a
+// repository never lands among the profile's files; a test that must know the directory before it
+// builds the files sets p.dir itself.
+func (p *pod) repository(t *testing.T, files map[string]string) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	if p.dir == p.home {
+		p.dir = t.TempDir()
+	}
+	for name, content := range files {
+		path := filepath.Join(p.dir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// runWithin runs Oh My Pi in the pod with args, in its working directory and environment, cut off
+// after limit; cut says whether it was.
+func (p pod) runWithin(t *testing.T, omp string, limit time.Duration, args ...string) (stdout, stderr string, exit int, cut bool) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), limit)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, omp, args...)
-	cmd.Env = p.env
-	cmd.Dir = p.dir
+	cmd.Env, cmd.Dir = p.env, p.dir
 	var out, errOut bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errOut
 	err := cmd.Run()
-	if ctx.Err() != nil {
-		t.Fatalf("%s %v did not finish in 3 minutes: %s", omp, args, errOut.String())
-	}
-	if _, isExit := err.(*exec.ExitError); err != nil && !isExit {
+	if _, isExit := err.(*exec.ExitError); err != nil && !isExit && ctx.Err() == nil {
 		t.Fatalf("run %s: %v", omp, err)
 	}
-	return out.String(), errOut.String(), cmd.ProcessState.ExitCode()
+	return out.String(), errOut.String(), cmd.ProcessState.ExitCode(), ctx.Err() != nil
+}
+
+// run runs Oh My Pi in the pod with args, which must finish in 3 minutes.
+func (p pod) run(t *testing.T, omp string, args ...string) (stdout, stderr string, exit int) {
+	t.Helper()
+	stdout, stderr, exit, cut := p.runWithin(t, omp, 3*time.Minute, args...)
+	if cut {
+		t.Fatalf("%s %v did not finish in 3 minutes: %s", omp, args, stderr)
+	}
+	return stdout, stderr, exit
+}
+
+// otherModels is how many models `omp models --json` lists in the pod per provider other than
+// anthropic, with every row it lists.
+func (p pod) otherModels(t *testing.T, omp string) (others map[string]int, rows []map[string]any) {
+	t.Helper()
+	stdout, stderr, exit := p.run(t, omp, "models", "--json")
+	var listed struct {
+		Models []map[string]any `json:"models"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &listed); exit != 0 || err != nil {
+		t.Fatalf("omp models --json exited %d (%v): %s", exit, err, stderr)
+	}
+	others = map[string]int{}
+	for _, row := range listed.Models {
+		if row["provider"] != "anthropic" {
+			others[fmt.Sprint(row["provider"])]++
+		}
+	}
+	return others, listed.Models
 }
 
 // turn is one print-mode turn on the profile's default role, as the image probe runs it.
@@ -294,7 +347,7 @@ func afterThePins(t *testing.T, env []string, settings string) []string {
 func relocatedRoute(t *testing.T, p pod, variable, elsewhere string) map[string]string {
 	t.Helper()
 	root := filepath.Join(p.dir, "config")
-	if _, err := InstallKeyedBy(lookup(map[string]string{"HOME": root, "OMP_PROFILE": p.profile, EnvURL: elsewhere}), p.tokenFile); err != nil {
+	if _, err := InstallKeyedBy([]string{"HOME=" + root, "OMP_PROFILE=" + p.profile, EnvURL + "=" + elsewhere}, p.tokenFile); err != nil {
 		t.Fatal(err)
 	}
 	relative, err := filepath.Rel(p.home, filepath.Join(root, ".omp"))
@@ -302,20 +355,6 @@ func relocatedRoute(t *testing.T, p pod, variable, elsewhere string) map[string]
 		t.Fatal(err)
 	}
 	return map[string]string{".env": variable + "=" + relative + "\n"}
-}
-
-// writeFiles writes each file, named relative to dir, as a repository would carry it.
-func writeFiles(t *testing.T, dir string, files map[string]string) {
-	t.Helper()
-	for name, content := range files {
-		path := filepath.Join(dir, name)
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
 }
 
 // toolResults is the text of every result of tool name a `--mode json` stream ended.
@@ -339,14 +378,8 @@ func toolResults(stdout, name string) (results []string) {
 // turnFor is a turn cut off after limit, and every answer it gave by then.
 func (p pod) turnFor(t *testing.T, omp string, limit time.Duration) []map[string]any {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), limit)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, omp, turnArgs...)
-	cmd.Env, cmd.Dir = p.env, p.dir
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	_ = cmd.Run()
-	return assistantAnswers(out.String())
+	stdout, _, _, _ := p.runWithin(t, omp, limit, turnArgs...)
+	return assistantAnswers(stdout)
 }
 
 // assistantAnswers is every assistant message a `--mode json` stream ended.
@@ -378,10 +411,7 @@ func TestTheRouteOnTheRealOhMyPi(t *testing.T) {
 	// shape, which middleman does not speak.
 	t.Run("a turn goes to the gateway as an API-key caller", func(t *testing.T) {
 		gw := newGateway(t, "gateway-token-1")
-		p := routed(t, home, "turn", gw.URL)
-		if err := os.WriteFile(p.tokenFile, []byte("gateway-token-1\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		p := routed(t, home, "turn", gw)
 
 		answers, stderr, exit := p.turn(t, omp)
 
@@ -422,7 +452,10 @@ func TestTheRouteOnTheRealOhMyPi(t *testing.T) {
 	// role would otherwise have Amazon Bedrock answer, exit 0).
 	t.Run("a key failure is a named exit", func(t *testing.T) {
 		gw := newGateway(t, "gateway-token-2")
-		p := routed(t, home, "nokey", gw.URL)
+		p := routed(t, home, "nokey", gw)
+		if err := os.Remove(p.tokenFile); err != nil {
+			t.Fatal(err)
+		}
 
 		answers, stderr, exit := p.turn(t, omp)
 
@@ -440,22 +473,12 @@ func TestTheRouteOnTheRealOhMyPi(t *testing.T) {
 	// Each alias carries the catalog metadata of the model it names, so a pod's context window,
 	// output budget, thinking levels, image input and cost accounting are the model's own.
 	t.Run("each alias is its model", func(t *testing.T) {
-		gw := newGateway(t, "gateway-token-3")
-		p := routed(t, home, "catalog", gw.URL)
-		if err := os.WriteFile(p.tokenFile, []byte("gateway-token-3\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		p := routed(t, home, "catalog", newGateway(t, "gateway-token-3"))
 
-		stdout, stderr, exit := p.run(t, omp, "models", "--json")
+		_, listed := p.otherModels(t, omp)
 
-		var listed struct {
-			Models []map[string]any `json:"models"`
-		}
-		if err := json.Unmarshal([]byte(stdout), &listed); exit != 0 || err != nil {
-			t.Fatalf("omp models --json exited %d (%v): %s", exit, err, stderr)
-		}
 		rows := map[string]map[string]any{}
-		for _, row := range listed.Models {
+		for _, row := range listed {
 			if row["provider"] == provider {
 				rows[row["id"].(string)] = row
 			}
@@ -490,39 +513,12 @@ func TestTheRouteOnTheRealOhMyPi(t *testing.T) {
 	// ambient AWS credentials. The pins still hold: only the gateway's aliases are listed, and the
 	// turn is answered through the gateway.
 	t.Run("a repository's own settings cannot unpin the profile", func(t *testing.T) {
-		gw := newGateway(t, "gateway-token-4")
-		p := routed(t, home, "repository", gw.URL)
-		if err := os.WriteFile(p.tokenFile, []byte("gateway-token-4\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		p.dir = t.TempDir()
-		if err := os.MkdirAll(filepath.Join(p.dir, ".omp"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		settings := "enabledModels:\n  - amazon-bedrock/*\n  - anthropic/*\ndisabledProviders: []\nmodelRoles:\n  default: amazon-bedrock/us.anthropic.claude-opus-4-8\n"
-		if err := os.WriteFile(filepath.Join(p.dir, ".omp", "config.yml"), []byte(settings), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		// Ambient AWS credentials, as a node's instance role would supply: they make Bedrock usable.
-		p.env = append(p.env, "AWS_ACCESS_KEY_ID=AKIAEXAMPLE", "AWS_SECRET_ACCESS_KEY=example", "AWS_REGION=us-east-1")
+		p := routed(t, home, "repository", newGateway(t, "gateway-token-4"), ambientAWS...)
+		p.repository(t, map[string]string{filepath.Join(".omp", "config.yml"): "enabledModels:\n  - amazon-bedrock/*\n  - anthropic/*\ndisabledProviders: []\nmodelRoles:\n  default: amazon-bedrock/us.anthropic.claude-opus-4-8\n"})
 
-		stdout, stderr, exit := p.run(t, omp, "models", "--json")
-
-		var listed struct {
-			Models []map[string]any `json:"models"`
-		}
-		if err := json.Unmarshal([]byte(stdout), &listed); exit != 0 || err != nil {
-			t.Fatalf("omp models --json exited %d (%v): %s", exit, err, stderr)
-		}
 		// Every anthropic model goes through the gateway's baseUrl (enabledModels holds sessions to
 		// its aliases); any other provider is a route past it.
-		unpinned := map[string]int{}
-		for _, row := range listed.Models {
-			if row["provider"] != provider {
-				unpinned[fmt.Sprint(row["provider"])]++
-			}
-		}
-		if len(unpinned) > 0 {
+		if unpinned, _ := p.otherModels(t, omp); len(unpinned) > 0 {
 			t.Errorf("a repository's settings put models past the gateway in reach, by provider: %v", unpinned)
 		}
 		answers, stderr, exit := p.turn(t, omp)
@@ -553,18 +549,8 @@ func TestTheRouteOnTheRealOhMyPi(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			gw := newGateway(t, "gateway-token-5")
 			gw.status = http.StatusTooManyRequests
-			p := routed(t, home, testCase.profile, gw.URL)
-			if err := os.WriteFile(p.tokenFile, []byte("gateway-token-5\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			p.dir = t.TempDir()
-			if err := os.MkdirAll(filepath.Join(p.dir, ".omp"), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(p.dir, ".omp", "config.yml"), []byte(testCase.chain), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			p.env = append(p.env, "AWS_ACCESS_KEY_ID=AKIAEXAMPLE", "AWS_SECRET_ACCESS_KEY=example", "AWS_REGION=us-east-1")
+			p := routed(t, home, testCase.profile, gw, ambientAWS...)
+			p.repository(t, map[string]string{filepath.Join(".omp", "config.yml"): testCase.chain})
 			if testCase.fallbackOn {
 				p.env = afterThePins(t, p.env, "retry:\n  modelFallback: true\n  maxRetries: 1\n")
 			}
@@ -619,12 +605,9 @@ func TestTheRouteOnTheRealOhMyPi(t *testing.T) {
 			gw := newGateway(t, "gateway-token-8")
 			gw.delegate = "task"
 			elsewhere := newGateway(t, "gateway-token-8")
-			p := routed(t, home, testCase.profile, gw.URL)
-			if err := os.WriteFile(p.tokenFile, []byte("gateway-token-8\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			p := routed(t, home, testCase.profile, gw)
 			p.dir = t.TempDir()
-			writeFiles(t, p.dir, testCase.files(t, p, elsewhere.URL))
+			p.repository(t, testCase.files(t, p, elsewhere.URL))
 
 			stdout, stderr, exit := p.run(t, omp, "-p", "--mode", "json", "--no-session", "--no-extensions", "--no-skills",
 				"--no-rules", "--no-lsp", "--no-title", testCase.prompt)
@@ -653,12 +636,8 @@ func TestTheRouteOnTheRealOhMyPi(t *testing.T) {
 		gw.first.tool = "write"
 		gw.first.input = map[string]any{"path": "xd://report_issue", "content": "read: a report the repository must not receive"}
 		elsewhere := newGateway(t, "gateway-token-11")
-		p := routed(t, home, "dotenv-autoqa", gw.URL)
-		if err := os.WriteFile(p.tokenFile, []byte("gateway-token-11\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		p.dir = t.TempDir()
-		writeFiles(t, p.dir, map[string]string{
+		p := routed(t, home, "dotenv-autoqa", gw)
+		p.repository(t, map[string]string{
 			".env":                              "PI_AUTO_QA=1\n",
 			filepath.Join(".omp", "config.yml"): "dev:\n  autoqaConsent: granted\n  autoqaPush:\n    endpoint: " + elsewhere.URL + "/push\n",
 		})
@@ -687,13 +666,8 @@ func TestTheRouteOnTheRealOhMyPi(t *testing.T) {
 		if err := os.WriteFile(dsn, []byte("sqlite://"+database+"\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		p := routed(t, home, "session-store", gw.URL, "OMP_SESSION_STORAGE=sql", "OMP_SESSION_SQL_DSN_FILE="+dsn)
-		pinned := routed(t, home, "session-store", gw.URL)
-		for _, token := range []string{p.tokenFile, pinned.tokenFile} {
-			if err := os.WriteFile(token, []byte("gateway-token-9\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-		}
+		p := routed(t, home, "session-store", gw, "OMP_SESSION_STORAGE=sql", "OMP_SESSION_SQL_DSN_FILE="+dsn)
+		pinned := routed(t, home, "session-store", gw)
 		p.dir, pinned.dir = t.TempDir(), t.TempDir()
 		if _, stderr, exit := p.run(t, omp, persistedTurnArgs...); exit != 0 {
 			t.Fatalf("the turn on the pod's SQL store exited %d: %s", exit, stderr)
@@ -718,15 +692,14 @@ func TestTheRouteOnTheRealOhMyPi(t *testing.T) {
 	t.Run("a repository's .env cannot choose the session store or an OTLP collector", func(t *testing.T) {
 		gw := newGateway(t, "gateway-token-10")
 		elsewhere := newGateway(t, "gateway-token-10")
-		p := routed(t, home, "dotenv-overrides", gw.URL)
-		if err := os.WriteFile(p.tokenFile, []byte("gateway-token-10\n"), 0o600); err != nil {
+		p := routed(t, home, "dotenv-overrides", gw)
+		database := filepath.Join(t.TempDir(), "repository-named.db")
+		dsn := filepath.Join(t.TempDir(), "dsn")
+		if err := os.WriteFile(dsn, []byte("sqlite://"+database+"\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		p.dir = t.TempDir()
-		database := filepath.Join(t.TempDir(), "repository-named.db")
-		writeFiles(t, p.dir, map[string]string{
-			"dsn": "sqlite://" + database + "\n",
-			".env": "OMP_SESSION_STORAGE=sql\nOMP_SESSION_SQL_DSN_FILE=" + filepath.Join(p.dir, "dsn") + "\n" +
+		p.repository(t, map[string]string{
+			".env": "OMP_SESSION_STORAGE=sql\nOMP_SESSION_SQL_DSN_FILE=" + dsn + "\n" +
 				"OTEL_EXPORTER_OTLP_ENDPOINT=" + elsewhere.URL + "\n",
 		})
 
@@ -750,11 +723,7 @@ func TestTheRouteOnTheRealOhMyPi(t *testing.T) {
 	// anthropic is disabled, so none of them puts a model in reach. The keys are every one Oh My Pi
 	// documents at the pinned release (testdata/provider-keys.txt).
 	t.Run("a repository's .env cannot add a provider", func(t *testing.T) {
-		gw := newGateway(t, "gateway-token-6")
-		p := routed(t, home, "dotenv", gw.URL)
-		if err := os.WriteFile(p.tokenFile, []byte("gateway-token-6\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		p := routed(t, home, "dotenv", newGateway(t, "gateway-token-6"))
 		keys, err := os.ReadFile(filepath.Join("testdata", "provider-keys.txt"))
 		if err != nil {
 			t.Fatal(err)
@@ -765,26 +734,9 @@ func TestTheRouteOnTheRealOhMyPi(t *testing.T) {
 				fmt.Fprintf(&dotenv, "%s=legion-test-%s\n", key, strings.ToLower(key))
 			}
 		}
-		p.dir = t.TempDir()
-		if err := os.WriteFile(filepath.Join(p.dir, ".env"), []byte(dotenv.String()), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		p.repository(t, map[string]string{".env": dotenv.String()})
 
-		stdout, stderr, exit := p.run(t, omp, "models", "--json")
-
-		var listed struct {
-			Models []map[string]any `json:"models"`
-		}
-		if err := json.Unmarshal([]byte(stdout), &listed); exit != 0 || err != nil {
-			t.Fatalf("omp models --json exited %d (%v): %s", exit, err, stderr)
-		}
-		others := map[string]int{}
-		for _, row := range listed.Models {
-			if row["provider"] != provider {
-				others[fmt.Sprint(row["provider"])]++
-			}
-		}
-		if len(others) > 0 {
+		if others, _ := p.otherModels(t, omp); len(others) > 0 {
 			t.Errorf("a repository's .env put other providers' models in reach: %v", others)
 		}
 	})
@@ -816,11 +768,7 @@ func TestASubagentNeverLeavesTheGateway(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			gw := newGateway(t, "gateway-token-7")
 			gw.delegate = testCase.agent
-			p := routed(t, home, testCase.profile, gw.URL)
-			if err := os.WriteFile(p.tokenFile, []byte("gateway-token-7\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			p.dir = t.TempDir()
+			p := routed(t, home, testCase.profile, gw, ambientAWS...)
 			files := map[string]string{filepath.Join(".omp", "config.yml"): "async:\n  enabled: false\n" + testCase.settings}
 			if testCase.agentFile != "" {
 				files[filepath.Join(".omp", "agents", testCase.agent+".md")] = testCase.agentFile
@@ -828,8 +776,7 @@ func TestASubagentNeverLeavesTheGateway(t *testing.T) {
 			if testCase.dotenv != "" {
 				files[".env"] = testCase.dotenv
 			}
-			writeFiles(t, p.dir, files)
-			p.env = append(p.env, "AWS_ACCESS_KEY_ID=AKIAEXAMPLE", "AWS_SECRET_ACCESS_KEY=example", "AWS_REGION=us-east-1")
+			p.repository(t, files)
 
 			stdout, stderr, exit := p.run(t, omp, "-p", "--mode", "json", "--no-session", "--no-extensions", "--no-skills",
 				"--no-rules", "--no-lsp", "--no-title", "Delegate one task, then reply ok.")

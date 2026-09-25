@@ -150,7 +150,7 @@ func TestProbeImageMakesTheRoundTripThroughTheGateway(t *testing.T) {
 
 	t.Setenv("LEGION_TEST_ROUTE", "https://elsewhere.internal/anthropic")
 	code, stdout, stderr = probeImage("--go-daemon-api-version", "3")
-	if code != 1 || stdout != "" || !strings.Contains(stderr, "routed to https://middleman.legion.internal/anthropic, found no usable model") {
+	if code != 1 || stdout != "" || !strings.Contains(stderr, "routed to https://middleman.legion.internal/anthropic: found no usable model") {
 		t.Errorf("probe-image whose round trip finds no model = %d %q %q, want exit 1 naming the route", code, stdout, stderr)
 	}
 

@@ -258,6 +258,32 @@ func TestEventsCarryTheTurnInWireOrderAndNoAck(t *testing.T) {
 	}
 }
 
+// An extension of the worker's Oh My Pi failing — the Legion plugin's session_start without the
+// daemon it needs, say — leaves the agent running without what that extension gives it, and Oh My
+// Pi says so only on its RPC stream: the daemon logs it, naming the claim, and emits no event.
+func TestAWorkersExtensionErrorIsLogged(t *testing.T) {
+	h := startListener(t, harnessOptions{})
+	p := dial(t, h.listener.Addr())
+	p.hello(testToken)
+	p.expect(shimwire.TypeHelloAck)
+	p.send(shimwire.Raw{Type: "extension_error", JSON: json.RawMessage(`{"type":"extension_error","extensionPath":"/opt/legion/pi-legion-envoy/dist/legion.js","event":"session_start","error":"LEGION_DAEMON_URL is required for Legion"}`)})
+	p.conn.Close()
+	for _, want := range []Event{Hello{Claim: testClaim, Generation: testGeneration}, Closed{Claim: testClaim}} {
+		if got := h.next(); got != want {
+			t.Fatalf("event = %#v, want %#v", got, want)
+		}
+	}
+	h.stop()
+	logs := h.logs.Lines()
+	if len(logs) != 1 || !strings.HasPrefix(logs[0], "worker-stream: an extension of the worker's Oh My Pi failed") ||
+		!strings.Contains(logs[0], "claim="+string(testClaim)) ||
+		!strings.Contains(logs[0], "extension=/opt/legion/pi-legion-envoy/dist/legion.js") ||
+		!strings.Contains(logs[0], "event=session_start") ||
+		!strings.Contains(logs[0], "error=LEGION_DAEMON_URL is required for Legion") {
+		t.Fatalf("logs = %q, want one warning naming the claim, the extension, its event and its error", logs)
+	}
+}
+
 // Only the shim's replay of a start it already observed carries the delivery id
 // (worker-shim.ts:365), and the event carries it exactly when the frame did.
 func TestTurnStartCarriesTheDeliveryIDOnlyWhenTheFrameDid(t *testing.T) {

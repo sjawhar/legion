@@ -329,7 +329,7 @@ other process; only the installation token enters each claim's Secret.
 | `LEGION_E2E_RUNTIME_KUBECONFIG` | `~/.kube/legion-daemon-production` | the kubeconfig file holding that context, kept apart from the devbox's own |
 | `LEGION_E2E_OPERATOR_CONTEXT` | `production` | the devbox's admin context, for operator steps only |
 | `LEGION_E2E_IMAGE` | required | the worker image under test, by digest: a `worker-image.yaml` run on the branch under test |
-| `STAGE4A_FROM` | unset | a development entry point: any check after `identity` except `stale-incarnation`, which rides `kill-pod`'s relaunch. `identity` always runs; the checks before the entry point are skipped, and each later check first puts the claims it needs where the full run would have left them, through the same runtime calls. The run ends `stage 4a e2e: every check from <check> passed — a development run, never the proof`, and is never cited as the proof |
+| `STAGE4A_FROM` | unset | a development entry point: any check after `identity` except `stale-incarnation`, which rides `kill-pod`'s relaunch; the harness refuses any other name at `identity`, before it creates anything. `identity` always runs; the checks before the entry point are skipped, and each later check first puts the claims it needs where the full run would have left them, through the same runtime calls. The run ends `stage 4a e2e: every check from <check> passed — a development run, never the proof`, and is never cited as the proof |
 | `STAGE4A_EVIDENCE_DIR` | a fresh `/tmp/legion-e2e4a-evidence.XXXXXXXX` | kept on every outcome and printed at exit: `transcript.log` (the whole run), `runtime.log` (the runtime's and the listener's JSON log lines), the two namespace snapshots, and the probe's pass cache |
 
 Two identities, so the runtime is proven under exactly the RBAC it ships with. The runtime and
@@ -347,8 +347,8 @@ the hash of the token presented. The pods run a stub agent under the real Go shi
 pod's uid to a marker file in the tree volume's sessions directory, the file a resume names, and
 sleeps, so the runtime's whole path runs with no model and no provider key. The runtime's settings:
 a 5-minute boot timeout, 3 registration intervals, a 15-second termination grace, a 10-second
-probe interval, storage class `gp2`, no resource requests, and the node selector
-`karpenter.k8s.aws/instance-cpu: "4"`, which gives every tree a node that fits it (below).
+probe interval, storage class `gp2`, no resource requests, and no scheduling beyond the Legion
+pool the runtime selects, whose NodePool floor gives every tree a node that fits it (below).
 
 The checks, in order, each printing what it observed and then `CHECK <name>: PASS`:
 
@@ -360,6 +360,7 @@ The checks, in order, each printing what it observed and then `CHECK <name>: PAS
 | `image-probe` | `ProbeImage` on the image under test passes, its log confirms `go-daemon-api-version` equal to the daemon's contract and names `model-gateway=anthropic/claude-fable-5-1-legion` (the probe pod's round trip through production's middleman as `legion-worker`, which needs agent-c's Legion model access applied on production), and the probe Sandbox is deleted |
 | `root-ready` | Spawn of the root: its Sandbox Ready, the returned incarnation the pod's uid, the init log (`pods/log`) carrying `workspace-init: /legion/workspaces/sjawhar/legion-smoke/s4a-1 on legion/S4A-1`, and a hello registered at generation 1 with that generation's token |
 | `gvisor` | `uname -r` in the root pod is gVisor's emulated kernel (`…-gvisor`), not the node's, and the pod's `runtimeClassName` is `gvisor` |
+| `gateway-token` | the root pod runs as ServiceAccount `legion-worker` with `automountServiceAccountToken: false`; the one projected token at `/var/run/legion/gateway/token` is a JWT for audience `middleman-legion` within the configured lifetime, read into the harness's memory and only its claims printed |
 | `adopt-working-copy` | `AdoptWorkingCopy` with the implement App's bot identity; `jj log -r @ -T author` in `$LEGION_WORKSPACE` shows it |
 | `worker-colocated` | a worker spawned while the root runs requires the tree's node (podAffinity on `legion.dev/tree`, topology `kubernetes.io/hostname`) and runs there |
 | `suspend` | Suspend of the worker: when it returns the runtime's watch no longer holds the claim; Sandbox `Suspended`, pod gone, tree PVC `Bound`, `Probe(recorded)` gone; over the settle window Observe delivers no observation of the worker evaluated after Suspend returned (an observation's `At` is stamped as its evaluation ends, and Observe re-reads the recorded incarnation before it sends) |
@@ -392,11 +393,9 @@ What the run had to learn about production:
   puts that pod on a `c7a.medium`, whose 8 pod slots its 7 daemonsets all but fill, so no second
   pod of the tree can ever join it. A CPU request on the root does not fix it: when a child is
   placed first, as the concurrent launch showed, the root must join the child's node, and there a
-  2-CPU root beside another tree's root stayed Pending on `Insufficient cpu`. The node selector
-  on Karpenter's `karpenter.k8s.aws/instance-cpu` label keeps every Legion pod on a 4-vCPU node
-  with 58 slots and requests nothing. The 4b daemon must carry it as
-  `runtime.kubernetes.scheduling.node_selector` until the `legion` NodePool in agent-c has the same
-  floor.
+  2-CPU root beside another tree's root stayed Pending on `Insufficient cpu`. The `legion`
+  NodePool's floor, `karpenter.k8s.aws/instance-cpu` Gt 3 (agent-c #20006), keeps every Legion pod
+  on a node of at least 4 vCPUs with room for the tree, and no pod requests anything.
 - gVisor on production reports `4.19.0-gvisor` from `uname -r`.
 - The worker image has no `kill` binary; the exec runs the shell's builtin.
 
