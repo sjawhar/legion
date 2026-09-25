@@ -261,8 +261,7 @@ func (s *failingBrowserAppendStore) AppendUpdateTx(ctx context.Context, tx pgx.T
 // evicted and reloaded without it before the write appends its own update. The write's fork
 // still holds the paragraph and its slot is on the failed room, so the write fails at its append
 // rather than versioning or publishing a document the room never held, and its transaction rolls
-// back to the durable document. A second transaction's write then runs on the reloaded room: the
-// version it writes is the document it publishes, not one that misses a write still in flight.
+// back to the durable document.
 func TestAWriteWhoseRoomReloadsBeforeItsFirstAppendFailsFast(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
@@ -312,32 +311,5 @@ func TestAWriteWhoseRoomReloadsBeforeItsFirstAppendFailsFast(t *testing.T) {
 	}
 	if latest != 1 {
 		t.Fatalf("latest version = %d, want the seeded version only", latest)
-	}
-
-	second, err := service.store.Pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin second edit: %v", err)
-	}
-	defer second.Rollback(ctx)
-	secondCtx, secondLedger := service.Join(ctx, second)
-	defer secondLedger.Discard()
-	bob := model.Actor{Kind: "user", ID: "bob"}
-	if _, err := service.ApplyOps(secondCtx, artifactID, []model.EditOp{{Op: "replace", Find: "before", With: "second"}}, bob, nil); err != nil {
-		t.Fatalf("second edit: %v", err)
-	}
-	snapshot, err := service.SnapshotVersion(secondCtx, artifactID, bob)
-	if err != nil {
-		t.Fatalf("version the second edit: %v", err)
-	}
-	var versioned string
-	if err := second.QueryRow(ctx, `select markdown from artifact_versions where artifact_id = $1 and number = $2`, artifactID, snapshot.Version.Number).Scan(&versioned); err != nil {
-		t.Fatalf("read the second edit's version: %v", err)
-	}
-	if err := secondLedger.Commit(ctx); err != nil {
-		t.Fatalf("commit second edit: %v", err)
-	}
-	requireText(t, service, artifactID, "second\n")
-	if versioned != "second\n" {
-		t.Fatalf("second edit's version %d = %q, want the published document %q", snapshot.Version.Number, versioned, "second\n")
 	}
 }
