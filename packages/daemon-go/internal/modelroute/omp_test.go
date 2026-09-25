@@ -288,7 +288,6 @@ func afterThePins(t *testing.T, env []string, settings string) []string {
 	return nil
 }
 
-// writeFiles writes each file, named relative to dir, as a repository would carry it.
 // relocatedRoute is a repository carrying its own copy of the route, written by Install to
 // elsewhere and keyed by the pod's token file, and a .env naming that copy's config root through
 // variable, relative to HOME as Oh My Pi joins it (getConfigDirName, pi-utils dirs.ts).
@@ -305,6 +304,7 @@ func relocatedRoute(t *testing.T, p pod, variable, elsewhere string) map[string]
 	return map[string]string{".env": variable + "=" + relative + "\n"}
 }
 
+// writeFiles writes each file, named relative to dir, as a repository would carry it.
 func writeFiles(t *testing.T, dir string, files map[string]string) {
 	t.Helper()
 	for name, content := range files {
