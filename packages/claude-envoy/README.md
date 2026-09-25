@@ -86,6 +86,19 @@ mutation follows its event topic; reads do not add a subscription.
 Dispatch asks remain on native Dispatch. Channel notifications are one-way ingress, not a remote
 human approval surface.
 
+## Skills
+
+The plugin ships two skills, `claude-envoy:envoy` and `claude-envoy:dispatch`, which teach the
+tools above. `skills/` holds one relative symlink per skill into the repository-root `skills/`,
+which stays their only source; Claude Code copies each target into the plugin cache at install.
+
+`envoy` and `dispatch` are the two a standalone Claude Code session uses. The other root skills
+stay out: they belong to Legion's roles (the architect, controller, oracle and retro skills, and the
+phase workers' `legion-worker` and `ce-simplify-code`) and to the reviewer's `thermonuclear-*`
+pair, and those run on Oh My Pi (`skills/AGENTS.md`). The `thermonuclear-*` rubrics also ship in
+the sjawhar@sjawhar plugin (sjawhar/dotfiles marketplace). Link another root skill here only when
+a standalone Claude Code session needs it.
+
 ## The bundle
 
 The marketplace installs this package's git tree into Claude Code's plugin cache with no

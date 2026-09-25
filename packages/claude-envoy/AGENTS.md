@@ -22,6 +22,7 @@ an Envoy input to decide Claude Code permissions. Dispatch asks stay on Dispatch
 | Task | Location | Notes |
 | --- | --- | --- |
 | Claude plugin manifest | `.claude-plugin/plugin.json` | Declares the MCP configuration only; it must not declare a Monitor. `hooks/hooks.json` is auto-discovered. Its `version` equals `package.json`'s (tested). |
+| Skills | `skills/envoy`, `skills/dispatch` | Relative symlinks into the root `skills/`; the plugin ships only these two, the ones a standalone Claude Code session uses (the rest belong to Legion roles on Oh My Pi; README "Skills"). Claude Code copies the targets into its cache at install. |
 | Committed bundle | `dist/`, `scripts/build.ts` | `bun run build` / `bun run check-dist`. The plugin cache has no `node_modules`, so both executables ship bundled; CI compares a fresh build on the pinned Bun (`.bun-version`). |
 | Channel configuration | `.mcp.json`, `bin/envoy-channel.ts` | Launch is `bun ${CLAUDE_PLUGIN_ROOT}/dist/envoy-channel.js`; stdout remains pure MCP protocol. The `env` block passes through `CLAUDE_PROJECT_DIR` only — an unset `${VAR}` is substituted literally, so optional inputs are inherited, never listed. |
 | SessionStart hook | `hooks/hooks.json`, `hooks/open-asks-hook.ts` | Records the current session id per Claude process and injects the open-asks summary; always exits 0. |
