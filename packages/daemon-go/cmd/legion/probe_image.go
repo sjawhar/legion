@@ -39,6 +39,7 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 	omp := flags.String("omp", "", "the OMP executable to probe (default: $LEGION_OMP_PATH)")
 	contract := flags.String("go-daemon-api-version", strconv.Itoa(api.GoDaemonAPIVersion),
 		"the Go daemon API contract the image's pi-legion-envoy must declare (the daemon's probe Sandbox passes its own)")
+	pluginRoot := flags.String("plugin-root", "", "the plugin directory a pod loads as its one explicit extension; the load probe runs the same way")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
@@ -81,7 +82,8 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 	}
 	err = daemon.ProbeImage(ctx, daemon.ImageProbe{
 		Omp: invocation, Contract: expected, Env: env, WorkDir: workDir, Model: model, Route: route, KeyFile: installed.KeyFile,
-		Log: slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
+		PluginRoot: *pluginRoot,
+		Log:        slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
 	})
 	if unavailable := (*daemon.ModelRouteUnavailable)(nil); errors.As(err, &unavailable) {
 		fmt.Fprintf(stderr, "legion probe-image: %v (transient: the daemon's probe runs again)\n", err)
