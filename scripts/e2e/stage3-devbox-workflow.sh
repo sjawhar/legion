@@ -574,7 +574,8 @@ begin rig
 chmod 0600 "$work"/*token "$work"/*-header "$work/postgres-password"
 (cd "$root/packages/daemon-go" && go build -o "$work/legion" ./cmd/legion)
 (cd "$root/packages/envoy" && go build -o "$work/envoy-listener" ./cmd/listener && go build -o "$work/envoy-dispatch" ./cmd/dispatch)
-while IFS= read -r line; do note "$line"; done < <(bash "$root/scripts/e2e/lib/built-from.sh" "$root" "$work/legion" "$work/envoy-listener" "$work/envoy-dispatch")
+built=$(bash "$root/scripts/e2e/lib/built-from.sh" "$root" "$work/legion" "$work/envoy-listener" "$work/envoy-dispatch") || fail "lib/built-from.sh could not say what the run built"
+while IFS= read -r line; do note "$line"; done <<<"$built"
 docker ps >/dev/null
 # Docker assigns the containers' host ports when it binds them, so neither can lose a race.
 docker run -d --name "$pg_container" --mount type=tmpfs,destination=/var/lib/postgresql/data \

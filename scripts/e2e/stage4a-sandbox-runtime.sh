@@ -92,7 +92,8 @@ note "run project $project (every object's legion.dev/project label)"
 note "image $image"
 note "worker stream tcp://$host:$port (the devbox's private address)"
 note "runtime identity: context $runtime_context in $runtime_kubeconfig; operator: context $operator"
-while IFS= read -r line; do note "$line"; done < <(bash "$root/scripts/e2e/lib/built-from.sh" "$root")
+built=$(bash "$root/scripts/e2e/lib/built-from.sh" "$root") || fail "lib/built-from.sh could not read the source revision"
+while IFS= read -r line; do note "$line"; done <<<"$built"
 [ -z "$from" ] || note "STAGE4A_FROM=$from: a development run, never the proof"
 
 begin snapshot

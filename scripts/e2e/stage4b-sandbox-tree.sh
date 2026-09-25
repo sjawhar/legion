@@ -479,11 +479,15 @@ fixture_markers() {
 
 # ---- teardown ------------------------------------------------------------------------------------
 
+# The daemon's two durable consumers are named by the Dispatch project key (intake's
+# dispatchConsumerName and githubConsumerName): legion-go-LEGSMOKE-dispatch and -github.
+consumers_prefix="legion-go-$project-"
 delete_consumers() {
   local name
-  for name in $(nats_stream consumers "$nats_url" "$stream" "legion-go-$run_label-" 2>/dev/null | jq -r .name); do
-    nats_stream delete "$nats_url" "$stream" "$name" && note "deleted the run's durable consumer $name from production NATS"
+  for name in "${consumers_prefix}dispatch" "${consumers_prefix}github"; do
+    nats_stream delete "$nats_url" "$stream" "$name" 2>/dev/null && note "deleted the run's durable consumer $name from production NATS"
   done
+  return 0
 }
 collect_transcripts() {
   local pod
@@ -530,16 +534,38 @@ production_baseline() {
 # production_audit fails on any production write the run made outside LEGSMOKE, and on any session
 # of the run holding a role outside legion-legsmoke-*.
 production_audit() {
-  local sessions issues roles
+  local sessions issues
   audited=1
   sessions=$(jq -R -s -c 'split("\n") | map(fromjson? | select(.msg == "api: claim registered") | .session) | unique' "$daemon_log")
   printf '%s\n' "$sessions" >"$evidence/run-sessions.json"
   issues=$(dispatch_get "issues?updated_since=$prod_baseline&limit=200" | jq -c --arg p "$project" '[.[] | select(.project != $p) | .key]')
   printf '%s\n' "$issues" >"$evidence/production-issues-touched-outside.json"
-  roles=$(curl -fsS --max-time 20 -H "@$work/envoy-auth-header" "$envoy_url/v1/roles" 2>/dev/null |
-    jq -c --argjson ids "$sessions" '[.[]? | select((.holder as $h | $ids | index($h)) and (.role | startswith("legion-legsmoke-") | not))]') || roles='"unreadable"'
-  printf '%s\n' "$roles" >"$evidence/production-roles-outside.json"
-  audit_verdict "$evidence/production-issues-touched-outside.json" "$evidence/production-roles-outside.json"
+  # Envoy lists no roles, and a session's interests leave the listener with it, so the run samples
+  # its sessions' interests while they are live (interests_snapshot). A registered session with no
+  # sample leaves the audit unable to vouch for it.
+  if [ "$(jq length <<<"$sessions")" -gt 0 ] && [ ! -s "$evidence/interests.jsonl" ]; then
+    printf '"no interests sampled for %s registered sessions"\n' "$(jq length <<<"$sessions")" >"$evidence/production-interests-outside.json"
+  else
+    jq -s -c --arg p "$project" --arg t "legion-$run_label-" '[.[] | .session_id as $s | .topics[]?
+      | select((contains($p) or contains($t) or contains($s)) | not) | {session: $s, topic: .}] | unique' \
+      "$evidence/interests.jsonl" 2>/dev/null >"$evidence/production-interests-outside.json" || printf '[]\n' >"$evidence/production-interests-outside.json"
+  fi
+  audit_verdict "$evidence/production-issues-touched-outside.json" "$evidence/production-interests-outside.json"
+}
+# interests_snapshot appends the Envoy interests of every session the run has registered so far to
+# $evidence/interests.jsonl. A session no longer registered answers 404 and is skipped; any other
+# answer fails the check, so an unreadable listener never reads as a clean sample.
+interests_snapshot() {
+  local session code
+  for session in $(jq -R -r 'fromjson? | select(.msg == "api: claim registered") | .session' "$daemon_log" | sort -u); do
+    code=$(curl -sS --max-time 20 -o "$work/interest.json" -w '%{http_code}' -H "@$work/envoy-auth-header" "$envoy_url/v1/interests/$session") ||
+      fail "the Envoy listener could not be reached for session $session's interests"
+    case "$code" in
+      200) jq -c --arg at "$check" '{at: $at} + .' "$work/interest.json" >>"$evidence/interests.jsonl" ;;
+      404) ;;
+      *) fail "the Envoy listener answered $code for session $session's interests: $(head -c 200 "$work/interest.json")" ;;
+    esac
+  done
 }
 audit_verdict() { [ "$(jq -c . "$1")" = "[]" ] && [ "$(jq -c . "$2")" = "[]" ]; }
 
@@ -562,7 +588,11 @@ host=$(curl -sf -m 5 -H "X-aws-ec2-metadata-token: $imds" http://169.254.169.254
 unset imds
 leftover=$(op get sandboxes,pods,pvc -l "legion.dev/project=$run_label" -o name 2>&1) || fail "the operator context cannot list namespace $namespace: $leftover"
 [ -z "$leftover" ] || fail "namespace $namespace already holds objects labelled legion.dev/project=$run_label, which another run left or owns: $(tr '\n' ' ' <<<"$leftover")"
-revision=$(bash "$root/scripts/e2e/lib/built-from.sh" "$root" | sed -n 's/^source: //p')
+stale_consumers=$(bun "$root/scripts/e2e/lib/nats-stream.ts" consumers "$nats_url" "$stream" "legion-go-$project-") ||
+  fail "production NATS $stream could not list its consumers"
+[ -z "$stale_consumers" ] || fail "production NATS already holds durable consumers of $project, which another run left or owns: $(jq -r .name <<<"$stale_consumers" | tr '\n' ' ')"
+built=$(bash "$root/scripts/e2e/lib/built-from.sh" "$root") || fail "lib/built-from.sh could not read the source revision"
+revision=$(sed -n 's/^source: //p' <<<"$built")
 jq -n --arg revision "$revision" --arg image "$image" --arg plugin "$(jq -r '.name + "@" + .version' "$root/packages/pi-envoy/package.json")" \
   --arg started "$(date -u +%FT%TZ)" '{revision: $revision, image: $image, plugin: $plugin, started: $started}' >"$evidence/run.json"
 note "source $revision; image $image; plugin $(jq -r .plugin "$evidence/run.json")"
@@ -653,7 +683,8 @@ pass
 
 begin boot
 (cd "$root/packages/daemon-go" && go build -o "$work/legion" ./cmd/legion)
-while IFS= read -r line; do note "$line"; done < <(bash "$root/scripts/e2e/lib/built-from.sh" "$root" "$work/legion")
+built=$(bash "$root/scripts/e2e/lib/built-from.sh" "$root" "$work/legion") || fail "lib/built-from.sh could not say what the run built"
+while IFS= read -r line; do note "$line"; done <<<"$built"
 docker run -d --name "$pg_container" --mount type=tmpfs,destination=/var/lib/postgresql/data \
   -e POSTGRES_USER=legion -e POSTGRES_PASSWORD="$(cat "$work/postgres-password")" -e POSTGRES_DB=legion \
   -p "127.0.0.1::5432" postgres:16 >/dev/null
@@ -818,6 +849,7 @@ for role in architect planner implementer tester reviewer; do
     fail "$role on $tree1: its first assistant turn did not complete"
 done
 note "architect, planner, implementer, tester and reviewer on $tree1 each completed a first turn in a pod"
+interests_snapshot
 pass
 
 begin token-rotation
@@ -963,6 +995,7 @@ controller_notice() {
 }
 until_true 300 "the held notice for $tree3 to reach the controller session $controller_session" controller_notice
 note "the controller session $controller_session received the held notice for $tree3"
+interests_snapshot
 before_status=$(dispatch_get "issues/$tree3" | jq -r .status)
 out=$("$work/legion" status "$tree3" backlog --operator-token-file "$work/operator-token" --config "$work/legion.yaml" 2>&1) || fail "legion status $tree3 backlog from the operator shell: $out"
 until_true 120 "Dispatch to show $tree3 in backlog" dispatch_status_is "$tree3" backlog
@@ -1050,17 +1083,17 @@ daemon_pid=
 teardown
 namespace_clean
 delete_consumers
-left=$(nats_stream consumers "$nats_url" "$stream" "legion-go-$run_label-")
+left=$(nats_stream consumers "$nats_url" "$stream" "$consumers_prefix")
 [ -z "$left" ] || fail "the run's durable consumers remain on production NATS: $left"
 pass
 
 begin production-audit
 audit_verdict_ok=
 if production_audit; then audit_verdict_ok=1; fi
-[ -n "$audit_verdict_ok" ] || fail "the run wrote outside LEGSMOKE or held a role outside legion-legsmoke-*: $evidence/production-issues-touched-outside.json, $evidence/production-roles-outside.json"
+[ -n "$audit_verdict_ok" ] || fail "the run wrote outside LEGSMOKE or subscribed outside it: $evidence/production-issues-touched-outside.json, $evidence/production-interests-outside.json"
 printf '["AGENTC-1"]\n' >"$evidence/controls/audit-outside.json"
-expect_failure production-audit-outside audit_verdict "$evidence/controls/audit-outside.json" "$evidence/production-roles-outside.json"
-note "no write outside $project, no role outside legion-legsmoke-*"
+expect_failure production-audit-outside audit_verdict "$evidence/controls/audit-outside.json" "$evidence/production-interests-outside.json"
+note "no write outside $project; every sampled interest of the run's sessions names $project, legion-$run_label-, or the session itself ($(wc -l <"$evidence/interests.jsonl" 2>/dev/null || echo 0) samples)"
 pass
 
 ok=1
