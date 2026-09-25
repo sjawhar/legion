@@ -157,12 +157,13 @@ export interface PrState {
    * stale slot can only ever describe the commit it names; `before` says whether it describes
    * every change since the head it replaces (absent in a slot a v33 daemon wrote). */
   pendingPush?: { sha: string; handoffOnly: boolean; before?: string; byReviewApp?: true };
-  /** Present exactly when the current head's push was the review App's (`ReducerConfig.reviewAppLogin`,
-   * the push's `pusher`): a planner's, tester's, reviewer's, or architect's commit. Such a push is
-   * never a fix attempt, and a red verdict on it is planned (the tester's red tests), so the next
-   * head is not one either. Set from the pending slot's `byReviewApp` or by the push webhook for
-   * the current head; the next `resetPrHead` sets or deletes it afresh. */
-  headPushedByReviewApp?: true;
+  /** Present while the newest head that changed a path outside `.legion/` was the review App's
+   * (`ReducerConfig.reviewAppLogin`, the push's `pusher`): the tester's red tests. A red on it is
+   * planned, so the next head is not a fix attempt. Set by such a head, cleared by a code-changing
+   * head from anyone else, and carried unchanged across handoff-only heads (every role's
+   * `.legion/` push), whether the classification arrives in the pending slot or by the push
+   * webhook for the current head. A review-App push is itself never a fix attempt either way. */
+  plannedRed?: true;
   /** The `fixAttempts` value the last `pr-blocked` was published for. `reduceCiEmission`
    * publishes `pr-blocked` only when `fixAttempts >= maxFixAttempts` AND `fixAttempts !==
    * blockedAttempts`, then records `fixAttempts` here. A take-back whose pre-decrement
@@ -523,7 +524,7 @@ const PrStateSchema = z
       .strict()
       .optional(),
     headCounted: z.literal(true).optional(),
-    headPushedByReviewApp: z.literal(true).optional(),
+    plannedRed: z.literal(true).optional(),
     pendingPush: z
       .object({
         sha: z.string().min(1),
@@ -1590,7 +1591,7 @@ function migrateV32State(
 }
 
 /** v33 -> v34: PrState gains the optional `reviewDecisionUnsettledFrom`, `changesRequest` and
- * `headPushedByReviewApp`, and `pendingPush` the optional `before` and `byReviewApp`. A pure bump:
+ * `plannedRed`, and `pendingPush` the optional `before` and `byReviewApp`. A pure bump:
  * absent is the correct starting value for each, since a v33 daemon settled each decision when its
  * head arrived, a pending slot without `before` is never taken to cover the head it replaces, a
  * decision with no recorded request is ended by no review, and a head or slot not marked as the

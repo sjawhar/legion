@@ -1997,20 +1997,17 @@ describe("review-App pushes and planned reds", () => {
   const tester = { pusher: "legion-reviewer[bot]", head_subject: "test: red tests for C1" };
   const implementer = { pusher: "legion-implementer[bot]", head_subject: "fix: C1" };
 
-  /** One push of `sha` from `before`, both webhooks in `order`, changing a path outside `.legion/`. */
+  /** One push of `sha` from `before`, both webhooks in `order`; it changes a path outside
+   * `.legion/` unless `paths` says otherwise. */
   function arrive(
     state: LegionState,
     before: string,
     sha: string,
     order: (typeof orders)[number],
-    who: Record<string, unknown>
+    who: Record<string, unknown>,
+    paths = "src/widget.test.ts\n.legion/test.json"
   ): Effect[] {
-    const push = {
-      ...who,
-      before,
-      after: sha,
-      changed_paths: "src/widget.test.ts\n.legion/test.json",
-    };
+    const push = { ...who, before, after: sha, changed_paths: paths };
     const out: Effect[] = [];
     if (order === "push first") out.push(...pushEffects(state, push));
     out.push(...effects(state, syncPayload(sha)));
@@ -2032,6 +2029,50 @@ describe("review-App pushes and planned reds", () => {
       settleRed(state, "fix-sha", 3);
       arrive(state, "fix-sha", "fix-2-sha", order, implementer);
       expect(state.prs[prKey]?.fixAttempts).toBe(1);
+    });
+
+    it(`the ordinary loop, implementer red then the tester's handoff-only push, counts 0, 1, 2, 3 and publishes pr-blocked once (${order})`, () => {
+      const state = rootState();
+      attachChild(state);
+      addPr(state, { headSha: "h0", verdict: "green", ciSettledAt: 1 });
+      const all: Effect[] = [];
+      const counts: number[] = [];
+      let head = "h0";
+      for (let round = 1; round <= 4; round += 1) {
+        all.push(...arrive(state, head, `impl-${round}`, order, implementer));
+        counts.push(state.prs[prKey]?.fixAttempts ?? -1);
+        all.push(...settleRed(state, `impl-${round}`, round * 10));
+        if (round === 4) break;
+        all.push(
+          ...arrive(state, `impl-${round}`, `test-${round}`, order, tester, ".legion/test.json")
+        );
+        all.push(...settleRed(state, `test-${round}`, round * 10 + 1));
+        head = `test-${round}`;
+      }
+
+      expect(counts).toEqual([0, 1, 2, 3]);
+      expect(prBlockedEffects(all)).toHaveLength(1);
+    });
+
+    it(`a red-test push keeps the next head uncounted across a handoff-only push after it (${order})`, () => {
+      const state = rootState();
+      attachChild(state);
+      addPr(state, { headSha: "impl-sha", verdict: "green", ciSettledAt: 1 });
+
+      arrive(state, "impl-sha", "red-tests-sha", order, tester);
+      settleRed(state, "red-tests-sha", 2);
+      arrive(
+        state,
+        "red-tests-sha",
+        "review-sha",
+        order,
+        { pusher: "legion-reviewer[bot]" },
+        ".legion/review.json"
+      );
+      settleRed(state, "review-sha", 3);
+      arrive(state, "review-sha", "fix-sha", order, implementer);
+
+      expect(state.prs[prKey]?.fixAttempts).toBe(0);
     });
 
     it(`a tester's red-test push onto a red head counts no fix attempt (${order})`, () => {

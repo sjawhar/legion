@@ -664,9 +664,7 @@ function githubClassificationState(state: LegionState): Record<string, unknown> 
           fixAttempts: pr.fixAttempts,
           ...(pr.blockedAttempts === undefined ? {} : { blockedAttempts: pr.blockedAttempts }),
           ...(pr.headCounted === undefined ? {} : { headCounted: pr.headCounted }),
-          ...(pr.headPushedByReviewApp === undefined
-            ? {}
-            : { headPushedByReviewApp: pr.headPushedByReviewApp }),
+          ...(pr.plannedRed === undefined ? {} : { plannedRed: pr.plannedRed }),
           ...(pr.pendingPush === undefined ? {} : { pendingPush: { ...pr.pendingPush } }),
           ...(pr.reviewDecision === undefined ? {} : { reviewDecision: pr.reviewDecision }),
           ...(pr.reviewDecisionUnsettledFrom === undefined
@@ -950,18 +948,20 @@ function registerPrFenced(
 export function resetPrHead(pr: PrState, headSha: string): void {
   const pending = pr.pendingPush?.sha === headSha ? pr.pendingPush : undefined;
   const priorHead = pr.headSha;
-  // A red the review App's own push earned (the tester's red tests) is planned: the head after it
-  // is not a fix attempt.
-  const plannedRed = pr.headPushedByReviewApp === true;
   if (pending) delete pr.pendingPush;
-  if (pr.verdict === "red" && !plannedRed && !pending?.handoffOnly && !pending?.byReviewApp) {
+  if (pr.verdict === "red" && !pr.plannedRed && !pending?.handoffOnly && !pending?.byReviewApp) {
     pr.fixAttempts += 1;
     pr.headCounted = true;
   } else {
     delete pr.headCounted;
   }
-  if (pending?.byReviewApp) pr.headPushedByReviewApp = true;
-  else delete pr.headPushedByReviewApp;
+  // A head that changes code decides the planned mark: the review App's (the tester's red tests)
+  // sets it, anyone else's clears it. A handoff-only head, or one whose push has not arrived yet
+  // (`push` settles it), carries the previous head's mark.
+  if (pending && !pending.handoffOnly) {
+    if (pending.byReviewApp) pr.plannedRed = true;
+    else delete pr.plannedRed;
+  }
   pr.headSha = headSha;
   pr.verdict = null;
   pr.failing = [];
@@ -1072,7 +1072,10 @@ function push(
   // recorded decision, or, for a head still to arrive, the verdict `resetPrHead` will see.
   const counted = pr.headSha === after ? pr.headCounted === true : pr.verdict === "red";
   if (pr.headSha === after) {
-    if (byReviewApp) pr.headPushedByReviewApp = true;
+    if (!classification.handoffOnly) {
+      if (byReviewApp) pr.plannedRed = true;
+      else delete pr.plannedRed;
+    }
     if ((classification.handoffOnly || byReviewApp) && pr.headCounted) {
       if (pr.blockedAttempts === pr.fixAttempts) delete pr.blockedAttempts;
       pr.fixAttempts -= 1;
