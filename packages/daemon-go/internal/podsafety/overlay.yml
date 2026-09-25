@@ -11,7 +11,8 @@
 # the conversation to its own servers (hindsight.apiUrl, mnemopi's embedding and LLM URLs);
 # images.urls publishes images to a backend; dev.autoqa pushes tool-issue reports to
 # dev.autoqaPush.endpoint. Session storage is left to OMP_SESSION_STORAGE, which outranks the
-# setting, and which the baseline holds to file unless the pod names its own store (podsafety.go).
+# setting, and which the baseline sets to file: a pod keeps its sessions as files on the tree
+# volume, and the Sandbox runtime refuses an operator's own store (podsafety.go).
 compaction:
   remoteEndpoint: ""
 memory:

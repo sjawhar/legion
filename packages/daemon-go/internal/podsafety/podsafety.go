@@ -1,10 +1,13 @@
 // Package podsafety is the baseline a Legion pod's Oh My Pi starts with, and nothing in it names a
 // model, a provider, or a route: a settings overlay that holds off the endpoints Oh My Pi posts a
 // conversation to on its own, and four variables through which a repository's .env would move
-// what the agent runs with. Everything here yields to the operator's own configuration
-// (runtime.kubernetes.pod): the overlay is named first, before the operator's overlays, and a
-// variable the pod's environment sets is kept. It runs only in a pod (`legion worker-shim
-// --pod-safety`, `legion probe-image --pod-safety`); a tmux pane starts Oh My Pi as it always has.
+// what the agent runs with. The overlay yields to the operator's own (runtime.kubernetes.pod): it is
+// named first, before the operator's overlays. Apply keeps a variable the pod's environment sets,
+// and the operator may set OTEL_SDK_DISABLED and PI_AUTO_QA; the Sandbox runtime refuses
+// PI_CONFIG_DIR and OMP_SESSION_STORAGE in the operator's pod, since they decide where a session
+// lives, and a pod keeps its sessions as files on the tree volume (sandbox.CheckPod). It runs only
+// in a pod (`legion worker-shim --pod-safety`, `legion probe-image --pod-safety`); a tmux pane
+// starts Oh My Pi as it always has.
 package podsafety
 
 import (
