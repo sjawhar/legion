@@ -6,10 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"maps"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
@@ -51,20 +54,23 @@ func runController(ctx context.Context, args []string, stdout, stderr io.Writer)
 
 // controllerStart is `legion controller start`, the operator's side of a controller the daemon
 // cannot launch itself (LEGION-206 Requirement 11; the shipped cmdControllerStart,
-// packages/daemon/src/cli/controller-start.ts:262-384). In order, and nothing is written or
-// launched until the daemon has answered: read the strict operator-side file; refuse an operator
-// token file others can read, and a blank or unreadable Envoy or Dispatch token file, a role-prompt
-// bundle missing a file, an instructions file that is missing or blank, an Oh My Pi invocation
-// that does not resolve, and a pi-legion-envoy manifest, at the plugin root this process's
-// environment names, that does not speak this binary's Go daemon API contract (it would refuse the
-// controller at session start; a dotenv file Oh My Pi reads itself or the launch prefix can move
-// that root, which this check does not see: daemon.VerifyPluginContract);
-// fetch the controller secret with the operator token as a bearer (the daemon mints a fresh
-// capability and revokes the previous controller's); write it 0600 under the local state
-// directory beside the gh shim, the `legion` launcher, and the deployment instructions;
-// then run Oh My Pi interactive — the launch prefix and the resolved invocation, one joined
-// `--append-system-prompt`, no `--resume`, no `--mode rpc` — in the foreground with the shared
-// controller environment, and answer its exit code.
+// packages/daemon/src/cli/controller-start.ts:262-384). In order, and nothing is kept, and nothing
+// but the probe is launched, until the daemon has answered: read the strict operator-side file;
+// refuse an operator token file others can read, and a blank or unreadable Envoy or Dispatch token
+// file, a role-prompt bundle missing a file, an instructions file that is missing or blank, and an
+// Oh My Pi invocation that does not resolve; then probe that Oh My Pi as the controller will run it
+// — the launch prefix, the invocation, the controller's whole environment, in
+// `<state_dir>/controller`, created for it, at the operator's terminal — and refuse a
+// pi-legion-envoy it does not load, or loads speaking another Go daemon API contract than this
+// binary's, which would refuse the controller at session start (daemon.ProbeController). The probe
+// runs `omp models`, which starts no session, so it neither registers, takes the controller role,
+// nor reads a controller secret. Then fetch the controller secret with the operator token as a
+// bearer (the daemon mints a fresh capability and revokes the previous controller's); write it
+// 0600 under the local state directory beside the gh shim, the `legion` launcher, and the
+// deployment instructions; then run Oh My Pi interactive — the launch prefix and the resolved invocation, one joined
+// `--append-system-prompt`, no `--resume`, no `--mode rpc` — in the foreground with the same
+// environment, and answer its exit code. A refusal before the secret is written removes the
+// directories made for the probe, so the state directory is as it was.
 func controllerStart(ctx context.Context, configPath, daemonURL string, stderr io.Writer) (int, error) {
 	absolute, err := filepath.EvalSymlinks(configPath)
 	if err == nil {
@@ -81,10 +87,10 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	if err != nil {
 		return 0, err
 	}
-	// Everything up to the fetch reads and writes nothing under the state directory: the daemon
-	// mints a fresh capability on every request and revokes the incumbent controller's, so a
-	// failure this machine can find on its own is found first — never after the running
-	// controller has been cut off for nothing.
+	// Every check this machine can make on its own comes before the fetch, and none of them writes
+	// under the state directory but the probe's own directory, removed again on a refusal: the
+	// daemon mints a fresh capability on every request and revokes the incumbent controller's, so
+	// a failure found here never cuts the running controller off for nothing.
 	if cfg.EnvoyTokenFile != "" {
 		if _, err := config.ReadSecretPointer("envoy_token_file", cfg.EnvoyTokenFile); err != nil {
 			return 0, err
@@ -120,18 +126,29 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 		stateDir = filepath.Join(filepath.Dir(registry.Path(nil, home)), cfg.Project+"-controller")
 	}
 	controllerDir := filepath.Join(stateDir, "controller")
-	if _, err := daemon.VerifyPluginContract(processEnvironment(), controllerDir, api.GoDaemonAPIVersion); err != nil {
-		return 0, err
-	}
-
-	secret, err := fetchControllerSecret(ctx, cfg.DaemonURL, operatorToken)
-	if err != nil {
-		return 0, err
-	}
-
 	token := string(legionclaim.ControllerToken(cfg.Project))
-	secretFile, err := tmux.WriteSecretFile(stateDir, token, secret)
+	// One environment, probed and then launched: the operator's own with the controller's set on
+	// top, later pairs replacing inherited values of the same name.
+	env := processEnvironment()
+	for _, pair := range controllerEnvironment(cfg, stateDir, token, tmux.SecretFilePath(stateDir, token)) {
+		env[pair[0]] = pair[1]
+	}
+	created, err := makeDirs(controllerDir)
 	if err != nil {
+		return 0, err
+	}
+	fmt.Fprintf(stderr, "[legion] checking the controller's Oh My Pi (%s) in %s before the daemon mints a capability\n",
+		tmux.WithOmpLaunchPrefix(cfg.OmpLaunchPrefix, invocation), controllerDir)
+	secret, err := probeAndMint(ctx, cfg.DaemonURL, daemon.ControllerProbe{
+		Omp: invocation, Prefix: cfg.OmpLaunchPrefix, Env: env, WorkDir: controllerDir, Stdin: os.Stdin, Stderr: stderr,
+		Contract: api.GoDaemonAPIVersion, Log: slog.New(slog.NewTextHandler(stderr, nil)),
+	}, operatorToken)
+	if err != nil {
+		removeDirs(created)
+		return 0, err
+	}
+
+	if _, err := tmux.WriteSecretFile(stateDir, token, secret); err != nil {
 		return 0, fmt.Errorf("write the controller secret: %w", err)
 	}
 	executable, err := os.Executable()
@@ -147,14 +164,6 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 			return 0, err
 		}
 	}
-	if err := os.MkdirAll(controllerDir, 0o700); err != nil {
-		return 0, fmt.Errorf("create %s: %w", controllerDir, err)
-	}
-
-	env := os.Environ()
-	for _, pair := range controllerEnvironment(cfg, stateDir, token, secretFile) {
-		env = append(env, pair[0]+"="+pair[1])
-	}
 	command := tmux.WithOmpLaunchPrefix(cfg.OmpLaunchPrefix, invocation) + " " + tmux.SystemPromptArgument(runtime.PromptParts{
 		RolePromptPaths:            []string{filepath.Join(rolesDir, "controller-root.md")},
 		DeploymentInstructionsPath: instructionsFile,
@@ -164,7 +173,10 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	// bound to ctx — a Ctrl-C reaches Oh My Pi through the terminal's process group and is its to
 	// handle, while this process, whose signals main has already caught, waits for its exit.
 	omp := exec.Command("sh", "-c", command)
-	omp.Dir, omp.Env = controllerDir, env
+	omp.Dir = controllerDir
+	for _, name := range slices.Sorted(maps.Keys(env)) {
+		omp.Env = append(omp.Env, name+"="+env[name])
+	}
 	omp.Stdin, omp.Stdout, omp.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := omp.Run(); err != nil {
 		var exit *exec.ExitError
@@ -217,35 +229,61 @@ func controllerEnvironment(cfg config.ControllerConfig, stateDir, token, secretF
 	return env
 }
 
+// probeAndMint is the controller probe and then the one daemon call, which mints the capability:
+// the probe's refusal comes before the mint, never after it.
+func probeAndMint(ctx context.Context, daemonURL string, probe daemon.ControllerProbe, operatorToken string) (string, error) {
+	if err := daemon.ProbeController(ctx, probe); err != nil {
+		return "", err
+	}
+	return fetchControllerSecret(ctx, daemonURL, operatorToken)
+}
+
+// makeDirs creates dir and its missing parents, 0700, and answers the ones it created, deepest
+// last.
+func makeDirs(dir string) ([]string, error) {
+	var missing []string
+	for d := dir; ; d = filepath.Dir(d) {
+		if _, err := os.Stat(d); err == nil || filepath.Dir(d) == d {
+			break
+		}
+		missing = append([]string{d}, missing...)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		removeDirs(missing)
+		return nil, fmt.Errorf("create %s: %w", dir, err)
+	}
+	return missing, nil
+}
+
+// removeDirs removes the directories makeDirs created, deepest first, each only while empty.
+func removeDirs(created []string) {
+	for i := len(created) - 1; i >= 0; i-- {
+		_ = os.Remove(created[i])
+	}
+}
+
 // fetchControllerSecret is `POST /legion/v1/controller/secret` with the operator token as a
 // bearer. A failed request names the daemon URL and never tries another address; a refusal
 // quotes the daemon's `error` (packages/daemon/src/cli/controller-start.ts:214-260).
 func fetchControllerSecret(ctx context.Context, daemonURL, operatorToken string) (string, error) {
-	url := daemonURL + "/legion/v1/controller/secret"
-	status, body, err := operator{base: daemonURL, bearer: operatorToken}.do(ctx, http.MethodPost, "/legion/v1/controller/secret", struct{}{})
+	const route = "/legion/v1/controller/secret"
+	status, body, err := operator{base: daemonURL, bearer: operatorToken}.do(ctx, http.MethodPost, route, struct{}{})
 	if err != nil {
 		return "", fmt.Errorf("could not reach the Legion daemon at %s: %v; is the port-forward running? (never falls back to another address)", daemonURL, err)
 	}
 	if status/100 != 2 {
-		detail := strings.TrimSpace(string(body))
-		var refusal struct {
-			Error string `json:"error"`
-		}
-		if json.Unmarshal(body, &refusal) == nil && refusal.Error != "" {
-			detail = refusal.Error
-		}
 		hint := ""
 		if status == http.StatusForbidden {
 			hint = " — the operator token does not match the daemon's operator_token_file"
 		}
-		return "", fmt.Errorf("%s answered %d: %s%s", url, status, detail, hint)
+		return "", fmt.Errorf("%s%s: %s%s", daemonURL, route, refusal(status, body), hint)
 	}
 	var answer api.ControllerSecretResponse
 	if err := json.Unmarshal(body, &answer); err != nil {
-		return "", fmt.Errorf("%s answered with a body that is not JSON", url)
+		return "", fmt.Errorf("%s%s answered with a body that is not JSON", daemonURL, route)
 	}
 	if answer.Secret == "" {
-		return "", fmt.Errorf("%s answered with no secret", url)
+		return "", fmt.Errorf("%s%s answered with no secret", daemonURL, route)
 	}
 	return answer.Secret, nil
 }

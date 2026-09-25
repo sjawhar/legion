@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -191,11 +192,30 @@ func newControllerStart(t *testing.T, d *controllerDaemon, opts controllerOption
 	}
 	c.write("controller.yaml", strings.Join(lines, "\n")+"\n", 0o600)
 
-	// The Oh My Pi LEGION_OMP_PATH names: it records its argv, environment, and working
-	// directory, and exits with the code the test asked for.
+	// The Oh My Pi LEGION_OMP_PATH names. As the load probe (`models --extension <probe>`) it
+	// records its environment and working directory and reports the plugin loaded from the file
+	// `loaded-from` names, or not loaded when there is none, as the probe extension does; as the
+	// controller it records its argv, environment, and working directory, and exits with the code
+	// the test asked for.
 	omp := filepath.Join(record, "omp")
-	script := fmt.Sprintf("#!/bin/sh\nfor a in \"$@\"; do printf '%%s\\0' \"$a\"; done >%[1]s/argv\nenv -0 >%[1]s/env\npwd >%[1]s/cwd\nexit %[2]d\n",
-		record, opts.exitCode)
+	script := fmt.Sprintf(`#!/bin/sh
+if [ "$1" = models ]; then
+  env -0 >%[1]s/probe-env
+  pwd -P >%[1]s/probe-cwd
+  readlink /proc/self/fd/0 >%[1]s/probe-stdin
+  if [ -f %[1]s/loaded-from ]; then
+    printf 'LEGION_PLUGIN_LOADED=yes\nLEGION_PLUGIN_LOADED_FROM=%%s\n' "$(cat %[1]s/loaded-from)" >&2
+  else
+    echo LEGION_PLUGIN_LOADED=no >&2
+  fi
+  exit 0
+fi
+for a in "$@"; do printf '%%s\0' "$a"; done >%[1]s/argv
+readlink /proc/self/fd/0 >%[1]s/stdin
+env -0 >%[1]s/env
+pwd >%[1]s/cwd
+exit %[2]d
+`, record, opts.exitCode)
 	if err := os.WriteFile(omp, []byte(script), 0o700); err != nil {
 		t.Fatalf("write the recording omp: %v", err)
 	}
@@ -213,15 +233,38 @@ func newControllerStart(t *testing.T, d *controllerDaemon, opts controllerOption
 }
 
 // installPlugin installs, in the operator's default Oh My Pi profile, a pi-legion-envoy manifest
-// declaring contract.
+// declaring contract, and has the recording Oh My Pi load it.
 func (c *operatorMachine) installPlugin(contract int) {
 	c.t.Helper()
-	c.installPluginAt(filepath.Join(c.home, ".omp"), contract)
+	c.loads(c.installPluginAt(filepath.Join(c.home, ".omp"), contract))
+}
+
+// loads has the recording Oh My Pi report the plugin loaded from the package directory dir, as
+// the probe extension renders it: a file URL of its dist/legion.js with a cache-busting query.
+func (c *operatorMachine) loads(dir string) {
+	c.t.Helper()
+	if err := os.WriteFile(filepath.Join(c.record, "loaded-from"), []byte("file://"+filepath.Join(dir, "dist", "legion.js")+"?mtime=1"), 0o600); err != nil {
+		c.t.Fatal(err)
+	}
+}
+
+// loadsNothing has the recording Oh My Pi report the plugin not loaded.
+func (c *operatorMachine) loadsNothing() {
+	c.t.Helper()
+	if err := os.Remove(filepath.Join(c.record, "loaded-from")); err != nil && !os.IsNotExist(err) {
+		c.t.Fatal(err)
+	}
+}
+
+// probeEnv is the environment the load probe's Oh My Pi ran under.
+func (c *operatorMachine) probeEnv() map[string]string {
+	c.t.Helper()
+	return readEnv(c.t, filepath.Join(c.record, "probe-env"))
 }
 
 // installPluginAt installs a pi-legion-envoy manifest declaring contract under the Oh My Pi data
-// root root.
-func (c *operatorMachine) installPluginAt(root string, contract int) {
+// root root, and answers its package directory.
+func (c *operatorMachine) installPluginAt(root string, contract int) string {
 	c.t.Helper()
 	dir := filepath.Join(root, "plugins", "node_modules", "@sjawhar", "pi-legion-envoy")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -231,6 +274,7 @@ func (c *operatorMachine) installPluginAt(root string, contract int) {
 	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(manifest), 0o600); err != nil {
 		c.t.Fatal(err)
 	}
+	return dir
 }
 
 func (c *operatorMachine) write(name, contents string, mode os.FileMode) {
@@ -284,9 +328,15 @@ func (c *operatorMachine) argv() []string {
 
 func (c *operatorMachine) env() map[string]string {
 	c.t.Helper()
-	raw, err := os.ReadFile(filepath.Join(c.record, "env"))
+	return readEnv(c.t, filepath.Join(c.record, "env"))
+}
+
+// readEnv reads an `env -0` recording.
+func readEnv(t *testing.T, path string) map[string]string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
 	if err != nil {
-		c.t.Fatalf("Oh My Pi was not launched: %v", err)
+		t.Fatalf("Oh My Pi was not launched: %v", err)
 	}
 	env := map[string]string{}
 	for _, entry := range strings.Split(strings.TrimSuffix(string(raw), "\x00"), "\x00") {
@@ -476,9 +526,13 @@ func TestControllerStartLaunchesOhMyPiWithTheSharedControllerEnvironment(t *test
 			t.Errorf("%s is set; only its _FILE pointer may be", name)
 		}
 	}
+	// Two lines: the probe, named before it runs so a prompt or a wait can be tied to it, then the
+	// launch.
+	wantProbe := fmt.Sprintf("[legion] checking the controller's Oh My Pi (env 'LEGION_TEST_PREFIX_RAN=1' %s) in %s before the daemon mints a capability\n",
+		filepath.Join(c.record, "omp"), filepath.Join(c.defaultDir, "controller"))
 	wantLog := fmt.Sprintf("[legion] starting the controller for demo against %s; state in %s\n", d.url, c.defaultDir)
-	if errb != wantLog {
-		t.Errorf("stderr = %q, want %q", errb, wantLog)
+	if errb != wantProbe+wantLog {
+		t.Errorf("stderr = %q, want %q", errb, wantProbe+wantLog)
 	}
 }
 
@@ -537,7 +591,7 @@ func TestControllerStartRefusedByTheDaemonWritesNothing(t *testing.T) {
 	d := newControllerDaemon(t)
 	c := newControllerStart(t, d, controllerOptions{tokenContents: "not-the-operator-token\n"})
 	code, _, errb := c.run()
-	want := d.url + "/legion/v1/controller/secret answered 403: Invalid operator token — the operator token does not match the daemon's operator_token_file\n"
+	want := d.url + "/legion/v1/controller/secret: the daemon answered 403 Forbidden: Invalid operator token — the operator token does not match the daemon's operator_token_file\n"
 	if code != 1 || !strings.HasSuffix(errb, want) {
 		t.Fatalf("legion controller start = %d, stderr %q; want 1 and a refusal ending %q", code, errb, want)
 	}
@@ -641,13 +695,16 @@ func TestControllerStartRefusesLocallyBeforeTheRequest(t *testing.T) {
 		c.wantNoSecretRequest()
 		c.wantNothingLaunchedOrWritten(c.defaultDir)
 	})
-	t.Run("no plugin in the operator's Oh My Pi profile", func(t *testing.T) {
+	t.Run("an Oh My Pi that does not load the plugin", func(t *testing.T) {
 		d := newControllerDaemon(t)
 		c := newControllerStart(t, d, controllerOptions{})
-		if err := os.RemoveAll(filepath.Join(c.home, ".omp")); err != nil {
-			t.Fatal(err)
+		c.loadsNothing()
+		code, _, errb := c.run()
+		for _, want := range []string{"did not load pi-legion-envoy (not installed, disabled, or unregistered)", "plugin list` under the controller's environment"} {
+			if code != 1 || !strings.Contains(errb, want) {
+				t.Fatalf("legion controller start = %d, stderr %q; want 1 and %q", code, errb, want)
+			}
 		}
-		c.refused("pi-legion-envoy manifest at " + filepath.Join(c.home, ".omp", "plugins", "node_modules", "@sjawhar", "pi-legion-envoy", "package.json") + " could not be read")
 		c.wantNoSecretRequest()
 		c.wantNothingLaunchedOrWritten(c.defaultDir)
 	})
@@ -663,62 +720,88 @@ func TestControllerStartRefusesLocallyBeforeTheRequest(t *testing.T) {
 	})
 }
 
-// The contract check reads the manifest Oh My Pi loads under the operator's process environment,
-// which the controller's Oh My Pi inherits (@oh-my-pi/pi-utils dirs.ts: getBaseConfigRoot,
-// DirResolver's constructor, resolveActiveAgentDirOverride, getPluginsDir); it cannot see a dotenv
-// file Oh My Pi reads itself or a launch prefix, and no row sets either. Each row installs the
-// release Oh My Pi loads where it loads it, and a plugin speaking another contract at the root a
-// wrong resolution would read: the controller starts only when the check read the first. An
-// honoured PI_CODING_AGENT_DIR moves the plugins only by turning the XDG data root off, so with
-// none it changes nothing; PI_CONFIG_DIR moves the config root, and an XDG data root still wins.
-// A relative agent directory is resolved where the controller's Oh My Pi runs, the controller's
-// state directory's `controller`. An Oh My Pi running under a profile hands its children
-// PI_CODING_AGENT_DIR set to that profile's agent directory, which Oh My Pi ignores, so an operator
-// starting from inside one is not refused.
-func TestControllerStartChecksThePluginOhMyPiLoads(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		// env names variables beyond HOME; "<home>" in a value is the operator's home directory.
-		env map[string]string
-		// loaded is the root Oh My Pi loads the plugin from, stale the one a wrong resolution reads,
-		// both relative to the home directory; "" installs nothing there.
-		loaded, stale string
-	}{
-		{name: "PI_CODING_AGENT_DIR honoured with no XDG data root",
-			env: map[string]string{"PI_CODING_AGENT_DIR": "<home>/elsewhere"}, loaded: ".omp"},
-		{name: "PI_CODING_AGENT_DIR honoured with an XDG data root",
-			env: map[string]string{"PI_CODING_AGENT_DIR": "<home>/elsewhere", "XDG_DATA_HOME": "<home>/xdg"}, loaded: ".omp", stale: "xdg/omp"},
-		{name: "PI_CONFIG_DIR with no XDG data root",
-			env: map[string]string{"PI_CONFIG_DIR": ".omp-alt"}, loaded: ".omp-alt", stale: ".omp"},
-		{name: "PI_CONFIG_DIR with an XDG data root",
-			env: map[string]string{"PI_CONFIG_DIR": ".omp-alt", "XDG_DATA_HOME": "<home>/xdg"}, loaded: "xdg/omp", stale: ".omp"},
-		{name: "a named profile, which ignores PI_CODING_AGENT_DIR",
-			env: map[string]string{"OMP_PROFILE": "work", "PI_CODING_AGENT_DIR": "<home>/.omp/profiles/work/agent"}, loaded: ".omp/profiles/work", stale: ".omp"},
-		{name: "PI_PROFILE's agent directory under the default profile",
-			env: map[string]string{"PI_PROFILE": "work", "PI_CODING_AGENT_DIR": "<home>/.omp/profiles/work/agent", "XDG_DATA_HOME": "<home>/xdg"}, loaded: "xdg/omp", stale: ".omp"},
-		{name: "a relative PI_CODING_AGENT_DIR, resolved in the controller's directory",
-			env: map[string]string{"PI_CODING_AGENT_DIR": "agent", "XDG_DATA_HOME": "<home>/xdg"}, loaded: ".omp", stale: "xdg/omp"},
-		{name: "a relative PI_CODING_AGENT_DIR that names the config root's own agent directory from the controller's",
-			env: map[string]string{"PI_CODING_AGENT_DIR": "../../../../../.omp/agent", "XDG_DATA_HOME": "<home>/xdg"}, loaded: "xdg/omp", stale: ".omp"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			d := newControllerDaemon(t)
-			c := newControllerStart(t, d, controllerOptions{})
-			if err := os.RemoveAll(filepath.Join(c.home, ".omp")); err != nil {
-				t.Fatal(err)
-			}
-			t.Setenv("PI_PROFILE", "")
-			for name, value := range tc.env {
-				t.Setenv(name, strings.ReplaceAll(value, "<home>", c.home))
-			}
-			c.installPluginAt(filepath.Join(c.home, tc.loaded), api.GoDaemonAPIVersion)
-			if tc.stale != "" {
-				c.installPluginAt(filepath.Join(c.home, tc.stale), api.GoDaemonAPIVersion-1)
-			}
-			if code, _, errb := c.run(); code != 0 || !c.launched() {
-				t.Fatalf("legion controller start = %d (launched %t), stderr %q; want the controller started", code, c.launched(), errb)
-			}
-		})
+// The plugin held to the contract is the one Oh My Pi reports loading, launched as the controller
+// launches it: no resolution of its own decides which copy that is. Each row installs a copy of
+// this binary's contract and one of another at two roots, and has Oh My Pi load one of them.
+func TestControllerStartHoldsTheCopyOhMyPiLoadsToTheContract(t *testing.T) {
+	t.Run("the loaded copy speaks the contract; the profile's own does not", func(t *testing.T) {
+		d := newControllerDaemon(t)
+		c := newControllerStart(t, d, controllerOptions{})
+		c.installPluginAt(filepath.Join(c.home, ".omp"), api.GoDaemonAPIVersion-1)
+		c.loads(c.installPluginAt(filepath.Join(c.home, "project", ".omp"), api.GoDaemonAPIVersion))
+		if code, _, errb := c.run(); code != 0 || !c.launched() {
+			t.Fatalf("legion controller start = %d (launched %t), stderr %q; want the controller started", code, c.launched(), errb)
+		}
+	})
+	t.Run("the loaded copy speaks another contract; the profile's own speaks this one", func(t *testing.T) {
+		d := newControllerDaemon(t)
+		c := newControllerStart(t, d, controllerOptions{})
+		loaded := c.installPluginAt(filepath.Join(c.home, "project", ".omp"), api.GoDaemonAPIVersion-1)
+		c.loads(loaded)
+		c.refused(fmt.Sprintf("pi-legion-envoy at %s (package 9.9.9) speaks Go daemon API contract %d; this daemon requires %d.",
+			filepath.Join(loaded, "package.json"), api.GoDaemonAPIVersion-1, api.GoDaemonAPIVersion))
+		c.wantNoSecretRequest()
+		c.wantNothingLaunchedOrWritten(c.defaultDir)
+	})
+}
+
+// The load probe's Oh My Pi reads the operator's stdin, as the controller does: a launch prefix
+// such as `secrets` scopes a human-tier grant by the terminal it is run from, and refuses on a
+// stdin that is not one.
+func TestControllerStartProbesOnTheOperatorsStdin(t *testing.T) {
+	d := newControllerDaemon(t)
+	c := newControllerStart(t, d, controllerOptions{})
+	terminal, err := os.Create(filepath.Join(t.TempDir(), "operator-terminal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer terminal.Close()
+	stdin := os.Stdin
+	os.Stdin = terminal
+	defer func() { os.Stdin = stdin }()
+
+	if code, _, errb := c.run(); code != 0 {
+		t.Fatalf("legion controller start = %d, stderr %q", code, errb)
+	}
+	probe, err := os.ReadFile(filepath.Join(c.record, "probe-stdin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch, err := os.ReadFile(filepath.Join(c.record, "stdin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(probe)); got != terminal.Name() || strings.TrimSpace(string(launch)) != terminal.Name() {
+		t.Errorf("the load probe read %q and the controller %q, want both on the operator's %q", got, strings.TrimSpace(string(launch)), terminal.Name())
+	}
+}
+
+// The load probe's Oh My Pi runs in the controller's own directory, which exists for it, under the
+// environment the controller is then launched with.
+func TestControllerStartProbesUnderTheControllersEnvironment(t *testing.T) {
+	d := newControllerDaemon(t)
+	c := newControllerStart(t, d, controllerOptions{})
+	if code, _, errb := c.run(); code != 0 {
+		t.Fatalf("legion controller start = %d, stderr %q", code, errb)
+	}
+	cwd, err := os.ReadFile(filepath.Join(c.record, "probe-cwd"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want, _ := filepath.EvalSymlinks(filepath.Join(c.defaultDir, "controller")); strings.TrimSpace(string(cwd)) != want {
+		t.Errorf("the load probe ran in %q, want the controller's directory %q", strings.TrimSpace(string(cwd)), want)
+	}
+	probe, launch := c.probeEnv(), c.env()
+	for _, shell := range []string{"PWD", "OLDPWD", "SHLVL", "_"} {
+		delete(probe, shell)
+		delete(launch, shell)
+	}
+	if !maps.Equal(probe, launch) {
+		t.Errorf("the load probe ran under %v, but the controller was launched under %v", probe, launch)
+	}
+	if probe["LEGION_CONTROLLER"] != "1" || probe["LEGION_CONTROLLER_SECRET_FILE"] == "" {
+		t.Errorf("the load probe's environment lacks the controller's set: LEGION_CONTROLLER=%q LEGION_CONTROLLER_SECRET_FILE=%q",
+			probe["LEGION_CONTROLLER"], probe["LEGION_CONTROLLER_SECRET_FILE"])
 	}
 }
 

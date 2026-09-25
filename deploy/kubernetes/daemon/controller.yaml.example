@@ -27,6 +27,10 @@ instructions: ./instructions.md
 # daemon's pinned `mise x … -- omp`, while the Go CLI holds no pin — set omp_invocation, or set
 # LEGION_OMP_PATH to an absolute omp, and it resolves the invocation as the Go daemon does).
 # omp_invocation: mise x github:sjawhar/oh-my-pi@<version> -- omp
+# The Go `legion controller start` runs the prefix twice: once to probe the plugin Oh My Pi loads,
+# before it asks the daemon for a capability, and once to launch. Both run at your terminal, as its
+# foreground job, so a prefix that asks for a PIN or a touch asks there, each time: `secrets` asks
+# once and the launch reuses its terminal-scoped grant.
 # omp_launch_prefix: [secrets, ANTHROPIC_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY, --]
 # Where the controller's secret, gh shim, legion launcher, and instructions live
 # (default: $XDG_STATE_HOME/legion/<project>-controller, i.e. ~/.local/state/legion/demo-controller).

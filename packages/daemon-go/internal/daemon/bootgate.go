@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"maps"
 	"net/url"
@@ -61,8 +62,11 @@ const (
 	sessionStorageProbeValue = "legion-launch-probe"
 )
 
-// pluginGate runs the Oh My Pi launch probes. As the daemon's boot gate on the plugin every pane
-// loads, it runs before the daemon opens its store, so no pane launches until it passes, and it
+// pluginGate runs the Oh My Pi launch probes, for three callers: the daemon's boot gate, `legion
+// probe-image` in the worker image (ProbeImage), and `legion controller start` on the operator's
+// machine (ProbeController), which runs the load probe alone, before any contract check, at the
+// operator's terminal. As the daemon's boot gate on the plugin every pane loads, it runs before
+// the daemon opens its store, so no pane launches until it passes, and it
 // runs under the environment a pane will have (tmux.PaneEnvironment: the allow-listed variables,
 // the XDG directories under `<state_dir>/home`), because the daemon's own HOME, profile, and XDG
 // directories are not what a pane's Oh My Pi reads. Two probes, in the shipped gate's order
@@ -98,7 +102,23 @@ type pluginGate struct {
 	// probe reads that root's manifest. Empty on tmux, where a pane loads the installed plugin
 	// through discovery.
 	pluginRoot string
-	log        *slog.Logger
+	// stdin is each probe's standard input; nil is /dev/null. When it is a terminal this process
+	// holds the foreground of, each attempt runs as the terminal's foreground job, and its stderr
+	// is also copied to echo, so a launch prefix's prompt is seen and can be answered (terminalJob).
+	stdin io.Reader
+	echo  io.Writer
+	// name begins the gate's own errors: "controller probe" for ProbeController; empty is the boot
+	// gate's, which the image probe also is.
+	name string
+	log  *slog.Logger
+}
+
+// label is the name the gate's errors begin with.
+func (g pluginGate) label() string {
+	if g.name == "" {
+		return "boot gate"
+	}
+	return g.name
 }
 
 // verify runs the two probes. A refusal names what the operator has to change; a gate the daemon's
@@ -111,7 +131,7 @@ func (g pluginGate) verify(ctx context.Context) error {
 	if g.pluginRoot != "" {
 		manifest = filepath.Join(g.pluginRoot, "package.json")
 	}
-	version, err := verifyPluginContract(manifest, profile, g.contract)
+	version, err := verifyPluginContract(manifest, profileWords(profile), g.contract)
 	if err != nil {
 		return err
 	}
@@ -155,11 +175,13 @@ var (
 //     there (legionPluginManifestPath, packages/daemon/src/daemon/boot-probes.ts:240-244).
 //
 // env is all it reads. Before it resolves its directories, Oh My Pi fills XDG_DATA_HOME,
-// PI_CONFIG_DIR, OMP_CONFIG_DIR and PI_CODING_AGENT_DIR from dotenv files it reads itself (~/.env,
-// the config root's .env, the agent directory's .env, its working directory's .env; env.ts, then
-// refreshDirsFromEnv), and a launch prefix can set any variable; neither reaches env. Where either
-// moves the plugin root, this names another manifest than the one Oh My Pi loads. The load probe
-// (verifyLoaded, verifyLoadedFrom) watches what Oh My Pi loads and catches both.
+// PI_CONFIG_DIR and PI_CODING_AGENT_DIR from dotenv files it reads itself (~/.env, the config root's
+// .env, the agent directory's .env, its working directory's .env; env.ts, then refreshDirsFromEnv),
+// where parseEnvFile also mirrors OMP_CONFIG_DIR and OMP_CODING_AGENT_DIR onto the PI_ names, and a
+// launch prefix can set any variable; neither reaches env. Where either moves the plugin root, this
+// names another manifest than the one Oh My Pi loads. The daemon's gate then refuses, because its
+// load probe holds what Oh My Pi loaded to this manifest (verifyLoadedFrom); `legion controller
+// start` reads no manifest this names, and holds the one Oh My Pi loaded instead (ProbeController).
 func pluginManifestPath(env map[string]string, workDir string) (string, string, error) {
 	requested, set := env["OMP_PROFILE"]
 	if !set {
@@ -236,29 +258,14 @@ func profileWords(profile string) string {
 	return "OMP profile " + profile
 }
 
-// VerifyPluginContract is the boot gate's contract probe for an Oh My Pi started under env in
-// workDir: the pi-legion-envoy manifest where that Oh My Pi reads its plugins (pluginManifestPath)
-// must declare contract (verifyPluginContract). `legion controller start` runs it on its own
-// process environment, in the controller's working directory, before its one daemon call, since no
-// boot gate checks the operator's machine and the mint it asks for revokes the incumbent
-// controller. It reads only that environment: a dotenv file Oh My Pi reads itself, or the launch
-// prefix, can move the plugin root it misses (pluginManifestPath), and controller start runs no
-// load probe. It answers the package version.
-func VerifyPluginContract(env map[string]string, workDir string, contract int) (string, error) {
-	manifest, profile, err := pluginManifestPath(env, workDir)
-	if err != nil {
-		return "", err
-	}
-	return verifyPluginContract(manifest, profile, contract)
-}
-
 // verifyPluginContract is the contract probe (verifyLegionPluginContract, boot-probes.ts:267-298,
 // on the Go daemon's own field): the manifest's `legion.goDaemonApiVersion` must be contract. A
 // manifest that is missing, unreadable, or without the field is the same refusal, never a
 // fallback — the load probe would call such a plugin merely "not loaded" and send the operator to
-// `omp plugin list` when the fix is a reinstall. It answers the package version.
-func verifyPluginContract(manifest, profile string, contract int) (string, error) {
-	install := fmt.Sprintf("Install the @sjawhar/pi-legion-envoy release built from this daemon's commit into %s.", profileWords(profile))
+// `omp plugin list` when the fix is a reinstall. installInto names where the refusal says to
+// install the release. It answers the package version.
+func verifyPluginContract(manifest, installInto string, contract int) (string, error) {
+	install := fmt.Sprintf("Install the @sjawhar/pi-legion-envoy release built from this daemon's commit into %s.", installInto)
 	raw, err := os.ReadFile(manifest)
 	var parsed any
 	if err == nil {
@@ -294,29 +301,40 @@ func verifyPluginContract(manifest, profile string, contract int) (string, error
 // loaded from the manifest's own package (verifyLoadedFrom). The classification is the shipped
 // one (killedOutcome, :94-122, :348-360).
 func (g pluginGate) verifyLoaded(ctx context.Context, manifest, version, profile string) error {
-	for _, name := range []string{"XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"} {
-		if dir := g.env[name]; dir != "" {
-			if err := os.MkdirAll(dir, 0o700); err != nil {
-				return fmt.Errorf("boot gate: create the pane's %s: %w", name, err)
-			}
-		}
+	list := "omp plugin list"
+	if profile != "" {
+		list = "OMP_PROFILE=" + profile + " " + list
 	}
-	dir, probe, err := writeProbe("legion-plugin-probe-", pluginLoadProbe)
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(dir)
-	launch := tmux.WithOmpLaunchPrefix(g.prefix, g.invocation)
-	loadedFrom := ""
-	err = bootprobe.Run(ctx, "pi-legion-envoy load", g.retry, g.log, func(ctx context.Context) bootprobe.Outcome {
-		outcome, from := g.probeLoad(ctx, launch, probe, version, profile)
-		loadedFrom = from
-		return outcome
-	})
+	loadedFrom, err := g.loadedFrom(ctx, fmt.Errorf("pi-legion-envoy %s is installed but not loaded by omp (disabled or unregistered): run %s", version, list))
 	if err != nil {
 		return err
 	}
 	return verifyLoadedFrom(loadedFrom, manifest, profile, g.contract)
+}
+
+// loadedFrom runs the load probe under the gate's retry and answers where the plugin loaded from.
+// notLoaded is the refusal for an Oh My Pi that answered without loading it.
+func (g pluginGate) loadedFrom(ctx context.Context, notLoaded error) (string, error) {
+	for _, name := range []string{"XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"} {
+		if dir := g.env[name]; dir != "" {
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				return "", fmt.Errorf("%s: create the %s Oh My Pi runs under: %w", g.label(), name, err)
+			}
+		}
+	}
+	dir, probe, err := g.writeProbe("legion-plugin-probe-", pluginLoadProbe)
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(dir)
+	launch := tmux.WithOmpLaunchPrefix(g.prefix, g.invocation)
+	location := ""
+	err = bootprobe.Run(ctx, "pi-legion-envoy load", g.retry, g.log, func(ctx context.Context) bootprobe.Outcome {
+		outcome, from := g.probeLoad(ctx, launch, probe, notLoaded)
+		location = from
+		return outcome
+	})
+	return location, err
 }
 
 // verifyLoadedFrom holds the plugin a pane loads to the manifest the contract probe read: the
@@ -326,13 +344,9 @@ func (g pluginGate) verifyLoaded(ctx context.Context, manifest, version, profile
 // prefix that sets OMP_PROFILE (`env OMP_PROFILE=… --`), a dotenv file Oh My Pi reads —
 // and the contract probe would otherwise have vouched for a plugin no pane runs.
 func verifyLoadedFrom(location, manifest, profile string, contract int) error {
-	loaded, err := url.Parse(location)
-	if err != nil || loaded.Scheme != "file" || loaded.Path == "" {
-		return fmt.Errorf("the pi-legion-envoy load probe reported the plugin loaded from %q, which is not a file the gate can hold to a manifest", location)
-	}
-	owner, err := owningManifest(loaded.Path)
+	owner, err := loadedManifest(location)
 	if err != nil {
-		return fmt.Errorf("pi-legion-envoy loads in a pane from %s, and the gate cannot hold it to a manifest: %w", loaded.Path, err)
+		return err
 	}
 	read, err := filepath.EvalSymlinks(manifest)
 	if err != nil {
@@ -343,6 +357,20 @@ func verifyLoadedFrom(location, manifest, profile string, contract int) error {
 			owner, contract, read, profileWords(profile))
 	}
 	return nil
+}
+
+// loadedManifest is the pi-legion-envoy manifest of the file the load probe reported the plugin
+// loaded from (a `file:` URL, as import.meta.url renders it), links resolved.
+func loadedManifest(location string) (string, error) {
+	loaded, err := url.Parse(location)
+	if err != nil || loaded.Scheme != "file" || loaded.Path == "" {
+		return "", fmt.Errorf("the pi-legion-envoy load probe reported the plugin loaded from %q, which is not a file the gate can hold to a manifest", location)
+	}
+	owner, err := owningManifest(loaded.Path)
+	if err != nil {
+		return "", fmt.Errorf("pi-legion-envoy loads from %s, and the gate cannot hold it to a manifest: %w", loaded.Path, err)
+	}
+	return owner, nil
 }
 
 // owningManifest is the pi-legion-envoy `package.json` nearest above file, links resolved.
@@ -365,8 +393,9 @@ func owningManifest(file string) (string, error) {
 	}
 }
 
-// probeLoad is one load-probe attempt, and, on a pass, where the plugin loaded from.
-func (g pluginGate) probeLoad(ctx context.Context, launch, probe, version, profile string) (bootprobe.Outcome, string) {
+// probeLoad is one load-probe attempt, and, on a pass, where the plugin loaded from. notLoaded is
+// the refusal for an Oh My Pi that answered without loading the plugin.
+func (g pluginGate) probeLoad(ctx context.Context, launch, probe string, notLoaded error) (bootprobe.Outcome, string) {
 	script := `exec ` + launch + ` models --extension "$1" --json >/dev/null`
 	args := []string{probe}
 	if g.pluginRoot != "" {
@@ -376,7 +405,7 @@ func (g pluginGate) probeLoad(ctx context.Context, launch, probe, version, profi
 	}
 	r, err := g.run(ctx, script, args...)
 	if err != nil {
-		return bootprobe.Outcome{Refusal: fmt.Errorf("boot gate: run the pi-legion-envoy load probe: %w", err)}, ""
+		return bootprobe.Outcome{Refusal: fmt.Errorf("%s: run the pi-legion-envoy load probe: %w", g.label(), err)}, ""
 	}
 	// A budget kill is transient when the probe never answered; a probe that said "not loaded" and
 	// only then hung has answered, and is judged below like any other answer.
@@ -407,11 +436,7 @@ func (g pluginGate) probeLoad(ctx context.Context, launch, probe, version, profi
 		}
 		return bootprobe.Outcome{Refusal: errors.New(message)}, ""
 	}
-	list := "omp plugin list"
-	if profile != "" {
-		list = "OMP_PROFILE=" + profile + " " + list
-	}
-	return bootprobe.Outcome{Refusal: fmt.Errorf("pi-legion-envoy %s is installed but not loaded by omp (disabled or unregistered): run %s", version, list)}, ""
+	return bootprobe.Outcome{Refusal: notLoaded}, ""
 }
 
 // verifyAgentsCapability is the pi.agents probe (verifyOmpAgentsCapability, boot-probes.ts:
@@ -421,7 +446,7 @@ func (g pluginGate) probeLoad(ctx context.Context, launch, probe, version, profi
 // `missing` answer, a clean exit without an answer, a launch that failed before Oh My Pi — is an
 // answer no retry changes.
 func (g pluginGate) verifyAgentsCapability(ctx context.Context) error {
-	dir, probe, err := writeProbe("legion-omp-probe-", agentsProbe)
+	dir, probe, err := g.writeProbe("legion-omp-probe-", agentsProbe)
 	if err != nil {
 		return err
 	}
@@ -488,15 +513,15 @@ func (g pluginGate) verifySessionStorage(ctx context.Context) error {
 }
 
 // writeProbe writes an extension probe into a directory of its own, which the caller removes.
-func writeProbe(pattern string, source []byte) (string, string, error) {
+func (g pluginGate) writeProbe(pattern string, source []byte) (string, string, error) {
 	dir, err := os.MkdirTemp("", pattern)
 	if err != nil {
-		return "", "", fmt.Errorf("boot gate: create a probe directory: %w", err)
+		return "", "", fmt.Errorf("%s: create a probe directory: %w", g.label(), err)
 	}
 	probe := filepath.Join(dir, "probe.mjs")
 	if err := os.WriteFile(probe, source, 0o600); err != nil {
 		os.RemoveAll(dir)
-		return "", "", fmt.Errorf("boot gate: write the probe extension: %w", err)
+		return "", "", fmt.Errorf("%s: write the probe extension: %w", g.label(), err)
 	}
 	return dir, probe, nil
 }
@@ -524,27 +549,36 @@ func (r ran) killed(launch string, budget time.Duration) string {
 // working directory. `exec` in every probe's script replaces the shell with the launch prefix and
 // Oh My Pi, and the attempt runs in its own process group, so a timeout or the daemon's stop kills
 // what is actually running — a prompting `secrets`, Oh My Pi and its children — rather than a
-// shell that leaves them holding the pipes (boot-probes.ts:163-167). It errs when the command could
-// not be run at all, and when ctx ended, whose attempt is then not judged.
+// shell that leaves them holding the pipes (boot-probes.ts:163-167). That group is a background
+// one, except at the operator's terminal, where it is the terminal's foreground job
+// (terminalJob). It errs when the command could not be run at all, when ctx ended, whose attempt
+// is then not judged, and when the terminal's Ctrl-C ended the attempt.
 func (g pluginGate) run(ctx context.Context, script string, args ...string) (ran, error) {
 	attempt, cancel := context.WithTimeout(ctx, g.timeout)
 	defer cancel()
-	cmd := exec.CommandContext(attempt, "sh", append([]string{"-c", script, "sh"}, args...)...)
+	job := foregroundOf(g.stdin, g.echo)
+	cmd := exec.CommandContext(attempt, "sh", append([]string{"-c", job.script(script), "sh"}, args...)...)
 	environ := make([]string, 0, len(g.env))
 	for _, name := range slices.Sorted(maps.Keys(g.env)) {
 		environ = append(environ, name+"="+g.env[name])
 	}
 	cmd.Env = environ
 	cmd.Dir = g.workDir
+	cmd.Stdin = g.stdin
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	job.attach(cmd)
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	cmd.WaitDelay = time.Second
 	started := time.Now()
 	err := cmd.Run()
+	job.release()
 	if ctx.Err() != nil {
 		return ran{}, ctx.Err()
+	}
+	if job.interrupted(cmd.ProcessState) {
+		return ran{}, errors.New("the probe was interrupted at the terminal")
 	}
 	var exitErr *exec.ExitError
 	if err != nil && !errors.As(err, &exitErr) && !errors.Is(err, exec.ErrWaitDelay) {
@@ -591,21 +625,21 @@ type ImageProbe struct {
 	PluginRoot string
 }
 
-// imageProbeTimeout is each image-probe attempt's budget: the default
-// slow_command_timeout_seconds, so the image gate and a default-configured daemon agree
+// defaultProbeTimeout is each image-probe and controller-probe attempt's budget: the default
+// slow_command_timeout_seconds, so both agree with a default-configured daemon's gate
 // (IMAGE_PROBE_TIMEOUT_MS, boot-probes.ts:56-58).
-const imageProbeTimeout = 300 * time.Second
+const defaultProbeTimeout = 300 * time.Second
 
 // ProbeImage runs the image's launch probes: pi.agents; then the daemon's own gate — the plugin
 // held to Contract, then loaded, from the manifest it was held by; then the session-storage
 // setting, which only the image runs (boot-probes.ts:11-21); then, when the profile is routed
 // through a gateway, one model round trip through it (verifyModelRoute). The contract comes before
 // the load, as in the daemon's gate, so a plugin of another contract is refused as a reinstall
-// rather than sent to `omp plugin list`. Each attempt is bounded by imageProbeTimeout and retried
+// rather than sent to `omp plugin list`. Each attempt is bounded by defaultProbeTimeout and retried
 // under bootprobe.Image: an image build has no supervisor and must finish.
 func ProbeImage(ctx context.Context, p ImageProbe) error {
 	return pluginGate{
-		env: p.Env, workDir: p.WorkDir, invocation: p.Omp, timeout: imageProbeTimeout,
+		env: p.Env, workDir: p.WorkDir, invocation: p.Omp, timeout: defaultProbeTimeout,
 		retry: bootprobe.Image, contract: p.Contract, model: p.Model, route: p.Route, keyFile: p.KeyFile,
 		pluginRoot: p.PluginRoot, log: p.Log,
 	}.verifyImage(ctx)
@@ -626,4 +660,64 @@ func (g pluginGate) verifyImage(ctx context.Context) error {
 		return nil
 	}
 	return g.verifyModelRoute(ctx)
+}
+
+// ControllerProbe is `legion controller start`'s gate on the operator's Oh My Pi, run before the
+// command's one daemon call: the mint that call asks for revokes the incumbent controller, and no
+// boot gate runs on the operator's machine.
+type ControllerProbe struct {
+	// Omp is the resolved OMP invocation and Prefix the launch prefix: what the controller runs.
+	Omp    string
+	Prefix []string
+	// Env is the environment the controller's Oh My Pi runs under, and WorkDir the directory it
+	// runs in, `<state_dir>/controller`, which must exist.
+	Env     map[string]string
+	WorkDir string
+	// Stdin is the operator's standard input, which the controller then reads: a launch prefix
+	// like `secrets` scopes a human-tier grant by the terminal it runs on, and refuses a stdin that
+	// is not one. When it is the terminal the command runs at, each attempt runs as its foreground
+	// job, so a prefix may also read it (a PIN) or change its modes.
+	Stdin io.Reader
+	// Stderr also receives each foreground attempt's stderr, where a prefix's prompt goes.
+	Stderr io.Writer
+	// Contract is the Go daemon API contract the loaded plugin must declare.
+	Contract int
+	// Log receives each transient failure the retry waits out.
+	Log *slog.Logger
+}
+
+// controllerProbeRetry is the controller probe's retry: short, since the operator waits at the
+// terminal, and bounded, since nothing supervises the command.
+var controllerProbeRetry = bootprobe.Retry{Initial: 2 * time.Second, Max: 10 * time.Second, Attempts: 3}
+
+// ProbeController launches Oh My Pi as the controller launches it — the launch prefix and the
+// invocation, under the controller's environment, in its directory — and holds the pi-legion-envoy
+// it loaded to Contract: the manifest of the file Oh My Pi reports loading it from. Which copy loads
+// is Oh My Pi's own resolution rather than a port of it, so a `--profile` in the invocation, a
+// project plugin root above the directory, a dotenv file Oh My Pi reads itself, the launch prefix,
+// or a symlinked state directory cannot make the check read another copy than the one the
+// controller runs. Unlike the daemon's gate, which names every variable of the pane environment it
+// probes, the load comes first: on the operator's machine only Oh My Pi can say which manifest to
+// read. Each attempt has the default slow-command budget, defaultProbeTimeout, as the image probe's
+// does.
+func ProbeController(ctx context.Context, p ControllerProbe) error {
+	g := pluginGate{
+		env: p.Env, workDir: p.WorkDir, invocation: p.Omp, prefix: p.Prefix, timeout: defaultProbeTimeout,
+		retry: controllerProbeRetry, contract: p.Contract, stdin: p.Stdin, echo: p.Stderr,
+		name: "controller probe", log: p.Log,
+	}
+	// Neither refusal names a profile: which one Oh My Pi reads is its own resolution, which this
+	// does not port, so the words say only what Oh My Pi did, where it ran, and how.
+	launch := tmux.WithOmpLaunchPrefix(p.Prefix, p.Omp)
+	location, err := g.loadedFrom(ctx, fmt.Errorf("Oh My Pi, launched as the controller launches it (%q, in %s), did not load pi-legion-envoy (not installed, disabled, or unregistered). Install the @sjawhar/pi-legion-envoy release built from this daemon's commit into the Oh My Pi the controller runs, and check it with `cd %s && %s plugin list` under the controller's environment: a .env or a project plugin root there applies",
+		launch, p.WorkDir, p.WorkDir, launch))
+	if err != nil {
+		return err
+	}
+	manifest, err := loadedManifest(location)
+	if err != nil {
+		return err
+	}
+	_, err = verifyPluginContract(manifest, "the Oh My Pi installation it loaded from", p.Contract)
+	return err
 }

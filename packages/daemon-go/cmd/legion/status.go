@@ -25,8 +25,11 @@ func runIssueStatus(ctx context.Context, issue, status string, args []string, st
 		fmt.Fprintln(stderr, issueStatusUsage)
 		return 2
 	}
+	// One decision, made once: an operator shell mints the grant with its bearer; otherwise the
+	// grant is the session's, read before the daemon is looked for.
+	fromShell := *c.tokenFile != ""
 	var grant string
-	if *c.tokenFile == "" {
+	if !fromShell {
 		read, err := grantFromEnvironment()
 		if err != nil {
 			fmt.Fprintf(stderr, "legion status: %v\n", err)
@@ -38,7 +41,7 @@ func runIssueStatus(ctx context.Context, issue, status string, args []string, st
 	if !ok {
 		return 1
 	}
-	if op.bearer != "" {
+	if fromShell {
 		if code := c.send(ctx, op, http.MethodPost, "/legion/v1/grants", struct{}{}, func(_ io.Writer, answer []byte) error {
 			var minted api.GrantResponse
 			if err := json.Unmarshal(answer, &minted); err != nil || minted.GrantID == "" {
