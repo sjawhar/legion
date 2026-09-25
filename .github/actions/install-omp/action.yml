@@ -1,0 +1,23 @@
+name: Install the pinned Oh My Pi
+description: >-
+  Installs the Oh My Pi build packages/daemon/src/daemon/omp-pin.ts pins (OMP_FORK_PIN, the
+  repository's one copy of the pin) through mise, and exports its path as LEGION_TEST_OMP for the
+  tests that run it; they refuse on GitHub Actions without one. Needs the repository checked out
+  and mise at ~/.local/bin/mise.
+runs:
+  using: composite
+  steps:
+    - name: Install the pinned Oh My Pi
+      shell: bash
+      env:
+        MISE_GITHUB_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        pin=$(sed -n 's/^export const OMP_FORK_PIN = "\(.*\)";$/\1/p' packages/daemon/src/daemon/omp-pin.ts)
+        test -n "$pin"
+        started=$(date +%s)
+        "$HOME/.local/bin/mise" install "$pin"
+        omp="$("$HOME/.local/bin/mise" where "$pin")/bin/omp"
+        "$omp" --version
+        echo "installed $pin in $(( $(date +%s) - started ))s"
+        echo "LEGION_TEST_OMP=$omp" >> "$GITHUB_ENV"
