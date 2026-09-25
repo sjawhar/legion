@@ -752,9 +752,10 @@ production_audit() {
   local sampled unvouched unanswered outside
   sampled=$(jq -s -c '[.[].session_id] | unique' "$evidence/interests.jsonl" 2>/dev/null) || sampled='[]'
   unvouched=$(jq -c --argjson sampled "$sampled" '[.[] | select(. as $s | $sampled | index($s) | not)]' <<<"$sessions")
-  unanswered=$(interests_unanswered "$evidence/interests-outcomes.txt") || unanswered='"the interest sample outcomes could not be read"'
+  unanswered=$(interests_unanswered "$evidence/interests-outcomes.txt") || unanswered='["the interest sample outcomes could not be read"]'
+  note_listener_restarts
   if [ "$unanswered" != "[]" ]; then
-    jq -c 'if type == "string" then [.] else [{"sessions the Envoy listener left unanswered for 3 samples in a row": .}] end' <<<"$unanswered" >"$evidence/production-interests-outside.json"
+    printf '%s\n' "$unanswered" >"$evidence/production-interests-outside.json"
   elif [ "$unvouched" != "[]" ]; then
     jq -c '[{"registered sessions with no interest sample": .}]' <<<"$unvouched" >"$evidence/production-interests-outside.json"
   elif outside=$(interests_outside "$evidence/interests.jsonl"); then
@@ -763,6 +764,20 @@ production_audit() {
     printf '"the interest samples could not be read"\n' >"$evidence/production-interests-outside.json"
   fi
   audit_verdict "$evidence/production-issues-touched-outside.json" "$evidence/production-interests-outside.json"
+}
+# note_listener_restarts records every listener-restart episode in $evidence/listener-restarts.json
+# and names, in a note, the release of the production listener whose run spans them, when one does.
+listener_release_repo=sjawhar/legion
+note_listener_restarts() {
+  local episodes first last releases
+  episodes=$(listener_restarts "$evidence/interests-outcomes.txt") || { note "the listener-restart episodes could not be read"; return 0; }
+  printf '%s\n' "$episodes" >"$evidence/listener-restarts.json"
+  [ "$episodes" != "[]" ] || return 0
+  first=$(jq -r 'map(.start) | min' <<<"$episodes")
+  last=$(jq -r 'map(.end // .start) | max' <<<"$episodes")
+  releases=$(timeout 60 gh run list -R "$listener_release_repo" --workflow 'Release Envoy Listener' --limit 30 --json databaseId,headSha,createdAt,updatedAt 2>/dev/null |
+    jq -r --arg at "$first" '[.[] | select(.createdAt <= $at and $at <= .updatedAt) | "run \(.databaseId) (\(.headSha[0:10]))"] | join(", ")') || releases=
+  note "the Envoy listener restarted from $first to $last: $(jq -r 'length' <<<"$episodes") episodes over $(jq -r 'map(.session) | unique | length' <<<"$episodes") sessions, $(jq -r 'map(.samples) | add' <<<"$episodes") samples answered 503 service starting; release: ${releases:-none known}"
 }
 # event_time_def is the jq definition of an event's time, Dispatch's created_at, as seconds since the
 # epoch with its fraction: as strings, "…:19.5Z" sorts before "…:19Z". An event without one, or a
@@ -819,22 +834,53 @@ interests_sample() {
     esac
   done
 }
-# interests_unanswered OUTCOMES prints, as one JSON array, each session whose samples went
-# unanswered 3 or more times in a row, with its longest such run. The sampler leaves 5 s between a
-# session's samples in any case; one or two failures widen that gap to 10 or 15 s, a blip the
-# evidence keeps; a third in a row is a listener not answering for that session, which the audit
-# cannot vouch past. An ok or absent answer ends a run.
+# outcome_sessions_def is the jq definition of sessions: the sample outcomes of $evidence/
+# interests-outcomes.txt (read raw, one string), grouped by session in the order sampled, each
+# folded into its longest run of unanswered samples and its listener-restart episodes.
+#
+# A restart episode is the listener answering 503 {"error":"service starting"}, as it does while a
+# release restarts it: a rolling deploy interleaves those 503s with answers from the task it
+# replaces. An episode opens at a session's first such 503 and takes every such 503 of the session
+# within restart_bound seconds of it; it ends at the session's first answered sample (ok or absent)
+# after its last 503. A 503 later than the bound opens the next episode. The episode's 503s count
+# toward no run of unanswered samples, and break none. Any other error (no answer, another code, a 503 with another body) counts: three in a row
+# is a listener not answering for that session, which the audit cannot vouch past. The sampler
+# leaves 5 s between a session's samples; one or two failures widen that gap to 10 or 15 s, a blip
+# the evidence keeps.
+# shellcheck disable=SC2016 # a jq program: its $ are jq's
+outcome_sessions_def='def ts: (capture("^(?<s>[0-9-]+T[0-9:]+)(\\.(?<f>[0-9]+))?Z$") // error("not an RFC3339 UTC time: \(.)")) | ((.s + "Z") | fromdateiso8601) + ((.f // "0") | "0." + . | tonumber);
+def sessions:
+  split("\n") | map(select(. != "") | (capture("^(?<time>\\S+) (?<session>\\S+) (?<kind>ok|absent|error)(?: (?<detail>.*))?$") // error("not a sample outcome: \(.)")) | . + {t: (.time | ts)})
+  | map(. + {restart: (.kind == "error" and ((.detail // "") | test("^answered 503: \\{\"error\":\"service starting\"\\}\\s*$")))})
+  | group_by(.session)
+  | map(reduce .[] as $s ({session: .[0].session, run: 0, worst: 0, episodes: []};
+      if $s.restart then
+        if .open and $s.t <= .open.st + $bound then .open.samples += 1 | .open.last = $s.time | .open.end = null | .open.seconds = null
+        else (if .open then .episodes += [.open] else . end) | .open = {start: $s.time, st: $s.t, last: $s.time, samples: 1, end: null, seconds: null} end
+      elif $s.kind == "error" then
+        .run += 1 | (if .run == 1 then .from = $s.time else . end)
+        | (if .run > .worst then .worst = .run | .wfrom = .from | .wto = $s.time | .wlast = "\($s.time) \($s.session) error \($s.detail // "")" else . end)
+      else
+        .run = 0 | (if .open and .open.end == null then .open.end = $s.time | .open.seconds = ($s.t - .open.st) else . end)
+      end)
+    | (if .open then .episodes += [.open] | .open = null else . end));'
+# interests_unanswered OUTCOMES prints, as one JSON array, what leaves the audit unable to vouch for
+# a session's samples: three unanswered in a row; a restart episode the session did not answer
+# after within restart_bound seconds of its start; or a second episode within restart_span seconds
+# of the first.
+restart_bound=300
+restart_span=600
 interests_unanswered() {
-  awk -v limit=3 '
-    $3 == "error" {
-      run[$2]++
-      if (run[$2] == 1) from[$2] = $1
-      if (run[$2] > worst[$2]) { worst[$2] = run[$2]; wfrom[$2] = from[$2]; wto[$2] = $1; wlast[$2] = $0 }
-      next
-    }
-    { run[$2] = 0 }
-    END { for (s in worst) if (worst[s] >= limit) printf "%s\t%d\t%s\t%s\t%s\n", s, worst[s], wfrom[s], wto[s], wlast[s] }
-  ' "$1" | jq -R -s -c '[split("\n")[] | select(. != "") | split("\t") | {session: .[0], consecutive: (.[1] | tonumber), from: .[2], to: .[3], last: .[4]}]'
+  jq -R -s -c --argjson bound "$restart_bound" --argjson span "$restart_span" "$outcome_sessions_def"' [sessions[]
+    | (select(.worst >= 3) | {"sessions the Envoy listener left unanswered for 3 samples in a row": {session, consecutive: .worst, from: .wfrom, to: .wto, last: .wlast}}),
+      (.session as $session | .episodes[] | select(.end == null) | {"a listener restart the session never answered after": {session: $session, start, last, samples}}),
+      (.session as $session | .episodes[] | select(.end != null and .seconds > $bound) | {"a listener restart longer than \($bound) s": {session: $session, start, end, seconds, samples}}),
+      (.session as $session | [.episodes[] | .st] as $starts | range(1; $starts | length) | select($starts[.] - $starts[. - 1] < $span) | {"more than one listener restart within \($span) s": {session: $session, starts: [$starts[. - 1], $starts[.]]}})]' "$1"
+}
+# listener_restarts OUTCOMES prints, as one JSON array, every restart episode of every session:
+# its start, end and sample count.
+listener_restarts() {
+  jq -R -s -c --argjson bound "$restart_bound" "$outcome_sessions_def"' [sessions[] | .session as $session | .episodes[] | {session: $session, start, end, samples, seconds}]' "$1"
 }
 # start_interests_sampler samples every 5 s while the daemon runs, besides every checkpoint's pass,
 # so a session that registers and ends between two checkpoints is still seen.
@@ -1357,10 +1403,16 @@ drive_spec "$tree3"
 wait_for_worker "$tree3" planner
 killed=" "
 kills=0
+# new_planner_pod: tree 3's planner claim runs a pod none of the kills took. It runs in this shell:
+# the killed list is a here-string, which the sh of an `sh -c` (dash) refuses as a syntax error.
+new_planner_pod() {
+  local inc
+  inc=$("$work/legion" state --json --config "$work/legion.yaml" | jq -r --arg i "$tree3" '.issues[$i].workers.planner.claim.locator.incarnation // empty')
+  [ -n "$inc" ] && ! grep -qF " $inc " <<<"$killed"
+}
 until issue_phase "$tree3" held >/dev/null 2>&1; do
   [ "$kills" -lt 8 ] || fail "$tree3 was not held after $kills killed planner launches"
-  until_true 600 "a new planner pod on $tree3" sh -c \
-    "inc=\$('$work/legion' state --json --config '$work/legion.yaml' | jq -r --arg i '$tree3' '.issues[\$i].workers.planner.claim.locator.incarnation // empty'); [ -n \"\$inc\" ] && ! grep -qF \" \$inc \" <<<'$killed'"
+  until_true 600 "a new planner pod on $tree3" new_planner_pod
   uid=$(claim_pod_uid "$tree3" planner)
   pod=$(claim_sandbox "$tree3" planner)
   driver_action kill "$uid"
@@ -1416,6 +1468,7 @@ begin node-release
 # Tree 1 lingers (linger_hours 0.3): after the pool's consolidateAfter, its node is gone while its
 # Sandboxes still exist Suspended and its volume is Bound.
 node=$(jq -r 'select(.object.kind == "Pod") | .object | select(.metadata.labels["legion.dev/tree"] == "'"$tree1"'") | .spec.nodeName // empty' "$evidence/pod-watch.json" | tail -1)
+[ -n "$node" ] || fail "the pod watch saw no pod of tree 1 on a node, so there is no node whose release to wait for"
 until_true 1500 "tree 1's node $node to be released" sh -c "out=\$(timeout 120 kubectl --context '$operator' get node '$node' -o name --ignore-not-found) && [ -z \"\$out\" ]"
 modes=$(op get sandboxes -l "legion.dev/project=$run_label,legion.dev/tree=$tree1" -o jsonpath='{.items[*].spec.operatingMode}')
 bound=$(op get pvc -l "legion.dev/project=$run_label,legion.dev/tree=$tree1" -o jsonpath='{.items[*].status.phase}')
@@ -1542,16 +1595,37 @@ caught=$(interests_outside "$evidence/controls/interests-outside.jsonl")
 jq -e 'any(.[]; .topic == "notifications.dispatch.issue.AGENTC-1")' <<<"$caught" >/dev/null ||
   fail "the interest filter let an outside topic through: $caught"
 note "the interest filter's control: an added topic outside the run (notifications.dispatch.issue.AGENTC-1) is caught"
-# The unanswered-sample rule: a blip passes, a listener that stops answering fails.
-printf '%s\n' "t1 control ok" "t2 control error unreachable: timeout" "t3 control ok" "t4 control error answered 503: busy" \
-  "t5 control error answered 503: busy" "t6 control absent" >"$evidence/controls/interests-outcomes-transient.txt"
-printf '%s\n' "t1 control ok" "t2 control error unreachable: timeout" "t3 control error answered 503: busy" \
-  "t4 control error unreachable: timeout" "t5 control ok" >"$evidence/controls/interests-outcomes-sustained.txt"
+# The unanswered-sample rule: a blip passes, a listener that stops answering fails, and so does a
+# listener restart past its bound or a 503 of another body; a restart within the bound passes.
+outcomes() { # outcomes START_SECOND OUTCOME…: one control sample per OUTCOME, 5 s apart
+  local at=$1 outcome
+  shift
+  for outcome in "$@"; do
+    printf '%s control %s\n' "$(date -u -d "@$at" +%FT%T.000Z)" "$outcome"
+    at=$((at + 5))
+  done
+}
+starting='error answered 503: {"error":"service starting"} '
+outcomes 1790000000 ok 'error unreachable: timeout' ok 'error answered 503: busy' 'error answered 503: busy' absent \
+  >"$evidence/controls/interests-outcomes-transient.txt"
+outcomes 1790000000 ok 'error unreachable: timeout' 'error answered 503: busy' 'error unreachable: timeout' ok \
+  >"$evidence/controls/interests-outcomes-sustained.txt"
+outcomes 1790000000 ok "$starting" ok "$starting" "$starting" "$starting" ok >"$evidence/controls/interests-outcomes-restart.txt"
+{ outcomes 1790000000 ok; for i in $(seq 0 61); do outcomes $((1790000005 + i * 5)) "$starting"; done; outcomes 1790000315 ok; } \
+  >"$evidence/controls/interests-outcomes-long-restart.txt"
+outcomes 1790000000 ok 'error answered 503: {"error":"overloaded"} ' 'error answered 503: {"error":"overloaded"} ' \
+  'error answered 503: {"error":"overloaded"} ' ok >"$evidence/controls/interests-outcomes-other-503.txt"
 [ "$(interests_unanswered "$evidence/controls/interests-outcomes-transient.txt")" = "[]" ] ||
   fail "two unanswered samples in a row failed the sample rule, which only three in a row do"
 [ "$(interests_unanswered "$evidence/controls/interests-outcomes-sustained.txt" | jq length)" = 1 ] ||
   fail "three unanswered samples in a row passed the sample rule"
-note "the unanswered-sample rule's controls: two failures in a row pass, three fail; this run had $(grep -c ' error ' "$evidence/interests-outcomes.txt") unanswered samples of $(grep -c . "$evidence/interests-outcomes.txt")"
+[ "$(interests_unanswered "$evidence/controls/interests-outcomes-restart.txt")" = "[]" ] ||
+  fail "a listener restart answered within ${restart_bound} s failed the sample rule"
+[ "$(interests_unanswered "$evidence/controls/interests-outcomes-long-restart.txt" | jq length)" -gt 0 ] ||
+  fail "a listener restart of 310 s passed the sample rule"
+[ "$(interests_unanswered "$evidence/controls/interests-outcomes-other-503.txt" | jq length)" = 1 ] ||
+  fail "three 503s of another body in a row passed the sample rule"
+note "the unanswered-sample rule's controls: two failures in a row pass, three fail; a restart within ${restart_bound} s passes, one of 310 s and three 503s of another body fail; this run had $(grep -c ' error ' "$evidence/interests-outcomes.txt") unanswered samples of $(grep -c . "$evidence/interests-outcomes.txt")"
 # The collector itself, on real data: an actor that did write outside LEGSMOKE during the run,
 # counted as one of the run's writers, must be found. Nothing is written for it.
 find_outside_writer

@@ -504,12 +504,22 @@ every checkpoint while the daemon runs. The run fails when:
 - the listener left one session's samples unanswered 3 times in a row. That leaves a gap of at
   least 20 s against the sampler's 5 s. One or two failures in a row are a blip, kept in
   `interests-outcomes.txt`, and their count is in the checkpoint's note;
+- a listener restart outlasted its bound. While a release restarts the listener it answers
+  `503 {"error":"service starting"}`, interleaved with answers from the task it replaces. Those
+  503s count toward no run of unanswered samples, inside a restart episode: it opens at a
+  session's first such 503, takes every such 503 within 300 s of it, and ends at the session's
+  next answered sample. The run fails when a session does not answer again within 300 s of the
+  episode's start, or has a second episode within 600 s of the first. Any other error, and a 503
+  with another body, counts as unanswered. Each episode's start, end and sample count is in
+  `listener-restarts.json`, and the checkpoint's note names the listener release whose run spans
+  them, when one does;
 - any sampled topic falls outside the run. The run's topics name LEGSMOKE, its subject space `notifications.legion.legsmoke.`, its repository's GitHub subjects (`notifications.github.sjawhar.legion-smoke.`, where an agent follows its own pull request), operator-close's tree, a `legion-legsmoke-` role, or the session itself.
 
 Four controls show the audit can fail. The verdict is given a synthetic outside issue and must
 refuse it. The interest filter is given the run's samples plus one outside topic and must catch
-it. The unanswered-sample rule passes two failures in a row and fails three. The collector, on the
-run's real
+it. The unanswered-sample rule passes two failures in a row and fails three, passes a restart
+answered within its bound, and fails a 310 s restart and three 503s of another body. The
+collector, on the run's real
 window, is given one actor that did write outside LEGSMOKE, and must find that actor's events. An
 event is dated by Dispatch's `created_at`; one without it stops the audit, never counts as older.
 
