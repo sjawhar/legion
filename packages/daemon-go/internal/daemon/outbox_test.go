@@ -311,9 +311,6 @@ func TestOutboxSuperviseStartsResumesSuspendsStopsAndDeduplicatesDelivery(t *tes
 	if err := machine.Handle(context.Background(), supervise.RequestReady{Claim: token, Generation: 1, Session: "ses-plan"}); err != nil {
 		t.Fatalf("ready planner: %v", err)
 	}
-	// The planner's phase ends, which is what queues its suspend.
-	issue.Phase = phase.Implementing
-	putOutboxIssue(t, pool, records, issue)
 	if err := runner.execute(context.Background(), mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "suspend", Tree: issue.Tree, Role: claim.RolePlanner, Generation: issue.Generation}, time.Now())); err != nil {
 		t.Fatalf("suspend planner: %v", err)
 	}

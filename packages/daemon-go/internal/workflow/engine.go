@@ -625,7 +625,7 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	// that task was sent, and stop the worker in the phase it now serves.
 	leaving, starting := RoleFor(from), RoleFor(row.To)
 	if leaving != starting {
-		if err := e.suspend(ctx, tx, issue, leaving); err != nil {
+		if err := e.suspend(ctx, tx, issue, leaving, from); err != nil {
 			return err
 		}
 	}

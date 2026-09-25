@@ -348,12 +348,13 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		if !found {
 			return nil
 		}
-		// A suspend stops a role because the issue left the role's phases. Once the issue is back
-		// in one of them the role has been handed its work again, and a suspend from before that
-		// return, retried late, would stop the worker in the phase it now serves.
-		if workflow.RoleFor(issue.Phase) == payload.Role {
-			r.log.Info("outbox suspend serves a role the issue is back in; finished without acting", "row", row.ID, "issue", issue.Key,
-				"phase", issue.Phase, "role", payload.Role)
+		// A transition's suspend, retried after the issue came back to a phase its role works,
+		// would stop the worker in the phase it now serves. The phase is read before the suspend
+		// acts, not in one transaction with it: a transition committing in between costs one
+		// suspend, which that transition's own start then resumes.
+		if payload.Leaves != "" && !workflow.SuspendApplies(issue.Phase, payload.Role) {
+			r.log.Info("outbox suspend of a role the issue is back in; finished without acting", "row", row.ID, "issue", issue.Key,
+				"leaves", payload.Leaves, "phase", issue.Phase, "role", payload.Role)
 			return nil
 		}
 		switch machine.Claim().State {

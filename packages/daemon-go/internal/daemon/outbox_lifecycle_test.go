@@ -270,11 +270,12 @@ func TestAChildAHumanMovesOutOfTheWorkflowStopsAndKeepsTheHumansStatus(t *testin
 }
 
 // A backward move between two of one role's phases (the implementer's retro back to implementing)
-// stops the worker and hands it the new phase. A suspend that fails and is retried must never land
-// after the worker has been handed that phase: it would stop the worker in its new phase and retire
-// the new task with it, and nothing would ever resume it, since the phase waits for that worker's
-// handoff. Here the runtime cannot stop the pane at first; the agent ends its retro turn and takes
-// whatever task it is sent; then the runtime recovers and every row runs to its end.
+// hands the running worker the new phase. No suspend may stop that worker once it has the new
+// phase: a stopped worker's new task is retired with it, and nothing would ever resume it, since
+// the phase waits for that worker's handoff. Here the runtime cannot stop a pane at first, so a
+// suspend queued by the move would fail and be retried; the worker finishes its retro turn and
+// takes whatever task it is sent; then the runtime recovers and every row runs to its end, and the
+// worker is still running with the implementing task.
 func TestASameRoleBackwardMoveNeverStopsTheWorkerInItsNewPhase(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
@@ -383,11 +384,11 @@ func TestASameRoleBackwardMoveNeverStopsTheWorkerInItsNewPhase(t *testing.T) {
 	}
 }
 
-// A suspend that stops a role because the issue left the role's phases is stale once the issue is
-// back in one of them: the role was handed its work again, and a suspend retried from before that
+// A transition's suspend, stamped with the phase it ends, is stale once the issue is back in a phase
+// its role works: the role was handed its work again, and a suspend retried from before that
 // return must not stop it. Here the implementer's suspend from the move to testing failed and backed
-// off; the tester failed the change, and the implementer is working on implementing again when the
-// old suspend comes due.
+// off; the tester failed the change, and the implementer is ready in implementing again when the old
+// suspend comes due.
 func TestASuspendFromBeforeItsRoleWasHandedWorkAgainNeverActs(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
@@ -417,11 +418,66 @@ func TestASuspendFromBeforeItsRoleWasHandedWorkAgainNeverActs(t *testing.T) {
 	}
 	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, project: "legion", log: quietLogger(), now: time.Now}
 
-	stale := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "suspend", Tree: issue.Tree, Role: claim.RoleImplementer, Generation: 1}, time.Now())
+	stale := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "suspend", Tree: issue.Tree, Role: claim.RoleImplementer, Generation: 1, Leaves: phase.Implementing}, time.Now())
 	if err := runner.execute(ctx, stale); err != nil {
 		t.Fatalf("the stale suspend = %v, want it finished", err)
 	}
 	if got := machine.Claim().State; got != supervise.StateReady {
 		t.Fatalf("implementer = %s after a suspend from before it was handed implementing again, want still ready", got)
+	}
+}
+
+// A root a human moves out of the workflow lingers: only the root is parked in done, and every
+// claim of every tree member is suspended. A child keeps its phase, so its running worker is one
+// whose role works the child's phase, and its suspend must act all the same: nothing else stops
+// that worker before the linger's tree close, and a completion from it would still advance the child
+// inside a tree the human closed. Found by #1347's review, whose test this is.
+func TestARootLeavingTheWorkflowSuspendsItsChildsWorker(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	ctx := context.Background()
+	root := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U", LastDispatchSeq: 5}
+	parent := root.Key
+	child := record.Issue{Key: "LEGION-209", Project: "LEGION", Tree: "LEGION-208", Parent: &parent, Title: "Child", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U", LastDispatchSeq: 5}
+	putOutboxIssue(t, pool, records, root)
+	putOutboxIssue(t, pool, records, child)
+	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		return records.PutSlot(ctx, tx, record.Slot{Issue: root.Key, Index: 0, AdmittedAt: time.Now()})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	token, err := claim.NewToken("legion", child.Key, claim.RoleImplementer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	machine, _, err := sup.Create(ctx, supervise.Claim{Token: token, Project: "legion", Tree: child.Tree, Issue: child.Key, Role: claim.RoleImplementer, State: supervise.StateQueued}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := machine.Handle(ctx, supervise.RequestSpawn{Claim: token}); err != nil {
+		t.Fatal(err)
+	}
+	generation := machine.Claim().Generation
+	for _, ev := range []supervise.Event{
+		supervise.RequestRegister{Claim: token, Generation: generation, Session: "ses-impl", SessionFile: "/tmp/impl.jsonl"},
+		supervise.RequestReady{Claim: token, Generation: generation, Session: "ses-impl"},
+	} {
+		if err := machine.Handle(ctx, ev); err != nil {
+			t.Fatalf("handle %T: %v", ev, err)
+		}
+	}
+	engine := workflow.New(records, workflow.Config{Project: "legion"}, quietLogger())
+	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, project: "legion", log: quietLogger(), now: time.Now,
+		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: root.Key, Status: "backlog"}}, notices: &outboxPublisher{}, handlers: []intake.Handler{engine}}
+
+	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "ev-backlog", intake.DispatchIssue{Key: root.Key, Seq: 6, Type: "issue.updated", Status: "backlog", Title: root.Title, Rank: "U"}, engine); err != nil {
+		t.Fatalf("backlog: %v", err)
+	}
+	if err := runner.RunOnce(ctx); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got := machine.Claim().State; got != supervise.StateSuspended {
+		t.Fatalf("child implementer = %s after its root moved to backlog, want suspended", got)
 	}
 }

@@ -32,6 +32,13 @@ func RoleFor(p phase.Phase) claim.Role {
 	}
 }
 
+// SuspendApplies is whether a transition's suspend of role still applies with the issue in phase
+// current: it stopped the role because the issue left the role's phases, so once the issue is back
+// in one of them the role has been handed its work again, and the suspend must not stop it there.
+func SuspendApplies(current phase.Phase, role claim.Role) bool {
+	return RoleFor(current) != role
+}
+
 func (e *Engine) enqueue(ctx context.Context, tx pgx.Tx, issue string, payload record.OutboxPayload) error {
 	row, err := record.NewOutboxRow(issue, payload, e.now())
 	if err != nil {
@@ -72,11 +79,12 @@ func (e *Engine) clearHandoff(ctx context.Context, tx pgx.Tx, issue string, role
 	return e.store.PutPhase(ctx, tx, row)
 }
 
-func (e *Engine) suspend(ctx context.Context, tx pgx.Tx, issue record.Issue, role claim.Role) error {
+// suspend stops the role the issue leaves, the transition's suspend stamped with the phase it ends.
+func (e *Engine) suspend(ctx context.Context, tx pgx.Tx, issue record.Issue, role claim.Role, leaves phase.Phase) error {
 	if role == "" || role == claim.RoleArchitect {
 		return nil
 	}
-	return e.supervise(ctx, tx, issue, "suspend", role, "")
+	return e.enqueue(ctx, tx, issue.Key, record.SuperviseRequest{Op: "suspend", Tree: issue.Tree, Role: role, Generation: issue.Generation, Leaves: leaves})
 }
 
 // start starts the phase worker of the issue's current phase, a start stamped with that phase.

@@ -76,6 +76,11 @@ type SuperviseRequest struct {
 	// finishes without acting. It is empty for the architect, which serves every phase, and for a
 	// suspend or a tree's close, which must still act after the issue moves on.
 	Phase phase.Phase `json:"phase,omitempty"`
+	// Leaves is the phase a transition's suspend ends. Such a suspend finishes without acting once
+	// the issue is back in a phase its role works (workflow.SuspendApplies). It is empty for the
+	// suspends a linger or a child's leave queues, which stop every claim whatever phase its issue
+	// holds, and for every other operation.
+	Leaves phase.Phase `json:"leaves,omitempty"`
 }
 
 func (SuperviseRequest) OutboxKind() OutboxKind { return OutboxKindSupervise }
