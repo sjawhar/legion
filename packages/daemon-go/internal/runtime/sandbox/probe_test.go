@@ -279,6 +279,18 @@ func TestProbeImageRetriesAProbeThatNeverFinished(t *testing.T) {
 			[]string{"probe pod " + probeSandboxName + " still Pending after 300ms (container probe waiting: ImagePullBackOff)"}},
 		{"no pod at all", func(g *probeRig) { g.hold.Store(true) },
 			[]string{"probe sandbox " + probeSandboxName + " has no pod after 300ms"}},
+		// A pod whose model turn outlasts the attempt: what it logged so far names the gateway.
+		{"a pod still in its model turn", func(g *probeRig) {
+			g.with(func() {
+				g.log = "probe-image: pi.agents answered\nprobe-image: a model turn through https://middleman.legion.internal is waiting"
+			})
+			g.finishes(func(p *corev1.Pod) {
+				p.Status = corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{
+					Name: probeContainer, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+				}}}
+			})
+		}, []string{"probe pod " + probeSandboxName + " still Running after 300ms", "log tail: probe-image: pi.agents answered",
+			"a model turn through https://middleman.legion.internal is waiting"}},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			g := newProbeRig(t, nil)
@@ -474,8 +486,8 @@ func TestProbeImageReplacesOnlyItsOwnProjectsLeftover(t *testing.T) {
 // probe, and a change to any one of them probes again. A pull from another registry at the same
 // digest proves nothing about the first, a devbox daemon may keep one state directory for a kind
 // cluster and for production, and a pass on one proves nothing on the other. Each case starts from
-// the first pass, so it differs from the cache in exactly one key, and dropping that key's
-// comparison fails it.
+// the first pass, so it differs from the cache in exactly one key; the pass is keyed on the probe
+// pod's fingerprint, which holds every one of them.
 func TestProbeImageRemembersAPassPerImageContractAndProbePod(t *testing.T) {
 	p := probeOptions(t)
 	cache := filepath.Join(p.StateDir, "image-probes", testDigestHex+".json")
