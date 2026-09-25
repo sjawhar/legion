@@ -10,6 +10,7 @@ import (
 	"github.com/reearth/ygo/provider/websocket"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
 // liveWrite is one transaction's writes to one live document. They run on a fork of the room's
@@ -51,6 +52,14 @@ type liveWrite struct {
 	// forkedFrom is the room document fork was last brought up to date from.
 	forkedFrom *crdt.Doc
 	updates    [][]byte
+	// tree and markdown are the document as this transaction's latest operation left it,
+	// rendered once by that operation (applyJoined) for the version its transaction may write.
+	// forkLive drops them whenever the fork they describe moves.
+	tree     *pmdoc.Node
+	markdown string
+	// anchorsTree is the tree the transaction's anchors were last refreshed against, so the
+	// version write does not refresh the same tree's anchors a second time.
+	anchorsTree *pmdoc.Node
 	// credits are the authors of the transaction's content changes; actor made the latest.
 	credits  map[string]model.Actor
 	actor    *model.Actor
@@ -151,9 +160,26 @@ func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 		return nil, err
 	}
 	if write.fork != nil && room == write.forkedFrom {
+		// Content the room gained moves the fork, so the rendering taken from it no longer
+		// describes the document. What says the fork moved is the fork itself, read on either
+		// side of this one apply: nothing else can be trusted. Two reads of the room are two
+		// snapshots - Server.Apply holds no lock across its callback - so an update landing
+		// between them is in one and not the other, and the fork would keep a rendering it
+		// has already moved past. The fork's own state vector and delete set together are the
+		// whole answer, because a deletion creates no struct and so advances no clock, while
+		// the update and every observer fire even for an update that integrates nothing.
+		var wasClocks crdt.StateVector
+		var wasDeletes *crdt.IDSet
+		if write.tree != nil {
+			wasClocks, wasDeletes = write.fork.StateVector(), crdt.DeleteSetFromDoc(write.fork)
+		}
 		if err := crdt.ApplyUpdateV1(write.fork, gained, nil); err != nil {
 			write.fork = nil
+			write.dropRendering()
 			return nil, fmt.Errorf("bring live document fork up to date: %w", err)
+		}
+		if write.tree != nil && !forkHeld(wasClocks, wasDeletes, write.fork) {
+			write.dropRendering()
 		}
 		return write.fork, nil
 	}
@@ -168,7 +194,50 @@ func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 	}
 	write.fork = fork
 	write.forkedFrom = room
+	// A rebuilt fork is a different document from the one the rendering was taken from.
+	write.dropRendering()
 	return fork, nil
+}
+
+// dropRendering forgets the rendering and the anchor refresh taken from a fork that has moved.
+func (w *liveWrite) dropRendering() {
+	w.tree, w.markdown, w.anchorsTree = nil, "", nil
+}
+
+// forkHeld reports whether fork still carries exactly the content clocks and deletes describe.
+// A deletion advances no clock, so the delete set is half the answer.
+func forkHeld(clocks crdt.StateVector, deletes *crdt.IDSet, fork *crdt.Doc) bool {
+	now := fork.StateVector()
+	if len(clocks) != len(now) {
+		return false
+	}
+	for client, clock := range clocks {
+		if now[client] != clock {
+			return false
+		}
+	}
+	return sameDeletes(deletes, crdt.DeleteSetFromDoc(fork))
+}
+
+// sameDeletes reports whether two delete sets cover the same runs. Ranges are normalized, so
+// equal sets compare equal run for run.
+func sameDeletes(was, now *crdt.IDSet) bool {
+	wasClients, nowClients := was.Clients(), now.Clients()
+	if len(wasClients) != len(nowClients) {
+		return false
+	}
+	for _, client := range wasClients {
+		wasRanges, nowRanges := was.Ranges(client), now.Ranges(client)
+		if len(wasRanges) != len(nowRanges) {
+			return false
+		}
+		for index := range wasRanges {
+			if wasRanges[index] != nowRanges[index] {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // joinRead joins a read of artifactID to the calling transaction, as joinLiveWrite joins a write.
