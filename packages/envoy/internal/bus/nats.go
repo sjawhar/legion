@@ -155,11 +155,19 @@ func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB 
 		}
 	}
 	opts.AsyncErrorCB = func(_ *nats.Conn, sub *nats.Subscription, err error) {
+		level := slog.LevelError
+		if errors.Is(err, nats.ErrConsumerNotActive) {
+			// Every consumer Envoy runs with idle heartbeats is a KV watcher's ordered consumer,
+			// which reports missed heartbeats only while the connection is not connected; once it
+			// is connected again, nats.go resets the consumer instead. The report restates the
+			// disconnect logged above, once per watcher.
+			level = slog.LevelWarn
+		}
 		if sub != nil {
-			slog.Error("envoy nats async error", slog.String("subject", sub.Subject), slog.String("error", err.Error()))
+			slog.Log(context.Background(), level, "envoy nats async error", slog.String("subject", sub.Subject), slog.String("error", err.Error()))
 			return
 		}
-		slog.Error("envoy nats async error", slog.String("error", err.Error()))
+		slog.Log(context.Background(), level, "envoy nats async error", slog.String("error", err.Error()))
 	}
 	return opts
 }
@@ -503,7 +511,8 @@ func (c *Client) runReconnectHooks(conn *nats.Conn) error {
 	return nil
 }
 
-// Subscribe creates the listener's recoverable JetStream subscription.
+// Subscribe creates the listener's recoverable JetStream subscription. The client keeps one
+// JetStream subscription: a later call unsubscribes the handle an earlier one returned.
 func (c *Client) Subscribe(subject string, handler nats.MsgHandler, opts ...nats.SubOpt) (*nats.Subscription, error) {
 	c.mu.Lock()
 	conn, js := c.Conn, c.js
@@ -518,7 +527,8 @@ func (c *Client) Subscribe(subject string, handler nats.MsgHandler, opts ...nats
 
 // SubscribeCore creates a recoverable core NATS subscription. The optional queue
 // identifies the stable queue group that shares role-lane delivery between
-// overlapping listeners.
+// overlapping listeners. The client keeps one core subscription: a later call
+// unsubscribes the handle an earlier one returned.
 func (c *Client) SubscribeCore(subject string, handler nats.MsgHandler, queues ...string) (*nats.Subscription, error) {
 	if err := c.ensureConn(); err != nil {
 		return nil, err
@@ -542,6 +552,13 @@ func (c *Client) registerSubscription(next recoverableSubscription, conn *nats.C
 	c.subscriptionsMu.Lock()
 	defer c.subscriptionsMu.Unlock()
 	subscription := &c.subscriptions[next.transport]
+	// Registering replaces the transport's subscription, so the one it replaces stops delivering:
+	// the listener's self-health rebuild re-registers after its durable consumer was lost, and the
+	// old handle, bound to that consumer's deliver inbox, would otherwise stay subscribed for good.
+	// For a consumer the library created, Unsubscribe also deletes it, as it always does.
+	if subscription.active != nil {
+		_ = subscription.active.Unsubscribe()
+	}
 	*subscription = next
 	if err := restoreSubscription(subscription, conn, js); err != nil {
 		subscription.active = nil
@@ -551,10 +568,6 @@ func (c *Client) registerSubscription(next recoverableSubscription, conn *nats.C
 }
 
 func restoreSubscription(subscription *recoverableSubscription, conn *nats.Conn, js nats.JetStreamContext) error {
-	if subscription.active != nil {
-		_ = subscription.active.Unsubscribe()
-		subscription.active = nil
-	}
 	var (
 		sub *nats.Subscription
 		err error
@@ -765,7 +778,11 @@ func (c *Client) restoreSubscriptions() error {
 	}
 	for index := range c.subscriptions {
 		subscription := &c.subscriptions[index]
-		if subscription.handler == nil {
+		// A reconnect in place leaves a subscription valid: nats.go has already re-sent its SUB, so
+		// it delivers as it did. Unsubscribing it to bind again would race the server's release of
+		// the consumer's push binding, which refuses the new bind while it still sees the old one.
+		// One on a replaced connection is invalid and is bound again.
+		if subscription.handler == nil || subscription.active.IsValid() {
 			continue
 		}
 		slog.Info("envoy nats resubscribing", slog.String("subject", subscription.subject))

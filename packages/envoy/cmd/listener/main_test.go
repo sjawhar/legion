@@ -1967,6 +1967,57 @@ func TestDurableConsumerSurvivesUnsubscribe(t *testing.T) {
 	_ = resub.Unsubscribe()
 }
 
+// A self-health rebuild that recreates a lost durable consumer replaces the listener's
+// subscription rather than adding one beside it. The subscription bound to the lost consumer's
+// deliver inbox can never deliver again; left subscribed, each rebuild adds one more SUB the
+// connection carries until the process exits.
+func TestRebuildingALostDurableConsumerReplacesItsSubscription(t *testing.T) {
+	client, err := bus.Connect([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("connect bus: %v", err)
+	}
+	t.Cleanup(client.Close)
+	consumer := "listener-rebuild-replaces-subscription"
+	_ = client.JS().DeleteConsumer(bus.Stream, consumer)
+	t.Cleanup(func() { _ = client.JS().DeleteConsumer(bus.Stream, consumer) })
+
+	var deliveries atomic.Int32
+	handler := func(msg *natsgo.Msg) {
+		deliveries.Add(1)
+		_ = msg.Ack()
+	}
+	if _, err := startListenerSubscription(client, consumer, handler); err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	subscriptions := client.Conn.NumSubscriptions()
+	durableProbe := func() error {
+		_, err := client.JS().ConsumerInfo(bus.Stream, consumer)
+		return err
+	}
+	for rebuild := 1; rebuild <= 2; rebuild++ {
+		if err := client.JS().DeleteConsumer(bus.Stream, consumer); err != nil {
+			t.Fatalf("rebuild %d: lose the durable consumer: %v", rebuild, err)
+		}
+		if err := rebuildListenerDependencies(client, nil, nil, nil, durableProbe, consumer, handler); err != nil {
+			t.Fatalf("rebuild %d: %v", rebuild, err)
+		}
+		if got := client.Conn.NumSubscriptions(); got != subscriptions {
+			t.Fatalf("rebuild %d: the connection carries %d subscriptions, want the %d it had before any rebuild", rebuild, got, subscriptions)
+		}
+	}
+
+	if _, err := client.JS().Publish("notifications.github.acme.widgets.push.branch.main", []byte(`{}`)); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for deliveries.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the rebuilt subscription never delivered")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // TestBoundDurableConsumerIsNotStolen pins the rolling-deploy contract: a
 // second listener attaching to a consumer that is still push-bound by a live
 // listener must be rejected, not delete the consumer to steal the binding —
@@ -3492,7 +3543,7 @@ func TestRunSelfHealthMonitor_RebuildsTerminalWatcher(t *testing.T) {
 			},
 			func() error {
 				rebuilds.Add(1)
-				return rewatchListenerKVWatchers(client.Conn, sessions, nil)
+				return rewatchListenerKVWatchers(client.Conn, nil, sessions, nil)
 			},
 			func() { terminated <- struct{}{} },
 			time.Millisecond,
