@@ -1,5 +1,10 @@
 import type { IssueKey } from "@legion/contracts";
-import { type CiFetchFailure, type CiFetchResult, isCiFetchFailure } from "../state/fetch";
+import {
+  type CiFetchFailure,
+  type CiFetchResult,
+  type ComparedPaths,
+  isCiFetchFailure,
+} from "../state/fetch";
 import type { GitHubPRRef } from "../state/types";
 import { type DaemonConfig, projectKeys } from "./config";
 import type { DispatchClient } from "./dispatch-client";
@@ -8,6 +13,7 @@ import {
   type AdmissionDriftRepair,
   isStaleQueuedStatus,
   type LegionState,
+  type PrState,
   staleQueueEntryReason,
 } from "./legion-state";
 import {
@@ -18,10 +24,12 @@ import {
   type DispatchIssueEvent,
   type Effect,
   type EnvelopeJson,
+  handoffOnlyPaths,
   type ReducerConfig,
   reduceDispatchEvent,
   resetPrHead,
   settleCiVerdict,
+  settleReviewDecision,
   supersededBy,
   uncertifyCiVerdict,
   writeCiFence,
@@ -47,6 +55,9 @@ export interface RunResyncDeps {
   dispatchClient: DispatchClient;
   saveState(): Promise<void>;
   fetchCiStatusBatch(prRefs: Record<string, GitHubPRRef>): Promise<Record<string, CiFetchResult>>;
+  /** GitHub's compare of two commits on `repo` (`owner/name`); throws when GitHub cannot answer.
+   * Asked only for a PR whose `changes_requested` decision is unsettled. */
+  compareChangedPaths(repo: string, base: string, head: string): Promise<ComparedPaths>;
   applyEffects(effects: Effect[], envelope: EnvelopeJson): Promise<void>;
   /** Reconciles active roots with admission through the process owner, which promotes a queued
    * root if removing an invalid active entry opened capacity. */
@@ -140,6 +151,11 @@ async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<CiFetchFa
       pr.headUpdatedAt = headUpdatedAt;
       pr.headUpdatedAtSource = "resync";
     }
+    // A decision kept across heads no push settled — this read found the head, or its push
+    // webhook never came — is settled here from GitHub's compare of the whole range.
+    if (pr.reviewDecisionUnsettledFrom !== undefined) {
+      await settleFromCompare(deps, prKey, pr.reviewDecisionUnsettledFrom, pr);
+    }
     // GitHub's rollup carries an attempt set with no listener identity. It
     // advances the stored fence, applies at an equal set, applies unfenced, or
     // is an older or inconsistent view and is skipped — acceptGitHubFence decides.
@@ -188,6 +204,33 @@ async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<CiFetchFa
     await deps.applyEffects(effects, envelope);
   }
   return ciFetchFailures;
+}
+
+/** Settles `pr`'s unsettled `changes_requested` from GitHub's compare of `base` against its head:
+ * a `.legion/`-only range keeps the decision; a real change drops it; and so does a range the
+ * compare cannot classify (the call fails, the file list is truncated or empty), logged once. */
+async function settleFromCompare(
+  deps: RunResyncDeps,
+  prKey: string,
+  base: string,
+  pr: PrState
+): Promise<void> {
+  let unclassified: string | undefined;
+  let handoffOnly = false;
+  try {
+    const compared = await deps.compareChangedPaths(pr.repo, base, pr.headSha);
+    if (compared.truncated) unclassified = "GitHub listed its maximum of files";
+    else if (compared.paths.length === 0) unclassified = "no changed paths";
+    else handoffOnly = handoffOnlyPaths(compared.paths);
+  } catch (error) {
+    unclassified = error instanceof Error ? error.message : String(error);
+  }
+  if (unclassified !== undefined) {
+    console.warn(
+      `[legion] resync could not classify ${prKey} ${base}...${pr.headSha} (${unclassified}); dropping its changes_requested decision`
+    );
+  }
+  settleReviewDecision(pr, handoffOnly);
 }
 
 /** Retries each failed daemon-owned Dispatch status write against a single fresh remote read: a

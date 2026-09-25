@@ -137,7 +137,11 @@ describe("Envoy GitHub envelope goldens", () => {
         config
       )
     ).toEqual([]);
-    expect(state.prs[prKey]?.pendingPush).toEqual({ sha: push.payload.after, handoffOnly: false });
+    expect(state.prs[prKey]?.pendingPush).toEqual({
+      sha: push.payload.after,
+      handoffOnly: false,
+      before: push.payload.before,
+    });
 
     expect(
       reduceGithubEvent(

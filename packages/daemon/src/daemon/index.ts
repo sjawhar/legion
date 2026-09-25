@@ -14,6 +14,7 @@ import {
   type CommandRunner,
   defaultRunner,
   getCiStatusBatch,
+  getComparedPaths,
 } from "../state/fetch";
 import type { GitHubPRRef } from "../state/types";
 import { type LegionApi, type LegionApiDeps, startLegionApi } from "./api";
@@ -66,7 +67,7 @@ import {
   type ProcessManagerDeps,
 } from "./processes";
 import { childAdopted } from "./reducers";
-import { runResync } from "./resync";
+import { type RunResyncDeps, runResync } from "./resync";
 import type { Runtime } from "./runtime";
 import { KubernetesRuntime } from "./runtime-kubernetes";
 import { TmuxRuntime, type TmuxRuntimeDeps } from "./runtime-tmux";
@@ -139,6 +140,21 @@ export function createCiStatusFetcher(
         env: buildRoleEnv(lease.token, lease.gitIdentity, baseEnv),
       };
     });
+}
+
+/** Resync's compare reader (`RunResyncDeps.compareChangedPaths`): GitHub's compare of two commits,
+ * read as the implement App of the repository's owner, like the CI reads above. */
+export function createCompareReader(
+  tokenManager: Pick<TokenManager, "getToken">,
+  runner: CommandRunner,
+  baseEnv: NodeJS.ProcessEnv
+): RunResyncDeps["compareChangedPaths"] {
+  return async (repo, base, head) => {
+    const lease = await tokenManager.getToken("implement", repo.split("/")[0]);
+    return getComparedPaths(repo, base, head, runner, {
+      env: buildRoleEnv(lease.token, lease.gitIdentity, baseEnv),
+    });
+  };
 }
 
 /** The listener publish body (`POST /v1/messages/publish`) for one daemon notice. `dedupe_key`
@@ -630,6 +646,11 @@ async function startDaemonLocked(
     deps.runner,
     environment.paneEnv
   );
+  const compareChangedPaths = createCompareReader(
+    deps.tokenManager,
+    deps.runner,
+    environment.paneEnv
+  );
 
   const emitResync = async (options?: { force?: boolean }): Promise<void> => {
     // Serialized against the shared durable mutation lane: resync reads/writes the same PrState
@@ -643,6 +664,7 @@ async function startDaemonLocked(
           dispatchClient: deps.dispatchClient,
           saveState: save,
           fetchCiStatusBatch,
+          compareChangedPaths,
           applyEffects: eventPump.applyEffects,
           reconcileAdmissionDrift: () => processManager.reconcileAdmissionDrift(),
           isResurrecting: (issue) => processManager.isResurrecting(issue),

@@ -719,3 +719,58 @@ async function getCiStatusBatchWithOptions(
 
   return result;
 }
+
+// =============================================================================
+// Compare Two Heads
+// =============================================================================
+
+/** GitHub's compare lists at most this many files; a response at the limit may be partial. */
+const COMPARE_FILE_LIMIT = 300;
+
+/** The paths GitHub's compare of `base...head` changes: each file's name and, for a rename, its
+ * previous name. `truncated` when GitHub listed its maximum of files, so the list may be partial. */
+export interface ComparedPaths {
+  paths: string[];
+  truncated: boolean;
+}
+
+/** Reads `GET repos/<repo>/compare/<base>...<head>` through `gh api` (`repo` is `owner/name`).
+ * Throws `GitHubAPIError` naming the range when gh fails or the answer has another shape. */
+export async function getComparedPaths(
+  repo: string,
+  base: string,
+  head: string,
+  runner: CommandRunner,
+  runnerOptions?: CommandRunnerOptions
+): Promise<ComparedPaths> {
+  const range = `${repo} ${base}...${head}`;
+  const { stdout, stderr, exitCode } = await runner(
+    [
+      "gh",
+      "api",
+      `repos/${repo}/compare/${base}...${head}`,
+      "--jq",
+      "{files: (.files // [] | length), paths: [(.files // [])[] | .filename, (.previous_filename // empty)]}",
+    ],
+    runnerOptions
+  );
+  if (exitCode !== 0) {
+    throw new GitHubAPIError(`compare ${range} failed: ${stderr.trim() || `exit ${exitCode}`}`);
+  }
+  let answer: Record<string, unknown> | undefined;
+  try {
+    answer = recordValue(JSON.parse(stdout));
+  } catch (error) {
+    throw new GitHubAPIError(`compare ${range} answered unparsable JSON: ${error}`);
+  }
+  const files = answer?.files;
+  const paths = answer?.paths;
+  if (
+    typeof files !== "number" ||
+    !Array.isArray(paths) ||
+    !paths.every((path): path is string => typeof path === "string")
+  ) {
+    throw new GitHubAPIError(`compare ${range} answered an unexpected shape`);
+  }
+  return { paths, truncated: files >= COMPARE_FILE_LIMIT };
+}

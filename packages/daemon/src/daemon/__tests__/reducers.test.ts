@@ -1841,7 +1841,11 @@ describe("push fix-attempt classification", () => {
     expect(
       pushEffects(state, { changed_paths: undefined, changed_paths_truncated: undefined })
     ).toEqual([{ kind: "log", message: expect.stringContaining("changed_paths absent") }]);
-    expect(state.prs[prKey]?.pendingPush).toEqual({ sha: "new-sha", handoffOnly: false });
+    expect(state.prs[prKey]?.pendingPush).toEqual({
+      sha: "new-sha",
+      handoffOnly: false,
+      before: "old-sha",
+    });
 
     effects(state, syncPayload("new-sha"));
 
@@ -1866,7 +1870,11 @@ describe("push fix-attempt classification", () => {
     const state = redPrState({ fixAttempts: 3, blockedAttempts: 3 });
 
     expect(pushEffects(state)).toEqual([]);
-    expect(state.prs[prKey]?.pendingPush).toEqual({ sha: "new-sha", handoffOnly: true });
+    expect(state.prs[prKey]?.pendingPush).toEqual({
+      sha: "new-sha",
+      handoffOnly: true,
+      before: "old-sha",
+    });
     expect(state.prs[prKey]?.fixAttempts).toBe(3);
 
     expect(effects(state, syncPayload("new-sha"))).toEqual([]);

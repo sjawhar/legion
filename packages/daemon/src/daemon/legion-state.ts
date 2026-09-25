@@ -122,13 +122,17 @@ export interface PrState {
    * lasts the review round: a new head that changes anything outside `.legion/` ends the round and
    * drops it, and a handoff-only head (the reviewer's own `.legion/review.json` push) keeps it. */
   reviewDecision?: "approved" | "changes_requested";
-  /** Present exactly when the current `headSha`'s arrival in `resetPrHead` kept a
-   * `changes_requested` decision with no push classification for that sha yet (the synchronize
-   * arrived before its push webhook). The push webhook whose `after` equals `headSha` settles it:
-   * handoff-only keeps the decision, anything else drops it, and either way deletes this field, so
-   * a redelivered push never drops a decision a later review recorded. The next `resetPrHead` sets
-   * or deletes it afresh. Never written as `false`, like `headCounted`. */
-  reviewDecisionUnsettled?: true;
+  /** Present exactly when `changes_requested` is being kept across heads that nothing has
+   * classified yet: the head those heads arrived from, the base of the range still to classify.
+   * `resetPrHead` sets it when a head arrives with no push classification that covers it (the
+   * synchronize came first, the push webhook was lost, or resync's read found the head), and keeps
+   * the first value while further unclassified heads arrive. It is settled, and deleted, by a push
+   * webhook for the current head whose `before` is this sha (handoff-only keeps the decision), by
+   * any push for the current head that changes a path outside `.legion/` or cannot be classified
+   * (drops it), by resync's compare of this sha against the current head (`.legion/`-only keeps
+   * it; anything else, a compare that fails included, drops it), or by a review the reducer
+   * records. */
+  reviewDecisionUnsettledFrom?: string;
   /** Present exactly when the current `headSha`'s arrival in `resetPrHead` incremented
    * `fixAttempts` (prior verdict was red and no pending push classified this sha handoff-only). A
    * later handoff-only push webhook whose `after` equals `headSha` takes the attempt back and
@@ -137,12 +141,13 @@ export interface PrState {
    * `reviewDecision`'s set/delete handling. */
   headCounted?: true;
   /** The latest push webhook's classification for a head that has not arrived yet (push `after`
-   * !== `headSha`). A later push for another not-yet-arrived sha overwrites it (latest push wins,
-   * one slot). `resetPrHead` consumes (deletes) it when a head with that exact sha arrives — from
-   * the synchronize webhook or from resync's GitHub read alike. A push for the CURRENT head never
-   * touches this slot (it only takes back). Keyed by sha, so a stale slot can only ever describe
-   * the commit it names. */
-  pendingPush?: { sha: string; handoffOnly: boolean };
+   * !== `headSha`), with the push's `before`. A later push for another not-yet-arrived sha
+   * overwrites it (latest push wins, one slot). `resetPrHead` consumes (deletes) it when a head
+   * with that exact sha arrives — from the synchronize webhook or from resync's GitHub read alike.
+   * A push for the CURRENT head never touches this slot (it only takes back). Keyed by sha, so a
+   * stale slot can only ever describe the commit it names; `before` says whether it describes
+   * every change since the head it replaces (absent in a slot a v33 daemon wrote). */
+  pendingPush?: { sha: string; handoffOnly: boolean; before?: string };
   /** The `fixAttempts` value the last `pr-blocked` was published for. `reduceCiEmission`
    * publishes `pr-blocked` only when `fixAttempts >= maxFixAttempts` AND `fixAttempts !==
    * blockedAttempts`, then records `fixAttempts` here. A take-back whose pre-decrement
@@ -497,10 +502,14 @@ const PrStateSchema = z
     ciReconciled: z.boolean(),
     fixAttempts: z.number().int().nonnegative(),
     reviewDecision: z.enum(["approved", "changes_requested"]).optional(),
-    reviewDecisionUnsettled: z.literal(true).optional(),
+    reviewDecisionUnsettledFrom: z.string().min(1).optional(),
     headCounted: z.literal(true).optional(),
     pendingPush: z
-      .object({ sha: z.string().min(1), handoffOnly: z.boolean() })
+      .object({
+        sha: z.string().min(1),
+        handoffOnly: z.boolean(),
+        before: z.string().min(1).optional(),
+      })
       .strict()
       .optional(),
     blockedAttempts: z.number().int().nonnegative().optional(),
@@ -1559,9 +1568,10 @@ function migrateV32State(
   return { ...state, version: 33, controllerLocator };
 }
 
-/** v33 -> v34: PrState gains the optional `reviewDecisionUnsettled` marker. A pure bump: absent is
- * the correct starting value for every PR, since a v33 daemon settled each decision when its head
- * arrived, and the next head's `resetPrHead` decides afresh. */
+/** v33 -> v34: PrState gains the optional `reviewDecisionUnsettledFrom`, and `pendingPush` the
+ * optional `before`. A pure bump: absent is the correct starting value for both, since a v33
+ * daemon settled each decision when its head arrived, and a pending slot without `before` is
+ * never taken to cover the head it replaces. */
 function migrateV33State(state: unknown): unknown {
   if (!recordValue(state) || state.version !== 33) return state;
   return { ...state, version: 34 };

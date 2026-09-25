@@ -663,9 +663,9 @@ function githubClassificationState(state: LegionState): Record<string, unknown> 
           ...(pr.headCounted === undefined ? {} : { headCounted: pr.headCounted }),
           ...(pr.pendingPush === undefined ? {} : { pendingPush: { ...pr.pendingPush } }),
           ...(pr.reviewDecision === undefined ? {} : { reviewDecision: pr.reviewDecision }),
-          ...(pr.reviewDecisionUnsettled === undefined
+          ...(pr.reviewDecisionUnsettledFrom === undefined
             ? {}
-            : { reviewDecisionUnsettled: pr.reviewDecisionUnsettled }),
+            : { reviewDecisionUnsettledFrom: pr.reviewDecisionUnsettledFrom }),
         },
       ])
     ),
@@ -930,18 +930,21 @@ function registerPrFenced(
  * sha handoff-only (`pendingPush`, consumed here whatever it says); `headCounted` records the
  * decision so a handoff-only push webhook arriving later can take the attempt back (see `push`). A
  * pending slot naming a different sha describes a newer push whose synchronize has not arrived and
- * is left in place. The same classification decides the review decision: an approval is dropped on
- * every new head, and `changes_requested` is dropped by a head classified as a real change but
- * kept by a handoff-only one — the reviewer's own handoff push after it asked for changes is still
- * that round. A head with no classification yet keeps it, marked `reviewDecisionUnsettled`, until
- * its push webhook settles it (see `push`), so a reviewer's completion between the two webhooks
- * still returns the issue to `in_progress`. */
+ * is left in place.
+ *
+ * An approval is dropped on every new head. `changes_requested` lasts while every change since
+ * the round's head is under `.legion/` — the reviewer's own handoff push after it asked for
+ * changes is still that round. A pending classification of this head that changes anything else
+ * drops it. A handoff-only one keeps it and settles the head when it covers every change since
+ * the head it replaces (its `before` is that head, and nothing earlier is unsettled). Otherwise
+ * the decision is kept and the range recorded (`reviewDecisionUnsettledFrom`, the first
+ * unclassified head's predecessor) for a push webhook or resync's compare to settle
+ * (`settleReviewDecision`), so a reviewer completing before either still writes `in_progress`. */
 export function resetPrHead(pr: PrState, headSha: string): void {
-  const pending = pr.pendingPush;
-  const classified = pending?.sha === headSha;
-  const handoffOnly = pending?.sha === headSha && pending.handoffOnly;
-  if (classified) delete pr.pendingPush;
-  if (pr.verdict === "red" && !handoffOnly) {
+  const pending = pr.pendingPush?.sha === headSha ? pr.pendingPush : undefined;
+  const priorHead = pr.headSha;
+  if (pending) delete pr.pendingPush;
+  if (pr.verdict === "red" && !pending?.handoffOnly) {
     pr.fixAttempts += 1;
     pr.headCounted = true;
   } else {
@@ -956,16 +959,35 @@ export function resetPrHead(pr: PrState, headSha: string): void {
   pr.ciSettlementGeneration = null;
   pr.ciSnapshot = null;
   pr.ciReconciled = false;
-  if (pr.reviewDecision === "changes_requested" && (handoffOnly || !classified)) {
-    if (classified) delete pr.reviewDecisionUnsettled;
-    else pr.reviewDecisionUnsettled = true;
-  } else {
+  if (pr.reviewDecision !== "changes_requested" || (pending && !pending.handoffOnly)) {
     delete pr.reviewDecision;
-    delete pr.reviewDecisionUnsettled;
+    delete pr.reviewDecisionUnsettledFrom;
+  } else if (
+    !pending ||
+    pending.before !== priorHead ||
+    pr.reviewDecisionUnsettledFrom !== undefined
+  ) {
+    pr.reviewDecisionUnsettledFrom ??= priorHead;
   }
 }
 
+/** Settles a `changes_requested` decision `resetPrHead` kept across unclassified heads, once the
+ * whole range from `reviewDecisionUnsettledFrom` to the current head is classified: handoff-only
+ * keeps it, anything else drops it. No-op when nothing is unsettled. */
+export function settleReviewDecision(pr: PrState, handoffOnly: boolean): void {
+  if (pr.reviewDecisionUnsettledFrom === undefined) return;
+  if (!handoffOnly) delete pr.reviewDecision;
+  delete pr.reviewDecisionUnsettledFrom;
+}
+
 const HANDOFF_PATH_PREFIX = ".legion/";
+
+/** The one `.legion/` rule: a change is handoff-only when it lists at least one path and every
+ * path is under `.legion/`. `classifyPush` applies it to a push's paths, resync to GitHub's
+ * compare of two heads. */
+export function handoffOnlyPaths(paths: readonly string[]): boolean {
+  return paths.length > 0 && paths.every((path) => path.startsWith(HANDOFF_PATH_PREFIX));
+}
 
 type PushClassification = { handoffOnly: true } | { handoffOnly: false; unknown?: string };
 
@@ -988,7 +1010,7 @@ export function classifyPush(payload: JsonRecord): PushClassification {
           ? { handoffOnly: false, unknown: `changed_paths_truncated=${truncated} unrecognised` }
           : !changedPaths
             ? { handoffOnly: false, unknown: "no commits listed" }
-            : changedPaths.split("\n").every((path) => path.startsWith(HANDOFF_PATH_PREFIX))
+            : handoffOnlyPaths(changedPaths.split("\n"))
               ? { handoffOnly: true }
               : { handoffOnly: false };
   if (classificationFixtureRecorder !== noClassificationFixtureRecorder) {
@@ -1010,10 +1032,13 @@ export function classifyPush(payload: JsonRecord): PushClassification {
  * `main`, a tag, or a legion branch with no PR maps to nothing). Its classification either takes
  * back the attempt the current head was counted for (its synchronize arrived first — the take-back
  * also forgets a `pr-blocked` published for that count, so the next real fix publishes it again)
- * or is remembered for the head that has not arrived yet (`pendingPush`, latest push wins). For the
- * current head it also settles a `changes_requested` decision `resetPrHead` kept unsettled: a
- * handoff-only push keeps it, any other push drops it. A push that cannot be classified counts as
- * before and, when that count is real, says so through a `log` effect. */
+ * or is remembered for the head that has not arrived yet (`pendingPush`, latest push wins, with
+ * the push's `before`). For the current head it also settles a `changes_requested` decision
+ * `resetPrHead` kept unsettled: a push that changes a path outside `.legion/`, or cannot be
+ * classified, drops it; a handoff-only push keeps it only when it starts at the range's base
+ * (`before` is `reviewDecisionUnsettledFrom`), and otherwise leaves the range for resync. A push
+ * that cannot be classified counts as before and, when that count is real, says so through a
+ * `log` effect. */
 function push(state: LegionState, payload: JsonRecord): Effect[] | undefined {
   if (payload.kind !== "push") return undefined;
   const repo = stringValue(payload.repo);
@@ -1034,12 +1059,17 @@ function push(state: LegionState, payload: JsonRecord): Effect[] | undefined {
       pr.fixAttempts -= 1;
       delete pr.headCounted;
     }
-    if (pr.reviewDecisionUnsettled) {
-      if (!classification.handoffOnly) delete pr.reviewDecision;
-      delete pr.reviewDecisionUnsettled;
+    if (!classification.handoffOnly) settleReviewDecision(pr, false);
+    else if (stringValue(payload.before) === pr.reviewDecisionUnsettledFrom) {
+      settleReviewDecision(pr, true);
     }
   } else {
-    pr.pendingPush = { sha: after, handoffOnly: classification.handoffOnly };
+    const before = stringValue(payload.before);
+    pr.pendingPush = {
+      sha: after,
+      handoffOnly: classification.handoffOnly,
+      ...(before === undefined ? {} : { before }),
+    };
   }
   if (classification.handoffOnly || classification.unknown === undefined || !counted) return [];
   return [
@@ -1098,12 +1128,12 @@ function review(state: LegionState, payload: JsonRecord): Effect[] | undefined {
   // legitimately pins its review to the implementation commit it read rather than to a later
   // handoff commit, and any such verdict still means the PR is not reviewer-clean. Safe to
   // record from any commit because a new head that changes anything outside `.legion/` drops the
-  // decision (`resetPrHead`, or `push` once it classifies that head), so a verdict never outlives
-  // the round it was given for. A decision recorded here is settled: no later push for the current
-  // head drops it.
+  // decision (`resetPrHead`, or `push` and resync once they classify that head), so a verdict
+  // never outlives the round it was given for. A decision recorded here is settled: nothing
+  // unsettled carries over from the heads before it.
   if (decision === "changes_requested" || (isCurrentHead && decision === "approved")) {
     pr.reviewDecision = decision;
-    delete pr.reviewDecisionUnsettled;
+    delete pr.reviewDecisionUnsettledFrom;
   }
   const result = routeActive(state, pr.key, {
     type: "pr-review",
