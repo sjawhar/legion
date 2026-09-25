@@ -966,11 +966,8 @@ export function resetPrHead(pr: PrState, headSha: string): void {
     delete pr.reviewDecision;
     delete pr.reviewDecisionUnsettledFrom;
     delete pr.changesRequestedBy;
-  } else if (
-    !pending ||
-    pending.before !== priorHead ||
-    pr.reviewDecisionUnsettledFrom !== undefined
-  ) {
+  } else if (pending?.before !== priorHead) {
+    // No classification covers this head, so the range stays open from its first unsettled base.
     pr.reviewDecisionUnsettledFrom ??= priorHead;
   }
 }
