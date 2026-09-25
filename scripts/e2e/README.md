@@ -408,6 +408,92 @@ What the run had to learn about production:
 - gVisor on production reports `4.19.0-gvisor` from `uname -r`.
 - The worker image has no `kill` binary; the exec runs the shell's builtin.
 
+## stage4b-sandbox-tree.sh
+
+Stage 4b's gate for the Go coordinator: the Go daemon drives real issue trees on the Agent Sandbox
+runtime. It runs in the production cluster's namespace `legion`, against production Dispatch, the
+production Envoy listener and production NATS, in the disposable Dispatch project LEGSMOKE and the
+smoke repository `sjawhar/legion-smoke`. The daemon runs on the devbox as the Legion daemon's
+restricted identity, and its pods dial its worker stream on the devbox's private address.
+
+```sh
+LEGION_E2E_RUNTIME_CONTEXT=legion-daemon@production LEGION_E2E_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest> \
+  bash scripts/e2e/stage4b-sandbox-tree.sh        # → "stage 4b e2e: PASS", exit 0
+STAGE4B_UNTIL=<checkpoint> …                      # a development run: stops after that checkpoint, never PASS
+```
+
+`STAGE4B_UNTIL` must name a checkpoint below; any other value is refused. `STAGE4B_EVIDENCE_DIR`
+keeps the evidence (default: a fresh `/tmp` directory, printed at the end): the transcript, the
+daemon log, `run.json` (source revision, image and plugin), the pod watch, each checked pod's spec,
+every agent transcript, the interest samples, the audit files and the negative controls. What the
+run built is printed by [`lib/built-from.sh`](#libbuilt-fromsh).
+
+Three roots are set todo under `admission_cap: 2`:
+- Tree 1 runs the whole workflow with real agents to `done`, lingers, and closes.
+- Tree 2 runs through its planner beside tree 1's implementer, on its own node, carrying the
+  repository-configuration fixture, and is then moved to backlog.
+- Tree 3 is admitted when tree 2 leaves the line. It supplies the held phase the controller
+  checkpoint needs, and is taken out from an operator shell.
+
+**One run at a time.** The project, the durable consumer names, ports 13370 and 13371 and the
+namespace label `legion.dev/project=legsmoke` are shared, so the run takes
+`$XDG_STATE_HOME/legion/e2e/stage4b.lock`. A run that does not get the lock refuses, and removes
+nothing.
+
+**What the run touches in production**, all of it removed by the `EXIT`/`INT`/`TERM`/`HUP` trap of
+the run that holds the lock:
+- **Production NATS, stream `ENVOY_NOTIFICATIONS`**: the daemon's two durable consumers. They are
+  named by the Dispatch key: `legion-go-LEGSMOKE-dispatch` (`notifications.dispatch.issue.>`) and
+  `legion-go-LEGSMOKE-github` (`notifications.github.sjawhar.legion-smoke.>`).
+  - The teardown deletes both by exact name and prints `deleted` or `absent` for each.
+  - `hygiene` fails if either remains, and the preflight refuses to start while either exists.
+  - A SIGKILLed driver runs no trap, and the next run's preflight names what it left.
+- **Production Dispatch, project LEGSMOKE**: three root issues per run. The preflight moves stale
+  todo roots to backlog. The proof human's writes use the agents' bearer and name the session
+  `legion-e2e4b-proof-human-<pid>` as their actor, which production Dispatch requires; it holds no
+  claim, so the workflow reads its status writes as a human's.
+- **`sjawhar/legion-smoke`**: the fixture branch `legion/<tree 2>`, deleted at teardown, and tree
+  1's pull request, which the proof human merges.
+- **Namespace `legion`**: the run's Sandboxes, pods, Secrets and PVCs, and its control pods, all
+  labelled `legsmoke`. [`lib/namespace-rig.sh`](#libnamespace-rigsh)'s teardown and
+  `namespace-clean` hold the namespace to its snapshot.
+
+`production-audit` checks the run's own writes. It lists every production issue outside LEGSMOKE
+updated since the baseline, then keeps those whose events name one of the run's writers: its
+agents' sessions, `legion-daemon:LEGSMOKE`, and the proof human. It also filters the Envoy interests
+the run's sessions held, sampled at every checkpoint while the daemon ran, to topics outside
+LEGSMOKE. Either list being non-empty fails the run.
+
+| checkpoint | what it holds |
+| :--- | :--- |
+| `prerequisites` | the tools, the restricted context and the image by digest; the lock and the two ports; nothing left in the namespace or on NATS from another run |
+| `preflight` | the runtime identity is `production-legion-daemon` and cannot list Secrets; the Sandbox CRD and the `legion` NodePool's instance-cpu floor; LEGSMOKE has no todo root; the stream carries both halves of intake; a throwaway pod on the Legion pool reaches Dispatch, the listener, the gateway and NATS |
+| `pod-watch` | the namespace snapshot; the pod, node-event and node-memory watches start |
+| `boot` | `legion start --check-config` passes the `runtime: kubernetes` config, the daemon boots, and the image probe passes (its first attempt's timeline is kept) |
+| `admitted-issue-cap` | the three roots: two admitted and one waiting, in rank order |
+| `spec-posted` | each admitted architect posts its spec and registers the gate; with `gates.design: off` the daemon moves the tree to planning |
+| `tree-separation` | tree 1's implementer and tree 2's planner run at once on different nodes, each tree on one node |
+| `repository-configuration` | tree 2's pods carry the fixture; the markers each loading path writes, and the agent's argv |
+| `issue-cap-moves` | tree 2 to backlog frees its slot, tree 3 is admitted, and tree 2's pods are gone |
+| `tree-moved` | tree 1 runs planner, implementer, tester, reviewer and retro to merging with real agents; the tester's adoption leaves a new empty change and keeps the implementer's author |
+| `review-pair` | the reviewer dispatched `thermonuclear-deep-review` and `thermonuclear-code-quality` by name, and each ran |
+| `first-turns` | every role on tree 1 completed a first turn in its pod |
+| `token-rotation` | a pod's projected gateway token rotates, and a model turn after the rotation still goes through the gateway |
+| `idle-suspend` | a finished worker's Sandbox is Suspended with its pod gone and the tree volume bound |
+| `kill-pod-resume` | a killed merger pod is relaunched on its session |
+| `fence` | a pod the controller recreates on its own is never adopted |
+| `daemon-relaunch-count` | the daemon relaunched the merger once for each pod the driver ended |
+| `restart-mid-tree` | a daemon restart re-adopts the merger's pod and session |
+| `controller` | `legion controller start` registers with the Sandbox daemon; tree 3's held notice reaches it; `legion status … backlog` from the operator shell moves tree 3, and Dispatch shows it |
+| `done` | the merger's READY, the proof human's merge, the production check and sign-off take tree 1 to `done` |
+| `node-release` | after the pool's consolidation, tree 1's node is gone while its Sandboxes stay Suspended and its volume Bound |
+| `close` | at linger expiry tree 1's Sandboxes and tree volume are deleted |
+| `re-admission` | tree 1 set todo again reports workspace-lost and relaunches a fresh architect |
+| `pod-shape` | every Sandbox pod was shape-checked (gVisor, the gateway's ServiceAccount and one projected token, the pool, Pod Security restricted, split provisioning, no token in the environment or argv) |
+| `pod-watch-verdict` | the pod watch saw no termination the run cannot account for, and the memory hog was OOMKilled |
+| `hygiene` | the daemon stopped, the namespace is clean, and the run's consumers are gone |
+| `production-audit` | no write by the run outside LEGSMOKE, no interest outside it, and the audit's negative control fails as it should |
+
 ## controller-start-tmux.sh
 
 Task 4b.5's acceptance for `legion controller start`, on tmux. The Go daemon runs on a real Postgres
