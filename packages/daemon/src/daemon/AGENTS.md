@@ -406,9 +406,11 @@ a pre-v33 controller (the headless `/controller/ready` never carried one), so th
 interactive spawn starts fresh and logs so; every later respawn resumes the file the interactive
 pane reports. The mirror-image skew — a pane launched by a daemon that predates LEGION-54 while
 this plugin is installed — carries no `LEGION_GRANT_FILE`, and the extension refuses every bash
-call in it with `LEGION_GRANT_FILE is not set on this pane: the daemon that launched it predates
-this plugin; restart the daemon on the matching release` rather than mint a grant nothing could
-read; step 1 before step 2 is what avoids it. **After
+command and every call Oh My Pi serves with `gh` in it with `LEGION_GRANT_FILE is not set on this
+pane: the daemon that launched it predates this plugin; relaunch the pane from a daemon on the
+matching release (a daemon restart keeps a live pane as it was launched)` rather than mint a grant
+nothing could read. A daemon restart re-adopts the live pane without relaunching it, so the pane
+itself has to be relaunched; step 1 before step 2 is what avoids it. **After
 deploying a skill change:** a controller session that predates it keeps the skill text it read
 at its own start in context until `/new` — its refusals stay correct, only the vocabulary lags
 (a gate name, a message shape) — so type `/new` into the controller pane. Killing the pane does

@@ -190,7 +190,8 @@ the same commit, exactly like an HTTP shape change. Three things the round taugh
   pane launched without `LEGION_GRANT_FILE` — is not something a daemon can gate (it cannot check
   a plugin newer than itself); the plugin's `tool_call` hook blocks every bash command itself with
   `LEGION_GRANT_FILE is not set on this pane: the daemon that launched it predates this plugin;
-  restart the daemon on the matching release`. `LEGION_GRANT is missing` is neither: the 2026-09-13
+  relaunch the pane from a daemon on the matching release (a daemon restart keeps a live pane as it
+  was launched)`, and a restart alone does not clear it: the daemon re-adopts the live pane. `LEGION_GRANT is missing` is neither: the 2026-09-13
   incident that produced it was daemon and plugin at the **same** contract with 1.17.1's `env`
   delivery dropped by the secretsd bash shim (`../legion/grant-delivery-plugin-omp-contract.md`) —
   the first draft of the daemon `AGENTS.md` cited it as the skew the gate now catches, and a

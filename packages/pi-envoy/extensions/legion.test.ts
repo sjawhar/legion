@@ -2936,7 +2936,7 @@ describe("Legion OMP extension", () => {
     const blocked = {
       block: true,
       reason:
-        "LEGION_GRANT_FILE is not set on this pane: the daemon that launched it predates this plugin; restart the daemon on the matching release",
+        "LEGION_GRANT_FILE is not set on this pane: the daemon that launched it predates this plugin; relaunch the pane from a daemon on the matching release (a daemon restart keeps a live pane as it was launched)",
     };
 
     delete process.env.LEGION_GRANT_FILE;
@@ -5299,7 +5299,7 @@ describe("the Go daemon's pane (LEGION_DAEMON_API=go)", () => {
     ).resolves.toEqual({
       block: true,
       reason:
-        "LEGION_GRANT_FILE is not set on this pane: the daemon that launched it predates this plugin; restart the daemon on the matching release",
+        "LEGION_GRANT_FILE is not set on this pane: the daemon that launched it predates this plugin; relaunch the pane from a daemon on the matching release (a daemon restart keeps a live pane as it was launched)",
     });
   });
 

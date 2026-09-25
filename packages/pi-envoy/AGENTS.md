@@ -92,7 +92,10 @@ Contract 5 adds `LEGION_GRANT_FILE` to the Go pane's environment, tmux pane and 
 (LEGION-262): Oh My Pi copies its environment once for every `gh` it runs to serve a `pr://` or
 `issue://` read or its `github` tool, so the pointer has to be there from its start, and this
 extension no longer sets it after the claim registers. A plugin at 5 on a pane a daemon at 4
-launched refuses every credentialed call with `LEGION_GRANT_FILE is not set on this pane`.
+launched refuses every bash command and every call Oh My Pi serves with `gh` with
+`LEGION_GRANT_FILE is not set on this pane`, until the pane is relaunched from a daemon at 5: a
+restarted daemon re-adopts a live pane without relaunching it (Go: `legion claims suspend`, then
+`resume`).
 The Go daemon's boot gate (`internal/daemon/bootgate.go`) refuses to start unless the installed
 manifest's field equals its `GoDaemonAPIVersion` (`internal/api/version.go`) — the manifest at the
 plugin root Oh My Pi resolves under the environment a pane will get, and the plugin a pane's Oh My
