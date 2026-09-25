@@ -10,11 +10,14 @@ package testnats
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -33,14 +36,18 @@ const Image = "nats:2.10"
 
 var (
 	// held is locked by the test using the shared server, from URL until the test's cleanups have
-	// run, so no two tests share its state.
-	held sync.Mutex
+	// run, so no two tests share its state. holder names that test, so that a second take by it or
+	// by one of its subtests, which would wait on itself, fails instead.
+	held     sync.Mutex
+	holderMu sync.Mutex
+	holder   string
 
-	mainRuns   bool
-	sharedOnce sync.Once
-	shared     *tcnats.NATSContainer
-	sharedURI  string
-	sharedErr  error
+	mainRuns      bool
+	sharedOnce    sync.Once
+	shared        *tcnats.NATSContainer
+	sharedURI     string
+	sharedMonitor string
+	sharedErr     error
 )
 
 // Main runs the package's tests, then removes the shared server if a test started it, and returns
@@ -60,27 +67,33 @@ func Main(m *testing.M) int {
 }
 
 // URL returns the package's shared NATS server with no stream on it, so none of a previous test's
-// streams, KV buckets, consumers or messages, and holds it for t until t ends.
+// streams, KV buckets, consumers or messages, and holds it for t until t ends. The reset waits for
+// the server to report no client connection first: a previous test that published without
+// waiting for acks leaves messages the server still routes after the test ends, into a stream
+// this test recreates.
 func URL(t testing.TB) string {
 	t.Helper()
 	if !mainRuns {
 		t.Fatal("testnats: the package's TestMain must return testnats.Main(m), which removes the shared NATS container")
 	}
-	held.Lock()
-	t.Cleanup(held.Unlock)
+	take(t)
 	sharedOnce.Do(func() {
 		ctx := context.Background()
-		ctr, err := tcnats.Run(ctx, Image)
+		ctr, err := tcnats.Run(ctx, Image, tcnats.WithArgument("http_port", "8222"))
 		if err != nil {
 			sharedErr = errors.Join(err, testcontainers.TerminateContainer(ctr))
 			return
 		}
 		shared = ctr
-		sharedURI, sharedErr = ctr.ConnectionString(ctx)
+		if sharedURI, sharedErr = ctr.ConnectionString(ctx); sharedErr != nil {
+			return
+		}
+		sharedMonitor, sharedErr = monitor(ctr)
 	})
 	if sharedErr != nil {
 		t.Fatalf("start the shared NATS: %v", sharedErr)
 	}
+	drained(t)
 	conn := Connect(t, sharedURI)
 	defer conn.Close()
 	js, err := conn.JetStream()
@@ -96,7 +109,98 @@ func URL(t testing.TB) string {
 			t.Fatalf("empty the shared NATS of stream %s: %v", name, err)
 		}
 	}
+	// The legacy stream listing drops a request that failed or timed out and closes empty, so the
+	// account says whether the server is empty.
+	info, err := js.AccountInfo()
+	if err != nil {
+		t.Fatalf("read the shared NATS's account after emptying it: %v", err)
+	}
+	if info.Streams != 0 {
+		t.Fatalf("the shared NATS still holds %d streams after emptying it", info.Streams)
+	}
 	return sharedURI
+}
+
+// take holds the shared server for t until t ends, refusing a take by the test already holding it
+// or by one of its subtests, which would wait for itself for the whole test binary's timeout.
+func take(t testing.TB) {
+	t.Helper()
+	holderMu.Lock()
+	current := holder
+	holderMu.Unlock()
+	if current != "" && (t.Name() == current || strings.HasPrefix(t.Name(), current+"/")) {
+		t.Fatalf("testnats: %s already holds the shared NATS server, so %s would wait for itself: take it once per test, through URL", current, t.Name())
+	}
+	held.Lock()
+	holderMu.Lock()
+	holder = t.Name()
+	holderMu.Unlock()
+	t.Cleanup(func() {
+		holderMu.Lock()
+		holder = ""
+		holderMu.Unlock()
+		held.Unlock()
+	})
+}
+
+// drained waits, within connectTimeout, for the shared server's monitoring endpoint to report no
+// client connection, and fails naming the connections left when it does not.
+func drained(t testing.TB) {
+	t.Helper()
+	deadline := time.Now().Add(connectTimeout)
+	for {
+		connections, err := clientConnections()
+		if err == nil && len(connections) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			if err != nil {
+				t.Fatalf("read the shared NATS's connections before emptying it: %v", err)
+			}
+			t.Fatalf("the shared NATS still has %d client connections %v from a previous test after %s", len(connections), connections, connectTimeout)
+		}
+		time.Sleep(retryInterval)
+	}
+}
+
+// clientConnections lists the shared server's open client connections, each by id and name.
+func clientConnections() ([]string, error) {
+	response, err := http.Get(sharedMonitor + "/connz")
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("GET %s/connz answered %s", sharedMonitor, response.Status)
+	}
+	var connz struct {
+		Connections []struct {
+			CID  uint64 `json:"cid"`
+			Name string `json:"name"`
+		} `json:"connections"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&connz); err != nil {
+		return nil, fmt.Errorf("decode %s/connz: %w", sharedMonitor, err)
+	}
+	connections := make([]string, 0, len(connz.Connections))
+	for _, c := range connz.Connections {
+		connections = append(connections, fmt.Sprintf("%d %q", c.CID, c.Name))
+	}
+	return connections, nil
+}
+
+// monitor returns the base URL of a container's NATS monitoring endpoint.
+func monitor(ctr *tcnats.NATSContainer) (string, error) {
+	ctx := context.Background()
+	host, err := ctr.Host(ctx)
+	if err != nil {
+		return "", err
+	}
+	port, err := ctr.MappedPort(ctx, "8222/tcp")
+	if err != nil {
+		return "", err
+	}
+	return "http://" + host + ":" + port.Port(), nil
 }
 
 // Start runs a NATS test container on Image, removed when the test ends (even when its start
