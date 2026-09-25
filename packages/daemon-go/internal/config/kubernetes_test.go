@@ -675,26 +675,26 @@ func operatorRoutePod(t *testing.T) string {
 	return indented.String()
 }
 
-// The Stage 4b proof's configuration (the LEGION-208 Stage 4b plan, decisions 1, 2, 4, 5, 6, 7):
-// the daemon on the devbox's private address driving production's namespace legion through the
-// restricted role's kubeconfig and context, against production Dispatch, the Envoy listener, and
-// NATS, with the gate off, a linger of 0.3 hours, and pods routed to middleman by the harnesses'
+// The Stage 4b proof's configuration (the LEGION-208 Stage 4b plan, decisions 1, 2, 4, 5, 6, 7),
+// with placeholder hosts for Dispatch, the Envoy listener, and NATS: the daemon on the devbox's
+// private address driving namespace legion through the restricted role's kubeconfig and context,
+// with the gate off, a linger of 0.3 hours, and pods routed to middleman by the harnesses'
 // operator pod, the fixture itself. No node selector and no requests: the pool's floor sizes the
 // node.
 func TestLoadForValidationAcceptsTheStage4bProofConfig(t *testing.T) {
 	path := writeConfigFile(t, `project: LEGSMOKE
 port: 13370
 worker_stream_port: 13371
-bind: 10.1.20.30
-daemon_url: http://10.1.20.30:13370
+bind: 192.0.2.30
+daemon_url: http://192.0.2.30:13370
 postgres_dsn: postgres://legion:secret@127.0.0.1:5432/legion?sslmode=disable
 state_dir: /tmp/stage4b/state
 operator_token_file: /tmp/stage4b/operator-token
-envoy_url: http://envoy-listener.internal.trajectorylabs.com:9020
+envoy_url: http://envoy-listener.internal.example:9020
 envoy_token_file: /tmp/stage4b/envoy-token
 nats_urls:
-  - nats://nats.internal.trajectorylabs.com:4222
-dispatch_url: https://dispatch.internal.trajectorylabs.com
+  - nats://nats.internal.example:4222
+dispatch_url: https://dispatch.internal.example
 dispatch_token_file: /tmp/stage4b/dispatch-token
 projects:
   LEGSMOKE: { repo: sjawhar/legion-smoke }
