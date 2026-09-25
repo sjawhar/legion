@@ -265,14 +265,22 @@ worker after its launch budget and the architect's retry relaunching it, restart
 implementation, a pending status write while Dispatch is down, and the Go pane's
 credentials: in one bash tool call of a real implementer pane, plain `gh` resolves
 `<state_dir>/worker-bin/gh`, two chained `legion gh` calls authenticate as `legion-implementer[bot]`
-on the command's one grant, and `gh pr merge` is refused. After the sign-off the proof human removes
+on the command's one grant, and `gh pr merge` is refused. Then `idle-pr-read` has the implementer
+and the root architect each read the pull request through Oh My Pi's `read` tool (`pr://`), with
+no bash command first, once their last grant is over 60 s old — a grant's lifetime — and requires
+the read's own `Created:` line back, judged from the transcript: Oh My Pi serves the read by
+running `gh` with the environment it copied at its start, so this passes only when the pane named
+`LEGION_GRANT_FILE` from that start and the plugin minted a grant for the read itself (LEGION-262).
+After the sign-off the proof human removes
 every `.legion/` handoff and `docs/solutions/` learning from the smoke `main` through one merged
 fixture pull request, and the run checks that `main` carries none: the Go daemon has no clean-head
 loop before Stage 7, so the proof's reviewer approves a head that still carries `.legion/`, and
 without the cleanup each merge would leave the next run a base carrying another issue's handoffs.
 Each check is named in the transcript;
-three negative controls demonstrate that the status-actor, held-worker, and re-closed-gate
-assertions reject deliberately corrupted observations before the captured observations pass again.
+six negative controls demonstrate that the status-actor, held-worker, re-closed-gate, and idle-read
+assertions reject deliberately corrupted observations before the captured observations pass again
+(the idle read's three: its result refused as it was before LEGION-262, the read inside its previous
+grant's lifetime, and a bash command before it).
 Once every agent is gone, `model-turns-through-the-gateway` runs
 [`lib/check-model-route.sh`](#libcheck-model-routesh) over every agent session in the isolated
 profile, each subagent's included: it fails on any assistant turn or model selection that is not
@@ -286,7 +294,7 @@ transcripts too, and fails unless they hold the same turns, sessions and subagen
 `STAGE3_FROM=held` or `STAGE3_FROM=restart` is a development aid for iterating on the later
 scenarios against a fresh rig: it skips the first issue's workflow (the proof human closes that
 root, which frees its admission slot as its sign-off would), `restart` also skips the held worker,
-and the credential check reads `STAGE3_PR` (default: the newest smoke pull request).
+and the credential and idle-read checks read `STAGE3_PR` (default: the newest smoke pull request).
 `STAGE3_UNTIL=rework` is the other development aid: it drives the first issue through its three
 review rounds, the per-round handoff checks, and the final review, then skips every later scenario.
 Such a run skips the status-actor check, which needs the first issue's whole history, ends
