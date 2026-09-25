@@ -42,6 +42,8 @@ shape below, and a thread the reviewer opens in its own round is still the truth
 
 ## The pattern
 
+**Superseded 2026-09-25 (LEGION-285):** every role now pushes its own commits, and the reviewer resolves the threads it accepts (`skills/legion-worker/SKILL.md`; the Apps' permissions are in `packages/daemon/src/daemon/AGENTS.md`, GitHub Apps). What follows records the earlier workflow. The probe's shape still holds; the account that closes the thread is now the reviewer's own.
+
 Plan the probe into the review round, not into the tester's E2E:
 
 1. **The planner names it.** The plan's review step says: submit the first review with at least one
@@ -77,6 +79,6 @@ instead of passing the phase (the `legion-worker` skill's production-like-surfac
 ## Related
 
 - [external-red-and-phase-ownership](../daemon/external-red-and-phase-ownership.md) §3 — why the
-  review App can reply but not resolve, who pushes, the reply grammar, and the GraphQL facts.
+  thread rules before LEGION-285, the reply grammar, and the GraphQL facts.
 - [worker-pane-shell-gotchas](worker-pane-shell-gotchas.md) §13 — the pane's `legion` is the
   deployed build; a new subcommand is exercised live as `bun packages/daemon/src/cli/index.ts …`.

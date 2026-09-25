@@ -80,7 +80,7 @@ architect was doing with the tree at that moment.
 
 ## Related
 
-- `../../../packages/daemon/src/daemon/AGENTS.md`, GitHub Apps — why the reviewer cannot resolve
-  the threads it accepts and the implementer runs `legion threads resolve`.
+- `../../../packages/daemon/src/daemon/AGENTS.md`, GitHub Apps — why the reviewer resolves the
+  threads it accepts with `legion threads resolve`.
 - `fast-follow-pr-mechanics-and-queue-registration.md` — the review-round mechanics these wakes
   sit inside.

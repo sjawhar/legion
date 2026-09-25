@@ -78,8 +78,8 @@ cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch
 jj -R "$LEGION_WORKSPACE" rebase -s 'roots(main@origin..@)' -d main@origin   # the whole chain
 ```
 
-The chain included the tester's and reviewer's local handoff commits (only the implementer
-pushes, so they ride on its next push) and an undescribed working-copy commit. In
+The chain included the tester's and reviewer's handoff commits and an undescribed working-copy
+commit. In
 this historical rebase, before LEGION-58, that commit held `.omp/config.yml`. Two files
 conflicted; resolve each in the working copy, then squash into the commit that owns the file so
 the descendants re-apply:
@@ -149,8 +149,7 @@ The architect's end-game assignment reads mergeability *first*:
 2. `CONFLICTING` → do **not** push the `.legion/` deletion. Rebase as above, post the
    fingerprint comment, push, the `legion` tool's `handoff_complete` with both fingerprints. The architect
    routes the next round.
-3. `MERGEABLE` → `legion threads resolve --pr <n> --repo <owner>/<repo>` (expect `No unresolved
-   threads` when the review was clean), `rm -r .legion`, `jj split -m "chore: remove .legion/
+3. `MERGEABLE` → `rm -r .legion`, `jj split -m "chore: remove .legion/
    handoffs after clean review (<KEY>)" .legion`, bookmark on `@-`, push, and confirm
    `jj diff --from <reviewed head> --to <new head> --summary` prints only `D .legion/…` lines.
 

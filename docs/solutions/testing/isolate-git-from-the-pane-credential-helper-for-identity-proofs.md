@@ -83,7 +83,7 @@ Two details of the negative control:
   `Resource not accessible by integration`. GitHub hides the repository from a token without
   `contents` over git; the REST text appears only on API writes (`POST /git/refs`,
   `resolveReviewThread`). A control that greps for the REST text on a git push will report a
-  false failure. (Measured before 2026-09-25. App 3202653 now holds `contents: write`, so a
+  false failure. (Measured before 2026-09-25. Every role pushes its own commits since LEGION-285, so a
   review-App push succeeds and can no longer serve as this negative control.)
 
 The tester's independent round (`.legion/test.json`, PR #1021) used the same isolation and
@@ -105,6 +105,6 @@ the pane's grant file and `PATH`, so its `git push` or `gh` also acts as the pan
 ## Related
 
 - `../legion/one-role-keyed-table-decides-which-github-app-acts.md` — which App each role acts
-  as, both Apps' real permission sets, and who pushes.
+  as and both Apps' real permission sets.
 - `../legion/worker-pane-shell-gotchas.md` §4 — the box's global credential helper hanging a rig
   daemon's clone: the same helper, a different failure.

@@ -55,13 +55,12 @@ not "no review yet"; it is "no review that branch protection counts".
   reviewer's `APPROVED` at the exact head SHA (verified through `latestReviews`/`reviews`), the
   green run, and the thread state — not `reviewDecision`, and not `mergeStateStatus` leaving
   `BLOCKED`.
-- The same App boundary explains the thread rule: the review App can reply on a thread but cannot
-  resolve it or push, so the implementer's/merger's `legion threads resolve` closes the threads the
-  reviewer has `Accepted:` (see `packages/daemon/src/daemon/AGENTS.md`, GitHub Apps).
+- The thread rule: the reviewer resolves the threads it has `Accepted:` with
+  `legion threads resolve` (see `packages/daemon/src/daemon/AGENTS.md`, GitHub Apps).
 
 ## Related
 
 - `../legion/one-role-keyed-table-decides-which-github-app-acts.md` — which App each role acts
-  as, and who pushes.
+  as.
 - `conflicting-pr-gets-no-pull-request-ci.md` — `mergeable`/`mergeStateStatus` and when a PR gets
   no CI at all.
