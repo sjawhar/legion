@@ -114,7 +114,11 @@ test("hovering a board card previews the issue and moving onto the card keeps it
     await page.mouse.move(0, 0);
     await link.hover();
     await expect(card).toBeVisible();
+    // `hover()` moves the pointer in one step, straight from the reference onto the card. Waiting
+    // past the 150 ms close delay before checking is what makes this a check that the move
+    // armed no close, rather than a race between the click and the timer.
     await card.hover();
+    await page.waitForTimeout(300);
     await expect(card).toBeVisible();
     await card.getByRole("link").click();
     await expect(page).toHaveURL(new RegExp(`/issues/${target.key}(/|$)`));
