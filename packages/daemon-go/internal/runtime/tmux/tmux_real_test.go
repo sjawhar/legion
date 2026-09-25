@@ -1474,3 +1474,50 @@ func TestRealTmuxAReleasedClaimsPaneIsTheSweeps(t *testing.T) {
 		t.Errorf("the in-flight launch's pane did not survive the sweep: %+v", obs)
 	}
 }
+
+// A sweep reads the daemon's claims before it reconciles, so a claim released in between — its
+// stop failed, and the daemon retired it anyway, as it does when an agent reports its exit — is
+// still in that sweep's known set, with the locator of the pane its Release let go, and the sweep
+// adopts the pane again. The watch it adopts is the known set's, though, not a hold: the first
+// sweep whose known set no longer names the claim lets the pane go, and reaps it. A claim a sweep
+// still names keeps its pane watched: a stop that failed and will be asked again.
+func TestRealTmuxAPaneAStaleSweepAdoptedIsReapedByTheNextSweep(t *testing.T) {
+	r := newRig(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	worker, err := r.rt.Spawn(ctx, r.spec("legion-t-LEGION-5-tester", "LEGION-3", "LEGION-5", claim.RoleTester))
+	if err != nil {
+		t.Fatalf("Spawn worker: %v", err)
+	}
+	kept, err := r.rt.Spawn(ctx, r.spec("legion-t-LEGION-6-reviewer", "LEGION-3", "LEGION-6", claim.RoleReviewer))
+	if err != nil {
+		t.Fatalf("Spawn kept: %v", err)
+	}
+	staleKnown := []runtime.Known{{Claim: worker.Claim, Locator: &worker}, {Claim: kept.Claim, Locator: &kept}}
+	run := r.rt.run
+	r.rt.run = func(ctx context.Context, argv []string) (result, error) {
+		if verb(argv) == "list-panes" && slices.Contains(argv, "-t") {
+			return result{}, errors.New("tmux list-panes: server not answering")
+		}
+		return run(ctx, argv)
+	}
+	for _, loc := range []runtime.Locator{worker, kept} {
+		if err := r.rt.Release(ctx, runtime.Known{Claim: loc.Claim, Locator: &loc}); err == nil {
+			t.Fatalf("%s's release succeeded with no pane lookup", loc.Claim)
+		}
+	}
+	r.rt.run = run
+	if err := r.rt.ReconcileOrphans(ctx, staleKnown, 0); err != nil {
+		t.Fatalf("the sweep that read the claims before the releases: %v", err)
+	}
+	// The worker's claim is retired now; the kept claim's stop failed, so the daemon still knows it.
+	if err := r.rt.ReconcileOrphans(ctx, []runtime.Known{{Claim: kept.Claim, Locator: &kept}}, 0); err != nil {
+		t.Fatalf("the next sweep: %v", err)
+	}
+	if obs := probe(t, r.rt, worker); obs.Kind != runtime.Gone {
+		t.Errorf("the released pane survived the first sweep that no longer names its claim: %+v", obs)
+	}
+	if obs := probe(t, r.rt, kept); obs.Kind != runtime.Alive {
+		t.Errorf("the pane of a claim the sweep still names did not survive: %+v", obs)
+	}
+}
