@@ -542,11 +542,7 @@ func (g pluginGate) probeLoad(ctx context.Context, launch, probe string, lane pl
 	// that is not Oh My Pi: its own refusal, since "not loaded" would send the operator to
 	// `omp plugin list` when the fix is the prefix or the invocation.
 	if r.exit != 0 && !strings.Contains(r.output, notLoadedMarker) {
-		message := fmt.Sprintf("OMP launch probe failed (exit %d) for launch command %q", r.exit, launch)
-		if r.tail != "" {
-			message += ": " + r.tail
-		}
-		return bootprobe.Outcome{Refusal: errors.New(message)}, ""
+		return bootprobe.Outcome{Refusal: errors.New(r.quoting(fmt.Sprintf("OMP launch probe failed (exit %d) for launch command %q", r.exit, launch)))}, ""
 	}
 	return bootprobe.Outcome{Refusal: notLoaded}, ""
 }
@@ -580,11 +576,7 @@ func (g pluginGate) verifyAgentsCapability(ctx context.Context) error {
 		if r.exit != 0 && available && !answeredNo {
 			return bootprobe.Outcome{Detail: fmt.Sprintf("launch command %q exited %d after Oh My Pi answered: %s", launch, r.exit, r.tail)}
 		}
-		message := fmt.Sprintf("the OMP launch command %q does not expose pi.agents", launch)
-		if r.tail != "" {
-			message += ": " + r.tail
-		}
-		return bootprobe.Outcome{Refusal: errors.New(message)}
+		return bootprobe.Outcome{Refusal: errors.New(r.quoting(fmt.Sprintf("the OMP launch command %q does not expose pi.agents", launch)))}
 	})
 }
 
@@ -616,11 +608,7 @@ func (g pluginGate) verifySessionStorage(ctx context.Context) error {
 			return bootprobe.Outcome{Refusal: fmt.Errorf("OMP launch command %q started with %s=%s (exit 0): this build predates the session.storage setting and would silently keep sessions on files under a sql session store; pin a fork release that carries the setting",
 				launch, sessionStorageVariable, sessionStorageProbeValue)}
 		}
-		detail := fmt.Sprintf("launch command %q exited %d without naming %s", launch, r.exit, sessionStorageVariable)
-		if r.tail != "" {
-			detail += ": " + r.tail
-		}
-		return bootprobe.Outcome{Detail: detail}
+		return bootprobe.Outcome{Detail: r.quoting(fmt.Sprintf("launch command %q exited %d without naming %s", launch, r.exit, sessionStorageVariable))}
 	})
 }
 
@@ -646,6 +634,14 @@ type ran struct {
 	tail                   string
 	timedOut               bool
 	elapsed                time.Duration
+}
+
+// quoting is message followed by the stderr tail, after ": ", when stderr said anything.
+func (r ran) quoting(message string) string {
+	if r.tail == "" {
+		return message
+	}
+	return message + ": " + r.tail
 }
 
 // killed is a budget kill's detail.
