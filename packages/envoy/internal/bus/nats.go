@@ -118,8 +118,10 @@ type Client struct {
 // options starts from nats.GetDefaultOptions: Connect fills in only some zero fields, and the
 // defaults are what turn on reconnecting, the client's pings and the drain and flusher timeouts. A
 // lost server is reconnected in place, forever, so JetStream handles taken from the connection
-// keep working; ReconnectedCB re-subscribes and runs the reconnect hooks, and ClosedCB fires only
-// on Close or Drain. The reconnect buffer is off, so nothing is held and sent after its caller
+// keep working; ReconnectedCB re-subscribes and runs the reconnect hooks. ClosedCB fires on Close
+// or Drain, and also when nats.go gives up on the connection itself: the same authorization error
+// twice in a row, or a server -ERR it does not classify. Those two are why onClosed still starts a
+// recovery that dials a replacement. The reconnect buffer is off, so nothing is held and sent after its caller
 // saw an error: a publish while reconnecting waits for the reconnect instead
 // (ensureConnWithContext), and a publish that fails was not sent.
 func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB func()) nats.Options {
@@ -453,18 +455,8 @@ func (c *Client) onReconnect(nc *nats.Conn) {
 		nc.Close()
 		return
 	}
-	c.mu.Lock()
-	c.Conn = nc
-	js, err := nc.JetStream(nats.MaxWait(10 * time.Second))
-	if err != nil {
-		c.mu.Unlock()
-		slog.Error("envoy nats resubscribe failed (jetstream)", slog.String("error", err.Error()))
-		go c.recover()
-		return
-	}
-	c.js = js
-	c.mu.Unlock()
-
+	// nc is the connection already in c.Conn, reconnected in place, and the JetStream context taken
+	// from it keeps working, so neither field is reassigned here.
 	if err := c.restoreSubscriptions(); err != nil {
 		if errors.Is(err, errStopped) {
 			// Stopped between the check above and the re-subscribe: same as that branch.
@@ -473,6 +465,12 @@ func (c *Client) onReconnect(nc *nats.Conn) {
 		}
 		slog.Error("envoy nats resubscribe failed", slog.String("error", err.Error()))
 		go c.recover()
+		return
+	}
+	// Drain stops the client before it takes the subscriptions to drain them, so a stop can land
+	// while restoreSubscriptions runs. The drain then owns the subscriptions and the connection, and
+	// a hook would only rewatch state the drain is about to close, as recover's attempt skips them.
+	if c.stopped() {
 		return
 	}
 	if err := c.runReconnectHooks(nc); err != nil {
@@ -713,9 +711,14 @@ func (c *Client) recover() {
 			err = c.runReconnectHooks(conn)
 		}
 		// A failure after the stop is the stop: the dial it cancelled, a subscription the drain
-		// closed, a connection it refused to install. None of them is a recovery failure.
+		// closed, a connection it refused to install. None of them is a recovery failure, but the
+		// error stays on the line in case a real one coincided with the stop.
 		if c.stopped() {
-			slog.Info("envoy nats recovery cancelled")
+			if err != nil {
+				slog.Info("envoy nats recovery cancelled", slog.String("error", err.Error()))
+			} else {
+				slog.Info("envoy nats recovery cancelled")
+			}
 			return
 		}
 		if err == nil {
