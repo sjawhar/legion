@@ -1055,11 +1055,16 @@ func inlineReplacement(markdown string) (*pmdoc.Node, error) {
 
 // hardBreakOrderedMarker and hardBreakBlockquoteMarker are the two block markers
 // pmdoc.LeadingBlockMarker cannot answer for a line after a hard break. An ordered item may
-// interrupt a paragraph only when its number is 1, so LeadingBlockMarker's any-digit-run pattern
-// would refuse `2024. was a year`, which stays prose; a blockquote's `>` is no textblock's own
-// marker, so pmdoc has no MarkerKind for it.
+// interrupt a paragraph only when its start number is 1, so LeadingBlockMarker's any-digit-run
+// pattern would refuse `2024. was a year`, which stays prose. Leading zeros do not change that
+// start number, so `01.` and `001)` interrupt exactly as `1.` does, while `02.` (start number 2)
+// and `10.` (start number 10) do not — which is why the digit run must end at the `1`. The zero
+// run is bounded at eight because a start number is at most nine digits, so `0000000001.` is a
+// tenth digit past that cap and opens no list at all: the bound is what keeps this pattern the
+// exact start-number-1 set the parser reads rather than a superset that refuses prose. A
+// blockquote's `>` is no textblock's own marker, so pmdoc has no MarkerKind for it.
 var (
-	hardBreakOrderedMarker    = regexp.MustCompile(`^[ \t]*1[.)][ \t]`)
+	hardBreakOrderedMarker    = regexp.MustCompile(`^[ \t]*0{0,8}1[.)][ \t]`)
 	hardBreakBlockquoteMarker = regexp.MustCompile(`^[ \t]*>`)
 )
 

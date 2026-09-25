@@ -142,8 +142,10 @@ start, where a heading, bullet, `1.`/`1)` ordered or `>` blockquote marker is `I
 `with` as well (`blockMarkerAfterHardBreak`), since replace is inline and that marker can only be
 written as escaped literal text continuing the matched block, never as the block it names. A bare
 newline is a soft break, which renders as a space and reaches no line start; an ordered marker
-whose number is not 1 cannot interrupt a paragraph; and marked text opens with its mark's
-delimiter, not the marker — none of the three is refused. A batch that leaves the document's
+whose start number is not 1 cannot interrupt a paragraph, and leading zeros do not change that
+number, so `01.` and `001)` are refused with `1.`, while `02.`, `10.` and a run of zeros past the
+nine digits a start number may have (`0000000001.`) are not; and marked text opens with its
+mark's delimiter, not the marker — none of the three is refused. A batch that leaves the document's
 semantic identity unchanged — `nodeToken` over the whole tree, inline marks included — mints no
 version, named or not, and the response carries `changed: false` with `unchanged_ops` naming each
 operation that changed nothing (`docs.EditOutcome`). Every refusal names its operation index and
