@@ -224,30 +224,21 @@ func (w *Watcher) watch(kv nats.KeyValue) error {
 	w.mu.Lock()
 	if w.stopped {
 		// Stop ran while WatchAll was starting. Stopping this watcher would be a server request
-		// outside the drain's deadline, so the drain ends its subscription; until then its
-		// updates are read and dropped, since nats.go blocks a watcher whose 256-entry buffer is
-		// full and a drain waits for every pending message to be delivered.
+		// outside the drain's deadline, so the drain ends its subscription; until then it is read
+		// and dropped, since a drain waits for every pending message to be delivered.
 		w.kv = kv
 		w.mu.Unlock()
 		w.applyMu.Unlock()
-		go func() {
-			for range watcher.Updates() {
-			}
-		}()
+		discard(watcher)
 		return nil
 	}
 	if !w.stream.IsZero() && stream.Before(w.stream) {
 		// A newer watch already switched to a recreated bucket. This watcher may be on the old
 		// stream, so installing it would reset the cache the current watcher filled and feed it
-		// the old bucket's keys. It is read and dropped until it ends: nats.go blocks a watcher
-		// whose 256-entry buffer is full, and Stop only unsubscribes, so an unread one would keep
-		// its delivery goroutine parked for the life of the process.
+		// the old bucket's keys.
 		w.mu.Unlock()
 		w.applyMu.Unlock()
-		go func() {
-			for range watcher.Updates() {
-			}
-		}()
+		discard(watcher)
 		_ = watcher.Stop()
 		return nil
 	}
@@ -311,6 +302,16 @@ func (w *Watcher) applyCurrent(entry nats.KeyValueEntry, generation uint64) {
 	if current {
 		w.apply(entry)
 	}
+}
+
+// discard reads and drops a watcher's entries until it ends. nats.go blocks a watcher whose
+// 256-entry buffer is full, and Stop only unsubscribes, so a watcher nothing reads keeps its
+// delivery goroutine parked for the life of the process.
+func discard(watcher nats.KeyWatcher) {
+	go func() {
+		for range watcher.Updates() {
+		}
+	}()
 }
 
 func (w *Watcher) signalReady() {
