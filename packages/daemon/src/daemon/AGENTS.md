@@ -109,11 +109,14 @@ choice the command makes. The daemon's own uses are not role-keyed at all and ar
 App explicitly: workspace provisioning (`ProcessManager`'s `provisioningToken`, `index.ts`, the
 clone/fetch of the shared repository; and `/legion/v1/provisioning-credential`, `credentials.ts`,
 the same token handed to the architect capability), the CI reads (`createCiStatusFetcher`), and
-the first of the two boot leases above. Only the implementer and merger push the issue branch: the
-review App's installation holds `contents: write` too (App 3202653, both installations, read from
-`GET /app/installations` on 2026-09-25), so the workflow, not GitHub, keeps a planner's, tester's,
-reviewer's, or architect's handoff commit in the shared workspace until the implementer's next
-push.
+the first of the two boot leases above. Every role pushes the commits it makes — the planner its
+plan handoff, the implementer its implementation, the tester its red tests and handoff, the
+reviewer its handoff — with its own App's credential; the merger makes no commit. The review App
+can: its installation holds `contents: write`, `pull_requests: write`, and `checks`, `actions` and
+`issues: write` on both of its installations (App 3202653, `legion-reviewer`, sjawhar with all
+repositories and trajectory-labs-pbc with selected ones, read from `GET /app/installations` with
+the App's own JWT on 2026-09-25). This paragraph is the one place Legion states an App's
+permissions; everything else points here.
 
 A phase worker's commit identity is its pane environment, never a config write. `launchWorker`
 (`processes.ts`) resolves the role's App identity from the token lease
@@ -153,15 +156,14 @@ pair; `KubernetesRuntime` sends the pod's shim an `adopt-working-copy` frame. A 
 copy is a previous phase's work and keeps its author, and a failing adoption fails the delivery so
 no worker is prompted whose commits would carry the wrong author.
 
-The review App can post reviews and reply on threads, but GitHub refuses it `resolveReviewThread`:
-the GraphQL API reports `viewerCanResolve: false` for its installation token on every thread, open
-or resolved, although that installation holds `contents: write` and `pull_requests: write` (App
-3202653, `GET /app/installations`, 2026-09-25). It could push the `.legion/` deletion commit, but no
-role acting as it pushes: the workflow gives pushing to the implementer. The implementer therefore
-pushes the `.legion/` deletion at the reviewer's direction, and the implementer — before every push that answers a
-review — and the merger — once more before READY — resolve every thread the reviewer has accepted with
-`legion threads resolve --pr <number> --repo <owner>/<repo>` (`cli/review-threads.ts`,
-`cmdThreadsResolve` in `cli/index.ts`). The command redeems the caller's grant through the same
+The review App resolves the review threads it opened: on 2026-09-25 its installation token's
+`resolveReviewThread` on a scratch thread it had opened on `sjawhar/legion-smoke#228` returned
+`isResolved: true` (the token read `viewerCanResolve: true` there), while on threads another
+account opened it reads `viewerCanResolve: false`. So the reviewer resolves every thread it has
+accepted, running `legion threads resolve --pr <number> --repo <owner>/<repo>` after its
+`Accepted:` replies (`cli/review-threads.ts`, `cmdThreadsResolve` in `cli/index.ts`), and the
+merger publishes no READY while a thread is unresolved. The implementer pushes the `.legion/`
+deletion at the reviewer's direction. The command redeems the caller's grant through the same
 `/gh-token` path `legion gh` uses and reads every review thread over GitHub GraphQL with an
 injected `fetch`; with no grant, its refusal names `--gh`. With `--gh`, for a session outside a
 Legion pane, which has no grant, it redeems nothing: `ghGraphql` sends the same queries and
