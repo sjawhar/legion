@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
+	"github.com/sjawhar/legion/daemon/internal/testomp"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -20,13 +21,7 @@ import (
 // is an operator's provider nothing listens on, so no credential the machine carries decides the
 // run (no probe here makes a model call).
 func TestThePromptReferenceProbeOnTheRealOhMyPi(t *testing.T) {
-	omp := os.Getenv("LEGION_TEST_OMP")
-	switch {
-	case omp == "" && os.Getenv("GITHUB_ACTIONS") == "true":
-		t.Fatal("LEGION_TEST_OMP is unset on GitHub Actions: name the pinned Oh My Pi binary (the daemon-go job installs it)")
-	case omp == "":
-		t.Skip("LEGION_TEST_OMP names no Oh My Pi binary")
-	}
+	omp := testomp.Binary(t)
 	noAgent := "finds no task agent thermonuclear-deep-review (dispatched by dist/skills/legion-worker/SKILL.md)"
 	noRubric := "finds no skill thermonuclear-deep-review (loaded by agents/thermonuclear-deep-review.md)"
 	for _, testCase := range []struct {
