@@ -132,11 +132,16 @@ func deliveryErrorText(err error) string {
 // claimLapsed is the predicate a claim transaction selects beside the pending attempt it locks:
 // whether that attempt is free for this sender to take, because nobody holds it or whoever
 // claimed it never came back within the lease. The lease is a minute. A send is bounded by the
-// listener client's five-second timeout and the short transaction that records its outcome, so a
-// claim older than that was left by a process that died between the two. The next retry resumes
-// that attempt under its original number, whose idempotency key the listener has already
-// deduplicated if the send did land; a retry beside a live claim takes an attempt of its own
+// listener client's own window (five seconds by default, DepsInput.EnvoyTimeout in a test) and
+// the short transaction that records its outcome, so a claim older than the lease was left by a
+// process that died between the two. A retry beside a live claim takes an attempt of its own
 // rather than two senders driving one.
+//
+// What a retry beside a lapsed claim does depends on its mode. In the attempt's own mode it
+// resumes that attempt under its original number, and so its original idempotency key, which
+// the stream deduplicates if the send did land. In a different mode it may not: that key is
+// mode-scoped, so riding the same row would publish a second frame under one attempt number.
+// It settles the stranded attempt instead and opens an attempt of its own.
 //
 // Postgres judges it, against the claimed_at Postgres itself wrote. A Dispatch task whose clock
 // ran ahead of the database would otherwise read every live claim as lapsed, and one that ran

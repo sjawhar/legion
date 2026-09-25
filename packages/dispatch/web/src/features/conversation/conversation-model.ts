@@ -411,6 +411,7 @@ export function buildConversationItems({
           comment_id: event.payload.comment_id,
           created_at: event.created_at,
           delivery: event.payload.delivery,
+          duplicate: event.payload.duplicate,
           envelope_id: null,
           error: event.payload.error ?? null,
           reply_id: event.payload.reply_id,

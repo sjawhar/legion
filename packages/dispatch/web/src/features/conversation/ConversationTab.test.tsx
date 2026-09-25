@@ -39,6 +39,11 @@ function issueState(dismissed: string[] = [], lastReadSeq = 0): UserIssueState {
   return { dismissed, last_read_seq: lastReadSeq, pinned: false, seq: 0 };
 }
 
+// Delivery attempts are dated relative to the run: the dashboard only offers a
+// same-mode Retry while an attempt is inside the stream's duplicate window, so a
+// fixture frozen at an absolute date would age out of every retry assertion.
+const recentAttemptAt = new Date(Date.now() - 60_000).toISOString();
+
 const primaryDocument: Artifact = {
   created_at: "2026-09-09T00:00:00Z",
   created_by: { id: "alice", kind: "user" },
@@ -391,7 +396,7 @@ test("hides targeted-message retries on a closed issue", async () => {
     };
     const failedDelivery: Event = {
       actor: { id: "alice", kind: "user" },
-      created_at: "2026-09-12T00:01:00Z",
+      created_at: recentAttemptAt,
       id: 2,
       issue_key: "CORE-1",
       notify: false,
@@ -413,8 +418,8 @@ test("hides targeted-message retries on a closed issue", async () => {
     unmount = render(tab({ "CORE-1": issueState() }, true, queryClient, true)).unmount;
     await screen.findByText("Failed: no live session s1");
 
-    expect(screen.queryByRole("button", { name: "Ask BTW again" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Send normally" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Send as BTW instead" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Send normally instead" })).toBeNull();
   } finally {
     unmount?.();
     api.getIssueEvents = originalGetIssueEvents;
@@ -451,7 +456,7 @@ test("a targeted message asked by a session names that session as the asker", as
     };
     const sent: Event = {
       actor: asker,
-      created_at: "2026-09-12T00:00:01Z",
+      created_at: recentAttemptAt,
       id: 2,
       issue_key: "CORE-1",
       notify: false,
@@ -946,7 +951,7 @@ test("a comment-delivery retry disables when the target no longer advertises the
           {
             attempt: 1,
             comment_id: "comment-1",
-            created_at: "2026-09-14T00:00:00Z",
+            created_at: recentAttemptAt,
             delivery: "steer",
             envelope_id: null,
             error: "no live session worker",
@@ -1024,7 +1029,7 @@ test("a comment-delivery retry to a role target checks the role's current live h
           {
             attempt: 1,
             comment_id: "comment-1",
-            created_at: "2026-09-14T00:00:00Z",
+            created_at: recentAttemptAt,
             delivery: "steer",
             envelope_id: null,
             error: "no live session reviewer",
@@ -1100,7 +1105,7 @@ test("a comment-delivery retry guards a same-tick double click to exactly one at
         {
           attempt: 1,
           comment_id: "comment-1",
-          created_at: "2026-09-12T00:00:00Z",
+          created_at: recentAttemptAt,
           delivery: "steer",
           envelope_id: null,
           error: "no live session worker",
@@ -1149,7 +1154,7 @@ test("a comment-delivery retry guards a same-tick double click to exactly one at
       return {
         attempt: 2,
         comment_id: id,
-        created_at: "2026-09-12T00:01:00Z",
+        created_at: recentAttemptAt,
         delivery,
         envelope_id: null,
         error: null,
@@ -1205,7 +1210,7 @@ test("a root targeted-message retry checks the role's current holder after a han
     // The failed attempt was recorded against the role's OLD holder.
     const failedDelivery: Event = {
       actor: { id: "alice", kind: "user" },
-      created_at: "2026-09-12T00:01:00Z",
+      created_at: recentAttemptAt,
       id: 2,
       issue_key: "CORE-1",
       notify: false,
@@ -1238,11 +1243,12 @@ test("a root targeted-message retry checks the role's current holder after a han
     ];
 
     unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
-    const sendNormally = await screen.findByRole("button", { name: "Send normally" });
+    // The new holder dropped steer, so the same-mode Retry of a steer attempt is refused.
+    const sendNormally = await screen.findByRole("button", { name: "Retry" });
     expect(sendNormally.hasAttribute("disabled")).toBe(true);
-    expect(screen.getByRole("button", { name: "Ask BTW again" }).hasAttribute("disabled")).toBe(
-      false
-    );
+    expect(
+      screen.getByRole("button", { name: "Send as BTW instead" }).hasAttribute("disabled")
+    ).toBe(false);
   } finally {
     unmount?.();
     api.getIssueEvents = originalGetIssueEvents;
@@ -1278,7 +1284,7 @@ test("a reply's targeted-message retry checks the thread's current role holder a
     };
     const sent: Event = {
       actor: { id: "alice", kind: "user" },
-      created_at: "2026-09-12T00:00:30Z",
+      created_at: recentAttemptAt,
       id: 2,
       issue_key: "CORE-1",
       notify: false,
@@ -1336,7 +1342,7 @@ test("a reply's targeted-message retry checks the thread's current role holder a
     // The reply's own failed delivery is recorded against the role's OLD holder too.
     const failedReplyDelivery: Event = {
       actor: { id: "alice", kind: "user" },
-      created_at: "2026-09-12T00:01:30Z",
+      created_at: recentAttemptAt,
       id: 4,
       issue_key: "CORE-1",
       notify: false,
@@ -1370,11 +1376,12 @@ test("a reply's targeted-message retry checks the thread's current role holder a
 
     unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
     await screen.findByText("Any update?");
-    const sendNormally = await screen.findByRole("button", { name: "Send normally" });
+    // The new holder dropped steer, so the same-mode Retry of a steer attempt is refused.
+    const sendNormally = await screen.findByRole("button", { name: "Retry" });
     expect(sendNormally.hasAttribute("disabled")).toBe(true);
-    expect(screen.getByRole("button", { name: "Ask BTW again" }).hasAttribute("disabled")).toBe(
-      false
-    );
+    expect(
+      screen.getByRole("button", { name: "Send as BTW instead" }).hasAttribute("disabled")
+    ).toBe(false);
   } finally {
     unmount?.();
     api.getIssueEvents = originalGetIssueEvents;
@@ -1404,7 +1411,7 @@ test("a comment-delivery retry guards a same-tick double click to exactly one at
         {
           attempt: 1,
           comment_id: "comment-1",
-          created_at: "2026-09-12T00:00:00Z",
+          created_at: recentAttemptAt,
           delivery: "steer",
           envelope_id: null,
           error: "no live session worker",
@@ -1441,7 +1448,7 @@ test("a comment-delivery retry guards a same-tick double click to exactly one at
       return {
         attempt: 2,
         comment_id: id,
-        created_at: "2026-09-12T00:01:00Z",
+        created_at: recentAttemptAt,
         delivery,
         envelope_id: null,
         error: null,

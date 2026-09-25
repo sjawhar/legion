@@ -230,7 +230,7 @@ func TestAbandonedMentionAttemptIsResumedUnderItsOriginalIdempotencyKey(t *testi
 	comment := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
 		"body": "The sender dies before it hears back.", "mentions": []map[string]any{{"target": "session:s1"}},
 	}))
-	original := comment.ID + ":session:s1:1"
+	original := comment.ID + ":session:s1:steer"
 	if len(keys) != 1 || keys[0] != original {
 		t.Fatalf("original send keys = %#v, want %q", keys, original)
 	}
@@ -252,8 +252,12 @@ func TestAbandonedMentionAttemptIsResumedUnderItsOriginalIdempotencyKey(t *testi
 	if attempt := decodeBody[commentDeliveryRead](t, held); attempt.Attempt != 2 || attempt.State != "sent" {
 		t.Fatalf("retry beside a held attempt = %#v, want its own attempt 2", attempt)
 	}
-	if len(keys) != 1 || keys[0] != comment.ID+":session:s1:2" {
-		t.Fatalf("held-attempt retry keys = %#v, want a second attempt's own key", keys)
+	// The key carries no attempt number, only the target and mode: a same-mode retry beside a
+	// live claim opens its own attempt ROW (nobody drives the held one), but sends under the
+	// SAME key as the original - if the held attempt's send lands too, the stream recognises
+	// the repeat and this one settles as a duplicate rather than a second delivery.
+	if len(keys) != 1 || keys[0] != original {
+		t.Fatalf("held-attempt retry keys = %#v, want the same key %q", keys, original)
 	}
 
 	// The holder never came back: the claim is old enough to be plainly abandoned.
@@ -343,7 +347,7 @@ func TestStrandedMentionAttemptIsResolvedRatherThanFailedUnsent(t *testing.T) {
 		attempt.SessionID == nil || *attempt.SessionID != "s1" {
 		t.Fatalf("resumed stranded attempt = %#v, want attempt 1 sent to the live session s1", attempt)
 	}
-	original := comment.ID + ":session:s1:1"
+	original := comment.ID + ":session:s1:steer"
 	if len(keys) != 1 || keys[0] != original {
 		t.Fatalf("stranded-attempt send keys = %#v, want one send under the original key %q", keys, original)
 	}

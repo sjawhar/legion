@@ -33,7 +33,11 @@ export function eventDescription(event: Event): string {
     case "message.answered":
       return event.payload.body;
     case "message.delivery":
-      return `Message ${event.payload.state}: ${event.payload.delivery}`;
+      // A duplicate attempt reached the listener and put nothing on the recipient's subject;
+      // its state is still `sent`, so reporting the state alone would read as a delivery.
+      return event.payload.duplicate === true
+        ? `Message already delivered: ${event.payload.delivery}`
+        : `Message ${event.payload.state}: ${event.payload.delivery}`;
     case "ask.opened":
       return `Ask opened: ${event.payload.question}`;
     case "ask.anchor_refreshed":
@@ -48,7 +52,11 @@ export function eventDescription(event: Event): string {
         ? "Comment lost its quote"
         : "Comment re-anchored after an edit";
     case "comment.delivery":
-      return `Comment ${event.payload.state}: ${event.payload.delivery}`;
+      // Same rule as message.delivery above: a duplicate is still `sent`, so the state alone
+      // would report a delivery the mentioned session never received.
+      return event.payload.duplicate === true
+        ? `Comment already delivered: ${event.payload.delivery}`
+        : `Comment ${event.payload.state}: ${event.payload.delivery}`;
     case "issue.created":
       return "Issue created";
     case "issue.updated":

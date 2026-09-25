@@ -9,7 +9,116 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
+
+// LEGION-271. A send whose answer misses the client's window is the one failure a retry is safe
+// after: the listener publishes before it answers, so the message may already be on the agent's
+// subject. Dispatch can only word that honestly if the timeout arrives as its own error rather
+// than as a string, and today client.go flattens the cause with %v so errors.Is sees nothing.
+// A refusal is the discriminating control: nothing landed, and it must not read as a timeout.
+func TestSendDistinguishesAReceiptTimeoutFromARefusal(t *testing.T) {
+	held := make(chan struct{})
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			IdempotencyKey string `json:"idempotency_key"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode send: %v", err)
+		}
+		if request.IdempotencyKey == "refused:steer" {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":"listener refused the send"}`))
+			return
+		}
+		<-held
+	}))
+	defer func() {
+		close(held)
+		listener.Close()
+	}()
+
+	_, err := New(listener.URL, WithTimeout(150*time.Millisecond)).Send(context.Background(), SendInput{
+		TargetSession: "s1", Message: "held past the window", IdempotencyKey: "held:steer",
+	})
+	if !errors.Is(err, ErrReceiptTimeout) {
+		t.Fatalf("send that missed the window = %v, want ErrReceiptTimeout", err)
+	}
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("a receipt timeout is still a listener failure: %v", err)
+	}
+
+	_, err = New(listener.URL, WithTimeout(5*time.Second)).Send(context.Background(), SendInput{
+		TargetSession: "s1", Message: "refused outright", IdempotencyKey: "refused:steer",
+	})
+	if err == nil || errors.Is(err, ErrReceiptTimeout) {
+		t.Fatalf("refused send = %v, want a failure that is not a receipt timeout", err)
+	}
+}
+
+// LEGION-271. The listener answers a send JetStream already held with duplicate: true, and that
+// is the only thing telling Dispatch its retry changed nothing on the agent's subject. An older
+// listener omits the field, which reads as false.
+func TestSendCarriesTheListenersDuplicateVerdict(t *testing.T) {
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			IdempotencyKey string `json:"idempotency_key"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode send: %v", err)
+		}
+		if request.IdempotencyKey == "already-held:steer" {
+			_, _ = w.Write([]byte(`{"event_id":"envelope-1","recipient":"s1","duplicate":true}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"event_id":"envelope-2","recipient":"s1"}`))
+	}))
+	defer listener.Close()
+
+	duplicate, err := New(listener.URL).Send(context.Background(), SendInput{
+		TargetSession: "s1", Message: "the stream already had this", IdempotencyKey: "already-held:steer",
+	})
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if !duplicate.Duplicate {
+		t.Fatalf("send result = %#v, want the listener's duplicate verdict carried", duplicate)
+	}
+
+	fresh, err := New(listener.URL).Send(context.Background(), SendInput{
+		TargetSession: "s1", Message: "the stream did not have this", IdempotencyKey: "fresh:steer",
+	})
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if fresh.Duplicate {
+		t.Fatalf("send result = %#v, want an omitted duplicate read as false", fresh)
+	}
+}
+
+// LEGION-271. A send that never reached the listener published nothing, so it must not be
+// classed a receipt timeout: that class is what tells a human their message may already have
+// been delivered. Only a request that was written and then went unanswered qualifies. The
+// distinguishing case is a connect that times out - a timeout, but one where nothing was sent.
+func TestSendDoesNotCallAConnectFailureAReceiptTimeout(t *testing.T) {
+	// 203.0.113.0/24 is TEST-NET-3: reserved, routed nowhere. The dial either times out or is
+	// refused outright; both mean nothing was written, and neither may read as a receipt
+	// timeout.
+	_, err := New("http://203.0.113.1:9", WithTimeout(200*time.Millisecond)).Send(
+		context.Background(), SendInput{
+			TargetSession: "s1", Message: "never left the building", IdempotencyKey: "m1:steer",
+		},
+	)
+	if err == nil {
+		t.Fatal("a send to an unroutable address must fail")
+	}
+	if errors.Is(err, ErrReceiptTimeout) {
+		t.Fatalf("connect failure = %v, want a failure that is not a receipt timeout", err)
+	}
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("connect failure = %v, want it still reported as a listener failure", err)
+	}
+}
 
 func TestSessionsMapsListenerRowsAndDefaultsMissingSlices(t *testing.T) {
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

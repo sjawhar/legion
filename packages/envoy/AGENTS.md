@@ -336,15 +336,53 @@ step of a delivery holds a connection across another.
 A claim outlives its sender by a minute, which Postgres judges (`claimLapsed`) against the
 `claimed_at` Postgres itself wrote, so no task's clock skew can read a live claim as lapsed or
 leave a stranded attempt unresumable. A retry beside a live claim takes an attempt of its own;
-one beside an abandoned claim resumes the original attempt under its original number, whose
-idempotency key (`<comment>:<target>:<attempt>`, `<message>:<attempt>`) makes a send that did
-land a duplicate the listener drops. A resumed attempt keeps the recipient it was opened for -
-a comment attempt its pinned session or its resolve error, a message attempt the session its row
-names - because that is the session the listener deduplicated the key for and the one holding
+one beside an abandoned claim resumes the original attempt under its original number. A resumed
+attempt keeps the recipient it was opened for - a comment attempt its pinned session or its
+resolve error, a message attempt the session its row names - because that is the session holding
 the frame; a role that has moved since is reached by an attempt of its own rather than by
 re-pointing this one, and only whether the original recipient can still receive the mode is
 re-derived. An attempt stranded before anything was resolved has no recipient to keep and is
 resolved afresh under that same number, never reported undeliverable unsent.
+
+The idempotency key carries no attempt number: it is `<message>:<mode>` and
+`<comment>:<target>:<mode>`, stable across every attempt of that pair. The listener prefixes the
+recipient (`agent.<session>.<key>`) and the JetStream MsgId appends the topic, so the key's real
+scope is **(message, mode, recipient session)**, and a retry of a send that already landed is a
+duplicate JetStream drops before the agent's subject ever sees it. That is what makes a retry
+after a receipt timeout safe: the listener publishes the envelope before it answers, so an
+answer that misses the client's window says nothing about whether the message landed, and only
+the same key can be recognised as the repeat it is. **This holds for as long as the stream's
+duplicate window, which equals its retention by construction (both are `streamDuplicateWindow`,
+`internal/bus/nats.go`) and is reconciled on every `bus.Connect` by `ensureStreamWithConfig`.**
+A retry in a DIFFERENT mode is a different key and genuinely does deliver again, which is what
+the dashboard's retry row says: its **Retry** re-sends the attempt's own mode, and the two
+mode-change actions say "instead". A mode change never rides on a stranded attempt - resuming it
+would publish a second frame under one attempt number - so the claim transaction settles that
+attempt `failed` ("superseded by a retry in another mode"), moves its `claimed_at` so the
+original sender stops owning it, appends its own `message.delivery` receipt, and opens a new
+attempt pinned to the session the stranded row named.
+
+**The window is one number, and the promise expires with it.** `DELIVERY_DUPLICATE_WINDOW_MS` in
+`packages/contracts` is the single literal: `contracts.DeliveryDuplicateWindow` is generated from
+it for Go, and the dashboard reads it directly. Past that window the stream holds neither the
+message nor its MsgId, so a same-mode retry publishes a second frame - which is why the row
+stores only the CAUSE of a receipt timeout and never the advice. Every delivery surface composes
+the advice through one predicate, `isSafeRetry` in
+`packages/dispatch/web/src/features/conversation/delivery.ts`: it shows the "retrying is safe"
+sentence, and offers the same-mode **Retry** at all, only for a failed attempt inside the window
+that is not itself a duplicate - and it reads a negative age as young, because `created_at` is
+Postgres-stamped while the browser supplies `now`. The mode-change actions are not gated: they
+always deliver. Their clause ("sending in a different mode delivers it again") is added only
+for a receipt timeout, the one cause whose send may already have reached the recipient;
+`RECEIPT_TIMEOUT_CAUSE` in `packages/contracts` is that cause's single literal, generated into
+Go as `contracts.ReceiptTimeoutCause` so the string Dispatch stores and the string the
+dashboard keys on cannot drift.
+
+An attempt the stream recognised records `duplicate` and no envelope id: it reached the listener
+and put nothing new on the recipient's subject, so it reads as "already delivered" rather than as
+a fresh send. The flag rides the attempt read, the `message.delivery` payload and the comment
+delivery payload, and every surface that renders an attempt - the targeted-message card, the
+comment thread's mention list, and the issue event feed - reads it.
 
 Because the attempt is committed `pending` before its send and names the session that send is
 going to, the session can answer or refuse the frame while it is still in flight - and can answer
@@ -486,7 +524,7 @@ Dispatch treats an agent endpoint and bearer token as one trust-bound configurat
 
 | Endpoint | Method | Contract |
 | --- | --- | --- |
-| `/v1/messages/send` | POST | Sends to a live `target_session`. Dispatch uses `source: "dispatch"`, an idempotency key, and a `payload` JSON string whose frame is `{event, delivery}`; the response is the envelope plus `recipient` with the full target session ID. |
+| `/v1/messages/send` | POST | Sends to a live `target_session`. Dispatch uses `source: "dispatch"`, an idempotency key, and a `payload` JSON string whose frame is `{event, delivery}`; the response is the envelope plus `recipient` with the full target session ID, and `duplicate: true` when JetStream already held this message. Only a `source: "dispatch"` send carries a MsgId, so only it can ever answer `duplicate`; the field is omitted (read as false) otherwise, which is also what an older listener answers. It means "the stream already held this MsgId", which includes the publish path's own reconnect retry whose first attempt landed and lost its acknowledgement. |
 | `/v1/messages/publish` | POST | Publishes a non-agent topic. An optional `dedupe_key` is used verbatim as the envelope's dedupe key (how a re-sent copy stays recognisable to the receiver's own dedupe); it is mutually exclusive with `idempotency_key` — both present is a 400 whose `expected` names both fields — it may not begin with the reserved forward mark `envoy.role.forward.` (a 400 naming `dedupe_key`; the role arbiter drops such an envelope on sight, so accepting it would be a 200 for a message that vanishes), and an empty string is absent; without either key the key is minted. A `notifications.role.<role>` topic requires a live holder and returns that session ID in `holder`. Its 404 adds `reason: "unclaimed"` for a role with no claim, or `reason: "holder_lapsed"` with the prior `holder`, `claim_released`, and a `last_seen` timestamp when the final heartbeat remains in its one-TTL diagnostic window. |
 | `/v1/roles/<role>` | GET | Returns the live role holder, including its capabilities and `last_seen`. A 404 has `reason: "unclaimed"` when no role claim exists; for an absent holder it has `reason: "holder_lapsed"` with the prior holder's ID, whether this lookup released the claim, and any final last-seen time retained for one TTL. |
 | `/v1/roles/set` | POST | Claims a role for a live session and registers its role topic. Last-claim-wins by default. With `"soft": true` the claim lands only if the role is unheld, already this session's, held by a session that is no longer live, or held by the declared `previous_session_id` (the id a fork/branch continues); any other live holder answers `409 {error, role, holder}` and nothing changes. |
@@ -517,7 +555,9 @@ targeted roots newest first with their deliveries and reply chains (a reply in t
 its own deliveries). Dispatch resolves a role holder
 and checks the selected session's capabilities for every attempt, then makes the synchronous
 listener send; `POST /api/v1/messages/{id}/deliveries` creates an explicit retry attempt (same
-callers, same `actor` rule for bearers). The targeted session alone uses
+callers, same `actor` rule for bearers) in the `delivery` mode it names - the attempt's own mode
+is the retry that cannot deliver the message twice, another mode is a genuine second delivery.
+The targeted session alone uses
 `POST /api/v1/messages/{id}/reply` for the attempt's automatic BTW response; an ordinary agent
 reply uses `dispatch_message({ in_reply_to })` on the same open issue.
 

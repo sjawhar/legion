@@ -632,6 +632,10 @@ export interface CommentDelivery {
   readonly delivery: DeliveryCapability;
   readonly session_id: string | null;
   readonly envelope_id: string | null;
+  /** The stream already held this message when the attempt was sent, so the mentioned session
+   *  gained nothing from it; `envelope_id` is then null. Absent on a row written before the
+   *  field existed, which reads as false. */
+  readonly duplicate?: boolean;
   readonly state: "pending" | "sent" | "failed";
   readonly error: string | null;
   readonly resolve_error: string | null;
@@ -654,6 +658,9 @@ export interface CommentDeliveryEventPayload {
    *  the attempt's claim, and both reply handlers settle the row in the statement that appends
    *  theirs. The attempt row itself reads `pending` between its commit and that outcome. */
   readonly state: "sent" | "failed";
+  /** The stream already held this message, so the mentioned session gained nothing from this
+   *  attempt. Absent means false. */
+  readonly duplicate?: boolean;
   readonly error?: string;
   readonly reply_id: string | null;
 }
@@ -722,6 +729,32 @@ export const DELIVERY_CAPABILITIES = ["aside", "btw", "steer"] as const;
 
 export type DeliveryCapability = (typeof DELIVERY_CAPABILITIES)[number];
 
+/**
+ * How long the notification stream recognises a repeated delivery as a duplicate, in
+ * milliseconds. This is the single source for that window: `bus/nats.go`'s
+ * `streamDuplicateWindow` is generated from it (`scripts/gen-go.ts` emits
+ * `contracts.DeliveryDuplicateWindow`), and the SPA reads it to decide whether re-sending a
+ * failed attempt in its own mode can still be promised not to deliver twice.
+ *
+ * It equals the stream's retention: past it the stream holds neither the message nor its
+ * MsgId, so a same-mode retry publishes a second frame and the agent is handed the same
+ * instruction again.
+ */
+export const DELIVERY_DUPLICATE_WINDOW_MS = 72 * 60 * 60 * 1000;
+
+/**
+ * The cause a delivery attempt records when the listener never answered its send. The listener
+ * publishes before it answers, so this is the one failure that may already have reached the
+ * recipient — which is what makes re-sending in another mode a genuine second delivery, and what
+ * the dashboard keys that wording on. Generated into Go as `contracts.ReceiptTimeoutCause`, so
+ * the string the server writes and the string the dashboard recognises are one literal.
+ *
+ * It is the CAUSE only: the advice that follows from it expires with
+ * `DELIVERY_DUPLICATE_WINDOW_MS`, so it is composed at render time and never stored.
+ */
+export const RECEIPT_TIMEOUT_CAUSE =
+  "The listener didn't answer within the send window; the message may already have been delivered.";
+
 export type MessageDeliveryMode = DeliveryCapability;
 
 export interface MessageDelivery {
@@ -730,6 +763,13 @@ export interface MessageDelivery {
   readonly delivery: MessageDeliveryMode;
   readonly session_id: string;
   readonly envelope_id: string | null;
+  /**
+   * The stream already held this message when the attempt was sent, so the recipient gained
+   * nothing from it. The attempt is still `sent` - it reached the listener - but `envelope_id`
+   * is null, because the envelope this send minted is the one the stream discarded. Absent on a
+   * row written before the field existed, which reads as false.
+   */
+  readonly duplicate?: boolean;
   /**
    * `pending` is an attempt Dispatch has committed but not yet sent, or whose send it never
    * learned the outcome of: the row is written before the listener call and settled by a
@@ -787,6 +827,9 @@ export interface MessageDeliveryEventPayload {
   readonly target?: string;
   readonly title: string;
   readonly state: "sent" | "failed";
+  /** The stream already held this message, so the recipient gained nothing from this attempt:
+   *  it reached the listener and put nothing new on the session's subject. Absent means false. */
+  readonly duplicate?: boolean;
   readonly error?: string;
 }
 
@@ -1657,6 +1700,9 @@ const CommentDeliverySchema = z.object({
   delivery: z.enum(DELIVERY_CAPABILITIES),
   session_id: z.string().nullable(),
   envelope_id: z.string().nullable(),
+  // A stripping object: without this line the flag is dropped from every agent-bound comment
+  // frame, since this schema is nested inside the passthrough payload schemas.
+  duplicate: z.boolean().optional(),
   state: z.enum(["pending", "sent", "failed"]),
   error: z.string().nullable(),
   resolve_error: z.string().nullable(),
@@ -1761,6 +1807,9 @@ export const MessageDeliveryEventPayloadSchema = z.object({
   target: z.string().optional(),
   title: z.string().optional(),
   state: z.enum(["sent", "failed"]).optional(),
+  // A stripping object: without this line the flag is dropped from every agent-bound
+  // message.delivery frame.
+  duplicate: z.boolean().optional(),
   error: z.string().optional(),
 });
 

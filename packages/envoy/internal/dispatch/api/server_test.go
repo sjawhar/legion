@@ -54,6 +54,9 @@ type testServerOptions struct {
 	// envoyURL points the Envoy listener client at a fake listener; empty leaves the client
 	// unconfigured, which is every test that never asks whether a session is live.
 	envoyURL string
+	// envoyTimeout shortens that client's window, so a test can exercise a receipt timeout
+	// without holding a stand-in listener for the production five seconds.
+	envoyTimeout time.Duration
 }
 
 func newTestHandler(t *testing.T) http.Handler {
@@ -113,6 +116,7 @@ func newTestServer(t *testing.T, options testServerOptions) (http.Handler, *stor
 		GitHubAPIBase:    options.githubAPIBase,
 		TestHooksEnabled: options.testHooks,
 		EnvoyURL:         options.envoyURL,
+		EnvoyTimeout:     options.envoyTimeout,
 		OIDC:             options.oidc,
 	})
 	if err != nil {

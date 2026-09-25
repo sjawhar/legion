@@ -356,7 +356,7 @@ test("an agent's answer on a failed attempt is accepted and shown as the answer"
     expect(answer.in_reply_to).toBe(message.id);
     await expect(card).toContainText("Answered by planner");
     await expect(threadReply(page, card, "Loud and clear.")).toBeVisible();
-    await expect(card.getByRole("button", { name: "Ask BTW again" })).toHaveCount(0);
+    await expect(card.getByRole("button", { name: "Send as BTW instead" })).toHaveCount(0);
     const stored = await getMessage(issue.key, message.id);
     expect(stored.message.deliveries).toMatchObject([
       { attempt: 1, error: null, reply_id: answer.id, state: "sent" },

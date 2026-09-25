@@ -9,6 +9,7 @@ import {
   textPrimaryOnSurface,
 } from "../../theme/classes";
 import { Timestamp } from "../refs/Timestamp";
+import { duplicateText, isSafeRetry, safeRetryGuidance, withGuidance } from "./delivery";
 import { ReplyButton } from "./ReplyButton";
 
 /** The current live capabilities behind a stored delivery target - a bare session, or a role
@@ -37,6 +38,8 @@ export interface TargetedMessageAttempt {
   readonly attempt: number;
   readonly createdAt: string;
   readonly delivery: MessageDeliveryMode;
+  /** The listener already held this message, so this attempt reached it and changed nothing. */
+  readonly duplicate?: boolean;
   readonly error?: string | null;
   readonly state: "pending" | "sent" | "failed";
   readonly targetName?: string;
@@ -45,28 +48,53 @@ export interface TargetedMessageAttempt {
 /** The headline one targeted message gets: who answered it, why it failed, that it is still
  *  going out, that it is a BTW waiting on an answer, or that it was delivered. `asking` is
  *  that BTW branch, whose line ends in a separator because it carries a timestamp: the two
- *  belong to one decision, so the caller reads it here rather than restating the condition. */
+ *  belong to one decision, so the caller reads it here rather than restating the condition.
+ *
+ *  A BTW is tested before `duplicate`: an outstanding BTW is still waiting on its answer even
+ *  when the send that carried it changed nothing, so the human must keep seeing that one is
+ *  expected. */
 function deliveryHeadline(
   answeredBy: string | undefined,
   delivery: TargetedMessageAttempt | undefined,
-  targetName: string
+  targetName: string,
+  retryOffered: boolean
 ): { text: string; asking: boolean } {
   if (answeredBy !== undefined) return { text: `Answered by ${answeredBy}`, asking: false };
-  if (delivery?.state === "failed")
-    return { text: `Failed: ${delivery.error ?? "delivery failed"}`, asking: false };
+  if (delivery?.state === "failed") {
+    const cause = `Failed: ${delivery.error ?? "delivery failed"}`;
+    // The promise belongs to the button: it is only true of the Retry this card is actually
+    // offering, and only while that Retry is offered at all.
+    return {
+      text: retryOffered ? withGuidance(cause, safeRetryGuidance("card", delivery.error)) : cause,
+      asking: false,
+    };
+  }
   const mode = delivery?.delivery ?? "steer";
   if (delivery?.state === "pending")
     return { text: `Sending to ${targetName} (${mode})`, asking: false };
   if (mode === "btw") return { text: `Asking ${targetName} (BTW) ·`, asking: true };
+  if (delivery?.duplicate === true) return { text: duplicateText, asking: false };
   return { text: `Sent to ${targetName} (${mode})`, asking: false };
 }
 
 /** One earlier attempt's line: what it did, and the name its own target resolved to when it
- *  was made, which a later role hand-off does not change. */
+ *  was made, which a later role hand-off does not change. An earlier attempt is never what
+ *  Retry re-sends, so it never carries the safe-retry promise. */
 function attemptSummary(attempt: TargetedMessageAttempt, targetName: string): string {
   if (attempt.state === "failed") return `Failed: ${attempt.error ?? "delivery failed"}`;
+  if (attempt.duplicate === true) return duplicateText;
   const verb = attempt.state === "pending" ? "Sending" : "Sent";
   return `${verb} to ${attempt.targetName ?? targetName} (${attempt.delivery})`;
+}
+
+/** Whether this card is offering the same-mode Retry the safe-retry promise describes: the
+ *  attempt has to be retryable at all, and the surface has to be showing the button. */
+export function offersSafeRetry(
+  deliveries: readonly TargetedMessageAttempt[],
+  retryAvailable: boolean
+): boolean {
+  const latest = deliveries.at(-1);
+  return retryAvailable && latest !== undefined && isSafeRetry(latest);
 }
 
 /** What became of a targeted message: answered, failed, asking (BTW), or sent - then the
@@ -74,14 +102,16 @@ function attemptSummary(attempt: TargetedMessageAttempt, targetName: string): st
 export function DeliveryStatus({
   answeredBy,
   deliveries,
+  retryOffered = false,
   targetName,
 }: {
   answeredBy?: string;
   deliveries: readonly TargetedMessageAttempt[];
+  retryOffered?: boolean;
   targetName: string;
 }): ReactNode {
   const delivery = deliveries.at(-1);
-  const headline = deliveryHeadline(answeredBy, delivery, targetName);
+  const headline = deliveryHeadline(answeredBy, delivery, targetName, retryOffered);
   return (
     <>
       <p className={`mt-2 text-sm font-semibold ${textPrimaryOnSurface}`}>
@@ -103,50 +133,92 @@ export function DeliveryStatus({
 
 /** The retry row an unanswered targeted message keeps while its issue is open. A disabled
  *  button's reason renders as visible text beneath it - not a `title` - so it reaches a phone,
- *  where a tooltip on a disabled control is unreachable. */
+ *  where a tooltip on a disabled control is unreachable.
+ *
+ *  Retry re-sends in the attempt's OWN mode, and appears only while `isSafeRetry` holds: that
+ *  send carries the same idempotency key, so the stream drops it if the message already landed
+ *  - but only inside the stream's duplicate window, and only for an attempt that actually
+ *  failed. Offering it otherwise would be offering a second delivery under a promise of none.
+ *  The mode-change actions have no such limit: they are a different key and are honestly
+ *  labelled "instead". */
 export function DeliveryRetry({
+  canAside,
   canBtw,
   canSteer,
+  mode,
   onRetry,
   retrying,
+  sameModeRetry,
   targetName,
 }: {
+  canAside: boolean;
   canBtw: boolean;
   canSteer: boolean;
-  onRetry: (delivery: "btw" | "steer") => void;
+  mode: MessageDeliveryMode;
+  onRetry: (delivery: MessageDeliveryMode) => void;
   retrying: boolean;
+  /** `offersSafeRetry` for this surface: the same decision the safe-retry sentence is made on. */
+  sameModeRetry: boolean;
   targetName: string;
 }): ReactNode {
+  const supports: Record<MessageDeliveryMode, boolean> = {
+    aside: canAside,
+    btw: canBtw,
+    steer: canSteer,
+  };
   return (
     <div className="mt-3 flex flex-wrap gap-3">
-      <div>
-        <button
-          className={`min-h-11 rounded-lg border px-3 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText}`}
-          disabled={retrying || !canBtw}
-          onClick={() => onRetry("btw")}
-          type="button"
-        >
-          Ask BTW again
-        </button>
-        {canBtw ? null : (
-          <p className={`mt-1 text-xs ${textMutedOnSurface}`}>{targetName} does not support BTW.</p>
-        )}
-      </div>
-      <div>
-        <button
-          className={`min-h-11 rounded-lg border px-3 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText}`}
-          disabled={retrying || !canSteer}
-          onClick={() => onRetry("steer")}
-          type="button"
-        >
-          Send normally
-        </button>
-        {canSteer ? null : (
-          <p className={`mt-1 text-xs ${textMutedOnSurface}`}>
-            {targetName} does not support normal delivery — use BTW.
-          </p>
-        )}
-      </div>
+      {!sameModeRetry ? null : (
+        <div>
+          <button
+            className={`min-h-11 rounded-lg border px-3 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText}`}
+            disabled={retrying || !supports[mode]}
+            onClick={() => onRetry(mode)}
+            type="button"
+          >
+            Retry
+          </button>
+          {supports[mode] ? null : (
+            <p className={`mt-1 text-xs ${textMutedOnSurface}`}>
+              {targetName} does not support {mode}.
+            </p>
+          )}
+        </div>
+      )}
+      {mode === "btw" ? null : (
+        <div>
+          <button
+            className={`min-h-11 rounded-lg border px-3 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText}`}
+            disabled={retrying || !canBtw}
+            onClick={() => onRetry("btw")}
+            type="button"
+          >
+            Send as BTW instead
+          </button>
+          {canBtw ? null : (
+            <p className={`mt-1 text-xs ${textMutedOnSurface}`}>
+              {targetName} does not support BTW.
+            </p>
+          )}
+        </div>
+      )}
+      {mode === "steer" ? null : (
+        <div>
+          <button
+            className={`min-h-11 rounded-lg border px-3 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText}`}
+            disabled={retrying || !canSteer}
+            onClick={() => onRetry("steer")}
+            type="button"
+          >
+            Send normally instead
+          </button>
+          {canSteer ? null : (
+            <p className={`mt-1 text-xs ${textMutedOnSurface}`}>
+              {targetName} does not support normal delivery — use BTW.
+            </p>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -155,6 +227,7 @@ interface TargetedMessageCardProps {
   /** Who answered the message, once a session did; the card then reads "Answered by". */
   readonly answeredBy?: string;
   readonly body: ReactNode;
+  readonly canAside: boolean;
   readonly canBtw: boolean;
   readonly canSteer: boolean;
   readonly current?: boolean;
@@ -163,7 +236,7 @@ interface TargetedMessageCardProps {
   readonly isClosed: boolean;
   readonly lastSeq?: number;
   readonly onReply?: () => void;
-  readonly onRetry?: (delivery: "btw" | "steer") => void;
+  readonly onRetry?: (delivery: MessageDeliveryMode) => void;
   readonly register?: (element: HTMLLIElement | null) => void;
   readonly retrying?: boolean;
   readonly targetName: string;
@@ -176,6 +249,7 @@ interface TargetedMessageCardProps {
 export function TargetedMessageCard({
   answeredBy,
   body,
+  canAside,
   canBtw,
   canSteer,
   current = false,
@@ -191,6 +265,9 @@ export function TargetedMessageCard({
   thread,
   turnID,
 }: TargetedMessageCardProps): ReactNode {
+  // Narrowed once, so the render below needs no second test of the same condition.
+  const retry = answeredBy === undefined && !isClosed ? onRetry : undefined;
+  const sameModeRetry = offersSafeRetry(deliveries, retry !== undefined);
   return (
     <li
       aria-current={current ? "true" : undefined}
@@ -206,16 +283,24 @@ export function TargetedMessageCard({
           <ReplyButton className="self-start" onClick={onReply} />
         )}
       </div>
-      <DeliveryStatus answeredBy={answeredBy} deliveries={deliveries} targetName={targetName} />
-      {answeredBy === undefined && !isClosed && onRetry !== undefined ? (
+      <DeliveryStatus
+        answeredBy={answeredBy}
+        deliveries={deliveries}
+        retryOffered={sameModeRetry}
+        targetName={targetName}
+      />
+      {retry === undefined ? null : (
         <DeliveryRetry
+          canAside={canAside}
           canBtw={canBtw}
           canSteer={canSteer}
-          onRetry={onRetry}
+          mode={deliveries.at(-1)?.delivery ?? "steer"}
+          onRetry={retry}
           retrying={retrying}
+          sameModeRetry={sameModeRetry}
           targetName={targetName}
         />
-      ) : null}
+      )}
       {thread}
     </li>
   );

@@ -11,7 +11,14 @@ import { Link } from "react-router-dom";
 import { api } from "../../api/client";
 import { userStateQuery, whoAmIQuery } from "../../api/queries";
 import { type EventPages, mergeEventPages } from "../../api/sse";
-import type { Agent, Artifact, Event, UserIssueState, UserState } from "../../api/types";
+import type {
+  Agent,
+  Artifact,
+  Event,
+  MessageDeliveryMode,
+  UserIssueState,
+  UserState,
+} from "../../api/types";
 import { PinButton } from "../../components/PinButton";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
@@ -66,6 +73,7 @@ import {
   type ThreadReply,
   visibleConversationItems,
 } from "./conversation-model";
+import { duplicateText, isSafeRetry, safeRetryGuidance, withGuidance } from "./delivery";
 import { MentionComposer, type ReplyTarget } from "./MentionComposer";
 import { ReplyButton } from "./ReplyButton";
 import { firstLine, ReplyQuote, replyQuoteText } from "./ReplyQuote";
@@ -107,6 +115,7 @@ function attemptsOf(deliveries: readonly MessageDeliveryEvent[]): TargetedMessag
     attempt: attempt.payload.attempt,
     createdAt: attempt.created_at,
     delivery: attempt.payload.delivery,
+    duplicate: attempt.payload.duplicate,
     error: attempt.payload.error,
     state: attempt.payload.state,
     targetName: attempt.payload.title,
@@ -185,7 +194,7 @@ function ConversationReply({
 }): ReactNode {
   const queryClient = useQueryClient();
   const retry = useMutation({
-    mutationFn: (delivery: "btw" | "steer") =>
+    mutationFn: (delivery: MessageDeliveryMode) =>
       api.createMessageDelivery(reply.event.payload.id, delivery),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["events", issueKey] }),
   });
@@ -219,6 +228,10 @@ function ConversationReply({
               retry: isClosed
                 ? undefined
                 : {
+                    canAside:
+                      capabilitiesForTarget(root.event.payload.target, agents)?.includes(
+                        "aside"
+                      ) !== false,
                     canBtw:
                       capabilitiesForTarget(root.event.payload.target, agents)?.includes("btw") !==
                       false,
@@ -443,6 +456,16 @@ function CommentDeliveryList({
     >
       {deliveries.map((delivery) => {
         const capabilities = capabilitiesForTarget(delivery.target, agents);
+        const outcome = {
+          state: delivery.state,
+          createdAt: delivery.created_at,
+          duplicate: delivery.duplicate,
+        };
+        // The same rule the targeted-message card applies: a mention's Retry re-sends its own
+        // mode under its own key, so it can only be offered while the stream would still
+        // recognise the repeat. The list offers no mode-change action, so its guidance says
+        // nothing about one.
+        const safeRetry = isSafeRetry(outcome);
         const canRetry = capabilities === undefined || capabilities.includes(delivery.delivery);
         return (
           <li
@@ -450,10 +473,19 @@ function CommentDeliveryList({
             key={`${delivery.target}:${delivery.attempt}`}
           >
             <span>
-              {delivery.target} · {delivery.state}
-              {delivery.error === null ? "" : ` · ${delivery.error}`}
+              {delivery.target} · {delivery.duplicate === true ? duplicateText : delivery.state}
+              {delivery.error === null
+                ? ""
+                : ` · ${
+                    safeRetry
+                      ? withGuidance(delivery.error, safeRetryGuidance("mention", delivery.error))
+                      : delivery.error
+                  }`}
+              {delivery.error === null && safeRetry
+                ? ` · ${safeRetryGuidance("mention", delivery.error)}`
+                : ""}
             </span>
-            {disabled || !canRetry ? null : (
+            {disabled || !canRetry || !safeRetry ? null : (
               <button
                 className={`min-h-8 font-medium ${linkText}`}
                 disabled={retrying}
@@ -679,7 +711,7 @@ function TargetedMessageTurn({
 }): ReactNode {
   const queryClient = useQueryClient();
   const retry = useMutation({
-    mutationFn: (delivery: "btw" | "steer") =>
+    mutationFn: (delivery: MessageDeliveryMode) =>
       api.createMessageDelivery(item.event.payload.id, delivery),
     onSuccess: () =>
       void queryClient.invalidateQueries({ queryKey: ["events", item.event.issue_key] }),
@@ -709,6 +741,7 @@ function TargetedMessageTurn({
           <EventBody event={item.event} />
         </>
       }
+      canAside={capabilities?.includes("aside") !== false}
       canBtw={capabilities?.includes("btw") !== false}
       canSteer={capabilities?.includes("steer") !== false}
       current={current}

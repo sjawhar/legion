@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -44,10 +45,15 @@ func TestCreateMessageAlwaysReturnsDeliveriesArray(t *testing.T) {
 }
 
 // newTargetedMessageHandler is the mux a targeted-delivery test drives, with the store behind
-// it: an ordinary test server pointed at that test's fake Envoy listener.
-func newTargetedMessageHandler(t *testing.T, envoyURL string) (http.Handler, *store.Store) {
+// it: an ordinary test server pointed at that test's fake Envoy listener. An optional window
+// shortens the listener client's timeout, for a test that exercises a receipt timeout.
+func newTargetedMessageHandler(t *testing.T, envoyURL string, window ...time.Duration) (http.Handler, *store.Store) {
 	t.Helper()
-	handler, database, _ := newTestServer(t, testServerOptions{envoyURL: envoyURL})
+	options := testServerOptions{envoyURL: envoyURL}
+	if len(window) > 0 {
+		options.envoyTimeout = window[0]
+	}
+	handler, database, _ := newTestServer(t, options)
 	return handler, database
 }
 
@@ -198,7 +204,7 @@ func TestTargetedMessageDeliveryRetriesAndAcceptsOnlyTargetReplies(t *testing.T)
 		t.Fatalf("first delivery = %#v", delivery)
 	}
 	if len(sent) != 1 || sent[0]["source"] != "dispatch" || sent[0]["target_session"] != "s1" ||
-		sent[0]["expects_reply"] != "required" || sent[0]["idempotency_key"] != created.ID+":1" {
+		sent[0]["expects_reply"] != "required" || sent[0]["idempotency_key"] != created.ID+":btw" {
 		t.Fatalf("listener request = %#v", sent)
 	}
 	frame := decodeDeliveryFrame(t, sent[0])
@@ -1519,7 +1525,7 @@ func TestStrandedMessageAttemptIsResumedRatherThanDeliveredTwice(t *testing.T) {
 	keys := append([]string(nil), listenerState.keys...)
 	delivered := len(listenerState.delivered)
 	listenerState.Unlock()
-	original := messageID + ":1"
+	original := messageID + ":steer"
 	if len(keys) != 2 || keys[0] != original || keys[1] != original {
 		t.Fatalf("send keys = %#v, want both sends under the original key %q", keys, original)
 	}
@@ -1535,6 +1541,456 @@ func TestStrandedMessageAttemptIsResumedRatherThanDeliveredTwice(t *testing.T) {
 	if attempts != 1 {
 		t.Fatalf("attempts = %d, want the stranded attempt resumed rather than a second one opened", attempts)
 	}
+}
+
+// LEGION-271, acceptance 1. A send that LANDS on the listener and then misses the listener
+// client's window is recorded failed, and failed is terminal, so the retry opens an attempt of
+// its own. While the key carried the attempt number, that retry was a key no dedupe layer had
+// ever seen and the agent was handed the same instruction twice. The key is now stable across
+// the attempts of one message in one mode, so the stream recognises the repeat, answers
+// duplicate, and the retry's row says so instead of claiming a delivery that never happened.
+func TestSendThatLandedThenMissedTheReceiptIsNotDeliveredTwiceOnRetry(t *testing.T) {
+	var listenerState struct {
+		sync.Mutex
+		keys      []string
+		delivered map[string]struct{}
+	}
+	listenerState.delivered = map[string]struct{}{}
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
+			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
+			var request struct {
+				TargetSession  string `json:"target_session"`
+				IdempotencyKey string `json:"idempotency_key"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Errorf("decode targeted send: %v", err)
+			}
+			listenerState.Lock()
+			listenerState.keys = append(listenerState.keys, request.IdempotencyKey)
+			first := len(listenerState.keys) == 1
+			// The real listener publishes the envelope before it answers, so the send has
+			// landed by this point whatever the caller later learns. JetStream's MsgId, built
+			// from this key, is what keeps a repeat off the agent's subject - and what makes
+			// the listener answer duplicate.
+			key := request.IdempotencyKey + "@" + request.TargetSession
+			_, held := listenerState.delivered[key]
+			listenerState.delivered[key] = struct{}{}
+			listenerState.Unlock()
+			if first {
+				// Past the window the handler below gives the client, so Dispatch records the
+				// attempt failed while the agent already has the message.
+				time.Sleep(400 * time.Millisecond)
+			}
+			if held {
+				_, _ = w.Write([]byte(`{"event_id":"target-envelope-2","recipient":"s1","duplicate":true}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"event_id":"target-envelope","recipient":"s1"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer listener.Close()
+	handler, database := newTargetedMessageHandler(t, listener.URL, 150*time.Millisecond)
+	issue := createInteractionIssue(t, handler, "TEST", "A send that landed then timed out", "before")
+
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", map[string]any{
+		"body": "The send landed; the answer did not.", "target": "session:s1", "delivery": "steer",
+	}, "alice")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create targeted message: status=%d body=%s", created.Code, created.Body.String())
+	}
+	message := decodeBody[model.Message](t, created)
+	if len(message.Deliveries) != 1 || message.Deliveries[0].State != "failed" {
+		t.Fatalf("first attempt = %#v, want one attempt recorded failed after the receipt timeout", message.Deliveries)
+	}
+	if failure := message.Deliveries[0].Error; failure == nil || !strings.Contains(*failure, "may already have been delivered") {
+		t.Fatalf("receipt-timeout error = %v, want the text that tells a human a retry is safe", failure)
+	}
+
+	retry := dispatchRequest(t, handler, http.MethodPost, "/api/v1/messages/"+message.ID+"/deliveries", map[string]any{
+		"delivery": "steer",
+	}, "alice")
+	if retry.Code != http.StatusCreated {
+		t.Fatalf("retry the failed attempt: status=%d body=%s", retry.Code, retry.Body.String())
+	}
+	resumed := decodeBody[model.MessageDelivery](t, retry)
+	if resumed.State != "sent" || !resumed.Duplicate || resumed.EnvelopeID != nil {
+		t.Fatalf("retry = %#v, want sent, duplicate, and no envelope id", resumed)
+	}
+
+	listenerState.Lock()
+	keys := append([]string(nil), listenerState.keys...)
+	delivered := len(listenerState.delivered)
+	listenerState.Unlock()
+	original := message.ID + ":steer"
+	if len(keys) != 2 || keys[0] != original || keys[1] != original {
+		t.Fatalf("send keys = %#v, want both sends under the mode-scoped key %q", keys, original)
+	}
+	if delivered != 1 {
+		t.Fatalf("the listener delivered %d distinct keys %#v, want the agent to receive the message once", delivered, keys)
+	}
+	// The history keeps both attempts and what each did: the first failed, the second reached
+	// the listener and changed nothing.
+	if got := readMessageAttemptHistory(t, database, message.ID); !reflect.DeepEqual(got, []attemptRow{
+		{Attempt: 1, State: "failed", Duplicate: false},
+		{Attempt: 2, State: "sent", Duplicate: true},
+	}) {
+		t.Fatalf("attempt history = %#v", got)
+	}
+}
+
+// attemptRow is the part of a message_deliveries row a duplicate-retry test reads back.
+type attemptRow struct {
+	Attempt   int
+	State     string
+	Duplicate bool
+}
+
+func readMessageAttemptHistory(t *testing.T, database *store.Store, messageID string) []attemptRow {
+	t.Helper()
+	rows, err := database.Pool.Query(context.Background(), `
+		select attempt, state, duplicate from message_deliveries where message_id = $1 order by attempt
+	`, messageID)
+	if err != nil {
+		t.Fatalf("read the attempt history: %v", err)
+	}
+	defer rows.Close()
+	history := []attemptRow{}
+	for rows.Next() {
+		var row attemptRow
+		if err := rows.Scan(&row.Attempt, &row.State, &row.Duplicate); err != nil {
+			t.Fatalf("scan the attempt history: %v", err)
+		}
+		history = append(history, row)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read the attempt history: %v", err)
+	}
+	return history
+}
+
+// The control for the test above: an attempt that failed WITHOUT landing carries nothing the
+// listener has seen, so its retry must reach the agent. A fix that collapses every retry of a
+// message onto one key has to keep this green.
+func TestSendThatFailedBeforeLandingStillDeliversOnRetry(t *testing.T) {
+	var listenerState struct {
+		sync.Mutex
+		sends     int
+		delivered map[string]struct{}
+	}
+	listenerState.delivered = map[string]struct{}{}
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
+			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
+			var request struct {
+				TargetSession  string `json:"target_session"`
+				IdempotencyKey string `json:"idempotency_key"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Errorf("decode targeted send: %v", err)
+			}
+			listenerState.Lock()
+			listenerState.sends++
+			first := listenerState.sends == 1
+			if !first {
+				listenerState.delivered[request.IdempotencyKey+"@"+request.TargetSession] = struct{}{}
+			}
+			listenerState.Unlock()
+			if first {
+				// Refused before the envelope was published: nothing landed.
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte(`{"error":"listener refused the send"}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"event_id":"target-envelope","recipient":"s1"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer listener.Close()
+	handler, _ := newTargetedMessageHandler(t, listener.URL)
+	issue := createInteractionIssue(t, handler, "TEST", "A send that never landed", "before")
+
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", map[string]any{
+		"body": "Nothing reached the listener.", "target": "session:s1", "delivery": "steer",
+	}, "alice")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create targeted message: status=%d body=%s", created.Code, created.Body.String())
+	}
+	message := decodeBody[model.Message](t, created)
+	if len(message.Deliveries) != 1 || message.Deliveries[0].State != "failed" {
+		t.Fatalf("first attempt = %#v, want one attempt recorded failed", message.Deliveries)
+	}
+
+	retry := dispatchRequest(t, handler, http.MethodPost, "/api/v1/messages/"+message.ID+"/deliveries", map[string]any{
+		"delivery": "steer",
+	}, "alice")
+	if retry.Code != http.StatusCreated {
+		t.Fatalf("retry the failed attempt: status=%d body=%s", retry.Code, retry.Body.String())
+	}
+	resumed := decodeBody[model.MessageDelivery](t, retry)
+	if resumed.State != "sent" {
+		t.Fatalf("retry of an attempt that never landed = %#v, want it delivered", resumed)
+	}
+	listenerState.Lock()
+	delivered := len(listenerState.delivered)
+	listenerState.Unlock()
+	if delivered != 1 {
+		t.Fatalf("the listener delivered %d distinct keys, want the retry to reach the agent once", delivered)
+	}
+}
+
+// LEGION-271, acceptance 3 and 6. The key is scoped to the mode, so a retry in a different mode
+// must reach the agent - and it must not ride on the stranded attempt's row, which
+// recordPendingMessageDelivery used to resume while overwriting its mode. That would publish a
+// second frame under one attempt number and make the history lie. The stranded attempt is
+// settled failed as superseded, with its own message.delivery receipt, and the new mode gets a
+// row pinned to the session the stranded row named. A role: message takes the same path without
+// a 409: the new attempt's route is that pinned session, not whoever holds the role now.
+func TestRetryInAnotherModeSupersedesTheStrandedAttempt(t *testing.T) {
+	for _, target := range []string{"session:s1", "role:planner"} {
+		t.Run(target, func(t *testing.T) {
+			var listenerState struct {
+				sync.Mutex
+				sends []struct{ key, session string }
+			}
+			listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
+					_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer","btw","aside"]}]`))
+				case r.Method == http.MethodGet && r.URL.Path == "/v1/roles/planner":
+					_, _ = w.Write([]byte(`{"role":"planner","holder":"s1","title":"planner","capabilities":["steer","btw","aside"]}`))
+				case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
+					var request struct {
+						TargetSession  string `json:"target_session"`
+						IdempotencyKey string `json:"idempotency_key"`
+					}
+					if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+						t.Errorf("decode targeted send: %v", err)
+					}
+					listenerState.Lock()
+					listenerState.sends = append(listenerState.sends, struct{ key, session string }{
+						request.IdempotencyKey, request.TargetSession,
+					})
+					listenerState.Unlock()
+					_, _ = w.Write([]byte(`{"event_id":"target-envelope","recipient":"s1"}`))
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer listener.Close()
+			handler, database := newTargetedMessageHandler(t, listener.URL)
+			issue := createInteractionIssue(t, handler, "TEST", "A retry in another mode", "before")
+
+			body := "Steer first, then ask about it instead (" + target + ")."
+			created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", map[string]any{
+				"body": body, "target": target, "delivery": "steer",
+			}, "alice")
+			if created.Code != http.StatusCreated {
+				t.Fatalf("create targeted message: status=%d body=%s", created.Code, created.Body.String())
+			}
+			message := decodeBody[model.Message](t, created)
+
+			strandMessageAttempt(t, database, message.ID)
+
+			retry := dispatchRequest(t, handler, http.MethodPost, "/api/v1/messages/"+message.ID+"/deliveries", map[string]any{
+				"delivery": "btw",
+			}, "alice")
+			if retry.Code != http.StatusCreated {
+				t.Fatalf("retry in another mode: status=%d body=%s", retry.Code, retry.Body.String())
+			}
+			opened := decodeBody[model.MessageDelivery](t, retry)
+			if opened.Attempt != 2 || opened.Delivery != "btw" || opened.State != "sent" {
+				t.Fatalf("mode-change retry = %#v, want a second attempt sent as btw", opened)
+			}
+			if opened.SessionID != "s1" {
+				t.Fatalf("mode-change retry session = %q, want the session the stranded attempt named", opened.SessionID)
+			}
+
+			// The stranded attempt is settled, not left pending and not silently rewritten.
+			superseded := readMessageDelivery(t, database, message.ID, 1)
+			if superseded.State != "failed" {
+				t.Fatalf("stranded attempt = %#v, want it settled failed as superseded", superseded)
+			}
+			if superseded.Error == nil || !strings.Contains(*superseded.Error, "superseded") {
+				t.Fatalf("stranded attempt error = %v, want it to say it was superseded", superseded.Error)
+			}
+			if superseded.Delivery != "steer" {
+				t.Fatalf("stranded attempt mode = %q, want its own mode kept", superseded.Delivery)
+			}
+
+			// The card's attempt history is built from receipts alone, so a settled row with
+			// no receipt never reads failed there. A SLICE, not a map by attempt: the
+			// invariant is one receipt per attempt, and a map would silently collapse a
+			// second receipt for the same attempt into the first.
+			if receipts := messageDeliveryReceiptRows(t, database, message.ID); !reflect.DeepEqual(
+				receipts, []deliveryReceipt{{Attempt: 1, State: "failed"}, {Attempt: 2, State: "sent"}},
+			) {
+				t.Fatalf("message.delivery receipts = %#v, want exactly one per attempt stating its outcome", receipts)
+			}
+
+			listenerState.Lock()
+			sends := append([]struct{ key, session string }(nil), listenerState.sends...)
+			listenerState.Unlock()
+			if len(sends) != 2 {
+				t.Fatalf("sends = %#v, want one per mode", sends)
+			}
+			if sends[0].key != message.ID+":steer" || sends[1].key != message.ID+":btw" {
+				t.Fatalf("send keys = %#v, want one key per mode", sends)
+			}
+			if sends[1].session != "s1" {
+				t.Fatalf("mode-change send went to %q, want the stranded attempt's own session", sends[1].session)
+			}
+		})
+	}
+}
+
+// LEGION-271, P3-1. A supersede settles an attempt whose original sender may still be running.
+// That sender's claim has to stop being its own, exactly as the resume branch makes it stop:
+// otherwise it returns, still reads `mine`, and - if the agent answered the frame it already
+// held - appends a SECOND message.delivery receipt for one attempt. The card's history is
+// event-sourced, so that renders the attempt twice under a colliding React key.
+func TestASupersededAttemptIsNotSettledAgainByItsOriginalSender(t *testing.T) {
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
+			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer","btw"]}]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
+			_, _ = w.Write([]byte(`{"event_id":"target-envelope","recipient":"s1"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer listener.Close()
+	handler, database, deps := newTestServer(t, testServerOptions{envoyURL: listener.URL})
+	issue := createInteractionIssue(t, handler, "TEST", "A superseded attempt settled twice", "before")
+	message := createIssueMessage(t, handler, issue.Key, map[string]any{
+		"body": "Steer first, then ask instead.", "target": "session:s1", "delivery": "steer",
+	}, "alice")
+
+	// Attempt 1 is stranded past its lease, holding a claim its sender still remembers.
+	stranded := strandMessageAttempt(t, database, message.ID)
+
+	retry := dispatchRequest(t, handler, http.MethodPost, "/api/v1/messages/"+message.ID+"/deliveries", map[string]any{
+		"delivery": "btw",
+	}, "alice")
+	if retry.Code != http.StatusCreated {
+		t.Fatalf("retry in another mode: status=%d body=%s", retry.Code, retry.Body.String())
+	}
+
+	// The agent answers the frame attempt 1 already carried, which is what puts a reply_id on
+	// the superseded row - the condition that makes a returning sender owe a receipt.
+	reply := bearerRequest(t, handler, http.MethodPost, "/api/v1/messages/"+message.ID+"/reply", map[string]any{
+		"actor": map[string]any{"kind": "session", "id": "s1"}, "attempt": 1, "body": "Already had it.",
+	})
+	if reply.Code != http.StatusCreated {
+		t.Fatalf("session answers the superseded frame: status=%d body=%s", reply.Code, reply.Body.String())
+	}
+
+	// Now the original sender returns, still holding the claim it took before the supersede.
+	stale := directServer(deps)
+	if _, err := stale.completeMessageDelivery(
+		context.Background(), message, model.Actor{Kind: "user", ID: "alice"},
+		pendingMessageDelivery{
+			attemptClaim: attemptClaim{attempt: 1, claimedAt: stranded},
+			resolved: ResolvedMention{
+				Target: "session:s1", Delivery: "steer", SessionID: new("s1"),
+				attemptSessionID: "s1", title: "planner",
+			},
+		},
+		nil, false, "",
+	); err != nil {
+		t.Fatalf("the returning sender's settle: %v", err)
+	}
+
+	receipts := messageDeliveryReceiptRows(t, database, message.ID)
+	byAttempt := map[int]int{}
+	for _, receipt := range receipts {
+		byAttempt[receipt.Attempt]++
+	}
+	if byAttempt[1] != 1 {
+		t.Fatalf("attempt 1 carries %d receipts (%#v), want exactly one", byAttempt[1], receipts)
+	}
+}
+
+func readMessageDelivery(t *testing.T, database *store.Store, messageID string, attempt int) model.MessageDelivery {
+	t.Helper()
+	row, err := scanMessageDelivery(database.Pool.QueryRow(context.Background(),
+		`select `+messageDeliveryColumns+` from message_deliveries where message_id = $1 and attempt = $2`,
+		messageID, attempt,
+	))
+	if err != nil {
+		t.Fatalf("read attempt %d: %v", attempt, err)
+	}
+	return row
+}
+
+// strandMessageAttempt leaves attempt 1 exactly as a sender that died between its send and its
+// settle leaves it: pending, claimed long enough ago for the lease to have lapsed, and carrying
+// NO message.delivery receipt - an attempt that never settled never appended one. Forcing the
+// row back to pending without also dropping the receipt its successful send left would fabricate
+// a state the code cannot produce, and would hide a second receipt behind the first.
+func strandMessageAttempt(t *testing.T, database *store.Store, messageID string) time.Time {
+	t.Helper()
+	if _, err := database.Pool.Exec(context.Background(), `
+		delete from events
+		where type = 'message.delivery' and payload ->> 'message_id' = $1
+		  and (payload ->> 'attempt')::int = 1
+	`, messageID); err != nil {
+		t.Fatalf("drop the stranded attempt's receipt: %v", err)
+	}
+	var claimedAt time.Time
+	if err := database.Pool.QueryRow(context.Background(), `
+		update message_deliveries
+		set state = 'pending', envelope_id = null, error = null, duplicate = false,
+		    claimed_at = now() - interval '5 minutes'
+		where message_id = $1 and attempt = 1
+		returning claimed_at
+	`, messageID).Scan(&claimedAt); err != nil {
+		t.Fatalf("strand attempt 1: %v", err)
+	}
+	return claimedAt
+}
+
+// deliveryReceipt is one message.delivery event as the dashboard's attempt history reads it.
+type deliveryReceipt struct {
+	Attempt int
+	State   string
+}
+
+// messageDeliveryReceiptRows returns every message.delivery event for a message, in order. It is
+// deliberately a slice: "exactly one receipt per attempt" is the invariant under test, and a
+// map keyed by attempt could not fail it.
+func messageDeliveryReceiptRows(t *testing.T, database *store.Store, messageID string) []deliveryReceipt {
+	t.Helper()
+	rows, err := database.Pool.Query(context.Background(), `
+		select (payload ->> 'attempt')::int, payload ->> 'state'
+		from events
+		where type = 'message.delivery' and payload ->> 'message_id' = $1
+		order by id
+	`, messageID)
+	if err != nil {
+		t.Fatalf("read delivery receipts: %v", err)
+	}
+	defer rows.Close()
+	receipts := []deliveryReceipt{}
+	for rows.Next() {
+		var receipt deliveryReceipt
+		if err := rows.Scan(&receipt.Attempt, &receipt.State); err != nil {
+			t.Fatalf("scan delivery receipt: %v", err)
+		}
+		receipts = append(receipts, receipt)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read delivery receipts: %v", err)
+	}
+	return receipts
 }
 
 // The attempt row is committed pending before its send, so the session can answer the frame
@@ -1869,7 +2325,7 @@ func TestAMessageSenderPastItsLeaseLeavesTheResumedAttemptsReceiptAlone(t *testi
 				attemptSessionID: "s1", title: "planner",
 			},
 		},
-		&envelope, "",
+		&envelope, false, "",
 	)
 	if err != nil {
 		t.Fatalf("the stalled sender's settle: %v", err)
@@ -1944,7 +2400,7 @@ func TestAResumedRoleMessageKeepsItsOriginalRecipient(t *testing.T) {
 	if resumed.Attempt != 1 || resumed.SessionID != "s1" || resumed.State != "sent" {
 		t.Fatalf("resumed attempt = %#v, want attempt 1 still recorded against s1", resumed)
 	}
-	if len(sends) != 1 || sends[0]["target_session"] != "s1" || sends[0]["idempotency_key"] != message.ID+":1" {
+	if len(sends) != 1 || sends[0]["target_session"] != "s1" || sends[0]["idempotency_key"] != message.ID+":steer" {
 		t.Fatalf("resumed send = %#v, want the original key delivered to s1", sends)
 	}
 	if roleLookups != 1 {
