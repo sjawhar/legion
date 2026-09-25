@@ -14,9 +14,10 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 )
 
-// imageOmp is an `omp` that answers each of the image's three probes by its own plan, one step per
+// imageOmp is an `omp` that answers each of the image's probes by its own plan, one step per
 // attempt of that probe (the last step repeats), telling them apart by argv as a real Oh My Pi
 // would run them, and recording the order they ran in and each attempt's argv and environment.
+// The model round trip's plan and answers are planModel's (modelprobe_test.go).
 type imageOmp struct{ dir, path string }
 
 func newImageOmp(t *testing.T, agents, load, session []string) imageOmp {
@@ -33,6 +34,7 @@ case "$*" in
 "models --no-extensions --extension "*" --json") kind=agents ;;
 "models --extension "*" --json") kind=load ;;
 "--no-session --no-extensions --no-skills --no-rules --no-lsp --no-tools") kind=session ;;
+"-p --mode json "*) kind=model ;;
 *) echo "fake omp: unexpected argv: $*" >&2; exit 64 ;;
 esac
 n=$(( $(cat "$dir/$kind.count" 2>/dev/null || echo 0) + 1 ))
@@ -42,6 +44,7 @@ printf '%s\n' "$*" >"$dir/$kind.argv.$n"
 env >"$dir/$kind.env.$n"
 step=$(sed -n "${n}p" "$dir/$kind.plan")
 [ -n "$step" ] || step=$(tail -n 1 "$dir/$kind.plan")
+[ "$kind" = model ] && { cp "$5" "$dir/model.overlay.$n"; exec "$dir/model.sh" "$step"; }
 root="$HOME/.omp"
 [ -n "${OMP_PROFILE:-}" ] && root="$root/profiles/$OMP_PROFILE"
 installed=$(cd "$root/plugins/node_modules/@sjawhar/pi-legion-envoy" 2>/dev/null && pwd -P)

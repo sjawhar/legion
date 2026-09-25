@@ -3,10 +3,15 @@ package sandbox
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"path"
 	"regexp"
 	"strings"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/modelroute"
 )
 
 // The pod's own paths. The tree volume is mounted whole at TreeRoot in both containers, and its
@@ -22,6 +27,20 @@ const (
 	ProvisionDir    = "/var/run/legion/provision"
 	StateDir        = "/var/run/legion/state"
 )
+
+// gatewayTokenVolume is the one projected volume a pod reaches the model gateway with, and its
+// read-only mount: a single serviceAccountToken source for g's audience, living g.TokenExpiry,
+// projected at modelroute.TokenFile, the file the image's Oh My Pi profile reads its gateway key
+// from. Every pod that calls the gateway, a worker's and the image probe's, mounts exactly this.
+func gatewayTokenVolume(g Gateway) (corev1.Volume, corev1.VolumeMount) {
+	expiry := int64(g.TokenExpiry / time.Second)
+	volume := corev1.Volume{Name: gatewayVolume, VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{
+		Sources: []corev1.VolumeProjection{{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
+			Audience: g.Audience, ExpirationSeconds: &expiry, Path: path.Base(modelroute.TokenFile),
+		}}},
+	}}}
+	return volume, corev1.VolumeMount{Name: gatewayVolume, MountPath: path.Dir(modelroute.TokenFile), ReadOnly: true}
+}
 
 // The image's own paths (packages/daemon/docker/worker.Dockerfile: ENV and the COPY lines).
 const (
@@ -42,10 +61,12 @@ const (
 	initTempDir = "/tmp"
 )
 
-// The keys of a claim's Secret that the runtime fills itself.
+// The keys of a claim's Secret that the runtime fills itself: the boot token and the provisioning
+// token for every claim, and the Dispatch bearer when Dispatch is configured.
 const (
 	bootTokenKey      = "LEGION_BOOT_TOKEN"
 	provisionTokenKey = "LEGION_PROVISION_TOKEN"
+	dispatchTokenKey  = "DISPATCH_TOKEN"
 )
 
 // The labels every object of a claim carries: the Sandbox, its pod template (the only place the

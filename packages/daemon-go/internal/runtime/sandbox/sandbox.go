@@ -33,21 +33,18 @@ import (
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/dynamic/dynamicinformer"
-	coreinformers "k8s.io/client-go/informers/core/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/modelroute"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
 var _ runtime.Runtime = (*Runtime)(nil)
-
-// defaultTreeVolume is the tree volume's size when Options leaves it zero.
-var defaultTreeVolume = resource.MustParse("20Gi")
 
 // apiTimeout bounds one API call the runtime makes outside a relaunch's own budget: a log or
 // event read for an observation's detail, a patch, a delete.
@@ -67,6 +64,7 @@ type Runtime struct {
 	dispatchURL, dispatchToken              string
 	natsURLs                                []string
 	tools                                   Tools
+	gateway                                 Gateway
 	agent                                   []string
 	bootTimeout                             time.Duration
 	bootIntervals                           int
@@ -82,6 +80,8 @@ type Runtime struct {
 	kube      kubernetes.Interface
 	sandboxes cache.SharedIndexInformer
 	pods      cache.SharedIndexInformer
+	// sandboxFeed and podFeed are whether each informer's latest list or watch request succeeded.
+	sandboxFeed, podFeed feed
 
 	mu sync.Mutex
 	// changed is closed and replaced on every informer event, waking every wait.
@@ -123,6 +123,7 @@ func configure(opts Options) (*Runtime, error) {
 	refuse := func(format string, args ...any) (*Runtime, error) {
 		return nil, fmt.Errorf("sandbox runtime: "+format, args...)
 	}
+	pool, poolSet := opts.Scheduling.NodeSelector[poolKey]
 	switch {
 	case opts.Namespace == "":
 		return refuse("no namespace")
@@ -132,6 +133,8 @@ func configure(opts Options) (*Runtime, error) {
 		return refuse("image %q is not pinned by digest (…@sha256:…)", opts.Image)
 	case opts.StorageClass == "":
 		return refuse("no storage class for the tree volume (the cluster has no default class to fall back on)")
+	case opts.TreeVolume.Sign() <= 0:
+		return refuse("no tree volume size: %s is not a positive quantity", opts.TreeVolume.String())
 	case opts.BootTimeout <= 0 || opts.TerminationGrace <= 0 || opts.ProbeInterval <= 0 || opts.AdoptTimeout <= 0:
 		return refuse("the boot timeout, termination grace, probe interval, and adoption timeout must be positive")
 	case opts.BootIntervals <= 0:
@@ -143,6 +146,21 @@ func configure(opts Options) (*Runtime, error) {
 	case (opts.DispatchURL == "") != (opts.DispatchToken == ""):
 		return refuse("the Dispatch URL and its bearer are configured together (URL %q, bearer given: %t)",
 			opts.DispatchURL, opts.DispatchToken != "")
+	case opts.Gateway.URL == "":
+		return refuse("no model gateway URL: a pod reaches the models through the gateway alone")
+	case opts.Gateway.Audience == "":
+		return refuse("no model gateway audience for the pods' projected token")
+	case opts.Gateway.ServiceAccount == "":
+		return refuse("no ServiceAccount for the pods to run as and project the gateway token for")
+	case opts.Gateway.TokenExpiry < minTokenExpiry:
+		return refuse("the gateway token's expiry %s must be at least %s, the shortest projected token the API server issues",
+			opts.Gateway.TokenExpiry, minTokenExpiry)
+	case poolSet:
+		return refuse("scheduling node selector sets %s=%q: %s is the runtime's, which puts every pod on the %s pool agent-c's policy requires",
+			poolKey, pool, poolKey, poolValue)
+	}
+	if _, err := modelroute.AnthropicRoute(opts.Gateway.URL); err != nil {
+		return refuse("the model gateway URL is one every pod would refuse: %v", err)
 	}
 	if errs := validation.IsValidLabelValue(opts.Project); len(errs) > 0 {
 		return refuse("project %q is not a label value: %s", opts.Project, strings.Join(errs, "; "))
@@ -162,14 +180,11 @@ func configure(opts Options) (*Runtime, error) {
 		namespace: opts.Namespace, project: opts.Project, image: opts.Image, storageClass: opts.StorageClass,
 		treeVolume: opts.TreeVolume, scheduling: opts.Scheduling, resources: opts.Resources,
 		streamURL: opts.StreamURL, daemonURL: opts.DaemonURL, envoyURL: opts.EnvoyURL, dispatchURL: opts.DispatchURL,
-		dispatchToken: opts.DispatchToken, natsURLs: opts.NATSURLs, tools: opts.Tools, agent: opts.Agent,
+		dispatchToken: opts.DispatchToken, natsURLs: opts.NATSURLs, tools: opts.Tools, gateway: opts.Gateway,
 		bootTimeout: opts.BootTimeout, bootIntervals: opts.BootIntervals, terminationGrace: opts.TerminationGrace,
-		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout,
+		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent,
 		tokens: opts.Tokens, conns: opts.Conns, now: opts.Now, log: opts.Log,
 		changed: make(chan struct{}), watch: map[claim.Token]runtime.Locator{}, trees: map[string]chan struct{}{},
-	}
-	if r.treeVolume.IsZero() {
-		r.treeVolume = defaultTreeVolume
 	}
 	if len(r.agent) == 0 {
 		r.agent = []string{defaultAgent}
@@ -187,9 +202,18 @@ func configure(opts Options) (*Runtime, error) {
 // stores to sync.
 func (r *Runtime) start(ctx context.Context, dyn dynamic.Interface, kube kubernetes.Interface) error {
 	r.dyn, r.kube = dyn, kube
-	selectProject := func(o *metav1.ListOptions) { o.LabelSelector = labelProject + "=" + r.project }
-	r.sandboxes = dynamicinformer.NewFilteredDynamicInformer(dyn, sandboxGVR, r.namespace, 0, cache.Indexers{}, selectProject).Informer()
-	r.pods = coreinformers.NewFilteredPodInformer(kube, r.namespace, 0, cache.Indexers{}, selectProject)
+	sandboxes, pods := r.sandboxClient(), kube.CoreV1().Pods(r.namespace)
+	r.sandboxFeed.resource, r.podFeed.resource = "Sandbox", "pod"
+	r.sandboxes = r.informer(&r.sandboxFeed, dyn, &unstructured.Unstructured{},
+		func(ctx context.Context, o metav1.ListOptions) (k8sruntime.Object, error) {
+			return sandboxes.List(ctx, o)
+		},
+		func(ctx context.Context, o metav1.ListOptions) (watch.Interface, error) {
+			return sandboxes.Watch(ctx, o)
+		})
+	r.pods = r.informer(&r.podFeed, kube, &corev1.Pod{},
+		func(ctx context.Context, o metav1.ListOptions) (k8sruntime.Object, error) { return pods.List(ctx, o) },
+		func(ctx context.Context, o metav1.ListOptions) (watch.Interface, error) { return pods.Watch(ctx, o) })
 	failed := make(chan error, 1)
 	for _, informer := range []cache.SharedIndexInformer{r.sandboxes, r.pods} {
 		if _, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -228,6 +252,68 @@ func (r *Runtime) start(ctx context.Context, dyn dynamic.Interface, kube kuberne
 	}
 	context.AfterFunc(ctx, stop)
 	return nil
+}
+
+// informer is a shared informer of the namespace's objects of the project, listed and watched
+// through list and watch, with the outcome of every request recorded in f: client-go's reflector
+// retries a refused watch itself without calling the watch-error handler, so only the requests
+// themselves say whether the store is still being fed.
+func (r *Runtime) informer(f *feed, client any, example k8sruntime.Object, list cache.ListWithContextFunc,
+	watchFn cache.WatchFuncWithContext,
+) cache.SharedIndexInformer {
+	project := func(o metav1.ListOptions) metav1.ListOptions {
+		o.LabelSelector = labelProject + "=" + r.project
+		return o
+	}
+	lw := &cache.ListWatch{
+		ListWithContextFunc: func(ctx context.Context, o metav1.ListOptions) (k8sruntime.Object, error) {
+			object, err := list(ctx, project(o))
+			f.record(err, r.now())
+			return object, err
+		},
+		WatchFuncWithContext: func(ctx context.Context, o metav1.ListOptions) (watch.Interface, error) {
+			w, err := watchFn(ctx, project(o))
+			f.record(err, r.now())
+			return w, err
+		},
+	}
+	return cache.NewSharedIndexInformerWithOptions(cache.ToListWatcherWithWatchListSemantics(lw, client), example,
+		cache.SharedIndexInformerOptions{})
+}
+
+// feed is whether one informer's latest list or watch request to the API server succeeded. A
+// store whose feed is failing holds what it last heard, which may no longer be so.
+type feed struct {
+	resource string
+	mu       sync.Mutex
+	failed   error
+	since    time.Time
+}
+
+// record notes a request's outcome at now: a failure marks the feed failing from the first one in
+// a row, and a success clears it.
+func (f *feed) record(err error, now time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err == nil {
+		f.failed = nil
+		return
+	}
+	if f.failed == nil {
+		f.since = now
+	}
+	f.failed = err
+}
+
+// check is an error while the feed is failing.
+func (f *feed) check() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failed == nil {
+		return nil
+	}
+	return fmt.Errorf("the %s store may be stale: its list or watch has failed since %s: %w",
+		f.resource, f.since.UTC().Format(time.RFC3339), f.failed)
 }
 
 // call is ctx bounded for one API request.
@@ -405,7 +491,8 @@ func (r *Runtime) Suspend(ctx context.Context, loc runtime.Locator) error {
 	newerRelaunch := ok && recorded.Incarnation != loc.Incarnation
 	switch {
 	case pod != nil && string(pod.UID) == loc.Incarnation:
-		if err := r.stopGracefully(ctx, loc, s); err != nil {
+		r.shutdown(ctx, loc)
+		if err := r.setMode(ctx, s, modeSuspended); err != nil {
 			return fmt.Errorf("suspend %s: %w", loc.Claim, err)
 		}
 	case pod != nil && newerRelaunch && string(pod.UID) == recorded.Incarnation, pod == nil && newerRelaunch:
@@ -428,13 +515,6 @@ func (r *Runtime) Suspend(ctx context.Context, loc runtime.Locator) error {
 	}
 	r.forgetIf(loc)
 	return nil
-}
-
-// stopGracefully sends the claim's connection a shutdown frame while its pod still runs, waits up
-// to the termination grace for the pod to end, and suspends the Sandbox.
-func (r *Runtime) stopGracefully(ctx context.Context, loc runtime.Locator, s *sandbox) error {
-	r.shutdown(ctx, loc)
-	return r.setMode(ctx, s, modeSuspended)
 }
 
 // shutdown asks the agent loc records to end its own process, while that process is still the
@@ -521,9 +601,10 @@ func (r *Runtime) AdoptWorkingCopy(ctx context.Context, loc runtime.Locator, id 
 // grace — what a crash between creating a Sandbox and persisting its claim leaves behind, or what
 // a claim retired without its release leaves. known is every claim the daemon has not retired, a
 // suspended one included, since its Sandbox holds its session and, for a root, the tree volume.
-// The located ones join the watch, unless it already holds a newer incarnation of the claim, and are
-// evaluated at once. Nothing here lists Secrets: each goes
-// with its Sandbox.
+// The image probe's Sandbox (labelled legion.dev/probe) is no claim's and never an orphan: the
+// probe deletes it, and its shutdown time has the controller delete it otherwise (probe.go).
+// The located ones join the watch, unless it already holds a newer incarnation of the claim, and
+// are evaluated at once. Nothing here lists Secrets: each goes with its Sandbox.
 func (r *Runtime) ReconcileOrphans(ctx context.Context, known []runtime.Known, grace time.Duration) error {
 	var errs []error
 	names := map[string]bool{}
@@ -544,7 +625,7 @@ func (r *Runtime) ReconcileOrphans(ctx context.Context, known []runtime.Known, g
 	}
 	for _, obj := range r.sandboxes.GetStore().List() {
 		u := obj.(*unstructured.Unstructured)
-		if names[u.GetName()] || u.GetDeletionTimestamp() != nil {
+		if names[u.GetName()] || u.GetLabels()[labelProbe] != "" || u.GetDeletionTimestamp() != nil {
 			continue
 		}
 		if age := r.now().Sub(u.GetCreationTimestamp().Time); age < grace {

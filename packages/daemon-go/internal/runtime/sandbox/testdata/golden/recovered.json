@@ -39,6 +39,28 @@
                 "topologyKey": "kubernetes.io/hostname"
               }
             ]
+          },
+          "podAntiAffinity": {
+            "requiredDuringSchedulingIgnoredDuringExecution": [
+              {
+                "labelSelector": {
+                  "matchExpressions": [
+                    {
+                      "key": "legion.dev/tree",
+                      "operator": "Exists"
+                    },
+                    {
+                      "key": "legion.dev/tree",
+                      "operator": "NotIn",
+                      "values": [
+                        "LEGION-208"
+                      ]
+                    }
+                  ]
+                },
+                "topologyKey": "kubernetes.io/hostname"
+              }
+            ]
           }
         },
         "automountServiceAccountToken": false,
@@ -104,6 +126,10 @@
                 "value": "http://10.1.20.250:9020"
               },
               {
+                "name": "LEGION_MODEL_GATEWAY_URL",
+                "value": "https://middleman.legion.internal"
+              },
+              {
                 "name": "LEGION_GH_PATH",
                 "value": "/usr/local/bin/gh"
               },
@@ -125,7 +151,7 @@
               },
               {
                 "name": "PI_SHELL_PREFIX",
-                "value": "PATH='/legion/worker-bin:/opt/legion/go/bin:'${PATH#'/legion/worker-bin:/opt/legion/go/bin:'} &&"
+                "value": "PATH='/legion/worker-bin:/opt/legion/go/bin:'$${PATH#'/legion/worker-bin:/opt/legion/go/bin:'} &&"
               },
               {
                 "name": "GIT_TERMINAL_PROMPT",
@@ -164,12 +190,12 @@
                 "value": "legion-implement[bot]"
               },
               {
-                "name": "LEGION_BOOT_TOKEN_FILE",
-                "value": "/var/run/legion/boot/LEGION_BOOT_TOKEN"
-              },
-              {
                 "name": "ENVOY_TOKEN_FILE",
                 "value": "/var/run/legion/boot/ENVOY_TOKEN"
+              },
+              {
+                "name": "LEGION_BOOT_TOKEN_FILE",
+                "value": "/var/run/legion/boot/LEGION_BOOT_TOKEN"
               }
             ],
             "image": "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
@@ -216,6 +242,11 @@
               {
                 "mountPath": "/home/legion/.config",
                 "name": "config"
+              },
+              {
+                "mountPath": "/var/run/legion/gateway",
+                "name": "gateway",
+                "readOnly": true
               }
             ],
             "workingDir": "/legion/workspaces/sjawhar/legion-smoke/legion-208"
@@ -330,6 +361,7 @@
           "runAsNonRoot": true,
           "runAsUser": 1000
         },
+        "serviceAccountName": "legion-worker",
         "terminationGracePeriodSeconds": 30,
         "tolerations": [
           {
@@ -352,12 +384,12 @@
               "defaultMode": 288,
               "items": [
                 {
-                  "key": "LEGION_BOOT_TOKEN",
-                  "path": "LEGION_BOOT_TOKEN"
-                },
-                {
                   "key": "ENVOY_TOKEN",
                   "path": "ENVOY_TOKEN"
+                },
+                {
+                  "key": "LEGION_BOOT_TOKEN",
+                  "path": "LEGION_BOOT_TOKEN"
                 }
               ],
               "secretName": "legion-legion-legion-208-tester-boot"
@@ -393,6 +425,20 @@
               "medium": "Memory"
             },
             "name": "config"
+          },
+          {
+            "name": "gateway",
+            "projected": {
+              "sources": [
+                {
+                  "serviceAccountToken": {
+                    "audience": "middleman-legion",
+                    "expirationSeconds": 600,
+                    "path": "token"
+                  }
+                }
+              ]
+            }
           }
         ]
       }

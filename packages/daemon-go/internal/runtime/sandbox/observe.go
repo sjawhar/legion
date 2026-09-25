@@ -29,9 +29,16 @@ type view struct {
 	stranger *corev1.Pod
 }
 
-// view reads the claim's Sandbox and pod from the stores, which New synced before it returned and
-// which stay synced for the runtime's life.
+// view reads the claim's Sandbox and pod from the stores. New synced both before it returned, and
+// they stay current while New's context lives and each informer's latest list or watch request
+// succeeded; while either's failed, the store holds what it last heard, so view refuses to answer
+// from it and evaluate answers Uncertain (row 1).
 func (r *Runtime) view(name string) (view, error) {
+	for _, f := range []*feed{&r.sandboxFeed, &r.podFeed} {
+		if err := f.check(); err != nil {
+			return view{}, err
+		}
+	}
 	s, err := r.storedSandbox(name)
 	if err != nil || s == nil {
 		return view{}, err
@@ -56,7 +63,8 @@ func (r *Runtime) Probe(ctx context.Context, loc runtime.Locator) (runtime.Obser
 // incarnation loc carries, S the claim's Sandbox, and P the pod S owns. The rows apply in order,
 // every observation carries loc, and the uid observed goes in the detail:
 //
-//  1. S cannot be read from the store                → Uncertain
+//  1. S cannot be read from the store, or a store's
+//     list or watch is failing                       → Uncertain
 //  2. S absent                                       → Gone
 //  3. P absent (either mode)                         → Gone
 //  4. P's uid ≠ R                                    → NotRecordedProcess

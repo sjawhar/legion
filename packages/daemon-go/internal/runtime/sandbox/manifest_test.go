@@ -6,7 +6,9 @@ import (
 	"flag"
 	"maps"
 	"os"
+	"path"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -14,9 +16,12 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/modelroute"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 )
 
 var updateGolden = flag.Bool("update", false, "rewrite the manifest goldens this package pins")
@@ -160,7 +165,8 @@ func TestPIShellPrefixIsTmuxsFormOverThePodsDirectories(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := envOf(podOf(t, r, workerSpec(t), false).Containers[0])["PI_SHELL_PREFIX"]
+	env := envOf(podOf(t, r, workerSpec(t), false).Containers[0])
+	got := kubeExpand(env["PI_SHELL_PREFIX"], env)
 	want := `PATH='/legion/worker-bin:/opt/legion/go/bin:'${PATH#'/legion/worker-bin:/opt/legion/go/bin:'} &&`
 	if got != want {
 		t.Fatalf("PI_SHELL_PREFIX\n got: %s\nwant: %s", got, want)
@@ -308,19 +314,27 @@ func TestALaunchItCannotHonourIsRefused(t *testing.T) {
 }
 
 // New refuses options no cluster could run: an image not pinned by digest, a tree volume with no
-// storage class on a cluster that has no default, a stream pods cannot dial.
+// storage class on a cluster that has no default, a stream pods cannot dial, a pool the runtime
+// does not choose.
 func TestNewRefusesOptionsNoPodCouldRun(t *testing.T) {
 	for name, tc := range map[string]struct {
 		edit func(*Options)
 		want string
 	}{
-		"tag image":     {func(o *Options) { o.Image = "ghcr.io/sjawhar/legion-worker:latest" }, "not pinned by digest"},
-		"no class":      {func(o *Options) { o.StorageClass = "" }, "no storage class"},
-		"unix stream":   {func(o *Options) { o.StreamURL = "unix:///run/legion.sock" }, "is not tcp://host:port"},
-		"relative tool": {func(o *Options) { o.Tools.Git = "git" }, "git path \"git\" is not absolute"},
-		"bad project":   {func(o *Options) { o.Project = "s4a run" }, "is not a label value"},
-		"url no bearer": {func(o *Options) { o.DispatchURL = "https://dispatch.internal" }, "configured together"},
-		"bearer no url": {func(o *Options) { o.DispatchToken = "dispatch-bearer" }, "configured together"},
+		"tag image":           {func(o *Options) { o.Image = "ghcr.io/sjawhar/legion-worker:latest" }, "not pinned by digest"},
+		"no class":            {func(o *Options) { o.StorageClass = "" }, "no storage class"},
+		"no tree volume":      {func(o *Options) { o.TreeVolume = resource.Quantity{} }, "no tree volume size"},
+		"unix stream":         {func(o *Options) { o.StreamURL = "unix:///run/legion.sock" }, "is not tcp://host:port"},
+		"relative tool":       {func(o *Options) { o.Tools.Git = "git" }, "git path \"git\" is not absolute"},
+		"bad project":         {func(o *Options) { o.Project = "s4a run" }, "is not a label value"},
+		"url no bearer":       {func(o *Options) { o.DispatchURL = "https://dispatch.internal" }, "configured together"},
+		"bearer no url":       {func(o *Options) { o.DispatchToken = "dispatch-bearer" }, "configured together"},
+		"no gateway URL":      {func(o *Options) { o.Gateway.URL = "" }, "no model gateway URL"},
+		"no gateway audience": {func(o *Options) { o.Gateway.Audience = "" }, "no model gateway audience"},
+		"no service account":  {func(o *Options) { o.Gateway.ServiceAccount = "" }, "no ServiceAccount"},
+		"token below minimum": {func(o *Options) { o.Gateway.TokenExpiry = 599 * time.Second }, "at least 10m0s"},
+		"another pool":        {func(o *Options) { o.Scheduling.NodeSelector = map[string]string{poolKey: "gpu"} }, "legion.dev/pool is the runtime's"},
+		"the pool restated":   {func(o *Options) { o.Scheduling.NodeSelector = map[string]string{poolKey: poolValue} }, "legion.dev/pool is the runtime's"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			opts := testOptions()
@@ -413,6 +427,204 @@ func TestTheRecoveredRefReachesTheInitContainerAlone(t *testing.T) {
 			}
 			if _, set := envOf(pod.Containers[0])["LEGION_WORKSPACE_RECOVERED_FROM"]; set {
 				t.Error("the agent's container carries LEGION_WORKSPACE_RECOVERED_FROM")
+			}
+		})
+	}
+}
+
+// A pod reaches the models through the gateway as the Gateway's ServiceAccount (decision 1, C6):
+// the one credential it holds there is a projected token for the gateway's audience, which the
+// kubelet rotates within TokenExpiry, mounted read-only at modelroute.TokenFile's directory in the worker container
+// alone, beside the gateway's URL; the API server's own token is never mounted.
+func TestAPodReachesTheModelGatewayAsItsServiceAccount(t *testing.T) {
+	opts := goldenOptions()
+	r, err := configure(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := corev1.VolumeProjection{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
+		Audience: opts.Gateway.Audience, ExpirationSeconds: new(int64(600)), Path: "token",
+	}}
+	for name, spec := range map[string]runtime.SpawnSpec{"root": rootSpec(t), "worker": workerSpec(t)} {
+		t.Run(name, func(t *testing.T) {
+			pod := podOf(t, r, spec, false)
+			if pod.ServiceAccountName != opts.Gateway.ServiceAccount {
+				t.Errorf("serviceAccountName = %q, want %q", pod.ServiceAccountName, opts.Gateway.ServiceAccount)
+			}
+			if pod.AutomountServiceAccountToken == nil || *pod.AutomountServiceAccountToken {
+				t.Error("the API server's service account token is mounted")
+			}
+			var projected []corev1.Volume
+			for _, volume := range pod.Volumes {
+				if volume.Projected != nil {
+					projected = append(projected, volume)
+				}
+			}
+			if len(projected) != 1 || len(projected[0].Projected.Sources) != 1 ||
+				!reflect.DeepEqual(projected[0].Projected.Sources[0], want) {
+				t.Fatalf("projected volumes %+v, want exactly one holding only %+v", projected, *want.ServiceAccountToken)
+			}
+			mounted := func(c corev1.Container) []corev1.VolumeMount {
+				var mounts []corev1.VolumeMount
+				for _, mount := range c.VolumeMounts {
+					if mount.Name == projected[0].Name {
+						mounts = append(mounts, mount)
+					}
+				}
+				return mounts
+			}
+			main, init := pod.Containers[0], pod.InitContainers[0]
+			if got := mounted(main); len(got) != 1 || got[0].MountPath != path.Dir(modelroute.TokenFile) || !got[0].ReadOnly {
+				t.Errorf("the worker container mounts the token volume as %+v, want once, read-only, at %s", got, path.Dir(modelroute.TokenFile))
+			}
+			if got := mounted(init); len(got) != 0 {
+				t.Errorf("the init container mounts the token volume: %+v", got)
+			}
+			if got := envOf(main)[modelroute.EnvURL]; got != opts.Gateway.URL {
+				t.Errorf("the worker container's LEGION_MODEL_GATEWAY_URL = %q, want %q", got, opts.Gateway.URL)
+			}
+			if _, set := envOf(init)[modelroute.EnvURL]; set {
+				t.Error("the init container is told the gateway's URL")
+			}
+		})
+	}
+}
+
+// Every tree pod refuses a node that holds a pod of another tree (decision 2: the pool's floor
+// sizes the node for one tree), whether or not it also requires its own tree's node, and a pod
+// with no tree label — the image probe — never counts against it.
+func TestEveryTreePodKeepsOffAnotherTreesNode(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []corev1.PodAffinityTerm{{
+		LabelSelector: &metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{
+			{Key: labelTree, Operator: metav1.LabelSelectorOpExists},
+			{Key: labelTree, Operator: metav1.LabelSelectorOpNotIn, Values: []string{testTree}},
+		}},
+		TopologyKey: corev1.LabelHostname,
+	}}
+	for name, tc := range map[string]struct {
+		spec     runtime.SpawnSpec
+		affinity bool
+	}{
+		"root, alone":             {rootSpec(t), false},
+		"worker, beside its tree": {workerSpec(t), true},
+		"worker, alone":           {workerSpec(t), false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pod := podOf(t, r, tc.spec, tc.affinity)
+			if pod.Affinity == nil || pod.Affinity.PodAntiAffinity == nil ||
+				!reflect.DeepEqual(pod.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution, want) ||
+				len(pod.Affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution) > 0 {
+				t.Fatalf("pod anti-affinity %+v, want exactly the required term %+v", pod.Affinity, want)
+			}
+			if got := pod.Affinity.PodAffinity != nil; got != tc.affinity {
+				t.Errorf("the pod requires its own tree's node: %t, want %t", got, tc.affinity)
+			}
+		})
+	}
+}
+
+// kubeExpand is the kubelet's expansion of a container's command, args, and env values
+// (k8s.io/kubernetes third_party/forked/golang/expansion): `$$` is a literal `$`, and `$(NAME)` is
+// the value of a variable the container defines, left as written when it defines none.
+func kubeExpand(input string, env map[string]string) string {
+	var out strings.Builder
+	for i := 0; i < len(input); i++ {
+		if input[i] != '$' || i+1 == len(input) {
+			out.WriteByte(input[i])
+			continue
+		}
+		switch next := input[i+1]; {
+		case next == '$':
+			out.WriteByte('$')
+			i++
+		case next == '(' && strings.Contains(input[i+2:], ")"):
+			name, _, _ := strings.Cut(input[i+2:], ")")
+			if value, ok := env[name]; ok {
+				out.WriteString(value)
+			} else {
+				out.WriteString("$(" + name + ")")
+			}
+			i += len(name) + 2
+		default:
+			out.WriteByte('$')
+		}
+	}
+	return out.String()
+}
+
+// Whatever text a launch carries reaches the process as written, although the kubelet expands
+// `$(NAME)` and `$$` in a container's command and env values: the inlined system prompt, an
+// operator's instructions, and a spec's env values mean what they say in a pod as in a pane.
+func TestTextSurvivesTheKubeletsExpansion(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	literal := "Run `echo $(HOME)` and `kill $$`; your issue is not $(LEGION_ISSUE), and $LEGION_WORKSPACE is yours. $"
+	spec := workerSpec(t)
+	if err := os.WriteFile(spec.Prompt.DeploymentInstructionsPath, []byte(literal+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	spec.Env["LEGION_E2E_NOTE"] = literal
+	l, err := r.prepare(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	main := r.podTemplate(l, false).Spec.Containers[0]
+	env := envOf(main)
+	argv := l.agentArgv(r.agent)
+	for i, arg := range main.Command[len(main.Command)-len(argv):] {
+		if got := kubeExpand(arg, env); got != argv[i] {
+			t.Errorf("the agent's argument #%d reaches it as %q, want %q", i, got, argv[i])
+		}
+	}
+	for name, want := range map[string]string{
+		"LEGION_E2E_NOTE": literal,
+		"PI_SHELL_PREFIX": shellprefix.For(workerBin, filepath.Dir(r.tools.Legion)),
+	} {
+		if got := kubeExpand(env[name], env); got != want {
+			t.Errorf("%s reaches the agent as %q, want %q", name, got, want)
+		}
+	}
+	if !strings.Contains(l.prompt, literal) {
+		t.Fatalf("the system prompt does not carry the instructions as written: %q", l.prompt)
+	}
+}
+
+// A gateway URL that every pod's modelroute refuses is refused at configure, before any API call:
+// otherwise the image probe's refusal of it would read as the image failing its probe, and a URL
+// carrying credentials would be written in plain text into every pod template. The refusal never
+// repeats the credentials, however malformed the userinfo is: the shapes url.Parse does not read
+// as userinfo included, and those whose separator is not a literal @.
+func TestAGatewayURLEveryPodRefusesIsRefusedByConfigure(t *testing.T) {
+	for name, tc := range map[string]struct{ url, want string }{
+		"no scheme":                        {"middleman.legion.internal", "is not an http(s) URL with a host"},
+		"ftp":                              {"ftp://middleman.legion.internal", "is not an http(s) URL with a host"},
+		"credentials":                      {"https://legion:hunter2@middleman.legion.internal", "carries credentials"},
+		"a query":                          {"https://middleman.legion.internal/?x=1", "carries a query or fragment"},
+		"credentials without a scheme":     {"legion:hunter2@middleman.legion.internal", "carries credentials"},
+		"credentials in an opaque URL":     {"https:legion:hunter2@middleman.legion.internal", "carries credentials"},
+		"credentials before a fragment":    {"https://legion:hunter2#x@middleman.legion.internal", "carries credentials"},
+		"credentials with a slash in them": {"https://legion:hun/ter2@middleman.legion.internal", "carries credentials"},
+		"an escaped @":                     {"https://legion:hunter2%40middleman.legion.internal", "does not parse as a URL"},
+		"an escaped @ without a scheme":    {"legion:hunter2%40middleman.legion.internal", "is not an http(s) URL with a host"},
+		"an escaped @ in an opaque URL":    {"https:legion:hunter2%40middleman.legion.internal", "is not an http(s) URL with a host"},
+		"a fullwidth @":                    {"https://legion:hunter2\uff20middleman.legion.internal", "does not parse as a URL"},
+		"a space for the @":                {"https://legion:hunter2 middleman.legion.internal", "does not parse as a URL"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			opts := testOptions()
+			opts.Gateway.URL = tc.url
+			_, err := configure(opts)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("configure: %v, want a refusal containing %q", err, tc.want)
+			}
+			if strings.Contains(err.Error(), "hun") {
+				t.Fatalf("the refusal repeats the URL's password: %v", err)
 			}
 		})
 	}

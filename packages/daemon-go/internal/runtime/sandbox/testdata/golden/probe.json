@@ -31,6 +31,12 @@
               "--go-daemon-api-version",
               "3"
             ],
+            "env": [
+              {
+                "name": "LEGION_MODEL_GATEWAY_URL",
+                "value": "https://middleman.legion.internal"
+              }
+            ],
             "image": "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
             "name": "probe",
             "resources": {
@@ -52,7 +58,14 @@
               "seccompProfile": {
                 "type": "RuntimeDefault"
               }
-            }
+            },
+            "volumeMounts": [
+              {
+                "mountPath": "/var/run/legion/gateway",
+                "name": "gateway",
+                "readOnly": true
+              }
+            ]
           }
         ],
         "enableServiceLinks": false,
@@ -68,6 +81,7 @@
           "runAsNonRoot": true,
           "runAsUser": 1000
         },
+        "serviceAccountName": "legion-worker",
         "terminationGracePeriodSeconds": 5,
         "tolerations": [
           {
@@ -75,6 +89,22 @@
             "key": "legion.dev/pool",
             "operator": "Equal",
             "value": "legion"
+          }
+        ],
+        "volumes": [
+          {
+            "name": "gateway",
+            "projected": {
+              "sources": [
+                {
+                  "serviceAccountToken": {
+                    "audience": "middleman-legion",
+                    "expirationSeconds": 600,
+                    "path": "token"
+                  }
+                }
+              ]
+            }
           }
         ]
       }

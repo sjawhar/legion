@@ -16,6 +16,8 @@ on:
       - "go.work"
       - "go.work.sum"
       - "scripts/e2e/**"
+      - "packages/daemon/src/daemon/omp-pin.ts"
+      - ".github/actions/install-omp/**"
   pull_request:
     paths:
       - "packages/envoy/**"
@@ -30,6 +32,8 @@ on:
       - "go.work"
       - "go.work.sum"
       - "scripts/e2e/**"
+      - "packages/daemon/src/daemon/omp-pin.ts"
+      - ".github/actions/install-omp/**"
   merge_group:
     types: [checks_requested]
 
@@ -76,6 +80,9 @@ jobs:
               - 'packages/pi-envoy/**'
               - 'packages/envoy-client/**'
               - 'packages/contracts/**'
+              # The Oh My Pi pin the phase-stall test runs (extensions/legion-phase-stall-omp.test.ts).
+              - 'packages/daemon/src/daemon/omp-pin.ts'
+              - '.github/actions/install-omp/**'
             dispatch:
               - 'packages/dispatch/**'
               - 'packages/contracts/**'
@@ -95,6 +102,9 @@ jobs:
               - 'packages/envoy/cmd/dispatch/**'
               # The plugin's Go client and the manifest field the boot gate holds it to.
               - 'packages/pi-envoy/**'
+              # The Oh My Pi pin the model-route test runs (internal/modelroute/omp_test.go).
+              - 'packages/daemon/src/daemon/omp-pin.ts'
+              - '.github/actions/install-omp/**'
 
   contracts:
     needs: changes
@@ -188,17 +198,8 @@ jobs:
           jj --version
       # extensions/legion-phase-stall-omp.test.ts runs the pinned Oh My Pi against stand-ins and
       # refuses on GitHub Actions without one. The pin is read from omp-pin.ts, the repository's one
-      # copy of it, and installed through the mise above.
-      - name: Install the pinned Oh My Pi
-        env:
-          MISE_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          pin=$(sed -n 's/^export const OMP_FORK_PIN = "\(.*\)";$/\1/p' packages/daemon/src/daemon/omp-pin.ts)
-          test -n "$pin"
-          "$HOME/.local/bin/mise" install "$pin"
-          omp="$("$HOME/.local/bin/mise" where "$pin")/bin/omp"
-          "$omp" --version
-          echo "LEGION_TEST_OMP=$omp" >> "$GITHUB_ENV"
+      # copy of it, installed through the mise above (.github/actions/install-omp).
+      - uses: ./.github/actions/install-omp
       - run: bun install --frozen-lockfile
       - name: Build contracts for pi-envoy
         run: bun run build
@@ -420,7 +421,7 @@ jobs:
         with:
           go-version-file: packages/daemon-go/go.mod
       # With the e2e tag, vet also compiles the live proofs behind it (the Stage 4a harness,
-      # sandbox/live_test.go), which run on the devbox against a real cluster.
+      # sandbox/live*_test.go), which run on the devbox against a real cluster.
       - name: Vet the Go daemon, its e2e-tagged live proofs included
         run: go vet -tags e2e ./...
         working-directory: packages/daemon-go
@@ -441,6 +442,11 @@ jobs:
           "$HOME/.local/bin/mise" use -g github:jj-vcs/jj@0.44.0
       - name: Verify jj
         run: jj --version
+      # internal/modelroute's route test runs the Oh My Pi the worker image ships against a stand-in
+      # for the model gateway, and refuses on GitHub Actions without one. The pin is read from
+      # omp-pin.ts, the repository's one copy of it, installed through the mise above
+      # (.github/actions/install-omp).
+      - uses: ./.github/actions/install-omp
       - name: Test the Go daemon
         run: go test -count=1 ./...
         working-directory: packages/daemon-go

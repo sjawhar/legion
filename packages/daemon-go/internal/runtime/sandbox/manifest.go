@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/modelroute"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
@@ -32,6 +33,7 @@ const (
 	stateVolume     = "state"
 	tempVolume      = "tmp"
 	configVolume    = "config"
+	gatewayVolume   = "gateway"
 )
 
 // maxArgBytes is Linux's MAX_ARG_STRLEN, the largest single argv string exec accepts, counting
@@ -50,10 +52,6 @@ const (
 // The pod runs as the image's legion user.
 const podUser = 1000
 
-// dispatchTokenKey is the claim Secret's key for the Dispatch bearer, which the runtime writes
-// into every claim's Secret when Dispatch is configured, beside the boot and provisioning tokens.
-const dispatchTokenKey = "DISPATCH_TOKEN"
-
 // runtimeOwned are the main container's variables the runtime sets itself: exactly the names
 // mainEnvironment sets (TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime), which the
 // shared validator refuses in a spec's Env and as a secret's pointer.
@@ -61,39 +59,42 @@ var runtimeOwned = map[string]bool{
 	"LEGION_DAEMON_API": true, "LEGION_TREE": true, "LEGION_ISSUE": true, "LEGION_ROLE": true,
 	"LEGION_GENERATION": true, "LEGION_PROJECT": true, "LEGION_DAEMON_URL": true,
 	"LEGION_STATE_DIR": true, "LEGION_WORKSPACE": true, "ENVOY_NATS_URL": true, "ENVOY_URL": true,
-	"DISPATCH_URL": true, "LEGION_GH_PATH": true, "LEGION_GIT_PATH": true, "LEGION_JJ_PATH": true,
-	"LEGION_CREDENTIAL_HELPER": true, "PATH": true, "PI_SHELL_PREFIX": true,
-	"GIT_TERMINAL_PROMPT": true, "XDG_CONFIG_HOME": true, "XDG_CACHE_HOME": true,
-	"XDG_DATA_HOME": true, "XDG_STATE_HOME": true, "POD_UID": true, "LEGION_BOOT_TOKEN_FILE": true,
-	"DISPATCH_TOKEN_FILE": true,
+	"DISPATCH_URL": true, modelroute.EnvURL: true, "LEGION_GH_PATH": true,
+	"LEGION_GIT_PATH": true, "LEGION_JJ_PATH": true, "LEGION_CREDENTIAL_HELPER": true, "PATH": true,
+	"PI_SHELL_PREFIX": true, "GIT_TERMINAL_PROMPT": true, "XDG_CONFIG_HOME": true,
+	"XDG_CACHE_HOME": true, "XDG_DATA_HOME": true, "XDG_STATE_HOME": true, "POD_UID": true,
+	bootTokenKey + "_FILE": true, dispatchTokenKey + "_FILE": true,
 }
 
 // launch is one relaunch's inputs, checked and resolved before anything touches the cluster.
 type launch struct {
 	spec runtime.SpawnSpec
 	name string
-	// repo is the repository workspace-init provisions, and workspace the issue's workspace it
-	// provisions on the tree volume (workspace.Location under TreeRoot).
-	repo, workspace string
-	// secrets are the claim Secret's keys beside the boot and provisioning tokens, each reaching
-	// the main container as a `<NAME>_FILE` pointer: the spec's, and the Dispatch bearer when
-	// Dispatch is configured.
+	// workspace is the issue's workspace workspace-init provisions on the tree volume
+	// (workspace.Location under TreeRoot).
+	workspace string
+	// secrets are the claim Secret's keys beside the provisioning token, each reaching the main
+	// container as a `<NAME>_FILE` pointer: the boot token, the spec's, and the Dispatch bearer
+	// when Dispatch is configured.
 	secrets map[string]string
-	// root is the tree's root claim, whose Sandbox owns the tree volume; isRoot is spec.Claim
+	// root is the tree's root claim, whose Sandbox owns the tree volume; isRoot is spec's claim
 	// being it.
 	root   claim.Token
 	isRoot bool
 	// prompt is the one --append-system-prompt value.
 	prompt string
-	// resumeFile is the recorded session in the main container's path; "" for a Spawn.
-	resumeFile string
+	// resumeFile is the recorded session in the main container's path, and initResumeFile the same
+	// file in the init container's; both "" for a Spawn.
+	resumeFile, initResumeFile string
 }
 
 // prepare checks spec and resolves everything a launch needs from it, reading the prompt files on
 // the daemon's disk, so a launch that cannot be honoured is refused before any API call: the
 // shared refusal (runtime.ValidateSpawnSpec), then the sandbox's own. A pod provisions its
-// workspace from a repository, so a spec with none is refused, and so is a secret named for a key
-// the runtime writes into the claim's Secret itself.
+// workspace from a repository, so a spec with none is refused, and so is a secret named for the
+// provisioning token, the one key the runtime writes whose pointer the worker container is never
+// told (the boot token's and the Dispatch bearer's pointers are runtime-owned, so the shared
+// refusal already covers them).
 func (r *Runtime) prepare(spec runtime.SpawnSpec) (launch, error) {
 	if err := runtime.ValidateSpawnSpec(spec, runtimeOwned); err != nil {
 		return launch{}, err
@@ -101,10 +102,8 @@ func (r *Runtime) prepare(spec runtime.SpawnSpec) (launch, error) {
 	refuse := func(format string, args ...any) error {
 		return fmt.Errorf("sandbox launch %s: "+format, append([]any{spec.Claim}, args...)...)
 	}
-	for _, name := range sortedKeys(spec.Secrets) {
-		if name == bootTokenKey || name == provisionTokenKey || name == dispatchTokenKey {
-			return launch{}, refuse("secret %s is a key the runtime writes itself", name)
-		}
+	if _, ok := spec.Secrets[provisionTokenKey]; ok {
+		return launch{}, refuse("secret %s is a key the runtime writes itself", provisionTokenKey)
 	}
 	if spec.Repository == "" {
 		return launch{}, refuse("no repository: a pod's init container provisions the issue's workspace from one")
@@ -122,18 +121,19 @@ func (r *Runtime) prepare(spec runtime.SpawnSpec) (launch, error) {
 		return launch{}, refuse("%v", err)
 	}
 	secrets := maps.Clone(spec.Secrets)
+	if secrets == nil {
+		secrets = map[string]string{}
+	}
+	secrets[bootTokenKey] = spec.BootToken
 	if r.dispatchToken != "" {
-		if secrets == nil {
-			secrets = map[string]string{}
-		}
 		secrets[dispatchTokenKey] = r.dispatchToken
 	}
 	l := launch{
-		spec: spec, name: SandboxName(spec.Claim), repo: spec.Repository, workspace: working.Dir, secrets: secrets,
-		root: root, isRoot: root == spec.Claim, prompt: prompt,
+		spec: spec, name: SandboxName(spec.Claim), workspace: working.Dir, secrets: secrets,
+		root: root, isRoot: claim.IsTreeArchitect(spec.Role, spec.Issue, spec.Tree), prompt: prompt,
 	}
 	if spec.ResumeSessionFile != "" {
-		if _, err := initSessionPath(spec.ResumeSessionFile); err != nil {
+		if l.initResumeFile, err = initSessionPath(spec.ResumeSessionFile); err != nil {
 			return launch{}, refuse("%v", err)
 		}
 		l.resumeFile = spec.ResumeSessionFile
@@ -238,20 +238,29 @@ func (r *Runtime) sandboxManifest(l launch, affinity bool) sandbox {
 
 // podTemplate is the pod a launch runs (decisions 7 and 10). Every tree pod mounts the tree volume
 // by its claim's name, the root included: the controller replaces the root's `tree` volume with the
-// same claim from its template, so root and workers read alike.
+// same claim from its template, so root and workers read alike. The pod runs as the gateway's
+// ServiceAccount, and its worker container alone mounts the gateway token (C6).
 //
 // affinity is whether another pod of the tree is scheduled right now. The tree volume is a
 // single-node EBS volume every tree pod mounts, so a pod placed on another node would fail to
 // attach it; with no other pod scheduled, any node will do. The controller applies a template only
 // to the next pod it creates, so the template is rebuilt for every relaunch.
+//
+// Every tree pod also refuses a node that holds a pod of another tree (Stage 4b decision 2): the
+// pool's floor sizes a node for one tree, and pods carry no requests, since under required
+// colocation the first pod placed decides the node and a request on a later one would strand it.
+// The selector is the tree label present and not this tree's, so a pod with no tree label, the
+// image probe's, never counts.
 func (r *Runtime) podTemplate(l launch, affinity bool) podTemplate {
 	resources := r.resources[l.spec.Role]
 	legion := r.tools.Legion
 	helper := "!" + legion + " credential"
+	gateway, gatewayMount := gatewayTokenVolume(r.gateway)
 	spec := corev1.PodSpec{
 		RestartPolicy:                 corev1.RestartPolicyNever,
 		TerminationGracePeriodSeconds: new(int64(math.Ceil(r.terminationGrace.Seconds()))),
 		AutomountServiceAccountToken:  new(false),
+		ServiceAccountName:            r.gateway.ServiceAccount,
 		EnableServiceLinks:            new(false),
 		SecurityContext: &corev1.PodSecurityContext{
 			RunAsNonRoot: new(true), RunAsUser: new(int64(podUser)), RunAsGroup: new(int64(podUser)), FSGroup: new(int64(podUser)),
@@ -260,12 +269,12 @@ func (r *Runtime) podTemplate(l launch, affinity bool) podTemplate {
 		NodeSelector:      r.nodeSelector(),
 		Tolerations:       r.tolerations(),
 		PriorityClassName: r.scheduling.PriorityClass,
-		Volumes:           r.volumes(l),
+		Volumes:           append(r.volumes(l), gateway),
 		InitContainers: []corev1.Container{{
 			Name:  initContainer,
 			Image: r.image,
 			Command: []string{
-				legion, "workspace-init", "--issue", l.spec.Issue, "--repo", l.repo, "--root", TreeRoot,
+				legion, "workspace-init", "--issue", l.spec.Issue, "--repo", l.spec.Repository, "--root", TreeRoot,
 				"--credential-helper", helper,
 			},
 			Env:        r.initEnvironment(l),
@@ -293,20 +302,35 @@ func (r *Runtime) podTemplate(l launch, affinity bool) podTemplate {
 				{Name: bootVolume, MountPath: BootDir, ReadOnly: true},
 				{Name: stateVolume, MountPath: StateDir},
 				{Name: configVolume, MountPath: xdgConfigHome},
+				gatewayMount,
 			},
 			Resources:       resources,
 			SecurityContext: restrictedContainer(),
 		}},
 	}
-	if affinity {
-		spec.Affinity = &corev1.Affinity{PodAffinity: &corev1.PodAffinity{
-			RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
-				LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
-					labelProject: r.project, labelTree: labelValue(l.spec.Tree),
-				}},
-				TopologyKey: corev1.LabelHostname,
+	tree := labelValue(l.spec.Tree)
+	spec.Affinity = &corev1.Affinity{PodAntiAffinity: &corev1.PodAntiAffinity{
+		RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
+			LabelSelector: &metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{
+				{Key: labelTree, Operator: metav1.LabelSelectorOpExists},
+				{Key: labelTree, Operator: metav1.LabelSelectorOpNotIn, Values: []string{tree}},
 			}},
-		}}
+			TopologyKey: corev1.LabelHostname,
+		}},
+	}}
+	if affinity {
+		spec.Affinity.PodAffinity = &corev1.PodAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
+				LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{labelProject: r.project, labelTree: tree}},
+				TopologyKey:   corev1.LabelHostname,
+			}},
+		}
+	}
+	for i := range spec.InitContainers {
+		kubeletLiteral(&spec.InitContainers[i])
+	}
+	for i := range spec.Containers {
+		kubeletLiteral(&spec.Containers[i])
 	}
 	return podTemplate{
 		Metadata: podMetadata{
@@ -317,12 +341,25 @@ func (r *Runtime) podTemplate(l launch, affinity bool) podTemplate {
 	}
 }
 
+// kubeletLiteral escapes a container's command and env values against the kubelet's expansion,
+// in which `$(NAME)` is another variable's value and `$$` a literal `$`: every `$` is doubled, so
+// the process receives the text as written, the inlined system prompt and the operator's
+// instructions included, as a tmux pane does.
+func kubeletLiteral(c *corev1.Container) {
+	for i := range c.Command {
+		c.Command[i] = strings.ReplaceAll(c.Command[i], "$", "$$")
+	}
+	for i := range c.Env {
+		c.Env[i].Value = strings.ReplaceAll(c.Env[i].Value, "$", "$$")
+	}
+}
+
 // volumes are the tree volume, the claim's Secret projected twice (its boot half for the main
 // container, its provisioning token for the init container alone), and three in-memory
 // directories: the main container's state directory, the init container's TMPDIR, and the XDG
 // config home both containers share.
 func (r *Runtime) volumes(l launch) []corev1.Volume {
-	boot := []corev1.KeyToPath{{Key: bootTokenKey, Path: bootTokenKey}}
+	var boot []corev1.KeyToPath
 	for _, name := range sortedKeys(l.secrets) {
 		boot = append(boot, corev1.KeyToPath{Key: name, Path: name})
 	}
@@ -378,9 +415,8 @@ func (r *Runtime) initEnvironment(l launch) []corev1.EnvVar {
 		{Name: "LEGION_PROVISION_TOKEN_FILE", Value: ProvisionDir + "/" + provisionTokenKey},
 		{Name: "LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS", Value: strconv.FormatInt(r.initWaitSeconds(), 10)},
 	}
-	if l.resumeFile != "" {
-		path, _ := initSessionPath(l.resumeFile) // checked by prepare
-		env = append(env, corev1.EnvVar{Name: "LEGION_RESUME_SESSION_FILE", Value: path})
+	if l.initResumeFile != "" {
+		env = append(env, corev1.EnvVar{Name: "LEGION_RESUME_SESSION_FILE", Value: l.initResumeFile})
 	}
 	if l.spec.WorkspaceRecoveredFrom != "" {
 		env = append(env, corev1.EnvVar{Name: "LEGION_WORKSPACE_RECOVERED_FROM", Value: l.spec.WorkspaceRecoveredFrom})
@@ -397,7 +433,8 @@ func (r *Runtime) initWaitSeconds() int64 {
 }
 
 // mainEnvironment is the pane contract with a pod's values (decision 10): the variables every
-// tmux pane is told (runtime/tmux/spawn.go, panePairs), then the spec's own, then one `<NAME>_FILE`
+// tmux pane is told (runtime/tmux/spawn.go, panePairs) and the model gateway's URL, which the
+// image's Oh My Pi profile routes its provider to, then the spec's own, then one `<NAME>_FILE`
 // pointer per secret into the boot projection. POD_UID is the pod's own incarnation, from the
 // downward API.
 func (r *Runtime) mainEnvironment(l launch, credentialHelper string) []corev1.EnvVar {
@@ -424,6 +461,7 @@ func (r *Runtime) mainEnvironment(l launch, credentialHelper string) []corev1.En
 	if r.dispatchURL != "" {
 		add("DISPATCH_URL", r.dispatchURL)
 	}
+	add(modelroute.EnvURL, r.gateway.URL)
 	add("LEGION_GH_PATH", r.tools.GH)
 	add("LEGION_GIT_PATH", r.tools.Git)
 	add("LEGION_JJ_PATH", r.tools.JJ)
@@ -439,14 +477,14 @@ func (r *Runtime) mainEnvironment(l launch, credentialHelper string) []corev1.En
 	for _, name := range sortedKeys(spec.Env) {
 		add(name, spec.Env[name])
 	}
-	add("LEGION_BOOT_TOKEN_FILE", BootDir+"/"+bootTokenKey)
 	for _, name := range sortedKeys(l.secrets) {
 		add(name+"_FILE", BootDir+"/"+name)
 	}
 	return env
 }
 
-// nodeSelector is the Legion pool's label with the configured selector merged over it.
+// nodeSelector is the Legion pool's label and the configured selector, which configure keeps off
+// the pool's key.
 func (r *Runtime) nodeSelector() map[string]string {
 	selector := map[string]string{poolKey: poolValue}
 	for key, value := range r.scheduling.NodeSelector {

@@ -17,7 +17,7 @@ import (
 
 // Scheduling is where Legion's pods may run, beyond the Legion pool every one of them selects.
 type Scheduling struct {
-	// NodeSelector is merged over {legion.dev/pool: legion}; a key here wins.
+	// NodeSelector is added to {legion.dev/pool: legion}; it may not set legion.dev/pool itself.
 	NodeSelector map[string]string
 	// Tolerations are appended to the Legion pool's own toleration.
 	Tolerations   []corev1.Toleration
@@ -28,6 +28,20 @@ type Scheduling struct {
 // LEGION_GH_PATH, LEGION_GIT_PATH, and LEGION_JJ_PATH; Legion is the Go `legion` every container
 // runs (/opt/legion/go/bin/legion), whose directory also leads the pod's PATH.
 type Tools struct{ GH, Git, JJ, Legion string }
+
+// Gateway is the model gateway every pod reaches the models through (LEGION-208 Stage 4b plan,
+// decision 1: LEGION-199's design A′). A pod runs as ServiceAccount, and the kubelet projects it a
+// token for Audience, rotated before TokenExpiry passes, which Oh My Pi presents to URL as its key:
+// no provider key reaches a pod.
+type Gateway struct {
+	URL, Audience, ServiceAccount string
+	// TokenExpiry is the projected token's lifetime, at least minTokenExpiry; the kubelet rotates
+	// the token at 80% of it.
+	TokenExpiry time.Duration
+}
+
+// minTokenExpiry is the shortest projected service account token the API server issues.
+const minTokenExpiry = 10 * time.Minute
 
 // ProvisionTokens mints the installation token workspace-init clones with, for a repository owner.
 // The daemon's is appauth; a harness's may be a token file read on every call.
@@ -44,7 +58,8 @@ type Options struct {
 	Image string
 	// StorageClass is the tree volume's class. Required: production has no default class.
 	StorageClass string
-	// TreeVolume is the tree volume's size; 20Gi when zero.
+	// TreeVolume is the tree volume's size, positive; the daemon's configuration supplies its
+	// default (runtime.kubernetes.tree_volume, 20Gi).
 	TreeVolume resource.Quantity
 	Scheduling Scheduling
 	// Resources are each role's container requests and limits; a role absent here gets none.
@@ -61,6 +76,7 @@ type Options struct {
 	// NATSURLs are ENVOY_NATS_URL, comma-joined; none leaves it unset.
 	NATSURLs []string
 	Tools    Tools
+	Gateway  Gateway
 	// Agent is the command the shim wraps, before the Oh My Pi arguments the runtime appends
 	// (`--resume`, `--mode rpc`, `--append-system-prompt`); Oh My Pi itself when nil.
 	Agent []string
