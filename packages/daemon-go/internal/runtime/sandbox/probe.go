@@ -16,7 +16,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/fields"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -342,14 +341,11 @@ const providersMountRecheck = 15 * time.Second
 // other FailedMount, such as `failed to sync secret cache: timed out waiting for the condition`
 // while the kubelet's watch catches up, is one the kubelet retries, and is left to the budget.
 func (r *Runtime) providersMountFailure(ctx context.Context, pod *corev1.Pod) string {
-	reading, cancel := call(ctx)
-	defer cancel()
-	selector := fields.Set{"involvedObject.kind": "Pod", "involvedObject.name": pod.Name, "involvedObject.uid": string(pod.UID)}
-	list, err := r.kube.CoreV1().Events(r.namespace).List(reading, metav1.ListOptions{FieldSelector: selector.String()})
+	events, err := r.podEvents(ctx, pod)
 	if err != nil {
 		return ""
 	}
-	for _, event := range list.Items {
+	for _, event := range events {
 		if event.Reason != "FailedMount" || !strings.Contains(event.Message, `volume "`+providersVolume+`"`) {
 			continue
 		}

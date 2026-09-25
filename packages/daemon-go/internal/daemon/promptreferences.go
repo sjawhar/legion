@@ -58,10 +58,7 @@ type promptNames [len(promptKinds)]map[string][]string
 // discovers there (both named relative to the plugin), and under rolesDir, when set (named
 // `roles/<file>`).
 func promptReferences(manifest string, skills []string, rolesDir string) (promptNames, error) {
-	var names promptNames
-	for i := range names {
-		names[i] = map[string][]string{}
-	}
+	names := newPromptNames()
 	root := filepath.Dir(manifest)
 	for _, dir := range skills {
 		if err := names.collect(root, filepath.Join(root, dir), ""); err != nil {
@@ -73,8 +70,8 @@ func promptReferences(manifest string, skills []string, rolesDir string) (prompt
 		return names, fmt.Errorf("pi-legion-envoy at %s ships agents in agents/, which the gate cannot read: %w", manifest, err)
 	}
 	if rolesDir != "" {
-		if err := names.collect(rolesDir, rolesDir, "roles"); err != nil {
-			return names, fmt.Errorf("the role prompts directory %s cannot be read: %w", rolesDir, err)
+		if err := names.collectRoles(rolesDir); err != nil {
+			return names, err
 		}
 	}
 	return names, nil
@@ -85,12 +82,9 @@ func promptReferences(manifest string, skills []string, rolesDir string) (prompt
 // daemon inlines its own role prompts into every Sandbox pod, so the image's probe must resolve
 // what those name, not the image's copy.
 func RolePromptReferences(rolesDir string) (string, error) {
-	var names promptNames
-	for i := range names {
-		names[i] = map[string][]string{}
-	}
-	if err := names.collect(rolesDir, rolesDir, "roles"); err != nil {
-		return "", fmt.Errorf("the role prompts directory %s cannot be read: %w", rolesDir, err)
+	names := newPromptNames()
+	if err := names.collectRoles(rolesDir); err != nil {
+		return "", err
 	}
 	encoded := map[string]map[string][]string{}
 	for i, kind := range promptKinds {
@@ -109,11 +103,34 @@ func (names promptNames) addEncoded(raw string) error {
 	for i, kind := range promptKinds {
 		for name, files := range encoded[kind.variable] {
 			for _, file := range files {
-				if !slices.Contains(names[i][name], file) {
-					names[i][name] = append(names[i][name], file)
-				}
+				names.add(i, name, file)
 			}
 		}
+	}
+	return nil
+}
+
+// newPromptNames holds no name of any kind.
+func newPromptNames() promptNames {
+	var names promptNames
+	for i := range names {
+		names[i] = map[string][]string{}
+	}
+	return names
+}
+
+// add records that file names name in the form promptKinds[kind], once.
+func (names promptNames) add(kind int, name, file string) {
+	if !slices.Contains(names[kind][name], file) {
+		names[kind][name] = append(names[kind][name], file)
+	}
+}
+
+// collectRoles adds every reference in the role prompts under rolesDir, each named
+// `roles/<file>`.
+func (names promptNames) collectRoles(rolesDir string) error {
+	if err := names.collect(rolesDir, rolesDir, "roles"); err != nil {
+		return fmt.Errorf("the role prompts directory %s cannot be read: %w", rolesDir, err)
 	}
 	return nil
 }
@@ -145,9 +162,7 @@ func (names promptNames) collect(base, dir, prefix string) error {
 		file := filepath.Join(prefix, under, rel)
 		for i, kind := range promptKinds {
 			for _, match := range kind.reference.FindAllSubmatch(body, -1) {
-				if name := string(match[1]); !slices.Contains(names[i][name], file) {
-					names[i][name] = append(names[i][name], file)
-				}
+				names.add(i, string(match[1]), file)
 			}
 		}
 		return nil
