@@ -350,8 +350,9 @@ Every pod carries the operator fixture's pod,
 [`fixtures/operator-route/pod.yml`](fixtures/operator-route/pod.yml), read through the daemon's
 own loader (`config.ReadPodFile`): ServiceAccount `legion-worker`, one projected token for
 audience `middleman-legion`, and a ConfigMap holding the fixture's `models.yml` (anthropic through
-production's middleman, keyed by that token) and `overlay.yml` (the roles, and every other
-provider disabled). Legion holds none of it. Before the harness runs, the script creates the
+production's middleman, keyed by that token) and `overlay.yml` (every role Legion's prompts
+reach, `enabledModels` holding each session to the gateway's aliases, and each provider a pod could
+reach without the gateway disabled). Legion holds none of it. Before the harness runs, the script creates the
 run's own copy of that ConfigMap as the operator, `legion-operator-route-<project>`, labelled
 with the run's project; the harness points the pods at it, so another run in the namespace can
 neither see nor delete this one's route. It also creates the run's providers Secret,

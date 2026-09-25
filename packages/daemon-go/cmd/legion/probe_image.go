@@ -40,7 +40,8 @@ var digits = regexp.MustCompile(`^[0-9]+$`)
 // shim starts Oh My Pi (podsafety.Apply), its overlay written to a fresh temporary directory since
 // the probe pod mounts no state volume; with --provider-env-dir, each provider key exported after
 // it as the shim exports them (shim.ReadProviderEnv); and with --role-references, the references
-// of the role prompts the daemon inlines into its pods, resolved in place of the image's roles.
+// of the role prompts the daemon inlines into its pods (promptrefs.Roles), resolved beside the
+// plugin's own. Without it the image's own role prompts are encoded and resolved the same way.
 func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := newFlags("probe-image", stderr)
 	omp := flags.String("omp", "", "the OMP executable to probe (default: $LEGION_OMP_PATH)")
