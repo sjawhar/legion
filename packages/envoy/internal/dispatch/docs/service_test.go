@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -309,24 +310,40 @@ func TestSettleRendersTreeAndWritesVersion(t *testing.T) {
 	}
 }
 
-// The browser editor gives every heading an id derived from its text as soon as it opens the
-// document (Milkdown's syncHeadingIdPlugin); the server parses headings with an empty one. A
-// version never renders the id, so that update changes nothing a version records: it credits no
-// connected reader and settles without a version, which would otherwise stale an approval.
-func TestAnEditorsHeadingIDsSettleWithoutAVersion(t *testing.T) {
-	service, artifactID := newTestService(t)
-	service.settle = time.Hour
-	seedServiceText(t, service, artifactID, "## Database\n\nUse SQLite")
-	alignLatestVersionWithUpdates(t, service, artifactID)
-	reader := model.Actor{Kind: "user", ID: "bob"}
-	service.addConnection(artifactID, service.nextConnection.Add(1), reader)
+// The browser editor derives attributes that no rendering carries: every heading's id, slugged
+// from its text as soon as it opens the document (Milkdown's syncHeadingIdPlugin), and every
+// ordered list item's label and list type, rewritten on the first click or caret move
+// (syncListOrderPlugin). The server parses headings with an empty id and every list item as a
+// bullet. A version records the rendered markdown alone, so such an update changes nothing a
+// version records: it credits no connected reader and settles without a version, which would
+// otherwise stale an approval.
+func TestAttributesTheEditorDerivesSettleWithoutAVersion(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		markdown string
+		edit     func(*pmdoc.Node) *pmdoc.Node
+	}{
+		{name: "heading ids", markdown: "## Database\n\nUse SQLite", edit: setHeadingID("database")},
+		{name: "ordered list labels", markdown: "## Plan\n\n1. First step.\n2. Second step.", edit: labelOrderedListItems},
+		{name: "ordered list starting at 3", markdown: "3. Third step.\n4. Fourth step.", edit: labelOrderedListItems},
+		{name: "ordered list inside bullets", markdown: "- Outer\n  1. Inner one.\n  2. Inner two.", edit: labelOrderedListItems},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			service.settle = time.Hour
+			seedServiceText(t, service, artifactID, test.markdown)
+			alignLatestVersionWithUpdates(t, service, artifactID)
+			reader := model.Actor{Kind: "user", ID: "bob"}
+			service.addConnection(artifactID, service.nextConnection.Add(1), reader)
 
-	editLiveTree(t, service, artifactID, setHeadingID("database"))
-	settleCurrentGeneration(t, service, artifactID)
+			editLiveTree(t, service, artifactID, test.edit)
+			settleCurrentGeneration(t, service, artifactID)
 
-	assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 1, 0)
-	if pending := pendingAuthors(service, artifactID); len(pending) != 0 {
-		t.Fatalf("pending authors after a heading id = %v, want none (reader %v changed nothing)", pending, reader)
+			assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 1, 0)
+			if pending := pendingAuthors(service, artifactID); len(pending) != 0 {
+				t.Fatalf("pending authors = %v, want none (reader %v changed nothing)", pending, reader)
+			}
+		})
 	}
 }
 
@@ -427,6 +444,30 @@ func setHeadingID(id string) func(*pmdoc.Node) *pmdoc.Node {
 		}
 		return tree
 	}
+}
+
+// labelOrderedListItems is the live edit the editor's list plugin makes on a click or caret move:
+// every item of an ordered list is labelled with its number and typed as ordered.
+func labelOrderedListItems(node *pmdoc.Node) *pmdoc.Node {
+	if node.Type == "ordered_list" {
+		start := 1
+		switch order := node.Attrs["order"].(type) {
+		case int:
+			start = order
+		case int64:
+			start = int(order)
+		case float64:
+			start = int(order)
+		}
+		for index, item := range node.Children {
+			item.Attrs["label"] = fmt.Sprintf("%d.", start+index)
+			item.Attrs["listType"] = "ordered"
+		}
+	}
+	for _, child := range node.Children {
+		labelOrderedListItems(child)
+	}
+	return node
 }
 
 func TestSettleStampsPersistedLegacyProofDocument(t *testing.T) {

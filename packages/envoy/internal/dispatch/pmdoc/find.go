@@ -1013,24 +1013,3 @@ func StripAnchorMarks(node *Node) *Node {
 	}
 	return out
 }
-
-// VersionedContent returns the part of doc a version records, the measure of whether an update
-// changed a document's content: doc with its anchor marks stripped (StripAnchorMarks) and without
-// each heading's id. The browser editor derives that id from the heading's text whenever it opens
-// the document, and no rendering carries it, so a heading edit counts through its text alone.
-func VersionedContent(doc *Node) *Node {
-	content := StripAnchorMarks(doc)
-	if content != nil {
-		dropHeadingIDs(content)
-	}
-	return content
-}
-
-func dropHeadingIDs(node *Node) {
-	if node.Type == "heading" {
-		delete(node.Attrs, "id")
-	}
-	for _, child := range node.Children {
-		dropHeadingIDs(child)
-	}
-}

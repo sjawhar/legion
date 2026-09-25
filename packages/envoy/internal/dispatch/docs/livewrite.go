@@ -280,7 +280,7 @@ func (s *Service) docView(ctx context.Context, artifactID string, read func(*crd
 
 // creditLiveWrite records whom a joined content change is credited to once its transaction
 // commits: its actor alone, as a service mutation that reaches the room directly is credited
-// (recordConnectedActors). A browser connected to the room made none of it.
+// (creditContentChange). A browser connected to the room made none of it.
 func (s *Service) creditLiveWrite(write *liveWrite, actor model.Actor) {
 	if write.credits == nil {
 		write.credits = make(map[string]model.Actor)

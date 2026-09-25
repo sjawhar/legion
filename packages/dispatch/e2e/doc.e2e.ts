@@ -8,7 +8,6 @@ import {
   createProject,
   editArtifact,
   getArtifact,
-  getArtifactText,
   getArtifactVersion,
 } from "./api";
 import {
@@ -17,6 +16,7 @@ import {
   documentEditor,
   documentTransport,
   openDocumentSockets,
+  openSpecAndAwaitHeadingIds,
   selectEditorText,
   typeAtEnd,
 } from "./editor";
@@ -127,15 +127,9 @@ test("reading a document gives its headings ids without versioning it or crediti
     session
   );
   const artifactId = issue.primary_artifact_id;
-  // The editor gives each heading an id from its text as it opens the document, which changes
-  // the document's full-state token but none of its text. Waiting for the token is waiting for
-  // that update to reach the room.
   const readAs = async (context: BrowserContext, text: string) => {
-    const before = (await getArtifactText(artifactId)).token;
     const page = await context.newPage();
-    await page.goto(`/issues/${issue.key}/spec`);
-    await expect(documentEditor(page)).toContainText(text);
-    await expect.poll(async () => (await getArtifactText(artifactId)).token).not.toBe(before);
+    await openSpecAndAwaitHeadingIds(page, issue.key, artifactId, text);
     await page.close();
   };
   // A named version is written at once and names every pending author, so it is the next

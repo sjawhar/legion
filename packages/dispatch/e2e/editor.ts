@@ -1,7 +1,31 @@
 import { expect, type Locator, type Page, type WebSocketRoute } from "@playwright/test";
 
+import { getArtifactText } from "./api";
+
 export function documentEditor(page: Page): Locator {
   return page.getByRole("textbox", { name: "Document editor" });
+}
+
+/** Opens an issue's spec in page and waits for the update its editor makes on its own as it opens
+ * the document: an id for each heading an agent wrote, which changes the document's full-state
+ * token and none of its text. The spec needs a heading. Returns the token after that update. */
+export async function openSpecAndAwaitHeadingIds(
+  page: Page,
+  issueKey: string,
+  artifactId: string,
+  text: string
+): Promise<string | undefined> {
+  const before = (await getArtifactText(artifactId)).token;
+  await page.goto(`/issues/${issueKey}/spec`);
+  await expect(documentEditor(page)).toContainText(text);
+  let after = before;
+  await expect
+    .poll(async () => {
+      after = (await getArtifactText(artifactId)).token;
+      return after;
+    })
+    .not.toBe(before);
+  return after;
 }
 
 export function actionBar(page: Page): Locator {

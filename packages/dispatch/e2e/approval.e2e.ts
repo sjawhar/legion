@@ -11,6 +11,7 @@ import {
   getIssueEvents,
   requestApproval,
 } from "./api";
+import { documentEditor, openSpecAndAwaitHeadingIds } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -117,11 +118,14 @@ test("a spec's approval is a human review pinned to its version: requested by th
   }
 });
 
-test("reading an approved spec leaves its approval current", async ({ browser }) => {
+test("reading an approved spec and moving the caret through its numbered list leaves its approval current", async ({
+  browser,
+}) => {
   await createProject({ key: "GATE", name: "Gate" });
+  // Numbered outcomes, as the default spec template asks for under Acceptance.
   const issue = await createIssue({
     project: "GATE",
-    spec: "## Plan\n\nShip the migration.\n",
+    spec: "## Acceptance\n\n1. The migration ships.\n2. The error rate stays flat.\n",
     title: "Design gate",
   });
   const artifactID = issue.primary_artifact_id;
@@ -138,18 +142,23 @@ test("reading an approved spec leaves its approval current", async ({ browser })
       .poll(async () => (await getArtifact(artifactID, { login: "alice" })).approval?.state)
       .toBe("approved");
 
-    // Bob reads the approved spec. His editor gives its heading an id from its text, which
-    // changes the document's full-state token and none of its text: waiting for the token is
-    // waiting for that update to reach the room.
-    const before = (await getArtifactText(artifactID)).token;
+    // Bob reads the approved spec, and his editor gives its heading an id. Then he clicks into
+    // the list and moves the caret, typing nothing: the first such move has his editor label
+    // each numbered item, which changes the token again and none of the text.
     const reader = await bob.newPage();
-    await reader.goto(`/issues/${issue.key}/spec`);
-    await expect(reader.getByRole("textbox", { name: "Document editor" })).toContainText(
-      "Ship the migration."
+    const opened = await openSpecAndAwaitHeadingIds(
+      reader,
+      issue.key,
+      artifactID,
+      "The error rate stays flat."
     );
-    await expect.poll(async () => (await getArtifactText(artifactID)).token).not.toBe(before);
-    // Settlement runs two seconds after the room's last update, and a version it wrote would
-    // leave the approval pinned to an older one.
+    await documentEditor(reader).getByText("The migration ships.").click();
+    for (const key of ["ArrowDown", "ArrowUp", "End", "Home"]) {
+      await reader.keyboard.press(key);
+    }
+    await expect.poll(async () => (await getArtifactText(artifactID)).token).not.toBe(opened);
+    // Settlement runs two seconds after the room's last update, and a version it wrote for
+    // either update would leave the approval pinned to an older one.
     await reader.waitForTimeout(3000);
     const artifact = await getArtifact(artifactID, { login: "alice" });
     expect(artifact.versions).toHaveLength(1);

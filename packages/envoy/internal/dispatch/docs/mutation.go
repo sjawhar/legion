@@ -35,7 +35,7 @@ type versionWrite struct {
 
 // applyLive runs mutate against artifactID's live document and credits actor with the content it
 // changes. Outside a transaction it writes the room directly, and the room's update observer
-// credits actor with it (recordConnectedActors). Joined to a transaction it writes that
+// credits actor with it (creditContentChange). Joined to a transaction it writes that
 // transaction's fork of the room (see liveWrite), appends the update inside the transaction,
 // and leaves the room and the credit to its ledger's Commit, so a transaction that does not
 // commit never reaches the room, a browser or a version's authors.
@@ -119,10 +119,14 @@ func (s *Service) applyJoined(ctx context.Context, tx pgx.Tx, artifactID string,
 	if err != nil {
 		return err
 	}
-	// The same measure the room's update observer classifies a live update by: a write that only
-	// adds or moves anchor marks, projects a mark record, or re-ids a heading leaves the content -
-	// and so the settled version - alone.
-	contentChanged := !pmdoc.VersionedContent(before).Equal(pmdoc.VersionedContent(tree))
+	// The measure the room's update observer classifies a live update by (updateChangesMarkdown):
+	// a write that leaves the rendered markdown alone - an anchor mark, a mark record's projection,
+	// an attribute no rendering carries - changes nothing a version stores.
+	beforeMarkdown, err := renderTree(before)
+	if err != nil {
+		return err
+	}
+	contentChanged := beforeMarkdown != markdown
 	if _, err := s.persistence.AppendUpdateTx(ctx, tx, artifactID, update, contentChanged); err != nil {
 		return fmt.Errorf("append transactional live document update: %w", err)
 	}

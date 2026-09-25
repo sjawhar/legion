@@ -317,10 +317,15 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		slog.Error("dispatch: loaded document outside Proof schema", "room", room, "error", err)
 		return err
 	}
+	markdown, err := renderTree(tree)
+	if err != nil {
+		slog.Error("dispatch: render loaded document", "room", room, "error", err)
+		return err
+	}
 	state := s.room(room)
 	state.mu.Lock()
 	state.closed = !open
-	state.contentTree = pmdoc.VersionedContent(tree)
+	state.contentMarkdown = &markdown
 	state.mu.Unlock()
 	doc.OnUpdate(func(update []byte, origin any) {
 		if _, identityRepair := origin.(*identityClosureOrigin); identityRepair {
@@ -329,31 +334,39 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		contentChanged := s.updateChangesMarkdown(room, doc)
 		s.recordUpdateClass(room, update, contentChanged, true)
 		if contentChanged {
-			s.recordConnectedActors(room, origin)
+			s.creditContentChange(room, origin)
 		}
 		s.scheduleSettle(room)
 	})
 	return nil
 }
 
+// updateChangesMarkdown reports whether the room's latest update changed its rendered markdown,
+// the only document content a version stores. An update that changes only what no rendering
+// carries - an anchor mark, or a heading id or list item label the browser editor derives - is no
+// content change.
 func (s *Service) updateChangesMarkdown(room string, doc *crdt.Doc) bool {
 	tree, err := treeOf(doc)
 	if err != nil {
 		slog.Error("dispatch: read updated document", "room", room, "error", err)
 		return true
 	}
-	content := pmdoc.VersionedContent(tree)
+	markdown, err := renderTree(tree)
+	if err != nil {
+		slog.Error("dispatch: render updated document", "room", room, "error", err)
+		return true
+	}
 	state := s.room(room)
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if state.contentTree != nil && state.contentTree.Equal(content) {
+	if state.contentMarkdown != nil && *state.contentMarkdown == markdown {
 		return false
 	}
-	state.contentTree = content
+	state.contentMarkdown = &markdown
 	return true
 }
 
-// recordConnectedActors credits an observed content change to its authors. A service mutation
+// creditContentChange credits an observed content change to its authors. A service mutation
 // (origin registered by serviceTransact) is its actor's alone, who joins `pending` and
 // becomes `lastActor`; a browser that was only connected while it happened is not credited. A
 // committed transaction's live write, which Ledger.Commit applies, was credited when the
@@ -362,7 +375,7 @@ func (s *Service) updateChangesMarkdown(room string, doc *crdt.Doc) bool {
 // connection sent it, so every connected peer joins `pending`: when exactly one is connected it is
 // the latest edit source and replaces `lastActor`, and otherwise the edit cannot be pinned on a
 // single peer and no older actor may stand in for it.
-func (s *Service) recordConnectedActors(room string, origin any) {
+func (s *Service) creditContentChange(room string, origin any) {
 	if _, published := origin.(*liveWriteOrigin); published {
 		return
 	}
@@ -395,7 +408,7 @@ func (s *Service) recordConnectedActors(room string, origin any) {
 }
 
 // addConnection registers a browser connected to room. It is credited only with browser edits
-// observed while it is connected (recordConnectedActors), never for connecting or for an agent's
+// observed while it is connected (creditContentChange), never for connecting or for an agent's
 // edit.
 func (s *Service) addConnection(room string, id uint64, actor model.Actor) {
 	state := s.room(room)
