@@ -271,7 +271,7 @@ func (d *engagingDocs) engage() {
 	}
 }
 
-func (d *engagingDocs) ApplyOps(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor, precondition *model.EditPrecondition) (int, error) {
+func (d *engagingDocs) ApplyOps(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor, precondition *model.EditPrecondition) (docs.EditOutcome, error) {
 	d.engage()
 	return d.API.ApplyOps(ctx, artifactID, ops, actor, precondition)
 }

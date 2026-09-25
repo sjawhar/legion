@@ -403,6 +403,6 @@ func TestAWriteWhoseRoomReloadsCannotEditWhatTheReloadDropped(t *testing.T) {
 	service, artifactID, _, joinedCtx, _ := forkBeforeRoomReload(t)
 	applied, err := service.ApplyOps(joinedCtx, artifactID, []model.EditOp{{Op: "replace", Find: "typed", With: "TYPED"}}, model.Actor{Kind: "user", ID: "alice"}, nil)
 	if !errors.Is(err, pmdoc.ErrTargetNotFound) {
-		t.Fatalf("edit of the dropped paragraph = %d applied, %v; want %v", applied, err, pmdoc.ErrTargetNotFound)
+		t.Fatalf("edit of the dropped paragraph = %#v, %v; want %v", applied, err, pmdoc.ErrTargetNotFound)
 	}
 }

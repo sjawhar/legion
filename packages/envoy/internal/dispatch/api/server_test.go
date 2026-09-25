@@ -292,8 +292,8 @@ func TestCreateProjectIssueAndReadPrimaryDocument(t *testing.T) {
 		Markdown string `json:"markdown"`
 		Version  *int   `json:"version"`
 	}](t, textResponse)
-	if text.Markdown != "# Hello\n" || text.Version != nil {
-		t.Fatalf("primary document: got %#v, want markdown # Hello and null version", text)
+	if text.Markdown != "# Hello\n" || text.Version == nil || *text.Version != 1 {
+		t.Fatalf("primary document: got %#v, want markdown # Hello at version 1", text)
 	}
 }
 

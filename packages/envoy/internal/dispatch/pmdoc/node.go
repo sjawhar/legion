@@ -24,7 +24,7 @@ type Node struct {
 	Children []*Node
 }
 
-var ErrSchema = errors.New("pmdoc: outside Proof schema")
+var ErrSchema = errors.New("outside Proof schema")
 
 var nodeTypes = map[string]bool{
 	"doc": true, "paragraph": true, "heading": true, "blockquote": true, "bullet_list": true,

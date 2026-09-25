@@ -2783,6 +2783,49 @@ describe("executeDispatchTool", () => {
     });
   });
 
+  test("says nothing changed and names the operations that changed nothing", async () => {
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const path = new URL(String(url)).pathname;
+      if (path === "/api/v1/issues/DSP-42") {
+        return response({
+          key: "DSP-42",
+          primary_artifact_id: "artifact-42",
+          artifacts: [{ id: "artifact-42", slug: "spec", name: "spec.md", primary: true }],
+        });
+      }
+      if (path === "/api/v1/artifacts/artifact-42/edits") {
+        return response({ applied: 2, version: null, changed: false, unchanged_ops: [0, 1] });
+      }
+      throw new Error(`unexpected request: ${path}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_doc_edit",
+      args: {
+        issue: "DSP-42",
+        artifact: "spec",
+        ops: [
+          { op: "replace", find: "draft", with: "draft" },
+          { op: "replace", find: "final", with: "final" },
+        ],
+        summary: "Record final wording",
+      },
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-42",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).toBe(
+      "Applied 2 ops; nothing changed (no new version); operations 0, 1 changed nothing" +
+        " (not subscribed to DSP-42; envoy_subscribe notifications.dispatch.issue.DSP-42.> for every event on it)"
+    );
+    expect(result.details).toEqual({ issue: "DSP-42", applied: 2, changed: false });
+  });
+
   test("names the issue's document slugs and display names when the requested one is missing", async () => {
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
       const path = new URL(String(url)).pathname;

@@ -1512,6 +1512,11 @@ export interface ArtifactUploadResponse {
 export interface EditArtifactResponse {
   readonly applied: number;
   readonly version: Version | null;
+  /** False when the batch left the document's canonical markdown exactly as it was, in which
+   *  case no version is minted, named or not. Absent from a Dispatch server predating the check. */
+  readonly changed?: boolean;
+  /** Zero-based index of each operation that left the document as it found it. */
+  readonly unchanged_ops?: number[];
   readonly advice?: WriteAdvice;
 }
 

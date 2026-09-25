@@ -8,7 +8,7 @@ import (
 )
 
 // ErrMoveInsideItself reports a move whose anchor lies inside the moved block.
-var ErrMoveInsideItself = errors.New("pmdoc: move anchor lies inside the moved block")
+var ErrMoveInsideItself = errors.New("move anchor lies inside the moved block")
 
 // findBlock returns the path and range of the block carrying blockID.
 func findBlock(doc *Node, blockID string) ([]int, Range, bool) {
@@ -166,9 +166,9 @@ func (e *TableIndexError) Error() string {
 		}
 	}
 	if e.Problem != "" {
-		return fmt.Sprintf("pmdoc: %s; %s", e.Problem, dimensions)
+		return fmt.Sprintf("%s; %s", e.Problem, dimensions)
 	}
-	return fmt.Sprintf("pmdoc: %s index %s is out of range; %s", e.Axis, e.Index, dimensions)
+	return fmt.Sprintf("%s index %s is out of range; %s", e.Axis, e.Index, dimensions)
 }
 
 func tableIndexError(table *Node, axis, index, problem string) error {
@@ -371,7 +371,7 @@ func removeAtPath(root *Node, path []int) {
 
 // ErrListItemContent reports a whole-text delete of a list item that holds
 // content besides its text and one nested list.
-var ErrListItemContent = errors.New("pmdoc: list item has content besides its text")
+var ErrListItemContent = errors.New("list item has content besides its text")
 
 // DeleteTextblock applies a delete of r when r covers a textblock's entire
 // text: the textblock goes, and with it the list, list item, or blockquote it

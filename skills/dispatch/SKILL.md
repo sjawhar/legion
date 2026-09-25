@@ -507,8 +507,8 @@ omitted `artifact` reads the issue specification; a project needs `artifact`; an
 ```ts
 dispatch_doc_edit({ issue?, project?, artifact, ops, precondition?, summary? })
 ```
-It returns issue or project-document owner details plus `applied` and optional `version`. `ops` is an array of this
-exact `EditOp` shape:
+It returns issue or project-document owner details plus `applied`, optional `version`, `changed`, and
+`unchanged_ops`. `ops` is an array of this exact `EditOp` shape:
 
 ```ts
 type EditOp = {
@@ -545,11 +545,27 @@ canonicalizes short ragged rows by padding missing cells, so column deletion pre
 `GET /api/v1/artifacts/<artifact UUID>/blocks` reports a table's own references plus its descendant cell anchors. A row or column
 deletion that would remove an open ask or unresolved comment anchor is `INVALID_OP` on `index`, naming the axis and anchor ids;
 answered asks and resolved comments are history and do not block it. A `find` or quote anchor tolerates inline Markdown
-(`**bold**`, `` `code` ``) and a leading `# ` selects a heading by its text; a miss names the three nearest blocks so the next quote
-lands. `replace` is inline: `with` is the new text of the matched span inside its block, so a leading list or heading
-marker (`4. Design`, `# Title`) stays literal text and never turns the block into a list or heading; `with` that forms more than one
-paragraph is rejected (`INVALID_OP` on `with`) — delete the block and insert new blocks instead. Use zero-based `occurrence` for a
+(`**bold**`, `` `code` ``) and a leading `# ` selects a heading by its text; a miss names the quote and the three nearest blocks so
+the next quote lands, and a `find` cut before a closing `**` or `` ` `` is refused as an unbalanced inline mark rather than reported
+as a miss. A `heading:` anchor matches the whole heading text exactly — a prefix of a longer heading is a miss, naming the anchor and
+the nearest headings. `replace` is inline: `with` is the new text of the matched span inside its block, so a marker of a *different*
+kind from the block's own (`4. Design` written into a heading, `# Title` into a paragraph) stays literal text and never turns the
+block into a list or heading. A `with` that opens with a marker of the *same* kind as the matched block's own would write it twice and
+is rejected (`INVALID_OP` on `with`) — including prose that merely looks like a marker (`1999. was a year` into an ordered item),
+which is written as text with a backslash escape (`1999\. was a year`) — omit the marker to replace the block's text, or use `insert`
+plus `delete` to change the block's kind, level or number. The one exception is a heading rename whose `find` carried a heading
+marker: `replace(find="## Old", with="## New")` gives `## New`. A different level in `with` applies only when `find` named the
+heading's actual level — `find="## Old"`, `with="### New"` retitles and makes it an h3 — because `# ` is the level-blind selector,
+so `find="# Old"` renames the text and keeps whatever level it selected. `with` that forms more than one
+paragraph is rejected (`INVALID_OP` on `with`) — delete the block and insert new blocks instead; so is any non-empty `with` that
+renders to no text, which a line indented four spaces or a tab does (markdown reads that as a code block), as does whitespace
+alone. An empty `with` is the one that deletes the matched text on purpose. Use zero-based `occurrence` for a
 repeated target; re-read a missing or ambiguous target before retrying. Pass `summary` to name the version when recording a decision.
+
+A batch that leaves the document's semantic identity unchanged — including its inline anchor marks, so an edit that only orphans a
+comment or ask anchor still mints its version — mints no version, named or not: the response carries
+`changed: false` with `unchanged_ops` naming each operation that did nothing, and the tool result says nothing changed. A `summary`
+does not force a version for such a batch; `POST /api/v1/artifacts/<id>/versions`, which names the current state on purpose, still does.
 
 A `delete` whose `find` is a block's entire text removes the block itself — the bullet, paragraph, or heading, not just its words — and
 a list emptied of every item disappears with it; a partial match keeps the block with its remaining text. Deleting the text of a bullet

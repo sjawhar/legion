@@ -6,10 +6,10 @@ import (
 )
 
 // ErrUnknownBlockType reports a retype to a type the block schema does not declare.
-var ErrUnknownBlockType = errors.New("pmdoc: unknown typed block")
+var ErrUnknownBlockType = errors.New("unknown typed block")
 
 // ErrBlockNotRetypable reports a retype of a block that is neither a paragraph nor a typed block.
-var ErrBlockNotRetypable = errors.New("pmdoc: block cannot be retyped")
+var ErrBlockNotRetypable = errors.New("block cannot be retyped")
 
 // RetypeBlock turns the block carrying blockID into a typed block in place. A
 // paragraph becomes the new block's body and receives a fresh identity from the

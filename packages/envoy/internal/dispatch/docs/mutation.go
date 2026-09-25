@@ -647,25 +647,25 @@ func (s *Service) warmLiveDocument(ctx context.Context, artifactID string) error
 // transaction. A conditional edit checks its precondition, resolves the batch,
 // and writes the plan inside that transaction, so no live writer can enter the
 // check-to-apply window.
-func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor, precondition *model.EditPrecondition) (int, error) {
+func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor, precondition *model.EditPrecondition) (EditOutcome, error) {
 	if precondition == nil {
 		return s.applyOpsUnconditional(ctx, artifactID, ops, actor)
 	}
 	tx, joined := txFromContext(ctx)
 	if !joined {
-		return 0, &ErrInvalidPrecondition{Reason: "requires an enclosing transaction"}
+		return EditOutcome{}, &ErrInvalidPrecondition{Reason: "requires an enclosing transaction"}
 	}
 	// The live document's locks, in their order (see liveWrite): its owner row and, once the
 	// room has recovered from any failure, its writer slot; then, with the room loaded, its
 	// advisory lock, held from before the precondition is read.
 	if _, err := s.joinLiveWrite(ctx, ledgerFrom(ctx), artifactID); err != nil {
-		return 0, err
+		return EditOutcome{}, err
 	}
 	if err := s.warmLiveDocument(ctx, artifactID); err != nil {
-		return 0, err
+		return EditOutcome{}, err
 	}
 	if err := lockDocumentRoom(ctx, tx, artifactID); err != nil {
-		return 0, err
+		return EditOutcome{}, err
 	}
 	if len(ops) == 0 {
 		var checkErr error
@@ -678,25 +678,26 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 			checkErr = checkEditPrecondition(tree, *precondition)
 		})
 		if checkErr != nil {
-			return 0, checkErr
+			return EditOutcome{}, checkErr
 		}
 		if err != nil {
-			return 0, fmt.Errorf("check empty document edit precondition: %w", err)
+			return EditOutcome{}, fmt.Errorf("check empty document edit precondition: %w", err)
 		}
-		return 0, nil
+		return EditOutcome{}, nil
 	}
 	var (
 		err       error
+		outcome   EditOutcome
 		snapshots []tableAnchorSnapshot
 	)
 	if hasTableAnchorMutation(ops) {
 		snapshots, err = s.prevalidateLiveOperations(ctx, artifactID, ops)
 		if err != nil {
-			return 0, fmt.Errorf("prevalidate live document operations: %w", err)
+			return EditOutcome{}, fmt.Errorf("prevalidate live document operations: %w", err)
 		}
 	}
 	if err := lockTableAnchorRows(ctx, tx, artifactID, snapshots); err != nil {
-		return 0, err
+		return EditOutcome{}, err
 	}
 	err = s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
@@ -721,7 +722,7 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 			// identified; a browser-authored block the closer has not yet stamped gets its id
 			// here, and the same ids persist through the update below.
 			pmdoc.EnsureBlockIDs(tree)
-			next, err := applyOperations(tree, ops)
+			batch, err := applyOperations(tree, ops)
 			if err != nil {
 				mutationErr = err
 				return
@@ -730,9 +731,13 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 				mutationErr = err
 				return
 			}
+			next := batch.tree
 			pmdoc.EnsureBlockIDs(next)
 			if err := validateAskBlocks(next); err != nil {
 				mutationErr = &ErrInvalidAskBlock{Reason: err}
+				return
+			}
+			if outcome, mutationErr = batch.outcome(len(ops)); mutationErr != nil {
 				return
 			}
 			mutationErr = pmdoc.Update(transaction, fragment, next)
@@ -743,21 +748,26 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 		return nil
 	})
 	if err != nil {
-		var quoteNotFound *ErrQuoteNotFound
-		if errors.As(err, &quoteNotFound) {
-			return 0, err
+		// A batch that resolved and wrote nothing is not a failure: it is the verdict the route
+		// mints no version for.
+		if errors.Is(err, websocket.ErrNoChanges) {
+			return outcome, nil
 		}
-		return 0, fmt.Errorf("apply live document operations: %w", err)
+		if isEditRefusal(err) {
+			return EditOutcome{}, err
+		}
+		return EditOutcome{}, fmt.Errorf("apply live document operations: %w", err)
 	}
-	return len(ops), nil
+	return outcome, nil
 }
 
 // applyOpsUnconditional preserves the precondition-free edit path's existing
 // validation and live-mutation behavior.
-func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor) (int, error) {
+func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor) (EditOutcome, error) {
 	if len(ops) == 0 {
-		return 0, nil
+		return EditOutcome{}, nil
 	}
+	var outcome EditOutcome
 	err := s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
 		tree, err := treeOf(doc)
@@ -765,13 +775,17 @@ func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, 
 			return err
 		}
 		pmdoc.EnsureBlockIDs(tree)
-		next, err := s.applyOperations(ctx, artifactID, tree, ops)
+		batch, err := s.applyOperations(ctx, artifactID, tree, ops)
 		if err != nil {
 			return err
 		}
+		next := batch.tree
 		pmdoc.EnsureBlockIDs(next)
 		if err := validateAskBlocks(next); err != nil {
 			return &ErrInvalidAskBlock{Reason: err}
+		}
+		if outcome, err = batch.outcome(len(ops)); err != nil {
+			return err
 		}
 		var updateErr error
 		transact(func(transaction *crdt.Transaction) {
@@ -783,13 +797,15 @@ func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, 
 		return nil
 	})
 	if err != nil {
-		var quoteNotFound *ErrQuoteNotFound
-		if errors.As(err, &quoteNotFound) {
-			return 0, err
+		if errors.Is(err, websocket.ErrNoChanges) {
+			return outcome, nil
 		}
-		return 0, fmt.Errorf("apply live document operations: %w", err)
+		if isEditRefusal(err) {
+			return EditOutcome{}, err
+		}
+		return EditOutcome{}, fmt.Errorf("apply live document operations: %w", err)
 	}
-	return len(ops), nil
+	return outcome, nil
 }
 
 // SetBlockAttributes applies server-owned typed-block state through the

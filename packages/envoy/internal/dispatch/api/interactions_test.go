@@ -1867,6 +1867,148 @@ func TestEditArtifactWithoutSummaryReturnsUnnamedVersion(t *testing.T) {
 	}
 }
 
+// AGENTC-193's spec grew versions 13 through 19 from edits that left it byte-identical, because
+// the batch's `summary` reached NamedVersion unconditionally. A batch that changes nothing mints
+// nothing and says so, with or without a summary.
+func TestEditArtifactThatChangesNothingMintsNoVersionAndSaysSo(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		request map[string]any
+	}{
+		{name: "with a summary", request: map[string]any{
+			"ops":     []map[string]string{{"op": "replace", "find": "before", "with": "before"}},
+			"summary": "Record the decision",
+			"actor":   sessionActor(),
+		}},
+		{name: "without a summary", request: map[string]any{
+			"ops":   []map[string]string{{"op": "replace", "find": "before", "with": "before"}},
+			"actor": sessionActor(),
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			handler := newTestHandler(t)
+			issue := createInteractionIssue(t, handler, "TEST", "Unchanged edit", "before")
+			edited := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", test.request)
+			if edited.Code != http.StatusOK {
+				t.Fatalf("edit document: status=%d body=%s", edited.Code, edited.Body.String())
+			}
+			result := decodeBody[struct {
+				Applied      int            `json:"applied"`
+				Version      *model.Version `json:"version"`
+				Changed      bool           `json:"changed"`
+				UnchangedOps []int          `json:"unchanged_ops"`
+			}](t, edited)
+			if result.Applied != 1 || result.Version != nil || result.Changed {
+				t.Fatalf("unchanged edit = %#v, want one applied operation, no version, changed=false", result)
+			}
+			if len(result.UnchangedOps) != 1 || result.UnchangedOps[0] != 0 {
+				t.Fatalf("unchanged operations = %v, want [0]", result.UnchangedOps)
+			}
+			read := sessionRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID, nil)
+			artifact := decodeBody[model.Artifact](t, read)
+			if len(artifact.Versions) != 1 {
+				t.Fatalf("versions after an unchanged edit = %d, want the creating version only", len(artifact.Versions))
+			}
+		})
+	}
+}
+
+func TestArtifactTextReportsTheLatestVersion(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Text version", "before")
+	readVersion := func() *int {
+		t.Helper()
+		response := sessionRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/text", nil)
+		if response.Code != http.StatusOK {
+			t.Fatalf("read text: status=%d body=%s", response.Code, response.Body.String())
+		}
+		return decodeBody[struct {
+			Version *int `json:"version"`
+		}](t, response).Version
+	}
+	if got := readVersion(); got == nil || *got != 1 {
+		t.Fatalf("text version after creation = %v, want 1", got)
+	}
+	if edited := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops":   []map[string]string{{"op": "replace", "find": "before", "with": "after"}},
+		"actor": sessionActor(),
+	}); edited.Code != http.StatusOK {
+		t.Fatalf("edit document: status=%d body=%s", edited.Code, edited.Body.String())
+	}
+	if got := readVersion(); got == nil || *got != 2 {
+		t.Fatalf("text version after an edit = %v, want 2", got)
+	}
+}
+
+// The route renders INVALID_OP and TARGET_AMBIGUOUS from the typed error, not the wrapped chain,
+// so a refusal inside a multi-operation batch has to reach the response still naming its operation.
+func TestDocumentEditRefusalsReachTheResponseNamingTheirOperation(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Refusal shapes", "Body.\n\n- Retracted\n\nShared line.\n\nShared line.\n")
+	for _, test := range []struct {
+		name   string
+		ops    []map[string]any
+		status int
+		code   string
+		wants  []string
+	}{
+		{
+			name: "a marker refusal in operation 1",
+			ops: []map[string]any{
+				{"op": "replace", "find": "Body.", "with": "Body!"},
+				{"op": "replace", "find": "Retracted", "with": "- Retracted later"},
+			},
+			status: http.StatusBadRequest,
+			code:   "INVALID_OP",
+			wants:  []string{"operation 1", `"- "`, "omit the marker"},
+		},
+		{
+			name: "an ambiguous quote in operation 1",
+			ops: []map[string]any{
+				{"op": "replace", "find": "Body.", "with": "Body!"},
+				{"op": "replace", "find": "Shared line.", "with": "Changed."},
+			},
+			status: http.StatusConflict,
+			code:   "TARGET_AMBIGUOUS",
+			wants:  []string{"operation 1", `"Shared line."`, "occurrence"},
+		},
+		{
+			name: "a quote spanning two blocks in operation 0",
+			ops: []map[string]any{
+				{"op": "replace", "find": "Body. Retracted", "with": "Changed."},
+			},
+			status: http.StatusBadRequest,
+			code:   "TARGET_SPANS_BLOCKS",
+			wants:  []string{"operation 0", `"Body. Retracted"`},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+				"ops": test.ops, "actor": sessionActor(),
+			})
+			body := decodeBody[struct {
+				Code       string            `json:"code"`
+				Error      string            `json:"error"`
+				Candidates []json.RawMessage `json:"candidates"`
+			}](t, response)
+			if response.Code != test.status || body.Code != test.code {
+				t.Fatalf("refusal: status=%d code=%q error=%q", response.Code, body.Code, body.Error)
+			}
+			for _, want := range test.wants {
+				if !strings.Contains(body.Error, want) {
+					t.Fatalf("refusal = %q, want it to name %q", body.Error, want)
+				}
+			}
+			if strings.Contains(body.Error, "pmdoc") {
+				t.Fatalf("refusal = %q, want no internal package name", body.Error)
+			}
+			if test.code == "TARGET_AMBIGUOUS" && len(body.Candidates) != 2 {
+				t.Fatalf("ambiguous candidates = %d, want the two matches", len(body.Candidates))
+			}
+		})
+	}
+}
+
 func TestDoneIssueAllowsOnlyAStatusReopen(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Strict reopen", "before")

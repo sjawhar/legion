@@ -37,7 +37,7 @@ func validateSplice(doc *Node, r Range, with *Node) error {
 	return with.Validate()
 }
 
-var ErrTableWidth = errors.New("pmdoc: table row exceeds table width")
+var ErrTableWidth = errors.New("table row exceeds table width")
 
 // BlockBoundary returns the document-level boundary before or after the block
 // containing target.

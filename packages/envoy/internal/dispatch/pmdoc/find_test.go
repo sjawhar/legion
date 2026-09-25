@@ -136,10 +136,6 @@ func TestFindQuoteMissNamesThreeNearestBlocksInOrder(t *testing.T) {
 	if !reflect.DeepEqual(missing.Nearest, want) {
 		t.Fatalf("nearest = %q, want %q", missing.Nearest, want)
 	}
-	const wantText = `pmdoc: target not found; nearest blocks: "Closest rendered block." | "Closest but later." | "Close enough."`
-	if err.Error() != wantText {
-		t.Fatalf("FindQuote miss = %q, want %q", err, wantText)
-	}
 }
 
 func TestFindQuoteMissWithOneBlockNamesOne(t *testing.T) {
@@ -148,9 +144,12 @@ func TestFindQuoteMissWithOneBlockNamesOne(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = FindQuote(doc, "missing", nil, nil)
-	const want = `pmdoc: target not found; nearest blocks: "Only block."`
-	if err == nil || err.Error() != want {
-		t.Fatalf("FindQuote miss = %q, want %q", err, want)
+	var missing *ErrQuoteNotFound
+	if !errors.As(err, &missing) {
+		t.Fatalf("FindQuote miss = %v, want *ErrQuoteNotFound", err)
+	}
+	if want := []string{"Only block."}; !reflect.DeepEqual(missing.Nearest, want) {
+		t.Fatalf("nearest = %q, want %q", missing.Nearest, want)
 	}
 }
 

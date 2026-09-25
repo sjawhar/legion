@@ -25,7 +25,7 @@ type API interface {
 	SnapshotVersion(ctx context.Context, tx pgx.Tx, artifactID string, actor model.Actor) (VersionResult, error)
 	SetIssueClosed(ctx context.Context, issueKey string, closed bool)
 	AcquireConditionalEdit(ctx context.Context, artifactID string) (func(), error)
-	ApplyOps(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor, precondition *model.EditPrecondition) (int, error)
+	ApplyOps(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor, precondition *model.EditPrecondition) (EditOutcome, error)
 	SetBlockAttributes(ctx context.Context, artifactID, blockID string, attributes map[string]any, actor model.Actor) error
 	ScheduleSettlement(artifactID string)
 	MarkQuote(ctx context.Context, artifactID string, mark MarkSpec, quote string, occurrence *int) (Anchored, error)
@@ -49,4 +49,16 @@ type VersionResult struct {
 	Version model.Version
 	Wrote   bool
 	Changes model.ReferenceChanges
+}
+
+// EditOutcome is what one batch of document edit operations did. Changed compares the document's
+// semantic identity — the nodeToken over the whole tree, inline marks included, which is what a
+// precondition compares — before and after the whole batch, not against the newest version, whose
+// markdown differs while unsettled browser text is pending. A batch that leaves the document as
+// it was mints no version, named or not. Unchanged indexes, in order, each operation that left
+// the tree exactly as it found it.
+type EditOutcome struct {
+	Applied   int
+	Changed   bool
+	Unchanged []int
 }

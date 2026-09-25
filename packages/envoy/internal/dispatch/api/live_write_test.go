@@ -887,11 +887,11 @@ type postApplyFailureDocs struct {
 	projectMarkPasses  int
 }
 
-func (d *postApplyFailureDocs) ApplyOps(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor, precondition *model.EditPrecondition) (int, error) {
+func (d *postApplyFailureDocs) ApplyOps(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor, precondition *model.EditPrecondition) (docs.EditOutcome, error) {
 	d.waitBeforeApply()
 	applied, err := d.API.ApplyOps(ctx, artifactID, ops, actor, precondition)
 	if err != nil {
-		return 0, err
+		return docs.EditOutcome{}, err
 	}
 	close(d.applied)
 	<-d.release

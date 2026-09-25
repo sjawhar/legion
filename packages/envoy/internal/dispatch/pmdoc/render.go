@@ -430,9 +430,15 @@ func (r *renderer) writeInlineText(node *Node, atLineStart *bool, escapePipes, e
 
 	value := node.Text
 	segmentStart := 0
+	// Where the current line begins inside this node, or -1 when the line began in an earlier
+	// one: a block marker is only a marker at the start of its own line.
+	lineStart := -1
+	if *atLineStart {
+		lineStart = 0
+	}
 	for byteOffset, char := range value {
 		width := utf8.RuneLen(char)
-		if needsInlineEscape(value, byteOffset, char, *atLineStart, escapePipes, escapeURLs) {
+		if needsInlineEscape(value, byteOffset, char, lineStart, escapePipes, escapeURLs) {
 			r.writeText(value[segmentStart:byteOffset])
 			if char == '&' {
 				r.writeText("&")
@@ -443,17 +449,23 @@ func (r *renderer) writeInlineText(node *Node, atLineStart *bool, escapePipes, e
 			}
 			segmentStart = byteOffset + width
 		}
+		if char == '\n' {
+			lineStart = byteOffset + width
+		}
 		*atLineStart = char == '\n'
 	}
 	r.writeText(value[segmentStart:])
 }
 
-func needsInlineEscape(value string, offset int, char rune, atLineStart, escapePipes, escapeURLs bool) bool {
+func needsInlineEscape(value string, offset int, char rune, lineStart int, escapePipes, escapeURLs bool) bool {
 	switch char {
 	case '\\':
 		return offset+1 < len(value) && isASCIIPunctuation(value[offset+1])
-	case '*', '_':
-		return emphasisDelimiter(value, offset, byte(char))
+	case '*':
+		return (blockStart(value, lineStart, offset) && markerTerminator(value, offset+1)) ||
+			emphasisDelimiter(value, offset, '*')
+	case '_':
+		return emphasisDelimiter(value, offset, '_')
 	case '`':
 		return true
 	case '[':
@@ -471,16 +483,55 @@ func needsInlineEscape(value string, offset int, char rune, atLineStart, escapeP
 	case '|':
 		return escapePipes
 	case '#':
-		return atLineStart && offset+1 < len(value) && value[offset+1] == ' '
+		return blockStart(value, lineStart, offset) && atxHeadingRun(value, offset)
 	case '>':
-		return atLineStart
+		return blockStart(value, lineStart, offset)
 	case '-', '+':
-		return atLineStart && offset+1 < len(value) && value[offset+1] == ' '
+		return blockStart(value, lineStart, offset) && markerTerminator(value, offset+1)
 	case '.', ')':
-		return orderedListMarkerPunctuation(value, offset)
+		return orderedListMarkerPunctuation(value, offset, lineStart)
 	default:
 		return false
 	}
+}
+
+// blockStart reports whether offset opens its own line: everything back to lineStart is
+// indentation the parser skips, up to three spaces or a run of tabs. A marker one space in is
+// still the marker — AGENTC-193's own payload was indented — and a line that began in an earlier
+// text node (lineStart < 0) is never a block start here.
+func blockStart(value string, lineStart, offset int) bool {
+	if lineStart < 0 || lineStart > offset {
+		return false
+	}
+	spaces := 0
+	for index := lineStart; index < offset; index++ {
+		switch value[index] {
+		case ' ':
+			spaces++
+		case '\t':
+		default:
+			return false
+		}
+	}
+	return spaces <= 3
+}
+
+// markerTerminator reports whether offset ends a list marker: the parser opens an item on a
+// marker followed by a space, a tab, or the end of the line.
+func markerTerminator(value string, offset int) bool {
+	return offset >= len(value) || value[offset] == ' ' || value[offset] == '\t' || value[offset] == '\n'
+}
+
+// atxHeadingRun reports whether value opens an ATX heading marker at offset: one to six hashes
+// ending the line or followed by a space or a tab. Escaping the first hash is enough to keep the
+// whole run text, and without it a `## ` a replacement wrote into a paragraph reads back as a
+// heading — or, inside a list item, as markdown the Proof schema refuses to import at all.
+func atxHeadingRun(value string, offset int) bool {
+	end := offset
+	for end < len(value) && value[end] == '#' {
+		end++
+	}
+	return end-offset <= 6 && markerTerminator(value, end)
 }
 
 func emphasisDelimiter(value string, offset int, delimiter byte) bool {
@@ -582,15 +633,17 @@ func isASCIIPunctuation(value byte) bool {
 	return value >= '!' && value <= '/' || value >= ':' && value <= '@' || value >= '[' && value <= '`' || value >= '{' && value <= '~'
 }
 
-func orderedListMarkerPunctuation(value string, offset int) bool {
-	if offset+1 >= len(value) || value[offset+1] != ' ' {
+// orderedListMarkerPunctuation reports whether the `.` or `)` at offset closes an ordered-list
+// marker: digits back to the start of an indented line, and a marker terminator after it.
+func orderedListMarkerPunctuation(value string, offset int, lineStart int) bool {
+	if !markerTerminator(value, offset+1) {
 		return false
 	}
 	start := offset
 	for start > 0 && value[start-1] >= '0' && value[start-1] <= '9' {
 		start--
 	}
-	return start < offset && (start == 0 || value[start-1] == '\n')
+	return start < offset && blockStart(value, lineStart, start)
 }
 
 func nodeHasMark(node *Node, markType string) bool {
