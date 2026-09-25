@@ -1349,7 +1349,13 @@ func (s *Service) roomFailure(room string) error {
 	if !ok {
 		return nil
 	}
-	state := value.(*roomState)
+	return value.(*roomState).failure()
+}
+
+// failure is state's own failure as an ErrServiceUnavailable, or nil while it has not failed.
+// Which state a caller asks is the question: the one registered for the room now, or the one a
+// write holds its slot on, which an eviction has replaced.
+func (state *roomState) failure() error {
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	if state.failed == nil {

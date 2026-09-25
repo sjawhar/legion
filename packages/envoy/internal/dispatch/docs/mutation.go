@@ -69,8 +69,9 @@ func recoverMutation(room string, err *error) {
 	}
 }
 
-// applyJoined is applyLive joined to tx. It returns websocket.ErrNoChanges when mutate wrote
-// nothing, as the room's Apply does.
+// applyJoined is applyLive run inside the transaction the context's ledger joined. It returns
+// websocket.ErrNoChanges when mutate wrote nothing, as the room's Apply does, and
+// ErrServiceUnavailable when the room its slot is on failed before its append.
 func (s *Service) applyJoined(ctx context.Context, artifactID string, actor model.Actor, mutate func(*crdt.Doc, func(func(*crdt.Transaction))) error) error {
 	ledger := ledgerFrom(ctx)
 	tx := ledger.tx
@@ -138,7 +139,7 @@ func (s *Service) applyJoined(ctx context.Context, artifactID string, actor mode
 	// before it may already have reloaded without the write, beyond the writer slot, which is on
 	// the failed room: the write cannot reach it coherently, so it fails - before it records the
 	// rendering below, which a refused write must not leave behind.
-	if err := write.roomFailure(); err != nil {
+	if err := write.state.failure(); err != nil {
 		return err
 	}
 	// The rendering this operation produced is the document as the transaction now sees it, so

@@ -125,17 +125,6 @@ func (s *Service) openLiveWrite(ctx context.Context, ledger *Ledger, artifactID 
 	return write, nil
 }
 
-// roomFailure is the failure of the room state write holds the slot on, as an
-// ErrServiceUnavailable, or nil while that room has not failed.
-func (write *liveWrite) roomFailure() error {
-	write.state.mu.Lock()
-	defer write.state.mu.Unlock()
-	if write.state.failed == nil {
-		return nil
-	}
-	return fmt.Errorf("%w: %w", ErrServiceUnavailable, write.state.failed)
-}
-
 // awaitLiveWriter waits until no other transaction holds artifactID's writer slot, so a read
 // joined to a transaction sees every write committed before it.
 func (s *Service) awaitLiveWriter(ctx context.Context, artifactID string) error {

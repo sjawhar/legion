@@ -54,7 +54,7 @@ can see, so the rule has to cover any in-memory wait by any transaction.
 
 ## Fix
 
-`awaitRoomRecovery` is where every such wait happens. It fails with `ErrServiceUnavailable`
+`awaitRoomRecovery` is where a transaction waits for a failed room. It fails with `ErrServiceUnavailable`
 (`503 DOC_SERVICE_UNAVAILABLE`) instead of waiting when the caller's ledger runs inside a
 transaction (`Ledger.inTransaction`): a handler's joined transaction, or settlement's own. The
 transaction rolls back, the eviction takes the lock, and the caller retries once the room has
@@ -68,6 +68,14 @@ between the commit and the publish, because the write's writer slot is on the fa
 after its append the write checks the room it holds the slot on (`liveWrite.roomFailure`). From
 that point its lock keeps any later eviction from finishing until the transaction ends, so a
 reload after it holds the write.
+
+## It is not the only in-memory wait
+
+`awaitRoomRecovery` is the wait this fix removes, not the only one of its kind. ygo's ready
+barrier is another: a room's eviction waits in `CloseRoom` for a load already in progress, and two
+loaders start that load on `context.Background()` (`docs/service.go`, `docs/livewrite.go`), so a
+load that cannot finish holds the eviction with no deadline to end it. LEGION-282 tracks that one;
+it predates this fix and needs its own.
 
 ## Rule
 

@@ -18,8 +18,9 @@ import (
 // and publishes the writes to their rooms, in that order. Discard, which callers defer right
 // after Join, drops whatever a transaction that did not commit left behind.
 //
-// Document settlement, and a named version written outside a caller's transaction, collect
-// their events in a ledger with no transaction.
+// Settlement's operations run in a transaction of its own, which no caller joined, so its ledger
+// carries no `tx` and marks itself `settling` instead; a named version written outside any
+// transaction collects its events in a ledger with neither.
 type Ledger struct {
 	service *Service
 	tx      pgx.Tx
@@ -53,8 +54,11 @@ func (s *Service) Join(ctx context.Context, tx pgx.Tx) (context.Context, *Ledger
 }
 
 // inTransaction reports whether the operations recording into l run inside an open database
-// transaction, the caller's or settlement's. Such an operation never waits for a failed room's
-// recovery (awaitRoomRecovery).
+// transaction that this ledger knows about: one a caller joined, or settlement's own. Such an
+// operation fails on a failed room rather than waiting for its recovery (awaitRoomRecovery). An
+// operation that runs inside a transaction without joining it is invisible here and still
+// waits, which is the hang this rule exists to stop, so a handler joins (Docs.Join) and passes
+// the context Join returned.
 func (l *Ledger) inTransaction() bool {
 	return l != nil && (l.tx != nil || l.settling)
 }

@@ -606,6 +606,16 @@ survive moves and retyping.
 block id, keeps a typed block's body, and uses `attributes` for client-owned typed attributes. Use it when
 an existing paragraph is the question that should become a decision.
 
+### A document that is reloading
+
+Every call that touches a document's live text — `dispatch_doc_edit`, `dispatch_ask` and
+`dispatch_comment` with a quote, `dispatch_suggest`, `dispatch_artifact` on a document, and
+creating an issue with a spec — can answer `DOC_SERVICE_UNAVAILABLE` (HTTP 503). It means that
+document's live room failed and is reloading from its durable copy, so the server refused rather
+than wait for it; your call wrote nothing and the document is intact. Nothing retries it for you:
+the Dispatch client hands a 503 straight back. Wait a few seconds and make the same call again. A
+second refusal in a row is worth telling your human about, with the document's reference.
+
 ## Typed blocks
 
 The server declares typed document blocks at `GET /api/v1/schema/blocks`. Write one only with the
