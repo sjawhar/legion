@@ -140,6 +140,8 @@ func (s *server) routes() []apiRoute {
 		{http.MethodPut, "/api/v1/me/issues/{key}/state", authHuman, "Update the caller's read state for an issue.", s.putUserState},
 		{http.MethodGet, "/api/v1/me/agents/state", authHuman, "The caller's per-agent conversation state: each cleared_before cutoff.", s.getUserAgentState},
 		{http.MethodPut, "/api/v1/me/agents/{session_id}/state", authHuman, "Clear an agent's conversation for the caller: hide exchanges at or before cleared_before.", s.putUserAgentState},
+		{http.MethodPut, "/api/v1/me/asks/{id}/snooze", authHuman, "Snooze an inbox row for the caller until snoozed_until.", s.putAskSnooze},
+		{http.MethodDelete, "/api/v1/me/asks/{id}/snooze", authHuman, "Un-snooze an inbox row for the caller.", s.deleteAskSnooze},
 		{http.MethodGet, "/api/v1/events", authAny, "Server-sent event stream; Last-Event-ID or ?since= resumes.", s.streamEvents},
 	}
 	if s.deps.TestHooksEnabled {

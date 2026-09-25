@@ -42,20 +42,8 @@ func TestListenerSIGTERMIsAnOrderedShutdown(t *testing.T) {
 	t.Cleanup(publisher.Close)
 
 	for run := 1; run <= 10; run++ {
-		port := freeTCPPort(t)
-		output := &lockedBuffer{}
-		cmd := exec.Command(binary)
-		cmd.Env = []string{
-			"PORT=" + strconv.Itoa(port),
-			"ENVOY_LISTEN_HOST=127.0.0.1",
-			"ENVOY_MACHINE_ID=sigterm-test-" + strconv.Itoa(run),
-			"NATS_URLS=" + uri,
-			"ENVOY_API_TOKEN=sigterm-test-token",
-		}
-		cmd.Stdout, cmd.Stderr = output, output
-		if err := cmd.Start(); err != nil {
-			t.Fatalf("run %d: start the listener: %v", run, err)
-		}
+		listener := startListenerProcess(t, binary, uri, "sigterm-test-"+strconv.Itoa(run))
+		port, cmd, output := listener.port, listener.cmd, listener.output
 		waitHealthy(t, port, cmd, output)
 
 		role := "sigterm-test-" + strconv.Itoa(run)
@@ -101,7 +89,7 @@ func TestListenerSIGTERMIsAnOrderedShutdown(t *testing.T) {
 		if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 			t.Fatalf("run %d: SIGTERM: %v", run, err)
 		}
-		_ = cmd.Wait()
+		<-listener.exited
 		close(stopTraffic)
 		<-trafficDone
 		holder.Close()
@@ -123,6 +111,45 @@ func TestListenerSIGTERMIsAnOrderedShutdown(t *testing.T) {
 	}
 }
 
+// listenerTestToken is the shared /v1 bearer every test-started listener is given.
+const listenerTestToken = "sigterm-test-token"
+
+// listenerProcess is a listener binary a test started, with its combined output.
+type listenerProcess struct {
+	cmd    *exec.Cmd
+	port   int
+	output *lockedBuffer
+	exited chan struct{}
+}
+
+// startListenerProcess starts binary as machine machineID against the NATS at uri, on a free port,
+// and kills it when the test ends if it is still running.
+func startListenerProcess(t *testing.T, binary, uri, machineID string) *listenerProcess {
+	t.Helper()
+	process := &listenerProcess{port: freeTCPPort(t), output: &lockedBuffer{}, exited: make(chan struct{})}
+	process.cmd = exec.Command(binary)
+	process.cmd.Env = []string{
+		"PORT=" + strconv.Itoa(process.port),
+		"ENVOY_LISTEN_HOST=127.0.0.1",
+		"ENVOY_MACHINE_ID=" + machineID,
+		"NATS_URLS=" + uri,
+		"ENVOY_API_TOKEN=" + listenerTestToken,
+	}
+	process.cmd.Stdout, process.cmd.Stderr = process.output, process.output
+	if err := process.cmd.Start(); err != nil {
+		t.Fatalf("start the listener %s: %v", machineID, err)
+	}
+	go func() {
+		_ = process.cmd.Wait()
+		close(process.exited)
+	}()
+	t.Cleanup(func() {
+		_ = process.cmd.Process.Kill()
+		<-process.exited
+	})
+	return process
+}
+
 // buildListener builds this package's listener binary into the test's temporary directory.
 func buildListener(t *testing.T) string {
 	t.Helper()
@@ -140,7 +167,7 @@ func postListener(t *testing.T, port int, path, body string) {
 	if err != nil {
 		t.Fatalf("%s: %v", path, err)
 	}
-	request.Header.Set("Authorization", "Bearer sigterm-test-token")
+	request.Header.Set("Authorization", "Bearer "+listenerTestToken)
 	request.Header.Set("Content-Type", "application/json")
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {

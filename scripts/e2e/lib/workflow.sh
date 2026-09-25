@@ -240,6 +240,53 @@ clean_smoke_main() {
   note "the proof human removed $(wc -l <<<"$paths") leftover paths from $repo main through $url"
 }
 
+# ---- the run's own pull requests ------------------------------------------------------------------
+
+# run_pull_requests prints the number of every open pull request on the smoke repository whose
+# branch is this run's own: the daemon's `legion/<project>-*` issue branches and clean_smoke_main's
+# `proof/clean-main-<ptoken>`, so a lane running beside this one is untouched. The limit is far above
+# the repository's open count: gh's default of 30 is a window of the newest, and this run's own can
+# sit outside it.
+run_pull_requests() {
+  gh -R "$repo" pr list --state open --limit 1000 --json number,headRefName \
+    --jq "[.[] | select((.headRefName | startswith(\"legion/$project-\")) or .headRefName == \"proof/clean-main-$ptoken\") | .number] | .[]"
+}
+# close_run_pull_requests closes each of them with its branch, printing one line per pull request
+# with gh's reason on anything short of a full close, and returns 1 when a pull request stays open
+# or the list itself fails. `gh pr close --delete-branch` also exits non-zero when the close
+# succeeded and only the branch delete failed; that one is read back and reported as closed. Only
+# the listing's stdout is parsed: gh can write to stderr on a listing that succeeds (the devbox shim
+# names an inherited GH_TOKEN on every call), and a word of that line would become a
+# `gh pr close <word>`, which gh reads as a branch name. The listing's stderr, its reason on a
+# failure included, goes to the caller's stderr.
+close_run_pull_requests() {
+  local prs pr out refused=0
+  prs=$(run_pull_requests) || {
+    printf "could not list the open pull requests on %s (gh's reason is on stderr)\n" "$repo"
+    return 1
+  }
+  for pr in $prs; do
+    if out=$(gh -R "$repo" pr close "$pr" --delete-branch 2>&1); then
+      printf 'closed %s#%s and deleted its branch\n' "$repo" "$pr"
+    elif [ "$(gh -R "$repo" pr view "$pr" --json state --jq .state 2>/dev/null)" = CLOSED ]; then
+      printf 'closed %s#%s; its branch was not deleted: %s\n' "$repo" "$pr" "$out"
+    else
+      printf 'could not close %s#%s: %s\n' "$repo" "$pr" "$out"
+      refused=1
+    fi
+  done
+  return "$refused"
+}
+# close_unpassed_run_pull_requests is the EXIT trap's part: a run that did not pass (`ok` unset)
+# closes what it opened, best effort, reporting to stderr. A passing run closed them in
+# cleanup-is-complete.
+close_unpassed_run_pull_requests() {
+  [ -z "${ok:-}" ] || return 0
+  close_run_pull_requests >&2 ||
+    printf "some of this run's pull requests may still be open on %s (above)\n" "$repo" >&2
+  return 0
+}
+
 # ---- the handoffs the daemon accepted -------------------------------------------------------------
 
 # The record keeps each role's phase row: the commit carrying the handoff its completion reported,

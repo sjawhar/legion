@@ -26,7 +26,7 @@ the native Dispatch tool suite:
 | Document block offsets and anchors | `src/dispatch-api.ts` | `ArtifactBlock` maps stable block IDs, canonical markdown offsets, and SHA-256 full-Proof-state tokens (including inline marks), plus per-block comment/ask reference counts; `Anchor.block_id` is nullable for legacy rows. |
 | Delivery capabilities | `src/dispatch-api.ts` | `DELIVERY_CAPABILITIES` (`aside`, `btw`, `steer`) is the one closed list; `MessageDeliveryMode`, `CommentMention`, `CommentDelivery`, the delivery event payload schema, and the envoy-client targeted-frame schema derive from it. `Comment.mentions` and `Comment.deliveries` mirror the server's hydrated read rows; `CreateCommentInput` describes its matching HTTP fields. `Agent.capabilities` stays an open `string[]` on the wire. |
 | Delivery `duplicate` | `src/dispatch-api.ts` | A delivery attempt carries `duplicate` when the notification stream already held the message, so the recipient gained nothing from it and `envelope_id` is null. `MessageDeliveryEventPayloadSchema` and `CommentDeliverySchema` are stripping `z.object`s nested inside passthrough payload schemas, so each must **declare** the field or it vanishes from every agent-bound frame. Absent means false, which is what a server older than the field answers. |
-| Delivery duplicate window | `src/dispatch-api.ts` | `DELIVERY_DUPLICATE_WINDOW_MS` is the single literal for how long the notification stream recognises a repeated delivery. `scripts/gen-go.ts` emits it as `contracts.DeliveryDuplicateWindow`, which `bus/nats.go` uses for both the stream's `Duplicates` window and its `MaxAge`; the dashboard reads the constant directly to decide whether re-sending a failed attempt can still be promised not to deliver twice. Changing it moves the stream configuration and the product promise together. |
+| Delivery duplicate window | `src/dispatch-api.ts` | `DELIVERY_DUPLICATE_WINDOW_MS` is the single literal for how long the notification stream recognises a repeated delivery. `scripts/gen-go.ts` emits it as `contracts.DeliveryDuplicateWindow`, which `bus/stream.go` uses for both the stream's `Duplicates` window and its `MaxAge`; the dashboard reads the constant directly to decide whether re-sending a failed attempt can still be promised not to deliver twice. Changing it moves the stream configuration and the product promise together. |
 | Receipt-timeout cause | `src/dispatch-api.ts` | `RECEIPT_TIMEOUT_CAUSE` is the exact string a delivery attempt records when the listener never answered its send, generated into Go as `contracts.ReceiptTimeoutCause`. The dashboard keys the "sending in a different mode delivers it again" wording on it, so it is one literal rather than a server string and a client pattern that can drift apart. |
 
 ## Critical conventions
@@ -56,10 +56,17 @@ the native Dispatch tool suite:
   client-owned attributes; `delete` and `move` also address a whole block by id; and table row or
   column deletion takes its table block id plus a zero-based `index`, preserving the table id and
   refusing to remove cells with open asks or unresolved comments. Insert/move anchors accept
-  `block:<id>` beside quotes, `start`, `end`, and `heading:<title>`. An optional `precondition`
-  selects exactly one whole-document token from `dispatch_doc_read` or block `{id, token}` entries
-  from `/blocks`; a block guard must cover every content block the batch changes, while untouched sections
-  remain independent. Insert and move need the document token because they depend on document order.
+  `block:<id>` beside quotes, `start`, `end`, and `heading:<title>`. The per-op object is the one
+  nested object built strict (`z.object(shape, { strict: true })`): every key but `op` is optional,
+  so a misspelled key would otherwise be stripped and the operation would run without it — a
+  `replace` left with no `with` deletes the text it was meant to rewrite. `dispatchToolSchema`'s
+  own `strict` covers only the top level, and the Go server's `DisallowUnknownFields` never sees a
+  key the tool layer already stripped, so this is the boundary that catches it. An unknown key
+  nested anywhere is reported with that object's keys, not the tool's (`formatZodIssues`).
+  An optional `precondition` selects exactly one whole-document token from `dispatch_doc_read` or
+  block `{id, token}` entries from `/blocks`; a block guard must cover every content block the
+  batch changes, while untouched sections remain independent. Insert and move need the document
+  token because they depend on document order.
   Tokens include inline marks, so a new anchored ask or comment rejects a stale edit. A stale guard
   returns `PRECONDITION_FAILED` with the current tokens and applies no part of the batch.
   Ask lifecycle payloads include nullable `block_id`; `block.repaired` restores server-owned

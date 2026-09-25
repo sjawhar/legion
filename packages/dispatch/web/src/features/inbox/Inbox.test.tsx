@@ -51,6 +51,7 @@ function artifactAsk(): InboxRow {
     thread: { edits: [], followers: [], replies: [] },
     question: "Does this design need review?",
     priority: null,
+    snoozed_until: null,
     state: "open",
     waiting_on: "human",
     urgency: "med",
@@ -76,6 +77,7 @@ function issueAsk(overrides: Partial<InboxRow> = {}): InboxRow {
     state: "open",
     waiting_on: "human",
     priority: null,
+    snoozed_until: null,
     urgency: "med",
     ...overrides,
   };
@@ -1402,5 +1404,212 @@ test("Mine's Blocked on you counts the viewer's and the unassigned asks; Everyon
     unmount();
     getAsk.mockRestore();
     getInbox.mockRestore();
+  }
+});
+
+/** An hour from now, as the server stores it: inside any snooze window the reader can pick. */
+function soon(hours = 3): string {
+  return new Date(Date.now() + hours * 60 * 60 * 1000).toISOString();
+}
+
+test("Snooze folds a row into Later until the reader un-snoozes it", async () => {
+  const askA = issueAsk({ id: "ask-a" });
+  const askB = issueAsk({
+    id: "ask-b",
+    issue: { assignee: "alice", key: "CORE-2", title: "Other issue" },
+    issue_key: "CORE-2",
+    question: "Which format?",
+  });
+  // The server's answer moves with the writes, so the refetch each write triggers returns what
+  // the server would now hold rather than resurrecting the pre-snooze list.
+  let served: InboxRow[] = [askA, askB];
+  const getInbox = spyOn(api, "getInbox").mockImplementation(async () => served);
+  const snoozeAsk = spyOn(api, "snoozeAsk").mockImplementation(async (id, until) => {
+    served = served.map((row) => (row.id === id ? { ...row, snoozed_until: until } : row));
+    return { snoozed_until: until };
+  });
+  const unsnoozeAsk = spyOn(api, "unsnoozeAsk").mockImplementation(async (id) => {
+    served = served.map((row) => (row.id === id ? { ...row, snoozed_until: null } : row));
+  });
+  const getAsk = mockAskReads([askA, askB]);
+  const { unmount } = renderInbox();
+  try {
+    await screen.findByText("Which format?");
+    expect(headings()).toEqual(["Waiting on you"]);
+    expect(screen.getByText(/Blocked on you: 2 items/)).toBeTruthy();
+
+    const row = screen.getByTestId("ask-ask-b").closest<HTMLElement>("[data-inbox-row]");
+    if (row === null) throw new Error("ask-b row missing");
+    fireEvent.change(within(row).getByLabelText("Snooze CORE-2"), {
+      target: { value: "tomorrow" },
+    });
+
+    // Folded by default: the row leaves the list, and the band's count says where it went.
+    await waitFor(() => expect(headings()).toEqual(["Waiting on you", "Later (1)"]));
+    expect(rowIds()).toEqual(["ask-a"]);
+    expect(screen.getByText(/Blocked on you: 1 item/)).toBeTruthy();
+    expect(snoozeAsk).toHaveBeenCalledTimes(1);
+    const [, until] = snoozeAsk.mock.calls[0] ?? [];
+    expect(Date.parse(until ?? "")).toBeGreaterThan(Date.now());
+
+    fireEvent.click(screen.getByRole("button", { name: /^Later \(1\)/ }));
+    const later = screen.getByTestId("ask-ask-b").closest<HTMLElement>("[data-inbox-row]");
+    expect(later?.getAttribute("data-inbox-section")).toBe("later");
+
+    fireEvent.click(within(later as HTMLElement).getByRole("button", { name: "Un-snooze CORE-2" }));
+    await waitFor(() => expect(headings()).toEqual(["Waiting on you"]));
+    expect(unsnoozeAsk).toHaveBeenCalledWith("ask-b");
+    expect(rowIds()).toEqual(["ask-a", "ask-b"]);
+    expect(screen.getByText(/Blocked on you: 2 items/)).toBeTruthy();
+  } finally {
+    unmount();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+    snoozeAsk.mockRestore();
+    unsnoozeAsk.mockRestore();
+  }
+});
+
+test("an agent's reply on a snoozed row leaves it in Later and off Waiting on you", async () => {
+  const snoozed = issueAsk({
+    id: "ask-snoozed",
+    question: "Which format?",
+    snoozed_until: soon(),
+    waiting_on: "agent",
+  });
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue([snoozed]);
+  const getAsk = mockAskReads([snoozed]);
+  const { queryClient, unmount } = renderInbox();
+  try {
+    await waitFor(() => expect(headings()).toEqual(["Later (1)"]));
+    expect(rowIds()).toEqual([]);
+
+    // The agent answers: the turn is the reader's again and the row carries the agent's reply -
+    // exactly the change that used to pull a deferred ask back onto the list.
+    act(() => {
+      queryClient.setQueryData<InboxRow[]>(
+        ["inbox"],
+        [
+          {
+            ...snoozed,
+            last_reply: {
+              author: { id: "session-1", kind: "session" },
+              created_at: "2026-09-11T01:00:00Z",
+            },
+            waiting_on: "human",
+          },
+        ]
+      );
+    });
+
+    expect(headings()).toEqual(["Later (1)"]);
+    expect(screen.queryByText("Waiting on you")).toBeNull();
+    expect(screen.queryByText(/Blocked on you/)).toBeNull();
+    expect(rowIds()).toEqual([]);
+
+    // Opening the band shows it there, still deferred, with its return time.
+    fireEvent.click(screen.getByRole("button", { name: /^Later \(1\)/ }));
+    const row = await screen.findByTestId("ask-ask-snoozed");
+    expect(row.closest("[data-inbox-section]")?.getAttribute("data-inbox-section")).toBe("later");
+  } finally {
+    unmount();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+  }
+});
+
+test("a snooze whose moment has passed is an ordinary row again", async () => {
+  const lapsed = issueAsk({
+    id: "ask-lapsed",
+    question: "Which format?",
+    snoozed_until: "2020-01-01T00:00:00.000Z",
+  });
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue([lapsed]);
+  const getAsk = mockAskReads([lapsed]);
+  const { unmount } = renderInbox();
+  try {
+    await screen.findByText("Which format?");
+    expect(headings()).toEqual(["Waiting on you"]);
+    expect(rowIds()).toEqual(["ask-lapsed"]);
+    expect(screen.getByText(/Blocked on you: 1 item/)).toBeTruthy();
+  } finally {
+    unmount();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+  }
+});
+
+test("a snooze still saving says Snoozing…, not Un-snoozing…, in the band it has moved to", async () => {
+  const row = issueAsk({ id: "ask-b", question: "Which format?" });
+  let served: InboxRow[] = [row];
+  const getInbox = spyOn(api, "getInbox").mockImplementation(async () => served);
+  // Held open, so the render under test is the one while the write is in flight.
+  let settle: (() => void) | undefined;
+  const snoozeAsk = spyOn(api, "snoozeAsk").mockImplementation(
+    (id, until) =>
+      new Promise((resolve) => {
+        settle = () => {
+          served = served.map((each) =>
+            each.id === id ? { ...each, snoozed_until: until } : each
+          );
+          resolve({ snoozed_until: until });
+        };
+      })
+  );
+  const getAsk = mockAskReads([row]);
+  const { unmount } = renderInbox();
+  try {
+    await screen.findByText("Which format?");
+    fireEvent.change(screen.getByLabelText("Snooze CORE-1"), { target: { value: "tomorrow" } });
+
+    // The optimistic update has already put the row in Later, which is right - it is where the
+    // snooze is going - but the label must say what the reader did, not where the row landed.
+    await waitFor(() => expect(headings()).toEqual(["Later (1)"]));
+    fireEvent.click(screen.getByRole("button", { name: /^Later \(1\)/ }));
+    expect(screen.getByText("Snoozing…")).toBeTruthy();
+    expect(screen.queryByText("Un-snoozing…")).toBeNull();
+    // The optimistic return time is shown beside it; that is the snooze being saved.
+    expect(document.querySelector("[data-inbox-snoozed-until]")).toBeTruthy();
+
+    // Once it settles the row reports its state again, not the last thing done to it.
+    await act(async () => {
+      settle?.();
+      await Promise.resolve();
+    });
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Un-snooze CORE-1" }).textContent).toBe("Un-snooze")
+    );
+    expect(screen.queryByText("Snoozing…")).toBeNull();
+  } finally {
+    unmount();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+    snoozeAsk.mockRestore();
+  }
+});
+
+test("a refused snooze rolls the row back and says why, where the reader can still see it", async () => {
+  const row = issueAsk({ id: "ask-b", question: "Which format?" });
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue([row]);
+  const snoozeAsk = spyOn(api, "snoozeAsk").mockRejectedValue(
+    new ApiError(400, { code: "SNOOZE_INPUT", error: "snoozed_until must be in the future" })
+  );
+  const getAsk = mockAskReads([row]);
+  const { unmount } = renderInbox();
+  try {
+    await screen.findByText("Which format?");
+    fireEvent.change(screen.getByLabelText("Snooze CORE-1"), { target: { value: "tomorrow" } });
+
+    // The row comes back to the band it was in, and the reason comes with it - the control is
+    // kept mounted through the fold, so the refusal is not thrown away with the row.
+    await waitFor(() => expect(headings()).toEqual(["Waiting on you"]));
+    expect(rowIds()).toEqual(["ask-b"]);
+    expect(screen.getByText("snoozed_until must be in the future")).toBeTruthy();
+    expect(screen.getByText(/Blocked on you: 1 item/)).toBeTruthy();
+  } finally {
+    unmount();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+    snoozeAsk.mockRestore();
   }
 });

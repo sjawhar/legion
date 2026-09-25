@@ -447,6 +447,28 @@ describe("dispatchToolSpecs", () => {
     ).toBe(false);
   });
 
+  // A mistyped `with` (`replace:`) used to be stripped by Zod's default strip mode, so the call
+  // validated with `with` simply absent - which the server reads as the one `with` that deletes
+  // the match. The edit applied, 200, and the quoted prose was gone with nothing to tell the
+  // model. Every key of an op but `op` is optional, so an unknown key is the only signal there is.
+  test("rejects a document edit op carrying an unknown key rather than stripping it", () => {
+    const schema = schemaFor("dispatch_doc_edit");
+    const target = { issue: "DSP-1", artifact: "spec" };
+
+    expect(
+      schema.safeParse({
+        ...target,
+        ops: [{ op: "replace", find: "old wording", replace: "new wording" }],
+      }).success
+    ).toBe(false);
+    expect(
+      schema.safeParse({
+        ...target,
+        ops: [{ op: "replace", find: "old wording", with: "new wording" }],
+      })
+    ).toMatchObject({ success: true, data: { ops: [{ with: "new wording" }] } });
+  });
+
   test("accepts a document retype operation with typed attributes", () => {
     expect(
       schemaFor("dispatch_doc_edit").safeParse({

@@ -66,6 +66,7 @@ const inboxRow: InboxRow = {
   options: [],
   thread: { edits: [], followers: [], replies: [] },
   priority: issue.priority,
+  snoozed_until: null,
   question: "Which layout?",
   state: "open",
   urgency: "med",

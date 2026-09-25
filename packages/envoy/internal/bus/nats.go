@@ -16,48 +16,6 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 )
 
-const Stream = "ENVOY_NOTIFICATIONS"
-
-// streamDuplicateWindow covers the entire retained notification lifetime, so
-// an outbox retry after a crash before published_at is recorded cannot create a
-// second retained Dispatch event while the original remains observable.
-//
-// It is the same window the dashboard gates its "retrying is safe" promise on: past it the
-// stream holds neither the message nor its MsgId, so a same-mode retry delivers a second time.
-// Both sides read one literal - DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts, from which
-// contracts.DeliveryDuplicateWindow is generated.
-const streamDuplicateWindow = contracts.DeliveryDuplicateWindow
-
-var streamSubjects = []string{
-	"notifications.agent.>",
-	"notifications.dispatch.>",
-	"notifications.github.>",
-	"notifications.slack.>",
-	// The Go Legion daemon's per-issue workflow notices (notifications.legion.<project>.<issue>).
-	"notifications.legion.>",
-	"notifications.ghostwispr.>",
-	"notifications.whatsapp.>",
-	"notifications.envoy.exceptions.notifications.agent.>",
-}
-
-// StreamSubjects reports the durable notification subjects, excluding role lanes.
-func StreamSubjects() []string {
-	return slices.Clone(streamSubjects)
-}
-
-var streamCfg = &nats.StreamConfig{
-	Name:      Stream,
-	Subjects:  streamSubjects,
-	Retention: nats.LimitsPolicy,
-	// Retention equals the duplicate window by construction: the dashboard promises a
-	// same-mode retry cannot deliver twice for exactly as long as the stream can still
-	// recognise the repeat, and a deployment where the two differ would break that promise.
-	MaxAge:     streamDuplicateWindow,
-	Duplicates: streamDuplicateWindow,
-	Storage:    nats.FileStorage,
-	Replicas:   1,
-}
-
 // ConnectOption configures the bus client.
 type ConnectOption func(*connectOpts)
 
@@ -168,8 +126,9 @@ func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB 
 			// Every consumer Envoy runs with idle heartbeats is a KV watcher's ordered consumer,
 			// which reports missed heartbeats only while the connection is not connected; once it
 			// is connected again, nats.go resets the consumer instead. The report restates the
-			// disconnect logged above, once per watcher. The listener's durable never carries a
-			// heartbeat: cmd/listener's startListenerSubscription refuses one that does.
+			// disconnect logged above, once per watcher. The listener's durable carries no heartbeat
+			// as long as cmd/listener's startListenerSubscription bound it, since that refuses one that
+			// does; a replaced connection binds the same durable again without that check.
 			level = slog.LevelWarn
 		}
 		if sub != nil {

@@ -11,11 +11,18 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { formatAskAge } from "./ask-age";
+import { isSnoozed } from "./snooze";
 
-/** Open asks whose turn is the human's (`waiting_on === "human"`) are waiting for the viewer. An
- *  agent's progress note keeps its ask waiting on the agent, whoever replied last. */
-export function waitingOnYou<T extends Pick<InboxRow, "waiting_on">>(asks: readonly T[]): T[] {
-  return asks.filter((ask) => ask.waiting_on === "human");
+/** Open asks whose turn is the human's (`waiting_on === "human"`) and that the viewer has not
+ *  deferred are waiting for the viewer. An agent's progress note keeps its ask waiting on the
+ *  agent, whoever replied last; a snooze keeps its ask off every "needs you" surface - the nav
+ *  badge, the sidebar, this banner - until it returns, because deferring it is the viewer
+ *  saying it does not need them now. A row that carries no snooze at all (an issue header's
+ *  `open_asks`) is never deferred. */
+export function waitingOnYou<
+  T extends Pick<InboxRow, "waiting_on"> & Partial<Pick<InboxRow, "snoozed_until">>,
+>(asks: readonly T[]): T[] {
+  return asks.filter((ask) => ask.waiting_on === "human" && !isSnoozed(ask));
 }
 
 export function BlockedOnYou({

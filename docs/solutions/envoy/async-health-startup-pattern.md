@@ -116,6 +116,12 @@ cache warm-ups are bounded at 30 s each. The durable-consumer subscribe tries up
 with a 3 s × attempt backoff, 135 s of sleeps in all (`cmd/listener/main.go`), so a rolling
 deploy that waits for the old task's binding can stay `starting` for minutes.
 
+Because a starting listener answers 200, a start that cannot succeed must end rather than wait:
+a deploy that trusts the 200 would stop the old task for a replacement that never serves. A
+durable the listener refuses (an idle heartbeat or an ack policy NATS cannot change in place) is
+the one subscribe failure no retry can fix, so the listener checks its durable right after the NATS
+connect, before the cache warm-ups, and on a refusal exits 1 at once instead of retrying.
+
 **A 200 is liveness, not readiness.** Anything that calls `/v1` after starting the listener — a
 test harness, an e2e script — waits for the `"healthy"` body, or for a 200 from a `/v1` route,
 never for a bare 200 from `/healthz`. The container smoke waited for a bare 200 and flaked on a

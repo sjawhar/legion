@@ -41,6 +41,7 @@ function inboxRow(overrides: Partial<InboxRow> = {}): InboxRow {
     options: [],
     thread: { edits: [], followers: [], replies: [] },
     priority: null,
+    snoozed_until: null,
     question: "Which approach?",
     state: "open",
     waiting_on: "human",

@@ -17,6 +17,7 @@ import (
 
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/cistore"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dedupe"
 	"github.com/sjawhar/envoy/internal/id"
@@ -1950,43 +1951,108 @@ func TestDurableConsumerSurvivesUnsubscribe(t *testing.T) {
 	_ = resub.Unsubscribe()
 }
 
-// The listener's durable carries no idle heartbeat. The bus logs nats.ErrConsumerNotActive at WARN
-// because the only consumers that report it are KV watchers' ordered consumers, which report it
-// only while disconnected; a heartbeat on the durable would make a real stall report that same
-// WARN. NATS refuses to change a consumer's heartbeat in place, so a durable that has one cannot be
-// corrected: the listener refuses it, by name, and leaves it for an operator rather than deleting a
-// cursor that may still hold undelivered messages.
-func TestAHeartbeatOnTheListenerDurableIsRefused(t *testing.T) {
+// A durable carrying a setting the listener's consumer policy fixes and NATS cannot change in place
+// is refused, by name, and left for an operator rather than deleting a cursor that may still hold
+// undelivered messages. The policy has no idle heartbeat: the bus logs nats.ErrConsumerNotActive at
+// WARN because the only consumers that report it are KV watchers' ordered consumers, which report it
+// only while disconnected, so a heartbeat on the durable would make a real stall report that same
+// WARN. It acks explicitly, one message at a time. Each durable here also carries a drifted ack
+// wait, which the refusal must leave as it is: a refused durable is never corrected.
+func TestASettingNATSCannotChangeOnTheListenerDurableIsRefused(t *testing.T) {
 	client, err := bus.Connect([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("connect bus: %v", err)
 	}
 	t.Cleanup(client.Close)
-	consumer := "listener-heartbeat-refused"
-	_ = client.JS().DeleteConsumer(bus.Stream, consumer)
-	t.Cleanup(func() { _ = client.JS().DeleteConsumer(bus.Stream, consumer) })
+	for _, tc := range []struct {
+		name     string
+		settings []string
+		apply    func(*natsgo.ConsumerConfig)
+	}{
+		{name: "heartbeat", settings: []string{"heartbeat"}, apply: func(c *natsgo.ConsumerConfig) { c.Heartbeat = 5 * time.Second }},
+		{name: "ack-policy", settings: []string{"ack policy"}, apply: func(c *natsgo.ConsumerConfig) { c.AckPolicy = natsgo.AckAllPolicy }},
+		// Both at once: the refusal names both, so one recreate fixes the durable for good.
+		{name: "both", settings: []string{"heartbeat", "ack policy"}, apply: func(c *natsgo.ConsumerConfig) {
+			c.Heartbeat = 5 * time.Second
+			c.AckPolicy = natsgo.AckAllPolicy
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			consumer := "listener-refused-" + tc.name
+			_ = client.JS().DeleteConsumer(bus.Stream, consumer)
+			t.Cleanup(func() { _ = client.JS().DeleteConsumer(bus.Stream, consumer) })
+			config := natsgo.ConsumerConfig{Durable: consumer, DeliverSubject: natsgo.NewInbox()}
+			applyListenerConsumerPolicy(&config, bus.StreamSubjects())
+			config.AckWait = 30 * time.Second
+			tc.apply(&config)
+			created, err := client.JS().AddConsumer(bus.Stream, &config)
+			if err != nil {
+				t.Fatalf("add a durable with a %v the policy forbids: %v", tc.settings, err)
+			}
+
+			sub, err := startListenerSubscription(client, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
+			if err == nil {
+				_ = sub.Unsubscribe()
+				t.Fatalf("the listener bound a durable whose %v the policy forbids", tc.settings)
+			}
+			if !strings.Contains(err.Error(), consumer) {
+				t.Fatalf("refusal = %q, want it to name the consumer", err)
+			}
+			for _, setting := range tc.settings {
+				if !strings.Contains(err.Error(), setting) {
+					t.Fatalf("refusal = %q, want it to name every setting it refuses: %v", err, tc.settings)
+				}
+			}
+			info, err := client.JS().ConsumerInfo(bus.Stream, consumer)
+			if err != nil {
+				t.Fatalf("the refused durable is gone: %v", err)
+			}
+			if !info.Created.Equal(created.Created) {
+				t.Fatalf("the refused durable was recreated at %s, want the original from %s", info.Created, created.Created)
+			}
+			if info.Config.AckWait != 30*time.Second {
+				t.Fatalf("the refused durable's ack wait = %s, want its own 30s: a refused durable was corrected", info.Config.AckWait)
+			}
+		})
+	}
+}
+
+// No retry can bind a refused durable, so the listener exits at once instead of retrying the bind.
+// While a listener starts, /healthz answers 200 "starting", so a rolling deploy that waited out a
+// retry, or the interest and session cache warm-ups (30 s each), would take the replacement for
+// healthy and stop the task it replaces. The refusal therefore comes right after the NATS connect:
+// on a NATS that holds no KV bucket yet, a refused listener exits without having opened one.
+func TestARefusedDurableStopsTheListenerAtOnce(t *testing.T) {
+	client := setupTestNATS(t)
+	t.Cleanup(client.Close)
+	consumer := "listener-refused-durable-startup"
 	config := natsgo.ConsumerConfig{Durable: consumer, DeliverSubject: natsgo.NewInbox()}
 	applyListenerConsumerPolicy(&config, bus.StreamSubjects())
 	config.Heartbeat = 5 * time.Second
-	created, err := client.JS().AddConsumer(bus.Stream, &config)
-	if err != nil {
+	if _, err := client.JS().AddConsumer(bus.Stream, &config); err != nil {
 		t.Fatalf("add a durable with a heartbeat: %v", err)
 	}
 
-	sub, err := startListenerSubscription(client, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
-	if err == nil {
-		_ = sub.Unsubscribe()
-		t.Fatal("the listener bound a durable that carries an idle heartbeat")
+	listener := startListenerProcess(t, buildListener(t), client.Conn.ConnectedUrl(), "refused-durable-startup")
+	cmd, output := listener.cmd, listener.output
+	select {
+	case <-listener.exited:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("the listener was still running 30s after meeting a refused durable:\n%s", output.String())
 	}
-	if !strings.Contains(err.Error(), consumer) || !strings.Contains(err.Error(), "heartbeat") {
-		t.Fatalf("refusal = %q, want it to name the consumer and its heartbeat", err)
+	if code := cmd.ProcessState.ExitCode(); code != 1 {
+		t.Fatalf("exit code = %d, want 1:\n%s", code, output.String())
 	}
-	info, err := client.JS().ConsumerInfo(bus.Stream, consumer)
-	if err != nil {
-		t.Fatalf("the refused durable is gone: %v", err)
+	if strings.Contains(output.String(), "subscribe failed, retrying") {
+		t.Fatalf("the listener retried a refused durable:\n%s", output.String())
 	}
-	if !info.Created.Equal(created.Created) {
-		t.Fatalf("the refused durable was recreated at %s, want the original from %s", info.Created, created.Created)
+	if !strings.Contains(output.String(), consumer) || !strings.Contains(output.String(), "heartbeat") {
+		t.Fatalf("the listener's output does not name the refused durable and its heartbeat:\n%s", output.String())
+	}
+	for _, bucket := range []string{store.Bucket, session.SessionBucket, cistore.Bucket} {
+		if _, err := client.JS().KeyValue(bucket); !errors.Is(err, natsgo.ErrBucketNotFound) {
+			t.Fatalf("KV bucket %s after the refused start: %v, want not found: the refusal came after the cache warm-ups", bucket, err)
+		}
 	}
 }
 
@@ -2080,8 +2146,14 @@ func TestBoundDurableConsumerIsNotStolen(t *testing.T) {
 	}
 	t.Cleanup(second.Close)
 
-	if _, err := startListenerSubscription(second, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() }); err == nil {
+	_, err = startListenerSubscription(second, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
+	if err == nil {
 		t.Fatal("second listener bound a consumer that was already push-bound")
+	}
+	// A bind race is retried at startup until the old listener lets go; a refusal would make every
+	// replacement in a rolling deploy exit while the task it replaces still holds the binding.
+	if errors.Is(err, errListenerDurableRefused) {
+		t.Fatalf("a bind race was classified as a refusal, so startup would exit instead of retrying: %v", err)
 	}
 	info, err := first.JS().ConsumerInfo(bus.Stream, consumer)
 	if err != nil {

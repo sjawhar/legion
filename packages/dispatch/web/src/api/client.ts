@@ -14,6 +14,7 @@ import type {
   ArtifactVersionText,
   Ask,
   AskRead,
+  AskSnooze,
   AuthenticatedUser,
   BlockSchema,
   Comment,
@@ -353,6 +354,21 @@ export class DispatchApiClient {
 
   getInbox(project?: string): Promise<InboxRow[]> {
     return this.json<InboxRow[]>(pathWithQuery("/api/v1/inbox", { project }));
+  }
+
+  /** `PUT /api/v1/me/asks/{id}/snooze`: fold this inbox row away for the caller until
+   *  `snoozedUntil` (RFC3339). Human-only, like the inbox itself. */
+  snoozeAsk(id: string, snoozedUntil: string): Promise<AskSnooze> {
+    return this.json<AskSnooze>(
+      `/api/v1/me/asks/${pathSegment(id)}/snooze`,
+      idempotentWriteInit("PUT", { snoozed_until: snoozedUntil })
+    );
+  }
+
+  /** `DELETE /api/v1/me/asks/{id}/snooze`: bring the row back now. A row that is not snoozed
+   *  answers the same 204. */
+  async unsnoozeAsk(id: string): Promise<void> {
+    await this.response(`/api/v1/me/asks/${pathSegment(id)}/snooze`, idempotentWriteInit("DELETE"));
   }
 
   listAgents(): Promise<Agent[]> {

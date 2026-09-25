@@ -499,8 +499,17 @@ export interface InboxThread {
 export interface InboxRow extends Ask {
   /** The owning issue's coarse priority, or null for an unset or unassigned issue. */
   readonly priority: IssuePriority | null;
+  /** When the viewer's own snooze on this row ends, or null when they have not snoozed it.
+   *  The server surfaces it and never filters on it: the row is listed either way, and the
+   *  Inbox folds it into `Later` only while this moment is still ahead. */
+  readonly snoozed_until: string | null;
   /** The card's initial thread; `["ask-thread", id]` remains its targeted live refresh. */
   readonly thread: InboxThread;
+}
+
+/** What `PUT /api/v1/me/asks/{id}/snooze` answers: the stored moment the row returns. */
+export interface AskSnooze {
+  readonly snoozed_until: string;
 }
 
 export interface AskAnchorArtifact {
@@ -731,7 +740,7 @@ export type DeliveryCapability = (typeof DELIVERY_CAPABILITIES)[number];
 
 /**
  * How long the notification stream recognises a repeated delivery as a duplicate, in
- * milliseconds. This is the single source for that window: `bus/nats.go`'s
+ * milliseconds. This is the single source for that window: `bus/stream.go`'s
  * `streamDuplicateWindow` is generated from it (`scripts/gen-go.ts` emits
  * `contracts.DeliveryDuplicateWindow`), and the SPA reads it to decide whether re-sending a
  * failed attempt in its own mode can still be promised not to deliver twice.
