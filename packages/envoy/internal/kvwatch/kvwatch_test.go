@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -69,18 +71,18 @@ func bucket(t *testing.T, uri string) (*natsgo.Conn, natsgo.KeyValue) {
 	return conn, kv
 }
 
-// consumers counts the consumers on the test bucket's stream: each armed watcher adds one.
-func consumers(t *testing.T, conn *natsgo.Conn) int {
-	t.Helper()
-	js, err := conn.JetStream()
-	if err != nil {
-		t.Fatalf("jetstream: %v", err)
+// waitingForTheApplyLock reports whether a watch is parked on applyMu: a goroutine in
+// (*Watcher).watch whose wait reason is sync.Mutex.Lock. A test that holds an apply open waits for
+// this before it releases the apply, so the watch is already queued for the lock the release frees.
+func waitingForTheApplyLock() bool {
+	buf := make([]byte, 1<<22)
+	buf = buf[:runtime.Stack(buf, true)]
+	for _, goroutine := range strings.Split(string(buf), "\n\n") {
+		if strings.Contains(goroutine, "[sync.Mutex.Lock") && strings.Contains(goroutine, "kvwatch.(*Watcher).watch(") {
+			return true
+		}
 	}
-	info, err := js.StreamInfo("KV_kvwatch-test")
-	if err != nil {
-		t.Fatalf("stream info: %v", err)
-	}
-	return info.State.Consumers
+	return false
 }
 
 func eventually(t *testing.T, what string, cond func() bool) {
@@ -392,14 +394,14 @@ func TestStopMakesTheEndSilentAndRewatchANoOp(t *testing.T) {
 // entries after the reset that emptied the cache for the new one.
 //
 // The first watcher's apply of late1 is held while late2..late41 queue in its updates. The Rewatch
-// arms its watcher (the bucket's stream gains a consumer) and then waits for that apply, because
-// the switch takes applyMu. Every other apply takes 10 ms, so once late1's is released the first
-// watcher applies at most an entry or two before the Rewatch, blocked for far longer than
-// sync.Mutex's 1 ms starvation threshold, is handed the lock; every entry the first watcher
-// delivers after the switch must be dropped.
+// arms its watcher and then waits for that apply, because the switch takes applyMu, and the test
+// releases late1 only once the Rewatch is parked on that lock. Every other apply takes 10 ms, so
+// once late1's is released the first watcher applies at most an entry or two before the Rewatch,
+// blocked for longer than sync.Mutex's 1 ms starvation threshold, is handed the lock; every entry
+// the first watcher delivers after the switch must be dropped.
 func TestAReplacedWatchersBufferedEntryIsDropped(t *testing.T) {
 	uri := testnats.URL(t)
-	firstConn, kv := bucket(t, uri)
+	_, kv := bucket(t, uri)
 	secondConn, _ := bucket(t, uri)
 
 	var mu sync.Mutex
@@ -457,14 +459,12 @@ func TestAReplacedWatchersBufferedEntryIsDropped(t *testing.T) {
 	}
 	// The keys wait in the first watcher's updates while its apply of late1 is held.
 	time.Sleep(300 * time.Millisecond)
-	before := consumers(t, firstConn)
 	rewatched := make(chan error, 1)
 	go func() {
 		err := w.Rewatch(secondConn)
 		rewatched <- err
 	}()
-	eventually(t, "the Rewatch's watcher", func() bool { return consumers(t, firstConn) > before })
-	time.Sleep(300 * time.Millisecond)
+	eventually(t, "the Rewatch waiting for the held apply", waitingForTheApplyLock)
 	releaseApply()
 	select {
 	case err := <-rewatched:
@@ -721,7 +721,7 @@ func TestADiscardedWatchOfTheOldStreamIsDrainedUntilItEnds(t *testing.T) {
 // its own sentinel, and releasing readiness then would let a caller read a cache the current
 // watcher has only partly filled.
 func TestAReplacedWatchersSentinelDoesNotReleaseReadiness(t *testing.T) {
-	_, uri := testnats.Start(t)
+	uri := testnats.URL(t)
 	_, first := bucket(t, uri)
 	for i := range 10 {
 		if _, err := first.Put(fmt.Sprintf("k%03d", i), []byte("1")); err != nil {
@@ -754,18 +754,17 @@ func TestAReplacedWatchersSentinelDoesNotReleaseReadiness(t *testing.T) {
 		t.Fatal("the first watcher never applied k000")
 	}
 	// The first watcher is held on its first key; its buffer holds the rest of its scan and its
-	// sentinel. The Rewatch's scan sees 200 keys.
+	// sentinel. The Rewatch's scan sees 200 keys. The first watcher is released only once the
+	// Rewatch is parked on applyMu, so the switch comes before the first watcher's sentinel.
 	for i := 10; i < 200; i++ {
 		if _, err := first.Put(fmt.Sprintf("k%03d", i), []byte("1")); err != nil {
 			t.Fatalf("put: %v", err)
 		}
 	}
 	liveConn, _ := bucket(t, uri)
-	before := consumers(t, liveConn)
 	done := make(chan error, 1)
 	go func() { done <- w.Rewatch(liveConn) }()
-	eventually(t, "the Rewatch's watcher", func() bool { return consumers(t, liveConn) > before })
-	time.Sleep(300 * time.Millisecond)
+	eventually(t, "the Rewatch waiting for the held apply", waitingForTheApplyLock)
 	slow.Store(true)
 	releaseOnce.Do(func() { close(release) })
 	if err := <-done; err != nil {

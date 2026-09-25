@@ -465,10 +465,6 @@ func sendHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			return
 		}
 		item.Sender = senderStamp(d.registry, d.sessions, item.SourceSession)
-		if d.client == nil {
-			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
-			return
-		}
 		duplicate, err := d.client.PublishReportingDuplicate(item)
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, err.Error())
@@ -556,10 +552,6 @@ func publishHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			return
 		}
 		d := state.Load()
-		if d.client == nil {
-			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
-			return
-		}
 		result := roleHolderResult{state: roleHolderLive}
 		if role, ok := strings.CutPrefix(request.Topic, contracts.RoleTopicPrefix); ok {
 			var err error
@@ -808,10 +800,7 @@ func (d *listenerDeps) streamInspector() streamInfoLookup {
 	if d.streamInfo != nil {
 		return d.streamInfo
 	}
-	if d.client != nil {
-		return d.client.JS()
-	}
-	return nil
+	return d.client.JS()
 }
 
 func streamInfoWithin(ctx context.Context, inspector streamInfoLookup, streamName, subjectsFilter string) (*nats.StreamInfo, error) {
@@ -859,9 +848,6 @@ func unwiredRepositoryWarning(ctx context.Context, d *listenerDeps, topic string
 		return ""
 	}
 	inspector := d.streamInspector()
-	if inspector == nil {
-		return ""
-	}
 	streamName := d.streamName
 	if streamName == "" {
 		streamName = bus.Stream
