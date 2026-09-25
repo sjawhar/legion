@@ -239,9 +239,15 @@ func (w *Watcher) watch(kv nats.KeyValue) error {
 	if !w.stream.IsZero() && stream.Before(w.stream) {
 		// A newer watch already switched to a recreated bucket. This watcher may be on the old
 		// stream, so installing it would reset the cache the current watcher filled and feed it
-		// the old bucket's keys.
+		// the old bucket's keys. It is read and dropped until it ends: nats.go blocks a watcher
+		// whose 256-entry buffer is full, and Stop only unsubscribes, so an unread one would keep
+		// its delivery goroutine parked for the life of the process.
 		w.mu.Unlock()
 		w.applyMu.Unlock()
+		go func() {
+			for range watcher.Updates() {
+			}
+		}()
 		_ = watcher.Stop()
 		return nil
 	}

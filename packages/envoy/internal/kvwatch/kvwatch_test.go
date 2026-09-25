@@ -578,10 +578,12 @@ type heldWatchKV struct {
 	natsgo.KeyValue
 	watched chan struct{}
 	release chan struct{}
+	watcher natsgo.KeyWatcher
 }
 
 func (k *heldWatchKV) WatchAll(opts ...natsgo.WatchOpt) (natsgo.KeyWatcher, error) {
 	watcher, err := k.KeyValue.WatchAll(opts...)
+	k.watcher = watcher
 	close(k.watched)
 	<-k.release
 	return watcher, err
@@ -647,4 +649,65 @@ func TestAWatchOfTheOldStreamDoesNotReplaceANewerOne(t *testing.T) {
 		t.Fatalf("put through the handle: %v", err)
 	}
 	eventually(t, "a write through the current handle", func() bool { return into.has("after") })
+}
+
+// A discarded watch's watcher is read until it ends. nats.go delivers into a watcher's 256-entry
+// Updates buffer and blocks when it is full, and Stop only unsubscribes, so a watcher of an old
+// bucket holding more keys than that, stopped with nothing reading it, keeps its delivery goroutine
+// parked for the life of the process.
+func TestADiscardedWatchOfTheOldStreamIsDrainedUntilItEnds(t *testing.T) {
+	_, uri := testnats.Start(t)
+	conn, first := bucket(t, uri)
+	for i := range 400 {
+		if _, err := first.Put(fmt.Sprintf("old-%d", i), []byte("1")); err != nil {
+			t.Fatalf("put: %v", err)
+		}
+	}
+	held := &heldWatchKV{KeyValue: first, watched: make(chan struct{}), release: make(chan struct{})}
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			close(held.release)
+		}
+	})
+	into := newSeen()
+	w := kvwatch.New("test cache", held, into.apply, into.reset)
+	w.Start()
+	select {
+	case <-held.watched:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first watch never armed its watcher")
+	}
+	updates := held.watcher.Updates()
+	eventually(t, "the held watcher's buffer to fill", func() bool { return len(updates) == cap(updates) })
+
+	js, err := conn.JetStream()
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	if err := js.DeleteKeyValue("kvwatch-test"); err != nil {
+		t.Fatalf("delete bucket: %v", err)
+	}
+	if _, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: "kvwatch-test"}); err != nil {
+		t.Fatalf("recreate bucket: %v", err)
+	}
+	liveConn, _ := bucket(t, uri)
+	if err := w.Rewatch(liveConn); err != nil {
+		t.Fatalf("rewatch: %v", err)
+	}
+	close(held.release)
+	released = true
+
+	ended := held.watcher.Error()
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case _, open := <-ended:
+			if !open {
+				return
+			}
+		case <-deadline:
+			t.Fatal("the discarded watcher never ended: its delivery goroutine is parked on a full buffer nothing reads")
+		}
+	}
 }
