@@ -123,9 +123,15 @@ type RequestResume struct{ Claim claim.Token }
 // every claim of a tree whose linger expired, or the operator closing a tree no workflow issue
 // backs — which is the only stop that ends the tree's root claim: any other stop of a root is
 // refused, and suspending it is how its process is stopped.
+//
+// Operator says the close is the operator's own, asked of a claim through the API rather than
+// decided by the workflow. Only that one is put to TreeClosable: the workflow closes a tree whose
+// issue record it still holds every time a linger expires, and asking whether an issue backs the
+// tree would refuse exactly the closes the workflow is entitled to make.
 type RequestStop struct {
 	Claim     claim.Token
 	TreeClose bool
+	Operator  bool
 }
 
 // RequestRetry relaunches a failed or retired claim's session with fresh budgets: the workflow's
@@ -712,16 +718,23 @@ func retry(m *Machine, ctx context.Context, _ Event) error {
 // retired root would leave the orphan sweep's known set, which would then take whatever the
 // runtime holds for the tree — under a sandbox, the tree volume. Any other stop of it is refused.
 //
-// A tree close is asked of TreeClosable here rather than by its caller, so the answer and the stop
-// it decides are one critical section: a workflow issue recorded for the tree between a caller's
-// read and this stop would otherwise have its root claim closed out from under it.
+// The operator's own close is asked of TreeClosable here rather than by its caller, so the answer
+// and the stop it decides are one critical section. The workflow's close is not asked: it stops
+// every claim of a tree whose linger expired, and the issue record it still holds for that tree is
+// exactly what TreeClosable refuses on.
 func stop(m *Machine, ctx context.Context, ev Event) error {
-	if m.claim.treeRoot() && !ev.(RequestStop).TreeClose {
+	request := ev.(RequestStop)
+	if m.claim.treeRoot() && !request.TreeClose {
 		return &RefusedError{State: m.claim.State, Request: "stop", Err: rootStopRefusal(m.claim.State)}
 	}
-	if ev.(RequestStop).TreeClose && m.deps.TreeClosable != nil {
-		if err := m.deps.TreeClosable(ctx, m.claim); err != nil {
-			return &RefusedError{State: m.claim.State, Request: "close", Err: err}
+	if request.TreeClose && request.Operator && m.deps.TreeClosable != nil {
+		closable, err := m.deps.TreeClosable(ctx, m.claim)
+		if err != nil {
+			return fmt.Errorf("close %s: %w", m.claim.Token, err)
+		}
+		if !closable {
+			return &RefusedError{State: m.claim.State, Request: "close",
+				Err: fmt.Errorf("%s is a workflow issue's tree, which closes when its linger expires", m.claim.Tree)}
 		}
 	}
 	if err := m.release(ctx); err != nil {

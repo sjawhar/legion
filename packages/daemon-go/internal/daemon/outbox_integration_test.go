@@ -448,6 +448,54 @@ func TestOutboxTreeCloseRowEndsTheTreesRootClaim(t *testing.T) {
 	}
 }
 
+// The daemon wires treeClosable into every claim's machine whenever a workflow is configured, and
+// the workflow closes a tree whose linger expired while it still holds that tree's issue record —
+// the very record treeClosable refuses on. So the two must not meet: a workflow tree_close is the
+// workflow's own decision and is never put to treeClosable, while the operator's close of the same
+// tree is refused. Without this wiring in the test, a predicate that refused both looked green.
+func TestTheWorkflowsTreeCloseIsNotPutToTheOperatorsPredicate(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Done, Generation: 1, Status: "done"}
+	putOutboxIssue(t, pool, records, issue)
+	sup, runtime := newOutboxSupervisor(t, "legion", t.TempDir())
+	sup.deps.TreeClosable = treeClosable(pool, records) // exactly what daemon.go wires in production
+	token, err := claim.NewToken("legion", issue.Key, claim.RoleArchitect)
+	if err != nil {
+		t.Fatalf("claim token: %v", err)
+	}
+	machine, _, err := sup.Create(context.Background(), supervise.Claim{
+		Token: token, Project: "legion", Tree: issue.Tree, Issue: issue.Key, Role: claim.RoleArchitect, State: supervise.StateQueued,
+	}, "")
+	if err != nil {
+		t.Fatalf("create root claim: %v", err)
+	}
+
+	// The operator's close of a tree a workflow issue backs is refused, and changes nothing.
+	operatorClose := machine.Handle(context.Background(), supervise.RequestStop{Claim: token, TreeClose: true, Operator: true})
+	var refused *supervise.RefusedError
+	if !errors.As(operatorClose, &refused) || !strings.Contains(refused.Error(), "closes when its linger expires") {
+		t.Fatalf("operator close = %v, want the workflow-tree refusal", operatorClose)
+	}
+	if got := machine.Claim().State; got == supervise.StateRetired {
+		t.Fatal("a refused operator close retired the root claim")
+	}
+
+	// The workflow's own close of that same tree goes through and releases the root.
+	runner := &outbox{pool: pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets"}
+	if err := runner.execute(context.Background(), mustOutboxRow(t, issue.Key, record.SuperviseRequest{
+		Op: "tree_close", Tree: issue.Tree, Role: claim.RoleArchitect, Generation: issue.Generation,
+	}, time.Now())); err != nil {
+		t.Fatalf("the workflow's tree close: %v", err)
+	}
+	if got := machine.Claim().State; got != supervise.StateRetired {
+		t.Fatalf("root claim state after the workflow's tree close = %s, want retired", got)
+	}
+	if releases := runtime.CallsOf("Release"); len(releases) != 1 || releases[0].Released.Claim != token {
+		t.Fatalf("releases = %+v, want the root released once", releases)
+	}
+}
+
 // A start whose task meets the claim's own pending delivery — a claim a retry relaunched still
 // holds the task it was relaunched with, until that turn ends — waits: the row stays and runs again
 // on the outbox's backoff, and the wait is logged at debug, never as a failed row.
