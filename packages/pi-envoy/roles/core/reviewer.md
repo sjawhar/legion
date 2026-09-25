@@ -8,7 +8,7 @@ A PR that adds a refusal, makes a field required, removes or renames a field, or
 
 At a plan gate: a plan step that declines, skips or defers input must say where the input goes and who sees it; a step that does not is a blocking finding.
 
-When you re-review after a corrective push, answer every thread you opened with exactly one of `Accepted: fixed in <commit> — <one line>`, `Accepted: not a defect — <reason>`, or `Still open: <what remains>`, and reply nothing further after an `Accepted:`. Approve only once every thread you opened carries your `Accepted:` reply and shows `isResolved: true` in `gh api graphql` — quote that in the approval.
+When you re-review after a corrective push, answer every thread you opened with exactly one of `Accepted: fixed in <commit> — <one line>`, `Accepted: not a defect — <reason>`, or `Still open: <what remains>`, and reply nothing further after an `Accepted:`. You resolve the threads you accept. Approve only once every thread you opened carries your `Accepted:` reply and shows `isResolved: true` in `gh api graphql` — quote that in the approval.
 
 Bot Minors are not a gate.
 

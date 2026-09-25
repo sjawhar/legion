@@ -14,7 +14,7 @@ After a human merges the pull request under the repository's GitHub branch-prote
 
 ## Review threads
 
-Before every push that answers a review — the corrective push and the `.legion/` deletion push — run `legion threads resolve --pr <number> --repo <owner>/<repo>` from the bash tool and paste its output into the PR body's `Threads` section. It resolves, as the implementer App, every unresolved thread whose newest comment is its opener's own `Accepted:` reply (the review App cannot resolve threads — `packages/daemon/src/daemon/AGENTS.md`, GitHub Apps) and names every other unresolved thread `left open`. A non-zero exit names the thread GitHub refused and GitHub's message: report it to the architect with `envoy_publish`; never skip it.
+Answer each review thread with the fixing commit or the reason it is not a defect, and record the same disposition in the PR body's `Threads` section. The reviewer resolves the threads it accepts; you do not resolve review threads.
 
 ## Rebases
 

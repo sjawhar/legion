@@ -233,8 +233,7 @@ Preserve this order exactly:
 
 1. tester green and review cycles complete;
 2. on a clean review, `spawn_worker` the implementer once more to push only the `.legion/`
-   deletion (only the implementer pushes the issue branch), then the reviewer approves that
-   head. The deletion must land before that approval, which is head-pinned. An implementer
+   deletion, then the reviewer approves that head. The deletion must land before that approval, which is head-pinned. An implementer
    completion advances the status only from `in_progress` to `testing`; this push, like retro
    later, leaves the status where it is, so you set nothing by hand — on its `phase-complete`
    wake, `spawn_worker` the reviewer to approve that head (a finished reviewer may already be
@@ -271,8 +270,8 @@ it. Do not let the merger publish `READY` for an obsolete approval.
 If a worker reports that `legion threads resolve` exited 1 naming a review thread GitHub refused
 to resolve, open a `dispatch_ask` that names the thread's URL and GitHub's message for a human to
 resolve it by hand, with options for resolved / could not; the merger does not publish while it
-is open. That is the one review-thread step a human takes: the review App cannot resolve threads,
-and the implementer's and merger's runs of the command close every accepted one.
+is open. That is the one review-thread step a human takes: the reviewer's own run of the command
+closes every thread it opened and accepted.
 
 ## 7. Close
 
