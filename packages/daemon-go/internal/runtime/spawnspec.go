@@ -18,11 +18,14 @@ var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 // IsEnvName reports whether name is one a shell accepts as an environment variable's.
 func IsEnvName(name string) bool { return envName.MatchString(name) }
 
-// SecretsDir is the one directory under a runtime's state directory that holds secret files: under
-// tmux each pane's boot token, its other secrets and its grant file, the daemon's Dispatch token,
-// the operator-launched controller's secret, and the daemon's provider-env directory; in a pod, the
-// grant file on the worker container's memory-backed state volume. The daemon prunes a claim's
-// files from it when the claim's process ends.
+// SecretsDir is `<state_dir>/secrets`, where secret files live under a state directory. Under a
+// daemon's state directory the daemon prunes it (internal/daemon/secrets.go): a claim's files go
+// when the claim is written with no process, and at boot every regular file that no claim with a
+// process owns goes, except the Dispatch token file; subdirectories are never pruned. So a claim's
+// file is named for its claim token (`<claim>` or `<claim>-<name>`, as GrantFile is), and a file
+// the daemon holds across claims is a subdirectory (config.ProviderEnvDir) or is kept by name in
+// boot's prune. In a Sandbox pod it is on the worker container's memory-backed state volume, which
+// goes with the pod.
 func SecretsDir(stateDir string) string { return filepath.Join(stateDir, "secrets") }
 
 // SecretFilePath is the secret file name in SecretsDir: `<state_dir>/secrets/<name>`.
