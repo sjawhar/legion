@@ -24,7 +24,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
-	"github.com/sjawhar/legion/daemon/internal/runtime/tmux"
+	"github.com/sjawhar/legion/daemon/internal/omplaunch"
 )
 
 // pluginLoadProbe is the Oh My Pi extension the load probe hands `omp models`: the shipped probe
@@ -87,7 +87,7 @@ type pluginGate struct {
 	// workDir is the probes' working directory: the state directory, under which every pane's
 	// workspace lives, rather than wherever the operator started the daemon.
 	workDir string
-	// invocation is the OMP invocation, a shell fragment (tmux.ResolveOmpInvocation's).
+	// invocation is the OMP invocation, a shell fragment (omplaunch.ResolveInvocation's).
 	invocation string
 	// prefix is `omp_launch_prefix`.
 	prefix []string
@@ -433,7 +433,7 @@ func (g pluginGate) loadedFrom(ctx context.Context, lane pluginLane, notLoaded e
 		return "", err
 	}
 	defer os.RemoveAll(dir)
-	launch := tmux.WithOmpLaunchPrefix(g.prefix, g.invocation)
+	launch := omplaunch.WithPrefix(g.prefix, g.invocation)
 	location := ""
 	err = bootprobe.Run(ctx, "pi-legion-envoy load", g.retry, g.log, func(ctx context.Context) bootprobe.Outcome {
 		outcome, from := g.probeLoad(ctx, launch, probe, lane, notLoaded, check)
@@ -563,7 +563,7 @@ func (g pluginGate) verifyAgentsCapability(ctx context.Context) error {
 		return err
 	}
 	defer os.RemoveAll(dir)
-	launch := tmux.WithOmpLaunchPrefix(g.prefix, g.invocation)
+	launch := omplaunch.WithPrefix(g.prefix, g.invocation)
 	return bootprobe.Run(ctx, "OMP pi.agents", g.retry, g.log, func(ctx context.Context) bootprobe.Outcome {
 		r, err := g.run(ctx, `exec `+launch+` models --no-extensions --extension "$1" --json >/dev/null`, probe)
 		if err != nil {
@@ -599,7 +599,7 @@ func (g pluginGate) verifyAgentsCapability(ctx context.Context) error {
 // pass); a clean exit is a build that accepted it, so predates the setting (refused); any other
 // failure is the launch dying before the resolver ran (transient).
 func (g pluginGate) verifySessionStorage(ctx context.Context) error {
-	launch := tmux.WithOmpLaunchPrefix(g.prefix, g.invocation)
+	launch := omplaunch.WithPrefix(g.prefix, g.invocation)
 	script := "export " + sessionStorageVariable + "=" + sessionStorageProbeValue + " PI_TIMING=x; exec " + launch +
 		" --no-session --no-extensions --no-skills --no-rules --no-lsp --no-tools </dev/null >/dev/null"
 	return bootprobe.Run(ctx, "OMP session storage setting", g.retry, g.log, func(ctx context.Context) bootprobe.Outcome {
@@ -822,7 +822,7 @@ func ProbeController(ctx context.Context, p ControllerProbe) error {
 	}
 	// Neither refusal names a profile: which one Oh My Pi reads is its own resolution, which this
 	// does not port, so the words say only what Oh My Pi did, where it ran, and how.
-	launch := tmux.WithOmpLaunchPrefix(p.Prefix, p.Omp)
+	launch := omplaunch.WithPrefix(p.Prefix, p.Omp)
 	location, err := g.loadedFrom(ctx, pluginLane{}, fmt.Errorf("Oh My Pi, launched as the controller launches it (%q, in %s), did not load pi-legion-envoy (not installed, disabled, or unregistered). Install the @sjawhar/pi-legion-envoy release built from this daemon's commit into the Oh My Pi the controller runs, and check it with `cd %s && %s plugin list` under the controller's environment: a .env or a project plugin root there applies",
 		launch, p.WorkDir, p.WorkDir, launch), promptCheck{})
 	if err != nil {

@@ -253,7 +253,7 @@ func TestNewRefusesAProviderDispatchTokenOnlyWhenDispatchIsConfigured(t *testing
 			}
 			if tc.dispatch {
 				opts.DispatchURL = "http://127.0.0.1:18766"
-				opts.DispatchTokenFile = filepath.Join(stateDir, "secrets", DispatchTokenFileName)
+				opts.DispatchTokenFile = filepath.Join(stateDir, "secrets", runtime.DispatchTokenFileName)
 			}
 			_, err := New(opts)
 			want := "tmux runtime: provider key DISPATCH_TOKEN would not reach OMP: every pane carries DISPATCH_TOKEN_FILE"
@@ -277,7 +277,7 @@ func TestRuntimeOwnedIsWhatEveryPaneIsToldByTheRuntime(t *testing.T) {
 	in := paneInputs{
 		stateDir: "/state", workspace: "/state/workspaces/LEGION-43", daemonURL: "http://127.0.0.1:13370",
 		envoyURL: "http://127.0.0.1:9020", natsURLs: []string{"nats://a:4222"},
-		dispatchURL: "http://127.0.0.1:18766", dispatchTokenFile: "/state/secrets/" + DispatchTokenFileName,
+		dispatchURL: "http://127.0.0.1:18766", dispatchTokenFile: "/state/secrets/" + runtime.DispatchTokenFileName,
 		tools: map[string]string{"LEGION_GH_PATH": "/usr/bin/gh", "LEGION_GIT_PATH": "/usr/bin/git", "LEGION_JJ_PATH": "/usr/bin/jj"},
 	}
 	told := map[string]bool{}
