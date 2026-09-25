@@ -10,7 +10,8 @@
 //     prints one {"name","filters","pending"} line per durable consumer whose name starts with the
 //     prefix
 //   bun scripts/e2e/lib/nats-stream.ts delete <nats-url> <stream> <name>
-//     deletes one durable consumer; one that does not exist is already gone, and exits 0
+//     deletes one durable consumer and prints "deleted"; one that does not exist is already gone:
+//     it prints "absent" and exits 0 too, so a caller says which it was
 import { connect, DeliverPolicy } from "nats";
 
 function refuse(message: string): never {
@@ -71,8 +72,10 @@ try {
     const jsm = await nc.jetstreamManager();
     try {
       await jsm.consumers.delete(stream, argument);
+      process.stdout.write("deleted\n");
     } catch (error) {
       if (!String(error).includes("consumer not found")) throw error;
+      process.stdout.write("absent\n");
     }
   } else {
     refuse(`unknown command ${command}`);

@@ -74,6 +74,7 @@ ok=
 torn_down=
 snapshotted=
 compared=
+locked=
 timeout_hook=
 daemon_pid=
 watch_pid=
@@ -97,7 +98,15 @@ begin() {
   echo "== $check"
 }
 note() { echo "   $*"; }
-pass() { echo "CHECK $check: PASS"; }
+# pass ends a development run once its STAGE4B_UNTIL checkpoint has passed.
+pass() {
+  echo "CHECK $check: PASS"
+  [ "$until" != "$check" ] || {
+    ok=1
+    echo "stage 4b e2e: development run until $until finished (not the proof)"
+    exit 0
+  }
+}
 fail() {
   echo "CHECK $check: FAIL: $*"
   exit 1
@@ -113,13 +122,6 @@ blocked() {
 # shellcheck source-path=SCRIPTDIR source=lib/namespace-rig.sh
 . "$root/scripts/e2e/lib/namespace-rig.sh"
 
-# stop_here CHECKPOINT ends a development run once CHECKPOINT has passed.
-stop_here() {
-  [ "$until" = "$1" ] || return 0
-  ok=1
-  echo "stage 4b e2e: development run until $until finished (not the proof)"
-  exit 0
-}
 
 rk() { kubectl --kubeconfig "$runtime_kubeconfig" --context "$runtime_context" "$@"; }
 
@@ -261,12 +263,15 @@ EOF
 }
 start_daemon() {
   env -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -u GH_AGENT_APP_PRIVATE_KEY_B64 \
-    -u GH_REVIEW_APP_PRIVATE_KEY_B64 "$work/legion" start --config "$work/legion.yaml" >>"$daemon_log" 2>&1 &
+    -u GH_REVIEW_APP_PRIVATE_KEY_B64 "$work/legion" start --config "$work/legion.yaml" >>"$daemon_log" 2>&1 9>&- &
   daemon_pid=$!
   timeout_hook=report_boot
-  until_true 900 "the Go daemon to boot and answer /healthz" curl -fsS "http://$host:$port_daemon/healthz"
+  # A daemon that exits (a refused image probe, a config it will not run) ends the wait at once.
+  until_true 900 "the Go daemon to boot and answer /healthz" daemon_answers_or_exited
   timeout_hook=
+  kill -0 "$daemon_pid" 2>/dev/null || fail "the Go daemon exited before it answered /healthz: $(tail -3 "$daemon_log" | cut -c1-300 | tr '\n' ' ')"
 }
+daemon_answers_or_exited() { ! kill -0 "$daemon_pid" 2>/dev/null || curl -fsS "http://$host:$port_daemon/healthz"; }
 report_boot() { note "the daemon log's tail: $(tail -5 "$daemon_log" | cut -c1-300)"; }
 log_lines() { jq -R -c --arg m "$1" 'fromjson? | select(.msg == $m)' "$daemon_log"; }
 
@@ -301,10 +306,13 @@ pod_watch_verdict() {
   [ ! -s "$work/pod-watch-verdict.txt" ]
 }
 start_pod_watch() {
-  op get pods -l "legion.dev/project=$run_label" -w -o json --output-watch-events >"$evidence/pod-watch.json" 2>"$evidence/logs/pod-watch.err" &
+  # kubectl itself, not a subshell around a function, so the recorded pid is what cleanup stops; and
+  # fd 9, the run lock, stays out of every background child, so none can outlive the run holding it.
+  kubectl --context "$operator" -n "$namespace" get pods -l "legion.dev/project=$run_label" -w -o json --output-watch-events \
+    >"$evidence/pod-watch.json" 2>"$evidence/logs/pod-watch.err" 9>&- &
   watch_pid=$!
   kubectl --context "$operator" get events -A -w -o json --field-selector involvedObject.kind=Node \
-    >"$evidence/node-events.json" 2>"$evidence/logs/node-events.err" &
+    >"$evidence/node-events.json" 2>"$evidence/logs/node-events.err" 9>&- &
   events_pid=$!
   ( # Node memory for the nodes the run's pods are on, every 30 s (metrics-server).
     trap - EXIT ERR
@@ -317,7 +325,7 @@ start_pod_watch() {
       done
       sleep 30
     done
-  ) >>"$evidence/node-memory.txt" 2>&1 &
+  ) >>"$evidence/node-memory.txt" 2>&1 9>&- &
   sampler_pid=$!
 }
 
@@ -485,7 +493,11 @@ consumers_prefix="legion-go-$project-"
 delete_consumers() {
   local name
   for name in "${consumers_prefix}dispatch" "${consumers_prefix}github"; do
-    nats_stream delete "$nats_url" "$stream" "$name" 2>/dev/null && note "deleted the run's durable consumer $name from production NATS"
+    case "$(nats_stream delete "$nats_url" "$stream" "$name" 2>&1)" in
+      deleted) note "deleted the run's durable consumer $name from production NATS" ;;
+      absent) ;;
+      *) note "could not delete the durable consumer $name from production NATS; it may remain" ;;
+    esac
   done
   return 0
 }
@@ -506,12 +518,16 @@ cleanup() {
   stop_pid "$watch_pid"
   stop_pid "$events_pid"
   stop_pid "$sampler_pid"
-  teardown
-  if [ -z "$compared" ] && [ -n "$snapshotted" ]; then (namespace_clean) || status=1; fi
-  op delete pod -l "legion.dev/e2e-control" --ignore-not-found --wait=false >/dev/null 2>&1
-  delete_consumers
-  [ -z "$fixture_branch" ] || gh api -X DELETE "repos/$repo/git/refs/heads/$fixture_branch" >/dev/null 2>&1
-  if [ -z "$audited" ] && [ -n "$prod_baseline" ]; then production_audit || status=1; fi
+  # The namespace label, the durable consumers and the project are shared by every Stage 4b run,
+  # so a run that never took the lock owns none of them and removes nothing.
+  if [ -n "$locked" ]; then
+    teardown
+    if [ -z "$compared" ] && [ -n "$snapshotted" ]; then (namespace_clean) || status=1; fi
+    op delete pod -l "legion.dev/e2e-control" --ignore-not-found --wait=false >/dev/null 2>&1
+    delete_consumers
+    [ -z "$fixture_branch" ] || gh api -X DELETE "repos/$repo/git/refs/heads/$fixture_branch" >/dev/null 2>&1
+    if [ -z "$audited" ] && [ -n "$prod_baseline" ]; then production_audit || status=1; fi
+  fi
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null; done
   docker rm -f "$pg_container" >/dev/null 2>&1
   rm -rf "$HOME/.omp/profiles/$profile" "$work"
@@ -579,6 +595,7 @@ case "$image" in *@sha256:*) ;; *) fail "LEGION_E2E_IMAGE must be the worker ima
 mkdir -p "$(dirname "$lock")"
 exec 9>"$lock"
 flock -n 9 || fail "another Stage 4b run holds $lock: one run at a time"
+locked=1
 for port in "$port_daemon" "$port_worker_stream"; do
   [ -z "$(ss -Hltn "sport = :$port")" ] || fail "port $port is taken on the devbox: $(ss -Hltnp "sport = :$port")"
 done
@@ -597,7 +614,12 @@ jq -n --arg revision "$revision" --arg image "$image" --arg plugin "$(jq -r '.na
   --arg started "$(date -u +%FT%TZ)" '{revision: $revision, image: $image, plugin: $plugin, started: $started}' >"$evidence/run.json"
 note "source $revision; image $image; plugin $(jq -r .plugin "$evidence/run.json")"
 note "daemon http://$host:$port_daemon, worker stream tcp://$host:$port_worker_stream; runtime identity context $runtime_context in $runtime_kubeconfig; operator context $operator"
-[ -z "$until" ] || note "STAGE4B_UNTIL=$until: a development run, never the proof"
+if [ -n "$until" ]; then
+  # A name no checkpoint has would run the whole proof as a development run.
+  grep -qE "^begin \"?${until}\"?\$" "$root/scripts/e2e/stage4b-sandbox-tree.sh" ||
+    fail "STAGE4B_UNTIL=$until names no checkpoint of this driver"
+  note "STAGE4B_UNTIL=$until: a development run, never the proof"
+fi
 read_bearers
 pass
 
@@ -671,7 +693,6 @@ while read -r url answer; do
   note "[pod] $url → $answer"
 done <"$evidence/reach.txt"
 pass
-stop_here preflight
 
 begin pod-watch
 snapshot "$evidence/namespace-before.txt" || fail "the operator could not list namespace $namespace"
@@ -712,7 +733,6 @@ kubectl --context "$operator" get events -n "$namespace" --field-selector "invol
 note "the first probe attempt's timeline (scheduling, node launch, image pull): $evidence/probe-timeline.json"
 production_baseline
 pass
-stop_here boot
 
 begin admitted-issue-cap
 tree1=$(new_issue "Stage 4b proof tree 1: the whole workflow ($work)")
@@ -725,10 +745,9 @@ until_true 300 "two roots admitted and one waiting in rank order" sh -c \
 state_file admission
 note "active $(jq -c .admission.active "$evidence/admission.json"), waiting $(jq -c .admission.waiting "$evidence/admission.json")"
 shape_pid=
-pod_shape_watcher &
+pod_shape_watcher 9>&- &
 shape_pid=$!
 pass
-stop_here admitted-issue-cap
 
 # drive_spec ISSUE: the architect writes its spec and registers the gate; with gates.design off the
 # daemon approves the registered version itself and the issue moves to planning.
