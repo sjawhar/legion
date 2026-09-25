@@ -1,16 +1,10 @@
 import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
-import {
-  DISPATCH_KEY_PATTERN,
-  type IssueKey,
-  LEGION_ROLES,
-  type LegionRole,
-} from "@legion/contracts";
+import { DISPATCH_KEY_PATTERN, type IssueKey, type LegionRole } from "@legion/contracts";
 import { parse } from "yaml";
 import { z } from "zod";
-import { type ImageDigestRef, parseImageDigestRef } from "./image-ref";
-import { SESSION_SQL_DSN_FILE_VARIABLE, SESSION_STORAGE_VARIABLE } from "./k8s-manifests";
+import type { ImageDigestRef } from "./image-ref";
 import { DEFAULT_OMP_INVOCATION } from "./omp-pin";
 import { readSecretPointer } from "./secrets";
 
@@ -46,13 +40,6 @@ export interface RoleResources {
  * holds its connection URL. */
 export type SessionStore = { kind: "pvc" } | { kind: "postgres"; dsnSecretKey: string };
 export type SessionStoreName = SessionStore["kind"];
-/** The names `session_store` accepts, in the order the refusal lists them. Checked against the
- * union both ways by the compiler (`Record<SessionStoreName, true>` refuses a missing or a stray
- * key), so a third store cannot be added to one without the other. */
-const SESSION_STORE_NAMES = Object.keys({
-  pvc: true,
-  postgres: true,
-} satisfies Record<SessionStoreName, true>) as SessionStoreName[];
 
 export interface KubernetesScheduling {
   nodeSelector: Record<string, string>;
@@ -245,8 +232,6 @@ export interface DaemonConfig {
 
 export interface LoadedConfigFile {
   fields: Record<string, unknown>;
-  /** The parsed `runtime.kubernetes` block, when the file selected the Kubernetes runtime by it. */
-  kubernetes?: KubernetesRuntimeConfig;
 }
 
 export interface LoadConfigFileOptions {
@@ -311,44 +296,16 @@ const MAX_TIMER_HOURS = Math.floor(MAX_TIMER_SECONDS / 3600);
 /** Also the per-attempt budget `legion probe-image` uses (`IMAGE_PROBE_TIMEOUT_MS`). */
 export const DEFAULT_SLOW_COMMAND_TIMEOUT_SECONDS = 300;
 
-const RESOURCE_PROFILE_SCHEMA: ConfigSchema = {
-  requests: { cpu: null, memory: null, ephemeral_storage: null },
-  limits: { cpu: null, memory: null, ephemeral_storage: null },
-};
+/** The refusal every source of `runtime: kubernetes` (the file, `LEGION_RUNTIME`, a programmatic
+ * override) gets, before anything else in the file is read: the Go daemon (`packages/daemon-go`)
+ * is the one that runs on Kubernetes. */
+const KUBERNETES_REFUSAL =
+  "is refused: the TypeScript daemon no longer runs on Kubernetes; use the Go daemon (packages/daemon-go)";
 
 const CONFIG_SCHEMA: ConfigSchema = {
   project: null,
   port: null,
-  runtime: {
-    kubernetes: {
-      namespace: null,
-      image: null,
-      storage_class: null,
-      tree_volume: null,
-      kubeconfig: null,
-      session_store: null,
-      session_dsn_secret: null,
-      resources: {
-        small: RESOURCE_PROFILE_SCHEMA,
-        medium: RESOURCE_PROFILE_SCHEMA,
-        large: RESOURCE_PROFILE_SCHEMA,
-      },
-      role_profiles: {
-        architect: null,
-        planner: null,
-        implementer: null,
-        tester: null,
-        reviewer: null,
-        merger: null,
-      },
-      scheduling: {
-        node_selector: null,
-        tolerations: null,
-        priority_class: null,
-      },
-    },
-    [CONFIG_ANY_KEY]: null,
-  },
+  runtime: null,
   daemon_url: null,
   bind: null,
   envoy_url: null,
@@ -618,10 +575,13 @@ export function requireNonEmpty(value: string, field: string): string {
 
 function parseRuntime(value: string | undefined, field: string): RuntimeName | undefined {
   if (value === undefined) return undefined;
-  if (!RUNTIMES.some((runtime) => runtime === value)) {
-    throw new Error(`${field} must be 'tmux' or 'kubernetes'`);
+  if (value === "kubernetes") {
+    throw new Error(
+      `${field === "runtime" ? "runtime: kubernetes" : `${field}=kubernetes`} ${KUBERNETES_REFUSAL}`
+    );
   }
-  return value as RuntimeName;
+  if (value !== "tmux") throw new Error(`${field} must be 'tmux'`);
+  return value;
 }
 
 export function validateUrl(value: string, field: string): string {
@@ -988,238 +948,6 @@ function parseGates(value: unknown, field: string): DaemonConfig["gates"] | unde
   return { design };
 }
 
-const QUANTITY_PATTERN = /^[0-9]+(\.[0-9]+)?(m|k|Ki|M|Mi|G|Gi|T|Ti|P|Pi|E|Ei)?$/;
-
-/** A Kubernetes quantity (e.g. `20Gi`, `500m`, `2`): a string in the file, or a bare YAML number
- * (`tree_volume: 20` parses as a number, not the string `"20"`), coerced to its decimal text and
- * validated against the same suffix set Kubernetes itself accepts. */
-function readQuantity(value: unknown, field: string): string | undefined {
-  if (value === undefined || value === null) return undefined;
-  const text = typeof value === "number" ? String(value) : value;
-  if (typeof text !== "string" || !QUANTITY_PATTERN.test(text)) {
-    throw new Error(`${field} must be a Kubernetes quantity (e.g. 20Gi)`);
-  }
-  return text;
-}
-
-function readResourceQuantities(
-  value: unknown,
-  field: string,
-  base: { cpu: string; memory: string; ephemeralStorage: string }
-): { cpu: string; memory: string; ephemeralStorage: string } {
-  if (value === undefined || value === null) return { ...base };
-  const parsed = UnknownRecordSchema.safeParse(value);
-  if (!parsed.success) throw new Error(`${field} must be a mapping`);
-  return {
-    cpu: readQuantity(parsed.data.cpu, `${field}.cpu`) ?? base.cpu,
-    memory: readQuantity(parsed.data.memory, `${field}.memory`) ?? base.memory,
-    ephemeralStorage:
-      readQuantity(parsed.data.ephemeral_storage, `${field}.ephemeral_storage`) ??
-      base.ephemeralStorage,
-  };
-}
-
-function parseResourceProfile(value: unknown, field: string, base: RoleResources): RoleResources {
-  if (value === undefined || value === null) {
-    return { requests: { ...base.requests }, limits: { ...base.limits } };
-  }
-  const parsed = UnknownRecordSchema.safeParse(value);
-  if (!parsed.success) throw new Error(`${field} must be a mapping`);
-  return {
-    requests: readResourceQuantities(parsed.data.requests, `${field}.requests`, base.requests),
-    limits: readResourceQuantities(parsed.data.limits, `${field}.limits`, base.limits),
-  };
-}
-
-function parseResources(value: unknown, field: string): Record<ResourceProfileName, RoleResources> {
-  const parsed =
-    value === undefined || value === null ? undefined : UnknownRecordSchema.safeParse(value);
-  if (parsed && !parsed.success) throw new Error(`${field} must be a mapping`);
-  const data = parsed?.data ?? {};
-  return {
-    small: parseResourceProfile(data.small, `${field}.small`, DEFAULT_KUBERNETES_RESOURCES.small),
-    medium: parseResourceProfile(
-      data.medium,
-      `${field}.medium`,
-      DEFAULT_KUBERNETES_RESOURCES.medium
-    ),
-    large: parseResourceProfile(data.large, `${field}.large`, DEFAULT_KUBERNETES_RESOURCES.large),
-  };
-}
-
-function parseRoleProfiles(value: unknown, field: string): Record<LegionRole, ResourceProfileName> {
-  const parsed =
-    value === undefined || value === null ? undefined : UnknownRecordSchema.safeParse(value);
-  if (parsed && !parsed.success) throw new Error(`${field} must be a mapping`);
-  const data = parsed?.data ?? {};
-  const result = { ...DEFAULT_ROLE_PROFILES };
-  for (const role of LEGION_ROLES) {
-    const raw = data[role];
-    if (raw === undefined) continue;
-    const roleField = `${field}.${role}`;
-    const profile = readString(raw, roleField);
-    if (
-      profile === undefined ||
-      !RESOURCE_PROFILE_NAMES.some((candidate) => candidate === profile)
-    ) {
-      throw new Error(`${roleField} must be one of small, medium, large`);
-    }
-    result[role] = profile as ResourceProfileName;
-  }
-  return result;
-}
-
-/** `runtime.kubernetes` (file-only, `github_apps` pattern): a mapping validated field-by-field,
- * with `resources`/`role_profiles` overriding the root spec §3 defaults per present key. Unknown
- * keys are rejected earlier by `collectUnknownKeys` against `CONFIG_SCHEMA`. */
-function parseScheduling(value: unknown, field: string): KubernetesScheduling {
-  const parsed =
-    value === undefined || value === null
-      ? { success: true as const, data: {} }
-      : UnknownRecordSchema.safeParse(value);
-  if (!parsed.success) throw new Error(`${field} must be a mapping`);
-  const data = parsed.data;
-  const nodeSelector = readStringRecord(data.node_selector, `${field}.node_selector`) ?? {};
-  const rawTolerations = data.tolerations;
-  if (rawTolerations !== undefined && !Array.isArray(rawTolerations)) {
-    throw new Error(`${field}.tolerations must be an array`);
-  }
-  const tolerations = (rawTolerations ?? []).map((raw, index) => {
-    const entry = UnknownRecordSchema.safeParse(raw);
-    const entryField = `${field}.tolerations[${index}]`;
-    if (!entry.success) throw new Error(`${entryField} must be a mapping`);
-    for (const name of Object.keys(entry.data)) {
-      if (!["key", "operator", "value", "effect"].includes(name)) {
-        throw new Error(`${entryField}.${name} is unknown`);
-      }
-    }
-    const key = requireNonEmpty(
-      readString(entry.data.key, `${entryField}.key`) ?? "",
-      `${entryField}.key`
-    );
-    const operator = readString(entry.data.operator, `${entryField}.operator`);
-    if (operator !== "Equal" && operator !== "Exists") {
-      throw new Error(`${entryField}.operator must be Equal or Exists`);
-    }
-    const effect = readString(entry.data.effect, `${entryField}.effect`);
-    if (effect !== "NoSchedule" && effect !== "NoExecute" && effect !== "PreferNoSchedule") {
-      throw new Error(`${entryField}.effect must be NoSchedule, NoExecute, or PreferNoSchedule`);
-    }
-    const value = readString(entry.data.value, `${entryField}.value`);
-    if (operator === "Exists" && value !== undefined && value !== "") {
-      throw new Error(`${entryField}.value must be omitted with operator Exists`);
-    }
-    return {
-      key,
-      operator: operator as "Equal" | "Exists",
-      ...(value !== undefined ? { value } : {}),
-      effect: effect as "NoSchedule" | "NoExecute" | "PreferNoSchedule",
-    };
-  });
-  const priorityClassName = readString(data.priority_class, `${field}.priority_class`);
-  return {
-    nodeSelector,
-    tolerations,
-    ...(priorityClassName !== undefined
-      ? { priorityClassName: requireNonEmpty(priorityClassName, `${field}.priority_class`) }
-      : {}),
-  };
-}
-
-function parseKubernetesRuntime(value: unknown, configDir: string): KubernetesRuntimeConfig {
-  const parsed = UnknownRecordSchema.safeParse(value);
-  if (!parsed.success) throw new Error("runtime.kubernetes must be a mapping");
-  const data = parsed.data;
-
-  const namespaceRaw = readString(data.namespace, "runtime.kubernetes.namespace");
-  if (namespaceRaw === undefined) {
-    throw new Error("runtime.kubernetes.namespace is required");
-  }
-  const namespace = requireNonEmpty(namespaceRaw, "runtime.kubernetes.namespace");
-
-  const imageRaw = readString(data.image, "runtime.kubernetes.image");
-  if (imageRaw === undefined) {
-    throw new Error("runtime.kubernetes.image is required");
-  }
-  const image = parseImageDigestRef(imageRaw);
-
-  const storageClassRaw = readString(data.storage_class, "runtime.kubernetes.storage_class");
-  const storageClass =
-    storageClassRaw === undefined
-      ? undefined
-      : requireNonEmpty(storageClassRaw, "runtime.kubernetes.storage_class");
-
-  const treeVolume = readQuantity(data.tree_volume, "runtime.kubernetes.tree_volume") ?? "20Gi";
-
-  const kubeconfigRaw = readString(data.kubeconfig, "runtime.kubernetes.kubeconfig");
-  const kubeconfig =
-    kubeconfigRaw === undefined
-      ? undefined
-      : path.isAbsolute(kubeconfigRaw)
-        ? kubeconfigRaw
-        : path.resolve(configDir, kubeconfigRaw);
-
-  return {
-    namespace,
-    image,
-    storageClass,
-    treeVolume,
-    kubeconfig,
-    sessionStore: parseSessionStore(data.session_store, data.session_dsn_secret),
-    resources: parseResources(data.resources, "runtime.kubernetes.resources"),
-    roleProfiles: parseRoleProfiles(data.role_profiles, "runtime.kubernetes.role_profiles"),
-    scheduling: parseScheduling(data.scheduling, "runtime.kubernetes.scheduling"),
-  };
-}
-
-/** Kubernetes' own rule for a Secret `data` key — and what keeps `<providers mount>/<key>` a single
- * path segment. The class is named once so the refusal quotes exactly what the pattern tests. */
-const SECRET_DATA_KEY_CLASS = "[-._a-zA-Z0-9]+";
-const SECRET_DATA_KEY_PATTERN = new RegExp(`^${SECRET_DATA_KEY_CLASS}$`);
-
-/** `runtime.kubernetes.session_store` (default `pvc`) with its cross-field key: `postgres`
- * requires `session_dsn_secret`, a Secret data key that is not one of the two variables the pod
- * receives — the worker shim exports every providers key into Oh My Pi's environment under the
- * key's own name, so such a key would shadow the daemon's value; `pvc` refuses the key rather than
- * silently ignoring it (the `omp_launch_prefix` rule). */
-function parseSessionStore(storeValue: unknown, keyValue: unknown): SessionStore {
-  const storeField = "runtime.kubernetes.session_store";
-  const keyField = "runtime.kubernetes.session_dsn_secret";
-  const requested = readString(storeValue, storeField) ?? "pvc";
-  const store = SESSION_STORE_NAMES.find((name) => name === requested);
-  if (store === undefined) {
-    throw new Error(
-      `${storeField} must be ${SESSION_STORE_NAMES.map((name) => `'${name}'`).join(" or ")}`
-    );
-  }
-  const key = readString(keyValue, keyField);
-  switch (store) {
-    case "pvc":
-      if (key !== undefined) {
-        throw new Error(`${keyField} is not used when ${storeField} is pvc; remove it`);
-      }
-      return { kind: "pvc" };
-    case "postgres": {
-      if (key === undefined) {
-        throw new Error(`${keyField} is required when ${storeField} is postgres`);
-      }
-      const dsnSecretKey = requireNonEmpty(key, keyField);
-      if (!SECRET_DATA_KEY_PATTERN.test(dsnSecretKey)) {
-        throw new Error(`${keyField} must be a Secret data key (${SECRET_DATA_KEY_CLASS})`);
-      }
-      if (
-        dsnSecretKey === SESSION_STORAGE_VARIABLE ||
-        dsnSecretKey === SESSION_SQL_DSN_FILE_VARIABLE
-      ) {
-        throw new Error(
-          `${keyField} must not be ${SESSION_STORAGE_VARIABLE} or ${SESSION_SQL_DSN_FILE_VARIABLE}: the worker shim exports every providers key into Oh My Pi's environment, and that name would shadow the daemon's value`
-        );
-      }
-      return { kind: "postgres", dsnSecretKey };
-    }
-  }
-}
-
 function fileString(fields: Record<string, unknown>, key: string): string | undefined {
   const value = fields[key];
   return typeof value === "string" ? value : undefined;
@@ -1261,10 +989,17 @@ export function loadConfigFromFile(
     );
   }
   if (parsed === undefined || parsed === null) return { fields: {} };
-  let kubernetes: KubernetesRuntimeConfig | undefined;
   const parsedRoot = UnknownRecordSchema.safeParse(parsed);
   if (!parsedRoot.success) throw new Error("Config file root must be a mapping");
   const config = parsedRoot.data;
+  const runtimeValue = config.runtime;
+  const runtimeMapping = UnknownRecordSchema.safeParse(runtimeValue);
+  if (
+    runtimeValue === "kubernetes" ||
+    (runtimeMapping.success && Object.hasOwn(runtimeMapping.data, "kubernetes"))
+  ) {
+    throw new Error(`runtime: kubernetes ${KUBERNETES_REFUSAL}`);
+  }
 
   const unknownKeys: string[] = [];
   collectUnknownKeys(config, CONFIG_SCHEMA, [], unknownKeys);
@@ -1277,19 +1012,10 @@ export function loadConfigFromFile(
   if (project !== undefined) fields.legionId = requireNonEmpty(project, "project");
   const port = readPositiveInteger(config.port, "port", 65535);
   if (port !== undefined) fields.port = port;
-  const runtimeValue = config.runtime;
   if (typeof runtimeValue === "string") {
     fields.runtime = parseRuntime(runtimeValue, "runtime");
   } else if (runtimeValue !== undefined && runtimeValue !== null) {
-    const mapping = UnknownRecordSchema.safeParse(runtimeValue);
-    const keys = mapping.success ? Object.keys(mapping.data) : [];
-    if (!mapping.success || keys.length !== 1 || keys[0] !== "kubernetes") {
-      throw new Error(
-        "runtime accepts tmux, kubernetes, or a mapping with the single key kubernetes"
-      );
-    }
-    fields.runtime = "kubernetes";
-    kubernetes = parseKubernetesRuntime(mapping.data.kubernetes, configDir);
+    throw new Error("runtime must be 'tmux'");
   }
   const daemonUrl = readString(config.daemon_url, "daemon_url");
   if (daemonUrl !== undefined) fields.daemonUrl = validateUrl(daemonUrl, "daemon_url");
@@ -1418,7 +1144,7 @@ export function loadConfigFromFile(
   const githubApps = loadGitHubApps(config.github_apps, options.resolveSecrets ?? true);
   if (githubApps !== undefined) fields.githubApps = githubApps;
 
-  return kubernetes === undefined ? { fields } : { fields, kubernetes };
+  return { fields };
 }
 
 /** The one rule that turns the operator-written `project` (`legion.yaml`'s value, `LEGION_ID`,
@@ -1458,42 +1184,16 @@ export function resolveDaemonConfig(
   if (!Number.isSafeInteger(port.value) || port.value > 65535) {
     throw new Error("LEGION_DAEMON_PORT must be a valid TCP port");
   }
+  if (opts.cliOverrides?.runtime?.name === "kubernetes") {
+    throw new Error(`runtime: kubernetes ${KUBERNETES_REFUSAL}`);
+  }
   const runtime = resolveValue<RuntimeName>(
     opts.cliOverrides?.runtime?.name,
     parseRuntime(fileString(fields, "runtime"), "runtime"),
     parseRuntime(env.LEGION_RUNTIME, "LEGION_RUNTIME"),
     "tmux"
   );
-  // One value for the runtime and its block: the file's `runtime.kubernetes` mapping is the only
-  // source of the block, so a bare `runtime: kubernetes` (file, env, or cli) has nothing to run.
-  let runtimeConfig: RuntimeConfig;
-  if (runtime.value === "kubernetes") {
-    const kubernetes =
-      opts.cliOverrides?.runtime?.name === "kubernetes"
-        ? opts.cliOverrides.runtime
-        : opts.configFile?.kubernetes;
-    if (kubernetes === undefined) {
-      throw new Error(
-        "runtime.kubernetes is required when runtime is kubernetes: set runtime.kubernetes.namespace and runtime.kubernetes.image in legion.yaml"
-      );
-    }
-    runtimeConfig = { ...kubernetes, name: "kubernetes" };
-  } else {
-    runtimeConfig = { name: "tmux" };
-  }
-  if (
-    runtime.source === "config" &&
-    env.LEGION_RUNTIME !== undefined &&
-    env.LEGION_RUNTIME !== runtime.value
-  ) {
-    console.warn(
-      `[legion] LEGION_RUNTIME=${env.LEGION_RUNTIME} ignored: legion.yaml's ${
-        runtime.value === "kubernetes"
-          ? "runtime.kubernetes block selects kubernetes"
-          : "runtime selects tmux"
-      } (the file outranks the environment)`
-    );
-  }
+  const runtimeConfig: RuntimeConfig = { name: "tmux" };
   // `LEGION_DAEMON_URL` is both this env key and the variable every Legion pane carries, so a
   // daemon started from inside a pane inherits the OUTER daemon's URL from its environment and
   // would tell its own processes to register there. Under tmux the only correct value is the
