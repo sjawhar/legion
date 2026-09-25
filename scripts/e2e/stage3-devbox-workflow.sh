@@ -17,7 +17,8 @@ set -Eeuo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
 work=$(mktemp -d /tmp/legion-e2e3.XXXXXXXX)
 # Evidence survives every outcome: logs, captured state, negative controls, the production audit,
-# and every agent transcript. Cleanup removes processes, containers, sockets, and profiles only.
+# and every agent transcript. Cleanup stops processes; removes containers, sockets, and profiles; and
+# closes the run's own pull requests on the smoke repository, deleting their branches.
 evidence=${STAGE3_EVIDENCE_DIR:-$(mktemp -d /tmp/legion-e2e3-evidence.XXXXXXXX)}
 mkdir -p "$evidence/logs" "$evidence/transcripts"
 ok=
@@ -93,6 +94,7 @@ cleanup() {
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null || true; done
   docker rm -f "$pg_container" "$nats_container" >/dev/null 2>&1 || true
   collect_transcripts
+  close_unpassed_run_pull_requests
   rm -rf "$HOME/.omp/profiles/$profile" "$work/model-gateway-cache" || true
   if [ -n "${ok:-}" ]; then
     rm -rf "$work" || true
@@ -1029,6 +1031,16 @@ note "the kept transcripts hold the same: ${kept%%, every one*}"
 pass
 
 begin cleanup-is-complete
+# The proof opens a pull request for every proof it drives and merges only the one the human-merge
+# check merges, so every run leaves branches and open pull requests on the smoke repository (the
+# held-worker and outbox proofs', at least). They outlive the run and pile up there; smoke-main-clean
+# reads only main's tree, so it never sees them. This run's own are closed here (run_pull_requests
+# names them), and the EXIT trap closes them for a run that fails or is interrupted.
+closed=$(close_run_pull_requests) || fail "closing this run's pull requests on $repo: $closed"
+open=$(run_pull_requests) || fail "list the open pull requests on $repo (gh's reason is on stderr)"
+[ -z "$open" ] || fail "this run's pull requests are still open on $repo: $(printf '%s' "$open" | tr '\n' ' ')"
+note "${closed:-no pull request of this run was open on $repo}"
+
 # The isolated OMP profile and the scratch work directory go last, once the transcripts are kept.
 rm -rf "$HOME/.omp/profiles/$profile"
 [ ! -e "$HOME/.omp/profiles/$profile" ] || fail "the isolated OMP profile remains"
