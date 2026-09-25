@@ -10,6 +10,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 )
 
@@ -112,7 +113,7 @@ type FetchRequest struct {
 // FeedRepository is where Fetch clones repository under a feed directory, and where Provision
 // clones and fetches it from.
 func FeedRepository(feed, repository string) (string, error) {
-	owner, repo, err := splitRepository(repository)
+	owner, repo, err := ghrepo.Split("workspace repository", repository)
 	if err != nil {
 		return "", err
 	}

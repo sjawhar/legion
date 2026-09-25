@@ -306,7 +306,7 @@ func TestWorkspaceInitRefusesBeforeTouchingTheVolume(t *testing.T) {
 				return []string{"provision", "--issue", "LEGION-42", "--repo", "acme", "--root", v.root, "--credential-helper", "x", "--feed", v.feed}
 			},
 			code: 1,
-			says: func(*treeVolume) string { return `--repo must be <owner>/<name> (got "acme")` },
+			says: func(*treeVolume) string { return `workspace repository must be "owner/name" (got "acme")` },
 		},
 		{
 			name: "a --repo with a .. segment",
@@ -433,7 +433,7 @@ func TestWorkspaceInitFetchRefusesBeforeFetching(t *testing.T) {
 			name: "a --repo that is not owner/name",
 			args: func(v *treeVolume) []string { return []string{"fetch", "--repo", "acme", "--feed", v.feed} },
 			code: 1,
-			says: func(*treeVolume) string { return `--repo must be <owner>/<name> (got "acme")` },
+			says: func(*treeVolume) string { return `workspace repository must be "owner/name" (got "acme")` },
 		},
 		{
 			name: "a --repo with a .. segment",

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
 // Provision ports packages/workspace/src/workspace.ts:402-515. It updates an existing working
@@ -77,22 +79,6 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 	return workspace, nil
 }
 
-// splitRepository is owner/repository's two names. A `.` or `..` segment is refused: joined under
-// the state directory it names another directory than the repository's, and provisioning removes
-// an incomplete clone at that path.
-func splitRepository(repository string) (owner, repo string, err error) {
-	parts := strings.Split(repository, "/")
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" || parts[0] != filepath.Base(parts[0]) || parts[1] != filepath.Base(parts[1]) {
-		return "", "", fmt.Errorf("workspace repository must be owner/repository, got %q", repository)
-	}
-	for _, part := range parts {
-		if part == "." || part == ".." {
-			return "", "", fmt.Errorf("workspace repository %q has a %q segment; want owner/repository", repository, part)
-		}
-	}
-	return parts[0], parts[1], nil
-}
-
 // Bookmark is the jj bookmark an issue's workspace is on: its branch.
 func Bookmark(issue string) string { return "legion/" + issue }
 
@@ -101,7 +87,7 @@ func Bookmark(issue string) string { return "legion/" + issue }
 // workspaces directory it names that directory, or its owner's, and Remove deletes a workspace
 // directory whole.
 func Location(stateDir, repository, issue string) (Workspace, error) {
-	owner, repo, err := splitRepository(repository)
+	owner, repo, err := ghrepo.Split("workspace repository", repository)
 	if err != nil {
 		return Workspace{}, err
 	}

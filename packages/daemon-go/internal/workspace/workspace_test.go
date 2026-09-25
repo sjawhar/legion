@@ -998,6 +998,17 @@ func TestARepositoryWithADotSegmentIsRefused(t *testing.T) {
 	}
 }
 
+// A repository whose names hold whitespace is no GitHub repository, as a project's configured repo
+// and `legion threads --repo` refuse it: Location refuses it too, naming it.
+func TestARepositoryHoldingWhitespaceIsRefused(t *testing.T) {
+	for _, repo := range []string{"acme/wid gets", "ac me/widgets", "acme/widgets\n"} {
+		want := `workspace repository "` + strings.ReplaceAll(repo, "\n", `\n`) + `" holds whitespace`
+		if _, err := Location("/state", repo, "WIDGETS-42"); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("Location(%q) = %v, want an error naming %q", repo, err, want)
+		}
+	}
+}
+
 // A `.` or `..` issue would name the repository's workspaces directory, or its owner's, as the
 // issue's workspace, and Remove deletes the workspace directory whole: Location refuses one, naming
 // it, and Remove removes nothing but a workspace Location names.

@@ -118,9 +118,6 @@ func parseWorkspaceInitFlags(flags *flag.FlagSet, args []string, usage string, s
 // feed, the container's own volume, with no git configuration but its own. It resolves git alone
 // and touches nothing but the feed and its own TMPDIR, where the one-shot credential goes.
 func workspaceFetch(ctx context.Context, repo, feed string, stdout io.Writer) error {
-	if _, _, ok := splitRepoFlag(repo); !ok {
-		return fmt.Errorf("--repo must be <owner>/<name> (got %q)", repo)
-	}
 	if !filepath.IsAbs(feed) {
 		return fmt.Errorf("--feed must be an absolute path (got %q)", feed)
 	}
@@ -154,9 +151,6 @@ func workspaceFetch(ctx context.Context, repo, feed string, stdout io.Writer) er
 func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, feed string, stdout io.Writer) error {
 	if !legionclaim.IsIssueKey(issue) {
 		return fmt.Errorf("--issue must be a Dispatch issue key like LEGION-1 (got %q)", issue)
-	}
-	if _, _, ok := splitRepoFlag(repo); !ok {
-		return fmt.Errorf("--repo must be <owner>/<name> (got %q)", repo)
 	}
 	if !filepath.IsAbs(root) {
 		return fmt.Errorf("--root must be an absolute path (got %q)", root)

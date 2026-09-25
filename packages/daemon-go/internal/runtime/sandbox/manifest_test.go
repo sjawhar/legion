@@ -418,7 +418,7 @@ func TestALaunchItCannotHonourIsRefused(t *testing.T) {
 		want string
 	}{
 		"no repository":       {func(s *runtime.SpawnSpec) { s.Repository = "" }, "no repository"},
-		"not owner/repo":      {func(s *runtime.SpawnSpec) { s.Repository = "sjawhar/legion-smoke/extra" }, "must be owner/repository"},
+		"not owner/repo":      {func(s *runtime.SpawnSpec) { s.Repository = "sjawhar/legion-smoke/extra" }, `workspace repository must be "owner/name"`},
 		"session off volume":  {func(s *runtime.SpawnSpec) { s.ResumeSessionFile = "/home/legion/elsewhere.jsonl" }, "cannot be resumed on this runtime"},
 		"runtime-owned env":   {func(s *runtime.SpawnSpec) { s.Env["PATH"] = "/bin" }, "Env sets PATH"},
 		"credential in env":   {func(s *runtime.SpawnSpec) { s.Env["GH_TOKEN"] = "x" }, "credential-shaped"},
