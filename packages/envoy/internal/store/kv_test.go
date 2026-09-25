@@ -512,15 +512,7 @@ func TestWatch_PropagatesPurge(t *testing.T) {
 
 func TestMatch_IndependentOfKVAfterStartup(t *testing.T) {
 	ctx := context.Background()
-	ctr, err := tcnats.Run(ctx, testnats.Image)
-	testcontainers.CleanupContainer(t, ctr)
-	if err != nil {
-		t.Fatalf("failed to start NATS: %v", err)
-	}
-	uri, err := ctr.ConnectionString(ctx)
-	if err != nil {
-		t.Fatalf("failed to get URI: %v", err)
-	}
+	ctr, uri := testnats.Start(t)
 	conn := testnats.Connect(t, uri)
 	// Safety net: a double close is a no-op.
 	t.Cleanup(conn.Close)

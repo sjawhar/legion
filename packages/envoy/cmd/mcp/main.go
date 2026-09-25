@@ -60,7 +60,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("nats: %v", err)
 	}
-	defer client.Conn.Close()
+	defer client.Close()
 
 	// Create and start bridge.
 	bridge := mcpbridge.NewBridge(cfg, client)

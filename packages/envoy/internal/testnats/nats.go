@@ -2,16 +2,36 @@
 package testnats
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/testcontainers/testcontainers-go"
+	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
 
 // Image is the NATS server image every Envoy test container runs. The envoy-go CI job reads this
 // declaration and pulls the image before its first test step, so no test reaches the registry
 // mid-run; keep it a single-line string constant.
 const Image = "nats:2.10"
+
+// Start runs a NATS test container on Image, removed when the test ends (even when its start
+// fails), and returns it with its client URL.
+func Start(t testing.TB) (*tcnats.NATSContainer, string) {
+	t.Helper()
+	ctx := context.Background()
+	ctr, err := tcnats.Run(ctx, Image)
+	testcontainers.CleanupContainer(t, ctr)
+	if err != nil {
+		t.Fatalf("start NATS: %v", err)
+	}
+	uri, err := ctr.ConnectionString(ctx)
+	if err != nil {
+		t.Fatalf("NATS connection string: %v", err)
+	}
+	return ctr, uri
+}
 
 const (
 	connectTimeout = 30 * time.Second

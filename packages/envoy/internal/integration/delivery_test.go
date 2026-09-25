@@ -18,8 +18,6 @@ import (
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/testnats"
-	"github.com/testcontainers/testcontainers-go"
-	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
 
 // testEnv holds a complete test environment: NATS, listener handler, mock sessions.
@@ -50,16 +48,7 @@ func setupTestEnv(t *testing.T, options ...testEnvOption) *testEnv {
 	ctx := context.Background()
 
 	// Start real NATS with JetStream
-	ctr, err := tcnats.Run(ctx, testnats.Image)
-	testcontainers.CleanupContainer(t, ctr)
-	if err != nil {
-		t.Fatalf("failed to start NATS: %v", err)
-	}
-
-	uri, err := ctr.ConnectionString(ctx)
-	if err != nil {
-		t.Fatalf("failed to get NATS URI: %v", err)
-	}
+	_, uri := testnats.Start(t)
 
 	// Connect bus client
 	client, err := bus.Connect([]string{uri}, bus.WithReplicas(1))

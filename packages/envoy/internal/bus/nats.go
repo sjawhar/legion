@@ -115,45 +115,53 @@ type Client struct {
 	closeOnce  sync.Once
 }
 
+// options starts from nats.GetDefaultOptions: Connect fills in only some zero fields, and the
+// defaults are what turn on reconnecting, the client's pings and the drain and flusher timeouts. A
+// lost server is reconnected in place, forever, so JetStream handles taken from the connection
+// keep working; ReconnectedCB re-subscribes and runs the reconnect hooks. ClosedCB fires on Close
+// or Drain, and also when nats.go gives up on the connection itself: the same authorization error
+// twice in a row, or a server -ERR it does not classify. Those two are why onClosed still starts a
+// recovery that dials a replacement. The reconnect buffer is off, so nothing is held and sent after its caller
+// saw an error: a publish while reconnecting waits for the reconnect instead
+// (ensureConnWithContext), and a publish that fails was not sent.
 func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB func()) nats.Options {
-	return nats.Options{
-		Servers:       urls,
-		Name:          name,
-		NoRandomize:   true,
-		Timeout:       5 * time.Second,
-		MaxReconnect:  -1,
-		ReconnectWait: 2 * nats.DefaultReconnectWait,
-		// A literal does not start from nats.GetDefaultOptions, and Connect does not default a
-		// zero DrainTimeout: without this a Drain stops waiting for the subscriptions at once,
-		// reports "nats: draining connection timed out" and closes under deliveries in flight.
-		DrainTimeout: nats.DefaultDrainTimeout,
-		DisconnectedErrCB: func(_ *nats.Conn, err error) {
-			if err != nil {
-				slog.Info("envoy nats disconnected", slog.String("error", err.Error()))
-				return
-			}
-			slog.Info("envoy nats disconnected")
-		},
-		ReconnectedCB: func(nc *nats.Conn) {
-			slog.Info("envoy nats reconnected", slog.String("url", nc.ConnectedUrl()))
-			if reconnectCB != nil {
-				reconnectCB(nc)
-			}
-		},
-		ClosedCB: func(_ *nats.Conn) {
-			slog.Info("envoy nats connection closed")
-			if closedCB != nil {
-				closedCB()
-			}
-		},
-		AsyncErrorCB: func(_ *nats.Conn, sub *nats.Subscription, err error) {
-			if sub != nil {
-				slog.Error("envoy nats async error", slog.String("subject", sub.Subject), slog.String("error", err.Error()))
-				return
-			}
-			slog.Error("envoy nats async error", slog.String("error", err.Error()))
-		},
+	opts := nats.GetDefaultOptions()
+	opts.Servers = urls
+	opts.Name = name
+	opts.NoRandomize = true
+	opts.Timeout = 5 * time.Second
+	opts.MaxReconnect = -1
+	// A publish while reconnecting waits for the reconnect (ensureConnWithContext), so the wait
+	// between attempts is how long it waits after NATS is back.
+	opts.ReconnectWait = time.Second
+	opts.ReconnectBufSize = -1
+	opts.DisconnectedErrCB = func(_ *nats.Conn, err error) {
+		if err != nil {
+			slog.Info("envoy nats disconnected", slog.String("error", err.Error()))
+			return
+		}
+		slog.Info("envoy nats disconnected")
 	}
+	opts.ReconnectedCB = func(nc *nats.Conn) {
+		slog.Info("envoy nats reconnected", slog.String("url", nc.ConnectedUrl()))
+		if reconnectCB != nil {
+			reconnectCB(nc)
+		}
+	}
+	opts.ClosedCB = func(_ *nats.Conn) {
+		slog.Info("envoy nats connection closed")
+		if closedCB != nil {
+			closedCB()
+		}
+	}
+	opts.AsyncErrorCB = func(_ *nats.Conn, sub *nats.Subscription, err error) {
+		if sub != nil {
+			slog.Error("envoy nats async error", slog.String("subject", sub.Subject), slog.String("error", err.Error()))
+			return
+		}
+		slog.Error("envoy nats async error", slog.String("error", err.Error()))
+	}
+	return opts
 }
 
 func connect(name string, urls []string, reconnectCB func(*nats.Conn), closedCB func()) (*nats.Conn, error) {
@@ -170,7 +178,9 @@ func connectWithContext(ctx context.Context, name string, urls []string, reconne
 		if deadline, ok := ctx.Deadline(); ok {
 			remaining := time.Until(deadline)
 			if remaining <= 0 {
-				return nil, ctx.Err()
+				// Not ctx.Err(): the deadline can pass before the context's timer marks it done,
+				// and a nil error here would hand the caller a nil connection to use.
+				return nil, context.DeadlineExceeded
 			}
 			if remaining < next.Timeout {
 				next.Timeout = remaining
@@ -212,8 +222,8 @@ func connectWithContext(ctx context.Context, name string, urls []string, reconne
 }
 
 // Dial opens a tuned core NATS connection using envoy's standard options
-// (5s connect timeout, infinite reconnect, 2× default backoff, retry-loop
-// for the initial 10 attempts). Callers that only need core pub/sub —
+// (5s connect timeout, infinite reconnect every second, retry-loop for the
+// initial 10 attempts). Callers that only need core pub/sub —
 // no JetStream stream creation, no durable consumer — should use this.
 // The NATS Go client auto-resubscribes core subscriptions on reconnect,
 // so no callbacks are needed for plain subscribers.
@@ -253,26 +263,17 @@ func Connect(urls []string, options ...ConnectOption) (*Client, error) {
 	return c, nil
 }
 
-func streamSubjectMatches(pattern, subject string) bool {
-	patternTokens := strings.Split(pattern, ".")
-	subjectTokens := strings.Split(subject, ".")
-	for index, patternToken := range patternTokens {
-		if patternToken == ">" {
-			return index == len(patternTokens)-1
-		}
-		if index >= len(subjectTokens) {
-			return false
-		}
-		if patternToken != "*" && patternToken != subjectTokens[index] {
-			return false
-		}
-	}
-	return len(patternTokens) == len(subjectTokens)
+// roleLaneSubjects are the role lanes and their exceptions twin. They travel over core NATS and
+// the stream must never retain them.
+var roleLaneSubjects = []string{
+	"notifications.role.>",
+	"notifications.envoy.exceptions.notifications.role.>",
 }
 
+// subjectCapturesRoleLanes reports whether some role-lane subject would land in a stream carrying
+// subject.
 func subjectCapturesRoleLanes(subject string) bool {
-	return streamSubjectMatches(subject, "notifications.role.legion") ||
-		streamSubjectMatches(subject, "notifications.envoy.exceptions.notifications.role.legion")
+	return slices.ContainsFunc(roleLaneSubjects, func(roleLane string) bool { return subjectsOverlap(subject, roleLane) })
 }
 
 func streamCapturesRoleLanes(subjects []string) bool {
@@ -280,10 +281,7 @@ func streamCapturesRoleLanes(subjects []string) bool {
 }
 
 func purgeLegacyRoleMessages(js nats.JetStreamContext) error {
-	for _, subject := range []string{
-		"notifications.role.>",
-		"notifications.envoy.exceptions.notifications.role.>",
-	} {
+	for _, subject := range roleLaneSubjects {
 		if err := js.PurgeStream(Stream, &nats.StreamPurgeRequest{Subject: subject}); err != nil {
 			return err
 		}
@@ -336,49 +334,82 @@ func subjectsOverlap(a, b string) bool {
 	return len(aTokens) == len(bTokens)
 }
 
-// reconciledSubjects is the subject list the stream carries once this binary has started: the
-// deployed list, then each of this binary's subjects the deployed list lacks. Every bus.Connect
-// caller ensures this one stream (the listener, Dispatch, natstail and the MCP server, wherever
-// they run), and they deploy separately, so a deployed subject this binary does not know may be
-// one another live deployment still needs; start-up keeps it. Two deployed subjects go:
+// streamReconciliation is the subject list the stream carries once this binary has started, and
+// what that did to the deployed list: the list is the deployed one, then each of this binary's
+// subjects the deployed list lacks. Every bus.Connect caller ensures this one stream (the
+// listener, Dispatch, natstail and the MCP server, wherever they run), and they deploy
+// separately, so a deployed subject this binary does not know may be one another live deployment
+// still needs; start-up keeps it and names it in foreign. Two kinds of deployed subject go:
 //   - one that captures the role lanes, which travel over core NATS and must never be retained
 //     (migrateRoleLanesOffStream);
 //   - one that overlaps a subject of this binary's (a widened, narrowed or split subject), because
-//     JetStream refuses both in one stream and the start would fail. This binary's shape wins,
-//     and the next start of a binary with the other shape puts that one back.
+//     JetStream refuses both in one stream and the start would fail. This binary's shape wins
+//     (replaced), and the next start of a binary with the other shape puts that one back.
 //
 // Retiring any other subject is an operator step, taken once no deployment compiled with it can
 // start again: `nats stream edit ENVOY_NOTIFICATIONS --subjects=... -f`.
-func reconciledSubjects(deployed, own []string) []string {
-	subjects := make([]string, 0, len(deployed)+len(own))
+type streamReconciliation struct {
+	subjects []string
+	replaced []subjectReplacement
+	foreign  []string
+}
+
+// subjectReplacement is a deployed subject a start dropped and every one of its own subjects that
+// overlapped it.
+type subjectReplacement struct {
+	dropped string
+	kept    []string
+}
+
+func reconcileSubjects(deployed, own []string) streamReconciliation {
+	result := streamReconciliation{subjects: make([]string, 0, len(deployed)+len(own))}
 	for _, subject := range deployed {
 		if subjectCapturesRoleLanes(subject) {
 			continue
 		}
 		if !slices.Contains(own, subject) {
-			if index := slices.IndexFunc(own, func(ownSubject string) bool { return subjectsOverlap(subject, ownSubject) }); index >= 0 {
-				slog.Warn("envoy nats stream subject replaced by an overlapping one", slog.String("dropped", subject), slog.String("kept", own[index]))
+			var overlapping []string
+			for _, ownSubject := range own {
+				if subjectsOverlap(subject, ownSubject) {
+					overlapping = append(overlapping, ownSubject)
+				}
+			}
+			if len(overlapping) > 0 {
+				result.replaced = append(result.replaced, subjectReplacement{dropped: subject, kept: overlapping})
 				continue
 			}
+			result.foreign = append(result.foreign, subject)
 		}
-		subjects = append(subjects, subject)
+		result.subjects = append(result.subjects, subject)
 	}
 	for _, subject := range own {
-		if !slices.Contains(subjects, subject) {
-			subjects = append(subjects, subject)
+		if !slices.Contains(result.subjects, subject) {
+			result.subjects = append(result.subjects, subject)
 		}
 	}
-	return subjects
+	return result
+}
+
+// log reports the reconciliation once the stream carries it.
+func (r streamReconciliation) log() {
+	for _, replacement := range r.replaced {
+		slog.Warn("envoy nats stream subject replaced by an overlapping one", slog.String("dropped", replacement.dropped), slog.Any("kept", replacement.kept))
+	}
+	if len(r.foreign) > 0 {
+		slog.Info("envoy nats stream keeps subjects this binary does not compile", slog.Any("subjects", r.foreign))
+	}
 }
 
 func ensureStreamWithConfig(js nats.JetStreamContext, cfg *nats.StreamConfig) error {
 	info, err := js.StreamInfo(Stream)
 	if err == nil {
+		reconciliation := reconcileSubjects(info.Config.Subjects, cfg.Subjects)
 		desired := *cfg
-		desired.Subjects = reconciledSubjects(info.Config.Subjects, cfg.Subjects)
+		desired.Subjects = reconciliation.subjects
 		if info.Config.MaxAge == desired.MaxAge &&
 			info.Config.Duplicates == desired.Duplicates &&
 			slices.Equal(info.Config.Subjects, desired.Subjects) {
+			reconciliation.log()
 			return nil
 		}
 		migratingRoleLanes := streamCapturesRoleLanes(info.Config.Subjects) && !streamCapturesRoleLanes(desired.Subjects)
@@ -388,6 +419,7 @@ func ensureStreamWithConfig(js nats.JetStreamContext, cfg *nats.StreamConfig) er
 		if _, err = js.UpdateStream(&desired); err != nil {
 			return err
 		}
+		reconciliation.log()
 		if migratingRoleLanes {
 			return purgeLegacyRoleMessages(js)
 		}
@@ -418,21 +450,29 @@ func (c *Client) onClosed() {
 }
 
 func (c *Client) onReconnect(nc *nats.Conn) {
-	c.mu.Lock()
-	c.Conn = nc
-	js, err := nc.JetStream(nats.MaxWait(10 * time.Second))
-	if err != nil {
-		c.mu.Unlock()
-		slog.Error("envoy nats resubscribe failed (jetstream)", slog.String("error", err.Error()))
+	// A reconnect while Drain runs belongs to a process that is shutting down: nats.go has re-sent
+	// the draining subscriptions, and nothing will drain them now, so close the connection rather
+	// than hand deliveries to a process that is exiting.
+	if c.stopped() {
+		nc.Close()
+		return
+	}
+	// nc is the connection already in c.Conn, reconnected in place, and the JetStream context taken
+	// from it keeps working, so neither field is reassigned here.
+	if err := c.restoreSubscriptions(); err != nil {
+		if errors.Is(err, errStopped) {
+			// Stopped between the check above and the re-subscribe: same as that branch.
+			nc.Close()
+			return
+		}
+		slog.Error("envoy nats resubscribe failed", slog.String("error", err.Error()))
 		go c.recover()
 		return
 	}
-	c.js = js
-	c.mu.Unlock()
-
-	if err := c.restoreSubscriptions(); err != nil {
-		slog.Error("envoy nats resubscribe failed", slog.String("error", err.Error()))
-		go c.recover()
+	// Drain stops the client before it takes the subscriptions to drain them, so a stop can land
+	// while restoreSubscriptions runs. The drain then owns the subscriptions and the connection, and
+	// a hook would only rewatch state the drain is about to close, as recover's attempt skips them.
+	if c.stopped() {
 		return
 	}
 	if err := c.runReconnectHooks(nc); err != nil {
@@ -552,6 +592,11 @@ func (c *Client) SubOK() bool {
 // connection, or re-subscribing.
 var errStopped = errors.New("bus: client is stopped")
 
+// stop stops the client: recovery ends, and nothing dials, installs a connection or re-subscribes.
+func (c *Client) stop() {
+	c.closeOnce.Do(func() { close(c.stopCh) })
+}
+
 func (c *Client) stopped() bool {
 	select {
 	case <-c.stopCh:
@@ -563,7 +608,7 @@ func (c *Client) stopped() bool {
 
 // Close stops any recovery goroutine and closes the underlying NATS connection.
 func (c *Client) Close() {
-	c.closeOnce.Do(func() { close(c.stopCh) })
+	c.stop()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.Conn != nil {
@@ -572,15 +617,17 @@ func (c *Client) Close() {
 }
 
 // Drain stops the client and drains it, letting the deliveries already in their handlers finish,
-// and closes the connection itself once timeout passes, so a blocked drain cannot keep a process
-// alive. It stops the client first, so neither the drain's close nor a recovery already under way
-// reconnects or re-subscribes a process that is shutting down. It then drains the delivery
-// subscriptions while the connection still accepts new ones: a handler finishing its delivery may
-// subscribe (RequestCoreTo's receipt inbox), which a draining connection refuses. Only then does
-// it drain the connection, whose Drain only starts the drain, and wait for it to close itself.
+// and the connection is closed when Drain returns, at the latest once timeout passes, so a blocked
+// drain cannot keep a process alive. It stops the client first, so neither the drain's close nor a
+// recovery already under way reconnects or re-subscribes a process that is shutting down. It then
+// drains the delivery subscriptions while the connection still accepts new ones: a handler
+// finishing its delivery may subscribe (RequestCoreTo's receipt inbox), which a draining
+// connection refuses. Only then does it drain the connection, whose Drain only starts the drain,
+// and wait for it to close itself. A connection that is reconnecting is closed at once: nothing it
+// sends reaches the server, so no subscription would drain and a reconnect would re-send them.
 func (c *Client) Drain(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
-	c.closeOnce.Do(func() { close(c.stopCh) })
+	c.stop()
 	c.subscriptionsMu.Lock()
 	var delivering []*nats.Subscription
 	for _, subscription := range c.subscriptions {
@@ -592,10 +639,13 @@ func (c *Client) Drain(timeout time.Duration) error {
 	c.mu.Lock()
 	conn := c.Conn
 	c.mu.Unlock()
+	defer conn.Close()
+	if conn.IsReconnecting() {
+		return fmt.Errorf("drain NATS: %w", nats.ErrConnectionReconnecting)
+	}
 	waitUntil := func(done func() bool) error {
 		for !done() {
 			if !time.Now().Before(deadline) {
-				conn.Close()
 				return fmt.Errorf("drain NATS: %w", context.DeadlineExceeded)
 			}
 			time.Sleep(10 * time.Millisecond)
@@ -604,7 +654,6 @@ func (c *Client) Drain(timeout time.Duration) error {
 	}
 	for _, subscription := range delivering {
 		if err := subscription.Drain(); err != nil {
-			conn.Close()
 			return err
 		}
 	}
@@ -614,7 +663,6 @@ func (c *Client) Drain(timeout time.Duration) error {
 		}
 	}
 	if err := conn.Drain(); err != nil {
-		conn.Close()
 		return err
 	}
 	return waitUntil(conn.IsClosed)
@@ -628,38 +676,61 @@ func (c *Client) recover() {
 	}
 	defer atomic.StoreInt32(&c.recovering, 0)
 
+	// The dial retries a lost server for up to ten attempts; the stop cancels it, so a recovery
+	// ends at Close or Drain instead of outliving the client.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-c.stopCh:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
 	backoff := time.Second
 	const maxBackoff = 30 * time.Second
 	for attempt := 1; ; attempt++ {
-		select {
-		case <-c.stopCh:
+		if c.stopped() {
 			slog.Info("envoy nats recovery cancelled")
 			return
-		default:
 		}
 		if c.subscriptionsHealthy() {
 			slog.Info("envoy nats recovery: already healthy")
 			return
 		}
 		slog.Info("envoy nats recovery attempt", slog.Int("attempt", attempt))
-		if err := c.ensureConn(); err == nil {
+		failure := "envoy nats recovery reconnect failed"
+		err := c.ensureConnWithContext(ctx)
+		if err == nil {
+			failure = "envoy nats recovery resubscribe failed"
 			err = c.restoreSubscriptions()
-			if err == nil {
-				c.mu.Lock()
-				conn := c.Conn
-				c.mu.Unlock()
-				err = c.runReconnectHooks(conn)
-			}
-			if err == nil {
-				slog.Info("envoy nats recovery successful", slog.Int("attempt", attempt))
-				return
-			}
-			slog.Error("envoy nats recovery resubscribe failed", slog.Int("attempt", attempt), slog.String("error", err.Error()))
-		} else {
-			slog.Error("envoy nats recovery reconnect failed", slog.Int("attempt", attempt), slog.String("error", err.Error()))
 		}
+		if err == nil && !c.stopped() {
+			c.mu.Lock()
+			conn := c.Conn
+			c.mu.Unlock()
+			err = c.runReconnectHooks(conn)
+		}
+		// A failure after the stop is the stop: the dial it cancelled, a subscription the drain
+		// closed, a connection it refused to install. None of them is a recovery failure, but the
+		// error stays on the line in case a real one coincided with the stop.
+		if c.stopped() {
+			if err != nil {
+				slog.Info("envoy nats recovery cancelled", slog.String("error", err.Error()))
+			} else {
+				slog.Info("envoy nats recovery cancelled")
+			}
+			return
+		}
+		if err == nil {
+			slog.Info("envoy nats recovery successful", slog.Int("attempt", attempt))
+			return
+		}
+		slog.Error(failure, slog.Int("attempt", attempt), slog.String("error", err.Error()))
 		select {
 		case <-c.stopCh:
+			slog.Info("envoy nats recovery cancelled")
 			return
 		case <-time.After(backoff):
 		}
@@ -709,15 +780,34 @@ func (c *Client) ensureConn() error {
 	return c.ensureConnWithContext(context.Background())
 }
 
+// ensureConnWithContext returns once the client has a usable connection. A connection nats.go is
+// reconnecting is waited for, until it reconnects, ctx ends or the client stops: with the
+// reconnect buffer off, a publish while reconnecting would otherwise fail at once, and a webhook
+// that fails answers 503 to a sender that does not redeliver. A closed connection is replaced by
+// dialling a new one, unless the client is stopped.
 func (c *Client) ensureConnWithContext(ctx context.Context) error {
-	c.mu.Lock()
-	if c.Conn != nil && c.Conn.Status() != nats.CLOSED {
+	for {
+		c.mu.Lock()
+		conn := c.Conn
 		c.mu.Unlock()
-		return nil
-	}
-	c.mu.Unlock()
-	if c.stopped() {
-		return errStopped
+		// A live connection serves even a stopped client: deliveries still in their handlers during
+		// Drain publish their receipts and exceptions through it.
+		if conn != nil && (conn.IsConnected() || conn.IsDraining()) {
+			return nil
+		}
+		if c.stopped() {
+			return errStopped
+		}
+		if conn == nil || conn.IsClosed() {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("bus: waiting for NATS to reconnect: %w", ctx.Err())
+		case <-c.stopCh:
+			return errStopped
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 
 	nc, err := connectWithContext(ctx, "envoy", c.urls, c.onReconnect, c.onClosed)

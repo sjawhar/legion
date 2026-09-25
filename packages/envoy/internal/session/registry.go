@@ -86,6 +86,8 @@ type SessionRegistry struct {
 	watcherMu         sync.Mutex
 	watcher           nats.KeyWatcher
 	watcherGeneration uint64
+	// watchStopped is set by StopWatch and never cleared: a stopped registry arms no watcher.
+	watchStopped bool
 
 	// readyCh is closed when watch() finishes its initial scan of existing KV
 	// entries (signalled by the nil sentinel WatchAll() emits after delivering
@@ -223,12 +225,24 @@ func (r *SessionRegistry) startWatch(kv nats.KeyValue) error {
 	if kv == nil {
 		return ErrNoKV
 	}
+	r.watcherMu.Lock()
+	stopped := r.watchStopped
+	r.watcherMu.Unlock()
+	if stopped {
+		return nil
+	}
 	watcher, err := kv.WatchAll()
 	if err != nil {
 		return err
 	}
 
 	r.watcherMu.Lock()
+	if r.watchStopped {
+		// StopWatch ran while WatchAll was starting. Leave this watcher to the connection's
+		// drain, which ends its subscription; stopping it here would be a server request.
+		r.watcherMu.Unlock()
+		return nil
+	}
 	previous := r.watcher
 	r.watcherGeneration++
 	generation := r.watcherGeneration
@@ -334,18 +348,18 @@ func (r *SessionRegistry) finishWatch(generation uint64) bool {
 	return true
 }
 
-// StopWatch stops the KV watcher on purpose, for a shutdown. The watcher's end then belongs to no
-// live generation, so consumeWatch records no terminal error and logs nothing: an ordered shutdown
-// is not a watcher failure.
+// StopWatch retires the KV watcher for a shutdown, before the NATS drain ends it. The watcher's end
+// then belongs to no live generation, so consumeWatch records no terminal error and logs nothing,
+// and the registry arms no watcher after it: a Rewatch from a recovery or a self-health rebuild
+// still running at shutdown is a no-op. It makes no request of the server (a watcher's Stop is a
+// synchronous consumer delete), because it runs outside the drain's deadline; the drain ends the
+// watcher's subscription.
 func (r *SessionRegistry) StopWatch() {
 	r.watcherMu.Lock()
-	watcher := r.watcher
+	r.watchStopped = true
 	r.watcher = nil
 	r.watcherGeneration++
 	r.watcherMu.Unlock()
-	if watcher != nil {
-		_ = watcher.Stop()
-	}
 }
 
 func (r *SessionRegistry) setWatchErr(err error) {

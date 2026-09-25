@@ -12,9 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/testcontainers/testcontainers-go"
-	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
-
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/cistore"
 	"github.com/sjawhar/envoy/internal/contracts"
@@ -28,15 +25,7 @@ import (
 // is emitted for the PR after the quiet period.
 func TestEndToEndCheckRunToChecks(t *testing.T) {
 	ctx := context.Background()
-	ctr, err := tcnats.Run(ctx, testnats.Image)
-	testcontainers.CleanupContainer(t, ctr)
-	if err != nil {
-		t.Fatalf("start nats: %v", err)
-	}
-	uri, err := ctr.ConnectionString(ctx)
-	if err != nil {
-		t.Fatalf("nats uri: %v", err)
-	}
+	_, uri := testnats.Start(t)
 
 	client, err := bus.Connect([]string{uri}, bus.WithReplicas(1))
 	if err != nil {

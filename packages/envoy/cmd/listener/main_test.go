@@ -1986,6 +1986,19 @@ func TestBoundDurableConsumerIsNotStolen(t *testing.T) {
 		t.Fatalf("first subscribe failed: %v", err)
 	}
 	t.Cleanup(func() { _ = firstSub.Unsubscribe(); _ = first.JS().DeleteConsumer(bus.Stream, consumer) })
+	// Subscribe returns before the server has processed the SUB, and the consumer is push-bound
+	// only once it has; the property under test is about a consumer that is already bound.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		info, err := first.JS().ConsumerInfo(bus.Stream, consumer)
+		if err == nil && info.PushBound {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the first listener's consumer never became push-bound: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 
 	second, err := bus.Connect([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
 	if err != nil {
@@ -2006,16 +2019,7 @@ func TestBoundDurableConsumerIsNotStolen(t *testing.T) {
 }
 
 func TestStartListenerSubscriptionMigratesLegacyDurableConsumer(t *testing.T) {
-	ctx := context.Background()
-	ctr, err := tcnats.Run(ctx, testnats.Image)
-	testcontainers.CleanupContainer(t, ctr)
-	if err != nil {
-		t.Fatalf("start NATS: %v", err)
-	}
-	uri, err := ctr.ConnectionString(ctx)
-	if err != nil {
-		t.Fatalf("NATS connection string: %v", err)
-	}
+	_, uri := testnats.Start(t)
 	legacyConn := testnats.Connect(t, uri)
 	legacyJS, err := legacyConn.JetStream()
 	if err != nil {
@@ -3562,16 +3566,7 @@ func TestRunSelfHealthMonitor_ExitsAfterRepeatedFailedRebuilds(t *testing.T) {
 // setupTestNATS launches a NATS testcontainer dedicated to this package's tests.
 func setupTestNATS(t *testing.T) *bus.Client {
 	t.Helper()
-	ctx := context.Background()
-	ctr, err := tcnats.Run(ctx, testnats.Image)
-	testcontainers.CleanupContainer(t, ctr)
-	if err != nil {
-		t.Fatalf("failed to start NATS: %v", err)
-	}
-	uri, err := ctr.ConnectionString(ctx)
-	if err != nil {
-		t.Fatalf("connection string: %v", err)
-	}
+	_, uri := testnats.Start(t)
 	client, err := bus.Connect([]string{uri}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("bus connect: %v", err)

@@ -7,6 +7,9 @@ services:
     network_mode: host
     command: ["/usr/local/bin/envoy-listener"]
     restart: unless-stopped
+    # A SIGTERM runs the listener's ordered shutdown: up to 10 s for HTTP, then up to 10 s to drain
+    # NATS. Docker's 10 s default would SIGKILL it before the drain starts.
+    stop_grace_period: 30s
     healthcheck:
       test: ["CMD", "curl", "-f", "http://127.0.0.1:9020/healthz"]
       interval: 10s

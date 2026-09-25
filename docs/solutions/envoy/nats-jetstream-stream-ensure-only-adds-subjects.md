@@ -34,17 +34,23 @@ pointed at production. A rollback, or a restart in the middle of a rollout, star
 compiled with a different subject list from the one another live deployment was compiled with.
 
 `ensureStreamWithConfig` therefore keeps the deployed subjects and appends each of the starting
-binary's subjects the stream lacks (`reconciledSubjects`). It removes a deployed subject in two
+binary's subjects the stream lacks (`reconcileSubjects`). It removes a deployed subject in two
 cases only:
 
-- the subject captures the role lanes, which travel over core NATS and must never be retained
-  (`migrateRoleLanesOffStream`);
+- the subject overlaps a role lane (`notifications.role.>` or
+  `notifications.envoy.exceptions.notifications.role.>`, whichever role it names). The role lanes
+  travel over core NATS and must never be retained (`migrateRoleLanesOffStream`);
 - the subject overlaps one of the starting binary's own subjects without equalling it (a
   widened, narrowed or split subject such as `notifications.legion.>` against
   `notifications.legion.*.*`). JetStream refuses two overlapping subjects in one stream, so
-  keeping both would fail the start. The starting binary's shape wins, it logs one
-  `envoy nats stream subject replaced by an overlapping one` line naming the dropped and the
-  kept subject, and the next start of a binary with the other shape puts that one back.
+  keeping both would fail the start. The starting binary's shape wins, and it logs one
+  `envoy nats stream subject replaced by an overlapping one` WARN per dropped subject, naming it
+  (`dropped`) and every one of its own subjects that replaced it (`kept`, a list). The next start
+  of a binary with the other shape puts that one back.
+
+Each start also logs `envoy nats stream keeps subjects this binary does not compile` at INFO,
+naming (`subjects`) the deployed subjects it kept without knowing them. That is the list the retire
+step below works from. Both lines are written only after the stream carries the reconciled list.
 
 `MaxAge` and the duplicate window still take the starting binary's values.
 
@@ -70,7 +76,9 @@ listener then answered `500 {"error":"nats: no response from stream"}`.
 - **Retiring a subject is an operator step.** Remove it from `streamSubjects`, wait until no
   deployment compiled with it can start again (every writer moved past it, rollback anchors
   included), then edit the live stream by hand: `nats stream edit ENVOY_NOTIFICATIONS
-  --subjects=<the list without it> -f`. Start-up never does it for you.
+  --subjects=<the list without it> -f`. Start-up never does it for you. A writer built after
+  the removal names the subject in its `keeps subjects this binary does not compile` line on every
+  start until the edit, so that line is where to find what is left to retire.
 - **Two starts in the same instant can still lose a subject.** JetStream's stream update has no
   compare-and-swap: if two writers with different lists both read the stream before either
   writes, the second write omits the first writer's addition. It takes two process starts within
