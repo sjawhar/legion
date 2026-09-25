@@ -571,3 +571,80 @@ func TestConcurrentRewatchesOntoARecreatedBucketKeepTheNewKeys(t *testing.T) {
 			into.has("fresh"), into.has("ghost"), into.resetCount(), w.Err())
 	}
 }
+
+// heldWatchKV starts its WatchAll on the bucket, then holds it until released: the watch it
+// serves has read the stream and armed its watcher, and has not yet taken the locks.
+type heldWatchKV struct {
+	natsgo.KeyValue
+	watched chan struct{}
+	release chan struct{}
+}
+
+func (k *heldWatchKV) WatchAll(opts ...natsgo.WatchOpt) (natsgo.KeyWatcher, error) {
+	watcher, err := k.KeyValue.WatchAll(opts...)
+	close(k.watched)
+	<-k.release
+	return watcher, err
+}
+
+// A watch reads its stream before it arms its watcher and takes the locks, so a slower watch can
+// arrive after a newer one has already switched to a recreated bucket. The slower watch read the
+// old stream and armed its watcher there; installing it would reset the cache the newer watcher
+// filled and feed it the old bucket's keys. It is discarded, and the newer watcher stays current.
+func TestAWatchOfTheOldStreamDoesNotReplaceANewerOne(t *testing.T) {
+	_, uri := testnats.Start(t)
+	conn, first := bucket(t, uri)
+	if _, err := first.Put("ghost", []byte("1")); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	held := &heldWatchKV{KeyValue: first, watched: make(chan struct{}), release: make(chan struct{})}
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			close(held.release)
+		}
+	})
+	into := newSeen()
+	w := kvwatch.New("test cache", held, into.apply, into.reset)
+	w.Start()
+	select {
+	case <-held.watched:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first watch never armed its watcher")
+	}
+
+	js, err := conn.JetStream()
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	if err := js.DeleteKeyValue("kvwatch-test"); err != nil {
+		t.Fatalf("delete bucket: %v", err)
+	}
+	recreated, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: "kvwatch-test"})
+	if err != nil {
+		t.Fatalf("recreate bucket: %v", err)
+	}
+	if _, err := recreated.Put("fresh", []byte("1")); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	liveConn, _ := bucket(t, uri)
+	if err := w.Rewatch(liveConn); err != nil {
+		t.Fatalf("rewatch: %v", err)
+	}
+	eventually(t, "the newer watcher's scan", func() bool { return into.has("fresh") })
+
+	close(held.release)
+	released = true
+	time.Sleep(500 * time.Millisecond)
+	if into.has("ghost") || !into.has("fresh") {
+		t.Fatalf("after the old stream's watch arrived: ghost %v, fresh %v, resets %d; want the recreated bucket's keys only",
+			into.has("ghost"), into.has("fresh"), into.resetCount())
+	}
+	if err := w.Check(); err != nil || w.Err() != nil {
+		t.Fatalf("Check = %v, Err %v; want the newer watcher current and healthy", err, w.Err())
+	}
+	if _, err := w.KV().Put("after", []byte("1")); err != nil {
+		t.Fatalf("put through the handle: %v", err)
+	}
+	eventually(t, "a write through the current handle", func() bool { return into.has("after") })
+}

@@ -127,6 +127,14 @@ func (w *Watcher) KV() nats.KeyValue {
 // revisions number from 1 again, so the cache would stay frozen behind a live watcher. The
 // recorded error makes the listener's self-health rebuild the watcher, and that Rewatch resets the
 // cache.
+//
+// The stream is known by its creation time, and one path moves that time with no recreate.
+// nats-server before v2.14.6 re-stamps a recovered stream's creation time in its file store, and
+// an in-place config update persists the re-stamped time (nats-io/nats-server#8471, fixed in
+// v2.14.6 and v2.15.0). So a stream config update after a server restart, followed by another
+// restart, reads here as a recreate. Its cost is bounded: /healthz answers 503 until the next
+// self-health rebuild, that rebuild refills the cache from the same bucket and adopts the new
+// time, and Check is quiet from then on.
 func (w *Watcher) Check() error {
 	stream, err := streamCreated(w.KV())
 	if err != nil {
@@ -186,8 +194,11 @@ func (w *Watcher) Stop() {
 // and, for a recreated bucket, the cache reset happen under applyMu, so no apply runs between
 // them: an apply the replaced watcher already started finishes first, and a watch that switches
 // after this one computes recreated against the new stream and applies only after the reset. Two
-// Rewatches do overlap, the bus's reconnect hook and the listener's self-health rebuild. After
-// Stop it arms nothing and only moves the handle.
+// Rewatches do overlap, the bus's reconnect hook and the listener's self-health rebuild. A watch
+// reads its stream before it arms its watcher and takes the locks, so it can arrive after a
+// newer watch has switched to a recreated bucket: a watch whose stream is older than the current
+// one's is discarded, and the current watcher stays. After Stop it arms nothing and only moves
+// the handle.
 func (w *Watcher) watch(kv nats.KeyValue) error {
 	if kv == nil {
 		return errors.New(w.name + ": KV unavailable")
@@ -223,6 +234,15 @@ func (w *Watcher) watch(kv nats.KeyValue) error {
 			for range watcher.Updates() {
 			}
 		}()
+		return nil
+	}
+	if !w.stream.IsZero() && stream.Before(w.stream) {
+		// A newer watch already switched to a recreated bucket. This watcher may be on the old
+		// stream, so installing it would reset the cache the current watcher filled and feed it
+		// the old bucket's keys.
+		w.mu.Unlock()
+		w.applyMu.Unlock()
+		_ = watcher.Stop()
 		return nil
 	}
 	previous := w.watcher
