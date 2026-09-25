@@ -200,7 +200,7 @@ const legionGoDeliveryView = z.strictObject({
 });
 
 /** `api.OperatorClaim`, the body of the operator routes that act on one claim (`POST
- * /legion/v1/operator/claims`, `…/{token}/deliver|suspend|resume|stop`): the claim as its
+ * /legion/v1/operator/claims`, `…/{token}/deliver|suspend|resume|stop|close`): the claim as its
  * supervisor holds it, but its hashes. */
 export const LegionGoOperatorClaimResponse = z.strictObject({
   token: nonEmptyString,

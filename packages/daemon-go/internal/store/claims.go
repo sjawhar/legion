@@ -21,7 +21,7 @@ var _ supervise.Store = (*Store)(nil)
 // separately (a delivery changes far more often than the claim it rides on) and read together.
 const claimSelect = `select c.token, c.project, c.tree, c.issue, c.role, c.generation, c.session,
 	c.session_file, c.locator, c.state, c.launch_failures, c.prompt_failures, c.prompt_retires,
-	c.boot_token_hash, c.capability_hash, c.uncertain_streak,
+	c.boot_token_hash, c.capability_hash, c.uncertain_streak, c.workspace_lost,
 	d.delivery_id, d.task, d.queued_at, d.delivered_at, d.confirmed_at
 	from claims c left join pending_task_deliveries d on d.claim_token = c.token`
 
@@ -41,8 +41,8 @@ func (s *Store) PutClaim(ctx context.Context, c supervise.Claim) error {
 	}
 	_, err := s.pool.Exec(ctx, `insert into claims (token, project, tree, issue, role, generation,
 		session, session_file, locator, state, launch_failures, prompt_failures, prompt_retires,
-		boot_token_hash, capability_hash, uncertain_streak)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+		boot_token_hash, capability_hash, uncertain_streak, workspace_lost)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 		on conflict (token) do update set project = excluded.project, tree = excluded.tree,
 		issue = excluded.issue, role = excluded.role, generation = excluded.generation,
 		session = excluded.session, session_file = excluded.session_file,
@@ -50,11 +50,12 @@ func (s *Store) PutClaim(ctx context.Context, c supervise.Claim) error {
 		launch_failures = excluded.launch_failures, prompt_failures = excluded.prompt_failures,
 		prompt_retires = excluded.prompt_retires, boot_token_hash = excluded.boot_token_hash,
 		capability_hash = excluded.capability_hash, uncertain_streak = excluded.uncertain_streak,
+		workspace_lost = excluded.workspace_lost,
 		updated_at = now()`,
 		string(c.Token), c.Project, c.Tree, c.Issue, string(c.Role), int64(c.Generation),
 		c.Session, c.SessionFile, locator, string(c.State),
 		c.Budgets.LaunchFailures, c.Budgets.PromptFailures, c.Budgets.PromptRetires,
-		c.BootTokenHash, c.CapabilityHash, c.UncertainStreak,
+		c.BootTokenHash, c.CapabilityHash, c.UncertainStreak, c.WorkspaceLost,
 	)
 	if err != nil {
 		return fmt.Errorf("put claim %s: %w", c.Token, err)
@@ -142,7 +143,7 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 	)
 	err := row.Scan(&token, &c.Project, &c.Tree, &c.Issue, &role, &generation, &c.Session,
 		&c.SessionFile, &locator, &state, &c.Budgets.LaunchFailures, &c.Budgets.PromptFailures,
-		&c.Budgets.PromptRetires, &c.BootTokenHash, &c.CapabilityHash, &c.UncertainStreak,
+		&c.Budgets.PromptRetires, &c.BootTokenHash, &c.CapabilityHash, &c.UncertainStreak, &c.WorkspaceLost,
 		&deliveryID, &task, &queuedAt, &delivered, &confirmed)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return supervise.Claim{}, err

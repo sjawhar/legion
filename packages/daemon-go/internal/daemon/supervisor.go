@@ -42,10 +42,11 @@ type supervisor struct {
 	feeding  sync.WaitGroup
 }
 
-// member is one claim's machine and the queue its events wait in.
+// member is one claim's machine, the queue its events wait in, and the tree the claim is of.
 type member struct {
 	machine *supervise.Machine
 	inbox   *inbox
+	tree    string
 }
 
 func newSupervisor(ctx context.Context, st *store.Store, project, stateDir string, log *slog.Logger) *supervisor {
@@ -150,7 +151,7 @@ func (s *supervisor) restore(ctx context.Context, claims []supervise.Claim) ([]c
 func (s *supervisor) add(token claim.Token, m *supervise.Machine) {
 	m.OnTerminal(s.terminal)
 	queue := newInbox()
-	s.machines[token] = &member{machine: m, inbox: queue}
+	s.machines[token] = &member{machine: m, inbox: queue, tree: m.Claim().Tree}
 	s.feeding.Add(1)
 	go func() {
 		defer s.feeding.Done()
@@ -181,6 +182,22 @@ func (s *supervisor) post(token claim.Token, ev supervise.Event) {
 		return
 	}
 	m.inbox.put(ev)
+}
+
+// volumeLost tells every other claim of c's tree that the tree volume was lost (TreeVolumeLost):
+// the sessions they recorded were on it. It is the machines' VolumeLost, called by c's machine
+// under its own lock, so it reads no machine — the tree of each is kept beside it — and only queues.
+func (s *supervisor) volumeLost(c supervise.Claim) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.stopped {
+		return
+	}
+	for token, m := range s.machines {
+		if token != c.Token && m.tree == c.Tree {
+			m.inbox.put(supervise.TreeVolumeLost{Claim: token})
+		}
+	}
 }
 
 // count is how many claims the daemon supervises.

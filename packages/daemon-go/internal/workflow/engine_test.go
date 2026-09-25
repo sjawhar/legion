@@ -374,7 +374,7 @@ func TestSignOffLingersOnceAndExpiryStopsTreeAndRemovesEveryWorkspace(t *testing
 	if _, err := intake.ApplyFact(ctx, pool, "timer", "linger-stale", intake.LingerExpired{Issue: "LEGION-208", Generation: 6}, engine, admissionStub{}); err != nil {
 		t.Fatalf("ApplyFact stale linger expiry: %v", err)
 	}
-	if stopped := superviseRequests(t, pool, "stop"); !sameCounts(stopped, everyClaim) {
+	if stopped := superviseRequests(t, pool, "tree_close"); !sameCounts(stopped, everyClaim) {
 		t.Fatalf("linger expiry stopped %v, want each tree claim once: %v", stopped, everyClaim)
 	}
 	assertOutboxCount(t, pool, "workspace_remove", 2)

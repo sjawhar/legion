@@ -51,12 +51,9 @@ func (m *Machine) chargePrompt(ctx context.Context, why string) error {
 			"limit", m.deps.Limits.PromptFailures)
 		return m.persist(ctx)
 	}
-	if err := m.deps.Runtime.Suspend(ctx, *m.claim.Locator); err != nil {
+	if err := m.suspendProcess(ctx); err != nil {
 		return fmt.Errorf("retire %s after %d prompt failures: suspend: %w", m.claim.Token, failures, err)
 	}
-	// The process is suspended: let go, a failure below has nothing to suspend, and the relaunch
-	// waits it out.
-	m.letGo()
 	retires := m.claim.Budgets.PromptRetires + 1
 	m.claim.Budgets.PromptRetires = retires
 	m.log.Warn("supervise: retired after prompt failures", "why", why, "promptFailures", failures,

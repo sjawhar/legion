@@ -3,6 +3,7 @@ package fake
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -387,9 +388,10 @@ func TestTheFakesAreUsableThroughTheBoundaryInterfaces(t *testing.T) {
 	}
 }
 
-// The fake holds its callers to the agreement every runtime checks: a claim released or swept with
-// another claim's locator is refused, and still recorded, so the test can see what was asked.
-func TestReleaseAndTheSweepRefuseALocatorOfAnotherClaim(t *testing.T) {
+// The fake holds its callers to the agreement every runtime checks: a claim released, resumed, or
+// swept with another claim's locator is refused, and still recorded, so the test can see what was
+// asked.
+func TestReleaseResumeAndTheSweepRefuseALocatorOfAnotherClaim(t *testing.T) {
 	ctx := context.Background()
 	fake := NewRuntime()
 	locator, err := fake.Spawn(ctx, spec("legion-omp-LEGION-208-tester"))
@@ -400,10 +402,15 @@ func TestReleaseAndTheSweepRefuseALocatorOfAnotherClaim(t *testing.T) {
 	if err := fake.Release(ctx, mismatched); err == nil || !strings.Contains(err.Error(), string(locator.Claim)) {
 		t.Fatalf("release: got %v, want a refusal naming %s", err, locator.Claim)
 	}
+	resumed := spec(mismatched.Claim)
+	resumed.ResumeSessionFile = "/sessions/reviewer.jsonl"
+	if _, err := fake.Resume(ctx, &locator, resumed); err == nil || !strings.Contains(err.Error(), string(locator.Claim)) {
+		t.Fatalf("resume: got %v, want a refusal naming %s", err, locator.Claim)
+	}
 	if err := fake.ReconcileOrphans(ctx, []runtime.Known{mismatched}, 0); err == nil {
 		t.Fatal("reconcile: a locator of another claim was accepted")
 	}
-	if methods := fake.Methods(); len(methods) != 3 || methods[1] != "Release" || methods[2] != "ReconcileOrphans" {
+	if methods := fake.Methods(); !slices.Equal(methods, []string{"Spawn", "Release", "Resume", "ReconcileOrphans"}) {
 		t.Fatalf("methods: got %v, want the refused calls recorded", methods)
 	}
 }

@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -75,10 +76,14 @@ type Claim struct {
 	// that has them resumes that session on every relaunch and refuses any other.
 	Session     string
 	SessionFile string
-	Locator     *runtime.Locator
-	State       ClaimState
-	Budgets     Budgets
-	Pending     *Delivery
+	// WorkspaceLost is a claim whose session was lost with the tree volume it lived on — the one
+	// exception to resuming the agent a claim recorded. It records no session, and every launch
+	// recreates its workspace, fresh, until a new agent registers.
+	WorkspaceLost bool
+	Locator       *runtime.Locator
+	State         ClaimState
+	Budgets       Budgets
+	Pending       *Delivery
 	// BootTokenHash is the hash of the current launch's boot token, which the shim's hello and the
 	// agent's registration are resolved by. CapabilityHash is the hash of the secret the agent's
 	// registration was issued.
@@ -93,8 +98,8 @@ func (c Claim) treeRoot() bool { return claim.IsTreeArchitect(c.Role, c.Issue, c
 
 // Event is everything that reaches a machine. The set is sealed: RuntimeObservation,
 // StreamHello, StreamTurnStart, StreamTurnEnd, StreamClosed, StreamLateRefusal, PromptAcked,
-// PromptRefused, Timer, and the eight requests. The transition table has a row or a named ignore
-// for every one of them in every state.
+// PromptRefused, Timer, TreeVolumeLost, and the nine requests. The transition table has a row or a
+// named ignore for every one of them in every state.
 type Event interface{ isEvent() }
 
 // Store is the persistence a machine writes through. A claim and its pending delivery are
@@ -157,6 +162,10 @@ type Deps struct {
 	// to the agent's working copy before the task. nil, for a daemon with no GitHub Apps, adopts
 	// nothing.
 	Identity func(ctx context.Context, role claim.Role) (runtime.GitIdentity, error)
+	// VolumeLost is told of a claim whose tree volume was found lost as it relaunches that claim
+	// fresh, so the daemon can tell the tree's other claims (TreeVolumeLost): their sessions were on
+	// the same volume. nil tells no one.
+	VolumeLost func(c Claim)
 }
 
 func (d Deps) check() error {
@@ -188,9 +197,11 @@ func (d Deps) check() error {
 	return nil
 }
 
-// RefusedError is a request the claim's state does not allow — the answer an API route gives
-// its caller instead of pretending the request happened. Err, when set, is the sentinel a caller
-// can act on (ErrDeliveryPending).
+// RefusedError is a request the claim does not allow — the answer an API route gives its caller
+// instead of pretending the request happened. A refusal the transition table makes is the claim's
+// state refusing the request, and says which state and why (Reason). One an action makes is about
+// something else — a delivery already pending, the claim being its tree's root — and carries the
+// sentinel a caller can act on (Err: ErrDeliveryPending, ErrRootStop), which is what it says.
 type RefusedError struct {
 	State   ClaimState
 	Request string
@@ -199,6 +210,9 @@ type RefusedError struct {
 }
 
 func (e *RefusedError) Error() string {
+	if e.Err != nil {
+		return fmt.Sprintf("%s refused: %v", e.Request, e.Err)
+	}
 	return fmt.Sprintf("%s refused: the claim is %s (%s)", e.Request, e.State, e.Reason)
 }
 
@@ -208,6 +222,11 @@ func (e *RefusedError) Unwrap() error { return e.Err }
 // fault — the claim takes the next task once its pending delivery's turn is over, so the caller
 // asks again later.
 var ErrDeliveryPending = errors.New("a delivery is already pending")
+
+// ErrRootStop is a stop of the tree's root claim that is not its tree's close, refused in every
+// state: the root ends only with its tree. The refusal adds what stops the root's process instead,
+// where one runs.
+var ErrRootStop = errors.New("the tree's root claim ends only when its tree closes")
 
 // Machine is one claim's decision owner.
 type Machine struct {
@@ -483,8 +502,6 @@ func (m *Machine) dropStale(event, fence, got, held string) {
 func (m *Machine) launch(ctx context.Context) error {
 	m.letGo()
 	for {
-		m.disarmAll()
-		m.forgetSend()
 		m.claim.Generation++
 		token := rand.Text()
 		m.claim.BootTokenHash = HashBootToken(token)
@@ -526,11 +543,36 @@ func (m *Machine) start(ctx context.Context, token string) (runtime.Locator, err
 
 // died is the claim's process found gone — or found to be some other process — while it was
 // live: one launch failure, and the same session relaunched after it, or failed when the budget
-// is spent.
+// is spent. A resume that found the tree volume lost is the exception (relaunchFresh).
 func (m *Machine) died(ctx context.Context, observation runtime.Observation) error {
 	m.log.Warn("supervise: process died", "incarnation", m.claim.Locator.Incarnation, "observed", string(observation.Kind),
 		"detail", observation.Detail)
+	if observation.Kind == runtime.Gone && strings.HasPrefix(observation.Detail, runtime.WorkspaceLostDetail) && m.claim.SessionFile != "" {
+		return m.relaunchFresh(ctx)
+	}
 	return m.relaunchAfterFailure(ctx)
+}
+
+// relaunchFresh is a resume whose workspace-init found the tree volume lost, the session file with
+// it: resuming again would fail the same way on every attempt until the budget ran out. It is the
+// one exception to the same-agent rule. The claim drops the session it recorded and relaunches as a
+// fresh session that recreates its workspace from the issue's branch, and the agent that registers
+// next is the session it resumes from then on. The volume ended the process, not the launch, so no
+// launch failure is charged; the fresh launch has no session to find missing, so it cannot end this
+// way again. The daemon is told first: the tree's other claims kept their sessions on that volume.
+func (m *Machine) relaunchFresh(ctx context.Context) error {
+	m.log.Warn("supervise: the tree volume was lost with the session; relaunching a fresh session", "session", m.claim.Session)
+	m.loseSession()
+	if m.deps.VolumeLost != nil {
+		m.deps.VolumeLost(copyClaim(m.claim))
+	}
+	return m.launch(ctx)
+}
+
+// loseSession drops the session the claim recorded, which lived on a tree volume since lost: the
+// claim expects no session until a new agent registers, and its launches recreate the workspace.
+func (m *Machine) loseSession() {
+	m.claim.Session, m.claim.SessionFile, m.claim.WorkspaceLost = "", "", true
 }
 
 // fail puts the claim where nothing relaunches it: its timers stop, its locator goes, and the
@@ -539,12 +581,10 @@ func (m *Machine) died(ctx context.Context, observation runtime.Observation) err
 // on until the tree closes; a suspension that fails is logged, and the claim fails all the same.
 func (m *Machine) fail(ctx context.Context, why string) error {
 	if loc := m.claim.Locator; loc != nil {
-		if err := m.deps.Runtime.Suspend(ctx, *loc); err != nil {
+		if err := m.suspendProcess(ctx); err != nil {
 			m.log.Error("supervise: could not suspend the failed claim's process", "incarnation", loc.Incarnation, "error", err)
 		}
 	}
-	m.disarmAll()
-	m.forgetSend()
 	m.letGo()
 	m.claim.State = StateFailed
 	m.log.Error("supervise: claim failed", "why", why, "launchFailures", m.claim.Budgets.LaunchFailures,
@@ -566,19 +606,31 @@ func (m *Machine) release(ctx context.Context) error {
 	return nil
 }
 
+// suspendProcess asks the runtime to stop the claim's process and keep its session — release's
+// counterpart for a claim that goes on — and lets the stopped process go, for the next launch of
+// the same session to wait out. A suspension that fails leaves the claim holding its process.
+func (m *Machine) suspendProcess(ctx context.Context) error {
+	if err := m.deps.Runtime.Suspend(ctx, *m.claim.Locator); err != nil {
+		return err
+	}
+	m.letGo()
+	return nil
+}
+
 // retire ends the claim: nothing of it runs any more and nothing relaunches it.
 func (m *Machine) retire(ctx context.Context) error {
-	m.disarmAll()
-	m.forgetSend()
 	m.letGo()
 	m.claim.State = StateRetired
 	return m.persist(ctx)
 }
 
-// letGo moves the process the claim records, when it records one, into previous: the claim no
-// longer runs it — it was stopped, found dead, or left behind — and the next launch of the same
-// session waits it out.
+// letGo ends what the machine had with the claim's process: no timer watches it and no send talks
+// to it any more, and the process the claim records, when it records one, moves into previous —
+// the claim no longer runs it (it was stopped, found dead, or left behind), and the next launch of
+// the same session waits it out.
 func (m *Machine) letGo() {
+	m.disarmAll()
+	m.forgetSend()
 	if m.claim.Locator != nil {
 		m.previous, m.claim.Locator = m.claim.Locator, nil
 	}
@@ -702,6 +754,8 @@ func claimOf(ev Event) claim.Token {
 	case PromptRefused:
 		return ev.Claim
 	case Timer:
+		return ev.Claim
+	case TreeVolumeLost:
 		return ev.Claim
 	case RequestSpawn:
 		return ev.Claim

@@ -57,7 +57,10 @@ type Notice struct {
 
 func (Notice) OutboxKind() OutboxKind { return OutboxKindNotice }
 
-// SuperviseOp identifies a worker-session operation.
+// SuperviseOp identifies a worker-session operation: "start" starts, resumes, or retries the role's
+// claim; "suspend" stops its process and keeps its session; "tree_close" is the tree's close —
+// the one request that ends the claim, the tree's root claim included. There is no plain stop:
+// only the tree's close ends a claim from the workflow, so the op states it.
 type SuperviseOp string
 
 // SuperviseRequest describes the session operation the outbox runner performs.
@@ -71,7 +74,7 @@ type SuperviseRequest struct {
 	Generation uint64 `json:"generation"`
 	// Phase is the phase a phase worker's start serves; a start for a phase the issue has left
 	// finishes without acting. It is empty for the architect, which serves every phase, and for a
-	// suspend or stop, which must still act after the issue moves on.
+	// suspend or a tree's close, which must still act after the issue moves on.
 	Phase phase.Phase `json:"phase,omitempty"`
 }
 
@@ -233,7 +236,7 @@ func validNoticeKind(kind NoticeKind) bool {
 
 func validSuperviseOp(op SuperviseOp) bool {
 	switch op {
-	case "start", "suspend", "stop":
+	case "start", "suspend", "tree_close":
 		return true
 	default:
 		return false

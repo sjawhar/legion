@@ -410,8 +410,8 @@ func TestRecordMigrationAppliesOverAPopulatedStageTwoDatabase(t *testing.T) {
 	st := emptyStore(t)
 	all, err := migrations.All()
 	must(t, err)
-	if len(all) != 6 {
-		t.Fatalf("migrations = %d, want three Stage 2 migrations and 0004 through 0006", len(all))
+	if len(all) < 6 {
+		t.Fatalf("migrations = %d, want at least the three Stage 2 migrations and 0004 through 0006", len(all))
 	}
 	for _, migration := range all[:3] {
 		inTx(t, st, func(tx pgx.Tx) {
@@ -424,13 +424,21 @@ func TestRecordMigrationAppliesOverAPopulatedStageTwoDatabase(t *testing.T) {
 			}())
 		})
 	}
+	// The claim is written in the Stage 2 schema's own columns: the store's PutClaim writes the
+	// latest schema's, which a Stage 2 database does not have yet.
 	stageTwo := supervise.Claim{Token: "legion-208-architect", Project: "LEGION", Tree: "LEGION-208", Issue: "LEGION-208", Role: claim.RoleArchitect, State: supervise.StateSuspended}
-	must(t, st.PutClaim(ctx, stageTwo))
+	inTx(t, st, func(tx pgx.Tx) {
+		_, err := tx.Exec(ctx, `insert into claims (token, project, tree, issue, role, generation, session, session_file,
+			state, launch_failures, prompt_failures, prompt_retires, uncertain_streak)
+			values ($1, $2, $3, $4, $5, 0, '', '', $6, 0, 0, 0, 0)`,
+			string(stageTwo.Token), stageTwo.Project, stageTwo.Tree, stageTwo.Issue, string(stageTwo.Role), string(stageTwo.State))
+		must(t, err)
+	})
 
 	applied, err := st.Migrate(ctx)
 	must(t, err)
-	if applied != 3 {
-		t.Fatalf("migrations applied = %d, want only 0004 through 0006", applied)
+	if applied != len(all)-3 {
+		t.Fatalf("migrations applied = %d, want every one after the Stage 2 three (%d)", applied, len(all)-3)
 	}
 	claims, err := st.Claims(ctx)
 	must(t, err)

@@ -193,7 +193,7 @@ func (s *server) spawn(w http.ResponseWriter, r *http.Request) {
 
 // claimRequest is one operator request on an existing claim: event builds the request the claim's
 // machine is posted, or answers the caller itself and reports false.
-func (s *server) claimRequest(request string, event func(http.ResponseWriter, *http.Request, claim.Token) (supervise.Event, bool)) http.HandlerFunc {
+func (s *server) claimRequest(request string, event func(http.ResponseWriter, *http.Request, supervise.Claim) (supervise.Event, bool)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token := claim.Token(r.PathValue("token"))
 		m, ok := s.supervisor.Machine(token)
@@ -201,7 +201,7 @@ func (s *server) claimRequest(request string, event func(http.ResponseWriter, *h
 			writeJSON(w, http.StatusNotFound, errorBody("no claim "+string(token)))
 			return
 		}
-		ev, ok := event(w, r, token)
+		ev, ok := event(w, r, m.Claim())
 		if !ok {
 			return
 		}
@@ -213,24 +213,47 @@ func (s *server) claimRequest(request string, event func(http.ResponseWriter, *h
 	}
 }
 
-func deliverEvent(w http.ResponseWriter, r *http.Request, token claim.Token) (supervise.Event, bool) {
+func deliverEvent(w http.ResponseWriter, r *http.Request, c supervise.Claim) (supervise.Event, bool) {
 	var req DeliverRequest
 	if !readBody(w, r, &req) || !requireFields(w, field{"task", req.Task}) {
 		return nil, false
 	}
-	return supervise.RequestDeliver{Claim: token, Task: req.Task}, true
+	return supervise.RequestDeliver{Claim: c.Token, Task: req.Task}, true
 }
 
-func suspendEvent(_ http.ResponseWriter, _ *http.Request, token claim.Token) (supervise.Event, bool) {
-	return supervise.RequestSuspend{Claim: token}, true
+func suspendEvent(_ http.ResponseWriter, _ *http.Request, c supervise.Claim) (supervise.Event, bool) {
+	return supervise.RequestSuspend{Claim: c.Token}, true
 }
 
-func resumeEvent(_ http.ResponseWriter, _ *http.Request, token claim.Token) (supervise.Event, bool) {
-	return supervise.RequestResume{Claim: token}, true
+func resumeEvent(_ http.ResponseWriter, _ *http.Request, c supervise.Claim) (supervise.Event, bool) {
+	return supervise.RequestResume{Claim: c.Token}, true
 }
 
-func stopEvent(_ http.ResponseWriter, _ *http.Request, token claim.Token) (supervise.Event, bool) {
-	return supervise.RequestStop{Claim: token}, true
+func stopEvent(_ http.ResponseWriter, _ *http.Request, c supervise.Claim) (supervise.Event, bool) {
+	return supervise.RequestStop{Claim: c.Token}, true
+}
+
+// closeEvent is the operator closing a tree no workflow issue backs, through its root claim: the
+// tree's close, which ends the root as the workflow's tree_close does for a tree it closes when its
+// linger expires. Without it a root the operator spawned could never end — under a sandbox, its
+// Sandbox and the tree volume would stay for good. A workflow issue's tree is the workflow's to
+// close, and a worker's claim is stopped, not closed.
+func (s *server) closeEvent(w http.ResponseWriter, r *http.Request, c supervise.Claim) (supervise.Event, bool) {
+	if !claim.IsTreeArchitect(c.Role, c.Issue, c.Tree) {
+		writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf("close refused: %s is not its tree's root claim; stop it instead", c.Token)))
+		return nil, false
+	}
+	recorded, err := s.recordedIssue(r.Context(), c.Tree)
+	if err != nil {
+		s.log.Error("api: read the workflow issue of a tree the operator closes", "tree", c.Tree, "error", err)
+		writeJSON(w, http.StatusInternalServerError, errorBody(fmt.Sprintf("close %s: the daemon could not read whether a workflow issue backs tree %s", c.Token, c.Tree)))
+		return nil, false
+	}
+	if recorded != nil {
+		writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf("close refused: %s is a workflow issue's tree, which closes when its linger expires", c.Tree)))
+		return nil, false
+	}
+	return supervise.RequestStop{Claim: c.Token, TreeClose: true}, true
 }
 
 // list answers every claim the daemon supervises, in token order.

@@ -313,11 +313,11 @@ func TestOutboxSuperviseStartsResumesSuspendsStopsAndDeduplicatesDelivery(t *tes
 	if len(runtime.CallsOf("Resume")) != 1 {
 		t.Fatalf("resume calls = %d, want one", len(runtime.CallsOf("Resume")))
 	}
-	if err := runner.execute(context.Background(), mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "stop", Tree: issue.Tree, Role: claim.RolePlanner, Generation: issue.Generation}, time.Now())); err != nil {
-		t.Fatalf("stop planner: %v", err)
+	if err := runner.execute(context.Background(), mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "tree_close", Tree: issue.Tree, Role: claim.RolePlanner, Generation: issue.Generation}, time.Now())); err != nil {
+		t.Fatalf("close the planner's tree: %v", err)
 	}
 	if got := machine.Claim().State; got != supervise.StateRetired {
-		t.Fatalf("claim state after stop = %s, want retired", got)
+		t.Fatalf("claim state after its tree's close = %s, want retired", got)
 	}
 }
 

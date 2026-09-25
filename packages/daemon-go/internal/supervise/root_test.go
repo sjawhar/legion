@@ -7,7 +7,6 @@ package supervise
 import (
 	"errors"
 	"reflect"
-	"strings"
 	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -189,15 +188,20 @@ func TestTreeCloseReleasesALiveRoot(t *testing.T) {
 // Nothing else retires the tree's root (N-v2-4): a retired root leaves the orphan sweep's known
 // set, and under a sandbox the sweep would then delete its Sandbox and the tree volume with it,
 // every child's workspace included. A stop that is not the tree's close — the operator's — is
-// refused in every state and changes nothing, and the refusal names the way to stop the root's
-// process instead.
+// refused in every state and changes nothing. The refusal is ErrRootStop, whatever the state, and
+// says what stops the root's process where one runs: suspend, once its agent has registered.
 func TestAStopThatIsNotTheTreesCloseNeverRetiresItsRoot(t *testing.T) {
-	wantRefused := func(t *testing.T, h *harness, state ClaimState) {
+	const (
+		suspendIt = "stop refused: the tree's root claim ends only when its tree closes; suspend it to stop its process"
+		booting   = "stop refused: the tree's root claim ends only when its tree closes; suspend it to stop its process once its agent has registered"
+		nothing   = "stop refused: the tree's root claim ends only when its tree closes; no process of this claim is running"
+	)
+	wantRefused := func(t *testing.T, h *harness, state ClaimState, want string) {
 		t.Helper()
 		before := h.claim()
-		var refused *RefusedError
-		if err := h.handle(RequestStop{Claim: rootToken}); !errors.As(err, &refused) || !strings.Contains(refused.Reason, "suspend") {
-			t.Fatalf("stop of a root in %s returned %v, want a refusal naming suspend", state, err)
+		err := h.handle(RequestStop{Claim: rootToken})
+		if !errors.Is(err, ErrRootStop) || err.Error() != want {
+			t.Fatalf("stop of a root in %s returned %v, want ErrRootStop saying %q", state, err, want)
 		}
 		h.wantCalls("Release", 0)
 		h.wantState(state)
@@ -208,13 +212,23 @@ func TestAStopThatIsNotTheTreesCloseNeverRetiresItsRoot(t *testing.T) {
 			t.Errorf("stored state %s, want %s", stored.State, state)
 		}
 	}
-	for _, state := range append([]ClaimState{StateQueued, StateSuspended}, liveStates...) {
+	for state, want := range map[ClaimState]string{
+		StateQueued: nothing, StateSuspended: nothing,
+		StateLaunching: booting, StateShimConnected: booting,
+		StateRegistered: suspendIt, StateReady: suspendIt, StateWorking: suspendIt, StateIdle: suspendIt,
+	} {
 		t.Run(string(state), func(t *testing.T) {
 			h := newHarnessOf(t, rootClaim())
 			h.reach(state)
-			wantRefused(t, h, state)
+			wantRefused(t, h, state, want)
 		})
 	}
+	t.Run(string(StateLaunchUncertain), func(t *testing.T) {
+		uncertain := rootClaim()
+		uncertain.State = StateLaunchUncertain
+		h := newHarnessOf(t, uncertain)
+		wantRefused(t, h, StateLaunchUncertain, nothing)
+	})
 	t.Run(string(StateFailed), func(t *testing.T) {
 		h := newHarnessOf(t, rootClaim())
 		h.reach(StateReady)
@@ -222,6 +236,31 @@ func TestAStopThatIsNotTheTreesCloseNeverRetiresItsRoot(t *testing.T) {
 			h.observe(runtime.Gone)
 		}
 		h.wantState(StateFailed)
-		wantRefused(t, h, StateFailed)
+		wantRefused(t, h, StateFailed, nothing)
 	})
+}
+
+// Suspend is what stops the root's process short of its tree's close, so it is accepted as soon as
+// the agent has registered: a registered agent holds a capability that mints grants and no timer
+// runs on it, so a claim that could be neither stopped nor suspended there would keep that
+// capability until its process died. The suspension revokes it and keeps the session to resume.
+func TestARegisteredRootCanBeSuspendedAndResumed(t *testing.T) {
+	h := newHarnessOf(t, rootClaim())
+	h.reach(StateRegistered)
+	loc := h.locator()
+
+	h.must(RequestSuspend{Claim: rootToken})
+
+	if suspend := h.wantCalls("Suspend", 1)[0]; suspend.Locator != loc {
+		t.Errorf("suspended %+v, want the registered process %+v", suspend.Locator, loc)
+	}
+	h.wantState(StateSuspended)
+	if stored := h.store.load(rootToken); stored.State != StateSuspended || stored.CapabilityHash != nil || stored.Session != session {
+		t.Errorf("stored %+v, want it suspended with its capability revoked and its session kept", stored)
+	}
+
+	h.must(RequestResume{Claim: rootToken})
+	if resume := h.wantCalls("Resume", 1)[0]; resume.Spec.ResumeSessionFile != sessionFile || resume.Previous == nil || *resume.Previous != loc {
+		t.Errorf("resumed %+v, want the recorded session after the suspended process", resume)
+	}
 }

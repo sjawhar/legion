@@ -504,7 +504,7 @@ func TestResumeRelaunchesTheSameSessionAfterTheSuspendedIncarnation(t *testing.T
 }
 
 // A restart forgets the suspended incarnation; by the time a claim is suspended its process was
-// stopped, so the resume has nothing to wait out and says so with the zero locator.
+// stopped, so the resume has nothing to wait out and says so with no previous locator (nil).
 func TestResumeAfterARestartHasNoIncarnationToWaitOut(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateSuspended)
@@ -687,8 +687,9 @@ func TestASuspensionWhoseTaskCannotBeRetiredStillRevokesTheCapability(t *testing
 	}
 }
 
-// Likewise a worker's exit retires its claim even when the runtime cannot release its process; only
-// the operator's stop keeps a claim whose release failed.
+// A worker's exit retires its claim even when the runtime cannot release its process: the agent has
+// ended, so its claim never stays live. A stop whose release fails keeps the claim, so the stop can
+// be asked again (TestAStopThatFailsChangesNothing).
 func TestAWorkerExitWhoseReleaseFailsStillRetiresIt(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateIdle)

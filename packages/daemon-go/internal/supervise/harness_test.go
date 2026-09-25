@@ -219,16 +219,35 @@ func (s *memStore) history() []Claim {
 	return append([]Claim(nil), s.puts...)
 }
 
-// testSpecs answers every launch with the same environment, or with the error it was told to.
-type testSpecs struct{ err error }
+// testSpecs answers every launch with the same environment, or with the error it was told to, and
+// records the claim each launch was built for.
+type testSpecs struct {
+	err    error
+	mu     sync.Mutex
+	claims []Claim
+}
 
 func (s *testSpecs) SpawnSpec(_ context.Context, c Claim) (runtime.SpawnSpec, error) {
+	s.mu.Lock()
+	s.claims = append(s.claims, copyClaim(c))
+	s.mu.Unlock()
 	if s.err != nil {
 		return runtime.SpawnSpec{}, s.err
 	}
 	return runtime.SpawnSpec{
 		Env: map[string]string{"LEGION_ISSUE": c.Issue},
 	}, nil
+}
+
+// last is the claim the latest launch was built for.
+func (s *testSpecs) last(t *testing.T) Claim {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.claims) == 0 {
+		t.Fatal("no launch was built")
+	}
+	return s.claims[len(s.claims)-1]
 }
 
 // logBuffer is a log handler's destination that tests read from.

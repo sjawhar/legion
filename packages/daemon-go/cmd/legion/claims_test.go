@@ -463,6 +463,21 @@ func TestClaimsSuspendResumeAndStopDriveTheClaim(t *testing.T) {
 	}
 }
 
+// close posts to the root claim's close route, with no body: the operator's close of a tree no
+// workflow issue backs, which the daemon decides (internal/api/operator.go).
+func TestClaimsClosePostsToTheClaimsCloseRoute(t *testing.T) {
+	d := newOperatorDaemon(t)
+	d.succeed(d.spawnArgs()...)
+
+	d.claims(append(append([]string{"close"}, d.reach()...), "--claim", string(architectClaim))...)
+
+	seen := d.lastOperatorRequest()
+	wantOperatorRequest(t, seen, http.MethodPost, "/legion/v1/operator/claims/"+string(architectClaim)+"/close")
+	if len(seen.body) != 0 {
+		t.Fatalf("close sent a body %q, want none", seen.body)
+	}
+}
+
 // list prints one line per claim — token, role, issue, state, generation — in the daemon's token
 // order, and --json prints the daemon's answer byte for byte.
 func TestClaimsListPrintsOneLinePerClaim(t *testing.T) {
@@ -534,7 +549,7 @@ func TestClaimsPrintsTheDaemonsRefusalAndFails(t *testing.T) {
 			args: func(d *operatorDaemon) []string {
 				return append(append([]string{"stop"}, d.reach()...), "--claim", string(architectClaim))
 			},
-			want: "the daemon answered 409 Conflict: stop refused: the claim is launching (the tree's root claim ends only when its tree closes; suspend it to stop its process)",
+			want: "the daemon answered 409 Conflict: stop refused: the tree's root claim ends only when its tree closes; suspend it to stop its process once its agent has registered",
 		},
 		{
 			name: "a spawn the daemon cannot name",
@@ -622,6 +637,7 @@ func TestClaimsRefusesAMissingFlagBeforeReachingTheDaemon(t *testing.T) {
 		{"suspend", [][2]string{{"operator-token-file", token}, {"claim", string(architectClaim)}}},
 		{"resume", [][2]string{{"operator-token-file", token}, {"claim", string(architectClaim)}}},
 		{"stop", [][2]string{{"operator-token-file", token}, {"claim", string(architectClaim)}}},
+		{"close", [][2]string{{"operator-token-file", token}, {"claim", string(architectClaim)}}},
 		{"list", [][2]string{{"operator-token-file", token}}},
 	} {
 		for _, missing := range sub.flags {
@@ -681,6 +697,7 @@ func TestClaimsRefusesAnOperatorTokenFileItCannotRead(t *testing.T) {
 		{"suspend", "--claim", string(architectClaim)},
 		{"resume", "--claim", string(architectClaim)},
 		{"stop", "--claim", string(architectClaim)},
+		{"close", "--claim", string(architectClaim)},
 		{"list"},
 	} {
 		for name, file := range files {
@@ -723,7 +740,7 @@ func TestClaimsWithoutAKnownSubcommandIsAUsageError(t *testing.T) {
 		args []string
 		want string
 	}{
-		{nil, "usage: legion claims spawn|deliver|suspend|resume|stop|list [flags]"},
+		{nil, "usage: legion claims spawn|deliver|suspend|resume|stop|close|list [flags]"},
 		{[]string{"frobnicate"}, `legion claims: unknown subcommand "frobnicate"`},
 	} {
 		var out, errb bytes.Buffer

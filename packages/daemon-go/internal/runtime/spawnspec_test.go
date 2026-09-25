@@ -45,6 +45,9 @@ func TestValidateSpawnSpecRefusesWhatNoRuntimeCouldHonour(t *testing.T) {
 		{"a secret name that is not a variable name", func(s *SpawnSpec) { s.Secrets["BAD NAME"] = "x" }, `spawn legion-omp-legion-43-tester: secret "BAD NAME" is not an environment variable name`},
 		{"a secret whose pointer the runtime owns", func(s *SpawnSpec) { s.Secrets["LEGION_BOOT_TOKEN"] = "x" }, "spawn legion-omp-legion-43-tester: secret LEGION_BOOT_TOKEN's pointer LEGION_BOOT_TOKEN_FILE is a variable the runtime sets itself"},
 		{"a secret whose pointer Env also sets", func(s *SpawnSpec) { s.Env["ENVOY_TOKEN_FILE"] = "/elsewhere" }, "spawn legion-omp-legion-43-tester: secret ENVOY_TOKEN's pointer ENVOY_TOKEN_FILE is also set in Env"},
+		{"a resume of a workspace recovered after its volume was lost", func(s *SpawnSpec) {
+			s.ResumeSessionFile, s.WorkspaceRecoveredFrom = "/sessions/tester.jsonl", "legion/LEGION-43"
+		}, "spawn legion-omp-legion-43-tester: ResumeSessionFile /sessions/tester.jsonl and WorkspaceRecoveredFrom legion/LEGION-43 are both set: a workspace recovered after its volume was lost holds no session to resume"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			spec := spawnSpec()
@@ -58,6 +61,8 @@ func TestValidateSpawnSpecRefusesWhatNoRuntimeCouldHonour(t *testing.T) {
 		"as it is":                    func(*SpawnSpec) {},
 		"with no repository":          func(s *SpawnSpec) { s.Repository = "" },
 		"with a credential's pointer": func(s *SpawnSpec) { s.Env["GH_TOKEN_FILE"] = "/state/gh-token" },
+		"resuming a session":          func(s *SpawnSpec) { s.ResumeSessionFile = "/sessions/tester.jsonl" },
+		"recovering a lost workspace": func(s *SpawnSpec) { s.WorkspaceRecoveredFrom = "legion/LEGION-43" },
 	} {
 		spec := spawnSpec()
 		mutate(&spec)

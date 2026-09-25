@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -86,6 +87,11 @@ type Timer struct {
 	DeliveryID string
 }
 
+// TreeVolumeLost is another claim of the claim's tree finding the tree volume lost (its
+// workspace-init found neither the clone nor its session): whatever session this claim recorded
+// was on that volume, and is gone with it. The daemon sends it to the tree's other claims.
+type TreeVolumeLost struct{ Claim claim.Token }
+
 // RequestSpawn launches a queued claim.
 type RequestSpawn struct{ Claim claim.Token }
 
@@ -114,8 +120,9 @@ type RequestSuspend struct{ Claim claim.Token }
 type RequestResume struct{ Claim claim.Token }
 
 // RequestStop ends the claim. TreeClose says the stop is its tree's close — the workflow stopping
-// every claim of a tree whose linger expired — which is the only stop that ends the tree's root
-// claim: any other stop of a root is refused, and suspending it is how its process is stopped.
+// every claim of a tree whose linger expired, or the operator closing a tree no workflow issue
+// backs — which is the only stop that ends the tree's root claim: any other stop of a root is
+// refused, and suspending it is how its process is stopped.
 type RequestStop struct {
 	Claim     claim.Token
 	TreeClose bool
@@ -151,6 +158,7 @@ func (StreamLateRefusal) isEvent()  {}
 func (PromptAcked) isEvent()        {}
 func (PromptRefused) isEvent()      {}
 func (Timer) isEvent()              {}
+func (TreeVolumeLost) isEvent()     {}
 func (RequestSpawn) isEvent()       {}
 func (RequestRegister) isEvent()    {}
 func (RequestReady) isEvent()       {}
@@ -188,6 +196,8 @@ const (
 	onDeliver     eventKind = "request_deliver"
 	onExit        eventKind = "request_exit"
 
+	onVolumeLost eventKind = "tree_volume_lost"
+
 	timerPrefix eventKind = "timer:"
 )
 
@@ -211,6 +221,8 @@ func kindOf(ev Event) eventKind {
 		return onRefused
 	case Timer:
 		return timerPrefix + eventKind(ev.Kind)
+	case TreeVolumeLost:
+		return onVolumeLost
 	case RequestSpawn:
 		return onSpawn
 	case RequestRegister:
@@ -366,6 +378,12 @@ func fillTable(t *builder) {
 	t.row(onProbeTimer, "probe the uncertain process again", reprobe, []ClaimState{StateLaunching, StateFailed}, live...)
 	t.ignore(onProbeTimer, noProcess, processless...)
 
+	// The tree's volume, found lost by another claim of the tree.
+	t.row(onVolumeLost, "the tree volume was lost: drop the session it held", sessionLost, nil,
+		slices.Concat(processless, booting)...)
+	t.ignore(onVolumeLost, "the agent registered, so its session is on the volume its process runs on",
+		StateRegistered, StateReady, StateWorking, StateIdle)
+
 	// Requests.
 	t.row(onSpawn, "launch", spawn, []ClaimState{StateLaunching, StateFailed}, StateQueued)
 	t.ignore(onSpawn, "the previous launch's pane is still uncertain", StateLaunchUncertain)
@@ -393,9 +411,10 @@ func fillTable(t *builder) {
 	t.ignore(onReady, retiredClaim, StateRetired)
 
 	t.row(onSuspend, "suspend: stop the process, keep the session", suspend, []ClaimState{StateSuspended},
-		StateReady, StateWorking, StateIdle)
+		StateRegistered, StateReady, StateWorking, StateIdle)
 	t.row(onSuspend, "already suspended", nothingToDo, nil, StateSuspended)
-	t.ignore(onSuspend, "the agent is not ready, so there is nothing to suspend yet", unready...)
+	t.ignore(onSuspend, "the agent is not ready, so there is nothing to suspend yet",
+		StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected)
 	t.ignore(onSuspend, failedClaim, StateFailed)
 	t.ignore(onSuspend, retiredClaim, StateRetired)
 
@@ -595,14 +614,12 @@ func bootInterval(m *Machine, ctx context.Context, _ Event) error {
 // and tries again at the next probe interval.
 func registrationDeadline(m *Machine, ctx context.Context, _ Event) error {
 	return m.probe(ctx, func(ctx context.Context) error {
-		if err := m.deps.Runtime.Suspend(ctx, *m.claim.Locator); err != nil {
+		incarnation := m.claim.Locator.Incarnation
+		if err := m.suspendProcess(ctx); err != nil {
 			m.arm(TimerRegistration, m.deps.Timeouts.Probe, "")
 			return fmt.Errorf("retire %s, whose agent never registered: suspend: %w", m.claim.Token, err)
 		}
-		m.log.Warn("supervise: the agent never registered; retired its process", "incarnation", m.claim.Locator.Incarnation)
-		// The process is suspended: let go, a failure has nothing to suspend, and the relaunch
-		// waits it out.
-		m.letGo()
+		m.log.Warn("supervise: the agent never registered; retired its process", "incarnation", incarnation)
 		return m.relaunchAfterFailure(ctx)
 	}, TimerRegistration, m.deps.Timeouts.Probe)
 }
@@ -613,9 +630,25 @@ func noTurn(m *Machine, ctx context.Context, _ Event) error {
 
 func spawn(m *Machine, ctx context.Context, _ Event) error { return m.launch(ctx) }
 
+// sessionLost is another claim of the tree finding the tree volume lost: the session this claim
+// recorded was on it, so the claim drops it and its next launch is a fresh session that recreates
+// its workspace — never a resume that finds the session missing (beside a clone another claim may
+// already have recreated) and fails until its budget runs out. A claim with no session has nothing
+// to drop.
+func sessionLost(m *Machine, ctx context.Context, _ Event) error {
+	if m.claim.Session == "" && m.claim.SessionFile == "" {
+		return nil
+	}
+	m.log.Warn("supervise: the tree volume the session lived on was lost; the next launch is a fresh session", "session", m.claim.Session)
+	m.loseSession()
+	return m.persist(ctx)
+}
+
+// register records the session the agent became; a claim whose workspace was lost has its fresh
+// agent now, whose session is on the recreated volume, so the loss is over.
 func register(m *Machine, ctx context.Context, ev Event) error {
 	r := ev.(RequestRegister)
-	m.claim.Session, m.claim.SessionFile = r.Session, r.SessionFile
+	m.claim.Session, m.claim.SessionFile, m.claim.WorkspaceLost = r.Session, r.SessionFile, false
 	m.claim.CapabilityHash = bytes.Clone(r.CapabilityHash)
 	m.claim.State = StateRegistered
 	m.disarm(TimerBoot)
@@ -647,7 +680,7 @@ func reready(m *Machine, ctx context.Context, _ Event) error { return m.sendPend
 // with it (settle): the next resume is started with its new phase's task, never handed the
 // finished one's.
 func suspend(m *Machine, ctx context.Context, _ Event) error {
-	if err := m.deps.Runtime.Suspend(ctx, *m.claim.Locator); err != nil {
+	if err := m.suspendProcess(ctx); err != nil {
 		return fmt.Errorf("suspend %s: %w", m.claim.Token, err)
 	}
 	return m.suspended(ctx)
@@ -659,8 +692,6 @@ func suspend(m *Machine, ctx context.Context, _ Event) error {
 // which Handle runs after every row; a retirement that fails is reported, and the claim's next
 // decision retires it before anything else.
 func (m *Machine) suspended(ctx context.Context) error {
-	m.disarmAll()
-	m.forgetSend()
 	m.letGo()
 	m.claim.State = StateSuspended
 	return m.persist(ctx)
@@ -682,13 +713,25 @@ func retry(m *Machine, ctx context.Context, _ Event) error {
 // runtime holds for the tree — under a sandbox, the tree volume. Any other stop of it is refused.
 func stop(m *Machine, ctx context.Context, ev Event) error {
 	if m.claim.treeRoot() && !ev.(RequestStop).TreeClose {
-		return &RefusedError{State: m.claim.State, Request: "stop",
-			Reason: "the tree's root claim ends only when its tree closes; suspend it to stop its process"}
+		return &RefusedError{State: m.claim.State, Request: "stop", Err: rootStopRefusal(m.claim.State)}
 	}
 	if err := m.release(ctx); err != nil {
 		return err
 	}
 	return m.retire(ctx)
+}
+
+// rootStopRefusal is ErrRootStop with what stops the root's process in state instead: a suspension,
+// which takes a registered agent, and nothing where no process runs.
+func rootStopRefusal(state ClaimState) error {
+	switch {
+	case slices.Contains(processless, state):
+		return fmt.Errorf("%w; %s", ErrRootStop, noProcess)
+	case slices.Contains(booting, state):
+		return fmt.Errorf("%w; suspend it to stop its process once its agent has registered", ErrRootStop)
+	default:
+		return fmt.Errorf("%w; suspend it to stop its process", ErrRootStop)
+	}
 }
 
 func deliverLater(m *Machine, ctx context.Context, ev Event) error {
@@ -721,9 +764,10 @@ func deliverResuming(m *Machine, ctx context.Context, ev Event) error {
 func exit(m *Machine, ctx context.Context, ev Event) error {
 	m.log.Info("supervise: the agent reported its exit", "reason", ev.(RequestExit).Reason)
 	if m.claim.treeRoot() {
-		if err := m.deps.Runtime.Suspend(ctx, *m.claim.Locator); err != nil {
+		incarnation := m.claim.Locator.Incarnation
+		if err := m.suspendProcess(ctx); err != nil {
 			m.log.Error("supervise: could not suspend the exited root's process; suspending its claim anyway",
-				"incarnation", m.claim.Locator.Incarnation, "error", err)
+				"incarnation", incarnation, "error", err)
 		}
 		return m.suspended(ctx)
 	}

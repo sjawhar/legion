@@ -18,16 +18,18 @@ import (
 )
 
 // claimsUsage names every subcommand of `legion claims`.
-const claimsUsage = "usage: legion claims spawn|deliver|suspend|resume|stop|list [flags]"
+const claimsUsage = "usage: legion claims spawn|deliver|suspend|resume|stop|close|list [flags]"
 
 // claimsCommands is the operator's hand on the daemon's claims, one subcommand per operator route
-// (internal/api/operator.go).
+// (internal/api/operator.go). close is the tree's close, through its root claim, for a tree no
+// workflow issue backs.
 var claimsCommands = map[string]command{
 	"spawn":   runClaimsSpawn,
 	"deliver": runClaimsDeliver,
 	"suspend": claimRequest("suspend"),
 	"resume":  claimRequest("resume"),
 	"stop":    claimRequest("stop"),
+	"close":   claimRequest("close"),
 	"list":    runClaimsList,
 }
 

@@ -84,6 +84,8 @@ func TestATaskGivenBeforeReadyWaitsForReady(t *testing.T) {
 	}
 }
 
+// A second delivery is refused for the delivery the claim already holds, whatever its state: the
+// refusal is ErrDeliveryPending, and it says so rather than naming the state.
 func TestASecondDeliveryWhileOneIsPendingIsRefused(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateWorking)
@@ -91,8 +93,8 @@ func TestASecondDeliveryWhileOneIsPendingIsRefused(t *testing.T) {
 	err := h.handle(RequestDeliver{Claim: testToken, Task: "another"})
 
 	var refused *RefusedError
-	if !errors.As(err, &refused) {
-		t.Fatalf("a second delivery returned %v, want a refusal", err)
+	if !errors.As(err, &refused) || !errors.Is(err, ErrDeliveryPending) || err.Error() != "deliver refused: a delivery is already pending" {
+		t.Fatalf("a second delivery returned %v, want the pending-delivery refusal", err)
 	}
 	if h.pending().Task != "implement the plan" {
 		t.Errorf("pending %+v, want the first task kept", h.pending())
