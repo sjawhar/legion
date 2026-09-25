@@ -64,13 +64,13 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 		fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
 		return 1
 	}
-	installed, err := modelroute.Install(os.LookupEnv)
+	installed, err := modelroute.Install(os.Environ())
 	if err != nil {
 		fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
 		return 1
 	}
 	env := map[string]string{}
-	for _, pair := range installed.Environ(os.Environ()) {
+	for _, pair := range installed.Environ {
 		if name, value, ok := strings.Cut(pair, "="); ok {
 			env[name] = value
 		}
@@ -80,7 +80,7 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 		model = modelroute.DefaultModel
 	}
 	err = daemon.ProbeImage(ctx, daemon.ImageProbe{
-		Omp: invocation, Contract: expected, Env: env, WorkDir: workDir, Model: model, Route: route,
+		Omp: invocation, Contract: expected, Env: env, WorkDir: workDir, Model: model, Route: route, KeyFile: installed.KeyFile,
 		Log: slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
 	})
 	if unavailable := (*daemon.ModelRouteUnavailable)(nil); errors.As(err, &unavailable) {

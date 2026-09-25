@@ -9,10 +9,12 @@ import (
 	"testing"
 )
 
-// The route the model probe's tests name, and the model the image's profile answers from.
+// The route the model probe's tests name, the model the image's profile answers from, and the
+// file its key command reads.
 const (
-	testRoute = "https://middleman.legion.internal/anthropic"
-	testModel = "anthropic/claude-fable-5-1-legion"
+	testRoute   = "https://middleman.legion.internal/anthropic"
+	testModel   = "anthropic/claude-fable-5-1-legion"
+	testKeyFile = "/var/run/legion/gateway/token"
 )
 
 // modelSteps are what the fake Oh My Pi answers the model round trip with: the turn's JSON event
@@ -24,8 +26,11 @@ var modelSteps = map[string]string{
   '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"ok"}],"api":"anthropic-messages","provider":"anthropic","model":"claude-fable-5-1-legion","stopReason":"stop"}}' \
   '{"type":"agent_end","isTerminal":true,"message":null}'; exit 0`,
 	"bedrock": `printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"ok"}],"api":"bedrock-converse-stream","provider":"amazon-bedrock","model":"us.anthropic.claude-opus-4-8","stopReason":"stop"}}'; exit 0`,
-	"nokey": `echo 'error: No API key found for anthropic.' >&2
-echo 'Use /login, set an API key environment variable, or create /home/legion/.omp/profiles/legion/agent/agent.db' >&2; exit 1`,
+	"nokey": `printf '%s\n' '431159 |       const r = await this.#we.getApiKey(this.model, this.sessionId);' \
+  '431160 |         throw new Error(\x60No API key found for ${this.model.provider}.' \
+  '                       ^' 'error: No API key found for anthropic.' '' \
+  'Use /login, set an API key environment variable, or create /home/legion/.omp/profiles/legion/agent/agent.db' \
+  '      at #So (/$bunfs/root/omp-linux-x64:431160:15)' >&2; exit 1`,
 	"no-model":     `echo 'No model available matching enabledModels (anthropic/*-legion) with usable credentials. Configure auth for an allowed provider or adjust enabledModels.' >&2; exit 1`,
 	"not-found":    `printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[],"api":"anthropic-messages","provider":"anthropic","model":"claude-fable-5-1-legion","stopReason":"error","errorMessage":"404 {\"type\":\"error\",\"error\":{\"type\":\"not_found_error\",\"message\":\"model not found\"}}"}}'; exit 1`,
 	"unauthorized": `printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[],"api":"anthropic-messages","provider":"anthropic","model":"claude-fable-5-1-legion","stopReason":"error","errorMessage":"401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"invalid api key\"}}"}}'; exit 1`,
@@ -57,7 +62,7 @@ func (f imageOmp) planModel(t *testing.T, steps ...string) {
 func modelGate(t *testing.T, f imageOmp, attempts int) pluginGate {
 	t.Helper()
 	gate, _ := imageGateUnder(t, f, contractCurrent, attempts)
-	gate.model, gate.route = testModel, testRoute
+	gate.model, gate.route, gate.keyFile = testModel, testRoute, testKeyFile
 	return gate
 }
 
@@ -82,10 +87,9 @@ func TestTheModelProbeMakesOneTurnThroughTheProfile(t *testing.T) {
 		strings.Join(argv[5:], " ") != "--no-session --no-tools --no-extensions --no-skills --no-rules --no-lsp --no-title Reply with the single word ok." {
 		t.Errorf("the round trip ran `omp %s`, want `omp -p --mode json --config <overlay> --no-session --no-tools --no-extensions --no-skills --no-rules --no-lsp --no-title Reply with the single word ok.`", strings.Join(argv, " "))
 	}
-	// The overlay keeps model fallback off, so the default alias's own answer or error ends the
-	// turn, and cuts Oh My Pi's retries; it is gone once the probe is.
-	if overlay := f.read(t, "model.overlay.1"); !strings.Contains(overlay, "modelFallback: false") || !strings.Contains(overlay, "maxRetries: 2") {
-		t.Errorf("the round trip's overlay is %q, want fallback off and two retries", overlay)
+	// The overlay cuts Oh My Pi's retries; it is gone once the probe is.
+	if overlay := f.read(t, "model.overlay.1"); !strings.Contains(overlay, "maxRetries: 2") {
+		t.Errorf("the round trip's overlay is %q, want two retries", overlay)
 	}
 	if _, err := os.Stat(argv[4]); !os.IsNotExist(err) {
 		t.Errorf("the overlay %s outlived the probe: %v", argv[4], err)
@@ -113,24 +117,27 @@ func TestTheModelProbeMakesOneTurnThroughTheProfile(t *testing.T) {
 // (the key command failing), the gateway refusing the key or the model, and a turn that answered
 // nothing are refusals naming what the turn said and the route; the gateway overloaded or
 // unreachable, and Oh My Pi dying or cut off before it answered, are a ModelRouteUnavailable, which
-// `legion probe-image` hands the daemon as a transient answer.
+// `legion probe-image` hands the daemon as a transient answer. A key failure names the file the
+// key command reads and Oh My Pi's one error line, not the source excerpt and the login hint Bun
+// prints around it.
 func TestTheModelProbeClassifiesWhatAnsweredTheTurn(t *testing.T) {
 	for _, testCase := range []struct {
 		step        string
 		unavailable bool
 		want        []string
+		notWant     []string
 	}{
-		{"answers", false, nil},
-		{"bedrock", false, []string{"answered by amazon-bedrock/us.anthropic.claude-opus-4-8", "not " + testModel, testRoute}},
-		{"nokey", false, []string{"no usable model", "No API key found for anthropic", testRoute}},
-		{"no-model", false, []string{"no usable model", "No model available matching enabledModels", testRoute}},
-		{"not-found", false, []string{"the gateway refused", "404", "model not found", testRoute}},
-		{"unauthorized", false, []string{"the gateway refused", "401", "invalid api key"}},
-		{"silent", false, []string{"answered nothing"}},
-		{"overloaded", true, []string{"ended error", "529", "Overloaded", testRoute}},
-		{"unreachable", true, []string{"ended error", "Unable to connect", testRoute}},
-		{"dies", true, []string{"exited 1 before answering", "database is locked", testRoute}},
-		{"hang", true, []string{"timed out after 1.5s", testRoute}},
+		{"answers", false, nil, nil},
+		{"bedrock", false, []string{"answered by amazon-bedrock/us.anthropic.claude-opus-4-8", "not " + testModel, testRoute}, nil},
+		{"nokey", false, []string{"the profile's key command gave no key", testKeyFile, "No API key found for anthropic.", testRoute}, []string{"431160", "/login", "agent.db"}},
+		{"no-model", false, []string{"no usable model", "No model available matching enabledModels", testRoute}, nil},
+		{"not-found", false, []string{"the gateway refused", "404", "model not found", testRoute}, nil},
+		{"unauthorized", false, []string{"the gateway refused", "401", "invalid api key"}, nil},
+		{"silent", false, []string{"answered nothing"}, nil},
+		{"overloaded", true, []string{"ended error", "529", "Overloaded", testRoute}, nil},
+		{"unreachable", true, []string{"ended error", "Unable to connect", testRoute}, nil},
+		{"dies", true, []string{"exited 1 before answering", "database is locked", testRoute}, nil},
+		{"hang", true, []string{"timed out after 1.5s", testRoute}, nil},
 	} {
 		t.Run(testCase.step, func(t *testing.T) {
 			f := newImageOmp(t, []string{"available"}, []string{"yes"}, []string{"refuses"})
@@ -150,6 +157,14 @@ func TestTheModelProbeClassifiesWhatAnsweredTheTurn(t *testing.T) {
 				if err == nil || !strings.Contains(err.Error(), want) {
 					t.Errorf("verifyImage = %v, want it to say %q", err, want)
 				}
+			}
+			for _, noise := range testCase.notWant {
+				if err != nil && strings.Contains(err.Error(), noise) {
+					t.Errorf("verifyImage = %v, want it not to quote %q", err, noise)
+				}
+			}
+			if err != nil && strings.Contains(err.Error(), ",:") {
+				t.Errorf("verifyImage = %v: the route runs into the reason with a stray comma", err)
 			}
 			if n := f.attempts(t, "model"); n != 1 {
 				t.Errorf("the round trip ran %d times, want once", n)

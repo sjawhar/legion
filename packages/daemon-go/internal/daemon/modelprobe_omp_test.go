@@ -42,10 +42,11 @@ func TestTheModelProbeOnTheRealOhMyPi(t *testing.T) {
 		// alias gets a reply, so a turn that fell back would pass where it must not.
 		status      int
 		unreachable bool
-		// noToken leaves the token file absent, as in a pod without the gateway token volume.
-		noToken     bool
-		unavailable bool
-		want, anyOf []string
+		// noToken leaves the token file absent, as in a pod without the gateway token volume;
+		// unreadable writes it at mode 000, as a token the pod's user cannot read.
+		noToken, unreadable  bool
+		unavailable          bool
+		want, anyOf, notWant []string
 	}{
 		{name: "the gateway answers"},
 		// Oh My Pi's client retries a 529 on its own backoff, past maxRetries and printing nothing
@@ -54,8 +55,13 @@ func TestTheModelProbeOnTheRealOhMyPi(t *testing.T) {
 		{name: "the model not found", status: 404, want: []string{"the gateway refused it: 404"}},
 		{name: "the key refused", status: 401, want: []string{"the gateway refused it: 401"}},
 		// The key command failing is the image's fault, never the gateway's moment: Oh My Pi starts
-		// on the pinned alias and exits naming the provider it has no key for.
-		{name: "the key command fails", noToken: true, want: []string{"found no usable model", "No API key found for anthropic"}},
+		// on the pinned alias and exits naming the provider it has no key for, and the refusal names
+		// the file the key command reads (the test's own, as InstallKeyedBy keys it), not Bun's
+		// source excerpt or its login hint.
+		{name: "the key command fails", noToken: true, want: []string{"the profile's key command gave no key", "token, which is missing", "No API key found for anthropic."}, notWant: []string{"/login", "agent.db", "throw new Error", "unreadable"}},
+		// A token file the pod cannot read gives Oh My Pi's same line: the refusal must not tell the
+		// operator the file is missing when it is there.
+		{name: "the key file is unreadable", unreadable: true, want: []string{"the profile's key command gave no key", "token, which cannot be read", "No API key found for anthropic."}, notWant: []string{"is missing"}},
 		{name: "unreachable", unreachable: true, unavailable: true, want: []string{"routed to http://127.0.0.1:"}, anyOf: []string{"Connection error", "timed out after 30s"}},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -74,17 +80,20 @@ func TestTheModelProbeOnTheRealOhMyPi(t *testing.T) {
 			profile := strings.ReplaceAll(testCase.name, " ", "-")
 			token := filepath.Join(t.TempDir(), "token")
 			if !testCase.noToken {
-				if err := os.WriteFile(token, []byte("gateway-token\n"), 0o600); err != nil {
+				mode := os.FileMode(0o600)
+				if testCase.unreadable {
+					mode = 0o000
+				}
+				if err := os.WriteFile(token, []byte("gateway-token\n"), mode); err != nil {
 					t.Fatal(err)
 				}
 			}
-			base := map[string]string{"HOME": home, "OMP_PROFILE": profile, modelroute.EnvURL: url, "PATH": "/usr/local/bin:/usr/bin:/bin"}
-			installed, err := modelroute.InstallKeyedBy(func(name string) (string, bool) { value, ok := base[name]; return value, ok }, token)
+			installed, err := modelroute.InstallKeyedBy([]string{"HOME=" + home, "OMP_PROFILE=" + profile, modelroute.EnvURL + "=" + url, "PATH=/usr/local/bin:/usr/bin:/bin"}, token)
 			if err != nil {
 				t.Fatal(err)
 			}
 			env := map[string]string{}
-			for _, pair := range installed.Environ([]string{"HOME=" + home, "OMP_PROFILE=" + profile, "PATH=/usr/local/bin:/usr/bin:/bin"}) {
+			for _, pair := range installed.Environ {
 				name, value, _ := strings.Cut(pair, "=")
 				env[name] = value
 			}
@@ -92,7 +101,7 @@ func TestTheModelProbeOnTheRealOhMyPi(t *testing.T) {
 			// and an overloaded or unreachable gateway still retries past it.
 			gate := pluginGate{
 				env: env, workDir: t.TempDir(), invocation: omp, timeout: 30 * time.Second,
-				model: modelroute.DefaultModel, route: installed.Route, log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+				model: modelroute.DefaultModel, route: installed.Route, keyFile: installed.KeyFile, log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 			}
 
 			started := time.Now()
@@ -109,6 +118,11 @@ func TestTheModelProbeOnTheRealOhMyPi(t *testing.T) {
 			for _, want := range testCase.want {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("verifyModelRoute = %v, want it to say %q", err, want)
+				}
+			}
+			for _, noise := range testCase.notWant {
+				if strings.Contains(err.Error(), noise) {
+					t.Errorf("verifyModelRoute = %v, want it not to quote %q", err, noise)
 				}
 			}
 			if len(testCase.anyOf) > 0 && !slices.ContainsFunc(testCase.anyOf, func(want string) bool { return strings.Contains(err.Error(), want) }) {

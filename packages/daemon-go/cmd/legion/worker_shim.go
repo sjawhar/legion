@@ -18,8 +18,9 @@ const workerShimUsage = "legion worker-shim --connect <unix:///path|tcp://host:p
 // worker's OMP: it dials the daemon's worker stream, and bridges OMP to it once acked. Its lines
 // go to stdout, which is what the pane shows; its exit status is OMP's. In a pod
 // (LEGION_MODEL_GATEWAY_URL set) it first writes the model route into OMP's profile
-// (modelroute.Install) and hands OMP the pins as its last settings overlay (Installed.Environ), so
-// the agent reaches its models through the gateway alone, whatever the repository's own settings.
+// (modelroute.Install) and starts OMP on the environment Install answers, which carries the pins as
+// its last settings overlay, so the agent reaches its models through the gateway alone, whatever
+// the repository's own settings.
 func runWorkerShim(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := newFlags("worker-shim", stderr)
 	connect := flags.String("connect", "", "the daemon's worker stream: unix:///<path> or tcp://<host>:<port>")
@@ -34,13 +35,13 @@ func runWorkerShim(ctx context.Context, args []string, stdout, stderr io.Writer)
 	cfg, err := workerShimConfig(set, *connect, *bootTokenFile, *providerEnvDir, flags.Args())
 	var installed modelroute.Installed
 	if err == nil {
-		installed, err = modelroute.Install(os.LookupEnv)
+		installed, err = modelroute.Install(cfg.Env)
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "legion worker-shim: %v\n", err)
 		return 1
 	}
-	cfg.Env = installed.Environ(cfg.Env)
+	cfg.Env = installed.Environ
 	cfg.Log = stdout
 	code, err := shim.Run(ctx, cfg)
 	if err != nil {

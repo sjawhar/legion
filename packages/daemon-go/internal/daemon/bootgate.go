@@ -88,10 +88,11 @@ type pluginGate struct {
 	// contract is the Go daemon API contract the plugin must declare: the daemon's own
 	// GoDaemonAPIVersion, or the one `legion probe-image` is asked for.
 	contract int
-	// model and route are the model the image's round trip must be answered by and the gateway
-	// route it goes through (ImageProbe); the round trip runs only when model is set.
-	model, route string
-	log          *slog.Logger
+	// model, route and keyFile are the model the image's round trip must be answered by, the
+	// gateway route it goes through, and the file the profile's key command reads (ImageProbe); the
+	// round trip runs only when model is set.
+	model, route, keyFile string
+	log                   *slog.Logger
 }
 
 // verify runs the two probes. A refusal names what the operator has to change; a gate the daemon's
@@ -505,10 +506,11 @@ type ImageProbe struct {
 	WorkDir string
 	// Log receives each transient failure the retry waits out.
 	Log *slog.Logger
-	// Model is the model the image's Oh My Pi profile must answer a turn from, and Route the
-	// gateway route the profile sends it through: set when `legion probe-image` routed the profile
-	// (modelroute.Install), empty for no model round trip.
-	Model, Route string
+	// Model is the model the image's Oh My Pi profile must answer a turn from, Route the gateway
+	// route the profile sends it through, and KeyFile the file the profile's key command reads: set
+	// when `legion probe-image` routed the profile (modelroute.Install), empty for no model round
+	// trip.
+	Model, Route, KeyFile string
 }
 
 // imageProbeTimeout is each image-probe attempt's budget: the default
@@ -526,7 +528,7 @@ const imageProbeTimeout = 300 * time.Second
 func ProbeImage(ctx context.Context, p ImageProbe) error {
 	return pluginGate{
 		env: p.Env, workDir: p.WorkDir, invocation: p.Omp, timeout: imageProbeTimeout,
-		retry: bootprobe.Image, contract: p.Contract, model: p.Model, route: p.Route, log: p.Log,
+		retry: bootprobe.Image, contract: p.Contract, model: p.Model, route: p.Route, keyFile: p.KeyFile, log: p.Log,
 	}.verifyImage(ctx)
 }
 
