@@ -687,18 +687,19 @@ pass
 
 begin stop
 # The tree's root claim ends only when its tree closes: the operator's stop of it is refused, names
-# suspend, and changes nothing — not its state, its generation, or its pane. Suspending it stops its
-# process. A worker's claim is the operator's to stop: a second worker of S2-1 is stopped, retired
-# with its pane gone. No workflow issue backs S2-1, so the operator then closes it while its first
-# worker still runs: the close ends the root claim and then every other claim of the tree, so that
-# worker's claim is retired and its pane is gone too.
+# suspend, and changes nothing — not its state, its generation, or its pane. No workflow issue backs
+# S2-1, so the refusal also names the operator's close, which ends its tree. Suspending the root
+# stops its process. A worker's claim is the operator's to stop: a second worker of S2-1 is stopped,
+# retired with its pane gone. The operator then closes S2-1 while its first worker still runs: the
+# close ends the root claim and then every other claim of the tree, so that worker's claim is
+# retired and its pane is gone too.
 root_before=$(claim_json "$c1" | jq -c '{generation, pane: .locator.tmux.pane}')
 if refusal=$(claims stop --claim "$c1" 2>&1 >/dev/null); then
   fail "the operator's stop of the root claim $c1 was accepted"
 fi
 case "$refusal" in
-  *"409 Conflict: stop refused: the tree's root claim ends only when its tree closes; suspend it to stop its process"*) ;;
-  *) fail "the root's stop was refused with '$refusal', not the root rule naming suspend" ;;
+  *"409 Conflict: stop refused: the tree's root claim ends only when its tree closes; suspend it to stop its process; no workflow issue backs its tree, so legion claims close ends it"*) ;;
+  *) fail "the root's stop was refused with '$refusal', not the root rule naming suspend and the close" ;;
 esac
 claim_is "$c1" '.state == "ready" or .state == "idle"' ||
   fail "the refused stop moved $c1: $(claim_json "$c1" | jq -c '{state, generation}')"
