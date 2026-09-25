@@ -41,18 +41,23 @@ and compares canonical markdown. `envoy-dispatch backfill-block-ids` runs that c
 document. Every write path that changes a document queues that closer once its transaction commits: a live edit (`POST /api/v1/artifacts/{id}/edits`), an uploaded document version (`POST /api/v1/issues/{key}/artifacts`, `POST /api/v1/projects/{key}/artifacts`), and a spec seeded at issue creation - so ask blocks written by any of them become asks without waiting for a later live change. The closer attributes the asks it indexes to the room's most recent mutating actor (`roomState.lastActor`, set by every edit, replacement and seed) when no pending author remains - an edit's own version write has already consumed `pending` by the time settlement runs. A free-text ask block (no bullet list) carries `options: []` on the wire, never JSON null.
 
 Each `doc_updates` row records `content_changed` - whether the update changed the document's
-rendered markdown, the only document content a version stores (`pmdoc.Render` of the tree before and after; the
-one measure the room's update observer, `updateChangesMarkdown`, and a transactional live write in
-`applyLive` both apply) - and settlement writes a version only when a content-class row lies past
-the latest version's `doc_update_version` cursor or ask reconciliation changed something. An update
-that changes only what no rendering carries therefore never versions a document: a comment's quote
-mark, a margin projection, or the attributes a reader's browser editor derives on its own - each
-heading's `id` when it opens the document, and each ordered list item's `label` and `listType` on
-the first click or caret move. A browser is credited as a version's author only for browser edits
-made while it is connected (`creditContentChange`), another browser's as well as its own, since a
-browser edit cannot be pinned on one connected peer; opening a document or an agent's edit credits
-it nothing, so a reader whose editor changes nothing the rendering carries causes no version and
-cannot stale an approval. A handler joins its document
+rendered markdown, the only document content a version stores (`pmdoc.Render` of the tree before and
+after; the one measure the room's update observer, `updateChangesMarkdown`, and a transactional live
+write in `applyLive` both apply) - and settlement writes a version only when a content-class row
+lies past the latest version's `doc_update_version` cursor or ask reconciliation changed something.
+An update that changes only what no rendering carries therefore never versions a document: a margin
+projection, the attributes a reader's browser editor derives on its own - each heading's `id` when
+it opens the document, and each ordered list item's `label` and `listType` on the first keyboard
+caret move or edit - or a comment's, suggestion's or ask's anchor mark, wherever it splits the text
+it covers. `pmdoc.Render` renders a document without its anchor marks, so an escape is decided over
+a whole run and `snake_case` never becomes `snake\_case` because a mark starts inside it; an
+anchored comment's or ask's `SnapshotVersion` compares that same rendering with the latest version's
+markdown, so marking a quote writes no version either. A browser is credited as a version's author
+only for browser edits made while it is connected (`creditContentChange`), another browser's as well
+as its own, since a browser edit cannot be pinned on one connected peer; opening a document or an
+agent's edit credits it nothing, so a reader whose editor changes nothing the rendering carries
+causes no version and cannot stale an approval.
+A handler joins its document
 operations to its transaction with `Docs.Join`, which returns the transaction's ledger
 (`docs/ledger.go`), the only way to give a document operation a
 transaction. A joined operation never writes the room: it runs on the transaction's fork of the

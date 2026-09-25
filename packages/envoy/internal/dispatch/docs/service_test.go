@@ -312,7 +312,7 @@ func TestSettleRendersTreeAndWritesVersion(t *testing.T) {
 
 // The browser editor derives attributes that no rendering carries: every heading's id, slugged
 // from its text as soon as it opens the document (Milkdown's syncHeadingIdPlugin), and every
-// ordered list item's label and list type, rewritten on the first click or caret move
+// ordered list item's label and list type, rewritten on the first keyboard caret move or edit
 // (syncListOrderPlugin). The server parses headings with an empty id and every list item as a
 // bullet. A version records the rendered markdown alone, so such an update changes nothing a
 // version records: it credits no connected reader and settles without a version, which would
@@ -344,6 +344,72 @@ func TestAttributesTheEditorDerivesSettleWithoutAVersion(t *testing.T) {
 				t.Fatalf("pending authors = %v, want none (reader %v changed nothing)", pending, reader)
 			}
 		})
+	}
+}
+
+// A comment or suggestion marked on part of an identifier changes no version's markdown, whether
+// the mark reaches the room directly, where the room's update observer classifies it, or through
+// a transaction that then snapshots the document, as an anchored comment's handler does. Either
+// way the document keeps its one version, and the marker is credited with nothing.
+func TestAMarkInsideAWordWritesNoVersion(t *testing.T) {
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	// snapshot marks the quote when mark is set, then versions the document, in one transaction,
+	// as an anchored comment's handler does.
+	snapshot := func(t *testing.T, service *Service, artifactID string, mark *MarkSpec) VersionResult {
+		t.Helper()
+		tx, err := service.store.Pool.Begin(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback(context.Background())
+		ctx, ledger := service.Join(context.Background(), tx)
+		defer ledger.Discard()
+		if mark != nil {
+			if _, err := service.MarkQuote(ctx, artifactID, *mark, "case", nil); err != nil {
+				t.Fatalf("mark: %v", err)
+			}
+		}
+		result, err := service.SnapshotVersion(ctx, tx, artifactID, alice)
+		if err != nil {
+			t.Fatalf("snapshot: %v", err)
+		}
+		if err := ledger.Commit(context.Background()); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		return result
+	}
+	for _, kind := range []MarkKind{MarkComment, MarkSuggestion} {
+		for _, joined := range []bool{false, true} {
+			name := string(kind) + ", direct"
+			if joined {
+				name = string(kind) + ", in a transaction that snapshots"
+			}
+			t.Run(name, func(t *testing.T) {
+				service, artifactID := newTestService(t)
+				service.settle = time.Hour
+				seedServiceText(t, service, artifactID, "Use snake_case here.")
+				// Version 2 is the seeded text, so the latest version and the document agree.
+				if baseline := snapshot(t, service, artifactID, nil); baseline.Version.Number != 2 {
+					t.Fatalf("baseline version = %d, want 2", baseline.Version.Number)
+				}
+				alignLatestVersionWithUpdates(t, service, artifactID)
+				spec := MarkSpec{Kind: kind, ID: "m1", By: alice}
+
+				if joined {
+					if result := snapshot(t, service, artifactID, &spec); result.Wrote {
+						t.Errorf("snapshot after the mark wrote version %d", result.Version.Number)
+					}
+				} else if _, err := service.MarkQuote(context.Background(), artifactID, spec, "case", nil); err != nil {
+					t.Fatalf("mark: %v", err)
+				}
+				settleCurrentGeneration(t, service, artifactID)
+
+				assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 2, 0)
+				if pending := pendingAuthors(service, artifactID); len(pending) != 0 {
+					t.Fatalf("pending authors = %v, want none (a mark is not content)", pending)
+				}
+			})
+		}
 	}
 }
 
@@ -446,8 +512,8 @@ func setHeadingID(id string) func(*pmdoc.Node) *pmdoc.Node {
 	}
 }
 
-// labelOrderedListItems is the live edit the editor's list plugin makes on a click or caret move:
-// every item of an ordered list is labelled with its number and typed as ordered.
+// labelOrderedListItems is the live edit the editor's list plugin makes on the first keyboard caret
+// move or edit: every item of an ordered list is labelled with its number and typed as ordered.
 func labelOrderedListItems(node *pmdoc.Node) *pmdoc.Node {
 	if node.Type == "ordered_list" {
 		start := 1

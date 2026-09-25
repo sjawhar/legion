@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import {
+  createComment,
   createIssue,
   createIssueArtifact,
   createNamedVersion,
@@ -9,6 +10,7 @@ import {
   getArtifact,
   getArtifactText,
   getIssueEvents,
+  rejectSuggestion,
   requestApproval,
 } from "./api";
 import { documentEditor, openSpecAndAwaitHeadingIds } from "./editor";
@@ -165,6 +167,94 @@ test("reading an approved spec and moving the caret through its numbered list le
     expect(artifact.approval).toMatchObject({ latest_version: 1, state: "approved", version: 1 });
   } finally {
     await bob.close();
+    await alice.close();
+  }
+});
+
+test("an agent's comment on part of an identifier in an approved spec leaves its approval current", async ({
+  browser,
+}) => {
+  await createProject({ key: "GATE", name: "Gate" });
+  const issue = await createIssue({
+    project: "GATE",
+    spec: "## Plan\n\nRename the user_id column.\n",
+    title: "Design gate",
+  });
+  const artifactID = issue.primary_artifact_id;
+  const requested = await requestApproval(artifactID, session);
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/");
+    const card = page.getByTestId(`ask-${requested.ask.id}`);
+    await card.getByRole("radio", { name: /^Approve/ }).check();
+    await card.getByRole("button", { name: "Answer" }).click();
+    await expect
+      .poll(async () => (await getArtifact(artifactID, { login: "alice" })).approval?.state)
+      .toBe("approved");
+
+    // The comment's mark starts inside `user_id`, splitting the word's text where the
+    // underscore sits. That changes nothing a version stores.
+    await createComment(
+      issue.key,
+      { anchor: { artifact: "spec", quote: "id column" }, body: "Is this indexed?" },
+      session
+    );
+    // Settlement runs two seconds after the room's last update, and a version it wrote would
+    // leave the approval pinned to an older one.
+    await page.waitForTimeout(3000);
+    const artifact = await getArtifact(artifactID, { login: "alice" });
+    expect(artifact.versions).toHaveLength(1);
+    expect(artifact.approval).toMatchObject({ latest_version: 1, state: "approved", version: 1 });
+  } finally {
+    await alice.close();
+  }
+});
+
+test("rejecting a suggestion on part of an identifier in an approved spec leaves its approval current", async ({
+  browser,
+}) => {
+  await createProject({ key: "GATE", name: "Gate" });
+  const issue = await createIssue({
+    project: "GATE",
+    spec: "## Plan\n\nMigrate snake_case_name first.\n",
+    title: "Design gate",
+  });
+  const artifactID = issue.primary_artifact_id;
+  // The suggestion's mark starts inside `snake_case_name`, splitting the word's text beside an
+  // underscore; rejecting it removes the mark and joins the text again.
+  const suggestion = await createComment(
+    issue.key,
+    {
+      anchor: { artifact: "spec", quote: "case_name" },
+      body: "Name the column for what it holds.",
+      suggestion: { replace_with: "case_label" },
+    },
+    session
+  );
+  const requested = await requestApproval(artifactID, session);
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/");
+    const card = page.getByTestId(`ask-${requested.ask.id}`);
+    await card.getByRole("radio", { name: /^Approve/ }).check();
+    await card.getByRole("button", { name: "Answer" }).click();
+    await expect
+      .poll(async () => (await getArtifact(artifactID, { login: "alice" })).approval?.state)
+      .toBe("approved");
+    const approved = (await getArtifact(artifactID, { login: "alice" })).approval;
+
+    await rejectSuggestion(suggestion.id, { login: "bob" });
+    // Settlement runs two seconds after the room's last update, and a version it wrote would
+    // leave the approval pinned to an older one.
+    await page.waitForTimeout(3000);
+    expect((await getArtifact(artifactID, { login: "alice" })).approval).toMatchObject({
+      latest_version: approved?.version,
+      state: "approved",
+      version: approved?.version,
+    });
+  } finally {
     await alice.close();
   }
 });

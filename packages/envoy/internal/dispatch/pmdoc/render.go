@@ -50,6 +50,10 @@ func render(doc *Node) (*renderer, error) {
 	if err := doc.Validate(); err != nil {
 		return nil, err
 	}
+	// Anchor marks render nothing, but one that starts or ends inside a word splits its text into
+	// runs, and an escape is decided within one run: rendering the document without them merges
+	// the runs, so a mark never changes the markdown (`snake_case`, never `snake\_case`).
+	doc = StripAnchorMarks(doc)
 	if len(doc.Children) == 1 && doc.Children[0].Type == "paragraph" && len(doc.Children[0].Children) == 0 {
 		return &renderer{}, nil
 	}

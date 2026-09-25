@@ -689,3 +689,38 @@ func TestRenderTableAutolinkPreservesHref(t *testing.T) {
 		t.Fatal("Parse(Render(Parse(table))) changed the autolink href")
 	}
 }
+
+// An anchor mark renders nothing, but one that starts or ends inside a word splits the word's
+// text into two runs. The rendering is the same as if the mark were not there: an escape is
+// decided over the whole run, so `snake_case` is never written `snake\_case`.
+func TestRenderIsTheSameWhereverAnAnchorMarkSplitsText(t *testing.T) {
+	comment := []Mark{{Type: "proofComment", Attrs: Attrs{"id": "c1", "by": "user:alice"}}}
+	ask := []Mark{{Type: "dispatchAsk", Attrs: Attrs{"id": "a1", "by": "user:alice"}}}
+	for _, test := range []struct {
+		name string
+		runs []*Node
+		want string
+	}{
+		{
+			name: "a comment on the end of a word",
+			runs: []*Node{{Type: "text", Text: "Use snake_"}, {Type: "text", Text: "case", Marks: comment}, {Type: "text", Text: " here."}},
+			want: "Use snake_case here.\n",
+		},
+		{
+			name: "an ask on the start of a word",
+			runs: []*Node{{Type: "text", Text: "Rename the "}, {Type: "text", Text: "user", Marks: ask}, {Type: "text", Text: "_id column."}},
+			want: "Rename the user_id column.\n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			doc := &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: test.runs}}}
+			markdown, err := Render(doc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if markdown != test.want {
+				t.Fatalf("Render() = %q, want %q", markdown, test.want)
+			}
+		})
+	}
+}
