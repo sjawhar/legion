@@ -673,9 +673,9 @@ type ImageProbe struct {
 	// Log receives each transient failure the retry waits out.
 	Log *slog.Logger
 	// PluginRoot is the plugin directory the pod's Oh My Pi loads as its one explicit extension
-	// (`--no-extensions --extension <root>`): the load probe runs the same way, and the contract
-	// probe reads that root's manifest, so the probe certifies the lane a pod uses. Empty leaves
-	// both on Oh My Pi's discovery, as a tmux pane loads the plugin.
+	// (`--no-extensions --extension <root>`), and is required: the load probe runs the same way,
+	// and the contract probe reads that root's manifest, so the probe certifies the lane a pod
+	// uses. A relative root is resolved against this process's working directory.
 	PluginRoot string
 	// RolesDir is the role prompts directory (prompts.ResolveRolePromptsDir): the load probe resolves
 	// the task agents and skills its prompts name beside the plugin's.
@@ -701,6 +701,9 @@ const defaultProbeTimeout = 300 * time.Second
 // rather than sent to `omp plugin list`. Each attempt is bounded by defaultProbeTimeout and retried
 // under bootprobe.Image: an image build has no supervisor and must finish.
 func ProbeImage(ctx context.Context, p ImageProbe) error {
+	if p.PluginRoot == "" {
+		return errors.New("image probe: ImageProbe.PluginRoot is required: the plugin directory a pod loads as its one explicit extension")
+	}
 	return pluginGate{
 		env: p.Env, workDir: p.WorkDir, invocation: p.Omp, timeout: defaultProbeTimeout,
 		retry: bootprobe.Image, contract: p.Contract,

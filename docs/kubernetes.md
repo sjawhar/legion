@@ -61,7 +61,7 @@ boot, and requires `agent-models=resolved`: each agent's model resolves, with a 
 tool resolves a subagent's (`packages/daemon-go/internal/runtime/sandbox/probe.go`). To run them yourself:
 `docker run --rm --entrypoint legion ghcr.io/sjawhar/legion-worker@sha256:… probe-image`, and
 `docker run --rm --entrypoint /opt/legion/go/bin/legion ghcr.io/sjawhar/legion-worker@sha256:… probe-image --plugin-root /opt/legion/pi-legion-envoy --skip-agent-models`
-(the plugin root a Sandbox pod loads the plugin from, so the Go probe loads it the same way; without
+(`--plugin-root` is required: the plugin root a Sandbox pod loads the plugin from, so the Go probe loads it the same way; without
 `--skip-agent-models` it also resolves each agent's model, which needs the operator's model roles).
 
 ### Pin by digest, never by tag

@@ -121,13 +121,16 @@ func imageEnv(home string) map[string]string {
 	return map[string]string{"HOME": home, "OMP_PROFILE": "legion", "PATH": os.Getenv("PATH"), "LEGION_OMP_PATH": "/opt/omp/bin/omp"}
 }
 
-// imageGateUnder is the image probe's gate over the image's HOME, run through f, with budgets that
-// cost the suite little: attempts bounds the retry (0 for none).
+// imageGateUnder is the image probe's gate over the image's HOME, loading the image's plugin root
+// as a pod does, run through f, with budgets that cost the suite little: attempts bounds the retry
+// (0 for none).
 func imageGateUnder(t *testing.T, f imageOmp, legion string, attempts int) (pluginGate, *bytes.Buffer) {
 	t.Helper()
 	var logged bytes.Buffer
+	home := imageHome(t, legion)
 	return pluginGate{
-		env:        imageEnv(imageHome(t, legion)),
+		env:        imageEnv(home),
+		pluginRoot: filepath.Join(home, "opt-legion", "pi-legion-envoy"),
 		workDir:    t.TempDir(),
 		invocation: f.path,
 		timeout:    1500 * time.Millisecond,
@@ -158,30 +161,32 @@ func TestProbeImageLoadsThePluginTheWayAPodDoes(t *testing.T) {
 	if !strings.Contains(argv, "--no-extensions ") || !strings.Contains(argv, "--extension "+root+" ") {
 		t.Errorf("the load probe ran `omp %s`, want it to run as a pod does: --no-extensions with %s as an explicit extension", strings.TrimSpace(argv), root)
 	}
-	// Without a plugin root — the daemon's own gate on tmux — the probe stays on discovery, which
-	// is how a pane loads it.
+	// Without a plugin root the image probe has no lane a pod uses, and is refused before any probe
+	// runs.
 	f = newImageOmp(t, []string{"available"}, []string{"yes"}, []string{"refuses"})
-	home = imageHome(t, contractCurrent)
-	if err := ProbeImage(context.Background(), ImageProbe{
-		Omp: f.path, Contract: 3, Env: imageEnv(home), WorkDir: t.TempDir(),
+	err = ProbeImage(context.Background(), ImageProbe{
+		Omp: f.path, Contract: 3, Env: imageEnv(imageHome(t, contractCurrent)), WorkDir: t.TempDir(),
 		Log: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
-	}); err != nil {
-		t.Fatalf("ProbeImage without a plugin root = %v", err)
+	})
+	if err == nil || !strings.Contains(err.Error(), "ImageProbe.PluginRoot is required") {
+		t.Fatalf("ProbeImage without a plugin root = %v, want it refused naming PluginRoot", err)
 	}
-	if argv := f.read(t, "load.argv.1"); strings.Contains(argv, "--no-extensions") {
-		t.Errorf("the load probe ran `omp %s` with no plugin root, want the discovery lane", strings.TrimSpace(argv))
+	if calls := f.calls(t); len(calls) != 0 {
+		t.Errorf("ProbeImage without a plugin root ran %v, want no probe", calls)
 	}
 }
 
 // `legion probe-image` runs the image's three launch probes — pi.agents, the plugin load held to
-// the contract, the session-storage setting — each as a pane would run Oh My Pi, under the image's
-// own environment, and leaves no probe file behind.
+// the contract, the session-storage setting — each as a pod runs Oh My Pi, under the image's own
+// environment, and leaves no probe file behind.
 func TestProbeImageRunsTheThreeProbesUnderTheImagesEnvironment(t *testing.T) {
 	f := newImageOmp(t, []string{"available"}, []string{"yes"}, []string{"refuses"})
-	env := imageEnv(imageHome(t, contractCurrent))
+	home := imageHome(t, contractCurrent)
+	env := imageEnv(home)
 
 	err := ProbeImage(context.Background(), ImageProbe{
-		Omp: f.path, Contract: 3, Env: env, WorkDir: t.TempDir(), Log: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		Omp: f.path, Contract: 3, Env: env, WorkDir: t.TempDir(), PluginRoot: filepath.Join(home, "opt-legion", "pi-legion-envoy"),
+		Log: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
 	})
 
 	if err != nil {
