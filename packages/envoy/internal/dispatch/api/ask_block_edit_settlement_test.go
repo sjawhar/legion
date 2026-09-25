@@ -256,6 +256,67 @@ func TestEditedBlockAskWritesOneVersionCreditingTheEditor(t *testing.T) {
 	}
 }
 
+// A block ask's edit writes its document inside the handler's transaction, so the events that
+// write produced - an anchor moved under a comment, here - belong to the ledger, and the
+// handler's own ask.edited follows them. A reader watching the live stream applies them in that
+// order: the refreshed anchor, then the question it moved under. Both reach the stream from one
+// commit, and nothing may publish before it.
+func TestAnEditedBlockAskPublishesItsDocumentEventsBeforeItsOwn(t *testing.T) {
+	handler, _, deps := newTestServer(t, testServerOptions{settle: 20 * time.Millisecond})
+	createReferenceAPIProject(t, handler, "CORE")
+	issue := createReferenceAPIIssue(t, handler, "CORE")
+	written := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"actor": sessionActor(),
+		"ops":   []map[string]string{{"op": "insert", "after": "end", "markdown": ":::ask{#decision}\nWhich transport carries it?\n:::"}},
+	})
+	if written.Code != http.StatusOK {
+		t.Fatalf("write ask block: status=%d body=%s", written.Code, written.Body.String())
+	}
+	awaitIndexedAskBlock(t, handler, issue.PrimaryArtifactID, "decision", "Which transport carries it?")
+	askID := blockAskID(t, handler, issue.Key, "decision")
+	anchored := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body":   "Say which one.",
+		"anchor": map[string]any{"artifact": "spec", "quote": "transport carries"},
+	}, "alice")
+	if anchored.Code != http.StatusCreated {
+		t.Fatalf("anchor a comment in the block: status=%d body=%s", anchored.Code, anchored.Body.String())
+	}
+
+	published, unsubscribe := deps.Events.Subscribe()
+	defer unsubscribe()
+	edited := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+askID, map[string]any{
+		"question": "Which transport ships this first, and when?", "actor": sessionActor(),
+	})
+	if edited.Code != http.StatusOK {
+		t.Fatalf("edit the block ask: status=%d body=%s", edited.Code, edited.Body.String())
+	}
+
+	var order []model.Event
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case event := <-published:
+			order = append(order, event)
+			if event.Type != "ask.edited" {
+				continue
+			}
+			if len(order) < 2 || order[len(order)-2].Type != "comment.anchor_refreshed" {
+				types := make([]string, 0, len(order))
+				for _, seen := range order {
+					types = append(types, seen.Type)
+				}
+				t.Fatalf("published %v, want comment.anchor_refreshed immediately before ask.edited", types)
+			}
+			if refreshed := order[len(order)-2]; refreshed.ID >= event.ID {
+				t.Fatalf("published the anchor refresh as event %d and ask.edited as %d, want the refresh appended first", refreshed.ID, event.ID)
+			}
+			return
+		case <-deadline:
+			t.Fatalf("the edit published %d events and no ask.edited", len(order))
+		}
+	}
+}
+
 // Acceptance 7, refused half: an option label carrying ": " cannot round-trip through the
 // block's `Label: Description` line, so the edit is refused whole - no row, block or version.
 func TestEditBlockAskRefusesAnOptionLabelTheBlockCannotCarry(t *testing.T) {

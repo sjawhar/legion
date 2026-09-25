@@ -868,9 +868,7 @@ func (s *Service) NamedVersion(ctx context.Context, artifactID, summary string, 
 	}
 	if !joinedTransaction {
 		s.commitVersion(artifactID, written.Version)
-		for _, event := range ledgerFrom(ctx).events {
-			s.events.Publish(event)
-		}
+		ledgerFrom(ctx).publishEvents()
 	}
 	return written, nil
 }

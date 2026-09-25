@@ -457,7 +457,7 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publishDocumentEvents(ledger, event)
+	s.publish(event)
 	WriteJSON(w, http.StatusOK, ask)
 }
 

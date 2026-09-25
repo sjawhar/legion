@@ -92,10 +92,16 @@ func (l *Ledger) Commit(ctx context.Context) error {
 		return err
 	}
 	l.publish()
+	l.publishEvents()
+	return nil
+}
+
+// publishEvents publishes the events this ledger's document operations appended, in the order
+// they appended them.
+func (l *Ledger) publishEvents() {
 	for _, event := range l.events {
 		l.service.events.Publish(event)
 	}
-	return nil
 }
 
 // commit is Commit up to the publish. Another transaction can run between the two, and tests
