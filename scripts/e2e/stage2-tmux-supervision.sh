@@ -615,8 +615,9 @@ pass
 begin stop
 # The tree's root claim ends only when its tree closes: the operator's stop of it is refused, names
 # suspend, and changes nothing — not its state, its generation, or its pane. Suspending it stops its
-# process; the worker's claim is stopped. No workflow issue backs S2-1, so the operator closes it,
-# which ends its root claim.
+# process. No workflow issue backs S2-1, so the operator closes it while its worker still runs: the
+# close ends the root claim and then every other claim of the tree, so the worker's claim is
+# retired and its pane is gone.
 root_before=$(claim_json "$c1" | jq -c '{generation, pane: .locator.tmux.pane}')
 if refusal=$(claims stop --claim "$c1" 2>&1 >/dev/null); then
   fail "the operator's stop of the root claim $c1 was accepted"
@@ -630,16 +631,20 @@ claim_is "$c1" '.state == "ready" or .state == "idle"' ||
 root_after=$(claim_json "$c1" | jq -c '{generation, pane: .locator.tmux.pane}')
 [ "$root_after" = "$root_before" ] || fail "the refused stop moved $c1 from $root_before to $root_after"
 claims suspend --claim "$c1" >/dev/null
-claims stop --claim "$c2" >/dev/null
-until_true 60 "the root to be suspended and the worker retired" sh -c \
-  "'$work/legion' claims list --json --config '$work/legion.yaml' --operator-token-file '$work/operator-token' | jq -e --arg r '$c1' --arg w '$c2' '([.claims[] | select(.token == \$r) | .state] == [\"suspended\"]) and ([.claims[] | select(.token == \$w) | .state] == [\"retired\"])'"
+until_true 60 "the root to be suspended" claim_is "$c1" '.state == "suspended"'
+worker_pane=$(claim_json "$c2" | jq -r .locator.tmux.pane)
+claim_is "$c2" '.state == "ready" or .state == "idle"' || fail "the worker $c2 is not live before the close: $(claim_json "$c2" | jq -c '{state}')"
+panes | grep -qxF "$worker_pane" || fail "the worker's pane $worker_pane is gone before the close"
 closed=$(claims close --json --claim "$c1") || fail "the operator's close of S2-1 through its root claim $c1 was refused"
 jq -e '.state == "retired"' <<<"$closed" >/dev/null || fail "the close of S2-1 left its root claim $(jq -c '{state, generation}' <<<"$closed")"
+claim_is "$c2" '.state == "retired"' || fail "the close of S2-1 left its worker $c2 $(claim_json "$c2" | jq -c '{state}'): a worker on a closed tree"
+pane_gone() { ! panes | grep -qxF "$1"; }
+until_true 30 "the worker's pane $worker_pane to be gone" pane_gone "$worker_pane"
 legion stop --config "$work/legion.yaml" >/dev/null
 stop_daemon "$daemon_pid" "legion stop"
 daemon_pid=
 note "the root's stop was refused, generation and pane unchanged ($root_after): $refusal"
-note "the root suspended, the worker retired; the operator's close of S2-1 retired the root; the daemon stopped with exit 0"
+note "the root suspended; the operator's close of S2-1, with its worker $c2 still live in pane $worker_pane, retired the root and the worker, and the pane is gone; the daemon stopped with exit 0"
 pass
 
 begin every-turn-through-the-gateway

@@ -124,6 +124,9 @@ func (r *Runtime) FailSuspend(err error) { r.fail("Suspend", err) }
 // FailRelease makes every later Release return err.
 func (r *Runtime) FailRelease(err error) { r.fail("Release", err) }
 
+// FailReleaseOf makes every later Release of token's claim return err; nil lets it through again.
+func (r *Runtime) FailReleaseOf(token claim.Token, err error) { r.fail("Release:"+string(token), err) }
+
 // FailObserve makes every later Observe return err instead of a sweep.
 func (r *Runtime) FailObserve(err error) { r.fail("Observe", err) }
 
@@ -218,6 +221,9 @@ func (r *Runtime) Release(_ context.Context, k runtime.Known) error {
 	defer r.mu.Unlock()
 	r.calls = append(r.calls, Call{Method: "Release", Released: copyKnown(k)})
 	if err := k.Validate(); err != nil {
+		return err
+	}
+	if err := r.failures["Release:"+string(k.Claim)]; err != nil {
 		return err
 	}
 	return r.failures["Release"]
