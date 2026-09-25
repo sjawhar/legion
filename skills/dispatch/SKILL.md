@@ -452,8 +452,8 @@ is rewritten, so anchors inside the text you replaced move as they would for any
 writes a new version, which on a spec awaiting approval closes the design gate until the new version is approved. Editing the block
 with `dispatch_doc_edit` works too and is the way to change anything else about it, including adding formatting to a question.
 Re-sending a field unchanged rewrites nothing, so retrying the whole ask is safe.
-Two shapes the block cannot carry are refused outright, naming the field and writing nothing: an option label containing `": "`,
-which is what separates a label from its description, and a question with a line beginning `:::`. Blank lines separate paragraphs;
+Text the block cannot carry back unchanged is refused outright, naming the field and writing nothing - an option label containing
+`": "`, the separator between a label and its description, is one example of text that cannot survive the round trip. Blank lines separate paragraphs;
 a single newline is kept as a line break.
 
 An ask stays open until a human answers, unless its question no longer needs that answer. Retract a moot or superseded question, or
