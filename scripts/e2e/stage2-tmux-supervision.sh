@@ -486,8 +486,8 @@ pass
 begin unregistered-agent-retired-at-the-deadline
 # A second daemon whose OMP answers the plugin gate and otherwise never runs the plugin: its pane's
 # process lives and its agent never registers. The gate also asks the load probe for the task agents
-# the installed plugin's skills dispatch (LEGION_PROMPT_AGENTS), and the stub answers that they
-# resolve, as the real Oh My Pi does for this checkout's plugin. The deadline is
+# and skills Legion's prompts name (LEGION_PROMPT_AGENTS, LEGION_PROMPT_SKILLS), and the stub
+# answers that they resolve, as the real Oh My Pi does for this checkout's plugin. The deadline is
 # worker_boot_timeout_seconds × worker_boot_registration_deadline_intervals = 10 s.
 cat >"$work/stub/omp" <<EOF
 #!/bin/sh
@@ -495,6 +495,7 @@ if [ "\$1" = models ]; then
   echo LEGION_PLUGIN_LOADED=yes >&2
   echo "LEGION_PLUGIN_LOADED_FROM=file://$work/plugin/dist/legion.js" >&2
   [ -n "\${LEGION_PROMPT_AGENTS:-}" ] && echo LEGION_PROMPT_AGENTS=resolved >&2
+  [ -n "\${LEGION_PROMPT_SKILLS:-}" ] && echo LEGION_PROMPT_SKILLS=resolved >&2
   exit 0
 fi
 exec sleep 3600

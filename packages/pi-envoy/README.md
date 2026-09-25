@@ -74,9 +74,11 @@ for every session — including a headless Legion controller — to see the Legi
 The tarball also ships `agents/`, the task agents Legion's skills dispatch (`oracle`, and the
 reviewer's pair `thermonuclear-deep-review` and `thermonuclear-code-quality`), which Oh My Pi
 discovers under any extension package root: an installed plugin in a pane, the explicit
-`--extension` root in a Sandbox pod. The Go daemon's boot gate and `legion probe-image` resolve
-every `task(agent="…")` those skills name through the same launch, and refuse by name an agent
-Oh My Pi cannot find.
+`--extension` root in a Sandbox pod. The skills those agents and the role prompts load (the pair's
+rubrics, the implementer's `ce-simplify-code`) ship in `dist/skills` with the rest. The Go
+daemon's boot gate and `legion probe-image` resolve every `task(agent="…")` and every
+`skill://<name>` those prompts name through the same launch, and refuse by name an agent or a
+skill Oh My Pi cannot find.
 `resources_discover` additionally serves the same directory as a secondary, extension-owned
 discovery path. The published manifest exposes `dist/envoy.js` and `dist/legion.js` for
 `omp.extensions` (only `omp.skills` ships as committed, since `dist/skills` is its path in both

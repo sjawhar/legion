@@ -47,8 +47,10 @@ The daemon refuses to serve unless its OMP exposes `pi.agents` and actually load
 plugin is broken fails instead of publishing. Its final step runs the Go `legion version`, requiring the
 commit the workflow built, then the Go `legion probe-image`: the same three probes, run by the Go
 daemon's own code (`packages/daemon-go/internal/daemon/bootgate.go`), with the plugin held to the Go
-daemon API contract (`legion.goDaemonApiVersion`) and every task agent its skills dispatch
-(`task(agent="…")`) resolved by name through the same launch, printing
+daemon API contract (`legion.goDaemonApiVersion`) and every task agent and skill Legion's prompts
+name (`task(agent="…")`, `skill://…`) resolved by name through the same launch (the plugin ships
+`oracle`, `thermonuclear-deep-review` and `thermonuclear-code-quality` in `agents/`, and the pair's
+rubrics and `ce-simplify-code` with Legion's other skills in `dist/skills`), printing
 `probe-image: OK (/opt/omp/bin/omp) session-storage=probed go-daemon-api-version=<N>`. The in-cluster
 TypeScript daemon runs `legion probe-image` in a one-shot pod against the configured digest
 ([The probe pod](#the-probe-pod)); the Go daemon's Agent Sandbox runtime runs the Go command in a probe

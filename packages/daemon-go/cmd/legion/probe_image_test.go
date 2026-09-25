@@ -13,8 +13,8 @@ import (
 )
 
 // imageOmp is an `omp` that passes the image's three probes as a working image's Oh My Pi does:
-// pi.agents is there, the plugin linked into the profile loads from its own package, and the
-// session-storage setting refuses a value it does not know, naming the variable. Its model round
+// pi.agents is there, the plugin linked into the profile loads from its own package and finds every
+// task agent and skill Legion's prompts name, and the session-storage setting refuses a value it does not know, naming the variable. Its model round
 // trip answers from the profile's default alias when the profile's models.yml routes anthropic to
 // the gateway $LEGION_TEST_ROUTE names, and refuses as Oh My Pi does without a usable model
 // otherwise.
@@ -25,7 +25,10 @@ func imageOmp(t *testing.T) string {
 installed=$(cd "$HOME/.omp/profiles/$OMP_PROFILE/plugins/node_modules/@sjawhar/pi-legion-envoy" && pwd -P)
 case "$*" in
 "models --no-extensions --extension "*" --json") echo LEGION_OMP_AGENTS=available >&2 ;;
-"models --extension "*" --json") printf 'LEGION_PLUGIN_LOADED=yes\nLEGION_PLUGIN_LOADED_FROM=file://%s/dist/legion.js\n' "$installed" >&2 ;;
+"models --extension "*" --json")
+  printf 'LEGION_PLUGIN_LOADED=yes\nLEGION_PLUGIN_LOADED_FROM=file://%s/dist/legion.js\n' "$installed" >&2
+  if [ -n "${LEGION_PROMPT_AGENTS:-}" ]; then echo LEGION_PROMPT_AGENTS=resolved >&2; fi
+  if [ -n "${LEGION_PROMPT_SKILLS:-}" ]; then echo LEGION_PROMPT_SKILLS=resolved >&2; fi ;;
 "-p --mode json "*)
   if ! grep -qx "    baseUrl: $LEGION_TEST_ROUTE" "$HOME/.omp/profiles/$OMP_PROFILE/agent/models.yml" 2>/dev/null; then
     echo "No model available matching enabledModels (anthropic/*-legion) with usable credentials." >&2; exit 1
