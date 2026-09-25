@@ -113,7 +113,7 @@ describe("role prompt parts", () => {
   test("residues do not repeat shared headless mechanics", () => {
     const mechanics = read("mechanics", "headless.md");
     const sharedMechanics = [
-      "Read and follow the `legion-worker` skill before acting.",
+      "Read and follow `skill://legion-worker` before acting.",
       'op: "handoff_complete"',
       "When your phase is done, stay in this session afterwards:",
       "roleToken",

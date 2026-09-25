@@ -14,11 +14,11 @@ After a human merges the pull request under the repository's GitHub branch-prote
 
 ## Review threads
 
-Before every push that answers a review — the corrective push and the `.legion/` deletion push — run `legion threads resolve --pr <number> --repo <owner>/<repo>` from the bash tool and paste its output into the PR body's `Threads` section. It resolves, as the implementer App, every unresolved thread whose newest comment is its opener's own `Accepted:` reply (the review App cannot resolve threads or push — `packages/daemon/src/daemon/AGENTS.md`, GitHub Apps) and names every other unresolved thread `left open`. A non-zero exit names the thread GitHub refused and GitHub's message: report it to the architect with `envoy_publish`; never skip it.
+Before every push that answers a review — the corrective push and the `.legion/` deletion push — run `legion threads resolve --pr <number> --repo <owner>/<repo>` from the bash tool and paste its output into the PR body's `Threads` section. It resolves, as the implementer App, every unresolved thread whose newest comment is its opener's own `Accepted:` reply (the review App cannot resolve threads — `packages/daemon/src/daemon/AGENTS.md`, GitHub Apps) and names every other unresolved thread `left open`. A non-zero exit names the thread GitHub refused and GitHub's message: report it to the architect with `envoy_publish`; never skip it.
 
 ## Rebases
 
-For the unchanged-diff fingerprint procedure, follow the `legion-worker` skill. Rebase the whole chain with `jj -R "$LEGION_WORKSPACE" rebase -s 'roots(main@origin..@)' -d main@origin`.
+For the unchanged-diff fingerprint procedure, follow `skill://legion-worker`. Rebase the whole chain with `jj -R "$LEGION_WORKSPACE" rebase -s 'roots(main@origin..@)' -d main@origin`.
 
 ## Workspace restrictions
 

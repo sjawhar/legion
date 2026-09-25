@@ -143,7 +143,7 @@ other tree paused.
 
 ## Phase work
 
-Specifications written into Dispatch follow [`skills/dispatch`'s Writing a spec](../dispatch/SKILL.md#writing-a-spec).
+Specifications written into Dispatch follow `skill://dispatch`'s [Writing a spec](../dispatch/SKILL.md#writing-a-spec).
 
 Follow the repository's normal engineering workflow and the assigned issue's acceptance
 criteria. Your phase's own charter and the predecessor handoffs you read define the phase
@@ -207,7 +207,7 @@ Append this exact structured footer to **every** pull-request comment and review
 phase posts on GitHub. It preserves session provenance on the artifact itself so work stays
 attributable to the session that produced it. Dispatch comments carry session provenance
 natively through their own `actor`/`origin` fields; this footer is for GitHub PR artifacts and
-for the retro's Dispatch message (`skills/legion-retro`):
+for the retro's Dispatch message (`skill://legion-retro`):
 
 ```html
 <!-- legion: {"session":"<session-id>","phase":"<phase>"} -->
@@ -314,10 +314,9 @@ this proof.
   `Accepted: not a defect — <reason>`, or `Still open: <what remains>`; nothing else is an
   acceptance, and nobody replies after an `Accepted:` (any later reply that is not itself an
   `Accepted:` — the opener's own follow-up included — leaves the thread open, since the command
-  reads only the newest comment). The review App can reply on a thread but can neither resolve it
-  nor push — GitHub grants both only to the pull request's author or an account with write (push)
-  access to the repository, and the review App is neither by design
-  (`packages/daemon/src/daemon/AGENTS.md`, GitHub Apps) — so the
+  reads only the newest comment). The review App can reply on a thread, but GitHub refuses it
+  `resolveReviewThread` (its token reads `viewerCanResolve: false`), and the workflow gives
+  pushing to the implementer alone (`packages/daemon/src/daemon/AGENTS.md`, GitHub Apps) — so the
   **implementer** runs `legion threads resolve --pr <number> --repo <owner>/<repo>` before every
   push that answers a review (the corrective push and the final `.legion/` deletion push) and
   pastes its output into the `Threads` section. The command resolves each unresolved thread
@@ -372,7 +371,7 @@ this proof.
   `E2E` line's head to the new SHA with
   `rebase re-check <old-sha> → <new-sha>: fingerprint unchanged, bare gates only`; the
   real-surface verification is not repeated. Different: a full test round.
-- **The implementer runs `ce-simplify-code` once per pull request, after the last review round
+- **The implementer runs `skill://ce-simplify-code` once per pull request, after the last review round
   closes and before the reviewer's final pass, when the diff touches runtime code; a docs-only
   diff gets none.** It is scoped to the pull request's own diff, at the head where the last review
   round closed: nothing applied leaves that head final; applied → the applied head is the final
@@ -400,7 +399,7 @@ this proof.
   Legion footer), and a `comments[]` array of `{path, line, side, body}`, one entry per
   finding — never one `pr review` call per finding (each submission fires a `pr-review` wake).
   Then return the issue to the architect; when clean, have the architect send the implementer
-  back to push the `.legion/` deletion (the review App cannot push), then review **that** head
+  back to push the `.legion/` deletion (only the implementer pushes the issue branch), then review **that** head
   and approve it by name. After a conflict-forced rebase, compute the fingerprint at the
   `commit_id` of your last submitted review and at the new head. Equal and that review was
   `APPROVE`: submit one more `APPROVE` naming the new head by SHA, its body naming both SHAs
@@ -538,7 +537,8 @@ cd -- "$LEGION_WORKSPACE" && \
 
 **Only the implementer pushes the issue branch.** It acts as the code-writing App
 (`legion-implementer[bot]`, `appRoleForLegionRole` in `packages/daemon/src/daemon/github-apps.ts`),
-the one App with `contents` permission (the merger acts as the same App but pushes nothing: it
+the one role the workflow lets push (the review App's installation holds `contents: write` too, but
+no role acting as it pushes; the merger acts as the implement App but pushes nothing: it
 verifies and publishes READY). If you are the implementer, advance the issue bookmark and push it
 with the provisioned credential helper. `--bookmark` also publishes the locally provisioned
 bookmark on its first push — a bookmark not yet tracking a remote one is tracked automatically:
@@ -550,12 +550,11 @@ cd -- "$LEGION_WORKSPACE" && \
 ```
 
 Every other role — planner, tester, reviewer, architects — acts as the review App
-(`legion-reviewer[bot]`), which cannot push: the `split` above is your last step, and the commit
+(`legion-reviewer[bot]`) and never pushes: the `split` above is your last step, and the commit
 rides the implementer's next push (the corrective push after a review, or the final `.legion/`
-deletion). A push from one of those roles is refused — over git it reads
-`remote: Repository not found.`; the REST API's form of the same refusal is
-`Resource not accessible by integration` — and that refusal is expected, not a failure to report
-or retry.
+deletion). GitHub does not stop a push from one of those roles: the review App's installation
+holds `contents: write`, so the push would succeed. The rule is the workflow's, and nothing but
+the rule enforces it.
 
 Do not report phase completion until the write, existence check, and handoff commit succeed —
 and, for the implementer, until the push has too. This is the committed copy the next phase

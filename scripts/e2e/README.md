@@ -170,6 +170,7 @@ The checks, in order, each printing what it observed (`== <check>` … `ok <chec
 | :--- | :--- |
 | `gate-refuses-another-contract` | edits the installed (unpacked) manifest to declare the next `goDaemonApiVersion`; `legion start` refuses naming both numbers; the manifest is put back byte for byte |
 | `gate-refuses-a-disabled-plugin` | `omp plugin disable`; `legion start` refuses with "installed but not loaded by omp"; `omp plugin enable` |
+| `gate-refuses-a-missing-skill` | the installed plugin's `dist/skills/thermonuclear-deep-review` moved aside; `legion start` refuses with "finds no skill thermonuclear-deep-review (loaded by agents/thermonuclear-deep-review.md)"; the rubric put back |
 | `architect-registers-and-is-ready` | `legion start` passes the gate (its log line); `legion claims spawn` of a root architect whose role prompt says to reply `ready` and wait; the claim reaches `ready` and the daemon logged its registration at contract 1 |
 | `envoy-role-held` | `GET /v1/roles/<claim token>` on the listener names the claim's session as holder |
 | `ready-in-state` | `legion state --json` shows the issue's architect `ready`, with that session and a tmux locator |

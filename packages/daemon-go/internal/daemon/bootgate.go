@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"maps"
 	"net/url"
@@ -32,7 +33,10 @@ import (
 // `legion.ts` set its load marker (`Symbol.for("legion.pi-envoy.legion-loaded")`,
 // packages/pi-envoy/extensions/legion.ts) — which only a plugin Oh My Pi actually loaded has done
 // — and, beside it, the marker's value: the `import.meta.url` of that `legion.ts`, where the plugin
-// loaded from.
+// loaded from. Given LEGION_PROMPT_AGENTS and LEGION_PROMPT_SKILLS (promptKinds), it also resolves
+// those task agents and skills through Oh My Pi's own discovery over the launch's extension roots,
+// as the task tool resolves an agent's name and a `skill://` read a skill's, and prints which it
+// could not find.
 //
 //go:embed probe.mjs
 var pluginLoadProbe []byte
@@ -73,7 +77,8 @@ const (
 // (packages/daemon/src/daemon/index.ts:365-383): the contract probe reads the installed manifest
 // and refuses a plugin that does not declare the gate's contract; the load probe runs Oh My Pi the
 // way a pane does and refuses a plugin it did not load — installed but disabled, or not
-// registered — or one it loaded from another root than the manifest the contract probe read.
+// registered — or one it loaded from another root than the manifest the contract probe read, and
+// refuses, by name, a task agent or a skill Legion's prompts name that the same Oh My Pi cannot find.
 //
 // Inside the worker image the same gate is `legion probe-image` (ProbeImage), which adds the two
 // probes only the image runs: pi.agents and the session-storage setting.
@@ -102,6 +107,9 @@ type pluginGate struct {
 	// probe reads that root's manifest. Empty on tmux, where a pane loads the installed plugin
 	// through discovery.
 	pluginRoot string
+	// rolesDir is the role prompts directory (prompts.ResolveRolePromptsDir): the task agents and
+	// skills its prompts name are resolved beside the plugin's. Empty resolves the plugin's alone.
+	rolesDir string
 	// stdin is each probe's standard input; nil is /dev/null. When it is a terminal this process
 	// holds the foreground of, each attempt runs as the terminal's foreground job, and its stderr
 	// is also copied to echo, so a launch prefix's prompt is seen and can be answered (terminalJob).
@@ -135,7 +143,11 @@ func (g pluginGate) verify(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := g.verifyLoaded(ctx, manifest, version, profile); err != nil {
+	names, err := promptReferences(manifest, g.rolesDir)
+	if err != nil {
+		return err
+	}
+	if err := g.verifyLoaded(ctx, manifest, version, profile, names); err != nil {
 		return err
 	}
 	g.log.Info("boot gate: pi-legion-envoy speaks this daemon's contract and loads in a pane",
@@ -297,15 +309,19 @@ func verifyPluginContract(manifest, installInto string, contract int) (string, e
 // verifyLoaded is the load probe (verifyLegionPluginLoaded, boot-probes.ts:313-392): Oh My Pi,
 // launched as a pane launches it — through the launch prefix, under the pane environment, with the
 // pane's XDG directories created first as a spawn creates them — lists its models with the probe
-// extension added, and passes only when the probe saw the plugin's load marker and the plugin
-// loaded from the manifest's own package (verifyLoadedFrom). The classification is the shipped
-// one (killedOutcome, :94-122, :348-360).
-func (g pluginGate) verifyLoaded(ctx context.Context, manifest, version, profile string) error {
+// extension added, and passes only when the probe saw the plugin's load marker, found every task
+// agent and skill in names, and the plugin loaded from the manifest's own package
+// (verifyLoadedFrom). The classification is the shipped one (killedOutcome, :94-122, :348-360).
+func (g pluginGate) verifyLoaded(ctx context.Context, manifest, version, profile string, names promptNames) error {
 	list := "omp plugin list"
 	if profile != "" {
 		list = "OMP_PROFILE=" + profile + " " + list
 	}
-	loadedFrom, err := g.loadedFrom(ctx, fmt.Errorf("pi-legion-envoy %s is installed but not loaded by omp (disabled or unregistered): run %s", version, list))
+	check := promptCheck{names: names, lane: "in a pane of " + profileWords(profile)}
+	if g.pluginRoot != "" {
+		check.lane = "loading the plugin from " + g.pluginRoot + " with discovery off, as a pod does"
+	}
+	loadedFrom, err := g.loadedFrom(ctx, fmt.Errorf("pi-legion-envoy %s is installed but not loaded by omp (disabled or unregistered): run %s", version, list), check)
 	if err != nil {
 		return err
 	}
@@ -313,8 +329,9 @@ func (g pluginGate) verifyLoaded(ctx context.Context, manifest, version, profile
 }
 
 // loadedFrom runs the load probe under the gate's retry and answers where the plugin loaded from.
-// notLoaded is the refusal for an Oh My Pi that answered without loading it.
-func (g pluginGate) loadedFrom(ctx context.Context, notLoaded error) (string, error) {
+// notLoaded is the refusal for an Oh My Pi that answered without loading it, and check the task
+// agents and skills the probe must also find (none for the controller probe).
+func (g pluginGate) loadedFrom(ctx context.Context, notLoaded error, check promptCheck) (string, error) {
 	for _, name := range []string{"XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"} {
 		if dir := g.env[name]; dir != "" {
 			if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -330,7 +347,7 @@ func (g pluginGate) loadedFrom(ctx context.Context, notLoaded error) (string, er
 	launch := tmux.WithOmpLaunchPrefix(g.prefix, g.invocation)
 	location := ""
 	err = bootprobe.Run(ctx, "pi-legion-envoy load", g.retry, g.log, func(ctx context.Context) bootprobe.Outcome {
-		outcome, from := g.probeLoad(ctx, launch, probe, notLoaded)
+		outcome, from := g.probeLoad(ctx, launch, probe, notLoaded, check)
 		location = from
 		return outcome
 	})
@@ -395,13 +412,16 @@ func owningManifest(file string) (string, error) {
 
 // probeLoad is one load-probe attempt, and, on a pass, where the plugin loaded from. notLoaded is
 // the refusal for an Oh My Pi that answered without loading the plugin.
-func (g pluginGate) probeLoad(ctx context.Context, launch, probe string, notLoaded error) (bootprobe.Outcome, string) {
+func (g pluginGate) probeLoad(ctx context.Context, launch, probe string, notLoaded error, check promptCheck) (bootprobe.Outcome, string) {
 	script := `exec ` + launch + ` models --extension "$1" --json >/dev/null`
 	args := []string{probe}
 	if g.pluginRoot != "" {
 		// As a pod runs it: no discovery, the plugin as an explicit root beside the probe.
 		script = `exec ` + launch + ` models --no-extensions --extension "$1" --extension "$2" --json >/dev/null`
 		args = []string{g.pluginRoot, probe}
+	}
+	if export := check.export(g.pluginRoot != ""); export != "" {
+		script = export + "; " + script
 	}
 	r, err := g.run(ctx, script, args...)
 	if err != nil {
@@ -420,6 +440,9 @@ func (g pluginGate) probeLoad(ctx context.Context, launch, probe string, notLoad
 				location = strings.TrimSpace(rest)
 			}
 		}
+		if refusal := check.refusal(r.output); refusal != nil {
+			return bootprobe.Outcome{Refusal: refusal}, ""
+		}
 		return bootprobe.Outcome{Passed: true}, location
 	}
 	// Oh My Pi loaded the plugin and then died: under load, not for want of the plugin.
@@ -437,6 +460,173 @@ func (g pluginGate) probeLoad(ctx context.Context, launch, probe string, notLoad
 		return bootprobe.Outcome{Refusal: errors.New(message)}, ""
 	}
 	return bootprobe.Outcome{Refusal: notLoaded}, ""
+}
+
+// promptKind is one form in which a Legion prompt names something Oh My Pi resolves only when a
+// worker uses it: reference, the form a prompt writes; variable, the load probe's input and the
+// prefix of its answers (probe.mjs); and a refusal's words for a name Oh My Pi cannot find.
+type promptKind struct {
+	reference                                         *regexp.Regexp
+	variable                                          string
+	noun, namedBy, consequence, remedy, discoveryName string
+}
+
+// promptKinds are the two forms: a task agent dispatched as `task(agent="<name>")` and a skill
+// loaded as `skill://<name>`, whose name ends on a letter or digit so the prose around it (a
+// sentence's period, a path's slash) is not read as part of it. A worker whose call or read names one Oh My Pi cannot find gets an
+// error listing what it has, and carries on without it, so the load probe resolves every name.
+var promptKinds = [...]promptKind{
+	{
+		reference:     regexp.MustCompile(`agent="([a-z0-9][a-z0-9._-]*)"`),
+		variable:      "LEGION_PROMPT_AGENTS",
+		noun:          "task agent",
+		namedBy:       "dispatched by",
+		consequence:   "a worker that calls one gets a tool result listing the agents it has, and carries on without it",
+		remedy:        "pi-legion-envoy ships every agent its prompts dispatch; install the release built from this daemon's commit",
+		discoveryName: "agent discovery",
+	},
+	{
+		reference:   regexp.MustCompile(`skill://([a-z0-9](?:[a-z0-9._-]*[a-z0-9])?)`),
+		variable:    "LEGION_PROMPT_SKILLS",
+		noun:        "skill",
+		namedBy:     "loaded by",
+		consequence: "a worker told to load one reads `Unknown skill` and carries on without it",
+		remedy: "pi-legion-envoy ships every skill its prompts load; install the release built from this daemon's commit, " +
+			"and check that the settings this Oh My Pi reads (`disabledExtensions`, `skills`) neither disable nor filter it",
+		discoveryName: "skill discovery",
+	},
+}
+
+// promptNames holds, for each of promptKinds, every name Legion's prompts write in that form, each
+// with the prompt files that write it.
+type promptNames [len(promptKinds)]map[string][]string
+
+// promptReferences are the task agents and skills Legion's prompts name: every reference in a
+// Markdown file under the manifest's `omp.skills` directories and its `agents/` directory, the
+// agent definitions Oh My Pi discovers there (both named relative to the plugin), and under
+// rolesDir, when set (named `roles/<file>`).
+func promptReferences(manifest, rolesDir string) (promptNames, error) {
+	var names promptNames
+	for i := range names {
+		names[i] = map[string][]string{}
+	}
+	raw, err := os.ReadFile(manifest)
+	if err != nil {
+		return names, fmt.Errorf("boot gate: read the pi-legion-envoy manifest %s for the skills it ships: %w", manifest, err)
+	}
+	var pkg struct {
+		Omp struct {
+			Skills []string `json:"skills"`
+		} `json:"omp"`
+	}
+	if err := json.Unmarshal(raw, &pkg); err != nil {
+		return names, fmt.Errorf("boot gate: parse the pi-legion-envoy manifest %s: %w", manifest, err)
+	}
+	root := filepath.Dir(manifest)
+	for _, dir := range pkg.Omp.Skills {
+		if err := names.collect(root, filepath.Join(root, dir), ""); err != nil {
+			return names, fmt.Errorf("pi-legion-envoy at %s ships skills in %s, which the gate cannot read: %w", manifest, dir, err)
+		}
+	}
+	// A plugin without agents/ ships no agent definition, so none names anything.
+	if err := names.collect(root, filepath.Join(root, "agents"), ""); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return names, fmt.Errorf("pi-legion-envoy at %s ships agents in agents/, which the gate cannot read: %w", manifest, err)
+	}
+	if rolesDir != "" {
+		if err := names.collect(rolesDir, rolesDir, "roles"); err != nil {
+			return names, fmt.Errorf("the role prompts directory %s cannot be read: %w", rolesDir, err)
+		}
+	}
+	return names, nil
+}
+
+// collect adds every reference in a Markdown file under dir, each file named by its path relative
+// to base under prefix.
+func (names promptNames) collect(base, dir, prefix string) error {
+	return filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil || entry.IsDir() || filepath.Ext(path) != ".md" {
+			return err
+		}
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(base, path)
+		if err != nil {
+			return err
+		}
+		file := filepath.Join(prefix, rel)
+		for i, kind := range promptKinds {
+			for _, match := range kind.reference.FindAllSubmatch(body, -1) {
+				if name := string(match[1]); !slices.Contains(names[i][name], file) {
+					names[i][name] = append(names[i][name], file)
+				}
+			}
+		}
+		return nil
+	})
+}
+
+// promptCheck is what the load probe must also find: names, the task agents and skills Legion's
+// prompts name, and lane, how the probed Oh My Pi loads the plugin, in a refusal's words. The zero
+// value asks for nothing.
+type promptCheck struct {
+	names promptNames
+	lane  string
+}
+
+// export is the shell command handing the load probe each kind's names and, for a pod, the plugin
+// root ("$1") as the one extension root its discovery reads; empty when the check asks for
+// nothing. Names are the references' alphabet, so single quotes hold them.
+func (c promptCheck) export(pod bool) string {
+	var assignments []string
+	for i, kind := range promptKinds {
+		if len(c.names[i]) > 0 {
+			assignments = append(assignments, kind.variable+"='"+strings.Join(slices.Sorted(maps.Keys(c.names[i])), ",")+"'")
+		}
+	}
+	if len(assignments) == 0 {
+		return ""
+	}
+	if pod {
+		assignments = append(assignments, `LEGION_PROMPT_ROOT="$1"`)
+	}
+	return "export " + strings.Join(assignments, " ")
+}
+
+// refusal judges the load probe's answers: nil when Oh My Pi found every name, else, for each kind
+// with a name it could not find, the refusal naming each one and the prompt files that name it.
+func (c promptCheck) refusal(output string) error {
+	var refusals []error
+	for i, kind := range promptKinds {
+		refusals = append(refusals, kind.refusal(output, c.names[i], c.lane))
+	}
+	return errors.Join(refusals...)
+}
+
+// refusal judges the load probe's answer on named, this kind's names: nil when there are none or
+// Oh My Pi found every one.
+func (k promptKind) refusal(output string, named map[string][]string, lane string) error {
+	if len(named) == 0 {
+		return nil
+	}
+	for line := range strings.Lines(output) {
+		line = strings.TrimSpace(line)
+		if line == k.variable+"=resolved" {
+			return nil
+		}
+		if rest, ok := strings.CutPrefix(line, k.variable+"_MISSING="); ok {
+			var missing []string
+			for _, name := range strings.Split(rest, ",") {
+				missing = append(missing, name+" ("+k.namedBy+" "+strings.Join(named[name], ", ")+")")
+			}
+			return fmt.Errorf("Oh My Pi, %s, finds no %s %s: %s. %s", lane, k.noun, strings.Join(missing, "; "), k.consequence, k.remedy)
+		}
+		if rest, ok := strings.CutPrefix(line, k.variable+"_UNRESOLVABLE="); ok {
+			return fmt.Errorf("Oh My Pi, %s, could not resolve %ss for the load probe (%s): pin a fork release whose %s the probe can import", lane, k.noun, rest, k.discoveryName)
+		}
+	}
+	return fmt.Errorf("the load probe gave no answer on the %ss Legion's prompts name (%s)", k.noun, strings.Join(slices.Sorted(maps.Keys(named)), ", "))
 }
 
 // verifyAgentsCapability is the pi.agents probe (verifyOmpAgentsCapability, boot-probes.ts:
@@ -623,6 +813,9 @@ type ImageProbe struct {
 	// probe reads that root's manifest, so the probe certifies the lane a pod uses. Empty leaves
 	// both on Oh My Pi's discovery, as a tmux pane loads the plugin.
 	PluginRoot string
+	// RolesDir is the role prompts directory (prompts.ResolveRolePromptsDir): the load probe resolves
+	// the task agents and skills its prompts name beside the plugin's.
+	RolesDir string
 }
 
 // defaultProbeTimeout is each image-probe and controller-probe attempt's budget: the default
@@ -641,7 +834,7 @@ func ProbeImage(ctx context.Context, p ImageProbe) error {
 	return pluginGate{
 		env: p.Env, workDir: p.WorkDir, invocation: p.Omp, timeout: defaultProbeTimeout,
 		retry: bootprobe.Image, contract: p.Contract, model: p.Model, route: p.Route, keyFile: p.KeyFile,
-		pluginRoot: p.PluginRoot, log: p.Log,
+		pluginRoot: p.PluginRoot, rolesDir: p.RolesDir, log: p.Log,
 	}.verifyImage(ctx)
 }
 
@@ -710,7 +903,7 @@ func ProbeController(ctx context.Context, p ControllerProbe) error {
 	// does not port, so the words say only what Oh My Pi did, where it ran, and how.
 	launch := tmux.WithOmpLaunchPrefix(p.Prefix, p.Omp)
 	location, err := g.loadedFrom(ctx, fmt.Errorf("Oh My Pi, launched as the controller launches it (%q, in %s), did not load pi-legion-envoy (not installed, disabled, or unregistered). Install the @sjawhar/pi-legion-envoy release built from this daemon's commit into the Oh My Pi the controller runs, and check it with `cd %s && %s plugin list` under the controller's environment: a .env or a project plugin root there applies",
-		launch, p.WorkDir, p.WorkDir, launch))
+		launch, p.WorkDir, p.WorkDir, launch), promptCheck{})
 	if err != nil {
 		return err
 	}

@@ -10,11 +10,11 @@ Environment or secret-scrub evidence (for example "`LEGION_*`/`DISPATCH_*`/`ENVO
 
 ## Rebases
 
-For the unchanged-diff fingerprint procedure, follow the `legion-worker` skill. Update the `E2E` head SHA with `rebase re-check <old-sha> → <new-sha>: fingerprint unchanged, bare gates only` when the fingerprint is equal.
+For the unchanged-diff fingerprint procedure, follow `skill://legion-worker`. Update the `E2E` head SHA with `rebase re-check <old-sha> → <new-sha>: fingerprint unchanged, bare gates only` when the fingerprint is equal.
 
 ## Workspace restrictions
 
-Do not change another phase's bookmark. Make only path-scoped logical commits with `jj -R "$LEGION_WORKSPACE" split -m "<message>" <paths…>`. You never push: your credential is the review App, which holds no contents permission — your handoff commit rides the implementer's next push.
+Do not change another phase's bookmark. Make only path-scoped logical commits with `jj -R "$LEGION_WORKSPACE" split -m "<message>" <paths…>`. You never push: only the implementer pushes the issue branch. The review App you act as can push (its installation holds `contents: write`), but the workflow gives pushing to the implementer, and your handoff commit rides the implementer's next push.
 
 ## GitHub attribution
 

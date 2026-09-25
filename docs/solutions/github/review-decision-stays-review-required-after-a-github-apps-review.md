@@ -62,6 +62,6 @@ not "no review yet"; it is "no review that branch protection counts".
 ## Related
 
 - `../legion/one-role-keyed-table-decides-which-github-app-acts.md` — which App each role acts
-  as, and why the review App holds no `contents` permission.
+  as, and who pushes.
 - `conflicting-pr-gets-no-pull-request-ci.md` — `mergeable`/`mergeStateStatus` and when a PR gets
   no CI at all.
