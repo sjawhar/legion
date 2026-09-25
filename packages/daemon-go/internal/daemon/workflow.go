@@ -132,6 +132,30 @@ func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config) error 
 	return err
 }
 
+// phaseHolds answers supervise's Deps.PhaseHolds from the issue record: a task is enqueued for the
+// phase its issue was in, so once the issue is in another role's phase a delivery still queued for
+// this one is stale and is dropped rather than sent. An architect's task belongs to no phase and
+// always holds. An issue the daemon no longer records holds nothing.
+func phaseHolds(pool *pgxpool.Pool, records record.Store) func(context.Context, supervise.Claim) (bool, error) {
+	return func(ctx context.Context, c supervise.Claim) (bool, error) {
+		if c.Role == claim.RoleArchitect {
+			return true, nil
+		}
+		var issue *record.Issue
+		if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+			var err error
+			issue, err = records.Issue(ctx, tx, c.Issue)
+			return err
+		}); err != nil {
+			return false, fmt.Errorf("read %s for the phase of %s: %w", c.Issue, c.Token, err)
+		}
+		if issue == nil {
+			return false, nil
+		}
+		return workflow.RoleFor(issue.Phase) == c.Role, nil
+	}
+}
+
 func (w *workflowRuntime) reconcile(ctx context.Context) error {
 	issues, err := w.dispatch.ListIssues(ctx, w.dispatchProject, []string{"todo", "in_progress", "testing", "needs_review", "retro"})
 	if err != nil {

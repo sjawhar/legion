@@ -516,6 +516,11 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 			Probe:                 cfg.ProbeInterval,
 		},
 	}
+	// Only a daemon with the workflow configured has issue records to read a phase from; Stage 2's
+	// supervision runs on claims alone, where every delivery holds.
+	if cfg.DispatchURL != "" {
+		sup.deps.PhaseHolds = phaseHolds(st.Pool(), record.NewStore())
+	}
 	return &supervision{
 		cfg: cfg, log: log, plan: p, stream: listener, runtime: rt, supervisor: sup, tokens: tokens, claims: claims,
 		cancel: cancel, cancelStream: cancelStream,

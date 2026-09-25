@@ -69,10 +69,11 @@ func (m *Machine) queue(ctx context.Context, task, id string) error {
 }
 
 // sendPending sends the pending delivery if everything a send needs is true now: the claim is
-// ready or idle, the delivery is neither confirmed nor already on its way, and the claim's
-// connection is registered. A missing connection is not a failure — the shim's next hello sends
-// it. A delivery an earlier daemon may have sent is sent again only after the agent says it is
-// not already in a turn; if it is, that turn is taken as the delivery's.
+// ready or idle, the delivery is neither confirmed nor already on its way, the issue is still in
+// this role's phase, and the claim's connection is registered. A missing connection is not a
+// failure — the shim's next hello sends it. A delivery an earlier daemon may have sent is sent
+// again only after the agent says it is not already in a turn; if it is, that turn is taken as the
+// delivery's.
 func (m *Machine) sendPending(ctx context.Context) error {
 	if state := m.claim.State; state != StateReady && state != StateIdle {
 		return nil
@@ -89,6 +90,15 @@ func (m *Machine) sendPending(ctx context.Context) error {
 		m.log.Info("supervise: no connection; the delivery waits for the shim's hello", "delivery", p.ID)
 		return nil
 	}
+	holds, err := m.phaseHolds(ctx)
+	if err != nil {
+		return err
+	}
+	if !holds {
+		m.log.Info("supervise: the issue has left this role's phase; the task is dropped rather than sent",
+			"delivery", p.ID, "issue", m.claim.Issue, "role", m.claim.Role)
+		return m.retirePending(ctx)
+	}
 	if m.askFirst {
 		m.askFirst = false
 		if m.streaming(ctx, conn) {
@@ -99,6 +109,33 @@ func (m *Machine) sendPending(ctx context.Context) error {
 	}
 	m.startSend(conn, *p)
 	return nil
+}
+
+// phaseHolds asks whether the issue is still in the phase this claim's role works. A daemon with
+// no workflow configured supplies no answer, and every delivery holds.
+func (m *Machine) phaseHolds(ctx context.Context) (bool, error) {
+	if m.deps.PhaseHolds == nil {
+		return true, nil
+	}
+	holds, err := m.deps.PhaseHolds(ctx, m.claim)
+	if err != nil {
+		return false, fmt.Errorf("read the phase of %s: %w", m.claim.Token, err)
+	}
+	return holds, nil
+}
+
+// retirePending drops the pending delivery without sending it. The claim keeps its state: the
+// task is stale, not the agent.
+func (m *Machine) retirePending(ctx context.Context) error {
+	p := m.claim.Pending
+	if p == nil {
+		return nil
+	}
+	if err := m.deps.Store.RetireDelivery(ctx, m.claim.Token, p.ID); err != nil {
+		return err
+	}
+	m.claim.Pending = nil
+	return m.persist(ctx)
 }
 
 // streaming asks the agent whether a turn is in flight. An agent that cannot say is taken as not

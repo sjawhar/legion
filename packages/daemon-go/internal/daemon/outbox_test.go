@@ -733,6 +733,55 @@ func TestTerminalReplayAppliesPersistedReadyFactOnce(t *testing.T) {
 	}
 }
 
+// The predicate supervise asks before it sends a queued task: the issue's phase names one role,
+// and a task queued for a role the issue has moved past is not sent. An architect's task is of no
+// phase, and an issue the daemon does not record holds nothing.
+func TestPhaseHoldsAnswersFromTheIssuesCurrentPhase(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	putOutboxIssue(t, pool, records, record.Issue{
+		Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "phase holds",
+		Phase: phase.Implementing, Status: "in_progress", Rank: "00000",
+	})
+	holds := phaseHolds(pool, records)
+	claimOf := func(role claim.Role, issue string) supervise.Claim {
+		return supervise.Claim{Token: claim.Token("legion-omp-" + issue + "-" + string(role)), Issue: issue, Role: role}
+	}
+
+	for _, tc := range []struct {
+		name  string
+		claim supervise.Claim
+		want  bool
+	}{
+		{name: "the phase's own role", claim: claimOf(claim.RoleImplementer, "LEGION-208"), want: true},
+		{name: "a role the issue has moved past", claim: claimOf(claim.RoleTester, "LEGION-208"), want: false},
+		{name: "the architect, whose task is of no phase", claim: claimOf(claim.RoleArchitect, "LEGION-208"), want: true},
+		{name: "an issue with no record", claim: claimOf(claim.RoleImplementer, "LEGION-999"), want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := holds(context.Background(), tc.claim)
+			if err != nil {
+				t.Fatalf("phaseHolds: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("phaseHolds(%s) = %v, want %v", tc.claim.Token, got, tc.want)
+			}
+		})
+	}
+
+	putOutboxIssue(t, pool, records, record.Issue{
+		Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "phase holds",
+		Phase: phase.Testing, Status: "testing", Rank: "00000",
+	})
+	implementer, err := holds(context.Background(), claimOf(claim.RoleImplementer, "LEGION-208"))
+	if err != nil {
+		t.Fatalf("phaseHolds after the phase moved: %v", err)
+	}
+	if implementer {
+		t.Fatal("the implementer's queued task still holds after the issue reached testing")
+	}
+}
+
 func putOutboxIssue(t *testing.T, pool *pgxpool.Pool, records record.Store, issue record.Issue) {
 	t.Helper()
 	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {

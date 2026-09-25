@@ -166,6 +166,11 @@ type Deps struct {
 	// fresh, so the daemon can tell the tree's other claims (TreeVolumeLost): their sessions were on
 	// the same volume. nil tells no one.
 	VolumeLost func(c Claim)
+	// PhaseHolds says whether the issue is still in the phase this claim's role works. A task is
+	// enqueued for the phase the issue was in, and the outbox refuses to start a role for a phase
+	// the issue has left (daemon/outbox.go); a delivery queued before the phase moved on is that
+	// same staleness one step later, so it is dropped rather than sent. nil holds every delivery.
+	PhaseHolds func(ctx context.Context, c Claim) (bool, error)
 }
 
 func (d Deps) check() error {

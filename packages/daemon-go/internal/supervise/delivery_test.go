@@ -1,6 +1,7 @@
 package supervise
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -327,6 +328,66 @@ func TestAReplayedTurnStartIsFencedOnItsDeliveryID(t *testing.T) {
 	h.wantState(StateWorking)
 	if h.pending().ConfirmedAt.IsZero() {
 		t.Error("a replay carrying the current delivery id did not confirm it")
+	}
+}
+
+// A turn that starts after the no-turn bound carries no delivery id and nothing is in flight to
+// attribute it to, so it is a foreign turn and confirms nothing (the divergence from the shipped
+// daemon, which commits a late start as the same delivery). The task is re-sent when that turn
+// ends — unless the issue has left this role's phase meanwhile, in which case the late turn was
+// the phase itself and re-sending would hand a finished worker its own finished task.
+func TestALateForeignTurnResendsTheTaskUnlessTheIssueLeftThePhase(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		holdsAfterRun bool
+		prompts       int
+	}{
+		{name: "the phase is still this role's", holdsAfterRun: true, prompts: 2},
+		{name: "the issue left this role's phase", holdsAfterRun: false, prompts: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newBareHarness(t)
+			// The phase is this role's while the task is delivered; the late turn is the phase
+			// running, so by the time it ends the daemon may have advanced past it.
+			holds := true
+			h.deps.PhaseHolds = func(context.Context, Claim) (bool, error) { return holds, nil }
+			c := queuedClaim()
+			if err := h.store.PutClaim(h.ctx, c); err != nil {
+				t.Fatal(err)
+			}
+			h.start(c)
+			h.reach(StateReady)
+			h.must(RequestDeliver{Claim: testToken, Task: "the task"})
+			first := h.wantPrompts(1)[0]
+
+			h.advance(testRPC) // the bound passes with no turn: charged, and the id rotated
+			rotated := h.pending().ID
+			if rotated == first.DeliveryID {
+				t.Fatal("the delivery id was not rotated when the bound passed")
+			}
+
+			h.must(StreamTurnStart{Claim: testToken})
+			h.wantState(StateWorking)
+			if !h.pending().ConfirmedAt.IsZero() {
+				t.Fatal("a turn starting after the bound confirmed the delivery it cannot be attributed to")
+			}
+			holds = tc.holdsAfterRun
+			h.must(StreamTurnEnd{Claim: testToken})
+
+			prompts := h.wantPrompts(tc.prompts)
+			if tc.holdsAfterRun {
+				if resent := prompts[1]; resent.DeliveryID != rotated || resent.Message != "the task" {
+					t.Errorf("re-sent %+v, want the task under the rotated id %s", resent, rotated)
+				}
+				return
+			}
+			if h.claim().Pending != nil {
+				t.Errorf("the claim still holds %+v after the issue left its phase", h.claim().Pending)
+			}
+			if _, ok := h.store.delivery(testToken); ok {
+				t.Error("the store still holds the delivery after the issue left its phase")
+			}
+		})
 	}
 }
 

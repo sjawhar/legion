@@ -13,7 +13,10 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
-func roleFor(p phase.Phase) claim.Role {
+// RoleFor is the role that works a phase: the one a transition starts, and the one whose queued
+// task a later phase makes stale (the daemon's supervise.Deps.PhaseHolds reads it for that).
+// A phase no role works — awaiting_merge, done, held — has none.
+func RoleFor(p phase.Phase) claim.Role {
 	switch p {
 	case phase.Planning:
 		return claim.RolePlanner
