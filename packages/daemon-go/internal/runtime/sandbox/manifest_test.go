@@ -599,7 +599,7 @@ func TestTextSurvivesTheKubeletsExpansion(t *testing.T) {
 // otherwise the image probe's refusal of it would read as the image failing its probe, and a URL
 // carrying credentials would be written in plain text into every pod template. The refusal never
 // repeats the credentials, however malformed the userinfo is: the shapes url.Parse does not read
-// as userinfo included.
+// as userinfo included, and those whose separator is not a literal @.
 func TestAGatewayURLEveryPodRefusesIsRefusedByConfigure(t *testing.T) {
 	for name, tc := range map[string]struct{ url, want string }{
 		"no scheme":                        {"middleman.legion.internal", "is not an http(s) URL with a host"},
@@ -610,6 +610,11 @@ func TestAGatewayURLEveryPodRefusesIsRefusedByConfigure(t *testing.T) {
 		"credentials in an opaque URL":     {"https:legion:hunter2@middleman.legion.internal", "carries credentials"},
 		"credentials before a fragment":    {"https://legion:hunter2#x@middleman.legion.internal", "carries credentials"},
 		"credentials with a slash in them": {"https://legion:hun/ter2@middleman.legion.internal", "carries credentials"},
+		"an escaped @":                     {"https://legion:hunter2%40middleman.legion.internal", "does not parse as a URL"},
+		"an escaped @ without a scheme":    {"legion:hunter2%40middleman.legion.internal", "is not an http(s) URL with a host"},
+		"an escaped @ in an opaque URL":    {"https:legion:hunter2%40middleman.legion.internal", "is not an http(s) URL with a host"},
+		"a fullwidth @":                    {"https://legion:hunter2\uff20middleman.legion.internal", "does not parse as a URL"},
+		"a space for the @":                {"https://legion:hunter2 middleman.legion.internal", "does not parse as a URL"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			opts := testOptions()

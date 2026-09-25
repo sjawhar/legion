@@ -153,7 +153,7 @@ func TestInstallRefusesWhatItCannotRoute(t *testing.T) {
 		want string
 	}{
 		"an empty gateway":     {func(env map[string]string) { env[EnvURL] = "" }, EnvURL + " is set but empty"},
-		"a relative gateway":   {func(env map[string]string) { env[EnvURL] = "middleman.internal" }, EnvURL + ` "middleman.internal" is not an http(s) URL with a host`},
+		"a relative gateway":   {func(env map[string]string) { env[EnvURL] = "middleman.internal" }, EnvURL + " is not an http(s) URL with a host"},
 		"another scheme":       {func(env map[string]string) { env[EnvURL] = "ftp://middleman.internal" }, "not an http(s) URL"},
 		"a query":              {func(env map[string]string) { env[EnvURL] = "https://middleman.internal/?x=1" }, "carries a query or fragment"},
 		"a fragment":           {func(env map[string]string) { env[EnvURL] = "https://middleman.internal/#x" }, "carries a query or fragment"},
@@ -162,7 +162,7 @@ func TestInstallRefusesWhatItCannotRoute(t *testing.T) {
 		"no profile":           {func(env map[string]string) { delete(env, "OMP_PROFILE") }, "OMP_PROFILE names no profile"},
 		"the default profile":  {func(env map[string]string) { env["OMP_PROFILE"] = "default" }, "OMP_PROFILE names no profile"},
 		"a path as a profile":  {func(env map[string]string) { env["OMP_PROFILE"] = "../legion" }, `OMP_PROFILE "../legion" is not a profile name`},
-		"a gateway on a space": {func(env map[string]string) { env[EnvURL] = "https://middle man.internal" }, "is not an http(s) URL with a host"},
+		"a gateway on a space": {func(env map[string]string) { env[EnvURL] = "https://middle man.internal" }, EnvURL + " does not parse as a URL"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			env := environment(t, "https://middleman.internal")
@@ -176,6 +176,9 @@ func TestInstallRefusesWhatItCannotRoute(t *testing.T) {
 			}
 			if strings.Contains(err.Error(), "secret") {
 				t.Errorf("the refusal quotes the URL's password: %v", err)
+			}
+			if raw := env[EnvURL]; raw != "" && strings.Contains(err.Error(), raw) {
+				t.Errorf("the refusal quotes the URL: %v", err)
 			}
 			if _, err := os.Stat(filepath.Join(home, ".omp")); !os.IsNotExist(err) {
 				t.Errorf("a refused Install wrote under HOME: %v", err)

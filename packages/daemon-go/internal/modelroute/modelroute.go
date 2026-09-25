@@ -166,8 +166,9 @@ func InstallKeyedBy(lookup func(string) (string, bool), tokenFile string) (Insta
 
 // AnthropicRoute is the gateway's anthropic route, <gateway>/anthropic, for a gateway base URL that
 // is http(s) with a host and carries no credentials, query or fragment. A base URL has no use for
-// an `@`, so one anywhere is refused as credentials before the URL is parsed, and no refusal can
-// quote a password, however malformed the userinfo that url.Parse would misread. The shim and `legion probe-image` refuse to start on a URL it refuses, and the
+// an `@`, so one anywhere is refused as credentials. A malformed value can hold a password
+// anywhere, so no refusal quotes the value or url.Parse's error: each names EnvURL and the rule
+// the value broke. The shim and `legion probe-image` refuse to start on a URL it refuses, and the
 // Sandbox runtime refuses to be configured with one, so no pod is ever told it.
 func AnthropicRoute(raw string) (string, error) {
 	if raw == "" {
@@ -177,18 +178,13 @@ func AnthropicRoute(raw string) (string, error) {
 		return "", fmt.Errorf("%s carries credentials; the gateway's key is the pod's projected token, never a URL's", EnvURL)
 	}
 	u, err := url.Parse(raw)
-	if err != nil {
-		var parseErr *url.Error
-		if errors.As(err, &parseErr) {
-			err = parseErr.Err
-		}
-		return "", fmt.Errorf("%s is not an http(s) URL with a host: %w", EnvURL, err)
-	}
 	switch {
+	case err != nil:
+		return "", fmt.Errorf("%s does not parse as a URL", EnvURL)
 	case (u.Scheme != "http" && u.Scheme != "https") || u.Host == "":
-		return "", fmt.Errorf("%s %q is not an http(s) URL with a host", EnvURL, raw)
+		return "", fmt.Errorf("%s is not an http(s) URL with a host", EnvURL)
 	case u.RawQuery != "" || u.Fragment != "" || strings.ContainsAny(raw, "?#"):
-		return "", fmt.Errorf("%s %q carries a query or fragment: it must be the gateway's base URL", EnvURL, raw)
+		return "", fmt.Errorf("%s carries a query or fragment: it must be the gateway's base URL", EnvURL)
 	}
 	return u.JoinPath("anthropic").String(), nil
 }
