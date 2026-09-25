@@ -34,31 +34,11 @@ import {
   schedulingFingerprint,
 } from "../worker-image-probe";
 import type { WorkerRpcClient } from "../worker-rpc";
-import { checkPr, fakeDispatchClient, procStatLine } from "./ci-fixtures";
+import { checkPr, fakeDispatchClient, procStatLine, waitFor } from "./ci-fixtures";
 import { createFakeK8sApi, type FakeK8sApi } from "./fake-k8s-api";
 import { fakeWorkerRpcClient } from "./fake-runtime";
 
 const { startDaemon } = daemonIndex;
-
-/** Yields once to the event loop's macrotask queue (never a wall-clock-bound wait --
- * `setImmediate` fires on the next tick, whatever that costs). */
-function onceEventLoop(): Promise<void> {
-  const { promise, resolve } = Promise.withResolvers<void>();
-  setImmediate(resolve);
-  return promise;
-}
-
-/** Polls `condition` across real macrotask ticks until it is true, rather than guessing a fixed
- * number of ticks (or, worse, a fixed real-time duration) is enough: the awaited chain here is a
- * boot-time fire-and-forget `ensureController()` call built entirely from mocked, instantly-
- * resolving dependencies, so under ordinary conditions this converges within one or two ticks --
- * but a single guessed tick is not a bound, only a guess, and a CPU-starved host can genuinely
- * need more than one before the condition is actually observable. */
-async function flushEventLoopUntil(condition: () => boolean, maxTicks = 20_000): Promise<void> {
-  for (let tick = 0; tick < maxTicks && !condition(); tick += 1) {
-    await onceEventLoop();
-  }
-}
 
 /** A `/proc/<pid>/stat` line for whatever pid the fake tmux reported: every pane a daemon under
  * test launches must record a process identity, and no real process exists behind these pids. */
@@ -868,15 +848,20 @@ describe("startDaemon", () => {
               // the API answers (with the loaded state), yet no pane has opened and `startDaemon`
               // has not resolved. Every step between the probe's first attempt and the API bind is
               // a fake dependency resolving in a microtask, so the bind has happened by the time a
-              // refused connection (one event-loop turn) comes back; the retry is a bounded safety
-              // net awaiting the real accept, never a timed wait.
+              // refused connection (one event-loop turn) comes back; the retry awaits the real
+              // accept, bounded by the clock rather than by a count of refused dials.
               let response: Response | undefined;
-              for (let attempt = 0; attempt < 100 && response === undefined; attempt += 1) {
+              const deadline = performance.now() + 4_000;
+              while (response === undefined) {
+                if (performance.now() >= deadline) {
+                  throw new Error(
+                    "timed out after 4000 ms waiting for the API to accept during the probe hold"
+                  );
+                }
                 response = await fetch(`http://127.0.0.1:${port}/legion/v1/state`).catch(
                   () => undefined
                 );
               }
-              if (!response) throw new Error("the API never came up during the probe hold");
               expect(response.status).toBe(200);
               const body = (await response.json()) as DaemonStateResponse;
               expect(body.admission.queue).toEqual([issue]);
@@ -1189,7 +1174,7 @@ describe("startDaemon", () => {
       expect(await spawned.json()).toEqual({ status: "queued", roleToken: childPlanner });
       expect(attemptedTopics).toContain(roleTopic(childArchitect));
 
-      await flushEventLoopUntil(() => {
+      await waitFor(() => {
         const claim = state.roles[childArchitect];
         return "issue" in claim && claim.pendingAssignment?.kind === "catchup";
       });
@@ -2304,10 +2289,9 @@ describe("startDaemon", () => {
 
       // No controller role claim existed at boot, so nothing would ever reach
       // `/controller/ready` on its own -- boot itself had to spawn the controller directly.
-      // Polls for the actual condition (the boot-time `ensureController()` fire-and-forget call
-      // reaching the point where the mocked `runner` observes the minted secret) instead of
-      // guessing a single real tick is always enough -- see `flushEventLoopUntil`'s doc comment.
-      await flushEventLoopUntil(() => controllerSecret !== undefined);
+      // Waits for the actual condition (the boot-time `ensureController()` fire-and-forget call
+      // reaching the point where the mocked `runner` observes the minted secret), on the clock.
+      await waitFor(() => controllerSecret !== undefined);
       expect(controllerSecret).toBeString();
       expect(publications).toEqual([]);
 

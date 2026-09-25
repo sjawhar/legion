@@ -22,7 +22,7 @@ import type { TmuxLocator } from "../runtime";
 import { TmuxRuntime, type TmuxRuntimeDeps } from "../runtime-tmux";
 import { connectWorkerRpc } from "../worker-rpc";
 import { fakeDispatchClient } from "./ci-fixtures";
-import { createTmuxTestServer } from "./real-tmux-fixture";
+import { createTmuxTestServer, waitForSocket } from "./real-tmux-fixture";
 
 const tmux = createTmuxTestServer("realprompt");
 const PROJECT = tmux.project;
@@ -126,14 +126,6 @@ async function openShimWindow(
 // process — a tmux server reaping a pane, the stand-in emitting `agent_start` on its own timer,
 // the daemon's own `worker_rpc_timeout_seconds` bound over a real shim — which no fake timer in
 // this process can advance. Each poll awaits a named condition, never a guessed duration.
-
-async function waitForSocket(target: string): Promise<void> {
-  for (let attempt = 0; attempt < 200; attempt += 1) {
-    if (existsSync(target)) return;
-    await Bun.sleep(20);
-  }
-  throw new Error(`worker shim socket never appeared at ${target}`);
-}
 
 async function paneAlive(paneId: string): Promise<boolean> {
   const listed = await run(tmuxArgv("list-panes", "-a", "-F", "#{pane_id}"));

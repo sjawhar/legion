@@ -16,7 +16,7 @@ import { newLegionState } from "../legion-state";
 import { locatorsForIssue, ProcessManager, type ProcessManagerDeps } from "../processes";
 import { TmuxRuntime } from "../runtime-tmux";
 import { connectWorkerRpc } from "../worker-rpc";
-import { fakeDispatchClient } from "./ci-fixtures";
+import { fakeDispatchClient, waitFor } from "./ci-fixtures";
 import { createTmuxTestServer } from "./real-tmux-fixture";
 
 const tmux = createTmuxTestServer("realinstructions");
@@ -59,16 +59,11 @@ async function run(
   return { stdout, stderr, exitCode };
 }
 
-/** Polls for `target` every 20 ms for up to 30 s, like `waitForSocket` in
- * `real-shutdown-e2e.test.ts`: the recorder is a real subprocess in a real pane, so there is no
- * promise in this process to await. The recorder renames the finished record into place, so the
- * name existing means the content is whole. */
+/** Waits for `target` for up to 30 s, inside the test's 60 s: the recorder is a real subprocess in
+ * a real pane, so there is no promise in this process to await. The recorder renames the finished
+ * record into place, so the name existing means the content is whole. */
 async function waitForFile(target: string): Promise<void> {
-  for (let attempt = 0; attempt < 1500; attempt += 1) {
-    if (existsSync(target)) return;
-    await Bun.sleep(20);
-  }
-  throw new Error(`argv record never appeared at ${target}`);
+  await waitFor(() => existsSync(target), 30_000, `the argv record at ${target}`);
 }
 
 function config(stateDir: string): DaemonConfig {

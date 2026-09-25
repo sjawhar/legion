@@ -113,6 +113,10 @@ function spawnShim(args: string[]): {
   };
 }
 
+// Each test spawns real `bun` CLI children and waits on them for up to 10 s (a registration, a
+// negative control's second dial), so each allows 30 s, as the repo's other real-process tests do.
+// Under bun's 5 s default a loaded host ends a test mid-wait, and the listener's cleanup then
+// rejects the abandoned registration wait as "worker stream listener closed".
 describe("worker stream end to end (real CLI shim, real API, real listener)", () => {
   it("registers with a minted token, survives a listener restart mid-stream, and exits on shutdown", async () => {
     const { api, state } = startApi();
@@ -155,7 +159,7 @@ describe("worker stream end to end (real CLI shim, real API, real listener)", ()
     const stdout = await shim.stdout();
     expect(stdout.split("agent_end").length - 1).toBe(2);
     expect(logs).toEqual([]);
-  });
+  }, 30_000);
 
   it("registers a tree root's shim under its architect token from a root boot token the API minted", async () => {
     const { api, state } = startApi();
@@ -179,7 +183,7 @@ describe("worker stream end to end (real CLI shim, real API, real listener)", ()
     client.shutdown();
     expect(await shim.proc.exited).toBe(0);
     expect(logs).toEqual([]);
-  });
+  }, 30_000);
 
   it("negative control: a token the API never minted is rejected, logged once per dial, and OMP is never spawned", async () => {
     const { api } = startApi();
@@ -201,7 +205,7 @@ describe("worker stream end to end (real CLI shim, real API, real listener)", ()
     const stdout = await shim.stdout();
     expect(stdout).not.toContain("agent_start"); // no OMP ever ran
     expect(stdout).toContain("unavailable (stream closed before hello_ack)");
-  });
+  }, 30_000);
 
   it("negative control: --socket with --connect, and a blank token file, exit non-zero before spawning anything", async () => {
     const both = spawnShim([
@@ -218,5 +222,5 @@ describe("worker stream end to end (real CLI shim, real API, real listener)", ()
     const blankShim = spawnShim(["--connect", "tcp://127.0.0.1:1", "--boot-token-file", blank]);
     expect(await blankShim.proc.exited).not.toBe(0);
     expect(await blankShim.stderr()).toContain(`--boot-token-file ${blank} is blank`);
-  });
+  }, 30_000);
 });

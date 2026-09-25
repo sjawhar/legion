@@ -23,15 +23,40 @@ export function fakeDispatchClient(overrides: Partial<DispatchClient> = {}): Dis
   };
 }
 
-/** Polls `predicate` every 10 ms until it holds or `timeoutMs` elapses. Real sockets and child
- * processes cannot be driven by fake timers, so a test awaits the observable condition itself
- * rather than a guessed duration. */
-export async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
-  for (let attempt = 0; attempt < timeoutMs / 10; attempt += 1) {
-    if (predicate()) return;
-    await Bun.sleep(10);
+/** The default bound on a test's wait: under bun's 5 s per-test timeout, so a wait that never ends
+ * fails with its own message rather than bun's. */
+const WAIT_TIMEOUT_MS = 4_000;
+
+/** Waits until `condition` holds, and throws naming what it waited for (`what`, by default the
+ * condition's own source) once `timeoutMs` of real time has passed. A wait on real I/O (a file
+ * write, a socket, a tmux or child process) is bounded by the clock, never by a count of ticks
+ * or polls: on a loaded host the count runs out while the I/O is still queued (beside 48 CPU
+ * spinners and 8 fsync writers, a launch's filesystem prep outlasted 100 one-millisecond polls,
+ * and a controller relaunch 20,000 macrotask ticks). The condition is checked on every macrotask
+ * tick for the first 20 ms, as promptly as a tick loop over resolved fakes, then every 5 ms, so a
+ * long wait leaves the CPU to the I/O it waits for. */
+export async function waitFor(
+  condition: () => boolean,
+  timeoutMs = WAIT_TIMEOUT_MS,
+  what = condition
+    .toString()
+    .replace(/^\(\)\s*=>\s*/, "")
+    .replace(/\s+/g, " ")
+): Promise<void> {
+  const start = performance.now();
+  for (;;) {
+    if (condition()) return;
+    const elapsed = performance.now() - start;
+    if (elapsed >= timeoutMs)
+      throw new Error(`timed out after ${timeoutMs} ms waiting for ${what}`);
+    if (elapsed < 20) {
+      const { promise, resolve } = Promise.withResolvers<void>();
+      setImmediate(resolve);
+      await promise;
+    } else {
+      await Bun.sleep(5);
+    }
   }
-  throw new Error("condition never became true");
 }
 
 /** A `/proc/<pid>/stat` line for a process that no test ever really runs: `pid`, a comm, and

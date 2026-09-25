@@ -11,7 +11,7 @@ import type { LegionState } from "../legion-state";
 import { locatorsForIssue, type ProcessManagerDeps } from "../processes";
 import { TmuxRuntime, type TmuxRuntimeDeps } from "../runtime-tmux";
 import { connectWorkerRpc } from "../worker-rpc";
-import { fakeDispatchClient } from "./ci-fixtures";
+import { fakeDispatchClient, waitFor } from "./ci-fixtures";
 
 /** The daemon CLI every spawned `legion worker-shim` subprocess in these tests runs through. */
 export const CLI_ENTRYPOINT = path.join(import.meta.dir, "..", "..", "cli", "index.ts");
@@ -91,13 +91,10 @@ export function createTmuxTestServer(label: string): TmuxTestServer {
   };
 }
 
-/** Polls until a `legion worker-shim --socket` subprocess has bound `target` (up to ~4 s). */
+/** Waits until a `legion worker-shim --socket` subprocess has bound `target`, for up to 10 s: a
+ * fresh `bun` child boots before it binds, and every caller's test allows 15 s or more. */
 export async function waitForSocket(target: string): Promise<void> {
-  for (let attempt = 0; attempt < 200; attempt += 1) {
-    if (existsSync(target)) return;
-    await Bun.sleep(20);
-  }
-  throw new Error(`worker shim socket never appeared at ${target}`);
+  await waitFor(() => existsSync(target), 10_000, `the worker shim socket at ${target}`);
 }
 
 export function realDaemonConfig(
