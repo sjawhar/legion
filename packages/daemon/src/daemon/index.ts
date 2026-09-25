@@ -423,21 +423,21 @@ async function startDaemonLocked(
   }
   probes.catch(() => {});
   const owners = new Set(projectRepos(config).map((repo) => repo.split("/")[0] as string));
-  const reviewLogins = new Set<string>();
-  await Promise.all(
+  const leases = await Promise.all(
     [...owners].flatMap((owner) => [
       deps.tokenManager.getToken("implement", owner),
-      deps.tokenManager.getToken("review", owner).then((lease) => {
-        reviewLogins.add(lease.gitIdentity.name);
-      }),
+      deps.tokenManager.getToken("review", owner),
     ])
   );
-  // The reducers judge a push by its pusher against this login (`ReducerConfig.reviewAppLogin`);
-  // one App has one bot login, so any other answer is a configuration the reducers cannot use.
-  const [reviewAppLogin, ...otherLogins] = reviewLogins;
-  if (reviewAppLogin === undefined || otherLogins.length > 0) {
+  // Each App has one bot login (the token manager caches one identity per App), so any lease of a
+  // role names it. The reducers judge a push by its pusher against the review App's
+  // (`ReducerConfig.reviewAppLogin`): one App configured for both roles would make every
+  // implementer push the review App's and count no fix attempt.
+  const implementLogin = leases[0]?.gitIdentity.name;
+  const reviewAppLogin = leases[1]?.gitIdentity.name;
+  if (!reviewAppLogin || reviewAppLogin === implementLogin) {
     throw new Error(
-      `the review App's token leases named ${reviewLogins.size === 0 ? "no bot login" : [...reviewLogins].join(", ")}; the reducers need exactly one`
+      `the review App's token lease names bot login ${JSON.stringify(reviewAppLogin ?? "")} and the implement App's ${JSON.stringify(implementLogin ?? "")}; the reducers need two different Apps`
     );
   }
   const reducerConfig = { ...config, reviewAppLogin };

@@ -327,11 +327,11 @@ async function rig(root: string, fixtureEnv: Record<string, string>): Promise<Ri
       baseEnv: {},
       runner: async () => ({ stdout: "[]", stderr: "", exitCode: 0 }),
       tokenManager: {
-        getToken: async () => ({
+        getToken: async (role: "implement" | "review") => ({
           token: "worker-token",
           expiresAt: "2099-01-01T00:00:00.000Z",
           gitIdentity: {
-            name: "legion-implement[bot]",
+            name: role === "review" ? "legion-review[bot]" : "legion-implement[bot]",
             email: "implement@users.noreply.github.com",
           },
         }),

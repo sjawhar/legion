@@ -2084,6 +2084,26 @@ describe("review-App pushes and planned reds", () => {
     });
   }
 
+  it("an unclassifiable push arriving first after a planned red logs no fix attempt, because none is counted", () => {
+    const state = rootState();
+    attachChild(state);
+    addPr(state, { headSha: "impl-sha", verdict: "green", ciSettledAt: 1 });
+    arrive(state, "impl-sha", "red-tests-sha", "push first", tester);
+    settleRed(state, "red-tests-sha", 2);
+
+    const logged = pushEffects(state, {
+      ...implementer,
+      before: "red-tests-sha",
+      after: "fix-sha",
+      changed_paths: undefined,
+      changed_paths_truncated: undefined,
+    });
+    effects(state, syncPayload("fix-sha"));
+
+    expect(logged).toEqual([]);
+    expect(state.prs[prKey]?.fixAttempts).toBe(0);
+  });
+
   it("four tester rounds each followed by a fix publish no pr-blocked", () => {
     const state = rootState();
     attachChild(state);

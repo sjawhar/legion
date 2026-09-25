@@ -934,11 +934,12 @@ function registerPrFenced(
 }
 
 /** A new head arrived (the synchronize webhook, or resync's GitHub read). It counts as a fix
- * attempt when the prior verdict was red — unless the push webhook already classified this exact
- * sha handoff-only (`pendingPush`, consumed here whatever it says); `headCounted` records the
- * decision so a handoff-only push webhook arriving later can take the attempt back (see `push`). A
- * pending slot naming a different sha describes a newer push whose synchronize has not arrived and
- * is left in place.
+ * attempt when the prior verdict was red, unless that red was planned (`plannedRed`: the newest
+ * code-changing head was the review App's, the tester's red tests) or the push webhook already
+ * classified this exact sha handoff-only or the review App's (`pendingPush`, consumed here
+ * whatever it says); `headCounted` records the decision so a handoff-only or review-App push
+ * webhook arriving later can take the attempt back (see `push`). A pending slot naming a different
+ * sha describes a newer push whose synchronize has not arrived and is left in place.
  *
  * An approval is dropped on every new head. `changes_requested` lasts while every change since
  * the round's head is under `.legion/` — the reviewer's own handoff push after it asked for
@@ -1075,7 +1076,8 @@ function push(
   const byReviewApp = stringValue(payload.pusher) === config.reviewAppLogin;
   // Whether this push's count is real — judged before any mutation below: the current head's
   // recorded decision, or, for a head still to arrive, the verdict `resetPrHead` will see.
-  const counted = pr.headSha === after ? pr.headCounted === true : pr.verdict === "red";
+  const counted =
+    pr.headSha === after ? pr.headCounted === true : pr.verdict === "red" && !pr.plannedRed;
   if (pr.headSha === after) {
     if (!classification.handoffOnly) {
       if (byReviewApp) pr.plannedRed = true;
@@ -1338,7 +1340,7 @@ export function reduceGithubEvent(
       topic,
       payload: envelope.payload,
       state: stateInput,
-      config: { projects: config.projects },
+      config: { projects: config.projects, reviewAppLogin: config.reviewAppLogin },
     },
     before,
     state,

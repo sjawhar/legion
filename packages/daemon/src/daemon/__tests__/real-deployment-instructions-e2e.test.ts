@@ -173,10 +173,13 @@ describe("real deployment instructions fragment (real tmux, the controller's bar
           runner: async () => ({ stdout: "[]", stderr: "", exitCode: 0 }),
           baseEnv: {},
           tokenManager: {
-            getToken: async () => ({
+            getToken: async (role: "implement" | "review") => ({
               token: "worker-token",
               expiresAt: "2099-01-01T00:00:00.000Z",
-              gitIdentity: { name: "legion-implement[bot]", email: "implement@example.com" },
+              gitIdentity: {
+                name: role === "review" ? "legion-review[bot]" : "legion-implement[bot]",
+                email: "implement@example.com",
+              },
             }),
           },
           ownerForIssue: (issue) => repoForIssue(cfg, issue).split("/")[0] as string,
