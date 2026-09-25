@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log/slog"
 	"maps"
 	"net/url"
@@ -135,19 +134,19 @@ func (g pluginGate) verify(ctx context.Context) error {
 	if g.pluginRoot != "" {
 		manifest = filepath.Join(g.pluginRoot, "package.json")
 	}
-	version, err := verifyPluginContract(manifest, profileWords(profile), g.contract)
+	plugin, err := readPluginManifest(manifest, profileWords(profile), g.contract)
 	if err != nil {
 		return err
 	}
-	names, err := promptReferences(manifest, g.rolesDir)
+	names, err := promptReferences(manifest, plugin.skills, g.rolesDir)
 	if err != nil {
 		return err
 	}
-	if err := g.verifyLoaded(ctx, manifest, version, profile, names); err != nil {
+	if err := g.verifyLoaded(ctx, manifest, plugin.version, profile, names); err != nil {
 		return err
 	}
 	g.log.Info("boot gate: pi-legion-envoy speaks this daemon's contract and loads in a pane",
-		"manifest", manifest, "version", version, "goDaemonApiVersion", g.contract)
+		"manifest", manifest, "version", plugin.version, "goDaemonApiVersion", g.contract)
 	return nil
 }
 
@@ -266,13 +265,20 @@ func profileWords(profile string) string {
 	return "OMP profile " + profile
 }
 
-// verifyPluginContract is the contract probe (verifyLegionPluginContract, boot-probes.ts:267-298,
-// on the Go daemon's own field): the manifest's `legion.goDaemonApiVersion` must be contract. A
-// manifest that is missing, unreadable, or without the field is the same refusal, never a
-// fallback — the load probe would call such a plugin merely "not loaded" and send the operator to
-// `omp plugin list` when the fix is a reinstall. installInto names where the refusal says to
-// install the release. It answers the package version.
-func verifyPluginContract(manifest, installInto string, contract int) (string, error) {
+// pluginManifest is what the gate reads from a pi-legion-envoy manifest: its package version and
+// the skills directories it ships (`omp.skills`, relative to the plugin root).
+type pluginManifest struct {
+	version string
+	skills  []string
+}
+
+// readPluginManifest reads the manifest once and is the contract probe
+// (verifyLegionPluginContract, boot-probes.ts:267-298, on the Go daemon's own field): the
+// manifest's `legion.goDaemonApiVersion` must be contract. A manifest that is missing,
+// unreadable, or without the field is the same refusal, never a fallback — the load probe would
+// call such a plugin merely "not loaded" and send the operator to `omp plugin list` when the fix
+// is a reinstall. installInto names where the refusal says to install the release.
+func readPluginManifest(manifest, installInto string, contract int) (pluginManifest, error) {
 	install := fmt.Sprintf("Install the @sjawhar/pi-legion-envoy release built from this daemon's commit into %s.", installInto)
 	raw, err := os.ReadFile(manifest)
 	var parsed any
@@ -280,7 +286,7 @@ func verifyPluginContract(manifest, installInto string, contract int) (string, e
 		err = json.Unmarshal(raw, &parsed)
 	}
 	if err != nil {
-		return "", fmt.Errorf("pi-legion-envoy manifest at %s could not be read (%v); this daemon requires a plugin speaking Go daemon API contract %d. %s",
+		return pluginManifest{}, fmt.Errorf("pi-legion-envoy manifest at %s could not be read (%v); this daemon requires a plugin speaking Go daemon API contract %d. %s",
 			manifest, err, contract, install)
 	}
 	record, _ := parsed.(map[string]any)
@@ -291,14 +297,24 @@ func verifyPluginContract(manifest, installInto string, contract int) (string, e
 	legion, _ := record["legion"].(map[string]any)
 	declared, present := legion["goDaemonApiVersion"]
 	if number, ok := declared.(float64); ok && number == float64(contract) {
-		return version, nil
+		plugin := pluginManifest{version: version}
+		omp, _ := record["omp"].(map[string]any)
+		listed, _ := omp["skills"].([]any)
+		for _, entry := range listed {
+			dir, ok := entry.(string)
+			if !ok {
+				return pluginManifest{}, fmt.Errorf("pi-legion-envoy manifest at %s lists a skills entry %v that is not a directory name. %s", manifest, entry, install)
+			}
+			plugin.skills = append(plugin.skills, dir)
+		}
+		return plugin, nil
 	}
 	spoken := "none"
 	if present {
 		encoded, _ := json.Marshal(declared)
 		spoken = string(encoded)
 	}
-	return "", fmt.Errorf("pi-legion-envoy at %s (package %s) speaks Go daemon API contract %s; this daemon requires %d. %s",
+	return pluginManifest{}, fmt.Errorf("pi-legion-envoy at %s (package %s) speaks Go daemon API contract %s; this daemon requires %d. %s",
 		manifest, version, spoken, contract, install)
 }
 
@@ -313,10 +329,7 @@ func (g pluginGate) verifyLoaded(ctx context.Context, manifest, version, profile
 	if profile != "" {
 		list = "OMP_PROFILE=" + profile + " " + list
 	}
-	check := promptCheck{names: names, lane: "in a pane of " + profileWords(profile)}
-	if g.pluginRoot != "" {
-		check.lane = "loading the plugin from " + g.pluginRoot + " with discovery off, as a pod does"
-	}
+	check := promptCheck{names: names, profile: profileWords(profile)}
 	loadedFrom, err := g.loadedFrom(ctx, fmt.Errorf("pi-legion-envoy %s is installed but not loaded by omp (disabled or unregistered): run %s", version, list), check)
 	if err != nil {
 		return err
@@ -409,14 +422,18 @@ func owningManifest(file string) (string, error) {
 // probeLoad is one load-probe attempt, and, on a pass, where the plugin loaded from. notLoaded is
 // the refusal for an Oh My Pi that answered without loading the plugin.
 func (g pluginGate) probeLoad(ctx context.Context, launch, probe string, notLoaded error, check promptCheck) (bootprobe.Outcome, string) {
+	// The lane: a pane's installed plugins through discovery, or, with a plugin root, as a pod
+	// runs it — no discovery, the plugin as an explicit root beside the probe.
+	pod := g.pluginRoot != ""
 	script := `exec ` + launch + ` models --extension "$1" --json >/dev/null`
 	args := []string{probe}
-	if g.pluginRoot != "" {
-		// As a pod runs it: no discovery, the plugin as an explicit root beside the probe.
+	lane := "in a pane of " + check.profile
+	if pod {
 		script = `exec ` + launch + ` models --no-extensions --extension "$1" --extension "$2" --json >/dev/null`
 		args = []string{g.pluginRoot, probe}
+		lane = "loading the plugin from " + g.pluginRoot + " with discovery off, as a pod does"
 	}
-	if export := check.export(g.pluginRoot != ""); export != "" {
+	if export := check.export(pod); export != "" {
 		script = export + "; " + script
 	}
 	r, err := g.run(ctx, script, args...)
@@ -436,7 +453,7 @@ func (g pluginGate) probeLoad(ctx context.Context, launch, probe string, notLoad
 				location = strings.TrimSpace(rest)
 			}
 		}
-		if refusal := check.refusal(r.output); refusal != nil {
+		if refusal := check.refusal(r.output, lane); refusal != nil {
 			return bootprobe.Outcome{Refusal: refusal}, ""
 		}
 		return bootprobe.Outcome{Passed: true}, location
@@ -456,173 +473,6 @@ func (g pluginGate) probeLoad(ctx context.Context, launch, probe string, notLoad
 		return bootprobe.Outcome{Refusal: errors.New(message)}, ""
 	}
 	return bootprobe.Outcome{Refusal: notLoaded}, ""
-}
-
-// promptKind is one form in which a Legion prompt names something Oh My Pi resolves only when a
-// worker uses it: reference, the form a prompt writes; variable, the load probe's input and the
-// prefix of its answers (probe.mjs); and a refusal's words for a name Oh My Pi cannot find.
-type promptKind struct {
-	reference                                         *regexp.Regexp
-	variable                                          string
-	noun, namedBy, consequence, remedy, discoveryName string
-}
-
-// promptKinds are the two forms: a task agent dispatched as `task(agent="<name>")` and a skill
-// loaded as `skill://<name>`, whose name ends on a letter or digit so the prose around it (a
-// sentence's period, a path's slash) is not read as part of it. A worker whose call or read names one Oh My Pi cannot find gets an
-// error listing what it has, and carries on without it, so the load probe resolves every name.
-var promptKinds = [...]promptKind{
-	{
-		reference:     regexp.MustCompile(`agent="([a-z0-9][a-z0-9._-]*)"`),
-		variable:      "LEGION_PROMPT_AGENTS",
-		noun:          "task agent",
-		namedBy:       "dispatched by",
-		consequence:   "a worker that calls one gets a tool result listing the agents it has, and carries on without it",
-		remedy:        "pi-legion-envoy ships every agent its prompts dispatch; install the release built from this daemon's commit",
-		discoveryName: "agent discovery",
-	},
-	{
-		reference:   regexp.MustCompile(`skill://([a-z0-9](?:[a-z0-9._-]*[a-z0-9])?)`),
-		variable:    "LEGION_PROMPT_SKILLS",
-		noun:        "skill",
-		namedBy:     "loaded by",
-		consequence: "a worker told to load one reads `Unknown skill` and carries on without it",
-		remedy: "pi-legion-envoy ships every skill its prompts load; install the release built from this daemon's commit, " +
-			"and check that the settings this Oh My Pi reads (`disabledExtensions`, `skills`) neither disable nor filter it",
-		discoveryName: "skill discovery",
-	},
-}
-
-// promptNames holds, for each of promptKinds, every name Legion's prompts write in that form, each
-// with the prompt files that write it.
-type promptNames [len(promptKinds)]map[string][]string
-
-// promptReferences are the task agents and skills Legion's prompts name: every reference in a
-// Markdown file under the manifest's `omp.skills` directories and its `agents/` directory, the
-// agent definitions Oh My Pi discovers there (both named relative to the plugin), and under
-// rolesDir, when set (named `roles/<file>`).
-func promptReferences(manifest, rolesDir string) (promptNames, error) {
-	var names promptNames
-	for i := range names {
-		names[i] = map[string][]string{}
-	}
-	raw, err := os.ReadFile(manifest)
-	if err != nil {
-		return names, fmt.Errorf("boot gate: read the pi-legion-envoy manifest %s for the skills it ships: %w", manifest, err)
-	}
-	var pkg struct {
-		Omp struct {
-			Skills []string `json:"skills"`
-		} `json:"omp"`
-	}
-	if err := json.Unmarshal(raw, &pkg); err != nil {
-		return names, fmt.Errorf("boot gate: parse the pi-legion-envoy manifest %s: %w", manifest, err)
-	}
-	root := filepath.Dir(manifest)
-	for _, dir := range pkg.Omp.Skills {
-		if err := names.collect(root, filepath.Join(root, dir), ""); err != nil {
-			return names, fmt.Errorf("pi-legion-envoy at %s ships skills in %s, which the gate cannot read: %w", manifest, dir, err)
-		}
-	}
-	// A plugin without agents/ ships no agent definition, so none names anything.
-	if err := names.collect(root, filepath.Join(root, "agents"), ""); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return names, fmt.Errorf("pi-legion-envoy at %s ships agents in agents/, which the gate cannot read: %w", manifest, err)
-	}
-	if rolesDir != "" {
-		if err := names.collect(rolesDir, rolesDir, "roles"); err != nil {
-			return names, fmt.Errorf("the role prompts directory %s cannot be read: %w", rolesDir, err)
-		}
-	}
-	return names, nil
-}
-
-// collect adds every reference in a Markdown file under dir, each file named by its path relative
-// to base under prefix.
-func (names promptNames) collect(base, dir, prefix string) error {
-	return filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil || entry.IsDir() || filepath.Ext(path) != ".md" {
-			return err
-		}
-		body, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(base, path)
-		if err != nil {
-			return err
-		}
-		file := filepath.Join(prefix, rel)
-		for i, kind := range promptKinds {
-			for _, match := range kind.reference.FindAllSubmatch(body, -1) {
-				if name := string(match[1]); !slices.Contains(names[i][name], file) {
-					names[i][name] = append(names[i][name], file)
-				}
-			}
-		}
-		return nil
-	})
-}
-
-// promptCheck is what the load probe must also find: names, the task agents and skills Legion's
-// prompts name, and lane, how the probed Oh My Pi loads the plugin, in a refusal's words. The zero
-// value asks for nothing.
-type promptCheck struct {
-	names promptNames
-	lane  string
-}
-
-// export is the shell command handing the load probe each kind's names and, for a pod, the plugin
-// root ("$1") as the one extension root its discovery reads; empty when the check asks for
-// nothing. Names are the references' alphabet, so single quotes hold them.
-func (c promptCheck) export(pod bool) string {
-	var assignments []string
-	for i, kind := range promptKinds {
-		if len(c.names[i]) > 0 {
-			assignments = append(assignments, kind.variable+"='"+strings.Join(slices.Sorted(maps.Keys(c.names[i])), ",")+"'")
-		}
-	}
-	if len(assignments) == 0 {
-		return ""
-	}
-	if pod {
-		assignments = append(assignments, `LEGION_PROMPT_ROOT="$1"`)
-	}
-	return "export " + strings.Join(assignments, " ")
-}
-
-// refusal judges the load probe's answers: nil when Oh My Pi found every name, else, for each kind
-// with a name it could not find, the refusal naming each one and the prompt files that name it.
-func (c promptCheck) refusal(output string) error {
-	var refusals []error
-	for i, kind := range promptKinds {
-		refusals = append(refusals, kind.refusal(output, c.names[i], c.lane))
-	}
-	return errors.Join(refusals...)
-}
-
-// refusal judges the load probe's answer on named, this kind's names: nil when there are none or
-// Oh My Pi found every one.
-func (k promptKind) refusal(output string, named map[string][]string, lane string) error {
-	if len(named) == 0 {
-		return nil
-	}
-	for line := range strings.Lines(output) {
-		line = strings.TrimSpace(line)
-		if line == k.variable+"=resolved" {
-			return nil
-		}
-		if rest, ok := strings.CutPrefix(line, k.variable+"_MISSING="); ok {
-			var missing []string
-			for _, name := range strings.Split(rest, ",") {
-				missing = append(missing, name+" ("+k.namedBy+" "+strings.Join(named[name], ", ")+")")
-			}
-			return fmt.Errorf("Oh My Pi, %s, finds no %s %s: %s. %s", lane, k.noun, strings.Join(missing, "; "), k.consequence, k.remedy)
-		}
-		if rest, ok := strings.CutPrefix(line, k.variable+"_UNRESOLVABLE="); ok {
-			return fmt.Errorf("Oh My Pi, %s, could not resolve %ss for the load probe (%s): pin a fork release whose %s the probe can import", lane, k.noun, rest, k.discoveryName)
-		}
-	}
-	return fmt.Errorf("the load probe gave no answer on the %ss Legion's prompts name (%s)", k.noun, strings.Join(slices.Sorted(maps.Keys(named)), ", "))
 }
 
 // verifyAgentsCapability is the pi.agents probe (verifyOmpAgentsCapability, boot-probes.ts:
@@ -895,6 +745,6 @@ func ProbeController(ctx context.Context, p ControllerProbe) error {
 	if err != nil {
 		return err
 	}
-	_, err = verifyPluginContract(manifest, "the Oh My Pi installation it loaded from", p.Contract)
+	_, err = readPluginManifest(manifest, "the Oh My Pi installation it loaded from", p.Contract)
 	return err
 }

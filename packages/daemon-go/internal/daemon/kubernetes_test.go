@@ -216,6 +216,17 @@ func TestAKubernetesDaemonRefusesAConfigurationTheClusterWouldRefuseLater(t *tes
 	}
 }
 
+// A daemon whose LEGION_ROLE_PROMPTS_DIR names no directory is refused before its boot, naming the
+// variable and the directory, rather than failing later on the first read of it.
+func TestADaemonRefusesARolePromptsDirectoryThatIsNotThere(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "no-roles")
+	t.Setenv("LEGION_ROLE_PROMPTS_DIR", missing)
+	_, err := prepare(kubernetesConfig(t, "https://127.0.0.1:1"), quietLogger(), overrides{})
+	if err == nil || !strings.Contains(err.Error(), "LEGION_ROLE_PROMPTS_DIR") || !strings.Contains(err.Error(), missing) {
+		t.Fatalf("prepare = %v, want a refusal naming LEGION_ROLE_PROMPTS_DIR and %s", err, missing)
+	}
+}
+
 // A Kubernetes daemon refuses, before its boot, an operator pod that collides with Legion's own —
 // a mount at Legion's boot projection (the LEGION-270 plan's negative control), and a provider key
 // the pointer to the daemon's Envoy bearer names — so no pod is ever built with it.
