@@ -306,7 +306,9 @@ which is how every pane ran with the daemon's own worker-bin-free PATH until LEG
 pane, read the OMP process, never the pane pid: the pid tmux reports is the pane shell (or, since
 bash 5.1 execs the last command of a `-c` list, the worker-shim itself), and `/proc/<pid>/environ`
 is that process's exec-time block, not what it handed OMP — walk first-children from the pane pid to
-the first process whose argv[0] is `omp` (the `LEGION_TMUX_LIVE=1` row in `processes.test.ts` does exactly this for a real controller, root, and worker); and
+the first process whose argv[0] is `omp` (the `LEGION_TMUX_LIVE=1` rows in `processes.test.ts` do
+exactly this for a real controller, root, and worker, recognising their OMP stand-in by its script,
+argv[1], never by a substring of the pane shell's `-c` string, which names that script too); and
 `GH_TOKEN`/`GITHUB_TOKEN`/`GH_HOST` set
 empty (rendered `-e KEY=`), so no ambient token or host shadows the per-call one `legion gh`
 redeems. Nothing about the credential rides the bash tool's arguments — a plugin that replaces the

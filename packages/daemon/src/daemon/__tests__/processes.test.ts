@@ -432,9 +432,12 @@ async function childProcesses(pid: number): Promise<number[]> {
 }
 
 /** The OMP stand-in under a live pane: the first-child chain from the pane pid down to the process
- * whose cmdline names `DELAYED_START_OMP`. Never the pane pid itself: that is the pane shell — or,
- * since bash 5.1 execs the last command of a `-c` list, the worker-shim — and what matters is the
- * process OMP's place. Polls the real process tree with a real delay: the awaited condition is a
+ * whose argv[1] is `DELAYED_START_OMP` (every row runs it as `<bun> DELAYED_START_OMP`). Never the
+ * pane shell: until it execs, the pid tmux reports is that `sh -c`, whose one argument already
+ * contains the stand-in's path and whose environ predates the command's own `export PATH=…`, so a
+ * substring of the whole cmdline would take the shell's environment for OMP's. After the exec it
+ * is the worker-shim (bash 5.1 execs the last command of a `-c` list) or, in the controller's bare
+ * pane, OMP itself. Polls the real process tree with a real delay: the awaited condition is a
  * kernel fork/exec under a real tmux server, which no fake clock can advance (bun starts in tens
  * of ms). */
 async function ompStandInPid(panePid: number): Promise<number> {
@@ -442,8 +445,8 @@ async function ompStandInPid(panePid: number): Promise<number> {
   for (;;) {
     let pid = panePid;
     for (;;) {
-      const cmdline = await readFile(`/proc/${pid}/cmdline`, "utf8").catch(() => "");
-      if (cmdline.includes(DELAYED_START_OMP)) return pid;
+      const argv = (await readFile(`/proc/${pid}/cmdline`, "utf8").catch(() => "")).split("\0");
+      if (argv[1] === DELAYED_START_OMP) return pid;
       const next = (await childProcesses(pid))[0];
       if (next === undefined) break;
       pid = next;
@@ -11818,6 +11821,29 @@ describe("ProcessManager", () => {
     },
     30_000
   );
+
+  // The pid tmux reports for a new pane is its `sh -c`, whose argument already holds the OMP
+  // invocation and whose environ predates the command's own `export PATH=…`. The live rows read
+  // OMP's environment through `ompStandInPid`, so it must wait past that shell, however long the
+  // shell takes to exec, and never read the shell's environment as OMP's.
+  it("ompStandInPid waits past a pane shell whose -c string names the stand-in until OMP runs", async () => {
+    const shell = Bun.spawn(
+      [
+        "sh",
+        "-c",
+        `export PATH=/legion-exported-marker:$PATH && sleep 1 && exec '${process.execPath}' '${DELAYED_START_OMP}'`,
+      ],
+      { stdin: "pipe", stdout: "ignore", stderr: "ignore" }
+    );
+    try {
+      const environment = await ompEnvironment(shell.pid);
+      expect(environment.PATH?.split(path.delimiter)[0]).toBe("/legion-exported-marker");
+    } finally {
+      shell.stdin.end();
+      shell.kill();
+      await shell.exited;
+    }
+  });
 
   // Requires a real tmux installation: a real worker pane killed under the daemon, found gone by the
   // resync probe, and relaunched with `--resume` onto a fresh pane (LEGION-179, acceptance 1b/4).
