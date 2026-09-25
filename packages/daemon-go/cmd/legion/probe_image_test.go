@@ -16,8 +16,10 @@ import (
 // imageOmp is an `omp` that passes the image's three probes as a working image's Oh My Pi does:
 // pi.agents is there, the plugin linked into the profile loads from its own package and finds every
 // task agent and skill Legion's prompts name, and the session-storage setting refuses a value it
-// does not know, naming the variable. With $LEGION_TEST_SEEN set, each run appends the environment
-// it saw there: PI_CONFIG_FILES, whether the first overlay it names exists, and OTEL_SDK_DISABLED.
+// does not know, naming the variable. Asked for task agents, it resolves their models too, unless
+// told to skip them. With $LEGION_TEST_SEEN set, each run appends the environment it saw there:
+// PI_CONFIG_FILES, whether the first overlay it names exists, and OTEL_SDK_DISABLED; with
+// $LEGION_TEST_KEY_SEEN, the provider key TEST_PROVIDER_KEY.
 func imageOmp(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "omp")
@@ -27,12 +29,14 @@ if [ -n "${LEGION_TEST_SEEN:-}" ]; then
   if [ -n "$first" ] && [ -f "$first" ]; then written=written; else written=absent; fi
   printf '%s %s %s\n' "${PI_CONFIG_FILES:-none}" "$written" "${OTEL_SDK_DISABLED:-unset}" >>"$LEGION_TEST_SEEN"
 fi
+[ -z "${LEGION_TEST_KEY_SEEN:-}" ] || printf '%s\n' "${TEST_PROVIDER_KEY:-unset}" >>"$LEGION_TEST_KEY_SEEN"
 installed=$(cd "$HOME/.omp/profiles/$OMP_PROFILE/plugins/node_modules/@sjawhar/pi-legion-envoy" && pwd -P)
 case "$*" in
 "models --no-extensions --extension "*" --json") echo LEGION_OMP_AGENTS=available >&2 ;;
 "models --extension "*" --json")
   printf 'LEGION_PLUGIN_LOADED=yes\nLEGION_PLUGIN_LOADED_FROM=file://%s/dist/legion.js\n' "$installed" >&2
   if [ -n "${LEGION_PROMPT_AGENTS:-}" ]; then echo LEGION_PROMPT_AGENTS=resolved >&2; fi
+  if [ -n "${LEGION_PROMPT_AGENTS:-}" ] && [ -z "${LEGION_SKIP_AGENT_MODELS:-}" ]; then echo LEGION_AGENT_MODELS=resolved >&2; fi
   if [ -n "${LEGION_PROMPT_SKILLS:-}" ]; then echo LEGION_PROMPT_SKILLS=resolved >&2; fi ;;
 *) echo "Invalid $OMP_SESSION_STORAGE for OMP_SESSION_STORAGE" >&2; exit 1 ;;
 esac
@@ -90,7 +94,7 @@ func TestProbeImagePrintsTheOKLineWithThisBinarysContract(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("probe-image exited %d: %s", code, stderr)
 	}
-	if want := "probe-image: OK (" + omp + ") session-storage=probed go-daemon-api-version=" + thisBinarysContract + "\n"; stdout != want {
+	if want := "probe-image: OK (" + omp + ") session-storage=probed agent-models=resolved go-daemon-api-version=" + thisBinarysContract + "\n"; stdout != want {
 		t.Fatalf("stdout = %q, want %q", stdout, want)
 	}
 }
@@ -117,8 +121,66 @@ func TestProbeImageProbesTheOmpItIsGiven(t *testing.T) {
 
 	code, stdout, stderr := probeImage("--omp", omp)
 
-	if code != 0 || stdout != "probe-image: OK ("+omp+") session-storage=probed go-daemon-api-version="+thisBinarysContract+"\n" {
+	if code != 0 || stdout != "probe-image: OK ("+omp+") session-storage=probed agent-models=resolved go-daemon-api-version="+thisBinarysContract+"\n" {
 		t.Fatalf("probe-image --omp = %d %q %q, want the OK line naming %s", code, stdout, stderr, omp)
+	}
+}
+
+// The image build's probe, which has none of the operator's model configuration, skips the agents'
+// models, and its OK line says so, which the daemon's probe Sandbox refuses at boot.
+func TestProbeImageWithSkipAgentModelsSaysSoOnTheOKLine(t *testing.T) {
+	omp := imageOmp(t)
+	inImage(t, thisBinarysContract, omp)
+
+	code, stdout, stderr := probeImage("--skip-agent-models")
+
+	if want := "probe-image: OK (" + omp + ") session-storage=probed agent-models=skipped go-daemon-api-version=" + thisBinarysContract + "\n"; code != 0 || stdout != want {
+		t.Fatalf("probe-image --skip-agent-models = %d %q %q, want %q", code, stdout, stderr, want)
+	}
+}
+
+// With --provider-env-dir, as the probe Sandbox runs it when provider keys are configured, every
+// probe's Oh My Pi gets each key as a worker's shim exports it, so an agent keyed only through the
+// providers Secret resolves as it would in a worker; a key the environment already names is refused
+// as the shim refuses it, before any probe runs.
+func TestProbeImageWithAProviderEnvDirExportsTheKeysAsTheShimDoes(t *testing.T) {
+	omp := imageOmp(t)
+	inImage(t, thisBinarysContract, omp)
+	providers := t.TempDir()
+	if err := os.WriteFile(filepath.Join(providers, "TEST_PROVIDER_KEY"), []byte("from-the-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	seen := filepath.Join(t.TempDir(), "seen")
+	t.Setenv("LEGION_TEST_KEY_SEEN", seen)
+
+	code, stdout, stderr := probeImage("--provider-env-dir", providers)
+
+	if code != 0 || !strings.HasPrefix(stdout, "probe-image: OK (") {
+		t.Fatalf("probe-image --provider-env-dir = %d %q %q, want the OK line", code, stdout, stderr)
+	}
+	raw, err := os.ReadFile(seen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range strings.Fields(string(raw)) {
+		if key != "from-the-secret" {
+			t.Errorf("a probe's Oh My Pi had TEST_PROVIDER_KEY=%q, want the Secret's", key)
+		}
+	}
+	if len(strings.Fields(string(raw))) < 3 {
+		t.Fatalf("Oh My Pi ran %d times, want the three probes: %q", len(strings.Fields(string(raw))), raw)
+	}
+
+	t.Setenv("TEST_PROVIDER_KEY", "already-set")
+	if err := os.Remove(seen); err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, stderr = probeImage("--provider-env-dir", providers)
+	if code != 1 || stdout != "" || !strings.Contains(stderr, "TEST_PROVIDER_KEY") {
+		t.Fatalf("probe-image --provider-env-dir over a set TEST_PROVIDER_KEY = %d %q %q, want exit 1 naming the key", code, stdout, stderr)
+	}
+	if _, err := os.Stat(seen); !os.IsNotExist(err) {
+		t.Errorf("Oh My Pi ran before the refusal (%v)", err)
 	}
 }
 

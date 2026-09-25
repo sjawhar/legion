@@ -105,6 +105,12 @@ type pluginGate struct {
 	// rolesDir is the role prompts directory (prompts.ResolveRolePromptsDir): the task agents and
 	// skills its prompts name are resolved beside the plugin's. Empty resolves the plugin's alone.
 	rolesDir string
+	// skipAgentModels leaves the prompt-named task agents' models unresolved (ImageProbe's
+	// SkipAgentModels); every other gate holds each agent to its own model.
+	skipAgentModels bool
+	// roleReferences, when set, are the references of the role prompts the probed Oh My Pi is
+	// handed (ImageProbe's RoleReferences), resolved in place of rolesDir's.
+	roleReferences string
 	// stdin is each probe's standard input; nil is /dev/null. When it is a terminal this process
 	// holds the foreground of, each attempt runs as the terminal's foreground job, and its stderr
 	// is also copied to echo, so a launch prefix's prompt is seen and can be answered (terminalJob).
@@ -138,9 +144,18 @@ func (g pluginGate) verify(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	names, err := promptReferences(manifest, plugin.skills, g.rolesDir)
+	rolesDir := g.rolesDir
+	if g.roleReferences != "" {
+		rolesDir = ""
+	}
+	names, err := promptReferences(manifest, plugin.skills, rolesDir)
 	if err != nil {
 		return err
+	}
+	if g.roleReferences != "" {
+		if err := names.addEncoded(g.roleReferences); err != nil {
+			return fmt.Errorf("%s: %w", g.label(), err)
+		}
 	}
 	if err := g.verifyLoaded(ctx, manifest, plugin.version, profile, names); err != nil {
 		return err
@@ -329,7 +344,7 @@ func (g pluginGate) verifyLoaded(ctx context.Context, manifest, version, profile
 	if profile != "" {
 		list = "OMP_PROFILE=" + profile + " " + list
 	}
-	check := promptCheck{names: names, profile: profileWords(profile)}
+	check := promptCheck{names: names, agentModels: !g.skipAgentModels, profile: profileWords(profile)}
 	loadedFrom, err := g.loadedFrom(ctx, fmt.Errorf("pi-legion-envoy %s is installed but not loaded by omp (disabled or unregistered): run %s", version, list), check)
 	if err != nil {
 		return err
@@ -657,6 +672,13 @@ type ImageProbe struct {
 	// RolesDir is the role prompts directory (prompts.ResolveRolePromptsDir): the load probe resolves
 	// the task agents and skills its prompts name beside the plugin's.
 	RolesDir string
+	// SkipAgentModels leaves the task agents' models unresolved: the image build's probe, which runs
+	// with none of the operator's model configuration.
+	SkipAgentModels bool
+	// RoleReferences are the task agents and skills the daemon's own role prompts name
+	// (RolePromptReferences), which a Sandbox pod is handed in place of the image's: set, they are
+	// resolved instead of RolesDir's.
+	RoleReferences string
 }
 
 // defaultProbeTimeout is each image-probe and controller-probe attempt's budget: the default
@@ -674,7 +696,8 @@ func ProbeImage(ctx context.Context, p ImageProbe) error {
 	return pluginGate{
 		env: p.Env, workDir: p.WorkDir, invocation: p.Omp, timeout: defaultProbeTimeout,
 		retry: bootprobe.Image, contract: p.Contract,
-		pluginRoot: p.PluginRoot, rolesDir: p.RolesDir, log: p.Log,
+		pluginRoot: p.PluginRoot, rolesDir: p.RolesDir, skipAgentModels: p.SkipAgentModels, roleReferences: p.RoleReferences,
+		log: p.Log,
 	}.verifyImage(ctx)
 }
 

@@ -99,7 +99,8 @@ fi
 # default profile: the daemon runs with HOME=$work/home and neither profile variable, and the
 # manifest there is the checkout's own, so it declares the contract this checkout's daemon
 # requires. The gate also asks the load probe for the task agents and skills the role prompts name
-# (LEGION_PROMPT_AGENTS, LEGION_PROMPT_SKILLS), and the stub answers that they resolve.
+# (LEGION_PROMPT_AGENTS, LEGION_PROMPT_SKILLS) and whether each of those agents' models resolves
+# (LEGION_AGENT_MODELS), and the stub answers that they all resolve.
 (umask 077 && printf 'stage1-operator-%s\n' "$project" >"$work/operator-token")
 cat >"$work/omp" <<'EOF'
 #!/bin/sh
@@ -107,6 +108,7 @@ if [ "$1" = models ]; then
   echo LEGION_PLUGIN_LOADED=yes >&2
   echo "LEGION_PLUGIN_LOADED_FROM=file://$HOME/.omp/plugins/node_modules/@sjawhar/pi-legion-envoy/dist/legion.js" >&2
   [ -n "${LEGION_PROMPT_AGENTS:-}" ] && echo LEGION_PROMPT_AGENTS=resolved >&2
+  [ -n "${LEGION_PROMPT_AGENTS:-}" ] && [ -z "${LEGION_SKIP_AGENT_MODELS:-}" ] && echo LEGION_AGENT_MODELS=resolved >&2
   [ -n "${LEGION_PROMPT_SKILLS:-}" ] && echo LEGION_PROMPT_SKILLS=resolved >&2
   exit 0
 fi

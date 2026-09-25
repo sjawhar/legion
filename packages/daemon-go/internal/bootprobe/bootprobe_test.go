@@ -139,10 +139,30 @@ func TestRunReportsTheStopOverAnInterruptedAttempt(t *testing.T) {
 }
 
 // The OK line is the wire between the image's `legion probe-image` and the daemon's probe
-// Sandbox: the session-storage mark, then the contract last.
-func TestOKLineCarriesTheMarkAndTheContract(t *testing.T) {
-	if got, want := OKLine("/opt/omp/bin/omp", 3), "probe-image: OK (/opt/omp/bin/omp) session-storage=probed go-daemon-api-version=3"; got != want {
+// Sandbox: the session-storage mark, the agent-models mark, then the contract last.
+func TestOKLineCarriesTheMarksAndTheContract(t *testing.T) {
+	if got, want := OKLine("/opt/omp/bin/omp", 3, AgentModelsResolved), "probe-image: OK (/opt/omp/bin/omp) session-storage=probed agent-models=resolved go-daemon-api-version=3"; got != want {
 		t.Errorf("OKLine = %q, want %q", got, want)
+	}
+}
+
+// The daemon reads whether the image's probe resolved the agents' models from its OK line; a CLI
+// that predates the agent-model check prints no mark, which reads as none.
+func TestAgentModelsReadsTheMarkOnAnOKLine(t *testing.T) {
+	for _, testCase := range []struct {
+		name, output, want string
+	}{
+		{"resolved, among other output", "[legion] probe retried\n" + OKLine("/opt/omp/bin/omp", 5, AgentModelsResolved) + "\n", AgentModelsResolved},
+		{"skipped", OKLine("/opt/omp/bin/omp", 5, AgentModelsSkipped), AgentModelsSkipped},
+		{"a CLI that predates the check", "probe-image: OK (/opt/omp/bin/omp) session-storage=probed go-daemon-api-version=5", ""},
+		{"the mark on a line that is not the OK line", "[legion] agent-models=resolved go-daemon-api-version=5", ""},
+		{"nothing", "", ""},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := AgentModels(testCase.output); got != testCase.want {
+				t.Fatalf("AgentModels = %q, want %q", got, testCase.want)
+			}
+		})
 	}
 }
 
@@ -156,8 +176,8 @@ func TestConfirmedContractReadsOnlyTheGoTokenOnAnOKLine(t *testing.T) {
 		contract int
 		ok       bool
 	}{
-		{"the Go line among other output", "[legion] OMP pi.agents probe failed transiently\n" + OKLine("/opt/omp/bin/omp", 3) + "\n", 3, true},
-		{"another number", OKLine("/opt/omp/bin/omp", 12), 12, true},
+		{"the Go line among other output", "[legion] OMP pi.agents probe failed transiently\n" + OKLine("/opt/omp/bin/omp", 3, AgentModelsResolved) + "\n", 3, true},
+		{"another number", OKLine("/opt/omp/bin/omp", 12, AgentModelsSkipped), 12, true},
 		{"the TypeScript CLI's line", "probe-image: OK (/opt/omp/bin/omp) session-storage=probed daemon-api-version=8", 0, false},
 		{"a CLI that predates the contract check", "probe-image: OK (/opt/omp/bin/omp) session-storage=probed", 0, false},
 		{"a CLI that predates the session-storage probe", "probe-image: OK (/opt/omp/bin/omp)", 0, false},
