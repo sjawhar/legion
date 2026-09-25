@@ -655,8 +655,9 @@ func main() {
 			os.Exit(1)
 		}
 		// Check if auto-resubscribe (bus.Client.onReconnect) already succeeded
-		// while we were sleeping. If so, the consumer is bound by our own client
-		// and retrying would hit "consumer is already bound" from ourselves.
+		// while we were sleeping. If so, the subscription is in place, and a retry
+		// would only replace our own handle with a new bind of the same consumer,
+		// which can lose the server's release of its push binding.
 		if client.SubOK() {
 			logger.Info("subscribe succeeded via auto-resubscribe during retry backoff")
 			break

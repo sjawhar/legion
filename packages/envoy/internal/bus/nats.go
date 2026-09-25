@@ -511,7 +511,8 @@ func (c *Client) runReconnectHooks(conn *nats.Conn) error {
 	return nil
 }
 
-// Subscribe creates the listener's recoverable JetStream subscription.
+// Subscribe creates the listener's recoverable JetStream subscription. The client keeps one
+// JetStream subscription: a later call unsubscribes the handle an earlier one returned.
 func (c *Client) Subscribe(subject string, handler nats.MsgHandler, opts ...nats.SubOpt) (*nats.Subscription, error) {
 	c.mu.Lock()
 	conn, js := c.Conn, c.js
@@ -526,7 +527,8 @@ func (c *Client) Subscribe(subject string, handler nats.MsgHandler, opts ...nats
 
 // SubscribeCore creates a recoverable core NATS subscription. The optional queue
 // identifies the stable queue group that shares role-lane delivery between
-// overlapping listeners.
+// overlapping listeners. The client keeps one core subscription: a later call
+// unsubscribes the handle an earlier one returned.
 func (c *Client) SubscribeCore(subject string, handler nats.MsgHandler, queues ...string) (*nats.Subscription, error) {
 	if err := c.ensureConn(); err != nil {
 		return nil, err

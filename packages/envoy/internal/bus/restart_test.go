@@ -259,11 +259,12 @@ func TestAReconnectInPlaceKeepsTheSubscriptionsNATSRestored(t *testing.T) {
 	}
 
 	// The restarted server answers core NATS before JetStream is ready, so the publish is retried
-	// until the stream acknowledges it: a publish that returned an error was not stored.
+	// until the stream acknowledges it. The message id makes a retry after a late acknowledgement
+	// a duplicate the stream drops, so the stream holds the message once either way.
 	var publishErr error
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, publishErr = client.JS().Publish("notifications.github.test.in-place-reconnect", []byte(`{}`)); publishErr == nil {
+		if _, publishErr = client.JS().Publish("notifications.github.test.in-place-reconnect", []byte(`{}`), natsgo.MsgId("in-place-reconnect")); publishErr == nil {
 			break
 		}
 		time.Sleep(250 * time.Millisecond)
