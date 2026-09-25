@@ -1,24 +1,27 @@
 // Package config loads the daemon's `legion.yaml` and its `LEGION_*` environment.
 //
-// The file keeps the key names the shipped TypeScript daemon reads, so the deployment overlays
-// (deploy/kubernetes/daemon/{base,overlays/kind}/legion.yaml) load at every stage of the Go
-// rewrite. Stages 1 and 2 model twenty-one of those keys plus five of the rewrite's own; the rest
-// fall into three classes the loader decides once, here: known-later keys a later stage models,
-// accepted and ignored with one log line each; tossed keys, refused naming the key and why the
-// setting no longer exists; and migration-only keys, refused with the TypeScript loader's own
-// message text so an operator searching for those words finds the same answer. Anything else is a
-// typo.
+// The file keeps the key names the shipped TypeScript daemon reads, so a key an operator carries
+// across means the same thing in either daemon. A key the Go daemon does not model falls into one
+// of three classes the loader decides once, here: known-later keys a later stage models, accepted
+// and ignored with one log line each; tossed keys, refused naming the key and why the setting no
+// longer exists; and migration-only keys, refused with the TypeScript loader's own message text so
+// an operator searching for those words finds the same answer. Anything else is a typo. Under
+// `runtime: kubernetes` the loader also refuses what a pod could not run with: the
+// `runtime.kubernetes` block's own values, and the keys outside it every pod needs. The TypeScript
+// in-cluster daemon's files (deploy/kubernetes/daemon) are that daemon's, not Go configurations.
 //
 // Load reads the file and nothing it names: a path key (`instructions`, `envoy_token_file`,
-// `operator_token_file`) is resolved against the file's directory and kept as a path. What sits at
-// that path is read at boot, by ReadSecretPointer and MaterializeDeploymentInstructions, so the
-// overlays load on a machine that has none of the files they mount.
+// `operator_token_file`, `runtime.kubernetes.kubeconfig`) is resolved against the file's directory
+// and kept as a path. What sits at that path is read at boot, by ReadSecretPointer,
+// MaterializeDeploymentInstructions, and the runtime's client, so a configuration validates on a
+// machine that has none of the files it names.
 package config
 
 import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -30,11 +33,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Runtime is the `runtime` block read as its discriminator. Stage 1 needs the name alone; every
-// member of `runtime.kubernetes` is accepted and ignored until Stage 4 models the Sandbox
-// runtime.
+// Runtime is the `runtime` block: its name, and under kubernetes the settled `runtime.kubernetes`
+// block (nil under tmux).
 type Runtime struct {
-	Name string
+	Name       string
+	Kubernetes *Kubernetes
 }
 
 // Config is the daemon's settled configuration: the file, the environment, and the defaults
@@ -107,9 +110,10 @@ type Config struct {
 	Projects          map[string]Project
 	Gates             Gates
 	GitHubApps        GitHubApps
-	LingerHours       int
-	ReviewRoundCap    int
-	MaxFixAttempts    int
+	// Linger is how long a finished tree keeps its workspace before it closes (`linger_hours`).
+	Linger         time.Duration
+	ReviewRoundCap int
+	MaxFixAttempts int
 }
 
 const (
@@ -196,6 +200,7 @@ type fileConfig struct {
 	StateDir          *string
 	AdmissionCap      *int
 	Runtime           *string
+	Kubernetes        *Kubernetes
 	DaemonURL         *string
 	OmpInvocation     *string
 	OmpLaunchPrefix   []string
@@ -211,11 +216,13 @@ type fileConfig struct {
 	Projects          map[string]Project
 	Gates             *Gates
 	GitHubApps        *GitHubApps
-	LingerHours       *int
+	Linger            *time.Duration
 	ReviewRoundCap    *int
 	MaxFixAttempts    *int
 	Durations         map[string]int
 	Counts            map[string]int
+	// set names every top-level key whose value is not null.
+	set map[string]bool
 }
 
 // Load reads the daemon's complete runtime configuration. App private-key commands and secrets
@@ -279,7 +286,7 @@ func rootMapping(document *yaml.Node) (*yaml.Node, error) {
 // readKeys walks the top-level keys in file order, reading the modelled ones and classifying the
 // rest.
 func readKeys(root *yaml.Node) (fileConfig, error) {
-	file := fileConfig{Durations: map[string]int{}, Counts: map[string]int{}}
+	file := fileConfig{Durations: map[string]int{}, Counts: map[string]int{}, set: map[string]bool{}}
 	if root == nil {
 		return file, nil
 	}
@@ -300,7 +307,7 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 		case "admission_cap":
 			file.AdmissionCap, err = readInt(value, key)
 		case "runtime":
-			file.Runtime, err = readRuntime(value)
+			file.Runtime, file.Kubernetes, err = readRuntime(value)
 		case "daemon_url":
 			file.DaemonURL, err = readString(value, key)
 		case "omp_invocation":
@@ -332,7 +339,7 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 		case "github_apps":
 			file.GitHubApps, err = readGitHubApps(value, key)
 		case "linger_hours":
-			file.LingerHours, err = readPositiveInteger(value, key, maxTimerSeconds/3600)
+			file.Linger, err = readLingerHours(value, key)
 		case "review_round_cap":
 			file.ReviewRoundCap, err = readPositiveInteger(value, key, 0)
 		case "max_fix_attempts":
@@ -346,6 +353,9 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 		}
 		if err != nil {
 			return fileConfig{}, err
+		}
+		if value.Tag != "!!null" {
+			file.set[key] = true
 		}
 	}
 	return file, nil
@@ -434,36 +444,40 @@ func checkGates(value *yaml.Node) error {
 	return nil
 }
 
-// readRuntime reads `runtime` as its discriminator: the `tmux` or `kubernetes` scalar, or the
-// shipped one-key `{kubernetes: {...}}` mapping whose members Stage 4 models and Stage 1 ignores
-// whole — nothing under it is walked.
-func readRuntime(value *yaml.Node) (*string, error) {
+// readRuntime reads `runtime`: the `tmux` or `kubernetes` scalar, or the shipped one-key
+// `{kubernetes: {...}}` mapping, whose block it reads. A bare `kubernetes` scalar carries no block,
+// which resolve refuses: the block is the only source of what a pod needs.
+func readRuntime(value *yaml.Node) (*string, *Kubernetes, error) {
 	if value.Tag == "!!null" {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if value.Kind == yaml.ScalarNode {
 		name := value.Value
 		if name != "tmux" && name != "kubernetes" {
-			return nil, errors.New("runtime must be 'tmux' or 'kubernetes'")
+			return nil, nil, errors.New("runtime must be 'tmux' or 'kubernetes'")
 		}
-		return &name, nil
+		return &name, nil, nil
 	}
 	if value.Kind != yaml.MappingNode ||
 		len(value.Content) != 2 ||
 		value.Content[0].Value != "kubernetes" {
-		return nil, errors.New("runtime accepts tmux, kubernetes, or a mapping with the single key kubernetes")
+		return nil, nil, errors.New("runtime accepts tmux, kubernetes, or a mapping with the single key kubernetes")
 	}
-	logIgnored("runtime.kubernetes", 4)
+	block, err := readKubernetes(value.Content[1])
+	if err != nil {
+		return nil, nil, err
+	}
 	name := "kubernetes"
-	return &name, nil
+	return &name, block, nil
 }
 
 func logIgnored(key string, stage int) {
 	slog.Info("legion.yaml key accepted and ignored", "key", key, "stage", stage)
 }
 
+// readString reads a string key; nil for an unset one (absent from its mapping, or null).
 func readString(value *yaml.Node, key string) (*string, error) {
-	if value.Tag == "!!null" {
+	if value == nil || value.Tag == "!!null" {
 		return nil, nil
 	}
 	var read string
@@ -574,7 +588,7 @@ func readProviderKeys(value *yaml.Node, key string) ([]ProviderKey, error) {
 }
 
 func readInt(value *yaml.Node, key string) (*int, error) {
-	if value.Tag == "!!null" {
+	if value == nil || value.Tag == "!!null" {
 		return nil, nil
 	}
 	var read int
@@ -582,6 +596,31 @@ func readInt(value *yaml.Node, key string) (*int, error) {
 		return nil, fmt.Errorf("%s must be an integer", key)
 	}
 	return &read, nil
+}
+
+// readLingerHours is `linger_hours`: a positive number of hours, a decimal among them (0.3 is 18
+// minutes), bounded as the shipped key is, by the timer bound in whole hours (config.ts
+// MAX_TIMER_HOURS). A value too small to be a nanosecond is refused, never read as zero, which the
+// engine would take for its 72-hour default.
+func readLingerHours(value *yaml.Node, key string) (*time.Duration, error) {
+	if value.Tag == "!!null" {
+		return nil, nil
+	}
+	var hours float64
+	if (value.Tag != "!!int" && value.Tag != "!!float") || value.Decode(&hours) != nil {
+		return nil, fmt.Errorf("%s must be a number", key)
+	}
+	if !(hours > 0) {
+		return nil, fmt.Errorf("%s must be a positive number", key)
+	}
+	if hours > maxTimerSeconds/3600 {
+		return nil, fmt.Errorf("%s must be at most %d", key, maxTimerSeconds/3600)
+	}
+	linger := time.Duration(math.Round(hours * float64(time.Hour)))
+	if linger <= 0 {
+		return nil, fmt.Errorf("%s must be a positive number", key)
+	}
+	return &linger, nil
 }
 
 // validURL is the shipped `validateUrl` (config.ts:627-634) for the URLs this daemon dials or
@@ -627,7 +666,7 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 		AdmissionCap:   defaultAdmissionCap,
 		EnvoyURL:       defaultEnvoyURL,
 		Gates:          Gates{Design: DesignGateRootIssues},
-		LingerHours:    72,
+		Linger:         72 * time.Hour,
 		ReviewRoundCap: 3,
 		MaxFixAttempts: 3,
 	}
@@ -665,6 +704,19 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 
 	if file.Runtime != nil {
 		cfg.Runtime = Runtime{Name: *file.Runtime}
+	}
+	if cfg.Runtime.Name == "kubernetes" {
+		if file.Kubernetes == nil {
+			return Config{}, errors.New("runtime.kubernetes is required when runtime is kubernetes")
+		}
+		if err := checkKubernetesKeys(file); err != nil {
+			return Config{}, err
+		}
+		block := *file.Kubernetes
+		if block.Kubeconfig != "" {
+			block.Kubeconfig = underConfig(block.Kubeconfig, configDir)
+		}
+		cfg.Runtime.Kubernetes = &block
 	}
 
 	switch {
