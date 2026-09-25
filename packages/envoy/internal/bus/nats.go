@@ -324,6 +324,13 @@ func (c *Client) onReconnect(nc *nats.Conn) {
 		return
 	}
 	if err := c.runReconnectHooks(nc); err != nil {
+		// A failure after the stop is the stop: a shutdown that began while a hook ran closed what
+		// the hook was reading through. recover reports that case the same way, with the error kept
+		// on the line in case a real failure coincided with the stop.
+		if c.stopped() {
+			slog.Info("envoy nats reconnect hooks cancelled", slog.String("error", err.Error()))
+			return
+		}
 		slog.Error("envoy nats reconnect hook failed", slog.String("error", err.Error()))
 	}
 }

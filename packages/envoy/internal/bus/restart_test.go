@@ -3,6 +3,7 @@ package bus_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"sync"
@@ -192,6 +193,12 @@ func (l *busLogs) Write(p []byte) (int, error) {
 	return l.buffer.Write(p)
 }
 
+func (l *busLogs) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buffer.String()
+}
+
 func (l *busLogs) errorLine() string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -284,5 +291,47 @@ func TestAReconnectInPlaceKeepsTheSubscriptionsNATSRestored(t *testing.T) {
 	}
 	if line := logs.errorLine(); line != "" {
 		t.Fatalf("a reconnect in place logged an error: %s", line)
+	}
+}
+
+// A reconnect hook that fails after the client was stopped fails because of the stop: a SIGTERM
+// that lands while the listener's rewatch hook runs closes the connection the hook is reading
+// through. recover already reports that case as the stop; the reconnect path must too, at INFO
+// with the error kept on the line, never as a hook failure at ERROR.
+func TestAReconnectHookFailingAfterTheStopIsTheStop(t *testing.T) {
+	ctr, uri := testnats.StartRestartable(t)
+	client, err := bus.Connect([]string{uri})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(client.Close)
+	hooked := make(chan struct{}, 1)
+	client.AddReconnectHook(func(*natsgo.Conn) error {
+		// The shutdown begins while the hook is still running, and the hook's next server request
+		// fails on the closed connection.
+		client.Close()
+		hooked <- struct{}{}
+		return errors.New("rewatch interest registry: nats: connection closed")
+	})
+
+	logs := captureBusLogs(t)
+	testnats.Stop(t, ctr)
+	if err := ctr.Start(context.Background()); err != nil {
+		t.Fatalf("start NATS again: %v", err)
+	}
+	select {
+	case <-hooked:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the reconnect never ran its hook")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && !strings.Contains(logs.String(), "reconnect hooks cancelled") && logs.errorLine() == "" {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if line := logs.errorLine(); line != "" {
+		t.Fatalf("a hook failing after the stop logged an error: %s", line)
+	}
+	if !strings.Contains(logs.String(), "envoy nats reconnect hooks cancelled") || !strings.Contains(logs.String(), "connection closed") {
+		t.Fatalf("the stop was not reported with its error at INFO: %s", logs.String())
 	}
 }

@@ -26,6 +26,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/kvwatch"
 )
 
 // Bucket is the JetStream KV bucket name for per-commit CI state.
@@ -227,15 +228,10 @@ type Store struct {
 	cacheRevisions map[string]uint64
 	readyCh        chan struct{}
 	readyOnce      sync.Once
-	// watchErr is non-nil once the WatchAll watcher fails to start or its update
-	// stream ends. The summary loop reads only the cache (no KV fallback), so a
-	// dead watcher silently stops/staleness summaries; Ping exposes it to the
-	// listener, which re-establishes the watcher or exits for Docker to restart.
-	watchErr error
-
-	watcherMu         sync.Mutex
-	watcher           nats.KeyWatcher
-	watcherGeneration uint64
+	// watcher feeds the cache. The summary loop reads only the cache (no KV fallback), so a dead
+	// watcher silently stops summaries; Ping exposes its terminal error to the listener, which
+	// re-establishes the watcher or exits for Docker to restart.
+	watcher kvwatch.Watcher
 }
 
 type openOpts struct {
@@ -296,6 +292,9 @@ func Open(nc *nats.Conn, opts ...Option) (*Store, error) {
 		cacheRevisions: map[string]uint64{},
 		readyCh:        make(chan struct{}),
 	}
+	s.watcher.Name = "cistore"
+	s.watcher.Apply = s.applyWatched
+	s.watcher.Ready = s.signalReady
 	go s.watch()
 	return s, nil
 }
@@ -312,9 +311,7 @@ func (s *Store) Ping() error {
 	if _, err := kv.Status(); err != nil {
 		return err
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.watchErr
+	return s.watcher.Err()
 }
 
 // Rewatch recreates the KV watcher against conn and clears a sticky terminal
@@ -331,103 +328,63 @@ func (s *Store) Rewatch(conn *nats.Conn) error {
 	if err != nil {
 		return fmt.Errorf("open CI store KV bucket: %w", err)
 	}
-	if err := s.startWatch(kv); err != nil {
+	if err := s.watcher.Watch(kv); err != nil {
 		return fmt.Errorf("watch CI store KV bucket: %w", err)
 	}
+	s.setKV(kv)
 	return nil
 }
 
 func (s *Store) watch() {
-	if err := s.startWatch(s.currentKV()); err != nil {
-		s.setWatchErr(err)
+	if err := s.watcher.Watch(s.currentKV()); err != nil {
+		s.watcher.Fail(err)
 		slog.Error("cistore watch failed", slog.String("error", err.Error()))
 		s.signalReady()
 	}
 }
 
-func (s *Store) startWatch(kv nats.KeyValue) error {
-	if kv == nil {
-		return errors.New("cistore: KV unavailable")
-	}
-	watcher, err := kv.WatchAll()
-	if err != nil {
-		return err
-	}
-
-	s.watcherMu.Lock()
-	previous := s.watcher
-	s.watcherGeneration++
-	generation := s.watcherGeneration
-	s.watcher = watcher
-	s.setKV(kv)
-	s.watcherMu.Unlock()
-
-	s.setWatchErr(nil)
-	if previous != nil {
-		_ = previous.Stop()
-	}
-	go s.consumeWatch(watcher, generation)
-	return nil
-}
-
-func (s *Store) consumeWatch(watcher nats.KeyWatcher, generation uint64) {
-	for entry := range watcher.Updates() {
-		if entry == nil {
-			// WatchAll emits a nil sentinel once the initial scan of existing
-			// keys is delivered — treat that as cache-ready.
-			s.signalReady()
-			continue
+// applyWatched applies one entry the KV watcher delivered to the cache.
+func (s *Store) applyWatched(entry nats.KeyValueEntry) {
+	key := entry.Key()
+	var malformed error
+	s.mu.Lock()
+	switch {
+	case entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge:
+		s.evictCachedLocked(key, entry.Revision())
+	default:
+		var marker struct {
+			Kind string `json:"kind"`
 		}
-
-		key := entry.Key()
-		var malformed error
-		s.mu.Lock()
-		switch {
-		case entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge:
-			s.evictCachedLocked(key, entry.Revision())
-		default:
-			var marker struct {
-				Kind string `json:"kind"`
-			}
-			if err := json.Unmarshal(entry.Value(), &marker); err == nil && marker.Kind == headRecordKind {
-				var head headRecord
-				if err := json.Unmarshal(entry.Value(), &head); err != nil {
-					s.evictCachedLocked(key, entry.Revision())
-					malformed = err
-				} else if !validHeadSHA(head.SHA) {
-					s.evictCachedLocked(key, entry.Revision())
-					malformed = errors.New("invalid head SHA")
-				} else {
-					s.cacheHeadLocked(key, head.SHA, entry.Revision())
-				}
+		if err := json.Unmarshal(entry.Value(), &marker); err == nil && marker.Kind == headRecordKind {
+			var head headRecord
+			if err := json.Unmarshal(entry.Value(), &head); err != nil {
+				s.evictCachedLocked(key, entry.Revision())
+				malformed = err
+			} else if !validHeadSHA(head.SHA) {
+				s.evictCachedLocked(key, entry.Revision())
+				malformed = errors.New("invalid head SHA")
 			} else {
-				var st State
-				if err := json.Unmarshal(entry.Value(), &st); err != nil {
-					s.evictCachedLocked(key, entry.Revision())
-					malformed = err
-				} else {
-					s.cacheStateLocked(key, st, entry.Revision())
-				}
+				s.cacheHeadLocked(key, head.SHA, entry.Revision())
+			}
+		} else {
+			var st State
+			if err := json.Unmarshal(entry.Value(), &st); err != nil {
+				s.evictCachedLocked(key, entry.Revision())
+				malformed = err
+			} else {
+				s.cacheStateLocked(key, st, entry.Revision())
 			}
 		}
-		s.mu.Unlock()
+	}
+	s.mu.Unlock()
 
-		if malformed != nil {
-			slog.Warn("cistore watch evicted malformed value",
-				slog.String("key", key),
-				slog.Uint64("revision", entry.Revision()),
-				slog.String("error", malformed.Error()),
-			)
-		}
+	if malformed != nil {
+		slog.Warn("cistore watch evicted malformed value",
+			slog.String("key", key),
+			slog.Uint64("revision", entry.Revision()),
+			slog.String("error", malformed.Error()),
+		)
 	}
-	if !s.finishWatch(generation) {
-		return
-	}
-	// Updates() closed unexpectedly (e.g. conn lost). The cache will now go stale
-	// with no updates; Ping reports the terminal watcher failure until Rewatch
-	// establishes a replacement.
-	s.setWatchErr(errors.New("cistore: KV watcher stream closed"))
-	s.signalReady()
 }
 
 func (s *Store) cacheStateLocked(key string, state State, revision uint64) {
@@ -469,28 +426,16 @@ func (s *Store) setKV(kv nats.KeyValue) {
 	s.kvMu.Unlock()
 }
 
-func (s *Store) finishWatch(generation uint64) bool {
-	s.watcherMu.Lock()
-	defer s.watcherMu.Unlock()
-	if generation != s.watcherGeneration {
-		return false
-	}
-	s.watcher = nil
-	return true
-}
-
 // WatchError returns the active watcher's terminal error string, or "" while
 // the watcher is running.
 func (s *Store) WatchError() string {
 	if s == nil {
 		return ""
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.watchErr == nil {
-		return ""
+	if err := s.watcher.Err(); err != nil {
+		return err.Error()
 	}
-	return s.watchErr.Error()
+	return ""
 }
 
 // WatchFailed reports whether the current watcher has stopped.
@@ -498,15 +443,15 @@ func (s *Store) WatchFailed() bool {
 	if s == nil {
 		return false
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.watchErr != nil
+	return s.watcher.Err() != nil
 }
 
-func (s *Store) setWatchErr(err error) {
-	s.mu.Lock()
-	s.watchErr = err
-	s.mu.Unlock()
+// StopWatch retires the KV watcher for a shutdown, before the NATS drain ends it (kvwatch.Stop): its
+// end records no terminal error and logs nothing, and a Rewatch from a recovery or a self-health
+// rebuild still running at shutdown arms no watcher. A Rewatch that fails on the closing connection
+// instead is reported by the bus as the stop, at INFO.
+func (s *Store) StopWatch() {
+	s.watcher.Stop()
 }
 
 func (s *Store) signalReady() {
