@@ -121,13 +121,15 @@ The Go daemon launches no controller: the operator starts one with `legion contr
 fetches the controller capability with the operator's bearer and runs Oh My Pi with
 `LEGION_CONTROLLER=1`, `LEGION_DAEMON_API=go`, and `LEGION_CONTROLLER_SECRET_FILE`. No boot gate
 checks the operator's machine, so the plugin's contract is held there twice: before its one daemon
-call, `legion controller start` reads the manifest at the plugin root its own environment names
-(the boot gate's contract probe; it cannot see a dotenv file Oh My Pi reads itself or the launch
-prefix, and runs no load probe) and refuses one whose `goDaemonApiVersion` is not its own — the
-mint revokes the incumbent controller, so a stale profile is found first —
-and the daemon refuses a controller registration whose `pluginContract` is not its
-`GoDaemonAPIVersion` with 409, naming both. That session
-goes through the controller session (`src/legion/controller-session.ts`) with the Go adapter
+call, `legion controller start` launches Oh My Pi as the controller will run — its launch prefix and
+invocation, the controller's environment, in `<state_dir>/controller` — with the boot gate's load
+probe, and refuses when that Oh My Pi loads no pi-legion-envoy, or loads one whose
+`goDaemonApiVersion` is not its own; the mint revokes the incumbent controller, so a plugin that
+would refuse the new session is found before that. The manifest it reads is the one Oh My Pi reports
+loading, so whatever moves the plugin root (a dotenv file, the launch prefix, a project plugin root,
+a symlinked state directory) moves the check with it. And the daemon refuses a controller
+registration whose `pluginContract` is not its `GoDaemonAPIVersion` with 409, naming both. That
+session goes through the controller session (`src/legion/controller-session.ts`) with the Go adapter
 (`goControllerDaemon`, `go-bootstrap.ts`), not `bootstrapGoClaim`, and gets no Go `legion` tool:
 `claims/register` with the capability in place of a boot token, answered with
 `api.ControllerRegisterResponse` (`LegionGoControllerRegisterResponse`), then the Envoy role
