@@ -287,7 +287,8 @@ production import). Every `dispatch_ask` passes three gates first:
    internals are your lane's to decide and record in the spec. Two things still go to the
    platform PO over Envoy: a contract between two lanes, and a halt condition (a change to IAM,
    deletion or exposure of production data, anything that reaches a customer). The PO takes those
-   to Sami as a Dispatch ask (Sami, 2026-09-25, AGENTC-34 §12).
+   to Sami as a Dispatch ask; you do not open one yourself, even as a permission ask under gate 2
+   (Sami, 2026-09-25, AGENTC-34 §12).
 2. **Is there genuine uncertainty?** If not, it is a plan you execute. The one legitimate ask
    without uncertainty is permission for an action only a human can authorise — a production
    write, an external send, a console action — and then the question is that action in one
@@ -389,7 +390,9 @@ Before saying you are waiting for human input, call `dispatch_open_asks`. With n
 
 **Anything that needs the human is an ask, or it does not exist.** An approval, a credential,
 a setting only they can change, a review click, a conflict between two of their own rules - if
-your work waits on it, open a `dispatch_ask` the moment you know, the action as the question.
+your work waits on it, open a `dispatch_ask` the moment you know, the action as the question. The
+exception is a halt condition from [Before you ask](#before-you-ask) gate 1, which goes to the
+platform PO over Envoy instead.
 Never write it into a spec, a comment reply, a message, or a
 pull-request body: nothing in those paths reaches the human's Inbox, and a human who is not
 reading your document does not know they are the blocker. Before asking, try to remove the
