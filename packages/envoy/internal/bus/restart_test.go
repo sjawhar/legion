@@ -4,59 +4,23 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
-	"net"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/go-connections/nat"
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/testnats"
-	"github.com/testcontainers/testcontainers-go"
-	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
-
-// startRestartableNATS runs a NATS container on a fixed host port, which survives the container's
-// stop and start as a server's address does, and returns it with its URL once it answers.
-func startRestartableNATS(t *testing.T) (*tcnats.NATSContainer, string) {
-	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("pick a port: %v", err)
-	}
-	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
-	_ = listener.Close()
-	ctr, err := tcnats.Run(context.Background(), testnats.Image, testcontainers.WithHostConfigModifier(func(hostConfig *container.HostConfig) {
-		hostConfig.PortBindings = nat.PortMap{"4222/tcp": {{HostIP: "127.0.0.1", HostPort: port}}}
-	}))
-	testcontainers.CleanupContainer(t, ctr)
-	if err != nil {
-		t.Fatalf("start NATS: %v", err)
-	}
-	uri := "nats://127.0.0.1:" + port
-	testnats.Connect(t, uri).Close()
-	return ctr, uri
-}
-
-func stopNATS(t *testing.T, ctr *tcnats.NATSContainer) {
-	t.Helper()
-	timeout := time.Second
-	if err := ctr.Stop(context.Background(), &timeout); err != nil {
-		t.Fatalf("stop NATS: %v", err)
-	}
-}
 
 // The listener opens its interest registry, session registry and CI store from client.Conn once,
 // at start. A NATS server restart must leave that state working: the connection reconnects in
 // place rather than closing, so a JetStream handle taken from it before the restart is still bound
 // to a live connection afterwards.
 func TestAServerRestartKeepsJetStreamStateTakenFromTheConnection(t *testing.T) {
-	ctr, uri := startRestartableNATS(t)
+	ctr, uri := testnats.StartRestartable(t)
 	client, err := bus.Connect([]string{uri})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
@@ -71,7 +35,7 @@ func TestAServerRestartKeepsJetStreamStateTakenFromTheConnection(t *testing.T) {
 		t.Fatalf("create bucket: %v", err)
 	}
 
-	stopNATS(t, ctr)
+	testnats.Stop(t, ctr)
 	if err := ctr.Start(context.Background()); err != nil {
 		t.Fatalf("start NATS again: %v", err)
 	}
@@ -91,14 +55,14 @@ func TestAServerRestartKeepsJetStreamStateTakenFromTheConnection(t *testing.T) {
 // callers treat an error as not delivered (a role-lane forward as delivery_failed, a webhook as a
 // 500 for the sender to retry), so a copy held and sent after reconnecting would arrive twice.
 func TestAPublishThatFailedWhileReconnectingIsNeverSent(t *testing.T) {
-	ctr, uri := startRestartableNATS(t)
+	ctr, uri := testnats.StartRestartable(t)
 	client, err := bus.Connect([]string{uri})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
 	t.Cleanup(client.Close)
 
-	stopNATS(t, ctr)
+	testnats.Stop(t, ctr)
 	waitFor(t, 15*time.Second, "the client to notice the server is gone", func() bool { return !client.Connected() })
 	item := contracts.Envelope{
 		EventID:       "evt-publish-while-reconnecting",
@@ -136,14 +100,14 @@ func TestAPublishThatFailedWhileReconnectingIsNeverSent(t *testing.T) {
 // rather than failing at once: a webhook that gets an error answers 503, and the sender does not
 // redeliver, so a failure fast enough to beat a one-second NATS restart loses the event.
 func TestAPublishWhileReconnectingWaitsForTheReconnect(t *testing.T) {
-	ctr, uri := startRestartableNATS(t)
+	ctr, uri := testnats.StartRestartable(t)
 	client, err := bus.Connect([]string{uri})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
 	t.Cleanup(client.Close)
 
-	stopNATS(t, ctr)
+	testnats.Stop(t, ctr)
 	waitFor(t, 15*time.Second, "the client to start reconnecting", func() bool { return client.Conn.IsReconnecting() })
 	restarted := make(chan error, 1)
 	go func() {
@@ -172,7 +136,7 @@ func TestAPublishWhileReconnectingWaitsForTheReconnect(t *testing.T) {
 // A connection that reconnects while Drain is still draining belongs to a process that is shutting
 // down: the reconnect closes it, quietly, instead of re-subscribing or logging a failure.
 func TestAReconnectDuringDrainClosesQuietly(t *testing.T) {
-	ctr, uri := startRestartableNATS(t)
+	ctr, uri := testnats.StartRestartable(t)
 	client, err := bus.Connect([]string{uri})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
@@ -198,7 +162,7 @@ func TestAReconnectDuringDrainClosesQuietly(t *testing.T) {
 	drained := make(chan error, 1)
 	go func() { drained <- client.Drain(15 * time.Second) }()
 	time.Sleep(200 * time.Millisecond)
-	stopNATS(t, ctr)
+	testnats.Stop(t, ctr)
 	if err := ctr.Start(context.Background()); err != nil {
 		t.Fatalf("start NATS again: %v", err)
 	}

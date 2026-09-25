@@ -3,9 +3,13 @@ package testnats
 
 import (
 	"context"
+	"net"
+	"strconv"
 	"testing"
 	"time"
 
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/go-connections/nat"
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/testcontainers/testcontainers-go"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
@@ -31,6 +35,38 @@ func Start(t testing.TB) (*tcnats.NATSContainer, string) {
 		t.Fatalf("NATS connection string: %v", err)
 	}
 	return ctr, uri
+}
+
+// StartRestartable runs a NATS test container on a fixed host port, which survives the container's
+// stop and start as a server's address does, and returns it with its URL once it answers. A
+// restart keeps the container's JetStream store, as a server restarted on its own volume does.
+func StartRestartable(t testing.TB) (*tcnats.NATSContainer, string) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("pick a port: %v", err)
+	}
+	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
+	_ = listener.Close()
+	ctr, err := tcnats.Run(context.Background(), Image, testcontainers.WithHostConfigModifier(func(hostConfig *container.HostConfig) {
+		hostConfig.PortBindings = nat.PortMap{"4222/tcp": {{HostIP: "127.0.0.1", HostPort: port}}}
+	}))
+	testcontainers.CleanupContainer(t, ctr)
+	if err != nil {
+		t.Fatalf("start NATS: %v", err)
+	}
+	uri := "nats://127.0.0.1:" + port
+	Connect(t, uri).Close()
+	return ctr, uri
+}
+
+// Stop stops a NATS test container within one second, which its Start restarts.
+func Stop(t testing.TB, ctr *tcnats.NATSContainer) {
+	t.Helper()
+	timeout := time.Second
+	if err := ctr.Stop(context.Background(), &timeout); err != nil {
+		t.Fatalf("stop NATS: %v", err)
+	}
 }
 
 const (
