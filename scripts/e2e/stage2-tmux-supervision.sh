@@ -132,9 +132,10 @@ tm() { tmux -L "legion-$ptoken" "$@"; }
 panes() { tm list-panes -a -F '#{pane_id}' 2>/dev/null | sort; }
 # pane_gone PANE: PANE is not among the daemon's tmux panes. It reads tmux's own answer rather than
 # `panes`, which drops tmux's stderr and so reads any failed listing as no panes at all: a listing
-# that fails is no answer, except that tmux's server exits with its last pane, so a server whose
-# socket no longer exists holds none. report_panes is the timeout_hook that says what tmux last
-# answered.
+# that fails is no answer, except that tmux's server exits with its last pane, so a gone server
+# holds none: tmux 3.7 leaves its socket behind, so "no server running" is the usual answer, and a
+# socket that no longer exists is the other. report_panes is the timeout_hook that says what tmux
+# last answered.
 pane_gone() {
   local listed
   if ! listed=$(tm list-panes -a -F '#{pane_id}' 2>&1); then

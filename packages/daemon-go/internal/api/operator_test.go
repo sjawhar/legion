@@ -404,7 +404,8 @@ func TestTheOperatorsCloseNamesTheWorkersItCouldNotStop(t *testing.T) {
 }
 
 // A claim of the tree the daemon supervises no machine for cannot be stopped, so the close does not
-// answer 200 over it: it is named with that reason beside the closed root.
+// answer 200 over it: it is named with that reason, and with the restart that makes it stoppable,
+// since the stop route answers 404 for it, beside the closed root.
 func TestTheOperatorsCloseNamesAClaimItSupervisesNoMachineFor(t *testing.T) {
 	h := newHarness(t)
 	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
@@ -420,8 +421,10 @@ func TestTheOperatorsCloseNamesAClaimItSupervisesNoMachineFor(t *testing.T) {
 	if recorder.Code != http.StatusInternalServerError {
 		t.Fatalf("close = %d, want 500; body %s", recorder.Code, recorder.Body)
 	}
-	if want := "legion-legion-legion-209-implementer (the daemon supervises no machine for it)"; !strings.Contains(recorder.Body.String(), want) {
-		t.Errorf("the refusal %s does not say %q", recorder.Body, want)
+	for _, want := range []string{"legion-legion-legion-209-implementer (the daemon supervises no machine for it", "until the daemon restarts"} {
+		if !strings.Contains(recorder.Body.String(), want) {
+			t.Errorf("the refusal %s does not say %q", recorder.Body, want)
+		}
 	}
 	if state := h.stored(architectToken).State; state != supervise.StateRetired {
 		t.Errorf("the root is %s, want it closed", state)

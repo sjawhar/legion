@@ -136,8 +136,9 @@ type RequestStop struct{ Claim claim.Token }
 type RequestTreeClose struct{ Claim claim.Token }
 
 // RequestOperatorClose is the operator closing a tree through the API, through its root claim; the
-// tree's other claims are stopped, not closed (api.closeTree). It is put to TreeClosable: an operator may close a tree no workflow issue backs, and a tree one
-// does back closes when its linger expires, never by hand.
+// tree's other claims are stopped, not closed (api.closeTree). It is put to TreeClosable: an
+// operator may close a tree no workflow issue backs, and a tree one does back closes when its
+// linger expires, never by hand.
 type RequestOperatorClose struct{ Claim claim.Token }
 
 // RequestRetry relaunches a failed or retired claim's session with fresh budgets: the workflow's
