@@ -35,11 +35,6 @@ type AskBlockEdit struct {
 	Urgency  *string
 }
 
-// writesBody reports whether the edit replaces any of the block's children.
-func (e AskBlockEdit) writesBody() bool {
-	return e.Question != nil || e.Options != nil
-}
-
 // ErrAskBlockUnrepresentable reports text the `:::ask` block cannot carry unchanged. The ask row
 // is a projection of the block, so text the block would alter is refused rather than stored:
 // storing it would leave the row and the block disagreeing, and the next settlement would
@@ -66,7 +61,7 @@ func (s *Service) SetAskBlockText(
 	edit AskBlockEdit,
 	actor model.Actor,
 ) (AskBlockText, error) {
-	var stored AskBlockText
+	var stored *AskBlockText
 	err := s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
 		tree, err := treeOf(doc)
 		if err != nil {
@@ -98,8 +93,9 @@ func (s *Service) SetAskBlockText(
 			want.Options = normalizeAskOptions(*edit.Options)
 		}
 
+		wroteBody := askBlockBodyChanges(current, edit)
 		var next *pmdoc.Node
-		if edit.writesBody() {
+		if wroteBody {
 			children, err := askBlockChildren(current, edit)
 			if err != nil {
 				return err
@@ -115,10 +111,10 @@ func (s *Service) SetAskBlockText(
 				return err
 			}
 		}
-		if err := verifyAskBlockRoundTrip(next, blockID, want, edit.writesBody()); err != nil {
+		if err := verifyAskBlockRoundTrip(next, blockID, want, wroteBody); err != nil {
 			return err
 		}
-		stored = want
+		stored = &want
 		if next.EqualWithBlockIDs(tree) {
 			return nil
 		}
@@ -138,7 +134,21 @@ func (s *Service) SetAskBlockText(
 		}
 		return AskBlockText{}, fmt.Errorf("write ask block text: %w", err)
 	}
-	return stored, nil
+	// stored is set by the closure, which applyLive runs before it can return nil or
+	// ErrNoChanges; a nil here would mean it never ran, which must not read as an empty ask.
+	if stored == nil {
+		return AskBlockText{}, fmt.Errorf("ask block %q was never read", blockID)
+	}
+	return *stored, nil
+}
+
+// askBlockBodyChanges reports whether edit still names a part of the body to rewrite, after the
+// parts it names but does not change have been dropped.
+func askBlockBodyChanges(current askBlock, edit AskBlockEdit) bool {
+	if edit.Question != nil && normalizeAskQuestion(*edit.Question) != current.question {
+		return true
+	}
+	return edit.Options != nil && !reflect.DeepEqual(normalizeAskOptions(*edit.Options), current.options)
 }
 
 // askBlockChildren is the block's children after edit: the parts it names rebuilt, the parts it
@@ -154,6 +164,16 @@ func askBlockChildren(current askBlock, edit AskBlockEdit) ([]*pmdoc.Node, error
 			continue
 		}
 		paragraphs = append(paragraphs, child)
+	}
+
+	// A field the caller named but did not change is not rewritten. An idempotent retry sends
+	// the whole ask back, and rebuilding nodes that already say the same thing would mint fresh
+	// inner block ids and orphan the anchors inside them for no change at all.
+	if edit.Question != nil && normalizeAskQuestion(*edit.Question) == current.question {
+		edit.Question = nil
+	}
+	if edit.Options != nil && reflect.DeepEqual(normalizeAskOptions(*edit.Options), current.options) {
+		edit.Options = nil
 	}
 
 	if edit.Question != nil {
@@ -231,18 +251,18 @@ func verifyAskBlockRoundTrip(next *pmdoc.Node, blockID string, want AskBlockText
 	}
 	markdown, err := renderTree(&pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{block.node}})
 	if err != nil {
-		return &ErrAskBlockUnrepresentable{Field: "question", Reason: "the text cannot be written as document markdown"}
+		return &ErrAskBlockUnrepresentable{Field: "block", Reason: "the text cannot be written as document markdown"}
 	}
 	rendered, err := pmdoc.Parse(markdown)
 	if err != nil {
 		return &ErrAskBlockUnrepresentable{
-			Field:  "question",
+			Field:  "block",
 			Reason: "the text would leave the document's markdown unreadable; a line may not begin with \":::\"",
 		}
 	}
 	reparsed, err := askBlockOf(rendered, blockID)
 	if err != nil {
-		return &ErrAskBlockUnrepresentable{Field: "question", Reason: "the text does not survive the document's markdown"}
+		return &ErrAskBlockUnrepresentable{Field: "block", Reason: "the text does not survive the document's markdown"}
 	}
 	return compareAskBlockText(reparsed, want)
 }
@@ -255,7 +275,7 @@ func askBlockOf(tree *pmdoc.Node, blockID string) (askBlock, error) {
 	}
 	for _, candidate := range invalid {
 		if candidate.id == blockID {
-			return askBlock{}, &ErrAskBlockUnrepresentable{Field: "question", Reason: candidate.reason.Error()}
+			return askBlock{}, &ErrAskBlockUnrepresentable{Field: "block", Reason: candidate.reason.Error()}
 		}
 	}
 	for _, candidate := range blocks {
@@ -274,10 +294,7 @@ func compareAskBlockText(block askBlock, want AskBlockText) error {
 		}
 	}
 	if !reflect.DeepEqual(block.options, want.Options) {
-		return &ErrAskBlockUnrepresentable{
-			Field:  "options",
-			Reason: "an option label may not contain \": \", which separates a label from its description",
-		}
+		return &ErrAskBlockUnrepresentable{Field: "options", Reason: askOptionsDifference(block.options, want.Options)}
 	}
 	if block.multiple != want.Multiple {
 		return &ErrAskBlockUnrepresentable{Field: "multiple", Reason: "the block carries a different value"}
@@ -286,6 +303,26 @@ func compareAskBlockText(block askBlock, want AskBlockText) error {
 		return &ErrAskBlockUnrepresentable{Field: "urgency", Reason: "the block carries a different value"}
 	}
 	return nil
+}
+
+// askOptionsDifference names the first way the block's options differ from the ones asked for,
+// so the refusal reports what was found rather than the cause it is most often.
+func askOptionsDifference(got, want []model.AskOption) string {
+	if len(got) != len(want) {
+		return fmt.Sprintf("the block carries %d options, not %d", len(got), len(want))
+	}
+	for index := range want {
+		if got[index] == want[index] {
+			continue
+		}
+		if got[index].Label != want[index].Label && strings.Contains(want[index].Label, ": ") {
+			return fmt.Sprintf("option %d's label may not contain %q, which separates a label from its description; "+
+				"the block reads it as %q", index+1, ": ", got[index].Label)
+		}
+		return fmt.Sprintf("the block carries option %d as %q/%q, not %q/%q", index+1,
+			got[index].Label, got[index].Description, want[index].Label, want[index].Description)
+	}
+	return "the block carries different options"
 }
 
 // questionParagraphs renders a question as the paragraphs parseAskBlock reads back: one per

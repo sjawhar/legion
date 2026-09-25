@@ -423,6 +423,7 @@ alone and the question's own wording, formatting, links and comment anchors are 
 is rewritten, so anchors inside the text you replaced move as they would for any document edit. Either way it is a document edit: it
 writes a new version, which on a spec awaiting approval closes the design gate until the new version is approved. Editing the block
 with `dispatch_doc_edit` works too and is the way to change anything else about it, including adding formatting to a question.
+Re-sending a field unchanged rewrites nothing, so retrying the whole ask is safe.
 Two shapes the block cannot carry are refused outright, naming the field and writing nothing: an option label containing `": "`,
 which is what separates a label from its description, and a question with a line beginning `:::`. Blank lines separate paragraphs;
 a single newline is kept as a line break.

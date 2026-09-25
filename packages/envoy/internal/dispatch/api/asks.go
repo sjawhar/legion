@@ -401,15 +401,16 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 	// the row holds the question as plain text, so rebuilding the whole body from it would strip
 	// an untouched question's formatting and links and orphan the anchors inside it.
 	if ask.BlockID != nil {
-		if ask.BlockArtifactID == nil {
-			s.writeHandlerError(w, fmt.Errorf("ask %q has block id without block artifact", ask.ID))
+		blockArtifact, err := blockArtifactOf(ask)
+		if err != nil {
+			s.writeHandlerError(w, err)
 			return
 		}
 		edit := docs.AskBlockEdit{Question: input.Question, Options: input.Options, Multiple: input.Multiple}
 		if input.Urgency != nil {
 			edit.Urgency = &requestedUrgency
 		}
-		stored, err := s.deps.Docs.SetAskBlockText(documentCtx, *ask.BlockArtifactID, *ask.BlockID, edit, actor)
+		stored, err := s.deps.Docs.SetAskBlockText(documentCtx, blockArtifact, *ask.BlockID, edit, actor)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -459,6 +460,15 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	s.publishDocumentEvents(ledger, event)
 	WriteJSON(w, http.StatusOK, ask)
+}
+
+// blockArtifactOf is the document an indexed ask's block lives in. Every write that touches the
+// block needs it, and a row carrying a block id without one is a broken invariant, not input.
+func blockArtifactOf(ask model.Ask) (string, error) {
+	if ask.BlockArtifactID == nil {
+		return "", fmt.Errorf("ask %q has block id without block artifact", ask.ID)
+	}
+	return *ask.BlockArtifactID, nil
 }
 
 func timestampPtr(value *time.Time) *string {

@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -128,8 +127,9 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 			if ask.BlockID == nil {
 				return nil
 			}
-			if ask.BlockArtifactID == nil {
-				return fmt.Errorf("ask %q has block id without block artifact", ask.ID)
+			blockArtifact, err := blockArtifactOf(ask)
+			if err != nil {
+				return err
 			}
 			attributes := map[string]any{
 				"state":       "answered",
@@ -140,7 +140,7 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 			if answer.Text != nil {
 				attributes["answer"] = *answer.Text
 			}
-			return s.deps.Docs.SetBlockAttributes(ctx, *ask.BlockArtifactID, *ask.BlockID, attributes, actor)
+			return s.deps.Docs.SetBlockAttributes(ctx, blockArtifact, *ask.BlockID, attributes, actor)
 		},
 	)
 	// An approval ask's answer is a review of the document it names, pinned to
@@ -221,10 +221,11 @@ func (s *server) resolveAsk(w http.ResponseWriter, r *http.Request) {
 			// A block ask's closed state belongs in its block too, written by whoever closed
 			// it: left to settlement, the repair lands on whoever next touches the document.
 			if ask.BlockID != nil {
-				if ask.BlockArtifactID == nil {
-					return model.Ask{}, fmt.Errorf("ask %q has block id without block artifact", ask.ID)
+				blockArtifact, err := blockArtifactOf(ask)
+				if err != nil {
+					return model.Ask{}, err
 				}
-				if err := s.deps.Docs.SetBlockAttributes(ctx, *ask.BlockArtifactID, *ask.BlockID, map[string]any{
+				if err := s.deps.Docs.SetBlockAttributes(ctx, blockArtifact, *ask.BlockID, map[string]any{
 					"state": "resolved",
 				}, actor); err != nil {
 					return model.Ask{}, err

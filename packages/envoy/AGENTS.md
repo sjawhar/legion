@@ -378,12 +378,12 @@ comment anchors into. Naming `urgency` or `multiple` alone therefore goes throug
 path and leaves every child node, mark and inner block id exactly as it was; naming `question`
 or `options` replaces that part with what the markdown pipeline parses, so it carries the same
 list attributes any other document write gives it, and anchors inside the text actually replaced
-are affected as they are by any document edit. Re-sending the values the block already holds
-writes nothing and succeeds.
-Text the block cannot carry
-unchanged is refused `400 ASK_BLOCK_TEXT` naming the field, with nothing written - an option
-label containing `": "`, which separates a label from its description, or a question with a line
-beginning `:::`, which would leave the canonical markdown unparseable. A single newline is
+are affected as they are by any document edit. A field named but unchanged is not rewritten, so
+an idempotent retry of the whole ask writes nothing, versions nothing and keeps every anchor.
+Text the block cannot carry unchanged is refused `400 ASK_BLOCK_TEXT` naming the field, with
+nothing written - an option label containing `": "`, which separates a label from its
+description, or a question with a line beginning `:::`, which would leave the canonical markdown
+unparseable. A single newline is
 carried as a hard break; surrounding whitespace is trimmed, as the parser trims it.
 Settlement retracts an ask whose block left the document in its own name,
 `{kind: "system", id: "document-settlement"}`, and restores only a retraction it wrote - a

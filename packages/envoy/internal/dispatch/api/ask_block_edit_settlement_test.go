@@ -703,3 +703,61 @@ func askBlockListAttrs(t *testing.T, database *store.Store, artifactID string) s
 	walk(tree)
 	return attrs
 }
+
+// An idempotent retry re-sends the whole ask. A field it names but does not change is not
+// rewritten: rebuilding nodes that already say the same thing would mint fresh inner block ids
+// and orphan the anchors inside them for no change at all (LEGION-265 review round 3, P3-1).
+func TestIdempotentBlockAskEditRewritesNothing(t *testing.T) {
+	handler, _ := blockAskHandler(t)
+	const formatted = ":::ask{#decision urgency=\"med\" multiple=\"false\"}\nWhich **transport** ships [first](https://example.test/rfc)?\n\n" +
+		"- REST: Matches the platform\n- gRPC: Adds streaming\n:::\n"
+	issue, askID := seedBlockAsk(t, handler, "Block ask idempotent", "decision", formatted,
+		"Which transport ships first?")
+
+	commented := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body":   "Still open?",
+		"anchor": map[string]any{"artifact": "spec", "quote": "Which transport ships first?"},
+	}, "alice")
+	if commented.Code != http.StatusCreated {
+		t.Fatalf("anchor a comment inside the ask block: status=%d body=%s", commented.Code, commented.Body.String())
+	}
+	comment := decodeBody[model.Comment](t, commented)
+
+	settleDocument(t, handler, issue.PrimaryArtifactID, issue.Key, "before-idempotent")
+	beforeMarkdown := documentMarkdown(t, handler, issue.PrimaryArtifactID)
+	beforeVersions := len(documentVersions(t, handler, issue.PrimaryArtifactID))
+	current := readBlockAsk(t, handler, askID)
+
+	// The whole ask, exactly as it reads now - what a retry sends.
+	options := make([]map[string]string, 0, len(current.Options))
+	for _, option := range current.Options {
+		options = append(options, map[string]string{"label": option.Label, "description": option.Description})
+	}
+	retried := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+askID, map[string]any{
+		"question": current.Question,
+		"options":  options,
+		"multiple": current.Multiple,
+		"urgency":  current.Urgency,
+		"actor":    sessionActor(),
+	})
+	if retried.Code != http.StatusOK {
+		t.Fatalf("idempotent retry: status=%d body=%s", retried.Code, retried.Body.String())
+	}
+
+	if got := documentMarkdown(t, handler, issue.PrimaryArtifactID); got != beforeMarkdown {
+		t.Fatalf("the idempotent retry rewrote the document:\nbefore:\n%s\nafter:\n%s", beforeMarkdown, got)
+	}
+	if got := len(documentVersions(t, handler, issue.PrimaryArtifactID)); got != beforeVersions {
+		t.Fatalf("the idempotent retry wrote %d versions", got-beforeVersions)
+	}
+	read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/"+comment.ID, nil, "alice")
+	if read.Code != http.StatusOK {
+		t.Fatalf("read the anchored comment: status=%d body=%s", read.Code, read.Body.String())
+	}
+	after := decodeBody[struct {
+		Comment model.Comment `json:"comment"`
+	}](t, read).Comment
+	if after.Anchor == nil || after.Anchor.Orphaned {
+		t.Fatalf("the idempotent retry orphaned the comment's anchor: %#v", after.Anchor)
+	}
+}
