@@ -8,31 +8,29 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/testcontainers/testcontainers-go"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
 
+// readinessTimeout bounds the wait for the JetStream API once the container runs. The container
+// start is not bounded by it: how long Docker takes to create a container is the daemon's load.
 const readinessTimeout = 30 * time.Second
 
 // JetStream starts a disposable NATS container and returns only after the JetStream API answers.
 func JetStream(t *testing.T) jetstream.JetStream {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), readinessTimeout)
-	t.Cleanup(cancel)
-
-	container, err := tcnats.Run(ctx, "nats:2.10")
+	container, err := start(t)
 	if err != nil {
 		t.Fatalf("start NATS JetStream: %v", err)
 	}
-	t.Cleanup(func() {
-		if err := container.Terminate(context.Background()); err != nil {
-			t.Errorf("terminate NATS JetStream: %v", err)
-		}
-	})
 
-	url, err := container.ConnectionString(ctx)
+	url, err := container.ConnectionString(t.Context())
 	if err != nil {
 		t.Fatalf("NATS connection string: %v", err)
 	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), readinessTimeout)
+	t.Cleanup(cancel)
 
 	for {
 		conn, js, err := ready(ctx, url)
@@ -62,4 +60,14 @@ func ready(ctx context.Context, url string) (*nats.Conn, jetstream.JetStream, er
 		return nil, nil, err
 	}
 	return conn, js, nil
+}
+
+// start runs a NATS container for t, and removes it when t ends. The removal is registered before
+// the start's error is looked at: a container Docker created and never saw ready — a readiness wait
+// that timed out under load — comes back beside the error, and would otherwise outlive the test.
+func start(t *testing.T, options ...testcontainers.ContainerCustomizer) (*tcnats.NATSContainer, error) {
+	t.Helper()
+	container, err := tcnats.Run(t.Context(), "nats:2.10", options...)
+	testcontainers.CleanupContainer(t, container)
+	return container, err
 }

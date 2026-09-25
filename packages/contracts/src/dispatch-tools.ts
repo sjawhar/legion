@@ -213,14 +213,17 @@ export const dispatchToolSpecs = [
     name: "dispatch_issue_update",
     example: { issue: "DSP-1", status: "in_progress" },
     description:
-      "Update an existing issue: move its lifecycle status, retitle it, replace its labels, link a URL " +
-      "(the pull request that delivers it, a run, a document), set its route, set or clear its parent, " +
-      "or attach it to architecture components. Status is one of " +
+      "Update an existing issue: move its lifecycle status, retitle it, replace its labels, set " +
+      "its priority, link a URL (the pull request that delivers it, a run, a document), set its " +
+      "route, set or clear its parent, or attach it to architecture components. Status is one of " +
       `${ISSUE_STATUSES.join(", ")}; outside Legion, move it yourself as the work advances; inside ` +
       "Legion the daemon moves it. external_links are " +
       "merged into the issue's existing links by URL, so linking the pull request you just opened " +
-      "keeps every earlier link. components replaces the issue's own attachment and is allowed on a " +
-      "closed issue. Priority is the human's and is not settable here. At least one " +
+      "keeps every earlier link. components replaces the issue's own attachment. A closed issue " +
+      "takes only rank, components, and a reopening status (any status but done); everything " +
+      "else, priority included, waits for the reopen. " +
+      "priority is yours to set and a human overrides it; rank, the board's own order, is not " +
+      "settable here. At least one " +
       `field besides issue is required. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE),
@@ -232,6 +235,15 @@ export const dispatchToolSpecs = [
           "Replacement label set, at most 20 labels of up to 40 characters; replaces every existing label."
         )
         .optional(),
+      // `.describe()` comes last here, unlike every other field. On the OMP host's Zod facade a
+      // description attached between `.nullable()` and `.optional()` is lost entirely — the
+      // emitted property carries no description key at all — and describing last is the order
+      // that puts it on the field.
+      priority: z
+        .number({ int: true, min: 0, max: 3 })
+        .nullable()
+        .optional()
+        .describe("Coarse priority: 0 is P0 (highest) through 3 is P3 (lowest); null clears it."),
       external_links: z
         .array(z.string({ min: 1 }))
         .describe("URLs to link; merged into the issue's existing external links by URL.")
@@ -252,6 +264,7 @@ export const dispatchToolSpecs = [
           readonly status?: unknown;
           readonly title?: unknown;
           readonly labels?: unknown;
+          readonly priority?: unknown;
           readonly external_links?: unknown;
           readonly route?: unknown;
           readonly parent?: unknown;
@@ -261,6 +274,8 @@ export const dispatchToolSpecs = [
           typeof input.status === "string" ||
           typeof input.title === "string" ||
           Array.isArray(input.labels) ||
+          typeof input.priority === "number" ||
+          input.priority === null ||
           Array.isArray(input.external_links) ||
           typeof input.route === "string" ||
           typeof input.parent === "string" ||
@@ -268,8 +283,36 @@ export const dispatchToolSpecs = [
         );
       },
       message:
-        "Issue update requires at least one field besides issue: status, title, labels, external_links, route, parent, or components.",
+        "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, or components.",
     },
+    strict: true,
+  },
+  {
+    name: "dispatch_claim",
+    example: { issue: "DSP-1" },
+    description:
+      "Claim a Dispatch issue before you start implementing it, so no other session takes the same work, " +
+      "and release it when you stop. Pass the issue alone to claim it, or release: true to give it up. " +
+      "Your claim records your own session and shows on every read of the issue: the dashboard header, the " +
+      "issue list and board, dispatch_read, and dispatch_issues. Claiming is refused with 409 ISSUE_CLAIMED " +
+      "when another session holds the issue and is still running; the refusal names that session, so talk to " +
+      "it instead of working the same issue in parallel. When a human holds the claim the refusal names the " +
+      "person, not a session: there is nothing running to message, so ask them on the issue rather than " +
+      "taking it. 409 CLAIM_CONTENDED means the issue changed " +
+      "hands twice while your call ran, so nothing was applied and nobody's liveness was checked: read " +
+      "the issue and decide again. A claim whose session is no longer running may be " +
+      "taken: the takeover is recorded on the issue and the session that lost it is told. A claim is not the " +
+      "issue's status — claiming moves nothing, so also move the issue to in_progress with " +
+      "dispatch_issue_update when you start. A claim is released by its holder or any human, and by " +
+      "any agent once the holder's session is no longer running. " +
+      ISSUE_REFERENCE,
+    arguments: (z) => ({
+      issue: z.string().describe(ISSUE_REFERENCE),
+      release: z
+        .boolean()
+        .describe("Give up your claim instead of taking it; the issue's status does not change.")
+        .optional(),
+    }),
     strict: true,
   },
   {

@@ -45,7 +45,24 @@ anchor marks are stripped (`pmdoc.StripAnchorMarks` + `Equal`, the one measure t
 observer and a transactional live write in `applyLive` both apply) - and settlement writes a version
 only when a content-class row lies past the latest version's `doc_update_version` cursor or ask
 reconciliation changed something, so a comment's quote mark or margin projection never versions a
-document.
+document. A document operation joined to an API transaction (`documentMutationContext`) never
+writes the room: it runs on the transaction's fork of the room's document (`docs/livewrite.go`),
+appends its update inside the transaction, and reads through the same fork. The room applies and
+broadcasts the update only when the handler calls `publishDocumentEvents` after the commit, and a
+handler defers `Docs.DiscardLiveWrites` on the collector so a transaction that does not commit
+leaves the room, every connected browser, every version and the durable document as they were.
+The write's actor, and the browsers connected when it changed the content, become the room's
+pending authors only once the commit returns (`commitDocumentMutation` calls
+`Docs.CreditLiveWrites` before the handler's `CommitVersion`), and a version the transaction writes
+itself names them.
+While a transaction's write to a document is open it holds that room's writer slot, so another
+transaction's joined operation on the document waits for it to be published or discarded, and it
+holds off the room's settlement, which runs once the write is published or discarded. The docs
+layer takes a document's locks in one order, wherever a handler starts: the owner row
+(`lockArtifactOwner`), then the writer slot, recovering a failed room first, then the advisory lock;
+a joined read takes the owner row before it waits for the slot. The slot is in memory, where
+Postgres cannot see a wait for it, so no transaction may wait for it while holding a lock its holder
+still needs, nor the advisory lock that a failed room's eviction needs to compact.
 
 Successful Dispatch writes on an issue may return top-level `advice` with the issue status, the
 count of session-authored messages/comments/asks since the last human event, and the calling
@@ -105,7 +122,8 @@ sections can change concurrently. Insert and move require the document token bec
 depends on document order. Tokens include inline marks, so a fresh anchor makes the relevant
 document or block guard stale. After resolving the artifact, the conditional path takes a bounded
 in-memory gate keyed by its artifact id before starting the write transaction or warming its room,
-then takes `pg_advisory_xact_lock(hashtext(artifact_id))` and enters its one Yjs transaction; it
+then takes the document's owner row and writer slot, then
+`pg_advisory_xact_lock(hashtext(artifact_id))`, and enters its one Yjs transaction; it
 reads, checks, resolves, and applies the batch inside that transaction. Admission waiters hold no
 database connection; `EDIT_QUEUE_FULL` is a `429` response that means back off, while
 `PRECONDITION_FAILED` means re-read. This protects unrelated document reads, websocket
@@ -117,6 +135,156 @@ returns `409 PRECONDITION_FAILED` with each mismatched block or document token a
 and commits no update, version, or event. An uncovered block guard returns `400 INVALID_PRECONDITION`
 before mutation. This lock orders commits rather than timestamps, so transaction-start `created_at`
 values and a different lock cannot admit a stale write.
+
+The room lock and the document's **owner row** — the artifact itself for a project document, its
+issue otherwise — are governed by two rules, both load-bearing. **Level:** no lock on `issues`,
+`artifacts`, `projects` or `asks` is `for update`. Weaker levels are free — `for no key update`
+where a writer must serialise against other writers of the same row, `for share` or `for key share`
+where it need not — and `TestNoForUpdateOnOwnerTables` (`api/lock_level_test.go`) enforces the
+prohibition over the way these locks are written: a `for update` spelled in a string literal, or
+in a chain of literals and package-level constants, `var`s included, resolved to a fixpoint, which
+is every site here. An operand the check cannot resolve is read through its own string literals
+alone, spliced in with a space at each end, so a clause that forms across that splice is refused
+too, and only a clause the scanned text never spells, including a keyword the splice splits
+mid-word, is outside its reach and is a review matter. What `for update` costs is the
+`for key share` a foreign key takes: under it an insert into `doc_updates`, `doc_snapshots`,
+`doc_checkpoints`, `comments`, or any child table added later waits on the owner row, and a
+durable writer holding the room lock then deadlocks against whoever holds that row.
+`for no key update` conflicts with itself exactly as `for update` did, so writers of one owner
+still serialise and the per-owner event sequence is unchanged. One transaction would
+still need `for update` on these tables: one that deletes such a row or changes a key column,
+which is what the weaker level does not cover. Nothing does either today; the check refuses it if
+something starts to, and that red is the prompt to revisit this rule, not to reach for a weaker
+level that would not hold. **Order:** a transaction that takes both an owner row and the room lock
+takes the owner row first. The durable writers take no owner row at all — `appendUpdate`,
+`CaptureSnapshot`, `PruneAfter`, `Compact` and `Delete` reach the room through `withRoomLock`,
+which holds a session-level `pg_advisory_lock` on its own connection before it opens a
+transaction, so no row lock can precede it there — which is why order alone could not be the
+whole rule; but a transaction that does take both, such as an upload appending its event after
+writing the document, deadlocks against a settlement if it takes them the other way round.
+
+Both rules were learned from failures. While those locks were `for update` they blocked a child
+insert, and a durable writer holding the room lock deadlocked against a settlement or an event
+append holding the owner row; on the live path the loser was `failRoom`, which evicted the room
+and dropped the update. With the level fixed but the order broken, a project-document upload that
+took the room lock before its event's owner lock deadlocked against a settlement holding that row.
+
+**One caller, one connection.** Nothing holding a connection of the shared pool (`store.Pool`)
+- a transaction, an open cursor, which holds its connection until it closes, or a connection
+taken with `Acquire` - acquires a second one from it, and nothing a connection-holder waits for
+needs one either. A transaction holds its connection until it commits, and a caller that asks
+for another one while holding a row or advisory lock waits for a connection only the callers
+queued behind that lock can release. At production's pool - one Fargate task at `cpu="512"`,
+pgx's default `max(4, NumCPU)`, so four - two anchored writes and two settlements of that
+issue's other documents are enough, and only `pg_terminate_backend` recovers it. Rationing
+connections does not fix it: the queue behind one writer's issue lock is unbounded (a
+settlement per document, every issue-owned event append, the architecture importer).
+
+The rule enforces itself. `store.Pool` keeps the pgx pool private and every way it hands out a
+connection - `Query`, `QueryRow`, `Exec`, `Ping`, `Acquire`, `AcquireFunc`, `AcquireAllIdle`,
+`CopyFrom`, `SendBatch`, `Begin`, `BeginTx` - refuses one taken while the caller already holds
+one, with `store.ErrNestedAcquire`, so a second acquisition fails a test instead of wedging
+production. Every entry point that opens one of this pool's transactions marks its context with
+`store.WithTransactionTracking`: `api.Register` marks every route and the document websocket,
+and settlement, the architecture importer's `Sync`, the outbox publisher's `Run`,
+`MaterializeAt`, the three CLI backfills (`BackfillBlockIDs`, `BackfillAnchorBlocks`,
+`CompactAll`), `rebuild-refs`, the startup seeds and each migration mark their own. There is no
+exception: `docs.SetIssueClosed` takes its caller's context so the pool sees it even though it
+runs after that caller has committed. A durable append holds its connection directly rather
+than through a transaction, so `withRoomLock` marks its context with `store.HoldsConnection`
+for as long as it holds that connection and the room's advisory lock, and `Query` marks the
+caller for as long as its rows are open, so a cursor counts as the held connection it is. A
+refusal logs its stack once per call site, so a caller that trips it in a loop cannot flood the
+log; the error itself is returned every time. `store/pool_test.go` and
+`api/anchored_write_concurrency_test.go` hold the halves: the refusal on every guarded method,
+concurrent anchored writes, and two settlements queued behind one held write on a
+four-connection pool.
+
+Work that genuinely needs its own connection while a transaction is open does not take it from
+the shared one. A cold document room loads on the rooms pool (`store.Pool.Rooms`, four
+connections, opened on demand and closed with the pool that owns it): that load is deliberately
+outside the writer's transaction, because the room outlives the request and its updates must
+not roll back with it. Everything the load needs comes from that pool, `onLoadDocument`'s issue
+read included - a writer holding a connection and the issue's row lock waits for the load, so a
+load that waited for the shared pool would close the same cycle without a transaction of its
+own. The pool belongs to the store rather than to each `PgVersioned`, so a caller that
+constructs one to read a document borrows those connections instead of opening more, and it is
+deliberately unguarded: a load taken under an open transaction must be served, not refused.
+
+Everywhere else a read runs through the transaction it is already inside: the issue state an
+anchored write checks before it stamps its mark (`issueOpen` through `queryFrom`), table anchor
+checks (`rejectLiveTableAnchors`, `rejectUnindexedTableMarks`), recorded mark refs, and the
+suggestion kind and browser-mark verification the comment routes ask for while their
+transaction is open. Settlement marks its injections owner-verified (`withOwnerVerified`)
+because it has already read and locked the owner row in its own transaction, so `allowInject`
+does not read it again. An injection that is not owner-verified does read the issue through the
+shared pool, and that read is outside the cycle only because ygo runs `OnInject` before
+`getOrCreateRoom` (`provider/websocket/inject.go:311-320`): an injection refused there has
+published no room placeholder for a connection-holder to park on. A handler that must read
+outside its transaction commits or rolls back first - `issue_create.go` rolls back at the
+duplicate-external branch before it opens the advice transaction - and a scan that publishes
+drains its rows first (`scanPendingEvents`, `documentRooms`), because an open cursor holds
+its connection until it closes.
+
+**No Envoy listener call runs with a transaction or a pooled connection held.** One caller, one
+connection bounds how many of the pool's connections a caller takes; this bounds how long it
+keeps the one it has. The listener is a cross-service HTTP call bounded only by its five-second
+client timeout (`internal/dispatch/envoy/client.go`), and production runs one Dispatch task on
+pgx's default pool of four connections, so a call made inside a transaction holds one of those
+four - and the rows it locked - until the listener answers; four concurrent ones empty the pool
+and stall every unrelated request, which a listener restart alone is enough to cause. A read
+(`Sessions`, `Role`, `Interest`, `ListInterests`) is resolved first, with nothing held; the
+transaction then re-reads under its own lock whatever the resolution depended on and decides
+with the resolution only while the locked row still agrees, taking it once more when it does
+not and answering a conflict after that. `api/envoy_resolve.go` owns that loop
+(`resolveThenLock`, `errStaleResolution`), the delivery read every send resolves through
+(`resolveDeliveryTarget`) and the settle half (`settleDeliveryAttempt`, `attemptClaim`,
+`claimLapsed`, `deliveryOutcome`, `receiptError`); its callers are `api/comment_create.go`
+(the mention and route resolution behind `suppress_route`), `api/comment_delivery.go` and
+`api/message_delivery.go` (a delivery's recipient, its claim and its settle) and
+`api/issue_claim.go` (the holder's liveness, on both the claim and the release route). A write -
+`Envoy.Send`, `Unsubscribe` - runs after a commit, never inside: the attempt is committed first,
+sent, and settled by a second short transaction, so a process that dies in between leaves a
+record of the attempt rather than losing it.
+
+Both delivery paths are that pair, and the same claim. A comment mention's attempt is the
+`comment_deliveries` row the creating transaction commits as `pending`; the post-commit sender -
+and every later `POST /api/v1/comments/{id}/deliveries` retry - claims it (`claimed_at`, migration
+`0046`), resolves, records that resolution on the claimed row, sends, and records `sent` or
+`failed` with its `comment.delivery` event in a second transaction. A targeted message is the
+same shape on `message_deliveries`, resolved before the claim rather than after it:
+`recordPendingMessageDelivery` claims or opens the attempt and commits it `pending` carrying that
+resolution, the send follows, and `completeMessageDelivery` settles it with the `message.delivery`
+event. Either way the pending row names the session its frame is going to before that frame is
+sent, and each of those statements is its own short transaction or single pooled read, so no
+step of a delivery holds a connection across another.
+
+A claim outlives its sender by a minute, which Postgres judges (`claimLapsed`) against the
+`claimed_at` Postgres itself wrote, so no task's clock skew can read a live claim as lapsed or
+leave a stranded attempt unresumable. A retry beside a live claim takes an attempt of its own;
+one beside an abandoned claim resumes the original attempt under its original number, whose
+idempotency key (`<comment>:<target>:<attempt>`, `<message>:<attempt>`) makes a send that did
+land a duplicate the listener drops. A resumed attempt keeps the recipient it was opened for -
+a comment attempt its pinned session or its resolve error, a message attempt the session its row
+names - because that is the session the listener deduplicated the key for and the one holding
+the frame; a role that has moved since is reached by an attempt of its own rather than by
+re-pointing this one, and only whether the original recipient can still receive the mode is
+re-derived. An attempt stranded before anything was resolved has no recipient to keep and is
+resolved afresh under that same number, never reported undeliverable unsent.
+
+Because the attempt is committed `pending` before its send and names the session that send is
+going to, the session can answer or refuse the frame while it is still in flight - and can answer
+it still when its sender dies between the send and the settle. Every attempt a sender settles
+carries exactly one delivery receipt, and that receipt says what its row says. A reply that
+reports an error records the attempt `failed` and appends the receipt itself, while a reply that
+carries a body records `sent` with its `reply_id` and appends only `*.answered`, so the settle
+transaction that finds its row already settled owes the receipt exactly when the row carries a
+`reply_id`, and builds it from that row rather than from what the send reported. Both statements
+a settle transaction makes are scoped to the claim its sender took, so when a lapsed sender and
+the sender that resumed its attempt both come back, only the one the row's claim still names
+settles it or pays anything on it. Both transactions lock the event's owner before the attempt
+row, the order every other delivery transaction takes them in; locking the attempt first would
+invert against the claim and deadlock two concurrent retries.
 
 Table row and column deletion records a mark snapshot during prevalidation, then locks the
 corresponding ask/comment rows with `FOR SHARE` in the edit transaction before its token check and
@@ -163,8 +331,9 @@ canonical markdown.
 
 - `packages/contracts` defines the TypeScript event schemas consumed by Dispatch clients. The Go Dispatch server maintains its emitted event names and wire payloads separately; `bun run gen:go` generates Envoy envelope validation only.
 - Issues carry a nullable coarse priority (`P0` highest through `P3` lowest) alongside their server-generated fractional `rank`. `POST /api/v1/issues` and `PATCH /api/v1/issues/{key}` accept `priority` as `0` through `3` or null; each priority write emits `issue.updated`. Issue and pinned lists sort by lifecycle status, then rank, then creation time; priority is a badge and a filter, never a sort key, so the List and the Board (whose columns keep the list's order) show the same order. `PATCH /api/v1/issues/{key}` accepts neighboring issue keys as `rank.before` and/or `rank.after`, validates they share the project, and serializes rank allocation per project before it rewrites only that issue's order key.
-- Every issue has a nullable `parent_key` (`graph_edges.child_of` is a live view over it). `POST /api/v1/issues` validates a supplied `parent` exists in the same project (`400 PARENT_INPUT`), and `PATCH /api/v1/issues/{key}` accepts a tri-state `parent`: absent leaves it, `null` clears it, a key reparents after locking the issue and the proposed parent in key order and refusing a missing, self, or foreign-project parent (`400 PARENT_INPUT`) and a cycle (`409 PARENT_INPUT`, with a depth-capped `union` ancestor walk so reads terminate even if a raced reparent ever commits one; the pairwise lock leaves the multi-ancestor race accepted, like rank). A reparent of a closed issue is `409 ISSUE_CLOSED` (rank stays the only closed-tolerated write). An actual parent change appends `child.removed` to the old parent and `child.added` to the new one (`{child_key}`, all owners in one `LockOwners` with the issue's own event) — both always notify, like `child.status`. Issue-detail `children` rows are one recursive-CTE query (`loadChildren`): each direct child carries `subtree_done` / `subtree_total` (the child itself included, every status; done = `status='done'`), `active_at` (the subtree's newest `updated_at`), and its own `external_links`, still ordered by key.
+- Every issue has a nullable `parent_key` (`graph_edges.child_of` is a live view over it). `POST /api/v1/issues` validates a supplied `parent` exists in the same project (`400 PARENT_INPUT`), and `PATCH /api/v1/issues/{key}` accepts a tri-state `parent`: absent leaves it, `null` clears it, a key reparents after locking the issue and the proposed parent in key order and refusing a missing, self, or foreign-project parent (`400 PARENT_INPUT`) and a cycle (`409 PARENT_INPUT`, with a depth-capped `union` ancestor walk so reads terminate even if a raced reparent ever commits one; the pairwise lock leaves the multi-ancestor race accepted, like rank). A reparent of a closed issue is `409 ISSUE_CLOSED` (a closed issue takes only `rank`, `components`, and a reopening `status` — any status but `done`; every other field, `priority` included, waits for the reopen). An actual parent change appends `child.removed` to the old parent and `child.added` to the new one (`{child_key}`, all owners in one `LockOwners` with the issue's own event) — both always notify, like `child.status`. Issue-detail `children` rows are one recursive-CTE query (`loadChildren`): each direct child carries `subtree_done` / `subtree_total` (the child itself included, every status; done = `status='done'`), `active_at` (the subtree's newest `updated_at`), and its own `external_links`, still ordered by key.
 - Every issue has a nullable `assignee`: the **lowercase** GitHub login of the human who answers its asks (`issues.assignee`, migration `0034`, indexed on open issues). `parseAllowedLogins` lowercases `DISPATCH_ALLOWED_LOGINS` and the identity implementations compare lowercased, so `api/issue_assignee.go`'s `canonicalLogin` (`strings.ToLower(strings.TrimSpace(login))`) is the stored form and plain `=` compares it; `/auth/whoami` still echoes GitHub's display casing (`Xodarap`), so the SPA lowercases the viewer once and compares exact. `POST /api/v1/issues` and `PATCH /api/v1/issues/{key}` accept `assignee` (the PATCH's `json.RawMessage` tri-state: absent leaves it, `null` clears, a string is canonicalised and must be an allowlist key — else `400 ASSIGNEE_NOT_ALLOWED` naming the login; a non-string is `400 INVALID_ISSUE`). Any authenticated actor may set it; the event's actor is who assigned it, and the whole issue rides in `issue.created` / `issue.updated`, so there is no `assigned_by`. Absent on create, the default is the first match of: a human actor's login; a personal token's `Owner`; the parent's assignee (which may be null); null — so the shared token's parentless issues are unassigned and a daemon status PATCH (no `assignee` key) never touches it. `GET /api/v1/users` (human-only) returns the allowlist keys sorted as `{users: [{login}]}` — the picker's options, a pure config read; `GET /api/v1/whoami` (any auth) returns `{kind: "user", login}` for a cookie/header caller or `{kind: "agent", owner}` for a bearer (`owner` is the personal token's lowercase login, null under the shared token) — what `dispatch_whoami` reports. Issue reads (`GET /issues/{key}`, summaries, pinned) carry `assignee`, and so does the `issue` on every inbox row.
+- Every issue has a nullable claim: the session that intends to implement it (`issues.claimed_by` — the actor JSON — and `issues.claimed_at`, migration `0045`, both set or both null by `issues_claim_complete`). It is on every issue read (`Issue.claim`, `IssueSummary.claim`, so the detail, the listing and the board rows all carry it) and is neither the `route` (where messages go) nor the `assignee` (the human who answers the asks). The whole rule lives in `api/issue_claim.go`. `POST /api/v1/issues/{key}/claim` (any authenticated actor) claims it: the claimant is the request's own actor, the same identity every other write carries — a human's login from their signed cookie (a body naming a session is ignored for a cookie caller), or, for a bearer, the session the caller declares in `actor`, since a token proves its owner or service subject and not which session it runs. A bearer can therefore name another session here exactly as on any other write; what makes a claim trustworthy is that `dispatch_claim` fills `actor` from the host's own runtime, so no model picks it, and that there is no second parameter for claiming on someone's behalf. The body rejects unknown fields, so an invented one is refused rather than ignored. It succeeds when the issue is unclaimed, when this actor already holds it (idempotent: the claim keeps its original time and appends no event), and when the holder is a session the Envoy listener no longer lists as live (`fetchLiveSessions` takes that snapshot of the same live list `GET /api/v1/agents` serves, with no transaction or pooled connection held, and `claimBlockedBy` — the whole taking rule, in one place — decides from it under the issue's row lock), which records the takeover. Against a live holder it answers `409 ISSUE_CLAIMED` with the claim in the body and the holder's session, live title and claim time in the message; a human's claim, which has no session to be running and none to message, is refused with the person's login and no liveness lookup at all. `{"force": true}` takes either anyway and is human-only (`403 HUMAN_ONLY` for a bearer), and only this route has that force — a refusal on the release route never offers one. An unreachable or unconfigured listener is `503 ENVOY_UNAVAILABLE` rather than a guess at whether a session ended, and a closed issue is `409 ISSUE_CLOSED`. A holder that changes twice while one request runs is `409 CLAIM_CONTENDED` carrying the claim the row shows: nothing was applied, and nothing about that holder's liveness was established, so it is never `ISSUE_CLAIMED`. `DELETE /api/v1/issues/{key}/claim` releases it: the holder, any human, or anyone once the holding session is gone; releasing an unclaimed issue is a 200 no-op. Both answer the issue. Claiming and releasing never move the status, and no status write ever claims (a move to `done` is the one that touches a claim, clearing it) (Sami, 2026-09-24, verbatim: "Keep them separate — Separate because humans might be using them to keep track of work"); closing an issue is the one write that clears a claim, in the same `PATCH` (`issue_patch.go`) that closes it. `issue.claimed` and `issue.released` carry `IssueClaimEventPayload {key, status, claim, previous_claim?, reason}`; the outbox publishes both to the previous claimant's own `notifications.agent.<session_id>` topic (`publishPreviousClaimant`), whatever the issue's route and regardless of `notify`, so a session learns it no longer holds the work.
 
 - Open asks accept `PATCH /api/v1/asks/{id}` from their asking session or any human. Each edit carries the full current ask, prior mutable fields, and its editor in an `ask.edited` event; `edited_at` is nullable until the first edit. Ask anchors are set on creation and are not editable through this route. `GET /api/v1/asks/{id}` returns `edits`, every rewording read back from those events oldest first (`{previous, edited_by, at}`). A human answer must carry the `edited_at` revision it reviewed; a mismatch returns `409 ASK_EDITED` without closing the ask.
 - Every document version or transactional live mutation refreshes each open anchored ask and comment from the current tree. A changed persisted anchor emits its own full `ask.anchor_refreshed` or `comment.anchor_refreshed` event in that same transaction; an unchanged row emits none. Refresh events are retained and sequenced on the row's owner topic but never notify or author/follower-route a session: the mutation is a side effect, not an interaction addressed to someone.
@@ -211,9 +380,10 @@ Dispatch treats an agent endpoint and bearer token as one trust-bound configurat
 
 - Health endpoints reflect dependency health, not just process liveness. `/healthz` returns `degraded` for transient JetStream/KV probe failures and `unhealthy` for NATS loss, a stopped session or CI KV watcher, or a missing durable consumer.
 - NATS reconnects indefinitely with backoff. Every reconnect recreates the session and CI KV watchers; the self-health monitor also rebuilds those watchers and a missing durable consumer while NATS is connected.
-- Only a terminal failure that remains after three consecutive recovery intervals self-terminates the listener. Shutdown stops HTTP first, bounds the NATS drain to ten seconds, logs completion, and exits non-zero so Docker's restart policy can restore it.
+- Only a terminal failure that remains after three consecutive recovery intervals self-terminates the listener. Shutdown stops HTTP first, then stops the session registry's watcher and drains NATS through `bus.Client.Drain`: the drain lets deliveries already in their handlers finish, never reconnects (the client's recovery is stopped first), and is bounded to ten seconds. It logs completion and exits non-zero so Docker's restart policy can restore it.
 - If a session is not live in the registry, delivery fails and the message is NAK'd for retry (up to MaxDeliver attempts over the stream's MaxAge window).
 - The `ENVOY_NOTIFICATIONS` duplicate window is 72 hours, matching the retained notification lifetime. Startup reconciles that setting with `UpdateStream`, so a Dispatch outbox retry after a post-publish crash cannot create another retained message while the original remains available.
+- Every `bus.Connect` caller (the listener, Dispatch, `natstail` and the MCP server, including the on-prem fleet's listeners and any ad-hoc run pointed at production's NATS) reconciles `ENVOY_NOTIFICATIONS`'s subjects at start by adding its own to the deployed list, so a restart during a rollout cannot drop a subject another deployment needs. It removes a deployed subject only when it captures the role lanes or overlaps one of the binary's own (a widened, narrowed or split subject, which JetStream refuses beside it); the binary's shape wins and one log line names both. Retiring a subject is an operator step once no deployment compiled with it can start: `nats stream edit ENVOY_NOTIFICATIONS --subjects=... -f` (`docs/solutions/envoy/nats-jetstream-stream-ensure-only-adds-subjects.md`).
 - Cross-machine route correctness depends on valid session registry entries with non-null ports.
 
 ## Listener API

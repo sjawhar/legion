@@ -207,15 +207,15 @@ func runHandoffComplete(ctx context.Context, args []string, stdout, stderr io.Wr
 	}
 	if role == "tester" || role == "test" {
 		if *verdict != "pass" && *verdict != "fail" {
-			fmt.Fprintln(stderr, "legion handoff complete: --verdict pass|fail is required for a tester")
+			fmt.Fprintln(stderr, "legion handoff complete: a tester's completion needs verdict pass or fail (the legion tool's handoff_complete with verdict, or --verdict)")
 			return 1
 		}
 	} else if *verdict != "" {
-		fmt.Fprintln(stderr, "legion handoff complete: --verdict is only valid for a tester")
+		fmt.Fprintln(stderr, "legion handoff complete: only a tester's completion carries a verdict; call the legion tool's handoff_complete without verdict")
 		return 1
 	}
 	if *ready && role != "merger" && role != "merge" {
-		fmt.Fprintln(stderr, "legion handoff complete: --ready is only valid for a merger")
+		fmt.Fprintln(stderr, "legion handoff complete: only a merger's completion carries ready; call the legion tool's handoff_complete without ready")
 		return 1
 	}
 	workspace, err := resolveWorkspace(*workspaceFlag)
@@ -260,7 +260,7 @@ func runHandoffComplete(ctx context.Context, args []string, stdout, stderr io.Wr
 }
 
 // handoffFiles names the handoff file each file-backed role writes: the phase word its role prompt
-// gives `legion handoff write --phase` (packages/pi-envoy/roles/*.md), whichever vocabulary the
+// gives the legion tool's handoff_write (packages/pi-envoy/roles/*.md), whichever vocabulary the
 // pane's LEGION_ROLE uses. The merger is not file-backed — it verifies and publishes READY and
 // writes no handoff (packages/pi-envoy/roles/merger.md).
 var handoffFiles = map[string]string{
@@ -320,7 +320,7 @@ func handoffCommit(ctx context.Context, workspace, role string) (string, error) 
 	}
 	refusal := fmt.Errorf("%s is not committed on this issue's branch (only the base branch carries it): write and commit this phase's handoff", file)
 	if _, err := os.Stat(filepath.Join(workspace, file)); err != nil {
-		refusal = fmt.Errorf("%s is missing from the workspace: write this phase's handoff with legion handoff write --phase %s", file, word)
+		refusal = fmt.Errorf("%s is missing from the workspace: write this phase's handoff with the legion tool's handoff_write with phase %s", file, word)
 	}
 	current, err := issuePhase(ctx)
 	if err != nil {

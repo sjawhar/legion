@@ -38,27 +38,10 @@ const marginGestures = ["keydown", "touchstart", "wheel"] as const;
 /**
  * How long after the margin changes shape its own scrolls are still the layout's, not a reader's.
  * A frame or two would cover the mechanics - anchoring while the content changes, clamping as it
- * settles - and the window is an order of magnitude longer than that on purpose: a real reader is
- * recognised by the gestures, which end the hold unconditionally and never consult this, so the
- * only thing a generous window can absorb is a scroll with no gesture at all.
- *
- * What that leaves, measured in Chromium: a scrollbar press, middle-click autoscroll and a wheel
- * all end the hold through their gestures. Find-in-page, `scrollIntoView`, an assistive-tech
- * focus move and Tab from the document into the margin do not carry one, so a scroll of theirs
- * that lands while the window is open is read as the layout's. The window is opened by any
- * class/style change in the margin's subtree - hovering a card re-arms it, harmlessly, since
- * every reader path that matters takes over without consulting it - and a remote collaborator
- * typing in the open document keeps it open while they type, because each republished placement
- * rewrites the cards' `style.top`. The cost of an absorbed scroll is bounded: the hold stays
- * armed and only moves the margin again if the linked card has left the scrollport, and the next
- * scroll or any gesture ends it.
- *
- * Focus is deliberately not a takeover signal, which would otherwise catch Tab and assistive
- * focus moves. Measured on a document item link in Chromium, the landing itself puts focus inside
- * the margin on both viewports: on a desktop the linked thread expands and its reply composer
- * takes it (`focusin` on a TEXTAREA inside the margin), and on a phone `useDialog` focuses the
- * review sheet's first control as it expands - the same moment the hold arms. A `focusin` rule
- * would end every landing before it began.
+ * settles - and the window is an order of magnitude longer than that on purpose: `keepCardInView`
+ * recognises a real reader by their gestures, which end the hold unconditionally and never
+ * consult this, so the only thing a generous window can absorb is a scroll with no gesture at
+ * all. What that costs is written there.
  */
 export const RELAYOUT_SETTLES_MS = 250;
 
@@ -72,14 +55,35 @@ export const RELAYOUT_SETTLES_MS = 250;
  * of view is scrolled back; a card already in view is left where it is.
  *
  * The reader wins from the moment they take part: a wheel, a touch, a key, a pointer press, or a
- * scroll this did not perform inside the margin, and - once the open document has reported where
- * its blocks and marks sit - a pointer press in the document, since pressing into the text is how
- * a reader starts a selection and someone working the passage is no longer being landed. A press
- * before those offsets land is the reader arriving, not leaving: every anchored card is still
- * stacked at the top of the margin, and dropping the hold there leaves the card below the fold
- * once its real placement arrives, which is the defect the hold exists to fix. Scrolling the
- * document is never taking part: that is when holding the linked card matters most. Returns the
- * teardown a new link or an unmount uses.
+ * scroll this did not perform inside the margin - except one that lands within
+ * `RELAYOUT_SETTLES_MS` of the margin changing shape, which the layout is taken to have done -
+ * and, once the open document has reported where its blocks and marks sit, a pointer press in
+ * the document, since pressing into the text is how a reader starts a selection and someone
+ * working the passage is no longer being landed. A press before those offsets land is the reader
+ * arriving, not leaving: every anchored card is still stacked at the top of the margin, and
+ * dropping the hold there leaves the card below the fold once its real placement arrives, which
+ * is the defect the hold exists to fix. Scrolling the document is never taking part: that is when
+ * holding the linked card matters most. Returns the teardown a new link or an unmount uses.
+ *
+ * What the relayout window absorbs, measured in Chromium: a scrollbar press, middle-click
+ * autoscroll and a wheel all end the hold through their gestures. Find-in-page, `scrollIntoView`,
+ * an assistive-tech focus move and Tab from the document into the margin do not carry one, so a
+ * scroll of theirs that lands while the window is open is read as the layout's. The window is
+ * opened by any class or style change in the margin's subtree and by any card arriving or
+ * leaving it (the observer watches `childList` too) - hovering a card re-arms it, harmlessly,
+ * since every reader path that matters takes over without consulting it; an arriving card is
+ * how the margin's own relayouts open it, which is what `placementAfterArrival` exercises in
+ * `deep-links.e2e.ts`; and a remote collaborator typing in the open document keeps it open
+ * while they type, because each republished placement rewrites the cards' `style.top`. The cost
+ * is bounded: the hold stays armed and only moves the margin again if the linked card has left
+ * the scrollport, and the next scroll or any gesture ends it.
+ *
+ * Focus is deliberately not a takeover signal, which would otherwise catch Tab and assistive
+ * focus moves. Measured on a document item link in Chromium, the landing itself puts focus inside
+ * the margin on both viewports: on a desktop the linked thread expands and its reply composer
+ * takes it (`focusin` on a TEXTAREA inside the margin), and on a phone `useDialog` focuses the
+ * review sheet's first control as it expands - the same moment the hold arms. A `focusin` rule
+ * would end every landing before it began.
  */
 function keepCardInView(
   margin: RefObject<HTMLElement | null>,

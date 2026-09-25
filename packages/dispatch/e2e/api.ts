@@ -6,6 +6,7 @@ import type {
   ArchitectureSource,
   ArchitectureTree,
   Artifact,
+  ArtifactText,
   ArtifactUploadResponse,
   ArtifactVersionText,
   Ask,
@@ -270,6 +271,10 @@ export function createComment(
   );
 }
 
+export function acceptSuggestion(id: string, options: ApiOptions = {}): Promise<Comment> {
+  return request<Comment>(`/api/v1/comments/${encodeURIComponent(id)}/accept`, "POST", {}, options);
+}
+
 export function editComment(
   id: string,
   input: { body: string },
@@ -310,6 +315,16 @@ export function followAsk(id: string, sessionID: string, actor: Actor): Promise<
     "PUT",
     {},
     { actor, as: "agent" }
+  );
+}
+
+/** The document's current canonical markdown, as the server's live room holds it. */
+export function getArtifactText(id: string, options: ApiOptions = {}): Promise<ArtifactText> {
+  return request<ArtifactText>(
+    `/api/v1/artifacts/${encodeURIComponent(id)}/text`,
+    "GET",
+    undefined,
+    options
   );
 }
 
@@ -369,6 +384,17 @@ export function editArtifact(
     `/api/v1/artifacts/${encodeURIComponent(id)}/edits`,
     "POST",
     input,
+    options
+  );
+}
+
+/** `POST /api/v1/issues/{key}/claim`: the claimant is the caller itself, so `options.actor`
+ *  (the session a bearer names, as on every other write) is the holder recorded. */
+export function claimIssue(issue: string, options: ApiOptions = {}): Promise<IssueDetails> {
+  return request<IssueDetails>(
+    `/api/v1/issues/${encodeURIComponent(issue)}/claim`,
+    "POST",
+    {},
     options
   );
 }

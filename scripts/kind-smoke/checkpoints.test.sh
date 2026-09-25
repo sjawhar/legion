@@ -316,10 +316,12 @@ echo "checkpoints.test.sh: tree-moved OK"
 
 # ---- kill-pod-resume ----------------------------------------------------------------------------------
 sess_file='/home/legion/.omp/profiles/legion/agent/sessions/--x--/2026-09-15T00-00-00-000Z_arch.jsonl'
-kill_assigned_at="$(date -u -d '60 seconds ago' +%FT%TZ)"
-active_implementer="$(jq -cn --arg at "$kill_assigned_at" '{phase:"implementer",sessionId:"i",assignedAt:$at}')"
+# checkpoints.sh admits an implementer phase under 120 s old, so each fixture stamps its phase
+# 60 s before the moment it is planted: a timestamp taken once for the section ages with every case
+# before it, and a slow section would carry the later cases past the limit.
+seconds_ago() { date -u -d "$1 seconds ago" +%FT%TZ; }
 kill_state() { # kill_state GEN POD READY(1|0) SESSION CLAIMS_JSON [PHASE_JSON] → a state document for the kill sequence
-  local active_phase="${6:-$active_implementer}"
+  local active_phase="${6:-$(jq -cn --arg at "$(seconds_ago 60)" '{phase:"implementer",sessionId:"i",assignedAt:$at}')}"
   base_state | jq --argjson g "$1" --arg p "$2" --arg ready "$3" --arg s "$4" --argjson claims "$5" --argjson phase "$active_phase" '
     .trees["ST1-1"].generation = $g | .trees["ST1-1"].locator.podName = $p | .trees["ST1-1"].locator.podUid = ("u-" + $p)
     | (if $ready == "1" then . else del(.trees["ST1-1"].readyConfirmedAt) end)
@@ -354,7 +356,7 @@ plant_kill_fixtures() { # plant_kill_fixtures G2 SESSION1 RESUME_FILE — the fo
 # that treats a planner or an idle/stale implementer as killable must fail these cases.
 plant_records
 plant_kill_fixtures 2 arch "$sess_file"
-kill_state 1 legion-st1-1-architect-g1 1 arch "$planner_and_implementer" "$(jq -cn --arg at "$kill_assigned_at" '{phase:"planner",sessionId:"p",assignedAt:$at}')" >"$FIX/state-1.json"
+kill_state 1 legion-st1-1-architect-g1 1 arch "$planner_and_implementer" "$(jq -cn --arg at "$(seconds_ago 60)" '{phase:"planner",sessionId:"p",assignedAt:$at}')" >"$FIX/state-1.json"
 redact_phase_state
 printf 'state-1.json\n' >"$FIX/state.seq"
 printf 'pod-g1-running.json\n' >"$FIX/pod-legion-st1-1-architect-g1.seq"
@@ -362,7 +364,7 @@ expect_failed kill-pod-resume "active phase is planner, expected implementer"
 refute grep -Fq 'kill -9' "$FAKE_LOG"
 
 plant_kill_fixtures 2 arch "$sess_file"
-kill_state 1 legion-st1-1-architect-g1 1 arch "$planner_and_implementer" "$(jq -cn --arg at "$(date -u -d '121 seconds ago' +%FT%TZ)" '{phase:"implementer",sessionId:"i",assignedAt:$at}')" >"$FIX/state-1.json"
+kill_state 1 legion-st1-1-architect-g1 1 arch "$planner_and_implementer" "$(jq -cn --arg at "$(seconds_ago 121)" '{phase:"implementer",sessionId:"i",assignedAt:$at}')" >"$FIX/state-1.json"
 redact_phase_state
 printf 'state-1.json\n' >"$FIX/state.seq"
 printf 'pod-g1-running.json\n' >"$FIX/pod-legion-st1-1-architect-g1.seq"

@@ -174,17 +174,28 @@ type queryer interface {
 
 // Register mounts every native-workspace route on mux. The routes live in routes_table.go; the
 // same table answers GET /api/v1.
+//
+// Every route is marked so the shared pool can refuse a second connection to a handler that
+// already holds one of its transactions (store.ErrNestedAcquire): one caller, one connection is
+// what keeps the pool from deadlocking, and a handler that breaks it fails here instead of in
+// production.
 func Register(mux *http.ServeMux, deps Deps) {
 	s := &server{deps: deps}
 	routes := s.routes()
 	s.routeIndex = routeIndexEntries(routes)
 	for _, route := range routes {
-		mux.HandleFunc(route.Method+" "+route.Pattern, route.Handler)
+		mux.HandleFunc(route.Method+" "+route.Pattern, trackTransactions(route.Handler))
 	}
 	if websocket, ok := deps.Docs.(interface {
 		ServeHTTP(http.ResponseWriter, *http.Request)
 	}); ok {
-		mux.Handle("GET /ws/doc/{room}", http.HandlerFunc(websocket.ServeHTTP))
+		mux.Handle("GET /ws/doc/{room}", trackTransactions(websocket.ServeHTTP))
+	}
+}
+
+func trackTransactions(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		handler(w, r.WithContext(store.WithTransactionTracking(r.Context())))
 	}
 }
 
@@ -523,14 +534,33 @@ func (s *server) publish(events ...model.Event) {
 	}
 }
 
-// documentMutationContext joins a document operation to an API transaction and
-// retains document-generated events until this handler publishes after commit.
+// documentMutationContext joins document operations to an API transaction. The returned
+// collector holds their events and their writes to live documents: no room or browser sees a
+// write until publishDocumentEvents runs after tx commits. Handlers defer
+// Docs.DiscardLiveWrites on the collector right after this call, so a transaction that does not
+// commit leaves every live document as it was.
 func documentMutationContext(ctx context.Context, tx pgx.Tx) (context.Context, *docs.EventCollector) {
 	collector := docs.NewEventCollector()
 	return docs.WithEventCollector(docs.WithTx(ctx, tx), collector), collector
 }
 
+// commitDocumentMutation commits tx and credits its live writes' authors to their rooms, before
+// the handler's CommitVersion clears the authors the transaction's own version named. When the
+// commit returns an error its outcome is unknown, so the rooms its live writes touched are failed
+// and reload the durable document.
+func (s *server) commitDocumentMutation(ctx context.Context, tx pgx.Tx, collector *docs.EventCollector) error {
+	if err := tx.Commit(ctx); err != nil {
+		s.deps.Docs.FailLiveWrites(collector, err)
+		return err
+	}
+	s.deps.Docs.CreditLiveWrites(collector)
+	return nil
+}
+
+// publishDocumentEvents applies a committed transaction's live document writes, then publishes
+// its document events and events.
 func (s *server) publishDocumentEvents(collector *docs.EventCollector, events ...model.Event) {
+	s.deps.Docs.PublishLiveWrites(collector)
 	s.publish(collector.Events()...)
 	s.publish(events...)
 }
@@ -549,11 +579,17 @@ func (s *server) begin(ctx context.Context) (pgx.Tx, error) {
 // requireOpenIssue locks an issue row and returns its lifecycle status, rejecting mutations
 // after completion without a second issue query.
 func (s *server) requireOpenIssue(ctx context.Context, tx pgx.Tx, key string) (string, error) {
+	return issueOpenStatus(ctx, tx, key, ownerRowLock)
+}
+
+// issueOpenStatus is that same read and refusal made through q under lock, so the check a
+// comment makes from the pool before its transaction opens refuses exactly what the locked
+// check will.
+func issueOpenStatus(ctx context.Context, q queryer, key, lock string) (string, error) {
 	var status string
 	var open bool
-	if err := tx.QueryRow(ctx, `
-		select status, closed_at is null from issues where key = $1 for update
-	`, key).Scan(&status, &open); err != nil {
+	if err := q.QueryRow(ctx, `
+		select status, closed_at is null from issues where key = $1`+lock, key).Scan(&status, &open); err != nil {
 		return "", err
 	}
 	if !open {

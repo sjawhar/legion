@@ -13,9 +13,12 @@
 # directory survives a failure, because its logs are the evidence, and goes when the run passed.
 #
 # The one input: LEGION_E2E_PG_DSN, the Postgres to run against; unset, the run starts its own
-# postgres:16 on tmpfs. The provider key is GEMINI_API_KEY_TESTS from the secret store (agent
-# tier: no YubiKey touch), which the daemon itself resolves at boot and hands every pane's shim as
-# a daemon-held file (`provider_keys`); the run never reads it.
+# postgres:16 on tmpfs. The agents' model is Anthropic through the Hawk model gateway on the
+# operator's own hawk login (lib/install-model-gateway.sh), so the operator's keyring must be
+# unlocked; no Anthropic key reaches a pane. The provider-key path is proven with
+# GEMINI_API_KEY_TESTS from the secret store (agent tier: no YubiKey touch), which the daemon
+# itself resolves at boot and hands every pane's shim as a daemon-held file (`provider_keys`); the
+# run never reads it.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -97,11 +100,11 @@ cleanup() {
   stop_pid "$listener_pid"
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null || true; done
   docker rm -f "$nats_container" "$pg_container" >/dev/null 2>&1 || true
-  rm -rf "$HOME/.omp/profiles/$profile" || true
+  rm -rf "$HOME/.omp/profiles/$profile" "$work/model-gateway-cache" || true
   if [ -n "${ok:-}" ]; then
     rm -rf "$work" || true
   else
-    echo "the run's workspace is $work (daemon log: $daemon_log)"
+    echo "the run's workspace is $work (daemon log: $daemon_log; model key command log: $work/model-gateway/hawk-token.log)"
   fi
   return 0
 }
@@ -189,10 +192,15 @@ expect_refusal() {
 
 # ---- setup -----------------------------------------------------------------------------------------
 
-for tool in go docker jq curl ss tmux bun mise socat secrets; do
+for tool in go docker jq curl ss tmux bun mise socat secrets hawk-token; do
   command -v "$tool" >/dev/null || fail "$tool is required"
 done
 mkdir -p "$state" "$work/xdg" "$work/tmux" "$work/stub"
+# The model route, installed while this shell still holds the operator's XDG directories, which
+# the key command runs hawk-token under. Its first mint is the preflight: a locked keyring stops the
+# run here, by name.
+key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --dest "$work/model-gateway" --cache-dir "$work/model-gateway-cache") ||
+  fail "the agents' model route through the Hawk model gateway could not be installed (the reason is above)"
 export XDG_STATE_HOME=$work/xdg # the legions registry this run writes is its own
 export TMUX_TMPDIR=$work/tmux   # so are the daemons' private tmux servers
 
@@ -303,14 +311,14 @@ expected_omp=$(readlink -f "$omp_bin/omp")
 jq -R -e --arg binary "$expected_omp" '
   fromjson? | select(.msg == "legion daemon resolved OMP invocation for boot probes and panes" and (.invocation | contains($binary)))
 ' "$daemon_log" >/dev/null || fail "the daemon did not log the pinned OMP binary $expected_omp for its boot probes and panes"
-note "$(jq -R -c 'fromjson? | select(.msg | startswith("boot gate")) | {msg, version, goDaemonApiVersion}' "$daemon_log" | head -1)"
-note "$(jq -R -c 'fromjson? | select(.msg == "legion daemon resolved OMP invocation for boot probes and panes") | {msg, invocation}' "$daemon_log" | head -1)"
+note "$(jq -R -c 'fromjson? | select(.msg | startswith("boot gate")) | {msg, version, goDaemonApiVersion}' "$daemon_log" | sed -n 1p)"
+note "$(jq -R -c 'fromjson? | select(.msg == "legion daemon resolved OMP invocation for boot probes and panes") | {msg, invocation}' "$daemon_log" | sed -n 1p)"
 c1=$(claims spawn --json --tree S2-1 --issue S2-1 --role architect --prompt-file "$work/architect.md" | jq -r .token)
 until_true 240 "claim $c1 to be ready" claim_is "$c1" '.state == "ready"'
 c1_json=$(claim_json "$c1")
 session1=$(jq -r .session <<<"$c1_json")
 [ -n "$session1" ] && [ "$session1" != null ] || fail "the ready claim records no session"
-registered=$(jq -R -c --arg c "$c1" 'fromjson? | select(.msg == "api: claim registered" and .claim == $c) | {generation, session, pluginContract}' "$daemon_log" | head -1)
+registered=$(jq -R -c --arg c "$c1" 'fromjson? | select(.msg == "api: claim registered" and .claim == $c) | {generation, session, pluginContract}' "$daemon_log" | sed -n 1p)
 [ -n "$registered" ] || fail "the daemon logged no registration for $c1"
 note "claim $c1 ready: generation $(jq -r .generation <<<"$c1_json"), session $session1, pane $(jq -r .locator.tmux.pane <<<"$c1_json")"
 note "registered: $registered"
@@ -345,6 +353,23 @@ session_file2=$(jq -r .sessionFile <<<"$c2_json")
 turns=$(user_turns "$session_file2" "$marker1")
 [ "$turns" = 1 ] || fail "the task reached the agent $turns times (session file $session_file2)"
 note "idle, no pending delivery; the agent's session file holds the task $turns time"
+pass
+
+begin model-turn-through-the-gateway
+# The task's reply came through the gateway: every assistant turn in the session file ran as the
+# profile's pinned model on the anthropic provider, the one provider the profile routes (to
+# middleman) and leaves enabled, and none ended in an error; the key command minted for more than
+# the preflight.
+pinned=$(sed -n 's/^  default: //p' "$HOME/.omp/profiles/$profile/agent/config.yml")
+[ -n "$pinned" ] || fail "the profile's config.yml names no default model role: $HOME/.omp/profiles/$profile/agent/config.yml"
+replies=$(jq -c 'select(.type == "message" and .message.role == "assistant")
+  | {provider: .message.provider, model: .message.model, stopReason: .message.stopReason}' "$session_file2" | jq -sc .)
+jq -e --arg pinned "$pinned" 'length > 0 and all(.provider == "anthropic" and "anthropic/" + .model == $pinned and .stopReason != "error")' \
+  <<<"$replies" >/dev/null || fail "claim $c2's replies did not all come from $pinned through the gateway: $replies"
+calls=$(grep -c ' invoked by pid ' "$work/model-gateway/hawk-token.log")
+[ "$calls" -ge 2 ] || fail "the key command $key_command ran $calls time(s), the preflight's alone"
+note "claim $c2's replies, from its session file: $replies"
+note "the key command $key_command ran $calls times and minted $(grep -c ' minted a key for pid ' "$work/model-gateway/hawk-token.log") ($work/model-gateway/hawk-token.log)"
 pass
 
 begin retried-frame-starts-no-second-turn
@@ -509,7 +534,7 @@ until_true 180 "the task sent after the restart to run and end" claim_is "$c1" '
 turns=$(user_turns "$session_file1" "$marker3")
 [ "$turns" = 1 ] || fail "the task sent after the restart reached the agent $turns times"
 restart_line=$(grep -n '^=== boot' "$daemon_log" | tail -1 | cut -d: -f1)
-tail -n +"$restart_line" "$daemon_log" | grep -qF 'rejected hello' && fail "the restarted daemon rejected a hello"
+grep -qF 'rejected hello' <<<"$(tail -n +"$restart_line" "$daemon_log")" && fail "the restarted daemon rejected a hello"
 note "boots $boots_before → $boots; $c1 and $c2 kept generation, incarnation $(jq -r .locator.incarnation <<<"$before1") / $(jq -r .locator.incarnation <<<"$before2"), and pane; no pane opened or closed"
 note "the shims' reconnect hellos were accepted: a task sent after the restart ran $turns time"
 pass
@@ -534,8 +559,18 @@ for p in $chain_pids; do
     fail "pane process chain runs the dotfiles OMP wrapper: $(tr '\0' ' ' <"/proc/$p/cmdline")"
 done
 shim1=$(first_child "$pane1_pid")
+# LEGION-206 P1 holds with the gateway route: the pane's shell and its OMP keep the daemon's own XDG
+# directories and carry no session bus address (only the key command gets the operator's).
+for p in "$pane1_pid" "$omp1"; do
+  for name in XDG_CONFIG_HOME XDG_CACHE_HOME XDG_DATA_HOME XDG_STATE_HOME; do
+    dir=$(env_of "$p" "$name")
+    case "$dir" in "$state"/home/*) ;; *) fail "process $p ($(basename "$(argv0 "$p")"))'s $name is '$dir', not under $state/home" ;; esac
+  done
+  ! grep -qz '^DBUS_SESSION_BUS_ADDRESS=' "/proc/$p/environ" ||
+    fail "process $p ($(basename "$(argv0 "$p")")) carries DBUS_SESSION_BUS_ADDRESS"
+done
 xdg=$(env_of "$omp1" XDG_CONFIG_HOME)
-case "$xdg" in "$state"/home/*) ;; *) fail "omp's XDG_CONFIG_HOME is '$xdg', not under $state/home" ;; esac
+! grep -qz '^ANTHROPIC_API_KEY=' "/proc/$omp1/environ" || fail "omp's environment carries ANTHROPIC_API_KEY"
 actual_omp=$(readlink -f "/proc/$omp1/exe")
 [ "$actual_omp" = "$expected_omp" ] || fail "omp $omp1 executes $actual_omp, not the configured pinned binary $expected_omp"
 pane_path=$(env_of "$shim1" PATH)
@@ -549,7 +584,8 @@ for name in GEMINI_API_KEY_TESTS SOPS_AGE_KEY_FILE SECRETSD_CONFIG; do
   [ -z "$(env_of "$omp1" "$name")" ] || fail "omp's environment carries $name"
 done
 note "pane process $pane1_pid is /bin/sh -c; first children: $chain"
-note "omp $omp1 executes the configured pinned binary $actual_omp, no process in its chain runs the dotfiles wrapper, and its PATH head ${omp_path%%:*} matches the pane's; XDG_CONFIG_HOME=$xdg; GEMINI_API_KEY of $key_length bytes (from the daemon-held file), absent from the shim; no GEMINI_API_KEY_TESTS, SOPS_AGE_KEY_FILE or SECRETSD_CONFIG"
+note "omp $omp1 executes the configured pinned binary $actual_omp, no process in its chain runs the dotfiles wrapper, and its PATH head ${omp_path%%:*} matches the pane's; XDG_CONFIG_HOME=$xdg; GEMINI_API_KEY of $key_length bytes (from the daemon-held file), absent from the shim; no ANTHROPIC_API_KEY, GEMINI_API_KEY_TESTS, SOPS_AGE_KEY_FILE or SECRETSD_CONFIG"
+note "the pane's shell $pane1_pid and omp $omp1: all four XDG base directories under $state/home, no DBUS_SESSION_BUS_ADDRESS"
 pass
 
 begin stray-pane-reaped-after-the-grace
@@ -585,6 +621,15 @@ legion stop --config "$work/legion.yaml" >/dev/null
 stop_daemon "$daemon_pid" "legion stop"
 daemon_pid=
 note "both claims retired; the daemon stopped with exit 0"
+pass
+
+begin every-turn-through-the-gateway
+# Every agent turn the run recorded, in every session of the isolated profile, each subagent's
+# included, was served by the anthropic provider, the gateway's; and the same check refuses a copy
+# of one captured session with a turn rewritten as Bedrock's.
+route=$(bash "$root/scripts/e2e/lib/check-model-route.sh" --sessions "$HOME/.omp/profiles/$profile/agent/sessions" \
+  --control "$work/model-route-control") || fail "an agent turn left the gateway route, or the check proved nothing (the reason is above)"
+note "$route"
 pass
 
 ok=1

@@ -5,7 +5,7 @@ import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { api } from "../../api/client";
 import { prependEventToLog } from "../../api/sse";
-import type { Actor, Comment, Event, UserIssueState, UserState } from "../../api/types";
+import type { Actor, Artifact, Comment, Event, UserIssueState, UserState } from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
 import { ConversationTab } from "./ConversationTab";
 
@@ -39,6 +39,32 @@ function issueState(dismissed: string[] = [], lastReadSeq = 0): UserIssueState {
   return { dismissed, last_read_seq: lastReadSeq, pinned: false, seq: 0 };
 }
 
+const primaryDocument: Artifact = {
+  created_at: "2026-09-09T00:00:00Z",
+  created_by: { id: "alice", kind: "user" },
+  id: "artifact-primary",
+  issue_key: "CORE-1",
+  kind: "doc",
+  name: "spec.md",
+  primary: true,
+  project: "CORE",
+  slug: "spec",
+  versions: [],
+};
+
+const secondaryDocument: Artifact = {
+  created_at: "2026-09-09T00:00:00Z",
+  created_by: { id: "alice", kind: "user" },
+  id: "artifact-secondary",
+  issue_key: "CORE-1",
+  kind: "doc",
+  name: "supporting-document.md",
+  primary: false,
+  project: "CORE",
+  slug: "supporting-document",
+  versions: [],
+};
+
 function newQueryClient(): QueryClient {
   return new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
@@ -50,14 +76,14 @@ function tab(
   visible: boolean,
   queryClient: QueryClient,
   isClosed = false,
-  artifactSlugs: ReadonlyMap<string, string> = new Map()
+  issueArtifacts: ReadonlyMap<string, Artifact> = new Map()
 ): ReactNode {
   return (
     <MemoryRouter>
       <KeymapProvider>
         <QueryClientProvider client={queryClient}>
           <ConversationTab
-            artifactSlugs={artifactSlugs}
+            issueArtifacts={issueArtifacts}
             isClosed={isClosed}
             issueKey="CORE-1"
             state={state}
@@ -529,7 +555,7 @@ test("renders an anchored comment with the owner controls in Conversation", asyn
         true,
         queryClient,
         false,
-        new Map([["artifact-secondary", "supporting-document"]])
+        new Map([["artifact-secondary", secondaryDocument]])
       )
     ).unmount;
     await screen.findByText("Please revise this.");
@@ -1573,6 +1599,74 @@ test("Conversation restores edit controls and the draft when its owner save reje
     save.resolve({ ...root.payload, deliveries: [], mentions: [] });
     unmount?.();
     editComment.mockRestore();
+    api.getIssueEvents = originalGetIssueEvents;
+    api.listAgents = originalListAgents;
+  }
+});
+
+test("a comment on the primary document links to the Spec route, not its artifact route", async () => {
+  // The link is built by `documentItemPath`, the one builder that knows a primary document is
+  // the issue's Spec tab; the hand-assembled href it replaced always named the artifact route.
+  const originalGetIssueEvents = api.getIssueEvents;
+  const originalListAgents = api.listAgents;
+  const queryClient = newQueryClient();
+  let unmount: (() => void) | undefined;
+  const comment: Event = {
+    actor: { id: "alice", kind: "user" },
+    created_at: "2026-09-12T00:00:00Z",
+    id: 1,
+    issue_key: "CORE-1",
+    notify: false,
+    payload: {
+      anchor: {
+        artifact_id: "artifact-primary",
+        block_id: null,
+        mark_id: "mark-1",
+        orphaned: false,
+        quote: "Anchored source",
+        version: 1,
+      },
+      artifact_name: "spec.md",
+      ask_id: null,
+      author: { id: "alice", kind: "user" },
+      body: "Please revise this.",
+      created_at: "2026-09-12T00:00:00Z",
+      deliveries: [],
+      edited_at: null,
+      id: "comment-1",
+      issue_key: "CORE-1",
+      mentions: [],
+      reply_to: null,
+      resolved: false,
+      resolved_at: null,
+      resolved_by: null,
+      suggestion: null,
+      turn: null,
+    },
+    seq: 1,
+    type: "comment.created",
+  };
+
+  try {
+    api.getIssueEvents = async () => [comment];
+    api.listAgents = async () => [];
+    queryClient.setQueryData(["whoami"], { login: "alice" });
+    unmount = render(
+      tab(
+        { "CORE-1": issueState() },
+        true,
+        queryClient,
+        false,
+        new Map([["artifact-primary", primaryDocument]])
+      )
+    ).unmount;
+    await screen.findByText("Please revise this.");
+
+    expect(screen.getByRole("link", { name: "View in document" }).getAttribute("href")).toBe(
+      "/issues/CORE-1/spec?comment=comment-1"
+    );
+  } finally {
+    unmount?.();
     api.getIssueEvents = originalGetIssueEvents;
     api.listAgents = originalListAgents;
   }

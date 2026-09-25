@@ -51,30 +51,40 @@ type testServerOptions struct {
 	// oidc is the service-account token verifier; nil is the unconfigured
 	// deployment, whose bearer handling is untouched by that feature.
 	oidc *oidc.Verifier
+	// envoyURL points the Envoy listener client at a fake listener; empty leaves the client
+	// unconfigured, which is every test that never asks whether a session is live.
+	envoyURL string
 }
 
 func newTestHandler(t *testing.T) http.Handler {
 	t.Helper()
-	handler, _ := newTestServer(t, testServerOptions{})
+	handler, _, _ := newTestServer(t, testServerOptions{})
 	return handler
 }
 
 func newTestHandlerWithStore(t *testing.T) (http.Handler, *store.Store) {
 	t.Helper()
-	return newTestServer(t, testServerOptions{})
+	handler, database, _ := newTestServer(t, testServerOptions{})
+	return handler, database
 }
 
 func newTestHandlerWithDefaultProject(t *testing.T) (http.Handler, *store.Store) {
 	t.Helper()
-	return newTestServer(t, testServerOptions{defaultProject: "DEFAULT"})
+	handler, database, _ := newTestServer(t, testServerOptions{defaultProject: "DEFAULT"})
+	return handler, database
 }
 
 func newTestHandlerWithTestHooks(t *testing.T) (http.Handler, *store.Store) {
 	t.Helper()
-	return newTestServer(t, testServerOptions{testHooks: true})
+	handler, database, _ := newTestServer(t, testServerOptions{testHooks: true})
+	return handler, database
 }
 
-func newTestServer(t *testing.T, options testServerOptions) (http.Handler, *store.Store) {
+// newTestServer builds the mux an API test drives and hands back the store behind it and the
+// dependencies it runs on, so a test that also calls a handler or a delivery step directly
+// (directServer) shares this server's broker and document service instead of standing up a
+// second pair.
+func newTestServer(t *testing.T, options testServerOptions) (http.Handler, *store.Store, Deps) {
 	t.Helper()
 	settle := options.settle
 	if settle == 0 {
@@ -102,6 +112,7 @@ func newTestServer(t *testing.T, options testServerOptions) (http.Handler, *stor
 		App:              options.app,
 		GitHubAPIBase:    options.githubAPIBase,
 		TestHooksEnabled: options.testHooks,
+		EnvoyURL:         options.envoyURL,
 		OIDC:             options.oidc,
 	})
 	if err != nil {
@@ -109,7 +120,14 @@ func newTestServer(t *testing.T, options testServerOptions) (http.Handler, *stor
 	}
 	mux := http.NewServeMux()
 	Register(mux, deps)
-	return mux, database
+	return mux, database, deps
+}
+
+// directServer is a server a test calls a handler or a delivery step on directly, without the
+// mux: it runs on the dependencies of the server under test - the same store, listener, broker
+// and document service - so what it writes and what it reads are the rows that handler left.
+func directServer(deps Deps) *server {
+	return &server{deps: deps}
 }
 
 // waitForDatabaseLocks waits until want backends are queued behind a lock that holder's
@@ -1367,7 +1385,7 @@ func TestArtifactSlugsDisambiguateNormalizedNameCollisions(t *testing.T) {
 func TestConcurrentStatusPatchesUseCommittedPreimage(t *testing.T) {
 	// The seeded specs' settlement would lock the child row this test holds; keep it
 	// out of the lock queue so only the two status patches are counted as waiters.
-	handler, database := newTestServer(t, testServerOptions{settle: time.Hour})
+	handler, database, _ := newTestServer(t, testServerOptions{settle: time.Hour})
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "TEST", "name": "Test project",
 	}, "alice"); response.Code != http.StatusCreated {

@@ -79,6 +79,18 @@ type Service struct {
 	// reads it. Nil outside tests; tests use it to evict the room in that window.
 	afterSettleWarm func(room string)
 	settleWG        sync.WaitGroup
+	// evictWG counts the forced evictions failRoomLocked spawns. They flush the room through
+	// the store, so shutdown joins them before it closes.
+	evictWG sync.WaitGroup
+	// gateMu makes "is the service stopping?" and the Add that follows it one step, against
+	// Shutdown's store. sync.WaitGroup panics if an Add from zero lands while a Wait is
+	// registered, and without this the check and the Add straddle the store.
+	//
+	// Lock order: a room's mu is taken BEFORE this - failRoomLocked and
+	// scheduleSettleAfterLocked both run under it - so nothing may take a room's mu while
+	// holding this one. Shutdown therefore holds it around the stopping store alone, never
+	// across the rooms.Range that locks each room.
+	gateMu          sync.Mutex
 	nextSettleTimer atomic.Uint64
 	timerMu         sync.Mutex
 	// timers reserve their ID before creating an immediate timer, whose callback
@@ -88,7 +100,8 @@ type Service struct {
 	suppressed map[string][]*suppressSlot
 	// serviceOrigins holds the transaction origins of the service's own in-flight Server.Apply
 	// calls (see serviceTransact), so a room's update observer can tell a service mutation from
-	// a browser peer's edit. Every other origin a live document reports is a connected peer.
+	// a browser peer's edit. Every other origin a live document reports, but a published live
+	// write's (liveWriteOrigin), is a connected peer.
 	serviceOrigins   sync.Map
 	conditionalGates sync.Map
 }
@@ -111,10 +124,15 @@ type roomState struct {
 	durableAppends  atomic.Int64
 	gen             uint64
 	suppressSettle  int
-	settleFailures  int
-	closed          bool
-	failed          error
-	failedDone      chan struct{}
+	// settleDeferred records a settlement asked for while suppressSettle held it off; the last
+	// release arms it.
+	settleDeferred bool
+	// liveWriter is the open transaction writing this document (see liveWrite), or nil.
+	liveWriter     *liveWrite
+	settleFailures int
+	closed         bool
+	failed         error
+	failedDone     chan struct{}
 }
 
 type documentUpdateClass struct {
@@ -130,7 +148,10 @@ type artifactOwner struct {
 	Name     string
 }
 
-// lockArtifactOwner loads an artifact's owner, then locks that owner row.
+// lockArtifactOwner loads an artifact's owner, then locks that owner row: the artifact itself
+// for a project document, its issue otherwise. The lock is `for no key update`, so it
+// serialises this writer against every other writer that takes it without blocking the
+// `for key share` a child insert takes - see lockDocumentRoom for why that is the rule.
 func lockArtifactOwner(ctx context.Context, tx pgx.Tx, artifactID string) (artifactOwner, bool, error) {
 	var owner artifactOwner
 	if err := tx.QueryRow(ctx, `
@@ -142,7 +163,7 @@ func lockArtifactOwner(ctx context.Context, tx pgx.Tx, artifactID string) (artif
 	if owner.IssueKey == nil {
 		var exists bool
 		if err := tx.QueryRow(ctx, `
-			select true from artifacts where id = $1 and issue_key is null for update
+			select true from artifacts where id = $1 and issue_key is null for no key update
 		`, artifactID).Scan(&exists); err != nil {
 			return artifactOwner{}, false, fmt.Errorf("lock document artifact: %w", err)
 		}
@@ -150,7 +171,7 @@ func lockArtifactOwner(ctx context.Context, tx pgx.Tx, artifactID string) (artif
 	}
 	var open bool
 	if err := tx.QueryRow(ctx, `
-		select closed_at is null from issues where key = $1 for update
+		select closed_at is null from issues where key = $1 for no key update
 	`, *owner.IssueKey).Scan(&open); err != nil {
 		return artifactOwner{}, false, fmt.Errorf("lock document issue: %w", err)
 	}
@@ -406,11 +427,14 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	select {
 	case <-settled:
 	case <-ctx.Done():
-		s.stopping.Store(true)
+		s.stopAccepting()
 		return ctx.Err()
 	}
-	s.stopping.Store(true)
+	s.stopAccepting()
 	s.waitSettles(ctx)
+	// A room that failed evicts itself on its own goroutine, and that eviction flushes the
+	// room through the store, so it has to finish before the store can go.
+	s.waitEvictions(ctx)
 	if err := drainCtx.Err(); err != nil {
 		return err
 	}
@@ -432,13 +456,21 @@ func (s *Service) scheduleSettleLocked(room string, state *roomState) {
 }
 
 func (s *Service) scheduleSettleAfterLocked(room string, state *roomState, delay time.Duration) {
-	if s.stopping.Load() || s.shuttingDown(room) || state.closed || state.failed != nil || state.suppressSettle > 0 {
+	if s.stopping.Load() || s.shuttingDown(room) || state.closed || state.failed != nil {
+		return
+	}
+	if state.suppressSettle > 0 {
+		state.settleDeferred = true
+		return
+	}
+	// The advisory read above skips the work; this one registers the timer against Shutdown's
+	// store, so the Add cannot land after waitSettles has begun.
+	if !s.addUnlessStopping(&s.settleWG) {
 		return
 	}
 	state.gen++
 	generation := state.gen
 	s.stopSettleTimer(state.settle)
-	s.settleWG.Add(1)
 	timerID := s.nextSettleTimer.Add(1)
 	s.registerSettleTimer(timerID)
 	timer := time.AfterFunc(delay, func() {
@@ -658,7 +690,7 @@ func (s *Service) settleRoom(room string, generation uint64) {
 	state.mu.Unlock()
 
 	eventCollector := NewEventCollector()
-	ctx := WithEventCollector(context.Background(), eventCollector)
+	ctx := store.WithTransactionTracking(WithEventCollector(context.Background(), eventCollector))
 	tx, err := s.store.Pool.Begin(ctx)
 	if err != nil {
 		s.retrySettle(room, generation, fmt.Errorf("begin document transaction: %w", err))
@@ -673,6 +705,10 @@ func (s *Service) settleRoom(room string, generation uint64) {
 	if !open {
 		return
 	}
+	// The owner row is read and locked in this transaction, so the repairs settlement injects
+	// below do not read it again: that read would be a second pooled connection taken while
+	// this transaction holds one, which is what deadlocks the pool.
+	ctx = withOwnerVerified(ctx)
 	latest, err := latestVersion(ctx, tx, room)
 	if err != nil {
 		s.retrySettle(room, generation, err)
@@ -750,7 +786,15 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		}
 		return
 	}
-	if state.gen != generation {
+	// An open live write is not in the room yet, and since this settlement holds the owner row,
+	// the write's transaction has already committed: the cursor this settlement versions against
+	// includes its row. Write no version; finishLiveWrite arms a settlement once it is published.
+	superseded := state.gen != generation
+	if state.liveWriter != nil {
+		state.settleDeferred = true
+		superseded = true
+	}
+	if superseded {
 		state.mu.Unlock()
 		if stamped == 0 {
 			return
@@ -999,11 +1043,11 @@ func currentUpdateCursor(ctx context.Context, tx pgx.Tx, artifactID string) (int
 
 func (s *Service) lockSettlementCursor(ctx context.Context, tx pgx.Tx, room string) error {
 	if !s.shuttingDown(room) {
-		if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext($1))`, room); err != nil {
-			return err
-		}
-		return nil
+		return lockDocumentRoom(ctx, tx, room)
 	}
+	// Shutdown will not wait behind a live writer, so it try-locks the room instead of blocking
+	// on it, and gives up after the deadline rather than queueing. That is what makes this
+	// branch safe: it never joins a lock queue, so it can never be a party to a cycle.
 	deadline := time.NewTimer(100 * time.Millisecond)
 	defer deadline.Stop()
 	for {
@@ -1058,6 +1102,7 @@ type BlockIDBackfill struct {
 // BackfillBlockIDs runs the identity closure against every document. A document
 // failure is reported with that document so later documents can still be stamped.
 func (s *Service) BackfillBlockIDs(ctx context.Context) ([]BlockIDBackfill, error) {
+	ctx = store.WithTransactionTracking(ctx)
 	rows, err := s.store.Pool.Query(ctx, `select id::text from artifacts where kind = 'doc' order by id`)
 	if err != nil {
 		return nil, fmt.Errorf("list documents: %w", err)
@@ -1099,7 +1144,7 @@ func (s *Service) backfillBlockIDs(ctx context.Context, artifactID string) Block
 	}
 	state.mu.Unlock()
 
-	backfillCtx := withBackfillInjection(ctx)
+	backfillCtx := withOwnerVerified(ctx)
 	slot := s.prepareSuppressedPersistence(artifactID)
 	origin := &identityClosureOrigin{}
 	var updates [][]byte
@@ -1168,10 +1213,42 @@ func (s *Service) backfillBlockIDs(ctx context.Context, artifactID string) Block
 	return report
 }
 
+// addUnlessStopping registers one worker with group unless Shutdown has already begun, and
+// reports whether it did. The check and the Add are one step against Shutdown's stopping store
+// (gateMu), so an Add can never follow the Wait that store precedes.
+func (s *Service) addUnlessStopping(group *sync.WaitGroup) bool {
+	s.gateMu.Lock()
+	defer s.gateMu.Unlock()
+	if s.stopping.Load() {
+		return false
+	}
+	group.Add(1)
+	return true
+}
+
+// stopAccepting closes the gate: after it returns, no addUnlessStopping registers a worker, so a
+// Wait that follows cannot race an Add. It holds gateMu around the store alone - never across
+// work that locks a room, which would invert the room-then-gate order.
+func (s *Service) stopAccepting() {
+	s.gateMu.Lock()
+	defer s.gateMu.Unlock()
+	s.stopping.Store(true)
+}
+
 func (s *Service) waitSettles(ctx context.Context) {
+	waitGroup(ctx, &s.settleWG)
+}
+
+func (s *Service) waitEvictions(ctx context.Context) {
+	waitGroup(ctx, &s.evictWG)
+}
+
+// waitGroup blocks until wg drains or ctx ends, so a bounded shutdown never waits forever on
+// work it cannot cancel.
+func waitGroup(ctx context.Context, wg *sync.WaitGroup) {
 	done := make(chan struct{})
 	go func() {
-		s.settleWG.Wait()
+		wg.Wait()
 		close(done)
 	}()
 	select {
@@ -1180,27 +1257,21 @@ func (s *Service) waitSettles(ctx context.Context) {
 	}
 }
 
-func (s *Service) SetIssueClosed(issueKey string, closed bool) {
-	rows, err := s.store.Pool.Query(context.Background(), `
+// SetIssueClosed refreshes the closed state every room of an issue remembers. Its caller runs
+// it after its own transaction has committed, and it takes that caller's context so the pool
+// can see it: a caller that ever runs it with a transaction still open is refused, not wedged.
+func (s *Service) SetIssueClosed(ctx context.Context, issueKey string, closed bool) {
+	rooms, err := s.documentRooms(ctx, "the issue's document rooms", `
 		select id::text from artifacts where issue_key = $1 and kind = 'doc'
 	`, issueKey)
 	if err != nil {
+		// Every room keeps the closed flag it already had. A caller that ran this while it
+		// still held a connection is refused (store.ErrNestedAcquire) and has to be able to
+		// see which issue went stale.
+		slog.Error("dispatch: refresh the closed state of an issue's rooms",
+			"issue", issueKey, "error", err)
 		return
 	}
-	var rooms []string
-	for rows.Next() {
-		var room string
-		if err := rows.Scan(&room); err != nil {
-			rows.Close()
-			return
-		}
-		rooms = append(rooms, room)
-	}
-	if rows.Err() != nil {
-		rows.Close()
-		return
-	}
-	rows.Close()
 	for _, room := range rooms {
 		state := s.room(room)
 		state.mu.Lock()
@@ -1217,8 +1288,9 @@ func (s *Service) SetIssueClosed(issueKey string, closed bool) {
 	}
 }
 
-// Evict closes a live room and discards its resident state so the next access
-// reloads the durable document without treating the room as failed.
+// Evict closes a live room and discards its resident state so the next access reloads the
+// durable document without treating the room as failed. No production code calls it: it exists
+// so tests, including those in package api, can force a room to reload.
 func (s *Service) Evict(_ context.Context, artifactID string) error {
 	value, _ := s.rooms.Load(artifactID)
 	var state *roomState
@@ -1264,7 +1336,15 @@ func (s *Service) failRoomLocked(room string, state *roomState, cause error) {
 	state.gen++
 	s.stopSettleTimer(state.settle)
 	s.purgeSuppressedPersistence(room)
+	// Shutdown joins the evictions it did not cause. The consequence differs from settleWG's
+	// gate, which skips the work as well as the waiting: this eviction runs either way, because
+	// awaitRoomRecovery blocks every reader of a failed room on the close(done) below, and a
+	// gated eviction that never ran would strand them. Only the joining is skipped.
+	tracked := s.addUnlessStopping(&s.evictWG)
 	go func() {
+		if tracked {
+			defer s.evictWG.Done()
+		}
 		_ = s.evictRoom(room, state)
 		close(done)
 	}()
@@ -1326,9 +1406,31 @@ func (s *Service) roomClosed(room string) bool {
 	return state.closed
 }
 
-func (s *Service) issueOpen(ctx context.Context, artifactID string) (bool, error) {
+// queryFrom returns the caller's transaction when it is inside one. A document read made while
+// an API write transaction is open must go through that transaction: a second connection from
+// the shared pool is what deadlocks it (store.ErrNestedAcquire).
+func (s *Service) queryFrom(ctx context.Context) Queryer {
+	if tx, ok := txFromContext(ctx); ok {
+		return tx
+	}
+	return s.store.Pool
+}
+
+// Queryer is the read surface shared by the pool and a transaction, so a read can be pointed
+// at whichever the caller is inside.
+type Queryer interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// issueOpen reads the document's issue state from q. Which q is the whole question: an API
+// handler that anchors a comment or an ask is inside a transaction here, and its own
+// connection is the only one it may use, while a room load must read from the pool that owns
+// the load - a writer holding a connection waits for that load, so a load that waits for the
+// shared pool closes the same cycle the transaction rule closes.
+func (s *Service) issueOpen(ctx context.Context, q Queryer, artifactID string) (bool, error) {
 	var open bool
-	if err := s.store.Pool.QueryRow(ctx, `
+	if err := q.QueryRow(ctx, `
 		select coalesce(i.closed_at is null, true)
 		from artifacts a left join issues i on i.key = a.issue_key
 		where a.id = $1 and a.kind = 'doc'

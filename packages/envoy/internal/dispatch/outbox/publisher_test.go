@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -254,6 +255,67 @@ func TestPublishAuthorRoutesNotifiesTheAddedOrRemovedFollowerDirectly(t *testing
 			got := publisher.all()
 			if len(got) != 1 || got[0].Topic != "notifications.agent.session-asker" {
 				t.Fatalf("%s routes = %#v, want the named session's own topic only", eventType, topicsOf(got))
+			}
+		})
+	}
+}
+
+// A session that loses an issue's claim hears about it on its own topic, whoever acted and
+// whatever the issue's route: a takeover (its session was no longer live) and a release
+// somebody else made. A session that releases its own claim is not told about itself.
+func TestPublishPreviousClaimantTellsTheSessionThatLostTheClaim(t *testing.T) {
+	previous := map[string]any{
+		"actor": map[string]any{"kind": "session", "id": "session-one"},
+		"at":    "2026-09-24T05:00:00Z",
+	}
+	for _, tc := range []struct {
+		name      string
+		eventType string
+		actor     model.Actor
+		payload   map[string]any
+		want      []string
+	}{
+		{
+			name:      "takeover",
+			eventType: "issue.claimed",
+			actor:     model.Actor{Kind: "session", ID: "session-two"},
+			payload:   map[string]any{"reason": "takeover", "previous_claim": previous},
+			want:      []string{"notifications.agent.session-one"},
+		},
+		{
+			name:      "human release",
+			eventType: "issue.released",
+			actor:     model.Actor{Kind: "user", ID: "alice"},
+			payload:   map[string]any{"reason": "released", "previous_claim": previous},
+			want:      []string{"notifications.agent.session-one"},
+		},
+		{
+			name:      "holder releases its own claim",
+			eventType: "issue.released",
+			actor:     model.Actor{Kind: "session", ID: "session-one"},
+			payload:   map[string]any{"reason": "released", "previous_claim": previous},
+			want:      []string{},
+		},
+		{
+			name:      "first claim on an unclaimed issue",
+			eventType: "issue.claimed",
+			actor:     model.Actor{Kind: "session", ID: "session-one"},
+			payload:   map[string]any{"reason": "claimed"},
+			want:      []string{},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			database := storetest.Open(t)
+			seedIssue(t, database, "T-1", nil)
+			publisher := &recordingPublisher{}
+			deps := Deps{Store: database, Publisher: publisher}
+			item := contracts.Envelope{EventID: "dispatch-1", Topic: "notifications.dispatch.issue.T-1." + tc.eventType}
+			event := model.Event{Type: tc.eventType, Actor: tc.actor, Payload: tc.payload}
+			if err := publishPreviousClaimant(context.Background(), deps, 0, item, event, map[string]struct{}{}); err != nil {
+				t.Fatalf("publish previous claimant: %v", err)
+			}
+			if got := topicsOf(publisher.all()); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("topics = %#v, want %#v", got, tc.want)
 			}
 		})
 	}
@@ -1250,6 +1312,68 @@ func TestScanPublishesReadyEventAfterFullBatchOfPoisonRows(t *testing.T) {
 	earliest := scanStart.Add(retryBaseDelay).Truncate(time.Microsecond)
 	if attempts < 1 || nextAttempt == nil || nextAttempt.Before(earliest) {
 		t.Fatalf("poison retry state = attempts %d next=%v, want at least one attempt with a retry no earlier than %v", attempts, nextAttempt, earliest)
+	}
+}
+
+// A row the scan cannot read must not stop the outbox. pgx treats a scan failure as fatal and
+// closes the cursor, so the events queued behind that row are unreachable until it stops
+// selecting into every batch: the unreadable row is backed off like any other unpublishable
+// event, and the next scan delivers what was behind it.
+func TestScanPublishesTheEventBehindAnUnreadableRow(t *testing.T) {
+	database := storetest.Open(t)
+	broker := events.NewBroker()
+	seedIssue(t, database, "T-1", nil)
+	unreadable := appendEvent(t, database, broker, model.Event{
+		IssueKey: new("T-1"),
+		Type:     "message.created",
+		Actor:    model.Actor{Kind: "session", ID: "worker"},
+		Payload:  model.Message{ID: "unreadable", IssueKey: new("T-1"), Body: "unreadable"},
+	})
+	behind := appendEvent(t, database, broker, model.Event{
+		IssueKey: new("T-1"),
+		Type:     "message.created",
+		Actor:    model.Actor{Kind: "session", ID: "worker"},
+		Payload:  model.Message{ID: "behind", IssueKey: new("T-1"), Body: "deliver"},
+	})
+	// A null element of published_destinations fails the scan into []string, which is how a
+	// column the code cannot read looks from here.
+	if _, err := database.Pool.Exec(context.Background(), `
+		update events set published_destinations = array[null]::text[] where id = $1
+	`, unreadable.ID); err != nil {
+		t.Fatalf("make the row unreadable: %v", err)
+	}
+
+	deps := Deps{Store: database, Publisher: &recordingPublisher{}, Broker: broker}
+	publisher := deps.Publisher.(*recordingPublisher)
+	scan(context.Background(), deps)
+	if items := publisher.all(); len(items) != 0 {
+		t.Fatalf("batch the unreadable row ended published %d envelopes: %#v", len(items), items)
+	}
+	// The unreadable row is backed off rather than published, so a scan run after that backoff
+	// reaches what was queued behind it. A scan that beats the backoff hits the same row again
+	// and doubles it, so this converges however loaded the box is.
+	deadline := time.Now().Add(20 * time.Second)
+	for publishedAt(t, database, behind.ID) == nil {
+		if time.Now().After(deadline) {
+			t.Fatal("event behind the unreadable row was never published")
+		}
+		time.Sleep(10 * time.Millisecond)
+		scan(context.Background(), deps)
+	}
+	items := publisher.all()
+	if len(items) != 1 || items[0].SourceEventID != fmt.Sprint(behind.ID) {
+		t.Fatalf("published items = %#v, want only event %d", items, behind.ID)
+	}
+	if publishedAt(t, database, unreadable.ID) != nil {
+		t.Fatal("unreadable row was marked published")
+	}
+	var nextAttempt *time.Time
+	if err := database.Pool.QueryRow(context.Background(),
+		`select next_attempt_at from events where id = $1`, unreadable.ID).Scan(&nextAttempt); err != nil {
+		t.Fatalf("read the unreadable row's retry state: %v", err)
+	}
+	if nextAttempt == nil {
+		t.Fatal("unreadable row stays eligible for every batch, so nothing behind it can be read")
 	}
 }
 

@@ -163,3 +163,53 @@ test("eventDescription names the child a reparent adds or removes", () => {
     "Removed child CORE-12"
   );
 });
+
+// The issue log names the same five movements, in its own voice: it has no actor column beside
+// the line, so a release says what happened and a takeover names who lost the claim.
+type ClaimLogEvent = Extract<Event, { type: "issue.claimed" | "issue.released" }>;
+
+const claimLogEvent = (
+  type: ClaimLogEvent["type"],
+  payload: Partial<ClaimLogEvent["payload"]>
+): ClaimLogEvent =>
+  ({
+    actor: { id: "alice", kind: "user" },
+    created_at: "2026-09-24T07:00:00Z",
+    id: 9,
+    issue_key: "CORE-1",
+    notify: false,
+    payload: { key: "CORE-1", status: "in_progress", claim: null, ...payload },
+    project: "CORE",
+    seq: 9,
+    type,
+  }) as ClaimLogEvent;
+
+const held = {
+  actor: { id: "session-one", kind: "session" as const, origin: { session_title: "Implementer" } },
+  at: "2026-09-24T06:00:00Z",
+};
+
+test.each([
+  [
+    "a first claim",
+    claimLogEvent("issue.claimed", { claim: held, reason: "claimed" }),
+    "Issue claimed",
+  ],
+  [
+    "a takeover",
+    claimLogEvent("issue.claimed", { claim: held, previous_claim: held, reason: "takeover" }),
+    "Claim taken from Implementer",
+  ],
+  [
+    "a release",
+    claimLogEvent("issue.released", { previous_claim: held, reason: "released" }),
+    "Claim released",
+  ],
+  [
+    "a close",
+    claimLogEvent("issue.released", { previous_claim: held, reason: "closed" }),
+    "Claim released on close",
+  ],
+])("the issue log line for %s", (_name, event, expected) => {
+  expect(eventDescription(event)).toBe(expected);
+});

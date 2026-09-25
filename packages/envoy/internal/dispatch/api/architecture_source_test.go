@@ -133,10 +133,11 @@ func newArchitectureSourceServer(t *testing.T, fake *fakeGitHubApp) (http.Handle
 	pemText := string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}))
 	github := httptest.NewServer(fake.handler(t))
 	t.Cleanup(github.Close)
-	return newTestServer(t, testServerOptions{
+	handler, database, _ := newTestServer(t, testServerOptions{
 		app:           &auth.AppConfig{ClientID: "Iv1.test", ClientSecret: "secret", PEM: pemText},
 		githubAPIBase: github.URL,
 	})
+	return handler, database
 }
 
 type architectureSourceResponse struct {
@@ -286,7 +287,7 @@ func TestArchitectureSourceAccessFailuresAnswer409(t *testing.T) {
 }
 
 func TestArchitectureSourceWithoutAppKeyAnswers409(t *testing.T) {
-	handler, _ := newTestServer(t, testServerOptions{})
+	handler, _, _ := newTestServer(t, testServerOptions{})
 	createTestProject(t, handler, "CORE")
 	response := dispatchRequest(t, handler, http.MethodPut, "/api/v1/projects/CORE/architecture-source", map[string]string{
 		"repo": "legion/arch", "branch": "main",

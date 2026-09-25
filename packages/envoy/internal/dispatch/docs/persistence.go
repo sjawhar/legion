@@ -31,7 +31,11 @@ func (p *PgVersioned) Load(ctx context.Context, room string) (persistence.LoadRe
 	if err := ctx.Err(); err != nil {
 		return persistence.LoadResult{}, err
 	}
-	tx, err := p.pool().BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	rooms, err := p.store.Pool.Rooms()
+	if err != nil {
+		return persistence.LoadResult{}, err
+	}
+	tx, err := rooms.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return persistence.LoadResult{}, fmt.Errorf("begin document load: %w", err)
 	}
@@ -96,7 +100,40 @@ func (p *PgVersioned) AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string
 }
 
 // lockDocumentRoom serializes every durable mutation of one document. Callers
-// that need a check-then-write guarantee must hold it before reading live state.
+// that need a check-then-write guarantee must hold it before reading live state. Every durable
+// writer that takes the room lock inside a transaction takes it here; withRoomLock takes the
+// session-level form on its own connection, and lockSettlementCursor try-locks it at shutdown.
+// The rule between this lock and a document's owner row has two halves, and both are
+// load-bearing.
+//
+// Level. No lock on issues, artifacts, projects or asks is `for update`. Weaker levels are
+// free - `for no key update` where a writer must serialise against other writers of the same
+// row, `for share` or `for key share` where it need not - and TestNoForUpdateOnOwnerTables
+// enforces the prohibition over the way these locks are written: a `for update` spelled in a
+// string literal, or in a chain of literals and package-level constants, `var`s included,
+// resolved to a fixpoint, which is every site here. An operand the check cannot resolve is
+// read through its own string literals alone, spliced in with a space at each end, so a clause
+// that forms across that splice is refused too, and only a clause the scanned text never
+// spells, including a keyword the splice splits mid-word, is outside its reach and is a review
+// matter. What `for update` costs is the `for key share` a foreign key takes: under it an
+// insert into doc_updates, doc_snapshots, doc_checkpoints, comments, or any child table added
+// later waits on the owner row, and a durable writer holding this lock then deadlocks against
+// whoever holds that row. `for no key update` conflicts with itself exactly as `for update`
+// did, so writers of one owner still serialise and the per-owner event sequence is unchanged.
+//
+// One transaction would still need `for update` on these tables: one that deletes such a row or
+// changes a key column, which is what the weaker level does not cover. Nothing here does either.
+// The check refuses it if something starts to, and that red is the prompt to revisit this rule,
+// not to reach for a weaker level that would not hold.
+//
+// Order. A transaction that takes both an owner row and this lock takes the owner row first.
+// The durable writers - appendUpdate, CaptureSnapshot, PruneAfter, and everything else reaching
+// this through withRoomLock - take no owner row at all, which is why order alone could never
+// have been the whole rule: withRoomLock holds a session-level pg_advisory_lock on its own
+// connection before it opens a transaction, so no row lock can precede it there. But a
+// transaction that does take both, such as an upload appending its event after writing the
+// document, still deadlocks against a settlement if it takes them the other way round: two
+// `for no key update` locks on the same row conflict with each other.
 func lockDocumentRoom(ctx context.Context, tx pgx.Tx, room string) error {
 	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext($1))`, room); err != nil {
 		return fmt.Errorf("lock document room: %w", err)
@@ -200,6 +237,9 @@ func (p *PgVersioned) MaterializeAt(ctx context.Context, room string, version pe
 	if version == 0 {
 		return nil, nil
 	}
+	// A version read opens its own transaction, so it marks its context like every other
+	// opener: the pool refuses a second connection taken under it (store.ErrNestedAcquire).
+	ctx = store.WithTransactionTracking(ctx)
 	tx, err := p.pool().Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin materialize document: %w", err)
@@ -234,8 +274,8 @@ func (p *PgVersioned) CaptureSnapshot(ctx context.Context, room, name string, st
 			return fmt.Errorf("begin capture document snapshot: %w", err)
 		}
 		defer tx.Rollback(ctx)
-		if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext($1))`, room); err != nil {
-			return fmt.Errorf("lock document room: %w", err)
+		if err := lockDocumentRoom(ctx, tx, room); err != nil {
+			return err
 		}
 		if err := p.recoverPruneTx(ctx, tx, room); err != nil {
 			return err
@@ -288,8 +328,8 @@ func (p *PgVersioned) PruneAfter(ctx context.Context, room string, target persis
 			return fmt.Errorf("begin checkpoint document prune: %w", err)
 		}
 		defer tx.Rollback(ctx)
-		if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext($1))`, room); err != nil {
-			return fmt.Errorf("lock document room: %w", err)
+		if err := lockDocumentRoom(ctx, tx, room); err != nil {
+			return err
 		}
 		var exists bool
 		if err := tx.QueryRow(ctx, `select exists(select 1 from doc_updates where artifact_id = $1)`, room).Scan(&exists); err != nil {
@@ -342,8 +382,8 @@ func (p *PgVersioned) Compact(ctx context.Context, room string, keep int) (int, 
 			return fmt.Errorf("begin compact document: %w", err)
 		}
 		defer tx.Rollback(ctx)
-		if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext($1))`, room); err != nil {
-			return fmt.Errorf("lock document room: %w", err)
+		if err := lockDocumentRoom(ctx, tx, room); err != nil {
+			return err
 		}
 		if err := p.recoverPruneTx(ctx, tx, room); err != nil {
 			return err
@@ -420,8 +460,8 @@ func (p *PgVersioned) Delete(ctx context.Context, room string) error {
 			return fmt.Errorf("begin delete document: %w", err)
 		}
 		defer tx.Rollback(ctx)
-		if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext($1))`, room); err != nil {
-			return fmt.Errorf("lock document room: %w", err)
+		if err := lockDocumentRoom(ctx, tx, room); err != nil {
+			return err
 		}
 		for _, query := range []string{
 			`delete from doc_snapshots where artifact_id = $1`,
@@ -439,11 +479,7 @@ func (p *PgVersioned) Delete(ctx context.Context, room string) error {
 	})
 }
 
-type queryRower interface {
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
-}
-
-func (p *PgVersioned) head(ctx context.Context, q queryRower, room string) (persistence.Version, error) {
+func (p *PgVersioned) head(ctx context.Context, q Queryer, room string) (persistence.Version, error) {
 	var version int64
 	if err := q.QueryRow(ctx, `
 		select coalesce(
@@ -520,6 +556,10 @@ func (p *PgVersioned) withRoomLock(ctx context.Context, room string, fn func(*pg
 		return fmt.Errorf("acquire document connection: %w", err)
 	}
 	defer conn.Release()
+	// The work below holds this connection and the room's advisory lock; anything it reads
+	// reads through them, never through a second pooled connection.
+	ctx, releaseMark := store.HoldsConnection(ctx)
+	defer releaseMark()
 	if _, err := conn.Exec(ctx, `select pg_advisory_lock(hashtext($1))`, room); err != nil {
 		return fmt.Errorf("lock document room: %w", err)
 	}
@@ -527,29 +567,46 @@ func (p *PgVersioned) withRoomLock(ctx context.Context, room string, fn func(*pg
 	return fn(conn)
 }
 
-func (p *PgVersioned) pool() *pgxpool.Pool {
+func (p *PgVersioned) pool() *store.Pool {
 	return p.store.Pool
 }
 
 func (s *Service) CompactAll(ctx context.Context, keep int) error {
-	rows, err := s.store.Pool.Query(ctx, `select id::text from artifacts where kind = 'doc'`)
+	ctx = store.WithTransactionTracking(ctx)
+	rooms, err := s.documentRooms(ctx, "document rooms", `select id::text from artifacts where kind = 'doc'`)
 	if err != nil {
-		return fmt.Errorf("list document rooms: %w", err)
+		return err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var artifactID string
-		if err := rows.Scan(&artifactID); err != nil {
-			return fmt.Errorf("scan document room: %w", err)
-		}
+	for _, artifactID := range rooms {
 		if _, err := s.persistence.Compact(ctx, artifactID, keep); err != nil {
 			return fmt.Errorf("compact document %s: %w", artifactID, err)
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("list document rooms: %w", err)
-	}
 	return nil
+}
+
+// documentRooms drains the id list before its caller does anything with it: the work each id
+// leads to - a compaction, a room close - takes a pooled connection of its own, and holding
+// the rows open across that would be a second connection for work the first is waiting on.
+// The what argument names the list in the errors the caller reads.
+func (s *Service) documentRooms(ctx context.Context, what, sql string, args ...any) ([]string, error) {
+	rows, err := s.store.Pool.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list %s: %w", what, err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var artifactID string
+		if err := rows.Scan(&artifactID); err != nil {
+			return nil, fmt.Errorf("scan document room: %w", err)
+		}
+		ids = append(ids, artifactID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate %s: %w", what, err)
+	}
+	return ids, nil
 }
 
 var _ persistence.VersionedPersistence = (*PgVersioned)(nil)

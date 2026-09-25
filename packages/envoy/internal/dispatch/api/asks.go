@@ -166,15 +166,9 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		s.writeHandlerError(w, err)
 		return
 	}
-	evictOnFailure := false
-	evictArtifactID := ""
-	defer func() {
-		if evictOnFailure {
-			_ = s.deps.Docs.Evict(r.Context(), evictArtifactID)
-		}
-	}()
 	defer tx.Rollback(r.Context())
 	documentCtx, documentEvents := documentMutationContext(r.Context(), tx)
+	defer s.deps.Docs.DiscardLiveWrites(documentEvents)
 	status, err := s.requireOpenOwnerStatus(r.Context(), tx, owner)
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -186,10 +180,6 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		return
 	}
 	anchor, artifactName, snapshot, err := s.resolveAnchor(documentCtx, tx, owner, input.Anchor, docs.MarkAsk, rowID, actor)
-	if anchor != nil {
-		evictOnFailure = true
-		evictArtifactID = anchor.ArtifactID
-	}
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -286,11 +276,10 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 			r.Context(), tx, "POST /api/v1/issues/{key}/asks", *owner.IssueKey, actor, rowID, *status,
 		)
 	}
-	if err := tx.Commit(r.Context()); err != nil {
+	if err := s.commitDocumentMutation(r.Context(), tx, documentEvents); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	evictOnFailure = false
 	if snapshot != nil {
 		s.deps.Docs.CommitVersion(anchor.ArtifactID, snapshot.Version)
 	}
@@ -361,7 +350,7 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	ask, err := s.loadAskForUpdate(r.Context(), tx, unlockedAsk.ID)
+	ask, err := s.lockAskForTransition(r.Context(), tx, unlockedAsk.ID)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -374,7 +363,7 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "ASK_KIND_FIXED", http.StatusConflict, "an approval ask's question and options are fixed; retract it and request approval again")
 		return
 	}
-	if actor.Kind == "session" && (ask.Author.Kind != actor.Kind || ask.Author.ID != actor.ID) {
+	if actor.Kind == "session" && !ask.Author.SameAs(actor) {
 		writeError(w, "NOT_AUTHOR", http.StatusForbidden, "only the asking session may edit an ask")
 		return
 	}
@@ -698,7 +687,7 @@ func (s *server) loadAskEdits(ctx context.Context, q queryer, askID string) ([]m
 	return edits, nil
 }
 
-// loadAsk reads one ask for a response: unlike loadAskForUpdate, which feeds the
+// loadAsk reads one ask for a response: unlike lockAskForTransition, which feeds the
 // ask.* event payloads, it carries WaitingOn for an open ask.
 func (s *server) loadAsk(ctx context.Context, q queryer, id string) (model.Ask, error) {
 	ask, _, err := scanAskRead(q.QueryRow(ctx, `
@@ -795,11 +784,17 @@ func (s *server) queryOwnerAsks(ctx context.Context, q queryer, owner owner, sta
 	return asks, replies, nil
 }
 
-func (s *server) loadAskForUpdate(ctx context.Context, tx pgx.Tx, id string) (model.Ask, error) {
+// lockAskForTransition reads one ask and locks its row for the transition about to be applied.
+// `for no key update` because nothing deletes an ask or changes its id: this still serialises
+// two transitions of the same ask against each other, while leaving the `for key share` a
+// reply's comments.ask_id insert takes unblocked. A reply is ordered against a transition by
+// the owner row, which comment_create.go and ask_transitions.go both take before either reads
+// this ask's state.
+func (s *server) lockAskForTransition(ctx context.Context, tx pgx.Tx, id string) (model.Ask, error) {
 	ask, err := scanAskRow(tx.QueryRow(ctx, `
 		select `+askRowColumns+`
 		`+askRowFrom+`
-		where a.id = $1 for update of a
+		where a.id = $1 for no key update of a
 	`, id))
 	if err != nil {
 		return model.Ask{}, err

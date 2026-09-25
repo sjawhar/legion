@@ -2,14 +2,18 @@ package bus
 
 import (
 	"context"
+	"errors"
 	"net"
 	"reflect"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/testnats"
+	"github.com/testcontainers/testcontainers-go"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
 
@@ -112,10 +116,10 @@ func TestConnectWithContextBoundsMultipleUnresponsiveServers(t *testing.T) {
 func TestConnectWithContextDoesNotPoisonAutomaticReconnect(t *testing.T) {
 	baseCtx := context.Background()
 	ctr, err := tcnats.Run(baseCtx, testnats.Image)
+	testcontainers.CleanupContainer(t, ctr)
 	if err != nil {
 		t.Fatalf("start NATS: %v", err)
 	}
-	t.Cleanup(func() { _ = ctr.Terminate(baseCtx) })
 	uri, err := ctr.ConnectionString(baseCtx)
 	if err != nil {
 		t.Fatalf("NATS connection string: %v", err)
@@ -169,10 +173,10 @@ func TestEnsureStreamWithConfig_updatesMaxAgeWhenExistingStreamDiffers(t *testin
 func TestConnectMigratesExistingStreamDuplicatesWindow(t *testing.T) {
 	ctx := context.Background()
 	ctr, err := tcnats.Run(ctx, testnats.Image)
+	testcontainers.CleanupContainer(t, ctr)
 	if err != nil {
 		t.Fatalf("start NATS: %v", err)
 	}
-	t.Cleanup(func() { _ = ctr.Terminate(ctx) })
 	uri, err := ctr.ConnectionString(ctx)
 	if err != nil {
 		t.Fatalf("NATS connection string: %v", err)
@@ -251,10 +255,10 @@ func TestEnsureStreamWithConfigPurgesRoleMessagesPublishedDuringMigration(t *tes
 func TestConnectPurgesLegacyRoleMessagesBeforeDurableConsumerRestart(t *testing.T) {
 	ctx := context.Background()
 	ctr, err := tcnats.Run(ctx, testnats.Image)
+	testcontainers.CleanupContainer(t, ctr)
 	if err != nil {
 		t.Fatalf("start NATS: %v", err)
 	}
-	t.Cleanup(func() { _ = ctr.Terminate(ctx) })
 	uri, err := ctr.ConnectionString(ctx)
 	if err != nil {
 		t.Fatalf("NATS connection string: %v", err)
@@ -353,7 +357,9 @@ func TestStreamConfigExcludesRoleLanes(t *testing.T) {
 	}
 }
 
-func TestEnsureStreamWithConfigUpdatesSubjectsWhenExistingStreamDiffers(t *testing.T) {
+// The legacy notifications.> catch-all captured the role lanes, so it is the one deployed subject
+// start-up replaces outright with the binary's own list.
+func TestEnsureStreamWithConfigReplacesTheLegacyRoleLaneCatchAll(t *testing.T) {
 	oldConfig := *streamCfg
 	oldConfig.Subjects = []string{"notifications.>"}
 	js := &streamInfoJetStream{config: oldConfig}
@@ -365,5 +371,151 @@ func TestEnsureStreamWithConfigUpdatesSubjectsWhenExistingStreamDiffers(t *testi
 	}
 	if !reflect.DeepEqual(js.config.Subjects, desiredConfig.Subjects) {
 		t.Fatalf("stream subjects = %v, want %v", js.config.Subjects, desiredConfig.Subjects)
+	}
+}
+
+// Several deployments ensure one stream: the listener and Dispatch run from one image but deploy
+// separately, and a rollback or a restart during a rollout starts a binary compiled with a
+// different subject list. Whichever starts must leave every subject the other still needs.
+func TestConnectKeepsTheSubjectsAnotherDeploymentOfTheStreamNeeds(t *testing.T) {
+	ctx := context.Background()
+	ctr, err := tcnats.Run(ctx, testnats.Image)
+	testcontainers.CleanupContainer(t, ctr)
+	if err != nil {
+		t.Fatalf("start NATS: %v", err)
+	}
+	uri, err := ctr.ConnectionString(ctx)
+	if err != nil {
+		t.Fatalf("NATS connection string: %v", err)
+	}
+	// The other deployment was compiled before notifications.legion.> existed and carries a
+	// subject this binary does not know.
+	other := *streamCfg
+	other.Subjects = []string{"notifications.retired.>"}
+	for _, subject := range streamCfg.Subjects {
+		if subject != "notifications.legion.>" {
+			other.Subjects = append(other.Subjects, subject)
+		}
+	}
+	otherConn := testnats.Connect(t, uri)
+	t.Cleanup(otherConn.Close)
+	otherJS, err := otherConn.JetStream()
+	if err != nil {
+		t.Fatalf("open the other deployment's JetStream: %v", err)
+	}
+	if err := ensureStreamWithConfig(otherJS, &other); err != nil {
+		t.Fatalf("the other deployment creates the stream: %v", err)
+	}
+
+	client, err := Connect([]string{uri})
+	if err != nil {
+		t.Fatalf("this binary connects: %v", err)
+	}
+	t.Cleanup(client.Close)
+	assertStreamSubjectsInclude(t, client.JS(), append([]string{"notifications.retired.>"}, streamCfg.Subjects...))
+
+	// The other deployment restarts while this binary is still live.
+	if err := ensureStreamWithConfig(otherJS, &other); err != nil {
+		t.Fatalf("the other deployment restarts: %v", err)
+	}
+	assertStreamSubjectsInclude(t, client.JS(), append([]string{"notifications.retired.>"}, streamCfg.Subjects...))
+	notice := contracts.Envelope{
+		EventID:        "notice-skew",
+		Source:         "agent",
+		SourceEventID:  "notice-skew",
+		Topic:          "notifications.legion.omp.LEGION-208",
+		DedupeKey:      "legion-outbox:skew",
+		IssuedAt:       contracts.NowMillis(),
+		PayloadSummary: "notice published after the other deployment restarted",
+		TraceID:        "notice-skew",
+	}
+	if err := client.Publish(notice); err != nil {
+		t.Fatalf("publish a Legion notice after the other deployment restarted: %v", err)
+	}
+}
+
+func assertStreamSubjectsInclude(t *testing.T, js nats.JetStreamContext, want []string) {
+	t.Helper()
+	info, err := js.StreamInfo(Stream)
+	if err != nil {
+		t.Fatalf("read stream: %v", err)
+	}
+	for _, subject := range want {
+		if !slices.Contains(info.Config.Subjects, subject) {
+			t.Fatalf("stream subjects = %v, missing %q", info.Config.Subjects, subject)
+		}
+	}
+}
+
+// JetStream refuses two overlapping subjects in one stream. When one deployment widens, narrows or
+// splits a subject another deployment still holds, each start (and a rollback's) must still
+// succeed, with the starting binary's shape of that subject in the stream.
+func TestEnsureStreamWithConfigStartsWhenADeployedSubjectOverlapsItsOwn(t *testing.T) {
+	ctx := context.Background()
+	ctr, err := tcnats.Run(ctx, testnats.Image)
+	testcontainers.CleanupContainer(t, ctr)
+	if err != nil {
+		t.Fatalf("start NATS: %v", err)
+	}
+	uri, err := ctr.ConnectionString(ctx)
+	if err != nil {
+		t.Fatalf("NATS connection string: %v", err)
+	}
+	conn := testnats.Connect(t, uri)
+	t.Cleanup(conn.Close)
+	js, err := conn.JetStream()
+	if err != nil {
+		t.Fatalf("open JetStream: %v", err)
+	}
+	shaped := func(legion string) nats.StreamConfig {
+		cfg := *streamCfg
+		cfg.Subjects = nil
+		for _, subject := range streamCfg.Subjects {
+			if subject == "notifications.legion.>" {
+				subject = legion
+			}
+			cfg.Subjects = append(cfg.Subjects, subject)
+		}
+		return cfg
+	}
+	wide, narrow := shaped("notifications.legion.>"), shaped("notifications.legion.*.*")
+
+	for _, tc := range []struct {
+		name            string
+		deployed, start nats.StreamConfig
+	}{
+		{name: "widen", deployed: narrow, start: wide},
+		{name: "narrow", deployed: wide, start: narrow},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := js.DeleteStream(Stream); err != nil && !errors.Is(err, nats.ErrStreamNotFound) {
+				t.Fatalf("reset stream: %v", err)
+			}
+			if err := ensureStreamWithConfig(js, &tc.deployed); err != nil {
+				t.Fatalf("the deployed binary creates the stream: %v", err)
+			}
+			for _, step := range []struct {
+				name string
+				cfg  nats.StreamConfig
+			}{
+				{name: "the new binary starts", cfg: tc.start},
+				{name: "the rollback starts", cfg: tc.deployed},
+				{name: "the new binary starts again", cfg: tc.start},
+			} {
+				if err := ensureStreamWithConfig(js, &step.cfg); err != nil {
+					t.Fatalf("%s: %v", step.name, err)
+				}
+				info, err := js.StreamInfo(Stream)
+				if err != nil {
+					t.Fatalf("%s: read stream: %v", step.name, err)
+				}
+				got, want := slices.Clone(info.Config.Subjects), slices.Clone(step.cfg.Subjects)
+				slices.Sort(got)
+				slices.Sort(want)
+				if !slices.Equal(got, want) {
+					t.Fatalf("%s: stream subjects = %v, want the starting binary's %v", step.name, info.Config.Subjects, step.cfg.Subjects)
+				}
+			}
+		})
 	}
 }

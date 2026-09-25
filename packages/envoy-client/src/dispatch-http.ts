@@ -1,6 +1,7 @@
 import type {
   Actor,
   Advised,
+  Agent,
   ArchitectureSource,
   Artifact,
   ArtifactApproval,
@@ -158,6 +159,27 @@ export class DispatchClient {
     return this.#json("PATCH", ["api", "v1", "issues", await this.#resolveIssue(issue)], input);
   }
 
+  /** `POST /api/v1/issues/{key}/claim`: this session takes the issue. 409 ISSUE_CLAIMED when a
+   *  running session, or any human, holds it; 409 CLAIM_CONTENDED when the holder changed twice
+   *  while the request ran, so nothing was applied. */
+  async claimIssue(issue: string, input: { readonly actor?: Actor } = {}): Promise<Issue> {
+    return this.#json(
+      "POST",
+      ["api", "v1", "issues", await this.#resolveIssue(issue), "claim"],
+      input
+    );
+  }
+
+  /** `DELETE /api/v1/issues/{key}/claim`: give up the claim, or clear one whose session is
+   *  gone. The status does not move. It answers the same two 409s, and has no force. */
+  async releaseIssueClaim(issue: string, input: { readonly actor?: Actor } = {}): Promise<Issue> {
+    return this.#json(
+      "DELETE",
+      ["api", "v1", "issues", await this.#resolveIssue(issue), "claim"],
+      input
+    );
+  }
+
   async getIssueEvents(issue: string, after = 0, limit = 200): Promise<Event[]> {
     return this.#json(
       "GET",
@@ -191,6 +213,12 @@ export class DispatchClient {
   /** Every open ask on a project's issues and documents (issue- or document-owned), oldest first. */
   async openAsksForProject(project: string): Promise<OpenAsksResponse> {
     return this.#json("GET", ["api", "v1", "asks", "open"], undefined, { project });
+  }
+
+  /** `GET /api/v1/agents`: the Envoy listener's live sessions, for naming a session by the
+   *  title it is running under rather than the one it stamped on an old write. */
+  async listAgents(): Promise<Agent[]> {
+    return this.#json("GET", ["api", "v1", "agents"]);
   }
 
   async whoami(): Promise<WhoamiResponse> {

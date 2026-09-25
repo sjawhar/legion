@@ -834,3 +834,98 @@ test("a retracted ask is hidden with the activity by default and shown when acti
     )
   ).toEqual(["day-divider", "message", "day-divider", "ask"]);
 });
+
+// Five ways a claim moves, each of which must read as a distinct, true line: a session
+// releasing its own claim, another session's release, a human's release of an agent's claim,
+// a close, and a takeover.
+const claimOf = (id: string, title: string) => ({
+  actor: { id, kind: "session" as const, origin: { session_title: title } },
+  at: "2026-09-24T06:00:00Z",
+});
+
+type ClaimEvent = Extract<Event, { type: "issue.claimed" | "issue.released" }>;
+
+function claimEvent(
+  type: ClaimEvent["type"],
+  actor: Actor,
+  payload: Partial<ClaimEvent["payload"]>
+): ClaimEvent {
+  return {
+    actor,
+    created_at: "2026-09-24T07:00:00Z",
+    id: 9,
+    issue_key: "CORE-1",
+    notify: false,
+    project: "CORE",
+    seq: 9,
+    type,
+    payload: { key: "CORE-1", status: "in_progress", claim: null, ...payload },
+  } as ClaimEvent;
+}
+
+const releaseCases: Array<[string, Event, string]> = [
+  [
+    "a session releasing its own claim",
+    claimEvent("issue.released", claimOf("session-one", "Implementer").actor, {
+      previous_claim: claimOf("session-one", "Implementer"),
+      reason: "released",
+    }),
+    "released the claim",
+  ],
+  [
+    "another session's release",
+    claimEvent("issue.released", claimOf("session-two", "Second agent").actor, {
+      previous_claim: claimOf("session-one", "Implementer"),
+      reason: "released",
+    }),
+    "released Implementer's claim",
+  ],
+  [
+    "a human releasing an agent's claim",
+    claimEvent(
+      "issue.released",
+      { id: "alice", kind: "user" },
+      {
+        previous_claim: claimOf("session-one", "Implementer"),
+        reason: "released",
+      }
+    ),
+    "released Implementer's claim",
+  ],
+  [
+    "a close",
+    claimEvent(
+      "issue.released",
+      { id: "alice", kind: "user" },
+      {
+        previous_claim: claimOf("session-one", "Implementer"),
+        reason: "closed",
+      }
+    ),
+    "released the claim with the close",
+  ],
+];
+
+test.each(releaseCases)("the activity line for %s", (_name, event, expected) => {
+  expect(activityDescription(event)).toBe(expected);
+});
+
+test("a first claim and a takeover read differently in the activity line", () => {
+  expect(
+    activityDescription(
+      claimEvent("issue.claimed", claimOf("session-one", "Implementer").actor, {
+        claim: claimOf("session-one", "Implementer"),
+        reason: "claimed",
+      })
+    )
+  ).toBe("claimed the issue");
+  expect(
+    activityDescription(
+      claimEvent("issue.claimed", claimOf("session-two", "Second agent").actor, {
+        claim: claimOf("session-two", "Second agent"),
+        previous_claim: claimOf("session-one", "Implementer"),
+        reason: "takeover",
+      })
+    )
+  ).toBe("took the claim from Implementer");
+});

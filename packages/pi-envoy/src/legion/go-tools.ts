@@ -2,6 +2,13 @@ import { LEGION_GO_PHASES, type LegionGoState } from "@legion/contracts/legion-g
 import type { PiApi, RegisteredTool, SessionContext, ToolResult } from "../pi-types";
 import { toolFailure, toolSuccess } from "../tool-result";
 import type { LegionGoDaemonClient } from "./go-daemon-client";
+import {
+  HANDOFF_DESCRIPTION,
+  HANDOFF_OPERATIONS,
+  handoffSchemaFields,
+  isHandoffOperation,
+  runHandoffAction,
+} from "./handoff-actions";
 
 export type GoLegionToolRole = "architect" | "phase-worker";
 
@@ -47,6 +54,7 @@ function toolSchema(pi: PiApi): unknown {
       "retry_or_escalate",
       "sign_off",
       "read_record",
+      ...HANDOFF_OPERATIONS,
     ]),
     issue: z.string().optional(),
     artifactId: z.string().optional(),
@@ -55,6 +63,7 @@ function toolSchema(pi: PiApi): unknown {
     to: z.enum(LEGION_GO_PHASES).optional(),
     reason: z.string().optional(),
     decision: z.enum(["retry", "escalate"]).optional(),
+    ...handoffSchemaFields(z),
   });
 }
 
@@ -96,24 +105,41 @@ function recordFrom(state: LegionGoState, issue: string): Readonly<Record<string
 }
 
 /** The Go daemon's role-local workflow surface. The TypeScript-daemon tool remains separate until
- * Stage 7; no Go operation can schedule a worker. */
+ * Stage 7; no Go operation can schedule a worker. The handoff actions belong to every session but
+ * the root architect: a phase worker, and a sub-architect (an architect whose issue is not its
+ * tree). */
 export function createGoLegionTool(deps: {
   readonly pi: PiApi;
   readonly daemon: () => LegionGoDaemonClient;
   readonly session: (context: SessionContext) => GoLegionToolSession;
+  /** Told of each `handoff_complete` that succeeded: the session's phase is complete. */
+  readonly onPhaseCompleted: (context: SessionContext) => void;
 }): RegisteredTool {
-  const { pi, daemon, session } = deps;
+  const { pi, daemon, session, onPhaseCompleted } = deps;
   return {
     name: "legion",
     label: "legion",
     description:
-      "Perform the workflow operation the Go Legion daemon assigned this role. The daemon advances phases; this tool cannot spawn workers.",
+      "Perform the workflow operation the Go Legion daemon assigned this role. The daemon advances phases; this tool cannot spawn workers. " +
+      HANDOFF_DESCRIPTION,
     defaultInactive: true,
     parameters: toolSchema(pi),
-    execute: async (_id, parameters, _signal, _onUpdate, context) => {
+    execute: async (_id, parameters, signal, _onUpdate, context) => {
       try {
         const active = session(context);
         const operation = requiredString(parameters, "legion", "op");
+        if (isHandoffOperation(operation)) {
+          if (active.kind === "architect" && active.issue === active.tree) {
+            throw new Error(`${operation} is not available to a root architect session`);
+          }
+          return await runHandoffAction({
+            operation,
+            parameters,
+            signal,
+            mintGrant: () => grantFor(daemon(), active),
+            onPhaseCompleted: () => onPhaseCompleted(context),
+          });
+        }
         if (!OPERATIONS[active.kind].includes(operation)) {
           throw new Error(`${operation} is not available to a ${active.kind} session`);
         }

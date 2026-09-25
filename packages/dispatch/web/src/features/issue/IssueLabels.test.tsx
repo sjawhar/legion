@@ -14,6 +14,7 @@ function summary(key: string, labels: string[]): IssueSummary {
     open_asks: 0,
     parent: null,
     assignee: null,
+    claim: null,
     components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
     priority: null,
     rank: "U",

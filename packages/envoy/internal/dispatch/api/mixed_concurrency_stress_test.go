@@ -14,7 +14,21 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
-func pooledDocumentHandler(t *testing.T, maxConns int32) (http.Handler, *store.Store) {
+// pooledDocumentHandler serves a Dispatch API whose pool is maxConns wide and whose documents
+// settle after settle, and returns the document service so a test can evict or settle a room.
+func pooledDocumentHandler(t *testing.T, maxConns int32, settle time.Duration) (http.Handler, *docs.Service) {
+	handler, service, _ := pooledDocumentHandlerWith(t, maxConns, settle, nil)
+	return handler, service
+}
+
+// pooledDocumentHandlerWith lets a test wrap the document service the API sees, so it can hold
+// one document call open while it arranges the rest of the pool.
+func pooledDocumentHandlerWith(
+	t *testing.T,
+	maxConns int32,
+	settle time.Duration,
+	wrap func(*docs.Service) docs.API,
+) (http.Handler, *docs.Service, *store.Store) {
 	t.Helper()
 	var service *docs.Service
 	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
@@ -25,9 +39,9 @@ func pooledDocumentHandler(t *testing.T, maxConns int32) (http.Handler, *store.S
 		if err != nil {
 			t.Fatalf("open test pool: %v", err)
 		}
-		database.Pool = pool
+		database.Pool = store.NewPool(pool)
 		t.Cleanup(pool.Close)
-		service = docs.New(docs.Deps{Store: database, Settle: time.Hour})
+		service = docs.New(docs.Deps{Store: database, Settle: settle})
 		t.Cleanup(func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
@@ -35,13 +49,16 @@ func pooledDocumentHandler(t *testing.T, maxConns int32) (http.Handler, *store.S
 				t.Errorf("shutdown document service: %v", err)
 			}
 		})
+		if wrap != nil {
+			return wrap(service)
+		}
 		return service
 	})
-	return handler, database
+	return handler, service, database
 }
 
 func TestConditionalEditFloodDoesNotStarveSmallPool(t *testing.T) {
-	handler, _ := pooledDocumentHandler(t, 2)
+	handler, _ := pooledDocumentHandler(t, 2, time.Hour)
 	issue := createInteractionIssue(t, handler, "TEST", "Conditional flood", "alpha")
 	for round := range 40 {
 		read := readDocumentPrecondition(t, handler, issue.PrimaryArtifactID)
@@ -78,7 +95,7 @@ func TestConditionalEditFloodDoesNotStarveSmallPool(t *testing.T) {
 func TestConcurrentConditionalAndUnconditionalEditsDoNotWedge(t *testing.T) {
 	// Unconditional edits hold a transaction connection before warm-up and wedge
 	// at pool_max_conns≈3 even on c34767d4; the follow-up fix owns that baseline.
-	handler, _ := pooledDocumentHandler(t, 8)
+	handler, _ := pooledDocumentHandler(t, 8, time.Hour)
 	issue := createInteractionIssue(t, handler, "TEST", "Mixed concurrency", "alpha")
 	for round := range 40 {
 		read := readDocumentPrecondition(t, handler, issue.PrimaryArtifactID)

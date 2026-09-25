@@ -24,7 +24,7 @@ type API interface {
 	TextWithBlocks(ctx context.Context, artifactID string) (string, []model.ArtifactBlock, error)
 	SnapshotVersion(ctx context.Context, tx pgx.Tx, artifactID string, actor model.Actor) (VersionResult, error)
 	CommitVersion(artifactID string, version model.Version)
-	SetIssueClosed(issueKey string, closed bool)
+	SetIssueClosed(ctx context.Context, issueKey string, closed bool)
 	AcquireConditionalEdit(ctx context.Context, artifactID string) (func(), error)
 	ApplyOps(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor, precondition *model.EditPrecondition) (int, error)
 	SetBlockAttributes(ctx context.Context, artifactID, blockID string, attributes map[string]any, actor model.Actor) error
@@ -36,7 +36,10 @@ type API interface {
 	AcceptSuggestion(ctx context.Context, artifactID, id, replaceWith string, actor model.Actor) error
 	RejectSuggestion(ctx context.Context, artifactID, id string, actor model.Actor) error
 	ProjectMark(ctx context.Context, artifactID, markID string, record MarkRecord, actor model.Actor) error
-	Evict(ctx context.Context, artifactID string) error
+	CreditLiveWrites(collector *EventCollector)
+	PublishLiveWrites(collector *EventCollector)
+	DiscardLiveWrites(collector *EventCollector)
+	FailLiveWrites(collector *EventCollector, cause error)
 	NamedVersion(ctx context.Context, artifactID, summary string, actor model.Actor) (VersionResult, error)
 	CompactAll(ctx context.Context, keep int) error
 }
@@ -54,11 +57,19 @@ type VersionResult struct {
 
 type eventCollectorContextKey struct{}
 
-// EventCollector retains document-generated events until the caller's enclosing
-// transaction commits. API handlers publish the collected events beside their own
-// events; document settlement publishes them after its own transaction commits.
+// EventCollector retains what document operations joined to a transaction produce until that
+// transaction ends: the events they generate and their writes to live documents. Once the
+// transaction commits, API handlers credit the writes (CreditLiveWrites) before CommitVersion,
+// then apply them with PublishLiveWrites and publish the collected events beside their own;
+// when it does not commit they drop the writes with DiscardLiveWrites. Document settlement
+// publishes its events after its own transaction commits.
 type EventCollector struct {
 	events []model.Event
+	// live holds, per document, the writes this transaction made to it. A live room sees
+	// them only through PublishLiveWrites, so a transaction that does not commit never
+	// reaches a room or a browser.
+	live  map[string]*liveWrite
+	order []string
 }
 
 // NewEventCollector constructs a transaction-local document event collector.

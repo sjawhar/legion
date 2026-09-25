@@ -10,6 +10,7 @@ import {
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
 import { decode } from "@toon-format/toon";
 import { z } from "zod";
+import { LOCAL_ENVOY_NOTICE } from "../src/legion/phase-stall";
 import { onEnvoyRoleRegained } from "../src/legion/role-claim-bridge";
 import type { MessageRenderer, MessageRendererTheme, PiApi } from "../src/pi-types";
 import { hostAgentRegistryMock, testAgentRoster } from "./test-host-registry";
@@ -302,7 +303,11 @@ function createPi(options: { readonly clipboardError?: Error; readonly zod?: typ
   const handlers = new Map<string, (event: unknown, context: SessionContext) => Promise<unknown>>();
   const renderers = new Map<string, MessageRenderer>();
   const messages: string[] = [];
-  const deliveries: { readonly content: string; readonly options: unknown }[] = [];
+  const deliveries: {
+    readonly content: string;
+    readonly details?: unknown;
+    readonly options: unknown;
+  }[] = [];
   // Persisted custom entries, in the shape a later `getBranch()` returns them.
   const entries: {
     readonly type: "custom";
@@ -317,7 +322,11 @@ function createPi(options: { readonly clipboardError?: Error; readonly zod?: typ
     on: (event, handler) => handlers.set(event, handler),
     sendMessage: (message, options) => {
       messages.push(message.content);
-      deliveries.push({ content: message.content, options });
+      deliveries.push({
+        content: message.content,
+        details: "details" in message ? message.details : undefined,
+        options,
+      });
     },
     appendEntry: (customType, data) => {
       entries.push({ type: "custom", customType, data });
@@ -950,6 +959,8 @@ describe("envoy OMP extension", () => {
       `Following ask ask-1 on LEGION-1: its answer and replies reach you directly (dispatch_follow unfollow to stop). For every event on LEGION-1: envoy_subscribe ${dispatchIssueSubject("LEGION-1", ">")}.`,
     ]);
     expect(fixture.deliveries[0]?.options).toEqual({ deliverAs: "steer", triggerTurn: false });
+    // The session's own doing, not an inbound event: the Legion phase-stall check skips it.
+    expect(fixture.deliveries[0]?.details).toEqual(LOCAL_ENVOY_NOTICE);
     // D3: whole-issue subscription is the agent's explicit envoy_subscribe, never a side effect.
     expect(natsState.controls.has(dispatchIssueSubject("LEGION-1", ">"))).toBe(false);
     expect(natsState.controls.has(`${DISPATCH_ISSUE_TOPIC_PREFIX}LEGION-1`)).toBe(false);
@@ -1085,6 +1096,11 @@ describe("envoy OMP extension", () => {
       { session_id: "ses_before", role: "release-captain" },
       { session_id: "ses_after", role: "release-captain" },
     ]);
+    // The id-change notice is the extension's own, not an inbound event: the Legion phase-stall
+    // check skips it.
+    expect(fixture.deliveries.map((delivery) => delivery.details)).toContainEqual(
+      LOCAL_ENVOY_NOTICE
+    );
   });
 
   test("a rebind re-claims a held role from memory when the registry rows are gone", async () => {

@@ -180,6 +180,7 @@ func newRig(t *testing.T, objects []k8sruntime.Object, options ...rigOption) *ri
 	g.autoStart.Store(true)
 	start := rigNow
 	g.now.Store(&start)
+	g.dyn.PrependReactor("patch", "sandboxes", k8stesting.ObjectReaction(generationTracker{g.dyn.Tracker()}))
 	for _, client := range []*k8stesting.Fake{&g.dyn.Fake, &g.kube.Fake} {
 		client.PrependReactor("*", "*", g.record)
 	}
@@ -220,6 +221,18 @@ func newDynamic(t *testing.T, objects ...*unstructured.Unstructured) *dynamicfak
 		}
 	}
 	return dyn
+}
+
+// generationTracker stores what a Sandbox patch leaves as the API server does for a CRD with a
+// status subresource, as the Sandbox's is: with metadata.generation bumped, in the same write,
+// hence one watch event. The fake's tracker leaves the generation alone.
+type generationTracker struct{ k8stesting.ObjectTracker }
+
+func (t generationTracker) Patch(gvr schema.GroupVersionResource, obj k8sruntime.Object, ns string, opts ...metav1.PatchOptions) error {
+	if object, err := metaOf(obj); err == nil && gvr == sandboxGVR {
+		object.SetGeneration(object.GetGeneration() + 1)
+	}
+	return t.ObjectTracker.Patch(gvr, obj, ns, opts...)
 }
 
 // advance moves the runtime's clock.

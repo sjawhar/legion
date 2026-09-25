@@ -278,3 +278,98 @@ func appendEvent(t *testing.T, database *store.Store, broker *Broker, event mode
 }
 
 func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
+
+// The owner row's lock is what allocates the per-owner event sequence, so weakening it to
+// `for no key update` - which it is, so a foreign-key child insert never waits on it - has to
+// leave that allocation exactly as strict. Concurrent appends on one owner must still produce
+// a dense, gapless, duplicate-free run, and leave last_seq at its end.
+func TestConcurrentAppendsKeepOwnerSequencesDense(t *testing.T) {
+	ctx := context.Background()
+	database := storetest.Open(t)
+	if _, err := database.Pool.Exec(ctx, `
+		insert into projects (key, name) values ('DD', 'Density');
+		insert into issues (key, project_key, number, title, created_by, rank)
+		values ('DD-1', 'DD', 1, 'Issue', '{"kind":"user","id":"alice"}', 'U');
+	`); err != nil {
+		t.Fatalf("seed owners: %v", err)
+	}
+	var artifactID string
+	if err := database.Pool.QueryRow(ctx, `
+		insert into artifacts (project_key, slug, name, kind, created_by)
+		values ('DD', 'notes-md', 'notes.md', 'doc', '{"kind":"user","id":"alice"}')
+		returning id::text
+	`).Scan(&artifactID); err != nil {
+		t.Fatalf("create unlinked artifact: %v", err)
+	}
+
+	const writers = 12
+	broker := NewBroker()
+	for _, owner := range []struct {
+		name     string
+		event    func() model.Event
+		match    string
+		lastSeq  string
+		ownerArg string
+	}{
+		{
+			name: "project document",
+			event: func() model.Event {
+				return model.Event{ArtifactID: new(artifactID), Type: "comment.created",
+					Actor: model.Actor{Kind: "user", ID: "alice"}, Payload: map[string]any{}}
+			},
+			match:    `artifact_id = $1::uuid`,
+			lastSeq:  `select last_seq from artifacts where id = $1`,
+			ownerArg: artifactID,
+		},
+		{
+			name: "issue",
+			event: func() model.Event {
+				return model.Event{IssueKey: new("DD-1"), Type: "comment.created",
+					Actor: model.Actor{Kind: "user", ID: "alice"}, Payload: map[string]any{}}
+			},
+			match:    `issue_key = $1`,
+			lastSeq:  `select last_seq from issues where key = $1`,
+			ownerArg: "DD-1",
+		},
+	} {
+		t.Run(owner.name, func(t *testing.T) {
+			appended := make(chan error, writers)
+			for range writers {
+				go func() {
+					tx, err := database.Pool.Begin(ctx)
+					if err != nil {
+						appended <- err
+						return
+					}
+					defer tx.Rollback(ctx)
+					if _, err := broker.Append(ctx, tx, owner.event()); err != nil {
+						appended <- err
+						return
+					}
+					appended <- tx.Commit(ctx)
+				}()
+			}
+			for range writers {
+				if err := <-appended; err != nil {
+					t.Fatalf("concurrent append: %v", err)
+				}
+			}
+			var count, distinct, minSeq, maxSeq, lastSeq int
+			if err := database.Pool.QueryRow(ctx, `
+				select count(*), count(distinct seq), min(seq), max(seq)
+				from events where type = 'comment.created' and `+owner.match, owner.ownerArg,
+			).Scan(&count, &distinct, &minSeq, &maxSeq); err != nil {
+				t.Fatalf("read appended sequences: %v", err)
+			}
+			if err := database.Pool.QueryRow(ctx, owner.lastSeq, owner.ownerArg).Scan(&lastSeq); err != nil {
+				t.Fatalf("read owner last_seq: %v", err)
+			}
+			if count != writers || distinct != writers || minSeq != 1 || maxSeq != writers || lastSeq != writers {
+				t.Fatalf(
+					"%s sequences: count=%d distinct=%d min=%d max=%d last_seq=%d, want a dense 1..%d",
+					owner.name, count, distinct, minSeq, maxSeq, lastSeq, writers,
+				)
+			}
+		})
+	}
+}

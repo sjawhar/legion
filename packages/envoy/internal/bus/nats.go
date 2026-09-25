@@ -123,6 +123,10 @@ func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB 
 		Timeout:       5 * time.Second,
 		MaxReconnect:  -1,
 		ReconnectWait: 2 * nats.DefaultReconnectWait,
+		// A literal does not start from nats.GetDefaultOptions, and Connect does not default a
+		// zero DrainTimeout: without this a Drain stops waiting for the subscriptions at once,
+		// reports "nats: draining connection timed out" and closes under deliveries in flight.
+		DrainTimeout: nats.DefaultDrainTimeout,
 		DisconnectedErrCB: func(_ *nats.Conn, err error) {
 			if err != nil {
 				slog.Info("envoy nats disconnected", slog.String("error", err.Error()))
@@ -266,14 +270,13 @@ func streamSubjectMatches(pattern, subject string) bool {
 	return len(patternTokens) == len(subjectTokens)
 }
 
+func subjectCapturesRoleLanes(subject string) bool {
+	return streamSubjectMatches(subject, "notifications.role.legion") ||
+		streamSubjectMatches(subject, "notifications.envoy.exceptions.notifications.role.legion")
+}
+
 func streamCapturesRoleLanes(subjects []string) bool {
-	for _, subject := range subjects {
-		if streamSubjectMatches(subject, "notifications.role.legion") ||
-			streamSubjectMatches(subject, "notifications.envoy.exceptions.notifications.role.legion") {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(subjects, subjectCapturesRoleLanes)
 }
 
 func purgeLegacyRoleMessages(js nats.JetStreamContext) error {
@@ -317,20 +320,72 @@ func migrateRoleLanesOffStream(js nats.JetStreamContext, oldConfig, newConfig *n
 	return purgeLegacyRoleMessages(js)
 }
 
+// subjectsOverlap reports whether some subject matches both patterns. JetStream refuses two such
+// subjects in one stream.
+func subjectsOverlap(a, b string) bool {
+	aTokens, bTokens := strings.Split(a, "."), strings.Split(b, ".")
+	for index := 0; index < len(aTokens) && index < len(bTokens); index++ {
+		aToken, bToken := aTokens[index], bTokens[index]
+		if aToken == ">" || bToken == ">" {
+			return true
+		}
+		if aToken != "*" && bToken != "*" && aToken != bToken {
+			return false
+		}
+	}
+	return len(aTokens) == len(bTokens)
+}
+
+// reconciledSubjects is the subject list the stream carries once this binary has started: the
+// deployed list, then each of this binary's subjects the deployed list lacks. Every bus.Connect
+// caller ensures this one stream (the listener, Dispatch, natstail and the MCP server, wherever
+// they run), and they deploy separately, so a deployed subject this binary does not know may be
+// one another live deployment still needs; start-up keeps it. Two deployed subjects go:
+//   - one that captures the role lanes, which travel over core NATS and must never be retained
+//     (migrateRoleLanesOffStream);
+//   - one that overlaps a subject of this binary's (a widened, narrowed or split subject), because
+//     JetStream refuses both in one stream and the start would fail. This binary's shape wins,
+//     and the next start of a binary with the other shape puts that one back.
+//
+// Retiring any other subject is an operator step, taken once no deployment compiled with it can
+// start again: `nats stream edit ENVOY_NOTIFICATIONS --subjects=... -f`.
+func reconciledSubjects(deployed, own []string) []string {
+	subjects := make([]string, 0, len(deployed)+len(own))
+	for _, subject := range deployed {
+		if subjectCapturesRoleLanes(subject) {
+			continue
+		}
+		if !slices.Contains(own, subject) {
+			if index := slices.IndexFunc(own, func(ownSubject string) bool { return subjectsOverlap(subject, ownSubject) }); index >= 0 {
+				slog.Warn("envoy nats stream subject replaced by an overlapping one", slog.String("dropped", subject), slog.String("kept", own[index]))
+				continue
+			}
+		}
+		subjects = append(subjects, subject)
+	}
+	for _, subject := range own {
+		if !slices.Contains(subjects, subject) {
+			subjects = append(subjects, subject)
+		}
+	}
+	return subjects
+}
+
 func ensureStreamWithConfig(js nats.JetStreamContext, cfg *nats.StreamConfig) error {
 	info, err := js.StreamInfo(Stream)
 	if err == nil {
-		if info.Config.MaxAge == cfg.MaxAge &&
-			info.Config.Duplicates == cfg.Duplicates &&
-			slices.Equal(info.Config.Subjects, cfg.Subjects) {
+		desired := *cfg
+		desired.Subjects = reconciledSubjects(info.Config.Subjects, cfg.Subjects)
+		if info.Config.MaxAge == desired.MaxAge &&
+			info.Config.Duplicates == desired.Duplicates &&
+			slices.Equal(info.Config.Subjects, desired.Subjects) {
 			return nil
 		}
-		migratingRoleLanes := streamCapturesRoleLanes(info.Config.Subjects) && !streamCapturesRoleLanes(cfg.Subjects)
-		if err := migrateRoleLanesOffStream(js, &info.Config, cfg); err != nil {
+		migratingRoleLanes := streamCapturesRoleLanes(info.Config.Subjects) && !streamCapturesRoleLanes(desired.Subjects)
+		if err := migrateRoleLanesOffStream(js, &info.Config, &desired); err != nil {
 			return err
 		}
-		// Updating here reconciles the deployed stream on the next listener start.
-		if _, err = js.UpdateStream(cfg); err != nil {
+		if _, err = js.UpdateStream(&desired); err != nil {
 			return err
 		}
 		if migratingRoleLanes {
@@ -493,6 +548,19 @@ func (c *Client) SubOK() bool {
 	return connOK && subOK
 }
 
+// errStopped is what a client refuses once Drain or Close stopped it: dialling or installing a
+// connection, or re-subscribing.
+var errStopped = errors.New("bus: client is stopped")
+
+func (c *Client) stopped() bool {
+	select {
+	case <-c.stopCh:
+		return true
+	default:
+		return false
+	}
+}
+
 // Close stops any recovery goroutine and closes the underlying NATS connection.
 func (c *Client) Close() {
 	c.closeOnce.Do(func() { close(c.stopCh) })
@@ -501,6 +569,55 @@ func (c *Client) Close() {
 	if c.Conn != nil {
 		c.Conn.Close()
 	}
+}
+
+// Drain stops the client and drains it, letting the deliveries already in their handlers finish,
+// and closes the connection itself once timeout passes, so a blocked drain cannot keep a process
+// alive. It stops the client first, so neither the drain's close nor a recovery already under way
+// reconnects or re-subscribes a process that is shutting down. It then drains the delivery
+// subscriptions while the connection still accepts new ones: a handler finishing its delivery may
+// subscribe (RequestCoreTo's receipt inbox), which a draining connection refuses. Only then does
+// it drain the connection, whose Drain only starts the drain, and wait for it to close itself.
+func (c *Client) Drain(timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	c.closeOnce.Do(func() { close(c.stopCh) })
+	c.subscriptionsMu.Lock()
+	var delivering []*nats.Subscription
+	for _, subscription := range c.subscriptions {
+		if subscription.active != nil && subscription.active.IsValid() {
+			delivering = append(delivering, subscription.active)
+		}
+	}
+	c.subscriptionsMu.Unlock()
+	c.mu.Lock()
+	conn := c.Conn
+	c.mu.Unlock()
+	waitUntil := func(done func() bool) error {
+		for !done() {
+			if !time.Now().Before(deadline) {
+				conn.Close()
+				return fmt.Errorf("drain NATS: %w", context.DeadlineExceeded)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		return nil
+	}
+	for _, subscription := range delivering {
+		if err := subscription.Drain(); err != nil {
+			conn.Close()
+			return err
+		}
+	}
+	for _, subscription := range delivering {
+		if err := waitUntil(func() bool { return !subscription.IsValid() }); err != nil {
+			return err
+		}
+	}
+	if err := conn.Drain(); err != nil {
+		conn.Close()
+		return err
+	}
+	return waitUntil(conn.IsClosed)
 }
 
 // recover attempts to restore the NATS connection and every recoverable
@@ -570,6 +687,11 @@ func (c *Client) restoreSubscriptions() error {
 	c.mu.Unlock()
 	c.subscriptionsMu.Lock()
 	defer c.subscriptionsMu.Unlock()
+	// Drain collects the subscriptions to drain under subscriptionsMu after stopping the client, so
+	// a recovery that reaches here after it re-subscribes nothing.
+	if c.stopped() {
+		return errStopped
+	}
 	for index := range c.subscriptions {
 		subscription := &c.subscriptions[index]
 		if subscription.handler == nil {
@@ -594,6 +716,9 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 		return nil
 	}
 	c.mu.Unlock()
+	if c.stopped() {
+		return errStopped
+	}
 
 	nc, err := connectWithContext(ctx, "envoy", c.urls, c.onReconnect, c.onClosed)
 	if err != nil {
@@ -606,6 +731,14 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 	}
 
 	c.mu.Lock()
+	// Drain and Close read c.Conn under c.mu after stopping the client, so checking here, under the
+	// same lock, means a connection dialled while they ran is either theirs to close or never
+	// installed.
+	if c.stopped() {
+		c.mu.Unlock()
+		nc.Close()
+		return errStopped
+	}
 	c.Conn = nc
 	c.js = js
 	c.mu.Unlock()

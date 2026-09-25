@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -111,7 +112,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 			s.writeHandlerError(w, err)
 			return
 		}
-	} else if err := tx.QueryRow(r.Context(), `select key from issues where key = $1 for update`, key).Scan(new(string)); err != nil {
+	} else if err := tx.QueryRow(r.Context(), `select key from issues where key = $1 for no key update`, key).Scan(new(string)); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -130,6 +131,15 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 			writeError(w, "ISSUE_CLOSED", http.StatusConflict, "issue is closed")
 			return
 		}
+	}
+	// Closing an issue releases whatever claim it held: the work is finished, so nobody is
+	// on it. No other status move touches the claim — a claim is an explicit act
+	// (issue_claim.go), and the status is also how humans track work.
+	// previousClaim is set only when this write closes the issue, so it alone says both that a
+	// claim is being released and whose it was.
+	var previousClaim *model.IssueClaim
+	if input.Status != nil && status == "done" {
+		previousClaim = before.Claim
 	}
 	// Every provided column lands in one UPDATE, updated_at with it; a components-only PATCH
 	// still touches updated_at. The row write runs before the components write so a component
@@ -183,6 +193,13 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	if changed {
 		sets = append(sets, "updated_at = now()")
 		if _, err := tx.Exec(r.Context(), `update issues set `+strings.Join(sets, ", ")+` where key = $1`, args...); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
+	if previousClaim != nil {
+		// Closing releases the claim through the one writer of those columns.
+		if err := writeIssueClaim(r.Context(), tx, key, nil); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -286,6 +303,15 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	events = append(events, event)
+	if previousClaim != nil {
+		released, err := s.appendEvent(r.Context(), tx, claimEvent("issue.released", key, actor, after, previousClaim, "closed"))
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		after.LastSeq++
+		events = append(events, released)
+	}
 	if statusChanged && after.Parent != nil {
 		childEvent, err := s.appendEvent(r.Context(), tx, issueOwner(*after.Parent).event(
 			"child.status",
@@ -328,7 +354,11 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if (before.ClosedAt == nil) != (after.ClosedAt == nil) {
-		s.deps.Docs.SetIssueClosed(key, after.ClosedAt != nil)
+		// The refresh runs after the commit, so a client that hangs up now must not stop it:
+		// rooms that never got the closed flag keep taking edits until they are reloaded.
+		// Dropping only the cancellation keeps the context's transaction mark, which is what
+		// lets the pool refuse a refresh run while a transaction is still open.
+		s.deps.Docs.SetIssueClosed(context.WithoutCancel(r.Context()), key, after.ClosedAt != nil)
 	}
 	s.publish(events...)
 	WriteJSON(w, http.StatusOK, withAdvice(after, advice))

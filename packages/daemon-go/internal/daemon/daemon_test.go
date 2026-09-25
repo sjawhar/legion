@@ -22,6 +22,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/testcontainers/testcontainers-go"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
@@ -746,14 +747,10 @@ func workflowNATS(t *testing.T) string {
 	t.Helper()
 	ctx := context.Background()
 	container, err := tcnats.Run(ctx, "nats:2.10")
+	testcontainers.CleanupContainer(t, container)
 	if err != nil {
 		t.Fatalf("start NATS JetStream: %v", err)
 	}
-	t.Cleanup(func() {
-		if err := container.Terminate(context.Background()); err != nil {
-			t.Errorf("terminate NATS JetStream: %v", err)
-		}
-	})
 	url, err := container.ConnectionString(ctx)
 	if err != nil {
 		t.Fatalf("NATS connection string: %v", err)

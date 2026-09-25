@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,6 +25,7 @@ import (
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/testnats"
+	"github.com/testcontainers/testcontainers-go"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
 
@@ -31,6 +33,8 @@ var (
 	sharedListenerNATSOnce sync.Once
 	sharedListenerNATSURI  string
 	sharedListenerNATSErr  error
+	// sharedListenerNATSContainer is the container the tests share, which TestMain terminates.
+	sharedListenerNATSContainer *tcnats.NATSContainer
 )
 
 func sharedListenerTestNATSURI(t *testing.T) string {
@@ -39,10 +43,15 @@ func sharedListenerTestNATSURI(t *testing.T) string {
 		ctx := context.Background()
 		ctr, err := tcnats.Run(ctx, testnats.Image)
 		if err != nil {
-			sharedListenerNATSErr = err
+			sharedListenerNATSErr = errors.Join(err, testcontainers.TerminateContainer(ctr))
 			return
 		}
 		sharedListenerNATSURI, sharedListenerNATSErr = ctr.ConnectionString(ctx)
+		if sharedListenerNATSErr != nil {
+			sharedListenerNATSErr = errors.Join(sharedListenerNATSErr, testcontainers.TerminateContainer(ctr))
+			return
+		}
+		sharedListenerNATSContainer = ctr
 	})
 	if sharedListenerNATSErr != nil {
 		t.Fatalf("failed to start shared NATS: %v", sharedListenerNATSErr)
@@ -1999,10 +2008,10 @@ func TestBoundDurableConsumerIsNotStolen(t *testing.T) {
 func TestStartListenerSubscriptionMigratesLegacyDurableConsumer(t *testing.T) {
 	ctx := context.Background()
 	ctr, err := tcnats.Run(ctx, testnats.Image)
+	testcontainers.CleanupContainer(t, ctr)
 	if err != nil {
 		t.Fatalf("start NATS: %v", err)
 	}
-	t.Cleanup(func() { _ = ctr.Terminate(ctx) })
 	uri, err := ctr.ConnectionString(ctx)
 	if err != nil {
 		t.Fatalf("NATS connection string: %v", err)
@@ -3550,61 +3559,15 @@ func TestRunSelfHealthMonitor_ExitsAfterRepeatedFailedRebuilds(t *testing.T) {
 	}
 }
 
-type blockingNATSDrainer struct {
-	started chan struct{}
-	release chan struct{}
-	closed  chan struct{}
-	once    sync.Once
-}
-
-func (d *blockingNATSDrainer) Drain() error {
-	close(d.started)
-	<-d.release
-	return nil
-}
-
-func (d *blockingNATSDrainer) Close() {
-	d.once.Do(func() { close(d.closed) })
-}
-
-func TestDrainNATSWithDeadlineClosesBlockedConnection(t *testing.T) {
-	drainer := &blockingNATSDrainer{
-		started: make(chan struct{}),
-		release: make(chan struct{}),
-		closed:  make(chan struct{}),
-	}
-	done := make(chan error, 1)
-	go func() { done <- drainNATSWithDeadline(drainer, 10*time.Millisecond) }()
-	select {
-	case <-drainer.started:
-	case <-time.After(time.Second):
-		t.Fatal("NATS drain never started")
-	}
-	select {
-	case err := <-done:
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("drain error = %v, want deadline exceeded", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("drain did not return at its deadline")
-	}
-	select {
-	case <-drainer.closed:
-	case <-time.After(time.Second):
-		t.Fatal("blocked NATS connection was not closed")
-	}
-	close(drainer.release)
-}
-
 // setupTestNATS launches a NATS testcontainer dedicated to this package's tests.
 func setupTestNATS(t *testing.T) *bus.Client {
 	t.Helper()
 	ctx := context.Background()
 	ctr, err := tcnats.Run(ctx, testnats.Image)
+	testcontainers.CleanupContainer(t, ctr)
 	if err != nil {
 		t.Fatalf("failed to start NATS: %v", err)
 	}
-	t.Cleanup(func() { _ = ctr.Terminate(ctx) })
 	uri, err := ctr.ConnectionString(ctx)
 	if err != nil {
 		t.Fatalf("connection string: %v", err)
@@ -3614,4 +3577,19 @@ func setupTestNATS(t *testing.T) *bus.Client {
 		t.Fatalf("bus connect: %v", err)
 	}
 	return client
+}
+
+// TestMain terminates the NATS container this package's tests share once they have all run.
+// Nothing else would: CI disables Ryuk, and without it a container outlives the test binary.
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if sharedListenerNATSContainer != nil {
+		if err := testcontainers.TerminateContainer(sharedListenerNATSContainer); err != nil {
+			fmt.Fprintf(os.Stderr, "terminate the shared NATS container: %v\n", err)
+			if code == 0 {
+				code = 1
+			}
+		}
+	}
+	os.Exit(code)
 }

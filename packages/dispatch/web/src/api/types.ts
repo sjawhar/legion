@@ -78,6 +78,8 @@ export type {
   InboxRow,
   Issue,
   IssueChild,
+  IssueClaim,
+  IssueClaimEventPayload,
   IssueComponents,
   IssueComponentsInput,
   IssueDetails,

@@ -84,7 +84,7 @@ func TestMarkAnchorVerifiesBrowserMark(t *testing.T) {
 	if comment.Anchor.MarkID != "m-1" || comment.Anchor.Quote != "quick" {
 		t.Fatalf("browser-mark anchor = %#v, want m-1 / quick", comment.Anchor)
 	}
-	if projection, found := findMarkProjection(t, database, issue.PrimaryArtifactID, "m-1"); !found || projection["text"] != "why" {
+	if projection, found := awaitMarkProjection(t, database, issue.PrimaryArtifactID, "m-1"); !found || projection["text"] != "why" {
 		t.Fatalf("browser-mark projection = %#v found=%t, want m-1 record", projection, found)
 	}
 	if _, found := findMarkProjection(t, database, issue.PrimaryArtifactID, comment.ID); found {
@@ -104,12 +104,15 @@ func writeBrowserMark(t *testing.T, database *store.Store, documentService *docs
 		t.Fatalf("begin browser mark: %v", err)
 	}
 	defer tx.Rollback(context.Background())
-	if _, err := documentService.MarkQuote(docs.WithTx(context.Background(), tx), artifactID, mark, quote, nil); err != nil {
+	ctx, collector := documentMutationContext(context.Background(), tx)
+	if _, err := documentService.MarkQuote(ctx, artifactID, mark, quote, nil); err != nil {
 		t.Fatalf("write browser mark: %v", err)
 	}
 	if err := tx.Commit(context.Background()); err != nil {
 		t.Fatalf("commit browser mark: %v", err)
 	}
+	documentService.CreditLiveWrites(collector)
+	documentService.PublishLiveWrites(collector)
 }
 
 func TestMarkAnchorSuggestionProjectsBrowserKind(t *testing.T) {

@@ -221,16 +221,6 @@ func (s *server) storeArtifact(
 		s.writeHandlerError(w, err)
 		return
 	}
-	// A CRDT replacement cannot be rolled back in memory, so failures after an
-	// existing document replacement evict the room after tx.Rollback and reload
-	// durable state on the next access (R30).
-	evictOnFailure := false
-	evictArtifactID := ""
-	defer func() {
-		if evictOnFailure {
-			_ = s.deps.Docs.Evict(r.Context(), evictArtifactID)
-		}
-	}()
 	defer tx.Rollback(r.Context())
 	var issueStatus *string
 	var project string
@@ -289,6 +279,18 @@ func (s *server) storeArtifact(
 		writeError(w, "ARTIFACT_KIND_MISMATCH", http.StatusBadRequest, "uploaded content type does not match existing artifact")
 		return
 	}
+	// A project document's owner row is the artifact itself, and until here this transaction
+	// has not locked it: the issue branch above locks its issue, but this one only read its
+	// project. Every writer that takes the owner row at all takes it before the room lock -
+	// the durable writers never take it - and the event this upload appends takes it after the
+	// document write has taken the room. Without this line the upload ran room -> owner against
+	// a settlement's owner -> room, and Postgres broke the cycle with a 500.
+	if target.IssueKey == nil && !created {
+		if err := s.requireOpenOwner(r.Context(), tx, ownerForArtifact(artifact)); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
 
 	var nextNumber int
 	if err := tx.QueryRow(r.Context(), `select coalesce(max(number), 0) + 1 from artifact_versions where artifact_id = $1`, artifact.ID).Scan(&nextNumber); err != nil {
@@ -313,12 +315,11 @@ func (s *server) storeArtifact(
 	var documentChanges model.ReferenceChanges
 	if kind == "doc" {
 		ctx, collector := documentMutationContext(r.Context(), tx)
+		defer s.deps.Docs.DiscardLiveWrites(collector)
 		documentEvents = collector
 		if created {
 			documentMarkdown, err = s.deps.Docs.SeedText(ctx, tx, artifact.ID, string(input.content), actor)
 		} else {
-			evictArtifactID = artifact.ID
-			evictOnFailure = true
 			documentMarkdown, err = s.deps.Docs.ReplaceText(ctx, artifact.ID, string(input.content), actor)
 		}
 		if err != nil {
@@ -392,11 +393,10 @@ func (s *server) storeArtifact(
 			r.Context(), tx, "POST /api/v1/issues/{key}/artifacts", *target.IssueKey, actor, "", *issueStatus,
 		)
 	}
-	if err := tx.Commit(r.Context()); err != nil {
+	if err := s.commitDocumentMutation(r.Context(), tx, documentEvents); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	evictOnFailure = false
 	if kind == "doc" {
 		// The seeded or replaced text was written inside this transaction, which suppresses
 		// the live settlement the edits path relies on; queue the closer now so the
@@ -623,6 +623,7 @@ func (s *server) createNamedVersion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	documentCtx, documentEvents := documentMutationContext(r.Context(), tx)
+	defer s.deps.Docs.DiscardLiveWrites(documentEvents)
 	named, err := s.deps.Docs.NamedVersion(documentCtx, artifact.ID, summary, actor)
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -647,7 +648,7 @@ func (s *server) createNamedVersion(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if err := tx.Commit(r.Context()); err != nil {
+	if err := s.commitDocumentMutation(r.Context(), tx, documentEvents); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -696,16 +697,6 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	// A CRDT edit cannot be rolled back in memory, so any failure after ApplyOps evicts the
-	// room and the next access reloads durable state (R30). Deferred BEFORE tx.Rollback so
-	// LIFO order rolls the transaction back first: eviction compacts the room and would
-	// otherwise block on the document rows this transaction still locks.
-	evictOnFailure := false
-	defer func() {
-		if evictOnFailure {
-			_ = s.deps.Docs.Evict(r.Context(), artifact.ID)
-		}
-	}()
 	defer tx.Rollback(r.Context())
 	eventOwner := ownerForArtifact(artifact)
 	status, err := s.requireOpenOwnerStatus(r.Context(), tx, eventOwner)
@@ -713,15 +704,10 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	evictOnFailure = true
 	documentCtx, documentEvents := documentMutationContext(r.Context(), tx)
+	defer s.deps.Docs.DiscardLiveWrites(documentEvents)
 	applied, err := s.deps.Docs.ApplyOps(documentCtx, artifact.ID, input.Ops, actor, input.Precondition)
 	if err != nil {
-		var preconditionFailed *docs.ErrPreconditionFailed
-		var invalidPrecondition *docs.ErrInvalidPrecondition
-		if errors.As(err, &preconditionFailed) || errors.As(err, &invalidPrecondition) {
-			evictOnFailure = false
-		}
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -777,11 +763,10 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 			r.Context(), tx, "POST /api/v1/artifacts/{id}/edits", *artifact.IssueKey, actor, "", *status,
 		)
 	}
-	if err := tx.Commit(r.Context()); err != nil {
+	if err := s.commitDocumentMutation(r.Context(), tx, documentEvents); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	evictOnFailure = false
 	var version *model.Version
 	if written != nil {
 		version = &written.Version

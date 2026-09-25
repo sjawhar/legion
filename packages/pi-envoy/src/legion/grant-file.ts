@@ -13,7 +13,7 @@ import { messageFor } from "@legion/envoy-client/errors";
  * throws naming the path; the caller blocks the command rather than let it run under whatever the
  * file held before.
  */
-export async function writeGrantFile(file: string, grantId: string): Promise<void> {
+async function writeGrantFile(file: string, grantId: string): Promise<void> {
   if (!path.isAbsolute(file)) {
     throw new Error(`LEGION_GRANT_FILE ${file} could not be written: the path is not absolute`);
   }
@@ -26,4 +26,20 @@ export async function writeGrantFile(file: string, grantId: string): Promise<voi
     await rm(temp, { force: true }).catch(() => {});
     throw new Error(`LEGION_GRANT_FILE ${file} could not be written: ${messageFor(error)}`);
   }
+}
+
+/**
+ * Mints a grant and writes it to the pane's `LEGION_GRANT_FILE`, where `legion` reads it: the one
+ * path by which the bash hook and the `legion` tool's `handoff_complete` hand a command its grant.
+ * A pane without the variable was launched by a daemon older than this plugin, so it is refused
+ * before anything is minted.
+ */
+export async function writeMintedGrant(mint: () => Promise<string>): Promise<void> {
+  const file = process.env.LEGION_GRANT_FILE;
+  if (file === undefined || file.trim() === "") {
+    throw new Error(
+      "LEGION_GRANT_FILE is not set on this pane: the daemon that launched it predates this plugin; restart the daemon on the matching release"
+    );
+  }
+  await writeGrantFile(file, await mint());
 }

@@ -269,7 +269,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 			defer adviceReadTx.Rollback(r.Context())
 			var existingStatus string
 			if err := adviceReadTx.QueryRow(r.Context(), `
-				select status from issues where key = $1 for update
+				select status from issues where key = $1 for no key update
 			`, existingKey).Scan(&existingStatus); err != nil {
 				s.writeHandlerError(w, err)
 				return

@@ -393,6 +393,7 @@ func validateDefaultProject(ctx context.Context, database *store.Store, project 
 	if project == "" {
 		return nil
 	}
+	ctx = store.WithTransactionTracking(ctx)
 	var exists bool
 	if err := database.Pool.QueryRow(ctx, `select exists(select 1 from projects where key = $1)`, project).Scan(&exists); err != nil {
 		return fmt.Errorf("query DISPATCH_DEFAULT_PROJECT %q: %w", project, err)
@@ -404,6 +405,7 @@ func validateDefaultProject(ctx context.Context, database *store.Store, project 
 }
 
 func seedRepoProjects(ctx context.Context, database *store.Store, raw string) error {
+	ctx = store.WithTransactionTracking(ctx)
 	mappings, err := api.ParseRepoProjects(raw)
 	if err != nil {
 		return err
@@ -601,7 +603,9 @@ func rebuildRefs(ctx context.Context, databaseURL, serverURL string, out io.Writ
 		return 1
 	}
 	defer database.Pool.Close()
-	report, err := refs.RebuildAll(ctx, database.Pool, serverURL)
+	// rebuild-refs opens a transaction per source, so it marks its context like the other
+	// commands: a read taken inside one is refused rather than left to deadlock the pool.
+	report, err := refs.RebuildAll(store.WithTransactionTracking(ctx), database.Pool, serverURL)
 	if err != nil {
 		fmt.Fprintf(out, "rebuild-refs: %v\n", err)
 		return 1

@@ -22,24 +22,8 @@ release_push="$script_dir/release-push.sh"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-PASS=0
-FAIL=0
-
-check() {
-  local desc="$1" result="$2"
-  if [ "$result" = "true" ]; then
-    echo "  PASS: $desc"
-    PASS=$((PASS + 1))
-  else
-    echo "  FAIL: $desc"
-    FAIL=$((FAIL + 1))
-  fi
-}
-
-# is <actual> <expected>: true/false for check.
-is() { [ "$1" = "$2" ] && echo true || echo false; }
-# contains <text> <regex>: true/false for check; greps the whole text.
-contains() { printf '%s\n' "$1" | grep -q -- "$2" && echo true || echo false; }
+# shellcheck source=.github/scripts/test-lib.sh
+source "$script_dir/test-lib.sh"
 
 identity() {
   git -C "$1" config user.name "release test"
@@ -192,11 +176,5 @@ check "rebase was aborted" "$(not_rebasing "$work/c6/b")"
 check "clone's manifest is intact, not truncated" "$(is "$(jq -r .version "$work/c6/b/packages/pkg/package.json")" 1.0.1)"
 check "origin/main is untouched" "$(is "$(origin_tip_subject "$work/c6")" "a: remove pkg")"
 
-echo
-echo "---"
-echo "Results: $PASS passed, $FAIL failed"
-if [ "$FAIL" -gt 0 ]; then
-  exit 1
-fi
-echo "PASS: release-push.sh push-main"
+summary "release-push.sh push-main"
 

@@ -2,6 +2,7 @@ import type { z } from "zod";
 
 export interface SchemaNode<E> {
   optional(): E;
+  nullable(): E;
   describe(text: string): E;
 }
 

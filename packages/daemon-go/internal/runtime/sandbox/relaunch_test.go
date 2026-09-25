@@ -277,7 +277,7 @@ func TestTheTreeAffinityFollowsTheTreesScheduledPods(t *testing.T) {
 		if err := g.r.Suspend(g.ctx, loc); err != nil {
 			t.Fatal(err)
 		}
-		g.eventually("the pod to go", func() bool { return g.pod(loc.Sandbox.Name) == nil })
+		g.eventually("the pod to leave the store treePodScheduled reads", func() bool { return g.r.storedPod(loc.Sandbox.Name) == nil })
 	}
 	g.spawn(testSpec(t, otherToken, claim.RoleReviewer, testTree))
 	if hasAffinity(otherToken) {
@@ -313,15 +313,39 @@ func TestAPatchIsFencedToTheSandboxItRead(t *testing.T) {
 	}
 }
 
-// A launch returns only once the Sandbox store holds the Sandbox it launched into: with a lagging
-// Sandbox informer, a first Spawn would otherwise read its own Sandbox as absent — a Probe Gone,
-// a Suspend that finds nothing to suspend.
-func TestALaunchReturnsOnlyOnceTheSandboxStoreHoldsItsSandbox(t *testing.T) {
-	g := newRig(t, nil, withLaggingSandboxInformer(300*time.Millisecond))
-	loc := g.spawn(workerSpec(t))
-	obs, err := g.r.Probe(g.ctx, loc)
-	if err != nil || obs.Kind != runtime.Alive {
-		t.Fatalf("Probe right after Spawn: %s %q, %v; want Alive", obs.Kind, obs.Detail, err)
+// A launch returns only once the runtime's Sandbox store holds the Sandbox as its Running patch
+// left it: the same generation the API server holds, and Running. With a lagging Sandbox informer
+// the new pod reaches its store first, and anything that reads the stores right after the launch
+// would otherwise see no Sandbox (a Probe answering Gone), the Suspended copy a first launch creates,
+// or, for a relaunch over a Sandbox already Running (a Resume after a death, the
+// registration-deadline relaunch, a retry), the Running copy from before the relaunch, which the
+// store then replaces with the relaunch's Suspended patch — and a Suspend that found the pod gone
+// would read that as already Suspended and write nothing.
+func TestALaunchReturnsOnlyOnceTheSandboxStoreHoldsItsRunningPatch(t *testing.T) {
+	for _, launches := range []int{1, 2} {
+		t.Run(fmt.Sprintf("launch %d", launches), func(t *testing.T) {
+			g := newRig(t, nil, withLaggingSandboxInformer(300*time.Millisecond))
+			name := SandboxName(workerToken)
+			var loc runtime.Locator
+			for range launches {
+				loc = g.spawn(workerSpec(t))
+			}
+			stored, err := g.r.storedSandbox(name)
+			if err != nil || stored == nil {
+				t.Fatalf("the Sandbox store right after Spawn holds no Sandbox (%v)", err)
+			}
+			api := g.sandbox(name)
+			if api.Generation == 0 {
+				t.Fatal("the rig's Sandbox patches bumped no generation, so this table cannot tell the Running patch from an earlier copy")
+			}
+			if stored.Generation != api.Generation || stored.mode() != modeRunning {
+				t.Fatalf("the Sandbox store right after Spawn shows it %s at generation %d; the API holds generation %d, Running",
+					stored.mode(), stored.Generation, api.Generation)
+			}
+			if obs, err := g.r.Probe(g.ctx, loc); err != nil || obs.Kind != runtime.Alive {
+				t.Fatalf("Probe right after Spawn: %s %q, %v; want Alive", obs.Kind, obs.Detail, err)
+			}
+		})
 	}
 }
 

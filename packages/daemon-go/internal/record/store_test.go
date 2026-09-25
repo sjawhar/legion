@@ -331,15 +331,45 @@ func TestOutboxLeaseFencesConcurrentWorkersAndExpires(t *testing.T) {
 	})
 }
 
-func TestPendingStatusWritesIncludesOnlyDueUnfinishedStatusEffects(t *testing.T) {
+// A status write the outbox failed and pushed back is still unwritten, so it stays listed through its
+// backoff; a finished one is deleted and gone, and a row of another kind is never listed.
+func TestPendingStatusWritesListsEveryUnfinishedStatusEffect(t *testing.T) {
 	ctx := context.Background()
 	st := migratedStore(t)
 	records := NewStore()
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	inTx(t, st, func(tx pgx.Tx) {
 		must(t, records.Enqueue(ctx, tx, OutboxRow{Kind: OutboxKindDispatchStatus, Issue: "LEGION-208", Payload: json.RawMessage(`{"status":"testing"}`), NextAt: now}))
-		must(t, records.Enqueue(ctx, tx, OutboxRow{Kind: OutboxKindDispatchStatus, Issue: "LEGION-209", Payload: json.RawMessage(`{"status":"retro"}`), NextAt: now.Add(time.Hour)}))
+		must(t, records.Enqueue(ctx, tx, OutboxRow{Kind: OutboxKindDispatchStatus, Issue: "LEGION-209", Payload: json.RawMessage(`{"status":"retro"}`), NextAt: now}))
 		must(t, records.Enqueue(ctx, tx, OutboxRow{Kind: OutboxKindNotice, Issue: "LEGION-208", Payload: json.RawMessage(`{"kind":"phase-finished"}`), NextAt: now}))
+	})
+
+	// LEGION-208's write fails and backs off a minute, as outbox.retry records it; LEGION-209's lands.
+	backoffUntil := now.Add(time.Minute)
+	inTx(t, st, func(tx pgx.Tx) {
+		rows, err := records.ClaimDue(ctx, tx, now, 10, time.Minute)
+		must(t, err)
+		if len(rows) != 3 {
+			t.Fatalf("claimed %#v, want all three rows", rows)
+		}
+		// Leased for an attempt in flight, both status writes are still unfinished.
+		leased, err := records.PendingStatusWrites(ctx, tx)
+		must(t, err)
+		if len(leased) != 2 || leased[0].Issue != "LEGION-208" || leased[1].Issue != "LEGION-209" {
+			t.Fatalf("pending status writes while leased = %#v, want the LEGION-208 and LEGION-209 status rows", leased)
+		}
+		for _, row := range rows {
+			switch {
+			case row.Kind != OutboxKindDispatchStatus:
+			case row.Issue == "LEGION-208":
+				must(t, records.RetryOutbox(ctx, tx, row.ID, row.LeaseToken, backoffUntil, "Dispatch unavailable"))
+			default:
+				must(t, records.FinishOutbox(ctx, tx, row.ID, row.LeaseToken))
+			}
+		}
+	})
+	inTx(t, st, func(tx pgx.Tx) {
+		must(t, records.Enqueue(ctx, tx, OutboxRow{Kind: OutboxKindDispatchStatus, Issue: "LEGION-210", Payload: json.RawMessage(`{"status":"in_progress"}`), NextAt: now}))
 	})
 
 	var pending []OutboxRow
@@ -348,26 +378,16 @@ func TestPendingStatusWritesIncludesOnlyDueUnfinishedStatusEffects(t *testing.T)
 		pending, err = records.PendingStatusWrites(ctx, tx)
 		must(t, err)
 	})
-	if len(pending) != 1 || pending[0].Issue != "LEGION-208" || pending[0].Kind != OutboxKindDispatchStatus {
-		t.Fatalf("pending status writes = %#v, want only the due dispatch status row", pending)
+	if len(pending) != 2 {
+		t.Fatalf("pending status writes = %#v, want the due LEGION-210 row then the backing-off LEGION-208 row", pending)
 	}
-
-	inTx(t, st, func(tx pgx.Tx) {
-		rows, err := records.ClaimDue(ctx, tx, now, 10, time.Minute)
-		must(t, err)
-		for _, row := range rows {
-			if row.Issue == "LEGION-208" && row.Kind == OutboxKindDispatchStatus {
-				must(t, records.FinishOutbox(ctx, tx, row.ID, row.LeaseToken))
-			}
-		}
-	})
-	inTx(t, st, func(tx pgx.Tx) {
-		pending, err := records.PendingStatusWrites(ctx, tx)
-		must(t, err)
-		if len(pending) != 0 {
-			t.Fatalf("pending status writes after finish = %#v, want none", pending)
-		}
-	})
+	if due := pending[0]; due.Issue != "LEGION-210" || due.Attempts != 0 || !due.NextAt.Equal(now) {
+		t.Fatalf("first pending status write = %#v, want LEGION-210 due now and never attempted", due)
+	}
+	if backingOff := pending[1]; backingOff.Issue != "LEGION-208" || backingOff.Kind != OutboxKindDispatchStatus ||
+		backingOff.Attempts != 1 || backingOff.LastError != "Dispatch unavailable" || !backingOff.NextAt.Equal(backoffUntil) {
+		t.Fatalf("second pending status write = %#v, want LEGION-208 after one failed attempt, next at %s", backingOff, backoffUntil)
+	}
 }
 
 func TestWaitingIncludesOnlySlotlessTodoRootsAndOrphansInRankOrder(t *testing.T) {

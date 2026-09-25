@@ -173,7 +173,7 @@ func (s *Service) VerifyMark(ctx context.Context, artifactID string, kind MarkKi
 	for {
 		var tree *pmdoc.Node
 		var readErr error
-		err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+		err := s.docView(ctx, artifactID, func(doc *crdt.Doc) {
 			tree, readErr = treeOf(doc)
 		})
 		if readErr != nil {
@@ -205,7 +205,7 @@ func (s *Service) VerifyMark(ctx context.Context, artifactID string, kind MarkKi
 func (s *Service) BlockForQuote(ctx context.Context, artifactID, quote string) (string, error) {
 	var blockID string
 	var blockErr error
-	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+	err := s.docView(ctx, artifactID, func(doc *crdt.Doc) {
 		tree, err := treeOf(doc)
 		if err != nil {
 			blockErr = err
@@ -231,7 +231,7 @@ func (s *Service) BlockForQuote(ctx context.Context, artifactID, quote string) (
 func (s *Service) SuggestionKind(ctx context.Context, artifactID, id string) (string, error) {
 	var kind string
 	var markErr error
-	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+	err := s.docView(ctx, artifactID, func(doc *crdt.Doc) {
 		tree, readErr := treeOf(doc)
 		if readErr != nil {
 			markErr = readErr
@@ -307,7 +307,6 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		if err != nil {
 			return false, err
 		}
-		s.recordActor(artifactID, actor)
 		var updateErr error
 		transact(func(txn *crdt.Transaction) {
 			updateErr = pmdoc.Update(txn, fragment, next)
@@ -366,10 +365,6 @@ func toPlain(record MarkRecord) (map[string]any, error) {
 	return plain, nil
 }
 
-type anchorQueryer interface {
-	Query(context.Context, string, ...any) (pgx.Rows, error)
-}
-
 type anchoredMark struct {
 	id       string
 	markType string
@@ -377,10 +372,7 @@ type anchoredMark struct {
 }
 
 func (s *Service) openAnchoredMarks(ctx context.Context, artifactID string) ([]anchoredMark, error) {
-	var source anchorQueryer = s.store.Pool
-	if tx, ok := txFromContext(ctx); ok {
-		source = tx
-	}
+	source := s.queryFrom(ctx)
 	var marks []anchoredMark
 	for _, target := range []struct {
 		table string
@@ -675,7 +667,7 @@ func (s *Service) recordedMarkRefs(ctx context.Context, artifactID string) (map[
 		{table: "asks"},
 		{table: "comments"},
 	} {
-		rows, err := s.store.Pool.Query(ctx, fmt.Sprintf(`
+		rows, err := s.queryFrom(ctx).Query(ctx, fmt.Sprintf(`
 			select anchor, %s
 			from %s
 			where anchor is not null and anchor->>'artifact_id' = $1
@@ -762,7 +754,7 @@ func (s *Service) sweepUnrecordedMarks(room string, tree *pmdoc.Node) {
 
 	var sweepErr error
 	err = s.srv.Apply(context.Background(), room, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
-		transact, release := s.serviceTransact(transact)
+		transact, release := s.serviceTransact(transact, nil)
 		defer release()
 		fragment := doc.GetXmlFragment(fragmentName)
 		fresh, readErr := treeOf(doc)

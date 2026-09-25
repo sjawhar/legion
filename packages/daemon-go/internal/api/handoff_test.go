@@ -138,7 +138,7 @@ func TestHandoffCompleteRefusesExpiredAndRevokedGrants(t *testing.T) {
 // it reaches the workflow, and only a true retry of it is answered "already received". Otherwise
 // the issue stays in merging with no way out but a new commit nothing asks for.
 func TestHandoffCompleteAppliesTheMergersCorrectedReadyAtTheSameCommit(t *testing.T) {
-	h, facts, _ := newArchitectHarness(t, nil, &intake.Refusal{Status: http.StatusConflict, Code: "READY_REQUIRED", Message: "run legion handoff complete --ready"})
+	h, facts, _ := newArchitectHarness(t, nil, &intake.Refusal{Status: http.StatusConflict, Code: "READY_REQUIRED", Message: "call the legion tool's handoff_complete with ready: true"})
 	seedIssueAt(t, h, "LEGION-208", phase.Merging)
 	merger := newLiveClaim(t, h, "LEGION-208", claim.RoleMerger)
 	assertFailure(t, h.request(http.MethodPost, "/legion/v1/handoff/complete", HandoffCompleteRequest{

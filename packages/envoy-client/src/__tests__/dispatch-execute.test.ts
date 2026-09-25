@@ -1101,11 +1101,212 @@ describe("executeDispatchTool", () => {
     });
   });
 
+  test("dispatch_claim claims for the calling session and releases with release: true", async () => {
+    const calls: Array<{ method: string; pathname: string; body: unknown }> = [];
+    const claim = {
+      actor: { kind: "session", id: "session-one", origin: { session_title: "Implementer" } },
+      at: "2026-09-24T06:00:00Z",
+    };
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const target = new URL(String(url));
+      const method = init?.method ?? "GET";
+      calls.push({
+        method,
+        pathname: target.pathname,
+        body: init?.body === undefined ? undefined : JSON.parse(String(init.body)),
+      });
+      return response({
+        key: "DSP-1",
+        status: "todo",
+        claim: method === "POST" ? claim : null,
+      });
+    };
+    const run = (args: Record<string, unknown>) =>
+      executeDispatchTool({
+        tool: "dispatch_claim",
+        args,
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        sessionId: "session-one",
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+
+    const claimed = await run({ issue: "DSP-1" });
+    expect(calls[0]?.method).toBe("POST");
+    expect(calls[0]?.pathname).toBe("/api/v1/issues/DSP-1/claim");
+    // The claimant is this session and nothing else names it.
+    expect(calls[0]?.body).toEqual({
+      actor: expect.objectContaining({ kind: "session", id: "session-one" }),
+    });
+    expect(claimed.text).toContain("DSP-1: claimed by you since 2026-09-24T06:00:00Z");
+    expect(claimed.text).toContain("move it to in_progress");
+    expect(claimed.details).toMatchObject({ issue: "DSP-1", status: "todo", claim });
+
+    const released = await run({ issue: "DSP-1", release: true });
+    expect(calls[1]?.method).toBe("DELETE");
+    expect(calls[1]?.pathname).toBe("/api/v1/issues/DSP-1/claim");
+    expect(released.text).toContain("DSP-1: claim released");
+    expect(released.details).toMatchObject({ issue: "DSP-1", claim: null });
+  });
+
+  test("a refused dispatch_claim reaches the caller with the code it must act on", async () => {
+    const refusal =
+      "session session-two (worker session-two) claimed this issue at 2026-09-24T06:00:00Z and is still running; ask that session to release it, or a human can force the claim";
+    const fetchImpl = async (_url: RequestInfo | URL): Promise<Response> =>
+      new Response(JSON.stringify({ code: "ISSUE_CLAIMED", error: refusal }), {
+        status: 409,
+        headers: { "Content-Type": "application/json" },
+      });
+
+    // ISSUE_CLAIMED and CLAIM_CONTENDED ask for different things, and the tool description
+    // names both by code, so the code has to survive into what the host shows.
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_claim",
+        args: { issue: "DSP-1" },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        sessionId: "session-one",
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      })
+    ).rejects.toThrow(`ISSUE_CLAIMED: ${refusal}`);
+  });
+
+  test("a re-coded refusal keeps every field the server sent beside its message", async () => {
+    const current = {
+      document: "sha256:current-document",
+      blocks: [{ id: "block-1", token: "sha256:current-block" }],
+    };
+    const mismatches = [
+      {
+        scope: "block",
+        block_id: "block-1",
+        expected: "sha256:stale-block",
+        current: "sha256:current-block",
+      },
+    ];
+    const fetchImpl = async (_url: RequestInfo | URL): Promise<Response> =>
+      new Response(
+        JSON.stringify({ code: "PRECONDITION_FAILED", error: "stale", current, mismatches }),
+        { status: 409, headers: { "Content-Type": "application/json" } }
+      );
+
+    // Putting the code into the message rebuilds the error, so every other field a caller
+    // reads off it has to be carried over rather than dropped in the rebuild.
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_claim",
+        args: { issue: "DSP-1" },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        sessionId: "session-one",
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      })
+    ).rejects.toEqual(
+      expect.objectContaining({
+        name: "DispatchServiceError",
+        code: "PRECONDITION_FAILED",
+        status: 409,
+        message: "PRECONDITION_FAILED: stale",
+        current,
+        mismatches,
+      })
+    );
+  });
+
+  test("a claim reads by the holder's live title, and the registry is asked only when one holds it", async () => {
+    const agentCalls: string[] = [];
+    const claimOf = (id: string, stamped: string) => ({
+      actor: { kind: "session", id, origin: { session_title: stamped } },
+      at: "2026-09-24T06:00:00Z",
+    });
+    const serve =
+      (claim: unknown) =>
+      async (url: RequestInfo | URL): Promise<Response> => {
+        const target = new URL(String(url));
+        if (target.pathname === "/api/v1/agents") {
+          agentCalls.push(target.pathname);
+          return response([{ session_id: "session-one", title: "Live registry title" }]);
+        }
+        if (target.pathname === "/api/v1/issues/DSP-1") {
+          return response({
+            key: "DSP-1",
+            title: "Claimed work",
+            status: "todo",
+            priority: null,
+            assignee: null,
+            claim,
+            components: {
+              mode: "inherit",
+              ids: [],
+              unknown: [],
+              reason: null,
+              inherited_from: null,
+            },
+            route: null,
+            open_asks: [],
+            last_seq: 0,
+            labels: [],
+          });
+        }
+        if (target.pathname === "/api/v1/issues/DSP-1/events") return response([]);
+        if (target.pathname === "/api/v1/issues/DSP-1/references") {
+          return response({ members: [], truncated: false });
+        }
+        if (target.pathname === "/api/v1/references") {
+          return response(emptyGraph("issue"));
+        }
+        throw new Error(`unexpected request: ${target.pathname}`);
+      };
+    const read = (claim: unknown) =>
+      executeDispatchTool({
+        tool: "dispatch_read",
+        args: { issue: "DSP-1" },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: serve(claim) as typeof fetch,
+      });
+
+    // A session holds it: the live title wins over the one stamped on the claim.
+    const claimed = await read(claimOf("session-one", "Stamped title"));
+    expect(claimed.text).toContain("Claimed by: Live registry title since 2026-09-24T06:00:00Z");
+    expect(claimed.text).not.toContain("Stamped title");
+    expect(agentCalls).toEqual(["/api/v1/agents"]);
+
+    // A holder the registry does not list falls back to the stamped title, silently.
+    const unlisted = await read(claimOf("session-gone", "Stamped title"));
+    expect(unlisted.text).toContain("Claimed by: Stamped title since 2026-09-24T06:00:00Z");
+    expect(agentCalls).toHaveLength(2);
+
+    // Nothing a session holds: no registry request at all.
+    const unclaimed = await read(null);
+    expect(unclaimed.text).toContain("Claimed by: nobody");
+    const human = await read({ actor: { kind: "user", id: "alice" }, at: "2026-09-24T06:00:00Z" });
+    expect(human.text).toContain("Claimed by: alice since 2026-09-24T06:00:00Z");
+    expect(agentCalls).toHaveLength(2);
+  });
+
   test("dispatch_issues passes each optional filter through, omits absent ones, and returns the documented row shape", async () => {
     const requests: URL[] = [];
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
       const target = new URL(String(url));
       requests.push(target);
+      // A session holds AGENTC-1, so the rows are labelled from the live registry.
+      if (target.pathname === "/api/v1/agents") {
+        return response([{ session_id: "s1", title: "Live registry title" }]);
+      }
       return response([
         {
           key: "AGENTC-1",
@@ -1119,6 +1320,10 @@ describe("executeDispatchTool", () => {
           updated_at: "2026-09-13T00:00:00Z",
           last_seq: 4,
           open_asks: 2,
+          claim: {
+            actor: { kind: "session", id: "s1", origin: { session_title: "Implementer" } },
+            at: "2026-09-13T01:00:00Z",
+          },
         },
       ]);
     };
@@ -1140,8 +1345,10 @@ describe("executeDispatchTool", () => {
       fetchImpl: fetchImpl as typeof fetch,
     });
 
-    expect(requests).toHaveLength(1);
-    expect(requests[0]?.pathname).toBe("/api/v1/issues");
+    expect(requests.map((request) => request.pathname)).toEqual([
+      "/api/v1/issues",
+      "/api/v1/agents",
+    ]);
     expect(Object.fromEntries(requests[0]?.searchParams ?? [])).toEqual({
       project: "AGENTC",
       status: "todo",
@@ -1157,6 +1364,10 @@ describe("executeDispatchTool", () => {
           status: "todo",
           priority: 1,
           parent: null,
+          claim: {
+            actor: { kind: "session", id: "s1", origin: { session_title: "Implementer" } },
+            at: "2026-09-13T01:00:00Z",
+          },
           labels: ["bug"],
           open_asks: 2,
           updated_at: "2026-09-13T00:00:00Z",
@@ -1889,6 +2100,48 @@ describe("executeDispatchTool", () => {
     expect(result.text).toContain("parent cleared");
     expect(patches).toEqual([expect.objectContaining({ parent: null })]);
   });
+
+  test("dispatch_issue_update sends the priority in the patch and reports what it became", async () => {
+    const patches: unknown[] = [];
+    const issue = {
+      key: "AGENTC-175",
+      title: "Issue update tool",
+      status: "in_progress",
+      priority: null,
+      labels: [],
+      route: null,
+      parent: null,
+      external_links: [],
+    };
+    const fetchImpl = async (_url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      if ((init?.method ?? "GET") === "GET") return response(issue);
+      const patch = JSON.parse(String(init?.body)) as { priority: number | null };
+      patches.push(patch);
+      return response({ ...issue, priority: patch.priority });
+    };
+    const run = (priority: unknown) =>
+      executeDispatchTool({
+        tool: "dispatch_issue_update",
+        args: { issue: "AGENTC-175", priority },
+        cwd: "/workspace",
+        host: "omp",
+        sessionId: "session-42",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+
+    const set = await run(1);
+    expect(set.text).toContain("priority -> P1");
+    const cleared = await run(null);
+    expect(cleared.text).toContain("priority cleared");
+    expect(patches).toEqual([
+      expect.objectContaining({ priority: 1 }),
+      expect.objectContaining({ priority: null }),
+    ]);
+  });
+
   test("rejects tool arguments outside the shared schema before issuing a request", async () => {
     const fetchImpl = (() => {
       throw new Error("network must not be called");
@@ -3992,6 +4245,10 @@ describe("executeDispatchTool", () => {
           labels: ["frontend", "urgent"],
           priority: 1,
           assignee: "alice",
+          claim: {
+            actor: { kind: "session", id: "s1", origin: { session_title: "Implementer" } },
+            at: "2026-09-13T01:00:00Z",
+          },
           components: {
             mode: "explicit",
             ids: ["web"],
@@ -4080,6 +4337,7 @@ describe("executeDispatchTool", () => {
     expect(result.text).toContain("Labels: frontend, urgent");
     expect(result.text).toContain("Priority: P1");
     expect(result.text).toContain("Status: open\nAssignee: alice\n");
+    expect(result.text).toContain("Claimed by: Implementer since 2026-09-13T01:00:00Z");
     expect(result.text).toContain(
       "Labels: frontend, urgent\nComponents: web (inherited from DSP-40) (retired: legacy-ui)\nRoute: none"
     );
@@ -4106,6 +4364,7 @@ describe("executeDispatchTool", () => {
           status: "open",
           priority: null,
           assignee: null,
+          claim: null,
           components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
           route: null,
           open_asks: [],
@@ -4136,6 +4395,7 @@ describe("executeDispatchTool", () => {
 
     expect(result.text).toContain("Title: Dispatch issue");
     expect(result.text).toContain("Assignee: unassigned");
+    expect(result.text).toContain("Claimed by: nobody");
     expect(result.text).toContain("Components: unassigned");
     expect(result.text).toContain("References:\n- unavailable");
     expect(result.text).toContain("Referenced by:\n- unavailable\nLinks:\n- unavailable");

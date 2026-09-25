@@ -1,4 +1,8 @@
-import type { CreateProofEditorOptions, ProofEditorHandle } from "@sjawhar/proof-editor";
+import type {
+  CreateProofEditorOptions,
+  ProofEditorHandle,
+  StoredMark,
+} from "@sjawhar/proof-editor";
 import type { Doc } from "yjs";
 
 import type { BlockSchema } from "../../api/types";
@@ -28,6 +32,38 @@ export const createEditor: CreateEditor = async (root, options) => {
   }
   return handle;
 };
+
+// bindRemoteMarks projects the document's `marks` map into the editor now and after every
+// transaction that changes it, and returns the unbinding. The projection waits for the end of the
+// transaction: Yjs calls the map's observers before the deep observer through which y-prosemirror
+// draws the same transaction's text, so projecting from the map's observer sees the text before
+// the update and writes it back (a remote accept of a suggestion, arriving with its projection,
+// reverts). The observer only notes that the map changed.
+export function bindRemoteMarks(doc: Doc, handle: EditorHandle): () => void {
+  const marks = doc.getMap("marks");
+  const project = () => {
+    handle.applyRemoteMarks(marks.toJSON() as Record<string, StoredMark>, {
+      hydrateAnchors: false,
+    });
+  };
+  let changed = false;
+  const noteChange = () => {
+    changed = true;
+  };
+  const projectChange = () => {
+    if (changed) {
+      changed = false;
+      project();
+    }
+  };
+  project();
+  marks.observe(noteChange);
+  doc.on("afterTransaction", projectChange);
+  return () => {
+    marks.unobserve(noteChange);
+    doc.off("afterTransaction", projectChange);
+  };
+}
 
 // A standalone Yjs document for an editor with no live connection (a historical version).
 export async function createDoc(): Promise<Doc> {

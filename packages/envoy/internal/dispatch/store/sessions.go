@@ -6,18 +6,17 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 )
 
 // PgSessionStore records the generation used to revoke signed browser sessions.
 type PgSessionStore struct {
-	pool *pgxpool.Pool
+	pool *Pool
 }
 
 // NewPgSessionStore returns a SessionStore backed by pool.
-func NewPgSessionStore(pool *pgxpool.Pool) *PgSessionStore {
+func NewPgSessionStore(pool *Pool) *PgSessionStore {
 	return &PgSessionStore{pool: pool}
 }
 

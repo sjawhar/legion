@@ -4,7 +4,7 @@ import { useNavigate } from "react-router-dom";
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import type { Artifact, Ask, Comment, IssueDetails } from "../../api/types";
 import { buildIssuePath } from "../refs/routes";
-import { useMargin } from "./Margin";
+import { useMargin } from "./margin-context";
 
 export const specArtifact: Artifact = {
   created_at: "2026-09-09T00:00:00Z",
@@ -32,6 +32,7 @@ export const issue: IssueDetails = {
   number: 1,
   parent: null,
   assignee: null,
+  claim: null,
   components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
   primary_artifact_id: "artifact-1",
   project: "CORE",

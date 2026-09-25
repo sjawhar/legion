@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
-
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,11 +13,7 @@ import (
 	"testing"
 	"time"
 
-	gws "github.com/gorilla/websocket"
-
-	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/crdt"
-	"github.com/reearth/ygo/persistence"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -349,7 +343,7 @@ func TestListIssueAsksFiltersByState(t *testing.T) {
 func TestAnswerAskLocksIssueBeforeAskRow(t *testing.T) {
 	// The seeded spec's settlement would lock the issue row this test holds; keep it
 	// out of the lock queue so the counted waiter is the answer handler.
-	handler, database := newTestServer(t, testServerOptions{settle: time.Hour})
+	handler, database, _ := newTestServer(t, testServerOptions{settle: time.Hour})
 	issue := createInteractionIssue(t, handler, "TEST", "Answer lock order", "A spec")
 	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
 		"question": "Can this be answered?", "actor": sessionActor(),
@@ -2022,383 +2016,6 @@ func TestGetCommentReturnsNotFound(t *testing.T) {
 	}
 }
 
-func TestEditArtifactRollbackEvictsLiveDocument(t *testing.T) {
-	const settleInterval = 50 * time.Millisecond
-	var documentService *docs.Service
-	var failure *postApplyFailureDocs
-	var persistenceStore *recordingVersionedStore
-	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
-		persistenceStore = &recordingVersionedStore{
-			VersionedStore: docs.NewPgVersioned(database),
-			updates:        make(chan struct{}, 8),
-		}
-		documentService = docs.New(docs.Deps{
-			Store:       database,
-			Persistence: persistenceStore,
-			Identity: identity.HeaderIdentity{
-				Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"alice": {}},
-			},
-			Settle: settleInterval,
-		})
-		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
-		failure = &postApplyFailureDocs{
-			API:                documentService,
-			beforeApply:        make(chan struct{}),
-			releaseBeforeApply: make(chan struct{}),
-			beforeEvict:        make(chan struct{}),
-			releaseEvict:       make(chan struct{}),
-			applied:            make(chan struct{}),
-			release:            make(chan struct{}),
-		}
-		return failure
-	})
-	issue := createInteractionIssue(t, handler, "TEST", "Transactional edit", "before")
-	documentServer := httptest.NewServer(http.HandlerFunc(documentService.ServeHTTP))
-	t.Cleanup(documentServer.Close)
-	headers := http.Header{"X-Dispatch-User": []string{"alice"}}
-	wsURL := "ws" + strings.TrimPrefix(documentServer.URL, "http") + "/ws/doc/" + issue.PrimaryArtifactID
-	connection, wsResponse, err := gws.DefaultDialer.Dial(wsURL, headers)
-	if err != nil {
-		t.Fatalf("connect live document: response=%#v err=%v", wsResponse, err)
-	}
-	t.Cleanup(func() { _ = connection.Close() })
-	drainDocumentUpdates(persistenceStore)
-	responses := make(chan *httptest.ResponseRecorder, 1)
-	handlerDone := make(chan struct{})
-	go func() {
-		defer close(handlerDone)
-		responses <- sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
-			"ops": []map[string]string{{"op": "replace", "find": "before", "with": "after"}}, "actor": sessionActor(),
-		})
-	}()
-	// Release every test gate before connection, server, and service cleanup. Otherwise a
-	// failed assertion can leave this request holding its transaction open indefinitely.
-	t.Cleanup(func() {
-		closeTestGate(failure.releaseBeforeApply)
-		closeTestGate(failure.release)
-		closeTestGate(failure.releaseEvict)
-		select {
-		case <-handlerDone:
-		case <-time.After(5 * time.Second):
-			t.Error("transactional edit did not exit after releasing test gates")
-		}
-	})
-	waitForBeforeApply(t, failure)
-	if _, err := documentService.ApplyOps(context.Background(), issue.PrimaryArtifactID, []model.EditOp{{Op: "replace", Find: "before", With: "before"}}, model.Actor{Kind: "user", ID: "alice"}, nil); err != nil {
-		t.Fatalf("apply live update before transactional edit: %v", err)
-	}
-	waitForDocumentUpdate(t, persistenceStore)
-	waitForSecondReplacementOrCommentLock(t, database, make(chan struct{}))
-	assertArtifactKeyShareLockAvailable(t, database, issue.PrimaryArtifactID)
-	closeTestGate(failure.releaseBeforeApply)
-	waitForPostApply(t, failure)
-	waitForDocumentUpdate(t, persistenceStore)
-	assertNoSettledDocumentVersion(t, database, issue.PrimaryArtifactID, settleInterval)
-	closeTestGate(failure.release)
-	waitForBeforeEvict(t, failure)
-	assertNoSettledDocumentVersion(t, database, issue.PrimaryArtifactID, settleInterval)
-	closeTestGate(failure.releaseEvict)
-	handlerResponse := awaitResponse(t, responses)
-	if handlerResponse.Code != http.StatusInternalServerError {
-		t.Fatalf("edit with forced post-apply failure: status=%d body=%s", handlerResponse.Code, handlerResponse.Body.String())
-	}
-	assertHandlerDocumentText(t, handler, issue.PrimaryArtifactID, "before\n")
-	assertNoSettledDocumentVersion(t, database, issue.PrimaryArtifactID, settleInterval)
-	waitForDocumentConnectionClose(t, connection)
-	reconnected, wsResponse, err := gws.DefaultDialer.Dial(wsURL, headers)
-	if err != nil {
-		t.Fatalf("reconnect evicted document: response=%#v err=%v", wsResponse, err)
-	}
-	t.Cleanup(func() { _ = reconnected.Close() })
-	assertHandlerDocumentText(t, handler, issue.PrimaryArtifactID, "before\n")
-}
-
-func TestSuggestionAcceptRollbackEvictsLiveDocument(t *testing.T) {
-	const settleInterval = 50 * time.Millisecond
-	var documentService *docs.Service
-	var failure *postApplyFailureDocs
-	var persistenceStore *recordingVersionedStore
-	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
-		persistenceStore = &recordingVersionedStore{
-			VersionedStore: docs.NewPgVersioned(database),
-			updates:        make(chan struct{}, 8),
-		}
-		documentService = docs.New(docs.Deps{
-			Store:       database,
-			Persistence: persistenceStore,
-			Identity: identity.HeaderIdentity{
-				Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"alice": {}},
-			},
-			Settle: settleInterval,
-		})
-		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
-		failure = &postApplyFailureDocs{
-			API: documentService, applied: make(chan struct{}), release: make(chan struct{}),
-		}
-		return failure
-	})
-	issue := createInteractionIssue(t, handler, "TEST", "Transactional suggestion", "before")
-	documentServer := httptest.NewServer(http.HandlerFunc(documentService.ServeHTTP))
-	t.Cleanup(documentServer.Close)
-	headers := http.Header{"X-Dispatch-User": []string{"alice"}}
-	wsURL := "ws" + strings.TrimPrefix(documentServer.URL, "http") + "/ws/doc/" + issue.PrimaryArtifactID
-	connection, wsResponse, err := gws.DefaultDialer.Dial(wsURL, headers)
-	if err != nil {
-		t.Fatalf("connect live document: response=%#v err=%v", wsResponse, err)
-	}
-	t.Cleanup(func() { _ = connection.Close() })
-	drainDocumentUpdates(persistenceStore)
-	earlierResponse := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
-		"body": "earlier", "anchor": map[string]any{"artifact": "spec", "quote": "before"}, "actor": sessionActor(),
-	})
-	if earlierResponse.Code != http.StatusCreated {
-		t.Fatalf("create earlier anchored comment: status=%d body=%s", earlierResponse.Code, earlierResponse.Body.String())
-	}
-	earlier := decodeBody[model.Comment](t, earlierResponse)
-	drainDocumentUpdates(persistenceStore)
-	suggestion := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
-		"body":       "replace it",
-		"anchor":     map[string]any{"artifact": "spec", "quote": "before"},
-		"suggestion": map[string]string{"replace_with": "after"},
-		"actor":      sessionActor(),
-	})
-	if suggestion.Code != http.StatusCreated {
-		t.Fatalf("create suggestion: status=%d body=%s", suggestion.Code, suggestion.Body.String())
-	}
-	comment := decodeBody[model.Comment](t, suggestion)
-	drainDocumentUpdates(persistenceStore)
-	responses := make(chan *httptest.ResponseRecorder, 1)
-	go func() {
-		responses <- dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
-	}()
-	waitForPostApply(t, failure)
-	waitForDocumentUpdate(t, persistenceStore)
-	close(failure.release)
-	handlerResponse := awaitResponse(t, responses)
-	if handlerResponse.Code != http.StatusInternalServerError {
-		t.Fatalf("accept with forced post-apply failure: status=%d body=%s", handlerResponse.Code, handlerResponse.Body.String())
-	}
-	reloaded := dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/"+earlier.ID, nil, "alice")
-	if reloaded.Code != http.StatusOK {
-		t.Fatalf("read earlier comment after rollback: status=%d body=%s", reloaded.Code, reloaded.Body.String())
-	}
-	if comment := decodeBody[struct {
-		Comment model.Comment `json:"comment"`
-	}](t, reloaded).Comment; comment.Anchor == nil || comment.Anchor.Orphaned {
-		t.Fatalf("earlier comment after rollback = %#v, want its original anchor", comment)
-	}
-	events := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
-	if events.Code != http.StatusOK || strings.Contains(events.Body.String(), `"type":"comment.anchor_refreshed"`) {
-		t.Fatalf("rollback anchor events = status=%d body=%s, want no committed cascade event", events.Code, events.Body.String())
-	}
-	assertHandlerDocumentText(t, handler, issue.PrimaryArtifactID, "before\n")
-	assertNoSettledDocumentVersion(t, database, issue.PrimaryArtifactID, settleInterval)
-	waitForDocumentConnectionClose(t, connection)
-	reconnected, wsResponse, err := gws.DefaultDialer.Dial(wsURL, headers)
-	if err != nil {
-		t.Fatalf("reconnect evicted document: response=%#v err=%v", wsResponse, err)
-	}
-	t.Cleanup(func() { _ = reconnected.Close() })
-	assertHandlerDocumentText(t, handler, issue.PrimaryArtifactID, "before\n")
-}
-
-func TestCommentProjectionFailureEvictsLiveDocument(t *testing.T) {
-	for _, action := range []string{"reply", "resolve"} {
-		t.Run(action, func(t *testing.T) {
-			var documentService *docs.Service
-			var failure *postApplyFailureDocs
-			handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
-				documentService = docs.New(docs.Deps{
-					Store:    database,
-					Settle:   time.Hour,
-					Identity: identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"alice": {}}},
-				})
-				t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
-				failure = &postApplyFailureDocs{
-					API:               documentService,
-					applied:           make(chan struct{}),
-					release:           make(chan struct{}),
-					failProjectMark:   true,
-					projectMarkPasses: 1,
-				}
-				return failure
-			})
-			issue := createInteractionIssue(t, handler, "TEST", "Projection rollback", "before")
-			documentServer := httptest.NewServer(http.HandlerFunc(documentService.ServeHTTP))
-			t.Cleanup(documentServer.Close)
-			connection, wsResponse, err := gws.DefaultDialer.Dial(
-				"ws"+strings.TrimPrefix(documentServer.URL, "http")+"/ws/doc/"+issue.PrimaryArtifactID,
-				http.Header{"X-Dispatch-User": []string{"alice"}},
-			)
-			if err != nil {
-				t.Fatalf("connect live document: response=%#v err=%v", wsResponse, err)
-			}
-			t.Cleanup(func() { _ = connection.Close() })
-			rootResponse := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
-				"body": "root", "anchor": map[string]any{"artifact": "spec", "quote": "before"}, "actor": sessionActor(),
-			})
-			if rootResponse.Code != http.StatusCreated {
-				t.Fatalf("create anchored root: status=%d body=%s", rootResponse.Code, rootResponse.Body.String())
-			}
-			root := decodeBody[model.Comment](t, rootResponse)
-
-			responses := make(chan *httptest.ResponseRecorder, 1)
-			done := make(chan struct{})
-			go func() {
-				defer close(done)
-				if action == "reply" {
-					responses <- dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
-						"body": "reply", "reply_to": root.ID,
-					}, "alice")
-					return
-				}
-				responses <- sessionRequest(t, handler, http.MethodPost, "/api/v1/comments/"+root.ID+"/resolve", map[string]any{"actor": sessionActor()})
-			}()
-			t.Cleanup(func() {
-				closeTestGate(failure.release)
-				select {
-				case <-done:
-				case <-time.After(time.Second):
-					t.Error("projection failure request did not finish after its gate opened")
-				}
-			})
-			waitForPostApply(t, failure)
-			closeTestGate(failure.release)
-			handlerResponse := awaitResponse(t, responses)
-			if handlerResponse.Code != http.StatusInternalServerError {
-				t.Fatalf("%s projection failure: status=%d body=%s", action, handlerResponse.Code, handlerResponse.Body.String())
-			}
-			assertHandlerDocumentText(t, handler, issue.PrimaryArtifactID, "before\n")
-			waitForDocumentConnectionClose(t, connection)
-		})
-	}
-}
-
-func TestDocumentUploadRollbackEvictsLiveDocument(t *testing.T) {
-	var documentService *docs.Service
-	var failure *postApplyFailureDocs
-	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
-		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
-		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
-		failure = &postApplyFailureDocs{
-			API: documentService, applied: make(chan struct{}), release: make(chan struct{}),
-		}
-		return failure
-	})
-	issue := createInteractionIssue(t, handler, "TEST", "Transactional upload", "before")
-	responses := make(chan *httptest.ResponseRecorder, 1)
-	go func() {
-		responses <- multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
-			"name": "spec.md",
-		}, "spec.md", "text/markdown", []byte("after"), "alice")
-	}()
-	waitForPostApply(t, failure)
-	close(failure.release)
-	response := awaitResponse(t, responses)
-	if response.Code != http.StatusInternalServerError {
-		t.Fatalf("upload with forced post-replace failure: status=%d body=%s", response.Code, response.Body.String())
-	}
-	assertHandlerDocumentText(t, handler, issue.PrimaryArtifactID, "before\n")
-}
-
-type recordingVersionedStore struct {
-	docs.VersionedStore
-	updates chan struct{}
-}
-
-func (s *recordingVersionedStore) AppendUpdate(ctx context.Context, room string, update []byte) (persistence.Version, error) {
-	version, err := s.VersionedStore.AppendUpdate(ctx, room, update)
-	if err == nil {
-		s.updates <- struct{}{}
-	}
-	return version, err
-}
-
-func (s *recordingVersionedStore) AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool) (persistence.Version, error) {
-	version, err := s.VersionedStore.AppendUpdateTx(ctx, tx, room, update, contentChanged)
-	if err == nil {
-		s.updates <- struct{}{}
-	}
-	return version, err
-}
-
-type postApplyFailureDocs struct {
-	docs.API
-	beforeApply        chan struct{}
-	releaseBeforeApply chan struct{}
-	beforeEvict        chan struct{}
-	releaseEvict       chan struct{}
-	applied            chan struct{}
-	release            chan struct{}
-	failProjectMark    bool
-	projectMarkPasses  int
-}
-
-func (d *postApplyFailureDocs) ApplyOps(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor, precondition *model.EditPrecondition) (int, error) {
-	d.waitBeforeApply()
-	applied, err := d.API.ApplyOps(ctx, artifactID, ops, actor, precondition)
-	if err != nil {
-		return 0, err
-	}
-	close(d.applied)
-	<-d.release
-	return applied, errors.New("forced post-apply failure")
-}
-
-func (d *postApplyFailureDocs) AcceptSuggestion(ctx context.Context, artifactID, markID, replacement string, actor model.Actor) error {
-	d.waitBeforeApply()
-	if err := d.API.AcceptSuggestion(ctx, artifactID, markID, replacement, actor); err != nil {
-		return err
-	}
-	close(d.applied)
-	<-d.release
-	return errors.New("forced post-apply failure")
-}
-
-func (d *postApplyFailureDocs) ProjectMark(ctx context.Context, artifactID, markID string, record docs.MarkRecord, actor model.Actor) error {
-	if !d.failProjectMark {
-		return d.API.ProjectMark(ctx, artifactID, markID, record, actor)
-	}
-	if d.projectMarkPasses > 0 {
-		d.projectMarkPasses--
-		return d.API.ProjectMark(ctx, artifactID, markID, record, actor)
-	}
-	d.waitBeforeApply()
-	if err := d.API.ProjectMark(ctx, artifactID, markID, record, actor); err != nil {
-		return err
-	}
-	close(d.applied)
-	<-d.release
-	return errors.New("forced post-projection failure")
-}
-
-func (d *postApplyFailureDocs) ReplaceText(ctx context.Context, artifactID, markdown string, actor model.Actor) (string, error) {
-	d.waitBeforeApply()
-	_, err := d.API.ReplaceText(ctx, artifactID, markdown, actor)
-	if err != nil {
-		return "", err
-	}
-	close(d.applied)
-	<-d.release
-	return "", errors.New("forced post-apply failure")
-}
-
-func (d *postApplyFailureDocs) Evict(ctx context.Context, artifactID string) error {
-	if d.beforeEvict != nil {
-		close(d.beforeEvict)
-		<-d.releaseEvict
-	}
-	return d.API.Evict(ctx, artifactID)
-}
-
-func (d *postApplyFailureDocs) waitBeforeApply() {
-	if d.beforeApply == nil {
-		return
-	}
-	close(d.beforeApply)
-	<-d.releaseBeforeApply
-}
-
 // loadMarkProjection waits for the mark to reach the persisted document: the API answers once
 // the live document carries the mark, and persistence follows on its own schedule.
 func loadMarkProjection(t *testing.T, database *store.Store, artifactID, markID string) map[string]any {
@@ -2413,6 +2030,24 @@ func loadMarkProjection(t *testing.T, database *store.Store, artifactID, markID 
 			t.Fatalf("mark projection %q is missing", markID)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// awaitMarkProjection waits for the mark's durable record. A document's updates do not all
+// reach Postgres inside the request that caused them: a server-side mark written outside a
+// transaction persists on the document service's own queue, and a Yjs update that depends on
+// one still in flight stays pending in a freshly loaded document until it lands. Reading the
+// instant a request returns is therefore a race with that queue, not a statement about the
+// write - the record either appears here or the caller's assertion fails on the empty result.
+func awaitMarkProjection(t *testing.T, database *store.Store, artifactID, markID string) (map[string]any, bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		projection, found := findMarkProjection(t, database, artifactID, markID)
+		if found || time.Now().After(deadline) {
+			return projection, found
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -2435,121 +2070,6 @@ func findMarkProjection(t *testing.T, database *store.Store, artifactID, markID 
 		t.Fatalf("mark projection = %#v, want object", value)
 	}
 	return projection, true
-}
-
-func drainDocumentUpdates(store *recordingVersionedStore) {
-	for {
-		select {
-		case <-store.updates:
-		default:
-			return
-		}
-	}
-}
-
-func closeTestGate(gate chan struct{}) {
-	if gate == nil {
-		return
-	}
-	select {
-	case <-gate:
-		return
-	default:
-		close(gate)
-	}
-}
-
-func assertArtifactKeyShareLockAvailable(t *testing.T, database *store.Store, artifactID string) {
-	t.Helper()
-	tx, err := database.Pool.Begin(context.Background())
-	if err != nil {
-		t.Fatalf("begin artifact lock probe: %v", err)
-	}
-	defer tx.Rollback(context.Background())
-	var lockedID string
-	if err := tx.QueryRow(context.Background(), `
-		select id::text from artifacts where id = $1 for key share nowait
-	`, artifactID).Scan(&lockedID); err != nil {
-		t.Fatalf("settlement holds artifact lock while waiting for issue lock: %v", err)
-	}
-}
-
-func waitForBeforeApply(t *testing.T, docs *postApplyFailureDocs) {
-	t.Helper()
-	select {
-	case <-docs.beforeApply:
-	case <-time.After(time.Second):
-		t.Fatal("document mutation did not reach pre-apply gate")
-	}
-}
-
-func waitForBeforeEvict(t *testing.T, docs *postApplyFailureDocs) {
-	t.Helper()
-	select {
-	case <-docs.beforeEvict:
-	case <-time.After(time.Second):
-		t.Fatal("document mutation did not reach eviction gate")
-	}
-}
-
-func waitForPostApply(t *testing.T, docs *postApplyFailureDocs) {
-	t.Helper()
-	select {
-	case <-docs.applied:
-	case <-time.After(time.Second):
-		t.Fatal("document mutation did not complete")
-	}
-}
-
-func waitForDocumentUpdate(t *testing.T, store *recordingVersionedStore) {
-	t.Helper()
-	select {
-	case <-store.updates:
-	case <-time.After(time.Second):
-		t.Fatal("document mutation did not reach persistence")
-	}
-}
-
-func assertHandlerDocumentText(t *testing.T, handler http.Handler, artifactID, want string) {
-	t.Helper()
-	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+artifactID+"/text", nil, "alice")
-	if response.Code != http.StatusOK {
-		t.Fatalf("read document after rollback: status=%d body=%s", response.Code, response.Body.String())
-	}
-	result := decodeBody[struct {
-		Markdown string `json:"markdown"`
-	}](t, response)
-	if result.Markdown != want {
-		t.Fatalf("document after rollback = %q, want %q", result.Markdown, want)
-	}
-}
-
-func assertNoSettledDocumentVersion(t *testing.T, database *store.Store, artifactID string, settle time.Duration) {
-	t.Helper()
-	time.Sleep(3 * settle)
-	var versions int
-	if err := database.Pool.QueryRow(context.Background(), `
-		select count(*) from artifact_versions where artifact_id = $1
-	`, artifactID).Scan(&versions); err != nil {
-		t.Fatalf("count document versions after rollback: %v", err)
-	}
-	if versions != 1 {
-		t.Fatalf("versions after rollback = %d, want 1", versions)
-	}
-}
-
-func waitForDocumentConnectionClose(t *testing.T, connection *gws.Conn) {
-	t.Helper()
-	connection.SetReadDeadline(time.Now().Add(time.Second))
-	for {
-		if _, _, err := connection.ReadMessage(); err != nil {
-			var networkError net.Error
-			if errors.As(err, &networkError) && networkError.Timeout() {
-				t.Fatal("document connection remained open after rollback")
-			}
-			return
-		}
-	}
 }
 
 func TestResolveAskRemovesItFromInboxAndKeepsTheThread(t *testing.T) {

@@ -7,11 +7,11 @@
 # hash, the namespace list) use the admin context. Each check prints what it observed, naming the
 # identity, then `CHECK <name>: PASS`; the first that fails ends the run non-zero, naming it.
 #
-# Everything the run creates carries its own project label, s4a-<run id>. On any exit the teardown
-# deletes by exact name every Sandbox the harness recorded, then everything labelled with that exact
-# project — never by label existence — and namespace-clean compares the namespace with the snapshot
-# taken before the run, restricted to objects of this run or of no project, so another tree's
-# objects cannot fail it. Nothing outside `legion` is touched.
+# Everything the run creates carries its own project label, s4a-<run id>, and lib/namespace-rig.sh
+# owns it: on any exit the teardown deletes by exact name every Sandbox the harness recorded, then
+# everything labelled with that exact project — never by label existence — and namespace-clean
+# compares the namespace with the snapshot taken before the run, restricted to objects of this run
+# or of no project, so another tree's objects cannot fail it. Nothing outside `legion` is touched.
 #
 # Inputs: LEGION_E2E_RUNTIME_CONTEXT (required) and LEGION_E2E_RUNTIME_KUBECONFIG (default
 # ~/.kube/legion-daemon-production) name the restricted identity; LEGION_E2E_OPERATOR_CONTEXT
@@ -33,7 +33,8 @@ image=${LEGION_E2E_IMAGE:-}
 from=${STAGE4A_FROM:-}
 evidence=${STAGE4A_EVIDENCE_DIR:-$(mktemp -d /tmp/legion-e2e4a-evidence.XXXXXXXX)}
 work=$(mktemp -d /tmp/legion-e2e4a.XXXXXXXX)
-project="s4a-$(date -u +%Y%m%d%H%M%S)-$(od -An -N2 -tx1 /dev/urandom | tr -d ' \n')"
+project_prefix=s4a-
+project="${project_prefix}$(date -u +%Y%m%d%H%M%S)-$(od -An -N2 -tx1 /dev/urandom | tr -d ' \n')"
 record=$work/sandboxes
 check=setup
 torn_down=
@@ -49,70 +50,13 @@ begin() {
   echo "== $check"
 }
 note() { echo "   $*"; }
+pass() { echo "CHECK $check: PASS"; }
 fail() {
   echo "CHECK $check: FAIL: $*"
   exit 1
 }
-op() { kubectl --context "$operator" -n "$namespace" "$@"; }
-
-# snapshot FILE: the namespace's Sandboxes, Secrets, PVCs, and pods that carry this run's project
-# label or no project label at all, as the operator sees them.
-snapshot() {
-  {
-    op get sandboxes,secrets,pvc,pods -l '!legion.dev/project' -o name
-    op get sandboxes,secrets,pvc,pods -l "legion.dev/project=$project" -o name
-  } | sort >"$1"
-}
-
-# teardown: this run's objects, and nothing else, gone. Never fails; runs once.
-teardown() {
-  [ -z "$torn_down" ] || return 0
-  torn_down=1
-  echo "== teardown"
-  case "$project" in
-    s4a-?*) ;;
-    *)
-      echo "   refused: the run project '$project' lacks the reserved prefix s4a-"
-      return 0
-      ;;
-  esac
-  local name left i failures=0
-  if [ -s "$record" ]; then
-    while read -r name; do
-      op delete sandbox "$name" --ignore-not-found --wait=false || true
-    done < <(sort -u "$record")
-  fi
-  op delete sandboxes -l "legion.dev/project=$project" --ignore-not-found --wait=false || true
-  for i in $(seq 1 150); do
-    if ! left=$(op get sandboxes,secrets,pvc,pods -l "legion.dev/project=$project" -o name 2>"$work/teardown.err"); then
-      # A transient API error is waited out; three in a row mean the context cannot answer.
-      failures=$((failures + 1))
-      if [ "$failures" -ge 3 ]; then
-        echo "   [operator] context $operator cannot list project $project's objects; they may remain: $(cat "$work/teardown.err")"
-        return 0
-      fi
-      sleep 2
-      continue
-    fi
-    failures=0
-    [ -n "$left" ] || break
-    [ "$i" -ne 90 ] || op delete secrets,pvc -l "legion.dev/project=$project" --ignore-not-found --wait=false || true
-    sleep 2
-  done
-  echo "   [operator] left of project $project: ${left:-nothing}"
-  return 0
-}
-
-namespace_clean() {
-  compared=1
-  begin namespace-clean
-  snapshot "$evidence/namespace-after.txt" || fail "the operator could not list namespace $namespace"
-  if ! diff -u "$evidence/namespace-before.txt" "$evidence/namespace-after.txt"; then
-    fail "namespace $namespace differs from its snapshot (restricted to project $project and unlabelled objects)"
-  fi
-  note "[operator] $(wc -l <"$evidence/namespace-after.txt") objects before and after, identical (unlabelled or project $project; sandboxes, secrets, pvc, pods)"
-  echo "CHECK namespace-clean: PASS"
-}
+# shellcheck source-path=SCRIPTDIR source=lib/namespace-rig.sh
+. "$root/scripts/e2e/lib/namespace-rig.sh"
 
 cleanup() {
   local status=$?

@@ -37,8 +37,13 @@ var listIssuesQuery = issueSummaryHead + issueSummaryTail
 var listPinnedIssuesQuery = issueSummaryHead + `
 	join user_issue_state s on s.issue_key = i.key and s.login = $7 and s.pinned` + issueSummaryTail
 
+// issueClaimColumns is the claim half of an issue select, named once like
+// issueComponentsColumns so every read scans the two columns in one order.
+const issueClaimColumns = `i.claimed_by, i.claimed_at`
+
 const issueSummaryHead = `
 	select i.key, i.title, i.status, i.priority, i.rank, i.labels, i.parent_key, i.assignee, i.updated_at, i.last_seq,
+	       ` + issueClaimColumns + `,
 	       count(a.id) filter (where i.closed_at is null),
 	       ` + issueComponentsColumns + `
 	from issues i`
@@ -60,6 +65,26 @@ const (
 	maxIssueLabels  = 20
 	maxIssueLabel16 = 40
 )
+
+// claimScan reads an issue's two claim columns as one nullable claim. A row has both or
+// neither (the issues_claim_complete constraint), so either absent means unclaimed.
+type claimScan struct {
+	actor []byte
+	at    *time.Time
+}
+
+func (c *claimScan) targets() []any { return []any{&c.actor, &c.at} }
+
+func (c *claimScan) resolve(key string) (*model.IssueClaim, error) {
+	if len(c.actor) == 0 || c.at == nil {
+		return nil, nil
+	}
+	claim := model.IssueClaim{At: *c.at}
+	if err := json.Unmarshal(c.actor, &claim.Actor); err != nil {
+		return nil, fmt.Errorf("decode issue %s claim actor: %w", key, err)
+	}
+	return &claim, nil
+}
 
 func normalizeIssueLabels(values []string) ([]string, error) {
 	if len(values) > maxIssueLabels {
@@ -132,11 +157,20 @@ func (s *server) listIssues(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var issue model.IssueSummary
 		var components componentsScan
-		targets := []any{&issue.Key, &issue.Title, &issue.Status, &issue.Priority, &issue.Rank, &issue.Labels, &issue.Parent, &issue.Assignee, &issue.UpdatedAt, &issue.LastSeq, &issue.OpenAsks}
+		var claim claimScan
+		targets := []any{&issue.Key, &issue.Title, &issue.Status, &issue.Priority, &issue.Rank, &issue.Labels, &issue.Parent, &issue.Assignee, &issue.UpdatedAt, &issue.LastSeq}
+		targets = append(targets, claim.targets()...)
+		targets = append(targets, &issue.OpenAsks)
 		if err := rows.Scan(append(targets, components.targets()...)...); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
+		resolved, err := claim.resolve(issue.Key)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		issue.Claim = resolved
 		issue.Components = components.resolve(issue.Key)
 		issues = append(issues, issue)
 	}
@@ -225,16 +259,18 @@ func (s *server) loadIssue(ctx context.Context, q queryer, key string) (model.Is
 	var issue model.Issue
 	var createdBy []byte
 	var components componentsScan
+	var claim claimScan
 	targets := []any{
 		&issue.Key, &issue.Project, &issue.Number, &issue.Title, &issue.Status, &issue.Priority, &issue.Rank, &issue.Labels,
 		&issue.Parent, &issue.Assignee, &issue.Route, &createdBy, &issue.CreatedAt, &issue.UpdatedAt, &issue.ClosedAt,
 		&issue.PrimaryArtifactID, &issue.LastSeq,
 	}
+	targets = append(targets, claim.targets()...)
 	if err := q.QueryRow(ctx, `
 		select i.key, i.project_key, i.number, i.title, i.status, i.priority, i.rank, i.labels, i.parent_key, i.assignee, i.route,
 		       i.created_by, i.created_at, i.updated_at, i.closed_at,
 		       coalesce((select a.id::text from artifacts a where a.issue_key = i.key and a.is_primary), ''),
-		       i.last_seq,
+		       i.last_seq, `+issueClaimColumns+`,
 		       `+issueComponentsColumns+`
 		from issues i
 		`+issueComponentsLateral+`
@@ -243,6 +279,11 @@ func (s *server) loadIssue(ctx context.Context, q queryer, key string) (model.Is
 		return model.Issue{}, err
 	}
 	issue.Components = components.resolve(issue.Key)
+	resolved, err := claim.resolve(issue.Key)
+	if err != nil {
+		return model.Issue{}, err
+	}
+	issue.Claim = resolved
 	if err := json.Unmarshal(createdBy, &issue.CreatedBy); err != nil {
 		return model.Issue{}, fmt.Errorf("decode issue actor: %w", err)
 	}

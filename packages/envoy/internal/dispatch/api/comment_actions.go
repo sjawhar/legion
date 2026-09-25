@@ -50,15 +50,9 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	evictOnFailure := false
-	evictArtifactID := ""
-	defer func() {
-		if evictOnFailure {
-			_ = s.deps.Docs.Evict(r.Context(), evictArtifactID)
-		}
-	}()
 	defer tx.Rollback(r.Context())
 	documentCtx, documentEvents := documentMutationContext(r.Context(), tx)
+	defer s.deps.Docs.DiscardLiveWrites(documentEvents)
 	comment, err := s.lockedComment(r.Context(), tx, r.PathValue("id"))
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -93,7 +87,7 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 		// A resolved orphaned suggestion reopens like any thread: its mark is gone, so it has no
 		// projection kind to carry and ProjectMark writes only the marks map.
 		projectionKind := ""
-		kind, kindErr := s.commentProjectionKind(r.Context(), comment)
+		kind, kindErr := s.commentProjectionKind(documentCtx, comment)
 		if kindErr != nil && !errors.Is(kindErr, docs.ErrAnchorMissing) {
 			s.writeHandlerError(w, kindErr)
 			return
@@ -101,8 +95,6 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 		if kindErr == nil {
 			projectionKind = kind
 		}
-		evictArtifactID = comment.Anchor.ArtifactID
-		evictOnFailure = true
 		if err := s.deps.Docs.ProjectMark(documentCtx, comment.Anchor.ArtifactID, comment.Anchor.MarkID, commentMarkRecord(comment, replies, projectionKind), actor); err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -122,11 +114,10 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if err := tx.Commit(r.Context()); err != nil {
+	if err := s.commitDocumentMutation(r.Context(), tx, documentEvents); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	evictOnFailure = false
 	s.publishDocumentEvents(documentEvents, event)
 	WriteJSON(w, http.StatusOK, comment)
 }
@@ -156,15 +147,9 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	evictOnFailure := false
-	evictArtifactID := ""
-	defer func() {
-		if evictOnFailure {
-			_ = s.deps.Docs.Evict(r.Context(), evictArtifactID)
-		}
-	}()
 	defer tx.Rollback(r.Context())
 	documentCtx, documentEvents := documentMutationContext(r.Context(), tx)
+	defer s.deps.Docs.DiscardLiveWrites(documentEvents)
 	comment, err := s.lockedComment(r.Context(), tx, r.PathValue("id"))
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -197,13 +182,11 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 			s.writeHandlerError(w, err)
 			return
 		}
-		projectionKind, err := s.commentProjectionKind(r.Context(), comment)
+		projectionKind, err := s.commentProjectionKind(documentCtx, comment)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
-		evictArtifactID = comment.Anchor.ArtifactID
-		evictOnFailure = true
 		if err := s.deps.Docs.ProjectMark(documentCtx, comment.Anchor.ArtifactID, comment.Anchor.MarkID, commentMarkRecord(comment, replies, projectionKind), actor); err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -232,11 +215,10 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if err := tx.Commit(r.Context()); err != nil {
+	if err := s.commitDocumentMutation(r.Context(), tx, documentEvents); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	evictOnFailure = false
 	s.publishDocumentEvents(documentEvents, event)
 	WriteJSON(w, http.StatusOK, comment)
 }
@@ -266,17 +248,9 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		s.writeHandlerError(w, err)
 		return
 	}
-	// A live mark mutation cannot roll back from memory with the SQL transaction.
-	// Evict after the transaction releases its locks when a later step fails.
-	evictOnFailure := false
-	evictArtifactID := ""
-	defer func() {
-		if evictOnFailure {
-			_ = s.deps.Docs.Evict(r.Context(), evictArtifactID)
-		}
-	}()
 	defer tx.Rollback(r.Context())
 	documentCtx, documentEvents := documentMutationContext(r.Context(), tx)
+	defer s.deps.Docs.DiscardLiveWrites(documentEvents)
 	comment, err := s.lockedComment(r.Context(), tx, r.PathValue("id"))
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -299,7 +273,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		// An orphaned suggestion's mark is gone, so it has no projection kind to carry; the
 		// resolve still lands and ProjectMark writes only the marks map. Resolve is the one way
 		// to close a suggestion that can no longer be accepted or rejected.
-		kind, kindErr := s.commentProjectionKind(r.Context(), comment)
+		kind, kindErr := s.commentProjectionKind(documentCtx, comment)
 		if kindErr != nil && !errors.Is(kindErr, docs.ErrAnchorMissing) {
 			s.writeHandlerError(w, kindErr)
 			return
@@ -333,7 +307,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 			writeError(w, "INVALID_SUGGESTION", http.StatusBadRequest, "accept requires an anchored suggestion")
 			return
 		}
-		kind, kindErr := s.commentProjectionKind(r.Context(), comment)
+		kind, kindErr := s.commentProjectionKind(documentCtx, comment)
 		if kindErr != nil && !errors.Is(kindErr, docs.ErrAnchorMissing) {
 			s.writeHandlerError(w, kindErr)
 			return
@@ -342,8 +316,6 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 			projectionKind = kind
 		}
 		if comment.Anchor != nil {
-			evictArtifactID = comment.Anchor.ArtifactID
-			evictOnFailure = true
 			var markErr error
 			if action == "accept" {
 				markErr = s.deps.Docs.AcceptSuggestion(documentCtx, comment.Anchor.ArtifactID, comment.Anchor.MarkID, comment.Suggestion.ReplaceWith, actor)
@@ -365,11 +337,11 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 					s.writeHandlerError(w, err)
 					return
 				}
-				if err := tx.Commit(r.Context()); err != nil {
+				if err := s.commitDocumentMutation(r.Context(), tx, documentEvents); err != nil {
 					s.writeHandlerError(w, err)
 					return
 				}
-				evictOnFailure = false
+				s.publishDocumentEvents(documentEvents)
 				s.writeHandlerError(w, markErr)
 				return
 			}
@@ -410,8 +382,6 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 			s.writeHandlerError(w, err)
 			return
 		}
-		evictArtifactID = comment.Anchor.ArtifactID
-		evictOnFailure = true
 		if err := s.deps.Docs.ProjectMark(documentCtx, comment.Anchor.ArtifactID, comment.Anchor.MarkID, commentMarkRecord(comment, replies, projectionKind), actor); err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -467,11 +437,10 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		return
 	}
 	events = append(events, event)
-	if err := tx.Commit(r.Context()); err != nil {
+	if err := s.commitDocumentMutation(r.Context(), tx, documentEvents); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	evictOnFailure = false
 	if version != nil {
 		s.deps.Docs.CommitVersion(comment.Anchor.ArtifactID, *version)
 	}

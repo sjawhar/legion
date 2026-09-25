@@ -1,52 +1,10 @@
-import { serviceSubjectLabel } from "@legion/contracts";
-import type { Actor, AskResolution } from "../../api/types";
+import { actorLabel } from "@legion/contracts";
+import type { AskResolution } from "../../api/types";
 
-/** `session:01234567…` — how an untitled session reads everywhere in the SPA. */
-export function shortSessionId(id: string): string {
-  return `session:${id.slice(0, 8)}…`;
-}
-
-/** The one session label: `title` when it has text (the agent registry's live title where a
- *  surface has one, else the title stamped on the write), else `shortSessionId`. The Agents
- *  page, ask cards, an ask's `Reaches` list, Subscribed agents, and the Conversation all read
- *  the same session the same way. */
-export function sessionLabel(sessionId: string, title: string | undefined): string {
-  const trimmed = title?.trim() ?? "";
-  return trimmed === "" ? shortSessionId(sessionId) : trimmed;
-}
-
-/** The name half of an actor's label: a user by login; a session by `sessionLabel` — the live
- *  title from `titles` (the agent registry) before the stamped `session_title`. */
-export function actorName(actor: Actor, titles?: ReadonlyMap<string, string>): string {
-  if (actor.kind !== "session") {
-    return actor.id;
-  }
-  const live = titles?.get(actor.id)?.trim();
-  return sessionLabel(
-    actor.id,
-    live === undefined || live === "" ? actor.origin?.session_title : live
-  );
-}
-
-/** `actorName` followed by ` (for <owner>)` when a personal token attributed the write to a
- *  human, or ` (as <namespace>/<name>)` — the verified token's subject through
- *  `serviceSubjectLabel`, `system:serviceaccount:legion:legion-worker` reading as
- *  `legion/legion-worker` — when a service token did. The namespace stays because every
- *  namespace has a `default` service account. */
-export function actorLabel(actor: Actor, titles?: ReadonlyMap<string, string>): string {
-  const name = actorName(actor, titles);
-  if (actor.kind !== "session") {
-    return name;
-  }
-  if (actor.owner !== undefined) {
-    return `${name} (for ${actor.owner})`;
-  }
-  const service = actor.service;
-  if (service === undefined) {
-    return name;
-  }
-  return `${name} (as ${serviceSubjectLabel(service)})`;
-}
+// How an actor is named lives in `@legion/contracts` (`src/actor-label.ts`), so the dashboard
+// and the agent tools cannot name the same session two ways. Re-exported here because every
+// SPA call site already imports it from this module.
+export { actorLabel, actorName, sessionLabel, shortSessionId } from "@legion/contracts";
 
 /** The verb-and-actor prefix of a resolution summary, without its free-text reason - callers
  *  that render the reason as Markdown (via `MarkdownBody`) compose this with their own markup

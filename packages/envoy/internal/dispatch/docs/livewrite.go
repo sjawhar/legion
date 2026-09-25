@@ -1,0 +1,368 @@
+package docs
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/provider/websocket"
+
+	"github.com/sjawhar/envoy/internal/dispatch/model"
+)
+
+// liveWrite is one transaction's writes to one live document. They run on a fork of the room's
+// document and are appended inside the transaction; the room applies and broadcasts them only
+// once the transaction has committed (PublishLiveWrites). A transaction that does not commit
+// leaves the room, and every browser connected to it, as they were (DiscardLiveWrites).
+//
+// While a liveWrite is open it holds its room's writer slot, so another transaction's joined
+// operation on the same document waits for this one to be published or discarded before it
+// forks: it then sees exactly the committed writes. It also holds off the room's settlement,
+// which would otherwise version the room between this transaction's commit and its publish:
+// none is armed while the write is open, and one already running writes no version
+// (settleRoom).
+//
+// Locks. A transaction takes a live document's locks in one order and holds each until it
+// commits, the slot until it publishes: the document's owner row (lockArtifactOwner: its
+// issue's row, or a project document's own artifact row), then the writer slot, then the
+// document's advisory lock (lockDocumentRoom; AppendUpdateTx takes it too). A joined read,
+// which waits for the slot but writes nothing, takes the owner row alone. Postgres cannot see a
+// wait for the slot, which is in memory. Every transaction that waits for or holds it holds the
+// owner row first, so a transaction waiting for the slot waits only for a committed write's
+// publish, which takes no database lock; and it holds no advisory lock while it waits, so a
+// failed room's eviction, whose compaction takes that lock, is never held up by a waiter.
+// Durable writers outside a transaction (ygo's persistence worker, compaction) take the advisory
+// lock and then only the foreign-key share lock on the owner row, which the owner lock, `for no
+// key update`, does not block. A write recovers a failed room before it takes the slot, so its
+// slot is on the room state that recovery left: taken on a failed one, it would hold off
+// neither the reloaded room's settlement nor the next write.
+//
+// The write's actor, and the browsers connected when it changed the content, are credited to
+// the room once the transaction commits (CreditLiveWrites), never while it may still roll back.
+type liveWrite struct {
+	artifactID string
+	state      *roomState
+	// clientID authors every item the transaction writes. Each fork is rebuilt from the room's
+	// current state plus updates, and reuses it so the transaction's clocks continue.
+	clientID crdt.ClientID
+	updates  [][]byte
+	// credits are the authors of the transaction's content changes; actor made the latest.
+	credits map[string]model.Actor
+	actor   *model.Actor
+	// rearm records that opening the write stopped an armed settlement timer.
+	rearm    bool
+	done     chan struct{}
+	finished bool
+}
+
+// liveWriteOrigin tags the room transaction that applies a committed live write, so the room's
+// update observer credits it to no one: CreditLiveWrites credited it when its transaction
+// committed. It must remain non-zero sized because ygo compares origins by interface equality.
+type liveWriteOrigin struct{ _ byte }
+
+var errLiveWriteNeedsCollector = errors.New("dispatch: a live document write joined to a transaction needs an event collector")
+
+func (c *EventCollector) liveWriteFor(artifactID string) *liveWrite {
+	if c == nil {
+		return nil
+	}
+	return c.live[artifactID]
+}
+
+// joinedLiveWrite is the calling transaction's open write to artifactID, if it has one.
+func joinedLiveWrite(ctx context.Context, artifactID string) *liveWrite {
+	if _, joined := txFromContext(ctx); !joined {
+		return nil
+	}
+	return eventCollector(ctx).liveWriteFor(artifactID)
+}
+
+// joinLiveWrite returns the transaction's write to artifactID. When the transaction has no write
+// to it yet, it first takes the document's owner row and then, once a failed room has
+// recovered, the writer slot (see liveWrite).
+func (s *Service) joinLiveWrite(ctx context.Context, tx pgx.Tx, collector *EventCollector, artifactID string) (*liveWrite, error) {
+	if write := collector.liveWriteFor(artifactID); write != nil {
+		return write, nil
+	}
+	if _, _, err := lockArtifactOwner(ctx, tx, artifactID); err != nil {
+		return nil, err
+	}
+	if err := s.awaitRoomRecovery(ctx, artifactID); err != nil {
+		return nil, err
+	}
+	return s.openLiveWrite(ctx, collector, artifactID)
+}
+
+// openLiveWrite takes artifactID's writer slot for the transaction, first waiting for the
+// transaction holding it, if one does.
+func (s *Service) openLiveWrite(ctx context.Context, collector *EventCollector, artifactID string) (*liveWrite, error) {
+	write := &liveWrite{artifactID: artifactID, clientID: crdt.NewClientID(), done: make(chan struct{})}
+	for {
+		state := s.room(artifactID)
+		state.mu.Lock()
+		if state.liveWriter == nil {
+			state.liveWriter = write
+			state.gen++
+			write.rearm = s.stopSettleTimer(state.settle)
+			state.suppressSettle++
+			state.mu.Unlock()
+			write.state = state
+			break
+		}
+		done := state.liveWriter.done
+		state.mu.Unlock()
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	if collector.live == nil {
+		collector.live = make(map[string]*liveWrite)
+	}
+	collector.live[artifactID] = write
+	collector.order = append(collector.order, artifactID)
+	return write, nil
+}
+
+// awaitLiveWriter waits until no other transaction holds artifactID's writer slot, so a read
+// joined to a transaction sees every write committed before it.
+func (s *Service) awaitLiveWriter(ctx context.Context, artifactID string) error {
+	for {
+		state := s.room(artifactID)
+		state.mu.Lock()
+		writer := state.liveWriter
+		state.mu.Unlock()
+		if writer == nil {
+			return nil
+		}
+		select {
+		case <-writer.done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+// forkLive builds the document a transaction's operation on write's room sees: the room's
+// current state with the transaction's own writes applied.
+func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, error) {
+	var state []byte
+	err := s.srv.Apply(ctx, write.artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+		state = crdt.EncodeStateAsUpdateV1(doc, nil)
+	})
+	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+		return nil, err
+	}
+	fork := crdt.New(crdt.WithClientID(write.clientID))
+	if err := crdt.ApplyUpdateV1(fork, state, nil); err != nil {
+		return nil, fmt.Errorf("fork live document: %w", err)
+	}
+	for _, update := range write.updates {
+		if err := crdt.ApplyUpdateV1(fork, update, nil); err != nil {
+			return nil, fmt.Errorf("fork live document with transaction writes: %w", err)
+		}
+	}
+	return fork, nil
+}
+
+// joinedFork is the fork holding the calling transaction's writes to artifactID, or nil when it
+// has none. A caller joined to a transaction without one first takes the document's owner row,
+// then waits until no other transaction's write to artifactID is open, so what it reads next
+// includes every committed write.
+func (s *Service) joinedFork(ctx context.Context, artifactID string) (*crdt.Doc, error) {
+	if write := joinedLiveWrite(ctx, artifactID); write != nil {
+		return s.forkLive(ctx, write)
+	}
+	if tx, joined := txFromContext(ctx); joined {
+		if _, _, err := lockArtifactOwner(ctx, tx, artifactID); err != nil {
+			return nil, err
+		}
+		return nil, s.awaitLiveWriter(ctx, artifactID)
+	}
+	return nil, nil
+}
+
+// docView runs read against the document the caller sees: the joinedFork when there is one,
+// otherwise the live room. It returns the room's Apply error, websocket.ErrNoChanges included,
+// as Apply does.
+func (s *Service) docView(ctx context.Context, artifactID string, read func(*crdt.Doc)) error {
+	fork, err := s.joinedFork(ctx, artifactID)
+	if err != nil {
+		return err
+	}
+	if fork != nil {
+		read(fork)
+		return nil
+	}
+	return s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+		read(doc)
+	})
+}
+
+// creditLiveWrite records whom a joined content change is credited to once its transaction
+// commits: the actor, and every browser connected to the room, as a change that reaches the
+// room directly is credited (recordConnectedActors).
+func (s *Service) creditLiveWrite(write *liveWrite, actor model.Actor) {
+	if write.credits == nil {
+		write.credits = make(map[string]model.Actor)
+	}
+	state := s.room(write.artifactID)
+	state.mu.Lock()
+	for _, connected := range state.connected {
+		write.credits[actorKey(connected)] = connected
+	}
+	state.mu.Unlock()
+	write.credits[actorKey(actor)] = actor
+	write.actor = new(actor)
+}
+
+// CreditLiveWrites credits a committed transaction's content changes to their rooms, for each
+// room's next version. Handlers call it once the commit returns and before CommitVersion, which
+// clears the authors a version the transaction wrote already names.
+func (s *Service) CreditLiveWrites(collector *EventCollector) {
+	if collector == nil {
+		return
+	}
+	for _, artifactID := range collector.order {
+		write := collector.live[artifactID]
+		if len(write.credits) == 0 {
+			continue
+		}
+		state := s.room(artifactID)
+		state.mu.Lock()
+		for key, actor := range write.credits {
+			state.pending[key] = actor
+		}
+		state.lastActor = write.actor
+		state.mu.Unlock()
+	}
+}
+
+// PublishLiveWrites applies the live writes of a committed transaction to their rooms and
+// broadcasts them. Each update is already durable, so the room's own persistence of it is
+// suppressed. A room that cannot take its update is failed, and reloads the durable document on
+// its next access.
+func (s *Service) PublishLiveWrites(collector *EventCollector) {
+	if collector == nil {
+		return
+	}
+	for _, artifactID := range collector.order {
+		write := collector.live[artifactID]
+		if write.finished {
+			continue
+		}
+		s.publishLiveWrite(write)
+	}
+}
+
+// publishLiveWrite applies write's updates to the room one operation at a time, in the order
+// they were made, as a room transaction and a broadcast each. A browser editor then receives
+// them as it would have received the operations themselves: an accepted suggestion's text
+// change before the margin projection that closes it, never both in one update.
+func (s *Service) publishLiveWrite(write *liveWrite) {
+	defer s.finishLiveWrite(write)
+	for _, update := range write.updates {
+		if err := s.publishLiveUpdate(write.artifactID, update); err != nil {
+			slog.Error("dispatch: publish committed live document write", "room", write.artifactID, "error", err)
+			s.failRoom(write.artifactID, err)
+			return
+		}
+	}
+}
+
+// publishLiveUpdate applies one committed update to the room and broadcasts it. It reads nothing
+// from the shared pool: the transaction that wrote the update checked the document's owner and
+// held its row until it committed, so the injections are owner-verified. Other transactions'
+// writes to the document hold pooled connections while they wait for this write's slot, so a
+// publish that asked the shared pool for the issue state could wait on them for good.
+func (s *Service) publishLiveUpdate(room string, update []byte) error {
+	ctx := withOwnerVerified(context.Background())
+	origin := &liveWriteOrigin{}
+	slot := s.prepareSuppressedPersistence(room)
+	var applied []byte
+	var applyErr error
+	err := s.srv.Apply(ctx, room, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+		unsubscribe := doc.OnUpdate(func(encoded []byte, updateOrigin any) {
+			if updateOrigin == origin {
+				applied = append([]byte(nil), encoded...)
+			}
+		})
+		defer unsubscribe()
+		applyErr = crdt.ApplyUpdateV1(doc, update, origin)
+	})
+	if applyErr == nil && err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+		applyErr = err
+	}
+	if applyErr != nil {
+		s.cancelSuppressedPersistence(room, slot)
+		return fmt.Errorf("apply committed live document write: %w", applyErr)
+	}
+	if applied == nil {
+		s.cancelSuppressedPersistence(room, slot)
+		return nil
+	}
+	s.finishSuppressedPersistence(slot, applied)
+	if err := s.srv.BroadcastUpdate(ctx, room, applied); err != nil {
+		// Connected browsers did not receive the write the room now holds; failing the room
+		// closes them, and they sync the durable document when they reconnect.
+		return fmt.Errorf("broadcast committed live document write: %w", err)
+	}
+	return nil
+}
+
+// DiscardLiveWrites drops the live writes of a transaction that did not commit. Their rooms
+// never saw them. It is a no-op for writes PublishLiveWrites already applied, so handlers defer
+// it right after they create the collector.
+func (s *Service) DiscardLiveWrites(collector *EventCollector) {
+	if collector == nil {
+		return
+	}
+	for _, artifactID := range collector.order {
+		s.finishLiveWrite(collector.live[artifactID])
+	}
+}
+
+// FailLiveWrites fails the rooms of a transaction whose commit returned an error. The commit may
+// have gone through, so the rooms cannot tell whether they should hold the writes; failed, they
+// reload the durable document, whichever way the commit went.
+func (s *Service) FailLiveWrites(collector *EventCollector, cause error) {
+	if collector == nil {
+		return
+	}
+	for _, artifactID := range collector.order {
+		write := collector.live[artifactID]
+		if write.finished {
+			continue
+		}
+		if len(write.updates) > 0 {
+			s.failRoom(artifactID, fmt.Errorf("commit live document write: %w", cause))
+		}
+		s.finishLiveWrite(write)
+	}
+}
+
+// finishLiveWrite releases write's room: its writer slot, and the settlement it suppressed,
+// which is armed again when opening the write stopped one or a settlement was asked for while
+// it was open.
+func (s *Service) finishLiveWrite(write *liveWrite) {
+	if write.finished {
+		return
+	}
+	write.finished = true
+	state := write.state
+	state.mu.Lock()
+	if state.liveWriter == write {
+		state.liveWriter = nil
+	}
+	state.suppressSettle--
+	if state.suppressSettle == 0 && (write.rearm || state.settleDeferred) {
+		state.settleDeferred = false
+		s.scheduleSettleLocked(write.artifactID, state)
+	}
+	state.mu.Unlock()
+	close(write.done)
+}

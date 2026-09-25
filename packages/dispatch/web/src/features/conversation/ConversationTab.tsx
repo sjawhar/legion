@@ -8,10 +8,10 @@ import {
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
-import { ApiError, api } from "../../api/client";
+import { api } from "../../api/client";
 import { userStateQuery, whoAmIQuery } from "../../api/queries";
 import { type EventPages, mergeEventPages } from "../../api/sse";
-import type { Agent, Event, UserIssueState, UserState } from "../../api/types";
+import type { Agent, Artifact, Event, UserIssueState, UserState } from "../../api/types";
 import { PinButton } from "../../components/PinButton";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
@@ -36,10 +36,10 @@ import {
 import { AskCard } from "../inbox/AskCard";
 import { ActivityLine } from "../issue/ActivityLine";
 import { EventBody } from "../issue/EventBody";
-import { stateForIssue } from "../issue/IssueHeader";
-import { eventItemId, isPinnedEvent } from "../issue/pins";
+import { eventItemId, isPinnedEvent, stateForIssue } from "../issue/pins";
 import {
   applyPinStateOperation,
+  issueStateTransport,
   type PinStateOperation,
   sharedIssueStateWrites,
 } from "../issue/state-write-queue";
@@ -47,7 +47,7 @@ import { ThreadCard } from "../margin/ThreadCard";
 import { useCommentActionQueue } from "../margin/useCommentActionQueue";
 import type { Thread as CommentThread } from "../margin/useMarginItems";
 import { CopyRefButton } from "../refs/CopyRefButton";
-import { buildIssuePath } from "../refs/routes";
+import { buildIssuePath, documentItemPath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { PHONE_VIEWPORT_QUERY, useDialog, useMediaQuery } from "../shell/useDialog";
 import { ViewportAnchor } from "../shell/ViewportAnchor";
@@ -86,7 +86,9 @@ interface FailedStateOperations {
 }
 
 interface ConversationTabProps {
-  artifactSlugs: ReadonlyMap<string, string>;
+  /** Every artifact on the issue by id - uploads and images as well as documents, which is
+   *  what `IssuePage` has. A comment's anchor names one of them, and its link is built from it. */
+  issueArtifacts: ReadonlyMap<string, Artifact>;
   focusItemId?: string;
   isClosed: boolean;
   issueKey: string;
@@ -481,7 +483,7 @@ function CommentDeliveryList({
 function CommentTurn({
   actionError,
   agents,
-  artifactSlugs,
+  issueArtifacts,
   composerClassName,
   current,
   disabled,
@@ -503,7 +505,7 @@ function CommentTurn({
 }: {
   actionError: boolean;
   agents: readonly Agent[];
-  artifactSlugs: ReadonlyMap<string, string>;
+  issueArtifacts: ConversationTabProps["issueArtifacts"];
   composerClassName?: string;
   current: boolean;
   disabled: boolean;
@@ -561,10 +563,11 @@ function CommentTurn({
     commentId === item.event.payload.id
       ? item.deliveries
       : (item.replies.find((reply) => reply.event.payload.id === commentId)?.deliveries ?? []);
-  const artifactSlug =
+  const anchorArtifact =
     item.event.payload.anchor === null
       ? undefined
-      : artifactSlugs.get(item.event.payload.anchor.artifact_id);
+      : issueArtifacts.get(item.event.payload.anchor.artifact_id);
+  const artifactSlug = anchorArtifact?.slug;
   const currentExpanded = forceExpanded || expanded;
   const toggleThread = () => {
     if (forceExpanded || (isPhone && !expanded)) {
@@ -612,10 +615,13 @@ function CommentTurn({
         thread={thread}
         viewerLogin={viewerLogin}
       />
-      {item.event.payload.anchor === null || artifactSlug === undefined ? null : (
+      {item.event.payload.anchor === null || anchorArtifact === undefined ? null : (
         <Link
           className={`ml-3 text-sm ${linkText}`}
-          to={`${buildIssuePath({ key: issueKey, kind: "artifact", slug: artifactSlug })}?comment=${item.event.payload.id}`}
+          to={documentItemPath(anchorArtifact, {
+            id: item.event.payload.id,
+            kind: "comment",
+          })}
         >
           View in document
         </Link>
@@ -732,7 +738,7 @@ function TargetedMessageTurn({
 }
 
 export function ConversationTab({
-  artifactSlugs,
+  issueArtifacts,
   focusItemId,
   isClosed,
   issueKey,
@@ -768,9 +774,20 @@ export function ConversationTab({
   const timers = useRef(new Map<Element, number>());
   const events = useMemo(() => eventItems(log.data), [log.data]);
   const today = dateKey(new Date().toISOString());
+  // A claim event's activity line names a session, so it reads the registry like every other
+  // author line; nothing is fetched for a log with no claim in it.
+  const { titles: activityTitles } = useAgents(
+    events.some((event) => event.type === "issue.claimed" || event.type === "issue.released")
+  );
   const items = useMemo(
-    () => buildConversationItems({ events, lastReadSeq: issueState.last_read_seq, today }),
-    [events, issueState.last_read_seq, today]
+    () =>
+      buildConversationItems({
+        events,
+        lastReadSeq: issueState.last_read_seq,
+        titles: activityTitles,
+        today,
+      }),
+    [activityTitles, events, issueState.last_read_seq, today]
   );
   const [showActivity, setShowActivity] = useShowActivity();
   const [showRetracted, setShowRetracted] = useShowRetracted();
@@ -1019,7 +1036,7 @@ export function ConversationTab({
     for (const operation of operations) {
       void sharedIssueStateWrites
         .enqueue(issueKey, operation, {
-          fetchState: async (key) => stateForIssue(await api.getMyState(), key),
+          ...issueStateTransport,
           onDrained: (key, next) => {
             queryClient.setQueryData<UserState>(["user-state"], (current) => ({
               ...current,
@@ -1044,9 +1061,6 @@ export function ConversationTab({
             });
             setRetryingFailedOps(false);
           },
-          putState: (key, state) => api.putIssueState(key, state),
-          staleState: (error) =>
-            error instanceof ApiError && error.code === "STATE_STALE" ? error.state : undefined,
         })
         .catch(() => {});
     }
@@ -1264,7 +1278,7 @@ export function ConversationTab({
                   replyTo?.parentKind === "comment" && replyTo.id === item.event.payload.id
                 }
                 agents={agents}
-                artifactSlugs={artifactSlugs}
+                issueArtifacts={issueArtifacts}
                 isPhone={isPhoneViewport}
                 onPhoneThreadToggle={() => setPhoneThreadId(item.event.payload.id)}
                 onAction={(id, kind) => commentActions.mutateItem({ id, kind })}
@@ -1339,7 +1353,7 @@ export function ConversationTab({
             <CommentTurn
               actionError={commentActions.actionErrorId === phoneThread.event.payload.id}
               agents={agents}
-              artifactSlugs={artifactSlugs}
+              issueArtifacts={issueArtifacts}
               composerClassName={`fixed inset-x-0 bottom-0 z-20 border-t px-4 pt-4 pb-2 ${card} ${borderDefault}`}
               current={phoneThread.id === targetTurnId}
               viewerLogin={viewer.data?.login ?? ""}

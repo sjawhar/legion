@@ -53,6 +53,10 @@ type Deps struct {
 // periodically so a dropped in-process notification cannot strand an event. It
 // returns when ctx is cancelled.
 func Run(ctx context.Context, deps Deps) {
+	// The publisher is one of the process's transaction openers, so its context carries the
+	// pool's marker: a read it ever makes while one of its transactions is open is refused
+	// rather than left to deadlock the pool (store.ErrNestedAcquire).
+	ctx = store.WithTransactionTracking(ctx)
 	events, unsubscribe := deps.Broker.Subscribe()
 	defer func() { unsubscribe() }()
 
@@ -96,7 +100,68 @@ func scan(ctx context.Context, deps Deps) {
 	}
 }
 
+// pendingEvent is one row of a scan, read out before anything is published: an open cursor
+// holds its pooled connection until it closes, so publishing - a network round trip, a
+// follower lookup, and a write per event - inside the loop would hold one of the pool's four
+// connections across all of it. The rows are drained first and the work done after.
+type pendingEvent struct {
+	event        model.Event
+	attempts     int
+	destinations []string
+	slug         string
+	route        *string
+	// failure is why the row cannot be published as it was read - it did not scan, or its
+	// actor or payload JSON did not decode - and failureLog is the predicate it reports
+	// under. The batch backs such an event off instead of publishing it.
+	failure    error
+	failureLog string
+}
+
 func scanBatch(ctx context.Context, deps Deps) (int, bool, error) {
+	pending, blocked, err := scanPendingEvents(ctx, deps)
+	if err != nil {
+		return 0, false, err
+	}
+
+	for _, item := range pending {
+		if item.failure != nil {
+			if retryEvent(ctx, deps, item, item.failureLog, item.failure) {
+				blocked = true
+			}
+			continue
+		}
+		if err := publish(
+			ctx, deps, item.event, item.slug, item.route, publishedDestinationSet(item.destinations),
+		); err != nil {
+			if retryEvent(ctx, deps, item, "dispatch outbox: publish event", err) {
+				blocked = true
+			}
+			continue
+		}
+		if _, err := deps.Store.Pool.Exec(ctx, `
+			update events set published_at = now(), next_attempt_at = null where id = $1 and published_at is null
+		`, item.event.ID); err != nil {
+			retryEvent(ctx, deps, item, "dispatch outbox: mark event published", err)
+			blocked = true
+		}
+	}
+	return len(pending), blocked, nil
+}
+
+// retryEvent reports a failed event under what and backs it off, so the events queued behind
+// one that cannot be published are not stuck behind it. It reports whether the batch is
+// blocked: an event whose retry could not be written stays eligible immediately, and a scan
+// that carried on would select the same batch forever.
+func retryEvent(ctx context.Context, deps Deps, item pendingEvent, what string, cause error) bool {
+	slog.Error(what, "event_id", item.event.ID, "error", cause)
+	if err := scheduleRetry(ctx, deps, item.event.ID, item.attempts); err != nil {
+		slog.Error("dispatch outbox: schedule retry", "event_id", item.event.ID, "error", err)
+		return true
+	}
+	return false
+}
+
+func scanPendingEvents(ctx context.Context, deps Deps) ([]pendingEvent, bool, error) {
 	rows, err := deps.Store.Pool.Query(ctx, `
 		select e.id, e.issue_key, e.artifact_id::text, coalesce(e.project_key, i.project_key, ar.project_key, ''), e.seq,
 		       e.type, e.actor, e.notify, e.created_at, e.payload, e.attempt_count, e.published_destinations,
@@ -112,78 +177,55 @@ func scanBatch(ctx context.Context, deps Deps) (int, bool, error) {
 		limit $1
 	`, batchSize)
 	if err != nil {
-		return 0, false, fmt.Errorf("select unpublished events: %w", err)
+		return nil, false, fmt.Errorf("select unpublished events: %w", err)
 	}
 	defer rows.Close()
 
-	count := 0
-	blocked := false
+	var pending []pendingEvent
+	unreadable := false
 	for rows.Next() {
-		count++
-		var event model.Event
+		var item pendingEvent
 		var actor, payload []byte
-		var slug string
-		var route *string
-		var attempts int
-		var destinations []string
 		if err := rows.Scan(
-			&event.ID,
-			&event.IssueKey,
-			&event.ArtifactID,
-			&event.Project,
-			&event.Seq,
-			&event.Type,
+			&item.event.ID,
+			&item.event.IssueKey,
+			&item.event.ArtifactID,
+			&item.event.Project,
+			&item.event.Seq,
+			&item.event.Type,
 			&actor,
-			&event.Notify,
-			&event.CreatedAt,
+			&item.event.Notify,
+			&item.event.CreatedAt,
 			&payload,
-			&attempts,
-			&destinations,
-			&slug,
-			&route,
+			&item.attempts,
+			&item.destinations,
+			&item.slug,
+			&item.route,
 		); err != nil {
-			slog.Error("dispatch outbox: read event", "error", err)
-			blocked = true
+			// pgx scans positionally and treats a failure as fatal to the cursor, so this
+			// row ends the batch and rows.Err() below repeats the same error. Carrying the
+			// row on as a failure backs it off like any other unpublishable event, which is
+			// what lets the events queued behind it be read at all; e.id is the first
+			// destination, so the row scanned that far before it failed.
+			item.failure = fmt.Errorf("read event: %w", err)
+			item.failureLog = "dispatch outbox: read event"
+			unreadable = true
+			pending = append(pending, item)
 			continue
 		}
-		if err := json.Unmarshal(actor, &event.Actor); err != nil {
-			slog.Error("dispatch outbox: decode event actor", "event_id", event.ID, "error", err)
-			if err := scheduleRetry(ctx, deps, event.ID, attempts); err != nil {
-				slog.Error("dispatch outbox: schedule retry", "event_id", event.ID, "error", err)
-				blocked = true
-			}
-			continue
+		if err := json.Unmarshal(actor, &item.event.Actor); err != nil {
+			item.failure = fmt.Errorf("decode event actor: %w", err)
+			item.failureLog = "dispatch outbox: decode event actor"
+		} else if err := json.Unmarshal(payload, &item.event.Payload); err != nil {
+			item.failure = fmt.Errorf("decode event payload: %w", err)
+			item.failureLog = "dispatch outbox: decode event payload"
 		}
-		if err := json.Unmarshal(payload, &event.Payload); err != nil {
-			slog.Error("dispatch outbox: decode event payload", "event_id", event.ID, "error", err)
-			if err := scheduleRetry(ctx, deps, event.ID, attempts); err != nil {
-				slog.Error("dispatch outbox: schedule retry", "event_id", event.ID, "error", err)
-				blocked = true
-			}
-			continue
-		}
-		if err := publish(ctx, deps, event, slug, route, publishedDestinationSet(destinations)); err != nil {
-			slog.Error("dispatch outbox: publish event", "event_id", event.ID, "error", err)
-			if err := scheduleRetry(ctx, deps, event.ID, attempts); err != nil {
-				slog.Error("dispatch outbox: schedule retry", "event_id", event.ID, "error", err)
-				blocked = true
-			}
-			continue
-		}
-		if _, err := deps.Store.Pool.Exec(ctx, `
-			update events set published_at = now(), next_attempt_at = null where id = $1 and published_at is null
-		`, event.ID); err != nil {
-			slog.Error("dispatch outbox: mark event published", "event_id", event.ID, "error", err)
-			if err := scheduleRetry(ctx, deps, event.ID, attempts); err != nil {
-				slog.Error("dispatch outbox: schedule retry", "event_id", event.ID, "error", err)
-			}
-			blocked = true
-		}
+		pending = append(pending, item)
 	}
-	if err := rows.Err(); err != nil {
-		return count, blocked, fmt.Errorf("iterate unpublished events: %w", err)
+	if err := rows.Err(); err != nil && !unreadable {
+		return nil, false, fmt.Errorf("iterate unpublished events: %w", err)
 	}
-	return count, blocked, nil
+	return pending, unreadable, nil
 }
 
 func scheduleRetry(ctx context.Context, deps Deps, eventID int64, attempts int) error {
@@ -239,7 +281,53 @@ func publish(ctx context.Context, deps Deps, event model.Event, slug string, rou
 			return err
 		}
 	}
-	return publishFollowerRoutes(ctx, deps, event.ID, item, event, delivered)
+	if err := publishFollowerRoutes(ctx, deps, event.ID, item, event, delivered); err != nil {
+		return err
+	}
+	return publishPreviousClaimant(ctx, deps, event.ID, item, event, delivered)
+}
+
+// publishPreviousClaimant tells a session that lost an issue's claim, on its own topic: a
+// takeover (another agent claimed an issue this session's claim was on, because the listener
+// no longer lists this session as live) and a release somebody else made. Like the follower
+// routes this ignores Notify — the losing session must hear it whoever acted, and it would
+// otherwise learn only by subscribing to the whole issue.
+func publishPreviousClaimant(ctx context.Context, deps Deps, eventID int64, item contracts.Envelope, event model.Event, delivered map[string]struct{}) error {
+	if event.Type != "issue.claimed" && event.Type != "issue.released" {
+		return nil
+	}
+	sessionID := payloadPreviousClaimSession(event.Payload)
+	if sessionID == "" || event.Actor.SameAs(model.Actor{Kind: "session", ID: sessionID}) {
+		return nil
+	}
+	routed := item
+	routed.Topic = contracts.AgentTopicPrefix + sessionID
+	if err := publishDestination(ctx, deps, eventID, routed, delivered); err != nil {
+		return fmt.Errorf("publish claim change to %q: %w", sessionID, err)
+	}
+	return nil
+}
+
+// payloadPreviousClaimSession reads the session id out of an event payload's previous claim,
+// or "" when there was none or a human held it.
+func payloadPreviousClaimSession(payload any) string {
+	values, ok := payload.(map[string]any)
+	if !ok {
+		return ""
+	}
+	claim, ok := values["previous_claim"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	actor, ok := claim["actor"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	if kind, _ := actor["kind"].(string); kind != "session" {
+		return ""
+	}
+	id, _ := actor["id"].(string)
+	return id
 }
 
 // publishFollowerRoutes delivers an ask's answer, edit, resolution, and every reply on it
@@ -264,7 +352,7 @@ func publishFollowerRoutes(ctx context.Context, deps Deps, eventID int64, item c
 		return err
 	}
 	for _, follower := range followers {
-		if event.Actor.Kind == "session" && event.Actor.ID == follower.SessionID {
+		if event.Actor.SameAs(model.Actor{Kind: "session", ID: follower.SessionID}) {
 			continue
 		}
 		routed := item
@@ -290,7 +378,7 @@ func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item con
 		if !found || author.Kind != "session" || seen[author.ID] {
 			return
 		}
-		if event.Actor.Kind == author.Kind && event.Actor.ID == author.ID {
+		if event.Actor.SameAs(author) {
 			return
 		}
 		seen[author.ID] = true
@@ -523,6 +611,9 @@ func payloadSummary(event model.Event, slug string) string {
 		detail = text.HeadRunes(askAnswerText(event.Payload), 120)
 	case event.Type == "subscription.removed", event.Type == "ask.follower_added", event.Type == "ask.follower_removed":
 		detail = payloadString(event.Payload, "session_id")
+	case event.Type == "issue.claimed", event.Type == "issue.released":
+		// "claimed", "takeover", "forced", "released", or "closed": why the holder changed.
+		detail = payloadString(event.Payload, "reason")
 	case strings.HasPrefix(event.Type, "ask."):
 		detail = text.HeadRunes(payloadString(event.Payload, "question"), 120)
 	case event.Type == "message.created", event.Type == "message.answered":

@@ -8,7 +8,7 @@ import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { type FakeDocumentRuntime, fakeDocumentRuntime } from "../../__tests__/document-runtime";
 import { api } from "../../api/client";
 import type { Artifact, Ask, IssueDetails } from "../../api/types";
-import { MarginProvider, useMargin } from "../margin/Margin";
+import { MarginProvider, useMargin } from "../margin/margin-context";
 import type { MarkPlacement } from "../margin/useMarginItems";
 import { RefPreviewHost } from "../refs/RefPreview";
 import { colorForLogin } from "./connection";
@@ -290,6 +290,7 @@ test("ProofDocument opens a hover card for a dispatch:// link in the live editor
     number: 1,
     parent: null,
     assignee: null,
+    claim: null,
     components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
     primary_artifact_id: "artifact-1",
     project: "CORE",

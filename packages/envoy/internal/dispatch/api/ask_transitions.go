@@ -230,6 +230,7 @@ func (s *server) closeAsk(ctx context.Context, id string, actor model.Actor, tra
 	}
 	defer tx.Rollback(ctx)
 	documentCtx, documentEvents := documentMutationContext(ctx, tx)
+	defer s.deps.Docs.DiscardLiveWrites(documentEvents)
 	ask, err := s.transitionAskTx(documentCtx, tx, id, transition)
 	if err != nil {
 		return model.Ask{}, err
@@ -249,7 +250,7 @@ func (s *server) closeAsk(ctx context.Context, id string, actor model.Actor, tra
 		}
 		events = append(events, more...)
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := s.commitDocumentMutation(ctx, tx, documentEvents); err != nil {
 		return model.Ask{}, err
 	}
 	s.publishDocumentEvents(documentEvents, events...)
@@ -266,7 +267,7 @@ func (s *server) transitionAskTx(ctx context.Context, tx pgx.Tx, id string, tran
 	if err := s.requireOpenOwner(ctx, tx, ownerOf(unlockedAsk.IssueKey, unlockedAsk.ArtifactID)); err != nil {
 		return model.Ask{}, err
 	}
-	ask, err := s.loadAskForUpdate(ctx, tx, id)
+	ask, err := s.lockAskForTransition(ctx, tx, id)
 	if err != nil {
 		return model.Ask{}, err
 	}

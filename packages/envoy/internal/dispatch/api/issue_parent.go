@@ -41,7 +41,7 @@ const parentDepthCap = 32
 
 var parentDepthCapSQL = strconv.Itoa(parentDepthCap)
 
-// lockIssueAndParent locks the issue and its proposed parent `for update` in key order —
+// lockIssueAndParent locks the issue and its proposed parent `for no key update` in key order —
 // serializing the pairwise A→B / B→A reparent race (deadlock detection breaks a crossed
 // order) — then validates the reparent: the parent must exist (400 PARENT_INPUT), differ
 // from the issue, share its project (400 PARENT_INPUT), and not be a descendant of the
@@ -58,7 +58,7 @@ func lockIssueAndParent(ctx context.Context, tx pgx.Tx, key, parent string) erro
 	projects := map[string]string{}
 	for _, lockKey := range []string{first, second} {
 		var project string
-		err := tx.QueryRow(ctx, `select project_key from issues where key = $1 for update`, lockKey).Scan(&project)
+		err := tx.QueryRow(ctx, `select project_key from issues where key = $1 for no key update`, lockKey).Scan(&project)
 		if errors.Is(err, pgx.ErrNoRows) && lockKey == parent {
 			return errorf(http.StatusBadRequest, "PARENT_INPUT", "parent issue %s not found", parent)
 		}

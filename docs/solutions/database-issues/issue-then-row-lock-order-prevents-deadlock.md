@@ -26,11 +26,13 @@ severity: high
 ## Problem
 
 Dispatch's transactional document mutations lock the issue row first
-(`requireOpenIssue`, `packages/envoy/internal/dispatch/api/server.go:332-336`, a `select …
-from issues where key = $1 for update`) and then the artifact/comment row inside the same
-transaction (e.g. `packages/envoy/internal/dispatch/api/artifacts.go:121-125`). Before the
+(`requireOpenIssue`, `packages/envoy/internal/dispatch/api/server.go`, a `select …
+from issues where key = $1 for no key update` — it was `for update` when this was written; see
+`packages/envoy/internal/dispatch/docs/persistence.go`'s `lockDocumentRoom` for why no lock on
+`issues`, `artifacts`, `projects` or `asks` may be `for update` now) and then the
+artifact/comment row inside the same transaction. Before the
 fix, `answerAsk` and `commentAction` did the opposite: they locked the specific ask or
-comment row first (`loadAskForUpdate`/`loadCommentForUpdate`, a `for update` on that row) and
+comment row first (`lockAskForTransition`/`loadCommentForUpdate`, a row lock on that row) and
 only *then* called `requireOpenIssue` to lock the issue row. Two transactions taking the same
 two locks in opposite orders is the textbook Postgres deadlock: a concurrent document edit
 holding the issue lock and waiting on the ask row, alongside an answer request holding the ask
@@ -59,7 +61,7 @@ if err := s.requireOpenIssue(r.Context(), tx, unlockedAsk.IssueKey); err != nil 
     s.writeHandlerError(w, err)
     return
 }
-ask, err := s.loadAskForUpdate(r.Context(), tx, r.PathValue("id"))  // row lock second
+ask, err := s.lockAskForTransition(r.Context(), tx, r.PathValue("id"))  // row lock second
 ```
 
 The deterministic regression test that proves the ordering

@@ -78,7 +78,7 @@ test("an issue margin offers Comments and Pinned, Comments first", () => {
         sheet: {
           closeThread: () => {},
           expanded: false,
-          threadKey: undefined,
+          thread: undefined,
           toggle: () => {},
         },
         filter: { blockId: undefined, clear: () => {} },
@@ -172,7 +172,7 @@ test("a document owner shows the Comments tab and comment composer only", () => 
             selectedItemId: undefined,
             showResolved: false,
           },
-          sheet: { closeThread: () => {}, expanded: true, threadKey: undefined, toggle: () => {} },
+          sheet: { closeThread: () => {}, expanded: true, thread: undefined, toggle: () => {} },
           filter: { blockId: undefined, clear: () => {} },
           tab: { set: () => {}, value: "comments" },
         }}
@@ -302,7 +302,14 @@ test("MarginSheet shows the selected phone thread in a full-height view with a B
                 closed = true;
               },
               expanded: true,
-              threadKey: root.id,
+              thread: {
+                anchor: root.anchor,
+                key: root.id,
+                lastReplyAt: undefined,
+                replies: [],
+                resolved: false,
+                root: { comment: root, kind: "comment" },
+              },
               toggle: (expanded) => {
                 sheetClosed = expanded === false;
               },
@@ -450,7 +457,7 @@ test("the standalone document phone sheet shows each suggestion's diff and Accep
             sheet: {
               closeThread: () => {},
               expanded: true,
-              threadKey: undefined,
+              thread: undefined,
               toggle: () => {},
             },
             filter: { blockId: "block-1", clear: () => {} },

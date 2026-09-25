@@ -23,7 +23,7 @@ import {
   LegionDaemonApiError,
   type LegionDaemonClient,
 } from "../src/legion/daemon-client";
-import { writeGrantFile } from "../src/legion/grant-file";
+import { writeMintedGrant } from "../src/legion/grant-file";
 import { bootstrapGoClaim, type GoClaimCapability } from "../src/legion/go-bootstrap";
 import {
   createLegionGoDaemonClient,
@@ -31,6 +31,15 @@ import {
 } from "../src/legion/go-daemon-client";
 import { createGoLegionTool } from "../src/legion/go-tools";
 import { exportJjSessionAttribution } from "../src/legion/jj-attribution";
+import {
+  assistantText,
+  inboundKind,
+  PHASE_STALL_ENTRY,
+  type PhaseStall,
+  type PhaseStallInput,
+  restorePhaseStall,
+  stepPhaseStall,
+} from "../src/legion/phase-stall";
 import {
   claimEnvoyRole,
   onEnvoyRoleRegained,
@@ -142,17 +151,8 @@ const callReadyWithRetry = async (label: string, call: () => Promise<void>): Pro
 async function wrapBashWithGrant(
   mint: () => Promise<GrantResponse>
 ): Promise<ToolCallEventResult | undefined> {
-  const grantFile = process.env.LEGION_GRANT_FILE;
-  if (grantFile === undefined || grantFile.trim() === "") {
-    return {
-      block: true,
-      reason:
-        "LEGION_GRANT_FILE is not set on this pane: the daemon that launched it predates this plugin; restart the daemon on the matching release",
-    };
-  }
   try {
-    const grant = await mint();
-    await writeGrantFile(grantFile, grant.grantId);
+    await writeMintedGrant(async () => (await mint()).grantId);
     return undefined;
   } catch (error) {
     return { block: true, reason: messageFor(error) };
@@ -172,8 +172,8 @@ async function persistedTranscript(
   return { sessionFile, agentId };
 }
 
-// An architect delegates code work, but its prompt requires `legion handoff
-// write/complete` and `legion gh --` to report its own phase and touch GitHub.
+// An architect delegates code work, but its prompt requires `legion gh --` to touch GitHub; its
+// handoffs go through the `legion` tool, not bash.
 // Allow bash only for a single `legion ...` invocation: no chaining outside a
 // quoted argument. This is a conservative character scan, not a shell parser --
 // it rejects some legitimate quoting it can't reason about (nested quotes,
@@ -394,6 +394,26 @@ export default function legionExtension(pi: PiApi): void {
   // tool_call (see the LEGION-45 guard there). A subagent's own instance inherits the pane's
   // environment, so the guard binds it exactly as it binds the worker that spawned it.
   let phaseWorkerPane: boolean | undefined;
+
+  // The phase-stall check (src/legion/phase-stall.ts). It runs only in a session holding a
+  // phase-worker capability for its own id with a phase role, so never in an architect (a root,
+  // and a sub-architect, which boots as a phase worker with role architect), the controller (whose
+  // claim lives in controllerSession), a session with no Legion environment, or a `task` subagent
+  // (whose instance returns at checkSubagentSession before any capability exists). Restored from
+  // the transcript at session_start and appended to it on every change.
+  let phaseStall: PhaseStall = "closed";
+  const phaseWorkerSession = (context: SessionContext): boolean =>
+    capability !== undefined &&
+    capability.sessionID === context.sessionManager.getSessionId() &&
+    capability.role !== "architect";
+  const advancePhaseStall = (input: PhaseStallInput): string | undefined => {
+    const step = stepPhaseStall(phaseStall, input);
+    if (step.state !== phaseStall) {
+      phaseStall = step.state;
+      pi.appendEntry(PHASE_STALL_ENTRY, { state: phaseStall });
+    }
+    return step.followUp;
+  };
 
   // One client for the session's whole life: its recovery record (the newest recovered secret
   // and the recovery in flight) is what lets two requests refused together share one
@@ -623,7 +643,7 @@ export default function legionExtension(pi: PiApi): void {
             })
           );
         });
-        registerArchitectTools();
+        registerLegionTool();
         await activateLegionTool();
       } catch (error) {
         if (
@@ -699,10 +719,10 @@ export default function legionExtension(pi: PiApi): void {
           secret: started.secret,
         };
         await claimEnvoyRole(sessionID, started.roleToken, context);
-        if (role === "architect") {
-          registerArchitectTools();
-          await activateLegionTool();
-        }
+        // Every worker gets the tool: a phase worker its handoff actions, a sub-architect those and
+        // the architect operations.
+        registerLegionTool();
+        await activateLegionTool();
         await callReadyWithRetry("worker/ready", () =>
           roleDaemon().workerReady({
             tree,
@@ -742,6 +762,9 @@ export default function legionExtension(pi: PiApi): void {
     // before classification, or the inherited LEGION_* environment would look like a fresh
     // root/worker boot and its failure would exit the parent process. See isSubagentSession.
     if (await checkSubagentSession(context)) return;
+    // A worker the daemon relaunched with --resume keeps its phase: its next turn may start from
+    // an Envoy notice rather than a new assignment, and must find the phase still open.
+    phaseStall = restorePhaseStall(context.sessionManager.getBranch?.() ?? []);
     if (process.env.LEGION_DAEMON_API === "go") {
       await bootstrapGoClaim(context, {
         capability: () => capability,
@@ -916,6 +939,26 @@ export default function legionExtension(pi: PiApi): void {
     );
   });
 
+  // The daemon's assignment (a user message) opens the phase; an Envoy delivery re-arms a stall
+  // that already had its follow-up or a WAITING reply. The `legion` tool's successful
+  // `handoff_complete` closes it (`onPhaseCompleted`, below).
+  pi.on("message_start", async (event, context) => {
+    if (!phaseWorkerSession(context)) return;
+    const kind = inboundKind(event.message);
+    if (kind !== undefined) advancePhaseStall({ kind });
+  });
+
+  // The run is about to settle with nothing left for the host to continue: a phase still open
+  // gets its one follow-up, which the host sends as the next turn of this same session.
+  pi.on("session_stop", async (event, context) => {
+    if (event.signal.aborted || !phaseWorkerSession(context)) return undefined;
+    const followUp = advancePhaseStall({
+      kind: "settle",
+      lastAssistantText: assistantText(event.last_assistant_message),
+    });
+    return followUp === undefined ? undefined : { continue: true, additionalContext: followUp };
+  });
+
   pi.on("session_shutdown", async (_event, context) => {
     const sessionID = context.sessionManager.getSessionId();
     if (
@@ -940,23 +983,32 @@ export default function legionExtension(pi: PiApi): void {
     }
   });
 
-  const architectSession = (
+  /** This session's TypeScript-daemon role, for the `legion` tool; the tool gates each operation by
+   * it. */
+  const toolSession = (
     context: SessionContext
-  ): { tree: string; issue: string; role: LegionRole; secret: string } => {
+  ): {
+    kind: "root-architect" | "phase-worker";
+    tree: string;
+    issue: string;
+    role: LegionRole;
+    secret: string;
+  } => {
     const sessionID = context.sessionManager.getSessionId();
-    if (
-      capability !== undefined &&
-      capability.sessionID === sessionID &&
-      capability.role === "architect"
-    ) {
-      return {
-        tree: capability.tree,
-        issue: capability.issue,
-        role: capability.role,
-        secret: capability.secret,
-      };
+    if (capability === undefined || capability.sessionID !== sessionID) {
+      throw new Error("legion is available only to this session's registered Legion role");
     }
-    throw new Error("legion is available only to root and sub-architect sessions");
+    return {
+      kind: capability.kind,
+      tree: capability.tree,
+      issue: capability.issue,
+      role: capability.role,
+      secret: capability.secret,
+    };
+  };
+
+  const onPhaseCompleted = (context: SessionContext): void => {
+    if (phaseWorkerSession(context)) advancePhaseStall({ kind: "handoff-complete" });
   };
 
   const activateLegionTool = async (): Promise<void> => {
@@ -965,11 +1017,13 @@ export default function legionExtension(pi: PiApi): void {
     await pi.setActiveTools([...activeTools, "legion"]);
   };
 
-  let architectToolsRegistered = false;
-  const registerArchitectTools = (): void => {
-    if (architectToolsRegistered) return;
-    architectToolsRegistered = true;
-    pi.registerTool(createLegionTool({ pi, roleDaemon, architectSession }));
+  let legionToolRegistered = false;
+  const registerLegionTool = (): void => {
+    if (legionToolRegistered) return;
+    legionToolRegistered = true;
+    pi.registerTool(
+      createLegionTool({ pi, roleDaemon, session: toolSession, onPhaseCompleted })
+    );
   };
 
   let goToolsRegistered = false;
@@ -994,6 +1048,7 @@ export default function legionExtension(pi: PiApi): void {
             secret: active.secret,
           };
         },
+        onPhaseCompleted,
       })
     );
   };

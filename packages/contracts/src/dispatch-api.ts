@@ -194,6 +194,18 @@ export interface WriteAdvice {
 /** Response-only; never on an event payload. */
 export type Advised<T> = T & { readonly advice?: WriteAdvice };
 
+/**
+ * The session (or human) working an issue: who claimed it and when. At most one claim exists
+ * at a time, and it is not the issue's `route` (where messages go) or its `assignee` (the
+ * human who answers its asks). A claim and the issue's status are separate records: claiming
+ * never moves the status, and no status change claims.
+ */
+export interface IssueClaim {
+  readonly actor: Actor;
+  /** RFC3339 timestamp of the claim. */
+  readonly at: string;
+}
+
 export interface Issue {
   readonly key: string;
   readonly project: string;
@@ -206,6 +218,8 @@ export interface Issue {
   readonly parent: string | null;
   /** Lowercase GitHub login of the human who answers this issue's asks; null when unassigned. */
   readonly assignee: string | null;
+  /** The session or human working this issue, or null when nobody has claimed it. */
+  readonly claim: IssueClaim | null;
   readonly components: IssueComponents;
   readonly external_links: ExternalLink[];
   readonly route: string | null;
@@ -228,6 +242,7 @@ export interface IssueSummary
     | "rank"
     | "parent"
     | "assignee"
+    | "claim"
     | "components"
     | "updated_at"
     | "last_seq"
@@ -635,7 +650,10 @@ export interface CommentDeliveryEventPayload {
   readonly attempt: number;
   readonly delivery: DeliveryCapability;
   readonly session_id: string | null;
-  readonly state: "pending" | "sent" | "failed";
+  /** A receipt is only ever appended with a settled outcome: the sender that records it holds
+   *  the attempt's claim, and both reply handlers settle the row in the statement that appends
+   *  theirs. The attempt row itself reads `pending` between its commit and that outcome. */
+  readonly state: "sent" | "failed";
   readonly error?: string;
   readonly reply_id: string | null;
 }
@@ -712,7 +730,14 @@ export interface MessageDelivery {
   readonly delivery: MessageDeliveryMode;
   readonly session_id: string;
   readonly envelope_id: string | null;
-  readonly state: "sent" | "failed";
+  /**
+   * `pending` is an attempt Dispatch has committed but not yet sent, or whose send it never
+   * learned the outcome of: the row is written before the listener call and settled by a
+   * second transaction after it, so no Envoy send holds a database connection. A retry
+   * resumes a pending attempt no live sender still holds, under its original idempotency key,
+   * so the listener deduplicates a send that did land.
+   */
+  readonly state: "pending" | "sent" | "failed";
   readonly error: string | null;
   readonly reply_id: string | null;
   readonly created_at: string;
@@ -1045,6 +1070,29 @@ export interface UserStateUpdatedEventPayload {
   readonly state: UserIssueState;
 }
 
+/**
+ * `issue.claimed` and `issue.released`: who is working the issue now, whose claim this one
+ * replaced or cleared, and why. `previous_claim` is present on a takeover (the holder's
+ * session was no longer live), a release, and a close; the previous claimant's own agent
+ * topic receives the event so it learns it no longer holds the work.
+ */
+export interface IssueClaimEventPayload {
+  readonly key: string;
+  readonly status: string;
+  readonly claim: IssueClaim | null;
+  readonly previous_claim?: IssueClaim;
+  readonly reason: "claimed" | "takeover" | "forced" | "released" | "closed";
+}
+
+/**
+ * `issue.released` always says whose claim it cleared: the server appends the event only with a
+ * claim in hand, whether the holder released it, a human did, or a close did. So readers of a
+ * release never have to handle a missing previous claim, and must not pretend to.
+ */
+export type IssueReleasedEventPayload = IssueClaimEventPayload & {
+  readonly previous_claim: IssueClaim;
+};
+
 interface DispatchEventBase {
   readonly id: number;
   readonly issue_key: string | null;
@@ -1082,6 +1130,14 @@ export type DispatchEvent =
   | (DispatchEventBase & { readonly type: "issue.created"; readonly payload: IssueEventPayload })
   | (DispatchEventBase & { readonly type: "issue.updated"; readonly payload: IssueEventPayload })
   | (DispatchEventBase & { readonly type: "issue.closed"; readonly payload: IssueEventPayload })
+  | (DispatchEventBase & {
+      readonly type: "issue.claimed";
+      readonly payload: IssueClaimEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "issue.released";
+      readonly payload: IssueReleasedEventPayload;
+    })
   | (DispatchEventBase & {
       readonly type: "artifact.created";
       readonly payload: ArtifactCreatedEventPayload;

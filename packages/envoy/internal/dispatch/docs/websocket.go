@@ -28,17 +28,24 @@ type connectionState struct {
 
 type connectionContextKey struct{}
 
-type backfillInjectionContextKey struct{}
+type ownerVerifiedContextKey struct{}
 
-// backfillInjectionToken is installed only on a backfill's own server calls.
-type backfillInjectionToken struct{ _ byte }
+// ownerVerifiedToken is installed only on the server's own calls, by a caller that already
+// knows the document's owner state: a settlement, which holds the owner row locked in its
+// transaction; the publish of a committed live write, whose transaction held that row until it
+// committed; or the block-id backfill, which is a command run against a database nobody is
+// serving from. Their injections skip the issue read in allowInject - for the settlement that
+// read would be a second pooled connection taken while its transaction is open
+// (store.ErrNestedAcquire), for the publish a read other writers' connections can starve (see
+// publishLiveUpdate), and for the backfill it is a question already answered.
+type ownerVerifiedToken struct{ _ byte }
 
-func withBackfillInjection(ctx context.Context) context.Context {
-	return context.WithValue(ctx, backfillInjectionContextKey{}, &backfillInjectionToken{})
+func withOwnerVerified(ctx context.Context) context.Context {
+	return context.WithValue(ctx, ownerVerifiedContextKey{}, &ownerVerifiedToken{})
 }
 
-func isBackfillInjection(ctx context.Context) bool {
-	_, ok := ctx.Value(backfillInjectionContextKey{}).(*backfillInjectionToken)
+func isOwnerVerified(ctx context.Context) bool {
+	_, ok := ctx.Value(ownerVerifiedContextKey{}).(*ownerVerifiedToken)
 	return ok
 }
 
@@ -157,7 +164,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "document not found", http.StatusNotFound)
 		return
 	}
-	if _, err := s.issueOpen(r.Context(), room); err != nil {
+	if _, err := s.issueOpen(r.Context(), s.queryFrom(r.Context()), room); err != nil {
 		http.Error(w, "document not found", http.StatusNotFound)
 		return
 	}
@@ -198,7 +205,7 @@ func (s *Service) authorize(r *http.Request) (websocket.ConnectionConfig, bool) 
 	if s.roomFailure(room) != nil {
 		return websocket.ConnectionConfig{}, false
 	}
-	open, err := s.issueOpen(r.Context(), room)
+	open, err := s.issueOpen(r.Context(), s.queryFrom(r.Context()), room)
 	if err != nil {
 		return websocket.ConnectionConfig{}, false
 	}
@@ -223,7 +230,7 @@ func schemaReadOnly(open bool, clientSchemaVersion string) bool {
 // authorizeSchemaVersion confirms the existing HTTP-authorized connection's schema admission
 // through Hocuspocus's authenticated scope, which is the provider's client-visible signal.
 func (s *Service) authorizeSchemaVersion(room, clientSchemaVersion string) (websocket.ConnectionConfig, error) {
-	open, err := s.issueOpen(context.Background(), room)
+	open, err := s.issueOpen(context.Background(), s.queryFrom(context.Background()), room)
 	if err != nil {
 		return websocket.ConnectionConfig{}, err
 	}
@@ -259,6 +266,13 @@ func (s *Service) requestActor(r *http.Request) (model.Actor, error) {
 	return model.Actor{Kind: "user", ID: login}, nil
 }
 
+// allowInject decides whether ygo may apply an injection to a room. Its issue read goes
+// through the shared pool for a caller that need hold no connection of its own (the
+// settlement warm-up in settleRoom), and that is outside the pool's deadlock cycle only
+// because ygo runs OnInject before getOrCreateRoom (reearth/ygo v1.49.5,
+// provider/websocket/inject.go:311-320): an injection refused here has published no room
+// placeholder for a connection-holder to park on, so nothing holding a connection is waiting
+// on this read. A vendored reordering of those two calls puts it back in the cycle.
 func (s *Service) allowInject(ctx context.Context, info websocket.InjectInfo) error {
 	if s.shuttingDown(info.Room) {
 		return ErrServiceUnavailable
@@ -266,13 +280,13 @@ func (s *Service) allowInject(ctx context.Context, info websocket.InjectInfo) er
 	if err := s.awaitRoomRecovery(ctx, info.Room); err != nil {
 		return err
 	}
-	if isBackfillInjection(ctx) {
+	if isOwnerVerified(ctx) {
 		return nil
 	}
 	if s.roomClosed(info.Room) {
 		return ErrIssueClosed
 	}
-	open, err := s.issueOpen(ctx, info.Room)
+	open, err := s.issueOpen(ctx, s.queryFrom(ctx), info.Room)
 	if err != nil {
 		return err
 	}
@@ -286,7 +300,15 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	if err := s.awaitRoomRecovery(ctx, room); err != nil {
 		return err
 	}
-	open, err := s.issueOpen(ctx, room)
+	// Everything this load needs comes from the pool that owns loads. A writer holding a
+	// pooled connection and the issue's row lock waits for this load, so a read of the shared
+	// pool here waits for a connection only that writer can release: the wedge, arrived at
+	// without a transaction of its own and so invisible to the pool's guard.
+	rooms, err := s.store.Pool.Rooms()
+	if err != nil {
+		return err
+	}
+	open, err := s.issueOpen(ctx, rooms, room)
 	if err != nil {
 		return err
 	}
@@ -331,14 +353,18 @@ func (s *Service) updateChangesMarkdown(room string, doc *crdt.Doc) bool {
 	return true
 }
 
-// recordConnectedActors credits an observed document update to the room's connected peers,
-// who all join `pending`. A service mutation (origin registered by serviceTransact) was
-// already credited to its actor by recordActor; any other update is a browser edit by one of
-// the peers, so when exactly one peer is connected it is the latest edit source and replaces
-// `lastActor`, and otherwise the edit cannot be pinned on a single peer and no older actor
-// may stand in for it.
+// recordConnectedActors credits an observed content change to the room's connected peers, who
+// all join `pending`. A service mutation (origin registered by serviceTransact) is credited to
+// its actor as well, who becomes `lastActor`. A committed transaction's live write, applied by
+// PublishLiveWrites, was credited when the transaction committed (CreditLiveWrites) and is not
+// credited again. Any other update is a browser edit by one of the peers, so when exactly one
+// peer is connected it is the latest edit source and replaces `lastActor`, and otherwise the
+// edit cannot be pinned on a single peer and no older actor may stand in for it.
 func (s *Service) recordConnectedActors(room string, origin any) {
-	_, service := s.serviceOrigins.Load(origin)
+	if _, published := origin.(*liveWriteOrigin); published {
+		return
+	}
+	value, service := s.serviceOrigins.Load(origin)
 	state := s.room(room)
 	state.mu.Lock()
 	defer state.mu.Unlock()
@@ -354,6 +380,10 @@ func (s *Service) recordConnectedActors(room string, origin any) {
 		}
 	}
 	if service {
+		if actor, credited := value.(*model.Actor); credited && actor != nil {
+			state.pending[actorKey(*actor)] = *actor
+			state.lastActor = new(*actor)
+		}
 		return
 	}
 	if ambiguous {

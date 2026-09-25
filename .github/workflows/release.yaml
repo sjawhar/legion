@@ -90,7 +90,7 @@ jobs:
             echo "skip=false"
           } >> "$GITHUB_OUTPUT"
           echo "Bumping cli-v${PREV_VERSION} -> cli-v${VERSION}"
-      - uses: oven-sh/setup-bun@v2
+      - uses: ./.github/actions/setup-bun
         if: steps.version.outputs.skip != 'true'
       - name: Install dependencies
         if: steps.version.outputs.skip != 'true'
@@ -181,7 +181,7 @@ jobs:
           ssh-key: ${{ secrets.DEPLOY_KEY }}
           fetch-depth: 0
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: ./.github/actions/setup-bun
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
@@ -284,7 +284,7 @@ jobs:
           ssh-key: ${{ secrets.DEPLOY_KEY }}
           fetch-depth: 0
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: ./.github/actions/setup-bun
       - uses: actions/setup-node@v4
         with:
           node-version: "24"

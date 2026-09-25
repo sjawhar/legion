@@ -149,7 +149,7 @@ test("a field the Go shape requires cannot be dropped", () => {
   expect(LegionGoStateResponse.safeParse(mutated).success).toBeFalse();
 });
 
-test("the Stage 3 state golden carries the record status and due Dispatch status write", () => {
+test("the Stage 3 state golden carries the record status and pending Dispatch status write", () => {
   const state = LegionGoStateResponse.parse(fixture("state-stage3.json"));
 
   expect(state.issues["LEGION-208"]?.status).toBe("needs_review");

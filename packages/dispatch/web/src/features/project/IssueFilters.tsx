@@ -129,6 +129,12 @@ export function IssueFilters({
           <Chip onClick={() => filters.setUnread(!filters.unread)} selected={filters.unread}>
             Unread
           </Chip>
+          <Chip
+            onClick={() => filters.setUnclaimed(!filters.unclaimed)}
+            selected={filters.unclaimed}
+          >
+            Unclaimed
+          </Chip>
         </div>
       ) : null}
     </>

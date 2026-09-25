@@ -334,6 +334,20 @@ func (r *SessionRegistry) finishWatch(generation uint64) bool {
 	return true
 }
 
+// StopWatch stops the KV watcher on purpose, for a shutdown. The watcher's end then belongs to no
+// live generation, so consumeWatch records no terminal error and logs nothing: an ordered shutdown
+// is not a watcher failure.
+func (r *SessionRegistry) StopWatch() {
+	r.watcherMu.Lock()
+	watcher := r.watcher
+	r.watcher = nil
+	r.watcherGeneration++
+	r.watcherMu.Unlock()
+	if watcher != nil {
+		_ = watcher.Stop()
+	}
+}
+
 func (r *SessionRegistry) setWatchErr(err error) {
 	r.mu.Lock()
 	r.watchErr = err
