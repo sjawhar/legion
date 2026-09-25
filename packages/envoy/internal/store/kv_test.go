@@ -2065,3 +2065,56 @@ func TestTheRegistryClockStampsWhatItRecords(t *testing.T) {
 		t.Fatalf("role ClaimedAt = %d, want the registry clock's %d", claim.ClaimedAt, at.UnixMilli())
 	}
 }
+
+// A rebuild onto an interest bucket that was deleted and created again refills the cache from the
+// new bucket. The recreated stream numbers its revisions from 1, so a cache still fenced by the
+// old bucket's revisions would keep an old value for every key the new bucket has not yet written
+// past, and a key the new bucket does not hold at all.
+func TestRewatchOntoARecreatedBucketRefillsTheCache(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	reg, err := Open(conn, WithReplicas(1), withTestBuckets(t))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	t.Cleanup(reg.StopWatch)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := reg.WaitForCacheReady(ctx); err != nil {
+		t.Fatalf("WaitForCacheReady: %v", err)
+	}
+	for i := range 20 {
+		if _, err := reg.Upsert(Interest{SessionID: "ses_a", MachineID: "m1"}, []string{fmt.Sprintf("notifications.old.%d", i)}); err != nil {
+			t.Fatalf("upsert ses_a: %v", err)
+		}
+	}
+	if _, err := reg.Upsert(Interest{SessionID: "ses_ghost", MachineID: "m1"}, []string{"notifications.ghost"}); err != nil {
+		t.Fatalf("upsert ses_ghost: %v", err)
+	}
+	waitFor(t, 5*time.Second, func() bool { return len(reg.Match("m1", "notifications.ghost")) == 1 })
+
+	js, err := conn.JetStream()
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	bucket := testBuckets(t).interests
+	if err := js.DeleteKeyValue(bucket); err != nil {
+		t.Fatalf("delete the interest bucket: %v", err)
+	}
+	recreated, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: bucket, Replicas: 1, Storage: natsgo.FileStorage})
+	if err != nil {
+		t.Fatalf("recreate the interest bucket: %v", err)
+	}
+	putInterest(t, recreated, Interest{SessionID: "ses_a", MachineID: "m1", Topics: []string{"notifications.new"}})
+	putInterest(t, recreated, Interest{SessionID: "ses_b", MachineID: "m1", Topics: []string{"notifications.b"}})
+	if err := reg.Rewatch(conn); err != nil {
+		t.Fatalf("Rewatch: %v", err)
+	}
+
+	waitFor(t, 5*time.Second, func() bool {
+		return len(reg.Match("m1", "notifications.new")) == 1 && len(reg.Match("m1", "notifications.b")) == 1
+	})
+	if got := reg.Match("m1", "notifications.ghost"); len(got) != 0 {
+		t.Fatalf("the cache kept a session the recreated bucket does not hold: %v", got)
+	}
+}
