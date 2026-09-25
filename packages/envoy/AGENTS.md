@@ -25,7 +25,7 @@ events to the right session.
 | Webhook config         | `internal/webhook/config.go`                     | ENVOY_WEBHOOKS parsing, startup validation         |
 | Listener behavior      | `cmd/listener/main.go`                    | subscribe/match/deliver flow                       |
 | NATS client            | `internal/bus/nats.go`                    | reconnect/self-heal logic                          |
-| Stream subjects        | `internal/bus/stream.go`                  | `ENVOY_NOTIFICATIONS` subject reconciliation at start |
+| Stream definition      | `internal/bus/stream.go`                  | `ENVOY_NOTIFICATIONS` subjects, retention and duplicate window, and their reconciliation at start |
 | Session delivery       | `internal/session/session.go`             | hot delivery via prompt_async                      |
 | Interest storage       | `internal/store/kv.go`                    | JetStream KV subscriptions                         |
 | KV cache watchers      | `internal/kvwatch/kvwatch.go`             | one watcher lifecycle for the interest, session and CI caches |
@@ -361,7 +361,7 @@ after a receipt timeout safe: the listener publishes the envelope before it answ
 answer that misses the client's window says nothing about whether the message landed, and only
 the same key can be recognised as the repeat it is. **This holds for as long as the stream's
 duplicate window, which equals its retention by construction (both are `streamDuplicateWindow`,
-`internal/bus/nats.go`) and is reconciled on every `bus.Connect` by `ensureStreamWithConfig`.**
+`internal/bus/stream.go`) and is reconciled on every `bus.Connect` by `ensureStreamWithConfig`.**
 A retry in a DIFFERENT mode is a different key and genuinely does deliver again, which is what
 the dashboard's retry row says: its **Retry** re-sends the attempt's own mode, and the two
 mode-change actions say "instead". A mode change never rides on a stranded attempt - resuming it

@@ -15,7 +15,7 @@ component: messaging
 severity: high
 applies_when:
   - Adding or retiring a NATS subject of the shared ENVOY_NOTIFICATIONS stream
-  - Rolling out a change that touches packages/envoy/internal/bus/nats.go's streamSubjects list
+  - Rolling out a change that touches packages/envoy/internal/bus/stream.go's streamSubjects list
   - Diagnosing why a subject that one service publishes to answers "nats: no response from stream"
 ---
 
@@ -24,7 +24,7 @@ applies_when:
 ## Context
 
 Every binary that calls `bus.Connect` ensures the shared `ENVOY_NOTIFICATIONS` stream when it
-starts, using its own compiled `streamSubjects` (`packages/envoy/internal/bus/nats.go`): the
+starts, using its own compiled `streamSubjects` (`packages/envoy/internal/bus/stream.go`): the
 listener (`cmd/listener`), Dispatch (`cmd/dispatch`), `natstail` (`cmd/natstail`) and the MCP
 server (`cmd/mcp`). Several deployments of them write production's one stream and roll
 separately: the production listener (applied by the production chain), native Dispatch (applied

@@ -731,7 +731,7 @@ export type DeliveryCapability = (typeof DELIVERY_CAPABILITIES)[number];
 
 /**
  * How long the notification stream recognises a repeated delivery as a duplicate, in
- * milliseconds. This is the single source for that window: `bus/nats.go`'s
+ * milliseconds. This is the single source for that window: `bus/stream.go`'s
  * `streamDuplicateWindow` is generated from it (`scripts/gen-go.ts` emits
  * `contracts.DeliveryDuplicateWindow`), and the SPA reads it to decide whether re-sending a
  * failed attempt in its own mode can still be promised not to deliver twice.
