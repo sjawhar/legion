@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -60,14 +59,10 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	if cfg.DispatchURL == "" {
 		return nil, nil
 	}
-	project, ok := cfg.Projects[cfg.Project]
-	if !ok {
-		return nil, fmt.Errorf("projects must configure %s", cfg.Project)
-	}
-	owner, _, ok := strings.Cut(project.Repo, "/")
-	if !ok || owner == "" {
-		return nil, fmt.Errorf("projects.%s.repo %q must be owner/repository", cfg.Project, project.Repo)
-	}
+	// The loader refuses a workflow whose projects do not configure the daemon's own, and a repo that
+	// is not owner/name.
+	project := cfg.Projects[cfg.Project]
+	owner, _, _ := strings.Cut(project.Repo, "/")
 	log.Info("legion workflow boot stage", "stage", "config")
 	tokens := suppliedTokens
 	if tokens == nil {
@@ -98,24 +93,14 @@ func engineConfig(cfg config.Config) workflow.Config {
 	}
 }
 
-func (w *workflowRuntime) bind(cfg config.Config) error {
-	if cfg.DispatchTokenFile == "" {
-		return errors.New("dispatch_token_file is required when dispatch_url is configured")
-	}
-	token, err := config.ReadSecretPointer("dispatch_token_file", cfg.DispatchTokenFile)
-	if err != nil {
-		return err
-	}
-	w.dispatch = dispatch.New(cfg.DispatchURL, token)
-	return nil
+// bind is the workflow's Dispatch client, with the bearer prepare read.
+func (w *workflowRuntime) bind(url, token string) {
+	w.dispatch = dispatch.New(url, token)
 }
 
 // connect opens Envoy's JetStream and this project's durable consumers, so a missing
 // notification stream refuses boot rather than leaving a daemon that reads no events.
 func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config) error {
-	if len(cfg.NatsURLs) == 0 {
-		return errors.New("nats_urls is required when dispatch_url is configured")
-	}
 	conn, err := nats.Connect(strings.Join(cfg.NatsURLs, ","))
 	if err != nil {
 		return fmt.Errorf("connect Envoy NATS: %w", err)

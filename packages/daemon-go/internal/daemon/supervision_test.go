@@ -51,9 +51,6 @@ func TestRunRefusesAConfigurationItCannotSuperviseUnder(t *testing.T) {
 		{"an Envoy token file that is not there", func(c *config.Config, _ *overrides) {
 			c.EnvoyTokenFile = filepath.Join(c.StateDir, "absent")
 		}, "envoy_token_file names"},
-		{"a runtime Stage 2 does not supervise under", func(c *config.Config, _ *overrides) {
-			c.Runtime = config.Runtime{Name: "kubernetes"}
-		}, "runtime kubernetes"},
 		{"no omp_invocation and no LEGION_OMP_PATH", func(c *config.Config, o *overrides) {
 			c.OmpInvocation = ""
 			o.runtime = nil

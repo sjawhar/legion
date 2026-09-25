@@ -182,11 +182,7 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 		}
 	}
 	if workflow != nil {
-		if err := workflow.bind(cfg); err != nil {
-			workflow.stop()
-			st.Close()
-			return err
-		}
+		workflow.bind(cfg.DispatchURL, plan.dispatchToken)
 		log.Info("legion workflow boot stage", "stage", "dispatch")
 	}
 
@@ -302,6 +298,8 @@ type plan struct {
 	operatorToken string
 	secrets       map[string]string
 	instructions  string
+	// dispatchToken is the Dispatch bearer dispatch_token_file names; "" without Dispatch.
+	dispatchToken string
 	prompts       *prompts.Composer
 	// stream is the worker stream's address: the listener binds it, and every agent's shim dials it.
 	stream     string
@@ -356,9 +354,6 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 	}
 	dispatchToken := ""
 	if cfg.DispatchURL != "" {
-		if cfg.DispatchTokenFile == "" {
-			return plan{}, errors.New("dispatch_token_file is required when dispatch_url is configured")
-		}
 		if dispatchToken, err = config.ReadSecretPointer("dispatch_token_file", cfg.DispatchTokenFile); err != nil {
 			return plan{}, err
 		}
@@ -374,7 +369,7 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 	}
 	p := plan{
 		project: project, operatorToken: operatorToken, secrets: secrets, instructions: instructions,
-		clock: clock, orphanSweep: orphanSweep,
+		dispatchToken: dispatchToken, clock: clock, orphanSweep: orphanSweep,
 	}
 	switch cfg.Runtime.Name {
 	case "tmux":

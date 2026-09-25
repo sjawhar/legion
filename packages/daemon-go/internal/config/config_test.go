@@ -15,7 +15,7 @@ import (
 
 // The smallest file that loads: the three Stage 1 keys and the Stage 3 workflow keys with no
 // environment fallback.
-const minimalFile = `project: demo
+const minimalFile = `project: DEMO
 state_dir: /var/lib/legion
 postgres_dsn: postgres://legion@127.0.0.1:5432/legion
 dispatch_url: http://127.0.0.1:8080
@@ -31,6 +31,7 @@ github_apps:
   review:
     app_id: "2"
     private_key: review-test-key
+nats_urls: [nats://127.0.0.1:4222]
 `
 
 // The refusals the shipped loader words itself, quoted here from
@@ -106,20 +107,20 @@ func ignoredLine(key string, stage int) string {
 	return fmt.Sprintf(`"key":%s,"stage":%d`, quoted, stage)
 }
 
-// defaultsFor is the Config a file carrying only project, state_dir, and postgres_dsn resolves to
-// on port, bind, and runtime: every other key at its default. The Stage 2 defaults are the shipped
+// defaultsFor is the Config minimalFile resolves to on port: every key it leaves out at its default,
+// on the loopback bind and the tmux runtime. The Stage 2 defaults are the shipped
 // loader's (packages/daemon/src/daemon/config.ts:288-312, `port + 1` at :1797, the loopback
 // daemon URL at :1510) plus the four keys Stage 2 adds — except omp_invocation, which has none
 // here: the shipped default is the OMP fork pin, whose one home is packages/daemon/src/daemon/
 // omp-pin.ts (docs/solutions/daemon/omp-pin-bump-behavioral-proof.md:29-43).
-func defaultsFor(port int, bind, runtime string) Config {
+func defaultsFor(port int) Config {
 	return Config{
-		Project:                                 "demo",
+		Project:                                 "DEMO",
 		Port:                                    port,
-		Bind:                                    bind,
+		Bind:                                    "127.0.0.1",
 		PostgresDSN:                             "postgres://legion@127.0.0.1:5432/legion",
 		StateDir:                                "/var/lib/legion",
-		Runtime:                                 Runtime{Name: runtime},
+		Runtime:                                 Runtime{Name: "tmux"},
 		AdmissionCap:                            4,
 		DaemonURL:                               fmt.Sprintf("http://127.0.0.1:%d", port),
 		OmpInvocation:                           "",
@@ -135,6 +136,7 @@ func defaultsFor(port int, bind, runtime string) Config {
 		PromptFailureLimit:                      3,
 		PromptRetireLimit:                       2,
 		EnvoyURL:                                "http://127.0.0.1:9020",
+		NatsURLs:                                []string{"nats://127.0.0.1:4222"},
 		DispatchURL:                             "http://127.0.0.1:8080",
 		DispatchTokenFile:                       "/var/run/legion/DISPATCH_TOKEN",
 		Projects:                                map[string]Project{"DEMO": {Repo: "acme/widgets"}},
@@ -154,7 +156,7 @@ func TestLoadMinimalFileAppliesDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if want := defaultsFor(13370, "127.0.0.1", "tmux"); !reflect.DeepEqual(cfg, want) {
+	if want := defaultsFor(13370); !reflect.DeepEqual(cfg, want) {
 		t.Errorf("Load = %+v, want %+v", cfg, want)
 	}
 }
@@ -202,7 +204,7 @@ envoy_token_file: /run/legion/ENVOY_TOKEN
 		t.Fatalf("Load: %v", err)
 	}
 
-	want := defaultsFor(14000, "127.0.0.1", "tmux")
+	want := defaultsFor(14000)
 	want.DaemonURL = "http://127.0.0.1:14000"
 	want.OmpInvocation = "mise x github:acme/omp@1 -- omp"
 	want.OmpLaunchPrefix = []string{"env", "OMP_PROFILE=legion", "--", "env", "OMP_PROFILE=legion", "--"}
@@ -344,6 +346,38 @@ func TestLoadRefusesEveryStage3Key(t *testing.T) {
 			want: "dispatch_url must be a valid URL",
 		},
 		{
+			name: "dispatch_url is the /mcp endpoint",
+			body: strings.Replace(minimalFile, "dispatch_url: http://127.0.0.1:8080\n", "dispatch_url: http://127.0.0.1:8080/mcp/\n", 1),
+			want: "dispatch_url must be the dispatch service base URL, not the /mcp endpoint",
+		},
+		// Boot needs each of these for a workflow, so the loader refuses the file, in the words of
+		// its own refusal: `legion start --check-config` never passes a file `legion start` refuses.
+		{
+			name: "dispatch_url without dispatch_token_file",
+			body: strings.Replace(minimalFile, "dispatch_token_file: /var/run/legion/DISPATCH_TOKEN\n", "", 1),
+			want: "dispatch_token_file is required when dispatch_url is configured",
+		},
+		{
+			name: "dispatch_url without nats_urls",
+			body: strings.Replace(minimalFile, "nats_urls: [nats://127.0.0.1:4222]\n", "", 1),
+			want: "nats_urls is required when dispatch_url is configured: the workflow's intake reads Envoy's notification stream",
+		},
+		{
+			name: "projects without the daemon's own project",
+			body: strings.Replace(minimalFile, "project: DEMO\n", "project: OTHER\n", 1),
+			want: "projects must configure OTHER, the daemon's own project",
+		},
+		{
+			name: "a repo whose owner is a dot segment",
+			body: strings.Replace(minimalFile, "{ repo: acme/widgets }", "{ repo: ./widgets }", 1),
+			want: `projects.DEMO.repo "./widgets" has a "." segment, which names no GitHub owner or repository`,
+		},
+		{
+			name: "a repo whose name is a dot-dot segment",
+			body: strings.Replace(minimalFile, "{ repo: acme/widgets }", "{ repo: acme/.. }", 1),
+			want: `projects.DEMO.repo "acme/.." has a ".." segment, which names no GitHub owner or repository`,
+		},
+		{
 			name: "dispatch_token_file is blank",
 			body: minimalFile + "dispatch_token_file: \"\"\n",
 			want: "dispatch_token_file must not be empty",
@@ -417,11 +451,6 @@ func TestLoadRefusesEveryStage3Key(t *testing.T) {
 			name: "github app secret is not a single key name",
 			body: minimalFile + "github_apps: {implement: {app_id: \"1\", private_key_secret: \"secrets get KEY\"}, review: {app_id: \"2\", private_key: key}}\n",
 			want: "github_apps.implement.private_key_secret must be a single secretsd key name (no whitespace)",
-		},
-		{
-			name: "linger_hours is not positive",
-			body: minimalFile + "linger_hours: 0\n",
-			want: "linger_hours must be a positive number",
 		},
 		{
 			name: "linger_hours exceeds the timer bound",

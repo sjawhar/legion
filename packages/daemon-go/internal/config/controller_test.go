@@ -124,7 +124,7 @@ func TestLoadControllerRefuses(t *testing.T) {
 			`project "/-_/" must include at least one alphanumeric character`},
 		{"a broken daemon_url", strings.Replace(requiredControllerKeys, "http://daemon.test:13370", "daemon", 1), "daemon_url must be a valid URL"},
 		{"a broken envoy_url", strings.Replace(requiredControllerKeys, "http://envoy.test:9020", "envoy", 1), "envoy_url must be a valid URL"},
-		{"dispatch_url alone", requiredControllerKeys + "dispatch_url: https://d.test\n", "dispatch_url is set but dispatch_token_file is not"},
+		{"dispatch_url alone", requiredControllerKeys + "dispatch_url: https://d.test\n", "dispatch_token_file is required when dispatch_url is configured"},
 		{"a broken nats_urls entry", without("nats_urls") + "nats_urls: [nats]\n", `nats_urls entry "nats" must be a valid URL`},
 		{"dispatch_token_file alone", requiredControllerKeys + "dispatch_token_file: ./t\n", "dispatch_token_file is set but dispatch_url is not"},
 		{"the Dispatch MCP endpoint", requiredControllerKeys + "dispatch_url: https://d.test/mcp/\ndispatch_token_file: ./t\n",

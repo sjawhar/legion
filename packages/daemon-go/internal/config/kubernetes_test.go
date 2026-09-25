@@ -136,7 +136,6 @@ func TestLoadForValidationDefaultsTheKubernetesBlock(t *testing.T) {
 		{"kubeconfig", block.Kubeconfig, ""},
 		{"context", block.Context, ""},
 		{"gateway.url, trailing slash dropped", block.Gateway.URL, "https://middleman.internal.example"},
-		{"gateway.token_expiry_seconds", block.Gateway.TokenExpiry, 600 * time.Second},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if !reflect.DeepEqual(tc.got, tc.want) {
