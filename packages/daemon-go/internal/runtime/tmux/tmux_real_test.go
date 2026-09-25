@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -820,6 +821,85 @@ func TestRealTmuxLifecycle(t *testing.T) {
 
 // Panes of one issue share its window, while a pane there still verifies; another issue gets a
 // window of its own; and one claim never has two processes.
+// Spawn hands out a locator only once its pane runs the pane's own command. tmux reports a new
+// pane's pid at fork, and until that child execs its command it is a copy of the tmux server: its
+// /proc names the server, its argv included. A probe in that window read a starting agent as not
+// running OMP, which supervision takes for a death, relaunching the claim over its still-starting
+// process (LEGION-274, window 1). Here every pane reads as the server's copy for its first half
+// second, as a pane does on a loaded host for as long as its exec waits.
+func TestRealTmuxSpawnReturnsOnlyOnceThePaneRunsItsCommand(t *testing.T) {
+	r := newRig(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	read := r.rt.readProc
+	var mu sync.Mutex
+	firstSeen := map[int]time.Time{}
+	r.rt.readProc = func(path string) ([]byte, error) {
+		body, err := read(path)
+		var pid int
+		var file string
+		if err != nil || !procFile.MatchString(path) {
+			return body, err
+		}
+		fmt.Sscanf(strings.TrimPrefix(path, "/proc/"), "%d/%s", &pid, &file)
+		stat, err := read(fmt.Sprintf("/proc/%d/stat", pid))
+		if err != nil {
+			return body, nil
+		}
+		parent, err := read(fmt.Sprintf("/proc/%d/stat", statParent(t, stat)))
+		if err != nil || statComm(t, parent) != "tmux: server" || statComm(t, stat) == "tmux: server" {
+			return body, nil
+		}
+		mu.Lock()
+		seen, ok := firstSeen[pid]
+		if !ok {
+			seen = time.Now()
+			firstSeen[pid] = seen
+		}
+		mu.Unlock()
+		if time.Since(seen) > 500*time.Millisecond {
+			return body, nil
+		}
+		// Still the server's fork, as the kernel shows it before exec: its comm and argv.
+		if file == "cmdline" {
+			return read(fmt.Sprintf("/proc/%d/cmdline", statParent(t, stat)))
+		}
+		open, end := strings.IndexByte(string(body), '('), strings.LastIndexByte(string(body), ')')
+		return []byte(string(body[:open+1]) + "tmux: server" + string(body[end:])), nil
+	}
+
+	loc, err := r.rt.Spawn(ctx, r.spec("legion-t-LEGION-8-architect", "LEGION-8", "LEGION-8", claim.RoleArchitect))
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if obs := probe(t, r.rt, loc); obs.Kind != runtime.Alive {
+		t.Fatalf("Probe right after Spawn = %+v, want alive: the locator was handed out while its pane was still tmux's fork", obs)
+	}
+}
+
+// procFile matches the /proc files a verification reads.
+var procFile = regexp.MustCompile(`^/proc/[0-9]+/(stat|cmdline)$`)
+
+// statComm and statParent are a /proc/<pid>/stat line's comm and parent pid.
+func statComm(t *testing.T, stat []byte) string {
+	t.Helper()
+	open, end := strings.IndexByte(string(stat), '('), strings.LastIndexByte(string(stat), ')')
+	if open < 0 || end < open {
+		t.Fatalf("malformed stat line %q", stat)
+	}
+	return string(stat[open+1 : end])
+}
+
+func statParent(t *testing.T, stat []byte) int {
+	t.Helper()
+	fields := strings.Fields(string(stat[strings.LastIndexByte(string(stat), ')')+1:]))
+	parent, err := strconv.Atoi(fields[1])
+	if err != nil {
+		t.Fatalf("stat line %q has no parent pid: %v", stat, err)
+	}
+	return parent
+}
+
 func TestRealTmuxSplitsIntoTheIssueWindow(t *testing.T) {
 	r := newRig(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)

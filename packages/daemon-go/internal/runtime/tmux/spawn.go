@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -420,6 +421,9 @@ func (r *Runtime) openPane(ctx context.Context, spec runtime.SpawnSpec, pane []s
 	if err != nil {
 		return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
 	}
+	if err := r.awaitPaneCommand(ctx, report); err != nil {
+		return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
+	}
 	ticks, alive, err := r.startTicks(report.pid)
 	if err != nil {
 		return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
@@ -437,6 +441,33 @@ func (r *Runtime) openPane(ctx context.Context, spec runtime.SpawnSpec, pane []s
 	}
 	r.track(loc, spec.Issue)
 	return loc, nil
+}
+
+// awaitPaneCommand waits, bounded by the command timeout, until the pane's process runs the pane's
+// command. tmux reports a new pane's pid at fork, and until that child execs its command it is a
+// copy of the server, which a probe reads as not running OMP; supervision takes that for a death
+// and relaunches the claim over its still-starting process (LEGION-274). A process that exits
+// meanwhile is left to the caller's identity read, which reports it; one still the server's copy
+// when the bound runs out is killed, so no process the daemon never recorded runs on.
+func (r *Runtime) awaitPaneCommand(ctx context.Context, report paneReport) error {
+	deadline := time.Now().Add(r.commandTimeout)
+	for {
+		fork, err := r.serverFork(report.pid)
+		if err != nil || !fork {
+			return err
+		}
+		if time.Now().After(deadline) {
+			if res, err := r.run(ctx, killPaneArgv(r.socket, report.pane)); err != nil || res.exitCode != 0 && !paneGoneStderr.MatchString(res.stderr) {
+				r.log.Warn("tmux runtime: could not kill a pane that never started its command", "pane", report.pane, "err", err, "stderr", res.stderr)
+			}
+			return fmt.Errorf("pane %s pid %d did not start its command within %s", report.pane, report.pid, r.commandTimeout)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 }
 
 // refuseLiveIncarnation refuses a launch for a claim whose watched process still runs: one claim,
