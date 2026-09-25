@@ -10,10 +10,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
-
-var issueKeyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9]*-[0-9]+$`)
 
 // decodedMessage is the checked envelope identity and its workflow fact. A nil Fact is a valid
 // additive or non-workflow event that the shipped reducer acknowledges without a state change.
@@ -113,14 +112,14 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 	if !ok {
 		return nil, fmt.Errorf("Dispatch durable subject has no issue key: %s", subject)
 	}
-	if keyProject, _, _ := strings.Cut(subjectKey, "-"); keyProject != project || !issueKeyPattern.MatchString(subjectKey) {
+	if keyProject, _, _ := strings.Cut(subjectKey, "-"); keyProject != project || !claim.IsIssueKey(subjectKey) {
 		return nil, nil
 	}
 	var event dispatchEvent
 	if err := json.Unmarshal([]byte(payload), &event); err != nil {
 		return nil, fmt.Errorf("decode Dispatch event: %w", err)
 	}
-	if event.ID <= 0 || event.Seq <= 0 || event.Notify == nil || !issueKeyPattern.MatchString(event.IssueKey) || event.Type == "" || !isJSONObject(event.Payload) {
+	if event.ID <= 0 || event.Seq <= 0 || event.Notify == nil || !claim.IsIssueKey(event.IssueKey) || event.Type == "" || !isJSONObject(event.Payload) {
 		return nil, fmt.Errorf("Dispatch durable message payload is not a valid Dispatch event")
 	}
 	if subjectKey != event.IssueKey {
@@ -144,7 +143,7 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 		}
 		parent := ""
 		if issue.Parent != nil {
-			if !issueKeyPattern.MatchString(*issue.Parent) {
+			if !claim.IsIssueKey(*issue.Parent) {
 				return nil, fmt.Errorf("Dispatch issue event payload has an invalid parent key")
 			}
 			parent = *issue.Parent

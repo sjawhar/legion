@@ -66,10 +66,9 @@ func validateSpawnSpec(spec runtime.SpawnSpec, providerKeys []string) error {
 	if err := runtime.ValidateSpawnSpec(spec, runtimeOwned); err != nil {
 		return err
 	}
+	// The token names the pane's secret files, and it is one file name: the shared validation
+	// above holds it to the one claim.NewToken derives, which has no separator in it.
 	token := string(spec.Claim)
-	if token == "." || token == ".." || strings.ContainsAny(token, "/\x00") {
-		return fmt.Errorf("spawn %q: the claim token names the pane's secret files and must be one file name", token)
-	}
 	refuse := func(format string, args ...any) error {
 		return fmt.Errorf("spawn %s: "+format, append([]any{token}, args...)...)
 	}

@@ -1,4 +1,4 @@
-import { LEGION_GO_PHASES, type LegionGoState } from "@legion/contracts/legion-go-api";
+import { LEGION_GO_WORKFLOW_PHASES, type LegionGoState } from "@legion/contracts/legion-go-api";
 import type { PiApi, RegisteredTool, SessionContext, ToolResult } from "../pi-types";
 import { toolFailure, toolSuccess } from "../tool-result";
 import type { LegionGoDaemonClient } from "./go-daemon-client";
@@ -60,7 +60,7 @@ function toolSchema(pi: PiApi): unknown {
     artifactId: z.string().optional(),
     version: z.number().optional(),
     issues: z.array(z.string()).optional(),
-    to: z.enum(LEGION_GO_PHASES).optional(),
+    to: z.enum(LEGION_GO_WORKFLOW_PHASES).optional(),
     reason: z.string().optional(),
     decision: z.enum(["retry", "escalate"]).optional(),
     ...handoffSchemaFields(z),
@@ -180,7 +180,7 @@ export function createGoLegionTool(deps: {
             const grantId = await grantFor(client, active);
             await client.phaseBackward({
               grantId,
-              to: requiredString(parameters, operation, "to") as (typeof LEGION_GO_PHASES)[number],
+              to: requiredString(parameters, operation, "to") as (typeof LEGION_GO_WORKFLOW_PHASES)[number],
               reason: requiredString(parameters, operation, "reason"),
             });
             return jsonSuccess({});

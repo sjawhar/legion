@@ -77,7 +77,7 @@ renumbers above the first.
 
 ### The Go daemon: `legion.goDaemonApiVersion`
 
-`legion.goDaemonApiVersion` (currently 5) is the contract with `packages/daemon-go`: the claim,
+`legion.goDaemonApiVersion` (currently 6) is the contract with `packages/daemon-go`: the claim,
 credential, workflow, controller, and state shapes `src/legion/go-daemon-client.ts` parses strictly
 through `@legion/contracts/legion-go-api` (its first consumer), and the Go pane's environment —
 `LEGION_DAEMON_API=go`, the identity variables above, `LEGION_BOOT_TOKEN_FILE`,
@@ -96,6 +96,19 @@ at 5 refuses every bash command and every call Oh My Pi serves with `gh`, answer
 `LEGION_GRANT_FILE is not set on this pane: …`. Restarting the daemon at 5 does not clear it, since
 a restarted daemon re-adopts a live pane without relaunching it; relaunching the pane does (under
 the Go daemon, `legion claims suspend` and then `legion claims resume` on its claim).
+Contract 6 adds `phase` to a claim's pending delivery on `/legion/v1/state` — the issue phase the
+task was queued for, absent for a task of no phase — and `unrecorded` as the `phase` and `status`
+the state route reads for an issue the workflow does not record, where an operator's claim exists
+and an issue does not (#1345). No request names `unrecorded`: the phase-backward request takes the
+workflow's phases alone. The handoff completion request is unchanged: a completion names no run,
+and the daemon attributes it to the run of the task the worker took, reading the claim in three
+steps — the task whose turn is running; or, once that turn ends and retires it, the run the claim
+is left serving, which is what answers for a worker woken by a notice; or, for a claim that has
+served no run at all, a task it holds that the agent may have read. A task the agent refused is
+not one it read, so it answers for none of them. `POST /legion/v1/handoff/complete` answers 409
+`HANDOFF_NO_RUN` to a claim that has taken no task at all, and the workflow refuses
+`HANDOFF_STALE_GENERATION` for a run the issue has left. The pane's `LEGION_GENERATION` is the
+claim's launch counter and says nothing about the run; nothing reads it for this.
 The Go daemon's boot gate (`internal/daemon/bootgate.go`) refuses to start unless the installed
 manifest's field equals its `GoDaemonAPIVersion` (`internal/api/version.go`) — the manifest at the
 plugin root Oh My Pi resolves under the environment a pane will get, and the plugin a pane's Oh My

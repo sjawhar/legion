@@ -130,8 +130,8 @@ type Store interface {
 	PutPhase(ctx context.Context, tx pgx.Tx, phase PhaseRow) error
 	PullRequest(ctx context.Context, tx pgx.Tx, issue string) (*PullRequest, error)
 	PullRequestByBranch(ctx context.Context, tx pgx.Tx, repo, branch string) (*PullRequest, error)
+	PullRequestByNumber(ctx context.Context, tx pgx.Tx, repo string, number int) (*PullRequest, error)
 	PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest) error
-	DeletePullRequest(ctx context.Context, tx pgx.Tx, issue string) error
 	// SessionClaimsTree says whether the agent session holds a claim in the tree.
 	SessionClaimsTree(ctx context.Context, tx pgx.Tx, tree, session string) (bool, error)
 	// ClearGeneration drops the facts one generation of an issue owns: a merged or closed pull
@@ -140,6 +140,7 @@ type Store interface {
 	// verdict. Each role keeps its claim and its last handoff, so a commit an earlier generation
 	// reported is never new again.
 	ClearGeneration(ctx context.Context, tx pgx.Tx, issue string) error
+	ClearTreeGeneration(ctx context.Context, tx pgx.Tx, tree string) error
 	Gate(ctx context.Context, tx pgx.Tx, issue string) (*DesignGate, error)
 	PutGate(ctx context.Context, tx pgx.Tx, gate DesignGate) error
 	Slots(ctx context.Context, tx pgx.Tx) ([]Slot, error)
@@ -150,4 +151,13 @@ type Store interface {
 	FinishOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) error
 	RetryOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string, nextAt time.Time, lastErr string) error
 	PendingStatusWrites(ctx context.Context, tx pgx.Tx, project string) ([]OutboxRow, error)
+}
+
+// ParentOf is an observed parent key as a record holds it: nil for none. Dispatch says "no parent"
+// with an empty string, and the record says it with a nil pointer.
+func ParentOf(key string) *string {
+	if key == "" {
+		return nil
+	}
+	return &key
 }

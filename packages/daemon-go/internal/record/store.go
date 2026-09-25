@@ -184,6 +184,20 @@ func (s *Postgres) PullRequestByBranch(ctx context.Context, tx pgx.Tx, repo, bra
 	return pr, nil
 }
 
+// PullRequestByNumber reads the pull request a GitHub event names. The engine reached it by
+// listing every issue and reading each one's pull request — a read per issue for every check,
+// review and push event — and the row is one query away.
+func (s *Postgres) PullRequestByNumber(ctx context.Context, tx pgx.Tx, repo string, number int) (*PullRequest, error) {
+	pr, err := scanPullRequest(tx.QueryRow(ctx, "select "+pullRequestColumns+" from pull_requests where repo = $1 and number = $2", repo, number))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read pull request %s#%d: %w", repo, number, err)
+	}
+	return pr, nil
+}
+
 func (s *Postgres) PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest) error {
 	failing, err := json.Marshal(pr.Failing)
 	if err != nil {
@@ -226,33 +240,45 @@ func (s *Postgres) PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest
 	return nil
 }
 
-func (s *Postgres) DeletePullRequest(ctx context.Context, tx pgx.Tx, issue string) error {
-	if _, err := tx.Exec(ctx, "delete from pull_requests where issue = $1", issue); err != nil {
-		return fmt.Errorf("delete pull request for %s: %w", issue, err)
-	}
-	return nil
-}
-
-func (s *Postgres) ClearGeneration(ctx context.Context, tx pgx.Tx, issue string) error {
-	for _, statement := range []string{
-		"delete from pull_requests where issue = $1 and state <> 'open'",
-		"update pull_requests set fix_attempts = 0, blocked_attempts = 0, head_counted = '' where issue = $1",
-		"delete from design_gates where issue = $1",
-		"update phases set handoff_commit = '', rounds = 0, verdict = '' where issue = $1",
-	} {
-		if _, err := tx.Exec(ctx, statement, issue); err != nil {
-			return fmt.Errorf("clear the generation of %s: %w", issue, err)
-		}
-	}
-	return nil
-}
-
 func (s *Postgres) SessionClaimsTree(ctx context.Context, tx pgx.Tx, tree, session string) (bool, error) {
 	var claims bool
 	if err := tx.QueryRow(ctx, "select exists (select 1 from claims where tree = $1 and session = $2 and session <> '')", tree, session).Scan(&claims); err != nil {
 		return false, fmt.Errorf("read the claims of session %s in %s: %w", session, tree, err)
 	}
 	return claims, nil
+}
+
+// ClearGeneration empties one issue's generation-scoped facts: a merged or closed pull request,
+// the counters of one still open, its design gate and its recorded handoffs.
+func (s *Postgres) ClearGeneration(ctx context.Context, tx pgx.Tx, issue string) error {
+	return clearGeneration(ctx, tx, "issue = $1", issue, fmt.Sprintf("clear the generation of %s", issue))
+}
+
+// ClearTreeGeneration empties them for every issue of the tree. A root set back to todo starts a
+// new generation of the whole tree, and its children carried the old one's pull request, gate and
+// handoffs into it — a child re-entered at the new generation read a handoff of the last.
+func (s *Postgres) ClearTreeGeneration(ctx context.Context, tx pgx.Tx, tree string) error {
+	return clearGeneration(ctx, tx, "issue in (select key from issues where tree = $1)", tree,
+		fmt.Sprintf("clear the generation of tree %s", tree))
+}
+
+func clearGeneration(ctx context.Context, tx pgx.Tx, where string, key string, describe string) error {
+	for _, statement := range []string{
+		"delete from pull_requests where " + where + " and state <> 'open'",
+		// An open pull request is kept across a new generation, but the last one's reading of it is
+		// not: its counters, its checks verdict and the review decision are all of a head nobody
+		// has judged since.
+		"update pull_requests set fix_attempts = 0, blocked_attempts = 0, head_counted = '', " +
+			"verdict = '', review_decision = '', failing = '[]'::jsonb, failing_statuses = '[]'::jsonb, " +
+			"check_runs = '[]'::jsonb, reconciled = false where " + where,
+		"delete from design_gates where " + where,
+		"update phases set handoff_commit = '', rounds = 0, verdict = '' where " + where,
+	} {
+		if _, err := tx.Exec(ctx, statement, key); err != nil {
+			return fmt.Errorf("%s: %w", describe, err)
+		}
+	}
+	return nil
 }
 
 func scanPullRequest(row scanner) (*PullRequest, error) {
@@ -373,7 +399,10 @@ func (s *Postgres) Enqueue(ctx context.Context, tx pgx.Tx, row OutboxRow) error 
 // project's row from its own daemon. An issue's Dispatch status writes run one at a time in the
 // order they were made: a status row waits while an older one for the same issue is unfinished,
 // because each carries the status its predecessor leaves, and a newer write run first would find the
-// board short of it and finish unwritten as though a human had moved it.
+// board short of it and finish unwritten as though a human had moved it. Supervise rows need no
+// such rule: a stop names the run it ends through the claim's own record of the newest start run
+// against it (claims.last_start_row), so ordering them here would buy nothing that survives a
+// retry the runtime delayed.
 func (s *Postgres) ClaimDue(ctx context.Context, tx pgx.Tx, project string, now time.Time, limit int, leaseFor time.Duration) ([]OutboxRow, error) {
 	if limit <= 0 {
 		return []OutboxRow{}, nil
@@ -385,7 +414,8 @@ func (s *Postgres) ClaimDue(ctx context.Context, tx pgx.Tx, project string, now 
 		where split_part(issue, '-', 1) = $4 and next_at <= $1 and (lease_until is null or lease_until <= $1)
 		and not (kind = $3 and exists (select 1 from outbox older
 			where older.kind = $3 and older.issue = outbox.issue and older.id < outbox.id))
-		order by next_at, id limit $2 for update skip locked`, now, limit, string(OutboxKindDispatchStatus), project)
+		order by next_at, id limit $2 for update skip locked`,
+		now, limit, string(OutboxKindDispatchStatus), project)
 	if err != nil {
 		return nil, fmt.Errorf("claim due outbox rows: %w", err)
 	}

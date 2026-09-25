@@ -34,6 +34,7 @@ const fixtureDir = path.join(import.meta.dir, "..", "fixtures", "daemon-api");
 const schemas: Record<string, z.ZodType> = {
   "state.json": LegionGoStateResponse,
   "state-stage3.json": LegionGoStateResponse,
+  "state-operator-claim.json": LegionGoStateResponse,
   "register.json": LegionGoRegisterResponse,
   "register-controller.json": LegionGoControllerRegisterResponse,
   "controller-secret.json": LegionGoControllerSecretResponse,
@@ -181,6 +182,20 @@ test("a Stage 3 issue without its Dispatch status is refused", () => {
   delete state.issues["LEGION-208"]?.status;
 
   expect(LegionGoStateResponse.safeParse(state).success).toBeFalse();
+});
+
+// An operator spawns a claim on an issue no workflow records — `legion claims spawn`, which is
+// Stage 2's shape and the merge-queue holder's in production — and state lists that issue for the
+// claim's sake. The document parsed here is the one a live daemon served with such a claim on it:
+// the whole document was refused, so every strict client lost state reading for as long as that
+// claim lived, over a row that is a legitimate state rather than corruption.
+test("state carrying an operator's claim on an issue no workflow records is parsed", () => {
+  const state = LegionGoStateResponse.parse(fixture("state-operator-claim.json"));
+
+  const spawned = state.issues["AC91849371-900"];
+  expect(spawned?.phase).toBe("unrecorded");
+  expect(spawned?.status).toBe("unrecorded");
+  expect(spawned?.architect?.state).toBe("idle");
 });
 
 test("a locator is the runtime's nested shape, never the flat one", () => {

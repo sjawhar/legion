@@ -137,6 +137,31 @@ func (s *testSupervisor) Create(ctx context.Context, c supervise.Claim, roleProm
 	return m, true, nil
 }
 
+// restart rebuilds a claim's machine from the store, as a daemon restart re-adopting it does:
+// everything the machine held only in memory is gone.
+func (s *testSupervisor) restart(t *testing.T, token claim.Token) *supervise.Machine {
+	t.Helper()
+	claims, err := s.store.Claims(s.ctx)
+	if err != nil {
+		t.Fatalf("read the claims: %v", err)
+	}
+	for _, c := range claims {
+		if c.Token != token {
+			continue
+		}
+		m, err := supervise.NewMachine(s.ctx, s.deps, c)
+		if err != nil {
+			t.Fatalf("rebuild the machine: %v", err)
+		}
+		s.mu.Lock()
+		s.machines[token] = m
+		s.mu.Unlock()
+		return m
+	}
+	t.Fatalf("no stored claim for %s", token)
+	return nil
+}
+
 func (s *testSupervisor) Claims(ctx context.Context) ([]supervise.Claim, error) {
 	return s.store.Claims(ctx)
 }

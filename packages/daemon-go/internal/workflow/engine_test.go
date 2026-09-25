@@ -45,7 +45,7 @@ func TestGateRegistrationWithDesignGateOffStartsPlanningAndSeedsApprovalRead(t *
 		DesignGate:     config.DesignGateOff,
 		ReviewRoundCap: 3,
 		MaxFixAttempts: 3,
-		LingerHours:    time.Hour,
+		Linger:         time.Hour,
 		Clock:          func() time.Time { return time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC) },
 	}, nil)
 	if _, err := intake.ApplyFact(ctx, pool, "api", "gate-registration", intake.GateRegistered{
@@ -153,9 +153,143 @@ func TestRefusedReadyIsCommittedAndApprovalAdvancesWithoutSecondReady(t *testing
 	}
 }
 
-// A READY refused at one version stands: the human may revise the spec again before approving,
-// and the approval that reopens the gate at the later version advances the merge. A retried READY
-// from the same merger phase is one fact, so nothing else could.
+// The same READY on an issue with no design gate at all — a tree whose architect never registered
+// one, or a project whose gate is off. The refusal recorded a pending version of 0, which the
+// issues table refuses (ready_pending_version > 0), so the whole fact failed on a constraint
+// instead of committing the refusal the merger was supposed to read.
+func TestReadyRefusedWithNoDesignGateCommitsAndRecordsNoPendingVersion(t *testing.T) {
+	pool := migratedPool(t)
+	ctx := context.Background()
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "U"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim"})
+	engine := testEngine()
+
+	result, err := intake.ApplyFact(ctx, pool, "api", "ready", intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim", Ready: true}, engine, admissionStub{})
+	if err != nil {
+		t.Fatalf("ApplyFact READY with no gate: %v", err)
+	}
+	if result.Refusal == nil || result.Refusal.Status != 409 {
+		t.Fatalf("READY refusal = %#v, want a committed refusal", result.Refusal)
+	}
+	var pending *int
+	if err := pool.QueryRow(ctx, "select ready_pending_version from issues where key = $1", "LEGION-208").Scan(&pending); err != nil {
+		t.Fatalf("read committed ready pending version: %v", err)
+	}
+	if pending != nil {
+		t.Fatalf("ReadyPendingVersion = %d, want none: there is no version to approve", *pending)
+	}
+}
+
+// A pull request GitHub reopens is the same pull request. Its fix attempts and blocked attempts
+// are what bound the review rounds, and rebuilding the record from the reopen zeroed them: closing
+// and reopening a pull request bought a fresh set of attempts, which is the cap the workflow has.
+func TestAReopenedPullRequestKeepsItsAttemptCounters(t *testing.T) {
+	pool := migratedPool(t)
+	ctx := context.Background()
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"})
+	seedPR(t, pool, record.PullRequest{
+		Issue: "LEGION-208", Repo: "acme/widgets", Number: 7, Branch: "legion/LEGION-208", HeadSHA: "old",
+		HeadUpdatedAt: time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC), HeadUpdatedAtSource: "webhook",
+		Failing: []string{}, FailingStatuses: []string{}, FixAttempts: 2, BlockedAttempts: 1, State: record.PullRequestOpen,
+	})
+	engine := testEngine()
+
+	if _, err := intake.ApplyFact(ctx, pool, "github", "reopened", intake.PullRequestOpened{
+		Repo: "acme/widgets", Number: 7, Branch: "legion/LEGION-208", HeadSHA: "new",
+		UpdatedAt: time.Date(2026, 9, 25, 0, 0, 0, 0, time.UTC),
+	}, engine, admissionStub{}); err != nil {
+		t.Fatalf("ApplyFact reopened: %v", err)
+	}
+
+	var fix, blocked int
+	var head string
+	if err := pool.QueryRow(ctx, "select fix_attempts, blocked_attempts, head_sha from pull_requests where issue = $1", "LEGION-208").Scan(&fix, &blocked, &head); err != nil {
+		t.Fatalf("read the reopened pull request: %v", err)
+	}
+	if fix != 2 || blocked != 1 {
+		t.Fatalf("reopened pull request counters = %d/%d, want the 2/1 it carried", fix, blocked)
+	}
+	if head != "new" {
+		t.Fatalf("reopened pull request head = %q, want the head the reopen named", head)
+	}
+}
+
+// A human moving an in-flight child back to todo starts the child's next run, and the run it
+// interrupted still has a worker: the implementer pane keeps the workspace and would report its
+// handoff into the new run. The previous run's worker is suspended first, and that suspend is
+// stamped with the generation the child now holds, since that is what the outbox fences it against.
+func TestAnInFlightChildSetBackToTodoSuspendsThePreviousRunsWorker(t *testing.T) {
+	// The child re-enters at the phase it was taken from, so a suspend that named that phase
+	// would be dropped by SuspendApplies exactly when the phase is the one the re-entry restarts
+	// — planning, under an open gate. This suspend ends a run, not a phase, and names none.
+	for _, tc := range []struct {
+		name  string
+		phase phase.Phase
+		role  claim.Role
+	}{
+		{name: "implementing", phase: phase.Implementing, role: claim.RoleImplementer},
+		{name: "planning under an open gate", phase: phase.Planning, role: claim.RolePlanner},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			ctx := context.Background()
+			approved := 1
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U", LastDispatchSeq: 3})
+			seedSlot(t, pool, record.Slot{Issue: "LEGION-208", Index: 0, AdmittedAt: time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)})
+			seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 1, ApprovedVersion: &approved})
+			parentKey := "LEGION-208"
+			seedIssue(t, pool, record.Issue{Key: "LEGION-209", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parentKey,
+				Phase: tc.phase, Generation: 1, Status: "in_progress", Rank: "V", LastDispatchSeq: 4})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-209", Role: tc.role, Claim: "child-worker", Rounds: 1})
+			engine := testEngine()
+
+			if _, err := intake.ApplyFact(ctx, pool, "dispatch", "child-back-to-todo", intake.DispatchIssue{
+				Key: "LEGION-209", Seq: 5, Type: "issue.updated", Status: "todo", Title: "child", Parent: "LEGION-208", Rank: "V",
+			}, engine, admissionStub{}); err != nil {
+				t.Fatalf("ApplyFact child todo: %v", err)
+			}
+
+			rows, err := pool.Query(ctx, "select payload->>'op', payload->>'role', (payload->>'generation')::bigint, coalesce(payload->>'leaves', '') from outbox where kind = 'supervise' and issue = $1 order by id", "LEGION-209")
+			if err != nil {
+				t.Fatalf("list the child's supervise rows: %v", err)
+			}
+			defer rows.Close()
+			var suspends, starts int
+			for rows.Next() {
+				var op, role, leaves string
+				var generation int64
+				if err := rows.Scan(&op, &role, &generation, &leaves); err != nil {
+					t.Fatalf("scan a supervise row: %v", err)
+				}
+				switch {
+				case op == "suspend" && role == string(tc.role):
+					if generation != 2 {
+						t.Errorf("suspend of the previous run = generation %d, want the 2 the child now holds", generation)
+					}
+					if leaves != "" {
+						t.Errorf("suspend of the previous run leaves %q, want none: it ends a run, not a phase", leaves)
+					}
+					if !SuspendApplies(phase.Phase(leaves), tc.phase) {
+						t.Errorf("the suspend does not apply with the child back in %s: the interrupted worker is never stopped", tc.phase)
+					}
+					if starts > 0 {
+						t.Error("the new run started before the previous run's worker was suspended")
+					}
+					suspends++
+				case op == "start":
+					starts++
+				}
+			}
+			if err := rows.Err(); err != nil {
+				t.Fatalf("iterate the child's supervise rows: %v", err)
+			}
+			if suspends != 1 {
+				t.Fatalf("suspends of the interrupted run = %d, want 1", suspends)
+			}
+		})
+	}
+}
+
 func TestRefusedReadyAdvancesWhenTheGateReopensAtALaterVersion(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
@@ -228,7 +362,7 @@ func TestCapturedArtifactVersionAndApprovalFlowThroughConsume(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
 	seedIssue(t, pool, record.Issue{Key: "CAPTURE-4", Tree: "CAPTURE-4", Project: "CAPTURE", Title: "captured gate", Phase: phase.Admitted, Generation: 1, Status: "in_progress", Rank: "U"})
-	engine := New(record.NewStore(), Config{Project: "CAPTURE", ReviewRoundCap: 3, MaxFixAttempts: 3, LingerHours: time.Hour, Clock: func() time.Time { return time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC) }}, nil)
+	engine := New(record.NewStore(), Config{Project: "CAPTURE", ReviewRoundCap: 3, MaxFixAttempts: 3, Linger: time.Hour, Clock: func() time.Time { return time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC) }}, nil)
 	if _, err := intake.ApplyFact(ctx, pool, "api", "register-captured-gate", intake.GateRegistered{Issue: "CAPTURE-4", ArtifactID: "0544d460-0931-4374-b20b-790408519edd", Version: 1}, engine, admissionStub{}); err != nil {
 		t.Fatalf("register gate: %v", err)
 	}
@@ -338,7 +472,7 @@ func TestSignOffLingersOnceAndExpiryStopsTreeAndRemovesEveryWorkspace(t *testing
 	seedIssue(t, pool, record.Issue{Key: "LEGION-209", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent, Phase: phase.Implementing, Generation: 7, Status: "in_progress", Rank: "V"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implementer", HandoffCommit: "production-check"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-209", Role: claim.RoleImplementer, Claim: "child-implementer"})
-	engine := New(record.NewStore(), Config{Project: "LEGION", LingerHours: time.Hour, Clock: func() time.Time { return now }}, nil)
+	engine := New(record.NewStore(), Config{Project: "LEGION", Linger: time.Hour, Clock: func() time.Time { return now }}, nil)
 
 	if _, err := intake.ApplyFact(ctx, pool, "api", "signoff", intake.SignOff{Issue: "LEGION-208"}, engine, admissionStub{}); err != nil {
 		t.Fatalf("ApplyFact signoff: %v", err)
@@ -635,7 +769,7 @@ func seedRecord(t *testing.T, pool *pgxpool.Pool, put func(pgx.Tx) error) {
 
 func testEngine() *Engine {
 	return New(record.NewStore(), Config{
-		Project: "LEGION", DesignGate: config.DesignGateRootIssues, ReviewRoundCap: 3, MaxFixAttempts: 3, LingerHours: time.Hour,
+		Project: "LEGION", DesignGate: config.DesignGateRootIssues, ReviewRoundCap: 3, MaxFixAttempts: 3, Linger: time.Hour,
 		Clock: func() time.Time { return time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC) },
 	}, nil)
 }
@@ -717,9 +851,16 @@ func publishCaptured(t *testing.T, js jetstream.JetStream, subject, path string)
 	}
 }
 
+// eventually polls until the condition holds. What it waits for is something the daemon reaches on
+// its own — a delivery, the transaction that answers it — so the wait is bounded by this test
+// binary's own deadline rather than a fixed span: on a loaded machine a step that is merely slow
+// is not a failure, and a condition that never holds still fails here, naming what it waited for.
 func eventually(t *testing.T, description string, condition func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(time.Minute)
+	if testDeadline, ok := t.Deadline(); ok && testDeadline.Add(-time.Second).Before(deadline) {
+		deadline = testDeadline.Add(-time.Second)
+	}
 	for time.Now().Before(deadline) {
 		if condition() {
 			return
@@ -793,4 +934,72 @@ func randomSuffix(t *testing.T) string {
 		t.Fatalf("random suffix: %v", err)
 	}
 	return hex.EncodeToString(bytes[:])
+}
+
+// A child taken back to todo re-enters at a new generation, and its interrupted worker keeps its
+// pane: the stop is an outbox row the runtime can refuse for as long as it likes. That worker
+// finishes the turn it was in and reports the completion of a run that is over. Nothing else on
+// the fact tells the two runs apart — the claim token is stable across runs and the session is
+// kept across a suspend — so the daemon names the run from the task the worker took, and a
+// completion of a generation the issue has left changes nothing.
+func TestACompletionFromAnInterruptedRunIsRefused(t *testing.T) {
+	pool := migratedPool(t)
+	ctx := context.Background()
+	approved := 1
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U", LastDispatchSeq: 3})
+	seedSlot(t, pool, record.Slot{Issue: "LEGION-208", Index: 0, AdmittedAt: time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)})
+	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 1, ApprovedVersion: &approved})
+	parentKey := "LEGION-208"
+	seedIssue(t, pool, record.Issue{Key: "LEGION-209", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parentKey,
+		Phase: phase.Planning, Generation: 2, Status: "in_progress", Rank: "V", LastDispatchSeq: 6})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-209", Role: claim.RolePlanner, Claim: "child-planner"})
+	engine := testEngine()
+
+	result, err := intake.ApplyFact(ctx, pool, "api", "stale-handoff", intake.HandoffComplete{
+		Issue: "LEGION-209", Role: claim.RolePlanner, Claim: "child-planner", Summary: "the plan of the run that was interrupted",
+		Commit: "plan-of-generation-1", Generation: 1,
+	}, engine, admissionStub{})
+	if err != nil {
+		t.Fatalf("apply the stale completion: %v", err)
+	}
+
+	if result.Refusal == nil || result.Refusal.Code != "HANDOFF_STALE_GENERATION" {
+		t.Fatalf("the stale completion = %+v, want a HANDOFF_STALE_GENERATION refusal", result.Refusal)
+	}
+	var got record.Issue
+	records := record.NewStore()
+	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		issue, err := records.Issue(ctx, tx, "LEGION-209")
+		if err != nil || issue == nil {
+			return err
+		}
+		got = *issue
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got.Phase != phase.Planning {
+		t.Fatalf("the child is in %s, want planning: the interrupted run's plan advanced the new one", got.Phase)
+	}
+
+	// The run the child is actually on reports the same phase, and it moves.
+	if _, err := intake.ApplyFact(ctx, pool, "api", "live-handoff", intake.HandoffComplete{
+		Issue: "LEGION-209", Role: claim.RolePlanner, Claim: "child-planner", Summary: "the new run's plan",
+		Commit: "plan-of-generation-2", Generation: 2,
+	}, engine, admissionStub{}); err != nil {
+		t.Fatalf("apply the live completion: %v", err)
+	}
+	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		issue, err := records.Issue(ctx, tx, "LEGION-209")
+		if err != nil || issue == nil {
+			return err
+		}
+		got = *issue
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got.Phase != phase.Implementing {
+		t.Fatalf("after the live completion the child is in %s, want implementing", got.Phase)
+	}
 }

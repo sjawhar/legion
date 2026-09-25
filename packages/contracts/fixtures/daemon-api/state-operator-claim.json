@@ -1,0 +1,37 @@
+{
+  "daemon": {
+    "project": "AC91849371",
+    "schemaVersion": 3,
+    "boots": 1,
+    "firstBootAt": "2026-09-25T05:50:00Z",
+    "startedAt": "2026-09-25T05:50:00Z"
+  },
+  "admission": {
+    "cap": 2,
+    "active": [],
+    "waiting": []
+  },
+  "issues": {
+    "AC91849371-900": {
+      "key": "AC91849371-900",
+      "generation": 0,
+      "phase": "unrecorded",
+      "status": "unrecorded",
+      "architect": {
+        "session": "01a0d71d-aace-7448-a0d4-e401d736438f",
+        "state": "idle",
+        "locator": {
+          "runtime": "tmux",
+          "claim": "legion-ac91849371-ac91849371-900-architect",
+          "incarnation": "1618075:268131172",
+          "tmux": {
+            "window": "@1",
+            "pane": "%1"
+          }
+        }
+      },
+      "workers": {}
+    }
+  },
+  "pendingStatusWrites": []
+}

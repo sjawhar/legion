@@ -3,6 +3,7 @@ package supervise
 import (
 	"context"
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/importer"
 	"go/parser"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -39,72 +41,97 @@ func sealed(t *testing.T) (events []string, states []ClaimState, timers []TimerK
 			t.Fatal(err)
 		}
 		parsed = append(parsed, file)
-		for _, decl := range file.Decls {
-			switch decl := decl.(type) {
-			case *ast.GenDecl:
-				if decl.Tok != token.CONST {
-					continue
-				}
-				for _, spec := range decl.Specs {
-					value := spec.(*ast.ValueSpec)
-					typ, ok := value.Type.(*ast.Ident)
-					if !ok || len(value.Values) != 1 {
-						continue
-					}
-					literal, ok := value.Values[0].(*ast.BasicLit)
-					if !ok {
-						continue
-					}
-					text, err := strconv.Unquote(literal.Value)
-					if err != nil {
-						t.Fatal(err)
-					}
-					switch typ.Name {
-					case "ClaimState":
-						states = append(states, ClaimState(text))
-					case "TimerKind":
-						timers = append(timers, TimerKind(text))
-					}
-				}
-			}
-		}
 	}
-	events = eventTypes(t, files, parsed)
+	set := sealedSet(t, files, parsed)
+	for _, value := range set.states {
+		states = append(states, ClaimState(value))
+	}
+	for _, value := range set.timers {
+		timers = append(timers, TimerKind(value))
+	}
+	events = set.events
 	if len(events) == 0 || len(states) == 0 || len(timers) == 0 {
 		t.Fatalf("read no sealed set from the source: events %v, states %v, timers %v", events, states, timers)
 	}
 	return events, states, timers
 }
 
-// eventTypes is every type in this package that implements Event, as the compiler sees it rather
-// than as the source spells it: a type that embeds another inherits its isEvent, so a scan for
-// isEvent declarations would not see it, and such a type could be mapped onto an existing kind
-// and inherit every row that kind has.
-func eventTypes(t *testing.T, files *token.FileSet, parsed []*ast.File) []string {
+// sealedSet is what the compiler sees of this package: every type that implements Event, and the
+// value of every ClaimState and TimerKind constant. It is read as the compiler sees it rather
+// than as the source spells it — a type that inherits isEvent by embedding, or declares it on a
+// pointer receiver, is an event a scan of isEvent declarations would not see, and a state or
+// timer whose value is not a plain literal is one a scan of literals would not read. Either could
+// be mapped onto an existing kind and inherit every row that kind has.
+type sealedSets struct {
+	events []string
+	states []string
+	timers []string
+}
+
+func sealedSet(t *testing.T, files *token.FileSet, parsed []*ast.File) sealedSets {
 	t.Helper()
+	set, err := checkedSealedSet(files, parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return set
+}
+
+// checkedSealedSet type-checks this package once per test binary — the check reads the standard
+// library from source, which is seconds, and five tests ask for the sealed set.
+var checkedSealedSet = func() func(*token.FileSet, []*ast.File) (sealedSets, error) {
+	once := sync.OnceValues(func() (sealedSets, error) {
+		return sealedSets{}, errors.New("the sealed set was asked for before any file was parsed")
+	})
+	var files *token.FileSet
+	var parsed []*ast.File
+	return func(f *token.FileSet, p []*ast.File) (sealedSets, error) {
+		if files == nil {
+			files, parsed = f, p
+			once = sync.OnceValues(func() (sealedSets, error) { return readSealedSet(files, parsed) })
+		}
+		return once()
+	}
+}()
+
+func readSealedSet(files *token.FileSet, parsed []*ast.File) (sealedSets, error) {
 	config := types.Config{Importer: importer.ForCompiler(files, "source", nil)}
 	pkg, err := config.Check("github.com/sjawhar/legion/daemon/internal/supervise", files, parsed, nil)
 	if err != nil {
-		t.Fatalf("type-check the package: %v", err)
+		return sealedSets{}, fmt.Errorf("type-check the package: %w", err)
 	}
 	event, ok := pkg.Scope().Lookup("Event").Type().Underlying().(*types.Interface)
 	if !ok {
-		t.Fatal("Event is not an interface")
+		return sealedSets{}, errors.New("Event is not an interface")
 	}
-	var names []string
+	var set sealedSets
 	for _, name := range pkg.Scope().Names() {
-		declared, ok := pkg.Scope().Lookup(name).(*types.TypeName)
-		if !ok {
-			continue
-		}
-		if _, isInterface := declared.Type().Underlying().(*types.Interface); isInterface {
-			continue
-		}
-		if types.Implements(declared.Type(), event) {
-			names = append(names, name)
+		switch declared := pkg.Scope().Lookup(name).(type) {
+		case *types.TypeName:
+			if _, isInterface := declared.Type().Underlying().(*types.Interface); isInterface {
+				continue
+			}
+			if types.Implements(declared.Type(), event) || types.Implements(types.NewPointer(declared.Type()), event) {
+				set.events = append(set.events, name)
+			}
+		case *types.Const:
+			named, ok := declared.Type().(*types.Named)
+			if !ok || declared.Val() == nil {
+				continue
+			}
+			value, err := strconv.Unquote(declared.Val().ExactString())
+			if err != nil {
+				continue
+			}
+			switch named.Obj().Name() {
+			case "ClaimState":
+				set.states = append(set.states, value)
+			case "TimerKind":
+				set.timers = append(set.timers, value)
+			}
 		}
 	}
-	return names
+	return set, nil
 }
 
 // samples is one event of every kind the table distinguishes, by Go type. A Timer is one kind per

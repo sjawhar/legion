@@ -191,13 +191,7 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 	})
 
 	inTx(t, st, func(tx pgx.Tx) {
-		must(t, records.DeletePullRequest(ctx, tx, issue.Key))
 		must(t, records.ReleaseSlot(ctx, tx, issue.Key))
-		pr, err := records.PullRequest(ctx, tx, issue.Key)
-		must(t, err)
-		if pr != nil {
-			t.Fatalf("pull request after delete = %#v, want nil", pr)
-		}
 		slots, err := records.Slots(ctx, tx)
 		must(t, err)
 		if len(slots) != 0 {

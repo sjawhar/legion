@@ -248,12 +248,6 @@ func nonEmptyLines(value string) []string {
 	return lines
 }
 
-// AdoptWorkingCopyCommand ports workspace.ts:365-380. Tmux and a pod shim must use the same
-// revset so only an undescribed working copy changes author.
-func AdoptWorkingCopyCommand(dir string) []string {
-	return []string{"jj", "metaedit", "--update-author", "-r", `@ & description(exact:"")`, "-R", dir}
-}
-
 // ownCommitsRevset ports workspace.ts:533-541: only commits unique to a closing workspace are
 // abandoned; all commits reached by another working copy, a bookmark, a remote, or a tag survive.
 func ownCommitsRevset(workspaceName string) string {

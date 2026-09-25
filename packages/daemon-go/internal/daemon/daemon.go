@@ -31,6 +31,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/omplaunch"
+	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/projection"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -163,6 +164,10 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 		boot, cancelAfterMint = context.WithTimeout(context.WithoutCancel(ctx), bootTimeout)
 		defer cancelAfterMint()
 		plan.identity = workflow.identity
+		// Only a daemon with the workflow configured has issue records to read a phase or a tree
+		// from; Stage 2's supervision runs on claims alone, where every delivery holds and every
+		// tree closes.
+		plan.phaseHolds, plan.treeClosable = workflow.phaseHolds, workflow.treeClosable
 	}
 	plan.prompts, err = prompts.New(plan.rolesDir, cfg.StateDir)
 	if err != nil {
@@ -302,6 +307,10 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 type plan struct {
 	// identity is the role's App bot identity, from the workflow's token source; nil without one.
 	identity func(ctx context.Context, role claim.Role) (runtime.GitIdentity, error)
+	// phaseHolds and treeClosable are the workflow's answers to the supervisor's two predicates;
+	// nil without a workflow, where every delivery holds and every tree closes.
+	phaseHolds   func(ctx context.Context, issue string, p phase.Phase) (bool, error)
+	treeClosable func(ctx context.Context, c supervise.Claim) (bool, error)
 	// tools are the gh, git, and jj boot resolved on the host, by name; nil without a repository,
 	// and under a runtime whose agents run the worker image's own.
 	tools         map[string]string
@@ -607,10 +616,12 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 			stateDir: cfg.StateDir, project: p.project, instructions: p.instructions, secrets: p.secrets, repo: repo, prompts: p.prompts,
 			identity: p.identity,
 		},
-		Identity:   p.identity,
-		VolumeLost: sup.volumeLost,
-		Clock:      p.clock,
-		Log:        log,
+		Identity:     p.identity,
+		PhaseHolds:   p.phaseHolds,
+		TreeClosable: p.treeClosable,
+		VolumeLost:   sup.volumeLost,
+		Clock:        p.clock,
+		Log:          log,
 		Limits: supervise.Limits{
 			LaunchFailures: cfg.LaunchFailureLimit,
 			PromptFailures: cfg.PromptFailureLimit,
@@ -622,12 +633,6 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 			RPC:                   cfg.WorkerRPCTimeout,
 			Probe:                 cfg.ProbeInterval,
 		},
-	}
-	// Only a daemon with the workflow configured has issue records to read a phase or a tree from;
-	// Stage 2's supervision runs on claims alone, where every delivery holds and every tree closes.
-	if cfg.DispatchURL != "" {
-		sup.deps.PhaseHolds = phaseHolds(st.Pool(), record.NewStore())
-		sup.deps.TreeClosable = treeClosable(st.Pool(), record.NewStore())
 	}
 	return &supervision{
 		cfg: cfg, log: log, plan: p, stream: listener, runtime: rt, supervisor: sup, tokens: tokens, claims: claims,
