@@ -254,6 +254,38 @@ func samePullRequest(got, want PullRequest) bool {
 		got.PlannedRed == want.PlannedRed
 }
 
+// A new generation keeps an open pull request but none of the old generation's fix-attempt
+// accounting: its counts, its counted head, and its planned mark, which would otherwise exempt the
+// new generation's first red from counting.
+func TestClearGenerationResetsAnOpenPullRequestsFixAttemptAccounting(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	issue := issueFixture("LEGION-285")
+	pr := PullRequest{
+		Issue: issue.Key, Repo: "sjawhar/legion", Number: 1359, Branch: "legion/LEGION-285",
+		HeadSHA: "red-tests", HeadUpdatedAt: time.Date(2026, 9, 25, 21, 0, 0, 0, time.UTC), HeadUpdatedAtSource: "webhook",
+		Verdict: "red", Failing: []string{"test"}, FailingStatuses: []string{}, CheckRuns: []AttemptRun{},
+		FixAttempts: 2, BlockedAttempts: 2, HeadCounted: "red-tests", PlannedRed: true, State: PullRequestOpen,
+	}
+	inTx(t, st, func(tx pgx.Tx) {
+		must(t, records.PutIssue(ctx, tx, issue))
+		must(t, records.PutPullRequest(ctx, tx, pr))
+		must(t, records.ClearGeneration(ctx, tx, issue.Key))
+	})
+	inTx(t, st, func(tx pgx.Tx) {
+		got, err := records.PullRequest(ctx, tx, issue.Key)
+		must(t, err)
+		if got == nil {
+			t.Fatal("the open pull request is gone, want it kept")
+		}
+		if got.FixAttempts != 0 || got.BlockedAttempts != 0 || got.HeadCounted != "" || got.PlannedRed {
+			t.Fatalf("after ClearGeneration: fixAttempts=%d blockedAttempts=%d headCounted=%q plannedRed=%v, want 0, 0, \"\" and false",
+				got.FixAttempts, got.BlockedAttempts, got.HeadCounted, got.PlannedRed)
+		}
+	})
+}
+
 func TestMarkProcessedIsIdempotent(t *testing.T) {
 	st := migratedStore(t)
 	records := NewStore()

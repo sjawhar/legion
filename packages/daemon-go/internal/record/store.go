@@ -270,8 +270,8 @@ func clearGeneration(ctx context.Context, tx pgx.Tx, where string, key string, d
 		// not: its counters, its checks verdict and the review decision are all of a head nobody
 		// has judged since.
 		"update pull_requests set fix_attempts = 0, blocked_attempts = 0, head_counted = '', " +
-			"verdict = '', review_decision = '', failing = '[]'::jsonb, failing_statuses = '[]'::jsonb, " +
-			"check_runs = '[]'::jsonb, reconciled = false where " + where,
+			"planned_red = false, verdict = '', review_decision = '', failing = '[]'::jsonb, " +
+			"failing_statuses = '[]'::jsonb, check_runs = '[]'::jsonb, reconciled = false where " + where,
 		"delete from design_gates where " + where,
 		"update phases set handoff_commit = '', rounds = 0, verdict = '' where " + where,
 	} {

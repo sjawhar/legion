@@ -73,3 +73,53 @@ func TestApplyDesignGateEventTracksCurrentVersionApproval(t *testing.T) {
 		t.Fatalf("new version gate = %#v, want closed at v3", closed)
 	}
 }
+
+// arrive applies one head's push webhook and its synchronize in the given order, as the engine
+// does: the push classifies the head's changed paths and names whether its pusher was the review
+// App, and the synchronize advances the pull request to the head.
+func arrive(pr record.PullRequest, sha, changedPaths string, byReviewApp, pushFirst bool) record.PullRequest {
+	truncated := "false"
+	classification := ClassifyPush(PushPayload{ChangedPaths: &changedPaths, ChangedPathsTruncated: &truncated})
+	if pushFirst {
+		return AdvancePullRequestHead(ApplyPush(pr, sha, classification, byReviewApp), sha)
+	}
+	return ApplyPush(AdvancePullRequestHead(pr, sha), sha, classification, byReviewApp)
+}
+
+// One tester round, in both webhook orders, each step reading the pull request the previous one
+// handed over: the review App's red tests set the planned mark, its handoff-only head carries it,
+// the implementer's fix clears it without counting the planned red, and a later fix whose push
+// webhook is lost counts against the unplanned red and carries the cleared mark.
+func TestPlannedRedIsSetCarriedAndClearedAcrossATesterRound(t *testing.T) {
+	for _, pushFirst := range []bool{true, false} {
+		name := "synchronize first"
+		if pushFirst {
+			name = "push first"
+		}
+		t.Run(name, func(t *testing.T) {
+			pr := record.PullRequest{HeadSHA: "impl", Verdict: "green"}
+			check := func(step, head string, plannedRed bool, fixAttempts int, headCounted string) {
+				t.Helper()
+				if pr.HeadSHA != head || pr.PlannedRed != plannedRed || pr.FixAttempts != fixAttempts || pr.HeadCounted != headCounted || pr.PendingPush != nil {
+					t.Errorf("after %s: head %q plannedRed=%v fixAttempts=%d headCounted=%q pendingPush=%v, want head %q plannedRed=%v fixAttempts=%d headCounted=%q and no pending push",
+						step, pr.HeadSHA, pr.PlannedRed, pr.FixAttempts, pr.HeadCounted, pr.PendingPush, head, plannedRed, fixAttempts, headCounted)
+				}
+			}
+
+			pr = arrive(pr, "red-tests", "src/widget_test.go", true, pushFirst)
+			check("the review App's red tests", "red-tests", true, 0, "")
+			pr.Verdict = "red"
+
+			pr = arrive(pr, "tester-handoff", ".legion/test.json", true, pushFirst)
+			check("the tester's handoff-only head", "tester-handoff", true, 0, "")
+			pr.Verdict = "red"
+
+			pr = arrive(pr, "fix", "src/widget.go", false, pushFirst)
+			check("the implementer's fix", "fix", false, 0, "")
+			pr.Verdict = "red"
+
+			pr = AdvancePullRequestHead(pr, "fix-2")
+			check("a later fix whose push webhook is lost", "fix-2", false, 1, "fix-2")
+		})
+	}
+}
