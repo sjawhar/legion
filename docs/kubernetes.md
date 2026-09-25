@@ -386,6 +386,83 @@ Every pod runs:
 The image probe runs as a Sandbox of its own, `legion-probe-<project>-<digest12>`, with
 `shutdownPolicy: Delete` ([The image is probed before it publishes](#the-image-is-probed-before-it-publishes)).
 
+### A shell on the tree volume
+
+Some of provisioning's refusals name `jj` commands against the tree's shared clone,
+`-R /legion/repos/github.com/<owner>/<repo>` (`packages/daemon-go/internal/workspace/bookmark.go`):
+- a local bookmark deleted and never pushed: restore it, cancel the deletion, or start from main;
+- a conflicted local bookmark: keep an added commit, or start from main.
+
+The refusals for an origin row that racing fetches conflicted or moved name no command, because
+provisioning again settles them.
+
+Each refusal is in the failing pod's `workspace-init` log
+(`kubectl -n legion logs <pod> -c workspace-init`), and the daemon's log quotes its tail. Nothing
+is registered before a refusal, so the pod's next attempt refuses again until the operator acts.
+The clone is only on the tree volume, so the commands run in a pod that mounts it, from the
+operator's context: the daemon's identity creates no pod and has no exec
+([RBAC](#rbac-the-go-daemon-needs)).
+
+**A pod of the tree is running.** Its `worker` container mounts the volume at `/legion`:
+
+```sh
+kubectl -n legion get pods -l legion.dev/tree=<KEY> --field-selector=status.phase=Running
+kubectl -n legion exec -it <pod> -c worker -- sh
+jj bookmark list --all-remotes legion/<KEY> -R /legion/repos/github.com/<owner>/<repo>
+```
+
+The shell runs as the tree's agents do, user 1000 under gVisor, with nothing they lack.
+
+**No pod of the tree is running**, as when the only pod is the one whose `workspace-init`
+refuses: mount the tree's claim in a pod of your own, `tree-<root Sandbox>`, e.g.
+`tree-legion-<project>-<root issue>-architect`
+(`kubectl -n legion get pvc -l legion.dev/tree=<KEY>`). The claim is `ReadWriteOnce`, so the pod
+must land on the node where the tree's pods hold it; the preferred affinity below puts it there.
+Delete it before the tree's next pod starts elsewhere, because that pod cannot attach the volume
+while this one holds it:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata: { name: legion-tree-shell, namespace: legion }   # no legion.dev/* labels
+spec:
+  runtimeClassName: gvisor
+  automountServiceAccountToken: false
+  nodeSelector: { legion.dev/pool: legion }
+  tolerations: [{ key: legion.dev/pool, operator: Equal, value: legion, effect: NoSchedule }]
+  affinity:
+    podAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector: { matchLabels: { legion.dev/tree: <KEY> } }
+            topologyKey: kubernetes.io/hostname
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000             # the tree pods' own: their files on the volume are group 1000
+    seccompProfile: { type: RuntimeDefault }
+  containers:
+    - name: shell
+      image: <runtime.kubernetes.image>      # the daemon's worker image, by digest
+      command: [sleep, "3600"]
+      securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+      volumeMounts: [{ name: tree, mountPath: /legion }]
+  volumes: [{ name: tree, persistentVolumeClaim: { claimName: tree-legion-<project>-<root issue>-architect } }]
+```
+
+```sh
+kubectl -n legion apply -f legion-tree-shell.yaml
+kubectl -n legion wait --for=condition=Ready pod/legion-tree-shell --timeout=300s
+kubectl -n legion exec -it legion-tree-shell -- sh
+kubectl -n legion delete pod legion-tree-shell
+```
+
+The pod carries no credential. A tree agent can plant git and jj configuration in the shared clone
+([Trust model](#trust-model-the-provisioning-token)), which this shell's `jj` obeys, and the pod
+gives that configuration nothing to take. Run no command in it that holds a token.
+
 ### Tree sizing: one tree per node
 
 The pool's floor, not the pod, decides node size. Legion pods carry no
