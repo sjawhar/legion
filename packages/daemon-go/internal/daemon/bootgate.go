@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	_ "embed"
 	"encoding/json"
@@ -97,7 +98,7 @@ type pluginGate struct {
 // verify runs the two probes. A refusal names what the operator has to change; a gate the daemon's
 // stop interrupted returns an error wrapping ctx's.
 func (g pluginGate) verify(ctx context.Context) error {
-	manifest, profile, err := pluginManifestPath(g.env)
+	manifest, profile, err := pluginManifestPath(g.env, g.workDir)
 	if err != nil {
 		return err
 	}
@@ -120,27 +121,30 @@ var (
 	windowsReservedProfile = regexp.MustCompile(`(?i)^(?:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(?:\..*)?$`)
 )
 
-// pluginManifestPath is the installed pi-legion-envoy manifest where Oh My Pi, started under env,
-// looks for its plugins, and the profile that decided it ("" for the default profile). The
-// resolution is Oh My Pi's own (@oh-my-pi/pi-utils 18.1.15, src/dirs.ts), ported for the
-// variables a pane can carry:
+// pluginManifestPath is the installed pi-legion-envoy manifest where Oh My Pi, started under env in
+// workDir, looks for its plugins, and the profile that decided it ("" for the default profile). The
+// resolution is Oh My Pi's own (@oh-my-pi/pi-utils 18.1.21, src/dirs.ts), ported whole:
 //
 //   - the profile is OMP_PROFILE when it is set at all, even empty, else PI_PROFILE; trimmed, an
 //     empty name or "default" is the default profile, and a name Oh My Pi would refuse is refused
 //     here in its words (resolveProfileEnv, normalizeProfileName, :59-88);
-//   - the config root is `.omp` under the home directory — HOME, else the account's, as
-//     `os.homedir()` answers — with `profiles/<name>` under it for a named profile (:110-117);
+//   - the config root is PI_CONFIG_DIR, else `.omp`, under the home directory — HOME, else the
+//     account's, as `os.homedir()` answers — with `profiles/<name>` under it for a named profile
+//     (getConfigDirName, getBaseConfigRoot, getProfileConfigRoot, :111-118, :282-284);
+//   - the agent directory is PI_CODING_AGENT_DIR, resolved against workDir as `path.resolve`
+//     resolves it against Oh My Pi's own, under the default profile only, and
+//     only when it is not the agent directory of the profile PI_PROFILE names, which an Oh My Pi
+//     running under that profile hands its children (resolveActiveAgentDirOverride,
+//     resolvePreProfileAgentDir, isProfileDerivedAgentDir, :132-134, :411-432); else it is the
+//     config root's own `agent`. That is the one way the variable reaches the plugins: an agent
+//     directory other than the config root's own turns the XDG data root off (:320-323, :340);
 //   - the data root is `$XDG_DATA_HOME/omp` for the default profile, or
-//     `$XDG_DATA_HOME/omp/profiles/<name>` for a named one, when that directory already exists,
-//     else the config root (DirResolver's constructor, :315-367);
+//     `$XDG_DATA_HOME/omp/profiles/<name>` for a named one, when that directory already exists
+//     and the XDG data root is on, else the config root (DirResolver's constructor, :316-375);
 //   - the plugins are `plugins/node_modules` under the data root (getPluginsDir,
-//     getPluginsNodeModules, :606-616), and the manifest is the package's own `package.json`
+//     getPluginsNodeModules, :607-617), and the manifest is the package's own `package.json`
 //     there (legionPluginManifestPath, packages/daemon/src/daemon/boot-probes.ts:240-244).
-//
-// PI_CONFIG_DIR and PI_CODING_AGENT_DIR move the roots in Oh My Pi too (:281-283, :315-322), and
-// this resolution does not follow them: neither is on the pane's allow-list, so no pane carries
-// one, and VerifyPluginContract refuses an environment in which Oh My Pi would honor either.
-func pluginManifestPath(env map[string]string) (string, string, error) {
+func pluginManifestPath(env map[string]string, workDir string) (string, string, error) {
 	requested, set := env["OMP_PROFILE"]
 	if !set {
 		requested = env["PI_PROFILE"]
@@ -154,11 +158,22 @@ func pluginManifestPath(env map[string]string) (string, string, error) {
 	if err != nil {
 		return "", "", err
 	}
-	root := filepath.Join(home, ".omp")
+	base := filepath.Join(home, cmp.Or(env["PI_CONFIG_DIR"], ".omp"))
+	root := base
 	if profile != "" {
 		root = filepath.Join(root, "profiles", profile)
 	}
-	if xdg := env["XDG_DATA_HOME"]; xdg != "" && (goruntime.GOOS == "linux" || goruntime.GOOS == "darwin") {
+	xdgOn := true
+	if agent := env["PI_CODING_AGENT_DIR"]; agent != "" && profile == "" {
+		handedDown, valid := normalizeProfile(env["PI_PROFILE"])
+		if !valid || handedDown == "" || agent != filepath.Join(base, "profiles", handedDown, "agent") {
+			if !filepath.IsAbs(agent) {
+				agent = filepath.Join(workDir, agent)
+			}
+			xdgOn = filepath.Clean(agent) == filepath.Join(root, "agent")
+		}
+	}
+	if xdg := env["XDG_DATA_HOME"]; xdgOn && xdg != "" && (goruntime.GOOS == "linux" || goruntime.GOOS == "darwin") {
 		candidate := filepath.Join(xdg, "omp")
 		if profile != "" {
 			candidate = filepath.Join(candidate, "profiles", profile)
@@ -205,43 +220,19 @@ func profileWords(profile string) string {
 	return "OMP profile " + profile
 }
 
-// VerifyPluginContract is the boot gate's contract probe for an Oh My Pi started under env: the
-// pi-legion-envoy manifest where that Oh My Pi reads its plugins (pluginManifestPath) must declare
-// contract (verifyPluginContract). `legion controller start` runs it on the operator's own
-// environment before its one daemon call, since no boot gate checks the operator's machine and the
-// mint it asks for revokes the incumbent controller. That environment is inherited whole by the
-// controller's Oh My Pi, so a variable that moves the directories Oh My Pi reads its plugins from,
-// which pluginManifestPath does not follow, is refused naming it wherever Oh My Pi would honor it:
-// the probe would otherwise vouch for, or refuse, a manifest that Oh My Pi never loads. Oh My Pi
-// honors PI_CONFIG_DIR whenever it is non-empty. It honors PI_CODING_AGENT_DIR only under the
-// default profile, and not when the value is the agent directory of the profile PI_PROFILE names —
-// the value an Oh My Pi running under that profile hands its children (dirs.ts
-// resolveActiveAgentDirOverride, resolvePreProfileAgentDir), which an operator starting the
-// controller from inside such a session carries. It answers the package version.
-func VerifyPluginContract(env map[string]string, contract int) (string, error) {
-	if value := env["PI_CONFIG_DIR"]; value != "" {
-		return "", movedPluginRoot("PI_CONFIG_DIR", value)
-	}
-	manifest, profile, err := pluginManifestPath(env)
+// VerifyPluginContract is the boot gate's contract probe for an Oh My Pi started under env in
+// workDir: the pi-legion-envoy manifest where that Oh My Pi reads its plugins (pluginManifestPath)
+// must declare contract (verifyPluginContract). `legion controller start` runs it on the operator's
+// own environment, in the controller's working directory, before its one daemon call, since no
+// boot gate checks the operator's machine and the mint it asks for revokes the incumbent
+// controller; the controller's Oh My Pi inherits that environment whole and starts there, so the
+// manifest checked is the one it loads. It answers the package version.
+func VerifyPluginContract(env map[string]string, workDir string, contract int) (string, error) {
+	manifest, profile, err := pluginManifestPath(env, workDir)
 	if err != nil {
 		return "", err
 	}
-	if value := env["PI_CODING_AGENT_DIR"]; value != "" && profile == "" {
-		home, err := ompHome(env)
-		if err != nil {
-			return "", err
-		}
-		handedDown, valid := normalizeProfile(env["PI_PROFILE"])
-		if !valid || handedDown == "" || value != filepath.Join(home, ".omp", "profiles", handedDown, "agent") {
-			return "", movedPluginRoot("PI_CODING_AGENT_DIR", value)
-		}
-	}
 	return verifyPluginContract(manifest, profile, contract)
-}
-
-// movedPluginRoot refuses a variable that moves where Oh My Pi reads its plugins from.
-func movedPluginRoot(name, value string) error {
-	return fmt.Errorf("%s is set (%s): it moves the directories Oh My Pi reads its plugins from, which this contract check does not follow. Unset it, and select the plugin root with OMP_PROFILE, HOME or XDG_DATA_HOME", name, value)
 }
 
 // verifyPluginContract is the contract probe (verifyLegionPluginContract, boot-probes.ts:267-298,

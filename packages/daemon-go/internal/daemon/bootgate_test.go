@@ -118,13 +118,100 @@ func TestPluginManifestPathIsWhereOhMyPiResolvesItsPluginsRoot(t *testing.T) {
 			env:  func(string, string) map[string]string { return map[string]string{} },
 			want: func(string, string) string { return manifestAt(filepath.Join(passwdHome, ".omp")) },
 		},
+		// Oh My Pi's config root is PI_CONFIG_DIR under HOME when it is set, and its XDG data root
+		// still wins when that exists (getBaseConfigRoot, DirResolver's constructor).
+		{
+			name: "PI_CONFIG_DIR names the config root under HOME",
+			env: func(home, xdg string) map[string]string {
+				return map[string]string{"HOME": home, "XDG_DATA_HOME": xdg, "PI_CONFIG_DIR": ".omp-alt"}
+			},
+			want: func(home, _ string) string { return manifestAt(filepath.Join(home, ".omp-alt")) },
+		},
+		{
+			name: "an XDG data root that exists wins over PI_CONFIG_DIR",
+			env: func(home, xdg string) map[string]string {
+				return map[string]string{"HOME": home, "XDG_DATA_HOME": xdg, "PI_CONFIG_DIR": ".omp-alt"}
+			},
+			layout: func(t *testing.T, _, xdg string) { mkdir(t, filepath.Join(xdg, "omp")) },
+			want:   func(_, xdg string) string { return manifestAt(filepath.Join(xdg, "omp")) },
+		},
+		// An honoured PI_CODING_AGENT_DIR moves only the agent directory. It reaches the plugins by
+		// one route: an agent directory other than the config root's own turns the XDG data root off.
+		{
+			name: "an honoured PI_CODING_AGENT_DIR leaves the plugins under the config root",
+			env: func(home, xdg string) map[string]string {
+				return map[string]string{"HOME": home, "XDG_DATA_HOME": xdg, "PI_CODING_AGENT_DIR": filepath.Join(home, "elsewhere")}
+			},
+			want: func(home, _ string) string { return manifestAt(filepath.Join(home, ".omp")) },
+		},
+		{
+			name: "an honoured PI_CODING_AGENT_DIR turns the XDG data root off",
+			env: func(home, xdg string) map[string]string {
+				return map[string]string{"HOME": home, "XDG_DATA_HOME": xdg, "PI_CODING_AGENT_DIR": filepath.Join(home, "elsewhere")}
+			},
+			layout: func(t *testing.T, _, xdg string) { mkdir(t, filepath.Join(xdg, "omp")) },
+			want:   func(home, _ string) string { return manifestAt(filepath.Join(home, ".omp")) },
+		},
+		{
+			name: "PI_CODING_AGENT_DIR naming the config root's own agent directory keeps the XDG data root",
+			env: func(home, xdg string) map[string]string {
+				return map[string]string{"HOME": home, "XDG_DATA_HOME": xdg, "PI_CODING_AGENT_DIR": filepath.Join(home, ".omp", "agent") + "/"}
+			},
+			layout: func(t *testing.T, _, xdg string) { mkdir(t, filepath.Join(xdg, "omp")) },
+			want:   func(_, xdg string) string { return manifestAt(filepath.Join(xdg, "omp")) },
+		},
+		{
+			name: "a named profile ignores PI_CODING_AGENT_DIR",
+			env: func(home, xdg string) map[string]string {
+				return map[string]string{"HOME": home, "XDG_DATA_HOME": xdg, "OMP_PROFILE": "work", "PI_CODING_AGENT_DIR": filepath.Join(home, "elsewhere")}
+			},
+			layout:  func(t *testing.T, _, xdg string) { mkdir(t, filepath.Join(xdg, "omp", "profiles", "work")) },
+			want:    func(_, xdg string) string { return manifestAt(filepath.Join(xdg, "omp", "profiles", "work")) },
+			profile: "work",
+		},
+		{
+			name: "the agent directory PI_PROFILE hands down, under PI_CONFIG_DIR, keeps the XDG data root",
+			env: func(home, xdg string) map[string]string {
+				return map[string]string{"HOME": home, "XDG_DATA_HOME": xdg, "OMP_PROFILE": "", "PI_PROFILE": "work", "PI_CONFIG_DIR": ".omp-alt",
+					"PI_CODING_AGENT_DIR": filepath.Join(home, ".omp-alt", "profiles", "work", "agent")}
+			},
+			layout: func(t *testing.T, _, xdg string) { mkdir(t, filepath.Join(xdg, "omp")) },
+			want:   func(_, xdg string) string { return manifestAt(filepath.Join(xdg, "omp")) },
+		},
+		{
+			name: "PI_PROFILE's agent directory under another config root is honoured",
+			env: func(home, xdg string) map[string]string {
+				return map[string]string{"HOME": home, "XDG_DATA_HOME": xdg, "OMP_PROFILE": "", "PI_PROFILE": "work", "PI_CONFIG_DIR": ".omp-alt",
+					"PI_CODING_AGENT_DIR": filepath.Join(home, ".omp", "profiles", "work", "agent")}
+			},
+			layout: func(t *testing.T, _, xdg string) { mkdir(t, filepath.Join(xdg, "omp")) },
+			want:   func(home, _ string) string { return manifestAt(filepath.Join(home, ".omp-alt")) },
+		},
+		// Oh My Pi resolves a relative agent directory against the directory it runs in, the
+		// resolution's working directory, here <home>/work.
+		{
+			name: "a relative PI_CODING_AGENT_DIR elsewhere turns the XDG data root off",
+			env: func(home, xdg string) map[string]string {
+				return map[string]string{"HOME": home, "XDG_DATA_HOME": xdg, "PI_CODING_AGENT_DIR": "agent"}
+			},
+			layout: func(t *testing.T, _, xdg string) { mkdir(t, filepath.Join(xdg, "omp")) },
+			want:   func(home, _ string) string { return manifestAt(filepath.Join(home, ".omp")) },
+		},
+		{
+			name: "a relative PI_CODING_AGENT_DIR naming the config root's own agent directory keeps the XDG data root",
+			env: func(home, xdg string) map[string]string {
+				return map[string]string{"HOME": home, "XDG_DATA_HOME": xdg, "PI_CODING_AGENT_DIR": "../.omp/agent"}
+			},
+			layout: func(t *testing.T, _, xdg string) { mkdir(t, filepath.Join(xdg, "omp")) },
+			want:   func(_, xdg string) string { return manifestAt(filepath.Join(xdg, "omp")) },
+		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			home, xdg := t.TempDir(), t.TempDir()
 			if testCase.layout != nil {
 				testCase.layout(t, home, xdg)
 			}
-			got, profile, err := pluginManifestPath(testCase.env(home, xdg))
+			got, profile, err := pluginManifestPath(testCase.env(home, xdg), filepath.Join(home, "work"))
 			if err != nil {
 				t.Fatalf("pluginManifestPath: %v", err)
 			}
@@ -141,7 +228,7 @@ func TestPluginManifestPathIsWhereOhMyPiResolvesItsPluginsRoot(t *testing.T) {
 // Oh My Pi refuses a profile name it cannot use, and so does the gate, naming it.
 func TestPluginManifestPathRefusesAProfileOhMyPiRefuses(t *testing.T) {
 	for _, name := range []string{"Work", "..", "work.", "-work", "con", "nul.txt"} {
-		_, _, err := pluginManifestPath(map[string]string{"HOME": t.TempDir(), "OMP_PROFILE": name})
+		_, _, err := pluginManifestPath(map[string]string{"HOME": t.TempDir(), "OMP_PROFILE": name}, t.TempDir())
 		if err == nil || !strings.Contains(err.Error(), `Invalid OMP profile "`+name+`"`) {
 			t.Errorf("OMP_PROFILE=%q: err = %v, want the invalid-profile refusal naming it", name, err)
 		}

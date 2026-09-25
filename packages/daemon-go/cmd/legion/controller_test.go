@@ -216,7 +216,14 @@ func newControllerStart(t *testing.T, d *controllerDaemon, opts controllerOption
 // declaring contract.
 func (c *operatorMachine) installPlugin(contract int) {
 	c.t.Helper()
-	dir := filepath.Join(c.home, ".omp", "plugins", "node_modules", "@sjawhar", "pi-legion-envoy")
+	c.installPluginAt(filepath.Join(c.home, ".omp"), contract)
+}
+
+// installPluginAt installs a pi-legion-envoy manifest declaring contract under the Oh My Pi data
+// root root.
+func (c *operatorMachine) installPluginAt(root string, contract int) {
+	c.t.Helper()
+	dir := filepath.Join(root, "plugins", "node_modules", "@sjawhar", "pi-legion-envoy")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		c.t.Fatal(err)
 	}
@@ -644,21 +651,6 @@ func TestControllerStartRefusesLocallyBeforeTheRequest(t *testing.T) {
 		c.wantNoSecretRequest()
 		c.wantNothingLaunchedOrWritten(c.defaultDir)
 	})
-	// The contract probe finds the manifest where Oh My Pi reads its plugins under the operator's
-	// environment, ported for HOME, XDG_DATA_HOME, OMP_PROFILE and PI_PROFILE. PI_CONFIG_DIR and
-	// PI_CODING_AGENT_DIR move those roots too, and the controller's Oh My Pi inherits them, so the
-	// probe would vouch for another manifest than the one it loads — after the mint has revoked the
-	// incumbent. Either set is refused, named, before the request.
-	for _, name := range []string{"PI_CONFIG_DIR", "PI_CODING_AGENT_DIR"} {
-		t.Run(name+" set in the operator's environment, naming it", func(t *testing.T) {
-			d := newControllerDaemon(t)
-			c := newControllerStart(t, d, controllerOptions{})
-			t.Setenv(name, filepath.Join(c.home, "elsewhere"))
-			c.refused(name + " is set")
-			c.wantNoSecretRequest()
-			c.wantNothingLaunchedOrWritten(c.defaultDir)
-		})
-	}
 	t.Run("an unknown key, naming it and the example", func(t *testing.T) {
 		d := newControllerDaemon(t)
 		c := newControllerStart(t, d, controllerOptions{lines: []string{
@@ -671,34 +663,56 @@ func TestControllerStartRefusesLocallyBeforeTheRequest(t *testing.T) {
 	})
 }
 
-// An Oh My Pi running under a profile hands its children PI_CODING_AGENT_DIR set to that profile's
-// agent directory, and Oh My Pi ignores the variable whenever a named profile is active, or when
-// the value is the agent directory of the profile PI_PROFILE names (@oh-my-pi/pi-utils dirs.ts
-// resolveActiveAgentDirOverride, resolvePreProfileAgentDir). An operator starting the controller
-// from inside such a session is not refused: the contract check reads the manifest that Oh My Pi
-// loads, and the controller starts.
-func TestControllerStartAcceptsTheAgentDirectoryAProfileHandsDown(t *testing.T) {
+// The contract check reads the manifest Oh My Pi loads under the operator's environment, which the
+// controller's Oh My Pi inherits whole (@oh-my-pi/pi-utils dirs.ts: getBaseConfigRoot,
+// DirResolver's constructor, resolveActiveAgentDirOverride, getPluginsDir). Each row installs the
+// release Oh My Pi loads where it loads it, and a plugin speaking another contract at the root a
+// wrong resolution would read: the controller starts only when the check read the first. An
+// honoured PI_CODING_AGENT_DIR moves the plugins only by turning the XDG data root off, so with
+// none it changes nothing; PI_CONFIG_DIR moves the config root, and an XDG data root still wins.
+// A relative agent directory is resolved where the controller's Oh My Pi runs, the controller's
+// state directory's `controller`. An Oh My Pi running under a profile hands its children
+// PI_CODING_AGENT_DIR set to that profile's agent directory, which Oh My Pi ignores, so an operator
+// starting from inside one is not refused.
+func TestControllerStartChecksThePluginOhMyPiLoads(t *testing.T) {
 	for _, tc := range []struct {
-		name, ompProfile, piProfile, pluginProfile string
+		name string
+		// env names variables beyond HOME; "<home>" in a value is the operator's home directory.
+		env map[string]string
+		// loaded is the root Oh My Pi loads the plugin from, stale the one a wrong resolution reads,
+		// both relative to the home directory; "" installs nothing there.
+		loaded, stale string
 	}{
-		{name: "a named profile is active", ompProfile: "work", pluginProfile: "work"},
-		{name: "PI_PROFILE's agent directory under the default profile", piProfile: "work"},
+		{name: "PI_CODING_AGENT_DIR honoured with no XDG data root",
+			env: map[string]string{"PI_CODING_AGENT_DIR": "<home>/elsewhere"}, loaded: ".omp"},
+		{name: "PI_CODING_AGENT_DIR honoured with an XDG data root",
+			env: map[string]string{"PI_CODING_AGENT_DIR": "<home>/elsewhere", "XDG_DATA_HOME": "<home>/xdg"}, loaded: ".omp", stale: "xdg/omp"},
+		{name: "PI_CONFIG_DIR with no XDG data root",
+			env: map[string]string{"PI_CONFIG_DIR": ".omp-alt"}, loaded: ".omp-alt", stale: ".omp"},
+		{name: "PI_CONFIG_DIR with an XDG data root",
+			env: map[string]string{"PI_CONFIG_DIR": ".omp-alt", "XDG_DATA_HOME": "<home>/xdg"}, loaded: "xdg/omp", stale: ".omp"},
+		{name: "a named profile, which ignores PI_CODING_AGENT_DIR",
+			env: map[string]string{"OMP_PROFILE": "work", "PI_CODING_AGENT_DIR": "<home>/.omp/profiles/work/agent"}, loaded: ".omp/profiles/work", stale: ".omp"},
+		{name: "PI_PROFILE's agent directory under the default profile",
+			env: map[string]string{"PI_PROFILE": "work", "PI_CODING_AGENT_DIR": "<home>/.omp/profiles/work/agent", "XDG_DATA_HOME": "<home>/xdg"}, loaded: "xdg/omp", stale: ".omp"},
+		{name: "a relative PI_CODING_AGENT_DIR, resolved in the controller's directory",
+			env: map[string]string{"PI_CODING_AGENT_DIR": "agent", "XDG_DATA_HOME": "<home>/xdg"}, loaded: ".omp", stale: "xdg/omp"},
+		{name: "a relative PI_CODING_AGENT_DIR that names the config root's own agent directory from the controller's",
+			env: map[string]string{"PI_CODING_AGENT_DIR": "../../../../../.omp/agent", "XDG_DATA_HOME": "<home>/xdg"}, loaded: "xdg/omp", stale: ".omp"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d := newControllerDaemon(t)
 			c := newControllerStart(t, d, controllerOptions{})
-			t.Setenv("OMP_PROFILE", tc.ompProfile)
-			t.Setenv("PI_PROFILE", tc.piProfile)
-			t.Setenv("PI_CODING_AGENT_DIR", filepath.Join(c.home, ".omp", "profiles", "work", "agent"))
-			if tc.pluginProfile != "" {
-				dir := filepath.Join(c.home, ".omp", "profiles", tc.pluginProfile, "plugins", "node_modules", "@sjawhar", "pi-legion-envoy")
-				if err := os.MkdirAll(dir, 0o700); err != nil {
-					t.Fatal(err)
-				}
-				manifest := fmt.Sprintf(`{"name":"@sjawhar/pi-legion-envoy","version":"9.9.9","legion":{"goDaemonApiVersion":%d}}`, api.GoDaemonAPIVersion)
-				if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(manifest), 0o600); err != nil {
-					t.Fatal(err)
-				}
+			if err := os.RemoveAll(filepath.Join(c.home, ".omp")); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PI_PROFILE", "")
+			for name, value := range tc.env {
+				t.Setenv(name, strings.ReplaceAll(value, "<home>", c.home))
+			}
+			c.installPluginAt(filepath.Join(c.home, tc.loaded), api.GoDaemonAPIVersion)
+			if tc.stale != "" {
+				c.installPluginAt(filepath.Join(c.home, tc.stale), api.GoDaemonAPIVersion-1)
 			}
 			if code, _, errb := c.run(); code != 0 || !c.launched() {
 				t.Fatalf("legion controller start = %d (launched %t), stderr %q; want the controller started", code, c.launched(), errb)

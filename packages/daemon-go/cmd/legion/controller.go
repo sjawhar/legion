@@ -108,15 +108,6 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	if err != nil {
 		return 0, err
 	}
-	if _, err := daemon.VerifyPluginContract(processEnvironment(), api.GoDaemonAPIVersion); err != nil {
-		return 0, err
-	}
-
-	secret, err := fetchControllerSecret(ctx, cfg.DaemonURL, operatorToken)
-	if err != nil {
-		return 0, err
-	}
-
 	stateDir := cfg.StateDir
 	if stateDir == "" {
 		home, err := os.UserHomeDir()
@@ -125,6 +116,16 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 		}
 		stateDir = filepath.Join(filepath.Dir(registry.Path(nil, home)), cfg.Project+"-controller")
 	}
+	controllerDir := filepath.Join(stateDir, "controller")
+	if _, err := daemon.VerifyPluginContract(processEnvironment(), controllerDir, api.GoDaemonAPIVersion); err != nil {
+		return 0, err
+	}
+
+	secret, err := fetchControllerSecret(ctx, cfg.DaemonURL, operatorToken)
+	if err != nil {
+		return 0, err
+	}
+
 	token := string(legionclaim.ControllerToken(cfg.Project))
 	secretFile, err := tmux.WriteSecretFile(stateDir, token, secret)
 	if err != nil {
@@ -143,7 +144,6 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 			return 0, err
 		}
 	}
-	controllerDir := filepath.Join(stateDir, "controller")
 	if err := os.MkdirAll(controllerDir, 0o700); err != nil {
 		return 0, fmt.Errorf("create %s: %w", controllerDir, err)
 	}
