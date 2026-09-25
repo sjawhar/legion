@@ -30,12 +30,17 @@ func TestAddEncodedReadsRolesEncodingAndRefusesAnyOther(t *testing.T) {
 
 	for _, testCase := range []struct{ name, raw, want string }{
 		{"not JSON", `LEGION_PROMPT_AGENTS=oracle`, "not promptrefs.Roles' encoding"},
-		{"null", `null`, "no LEGION_PROMPT_AGENTS"},
+		{"null", `null`, "the encoding is null, not an object"},
 		{"an empty object", `{}`, "no LEGION_PROMPT_AGENTS"},
 		{"a kind missing", `{"LEGION_PROMPT_AGENTS":{}}`, "no LEGION_PROMPT_SKILLS"},
-		{"a kind that is null", `{"LEGION_PROMPT_AGENTS":null,"LEGION_PROMPT_SKILLS":{}}`, "no LEGION_PROMPT_AGENTS"},
+		{"a kind that is null", `{"LEGION_PROMPT_AGENTS":null,"LEGION_PROMPT_SKILLS":{}}`, "LEGION_PROMPT_AGENTS is null, not an object"},
 		{"a misspelled kind", `{"LEGION_PROMPT_AGENTS":{},"LEGION_PROMPT_SKILLS":{},"LEGION_PROMPT_SKILL":{"dispatch":["roles/architect.md"]}}`, "unknown kind LEGION_PROMPT_SKILL"},
 		{"a name no file names", `{"LEGION_PROMPT_AGENTS":{"oracle":[]},"LEGION_PROMPT_SKILLS":{}}`, "LEGION_PROMPT_AGENTS name oracle is named by no file"},
+		{"a kind given twice", `{"LEGION_PROMPT_AGENTS":{"oracle":["roles/architect.md"]},"LEGION_PROMPT_SKILLS":{},"LEGION_PROMPT_AGENTS":{}}`, "LEGION_PROMPT_AGENTS appears twice"},
+		{"a name given twice", `{"LEGION_PROMPT_AGENTS":{"oracle":["roles/a.md"],"oracle":["roles/b.md"]},"LEGION_PROMPT_SKILLS":{}}`, "LEGION_PROMPT_AGENTS name oracle appears twice"},
+		{"an agent name outside the reference alphabet", `{"LEGION_PROMPT_AGENTS":{"o'racle":["roles/architect.md"]},"LEGION_PROMPT_SKILLS":{}}`, "LEGION_PROMPT_AGENTS name \"o'racle\" is not one a prompt can write"},
+		{"a skill name ending on a period", `{"LEGION_PROMPT_AGENTS":{},"LEGION_PROMPT_SKILLS":{"dispatch.":["roles/architect.md"]}}`, "LEGION_PROMPT_SKILLS name \"dispatch.\" is not one a prompt can write"},
+		{"trailing data", `{"LEGION_PROMPT_AGENTS":{},"LEGION_PROMPT_SKILLS":{}}{}`, "more than one JSON value"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			err := New().AddEncoded(testCase.raw)

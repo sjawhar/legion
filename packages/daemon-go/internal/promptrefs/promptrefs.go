@@ -6,13 +6,15 @@ package promptrefs
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"io/fs"
-	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strings"
 )
 
 // Kind is one form in which a prompt names something.
@@ -30,10 +32,23 @@ const (
 // Kinds are every kind, in order.
 var Kinds = [kinds]Kind{TaskAgents, Skills}
 
-var reference = [kinds]*regexp.Regexp{
-	TaskAgents: regexp.MustCompile(`agent="([a-z0-9][a-z0-9._-]*)"`),
-	Skills:     regexp.MustCompile(`skill://([a-z0-9](?:[a-z0-9._-]*[a-z0-9])?)`),
+// namePattern is each kind's name as a prompt can write it.
+var namePattern = [kinds]string{
+	TaskAgents: `[a-z0-9][a-z0-9._-]*`,
+	Skills:     `[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?`,
 }
+
+// reference finds each kind's names in a prompt, and whole is a kind's name alone.
+var (
+	reference = [kinds]*regexp.Regexp{
+		TaskAgents: regexp.MustCompile(`agent="(` + namePattern[TaskAgents] + `)"`),
+		Skills:     regexp.MustCompile(`skill://(` + namePattern[Skills] + `)`),
+	}
+	whole = [kinds]*regexp.Regexp{
+		TaskAgents: regexp.MustCompile(`^` + namePattern[TaskAgents] + `$`),
+		Skills:     regexp.MustCompile(`^` + namePattern[Skills] + `$`),
+	}
+)
 
 var variable = [kinds]string{TaskAgents: "LEGION_PROMPT_AGENTS", Skills: "LEGION_PROMPT_SKILLS"}
 
@@ -111,40 +126,89 @@ func Roles(rolesDir string) (string, error) {
 	return string(raw), err
 }
 
-// AddEncoded adds the references Roles encoded, refusing anything but that encoding: an object
-// holding every kind, and no other key, each kind's names (possibly none) each with the files that
-// name it. An encoding that read as no references would let the probe pass without resolving the
-// role prompts, so a daemon and an image that disagree on it refuse instead.
+// AddEncoded adds the references Roles encoded, refusing anything but that encoding: one JSON
+// object holding every kind once and no other key, each kind an object of its names (possibly
+// none), each name once, as a prompt can write it, with the files that name it. An encoding that
+// read as fewer references than it holds, or as names the load probe's input cannot carry, would
+// let the probe pass without resolving the role prompts, so a daemon and an image that disagree on
+// it refuse instead.
 func (names Names) AddEncoded(raw string) error {
-	refuse := func(why string) error {
-		return fmt.Errorf("the role prompt references %q are not promptrefs.Roles' encoding: %s", raw, why)
-	}
-	var encoded map[string]map[string][]string
-	if err := json.Unmarshal([]byte(raw), &encoded); err != nil {
-		return refuse(err.Error())
-	}
-	for key := range encoded {
-		if !slices.Contains(variable[:], key) {
-			return refuse("unknown kind " + key)
+	read := New()
+	seen := map[Kind]bool{}
+	dec := json.NewDecoder(strings.NewReader(raw))
+	err := members(dec, "the encoding", func(key string) error {
+		kind := Kind(slices.Index(variable[:], key))
+		switch {
+		case kind < 0:
+			return errors.New("unknown kind " + key)
+		case seen[kind]:
+			return errors.New(key + " appears twice")
 		}
-	}
-	for _, kind := range Kinds {
-		named := encoded[kind.Variable()]
-		if named == nil {
-			return refuse("no " + kind.Variable())
-		}
-		for _, name := range slices.Sorted(maps.Keys(named)) {
-			if len(named[name]) == 0 {
-				return refuse(kind.Variable() + " name " + name + " is named by no file")
+		seen[kind] = true
+		return members(dec, key, func(name string) error {
+			switch _, twice := read[kind][name]; {
+			case twice:
+				return fmt.Errorf("%s name %s appears twice", key, name)
+			case !whole[kind].MatchString(name):
+				return fmt.Errorf("%s name %q is not one a prompt can write", key, name)
 			}
+			var files []string
+			if err := dec.Decode(&files); err != nil {
+				return fmt.Errorf("%s name %s: %w", key, name, err)
+			}
+			if len(files) == 0 {
+				return fmt.Errorf("%s name %s is named by no file", key, name)
+			}
+			read[kind][name] = files
+			return nil
+		})
+	})
+	if err == nil {
+		if _, next := dec.Token(); next != io.EOF {
+			err = errors.New("more than one JSON value")
 		}
 	}
 	for _, kind := range Kinds {
-		for name, files := range encoded[kind.Variable()] {
+		if err == nil && !seen[kind] {
+			err = errors.New("no " + kind.Variable())
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("the role prompt references %q are not promptrefs.Roles' encoding: %w", raw, err)
+	}
+	for _, kind := range Kinds {
+		for name, files := range read[kind] {
 			for _, file := range files {
 				names.add(kind, name, file)
 			}
 		}
 	}
 	return nil
+}
+
+// members reads one JSON object from dec, calling member with each of its keys while dec stands at
+// that key's value, which member reads. what names the object in a refusal of anything else.
+func members(dec *json.Decoder, what string, member func(key string) error) error {
+	open, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	switch open {
+	case json.Delim('{'):
+	case nil:
+		return fmt.Errorf("%s is null, not an object", what)
+	default:
+		return fmt.Errorf("%s is %v, not an object", what, open)
+	}
+	for dec.More() {
+		key, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		if err := member(key.(string)); err != nil {
+			return err
+		}
+	}
+	_, err = dec.Token()
+	return err
 }
