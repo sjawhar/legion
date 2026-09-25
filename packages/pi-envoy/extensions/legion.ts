@@ -347,9 +347,9 @@ const JJ_LOG_REWRITE: PaneRule = {
 // that call: the same command run from the pane's shell would complete the phase where the stall
 // cannot see it, draw a follow-up asking the worker to complete again, and on the TypeScript
 // daemon's no-holder path could hand the architect the same completion twice. Only `complete` is
-// refused: `legion handoff write` and `read` from the shell leave no phase open, and the shell's
-// stdin is how a handoff too large for one argv string was written by hand. `legion`, `handoff`
-// and `complete` separated only by whitespace, quotes, and argv-list punctuation, so
+// refused: `legion handoff write` and `read` from the shell leave no phase open, and the shell can
+// pipe a handoff too large for one argv string to `legion handoff write` on stdin. `legion`,
+// `handoff` and `complete` separated only by whitespace, quotes, and argv-list punctuation, so
 // `["legion", "handoff", "complete"]` counts and a path through `legion/handoff` does not.
 const LEGION_HANDOFF_COMPLETE_MENTION = /\blegion[\s"'`,[\]]+handoff[\s"'`,[\]]+complete\b/;
 
