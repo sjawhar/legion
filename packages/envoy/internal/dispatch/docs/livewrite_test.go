@@ -163,10 +163,10 @@ func TestARolledBackWriteIsNoAuthorOfTheNextVersion(t *testing.T) {
 	}
 }
 
-// A browser connected when a transaction changes its document is credited on the version the
-// transaction writes, as it is when a write reaches the room directly, and not again on a
-// version settled after it left.
-func TestAJoinedWriteCreditsConnectedBrowsersOnItsOwnVersionOnly(t *testing.T) {
+// A browser connected while a transaction changes its document made none of the change: the
+// version the transaction writes names only its writer, as a write that reaches the room
+// directly does, and a version settled after the browser left names only its own editor.
+func TestAJoinedWritesVersionNamesItsWriterNotAConnectedBrowser(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "before")
@@ -197,8 +197,8 @@ func TestAJoinedWriteCreditsConnectedBrowsersOnItsOwnVersionOnly(t *testing.T) {
 		t.Fatalf("commit edit transaction: %v", err)
 	}
 	ledger.publish()
-	if want := []model.Actor{browser, writer}; !reflect.DeepEqual(snapshot.Version.Authors, want) {
-		t.Fatalf("joined edit's version authors = %#v, want %v", snapshot.Version.Authors, want)
+	if want := []model.Actor{writer}; !reflect.DeepEqual(snapshot.Version.Authors, want) {
+		t.Fatalf("joined edit's version authors = %#v, want only the writer %v (browser %v only watched)", snapshot.Version.Authors, want, browser)
 	}
 
 	service.removeConnection(artifactID, connectionID)

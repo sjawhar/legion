@@ -355,27 +355,57 @@ func TestRenamingAHeadingIsVersionedAndCredited(t *testing.T) {
 	}
 }
 
-// A browser that opens a document and leaves without changing it is a reader, not an author:
-// the next version, written for someone else's edit, names only that editor.
+// A browser that has a document open and changes nothing is a reader, not an author: a version
+// written for an agent's edit names only the agent, whether the edit reaches the room directly or
+// through a committed transaction, and whether the reader left before it or is still connected.
 func TestAReaderWhoChangesNothingIsNoAuthorOfTheNextVersion(t *testing.T) {
-	service, artifactID := newTestService(t)
-	service.settle = time.Hour
-	seedServiceText(t, service, artifactID, "before")
-	alignLatestVersionWithUpdates(t, service, artifactID)
-	reader := model.Actor{Kind: "user", ID: "bob"}
-	connectionID := service.nextConnection.Add(1)
-	service.addConnection(artifactID, connectionID, reader)
-	service.removeConnection(artifactID, connectionID)
-
 	agent := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
-	if _, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{Op: "replace", Find: "before", With: "after"}}, agent, nil); err != nil {
-		t.Fatalf("agent edit: %v", err)
-	}
-	settleCurrentGeneration(t, service, artifactID)
+	edit := []model.EditOp{{Op: "replace", Find: "before", With: "after"}}
+	for _, test := range []struct {
+		name         string
+		readerLeaves bool
+		joined       bool
+	}{
+		{name: "reader left, direct edit", readerLeaves: true},
+		{name: "reader connected, direct edit"},
+		{name: "reader connected, transactional edit", joined: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			service.settle = time.Hour
+			seedServiceText(t, service, artifactID, "before")
+			alignLatestVersionWithUpdates(t, service, artifactID)
+			reader := model.Actor{Kind: "user", ID: "bob"}
+			connectionID := service.nextConnection.Add(1)
+			service.addConnection(artifactID, connectionID, reader)
+			if test.readerLeaves {
+				service.removeConnection(artifactID, connectionID)
+			}
 
-	version := waitForDocumentVersion(t, service.store, artifactID, 2)
-	if !reflect.DeepEqual(version.Authors, []model.Actor{agent}) {
-		t.Fatalf("version 2 authors = %v, want only the agent %v (reader %v changed nothing)", version.Authors, agent, reader)
+			if test.joined {
+				tx, err := service.store.Pool.Begin(context.Background())
+				if err != nil {
+					t.Fatalf("begin agent edit: %v", err)
+				}
+				defer tx.Rollback(context.Background())
+				joinedCtx, ledger := service.Join(context.Background(), tx)
+				defer ledger.Discard()
+				if _, err := service.ApplyOps(joinedCtx, artifactID, edit, agent, nil); err != nil {
+					t.Fatalf("agent edit: %v", err)
+				}
+				if err := ledger.Commit(context.Background()); err != nil {
+					t.Fatalf("commit agent edit: %v", err)
+				}
+			} else if _, err := service.ApplyOps(context.Background(), artifactID, edit, agent, nil); err != nil {
+				t.Fatalf("agent edit: %v", err)
+			}
+			settleCurrentGeneration(t, service, artifactID)
+
+			version := waitForDocumentVersion(t, service.store, artifactID, 2)
+			if !reflect.DeepEqual(version.Authors, []model.Actor{agent}) {
+				t.Fatalf("version 2 authors = %v, want only the agent %v (reader %v changed nothing)", version.Authors, agent, reader)
+			}
+		})
 	}
 }
 

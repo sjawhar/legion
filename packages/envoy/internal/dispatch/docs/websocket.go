@@ -353,12 +353,15 @@ func (s *Service) updateChangesMarkdown(room string, doc *crdt.Doc) bool {
 	return true
 }
 
-// recordConnectedActors credits an observed content change to the room's connected peers, who
-// all join `pending`. A service mutation (origin registered by serviceTransact) is credited to
-// its actor as well, who becomes `lastActor`. A committed transaction's live write, which
-// Ledger.Commit applies, was credited when the transaction committed and is not credited again. Any other update is a browser edit by one of the peers, so when exactly one
-// peer is connected it is the latest edit source and replaces `lastActor`, and otherwise the
-// edit cannot be pinned on a single peer and no older actor may stand in for it.
+// recordConnectedActors credits an observed content change to whoever made it. A service
+// mutation (origin registered by serviceTransact) is its actor's alone, who joins `pending` and
+// becomes `lastActor`; a browser that was only connected while it happened is not credited. A
+// committed transaction's live write, which Ledger.Commit applies, was credited when the
+// transaction committed and is not credited again. Any other update is a browser edit by one of
+// the peers, which ygo applies while that peer's connection is registered, so the connected
+// peers all join `pending`: when exactly one is connected it is the latest edit source and
+// replaces `lastActor`, and otherwise the edit cannot be pinned on a single peer and no older
+// actor may stand in for it.
 func (s *Service) recordConnectedActors(room string, origin any) {
 	if _, published := origin.(*liveWriteOrigin); published {
 		return
@@ -367,6 +370,13 @@ func (s *Service) recordConnectedActors(room string, origin any) {
 	state := s.room(room)
 	state.mu.Lock()
 	defer state.mu.Unlock()
+	if service {
+		if actor, credited := value.(*model.Actor); credited && actor != nil {
+			state.pending[actorKey(*actor)] = *actor
+			state.lastActor = new(*actor)
+		}
+		return
+	}
 	var sole *model.Actor
 	ambiguous := false
 	for _, actor := range state.connected {
@@ -377,13 +387,6 @@ func (s *Service) recordConnectedActors(room string, origin any) {
 		} else if key != actorKey(*sole) {
 			ambiguous = true
 		}
-	}
-	if service {
-		if actor, credited := value.(*model.Actor); credited && actor != nil {
-			state.pending[actorKey(*actor)] = *actor
-			state.lastActor = new(*actor)
-		}
-		return
 	}
 	if ambiguous {
 		sole = nil
