@@ -333,6 +333,16 @@ OMP_PROFILE=$profile omp plugin list --json |
   fail "the plugin did not come back enabled"
 pass
 
+begin gate-refuses-a-missing-skill
+# The gate's load probe resolves every skill Legion's prompts load through the pane's own Oh My Pi.
+# The installed plugin without the rubric its thermonuclear-deep-review agent loads is refused,
+# naming the skill and the agent definition that loads it.
+mv "$work/plugin/dist/skills/thermonuclear-deep-review" "$work/rubric.aside"
+expect_refusal missing-skill "finds no skill thermonuclear-deep-review (loaded by agents/thermonuclear-deep-review.md)"
+mv "$work/rubric.aside" "$work/plugin/dist/skills/thermonuclear-deep-review"
+[ -f "$work/plugin/dist/skills/thermonuclear-deep-review/SKILL.md" ] || fail "the rubric was not restored"
+pass
+
 # ---- one real agent: register, claim its role, ready ----------------------------------------------
 
 begin architect-registers-and-is-ready
