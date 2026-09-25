@@ -321,6 +321,39 @@ test("keyboard focus opens the card at once, scrolling under it repositions rath
   }
 });
 
+test("keyboard focus on another reference outruns the close the pointer armed", () => {
+  const getIssue = mockIssues();
+  jest.useFakeTimers();
+  const view = render(<Harness />);
+  try {
+    const first = screen.getByRole("link", { name: "first" });
+    const second = screen.getByRole("link", { name: "second" });
+    fireEvent.pointerOver(first, { pointerType: "mouse" });
+    act(() => {
+      jest.advanceTimersByTime(REF_PREVIEW_OPEN_DELAY_MS);
+    });
+    expect(screen.getByRole("tooltip").textContent).toContain("CORE-1");
+
+    // The pointer leaves, arming the close, and the keyboard reaches another reference inside
+    // the bridge delay: the new card is the current target, so the close the old one armed must
+    // not fire under it.
+    fireEvent.pointerOut(first, { pointerType: "mouse", relatedTarget: document.body });
+    act(() => {
+      jest.advanceTimersByTime(REF_PREVIEW_CLOSE_DELAY_MS - 50);
+      second.focus();
+    });
+    expect(screen.getByRole("tooltip").textContent).toContain("CORE-2");
+    act(() => {
+      jest.advanceTimersByTime(1000);
+    });
+    expect(screen.getByRole("tooltip").textContent).toContain("CORE-2");
+    expect(second.getAttribute("aria-describedby")).toBe(screen.getByRole("tooltip").id);
+  } finally {
+    view.unmount();
+    getIssue.mockRestore();
+  }
+});
+
 test("scrolling under a hover-opened card closes it", () => {
   const getIssue = mockIssues();
   jest.useFakeTimers();

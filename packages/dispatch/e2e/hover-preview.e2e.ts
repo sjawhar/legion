@@ -17,8 +17,9 @@ test.beforeEach(async () => {
 /** Hold the page's clock still, so a check about the close delay cannot race it. `pauseAt` takes
  * a time on the page's own installed clock, and the Node process's `Date.now()` can already be
  * behind that clock, which would ask it to move backwards: a lead of `+ 1` ms failed 11 runs of
- * 12, and a second is past any skew. No close is armed at any call site, so the jump to that
- * moment fires no timer. */
+ * 12, and a second is past any skew. `pauseAt` runs every page timer that falls due inside the
+ * jump; at all three call sites the card is open, so its open timer has already fired and no
+ * close is armed, and the jump fires no close. */
 async function pauseClock(page: Page): Promise<void> {
   await page.clock.pauseAt(Date.now() + 1000);
 }
@@ -169,20 +170,22 @@ test("a card survives a held-button drag that leaves its reference and comes bac
     // either - what this pins is the rule the handler reads, a pointer returning to the anchor
     // with a button held, whatever the drag means to the page.
     const box = await link.boundingBox();
-    if (box === null) {
-      throw new Error("reference is not visible");
+    const cardBox = await card.boundingBox();
+    if (box === null || cardBox === null) {
+      throw new Error("reference or card is not visible");
     }
     const beside = { x: box.x - 8, y: box.y + box.height / 2 };
     await page.mouse.move(beside.x, beside.y);
     await page.mouse.down();
     await page.mouse.move(beside.x, box.y + box.height + 40, { steps: 4 });
-    // Back up the same column and only then right onto the link: the card hangs below the
-    // reference, so a diagonal return crosses it and the card's own re-entry would cancel the
-    // close instead of the anchor's. This path stays clear of the card at every step, so the
-    // cancel can only come from the anchor - which holds only while the card is left-aligned
-    // with its reference, so the column is checked rather than assumed (`PreviewCard` clamps a
-    // card near the right edge leftwards, and that one would sit under this column).
-    expect((await card.boundingBox())?.x ?? 0).toBeGreaterThan(beside.x);
+    // Back up the same column and only then right onto the link. The final leg runs at the
+    // anchor's own height, which the card never covers - it hangs 6 px below it - so the pointer
+    // arrives at the anchor from outside the zone and the anchor's re-entry is what cancels the
+    // close. The column check is this gesture's precondition rather than what makes the test
+    // red: a card clamped left under the column (`PreviewCard` clamps one near the right edge)
+    // would be entered and left again before the anchor, and leaving re-arms the close, so the
+    // anchor would still have to cancel it.
+    expect(cardBox.x).toBeGreaterThan(beside.x);
     await page.mouse.move(beside.x, beside.y, { steps: 4 });
     await page.mouse.move(box.x + box.width / 2, beside.y, { steps: 4 });
     await expect(card).toBeVisible();
@@ -213,10 +216,11 @@ test("a card survives a held-button move from the card back onto its reference",
     await pauseClock(page);
 
     // The other end of the same zone. The press starts beside the reference, because pressing
-    // the card's own link starts Chromium's native link drag and boundary events stop; from
-    // there the pointer travels over the card and steps straight back onto the reference, which
-    // is one crossing inside the zone (`pointerout` from the card naming the anchor, then
-    // `pointerover` on the anchor with the button held). Nothing may arm a close.
+    // the card's own link starts Chromium's native link drag and boundary events stop. Reaching
+    // that point leaves the zone and arms a close, which the drag's entry onto the card cancels;
+    // the step from the card back onto the reference is the crossing under test (`pointerout`
+    // from the card naming the anchor, then `pointerover` on the anchor with the button held),
+    // and that step must arm nothing.
     const box = await link.boundingBox();
     const cardBox = await card.boundingBox();
     if (box === null || cardBox === null) {
