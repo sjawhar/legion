@@ -88,11 +88,11 @@ type Anchored struct {
 // MarkQuote marks one matching quote and returns what the new mark anchors to.
 func (s *Service) MarkQuote(ctx context.Context, artifactID string, mark MarkSpec, quote string, occurrence *int) (Anchored, error) {
 	var anchored Anchored
-	err := s.applyLive(ctx, artifactID, mark.By, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) (bool, error) {
+	err := s.applyLive(ctx, artifactID, mark.By, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
 		tree, err := treeOf(doc)
 		if err != nil {
-			return false, err
+			return err
 		}
 
 		var markErr error
@@ -100,21 +100,21 @@ func (s *Service) MarkQuote(ctx context.Context, artifactID string, mark MarkSpe
 			_, markErr = markQuoteInTxn(txn, fragment, tree, quote, occurrence, nil, mark)
 		})
 		if markErr != nil {
-			return false, markErr
+			return markErr
 		}
 
 		tree, err = treeOf(doc)
 		if err != nil {
-			return false, err
+			return err
 		}
 		anchored, err = readAnchored(tree, mark.Kind, mark.ID)
 		if errors.Is(err, ErrAnchorMissing) {
-			return false, fmt.Errorf("%w: written mark %q is missing", ErrDocSchema, mark.ID)
+			return fmt.Errorf("%w: written mark %q is missing", ErrDocSchema, mark.ID)
 		}
 		if err != nil {
-			return false, err
+			return err
 		}
-		return true, nil
+		return nil
 	})
 	if err != nil {
 		return Anchored{}, err
@@ -179,7 +179,7 @@ func (s *Service) VerifyMark(ctx context.Context, artifactID string, kind MarkKi
 		if readErr != nil {
 			return Anchored{}, readErr
 		}
-		if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+		if err != nil {
 			return Anchored{}, err
 		}
 		anchored, err := readAnchored(tree, kind, id)
@@ -221,7 +221,7 @@ func (s *Service) BlockForQuote(ctx context.Context, artifactID, quote string) (
 	if blockErr != nil {
 		return "", blockErr
 	}
-	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+	if err != nil {
 		return "", err
 	}
 	return blockID, nil
@@ -247,7 +247,7 @@ func (s *Service) SuggestionKind(ctx context.Context, artifactID, id string) (st
 	if markErr != nil {
 		return "", markErr
 	}
-	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+	if err != nil {
 		return "", err
 	}
 	return kind, nil
@@ -264,23 +264,23 @@ func (s *Service) RejectSuggestion(ctx context.Context, artifactID, id string, a
 }
 
 func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWith string, actor model.Actor, accept bool) error {
-	return s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) (bool, error) {
+	return s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
 		tree, err := treeOf(doc)
 		if err != nil {
-			return false, err
+			return err
 		}
 		range_, _, ok := pmdoc.FindMark(tree, string(MarkSuggestion), id)
 		if !ok {
-			return false, ErrAnchorOrphaned
+			return ErrAnchorOrphaned
 		}
 		attrs, ok := pmdoc.MarkAttrs(tree, string(MarkSuggestion), id)
 		if !ok {
-			return false, fmt.Errorf("%w: suggestion mark %q has no attributes", ErrDocSchema, id)
+			return fmt.Errorf("%w: suggestion mark %q has no attributes", ErrDocSchema, id)
 		}
 		kind, err := suggestionKind(attrs, id)
 		if err != nil {
-			return false, err
+			return err
 		}
 
 		splice := (accept && (kind == "replace" || kind == "delete")) || (!accept && kind == "insert")
@@ -290,9 +290,9 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 				unmarkErr = pmdoc.Unmark(txn, fragment, string(MarkSuggestion), id)
 			})
 			if unmarkErr != nil {
-				return false, unmarkErr
+				return unmarkErr
 			}
-			return true, nil
+			return nil
 		}
 
 		with := replaceWith
@@ -301,20 +301,20 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		}
 		replacement, err := inlineAware(with)
 		if err != nil {
-			return false, err
+			return err
 		}
 		next, err := pmdoc.Splice(tree, range_, replacement)
 		if err != nil {
-			return false, err
+			return err
 		}
 		var updateErr error
 		transact(func(txn *crdt.Transaction) {
 			updateErr = pmdoc.Update(txn, fragment, next)
 		})
 		if updateErr != nil {
-			return false, updateErr
+			return updateErr
 		}
-		return true, nil
+		return nil
 	})
 }
 
@@ -341,12 +341,12 @@ func (s *Service) ProjectMark(ctx context.Context, artifactID, markID string, re
 	if err != nil {
 		return err
 	}
-	return s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) (bool, error) {
+	return s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
 		marks := doc.GetMap(marksMapName)
 		transact(func(txn *crdt.Transaction) {
 			marks.Set(txn, markID, plain)
 		})
-		return true, nil
+		return nil
 	})
 }
 
@@ -371,8 +371,7 @@ type anchoredMark struct {
 	anchor   model.Anchor
 }
 
-func (s *Service) openAnchoredMarks(ctx context.Context, artifactID string) ([]anchoredMark, error) {
-	source := s.queryFrom(ctx)
+func (s *Service) openAnchoredMarks(ctx context.Context, source Queryer, artifactID string) ([]anchoredMark, error) {
 	var marks []anchoredMark
 	for _, target := range []struct {
 		table string
@@ -424,7 +423,7 @@ func commentMarkType(table string) string {
 // persisted change appends the affected row's own full refresh event in this
 // transaction; callers publish the collected committed events afterward.
 func (s *Service) refreshAnchors(ctx context.Context, tx pgx.Tx, artifactID string, tree *pmdoc.Node, actor model.Actor) error {
-	anchors, err := s.openAnchoredMarks(WithTx(ctx, tx), artifactID)
+	anchors, err := s.openAnchoredMarks(ctx, tx, artifactID)
 	if err != nil {
 		return err
 	}

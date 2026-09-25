@@ -167,8 +167,8 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		return
 	}
 	defer tx.Rollback(r.Context())
-	documentCtx, documentEvents := documentMutationContext(r.Context(), tx)
-	defer s.deps.Docs.DiscardLiveWrites(documentEvents)
+	documentCtx, ledger := s.deps.Docs.Join(r.Context(), tx)
+	defer ledger.Discard()
 	status, err := s.requireOpenOwnerStatus(r.Context(), tx, owner)
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -276,14 +276,11 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 			r.Context(), tx, "POST /api/v1/issues/{key}/asks", *owner.IssueKey, actor, rowID, *status,
 		)
 	}
-	if err := s.commitDocumentMutation(r.Context(), tx, documentEvents); err != nil {
+	if err := ledger.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if snapshot != nil {
-		s.deps.Docs.CommitVersion(anchor.ArtifactID, snapshot.Version)
-	}
-	s.publishDocumentEvents(documentEvents, events...)
+	s.publishDocumentEvents(ledger, events...)
 	WriteJSON(w, http.StatusCreated, withAdvice(ask, advice))
 }
 

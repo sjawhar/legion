@@ -8,7 +8,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/reearth/ygo/persistence"
+
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 // A settlement already past its entry check when a transaction opens its write can reach the
@@ -60,8 +66,8 @@ func TestSettlementBetweenCommitAndPublishWaitsForTheWrite(t *testing.T) {
 	if _, _, err := lockArtifactOwner(ctx, tx, artifactID); err != nil {
 		t.Fatalf("lock document owner: %v", err)
 	}
-	joined, collector := joinTx(ctx, tx)
-	defer service.DiscardLiveWrites(collector)
+	joined, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	if _, err := service.ApplyOps(joined, artifactID, []model.EditOp{{Op: "replace", Find: "before", With: "after"}}, alice, nil); err != nil {
 		t.Fatalf("apply joined edit: %v", err)
@@ -71,17 +77,16 @@ func TestSettlementBetweenCommitAndPublishWaitsForTheWrite(t *testing.T) {
 	}
 	// A browser types while the edit's transaction is open.
 	editLiveTree(t, service, artifactID, appendBlocks(t, "typed"))
-	if err := tx.Commit(ctx); err != nil {
+	if err := ledger.commit(ctx); err != nil {
 		t.Fatalf("commit edit transaction: %v", err)
 	}
-	service.CreditLiveWrites(collector)
 	close(resume)
 	select {
 	case <-settled:
 	case <-time.After(10 * time.Second):
 		t.Fatal("paused settlement did not finish")
 	}
-	service.PublishLiveWrites(collector)
+	ledger.publish()
 	settleCurrentGeneration(t, service, artifactID)
 
 	var markdown string
@@ -106,14 +111,14 @@ func TestFailedLiveWritesReloadTheDurableDocument(t *testing.T) {
 		t.Fatalf("begin edit transaction: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	joined, collector := joinTx(ctx, tx)
+	joined, ledger := service.Join(ctx, tx)
 	if _, err := service.ApplyOps(joined, artifactID, []model.EditOp{{Op: "replace", Find: "before", With: "after"}}, model.Actor{Kind: "user", ID: "alice"}, nil); err != nil {
 		t.Fatalf("apply joined edit: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("commit edit transaction: %v", err)
 	}
-	service.FailLiveWrites(collector, errors.New("commit outcome unknown"))
+	ledger.fail(errors.New("commit outcome unknown"))
 	if got, err := service.Text(ctx, artifactID); err != nil || got != "after\n" {
 		t.Fatalf("document after failing its live write = %q (%v), want the committed text", got, err)
 	}
@@ -129,7 +134,7 @@ func TestARolledBackWriteIsNoAuthorOfTheNextVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin edit transaction: %v", err)
 	}
-	joined, collector := joinTx(ctx, tx)
+	joined, ledger := service.Join(ctx, tx)
 	rolledBack := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
 	if _, err := service.ReplaceText(joined, artifactID, "rolled back", rolledBack); err != nil {
 		t.Fatalf("replace text in the transaction: %v", err)
@@ -137,7 +142,7 @@ func TestARolledBackWriteIsNoAuthorOfTheNextVersion(t *testing.T) {
 	if err := tx.Rollback(ctx); err != nil {
 		t.Fatalf("roll back edit transaction: %v", err)
 	}
-	service.DiscardLiveWrites(collector)
+	ledger.Discard()
 
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	if _, err := service.ReplaceText(ctx, artifactID, "after", alice); err != nil {
@@ -178,8 +183,8 @@ func TestAJoinedWriteCreditsConnectedBrowsersOnItsOwnVersionOnly(t *testing.T) {
 	if _, _, err := lockArtifactOwner(ctx, tx, artifactID); err != nil {
 		t.Fatalf("lock document owner: %v", err)
 	}
-	joined, collector := joinTx(ctx, tx)
-	defer service.DiscardLiveWrites(collector)
+	joined, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
 	writer := model.Actor{Kind: "user", ID: "bob"}
 	if _, err := service.ApplyOps(joined, artifactID, []model.EditOp{{Op: "replace", Find: "before", With: "during"}}, writer, nil); err != nil {
 		t.Fatalf("apply joined edit: %v", err)
@@ -188,12 +193,10 @@ func TestAJoinedWriteCreditsConnectedBrowsersOnItsOwnVersionOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("snapshot joined edit: %v", err)
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := ledger.commit(ctx); err != nil {
 		t.Fatalf("commit edit transaction: %v", err)
 	}
-	service.CreditLiveWrites(collector)
-	service.CommitVersion(artifactID, snapshot.Version)
-	service.PublishLiveWrites(collector)
+	ledger.publish()
 	if want := []model.Actor{browser, writer}; !reflect.DeepEqual(snapshot.Version.Authors, want) {
 		t.Fatalf("joined edit's version authors = %#v, want %v", snapshot.Version.Authors, want)
 	}
@@ -239,8 +242,8 @@ func TestAWriteOpenedDuringRoomRecoveryHoldsOffTheRecoveredRoom(t *testing.T) {
 		t.Fatalf("begin edit transaction: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	joined, collector := joinTx(ctx, tx)
-	defer service.DiscardLiveWrites(collector)
+	joined, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
 	edited := make(chan error, 1)
 	go func() {
 		_, err := service.ReplaceText(joined, artifactID, "after", model.Actor{Kind: "user", ID: "alice"})
@@ -260,12 +263,11 @@ func TestAWriteOpenedDuringRoomRecoveryHoldsOffTheRecoveredRoom(t *testing.T) {
 		t.Fatal("joined edit did not finish once the room could recover")
 	}
 	editLiveTree(t, service, artifactID, appendBlocks(t, "typed"))
-	if err := tx.Commit(ctx); err != nil {
+	if err := ledger.commit(ctx); err != nil {
 		t.Fatalf("commit edit transaction: %v", err)
 	}
-	service.CreditLiveWrites(collector)
 	settleCurrentGeneration(t, service, artifactID)
-	service.PublishLiveWrites(collector)
+	ledger.publish()
 	settleCurrentGeneration(t, service, artifactID)
 
 	var markdown string
@@ -276,5 +278,131 @@ func TestAWriteOpenedDuringRoomRecoveryHoldsOffTheRecoveredRoom(t *testing.T) {
 	}
 	if markdown != "after\n\ntyped\n" {
 		t.Fatalf("latest version = %q, want the committed edit and the browser's paragraph", markdown)
+	}
+}
+
+// failingBrowserAppendStore fails every browser update's durable append while failing is set,
+// holding the first such append until release closes, and runs beforeTx once, just before the
+// next transactional append and so before that append takes the document's advisory lock.
+type failingBrowserAppendStore struct {
+	VersionedStore
+	failing  atomic.Bool
+	held     atomic.Bool
+	entered  chan struct{}
+	release  chan struct{}
+	beforeTx atomic.Pointer[func()]
+}
+
+func (s *failingBrowserAppendStore) fail() error {
+	if !s.failing.Load() {
+		return nil
+	}
+	if s.held.CompareAndSwap(false, true) {
+		close(s.entered)
+		<-s.release
+	}
+	return errors.New("injected browser append failure")
+}
+
+func (s *failingBrowserAppendStore) AppendUpdate(ctx context.Context, room string, update []byte) (persistence.Version, error) {
+	if err := s.fail(); err != nil {
+		return 0, err
+	}
+	return s.VersionedStore.AppendUpdate(ctx, room, update)
+}
+
+func (s *failingBrowserAppendStore) AppendUpdateWithClass(ctx context.Context, room string, update []byte, contentChanged bool) (persistence.Version, error) {
+	if err := s.fail(); err != nil {
+		return 0, err
+	}
+	return s.VersionedStore.(classifiedUpdateStore).AppendUpdateWithClass(ctx, room, update, contentChanged)
+}
+
+func (s *failingBrowserAppendStore) AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool) (persistence.Version, error) {
+	if hook := s.beforeTx.Swap(nil); hook != nil {
+		(*hook)()
+	}
+	return s.VersionedStore.AppendUpdateTx(ctx, tx, room, update, contentChanged)
+}
+
+// forkBeforeRoomReload opens a joined write whose first operation forks the room while the room
+// holds a browser paragraph, "typed", that is not durable yet. That paragraph's append then
+// fails, and the failed room is evicted and reloaded without it before the write appends its
+// own update. It returns with the write's transaction still open.
+func forkBeforeRoomReload(t *testing.T) (*Service, string, pgx.Tx, context.Context, *Ledger) {
+	t.Helper()
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "before")
+	store := &failingBrowserAppendStore{
+		VersionedStore: NewPgVersioned(database),
+		entered:        make(chan struct{}),
+		release:        make(chan struct{}),
+	}
+	service := New(Deps{Store: database, Persistence: store, Events: events.NewBroker(), Settle: time.Hour})
+	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
+	seedServiceText(t, service, artifactID, "before")
+	liveTree(t, service, artifactID)
+
+	ctx := context.Background()
+	tx, err := service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin transactional edit: %v", err)
+	}
+	t.Cleanup(func() { _ = tx.Rollback(context.Background()) })
+	joinedCtx, ledger := service.Join(ctx, tx)
+	t.Cleanup(ledger.Discard)
+
+	store.failing.Store(true)
+	editLiveTree(t, service, artifactID, appendBlocks(t, "typed"))
+	<-store.entered
+	reload := func() {
+		close(store.release)
+		waitForRoomFailure(t, service, artifactID)
+		if err := service.awaitRoomRecovery(ctx, artifactID); err != nil {
+			t.Errorf("await room recovery: %v", err)
+		}
+		store.failing.Store(false)
+	}
+	store.beforeTx.Store(&reload)
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	if _, err := service.ApplyOps(joinedCtx, artifactID, []model.EditOp{{Op: "replace", Find: "before", With: "after"}}, alice, nil); err != nil {
+		t.Fatalf("joined edit: %v", err)
+	}
+	return service, artifactID, tx, joinedCtx, ledger
+}
+
+// A write keeps its fork of the room between operations. When the room reloads underneath it,
+// the fork still holds what the failed room had and the reloaded one dropped, so the write must
+// fork again: a version it snapshots is the document its commit publishes.
+func TestAWriteWhoseRoomReloadsSnapshotsTheReloadedDocument(t *testing.T) {
+	service, artifactID, tx, joinedCtx, ledger := forkBeforeRoomReload(t)
+	ctx := context.Background()
+	snapshot, err := service.SnapshotVersion(joinedCtx, tx, artifactID, model.Actor{Kind: "user", ID: "alice"})
+	if err != nil {
+		t.Fatalf("snapshot version: %v", err)
+	}
+	var versioned string
+	if err := tx.QueryRow(ctx, `select markdown from artifact_versions where artifact_id = $1 and number = $2`, artifactID, snapshot.Version.Number).Scan(&versioned); err != nil {
+		t.Fatalf("read snapshot version: %v", err)
+	}
+	if err := ledger.Commit(ctx); err != nil {
+		t.Fatalf("commit transactional edit: %v", err)
+	}
+	published, err := service.Text(ctx, artifactID)
+	if err != nil {
+		t.Fatalf("read published document: %v", err)
+	}
+	if published != "after\n" || versioned != published {
+		t.Fatalf("version %d = %q, published document = %q, want both %q", snapshot.Version.Number, versioned, published, "after\n")
+	}
+}
+
+// The paragraph the reloaded room dropped is gone for the write too: an edit that quotes it is
+// refused rather than reported applied and lost at the publish.
+func TestAWriteWhoseRoomReloadsCannotEditWhatTheReloadDropped(t *testing.T) {
+	service, artifactID, _, joinedCtx, _ := forkBeforeRoomReload(t)
+	applied, err := service.ApplyOps(joinedCtx, artifactID, []model.EditOp{{Op: "replace", Find: "typed", With: "TYPED"}}, model.Actor{Kind: "user", ID: "alice"}, nil)
+	if !errors.Is(err, pmdoc.ErrTargetNotFound) {
+		t.Fatalf("edit of the dropped paragraph = %d applied, %v; want %v", applied, err, pmdoc.ErrTargetNotFound)
 	}
 }

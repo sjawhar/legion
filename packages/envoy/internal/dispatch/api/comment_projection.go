@@ -11,10 +11,9 @@ import (
 )
 
 // commentProjectionKind reads the suggestion's kind from the live document. ctx is the handler's
-// document context (documentMutationContext), so the read joins the handler's transaction: it
-// runs while that transaction is open, where a second pooled connection is what deadlocks the
-// pool (store.ErrNestedAcquire), and it reads the document as the transaction's own writes left
-// it.
+// document context (Docs.Join), so the read joins the handler's transaction: it runs while that
+// transaction is open, where a second pooled connection is what deadlocks the pool
+// (store.ErrNestedAcquire), and it reads the document as the transaction's own writes left it.
 func (s *server) commentProjectionKind(ctx context.Context, comment model.Comment) (string, error) {
 	if comment.Suggestion == nil || comment.Anchor == nil {
 		return "", nil

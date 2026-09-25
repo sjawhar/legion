@@ -10,7 +10,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
@@ -139,7 +138,7 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 			if answer.Text != nil {
 				attributes["answer"] = *answer.Text
 			}
-			return s.deps.Docs.SetBlockAttributes(docs.WithTx(ctx, tx), *ask.BlockArtifactID, *ask.BlockID, attributes, actor)
+			return s.deps.Docs.SetBlockAttributes(ctx, *ask.BlockArtifactID, *ask.BlockID, attributes, actor)
 		},
 	)
 	// An approval ask's answer is a review of the document it names, pinned to
@@ -229,8 +228,8 @@ func (s *server) closeAsk(ctx context.Context, id string, actor model.Actor, tra
 		return model.Ask{}, err
 	}
 	defer tx.Rollback(ctx)
-	documentCtx, documentEvents := documentMutationContext(ctx, tx)
-	defer s.deps.Docs.DiscardLiveWrites(documentEvents)
+	documentCtx, ledger := s.deps.Docs.Join(ctx, tx)
+	defer ledger.Discard()
 	ask, err := s.transitionAskTx(documentCtx, tx, id, transition)
 	if err != nil {
 		return model.Ask{}, err
@@ -250,10 +249,10 @@ func (s *server) closeAsk(ctx context.Context, id string, actor model.Actor, tra
 		}
 		events = append(events, more...)
 	}
-	if err := s.commitDocumentMutation(ctx, tx, documentEvents); err != nil {
+	if err := ledger.Commit(ctx); err != nil {
 		return model.Ask{}, err
 	}
-	s.publishDocumentEvents(documentEvents, events...)
+	s.publishDocumentEvents(ledger, events...)
 	return ask, nil
 }
 

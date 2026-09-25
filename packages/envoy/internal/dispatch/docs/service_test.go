@@ -846,7 +846,7 @@ func TestRolledBackWriteNeverReachesTheRoom(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin transactional edit: %v", err)
 	}
-	joined, collector := joinTx(ctx, tx)
+	joined, ledger := service.Join(ctx, tx)
 	if _, err := service.ReplaceText(joined, artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("replace text: %v", err)
 	}
@@ -859,7 +859,7 @@ func TestRolledBackWriteNeverReachesTheRoom(t *testing.T) {
 	if err := tx.Rollback(ctx); err != nil {
 		t.Fatalf("roll back document mutation: %v", err)
 	}
-	service.DiscardLiveWrites(collector)
+	ledger.Discard()
 	time.Sleep(3 * settleInterval)
 	if got, err := service.Text(ctx, artifactID); err != nil || got != "before\n" {
 		t.Fatalf("live document after rollback = %q (%v), want before", got, err)
@@ -991,7 +991,7 @@ func snapshotAndCommitVersion(t *testing.T, service *Service, artifactID string,
 	if err := tx.Commit(context.Background()); err != nil {
 		t.Fatalf("commit snapshot transaction: %v", err)
 	}
-	service.CommitVersion(artifactID, version)
+	service.commitVersion(artifactID, version)
 }
 
 // settleCurrentGeneration runs the room's settlement at its current generation once every live
@@ -1589,12 +1589,11 @@ func (s *Service) recordActor(room string, actor model.Actor) {
 	state.mu.Unlock()
 }
 
-// joinTx joins document operations to tx the way an API handler does. The live writes they make
-// reach the room only through PublishLiveWrites on the returned collector, after tx commits, and
-// credit their authors only through CreditLiveWrites.
-func joinTx(ctx context.Context, tx pgx.Tx) (context.Context, *EventCollector) {
-	collector := NewEventCollector()
-	return WithEventCollector(WithTx(ctx, tx), collector), collector
+// joined joins document operations to tx the way an API handler does, for a test that commits
+// tx itself.
+func joined(service *Service, tx pgx.Tx) context.Context {
+	ctx, _ := service.Join(context.Background(), tx)
+	return ctx
 }
 
 func seedServiceText(t *testing.T, service *Service, artifactID, markdown string) {
