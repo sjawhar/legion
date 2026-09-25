@@ -151,6 +151,7 @@ func TestPromptReferencesReadTheSkillsTheAgentsAndTheRolePrompts(t *testing.T) {
 	for name, content := range map[string]string{
 		filepath.Join("core", "planner.md"): "Consult `task(agent=\"oracle\")` on a hard tradeoff.\n",
 		"reviewer.md":                       "Run `task(agent=\"thermonuclear-deep-review\")` after `skill://ce-simplify-code`.\n",
+		"tester.md":                         "Follow skill://legion-worker.\n",
 		"notes.txt":                         "task(agent=\"not-a-prompt\") skill://not-a-prompt\n",
 	} {
 		path := filepath.Join(roles, name)
@@ -174,7 +175,7 @@ func TestPromptReferencesReadTheSkillsTheAgentsAndTheRolePrompts(t *testing.T) {
 		},
 		{
 			"ce-simplify-code":          {filepath.Join("roles", "reviewer.md")},
-			"legion-worker":             {worker},
+			"legion-worker":             {worker, filepath.Join("roles", "tester.md")},
 			"thermonuclear-deep-review": {filepath.Join("agents", "thermonuclear-deep-review.md")},
 		},
 	}

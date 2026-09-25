@@ -472,7 +472,8 @@ type promptKind struct {
 }
 
 // promptKinds are the two forms: a task agent dispatched as `task(agent="<name>")` and a skill
-// loaded as `skill://<name>`. A worker whose call or read names one Oh My Pi cannot find gets an
+// loaded as `skill://<name>`, whose name ends on a letter or digit so the prose around it (a
+// sentence's period, a path's slash) is not read as part of it. A worker whose call or read names one Oh My Pi cannot find gets an
 // error listing what it has, and carries on without it, so the load probe resolves every name.
 var promptKinds = [...]promptKind{
 	{
@@ -485,7 +486,7 @@ var promptKinds = [...]promptKind{
 		discoveryName: "agent discovery",
 	},
 	{
-		reference:   regexp.MustCompile(`skill://([a-z0-9][a-z0-9._-]*)`),
+		reference:   regexp.MustCompile(`skill://([a-z0-9](?:[a-z0-9._-]*[a-z0-9])?)`),
 		variable:    "LEGION_PROMPT_SKILLS",
 		noun:        "skill",
 		namedBy:     "loaded by",
