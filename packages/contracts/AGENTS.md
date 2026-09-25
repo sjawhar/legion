@@ -56,10 +56,17 @@ the native Dispatch tool suite:
   client-owned attributes; `delete` and `move` also address a whole block by id; and table row or
   column deletion takes its table block id plus a zero-based `index`, preserving the table id and
   refusing to remove cells with open asks or unresolved comments. Insert/move anchors accept
-  `block:<id>` beside quotes, `start`, `end`, and `heading:<title>`. An optional `precondition`
-  selects exactly one whole-document token from `dispatch_doc_read` or block `{id, token}` entries
-  from `/blocks`; a block guard must cover every content block the batch changes, while untouched sections
-  remain independent. Insert and move need the document token because they depend on document order.
+  `block:<id>` beside quotes, `start`, `end`, and `heading:<title>`. The per-op object is the one
+  nested object built strict (`z.object(shape, { strict: true })`): every key but `op` is optional,
+  so a misspelled key would otherwise be stripped and the operation would run without it — a
+  `replace` left with no `with` deletes the text it was meant to rewrite. `dispatchToolSchema`'s
+  own `strict` covers only the top level, and the Go server's `DisallowUnknownFields` never sees a
+  key the tool layer already stripped, so this is the boundary that catches it. An unknown key
+  nested anywhere is reported with that object's keys, not the tool's (`formatZodIssues`).
+  An optional `precondition` selects exactly one whole-document token from `dispatch_doc_read` or
+  block `{id, token}` entries from `/blocks`; a block guard must cover every content block the
+  batch changes, while untouched sections remain independent. Insert and move need the document
+  token because they depend on document order.
   Tokens include inline marks, so a new anchored ask or comment rejects a stale edit. A stale guard
   returns `PRECONDITION_FAILED` with the current tokens and applies no part of the batch.
   Ask lifecycle payloads include nullable `block_id`; `block.repaired` restores server-owned

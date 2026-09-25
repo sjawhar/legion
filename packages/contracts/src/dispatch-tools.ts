@@ -609,52 +609,60 @@ export const dispatchToolSpecs = [
       ref: z.string().describe("Optional dispatch:// issue or document reference.").optional(),
       ops: z
         .array(
-          z.object({
-            op: z.enum(DOC_EDIT_OPS).describe("Edit operation."),
-            find: z
-              .string()
-              .describe(
-                "Text of the target as rendered, for replace or delete; inline markdown (**bold**, `code`) is tolerated and must be balanced; a leading '# ' matches a heading. A delete of a block's entire text removes the block."
-              )
-              .optional(),
-            with: z
-              .string()
-              .describe(
-                "Replacement text for replace, parsed as inline markdown within the matched block; a marker of a different kind from the block's own is literal text, one of the same kind is refused unless it is a heading rename (where a level named by find is what lets with change it), a backslash escape keeps prose that merely looks like a marker, and any non-empty value that renders to no text is refused - only an empty value deletes the match."
-              )
-              .optional(),
-            occurrence: z
-              .number({ int: true, min: 0 })
-              .describe("Optional zero-based match occurrence.")
-              .optional(),
-            markdown: z.string().describe("Markdown to insert.").optional(),
-            after: z
-              .string()
-              .describe(
-                'Insert or move after this anchor: a quote of the neighbouring block\'s text, or one of "start", "end", "heading:<exact heading text>", "block:<id>".'
-              )
-              .optional(),
-            before: z
-              .string()
-              .describe(
-                'Insert or move before this anchor: a quote of the neighbouring block\'s text, or one of "start", "end", "heading:<exact heading text>", "block:<id>".'
-              )
-              .optional(),
-            block: z
-              .string()
-              .describe(
-                "Block id for retype, delete, move, delete_row, or delete_column: the #id of a typed block, or an id from GET /api/v1/artifacts/{id}/blocks."
-              )
-              .optional(),
-            index: z
-              .number({ int: true, min: 0 })
-              .describe("Zero-based row or column index for delete_row or delete_column.")
-              .optional(),
-            type: z.string().describe("Typed block name for retype.").optional(),
-            attributes: z.unknown().describe("Typed block attributes for retype.").optional(),
-          })
+          // Strict: every key but `op` is optional, so a misspelled one (`replace` for `with`)
+          // would otherwise be stripped and the operation would run without it - a `replace`
+          // left with no `with` deletes the text it was meant to rewrite.
+          z.object(
+            {
+              op: z.enum(DOC_EDIT_OPS).describe("Edit operation."),
+              find: z
+                .string()
+                .describe(
+                  "Text of the target as rendered, for replace or delete; inline markdown (**bold**, `code`) is tolerated and must be balanced; a leading '# ' matches a heading. A delete of a block's entire text removes the block."
+                )
+                .optional(),
+              with: z
+                .string()
+                .describe(
+                  "Replacement text for replace, parsed as inline markdown within the matched block; a marker of a different kind from the block's own is literal text, one of the same kind is refused unless it is a heading rename (where a level named by find is what lets with change it), a backslash escape keeps prose that merely looks like a marker, and any non-empty value that renders to no text is refused - only an empty value deletes the match."
+                )
+                .optional(),
+              occurrence: z
+                .number({ int: true, min: 0 })
+                .describe("Optional zero-based match occurrence.")
+                .optional(),
+              markdown: z.string().describe("Markdown to insert.").optional(),
+              after: z
+                .string()
+                .describe(
+                  'Insert or move after this anchor: a quote of the neighbouring block\'s text, or one of "start", "end", "heading:<exact heading text>", "block:<id>".'
+                )
+                .optional(),
+              before: z
+                .string()
+                .describe(
+                  'Insert or move before this anchor: a quote of the neighbouring block\'s text, or one of "start", "end", "heading:<exact heading text>", "block:<id>".'
+                )
+                .optional(),
+              block: z
+                .string()
+                .describe(
+                  "Block id for retype, delete, move, delete_row, or delete_column: the #id of a typed block, or an id from GET /api/v1/artifacts/{id}/blocks."
+                )
+                .optional(),
+              index: z
+                .number({ int: true, min: 0 })
+                .describe("Zero-based row or column index for delete_row or delete_column.")
+                .optional(),
+              type: z.string().describe("Typed block name for retype.").optional(),
+              attributes: z.unknown().describe("Typed block attributes for retype.").optional(),
+            },
+            { strict: true }
+          )
         )
-        .describe("Flat tagged edits; the server validates fields required for each operation."),
+        .describe(
+          "Flat tagged edits; an operation takes only the keys below, a misspelled one is refused rather than ignored, and the server validates the fields its op requires."
+        ),
       precondition: z
         .object({
           document: z

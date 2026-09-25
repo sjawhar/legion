@@ -542,6 +542,11 @@ type EditOp = {
 };
 ```
 
+An operation takes only these keys. A key it does not declare is refused before the call leaves
+your process, naming the operation and its keys, because every key but `op` is optional: a
+misspelled `with` would otherwise be dropped and the `replace` would delete the text you meant to
+rewrite.
+
 Target `replace`, `delete`, and quote insert anchors by a block's text as rendered: write inline
 code without backticks, bold without asterisks, and link text without link syntax. A table-cell
 anchor is its cell text. Quote code-block contents without their Markdown fences. A quote must stay

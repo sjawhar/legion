@@ -132,8 +132,13 @@ export function formatZodIssues(issues: readonly z.core.$ZodIssue[], schema: z.Z
           : [
               `${path} must be ${describeExpected(issue.expected, schemaAt(schema, issue.path))}, not ${describeInput(issue.input)}`,
             ];
-      case "unrecognized_keys":
-        return issue.keys.map((key) => `unknown field "${key}"; allowed: ${allowed}`);
+      case "unrecognized_keys": {
+        // A nested object's allowed keys are its own: the tool's top-level keys would send a
+        // model that mistyped a document-edit operation's key back with the same operation.
+        const here = Object.keys(shapeOf(schemaAt(schema, issue.path)) ?? {}).join(", ") || allowed;
+        const where = path === "" ? "" : ` in ${path}`;
+        return issue.keys.map((key) => `unknown field "${key}"${where}; allowed: ${here}`);
+      }
       case "invalid_value":
         return [
           `${path} must be one of ${issue.values.map(String).join("|")}; got ${JSON.stringify(issue.input)}`,
