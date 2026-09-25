@@ -163,13 +163,35 @@ deletion at the reviewer's direction, and the implementer — before every push 
 review — and the merger — once more before READY — resolve every thread the reviewer has accepted with
 `legion threads resolve --pr <number> --repo <owner>/<repo>` (`cli/review-threads.ts`,
 `cmdThreadsResolve` in `cli/index.ts`). The command redeems the caller's grant through the same
-`/gh-token` path `legion gh` uses, reads every review thread over GitHub GraphQL with an injected
-`fetch`, resolves each unresolved thread whose newest comment was written by the account that
-opened it and begins `Accepted:` (one `resolveReviewThread` per thread), prints `resolved <url>` /
-`left open <url> — newest reply by <login> is not an acceptance`, and exits 1 naming the first
-thread GitHub refuses; any newest comment that is not the opener's own `Accepted:` — a
-`Still open:` reply, a reply by another account, or the opener's own later follow-up — leaves the
-thread open with exit 0.
+`/gh-token` path `legion gh` uses and reads every review thread over GitHub GraphQL with an
+injected `fetch`; with no grant, its refusal names `--gh`. With `--gh`, for a session outside a
+Legion pane, which has no grant, it redeems nothing: `ghGraphql` sends the same queries and
+mutations through the caller's own `gh` (`gh api graphql --input -` under the caller's
+environment, which decides the identity, plus `GH_REPO` from `--repo`, so a routed `gh`
+authenticates for that repository from any directory), and shows gh's stderr on success too, where
+the devbox shim names an inherited `GH_TOKEN` or a fallback personal token the call then acts as.
+`--gh` inside a pane (`LEGION_GRANT_FILE` set) is refused before anything runs: the pane's `gh` is
+`worker-bin/gh`, which execs `legion gh`, and that refuses, as a possible merge, a GraphQL
+`--input` body it cannot read; the pane uses its grant. Either way the same
+`resolveAcceptedThreads` resolves each unresolved thread whose newest comment was written by the
+account that opened it, begins `Accepted:` after nothing but space, tab, CR or LF, and is submitted
+(one `resolveReviewThread` per thread), prints `resolved <url>` / `left open <url> — newest reply
+by <login> is not an acceptance`, and exits 1 naming the first thread GitHub refuses; any newest
+comment that is not the opener's own `Accepted:` — a `Still open:` reply, a reply by another
+account, the opener's own later follow-up, or an `Accepted:` after a no-break space — leaves the
+thread open with exit 0. A newest comment that is a draft in a pending review never counts either
+(`left open <url> — newest reply by <login> is an unsubmitted draft in a pending review`). GitHub
+shows a draft only to its author, so a caller posting as the opener's account would otherwise
+resolve on an acceptance nobody submitted. For every caller, then, a thread is resolved only when
+its newest submitted comment is the opener's `Accepted:`; a caller's own draft newer than that can
+only make it leave the thread open. A newest comment with no `state` (the query stopped selecting
+it), or an unresolved thread with no comments, exits 1 before anything is resolved. The Go CLI's
+`threads resolve` (`packages/daemon-go/cmd/legion/threads.go`) applies the same rule, whitespace,
+pending drafts and both refusals included; `threads_test.go` and `review-threads.test.ts` share
+its vectors. Outside a pane the reviewer and the implementer can post as one account, the
+repository owner's App: the caller then sees the reviewer's drafts, and the opener check cannot
+tell an implementer's `Accepted:` from the reviewer's, so only the reviewer ever writes
+`Accepted:`.
 
 Each App's private key comes from exactly one of three `legion.yaml` sources under
 `github_apps.<role>` (`loadGitHubApps`, `config.ts`): `private_key` (the PEM inline),

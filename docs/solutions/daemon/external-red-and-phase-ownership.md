@@ -98,12 +98,13 @@ App is rejected by design, not because it would not work. So in every round:
 - the reviewer answers each thread it opened with one of `Accepted: fixed in <commit> — <one line>`,
   `Accepted: not a defect — <reason>`, or `Still open: <what remains>`, and the **implementer**
   runs `legion threads resolve --pr <number> --repo <owner>/<repo>` (LEGION-34) before its next
-  push: it resolves every unresolved thread whose newest comment is the opener's own `Accepted:`
-  reply, one `resolveReviewThread` per thread, prints `resolved <url>` /
-  `left open <url> — newest reply by <login> is not an acceptance`, and exits 1 naming the thread
-  and GitHub's message when GitHub refuses one (report it to the architect; a human resolves that
-  thread). The merger runs it once more before READY. Never a hand-written GraphQL mutation and
-  never a bulk resolve;
+  push: it resolves every unresolved thread whose newest comment is the opener's own submitted
+  `Accepted:` reply, one `resolveReviewThread` per thread, prints `resolved <url>` /
+  `left open <url> — newest reply by <login> is not an acceptance` (or `… is an unsubmitted draft
+  in a pending review`, for a newest comment still in a pending review), and exits 1 naming the
+  thread and GitHub's message when GitHub refuses one (report it to the architect; a human
+  resolves that thread). The merger runs it once more before READY. Never a hand-written GraphQL
+  mutation and never a bulk resolve;
 - the reviewer's approval is the review itself; the head it approves by name is the
   implementer-pushed `.legion/` deletion.
 
@@ -128,7 +129,8 @@ Quote GitHub's sentence when writing the *why*; do not re-derive it from the int
 **Why the reply grammar is exact.** GitHub stores no verdict on a thread — `isResolved` is the only
 state, and the review App cannot set it — so the reviewer's reply text is the only machine-readable
 signal. `isAcceptance` (`packages/daemon/src/cli/review-threads.ts`) is a strict prefix check on
-the newest comment after `trimStart()`: `Accepted (round 2): …` (sjawhar/legion#966's own wording),
+the newest comment after stripping leading space, tab, CR and LF only, the same four characters the
+Go CLI strips: `Accepted (round 2): …` (sjawhar/legion#966's own wording),
 `Fixed in …`, a bare "fixed, thanks", or an `Accepted:` written by anyone but the thread's opener
 leaves the thread open, silently and by design (the unit test pins each). The opener's own later
 follow-up leaves it open too — the rule reads the newest comment only — so nobody replies after an

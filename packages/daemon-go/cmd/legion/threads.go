@@ -16,7 +16,7 @@ const reviewThreadsQuery = `query($owner: String!, $name: String!, $number: Int!
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       reviewThreads(first: 100, after: $after) {
-        nodes { id isResolved opener: comments(first: 1) { nodes { author { login } url body } } newest: comments(last: 1) { nodes { author { login } url body } } }
+        nodes { id isResolved opener: comments(first: 1) { nodes { author { login } url body } } newest: comments(last: 1) { nodes { author { login } url body state } } }
         pageInfo { hasNextPage endCursor }
       }
     }
@@ -67,12 +67,22 @@ func runThreads(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		return 0
 	}
 	for _, thread := range threads {
-		if thread.openerLogin == "" || thread.openerLogin != thread.newestLogin || !strings.HasPrefix(strings.TrimLeft(thread.newestBody, " \t\r\n"), "Accepted:") {
+		// A draft in a pending review never counts: GitHub shows it only to its author, so a caller
+		// posting as the opener's account would otherwise resolve on an unsubmitted acceptance. For
+		// every caller a thread is resolved only when its newest submitted comment is the opener's
+		// Accepted:; a caller's own newer draft can only make it leave the thread open. Only space,
+		// tab, CR and LF may precede Accepted:. This is the TypeScript CLI's rule (review-threads.ts
+		// acceptedByOpener and isAcceptance); threads_test.go and review-threads.test.ts share vectors.
+		if thread.newestPending || thread.openerLogin == "" || thread.openerLogin != thread.newestLogin || !strings.HasPrefix(strings.TrimLeft(thread.newestBody, " \t\r\n"), "Accepted:") {
 			by := thread.newestLogin
 			if by == "" {
 				by = "an unknown account"
 			}
-			fmt.Fprintf(stdout, "left open %s — newest reply by %s is not an acceptance\n", thread.url, by)
+			reason := "not an acceptance"
+			if thread.newestPending {
+				reason = "an unsubmitted draft in a pending review"
+			}
+			fmt.Fprintf(stdout, "left open %s — newest reply by %s is %s\n", thread.url, by, reason)
 			continue
 		}
 		if err := graphql(ctx, credential.Token, resolveReviewThreadMutation, map[string]any{"threadId": thread.id}, nil); err != nil {
@@ -97,6 +107,8 @@ func threadFailure(stderr io.Writer, url string, err error) int {
 
 type reviewThread struct {
 	id, url, openerLogin, newestLogin, newestBody string
+	// newestPending marks a newest comment that is a draft in a pending, unsubmitted review.
+	newestPending bool
 }
 
 func unresolvedReviewThreads(ctx context.Context, token, owner, name string, number int) ([]reviewThread, error) {
@@ -111,11 +123,19 @@ func unresolvedReviewThreads(ctx context.Context, token, owner, name string, num
 			return nil, fmt.Errorf("%s/%s#%d was not found by GitHub", owner, name, number)
 		}
 		for _, node := range page.Data.Repository.PullRequest.ReviewThreads.Nodes {
-			if node.IsResolved || len(node.Opening.Nodes) == 0 || len(node.Newest.Nodes) == 0 {
+			if node.IsResolved {
 				continue
 			}
+			if len(node.Opening.Nodes) == 0 || len(node.Newest.Nodes) == 0 {
+				return nil, fmt.Errorf("review thread %s has no comments", node.ID)
+			}
 			opening, newest := node.Opening.Nodes[0], node.Newest.Nodes[0]
-			all = append(all, reviewThread{id: node.ID, url: opening.URL, openerLogin: opening.Author.Login, newestLogin: newest.Author.Login, newestBody: newest.Body})
+			// GitHub always answers state when the query selects it. Anything else means the query or
+			// the response changed shape, and reading it as submitted would resolve on a draft.
+			if newest.State != "PENDING" && newest.State != "SUBMITTED" {
+				return nil, fmt.Errorf("review thread %s: its newest comment carried state %q, not \"PENDING\" or \"SUBMITTED\"", node.ID, newest.State)
+			}
+			all = append(all, reviewThread{id: node.ID, url: opening.URL, openerLogin: opening.Author.Login, newestLogin: newest.Author.Login, newestBody: newest.Body, newestPending: newest.State == "PENDING"})
 		}
 		info := page.Data.Repository.PullRequest.ReviewThreads.PageInfo
 		if !info.HasNextPage {
@@ -151,8 +171,10 @@ type reviewThreadsPage struct {
 }
 
 type reviewComment struct {
-	URL    string `json:"url"`
-	Body   string `json:"body"`
+	URL  string `json:"url"`
+	Body string `json:"body"`
+	// State is GitHub's PullRequestReviewCommentState (PENDING or SUBMITTED), selected on newest.
+	State  string `json:"state"`
 	Author struct {
 		Login string `json:"login"`
 	} `json:"author"`

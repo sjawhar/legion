@@ -6,6 +6,8 @@ const PR = "https://github.com/sjawhar/legion/pull/993#discussion_r";
 interface Comment {
   login: string;
   body: string;
+  /** GitHub's `PullRequestReviewCommentState`; a PENDING comment is visible only to its author. */
+  state?: "PENDING" | "SUBMITTED";
 }
 
 function thread(id: string, n: number, opener: string, newest: Comment, isResolved = false) {
@@ -13,7 +15,11 @@ function thread(id: string, n: number, opener: string, newest: Comment, isResolv
     id,
     isResolved,
     opener: { nodes: [{ url: `${PR}${n}`, author: { login: opener } }] },
-    newest: { nodes: [{ author: { login: newest.login }, body: newest.body }] },
+    newest: {
+      nodes: [
+        { author: { login: newest.login }, body: newest.body, state: newest.state ?? "SUBMITTED" },
+      ],
+    },
   };
 }
 
@@ -32,6 +38,14 @@ function page(nodes: unknown[], endCursor: string | null) {
 const resolvedOk = (threadId: string) => ({
   data: { resolveReviewThread: { thread: { id: threadId, isResolved: true } } },
 });
+
+/** A page as GitHub serves it for `query`: GitHub answers only the fields a query selects, so each
+ * newest comment's `state` is dropped unless the query's `newest` selection names it. */
+function served(query: string, page: unknown): unknown {
+  const newest = query.split("\n").find((line) => line.includes("newest:")) ?? "";
+  if (page === undefined || /\bstate\b/.test(newest)) return page;
+  return JSON.parse(JSON.stringify(page), (key, value) => (key === "state" ? undefined : value));
+}
 
 /** A fake daemon + GitHub: `/legion/v1/gh-token` redeems the grant; `api.github.com/graphql`
  * serves `reviewThreads` pages keyed by the `after` cursor ("null" for the first page) and
@@ -58,10 +72,49 @@ function fakeGitHub(
       resolved.push(threadId);
       return Response.json(mutation(threadId));
     }
-    return Response.json(pages[String(body.variables.after)]);
+    return Response.json(served(body.query, pages[String(body.variables.after)]));
   };
   return { fetch, requests, graphqlBodies, resolved };
 }
+
+/** For a run that must never reach gh: the grant path, and `--gh` refused inside a pane. */
+const noGh = {
+  runGh: async (): Promise<never> => {
+    throw new Error("gh ran");
+  },
+  stderr: (): never => {
+    throw new Error("gh's stderr was written");
+  },
+};
+
+/** A caller's own `gh` for `--gh`: `gh api graphql --input -` served from the same pages and
+ * mutation as `fakeGitHub`, recording each call's argv and environment, and writing `stderr` on
+ * every successful call. */
+function fakeGh(
+  pages: Record<string, unknown>,
+  mutation: (threadId: string) => unknown,
+  stderr = ""
+) {
+  const calls: Array<{ args: string[]; env: NodeJS.ProcessEnv }> = [];
+  const resolved: string[] = [];
+  const runGh = async (args: string[], stdin: string, env: NodeJS.ProcessEnv) => {
+    calls.push({ args, env });
+    const body = JSON.parse(stdin) as { query: string; variables: Record<string, unknown> };
+    if (body.query.includes("resolveReviewThread")) {
+      const threadId = body.variables.threadId as string;
+      resolved.push(threadId);
+      return { exitCode: 0, stdout: JSON.stringify(mutation(threadId)), stderr };
+    }
+    const page = served(body.query, pages[String(body.variables.after)]);
+    return { exitCode: 0, stdout: JSON.stringify(page), stderr };
+  };
+  return { runGh, calls, resolved };
+}
+
+/** No daemon and no GitHub API from the CLI itself: `--gh` reaches GitHub only through `gh`. */
+const noFetch = async (): Promise<never> => {
+  throw new Error("--gh fetched");
+};
 
 describe("legion threads resolve", () => {
   it("resolves exactly the unresolved threads whose newest comment is the opener's Accepted: reply, across pages", async () => {
@@ -112,7 +165,12 @@ describe("legion threads resolve", () => {
 
     await cmdThreadsResolve(
       { repo: "sjawhar/legion", pr: "993" },
-      { env: { LEGION_GRANT: "grant-123" }, fetch: github.fetch, log: (line) => lines.push(line) }
+      {
+        env: { LEGION_GRANT: "grant-123" },
+        fetch: github.fetch,
+        ...noGh,
+        log: (line) => lines.push(line),
+      }
     );
 
     expect(github.resolved).toEqual(["T1", "T5"]);
@@ -156,7 +214,12 @@ describe("legion threads resolve", () => {
     await expect(
       cmdThreadsResolve(
         { repo: "sjawhar/legion", pr: "993" },
-        { env: { LEGION_GRANT: "grant-123" }, fetch: github.fetch, log: (line) => lines.push(line) }
+        {
+          env: { LEGION_GRANT: "grant-123" },
+          fetch: github.fetch,
+          ...noGh,
+          log: (line) => lines.push(line),
+        }
       )
     ).rejects.toEqual(
       expect.objectContaining({
@@ -174,7 +237,12 @@ describe("legion threads resolve", () => {
     await expect(
       cmdThreadsResolve(
         { repo: "sjawhar/legion", pr: "993" },
-        { env: { LEGION_GRANT: "grant-123" }, fetch: github.fetch, log: () => undefined }
+        {
+          env: { LEGION_GRANT: "grant-123" },
+          fetch: github.fetch,
+          ...noGh,
+          log: () => undefined,
+        }
       )
     ).rejects.toEqual(
       // The CLI includes the status and daemon refusal message.
@@ -206,7 +274,12 @@ describe("legion threads resolve", () => {
 
     await cmdThreadsResolve(
       { repo: "sjawhar/legion", pr: "993" },
-      { env: { LEGION_GRANT: "grant-123" }, fetch: github.fetch, log: (line) => lines.push(line) }
+      {
+        env: { LEGION_GRANT: "grant-123" },
+        fetch: github.fetch,
+        ...noGh,
+        log: (line) => lines.push(line),
+      }
     );
 
     expect(lines).toEqual(["no unresolved threads"]);
@@ -224,10 +297,285 @@ describe("legion threads resolve", () => {
         cmdThreadsResolve(options, {
           env: { LEGION_GRANT: "grant-123" },
           fetch: github.fetch,
+          ...noGh,
           log: () => undefined,
         })
       ).rejects.toEqual(expect.objectContaining({ message, code: 1 }));
       expect(github.requests).toEqual([]);
     }
+  });
+
+  it("--gh applies the same rule through the caller's gh, with no grant and from any directory", async () => {
+    const reviewer = "legion-reviewer";
+    const gh = fakeGh(
+      {
+        null: page(
+          [
+            thread("T1", 1, reviewer, { login: reviewer, body: "Accepted: fixed in abc1234" }),
+            // An `Accepted:` from an account other than the opener is not the opener's
+            // acceptance: refused.
+            thread("T2", 2, reviewer, { login: "sjawhar-agent", body: "Accepted: fixed" }),
+            thread("T3", 3, reviewer, { login: reviewer, body: "Still open: the test pins text." }),
+          ],
+          null
+        ),
+      },
+      resolvedOk
+    );
+    const lines: string[] = [];
+    const written: string[] = [];
+
+    await cmdThreadsResolve(
+      { repo: "sjawhar/legion", pr: "993", gh: true },
+      {
+        env: { OMP_SESSION_ID: "omp-session", GH_REPO: "acme/widgets" },
+        fetch: noFetch,
+        runGh: gh.runGh,
+        log: (line) => lines.push(line),
+        stderr: (text) => written.push(text),
+      }
+    );
+
+    expect(gh.resolved).toEqual(["T1"]);
+    expect(lines).toEqual([
+      `resolved ${PR}1`,
+      `left open ${PR}2 — newest reply by sjawhar-agent is not an acceptance`,
+      `left open ${PR}3 — newest reply by legion-reviewer is not an acceptance`,
+    ]);
+    // A clean success writes nothing to stderr.
+    expect(written).toEqual([]);
+    // Every call gets the caller's environment, which decides the identity (the devbox shim routes
+    // to an App only when it sees an agent session such as OMP_SESSION_ID), with GH_REPO set to
+    // --repo over the caller's own: a routed gh outside a checkout has no other owner to route on.
+    const env = { OMP_SESSION_ID: "omp-session", GH_REPO: "sjawhar/legion" };
+    expect(gh.calls).toEqual([
+      { args: ["api", "graphql", "--input", "-"], env },
+      { args: ["api", "graphql", "--input", "-"], env },
+    ]);
+  });
+
+  it("--gh shows gh's stderr from a successful call, where the devbox shim names an inherited GH_TOKEN the call then acts as", async () => {
+    const reviewer = "legion-reviewer";
+    const warning =
+      "gh shim: GH_TOKEN inherited from the environment (ghp_…, a PERSONAL token: this call acts as its user, not as an App); not routing\n";
+    const gh = fakeGh(
+      {
+        null: page(
+          [thread("T1", 1, reviewer, { login: reviewer, body: "Accepted: fixed in abc1234" })],
+          null
+        ),
+      },
+      resolvedOk,
+      warning
+    );
+    const lines: string[] = [];
+    const written: string[] = [];
+
+    await cmdThreadsResolve(
+      { repo: "sjawhar/legion", pr: "993", gh: true },
+      {
+        env: { GH_TOKEN: "ghp_personal" },
+        fetch: noFetch,
+        runGh: gh.runGh,
+        log: (line) => lines.push(line),
+        stderr: (text) => written.push(text),
+      }
+    );
+
+    expect(lines).toEqual([`resolved ${PR}1`]);
+    // The query's and the mutation's, verbatim: the mutation acts as that token's owner.
+    expect(written).toEqual([warning, warning]);
+  });
+
+  it("leaves open a thread whose newest comment is the opener's Accepted: still pending in an unsubmitted review, on both paths", async () => {
+    // GitHub shows a pending review's drafts to their author only. Outside a pane the caller can
+    // be the account that opened every thread (sjawhar-agent on sjawhar/*), and a role App can
+    // have drafts of its own: neither path may act on one.
+    const account = "sjawhar-agent";
+    const pages = {
+      null: page(
+        [
+          thread("T1", 1, account, {
+            login: account,
+            body: "Accepted: drafted, not yet submitted",
+            state: "PENDING",
+          }),
+          thread("T2", 2, account, { login: account, body: "Accepted: fixed in abc1234" }),
+        ],
+        null
+      ),
+    };
+    const github = fakeGitHub(pages, resolvedOk);
+    const gh = fakeGh(pages, resolvedOk);
+    const runs = [
+      {
+        gh: false,
+        deps: { env: { LEGION_GRANT: "grant-123" }, fetch: github.fetch, ...noGh },
+        resolved: github.resolved,
+      },
+      {
+        gh: true,
+        deps: { env: {}, fetch: noFetch, runGh: gh.runGh, stderr: () => undefined },
+        resolved: gh.resolved,
+      },
+    ];
+
+    for (const run of runs) {
+      const lines: string[] = [];
+      await cmdThreadsResolve(
+        { repo: "sjawhar/legion", pr: "993", gh: run.gh },
+        { ...run.deps, log: (line) => lines.push(line) }
+      );
+
+      expect(run.resolved).toEqual(["T2"]);
+      expect(lines).toEqual([
+        `left open ${PR}1 — newest reply by sjawhar-agent is an unsubmitted draft in a pending review`,
+        `resolved ${PR}2`,
+      ]);
+    }
+  });
+
+  it("trims only space, tab, CR and LF before Accepted:, as the Go CLI does", async () => {
+    // The shared vector with threads_test.go: both CLIs must answer these the same way.
+    const reviewer = "legion-reviewer";
+    const github = fakeGitHub(
+      {
+        null: page(
+          [
+            thread("T1", 1, reviewer, { login: reviewer, body: " \t\r\nAccepted: fixed" }),
+            thread("T2", 2, reviewer, { login: reviewer, body: "\u00a0Accepted: fixed" }),
+          ],
+          null
+        ),
+      },
+      resolvedOk
+    );
+    const lines: string[] = [];
+
+    await cmdThreadsResolve(
+      { repo: "sjawhar/legion", pr: "993" },
+      {
+        env: { LEGION_GRANT: "grant-123" },
+        fetch: github.fetch,
+        ...noGh,
+        log: (line) => lines.push(line),
+      }
+    );
+
+    expect(github.resolved).toEqual(["T1"]);
+    expect(lines).toEqual([
+      `resolved ${PR}1`,
+      `left open ${PR}2 — newest reply by legion-reviewer is not an acceptance`,
+    ]);
+  });
+
+  it("refuses a newest comment that carries no state, resolving nothing", async () => {
+    // GitHub always answers `state` when the query selects it; its absence means the query or the
+    // response changed shape, and treating it as submitted would bring back resolve-on-a-draft.
+    const reviewer = "legion-reviewer";
+    const github = fakeGitHub(
+      {
+        null: page(
+          [
+            {
+              id: "T1",
+              isResolved: false,
+              opener: { nodes: [{ url: `${PR}1`, author: { login: reviewer } }] },
+              newest: { nodes: [{ author: { login: reviewer }, body: "Accepted: fixed" }] },
+            },
+          ],
+          null
+        ),
+      },
+      resolvedOk
+    );
+
+    await expect(
+      cmdThreadsResolve(
+        { repo: "sjawhar/legion", pr: "993" },
+        { env: { LEGION_GRANT: "grant-123" }, fetch: github.fetch, ...noGh, log: () => undefined }
+      )
+    ).rejects.toEqual(
+      expect.objectContaining({
+        message:
+          'review thread T1: its newest comment carried state undefined, not "PENDING" or "SUBMITTED"',
+        code: 1,
+      })
+    );
+    expect(github.resolved).toEqual([]);
+  });
+
+  it("refuses an unresolved thread with no comments, as the Go CLI does", async () => {
+    const github = fakeGitHub(
+      {
+        null: page(
+          [{ id: "T1", isResolved: false, opener: { nodes: [] }, newest: { nodes: [] } }],
+          null
+        ),
+      },
+      resolvedOk
+    );
+
+    await expect(
+      cmdThreadsResolve(
+        { repo: "sjawhar/legion", pr: "993" },
+        { env: { LEGION_GRANT: "grant-123" }, fetch: github.fetch, ...noGh, log: () => undefined }
+      )
+    ).rejects.toEqual(
+      expect.objectContaining({ message: "review thread T1 has no comments", code: 1 })
+    );
+    expect(github.resolved).toEqual([]);
+  });
+
+  it("--gh exits 1 with gh's own message when gh fails, resolving nothing", async () => {
+    const runGh = async () => ({
+      exitCode: 4,
+      stdout: "",
+      stderr: "gh: To use GitHub CLI in automation, set the GH_TOKEN environment variable.\n",
+    });
+    const written: string[] = [];
+
+    await expect(
+      cmdThreadsResolve(
+        { repo: "sjawhar/legion", pr: "993", gh: true },
+        {
+          env: {},
+          fetch: noFetch,
+          runGh,
+          log: () => undefined,
+          stderr: (text) => written.push(text),
+        }
+      )
+    ).rejects.toEqual(
+      expect.objectContaining({
+        message:
+          "gh api graphql failed (exit 4): gh: To use GitHub CLI in automation, set the GH_TOKEN environment variable.",
+        code: 1,
+      })
+    );
+    // gh's message reaches the caller once, in the error.
+    expect(written).toEqual([]);
+  });
+
+  it("--gh in a Legion pane is refused before gh runs, pointing at the grant path", async () => {
+    // A pane's `gh` is `legion gh`, which refuses a GraphQL body it cannot read as a merge: the
+    // pane's way to the rule is its grant, so --gh there is named as the wrong path up front.
+    await expect(
+      cmdThreadsResolve(
+        { repo: "sjawhar/legion", pr: "993", gh: true },
+        {
+          env: { LEGION_GRANT_FILE: "/run/legion/grant" },
+          fetch: noFetch,
+          ...noGh,
+          log: () => undefined,
+        }
+      )
+    ).rejects.toEqual(
+      expect.objectContaining({
+        message:
+          "--gh is for a session outside a Legion pane; this pane names a grant (LEGION_GRANT_FILE), so run legion threads resolve without --gh",
+        code: 1,
+      })
+    );
   });
 });

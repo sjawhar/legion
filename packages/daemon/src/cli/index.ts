@@ -44,9 +44,11 @@ import { CliError } from "./errors";
 import { isGhMergeIntent } from "./gh-merge-intent";
 import {
   type Fetch,
+  ghGraphql,
   githubGraphql,
   parsePullNumber,
   parseRepo,
+  type RunGh,
   resolveAcceptedThreads,
 } from "./review-threads";
 import { readSecretPointer } from "./secret-pointer";
@@ -64,7 +66,10 @@ interface GhCommandDeps extends GrantRedemptionDeps {
 }
 
 interface ThreadsResolveCommandDeps extends GrantRedemptionDeps {
+  runGh: RunGh;
   log(line: string): void;
+  /** Writes gh's own stderr from a successful `--gh` call, verbatim. */
+  stderr(text: string): void;
 }
 
 interface CredentialCommandDeps {
@@ -94,11 +99,12 @@ function daemonUrl(env: NodeJS.ProcessEnv, explicit?: string): string {
   );
 }
 
-/** The grant `legion gh`, `legion credential`, and `legion handoff complete` redeem:
- * `LEGION_GRANT_FILE` (the file the daemon names on every pane and the pi-envoy extension writes
- * before each bash command runs — never command text or the bash tool's `env`, see LEGION-12 and
- * LEGION-52) ahead of `LEGION_GRANT`, an operator's own manual export. */
-function grantFrom(env: NodeJS.ProcessEnv): string {
+/** The grant `legion gh`, `legion credential`, `legion handoff complete`, and `legion threads
+ * resolve` (without `--gh`) redeem: `LEGION_GRANT_FILE` (the file the daemon names on every pane
+ * and the pi-envoy extension writes before each bash command runs — never command text or the bash
+ * tool's `env`, see LEGION-12 and LEGION-52) ahead of `LEGION_GRANT`, an operator's own manual
+ * export. `withoutGrant` ends the no-grant refusal with a command's own way to run without one. */
+function grantFrom(env: NodeJS.ProcessEnv, withoutGrant = ""): string {
   const file = env.LEGION_GRANT_FILE;
   if (file !== undefined) {
     try {
@@ -117,7 +123,7 @@ function grantFrom(env: NodeJS.ProcessEnv): string {
   const grant = env.LEGION_GRANT;
   if (!grant) {
     throw new CliError(
-      "LEGION_GRANT_FILE is missing (and LEGION_GRANT is unset): the Legion daemon names the grant file on every pane and the pi-envoy extension writes it before each bash command runs"
+      `LEGION_GRANT_FILE is missing (and LEGION_GRANT is unset): the Legion daemon names the grant file on every pane and the pi-envoy extension writes it before each bash command runs${withoutGrant}`
     );
   }
   return grant;
@@ -129,6 +135,22 @@ async function spawnGh(args: string[], env: NodeJS.ProcessEnv): Promise<number> 
   child.once("error", completion.reject);
   child.once("close", (code) => completion.resolve(code ?? 1));
   return completion.promise;
+}
+
+async function runGh(
+  args: string[],
+  stdin: string,
+  env: NodeJS.ProcessEnv
+): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  const child = Bun.spawn(["gh", ...args], { env, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+  child.stdin.write(stdin);
+  child.stdin.end();
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  return { exitCode, stdout, stderr };
 }
 
 /** The `gh issue` verbs that write to a GitHub issue. Reads (`view`, `list`, `status`) are not
@@ -223,11 +245,11 @@ function isGitHubIssueWriteInvocation(args: string[]): boolean {
   );
 }
 
-async function redeemGitHubToken(deps: GrantRedemptionDeps): Promise<string> {
+async function redeemGitHubToken(deps: GrantRedemptionDeps, withoutGrant = ""): Promise<string> {
   const response = await deps.fetch(`${daemonUrl(deps.env, deps.daemonUrl)}/legion/v1/gh-token`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ grantId: grantFrom(deps.env) }),
+    body: JSON.stringify({ grantId: grantFrom(deps.env, withoutGrant) }),
   });
   if (!response.ok) {
     const body = await response.text();
@@ -271,21 +293,41 @@ export async function cmdGh(args: string[], deps: GhCommandDeps): Promise<void> 
   if (exitCode !== 0) throw new CliError(`gh exited with status ${exitCode}`, exitCode);
 }
 
-/** `legion threads resolve --pr <n> --repo <owner>/<name>`: as the App of the role running it,
- * resolves every unresolved review thread whose newest comment is its opener's own `Accepted:`
- * reply and names every other unresolved thread as left open (`resolveAcceptedThreads`). GitHub
- * lets only the pull request's author or an account with write (push) access to the repository
+/** `legion threads resolve --pr <n> --repo <owner>/<name>`: as the App of the role running it
+ * (with `gh`, as whoever the caller's own `gh` authenticates as), resolves every unresolved review
+ * thread whose newest comment is its opener's own submitted `Accepted:` reply and names every
+ * other unresolved thread as left open (`resolveAcceptedThreads`). GitHub lets only the pull
+ * request's author or an account with write (push) access to the repository
  * resolve a thread or push to its branch; the review App is neither by design (`pull_requests:
  * write`, no `contents`), so the threads it opens are resolved here by the implementer — before
  * every push that answers a review — and by the merger once more before READY. Both flags are
- * validated before any grant is redeemed. */
+ * validated before any grant is redeemed. With `gh`, a session outside a Legion pane, which has
+ * no grant, applies the same rule through its own `gh` (`ghGraphql`), from any directory: GH_REPO
+ * names the repository a routed `gh` would otherwise read from a checkout, and gh's stderr is
+ * shown on success too, since a `gh` that picks its credential per call says there when the call
+ * acts as someone else (an inherited GH_TOKEN, a fallback personal token). `gh` inside a pane is
+ * refused before anything runs: a pane's `gh` is `legion gh`, which refuses a GraphQL body it
+ * cannot read, and the pane has its grant. */
 export async function cmdThreadsResolve(
-  options: { repo: string; pr: string },
+  options: { repo: string; pr: string; gh?: boolean },
   deps: ThreadsResolveCommandDeps
 ): Promise<void> {
   const repo = parseRepo(options.repo);
   const number = parsePullNumber(options.pr);
-  const graphql = githubGraphql(deps.fetch, await redeemGitHubToken(deps));
+  if (options.gh && deps.env.LEGION_GRANT_FILE !== undefined) {
+    throw new CliError(
+      "--gh is for a session outside a Legion pane; this pane names a grant (LEGION_GRANT_FILE), so run legion threads resolve without --gh"
+    );
+  }
+  const graphql = options.gh
+    ? ghGraphql(deps.runGh, deps.env, repo, deps.stderr)
+    : githubGraphql(
+        deps.fetch,
+        await redeemGitHubToken(
+          deps,
+          "; a session outside a Legion pane has no grant and adds --gh to resolve through its own gh"
+        )
+      );
   await resolveAcceptedThreads(graphql, repo, number, deps.log);
 }
 
@@ -720,17 +762,28 @@ const threadsResolveCommand = defineCommand({
   meta: {
     name: "resolve",
     description:
-      "Resolve every review thread whose newest comment is its opener's `Accepted:` reply, as the GitHub App of the role running it",
+      "Resolve every review thread whose newest comment is its opener's submitted `Accepted:` reply, as the GitHub App of the role running it (with --gh, as whoever your own gh authenticates as)",
   },
   args: {
     pr: { type: "string", required: true, description: "Pull request number" },
     repo: { type: "string", required: true, description: "Repository as <owner>/<name>" },
+    gh: {
+      type: "boolean",
+      description:
+        "Authenticate with your own gh instead of a Legion grant: for a session outside a Legion pane",
+    },
   },
   run: ({ args }) =>
     runCli(() =>
       cmdThreadsResolve(
-        { repo: args.repo as string, pr: args.pr as string },
-        { env: process.env, fetch, log: (line) => console.log(line) }
+        { repo: args.repo as string, pr: args.pr as string, gh: args.gh === true },
+        {
+          env: process.env,
+          fetch,
+          runGh,
+          log: (line) => console.log(line),
+          stderr: (text) => process.stderr.write(text),
+        }
       )
     ),
 });
