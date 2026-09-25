@@ -1175,8 +1175,9 @@ function review(state: LegionState, payload: JsonRecord): Effect[] | undefined {
   // handoff commit, and any such verdict still means the PR is not reviewer-clean. Safe to
   // record from any commit because a new head by another account than the review App that
   // changes anything outside `.legion/` drops the decision (`resetPrHead`, or `push` and resync
-  // once they classify that head), so a verdict never outlives the round it was given for. A review of the current head is settled; one of an
-  // earlier commit (late, redelivered, or pinned below a handoff) opens the range from that commit,
+  // once they classify that head), so a verdict never outlives the round it was given for. A
+  // review of the current head is settled; one of an earlier commit (late, redelivered, or
+  // pinned below a handoff) opens the range from that commit,
   // so what landed since it is classified before the decision is trusted. The account that asked
   // for changes ends its own request with a non-empty review of a later head that asks for none
   // (its clean round is a COMMENT while the head carries `.legion/`): it read the new head. The

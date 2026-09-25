@@ -133,8 +133,8 @@ export interface PrState {
    * deleted, by a push webhook for the current head whose `before` is this sha (handoff-only or
    * the review App's keeps the decision), by any push for the current head by another account
    * that changes a path outside `.legion/` or cannot be classified (drops it), and by resync's
-   * compare of this sha against the current head (every commit the review App's, or `.legion/`-only,
-   * keeps it; anything else, a compare that fails included, drops it). */
+   * compare of this sha against the current head (every commit the review App's, or
+   * `.legion/`-only, keeps it; anything else, a compare that fails included, drops it). */
   reviewDecisionUnsettledFrom?: string;
   /** Who asked for the current `changes_requested` and at which commit: present with that
    * decision when its review carried both (absent on one a v33 daemon recorded). A non-empty
