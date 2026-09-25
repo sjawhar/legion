@@ -156,14 +156,18 @@ pair; `KubernetesRuntime` sends the pod's shim an `adopt-working-copy` frame. A 
 copy is a previous phase's work and keeps its author, and a failing adoption fails the delivery so
 no worker is prompted whose commits would carry the wrong author.
 
-The review App resolves the review threads it opened: on 2026-09-25 its installation token's
-`resolveReviewThread` on a scratch thread it had opened on `sjawhar/legion-smoke#228` returned
-`isResolved: true` (the token read `viewerCanResolve: true` there), while on threads another
-account opened it reads `viewerCanResolve: false`. So the reviewer resolves every thread it has
-accepted, running `legion threads resolve --pr <number> --repo <owner>/<repo>` after its
-`Accepted:` replies (`cli/review-threads.ts`, `cmdThreadsResolve` in `cli/index.ts`), and the
-merger publishes no READY while a thread is unresolved. The implementer pushes the `.legion/`
-deletion at the reviewer's direction. The command redeems the caller's grant through the same
+GitHub grants resolving a review thread to the pull request's author's App, not to the account
+that opened the thread. On `sjawhar/legion#1055`, which `legion-implementer` opened, the review
+App's installation token reads `viewerCanResolve: false` on the threads the review App itself
+opened, and the implement App's reads `true` (read-only readings, 2026-09-25; `#1187` reads the
+same for unresolve). On `sjawhar/legion-smoke#228`, which the review App opened, the review App's
+token read `viewerCanResolve: true` on its own thread, and its `resolveReviewThread` returned
+`isResolved: true` (2026-09-25; the PR is closed and its branch deleted). The implementer opens
+every Legion pull request, so the implementer — before every push that answers a review — and
+the merger — once more before READY — resolve every thread the reviewer has accepted with
+`legion threads resolve --pr <number> --repo <owner>/<repo>` (`cli/review-threads.ts`,
+`cmdThreadsResolve` in `cli/index.ts`). The implementer also pushes the `.legion/` deletion at
+the reviewer's direction. The command redeems the caller's grant through the same
 `/gh-token` path `legion gh` uses and reads every review thread over GitHub GraphQL with an
 injected `fetch`; with no grant, its refusal names `--gh`. With `--gh`, for a session outside a
 Legion pane, which has no grant, it redeems nothing: `ghGraphql` sends the same queries and
