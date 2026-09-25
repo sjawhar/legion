@@ -509,9 +509,11 @@ and `data`: a JSON object of the phase-specific fields only. It runs `legion han
 
 A handoff built from the one already on disk (a test handoff that accumulates review rounds can
 pass 128 KiB) can instead be piped from bash, so you never re-emit the whole payload:
-`jq 'del(.schemaVersion, .phase, .completed) | <your edit>' .legion/<phase>.json | legion handoff write --phase <phase>`.
-With `--data` omitted, `legion handoff write` reads the JSON object from stdin. The CLI adds
-`schemaVersion`, `phase` and `completed` itself and refuses them in the data, hence the `del`.
+`cd -- "$LEGION_WORKSPACE" && bun -e 'const h = await Bun.file(".legion/<phase>.json").json(); delete h.schemaVersion; delete h.phase; delete h.completed; <your edit to h>; console.log(JSON.stringify(h))' | legion handoff write --phase <phase>`.
+The program is single-quoted, so strings in your edit take double quotes. It is `bun` because the
+worker image a pod runs ships `bun` and not `jq`, and a devbox pane has the `bun` Legion builds
+with. With `--data` omitted, `legion handoff write` reads the JSON object from stdin. The CLI adds
+`schemaVersion`, `phase` and `completed` itself and refuses them in the data, hence the `delete`s.
 
 `handoff_write` validates the payload against the phase's schema before writing: an
 implement handoff without a well-formed `proof`, or a test handoff that reports no failure and
