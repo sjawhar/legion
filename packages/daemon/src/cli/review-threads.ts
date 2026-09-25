@@ -88,10 +88,18 @@ export type RunGh = (
 ) => Promise<{ exitCode: number; stdout: string; stderr: string }>;
 
 /** One GraphQL call through the caller's own `gh` (`gh api graphql --input -`), for a session
- * outside a Legion pane, which has no grant to redeem. GH_REPO names the repository, so a `gh`
- * that picks its credential by repository (the devbox shim routes to that owner's GitHub App)
- * authenticates for it. A non-zero exit rejects with a CliError carrying gh's own message. */
-export function ghGraphql(runGh: RunGh, env: NodeJS.ProcessEnv, repo: GitHubRepo): GraphqlCall {
+ * outside a Legion pane, which has no grant to redeem. gh gets the caller's environment, which
+ * decides whose credential it uses, with GH_REPO set to the repository, so a `gh` that picks its
+ * credential by repository (the devbox shim routes to that owner's GitHub App) authenticates for
+ * it from any directory. A non-zero exit rejects with a CliError carrying gh's own message; a
+ * successful call hands gh's stderr to `stderr` verbatim, since that is where the devbox shim
+ * announces an inherited GH_TOKEN, the identity the call then acts as. */
+export function ghGraphql(
+  runGh: RunGh,
+  env: NodeJS.ProcessEnv,
+  repo: GitHubRepo,
+  stderr: (text: string) => void
+): GraphqlCall {
   return async <T>(query: string, variables: Record<string, unknown>): Promise<T> => {
     const result = await runGh(
       ["api", "graphql", "--input", "-"],
@@ -102,6 +110,7 @@ export function ghGraphql(runGh: RunGh, env: NodeJS.ProcessEnv, repo: GitHubRepo
       const message = result.stderr.trim() || result.stdout.trim();
       throw new CliError(`gh api graphql failed (exit ${result.exitCode}): ${message}`);
     }
+    if (result.stderr !== "") stderr(result.stderr);
     return graphqlData<T>(JSON.parse(result.stdout));
   };
 }

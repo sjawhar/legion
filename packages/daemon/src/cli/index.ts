@@ -68,6 +68,8 @@ interface GhCommandDeps extends GrantRedemptionDeps {
 interface ThreadsResolveCommandDeps extends GrantRedemptionDeps {
   runGh: RunGh;
   log(line: string): void;
+  /** Writes gh's own stderr from a successful `--gh` call, verbatim. */
+  stderr(text: string): void;
 }
 
 interface CredentialCommandDeps {
@@ -299,7 +301,8 @@ export async function cmdGh(args: string[], deps: GhCommandDeps): Promise<void> 
  * every push that answers a review — and by the merger once more before READY. Both flags are
  * validated before any grant is redeemed. With `gh`, a session outside a Legion pane, which has
  * no grant, applies the same rule through its own `gh` (`ghGraphql`), from any directory: GH_REPO
- * names the repository a routed `gh` would otherwise read from a checkout. */
+ * names the repository a routed `gh` would otherwise read from a checkout, and gh's stderr is
+ * shown on success too, where the devbox shim names an inherited GH_TOKEN the call acts as. */
 export async function cmdThreadsResolve(
   options: { repo: string; pr: string; gh?: boolean },
   deps: ThreadsResolveCommandDeps
@@ -307,7 +310,7 @@ export async function cmdThreadsResolve(
   const repo = parseRepo(options.repo);
   const number = parsePullNumber(options.pr);
   const graphql = options.gh
-    ? ghGraphql(deps.runGh, deps.env, repo)
+    ? ghGraphql(deps.runGh, deps.env, repo, deps.stderr)
     : githubGraphql(deps.fetch, await redeemGitHubToken(deps));
   await resolveAcceptedThreads(graphql, repo, number, deps.log);
 }
@@ -758,7 +761,13 @@ const threadsResolveCommand = defineCommand({
     runCli(() =>
       cmdThreadsResolve(
         { repo: args.repo as string, pr: args.pr as string, gh: args.gh === true },
-        { env: process.env, fetch, runGh, log: (line) => console.log(line) }
+        {
+          env: process.env,
+          fetch,
+          runGh,
+          log: (line) => console.log(line),
+          stderr: (text) => process.stderr.write(text),
+        }
       )
     ),
 });
