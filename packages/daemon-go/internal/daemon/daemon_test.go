@@ -135,22 +135,23 @@ type stopped struct{}
 
 func (stopped) Stop() bool { return true }
 
-// built is what the daemon handed the runtime it built: the connection directory and the address
-// every pane's shim dials.
+// built is what the daemon handed the runtime it built: the connection directory, the address
+// every pane's shim dials, and the workflow's App tokens.
 type built struct {
 	mu      sync.Mutex
 	conns   runtime.Conns
 	address string
+	apps    appauth.Tokens
 }
 
 // fakeRuntime is a daemon whose runtime is rt: the real stream listener, store, and machines,
 // with nothing launched for real.
 func fakeRuntime(rt *fake.Runtime, record *built) overrides {
 	return overrides{
-		runtime: func(_ context.Context, conns runtime.Conns, address string) (runtime.Runtime, error) {
+		runtime: func(_ context.Context, conns runtime.Conns, address string, apps appauth.Tokens) (runtime.Runtime, error) {
 			record.mu.Lock()
 			defer record.mu.Unlock()
-			record.conns, record.address = conns, address
+			record.conns, record.address, record.apps = conns, address, apps
 			return rt, nil
 		},
 		clock: stillClock{},

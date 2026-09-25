@@ -65,9 +65,9 @@ const (
 
 // overrides are the parts of a daemon a test replaces; the zero value is the real daemon.
 type overrides struct {
-	// runtime builds the runtime over the worker stream — its connection directory, and the
-	// address every pane's shim dials; nil is the tmux runtime.
-	runtime func(ctx context.Context, conns runtime.Conns, streamAddress string) (runtime.Runtime, error)
+	// runtime builds the runtime over the worker stream in place of the configured one; nil is the
+	// configured runtime.
+	runtime runtimeFactory
 	// clock is the machines' time; nil is the wall clock.
 	clock supervise.Clock
 	// getenv is the environment the OMP invocation is resolved against; nil is the process's.
@@ -80,27 +80,31 @@ type overrides struct {
 	// gate stands in for the plugin gate when runtime is replaced: nil is none, since a replaced
 	// runtime launches no Oh My Pi to gate. With the tmux runtime, the gate is always the real one.
 	gate func(ctx context.Context) error
+	// probe stands in for the worker image probe when runtime is replaced under kubernetes: nil is
+	// none. With the Agent Sandbox runtime, the probe is always the real one.
+	probe func(ctx context.Context, rt runtime.Runtime) error
 	// workflowTokens replaces the GitHub App token manager in a workflow integration test. The
 	// production daemon always mints through appauth.New.
 	workflowTokens appauth.Tokens
 }
 
 // Run is the daemon. It refuses what it cannot run on before it touches anything — the
-// configuration first, then the plugin gate, which holds the Oh My Pi plugin every pane will load
-// to this daemon's contract — then opens the store (refusing by the host it could not reach),
-// migrates, takes its API listener and its worker stream, builds the runtime, records the boot,
-// supervises every claim the store holds, serves the API, and blocks until ctx is done — then
-// stops supervising, closes the API, stamps the boot's end, and closes the pool, in that order,
-// because the stamp needs the pool.
+// configuration first, then, under tmux, the plugin gate, which holds the Oh My Pi plugin every
+// pane will load to this daemon's contract — then opens the store (refusing by the host it could
+// not reach), migrates, takes its API listener and its worker stream, builds the runtime (under
+// kubernetes, once Agent Sandbox's install check passes), proves the worker image under
+// kubernetes, records the boot, supervises every claim the store holds, serves the API, and blocks
+// until ctx is done — then stops supervising, closes the API, stamps the boot's end, and closes
+// the pool, in that order, because the stamp needs the pool.
 //
 // Everything that can refuse comes before the boot record: a recorded boot is a boot that
-// served, and a daemon whose port, socket, or tmux another process holds never ran.
+// served, and a daemon whose port, socket, tmux, cluster, or image refused it never ran.
 //
 // ctx decides one thing: how long the daemon serves. The boot record and its stamp are the
 // daemon's own bookkeeping and run on a context the shutdown did not cancel, so a signal that
 // arrives mid-startup still leaves a recorded, stamped boot rather than a row with no end. A
-// signal that arrives while the plugin gate waits ends the daemon there, cleanly: it has served
-// nothing and records nothing.
+// signal that arrives while the plugin gate or the image probe waits ends the daemon there,
+// cleanly: it has served nothing and records nothing.
 func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	return run(ctx, cfg, log, overrides{})
 }
@@ -161,19 +165,21 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 	if workflow != nil {
 		log.Info("legion workflow boot stage", "stage", "prompts")
 	}
-	executable, err := os.Executable()
-	if err != nil {
-		workflow.stop()
-		st.Close()
-		return fmt.Errorf("resolve this daemon's executable for the pane legion launcher: %w", err)
-	}
-	if err := workerbin.Install(cfg.StateDir, executable); err != nil {
-		workflow.stop()
-		st.Close()
-		return err
-	}
-	if workflow != nil {
-		log.Info("legion workflow boot stage", "stage", "worker-bin")
+	if cfg.Runtime.Name == "tmux" {
+		executable, err := os.Executable()
+		if err != nil {
+			workflow.stop()
+			st.Close()
+			return fmt.Errorf("resolve this daemon's executable for the pane legion launcher: %w", err)
+		}
+		if err := workerbin.Install(cfg.StateDir, executable); err != nil {
+			workflow.stop()
+			st.Close()
+			return err
+		}
+		if workflow != nil {
+			log.Info("legion workflow boot stage", "stage", "worker-bin")
+		}
 	}
 	if workflow != nil {
 		if err := workflow.bind(cfg); err != nil {
@@ -192,12 +198,34 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 		return fmt.Errorf("listen on %s: %w", address, err)
 	}
 
-	s, err := openSupervision(boot, cfg, log, plan, st)
+	var apps appauth.Tokens
+	if workflow != nil {
+		apps = workflow.tokens
+	}
+	s, err := openSupervision(boot, cfg, log, plan, st, apps)
 	if err != nil {
 		listener.Close()
 		workflow.stop()
 		st.Close()
 		return err
+	}
+	if plan.probe != nil {
+		if err := plan.probe(ctx, s.runtime); err != nil {
+			s.stop()
+			listener.Close()
+			workflow.stop()
+			st.Close()
+			if ctx.Err() != nil {
+				log.Info("legion daemon stopped before its worker image passed its probe", "project", cfg.Project)
+				return nil
+			}
+			return err
+		}
+		// The probe waits out a cold node and an image pull, which the boot budget does not bound,
+		// as it does not bound the plugin gate: the work after the probe has a budget of its own.
+		var cancelAfterProbe context.CancelFunc
+		boot, cancelAfterProbe = context.WithTimeout(context.WithoutCancel(ctx), bootTimeout)
+		defer cancelAfterProbe()
 	}
 	if workflow != nil {
 		if err := workflow.reconcile(boot); err != nil {
@@ -267,33 +295,37 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 type plan struct {
 	// identity is the role's App bot identity, from the workflow's token source; nil without one.
 	identity func(ctx context.Context, role claim.Role) (runtime.GitIdentity, error)
-	// tools are the gh, git, and jj boot resolved, by name; nil without a repository.
+	// tools are the gh, git, and jj boot resolved on the host, by name; nil without a repository,
+	// and under a runtime whose agents run the worker image's own.
 	tools         map[string]string
 	project       string
 	operatorToken string
 	secrets       map[string]string
 	instructions  string
-	// dispatchTokenFile is the daemon-held Dispatch bearer every pane reads as DISPATCH_TOKEN_FILE.
-	dispatchTokenFile string
-	prompts           *prompts.Composer
-	newRuntime        func(ctx context.Context, conns runtime.Conns, streamAddress string) (runtime.Runtime, error)
-	// gate is the plugin gate run before anything is opened (pluginGate); nil only for a replaced
-	// runtime without one.
-	gate        func(ctx context.Context) error
+	prompts       *prompts.Composer
+	// stream is the worker stream's address: the listener binds it, and every agent's shim dials it.
+	stream     string
+	newRuntime runtimeFactory
+	// gate is the plugin gate run before anything is opened (pluginGate); nil under a runtime with
+	// no host Oh My Pi, and for a replaced runtime without one.
+	gate func(ctx context.Context) error
+	// probe proves the runtime's worker image once the runtime is built and before the boot is
+	// recorded; nil under tmux, and for a replaced runtime without one.
+	probe       func(ctx context.Context, rt runtime.Runtime) error
 	clock       supervise.Clock
 	orphanSweep time.Duration
 }
 
-// prepare is every refusal that needs nothing but the configuration and the machine: the runtime
-// this stage supervises under, the operator bearer the spawn surface authenticates against, the
-// Envoy bearer every pane is handed, the OMP invocation every pane runs and the plugin gate on
-// it, the operator's deployment instructions, written where every pane's prompt reads them, and
-// the provider keys, resolved from secretsd into the files every pane's shim reads — all before
-// the gate runs and before any pane can launch.
+// runtimeFactory builds the runtime over the worker stream (C3): ctx is supervision's lifetime,
+// conns the stream listener, stream the address every agent's shim dials, and tokens the
+// workflow's App tokens, nil without a workflow.
+type runtimeFactory func(ctx context.Context, conns runtime.Conns, stream string, tokens appauth.Tokens) (runtime.Runtime, error)
+
+// prepare is every refusal that needs nothing but the configuration and the machine: the operator
+// bearer the spawn surface authenticates against, the Envoy bearer every agent is handed, the
+// operator's deployment instructions, and then what the runtime needs — all before the plugin gate
+// runs and before any agent can launch.
 func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
-	if cfg.Runtime.Name != "tmux" {
-		return plan{}, fmt.Errorf("runtime %s: the Go daemon supervises its agents under tmux until Stage 4 models the Sandbox runtime", cfg.Runtime.Name)
-	}
 	project, err := claim.ProjectToken(cfg.Project)
 	if err != nil {
 		return plan{}, err
@@ -313,18 +345,69 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 		}
 		secrets["ENVOY_TOKEN"] = envoyToken
 	}
+	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
+		return plan{}, fmt.Errorf("create state directory %s: %w", cfg.StateDir, err)
+	}
+	instructions := ""
+	if cfg.InstructionsPath != "" {
+		if instructions, err = config.MaterializeDeploymentInstructions(cfg.InstructionsPath, cfg.StateDir, cfg.Project); err != nil {
+			return plan{}, err
+		}
+	}
+	dispatchToken := ""
+	if cfg.DispatchURL != "" {
+		if cfg.DispatchTokenFile == "" {
+			return plan{}, errors.New("dispatch_token_file is required when dispatch_url is configured")
+		}
+		if dispatchToken, err = config.ReadSecretPointer("dispatch_token_file", cfg.DispatchTokenFile); err != nil {
+			return plan{}, err
+		}
+	}
 
-	newRuntime, gate := o.runtime, o.gate
+	clock := o.clock
+	if clock == nil {
+		clock = supervise.RealClock{}
+	}
+	orphanSweep := o.orphanSweep
+	if orphanSweep == 0 {
+		orphanSweep = orphanSweepInterval
+	}
+	p := plan{
+		project: project, operatorToken: operatorToken, secrets: secrets, instructions: instructions,
+		clock: clock, orphanSweep: orphanSweep,
+	}
+	switch cfg.Runtime.Name {
+	case "tmux":
+		err = prepareTmux(cfg, log, o, dispatchToken, &p)
+	case "kubernetes":
+		err = prepareSandbox(cfg, log, o, dispatchToken, &p)
+	default:
+		err = fmt.Errorf("runtime %q is neither tmux nor kubernetes", cfg.Runtime.Name)
+	}
+	if err != nil {
+		return plan{}, err
+	}
+	return p, nil
+}
+
+// prepareTmux is what panes on this host need: the OMP invocation every pane runs and the plugin
+// gate on it, the Dispatch bearer written where every pane reads it, the provider keys resolved
+// from secretsd into the files every pane's shim reads, and the host's gh, git, and jj. The worker
+// stream is a unix socket under the state directory (decision 2 — no configuration key).
+func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken string, p *plan) error {
+	p.newRuntime, p.gate = o.runtime, o.gate
+	p.stream = "unix://" + filepath.Join(cfg.StateDir, streamSocket)
 	invocation := ""
-	if newRuntime == nil {
+	if p.newRuntime == nil {
 		getenv := o.getenv
 		if getenv == nil {
 			getenv = os.Getenv
 		}
+		var err error
 		if invocation, err = tmux.ResolveOmpInvocation(cfg.OmpInvocation, getenv); err != nil {
-			return plan{}, err
+			return err
 		}
-		gate = pluginGate{
+		p.gate = pluginGate{
 			env:        tmux.PaneEnvironment(os.Environ(), cfg.StateDir),
 			workDir:    cfg.StateDir,
 			invocation: invocation,
@@ -336,28 +419,11 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 		}.verify
 		log.Info("legion daemon resolved OMP invocation for boot probes and panes", "invocation", invocation)
 	}
-
-	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
-		return plan{}, fmt.Errorf("create state directory %s: %w", cfg.StateDir, err)
-	}
 	dispatchTokenFile := ""
-	if cfg.DispatchURL != "" {
-		if cfg.DispatchTokenFile == "" {
-			return plan{}, errors.New("dispatch_token_file is required when dispatch_url is configured")
-		}
-		token, err := config.ReadSecretPointer("dispatch_token_file", cfg.DispatchTokenFile)
-		if err != nil {
-			return plan{}, err
-		}
-		if dispatchTokenFile, err = tmux.WriteDispatchTokenFile(cfg.StateDir, token); err != nil {
-			return plan{}, fmt.Errorf("write the pane Dispatch token file: %w", err)
-		}
-	}
-
-	instructions := ""
-	if cfg.InstructionsPath != "" {
-		if instructions, err = config.MaterializeDeploymentInstructions(cfg.InstructionsPath, cfg.StateDir, cfg.Project); err != nil {
-			return plan{}, err
+	if dispatchToken != "" {
+		var err error
+		if dispatchTokenFile, err = tmux.WriteDispatchTokenFile(cfg.StateDir, dispatchToken); err != nil {
+			return fmt.Errorf("write the pane Dispatch token file: %w", err)
 		}
 	}
 	// Last of the refusals: resolving a human-tier key may cost a YubiKey tap, which a
@@ -368,48 +434,26 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 	}
 	providerEnvDir, err := config.MaterializeProviderKeys(cfg.ProviderKeys, cfg.StateDir, environ, log)
 	if err != nil {
-		return plan{}, err
+		return err
 	}
 	// Only a configuration with a repository runs Legion's own gh, git, and jj.
-	var tools map[string]string
 	if _, ok := cfg.Projects[cfg.Project]; ok {
-		tools, err = resolveTools(func(name string) (string, bool) { return envValue(environ, name) })
-		if err != nil {
-			return plan{}, err
+		if p.tools, err = resolveTools(func(name string) (string, bool) { return envValue(environ, name) }); err != nil {
+			return err
 		}
 	}
-	if newRuntime == nil {
-		newRuntime = tmuxRuntime(cfg, project, invocation, providerEnvDir, dispatchTokenFile, tools, log)
+	if p.newRuntime == nil {
+		p.newRuntime = tmuxRuntime(cfg, p.project, invocation, providerEnvDir, dispatchTokenFile, p.tools, log)
 	}
-
-	clock := o.clock
-	if clock == nil {
-		clock = supervise.RealClock{}
-	}
-	orphanSweep := o.orphanSweep
-	if orphanSweep == 0 {
-		orphanSweep = orphanSweepInterval
-	}
-	return plan{
-		tools:             tools,
-		project:           project,
-		operatorToken:     operatorToken,
-		secrets:           secrets,
-		instructions:      instructions,
-		dispatchTokenFile: dispatchTokenFile,
-		newRuntime:        newRuntime,
-		gate:              gate,
-		clock:             clock,
-		orphanSweep:       orphanSweep,
-	}, nil
+	return nil
 }
 
 // tmuxRuntime builds the tmux runtime over the worker stream: the listener is its connection
 // directory, and the listener's address is the `--connect` every pane's shim is started with;
 // providerEnvDir, when set, is the `--provider-env-dir` beside it. The private server's
 // environment is scrubbed before anything is launched on it.
-func tmuxRuntime(cfg config.Config, project, invocation, providerEnvDir, dispatchTokenFile string, tools map[string]string, log *slog.Logger) func(context.Context, runtime.Conns, string) (runtime.Runtime, error) {
-	return func(ctx context.Context, conns runtime.Conns, streamAddress string) (runtime.Runtime, error) {
+func tmuxRuntime(cfg config.Config, project, invocation, providerEnvDir, dispatchTokenFile string, tools map[string]string, log *slog.Logger) runtimeFactory {
+	return func(ctx context.Context, conns runtime.Conns, streamAddress string, _ appauth.Tokens) (runtime.Runtime, error) {
 		rt, err := tmux.New(tmux.Options{
 			Project:           project,
 			StateDir:          cfg.StateDir,
@@ -461,10 +505,11 @@ type supervision struct {
 	stopOnce     sync.Once
 }
 
-// openSupervision reads the claims the store holds, takes the worker stream socket, and builds
-// the runtime over it: every step of supervision that can refuse, so a daemon that cannot
-// supervise refuses before its boot is recorded.
-func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, p plan, st *store.Store) (*supervision, error) {
+// openSupervision reads the claims the store holds, takes the worker stream, and builds the
+// runtime over it, for supervision's lifetime and with the workflow's App tokens (nil without a
+// workflow): every step of supervision that can refuse, so a daemon that cannot supervise refuses
+// before its boot is recorded.
+func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, p plan, st *store.Store, apps appauth.Tokens) (*supervision, error) {
 	claims, err := st.Claims(boot)
 	if err != nil {
 		return nil, err
@@ -475,14 +520,14 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 	streaming, cancelStream := context.WithCancel(context.Background())
 	tokens := api.NewBootTokens(st)
 	sup := newSupervisor(supervising, st, p.project, cfg.StateDir, log)
-	listener, err := stream.Listen(streaming, "unix://"+filepath.Join(cfg.StateDir, streamSocket),
+	listener, err := stream.Listen(streaming, p.stream,
 		sup.helloResolver(tokens, cfg.WorkerRPCTimeout), stream.Options{RPCTimeout: cfg.WorkerRPCTimeout, Log: log})
 	if err != nil {
 		cancel()
 		cancelStream()
 		return nil, err
 	}
-	rt, err := p.newRuntime(boot, listener, listener.Addr())
+	rt, err := p.newRuntime(supervising, listener, listener.Addr(), apps)
 	if err != nil {
 		cancel()
 		cancelStream()

@@ -597,14 +597,10 @@ func TestPrepareWritesTheDispatchTokenFileAndBootPruneKeepsIt(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p, err := prepare(cfg, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{}))
-	if err != nil {
+	if _, err := prepare(cfg, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{})); err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
 	want := filepath.Join(cfg.StateDir, "secrets", "dispatch-token")
-	if p.dispatchTokenFile != want {
-		t.Fatalf("Dispatch token file = %q, want %q", p.dispatchTokenFile, want)
-	}
 	if info, err := os.Stat(want); err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("Dispatch token file stat = %v, %v; want mode 0600", info, err)
 	}
