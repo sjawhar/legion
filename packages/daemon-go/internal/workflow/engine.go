@@ -121,7 +121,7 @@ func (e *Engine) dispatchIssue(ctx context.Context, tx pgx.Tx, fact intake.Dispa
 	if agent, err := e.agentStatusWrite(ctx, tx, *issue, fact); err != nil || agent {
 		return intake.Result{}, err
 	}
-	if staleTreeStatus(fact.Status) {
+	if record.OutOfWorkflow(fact.Status) {
 		return intake.Result{}, e.leave(ctx, tx, *issue, fact.Status)
 	}
 	if fact.Status == "todo" && e.treeKey(ctx, tx, *issue) != issue.Key {
@@ -863,11 +863,6 @@ func (e *Engine) gateForIssue(ctx context.Context, tx pgx.Tx, issue record.Issue
 	return e.store.Gate(ctx, tx, e.treeKey(ctx, tx, issue))
 }
 
-// staleTreeStatus is a status that takes an issue out of the workflow: every status admission
-// holds no slot for except todo, which admits.
-func staleTreeStatus(status string) bool {
-	return status == "done" || status == "backlog" || status == "icebox" || status == "triage"
-}
 func phaseIndex(value phase.Phase) int {
 	for index, candidate := range []phase.Phase{phase.Planning, phase.Implementing, phase.Testing, phase.Reviewing, phase.Retro, phase.Merging, phase.AwaitingMerge, phase.ProductionCheck} {
 		if candidate == value {

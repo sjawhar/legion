@@ -252,7 +252,7 @@ func (a *Admission) releaseInactiveSlots(ctx context.Context, tx pgx.Tx) error {
 		if issue == nil {
 			return fmt.Errorf("slotted issue %s has no record", slot.Issue)
 		}
-		if issue.Phase == phase.Done || staleStatus(issue.Status) {
+		if issue.Phase == phase.Done || record.OutOfWorkflow(issue.Status) {
 			if err := a.store.ReleaseSlot(ctx, tx, issue.Key); err != nil {
 				return fmt.Errorf("release inactive issue %s: %w", issue.Key, err)
 			}
@@ -318,15 +318,6 @@ func nextSlotIndex(slots []record.Slot) int {
 		if _, present := used[index]; !present {
 			return index
 		}
-	}
-}
-
-func staleStatus(status string) bool {
-	switch status {
-	case "triage", "icebox", "backlog", "done":
-		return true
-	default:
-		return false
 	}
 }
 
