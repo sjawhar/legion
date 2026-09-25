@@ -72,6 +72,8 @@ gateway_url=https://middleman.hawk.internal.trajectorylabs.com
 # deletes with the rest.
 fixture=$root/scripts/e2e/fixtures/operator-route
 route_configmap=legion-operator-route-$run_label
+# operator-close's tree, which no workflow issue backs: the run's own, named for the run.
+optree="S4BOP-$$"
 port_daemon=13370
 port_worker_stream=13371
 stream=ENVOY_NOTIFICATIONS
@@ -107,6 +109,7 @@ prod_baseline=
 audited=
 fixture_branch=
 pair_recorded=
+pair_session=
 
 begin() {
   check=$1
@@ -166,47 +169,75 @@ pod_exec() {
 
 pair_agents="thermonuclear-deep-review thermonuclear-code-quality"
 # pair_dispatch AGENT reads a reviewer session on stdin and prints what the session holds for AGENT:
-# every task call naming it, the tool result of each call (text, isError, details), and every
-# async-result delivery naming it. Nothing is summarised, so the evidence keeps each failure's text.
+# every task call naming it, the tool result of each call (text, isError, details), the ids its
+# results name for AGENT (details.progress), and every task-result block naming AGENT the session
+# received, however it arrived: an async-result delivery, or a hub wait or jobs snapshot that
+# recovered it first. A delivery is that block alone, never the rest of a snapshot, which carries
+# other jobs' output. Nothing else is summarised, so the evidence keeps each failure's text.
 pair_dispatch() {
   jq -R -s -c --arg agent "$1" '[split("\n")[] | fromjson?] as $e
     | [$e[] | select(.type == "message" and .message.role == "assistant") | .message.content[]?
         | select(.type == "toolCall" and .name == "task" and (.arguments | tostring | contains($agent)))] as $calls
     | ($calls | map(.id)) as $ids
+    | [$e[] | select(.type == "message" and .message.role == "toolResult" and (.message.toolCallId as $i | $ids | index($i)))
+        | .message | {toolCallId, isError, text: ([.content[]? | select(.type == "text") | .text] | join("\n")), details}] as $results
     | {agent: $agent,
        calls: [$calls[] | {id, arguments}],
-       results: [$e[] | select(.type == "message" and .message.role == "toolResult" and (.message.toolCallId as $i | $ids | index($i)))
-         | .message | {toolCallId, isError, text: ([.content[]? | select(.type == "text") | .text] | join("\n")), details}],
-       deliveries: [$e[] | select(.type == "custom_message" and .customType == "async-result" and (.content | tostring | contains("agent=\"" + $agent + "\"")))
-         | {timestamp, content: (.content | tostring)}]}'
+       results: $results,
+       ids: ([$results[].details.progress[]? | select(.agent == $agent) | .id] | unique),
+       deliveries: [$e[]
+         | (if .type == "custom_message" and .customType == "async-result" then {timestamp, via: "async-result", text: (.content | tostring)}
+            elif .type == "message" and .message.role == "toolResult" and .message.toolName == "hub"
+              then {timestamp, via: "hub", text: ([.message.content[]? | select(.type == "text") | .text] | join("\n"))}
+            else empty end)
+         | . as $d
+         | ($d.text | [scan("<task-result [^>]*agent=\"" + $agent + "\"[^>]*>[\\s\\S]*?</task-result>")])[]
+         | {timestamp: $d.timestamp, via: $d.via, content: .}]}'
+}
+# pair_text prints the reviewer's session, read from the tree volume with no call to the daemon, so
+# the teardown can still read it after a signal to the run's process group has ended the daemon.
+pair_text() {
+  local pod
+  [ -n "$pair_session" ] || return 1
+  pod=$(tree_pod "$tree1") || return 1
+  pod_exec "$pod" cat -- "$pair_session"
 }
 # pair_settled: the reviewer dispatched both agents and each dispatch has an outcome: a refused call,
-# a finished result naming the agent, or a delivered background result.
+# a task-result block naming the agent, or the subagent's own session ending in a yield.
 pair_settled() {
-  local text agent
-  text=$(claim_session_text "$tree1" reviewer) || return 1
+  local text agent ids id pod
+  text=$(pair_text) || return 1
+  pod=$(tree_pod "$tree1") || return 1
   for agent in $pair_agents; do
-    pair_dispatch "$agent" <<<"$text" | jq -e --arg agent "$agent" '(.calls | length) > 0 and (
-      any(.results[]; .isError == true) or (.deliveries | length) > 0
-      or any(.results[].details.results[]?; .agent == $agent))' >/dev/null || return 1
+    ids=$(pair_dispatch "$agent" <<<"$text" | jq -r '
+      if (.calls | length) == 0 then "none"
+      elif any(.results[]; .isError == true) or (.deliveries | length) > 0 then "settled"
+      else .ids[] end') || return 1
+    case "$ids" in
+      none | "") return 1 ;;
+      settled) continue ;;
+    esac
+    for id in $ids; do
+      pod_exec "$pod" grep -q '"toolName":"yield"' -- "${pair_session%.jsonl}/$id.jsonl" && continue 2
+    done
+    return 1
   done
 }
 # record_pair keeps the reviewer's session, the sessions of the subagents it started, and each
 # agent's dispatch under $evidence/review-pair, once.
 record_pair() {
-  local file pod text agent
+  local pod text agent
   [ -z "$pair_recorded" ] || return 0
-  file=$(claim_session_file "$tree1" reviewer) || return 1
+  text=$(pair_text) || return 1
   pod=$(tree_pod "$tree1") || return 1
   mkdir -p "$evidence/review-pair"
-  text=$(pod_exec "$pod" cat -- "$file") || return 1
   printf '%s\n' "$text" >"$evidence/review-pair/reviewer.jsonl"
-  op exec "$pod" -c worker -- tar -C "$(dirname "$file")" -cf - "$(basename "$file" .jsonl)" 2>/dev/null |
+  op exec "$pod" -c worker -- tar -C "$(dirname "$pair_session")" -cf - "$(basename "$pair_session" .jsonl)" 2>/dev/null |
     tar -C "$evidence/review-pair" -xf - 2>/dev/null || true
   for agent in $pair_agents; do
     pair_dispatch "$agent" <<<"$text" >"$evidence/review-pair/$agent.json"
   done
-  printf '%s\n' "$(basename "$file" .jsonl)" >"$evidence/review-pair/session-stem"
+  printf '%s\n' "$(basename "$pair_session" .jsonl)" >"$evidence/review-pair/session-stem"
   pair_recorded=1
 }
 claim_session_file() {
@@ -353,7 +384,8 @@ driver_action() { printf '%s %s %s\n' "$1" "$2" "$(date -u +%FT%T.%3NZ)" >>"$evi
 # a container OOMKilled), and every claim process the daemon found dead (`supervise: process died`,
 # naming the pod uid as the incarnation) that no driver action ended, and exits 1 when there is any.
 # A pod the daemon suspended, released or closed ends without either, so it needs no match. The
-# resume that finds the tree volume lost dies by design (its detail begins workspace-lost:), and
+# resume that finds the tree volume lost dies by design (the runtime's detail begins "the tree volume
+# was lost: "), and
 # re-admission counts those itself. The memory hog, labelled legion.dev/e2e-control=memory-hog, is
 # excluded, and must have been seen OOMKilled.
 pod_watch_verdict() {
@@ -371,7 +403,7 @@ pod_watch_verdict() {
         | [ ($p.status.initContainerStatuses[]?, $p.status.containerStatuses[]?) | (.state.terminated, .lastState.terminated) | select(. != null) ] as $terms
         | select($podReason == "Evicted" or any($terms[]; .reason == "OOMKilled"))
         | "\($p.metadata.name) uid \($p.metadata.uid): \($podReason) \([$terms[] | "\(.reason) exit \(.exitCode)"] | join(", "))" ]
-      + [ $died[] | select((.detail // "") | startswith("workspace-lost:") | not)
+      + [ $died[] | select((.detail // "") | startswith("the tree volume was lost: ") | not)
           | .incarnation as $i | select(($driver | index($i)) == null)
           | "incarnation \($i) died with no driver action: observed \(.observed), \((.detail // "") | .[0:200])" ]
       | unique as $bad
@@ -628,6 +660,21 @@ delete_consumers() {
   done
   return 0
 }
+# remove_run_branches closes each pull request the run left open on the smoke repository and deletes
+# each tree's branch legion/<tree> there (tree 2's is the fixture's): the run's own, which a run that
+# stops before the proof human's merge would otherwise leave behind.
+remove_run_branches() {
+  local issue number
+  for issue in $tree1 $tree2 $tree3; do
+    number=$(timeout 60 gh -R "$repo" pr list --head "legion/$issue" --state open --json number --jq '.[0].number // empty' 2>/dev/null)
+    if [ -n "$number" ]; then
+      timeout 60 gh -R "$repo" pr close "$number" --comment "Closed by the Stage 4b run that opened it, at its teardown." >/dev/null 2>&1 &&
+        note "closed the run's open pull request $repo#$number (legion/$issue)"
+    fi
+    timeout 60 gh api -X DELETE "repos/$repo/git/refs/heads/legion/$issue" >/dev/null 2>&1 && note "deleted the run's branch legion/$issue from $repo"
+  done
+  return 0
+}
 collect_transcripts() {
   local pod
   for tree in $tree1 $tree2 $tree3; do
@@ -660,7 +707,7 @@ cleanup() {
     teardown
     if [ -z "$compared" ] && [ -n "$snapshotted" ]; then (namespace_clean) || status=1; fi
     delete_consumers
-    [ -z "$fixture_branch" ] || gh api -X DELETE "repos/$repo/git/refs/heads/$fixture_branch" >/dev/null 2>&1
+    remove_run_branches
     if [ -z "$audited" ] && [ -n "$prod_baseline" ]; then production_audit || status=1; fi
   fi
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null; done
@@ -690,7 +737,7 @@ production_baseline() {
 production_audit() {
   local sessions actors
   audited=1
-  sessions=$(jq -R -s -c 'split("\n") | map(fromjson? | select(.msg == "api: claim registered") | .session) | unique' "$daemon_log")
+  sessions=$(jq -R -s -c 'split("\n") | map(fromjson? | select(.msg | IN("api: claim registered", "api: controller registered")) | .session) | unique' "$daemon_log")
   printf '%s\n' "$sessions" >"$evidence/run-sessions.json"
   # Production Dispatch is busy with other work while the run goes on, so an issue outside
   # LEGSMOKE updated since the baseline is the run's write only when one of its events names one
@@ -749,13 +796,14 @@ find_outside_writer() {
   fail "$(wc -w <<<"$keys") issues outside $project were updated since $prod_baseline, and none of their events reads as since then"
 }
 # interests_sample LABEL appends the Envoy interests of every session the run has registered so far
+# (its agents' claims and the operator's controller)
 # to $evidence/interests.jsonl, each line labelled, and each attempt's outcome to
 # $evidence/interests-outcomes.txt as "TIME SESSION ok|absent|error DETAIL". A session no longer
 # registered answers 404 (absent). No answer, or any other, is an error, so an unreadable listener
 # never reads as a clean sample.
 interests_sample() {
   local session code now tmp=$work/interest.$BASHPID.json
-  for session in $(jq -R -r 'fromjson? | select(.msg == "api: claim registered") | .session' "$daemon_log" | sort -u); do
+  for session in $(jq -R -r 'fromjson? | select(.msg | IN("api: claim registered", "api: controller registered")) | .session' "$daemon_log" | sort -u); do
     now=$(date -u +%FT%T.%3NZ)
     if ! code=$(curl -sS --max-time 20 -o "$tmp" -w '%{http_code}' -H "@$work/envoy-auth-header" "$envoy_url/v1/interests/$session" 2>&1); then
       printf '%s %s error unreachable: %s\n' "$now" "$session" "$(tr '\n' ' ' <<<"$code")" >>"$evidence/interests-outcomes.txt"
@@ -804,10 +852,12 @@ start_interests_sampler() {
 }
 # interests_outside FILE prints, as one JSON array, every sampled topic in FILE outside the run: a
 # topic of the run names LEGSMOKE, the project's own subject space (notifications.legion.legsmoke.),
-# a legion-legsmoke- role, or the session itself.
+# its repository's GitHub subjects (notifications.github.sjawhar.legion-smoke., where an agent
+# follows its own pull request), operator-close's tree ($optree), a legion-legsmoke- role, or the
+# session itself.
 interests_outside() {
-  jq -s -c --arg p "$project" --arg t "legion-$run_label-" --arg space "notifications.legion.$run_label." '[.[] | .session_id as $s | .topics[]?
-    | select((contains($p) or contains($t) or startswith($space) or contains($s)) | not) | {session: $s, topic: .}] | unique' "$1"
+  jq -s -c --arg p "$project" --arg t "legion-$run_label-" --arg space "notifications.legion.$run_label." --arg repo "notifications.github.${repo/\//.}." --arg op "$optree" '[.[] | .session_id as $s | .topics[]?
+    | select((contains($p) or contains($t) or startswith($space) or startswith($repo) or contains($op) or contains($s)) | not) | {session: $s, topic: .}] | unique' "$1"
 }
 audit_verdict() { [ "$(jq -c . "$1")" = "[]" ] && [ "$(jq -c . "$2")" = "[]" ]; }
 
@@ -1023,7 +1073,7 @@ pass
 
 begin repository-configuration
 # Tree 2's pods carry the repository's own configuration (push_fixture). Each marker names a loading
-# path, and which ones a pod's agent loads is the boundary LEGION-263 owns. The markers live in the
+# path the pod's agent loaded, as an agent in any checkout does. The markers live in the
 # pod's own /tmp, which goes with the pod once the planner's phase ends and its Sandbox suspends, so
 # they are read while the planner waits after its first turn; then it plans. The argv the pod ran
 # its agent with is recorded beside them.
@@ -1076,6 +1126,7 @@ wait_for_phase "$tree1" reviewing 1200
 assert_handoff_committer "$tree1" tester testing 0
 wait_for_worker "$tree1" reviewer
 send_agent "$tree1" reviewer "Stage 4b proof review operation: review pull request #$pr_number in $repo as your role requires, running the deep and code-quality review passes your instructions name as task subagents, then submit APPROVE on it at its current head as legion-reviewer[bot] and complete the reviewer handoff."
+pair_session=$(claim_session_file "$tree1" reviewer) || fail "the reviewer on $tree1 has no session file"
 until_true 1800 "the reviewer's two thermonuclear dispatches to reach an outcome" pair_settled
 record_pair || fail "the reviewer's session and its review pair could not be recorded"
 note "the review pair's dispatches are kept in $evidence/review-pair ($(jq -r -s 'map("\(.agent): \(.calls | length) calls, \(.results | length) results, \(.deliveries | length) deliveries") | join("; ")' "$evidence"/review-pair/thermonuclear-*.json))"
@@ -1086,16 +1137,14 @@ if issue_phase "$tree1" retro >/dev/null; then
   send_agent "$tree1" implementer "Stage 4b proof retro: write the required retro handoff for pull request #$pr_number and complete the phase. Do not change the approved implementation."
 fi
 wait_for_phase "$tree1" merging 1800
-for role in planner implementer tester reviewer merger; do
-  claim_view "$tree1" "$role" >/dev/null 2>&1 || continue
-done
 note "$tree1 moved planner → implementer → tester → reviewer → retro → merging with real agents; $repo#$pr_number changes $smoke_file"
 pass
 
 begin review-pair
 # The reviewer's two review passes are the image's thermonuclear agents, dispatched by name, and each
-# must have run: a delivered background result names the agent as completed, and the subagent's own
-# session, beside the reviewer's, ends in an accepted yield, every turn on the review target. A missing agent is refused to the model
+# must have run: one of its runs completed, by the task-result block the reviewer received (a
+# delivery or a hub snapshot) or, with none, by its own session, which beside the reviewer's ends in
+# an accepted yield, every turn on the review target. A missing agent is refused to the model
 # as "Unknown agent", an agent whose declared model the pod cannot resolve fails "No model
 # selected", and a model that substitutes the bundled reviewer still posts a verdict, which looks
 # the same from outside. tree-moved recorded the dispatches (record_pair); each failure below
@@ -1109,11 +1158,17 @@ review_target=$(sed -n 's/^  review: \([^:]*\).*/\1/p' "$fixture/overlay.yml")
 for agent in $pair_agents; do
   d=$evidence/review-pair/$agent.json
   [ "$(jq '.calls | length' "$d")" -gt 0 ] || fail "the reviewer dispatched no task naming $agent"
-  said=$(jq -r '[.results[].text, .deliveries[].content] | join("\n")' "$d")
+  # A refusal is in a task call's own result or in a run that did not complete; a completed review's
+  # output may quote the same words.
+  said=$(jq -r '[.results[].text, (.deliveries[].content | select(test("^<task-result [^>]*status=\"completed\"") | not))] | join("\n")' "$d")
   if grep -qF "Unknown agent \"$agent\"" <<<"$said"; then fail "the reviewer's task for $agent was refused: $(grep -F 'Unknown agent' <<<"$said" | head -1)"; fi
   if grep -qF 'No model selected' <<<"$said"; then fail "the reviewer's task for $agent did not run: $(grep -F 'No model selected' <<<"$said" | head -1)"; fi
-  id=$(jq -r --arg agent "$agent" '[.deliveries[].content | capture("<task-result id=\"(?<id>[^\"]+)\" agent=\"" + $agent + "\" status=\"completed\"")? | .id] | first // empty' "$d")
-  [ -n "$id" ] || fail "the reviewer's task for $agent has no completed delivery: $(jq -c '[.results[] | {isError, text: .text[0:300]}] + [.deliveries[] | .content[0:300]]' "$d")"
+  # A reviewer may run an agent more than once; one completed run is the pass, and with none the
+  # failure quotes what the reviewer received. A run that sent no result (its session only) counts
+  # when its own session ends in an accepted yield, below.
+  id=$(jq -r --arg agent "$agent" '([.deliveries[].content | capture("<task-result id=\"(?<id>[^\"]+)\" agent=\"" + $agent + "\" status=\"completed\"")? | .id]
+    + [.ids[] as $i | select([.deliveries[].content | select(contains("id=\"" + $i + "\""))] | length == 0) | $i]) | first // empty' "$d")
+  [ -n "$id" ] || fail "the reviewer's task for $agent did not complete: $(jq -c '[.deliveries[] | .content[0:300]] + [.results[] | {isError, text: .text[0:300]}]' "$d")"
   sub=$evidence/review-pair/$stem/$id.jsonl
   [ -s "$sub" ] || fail "$agent's session $stem/$id.jsonl is not beside the reviewer's"
   jq -R -s -e '[split("\n")[] | fromjson? | select(.type == "message" and .message.role == "toolResult" and .message.toolName == "yield" and .message.isError == false)] | length > 0' "$sub" >/dev/null ||
@@ -1121,7 +1176,7 @@ for agent in $pair_agents; do
   models=$(jq -R -s -c '[split("\n")[] | fromjson? | select(.type == "message" and .message.role == "assistant") | "\(.message.provider)/\(.message.model)"] | unique' "$sub")
   [ "$models" = "$(jq -cn --arg m "$review_target" '[$m]')" ] ||
     fail "$agent's session $id ran on $models, not only the fixture's review target $review_target"
-  note "$agent ran as $id on $review_target: its delivery says completed and its session ends in an accepted yield"
+  note "$agent ran as $id on $review_target, its session ending in an accepted yield; its result reached the reviewer by $(jq -r '[.deliveries[].via] | unique | if length == 0 then "no delivery or snapshot" else join(" and ") end' "$d")"
 done
 pass
 
@@ -1138,25 +1193,33 @@ note "architect, planner, implementer, tester and reviewer on $tree1 each comple
 pass
 
 begin token-rotation
-# A pod's projected operator token (pod.yml: expiration_seconds 3600, which the kubelet renews at
-# 80 %, 2880 s after the pod's start) rotates, and a model turn after the rotation still goes through
-# the gateway's aliases. The architect's pod is the longest-lived.
+# A pod's projected operator token (pod.yml: expiration_seconds 3600) is renewed by the kubelet at
+# 80 % of its life, 2880 s after it was issued, and a model turn after the renewal still runs on the
+# gateway's aliases. The architect's pod is the longest-lived. A token whose issue time (iat) is
+# later than the pod's start is a renewal: the pod's first token was issued as it started. By
+# token-rotation the architect has usually run long enough for one, so the wait is often none.
 pod=$(claim_sandbox "$tree1" architect)
 pod_uid=$(op get pod "$pod" -o jsonpath='{.metadata.uid}')
-# token_hash prints the token file's sha256, or fails: an exec that did not answer is never a hash.
-token_hash() { pod_exec "$pod" sha256sum /var/run/operator/token | cut -d' ' -f1 | grep -xE '[0-9a-f]{64}'; }
-first=$(token_hash) || fail "the architect pod $pod's operator token could not be read"
-started=$(date +%s)
-token_rotated() {
-  local now
-  now=$(token_hash) || return 1
-  [ "$now" != "$first" ]
+pod_started=$(date -d "$(op get pod "$pod" -o jsonpath='{.status.startTime}')" +%s) || fail "the architect pod $pod has no start time"
+# token_iat prints the issue time of the pod's token, from its payload alone, or fails: an exec that
+# did not answer is never a time. The token itself is never printed.
+token_iat() {
+  local payload
+  payload=$(pod_exec "$pod" cat /var/run/operator/token | cut -d. -f2 | tr '_-' '/+') || return 1
+  case $((${#payload} % 4)) in 2) payload="$payload==" ;; 3) payload="$payload=" ;; esac
+  base64 -d <<<"$payload" 2>/dev/null | jq -er '.iat | numbers'
 }
-until_true 3600 "the architect pod's operator token to rotate" token_rotated
+token_renewed() {
+  local iat
+  iat=$(token_iat) || return 1
+  [ "$iat" -gt $((pod_started + 60)) ]
+}
+until_true 3600 "the architect pod's operator token to be renewed" token_renewed
 now_uid=$(op get pod "$pod" -o jsonpath='{.metadata.uid}')
-[ "$now_uid" = "$pod_uid" ] || fail "the architect's pod was replaced during the wait ($pod_uid -> $now_uid), so the new token is another pod's, not a rotation"
+[ "$now_uid" = "$pod_uid" ] || fail "the architect's pod was replaced during the wait ($pod_uid -> $now_uid), so the new token is another pod's, not a renewal"
+iat=$(token_iat) || fail "the architect pod $pod's operator token could not be read"
 rotated=$(date -u +%FT%TZ)
-note "the token file changed $(($(date +%s) - started)) s after sampling (at $rotated)"
+note "the architect pod started at $(date -u -d "@$pod_started" +%FT%TZ); its token was issued at $(date -u -d "@$iat" +%FT%TZ), a renewal"
 send_agent "$tree1" architect "Stage 4b proof: reply to this message with one short sentence, then wait."
 # The poll runs in this shell: the session readers need the run's own variables, which a child sh
 # would not have.
@@ -1182,6 +1245,8 @@ note "Suspended Sandboxes of $tree1: $suspended; its tree volume Bound"
 pass
 
 begin kill-pod-resume
+# merging launches the merger; its pod must be running before the kill reaches PID 1.
+wait_for_worker "$tree1" merger
 pod=$(claim_sandbox "$tree1" merger)
 uid=$(claim_pod_uid "$tree1" merger)
 session=$(claim_view "$tree1" merger | jq -r .session)
@@ -1358,15 +1423,16 @@ pass
 
 begin re-admission
 set_status "$tree1" todo
-until_true 900 "the re-admitted tree 1 to report workspace-lost and relaunch a fresh architect" sh -c \
-  "grep -c 'workspace-lost:' '$daemon_log' | grep -q '^[1-9]'"
+lost_msg="supervise: the tree volume was lost with the session; relaunching a fresh session"
+lost_seen() { [ "$(log_lines "$lost_msg" | wc -l)" -ge 1 ]; }
+until_true 900 "the re-admitted tree 1 to report its tree volume lost and relaunch a fresh architect" lost_seen
 wait_for_worker "$tree1" architect
 pod=$(tree_pod "$tree1")
 recovered=$(pod_exec "$pod" cat "/legion/workspaces/$repo/${tree1,,}/.legion/workspace-recovered.json")
 jq -e --arg b "legion/$tree1" 'tostring | contains($b)' <<<"$recovered" >/dev/null || fail "the recovery marker does not name legion/$tree1: $recovered"
-lost=$(grep -c 'workspace-lost:' "$daemon_log")
-[ "$lost" = 1 ] || fail "workspace-lost was reported $lost times, want exactly once"
-note "one workspace-lost, then a fresh session whose workspace holds .legion/workspace-recovered.json naming legion/$tree1"
+lost=$(log_lines "$lost_msg" | wc -l)
+[ "$lost" = 1 ] || fail "the daemon reported the tree volume lost $lost times, want exactly once"
+note "the tree volume reported lost once, then a fresh session whose workspace holds .legion/workspace-recovered.json naming legion/$tree1"
 pass
 
 begin operator-close
@@ -1395,7 +1461,6 @@ esac
 [ "$(states1)" = "$claims_before" ] || fail "the refused close changed tree 1's claims: $claims_before, then $(states1)"
 note "the operator's close of workflow tree $tree1 was refused ($refusal); its claims $claims_before and objects $objects_before are unchanged"
 set_status "$tree1" backlog
-optree="S4BOP-$$"
 printf '%s\n' "You are a Stage 4b operator-close fixture, the root of a tree no workflow issue backs. Do nothing and wait." >"$work/op-architect.md"
 printf '%s\n' "You are a Stage 4b operator-close fixture, a worker of that tree. Do nothing and wait." >"$work/op-worker.md"
 op_root=$(claims_cli spawn --json --tree "$optree" --issue "$optree" --role architect --prompt-file "$work/op-architect.md" | jq -er .token) ||

@@ -198,8 +198,8 @@ round_correction_pushed() {
 # drops the suffix, and a user could hold the bare name. The approval must be of the current head.
 reviewer_approved_head() {
   local head approved
-  head=$(gh api "repos/$repo/pulls/$pr_number" --jq .head.sha) || return 1
-  approved=$(gh api --paginate "repos/$repo/pulls/$pr_number/reviews" \
+  head=$(timeout 60 gh api "repos/$repo/pulls/$pr_number" --jq .head.sha) || return 1
+  approved=$(timeout 60 gh api --paginate "repos/$repo/pulls/$pr_number/reviews" \
     --jq '.[] | select(.user.login == "legion-reviewer[bot]" and .state == "APPROVED") | .commit_id') || return 1
   grep -qx -- "$head" <<<"$approved"
 }

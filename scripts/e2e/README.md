@@ -472,8 +472,9 @@ the run that owns it. A signal to the whole process group does not stop the remo
   todo roots to backlog. The proof human's writes use the agents' bearer and name the session
   `legion-e2e4b-proof-human-<pid>` as their actor, which production Dispatch requires; it holds no
   claim, so the workflow reads its status writes as a human's.
-- **`sjawhar/legion-smoke`**: the fixture branch `legion/<tree 2>`, deleted at teardown, and tree
-  1's pull request, which the proof human merges.
+- **`sjawhar/legion-smoke`**: the fixture branch `legion/<tree 2>`, and tree 1's pull request, which
+  the proof human merges. The teardown closes any pull request the run left open, such as one from a
+  run that stopped before the merge, and deletes each tree's branch `legion/<tree>`.
 - **Namespace `legion`**: the run's Sandboxes, pods, Secrets and PVCs, its control pods, and its
   copy of the operator fixture's ConfigMap, `legion-operator-route-legsmoke`, all labelled
   `legsmoke`. [`lib/namespace-rig.sh`](#libnamespace-rigsh)'s teardown and
@@ -490,7 +491,7 @@ every checkpoint while the daemon runs. The run fails when:
 - the listener left one session's samples unanswered 3 times in a row. That leaves a gap of at
   least 20 s against the sampler's 5 s. One or two failures in a row are a blip, kept in
   `interests-outcomes.txt`, and their count is in the checkpoint's note;
-- any sampled topic falls outside the run.
+- any sampled topic falls outside the run. The run's topics name LEGSMOKE, its subject space `notifications.legion.legsmoke.`, its repository's GitHub subjects (`notifications.github.sjawhar.legion-smoke.`, where an agent follows its own pull request), operator-close's tree, a `legion-legsmoke-` role, or the session itself.
 
 Four controls show the audit can fail. The verdict is given a synthetic outside issue and must
 refuse it. The interest filter is given the run's samples plus one outside topic and must catch
@@ -511,11 +512,11 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 | `repository-configuration` | tree 2's workspace carries the fixture (`.omp/extensions/fixture.ts` and its `AGENTS.md`); the markers each loading path writes, and the agent's argv |
 | `issue-cap-moves` | tree 2 to backlog frees its slot, tree 3 is admitted, and tree 2's pods are gone |
 | `tree-moved` | tree 1 runs planner, implementer, tester, reviewer and retro to merging with real agents; the tester's adoption leaves a new empty change and keeps the implementer's author; once both of the reviewer's thermonuclear dispatches have an outcome, the reviewer's session, its subagents' sessions and each dispatch are kept under `review-pair/` |
-| `review-pair` | the reviewer dispatched `thermonuclear-deep-review` and `thermonuclear-code-quality` by name; each one's delivered result says completed, its own session ends in an accepted yield, and every turn of it ran on the fixture overlay's `review` target (the task executor runs a subagent on its parent's model, silently, when the subagent's own does not resolve). A refusal (`Unknown agent`, `No model selected`) fails with its text |
+| `review-pair` | the reviewer dispatched `thermonuclear-deep-review` and `thermonuclear-code-quality` by name, and one run of each completed. A run completes by the task-result block the reviewer received, whether by async delivery or a hub wait or jobs snapshot, saying `completed`. With no block, the subagent's own session beside the reviewer's must end in an accepted yield. Every turn of that session runs on the fixture overlay's `review` target: the task executor runs a subagent on its parent's model, silently, when the subagent's own does not resolve. A refusal (`Unknown agent`, `No model selected`) in a task result or in a run that did not complete fails with its text. tree-moved keeps the reviewer's session and the subagents' sessions as the pair settles, reading the tree volume, not the daemon |
 | `first-turns` | every role on tree 1 completed a first turn in its pod |
-| `token-rotation` | a pod's projected operator token (`/var/run/operator/token`, 3600 s, renewed by the kubelet at 80 %) rotates: its file reads a new sha256 in the same pod, by uid, and an exec that did not answer is never a rotation. A model turn after the rotation still runs on the gateway's aliases |
+| `token-rotation` | a pod's projected operator token (`/var/run/operator/token`, 3600 s, renewed by the kubelet at 80 %) is renewed: the token in the file was issued (its `iat`) after the pod started, in the same pod by uid. An exec that does not answer is never a token. A model turn after the renewal still runs on the gateway's aliases |
 | `idle-suspend` | a finished worker's Sandbox is Suspended with its pod gone and the tree volume bound |
-| `kill-pod-resume` | a killed merger pod is relaunched on its session |
+| `kill-pod-resume` | once the merger's pod is running, a killed merger pod is relaunched on its session |
 | `fence` | a pod the controller recreates on its own is never adopted. Once the relaunch's boot token is in the Secret, the replaced generation's token is refused, and the daemon logs `worker-stream: rejected hello (stale worker generation)` |
 | `daemon-relaunch-count` | the daemon relaunched the merger, `resumed`, once for each pod the driver ended |
 | `restart-mid-tree` | a daemon restart re-adopts the merger's pod and session |
@@ -523,10 +524,10 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 | `done` | the merger's READY, the proof human's merge, the production check and sign-off take tree 1 to `done` |
 | `node-release` | after the pool's consolidation, tree 1's node is gone while its Sandboxes stay Suspended and its volume Bound |
 | `close` | at linger expiry tree 1's Sandboxes and tree volume are deleted |
-| `re-admission` | tree 1 set todo again reports workspace-lost and relaunches a fresh architect |
+| `re-admission` | tree 1 set todo again: the daemon logs `supervise: the tree volume was lost with the session; relaunching a fresh session` exactly once, and the fresh architect's workspace holds `.legion/workspace-recovered.json` naming `legion/<tree 1>` |
 | `operator-close` | `legion claims close` on the Sandbox runtime: the close of re-admitted tree 1's live root is refused 409, and its claims, Sandboxes and pods are unchanged; an operator-spawned tree closes with its worker live, the root and the worker are retired, and the tree's Sandboxes, pods and volume are gone |
 | `pod-shape` | every Sandbox pod was shape-checked (gVisor, the operator's ServiceAccount and one projected token, the run's route ConfigMap mounted as the profile's `models.yml`, the pool, Pod Security restricted, split provisioning, no token in the environment or argv) |
-| `pod-watch-verdict` | no pod of the run was Evicted or had a container OOMKilled, and every claim process the daemon found dead (`supervise: process died`) was one the driver ended. The resume that finds the tree volume lost is the exception, counted by `re-admission`. The memory hog was OOMKilled. Synthetic OOMKilled and process-died controls both fail |
+| `pod-watch-verdict` | no pod of the run was Evicted or had a container OOMKilled, and every claim process the daemon found dead (`supervise: process died`) was one the driver ended. The resume that finds the tree volume lost is the exception, by its detail (`the tree volume was lost: …`), counted by `re-admission`. The memory hog was OOMKilled. Synthetic OOMKilled and process-died controls both fail |
 | `hygiene` | the daemon stopped, the namespace is clean, and the run's consumers are gone |
 | `production-audit` | no write by the run outside LEGSMOKE and no interest outside it; the verdict refuses a synthetic outside issue, and the collector finds a real outside writer's events |
 
