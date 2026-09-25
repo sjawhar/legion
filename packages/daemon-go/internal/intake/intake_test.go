@@ -10,7 +10,9 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -319,6 +321,105 @@ func TestConsumeRestartResumesAfterAcknowledgedMessage(t *testing.T) {
 	eventually(t, "durable consumer resumes after ack", func() bool { return writeCount(t, pool) == 2 })
 }
 
+// A daemon's first boot on a NATS server already holding history — production's stream keeps
+// 72 hours of ENVOY_NOTIFICATIONS — must not replay it into admission: its consumers, created now,
+// start at the next message. Boot's Dispatch listing is what covers the state before them.
+func TestAFreshConsumerStartsAtTheNextMessage(t *testing.T) {
+	pool := migratedPool(t)
+	createWrites(t, pool)
+	js, stream := testJetStream(t)
+	spec := consumerSpec(&lockedBuffer{})
+	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", capturedIssueUpdatedEnvelope(t))
+	publish(t, js, "notifications.github.sjawhar.legion.pr.42", capturedGitHubEnvelope(t, "pr-opened.json"))
+
+	consumers, err := OpenConsumers(context.Background(), js, spec)
+	if err != nil {
+		t.Fatalf("OpenConsumers: %v", err)
+	}
+	for _, name := range []string{dispatchConsumerName(spec.Project), githubConsumerName(spec.Project)} {
+		if pending := consumerInfo(t, stream, name).NumPending; pending != 0 {
+			t.Errorf("%s was created with %d messages of history pending, want 0", name, pending)
+		}
+	}
+	stop := runConsumers(t, consumers, pool, writeHandler("fresh", nil))
+	defer stop()
+	publish(t, js, "notifications.dispatch.issue.CAPTURE-4.issue.created", capturedIssueCreatedEnvelope(t))
+	eventually(t, "the next message committed", func() bool { return writeCount(t, pool) >= 1 })
+	assertNoAckPending(t, stream, dispatchConsumerName(spec.Project))
+	if got := writeCount(t, pool); got != 1 {
+		t.Errorf("%d facts committed, want only the message published after the consumers were created", got)
+	}
+}
+
+// A consumer that already exists keeps its position, whatever policy created it: an earlier daemon's
+// consumer (created delivering all) still owes its unacknowledged backlog, and a boot that updates
+// it still applies the configuration that may change, the repositories it filters on.
+func TestAnExistingConsumerKeepsItsPosition(t *testing.T) {
+	pool := migratedPool(t)
+	createWrites(t, pool)
+	js, stream := testJetStream(t)
+	spec := consumerSpec(&lockedBuffer{})
+	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", capturedIssueUpdatedEnvelope(t))
+	publish(t, js, "notifications.github.sjawhar.legion.pr.42", capturedGitHubEnvelope(t, "pr-opened.json"))
+	for _, config := range []jetstream.ConsumerConfig{
+		{Durable: dispatchConsumerName(spec.Project), FilterSubject: "notifications.dispatch.issue.>", AckPolicy: jetstream.AckExplicitPolicy, AckWait: spec.AckWait},
+		{Durable: githubConsumerName(spec.Project), FilterSubjects: githubFilters(spec.Repositories), AckPolicy: jetstream.AckExplicitPolicy, AckWait: spec.AckWait},
+	} {
+		if _, err := stream.CreateConsumer(context.Background(), config); err != nil {
+			t.Fatalf("create the earlier daemon's consumer %s: %v", config.Durable, err)
+		}
+	}
+
+	spec.Repositories = []string{"sjawhar/legion", "acme/widgets"}
+	if _, err := OpenConsumers(context.Background(), js, spec); err != nil {
+		t.Fatalf("OpenConsumers over existing consumers: %v", err)
+	}
+	for _, name := range []string{dispatchConsumerName(spec.Project), githubConsumerName(spec.Project)} {
+		if pending := consumerInfo(t, stream, name).NumPending; pending != 1 {
+			t.Errorf("%s has %d messages pending after the boot, want its backlog of 1", name, pending)
+		}
+	}
+	if got, want := consumerInfo(t, stream, githubConsumerName(spec.Project)).Config.FilterSubjects, githubFilters(spec.Repositories); !slices.Equal(got, want) {
+		t.Errorf("GitHub consumer filters = %v, want the boot's %v", got, want)
+	}
+
+	stop := startConsume(t, js, spec, pool, writeHandler("existing", nil))
+	defer stop()
+	eventually(t, "both backlogs delivered and acknowledged", func() bool {
+		for _, name := range []string{dispatchConsumerName(spec.Project), githubConsumerName(spec.Project)} {
+			if info := consumerInfo(t, stream, name); info.NumPending != 0 || info.NumAckPending != 0 || info.Delivered.Consumer == 0 {
+				return false
+			}
+		}
+		return true
+	})
+	if writeCount(t, pool) == 0 {
+		t.Error("the Dispatch backlog was acknowledged without being applied")
+	}
+}
+
+func consumerInfo(t *testing.T, stream jetstream.Stream, name string) *jetstream.ConsumerInfo {
+	t.Helper()
+	consumer, err := stream.Consumer(context.Background(), name)
+	if err != nil {
+		t.Fatalf("look up consumer %s: %v", name, err)
+	}
+	info, err := consumer.Info(context.Background())
+	if err != nil {
+		t.Fatalf("consumer %s info: %v", name, err)
+	}
+	return info
+}
+
+func capturedGitHubEnvelope(t *testing.T, name string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("testdata", "github", name))
+	if err != nil {
+		t.Fatalf("read captured GitHub envelope %s: %v", name, err)
+	}
+	return data
+}
+
 func TestConsumeCommitsRefusalAndAcknowledges(t *testing.T) {
 	pool := migratedPool(t)
 	createWrites(t, pool)
@@ -349,6 +450,11 @@ func startConsume(t *testing.T, js jetstream.JetStream, spec ConsumerSpec, pool 
 	if err != nil {
 		t.Fatalf("OpenConsumers: %v", err)
 	}
+	return runConsumers(t, consumers, pool, handlers...)
+}
+
+func runConsumers(t *testing.T, consumers *Consumers, pool *pgxpool.Pool, handlers ...Handler) func() {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- consumers.Run(ctx, pool, handlers...) }()

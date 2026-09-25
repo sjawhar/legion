@@ -2,6 +2,7 @@ package intake
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -37,7 +38,11 @@ type Consumers struct {
 	github   jetstream.Consumer
 }
 
-// OpenConsumers creates or updates this project's Dispatch and GitHub durable consumers.
+// OpenConsumers creates or updates this project's Dispatch and GitHub durable consumers. A consumer
+// created here starts at the next message, so a first daemon on a stream that already holds history
+// (production keeps 72 hours of it) does not replay it into admission; boot's Dispatch listing is
+// what covers the state before it. A consumer that exists keeps its position and the policy that
+// created it, and takes the rest of this boot's configuration.
 func OpenConsumers(ctx context.Context, js jetstream.JetStream, spec ConsumerSpec) (*Consumers, error) {
 	spec, err := normalizedSpec(spec)
 	if err != nil {
@@ -48,25 +53,41 @@ func OpenConsumers(ctx context.Context, js jetstream.JetStream, spec ConsumerSpe
 		return nil, fmt.Errorf("open %s: %w", notificationStream, err)
 	}
 
-	dispatch, err := stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
+	dispatch, err := openConsumer(ctx, stream, jetstream.ConsumerConfig{
 		Durable:       dispatchConsumerName(spec.Project),
 		FilterSubject: "notifications.dispatch.issue.>",
 		AckPolicy:     jetstream.AckExplicitPolicy,
 		AckWait:       spec.AckWait,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("create Dispatch durable consumer: %w", err)
+		return nil, fmt.Errorf("open the Dispatch durable consumer: %w", err)
 	}
-	github, err := stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
+	github, err := openConsumer(ctx, stream, jetstream.ConsumerConfig{
 		Durable:        githubConsumerName(spec.Project),
 		FilterSubjects: githubFilters(spec.Repositories),
 		AckPolicy:      jetstream.AckExplicitPolicy,
 		AckWait:        spec.AckWait,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("create GitHub durable consumer: %w", err)
+		return nil, fmt.Errorf("open the GitHub durable consumer: %w", err)
 	}
 	return &Consumers{spec: spec, dispatch: dispatch, github: github}, nil
+}
+
+// openConsumer updates the durable consumer config names, keeping the start position it was created
+// with (JetStream refuses to change it), or creates it delivering only new messages.
+func openConsumer(ctx context.Context, stream jetstream.Stream, config jetstream.ConsumerConfig) (jetstream.Consumer, error) {
+	existing, err := stream.Consumer(ctx, config.Durable)
+	if errors.Is(err, jetstream.ErrConsumerNotFound) {
+		config.DeliverPolicy = jetstream.DeliverNewPolicy
+		return stream.CreateConsumer(ctx, config)
+	}
+	if err != nil {
+		return nil, err
+	}
+	created := existing.CachedInfo().Config
+	config.DeliverPolicy, config.OptStartSeq, config.OptStartTime = created.DeliverPolicy, created.OptStartSeq, created.OptStartTime
+	return stream.UpdateConsumer(ctx, config)
 }
 
 // Run consumes both durable consumers until ctx ends, and returns the error of either one that
