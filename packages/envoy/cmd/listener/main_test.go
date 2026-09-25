@@ -9,8 +9,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,6 +17,7 @@ import (
 
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/cistore"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dedupe"
 	"github.com/sjawhar/envoy/internal/id"
@@ -1966,12 +1965,17 @@ func TestASettingNATSCannotChangeOnTheListenerDurableIsRefused(t *testing.T) {
 	}
 	t.Cleanup(client.Close)
 	for _, tc := range []struct {
-		name    string
-		setting string
-		apply   func(*natsgo.ConsumerConfig)
+		name     string
+		settings []string
+		apply    func(*natsgo.ConsumerConfig)
 	}{
-		{name: "heartbeat", setting: "heartbeat", apply: func(c *natsgo.ConsumerConfig) { c.Heartbeat = 5 * time.Second }},
-		{name: "ack-policy", setting: "ack policy", apply: func(c *natsgo.ConsumerConfig) { c.AckPolicy = natsgo.AckAllPolicy }},
+		{name: "heartbeat", settings: []string{"heartbeat"}, apply: func(c *natsgo.ConsumerConfig) { c.Heartbeat = 5 * time.Second }},
+		{name: "ack-policy", settings: []string{"ack policy"}, apply: func(c *natsgo.ConsumerConfig) { c.AckPolicy = natsgo.AckAllPolicy }},
+		// Both at once: the refusal names both, so one recreate fixes the durable for good.
+		{name: "both", settings: []string{"heartbeat", "ack policy"}, apply: func(c *natsgo.ConsumerConfig) {
+			c.Heartbeat = 5 * time.Second
+			c.AckPolicy = natsgo.AckAllPolicy
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			consumer := "listener-refused-" + tc.name
@@ -1983,16 +1987,21 @@ func TestASettingNATSCannotChangeOnTheListenerDurableIsRefused(t *testing.T) {
 			tc.apply(&config)
 			created, err := client.JS().AddConsumer(bus.Stream, &config)
 			if err != nil {
-				t.Fatalf("add a durable with a %s the policy forbids: %v", tc.setting, err)
+				t.Fatalf("add a durable with a %v the policy forbids: %v", tc.settings, err)
 			}
 
 			sub, err := startListenerSubscription(client, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
 			if err == nil {
 				_ = sub.Unsubscribe()
-				t.Fatalf("the listener bound a durable whose %s the policy forbids", tc.setting)
+				t.Fatalf("the listener bound a durable whose %v the policy forbids", tc.settings)
 			}
-			if !strings.Contains(err.Error(), consumer) || !strings.Contains(err.Error(), tc.setting) {
-				t.Fatalf("refusal = %q, want it to name the consumer and its %s", err, tc.setting)
+			if !strings.Contains(err.Error(), consumer) {
+				t.Fatalf("refusal = %q, want it to name the consumer", err)
+			}
+			for _, setting := range tc.settings {
+				if !strings.Contains(err.Error(), setting) {
+					t.Fatalf("refusal = %q, want it to name every setting it refuses: %v", err, tc.settings)
+				}
 			}
 			info, err := client.JS().ConsumerInfo(bus.Stream, consumer)
 			if err != nil {
@@ -2008,19 +2017,15 @@ func TestASettingNATSCannotChangeOnTheListenerDurableIsRefused(t *testing.T) {
 	}
 }
 
-// No retry can bind a refused durable, so the listener exits at once instead of retrying the bind
-// for over two minutes. While it retried, /healthz answered 200 "starting", and a rolling deploy
-// would take the replacement for healthy and stop the task it replaces.
+// No retry can bind a refused durable, so the listener exits at once instead of retrying the bind.
+// While a listener starts, /healthz answers 200 "starting", so a rolling deploy that waited out a
+// retry, or the interest and session cache warm-ups (30 s each), would take the replacement for
+// healthy and stop the task it replaces. The refusal therefore comes right after the NATS connect:
+// on a NATS that holds no KV bucket yet, a refused listener exits without having opened one.
 func TestARefusedDurableStopsTheListenerAtOnce(t *testing.T) {
-	uri := sharedListenerTestNATSURI(t)
-	client, err := bus.Connect([]string{uri}, bus.WithReplicas(1))
-	if err != nil {
-		t.Fatalf("connect bus: %v", err)
-	}
+	client := setupTestNATS(t)
 	t.Cleanup(client.Close)
 	consumer := "listener-refused-durable-startup"
-	_ = client.JS().DeleteConsumer(bus.Stream, consumer)
-	t.Cleanup(func() { _ = client.JS().DeleteConsumer(bus.Stream, consumer) })
 	config := natsgo.ConsumerConfig{Durable: consumer, DeliverSubject: natsgo.NewInbox()}
 	applyListenerConsumerPolicy(&config, bus.StreamSubjects())
 	config.Heartbeat = 5 * time.Second
@@ -2028,31 +2033,10 @@ func TestARefusedDurableStopsTheListenerAtOnce(t *testing.T) {
 		t.Fatalf("add a durable with a heartbeat: %v", err)
 	}
 
-	binary := buildListener(t)
-	output := &lockedBuffer{}
-	cmd := exec.Command(binary)
-	cmd.Env = []string{
-		"PORT=" + strconv.Itoa(freeTCPPort(t)),
-		"ENVOY_LISTEN_HOST=127.0.0.1",
-		"ENVOY_MACHINE_ID=refused-durable-startup",
-		"NATS_URLS=" + uri,
-		"ENVOY_API_TOKEN=refused-durable-token",
-	}
-	cmd.Stdout, cmd.Stderr = output, output
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start the listener: %v", err)
-	}
-	exited := make(chan struct{})
-	go func() {
-		_ = cmd.Wait()
-		close(exited)
-	}()
-	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		<-exited
-	})
+	listener := startListenerProcess(t, buildListener(t), client.Conn.ConnectedUrl(), "refused-durable-startup")
+	cmd, output := listener.cmd, listener.output
 	select {
-	case <-exited:
+	case <-listener.exited:
 	case <-time.After(30 * time.Second):
 		t.Fatalf("the listener was still running 30s after meeting a refused durable:\n%s", output.String())
 	}
@@ -2064,6 +2048,11 @@ func TestARefusedDurableStopsTheListenerAtOnce(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), consumer) || !strings.Contains(output.String(), "heartbeat") {
 		t.Fatalf("the listener's output does not name the refused durable and its heartbeat:\n%s", output.String())
+	}
+	for _, bucket := range []string{store.Bucket, session.SessionBucket, cistore.Bucket} {
+		if _, err := client.JS().KeyValue(bucket); !errors.Is(err, natsgo.ErrBucketNotFound) {
+			t.Fatalf("KV bucket %s after the refused start: %v, want not found: the refusal came after the cache warm-ups", bucket, err)
+		}
 	}
 }
 
