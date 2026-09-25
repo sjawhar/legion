@@ -43,8 +43,9 @@ re-resolves the name and connects to production. Production NATS accepts anonymo
 
 A #1311 pin rehearsal named its NATS container's alias `envoy-nats`. In the 15 s stop-to-start gap
 the rig's listener reconnected to production NATS for about a minute. It created a durable consumer
-there (`listener-probe-listener`, then deleted), consumed 961 notifications without delivering any,
-and took one live `notifications.role.cos` message out of the role queue group, which was lost.
+there (`listener-probe-listener`, then deleted), whose delivered sequence reached 963; in that
+minute the listener logged 961 `listener received` lines and delivered none of them. It also took
+one live `notifications.role.cos` message out of the role queue group, which was lost.
 
 ## Fix: all four parts, before any run
 
@@ -54,27 +55,38 @@ and took one live `notifications.role.cos` message out of the role queue group, 
 2. **An unroutable resolver on every rig container.** Pass `--dns 192.0.2.1` (TEST-NET-1, which
    routes nowhere) to each `docker run`. Docker's embedded DNS still answers the network's own
    names, and a name it would forward now times out instead of reaching the host's resolvers.
-3. **A pre-flight check from inside the rig**, while no container holds the alias. Both the rig's
-   alias and the production name must fail to resolve, or the run stops:
+3. **A pre-flight check that fails on a bad rig.** Before the first container starts, no name the
+   rig's clients dial may resolve on the host (`getent hosts envoy-nats` returns production here).
+   After each `docker run`, and before the first restart, the container must carry the sinkhole
+   resolver. A probe that passes its own `--dns 192.0.2.1` cannot fail for a name no container
+   holds, so it proves neither:
 
    ```bash
-   for name in "$alias" envoy-nats; do
-     if docker run --rm --network "$net" --dns 192.0.2.1 natsio/nats-box:latest nslookup "$name" >/dev/null 2>&1; then
-       echo "pre-flight FAILED: $name resolves inside the rig" >&2; exit 1
-     fi
-   done
+   if getent hosts "$alias" >/dev/null; then
+     echo "pre-flight FAILED: $alias resolves on the host" >&2; exit 1
+   fi
+   # after each rig container starts
+   if [ "$(docker inspect -f '{{json .HostConfig.Dns}}' "$c")" != '["192.0.2.1"]' ]; then
+     echo "pre-flight FAILED: $c forwards to the host's resolvers" >&2; exit 1
+   fi
    ```
 
-4. **A per-connection guard for the whole run.** The pre-flight proves the start, and the
+   On this devbox the first check fails for `envoy-nats` and passes for `l208r-bus-newprod`, and the
+   second fails for a container started without `--dns` (`HostConfig.Dns` is `null`).
+
+4. **A per-connection guard for the whole run.** The pre-flight covers the start; the
    fall-through happens mid-run, in the restart gap. Every half second, read the client container's
    live TCP peers on the server's port from `/proc/net/tcp` (and `tcp6`). Kill the client at once if
    any peer is outside the rig's subnet, and fail the run. Give the rig network an explicit subnet
    (`docker network create --subnet ...`) so "the rig's own container" is a checkable fact. Also fail
    the run if the client ever logs a server URL that is not the rig's alias.
 
+   A guard that cannot read the table must fail the run, not pass it with an empty peer list:
+
    ```bash
    # port 4222 is 0x107E; /proc/net/tcp holds addresses as little-endian hex
-   for h in $(docker exec "$client" cat /proc/net/tcp | awk 'NR>1 {split($3,a,":"); if (a[2]=="107E") print a[1]}' | sort -u); do
+   table=$(docker exec "$client" cat /proc/net/tcp) || { docker kill "$client"; echo "cannot read $client's sockets"; exit 1; }
+   for h in $(printf '%s\n' "$table" | awk 'NR>1 {split($3,a,":"); if (a[2]=="107E") print a[1]}' | sort -u); do
      ip=$(printf '%d.%d.%d.%d' "0x${h:6:2}" "0x${h:4:2}" "0x${h:2:2}" "0x${h:0:2}")
      case "$ip" in "$rig_prefix".*) ;; *) docker kill "$client"; echo "foreign peer $ip"; exit 1 ;; esac
    done
@@ -88,6 +100,8 @@ overlapping pool.
 
 Before trusting a restart rig on a tailnet-joined machine:
 - `getent hosts <every name the rig's clients dial>` on the host must come back empty;
-- during the run, the guard's peer list must show only rig addresses;
+- during the run, the guard's peer list must show only rig addresses, and after every restart the
+  rig's server must show each client connected to it (NATS: `/connz` on the monitoring port), so a
+  guard that reads nothing fails instead of passing;
 - afterwards, list what the run could have touched in production (consumers, KV keys, stream
   subjects) and confirm none of it is the rig's.
