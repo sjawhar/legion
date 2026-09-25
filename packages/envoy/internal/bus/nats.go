@@ -550,6 +550,13 @@ func (c *Client) registerSubscription(next recoverableSubscription, conn *nats.C
 	c.subscriptionsMu.Lock()
 	defer c.subscriptionsMu.Unlock()
 	subscription := &c.subscriptions[next.transport]
+	// Registering replaces the transport's subscription, so the one it replaces stops delivering:
+	// the listener's self-health rebuild re-registers after its durable consumer was lost, and the
+	// old handle, bound to that consumer's deliver inbox, would otherwise stay subscribed for good.
+	// For a consumer the library created, Unsubscribe also deletes it, as it always does.
+	if subscription.active != nil {
+		_ = subscription.active.Unsubscribe()
+	}
 	*subscription = next
 	if err := restoreSubscription(subscription, conn, js); err != nil {
 		subscription.active = nil
