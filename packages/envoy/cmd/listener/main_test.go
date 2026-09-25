@@ -3489,6 +3489,94 @@ func TestRunSelfHealthMonitor_RetriesPastTransientFailures(t *testing.T) {
 	}
 }
 
+// A self-health rebuild moves an interest registry whose connection closed to the client's live
+// one, as it does for the session and CI stores. The registry's buckets and watcher were bound to
+// the connection Open took, so a rewatch on that connection's handles could only fail again and the
+// monitor would end at its terminal threshold, terminating a listener whose NATS is healthy.
+func TestRunSelfHealthMonitor_MovesADeadInterestRegistryToTheLiveConnection(t *testing.T) {
+	client := setupTestNATS(t)
+	registryConn, err := natsgo.Connect(client.Conn.ConnectedUrl())
+	if err != nil {
+		t.Fatalf("connect registry: %v", err)
+	}
+	registry, err := store.Open(registryConn, store.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("open interest registry: %v", err)
+	}
+	readyCtx, readyCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer readyCancel()
+	if err := registry.WaitForCacheReady(readyCtx); err != nil {
+		t.Fatalf("wait for interest cache: %v", err)
+	}
+	registryConn.Close()
+	if err := registry.Ping(); err == nil {
+		t.Fatal("the registry still answered after its connection closed")
+	}
+
+	logger := logging.New("test")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	recovered := make(chan struct{}, 1)
+	terminated := make(chan struct{}, 1)
+	done := make(chan struct{})
+	go func() {
+		runSelfHealthMonitor(
+			ctx,
+			logger,
+			func() error {
+				err := registry.Ping()
+				if err == nil {
+					select {
+					case recovered <- struct{}{}:
+					default:
+					}
+				}
+				return err
+			},
+			func(err error) bool { return errors.Is(err, natsgo.ErrConnectionClosed) },
+			func() error { return rewatchListenerKVWatchers(client.Conn, registry, nil, nil) },
+			func() { terminated <- struct{}{} },
+			time.Millisecond,
+			3,
+		)
+		close(done)
+	}()
+
+	select {
+	case <-recovered:
+	case <-terminated:
+		t.Fatal("the monitor terminated instead of moving the registry to the live connection")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the monitor never recovered the registry")
+	}
+	cancel()
+	<-done
+
+	writer := testnats.Connect(t, client.Conn.ConnectedUrl())
+	t.Cleanup(writer.Close)
+	other, err := store.Open(writer, store.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("open the registry as another listener: %v", err)
+	}
+	if _, err := other.Upsert(store.Interest{SessionID: "ses_after_move", MachineID: "other-listener"}, []string{"notifications.agent.ses_after_move"}); err != nil {
+		t.Fatalf("subscribe through another listener: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		found := false
+		for _, interest := range registry.List() {
+			found = found || interest.SessionID == "ses_after_move"
+		}
+		if found {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the moved registry's cache never saw another listener's subscription")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 func TestRunSelfHealthMonitor_RebuildsTerminalWatcher(t *testing.T) {
 	client := setupTestNATS(t)
 	watcherConn, err := natsgo.Connect(client.Conn.ConnectedUrl())
