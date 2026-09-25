@@ -1,6 +1,10 @@
 package record
 
-import "sort"
+import (
+	"sort"
+
+	"github.com/sjawhar/legion/daemon/internal/claim"
+)
 
 // RankLess compares Dispatch's fractional key, compared as bytes — the order rank.Between
 // generates. Equal keys are ordered by issue key.
@@ -31,7 +35,7 @@ func Waiting(issues []Issue, slots []Slot) []Issue {
 	}
 	waiting := make([]Issue, 0, len(issues))
 	for _, issue := range issues {
-		if issue.Status == "todo" && issue.Tree == issue.Key {
+		if issue.Status == "todo" && claim.IsTreeRoot(issue.Key, issue.Tree) {
 			if _, ok := slotted[issue.Key]; !ok {
 				waiting = append(waiting, issue)
 			}

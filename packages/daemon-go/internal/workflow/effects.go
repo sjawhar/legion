@@ -85,13 +85,13 @@ func (e *Engine) start(ctx context.Context, tx pgx.Tx, issue record.Issue, role 
 	if role == "" {
 		return nil
 	}
-	return e.enqueue(ctx, tx, issue.Key, record.SuperviseRequest{Op: "start", Tree: e.treeKey(ctx, tx, issue), Role: role, Task: task,
+	return e.enqueue(ctx, tx, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: role, Task: task,
 		Generation: issue.Generation, Phase: issue.Phase})
 }
 
 // supervise enqueues op for the issue's role claim, stamped with the generation it serves.
 func (e *Engine) supervise(ctx context.Context, tx pgx.Tx, issue record.Issue, op record.SuperviseOp, role claim.Role, task string) error {
-	return e.enqueue(ctx, tx, issue.Key, record.SuperviseRequest{Op: op, Tree: e.treeKey(ctx, tx, issue), Role: role, Task: task, Generation: issue.Generation})
+	return e.enqueue(ctx, tx, issue.Key, record.SuperviseRequest{Op: op, Tree: issue.Tree, Role: role, Task: task, Generation: issue.Generation})
 }
 
 // task is what a started worker is told. It names the phase the worker starts, which the issue

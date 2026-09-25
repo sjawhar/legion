@@ -245,7 +245,7 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 	if err := r.notices.Publish(ctx, notify.Topic(token, row.Issue), message, payload, dedupeKey); err != nil {
 		return fmt.Errorf("publish issue notice for %s: %w", row.Issue, err)
 	}
-	if issue.Tree != issue.Key {
+	if !claim.IsTreeRoot(issue.Key, issue.Tree) {
 		if err := r.notices.Publish(ctx, notify.Topic(token, issue.Tree), message, payload, dedupeKey); err != nil {
 			return fmt.Errorf("publish tree notice for %s: %w", row.Issue, err)
 		}
