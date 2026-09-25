@@ -151,13 +151,7 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 	if workflow != nil {
 		plan.identity = workflow.identity
 	}
-	rolesDir, err := prompts.ResolveRolePromptsDir(os.LookupEnv)
-	if err != nil {
-		workflow.stop()
-		st.Close()
-		return fmt.Errorf("resolve role prompts: %w", err)
-	}
-	plan.prompts, err = prompts.New(rolesDir, cfg.StateDir)
+	plan.prompts, err = prompts.New(plan.rolesDir, cfg.StateDir)
 	if err != nil {
 		workflow.stop()
 		st.Close()
@@ -305,6 +299,9 @@ type plan struct {
 	// dispatchToken is the Dispatch bearer dispatch_token_file names; "" without Dispatch.
 	dispatchToken string
 	prompts       *prompts.Composer
+	// rolesDir is the role prompts directory (prompts.ResolveRolePromptsDir), resolved before the
+	// gate, which resolves every task agent its prompts dispatch.
+	rolesDir string
 	// stream is the worker stream's address: the listener binds it, and every agent's shim dials it.
 	stream     string
 	newRuntime runtimeFactory
@@ -371,9 +368,13 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 	if orphanSweep == 0 {
 		orphanSweep = orphanSweepInterval
 	}
+	rolesDir, err := prompts.ResolveRolePromptsDir(os.LookupEnv)
+	if err != nil {
+		return plan{}, fmt.Errorf("resolve role prompts: %w", err)
+	}
 	p := plan{
 		project: project, operatorToken: operatorToken, secrets: secrets, instructions: instructions,
-		dispatchToken: dispatchToken, clock: clock, orphanSweep: orphanSweep,
+		dispatchToken: dispatchToken, rolesDir: rolesDir, clock: clock, orphanSweep: orphanSweep,
 	}
 	switch cfg.Runtime.Name {
 	case "tmux":
@@ -414,6 +415,7 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 			timeout:    cfg.SlowCommandTimeout,
 			retry:      bootprobe.Daemon,
 			contract:   api.GoDaemonAPIVersion,
+			rolesDir:   p.rolesDir,
 			log:        log,
 		}.verify
 		log.Info("legion daemon resolved OMP invocation for boot probes and panes", "invocation", invocation)

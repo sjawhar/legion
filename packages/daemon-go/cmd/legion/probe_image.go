@@ -15,6 +15,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/daemon"
 	"github.com/sjawhar/legion/daemon/internal/modelroute"
+	"github.com/sjawhar/legion/daemon/internal/prompts"
 )
 
 // digits is what --go-daemon-api-version accepts before it is read as a number.
@@ -65,6 +66,11 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 		fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
 		return 1
 	}
+	rolesDir, err := prompts.ResolveRolePromptsDir(os.LookupEnv)
+	if err != nil {
+		fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
+		return 1
+	}
 	installed, err := modelroute.Install(os.Environ())
 	if err != nil {
 		fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
@@ -82,8 +88,8 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 	}
 	err = daemon.ProbeImage(ctx, daemon.ImageProbe{
 		Omp: invocation, Contract: expected, Env: env, WorkDir: workDir, Model: model, Route: route, KeyFile: installed.KeyFile,
-		PluginRoot: *pluginRoot,
-		Log:        slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
+		PluginRoot: *pluginRoot, RolesDir: rolesDir,
+		Log: slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
 	})
 	if unavailable := (*daemon.ModelRouteUnavailable)(nil); errors.As(err, &unavailable) {
 		fmt.Fprintf(stderr, "legion probe-image: %v (transient: the daemon's probe runs again)\n", err)

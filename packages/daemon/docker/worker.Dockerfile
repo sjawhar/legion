@@ -199,8 +199,9 @@ COPY --from=go /out/legion /opt/legion/go/bin/legion
 # to /usr/bin/git on the image PATH and the step refuses any other path, so git's absolute path is as fixed
 # as gh's and jj's (/usr/local/bin, copied above) and a pod environment can name all three. Then the Go
 # `legion probe-image` runs the three launch probes through the Go daemon's own code, loading the plugin
-# the way a Sandbox pod does (--plugin-root: the one explicit extension, discovery off), and holds the
-# plugin to the Go daemon API contract this binary speaks, printing
+# the way a Sandbox pod does (--plugin-root: the one explicit extension, discovery off), holds the
+# plugin to the Go daemon API contract this binary speaks, and resolves by name every task agent the
+# plugin's skills dispatch (shipped in its agents/ directory), printing
 # `probe-image: OK (/opt/omp/bin/omp) session-storage=probed go-daemon-api-version=<N>`; the Go daemon's
 # probe Sandbox runs it again with its own contract and the pod's LEGION_MODEL_GATEWAY_URL and gateway
 # token, adding the model round trip and `model-gateway=<model>` before any claim runs on the image
