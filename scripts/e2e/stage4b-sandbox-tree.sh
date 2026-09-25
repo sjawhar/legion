@@ -101,6 +101,7 @@ note() { echo "   $*"; }
 # pass ends a development run once its STAGE4B_UNTIL checkpoint has passed.
 pass() {
   echo "CHECK $check: PASS"
+  [ -z "$daemon_pid" ] || interests_snapshot
   [ "$until" != "$check" ] || {
     ok=1
     echo "stage 4b e2e: development run until $until finished (not the proof)"
@@ -555,21 +556,30 @@ production_baseline() {
 # production_audit fails on any production write the run made outside LEGSMOKE, and on any session
 # of the run holding a role outside legion-legsmoke-*.
 production_audit() {
-  local sessions issues
+  local sessions actors key touched
   audited=1
   sessions=$(jq -R -s -c 'split("\n") | map(fromjson? | select(.msg == "api: claim registered") | .session) | unique' "$daemon_log")
   printf '%s\n' "$sessions" >"$evidence/run-sessions.json"
-  issues=$(dispatch_get "issues?updated_since=$prod_baseline&limit=200" | jq -c --arg p "$project" '[.[] | select(.project != $p) | .key]')
-  printf '%s\n' "$issues" >"$evidence/production-issues-touched-outside.json"
+  # Production Dispatch is busy with other work while the run goes on, so an issue outside
+  # LEGSMOKE updated since the baseline is the run's write only when one of its events names one
+  # of the run's own writers: its agents' sessions, the daemon, and the proof human.
+  actors=$(jq -c --arg daemon "legion-daemon:$project" --arg human "$dispatch_actor" '. + [$daemon, $human]' <<<"$sessions")
+  touched='[]'
+  for key in $(dispatch_get "issues?updated_since=$prod_baseline" | jq -r --arg p "$project-" '.[].key | select(startswith($p) | not)'); do
+    touched=$(dispatch_events "$key" | jq -c --argjson actors "$actors" --arg since "$prod_baseline" --arg key "$key" --argjson so_far "$touched" \
+      '$so_far + [.[] | select((.at // "") >= $since and (.actor.id as $id | $actors | index($id))) | {issue: $key, seq, type, actor: .actor.id, at}]')
+  done
+  printf '%s\n' "$touched" >"$evidence/production-issues-touched-outside.json"
   # Envoy lists no roles, and a session's interests leave the listener with it, so the run samples
-  # its sessions' interests while they are live (interests_snapshot). A registered session with no
-  # sample leaves the audit unable to vouch for it.
+  # its sessions' interests at every checkpoint while its daemon runs (interests_snapshot). A
+  # registered session with no sample leaves the audit unable to vouch for it.
   if [ "$(jq length <<<"$sessions")" -gt 0 ] && [ ! -s "$evidence/interests.jsonl" ]; then
     printf '"no interests sampled for %s registered sessions"\n' "$(jq length <<<"$sessions")" >"$evidence/production-interests-outside.json"
   else
     jq -s -c --arg p "$project" --arg t "legion-$run_label-" '[.[] | .session_id as $s | .topics[]?
       | select((contains($p) or contains($t) or contains($s)) | not) | {session: $s, topic: .}] | unique' \
-      "$evidence/interests.jsonl" 2>/dev/null >"$evidence/production-interests-outside.json" || printf '[]\n' >"$evidence/production-interests-outside.json"
+      "$evidence/interests.jsonl" >"$evidence/production-interests-outside.json" ||
+      printf '"the interest samples could not be read"\n' >"$evidence/production-interests-outside.json"
   fi
   audit_verdict "$evidence/production-issues-touched-outside.json" "$evidence/production-interests-outside.json"
 }
@@ -873,7 +883,6 @@ for role in architect planner implementer tester reviewer; do
     fail "$role on $tree1: its first assistant turn did not complete"
 done
 note "architect, planner, implementer, tester and reviewer on $tree1 each completed a first turn in a pod"
-interests_snapshot
 pass
 
 begin token-rotation
