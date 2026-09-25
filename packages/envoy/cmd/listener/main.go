@@ -120,11 +120,15 @@ func listenerDurableRefusal(consumer string, config nats.ConsumerConfig) error {
 	if len(settings) == 0 {
 		return nil
 	}
+	without := "that setting"
+	if len(settings) > 1 {
+		without = "those settings"
+	}
 	return fmt.Errorf("%w: durable consumer %s has %s, which the listener's consumer policy forbids and NATS cannot change in place; "+
 		"deleting it lets the listener recreate it at deliver policy all, which replays every retained message, "+
-		"so to keep its cursor recreate it from its own config without them, at deliver policy by_start_sequence "+
+		"so to keep its cursor recreate it from its own config without %s, at deliver policy by_start_sequence "+
 		"with opt_start_seq one past its ack_floor.stream_seq (packages/envoy/AGENTS.md, Operational notes)",
-		errListenerDurableRefused, consumer, strings.Join(settings, " and "))
+		errListenerDurableRefused, consumer, strings.Join(settings, " and "), without)
 }
 
 // checkListenerDurable returns listenerDurableRefusal's answer for the machine's existing durable,
@@ -695,8 +699,10 @@ func main() {
 	// binding ("consumer is already bound"), so retry with backoff until the
 	// old listener's delivery interest clears; never delete the consumer to
 	// steal the binding — that resets the durable cursor and replays the full
-	// retention window to every subscriber. A durable refused here, made so
-	// since the check after the connect, is not retried either.
+	// retention window to every subscriber. A durable refused here is not
+	// retried either. The loop is the only refusal when the check after the
+	// connect could not read the durable (logged at WARN above), and it also
+	// catches a durable made refusable since that check.
 	deliveryConfig := listenerDeliveryHandlerConfig{
 		client:            client,
 		forwardRole:       client.RequestCoreTo,
