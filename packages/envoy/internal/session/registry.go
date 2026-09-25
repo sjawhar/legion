@@ -260,13 +260,10 @@ func (r *SessionRegistry) setKV(kv nats.KeyValue) {
 
 // StopWatch retires the KV watcher for a shutdown, before the NATS drain ends it (kvwatch.Stop): its
 // end records no terminal error and logs nothing, and a Rewatch from a recovery or a self-health
-// rebuild still running at shutdown is a no-op.
+// rebuild still running at shutdown arms no watcher. A Rewatch that fails on the closing connection
+// instead is reported by the bus as the stop, at INFO.
 func (r *SessionRegistry) StopWatch() {
 	r.watcher.Stop()
-}
-
-func (r *SessionRegistry) setWatchErr(err error) {
-	r.watcher.Fail(err)
 }
 
 // signalReady closes readyCh exactly once, unblocking any callers of

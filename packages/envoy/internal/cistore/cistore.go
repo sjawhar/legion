@@ -448,7 +448,8 @@ func (s *Store) WatchFailed() bool {
 
 // StopWatch retires the KV watcher for a shutdown, before the NATS drain ends it (kvwatch.Stop): its
 // end records no terminal error and logs nothing, and a Rewatch from a recovery or a self-health
-// rebuild still running at shutdown is a no-op.
+// rebuild still running at shutdown arms no watcher. A Rewatch that fails on the closing connection
+// instead is reported by the bus as the stop, at INFO.
 func (s *Store) StopWatch() {
 	s.watcher.Stop()
 }

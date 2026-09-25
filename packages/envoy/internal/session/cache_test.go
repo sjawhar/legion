@@ -179,7 +179,7 @@ func TestWatchError_EmptyByDefault(t *testing.T) {
 	if r.WatchError() != "" {
 		t.Fatalf("expected empty watch error, got %q", r.WatchError())
 	}
-	r.setWatchErr(errors.New("boom"))
+	r.watcher.Fail(errors.New("boom"))
 	if r.WatchError() != "boom" {
 		t.Fatalf("expected 'boom', got %q", r.WatchError())
 	}
@@ -189,7 +189,7 @@ func TestWatchHealthError_GatesOnReady(t *testing.T) {
 	// Before the initial scan completes, a watch error must NOT surface — the
 	// listener is still in normal startup and Ping() should stay healthy.
 	startup := &SessionRegistry{cache: map[string]cachedSession{}, readyCh: make(chan struct{})}
-	startup.setWatchErr(errors.New("watcher stopped"))
+	startup.watcher.Fail(errors.New("watcher stopped"))
 	if err := startup.watchHealthError(); err != nil {
 		t.Fatalf("expected nil during startup before scan, got %v", err)
 	}
@@ -198,7 +198,7 @@ func TestWatchHealthError_GatesOnReady(t *testing.T) {
 	// self-health watchdog react instead of serving a frozen cache forever.
 	dead := &SessionRegistry{cache: map[string]cachedSession{}, readyCh: make(chan struct{})}
 	dead.signalReady()
-	dead.setWatchErr(errors.New("watcher stopped"))
+	dead.watcher.Fail(errors.New("watcher stopped"))
 	if err := dead.watchHealthError(); err == nil {
 		t.Fatal("expected watch error after ready, got nil")
 	}
