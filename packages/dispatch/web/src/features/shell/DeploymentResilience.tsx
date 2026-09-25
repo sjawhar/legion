@@ -61,14 +61,13 @@ async function deploymentChanged(): Promise<boolean> {
   return latest !== undefined && latest !== runningIndexAsset();
 }
 
-function reloadForChunkFailure(event: Event): void {
+// Reloads the page once per session for a chunk that failed to download while online.
+function reloadForChunkFailure(): void {
   // A chunk that fails to download while the browser is offline is a network outage, not a
-  // replaced deployment: reloading now would swap the app for the browser's offline page. The
-  // error propagates to the importer, whose lazy boundary retries once the network returns.
+  // replaced deployment: reloading now would swap the app for the browser's offline page.
   if (!navigator.onLine) {
     return;
   }
-  event.preventDefault();
   if (window.sessionStorage.getItem(CHUNK_RELOAD_STORAGE_KEY) === "true") {
     return;
   }
@@ -76,6 +75,13 @@ function reloadForChunkFailure(event: Event): void {
   window.location.reload();
 }
 
+// Vite dispatches `vite:preloadError` for a chunk or one of its stylesheets that failed to
+// download, and throws the failure to the importer unless the event is default-prevented. A
+// prevented failure of the chunk itself resolves the import with `undefined`, which the importer
+// reads as a module and fails on with a TypeError that says nothing about the download; a
+// prevented stylesheet failure loads the module without its styles. So the handler never
+// prevents it: the importer always sees the failure itself, and the page also reloads at most
+// once per session.
 export function installChunkFailureRecovery(): void {
   window.addEventListener("vite:preloadError", reloadForChunkFailure);
 }

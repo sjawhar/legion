@@ -128,8 +128,11 @@ document tab mounts. `loadDocumentTransport` resolves to a synchronous `connect`
 browser is offline is retried once the network returns (Chromium caches a failed module fetch,
 so the retry can reject too); a failure while online, or a retry that rejects, reaches
 `DeploymentResilience`, which treats it as a replaced deployment and reloads once per session.
-A load that still rejects (the session's reload already spent) sets the document's connection
-state to `failed` — a rose dot — and renders the error under the toolbar rather than staying
+It never default-prevents Vite's `vite:preloadError` (`installChunkFailureRecovery` says why), so
+every importer sees the load failure itself: a route's error box names the failed download, and
+the first editor a page mounts after its stylesheet failed shows the document's failed state. A
+load that still rejects (the session's reload already spent) sets the document's connection state
+to `failed` — a rose dot — and renders the error under the toolbar rather than staying
 "connecting". `DocumentRuntime` supplies the transport and editor creation seams
 (`loadTransport`, `createEditor`); happy-dom tests use its doubles from
 `web/src/__tests__/document-runtime.ts`, while `e2e/editor.ts` drives the real editor in

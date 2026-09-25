@@ -31,7 +31,7 @@ test("warms the block schema and headless Markdown renderer once after the first
   }
 });
 
-test("a Vite preload error reloads once and prevents the browser's fallback", async () => {
+test("a Vite preload error reloads once per session and always reaches its importer", async () => {
   window.sessionStorage.clear();
   installChunkFailureRecovery();
   const reload = spyOn(window.location, "reload").mockImplementation(() => undefined);
@@ -43,8 +43,8 @@ test("a Vite preload error reloads once and prevents the browser's fallback", as
     window.dispatchEvent(first);
     window.dispatchEvent(second);
 
-    expect(first.defaultPrevented).toBe(true);
-    expect(second.defaultPrevented).toBe(true);
+    expect(first.defaultPrevented).toBe(false);
+    expect(second.defaultPrevented).toBe(false);
     expect(reload).toHaveBeenCalledTimes(1);
     expect(window.sessionStorage.getItem("dispatch.reloaded-for-chunk")).toBe("true");
   } finally {

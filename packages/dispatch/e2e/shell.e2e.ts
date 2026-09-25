@@ -79,6 +79,34 @@ test("signing out returns to the sign-in page", async ({ browser }, testInfo) =>
   await context.close();
 });
 
+test("a page chunk that fails again after the session's one reload shows the failed download", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Unreachable page" });
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  // Every download of the issue page's code fails, the way a request does when the network
+  // changes under it (a VPN reconnect, a Wi-Fi switch).
+  await page.route(/\/assets\/IssuePage-[^/]+\.js$/u, (route) => route.abort());
+  let loads = 0;
+  page.on("load", () => {
+    loads += 1;
+  });
+
+  try {
+    await page.goto(`/issues/${issue.key}`);
+    // The first failure reloads the page once; the second, with that reload spent, stays.
+    await expect.poll(() => loads).toBe(2);
+    const box = page.getByTestId("error-boundary");
+    await expect(box).toContainText("Failed to fetch dynamically imported module");
+    await expect(box).not.toContainText("Cannot read properties of undefined");
+    await expect(box.getByRole("button", { name: "Reload Dispatch" })).toBeVisible();
+  } finally {
+    await context.close();
+  }
+});
+
 test("the document editor renders headings and ordered lists with real typography", async ({
   browser,
 }) => {
