@@ -1362,61 +1362,84 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     }
   }, 60_000);
 
-  // A conflict with a deleted side resolves to its other side alone under
-  // `bookmarks(exact:legion/<KEY>)`, as if the bookmark were whole. Both shapes are refused by
-  // name, and each of the refusal's two ways out is followed as it is written: keep the added
-  // commit, which the workspace then starts at; or start from main, with the branch deleted on
-  // GitHub when origin has it and the local bookmark deleted when it does not.
+  // A conflicted local bookmark is refused by name, and each of the refusal's two ways out is followed
+  // as it is written, every command in order: keep an added commit, which the workspace then starts
+  // at; or start from main, deleting the local bookmark, after deleting the branch on GitHub when
+  // origin has it. A conflict with a deleted side resolves to its other side alone under
+  // `bookmarks(exact:legion/<KEY>)`, as if the bookmark were whole; with two added commits the
+  // GitHub deletion alone would leave the local side in conflict with a deletion.
   for (const shape of [
     {
       name: "a local deletion never pushed, then origin's branch moved",
       build: async (rig: Rig) => {
-        const pushed = await pushIssueBranch(rig);
+        const base = await pushIssueBranch(rig);
         await rig.jj(["bookmark", "delete", issueBookmark], { cwd: rig.repoCloneDir });
         const moved = await commitOnMain(rig, "moved");
         await moveRemoteBranch(rig, moved);
-        return { pushed, moved, originHasIt: true };
+        return { base, added: [moved], originHasIt: true };
       },
     },
     {
       name: "a local move never pushed, then the branch deleted on GitHub",
       build: async (rig: Rig) => {
-        const pushed = await pushIssueBranch(rig);
+        const base = await pushIssueBranch(rig);
         const moved = await commitOnMain(rig, "moved");
         await rig.jj(["bookmark", "set", issueBookmark, "-r", moved, "--allow-backwards"], {
           cwd: rig.repoCloneDir,
         });
         await rig.deleteRemoteBranch(issueBookmark);
-        return { pushed, moved, originHasIt: false };
+        return { base, added: [moved], originHasIt: false };
+      },
+    },
+    {
+      name: "a local move never pushed while origin's branch moved",
+      build: async (rig: Rig) => {
+        const base = await pushIssueBranch(rig);
+        const local = await commitOnMain(rig, "local");
+        await rig.jj(["bookmark", "set", issueBookmark, "-r", local, "--allow-backwards"], {
+          cwd: rig.repoCloneDir,
+        });
+        const remote = await commitOnMain(rig, "remote");
+        await moveRemoteBranch(rig, remote);
+        return { base, added: [local, remote], originHasIt: true };
       },
     },
   ]) {
-    test(`refuses a bookmark conflicted with a deleted side, ${shape.name}, and follows both ways out`, async () => {
+    test(`refuses a conflicted bookmark, ${shape.name}, and follows both ways out`, async () => {
       for (const { name, command } of JJ_BINARIES) {
         for (const wayOut of ["keep", "main"] as const) {
           const label = `${name}, ${wayOut}`;
           const rig = await realJjRig(command, path.join(await temporaryDirectory(), "state"));
           const { repoCloneDir, workspaceDir, calls, jj, commitOf, deps } = rig;
-          const { pushed, moved, originHasIt } = await shape.build(rig);
+          const { base, added, originHasIt } = await shape.build(rig);
+          const [kept] = added;
+          const deleteLocal = `\`jj bookmark delete ${issueBookmark} -R ${repoCloneDir}\``;
           const fromMain = originHasIt
-            ? `delete the branch on GitHub (the pull request's Delete branch button, or \`gh api -X DELETE repos/acme/widgets/git/refs/heads/${issueBookmark}\`)`
-            : `\`jj bookmark delete ${issueBookmark} -R ${repoCloneDir}\``;
+            ? `delete the branch on GitHub (the pull request's Delete branch button, or \`gh api -X DELETE repos/acme/widgets/git/refs/heads/${issueBookmark}\`) and run ${deleteLocal}`
+            : deleteLocal;
+          const keep =
+            added.length > 1
+              ? `Keep one of its added commits: \`jj bookmark set ${issueBookmark} -r <commit> -R ${repoCloneDir}\`. `
+              : `Keep its added commit: \`jj bookmark set ${issueBookmark} -r ${kept} -R ${repoCloneDir}\`. `;
+          const deletion = added.length > 1 ? "" : ", one side a deletion";
+          // The added commits in either order: jj's, from the merge of the two operations.
+          const refusals = [added, [...added].reverse()].map(
+            (adds) =>
+              `Bookmark ${issueBookmark} is conflicted (adds ${adds.join(", ")}; removes ${base})${deletion}; workspace ${workspaceDir} was not created. ` +
+              keep +
+              `Start from main instead: ${fromMain}, and the next provisioning starts at main.`
+          );
 
           for (const attempt of [1, 2]) {
             calls.length = 0;
-            expect(await refusal(deps), `${label}, attempt ${attempt}`).toBe(
-              `Bookmark ${issueBookmark} is conflicted (adds ${moved}; removes ${pushed}), one side a deletion; workspace ${workspaceDir} was not created. ` +
-                `Keep its added commit: \`jj bookmark set ${issueBookmark} -r ${moved} -R ${repoCloneDir}\`. ` +
-                `Start from main instead: ${fromMain}, and the next provisioning starts at main.`
-            );
+            expect(refusals, `${label}, attempt ${attempt}`).toContain(await refusal(deps));
             await rig.expectNothingRegistered(`${label}, attempt ${attempt}`);
           }
 
           if (wayOut === "keep") {
-            await jj(["bookmark", "set", issueBookmark, "-r", moved, "-R", repoCloneDir]);
-          } else if (originHasIt) {
-            await rig.deleteRemoteBranch(issueBookmark);
+            await jj(["bookmark", "set", issueBookmark, "-r", kept, "-R", repoCloneDir]);
           } else {
+            if (originHasIt) await rig.deleteRemoteBranch(issueBookmark);
             await jj(["bookmark", "delete", issueBookmark, "-R", repoCloneDir]);
           }
           await expect(provisionIssueWorkspace("WIDGETS-42", deps), label).resolves.toEqual({
@@ -1425,7 +1448,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
             bookmark: issueBookmark,
           });
           expect(await commitOf("@-", workspaceDir), label).toBe(
-            wayOut === "keep" ? moved : await commitOf("main")
+            wayOut === "keep" ? kept : await commitOf("main")
           );
         }
       }

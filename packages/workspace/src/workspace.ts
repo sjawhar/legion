@@ -211,9 +211,11 @@ async function ensureRepoClone(
  *     with a deleted side — a local deletion never pushed after origin's branch moved, or a local
  *     move never pushed after GitHub deleted the branch — which `bookmarks(exact:legion/<KEY>)`
  *     lists as one commit (verified on jj 0.44 and 0.45). The refusal names two ways out: keep an
- *     added commit (`jj bookmark set`, which jj refuses for the removed side), or start from main,
- *     by deleting the branch on GitHub when origin has it and `jj bookmark delete` when it does
- *     not.
+ *     added commit (`jj bookmark set`, which jj refuses for the removed side), or start from main
+ *     with `jj bookmark delete`, after deleting the branch on GitHub when origin has it: with two
+ *     added commits (a local move never pushed while origin's branch moved), the GitHub deletion
+ *     alone leaves the local side in conflict with a deletion, which the next provisioning refuses
+ *     again.
  *   - A local bookmark on one commit is where the workspace starts, whatever origin's row is: a
  *     row with no commit, after GitHub deleted a branch the local bookmark had moved on from, or
  *     one tracked before the first push.
@@ -267,9 +269,10 @@ async function createWorkspace(
       local.added.length > 1
         ? ["one of its added commits", "<commit>"]
         : ["its added commit", local.added[0]];
+    const deleteLocal = `\`jj bookmark delete ${bookmark} -R ${repoCloneDir}\``;
     const fromMain = origin?.present
-      ? `delete the branch on GitHub (the pull request's Delete branch button, or \`gh api -X DELETE repos/${deps.repo}/git/refs/heads/${bookmark}\`)`
-      : `\`jj bookmark delete ${bookmark} -R ${repoCloneDir}\``;
+      ? `delete the branch on GitHub (the pull request's Delete branch button, or \`gh api -X DELETE repos/${deps.repo}/git/refs/heads/${bookmark}\`) and run ${deleteLocal}`
+      : deleteLocal;
     throw new Error(
       `Bookmark ${bookmark} is conflicted ${conflictTargets(local)}; workspace ${workspaceDir} was not created. ` +
         `Keep ${keep}: \`jj bookmark set ${bookmark} -r ${commit} -R ${repoCloneDir}\`. ` +

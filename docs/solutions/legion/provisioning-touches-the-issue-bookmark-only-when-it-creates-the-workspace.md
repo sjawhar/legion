@@ -62,9 +62,11 @@ not exist. In order:
      pushed, then origin's branch moved; or a local move never pushed, then the branch deleted on
      GitHub): `Bookmark legion/<KEY> is conflicted (adds <ids>; removes <ids>)[, one side a
      deletion]; workspace <dir> was not created. Keep its added commit: \`jj bookmark set
-     legion/<KEY> -r <commit> -R <clone>\`. Start from main instead: <the branch deleted on GitHub
-     when origin has it, else \`jj bookmark delete legion/<KEY> -R <clone>\`>, and the next
-     provisioning starts at main.`;
+     legion/<KEY> -r <commit> -R <clone>\`. Start from main instead: <when origin has the branch,
+     delete it on GitHub and run \`jj bookmark delete legion/<KEY> -R <clone>\`; else that
+     \`jj bookmark delete\` alone>, and the next provisioning starts at main.` With two added
+     commits (a local move never pushed while origin's branch moved) the GitHub deletion alone
+     leaves the local side in conflict with a deletion, which the next provisioning refuses again;
    - a local bookmark on one commit is where the workspace starts, whatever origin's row is,
      including a row tracked with no commit (tracked before the first push, or left after GitHub
      deleted a branch the local bookmark moved on from);
