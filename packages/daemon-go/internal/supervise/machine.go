@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -556,7 +555,7 @@ func (m *Machine) start(ctx context.Context, token string) (runtime.Locator, err
 func (m *Machine) died(ctx context.Context, observation runtime.Observation) error {
 	m.log.Warn("supervise: process died", "incarnation", m.claim.Locator.Incarnation, "observed", string(observation.Kind),
 		"detail", observation.Detail)
-	if observation.Kind == runtime.Gone && strings.HasPrefix(observation.Detail, runtime.WorkspaceLostDetail) && m.claim.SessionFile != "" {
+	if observation.Kind == runtime.Gone && observation.WorkspaceLost && m.claim.SessionFile != "" {
 		return m.relaunchFresh(ctx)
 	}
 	return m.relaunchAfterFailure(ctx)

@@ -11,8 +11,8 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
-const lostDetail = runtime.WorkspaceLostDetail +
-	" pod legion-legion-208-architect (uid u2) Failed: init container workspace-init terminated (Error, exit code 3)"
+const lostDetail = "the tree volume was lost: pod legion-legion-208-architect (uid u2) Failed: " +
+	"init container workspace-init terminated (Error, exit code 3)"
 
 // resumedHarness is a machine over c that has suspended its recorded session and is resuming it;
 // told records every claim the machine reports its tree volume lost for.
@@ -34,6 +34,15 @@ func (h *harness) gone(detail string) {
 	h.must(RuntimeObservation{Observation: runtime.Observation{Locator: h.locator(), Kind: runtime.Gone, At: h.clock.Now(), Detail: detail}})
 }
 
+// goneWithWorkspaceLost is the runtime's verdict that the process never started because its tree
+// volume was lost: the field, not the wording of the detail beside it.
+func (h *harness) goneWithWorkspaceLost(detail string) {
+	h.t.Helper()
+	h.must(RuntimeObservation{Observation: runtime.Observation{
+		Locator: h.locator(), Kind: runtime.Gone, At: h.clock.Now(), Detail: detail, WorkspaceLost: true,
+	}})
+}
+
 // One exit 3 relaunches the claim once, as a fresh recorded session: no session file to resume, the
 // next generation, a launch built for a claim whose workspace was lost, and no launch failure
 // charged — the volume ended the process, not the launch. The daemon is told, and the fresh agent's
@@ -42,7 +51,7 @@ func TestAWorkspaceLostGoneRelaunchesAFreshSessionOnce(t *testing.T) {
 	h, told := resumedHarness(t, rootClaim())
 	generation := h.generation()
 
-	h.gone(lostDetail)
+	h.goneWithWorkspaceLost(lostDetail)
 
 	spawns := h.wantCalls("Spawn", 2)
 	if fresh := spawns[1].Spec; fresh.ResumeSessionFile != "" || fresh.Generation != generation+1 {
@@ -74,7 +83,7 @@ func TestAWorkspaceLostGoneRelaunchesAFreshSessionOnce(t *testing.T) {
 
 // Any other end of a resumed process is an ordinary death: one launch failure, and the recorded
 // session resumed again after the process that died.
-func TestAGoneWithoutTheWorkspaceLostDetailStillResumesTheSession(t *testing.T) {
+func TestAGoneWithoutTheWorkspaceLostVerdictStillResumesTheSession(t *testing.T) {
 	h, told := resumedHarness(t, rootClaim())
 	dead := h.locator()
 

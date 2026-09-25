@@ -65,11 +65,12 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 		return status
 	}
 	for _, tc := range []struct {
-		row     string
-		objects []k8sruntime.Object
-		want    runtime.ObservationKind
-		detail  []string
-		absent  []string
+		row           string
+		objects       []k8sruntime.Object
+		want          runtime.ObservationKind
+		detail        []string
+		absent        []string
+		workspaceLost bool
 	}{
 		{row: "2 sandbox absent", want: runtime.Gone, detail: []string{"sandbox legion/" + name + " is absent"}},
 		{
@@ -98,13 +99,13 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 			objects: withPod(modeRunning, nil, recorded, sandboxUID, failed(terminated(initContainer, 0, "Completed"), terminated(mainContainer, 137, "Error"))),
 			want:    runtime.Gone,
 			detail:  []string{"pod " + name + " (uid " + recorded + ") Failed: main container worker terminated (Error, exit code 137)", "last lines of worker:\nfake logs"},
-			absent:  []string{"workspace-lost"},
 		},
 		{
-			row:     "5 workspace-init lost the workspace",
-			objects: withPod(modeRunning, nil, recorded, sandboxUID, failed(terminated(initContainer, 3, "Error"))),
-			want:    runtime.Gone,
-			detail:  []string{"workspace-lost: pod " + name, "init container workspace-init terminated (Error, exit code 3)", "last lines of workspace-init:"},
+			row:           "5 workspace-init lost the workspace",
+			objects:       withPod(modeRunning, nil, recorded, sandboxUID, failed(terminated(initContainer, 3, "Error"))),
+			want:          runtime.Gone,
+			workspaceLost: true,
+			detail:        []string{"the tree volume was lost: pod " + name, "init container workspace-init terminated (Error, exit code 3)", "last lines of workspace-init:"},
 		},
 		{
 			row:     "5 the agent exited cleanly",
@@ -199,6 +200,9 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 			}
 			if obs.Locator != loc {
 				t.Fatalf("observation carries %+v, want the recorded locator", obs.Locator)
+			}
+			if obs.WorkspaceLost != tc.workspaceLost {
+				t.Errorf("WorkspaceLost = %t, want %t (detail: %s)", obs.WorkspaceLost, tc.workspaceLost, obs.Detail)
 			}
 			for _, want := range tc.detail {
 				if !strings.Contains(obs.Detail, want) {
