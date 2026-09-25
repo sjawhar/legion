@@ -3,8 +3,11 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -62,8 +65,11 @@ type Gateway struct {
 const (
 	kubernetesKey     = "runtime.kubernetes"
 	defaultTreeVolume = "20Gi"
-	// minTokenExpiry is the shortest projected service account token Kubernetes issues.
+	// minTokenExpiry is the shortest projected service account token Kubernetes issues, and
+	// maxTokenExpiry the longest the cluster's admission policy admits for a Legion pod
+	// (agent-c #20053, the legion-sandbox-pods fence).
 	minTokenExpiry = 600
+	maxTokenExpiry = 3600
 	// poolLabel is the node label that selects the Legion pool. The runtime sets it on every pod,
 	// and the cluster's admission policy requires its value.
 	poolLabel = "legion.dev/pool"
@@ -448,8 +454,8 @@ func readGateway(value *yaml.Node) (Gateway, error) {
 		return Gateway{}, fmt.Errorf("%s is required", expiryKey)
 	case *expiry < minTokenExpiry:
 		return Gateway{}, fmt.Errorf("%s must be at least %d (the kubelet's minimum)", expiryKey, minTokenExpiry)
-	case *expiry > maxTimerSeconds:
-		return Gateway{}, fmt.Errorf("%s must be at most %d", expiryKey, maxTimerSeconds)
+	case *expiry > maxTokenExpiry:
+		return Gateway{}, fmt.Errorf("%s must be at most %d (the longest pod token the cluster's admission policy admits)", expiryKey, maxTokenExpiry)
 	}
 	gateway.TokenExpiry = time.Duration(*expiry) * time.Second
 	return gateway, nil
@@ -485,6 +491,33 @@ func checkKubernetesKeys(file fileConfig) error {
 	} {
 		if file.set[rule.key] {
 			return fmt.Errorf("%s is not used when runtime is kubernetes: %s; remove %s", rule.key, rule.why, rule.key)
+		}
+	}
+	return nil
+}
+
+// checkPodReachable refuses an address pods are handed that no pod can reach. Every pod's shim
+// dials the worker stream at tcp://<bind>:<worker_stream_port>, so bind must name one of the
+// daemon host's own addresses, never loopback or the unspecified address it would listen on; and
+// a loopback host in daemon_url, envoy_url, or nats_urls is, in a pod, the pod itself.
+func checkPodReachable(cfg Config) error {
+	if ip := net.ParseIP(cfg.Bind); strings.EqualFold(cfg.Bind, "localhost") || ip != nil && (ip.IsLoopback() || ip.IsUnspecified()) {
+		return fmt.Errorf("bind %s is not an address a pod can reach, and every pod's shim dials the worker stream at tcp://%s; bind the daemon host's own address when runtime is kubernetes",
+			cfg.Bind, net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.WorkerStreamPort)))
+	}
+	addresses := []struct{ key, value string }{{"daemon_url", cfg.DaemonURL}, {"envoy_url", cfg.EnvoyURL}}
+	for _, raw := range cfg.NatsURLs {
+		addresses = append(addresses, struct{ key, value string }{"nats_urls", raw})
+	}
+	for _, address := range addresses {
+		parsed, err := url.Parse(address.value)
+		if err != nil {
+			return fmt.Errorf("%s must be a valid URL", address.key)
+		}
+		host := parsed.Hostname()
+		if ip := net.ParseIP(host); strings.EqualFold(host, "localhost") || ip != nil && ip.IsLoopback() {
+			return fmt.Errorf("%s %s names a loopback host, which in a pod is the pod itself; name the host pods reach it at when runtime is kubernetes",
+				address.key, address.value)
 		}
 	}
 	return nil

@@ -410,14 +410,54 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			want: "runtime.kubernetes.gateway.token_expiry_seconds must be at least 600 (the kubelet's minimum)",
 		},
 		{
-			name: "gateway token_expiry_seconds past the timer bound",
-			body: kubernetesWith("token_expiry_seconds: 600", "token_expiry_seconds: 2147484"),
-			want: "runtime.kubernetes.gateway.token_expiry_seconds must be at most 2147483",
+			name: "gateway token_expiry_seconds past the lifetime the cluster admits",
+			body: kubernetesWith("token_expiry_seconds: 600", "token_expiry_seconds: 3601"),
+			want: "runtime.kubernetes.gateway.token_expiry_seconds must be at most 3600 (the longest pod token the cluster's admission policy admits)",
 		},
 		{
 			name: "gateway token_expiry_seconds not an integer",
 			body: kubernetesWith("token_expiry_seconds: 600", "token_expiry_seconds: 10m"),
 			want: "runtime.kubernetes.gateway.token_expiry_seconds must be an integer",
+		},
+		{
+			name: "daemon_url empty",
+			body: kubernetesWith("daemon_url: http://10.0.0.5:13370\n", "daemon_url: \"\"\n"),
+			want: "daemon_url must be a valid URL",
+		},
+		{
+			name: "daemon_url on loopback",
+			body: kubernetesWith("daemon_url: http://10.0.0.5:13370", "daemon_url: http://127.0.0.1:13370"),
+			want: "daemon_url http://127.0.0.1:13370 names a loopback host, which in a pod is the pod itself; name the host pods reach it at when runtime is kubernetes",
+		},
+		{
+			name: "daemon_url on localhost",
+			body: kubernetesWith("daemon_url: http://10.0.0.5:13370", "daemon_url: http://localhost:13370"),
+			want: "daemon_url http://localhost:13370 names a loopback host, which in a pod is the pod itself; name the host pods reach it at when runtime is kubernetes",
+		},
+		{
+			name: "envoy_url on IPv6 loopback",
+			body: kubernetesWith("envoy_url: http://envoy-listener.internal.example:9020", "envoy_url: http://[::1]:9020"),
+			want: "envoy_url http://[::1]:9020 names a loopback host, which in a pod is the pod itself; name the host pods reach it at when runtime is kubernetes",
+		},
+		{
+			name: "a nats_urls entry on loopback",
+			body: kubernetesWith("nats_urls: [nats://nats.internal.example:4222]", "nats_urls: [nats://nats.internal.example:4222, nats://127.0.0.2:4222]"),
+			want: "nats_urls nats://127.0.0.2:4222 names a loopback host, which in a pod is the pod itself; name the host pods reach it at when runtime is kubernetes",
+		},
+		{
+			name: "bind on loopback",
+			body: kubernetesWith("bind: 10.0.0.5", "bind: 127.0.0.1"),
+			want: "bind 127.0.0.1 is not an address a pod can reach, and every pod's shim dials the worker stream at tcp://127.0.0.1:13371; bind the daemon host's own address when runtime is kubernetes",
+		},
+		{
+			name: "bind unspecified",
+			body: kubernetesWith("bind: 10.0.0.5", "bind: 0.0.0.0"),
+			want: "bind 0.0.0.0 is not an address a pod can reach, and every pod's shim dials the worker stream at tcp://0.0.0.0:13371; bind the daemon host's own address when runtime is kubernetes",
+		},
+		{
+			name: "bind IPv6 unspecified",
+			body: kubernetesWith("bind: 10.0.0.5", "bind: \"::\""),
+			want: "bind :: is not an address a pod can reach, and every pod's shim dials the worker stream at tcp://[::]:13371; bind the daemon host's own address when runtime is kubernetes",
 		},
 		{
 			name: "daemon_url absent",
