@@ -136,6 +136,50 @@ test("hovering a board card previews the issue and moving onto the card keeps it
   }
 });
 
+test("a card survives a selection drag that leaves its reference and comes back", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name === "iphone", "a held mouse button is not a touch gesture");
+  const { source } = await seedReference();
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${source.key}/conversation`);
+    const turns = page.getByRole("list", { name: "Conversation turns" });
+    const link = turns.getByRole("link", { name: "Hover target" });
+    await expect(link).toBeVisible();
+    await link.hover();
+    const card = page.getByRole("tooltip");
+    await expect(card).toBeVisible();
+
+    // The press lands on the text beside the reference, not on the reference: pressing the link
+    // itself starts Chromium's native link drag, which stops delivering boundary events. A
+    // selection drag keeps delivering them, so the pointer really does leave the reference and
+    // come back with a button held, and the card must survive that as it survives the same move
+    // onto its own card.
+    const box = await link.boundingBox();
+    if (box === null) {
+      throw new Error("reference is not visible");
+    }
+    const beside = { x: box.x - 8, y: box.y + box.height / 2 };
+    await page.mouse.move(beside.x, beside.y);
+    await page.mouse.down();
+    await page.mouse.move(beside.x, box.y + box.height + 40, { steps: 4 });
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 4 });
+    const openAfterCloseDelay = await page.evaluate(
+      (delay) =>
+        new Promise<boolean>((resolve) => {
+          setTimeout(() => resolve(document.getElementById("ref-preview") !== null), delay);
+        }),
+      REF_PREVIEW_CLOSE_DELAY_MS * 2
+    );
+    await page.mouse.up();
+    expect(openAfterCloseDelay).toBe(true);
+  } finally {
+    await alice.close();
+  }
+});
+
 test("on a phone, tapping a reference follows it and never shows a card", async ({
   browser,
 }, testInfo) => {
