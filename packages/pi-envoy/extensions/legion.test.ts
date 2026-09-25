@@ -2762,9 +2762,11 @@ describe("Legion OMP extension", () => {
       mode: 0o600,
     });
 
-    // A read of a file, or of a GitHub URL (fetched over HTTP, never through gh), redeems nothing.
+    // A read of a file, or of a GitHub URL (fetched over HTTP, never through gh), redeems nothing,
+    // and neither does a path whose `pr://` follows no separator: Oh My Pi reads it as a file.
     const unserved = [
       { toolName: "read", input: { path: "src/pr-view.ts" } },
+      { toolName: "read", input: { path: "docs/pr://x" } },
       { toolName: "read", input: { path: "https://github.com/acme/widgets/pull/7" } },
       { toolName: "grep", input: { pattern: "pr://", path: "src" } },
       { toolName: "read", input: { path: "skill://pr-review" } },
