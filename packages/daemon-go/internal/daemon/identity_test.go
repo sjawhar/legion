@@ -40,6 +40,14 @@ func TestSpawnSpecCarriesTheRoleAppIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SpawnSpec: %v", err)
 	}
+	if spec.Repository != "" {
+		t.Errorf("the launch names repository %q with none configured", spec.Repository)
+	}
+	s.repo = "acme/widgets"
+	if spec, err := s.SpawnSpec(context.Background(), c); err != nil || spec.Repository != "acme/widgets" {
+		t.Errorf("SpawnSpec with a configured repository = %q, %v; want acme/widgets, the runtime's to locate the workspace from", spec.Repository, err)
+	}
+	s.repo = ""
 	for name, want := range map[string]string{
 		"JJ_USER": bot.Name, "JJ_EMAIL": bot.Email,
 		"GIT_AUTHOR_NAME": bot.Name, "GIT_AUTHOR_EMAIL": bot.Email,

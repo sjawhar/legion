@@ -104,17 +104,22 @@ func TestSuspendWithAStaleLocator(t *testing.T) {
 	})
 }
 
-// Release ends the claim whatever its locator says: the Sandbox is deleted by name, after a
-// shutdown frame when the claim has a live connection. A Sandbox already gone is released.
+// Release ends the claim whatever its locator says: the Sandbox is deleted by name. The shutdown
+// frame goes to the process the locator records, and only while it is still the claim's running
+// pod (decision 3c/3d): a stale or absent locator's process is not acted on, and deleting the
+// Sandbox ends whatever pod it holds. A Sandbox already gone is released.
 func TestReleaseDeletesTheClaimsSandbox(t *testing.T) {
 	name := SandboxName(workerToken)
-	for label, locate := range map[string]func(runtime.Locator) *runtime.Locator{
-		"current": func(loc runtime.Locator) *runtime.Locator { return &loc },
-		"stale": func(loc runtime.Locator) *runtime.Locator {
+	for label, tc := range map[string]struct {
+		locate    func(runtime.Locator) *runtime.Locator
+		shutdowns int
+	}{
+		"current": {func(loc runtime.Locator) *runtime.Locator { return &loc }, 1},
+		"stale": {func(loc runtime.Locator) *runtime.Locator {
 			stale := sandboxLocator(workerToken, "uid-pod-long-gone")
 			return &stale
-		},
-		"no locator": func(runtime.Locator) *runtime.Locator { return nil },
+		}, 0},
+		"no locator": {func(runtime.Locator) *runtime.Locator { return nil }, 0},
 	} {
 		t.Run(label, func(t *testing.T) {
 			g := newRig(t, nil)
@@ -122,19 +127,39 @@ func TestReleaseDeletesTheClaimsSandbox(t *testing.T) {
 			g.conns.Register(workerToken, conn)
 			loc := g.spawn(workerSpec(t))
 			g.clearActions()
-			if err := g.r.Release(g.ctx, workerToken, locate(loc), 100*time.Millisecond); err != nil {
+			if err := g.r.Release(g.ctx, runtime.Known{Claim: workerToken, Locator: tc.locate(loc)}); err != nil {
 				t.Fatal(err)
 			}
 			if g.sandbox(name) != nil {
 				t.Fatal("the sandbox survived its release")
 			}
-			if conn.Shutdowns() != 1 {
-				t.Fatalf("%d shutdown frames, want 1", conn.Shutdowns())
+			if conn.Shutdowns() != tc.shutdowns {
+				t.Fatalf("%d shutdown frames, want %d", conn.Shutdowns(), tc.shutdowns)
 			}
-			if err := g.r.Release(g.ctx, workerToken, nil, 0); err != nil {
+			if err := g.r.Release(g.ctx, runtime.Known{Claim: workerToken}); err != nil {
 				t.Fatalf("releasing a released claim: %v", err)
 			}
 		})
+	}
+}
+
+// Release takes the claim once. A claim paired with another claim's locator is refused before
+// anything is sent or deleted: releasing one claim never ends another's Sandbox or process.
+func TestReleaseRefusesALocatorOfAnotherClaim(t *testing.T) {
+	g := newRig(t, nil)
+	conn := fake.NewConn()
+	g.conns.Register(workerToken, conn)
+	g.spawn(workerSpec(t))
+	other := g.spawn(testSpec(t, otherToken, claim.RoleReviewer, testTree))
+	g.clearActions()
+	if err := g.r.Release(g.ctx, runtime.Known{Claim: workerToken, Locator: &other}); err == nil || !strings.Contains(err.Error(), string(otherToken)) {
+		t.Fatalf("Release = %v, want a refusal naming the locator's claim", err)
+	}
+	if writes := g.writes(); len(writes) > 0 || conn.Shutdowns() != 0 {
+		t.Fatalf("the refused release wrote %v and sent %d shutdown frames", writes, conn.Shutdowns())
+	}
+	if g.sandbox(SandboxName(workerToken)) == nil || g.sandbox(SandboxName(otherToken)) == nil {
+		t.Fatal("a refused release deleted a sandbox")
 	}
 }
 
@@ -153,7 +178,7 @@ func TestAFailedReleaseLeavesTheSandboxToTheSweep(t *testing.T) {
 		}
 		return false, nil, nil
 	})
-	if err := g.r.Release(g.ctx, workerToken, &loc, 0); err == nil || !strings.Contains(err.Error(), "request timed out") {
+	if err := g.r.Release(g.ctx, runtime.Known{Claim: workerToken, Locator: &loc}); err == nil || !strings.Contains(err.Error(), "request timed out") {
 		t.Fatalf("Release: %v, want the delete's failure", err)
 	}
 	if recorded, ok := g.r.recorded(workerToken); !ok || recorded != loc {

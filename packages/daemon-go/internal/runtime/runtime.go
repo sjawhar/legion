@@ -15,6 +15,8 @@ package runtime
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -37,30 +39,33 @@ const (
 //
 // A locator that no longer names the claim's current process — nothing is there, or something
 // else is — is a process already stopped as far as `Suspend` and `Release` are concerned: neither
-// returns an error, and the runtime logs it once. `Suspend` leaves a newer incarnation the runtime
+// acts on it, and neither returns an error for it. `Suspend` leaves a newer incarnation the runtime
 // recorded for the claim alone; a process of the claim that no locator records — a sandbox's pod
 // the controller recreated — it stops all the same, so it cannot keep running on the claim's token.
-// `Release` ends the claim either way. A state the runtime cannot verify is an error, never
-// "stopped".
+// `Release` still ends whatever else the runtime holds for the claim. A state the runtime cannot
+// verify is an error, never "stopped".
 type Runtime interface {
 	// Spawn starts an agent and returns the locator that identifies the process it started —
 	// including the incarnation, captured at spawn, that later observations are fenced against.
 	Spawn(ctx context.Context, spec SpawnSpec) (Locator, error)
 	// Resume starts the same agent again from the session file the spec names, after waiting
-	// for the previous incarnation to be Gone. prev is the incarnation the caller recorded, and a
-	// hint: a runtime that finds a claim's process by the claim's own name, as a sandbox does,
-	// waits out whatever holds that name even when prev is zero. A claim resumes the agent it
-	// recorded or none: a fresh agent on a claim that had one is the failure the same-agent refusal
-	// exists to catch.
-	Resume(ctx context.Context, prev Locator, spec SpawnSpec) (Locator, error)
-	// Suspend stops the process gracefully and keeps everything a later Resume needs: the agent's
-	// session, and whatever the runtime holds for the claim. It is how every relaunch retires the
-	// process it replaces.
+	// for the previous incarnation to be Gone. prev is the incarnation the caller recorded, nil
+	// when it recorded none, and a hint: a runtime that finds a claim's process by the claim's own
+	// name, as a sandbox does, waits out whatever holds that name even when prev is nil. A claim
+	// resumes the agent it recorded or none: a fresh agent on a claim that had one is the failure
+	// the same-agent refusal exists to catch.
+	Resume(ctx context.Context, prev *Locator, spec SpawnSpec) (Locator, error)
+	// Suspend stops the process gracefully, within the runtime's stop grace, and keeps everything
+	// a later Resume needs: the agent's session, and whatever the runtime holds for the claim. The
+	// relaunches that replace a live process — prompt retirement and the registration deadline —
+	// retire it with Suspend first; a relaunch after a death calls none, since the process is gone
+	// and Spawn and Resume never start a second process on the claim.
 	Suspend(ctx context.Context, loc Locator) error
-	// Release ends the claim, whether or not a process runs for it: a shutdown frame over the
-	// claim's registered connection when there is one, a wait of up to grace, and then whatever
-	// the runtime holds for the claim is gone. loc is the claim's process, or nil when none runs.
-	Release(ctx context.Context, c claim.Token, loc *Locator, grace time.Duration) error
+	// Release ends the claim, whether or not a process runs for it. The process k.Locator records,
+	// while it is still the claim's, is sent a shutdown frame over the claim's connection and given
+	// the runtime's stop grace to end itself; then it, and whatever else the runtime holds for the
+	// claim, are gone. k.Locator is nil when no process runs.
+	Release(ctx context.Context, k Known) error
 	// Probe is one observation of one locator, now. `Uncertain` is a verdict, not a failure: a
 	// returned error means the runtime itself could not be asked, and an error is never a
 	// statement about the process.
@@ -80,12 +85,31 @@ type Runtime interface {
 	ControllerLaunch() ControllerLaunch
 }
 
-// Known is one claim the daemon has not retired, as the orphan sweep is told of it: the claim, and
-// its process when one runs.
+// Known is one claim as a runtime is told of it — each entry of the orphan sweep's known set, and
+// the claim Release ends: the claim, and its process when one runs.
 type Known struct {
 	Claim claim.Token
 	// Locator is the claim's process; nil when none runs — suspended, failed, or never launched.
 	Locator *Locator
+}
+
+// Validate is the agreement every runtime checks before it acts on a Known: a claim, and, when
+// there is a locator, a valid one of that same claim. A pair that disagreed would have a runtime
+// end one claim's objects while it stopped another claim's process.
+func (k Known) Validate() error {
+	if k.Claim == "" {
+		return errors.New("known claim: no claim token")
+	}
+	if k.Locator == nil {
+		return nil
+	}
+	if err := k.Locator.Validate(); err != nil {
+		return fmt.Errorf("known claim %s: %w", k.Claim, err)
+	}
+	if k.Locator.Claim != k.Claim {
+		return fmt.Errorf("known claim %s: its locator is claim %s's process", k.Claim, k.Locator.Claim)
+	}
+	return nil
 }
 
 // SpawnSpec is everything a runtime needs to start one agent: which claim it is, what it is
@@ -94,22 +118,28 @@ type Known struct {
 // `Release` send a shutdown frame over `Conns.Conn(loc.Claim)` — and because a locator without it
 // could not be matched to the claim it belongs to.
 //
-// Env is the pane's plain variables; Secrets never travel as values — each is written to a 0600
-// file and reaches the process as a `<NAME>_FILE` pointer. ResumeSessionFile is set only by
-// `Resume`, and it names the transcript the same agent continues from.
+// Nothing in it is a place on one runtime's disk. Repository is the issue's repository
+// (`owner/repo`), "" for a configuration with none, and each runtime locates the issue's
+// workspace under its own root. Env is the agent's plain variables; Secrets never travel as
+// values — each is written to a 0600 file and reaches the process as a `<NAME>_FILE` pointer — and
+// carries only what is the claim's to carry: a credential every agent of the deployment shares,
+// like the Dispatch bearer, is a runtime option. ResumeSessionFile is set only by `Resume`, and it
+// names the transcript the same agent continues from. WorkspaceRecoveredFrom names the ref a
+// workspace recreated after its volume was lost is recovered from; "" for every other launch.
 type SpawnSpec struct {
-	Claim             claim.Token
-	Project           string
-	Tree              string
-	Issue             string
-	Role              claim.Role
-	Generation        uint64
-	BootToken         string
-	Env               map[string]string
-	Secrets           map[string]string
-	Prompt            PromptParts
-	Workspace         string
-	ResumeSessionFile string
+	Claim                  claim.Token
+	Project                string
+	Tree                   string
+	Issue                  string
+	Role                   claim.Role
+	Generation             uint64
+	BootToken              string
+	Env                    map[string]string
+	Secrets                map[string]string
+	Prompt                 PromptParts
+	Repository             string
+	ResumeSessionFile      string
+	WorkspaceRecoveredFrom string
 }
 
 // PromptParts are the pieces of the agent's system prompt: its role prompt files, the sentence

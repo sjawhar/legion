@@ -23,7 +23,6 @@ const (
 	testBoot                = 120 * time.Second
 	testRPC                 = 5 * time.Second
 	testProbe               = 30 * time.Second
-	testGrace               = 10 * time.Second
 	intervals               = 3
 	deadline                = testBoot * intervals
 	session                 = "ses_implementer"
@@ -228,8 +227,7 @@ func (s *testSpecs) SpawnSpec(_ context.Context, c Claim) (runtime.SpawnSpec, er
 		return runtime.SpawnSpec{}, s.err
 	}
 	return runtime.SpawnSpec{
-		Env:       map[string]string{"LEGION_ISSUE": c.Issue},
-		Workspace: "/state/workspaces/" + c.Issue,
+		Env: map[string]string{"LEGION_ISSUE": c.Issue},
 	}, nil
 }
 
@@ -285,7 +283,6 @@ func testTimeouts() Timeouts {
 		RegistrationIntervals: intervals,
 		RPC:                   testRPC,
 		Probe:                 testProbe,
-		StopGrace:             testGrace,
 	}
 }
 

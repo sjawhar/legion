@@ -513,7 +513,6 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 			RegistrationIntervals: cfg.WorkerBootRegistrationDeadlineIntervals,
 			RPC:                   cfg.WorkerRPCTimeout,
 			Probe:                 cfg.ProbeInterval,
-			StopGrace:             cfg.WorkerStopTimeout,
 		},
 	}
 	return &supervision{

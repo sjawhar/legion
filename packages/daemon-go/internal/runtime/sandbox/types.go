@@ -52,9 +52,12 @@ type Options struct {
 	// StreamURL is the worker stream listener every pod's shim dials, tcp://host:port.
 	StreamURL string
 	// DaemonURL, EnvoyURL, and DispatchURL are the pane values LEGION_DAEMON_URL, ENVOY_URL, and
-	// DISPATCH_URL; an empty one is left unset. With DispatchURL set, every launch carries its
-	// bearer as the DISPATCH_TOKEN secret, and without it none may.
+	// DISPATCH_URL; an empty one is left unset.
 	DaemonURL, EnvoyURL, DispatchURL string
+	// DispatchToken is the Dispatch bearer every claim's Secret carries as DISPATCH_TOKEN, and its
+	// main container reads through DISPATCH_TOKEN_FILE. It is configured exactly when DispatchURL
+	// is.
+	DispatchToken string
 	// NATSURLs are ENVOY_NATS_URL, comma-joined; none leaves it unset.
 	NATSURLs []string
 	Tools    Tools
@@ -67,8 +70,8 @@ type Options struct {
 	// BootIntervals is the registration deadline in boot intervals; the init container's lock
 	// wait is sized from it (worker_boot_registration_deadline_intervals).
 	BootIntervals int
-	// TerminationGrace is the pods' terminationGracePeriodSeconds, and how long Suspend waits for
-	// a process to end itself after its shutdown frame (worker_stop_timeout_seconds).
+	// TerminationGrace is the pods' terminationGracePeriodSeconds, and how long Suspend and Release
+	// wait for a process to end itself after its shutdown frame (worker_stop_timeout_seconds).
 	TerminationGrace time.Duration
 	// ProbeInterval is how often every watched claim is evaluated again, beyond the evaluation
 	// each change to its Sandbox or pod triggers (probe_interval_seconds).

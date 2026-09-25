@@ -459,10 +459,11 @@ func describedArgs(jj, dir string) []string {
 // every pane — under the requested identity and budget. Every role of an issue shares the
 // workspace, so a working copy the previous role left described (its pushed commit) is kept as it
 // is, and the incoming role starts on a fresh one of its own (`jj new`): otherwise its work would
-// land in the previous role's commit, authored by the previous role's App. A failure is reported
-// the way the shipped runner does (commandFailure, packages/workspace/src/workspace.ts:58-69): the
-// daemon decides what a failed adoption means. A shim without either variable was not started by
-// a runtime, and refuses (worker-shim.ts:800-807).
+// land in the previous role's commit, authored by the previous role's App. One read decides which
+// of the two changes the working copy needs, and only that one runs. A failure is reported the way
+// the shipped runner does (commandFailure, packages/workspace/src/workspace.ts:58-69): the daemon
+// decides what a failed adoption means. A shim without either variable was not started by a
+// runtime, and refuses (worker-shim.ts:800-807).
 func (s *shim) runAdoption(request shimwire.AdoptWorkingCopy) error {
 	workspace := envValue(s.cfg.Env, "LEGION_WORKSPACE")
 	if workspace == "" {
@@ -477,14 +478,15 @@ func (s *shim) runAdoption(request shimwire.AdoptWorkingCopy) error {
 	defer cancel()
 	env := append(slices.Clone(s.cfg.Env), "JJ_USER="+request.JJUser, "JJ_EMAIL="+request.JJEmail)
 	started := time.Now()
-	if _, err := runAdoptionCommand(ctx, budget, started, env, adoptionArgs(jj, workspace)); err != nil {
-		return err
-	}
 	described, err := runAdoptionCommand(ctx, budget, started, env, describedArgs(jj, workspace))
-	if err != nil || described == "" {
+	if err != nil {
 		return err
 	}
-	_, err = runAdoptionCommand(ctx, budget, started, env, []string{jj, "new", "-R", workspace})
+	change := adoptionArgs(jj, workspace)
+	if described != "" {
+		change = []string{jj, "new", "-R", workspace}
+	}
+	_, err = runAdoptionCommand(ctx, budget, started, env, change)
 	return err
 }
 

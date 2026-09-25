@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -97,7 +96,7 @@ func testSpec(t *testing.T, token claim.Token, role claim.Role, issue string) ru
 			RolePromptPaths: []string{rolePrompt}, Addressing: "Legion addressing: your role topic is `notifications.role." + string(token) + "`.",
 			DeploymentInstructionsPath: instructions,
 		},
-		Workspace: "/legion/workspaces/sjawhar/legion-smoke/" + strings.ToLower(issue),
+		Repository: "sjawhar/legion-smoke",
 	}
 }
 

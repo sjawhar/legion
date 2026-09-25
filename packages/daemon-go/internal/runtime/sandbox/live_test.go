@@ -719,14 +719,10 @@ func (r *liveRig) poll(limit time.Duration, what string, cond func() (bool, erro
 // ---- launching, as the machine does -----------------------------------------------------------
 
 func (r *liveRig) spec(c *liveClaim, resume string) runtime.SpawnSpec {
-	dir, err := workspace.Location(TreeRoot, r.env.repo, c.issue)
-	if err != nil {
-		panic(err)
-	}
 	return runtime.SpawnSpec{
 		Claim: c.token, Project: r.env.claimProject, Tree: c.tree, Issue: c.issue, Role: c.role,
 		Generation: c.gen, BootToken: c.bootToken, Env: map[string]string{"LEGION_E2E_MARKER": c.marker},
-		Prompt: runtime.PromptParts{RolePromptPaths: []string{r.prompt}}, Workspace: dir.Dir, ResumeSessionFile: resume,
+		Prompt: runtime.PromptParts{RolePromptPaths: []string{r.prompt}}, Repository: r.env.repo, ResumeSessionFile: resume,
 	}
 }
 
@@ -749,15 +745,11 @@ func (r *liveRig) spawn(c *liveClaim, armed bool) (runtime.Locator, error) {
 
 // resume is a Resume of the claim's next generation from file, with its last locator as prev.
 func (r *liveRig) resume(c *liveClaim, file string) (runtime.Locator, error) {
-	var prev runtime.Locator
-	if c.last != nil {
-		prev = *c.last
-	}
 	if err := r.startRuntimeOnce(); err != nil {
 		return runtime.Locator{}, err
 	}
 	c.bootToken, c.gen = r.reg.mint(c.token, true)
-	loc, err := r.rt.Resume(r.ctx, prev, r.spec(c, file))
+	loc, err := r.rt.Resume(r.ctx, c.last, r.spec(c, file))
 	if err != nil {
 		return runtime.Locator{}, err
 	}
@@ -2036,7 +2028,7 @@ func (r *liveRig) checkReleaseTree() error {
 			continue
 		}
 		loc := c.loc
-		if err := r.rt.Release(r.ctx, c.token, loc, liveGrace); err != nil {
+		if err := r.rt.Release(r.ctx, runtime.Known{Claim: c.token, Locator: loc}); err != nil {
 			return fmt.Errorf("Release(%s): %w", c.name, err)
 		}
 		how := "nil locator"

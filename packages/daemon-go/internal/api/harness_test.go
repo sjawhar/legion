@@ -29,7 +29,6 @@ import (
 const (
 	testProject       = "legion"
 	testOperatorToken = "operator-bearer-for-tests"
-	testGrace         = 7 * time.Second
 )
 
 // testStore is a migrated database of the test's own on the devbox or CI Postgres: the routes
@@ -97,7 +96,7 @@ func (stopped) Stop() bool { return true }
 type fixedSpecs struct{}
 
 func (fixedSpecs) SpawnSpec(context.Context, supervise.Claim) (runtime.SpawnSpec, error) {
-	return runtime.SpawnSpec{Workspace: "/", Prompt: runtime.PromptParts{RolePromptPaths: []string{"/dev/null"}}}, nil
+	return runtime.SpawnSpec{Prompt: runtime.PromptParts{RolePromptPaths: []string{"/dev/null"}}}, nil
 }
 
 // testSupervisor is the daemon's claim directory as the routes see it, over real machines and a
@@ -165,7 +164,7 @@ func newHarness(t *testing.T) *harness {
 			Runtime: rt, Conns: conns, Store: tokens.Recording(st), Specs: fixedSpecs{}, Clock: stillClock{}, Log: quiet,
 			Limits: supervise.Limits{LaunchFailures: 3, PromptFailures: 3, PromptRetires: 2},
 			Timeouts: supervise.Timeouts{
-				Boot: time.Minute, RegistrationIntervals: 3, RPC: 5 * time.Second, Probe: 30 * time.Second, StopGrace: testGrace,
+				Boot: time.Minute, RegistrationIntervals: 3, RPC: 5 * time.Second, Probe: 30 * time.Second,
 			},
 		},
 		store:    st,

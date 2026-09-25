@@ -496,17 +496,14 @@ func (r *rig) mustTmux(args ...string) string {
 }
 
 // spec is a spawn spec for a claim, with a boot token minted for this launch and known to the
-// daemon, a workspace of its own, a PATH distinguishable from the daemon's, and an Envoy secret.
+// daemon, no repository — so the runtime makes the issue's own workspace (rig.workspace) — a PATH
+// distinguishable from the daemon's, and an Envoy secret.
 func (r *rig) spec(token, tree, issue string, role claim.Role) runtime.SpawnSpec {
 	r.t.Helper()
 	bootToken := "boot-" + randomHex(r.t, 8)
 	r.daemon.mu.Lock()
 	r.daemon.claims[bootToken] = bootClaim{token: claim.Token(token), tree: tree, issue: issue, role: role, generation: 1}
 	r.daemon.mu.Unlock()
-	workspace := filepath.Join(r.dir, "ws", issue)
-	if err := os.MkdirAll(workspace, 0o755); err != nil {
-		r.t.Fatal(err)
-	}
 	return runtime.SpawnSpec{
 		Claim:      claim.Token(token),
 		Project:    r.project,
@@ -522,8 +519,13 @@ func (r *rig) spec(token, tree, issue string, role claim.Role) runtime.SpawnSpec
 			Addressing:                 `Your topic is "notifications.role.` + token + `"; $HOME stays literal.`,
 			DeploymentInstructionsPath: r.instructions,
 		},
-		Workspace: workspace,
 	}
+}
+
+// workspace is the directory the runtime locates for an issue of a configuration with no
+// repository: `<state_dir>/workspaces/<issue>`.
+func (r *rig) workspace(issue string) string {
+	return filepath.Join(r.stateDir, "workspaces", issue)
 }
 
 func eventually(t *testing.T, within time.Duration, what string, done func() bool) {
@@ -690,7 +692,7 @@ func TestRealTmuxLifecycle(t *testing.T) {
 		"LEGION_PROJECT":         r.project,
 		"LEGION_DAEMON_URL":      r.daemon.server.URL,
 		"LEGION_STATE_DIR":       r.stateDir,
-		"LEGION_WORKSPACE":       spec.Workspace,
+		"LEGION_WORKSPACE":       r.workspace(spec.Issue),
 		"ENVOY_NATS_URL":         "nats://127.0.0.1:4222",
 		"ENVOY_URL":              "http://127.0.0.1:9020",
 		"GIT_TERMINAL_PROMPT":    "0",
@@ -737,7 +739,7 @@ func TestRealTmuxLifecycle(t *testing.T) {
 
 	// One --append-system-prompt word, its $(cat)s expanded by the pane's shell, the addressing
 	// text literal.
-	report := readReport(t, spec.Workspace, omp)
+	report := readReport(t, r.workspace(spec.Issue), omp)
 	prompts, _ := report["systemPrompt"].([]any)
 	want := "You are the stand-in tester.\n\n" + spec.Prompt.Addressing + "\n\n# Deployment instructions (demo)\n\nRun the checks."
 	if len(prompts) != 1 || prompts[0] != want {
@@ -762,7 +764,7 @@ func TestRealTmuxLifecycle(t *testing.T) {
 	// Resume: the same session, from the file it registered, in a new incarnation.
 	resumed := r.spec("legion-t-LEGION-1-architect", "LEGION-1", "LEGION-1", claim.RoleArchitect)
 	resumed.ResumeSessionFile = registration.OmpSessionFile
-	loc2, err := r.rt.Resume(ctx, loc, resumed)
+	loc2, err := r.rt.Resume(ctx, &loc, resumed)
 	if err != nil {
 		t.Fatalf("Resume: %v", err)
 	}
@@ -772,7 +774,7 @@ func TestRealTmuxLifecycle(t *testing.T) {
 	if again := r.daemon.awaitReady(t, resumed.BootToken); again.SessionID != registration.SessionID {
 		t.Errorf("the resumed agent registered as session %s, want %s", again.SessionID, registration.SessionID)
 	}
-	if report := readReport(t, spec.Workspace, descendant(t, panePid(t, loc2), "omp")); report["resumed"] != true {
+	if report := readReport(t, r.workspace(spec.Issue), descendant(t, panePid(t, loc2), "omp")); report["resumed"] != true {
 		t.Errorf("the resumed OMP was not started with --resume: %v", report["argv"])
 	}
 
@@ -782,7 +784,8 @@ func TestRealTmuxLifecycle(t *testing.T) {
 		t.Fatalf("Prompt: %v", err)
 	}
 	before = len(r.recorded())
-	if err := r.rt.Release(ctx, loc2.Claim, &loc2, 500*time.Millisecond); err != nil {
+	impatient := r.newRuntime(func(o *Options) { o.StopGrace = 500 * time.Millisecond })
+	if err := impatient.Release(ctx, runtime.Known{Claim: loc2.Claim, Locator: &loc2}); err != nil {
 		t.Fatalf("Release: %v", err)
 	}
 	if !hasKillPane(r.recorded()[before:]) {
@@ -795,7 +798,7 @@ func TestRealTmuxLifecycle(t *testing.T) {
 	// Releasing a claim with no process — a suspended one — asks tmux nothing: a pane holds nothing
 	// of a claim once its process is gone.
 	before = len(r.recorded())
-	if err := r.rt.Release(ctx, loc2.Claim, nil, 500*time.Millisecond); err != nil {
+	if err := r.rt.Release(ctx, runtime.Known{Claim: loc2.Claim}); err != nil {
 		t.Fatalf("Release with no locator: %v", err)
 	}
 	if ran := r.recorded()[before:]; len(ran) != 0 {
@@ -805,7 +808,7 @@ func TestRealTmuxLifecycle(t *testing.T) {
 	// Resuming from a session file that is gone is a refusal, never a fresh agent.
 	missing := r.spec("legion-t-LEGION-1-architect", "LEGION-1", "LEGION-1", claim.RoleArchitect)
 	missing.ResumeSessionFile = filepath.Join(r.dir, "no-such-session.jsonl")
-	if _, err := r.rt.Resume(ctx, loc2, missing); err == nil ||
+	if _, err := r.rt.Resume(ctx, &loc2, missing); err == nil ||
 		err.Error() != "Refusing to start LEGION-1 fresh while resurrecting: recorded OMP session file is missing: "+missing.ResumeSessionFile {
 		t.Errorf("Resume from a missing session file = %v", err)
 	}
@@ -863,7 +866,7 @@ func TestRealTmuxSplitsIntoTheIssueWindow(t *testing.T) {
 	impatient := r.newRuntime(func(o *Options) { o.StopGrace = 300 * time.Millisecond })
 	resume := r.spec("legion-t-LEGION-2-tester", "LEGION-2", "LEGION-2", claim.RoleTester)
 	resume.ResumeSessionFile = r.rolePrompt
-	if _, err := impatient.Resume(ctx, tester, resume); err == nil ||
+	if _, err := impatient.Resume(ctx, &tester, resume); err == nil ||
 		!strings.Contains(err.Error(), "previous incarnation "+tester.Incarnation+" is still running") {
 		t.Errorf("a resume over a live incarnation = %v", err)
 	}
@@ -918,7 +921,7 @@ func TestRealTmuxUncertainOnABrokenSocket(t *testing.T) {
 	if err := r.rt.Suspend(ctx, loc); err == nil || !strings.Contains(err.Error(), "cannot verify pane %1") {
 		t.Errorf("Suspend on a hung server = %v, want a refusal", err)
 	}
-	if err := r.rt.Release(ctx, loc.Claim, &loc, 0); err == nil || !strings.Contains(err.Error(), "cannot verify pane %1") {
+	if err := r.rt.Release(ctx, runtime.Known{Claim: loc.Claim, Locator: &loc}); err == nil || !strings.Contains(err.Error(), "cannot verify pane %1") {
 		t.Errorf("Release on a hung server = %v, want a refusal", err)
 	}
 	if err := r.rt.ReconcileOrphans(ctx, []runtime.Known{{Claim: loc.Claim, Locator: &loc}}, 0); err == nil || !strings.Contains(err.Error(), "timed out") {
@@ -1211,7 +1214,7 @@ func TestRealTmuxNeverKillsAPaneThatIsNotTheRecordedProcess(t *testing.T) {
 			if err := r.rt.Suspend(ctx, tc.loc); err != nil {
 				t.Errorf("Suspend: %v", err)
 			}
-			if err := r.rt.Release(ctx, tc.loc.Claim, &tc.loc, time.Second); err != nil {
+			if err := r.rt.Release(ctx, runtime.Known{Claim: tc.loc.Claim, Locator: &tc.loc}); err != nil {
 				t.Errorf("Release: %v", err)
 			}
 			if hasKillPane(r.recorded()[before:]) {
@@ -1409,5 +1412,64 @@ func TestRealTmuxPaneResolvesThisDaemonsLegionCLI(t *testing.T) {
 	gh.Env = []string{"PATH=" + env["PATH"]}
 	if out, err := gh.CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != launcher {
 		t.Fatalf("legion after the gh shim's PATH edit = %q (%v), want %s", out, err, launcher)
+	}
+}
+
+// Releasing a claim lets go of everything the runtime watches for it, whether or not its process
+// could be stopped: the daemon retires a worker whose agent reported its exit even when its pane
+// could not be stopped, and ends a tree's root with a Release of no locator even when the root's
+// exit Suspend failed. Either pane is then the orphan sweep's, never kept alive by the watch until
+// it ends itself. A claim still known keeps its pane: an in-flight launch has no locator yet.
+func TestRealTmuxAReleasedClaimsPaneIsTheSweeps(t *testing.T) {
+	r := newRig(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	worker, err := r.rt.Spawn(ctx, r.spec("legion-t-LEGION-5-tester", "LEGION-3", "LEGION-5", claim.RoleTester))
+	if err != nil {
+		t.Fatalf("Spawn worker: %v", err)
+	}
+	root, err := r.rt.Spawn(ctx, r.spec("legion-t-LEGION-3-architect", "LEGION-3", "LEGION-3", claim.RoleArchitect))
+	if err != nil {
+		t.Fatalf("Spawn root: %v", err)
+	}
+	launching, err := r.rt.Spawn(ctx, r.spec("legion-t-LEGION-6-planner", "LEGION-3", "LEGION-6", claim.RoleTester))
+	if err != nil {
+		t.Fatalf("Spawn launching: %v", err)
+	}
+	// Every pane lookup fails while the worker is released and the root suspended.
+	run := r.rt.run
+	r.rt.run = func(ctx context.Context, argv []string) (result, error) {
+		if verb(argv) == "list-panes" && slices.Contains(argv, "-t") {
+			return result{}, errors.New("tmux list-panes: server not answering")
+		}
+		return run(ctx, argv)
+	}
+	if err := r.rt.Release(ctx, runtime.Known{Claim: worker.Claim, Locator: &worker}); err == nil {
+		t.Fatal("the worker's release succeeded with no pane lookup")
+	}
+	if err := r.rt.Suspend(ctx, root); err == nil {
+		t.Fatal("the root's suspend succeeded with no pane lookup")
+	}
+	r.rt.run = run
+	// The tree closes: its root is released with no locator, since its claim was suspended.
+	if err := r.rt.Release(ctx, runtime.Known{Claim: root.Claim}); err != nil {
+		t.Fatalf("Release of the suspended root: %v", err)
+	}
+	for _, loc := range []runtime.Locator{worker, root} {
+		if obs := probe(t, r.rt, loc); obs.Kind != runtime.Alive {
+			t.Fatalf("%s's pane is not running before the sweep: %+v", loc.Claim, obs)
+		}
+	}
+	// Both claims are retired now; the launch is known with no locator.
+	if err := r.rt.ReconcileOrphans(ctx, []runtime.Known{{Claim: launching.Claim}}, 0); err != nil {
+		t.Fatalf("ReconcileOrphans: %v", err)
+	}
+	for _, loc := range []runtime.Locator{worker, root} {
+		if obs := probe(t, r.rt, loc); obs.Kind != runtime.Gone {
+			t.Errorf("%s's pane survived the sweep after its claim was released: %+v", loc.Claim, obs)
+		}
+	}
+	if obs := probe(t, r.rt, launching); obs.Kind != runtime.Alive {
+		t.Errorf("the in-flight launch's pane did not survive the sweep: %+v", obs)
 	}
 }

@@ -25,20 +25,20 @@ func (r *Runtime) Spawn(ctx context.Context, spec runtime.SpawnSpec) (runtime.Lo
 	if spec.ResumeSessionFile != "" {
 		return runtime.Locator{}, fmt.Errorf("spawn %s: a ResumeSessionFile is Resume's to set", spec.Claim)
 	}
-	return r.relaunch(ctx, runtime.Locator{}, spec)
+	return r.relaunch(ctx, nil, spec)
 }
 
 // Resume starts the agent spec's claim recorded, again, from spec.ResumeSessionFile. prev is a
 // hint: the claim's Sandbox is found by the claim's name, so the relaunch waits out whatever pod
-// holds it even when prev is zero, a claim suspended across a daemon restart. The init container
+// holds it even when prev is nil, a claim suspended across a daemon restart. The init container
 // refuses to start when the session file is missing from the tree volume — a fresh agent on a
 // claim that had one is never started.
-func (r *Runtime) Resume(ctx context.Context, prev runtime.Locator, spec runtime.SpawnSpec) (runtime.Locator, error) {
+func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtime.SpawnSpec) (runtime.Locator, error) {
 	if spec.ResumeSessionFile == "" {
 		return runtime.Locator{}, fmt.Errorf("resume %s: no session file to resume from", spec.Claim)
 	}
-	if prev != (runtime.Locator{}) && prev.Claim != spec.Claim {
-		return runtime.Locator{}, fmt.Errorf("resume %s: the previous locator is %s's", spec.Claim, prev.Claim)
+	if err := (runtime.Known{Claim: spec.Claim, Locator: prev}).Validate(); err != nil {
+		return runtime.Locator{}, fmt.Errorf("sandbox runtime: resume: %w", err)
 	}
 	return r.relaunch(ctx, prev, spec)
 }
@@ -53,7 +53,7 @@ func (r *Runtime) Resume(ctx context.Context, prev runtime.Locator, spec runtime
 //
 // Steps 4 to 6 take the tree's launch turn and wait until no other pod of the tree is in
 // workspace-init (awaitTreeInitialized).
-func (r *Runtime) relaunch(ctx context.Context, prev runtime.Locator, spec runtime.SpawnSpec) (runtime.Locator, error) {
+func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runtime.SpawnSpec) (runtime.Locator, error) {
 	l, err := r.prepare(spec)
 	if err != nil {
 		return runtime.Locator{}, err
@@ -63,7 +63,7 @@ func (r *Runtime) relaunch(ctx context.Context, prev runtime.Locator, spec runti
 	}
 	// This launch replaces whatever process the claim ran, so nothing more is reported about it.
 	r.forget(spec.Claim)
-	if prev != (runtime.Locator{}) {
+	if prev != nil {
 		r.log.Info("sandbox runtime: relaunching", "claim", spec.Claim, "previous", prev.Incarnation, "resume", l.resumeFile != "")
 	}
 	s, created, err := r.ensureSandbox(ctx, l)
@@ -242,7 +242,7 @@ func (r *Runtime) awaitNewPod(ctx context.Context, s *sandbox, old map[types.UID
 }
 
 // writeSecret makes the claim's Secret hold this launch's boot token, provisioning token, and the
-// spec's secrets, owned by the Sandbox so garbage collection deletes it with the Sandbox (decision
+// launch's secrets, owned by the Sandbox so garbage collection deletes it with the Sandbox (decision
 // 6). It is written while the Sandbox is Suspended, so no pod ever waits on a missing Secret or
 // starts on the previous generation's token. A Secret left owned by an earlier Sandbox of the same
 // name is replaced, not updated: the collector may already be deleting it.
@@ -250,7 +250,7 @@ func (r *Runtime) writeSecret(ctx context.Context, s *sandbox, l launch, provisi
 	ctx, cancel := call(ctx)
 	defer cancel()
 	data := map[string][]byte{bootTokenKey: []byte(l.spec.BootToken), provisionTokenKey: []byte(provisionToken)}
-	for name, value := range l.spec.Secrets {
+	for name, value := range l.secrets {
 		data[name] = []byte(value)
 	}
 	want := corev1.Secret{

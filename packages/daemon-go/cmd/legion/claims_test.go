@@ -49,7 +49,7 @@ func (neverFires) Stop() bool { return true }
 type anyLaunch struct{}
 
 func (anyLaunch) SpawnSpec(context.Context, supervise.Claim) (runtime.SpawnSpec, error) {
-	return runtime.SpawnSpec{Workspace: "/", Prompt: runtime.PromptParts{RolePromptPaths: []string{"/dev/null"}}}, nil
+	return runtime.SpawnSpec{Prompt: runtime.PromptParts{RolePromptPaths: []string{"/dev/null"}}}, nil
 }
 
 // memoryClaims is the daemon's claims as the routes reach them: real machines, over a store kept
@@ -159,7 +159,7 @@ func newOperatorDaemon(t *testing.T) *operatorDaemon {
 		Runtime: rt, Conns: fake.NewConns(), Store: tokens.Recording(claims), Specs: anyLaunch{}, Clock: stillTime{}, Log: quiet,
 		Limits: supervise.Limits{LaunchFailures: 3, PromptFailures: 3, PromptRetires: 2},
 		Timeouts: supervise.Timeouts{
-			Boot: time.Minute, RegistrationIntervals: 3, RPC: 5 * time.Second, Probe: 30 * time.Second, StopGrace: 7 * time.Second,
+			Boot: time.Minute, RegistrationIntervals: 3, RPC: 5 * time.Second, Probe: 30 * time.Second,
 		},
 	}
 	handler := api.NewServer("127.0.0.1", 0, api.Options{
