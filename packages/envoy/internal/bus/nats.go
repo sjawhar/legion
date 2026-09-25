@@ -568,10 +568,6 @@ func (c *Client) registerSubscription(next recoverableSubscription, conn *nats.C
 }
 
 func restoreSubscription(subscription *recoverableSubscription, conn *nats.Conn, js nats.JetStreamContext) error {
-	if subscription.active != nil {
-		_ = subscription.active.Unsubscribe()
-		subscription.active = nil
-	}
 	var (
 		sub *nats.Subscription
 		err error

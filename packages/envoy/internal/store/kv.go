@@ -264,8 +264,10 @@ func (r *Registry) watch() {
 // loses the watcher's ordered consumer, and nats.go replaces it only once it notices the missed
 // heartbeats, up to twenty seconds later; until then the cache misses every write another
 // listener makes, and a drain deletes a consumer the server no longer has. The listener's
-// reconnect hook calls this, so the cache follows the bucket from the reconnect on. The bucket
-// handle stays the one Open took: the bus reconnects that connection in place.
+// reconnect hook calls this, so the cache follows the bucket from the reconnect on. It watches
+// the bucket handle Open took, which a server restart leaves working because the bus reconnects
+// that connection in place. When the bus's recover path replaces a closed connection instead, the
+// handle is on the closed one and Rewatch fails with "nats: connection closed".
 func (r *Registry) Rewatch() error {
 	watcher, err := r.kv.WatchAll()
 	if err != nil {
