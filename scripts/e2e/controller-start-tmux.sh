@@ -18,7 +18,7 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
 work=$(mktemp -d /tmp/legion-e2e-controller.XXXXXXXX)
 evidence=${CONTROLLER_START_EVIDENCE_DIR:-$(mktemp -d /tmp/legion-e2e-controller-evidence.XXXXXXXX)}
-mkdir -p "$evidence/logs"
+mkdir -p "$evidence/logs" "$evidence/checks"
 ok=
 daemon_pid=
 listener_pid=
@@ -47,6 +47,7 @@ fail() { echo "FAIL $check: $*" >&2; exit 1; }
 cleanup() {
   local p
   set +e
+  for p in ctl1 ctl2; do TMUX_TMPDIR=$work/tmux tmux -L accept capture-pane -p -t "$p" >"$evidence/checks/$p.pane" 2>/dev/null; done
   TMUX_TMPDIR=$work/tmux tmux -L accept kill-server >/dev/null 2>&1
   stop_pid "$daemon_pid"
   TMUX_TMPDIR=$work/tmux tmux -L "legion-$ptoken" kill-server >/dev/null 2>&1
@@ -55,7 +56,7 @@ cleanup() {
   docker rm -f "$nats_container" "$pg_container" >/dev/null 2>&1
   rm -rf "$HOME/.omp/profiles/$profile" "$work"
   [ -n "$ok" ] || echo "controller start e2e: FAIL (check $check)"
-  echo "evidence: $evidence (logs/daemon.log, logs/listener.log)"
+  echo "evidence: $evidence (logs/daemon.log, logs/listener.log, and checks/: each check's own output and the controller panes)"
   return 0
 }
 trap cleanup EXIT
@@ -181,16 +182,17 @@ note "no private_key_command ran ($marker absent)"
 pass
 
 # ---- the boot gate on the plugin's contract --------------------------------------------------------
-begin gate-refuses-a-contract-3-plugin
+begin gate-refuses-the-previous-contract
 cp -p "$work/plugin/package.json" "$work/manifest.orig"
-jq '.legion.goDaemonApiVersion = 3' "$work/manifest.orig" >"$work/plugin/package.json"
+previous_contract=$((want_contract - 1))
+jq --argjson c "$previous_contract" '.legion.goDaemonApiVersion = $c' "$work/manifest.orig" >"$work/plugin/package.json"
 st=0
-operator_env timeout 300 "$work/legion" start --config "$work/legion.yaml" >"$work/refusal-contract.log" 2>&1 || st=$?
+operator_env timeout 300 "$work/legion" start --config "$work/legion.yaml" >"$evidence/checks/refusal-contract.log" 2>&1 || st=$?
 cp -p "$work/manifest.orig" "$work/plugin/package.json"
 [ "$st" != 0 ] && [ "$st" != 124 ] || fail "legion start exited $st"
-grep -qF "speaks Go daemon API contract 3; this daemon requires $want_contract" "$work/refusal-contract.log" ||
-  fail "the refusal does not name both contracts: $(head -3 "$work/refusal-contract.log")"
-note "legion start exit $st: $(grep -oF "speaks Go daemon API contract 3; this daemon requires $want_contract" "$work/refusal-contract.log" | head -1)"
+grep -qF "speaks Go daemon API contract $previous_contract; this daemon requires $want_contract" "$evidence/checks/refusal-contract.log" ||
+  fail "the refusal does not name both contracts: $(head -3 "$evidence/checks/refusal-contract.log")"
+note "legion start exit $st: $(grep -oF "speaks Go daemon API contract $previous_contract; this daemon requires $want_contract" "$evidence/checks/refusal-contract.log" | head -1)"
 pass
 
 # ---- the daemon ------------------------------------------------------------------------------------
@@ -226,7 +228,7 @@ note "the daemon minted nothing; $ctl_state not created"
 pass
 
 begin controller-claims-the-role
-tm new-session -d -s ctl1 -x 200 -y 50 "cd '$work' && env -u OMP_SESSION_ID -u OMPCODE -u PI_CONFIG_FILES -u ENVOY_NATS_URL -u LEGION_OMP_PATH OMP_PROFILE='$profile' '$work/legion' controller start --config '$work/controller.yaml' 2>'$work/ctl1.stderr'; echo \$? >'$work/ctl1.exit'; sleep 600"
+tm new-session -d -s ctl1 -x 200 -y 50 "cd '$work' && env -u OMP_SESSION_ID -u OMPCODE -u PI_CONFIG_FILES -u ENVOY_NATS_URL -u LEGION_OMP_PATH OMP_PROFILE='$profile' '$work/legion' controller start --config '$work/controller.yaml' 2>'$evidence/checks/ctl1.stderr'; echo \$? >'$evidence/checks/ctl1.exit'; sleep 600"
 until_true 180 "controllerLocator in the state" sh -c "'$work/legion' state --json --port $daemon_port | jq -e '.controllerLocator.sessionId != null'"
 locator1=$(state_json | jq -c .controllerLocator)
 session1=$(jq -r .sessionId <<<"$locator1")
@@ -260,7 +262,7 @@ tm send-keys -t ctl1 C-c
 sleep 2
 kill -0 "$cli1" 2>/dev/null || fail "one Ctrl-C ended legion controller start"
 kill -0 "$omp1" 2>/dev/null || fail "one Ctrl-C ended Oh My Pi"
-[ ! -e "$work/ctl1.exit" ] || fail "the command exited on one Ctrl-C"
+[ ! -e "$evidence/checks/ctl1.exit" ] || fail "the command exited on one Ctrl-C"
 note "after one Ctrl-C both legion ($cli1) and omp ($omp1) run; Oh My Pi owns the terminal"
 pass
 
@@ -283,7 +285,18 @@ begin second-start-revokes-the-first
 cap1=$(cat "$ctl_state/secrets/$role")
 grant_before=$(curl -fsS -X POST -H "Authorization: Bearer $(cat "$work/operator-token")" -H 'Content-Type: application/json' \
   --data '{}' "http://127.0.0.1:$daemon_port/legion/v1/grants" | jq -r .grantId)
-tm new-session -d -s ctl2 -x 200 -y 50 "cd '$work' && env -u OMP_SESSION_ID -u OMPCODE -u PI_CONFIG_FILES -u ENVOY_NATS_URL -u LEGION_OMP_PATH OMP_PROFILE='$profile' '$work/legion' controller start --config '$work/controller.yaml' 2>'$work/ctl2.stderr'; echo \$? >'$work/ctl2.exit'; sleep 600"
+# The grant's positive control: before the second start it redeems, reaching the status route's
+# missing Dispatch, so the route takes issue X-1 past the grant check.
+redeem_status() {
+  curl -sS -o "$evidence/checks/$1" -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+    --data "$(jq -cn --arg g "$grant_before" '{grantId: $g, issue: "X-1", status: "backlog"}')" "http://127.0.0.1:$daemon_port/legion/v1/issues/status"
+}
+code=$(redeem_status grant-before-second-start.json) || fail "the status route could not be reached: $code"
+if [ "$code" != 500 ] || ! grep -qF DISPATCH_UNAVAILABLE "$evidence/checks/grant-before-second-start.json"; then
+  fail "the grant answered $code $(cat "$evidence/checks/grant-before-second-start.json") before the second start, want 500 DISPATCH_UNAVAILABLE"
+fi
+note "the grant, before the second start → $code $(cat "$evidence/checks/grant-before-second-start.json")"
+tm new-session -d -s ctl2 -x 200 -y 50 "cd '$work' && env -u OMP_SESSION_ID -u OMPCODE -u PI_CONFIG_FILES -u ENVOY_NATS_URL -u LEGION_OMP_PATH OMP_PROFILE='$profile' '$work/legion' controller start --config '$work/controller.yaml' 2>'$evidence/checks/ctl2.stderr'; echo \$? >'$evidence/checks/ctl2.exit'; sleep 600"
 until_true 180 "controllerLocator to name a second session" sh -c "'$work/legion' state --json --port $daemon_port | jq -e --arg s '$session1' '.controllerLocator.sessionId != null and .controllerLocator.sessionId != \$s'"
 locator2=$(state_json | jq -c .controllerLocator)
 session2=$(jq -r .sessionId <<<"$locator2")
@@ -293,14 +306,15 @@ note "GET /v1/roles/$role → holder $session2"
 mints=$(jq -R -c 'fromjson? | select(.msg | startswith("api: minted a controller capability")) | .generation' "$daemon_log" | tr '\n' ' ')
 [ "$mints" = "1 2 " ] || fail "capability mints logged: $mints"
 note "daemon minted generations: $mints"
-body=$(jq -cn --arg t "$cap1" --arg s "$session1" '{bootToken: $t, sessionId: $s, ompSessionFile: "/x.jsonl", agentId: "a", pluginContract: 4}')
-code=$(curl -s -o "$work/reregister.json" -w '%{http_code}' -X POST -H 'Content-Type: application/json' --data "$body" "http://127.0.0.1:$daemon_port/legion/v1/claims/register")
-[ "$code" = 403 ] || fail "registering with the first capability answered $code $(cat "$work/reregister.json")"
-note "POST /claims/register with the first capability → $code $(cat "$work/reregister.json")"
-code=$(curl -s -o "$work/stale-grant.json" -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
-  --data "$(jq -cn --arg g "$grant_before" '{grantId: $g, issue: "X-1", status: "backlog"}')" "http://127.0.0.1:$daemon_port/legion/v1/issues/status")
-grep -qF DISPATCH_UNAVAILABLE "$work/stale-grant.json" && fail "a controller grant minted before the second start still redeems"
-note "a controller grant minted before the second start → $code $(cat "$work/stale-grant.json")"
+body=$(jq -cn --arg t "$cap1" --arg s "$session1" --argjson c "$want_contract" '{bootToken: $t, sessionId: $s, ompSessionFile: "/x.jsonl", agentId: "a", pluginContract: $c}')
+code=$(curl -s -o "$evidence/checks/reregister.json" -w '%{http_code}' -X POST -H 'Content-Type: application/json' --data "$body" "http://127.0.0.1:$daemon_port/legion/v1/claims/register")
+[ "$code" = 403 ] || fail "registering with the first capability answered $code $(cat "$evidence/checks/reregister.json")"
+note "POST /claims/register with the first capability → $code $(cat "$evidence/checks/reregister.json")"
+code=$(redeem_status stale-grant.json) || fail "the status route could not be reached: $code"
+if [ "$code" != 403 ] || ! grep -qF GRANT_UNAVAILABLE "$evidence/checks/stale-grant.json"; then
+  fail "the same grant answered $code $(cat "$evidence/checks/stale-grant.json") after the second start, want 403 GRANT_UNAVAILABLE"
+fi
+note "the same grant, after the second start → $code $(cat "$evidence/checks/stale-grant.json")"
 pass
 
 begin liveness-probe-against-the-listener
@@ -327,17 +341,19 @@ func main() {
 GO
 printf '{"Replace":{"%s":"%s"}}' "$root/packages/daemon-go/cmd/liveprobe-accept/main.go" "$work/liveprobe.go" >"$work/overlay.json"
 verdicts=$(cd "$root/packages/daemon-go" && go run -overlay "$work/overlay.json" ./cmd/liveprobe-accept \
-  "http://127.0.0.1:$envoy_port" "$work/envoy-token" "$ptoken" "$session2" "$session1" 2>"$work/liveprobe.log" | tr '\n' ' ')
-[ "$verdicts" = "$session2=alive $session1=gone " ] || fail "verdicts: $verdicts; log $(cat "$work/liveprobe.log")"
+  "http://127.0.0.1:$envoy_port" "$work/envoy-token" "$ptoken" "$session2" "$session1" 2>"$evidence/checks/liveprobe.log" | tr '\n' ' ')
+[ "$verdicts" = "$session2=alive $session1=gone " ] || fail "verdicts: $verdicts; log $(cat "$evidence/checks/liveprobe.log")"
 note "controller.Prober on the live listener: $verdicts"
-note "$(grep -o 'msg=.*' "$work/liveprobe.log" | head -1)"
+note "$(grep -o 'msg=.*' "$evidence/checks/liveprobe.log" | head -1)"
 pass
 
 begin exit-code-is-oh-my-pis
 # Oh My Pi: "press Ctrl+C again to exit, or Ctrl+D" — Ctrl+D on an empty editor quits.
 tm send-keys -t ctl2 C-d
-until_true 30 "legion controller start to exit after Oh My Pi" test -s "$work/ctl2.exit"
-note "the second controller's legion controller start exited $(cat "$work/ctl2.exit") after Oh My Pi quit; stderr: $(cat "$work/ctl2.stderr")"
+until_true 30 "legion controller start to exit after Oh My Pi" test -s "$evidence/checks/ctl2.exit"
+[ "$(cat "$evidence/checks/ctl2.exit")" = 0 ] ||
+  fail "legion controller start exited $(cat "$evidence/checks/ctl2.exit") after Oh My Pi quit cleanly, want 0; stderr: $(cat "$evidence/checks/ctl2.stderr")"
+note "the second controller's legion controller start exited 0 after Oh My Pi quit cleanly; stderr: $(cat "$evidence/checks/ctl2.stderr")"
 pass
 
 ok=1

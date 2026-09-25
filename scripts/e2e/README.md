@@ -414,22 +414,25 @@ bash scripts/e2e/controller-start-tmux.sh
 Each check prints `== <name>`, what it observed, and `ok <name>`. The first check that fails ends the
 run non-zero and names itself. On any exit the run removes its scratch directory, the isolated
 profile, both tmux servers, and its Postgres and NATS containers. `CONTROLLER_START_EVIDENCE_DIR`
-keeps the daemon and listener logs; it defaults to a fresh `/tmp` directory, which is printed.
+keeps the daemon and listener logs and, under `checks/`, each check's own output (the controllers'
+stderr and exit codes, the refusal, the route answers, the prober's log) and both controller panes
+as they were at exit, so a failed run keeps what failed; it defaults to a fresh `/tmp` directory,
+which is printed. No secret is written there.
 
 | check | what it holds, and 4b.5's acceptance item |
 | :--- | :--- |
-| `check-config-passes` | `legion start --check-config` passes the run's config (`--check-config` passes on the proof's config) |
+| `check-config-passes` | `legion start --check-config` passes the run's tmux config. 4b.5's "`--check-config` passes on the proof's config" is the full-tree driver's, whose config is `runtime: kubernetes`: `stage4b-sandbox-tree.sh`'s `boot` checkpoint runs it before the daemon starts |
 | `check-config-names-each-broken-key` | an unknown key, a zero `admission_cap`, a bad `envoy_url`, and a Dispatch URL without its token file are each refused by name, and neither App's `private_key_command` runs (names the key on each broken variant) |
-| `gate-refuses-a-contract-3-plugin` | the boot gate refuses the plugin with its manifest set to contract 3, naming both contracts (the plugin at the bumped contract refuses the previous one by name) |
+| `gate-refuses-the-previous-contract` | the boot gate refuses the plugin with its manifest set to the contract before the checkout's, naming both contracts (the plugin at the bumped contract refuses the previous one by name) |
 | `daemon-serves` | the daemon answers `/healthz` with no `controllerLocator` yet |
 | `state-config-runs-no-key-command` | `legion state --config` on a config whose key command would fail still reads the state, and the command never runs (`legion state --config` runs no key command) |
 | `operator-token-file-others-can-read-is-refused` | a 0640 operator token file is refused by path and mode, the daemon mints nothing, and no state directory is written (a group-readable operator token file is refused naming it) |
 | `controller-claims-the-role` | the controller registers, `GET /legion/v1/state` shows `controllerLocator` (`runtime: tmux`, `external: true`), the Envoy role `legion-<project>-controller` names its session, and its Oh My Pi has the controller environment, its secret only as a 0600 file, interactive (claims the controller role, shows `controllerLocator`) |
 | `ctrl-c-reaches-omp-not-the-cli` | one Ctrl-C leaves both `legion controller start` and Oh My Pi running (decision 3: Oh My Pi owns the terminal) |
 | `status-from-an-operator-shell` | `legion status --operator-token-file` mints a grant with the operator bearer and reaches the status route; the rig has no Dispatch, so the route answers 500 naming it. A wrong bearer is refused 403 (decision 3's operator path; the status write itself is the full-tree proof's) |
-| `second-start-revokes-the-first` | a second start takes the role and the locator, the daemon logs mints 1 and 2, the first capability's registration is refused 403, and a grant minted before the second start no longer redeems (a second start revokes the first's capability) |
+| `second-start-revokes-the-first` | a second start takes the role and the locator, the daemon logs mints 1 and 2, the first capability's registration is refused 403, and a grant minted before the second start, which redeemed then (500 `DISPATCH_UNAVAILABLE`, past the grant check), is refused 403 `GRANT_UNAVAILABLE` after it (a second start revokes the first's capability) |
 | `liveness-probe-against-the-listener` | `controller.Prober` on the live listener calls the second session alive and the first gone |
-| `exit-code-is-oh-my-pis` | Ctrl-D quits Oh My Pi and the command exits with its code |
+| `exit-code-is-oh-my-pis` | Ctrl-D quits Oh My Pi cleanly and the command exits 0, as Oh My Pi did. A non-zero code is carried through too; the stub-omp unit test (`cmd/legion/controller_test.go`, exit 3) holds that |
 
 ## verifiers-staging-token.sh
 
