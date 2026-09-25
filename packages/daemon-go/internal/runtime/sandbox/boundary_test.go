@@ -48,6 +48,13 @@ import (
 // canaryToken is the provisioning Secret's value in every pod the rig runs.
 const canaryToken = "ghs_canary_the_tree_must_never_read"
 
+// canaryForms are the ways the token can sit in a file: as itself, base64-encoded, and as the
+// base64 of the Basic credential git sends, which an http.extraHeader would hold.
+var canaryForms = []string{
+	canaryToken, base64.StdEncoding.EncodeToString([]byte(canaryToken)),
+	base64.StdEncoding.EncodeToString([]byte("x-access-token:" + canaryToken)),
+}
+
 // boundaryRepo is the repository every pod provisions (testSpec's).
 const boundaryRepo = "sjawhar/legion-smoke"
 
@@ -126,7 +133,7 @@ func newInitRig(t *testing.T, legion string) *initRig {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(rig.pattern, []byte(canaryToken+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(rig.pattern, []byte(strings.Join(canaryForms, "\n")+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	rig.github = newGitHubStandIn(t, root)
@@ -214,6 +221,25 @@ func (rig *initRig) run(pod corev1.PodSpec) error {
 	rig.pod++
 	podDir := filepath.Join(rig.pods, fmt.Sprintf("pod-%d", rig.pod))
 	defer func() { _ = os.RemoveAll(podDir) }()
+	// The rig models the Secret routes the manifest uses; any other would carry the token past it.
+	for _, volume := range pod.Volumes {
+		if volume.Projected != nil && slices.ContainsFunc(volume.Projected.Sources, func(source corev1.VolumeProjection) bool { return source.Secret != nil }) {
+			rig.t.Fatalf("volume %s projects a Secret, which the rig does not model", volume.Name)
+		}
+		if volume.Secret != nil && len(volume.Secret.Items) == 0 {
+			rig.t.Fatalf("volume %s mounts every key of Secret %s, which the rig does not model", volume.Name, volume.Secret.SecretName)
+		}
+	}
+	for _, c := range slices.Concat(pod.InitContainers, pod.Containers) {
+		for _, v := range c.Env {
+			if v.ValueFrom != nil && v.ValueFrom.SecretKeyRef != nil {
+				rig.t.Fatalf("%s reads %s from a Secret, which the rig does not model", c.Name, v.Name)
+			}
+		}
+		if slices.ContainsFunc(c.EnvFrom, func(from corev1.EnvFromSource) bool { return from.SecretRef != nil }) {
+			rig.t.Fatalf("%s takes its environment from a Secret, which the rig does not model", c.Name)
+		}
+	}
 	volumes := map[string]string{}
 	for _, volume := range pod.Volumes {
 		dir := filepath.Join(podDir, "volumes", volume.Name)
@@ -238,6 +264,9 @@ func (rig *initRig) run(pod corev1.PodSpec) error {
 	for _, c := range pod.InitContainers {
 		if err := rig.runContainer(podDir, volumes, c); err != nil {
 			return err
+		}
+		if c.Name == fetchContainer {
+			rig.holdsNoCanary("the feed", volumes[feedVolume])
 		}
 	}
 	return nil
@@ -389,10 +418,11 @@ func (rig *initRig) tool(dir, name string, args ...string) string {
 	return string(output)
 }
 
-// holdsNoCanary fails when a file on the tree volume holds the provisioning token.
-func (rig *initRig) holdsNoCanary() {
+// holdsNoCanary fails when a file under dir, what names, holds the provisioning token in any of
+// its forms.
+func (rig *initRig) holdsNoCanary(what, dir string) {
 	rig.t.Helper()
-	err := filepath.WalkDir(rig.tree, func(path string, entry fs.DirEntry, err error) error {
+	err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil || !entry.Type().IsRegular() {
 			return err
 		}
@@ -400,13 +430,15 @@ func (rig *initRig) holdsNoCanary() {
 		if err != nil {
 			return err
 		}
-		if strings.Contains(string(body), canaryToken) {
-			rig.t.Errorf("the tree volume holds the provisioning token in %s", path)
+		for _, form := range canaryForms {
+			if strings.Contains(string(body), form) {
+				rig.t.Errorf("%s holds the provisioning token in %s", what, path)
+			}
 		}
 		return nil
 	})
 	if err != nil {
-		rig.t.Fatalf("walk the tree volume: %v", err)
+		rig.t.Fatalf("walk %s: %v", what, err)
 	}
 }
 
@@ -575,8 +607,11 @@ func TestNothingTheTreePlantsReadsTheProvisioningToken(t *testing.T) {
 				t.Logf("the second pod, with the plant in place: %v", err)
 			}
 
+			holdsToken := func(text string) bool {
+				return slices.ContainsFunc(canaryForms, func(form string) bool { return strings.Contains(text, form) })
+			}
 			for _, line := range rig.sunk() {
-				if strings.Contains(line, canaryToken) {
+				if holdsToken(line) {
 					t.Errorf("planted code read the provisioning token: %s", line)
 				}
 			}
@@ -584,12 +619,12 @@ func TestNothingTheTreePlantsReadsTheProvisioningToken(t *testing.T) {
 			// anything at all.
 			if rig.host != nil {
 				for _, credential := range rig.host.credentials() {
-					if strings.Contains(credential, canaryToken) {
+					if holdsToken(credential) {
 						t.Errorf("the host the tree named received the provisioning token: %s", credential)
 					}
 				}
 			}
-			rig.holdsNoCanary()
+			rig.holdsNoCanary("the tree volume", rig.tree)
 
 			v.live(rig)
 			if rig.host != nil {
