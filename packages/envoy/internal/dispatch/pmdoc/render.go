@@ -22,6 +22,9 @@ type BlockOffset struct {
 	To   int
 }
 
+// Render returns doc as canonical Markdown. A mark the rendering does not write
+// (renderedMarkTypes) cannot change it: the document is rendered with its anchor marks stripped,
+// which merges the text runs an anchor split, and an escape is decided over a whole run.
 func Render(doc *Node) (string, error) {
 	r, err := render(doc)
 	if err != nil {
@@ -659,11 +662,18 @@ func nodeHasMark(node *Node, markType string) bool {
 	return false
 }
 
+// renderedMarkTypes are the marks canonical Markdown writes. Every other mark the schema allows
+// (markTypes) is an anchor, invisible to the rendering, and StripAnchorMarks removes exactly the
+// marks that are not here: what renders is one list, not two of opposite polarity that a new
+// invisible mark could fall between.
+var renderedMarkTypes = map[string]bool{
+	"link": true, "strong": true, "emphasis": true, "strike_through": true, "inlineCode": true,
+}
+
 func visibleMarks(marks []Mark) []Mark {
 	out := make([]Mark, 0, len(marks))
 	for _, mark := range marks {
-		switch mark.Type {
-		case "link", "strong", "emphasis", "strike_through", "inlineCode":
+		if renderedMarkTypes[mark.Type] {
 			out = append(out, mark)
 		}
 	}

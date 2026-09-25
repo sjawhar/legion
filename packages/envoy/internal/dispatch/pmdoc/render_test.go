@@ -690,6 +690,40 @@ func TestRenderTableAutolinkPreservesHref(t *testing.T) {
 	}
 }
 
+// Every mark the schema allows that the rendering does not write is an anchor, and no anchor may
+// change the markdown, whichever one a later schema adds: the loop reads markTypes, so a new
+// invisible mark is covered here the day it exists.
+func TestNoUnrenderedSchemaMarkChangesTheMarkdown(t *testing.T) {
+	const head, marked, tail = "Use snake_", "case here. see [x]", "(y)"
+	whole := &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{
+		{Type: "text", Text: head + marked + tail},
+	}}}}
+	want, err := Render(whole)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for markType := range markTypes {
+		if renderedMarkTypes[markType] {
+			continue
+		}
+		t.Run(markType, func(t *testing.T) {
+			marks := []Mark{{Type: markType, Attrs: Attrs{"id": "m1", "by": "user:alice"}}}
+			split := &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{
+				{Type: "text", Text: head},
+				{Type: "text", Text: marked, Marks: marks},
+				{Type: "text", Text: tail},
+			}}}}
+			markdown, err := Render(split)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if markdown != want {
+				t.Fatalf("Render() with a %s mark = %q, want the unmarked %q", markType, markdown, want)
+			}
+		})
+	}
+}
+
 // An anchor mark renders nothing, but one that starts or ends inside a word splits the word's
 // text into two runs. The rendering is the same as if the mark were not there: an escape is
 // decided over the whole run, so `snake_case` is never written `snake\_case`.
