@@ -745,32 +745,29 @@ export async function getComparedPaths(
 ): Promise<ComparedPaths> {
   const range = `${repo} ${base}...${head}`;
   const { stdout, stderr, exitCode } = await runner(
-    [
-      "gh",
-      "api",
-      `repos/${repo}/compare/${base}...${head}`,
-      "--jq",
-      "{files: (.files // [] | length), paths: [(.files // [])[] | .filename, (.previous_filename // empty)]}",
-    ],
+    ["gh", "api", `repos/${repo}/compare/${base}...${head}`],
     runnerOptions
   );
   if (exitCode !== 0) {
     throw new GitHubAPIError(`compare ${range} failed: ${stderr.trim() || `exit ${exitCode}`}`);
   }
-  let answer: Record<string, unknown> | undefined;
+  let files: unknown;
   try {
-    answer = recordValue(JSON.parse(stdout));
+    files = recordValue(JSON.parse(stdout))?.files ?? [];
   } catch (error) {
     throw new GitHubAPIError(`compare ${range} answered unparsable JSON: ${error}`);
   }
-  const files = answer?.files;
-  const paths = answer?.paths;
-  if (
-    typeof files !== "number" ||
-    !Array.isArray(paths) ||
-    !paths.every((path): path is string => typeof path === "string")
-  ) {
+  if (!Array.isArray(files))
     throw new GitHubAPIError(`compare ${range} answered an unexpected shape`);
+  const paths: string[] = [];
+  for (const file of files) {
+    const filename = recordValue(file)?.filename;
+    const previous = recordValue(file)?.previous_filename;
+    if (typeof filename !== "string" || (previous !== undefined && typeof previous !== "string")) {
+      throw new GitHubAPIError(`compare ${range} answered an unexpected shape`);
+    }
+    paths.push(filename);
+    if (previous !== undefined) paths.push(previous);
   }
-  return { paths, truncated: files >= COMPARE_FILE_LIMIT };
+  return { paths, truncated: files.length >= COMPARE_FILE_LIMIT };
 }

@@ -4455,7 +4455,7 @@ describe("Legion HTTP API", () => {
         headSha: "review-handoff-sha",
         reviewDecision: "changes_requested",
         reviewDecisionUnsettledFrom: "impl-sha",
-        changesRequestedBy: "legion-reviewer[bot]",
+        changesRequest: { by: "legion-reviewer[bot]", at: "impl-sha" },
       });
       state.prByBranch[`acme/widgets@${branch}`] = "acme/widgets#9";
       const deliver = (payload: Record<string, unknown>) =>
@@ -4463,7 +4463,11 @@ describe("Legion HTTP API", () => {
           state,
           "notifications.github.acme.widgets.issue.9",
           { event_id: randomUUID(), issued_at: now, payload },
-          { maxFixAttempts: 3, projects: { WIDGETS: { repo: "acme/widgets" } } }
+          {
+            maxFixAttempts: 3,
+            projects: { WIDGETS: { repo: "acme/widgets" } },
+            reviewAppLogin: "legion-reviewer[bot]",
+          }
         );
       // The implementer's real fix: its synchronize lands, its push webhook is lost.
       deliver({
@@ -4520,6 +4524,123 @@ describe("Legion HTTP API", () => {
       const complete = await json("/legion/v1/phase/complete", { grantId, summary: "Round 2" });
 
       expect(complete.response.status).toBe(200);
+      expect(statusWrites).toEqual([{ issue: root, status: "retro" }]);
+    });
+  }
+
+  for (const order of ["push first", "synchronize first"] as const) {
+    it(`a clean round after corrective heads that change only .legion/ writes retro, and the deletion push writes nothing (${order})`, async () => {
+      const statusWrites: Array<{ issue: IssueKey; status: string }> = [];
+      await start({
+        dispatchClient: fakeDispatchClient({
+          setStatus: async (issue, status) => {
+            statusWrites.push({ issue, status });
+            // Dispatch's echo of the daemon's own write.
+            const node = state.issues[issue];
+            if (node) node.status = status as typeof node.status;
+          },
+        }),
+      });
+      const branch = `legion/${root}`;
+      state.prs["acme/widgets#9"] = checkPr(root, { number: 9, headSha: "impl-sha" });
+      state.prByBranch[`acme/widgets@${branch}`] = "acme/widgets#9";
+      const rootNode = state.issues[root];
+      if (!rootNode) throw new Error("no root issue");
+      rootNode.status = "needs_review";
+      const deliver = (payload: Record<string, unknown>) =>
+        reduceGithubEvent(
+          state,
+          "notifications.github.acme.widgets.issue.9",
+          { event_id: randomUUID(), issued_at: now, payload },
+          {
+            maxFixAttempts: 3,
+            projects: { WIDGETS: { repo: "acme/widgets" } },
+            reviewAppLogin: "legion-reviewer[bot]",
+          }
+        );
+      let head = "impl-sha";
+      const headArrives = (sha: string, paths: string) => {
+        const push = {
+          kind: "push",
+          repo: "acme/widgets",
+          ref: `refs/heads/${branch}`,
+          before: head,
+          after: sha,
+          pusher: "p",
+          head_subject: "s",
+          commit_count: "1",
+          compare_url: "u",
+          changed_paths: paths,
+          changed_paths_truncated: "false",
+        };
+        const sync = {
+          kind: "pr",
+          action: "synchronize",
+          repo: "acme/widgets",
+          number: "9",
+          head_ref: branch,
+          head_sha: sha,
+        };
+        if (order === "push first") deliver(push);
+        deliver(sync);
+        if (order === "synchronize first") deliver(push);
+        head = sha;
+      };
+      const review = (state_: string, body: string) =>
+        deliver({
+          kind: "review",
+          action: "submitted",
+          repo: "acme/widgets",
+          number: "9",
+          parent_kind: "pr",
+          author: "legion-reviewer[bot]",
+          url: "review-url",
+          state: state_,
+          body,
+          commit_id: head,
+          head_sha: head,
+        });
+      const complete = async (role: "reviewer" | "implementer") => {
+        state.roles[roleToken(state.project, root, role)] = {
+          issue: root,
+          role,
+          generation: 1,
+          locator: {
+            runtime: "tmux",
+            tmuxSession: "legion-omp",
+            tmuxWindowId: "@42",
+            tmuxPaneId: "%1",
+            socketPath: `/state/workers/${role}.sock`,
+          },
+        };
+        const bootToken = await api?.mintWorkerBootToken(root, root, role, 1);
+        if (!bootToken) throw new Error("worker boot token was not minted");
+        const started = await json<{ secret: string }>("/legion/v1/worker/started", {
+          tree: root,
+          issue: root,
+          role,
+          bootToken,
+          sessionId: `ses_${role}`,
+          agentId: `agt_${role}`,
+          ompSessionFile: `/tmp/${role}.json`,
+        });
+        expect(started.response.status).toBe(200);
+        state.phases[root] = { phase: role, sessionId: `ses_${role}` };
+        const grantId = await mintGrant(root, `ses_${role}`, started.body.secret);
+        const done = await json("/legion/v1/phase/complete", { grantId, summary: role });
+        expect(done.response.status).toBe(200);
+      };
+
+      review("changes_requested", "C1 blocks");
+      headArrives("review-handoff-sha", ".legion/review.json");
+      // Every thread answered "not a defect": the corrective head and the tester's change only .legion/.
+      headArrives("implement-handoff-sha", ".legion/implement.json");
+      headArrives("test-handoff-sha", ".legion/test.json");
+      review("commented", "Round 2: every dispute accepted; clean");
+      await complete("reviewer");
+      headArrives("deletion-sha", ".legion/implement.json\n.legion/review.json\n.legion/test.json");
+      await complete("implementer");
+
       expect(statusWrites).toEqual([{ issue: root, status: "retro" }]);
     });
   }

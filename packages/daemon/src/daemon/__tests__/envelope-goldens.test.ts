@@ -8,6 +8,7 @@ import { type ReducerConfig, reduceGithubEvent } from "../reducers";
 const config: ReducerConfig = {
   maxFixAttempts: 3,
   projects: { WIDGETS: { repo: "example-org/example-repo" } },
+  reviewAppLogin: "legion-reviewer[bot]",
 };
 
 describe("Envoy GitHub envelope goldens", () => {

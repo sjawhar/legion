@@ -39,6 +39,7 @@ const prNumber = 17;
 const config: ReducerConfig = {
   maxFixAttempts: 3,
   projects: { LEGSMOKE: { repo } },
+  reviewAppLogin: "legion-reviewer[bot]",
 };
 
 /** A normalized `pull_request_review` payload as Envoy delivers it: flat strings, `commit_id`
@@ -1123,7 +1124,7 @@ describe("reduceGithubEvent", () => {
     const state = newLegionState("omp", 4);
     state.issues[legionIssue] = issueNode(legionIssue, "Legion issue");
     const twoProjectConfig = {
-      maxFixAttempts: 3,
+      ...config,
       projects: {
         LEGION: { repo: legionRepo },
         WIDGETS: { repo: widgetsRepo },
@@ -1990,6 +1991,77 @@ describe("push fix-attempt classification", () => {
   });
 });
 
+describe("review-App pushes and planned reds", () => {
+  const prKey = `${repo}#${prNumber}`;
+  const orders = ["push first", "synchronize first"] as const;
+  const tester = { pusher: "legion-reviewer[bot]", head_subject: "test: red tests for C1" };
+  const implementer = { pusher: "legion-implementer[bot]", head_subject: "fix: C1" };
+
+  /** One push of `sha` from `before`, both webhooks in `order`, changing a path outside `.legion/`. */
+  function arrive(
+    state: LegionState,
+    before: string,
+    sha: string,
+    order: (typeof orders)[number],
+    who: Record<string, unknown>
+  ): Effect[] {
+    const push = {
+      ...who,
+      before,
+      after: sha,
+      changed_paths: "src/widget.test.ts\n.legion/test.json",
+    };
+    const out: Effect[] = [];
+    if (order === "push first") out.push(...pushEffects(state, push));
+    out.push(...effects(state, syncPayload(sha)));
+    if (order === "synchronize first") out.push(...pushEffects(state, push));
+    return out;
+  }
+
+  for (const order of orders) {
+    it(`a tester's red-test push and the implementer's fix after it count no fix attempt; a red fix and its successor count one (${order})`, () => {
+      const state = rootState();
+      attachChild(state);
+      addPr(state, { headSha: "impl-sha", verdict: "green", ciSettledAt: 1 });
+
+      arrive(state, "impl-sha", "red-tests-sha", order, tester);
+      settleRed(state, "red-tests-sha", 2);
+      arrive(state, "red-tests-sha", "fix-sha", order, implementer);
+      expect(state.prs[prKey]?.fixAttempts).toBe(0);
+
+      settleRed(state, "fix-sha", 3);
+      arrive(state, "fix-sha", "fix-2-sha", order, implementer);
+      expect(state.prs[prKey]?.fixAttempts).toBe(1);
+    });
+
+    it(`a tester's red-test push onto a red head counts no fix attempt (${order})`, () => {
+      const state = redPrState();
+
+      arrive(state, "old-sha", "red-tests-sha", order, tester);
+
+      expect(state.prs[prKey]?.fixAttempts).toBe(0);
+    });
+  }
+
+  it("four tester rounds each followed by a fix publish no pr-blocked", () => {
+    const state = rootState();
+    attachChild(state);
+    addPr(state, { headSha: "h0", verdict: "green", ciSettledAt: 1 });
+    const all: Effect[] = [];
+    let head = "h0";
+    for (let round = 1; round <= 4; round += 1) {
+      all.push(...arrive(state, head, `red-${round}`, "synchronize first", tester));
+      all.push(...settleRed(state, `red-${round}`, round * 10));
+      all.push(...arrive(state, `red-${round}`, `fix-${round}`, "push first", implementer));
+      all.push(...settleGreen(state, `fix-${round}`, round * 10 + 1));
+      head = `fix-${round}`;
+    }
+
+    expect(state.prs[prKey]?.fixAttempts).toBe(0);
+    expect(prBlockedEffects(all)).toEqual([]);
+  });
+});
+
 describe("a review decision across a new head", () => {
   const prKey = `${repo}#${prNumber}`;
   const orders = ["push first", "synchronize first"] as const;
@@ -2084,6 +2156,20 @@ describe("a review decision across a new head", () => {
       expect(state.prs[prKey]?.reviewDecision).toBe("changes_requested");
     });
   }
+
+  it("a follow-up comment by the requester at the head it requested changes at keeps the request", () => {
+    const state = rootState();
+    attachChild(state);
+    addPr(state);
+    effects(
+      state,
+      reviewPayload({ state: "changes_requested", author: "sami", body: "C1 blocks" })
+    );
+
+    effects(state, reviewPayload({ state: "commented", author: "sami", body: "Also, C2" }));
+
+    expect(state.prs[prKey]?.reviewDecision).toBe("changes_requested");
+  });
 
   it("the reviewer's own non-empty COMMENT at the fix supersedes an open-range decision", () => {
     const state = lostPushRound();

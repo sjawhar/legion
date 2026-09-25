@@ -423,12 +423,24 @@ async function startDaemonLocked(
   }
   probes.catch(() => {});
   const owners = new Set(projectRepos(config).map((repo) => repo.split("/")[0] as string));
+  const reviewLogins = new Set<string>();
   await Promise.all(
     [...owners].flatMap((owner) => [
       deps.tokenManager.getToken("implement", owner),
-      deps.tokenManager.getToken("review", owner),
+      deps.tokenManager.getToken("review", owner).then((lease) => {
+        reviewLogins.add(lease.gitIdentity.name);
+      }),
     ])
   );
+  // The reducers judge a push by its pusher against this login (`ReducerConfig.reviewAppLogin`);
+  // one App has one bot login, so any other answer is a configuration the reducers cannot use.
+  const [reviewAppLogin, ...otherLogins] = reviewLogins;
+  if (reviewAppLogin === undefined || otherLogins.length > 0) {
+    throw new Error(
+      `the review App's token leases named ${reviewLogins.size === 0 ? "no bot login" : `${[...reviewLogins].join(", ")}`}; the reducers need exactly one`
+    );
+  }
+  const reducerConfig = { ...config, reviewAppLogin };
   const stateFile = path.join(config.stateDir, "state.json");
   const state = await deps.loadState(stateFile, {
     project: config.project,
@@ -638,7 +650,7 @@ async function startDaemonLocked(
     },
     onDequeue: (issue) => processManager.dequeue(issue),
     onUndeliverable,
-    config,
+    config: reducerConfig,
   };
   const eventPump: EventPump = startEventPump(eventDeps);
   const fetchCiStatusBatch = createCiStatusFetcher(
@@ -660,7 +672,7 @@ async function startDaemonLocked(
       runResync(
         {
           state,
-          config,
+          config: reducerConfig,
           dispatchClient: deps.dispatchClient,
           saveState: save,
           fetchCiStatusBatch,

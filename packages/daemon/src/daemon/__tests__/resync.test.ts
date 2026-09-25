@@ -25,6 +25,7 @@ function resyncDeps(
       resyncIntervalMs: 600_000,
       projects: { LEGION: { repo: "sjawhar/legion" } },
       maxFixAttempts: 3,
+      reviewAppLogin: "legion-reviewer[bot]",
     },
     dispatchClient: fakeDispatchClient(),
     saveState: async () => {},
@@ -1249,7 +1250,12 @@ describe("runResync", () => {
 
     await runResync({
       ...resyncDeps(state),
-      config: { resyncIntervalMs: 600_000, projects, maxFixAttempts: 3 },
+      config: {
+        resyncIntervalMs: 600_000,
+        projects,
+        maxFixAttempts: 3,
+        reviewAppLogin: "legion-reviewer[bot]",
+      },
       dispatchClient: fakeDispatchClient({
         listIssues: async (project) => {
           projectCalls.push(project);
@@ -1979,6 +1985,36 @@ describe("runResync settles a changes-requested decision no push webhook settled
 
     expect(state.prs[prKey]?.reviewDecision).toBeUndefined();
     expect(asked).toEqual([["head-0", "handoff-sha"]]);
+  });
+
+  it("a late changes-requested review of an earlier commit is settled from that commit", async () => {
+    const state = reviewedState();
+    delete state.prs[prKey]?.reviewDecision;
+    synchronize(state, "fix-sha", "2026-08-23T12:00:00.000Z");
+    // Round 1's review, redelivered after the fix's head arrived.
+    deliver(state, {
+      kind: "review",
+      action: "submitted",
+      repo: "sjawhar/legion",
+      number: "7",
+      parent_kind: "pr",
+      author: "legion-reviewer[bot]",
+      url: "review-url",
+      state: "changes_requested",
+      body: "C1 blocks",
+      commit_id: "impl-sha",
+      head_sha: "impl-sha",
+    });
+    const asked: Array<[string, string]> = [];
+
+    await runResync({
+      ...resyncDeps(state),
+      fetchCiStatusBatch: readAt("fix-sha"),
+      compareChangedPaths: compareAnswering(["src/fix.ts"], asked),
+    });
+
+    expect(state.prs[prKey]?.reviewDecision).toBeUndefined();
+    expect(asked).toEqual([["impl-sha", "fix-sha"]]);
   });
 
   it("drops it when GitHub's compare cannot classify the head", async () => {

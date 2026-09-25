@@ -123,23 +123,25 @@ export interface PrState {
    * drops it, and a handoff-only head (the reviewer's own `.legion/review.json` push) keeps it. */
   reviewDecision?: "approved" | "changes_requested";
   /** Present exactly when `changes_requested` is being kept across heads that nothing has
-   * classified yet: the head those heads arrived from, the base of the range still to classify.
-   * `resetPrHead` sets it when a head arrives with no push classification that covers it (the
-   * synchronize came first, the push webhook was lost, or resync's read found the head), and keeps
-   * the first value while further unclassified heads arrive. It is settled, and deleted, by a push
-   * webhook for the current head whose `before` is this sha (handoff-only keeps the decision), by
-   * any push for the current head that changes a path outside `.legion/` or cannot be classified
-   * (drops it), by resync's compare of this sha against the current head (`.legion/`-only keeps
-   * it; anything else, a compare that fails included, drops it), by a review the reducer
-   * records, or by a non-empty review of the current head from `changesRequestedBy` that asks for
-   * no changes (drops it). */
+   * classified yet: the base of the range still to classify. `resetPrHead` sets it to the head a
+   * new head arrived from when no push classification covers that head (the synchronize came
+   * first, the push webhook was lost, or resync's read found the head), and keeps the first value
+   * while further unclassified heads arrive; the `review` reducer sets it to the commit a
+   * `changes_requested` review named when that is not the current head (a late or redelivered
+   * review, or one pinned to the implementation commit below a handoff). It is settled, and
+   * deleted, by a push webhook for the current head whose `before` is this sha (handoff-only keeps
+   * the decision), by any push for the current head that changes a path outside `.legion/` or
+   * cannot be classified (drops it), and by resync's compare of this sha against the current head
+   * (`.legion/`-only keeps it; anything else, a compare that fails included, drops it). */
   reviewDecisionUnsettledFrom?: string;
-  /** The login whose review recorded the current `changes_requested` decision; present exactly
-   * with that decision (absent on one a v33 daemon recorded). Only a non-empty review of the
-   * current head from this login can supersede the decision while its range is unsettled: the
-   * empty-body review GitHub fires for every thread reply, and every other account's review,
+  /** Who asked for the current `changes_requested` and at which commit: present with that
+   * decision when its review carried both (absent on one a v33 daemon recorded). A non-empty
+   * review of a later current head by the same login that neither approves nor requests changes
+   * — the reviewer's clean round is a COMMENT while the head carries `.legion/` — ends the
+   * request, whether or not a range is open. The empty-body review GitHub fires for every thread
+   * reply, every other account's review, and the requester's follow-up at the commit it named
    * leave it standing. */
-  changesRequestedBy?: string;
+  changesRequest?: { by: string; at: string };
   /** Present exactly when the current `headSha`'s arrival in `resetPrHead` incremented
    * `fixAttempts` (prior verdict was red and no pending push classified this sha handoff-only). A
    * later handoff-only push webhook whose `after` equals `headSha` takes the attempt back and
@@ -154,7 +156,13 @@ export interface PrState {
    * A push for the CURRENT head never touches this slot (it only takes back). Keyed by sha, so a
    * stale slot can only ever describe the commit it names; `before` says whether it describes
    * every change since the head it replaces (absent in a slot a v33 daemon wrote). */
-  pendingPush?: { sha: string; handoffOnly: boolean; before?: string };
+  pendingPush?: { sha: string; handoffOnly: boolean; before?: string; byReviewApp?: true };
+  /** Present exactly when the current head's push was the review App's (`ReducerConfig.reviewAppLogin`,
+   * the push's `pusher`): a planner's, tester's, reviewer's, or architect's commit. Such a push is
+   * never a fix attempt, and a red verdict on it is planned (the tester's red tests), so the next
+   * head is not one either. Set from the pending slot's `byReviewApp` or by the push webhook for
+   * the current head; the next `resetPrHead` sets or deletes it afresh. */
+  headPushedByReviewApp?: true;
   /** The `fixAttempts` value the last `pr-blocked` was published for. `reduceCiEmission`
    * publishes `pr-blocked` only when `fixAttempts >= maxFixAttempts` AND `fixAttempts !==
    * blockedAttempts`, then records `fixAttempts` here. A take-back whose pre-decrement
@@ -510,13 +518,18 @@ const PrStateSchema = z
     fixAttempts: z.number().int().nonnegative(),
     reviewDecision: z.enum(["approved", "changes_requested"]).optional(),
     reviewDecisionUnsettledFrom: z.string().min(1).optional(),
-    changesRequestedBy: z.string().min(1).optional(),
+    changesRequest: z
+      .object({ by: z.string().min(1), at: z.string().min(1) })
+      .strict()
+      .optional(),
     headCounted: z.literal(true).optional(),
+    headPushedByReviewApp: z.literal(true).optional(),
     pendingPush: z
       .object({
         sha: z.string().min(1),
         handoffOnly: z.boolean(),
         before: z.string().min(1).optional(),
+        byReviewApp: z.literal(true).optional(),
       })
       .strict()
       .optional(),
@@ -1576,11 +1589,12 @@ function migrateV32State(
   return { ...state, version: 33, controllerLocator };
 }
 
-/** v33 -> v34: PrState gains the optional `reviewDecisionUnsettledFrom` and `changesRequestedBy`,
- * and `pendingPush` the optional `before`. A pure bump: absent is the correct starting value for
- * each, since a v33 daemon settled each decision when its head arrived, a pending slot without
- * `before` is never taken to cover the head it replaces, and a decision with no recorded author is
- * superseded by no review. */
+/** v33 -> v34: PrState gains the optional `reviewDecisionUnsettledFrom`, `changesRequest` and
+ * `headPushedByReviewApp`, and `pendingPush` the optional `before` and `byReviewApp`. A pure bump:
+ * absent is the correct starting value for each, since a v33 daemon settled each decision when its
+ * head arrived, a pending slot without `before` is never taken to cover the head it replaces, a
+ * decision with no recorded request is ended by no review, and a head or slot not marked as the
+ * review App's counts as before. */
 function migrateV33State(state: unknown): unknown {
   if (!recordValue(state) || state.version !== 33) return state;
   return { ...state, version: 34 };

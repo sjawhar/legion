@@ -6,6 +6,7 @@ import path from "node:path";
 import {
   controllerToken,
   type DaemonStateResponse,
+  type IssueKey,
   LEGION_DAEMON_API_VERSION,
   roleToken,
   roleTopic,
@@ -33,7 +34,7 @@ import {
   schedulingFingerprint,
 } from "../worker-image-probe";
 import type { WorkerRpcClient } from "../worker-rpc";
-import { fakeDispatchClient, procStatLine } from "./ci-fixtures";
+import { checkPr, fakeDispatchClient, procStatLine } from "./ci-fixtures";
 import { createFakeK8sApi, type FakeK8sApi } from "./fake-k8s-api";
 import { fakeWorkerRpcClient } from "./fake-runtime";
 
@@ -461,6 +462,42 @@ describe("startDaemon", () => {
     expect(commandOptions.map((options) => options.env?.GH_TOKEN)).toEqual([
       "ghs_acme_app_token",
       "ghs_other_app_token",
+    ]);
+  });
+
+  it("reads GitHub's compare for resync with the repository owner's implementer App token", async () => {
+    const commands: Array<{ command: string[]; token: string | undefined }> = [];
+    const runner: CommandRunner = async (command, options) => {
+      commands.push({ command, token: options?.env?.GH_TOKEN });
+      return {
+        stdout: JSON.stringify({ files: [{ filename: "src/fix.ts" }] }),
+        stderr: "",
+        exitCode: 0,
+      };
+    };
+    const tokenCalls: Array<{ role: string; owner: string }> = [];
+    const tokenManager = {
+      getToken: async (role: "implement" | "review", owner: string) => {
+        tokenCalls.push({ role, owner });
+        return {
+          token: `ghs_${owner}_${role}_token`,
+          expiresAt: "2099-01-01T00:00:00.000Z",
+          gitIdentity: { name: `legion-${role}[bot]`, email: `${role}@users.noreply.github.com` },
+        };
+      },
+    };
+
+    const compared = await daemonIndex.createCompareReader(tokenManager, runner, {
+      PATH: "/pane/bin",
+    })("acme/api", "base-sha", "head-sha");
+
+    expect(compared).toEqual({ paths: ["src/fix.ts"], truncated: false });
+    expect(tokenCalls).toEqual([{ role: "implement", owner: "acme" }]);
+    expect(commands).toEqual([
+      {
+        command: ["gh", "api", "repos/acme/api/compare/base-sha...head-sha"],
+        token: "ghs_acme_implement_token",
+      },
     ]);
   });
 
@@ -3769,6 +3806,154 @@ describe("startDaemon", () => {
         new RegExp(
           `pi-legion-envoy manifest at .* could not be read \\(ENOENT: no such file or directory\\); this daemon requires a plugin speaking daemon API contract ${LEGION_DAEMON_API_VERSION}\\.`
         )
+      );
+    } finally {
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  /** A booted daemon on `state` whose token leases name `logins[owner]` for the review App. */
+  async function bootWithReviewLogins(
+    daemonConfig: DaemonConfig,
+    state: LegionState,
+    nats: FakeNats,
+    reviewLogin: (owner: string) => string
+  ) {
+    return startDaemon(daemonConfig, {
+      deps: {
+        loadState: async () => state,
+        saveState: async () => {},
+        createNatsTransport: async () => nats,
+        runner: async (command) =>
+          command[0] === "sh"
+            ? {
+                stdout: "[]",
+                stderr: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+                exitCode: 0,
+              }
+            : { stdout: "", stderr: "", exitCode: 0 },
+        resolveDaemonEnvironment: environmentResolver(daemonEnvironment),
+        statPrompt: async () => {},
+        readProcessStat: fakeProcStat,
+        readPluginManifest: async () => validLegionPluginManifest,
+        envoyPublish: async () => {},
+        dispatchClient: fakeDispatchClient(),
+        tokenManager: {
+          getToken: async (role: "implement" | "review", owner: string) => ({
+            token: "test-token",
+            expiresAt: "2026-08-25T00:00:00.000Z",
+            gitIdentity: {
+              name: role === "review" ? reviewLogin(owner) : "legion-implement[bot]",
+              email: `1+${role}@users.noreply.github.com`,
+            },
+          }),
+        },
+        setTimeout: () => 1 as never,
+        clearTimeout: () => {},
+        setInterval: () => 1 as never,
+        clearInterval: () => {},
+        onSignal: () => {},
+        exit: () => {},
+        now: () => Date.parse("2026-08-24T00:00:00.000Z"),
+      },
+    });
+  }
+
+  for (const [pusher, attempts] of [
+    ["legion-review-boot[bot]", 0],
+    ["legion-implement[bot]", 1],
+  ] as const) {
+    it(`judges a push onto a red head by the review App login its boot lease named (${pusher}: ${attempts} fix attempt)`, async () => {
+      const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+      const daemonConfig = config(stateDir);
+      const nats = new FakeNats();
+      const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+      const branch = "legion/WIDGETS-9";
+      state.prs["acme/widgets#9"] = checkPr("WIDGETS-9" as IssueKey, {
+        number: 9,
+        headSha: "red-sha",
+        verdict: "red",
+        failing: ["test"],
+        ciSettledAt: 1,
+      });
+      state.prByBranch[`acme/widgets@${branch}`] = "acme/widgets#9";
+      const daemon = await bootWithReviewLogins(
+        daemonConfig,
+        state,
+        nats,
+        () => "legion-review-boot[bot]"
+      );
+      const envelope = (id: string, topic: string, payload: Record<string, unknown>) =>
+        JSON.stringify({
+          event_id: id,
+          source: "github",
+          source_event_id: id,
+          topic,
+          dedupe_key: id,
+          issued_at: 1_000,
+          payload_summary: id,
+          payload: JSON.stringify(payload),
+          trace_id: id,
+        });
+
+      try {
+        nats.emit(
+          `notifications.github.acme.widgets.push.branch.${branch}`,
+          envelope("push-1", `notifications.github.acme.widgets.push.branch.${branch}`, {
+            kind: "push",
+            repo: "acme/widgets",
+            ref: `refs/heads/${branch}`,
+            before: "red-sha",
+            after: "next-sha",
+            pusher,
+            head_subject: "next",
+            commit_count: "1",
+            compare_url: "u",
+            changed_paths: "src/widget.test.ts",
+            changed_paths_truncated: "false",
+          })
+        );
+        nats.emit(
+          "notifications.github.acme.widgets.pull_request.synchronize",
+          envelope("sync-1", "notifications.github.acme.widgets.pull_request.synchronize", {
+            kind: "pr",
+            action: "synchronize",
+            repo: "acme/widgets",
+            number: "9",
+            head_ref: branch,
+            head_sha: "next-sha",
+          })
+        );
+        await daemon.drain();
+
+        expect(state.prs["acme/widgets#9"]).toMatchObject({
+          headSha: "next-sha",
+          fixAttempts: attempts,
+        });
+      } finally {
+        await daemon.stop();
+        await rm(stateDir, { recursive: true, force: true });
+      }
+    });
+  }
+
+  it("refuses to start when the review App's token leases name more than one bot login", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = {
+      ...config(stateDir),
+      projects: {
+        WIDGETS: { repo: "acme/widgets" },
+        OTHER: { repo: "other/web" },
+      } as DaemonConfig["projects"],
+    };
+    const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+    try {
+      await expect(
+        bootWithReviewLogins(daemonConfig, state, new FakeNats(), (owner) =>
+          owner === "acme" ? "legion-reviewer[bot]" : "other-reviewer[bot]"
+        )
+      ).rejects.toThrow(
+        "the review App's token leases named legion-reviewer[bot], other-reviewer[bot]; the reducers need exactly one"
       );
     } finally {
       await rm(stateDir, { recursive: true, force: true });
