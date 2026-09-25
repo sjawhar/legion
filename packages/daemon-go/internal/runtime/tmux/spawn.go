@@ -44,10 +44,10 @@ var runtimeOwned = map[string]bool{
 	"LEGION_DAEMON_API": true, "LEGION_TREE": true, "LEGION_ISSUE": true, "LEGION_ROLE": true,
 	"LEGION_GENERATION": true, "LEGION_PROJECT": true, "LEGION_DAEMON_URL": true,
 	"LEGION_STATE_DIR": true, "LEGION_WORKSPACE": true, "ENVOY_NATS_URL": true, "ENVOY_URL": true,
-	"GIT_TERMINAL_PROMPT": true, "XDG_CONFIG_HOME": true, "XDG_CACHE_HOME": true,
-	"XDG_DATA_HOME": true, "XDG_STATE_HOME": true, "LEGION_BOOT_TOKEN_FILE": true,
-	"LEGION_GH_PATH": true, "LEGION_GIT_PATH": true, "LEGION_JJ_PATH": true,
-	"DISPATCH_URL": true, "DISPATCH_TOKEN_FILE": true, "PI_SHELL_PREFIX": true,
+	"GIT_TERMINAL_PROMPT": true, "LEGION_GRANT_FILE": true, "XDG_CONFIG_HOME": true,
+	"XDG_CACHE_HOME": true, "XDG_DATA_HOME": true, "XDG_STATE_HOME": true,
+	"LEGION_BOOT_TOKEN_FILE": true, "LEGION_GH_PATH": true, "LEGION_GIT_PATH": true,
+	"LEGION_JJ_PATH": true, "DISPATCH_URL": true, "DISPATCH_TOKEN_FILE": true, "PI_SHELL_PREFIX": true,
 }
 
 // validateSpawnSpec refuses a spec the runtime cannot honour exactly, before anything touches the
@@ -196,10 +196,10 @@ type paneInputs struct {
 
 // panePairs are a pane's -e pairs, in one order: the variables every Legion pane is told (the
 // shipped set, processes.ts:4562-4579, LEGION_DAEMON_API=go, which picks the plugin's Go client,
-// and PI_SHELL_PREFIX, which keeps this daemon's gh and legion first in the agent's bash tool),
-// the four XDG base directories under `<state_dir>/home`, the spec's own variables sorted, then a
-// `<NAME>_FILE` pointer per secret file. PATH is never among them — tmux would replace it
-// (LEGION-91) — and neither is any secret's value.
+// PI_SHELL_PREFIX, which keeps this daemon's gh and legion first in the agent's bash tool, and
+// LEGION_GRANT_FILE, runtime.GrantFile), the four XDG base directories under `<state_dir>/home`,
+// the spec's own variables sorted, then a `<NAME>_FILE` pointer per secret file. PATH is never
+// among them — tmux would replace it (LEGION-91) — and neither is any secret's value.
 func panePairs(spec runtime.SpawnSpec, in paneInputs, files []secretFile) []string {
 	var pairs []string
 	add := func(name, value string) { pairs = append(pairs, "-e", name+"="+value) }
@@ -225,6 +225,7 @@ func panePairs(spec runtime.SpawnSpec, in paneInputs, files []secretFile) []stri
 	}
 	add("PI_SHELL_PREFIX", shellprefix.For(workerbin.Dir(in.stateDir), workerbin.LauncherDir(in.stateDir)))
 	add("GIT_TERMINAL_PROMPT", "0")
+	add("LEGION_GRANT_FILE", runtime.GrantFile(in.stateDir, spec.Claim))
 	for _, dir := range xdgDirectories(in.stateDir) {
 		add(dir[0], dir[1])
 	}

@@ -254,6 +254,41 @@ func TestBothContainersShareOneInMemoryXDGConfigHome(t *testing.T) {
 	}
 }
 
+// Oh My Pi copies its own environment once for every `gh` it runs to serve a pr:// or issue://
+// read, so the worker container is told LEGION_GRANT_FILE from its start; the extension writes a
+// grant there before each such call (LEGION-262). The file is the claim's, on the state volume in
+// memory — never on the tree volume every agent of the tree can read — and the init container,
+// which redeems no grant, is told none.
+func TestTheWorkerContainerNamesItsGrantFileInMemory(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := workerSpec(t)
+	pod := podOf(t, r, spec, false)
+	init, main := pod.InitContainers[0], pod.Containers[0]
+	want := StateDir + "/secrets/" + string(spec.Claim) + "-grant"
+	if got := envOf(main)["LEGION_GRANT_FILE"]; got != want {
+		t.Fatalf("the worker container's LEGION_GRANT_FILE = %q, want %q", got, want)
+	}
+	if got, ok := envOf(init)["LEGION_GRANT_FILE"]; ok {
+		t.Errorf("the init container is told LEGION_GRANT_FILE=%q; it redeems no grant", got)
+	}
+	// The deepest mount holding the path is the volume the file lands on.
+	var volume, at string
+	for _, mount := range main.VolumeMounts {
+		if strings.HasPrefix(want, mount.MountPath+"/") && len(mount.MountPath) > len(at) {
+			volume, at = mount.Name, mount.MountPath
+		}
+	}
+	for _, v := range pod.Volumes {
+		if v.Name == volume && v.EmptyDir != nil && v.EmptyDir.Medium == corev1.StorageMediumMemory {
+			return
+		}
+	}
+	t.Fatalf("the grant file %s is on volume %q, which is not an in-memory emptyDir", want, volume)
+}
+
 // The provisioning token never shares a process with anything a tree agent can write (Stage 4b
 // Task 4b.6b): the claim's Secret projects it into workspace-fetch alone, the only container told
 // where it is, and no other container can write a volume workspace-fetch mounts — the feed it
