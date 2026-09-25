@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/modelroute"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
@@ -58,7 +59,7 @@ var runtimeOwned = map[string]bool{
 	"LEGION_DAEMON_API": true, "LEGION_TREE": true, "LEGION_ISSUE": true, "LEGION_ROLE": true,
 	"LEGION_GENERATION": true, "LEGION_PROJECT": true, "LEGION_DAEMON_URL": true,
 	"LEGION_STATE_DIR": true, "LEGION_WORKSPACE": true, "ENVOY_NATS_URL": true, "ENVOY_URL": true,
-	"DISPATCH_URL": true, "LEGION_MODEL_GATEWAY_URL": true, "LEGION_GH_PATH": true,
+	"DISPATCH_URL": true, modelroute.EnvURL: true, "LEGION_GH_PATH": true,
 	"LEGION_GIT_PATH": true, "LEGION_JJ_PATH": true, "LEGION_CREDENTIAL_HELPER": true, "PATH": true,
 	"PI_SHELL_PREFIX": true, "GIT_TERMINAL_PROMPT": true, "XDG_CONFIG_HOME": true,
 	"XDG_CACHE_HOME": true, "XDG_DATA_HOME": true, "XDG_STATE_HOME": true, "POD_UID": true,
@@ -460,7 +461,7 @@ func (r *Runtime) mainEnvironment(l launch, credentialHelper string) []corev1.En
 	if r.dispatchURL != "" {
 		add("DISPATCH_URL", r.dispatchURL)
 	}
-	add("LEGION_MODEL_GATEWAY_URL", r.gateway.URL)
+	add(modelroute.EnvURL, r.gateway.URL)
 	add("LEGION_GH_PATH", r.tools.GH)
 	add("LEGION_GIT_PATH", r.tools.Git)
 	add("LEGION_JJ_PATH", r.tools.JJ)

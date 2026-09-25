@@ -22,6 +22,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/sjawhar/legion/daemon/internal/modelroute"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
@@ -123,7 +124,7 @@ func (r *liveRig) checkGatewayToken() error {
 			name, pod.Spec.ServiceAccountName, pod.Spec.AutomountServiceAccountToken, liveGateway.ServiceAccount)
 	}
 	note("runtime", "pod %s: serviceAccountName %s, automountServiceAccountToken false", name, pod.Spec.ServiceAccountName)
-	path := GatewayDir + "/" + gatewayTokenFile
+	path := modelroute.TokenFile
 	token, err := r.exec(root, "cat", path)
 	if err != nil {
 		return err

@@ -536,10 +536,21 @@ type probeSpec struct {
 // pool, gVisor, the configured scheduling — with the workers' pod security, reaching the model
 // gateway as every worker does (C6: the Gateway's ServiceAccount, gatewayTokenVolume, and
 // LEGION_MODEL_GATEWAY_URL), and a single container running the image's Go `legion probe-image`
-// against contract, whose round trip goes through that route.
+// against contract, whose round trip goes through that route. Its command and env are escaped
+// against the kubelet's expansion as every worker container's are (kubeletLiteral).
 func (r *Runtime) probeManifest(name string, contract int, resources corev1.ResourceRequirements, shutdown time.Time) probeSandbox {
 	labels := map[string]string{labelProject: r.project, labelProbe: "image"}
 	gateway, gatewayMount := gatewayTokenVolume(r.gateway)
+	container := corev1.Container{
+		Name:            probeContainer,
+		Image:           r.image,
+		Command:         []string{r.tools.Legion, "probe-image", "--go-daemon-api-version", strconv.Itoa(contract)},
+		Env:             []corev1.EnvVar{{Name: modelroute.EnvURL, Value: r.gateway.URL}},
+		VolumeMounts:    []corev1.VolumeMount{gatewayMount},
+		Resources:       resources,
+		SecurityContext: restrictedContainer(),
+	}
+	kubeletLiteral(&container)
 	return probeSandbox{
 		TypeMeta:   metav1.TypeMeta{APIVersion: sandboxGVR.GroupVersion().String(), Kind: "Sandbox"},
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: r.namespace, Labels: labels},
@@ -563,15 +574,7 @@ func (r *Runtime) probeManifest(name string, contract int, resources corev1.Reso
 					Tolerations:       r.tolerations(),
 					PriorityClassName: r.scheduling.PriorityClass,
 					Volumes:           []corev1.Volume{gateway},
-					Containers: []corev1.Container{{
-						Name:            probeContainer,
-						Image:           r.image,
-						Command:         []string{r.tools.Legion, "probe-image", "--go-daemon-api-version", strconv.Itoa(contract)},
-						Env:             []corev1.EnvVar{{Name: modelroute.EnvURL, Value: r.gateway.URL}},
-						VolumeMounts:    []corev1.VolumeMount{gatewayMount},
-						Resources:       resources,
-						SecurityContext: restrictedContainer(),
-					}},
+					Containers:        []corev1.Container{container},
 				},
 			},
 		},

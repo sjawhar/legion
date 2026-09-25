@@ -141,7 +141,7 @@ func InstallKeyedBy(lookup func(string) (string, bool), tokenFile string) (Insta
 	if !set {
 		return Installed{}, nil
 	}
-	route, err := anthropicRoute(raw)
+	route, err := AnthropicRoute(raw)
 	if err != nil {
 		return Installed{}, err
 	}
@@ -164,10 +164,11 @@ func InstallKeyedBy(lookup func(string) (string, bool), tokenFile string) (Insta
 	return Installed{Route: route, Pins: filepath.Join(agent, "config.yml")}, nil
 }
 
-// anthropicRoute is the gateway's anthropic route, <gateway>/anthropic, for a gateway base URL that
+// AnthropicRoute is the gateway's anthropic route, <gateway>/anthropic, for a gateway base URL that
 // is http(s) with a host and carries no credentials, query or fragment. A refusal never quotes a
-// URL's password.
-func anthropicRoute(raw string) (string, error) {
+// URL's password. The shim and `legion probe-image` refuse to start on a URL it refuses, and the
+// Sandbox runtime refuses to be configured with one, so no pod is ever told it.
+func AnthropicRoute(raw string) (string, error) {
 	if raw == "" {
 		return "", fmt.Errorf("%s is set but empty: it must name the model gateway's base URL", EnvURL)
 	}

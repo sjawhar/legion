@@ -6,6 +6,7 @@ import (
 	"flag"
 	"maps"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -18,6 +19,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/modelroute"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 )
@@ -432,7 +434,7 @@ func TestTheRecoveredRefReachesTheInitContainerAlone(t *testing.T) {
 
 // A pod reaches the models through the gateway as the Gateway's ServiceAccount (decision 1, C6):
 // the one credential it holds there is a projected token for the gateway's audience, which the
-// kubelet rotates within TokenExpiry, mounted read-only at GatewayDir in the worker container
+// kubelet rotates within TokenExpiry, mounted read-only at modelroute.TokenFile's directory in the worker container
 // alone, beside the gateway's URL; the API server's own token is never mounted.
 func TestAPodReachesTheModelGatewayAsItsServiceAccount(t *testing.T) {
 	opts := goldenOptions()
@@ -472,16 +474,16 @@ func TestAPodReachesTheModelGatewayAsItsServiceAccount(t *testing.T) {
 				return mounts
 			}
 			main, init := pod.Containers[0], pod.InitContainers[0]
-			if got := mounted(main); len(got) != 1 || got[0].MountPath != GatewayDir || !got[0].ReadOnly {
-				t.Errorf("the worker container mounts the token volume as %+v, want once, read-only, at %s", got, GatewayDir)
+			if got := mounted(main); len(got) != 1 || got[0].MountPath != path.Dir(modelroute.TokenFile) || !got[0].ReadOnly {
+				t.Errorf("the worker container mounts the token volume as %+v, want once, read-only, at %s", got, path.Dir(modelroute.TokenFile))
 			}
 			if got := mounted(init); len(got) != 0 {
 				t.Errorf("the init container mounts the token volume: %+v", got)
 			}
-			if got := envOf(main)["LEGION_MODEL_GATEWAY_URL"]; got != opts.Gateway.URL {
+			if got := envOf(main)[modelroute.EnvURL]; got != opts.Gateway.URL {
 				t.Errorf("the worker container's LEGION_MODEL_GATEWAY_URL = %q, want %q", got, opts.Gateway.URL)
 			}
-			if _, set := envOf(init)["LEGION_MODEL_GATEWAY_URL"]; set {
+			if _, set := envOf(init)[modelroute.EnvURL]; set {
 				t.Error("the init container is told the gateway's URL")
 			}
 		})
@@ -590,5 +592,30 @@ func TestTextSurvivesTheKubeletsExpansion(t *testing.T) {
 	}
 	if !strings.Contains(l.prompt, literal) {
 		t.Fatalf("the system prompt does not carry the instructions as written: %q", l.prompt)
+	}
+}
+
+// A gateway URL that every pod's modelroute refuses is refused at configure, before any API call:
+// otherwise the image probe's refusal of it would read as the image failing its probe, and a URL
+// carrying credentials would be written in plain text into every pod template. The refusal never
+// repeats the credentials.
+func TestAGatewayURLEveryPodRefusesIsRefusedByConfigure(t *testing.T) {
+	for name, tc := range map[string]struct{ url, want string }{
+		"no scheme":   {"middleman.legion.internal", "is not an http(s) URL with a host"},
+		"ftp":         {"ftp://middleman.legion.internal", "is not an http(s) URL with a host"},
+		"credentials": {"https://legion:hunter2@middleman.legion.internal", "carries credentials"},
+		"a query":     {"https://middleman.legion.internal/?x=1", "carries a query or fragment"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			opts := testOptions()
+			opts.Gateway.URL = tc.url
+			_, err := configure(opts)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("configure: %v, want a refusal containing %q", err, tc.want)
+			}
+			if strings.Contains(err.Error(), "hunter2") {
+				t.Fatalf("the refusal repeats the URL's password: %v", err)
+			}
+		})
 	}
 }

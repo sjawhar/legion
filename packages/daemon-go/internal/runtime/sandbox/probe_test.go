@@ -627,6 +627,8 @@ func TestProbeNameIsTheProjectAndTheImage(t *testing.T) {
 // the image's `legion probe-image` writes the profile's route from.
 func TestTheProbePodReachesTheGatewayAsAWorkerDoes(t *testing.T) {
 	opts := goldenOptions()
+	// A `$$` in the URL is one the kubelet would turn into `$` in a container it did not escape.
+	opts.Gateway.URL = "https://middleman.legion.internal/a$$b"
 	r, err := configure(opts)
 	if err != nil {
 		t.Fatal(err)
@@ -652,8 +654,11 @@ func TestTheProbePodReachesTheGatewayAsAWorkerDoes(t *testing.T) {
 		t.Errorf("the pod's gateway token is %s, but the image's profile reads its key from %s", token, modelroute.TokenFile)
 	}
 	got, want := envOf(probe)[modelroute.EnvURL], envOf(worker.Containers[0])[modelroute.EnvURL]
-	if got != opts.Gateway.URL || got != want {
+	if got != want {
 		t.Errorf("the probe container's %s = %q, want the worker's %q", modelroute.EnvURL, got, want)
+	}
+	if seen := kubeExpand(got, envOf(probe)); seen != opts.Gateway.URL {
+		t.Errorf("the probe process is told %s = %q, want the configured %q", modelroute.EnvURL, seen, opts.Gateway.URL)
 	}
 }
 

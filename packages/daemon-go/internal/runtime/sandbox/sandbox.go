@@ -40,6 +40,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/modelroute"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -157,6 +158,9 @@ func configure(opts Options) (*Runtime, error) {
 	case poolSet:
 		return refuse("scheduling node selector sets %s=%q: %s is the runtime's, which puts every pod on the %s pool agent-c's policy requires",
 			poolKey, pool, poolKey, poolValue)
+	}
+	if _, err := modelroute.AnthropicRoute(opts.Gateway.URL); err != nil {
+		return refuse("the model gateway URL is one every pod would refuse: %v", err)
 	}
 	if errs := validation.IsValidLabelValue(opts.Project); len(errs) > 0 {
 		return refuse("project %q is not a label value: %s", opts.Project, strings.Join(errs, "; "))
