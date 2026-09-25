@@ -950,7 +950,12 @@ until_true 900 "the architect pod's gateway token to rotate" sh -c "[ \"\$(kubec
 rotated=$(date -u +%FT%TZ)
 note "the token file changed $(($(date +%s) - started)) s after sampling (at $rotated)"
 send_agent "$tree1" architect "Stage 4b proof: reply to this message with one short sentence, then wait."
-until_true 600 "a completed architect turn after the rotation" sh -c "$(declare -f claim_session_text claim_session_file tree_pod issue_tree pod_exec daemon_state op); claim_session_text '$tree1' architect | jq -R -s -e --arg at '$rotated' '[split(\"\\n\")[] | fromjson? | select(.type == \"message\" and .message.role == \"assistant\" and .timestamp > \$at)] | any(.message.stopReason == \"stop\")' >/dev/null"
+# The poll runs in this shell: the session readers need the run's own variables, which a child sh
+# would not have.
+turn_after_rotation() {
+  claim_session_text "$tree1" architect | jq -R -s -e --arg at "$rotated" '[split("\n")[] | fromjson? | select(.type == "message" and .message.role == "assistant" and .timestamp > $at)] | any(.message.stopReason == "stop")' >/dev/null
+}
+until_true 600 "a completed architect turn after the rotation" turn_after_rotation
 after=$(claim_session_text "$tree1" architect | jq -R -s -c --arg at "$rotated" '[split("\n")[] | fromjson? | select(.type == "message" and .message.role == "assistant" and .timestamp > $at) | "\(.message.provider)/\(.message.model)"] | unique')
 note "turns after the rotation were answered by $after"
 jq -e 'all(.[]; test("^anthropic/claude-[a-z0-9.-]+-legion$"))' <<<"$after" >/dev/null || fail "a turn after the rotation left the gateway's aliases: $after"
