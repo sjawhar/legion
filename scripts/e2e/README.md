@@ -136,7 +136,7 @@ What it stands up, all of it the run's own:
 - **Postgres**: `LEGION_E2E_PG_DSN` when set; otherwise a `postgres:16` container on tmpfs
   (`legion-e2e2-pg-<pid>`) on an ephemeral loopback port — tmpfs rather than the image's anonymous
   volume, which a box whose docker volume subsystem stalls would hang on.
-- **NATS and the Envoy listener**, as `scripts/kind-smoke/up.sh` runs them on the host: a
+- **NATS and the Envoy listener** on the host: a
   `nats:2.10 -js` container (`legion-e2e2-nats-<pid>`), and `packages/envoy`'s `cmd/listener`
   built into the work directory and started with a fresh API bearer, which reaches every pane as
   the 0600 file `envoy_token_file` names.
@@ -227,8 +227,9 @@ gateway's Anthropic endpoint (required; [`lib/model-gateway-url.sh`](#libmodel-g
 `hawk-token` on `PATH`, their `hawk login`, and the GNOME keyring holding it unlocked (every reboot
 locks it; the `unlock-keyring` skill). `SMOKE_UPSTREAM_NATS` (required) names the production Envoy
 NATS the GitHub bridge subscribes on by its fully-qualified name on the operator's tailnet
-(`nats://envoy-nats.<tailnet>.ts.net:4222`), as for the kind smoke's bridge
-([`scripts/kind-smoke/README.md`](../kind-smoke/README.md)); `prerequisites` refuses a run without
+(`nats://envoy-nats.<tailnet>.ts.net:4222`), never a bare alias, which only a resolver's search
+domain completes ([the rig-alias learning](../../docs/solutions/testing/a-rig-container-alias-that-is-momentarily-unheld-resolves-through-the-tailnet-to-production.md));
+`prerequisites` refuses a run without
 either, and refuses an upstream that is not one NATS URL naming a host with a dot. The script prints
 neither value. The proof human is the devbox's ordinary `gh` — the dotfiles shim, acting as the
 `sjawhar-agent` App — for its reviews, its reads, and its merge; it is never a Legion App, and the

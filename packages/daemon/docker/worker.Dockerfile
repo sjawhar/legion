@@ -178,10 +178,7 @@ WORKDIR /home/legion
 #    deployment's sessions on files. The order is load-bearing: `defaultRunner` (state/fetch.ts) kills any
 #    single omp invocation after 30 s, so a natives download inside the first probe would read as a
 #    definitive "does not expose pi.agents" failure. Step 3 must have already fetched them.
-# Any failure fails the build: a broken image never publishes. The in-cluster TypeScript daemon
-# (deploy/kubernetes/daemon, runtime: kubernetes) re-runs the same command with
-# `--daemon-api-version <N>` in a one-shot pod of this image before it serves — the image's own CLI is
-# the only thing that can read the image plugin's daemon API contract (worker-image-probe.ts).
+# Any failure fails the build: a broken image never publishes.
 RUN set -eu; \
     bun --version; omp --version; jj --version; gh --version; git --version; \
     scratch="$(mktemp -d)"; \

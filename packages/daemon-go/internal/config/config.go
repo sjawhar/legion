@@ -9,8 +9,7 @@
 // longer exists; and migration-only keys, refused with the TypeScript loader's own message text so
 // an operator searching for those words finds the same answer. Anything else is a typo. Under
 // `runtime: kubernetes` the loader also refuses what a pod could not run with: the
-// `runtime.kubernetes` block's own values, and the keys outside it every pod needs. The TypeScript
-// in-cluster daemon's files (deploy/kubernetes/daemon) are that daemon's, not Go configurations.
+// `runtime.kubernetes` block's own values, and the keys outside it every pod needs.
 //
 // Load reads the file and nothing it names: a path key (`instructions`, `envoy_token_file`,
 // `operator_token_file`, `runtime.kubernetes.kubeconfig`) is resolved against the file's directory

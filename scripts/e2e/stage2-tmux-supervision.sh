@@ -2,7 +2,7 @@
 # Stage 2's gate for the Go coordinator: supervision on tmux, proven against the real things. The
 # Go daemon launches a real Oh My Pi — the pinned build (packages/daemon/src/daemon/omp-pin.ts)
 # with this checkout's plugin in an isolated OMP profile — in panes of its private tmux server,
-# against a real Envoy listener and NATS (scripts/kind-smoke's host-side recipe) and a real
+# against a real Envoy listener and NATS on the host and a real
 # Postgres. Every gate behaviour is one named check that prints what it observed; the first check
 # that does not hold ends the run non-zero, naming it.
 #
@@ -263,9 +263,8 @@ if [ -z "${LEGION_E2E_PG_DSN:-}" ]; then
   LEGION_E2E_PG_DSN="postgres://legion:legion@127.0.0.1:$(docker port "$pg_container" 5432/tcp | head -1 | sed 's/.*://')/legion"
 fi
 
-# NATS and the Envoy listener, as scripts/kind-smoke/up.sh runs them on the host (ensure_nats,
-# start_listener): nats:2.10 with JetStream, and the listener built from packages/envoy with its
-# API bearer, which reaches every pane as a 0600 file (envoy_token_file).
+# NATS and the Envoy listener on the host: nats:2.10 with JetStream, and the listener built from
+# packages/envoy with its API bearer, which reaches every pane as a 0600 file (envoy_token_file).
 docker run -d --name "$nats_container" -p 127.0.0.1::4222 nats:2.10 -js >/dev/null
 until_true 60 "NATS to be ready" sh -c "docker logs '$nats_container' 2>&1 | grep -q 'Server is ready'"
 nats_url="nats://127.0.0.1:$(docker port "$nats_container" 4222/tcp | head -1 | sed 's/.*://')"
