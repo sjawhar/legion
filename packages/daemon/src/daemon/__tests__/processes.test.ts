@@ -993,25 +993,12 @@ describe("ProcessManager", () => {
       ["jj", "git", "fetch", "-R", repo],
       [
         "jj",
-        "log",
-        "-r",
-        "bookmarks(exact:legion/LEGION-42)",
-        "--no-graph",
-        "-T",
-        'commit_id ++ "\n"',
-        "--ignore-working-copy",
-        "-R",
-        repo,
-      ],
-      // No local bookmark resolved: the origin rows, whose absence starts the workspace at main.
-      [
-        "jj",
         "bookmark",
         "list",
         "--all-remotes",
         "exact:legion/LEGION-42",
         "-T",
-        'if(remote == "origin", if(tracked, "tracked", "untracked") ++ " " ++ normal_target.commit_id() ++ "\n")',
+        'if(remote, if(remote == "origin", "origin " ++ if(conflict, "conflicted " ++ added_targets.map(|c| c.commit_id()).join(","), if(tracked, "tracked ", "untracked ") ++ normal_target.commit_id()) ++ "\n"), "local " ++ if(conflict, "conflicted " ++ added_targets.map(|c| c.commit_id()).join(","), if(present, normal_target.commit_id(), "absent")) ++ "\n")',
         "--ignore-working-copy",
         "-R",
         repo,
@@ -2751,6 +2738,8 @@ describe("ProcessManager", () => {
         if (command[3] === "list-panes" && command.includes("%7")) {
           return { stdout: "%7 12345\n", exitCode: 0 };
         }
+        // Provisioning's commands: no bookmark rows, so the workspace starts at main.
+        if (command[0] === "jj" || command[0] === "git") return { stdout: "", exitCode: 0 };
         return { stdout: "sjawhar-legion-42\n", exitCode: 0 };
       },
     });

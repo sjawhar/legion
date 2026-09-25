@@ -1,5 +1,5 @@
 ---
-title: "jj bookmark facts verified on 0.44.0 and 0.45.1: a fetch deletes a matching local bookmark, three ways to read a bookmark disagree on conflicted and deleted ones, a bookmark on an unsnapshotted @ moves with the next snapshot"
+title: "jj bookmark facts verified on 0.44.0 and 0.45.1: a fetch deletes a matching local bookmark, four ways to read a bookmark disagree on conflicted and deleted ones, a bookmark on an unsnapshotted @ moves with the next snapshot"
 category: legion
 tags:
   - jj
@@ -28,12 +28,14 @@ related_issues:
   - "sjawhar/legion#1087"
 ---
 
-# jj bookmark facts verified on 0.44.0 and 0.45.1: a fetch deletes a matching local bookmark, three ways to read a bookmark disagree on conflicted and deleted ones, a bookmark on an unsnapshotted @ moves with the next snapshot
+# jj bookmark facts verified on 0.44.0 and 0.45.1: a fetch deletes a matching local bookmark, four ways to read a bookmark disagree on conflicted and deleted ones, a bookmark on an unsnapshotted @ moves with the next snapshot
 
 Everything below was reproduced on 2026-09-13 on both binaries this repository runs: this box's
 `jj 0.45.1-sami.20260910` and stock `jj 0.44.0` (`mise x github:jj-vcs/jj@0.44.0 -- jj`, then the CI
 version). Every row was **identical on both** unless a cell says otherwise. Construction recipes
 are at the end so a future worker can re-verify on a new pin instead of trusting this page.
+The **rows** form and the two conflict states with one side missing were added on 2026-09-25,
+measured on the same two binaries (LEGION-286).
 
 ## A fetch deletes a tracked local bookmark whose remote branch is gone
 
@@ -65,21 +67,27 @@ a repo's settings live at `~/.config/jj/repos/<config-id>/config.toml` (`$XDG_CO
 from `<clone>/.jj/repo/config-id`), not inside the clone — under another `HOME` the same `jj config
 get` prints the default `true` with `Per-repo config not found. Generating an empty one.`
 
-## Three ways to read one bookmark, five states
+## Four ways to read one bookmark, seven states
 
 Command forms, run from the clone with `--ignore-working-copy -R <clone>`:
 
 - **list**: `jj bookmark list legion/X`
 - **present**: `jj log -r 'present(legion/X)' --no-graph -T 'commit_id ++ "\n"'`
 - **exact**: `jj log -r 'bookmarks(exact:legion/X)' --no-graph -T 'commit_id ++ "\n"'`
+- **rows**: `jj bookmark list --all-remotes exact:legion/X -T <template>`, the template printing
+  `local <commit>` / `local absent` / `origin tracked|untracked <commit>`, or
+  `conflicted <commit>,<commit>…` from `added_targets` when the row's `conflict` is true
+  (`createWorkspace`'s `BOOKMARK_ROWS` in `packages/workspace/src/workspace.ts`)
 
-| state of `legion/X` | list | present | exact |
-| --- | --- | --- | --- |
-| missing | exit 0, **no stdout**, stderr `Warning: No matching bookmarks for names: legion/X` | exit 0, 0 lines | exit 0, 0 lines |
-| only `legion/X1` exists | as missing (positional name is exact, not a prefix) | 0 lines | 0 lines (`exact:` is exact) |
-| normal | exit 0, one row `legion/X: <change> <commit> …` | exit 0, **1 line**, the commit id | exit 0, **1 line**, the commit id |
-| local deleted, `@origin` row survives | exit 0, **2 rows**: `legion/X (deleted)` + `  @origin: …`, stderr `Hint: Bookmarks marked as deleted can be *deleted permanently* …` | exit 0, 0 lines | exit 0, 0 lines |
-| conflicted (two targets) | exit 0, **5–6 rows**: `legion/X (conflicted):`, `  - <base>`, `  + <A>`, `  + <B>`, stderr `Hint: Some bookmarks have conflicts …` | **exit 1**, 0 lines, stderr `Error: Name \`legion/X\` is conflicted` + `Hint: Use commit ID to select single revision from: <A>, <B>` + `Hint: Use \`bookmarks(legion/X)\` to select all revisions` | exit 0, **2 lines**, one commit id each |
+| state of `legion/X` | list | present | exact | rows |
+| --- | --- | --- | --- | --- |
+| missing | exit 0, **no stdout**, stderr `Warning: No matching bookmarks for names: legion/X` | exit 0, 0 lines | exit 0, 0 lines | no stdout |
+| only `legion/X1` exists | as missing (positional name is exact, not a prefix) | 0 lines | 0 lines (`exact:` is exact) | no stdout |
+| normal | exit 0, one row `legion/X: <change> <commit> …` | exit 0, **1 line**, the commit id | exit 0, **1 line**, the commit id | `local <commit>`, plus `origin tracked <commit>` once pushed |
+| local deleted, `@origin` row survives (a `jj bookmark delete`, or a `jj abandon` of its commit) | exit 0, **2 rows**: `legion/X (deleted)` + `  @origin: …`, stderr `Hint: Bookmarks marked as deleted can be *deleted permanently* …` | exit 0, 0 lines | exit 0, 0 lines | `local absent` + `origin tracked <commit>` |
+| conflicted (two targets) | exit 0, **5–6 rows**: `legion/X (conflicted):`, `  - <base>`, `  + <A>`, `  + <B>`, stderr `Hint: Some bookmarks have conflicts …` | **exit 1**, 0 lines, stderr `Error: Name \`legion/X\` is conflicted` + `Hint: Use commit ID to select single revision from: <A>, <B>` + `Hint: Use \`bookmarks(legion/X)\` to select all revisions` | exit 0, **2 lines**, one commit id each | `local conflicted <A>,<B>` |
+| conflicted, one side a deletion (deleted locally, then origin moved to `<B>` and the clone fetched) | `legion/X (conflicted):`, `  - <base> (hidden)`, `  + <B>`, `  @origin: <B>` | stderr `Error: Name \`legion/X\` is conflicted`, its hint naming `<B>` alone | exit 0, **1 line**, `<B>`: **indistinguishable from normal** | `local conflicted <B>` + `origin tracked <B>` |
+| `@origin` row conflicted, no local (two fetches of the clone raced, from the same operation, while origin moved from `<B>` to `<C>`) | no stdout (no local row); the first command after the race prints `Concurrent modification detected, resolving automatically.` | 0 lines | 0 lines | `origin conflicted <B>,<C>`; a template reading `normal_target` there prints `<Error: No value set to Option<Commit>>` (0.45) or `<Error: No Commit available>` (0.44) and **exits 0** |
 
 What that means for a caller that needs "exactly one commit or stop":
 
@@ -89,38 +97,16 @@ What that means for a caller that needs "exactly one commit or stop":
 - **`present()` cannot tell conflicted from broken.** It collapses the conflicted case into exit 1
   with the answer only in a stderr hint, so a "more than one commit" branch keyed on it is dead
   code. Fine when you only need present/absent of a *healthy* name.
-- **`bookmarks(exact:name)` lists every local target and exits 0**, so the caller's three
-  branches — none / one / several — are all real paths. jj's own conflict hint names
-  `bookmarks(<name>)` as the way to select all targets. The TypeScript `createWorkspace` uses it.
-
-## One templated `jj bookmark list` reads every row's state
-
-Reproduced on 2026-09-25 on both binaries, identical (LEGION-286). A revset cannot see a
-**conflict with a deleted side**. When a row's two sides diverge and one of them is a deletion, jj
-keeps the row conflicted (`- <base> + <other side>`). `bookmarks(exact:)` for a local row, and
-`untracked_remote_bookmarks()` for an untracked remote row, then list the
-other side's commit **alone**, one line, so "one commit" does not mean "not conflicted". Three
-ways to get there are below: a local deletion followed by origin moving, a local move followed by
-the remote deleting the branch, and two racing fetches of an untracked row where one sees it move
-and one sees it deleted (constructed with `jj --at-op <op> git fetch` twice from one operation; a
-later fetch sets the row to the remote's state again). A template over the rows reads each state's
-flags directly:
-
-`jj bookmark list --all-remotes exact:legion/X -T 'if(remote, remote, "local") ++ "|" ++ if(present, "1", "0") ++ "|" ++ if(conflict, "1", "0") ++ "|" ++ if(tracked, "1", "0") ++ "|" ++ added_targets.map(|c| c.commit_id()).join(",") ++ "|" ++ removed_targets.map(|c| c.commit_id()).join(",") ++ "\n"'`
-
-| state of `legion/X` | rows (`where\|present\|conflict\|tracked\|added\|removed`) |
-| --- | --- |
-| missing | none, exit 0 |
-| only an untracked `@origin` row (another clone pushed it) | `origin\|1\|0\|0\|<A>\|` |
-| normal, tracked | `local\|1\|0\|0\|<A>\|`, `git\|1\|0\|1\|<A>\|`, `origin\|1\|0\|1\|<A>\|` |
-| local deleted, never pushed | `local\|0\|0\|0\|\|`, `origin\|1\|0\|1\|<A>\|` |
-| local deleted, then origin moved to `<B>` and a fetch | `local\|1\|1\|0\|<B>\|<A>`, `origin\|1\|0\|1\|<B>\|`; `bookmarks(exact:)` lists `<B>` alone |
-| local moved to `<B>`, never pushed, then the branch deleted on the remote and a fetch | `local\|1\|1\|0\|<B>\|<A>`, `git\|1\|0\|1\|<B>\|`, `origin\|0\|0\|1\|\|`; `bookmarks(exact:)` lists `<B>` alone |
-| untracked `@origin` at `<A>`; racing fetches, one sees `<B>`, one sees the branch deleted | `origin\|1\|1\|0\|<B>\|<A>`; `untracked_remote_bookmarks()` lists `<B>` alone |
-
-The separator is `|`, not a space, because the reader trims each line, which would drop an empty last field.
-The Go `createWorkspace` (`packages/daemon-go/internal/workspace/bookmark.go`) switches on these
-rows.
+- **`bookmarks(exact:name)` lists every present local target and exits 0**, so none / one / several
+  are real paths, but a conflict whose other side is a deletion lists one commit, the same as a
+  healthy bookmark.
+- **rows** tells all seven states apart in one command, including the origin row's tracking, which
+  decides whether a missing local bookmark is adopted or refused. This is what `createWorkspace`
+  uses. Any template that reads `normal_target` must guard it with `conflict` (and a local row
+  with `present`): the `<Error: …>` text it prints otherwise is on stdout with exit 0.
+- The racing-fetch recipe below conflicted the row with neither fetch run with
+  `--ignore-working-copy`. With both carrying it, one run of the same sequence merged the two
+  operations without conflicting the row.
 
 ## `jj workspace add --revision <name>` registers before it errors
 
@@ -240,8 +226,16 @@ jj -R clone workspace add a --name a --revision main; jj -R clone workspace add 
 jj log -r '::a@ ~ ::(working_copies() ~ a@) ~ ::(bookmarks() | remote_bookmarks() | tags())' --no-graph -T 'commit_id ++ "\n"' --ignore-working-copy -R clone
 rm -rf a; jj abandon -r '<the ids, | -joined>' --ignore-working-copy -R clone; jj workspace forget a --ignore-working-copy -R clone
 git --git-dir=clone/.git worktree prune; (cd b && jj log -r 'all()')
+# conflicted, one side a deletion: delete legion/D locally, move it on origin, fetch
+(cd clone && jj bookmark delete legion/D)
+git --git-dir=clone/.git push "$PWD/remote" <new commit>:refs/heads/legion/D; jj -R clone git fetch
+# origin row conflicted: origin moves A -> B -> C around two fetches from the same operation
+jj -R clone git fetch; OP=$(jj -R clone op log --no-graph -T 'id ++ "\n"' --limit 1)   # row at A
+git --git-dir=clone/.git push --force "$PWD/remote" <B>:refs/heads/legion/R; jj -R clone git fetch
+git --git-dir=clone/.git push --force "$PWD/remote" <C>:refs/heads/legion/R
+jj -R clone --at-op "$OP" git fetch      # the next command reconciles → origin conflicted <B>,<C>
 ```
 
-Run the three read forms after each step; compare with the table. The test file's `realJjRig`
+Run the four read forms after each step; compare with the table. The test file's `realJjRig`
 (`packages/workspace/src/workspace.test.ts`) is the executable version of this recipe against
 both binaries.

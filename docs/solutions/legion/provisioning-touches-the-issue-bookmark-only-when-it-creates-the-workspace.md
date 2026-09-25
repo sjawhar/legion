@@ -49,17 +49,33 @@ creates it when there is something to push.
 Only `createWorkspace` touches the bookmark, and it runs only when the workspace directory does
 not exist. In order:
 
-1. **Resolve first, before any other command:**
-   `jj log -r 'bookmarks(exact:legion/<KEY>)' --no-graph -T 'commit_id ++ "\n"' --ignore-working-copy -R <clone>`
-   — one commit id per line. A nonzero exit or more than one line throws, naming the bookmark and
-   the ids (`Bookmark legion/<KEY> is conflicted (<id>, <id>); workspace <dir> was not created.
-   Resolve it with \`jj bookmark set legion/<KEY> -r <commit> -R <clone>\`.`), with **no prune, no
-   add, nothing registered** — the failure repeats on every resume until a human resolves the
-   bookmark. See the companion table in
-   `jj-bookmark-facts-verified-on-0-44-0-and-0-45-1.md` for why this revset and not `present()` or
-   `jj bookmark list`.
-2. Exactly one commit is the add revision — `jj workspace add … --revision <commit id>`, **the id,
-   never the name**. None means `main`.
+1. **Resolve first, before any other command:** one templated read,
+   `jj bookmark list --all-remotes exact:legion/<KEY> -T <BOOKMARK_ROWS> --ignore-working-copy -R <clone>`,
+   prints the local row and the `@origin` row, each with its commit or its conflict's targets, and
+   the origin row's tracking (LEGION-286). Each of these throws, naming the bookmark, with **no
+   prune, no add, nothing registered**, so the failure repeats on every resume until a human acts:
+   - a nonzero exit, or a row the template cannot print (`Bookmark legion/<KEY> could not be
+     resolved; workspace <dir> was not created.`);
+   - a conflicted local bookmark, including a conflict whose other side is a deletion
+     (`Bookmark legion/<KEY> is conflicted (<id>, <id>); workspace <dir> was not created. Resolve
+     it with \`jj bookmark set legion/<KEY> -r <commit> -R <clone>\`.`);
+   - with no local bookmark, a conflicted origin row, which a fetch racing provisioning's leaves
+     (`Remote bookmark legion/<KEY>@origin is conflicted (<id>, <id>); workspace <dir> was not
+     created.`); the next provisioning's fetch settles it;
+   - with no local bookmark, a tracked origin row: a deletion never pushed, from a
+     `jj bookmark delete` or a `jj abandon` of the bookmark's commit. The refusal names the tracked
+     commit and three ways out: restore it (`jj bookmark set legion/<KEY> -r legion/<KEY>@origin`),
+     cancel the deletion so the next provisioning adopts origin's branch
+     (`jj bookmark forget legion/<KEY>`), or start from main by deleting the branch on GitHub.
+
+   See the companion table in `jj-bookmark-facts-verified-on-0-44-0-and-0-45-1.md` for why this
+   read and not `bookmarks(exact:…)`, `present()` or a bare `jj bookmark list`.
+2. The add revision, as `jj workspace add … --revision <commit id>`, **the id, never the name**:
+   - the local bookmark's commit when it has one;
+   - with no local bookmark and an **untracked** origin row (a fresh clone tracks `main` alone,
+     so a branch another clone pushed is only such a row), that row's commit, after
+     `jj bookmark track legion/<KEY>@origin`;
+   - with neither (a brand-new issue, or a merged branch GitHub deleted), `main`.
 3. `git worktree prune`, then the add. On `already registered|exists` (jj still registers the
    workspace but its directory is gone): flag-free `jj workspace forget <name> -R <clone>`, prune,
    the same add again at the same revision. A brand-new workspace and a forgotten registration
@@ -115,6 +131,14 @@ From the spec's Rejected list (v8):
 - `jj bookmark create` instead of `set` on the fresh path: `create` refuses a pre-existing local
   bookmark on a workspace jj does not know; `set` moves it forward or refuses sideways. The spec
   names `set`; with v8's resolve-first rule the set only ever runs when no bookmark exists.
+- `bookmarks(exact:legion/<KEY>)` as the resolution (#1023 until LEGION-286): it lists a conflict
+  whose other side is a deletion as one commit, the same as a healthy bookmark, so a bookmark
+  deleted locally and then moved on origin was added at as if nothing were wrong.
+- A push from the shared clone as the way to start from main after a deletion never pushed
+  (LEGION-286's spec v5): the clone's only credential helper is `legion credential`, which needs a
+  tree's grant, so the push cannot authenticate from an operator's shell or the controller; and
+  `jj git push --deleted` would push every pending deletion in the clone, closing other issues'
+  pull requests.
 
 ## Checking it in production
 

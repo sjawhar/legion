@@ -206,14 +206,15 @@ async function ensureRepoClone(
  * working copy holds (LEGION-28); a bookmark a worker left elsewhere stays there. The implementer's
  * push step (`jj bookmark set` + `jj git push --bookmark`) owns every later move.
  *
- * The resolution runs before any other command. `bookmarks(exact:legion/<KEY>)` lists the
- * bookmark's local targets one commit id per line — none when it is missing or only a remote row
- * survives, one normally, two or more when it is conflicted (verified on jj 0.44 and 0.45). A
- * failed command or more than one commit throws, naming the bookmark, before anything is pruned,
- * added, or registered: a `jj workspace add --revision legion/<KEY>` for a name jj cannot resolve
- * still registers the workspace, parented on the root commit, before reporting the error, and the
- * next resume would adopt that empty workspace silently. The add takes the commit id, never the
- * name, for the same reason.
+ * The resolution runs before any other command: one `jj bookmark list` (`BOOKMARK_ROWS`) prints
+ * the local row and the `@origin` row of the bookmark, each with jj's conflict state. A conflicted
+ * local bookmark is refused, and so is one whose conflict has a deletion on one side (deleted
+ * locally, then moved on origin), which `bookmarks(exact:legion/<KEY>)` would list as one commit
+ * (verified on jj 0.44 and 0.45). A failed read, a row the template cannot have printed, or a
+ * refusal throws, naming the bookmark, before anything is pruned, added, or registered: a
+ * `jj workspace add --revision` jj cannot resolve still registers the workspace, parented on the
+ * root commit, before reporting the error, and the next resume would adopt that empty workspace
+ * silently. The add takes the commit id, never the name, for the same reason.
  *
  * A brand-new workspace and one jj still registers but whose directory is gone start from the same
  * resolution: on `already registered|exists` the registration is forgotten, the colocated worktree
@@ -227,32 +228,49 @@ async function createWorkspace(
   workspaceName: string,
   bookmark: string
 ): Promise<void> {
-  const resolveArgs = [
+  const listArgs = [
     "jj",
-    "log",
-    "-r",
-    `bookmarks(exact:${bookmark})`,
-    "--no-graph",
+    "bookmark",
+    "list",
+    "--all-remotes",
+    `exact:${bookmark}`,
     "-T",
-    'commit_id ++ "\n"',
+    BOOKMARK_ROWS,
     "--ignore-working-copy",
     "-R",
     repoCloneDir,
   ];
-  const resolved = await run(deps, resolveArgs);
-  if (resolved.exitCode !== 0) {
-    throw new Error(
-      `Bookmark ${bookmark} could not be resolved; workspace ${workspaceDir} was not created.\n${commandFailure(resolved, resolveArgs).message}`
-    );
+  const listed = await run(deps, listArgs);
+  const unresolved = `Bookmark ${bookmark} could not be resolved; workspace ${workspaceDir} was not created.`;
+  if (listed.exitCode !== 0) {
+    throw new Error(`${unresolved}\n${commandFailure(listed, listArgs).message}`);
   }
-  const commits = resolved.stdout.split("\n").filter((line) => line.trim() !== "");
-  if (commits.length > 1) {
+  let local: string[] | undefined;
+  let origin: string[] | undefined;
+  for (const line of listed.stdout.split("\n")) {
+    if (line === "") continue;
+    const [where, ...fields] = line.split(" ");
+    const commits = (fields.at(-1) ?? "").split(",");
+    if (
+      (where !== "local" && where !== "origin") ||
+      !commits.every((commit) => /^[0-9a-f]{40}$/.test(commit) || commit === "absent")
+    ) {
+      throw new Error(
+        `${unresolved}\n\`${listArgs.join(" ")}\` printed a row it cannot print: ${line}`
+      );
+    }
+    if (where === "local") local = fields;
+    else origin = fields;
+  }
+  if (local?.[0] === "conflicted") {
     throw new Error(
-      `Bookmark ${bookmark} is conflicted (${commits.join(", ")}); workspace ${workspaceDir} was not created. Resolve it with \`jj bookmark set ${bookmark} -r <commit> -R ${repoCloneDir}\`.`
+      `Bookmark ${bookmark} is conflicted (${local[1]?.split(",").join(", ")}); workspace ${workspaceDir} was not created. Resolve it with \`jj bookmark set ${bookmark} -r <commit> -R ${repoCloneDir}\`.`
     );
   }
   const bookmarkCommit =
-    commits[0] ?? (await adoptOriginBranch(deps, repoCloneDir, workspaceDir, bookmark));
+    local !== undefined && local[0] !== "absent"
+      ? local[0]
+      : await adoptOriginBranch(deps, repoCloneDir, workspaceDir, bookmark, origin);
 
   await mkdir(path.dirname(workspaceDir), { recursive: true });
   const gitDir = path.join(repoCloneDir, ".git");
@@ -298,55 +316,57 @@ async function createWorkspace(
   await runChecked(deps, ["jj", "bookmark", "set", bookmark, "-r", "@"], { cwd: workspaceDir });
 }
 
+/** The `jj bookmark list -T` template of `createWorkspace`'s one read. It prints `local <commit>`,
+ * `local absent` for a local deletion whose origin row survives, and `origin tracked <commit>` or
+ * `origin untracked <commit>`; either row prints `conflicted <commit>,<commit>…` (the conflict's
+ * present targets) instead when jj holds it conflicted, where `normal_target` would print an
+ * `<Error: …>` and exit 0. Other remotes and a colocated clone's `@git` row print nothing. */
+const BOOKMARK_ROWS =
+  'if(remote, if(remote == "origin", "origin " ++ if(conflict, "conflicted " ++ added_targets.map(|c| c.commit_id()).join(","), if(tracked, "tracked ", "untracked ") ++ normal_target.commit_id()) ++ "\n"), "local " ++ if(conflict, "conflicted " ++ added_targets.map(|c| c.commit_id()).join(","), if(present, normal_target.commit_id(), "absent")) ++ "\n")';
+
 /** The issue's branch as origin has it, for an issue with no local bookmark: the commit of an
  * **untracked** `legion/<KEY>@origin` row, after tracking it, so the workspace starts on the
  * branch and the local bookmark is the remote's. A fresh clone tracks `main` alone, so a branch
  * another clone pushed (a repository's fixture, a tree's branch before its volume was lost) is
  * only such a row; left alone, the workspace would start at `main` and the bookmark created there
- * would diverge from the remote, and the issue's next push would refuse (LEGION-286). A **tracked**
- * row with no local bookmark is a local deletion never pushed (only a `jj bookmark delete` leaves
- * it, and `jj bookmark track` does nothing to it): it is refused, naming the ways out, before
- * anything is added. No row at all (a brand-new issue, or a merged branch GitHub deleted, whose
- * fetch dropped the bookmark with it) is `undefined`: the workspace starts at `main`, and none of
- * a deleted branch comes back (LEGION-28, LEGION-84). One `jj bookmark list` reads every origin
- * row of the bookmark with its tracking, on jj 0.44 and 0.45. */
+ * would diverge from the remote, and the issue's next push would refuse (LEGION-286).
+ *
+ * A **tracked** row with no local bookmark is a local deletion never pushed (a `jj bookmark
+ * delete`, or a `jj abandon` of the commit the bookmark pointed at, leaves it, and `jj bookmark
+ * track` does nothing to it): it is refused, naming the ways out, before anything is added. The
+ * way to start from main is deleting the branch on GitHub, not a push from the shared clone: the
+ * clone's only credential helper is `legion credential` (`configureRepositoryCredential`), which
+ * authenticates a tree's grant, so a push from an operator's shell or the controller cannot
+ * authenticate, and `jj git push --deleted` would push every pending deletion in the clone, other
+ * issues' branches included. A **conflicted** row (another jj process's fetch racing
+ * provisioning's) is refused by name; the next provisioning's fetch settles it. No row at all (a
+ * brand-new issue, or a merged branch GitHub deleted, whose fetch dropped the bookmark with it) is
+ * `undefined`: the workspace starts at `main`, and none of a deleted branch comes back
+ * (LEGION-28, LEGION-84). */
 async function adoptOriginBranch(
   deps: ProvisionIssueWorkspaceDeps,
   repoCloneDir: string,
   workspaceDir: string,
-  bookmark: string
+  bookmark: string,
+  origin: readonly string[] | undefined
 ): Promise<string | undefined> {
-  const listArgs = [
-    "jj",
-    "bookmark",
-    "list",
-    "--all-remotes",
-    `exact:${bookmark}`,
-    "-T",
-    'if(remote == "origin", if(tracked, "tracked", "untracked") ++ " " ++ normal_target.commit_id() ++ "\n")',
-    "--ignore-working-copy",
-    "-R",
-    repoCloneDir,
-  ];
-  const listed = await run(deps, listArgs);
-  if (listed.exitCode !== 0) {
+  if (origin === undefined) return undefined;
+  const [state, target = ""] = origin;
+  if (state === "conflicted") {
     throw new Error(
-      `Remote bookmark ${bookmark}@origin could not be read; workspace ${workspaceDir} was not created.\n${commandFailure(listed, listArgs).message}`
+      `Remote bookmark ${bookmark}@origin is conflicted (${target.split(",").join(", ")}); workspace ${workspaceDir} was not created.`
     );
   }
-  const row = listed.stdout.split("\n").find((line) => line.trim() !== "");
-  if (row === undefined) return undefined;
-  const [tracking, commit] = row.trim().split(" ");
-  if (tracking === "tracked") {
+  if (state === "tracked") {
     throw new Error(
-      `Bookmark ${bookmark} was deleted in ${repoCloneDir} but the deletion was never pushed: origin still has ${bookmark}@origin, tracked. Workspace ${workspaceDir} was not created. ` +
-        `Restore the bookmark with \`jj bookmark set ${bookmark} -r ${bookmark}@origin -R ${repoCloneDir}\`, ` +
-        `or drop the deletion with \`jj bookmark forget ${bookmark} -R ${repoCloneDir}\`, which leaves origin's branch for the next provisioning to adopt; ` +
-        `to start the issue from main instead, push the deletion of this one branch with \`jj git push --remote origin --bookmark ${bookmark} -R ${repoCloneDir}\` (\`--deleted\` would push every pending deletion in the clone, other issues' branches included).`
+      `Bookmark ${bookmark} was deleted in the shared clone ${repoCloneDir} and the deletion never pushed, while ${bookmark}@origin is tracked at ${target}; workspace ${workspaceDir} was not created. ` +
+        `Restore it: \`jj bookmark set ${bookmark} -r ${bookmark}@origin -R ${repoCloneDir}\`. ` +
+        `Cancel the deletion, and the next provisioning adopts origin's branch: \`jj bookmark forget ${bookmark} -R ${repoCloneDir}\`. ` +
+        "Start from main instead: delete the branch on GitHub; the next provisioning starts at main."
     );
   }
   await runChecked(deps, ["jj", "bookmark", "track", `${bookmark}@origin`, "-R", repoCloneDir]);
-  return commit;
+  return target;
 }
 
 /** Removes a repository-scoped jj `user.name`/`user.email` from the shared clone. `--repo` on a
@@ -466,12 +486,13 @@ export async function provisionIssueWorkspace(
   // matches exactly this pattern for a Dispatch key). `createWorkspace` alone touches it: it
   // creates the workspace on the bookmark's one commit, on origin's branch (tracked) when only an
   // untracked `legion/<KEY>@origin` row exists, or at `main` creating the bookmark when neither
-  // does, and stops before registering anything when the bookmark is conflicted or unresolvable,
-  // or deleted locally with the deletion never pushed. A workspace that already exists gets no bookmark command here — present or
-  // absent, the bookmark is left exactly as the fetch and the workers left it. The fetch may
-  // delete the bookmark together with its merged remote branch, but it never abandons the branch's
-  // commits or rewrites a workspace's working copy: `git.abandon-unreachable-commits` is `false`
-  // in the clone's per-repo jj settings before every fetch (LEGION-84).
+  // does, and stops before registering anything when the bookmark or its origin row is conflicted
+  // or unreadable, or deleted locally with the deletion never pushed. A workspace that already
+  // exists gets no bookmark command here — present or absent, the bookmark is left exactly as the
+  // fetch and the workers left it. The fetch may delete the bookmark together with its merged
+  // remote branch, but it never abandons the branch's commits or rewrites a workspace's working
+  // copy: `git.abandon-unreachable-commits` is `false` in the clone's per-repo jj settings before
+  // every fetch (LEGION-84).
   const bookmark = `legion/${issue}`;
 
   const workspaceExists = existsSync(workspaceDir);
