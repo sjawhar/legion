@@ -13,23 +13,39 @@ var registeredWorkspace = regexp.MustCompile(`(?i)already (?:registered|exists)`
 
 // createWorkspace ports workspace.ts:198-296. It resolves a bookmark before pruning or adding a
 // workspace: a conflicted bookmark must not leave a registered working copy behind.
+//
+// The workspace starts at the issue's bookmark legion/<KEY> when it resolves to one commit. When no
+// local bookmark exists but origin has the branch, the branch is the issue's own, pushed from
+// another clone before this workspace existed: a repository's fixture, or the branch a tree pushed
+// before its volume was lost. A fresh clone tracks main alone, so such a branch is only a remote
+// row; it is tracked, and the workspace starts at it, so its commits are there and the issue's next
+// push moves it. The TypeScript twin starts such a workspace at main (LEGION-286). Only when
+// neither exists — a brand-new issue, or a merged branch GitHub deleted, which leaves no remote row
+// — does the workspace start at main, with the bookmark created on it.
 func createWorkspace(ctx context.Context, run Runner, workspace Workspace) error {
 	cloneDir := workspace.Clone
 	workspaceName := filepath.Base(workspace.Dir)
-	resolve := []string{
-		"jj", "log", "-r", "bookmarks(exact:" + workspace.Bookmark + ")", "--no-graph", "-T", `commit_id ++ "\n"`,
-		"--ignore-working-copy", "-R", cloneDir,
-	}
-	resolved, err := runCommand(ctx, run, resolve, nil, "")
+	commits, err := bookmarkCommits(ctx, run, cloneDir, "bookmarks(exact:"+workspace.Bookmark+")", "Bookmark "+workspace.Bookmark, workspace.Dir)
 	if err != nil {
-		return fmt.Errorf("run %s: %w", strings.Join(resolve, " "), err)
+		return err
 	}
-	if resolved.ExitCode != 0 {
-		return fmt.Errorf("Bookmark %s could not be resolved; workspace %s was not created: %w", workspace.Bookmark, workspace.Dir, commandFailure(resolve, resolved))
-	}
-	commits := nonEmptyLines(resolved.Stdout)
-	if len(commits) > 1 {
-		return fmt.Errorf("Bookmark %s is conflicted (%s); workspace %s was not created", workspace.Bookmark, strings.Join(commits, ", "), workspace.Dir)
+	if len(commits) == 0 {
+		remote := workspace.Bookmark + "@origin"
+		remoteCommits, err := bookmarkCommits(ctx, run, cloneDir, `remote_bookmarks(exact:"`+workspace.Bookmark+`", exact:"origin")`, "Remote bookmark "+remote, workspace.Dir)
+		if err != nil {
+			return err
+		}
+		if len(remoteCommits) == 1 {
+			if _, err := RunChecked(ctx, run, []string{"jj", "bookmark", "track", remote, "-R", cloneDir}, nil, ""); err != nil {
+				return err
+			}
+			if commits, err = bookmarkCommits(ctx, run, cloneDir, "bookmarks(exact:"+workspace.Bookmark+")", "Bookmark "+workspace.Bookmark, workspace.Dir); err != nil {
+				return err
+			}
+			if len(commits) != 1 || commits[0] != remoteCommits[0] {
+				return fmt.Errorf("tracking %s left bookmark %s at %v, want %s; workspace %s was not created", remote, workspace.Bookmark, commits, remoteCommits[0], workspace.Dir)
+			}
+		}
 	}
 	if err := os.MkdirAll(filepath.Dir(workspace.Dir), 0o700); err != nil {
 		return fmt.Errorf("create workspace parent: %w", err)
@@ -66,6 +82,25 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace) error
 	}
 	_, err = RunChecked(ctx, run, []string{"jj", "bookmark", "set", workspace.Bookmark, "-r", "@"}, nil, workspace.Dir)
 	return err
+}
+
+// bookmarkCommits lists the commits revset names in the shared clone, one per line: none when the
+// bookmark does not exist, one normally, and more when it is conflicted, which is refused naming
+// what (the bookmark) before anything is pruned, added, or registered.
+func bookmarkCommits(ctx context.Context, run Runner, cloneDir, revset, what, workspaceDir string) ([]string, error) {
+	resolve := []string{"jj", "log", "-r", revset, "--no-graph", "-T", `commit_id ++ "\n"`, "--ignore-working-copy", "-R", cloneDir}
+	resolved, err := runCommand(ctx, run, resolve, nil, "")
+	if err != nil {
+		return nil, fmt.Errorf("run %s: %w", strings.Join(resolve, " "), err)
+	}
+	if resolved.ExitCode != 0 {
+		return nil, fmt.Errorf("%s could not be resolved; workspace %s was not created: %w", what, workspaceDir, commandFailure(resolve, resolved))
+	}
+	commits := nonEmptyLines(resolved.Stdout)
+	if len(commits) > 1 {
+		return nil, fmt.Errorf("%s is conflicted (%s); workspace %s was not created", what, strings.Join(commits, ", "), workspaceDir)
+	}
+	return commits, nil
 }
 
 func nonEmptyLines(value string) []string {
