@@ -51,7 +51,8 @@ func testPlugin(t *testing.T, dir string, agent, rubric bool) string {
 // The load probe resolves every task agent and skill Legion's prompts name through the real Oh My
 // Pi's own agent and skill discovery, on the lane the probed Oh My Pi loads the plugin by: a pod's
 // one explicit root with discovery off, or a pane's installed plugins. Only the real binary shows
-// that the probe's imports of that discovery work and see what the launch sees. The profile is routed
+// that the probe's imports of that discovery work and see what the launch sees, the profile's skill
+// settings included, since a session drops a skill they disable or ignore. The profile is routed
 // through a gateway nothing listens on, so no credential the machine carries decides the run
 // (no probe here makes a model call).
 func TestThePromptReferenceProbeOnTheRealOhMyPi(t *testing.T) {
@@ -67,7 +68,9 @@ func TestThePromptReferenceProbeOnTheRealOhMyPi(t *testing.T) {
 	for _, testCase := range []struct {
 		name                 string
 		agent, rubric, onPod bool
-		refusal              string
+		// settings is appended to the profile's config.yml, the settings the launch reads.
+		settings string
+		refusal  string
 	}{
 		{name: "a pod, the plugin shipping the agent and its rubric", agent: true, rubric: true, onPod: true},
 		{name: "a pod, the plugin without the agent", rubric: true, onPod: true, refusal: noAgent},
@@ -75,6 +78,10 @@ func TestThePromptReferenceProbeOnTheRealOhMyPi(t *testing.T) {
 		{name: "a pane, the installed plugin shipping the agent and its rubric", agent: true, rubric: true},
 		{name: "a pane, the installed plugin without the agent", rubric: true, refusal: noAgent},
 		{name: "a pane, the installed plugin without the rubric", agent: true, refusal: noRubric},
+		{name: "a pod, a profile that disables the rubric", agent: true, rubric: true, onPod: true,
+			settings: "disabledExtensions:\n  - skill:thermonuclear-deep-review\n", refusal: noRubric},
+		{name: "a pane, a profile that ignores the rubric", agent: true, rubric: true,
+			settings: "skills:\n  ignoredSkills:\n    - thermonuclear-deep-review\n", refusal: noRubric},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -89,6 +96,18 @@ func TestThePromptReferenceProbeOnTheRealOhMyPi(t *testing.T) {
 				modelroute.EnvURL + "=http://127.0.0.1:9", "PATH=/usr/local/bin:/usr/bin:/bin"}, token)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if testCase.settings != "" {
+				config, err := os.OpenFile(filepath.Join(home, ".omp", "profiles", "legion", "agent", "config.yml"), os.O_APPEND|os.O_WRONLY, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := config.WriteString(testCase.settings); err != nil {
+					t.Fatal(err)
+				}
+				if err := config.Close(); err != nil {
+					t.Fatal(err)
+				}
 			}
 			env := map[string]string{}
 			for _, pair := range installed.Environ {

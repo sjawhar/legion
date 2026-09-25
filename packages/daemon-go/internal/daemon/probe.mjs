@@ -8,6 +8,8 @@ export default async function probeLegionPluginLoaded(pi) {
   // The task agents and skills Legion's prompts name, each resolved as a worker's use resolves it:
   // Oh My Pi's own agent and skill discovery over this launch's extension roots. A pod names its
   // one plugin root with discovery off (LEGION_PROMPT_ROOT); a pane discovers its installed plugins.
+  // Skills are filtered as a session filters them, by the launch's own `skills` settings and
+  // `disabledExtensions` (session-tools.ts #applyDiscoveredSkills at the pin).
   const root = process.env.LEGION_PROMPT_ROOT;
   const roots = root
     ? { explicit: [root], mode: "explicit-only", configured: [], configuredLevel: "user" }
@@ -19,7 +21,14 @@ export default async function probeLegionPluginLoaded(pi) {
   });
   await resolve("LEGION_PROMPT_SKILLS", async () => {
     const { loadSkills } = await import("@oh-my-pi/pi-coding-agent/extensibility/skills");
-    return (await loadSkills({ cwd, extensionRoots: roots })).skills;
+    const { settings } = await import("@oh-my-pi/pi-coding-agent/config/settings");
+    const options = {
+      ...settings.getGroup("skills"),
+      cwd,
+      disabledExtensions: settings.get("disabledExtensions") ?? [],
+      extensionRoots: roots,
+    };
+    return (await loadSkills(options)).skills;
   });
 }
 

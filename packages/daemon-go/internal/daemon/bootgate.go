@@ -466,9 +466,9 @@ func (g pluginGate) probeLoad(ctx context.Context, launch, probe string, notLoad
 // worker uses it: reference, the form a prompt writes; variable, the load probe's input and the
 // prefix of its answers (probe.mjs); and a refusal's words for a name Oh My Pi cannot find.
 type promptKind struct {
-	reference                                 *regexp.Regexp
-	variable                                  string
-	noun, namedBy, consequence, discoveryName string
+	reference                                         *regexp.Regexp
+	variable                                          string
+	noun, namedBy, consequence, remedy, discoveryName string
 }
 
 // promptKinds are the two forms: a task agent dispatched as `task(agent="<name>")` and a skill
@@ -481,14 +481,17 @@ var promptKinds = [...]promptKind{
 		noun:          "task agent",
 		namedBy:       "dispatched by",
 		consequence:   "a worker that calls one gets a tool result listing the agents it has, and carries on without it",
+		remedy:        "pi-legion-envoy ships every agent its prompts dispatch; install the release built from this daemon's commit",
 		discoveryName: "agent discovery",
 	},
 	{
-		reference:     regexp.MustCompile(`skill://([a-z0-9][a-z0-9._-]*)`),
-		variable:      "LEGION_PROMPT_SKILLS",
-		noun:          "skill",
-		namedBy:       "loaded by",
-		consequence:   "a worker told to load one reads `Unknown skill` and carries on without it",
+		reference:   regexp.MustCompile(`skill://([a-z0-9][a-z0-9._-]*)`),
+		variable:    "LEGION_PROMPT_SKILLS",
+		noun:        "skill",
+		namedBy:     "loaded by",
+		consequence: "a worker told to load one reads `Unknown skill` and carries on without it",
+		remedy: "pi-legion-envoy ships every skill its prompts load; install the release built from this daemon's commit, " +
+			"and check that the settings this Oh My Pi reads (`disabledExtensions`, `skills`) neither disable nor filter it",
 		discoveryName: "skill discovery",
 	},
 }
@@ -616,8 +619,7 @@ func (k promptKind) refusal(output string, named map[string][]string, lane strin
 			for _, name := range strings.Split(rest, ",") {
 				missing = append(missing, name+" ("+k.namedBy+" "+strings.Join(named[name], ", ")+")")
 			}
-			return fmt.Errorf("Oh My Pi, %s, finds no %s %s: %s. pi-legion-envoy ships every agent and skill its prompts name; install the release built from this daemon's commit",
-				lane, k.noun, strings.Join(missing, "; "), k.consequence)
+			return fmt.Errorf("Oh My Pi, %s, finds no %s %s: %s. %s", lane, k.noun, strings.Join(missing, "; "), k.consequence, k.remedy)
 		}
 		if rest, ok := strings.CutPrefix(line, k.variable+"_UNRESOLVABLE="); ok {
 			return fmt.Errorf("Oh My Pi, %s, could not resolve %ss for the load probe (%s): pin a fork release whose %s the probe can import", lane, k.noun, rest, k.discoveryName)
