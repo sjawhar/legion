@@ -550,6 +550,28 @@ func probe(t *testing.T, rt *Runtime, loc runtime.Locator) runtime.Observation {
 	return obs
 }
 
+// awaitGone re-probes loc until it reads Gone, and fails if the process is ever Alive again. A stop
+// returns once its process no longer runs, and the pane then passes through states a single probe
+// cannot call Gone (LEGION-274): the exited process not yet reaped, whose pane still lists its pid
+// with an empty command line (NotRecordedProcess), and, for the server's last pane, the server
+// exiting under the probe's own list-panes. Both converge on Gone.
+func awaitGone(t *testing.T, rt *Runtime, loc runtime.Locator, after string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		obs := probe(t, rt, loc)
+		switch {
+		case obs.Kind == runtime.Gone:
+			return
+		case obs.Kind == runtime.Alive:
+			t.Fatalf("Probe after %s = %+v: the stopped process is running", after, obs)
+		case time.Now().After(deadline):
+			t.Fatalf("Probe after %s = %+v, want gone within 10s", after, obs)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 func panePid(t *testing.T, loc runtime.Locator) int {
 	t.Helper()
 	inc, err := parseIncarnation(loc.Incarnation)
@@ -762,9 +784,7 @@ func TestRealTmuxLifecycle(t *testing.T) {
 	if hasKillPane(r.recorded()[before:]) {
 		t.Errorf("a graceful stop killed the pane")
 	}
-	if obs := probe(t, r.rt, loc); obs.Kind != runtime.Gone {
-		t.Fatalf("Probe after suspend = %+v, want gone", obs)
-	}
+	awaitGone(t, r.rt, loc, "suspend")
 
 	// Resume: the same session, from the file it registered, in a new incarnation.
 	resumed := r.spec("legion-t-LEGION-1-architect", "LEGION-1", "LEGION-1", claim.RoleArchitect)
@@ -796,9 +816,7 @@ func TestRealTmuxLifecycle(t *testing.T) {
 	if !hasKillPane(r.recorded()[before:]) {
 		t.Errorf("an agent that ignored its shutdown was not killed")
 	}
-	if obs := probe(t, r.rt, loc2); obs.Kind != runtime.Gone {
-		t.Fatalf("Probe after release = %+v, want gone", obs)
-	}
+	awaitGone(t, r.rt, loc2, "release")
 
 	// Releasing a claim with no process — a suspended one — asks tmux nothing: a pane holds nothing
 	// of a claim once its process is gone.
