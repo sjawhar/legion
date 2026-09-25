@@ -98,12 +98,13 @@ App is rejected by design, not because it would not work. So in every round:
 - the reviewer answers each thread it opened with one of `Accepted: fixed in <commit> — <one line>`,
   `Accepted: not a defect — <reason>`, or `Still open: <what remains>`, and the **implementer**
   runs `legion threads resolve --pr <number> --repo <owner>/<repo>` (LEGION-34) before its next
-  push: it resolves every unresolved thread whose newest comment is the opener's own `Accepted:`
-  reply, one `resolveReviewThread` per thread, prints `resolved <url>` /
-  `left open <url> — newest reply by <login> is not an acceptance`, and exits 1 naming the thread
-  and GitHub's message when GitHub refuses one (report it to the architect; a human resolves that
-  thread). The merger runs it once more before READY. Never a hand-written GraphQL mutation and
-  never a bulk resolve;
+  push: it resolves every unresolved thread whose newest comment is the opener's own submitted
+  `Accepted:` reply, one `resolveReviewThread` per thread, prints `resolved <url>` /
+  `left open <url> — newest reply by <login> is not an acceptance` (or `… is an unsubmitted draft
+  in a pending review`, for a newest comment still in a pending review), and exits 1 naming the
+  thread and GitHub's message when GitHub refuses one (report it to the architect; a human
+  resolves that thread). The merger runs it once more before READY. Never a hand-written GraphQL
+  mutation and never a bulk resolve;
 - the reviewer's approval is the review itself; the head it approves by name is the
   implementer-pushed `.legion/` deletion.
 

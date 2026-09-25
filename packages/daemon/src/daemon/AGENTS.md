@@ -180,11 +180,15 @@ acceptance`, and exits 1 naming the first thread GitHub refuses; any newest comm
 the opener's own `Accepted:` — a `Still open:` reply, a reply by another account, or the opener's
 own later follow-up — leaves the thread open with exit 0. A newest comment that is a draft in a
 pending review never counts either (`left open <url> — newest reply by <login> is an unsubmitted
-draft in a pending review`): GitHub shows a draft only to its author, so counting it would make
-the answer depend on who runs the command. Outside a pane the reviewer and the implementer can
-post as one account, the repository owner's App: the caller then sees the reviewer's drafts, and
-the opener check cannot tell an implementer's `Accepted:` from the reviewer's, so only the
-reviewer ever writes `Accepted:`.
+draft in a pending review`). GitHub shows a draft only to its author, so a caller posting as the
+opener's account would otherwise resolve on an acceptance nobody submitted. A caller still sees
+its own drafts, and one newer than a submitted acceptance leaves that thread open for that caller
+while another caller would resolve it: the rule fails closed per caller. The Go CLI's
+`threads resolve` (`packages/daemon-go/cmd/legion/threads.go`) applies the same rule, pending
+drafts included. Outside a pane the reviewer and the implementer can post as one account, the
+repository owner's App: the caller then sees the reviewer's drafts, and the opener check cannot
+tell an implementer's `Accepted:` from the reviewer's, so only the reviewer ever writes
+`Accepted:`.
 
 Each App's private key comes from exactly one of three `legion.yaml` sources under
 `github_apps.<role>` (`loadGitHubApps`, `config.ts`): `private_key` (the PEM inline),

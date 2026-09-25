@@ -57,6 +57,51 @@ func TestThreadsResolveOnlyAcceptedRepliesByTheOpener(t *testing.T) {
 	}
 }
 
+// A caller sees its own drafts in a pending review, and nobody else's, so a PENDING newest comment
+// is never an acceptance: the TypeScript CLI's rule (review-threads.ts `acceptedByOpener`).
+func TestThreadsResolveNeverCountsAPendingDraft(t *testing.T) {
+	var mu sync.Mutex
+	var resolved []string
+	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Query     string         `json:"query"`
+			Variables map[string]any `json:"variables"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if strings.Contains(request.Query, "resolveReviewThread") {
+			resolved = append(resolved, request.Variables["threadId"].(string))
+			_, _ = io.WriteString(w, `{"data":{"resolveReviewThread":{"thread":{"id":"accepted","isResolved":true}}}}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"id":"draft","isResolved":false,"opener":{"nodes":[{"author":{"login":"reviewer"},"url":"https://github.test/thread/draft","body":"raise"}]},"newest":{"nodes":[{"author":{"login":"reviewer"},"url":"https://github.test/thread/draft","body":"Accepted: drafted, not yet submitted","state":"PENDING"}]}},{"id":"accepted","isResolved":false,"opener":{"nodes":[{"author":{"login":"reviewer"},"url":"https://github.test/thread/accepted","body":"raise"}]},"newest":{"nodes":[{"author":{"login":"reviewer"},"url":"https://github.test/thread/accepted","body":"Accepted: fixed","state":"SUBMITTED"}]}}],"pageInfo":{"hasNextPage":false,"endCursor":""}}}}}}`)
+	}))
+	defer github.Close()
+	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"token":"grant-token","appLogin":"legion-implementer[bot]"}`)
+	}))
+	defer daemon.Close()
+	t.Setenv("LEGION_DAEMON_URL", daemon.URL)
+	t.Setenv("LEGION_GITHUB_GRAPHQL_URL", github.URL)
+	t.Setenv("LEGION_GRANT", "one-command-grant")
+	var out, errb bytes.Buffer
+	if code := run(context.Background(), []string{"legion", "threads", "resolve", "--repo", "owner/repo", "--pr", "7"}, &out, &errb); code != 0 {
+		t.Fatalf("threads resolve = %d: %s", code, errb.String())
+	}
+	want := "left open https://github.test/thread/draft — newest reply by reviewer is an unsubmitted draft in a pending review\nresolved https://github.test/thread/accepted\n"
+	if got := out.String(); got != want {
+		t.Fatalf("stdout = %q, want %q", got, want)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(resolved) != 1 || resolved[0] != "accepted" {
+		t.Fatalf("resolved = %v, want [accepted]", resolved)
+	}
+}
+
 func TestThreadsResolveRejectsInvalidArgumentsBeforeGrantRedemption(t *testing.T) {
 	for _, args := range [][]string{
 		nil,

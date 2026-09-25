@@ -141,9 +141,11 @@ function isAcceptance(body: string): boolean {
 
 /** True when the thread's newest comment is its opener's own submitted `Accepted:` reply: the
  * account that raised the point is the one closing it, and nobody has replied since. A draft in a
- * pending review never counts: GitHub shows it only to its author, so counting it would let the
- * answer depend on who runs the command, and an outside-a-pane caller posting as the opener's
- * account would resolve on an acceptance the reviewer has not submitted. */
+ * pending review never counts. GitHub shows a draft only to its author, so without this check an
+ * outside-a-pane caller posting as the opener's account would resolve on an acceptance the
+ * reviewer has not submitted. The caller still sees its own drafts: one newer than a submitted
+ * acceptance hides that acceptance from this caller, and the thread stays open for it. The rule
+ * fails closed per caller: it can leave open what another caller would resolve, never the reverse. */
 function acceptedByOpener(thread: UnresolvedThread): boolean {
   return (
     !thread.newestPending &&

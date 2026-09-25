@@ -265,6 +265,7 @@ later phase keeps it current rather than replacing it:
 `legion threads resolve --pr <n> --repo <owner>/<repo>` at <head-sha>:
 resolved <thread URL>
 left open <thread URL> — newest reply by <login> is not an acceptance
+left open <thread URL> — newest reply by <login> is an unsubmitted draft in a pending review
 
 **Thermo:** `ce-simplify-code` once at <head-sha>: <0 applied | applied → new head <sha>>; thermonuclear pair at the final head <sha>:
 <verdict>. (omitted entirely on a docs-only PR — there is no code for either pass, so neither runs)
