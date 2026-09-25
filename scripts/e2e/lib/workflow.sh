@@ -41,15 +41,16 @@ dispatch_get() {
   curl -sS --fail-with-body --max-time 20 -H "@$work/dispatch-auth-header" "$(dispatch_url)/api/v1/$1"
 }
 # dispatch_events ISSUE prints the issue's whole event log, paging past Dispatch's 200-event limit.
+# The pages travel through a pipe: one page of an issue carrying documents can pass the 128 KiB
+# a single argv string may hold.
 dispatch_events() {
-  local issue=$1 after=0 page all='[]'
+  local issue=$1 after=0 page
   while :; do
     page=$(dispatch_get "issues/$issue/events?after=$after&limit=200")
-    all=$(jq -c --argjson page "$page" '. + $page' <<<"$all")
+    printf '%s\n' "$page"
     [ "$(jq length <<<"$page")" -eq 200 ] || break
     after=$(jq '.[-1].seq' <<<"$page")
-  done
-  printf '%s\n' "$all"
+  done | jq -s -c 'add'
 }
 dispatch_status_is() { dispatch_get "issues/$1" | jq -e --arg status "$2" '.status == $status'; }
 review_cap_posted() {

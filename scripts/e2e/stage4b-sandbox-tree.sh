@@ -607,12 +607,7 @@ production_audit() {
   # LEGSMOKE updated since the baseline is the run's write only when one of its events names one
   # of the run's own writers: its agents' sessions, the daemon, and the proof human.
   actors=$(jq -c --arg daemon "legion-daemon:$project" --arg human "$dispatch_actor" '. + [$daemon, $human]' <<<"$sessions")
-  touched='[]'
-  for key in $(dispatch_get "issues?updated_since=$prod_baseline" | jq -r --arg p "$project-" '.[].key | select(startswith($p) | not)'); do
-    touched=$(dispatch_events "$key" | jq -c --argjson actors "$actors" --arg since "$prod_baseline" --arg key "$key" --argjson so_far "$touched" \
-      '$so_far + [.[] | select((.at // "") >= $since and (.actor.id as $id | $actors | index($id))) | {issue: $key, seq, type, actor: .actor.id, at}]')
-  done
-  printf '%s\n' "$touched" >"$evidence/production-issues-touched-outside.json"
+  touched_outside "$actors" >"$evidence/production-issues-touched-outside.json"
   # Envoy lists no roles, and a session's interests leave the listener with it, so the run samples
   # its sessions' interests at every checkpoint while its daemon runs (interests_snapshot). A
   # registered session with no sample leaves the audit unable to vouch for it.
@@ -627,6 +622,34 @@ production_audit() {
       printf '"the interest samples could not be read"\n' >"$evidence/production-interests-outside.json"
   fi
   audit_verdict "$evidence/production-issues-touched-outside.json" "$evidence/production-interests-outside.json"
+}
+# event_time_def is the jq definition of an event's time, Dispatch's created_at; an event without
+# one stops the read rather than counting as older than the baseline.
+event_time_def='def event_time: .created_at // error("event \(.seq) of \(.issue_key) has no created_at");'
+# touched_outside ACTORS prints, as one JSON array, every event since the baseline on a production
+# issue outside LEGSMOKE whose actor is one of ACTORS (a JSON array of actor ids).
+touched_outside() {
+  local actors=$1 key touched='[]'
+  for key in $(dispatch_get "issues?updated_since=$prod_baseline" | jq -r --arg p "$project-" '.[].key | select(startswith($p) | not)'); do
+    touched=$(dispatch_events "$key" | jq -c --argjson actors "$actors" --arg since "$prod_baseline" --arg key "$key" --argjson so_far "$touched" \
+      "$event_time_def"' $so_far + [.[] | select(event_time >= $since and (.actor.id as $id | $actors | index($id))) | {issue: $key, seq, type, actor: .actor.id, created_at}]')
+  done
+  printf '%s\n' "$touched"
+}
+# find_outside_writer sets outsider to the actor of one event since the baseline on a production
+# issue outside LEGSMOKE, or to nothing when no such issue was updated: the collector's control on
+# real data. Every event moves its issue's updated_at (the Dispatch broker), so an issue the listing
+# returns has an event since the baseline, and a listing whose events all read as older fails.
+find_outside_writer() {
+  local keys key
+  outsider=
+  keys=$(dispatch_get "issues?updated_since=$prod_baseline" | jq -r --arg p "$project-" '.[].key | select(startswith($p) | not)') || fail "list production issues updated since $prod_baseline"
+  [ -n "$keys" ] || return 0
+  for key in $keys; do
+    outsider=$(dispatch_events "$key" | jq -r --arg since "$prod_baseline" "$event_time_def"' [.[] | select(event_time >= $since) | .actor.id | select(. != null)] | first // empty') || fail "read $key's events"
+    [ -z "$outsider" ] || return 0
+  done
+  fail "$(wc -w <<<"$keys") issues outside $project were updated since $prod_baseline, and none of their events reads as since then"
 }
 # interests_snapshot appends the Envoy interests of every session the run has registered so far to
 # $evidence/interests.jsonl. A session no longer registered answers 404 and is skipped; any other
@@ -1236,6 +1259,17 @@ if production_audit; then audit_verdict_ok=1; fi
 [ -n "$audit_verdict_ok" ] || fail "the run wrote outside LEGSMOKE or subscribed outside it: $evidence/production-issues-touched-outside.json, $evidence/production-interests-outside.json"
 printf '["AGENTC-1"]\n' >"$evidence/controls/audit-outside.json"
 expect_failure production-audit-outside audit_verdict "$evidence/controls/audit-outside.json" "$evidence/production-interests-outside.json"
+# The collector itself, on real data: an actor that did write outside LEGSMOKE during the run,
+# counted as one of the run's writers, must be found. Nothing is written for it.
+find_outside_writer
+if [ -z "$outsider" ]; then
+  note "no one wrote to a production issue outside $project during the run, so the collector's real-data control had nothing to find"
+else
+  seen=$(touched_outside "$(jq -cn --arg a "$outsider" '[$a]')")
+  printf '%s\n' "$seen" >"$evidence/controls/audit-real-outsider.json"
+  [ "$(jq length <<<"$seen")" -gt 0 ] || fail "the collector did not find $outsider's writes outside $project, which it must"
+  note "the collector's control: given $outsider (not the run's) as a writer, it finds $(jq length <<<"$seen") of its events outside $project"
+fi
 note "no write outside $project; every sampled interest of the run's sessions names $project, legion-$run_label-, or the session itself ($(wc -l <"$evidence/interests.jsonl" 2>/dev/null || echo 0) samples)"
 pass
 

@@ -462,7 +462,10 @@ the run that holds the lock:
 updated since the baseline, then keeps those whose events name one of the run's writers: its
 agents' sessions, `legion-daemon:LEGSMOKE`, and the proof human. It also filters the Envoy interests
 the run's sessions held, sampled at every checkpoint while the daemon ran, to topics outside
-LEGSMOKE. Either list being non-empty fails the run.
+LEGSMOKE. Either list being non-empty fails the run. Two controls show the audit can fail. The
+verdict is given a synthetic outside issue and must refuse it. The collector, on the run's real
+window, is given one actor that did write outside LEGSMOKE, and must find that actor's events. An
+event is dated by Dispatch's `created_at`; one without it stops the audit, never counts as older.
 
 | checkpoint | what it holds |
 | :--- | :--- |
@@ -493,7 +496,7 @@ LEGSMOKE. Either list being non-empty fails the run.
 | `pod-shape` | every Sandbox pod was shape-checked (gVisor, the gateway's ServiceAccount and one projected token, the pool, Pod Security restricted, split provisioning, no token in the environment or argv) |
 | `pod-watch-verdict` | the pod watch saw no termination the run cannot account for, and the memory hog was OOMKilled |
 | `hygiene` | the daemon stopped, the namespace is clean, and the run's consumers are gone |
-| `production-audit` | no write by the run outside LEGSMOKE, no interest outside it, and the audit's negative control fails as it should |
+| `production-audit` | no write by the run outside LEGSMOKE and no interest outside it; the verdict refuses a synthetic outside issue, and the collector finds a real outside writer's events |
 
 ## controller-start-tmux.sh
 
