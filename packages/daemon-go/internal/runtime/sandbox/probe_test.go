@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,6 +18,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -161,9 +163,8 @@ func (g *probeRig) containerAndCollector() {
 // passing test nothing. A test whose attempt must run out sets unfinishedBudget.
 func probeOptions(t *testing.T) ImageProbe {
 	return ImageProbe{
-		Contract: 3, StateDir: t.TempDir(), Budget: 10 * time.Second,
-		Retry:     bootprobe.Retry{Initial: time.Millisecond, Max: time.Millisecond, Attempts: 2},
-		APIServer: "https://A1B2C3.gr7.us-west-2.eks.amazonaws.com",
+		Contract: 3, Budget: 10 * time.Second,
+		Retry: bootprobe.Retry{Initial: time.Millisecond, Max: time.Millisecond, Attempts: 2},
 	}
 }
 
@@ -185,9 +186,10 @@ func wantContains(t *testing.T, err error, wants ...string) {
 	}
 }
 
-// okLine is the OK line an image prints when every probe passed, confirming contract.
+// okLine is the OK line an image prints when every probe passed, confirming contract, the
+// prompt-named agents' models resolved.
 func okLine(contract int) string {
-	return bootprobe.OKLine("/opt/omp/bin/omp", contract)
+	return bootprobe.OKLine("/opt/omp/bin/omp", contract, bootprobe.AgentModelsResolved)
 }
 
 // The probe is a Sandbox named for the project and the image, running the image's Go `legion
@@ -237,6 +239,14 @@ func TestProbeImageRefusesWhatTheProbePodAnswered(t *testing.T) {
 			[]string{"without confirming Go daemon API contract 3 (its legion CLI predates the check)"}},
 		{"another contract", func(g *probeRig) { g.succeeds(okLine(2)) },
 			[]string{"confirmed Go daemon API contract 2, this daemon requires 3"}},
+		{"a CLI that predates the agent-model check", func(g *probeRig) {
+			g.succeeds("probe-image: OK (/opt/omp/bin/omp) session-storage=probed go-daemon-api-version=3")
+		}, []string{"without resolving the prompt-named agents' models: the worker image predates the agent-model check (LEGION-270)"}},
+		{"a CLI that predates a flag the probe passes", func(g *probeRig) {
+			g.fails("flag provided but not defined: -role-references\nUsage of legion probe-image:")
+		}, []string{"Failed (container probe terminated", "its legion CLI has no -role-references, a flag this daemon's probe passes, so the worker image predates this daemon"}},
+		{"a build-time probe's result", func(g *probeRig) { g.succeeds(bootprobe.OKLine("/opt/omp/bin/omp", 3, bootprobe.AgentModelsSkipped)) },
+			[]string{"with the agents' models skipped: a build-time probe's result reached boot"}},
 		{"an image name the kubelet cannot use", func(g *probeRig) { g.waits("InvalidImageName") },
 			[]string{"container probe waiting: InvalidImageName"}},
 		{"an image the node may never pull", func(g *probeRig) { g.waits("ErrImageNeverPull") },
@@ -252,9 +262,6 @@ func TestProbeImageRefusesWhatTheProbePodAnswered(t *testing.T) {
 			wantContains(t, err, testCase.want...)
 			if n := g.creates.Load(); n != 1 {
 				t.Errorf("ran the probe %d times for a definitive answer, want once", n)
-			}
-			if _, statErr := os.Stat(filepath.Join(p.StateDir, "image-probes", testDigestHex+".json")); !errors.Is(statErr, os.ErrNotExist) {
-				t.Errorf("a refused image left a pass cache: %v", statErr)
 			}
 			g.eventually("the probe Sandbox to be deleted", func() bool { return g.sandbox(probeSandboxName) == nil })
 		})
@@ -459,143 +466,104 @@ func TestProbeImageReplacesOnlyItsOwnProjectsLeftover(t *testing.T) {
 	}
 }
 
-// A pass is remembered per image, contract, and what and where the probe pod ran — the image's
-// repository as well as its digest, the probe's command, the cluster, the namespace, and the
-// scheduling it was proven on: a daemon that boots again with all of them unchanged launches no
-// probe, and a change to any one of them probes again. A pull from another registry at the same
-// digest proves nothing about the first, a devbox daemon may keep one state directory for a kind
-// cluster and for production, and a pass on one proves nothing on the other. Each case starts from
-// the first pass, so it differs from the cache in exactly one key; the pass is keyed on the probe
-// pod's fingerprint, which holds every one of them.
-func TestProbeImageRemembersAPassPerImageContractAndProbePod(t *testing.T) {
-	p := probeOptions(t)
-	cache := filepath.Join(p.StateDir, "image-probes", testDigestHex+".json")
+// Every boot probes the image: no pass is remembered, since the probe pod's spec cannot show the
+// operator's ConfigMap and Secret contents, which decide whether the agents' models resolve. A
+// second boot on the same image creates its own probe pod, and refuses when the operator's
+// configuration stopped resolving an agent's model in between.
+func TestEveryBootProbesTheImage(t *testing.T) {
 	g := newProbeRig(t, nil)
 	g.succeeds(okLine(3))
-	if err := g.probe(p); err != nil {
-		t.Fatalf("the first probe = %v", err)
+	if err := g.probe(probeOptions(t)); err != nil {
+		t.Fatalf("the first boot's probe = %v, want a pass", err)
 	}
-	var entry map[string]any
-	raw, err := os.ReadFile(cache)
-	if err != nil {
-		t.Fatalf("read the pass cache: %v", err)
-	}
-	if err := json.Unmarshal(raw, &entry); err != nil {
-		t.Fatalf("decode the pass cache: %v", err)
-	}
-	if entry["image"] != testImage || entry["goDaemonApiVersion"] != float64(3) {
-		t.Errorf("the pass cache = %s, want this image at contract 3", raw)
-	}
+	g.eventually("the first probe Sandbox to be deleted", func() bool { return g.sandbox(probeSandboxName) == nil })
+	g.fails("legion probe-image: Oh My Pi, loading the plugin from /opt/legion/pi-legion-envoy with discovery off, as a pod does, " +
+		"cannot run task agent oracle (dispatched by roles/core/planner.md) on its model @oracle: role oracle is not configured.")
 
-	again := newProbeRig(t, nil)
-	if err := again.probe(p); err != nil {
-		t.Fatalf("a probe with the pass cached = %v", err)
-	}
-	if n := again.creates.Load(); n != 0 {
-		t.Errorf("a cached pass still created %d probe Sandboxes", n)
-	}
+	err := g.probe(probeOptions(t))
 
-	for name, rerun := range map[string]func() (*probeRig, ImageProbe){
-		"another contract": func() (*probeRig, ImageProbe) {
-			q := p
-			q.Contract = 4
-			return newProbeRig(t, nil).succeeds(okLine(4)), q
-		},
-		"another repository at the same digest": func() (*probeRig, ImageProbe) {
-			return newProbeRig(t, nil, withOptions(func(o *Options) {
-				o.Image = "123456789012.dkr.ecr.us-west-2.amazonaws.com/legion-worker@sha256:" + testDigestHex
-			})).succeeds(okLine(3)), p
-		},
-		"another probe command": func() (*probeRig, ImageProbe) {
-			return newProbeRig(t, nil, withOptions(func(o *Options) { o.Tools.Legion = "/opt/legion/bin/legion" })).
-				succeeds(okLine(3)), p
-		},
-		"another operator pod": func() (*probeRig, ImageProbe) {
-			return newProbeRig(t, nil, withOptions(func(o *Options) { o.Pod.Env = map[string]string{"PI_CONFIG_FILES": "/etc/legion-operator/overlay.yml"} })).
-				succeeds(okLine(3)), p
-		},
-		"another placement": func() (*probeRig, ImageProbe) {
-			return newProbeRig(t, nil, withOptions(func(o *Options) {
-				o.Scheduling.NodeSelector = map[string]string{"topology.kubernetes.io/zone": "us-west-2a"}
-			})).succeeds(okLine(3)), p
-		},
-		"another cluster": func() (*probeRig, ImageProbe) {
-			q := p
-			q.APIServer = "https://127.0.0.1:40357"
-			return newProbeRig(t, nil).succeeds(okLine(3)), q
-		},
-		// The rig's controller stand-in serves only its own namespace, so this probe never gets a
-		// pod: that it created a Sandbox at all is the cache refusing a pass from another namespace.
-		"another namespace": func() (*probeRig, ImageProbe) {
-			q := p
-			q.Budget = unfinishedBudget
-			return newProbeRig(t, nil, withOptions(func(o *Options) { o.Namespace = "legion-staging" })), q
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			if err := os.WriteFile(cache, raw, 0o600); err != nil {
-				t.Fatal(err)
-			}
-			g, q := rerun()
-			err := g.probe(q)
-			if n := g.creates.Load(); n == 0 {
-				t.Fatalf("reused the pass cached under another key: no probe Sandbox created (err %v)", err)
-			}
-			if name != "another namespace" && err != nil {
-				t.Errorf("ProbeImage = %v, want the probe run again and passing", err)
-			}
-		})
+	wantContains(t, err, "task agent oracle", "role oracle is not configured")
+	if n := g.creates.Load(); n != 2 {
+		t.Errorf("created the probe Sandbox %d times over two boots, want once each", n)
 	}
 }
 
-// A cache file that cannot be read, does not decode, or names another image is no pass: the probe
-// runs again, and says why it ignored the file. A pass recorded before the cache named the image's
-// repository and the probe pod decodes as neither, so the first boot after the change probes again.
-func TestProbeImageIgnoresACacheItCannotTrust(t *testing.T) {
-	for name, contents := range map[string]string{
-		"not JSON":                         "{not json",
-		"another field":                    `{"image":"` + testImage + `","goDaemonApiVersion":3,"pod":"x","probedAt":"2026-09-23T12:00:00Z","daemonApiVersion":8}`,
-		"another image":                    `{"image":"ghcr.io/sjawhar/legion-worker@sha256:` + strings.Repeat("a", 64) + `","goDaemonApiVersion":3,"pod":"x","probedAt":"2026-09-23T12:00:00Z"}`,
-		"a pass keyed on the digest alone": `{"digest":"sha256:` + testDigestHex + `","goDaemonApiVersion":3,"placement":"x","probedAt":"2026-09-23T12:00:00Z"}`,
+// A providers Secret the kubelet cannot mount leaves the probe pod Pending, never Failed: a
+// FailedMount event saying the Secret, or one of the keys provider_keys asks of it, is missing is
+// the answer, a refusal naming the Secret, the keys, and the kubelet's message, given once rather
+// than retried to the budget. Any other FailedMount on the volume is one the kubelet retries (its
+// Secret watch not yet synced, kubernetes/kubernetes#99475), and the attempt runs to its budget.
+func TestProbeImageRefusesAProvidersSecretThePodCannotMount(t *testing.T) {
+	mount := `MountVolume.SetUp failed for volume "providers" : `
+	for _, testCase := range []struct {
+		name, message string
+		refused       bool
+	}{
+		{"the Secret missing", mount + `secret "` + ProvidersSecretName(testProject) + `" not found`, true},
+		{"a key missing", mount + "references non-existent secret key: ANTHROPIC_API_KEY", true},
+		{"the kubelet's secret cache not synced", mount + "failed to sync secret cache: timed out waiting for the condition", false},
 	} {
-		t.Run(name, func(t *testing.T) {
+		t.Run(testCase.name, func(t *testing.T) {
+			g := newProbeRig(t, nil, withOptions(func(o *Options) { o.ProviderKeys = map[string]string{"ANTHROPIC_API_KEY": "anthropic"} }))
+			g.waits("ContainerCreating")
+			if _, err := g.kube.CoreV1().Events(testNamespace).Create(g.ctx, &corev1.Event{
+				ObjectMeta:     metav1.ObjectMeta{Name: probeSandboxName + ".mount", Namespace: testNamespace},
+				InvolvedObject: corev1.ObjectReference{Kind: "Pod", Name: probeSandboxName, Namespace: testNamespace},
+				Reason:         "FailedMount", Type: corev1.EventTypeWarning, Message: testCase.message,
+			}, metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
+			}
 			p := probeOptions(t)
-			cache := filepath.Join(p.StateDir, "image-probes", testDigestHex+".json")
-			if err := os.MkdirAll(filepath.Dir(cache), 0o700); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(cache, []byte(contents), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			var logged bytes.Buffer
-			g := newProbeRig(t, nil, withOptions(func(o *Options) { o.Log = slogTo(&logged) }))
-			g.succeeds(okLine(3))
+			p.Budget = unfinishedBudget
 
-			if err := g.probe(p); err != nil {
-				t.Fatalf("ProbeImage = %v", err)
+			err := g.probe(p)
+
+			if testCase.refused {
+				wantContains(t, err, "cannot mount the providers Secret "+ProvidersSecretName(testProject), "(anthropic)", testCase.message)
+				if n := g.creates.Load(); n != 1 {
+					t.Errorf("ran the probe %d times for a Secret the pod cannot mount, want once", n)
+				}
+				return
 			}
-			if n := g.creates.Load(); n != 1 {
-				t.Errorf("created %d probe Sandboxes, want the probe run again", n)
+			wantContains(t, err, "the worker image probe never completed within its retry budget (2 attempts)")
+			if err != nil && strings.Contains(err.Error(), "cannot mount the providers Secret") {
+				t.Errorf("ProbeImage = %v, refused a mount failure the kubelet retries", err)
 			}
-			if !strings.Contains(logged.String(), "ignoring the image probe cache") || !strings.Contains(logged.String(), cache) {
-				t.Errorf("the log does not say the cache %s was ignored:\n%s", cache, logged.String())
+			if n := g.creates.Load(); n != 2 {
+				t.Errorf("ran the probe %d times, want the retry's 2", n)
 			}
 		})
 	}
 }
 
-// A pass names the cluster it was proven on, so a probe that cannot name its API server refuses to
-// run rather than record a pass any cluster would reuse.
-func TestProbeImageRefusesWithoutItsAPIServer(t *testing.T) {
-	g := newProbeRig(t, nil)
-	p := probeOptions(t)
-	p.APIServer = ""
-
-	err := g.probe(p)
-
-	wantContains(t, err, "an API server")
-	if n := g.creates.Load(); n != 0 {
-		t.Errorf("created %d probe Sandboxes without an API server to record", n)
+// The probe runs as a worker runs: with provider keys configured it exports the providers Secret's
+// keys as the worker's shim does, and given the daemon's role prompts' references it resolves
+// those; with neither, its command carries neither flag.
+func TestTheProbeRunsAsAWorkerRuns(t *testing.T) {
+	const references = `{"LEGION_PROMPT_AGENTS":{"oracle":["roles/core/planner.md"]}}`
+	for _, testCase := range []struct {
+		name       string
+		keys       map[string]string
+		references string
+		want       []string
+	}{
+		{"neither", nil, "", nil},
+		{"provider keys", map[string]string{"ANTHROPIC_API_KEY": "anthropic"}, "", []string{"--provider-env-dir", ProvidersDir}},
+		{"role references", nil, references, []string{"--role-references", references}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			opts := goldenOptions()
+			opts.ProviderKeys = testCase.keys
+			r, err := configure(opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			command := r.probeManifest(probeSandboxName, ImageProbe{Contract: 3, RoleReferences: testCase.references}, time.Now()).Spec.PodTemplate.Spec.Containers[0].Command
+			base := []string{opts.Tools.Legion, "probe-image", "--go-daemon-api-version", "3", "--plugin-root", legionPlugin, "--pod-safety"}
+			if want := append(base, testCase.want...); !slices.Equal(command, want) {
+				t.Errorf("the probe's command = %q, want %q", command, want)
+			}
+		})
 	}
 }
 
@@ -621,7 +589,7 @@ func TestTheProbeIsToldTheOperatorsVariablesAsWritten(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	env := envOf(r.probeManifest(probeSandboxName, 3, corev1.ResourceRequirements{}, time.Now()).Spec.PodTemplate.Spec.Containers[0])
+	env := envOf(r.probeManifest(probeSandboxName, ImageProbe{Contract: 3}, time.Now()).Spec.PodTemplate.Spec.Containers[0])
 	if seen := kubeExpand(env["PI_CONFIG_FILES"], env); seen != literal {
 		t.Errorf("the probe process is told PI_CONFIG_FILES = %q, want %q", seen, literal)
 	}
@@ -638,7 +606,7 @@ func TestProbeManifestGoldenAndSchema(t *testing.T) {
 		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m"), corev1.ResourceMemory: resource.MustParse("1Gi")},
 		Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("2Gi")},
 	}
-	u, err := encodeProbe(r.probeManifest(probeSandboxName, 3, small, time.Date(2026, 9, 23, 12, 5, 30, 0, time.UTC)))
+	u, err := encodeProbe(r.probeManifest(probeSandboxName, ImageProbe{Contract: 3, Resources: small}, time.Date(2026, 9, 23, 12, 5, 30, 0, time.UTC)))
 	if err != nil {
 		t.Fatal(err)
 	}

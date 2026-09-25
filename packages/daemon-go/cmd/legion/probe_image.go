@@ -15,6 +15,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/daemon"
 	"github.com/sjawhar/legion/daemon/internal/podsafety"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
+	"github.com/sjawhar/legion/daemon/internal/shim"
 )
 
 // digits is what --go-daemon-api-version accepts before it is read as a number.
@@ -28,10 +29,14 @@ var digits = regexp.MustCompile(`^[0-9]+$`)
 // (daemon.ProbeImage) and, when every one passes, prints bootprobe.OKLine; a failure is the
 // probe's message, exit 1, so a broken image never publishes. Unlike the TypeScript command, the
 // contract is always checked: bare, against this binary's own GoDaemonAPIVersion, which the
-// plugin packed from the same commit must declare. With --pod-safety, which the probe Sandbox
-// passes, the probes run Oh My Pi on the pod's baseline as a worker's shim starts it
-// (podsafety.Apply), its overlay written to a fresh temporary directory: the probe pod mounts no
-// state volume.
+// plugin packed from the same commit must declare. The load probe also holds every task agent the
+// prompts dispatch to its own model; the OK line says so (agent-models=resolved), or that the
+// build's probe, which has no operator model configuration, skipped it (--skip-agent-models). The
+// probe Sandbox runs it as a worker runs: with --pod-safety, on the pod's baseline as a worker's
+// shim starts Oh My Pi (podsafety.Apply), its overlay written to a fresh temporary directory since
+// the probe pod mounts no state volume; with --provider-env-dir, each provider key exported after
+// it as the shim exports them (shim.ReadProviderEnv); and with --role-references, the references
+// of the role prompts the daemon inlines into its pods, resolved in place of the image's roles.
 func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := newFlags("probe-image", stderr)
 	omp := flags.String("omp", "", "the OMP executable to probe (default: $LEGION_OMP_PATH)")
@@ -39,6 +44,9 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 		"the Go daemon API contract the image's pi-legion-envoy must declare (the daemon's probe Sandbox passes its own)")
 	pluginRoot := flags.String("plugin-root", "", "the plugin directory a pod loads as its one explicit extension; the load probe runs the same way")
 	podSafety := flags.Bool("pod-safety", false, "run the probes on a pod's baseline (internal/podsafety), as a pod's shim starts Oh My Pi")
+	providerEnvDir := flags.String("provider-env-dir", "", "a directory whose files NAME=contents the probes' Oh My Pi gets, as a worker's shim exports them")
+	skipAgentModels := flags.Bool("skip-agent-models", false, "leave the prompt-named task agents' models unresolved (the image build's probe)")
+	roleReferences := flags.String("role-references", "", "the task agents and skills the daemon's own role prompts name, resolved in place of the image's roles")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
@@ -81,6 +89,14 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 			return 1
 		}
 	}
+	if *providerEnvDir != "" {
+		providerEnv, err := shim.ReadProviderEnv(*providerEnvDir, os.LookupEnv)
+		if err != nil {
+			fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
+			return 1
+		}
+		environ = append(environ, providerEnv...)
+	}
 	env := map[string]string{}
 	for _, pair := range environ {
 		if name, value, ok := strings.Cut(pair, "="); ok {
@@ -89,12 +105,17 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 	}
 	err = daemon.ProbeImage(ctx, daemon.ImageProbe{
 		Omp: invocation, Contract: expected, Env: env, WorkDir: workDir, PluginRoot: *pluginRoot, RolesDir: rolesDir,
+		SkipAgentModels: *skipAgentModels, RoleReferences: *roleReferences,
 		Log: slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
 		return 1
 	}
-	fmt.Fprintln(stdout, bootprobe.OKLine(invocation, expected))
+	agentModels := bootprobe.AgentModelsResolved
+	if *skipAgentModels {
+		agentModels = bootprobe.AgentModelsSkipped
+	}
+	fmt.Fprintln(stdout, bootprobe.OKLine(invocation, expected, agentModels))
 	return 0
 }

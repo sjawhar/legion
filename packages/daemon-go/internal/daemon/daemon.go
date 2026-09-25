@@ -36,6 +36,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/tmux"
 	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
+	workershim "github.com/sjawhar/legion/daemon/internal/shim"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/stream"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
@@ -430,17 +431,6 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 		if invocation, err = tmux.ResolveOmpInvocation(cfg.OmpInvocation, getenv); err != nil {
 			return err
 		}
-		p.gate = pluginGate{
-			env:        tmux.PaneEnvironment(os.Environ(), cfg.StateDir),
-			workDir:    cfg.StateDir,
-			invocation: invocation,
-			prefix:     cfg.OmpLaunchPrefix,
-			timeout:    cfg.SlowCommandTimeout,
-			retry:      bootprobe.Daemon,
-			contract:   api.GoDaemonAPIVersion,
-			rolesDir:   p.rolesDir,
-			log:        log,
-		}.verify
 		log.Info("legion daemon resolved OMP invocation for boot probes and panes", "invocation", invocation)
 	}
 	dispatchTokenFile := ""
@@ -460,6 +450,23 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 	if err != nil {
 		return err
 	}
+	if p.newRuntime == nil {
+		env, err := gateEnvironment(os.Environ(), cfg.StateDir, providerEnvDir)
+		if err != nil {
+			return err
+		}
+		p.gate = pluginGate{
+			env:        env,
+			workDir:    cfg.StateDir,
+			invocation: invocation,
+			prefix:     cfg.OmpLaunchPrefix,
+			timeout:    cfg.SlowCommandTimeout,
+			retry:      bootprobe.Daemon,
+			contract:   api.GoDaemonAPIVersion,
+			rolesDir:   p.rolesDir,
+			log:        log,
+		}.verify
+	}
 	// Only a configuration with a repository runs Legion's own gh, git, and jj.
 	if _, ok := cfg.Projects[cfg.Project]; ok {
 		if p.tools, err = resolveTools(func(name string) (string, bool) { return envValue(environ, name) }); err != nil {
@@ -470,6 +477,29 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 		p.newRuntime = tmuxRuntime(cfg, p.project, invocation, providerEnvDir, dispatchTokenFile, p.tools, log)
 	}
 	return nil
+}
+
+// gateEnvironment is the environment a pane's Oh My Pi runs with, which the boot gate probes under:
+// the pane environment, and each provider key the pane's shim exports from providerEnvDir as the
+// shim exports it (shim.ReadProviderEnv), so a task agent whose model's key comes only through a
+// provider key resolves as it will in a pane.
+func gateEnvironment(environ []string, stateDir, providerEnvDir string) (map[string]string, error) {
+	env := tmux.PaneEnvironment(environ, stateDir)
+	if providerEnvDir == "" {
+		return env, nil
+	}
+	pairs, err := workershim.ReadProviderEnv(providerEnvDir, func(name string) (string, bool) {
+		value, ok := env[name]
+		return value, ok
+	})
+	if err != nil {
+		return nil, fmt.Errorf("boot gate: %w", err)
+	}
+	for _, pair := range pairs {
+		name, value, _ := strings.Cut(pair, "=")
+		env[name] = value
+	}
+	return env, nil
 }
 
 // tmuxRuntime builds the tmux runtime over the worker stream: the listener is its connection

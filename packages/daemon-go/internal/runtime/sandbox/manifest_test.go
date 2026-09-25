@@ -153,7 +153,7 @@ func TestTheOperatorsPodIsSentInFieldsTheSandboxCRDDeclares(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	probe, err := encodeProbe(r.probeManifest("legion-probe", 5, corev1.ResourceRequirements{}, time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)))
+	probe, err := encodeProbe(r.probeManifest("legion-probe", ImageProbe{Contract: 5}, time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -566,7 +566,7 @@ func TestAPodRunsAsTheOperatorsAccountWithNoTokenOfLegions(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			probe := r.probeManifest("legion-probe", 5, corev1.ResourceRequirements{}, time.Time{}).Spec.PodTemplate.Spec
+			probe := r.probeManifest("legion-probe", ImageProbe{Contract: 5}, time.Time{}).Spec.PodTemplate.Spec
 			for pod, spec := range map[string]corev1.PodSpec{"root": podOf(t, r, rootSpec(t), false), "worker": podOf(t, r, workerSpec(t), true), "probe": probe} {
 				if spec.ServiceAccountName != account {
 					t.Errorf("%s: serviceAccountName = %q, want %q", pod, spec.ServiceAccountName, account)
@@ -628,7 +628,7 @@ func TestTheOperatorsPodReachesEveryPodLegionRuns(t *testing.T) {
 	}{
 		{"root", podOf(t, r, rootSpec(t), false), mainContainer},
 		{"worker", podOf(t, r, workerSpec(t), true), mainContainer},
-		{"probe", r.probeManifest("legion-probe", 5, corev1.ResourceRequirements{}, time.Time{}).Spec.PodTemplate.Spec, probeContainer},
+		{"probe", r.probeManifest("legion-probe", ImageProbe{Contract: 5}, time.Time{}).Spec.PodTemplate.Spec, probeContainer},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.pod.ServiceAccountName != opts.Pod.ServiceAccount {
@@ -692,7 +692,7 @@ func TestProviderKeysReachEveryPodAsTheProvidersSecretsFiles(t *testing.T) {
 				agent string
 			}{
 				{worker, mainContainer},
-				{r.probeManifest("legion-probe", 5, corev1.ResourceRequirements{}, time.Time{}).Spec.PodTemplate.Spec, probeContainer},
+				{r.probeManifest("legion-probe", ImageProbe{Contract: 5}, time.Time{}).Spec.PodTemplate.Spec, probeContainer},
 			} {
 				var volumes []corev1.Volume
 				for _, volume := range tc.pod.Volumes {
@@ -778,7 +778,7 @@ func TestLegionsOwnNamesAreWhatItsPodsCarry(t *testing.T) {
 		pod := podOf(t, r, spec, tc.colocate)
 		carry(pod, containerNamed(t, pod, mainContainer))
 	}
-	probe := r.probeManifest("legion-probe", 5, corev1.ResourceRequirements{}, time.Time{}).Spec.PodTemplate.Spec
+	probe := r.probeManifest("legion-probe", ImageProbe{Contract: 5}, time.Time{}).Spec.PodTemplate.Spec
 	carry(probe, containerNamed(t, probe, probeContainer))
 	for _, list := range []struct {
 		name    string

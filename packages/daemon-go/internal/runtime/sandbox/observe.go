@@ -198,21 +198,30 @@ func (r *Runtime) logTail(ctx context.Context, pod, container string) string {
 // events are the pod's events, "<type> <reason>: <message>" joined by " | ", or why they could
 // not be read.
 func (r *Runtime) events(ctx context.Context, pod *corev1.Pod) string {
-	reading, cancel := call(ctx)
-	defer cancel()
-	selector := fields.Set{"involvedObject.kind": "Pod", "involvedObject.name": pod.Name, "involvedObject.uid": string(pod.UID)}
-	list, err := r.kube.CoreV1().Events(r.namespace).List(reading, metav1.ListOptions{FieldSelector: selector.String()})
+	events, err := r.podEvents(ctx, pod)
 	if err != nil {
 		return fmt.Sprintf("(the events could not be read: %v)", err)
 	}
-	parts := make([]string, 0, len(list.Items))
-	for _, event := range list.Items {
+	parts := make([]string, 0, len(events))
+	for _, event := range events {
 		parts = append(parts, fmt.Sprintf("%s %s: %s", event.Type, event.Reason, event.Message))
 	}
 	if len(parts) == 0 {
 		return "(none)"
 	}
 	return strings.Join(parts, " | ")
+}
+
+// podEvents lists the events the API server holds for pod, this incarnation's only.
+func (r *Runtime) podEvents(ctx context.Context, pod *corev1.Pod) ([]corev1.Event, error) {
+	reading, cancel := call(ctx)
+	defer cancel()
+	selector := fields.Set{"involvedObject.kind": "Pod", "involvedObject.name": pod.Name, "involvedObject.uid": string(pod.UID)}
+	list, err := r.kube.CoreV1().Events(r.namespace).List(reading, metav1.ListOptions{FieldSelector: selector.String()})
+	if err != nil {
+		return nil, err
+	}
+	return list.Items, nil
 }
 
 func podCondition(pod *corev1.Pod, kind corev1.PodConditionType) *corev1.PodCondition {
