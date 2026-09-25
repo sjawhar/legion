@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -192,6 +193,71 @@ func TestMigrateAppliesNothingASecondTime(t *testing.T) {
 	}
 	if version != latest {
 		t.Errorf("schema version after a second migrate = %d, want %d", version, latest)
+	}
+}
+
+// Two branches can each take the next migration number, and they land in either order: a database
+// migrated by a daemon with the higher one first has to take the lower one when it arrives. Migrate
+// applies every embedded migration the database has not recorded, not only those above its highest,
+// so a database at 0001-0006 and 0008 and later takes 0007 — here the controllers table — and ends
+// with every version recorded.
+func TestMigrateAppliesALowerMigrationADatabaseAlreadyPastItLacks(t *testing.T) {
+	ctx := context.Background()
+	store := emptyStore(t)
+	all, err := migrations.All()
+	if err != nil {
+		t.Fatalf("read the embedded migrations: %v", err)
+	}
+	const skipped = 7
+	for _, migration := range all {
+		if migration.Version == skipped {
+			continue
+		}
+		if _, err := store.apply(ctx, migration); err != nil {
+			t.Fatalf("apply %s: %v", migration.Name, err)
+		}
+	}
+	controllers := func() bool {
+		t.Helper()
+		var exists bool
+		if err := store.pool.QueryRow(ctx, "select to_regclass('public.controllers') is not null").Scan(&exists); err != nil {
+			t.Fatalf("look for the controllers table: %v", err)
+		}
+		return exists
+	}
+	if version, err := store.SchemaVersion(ctx); err != nil || version != all[len(all)-1].Version || controllers() {
+		t.Fatalf("before Migrate: schema version %d (%v), controllers table %t; want the latest, and no table", version, err, controllers())
+	}
+
+	applied, err := store.Migrate(ctx)
+
+	if err != nil || applied != 1 {
+		t.Fatalf("migrate = %d, %v; want the one missing migration applied", applied, err)
+	}
+	if !controllers() {
+		t.Error("migration 0007 was recorded as applied, but the controllers table does not exist")
+	}
+	var recorded []int
+	rows, err := store.pool.Query(ctx, "select version from schema_version order by version")
+	if err != nil {
+		t.Fatalf("read schema_version: %v", err)
+	}
+	for rows.Next() {
+		var version int
+		if err := rows.Scan(&version); err != nil {
+			t.Fatalf("scan schema_version: %v", err)
+		}
+		recorded = append(recorded, version)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read schema_version: %v", err)
+	}
+	want := make([]int, len(all))
+	for i, migration := range all {
+		want[i] = migration.Version
+	}
+	if !slices.Equal(recorded, want) {
+		t.Errorf("schema_version holds %v, want every embedded version %v", recorded, want)
 	}
 }
 
