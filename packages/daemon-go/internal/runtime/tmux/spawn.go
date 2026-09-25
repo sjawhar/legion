@@ -182,9 +182,9 @@ func WriteDispatchTokenFile(stateDir, token string) (string, error) {
 	return WriteSecretFile(stateDir, DispatchTokenFileName, token)
 }
 
-// WriteSecretFile writes value as runtime.SecretFilePath, a 0600 file in the 0700 secrets directory, and
-// returns its path: what a process outside a pane (`legion controller start`'s controller secret)
-// is handed as a `<NAME>_FILE` pointer, never the value.
+// WriteSecretFile writes value as runtime.SecretFilePath, a 0600 file in the 0700 secrets
+// directory, and returns its path: what a process outside a pane (`legion controller start`'s
+// controller secret) is handed as a `<NAME>_FILE` pointer, never the value.
 func WriteSecretFile(stateDir, name, value string) (string, error) {
 	path := runtime.SecretFilePath(stateDir, name)
 	if err := writeSecretFiles(stateDir, []secretFile{{name: name, path: path, value: value}}); err != nil {
