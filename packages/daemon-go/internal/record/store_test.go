@@ -332,7 +332,9 @@ func TestOutboxLeaseFencesConcurrentWorkersAndExpires(t *testing.T) {
 }
 
 // A status write the outbox failed and pushed back is still unwritten, so it stays listed through its
-// backoff; a finished one is deleted and gone, and a row of another kind is never listed.
+// backoff; a finished one is deleted and gone, and a row of another kind is never listed. The list
+// runs oldest first, the order ClaimDue writes an issue's statuses in, so a newer write queued
+// behind a backing-off one is listed after it rather than ahead of it as a due write.
 func TestPendingStatusWritesListsEveryUnfinishedStatusEffect(t *testing.T) {
 	ctx := context.Background()
 	st := migratedStore(t)
@@ -370,6 +372,7 @@ func TestPendingStatusWritesListsEveryUnfinishedStatusEffect(t *testing.T) {
 	})
 	inTx(t, st, func(tx pgx.Tx) {
 		must(t, records.Enqueue(ctx, tx, OutboxRow{Kind: OutboxKindDispatchStatus, Issue: "LEGION-210", Payload: json.RawMessage(`{"status":"in_progress"}`), NextAt: now}))
+		must(t, records.Enqueue(ctx, tx, OutboxRow{Kind: OutboxKindDispatchStatus, Issue: "LEGION-208", Payload: json.RawMessage(`{"status":"needs_review"}`), NextAt: now}))
 	})
 
 	var pending []OutboxRow
@@ -378,15 +381,21 @@ func TestPendingStatusWritesListsEveryUnfinishedStatusEffect(t *testing.T) {
 		pending, err = records.PendingStatusWrites(ctx, tx)
 		must(t, err)
 	})
-	if len(pending) != 2 {
-		t.Fatalf("pending status writes = %#v, want the due LEGION-210 row then the backing-off LEGION-208 row", pending)
+	if len(pending) != 3 {
+		t.Fatalf("pending status writes = %#v, want LEGION-208's backing-off write, LEGION-210's, then LEGION-208's queued write", pending)
 	}
-	if due := pending[0]; due.Issue != "LEGION-210" || due.Attempts != 0 || !due.NextAt.Equal(now) {
-		t.Fatalf("first pending status write = %#v, want LEGION-210 due now and never attempted", due)
-	}
-	if backingOff := pending[1]; backingOff.Issue != "LEGION-208" || backingOff.Kind != OutboxKindDispatchStatus ||
+	if backingOff := pending[0]; backingOff.Issue != "LEGION-208" || backingOff.Kind != OutboxKindDispatchStatus ||
 		backingOff.Attempts != 1 || backingOff.LastError != "Dispatch unavailable" || !backingOff.NextAt.Equal(backoffUntil) {
-		t.Fatalf("second pending status write = %#v, want LEGION-208 after one failed attempt, next at %s", backingOff, backoffUntil)
+		t.Fatalf("first pending status write = %#v, want LEGION-208 after one failed attempt, next at %s", backingOff, backoffUntil)
+	}
+	if due := pending[1]; due.Issue != "LEGION-210" || due.Attempts != 0 || !due.NextAt.Equal(now) {
+		t.Fatalf("second pending status write = %#v, want LEGION-210 due now and never attempted", due)
+	}
+	queued := pending[2]
+	var queuedWrite StatusWrite
+	must(t, json.Unmarshal(queued.Payload, &queuedWrite))
+	if queued.Issue != "LEGION-208" || queued.Attempts != 0 || queuedWrite.Status != "needs_review" {
+		t.Fatalf("third pending status write = %#v, want LEGION-208's needs_review write, queued behind its testing write", queued)
 	}
 }
 

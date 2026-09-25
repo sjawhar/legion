@@ -733,6 +733,68 @@ func TestTerminalReplayAppliesPersistedReadyFactOnce(t *testing.T) {
 	}
 }
 
+// The predicate supervise asks before it sends a queued task: the task names the phase it was
+// queued for, and a task whose phase the issue has left is finished work. The role is not what is
+// compared — one role runs several phases — and a delivery of no phase is nobody's to drop.
+func TestPhaseHoldsAnswersFromTheIssuesCurrentPhase(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	putOutboxIssue(t, pool, records, record.Issue{
+		Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "phase holds",
+		Phase: phase.Implementing, Status: "in_progress", Rank: "00000",
+	})
+	holds := phaseHolds(pool, records)
+	claimOf := func(role claim.Role, issue string) supervise.Claim {
+		return supervise.Claim{Token: claim.Token("legion-omp-" + issue + "-" + string(role)), Issue: issue, Role: role}
+	}
+	queuedFor := func(p phase.Phase) supervise.Delivery {
+		return supervise.Delivery{ID: outboxDeliveryPrefix + "42", Task: "the task", Phase: p}
+	}
+	byHand := supervise.Delivery{ID: "MKVV7QJ2", Task: "the task"}
+
+	for _, tc := range []struct {
+		name     string
+		claim    supervise.Claim
+		delivery supervise.Delivery
+		want     bool
+	}{
+		{name: "the issue's own phase", claim: claimOf(claim.RoleImplementer, "LEGION-208"), delivery: queuedFor(phase.Implementing), want: true},
+		{name: "a phase the issue has not reached", claim: claimOf(claim.RoleTester, "LEGION-208"), delivery: queuedFor(phase.Testing), want: false},
+		// The implementer works implementing, retro and the production check: a task written for
+		// one of them is not the work of another, which the role alone cannot tell.
+		{name: "another phase of this claim's own role", claim: claimOf(claim.RoleImplementer, "LEGION-208"), delivery: queuedFor(phase.Retro), want: false},
+		// The operator asked for this one and was answered 200; dropping it would make the work
+		// silently not happen after a relaunch.
+		{name: "an operator's own delivery, of no phase", claim: claimOf(claim.RoleTester, "LEGION-208"), delivery: byHand, want: true},
+		{name: "the architect, whose task is of no phase", claim: claimOf(claim.RoleArchitect, "LEGION-208"), delivery: byHand, want: true},
+		// The workflow never deletes an issue, so no record means the claim is not the workflow's:
+		// an operator spawn, whose task the workflow has no standing to drop.
+		{name: "a claim the workflow never made", claim: claimOf(claim.RoleImplementer, "LEGION-999"), delivery: queuedFor(phase.Implementing), want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := holds(context.Background(), tc.claim, tc.delivery)
+			if err != nil {
+				t.Fatalf("phaseHolds: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("phaseHolds(%s) = %v, want %v", tc.claim.Token, got, tc.want)
+			}
+		})
+	}
+
+	putOutboxIssue(t, pool, records, record.Issue{
+		Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "phase holds",
+		Phase: phase.Testing, Status: "testing", Rank: "00000",
+	})
+	implementer, err := holds(context.Background(), claimOf(claim.RoleImplementer, "LEGION-208"), queuedFor(phase.Implementing))
+	if err != nil {
+		t.Fatalf("phaseHolds after the phase moved: %v", err)
+	}
+	if implementer {
+		t.Fatal("the implementer's queued task still holds after the issue reached testing")
+	}
+}
+
 func putOutboxIssue(t *testing.T, pool *pgxpool.Pool, records record.Store, issue record.Issue) {
 	t.Helper()
 	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {

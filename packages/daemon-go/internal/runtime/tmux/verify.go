@@ -14,9 +14,10 @@ import (
 )
 
 // noServerStderr is what tmux says when no server is behind the daemon's own socket: a socket
-// left behind by an exited server, or one never created — a first boot, or a reboot that cleared
-// TMUX_TMPDIR (tmux.ts:18-22).
-var noServerStderr = regexp.MustCompile(`no server running|error connecting to .*\(No such file or directory\)`)
+// left behind by an exited server, one never created — a first boot, or a reboot that cleared
+// TMUX_TMPDIR (tmux.ts:18-22) — or a server that exited while this client's command ran, which is
+// what releasing the server's last pane does to a probe just behind it.
+var noServerStderr = regexp.MustCompile(`no server running|server exited unexpectedly|error connecting to .*\(No such file or directory\)`)
 
 // paneGoneStderr is what a command's stderr says when the pane it targets provably does not exist:
 // tmux cannot find it, or there is no server at all — and no server on the daemon's own socket

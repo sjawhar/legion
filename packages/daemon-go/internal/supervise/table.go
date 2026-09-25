@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -119,14 +120,25 @@ type RequestSuspend struct{ Claim claim.Token }
 // RequestResume relaunches a suspended claim's session.
 type RequestResume struct{ Claim claim.Token }
 
-// RequestStop ends the claim. TreeClose says the stop is its tree's close — the workflow stopping
-// every claim of a tree whose linger expired, or the operator closing a tree no workflow issue
-// backs — which is the only stop that ends the tree's root claim: any other stop of a root is
-// refused, and suspending it is how its process is stopped.
-type RequestStop struct {
-	Claim     claim.Token
-	TreeClose bool
-}
+// RequestStop ends one claim. The tree's root claim is not one it can end: a root ends only with
+// its tree, so any other stop of it is refused, and suspending it is how its process is stopped.
+//
+// A close is its own event rather than a flag here, and there are two of them, because who decided
+// the close is what says whether TreeClosable is asked. A flag has an unsafe default, and the
+// caller that never thought about it gets that default; these two make a new caller name which
+// close it is making, and the table holds a row for each.
+type RequestStop struct{ Claim claim.Token }
+
+// RequestTreeClose is the workflow closing a tree: every claim of a tree whose linger expired,
+// the root's included. It is the workflow's own decision and is not put to TreeClosable — the
+// workflow still holds the issue record of the tree it is closing, which is the very record
+// TreeClosable refuses on, so asking would refuse exactly the closes it is entitled to make.
+type RequestTreeClose struct{ Claim claim.Token }
+
+// RequestOperatorClose is the operator closing a tree through the API, the root claim's included.
+// It is put to TreeClosable: an operator may close a tree no workflow issue backs, and a tree one
+// does back closes when its linger expires, never by hand.
+type RequestOperatorClose struct{ Claim claim.Token }
 
 // RequestRetry relaunches a failed or retired claim's session with fresh budgets: the workflow's
 // decision that the role runs again — the tree's architect retrying a held phase, or a closed tree
@@ -135,10 +147,15 @@ type RequestRetry struct{ Claim claim.Token }
 
 // RequestDeliver gives the claim a task. ID is a durable outbox delivery id when an outbox row
 // drives the request; an empty ID asks the machine to mint an ordinary operator delivery id.
+//
+// Phase is the issue phase the task is for, and says when the task stops being the work to do: a
+// task of a phase the issue has left is dropped rather than sent. The workflow names it; an
+// operator's own delivery names none and is held whatever phase its issue is in.
 type RequestDeliver struct {
 	Claim claim.Token
 	Task  string
 	ID    string
+	Phase phase.Phase
 }
 
 // RequestExit is the agent reporting its own end.
@@ -149,52 +166,56 @@ type RequestExit struct {
 	Reason     string
 }
 
-func (RuntimeObservation) isEvent() {}
-func (StreamHello) isEvent()        {}
-func (StreamTurnStart) isEvent()    {}
-func (StreamTurnEnd) isEvent()      {}
-func (StreamClosed) isEvent()       {}
-func (StreamLateRefusal) isEvent()  {}
-func (PromptAcked) isEvent()        {}
-func (PromptRefused) isEvent()      {}
-func (Timer) isEvent()              {}
-func (TreeVolumeLost) isEvent()     {}
-func (RequestSpawn) isEvent()       {}
-func (RequestRegister) isEvent()    {}
-func (RequestReady) isEvent()       {}
-func (RequestSuspend) isEvent()     {}
-func (RequestResume) isEvent()      {}
-func (RequestStop) isEvent()        {}
-func (RequestRetry) isEvent()       {}
-func (RequestDeliver) isEvent()     {}
-func (RequestExit) isEvent()        {}
+func (RuntimeObservation) isEvent()   {}
+func (StreamHello) isEvent()          {}
+func (StreamTurnStart) isEvent()      {}
+func (StreamTurnEnd) isEvent()        {}
+func (StreamClosed) isEvent()         {}
+func (StreamLateRefusal) isEvent()    {}
+func (PromptAcked) isEvent()          {}
+func (PromptRefused) isEvent()        {}
+func (Timer) isEvent()                {}
+func (TreeVolumeLost) isEvent()       {}
+func (RequestSpawn) isEvent()         {}
+func (RequestRegister) isEvent()      {}
+func (RequestReady) isEvent()         {}
+func (RequestSuspend) isEvent()       {}
+func (RequestResume) isEvent()        {}
+func (RequestStop) isEvent()          {}
+func (RequestTreeClose) isEvent()     {}
+func (RequestOperatorClose) isEvent() {}
+func (RequestRetry) isEvent()         {}
+func (RequestDeliver) isEvent()       {}
+func (RequestExit) isEvent()          {}
 
 // eventKind is what the table is keyed on beside the state: an event's type, with a Timer split
 // by its kind, because the four waits mean four different things.
 type eventKind string
 
 const (
-	onObservation eventKind = "runtime_observation"
-	onHello       eventKind = "stream_hello"
-	onTurnStart   eventKind = "stream_turn_start"
-	onTurnEnd     eventKind = "stream_turn_end"
-	onClosed      eventKind = "stream_closed"
-	onLateRefusal eventKind = "stream_late_refusal"
-	onAcked       eventKind = "prompt_acked"
-	onRefused     eventKind = "prompt_refused"
-	onBootTimer   eventKind = timerPrefix + eventKind(TimerBoot)
-	onDeadline    eventKind = timerPrefix + eventKind(TimerRegistration)
-	onTurnTimer   eventKind = timerPrefix + eventKind(TimerTurn)
-	onProbeTimer  eventKind = timerPrefix + eventKind(TimerProbe)
-	onSpawn       eventKind = "request_spawn"
-	onRegister    eventKind = "request_register"
-	onReady       eventKind = "request_ready"
-	onSuspend     eventKind = "request_suspend"
-	onResume      eventKind = "request_resume"
-	onStop        eventKind = "request_stop"
-	onRetry       eventKind = "request_retry"
-	onDeliver     eventKind = "request_deliver"
-	onExit        eventKind = "request_exit"
+	onObservation   eventKind = "runtime_observation"
+	onHello         eventKind = "stream_hello"
+	onTurnStart     eventKind = "stream_turn_start"
+	onTurnEnd       eventKind = "stream_turn_end"
+	onClosed        eventKind = "stream_closed"
+	onLateRefusal   eventKind = "stream_late_refusal"
+	onAcked         eventKind = "prompt_acked"
+	onRefused       eventKind = "prompt_refused"
+	onBootTimer     eventKind = timerPrefix + eventKind(TimerBoot)
+	onDeadline      eventKind = timerPrefix + eventKind(TimerRegistration)
+	onTurnTimer     eventKind = timerPrefix + eventKind(TimerTurn)
+	onProbeTimer    eventKind = timerPrefix + eventKind(TimerProbe)
+	onSpawn         eventKind = "request_spawn"
+	onRegister      eventKind = "request_register"
+	onReady         eventKind = "request_ready"
+	onSuspend       eventKind = "request_suspend"
+	onResume        eventKind = "request_resume"
+	onStop          eventKind = "request_stop"
+	onTreeClose     eventKind = "request_tree_close"
+	onOperatorClose eventKind = "request_operator_close"
+	onRetry         eventKind = "request_retry"
+	onDeliver       eventKind = "request_deliver"
+	onExit          eventKind = "request_exit"
 
 	onVolumeLost eventKind = "tree_volume_lost"
 
@@ -235,6 +256,10 @@ func kindOf(ev Event) eventKind {
 		return onResume
 	case RequestStop:
 		return onStop
+	case RequestTreeClose:
+		return onTreeClose
+	case RequestOperatorClose:
+		return onOperatorClose
 	case RequestRetry:
 		return onRetry
 	case RequestDeliver:
@@ -260,6 +285,8 @@ func requestName(ev Event) (string, bool) {
 		return "resume", true
 	case RequestStop:
 		return "stop", true
+	case RequestTreeClose, RequestOperatorClose:
+		return "close", true
 	case RequestRetry:
 		return "retry", true
 	case RequestDeliver:
@@ -413,7 +440,7 @@ func fillTable(t *builder) {
 	t.row(onSuspend, "suspend: stop the process, keep the session", suspend, []ClaimState{StateSuspended},
 		StateRegistered, StateReady, StateWorking, StateIdle)
 	t.row(onSuspend, "already suspended", nothingToDo, nil, StateSuspended)
-	t.ignore(onSuspend, "the agent is not ready, so there is nothing to suspend yet",
+	t.ignore(onSuspend, notRegistered,
 		StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected)
 	t.ignore(onSuspend, failedClaim, StateFailed)
 	t.ignore(onSuspend, retiredClaim, StateRetired)
@@ -425,10 +452,16 @@ func fillTable(t *builder) {
 	t.ignore(onResume, failedClaim, StateFailed)
 	t.ignore(onResume, retiredClaim, StateRetired)
 
-	t.row(onStop, "release the claim and retire it; the tree's root only at the tree's close", stop, []ClaimState{StateRetired},
-		StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected, StateRegistered, StateReady, StateWorking, StateIdle,
-		StateSuspended, StateFailed)
+	stoppable := []ClaimState{StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected, StateRegistered,
+		StateReady, StateWorking, StateIdle, StateSuspended, StateFailed}
+	t.row(onStop, "release the claim and retire it; the tree's root only at the tree's close", stop, []ClaimState{StateRetired}, stoppable...)
 	t.row(onStop, "already retired", nothingToDo, nil, StateRetired)
+
+	t.row(onTreeClose, "the workflow's close of the tree: release the claim and retire it", treeClose, []ClaimState{StateRetired}, stoppable...)
+	t.row(onTreeClose, "already retired", nothingToDo, nil, StateRetired)
+
+	t.row(onOperatorClose, "the operator's close of the tree, if no workflow issue backs it", operatorClose, []ClaimState{StateRetired}, stoppable...)
+	t.row(onOperatorClose, "already retired", nothingToDo, nil, StateRetired)
 
 	t.row(onRetry, "retry: fresh budgets, and the same session relaunched", retry, []ClaimState{StateLaunching, StateFailed}, StateFailed, StateRetired)
 	t.ignore(onRetry, "a queued claim is spawned, not retried", StateQueued)
@@ -707,14 +740,42 @@ func retry(m *Machine, ctx context.Context, _ Event) error {
 	return m.launch(ctx)
 }
 
-// stop ends the claim: the runtime releases it, and it retires. A release that fails changes
+// stop ends one claim: the runtime releases it, and it retires. A release that fails changes
 // nothing, so the stop can be asked again. The tree's root claim ends only with its tree: a
 // retired root would leave the orphan sweep's known set, which would then take whatever the
 // runtime holds for the tree — under a sandbox, the tree volume. Any other stop of it is refused.
-func stop(m *Machine, ctx context.Context, ev Event) error {
-	if m.claim.treeRoot() && !ev.(RequestStop).TreeClose {
+func stop(m *Machine, ctx context.Context, _ Event) error {
+	if m.claim.treeRoot() {
 		return &RefusedError{State: m.claim.State, Request: "stop", Err: rootStopRefusal(m.claim.State)}
 	}
+	return m.end(ctx)
+}
+
+// treeClose is the workflow's close of the tree, which ends the root claim too. It is the
+// workflow's own decision: it stops every claim of a tree whose linger expired, and the issue
+// record it still holds for that tree is exactly what TreeClosable refuses on, so it is not asked.
+func treeClose(m *Machine, ctx context.Context, _ Event) error { return m.end(ctx) }
+
+// operatorClose is the operator's own close, asked of a claim through the API. TreeClosable is
+// asked here rather than by the caller, so the answer and the stop it decides sit together rather
+// than a round trip apart; it does not lock the record it reads.
+func operatorClose(m *Machine, ctx context.Context, _ Event) error {
+	if m.deps.TreeClosable != nil {
+		closable, err := m.deps.TreeClosable(ctx, m.claim)
+		if err != nil {
+			return fmt.Errorf("close %s: %w", m.claim.Token, err)
+		}
+		if !closable {
+			return &RefusedError{State: m.claim.State, Request: "close",
+				Err: fmt.Errorf("%s is a workflow issue's tree, which closes when its linger expires", m.claim.Tree)}
+		}
+	}
+	return m.end(ctx)
+}
+
+// end releases the claim's process and retires the claim, which is what every stop and close does
+// once it is allowed.
+func (m *Machine) end(ctx context.Context) error {
 	if err := m.release(ctx); err != nil {
 		return err
 	}
@@ -735,21 +796,18 @@ func rootStopRefusal(state ClaimState) error {
 }
 
 func deliverLater(m *Machine, ctx context.Context, ev Event) error {
-	request := ev.(RequestDeliver)
-	return m.queue(ctx, request.Task, request.ID)
+	return m.queue(ctx, ev.(RequestDeliver))
 }
 
 func deliverNow(m *Machine, ctx context.Context, ev Event) error {
-	request := ev.(RequestDeliver)
-	if err := m.queue(ctx, request.Task, request.ID); err != nil {
+	if err := m.queue(ctx, ev.(RequestDeliver)); err != nil {
 		return err
 	}
 	return m.sendPending(ctx)
 }
 
 func deliverResuming(m *Machine, ctx context.Context, ev Event) error {
-	request := ev.(RequestDeliver)
-	if err := m.queue(ctx, request.Task, request.ID); err != nil {
+	if err := m.queue(ctx, ev.(RequestDeliver)); err != nil {
 		return err
 	}
 	return m.launch(ctx)

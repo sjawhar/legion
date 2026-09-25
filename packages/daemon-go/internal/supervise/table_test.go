@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"go/ast"
+	"go/importer"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"os"
 	"strconv"
 	"strings"
@@ -26,6 +28,7 @@ func sealed(t *testing.T) (events []string, states []ClaimState, timers []TimerK
 		t.Fatal(err)
 	}
 	files := token.NewFileSet()
+	var parsed []*ast.File
 	for _, entry := range entries {
 		name := entry.Name()
 		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
@@ -35,14 +38,9 @@ func sealed(t *testing.T) (events []string, states []ClaimState, timers []TimerK
 		if err != nil {
 			t.Fatal(err)
 		}
+		parsed = append(parsed, file)
 		for _, decl := range file.Decls {
 			switch decl := decl.(type) {
-			case *ast.FuncDecl:
-				if decl.Name.Name == "isEvent" && decl.Recv != nil {
-					if ident, ok := decl.Recv.List[0].Type.(*ast.Ident); ok {
-						events = append(events, ident.Name)
-					}
-				}
 			case *ast.GenDecl:
 				if decl.Tok != token.CONST {
 					continue
@@ -71,10 +69,42 @@ func sealed(t *testing.T) (events []string, states []ClaimState, timers []TimerK
 			}
 		}
 	}
+	events = eventTypes(t, files, parsed)
 	if len(events) == 0 || len(states) == 0 || len(timers) == 0 {
 		t.Fatalf("read no sealed set from the source: events %v, states %v, timers %v", events, states, timers)
 	}
 	return events, states, timers
+}
+
+// eventTypes is every type in this package that implements Event, as the compiler sees it rather
+// than as the source spells it: a type that embeds another inherits its isEvent, so a scan for
+// isEvent declarations would not see it, and such a type could be mapped onto an existing kind
+// and inherit every row that kind has.
+func eventTypes(t *testing.T, files *token.FileSet, parsed []*ast.File) []string {
+	t.Helper()
+	config := types.Config{Importer: importer.ForCompiler(files, "source", nil)}
+	pkg, err := config.Check("github.com/sjawhar/legion/daemon/internal/supervise", files, parsed, nil)
+	if err != nil {
+		t.Fatalf("type-check the package: %v", err)
+	}
+	event, ok := pkg.Scope().Lookup("Event").Type().Underlying().(*types.Interface)
+	if !ok {
+		t.Fatal("Event is not an interface")
+	}
+	var names []string
+	for _, name := range pkg.Scope().Names() {
+		declared, ok := pkg.Scope().Lookup(name).(*types.TypeName)
+		if !ok {
+			continue
+		}
+		if _, isInterface := declared.Type().Underlying().(*types.Interface); isInterface {
+			continue
+		}
+		if types.Implements(declared.Type(), event) {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 // samples is one event of every kind the table distinguishes, by Go type. A Timer is one kind per
@@ -83,24 +113,26 @@ func samples(t *testing.T) map[string][]Event {
 	t.Helper()
 	events, _, timers := sealed(t)
 	byType := map[string][]Event{
-		"RuntimeObservation": {RuntimeObservation{}},
-		"StreamHello":        {StreamHello{}},
-		"StreamTurnStart":    {StreamTurnStart{}},
-		"StreamTurnEnd":      {StreamTurnEnd{}},
-		"StreamClosed":       {StreamClosed{}},
-		"StreamLateRefusal":  {StreamLateRefusal{}},
-		"PromptAcked":        {PromptAcked{}},
-		"PromptRefused":      {PromptRefused{}},
-		"TreeVolumeLost":     {TreeVolumeLost{}},
-		"RequestSpawn":       {RequestSpawn{}},
-		"RequestRegister":    {RequestRegister{}},
-		"RequestReady":       {RequestReady{}},
-		"RequestSuspend":     {RequestSuspend{}},
-		"RequestResume":      {RequestResume{}},
-		"RequestStop":        {RequestStop{}},
-		"RequestRetry":       {RequestRetry{}},
-		"RequestDeliver":     {RequestDeliver{}},
-		"RequestExit":        {RequestExit{}},
+		"RuntimeObservation":   {RuntimeObservation{}},
+		"StreamHello":          {StreamHello{}},
+		"StreamTurnStart":      {StreamTurnStart{}},
+		"StreamTurnEnd":        {StreamTurnEnd{}},
+		"StreamClosed":         {StreamClosed{}},
+		"StreamLateRefusal":    {StreamLateRefusal{}},
+		"PromptAcked":          {PromptAcked{}},
+		"PromptRefused":        {PromptRefused{}},
+		"TreeVolumeLost":       {TreeVolumeLost{}},
+		"RequestSpawn":         {RequestSpawn{}},
+		"RequestRegister":      {RequestRegister{}},
+		"RequestReady":         {RequestReady{}},
+		"RequestSuspend":       {RequestSuspend{}},
+		"RequestResume":        {RequestResume{}},
+		"RequestStop":          {RequestStop{}},
+		"RequestTreeClose":     {RequestTreeClose{}},
+		"RequestOperatorClose": {RequestOperatorClose{}},
+		"RequestRetry":         {RequestRetry{}},
+		"RequestDeliver":       {RequestDeliver{}},
+		"RequestExit":          {RequestExit{}},
 	}
 	for _, kind := range timers {
 		byType["Timer"] = append(byType["Timer"], Timer{Kind: kind})
@@ -142,6 +174,27 @@ func TestTheTableHasARowOrANamedIgnoreForEveryEventInEveryState(t *testing.T) {
 	for k := range table {
 		if !covered[k] {
 			t.Errorf("row %s/%s is keyed on a state or event kind the sealed set does not have", k.state, k.kind)
+		}
+	}
+}
+
+// Two event types keyed on one kind would share every row the table holds for it, which is how an
+// event meant to be answered its own way answers as another: the close split is worth nothing if a
+// later close can be aliased onto onStop in kindOf. A Timer is the one type that spreads over
+// several kinds, by its TimerKind, and each of those is one kind of one type.
+func TestNoTwoEventTypesShareAKind(t *testing.T) {
+	byKind := map[eventKind]string{}
+	for name, events := range samples(t) {
+		for _, ev := range events {
+			k := kindOf(ev)
+			if k == "" {
+				t.Errorf("%s has no kind: kindOf answers nothing for it, so the table cannot key on it", name)
+				continue
+			}
+			if owner, taken := byKind[k]; taken && owner != name {
+				t.Errorf("%s and %s are both kind %q: each event type answers its own way, so each takes its own kind", owner, name, k)
+			}
+			byKind[k] = name
 		}
 	}
 }

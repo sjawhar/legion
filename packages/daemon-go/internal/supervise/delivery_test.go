@@ -1,10 +1,12 @@
 package supervise
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -330,6 +332,66 @@ func TestAReplayedTurnStartIsFencedOnItsDeliveryID(t *testing.T) {
 	}
 }
 
+// A turn that starts after the no-turn bound carries no delivery id and nothing is in flight to
+// attribute it to, so it is a foreign turn and confirms nothing (the divergence from the shipped
+// daemon, which commits a late start as the same delivery). The task is re-sent when that turn
+// ends — unless the issue has left this role's phase meanwhile, in which case the late turn was
+// the phase itself and re-sending would hand a finished worker its own finished task.
+func TestALateForeignTurnResendsTheTaskUnlessTheIssueLeftThePhase(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		holdsAfterRun bool
+		prompts       int
+	}{
+		{name: "the phase is still this role's", holdsAfterRun: true, prompts: 2},
+		{name: "the issue left this role's phase", holdsAfterRun: false, prompts: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newBareHarness(t)
+			// The phase is this role's while the task is delivered; the late turn is the phase
+			// running, so by the time it ends the daemon may have advanced past it.
+			holds := true
+			h.deps.PhaseHolds = func(context.Context, Claim, Delivery) (bool, error) { return holds, nil }
+			c := queuedClaim()
+			if err := h.store.PutClaim(h.ctx, c); err != nil {
+				t.Fatal(err)
+			}
+			h.start(c)
+			h.reach(StateReady)
+			h.must(RequestDeliver{Claim: testToken, Task: "the task"})
+			first := h.wantPrompts(1)[0]
+
+			h.advance(testRPC) // the bound passes with no turn: charged, and the id rotated
+			rotated := h.pending().ID
+			if rotated == first.DeliveryID {
+				t.Fatal("the delivery id was not rotated when the bound passed")
+			}
+
+			h.must(StreamTurnStart{Claim: testToken})
+			h.wantState(StateWorking)
+			if !h.pending().ConfirmedAt.IsZero() {
+				t.Fatal("a turn starting after the bound confirmed the delivery it cannot be attributed to")
+			}
+			holds = tc.holdsAfterRun
+			h.must(StreamTurnEnd{Claim: testToken})
+
+			prompts := h.wantPrompts(tc.prompts)
+			if tc.holdsAfterRun {
+				if resent := prompts[1]; resent.DeliveryID != rotated || resent.Message != "the task" {
+					t.Errorf("re-sent %+v, want the task under the rotated id %s", resent, rotated)
+				}
+				return
+			}
+			if h.claim().Pending != nil {
+				t.Errorf("the claim still holds %+v after the issue left its phase", h.claim().Pending)
+			}
+			if _, ok := h.store.delivery(testToken); ok {
+				t.Error("the store still holds the delivery after the issue left its phase")
+			}
+		})
+	}
+}
+
 func TestAForeignTurnDoesNotConfirmADeliveryNeverSent(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateReady)
@@ -614,5 +676,41 @@ func TestRepeatOutboxDeliveryDoesNotQueueTheTaskTwice(t *testing.T) {
 	}
 	if prompts := h.wantPrompts(1); prompts[0].DeliveryID != "outbox:42" {
 		t.Fatalf("prompt = %#v, want outbox delivery id", prompts[0])
+	}
+}
+
+// Dropping a task for its phase clears the claim's pending delivery, and a restored claim also
+// carries the daemon's standing question for its agent: whether the turn it may be in is the
+// pending delivery's. Leaving that question armed with nothing pending made ready-with-no-task
+// reachable for the first time, and the next task then took the agent's own foreign turn as its
+// own — confirmed, never prompted, and retired at that turn's end, so the phase stalled with
+// nothing sent and the outbox row already finished.
+func TestDroppingATaskForItsPhaseAlsoDropsTheQuestionARestartLeft(t *testing.T) {
+	restored := fixture(StateReady)
+	restored.Pending.Phase = phase.Implementing
+	h := newHarnessOf(t, restored)
+	if err := h.store.PutDelivery(h.ctx, testToken, *restored.Pending); err != nil {
+		t.Fatalf("seed the restored delivery: %v", err)
+	}
+	h.conns.Register(testToken, h.conn)
+	h.deps.PhaseHolds = func(_ context.Context, _ Claim, d Delivery) (bool, error) { return d.Phase == "", nil }
+	h.start(restored)
+
+	// The issue has left the phase the restored task was queued for: it is dropped.
+	h.must(RequestReady{Claim: testToken, Generation: restored.Generation, Session: session})
+	if p := h.m.Claim().Pending; p != nil {
+		t.Fatalf("the finished phase's task is still pending as %+v", p)
+	}
+
+	// The agent is in a turn of its own, and an operator delivers a task of no phase.
+	h.conn.SetStreaming(true)
+	h.must(RequestDeliver{Claim: testToken, Task: "look at the tree"})
+
+	sent := h.wantPrompts(1)
+	if sent[0].Message != "look at the tree" {
+		t.Errorf("prompt = %+v, want the operator's task", sent[0])
+	}
+	if p := h.m.Claim().Pending; p == nil || !p.ConfirmedAt.IsZero() {
+		t.Fatalf("pending = %+v, want the operator's task unconfirmed: the agent's own turn is not its delivery's", p)
 	}
 }

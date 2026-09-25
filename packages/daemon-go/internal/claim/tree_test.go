@@ -14,6 +14,9 @@ var treePlacements = []struct {
 	{name: "the tree's own issue", issue: "LEGION-208", tree: "LEGION-208", root: true},
 	{name: "a child issue", issue: "LEGION-231", tree: "LEGION-208", root: false},
 	{name: "a child whose key extends the tree's", issue: "LEGION-2081", tree: "LEGION-208", root: false},
+	// The suffix case the comment above claims: only this row separates IsTreeRoot from
+	// strings.HasSuffix(issue, tree), which every other row here agrees with.
+	{name: "a key the tree's is a suffix of", issue: "ALEGION-208", tree: "LEGION-208", root: false},
 	{name: "a child whose key the tree's extends", issue: "LEGION-20", tree: "LEGION-208", root: false},
 	{name: "the tree's number in another project", issue: "WIDGETS-208", tree: "LEGION-208", root: false},
 }

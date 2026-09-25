@@ -18,7 +18,7 @@ import (
 const logTailLines = 20
 
 // workspaceLostExitCode is workspace-init's exit code for a tree volume that lost its clone and
-// the session being resumed (decision 11): a Gone that says so begins runtime.WorkspaceLostDetail.
+// the session being resumed (decision 11): a Gone that says so carries Observation.WorkspaceLost.
 const workspaceLostExitCode = 3
 
 // view is what the stores hold for one claim's name: its Sandbox, the pod the Sandbox owns, and a
@@ -96,7 +96,10 @@ func (r *Runtime) evaluate(ctx context.Context, loc runtime.Locator) runtime.Obs
 	pod := v.pod
 	switch pod.Status.Phase {
 	case corev1.PodFailed, corev1.PodSucceeded:
-		return observe(runtime.Gone, "%s", r.ended(ctx, v))
+		detail, workspaceLost := r.ended(ctx, v)
+		ended := observe(runtime.Gone, "%s", detail)
+		ended.WorkspaceLost = workspaceLost
+		return ended
 	}
 	if scheduled := podCondition(pod, corev1.PodScheduled); pod.Status.Phase == corev1.PodPending && scheduled != nil &&
 		scheduled.Status == corev1.ConditionFalse {
@@ -138,9 +141,9 @@ func podAbsent(v view) string {
 
 // ended is row 5's detail: the container that ended — the first init container that failed, else
 // the main container — with its reason and exit code, the Sandbox's Finished condition when
-// current, and the container's last log lines. workspace-init's exit code 3 begins the detail
-// with runtime.WorkspaceLostDetail (decision 11).
-func (r *Runtime) ended(ctx context.Context, v view) string {
+// current, and the container's last log lines. workspace-init's exit code 3 is the tree volume
+// lost (decision 11), which it reports as the second return rather than as a shape of the detail.
+func (r *Runtime) ended(ctx context.Context, v view) (string, bool) {
 	pod := v.pod
 	kind, container, state := "main", mainContainer, (*corev1.ContainerStateTerminated)(nil)
 	for _, status := range pod.Status.InitContainerStatuses {
@@ -157,8 +160,9 @@ func (r *Runtime) ended(ctx context.Context, v view) string {
 		}
 	}
 	var detail strings.Builder
-	if kind == "init" && container == initContainer && state.ExitCode == workspaceLostExitCode {
-		detail.WriteString(runtime.WorkspaceLostDetail + " ")
+	workspaceLost := kind == "init" && container == initContainer && state != nil && state.ExitCode == workspaceLostExitCode
+	if workspaceLost {
+		detail.WriteString("the tree volume was lost: ")
 	}
 	fmt.Fprintf(&detail, "pod %s (uid %s) %s", pod.Name, pod.UID, pod.Status.Phase)
 	if state != nil {
@@ -170,7 +174,7 @@ func (r *Runtime) ended(ctx context.Context, v view) string {
 		fmt.Fprintf(&detail, "; sandbox Finished=%s %s", finished.Status, finished.Reason)
 	}
 	fmt.Fprintf(&detail, "; last lines of %s:\n%s", container, r.logTail(ctx, pod.Name, container))
-	return detail.String()
+	return detail.String(), workspaceLost
 }
 
 // logTail is a container's last log lines, or why they could not be read: a detail's quote never

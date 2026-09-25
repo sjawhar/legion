@@ -889,7 +889,8 @@ func TestRunRelaunchesAFreshSessionWhenTheTreeVolumeIsLostAndTellsTheTree(t *tes
 	resumed := d.claim(root).Locator
 
 	rt.Emit(runtime.Observation{Locator: *resumed, Kind: runtime.Gone,
-		Detail: runtime.WorkspaceLostDetail + " pod legion-legion-1-architect Failed: init container workspace-init terminated (Error, exit code 3)"})
+		WorkspaceLost: true,
+		Detail:        "the tree volume was lost: pod legion-legion-1-architect Failed: init container workspace-init terminated (Error, exit code 3)"})
 
 	eventually(t, "the root's fresh relaunch and the worker's dropped session", func() bool {
 		r, w := d.claim(root), d.claim(worker)

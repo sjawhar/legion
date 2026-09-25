@@ -25,8 +25,12 @@ import (
 
 const (
 	outboxBatchSize = 32
-	outboxLease     = 30 * time.Second
-	outboxPoll      = 100 * time.Millisecond
+	// outboxDeliveryPrefix namespaces a delivery id the outbox mints from its row id, so a row's
+	// id cannot collide with a minted one. What a delivery is for is its phase, not its id: the
+	// id is rotated by a prompt retry.
+	outboxDeliveryPrefix = "outbox:"
+	outboxLease          = 30 * time.Second
+	outboxPoll           = 100 * time.Millisecond
 	// outboxFailedTickWait spaces the ticks while the database refuses, so an outage logs once a
 	// second rather than ten times.
 	outboxFailedTickWait = time.Second
@@ -245,7 +249,7 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 	if err := r.notices.Publish(ctx, notify.Topic(token, row.Issue), message, payload, dedupeKey); err != nil {
 		return fmt.Errorf("publish issue notice for %s: %w", row.Issue, err)
 	}
-	if issue.Tree != issue.Key {
+	if !claim.IsTreeRoot(issue.Key, issue.Tree) {
 		if err := r.notices.Publish(ctx, notify.Topic(token, issue.Tree), message, payload, dedupeKey); err != nil {
 			return fmt.Errorf("publish tree notice for %s: %w", row.Issue, err)
 		}
@@ -319,7 +323,10 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 			}
 		}
 		if payload.Task != "" {
-			if err := machine.Handle(ctx, supervise.RequestDeliver{Claim: token, Task: payload.Task, ID: fmt.Sprintf("outbox:%d", row.ID)}); err != nil {
+			// The row's phase, already held to the issue's above, travels with the delivery: it is
+			// what says the task is still the work to do once the delivery has outlived its id.
+			if err := machine.Handle(ctx, supervise.RequestDeliver{Claim: token, Task: payload.Task, Phase: payload.Phase,
+				ID: fmt.Sprintf("%s%d", outboxDeliveryPrefix, row.ID)}); err != nil {
 				return fmt.Errorf("deliver to claim %s: %w", token, err)
 			}
 		}
@@ -341,7 +348,7 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		if !found {
 			return nil
 		}
-		if err := machine.Handle(ctx, supervise.RequestStop{Claim: token, TreeClose: true}); err != nil {
+		if err := machine.Handle(ctx, supervise.RequestTreeClose{Claim: token}); err != nil {
 			return fmt.Errorf("close the tree of claim %s: %w", token, err)
 		}
 		return nil

@@ -170,12 +170,6 @@ const (
 	Uncertain ObservationKind = "uncertain"
 )
 
-// WorkspaceLostDetail begins the Detail of a Gone whose process never started because its
-// workspace-init found the tree volume lost: neither the shared clone nor the session file it was
-// to resume (exit code 3, cmd/legion/workspace_init.go). The session went with the volume, so the
-// supervisor relaunches the claim as a fresh session rather than resume one that no longer exists.
-const WorkspaceLostDetail = "workspace-lost:"
-
 // Observation is one runtime fact about one process, with the moment it was observed and, for a
 // verdict that needs one, the detail an operator reads.
 type Observation struct {
@@ -183,6 +177,12 @@ type Observation struct {
 	Kind    ObservationKind
 	At      time.Time
 	Detail  string
+	// WorkspaceLost is a Gone whose process never started because its workspace-init found the
+	// tree volume lost: neither the shared clone nor the session file it was to resume (exit code
+	// 3, cmd/legion/workspace_init.go). The session went with the volume, so the supervisor
+	// relaunches the claim as a fresh session rather than resume one that no longer exists. It is
+	// a field rather than a shape of Detail, which is prose for an operator and nothing else.
+	WorkspaceLost bool
 }
 
 // GitIdentity is the author a worker's commits carry.

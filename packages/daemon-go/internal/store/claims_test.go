@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
@@ -56,7 +57,7 @@ func sameClaim(t *testing.T, got, want supervise.Claim) {
 	if gotPending == nil {
 		return
 	}
-	if gotPending.ID != wantPending.ID || gotPending.Task != wantPending.Task {
+	if gotPending.ID != wantPending.ID || gotPending.Task != wantPending.Task || gotPending.Phase != wantPending.Phase {
 		t.Errorf("pending delivery read back = %+v, want %+v", *gotPending, *wantPending)
 	}
 	for _, field := range []struct {
@@ -92,6 +93,7 @@ func TestAClaimRoundTripsWithItsLocatorAndDelivery(t *testing.T) {
 	want.Pending = &supervise.Delivery{
 		ID:          "delivery-1",
 		Task:        "implement the plan",
+		Phase:       phase.Implementing,
 		QueuedAt:    at(1),
 		DeliveredAt: at(2),
 	}
@@ -104,6 +106,39 @@ func TestAClaimRoundTripsWithItsLocatorAndDelivery(t *testing.T) {
 	}
 
 	sameClaim(t, onlyClaim(t, store), want)
+}
+
+// The phase a task was queued for is what says the task is still the work to do, and it has to
+// survive the path that rewrites the delivery: a prompt refused or unanswered is re-put under a
+// new id, and a restart then reads the delivery back from this table. A phase lost on either side
+// of that round trip brings back the drop this column exists to make: the daemon would send a
+// finished phase's task to a worker that had moved on, silently, after every restart.
+func TestARePutDeliveryKeepsThePhaseItWasQueuedFor(t *testing.T) {
+	ctx := context.Background()
+	store := migratedStore(t)
+	c := tmuxClaim("legion-LEGION-211-implementer")
+	queued := supervise.Delivery{ID: "outbox:42", Task: "Continue. Phase: implementing.", Phase: phase.Implementing, QueuedAt: at(1)}
+	if err := store.PutClaim(ctx, c); err != nil {
+		t.Fatalf("put claim: %v", err)
+	}
+	if err := store.PutDelivery(ctx, c.Token, queued); err != nil {
+		t.Fatalf("put delivery: %v", err)
+	}
+
+	// What promptFailed does: the same task under a new id, unconfirmed.
+	rotated := queued
+	rotated.ID = "S4YXQ2F7TDNX"
+	if err := store.PutDelivery(ctx, c.Token, rotated); err != nil {
+		t.Fatalf("re-put the delivery under its new id: %v", err)
+	}
+
+	read := onlyClaim(t, store)
+	if read.Pending == nil {
+		t.Fatal("the restarted daemon read no pending delivery")
+	}
+	if read.Pending.ID != rotated.ID || read.Pending.Phase != phase.Implementing {
+		t.Fatalf("delivery read back = %+v, want %s queued for %s", read.Pending, rotated.ID, phase.Implementing)
+	}
 }
 
 func TestAClaimWithNothingOptionalRoundTripsAsNothing(t *testing.T) {

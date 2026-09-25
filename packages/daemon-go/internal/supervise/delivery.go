@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/phase"
 
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
@@ -25,9 +26,16 @@ import (
 // answers it without a second turn. The id is kept across a send that failed in transit, so a
 // retry is recognised, and rotated after a prompt that was acknowledged and started no turn, so
 // the retry is a new prompt rather than an echo of the acknowledged one.
+//
+// Phase is the issue phase the task was queued for, which is what says whether the task is still
+// the work to do: it is carried here, persisted, because the id is rewritten by that rotation and
+// the task text is the workflow's to write. A delivery of no phase — an operator's own, an
+// architect's — is never dropped for the phase its issue reaches. It is still retired with a
+// suspension, like any unconfirmed delivery (settle).
 type Delivery struct {
 	ID          string
 	Task        string
+	Phase       phase.Phase
 	QueuedAt    time.Time
 	DeliveredAt time.Time
 	ConfirmedAt time.Time
@@ -48,9 +56,11 @@ func pendingID(p *Delivery) string {
 	return p.ID
 }
 
-// queue gives the claim a task. An outbox repeats its row id after a crash before FinishOutbox;
-// the same task and id are therefore accepted without changing the persisted delivery.
-func (m *Machine) queue(ctx context.Context, task, id string) error {
+// queue gives the claim the task a deliver request carries, with the phase it was queued for. An
+// outbox repeats its row id after a crash before FinishOutbox; the same task and id are therefore
+// accepted without changing the persisted delivery.
+func (m *Machine) queue(ctx context.Context, request RequestDeliver) error {
+	id, task := request.ID, request.Task
 	if pending := m.claim.Pending; pending != nil {
 		if id != "" && pending.ID == id && pending.Task == task {
 			return nil
@@ -60,7 +70,7 @@ func (m *Machine) queue(ctx context.Context, task, id string) error {
 	if id == "" {
 		id = rand.Text()
 	}
-	d := Delivery{ID: id, Task: task, QueuedAt: m.deps.Clock.Now()}
+	d := Delivery{ID: id, Task: task, Phase: request.Phase, QueuedAt: m.deps.Clock.Now()}
 	if err := m.deps.Store.PutDelivery(ctx, m.claim.Token, d); err != nil {
 		return err
 	}
@@ -69,10 +79,11 @@ func (m *Machine) queue(ctx context.Context, task, id string) error {
 }
 
 // sendPending sends the pending delivery if everything a send needs is true now: the claim is
-// ready or idle, the delivery is neither confirmed nor already on its way, and the claim's
-// connection is registered. A missing connection is not a failure — the shim's next hello sends
-// it. A delivery an earlier daemon may have sent is sent again only after the agent says it is
-// not already in a turn; if it is, that turn is taken as the delivery's.
+// ready or idle, the delivery is neither confirmed nor already on its way, the issue is still in
+// the phase the task was queued for, and the claim's connection is registered. A missing connection is not a
+// failure — the shim's next hello sends it. A delivery an earlier daemon may have sent is sent
+// again only after the agent says it is not already in a turn; if it is, that turn is taken as the
+// delivery's.
 func (m *Machine) sendPending(ctx context.Context) error {
 	if state := m.claim.State; state != StateReady && state != StateIdle {
 		return nil
@@ -89,6 +100,20 @@ func (m *Machine) sendPending(ctx context.Context) error {
 		m.log.Info("supervise: no connection; the delivery waits for the shim's hello", "delivery", p.ID)
 		return nil
 	}
+	holds, err := m.phaseHolds(ctx, *p)
+	if err != nil {
+		return err
+	}
+	if !holds {
+		m.log.Info("supervise: the issue has left the phase this task was queued for; it is dropped rather than sent",
+			"delivery", p.ID, "issue", m.claim.Issue, "queuedFor", p.Phase)
+		// The question a restart left — whether the turn the agent may be in is the pending
+		// delivery's — goes with the delivery it was about. Left armed with nothing pending, the
+		// next task takes the agent's own turn as its own: confirmed, never prompted, and retired
+		// at that turn's end.
+		m.askFirst = false
+		return m.retirePending(ctx)
+	}
 	if m.askFirst {
 		m.askFirst = false
 		if m.streaming(ctx, conn) {
@@ -99,6 +124,33 @@ func (m *Machine) sendPending(ctx context.Context) error {
 	}
 	m.startSend(conn, *p)
 	return nil
+}
+
+// phaseHolds asks whether the issue is still in the phase this task was queued for. A daemon with
+// no workflow configured supplies no answer, and every delivery holds.
+func (m *Machine) phaseHolds(ctx context.Context, d Delivery) (bool, error) {
+	if m.deps.PhaseHolds == nil {
+		return true, nil
+	}
+	holds, err := m.deps.PhaseHolds(ctx, m.claim, d)
+	if err != nil {
+		return false, fmt.Errorf("read the phase of %s: %w", m.claim.Token, err)
+	}
+	return holds, nil
+}
+
+// retirePending drops the pending delivery without sending it. The claim keeps its state: the
+// task is stale, not the agent.
+func (m *Machine) retirePending(ctx context.Context) error {
+	p := m.claim.Pending
+	if p == nil {
+		return nil
+	}
+	if err := m.deps.Store.RetireDelivery(ctx, m.claim.Token, p.ID); err != nil {
+		return err
+	}
+	m.claim.Pending = nil
+	return m.persist(ctx)
 }
 
 // streaming asks the agent whether a turn is in flight. An agent that cannot say is taken as not

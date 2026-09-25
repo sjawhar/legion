@@ -428,10 +428,12 @@ func (s *Postgres) RetryOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseTo
 
 // PendingStatusWrites lists every Dispatch status write the outbox has not finished: due now, in
 // flight, backing off after a failed attempt, or waiting behind an older write for the same issue.
-// Finishing deletes the row, so each one left is still unwritten.
+// Finishing deletes the row, so each one left is a write the outbox has not finished; a write that
+// reached Dispatch whose finish failed stays listed until its lease expires and the rerun finishes
+// it. Oldest first: the order ClaimDue writes one issue's statuses in.
 func (s *Postgres) PendingStatusWrites(ctx context.Context, tx pgx.Tx) ([]OutboxRow, error) {
 	rows, err := tx.Query(ctx, `select `+outboxColumns+` from outbox
-		where kind = $1 order by next_at, id`, string(OutboxKindDispatchStatus))
+		where kind = $1 order by id`, string(OutboxKindDispatchStatus))
 	if err != nil {
 		return nil, fmt.Errorf("list pending Dispatch status writes: %w", err)
 	}

@@ -168,6 +168,18 @@ func newHarness(t *testing.T) *harness {
 			Timeouts: supervise.Timeouts{
 				Boot: time.Minute, RegistrationIntervals: 3, RPC: 5 * time.Second, Probe: 30 * time.Second,
 			},
+			// The daemon's own wiring: a tree a workflow issue backs does not close here.
+			TreeClosable: func(ctx context.Context, c supervise.Claim) (bool, error) {
+				var issue *record.Issue
+				if err := pgx.BeginFunc(ctx, st.Pool(), func(tx pgx.Tx) error {
+					var err error
+					issue, err = record.NewStore().Issue(ctx, tx, c.Tree)
+					return err
+				}); err != nil {
+					return false, err
+				}
+				return issue == nil, nil
+			},
 		},
 		store:    st,
 		machines: map[claim.Token]*supervise.Machine{},

@@ -121,10 +121,10 @@ func (e *Engine) dispatchIssue(ctx context.Context, tx pgx.Tx, fact intake.Dispa
 	if agent, err := e.agentStatusWrite(ctx, tx, *issue, fact); err != nil || agent {
 		return intake.Result{}, err
 	}
-	if staleTreeStatus(fact.Status) {
+	if record.OutOfWorkflow(fact.Status) {
 		return intake.Result{}, e.leave(ctx, tx, *issue, fact.Status)
 	}
-	if fact.Status == "todo" && e.treeKey(ctx, tx, *issue) != issue.Key {
+	if fact.Status == "todo" && !claim.IsTreeRoot(issue.Key, issue.Tree) {
 		return intake.Result{}, e.reenterChild(ctx, tx, *issue, fact)
 	}
 	return intake.Result{}, nil
@@ -140,7 +140,7 @@ func (e *Engine) agentStatusWrite(ctx context.Context, tx pgx.Tx, issue record.I
 	if fact.ActorSession == "" {
 		return false, nil
 	}
-	claims, err := e.store.SessionClaimsTree(ctx, tx, e.treeKey(ctx, tx, issue), fact.ActorSession)
+	claims, err := e.store.SessionClaimsTree(ctx, tx, issue.Tree, fact.ActorSession)
 	if err != nil || !claims {
 		return false, err
 	}
@@ -673,7 +673,7 @@ func (e *Engine) advancePendingReady(ctx context.Context, tx pgx.Tx, rootKey str
 		return err
 	}
 	for _, issue := range issues {
-		if e.treeKey(ctx, tx, issue) != rootKey || issue.Phase != phase.Merging || issue.ReadyPendingVersion == nil || *issue.ReadyPendingVersion > gate.LatestVersion {
+		if issue.Tree != rootKey || issue.Phase != phase.Merging || issue.ReadyPendingVersion == nil || *issue.ReadyPendingVersion > gate.LatestVersion {
 			continue
 		}
 		row, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleMerger)
@@ -697,7 +697,7 @@ func (e *Engine) advancePendingReady(ctx context.Context, tx pgx.Tx, rootKey str
 // the human's move; the tree's architect is told, and decides what the rest of its tree does, as
 // the shipped daemon routes a child's close to the architect. A later todo re-enters the child.
 func (e *Engine) leave(ctx context.Context, tx pgx.Tx, issue record.Issue, status string) error {
-	if e.treeKey(ctx, tx, issue) == issue.Key {
+	if claim.IsTreeRoot(issue.Key, issue.Tree) {
 		return e.beginLinger(ctx, tx, issue)
 	}
 	if issue.Phase != phase.Done {
@@ -813,13 +813,6 @@ func (e *Engine) pullRequest(ctx context.Context, tx pgx.Tx, repo string, number
 	return nil, nil
 }
 
-func (e *Engine) treeKey(_ context.Context, _ pgx.Tx, issue record.Issue) string {
-	if issue.Tree != "" {
-		return issue.Tree
-	}
-	return issue.Key
-}
-
 func (e *Engine) treeMembers(ctx context.Context, tx pgx.Tx, root record.Issue) ([]record.Issue, error) {
 	issues, err := e.store.Issues(ctx, tx)
 	if err != nil {
@@ -860,14 +853,9 @@ func (e *Engine) liveTree(ctx context.Context, tx pgx.Tx, root record.Issue) (bo
 }
 
 func (e *Engine) gateForIssue(ctx context.Context, tx pgx.Tx, issue record.Issue) (*record.DesignGate, error) {
-	return e.store.Gate(ctx, tx, e.treeKey(ctx, tx, issue))
+	return e.store.Gate(ctx, tx, issue.Tree)
 }
 
-// staleTreeStatus is a status that takes an issue out of the workflow: every status admission
-// holds no slot for except todo, which admits.
-func staleTreeStatus(status string) bool {
-	return status == "done" || status == "backlog" || status == "icebox" || status == "triage"
-}
 func phaseIndex(value phase.Phase) int {
 	for index, candidate := range []phase.Phase{phase.Planning, phase.Implementing, phase.Testing, phase.Reviewing, phase.Retro, phase.Merging, phase.AwaitingMerge, phase.ProductionCheck} {
 		if candidate == value {

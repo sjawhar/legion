@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -166,6 +165,22 @@ type Deps struct {
 	// fresh, so the daemon can tell the tree's other claims (TreeVolumeLost): their sessions were on
 	// the same volume. nil tells no one.
 	VolumeLost func(c Claim)
+	// PhaseHolds says whether this delivery is still worth sending: the workflow enqueues a task
+	// for the phase its issue was in, and the outbox refuses to start a role for a phase the issue
+	// has left (daemon/outbox.go), so a delivery queued before the phase moved on is that same
+	// staleness one step later and is dropped rather than sent. It is given the delivery as well as
+	// the claim because only the caller that queued a task knows whether the workflow's phases
+	// govern it at all: a task an operator delivered by hand is not the workflow's to drop. nil
+	// holds every delivery.
+	PhaseHolds func(ctx context.Context, c Claim, d Delivery) (bool, error)
+	// TreeClosable answers whether the operator may close this claim's tree: false refuses the
+	// close, and an error is the read itself failing, which the caller sees as a failure rather
+	// than a refusal. It is asked only for the operator's own close — the workflow's linger close
+	// is its own decision — and here rather than by the caller, so the answer and the stop it
+	// decides are one decision rather than two round trips apart. It is not a lock on what it
+	// reads: an issue recorded for the tree commits in its own transaction and can still land
+	// between this answer and the retire. nil closes every tree.
+	TreeClosable func(ctx context.Context, c Claim) (bool, error)
 }
 
 func (d Deps) check() error {
@@ -547,7 +562,7 @@ func (m *Machine) start(ctx context.Context, token string) (runtime.Locator, err
 func (m *Machine) died(ctx context.Context, observation runtime.Observation) error {
 	m.log.Warn("supervise: process died", "incarnation", m.claim.Locator.Incarnation, "observed", string(observation.Kind),
 		"detail", observation.Detail)
-	if observation.Kind == runtime.Gone && strings.HasPrefix(observation.Detail, runtime.WorkspaceLostDetail) && m.claim.SessionFile != "" {
+	if observation.Kind == runtime.Gone && observation.WorkspaceLost && m.claim.SessionFile != "" {
 		return m.relaunchFresh(ctx)
 	}
 	return m.relaunchAfterFailure(ctx)
@@ -768,6 +783,10 @@ func claimOf(ev Event) claim.Token {
 	case RequestResume:
 		return ev.Claim
 	case RequestStop:
+		return ev.Claim
+	case RequestTreeClose:
+		return ev.Claim
+	case RequestOperatorClose:
 		return ev.Claim
 	case RequestRetry:
 		return ev.Claim

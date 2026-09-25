@@ -170,7 +170,7 @@ func (a *Admission) applyObservation(ctx context.Context, tx pgx.Tx, stored reco
 	// The workflow handler runs first and re-enters a live tree's child reopened to todo, recording
 	// the observation; a child still newly todo here has no live tree. It is an orphan, admitted as
 	// a root of its own, as an unrecorded orphan is.
-	if observation.Status == "todo" && stored.Tree != stored.Key && stored.Status != "todo" {
+	if observation.Status == "todo" && !claim.IsTreeRoot(stored.Key, stored.Tree) && stored.Status != "todo" {
 		a.log.Info("admission orphan", "issue", stored.Key, "parent", observation.Parent)
 		return a.readmit(ctx, tx, stored, observation.Title, observation.Parent, observation.Rank, observation.Seq)
 	}
@@ -188,7 +188,7 @@ func (a *Admission) applyObservation(ctx context.Context, tx pgx.Tx, stored reco
 // readmittable says whether a todo on this record starts a new generation of its tree: it is a
 // root, and its tree lingers after its sign-off or was closed. A child's done is only the child's.
 func readmittable(stored record.Issue) bool {
-	return stored.Tree == stored.Key && (stored.LingerUntil != nil || stored.Phase == phase.Done)
+	return claim.IsTreeRoot(stored.Key, stored.Tree) && (stored.LingerUntil != nil || stored.Phase == phase.Done)
 }
 
 // readmit records a lingering or closed root's todo as a new generation waiting for a slot. The new
@@ -252,7 +252,7 @@ func (a *Admission) releaseInactiveSlots(ctx context.Context, tx pgx.Tx) error {
 		if issue == nil {
 			return fmt.Errorf("slotted issue %s has no record", slot.Issue)
 		}
-		if issue.Phase == phase.Done || staleStatus(issue.Status) {
+		if issue.Phase == phase.Done || record.OutOfWorkflow(issue.Status) {
 			if err := a.store.ReleaseSlot(ctx, tx, issue.Key); err != nil {
 				return fmt.Errorf("release inactive issue %s: %w", issue.Key, err)
 			}
@@ -318,15 +318,6 @@ func nextSlotIndex(slots []record.Slot) int {
 		if _, present := used[index]; !present {
 			return index
 		}
-	}
-}
-
-func staleStatus(status string) bool {
-	switch status {
-	case "triage", "icebox", "backlog", "done":
-		return true
-	default:
-		return false
 	}
 }
 
