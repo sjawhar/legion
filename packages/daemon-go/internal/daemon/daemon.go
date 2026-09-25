@@ -225,6 +225,16 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 		defer cancelAfterProbe()
 	}
 	if workflow != nil {
+		// The durable consumers exist before the listing is read: a consumer created now delivers
+		// only what is published after it, so everything earlier is the listing's, and what the
+		// listing misses (a move published while it is read) the consumer delivers.
+		if err := workflow.connect(boot, cfg); err != nil {
+			s.stop()
+			listener.Close()
+			workflow.stop()
+			st.Close()
+			return err
+		}
 		if err := workflow.reconcile(boot); err != nil {
 			s.stop()
 			listener.Close()
@@ -233,13 +243,6 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 			return err
 		}
 		log.Info("legion workflow boot stage", "stage", "admission")
-		if err := workflow.connect(boot, cfg); err != nil {
-			s.stop()
-			listener.Close()
-			workflow.stop()
-			st.Close()
-			return err
-		}
 		workflow.attach(s)
 	}
 

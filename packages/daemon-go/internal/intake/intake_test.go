@@ -323,7 +323,8 @@ func TestConsumeRestartResumesAfterAcknowledgedMessage(t *testing.T) {
 
 // A daemon's first boot on a NATS server already holding history — production's stream keeps
 // 72 hours of ENVOY_NOTIFICATIONS — must not replay it into admission: its consumers, created now,
-// start at the next message. Boot's Dispatch listing is what covers the state before them.
+// start at the next message. Boot reads its Dispatch listing after creating them, and the listing
+// covers the state before them.
 func TestAFreshConsumerStartsAtTheNextMessage(t *testing.T) {
 	pool := migratedPool(t)
 	createWrites(t, pool)

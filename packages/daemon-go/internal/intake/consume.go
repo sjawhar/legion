@@ -40,8 +40,9 @@ type Consumers struct {
 
 // OpenConsumers creates or updates this project's Dispatch and GitHub durable consumers. A consumer
 // created here starts at the next message, so a first daemon on a stream that already holds history
-// (production keeps 72 hours of it) does not replay it into admission; boot's Dispatch listing is
-// what covers the state before it. A consumer that exists keeps its position and the policy that
+// (production keeps 72 hours of it) does not replay it into admission. Boot opens the consumers before
+// it reads its Dispatch listing, so the listing covers the state before them and the consumers
+// everything published since, including what lands while the listing is read. A consumer that exists keeps its position and the policy that
 // created it, and takes the rest of this boot's configuration.
 func OpenConsumers(ctx context.Context, js jetstream.JetStream, spec ConsumerSpec) (*Consumers, error) {
 	spec, err := normalizedSpec(spec)

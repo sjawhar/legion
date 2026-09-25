@@ -99,7 +99,8 @@ func (w *workflowRuntime) bind(url, token string) {
 }
 
 // connect opens Envoy's JetStream and this project's durable consumers, so a missing
-// notification stream refuses boot rather than leaving a daemon that reads no events.
+// notification stream refuses boot rather than leaving a daemon that reads no events. Boot runs it
+// before reconcile, whose Dispatch listing covers only what precedes a consumer created now.
 func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config) error {
 	conn, err := nats.Connect(strings.Join(cfg.NatsURLs, ","))
 	if err != nil {
