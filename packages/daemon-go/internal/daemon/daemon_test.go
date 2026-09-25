@@ -681,7 +681,12 @@ func TestAnIssueMovedWhileBootListsIsStillAdmitted(t *testing.T) {
 	var once sync.Once
 	dispatchServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/issues" {
-			t.Errorf("Dispatch request = %s %s", r.Method, r.URL.Path)
+			// Once the move is admitted, the outbox reads and writes this project's issue; those
+			// calls are not what this test is about. Another project's issue is never this daemon's.
+			if !strings.HasPrefix(r.URL.Path, "/api/v1/issues/"+cfg.Project+"-") {
+				t.Errorf("Dispatch request = %s %s", r.Method, r.URL.Path)
+			}
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
 			return
 		}
 		// The move lands while the listing is read, which is already past it.
