@@ -48,12 +48,23 @@ import (
 // canaryToken is the provisioning Secret's value in every pod the rig runs.
 const canaryToken = "ghs_canary_the_tree_must_never_read"
 
-// canaryForms are the ways the token can sit in a file: as itself, base64-encoded, and as the
-// base64 of the Basic credential git sends, which an http.extraHeader would hold.
-var canaryForms = []string{
-	canaryToken, base64.StdEncoding.EncodeToString([]byte(canaryToken)),
-	base64.StdEncoding.EncodeToString([]byte("x-access-token:" + canaryToken)),
-}
+// canaryForms are the ways the token can sit in a file: as itself, and base64-encoded inside any
+// payload, such as the Basic credential an http.extraHeader holds, whatever its username. Base64
+// encodes three bytes as four characters, so the token encodes differently at each byte offset
+// modulo three: each form is the run of characters the token's own bytes decide at one offset,
+// without the partial groups at either end.
+var canaryForms = func() []string {
+	forms := []string{canaryToken}
+	for shift := 0; shift < 3; shift++ {
+		encoded := base64.StdEncoding.EncodeToString(append(make([]byte, shift), canaryToken...))
+		start := 0
+		if shift > 0 {
+			start = 4
+		}
+		forms = append(forms, encoded[start:(shift+len(canaryToken))/3*4])
+	}
+	return forms
+}()
 
 // boundaryRepo is the repository every pod provisions (testSpec's).
 const boundaryRepo = "sjawhar/legion-smoke"
