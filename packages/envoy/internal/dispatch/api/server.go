@@ -221,20 +221,12 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 	// still serves every other caller of FindQuote.
 	var ambiguousQuote *docs.ErrQuoteAmbiguous
 	if errors.As(err, &ambiguousQuote) {
-		WriteJSON(w, http.StatusConflict, map[string]any{
-			"error":      ambiguousQuote.Error(),
-			"code":       "TARGET_AMBIGUOUS",
-			"candidates": ambiguousQuote.Candidates,
-		})
+		writeAmbiguousTarget(w, ambiguousQuote.Error(), ambiguousQuote.Candidates)
 		return
 	}
 	var ambiguous *pmdoc.ErrTargetAmbiguous
 	if errors.As(err, &ambiguous) {
-		WriteJSON(w, http.StatusConflict, map[string]any{
-			"error":      ambiguous.Error(),
-			"code":       "TARGET_AMBIGUOUS",
-			"candidates": ambiguous.Candidates,
-		})
+		writeAmbiguousTarget(w, ambiguous.Error(), ambiguous.Candidates)
 		return
 	}
 
@@ -318,6 +310,16 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 	}
 	writeError(w, "INTERNAL", http.StatusInternalServerError, "internal server error")
 	slog.Error("dispatch: API handler failed", "error", err)
+}
+
+// writeAmbiguousTarget serves a quote that resolved in several places: the caller picks one by
+// the candidates' positions, or narrows the quote.
+func writeAmbiguousTarget(w http.ResponseWriter, message string, candidates []pmdoc.Candidate) {
+	WriteJSON(w, http.StatusConflict, map[string]any{
+		"error":      message,
+		"code":       "TARGET_AMBIGUOUS",
+		"candidates": candidates,
+	})
 }
 
 func (s *server) optionalActor(r *http.Request) (model.Actor, bool, error) {

@@ -20,11 +20,20 @@ import (
 // error raised outside a batch leaves it nil and reads exactly as it did before.
 type opIndex struct{ Operation *int }
 
+func (o *opIndex) setOperation(index int) { o.Operation = &index }
+
 func (o opIndex) prefix() string {
 	if o.Operation == nil {
 		return ""
 	}
 	return fmt.Sprintf("operation %d: ", *o.Operation)
+}
+
+// operationStamped is every error that renders its own operation index, so a new one joins by
+// embedding opIndex rather than by being listed here.
+type operationStamped interface {
+	error
+	setOperation(int)
 }
 
 // ErrInvalidOp identifies the malformed user-facing operation field.
@@ -87,26 +96,15 @@ func (e *ErrQuoteSpansBlocks) Error() string {
 
 func (e *ErrQuoteSpansBlocks) Unwrap() error { return pmdoc.ErrTargetSpansBlocks }
 
-// stampOperation gives index to the one error the API renders from its own text, and falls back
-// to wrapping everything else with the same prefix.
+// stampOperation gives index to an error that renders its own operation, and falls back to
+// wrapping everything else with the same prefix.
 func stampOperation(index int, err error) error {
-	var invalid *ErrInvalidOp
-	var missing *ErrQuoteNotFound
-	var ambiguous *ErrQuoteAmbiguous
-	var spans *ErrQuoteSpansBlocks
-	switch {
-	case errors.As(err, &invalid):
-		invalid.Operation = &index
-	case errors.As(err, &missing):
-		missing.Operation = &index
-	case errors.As(err, &ambiguous):
-		ambiguous.Operation = &index
-	case errors.As(err, &spans):
-		spans.Operation = &index
-	default:
-		return fmt.Errorf("operation %d: %w", index, err)
+	var stamped operationStamped
+	if errors.As(err, &stamped) {
+		stamped.setOperation(index)
+		return err
 	}
-	return err
+	return fmt.Errorf("operation %d: %w", index, err)
 }
 
 // isEditRefusal reports an error the caller wrote the batch wrong, whose own text is what the

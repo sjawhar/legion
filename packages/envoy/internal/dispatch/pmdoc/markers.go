@@ -79,12 +79,12 @@ func MarkerAt(doc *Node, position int) (BlockMarker, bool) {
 }
 
 func textblockMarker(doc, node *Node, path []int) BlockMarker {
-	switch node.Type {
-	case "heading":
+	if node.Type == "heading" {
 		return BlockMarker{Kind: MarkerHeading, Level: int(num(node.Attrs["level"], 1))}
-	case "paragraph":
-	default:
-		// A code block's first line follows a fence, and its content is literal.
+	}
+	// Only a paragraph can be carrying a list item's marker: a code block's first line follows a
+	// fence, and its content is literal.
+	if node.Type != "paragraph" {
 		return BlockMarker{}
 	}
 	// A list item renders its marker before its first child only; every later child of the same
