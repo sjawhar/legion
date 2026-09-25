@@ -45,6 +45,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/stream"
 )
@@ -65,7 +66,8 @@ var liveChecks = []liveCheck{
 	{"image-probe", (*liveRig).checkImageProbe},
 	{"root-ready", (*liveRig).checkRootReady},
 	{"gvisor", (*liveRig).checkGVisor},
-	{"gateway-token", (*liveRig).checkGatewayToken},
+	{"operator-token", (*liveRig).checkOperatorToken},
+	{"pod-baseline", (*liveRig).checkPodBaseline},
 	{"adopt-working-copy", (*liveRig).checkAdoptWorkingCopy},
 	{"worker-colocated", (*liveRig).checkWorkerColocated},
 	{"suspend", (*liveRig).checkSuspend},
@@ -104,15 +106,10 @@ const (
 // node a 4-vCPU one with room for the tree while no pod requests anything (Stage 4b decision 2).
 var liveTreeVolume = resource.MustParse("20Gi")
 
-// liveGateway is the model gateway the run's pods are pointed at, as the 4b daemon's configuration
-// sets it (runtime.kubernetes.gateway): production's middleman, the legion-worker ServiceAccount
-// agent-c creates for Legion's pods, the audience middleman trusts the cluster's tokens for, and
-// the shortest token lifetime. The stub agent calls no model; the pods carry the token so that the
-// proof runs the pod shape real agents run, which `legion-sandbox-pods` must admit.
-var liveGateway = Gateway{
-	URL: "https://middleman.hawk.internal.trajectorylabs.com", Audience: "middleman-legion", ServiceAccount: "legion-worker",
-	TokenExpiry: minTokenExpiry,
-}
+// fixtureConfigMap is the ConfigMap the operator fixture's pod.yml names; each run creates its own
+// copy, named for its project (LEGION_E2E_OPERATOR_CONFIGMAP), since Stage 4b's driver shares the
+// namespace and a common name would let one run delete another's route.
+const fixtureConfigMap = "legion-operator-route"
 
 // The stub agent (decision 7): the shim runs it after its hello is acknowledged, with the Oh My Pi
 // arguments the runtime appends as the shell's positional parameters, which it ignores.
@@ -125,6 +122,9 @@ type liveEnv struct {
 	streamHost, streamPort                             string
 	appID, appKeyName                                  string
 	record, work, from                                 string
+	// operatorPodFile is scripts/e2e/fixtures/operator-route/pod.yml, the operator's pod every
+	// launch carries; operatorConfigMap is the run's copy of the ConfigMap it names.
+	operatorPodFile, operatorConfigMap string
 }
 
 func readLiveEnv(t *testing.T) liveEnv {
@@ -152,6 +152,8 @@ func readLiveEnv(t *testing.T) liveEnv {
 		record:            get("LEGION_E2E_RECORD"),
 		work:              get("LEGION_E2E_WORK"),
 		from:              os.Getenv("LEGION_E2E_FROM"),
+		operatorPodFile:   get("LEGION_E2E_OPERATOR_POD"),
+		operatorConfigMap: get("LEGION_E2E_OPERATOR_CONFIGMAP"),
 	}
 	if !strings.HasPrefix(env.project, "s4a-") {
 		fmt.Printf("CHECK identity: FAIL: the run project %q lacks the reserved prefix s4a-\n", env.project)
@@ -165,6 +167,26 @@ func readLiveEnv(t *testing.T) liveEnv {
 		t.FailNow()
 	}
 	return env
+}
+
+// readOperatorPod reads the operator fixture through the daemon's own loader, with its ConfigMap named
+// for this run.
+func readOperatorPod(env liveEnv) (Pod, error) {
+	pod, err := config.ReadPodFile(env.operatorPodFile)
+	if err != nil {
+		return Pod{}, err
+	}
+	renamed := 0
+	for _, volume := range pod.Volumes {
+		if volume.ConfigMap != nil && volume.ConfigMap.Name == fixtureConfigMap {
+			volume.ConfigMap.Name = env.operatorConfigMap
+			renamed++
+		}
+	}
+	if renamed != 1 {
+		return Pod{}, fmt.Errorf("%s names ConfigMap %s in %d volumes, want one", env.operatorPodFile, fixtureConfigMap, renamed)
+	}
+	return Pod{Env: pod.Env, Volumes: pod.Volumes, VolumeMounts: pod.VolumeMounts, ServiceAccount: pod.ServiceAccount}, nil
 }
 
 // claimState is where a claim stands, as the daemon's machine would record it.
@@ -427,10 +449,12 @@ type liveRig struct {
 	tokens   implementTokens
 	identity runtime.GitIdentity
 	prompt   string
-	reg      *registry
-	obs      *observations
-	logs     *logRecorder
-	log      *slog.Logger
+	// pod is the operator's pod every launch carries: the fixture, as the daemon reads it.
+	pod  Pod
+	reg  *registry
+	obs  *observations
+	logs *logRecorder
+	log  *slog.Logger
 
 	// The current runtime instance and its listener; stop ends both.
 	rt      *Runtime
@@ -515,6 +539,12 @@ func newLiveRig(t *testing.T, env liveEnv) *liveRig {
 		fail("%v", err)
 	}
 
+	if r.pod, err = readOperatorPod(env); err != nil {
+		fail("%v", err)
+	}
+	note("operator", "pod from %s: service account %s, %d volumes, %d mounts, ConfigMap %s",
+		env.operatorPodFile, r.pod.ServiceAccount, len(r.pod.Volumes), len(r.pod.VolumeMounts), env.operatorConfigMap)
+
 	prompt := filepath.Join(env.work, "role-prompt.md")
 	if err := os.WriteFile(prompt, []byte("The Stage 4a stub agent; no model reads this.\n"), 0o600); err != nil {
 		fail("%v", err)
@@ -581,7 +611,7 @@ func (r *liveRig) startRuntime() error {
 		Namespace: r.env.namespace, Project: r.env.project, Image: r.env.image, StorageClass: "gp2", TreeVolume: liveTreeVolume,
 		StreamURL: address,
 		Tools:     Tools{GH: "/usr/local/bin/gh", Git: "/usr/bin/git", JJ: "/usr/local/bin/jj", Legion: "/opt/legion/go/bin/legion"},
-		Gateway:   liveGateway,
+		Pod:       r.pod,
 		Agent:     stubAgent, BootTimeout: liveBootTimeout, BootIntervals: liveBootIntervals,
 		TerminationGrace: liveGrace, ProbeInterval: liveProbeInterval, AdoptTimeout: liveAdoptTimeout,
 		Tokens: r.tokens, Conns: ln, Log: r.log,

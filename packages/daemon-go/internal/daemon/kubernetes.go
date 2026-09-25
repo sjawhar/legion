@@ -39,9 +39,9 @@ var workerImageTools = sandbox.Tools{GH: "/usr/local/bin/gh", Git: "/usr/bin/git
 
 // imageProbeRetry is how often the daemon tries its worker image again after an attempt that said
 // nothing definitive: the daemon's backoff, bounded like `legion probe-image`'s at six attempts.
-// The probe pod answers a failure it cannot tell from the network the same way every time (exit 75),
-// so an unbounded retry would hold a deterministic refusal, such as a memory limit too small for
-// the turn, as a boot that never ends.
+// Its transient outcomes (a pod that never finished, a kubelet failure) can repeat for a reason no
+// wait changes, such as a memory limit too small for Oh My Pi, so an unbounded retry would hold a
+// deterministic refusal as a boot that never ends.
 var imageProbeRetry = bootprobe.Image
 
 // prepareSandbox is what Agent Sandbox needs before anything is opened (C1's translation, C3):
@@ -76,7 +76,7 @@ func prepareSandbox(cfg config.Config, log *slog.Logger, o overrides, dispatchTo
 			return fmt.Errorf("the image probe needs the Agent Sandbox runtime, not %T", rt)
 		}
 		return sandboxed.ProbeImage(ctx, sandbox.ImageProbe{
-			Contract: api.GoDaemonAPIVersion, StateDir: cfg.StateDir, Budget: imageProbeBudget(cfg.SlowCommandTimeout),
+			Contract: api.GoDaemonAPIVersion, StateDir: cfg.StateDir, Budget: cfg.SlowCommandTimeout,
 			Retry: imageProbeRetry, APIServer: rc.Host,
 		})
 	}
@@ -145,9 +145,6 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, stream, dis
 		DaemonURL:  cfg.DaemonURL, EnvoyURL: cfg.EnvoyURL, DispatchURL: cfg.DispatchURL, DispatchToken: dispatchToken,
 		NATSURLs: cfg.NatsURLs,
 		Tools:    workerImageTools,
-		Gateway: sandbox.Gateway{
-			URL: k.Gateway.URL, Audience: k.Gateway.Audience, ServiceAccount: k.Gateway.ServiceAccount, TokenExpiry: k.Gateway.TokenExpiry,
-		},
 		Pod: sandbox.Pod{
 			Env: k.Pod.Env, Volumes: k.Pod.Volumes, VolumeMounts: k.Pod.VolumeMounts, ServiceAccount: k.Pod.ServiceAccount,
 		},
@@ -336,12 +333,4 @@ func (t implementTokens) Token(ctx context.Context, owner string) (string, error
 		return "", err
 	}
 	return lease.Token, nil
-}
-
-// imageProbeBudget is one image-probe attempt's wait for the probe pod: the slow-command budget
-// for the pod's start and its launch probes, with the pod's model turn, which `legion probe-image`
-// bounds on its own (modelTurnTimeout), on top, so the attempt outlasts the turn however the budget
-// is configured.
-func imageProbeBudget(slowCommand time.Duration) time.Duration {
-	return slowCommand + modelTurnTimeout
 }

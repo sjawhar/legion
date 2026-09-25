@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -14,14 +15,18 @@ import (
 
 // imageOmp is an `omp` that passes the image's three probes as a working image's Oh My Pi does:
 // pi.agents is there, the plugin linked into the profile loads from its own package and finds every
-// task agent and skill Legion's prompts name, and the session-storage setting refuses a value it does not know, naming the variable. Its model round
-// trip answers from the profile's default alias when the profile's models.yml routes anthropic to
-// the gateway $LEGION_TEST_ROUTE names, and refuses as Oh My Pi does without a usable model
-// otherwise.
+// task agent and skill Legion's prompts name, and the session-storage setting refuses a value it
+// does not know, naming the variable. With $LEGION_TEST_SEEN set, each run appends the environment
+// it saw there: PI_CONFIG_FILES, whether the first overlay it names exists, and OTEL_SDK_DISABLED.
 func imageOmp(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "omp")
 	script := `#!/bin/sh
+if [ -n "${LEGION_TEST_SEEN:-}" ]; then
+  first=${PI_CONFIG_FILES%%:*}
+  if [ -n "$first" ] && [ -f "$first" ]; then written=written; else written=absent; fi
+  printf '%s %s %s\n' "${PI_CONFIG_FILES:-none}" "$written" "${OTEL_SDK_DISABLED:-unset}" >>"$LEGION_TEST_SEEN"
+fi
 installed=$(cd "$HOME/.omp/profiles/$OMP_PROFILE/plugins/node_modules/@sjawhar/pi-legion-envoy" && pwd -P)
 case "$*" in
 "models --no-extensions --extension "*" --json") echo LEGION_OMP_AGENTS=available >&2 ;;
@@ -29,14 +34,6 @@ case "$*" in
   printf 'LEGION_PLUGIN_LOADED=yes\nLEGION_PLUGIN_LOADED_FROM=file://%s/dist/legion.js\n' "$installed" >&2
   if [ -n "${LEGION_PROMPT_AGENTS:-}" ]; then echo LEGION_PROMPT_AGENTS=resolved >&2; fi
   if [ -n "${LEGION_PROMPT_SKILLS:-}" ]; then echo LEGION_PROMPT_SKILLS=resolved >&2; fi ;;
-"-p --mode json "*)
-  if ! grep -qx "    baseUrl: $LEGION_TEST_ROUTE" "$HOME/.omp/profiles/$OMP_PROFILE/agent/models.yml" 2>/dev/null; then
-    echo "No model available matching enabledModels (anthropic/*-legion) with usable credentials." >&2; exit 1
-  fi
-  if [ -n "${LEGION_TEST_OVERLOADED:-}" ]; then
-    printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[],"provider":"anthropic","model":"claude-fable-5-1-legion","stopReason":"error","errorMessage":"529 overloaded"}}'; exit 1
-  fi
-  printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"ok"}],"provider":"anthropic","model":"claude-fable-5-1-legion","stopReason":"stop"}}' ;;
 *) echo "Invalid $OMP_SESSION_STORAGE for OMP_SESSION_STORAGE" >&2; exit 1 ;;
 esac
 `
@@ -125,42 +122,43 @@ func TestProbeImageProbesTheOmpItIsGiven(t *testing.T) {
 	}
 }
 
-// In a pod the daemon routed through the model gateway, the command writes the route into the
-// image's `legion` profile before it probes, makes the round trip through it, and names the model
-// that answered on the OK line, which the daemon requires. A gateway it cannot route is refused
-// naming the variable, and so is a round trip the profile cannot make, with no OK line either way.
-func TestProbeImageMakesTheRoundTripThroughTheGateway(t *testing.T) {
+// With --pod-safety, as the daemon's probe Sandbox runs it, every probe runs Oh My Pi on the pod's
+// baseline, as a pod's shim starts it: the overlay written and named first in PI_CONFIG_FILES,
+// ahead of the pod's own, and OpenTelemetry held off. Bare, as the image's build runs it, the
+// probes run on the environment as it is.
+func TestProbeImageWithPodSafetyProbesOnThePodsBaseline(t *testing.T) {
 	omp := imageOmp(t)
-	inImage(t, "3", omp)
-	t.Setenv("LEGION_MODEL_GATEWAY_URL", "https://middleman.legion.internal")
-	t.Setenv("LEGION_TEST_ROUTE", "https://middleman.legion.internal/anthropic")
-
-	code, stdout, stderr := probeImage("--go-daemon-api-version", "3")
-
-	want := "probe-image: OK (" + omp + ") session-storage=probed model-gateway=anthropic/claude-fable-5-1-legion go-daemon-api-version=3\n"
-	if code != 0 || stdout != want {
-		t.Fatalf("probe-image in a routed pod = %d %q %q, want the OK line naming the model", code, stdout, stderr)
-	}
-
-	// The gateway overloaded is no answer about the image: the command exits bootprobe.TransientExit,
-	// which the daemon's probe Sandbox runs again.
-	t.Setenv("LEGION_TEST_OVERLOADED", "1")
-	code, stdout, stderr = probeImage("--go-daemon-api-version", "3")
-	if code != 75 || stdout != "" || !strings.Contains(stderr, "529 overloaded (transient: the daemon's probe runs again)") {
-		t.Errorf("probe-image with the gateway overloaded = %d %q %q, want exit 75 naming the 529", code, stdout, stderr)
-	}
-	t.Setenv("LEGION_TEST_OVERLOADED", "")
-
-	t.Setenv("LEGION_TEST_ROUTE", "https://elsewhere.internal/anthropic")
-	code, stdout, stderr = probeImage("--go-daemon-api-version", "3")
-	if code != 1 || stdout != "" || !strings.Contains(stderr, "routed to https://middleman.legion.internal/anthropic: found no usable model") {
-		t.Errorf("probe-image whose round trip finds no model = %d %q %q, want exit 1 naming the route", code, stdout, stderr)
-	}
-
-	t.Setenv("LEGION_MODEL_GATEWAY_URL", "ftp://middleman.legion.internal")
-	code, stdout, stderr = probeImage("--go-daemon-api-version", "3")
-	if code != 1 || stdout != "" || !strings.Contains(stderr, "LEGION_MODEL_GATEWAY_URL") {
-		t.Errorf("probe-image with an unroutable gateway = %d %q %q, want exit 1 naming the variable", code, stdout, stderr)
+	inImage(t, thisBinarysContract, omp)
+	t.Setenv("PI_CONFIG_FILES", "/etc/legion-operator/overlay.yml")
+	t.Setenv("OTEL_SDK_DISABLED", "")
+	for name, tc := range map[string]struct {
+		args []string
+		want *regexp.Regexp
+	}{
+		"--pod-safety": {[]string{"--pod-safety"}, regexp.MustCompile(`^/\S+/podsafety-overlay\.yml:/etc/legion-operator/overlay\.yml written true$`)},
+		"bare":         {nil, regexp.MustCompile(`^/etc/legion-operator/overlay\.yml absent unset$`)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			seen := filepath.Join(t.TempDir(), "seen")
+			t.Setenv("LEGION_TEST_SEEN", seen)
+			code, stdout, stderr := probeImage(tc.args...)
+			if code != 0 || !strings.HasPrefix(stdout, "probe-image: OK (") {
+				t.Fatalf("probe-image %v = %d %q %q, want the OK line", tc.args, code, stdout, stderr)
+			}
+			raw, err := os.ReadFile(seen)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runs := strings.Split(strings.TrimSpace(string(raw)), "\n")
+			if len(runs) < 3 {
+				t.Fatalf("Oh My Pi ran %d times, want the three probes: %q", len(runs), runs)
+			}
+			for _, run := range runs {
+				if !tc.want.MatchString(run) {
+					t.Errorf("a probe ran Oh My Pi with %q, want %s", run, tc.want)
+				}
+			}
+		})
 	}
 }
 

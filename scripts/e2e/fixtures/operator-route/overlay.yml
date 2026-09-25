@@ -1,0 +1,33 @@
+# The live harnesses' operator settings (pod.yml names this file in PI_CONFIG_FILES, after Legion's
+# pod baseline): every model turn on the gateway's aliases (models.yml), with nothing to fall back
+# to. Oh My Pi falls back from a failing provider without a word, so enabledModels holds every
+# session's own model to the aliases, and each provider a pod could reach without the gateway is
+# disabled, as scripts/e2e/lib/install-model-gateway.sh does for the tmux proofs: Bedrock twice (a
+# node's instance role is its key), Google, and the local servers Oh My Pi uses with no key.
+# Records merge key by key across settings layers, so every role Legion's prompts reach is named:
+# the shipped review and oracle agents' @review and @oracle, and the bundled scout's @smol.
+enabledModels:
+  - anthropic/*-legion
+disabledProviders:
+  - amazon-bedrock
+  - bedrock-mantle
+  - google
+  - ollama
+  - llama.cpp
+  - lm-studio
+modelRoles:
+  default: anthropic/claude-fable-5-1-legion:xhigh
+  plan: anthropic/claude-fable-5-1-legion:max
+  slow: anthropic/claude-opus-5-legion:xhigh
+  smol: anthropic/claude-sonnet-5-legion
+  task: anthropic/claude-sonnet-5-legion
+  vision: anthropic/claude-sonnet-5-legion
+  commit: anthropic/claude-sonnet-5-legion
+  tiny: anthropic/claude-sonnet-5-legion
+  advisor: anthropic/claude-sonnet-5-legion:medium
+  review: anthropic/claude-opus-5-legion:high
+  oracle: anthropic/claude-opus-5-legion:high
+retry:
+  # A failed turn does not move to another model: a repository can add retry.fallbackChains keys
+  # (a record), and with fallback off a failure is the role's own.
+  modelFallback: false

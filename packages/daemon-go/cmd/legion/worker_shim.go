@@ -8,24 +8,23 @@ import (
 	"io"
 	"os"
 
-	"github.com/sjawhar/legion/daemon/internal/modelroute"
+	"github.com/sjawhar/legion/daemon/internal/podsafety"
 	"github.com/sjawhar/legion/daemon/internal/shim"
 )
 
-const workerShimUsage = "legion worker-shim --connect <unix:///path|tcp://host:port> --boot-token-file <path> [--provider-env-dir <dir>] -- <omp argv…>"
+const workerShimUsage = "legion worker-shim --connect <unix:///path|tcp://host:port> --boot-token-file <path> [--provider-env-dir <dir>] [--pod-safety] -- <omp argv…>"
 
 // runWorkerShim is `legion worker-shim`, the command a runtime puts in front of every phase
 // worker's OMP: it dials the daemon's worker stream, and bridges OMP to it once acked. Its lines
-// go to stdout, which is what the pane shows; its exit status is OMP's. In a pod
-// (LEGION_MODEL_GATEWAY_URL set) it first writes the model route into OMP's profile
-// (modelroute.Install) and starts OMP on the environment Install answers, which carries the pins as
-// its last settings overlay, so the agent reaches its models through the gateway alone, whatever
-// the repository's own settings.
+// go to stdout, which is what the pane shows; its exit status is OMP's. With --pod-safety, which
+// the Sandbox runtime passes and a tmux pane never does, OMP starts on the pod's baseline
+// (podsafety.Apply, its overlay written to LEGION_STATE_DIR).
 func runWorkerShim(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := newFlags("worker-shim", stderr)
 	connect := flags.String("connect", "", "the daemon's worker stream: unix:///<path> or tcp://<host>:<port>")
 	bootTokenFile := flags.String("boot-token-file", "", "the file holding the pane's boot token")
 	providerEnvDir := flags.String("provider-env-dir", "", "a directory whose files become NAME=contents in OMP's environment only")
+	podSafety := flags.Bool("pod-safety", false, "start OMP on a pod's baseline (internal/podsafety), writing its overlay to LEGION_STATE_DIR")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
@@ -33,15 +32,13 @@ func runWorkerShim(ctx context.Context, args []string, stdout, stderr io.Writer)
 	flags.Visit(func(f *flag.Flag) { set[f.Name] = true })
 
 	cfg, err := workerShimConfig(set, *connect, *bootTokenFile, *providerEnvDir, flags.Args())
-	var installed modelroute.Installed
-	if err == nil {
-		installed, err = modelroute.Install(cfg.Env)
+	if err == nil && *podSafety {
+		cfg.Env, err = podSafeEnvironment(cfg.Env)
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "legion worker-shim: %v\n", err)
 		return 1
 	}
-	cfg.Env = installed.Environ
 	cfg.Log = stdout
 	code, err := shim.Run(ctx, cfg)
 	if err != nil {
@@ -49,6 +46,16 @@ func runWorkerShim(ctx context.Context, args []string, stdout, stderr io.Writer)
 		return 1
 	}
 	return code
+}
+
+// podSafeEnvironment is environ on the pod's baseline, its overlay written to the pod's state
+// directory, which the runtime names as LEGION_STATE_DIR.
+func podSafeEnvironment(environ []string) ([]string, error) {
+	state := os.Getenv("LEGION_STATE_DIR")
+	if state == "" {
+		return nil, errors.New("--pod-safety needs LEGION_STATE_DIR, the pod's state directory, to write the baseline overlay to")
+	}
+	return podsafety.Apply(environ, state)
 }
 
 // workerShimConfig is every refusal the command makes, each before anything is dialled or

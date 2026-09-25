@@ -441,7 +441,6 @@ runtime:
     namespace: legion
     image: ghcr.io/sjawhar/legion-worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
     storage_class: gp2
-    gateway: { url: "https://middleman.internal.example", audience: middleman-legion, service_account: legion-worker, token_expiry_seconds: 600 }
     pod:
       volumes: [{name: creds, secret: {name: legion-creds}}]
       volume_mounts: [{volume: creds, mount_path: /var/run/legion/boot}]

@@ -9,11 +9,9 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/sjawhar/legion/daemon/internal/modelroute"
 )
 
-// realOmp is the pinned Oh My Pi binary LEGION_TEST_OMP names, as for internal/modelroute's route
+// realOmp is the pinned Oh My Pi binary LEGION_TEST_OMP names, as for internal/podsafety's baseline
 // test; GitHub Actions installs it (.github/actions/install-omp), so a run there never skips.
 func realOmp(t *testing.T) string {
 	t.Helper()
@@ -65,19 +63,24 @@ func TestTheAgentArgvImportsNoRepositoryExtensionHookOrCommand(t *testing.T) {
 	if out, err := exec.Command("git", "init", "--quiet", repo).CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v: %s", err, out)
 	}
-	// The pod's own route and pins, through a gateway nothing listens on: RPC mode starts only on a
-	// profile with a model, and routing it keeps the test off any credential the machine carries (a
-	// devbox's instance role reaches Amazon Bedrock; a runner has none). get_state makes no model
-	// call, so the token is never read.
-	token := filepath.Join(dir, "token")
-	if err := os.WriteFile(token, []byte("unused\n"), 0o600); err != nil {
-		t.Fatal(err)
+	// A profile whose one model is an operator's provider that nothing listens on: RPC mode starts
+	// only on a profile with a model, and naming it keeps the test off any credential the machine
+	// carries (a devbox's instance role reaches Amazon Bedrock; a runner has none, and the metadata
+	// service is held off besides). get_state makes no model call, so the provider is never dialled.
+	agent := filepath.Join(home, ".omp", "profiles", "legion", "agent")
+	for name, content := range map[string]string{
+		"models.yml": "providers:\n  operator:\n    baseUrl: http://127.0.0.1:9\n    auth: apiKey\n    api: anthropic-messages\n" +
+			"    apiKey: unused\n    models:\n      - id: argv-test\n        name: Argv test\n",
+		"config.yml": "modelRoles:\n  default: operator/argv-test\n",
+	} {
+		if err := os.MkdirAll(agent, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(agent, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
-	installed, err := modelroute.InstallKeyedBy([]string{"HOME=" + home, "OMP_PROFILE=legion",
-		modelroute.EnvURL + "=http://127.0.0.1:9", "PATH=/usr/local/bin:/usr/bin:/bin"}, token)
-	if err != nil {
-		t.Fatal(err)
-	}
+	environ := []string{"HOME=" + home, "OMP_PROFILE=legion", "PATH=/usr/local/bin:/usr/bin:/bin", "AWS_EC2_METADATA_DISABLED=true"}
 
 	pod := launch{prompt: "The test's system prompt."}.agentArgv([]string{omp})
 	root := slices.Index(pod, legionPlugin)
@@ -101,7 +104,7 @@ func TestTheAgentArgvImportsNoRepositoryExtensionHookOrCommand(t *testing.T) {
 			defer cancel()
 			cmd := exec.CommandContext(ctx, testCase.argv[0], testCase.argv[1:]...)
 			cmd.Dir = repo
-			cmd.Env = append(slices.Clone(installed.Environ), "LEGION_TEST_MARKS="+marks)
+			cmd.Env = append(slices.Clone(environ), "LEGION_TEST_MARKS="+marks)
 			// One RPC request, then end of input: Oh My Pi answers it after its session has loaded
 			// every extension, hook and command, and exits when stdin closes.
 			cmd.Stdin = strings.NewReader(`{"type":"get_state","id":"1"}` + "\n")

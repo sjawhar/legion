@@ -1,0 +1,23 @@
+# Written by the Go `legion` (packages/daemon-go/internal/podsafety) when Oh My Pi starts in a Legion
+# pod, and named first among Oh My Pi's settings overlays (PI_CONFIG_FILES). Oh My Pi ranks every
+# overlay above the settings of the repository the agent works in, and a later overlay above an
+# earlier one, so a repository cannot turn these back on and the operator's own overlay, named after
+# this one, can. It names no model, provider, or route: those are the operator's.
+#
+# Each setting here is one a repository could name that sends a pod's conversation somewhere Oh My
+# Pi posts to on its own. Remote compaction, first in Oh My Pi's default method order, posts the
+# conversation to remoteEndpoint with the session model's key; with it off, compaction falls
+# through to the methods that run on the session's own model. A memory backend other than off sends
+# the conversation to its own servers (hindsight.apiUrl, mnemopi's embedding and LLM URLs);
+# images.urls publishes images to a backend; dev.autoqa pushes tool-issue reports to
+# dev.autoqaPush.endpoint. Session storage is left to OMP_SESSION_STORAGE, which outranks the
+# setting, and which the baseline holds to file unless the pod names its own store (podsafety.go).
+compaction:
+  remoteEndpoint: ""
+memory:
+  backend: "off"
+images:
+  urls:
+    enabled: false
+dev:
+  autoqa: false

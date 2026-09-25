@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"path"
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 
 	"gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
@@ -38,7 +38,6 @@ type Kubernetes struct {
 	// Resources are each role's container requests and limits. A role absent here gets none,
 	// which is the default for every role: one tree runs per node, and the pool's floor sizes it.
 	Resources map[claim.Role]RoleResources
-	Gateway   Gateway
 	// Pod is what the operator adds to every pod (runtime.kubernetes.pod).
 	Pod PodConfig
 }
@@ -73,22 +72,10 @@ type PodConfig struct {
 	ServiceAccount string
 }
 
-// Gateway is how a pod reaches the model: the model gateway's base URL, and the service account
-// whose projected token (for Audience, rotated within TokenExpiry) is the pod's key there.
-type Gateway struct {
-	URL, Audience, ServiceAccount string
-	TokenExpiry                   time.Duration
-}
-
 const (
 	kubernetesKey     = "runtime.kubernetes"
 	podKey            = kubernetesKey + ".pod"
 	defaultTreeVolume = "20Gi"
-	// minTokenExpiry is the shortest projected service account token Kubernetes issues, and
-	// maxTokenExpiry the longest the cluster's admission policy admits for a Legion pod
-	// (agent-c #20053, the legion-sandbox-pods fence).
-	minTokenExpiry = 600
-	maxTokenExpiry = 3600
 	// poolLabel is the node label that selects the Legion pool. The runtime sets it on every pod,
 	// and the cluster's admission policy requires its value.
 	poolLabel = "legion.dev/pool"
@@ -113,6 +100,9 @@ func readKubernetes(value *yaml.Node) (*Kubernetes, error) {
 	}
 	if fields["role_profiles"] != nil {
 		return nil, errors.New("unknown key runtime.kubernetes.role_profiles: each role's requests and limits are set under runtime.kubernetes.resources, and a role absent there gets none")
+	}
+	if fields["gateway"] != nil {
+		return nil, errors.New("runtime.kubernetes.gateway was removed (LEGION-270): configure pods with runtime.kubernetes.pod (docs/kubernetes.md, Operator configuration)")
 	}
 	block := &Kubernetes{TreeVolume: defaultTreeVolume}
 	if block.Namespace, err = requiredString(fields["namespace"], kubernetesKey+".namespace", ""); err != nil {
@@ -153,17 +143,32 @@ func readKubernetes(value *yaml.Node) (*Kubernetes, error) {
 	if block.Resources, err = readResources(fields["resources"]); err != nil {
 		return nil, err
 	}
-	if block.Gateway, err = readGateway(fields["gateway"]); err != nil {
-		return nil, err
-	}
 	if block.Pod, err = readPod(fields["pod"]); err != nil {
 		return nil, err
 	}
-	if account := block.Pod.ServiceAccount; account != "" && account != block.Gateway.ServiceAccount {
-		return nil, fmt.Errorf("%s.service_account %s differs from %s.gateway.service_account %s: a pod runs as one account",
-			podKey, account, kubernetesKey, block.Gateway.ServiceAccount)
-	}
 	return block, nil
+}
+
+// ReadPodFile reads a `runtime.kubernetes.pod` block kept in a file of its own, such as a live
+// harness's operator fixture (scripts/e2e/fixtures/operator-route/pod.yml), with every check the
+// loader makes of the block inside a legion.yaml.
+func ReadPodFile(path string) (PodConfig, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return PodConfig{}, fmt.Errorf("read %s: %w", path, err)
+	}
+	var document yaml.Node
+	if err := yaml.Unmarshal(raw, &document); err != nil {
+		return PodConfig{}, fmt.Errorf("parse %s: %w", path, err)
+	}
+	if len(document.Content) != 1 {
+		return PodConfig{}, fmt.Errorf("%s holds no %s mapping", path, podKey)
+	}
+	pod, err := readPod(document.Content[0])
+	if err != nil {
+		return PodConfig{}, fmt.Errorf("%s: %w", path, err)
+	}
+	return pod, nil
 }
 
 // readPod reads `runtime.kubernetes.pod`, refusing a shape no pod could carry.
@@ -722,49 +727,6 @@ func readQuantities(value *yaml.Node, key string) (Quantities, error) {
 		}
 	}
 	return quantities, nil
-}
-
-// readGateway reads the model gateway, required with every member: a pod has no other way to a model.
-func readGateway(value *yaml.Node) (Gateway, error) {
-	const key = kubernetesKey + ".gateway"
-	if value == nil {
-		return Gateway{}, errors.New(key + " is required: a pod reaches the model only through the gateway, with its projected service account token")
-	}
-	if value.Kind != yaml.MappingNode {
-		return Gateway{}, fmt.Errorf("%s must be a mapping", key)
-	}
-	fields, err := members(value, key, "url", "audience", "service_account", "token_expiry_seconds")
-	if err != nil {
-		return Gateway{}, err
-	}
-	var gateway Gateway
-	url, err := requiredString(fields["url"], key+".url", "")
-	if err != nil {
-		return Gateway{}, err
-	}
-	if gateway.URL, err = baseURL(url, key+".url"); err != nil {
-		return Gateway{}, err
-	}
-	if gateway.Audience, err = requiredString(fields["audience"], key+".audience", ""); err != nil {
-		return Gateway{}, err
-	}
-	if gateway.ServiceAccount, err = requiredString(fields["service_account"], key+".service_account", ""); err != nil {
-		return Gateway{}, err
-	}
-	const expiryKey = key + ".token_expiry_seconds"
-	expiry, err := readInt(fields["token_expiry_seconds"], expiryKey)
-	switch {
-	case err != nil:
-		return Gateway{}, err
-	case expiry == nil:
-		return Gateway{}, fmt.Errorf("%s is required", expiryKey)
-	case *expiry < minTokenExpiry:
-		return Gateway{}, fmt.Errorf("%s must be at least %d (the kubelet's minimum)", expiryKey, minTokenExpiry)
-	case *expiry > maxTokenExpiry:
-		return Gateway{}, fmt.Errorf("%s must be at most %d (the longest pod token the cluster's admission policy admits)", expiryKey, maxTokenExpiry)
-	}
-	gateway.TokenExpiry = time.Duration(*expiry) * time.Second
-	return gateway, nil
 }
 
 // checkKubernetesKeys refuses a file whose keys outside the block leave a pod unable to run, or

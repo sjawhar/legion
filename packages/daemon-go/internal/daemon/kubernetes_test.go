@@ -35,7 +35,6 @@ func kubernetesConfig(t *testing.T, server string) config.Config {
 	cfg.Runtime = config.Runtime{Name: "kubernetes", Kubernetes: &config.Kubernetes{
 		Namespace: "legion", Image: "ghcr.io/sjawhar/legion-worker@sha256:" + strings.Repeat("a", 64),
 		StorageClass: "gp2", TreeVolume: "20Gi", Kubeconfig: writeKubeconfig(t, server, "test"),
-		Gateway: config.Gateway{URL: "https://gateway.example.test", Audience: "middleman-legion", ServiceAccount: "legion-worker", TokenExpiry: 10 * time.Minute},
 	}}
 	return cfg
 }
@@ -261,7 +260,7 @@ func TestAKubernetesDaemonRefusesAnOperatorPodCollidingWithLegionsBeforeItsBoot(
 // CheckOperatorPod refuses every operator piece that collides with what Legion puts in a pod,
 // naming both: a variable, volume, or mount path of the runtime's own, a path the worker image
 // owns, a variable every launch's spec sets, and a provider key the shim could not export — and
-// passes an operator pod beside Legion's, the LEGION-270 harness's shape.
+// passes the Go live harnesses' operator pod (scripts/e2e/fixtures/operator-route/pod.yml).
 func TestCheckOperatorPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 	mountAt := func(path string) config.PodConfig {
 		return config.PodConfig{
@@ -276,6 +275,10 @@ func TestCheckOperatorPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		return "runtime.kubernetes.pod.volume_mounts[0].mount_path " + path + " overlaps " + owned + ", which Legion mounts in every pod: a mount may be neither at, under, nor above one of Legion's"
 	}
 	secrets := map[string]secretPointer{"ENVOY_TOKEN": {"envoy_token_file", "/var/run/legion/ENVOY_TOKEN"}}
+	fixture, err := config.ReadPodFile(filepath.Join("..", "..", "..", "..", "scripts", "e2e", "fixtures", "operator-route", "pod.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
 		name string
 		pod  config.PodConfig
@@ -317,23 +320,7 @@ func TestCheckOperatorPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 			want: "provider_keys names GIT_AUTHOR_NAME, which every launch sets itself (the git identity the role's GitHub App commits as): the shim would not export the key"},
 		{name: "a provider key a launch secret's pointer names", keys: []config.ProviderKey{{Env: "ENVOY_TOKEN", Secret: "envoy"}},
 			want: "provider_keys names ENVOY_TOKEN, which every launch sets itself (the pointer to the launch secret ENVOY_TOKEN): the shim would not export the key"},
-		{name: "an operator pod beside Legion's", pod: config.PodConfig{
-			Env:            map[string]string{"PI_CONFIG_FILES": "/etc/legion-operator/overlay.yml", "CLAUDE_CODE_USE_FOUNDRY": "0"},
-			ServiceAccount: "legion-worker",
-			Volumes: []corev1.Volume{
-				{Name: "operator-config", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
-					LocalObjectReference: corev1.LocalObjectReference{Name: "legion-operator"},
-				}}},
-				{Name: "operator-token", VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{Sources: []corev1.VolumeProjection{
-					{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{Audience: "middleman-legion", ExpirationSeconds: new(int64(3600)), Path: "token"}},
-				}}}},
-			},
-			VolumeMounts: []corev1.VolumeMount{
-				{Name: "operator-config", MountPath: "/home/legion/.omp/profiles/legion/agent/models.yml", SubPath: "models.yml", ReadOnly: true},
-				{Name: "operator-config", MountPath: "/etc/legion-operator/overlay.yml", SubPath: "overlay.yml", ReadOnly: true},
-				{Name: "operator-token", MountPath: "/var/run/operator", ReadOnly: true},
-			},
-		}, keys: []config.ProviderKey{{Env: "ANTHROPIC_API_KEY", Secret: "anthropic"}}},
+		{name: "the live harnesses' operator pod", pod: fixture, keys: []config.ProviderKey{{Env: "ANTHROPIC_API_KEY", Secret: "anthropic"}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := checkOperatorPod(tc.pod, tc.keys, secrets)

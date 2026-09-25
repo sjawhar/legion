@@ -112,7 +112,8 @@ jobs:
               - 'packages/envoy/cmd/dispatch/**'
               # The plugin's Go client and the manifest field the boot gate holds it to.
               - 'packages/pi-envoy/**'
-              # The Oh My Pi pin the model-route test runs (internal/modelroute/omp_test.go).
+              # The Oh My Pi pin the real-binary tests run (internal/podsafety's baseline, the
+              # pod agent's argv in internal/runtime/sandbox).
               - 'packages/daemon/src/daemon/omp-pin.ts'
               - '.github/actions/install-omp/**'
 
@@ -441,8 +442,8 @@ jobs:
       # working-copy filters are among what they plant), and the daemon resolves jj at boot and
       # refuses to start without it.
       - uses: ./.github/actions/install-jj
-      # internal/modelroute's route test runs the Oh My Pi the worker image ships against a stand-in
-      # for the model gateway, and refuses on GitHub Actions without one. The pin is read from
+      # internal/podsafety's baseline test and the pod agent's argv test run the Oh My Pi the worker
+      # image ships, and refuse on GitHub Actions without one. The pin is read from
       # omp-pin.ts, the repository's one copy of it, installed through the mise above
       # (.github/actions/install-omp).
       - uses: ./.github/actions/install-omp
