@@ -452,24 +452,16 @@ func (s *server) getArtifactText(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	version, err := s.latestVersionNumber(r.Context(), artifact.ID)
+	// The markdown and the version are two unsynchronised reads, in both directions: the live
+	// markdown can be ahead of the version while browser text is unsettled, and a version minted
+	// between the two reads can be ahead of the markdown. `token` is the route's concurrency
+	// primitive; `version` says which version the document has, not which one this markdown is.
+	version, err := latestVersionNumber(r.Context(), s.deps.Store.Pool, artifact.ID)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, map[string]any{"markdown": markdown, "version": version, "token": token})
-}
-
-// latestVersionNumber is the newest version a document has, or nil for one that has none. The
-// live markdown beside it can be ahead of that version while browser text is unsettled.
-func (s *server) latestVersionNumber(ctx context.Context, artifactID string) (*int, error) {
-	var number *int
-	if err := s.deps.Store.Pool.QueryRow(ctx, `
-		select max(number) from artifact_versions where artifact_id = $1
-	`, artifactID).Scan(&number); err != nil {
-		return nil, fmt.Errorf("read latest document version: %w", err)
-	}
-	return number, nil
 }
 
 func (s *server) getArtifactBlocks(w http.ResponseWriter, r *http.Request) {

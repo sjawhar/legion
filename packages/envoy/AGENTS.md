@@ -79,14 +79,27 @@ Quote-anchored asks and comments retain their inline mark and quote cache, plus 
 of the lowest block containing the complete quote. A quote that spans top-level siblings stays
 unpinned. `GET /api/v1/artifacts/{id}/blocks` returns each block's canonical markdown range,
 SHA-256 token over its complete Proof state (including inline marks), and `{comments, asks}`
-reference counts; `GET .../text` returns the full-document Proof-state token. The server resolves
+reference counts; `GET .../text` returns the full-document Proof-state token and the document's
+latest version number, or `null` when it has none (the live markdown beside it and that version
+are two unsynchronised reads, in both directions; `token` is the concurrency primitive). The server resolves
 the block when it creates a quote or browser-mark anchor; `envoy-dispatch backfill-anchor-blocks`
 fills legacy anchors only when their cached quote has one current match.
 
 Document edits (`POST /api/v1/artifacts/{id}/edits`, `docs/edits.go` `applyOperation`) are
 `replace`, `delete`, `insert`, `retype`, `move`, `delete_row`, and `delete_column`. `replace` is
-inline: `with` parses through `pmdoc.ParseInline` (paragraph-only block grammar), so a leading list
-or heading marker is text and a multi-paragraph `with` is `INVALID_OP`. `delete` takes `find` or
+inline: `with` parses through `pmdoc.ParseInline` (paragraph-only block grammar), so a multi-paragraph
+`with` is `INVALID_OP` and a leading marker of a *different* kind from the matched block's own is
+literal escaped text. A `with` opening with a marker of the *same* kind as that block's own would
+render it twice and is `INVALID_OP` on `with` (`replacementMarkdown`), naming the marker the block
+renders and the backslash escape for prose that merely looks like one; the exception is a heading
+rename whose `find` carried the heading marker, where the repeated marker is dropped and a
+different level retitles the heading and sets that level. A batch that leaves the document's
+semantic identity unchanged — `nodeToken` over the whole tree, inline marks included — mints no
+version, named or not, and the response carries `changed: false` with `unchanged_ops` naming each
+operation that changed nothing (`docs.EditOutcome`). Every refusal names its operation index and
+its anchor: `docs` dresses quote, heading-anchor and cross-block misses (`ErrQuoteNotFound`,
+`ErrAnchorAmbiguous`, `ErrQuoteSpansBlocks`), and `isEditRefusal` keeps the service's internal
+prose off them. `delete` takes `find` or
 `block`; a `find` covering a textblock's whole text removes that block
 (`pmdoc.DeleteTextblock`: it also drops a list, list item, or blockquote it empties, hoists a nested
 list into the place of a bullet whose text goes, and refuses a bullet with other content with

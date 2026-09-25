@@ -155,7 +155,7 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return nil, err
 		}
-		version, err := latestVersionNumber(ctx, tx, artifact.ID)
+		version, err := settledVersionNumber(ctx, tx, artifact.ID)
 		if err != nil {
 			return nil, err
 		}

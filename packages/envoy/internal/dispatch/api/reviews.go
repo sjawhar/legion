@@ -33,14 +33,20 @@ var approvalAskOptions = []model.AskOption{
 	{Label: approvalOptionRequestChanges, Description: "Say what must change before it can be approved."},
 }
 
-// latestVersionNumber is the newest settled version of an artifact, 0 when none exists.
-func latestVersionNumber(ctx context.Context, q queryer, artifactID string) (int, error) {
+// latestVersionNumber is the newest settled version of an artifact, nil when it has none.
+func latestVersionNumber(ctx context.Context, q queryer, artifactID string) (*int, error) {
 	var latest *int
 	if err := q.QueryRow(ctx, `select max(number) from artifact_versions where artifact_id = $1`, artifactID).Scan(&latest); err != nil {
-		return 0, fmt.Errorf("latest artifact version: %w", err)
+		return nil, fmt.Errorf("latest artifact version: %w", err)
 	}
-	if latest == nil {
-		return 0, nil
+	return latest, nil
+}
+
+// settledVersionNumber is latestVersionNumber for the callers that read a missing version as 0.
+func settledVersionNumber(ctx context.Context, q queryer, artifactID string) (int, error) {
+	latest, err := latestVersionNumber(ctx, q, artifactID)
+	if err != nil || latest == nil {
+		return 0, err
 	}
 	return *latest, nil
 }
@@ -320,7 +326,7 @@ func (s *server) createArtifactReview(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	version, err := latestVersionNumber(r.Context(), tx, artifact.ID)
+	version, err := settledVersionNumber(r.Context(), tx, artifact.ID)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -404,7 +410,7 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		s.writeHandlerError(w, err)
 		return
 	}
-	version, err := latestVersionNumber(r.Context(), tx, artifact.ID)
+	version, err := settledVersionNumber(r.Context(), tx, artifact.ID)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

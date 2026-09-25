@@ -18,15 +18,15 @@ import (
 // opIndex is the batch position of the operation an error came from. The API renders these
 // errors from their own text rather than the wrapped chain, so each carries its own index; an
 // error raised outside a batch leaves it nil and reads exactly as it did before.
-type opIndex struct{ Operation *int }
+type opIndex struct{ operation *int }
 
-func (o *opIndex) setOperation(index int) { o.Operation = &index }
+func (o *opIndex) setOperation(index int) { o.operation = &index }
 
 func (o opIndex) prefix() string {
-	if o.Operation == nil {
+	if o.operation == nil {
 		return ""
 	}
-	return fmt.Sprintf("operation %d: ", *o.Operation)
+	return fmt.Sprintf("operation %d: ", *o.operation)
 }
 
 // operationStamped is every error that renders its own operation index, so a new one joins by
@@ -51,33 +51,44 @@ func invalidOp(field string) error {
 	return &ErrInvalidOp{Field: field}
 }
 
-// ErrQuoteNotFound names the quote that missed, explains how document edit quotes are matched,
-// and names the closest blocks.
 type ErrQuoteNotFound struct {
 	opIndex
 	Quote   string
 	Nearest []string
+	// Matches is how many places the quote did match, nonzero only when an occurrence was out
+	// of range: the quote is right and the occurrence is not.
+	Matches int
 }
 
 func (e *ErrQuoteNotFound) Error() string {
+	if e.Matches > 0 {
+		return fmt.Sprintf(
+			"%squote %q matches %d places, so that occurrence is out of range; occurrence is zero-based; nearest blocks: %s",
+			e.prefix(), e.Quote, e.Matches, pmdoc.QuoteBlocks(e.Nearest),
+		)
+	}
 	return fmt.Sprintf(`%squote %q not found; quotes match the block text as rendered (inline markdown is tolerated; use "heading:<title>", "block:<id>", "start", or "end" as insert and move anchors); nearest blocks: %s`, e.prefix(), e.Quote, pmdoc.QuoteBlocks(e.Nearest))
 }
 
 func (e *ErrQuoteNotFound) Unwrap() error { return pmdoc.ErrTargetNotFound }
 
-// ErrQuoteAmbiguous names a quote that resolved in several places, with the candidates the API
-// hands back so the caller can pick one.
-type ErrQuoteAmbiguous struct {
+// ErrAnchorAmbiguous names a quote or a `heading:` anchor that resolved in several places, with
+// the candidates the API hands back so the caller can pick one.
+type ErrAnchorAmbiguous struct {
 	opIndex
-	Quote      string
+	// Kind is the noun the caller wrote: "quote" or "heading anchor".
+	Kind       string
+	Target     string
 	Candidates []pmdoc.Candidate
 }
 
-func (e *ErrQuoteAmbiguous) Error() string {
-	return fmt.Sprintf(
-		"%squote %q matches %d places; pass a zero-based occurrence, or quote more of the surrounding text",
-		e.prefix(), e.Quote, len(e.Candidates),
-	)
+func (e *ErrAnchorAmbiguous) Error() string {
+	// A heading anchor matches whole headings, so there is no surrounding text to quote more of.
+	advice := "pass a zero-based occurrence to choose one"
+	if e.Kind == "quote" {
+		advice = "pass a zero-based occurrence, or quote more of the surrounding text"
+	}
+	return fmt.Sprintf("%s%s %q matches %d places; %s", e.prefix(), e.Kind, e.Target, len(e.Candidates), advice)
 }
 
 // ErrQuoteSpansBlocks names a quote that reached across a block boundary. A quote-anchored edit
@@ -109,12 +120,13 @@ func stampOperation(index int, err error) error {
 
 // isEditRefusal reports an error the caller wrote the batch wrong, whose own text is what the
 // route serves. Wrapping one in the service's internal prose would bury the operation index and
-// the quote the reader needs.
+// the anchor the reader needs.
 func isEditRefusal(err error) bool {
 	var invalid *ErrInvalidOp
-	var ambiguous *ErrQuoteAmbiguous
+	var ambiguous *ErrAnchorAmbiguous
 	return errors.Is(err, pmdoc.ErrTargetNotFound) ||
 		errors.Is(err, pmdoc.ErrTargetSpansBlocks) ||
+		errors.Is(err, pmdoc.ErrTableWidth) ||
 		errors.As(err, &invalid) ||
 		errors.As(err, &ambiguous)
 }
@@ -345,18 +357,20 @@ func removedBlockError(blockID string, removal batchRemoval) error {
 	return &ErrInvalidOp{Field: "block", Reason: reason + "; remove it from the atomic batch"}
 }
 
-// editBatch is what a resolved batch of operations produced: the tree to write, the canonical
-// markdown the document had before the batch, and every operation that left the tree as it was.
+// editBatch is what a resolved batch of operations produced: the tree to write, the token of the
+// document before the batch, and every operation that left the tree as it was.
 type editBatch struct {
 	tree      *pmdoc.Node
 	before    string
 	unchanged []int
 }
 
-// outcome is the batch's verdict, rendered once the caller has stamped the block ids the write
-// carries, so the comparison is against exactly the markdown the document ends up with.
+// outcome is the batch's verdict, taken once the caller has stamped the block ids the write
+// carries. It compares nodeToken, the same semantic identity the precondition machinery uses:
+// canonical markdown renders no anchor mark, so a batch that orphans a human's comment anchor
+// while leaving the words alone is a change, and gets its version.
 func (b editBatch) outcome(applied int) (EditOutcome, error) {
-	after, err := renderTree(b.tree)
+	after, err := nodeToken(b.tree)
 	if err != nil {
 		return EditOutcome{}, err
 	}
@@ -370,7 +384,7 @@ func applyOperations(tree *pmdoc.Node, ops []model.EditOp) (editBatch, error) {
 }
 
 func applyOperationsWithValidation(tree *pmdoc.Node, ops []model.EditOp, validate operationValidator) (editBatch, error) {
-	before, err := renderTree(tree)
+	before, err := nodeToken(tree)
 	if err != nil {
 		return editBatch{}, err
 	}
@@ -667,7 +681,7 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		if err != nil {
 			return nil, err
 		}
-		replacement, err := replacementMarkdown(tree, r, op.Find, op.With)
+		replacement, level, err := replacementMarkdown(tree, r, op.Find, op.With)
 		if err != nil {
 			return nil, err
 		}
@@ -675,7 +689,11 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		if err != nil {
 			return nil, err
 		}
-		return pmdoc.Splice(tree, r, with)
+		next, err := pmdoc.Splice(tree, r, with)
+		if err != nil || level == 0 {
+			return next, err
+		}
+		return pmdoc.SetHeadingLevel(next, r.From, level)
 	case "delete":
 		if op.Block != "" {
 			if op.Find != "" {
@@ -712,7 +730,7 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 			return nil, err
 		}
 		if plainText && pmdoc.TargetSpansBlocks(tree, target) {
-			return nil, pmdoc.ErrTargetSpansBlocks
+			return nil, &ErrQuoteSpansBlocks{Quote: anchor}
 		}
 		with, err := parseInput(op.Markdown)
 		if err != nil {
@@ -829,22 +847,35 @@ func anchorField(after bool) string {
 // rename is the one shape that keeps working: `find` carried the marker through the match, so
 // an identical one in `with` is the block's, and it is dropped. Every other repetition is
 // refused, and a marker of a different kind stays the literal text it has always been.
-func replacementMarkdown(tree *pmdoc.Node, r pmdoc.Range, find, with string) (string, error) {
+func replacementMarkdown(tree *pmdoc.Node, r pmdoc.Range, find, with string) (text string, level int, err error) {
 	own, ok := pmdoc.MarkerAt(tree, r.From)
 	if !ok || own.Kind == pmdoc.MarkerNone {
-		return with, nil
+		return with, 0, nil
 	}
 	written, width := pmdoc.LeadingBlockMarker(with)
 	if written.Kind != own.Kind {
-		return with, nil
+		return with, 0, nil
 	}
-	if own.Kind == pmdoc.MarkerHeading && written.Level == own.Level && pmdoc.HeadingMarker(find) != "" {
-		return with[width:], nil
+	// A `find` that carried the heading's own marker is renaming that heading, so the marker in
+	// `with` is the block's and is dropped. A different level is the obvious way to say "and make
+	// it that level", so it is applied rather than refused.
+	if own.Kind == pmdoc.MarkerHeading && pmdoc.HeadingMarker(find) != "" {
+		if written.Level == own.Level {
+			return with[width:], 0, nil
+		}
+		return with[width:], written.Level, nil
 	}
-	return "", &ErrInvalidOp{Field: "with", Reason: fmt.Sprintf(
-		"with begins with a marker of the same kind as the matched block's own (%s, which the block renders as %q), so the result would carry it twice; omit the marker to replace the block's text, or use insert plus delete to change the block's kind or number",
-		written.Kind, own.Markdown(),
+	return "", 0, &ErrInvalidOp{Field: "with", Reason: fmt.Sprintf(
+		"with begins with a marker of the same kind as the matched block's own (%s, which the block renders as %q), so the result would carry it twice; omit the marker to replace the block's text, backslash-escape it (%s) to keep prose that merely looks like a marker, or use insert plus delete to change the block's kind, level or number",
+		written.Kind, own.Markdown(), escapedMarkerExample(with, width),
 	)}
+}
+
+// escapedMarkerExample shows the caller their own marker escaped, which is how prose that merely
+// opens like one (`1999. was a year`) is written as text.
+func escapedMarkerExample(with string, width int) string {
+	marker := strings.TrimRight(with[:width], " \t")
+	return strconv.Quote(marker[:len(marker)-1] + `\` + marker[len(marker)-1:] + with[width:])
 }
 
 // invalidSchemaOp reports a tree operation that would leave a container outside
@@ -918,16 +949,18 @@ func resolveEditQuote(tree *pmdoc.Node, field, quote string, occurrence *int) (p
 	var missing *pmdoc.ErrQuoteNotFound
 	if errors.As(err, &missing) {
 		if delimiter, unbalanced := pmdoc.UnbalancedInlineMark(quote); unbalanced {
+			// The quote may simply be wrong about the text and merely carry an odd delimiter, so
+			// the nearest blocks that would fix an ordinary miss stay in the message.
 			return pmdoc.Range{}, &ErrInvalidOp{Field: field, Reason: fmt.Sprintf(
-				"inline marks in %s must be balanced: %q opens a span the quote never closes, so it cannot match the text as rendered; quote the whole marked span or none of it",
-				field, delimiter,
+				"inline marks in %s must be balanced: %q opens a span the quote never closes, so it cannot match the text as rendered; quote the whole marked span or none of it; nearest blocks: %s",
+				field, delimiter, pmdoc.QuoteBlocks(missing.Nearest),
 			)}
 		}
-		return pmdoc.Range{}, &ErrQuoteNotFound{Quote: quote, Nearest: missing.Nearest}
+		return pmdoc.Range{}, &ErrQuoteNotFound{Quote: quote, Nearest: missing.Nearest, Matches: missing.Matches}
 	}
 	var ambiguous *pmdoc.ErrTargetAmbiguous
 	if errors.As(err, &ambiguous) {
-		return pmdoc.Range{}, &ErrQuoteAmbiguous{Quote: quote, Candidates: ambiguous.Candidates}
+		return pmdoc.Range{}, &ErrAnchorAmbiguous{Kind: "quote", Target: quote, Candidates: ambiguous.Candidates}
 	}
 	if errors.Is(err, pmdoc.ErrTargetSpansBlocks) {
 		return pmdoc.Range{}, &ErrQuoteSpansBlocks{Quote: quote}
@@ -948,6 +981,12 @@ func insertTarget(tree *pmdoc.Node, field, anchor string, occurrence *int) (pmdo
 			return pmdoc.Range{}, false, invalidOp("heading")
 		}
 		r, err := pmdoc.FindHeading(tree, title, occurrence)
+		var ambiguous *pmdoc.ErrTargetAmbiguous
+		if errors.As(err, &ambiguous) {
+			return pmdoc.Range{}, false, &ErrAnchorAmbiguous{
+				Kind: "heading anchor", Target: title, Candidates: ambiguous.Candidates,
+			}
+		}
 		return r, false, err
 	}
 	if blockID, ok := strings.CutPrefix(anchor, "block:"); ok {

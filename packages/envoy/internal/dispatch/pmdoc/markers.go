@@ -1,6 +1,7 @@
 package pmdoc
 
 import (
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
@@ -104,6 +105,35 @@ func textblockMarker(doc, node *Node, path []int) BlockMarker {
 		return BlockMarker{Kind: MarkerBullet}
 	}
 	return BlockMarker{}
+}
+
+// SetHeadingLevel returns a copy of doc with the level of the heading whose own text begins at
+// position set to level. A `replace` that carried a heading marker through `find` is renaming the
+// heading, so a different level in its replacement is how the caller says "and make it that one".
+func SetHeadingLevel(doc *Node, position, level int) (*Node, error) {
+	var target []int
+	walk(doc, func(node *Node, path []int, pos, _ int) bool {
+		if node.Type != "heading" || pos+1 != position {
+			return true
+		}
+		target = append([]int(nil), path...)
+		return false
+	})
+	if target == nil {
+		return nil, fmt.Errorf("%w: heading at position %d", ErrTargetNotFound, position)
+	}
+	out := cloneNode(doc)
+	heading := nodeAtPath(out, target)
+	attrs := make(Attrs, len(heading.Attrs)+1)
+	for name, value := range heading.Attrs {
+		attrs[name] = value
+	}
+	attrs["level"] = float64(level)
+	heading.Attrs = attrs
+	if err := out.Validate(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // HeadingMarker returns the ATX marker a quote carries to select a heading by its text, or the

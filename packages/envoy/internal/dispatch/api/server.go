@@ -219,7 +219,7 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 	}
 	// The edit route's own ambiguity error names the operation and the quote; the bare pmdoc one
 	// still serves every other caller of FindQuote.
-	var ambiguousQuote *docs.ErrQuoteAmbiguous
+	var ambiguousQuote *docs.ErrAnchorAmbiguous
 	if errors.As(err, &ambiguousQuote) {
 		writeAmbiguousTarget(w, ambiguousQuote.Error(), ambiguousQuote.Candidates)
 		return

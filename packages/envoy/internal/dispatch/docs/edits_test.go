@@ -83,6 +83,31 @@ func TestApplyOpsReportsABatchThatWroteUpdatesAndNoMarkdownAsUnchanged(t *testin
 	}
 }
 
+// Canonical markdown renders no anchor mark, so a `replace` whose `with` equals its `find` reads
+// as identical text while the human comment anchor it covered is gone. That is a change, and the
+// version that records it must still be minted (Deep1326).
+func TestApplyOpsReportsAnEditThatOnlyDropsAnAnchorMarkAsChanged(t *testing.T) {
+	service, artifactID := newTestService(t)
+	seedServiceText(t, service, artifactID, "Keep anchored words here.")
+	if _, err := service.MarkQuote(context.Background(), artifactID, MarkSpec{
+		Kind: MarkComment, ID: "comment-1", By: model.Actor{Kind: "user", ID: "alice"},
+	}, "anchored words", nil); err != nil {
+		t.Fatalf("anchor a comment: %v", err)
+	}
+	result, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{
+		{Op: "replace", Find: "anchored words", With: "anchored words"},
+	}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}, nil)
+	if err != nil {
+		t.Fatalf("replace over the anchor: %v", err)
+	}
+	if !result.Changed || len(result.Unchanged) != 0 {
+		t.Fatalf("edit that dropped the anchor = %#v, want changed with no unchanged operation", result)
+	}
+	if _, _, ok := pmdoc.FindMark(liveTree(t, service, artifactID), "proofComment", "comment-1"); ok {
+		t.Fatal("the replace kept the anchor, so this no longer exercises the verdict")
+	}
+}
+
 func TestVerifyTableAnchorSnapshotsRejectsMarkAddedAfterPrevalidation(t *testing.T) {
 	tree, err := parseInput("| Key | Value |\n| --- | --- |\n| delete | row |\n| retain | row |\n")
 	if err != nil {
@@ -305,8 +330,8 @@ func TestApplyOpsRejectsAmbiguousTargetWithoutChangingDocument(t *testing.T) {
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "same same")
 	_, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{Op: "replace", Find: "same", With: "changed"}}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}, nil)
-	var ambiguous *ErrQuoteAmbiguous
-	if !errors.As(err, &ambiguous) || ambiguous.Quote != "same" {
+	var ambiguous *ErrAnchorAmbiguous
+	if !errors.As(err, &ambiguous) || ambiguous.Kind != "quote" || ambiguous.Target != "same" {
 		t.Fatalf("ambiguous edit error = %v, want the quote named", err)
 	}
 	if len(ambiguous.Candidates) != 2 {
@@ -883,6 +908,15 @@ func TestApplyOperationReplaceKeepsAHeadingMarkerLiteralInATextblock(t *testing.
 		{name: "two hashes in a paragraph", markdown: "Body.\n", find: "Body.", with: "## Not a heading"},
 		{name: "six hashes in a paragraph", markdown: "Body.\n", find: "Body.", with: "###### Not a heading"},
 		{name: "two hashes in a list item", markdown: "- Item.\n", find: "Item.", with: "## Not a heading"},
+		{name: "a star bullet in a paragraph", markdown: "Body.\n", find: "Body.", with: "* Not a bullet"},
+		// Rev1326: the parser also opens an ATX heading on a hash run followed by a tab, or
+		// ending the line.
+		{name: "a tab after a hash in a paragraph", markdown: "Body.\n", find: "Body.", with: "#\tNot a heading"},
+		{name: "a tab after two hashes in a paragraph", markdown: "Body.\n", find: "Body.", with: "##\tNot a heading"},
+		{name: "three hashes ending the line", markdown: "Body.\n", find: "Body.", with: "###"},
+		{name: "six hashes ending the line", markdown: "Body.\n", find: "Body.", with: "######"},
+		{name: "a tab after two hashes in a list item", markdown: "- Item.\n", find: "Item.", with: "##\tNot a heading"},
+		{name: "three hashes ending the line in a list item", markdown: "- Item.\n", find: "Item.", with: "###"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			tree, err := parseInput(test.markdown)
@@ -906,6 +940,70 @@ func TestApplyOperationReplaceKeepsAHeadingMarkerLiteralInATextblock(t *testing.
 			}
 		})
 	}
+}
+
+// AGENTC-193's own payload was whitespace-prefixed (`   - **Retracted …`), and the parser opens
+// a block on a marker up to three spaces or a tab run in. Markdown cannot carry a textblock's
+// leading indentation — the parser strips it, and no escape exists for a space — so the round
+// trip these rows can hold is the one that matters: the canonical markdown parses at all (inside
+// a list item it used to be outside the Proof schema), no block changes type, and rendering it is
+// a fixed point. Rows named by Deep1326 and Rev1326.
+func TestApplyOperationReplaceKeepsAnIndentedMarkerFromChangingTheDocument(t *testing.T) {
+	for _, test := range []struct {
+		name, markdown, find, with string
+	}{
+		{name: "an indented hash in a paragraph", markdown: "Body.\n", find: "Body.", with: "   ## Not a heading"},
+		{name: "a one-space hash in a paragraph", markdown: "Body.\n", find: "Body.", with: " # Not a heading"},
+		{name: "an indented bullet in a paragraph", markdown: "Body.\n", find: "Body.", with: "   - Not a bullet"},
+		{name: "an indented ordered marker in a paragraph", markdown: "Body.\n", find: "Body.", with: "   7. Not an item"},
+		{name: "an indented hash in a bullet item", markdown: "- Item.\n", find: "Item.", with: "   ## Not a heading"},
+		{name: "an indented bullet in an ordered item", markdown: "1. Item.\n", find: "Item.", with: "   - Not a bullet"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tree, err := parseInput(test.markdown)
+			if err != nil {
+				t.Fatal(err)
+			}
+			next, err := applyOperation(tree, model.EditOp{Op: "replace", Find: test.find, With: test.with})
+			if err != nil {
+				t.Fatal(err)
+			}
+			markdown, err := renderTree(next)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reparsed, err := parseInput(markdown)
+			if err != nil {
+				t.Fatalf("canonical markdown %q does not parse back: %v", markdown, err)
+			}
+			if want, got := blockTypes(next), blockTypes(reparsed); !reflect.DeepEqual(want, got) {
+				t.Fatalf("canonical markdown %q reads back as %v, want %v: the %q marker was written unescaped", markdown, got, want, test.with)
+			}
+			settled, err := renderTree(reparsed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			again, err := parseInput(settled)
+			if err != nil {
+				t.Fatalf("settled markdown %q does not parse back: %v", settled, err)
+			}
+			if !again.Equal(reparsed) {
+				t.Fatalf("markdown %q is not a fixed point: it reads back as a different document", settled)
+			}
+		})
+	}
+}
+
+// blockTypes is every non-text node type in document order, the shape a round trip must preserve.
+func blockTypes(tree *pmdoc.Node) []string {
+	var types []string
+	pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
+		if node.Type != "text" {
+			types = append(types, node.Type)
+		}
+		return true
+	})
+	return types
 }
 
 // TESTER-AUTHORED (Accept1326, LEGION-260 acceptance item 3): "a heading: anchor, quote anchor or
@@ -987,7 +1085,7 @@ func TestApplyOperationReplaceRefusesAWithThatRepeatsTheBlocksOwnMarker(t *testi
 		name, markdown, find, with string
 	}{
 		{name: "heading marker find never carried", markdown: "## Design\n", find: "Design", with: "## Design notes"},
-		{name: "a different heading level", markdown: "## Design\n", find: "## Design", with: "### Design"},
+		{name: "a heading marker on a heading whose find carried none", markdown: "## Design\n", find: "Design", with: "# Design"},
 		{name: "ordered marker on an ordered item", markdown: "1. Launcher contract\n", find: "Launcher contract", with: "1. Launcher contract, ruled"},
 		{name: "bullet marker on a bullet item", markdown: "- Retracted\n", find: "Retracted", with: "- Retracted later"},
 		{name: "an indented bullet marker on a bullet item", markdown: "- Retracted\n", find: "Retracted", with: "   - Retracted later"},
@@ -1004,6 +1102,37 @@ func TestApplyOperationReplaceRefusesAWithThatRepeatsTheBlocksOwnMarker(t *testi
 			}
 			if !strings.Contains(invalid.Reason, "omit the marker") {
 				t.Fatalf("reason = %q, want the omit-the-marker guidance", invalid.Reason)
+			}
+		})
+	}
+}
+
+// A rename that carries the heading's own marker through `find` may also carry a different level:
+// that is the obvious way to say "and make it that level", so it applies rather than being
+// refused (Rev1326, Main's item 6).
+func TestApplyOperationReplaceSetsAHeadingLevelFromItsReplacementMarker(t *testing.T) {
+	for _, test := range []struct {
+		name, markdown, find, with, want string
+	}{
+		{name: "deeper", markdown: "## Design\n\nBody.\n", find: "## Design", with: "### Design", want: "### Design\n\nBody.\n"},
+		{name: "shallower, with a rename", markdown: "### Design\n", find: "### Design", with: "# Design notes", want: "# Design notes\n"},
+		{name: "a level-blind find still renames", markdown: "## Design\n", find: "# Design", with: "## Design notes", want: "## Design notes\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tree, err := parseInput(test.markdown)
+			if err != nil {
+				t.Fatal(err)
+			}
+			next, err := applyOperation(tree, model.EditOp{Op: "replace", Find: test.find, With: test.with})
+			if err != nil {
+				t.Fatalf("retitle heading: %v", err)
+			}
+			markdown, err := renderTree(next)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if markdown != test.want {
+				t.Fatalf("replace with %q = %q, want %q", test.with, markdown, test.want)
 			}
 		})
 	}
@@ -1163,6 +1292,98 @@ func TestApplyOperationRefusesAFindWithAnUnbalancedInlineMark(t *testing.T) {
 		if !strings.Contains(invalid.Reason, "balanced") {
 			t.Fatalf("unbalanced find %q reason = %q, want the balance rule", find, invalid.Reason)
 		}
+	}
+}
+
+// The unbalanced-mark verdict may be wrong about which mistake it names — a quote that misses and
+// merely contains an odd delimiter — so the nearest blocks that would fix an ordinary miss stay
+// in the message (Deep1326).
+func TestApplyOperationUnbalancedMarkKeepsNearestBlocks(t *testing.T) {
+	tree, err := parseInput("Closest rendered block.\n\nAnother block.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = applyOperation(tree, model.EditOp{Op: "replace", Find: "Closest **unmatched", With: "x"})
+	var invalid *ErrInvalidOp
+	if !errors.As(err, &invalid) || invalid.Field != "find" {
+		t.Fatalf("unbalanced find = %v, want invalid find", err)
+	}
+	if !strings.Contains(invalid.Reason, "nearest blocks") || !strings.Contains(invalid.Reason, "Closest rendered block.") {
+		t.Fatalf("reason = %q, want the nearest blocks list", invalid.Reason)
+	}
+}
+
+// An ambiguous `heading:` anchor is the same shape as an ambiguous quote: it names the operation
+// and the anchor, with candidates to disambiguate, and offers the occurrence advice a heading
+// anchor can actually use (Rev1326).
+func TestApplyOperationsAmbiguousHeadingAnchorNamesTheOperationAndAnchor(t *testing.T) {
+	tree, err := parseInput("Body.\n\n# Dup\n\nMore.\n\n# Dup\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = applyOperations(tree, []model.EditOp{
+		{Op: "replace", Find: "Body.", With: "Body!"},
+		{Op: "insert", Markdown: "Intro.", After: "heading:Dup"},
+	})
+	var ambiguous *ErrAnchorAmbiguous
+	if !errors.As(err, &ambiguous) || ambiguous.Kind != "heading anchor" || ambiguous.Target != "Dup" || len(ambiguous.Candidates) != 2 {
+		t.Fatalf("heading anchor ambiguity = %v, want it dressed with the anchor and two candidates", err)
+	}
+	if !strings.Contains(ambiguous.Error(), "operation 1") {
+		t.Fatalf("heading anchor ambiguity = %q, want it to name operation 1", ambiguous.Error())
+	}
+	if strings.Contains(ambiguous.Error(), "surrounding text") {
+		t.Fatalf("heading anchor ambiguity = %q, a heading anchor has no surrounding text to quote", ambiguous.Error())
+	}
+}
+
+// An insert anchored on a quote spanning two blocks is the same failure as a replace or delete
+// with that quote, and reads the same way (Rev1326).
+func TestApplyOperationInsertWithACrossBlockQuoteAnchorNamesTheQuote(t *testing.T) {
+	tree, err := parseInput("## Alpha\n\nBody.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = applyOperation(tree, model.EditOp{Op: "insert", Markdown: "x", After: "Alpha Body."})
+	var spans *ErrQuoteSpansBlocks
+	if !errors.As(err, &spans) || spans.Quote != "Alpha Body." {
+		t.Fatalf("cross-block insert anchor = %v, want the anchor named", err)
+	}
+}
+
+// An out-of-range occurrence is a miss like any other: it names the quote, how many places it
+// did match, and the nearest blocks — not a bare "target not found" (Rev1326).
+func TestApplyOperationOutOfRangeOccurrenceNamesTheQuoteAndMatchCount(t *testing.T) {
+	tree, err := parseInput("Alpha block.\n\nAlpha block.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	occurrence := 5
+	_, err = applyOperation(tree, model.EditOp{Op: "replace", Find: "Alpha block.", With: "x", Occurrence: &occurrence})
+	var missing *ErrQuoteNotFound
+	if !errors.As(err, &missing) || missing.Quote != "Alpha block." || missing.Matches != 2 {
+		t.Fatalf("out-of-range occurrence = %v, want the quote and match count named", err)
+	}
+	if !strings.Contains(missing.Error(), "matches 2 places") || !strings.Contains(missing.Error(), "nearest blocks") {
+		t.Fatalf("out-of-range occurrence = %q, want the match count and nearest blocks", missing.Error())
+	}
+}
+
+// A too-wide table row is the same class of refusal as any other: it reaches the caller without
+// the service's internal "apply live document operations:" prose (Quality1326).
+func TestApplyOperationsTableWidthRefusalHasNoServiceProse(t *testing.T) {
+	tree, err := parseInput("| Key | Value |\n| --- | --- |\n| a | b |\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = applyOperations(tree, []model.EditOp{
+		{Op: "insert", Markdown: "| too | many | cells |", After: "b"},
+	})
+	if !errors.Is(err, pmdoc.ErrTableWidth) {
+		t.Fatalf("table width error = %v, want ErrTableWidth", err)
+	}
+	if !isEditRefusal(err) {
+		t.Fatalf("table width error = %v, want isEditRefusal true", err)
 	}
 }
 

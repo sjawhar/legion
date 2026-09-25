@@ -52,10 +52,11 @@ type VersionResult struct {
 }
 
 // EditOutcome is what one batch of document edit operations did. Changed compares the document's
-// canonical markdown before and after the whole batch — not the newest version's markdown, which
-// differs while unsettled browser text is pending — so a batch that leaves the document as it was
-// mints no version, named or not. Unchanged indexes, in order, each operation that left the tree
-// exactly as it found it.
+// semantic identity — the nodeToken over the whole tree, inline marks included, which is what a
+// precondition compares — before and after the whole batch, not against the newest version, whose
+// markdown differs while unsettled browser text is pending. A batch that leaves the document as
+// it was mints no version, named or not. Unchanged indexes, in order, each operation that left
+// the tree exactly as it found it.
 type EditOutcome struct {
 	Applied   int
 	Changed   bool

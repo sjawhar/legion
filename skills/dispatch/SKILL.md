@@ -507,8 +507,8 @@ omitted `artifact` reads the issue specification; a project needs `artifact`; an
 ```ts
 dispatch_doc_edit({ issue?, project?, artifact, ops, precondition?, summary? })
 ```
-It returns issue or project-document owner details plus `applied` and optional `version`. `ops` is an array of this
-exact `EditOp` shape:
+It returns issue or project-document owner details plus `applied`, optional `version`, `changed`, and
+`unchanged_ops`. `ops` is an array of this
 
 ```ts
 type EditOp = {
@@ -550,14 +550,17 @@ the next quote lands, and a `find` cut before a closing `**` or `` ` `` is refus
 as a miss. A `heading:` anchor matches the whole heading text exactly — a prefix of a longer heading is a miss, naming the anchor and
 the nearest headings. `replace` is inline: `with` is the new text of the matched span inside its block, so a marker of a *different*
 kind from the block's own (`4. Design` written into a heading, `# Title` into a paragraph) stays literal text and never turns the
-block into a list or heading. A `with` that opens with the marker the matched block already renders would write that marker twice and
-is rejected (`INVALID_OP` on `with`) — omit the marker to replace the block's text, or use `insert` plus `delete` to change the
-block's kind or number. The one exception is a heading rename whose `find` carried the same marker through the match:
-`replace(find="## Old", with="## New")` gives `## New`. `with` that forms more than one
+block into a list or heading. A `with` that opens with a marker of the *same* kind as the matched block's own would write it twice and
+is rejected (`INVALID_OP` on `with`) — including prose that merely looks like a marker (`1999. was a year` into an ordered item),
+which is written as text with a backslash escape (`1999\. was a year`) — omit the marker to replace the block's text, or use `insert`
+plus `delete` to change the block's kind or number. The one exception is a heading rename whose `find` carried the same marker
+through the match: `replace(find="## Old", with="## New")` gives `## New`, and a different level there — `with="### New"` — retitles
+the heading and sets that level. `with` that forms more than one
 paragraph is rejected (`INVALID_OP` on `with`) — delete the block and insert new blocks instead. Use zero-based `occurrence` for a
 repeated target; re-read a missing or ambiguous target before retrying. Pass `summary` to name the version when recording a decision.
 
-A batch that leaves the document's canonical markdown exactly as it was mints no version, named or not: the response carries
+A batch that leaves the document's semantic identity unchanged — including its inline anchor marks, so an edit that only orphans a
+comment or ask anchor still mints its version — mints no version, named or not: the response carries
 `changed: false` with `unchanged_ops` naming each operation that did nothing, and the tool result says nothing changed. A `summary`
 does not force a version for such a batch; `POST /api/v1/artifacts/<id>/versions`, which names the current state on purpose, still does.
 

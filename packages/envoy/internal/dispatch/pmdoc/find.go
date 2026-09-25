@@ -25,10 +25,12 @@ var ErrTargetNotFound = errors.New("target not found")
 var ErrTargetSpansBlocks = errors.New("target spans textblocks")
 
 // ErrQuoteNotFound reports a quote miss with up to three closest rendered textblocks, in
-// document order among equals. It unwraps ErrTargetNotFound so callers can preserve their
+// document order among equals, and how many places the quote did match — nonzero only when an
+// occurrence was out of range. It unwraps ErrTargetNotFound so callers can preserve their
 // existing miss handling.
 type ErrQuoteNotFound struct {
 	Nearest []string
+	Matches int
 }
 
 func (e *ErrQuoteNotFound) Error() string {
@@ -116,7 +118,12 @@ func FindQuote(doc *Node, quote string, occurrence *int, near *int) (Range, erro
 	}
 	if occurrence != nil {
 		if *occurrence < 0 || *occurrence >= len(matches) {
-			return Range{}, ErrTargetNotFound
+			miss := quoteNotFound(doc, quote)
+			var missing *ErrQuoteNotFound
+			if errors.As(miss, &missing) {
+				missing.Matches = len(matches)
+			}
+			return Range{}, miss
 		}
 		return matches[*occurrence].Range, nil
 	}
