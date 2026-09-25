@@ -117,15 +117,15 @@ const bookmarkRowTemplate = `if(remote, remote, "local") ++ "|" ++ if(present, "
 // one `jj bookmark list`, keyed by where each row is. A bookmark that exists nowhere lists nothing.
 func issueBookmark(ctx context.Context, run Runner, workspace Workspace) (map[string]bookmarkRow, error) {
 	list := []string{"jj", "bookmark", "list", "--all-remotes", "exact:" + workspace.Bookmark, "-T", bookmarkRowTemplate, "--ignore-working-copy", "-R", workspace.Clone}
-	listed, err := runCommand(ctx, run, list, nil, "")
+	result, err := runCommand(ctx, run, list, nil, "")
 	if err != nil {
 		return nil, fmt.Errorf("run %s: %w", strings.Join(list, " "), err)
 	}
-	if listed.ExitCode != 0 {
-		return nil, fmt.Errorf("Bookmark %s could not be resolved; workspace %s was not created: %w", workspace.Bookmark, workspace.Dir, commandFailure(list, listed))
+	if result.ExitCode != 0 {
+		return nil, fmt.Errorf("Bookmark %s could not be resolved; workspace %s was not created: %w", workspace.Bookmark, workspace.Dir, commandFailure(list, result))
 	}
 	rows := map[string]bookmarkRow{}
-	for _, line := range nonEmptyLines(listed.Stdout) {
+	for _, line := range nonEmptyLines(result.Stdout) {
 		fields := strings.Split(line, "|")
 		if len(fields) != 6 {
 			return nil, fmt.Errorf("Bookmark %s's row %q is not the shape %s prints; workspace %s was not created", workspace.Bookmark, line, strings.Join(list, " "), workspace.Dir)
