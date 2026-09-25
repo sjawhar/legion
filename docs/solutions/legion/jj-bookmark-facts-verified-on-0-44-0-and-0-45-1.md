@@ -115,7 +115,7 @@ flags directly:
 | normal, tracked | `local\|1\|0\|0\|<A>\|`, `git\|1\|0\|1\|<A>\|`, `origin\|1\|0\|1\|<A>\|` |
 | local deleted, never pushed | `local\|0\|0\|0\|\|`, `origin\|1\|0\|1\|<A>\|` |
 | local deleted, then origin moved to `<B>` and a fetch | `local\|1\|1\|0\|<B>\|<A>`, `origin\|1\|0\|1\|<B>\|`; `bookmarks(exact:)` lists `<B>` alone |
-| local moved to `<B>`, never pushed, then the branch deleted on the remote and a fetch | `local\|1\|1\|0\|<B>\|<A>`, `origin\|0\|0\|1\|\|`; `bookmarks(exact:)` lists `<B>` alone |
+| local moved to `<B>`, never pushed, then the branch deleted on the remote and a fetch | `local\|1\|1\|0\|<B>\|<A>`, `git\|1\|0\|1\|<B>\|`, `origin\|0\|0\|1\|\|`; `bookmarks(exact:)` lists `<B>` alone |
 | untracked `@origin` at `<A>`; racing fetches, one sees `<B>`, one sees the branch deleted | `origin\|1\|1\|0\|<B>\|<A>`; `untracked_remote_bookmarks()` lists `<B>` alone |
 
 The separator is `|`, not a space, because the reader trims each line, which would drop an empty last field.
