@@ -46,6 +46,8 @@ step=$(sed -n "${n}p" "$dir/$kind.plan")
 root="$HOME/.omp"
 [ -n "${OMP_PROFILE:-}" ] && root="$root/profiles/$OMP_PROFILE"
 installed=$(cd "$root/plugins/node_modules/@sjawhar/pi-legion-envoy" 2>/dev/null && pwd -P)
+# A pod's lane hands Oh My Pi the plugin root as its one explicit extension: it loads from there.
+[ "$kind:$2" = "load:--no-extensions" ] && installed=$(cd "$4" && pwd -P)
 case "$kind:$step" in
 agents:available) echo LEGION_OMP_AGENTS=available >&2; exit 0 ;;
 agents:missing) echo LEGION_OMP_AGENTS=missing >&2; exit 0 ;;
@@ -54,6 +56,7 @@ agents:available-then-die) echo LEGION_OMP_AGENTS=available >&2; echo "database 
 agents:missing-then-hang) echo LEGION_OMP_AGENTS=missing >&2; exec sleep 30 ;;
 load:yes) printf 'LEGION_PLUGIN_LOADED=yes\nLEGION_PLUGIN_LOADED_FROM=file://%s/dist/legion.js?mtime=1\n' "$installed" >&2; exit 0 ;;
 load:no) echo LEGION_PLUGIN_LOADED=no >&2; exit 0 ;;
+load:elsewhere) printf 'LEGION_PLUGIN_LOADED=yes\nLEGION_PLUGIN_LOADED_FROM=file://%s/elsewhere/pi-legion-envoy/dist/legion.js\n' "$dir" >&2; exit 0 ;;
 session:refuses) echo "Invalid OMP_SESSION_STORAGE: legion-launch-probe (expected file or sql)" >&2; exit 1 ;;
 session:accepts) echo "startup timings: settings 3ms" >&2; exit 0 ;;
 session:dies) echo "database is locked" >&2; exit 1 ;;
@@ -173,6 +176,67 @@ func TestProbeImageLoadsThePluginTheWayAPodDoes(t *testing.T) {
 	}
 	if calls := f.calls(t); len(calls) != 0 {
 		t.Errorf("ProbeImage without a plugin root ran %v, want no probe", calls)
+	}
+}
+
+// A relative plugin root is the one the caller's working directory names: the probe hands Oh My Pi
+// that directory, absolute, and holds what it loaded to that directory's manifest.
+func TestTheImageProbeResolvesARelativePluginRoot(t *testing.T) {
+	f := newImageOmp(t, []string{"available"}, []string{"yes"}, []string{"refuses"})
+	home := imageHome(t, contractCurrent)
+	t.Chdir(home)
+
+	err := ProbeImage(context.Background(), ImageProbe{
+		Omp: f.path, Contract: 3, Env: imageEnv(home), WorkDir: home, PluginRoot: filepath.Join("opt-legion", "pi-legion-envoy"),
+		Log: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+	})
+
+	if err != nil {
+		t.Fatalf("ProbeImage with a relative plugin root = %v, want every probe to pass", err)
+	}
+	if argv, root := f.read(t, "load.argv.1"), filepath.Join(home, "opt-legion", "pi-legion-envoy"); !strings.Contains(argv, "--extension "+root+" ") {
+		t.Errorf("the load probe ran `omp %s`, want the plugin root as the absolute %s", strings.TrimSpace(argv), root)
+	}
+}
+
+// In a pod's lane the plugin comes from the image's plugin root, and discovery is off, so no
+// refusal there sends the operator to the profile's plugin install: each names the root a pod
+// loads.
+func TestTheImageProbesRefusalsNameThePluginRootAPodLoads(t *testing.T) {
+	for _, testCase := range []struct {
+		name, legion string
+		load         []string
+		want         []string
+		notWant      string
+	}{
+		{"another contract", contractPrevious, []string{"yes"},
+			[]string{"speaks Go daemon API contract 2; this daemon requires 3", "into the plugin root @ROOT, which a pod loads as its one explicit extension"}, "OMP profile"},
+		{"not loaded", contractCurrent, []string{"no"},
+			[]string{"pi-legion-envoy 1.57.0 at @ROOT did not load with discovery off and @ROOT as Oh My Pi's one explicit extension, as a pod loads it"}, "omp plugin list"},
+		{"loaded from another copy", contractCurrent, []string{"elsewhere"},
+			[]string{"loads from @DIR/elsewhere/pi-legion-envoy/package.json, but the probe passed @ROOT as Oh My Pi's one explicit extension"}, "dotenv"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			f := newImageOmp(t, []string{"available"}, testCase.load, []string{"refuses"})
+			writeManifest(t, filepath.Join(f.dir, "elsewhere", "pi-legion-envoy", "package.json"), contractCurrent)
+			gate, _ := imageGateUnder(t, f, testCase.legion, 0)
+
+			err := gate.verifyImage(context.Background())
+
+			if err == nil {
+				t.Fatal("verifyImage passed, want a refusal")
+			}
+			dir, _ := filepath.EvalSymlinks(f.dir)
+			for _, want := range testCase.want {
+				want = strings.NewReplacer("@ROOT", gate.pluginRoot, "@DIR", dir).Replace(want)
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("verifyImage = %v, want it to say %q", err, want)
+				}
+			}
+			if strings.Contains(err.Error(), testCase.notWant) {
+				t.Errorf("verifyImage = %v, which names %q, a remedy of the lane a pod does not load", err, testCase.notWant)
+			}
+		})
 	}
 }
 

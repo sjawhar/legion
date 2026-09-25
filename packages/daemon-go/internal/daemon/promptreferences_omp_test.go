@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -80,18 +81,21 @@ func TestThePromptReferenceProbeOnTheRealOhMyPi(t *testing.T) {
 				name, value, _ := strings.Cut(pair, "=")
 				env[name] = value
 			}
-			probe := ImageProbe{Omp: omp, Contract: 3, Env: env, WorkDir: dir, Log: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))}
+			log := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+			var err error
 			if testCase.onPod {
-				probe.PluginRoot = root
+				err = ProbeImage(context.Background(), ImageProbe{Omp: omp, Contract: 3, Env: env, WorkDir: dir, PluginRoot: root, Log: log})
 			} else {
 				install := exec.Command(omp, "plugin", "install", root)
 				install.Env = environ
 				if out, err := install.CombinedOutput(); err != nil {
 					t.Fatalf("omp plugin install: %v\n%s", err, out)
 				}
+				// A pane loads the plugin through discovery, as the daemon's boot gate on tmux
+				// probes it.
+				err = pluginGate{env: env, workDir: dir, invocation: omp, timeout: defaultProbeTimeout, retry: bootprobe.Image,
+					contract: 3, log: log}.verify(context.Background())
 			}
-
-			err := ProbeImage(context.Background(), probe)
 
 			switch {
 			case testCase.refusal == "" && err != nil:

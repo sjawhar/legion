@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -106,8 +107,8 @@ func TestTheAgentModelCheckOnTheRealOhMyPi(t *testing.T) {
 			for name, value := range testCase.env {
 				env[name] = value
 			}
-			probe := ImageProbe{Omp: omp, Contract: 3, Env: env, WorkDir: dir, SkipAgentModels: testCase.skip,
-				Log: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))}
+			log := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+			var err error
 			if testCase.pane {
 				install := exec.Command(omp, "plugin", "install", root)
 				for name, value := range env {
@@ -116,11 +117,14 @@ func TestTheAgentModelCheckOnTheRealOhMyPi(t *testing.T) {
 				if out, err := install.CombinedOutput(); err != nil {
 					t.Fatalf("omp plugin install: %v\n%s", err, out)
 				}
+				// A pane loads the plugin through discovery, as the daemon's boot gate on tmux
+				// probes it.
+				err = pluginGate{env: env, workDir: dir, invocation: omp, timeout: defaultProbeTimeout, retry: bootprobe.Image,
+					contract: 3, skipAgentModels: testCase.skip, log: log}.verify(context.Background())
 			} else {
-				probe.PluginRoot = root
+				err = ProbeImage(context.Background(), ImageProbe{Omp: omp, Contract: 3, Env: env, WorkDir: dir, PluginRoot: root,
+					SkipAgentModels: testCase.skip, Log: log})
 			}
-
-			err := ProbeImage(context.Background(), probe)
 
 			if len(testCase.want) == 0 {
 				if err != nil {
