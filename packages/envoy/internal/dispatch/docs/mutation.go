@@ -126,9 +126,14 @@ func (s *Service) applyJoined(ctx context.Context, tx pgx.Tx, artifactID string,
 	if _, err := s.persistence.AppendUpdateTx(ctx, tx, artifactID, update, contentChanged); err != nil {
 		return fmt.Errorf("append transactional live document update: %w", err)
 	}
+	// The rendering this operation produced is the document as the transaction now sees it, so
+	// a version it writes later snapshots this tree rather than walking and rendering the
+	// document again (captureLiveTextAndAuthors). forkLive drops both the moment the fork moves.
+	write.tree, write.markdown = tree, markdown
 	if _, err := s.writeVersionTx(ctx, tx, artifactID, markdown, tree, actor, nil); err != nil {
 		return fmt.Errorf("refresh transactional document anchors: %w", err)
 	}
+	write.anchorsTree = tree
 	write.updates = append(write.updates, update)
 	recorded = true
 	if contentChanged {
@@ -902,6 +907,13 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 	if err != nil {
 		return nil, "", versionPending{}, nil, err
 	}
+	if write := joinedLiveWrite(ctx, room); fork != nil && write != nil && write.tree != nil && write.fork == fork {
+		state := s.room(room)
+		state.mu.Lock()
+		capture, authors := captureAuthors(state, write, actor)
+		state.mu.Unlock()
+		return write.tree, write.markdown, capture, authors, nil
+	}
 	if fork == nil && s.srv.GetDoc(room) == nil {
 		err := s.srv.Apply(ctx, room, func(_ *crdt.Doc, _ func(func(*crdt.Transaction))) {})
 		if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
@@ -1035,8 +1047,15 @@ func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID, mar
 	if err != nil {
 		return versionWriteResult{}, err
 	}
-	if err := s.refreshAnchors(ctx, tx, artifactID, tree, actor); err != nil {
-		return versionWriteResult{}, err
+	// The transaction's own live operation already refreshed this tree's anchors (applyJoined);
+	// refreshing the same tree twice reads and re-derives every open anchor for no change.
+	// Neither call goes: this is the only refresh a version written without a live write of its
+	// own gets - settlement and a standalone named version - and the write == nil arm above is
+	// the only one a mark-only write, which writes no version, gets at all.
+	if live := joinedLiveWrite(ctx, artifactID); live == nil || live.anchorsTree != tree {
+		if err := s.refreshAnchors(ctx, tx, artifactID, tree, actor); err != nil {
+			return versionWriteResult{}, err
+		}
 	}
 	if write.capture != nil {
 		s.rememberPendingVersion(artifactID, version, *write.capture)
