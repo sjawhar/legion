@@ -2,6 +2,7 @@ package pmdoc
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -16,10 +17,12 @@ const (
 	MarkerBullet  MarkerKind = "bullet list"
 )
 
-// BlockMarker is one block marker. Level carries a heading's level; a list marker leaves it zero.
+// BlockMarker is one block marker. Level carries a heading's level; Number carries an ordered
+// item's own number, the one the renderer writes before its text.
 type BlockMarker struct {
-	Kind  MarkerKind
-	Level int
+	Kind   MarkerKind
+	Level  int
+	Number int
 }
 
 // Markdown renders the marker the way the document renderer writes it, for error text.
@@ -28,7 +31,7 @@ func (m BlockMarker) Markdown() string {
 	case MarkerHeading:
 		return strings.Repeat("#", max(m.Level, 1)) + " "
 	case MarkerOrdered:
-		return "1. "
+		return strconv.Itoa(max(m.Number, 1)) + ". "
 	case MarkerBullet:
 		return "- "
 	default:
@@ -92,9 +95,11 @@ func textblockMarker(doc, node *Node, path []int) BlockMarker {
 	if nodeAtPath(doc, path[:len(path)-1]).Type != "list_item" {
 		return BlockMarker{}
 	}
-	switch nodeAtPath(doc, path[:len(path)-2]).Type {
+	item := path[len(path)-2]
+	list := nodeAtPath(doc, path[:len(path)-2])
+	switch list.Type {
 	case "ordered_list":
-		return BlockMarker{Kind: MarkerOrdered}
+		return BlockMarker{Kind: MarkerOrdered, Number: int(num(list.Attrs["order"], 1)) + item}
 	case "bullet_list":
 		return BlockMarker{Kind: MarkerBullet}
 	}

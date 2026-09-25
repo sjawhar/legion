@@ -217,6 +217,17 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 		writeError(w, apiErr.code, apiErr.status, apiErr.message)
 		return
 	}
+	// The edit route's own ambiguity error names the operation and the quote; the bare pmdoc one
+	// still serves every other caller of FindQuote.
+	var ambiguousQuote *docs.ErrQuoteAmbiguous
+	if errors.As(err, &ambiguousQuote) {
+		WriteJSON(w, http.StatusConflict, map[string]any{
+			"error":      ambiguousQuote.Error(),
+			"code":       "TARGET_AMBIGUOUS",
+			"candidates": ambiguousQuote.Candidates,
+		})
+		return
+	}
 	var ambiguous *pmdoc.ErrTargetAmbiguous
 	if errors.As(err, &ambiguous) {
 		WriteJSON(w, http.StatusConflict, map[string]any{

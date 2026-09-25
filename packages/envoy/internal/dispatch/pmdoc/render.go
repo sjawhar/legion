@@ -471,7 +471,7 @@ func needsInlineEscape(value string, offset int, char rune, atLineStart, escapeP
 	case '|':
 		return escapePipes
 	case '#':
-		return atLineStart && offset+1 < len(value) && value[offset+1] == ' '
+		return atLineStart && atxHeadingRun(value, offset)
 	case '>':
 		return atLineStart
 	case '-', '+':
@@ -481,6 +481,18 @@ func needsInlineEscape(value string, offset int, char rune, atLineStart, escapeP
 	default:
 		return false
 	}
+}
+
+// atxHeadingRun reports whether value opens an ATX heading marker at offset: one to six hashes
+// followed by a space. Escaping the first hash is enough to keep the whole run text, and without
+// it a `## ` a replacement wrote into a paragraph reads back as a heading — or, inside a list
+// item, as markdown the Proof schema refuses to import at all.
+func atxHeadingRun(value string, offset int) bool {
+	end := offset
+	for end < len(value) && value[end] == '#' {
+		end++
+	}
+	return end-offset <= 6 && end < len(value) && value[end] == ' '
 }
 
 func emphasisDelimiter(value string, offset int, delimiter byte) bool {

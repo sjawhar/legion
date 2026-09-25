@@ -15,14 +15,27 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
+// opIndex is the batch position of the operation an error came from. The API renders these
+// errors from their own text rather than the wrapped chain, so each carries its own index; an
+// error raised outside a batch leaves it nil and reads exactly as it did before.
+type opIndex struct{ Operation *int }
+
+func (o opIndex) prefix() string {
+	if o.Operation == nil {
+		return ""
+	}
+	return fmt.Sprintf("operation %d: ", *o.Operation)
+}
+
 // ErrInvalidOp identifies the malformed user-facing operation field.
 type ErrInvalidOp struct {
+	opIndex
 	Field  string
 	Reason string
 }
 
 func (e *ErrInvalidOp) Error() string {
-	return fmt.Sprintf("invalid document operation field %q: %s", e.Field, e.Reason)
+	return fmt.Sprintf("%sinvalid document operation field %q: %s", e.prefix(), e.Field, e.Reason)
 }
 
 func invalidOp(field string) error {
@@ -32,15 +45,81 @@ func invalidOp(field string) error {
 // ErrQuoteNotFound names the quote that missed, explains how document edit quotes are matched,
 // and names the closest blocks.
 type ErrQuoteNotFound struct {
+	opIndex
 	Quote   string
 	Nearest []string
 }
 
 func (e *ErrQuoteNotFound) Error() string {
-	return fmt.Sprintf(`quote %q not found; quotes match the block text as rendered (inline markdown is tolerated; use "heading:<title>", "block:<id>", "start", or "end" as insert and move anchors); nearest blocks: %s`, e.Quote, pmdoc.QuoteBlocks(e.Nearest))
+	return fmt.Sprintf(`%squote %q not found; quotes match the block text as rendered (inline markdown is tolerated; use "heading:<title>", "block:<id>", "start", or "end" as insert and move anchors); nearest blocks: %s`, e.prefix(), e.Quote, pmdoc.QuoteBlocks(e.Nearest))
 }
 
 func (e *ErrQuoteNotFound) Unwrap() error { return pmdoc.ErrTargetNotFound }
+
+// ErrQuoteAmbiguous names a quote that resolved in several places, with the candidates the API
+// hands back so the caller can pick one.
+type ErrQuoteAmbiguous struct {
+	opIndex
+	Quote      string
+	Candidates []pmdoc.Candidate
+}
+
+func (e *ErrQuoteAmbiguous) Error() string {
+	return fmt.Sprintf(
+		"%squote %q matches %d places; pass a zero-based occurrence, or quote more of the surrounding text",
+		e.prefix(), e.Quote, len(e.Candidates),
+	)
+}
+
+// ErrQuoteSpansBlocks names a quote that reached across a block boundary. A quote-anchored edit
+// stays inside one textblock, so the fix is to quote less, or to address the blocks by id.
+type ErrQuoteSpansBlocks struct {
+	opIndex
+	Quote string
+}
+
+func (e *ErrQuoteSpansBlocks) Error() string {
+	return fmt.Sprintf(
+		"%squote %q spans more than one block; a quote-anchored edit stays inside one block, so quote text from a single block, or address whole blocks by id",
+		e.prefix(), e.Quote,
+	)
+}
+
+func (e *ErrQuoteSpansBlocks) Unwrap() error { return pmdoc.ErrTargetSpansBlocks }
+
+// stampOperation gives index to the one error the API renders from its own text, and falls back
+// to wrapping everything else with the same prefix.
+func stampOperation(index int, err error) error {
+	var invalid *ErrInvalidOp
+	var missing *ErrQuoteNotFound
+	var ambiguous *ErrQuoteAmbiguous
+	var spans *ErrQuoteSpansBlocks
+	switch {
+	case errors.As(err, &invalid):
+		invalid.Operation = &index
+	case errors.As(err, &missing):
+		missing.Operation = &index
+	case errors.As(err, &ambiguous):
+		ambiguous.Operation = &index
+	case errors.As(err, &spans):
+		spans.Operation = &index
+	default:
+		return fmt.Errorf("operation %d: %w", index, err)
+	}
+	return err
+}
+
+// isEditRefusal reports an error the caller wrote the batch wrong, whose own text is what the
+// route serves. Wrapping one in the service's internal prose would bury the operation index and
+// the quote the reader needs.
+func isEditRefusal(err error) bool {
+	var invalid *ErrInvalidOp
+	var ambiguous *ErrQuoteAmbiguous
+	return errors.Is(err, pmdoc.ErrTargetNotFound) ||
+		errors.Is(err, pmdoc.ErrTargetSpansBlocks) ||
+		errors.As(err, &invalid) ||
+		errors.As(err, &ambiguous)
+}
 
 // ErrInvalidPrecondition identifies a malformed optimistic-concurrency guard.
 type ErrInvalidPrecondition struct {
@@ -301,11 +380,11 @@ func applyOperationsWithValidation(tree *pmdoc.Node, ops []model.EditOp, validat
 	var unchanged []int
 	for index, op := range ops {
 		if removal, alreadyRemoved := removed[op.Block]; op.Block != "" && alreadyRemoved {
-			return editBatch{}, fmt.Errorf("operation %d: %w", index, removedBlockError(op.Block, removal))
+			return editBatch{}, stampOperation(index, removedBlockError(op.Block, removal))
 		}
 		if validate != nil {
 			if err := validate(tree, op); err != nil {
-				return editBatch{}, fmt.Errorf("operation %d: %w", index, err)
+				return editBatch{}, stampOperation(index, err)
 			}
 		}
 		var removedIDs []string
@@ -314,13 +393,13 @@ func applyOperationsWithValidation(tree *pmdoc.Node, ops []model.EditOp, validat
 				var err error
 				removedIDs, err = pmdoc.BlockDescendantIDs(tree, op.Block)
 				if err != nil {
-					return editBatch{}, fmt.Errorf("operation %d: %w", index, err)
+					return editBatch{}, stampOperation(index, err)
 				}
 			}
 		}
 		next, err := applyOperation(tree, op)
 		if err != nil {
-			return editBatch{}, fmt.Errorf("operation %d: %w", index, err)
+			return editBatch{}, stampOperation(index, err)
 		}
 		if next.Equal(tree) {
 			unchanged = append(unchanged, index)
@@ -828,7 +907,7 @@ func findEditQuote(tree *pmdoc.Node, field, quote string, occurrence *int) (pmdo
 		return pmdoc.Range{}, err
 	}
 	if pmdoc.TargetSpansBlocks(tree, r) {
-		return pmdoc.Range{}, pmdoc.ErrTargetSpansBlocks
+		return pmdoc.Range{}, &ErrQuoteSpansBlocks{Quote: quote}
 	}
 	return r, nil
 }
@@ -847,6 +926,13 @@ func resolveEditQuote(tree *pmdoc.Node, field, quote string, occurrence *int) (p
 			)}
 		}
 		return pmdoc.Range{}, &ErrQuoteNotFound{Quote: quote, Nearest: missing.Nearest}
+	}
+	var ambiguous *pmdoc.ErrTargetAmbiguous
+	if errors.As(err, &ambiguous) {
+		return pmdoc.Range{}, &ErrQuoteAmbiguous{Quote: quote, Candidates: ambiguous.Candidates}
+	}
+	if errors.Is(err, pmdoc.ErrTargetSpansBlocks) {
+		return pmdoc.Range{}, &ErrQuoteSpansBlocks{Quote: quote}
 	}
 	return pmdoc.Range{}, err
 }

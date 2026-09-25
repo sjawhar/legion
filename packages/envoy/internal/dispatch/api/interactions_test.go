@@ -1940,6 +1940,75 @@ func TestArtifactTextReportsTheLatestVersion(t *testing.T) {
 	}
 }
 
+// The route renders INVALID_OP and TARGET_AMBIGUOUS from the typed error, not the wrapped chain,
+// so a refusal inside a multi-operation batch has to reach the response still naming its operation.
+func TestDocumentEditRefusalsReachTheResponseNamingTheirOperation(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Refusal shapes", "Body.\n\n- Retracted\n\nShared line.\n\nShared line.\n")
+	for _, test := range []struct {
+		name   string
+		ops    []map[string]any
+		status int
+		code   string
+		wants  []string
+	}{
+		{
+			name: "a marker refusal in operation 1",
+			ops: []map[string]any{
+				{"op": "replace", "find": "Body.", "with": "Body!"},
+				{"op": "replace", "find": "Retracted", "with": "- Retracted later"},
+			},
+			status: http.StatusBadRequest,
+			code:   "INVALID_OP",
+			wants:  []string{"operation 1", `"- "`, "omit the marker"},
+		},
+		{
+			name: "an ambiguous quote in operation 1",
+			ops: []map[string]any{
+				{"op": "replace", "find": "Body.", "with": "Body!"},
+				{"op": "replace", "find": "Shared line.", "with": "Changed."},
+			},
+			status: http.StatusConflict,
+			code:   "TARGET_AMBIGUOUS",
+			wants:  []string{"operation 1", `"Shared line."`, "occurrence"},
+		},
+		{
+			name: "a quote spanning two blocks in operation 0",
+			ops: []map[string]any{
+				{"op": "replace", "find": "Body. Retracted", "with": "Changed."},
+			},
+			status: http.StatusBadRequest,
+			code:   "TARGET_SPANS_BLOCKS",
+			wants:  []string{"operation 0", `"Body. Retracted"`},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+				"ops": test.ops, "actor": sessionActor(),
+			})
+			body := decodeBody[struct {
+				Code       string            `json:"code"`
+				Error      string            `json:"error"`
+				Candidates []json.RawMessage `json:"candidates"`
+			}](t, response)
+			if response.Code != test.status || body.Code != test.code {
+				t.Fatalf("refusal: status=%d code=%q error=%q", response.Code, body.Code, body.Error)
+			}
+			for _, want := range test.wants {
+				if !strings.Contains(body.Error, want) {
+					t.Fatalf("refusal = %q, want it to name %q", body.Error, want)
+				}
+			}
+			if strings.Contains(body.Error, "pmdoc") {
+				t.Fatalf("refusal = %q, want no internal package name", body.Error)
+			}
+			if test.code == "TARGET_AMBIGUOUS" && len(body.Candidates) != 2 {
+				t.Fatalf("ambiguous candidates = %d, want the two matches", len(body.Candidates))
+			}
+		})
+	}
+}
+
 func TestDoneIssueAllowsOnlyAStatusReopen(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Strict reopen", "before")

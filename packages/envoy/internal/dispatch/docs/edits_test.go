@@ -305,9 +305,9 @@ func TestApplyOpsRejectsAmbiguousTargetWithoutChangingDocument(t *testing.T) {
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "same same")
 	_, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{Op: "replace", Find: "same", With: "changed"}}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}, nil)
-	var ambiguous *pmdoc.ErrTargetAmbiguous
-	if !errors.As(err, &ambiguous) {
-		t.Fatalf("ambiguous edit error = %v, want ErrTargetAmbiguous", err)
+	var ambiguous *ErrQuoteAmbiguous
+	if !errors.As(err, &ambiguous) || ambiguous.Quote != "same" {
+		t.Fatalf("ambiguous edit error = %v, want the quote named", err)
 	}
 	if len(ambiguous.Candidates) != 2 {
 		t.Fatalf("ambiguous candidates = %#v, want two candidates", ambiguous.Candidates)
@@ -867,6 +867,83 @@ func TestApplyOperationReplaceInsideATextblockIsInline(t *testing.T) {
 	}
 }
 
+// TESTER-AUTHORED (Accept1326, LEGION-260 acceptance item 2): a `with` whose leading marker is of
+// a different kind from the matched block's own "stays literal and escaped", so the document's own
+// canonical markdown still describes the document it was rendered from. The renderer escapes a
+// lone "# " at a line start but not a multi-# ATX marker — pmdoc/render.go needsInlineEscape's
+// '#' case requires the very next byte to be a space — so a "## " written into a paragraph reads
+// back as a heading, and one written into a list item's paragraph reads back as markdown outside
+// the Proof schema, which Dispatch refuses to import at all. The single-# row is the control:
+// it is escaped today and must stay so.
+func TestApplyOperationReplaceKeepsAHeadingMarkerLiteralInATextblock(t *testing.T) {
+	for _, test := range []struct {
+		name, markdown, find, with string
+	}{
+		{name: "one hash in a paragraph", markdown: "Body.\n", find: "Body.", with: "# Not a heading"},
+		{name: "two hashes in a paragraph", markdown: "Body.\n", find: "Body.", with: "## Not a heading"},
+		{name: "six hashes in a paragraph", markdown: "Body.\n", find: "Body.", with: "###### Not a heading"},
+		{name: "two hashes in a list item", markdown: "- Item.\n", find: "Item.", with: "## Not a heading"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tree, err := parseInput(test.markdown)
+			if err != nil {
+				t.Fatal(err)
+			}
+			next, err := applyOperation(tree, model.EditOp{Op: "replace", Find: test.find, With: test.with})
+			if err != nil {
+				t.Fatal(err)
+			}
+			markdown, err := renderTree(next)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reparsed, err := parseInput(markdown)
+			if err != nil {
+				t.Fatalf("canonical markdown %q does not parse back: %v", markdown, err)
+			}
+			if !reparsed.Equal(next) {
+				t.Fatalf("canonical markdown %q reads back as a different document: the %q marker was written unescaped", markdown, test.with)
+			}
+		})
+	}
+}
+
+// TESTER-AUTHORED (Accept1326, LEGION-260 acceptance item 3): "a heading: anchor, quote anchor or
+// target that doesn't resolve returns an error naming the operation's index, the anchor text, and
+// the nearest existing headings ... or blocks. It never names an internal package."
+// resolveEditQuote only dresses pmdoc.ErrQuoteNotFound; a quote that resolves ambiguously
+// (ErrTargetAmbiguous) or across two textblocks (ErrTargetSpansBlocks) falls through raw, so an
+// agent is told "pmdoc: target is ambiguous" with no operation index and no quote to act on.
+func TestApplyOperationsUnresolvedQuoteErrorsNameTheQuoteNotThePackage(t *testing.T) {
+	for _, test := range []struct {
+		name, markdown, find string
+	}{
+		{name: "quote matching two blocks", markdown: "Shared line.\n\nShared line.\n", find: "Shared line."},
+		{name: "quote spanning two blocks", markdown: "## Alpha\n\nBody.\n", find: "Alpha Body."},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tree, err := parseInput(test.markdown)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = applyOperations(tree, []model.EditOp{{Op: "replace", Find: test.find, With: "z"}})
+			if err == nil {
+				t.Fatalf("replace find=%q resolved, want a refusal", test.find)
+			}
+			message := err.Error()
+			if strings.Contains(message, "pmdoc") {
+				t.Errorf("error %q names the internal package", message)
+			}
+			if !strings.Contains(message, "operation 0") {
+				t.Errorf("error %q does not name the operation index", message)
+			}
+			if !strings.Contains(message, test.find) {
+				t.Errorf("error %q does not name the quote %q", message, test.find)
+			}
+		})
+	}
+}
+
 func TestApplyOperationReplaceRejectsBlockReplacements(t *testing.T) {
 	tree, err := parseInput("Body.\n")
 	if err != nil {
@@ -929,6 +1006,49 @@ func TestApplyOperationReplaceRefusesAWithThatRepeatsTheBlocksOwnMarker(t *testi
 				t.Fatalf("reason = %q, want the omit-the-marker guidance", invalid.Reason)
 			}
 		})
+	}
+}
+
+// The refusal quotes the marker the reader will see in the document, not a stand-in: AGENTC-193's
+// item was `7.`, and telling that reader the block renders `1.` sends them looking for a
+// different bullet.
+func TestApplyOperationReplaceRefusalQuotesTheBlocksRealMarker(t *testing.T) {
+	tree, err := parseInput("7. Launcher contract\n8. Acceptance\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct{ find, want string }{
+		{find: "Launcher contract", want: `"7. "`},
+		{find: "Acceptance", want: `"8. "`},
+	} {
+		_, err := applyOperation(tree, model.EditOp{Op: "replace", Find: test.find, With: "9. " + test.find})
+		var invalid *ErrInvalidOp
+		if !errors.As(err, &invalid) {
+			t.Fatalf("replace in %q = %v, want invalid with", test.find, err)
+		}
+		if !strings.Contains(invalid.Reason, test.want) {
+			t.Fatalf("reason = %q, want it to quote %s", invalid.Reason, test.want)
+		}
+	}
+}
+
+// A refusal is rendered from the typed error, not the wrapped chain, so the operation index has
+// to survive on the error itself or a multi-op batch never says which operation was refused.
+func TestApplyOperationsRefusalsCarryTheirOperationIndex(t *testing.T) {
+	tree, err := parseInput("Body.\n\n- Retracted\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = applyOperations(tree, []model.EditOp{
+		{Op: "replace", Find: "Body.", With: "Body!"},
+		{Op: "replace", Find: "Retracted", With: "- Retracted later"},
+	})
+	var invalid *ErrInvalidOp
+	if !errors.As(err, &invalid) || invalid.Field != "with" {
+		t.Fatalf("batch error = %v, want invalid with", err)
+	}
+	if !strings.Contains(invalid.Error(), "operation 1") {
+		t.Fatalf("refusal = %q, want it to name operation 1", invalid.Error())
 	}
 }
 

@@ -748,7 +748,7 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 		if errors.Is(err, websocket.ErrNoChanges) {
 			return outcome, nil
 		}
-		if errors.Is(err, pmdoc.ErrTargetNotFound) {
+		if isEditRefusal(err) {
 			return EditOutcome{}, err
 		}
 		return EditOutcome{}, fmt.Errorf("apply live document operations: %w", err)
@@ -795,7 +795,7 @@ func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, 
 		if errors.Is(err, websocket.ErrNoChanges) {
 			return outcome, nil
 		}
-		if errors.Is(err, pmdoc.ErrTargetNotFound) {
+		if isEditRefusal(err) {
 			return EditOutcome{}, err
 		}
 		return EditOutcome{}, fmt.Errorf("apply live document operations: %w", err)

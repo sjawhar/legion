@@ -22,7 +22,7 @@ type Range struct {
 // ErrTargetNotFound is the text an agent reads when a quote, heading or block anchor does not
 // resolve, so it names no internal package.
 var ErrTargetNotFound = errors.New("target not found")
-var ErrTargetSpansBlocks = errors.New("pmdoc: target spans textblocks")
+var ErrTargetSpansBlocks = errors.New("target spans textblocks")
 
 // ErrQuoteNotFound reports a quote miss with up to three closest rendered textblocks, in
 // document order among equals. It unwraps ErrTargetNotFound so callers can preserve their
@@ -80,12 +80,19 @@ type Candidate struct {
 	Context string `json:"context"`
 }
 
-// ErrTargetAmbiguous reports a quote that needs an occurrence or position hint.
+// ErrTargetAmbiguous reports a quote that needs an occurrence or position hint. Target is the
+// text that matched in several places, so the reader knows which of its quotes to narrow.
 type ErrTargetAmbiguous struct {
+	Target     string
 	Candidates []Candidate
 }
 
-func (e *ErrTargetAmbiguous) Error() string { return "pmdoc: target is ambiguous" }
+func (e *ErrTargetAmbiguous) Error() string {
+	return fmt.Sprintf(
+		"%q matches %d places; pass a zero-based occurrence, or quote more of the surrounding text",
+		e.Target, len(e.Candidates),
+	)
+}
 
 // FindQuote finds quote in the document text and returns its ProseMirror
 // range. occurrence is zero-based. When several exact matches exist, near
@@ -136,7 +143,7 @@ func FindQuote(doc *Node, quote string, occurrence *int, near *int) (Range, erro
 			Context: slice16(text.value, max(0, match.textFrom-40), min(len16(text.value), match.textTo+40)),
 		})
 	}
-	return Range{}, &ErrTargetAmbiguous{Candidates: candidates}
+	return Range{}, &ErrTargetAmbiguous{Target: quote, Candidates: candidates}
 }
 
 // TargetSpansBlocks reports whether r is not wholly contained by one
@@ -196,7 +203,7 @@ func FindHeading(doc *Node, title string, occurrence *int) (Range, error) {
 	if len(matches) == 1 {
 		return matches[0].Range, nil
 	}
-	return Range{}, &ErrTargetAmbiguous{Candidates: matches}
+	return Range{}, &ErrTargetAmbiguous{Target: title, Candidates: matches}
 }
 
 // headingNotFound ranks the document's headings by their common prefix with title, the way a
