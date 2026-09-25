@@ -1214,9 +1214,15 @@ token_renewed() {
   iat=$(token_iat) || return 1
   [ "$iat" -gt $((pod_started + 60)) ]
 }
+# architect_pod_kept WHEN fails when the architect's pod is no longer the one whose token renewed:
+# a replacement's first token is issued at its start, later than the old pod's, and is no renewal.
+architect_pod_kept() {
+  local now
+  now=$(op get pod "$pod" -o jsonpath='{.metadata.uid}')
+  [ "$now" = "$pod_uid" ] || fail "the architect's pod was replaced $1 ($pod_uid -> $now), so its token is another pod's first, not a renewal"
+}
 until_true 3600 "the architect pod's operator token to be renewed" token_renewed
-now_uid=$(op get pod "$pod" -o jsonpath='{.metadata.uid}')
-[ "$now_uid" = "$pod_uid" ] || fail "the architect's pod was replaced during the wait ($pod_uid -> $now_uid), so the new token is another pod's, not a renewal"
+architect_pod_kept "during the wait"
 iat=$(token_iat) || fail "the architect pod $pod's operator token could not be read"
 rotated=$(date -u +%FT%TZ)
 note "the architect pod started at $(date -u -d "@$pod_started" +%FT%TZ); its token was issued at $(date -u -d "@$iat" +%FT%TZ), a renewal"
@@ -1227,6 +1233,7 @@ turn_after_rotation() {
   claim_session_text "$tree1" architect | jq -R -s -e --arg at "$rotated" '[split("\n")[] | fromjson? | select(.type == "message" and .message.role == "assistant" and .timestamp > $at)] | any(.message.stopReason == "stop")' >/dev/null
 }
 until_true 600 "a completed architect turn after the rotation" turn_after_rotation
+architect_pod_kept "before the turn after the rotation completed"
 after=$(claim_session_text "$tree1" architect | jq -R -s -c --arg at "$rotated" '[split("\n")[] | fromjson? | select(.type == "message" and .message.role == "assistant" and .timestamp > $at) | "\(.message.provider)/\(.message.model)"] | unique')
 note "turns after the rotation were answered by $after"
 jq -e 'all(.[]; test("^anthropic/claude-[a-z0-9.-]+-legion$"))' <<<"$after" >/dev/null || fail "a turn after the rotation left the gateway's aliases: $after"
