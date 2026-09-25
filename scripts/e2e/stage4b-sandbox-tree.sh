@@ -330,6 +330,38 @@ start_pod_watch() {
   sampler_pid=$!
 }
 
+# start_memory_hog NODE is the pod watch's negative control: a pod the operator pins to a tree's
+# node, labelled as the run's control, with its own 64Mi limit, which it allocates past. Only its
+# own cgroup OOM-kills it, so no tree pod sees node pressure; pod_watch_verdict excludes it by its
+# label and requires that it was seen OOMKilled.
+start_memory_hog() {
+  local node=$1 hog=$work/memory-hog.yaml
+  cat >"$hog" <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: legion-e2e4b-memory-hog-$$
+  labels: { legion.dev/project: $run_label, legion.dev/e2e-control: memory-hog }
+spec:
+  restartPolicy: Never
+  nodeName: $node
+  automountServiceAccountToken: false
+  tolerations: [{ key: legion.dev/pool, operator: Equal, value: legion, effect: NoSchedule }]
+  securityContext: { runAsNonRoot: true, runAsUser: 1000, seccompProfile: { type: RuntimeDefault } }
+  containers:
+    - name: hog
+      image: $image
+      command: [bun, -e, "const held = []; for (;;) held.push(new Uint8Array(8 << 20).fill(1))"]
+      resources: { requests: { memory: 32Mi, cpu: 10m }, limits: { memory: 64Mi } }
+      securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+EOF
+  op apply -f "$hog" >/dev/null || blocked "the operator could not create the memory hog ($hog)"
+}
+hog_oomkilled() {
+  op get pod "legion-e2e4b-memory-hog-$$" -o json |
+    jq -e '[.status.containerStatuses[]?.state.terminated.reason, .status.containerStatuses[]?.lastState.terminated.reason] | index("OOMKilled")' >/dev/null
+}
+
 # ---- the pod-shape watcher (checkpoint pod-shape) --------------------------------------------------
 
 # check_pod_shape POD UID prints each way the pod departs from the shape every Sandbox pod has, or
@@ -797,6 +829,10 @@ nodes2=$(node_of_tree "$tree2")
 [ "$(wc -l <<<"$nodes1")" = 1 ] && [ "$(wc -l <<<"$nodes2")" = 1 ] || fail "a tree spans nodes at $at: tree 1 $nodes1, tree 2 $nodes2"
 [ "$nodes1" != "$nodes2" ] || fail "at $at tree 1 and tree 2 share node $nodes1"
 note "at $at: tree 1 ($tree1, implementer running) on $nodes1; tree 2 ($tree2, planner running) on $nodes2"
+start_memory_hog "$nodes1"
+until_true 300 "the memory hog on $nodes1 to be OOMKilled" hog_oomkilled
+op delete pod "legion-e2e4b-memory-hog-$$" --wait=false >/dev/null
+note "the memory hog on tree 1's node $nodes1 was OOMKilled by its own 64Mi limit"
 pass
 
 begin repository-configuration
@@ -1104,6 +1140,9 @@ shape_pid=
 if ! pod_watch_verdict "$evidence/pod-watch.json" "$evidence/driver-actions.txt" "$daemon_log"; then
   fail "the pod watch saw terminations the run cannot account for: $(tr '\n' ';' <"$work/pod-watch-verdict.txt")"
 fi
+pressure=$(jq -R -c 'fromjson? | select(.pressure? and (.pressure | index("MemoryPressure")))' "$evidence/node-memory.txt")
+[ -z "$pressure" ] || fail "a node of the run reported MemoryPressure: $(head -3 <<<"$pressure" | tr '\n' ' ')"
+note "no node of the run reported MemoryPressure ($(grep -c '"pressure"' "$evidence/node-memory.txt") samples)"
 jq -c 'select(.object.kind == "Pod") | .object' "$evidence/pod-watch.json" | tail -1 |
   jq -c '{kind: "Pod", object: (.status.containerStatuses[0].state = {terminated: {reason: "OOMKilled", exitCode: 137}})}' >"$work/injected.json"
 cat "$evidence/pod-watch.json" "$work/injected.json" >"$evidence/controls/pod-watch-with-oom.json"
