@@ -13,7 +13,9 @@ const requiredArguments: Record<string, readonly string[]> = {
   dispatch_resolve_ask: ["ask", "kind", "reason"],
   dispatch_comment: ["body"],
   dispatch_suggest: ["quote", "replace_with"],
-  dispatch_message: ["issue", "body"],
+  // `issue` is optional here: answering a human's issue-less direct message names only
+  // `in_reply_to`, and the spec's own refine is what requires an issue otherwise.
+  dispatch_message: ["body"],
   dispatch_doc_edit: ["ops"],
   dispatch_doc_read: [],
   dispatch_request_approval: [],

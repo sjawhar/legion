@@ -227,6 +227,20 @@ describe("dispatchToolSpecs", () => {
     ).toBe(true);
   });
 
+  test("dispatch_message needs an issue unless in_reply_to answers a direct message", () => {
+    const schema = schemaFor("dispatch_message");
+
+    // A human's direct message to a session belongs to no issue, so its answer names only the
+    // message it replies to.
+    expect(
+      schema.safeParse({ in_reply_to: "message-1", body: "Answering your message." }).success
+    ).toBe(true);
+    expect(schema.safeParse({ body: "Implementation started." }).success).toBe(false);
+    expect(schema.safeParse({ issue: "DSP-1", body: "Implementation started." }).success).toBe(
+      true
+    );
+  });
+
   test("dispatch_whoami accepts no arguments and rejects any key", () => {
     const schema = schemaFor("dispatch_whoami");
 

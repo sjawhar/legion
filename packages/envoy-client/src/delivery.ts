@@ -680,12 +680,17 @@ export function renderInbound(
               issueKey: frame.event.issue_key,
               body: message.data.body,
             };
-            if (frame.event.issue_key !== null) {
-              dispatchReply = {
-                tool: "dispatch_message",
-                args: { issue: frame.event.issue_key, in_reply_to: message.data.id, body: "..." },
-              };
-            }
+            // A human's direct message to this session carries no issue key, and
+            // `dispatch_message` answers it with `in_reply_to` alone; every other targeted
+            // message names the issue the reply posts into.
+            dispatchReply = {
+              tool: "dispatch_message",
+              args: {
+                ...(frame.event.issue_key === null ? {} : { issue: frame.event.issue_key }),
+                in_reply_to: message.data.id,
+                body: "...",
+              },
+            };
           }
         } else if (frame.event.type === "comment.created") {
           const comment = DispatchTargetedCommentPayloadSchema.safeParse(frame.event.payload);

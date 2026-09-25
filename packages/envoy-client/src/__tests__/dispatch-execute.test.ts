@@ -287,32 +287,34 @@ describe("executeDispatchTool", () => {
     const fetchImpl = (() => {
       throw new Error("network must not be called");
     }) as unknown as typeof fetch;
+    const refuse = (args: Record<string, unknown>) =>
+      executeDispatchTool({
+        tool: "dispatch_message",
+        args,
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl,
+      }).then(
+        () => undefined,
+        (error: unknown) => error
+      );
 
-    const failure = await executeDispatchTool({
-      tool: "dispatch_message",
-      args: { message: "x", in_reply_to: "nope" },
-      cwd: "/workspace",
-      host: "omp",
-      config,
-      env: {},
-      exec: repoExec("owner/repo"),
-      fetchImpl,
-    }).then(
-      () => undefined,
-      (error: unknown) => error
-    );
-    expect(failure).toBeInstanceOf(ToolInputError);
-    if (!(failure instanceof ToolInputError)) throw new Error("expected ToolInputError");
-    expect(failure.problems).toEqual([
-      "issue is required; supply issue or set LEGION_ISSUE",
+    // `in_reply_to` is what makes `issue` optional, so a call that names one is never refused
+    // for a missing issue - only for the reply target it could not read.
+    const replying = await refuse({ message: "x", in_reply_to: "nope" });
+    expect(replying).toBeInstanceOf(ToolInputError);
+    if (!(replying instanceof ToolInputError)) throw new Error("expected ToolInputError");
+    expect(replying.problems).toEqual([
       "body is required (string)",
       'unknown field "message"; allowed: issue, body, in_reply_to',
       "in_reply_to must be a full message id (uuid) or a dispatch://KEY/message/<id> reference",
     ]);
-    expect(failure.message).toBe(
+    expect(replying.message).toBe(
       [
-        "dispatch_message was not called: 4 problems",
-        "- issue is required; supply issue or set LEGION_ISSUE",
+        "dispatch_message was not called: 3 problems",
         "- body is required (string)",
         '- unknown field "message"; allowed: issue, body, in_reply_to',
         "- in_reply_to must be a full message id (uuid) or a dispatch://KEY/message/<id> reference",
@@ -320,6 +322,16 @@ describe("executeDispatchTool", () => {
         '- Example: dispatch_message({"issue":"DSP-1","body":"Implementation started."})',
       ].join("\n")
     );
+
+    // Without one, the owner problem leads and the schema's own restatement of it is dropped.
+    const posting = await refuse({ message: "x" });
+    expect(posting).toBeInstanceOf(ToolInputError);
+    if (!(posting instanceof ToolInputError)) throw new Error("expected ToolInputError");
+    expect(posting.problems).toEqual([
+      "issue is required; supply issue or set LEGION_ISSUE",
+      "body is required (string)",
+      'unknown field "message"; allowed: issue, body, in_reply_to',
+    ]);
   });
 
   test("names every bad option element and the unknown field in one refusal", async () => {
@@ -610,6 +622,109 @@ describe("executeDispatchTool", () => {
       "(not subscribed to DSP-42; envoy_subscribe notifications.dispatch.issue.DSP-42.> for every event on it)";
     expect(bareIDResult.text).toBe(posted);
     expect(refResult.text).toBe(posted);
+  });
+
+  // A human's direct message to a session (the Agents page, POST /api/v1/agents/{id}/messages)
+  // belongs to no issue, and only POST /api/v1/messages/{id}/reply can carry an answer into that
+  // conversation. The route the tool picks is decided by what the caller named, not by what the
+  // environment could supply: a Legion pane has LEGION_ISSUE set, and filing the answer on that
+  // issue would put it on unrelated work.
+  test("routes only a bare in_reply_to with no issue to the message reply route", async () => {
+    const parent = "6f1d2c3b-4a5e-4f60-8b7c-9d0e1f2a3b4c";
+    const calls: Array<{ method: string; path: string; body: unknown }> = [];
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const target = new URL(String(url));
+      calls.push({
+        method: init?.method ?? "GET",
+        path: target.pathname,
+        body: JSON.parse(init?.body as string),
+      });
+      if (target.pathname === `/api/v1/messages/${parent}/reply`) {
+        return response({
+          id: "reply-1",
+          issue_key: null,
+          body: JSON.parse(init?.body as string).body,
+        });
+      }
+      if (target.pathname === "/api/v1/issues/LEGION-3/messages") {
+        return response({ id: "message-9", issue_key: "LEGION-3" });
+      }
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+    const call = (args: Record<string, unknown>) =>
+      executeDispatchTool({
+        tool: "dispatch_message",
+        args,
+        cwd: "/workspace",
+        host: "omp",
+        sessionId: "ses_reader",
+        config,
+        env: { LEGION_ISSUE: "LEGION-3" },
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+
+    const reply = await call({ body: "On it.", in_reply_to: parent });
+    const onIssue = await call({ issue: "LEGION-3", body: "On it.", in_reply_to: parent });
+    // A dispatch://KEY/message/<id> names the issue its message lives on, so it is not a direct
+    // message: it keeps the issue path even though the call names no issue of its own.
+    const byRef = await call({
+      body: "On it.",
+      in_reply_to: `dispatch://LEGION-3/message/${parent}`,
+    });
+
+    expect(calls).toMatchObject([
+      {
+        method: "POST",
+        path: `/api/v1/messages/${parent}/reply`,
+        body: { body: "On it.", attempt: 1, actor: { kind: "session", id: "ses_reader" } },
+      },
+      {
+        method: "POST",
+        path: "/api/v1/issues/LEGION-3/messages",
+        body: { body: "On it.", in_reply_to: parent },
+      },
+      {
+        method: "POST",
+        path: "/api/v1/issues/LEGION-3/messages",
+        body: { body: "On it.", in_reply_to: parent },
+      },
+    ]);
+    expect(reply.details).toMatchObject({ message: "reply-1", in_reply_to: parent, posted: true });
+    expect(reply.text).toBe(`Replied to message ${parent} with message reply-1`);
+    expect(onIssue.details).toMatchObject({ issue: "LEGION-3", message: "message-9" });
+    expect(byRef.details).toMatchObject({ issue: "LEGION-3", message: "message-9" });
+  });
+
+  // Dispatch allows one reply per delivery attempt: a second call is answered with the reply
+  // already stored, at 200, and posts nothing. Reporting that as a send would tell a session it
+  // answered a human it never answered - most often over the host's own automatic BTW reply.
+  test("says nothing was posted when the delivery was already answered", async () => {
+    const parent = "6f1d2c3b-4a5e-4f60-8b7c-9d0e1f2a3b4c";
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      if (new URL(String(url)).pathname !== `/api/v1/messages/${parent}/reply`) {
+        throw new Error("unexpected request");
+      }
+      return response({ id: "reply-0", issue_key: null, body: "The host already answered." });
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_message",
+      args: { body: "On it.", in_reply_to: parent },
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "ses_reader",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.details).toMatchObject({ message: "reply-0", posted: false });
+    expect(result.text).toBe(
+      `Message ${parent} was already answered by message reply-0; Dispatch kept that reply and ` +
+        "posted nothing. Wait for their next message rather than answering this one again."
+    );
   });
 
   test("rejects a message in_reply_to referencing a non-message dispatch reference", async () => {

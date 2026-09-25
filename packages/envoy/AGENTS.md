@@ -578,8 +578,17 @@ listener send; `POST /api/v1/messages/{id}/deliveries` creates an explicit retry
 callers, same `actor` rule for bearers) in the `delivery` mode it names - the attempt's own mode
 is the retry that cannot deliver the message twice, another mode is a genuine second delivery.
 The targeted session alone uses
-`POST /api/v1/messages/{id}/reply` for the attempt's automatic BTW response; an ordinary agent
-reply uses `dispatch_message({ in_reply_to })` on the same open issue.
+`POST /api/v1/messages/{id}/reply`, both for the attempt's automatic BTW response and for
+`dispatch_message({ in_reply_to })` called with a bare message id and no `issue` - the only way
+to answer a human's issue-less direct message, since every other message route hangs its message
+off an issue. The tool sends `attempt: 1`, the attempt an issue-less message is created with,
+and the executor decides the route from what the caller named rather than from the resolved
+owner, so `LEGION_ISSUE` never files a direct-message answer on an unrelated issue
+(`packages/envoy-client/src/dispatch-execute.ts`). A `dispatch://KEY/message/<id>` names the
+issue its message lives on, so that form and any call naming an `issue` still post through
+`POST /api/v1/issues/{key}/messages`. Because a second reply on an answered attempt returns the
+stored reply at 200 without posting, the tool compares that reply's body with the one it sent
+and reports the message as already answered rather than as a send.
 
 Messages thread: `in_reply_to` names a message in the same conversation - a message of the same
 issue, or, for `POST /api/v1/agents/{session_id}/messages`, an issue-less message whose thread

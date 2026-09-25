@@ -34,6 +34,7 @@ import type {
   IssueSummary,
   Message,
   MessageRead,
+  MessageReplyInput,
   OpenAsksResponse,
   ResolveAskInput,
   SearchResponse,
@@ -338,6 +339,16 @@ export class DispatchClient {
       ["api", "v1", "issues", await this.#resolveIssue(issue), "messages"],
       input
     );
+  }
+
+  /**
+   * `POST /api/v1/messages/{id}/reply`: the targeted session's reply to the delivery it
+   * received. It takes no issue, so it is the route that answers a human's direct message -
+   * a conversation Dispatch keeps without one - and the server settles the delivery attempt
+   * with the reply it inserts.
+   */
+  async messageReply(id: string, input: MessageReplyInput): Promise<Message> {
+    return this.#json("POST", ["api", "v1", "messages", id, "reply"], input);
   }
 
   async getMessage(issue: string, id: string): Promise<MessageRead> {

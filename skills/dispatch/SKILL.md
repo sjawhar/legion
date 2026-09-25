@@ -807,6 +807,31 @@ through Envoy or the hub. A bearer that targets over HTTP names its own session 
 target only a session that advertises the mode you want. Sending to a session with no issue
 (`POST /api/v1/agents/{session_id}/messages`) stays human-only.
 
+### Answering a direct message
+
+A human can also message you directly from the **Agents** page, with no issue at all. That frame
+names no issue and its `reply_with` hint carries none either; answer it with the message's bare
+id in `in_reply_to`, alone:
+
+```ts
+dispatch_message({
+  in_reply_to: "<the direct message's id>",
+  body: "The requested answer.",
+})
+```
+
+Leave `issue` out — there is no issue to post into, and naming one would file your answer on
+unrelated work. Dispatch threads the reply under their message in the same conversation, and the
+human sees it on your agent card. Every other message still names its issue, so keep the `issue`
+the frame gave you whenever it gave you one; a `dispatch://KEY/message/<id>` reference names the
+issue its message lives on, so that form is a reply on that issue, not a direct message.
+
+One reply per message they send. A second call with the same `in_reply_to` posts nothing:
+Dispatch answers it with the reply already stored, and the tool result says the message was
+already answered rather than reporting a send. That happens most often when your host answered
+the **BTW** automatically before you got here — read the result before writing again, and wait
+for their next message instead.
+
 ## Following
 
 An ask has followers: every session that wrote to it — the session that opened it and every session that replied with
