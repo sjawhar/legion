@@ -1253,9 +1253,11 @@ session=$(claim_view "$tree1" merger | jq -r .session)
 driver_action kill "$uid"
 op exec "$pod" -c worker -- sh -c 'kill 1' >/dev/null 2>&1 || true
 until_true 300 "the merger's Sandbox to report Finished for pod $uid" sh -c \
-  "timeout 120 kubectl --context '$operator' -n '$namespace' get sandbox '$pod' -o json | jq -e '.status.conditions[]? | select(.type == \"Finished\" and .status == \"True\")' >/dev/null || [ \"\$('$work/legion' state --json --config '$work/legion.yaml' | jq -r --arg i '$tree1' '.issues[\$i].workers.merger.claim.locator.incarnation // empty')\" != '$uid' ]"
+  "timeout 120 kubectl --context '$operator' -n '$namespace' get sandbox '$pod' -o json | jq -e '.status.conditions[]? | select(.type == \"Finished\" and .status == \"True\")' >/dev/null || { inc=\$('$work/legion' state --json --config '$work/legion.yaml' | jq -r --arg i '$tree1' '.issues[\$i].workers.merger.claim.locator.incarnation // empty'); [ -n \"\$inc\" ] && [ \"\$inc\" != '$uid' ]; }"
+# The claim has no incarnation between the process's death and its relaunch, so moving off the
+# old pod means a new incarnation, never an empty one.
 until_true 600 "the merger to relaunch with a new pod" sh -c \
-  "[ \"\$('$work/legion' state --json --config '$work/legion.yaml' | jq -r --arg i '$tree1' '.issues[\$i].workers.merger.claim.locator.incarnation // empty')\" != '$uid' ]"
+  "inc=\$('$work/legion' state --json --config '$work/legion.yaml' | jq -r --arg i '$tree1' '.issues[\$i].workers.merger.claim.locator.incarnation // empty'); [ -n \"\$inc\" ] && [ \"\$inc\" != '$uid' ]"
 new_uid=$(claim_pod_uid "$tree1" merger)
 [ "$(claim_view "$tree1" merger | jq -r .session)" = "$session" ] || fail "the relaunched merger has another session"
 resume=$(op get pod "$pod" -o json | jq -r '[.spec.containers[] | select(.name == "worker") | .command[]?] | map(select(startswith("--resume"))) | first // empty')
@@ -1274,7 +1276,7 @@ old_token=$(boot_token) || blocked "the merger's boot Secret $pod-boot has no LE
 driver_action delete "$uid"
 op delete pod "$pod" --wait=false >/dev/null
 until_true 600 "the merger's claim to move off pod $uid" sh -c \
-  "[ \"\$('$work/legion' state --json --config '$work/legion.yaml' | jq -r --arg i '$tree1' '.issues[\$i].workers.merger.claim.locator.incarnation // empty')\" != '$uid' ]"
+  "inc=\$('$work/legion' state --json --config '$work/legion.yaml' | jq -r --arg i '$tree1' '.issues[\$i].workers.merger.claim.locator.incarnation // empty'); [ -n \"\$inc\" ] && [ \"\$inc\" != '$uid' ]"
 third=$(claim_pod_uid "$tree1" merger)
 [ "$third" != "$new_uid" ] && [ "$third" != "$uid" ] || fail "the merger's third incarnation $third repeats an earlier uid"
 grep -q '"msg":"supervise: dropped a stale event"' "$daemon_log" || note "no stale event was dropped in this run (the recreated pod's events arrived after the claim moved)"
@@ -1360,7 +1362,7 @@ until issue_phase "$tree3" held >/dev/null 2>&1; do
   kills=$((kills + 1))
   note "killed planner launch $kills of $tree3 (uid $uid)"
   until_true 600 "$tree3 to be held or its planner relaunched" sh -c \
-    "'$work/legion' state --json --config '$work/legion.yaml' | jq -e --arg i '$tree3' --arg u '$uid' '.issues[\$i].phase == \"held\" or ((.issues[\$i].workers.planner.claim.locator.incarnation // \"\") != \$u)' >/dev/null"
+    "'$work/legion' state --json --config '$work/legion.yaml' | jq -e --arg i '$tree3' --arg u '$uid' '.issues[\$i].phase == \"held\" or ((.issues[\$i].workers.planner.claim.locator.incarnation // \"\") as \$n | \$n != \"\" and \$n != \$u)' >/dev/null"
 done
 note "$tree3 is held after $kills killed planner launches"
 # The held notice reaches the controller: its session, on this machine, holds the Envoy delivery.
