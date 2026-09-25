@@ -436,12 +436,19 @@ Three roots are set todo under `admission_cap: 2`:
   checkpoint needs, and is taken out from an operator shell.
 
 **One run at a time.** The project, the durable consumer names, ports 13370 and 13371 and the
-namespace label `legion.dev/project=legsmoke` are shared, so the run takes
-`$XDG_STATE_HOME/legion/e2e/stage4b.lock`. A run that does not get the lock refuses, and removes
-nothing.
+namespace label `legion.dev/project=legsmoke` are shared.
+- The run takes `~/.local/state/legion/e2e/stage4b.lock`, one path whatever `XDG_STATE_HOME` says.
+- It owns the shared objects only after four checks pass: the lock, both ports free, no leftover
+  `legsmoke` object in the namespace, and no `legion-go-LEGSMOKE-` consumer on the stream.
+- A run refused at any of the four removes nothing.
 
 **What the run touches in production**, all of it removed by the `EXIT`/`INT`/`TERM`/`HUP` trap of
-the run that holds the lock:
+the run that owns it. A signal to the whole process group does not stop the removal:
+- a closed pane, a Ctrl-C, or `timeout`'s TERM;
+- the transcript's `tee` ignores those signals;
+- the teardown ignores a second signal and SIGPIPE;
+- the teardown writes to the transcript even when the signal interrupted a command whose output
+  went to `/dev/null`.
 - **Production NATS, stream `ENVOY_NOTIFICATIONS`**: the daemon's two durable consumers. They are
   named by the Dispatch key: `legion-go-LEGSMOKE-dispatch` (`notifications.dispatch.issue.>`) and
   `legion-go-LEGSMOKE-github` (`notifications.github.sjawhar.legion-smoke.>`).
@@ -458,34 +465,42 @@ the run that holds the lock:
   labelled `legsmoke`. [`lib/namespace-rig.sh`](#libnamespace-rigsh)'s teardown and
   `namespace-clean` hold the namespace to its snapshot.
 
-`production-audit` checks the run's own writes. It lists every production issue outside LEGSMOKE
-updated since the baseline, then keeps those whose events name one of the run's writers: its
-agents' sessions, `legion-daemon:LEGSMOKE`, and the proof human. It also filters the Envoy interests
-the run's sessions held, sampled at every checkpoint while the daemon ran, to topics outside
-LEGSMOKE. Either list being non-empty fails the run. Two controls show the audit can fail. The
-verdict is given a synthetic outside issue and must refuse it. The collector, on the run's real
+`production-audit` checks the run's own writes. Its window opens, to the nanosecond, just before
+the daemon starts. It lists every production issue outside LEGSMOKE updated since then, and keeps
+those whose events name one of the run's writers: its agents' sessions, `legion-daemon:LEGSMOKE`,
+and the proof human. Event times are compared as instants, not strings.
+
+It also audits the Envoy interests the run's sessions held, which are sampled every 5 s and at
+every checkpoint while the daemon runs. The run fails when:
+- a registered session has no sample the listener answered;
+- the listener failed to answer any sample;
+- any sampled topic falls outside the run.
+
+Three controls show the audit can fail. The verdict is given a synthetic outside issue and must
+refuse it. The interest filter is given the run's samples plus one outside topic and must catch
+it. The collector, on the run's real
 window, is given one actor that did write outside LEGSMOKE, and must find that actor's events. An
 event is dated by Dispatch's `created_at`; one without it stops the audit, never counts as older.
 
 | checkpoint | what it holds |
 | :--- | :--- |
-| `prerequisites` | the tools, the restricted context and the image by digest; the lock and the two ports; nothing left in the namespace or on NATS from another run |
+| `prerequisites` | the tools, the restricted context and the image by digest; the lock and the two ports; nothing left in the namespace or on NATS from another run; only then does the run own the shared objects |
 | `preflight` | the runtime identity is `production-legion-daemon` and cannot list Secrets; the Sandbox CRD and the `legion` NodePool's instance-cpu floor; LEGSMOKE has no todo root; the stream carries both halves of intake; a throwaway pod on the Legion pool reaches Dispatch, the listener, the gateway and NATS |
 | `pod-watch` | the namespace snapshot; the pod, node-event and node-memory watches start |
-| `boot` | `legion start --check-config` passes the `runtime: kubernetes` config, the daemon boots, and the image probe passes (its first attempt's timeline is kept) |
+| `boot` | the build's source is the one prerequisites recorded; `legion start --check-config` passes the `runtime: kubernetes` config; the audit window opens and the interest sampler starts; the daemon boots, and the image probe passes (its first attempt's timeline is kept) |
 | `admitted-issue-cap` | the three roots: two admitted and one waiting, in rank order |
 | `spec-posted` | each admitted architect posts its spec and registers the gate; with `gates.design: off` the daemon moves the tree to planning |
 | `tree-separation` | tree 1's implementer and tree 2's planner run at once on different nodes, each tree on one node |
-| `repository-configuration` | tree 2's pods carry the fixture; the markers each loading path writes, and the agent's argv |
+| `repository-configuration` | tree 2's workspace carries the fixture (`.omp/extensions/fixture.ts` and its `AGENTS.md`); the markers each loading path writes, and the agent's argv |
 | `issue-cap-moves` | tree 2 to backlog frees its slot, tree 3 is admitted, and tree 2's pods are gone |
 | `tree-moved` | tree 1 runs planner, implementer, tester, reviewer and retro to merging with real agents; the tester's adoption leaves a new empty change and keeps the implementer's author; once both of the reviewer's thermonuclear dispatches have an outcome, the reviewer's session, its subagents' sessions and each dispatch are kept under `review-pair/` |
 | `review-pair` | the reviewer dispatched `thermonuclear-deep-review` and `thermonuclear-code-quality` by name; each one's delivered result says completed, and its own session ends in an accepted yield. A refusal (`Unknown agent`, `No model selected`) fails with its text |
 | `first-turns` | every role on tree 1 completed a first turn in its pod |
-| `token-rotation` | a pod's projected gateway token rotates, and a model turn after the rotation still goes through the gateway |
+| `token-rotation` | a pod's projected gateway token rotates: its file reads a new sha256 in the same pod, by uid, and an exec that did not answer is never a rotation. A model turn after the rotation still goes through the gateway |
 | `idle-suspend` | a finished worker's Sandbox is Suspended with its pod gone and the tree volume bound |
 | `kill-pod-resume` | a killed merger pod is relaunched on its session |
-| `fence` | a pod the controller recreates on its own is never adopted |
-| `daemon-relaunch-count` | the daemon relaunched the merger once for each pod the driver ended |
+| `fence` | a pod the controller recreates on its own is never adopted. Once the relaunch's boot token is in the Secret, the replaced generation's token is refused, and the daemon logs `worker-stream: rejected hello (stale worker generation)` |
+| `daemon-relaunch-count` | the daemon relaunched the merger, `resumed`, once for each pod the driver ended |
 | `restart-mid-tree` | a daemon restart re-adopts the merger's pod and session |
 | `controller` | `legion controller start` registers with the Sandbox daemon; tree 3's held notice reaches it; `legion status … backlog` from the operator shell moves tree 3, and Dispatch shows it |
 | `done` | the merger's READY, the proof human's merge, the production check and sign-off take tree 1 to `done` |
@@ -494,7 +509,7 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 | `re-admission` | tree 1 set todo again reports workspace-lost and relaunches a fresh architect |
 | `operator-close` | `legion claims close` on the Sandbox runtime: the close of re-admitted tree 1's live root is refused 409, and its claims, Sandboxes and pods are unchanged; an operator-spawned tree closes with its worker live, the root and the worker are retired, and the tree's Sandboxes, pods and volume are gone |
 | `pod-shape` | every Sandbox pod was shape-checked (gVisor, the gateway's ServiceAccount and one projected token, the pool, Pod Security restricted, split provisioning, no token in the environment or argv) |
-| `pod-watch-verdict` | the pod watch saw no termination the run cannot account for, and the memory hog was OOMKilled |
+| `pod-watch-verdict` | no pod of the run was Evicted or had a container OOMKilled, and every claim process the daemon found dead (`supervise: process died`) was one the driver ended. The resume that finds the tree volume lost is the exception, counted by `re-admission`. The memory hog was OOMKilled. Synthetic OOMKilled and process-died controls both fail |
 | `hygiene` | the daemon stopped, the namespace is clean, and the run's consumers are gone |
 | `production-audit` | no write by the run outside LEGSMOKE and no interest outside it; the verdict refuses a synthetic outside issue, and the collector finds a real outside writer's events |
 
@@ -636,9 +651,12 @@ bash scripts/e2e/lib/built-from.sh "$root" "$work/legion"
 ```
 
 When the working copy has changes, as in a negative control, which runs a base with the new
-script copied in, the source line says so. The next line gives the sha256 of `jj diff --git`
-(`git diff HEAD` under git), followed by the diff's `--stat`, so the run shows what it held and
-not only that something changed. Without jj, or outside a jj workspace, it reads git, which is
+script copied in, the source line says so. The next line gives the sha256 of the diff, followed by
+its `--stat`, so the run shows what it held and not only that something changed.
+- Under jj the diff is `jj diff --git`.
+- Under git it is `git diff HEAD`, taken against a copy of the index in which every untracked file
+  is added as intent-to-add. The copied-in script is therefore in it, and the checkout's own index
+  is never written. Without jj, or outside a jj workspace, it reads git, which is
 what CI's checkout is.
 
 Each binary is tied to that source by the stamp the Go toolchain writes at build time. The stamp has
@@ -854,7 +872,7 @@ timed-out wait runs before it fails), and defines `note` and `fail`, which exits
 
 | function | does |
 | :--- | :--- |
-| `until_true SECONDS WHAT CMD…` | runs CMD every half second until it succeeds; after SECONDS it runs `timeout_hook` and fails naming WHAT. A guard that writes `$evidence/pane-endpoint-violation.txt` makes the next wait abort, naming the violation |
+| `until_true SECONDS WHAT CMD…` | runs CMD every half second until it succeeds. After SECONDS of wall time, each poll's own run included, it runs `timeout_hook` and fails naming WHAT. It says what it waits for on entry and every 60 s. A poll that never returns would hold the wait, so callers bound their remote calls. A guard that writes `$evidence/pane-endpoint-violation.txt` makes the next wait abort, naming the violation |
 | `pick_port VAR` | assigns VAR a port from [`lib/free-port.sh`](#libfree-portsh) that no earlier pick of the run returned. It assigns in place: a command substitution would run it in a subshell and lose the run's set of picks |
 | `start_process NAME CMD…` | starts CMD in the background, appending to NAME's log, and sets `NAME_pid` |
 | `log_size NAME` | the size of NAME's log, the offset `await_start` reads a start's own lines from |
@@ -922,7 +940,7 @@ key), and either `label_prefix` (the prefix every run label of the proof carries
 
 | function | does |
 | :--- | :--- |
-| `op ARGS…` | `kubectl --context $operator -n $namespace ARGS…` |
+| `op ARGS…` | `kubectl --context $operator -n $namespace ARGS…`, bounded at 300 s (`timeout --foreground`, so a Ctrl-C still reaches kubectl) |
 | `snapshot FILE` | writes the namespace's Sandboxes, Secrets, PVCs and pods that carry the run's project label or none, sorted |
 | `teardown` | runs once and never fails. It refuses a label without `label_prefix`, or other than `label_exact`, so a mistyped label cannot select another run's objects; deletes every recorded Sandbox by name, then the Sandboxes labelled with that exact project; then lists the project's objects every 2 s, up to 150 listings, until none is left. Secrets and PVCs the Sandboxes' own deletion has not taken by the 90th listing are deleted by that exact label once, on the first listing from then on that answers; three failed listings in a row end the wait, naming the context and its error |
 | `namespace_clean` | the check `namespace-clean`: a fresh snapshot, written to `$evidence/namespace-after.txt`, must equal `$evidence/namespace-before.txt` |
