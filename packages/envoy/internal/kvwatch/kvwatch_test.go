@@ -157,6 +157,56 @@ func TestAFirstStartFailingAfterARewatchLeavesTheLiveWatcherHealthy(t *testing.T
 	eventually(t, "the live watcher's delivery", func() bool { return into.has("after-start") })
 }
 
+// A first start that fails while a Rewatch's watcher is still scanning leaves readiness to that
+// watcher: the cache is ready only once the current watcher has delivered every existing key, so a
+// caller waiting for it never reads a partial cache as complete.
+func TestAFirstStartFailingDuringARewatchScanWaitsForThatScan(t *testing.T) {
+	_, uri := testnats.Start(t)
+	firstConn, first := bucket(t, uri)
+	liveConn, live := bucket(t, uri)
+	if _, err := live.Put("held", []byte("1")); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	firstConn.Close()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var enterOnce, releaseOnce sync.Once
+	releaseScan := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseScan)
+	into := newSeen()
+	apply := func(entry natsgo.KeyValueEntry) {
+		if entry.Key() == "held" {
+			enterOnce.Do(func() { close(entered) })
+			<-release
+		}
+		into.apply(entry)
+	}
+	w := kvwatch.New("test cache", first, apply, into.reset)
+	t.Cleanup(w.Stop)
+	if _, err := w.Rewatch(liveConn); err != nil {
+		t.Fatalf("rewatch: %v", err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the Rewatch's scan never reached the held key")
+	}
+
+	w.Start()
+	time.Sleep(300 * time.Millisecond)
+	if w.Ready() {
+		t.Fatal("the cache was ready while the current watcher's scan had not delivered every key")
+	}
+	releaseScan()
+	eventually(t, "readiness after the current watcher's scan", w.Ready)
+	if !into.has("held") {
+		t.Fatal("ready without the held key")
+	}
+	if err := w.Err(); err != nil {
+		t.Fatalf("the failed first start marked the live watcher dead: %v", err)
+	}
+}
+
 // A watcher that ends on its own - its connection closed - leaves the cache frozen, and Err says so
 // until a Rewatch replaces it.
 func TestAWatcherThatEndsOnItsOwnRecordsItsError(t *testing.T) {

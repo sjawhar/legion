@@ -62,9 +62,10 @@ func New(name string, kv nats.KeyValue, apply func(nats.KeyValueEntry), reset fu
 }
 
 // Start arms the first watcher in the background, so a store's Open never waits on WatchAll. A
-// first start that fails logs its error, records it only when no watcher is current (a reconnect
-// hook's Rewatch may have armed one meanwhile), and releases readiness, so a caller waiting for
-// the cache sees the empty cache rather than hanging.
+// first start that fails logs its error. When no watcher is current it records the error and
+// releases readiness, so a caller waiting for the cache sees the empty cache rather than hanging.
+// When a reconnect hook's Rewatch has armed one meanwhile, it does neither: the error is not that
+// watcher's, and that watcher releases readiness once it has delivered every existing key.
 func (w *Watcher) Start() {
 	go func() {
 		err := w.watch(w.first)
@@ -73,11 +74,14 @@ func (w *Watcher) Start() {
 		}
 		slog.Error(w.name+" watch failed", slog.String("error", err.Error()))
 		w.mu.Lock()
-		if w.watcher == nil && !w.stopped {
+		current := w.watcher != nil
+		if !current && !w.stopped {
 			w.err = err
 		}
 		w.mu.Unlock()
-		w.signalReady()
+		if !current {
+			w.signalReady()
+		}
 	}()
 }
 
