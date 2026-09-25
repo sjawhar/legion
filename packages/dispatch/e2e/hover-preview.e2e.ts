@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 
+import { REF_PREVIEW_CLOSE_DELAY_MS } from "../web/src/features/refs/ref-preview-timing";
 import { createComment, createIssue, createProject, patchIssue } from "./api";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -114,8 +115,19 @@ test("hovering a board card previews the issue and moving onto the card keeps it
     await page.mouse.move(0, 0);
     await link.hover();
     await expect(card).toBeVisible();
+    // `hover()` moves the pointer in one step, straight from the reference onto the card. A close
+    // that move armed would run on the page's timers, so the check does too: a page timer set
+    // after the move, for twice REF_PREVIEW_CLOSE_DELAY_MS, fires after any close timer the move
+    // started, however starved the renderer is, and the card must still be there.
     await card.hover();
-    await expect(card).toBeVisible();
+    const openAfterCloseDelay = await page.evaluate(
+      (delay) =>
+        new Promise<boolean>((resolve) => {
+          setTimeout(() => resolve(document.getElementById("ref-preview") !== null), delay);
+        }),
+      REF_PREVIEW_CLOSE_DELAY_MS * 2
+    );
+    expect(openAfterCloseDelay).toBe(true);
     await card.getByRole("link").click();
     await expect(page).toHaveURL(new RegExp(`/issues/${target.key}(/|$)`));
     await expect(page.getByRole("tooltip")).toHaveCount(0);
