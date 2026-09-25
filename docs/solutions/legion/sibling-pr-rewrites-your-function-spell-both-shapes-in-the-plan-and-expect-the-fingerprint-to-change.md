@@ -147,7 +147,7 @@ The architect's end-game assignment reads mergeability *first*:
 
 1. `legion gh -- pr view <n> --json mergeable,mergeStateStatus`.
 2. `CONFLICTING` → do **not** push the `.legion/` deletion. Rebase as above, post the
-   fingerprint comment, push, `legion handoff complete` with both fingerprints. The architect
+   fingerprint comment, push, the `legion` tool's `handoff_complete` with both fingerprints. The architect
    routes the next round.
 3. `MERGEABLE` → `legion threads resolve --pr <n> --repo <owner>/<repo>` (expect `No unresolved
    threads` when the review was clean), `rm -r .legion`, `jj split -m "chore: remove .legion/

@@ -2,7 +2,6 @@ import { z } from "zod";
 
 export const HANDOFF_SCHEMA_VERSION = 1 as const;
 export const LEGION_DIR_NAME = ".legion";
-export const MESSAGES_DIR_NAME = "messages";
 
 export const HANDOFF_PHASES = ["architect", "plan", "implement", "test", "review"] as const;
 
@@ -108,13 +107,6 @@ export interface ReviewHandoff extends BaseHandoff {
   minor?: number;
   verdict?: "approved" | "changes_requested";
   keyFindings?: Array<{ severity: string; file: string; description: string }>;
-}
-
-export interface HandoffMessage {
-  from: HandoffPhase;
-  to: HandoffPhase;
-  body: string;
-  timestamp: string;
 }
 
 export type PhaseHandoff =
@@ -278,13 +270,6 @@ const phaseHandoffSchema = z.discriminatedUnion("phase", [
   reviewSchema,
 ]);
 
-const handoffMessageSchema = z.object({
-  from: handoffPhase,
-  to: handoffPhase,
-  body: z.string(),
-  timestamp: isoTimestamp,
-});
-
 export function isHandoffPhase(value: unknown): value is HandoffPhase {
   return handoffPhase.safeParse(value).success;
 }
@@ -325,9 +310,4 @@ export function describePhaseHandoffWriteProblems(value: unknown): string[] {
     (field) =>
       `${field}: missing or empty — name the skills this role must load, or state \`none: <what you looked through and why nothing fits>\``
   );
-}
-
-export function validateHandoffMessage(value: unknown): HandoffMessage | null {
-  const result = handoffMessageSchema.safeParse(value);
-  return result.success ? (result.data as HandoffMessage) : null;
 }

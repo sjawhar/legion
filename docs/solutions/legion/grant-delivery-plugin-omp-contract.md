@@ -51,8 +51,9 @@ number covers the pane contract too".
 ## Where the delivery shape changed
 
 `@sjawhar/pi-legion-envoy`'s `tool_call` hook (`extensions/legion.ts`) mints a 60-second grant per
-bash call and hands it to the shell so `legion gh`, `jj git push`, and `legion handoff complete` can
-redeem it. Through 1.16.x it prepended `export LEGION_GRANT='<uuid>'` (and the `GH_*`/`PATH` lines)
+bash call and hands it to the shell so `legion gh` and `jj git push` can redeem it (the `legion`
+tool mints its own before `handoff_complete`). Through 1.16.x it prepended
+`export LEGION_GRANT='<uuid>'` (and the `GH_*`/`PATH` lines)
 to `toolCall.input.command`; the model saw that text as its own and copied it, stacking stale ids
 that 403'd. LEGION-12 / #974 (merged 2026-09-13 00:15Z, released as 1.17.1) moved the whole record
 into `toolCall.input.env` instead, spread last so a copied `env` cannot displace the fresh grant.

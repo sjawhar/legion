@@ -103,16 +103,12 @@ describe("handoff command", () => {
     console.error = originalError;
   });
 
-  it("defines write/read/message/messages subcommands and required args", async () => {
+  it("defines write/read subcommands and required args", async () => {
     const write = getSubCommand(handoffCommand, "write");
     const read = getSubCommand(handoffCommand, "read");
-    const message = getSubCommand(handoffCommand, "message");
-    const messages = getSubCommand(handoffCommand, "messages");
 
     const writeArgs = await resolveArgs(write);
     const readArgs = await resolveArgs(read);
-    const messageArgs = await resolveArgs(message);
-    const messagesArgs = await resolveArgs(messages);
 
     expect((writeArgs.phase as StringArg).type).toBe("string");
     expect((writeArgs.phase as StringArg).required).toBe(true);
@@ -122,16 +118,6 @@ describe("handoff command", () => {
     expect((readArgs.phase as StringArg).type).toBe("string");
     expect((readArgs.phase as StringArg).required).toBeFalsy();
     expect((readArgs.workspace as StringArg).type).toBe("string");
-
-    expect((messagesArgs.workspace as StringArg).type).toBe("string");
-
-    expect((messageArgs.from as StringArg).type).toBe("string");
-    expect((messageArgs.from as StringArg).required).toBe(true);
-    expect((messageArgs.to as StringArg).type).toBe("string");
-    expect((messageArgs.to as StringArg).required).toBe(true);
-    expect((messageArgs.body as StringArg).type).toBe("string");
-    expect((messageArgs.body as StringArg).required).toBe(true);
-    expect((messageArgs.workspace as StringArg).type).toBe("string");
   });
 
   it("writes phase handoff JSON with auto-populated fields", async () => {
@@ -212,24 +198,6 @@ describe("handoff command", () => {
     expect(parsed.implement.phase).toBe("implement");
   });
 
-  it("writes handoff messages", async () => {
-    const message = getSubCommand(handoffCommand, "message");
-    await runCommand(message, { from: "plan", to: "implement", body: "test" });
-
-    const messagesDir = path.join(tempDir, ".legion", "messages");
-    const files = fs.readdirSync(messagesDir);
-    expect(files.length).toBe(1);
-    expect(files[0]).toContain("-plan-to-implement.json");
-
-    const payload = JSON.parse(
-      fs.readFileSync(path.join(messagesDir, files[0] as string), "utf-8")
-    ) as Record<string, unknown>;
-    expect(payload.from).toBe("plan");
-    expect(payload.to).toBe("implement");
-    expect(payload.body).toBe("test");
-    expect(typeof payload.timestamp).toBe("string");
-  });
-
   it("exits non-zero for invalid phase", async () => {
     const write = getSubCommand(handoffCommand, "write");
     try {
@@ -270,23 +238,6 @@ describe("handoff command", () => {
     expect(exitCode).toBe(1);
     const errors = (console.error as ReturnType<typeof mock>).mock.calls.flat();
     expect(errors.join("\n")).toContain("Invalid JSON");
-  });
-
-  it("reads handoff messages via messages subcommand", async () => {
-    const message = getSubCommand(handoffCommand, "message");
-    const messages = getSubCommand(handoffCommand, "messages");
-
-    await runCommand(message, { from: "plan", to: "implement", body: "ready" });
-    await runCommand(messages, {});
-
-    const calls = (console.log as ReturnType<typeof mock>).mock.calls;
-    const output = calls[calls.length - 1]?.[0] as string;
-    const parsed = JSON.parse(output) as Array<Record<string, unknown>>;
-
-    expect(parsed).toHaveLength(1);
-    expect(parsed[0]?.from).toBe("plan");
-    expect(parsed[0]?.to).toBe("implement");
-    expect(parsed[0]?.body).toBe("ready");
   });
 
   it("uses --workspace instead of cwd when provided", async () => {
@@ -381,35 +332,6 @@ describe("handoff command", () => {
     expect(exitCode).toBe(1);
     const errors = (console.error as ReturnType<typeof mock>).mock.calls.flat();
     expect(errors.join("\n")).toContain("[handoff] Failed to write handoff:");
-  });
-
-  it("prints confirmation message on successful message write", async () => {
-    const message = getSubCommand(handoffCommand, "message");
-    await runCommand(message, { from: "plan", to: "implement", body: "test" });
-
-    const calls = (console.log as ReturnType<typeof mock>).mock.calls.flat();
-    const output = calls.join("\n");
-    expect(output).toContain("[handoff] Wrote message from plan to implement");
-    expect(exitCode).toBeUndefined();
-  });
-
-  it("exits non-zero when message write fails", async () => {
-    const message = getSubCommand(handoffCommand, "message");
-    // Create a file where .legion directory would need to go
-    const blocker = path.join(tempDir, ".legion");
-    fs.writeFileSync(blocker, "not a directory");
-
-    try {
-      await runCommand(message, {
-        from: "plan",
-        to: "implement",
-        body: "test",
-      });
-    } catch {}
-
-    expect(exitCode).toBe(1);
-    const errors = (console.error as ReturnType<typeof mock>).mock.calls.flat();
-    expect(errors.join("\n")).toContain("[handoff] Failed to write message:");
   });
 
   it("exits non-zero naming proof when an implement handoff carries none", async () => {

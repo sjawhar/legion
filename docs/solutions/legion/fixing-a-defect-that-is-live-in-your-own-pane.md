@@ -66,7 +66,7 @@ commits you made (the skill's pre-push check says exactly this since this issue)
 
 `jj new <conflicted>` → edit → `jj squash --into <conflicted>` is the clean way to resolve a
 conflict inside a rebased chain without `jj edit`. It leaves `@` on the (now empty) scratch
-child of that commit, not on your working-copy commit at the tip; `legion handoff write` then
+child of that commit, not on your working-copy commit at the tip; `handoff_write` then
 writes into the wrong place. Return with `jj edit <your own working-copy change id>` — the
 undescribed working-copy commit, never a described commit or another role's — and the empty
 scratch commit is abandoned automatically. Record the detour in the handoff.

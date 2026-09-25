@@ -132,14 +132,29 @@ takes `--operator-token-file`, which buys a controller grant over the operator's
 ## Phase workers' handoff actions and the phase-stall follow-up
 
 A worker's handoff operations are actions of the `legion` tool, never shell text:
-`handoff_write`, `handoff_read`, `handoff_message`, and `handoff_complete`
-(`src/legion/handoff-actions.ts`). Both daemons' tools carry them (`src/legion/tools.ts`, now
-registered for every TypeScript-daemon worker, and `src/legion/go-tools.ts`), for every session but
-the root architect. Each action runs the daemon's own `legion handoff ...` command, `legion` found on
-the pane's PATH (the tmux `<state_dir>/bin/legion` launcher, or the image's binary in a pod), in
-`LEGION_WORKSPACE`; `handoff_complete` first mints a grant into `LEGION_GRANT_FILE`, as the bash hook
-does before a shell command. `legion gh` and `legion credential` stay shell commands: git and gh
-call them.
+`handoff_write`, `handoff_read`, and `handoff_complete` (`src/legion/handoff-actions.ts`). Both
+daemons' tools carry them (`src/legion/tools.ts`, now registered for every TypeScript-daemon worker,
+and `src/legion/go-tools.ts`), for every session but the root architect. Each action runs the
+daemon's own `legion handoff ...` command, `legion` found on the pane's PATH (the tmux
+`<state_dir>/bin/legion` launcher, or the image's binary in a pod), in `LEGION_WORKSPACE`;
+`handoff_complete` first mints a grant into `LEGION_GRANT_FILE`, as the bash hook does before a
+shell command. `legion gh` and `legion credential` stay shell commands: git and gh call them. What a
+later phase needs goes in the handoff; a question for another live role goes to its role topic with
+`envoy_publish`.
+
+`handoff_write` sends its payload on the command's stdin, which both CLIs read when `--data` is
+omitted: one argv string is capped at 128 KiB (Linux's `MAX_ARG_STRLEN`), and a tester's handoff that
+accumulates review rounds outgrows it.
+
+The shell's completion is closed: the tool_call hook refuses `legion handoff complete` (by name or by
+a path ending `/legion`) in a phase-worker pane, a sub-architect's included, and a root architect's,
+ahead of every role gate so that it binds a `task` subagent too — a `bash` command in any position of
+a chain, and `eval` code or a `hub` process start by a plain-text rule, exactly as it refuses the jj
+operation-log rewrites (`PANE_RULES` in `extensions/legion.ts`). A completion run from the shell
+would never reach the phase stall below. `legion handoff write` and `read` stay open to the shell:
+they leave no phase open, a root architect reads committed handoffs with `legion handoff read`, and
+a worker can pipe a handoff built from the one on disk to `legion handoff write` on stdin
+(`skills/legion-worker/SKILL.md`, the handoff write section).
 
 In a phase-worker session (planner, implementer, tester, reviewer, merger: never an architect, the
 controller, a session with no Legion environment, or a `task` subagent), `src/legion/phase-stall.ts`

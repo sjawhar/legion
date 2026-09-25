@@ -6,7 +6,7 @@ import { requiredEnvironment } from "./classify";
 import { writeMintedGrant } from "./grant-file";
 
 /**
- * The handoff actions of the `legion` tool: a worker's `legion handoff write|read|message|complete`
+ * The handoff actions of the `legion` tool: a worker's `legion handoff write|read|complete`
  * as tool calls rather than shell text, so the extension knows each one's outcome without reading
  * a bash command (LEGION-208 Stage 4b, task 4b.15). Each action runs the same command underneath —
  * `legion` found on the pane's PATH, which is the daemon's own CLI: the `<state_dir>/bin/legion`
@@ -19,7 +19,6 @@ import { writeMintedGrant } from "./grant-file";
 export const HANDOFF_OPERATION_FIELDS = {
   handoff_write: ["phase", "data"],
   handoff_read: ["phase"],
-  handoff_message: ["sender", "recipient", "body"],
   handoff_complete: ["summary", "verdict", "ready", "phase"],
 } as const satisfies Readonly<Record<string, readonly string[]>>;
 
@@ -36,9 +35,6 @@ export function handoffSchemaFields(z: PiZod): Readonly<Record<string, unknown>>
   return {
     phase: z.enum(HANDOFF_PHASES).optional(),
     data: z.unknown().optional(),
-    sender: z.enum(HANDOFF_PHASES).optional(),
-    recipient: z.enum(HANDOFF_PHASES).optional(),
-    body: z.string().optional(),
     summary: z.string().optional(),
     verdict: z.enum(["pass", "fail"]).optional(),
     ready: z.boolean().optional(),
@@ -50,11 +46,11 @@ export const HANDOFF_DESCRIPTION =
   "Handoff actions (phase workers and sub-architects): handoff_write writes this phase's handoff " +
   "(`phase`, and `data`: the phase-specific fields as a JSON object) to `.legion/<phase>.json` in " +
   "the issue workspace; handoff_read returns the handoffs (every phase, or `phase`); " +
-  "handoff_message leaves a message for another phase (`sender`, `recipient`, `body`); " +
   "handoff_complete reports this phase complete to the daemon (`summary`: two sentences for the " +
   "architect; `verdict` pass|fail when your role's instructions require one; `ready: true` for " +
   "the merger's READY; no `phase` is needed, and one other than your own is refused). Each " +
-  "returns the command's output; a failed action changed nothing.";
+  "returns the command's output; a failed action changed nothing. What a later phase needs goes " +
+  "in your handoff; a question for another live role goes to its role topic with envoy_publish.";
 
 /** The handoff phase each role writes, by the pane's LEGION_ROLE in either vocabulary, as the Go
  * CLI's `handoffFiles` maps it (`packages/daemon-go/cmd/legion/handoff.go`). The merger writes no
@@ -82,11 +78,14 @@ function required(parameters: Record<string, unknown>, operation: string, name: 
   return value;
 }
 
-/** The `legion` arguments for one action, its fields validated. */
+/** The `legion` arguments for one action, its fields validated, and what the command reads on
+ * stdin. `handoff_write` sends its payload on stdin, which both CLIs read when `--data` is
+ * omitted: one argv string is capped at 128 KiB (Linux's MAX_ARG_STRLEN), and a handoff that
+ * accumulates review rounds outgrows it. */
 function commandArguments(
   operation: HandoffOperation,
   parameters: Record<string, unknown>
-): string[] {
+): { readonly args: string[]; readonly stdin?: string } {
   const accepted: readonly string[] = HANDOFF_OPERATION_FIELDS[operation];
   for (const name of Object.keys(parameters)) {
     if (name !== "op" && !accepted.includes(name)) {
@@ -100,23 +99,15 @@ function commandArguments(
         throw new Error("handoff_write requires data: the phase's handoff fields as a JSON object");
       }
       const phase = required(parameters, operation, "phase");
-      return ["handoff", "write", "--phase", phase, "--data", JSON.stringify(data)];
+      return { args: ["handoff", "write", "--phase", phase], stdin: JSON.stringify(data) };
     }
     case "handoff_read":
-      return parameters.phase === undefined
-        ? ["handoff", "read"]
-        : ["handoff", "read", "--phase", required(parameters, operation, "phase")];
-    case "handoff_message":
-      return [
-        "handoff",
-        "message",
-        "--from",
-        required(parameters, operation, "sender"),
-        "--to",
-        required(parameters, operation, "recipient"),
-        "--body",
-        required(parameters, operation, "body"),
-      ];
+      return {
+        args:
+          parameters.phase === undefined
+            ? ["handoff", "read"]
+            : ["handoff", "read", "--phase", required(parameters, operation, "phase")],
+      };
     case "handoff_complete": {
       const command = [
         "handoff",
@@ -149,15 +140,17 @@ function commandArguments(
         throw new Error("handoff_complete's ready is true or false");
       }
       if (ready === true) command.push("--ready");
-      return command;
+      return { args: command };
     }
   }
 }
 
-/** Runs `legion <args>` in `cwd`; its exit code and combined output, or the reason it never ran
- * to an exit (not found, timed out, aborted). */
+/** Runs `legion <args>` in `cwd` with `stdin` on its standard input (closed empty when there is
+ * none); its exit code and combined output, or the reason it never ran to an exit (not found,
+ * timed out, aborted). */
 function runLegion(
   args: readonly string[],
+  stdin: string | undefined,
   cwd: string,
   signal: AbortSignal | undefined
 ): Promise<{ readonly exitCode: number; readonly output: string }> {
@@ -165,7 +158,7 @@ function runLegion(
     readonly exitCode: number;
     readonly output: string;
   }>();
-  execFile(
+  const child = execFile(
     "legion",
     args,
     { cwd, env: process.env, signal, timeout: COMMAND_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024 },
@@ -183,6 +176,12 @@ function runLegion(
       }
     }
   );
+  // A command that exits before reading all of its input closes the pipe (EPIPE); its exit code
+  // and output, reported above, say what happened.
+  child.stdin?.on("error", (error: NodeJS.ErrnoException) => {
+    if (error.code !== "EPIPE") reject(error);
+  });
+  child.stdin?.end(stdin ?? "");
   return promise;
 }
 
@@ -200,10 +199,11 @@ export async function runHandoffAction(input: {
   readonly mintGrant: () => Promise<string>;
   readonly onPhaseCompleted: () => void;
 }): Promise<ToolResult> {
-  const args = commandArguments(input.operation, input.parameters);
+  const { args, stdin } = commandArguments(input.operation, input.parameters);
   if (input.operation === "handoff_complete") await writeMintedGrant(input.mintGrant);
   const { exitCode, output } = await runLegion(
     args,
+    stdin,
     requiredEnvironment(process.env, "LEGION_WORKSPACE"),
     input.signal
   );
