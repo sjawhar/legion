@@ -21,7 +21,12 @@ const Stream = "ENVOY_NOTIFICATIONS"
 // streamDuplicateWindow covers the entire retained notification lifetime, so
 // an outbox retry after a crash before published_at is recorded cannot create a
 // second retained Dispatch event while the original remains observable.
-const streamDuplicateWindow = 72 * time.Hour
+//
+// It is the same window the dashboard gates its "retrying is safe" promise on: past it the
+// stream holds neither the message nor its MsgId, so a same-mode retry delivers a second time.
+// Both sides read one literal - DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts, from which
+// contracts.DeliveryDuplicateWindow is generated.
+const streamDuplicateWindow = contracts.DeliveryDuplicateWindow
 
 var streamSubjects = []string{
 	"notifications.agent.>",
@@ -41,10 +46,13 @@ func StreamSubjects() []string {
 }
 
 var streamCfg = &nats.StreamConfig{
-	Name:       Stream,
-	Subjects:   streamSubjects,
-	Retention:  nats.LimitsPolicy,
-	MaxAge:     72 * time.Hour,
+	Name:      Stream,
+	Subjects:  streamSubjects,
+	Retention: nats.LimitsPolicy,
+	// Retention equals the duplicate window by construction: the dashboard promises a
+	// same-mode retry cannot deliver twice for exactly as long as the stream can still
+	// recognise the repeat, and a deployment where the two differ would break that promise.
+	MaxAge:     streamDuplicateWindow,
 	Duplicates: streamDuplicateWindow,
 	Storage:    nats.FileStorage,
 	Replicas:   1,
@@ -858,36 +866,56 @@ func usesCoreTransport(topic string) bool {
 }
 
 // Publish routes role lanes and their delivery-exception lanes through core
-// NATS; every other notification retains JetStream durability.
+// NATS; every other notification retains JetStream durability. Its signature is
+// an interface method in cistore, outbox and webhook, so a caller that wants
+// JetStream's duplicate verdict calls PublishReportingDuplicate instead.
 func (c *Client) Publish(item contracts.Envelope) error {
+	_, err := c.PublishReportingDuplicate(item)
+	return err
+}
+
+// PublishReportingDuplicate publishes as Publish does and reports whether
+// JetStream recognised the message as one the stream already holds. That is only
+// ever possible for a Dispatch-sourced envelope, the only one published under a
+// MsgId, and only within the stream's duplicate window; a core-transport topic
+// has no acknowledgement at all and always reports false.
+//
+// True means "the stream already held this MsgId", not "this call published
+// nothing new": the reconnect retry below republishes after a failure that may
+// have landed, so the very publish that put the message on the subject can come
+// back a duplicate.
+func (c *Client) PublishReportingDuplicate(item contracts.Envelope) (bool, error) {
 	if usesCoreTransport(item.Topic) {
-		return c.PublishCore(item)
+		return false, c.PublishCore(item)
 	}
 	return c.publishJetStream(item)
 }
 
-func (c *Client) publishJetStream(item contracts.Envelope) error {
+func (c *Client) publishJetStream(item contracts.Envelope) (bool, error) {
 	data, err := json.Marshal(item)
 	if err != nil {
-		return err
+		return false, err
 	}
 	ctx, cancel := c.publishAcknowledgementClock.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := c.ensureConnWithContext(ctx); err != nil {
-		return err
+		return false, err
 	}
 	options := []nats.PubOpt{nats.Context(ctx)}
 	if item.Source == "dispatch" {
 		options = append(options, nats.MsgId(item.DedupeKey+":"+item.Topic))
 	}
-	_, err = c.js.Publish(item.Topic, data, options...)
+	ack, err := c.js.Publish(item.Topic, data, options...)
 	if err != nil && errors.Is(err, nats.ErrConnectionClosed) {
 		if err := c.ensureConnWithContext(ctx); err != nil {
-			return err
+			return false, err
 		}
-		_, err = c.js.Publish(item.Topic, data, options...)
+		ack, err = c.js.Publish(item.Topic, data, options...)
 	}
-	return err
+	if err != nil {
+		return false, err
+	}
+	return ack.Duplicate, nil
 }
 
 // PublishCore publishes directly to the envelope's NATS subject without

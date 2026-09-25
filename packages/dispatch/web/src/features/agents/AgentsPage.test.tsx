@@ -15,6 +15,11 @@ import type {
 import { AuthGate } from "../../app";
 import { orderAgents, partitionAgents } from "./AgentsPage";
 
+// Delivery attempts are dated relative to the run: the dashboard only offers a
+// same-mode Retry while an attempt is inside the stream's duplicate window, so a
+// fixture frozen at an absolute date would age out of every retry assertion.
+const recentAttemptAt = new Date(Date.now() - 60_000).toISOString();
+
 const now = Date.now();
 const agents = [
   {
@@ -105,7 +110,7 @@ function renderAgents({
   const getBlockSchema = spyOn(api, "getBlockSchema").mockResolvedValue({ types: [], version: 1 });
   const createMessageDelivery = spyOn(api, "createMessageDelivery").mockResolvedValue({
     attempt: 2,
-    created_at: "2026-09-14T00:00:01Z",
+    created_at: recentAttemptAt,
     delivery: "steer",
     envelope_id: "envelope-2",
     error: null,
@@ -704,7 +709,7 @@ test("Agents renders each targeted message and its reply beneath the matching ca
     deliveries: [
       {
         attempt: 1,
-        created_at: "2026-09-14T00:00:00Z",
+        created_at: recentAttemptAt,
         delivery: "btw",
         envelope_id: "envelope-1",
         error: null,
@@ -753,7 +758,7 @@ test("Agents keeps an issue-attached legacy reply on its issue message route", a
     deliveries: [
       {
         attempt: 1,
-        created_at: "2026-09-14T00:00:00Z",
+        created_at: recentAttemptAt,
         delivery: "btw",
         envelope_id: "envelope-1",
         error: null,
@@ -796,7 +801,7 @@ test("Agents retain targeted-message retries and attempt history", async () => {
     deliveries: [
       {
         attempt: 1,
-        created_at: "2026-09-14T00:00:00Z",
+        created_at: recentAttemptAt,
         delivery: "btw",
         envelope_id: null,
         error: "no live session planner-session",
@@ -820,12 +825,19 @@ test("Agents retain targeted-message retries and attempt history", async () => {
   try {
     const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
     expand(planner, "Planner");
-    const retry = await within(planner).findByRole("button", { name: "Send normally" });
+    const retry = await within(planner).findByRole("button", { name: "Send normally instead" });
     expect(retry.hasAttribute("disabled")).toBe(false);
-    expect(within(planner).getByRole("button", { name: "Ask BTW again" })).toBeTruthy();
+    const sameMode = within(planner).getByRole("button", { name: "Retry" });
+    expect(sameMode.hasAttribute("disabled")).toBe(false);
     fireEvent.click(retry);
     await waitFor(() =>
       expect(page.createMessageDelivery).toHaveBeenCalledWith("message-1", "steer")
+    );
+    // The same-mode Retry re-sends the attempt's own mode, the only retry that cannot deliver
+    // the message twice.
+    fireEvent.click(sameMode);
+    await waitFor(() =>
+      expect(page.createMessageDelivery).toHaveBeenCalledWith("message-1", "btw")
     );
   } finally {
     page.view.unmount();
@@ -838,7 +850,7 @@ test("Send normally disables when the target does not advertise steer", async ()
     deliveries: [
       {
         attempt: 1,
-        created_at: "2026-09-14T00:00:00Z",
+        created_at: recentAttemptAt,
         delivery: "btw",
         envelope_id: null,
         error: "no live session planner-session",
@@ -855,13 +867,13 @@ test("Send normally disables when the target does not advertise steer", async ()
   try {
     const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
     expand(planner, "Planner");
-    const retry = await within(planner).findByRole("button", { name: "Send normally" });
+    const retry = await within(planner).findByRole("button", { name: "Send normally instead" });
     expect(retry.hasAttribute("disabled")).toBe(true);
     expect(retry.hasAttribute("title")).toBe(false);
     await within(planner).findByText("Planner does not support normal delivery — use BTW.");
-    expect(
-      within(planner).getByRole("button", { name: "Ask BTW again" }).hasAttribute("disabled")
-    ).toBe(false);
+    expect(within(planner).getByRole("button", { name: "Retry" }).hasAttribute("disabled")).toBe(
+      false
+    );
   } finally {
     page.view.unmount();
     page.restore();
@@ -1045,7 +1057,7 @@ test("Agents replies to an issue-less exchange through the agent route, threaded
     deliveries: [
       {
         attempt: 1,
-        created_at: "2026-09-14T00:00:00Z",
+        created_at: recentAttemptAt,
         delivery: "btw",
         envelope_id: "envelope-1",
         error: null,
@@ -1114,7 +1126,7 @@ test("a root targeted-message retry on the Agents page checks the role's current
     deliveries: [
       {
         attempt: 1,
-        created_at: "2026-09-14T00:00:00Z",
+        created_at: recentAttemptAt,
         delivery: "steer",
         envelope_id: null,
         error: "no live session old-reviewer-session",
@@ -1147,12 +1159,13 @@ test("a root targeted-message retry on the Agents page checks the role's current
       "New reviewer"
     );
     expand(reviewerCard, "New reviewer");
-    const sendNormally = await within(reviewerCard).findByRole("button", {
-      name: "Send normally",
-    });
+    // The new holder dropped steer, so the same-mode Retry of a steer attempt is refused.
+    const sendNormally = await within(reviewerCard).findByRole("button", { name: "Retry" });
     expect(sendNormally.hasAttribute("disabled")).toBe(true);
     expect(
-      within(reviewerCard).getByRole("button", { name: "Ask BTW again" }).hasAttribute("disabled")
+      within(reviewerCard)
+        .getByRole("button", { name: "Send as BTW instead" })
+        .hasAttribute("disabled")
     ).toBe(false);
   } finally {
     page.view.unmount();
@@ -1166,7 +1179,7 @@ test("a reply's targeted-message retry on the Agents page checks the thread's cu
     deliveries: [
       {
         attempt: 1,
-        created_at: "2026-09-14T00:00:00Z",
+        created_at: recentAttemptAt,
         delivery: "steer",
         envelope_id: "envelope-1",
         error: null,
@@ -1189,7 +1202,7 @@ test("a reply's targeted-message retry on the Agents page checks the thread's cu
     deliveries: [
       {
         attempt: 1,
-        created_at: "2026-09-14T00:02:00Z",
+        created_at: recentAttemptAt,
         delivery: "steer",
         envelope_id: null,
         error: "no live session old-reviewer-session",
@@ -1224,12 +1237,13 @@ test("a reply's targeted-message retry on the Agents page checks the thread's cu
       "New reviewer"
     );
     expand(reviewerCard, "New reviewer");
-    const sendNormally = await within(reviewerCard).findByRole("button", {
-      name: "Send normally",
-    });
+    // The new holder dropped steer, so the same-mode Retry of a steer attempt is refused.
+    const sendNormally = await within(reviewerCard).findByRole("button", { name: "Retry" });
     expect(sendNormally.hasAttribute("disabled")).toBe(true);
     expect(
-      within(reviewerCard).getByRole("button", { name: "Ask BTW again" }).hasAttribute("disabled")
+      within(reviewerCard)
+        .getByRole("button", { name: "Send as BTW instead" })
+        .hasAttribute("disabled")
     ).toBe(false);
   } finally {
     page.view.unmount();

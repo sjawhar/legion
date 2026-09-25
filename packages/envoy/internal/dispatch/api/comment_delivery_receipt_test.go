@@ -315,7 +315,7 @@ func TestASenderPastItsLeaseLeavesTheResumedAttemptsReceiptAlone(t *testing.T) {
 		ctx, stored, model.CommentDelivery{
 			CommentID: stored.ID, Target: "session:s1", Attempt: 1, Delivery: "steer", SessionID: &session,
 		},
-		model.Actor{Kind: "user", ID: "alice"}, attemptClaim{attempt: 1, claimedAt: lapsed}, &envelope, "",
+		model.Actor{Kind: "user", ID: "alice"}, attemptClaim{attempt: 1, claimedAt: lapsed}, &envelope, false, "",
 	)
 	if err != nil {
 		t.Fatalf("the stalled sender's settle: %v", err)

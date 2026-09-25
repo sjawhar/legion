@@ -1655,6 +1655,58 @@ func TestRegisterV1Routes_UnknownRouteReturnsJSONError(t *testing.T) {
 		})
 	}
 }
+
+// LEGION-271. The send handler publishes before it answers, so a caller whose window expires
+// cannot tell whether the message landed. Its retry under the same idempotency key is a
+// JetStream duplicate and reaches the agent no second time; the answer has to say so, or
+// Dispatch records the retry as an ordinary send and the attempt history claims a delivery that
+// never happened. Only a dispatch-sourced send carries a MsgId, so only it can ever be one.
+func TestSendHandler_ReportsAJetStreamDuplicate(t *testing.T) {
+	client := setupPublishTestClient(t)
+	registry, sessions := setupSessionsTest(t, nil, map[string]int{"ses_target": 1})
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions})
+
+	send := func(t *testing.T, body string) sendResponse {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		sendHandler(&state).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/send", strings.NewReader(body)))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+		}
+		var response sendResponse
+		if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+			t.Fatalf("decode send response: %v", err)
+		}
+		return response
+	}
+
+	const dispatchSend = `{"target_session":"ses_target","source":"dispatch","message":"ship it","idempotency_key":"message-dup:steer"}`
+	if first := send(t, dispatchSend); first.Duplicate {
+		t.Fatalf("first send reported a duplicate; the stream held nothing")
+	}
+	second := send(t, dispatchSend)
+	if !second.Duplicate {
+		t.Fatalf("a repeat of a landed idempotency key must answer duplicate: %+v", second)
+	}
+	if second.EventID == "" {
+		t.Fatalf("a duplicate still names the envelope this request minted: %+v", second)
+	}
+
+	// The control: a different key is not a duplicate, so the flag is not simply what every
+	// send after the first answers.
+	fresh := send(t, `{"target_session":"ses_target","source":"dispatch","message":"ship it","idempotency_key":"message-dup:btw"}`)
+	if fresh.Duplicate {
+		t.Fatalf("a different idempotency key must not answer duplicate: %+v", fresh)
+	}
+
+	// An agent-sourced send carries no MsgId, so the stream cannot recognise a repeat.
+	const agentSend = `{"target_session":"ses_target","source":"agent","message":"ship it","idempotency_key":"agent-dup:steer"}`
+	send(t, agentSend)
+	if repeated := send(t, agentSend); repeated.Duplicate {
+		t.Fatalf("an agent-sourced send cannot be a duplicate: %+v", repeated)
+	}
+}
 func TestMessageHandlersRejectPresentEmptyOptionalFields(t *testing.T) {
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, map[string]int{"ses_target": 1})

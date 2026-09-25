@@ -24,6 +24,9 @@ let liveSessions = new Set<string>();
 const sendStatuses = new Map<string, 200 | 404>();
 let interests: { session_id: string; topics: string[]; updated_at?: number }[] = [];
 const sentMessages: SentMessage[] = [];
+/** (idempotency key, recipient) pairs this stand-in has already published, the stream's own
+ *  duplicate window for the life of the fixture. Cleared with the session seed. */
+const publishedKeys = new Set<string>();
 const unsubscribeCalls: unknown[] = [];
 
 Bun.serve({
@@ -63,9 +66,16 @@ Bun.serve({
           { status: 404 }
         );
       }
+      // The real listener publishes under a JetStream MsgId built from the idempotency key and
+      // the recipient, so a repeat of a key the stream already holds is suppressed and answered
+      // `duplicate`. Modelling that here is what lets an e2e see the duplicate wording.
+      const streamKey = `${message.idempotency_key}@${message.target_session}`;
+      const duplicate = publishedKeys.has(streamKey);
+      publishedKeys.add(streamKey);
       return Response.json({
         event_id: `envelope-${sentMessages.length}`,
         recipient: message.target_session,
+        ...(duplicate ? { duplicate: true } : {}),
       });
     }
     if (request.method === "PUT" && url.pathname === "/__fixture/sessions") {
@@ -79,6 +89,7 @@ Bun.serve({
       for (const session of sessions) sendStatuses.set(session.session_id, 200);
       liveSessions = new Set(sessions.map((session) => session.session_id));
       sentMessages.length = 0;
+      publishedKeys.clear();
       return Response.json({ ok: true });
     }
     if (request.method === "PATCH" && url.pathname.startsWith("/__fixture/sessions/")) {

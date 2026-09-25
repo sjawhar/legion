@@ -662,12 +662,15 @@ type Mention struct {
 
 // CommentDelivery records one attempt to deliver a mention to its resolved session.
 type CommentDelivery struct {
-	CommentID    string    `json:"comment_id"`
-	Target       string    `json:"target"`
-	Attempt      int       `json:"attempt"`
-	Delivery     string    `json:"delivery"`
-	SessionID    *string   `json:"session_id"`
-	EnvelopeID   *string   `json:"envelope_id"`
+	CommentID  string  `json:"comment_id"`
+	Target     string  `json:"target"`
+	Attempt    int     `json:"attempt"`
+	Delivery   string  `json:"delivery"`
+	SessionID  *string `json:"session_id"`
+	EnvelopeID *string `json:"envelope_id"`
+	// Duplicate reports that the stream already held this message when the attempt was sent,
+	// so the recipient gained nothing from it. EnvelopeID is then nil.
+	Duplicate    bool      `json:"duplicate"`
 	State        string    `json:"state"`
 	Error        *string   `json:"error"`
 	ResolveError *string   `json:"resolve_error"`
@@ -687,6 +690,9 @@ type CommentDeliveryEventPayload struct {
 	Delivery  string  `json:"delivery"`
 	SessionID *string `json:"session_id"`
 	State     string  `json:"state"`
+	// Duplicate reports that the stream already held this message, so the mentioned session
+	// gained nothing from this attempt.
+	Duplicate bool    `json:"duplicate,omitempty"`
 	Error     string  `json:"error,omitempty"`
 	ReplyID   *string `json:"reply_id"`
 }
@@ -826,15 +832,19 @@ type Message struct {
 
 // MessageDelivery records one human-requested attempt to reach a live agent.
 type MessageDelivery struct {
-	MessageID  string    `json:"message_id"`
-	Attempt    int       `json:"attempt"`
-	Delivery   string    `json:"delivery"`
-	SessionID  string    `json:"session_id"`
-	EnvelopeID *string   `json:"envelope_id"`
-	State      string    `json:"state"`
-	Error      *string   `json:"error"`
-	ReplyID    *string   `json:"reply_id"`
-	CreatedAt  time.Time `json:"created_at"`
+	MessageID  string  `json:"message_id"`
+	Attempt    int     `json:"attempt"`
+	Delivery   string  `json:"delivery"`
+	SessionID  string  `json:"session_id"`
+	EnvelopeID *string `json:"envelope_id"`
+	// Duplicate reports that the stream already held this message when the attempt was sent,
+	// so the recipient gained nothing from it. EnvelopeID is then nil: the envelope this send
+	// minted is the one JetStream discarded.
+	Duplicate bool      `json:"duplicate"`
+	State     string    `json:"state"`
+	Error     *string   `json:"error"`
+	ReplyID   *string   `json:"reply_id"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // MessageEventPayload wraps a Message with the reply target's body preview (first 160
@@ -863,6 +873,9 @@ type MessageDeliveryEventPayload struct {
 	Target    string `json:"target"`
 	Title     string `json:"title"`
 	State     string `json:"state"`
+	// Duplicate reports that the stream already held this message, so the recipient gained
+	// nothing from this attempt. Absent means false.
+	Duplicate bool   `json:"duplicate,omitempty"`
 	Error     string `json:"error,omitempty"`
 }
 

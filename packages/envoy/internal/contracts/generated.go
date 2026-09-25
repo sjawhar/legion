@@ -132,6 +132,16 @@ func validateWireNonEmpty(fields map[string]json.RawMessage, field, path string)
 const AgentTopicPrefix = "notifications.agent."
 const RoleTopicPrefix = "notifications.role."
 
+// DeliveryDuplicateWindow is how long the notification stream recognises a repeated delivery as
+// a duplicate. Generated from DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts so the stream's
+// configuration and the dashboard's "retrying is safe" promise cannot drift apart.
+const DeliveryDuplicateWindow = 259200000 * time.Millisecond
+
+// ReceiptTimeoutCause is what a delivery attempt records when the listener never answered its
+// send. Generated from RECEIPT_TIMEOUT_CAUSE in packages/contracts so the string Dispatch writes
+// and the string the dashboard keys its retry wording on cannot drift apart.
+const ReceiptTimeoutCause = "The listener didn't answer within the send window; the message may already have been delivered."
+
 func NowMillis() int64 {
 	return time.Now().UnixMilli()
 }

@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/asks"
 	dispatchenvoy "github.com/sjawhar/envoy/internal/dispatch/envoy"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -57,12 +58,24 @@ func (s *server) resolveMentionTargets(ctx context.Context, targets []string, de
 	return resolved
 }
 
-func (s *server) sendResolvedDelivery(ctx context.Context, target ResolvedMention, body, idempotencyKey string, urgency *string, frame []byte) (*string, string) {
+// sendResolvedDelivery sends one already-resolved delivery and reports what the listener did:
+// the envelope it minted, whether the stream already held the message, and the failure to
+// record otherwise.
+//
+// A receipt timeout is worded differently from every other failure, and only here. The listener
+// publishes the envelope before it answers, so a send whose answer missed the window may have
+// landed. What the row records is only that CAUSE. Whether retrying is safe depends on how old
+// the attempt is - the stream recognises the repeat for exactly as long as its duplicate window
+// - so that guidance is composed at render time against the attempt's age, never frozen into
+// the row here. A row written today would otherwise still promise a safe retry next week.
+func (s *server) sendResolvedDelivery(
+	ctx context.Context, target ResolvedMention, body, idempotencyKey string, urgency *string, frame []byte,
+) (*string, bool, string) {
 	if target.ResolveError != "" {
-		return nil, target.ResolveError
+		return nil, false, target.ResolveError
 	}
 	if target.SessionID == nil {
-		return nil, "no live session"
+		return nil, false, "no live session"
 	}
 	expectsReply := "optional"
 	if target.Delivery == "btw" {
@@ -76,11 +89,25 @@ func (s *server) sendResolvedDelivery(ctx context.Context, target ResolvedMentio
 		Urgency:        urgencyValue(urgency),
 		ExpectsReply:   expectsReply,
 	})
-	if err != nil {
-		return nil, deliveryErrorText(err)
+	if errors.Is(err, dispatchenvoy.ErrReceiptTimeout) {
+		return nil, false, receiptTimeoutText
 	}
-	return &send.EnvelopeID, ""
+	if err != nil {
+		return nil, false, deliveryErrorText(err)
+	}
+	// A duplicate names an envelope JetStream discarded, so the attempt records none.
+	if send.Duplicate {
+		return nil, true, ""
+	}
+	return &send.EnvelopeID, false, ""
 }
+
+// receiptTimeoutText is the CAUSE a receipt timeout records: what happened, and the one fact
+// about it that never expires - the send may have landed. The advice that follows from it
+// ("retrying in the same mode cannot deliver twice") is time-limited and belongs to the
+// renderer, which has the attempt's age; see isSafeRetry in the dashboard's delivery module.
+// The dashboard keys that wording on this exact string, so both sides read one literal.
+const receiptTimeoutText = contracts.ReceiptTimeoutCause
 
 // claimedCommentDelivery is the attempt one delivery call owns. settled is non-nil when that
 // attempt already carries its outcome, or belongs to a sender that is still working, and
@@ -210,7 +237,8 @@ func commentDeliveryReceipt(
 		model.CommentDeliveryEventPayload{
 			CommentID: comment.ID, AskID: comment.AskID, Target: attempt.Target,
 			Attempt: attempt.Attempt, Delivery: attempt.Delivery, SessionID: attempt.SessionID,
-			State: attempt.State, Error: receiptError(attempt.Error), ReplyID: attempt.ReplyID,
+			State: attempt.State, Duplicate: attempt.Duplicate, Error: receiptError(attempt.Error),
+			ReplyID: attempt.ReplyID,
 		},
 	)
 }
@@ -227,18 +255,20 @@ func (s *server) completeCommentDelivery(
 	actor model.Actor,
 	claim attemptClaim,
 	envelopeID *string,
+	duplicate bool,
 	deliveryError string,
 ) (model.CommentDelivery, error) {
 	sent := recorded
 	sent.State, sent.Error = deliveryOutcome(deliveryError)
+	sent.Duplicate, sent.EnvelopeID = duplicate, envelopeID
 	return settleDeliveryAttempt(ctx, s, commentDeliveryReceipt(comment, actor, sent),
 		func(ctx context.Context, tx pgx.Tx) (model.CommentDelivery, error) {
 			return scanCommentDelivery(tx.QueryRow(ctx, `
-				update comment_deliveries set envelope_id = $5, state = $6, error = $7
+				update comment_deliveries set envelope_id = $5, state = $6, error = $7, duplicate = $8
 				where comment_id = $1 and target = $2 and attempt = $3
 				  and state = 'pending' and claimed_at = $4
 				returning `+commentDeliveryColumns,
-				comment.ID, sent.Target, claim.attempt, claim.claimedAt, envelopeID, sent.State, sent.Error,
+				comment.ID, sent.Target, claim.attempt, claim.claimedAt, envelopeID, sent.State, sent.Error, duplicate,
 			))
 		},
 		func(ctx context.Context, tx pgx.Tx) (model.CommentDelivery, bool, *string, error) {
@@ -382,11 +412,13 @@ func (s *server) deliverResolvedCommentMention(
 	if err != nil {
 		return model.CommentDelivery{}, fmt.Errorf("encode comment mention delivery frame: %w", err)
 	}
-	envelopeID, deliveryError := s.sendResolvedDelivery(
-		ctx, target, stored.Body, stored.ID+":"+target.Target+":"+fmt.Sprint(claimed.attempt), nil, frame,
+	// The key is scoped to the mention's target and mode, stable across every attempt of that
+	// triple, so a retry of a send that already landed is a duplicate the stream drops.
+	envelopeID, duplicate, deliveryError := s.sendResolvedDelivery(
+		ctx, target, stored.Body, stored.ID+":"+target.Target+":"+target.Delivery, nil, frame,
 	)
 	return s.completeCommentDelivery(
-		ctx, stored, recorded, actor, claimed.attemptClaim, envelopeID, deliveryError,
+		ctx, stored, recorded, actor, claimed.attemptClaim, envelopeID, duplicate, deliveryError,
 	)
 }
 
@@ -416,7 +448,7 @@ func (s *server) loadCommentCreatedEvent(ctx context.Context, q queryer, comment
 
 // commentDeliveryColumns is the comment_deliveries select list scanCommentDelivery reads, in
 // scan order.
-const commentDeliveryColumns = `comment_id::text, target, attempt, delivery, session_id, envelope_id, state, error, resolve_error, reply_id::text, created_at`
+const commentDeliveryColumns = `comment_id::text, target, attempt, delivery, session_id, envelope_id, duplicate, state, error, resolve_error, reply_id::text, created_at`
 
 // scanCommentDelivery decodes one commentDeliveryColumns row; extra receives any columns
 // selected after them.
@@ -424,8 +456,8 @@ func scanCommentDelivery(row pgx.Row, extra ...any) (model.CommentDelivery, erro
 	var attempt model.CommentDelivery
 	fields := []any{
 		&attempt.CommentID, &attempt.Target, &attempt.Attempt, &attempt.Delivery, &attempt.SessionID,
-		&attempt.EnvelopeID, &attempt.State, &attempt.Error, &attempt.ResolveError, &attempt.ReplyID,
-		&attempt.CreatedAt,
+		&attempt.EnvelopeID, &attempt.Duplicate, &attempt.State, &attempt.Error, &attempt.ResolveError,
+		&attempt.ReplyID, &attempt.CreatedAt,
 	}
 	if err := row.Scan(append(fields, extra...)...); err != nil {
 		return model.CommentDelivery{}, err

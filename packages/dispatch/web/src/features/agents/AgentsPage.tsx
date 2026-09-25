@@ -8,6 +8,7 @@ import type {
   Agent,
   Message,
   MessageDelivery,
+  MessageDeliveryMode,
   MessageRead,
   UserAgentStates,
 } from "../../api/types";
@@ -68,6 +69,7 @@ function deliveryAttempts(
     attempt: attempt.attempt,
     createdAt: attempt.created_at,
     delivery: attempt.delivery,
+    duplicate: attempt.duplicate,
     error: attempt.error,
     state: attempt.state,
     targetName,
@@ -223,7 +225,7 @@ function AgentExchangeReply({
 }): ReactNode {
   const queryClient = useQueryClient();
   const retry = useMutation({
-    mutationFn: (delivery: "btw" | "steer") => api.createMessageDelivery(reply.id, delivery),
+    mutationFn: (delivery: MessageDeliveryMode) => api.createMessageDelivery(reply.id, delivery),
     onSuccess: () =>
       void queryClient.invalidateQueries({ queryKey: ["agents", agent.session_id, "messages"] }),
   });
@@ -250,6 +252,9 @@ function AgentExchangeReply({
                 answer === undefined ? undefined : resolveAuthor(answer.author, titles).label,
               attempts: deliveryAttempts(reply.deliveries, label),
               retry: {
+                canAside:
+                  capabilitiesForTarget(read.message.target, liveAgents)?.includes("aside") !==
+                  false,
                 canBtw:
                   capabilitiesForTarget(read.message.target, liveAgents)?.includes("btw") !== false,
                 canSteer:
@@ -295,7 +300,8 @@ function AgentTargetedMessage({
 }): ReactNode {
   const queryClient = useQueryClient();
   const retry = useMutation({
-    mutationFn: (delivery: "btw" | "steer") => api.createMessageDelivery(read.message.id, delivery),
+    mutationFn: (delivery: MessageDeliveryMode) =>
+      api.createMessageDelivery(read.message.id, delivery),
     onSuccess: () =>
       void queryClient.invalidateQueries({ queryKey: ["agents", agent.session_id, "messages"] }),
   });
@@ -320,6 +326,7 @@ function AgentTargetedMessage({
           </div>
         </>
       }
+      canAside={capabilitiesForTarget(read.message.target, liveAgents)?.includes("aside") !== false}
       canBtw={capabilitiesForTarget(read.message.target, liveAgents)?.includes("btw") !== false}
       canSteer={capabilitiesForTarget(read.message.target, liveAgents)?.includes("steer") !== false}
       deliveries={deliveryAttempts(read.message.deliveries, label)}

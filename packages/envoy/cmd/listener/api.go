@@ -79,9 +79,14 @@ type messageBody struct {
 	ExpiresAt      *int64  `json:"expires_at"`
 }
 
+// sendResponse is the answer to a targeted send. Duplicate reports that JetStream already held
+// this message, so nothing new reached the agent's subject; it is only ever true for a
+// dispatch-sourced send, the only one published under a MsgId. Absent means false, which is
+// what an older listener's answer reads as.
 type sendResponse struct {
 	contracts.Envelope
 	Recipient string `json:"recipient"`
+	Duplicate bool   `json:"duplicate,omitempty"`
 }
 
 type publishResponse struct {
@@ -482,11 +487,14 @@ func sendHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
 			return
 		}
-		if err := d.client.Publish(item); err != nil {
+		duplicate, err := d.client.PublishReportingDuplicate(item)
+		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, sendResponse{Envelope: item, Recipient: targetSession})
+		writeJSON(w, http.StatusOK, sendResponse{
+			Envelope: item, Recipient: targetSession, Duplicate: duplicate,
+		})
 	}
 }
 
