@@ -190,21 +190,31 @@ func (g pluginGate) verify(ctx context.Context) error {
 // pluginLane is how the probed Oh My Pi loads pi-legion-envoy, resolved once for the gate (lane):
 // a pane's installed plugin through discovery, or, given a plugin root, a pod's lane, that root as
 // Oh My Pi's one explicit extension with discovery off. It carries the manifest the contract probe
-// reads and the words every refusal uses, so none of them sends the operator to the other lane's
-// remedy: in a pod's lane, discovery is off and the profile's plugin install is never loaded.
+// reads, the load probe's arguments, and the words every refusal uses, so none of them sends the
+// operator to the other lane's remedy: in a pod's lane, discovery is off and the profile's plugin
+// install is never loaded. Only lane knows there are two.
 type pluginLane struct {
-	// manifest is the pi-legion-envoy manifest the contract probe reads; profile the OMP profile a
-	// pane resolves it under ("" for the default profile, and in a pod's lane).
-	manifest, profile string
-	// root is a pod's plugin root, absolute; "" for a pane's discovery.
-	root string
+	// manifest is the pi-legion-envoy manifest the contract probe reads.
+	manifest string
 	// installInto is where the contract refusal says to install the release built from this
 	// daemon's commit.
 	installInto string
 	// described is how the probed Oh My Pi loaded the plugin, as a refusal of a task agent or skill
 	// it could not find says it.
 	described string
+	// flags are the load probe's extension flags, and roots their arguments before the probe's own
+	// path, which comes last; exports are the variables the probe reads besides the check's names.
+	flags   string
+	roots   []string
+	exports []string
+	// notLoaded is the refusal for an Oh My Pi that answered without loading the plugin at version;
+	// elsewhere, for one that loaded it from owner when the contract probe held read to contract.
+	notLoaded func(version string) error
+	elsewhere func(owner, read string, contract int) error
 }
+
+// discoveryFlags adds the load probe, "$1", beside what Oh My Pi's discovery loads.
+const discoveryFlags = `--extension "$1"`
 
 // lane resolves the gate's plugin lane. A relative plugin root is resolved against this process's
 // working directory, so the directory the load probe hands Oh My Pi and the manifest the contract
@@ -217,9 +227,21 @@ func (g pluginGate) lane() (pluginLane, error) {
 		}
 		return pluginLane{
 			manifest:    filepath.Join(root, "package.json"),
-			root:        root,
 			installInto: "the plugin root " + root + ", which a pod loads as its one explicit extension",
 			described:   "loading the plugin from " + root + " with discovery off, as a pod does",
+			// Discovery off, the plugin root, then the probe; the root is also the one extension
+			// root the probe's own discovery of task agents and skills reads.
+			flags:   `--no-extensions --extension "$1" --extension "$2"`,
+			roots:   []string{root},
+			exports: []string{`LEGION_PROMPT_ROOT="$1"`},
+			notLoaded: func(version string) error {
+				return fmt.Errorf("pi-legion-envoy %s at %s did not load with discovery off and %s as Oh My Pi's one explicit extension, as a pod loads it: the plugin root holds no plugin Oh My Pi can load; build the worker image from this daemon's commit",
+					version, root, root)
+			},
+			elsewhere: func(owner, read string, contract int) error {
+				return fmt.Errorf("pi-legion-envoy loads from %s, but the probe passed %s as Oh My Pi's one explicit extension, with discovery off, and held its manifest %s to Go daemon API contract %d: the OMP invocation, or its launch prefix, loads another copy of the plugin",
+					owner, root, read, contract)
+			},
 		}, nil
 	}
 	manifest, profile, err := pluginManifestPath(g.env, g.workDir)
@@ -228,32 +250,21 @@ func (g pluginGate) lane() (pluginLane, error) {
 	}
 	return pluginLane{
 		manifest:    manifest,
-		profile:     profile,
 		installInto: profileWords(profile),
 		described:   "in a pane of " + profileWords(profile),
+		flags:       discoveryFlags,
+		notLoaded: func(version string) error {
+			list := "omp plugin list"
+			if profile != "" {
+				list = "OMP_PROFILE=" + profile + " " + list
+			}
+			return fmt.Errorf("pi-legion-envoy %s is installed but not loaded by omp (disabled or unregistered): run %s", version, list)
+		},
+		elsewhere: func(owner, read string, contract int) error {
+			return fmt.Errorf("pi-legion-envoy loads in a pane from %s, but the manifest this gate held to Go daemon API contract %d is %s, at the plugin root of %s in the pane environment: the launch prefix, or a dotenv file Oh My Pi reads, selects another plugin root. Select the OMP profile in the daemon's own environment, which every pane inherits",
+				owner, contract, read, profileWords(profile))
+		},
 	}, nil
-}
-
-// notLoaded is the load probe's refusal for an Oh My Pi that answered without loading the plugin.
-func (l pluginLane) notLoaded(version string) error {
-	if l.root != "" {
-		return fmt.Errorf("pi-legion-envoy %s at %s did not load with discovery off and %s as Oh My Pi's one explicit extension, as a pod loads it: the plugin root holds no plugin Oh My Pi can load; build the worker image from this daemon's commit",
-			version, l.root, l.root)
-	}
-	list := "omp plugin list"
-	if l.profile != "" {
-		list = "OMP_PROFILE=" + l.profile + " " + list
-	}
-	return fmt.Errorf("pi-legion-envoy %s is installed but not loaded by omp (disabled or unregistered): run %s", version, list)
-}
-
-// loadArgs are the load probe's extension flags and their arguments: the probe beside what
-// discovery loads, or, in a pod's lane, discovery off, the plugin root, then the probe.
-func (l pluginLane) loadArgs(probe string) (string, []string) {
-	if l.root != "" {
-		return `--no-extensions --extension "$1" --extension "$2"`, []string{l.root, probe}
-	}
-	return `--extension "$1"`, []string{probe}
 }
 
 var (
@@ -479,15 +490,10 @@ func (l pluginLane) verifyLoadedFrom(location string, contract int) error {
 	if err != nil {
 		return fmt.Errorf("boot gate: resolve the manifest %s the contract probe read: %w", l.manifest, err)
 	}
-	switch {
-	case owner == read:
+	if owner == read {
 		return nil
-	case l.root != "":
-		return fmt.Errorf("pi-legion-envoy loads from %s, but the probe passed %s as Oh My Pi's one explicit extension, with discovery off, and held its manifest %s to Go daemon API contract %d: the OMP invocation, or its launch prefix, loads another copy of the plugin",
-			owner, l.root, read, contract)
 	}
-	return fmt.Errorf("pi-legion-envoy loads in a pane from %s, but the manifest this gate held to Go daemon API contract %d is %s, at the plugin root of %s in the pane environment: the launch prefix, or a dotenv file Oh My Pi reads, selects another plugin root. Select the OMP profile in the daemon's own environment, which every pane inherits",
-		owner, contract, read, profileWords(l.profile))
+	return l.elsewhere(owner, read, contract)
 }
 
 // loadedManifest is the pi-legion-envoy manifest of the file the load probe reported the plugin
@@ -527,11 +533,11 @@ func owningManifest(file string) (string, error) {
 // probeLoad is one load-probe attempt, and, on a pass, where the plugin loaded from. notLoaded is
 // the refusal for an Oh My Pi that answered without loading the plugin.
 func (g pluginGate) probeLoad(ctx context.Context, launch, probe string, lane pluginLane, notLoaded error, check promptCheck) (bootprobe.Outcome, string) {
-	flags, args := lane.loadArgs(probe)
-	script := `exec ` + launch + ` models ` + flags + ` --json >/dev/null`
-	if export := check.export(lane.root != ""); export != "" {
-		script = export + "; " + script
+	script := `exec ` + launch + ` models ` + lane.flags + ` --json >/dev/null`
+	if exports := append(check.assignments(), lane.exports...); len(exports) > 0 {
+		script = "export " + strings.Join(exports, " ") + "; " + script
 	}
+	args := append(slices.Clone(lane.roots), probe)
 	r, err := g.run(ctx, script, args...)
 	if err != nil {
 		return bootprobe.Outcome{Refusal: fmt.Errorf("%s: run the pi-legion-envoy load probe: %w", g.label(), err)}, ""
@@ -836,7 +842,9 @@ func ProbeController(ctx context.Context, p ControllerProbe) error {
 	// Neither refusal names a profile: which one Oh My Pi reads is its own resolution, which this
 	// does not port, so the words say only what Oh My Pi did, where it ran, and how.
 	launch := omplaunch.WithPrefix(p.Prefix, p.Omp)
-	location, err := g.loadedFrom(ctx, pluginLane{}, fmt.Errorf("Oh My Pi, launched as the controller launches it (%q, in %s), did not load pi-legion-envoy (not installed, disabled, or unregistered). Install the @sjawhar/pi-legion-envoy release built from this daemon's commit into the Oh My Pi the controller runs, and check it with `cd %s && %s plugin list` under the controller's environment: a .env or a project plugin root there applies",
+	// The controller's lane is discovery's, with its own refusal: it reads no manifest, and a check
+	// that names nothing needs no words for how the plugin loaded.
+	location, err := g.loadedFrom(ctx, pluginLane{flags: discoveryFlags}, fmt.Errorf("Oh My Pi, launched as the controller launches it (%q, in %s), did not load pi-legion-envoy (not installed, disabled, or unregistered). Install the @sjawhar/pi-legion-envoy release built from this daemon's commit into the Oh My Pi the controller runs, and check it with `cd %s && %s plugin list` under the controller's environment: a .env or a project plugin root there applies",
 		launch, p.WorkDir, p.WorkDir, launch), promptCheck{})
 	if err != nil {
 		return err
