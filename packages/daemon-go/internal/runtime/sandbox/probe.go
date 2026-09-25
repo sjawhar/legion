@@ -342,9 +342,9 @@ func (r *Runtime) stuck(ctx context.Context, pod *corev1.Pod, name, digest strin
 // Secret, or one of the keys it is asked for, is missing (`secret "<name>" not found` from the
 // kubelet's watching secret manager, `secrets "<name>" not found` from the API server that one on
 // the Get or Cache strategy asks, `references non-existent secret key: <key>`, pkg/volume/secret),
-// or "" when the pod's events hold none. Every
-// other FailedMount, such as `failed to sync secret cache: timed out waiting for the condition`
-// while the kubelet's watch catches up, is one the kubelet retries, and is left to the budget.
+// or "" when the pod's events hold none. Every other FailedMount, such as `failed to sync secret
+// cache: timed out waiting for the condition` while the kubelet's watch catches up, is one the
+// kubelet retries, and is left to the budget.
 func (r *Runtime) providersMountFailure(ctx context.Context, pod *corev1.Pod) string {
 	events, err := r.podEvents(ctx, pod)
 	if err != nil {

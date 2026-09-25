@@ -53,8 +53,8 @@ func New() Names {
 	return names
 }
 
-// Add records that file names name in the form kind, once.
-func (names Names) Add(kind Kind, name, file string) {
+// add records that file names name in the form kind, once.
+func (names Names) add(kind Kind, name, file string) {
 	if !slices.Contains(names[kind][name], file) {
 		names[kind][name] = append(names[kind][name], file)
 	}
@@ -87,28 +87,20 @@ func (names Names) Collect(base, dir, prefix string) error {
 		file := filepath.Join(prefix, under, rel)
 		for _, kind := range Kinds {
 			for _, match := range reference[kind].FindAllSubmatch(body, -1) {
-				names.Add(kind, string(match[1]), file)
+				names.add(kind, string(match[1]), file)
 			}
 		}
 		return nil
 	})
 }
 
-// CollectRoles adds every reference in the role prompts under rolesDir, each named `roles/<file>`.
-func (names Names) CollectRoles(rolesDir string) error {
-	if err := names.Collect(rolesDir, rolesDir, "roles"); err != nil {
-		return fmt.Errorf("the role prompts directory %s cannot be read: %w", rolesDir, err)
-	}
-	return nil
-}
-
-// Roles are the references of the role prompts under rolesDir, encoded for `legion probe-image
-// --role-references`: the daemon hands its own role prompts to every worker, so a probe resolves
-// what those name, not the probed image's copy.
+// Roles are the references of the role prompts under rolesDir, each named `roles/<file>`, encoded
+// for `legion probe-image --role-references`: the daemon hands its own role prompts to every
+// worker, so a probe resolves what those name, not the probed image's copy.
 func Roles(rolesDir string) (string, error) {
 	names := New()
-	if err := names.CollectRoles(rolesDir); err != nil {
-		return "", err
+	if err := names.Collect(rolesDir, rolesDir, "roles"); err != nil {
+		return "", fmt.Errorf("the role prompts directory %s cannot be read: %w", rolesDir, err)
 	}
 	encoded := map[string]map[string][]string{}
 	for _, kind := range Kinds {
@@ -127,7 +119,7 @@ func (names Names) AddEncoded(raw string) error {
 	for _, kind := range Kinds {
 		for name, files := range encoded[kind.Variable()] {
 			for _, file := range files {
-				names.Add(kind, name, file)
+				names.add(kind, name, file)
 			}
 		}
 	}
