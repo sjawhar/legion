@@ -293,7 +293,15 @@ async function createWorkspace(
     );
   } else if (origin?.present) {
     const listedCommit = origin.added[0];
-    await runChecked(deps, ["jj", "bookmark", "track", remote, "-R", repoCloneDir]);
+    await runChecked(deps, [
+      "jj",
+      "bookmark",
+      "track",
+      remote,
+      "--ignore-working-copy",
+      "-R",
+      repoCloneDir,
+    ]);
     const tracked = (await readBookmark(deps, repoCloneDir, workspaceDir, bookmark)).local;
     if (!tracked?.present || tracked.conflict || tracked.added[0] !== listedCommit) {
       throw new Error(

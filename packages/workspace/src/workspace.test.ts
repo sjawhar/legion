@@ -1324,7 +1324,17 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       expect(
         calls.filter((cmd) => cmd[1] === "bookmark" && cmd[2] !== "list"),
         name
-      ).toEqual([["jj", "bookmark", "track", `${issueBookmark}@origin`, "-R", repoCloneDir]]);
+      ).toEqual([
+        [
+          "jj",
+          "bookmark",
+          "track",
+          `${issueBookmark}@origin`,
+          "--ignore-working-copy",
+          "-R",
+          repoCloneDir,
+        ],
+      ]);
     }
   }, 60_000);
 
