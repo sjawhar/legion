@@ -169,7 +169,7 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 		c.Pending = &supervise.Delivery{
 			ID:          *deliveryID,
 			Task:        *task,
-			Phase:       phase.Phase(deref(deliveryPhase)),
+			Phase:       phase.Phase(*deliveryPhase),
 			QueuedAt:    *queuedAt,
 			DeliveredAt: orZero(delivered),
 			ConfirmedAt: orZero(confirmed),
@@ -191,13 +191,4 @@ func orZero(t *time.Time) time.Time {
 		return time.Time{}
 	}
 	return *t
-}
-
-// deref is a nullable text column as its Go value: a column the schema defaults to the empty
-// string is null only for a row written before that column existed.
-func deref(s *string) string {
-	if s == nil {
-		return ""
-	}
-	return *s
 }

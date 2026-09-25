@@ -155,12 +155,8 @@ func phaseHolds(pool *pgxpool.Pool, records record.Store) func(context.Context, 
 		if d.Phase == "" {
 			return true, nil
 		}
-		var issue *record.Issue
-		if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-			var err error
-			issue, err = records.Issue(ctx, tx, c.Issue)
-			return err
-		}); err != nil {
+		issue, err := recordedIssue(ctx, pool, records, c.Issue)
+		if err != nil {
 			return false, fmt.Errorf("read %s for the phase of %s: %w", c.Issue, c.Token, err)
 		}
 		if issue == nil {
@@ -179,16 +175,25 @@ func phaseHolds(pool *pgxpool.Pool, records record.Store) func(context.Context, 
 // still land between this answer and the retire.
 func treeClosable(pool *pgxpool.Pool, records record.Store) func(context.Context, supervise.Claim) (bool, error) {
 	return func(ctx context.Context, c supervise.Claim) (bool, error) {
-		var issue *record.Issue
-		if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-			var err error
-			issue, err = records.Issue(ctx, tx, c.Tree)
-			return err
-		}); err != nil {
+		issue, err := recordedIssue(ctx, pool, records, c.Tree)
+		if err != nil {
 			return false, fmt.Errorf("read whether a workflow issue backs tree %s: %w", c.Tree, err)
 		}
 		return issue == nil, nil
 	}
+}
+
+// recordedIssue reads one issue in a transaction of its own, which is what both supervisor
+// predicates need: the machine asks them while holding its own lock, and neither answer may take
+// a lock of the daemon's.
+func recordedIssue(ctx context.Context, pool *pgxpool.Pool, records record.Store, key string) (*record.Issue, error) {
+	var issue *record.Issue
+	err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		var err error
+		issue, err = records.Issue(ctx, tx, key)
+		return err
+	})
+	return issue, err
 }
 
 func (w *workflowRuntime) reconcile(ctx context.Context) error {
