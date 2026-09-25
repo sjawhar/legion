@@ -81,6 +81,9 @@ func fakeOMP() int {
 	}()
 
 	emit(fmt.Sprintf(`{"type":"fake_ready","pid":%d}`, os.Getpid()))
+	if message := os.Getenv("FAKE_OMP_EXTENSION_ERROR"); message != "" {
+		emit(fmt.Sprintf(`{"type":"extension_error","extensionPath":"/opt/legion/pi-legion-envoy/dist/legion.js","event":"session_start","error":%q}`, message))
+	}
 	if os.Getenv("FAKE_OMP_HUGE_LINE") == "1" {
 		emit(`{"type":"fake_huge","pad":"` + strings.Repeat("x", 2<<20) + `"}`)
 	}
@@ -970,4 +973,17 @@ func TestAnOverlongLineFromOMPEndsTheChild(t *testing.T) {
 	if sh.log.count("exceeds the plain-frame limit") != 1 {
 		t.Fatalf("the shim did not say why it ended the child; log:\n%s", sh.log)
 	}
+}
+
+// The pod's log is the shim's one line per frame it summarizes, and an extension of Oh My Pi
+// failing is one of them: a Legion plugin whose session_start failed leaves an agent with no
+// legion tool, and the pod's log says why.
+func TestTheShimLogsAnExtensionError(t *testing.T) {
+	path := socketPath(t)
+	daemon := listen(t, path)
+	child := newOMP(t, "FAKE_OMP_EXTENSION_ERROR=LEGION_DAEMON_URL is required for Legion")
+	sh := run(t, config(t, path, child), newClock())
+	daemon.accept(t).open(t)
+
+	sh.log.awaitLine(t, "extension_error /opt/legion/pi-legion-envoy/dist/legion.js session_start: LEGION_DAEMON_URL is required for Legion", 1)
 }

@@ -331,7 +331,9 @@ func (c *Conn) logNotAFrame(line []byte, err error) {
 }
 
 // dispatch acts on one whole frame. OMP's other events — tool calls, message updates, errors —
-// are not facts the daemon supervises on, and are dropped here.
+// are not facts the daemon supervises on, and are dropped here, except an extension's failure,
+// which leaves the agent running without what the extension gives it (the Legion plugin's tool,
+// when its session_start fails) and is on no other record the daemon reads, so it is logged.
 func (c *Conn) dispatch(frame shimwire.Frame) {
 	switch frame := frame.(type) {
 	case shimwire.AgentStart:
@@ -343,6 +345,17 @@ func (c *Conn) dispatch(frame shimwire.Frame) {
 		c.events.push(TurnEnd{Claim: c.claim})
 	case shimwire.Response:
 		c.answer(frame)
+	case shimwire.Raw:
+		if frame.Type == "extension_error" {
+			var event struct {
+				ExtensionPath string `json:"extensionPath"`
+				Event         string `json:"event"`
+				Error         string `json:"error"`
+			}
+			_ = json.Unmarshal(frame.JSON, &event)
+			c.log.Warn("worker-stream: an extension of the worker's Oh My Pi failed", "claim", c.claim,
+				"extension", event.ExtensionPath, "event", event.Event, "error", event.Error)
+		}
 	case shimwire.AdoptWorkingCopyResult:
 		c.mu.Lock()
 		request, waiting := c.pending[frame.ID]

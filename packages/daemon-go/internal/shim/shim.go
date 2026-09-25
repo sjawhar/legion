@@ -568,6 +568,16 @@ func summarize(frame shimwire.Frame) string {
 				return "error " + *event.Message
 			}
 			return "error " + string(f.JSON)
+		case "extension_error":
+			// An extension that failed leaves the agent running without what it gives it; this
+			// line is the one place a pod's log says so (Oh My Pi reports it on its RPC stream only).
+			var event struct {
+				ExtensionPath string `json:"extensionPath"`
+				Event         string `json:"event"`
+				Error         string `json:"error"`
+			}
+			_ = json.Unmarshal(f.JSON, &event)
+			return "extension_error " + event.ExtensionPath + " " + event.Event + ": " + event.Error
 		}
 	}
 	return ""
