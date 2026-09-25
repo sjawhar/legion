@@ -251,9 +251,8 @@ cannot finish, the writer behind it is answered the same way or admitted once th
 reloaded, and the room then reloads with the browser's own paragraph in the document the server
 serves. The trigger it installs makes every `doc_updates` insert on that database sleep, so it is
 dropped in a `finally` and again in `test.afterEach` - a timeout or a Ctrl-C leaves nothing
-behind. Run it on
-a change and on its base whenever the docs layer's locking, recovery or publish paths move; the
-two runs' `FAILED-ROOM` lines are the comparison.
+behind. Run it on a change and on its base whenever the docs layer's locking, recovery or publish
+paths move; the two runs' `FAILED-ROOM` lines are the comparison.
 
 `e2e/fake-envoy.ts` is a stub Envoy listener the harness starts on
 `FAKE_ENVOY_PORT` (default `9021`) and the only Envoy the server talks to:

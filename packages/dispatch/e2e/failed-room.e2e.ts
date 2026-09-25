@@ -79,8 +79,9 @@ async function releaseTheRoom(): Promise<void> {
 }
 
 // A trigger left behind makes every later `doc_updates` insert on this database sleep, which
-// fails whatever writes a document next - `resetDatabase`'s wait for open transactions included. This runs after a timeout, a Ctrl-C between tests, and a
-// throw inside the body, which the `finally` below covers on its own.
+// fails whatever writes a document next - `resetDatabase`'s wait for open transactions
+// included. This runs after a timeout, a Ctrl-C between tests, and a throw inside the body,
+// which the `finally` below covers on its own.
 test.afterEach(async () => {
   if (process.env.DISPATCH_FAILED_ROOM_PROBE === "1") {
     await releaseTheRoom();
