@@ -241,6 +241,19 @@ Proof uses collaborative cursor decorations at the desktop `xl` breakpoint and a
 layouts intentionally omit the remote cursor plugin because its edge widget disrupts mobile
 post-update text selection; Yjs document transport and local editing remain active.
 
+`e2e/failed-room.e2e.ts` is opt-in and skipped without `DISPATCH_FAILED_ROOM_PROBE=1`: it holds
+the room's next durable append for 20 s with a `doc_updates` trigger and cancels that backend, so
+it costs about 40 s and does not belong in the suite CI runs. Run it as
+`DISPATCH_FAILED_ROOM_PROBE=1 bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/failed-room.e2e.ts`.
+It is the end-to-end check for a failed document room: the writer inside the docs layer when the
+room fails is answered `503 DOC_SERVICE_UNAVAILABLE` rather than waiting for a recovery that
+cannot finish, the writer behind it is answered the same way or admitted once the room has
+reloaded, and the room then reloads with the browser's own paragraph in the document the server
+serves. The trigger it installs makes every `doc_updates` insert on that database sleep, so it is
+dropped in a `finally` and again in `test.afterEach` - a timeout or a Ctrl-C leaves nothing
+behind. Run it on a change and on its base whenever the docs layer's locking, recovery or publish
+paths move; the two runs' `FAILED-ROOM` lines are the comparison.
+
 `e2e/fake-envoy.ts` is a stub Envoy listener the harness starts on
 `FAKE_ENVOY_PORT` (default `9021`) and the only Envoy the server talks to:
 `run-server.sh` builds `ENVOY_URL` from that port alone. Tests seed
