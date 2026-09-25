@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -166,26 +167,9 @@ func TestReadinessGate_Ready_PassesThrough(t *testing.T) {
 	}
 }
 
-// healthzHandler builds the same /healthz handler used in main(), parameterized
-// by the shared state pointer so we can control readiness in tests.
-func healthzHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		d := state.Load()
-		if d == nil {
-			w.WriteHeader(http.StatusOK)
-			_ = json.NewEncoder(w).Encode(map[string]string{"status": "starting"})
-			return
-		}
-		// Post-init path would check NATS health, but requires a live
-		// bus.Client which needs NATS. Only the starting state is
-		// testable without NATS.
-	}
-}
-
 func TestHealthz_Starting_Returns200WithJSON(t *testing.T) {
 	var state atomic.Pointer[listenerDeps]
-	handler := healthzHandler(&state)
+	handler := healthzHandler(&state, new(string))
 
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, httptest.NewRequest("GET", "/healthz", nil))
@@ -238,7 +222,7 @@ func TestFullMux_StartingState(t *testing.T) {
 	var state atomic.Pointer[listenerDeps]
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", healthzHandler(&state))
+	mux.HandleFunc("/healthz", healthzHandler(&state, new(string)))
 
 	v1 := http.NewServeMux()
 	v1.HandleFunc("/v1/interests/subscribe", func(w http.ResponseWriter, r *http.Request) {
@@ -3726,4 +3710,145 @@ func TestMain(m *testing.M) {
 		}
 	}
 	os.Exit(code)
+}
+
+// endInterestWatcherWhileConnected ends the interest registry's KV watcher while NATS stays
+// connected: deleting the bucket's stream makes the watcher's ordered consumer fail to reset.
+func endInterestWatcherWhileConnected(t *testing.T, client *bus.Client, registry *store.Registry) {
+	t.Helper()
+	if err := client.JS().DeleteStream("KV_" + store.Bucket); err != nil {
+		t.Fatalf("delete the interest bucket's stream: %v", err)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for !registry.WatchFailed() {
+		if time.Now().After(deadline) {
+			t.Fatal("the interest watcher never ended after its stream was deleted")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !client.Connected() {
+		t.Fatal("the bus lost NATS; the watcher must end with the connection up")
+	}
+}
+
+// An interest watcher that ends while NATS stays connected is rebuilt by self-health, with the
+// listener's own predicate and rebuild, and the cache then follows new interests. Without
+// registry.WatchFailed() in isUnrecoverableSelfHealthFailure the failed probe reads as transient,
+// nothing is rebuilt, and the cache stays frozen behind the dead watcher.
+func TestSelfHealthRebuildsAnInterestWatcherThatEndedWhileConnected(t *testing.T) {
+	client := setupTestNATS(t)
+	registry, err := store.Open(client.Conn, store.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("open interest registry: %v", err)
+	}
+	t.Cleanup(registry.StopWatch)
+	readyCtx, readyCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer readyCancel()
+	if err := registry.WaitForCacheReady(readyCtx); err != nil {
+		t.Fatalf("wait for interest cache: %v", err)
+	}
+	endInterestWatcherWhileConnected(t, client, registry)
+	// Rewatch opens the bucket, as the session and CI stores do, and never creates it; the bucket
+	// comes back, empty, and the watcher stays dead until something rebuilds it.
+	if _, err := client.JS().CreateKeyValue(&natsgo.KeyValueConfig{Bucket: store.Bucket, Replicas: 1, Storage: natsgo.FileStorage}); err != nil {
+		t.Fatalf("recreate the interest bucket: %v", err)
+	}
+
+	logger := logging.New("test")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	recovered := make(chan struct{}, 1)
+	terminated := make(chan struct{}, 1)
+	done := make(chan struct{})
+	go func() {
+		runSelfHealthMonitor(
+			ctx,
+			logger,
+			func() error {
+				err := checkSelfHealth(registry, nil, nil, nil)
+				if err == nil {
+					select {
+					case recovered <- struct{}{}:
+					default:
+					}
+				}
+				return err
+			},
+			func(err error) bool { return isUnrecoverableSelfHealthFailure(err, client, registry, nil, nil) },
+			func() error { return rebuildListenerDependencies(client, registry, nil, nil, nil, "", nil) },
+			func() { terminated <- struct{}{} },
+			10*time.Millisecond,
+			3,
+		)
+		close(done)
+	}()
+	select {
+	case <-recovered:
+	case <-terminated:
+		t.Fatal("the monitor terminated instead of rebuilding the interest watcher")
+	case <-time.After(10 * time.Second):
+		t.Fatal("the monitor never rebuilt the interest watcher")
+	}
+	cancel()
+	<-done
+
+	writer := testnats.Connect(t, client.Conn.ConnectedUrl())
+	other, err := store.Open(writer, store.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("open a second registry: %v", err)
+	}
+	t.Cleanup(other.StopWatch)
+	if _, err := other.Upsert(store.Interest{SessionID: "ses_after_rebuild", MachineID: "m1"}, []string{"notifications.rebuilt"}); err != nil {
+		t.Fatalf("write an interest after the rebuild: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if got, err := registry.Get("ses_after_rebuild"); err == nil && slices.Contains(got.Topics, "notifications.rebuilt") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the rebuilt registry's cache never saw an interest written after the rebuild")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// /healthz answers 503 unhealthy, naming the interest watcher, while that watcher is dead, as it
+// does for a dead session or CI watcher. Without that branch the registry's Ping reports the
+// watcher's error as a transient KV failure and /healthz answers 200 degraded over a frozen cache.
+func TestHealthzAnswersUnhealthyWhileTheInterestWatcherIsDead(t *testing.T) {
+	client := setupTestNATS(t)
+	sub, err := startListenerSubscription(client, "listener-healthz-interest", func(msg *natsgo.Msg) { _ = msg.Ack() })
+	if err != nil {
+		t.Fatalf("bind the durable: %v", err)
+	}
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+	registry, err := store.Open(client.Conn, store.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("open interest registry: %v", err)
+	}
+	t.Cleanup(registry.StopWatch)
+	readyCtx, readyCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer readyCancel()
+	if err := registry.WaitForCacheReady(readyCtx); err != nil {
+		t.Fatalf("wait for interest cache: %v", err)
+	}
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{client: client, registry: registry})
+	get := func() (int, map[string]any) {
+		recorder := httptest.NewRecorder()
+		healthzHandler(&state, new(string)).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+		var body map[string]any
+		_ = json.Unmarshal(recorder.Body.Bytes(), &body)
+		return recorder.Code, body
+	}
+	if code, body := get(); code != http.StatusOK || body["status"] != "healthy" {
+		t.Fatalf("before the watcher ends: /healthz = %d %v, want 200 healthy", code, body)
+	}
+
+	endInterestWatcherWhileConnected(t, client, registry)
+	code, body := get()
+	if code != http.StatusServiceUnavailable || body["status"] != "unhealthy" || !strings.Contains(fmt.Sprint(body["error"]), "interest KV watcher") {
+		t.Fatalf("with the interest watcher dead: /healthz = %d %v, want 503 unhealthy naming the interest KV watcher", code, body)
+	}
 }

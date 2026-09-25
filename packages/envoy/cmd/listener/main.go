@@ -316,6 +316,77 @@ func sessionHealthFields(sessions *session.SessionRegistry) map[string]interface
 	}
 }
 
+// healthzHandler is the listener's /healthz. consumer names the durable whose lag it reports; it is
+// empty until the subscription is set up.
+func healthzHandler(deps *atomic.Pointer[listenerDeps], consumer *string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		d := deps.Load()
+		if d == nil {
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "starting"})
+			return
+		}
+		if err := d.client.Conn.FlushTimeout(3 * time.Second); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "unhealthy", "error": "nats unavailable"})
+			return
+		}
+		if !d.client.SubOK() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "unhealthy", "error": "subscription inactive"})
+			return
+		}
+		if d.registry != nil && d.registry.WatchFailed() {
+			writeDependencyHealth(w, "interest KV watcher", errors.New(d.registry.WatchError()), true)
+			return
+		}
+		if d.sessions != nil && d.sessions.WatchFailed() {
+			writeDependencyHealth(w, "session KV watcher", errors.New(d.sessions.WatchError()), true)
+			return
+		}
+		if d.ciStore != nil && d.ciStore.WatchFailed() {
+			writeDependencyHealth(w, "CI KV watcher", errors.New(d.ciStore.WatchError()), true)
+			return
+		}
+		if d.registry != nil {
+			if err := d.registry.Ping(); err != nil {
+				writeDependencyHealth(w, "interest KV", err, errors.Is(err, nats.ErrConnectionClosed))
+				return
+			}
+		}
+		if d.sessions != nil {
+			if err := d.sessions.Ping(); err != nil {
+				writeDependencyHealth(w, "session KV", err, d.sessions.WatchFailed() || errors.Is(err, nats.ErrConnectionClosed))
+				return
+			}
+		}
+		if d.ciStore != nil {
+			if err := d.ciStore.Ping(); err != nil {
+				writeDependencyHealth(w, "CI KV", err, d.ciStore.WatchFailed() || errors.Is(err, nats.ErrConnectionClosed))
+				return
+			}
+		}
+		response := map[string]interface{}{"status": "healthy"}
+		for k, v := range sessionHealthFields(d.sessions) {
+			response[k] = v
+		}
+		if *consumer != "" {
+			consumerInfo, err := d.client.JS().ConsumerInfo(bus.Stream, *consumer)
+			if err != nil {
+				writeDependencyHealth(w, "durable consumer", err, errors.Is(err, nats.ErrConsumerNotFound))
+				return
+			}
+			if consumerInfo != nil {
+				response["num_pending"] = consumerInfo.NumPending
+				response["num_ack_pending"] = consumerInfo.NumAckPending
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(response)
+	}
+}
+
 func writeDependencyHealth(w http.ResponseWriter, dependency string, err error, terminal bool) {
 	statusCode := http.StatusOK
 	status := "degraded"
@@ -418,72 +489,7 @@ func main() {
 	// a terminal watcher, or the durable consumer is unavailable. Transient KV
 	// failures return 200 "degraded" while the monitor and NATS reconnect retry.
 	// Consumer lag metrics are included when available (after subscription setup).
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		d := deps.Load()
-		if d == nil {
-			w.WriteHeader(http.StatusOK)
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "starting"})
-			return
-		}
-		if err := d.client.Conn.FlushTimeout(3 * time.Second); err != nil {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "unhealthy", "error": "nats unavailable"})
-			return
-		}
-		if !d.client.SubOK() {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "unhealthy", "error": "subscription inactive"})
-			return
-		}
-		if d.registry != nil && d.registry.WatchFailed() {
-			writeDependencyHealth(w, "interest KV watcher", errors.New(d.registry.WatchError()), true)
-			return
-		}
-		if d.sessions != nil && d.sessions.WatchFailed() {
-			writeDependencyHealth(w, "session KV watcher", errors.New(d.sessions.WatchError()), true)
-			return
-		}
-		if d.ciStore != nil && d.ciStore.WatchFailed() {
-			writeDependencyHealth(w, "CI KV watcher", errors.New(d.ciStore.WatchError()), true)
-			return
-		}
-		if d.registry != nil {
-			if err := d.registry.Ping(); err != nil {
-				writeDependencyHealth(w, "interest KV", err, errors.Is(err, nats.ErrConnectionClosed))
-				return
-			}
-		}
-		if d.sessions != nil {
-			if err := d.sessions.Ping(); err != nil {
-				writeDependencyHealth(w, "session KV", err, d.sessions.WatchFailed() || errors.Is(err, nats.ErrConnectionClosed))
-				return
-			}
-		}
-		if d.ciStore != nil {
-			if err := d.ciStore.Ping(); err != nil {
-				writeDependencyHealth(w, "CI KV", err, d.ciStore.WatchFailed() || errors.Is(err, nats.ErrConnectionClosed))
-				return
-			}
-		}
-		response := map[string]interface{}{"status": "healthy"}
-		for k, v := range sessionHealthFields(d.sessions) {
-			response[k] = v
-		}
-		if healthzConsumer != "" {
-			consumerInfo, err := d.client.JS().ConsumerInfo(bus.Stream, healthzConsumer)
-			if err != nil {
-				writeDependencyHealth(w, "durable consumer", err, errors.Is(err, nats.ErrConsumerNotFound))
-				return
-			}
-			if consumerInfo != nil {
-				response["num_pending"] = consumerInfo.NumPending
-				response["num_ack_pending"] = consumerInfo.NumAckPending
-			}
-		}
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(response)
-	})
+	mux.HandleFunc("/healthz", healthzHandler(&deps, &healthzConsumer))
 
 	// GaugeFunc for consumer pending — queries NATS at scrape time
 
