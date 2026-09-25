@@ -213,6 +213,10 @@ func rebuildListenerDependencies(
 // NATS reconnects. A terminal watcher, closed KV handle, or missing durable
 // consumer is rebuilt immediately; repeated terminal observations enter the
 // bounded shutdown path so Docker can replace an unrecoverable listener.
+// A probe that lands in a reconnect gap is that transient case: it fails at
+// once with "outbound buffer limit exceeded" while the bus is disconnected (its
+// reconnect buffer is off), or at its deadline when the reconnect lands during
+// the probe. Either is one WARN, then "self-health recovered" from the next.
 func runSelfHealthMonitor(
 	ctx context.Context,
 	logger *logging.Logger,
