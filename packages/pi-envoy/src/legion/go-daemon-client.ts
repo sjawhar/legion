@@ -1,5 +1,8 @@
 import { messageFor } from "@legion/envoy-client/errors";
 import {
+  LegionGoControllerGrantRequest,
+  LegionGoControllerRegisterResponse,
+  type LegionGoControllerRegistration,
   LegionGoEmptyResponse,
   LegionGoErrorResponse,
   LegionGoGateRegisterRequest,
@@ -60,10 +63,16 @@ export interface GoExitInput extends GoReadyInput {
 export interface LegionGoDaemonClient {
   readonly state: () => Promise<LegionGoState>;
   readonly register: (input: GoRegisterInput) => Promise<LegionGoRegistration>;
+  /** The same route, for the operator-launched controller: `bootToken` is the capability `legion
+   * controller start` fetched, and the answer is the controller's registration. */
+  readonly registerController: (input: GoRegisterInput) => Promise<LegionGoControllerRegistration>;
   readonly ready: (input: GoReadyInput) => Promise<void>;
   readonly exit: (input: GoExitInput) => Promise<void>;
   readonly grant: (
     input: z.input<typeof LegionGoGrantRequest>
+  ) => Promise<z.output<typeof LegionGoGrantResponse>>;
+  readonly controllerGrant: (
+    input: z.input<typeof LegionGoControllerGrantRequest>
   ) => Promise<z.output<typeof LegionGoGrantResponse>>;
   readonly githubToken: (
     input: z.input<typeof LegionGoGrantCredentialRequest>
@@ -234,10 +243,14 @@ export function createLegionGoDaemonClient(
     state: () => read("GET", "/legion/v1/state", LegionGoStateResponse),
     register: (input) =>
       read("POST", "/legion/v1/claims/register", LegionGoRegisterResponse, input),
+    registerController: (input) =>
+      read("POST", "/legion/v1/claims/register", LegionGoControllerRegisterResponse, input),
     ready: (input) => acknowledge("/legion/v1/claims/ready", input),
     exit: (input) => acknowledge("/legion/v1/claims/exit", input),
     grant: (input) =>
       post("/legion/v1/grants", LegionGoGrantRequest, LegionGoGrantResponse, input),
+    controllerGrant: (input) =>
+      post("/legion/v1/grants", LegionGoControllerGrantRequest, LegionGoGrantResponse, input),
     githubToken: (input) =>
       post(
         "/legion/v1/gh-token",

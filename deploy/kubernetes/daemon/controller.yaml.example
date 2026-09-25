@@ -23,7 +23,9 @@ dispatch_url: https://dispatch.example
 dispatch_token_file: ./dispatch-token
 # The deployment's standing rules, appended to the controller's system prompt like every pane's.
 instructions: ./instructions.md
-# How Oh My Pi is launched on this machine (defaults: the daemon's pinned `mise x … -- omp`; no prefix).
+# How Oh My Pi is launched on this machine (defaults: no prefix; the TypeScript CLI's invocation is the
+# daemon's pinned `mise x … -- omp`, while the Go CLI holds no pin — set omp_invocation, or set
+# LEGION_OMP_PATH to an absolute omp, and it resolves the invocation as the Go daemon does).
 # omp_invocation: mise x github:sjawhar/oh-my-pi@<version> -- omp
 # omp_launch_prefix: [secrets, ANTHROPIC_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY, --]
 # Where the controller's secret, gh shim, legion launcher, and instructions live

@@ -5126,3 +5126,207 @@ describe("the Go daemon's pane (LEGION_DAEMON_API=go)", () => {
     expect(pane.exits).toEqual([]);
   });
 });
+
+/** The session `legion controller start` launches against the Go daemon: `LEGION_DAEMON_API=go`,
+ * the `LEGION_CONTROLLER` marker, and the controller capability as a 0600 file behind
+ * `LEGION_CONTROLLER_SECRET_FILE` (`packages/daemon-go/cmd/legion/controller.go`). The stub answers
+ * the claim registration with the controller's registration (or `register`), mints grants, and
+ * 404s every other daemon path as the Go daemon's catch-all does. */
+async function goController(options: {
+  readonly sessionId: string;
+  readonly register?: () => Response | Promise<Response>;
+}): Promise<{
+  readonly token: string;
+  readonly registration: Record<string, unknown>;
+  readonly grantFile: string;
+  readonly requests: { readonly path: string; readonly body: unknown }[];
+  readonly exits: number[];
+  readonly tools: RegisteredTool[];
+  readonly handlers: Map<string, Handler>;
+  readonly context: (sessionId: string, sessionFile?: string) => SessionContext;
+}> {
+  const token = "legion-omp-controller";
+  const registration = {
+    claimToken: token,
+    role: "controller",
+    generation: 2,
+    secret: `go-controller-secret-${options.sessionId}`,
+  };
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-go-controller-"));
+  const secretsDir = path.join(stateDir, "secrets");
+  await mkdir(secretsDir, { mode: 0o700 });
+  temporaryPaths.push(stateDir);
+  const capabilityFile = path.join(secretsDir, token);
+  const grantFile = path.join(secretsDir, `${token}-grant`);
+  await writeFile(capabilityFile, "controller-capability\n", { mode: 0o600 });
+  process.env.LEGION_DAEMON_API = "go";
+  process.env.LEGION_CONTROLLER = "1";
+  process.env.LEGION_ROLE = "controller";
+  process.env.LEGION_CONTROLLER_SECRET_FILE = capabilityFile;
+  process.env.LEGION_DAEMON_URL = "http://daemon.test";
+  process.env.ENVOY_URL = "http://envoy.test";
+  process.env.LEGION_PROJECT = "omp";
+  process.env.LEGION_STATE_DIR = stateDir;
+  process.env.LEGION_GRANT_FILE = grantFile;
+
+  const requests: { readonly path: string; readonly body: unknown }[] = [];
+  let grants = 0;
+  globalThis.fetch = (async (input, init) => {
+    const url = new URL(input.toString());
+    const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
+    requests.push({ path: url.pathname, body });
+    if (url.pathname === "/legion/v1/claims/register") {
+      return (await options.register?.()) ?? Response.json(registration);
+    }
+    if (url.pathname === "/legion/v1/grants") {
+      grants += 1;
+      return Response.json({
+        grantId: `go-controller-grant-${grants}`,
+        expiresAt: "2099-01-01T00:00:00Z",
+      });
+    }
+    if (url.pathname.startsWith("/legion/")) {
+      return Response.json({ error: "no route" }, { status: 404 });
+    }
+    if (url.pathname === `/v1/roles/${token}`) {
+      return Response.json({ role: token, holder: options.sessionId, last_seen: 1 });
+    }
+    return Response.json({
+      session_id: body?.session_id ?? options.sessionId,
+      machine_id: "machine",
+      dir: "/tmp/legion-workspace",
+      topics: [token],
+    });
+  }) as typeof fetch;
+
+  const exits: number[] = [];
+  setLegionBootstrapExitForTests((code) => {
+    exits.push(code);
+    throw new Error("process would exit");
+  });
+  const fixture = createPi();
+  legionExtension(fixture.pi);
+  return {
+    token,
+    registration,
+    grantFile,
+    requests,
+    exits,
+    tools: fixture.tools,
+    handlers: fixture.handlers,
+    context: (sessionId, sessionFile = `/tmp/${sessionId}.jsonl`) =>
+      sessionContext(sessionId, sessionFile),
+  };
+}
+
+describe("the Go daemon's operator-launched controller (LEGION_DAEMON_API=go, LEGION_CONTROLLER=1)", () => {
+  test("registers on the claim route with its capability, then claims the controller role, and asks nothing else", async () => {
+    const controller = await goController({ sessionId: "ses_go_controller" });
+    await controller.handlers.get("session_start")?.({}, controller.context("ses_go_controller"));
+
+    expect(daemonRequests(controller.requests)).toEqual([
+      {
+        path: "/legion/v1/claims/register",
+        body: {
+          bootToken: "controller-capability",
+          sessionId: "ses_go_controller",
+          ompSessionFile: "/tmp/ses_go_controller.jsonl",
+          agentId: "ses_go_controller",
+          pluginContract: pkg.legion.goDaemonApiVersion,
+        },
+      },
+    ]);
+    const paths = controller.requests.map((request) => request.path);
+    const roleClaim = controller.requests.findIndex(
+      (request) =>
+        request.path === "/v1/roles/set" &&
+        JSON.stringify(request.body) ===
+          JSON.stringify({ session_id: "ses_go_controller", role: controller.token })
+    );
+    expect(roleClaim).toBeGreaterThan(paths.indexOf("/legion/v1/claims/register"));
+    expect(controller.exits).toEqual([]);
+    // The Go `legion` tool is an architect's and a worker's; the controller does not get it.
+    expect(controller.tools.map((tool) => tool.name)).not.toContain("legion");
+  });
+
+  test("mints a controller grant with its registration secret for every bash command", async () => {
+    const controller = await goController({ sessionId: "ses_go_controller_grant" });
+    const context = controller.context("ses_go_controller_grant");
+    await controller.handlers.get("session_start")?.({}, context);
+    const toolCall = controller.handlers.get("tool_call");
+    if (toolCall === undefined) throw new Error("tool_call handler was not registered");
+
+    await expect(
+      toolCall(
+        {
+          toolName: "bash",
+          toolCallId: "go-controller-bash",
+          input: { command: "legion status LEGSMOKE-3 backlog" },
+        },
+        context
+      )
+    ).resolves.toBeUndefined();
+
+    expect(await grantFileContents(controller.grantFile)).toEqual({
+      grant: "go-controller-grant-1",
+      mode: 0o600,
+    });
+    expect(
+      daemonRequests(controller.requests).filter((request) => request.path === "/legion/v1/grants")
+    ).toEqual([
+      {
+        path: "/legion/v1/grants",
+        body: { sessionId: "ses_go_controller_grant", secret: controller.registration.secret },
+      },
+    ]);
+  });
+
+  test("a session switch in the controller registers the new session", async () => {
+    const controller = await goController({ sessionId: "ses_go_controller_before" });
+    await controller.handlers.get("session_start")?.(
+      {},
+      controller.context("ses_go_controller_before")
+    );
+    await controller.handlers.get("session_switch")?.(
+      {},
+      controller.context("ses_go_controller_after", "/tmp/ses_go_controller_after.jsonl")
+    );
+
+    expect(
+      daemonRequests(controller.requests).map(
+        (request) => (request.body as { sessionId?: string }).sessionId
+      )
+    ).toEqual(["ses_go_controller_before", "ses_go_controller_after"]);
+    expect(daemonRequests(controller.requests).map((request) => request.path)).toEqual([
+      "/legion/v1/claims/register",
+      "/legion/v1/claims/register",
+    ]);
+  });
+
+  test("a refused capability is logged and propagates, and the operator's session is not ended", async () => {
+    const controller = await goController({
+      sessionId: "ses_go_controller_replaced",
+      register: () => Response.json({ error: "Invalid boot token" }, { status: 403 }),
+    });
+
+    const errors: string[] = [];
+    const errorLog = spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      errors.push(args.map(String).join(" "));
+    });
+    try {
+      await expect(
+        controller.handlers.get("session_start")?.(
+          {},
+          controller.context("ses_go_controller_replaced")
+        )
+      ).rejects.toThrow("Invalid boot token");
+    } finally {
+      errorLog.mockRestore();
+    }
+    expect(controller.exits).toEqual([]);
+    expect(errors).toContain(
+      "[legion] claims/register for the controller failed (403): Invalid boot token"
+    );
+    expect(controller.requests.map((request) => request.path)).not.toContain("/v1/roles/set");
+  });
+});

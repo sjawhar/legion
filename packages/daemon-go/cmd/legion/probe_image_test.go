@@ -5,8 +5,11 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/sjawhar/legion/daemon/internal/api"
 )
 
 // imageOmp is an `omp` that passes the image's three probes as a working image's Oh My Pi does:
@@ -28,6 +31,9 @@ esac
 	}
 	return path
 }
+
+// thisBinarysContract is the Go daemon API contract this binary speaks, as a manifest writes it.
+var thisBinarysContract = strconv.Itoa(api.GoDaemonAPIVersion)
 
 // inImage sets this process's environment to the worker image's: a HOME whose `legion` profile
 // links the plugin, its manifest declaring Go contract goContract, and LEGION_OMP_PATH set to omp.
@@ -66,14 +72,14 @@ func probeImage(args ...string) (int, string, string) {
 // this binary speaks and prints the OK line the daemon's probe Sandbox reads.
 func TestProbeImagePrintsTheOKLineWithThisBinarysContract(t *testing.T) {
 	omp := imageOmp(t)
-	inImage(t, "3", omp)
+	inImage(t, thisBinarysContract, omp)
 
 	code, stdout, stderr := probeImage()
 
 	if code != 0 {
 		t.Fatalf("probe-image exited %d: %s", code, stderr)
 	}
-	if want := "probe-image: OK (" + omp + ") session-storage=probed go-daemon-api-version=3\n"; stdout != want {
+	if want := "probe-image: OK (" + omp + ") session-storage=probed go-daemon-api-version=" + thisBinarysContract + "\n"; stdout != want {
 		t.Fatalf("stdout = %q, want %q", stdout, want)
 	}
 }
@@ -96,17 +102,17 @@ func TestProbeImageHoldsThePluginToTheContractItIsAskedFor(t *testing.T) {
 
 func TestProbeImageProbesTheOmpItIsGiven(t *testing.T) {
 	omp := imageOmp(t)
-	inImage(t, "3", "/nonexistent/omp")
+	inImage(t, thisBinarysContract, "/nonexistent/omp")
 
 	code, stdout, stderr := probeImage("--omp", omp)
 
-	if code != 0 || stdout != "probe-image: OK ("+omp+") session-storage=probed go-daemon-api-version=3\n" {
+	if code != 0 || stdout != "probe-image: OK ("+omp+") session-storage=probed go-daemon-api-version="+thisBinarysContract+"\n" {
 		t.Fatalf("probe-image --omp = %d %q %q, want the OK line naming %s", code, stdout, stderr, omp)
 	}
 }
 
 func TestProbeImageRefusesWithoutAnOmpOrAContract(t *testing.T) {
-	inImage(t, "3", "")
+	inImage(t, thisBinarysContract, "")
 	code, _, stderr := probeImage()
 	if code != 1 || !strings.Contains(stderr, "set LEGION_OMP_PATH (or pass --omp) to the OMP executable to probe") {
 		t.Errorf("probe-image with no OMP = %d %q, want exit 1 naming LEGION_OMP_PATH and --omp", code, stderr)

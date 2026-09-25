@@ -463,6 +463,12 @@ func resolveStage3(file fileConfig, configDir string, cfg *Config) error {
 	if file.GitHubApps != nil {
 		cfg.GitHubApps = *file.GitHubApps
 	}
+	// Boot reads the Dispatch bearer through this pointer (internal/daemon/workflow.go bind), so
+	// the file is refused here too, naming the key: `legion start --check-config` never passes a
+	// file `legion start` refuses for it.
+	if file.DispatchURL != nil && cfg.DispatchTokenFile == "" {
+		return errors.New("dispatch_token_file is required when dispatch_url is configured")
+	}
 	if file.Linger != nil {
 		cfg.Linger = *file.Linger
 	}

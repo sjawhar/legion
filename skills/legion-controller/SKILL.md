@@ -59,23 +59,26 @@ command run `/legion-claim-controller` again.
 This handshake lets the daemon redeliver held controller work. It does not turn the controller
 into a state holder: daemon state and the Dispatch project remain authoritative.
 
-### Started by the operator (runtime: kubernetes)
+### Started by the operator
 
-When the daemon runs inside a Kubernetes cluster it cannot open a terminal anywhere, so nobody
-launched your pane: the operator ran `legion controller start --config controller.yaml
-[--daemon-url <port-forward>]` on their own machine, and you are that foreground OMP session.
-The command fetched a fresh controller secret from the daemon with the operator's token, wrote it
-to a 0600 file under `LEGION_STATE_DIR` (`~/.local/state/legion/<project>-controller` by default)
-beside the `gh` shim and the `legion` launcher, and started you with `LEGION_CONTROLLER=1` and
-the same environment a tmux controller pane carries — so the extension claims the role and calls
-`/controller/ready` exactly as under tmux, and nothing changes in how you handle wakes. The
-daemon records you as `controllerLocator: {runtime: "kubernetes", external: true, sessionId,
-registeredAt}` and reads your liveness from the Envoy role registry (the holder of
+When the daemon cannot open a terminal for you — the TypeScript daemon under `runtime: kubernetes`,
+and the Go daemon under either runtime, since it launches no controller — nobody launched your
+pane: the operator ran `legion controller start --config controller.yaml [--daemon-url <url>]` on
+their own machine, and you are that foreground OMP session. The command fetched a fresh controller
+secret from the daemon with the operator's token, wrote it to a 0600 file under `LEGION_STATE_DIR`
+(`~/.local/state/legion/<project>-controller` by default) beside the `gh` shim and the `legion`
+launcher, and started you with `LEGION_CONTROLLER=1` and the same environment a tmux controller pane
+carries, so nothing changes in how you handle wakes. Under the TypeScript daemon the extension
+claims the role and calls `/controller/ready` exactly as under tmux; under the Go daemon
+(`LEGION_DAEMON_API=go` in your environment) it registers on `/legion/v1/claims/register` with the
+secret, then claims the role. The daemon records you as `controllerLocator: {runtime, external:
+true, sessionId, registeredAt}`, `runtime` being the daemon's own (`kubernetes`, or `tmux` under the
+Go daemon). The TypeScript daemon reads your liveness from the Envoy role registry (the holder of
 `legion-<project>-controller` and its `last_seen`), not from a pane: keep the session running.
 Exiting it leaves the project without a controller until the operator runs the command again —
-the daemon logs `controller not registered; run legion controller start` once per boot-timeout
-interval and launches nothing itself. `legion state` and `legion status <KEY> <status>` work here
-over `LEGION_DAEMON_URL` (the port-forward). A second `legion controller start` replaces you: it
+the TypeScript daemon logs `controller not registered; run legion controller start` once per
+boot-timeout interval and launches nothing itself. `legion state` and `legion status <KEY>
+<status>` work here over `LEGION_DAEMON_URL`. A second `legion controller start` replaces you: it
 mints a new secret, so your grants stop working and the role moves to the new session.
 
 ## Deployment instructions

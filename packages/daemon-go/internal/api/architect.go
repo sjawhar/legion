@@ -72,16 +72,6 @@ type SignOffRequest struct {
 // SignOffResponse confirms the sign-off fact committed.
 type SignOffResponse struct{}
 
-func routeFields(w http.ResponseWriter, fields ...field) bool {
-	for _, f := range fields {
-		if strings.TrimSpace(f.value) == "" {
-			writeFailure(w, http.StatusBadRequest, "MISSING_FIELD", f.name+" is required")
-			return false
-		}
-	}
-	return true
-}
-
 func (s *server) architectGrant(w http.ResponseWriter, id string) (credential.Grant, bool) {
 	grant, ok := s.redeem(w, id)
 	if !ok {
@@ -182,7 +172,7 @@ func (s *server) applyFact(w http.ResponseWriter, r *http.Request, eventID strin
 
 func (s *server) gateRegister(w http.ResponseWriter, r *http.Request) {
 	var req GateRegisterRequest
-	if !readBody(w, r, &req) || !routeFields(w,
+	if !readBody(w, r, &req) || !requireFailureFields(w,
 		field{"grantId", req.GrantID},
 		field{"issue", req.Issue},
 		field{"artifactId", req.ArtifactID},
@@ -291,7 +281,7 @@ func (s *server) dispatchIssue(w http.ResponseWriter, r *http.Request, key strin
 
 func (s *server) waveRelease(w http.ResponseWriter, r *http.Request) {
 	var req WaveReleaseRequest
-	if !readBody(w, r, &req) || !routeFields(w, field{"grantId", req.GrantID}) {
+	if !readBody(w, r, &req) || !requireFailureFields(w, field{"grantId", req.GrantID}) {
 		return
 	}
 	grant, ok := s.architectGrant(w, req.GrantID)
@@ -330,7 +320,7 @@ func (s *server) waveRelease(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) phaseBackward(w http.ResponseWriter, r *http.Request) {
 	var req PhaseBackwardRequest
-	if !readBody(w, r, &req) || !routeFields(w,
+	if !readBody(w, r, &req) || !requireFailureFields(w,
 		field{"grantId", req.GrantID},
 		field{"to", string(req.To)},
 		field{"reason", req.Reason},
@@ -351,7 +341,7 @@ func (s *server) phaseBackward(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) phaseRetry(w http.ResponseWriter, r *http.Request) {
 	var req PhaseRetryRequest
-	if !readBody(w, r, &req) || !routeFields(w,
+	if !readBody(w, r, &req) || !requireFailureFields(w,
 		field{"grantId", req.GrantID},
 		field{"issue", req.Issue},
 		field{"decision", string(req.Decision)},
@@ -375,7 +365,7 @@ func (s *server) phaseRetry(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) signOff(w http.ResponseWriter, r *http.Request) {
 	var req SignOffRequest
-	if !readBody(w, r, &req) || !routeFields(w, field{"grantId", req.GrantID}, field{"issue", req.Issue}) {
+	if !readBody(w, r, &req) || !requireFailureFields(w, field{"grantId", req.GrantID}, field{"issue", req.Issue}) {
 		return
 	}
 	if !claim.IsIssueKey(req.Issue) {

@@ -17,14 +17,21 @@ import {
   type LegionControlDirective,
   parseControlDirective,
 } from "../src/legion/control";
-import { createControllerSession } from "../src/legion/controller-session";
+import {
+  createControllerSession,
+  typescriptControllerDaemon,
+} from "../src/legion/controller-session";
 import {
   createLegionDaemonClient,
   LegionDaemonApiError,
   type LegionDaemonClient,
 } from "../src/legion/daemon-client";
 import { writeMintedGrant } from "../src/legion/grant-file";
-import { bootstrapGoClaim, type GoClaimCapability } from "../src/legion/go-bootstrap";
+import {
+  bootstrapGoClaim,
+  type GoClaimCapability,
+  goControllerDaemon,
+} from "../src/legion/go-bootstrap";
 import {
   createLegionGoDaemonClient,
   type LegionGoDaemonClient,
@@ -500,6 +507,8 @@ export default function legionExtension(pi: PiApi): void {
     }
   };
 
+  const typescriptController = typescriptControllerDaemon(rerunReadyAfterRegain, pkg.version);
+  const goController = goControllerDaemon(goRoleDaemon, persistedTranscript);
   const controllerSession = createControllerSession(
     async (context) => {
       const persisted = await persistedTranscript(context);
@@ -510,8 +519,7 @@ export default function legionExtension(pi: PiApi): void {
       return persisted;
     },
     checkSubagentSession,
-    rerunReadyAfterRegain,
-    pkg.version
+    () => (process.env.LEGION_DAEMON_API === "go" ? goController : typescriptController)
   );
 
   const reclaimArchitect = async (): Promise<void> => {
@@ -766,6 +774,12 @@ export default function legionExtension(pi: PiApi): void {
     // an Envoy notice rather than a new assignment, and must find the phase still open.
     phaseStall = restorePhaseStall(context.sessionManager.getBranch?.() ?? []);
     if (process.env.LEGION_DAEMON_API === "go") {
+      // The operator-launched controller registers through the controller session and carries no
+      // Go `legion` tool: its operations are an architect's and a worker's.
+      if (classifySession(process.env).kind === "controller") {
+        await controllerSession.handleSessionStart(context);
+        return;
+      }
       await bootstrapGoClaim(context, {
         capability: () => capability,
         setCapability: (next) => {

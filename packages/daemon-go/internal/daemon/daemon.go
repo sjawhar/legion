@@ -712,6 +712,8 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 			records:      records,
 			supervisor:   s.supervisor,
 			project:      cfg.Project,
+			projectToken: p.project,
+			runtime:      cfg.Runtime.Name,
 			admissionCap: cfg.AdmissionCap,
 			startedAt:    startedAt,
 		},
@@ -720,6 +722,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		BootTokens:        s.tokens,
 		Project:           p.project,
 		OperatorToken:     p.operatorToken,
+		Controller:        st,
 		Log:               s.log,
 		Pool:              st.Pool(),
 		Handlers:          handlers,
@@ -750,12 +753,15 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 }
 
 // source answers the state route out of the daemon's own store: the daemon itself, the cap it
-// admits under, and every claim it supervises, filed under the issue it is on.
+// admits under, every claim it supervises, filed under the issue it is on, and the project's
+// controller.
 type source struct {
 	store        *store.Store
 	records      record.Store
 	supervisor   *supervisor
 	project      string
+	projectToken string
+	runtime      string
 	admissionCap int
 	startedAt    time.Time
 }
@@ -807,6 +813,13 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 		StartedAt:     s.startedAt,
 	}
 	state.Admission.Cap = s.admissionCap
+	controller, found, err := s.store.ControllerTx(ctx, tx, s.projectToken)
+	if err != nil {
+		return api.State{}, err
+	}
+	if found {
+		state.ControllerLocator = api.ControllerLocatorOf(s.runtime, controller)
+	}
 	return state, nil
 }
 

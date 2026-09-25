@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 )
@@ -499,12 +500,14 @@ func TestTheLoadProbeStopsWithTheDaemon(t *testing.T) {
 // before the daemon boots: a refusal records no boot, and a daemon stopped while the gate waits
 // stops cleanly, having served nothing.
 func TestRunGatesThePluginUnderThePaneEnvironmentBeforeItBoots(t *testing.T) {
+	// The daemon holds the plugin to its own GoDaemonAPIVersion.
+	thisDaemons := `{"goDaemonApiVersion":` + strconv.Itoa(api.GoDaemonAPIVersion) + `}`
 	for _, testCase := range []struct {
 		name, legion, step, want string
 	}{
 		{"another contract", `{"goDaemonApiVersion":1}`, "yes", "speaks Go daemon API contract 1"},
-		{"not loaded", contractCurrent, "no", "is installed but not loaded by omp"},
-		{"stopped while the probe runs", contractCurrent, "hang", ""},
+		{"not loaded", thisDaemons, "no", "is installed but not loaded by omp"},
+		{"stopped while the probe runs", thisDaemons, "hang", ""},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			cfg := testConfig(t)

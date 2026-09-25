@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -37,6 +38,10 @@ type Options struct {
 	Project string
 	// OperatorToken is the bearer every operator route compares against; empty admits no one.
 	OperatorToken string
+	// Controller is the project's controller record, which the controller secret route mints,
+	// the claim registration route registers a session on, and the grants route authenticates
+	// the registered session against.
+	Controller ControllerStore
 	// Log receives what the routes decide; nil is slog.Default().
 	Log *slog.Logger
 	// Tokens mints the GitHub App leases credential routes return after redeeming a grant.
@@ -60,14 +65,18 @@ type server struct {
 	project           string
 	operatorSet       bool
 	operatorHash      [sha256.Size]byte
-	tokens            appauth.Tokens
-	githubOwner       string
-	grants            *credential.Grants
-	pool              *pgxpool.Pool
-	handlers          []intake.Handler
-	records           record.Store
-	dispatch          dispatch.Client
-	log               *slog.Logger
+	controller        ControllerStore
+	// controllerMu orders a capability mint against a registration and a controller grant, so a
+	// grant the replaced registration authorised is never recorded after the mint revoked them.
+	controllerMu sync.Mutex
+	tokens       appauth.Tokens
+	githubOwner  string
+	grants       *credential.Grants
+	pool         *pgxpool.Pool
+	handlers     []intake.Handler
+	records      record.Store
+	dispatch     dispatch.Client
+	log          *slog.Logger
 }
 
 // NewServer builds the daemon's HTTP server on bind:port — the configured address only, never
@@ -84,6 +93,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		supervisor:        opts.Supervisor,
 		bootTokens:        opts.BootTokens,
 		project:           opts.Project,
+		controller:        opts.Controller,
 		tokens:            opts.Tokens,
 		githubOwner:       opts.GitHubOwner,
 		grants:            opts.Grants,
@@ -113,6 +123,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 	mux.HandleFunc("POST /legion/v1/claims/ready", s.ready)
 	mux.HandleFunc("POST /legion/v1/claims/exit", s.exit)
 	mux.HandleFunc("POST /legion/v1/grants", s.grant)
+	mux.HandleFunc("POST /legion/v1/controller/secret", s.controllerSecret)
 	mux.HandleFunc("POST /legion/v1/gh-token", s.githubToken)
 	mux.HandleFunc("POST /legion/v1/git-credential", s.gitCredential)
 	mux.HandleFunc("POST /legion/v1/provisioning-credential", s.provisioningCredential)

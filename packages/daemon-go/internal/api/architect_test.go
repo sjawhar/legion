@@ -119,6 +119,7 @@ func newArchitectHarness(t *testing.T, grants *credential.Grants, refusal *intak
 		BootTokens:    h.tokens,
 		Project:       testProject,
 		OperatorToken: testOperatorToken,
+		Controller:    h.store,
 		Grants:        grants,
 		Pool:          h.store.Pool(),
 		Record:        record.NewStore(),

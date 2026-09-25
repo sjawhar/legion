@@ -18,11 +18,12 @@ type RegisterRequest struct {
 // RegisterResponse is what the agent learns about itself: the claim it holds, where it holds it,
 // and the secret its later calls authenticate with. The secret is minted per registration and the
 // capability hash is persisted before the response is written, so a daemon that restarts one
-// instruction later still recognises this agent.
+// instruction later still recognises this agent. The project controller's registration names its
+// role token and RoleController, and carries no tree and no issue.
 type RegisterResponse struct {
 	ClaimToken Token  `json:"claimToken"`
-	Tree       string `json:"tree"`
-	Issue      string `json:"issue"`
+	Tree       string `json:"tree,omitempty"`
+	Issue      string `json:"issue,omitempty"`
 	Role       Role   `json:"role"`
 	Generation uint64 `json:"generation"`
 	Secret     string `json:"secret"`

@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/controller"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
@@ -25,6 +26,30 @@ type State struct {
 	Admission           Admission            `json:"admission"`
 	Issues              map[string]Issue     `json:"issues"` // the issue record, keyed by issue key
 	PendingStatusWrites []PendingStatusWrite `json:"pendingStatusWrites"`
+	// ControllerLocator is the project's controller, absent until a session registers with the
+	// capability `legion controller start` fetched.
+	ControllerLocator *ControllerLocator `json:"controllerLocator,omitempty"`
+}
+
+// ControllerLocator is the external record of the project's controller (LEGION-206 Requirement
+// 11): the operator started it on their own machine, so the daemon has no process of it to
+// address — only the runtime the daemon runs under, the session registered with the current
+// controller capability, and when it registered. It is alive while the Envoy listener names that
+// session as the controller role's holder within the liveness window (`controller.Prober`).
+type ControllerLocator struct {
+	Runtime      string    `json:"runtime"`
+	External     bool      `json:"external"`
+	SessionID    string    `json:"sessionId"`
+	RegisteredAt time.Time `json:"registeredAt"`
+}
+
+// ControllerLocatorOf is record as the state shows it under the runtime runtimeName names: the
+// registered session's external record, or nil while no session holds the current capability.
+func ControllerLocatorOf(runtimeName string, record controller.Record) *ControllerLocator {
+	if !record.Registered() {
+		return nil
+	}
+	return &ControllerLocator{Runtime: runtimeName, External: true, SessionID: record.Session, RegisteredAt: record.RegisteredAt}
 }
 
 // MarshalJSON keeps `issues` an object on the wire: a nil Go map is `null`, which the plugin's

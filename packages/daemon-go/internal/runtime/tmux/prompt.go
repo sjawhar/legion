@@ -22,13 +22,14 @@ func shellPath(value string) string {
 // doubleQuoteEscaper escapes the four characters a shell still interprets inside double quotes.
 var doubleQuoteEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`, `$`, `\$`, "`", "\\`")
 
-// systemPromptArgument is the one `--append-system-prompt` word every pane's OMP receives. OMP's
+// SystemPromptArgument is the one `--append-system-prompt` word every pane's OMP receives, and
+// the operator-launched controller's (`legion controller start`). OMP's
 // flag is last-wins, so every fragment rides a single value, in order: the role prompt files, the
 // addressing text, then the deployment instructions file, separated by a blank line. It is one
 // double-quoted word holding `$(cat <files>)`, so the pane's own shell reads the files — their
 // size and quoting never pass through tmux's argv — and the addressing text is escaped for the
 // double quotes (runtime-tmux.ts:79-103). The caller has checked there is a role prompt.
-func systemPromptArgument(parts runtime.PromptParts) string {
+func SystemPromptArgument(parts runtime.PromptParts) string {
 	quoted := make([]string, len(parts.RolePromptPaths))
 	for i, path := range parts.RolePromptPaths {
 		quoted[i] = shellPath(path)
@@ -64,7 +65,7 @@ func innerCommand(prefix []string, invocation, resumeSessionFile string, parts r
 	if resumeSessionFile != "" {
 		resume = " --resume=" + shellPath(resumeSessionFile)
 	}
-	return WithOmpLaunchPrefix(prefix, invocation) + resume + " --mode rpc " + systemPromptArgument(parts)
+	return WithOmpLaunchPrefix(prefix, invocation) + resume + " --mode rpc " + SystemPromptArgument(parts)
 }
 
 // shimShellCommand is the pane's shell command: PATH exported first, then the workspace, then

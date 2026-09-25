@@ -94,3 +94,30 @@ func TestGrantStillMatchesTheClaimThatMintedIt(t *testing.T) {
 		t.Fatal("StillMatches accepted a claim whose capability changed after the grant was minted")
 	}
 }
+
+// A new controller capability ends every controller grant the previous one minted, and no claim's
+// grant: the incumbent controller's in-flight command loses its credential the moment it is
+// replaced, while the phase workers' commands run on.
+func TestRevokeControllersEndsOnlyControllerGrants(t *testing.T) {
+	grants := New(nil)
+	controller, err := grants.MintController()
+	if err != nil {
+		t.Fatalf("MintController: %v", err)
+	}
+	worker, err := grants.Mint(supervise.Claim{
+		Token: "legion-legion-legion-208-tester", Project: "legion", Tree: "LEGION-208", Issue: "LEGION-208",
+		Role: claim.RoleTester, CapabilityHash: []byte("tester-capability"),
+	})
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+
+	grants.RevokeControllers()
+
+	if _, err := grants.Redeem(controller.ID); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("Redeem of a revoked controller grant = %v, want ErrUnavailable", err)
+	}
+	if _, err := grants.Redeem(worker.ID); err != nil {
+		t.Fatalf("Redeem of a claim grant after the controllers were revoked = %v, want it still served", err)
+	}
+}

@@ -11,9 +11,12 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/credential"
 )
 
-// GrantRequest is a request to mint one short-lived grant. Its session form preserves the shipped
-// route wire shape: a registered pane identifies its session, tree, issue, and capability secret.
-// An empty form is the controller form and must instead carry the operator bearer header.
+// GrantRequest is a request to mint one short-lived grant, in one of three forms. The claim form
+// preserves the shipped route wire shape: a registered pane identifies its session, tree, issue,
+// and capability secret. The controller-session form is the session registered with the current
+// controller capability and its registration secret, with no tree and no issue (the shipped
+// controller form, credentials.ts:26-47). An empty form is the operator's and must instead carry
+// the operator bearer header.
 type GrantRequest struct {
 	SessionID string `json:"sessionId"`
 	Secret    string `json:"secret"`
@@ -55,53 +58,67 @@ func writeFailure(w http.ResponseWriter, status int, code, message string) {
 	writeJSON(w, status, Failure{Code: code, Error: message})
 }
 
+// requireFailureFields refuses the first field that is blank, by its wire name, in the Failure
+// shape every credential and workflow refusal takes. The claim and operator routes refuse with
+// their sentence alone (requireFields).
+func requireFailureFields(w http.ResponseWriter, fields ...field) bool {
+	for _, f := range fields {
+		if strings.TrimSpace(f.value) == "" {
+			writeFailure(w, http.StatusBadRequest, "MISSING_FIELD", f.name+" is required")
+			return false
+		}
+	}
+	return true
+}
+
 func (s *server) grant(w http.ResponseWriter, r *http.Request) {
 	var req GrantRequest
 	if !readBody(w, r, &req) {
 		return
 	}
-	claimForm := req.SessionID != "" || req.Secret != "" || req.Tree != "" || req.Issue != ""
-	if claimForm {
-		if !requireFields(w, field{"sessionId", req.SessionID}, field{"secret", req.Secret}, field{"tree", req.Tree}, field{"issue", req.Issue}) {
-			return
+	switch {
+	case req.Tree != "" || req.Issue != "":
+		if requireFailureFields(w, field{"sessionId", req.SessionID}, field{"secret", req.Secret}, field{"tree", req.Tree}, field{"issue", req.Issue}) {
+			s.claimGrant(w, r, req)
 		}
-		claims, err := s.supervisor.Claims(r.Context())
-		if err != nil {
-			s.log.Error("api: list claims to mint grant", "error", err)
-			writeFailure(w, http.StatusInternalServerError, "GRANT_MINT_FAILED", "could not mint grant")
-			return
+	case req.SessionID != "" || req.Secret != "":
+		if requireFailureFields(w, field{"sessionId", req.SessionID}, field{"secret", req.Secret}) {
+			s.controllerSessionGrant(w, r, req)
 		}
-		for _, current := range claims {
-			if current.Session != req.SessionID || current.Tree != req.Tree || current.Issue != req.Issue {
-				continue
-			}
-			machine, authenticated := s.authenticated(current.Token, req.Secret)
-			if !authenticated {
-				break
-			}
-			grant, err := s.grants.Mint(machine.Claim())
-			if err != nil {
-				s.log.Error("api: mint claim grant", "error", err)
-				writeFailure(w, http.StatusInternalServerError, "GRANT_MINT_FAILED", "could not mint grant")
-				return
-			}
-			writeJSON(w, http.StatusOK, GrantResponse{GrantID: grant.ID, ExpiresAt: grant.ExpiresAt.UTC().Format(timeFormat)})
-			return
-		}
-		writeFailure(w, http.StatusForbidden, "INVALID_SESSION_SECRET", claim.InvalidSecret.Message)
-		return
-	}
-	if !s.operatorAuthorized(r) {
+	case !s.operatorAuthorized(r):
 		writeFailure(w, http.StatusForbidden, "INVALID_OPERATOR_TOKEN", invalidOperatorToken)
-		return
+	default:
+		s.mintControllerGrant(w)
 	}
-	grant, err := s.grants.MintController()
+}
+
+// claimGrant is the claim form: the claim registered as req's session on its tree and issue,
+// proving its registration secret, mints a grant for that claim.
+func (s *server) claimGrant(w http.ResponseWriter, r *http.Request, req GrantRequest) {
+	claims, err := s.supervisor.Claims(r.Context())
 	if err != nil {
-		s.log.Error("api: mint controller grant", "error", err)
+		s.log.Error("api: list claims to mint grant", "error", err)
 		writeFailure(w, http.StatusInternalServerError, "GRANT_MINT_FAILED", "could not mint grant")
 		return
 	}
-	writeJSON(w, http.StatusOK, GrantResponse{GrantID: grant.ID, ExpiresAt: grant.ExpiresAt.UTC().Format(timeFormat)})
+	for _, current := range claims {
+		if current.Session != req.SessionID || current.Tree != req.Tree || current.Issue != req.Issue {
+			continue
+		}
+		machine, authenticated := s.authenticated(current.Token, req.Secret)
+		if !authenticated {
+			break
+		}
+		grant, err := s.grants.Mint(machine.Claim())
+		if err != nil {
+			s.log.Error("api: mint claim grant", "error", err)
+			writeFailure(w, http.StatusInternalServerError, "GRANT_MINT_FAILED", "could not mint grant")
+			return
+		}
+		writeJSON(w, http.StatusOK, GrantResponse{GrantID: grant.ID, ExpiresAt: grant.ExpiresAt.UTC().Format(timeFormat)})
+		return
+	}
+	writeFailure(w, http.StatusForbidden, "INVALID_SESSION_SECRET", claim.InvalidSecret.Message)
 }
 
 const timeFormat = "2006-01-02T15:04:05.999999999Z07:00"
@@ -150,7 +167,7 @@ func (s *server) provisioningCredential(w http.ResponseWriter, r *http.Request) 
 
 func (s *server) redeemRepositoryGrant(w http.ResponseWriter, r *http.Request) (credential.Grant, bool) {
 	var req GrantCredentialRequest
-	if !readBody(w, r, &req) || !requireFields(w, field{"grantId", req.GrantID}) {
+	if !readBody(w, r, &req) || !requireFailureFields(w, field{"grantId", req.GrantID}) {
 		return credential.Grant{}, false
 	}
 	grant, ok := s.redeem(w, req.GrantID)

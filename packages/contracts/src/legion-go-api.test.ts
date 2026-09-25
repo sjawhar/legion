@@ -3,6 +3,9 @@ import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import {
+  LegionGoControllerGrantRequest,
+  LegionGoControllerRegisterResponse,
+  LegionGoControllerSecretResponse,
   LegionGoEmptyResponse,
   LegionGoErrorResponse,
   LegionGoGateRegisterRequest,
@@ -32,6 +35,8 @@ const schemas: Record<string, z.ZodType> = {
   "state.json": LegionGoStateResponse,
   "state-stage3.json": LegionGoStateResponse,
   "register.json": LegionGoRegisterResponse,
+  "register-controller.json": LegionGoControllerRegisterResponse,
+  "controller-secret.json": LegionGoControllerSecretResponse,
   "error.json": LegionGoErrorResponse,
   "operator-claim.json": LegionGoOperatorClaimResponse,
   "operator-claims.json": LegionGoOperatorClaimsResponse,
@@ -74,6 +79,11 @@ test("every Stage 3 workflow request has a strict schema", () => {
       "grant",
       LegionGoGrantRequest,
       { sessionId: "ses_208", secret: "claim-secret", tree: "LEGION-208", issue: "LEGION-209" },
+    ],
+    [
+      "controller grant",
+      LegionGoControllerGrantRequest,
+      { sessionId: "ses_controller", secret: "s" },
     ],
     ["grant credential", LegionGoGrantCredentialRequest, { grantId: "grant-208" }],
     [
@@ -205,4 +215,13 @@ test("a register response without its secret is refused", () => {
   delete mutated.secret;
 
   expect(LegionGoRegisterResponse.safeParse(mutated).success).toBeFalse();
+});
+
+test("a claim's registration and the controller's are told apart by their schemas", () => {
+  const claim = fixture("register.json");
+  const controller = fixture("register-controller.json");
+
+  expect(LegionGoControllerRegisterResponse.safeParse(controller).success).toBeTrue();
+  expect(LegionGoRegisterResponse.safeParse(controller).success).toBeFalse();
+  expect(LegionGoControllerRegisterResponse.safeParse(claim).success).toBeFalse();
 });

@@ -159,12 +159,25 @@ const legionGoAdmission = z.strictObject({
   waiting: z.array(nonEmptyString),
 });
 
-/** `api.State`, the body of `GET /legion/v1/state`. */
+/** `api.ControllerLocator` — the external record of the operator-launched controller: the
+ * runtime the daemon runs under (`tmux` or `kubernetes`, its configured runtime), the session that
+ * registered with the current controller capability, and when. The daemon has no process of it
+ * to address. */
+const legionGoControllerLocator = z.strictObject({
+  runtime: z.enum(["tmux", "kubernetes"]),
+  external: z.literal(true),
+  sessionId: nonEmptyString,
+  registeredAt: timestamp,
+});
+
+/** `api.State`, the body of `GET /legion/v1/state`. `controllerLocator` is absent until a session
+ * registers with the capability `legion controller start` fetched. */
 export const LegionGoStateResponse = z.strictObject({
   daemon: goDaemonInfo,
   admission: legionGoAdmission,
   issues: z.record(z.string(), legionGoIssue),
   pendingStatusWrites: z.array(legionGoPendingStatusWrite),
+  controllerLocator: legionGoControllerLocator.optional(),
 });
 
 export type LegionGoState = z.output<typeof LegionGoStateResponse>;
@@ -182,6 +195,25 @@ export const LegionGoRegisterResponse = z.strictObject({
 });
 
 export type LegionGoRegistration = z.output<typeof LegionGoRegisterResponse>;
+
+/** `claim.RegisterResponse` for a session that registered with the controller capability (the
+ * `bootToken` of `POST /legion/v1/claims/register` is the secret `legion controller start`
+ * fetched): the project's controller role token, the role `controller`, the capability's
+ * generation, and the secret its controller grants authenticate with. No tree, no issue. */
+export const LegionGoControllerRegisterResponse = z.strictObject({
+  claimToken: nonEmptyString,
+  role: z.literal("controller"),
+  generation: z.number().int().positive(),
+  secret: nonEmptyString,
+});
+
+export type LegionGoControllerRegistration = z.output<typeof LegionGoControllerRegisterResponse>;
+
+/** `api.ControllerSecretResponse`, the body of `POST /legion/v1/controller/secret`: the controller
+ * capability the operator's bearer bought. */
+export const LegionGoControllerSecretResponse = z.strictObject({
+  secret: nonEmptyString,
+});
 
 /** Claim routes refuse with only a sentence; credential and workflow routes add a stable code. */
 export const LegionGoErrorResponse = z.union([
@@ -255,6 +287,13 @@ export const LegionGoGrantRequest = z.strictObject({
   secret: nonEmptyString,
   tree: nonEmptyString,
   issue: nonEmptyString,
+});
+
+/** `api.GrantRequest`, the controller-session form: the session registered with the current
+ * controller capability and its registration's secret mint one controller grant. */
+export const LegionGoControllerGrantRequest = z.strictObject({
+  sessionId: nonEmptyString,
+  secret: nonEmptyString,
 });
 
 /** `api.GrantCredentialRequest`, shared by the three grant-redemption routes. */
