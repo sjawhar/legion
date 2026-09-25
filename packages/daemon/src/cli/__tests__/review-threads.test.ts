@@ -449,4 +449,26 @@ describe("legion threads resolve", () => {
     // gh's message reaches the caller once, in the error.
     expect(written).toEqual([]);
   });
+
+  it("--gh in a Legion pane is refused before gh runs, pointing at the grant path", async () => {
+    // A pane's `gh` is `legion gh`, which refuses a GraphQL body it cannot read as a merge: the
+    // pane's way to the rule is its grant, so --gh there is named as the wrong path up front.
+    await expect(
+      cmdThreadsResolve(
+        { repo: "sjawhar/legion", pr: "993", gh: true },
+        {
+          env: { LEGION_GRANT_FILE: "/run/legion/grant" },
+          fetch: noFetch,
+          ...noGh,
+          log: () => undefined,
+        }
+      )
+    ).rejects.toEqual(
+      expect.objectContaining({
+        message:
+          "--gh is for a session outside a Legion pane; this pane names a grant (LEGION_GRANT_FILE), so run legion threads resolve without --gh",
+        code: 1,
+      })
+    );
+  });
 });

@@ -304,13 +304,21 @@ export async function cmdGh(args: string[], deps: GhCommandDeps): Promise<void> 
  * validated before any grant is redeemed. With `gh`, a session outside a Legion pane, which has
  * no grant, applies the same rule through its own `gh` (`ghGraphql`), from any directory: GH_REPO
  * names the repository a routed `gh` would otherwise read from a checkout, and gh's stderr is
- * shown on success too, where the devbox shim names an inherited GH_TOKEN the call acts as. */
+ * shown on success too, since a `gh` that picks its credential per call says there when the call
+ * acts as someone else (an inherited GH_TOKEN, a fallback personal token). `gh` inside a pane is
+ * refused before anything runs: a pane's `gh` is `legion gh`, which refuses a GraphQL body it
+ * cannot read, and the pane has its grant. */
 export async function cmdThreadsResolve(
   options: { repo: string; pr: string; gh?: boolean },
   deps: ThreadsResolveCommandDeps
 ): Promise<void> {
   const repo = parseRepo(options.repo);
   const number = parsePullNumber(options.pr);
+  if (options.gh && deps.env.LEGION_GRANT_FILE !== undefined) {
+    throw new CliError(
+      "--gh is for a session outside a Legion pane; this pane names a grant (LEGION_GRANT_FILE), so run legion threads resolve without --gh"
+    );
+  }
   const graphql = options.gh
     ? ghGraphql(deps.runGh, deps.env, repo, deps.stderr)
     : githubGraphql(

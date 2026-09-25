@@ -98,8 +98,8 @@ export type RunGh = (
  * decides whose credential it uses, with GH_REPO set to the repository, so a `gh` that picks its
  * credential by repository (the devbox shim routes to that owner's GitHub App) authenticates for
  * it from any directory. A non-zero exit rejects with a CliError carrying gh's own message; a
- * successful call hands gh's stderr to `stderr` verbatim, since that is where the devbox shim
- * announces an inherited GH_TOKEN, the identity the call then acts as. */
+ * successful call hands gh's stderr to `stderr` verbatim, since that is where such a `gh` says the
+ * call acts as someone else (an inherited GH_TOKEN, a fallback personal token). */
 export function ghGraphql(
   runGh: RunGh,
   env: NodeJS.ProcessEnv,
