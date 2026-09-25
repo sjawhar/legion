@@ -76,7 +76,8 @@ Command forms, run from the clone with `--ignore-working-copy -R <clone>`:
 - **exact**: `jj log -r 'bookmarks(exact:legion/X)' --no-graph -T 'commit_id ++ "\n"'`
 - **rows**: `jj bookmark list --all-remotes exact:legion/X -T <template>`, the template printing
   `local present <commit>` / `local absent` / `origin tracked|untracked <commit>`, or
-  `conflicted <commit>,<commit>…` from `added_targets` when the row's `conflict` is true
+  `conflicted <adds> <removes>` (each comma-separated, from `added_targets` and `removed_targets`)
+  when the row's `conflict` is true
   (`createWorkspace`'s `BOOKMARK_ROWS` in `packages/workspace/src/workspace.ts`)
 
 | state of `legion/X` | list | present | exact | rows |
@@ -85,9 +86,9 @@ Command forms, run from the clone with `--ignore-working-copy -R <clone>`:
 | only `legion/X1` exists | as missing (positional name is exact, not a prefix) | 0 lines | 0 lines (`exact:` is exact) | no stdout |
 | normal | exit 0, one row `legion/X: <change> <commit> …` | exit 0, **1 line**, the commit id | exit 0, **1 line**, the commit id | `local present <commit>`, plus `origin tracked <commit>` once pushed |
 | local deleted, `@origin` row survives (a `jj bookmark delete`, or a `jj abandon` of its commit) | exit 0, **2 rows**: `legion/X (deleted)` + `  @origin: …`, stderr `Hint: Bookmarks marked as deleted can be *deleted permanently* …` | exit 0, 0 lines | exit 0, 0 lines | `local absent` + `origin tracked <commit>` |
-| conflicted (two targets) | exit 0, **5–6 rows**: `legion/X (conflicted):`, `  - <base>`, `  + <A>`, `  + <B>`, stderr `Hint: Some bookmarks have conflicts …` | **exit 1**, 0 lines, stderr `Error: Name \`legion/X\` is conflicted` + `Hint: Use commit ID to select single revision from: <A>, <B>` + `Hint: Use \`bookmarks(legion/X)\` to select all revisions` | exit 0, **2 lines**, one commit id each | `local conflicted <A>,<B>` |
-| conflicted, one side a deletion (deleted locally, then origin moved to `<B>` and the clone fetched) | `legion/X (conflicted):`, `  - <base> (hidden)`, `  + <B>`, `  @origin: <B>` | stderr `Error: Name \`legion/X\` is conflicted`, its hint naming `<B>` alone | exit 0, **1 line**, `<B>`: **indistinguishable from normal** | `local conflicted <B>` + `origin tracked <B>` |
-| `@origin` row conflicted, no local (two fetches of the clone raced, from the same operation, while origin moved from `<B>` to `<C>`) | no stdout (no local row); the first command after the race prints `Concurrent modification detected, resolving automatically.` | 0 lines | 0 lines | `origin conflicted <B>,<C>`; a template reading `normal_target` there prints `<Error: No value set to Option<Commit>>` (0.45) or `<Error: No Commit available>` (0.44) and **exits 0** |
+| conflicted (two targets) | exit 0, **5–6 rows**: `legion/X (conflicted):`, `  - <base>`, `  + <A>`, `  + <B>`, stderr `Hint: Some bookmarks have conflicts …` | **exit 1**, 0 lines, stderr `Error: Name \`legion/X\` is conflicted` + `Hint: Use commit ID to select single revision from: <A>, <B>` + `Hint: Use \`bookmarks(legion/X)\` to select all revisions` | exit 0, **2 lines**, one commit id each | `local conflicted <A>,<B> <base>` |
+| conflicted, one side a deletion (deleted locally, then origin moved to `<B>` and the clone fetched) | `legion/X (conflicted):`, `  - <base> (hidden)`, `  + <B>`, `  @origin: <B>` | stderr `Error: Name \`legion/X\` is conflicted`, its hint naming `<B>` alone | exit 0, **1 line**, `<B>`: **indistinguishable from normal** | `local conflicted <B> <base>` + `origin tracked <B>` |
+| `@origin` row conflicted, no local (the row at `<A>`, then two fetches of the clone raced from that operation while origin moved to `<B>` and then `<C>`) | no stdout (no local row); the first command after the race prints `Concurrent modification detected, resolving automatically.` | 0 lines | 0 lines | `origin conflicted <B>,<C> <A>`; a template reading `normal_target` there prints `<Error: No value set to Option<Commit>>` (0.45) or `<Error: No Commit available>` (0.44) and **exits 0** |
 
 What that means for a caller that needs "exactly one commit or stop":
 
@@ -233,7 +234,7 @@ git --git-dir=clone/.git push "$PWD/remote" <new commit>:refs/heads/legion/D; jj
 jj -R clone git fetch; OP=$(jj -R clone op log --no-graph -T 'id ++ "\n"' --limit 1)   # row at A
 git --git-dir=clone/.git push --force "$PWD/remote" <B>:refs/heads/legion/R; jj -R clone git fetch
 git --git-dir=clone/.git push --force "$PWD/remote" <C>:refs/heads/legion/R
-jj -R clone --at-op "$OP" git fetch      # the next command reconciles → origin conflicted <B>,<C>
+jj -R clone --at-op "$OP" git fetch      # the next command reconciles → origin conflicted <B>,<C> <A>
 ```
 
 Run the four read forms after each step; compare with the table. The test file's `realJjRig`

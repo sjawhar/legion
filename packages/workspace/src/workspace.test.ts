@@ -148,8 +148,8 @@ function credentialConfigCommands(gitDir: string, helper: string): string[][] {
   ];
 }
 /** The command `createWorkspace` runs before anything else: the bookmark's local row
- * (`present <commit>`, `absent`, or `conflicted <commit>,…`) and its `@origin` row (`tracked` or
- * `untracked <commit>`, or `conflicted <commit>,…`). */
+ * (`present <commit>`, `absent`, or `conflicted <adds> <removes>`) and its `@origin` row
+ * (`tracked` or `untracked <commit>`, or `conflicted <adds> <removes>`). */
 function bookmarkRowsCommand(bookmark: string, repoCloneDir: string): string[] {
   return [
     "jj",
@@ -158,7 +158,7 @@ function bookmarkRowsCommand(bookmark: string, repoCloneDir: string): string[] {
     "--all-remotes",
     `exact:${bookmark}`,
     "-T",
-    'if(remote, if(remote == "origin", "origin " ++ if(conflict, "conflicted " ++ added_targets.map(|c| c.commit_id()).join(","), if(tracked, "tracked ", "untracked ") ++ normal_target.commit_id()) ++ "\n"), "local " ++ if(conflict, "conflicted " ++ added_targets.map(|c| c.commit_id()).join(","), if(present, "present " ++ normal_target.commit_id(), "absent")) ++ "\n")',
+    'if(remote, if(remote == "origin", "origin " ++ if(conflict, "conflicted " ++ added_targets.map(|c| c.commit_id()).join(",") ++ " " ++ removed_targets.map(|c| c.commit_id()).join(","), if(tracked, "tracked ", "untracked ") ++ normal_target.commit_id()) ++ "\n"), "local " ++ if(conflict, "conflicted " ++ added_targets.map(|c| c.commit_id()).join(",") ++ " " ++ removed_targets.map(|c| c.commit_id()).join(","), if(present, "present " ++ normal_target.commit_id(), "absent")) ++ "\n")',
     "--ignore-working-copy",
     "-R",
     repoCloneDir,
@@ -1296,7 +1296,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
           `Bookmark ${bookmark} was deleted in the shared clone ${repoCloneDir} and the deletion never pushed, while ${bookmark}@origin is tracked at ${pushed}; workspace ${workspaceDir} was not created. ` +
             `Restore it: \`jj bookmark set ${bookmark} -r ${bookmark}@origin -R ${repoCloneDir}\`. ` +
             `Cancel the deletion, and the next provisioning adopts origin's branch: \`jj bookmark forget ${bookmark} -R ${repoCloneDir}\`. ` +
-            "Start from main instead: delete the branch on GitHub; the next provisioning starts at main."
+            `Start from main instead: delete the branch on GitHub (the pull request's Delete branch button, or \`gh api -X DELETE repos/acme/widgets/git/refs/heads/${bookmark}\`), and the next provisioning starts at main.`
         );
         expect(
           calls.some((cmd) => cmd[1] === "workspace" && cmd[2] === "add"),
@@ -1362,7 +1362,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
           provisionIssueWorkspace("WIDGETS-42", deps),
           `${name}, attempt ${attempt}`
         ).rejects.toThrow(
-          `Bookmark ${bookmark} is conflicted (${moved}); workspace ${workspaceDir} was not created.`
+          `Bookmark ${bookmark} is conflicted (adds ${moved}; removes ${pushed}); workspace ${workspaceDir} was not created.`
         );
         expect(
           calls.some((cmd) => cmd[1] === "workspace" && cmd[2] === "add"),
@@ -1407,7 +1407,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       };
       // Origin has the branch at A, which the clone knows as an untracked row; origin then moves
       // it to B, and provisioning's fetch will see B.
-      await moveRemote("a");
+      const a = await moveRemote("a");
       await jj(["git", "fetch", "-R", repoCloneDir]);
       const beforeFetch = (
         await jj([
@@ -1446,8 +1446,8 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       // The conflict's two targets, in the order jj merged the two fetches' operations.
       expect(
         [
-          `Remote bookmark ${bookmark}@origin is conflicted (${b}, ${c}); workspace ${workspaceDir} was not created.`,
-          `Remote bookmark ${bookmark}@origin is conflicted (${c}, ${b}); workspace ${workspaceDir} was not created.`,
+          `Remote bookmark ${bookmark}@origin is conflicted (adds ${b}, ${c}; removes ${a}); workspace ${workspaceDir} was not created.`,
+          `Remote bookmark ${bookmark}@origin is conflicted (adds ${c}, ${b}; removes ${a}); workspace ${workspaceDir} was not created.`,
         ],
         name
       ).toContain(refusal);
@@ -1500,11 +1500,15 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
   test("refuses to create a workspace on a conflicted bookmark and leaves no directory behind, on consecutive attempts", async () => {
     for (const { name, command } of JJ_BINARIES) {
       const stateDir = path.join(await temporaryDirectory(), "state");
-      const { repoCloneDir, workspaceDir, calls, jj, deps } = await realJjRig(command, stateDir);
+      const { repoCloneDir, workspaceDir, calls, jj, commitOf, deps } = await realJjRig(
+        command,
+        stateDir
+      );
       const bookmark = "legion/WIDGETS-42";
 
       await provisionIssueWorkspace("WIDGETS-42", deps);
       await jj(["new", "-m", "later work"], { cwd: workspaceDir });
+      const base = await commitOf(bookmark);
       // Two moves of the bookmark from the same operation — one on the main operation line, one
       // `--at-op` the operation before it — which the next command reconciles into a conflict.
       const baseOperation = (
@@ -1550,10 +1554,21 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
 
       for (const attempt of [1, 2]) {
         calls.length = 0;
-        await expect(
-          provisionIssueWorkspace("WIDGETS-42", deps),
-          `${name}, attempt ${attempt}`
-        ).rejects.toThrow(`Bookmark ${bookmark} is conflicted (${conflictedTargets.join(", ")})`);
+        const refusal = await provisionIssueWorkspace("WIDGETS-42", deps).then(
+          () => "provisioning resolved",
+          (error: Error) => error.message
+        );
+        // Both moves are the conflict's adds, in the order jj merged the two operations; the
+        // bookmark's commit before them is what it removes.
+        expect(refusal, `${name}, attempt ${attempt}`).toStartWith(
+          `Bookmark ${bookmark} is conflicted (adds `
+        );
+        for (const target of conflictedTargets) {
+          expect(refusal, `${name}, attempt ${attempt}`).toContain(target);
+        }
+        expect(refusal, `${name}, attempt ${attempt}`).toContain(
+          `; removes ${base}); workspace ${workspaceDir} was not created.`
+        );
         // The resolution is the last command (the settings read — already `false` from the first
         // provisioning, so no write — and the fetch precede it): nothing was added, so nothing
         // exists or is registered for the next resume to adopt.
@@ -1709,6 +1724,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       "19508b7be08e4c3a2b1d0f9e8d7c6b5a49382716",
       "4e4bde478a1d5f6e7a8b9c0d1e2f3a4b5c6d7e8f",
     ];
+    const base = "7c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d";
     const calls: RunCall[] = [];
     await mkdir(path.join(repoCloneDir, ".jj"), { recursive: true });
 
@@ -1724,7 +1740,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
           if (cmd[0] === "jj" && cmd[1] === "bookmark" && cmd[2] === "list") {
             return {
               exitCode: 0,
-              stdout: `local conflicted ${commits[0]},${commits[1]}\n`,
+              stdout: `local conflicted ${commits[0]},${commits[1]} ${base}\n`,
               stderr: "",
             };
           }
@@ -1732,7 +1748,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
         },
       })
     ).rejects.toThrow(
-      `Bookmark legion/WIDGETS-42 is conflicted (${commits[0]}, ${commits[1]}); workspace ${workspaceDir} was not created. Resolve it with \`jj bookmark set legion/WIDGETS-42 -r <commit> -R ${repoCloneDir}\`.`
+      `Bookmark legion/WIDGETS-42 is conflicted (adds ${commits[0]}, ${commits[1]}; removes ${base}); workspace ${workspaceDir} was not created. Resolve it with \`jj bookmark set legion/WIDGETS-42 -r <commit> -R ${repoCloneDir}\`.`
     );
     // The resolution is the last command: no prune, no add, nothing registered for the next
     // resume to adopt.

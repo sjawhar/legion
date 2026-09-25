@@ -57,16 +57,19 @@ not exist. In order:
    - a nonzero exit, or a row the template cannot print (`Bookmark legion/<KEY> could not be
      resolved; workspace <dir> was not created.`);
    - a conflicted local bookmark, including a conflict whose other side is a deletion
-     (`Bookmark legion/<KEY> is conflicted (<id>, <id>); workspace <dir> was not created. Resolve
-     it with \`jj bookmark set legion/<KEY> -r <commit> -R <clone>\`.`);
+     (`Bookmark legion/<KEY> is conflicted (adds <id>, <id>; removes <id>); workspace <dir> was
+     not created. Resolve it with \`jj bookmark set legion/<KEY> -r <commit> -R <clone>\`.`);
    - with no local bookmark, a conflicted origin row, which a fetch racing provisioning's leaves
-     (`Remote bookmark legion/<KEY>@origin is conflicted (<id>, <id>); workspace <dir> was not
-     created.`); the next provisioning's fetch settles it;
+     (`Remote bookmark legion/<KEY>@origin is conflicted (adds <id>, <id>; removes <id>);
+     workspace <dir> was not created.`); the next provisioning's fetch settles it;
    - with no local bookmark, a tracked origin row: a deletion never pushed, from a
      `jj bookmark delete` or a `jj abandon` of the bookmark's commit. The refusal names the tracked
      commit and three ways out: restore it (`jj bookmark set legion/<KEY> -r legion/<KEY>@origin`),
      cancel the deletion so the next provisioning adopts origin's branch
-     (`jj bookmark forget legion/<KEY>`), or start from main by deleting the branch on GitHub.
+     (`jj bookmark forget legion/<KEY>`), or start from main by deleting the branch on GitHub (the
+     pull request's Delete branch button, or
+     `gh api -X DELETE repos/<owner>/<repo>/git/refs/heads/legion/<KEY>`). These are the Go
+     twin's words too.
 
    See the companion table in `jj-bookmark-facts-verified-on-0-44-0-and-0-45-1.md` for why this
    read and not `bookmarks(exact:…)`, `present()` or a bare `jj bookmark list`.
