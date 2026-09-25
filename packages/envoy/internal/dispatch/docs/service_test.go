@@ -369,7 +369,7 @@ func TestAMarkInsideAWordWritesNoVersion(t *testing.T) {
 				t.Fatalf("mark: %v", err)
 			}
 		}
-		result, err := service.SnapshotVersion(ctx, tx, artifactID, alice)
+		result, err := service.SnapshotVersion(ctx, artifactID, alice)
 		if err != nil {
 			t.Fatalf("snapshot: %v", err)
 		}
@@ -864,6 +864,37 @@ func TestBackfillStampsClosedIssueDocument(t *testing.T) {
 	}
 }
 
+// A closed issue's document stays readable: GET /blocks reads it as GET /text does
+// (readDocument), rather than asking the room, whose inject gate refuses a closed issue, and
+// failing the room over that refusal.
+func TestAClosedIssuesDocumentReadsItsBlocksWithoutFailingItsRoom(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "before")
+	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Hour})
+	t.Cleanup(func() {
+		if err := service.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown document service: %v", err)
+		}
+	})
+	seedServiceText(t, service, artifactID, "before")
+	liveTree(t, service, artifactID)
+	if _, err := database.Pool.Exec(context.Background(), `update issues set closed_at = now() where key = 'DOC-1'`); err != nil {
+		t.Fatalf("close document issue: %v", err)
+	}
+	service.SetIssueClosed(context.Background(), "DOC-1", true)
+
+	markdown, blocks, err := service.TextWithBlocks(context.Background(), artifactID)
+	if err != nil {
+		t.Fatalf("read a closed issue's blocks: %v", err)
+	}
+	if markdown != "before\n" || len(blocks) != 1 {
+		t.Fatalf("closed document = %q with %d blocks, want %q with one", markdown, len(blocks), "before\n")
+	}
+	if err := service.roomFailure(artifactID); err != nil {
+		t.Fatalf("reading a closed issue's blocks failed its room: %v", err)
+	}
+}
+
 func TestBackfillDoesNotBypassClosedIssueForConcurrentApplyOps(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
@@ -1211,15 +1242,14 @@ func snapshotAndCommitVersion(t *testing.T, service *Service, artifactID string,
 		t.Fatalf("begin snapshot transaction: %v", err)
 	}
 	defer tx.Rollback(context.Background())
-	versionResult, err := service.SnapshotVersion(context.Background(), tx, artifactID, actor)
-	version := versionResult.Version
-	if err != nil {
+	snapshotCtx, ledger := service.Join(context.Background(), tx)
+	defer ledger.Discard()
+	if _, err := service.SnapshotVersion(snapshotCtx, artifactID, actor); err != nil {
 		t.Fatalf("snapshot version: %v", err)
 	}
-	if err := tx.Commit(context.Background()); err != nil {
+	if err := ledger.Commit(context.Background()); err != nil {
 		t.Fatalf("commit snapshot transaction: %v", err)
 	}
-	service.commitVersion(artifactID, version)
 }
 
 // settleCurrentGeneration runs the room's settlement at its current generation once every live
@@ -1817,13 +1847,6 @@ func (s *Service) recordActor(room string, actor model.Actor) {
 	state.mu.Unlock()
 }
 
-// joined joins document operations to tx the way an API handler does, for a test that commits
-// tx itself.
-func joined(service *Service, tx pgx.Tx) context.Context {
-	ctx, _ := service.Join(context.Background(), tx)
-	return ctx
-}
-
 func seedServiceText(t *testing.T, service *Service, artifactID, markdown string) {
 	t.Helper()
 	tx, err := service.store.Pool.Begin(context.Background())
@@ -1831,10 +1854,12 @@ func seedServiceText(t *testing.T, service *Service, artifactID, markdown string
 		t.Fatalf("begin seed text: %v", err)
 	}
 	defer tx.Rollback(context.Background())
-	if _, err := service.SeedText(context.Background(), tx, artifactID, markdown, model.Actor{Kind: "user", ID: "seed"}); err != nil {
+	seedCtx, ledger := service.Join(context.Background(), tx)
+	defer ledger.Discard()
+	if _, err := service.SeedText(seedCtx, artifactID, markdown, model.Actor{Kind: "user", ID: "seed"}); err != nil {
 		t.Fatalf("seed service text: %v", err)
 	}
-	if err := tx.Commit(context.Background()); err != nil {
+	if err := ledger.Commit(context.Background()); err != nil {
 		t.Fatalf("commit seed text: %v", err)
 	}
 }

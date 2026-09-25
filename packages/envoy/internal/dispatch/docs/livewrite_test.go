@@ -13,7 +13,6 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
-	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
@@ -72,7 +71,7 @@ func TestSettlementBetweenCommitAndPublishWaitsForTheWrite(t *testing.T) {
 	if _, err := service.ApplyOps(joined, artifactID, []model.EditOp{{Op: "replace", Find: "before", With: "after"}}, alice, nil); err != nil {
 		t.Fatalf("apply joined edit: %v", err)
 	}
-	if _, err := service.SnapshotVersion(joined, tx, artifactID, alice); err != nil {
+	if _, err := service.SnapshotVersion(joined, artifactID, alice); err != nil {
 		t.Fatalf("snapshot joined edit: %v", err)
 	}
 	// A browser types while the edit's transaction is open.
@@ -189,7 +188,7 @@ func TestAJoinedWritesVersionNamesItsWriterNotAConnectedBrowser(t *testing.T) {
 	if _, err := service.ApplyOps(joined, artifactID, []model.EditOp{{Op: "replace", Find: "before", With: "during"}}, writer, nil); err != nil {
 		t.Fatalf("apply joined edit: %v", err)
 	}
-	snapshot, err := service.SnapshotVersion(joined, tx, artifactID, writer)
+	snapshot, err := service.SnapshotVersion(joined, artifactID, writer)
 	if err != nil {
 		t.Fatalf("snapshot joined edit: %v", err)
 	}
@@ -210,74 +209,6 @@ func TestAJoinedWritesVersionNamesItsWriterNotAConnectedBrowser(t *testing.T) {
 	version := waitForDocumentVersion(t, service.store, artifactID, 3)
 	if !reflect.DeepEqual(version.Authors, []model.Actor{later}) {
 		t.Fatalf("version 3 authors = %#v, want only %v", version.Authors, later)
-	}
-}
-
-// A write that starts while its room is failing waits for the room to recover and opens on the
-// recovered room, whose settlement it then holds off. A browser types while the write is open;
-// a settlement between the write's commit and its publish must not version that typing past the
-// committed write, which the room does not hold yet.
-func TestAWriteOpenedDuringRoomRecoveryHoldsOffTheRecoveredRoom(t *testing.T) {
-	service, artifactID := newTestService(t)
-	service.settle = time.Hour
-	seedServiceText(t, service, artifactID, "before")
-	ctx := context.Background()
-	if err := service.warmLiveDocument(ctx, artifactID); err != nil {
-		t.Fatalf("load live document: %v", err)
-	}
-	// An outside transaction holds the document's advisory lock, so the failed room's eviction,
-	// which compacts the document, cannot finish until the test releases it.
-	holder, err := service.store.Pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin lock holder: %v", err)
-	}
-	defer holder.Rollback(ctx)
-	if err := lockDocumentRoom(ctx, holder, artifactID); err != nil {
-		t.Fatalf("hold document lock: %v", err)
-	}
-	service.failRoom(artifactID, errors.New("injected room failure"))
-
-	tx, err := service.store.Pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin edit transaction: %v", err)
-	}
-	defer tx.Rollback(ctx)
-	joined, ledger := service.Join(ctx, tx)
-	defer ledger.Discard()
-	edited := make(chan error, 1)
-	go func() {
-		_, err := service.ReplaceText(joined, artifactID, "after", model.Actor{Kind: "user", ID: "alice"})
-		edited <- err
-	}()
-	// Give the edit time to reach the failed room before its eviction can finish.
-	time.Sleep(100 * time.Millisecond)
-	if err := holder.Rollback(ctx); err != nil {
-		t.Fatalf("release document lock: %v", err)
-	}
-	select {
-	case err := <-edited:
-		if err != nil {
-			t.Fatalf("replace text in the transaction: %v", err)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("joined edit did not finish once the room could recover")
-	}
-	editLiveTree(t, service, artifactID, appendBlocks(t, "typed"))
-	if err := ledger.commit(ctx); err != nil {
-		t.Fatalf("commit edit transaction: %v", err)
-	}
-	settleCurrentGeneration(t, service, artifactID)
-	ledger.publish()
-	settleCurrentGeneration(t, service, artifactID)
-
-	var markdown string
-	if err := service.store.Pool.QueryRow(ctx, `
-		select markdown from artifact_versions where artifact_id = $1 order by number desc limit 1
-	`, artifactID).Scan(&markdown); err != nil {
-		t.Fatalf("read latest version: %v", err)
-	}
-	if markdown != "after\n\ntyped\n" {
-		t.Fatalf("latest version = %q, want the committed edit and the browser's paragraph", markdown)
 	}
 }
 
@@ -325,12 +256,13 @@ func (s *failingBrowserAppendStore) AppendUpdateTx(ctx context.Context, tx pgx.T
 	return s.VersionedStore.AppendUpdateTx(ctx, tx, room, update, contentChanged)
 }
 
-// forkBeforeRoomReload opens a joined write whose first operation forks the room while the room
-// holds a browser paragraph, "typed", that is not durable yet. That paragraph's append then
-// fails, and the failed room is evicted and reloaded without it before the write appends its
-// own update. It returns with the write's transaction still open.
-func forkBeforeRoomReload(t *testing.T) (*Service, string, pgx.Tx, context.Context, *Ledger) {
-	t.Helper()
+// A joined write's first operation forks the room while the room holds a browser paragraph,
+// "typed", that is not durable yet. That paragraph's append then fails, and the failed room is
+// evicted and reloaded without it before the write appends its own update. The write's fork
+// still holds the paragraph and its slot is on the failed room, so the write fails at its append
+// rather than versioning or publishing a document the room never held, and its transaction rolls
+// back to the durable document.
+func TestAWriteWhoseRoomReloadsBeforeItsFirstAppendFailsFast(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
 	store := &failingBrowserAppendStore{
@@ -348,9 +280,9 @@ func forkBeforeRoomReload(t *testing.T) (*Service, string, pgx.Tx, context.Conte
 	if err != nil {
 		t.Fatalf("begin transactional edit: %v", err)
 	}
-	t.Cleanup(func() { _ = tx.Rollback(context.Background()) })
+	defer tx.Rollback(ctx)
 	joinedCtx, ledger := service.Join(ctx, tx)
-	t.Cleanup(ledger.Discard)
+	defer ledger.Discard()
 
 	store.failing.Store(true)
 	editLiveTree(t, service, artifactID, appendBlocks(t, "typed"))
@@ -364,45 +296,20 @@ func forkBeforeRoomReload(t *testing.T) (*Service, string, pgx.Tx, context.Conte
 		store.failing.Store(false)
 	}
 	store.beforeTx.Store(&reload)
-	alice := model.Actor{Kind: "user", ID: "alice"}
-	if _, err := service.ApplyOps(joinedCtx, artifactID, []model.EditOp{{Op: "replace", Find: "before", With: "after"}}, alice, nil); err != nil {
-		t.Fatalf("joined edit: %v", err)
+	failsFast(t, "a joined write whose room reloaded before its first append", func() error {
+		_, err := service.ApplyOps(joinedCtx, artifactID, []model.EditOp{{Op: "replace", Find: "before", With: "after"}}, model.Actor{Kind: "user", ID: "alice"}, nil)
+		return err
+	})
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatalf("roll back: %v", err)
 	}
-	return service, artifactID, tx, joinedCtx, ledger
-}
-
-// A write keeps its fork of the room between operations. When the room reloads underneath it,
-// the fork still holds what the failed room had and the reloaded one dropped, so the write must
-// fork again: a version it snapshots is the document its commit publishes.
-func TestAWriteWhoseRoomReloadsSnapshotsTheReloadedDocument(t *testing.T) {
-	service, artifactID, tx, joinedCtx, ledger := forkBeforeRoomReload(t)
-	ctx := context.Background()
-	snapshot, err := service.SnapshotVersion(joinedCtx, tx, artifactID, model.Actor{Kind: "user", ID: "alice"})
-	if err != nil {
-		t.Fatalf("snapshot version: %v", err)
+	ledger.Discard()
+	requireText(t, service, artifactID, "before\n")
+	var latest int
+	if err := database.Pool.QueryRow(ctx, `select max(number) from artifact_versions where artifact_id = $1`, artifactID).Scan(&latest); err != nil {
+		t.Fatalf("read latest version: %v", err)
 	}
-	var versioned string
-	if err := tx.QueryRow(ctx, `select markdown from artifact_versions where artifact_id = $1 and number = $2`, artifactID, snapshot.Version.Number).Scan(&versioned); err != nil {
-		t.Fatalf("read snapshot version: %v", err)
-	}
-	if err := ledger.Commit(ctx); err != nil {
-		t.Fatalf("commit transactional edit: %v", err)
-	}
-	published, err := service.Text(ctx, artifactID)
-	if err != nil {
-		t.Fatalf("read published document: %v", err)
-	}
-	if published != "after\n" || versioned != published {
-		t.Fatalf("version %d = %q, published document = %q, want both %q", snapshot.Version.Number, versioned, published, "after\n")
-	}
-}
-
-// The paragraph the reloaded room dropped is gone for the write too: an edit that quotes it is
-// refused rather than reported applied and lost at the publish.
-func TestAWriteWhoseRoomReloadsCannotEditWhatTheReloadDropped(t *testing.T) {
-	service, artifactID, _, joinedCtx, _ := forkBeforeRoomReload(t)
-	applied, err := service.ApplyOps(joinedCtx, artifactID, []model.EditOp{{Op: "replace", Find: "typed", With: "TYPED"}}, model.Actor{Kind: "user", ID: "alice"}, nil)
-	if !errors.Is(err, pmdoc.ErrTargetNotFound) {
-		t.Fatalf("edit of the dropped paragraph = %#v, %v; want %v", applied, err, pmdoc.ErrTargetNotFound)
+	if latest != 1 {
+		t.Fatalf("latest version = %d, want the seeded version only", latest)
 	}
 }

@@ -73,24 +73,30 @@ as a version's author only for browser edits made while it is connected (`credit
 another browser's as well as its own, since a browser edit cannot be pinned on one connected peer;
 opening a document or an agent's edit credits it nothing, so a reader whose editor changes nothing
 the rendering carries causes no version and cannot stale an approval.
-A handler joins its document
-operations to its transaction with `Docs.Join`, which returns the transaction's ledger
-(`docs/ledger.go`), the only way to give a document operation a
-transaction. A joined operation never writes the room: it runs on the transaction's fork of the
-room's document (`docs/livewrite.go`), appends its update inside the transaction, and reads through
-the same fork. The handler ends the transaction with `ledger.Commit`, which commits, credits the
-writes' actor to their rooms, releases the authors a version the transaction wrote named, and only
-then applies and broadcasts the updates; it defers `ledger.Discard`, so a transaction that does not
+A handler joins its document operations to its transaction with `Docs.Join`, which returns the
+transaction's ledger (`docs/ledger.go`), the only way to give a document operation a transaction:
+`SeedText` and `SnapshotVersion` take theirs from the ledger and refuse a context that was not
+joined. A joined operation never writes the room: it runs on the transaction's fork of the room's
+document (`docs/livewrite.go`), appends its update inside the transaction, and reads through the
+same fork. The handler ends the transaction with `ledger.Commit`, which commits, credits the
+writes' actor to their rooms, releases the authors a version the transaction wrote named, then
+applies and broadcasts the updates, and last publishes the events its document operations
+appended, ahead of the handler's own; it defers `ledger.Discard`, so a transaction that does not
 commit leaves the room, every connected browser, every version and the durable document as they
 were.
+
 While a transaction's write to a document is open it holds that room's writer slot, so another
 transaction's joined operation on the document waits for it to be published or discarded, and it
 holds off the room's settlement, which runs once the write is published or discarded. The docs
 layer takes a document's locks in one order, wherever a handler starts: the owner row
-(`lockArtifactOwner`), then the writer slot, recovering a failed room first, then the advisory lock;
-a joined read takes the owner row before it waits for the slot. The slot is in memory, where
-Postgres cannot see a wait for it, so no transaction may wait for it while holding a lock its holder
-still needs, nor the advisory lock that a failed room's eviction needs to compact.
+(`lockArtifactOwner`), then the writer slot, then the advisory lock; a joined read takes the owner
+row before it waits for the slot. The slot is in memory, where Postgres cannot see a wait for it, so
+no transaction may wait for it while holding a lock its holder still needs. A failed room's eviction
+flushes and compacts under the advisory lock, so no transaction waits for a failed room to recover
+either: a document operation inside a transaction (a handler's, or settlement's own) that meets one
+fails with `ErrServiceUnavailable` (`503 DOC_SERVICE_UNAVAILABLE`), the transaction rolls back, and
+the caller retries once the room has reloaded; so does a write whose room fails before its first
+append, since the reloaded room may lack it.
 
 Successful Dispatch writes on an issue may return top-level `advice` with the issue status, the
 count of session-authored messages/comments/asks since the last human event, and the calling

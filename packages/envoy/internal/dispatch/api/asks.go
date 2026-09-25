@@ -279,7 +279,7 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publishDocumentEvents(ledger, events...)
+	s.publish(events...)
 	WriteJSON(w, http.StatusCreated, withAdvice(ask, advice))
 }
 
@@ -457,7 +457,7 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publishDocumentEvents(ledger, event)
+	s.publish(event)
 	WriteJSON(w, http.StatusOK, ask)
 }
 

@@ -276,7 +276,7 @@ func (s *server) closeAsk(ctx context.Context, id string, actor model.Actor, tra
 	if err := ledger.Commit(ctx); err != nil {
 		return model.Ask{}, err
 	}
-	s.publishDocumentEvents(ledger, events...)
+	s.publish(events...)
 	return ask, nil
 }
 

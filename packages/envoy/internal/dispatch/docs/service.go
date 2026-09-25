@@ -78,6 +78,9 @@ type Service struct {
 	// afterSettleWarm runs after settleRoom has warmed the live document and before it
 	// reads it. Nil outside tests; tests use it to evict the room in that window.
 	afterSettleWarm func(room string)
+	// afterSettleLock runs after settleRoom has taken the document's advisory lock and before
+	// it touches the room. Nil outside tests; tests use it to fail the room in that window.
+	afterSettleLock func(room string)
 	settleWG        sync.WaitGroup
 	// evictWG counts the forced evictions failRoomLocked spawns. They flush the room through
 	// the store, so shutdown joins them before it closes.
@@ -715,7 +718,7 @@ func (s *Service) settleRoom(room string, generation uint64) {
 	generation = state.gen
 	state.mu.Unlock()
 
-	ledger := &Ledger{service: s}
+	ledger := &Ledger{service: s, settling: true}
 	ctx := store.WithTransactionTracking(withLedger(context.Background(), ledger))
 	tx, err := s.store.Pool.Begin(ctx)
 	if err != nil {
@@ -747,6 +750,9 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		}
 		s.retrySettle(room, generation, fmt.Errorf("lock document cursor: %w", err))
 		return
+	}
+	if s.afterSettleLock != nil {
+		s.afterSettleLock(room)
 	}
 	if s.hasPendingUpdates(room) {
 		if s.shuttingDown(room) {
@@ -977,7 +983,7 @@ func (s *Service) settleRoom(room string, generation uint64) {
 			s.retrySettle(room, generation, writeErr)
 			return
 		}
-		published = append(published, ledger.Events()...)
+		published = append(published, ledger.events...)
 		// A document body cites nodes whose rows carry a backlink count, so the version event
 		// names what this settle moved exactly as a message or comment write does.
 		versionEvent := model.Event{
@@ -1343,7 +1349,13 @@ func (s *Service) roomFailure(room string) error {
 	if !ok {
 		return nil
 	}
-	state := value.(*roomState)
+	return value.(*roomState).failure()
+}
+
+// failure is state's own failure as an ErrServiceUnavailable, or nil while it has not failed.
+// Which state a caller asks is the question: the one registered for the room now, or the one a
+// write holds its slot on, which an eviction has replaced.
+func (state *roomState) failure() error {
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	if state.failed == nil {
@@ -1366,6 +1378,12 @@ func (s *Service) roomFailed(room string) bool {
 // awaitRoomRecovery waits for a failed room's forced eviction. Its next caller
 // then reloads the persisted document into a new room state. A room without
 // state has nothing to recover, so this lookup must not allocate one.
+//
+// An operation inside a database transaction does not wait: it fails with
+// ErrServiceUnavailable, and the transaction rolls back. The eviction flushes and
+// compacts the document under its advisory lock, which the transaction may hold,
+// or which a transaction waiting on one of its locks may hold; Postgres cannot see
+// a wait here, so it would never break the cycle.
 func (s *Service) awaitRoomRecovery(ctx context.Context, room string) error {
 	value, ok := s.rooms.Load(room)
 	if !ok {
@@ -1378,6 +1396,9 @@ func (s *Service) awaitRoomRecovery(ctx context.Context, room string) error {
 	state.mu.Unlock()
 	if failure == nil {
 		return nil
+	}
+	if ledgerFrom(ctx).inTransaction() {
+		return fmt.Errorf("%w: %w", ErrServiceUnavailable, failure)
 	}
 	select {
 	case <-done:

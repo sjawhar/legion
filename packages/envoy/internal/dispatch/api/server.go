@@ -560,14 +560,6 @@ func (s *server) publish(events ...model.Event) {
 	}
 }
 
-// publishDocumentEvents publishes the events a committed transaction's document operations
-// appended (ledger.Events), then events. Handlers call it once ledger.Commit has returned, which
-// has already applied the transaction's live document writes to their rooms.
-func (s *server) publishDocumentEvents(ledger *docs.Ledger, events ...model.Event) {
-	s.publish(ledger.Events()...)
-	s.publish(events...)
-}
-
 func (s *server) begin(ctx context.Context) (pgx.Tx, error) {
 	if s.deps.Store == nil || s.deps.Store.Pool == nil {
 		return nil, errorf(http.StatusServiceUnavailable, "DATABASE_UNAVAILABLE", "database unavailable")

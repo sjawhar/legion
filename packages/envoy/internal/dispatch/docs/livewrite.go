@@ -36,9 +36,14 @@ import (
 // failed room's eviction, whose compaction takes that lock, is never held up by a waiter.
 // Durable writers outside a transaction (ygo's persistence worker, compaction) take the advisory
 // lock and then only the foreign-key share lock on the owner row, which the owner lock, `for no
-// key update`, does not block. A write recovers a failed room before it takes the slot, so its
-// slot is on the room state that recovery left: taken on a failed one, it would hold off
-// neither the reloaded room's settlement nor the next write.
+// key update`, does not block.
+//
+// A failed room. Its eviction flushes and compacts the document under the advisory lock, so a
+// transaction never waits for it (awaitRoomRecovery): an operation that meets a failed room
+// fails with ErrServiceUnavailable, and the transaction rolls back. A write whose room fails
+// after it opened fails at its next append, the point from which its advisory lock holds off
+// any eviction until it ends (applyJoined): its slot is on the failed room, which neither the
+// reloaded room's settlement nor its next writer sees.
 //
 // The write's actor, who made its content changes, is credited to the room once the transaction
 // commits (Ledger.Commit), never while it may still roll back.
@@ -78,8 +83,8 @@ func joinedLiveWrite(ctx context.Context, artifactID string) *liveWrite {
 }
 
 // joinLiveWrite returns the transaction's write to artifactID. When the transaction has no write
-// to it yet, it first takes the document's owner row and then, once a failed room has
-// recovered, the writer slot (see liveWrite).
+// to it yet, it first takes the document's owner row, refuses a failed room, and then takes the
+// writer slot (see liveWrite).
 func (s *Service) joinLiveWrite(ctx context.Context, ledger *Ledger, artifactID string) (*liveWrite, error) {
 	if write := ledger.liveWriteFor(artifactID); write != nil {
 		return write, nil
@@ -148,10 +153,12 @@ func (s *Service) awaitLiveWriter(ctx context.Context, artifactID string) error 
 func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, error) {
 	var gained []byte
 	var room *crdt.Doc
+	var incremental bool
 	err := s.srv.Apply(ctx, write.artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
 		room = doc
+		incremental = write.fork != nil && doc == write.forkedFrom
 		var since crdt.StateVector
-		if write.fork != nil && doc == write.forkedFrom {
+		if incremental {
 			since = write.fork.StateVector()
 		}
 		gained = crdt.EncodeStateAsUpdateV1(doc, since)
@@ -159,7 +166,24 @@ func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
 		return nil, err
 	}
-	if write.fork != nil && room == write.forkedFrom {
+	fork, err := buildFork(write, incremental, gained)
+	if err != nil {
+		// A fork an update failed to reach is in an unknown state, and so is the rendering taken
+		// from it: the next operation rebuilds both.
+		write.fork, write.forkedFrom = nil, nil
+		write.dropRendering()
+		return nil, err
+	}
+	write.fork, write.forkedFrom = fork, room
+	return fork, nil
+}
+
+// buildFork brings write's kept fork up to date with gained, what its room gained since the fork
+// was last brought up to date, or, when the fork cannot be kept, builds a new one from gained,
+// the room's whole state, and the transaction's writes. Either way it drops a rendering the
+// fork has moved past.
+func buildFork(write *liveWrite, incremental bool, gained []byte) (*crdt.Doc, error) {
+	if incremental {
 		// Content the room gained moves the fork, so the rendering taken from it no longer
 		// describes the document. What says the fork moved is the fork itself, read on either
 		// side of this one apply: nothing else can be trusted. Two reads of the room are two
@@ -174,8 +198,6 @@ func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 			wasClocks, wasDeletes = write.fork.StateVector(), crdt.DeleteSetFromDoc(write.fork)
 		}
 		if err := crdt.ApplyUpdateV1(write.fork, gained, nil); err != nil {
-			write.fork = nil
-			write.dropRendering()
 			return nil, fmt.Errorf("bring live document fork up to date: %w", err)
 		}
 		if write.tree != nil && !forkHeld(wasClocks, wasDeletes, write.fork) {
@@ -192,8 +214,6 @@ func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 			return nil, fmt.Errorf("fork live document with transaction writes: %w", err)
 		}
 	}
-	write.fork = fork
-	write.forkedFrom = room
 	// A rebuilt fork is a different document from the one the rendering was taken from.
 	write.dropRendering()
 	return fork, nil
