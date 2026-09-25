@@ -410,6 +410,9 @@ func (r *Runtime) probeLog(ctx context.Context, name string) (string, error) {
 	return strings.TrimSpace(string(text)), nil
 }
 
+// undefinedFlag is Go's flag package refusing a flag the probed CLI does not define.
+var undefinedFlag = regexp.MustCompile(`flag provided but not defined: (-\S+)`)
+
 // judge is the verdict a finished probe pod's log gives (judgeProbeLog, worker-image-probe.ts:
 // 470-508). A Failed pod here is one whose probe container exited on its own (kubeletFailure has
 // ruled out the rest): the image's refusal. The OK line must confirm this daemon's contract: an
@@ -420,9 +423,6 @@ func (r *Runtime) probeLog(ctx context.Context, name string) (string, error) {
 // workers run their agents on their models. Given the daemon's role references, an image whose CLI
 // predates the check never gets that far: it stops at the probe command's flags, and its Failed pod
 // is refused naming the flag its CLI lacks.
-// undefinedFlag is Go's flag package refusing a flag the probed CLI does not define.
-var undefinedFlag = regexp.MustCompile(`flag provided but not defined: (-\S+)`)
-
 func (r *Runtime) judge(name, digest string, pod *corev1.Pod, logTail string, contract int) bootprobe.Outcome {
 	if pod.Status.Phase == corev1.PodFailed {
 		ended := ""
