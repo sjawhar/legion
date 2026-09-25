@@ -9,8 +9,9 @@
 #
 # Every pod carries the operator fixture's pod (scripts/e2e/fixtures/operator-route/pod.yml): its
 # model route, overlay, ServiceAccount and projected token. Legion holds none of it. The run
-# creates its own copy of the ConfigMap the fixture mounts, named for the run's project, before the
-# harness runs; the teardown deletes it with the rest of the run's objects.
+# creates its own copy of the ConfigMap the fixture mounts, named for the run's project, and its own
+# providers Secret (legion-<project>-providers, one key provider_keys names), before the harness
+# runs; the teardown deletes both with the rest of the run's objects.
 #
 # Everything the run creates carries its own project label, s4a-<run id>, and lib/namespace-rig.sh
 # owns it: on any exit the teardown deletes by exact name every Sandbox the harness recorded, then
@@ -42,6 +43,7 @@ project_prefix=s4a-
 project="${project_prefix}$(date -u +%Y%m%d%H%M%S)-$(od -An -N2 -tx1 /dev/urandom | tr -d ' \n')"
 fixture=$root/scripts/e2e/fixtures/operator-route
 route_configmap=legion-operator-route-$project
+providers_secret=legion-$project-providers
 record=$work/sandboxes
 check=setup
 torn_down=
@@ -115,6 +117,13 @@ op create configmap "$route_configmap" --from-file=models.yml="$fixture/models.y
   --dry-run=client -o yaml | kubectl label --local -f - "legion.dev/project=$project" -o yaml | op create -f - >/dev/null ||
   fail "the operator could not create ConfigMap $route_configmap"
 note "[operator] ConfigMap $route_configmap: models.yml and overlay.yml from $fixture, label legion.dev/project=$project"
+# The run's providers Secret, named as the runtime names it (ProvidersSecretName), holding one key no
+# model route reads: provider_keys hands it to every agent's Oh My Pi, and provider-key checks where
+# it arrives.
+op create secret generic "$providers_secret" --from-literal=stage4a="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')" \
+  --dry-run=client -o yaml | kubectl label --local -f - "legion.dev/project=$project" -o yaml | op create -f - >/dev/null ||
+  fail "the operator could not create Secret $providers_secret"
+note "[operator] Secret $providers_secret: one key, stage4a (a random value no route reads), label legion.dev/project=$project"
 pass
 
 begin build
