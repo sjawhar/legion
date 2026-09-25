@@ -153,7 +153,8 @@ test("a pointer moved straight from a reference onto its card keeps it open, and
     await act(async () => {});
 
     // A fast pointer crosses no gap: the reference's `pointerout` names the card as its
-    // destination, and React enters the card from that same event, before any close is armed.
+    // destination. Both are the hover zone, so the document listener arms no close, and the
+    // `pointerover` that follows has nothing to cancel.
     fireEvent.pointerOut(first, { pointerType: "mouse", relatedTarget: card });
     fireEvent.pointerOver(card, { pointerType: "mouse", relatedTarget: first });
     act(() => {
