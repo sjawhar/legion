@@ -99,7 +99,11 @@ type LingerClose struct {
 func (LingerClose) OutboxKind() OutboxKind { return OutboxKindLingerClose }
 
 // WorkspaceRemove removes the workspace named by the row's issue.
-type WorkspaceRemove struct{}
+type WorkspaceRemove struct {
+	// Generation is the issue generation whose tree closed. A removal of an earlier generation
+	// finishes without acting: the workspace there is the re-admitted tree's.
+	Generation uint64 `json:"generation"`
+}
 
 func (WorkspaceRemove) OutboxKind() OutboxKind { return OutboxKindWorkspaceRemove }
 

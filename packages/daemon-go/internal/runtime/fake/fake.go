@@ -55,6 +55,8 @@ type ProbeResult struct {
 type Runtime struct {
 	// Launch is what ControllerLaunch answers. NewRuntime sets it to "daemon", the tmux answer.
 	Launch runtime.ControllerLaunch
+	// InPod is what ProvisionsWorkspaces answers: false, the tmux answer, unless a test sets it.
+	InPod bool
 	// Now stamps the observations the fake mints. NewRuntime sets it to time.Now; a test with a
 	// clock of its own replaces it before use.
 	Now func() time.Time
@@ -317,6 +319,12 @@ func (r *Runtime) AdoptWorkingCopy(_ context.Context, loc runtime.Locator, id ru
 	defer r.mu.Unlock()
 	r.calls = append(r.calls, Call{Method: "AdoptWorkingCopy", Locator: loc, Identity: id})
 	return r.failures["AdoptWorkingCopy"]
+}
+
+func (r *Runtime) ProvisionsWorkspaces() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.InPod
 }
 
 func (r *Runtime) ControllerLaunch() runtime.ControllerLaunch {

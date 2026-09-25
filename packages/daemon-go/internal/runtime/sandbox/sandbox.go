@@ -461,6 +461,10 @@ func (r *Runtime) ControllerLaunch() runtime.ControllerLaunch {
 	return runtime.ControllerLaunchOperator
 }
 
+// ProvisionsWorkspaces is true: every pod's init containers provision its claim's workspace on the
+// tree volume, and the tree volume goes with the tree's root claim.
+func (r *Runtime) ProvisionsWorkspaces() bool { return true }
+
 // Suspend stops loc's process and keeps the claim's Sandbox, its Secret, and the tree volume for
 // a later Resume (decision 3b): a shutdown frame when the claim has a live connection, a wait of
 // up to the termination grace for the process to end itself, then `operatingMode: Suspended`, in

@@ -270,6 +270,10 @@ func (r *Runtime) Socket() string { return r.socket }
 // of its own server.
 func (r *Runtime) ControllerLaunch() runtime.ControllerLaunch { return runtime.ControllerLaunchDaemon }
 
+// ProvisionsWorkspaces is false: a pane runs in a workspace the daemon provisioned under its own
+// state directory before the launch.
+func (r *Runtime) ProvisionsWorkspaces() bool { return false }
+
 // result is one tmux invocation's outcome. timedOut is the budget the client was killed at, zero
 // when it returned on its own.
 type result struct {

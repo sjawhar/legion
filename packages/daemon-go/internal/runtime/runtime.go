@@ -83,6 +83,10 @@ type Runtime interface {
 	AdoptWorkingCopy(ctx context.Context, loc Locator, id GitIdentity) error
 	// ControllerLaunch says which side starts the controller under this runtime.
 	ControllerLaunch() ControllerLaunch
+	// ProvisionsWorkspaces is whether the runtime provisions each claim's workspace where its
+	// process runs (a pod's init containers, on the tree volume). When it does, the daemon
+	// provisions and removes none on its own host.
+	ProvisionsWorkspaces() bool
 }
 
 // Known is one claim as a runtime is told of it — each entry of the orphan sweep's known set, and

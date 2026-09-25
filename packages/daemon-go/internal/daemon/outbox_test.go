@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -237,9 +239,15 @@ func TestOutboxLingerAppliesExpirationAndReturnsHandlerFailure(t *testing.T) {
 }
 
 func TestOutboxWorkspaceRemovalUsesDeterministicLocationAndReturnsFailure(t *testing.T) {
-	row := mustOutboxRow(t, "LEGION-208", record.WorkspaceRemove{}, time.Now())
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Done, Generation: 2, Status: "done"}
+	putOutboxIssue(t, pool, records, issue)
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	row := mustOutboxRow(t, issue.Key, record.WorkspaceRemove{Generation: issue.Generation}, time.Now())
 	var removed workspace.Workspace
 	runner := &outbox{
+		pool: pool, records: records, supervisor: sup, log: quietLogger(),
 		stateDir: t.TempDir(),
 		repo:     "acme/widgets",
 		remove: func(_ context.Context, got workspace.Workspace) error {
@@ -983,4 +991,111 @@ func TestAClosedTreeSetBackToTodoRelaunchesItsArchitect(t *testing.T) {
 	if len(resumes) != 1 || resumes[0].Spec.ResumeSessionFile != "/tmp/architect.jsonl" {
 		t.Fatalf("resume calls = %+v, want the kept session relaunched once", resumes)
 	}
+}
+
+// A tree's workspace removal serves the generation whose linger expired. One still waiting out its
+// backoff when the tree is re-admitted finishes without acting: the workspace there now is the next
+// generation's, just provisioned for the relaunched architect.
+func TestAnEarlierGenerationsWorkspaceRemovalLeavesTheReadmittedTreesWorkspace(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	ctx := context.Background()
+	until := time.Now().Add(-time.Minute)
+	root := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Done, Generation: 3, Status: "done", Rank: "U", LingerUntil: &until, LastDispatchSeq: 5}
+	putOutboxIssue(t, pool, records, root)
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	engine := workflow.New(records, workflow.Config{Project: "legion"}, quietLogger())
+	admission := admit.New(records, 2, "legion", quietLogger())
+	clock := time.Now().Add(time.Hour)
+	removals, busy := 0, true
+	runner := &outbox{
+		pool: pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets",
+		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: root.Key, Status: "todo"}}, handlers: []intake.Handler{engine, admission},
+		now: func() time.Time { return clock }, log: quietLogger(),
+		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
+			return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-208"}, nil
+		},
+		remove: func(context.Context, workspace.Workspace) error {
+			removals++
+			if busy {
+				return errors.New("jj workspace forget: the repository is locked")
+			}
+			return nil
+		},
+	}
+	if _, err := intake.ApplyFact(ctx, pool, "outbox", "linger:LEGION-208:3", intake.LingerExpired{Issue: root.Key, Generation: 3}, engine, admission); err != nil {
+		t.Fatalf("apply linger expiry: %v", err)
+	}
+	if err := runner.RunOnce(ctx); err != nil {
+		t.Fatalf("run the linger effects: %v", err)
+	}
+	if removals != 1 || workspaceRemovals(t, pool) != 1 {
+		t.Fatalf("after a failed removal: %d attempts, %d rows, want one attempt and its row waiting", removals, workspaceRemovals(t, pool))
+	}
+
+	busy = false
+	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "todo-again", intake.DispatchIssue{Key: root.Key, Seq: 6, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: root.Rank}, engine, admission); err != nil {
+		t.Fatalf("apply the todo: %v", err)
+	}
+	clock = clock.Add(2 * time.Minute)
+	if err := runner.RunOnce(ctx); err != nil {
+		t.Fatalf("run the re-admission effects: %v", err)
+	}
+	if removals != 1 || workspaceRemovals(t, pool) != 0 {
+		t.Fatalf("after re-admission: %d removal attempts, %d rows, want the first generation's row finished without removing", removals, workspaceRemovals(t, pool))
+	}
+}
+
+// Under a runtime that provisions each claim's workspace in its own pod (C4), the daemon provisions
+// none and removes none: a start spawns the claim with no workspace on the host, a retired claim's
+// relaunch provisions nothing, and a tree's removal row finishes without acting.
+func TestARuntimeThatProvisionsInItsPodsLeavesTheHostWithoutWorkspaces(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	ctx := context.Background()
+	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Planning, Generation: 1, Status: "in_progress"}
+	putOutboxIssue(t, pool, records, issue)
+	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
+	rt.InPod = true
+	provisions, removals := 0, 0
+	runner := &outbox{
+		pool: pool, records: records, supervisor: sup, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets", log: quietLogger(),
+		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
+			provisions++
+			return workspace.Workspace{}, nil
+		},
+		remove: func(context.Context, workspace.Workspace) error { removals++; return nil },
+	}
+
+	start := record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RoleArchitect, Generation: issue.Generation}
+	if err := runner.execute(ctx, mustOutboxRow(t, issue.Key, start, time.Now())); err != nil {
+		t.Fatalf("start the architect: %v", err)
+	}
+	if err := runner.execute(ctx, mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "tree_close", Tree: issue.Tree, Role: claim.RoleArchitect, Generation: issue.Generation}, time.Now())); err != nil {
+		t.Fatalf("close the tree: %v", err)
+	}
+	if err := runner.execute(ctx, mustOutboxRow(t, issue.Key, record.WorkspaceRemove{Generation: issue.Generation}, time.Now())); err != nil {
+		t.Fatalf("remove the workspace: %v", err)
+	}
+	if err := runner.execute(ctx, mustOutboxRow(t, issue.Key, start, time.Now())); err != nil {
+		t.Fatalf("relaunch the retired architect: %v", err)
+	}
+	if launches := len(rt.CallsOf("Spawn")) + len(rt.CallsOf("Resume")); launches != 2 {
+		t.Errorf("the runtime saw %d launches, want the start and the relaunch", launches)
+	}
+	if provisions != 0 || removals != 0 {
+		t.Errorf("the daemon provisioned %d and removed %d host workspaces, want none", provisions, removals)
+	}
+	if _, err := os.Stat(filepath.Join(runner.stateDir, "workspaces")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the state directory has a workspaces directory (%v), want none", err)
+	}
+}
+
+func workspaceRemovals(t *testing.T, pool *pgxpool.Pool) int {
+	t.Helper()
+	var count int
+	if err := pool.QueryRow(context.Background(), `select count(*) from outbox where kind = 'workspace_remove'`).Scan(&count); err != nil {
+		t.Fatalf("count workspace removal rows: %v", err)
+	}
+	return count
 }

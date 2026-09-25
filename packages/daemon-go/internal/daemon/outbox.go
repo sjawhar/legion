@@ -183,7 +183,7 @@ func (r *outbox) execute(ctx context.Context, row record.OutboxRow) error {
 	case record.LingerClose:
 		return r.linger(ctx, row, value)
 	case record.WorkspaceRemove:
-		return r.removeWorkspace(ctx, row)
+		return r.removeWorkspace(ctx, row, value)
 	default:
 		return fmt.Errorf("outbox row %d: no executor for %T", row.ID, payload)
 	}
@@ -357,7 +357,14 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 	}
 }
 
+// podsProvision is whether the runtime provisions each claim's workspace in the claim's own pod
+// (C4): then the daemon provisions and removes none on its host.
+func (r *outbox) podsProvision() bool { return r.supervisor.deps.Runtime.ProvisionsWorkspaces() }
+
 func (r *outbox) provisionWorkspace(ctx context.Context, issue record.Issue) error {
+	if r.podsProvision() {
+		return nil
+	}
 	if r.tokens == nil {
 		return errors.New("supervise executor has no GitHub App token manager")
 	}
@@ -412,9 +419,24 @@ func (r *outbox) linger(ctx context.Context, row record.OutboxRow, payload recor
 	return nil
 }
 
-func (r *outbox) removeWorkspace(ctx context.Context, row record.OutboxRow) error {
+func (r *outbox) removeWorkspace(ctx context.Context, row record.OutboxRow, payload record.WorkspaceRemove) error {
+	if r.supervisor == nil {
+		return errors.New("workspace removal has no claim supervisor")
+	}
+	if r.podsProvision() {
+		return nil
+	}
 	if r.repo == "" {
 		return errors.New("workspace removal has no configured repository")
+	}
+	issue, err := r.issue(ctx, row.Issue)
+	if err != nil {
+		return err
+	}
+	if payload.Generation != issue.Generation {
+		r.log.Info("outbox workspace removal serves an earlier generation; finished without acting", "row", row.ID, "issue", issue.Key,
+			"generation", payload.Generation, "current", issue.Generation)
+		return nil
 	}
 	working, err := workspace.Location(r.stateDir, r.repo, row.Issue)
 	if err != nil {
