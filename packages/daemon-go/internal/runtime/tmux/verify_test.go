@@ -58,6 +58,9 @@ func TestReadPaneLookup(t *testing.T) {
 		{"can't find pane", "%1533", result{stderr: "can't find pane: %1533", exitCode: 1}, paneLookup{status: paneAbsent}},
 		{"no server behind the socket", "%1533", result{stderr: "no server running on /tmp/tmux-1000/legion-omp", exitCode: 1}, paneLookup{status: paneAbsent}},
 		{"a socket never created", "%1533", result{stderr: "error connecting to /tmp/tmux-1000/legion-omp (No such file or directory)", exitCode: 1}, paneLookup{status: paneAbsent}},
+		// tmux's third way of saying the server is gone: it exited while this client's command
+		// ran, which is what a release of the last pane does to a probe just behind it.
+		{"the server exited under the client", "%1533", result{stderr: "server exited unexpectedly", exitCode: 1}, paneLookup{status: paneAbsent}},
 		{
 			"any other exit proves nothing", "%1533",
 			result{stderr: "server not responding", exitCode: 1},
