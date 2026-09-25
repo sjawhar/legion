@@ -25,8 +25,9 @@ var (
 //     a deleted side, which `bookmarks(exact:)` resolves to the other side alone: a local deletion
 //     never pushed and then origin's branch moving, or a local move never pushed and then the
 //     branch deleted on GitHub. The refusal names two ways out: keep an added commit
-//     (`jj bookmark set`, which jj refuses for the removed side or main), or start from main, by
-//     deleting the branch on GitHub when origin has it and `jj bookmark delete` when it does not.
+//     (`jj bookmark set`, which jj refuses for the removed side or main), or start from main with
+//     `jj bookmark delete`, after deleting the branch on GitHub when origin has it: the GitHub
+//     deletion alone leaves the local side in conflict with a deletion when both sides moved.
 //   - A local bookmark on one commit is where the workspace starts, whether or not origin has the
 //     branch yet.
 //   - With no local bookmark, a conflicted origin row is refused: only concurrent fetches leave
@@ -68,7 +69,7 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace) error
 		}
 		fromMain := fmt.Sprintf("`jj bookmark delete %s -R %s`", workspace.Bookmark, cloneDir)
 		if origin.present {
-			fromMain = fmt.Sprintf("delete the branch on GitHub (the pull request's Delete branch button, or `gh api -X DELETE repos/%s/git/refs/heads/%s`)", workspace.Repo, workspace.Bookmark)
+			fromMain = fmt.Sprintf("delete the branch on GitHub (the pull request's Delete branch button, or `gh api -X DELETE repos/%s/git/refs/heads/%s`) and run %s", workspace.Repo, workspace.Bookmark, fromMain)
 		}
 		return fmt.Errorf("Bookmark %s is conflicted %s; workspace %s was not created. Keep %s: `jj bookmark set %s -r %s -R %s`. Start from main instead: %s, and the next provisioning starts at main",
 			workspace.Bookmark, local.sides(), workspace.Dir, keep, workspace.Bookmark, commit, cloneDir, fromMain)

@@ -747,11 +747,12 @@ func codeSpan(t *testing.T, refusal, prefix string) string {
 // githubDelete is how a refusal names deleting an acme/widgets branch on GitHub.
 const githubDelete = "gh api -X DELETE repos/acme/widgets/git/refs/heads/"
 
-// runWayOut runs the refusal's backticked command that starts with prefix, exactly as written, and
-// returns it. A GitHub deletion is GitHub's side of it: the ref the command names leaves the remote.
-func (l lostWorkspace) runWayOut(t *testing.T, refusal, prefix string) string {
+// runWayOut runs the refusal's backticked command that starts with prefix, exactly as written but
+// for a `<commit>` placeholder, which becomes commit, and returns it. A GitHub deletion is GitHub's
+// side of it: the ref the command names leaves the remote.
+func (l lostWorkspace) runWayOut(t *testing.T, refusal, prefix, commit string) string {
 	t.Helper()
-	command := codeSpan(t, refusal, prefix)
+	command := strings.ReplaceAll(codeSpan(t, refusal, prefix), "<commit>", commit)
 	if ref, ok := strings.CutPrefix(command, githubDelete); ok {
 		runSetup(t, l.req.StateDir, "git", "--git-dir="+l.run.remote, "update-ref", "-d", "refs/heads/"+ref)
 	} else {
@@ -789,7 +790,7 @@ func TestProvisionRefusesALocalDeletionNeverPushed(t *testing.T) {
 				}
 			}
 
-			command := l.runWayOut(t, refusal, way.command)
+			command := l.runWayOut(t, refusal, way.command, "")
 			working, err := Provision(context.Background(), l.run, l.req)
 			if err != nil {
 				t.Fatalf("provision after `%s`: %v", command, err)
@@ -809,63 +810,75 @@ func TestProvisionRefusesALocalDeletionNeverPushed(t *testing.T) {
 	}
 }
 
-// A bookmark whose two sides diverged, one of them a deletion, is conflicted after the next fetch,
-// and `bookmarks(exact:)` resolves it to the other side's commit alone: a local deletion never
-// pushed and then origin's branch moving (a human's push, GitHub's Update branch), or a local move
-// never pushed and then the branch deleted on GitHub (a merge). Provisioning refuses the conflict by
-// name, with its sides, every time, before anything is registered, and each of its two ways out,
-// run exactly as the refusal writes it, provisions as it says: keeping the added commit starts
-// there, and starting from main (deleting the branch on GitHub while origin has it, deleting the
-// local bookmark once it does not) starts at main.
-func TestProvisionRefusesAConflictWithADeletedSide(t *testing.T) {
+// A bookmark whose sides diverged is conflicted after the next fetch: a local deletion never pushed
+// and then origin's branch moving (a human's push, GitHub's Update branch), a local move never
+// pushed and then the branch deleted on GitHub (a merge), or a local move never pushed while origin
+// moved. With a deleted side, `bookmarks(exact:)` resolves it to the other side's commit alone.
+// Provisioning refuses the conflict by name, with its sides, every time, before anything is
+// registered, and each of its two ways out, every command of it run in order exactly as the refusal
+// writes it, provisions as it says: keeping an added commit starts there, and starting from main
+// (deleting the branch on GitHub while origin has it, then the local bookmark) starts at main.
+func TestProvisionRefusesALocalConflictAndItsWaysOutHold(t *testing.T) {
+	moveLocally := func(t *testing.T, l lostWorkspace) string {
+		runSetup(t, l.clone, "jj", "new", "--no-edit", l.first.Bookmark, "-m", "never pushed", "--ignore-working-copy")
+		runSetup(t, l.clone, "jj", "bookmark", "set", l.first.Bookmark, "-r", l.first.Bookmark+"+", "--ignore-working-copy")
+		return commitOf(t, l.clone, l.first.Bookmark)
+	}
 	for _, diverge := range []struct {
 		name string
-		// diverges the two sides of l's bookmark, returning the commit that survives as added
-		sides func(t *testing.T, l lostWorkspace) string
-		// fromMain is how the refusal names starting from main in this state
-		fromMain string
+		// diverges the sides of l's bookmark, returning the commit to keep and the refusal's sides
+		sides func(t *testing.T, l lostWorkspace) (string, string)
+		// fromMain is the refusal's commands, in order, that start from main in this state
+		fromMain []string
 	}{
-		{"deleted locally, then origin moved", func(t *testing.T, l lostWorkspace) string {
+		{"deleted locally, then origin moved", func(t *testing.T, l lostWorkspace) (string, string) {
 			runSetup(t, l.clone, "jj", "bookmark", "delete", l.first.Bookmark)
-			return pushRemoteBranch(t, l.run.remote, l.first.Bookmark, "moved.txt")
-		}, githubDelete},
-		{"moved locally, then deleted on GitHub", func(t *testing.T, l lostWorkspace) string {
-			runSetup(t, l.clone, "jj", "new", "--no-edit", l.first.Bookmark, "-m", "never pushed", "--ignore-working-copy")
-			runSetup(t, l.clone, "jj", "bookmark", "set", l.first.Bookmark, "-r", l.first.Bookmark+"+", "--ignore-working-copy")
+			moved := pushRemoteBranch(t, l.run.remote, l.first.Bookmark, "moved.txt")
+			return moved, "(adds " + moved + "; removes " + l.pushed + "), one side a deletion"
+		}, []string{githubDelete, "jj bookmark delete"}},
+		{"moved locally, then deleted on GitHub", func(t *testing.T, l lostWorkspace) (string, string) {
+			local := moveLocally(t, l)
 			runSetup(t, l.req.StateDir, "git", "--git-dir="+l.run.remote, "update-ref", "-d", "refs/heads/"+l.first.Bookmark)
-			return commitOf(t, l.clone, l.first.Bookmark)
-		}, "jj bookmark delete"},
+			return local, "(adds " + local + "; removes " + l.pushed + "), one side a deletion"
+		}, []string{"jj bookmark delete"}},
+		{"moved locally while origin moved", func(t *testing.T, l lostWorkspace) (string, string) {
+			local := moveLocally(t, l)
+			moved := pushRemoteBranch(t, l.run.remote, l.first.Bookmark, "moved.txt")
+			return local, "(adds " + local + ", " + moved + "; removes " + l.pushed + ")"
+		}, []string{githubDelete, "jj bookmark delete"}},
 	} {
 		for _, way := range []struct {
-			name    string
-			command string
-			atAdded bool
+			name     string
+			commands []string
+			atKept   bool
 		}{
-			{"keep the added commit", "jj bookmark set", true},
+			{"keep an added commit", []string{"jj bookmark set"}, true},
 			{"start from main", diverge.fromMain, false},
 		} {
 			t.Run(diverge.name+"/"+way.name, func(t *testing.T) {
 				l := pushedThenLost(t, "pushed.txt")
-				added := diverge.sides(t, l)
+				keep, sides := diverge.sides(t, l)
 				var refusal string
 				for attempt := 1; attempt <= 2; attempt++ {
 					refusal = l.refusedBeforeAnything(t, attempt)
-					want := "Bookmark legion/WIDGETS-42 is conflicted (adds " + added + "; removes " + l.pushed + "), one side a deletion"
-					if !strings.Contains(refusal, want) {
+					if want := "Bookmark legion/WIDGETS-42 is conflicted " + sides + ";"; !strings.Contains(refusal, want) {
 						t.Fatalf("attempt %d: the refusal lacks %q:\n%s", attempt, want, refusal)
 					}
 				}
-				command := l.runWayOut(t, refusal, way.command)
+				var ran []string
+				for _, prefix := range way.commands {
+					ran = append(ran, l.runWayOut(t, refusal, prefix, keep))
+				}
 				working, err := Provision(context.Background(), l.run, l.req)
 				if err != nil {
-					t.Fatalf("provision after `%s`: %v", command, err)
+					t.Fatalf("provision after %q: %v", ran, err)
 				}
 				parent, main := commitOf(t, working.Dir, "@-"), commitOf(t, l.clone, "main@origin")
 				switch {
-				case way.atAdded && parent != added:
-					t.Errorf("after `%s` the workspace's @- is %s, want the added %s", command, parent, added)
-				case !way.atAdded && parent != main:
-					t.Errorf("after `%s` the workspace's @- is %s, want main's %s", command, parent, main)
+				case way.atKept && parent != keep:
+					t.Errorf("after %q the workspace's @- is %s, want the kept %s", ran, parent, keep)
+				case !way.atKept && parent != main:
+					t.Errorf("after %q the workspace's @- is %s, want main's %s", ran, parent, main)
 				}
 			})
 		}
