@@ -64,17 +64,11 @@ type listenerCache struct {
 // listenerCaches lists the caches the listener keeps. It is the one place that names them, so
 // rewatch, self-health, /healthz and shutdown each reach every cache.
 func listenerCaches(registry *store.Registry, sessions *session.SessionRegistry, ciStore *cistore.Store) []listenerCache {
-	var caches []listenerCache
-	if registry != nil {
-		caches = append(caches, listenerCache{name: "interest", cache: registry})
+	return []listenerCache{
+		{name: "interest", cache: registry},
+		{name: "session", cache: sessions},
+		{name: "CI", cache: ciStore},
 	}
-	if sessions != nil {
-		caches = append(caches, listenerCache{name: "session", cache: sessions})
-	}
-	if ciStore != nil {
-		caches = append(caches, listenerCache{name: "CI", cache: ciStore})
-	}
-	return caches
 }
 
 func newCIRecorder(deps *atomic.Pointer[listenerDeps]) webhook.CIRecorderFuncs {
@@ -360,7 +354,7 @@ func runSelfHealthMonitor(
 func checkSelfHealth(caches []listenerCache, durable func() error) error {
 	for _, c := range caches {
 		if err := c.cache.Ping(); err != nil {
-			return fmt.Errorf("%s kv: %w", strings.ToLower(c.name), err)
+			return fmt.Errorf("%s kv: %w", c.name, err)
 		}
 	}
 	if durable != nil {

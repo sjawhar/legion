@@ -185,30 +185,6 @@ func TestSessionRegistry_Delete(t *testing.T) {
 	}
 }
 
-func TestSessionRegistry_NilPutReturnsErrNoKV(t *testing.T) {
-	var reg *SessionRegistry
-	err := reg.Put("ses_test", SessionEntry{Port: 1234})
-	if err != ErrNoKV {
-		t.Fatalf("expected ErrNoKV, got: %v", err)
-	}
-}
-
-func TestSessionRegistry_NilGetReturnsErrNoKV(t *testing.T) {
-	var reg *SessionRegistry
-	_, err := reg.Get("ses_test")
-	if err != ErrNoKV {
-		t.Fatalf("expected ErrNoKV, got: %v", err)
-	}
-}
-
-func TestSessionRegistry_NilDeleteReturnsErrNoKV(t *testing.T) {
-	var reg *SessionRegistry
-	err := reg.Delete("ses_test")
-	if err != ErrNoKV {
-		t.Fatalf("expected ErrNoKV, got: %v", err)
-	}
-}
-
 func TestSessionRegistry_Ping_Healthy(t *testing.T) {
 	client := setupNATS(t)
 	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))
@@ -236,13 +212,6 @@ func TestSessionRegistry_Ping_ClosedConnReturnsError(t *testing.T) {
 
 	if err := reg.Ping(); err == nil {
 		t.Fatal("Ping after conn close should return error")
-	}
-}
-
-func TestSessionRegistry_Ping_NilReceiver(t *testing.T) {
-	var reg *SessionRegistry
-	if err := reg.Ping(); err != ErrNoKV {
-		t.Fatalf("expected ErrNoKV, got %v", err)
 	}
 }
 

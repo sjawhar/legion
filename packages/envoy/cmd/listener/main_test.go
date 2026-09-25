@@ -3504,7 +3504,7 @@ func TestCheckSelfHealth_HealthyReturnsNil(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open session registry: %v", err)
 	}
-	if err := checkSelfHealth(listenerCaches(registry, sessions, nil), nil); err != nil {
+	if err := checkSelfHealth([]listenerCache{{name: "interest", cache: registry}, {name: "session", cache: sessions}}, nil); err != nil {
 		t.Fatalf("healthy probe should not error: %v", err)
 	}
 }
@@ -3524,7 +3524,7 @@ func TestCheckSelfHealth_ClosedConnReturnsError(t *testing.T) {
 
 	client.Close()
 
-	if err := checkSelfHealth(listenerCaches(registry, sessions, nil), nil); err == nil {
+	if err := checkSelfHealth([]listenerCache{{name: "interest", cache: registry}, {name: "session", cache: sessions}}, nil); err == nil {
 		t.Fatal("probe after conn close should return error")
 	}
 }
@@ -3607,7 +3607,9 @@ func TestRunSelfHealthMonitor_MovesADeadInterestRegistryToTheLiveConnection(t *t
 	monitorUntilRecovered(t, "the registry on the live connection", 5*time.Second, time.Millisecond,
 		registry.Ping,
 		func(err error) bool { return errors.Is(err, natsgo.ErrConnectionClosed) },
-		func() error { return rewatchListenerKVWatchers(client.Conn, listenerCaches(registry, nil, nil)) },
+		func() error {
+			return rewatchListenerKVWatchers(client.Conn, []listenerCache{{name: "interest", cache: registry}})
+		},
 	)
 
 	writer := testnats.Connect(t, client.Conn.ConnectedUrl())
@@ -3667,11 +3669,11 @@ func TestRunSelfHealthMonitor_RebuildsTerminalWatcher(t *testing.T) {
 	monitorUntilRecovered(t, "the session watcher", 5*time.Second, time.Millisecond,
 		sessions.Ping,
 		func(err error) bool {
-			return isUnrecoverableSelfHealthFailure(err, client, listenerCaches(nil, sessions, nil))
+			return isUnrecoverableSelfHealthFailure(err, client, []listenerCache{{name: "session", cache: sessions}})
 		},
 		func() error {
 			rebuilds.Add(1)
-			return rewatchListenerKVWatchers(client.Conn, listenerCaches(nil, sessions, nil))
+			return rewatchListenerKVWatchers(client.Conn, []listenerCache{{name: "session", cache: sessions}})
 		},
 	)
 	if got := rebuilds.Load(); got != 1 {
@@ -3832,12 +3834,12 @@ func TestSelfHealthRebuildsAnInterestWatcherThatEndedWhileConnected(t *testing.T
 	}
 
 	monitorUntilRecovered(t, "the interest watcher", 10*time.Second, 10*time.Millisecond,
-		func() error { return checkSelfHealth(listenerCaches(registry, nil, nil), nil) },
+		func() error { return checkSelfHealth([]listenerCache{{name: "interest", cache: registry}}, nil) },
 		func(err error) bool {
-			return isUnrecoverableSelfHealthFailure(err, client, listenerCaches(registry, nil, nil))
+			return isUnrecoverableSelfHealthFailure(err, client, []listenerCache{{name: "interest", cache: registry}})
 		},
 		func() error {
-			return rebuildListenerDependencies(client, listenerCaches(registry, nil, nil), nil, "", nil)
+			return rebuildListenerDependencies(client, []listenerCache{{name: "interest", cache: registry}}, nil, "", nil)
 		},
 	)
 
@@ -3881,7 +3883,7 @@ func TestHealthzAnswersUnhealthyWhileTheInterestWatcherIsDead(t *testing.T) {
 		t.Fatalf("wait for interest cache: %v", err)
 	}
 	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: client, registry: registry, caches: listenerCaches(registry, nil, nil), consumer: "listener-healthz-interest"})
+	state.Store(&listenerDeps{client: client, registry: registry, caches: []listenerCache{{name: "interest", cache: registry}}, consumer: "listener-healthz-interest"})
 	get := func() (int, map[string]any) {
 		recorder := httptest.NewRecorder()
 		healthzHandler(&state).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/healthz", nil))

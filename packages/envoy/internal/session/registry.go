@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"sort"
 	"sync"
@@ -137,9 +136,6 @@ func OpenSessionRegistry(conn *nats.Conn, options ...SessionRegistryOption) (*Se
 // expired diagnostic last-seen timestamps on every monitor cycle. A dead watcher
 // is reported so /healthz exposes the stale cache while NATS reconnects.
 func (r *SessionRegistry) Ping() error {
-	if r == nil {
-		return ErrNoKV
-	}
 	if err := r.watcher.Check(); err != nil {
 		return err
 	}
@@ -148,9 +144,6 @@ func (r *SessionRegistry) Ping() error {
 	r.mu.Unlock()
 	return r.watcher.Err()
 }
-
-// ErrNoKV is returned when methods are called on a nil SessionRegistry.
-var ErrNoKV = fmt.Errorf("session registry: KV unavailable")
 
 // Rewatch moves the cache's watcher and the handle the registry writes through to conn
 // (kvwatch.Watcher.Rewatch).
@@ -214,9 +207,6 @@ func (r *SessionRegistry) WaitForCacheReady(ctx context.Context) error {
 
 // TTL returns the liveness window configured by the backing session bucket.
 func (r *SessionRegistry) TTL() time.Duration {
-	if r == nil {
-		return 0
-	}
 	return r.ttl
 }
 
@@ -229,9 +219,6 @@ func (r *SessionRegistry) CacheReady() bool {
 // CacheSize returns the number of cached sessions. Observability only; reports
 // the raw count without pruning expired-but-not-yet-read entries.
 func (r *SessionRegistry) CacheSize() int {
-	if r == nil {
-		return 0
-	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return len(r.cache)
@@ -244,9 +231,6 @@ func (r *SessionRegistry) WatchErr() error {
 }
 
 func (r *SessionRegistry) Put(sessionID string, entry SessionEntry) error {
-	if r == nil {
-		return ErrNoKV
-	}
 	// Several live processes can hold the same session (shared on-disk state), and
 	// blind last-writer-wins routed deliveries to whichever heartbeated last —
 	// including processes not driving the session. mergeForClaim arbitrates.
@@ -270,9 +254,6 @@ func (r *SessionRegistry) Put(sessionID string, entry SessionEntry) error {
 }
 
 func (r *SessionRegistry) Get(sessionID string) (SessionEntry, error) {
-	if r == nil {
-		return SessionEntry{}, ErrNoKV
-	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.pruneLocked(time.Now())
@@ -287,9 +268,6 @@ func (r *SessionRegistry) Get(sessionID string) (SessionEntry, error) {
 // heartbeat time. It is retained for one additional registry TTL so callers
 // can report why an otherwise durable reference stopped resolving.
 func (r *SessionRegistry) LastSeen(sessionID string) int64 {
-	if r == nil {
-		return 0
-	}
 	now := time.Now()
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -301,9 +279,6 @@ func (r *SessionRegistry) LastSeen(sessionID string) int64 {
 	return entry.lastSeen
 }
 func (r *SessionRegistry) Delete(sessionID string) error {
-	if r == nil {
-		return ErrNoKV
-	}
 	revision := r.cachedRevision(sessionID)
 	kv := r.watcher.KV()
 	entry, err := kv.Get(sessionID)
@@ -357,9 +332,6 @@ type ListEntry struct {
 // their local TTL. Cache-only: no JetStream round-trips, so it can't hang on a
 // slow KV leader the way the old Keys()+per-key Get() loop did.
 func (r *SessionRegistry) List() ([]ListEntry, error) {
-	if r == nil {
-		return nil, ErrNoKV
-	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.pruneLocked(time.Now())
