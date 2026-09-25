@@ -69,6 +69,20 @@ func bucket(t *testing.T, uri string) (*natsgo.Conn, natsgo.KeyValue) {
 	return conn, kv
 }
 
+// consumers counts the consumers on the test bucket's stream: each armed watcher adds one.
+func consumers(t *testing.T, conn *natsgo.Conn) int {
+	t.Helper()
+	js, err := conn.JetStream()
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	info, err := js.StreamInfo("KV_kvwatch-test")
+	if err != nil {
+		t.Fatalf("stream info: %v", err)
+	}
+	return info.State.Consumers
+}
+
 func eventually(t *testing.T, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -387,17 +401,6 @@ func TestAReplacedWatchersBufferedEntryIsDropped(t *testing.T) {
 	uri := testnats.URL(t)
 	firstConn, kv := bucket(t, uri)
 	secondConn, _ := bucket(t, uri)
-	js, err := firstConn.JetStream()
-	if err != nil {
-		t.Fatalf("jetstream: %v", err)
-	}
-	consumers := func() int {
-		info, err := js.StreamInfo("KV_kvwatch-test")
-		if err != nil {
-			t.Fatalf("stream info: %v", err)
-		}
-		return info.State.Consumers
-	}
 
 	var mu sync.Mutex
 	counts := map[string]int{}
@@ -454,13 +457,13 @@ func TestAReplacedWatchersBufferedEntryIsDropped(t *testing.T) {
 	}
 	// The keys wait in the first watcher's updates while its apply of late1 is held.
 	time.Sleep(300 * time.Millisecond)
-	before := consumers()
+	before := consumers(t, firstConn)
 	rewatched := make(chan error, 1)
 	go func() {
 		err := w.Rewatch(secondConn)
 		rewatched <- err
 	}()
-	eventually(t, "the Rewatch's watcher", func() bool { return consumers() > before })
+	eventually(t, "the Rewatch's watcher", func() bool { return consumers(t, firstConn) > before })
 	time.Sleep(300 * time.Millisecond)
 	releaseApply()
 	select {
@@ -758,8 +761,10 @@ func TestAReplacedWatchersSentinelDoesNotReleaseReadiness(t *testing.T) {
 		}
 	}
 	liveConn, _ := bucket(t, uri)
+	before := consumers(t, liveConn)
 	done := make(chan error, 1)
 	go func() { done <- w.Rewatch(liveConn) }()
+	eventually(t, "the Rewatch's watcher", func() bool { return consumers(t, liveConn) > before })
 	time.Sleep(300 * time.Millisecond)
 	slow.Store(true)
 	releaseOnce.Do(func() { close(release) })
@@ -783,62 +788,29 @@ func TestARewatchOntoABucketRestoredWithAnOlderStreamRefillsTheCache(t *testing.
 	t.Cleanup(conn.Close)
 	js, err := conn.JetStream()
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("jetstream: %v", err)
 	}
 	const stream = "KV_kvwatch-test"
 	old, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: "kvwatch-test"})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("create the first bucket: %v", err)
 	}
 	if _, err := old.Put("restored-key", []byte("1")); err != nil {
-		t.Fatal(err)
+		t.Fatalf("put restored-key: %v", err)
 	}
-
-	// Snapshot the stream.
-	inbox := natsgo.NewInbox()
-	chunks, err := conn.SubscribeSync(inbox)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req, _ := json.Marshal(map[string]any{"deliver_subject": inbox, "no_consumers": true})
-	msg, err := conn.Request("$JS.API.STREAM.SNAPSHOT."+stream, req, 5*time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var snap struct {
-		Config json.RawMessage               `json:"config"`
-		State  json.RawMessage               `json:"state"`
-		Error  *struct{ Description string } `json:"error"`
-	}
-	if err := json.Unmarshal(msg.Data, &snap); err != nil || snap.Error != nil {
-		t.Fatalf("snapshot: %v %s", err, msg.Data)
-	}
-	var data [][]byte
-	for {
-		m, err := chunks.NextMsg(5 * time.Second)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(m.Data) == 0 {
-			break
-		}
-		data = append(data, append([]byte(nil), m.Data...))
-		if m.Reply != "" {
-			_ = conn.Publish(m.Reply, nil)
-		}
-	}
+	snap := snapshotStream(t, conn, stream)
 
 	// Delete and create the bucket again: a newer stream the watcher installs.
 	if err := js.DeleteKeyValue("kvwatch-test"); err != nil {
-		t.Fatal(err)
+		t.Fatalf("delete the first bucket: %v", err)
 	}
 	time.Sleep(50 * time.Millisecond)
 	live, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: "kvwatch-test"})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("create the live bucket: %v", err)
 	}
 	if _, err := live.Put("live-key", []byte("1")); err != nil {
-		t.Fatal(err)
+		t.Fatalf("put live-key: %v", err)
 	}
 	into := newSeen()
 	w := kvwatch.New("probe cache", live, into.apply, into.reset)
@@ -848,28 +820,9 @@ func TestARewatchOntoABucketRestoredWithAnOlderStreamRefillsTheCache(t *testing.
 
 	// Delete it and restore the older snapshot in its place.
 	if err := js.DeleteKeyValue("kvwatch-test"); err != nil {
-		t.Fatal(err)
+		t.Fatalf("delete the live bucket: %v", err)
 	}
-	rreq, _ := json.Marshal(map[string]any{"config": snap.Config, "state": snap.State})
-	msg, err = conn.Request("$JS.API.STREAM.RESTORE."+stream, rreq, 5*time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var rresp struct {
-		DeliverSubject string                        `json:"deliver_subject"`
-		Error          *struct{ Description string } `json:"error"`
-	}
-	if err := json.Unmarshal(msg.Data, &rresp); err != nil || rresp.Error != nil {
-		t.Fatalf("restore: %v %s", err, msg.Data)
-	}
-	for _, chunk := range data {
-		if _, err := conn.Request(rresp.DeliverSubject, chunk, 5*time.Second); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := conn.Request(rresp.DeliverSubject, nil, 10*time.Second); err != nil {
-		t.Fatal(err)
-	}
+	restoreStream(t, conn, stream, snap)
 
 	if err := w.Check(); err != nil {
 		t.Fatalf("Check: %v", err)
@@ -884,5 +837,75 @@ func TestARewatchOntoABucketRestoredWithAnOlderStreamRefillsTheCache(t *testing.
 	if w.Err() != nil || !into.has("restored-key") || into.has("live-key") || into.resetCount() == 0 {
 		t.Fatalf("after three Rewatches onto the restored bucket: Err=%v, restored-key=%v, live-key=%v, resets=%d; "+
 			"want the restored bucket's key only, after a reset", w.Err(), into.has("restored-key"), into.has("live-key"), into.resetCount())
+	}
+}
+
+// snapshot is a stream snapshot as the server sent it: the stream's config and state, and the
+// data chunks.
+type snapshot struct {
+	config, state json.RawMessage
+	chunks        [][]byte
+}
+
+// snapshotStream snapshots stream through the raw JetStream API, which nats.go does not wrap.
+func snapshotStream(t *testing.T, conn *natsgo.Conn, stream string) snapshot {
+	t.Helper()
+	inbox := natsgo.NewInbox()
+	chunks, err := conn.SubscribeSync(inbox)
+	if err != nil {
+		t.Fatalf("snapshot %s: subscribe: %v", stream, err)
+	}
+	req, _ := json.Marshal(map[string]any{"deliver_subject": inbox, "no_consumers": true})
+	msg, err := conn.Request("$JS.API.STREAM.SNAPSHOT."+stream, req, 5*time.Second)
+	if err != nil {
+		t.Fatalf("snapshot %s: request: %v", stream, err)
+	}
+	var resp struct {
+		Config json.RawMessage               `json:"config"`
+		State  json.RawMessage               `json:"state"`
+		Error  *struct{ Description string } `json:"error"`
+	}
+	if err := json.Unmarshal(msg.Data, &resp); err != nil || resp.Error != nil {
+		t.Fatalf("snapshot %s: %v %s", stream, err, msg.Data)
+	}
+	snap := snapshot{config: resp.Config, state: resp.State}
+	for {
+		m, err := chunks.NextMsg(5 * time.Second)
+		if err != nil {
+			t.Fatalf("snapshot %s: chunk %d: %v", stream, len(snap.chunks), err)
+		}
+		if len(m.Data) == 0 {
+			return snap
+		}
+		snap.chunks = append(snap.chunks, append([]byte(nil), m.Data...))
+		if m.Reply != "" {
+			_ = conn.Publish(m.Reply, nil)
+		}
+	}
+}
+
+// restoreStream restores snap as stream through the raw JetStream API. The restored stream keeps
+// the snapshot's creation time.
+func restoreStream(t *testing.T, conn *natsgo.Conn, stream string, snap snapshot) {
+	t.Helper()
+	req, _ := json.Marshal(map[string]any{"config": snap.config, "state": snap.state})
+	msg, err := conn.Request("$JS.API.STREAM.RESTORE."+stream, req, 5*time.Second)
+	if err != nil {
+		t.Fatalf("restore %s: request: %v", stream, err)
+	}
+	var resp struct {
+		DeliverSubject string                        `json:"deliver_subject"`
+		Error          *struct{ Description string } `json:"error"`
+	}
+	if err := json.Unmarshal(msg.Data, &resp); err != nil || resp.Error != nil {
+		t.Fatalf("restore %s: %v %s", stream, err, msg.Data)
+	}
+	for i, chunk := range snap.chunks {
+		if _, err := conn.Request(resp.DeliverSubject, chunk, 5*time.Second); err != nil {
+			t.Fatalf("restore %s: chunk %d: %v", stream, i, err)
+		}
+	}
+	if _, err := conn.Request(resp.DeliverSubject, nil, 10*time.Second); err != nil {
+		t.Fatalf("restore %s: end of data: %v", stream, err)
 	}
 }
