@@ -106,14 +106,12 @@ async function agentModels(agents, ctx) {
       );
       if (declared.length === 0) continue;
       const why = await problem(declared);
-      // <agent> <model> <why>: the gate splits the answer on its first two spaces, and a model
-      // pattern holds none.
-      if (why) unresolved.push(`${agent.name} ${declared.join(",")} ${why}`);
+      if (why) unresolved.push({ agent: agent.name, model: declared.join(","), why });
     }
     process.stderr.write(
       unresolved.length === 0
         ? "LEGION_AGENT_MODELS=resolved\n"
-        : unresolved.map((line) => `LEGION_AGENT_MODEL_UNRESOLVED=${line}\n`).join("")
+        : unresolved.map((entry) => `LEGION_AGENT_MODEL_UNRESOLVED=${JSON.stringify(entry)}\n`).join("")
     );
   } catch (error) {
     process.stderr.write(`LEGION_AGENT_MODELS_UNRESOLVABLE=${firstLine(error)}\n`);

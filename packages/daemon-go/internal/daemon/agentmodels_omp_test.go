@@ -35,7 +35,8 @@ func agentModelPlugin(t *testing.T, dir string) string {
 // model no available provider serves, a model whose key does not work while the parent's does (the
 // tool's silent fallback to the parent's model), and a model whose key does not work at all. A key
 // the environment supplies, as a worker's shim exports one from the providers Secret, counts. A
-// build-time probe skips the check. The operator's override counts only when it expands to a model,
+// build-time probe skips the check, and a key command slower than the 2 s Oh My Pi gives the
+// probe's shutdown handler still answers. The operator's override counts only when it expands to a model,
 // as the task tool takes it, and an agent that declares no model runs on the session's own and is
 // not judged. The profile's providers listen nowhere, so no model is called and no credential the
 // machine carries decides the run.
@@ -45,7 +46,9 @@ func TestTheAgentModelCheckOnTheRealOhMyPi(t *testing.T) {
 		"  fake:\n    baseUrl: http://127.0.0.1:9\n    auth: apiKey\n    api: anthropic-messages\n    apiKey: static-key\n" +
 		"    models:\n      - id: m1\n        name: M1\n" +
 		"  badkey:\n    baseUrl: http://127.0.0.1:9\n    auth: apiKey\n    api: anthropic-messages\n    apiKey: \"!exit 1\"\n" +
-		"    models:\n      - id: m3\n        name: M3\n"
+		"    models:\n      - id: m3\n        name: M3\n" +
+		"  slowkey:\n    baseUrl: http://127.0.0.1:9\n    auth: apiKey\n    api: anthropic-messages\n    apiKey: \"!sleep 3; echo k\"\n" +
+		"    models:\n      - id: m4\n        name: M4\n"
 	const dispatched = "(dispatched by dist/skills/legion-worker/SKILL.md)"
 	for _, testCase := range []struct {
 		name  string
@@ -76,6 +79,10 @@ func TestTheAgentModelCheckOnTheRealOhMyPi(t *testing.T) {
 		{name: "an override that expands to a model", roles: "  default: fake/m1\n  review: fake/m1\n",
 			config: "task:\n  agentModelOverrides:\n    oracle: fake/m1\n"},
 		{name: "an agent that declares no model, with no default role", roles: "  review: fake/m1\n  oracle: fake/m1\n"},
+		// The answer comes from a session_shutdown handler Oh My Pi abandons after 2 s; at the pin the
+		// process outlives it, so a key slower than that still answers. A pin that ends the process
+		// with the handler would refuse this boot.
+		{name: "a key command slower than the shutdown handler's 2 s", roles: "  default: fake/m1\n  review: fake/m1\n  oracle: slowkey/m4\n"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			dir := t.TempDir()

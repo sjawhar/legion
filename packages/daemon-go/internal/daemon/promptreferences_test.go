@@ -153,3 +153,39 @@ func TestReadPluginManifestRefusesSkillsItCannotRead(t *testing.T) {
 		})
 	}
 }
+
+// The gate reads the load probe's answer on the agents' models line by line: resolved passes; each
+// unresolved agent is one JSON object, refused naming the agent, the files that dispatch it, its
+// model and why; a line it cannot read is refused as such; and no answer at all is refused naming
+// the likely cause.
+func TestAgentModelRefusalReadsTheProbesAnswer(t *testing.T) {
+	agents := map[string][]string{"oracle": {"dist/skills/legion-oracle/SKILL.md"}}
+	for _, testCase := range []struct {
+		name, output string
+		want         []string
+	}{
+		{name: "resolved", output: "LEGION_PROMPT_AGENTS=resolved\nLEGION_AGENT_MODELS=resolved\n"},
+		{name: "unresolved", output: `LEGION_AGENT_MODEL_UNRESOLVED={"agent":"oracle","model":"@oracle","why":"role oracle is not configured"}` + "\n",
+			want: []string{"in a pane of the default profile, cannot run task agent oracle (dispatched by dist/skills/legion-oracle/SKILL.md) on its model @oracle: role oracle is not configured"}},
+		{name: "unreadable", output: "LEGION_AGENT_MODEL_UNRESOLVED=oracle @oracle role oracle is not configured\n",
+			want: []string{"which the gate cannot read"}},
+		{name: "no answer", output: "LEGION_PROMPT_AGENTS=resolved\n",
+			want: []string{"gave no answer on the models of the task agents Legion's prompts name (oracle)", "session_shutdown handler", "2 s"}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			err := agentModelRefusal(testCase.output, agents, "in a pane of the default profile")
+
+			if len(testCase.want) == 0 {
+				if err != nil {
+					t.Fatalf("agentModelRefusal = %v, want a pass", err)
+				}
+				return
+			}
+			for _, want := range testCase.want {
+				if err == nil || !strings.Contains(err.Error(), want) {
+					t.Errorf("agentModelRefusal = %v, want it to say %q", err, want)
+				}
+			}
+		})
+	}
+}

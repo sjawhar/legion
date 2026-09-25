@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -131,17 +132,21 @@ func agentModelRefusal(output string, agents map[string][]string, lane string) e
 			return fmt.Errorf("Oh My Pi, %s, could not resolve task agents' models for the load probe (%s): pin a fork release whose model resolver the probe can import",
 				lane, strings.TrimPrefix(line, agentModelsUnresolvable))
 		case strings.HasPrefix(line, agentModelUnresolved):
-			// <agent> <model> <why>
-			fields := strings.SplitN(strings.TrimPrefix(line, agentModelUnresolved), " ", 3)
-			if len(fields) < 3 {
+			var answer struct{ Agent, Model, Why string }
+			if err := json.Unmarshal([]byte(strings.TrimPrefix(line, agentModelUnresolved)), &answer); err != nil || answer.Agent == "" {
 				return fmt.Errorf("the load probe answered %q on the task agents' models, which the gate cannot read", line)
 			}
 			unresolved = append(unresolved, fmt.Sprintf("task agent %s (dispatched by %s) on its model %s: %s",
-				fields[0], strings.Join(agents[fields[0]], ", "), fields[1], fields[2]))
+				answer.Agent, strings.Join(agents[answer.Agent], ", "), answer.Model, answer.Why))
 		}
 	}
 	if len(unresolved) == 0 {
-		return fmt.Errorf("the load probe gave no answer on the models of the task agents Legion's prompts name (%s)",
+		// The probe answers from Oh My Pi's session_shutdown handler, which Oh My Pi gives 2 s at
+		// the pinned release (SESSION_SHUTDOWN_HANDLER_TIMEOUT_MS, extensibility/extensions/runner.ts); at
+		// that pin the process outlives the handler, so the answer still arrives.
+		return fmt.Errorf("the load probe gave no answer on the models of the task agents Legion's prompts name (%s): "+
+			"it answers from Oh My Pi's session_shutdown handler, which Oh My Pi abandons after 2 s, so a key command or token refresh slower than that, "+
+			"under an Oh My Pi that ends when it abandons the handler, is the likely cause",
 			strings.Join(slices.Sorted(maps.Keys(agents)), ", "))
 	}
 	return fmt.Errorf("Oh My Pi, %s, cannot run %s. A worker that dispatches one runs it on another model, or not at all: configure each role the agents name in the settings this Oh My Pi reads (modelRoles, or task.agentModelOverrides), on a model whose key works",
