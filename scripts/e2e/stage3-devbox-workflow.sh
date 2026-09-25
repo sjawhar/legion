@@ -40,6 +40,8 @@ watcher_pid=
 port_daemon=
 port_listener=
 port_dispatch=
+dispatch_base=
+dispatch_actor=
 port_worker_stream=
 port_pg=
 port_nats=
@@ -152,6 +154,7 @@ start_dispatch() {
     result=0
     await_start dispatch "$dispatch_pid" "$offset" 60 "the scratch Dispatch server" \
       curl -fsS "http://127.0.0.1:$port_dispatch/api/v1" || result=$?
+    dispatch_base="http://127.0.0.1:$port_dispatch"
     [ "$result" != 0 ] || return 0
     [ -z "$keep" ] || fail "the restarted scratch Dispatch lost port $port_dispatch to another process"
     note "the scratch Dispatch lost port $port_dispatch to another process (attempt $attempt); picking another"
@@ -564,9 +567,11 @@ begin rig
 (umask 077 && head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/envoy-token" &&
   printf 'Authorization: Bearer %s\n' "$(cat "$work/envoy-token")" >"$work/envoy-auth-header" &&
   head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/dispatch-token" &&
+  printf 'Authorization: Bearer %s\n' "$(cat "$work/dispatch-token")" >"$work/dispatch-auth-header" &&
+  printf 'X-Dispatch-User: smoke\n' >"$work/dispatch-human-header" &&
   head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/operator-token" &&
   head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/postgres-password")
-chmod 0600 "$work"/*token "$work/envoy-auth-header" "$work/postgres-password"
+chmod 0600 "$work"/*token "$work"/*-header "$work/postgres-password"
 (cd "$root/packages/daemon-go" && go build -o "$work/legion" ./cmd/legion)
 (cd "$root/packages/envoy" && go build -o "$work/envoy-listener" ./cmd/listener && go build -o "$work/envoy-dispatch" ./cmd/dispatch)
 docker ps >/dev/null

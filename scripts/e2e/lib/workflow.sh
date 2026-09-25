@@ -5,14 +5,23 @@
 # negative controls. A stage proof sources lib/rig.sh first.
 #
 # Sourced, never run. The caller sets
-#   work           the run's scratch directory, holding the two files the lib reads: dispatch-token,
-#                  the Dispatch bearer, and legion, the Go daemon binary it asks for state
+#   work           the run's scratch directory, holding the files the lib reads: legion, the Go
+#                  daemon binary it asks for state; legion.yaml, the daemon's configuration, which
+#                  says where the daemon answers; dispatch-auth-header, the curl header line
+#                  (`Authorization: Bearer …`) the agents' Dispatch bearer is sent as; and
+#                  dispatch-human-header, the one the proof human's writes are sent with. Headers
+#                  go by file, so no bearer is ever in a process's argv
 #   evidence       the evidence directory
 #   project        the Dispatch project the run's issues live in; the daemon writes as
 #                  legion-daemon:<project>
 #   repo           the smoke repository, owner/name
-#   port_dispatch  the Dispatch server's port on 127.0.0.1
-#   port_daemon    the daemon's port on 127.0.0.1
+#   dispatch_base  the Dispatch server's base URL (a scratch server's http://127.0.0.1:<port>, or
+#                  production's)
+#   dispatch_actor the session every proof-human write names as its actor, or empty. A bearer caller
+#                  must name one (production Dispatch refuses the write otherwise, ACTOR_KIND); it
+#                  holds no claim, so the workflow reads its status writes as a human's. Empty, the
+#                  writes carry none and the human header alone says who wrote (a scratch
+#                  Dispatch's X-Dispatch-User)
 #   pg_container   the container holding the daemon's Postgres database
 #   pr_number      the issue's pull request, once it exists
 #   smoke_file     the one product file that pull request's first implementation changed: the
@@ -27,9 +36,9 @@
 
 # ---- Dispatch -------------------------------------------------------------------------------------
 
-dispatch_url() { printf 'http://127.0.0.1:%s' "$port_dispatch"; }
+dispatch_url() { printf '%s' "$dispatch_base"; }
 dispatch_get() {
-  curl -fsS --max-time 20 -H "Authorization: Bearer $(cat "$work/dispatch-token")" "$(dispatch_url)/api/v1/$1"
+  curl -fsS --max-time 20 -H "@$work/dispatch-auth-header" "$(dispatch_url)/api/v1/$1"
 }
 # dispatch_events ISSUE prints the issue's whole event log, paging past Dispatch's 200-event limit.
 dispatch_events() {
@@ -48,11 +57,14 @@ review_cap_posted() {
 }
 dispatch_human() {
   local method=$1 path=$2 body=${3:-}
+  if [ -n "$body" ] && [ -n "$dispatch_actor" ]; then
+    body=$(jq -c --arg id "$dispatch_actor" '. + {actor: {kind: "session", id: $id}}' <<<"$body")
+  fi
   if [ -n "$body" ]; then
-    curl -fsS --max-time 20 -X "$method" -H 'X-Dispatch-User: smoke' -H 'content-type: application/json' \
+    curl -fsS --max-time 20 -X "$method" -H "@$work/dispatch-human-header" -H 'content-type: application/json' \
       --data "$body" "$(dispatch_url)/api/v1/$path"
   else
-    curl -fsS --max-time 20 -X "$method" -H 'X-Dispatch-User: smoke' "$(dispatch_url)/api/v1/$path"
+    curl -fsS --max-time 20 -X "$method" -H "@$work/dispatch-human-header" "$(dispatch_url)/api/v1/$path"
   fi
 }
 new_issue() {
@@ -65,7 +77,7 @@ set_status() { dispatch_human PATCH "issues/$1" "$(jq -cn --arg status "$2" '{st
 
 # ---- the daemon's state ---------------------------------------------------------------------------
 
-daemon_state() { "$work/legion" state --json --port "$port_daemon"; }
+daemon_state() { "$work/legion" state --json --config "$work/legion.yaml"; }
 state_file() { daemon_state >"$evidence/$1.json"; }
 issue_phase() { daemon_state | jq -e --arg issue "$1" --arg phase "$2" '.issues[$issue].phase == $phase'; }
 issue_phase_in() {
@@ -135,6 +147,10 @@ session_contains() {
   grep -Fq -- "$3" <<<"$text"
 }
 
+gate_registered() {
+  daemon_state | jq -e --arg issue "$1" --arg artifact "$2" \
+    '.issues[$issue].designGate.artifactId == $artifact and .issues[$issue].designGate.currentVersion > 0'
+}
 # The architect owns spec editing and gate registration; the proof names the one primary artifact
 # Dispatch created so a real agent cannot register an unrelated document.
 drive_gate() {
@@ -142,8 +158,7 @@ drive_gate() {
   artifact=$(dispatch_get "issues/$issue" | jq -er .primary_artifact_id)
   wait_for_worker "$issue" architect
   send_agent "$issue" architect "$label: update this issue's primary spec document with one tiny, concrete one-file smoke change for $repo, and say in it that a review of the pull request may ask for one more line appended to that same file, which is in scope. Request approval for primary artifact $artifact. Then use the Go-daemon Legion operation to register the gate for exactly artifact $artifact at the version returned by that approval request. Wait after registering."
-  until_true 300 "$label architect to register primary artifact $artifact" sh -c \
-    "'$work/legion' state --json --port '$port_daemon' | jq -e --arg issue '$issue' --arg artifact '$artifact' '.issues[\$issue].designGate.artifactId == \$artifact and .issues[\$issue].designGate.currentVersion > 0'"
+  until_true 300 "$label architect to register primary artifact $artifact" gate_registered "$issue" "$artifact"
   gate_artifact=$(daemon_state | jq -er --arg issue "$issue" '.issues[$issue].designGate.artifactId')
   gate_version=$(daemon_state | jq -er --arg issue "$issue" '.issues[$issue].designGate.currentVersion')
   dispatch_human POST "artifacts/$gate_artifact/reviews" '{"state":"approved"}' >/dev/null

@@ -794,14 +794,16 @@ it.
 . "$root/scripts/e2e/lib/namespace-rig.sh"     # sourced, never run
 ```
 
-The caller sets `operator` (the admin kubectl context), `namespace`, `project` (the run's
-`legion.dev/project` label), `project_prefix` (the prefix every run project of the proof carries,
-`s4a-`), `record` (a file with one Sandbox name per line), `work`, `evidence`, and `torn_down` and
+The caller sets `operator` (the admin kubectl context), `namespace`, `run_label` (the run's
+`legion.dev/project` label, named apart from `lib/workflow.sh`'s `project`, the Dispatch project
+key), and either `label_prefix` (the prefix every run label of the proof carries, Stage 4a's
+`s4a-`) or `label_exact` (the one fixed label the proof owns while it holds its run lock, Stage
+4b's `legsmoke`), `record` (a file with one Sandbox name per line), `work`, `evidence`, and `torn_down` and
 `compared` empty; it defines `begin`, `note`, `pass` and `fail`, which exits.
 
 | function | does |
 | :--- | :--- |
 | `op ARGS…` | `kubectl --context $operator -n $namespace ARGS…` |
 | `snapshot FILE` | writes the namespace's Sandboxes, Secrets, PVCs and pods that carry the run's project label or none, sorted |
-| `teardown` | runs once and never fails. It refuses a project without `project_prefix`, so a mistyped project cannot select another run's objects; deletes every recorded Sandbox by name, then the Sandboxes labelled with that exact project; then lists the project's objects every 2 s, up to 150 listings, until none is left. Secrets and PVCs the Sandboxes' own deletion has not taken by the 90th listing are deleted by that exact label once, on the first listing from then on that answers; three failed listings in a row end the wait, naming the context and its error |
+| `teardown` | runs once and never fails. It refuses a label without `label_prefix`, or other than `label_exact`, so a mistyped label cannot select another run's objects; deletes every recorded Sandbox by name, then the Sandboxes labelled with that exact project; then lists the project's objects every 2 s, up to 150 listings, until none is left. Secrets and PVCs the Sandboxes' own deletion has not taken by the 90th listing are deleted by that exact label once, on the first listing from then on that answers; three failed listings in a row end the wait, naming the context and its error |
 | `namespace_clean` | the check `namespace-clean`: a fresh snapshot, written to `$evidence/namespace-after.txt`, must equal `$evidence/namespace-before.txt` |
