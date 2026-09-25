@@ -136,7 +136,16 @@ renders and, in backticks the caller can paste back, their own text with the mar
 character escaped; the exception is a heading
 rename whose `find` carried a heading marker, where the repeated marker is dropped, and `with` may
 change the level only when `find` named the block's actual level — `# ` is the level-blind
-selector, so a generic `find` renames the text and keeps the level. A batch that leaves the document's
+selector, so a generic `find` renames the text and keeps the level. A hard line break inside `with`
+— two trailing spaces or a backslash before the newline — puts what follows it at a true line
+start, where a heading, bullet, `1.`/`1)` ordered or `>` blockquote marker is `INVALID_OP` on
+`with` as well (`blockMarkerAfterHardBreak`), since replace is inline and that marker can only be
+written as escaped literal text continuing the matched block, never as the block it names. A bare
+newline is a soft break, which renders as a space and reaches no line start; an ordered marker
+whose start number is not 1 cannot interrupt a paragraph, and leading zeros do not change that
+number, so `01.` and `001)` are refused with `1.`, while `02.`, `10.` and a run of zeros past the
+nine digits a start number may have (`0000000001.`) are not; and marked text opens with its
+mark's delimiter, not the marker — none of the three is refused. A batch that leaves the document's
 semantic identity unchanged — `nodeToken` over the whole tree, inline marks included — mints no
 version, named or not, and the response carries `changed: false` with `unchanged_ops` naming each
 operation that changed nothing (`docs.EditOutcome`). Every refusal names its operation index and
