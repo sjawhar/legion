@@ -16,6 +16,7 @@ import (
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/kvwatch"
 	"github.com/sjawhar/envoy/internal/testnats"
 	"github.com/testcontainers/testcontainers-go"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
@@ -573,7 +574,7 @@ func TestOpen_EmptyBucketSucceeds(t *testing.T) {
 // restart when watch() hasn't populated the cache yet.
 
 // coldRegistry creates a Registry with an empty cache backed by the given KV buckets.
-// No watch() goroutine is started, so the cache stays cold for the test's lifetime.
+// Its watcher is never started, so the cache stays cold for the test's lifetime.
 func coldRegistry(t *testing.T, conn *natsgo.Conn) (*Registry, natsgo.KeyValue) {
 	t.Helper()
 	js, err := conn.JetStream()
@@ -588,7 +589,9 @@ func coldRegistry(t *testing.T, conn *natsgo.Conn) (*Registry, natsgo.KeyValue) 
 	if err != nil {
 		t.Fatalf("failed to create role KV bucket: %v", err)
 	}
-	return &Registry{kv: kv, roleKV: roleKV, now: time.Now, cache: map[string]Interest{}}, kv
+	r := &Registry{kv: kv, roleKV: roleKV, now: time.Now, cache: map[string]Interest{}, cacheRevisions: map[string]uint64{}}
+	r.watcher = kvwatch.New("interest registry", kv, r.applyWatched, r.resetCache)
+	return r, kv
 }
 
 func TestGet_ColdCacheFallsBackToKV(t *testing.T) {
@@ -1320,38 +1323,6 @@ func TestWaitForCacheReady_PrePopulatedKVIsVisibleAfterReady(t *testing.T) {
 	got := reg2.Match("m1", "topic.pre")
 	if len(got) != 1 || got[0].SessionID != "ses_pre" {
 		t.Fatalf("expected pre-populated entry visible after WaitForCacheReady; got %v", got)
-	}
-}
-
-func TestWaitForCacheReady_RespectsContextCancellation(t *testing.T) {
-	// Build a Registry with NO watch() goroutine running, so readyCh never closes.
-	// WaitForCacheReady must return ctx.Err() instead of hanging.
-	r := &Registry{cache: map[string]Interest{}, readyCh: make(chan struct{})}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	err := r.WaitForCacheReady(ctx)
-	if err == nil {
-		t.Fatal("WaitForCacheReady must return error when readyCh stays open and ctx expires")
-	}
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("expected context.DeadlineExceeded, got %v", err)
-	}
-}
-
-func TestWaitForCacheReady_IdempotentAfterReady(t *testing.T) {
-	// Calling WaitForCacheReady after the channel has been signaled must
-	// return immediately, not block or panic on double-close.
-	r := &Registry{cache: map[string]Interest{}, readyCh: make(chan struct{})}
-	close(r.readyCh)
-
-	for i := 0; i < 3; i++ {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-		err := r.WaitForCacheReady(ctx)
-		cancel()
-		if err != nil {
-			t.Fatalf("call %d: expected nil after readyCh closed, got %v", i, err)
-		}
 	}
 }
 

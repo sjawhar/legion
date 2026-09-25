@@ -1,6 +1,8 @@
 package kvwatch_test
 
 import (
+	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -10,16 +12,26 @@ import (
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
-// seen records the keys a watcher delivered.
+// seen records the keys a watcher delivered and how many times the cache was reset.
 type seen struct {
-	mu   sync.Mutex
-	keys map[string]bool
+	mu     sync.Mutex
+	keys   map[string]bool
+	resets int
 }
+
+func newSeen() *seen { return &seen{keys: map[string]bool{}} }
 
 func (s *seen) apply(entry natsgo.KeyValueEntry) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.keys[entry.Key()] = true
+}
+
+func (s *seen) reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.keys = map[string]bool{}
+	s.resets++
 }
 
 func (s *seen) has(key string) bool {
@@ -28,8 +40,10 @@ func (s *seen) has(key string) bool {
 	return s.keys[key]
 }
 
-func newWatcher(name string, into *seen) *kvwatch.Watcher {
-	return &kvwatch.Watcher{Name: name, Apply: into.apply, Ready: func() {}}
+func (s *seen) resetCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.resets
 }
 
 // bucket opens the test bucket on its own connection, which the test can close to end a watcher
@@ -63,21 +77,100 @@ func eventually(t *testing.T, what string, cond func() bool) {
 	}
 }
 
+// The cache is ready once the first watcher has delivered every existing key, and not before.
+func TestTheCacheIsReadyAfterTheFirstScan(t *testing.T) {
+	_, uri := testnats.Start(t)
+	_, kv := bucket(t, uri)
+	if _, err := kv.Put("before-start", []byte("1")); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	into := newSeen()
+	w := kvwatch.New("test cache", kv, into.apply, into.reset)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if err := w.WaitReady(ctx); !errors.Is(err, context.DeadlineExceeded) || w.Ready() {
+		t.Fatalf("WaitReady before Start = %v (ready %v), want the context's deadline", err, w.Ready())
+	}
+
+	w.Start()
+	for range 2 {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := w.WaitReady(ctx)
+		cancel()
+		if err != nil {
+			t.Fatalf("WaitReady after Start: %v", err)
+		}
+	}
+	if !w.Ready() || !into.has("before-start") {
+		t.Fatalf("ready %v with the existing key applied %v, want both", w.Ready(), into.has("before-start"))
+	}
+}
+
+// A first start that fails releases readiness and records its error, so a caller waiting for the
+// cache sees an empty cache that /healthz reports rather than a hang.
+func TestAFailedFirstStartIsReadyAndRecordsItsError(t *testing.T) {
+	_, uri := testnats.Start(t)
+	conn, kv := bucket(t, uri)
+	conn.Close()
+	w := kvwatch.New("test cache", kv, newSeen().apply, func() {})
+
+	w.Start()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := w.WaitReady(ctx); err != nil {
+		t.Fatalf("WaitReady after a failed first start: %v", err)
+	}
+	if w.Err() == nil {
+		t.Fatal("a failed first start recorded no error")
+	}
+}
+
+// A first start that fails after a Rewatch has armed a live watcher records nothing: the error is
+// the first start's, not the current watcher's, and recording it would mark a live cache dead.
+func TestAFirstStartFailingAfterARewatchLeavesTheLiveWatcherHealthy(t *testing.T) {
+	_, uri := testnats.Start(t)
+	firstConn, first := bucket(t, uri)
+	liveConn, _ := bucket(t, uri)
+	firstConn.Close()
+	into := newSeen()
+	w := kvwatch.New("test cache", first, into.apply, into.reset)
+	live, err := w.Rewatch(liveConn)
+	if err != nil {
+		t.Fatalf("rewatch: %v", err)
+	}
+
+	w.Start()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := w.WaitReady(ctx); err != nil {
+		t.Fatalf("WaitReady: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if err := w.Err(); err != nil {
+		t.Fatalf("the failed first start marked the live watcher dead: %v", err)
+	}
+	if _, err := live.Put("after-start", []byte("1")); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	eventually(t, "the live watcher's delivery", func() bool { return into.has("after-start") })
+}
+
 // A watcher that ends on its own - its connection closed - leaves the cache frozen, and Err says so
-// until a Watch replaces it.
+// until a Rewatch replaces it.
 func TestAWatcherThatEndsOnItsOwnRecordsItsError(t *testing.T) {
 	_, uri := testnats.Start(t)
 	conn, kv := bucket(t, uri)
-	into := &seen{keys: map[string]bool{}}
-	w := newWatcher("test cache", into)
-	if err := w.Watch(kv); err != nil {
-		t.Fatalf("watch: %v", err)
-	}
+	into := newSeen()
+	w := kvwatch.New("test cache", kv, into.apply, into.reset)
+	w.Start()
+	eventually(t, "the first scan", w.Ready)
 	conn.Close()
 	eventually(t, "the ended watcher's error", func() bool { return w.Err() != nil })
 
-	_, live := bucket(t, uri)
-	if err := w.Watch(live); err != nil {
+	liveConn, _ := bucket(t, uri)
+	live, err := w.Rewatch(liveConn)
+	if err != nil {
 		t.Fatalf("rewatch: %v", err)
 	}
 	if err := w.Err(); err != nil {
@@ -87,19 +180,21 @@ func TestAWatcherThatEndsOnItsOwnRecordsItsError(t *testing.T) {
 		t.Fatalf("put: %v", err)
 	}
 	eventually(t, "the replacement watcher's delivery", func() bool { return into.has("after-rewatch") })
+	if into.resetCount() != 0 {
+		t.Fatalf("a rewatch onto the same bucket reset the cache %d times", into.resetCount())
+	}
 }
 
-// A watcher Watch replaced ends without recording anything: only the current watcher's end is the
-// cache's.
+// A watcher Rewatch replaced ends without recording anything: only the current watcher's end is
+// the cache's.
 func TestAReplacedWatcherEndingRecordsNothing(t *testing.T) {
 	_, uri := testnats.Start(t)
 	firstConn, first := bucket(t, uri)
-	_, second := bucket(t, uri)
-	w := newWatcher("test cache", &seen{keys: map[string]bool{}})
-	if err := w.Watch(first); err != nil {
-		t.Fatalf("watch: %v", err)
-	}
-	if err := w.Watch(second); err != nil {
+	secondConn, _ := bucket(t, uri)
+	w := kvwatch.New("test cache", first, newSeen().apply, func() {})
+	w.Start()
+	eventually(t, "the first scan", w.Ready)
+	if _, err := w.Rewatch(secondConn); err != nil {
 		t.Fatalf("rewatch: %v", err)
 	}
 	firstConn.Close()
@@ -109,16 +204,100 @@ func TestAReplacedWatcherEndingRecordsNothing(t *testing.T) {
 	}
 }
 
-// After Stop, the current watcher's end records nothing and a later Watch arms nothing, so a
-// reconnect hook still running at shutdown neither reports an error nor starts a watcher.
-func TestStopMakesTheEndSilentAndWatchANoOp(t *testing.T) {
+// A bucket deleted and created again numbers its revisions from 1, so a cache fenced by the old
+// revisions would drop the new bucket's entries and keep keys it no longer holds. A Rewatch onto
+// the recreated bucket resets the cache before the new watcher fills it.
+func TestARewatchOntoARecreatedBucketResetsTheCache(t *testing.T) {
 	_, uri := testnats.Start(t)
 	conn, kv := bucket(t, uri)
-	into := &seen{keys: map[string]bool{}}
-	w := newWatcher("test cache", into)
-	if err := w.Watch(kv); err != nil {
-		t.Fatalf("watch: %v", err)
+	if _, err := kv.Put("ghost", []byte("1")); err != nil {
+		t.Fatalf("put: %v", err)
 	}
+	into := newSeen()
+	w := kvwatch.New("test cache", kv, into.apply, into.reset)
+	w.Start()
+	eventually(t, "the ghost key", func() bool { return into.has("ghost") })
+
+	js, err := conn.JetStream()
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	if err := js.DeleteKeyValue("kvwatch-test"); err != nil {
+		t.Fatalf("delete bucket: %v", err)
+	}
+	recreated, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: "kvwatch-test"})
+	if err != nil {
+		t.Fatalf("recreate bucket: %v", err)
+	}
+	if _, err := recreated.Put("fresh", []byte("1")); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	if _, err := w.Rewatch(conn); err != nil {
+		t.Fatalf("rewatch: %v", err)
+	}
+	eventually(t, "the recreated bucket's key", func() bool { return into.has("fresh") })
+	if into.has("ghost") || into.resetCount() != 1 {
+		t.Fatalf("after the rewatch: ghost kept %v, resets %d, want the ghost gone after one reset", into.has("ghost"), into.resetCount())
+	}
+}
+
+// A bucket deleted and created again while its watcher runs need not end the watcher: nats.go's
+// ordered consumer can reset onto the new stream and go on without delivering its first revisions,
+// so the cache stays frozen behind a live watcher. Check, the store's health probe, reports it as
+// the watcher's terminal error, and the Rewatch the listener then runs resets the cache.
+func TestCheckReportsABucketRecreatedUnderALiveWatcher(t *testing.T) {
+	_, uri := testnats.Start(t)
+	conn, kv := bucket(t, uri)
+	if _, err := kv.Put("ghost", []byte("1")); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	into := newSeen()
+	w := kvwatch.New("test cache", kv, into.apply, into.reset)
+	w.Start()
+	eventually(t, "the ghost key", func() bool { return into.has("ghost") })
+	if err := w.Check(kv); err != nil || w.Err() != nil {
+		t.Fatalf("Check on the watched bucket = %v, Err %v, want both nil", err, w.Err())
+	}
+
+	js, err := conn.JetStream()
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	if err := js.DeleteKeyValue("kvwatch-test"); err != nil {
+		t.Fatalf("delete bucket: %v", err)
+	}
+	if _, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: "kvwatch-test"}); err != nil {
+		t.Fatalf("recreate bucket: %v", err)
+	}
+	if err := w.Check(kv); err != nil {
+		t.Fatalf("Check on the recreated bucket: %v", err)
+	}
+	// The watcher may also have ended on its own by now, which records its own terminal error; either
+	// way the recreated bucket reaches Err.
+	if err := w.Err(); err == nil {
+		t.Fatal("Check on a recreated bucket left Err nil, so self-health would never rebuild the watcher")
+	}
+
+	if _, err := w.Rewatch(conn); err != nil {
+		t.Fatalf("rewatch: %v", err)
+	}
+	if err := w.Err(); err != nil {
+		t.Fatalf("Err after the rewatch = %v, want nil", err)
+	}
+	if into.has("ghost") || into.resetCount() != 1 {
+		t.Fatalf("after the rewatch: ghost kept %v, resets %d, want the ghost gone after one reset", into.has("ghost"), into.resetCount())
+	}
+}
+
+// After Stop, the current watcher's end records nothing and a later Rewatch arms nothing, so a
+// reconnect hook still running at shutdown neither reports an error nor starts a watcher.
+func TestStopMakesTheEndSilentAndRewatchANoOp(t *testing.T) {
+	_, uri := testnats.Start(t)
+	conn, kv := bucket(t, uri)
+	into := newSeen()
+	w := kvwatch.New("test cache", kv, into.apply, into.reset)
+	w.Start()
+	eventually(t, "the first scan", w.Ready)
 	w.Stop()
 	conn.Close()
 	time.Sleep(500 * time.Millisecond)
@@ -126,15 +305,16 @@ func TestStopMakesTheEndSilentAndWatchANoOp(t *testing.T) {
 		t.Fatalf("a stopped watcher's end was recorded: %v", err)
 	}
 
-	_, live := bucket(t, uri)
-	if err := w.Watch(live); err != nil {
-		t.Fatalf("a Watch after Stop returned an error: %v", err)
+	liveConn, _ := bucket(t, uri)
+	live, err := w.Rewatch(liveConn)
+	if err != nil {
+		t.Fatalf("a Rewatch after Stop returned an error: %v", err)
 	}
 	if _, err := live.Put("after-stop", []byte("1")); err != nil {
 		t.Fatalf("put: %v", err)
 	}
 	time.Sleep(500 * time.Millisecond)
 	if into.has("after-stop") {
-		t.Fatal("a Watch after Stop armed a watcher")
+		t.Fatal("a Rewatch after Stop armed a watcher")
 	}
 }

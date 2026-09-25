@@ -55,15 +55,10 @@ type Registry struct {
 	// including delete tombstones. It prevents a delayed local write-through
 	// from replacing a newer watcher update.
 	cacheRevisions map[string]uint64
-	// readyCh is closed when watch() finishes its initial scan of existing KV
-	// entries (signalled by the nil sentinel WatchAll() emits after delivering
-	// the current value of each existing key). After readyCh is closed, the
-	// cache is consistent with the durable KV state and Match() can answer
-	// every "is this session subscribed?" question without falling through.
-	readyCh   chan struct{}
-	readyOnce sync.Once
-	// watcher feeds the cache from the interest bucket.
-	watcher kvwatch.Watcher
+	// watcher feeds the cache from the interest bucket. Once it is ready the cache is consistent
+	// with the bucket, and Match answers every "is this session subscribed?" question without
+	// falling through.
+	watcher *kvwatch.Watcher
 }
 
 // OpenOption configures the registry.
@@ -114,26 +109,24 @@ func Open(conn *nats.Conn, options ...OpenOption) (*Registry, error) {
 		roleKV:                roleKV,
 		cache:                 map[string]Interest{},
 		cacheRevisions:        map[string]uint64{},
-		readyCh:               make(chan struct{}),
 		now:                   opts.now,
 		openedAt:              opts.now(),
 		restoredRoleRevisions: restoredRoleRevisions,
 	}
-	r.watcher.Name = "interest registry"
-	r.watcher.Apply = r.applyWatched
-	r.watcher.Ready = r.signalReady
-	// Skip eager load — watch() populates cache asynchronously via KV watcher.
-	// The synchronous load() did N individual kv.Get() calls that block indefinitely
-	// when the KV stream leader is on a remote node.
-	go r.watch()
+	r.watcher = kvwatch.New("interest registry", kv, r.applyWatched, r.resetCache)
+	// No eager load: the watcher populates the cache asynchronously. A synchronous load of N
+	// individual kv.Get() calls blocks indefinitely when the KV stream leader is on a remote node.
+	r.watcher.Start()
 	return r, nil
 }
 
 // Ping verifies both KV buckets are reachable through the current NATS
-// connection. /healthz and the listener monitor use failures to report an
-// unavailable dependency while NATS reconnects.
+// connection and reports the cache watcher's terminal error, including an
+// interest bucket recreated under it (kvwatch.Watcher.Check). /healthz and the
+// listener monitor use failures to report an unavailable dependency while NATS
+// reconnects.
 func (r *Registry) Ping() error {
-	if _, err := r.interests().Status(); err != nil {
+	if err := r.watcher.Check(r.interests()); err != nil {
 		return err
 	}
 	if _, err := r.roles().Status(); err != nil {
@@ -142,24 +135,13 @@ func (r *Registry) Ping() error {
 	return r.watcher.Err()
 }
 
-// WatchFailed reports whether the cache's watcher has stopped, so the listener can tell a
+// WatchErr is the cache watcher's terminal error, or nil while it runs, so the listener can tell a
 // rebuildable dead cache from a transient KV timeout.
-func (r *Registry) WatchFailed() bool {
-	return r.watcher.Err() != nil
+func (r *Registry) WatchErr() error {
+	return r.watcher.Err()
 }
 
-// WatchError is the cache watcher's terminal error, or "" while it runs.
-func (r *Registry) WatchError() string {
-	if err := r.watcher.Err(); err != nil {
-		return err.Error()
-	}
-	return ""
-}
-
-// StopWatch retires the cache's watcher for a shutdown, before the NATS drain ends it
-// (kvwatch.Stop): its end records no terminal error and logs nothing, and a Rewatch from a recovery
-// or a self-health rebuild still running at shutdown arms no watcher. A Rewatch that fails on the
-// closing connection instead is reported by the bus as the stop, at INFO.
+// StopWatch retires the cache's watcher for a shutdown (kvwatch.Watcher.Stop).
 func (r *Registry) StopWatch() {
 	r.watcher.Stop()
 }
@@ -290,52 +272,45 @@ func (r *Registry) deleteInterest(sessionID string) error {
 	return nil
 }
 
-func (r *Registry) watch() {
-	if err := r.watcher.Watch(r.interests()); err != nil {
-		slog.Error("registry watch failed", slog.String("error", err.Error()))
-		r.watcher.Fail(err)
-		// Unblock callers of WaitForCacheReady even on watcher failure — they'd
-		// rather see the empty-cache symptom than hang. /healthz then exposes
-		// the unavailable registry while NATS retries its connection.
-		r.signalReady()
-	}
-}
-
-// Rewatch reopens both buckets on conn and replaces the cache's watcher with one there. A NATS
-// server restart loses the watcher's ordered consumer, and nats.go replaces it only once it notices
-// the missed heartbeats, up to twenty seconds later; until then the cache misses every write
-// another listener makes, and a drain deletes a consumer the server no longer has. The listener's
-// reconnect hook calls this, so the cache follows the bucket from the reconnect on. After a server
-// restart conn is the connection Open took, reconnected in place; when the bus's recover path
-// replaces a closed connection, conn is the new one and the registry moves to it.
+// Rewatch reopens both buckets on conn and replaces the cache's watcher with one there
+// (kvwatch.Watcher.Rewatch). A NATS server restart loses the watcher's ordered consumer, and
+// nats.go replaces it only once it notices the missed heartbeats, up to twenty seconds later;
+// until then the cache misses every write another listener makes, and a drain deletes a consumer
+// the server no longer has. The listener's reconnect hook calls this, so the cache follows the
+// bucket from the reconnect on.
 func (r *Registry) Rewatch(conn *nats.Conn) error {
-	if conn == nil {
-		return errors.New("interest registry: no connection")
+	kv, err := r.watcher.Rewatch(conn)
+	if err != nil {
+		return err
 	}
+	r.kvMu.Lock()
+	r.kv = kv
+	r.kvMu.Unlock()
 	js, err := conn.JetStream(nats.MaxWait(10 * time.Second))
 	if err != nil {
-		return fmt.Errorf("open interest registry JetStream: %w", err)
-	}
-	kv, err := js.KeyValue(r.interests().Bucket())
-	if err != nil {
-		return fmt.Errorf("open interest registry KV bucket: %w", err)
+		return fmt.Errorf("open role registry JetStream: %w", err)
 	}
 	roleKV, err := js.KeyValue(r.roles().Bucket())
 	if err != nil {
 		return fmt.Errorf("open role KV bucket: %w", err)
 	}
-	if err := r.watcher.Watch(kv); err != nil {
-		return fmt.Errorf("watch interest registry KV bucket: %w", err)
-	}
 	r.kvMu.Lock()
-	r.kv, r.roleKV = kv, roleKV
+	r.roleKV = roleKV
 	r.kvMu.Unlock()
 	return nil
 }
 
+// resetCache empties the cache and its revision fence, for a recreated interest bucket.
+func (r *Registry) resetCache() {
+	r.mu.Lock()
+	r.cache = map[string]Interest{}
+	r.cacheRevisions = map[string]uint64{}
+	r.mu.Unlock()
+}
+
 // applyWatched applies one entry the KV watcher delivered to the cache. The revision fence in
-// cacheInterestLocked and evictCachedInterestLocked keeps a replaced watcher's last updates from
-// undoing a newer one's.
+// cacheInterestLocked and evictCachedInterestLocked keeps a delayed local write-through and a
+// watcher update from undoing each other.
 func (r *Registry) applyWatched(entry nats.KeyValueEntry) {
 	if entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge {
 		r.mu.Lock()
@@ -361,34 +336,12 @@ func (r *Registry) applyWatched(entry nats.KeyValueEntry) {
 	r.mu.Unlock()
 }
 
-// signalReady closes readyCh exactly once, unblocking any callers of
-// WaitForCacheReady. Safe to call from multiple code paths (success / error).
-func (r *Registry) signalReady() {
-	r.readyOnce.Do(func() {
-		if r.readyCh != nil {
-			close(r.readyCh)
-		}
-	})
-}
-
-// WaitForCacheReady blocks until watch() has finished its initial scan of
-// existing KV entries, or until the context is cancelled. After this returns
-// nil, registry.Match sees every existing subscription in the bucket.
-//
-// Callers should set a bounded timeout: WatchAll() on a healthy cluster
-// completes in milliseconds, but the watcher may legitimately fail to start
-// (e.g., bucket misconfigured). The caller logs the failure and serves the
-// write-through path; /healthz exposes the unavailable registry.
+// WaitForCacheReady blocks until the watcher has delivered every existing interest, or until ctx
+// is done. After it returns nil, Match sees every existing subscription in the bucket. Callers
+// bound ctx: a watcher that fails to start releases it too, and the caller then serves the
+// write-through path while /healthz exposes the unavailable registry.
 func (r *Registry) WaitForCacheReady(ctx context.Context) error {
-	if r == nil || r.readyCh == nil {
-		return nil
-	}
-	select {
-	case <-r.readyCh:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	return r.watcher.WaitReady(ctx)
 }
 
 func (r *Registry) Upsert(item Interest, topics []string) (Interest, error) {

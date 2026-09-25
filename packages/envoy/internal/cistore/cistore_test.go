@@ -561,7 +561,7 @@ func TestRewatchRestartsStoppedWatcher(t *testing.T) {
 	url := conn.ConnectedUrl()
 	conn.Close()
 	deadline := time.Now().Add(5 * time.Second)
-	for !s.WatchFailed() {
+	for s.WatchErr() == nil {
 		if time.Now().After(deadline) {
 			t.Fatal("stopped watcher did not become unhealthy")
 		}

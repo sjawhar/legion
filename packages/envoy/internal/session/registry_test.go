@@ -259,7 +259,7 @@ func TestSessionRegistry_RewatchRestartsStoppedWatcher(t *testing.T) {
 
 	url := client.Conn.ConnectedUrl()
 	client.Close()
-	waitFor(t, 5*time.Second, func() bool { return registry.WatchFailed() })
+	waitFor(t, 5*time.Second, func() bool { return registry.WatchErr() != nil })
 	if err := registry.Ping(); err == nil {
 		t.Fatal("stopped watcher should make the registry unhealthy")
 	}
