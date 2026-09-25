@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -21,9 +22,35 @@ type Store struct {
 //go:embed migrations/*.up.sql
 var migrationFiles embed.FS
 
-// Open connects to databaseURL and verifies the database is reachable.
+// poolSizeParam is the connection-string parameter Open refuses. Open fixes MaxConns at
+// sharedPoolSize, so a connection string that asks for a pool size is asking for something
+// that will not happen, and ignoring it silently would leave the operator tuning a number
+// nobody reads.
+//
+// The other pool parameters are not refused because they are not ignored: the shared pool
+// keeps whatever minimums the connection string sets, and only the rooms and health pools
+// override them, deliberately and per pool (Pool.separate).
+const poolSizeParam = "pool_max_conns"
+
+// Open connects to databaseURL and verifies the database is reachable. The pool's size is
+// sharedPoolSize: how many connections Dispatch may hold is a property of Dispatch, not of the
+// string that names its database.
 func Open(ctx context.Context, databaseURL string) (*Store, error) {
-	pool, err := pgxpool.New(ctx, databaseURL)
+	declared, err := declaresPoolSize(databaseURL)
+	if err != nil {
+		return nil, err
+	}
+	if declared {
+		return nil, fmt.Errorf(
+			"DATABASE_URL sets %s, which Dispatch does not honour: the pool is fixed at %d in code (store.sharedPoolSize). Remove the parameter",
+			poolSizeParam, sharedPoolSize)
+	}
+	config, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse Postgres URL: %w", err)
+	}
+	config.MaxConns = sharedPoolSize
+	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		return nil, fmt.Errorf("open Postgres pool: %w", err)
 	}
@@ -32,6 +59,23 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 		return nil, fmt.Errorf("ping Postgres: %w", err)
 	}
 	return &Store{Pool: NewPool(pool)}, nil
+}
+
+// declaresPoolSize reports whether databaseURL carries poolSizeParam. It asks pgx.ParseConfig
+// rather than pgxpool.ParseConfig or the raw string. pgxpool is the layer that consumes the
+// parameter - it folds it into MaxConns and deletes it from RuntimeParams - so its parse
+// cannot answer the question, while the layer underneath it leaves the parameter there.
+// Scanning the string instead would answer a different question: keyword/value values may be
+// quoted or backslash-escaped and may contain the parameter's own name, and a keyword may be
+// separated from its "=" by whitespace, so a scanner refuses valid passwords and misses
+// "pool_max_conns = 4", which pgx honours.
+func declaresPoolSize(databaseURL string) (bool, error) {
+	config, err := pgx.ParseConfig(databaseURL)
+	if err != nil {
+		return false, fmt.Errorf("parse Postgres URL: %w", err)
+	}
+	_, declared := config.RuntimeParams[poolSizeParam]
+	return declared, nil
 }
 
 // Migrate applies embedded migrations in filename order. Every migration and

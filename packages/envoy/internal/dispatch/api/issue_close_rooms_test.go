@@ -86,7 +86,7 @@ func TestClosingAnIssueClosesItsRoomsAfterTheClientHangsUp(t *testing.T) {
 	}
 }
 
-// waitForDocumentConnectionClose waits for the server to close a connected client's room.
+// waitForDocumentConnectionClose waits for the server to close a connected client's connection.
 func waitForDocumentConnectionClose(t *testing.T, connection *gws.Conn) {
 	t.Helper()
 	connection.SetReadDeadline(time.Now().Add(time.Second))

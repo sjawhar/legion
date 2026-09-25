@@ -5,11 +5,25 @@ OAuth, and the GitHub REST/GraphQL proxy.
 
 ## Startup and persistence
 
-`DATABASE_URL` and `DISPATCH_AGENT_TOKEN` are required. Startup opens a
-`pgxpool.Pool`, applies embedded migrations from
-`internal/dispatch/store/migrations`, then starts HTTP serving. The Postgres
-store contains users, native issues, artifacts, document updates, and the event
-outbox.
+`DATABASE_URL` and `DISPATCH_AGENT_TOKEN` are required. Startup opens the shared
+`pgxpool.Pool` at `store.sharedPoolSize` connections — the size is a property of
+Dispatch rather than of the URL or the task's CPU allotment, and a `DATABASE_URL`
+carrying `pool_max_conns` is refused at open rather than silently overridden —
+applies embedded migrations from `internal/dispatch/store/migrations`, then
+starts HTTP serving. The Postgres store contains users, native issues,
+artifacts, document updates, and the event outbox.
+
+`dispatchHandler` mounts the one `GET /healthz` the process serves on its own
+mux, above the dashboard router, and the probe reads the database through
+`store.Pool.Healthy` — a one-connection pool nothing else uses, under
+`store.healthProbeTimeout`, two seconds covering dial and query. It never waits
+on the shared pool: a busy period legitimately leaves that pool with no free
+connection, and a probe queued behind a writer reads as a dead process, so the
+ALB fails it at five seconds and ECS replaces the task, cancelling every
+in-flight request of every other client. The compose healthcheck and the deploy
+script are tighter still at three seconds. The deadline covers the other half —
+a database that drops packets rather than refusing is answered `503` with
+`db: false` inside the bound, never with silence, and the reason is logged.
 
 Migration 0010 adds stored generated `search` columns; Postgres maintains them on writes and no
 application code writes or refreshes them.
@@ -117,7 +131,7 @@ the table says human only.
 | `/auth/whoami` | GET | identity | Return the resolved human identity. |
 | `/api/github/rest/...` | any | identity | Proxy GitHub REST with the user's token. |
 | `/api/github/graphql` | POST | identity | Proxy GitHub GraphQL with the user's token. |
-| `/healthz` | GET | public | Report database and NATS readiness. |
+| `/healthz` | GET | public | Report that the process serves, Postgres answers within two seconds on the health pool, and NATS is connected where configured. |
 | `/api/v1/projects` | GET, POST | POST human only | List projects (including `open_asks`) or create one. |
 | `/api/v1/projects/{key}/artifacts` | GET, POST | user or bearer | List non-primary artifacts in a project (`?unlinked=true` selects unlinked ones) or create an unlinked project artifact. |
 | `/api/v1/settings/repo-projects` | GET | human only | List repository-to-project mappings. |

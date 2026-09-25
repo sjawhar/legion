@@ -102,8 +102,9 @@ func (g *gatedMarkQuote) MarkQuote(
 // The other holders that wait are the document settlements: each opens its own transaction and
 // locks the same issue row an anchored write locks first (lockArtifactOwner), before it knows
 // whether it has work. Two of them, one anchored write holding the row, and one more write
-// queued behind it fill a four-connection pool - production's, one Fargate task at cpu="512" -
-// so the write in the middle must finish without asking that pool for anything else.
+// queued behind it fill a four-connection pool - small on purpose, because the cycle this
+// pins closes at any size and four reaches it with four callers - so the write in the middle
+// must finish without asking that pool for anything else.
 func TestSettlementsBehindAnAnchoredWriteDoNotWedgeThePool(t *testing.T) {
 	const maxConns = 4
 	gate := &gatedMarkQuote{entered: make(chan struct{}), release: make(chan struct{})}

@@ -173,7 +173,6 @@ func New(ctx *AppContext) http.Handler {
 	mux.HandleFunc("GET /auth/whoami", r.authWhoami)
 	mux.HandleFunc("/api/github/rest/", r.apiGithubRest)
 	mux.HandleFunc("/api/github/graphql", r.apiGithubGraphql)
-	mux.HandleFunc("GET /healthz", r.healthz)
 	api.Register(mux, r.ctx.apiDeps)
 	mux.HandleFunc("/", r.staticHandler)
 	return r.enforceCookieOrigin(mux)
@@ -355,18 +354,6 @@ func (r *router) proxyConfigForUser(w http.ResponseWriter, user *auth.User) (*gi
 		ClientSecret: app.ClientSecret,
 		HTTPClient:   r.ctx.HTTPClient,
 	}, true
-}
-
-func (r *router) healthz(w http.ResponseWriter, req *http.Request) {
-	databaseOK := r.ctx.Store != nil && r.ctx.Store.Pool != nil
-	if databaseOK {
-		databaseOK = r.ctx.Store.Pool.Ping(req.Context()) == nil
-	}
-	status := http.StatusOK
-	if !databaseOK {
-		status = http.StatusServiceUnavailable
-	}
-	api.WriteJSON(w, status, map[string]any{"ok": databaseOK, "db": databaseOK, "nats": nil})
 }
 
 // ───── static ───────────────────────────────────────────────────────────────

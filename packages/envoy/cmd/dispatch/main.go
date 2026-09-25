@@ -449,6 +449,9 @@ func parsePositiveInt(raw string) (int, error) {
 	return n, nil
 }
 
+// dispatchHandler mounts the one /healthz the process serves above every dashboard and API
+// route, so the probe is answered whatever the router is doing. Go's ServeMux prefers the
+// longer pattern, so "GET /healthz" wins over the router's "/".
 func dispatchHandler(handler http.Handler, database *store.Store, natsClient *bus.Client) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /healthz", healthzHandler(database, natsClient))
@@ -456,11 +459,22 @@ func dispatchHandler(handler http.Handler, database *store.Store, natsClient *bu
 	return mux
 }
 
+// healthzHandler answers the probe: the process is serving, Postgres is reachable on the
+// health pool's own connection, and NATS is connected where it is configured. Nothing here
+// waits on the shared pool, and Healthy bounds its own wait at store.healthProbeTimeout, which
+// records why a probe that answers late is as bad as one that never answers.
 func healthzHandler(database *store.Store, natsClient *bus.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		databaseOK := database != nil && database.Pool != nil
 		if databaseOK {
-			databaseOK = database.Pool.Ping(req.Context()) == nil
+			// A 503 that records no reason works against the point of the probe: a closed
+			// pool, a deadline on a stalled link, an authentication failure and a refused
+			// dial are four incidents with four next steps, and the body distinguishes
+			// none of them. One line per failed poll, for as long as the outage lasts.
+			if err := database.Pool.Healthy(req.Context()); err != nil {
+				slog.Warn("dispatch: health probe failed", "error", err)
+				databaseOK = false
+			}
 		}
 		var natsOK *bool
 		if natsClient != nil {
