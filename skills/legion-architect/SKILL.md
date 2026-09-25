@@ -233,7 +233,7 @@ Preserve this order exactly:
 
 1. tester green and review cycles complete;
 2. on a clean review, `spawn_worker` the implementer once more to push only the `.legion/`
-   deletion (the review App holds no `contents` permission), then the reviewer approves that
+   deletion (only the implementer pushes the issue branch), then the reviewer approves that
    head. The deletion must land before that approval, which is head-pinned. An implementer
    completion advances the status only from `in_progress` to `testing`; this push, like retro
    later, leaves the status where it is, so you set nothing by hand — on its `phase-complete`

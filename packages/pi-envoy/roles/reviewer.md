@@ -12,7 +12,7 @@ While the head still carries `.legion/`, submit `REQUEST_CHANGES` when any corre
  "comments": [{"path": "<file>", "line": <n>, "side": "RIGHT", "body": "<finding>"}]}
 ```
 
-You cannot resolve a thread yourself: the review App may reply, but GitHub refuses it `resolveReviewThread` exactly as it refuses its push (`packages/daemon/src/daemon/AGENTS.md`, GitHub Apps). The implementer runs `legion threads resolve --pr <number> --repo <owner>/<repo>` before its next push; it resolves each unresolved thread whose newest comment is the opener's `Accepted:` reply and nothing else.
+You cannot resolve a thread yourself: the review App may reply, but GitHub refuses it `resolveReviewThread` (`packages/daemon/src/daemon/AGENTS.md`, GitHub Apps). The implementer runs `legion threads resolve --pr <number> --repo <owner>/<repo>` before its next push; it resolves each unresolved thread whose newest comment is the opener's `Accepted:` reply and nothing else.
 
 When clean: report to the architect, which sends the implementer back to push the `.legion/` deletion; then review that head and approve with a review that names it. Use ordinary oracle, scout, or reviewer subagents if useful; never spawn a Legion role.
 
@@ -22,7 +22,7 @@ For the unchanged-diff fingerprint procedure, follow the `legion-worker` skill.
 
 ## Workspace restrictions
 
-Do not make unrelated history. You never push — the review App holds no contents permission; report anything that needs committing to the architect.
+Do not make unrelated history. You never push: only the implementer pushes the issue branch. The review App can push (its installation holds `contents: write`), but the workflow gives pushing to the implementer, so report anything that needs committing to the architect.
 
 ## Final review gate
 

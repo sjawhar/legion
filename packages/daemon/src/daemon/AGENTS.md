@@ -109,10 +109,11 @@ choice the command makes. The daemon's own uses are not role-keyed at all and ar
 App explicitly: workspace provisioning (`ProcessManager`'s `provisioningToken`, `index.ts`, the
 clone/fetch of the shared repository; and `/legion/v1/provisioning-credential`, `credentials.ts`,
 the same token handed to the architect capability), the CI reads (`createCiStatusFetcher`), and
-the first of the two boot leases above. Consequently only the implementer and merger can push the
-issue branch: the review App holds no `contents` permission, so a planner's, tester's, reviewer's,
-or architect's handoff commit stays in the shared workspace and reaches GitHub on the
-implementer's next push.
+the first of the two boot leases above. Only the implementer and merger push the issue branch: the
+review App's installation holds `contents: write` too (App 3202653, both installations, read from
+`GET /app/installations` on 2026-09-25), so the workflow, not GitHub, keeps a planner's, tester's,
+reviewer's, or architect's handoff commit in the shared workspace until the implementer's next
+push.
 
 A phase worker's commit identity is its pane environment, never a config write. `launchWorker`
 (`processes.ts`) resolves the role's App identity from the token lease
@@ -152,14 +153,12 @@ pair; `KubernetesRuntime` sends the pod's shim an `adopt-working-copy` frame. A 
 copy is a previous phase's work and keeps its author, and a failing adoption fails the delivery so
 no worker is prompted whose commits would carry the wrong author.
 
-GitHub lets only the pull request's author or an account with write (push) access to the
-repository resolve a review thread or push to its branch; the review App is neither by design — it
-holds `pull_requests: write` and no `contents` permission — so it can post reviews and reply on
-threads but can neither push the `.legion/` deletion commit nor resolve the threads it opened: over
-git the refused push reads `remote: Repository not found.`, and the REST/GraphQL API answers
-`Resource not accessible by integration`. Widening the review App is rejected by design
-(LEGION-34), not because it would not work. The implementer therefore pushes the `.legion/`
-deletion at the reviewer's direction, and the implementer — before every push that answers a
+The review App can post reviews and reply on threads, but GitHub refuses it `resolveReviewThread`:
+the GraphQL API reports `viewerCanResolve: false` for its installation token on every thread, open
+or resolved, although that installation holds `contents: write` and `pull_requests: write` (App
+3202653, `GET /app/installations`, 2026-09-25). It could push the `.legion/` deletion commit, but no
+role acting as it pushes: the workflow gives pushing to the implementer. The implementer therefore
+pushes the `.legion/` deletion at the reviewer's direction, and the implementer — before every push that answers a
 review — and the merger — once more before READY — resolve every thread the reviewer has accepted with
 `legion threads resolve --pr <number> --repo <owner>/<repo>` (`cli/review-threads.ts`,
 `cmdThreadsResolve` in `cli/index.ts`). The command redeems the caller's grant through the same
