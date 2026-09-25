@@ -2,9 +2,11 @@ package kvwatch_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -707,7 +709,180 @@ func TestADiscardedWatchOfTheOldStreamIsDrainedUntilItEnds(t *testing.T) {
 				return
 			}
 		case <-deadline:
-			t.Fatal("the discarded watcher never ended: its delivery goroutine is parked on a full buffer nothing reads")
+			t.Fatal("the discarded watcher never ended: it was left unread (its delivery goroutine parks on a full buffer) or never stopped")
 		}
+	}
+}
+
+// Readiness is the current watcher's to release. A watcher a Rewatch replaced mid-scan still reads
+// its own sentinel, and releasing readiness then would let a caller read a cache the current
+// watcher has only partly filled.
+func TestAReplacedWatchersSentinelDoesNotReleaseReadiness(t *testing.T) {
+	_, uri := testnats.Start(t)
+	_, first := bucket(t, uri)
+	for i := range 10 {
+		if _, err := first.Put(fmt.Sprintf("k%03d", i), []byte("1")); err != nil {
+			t.Fatalf("put: %v", err)
+		}
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var enterOnce, releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	var slow atomic.Bool
+	var k0 atomic.Int32
+	into := newSeen()
+	apply := func(entry natsgo.KeyValueEntry) {
+		if entry.Key() == "k000" && k0.Add(1) == 1 {
+			enterOnce.Do(func() { close(entered) })
+			<-release
+		}
+		if slow.Load() {
+			time.Sleep(10 * time.Millisecond)
+		}
+		into.apply(entry)
+	}
+	w := kvwatch.New("probe", first, apply, into.reset)
+	t.Cleanup(w.Stop)
+	w.Start()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first watcher never applied k000")
+	}
+	// The first watcher is held on its first key; its buffer holds the rest of its scan and its
+	// sentinel. The Rewatch's scan sees 200 keys.
+	for i := 10; i < 200; i++ {
+		if _, err := first.Put(fmt.Sprintf("k%03d", i), []byte("1")); err != nil {
+			t.Fatalf("put: %v", err)
+		}
+	}
+	liveConn, _ := bucket(t, uri)
+	done := make(chan error, 1)
+	go func() { done <- w.Rewatch(liveConn) }()
+	time.Sleep(300 * time.Millisecond)
+	slow.Store(true)
+	releaseOnce.Do(func() { close(release) })
+	if err := <-done; err != nil {
+		t.Fatalf("rewatch: %v", err)
+	}
+	eventually(t, "readiness", w.Ready)
+	if !into.has("k199") {
+		t.Fatal("ready while the current watcher's scan was incomplete: k199 missing")
+	}
+}
+
+// A bucket deleted and replaced by a stream with an older creation time -- a JetStream restore of a
+// snapshot taken before the bucket was last recreated, or a recreate after the clock stepped back --
+// is still a recreated bucket. The stale-watch discard compares creation times, so it must only
+// apply against a live, healthy watcher; otherwise every Rewatch would discard itself and the
+// cache would keep the deleted bucket's keys.
+func TestARewatchOntoABucketRestoredWithAnOlderStreamRefillsTheCache(t *testing.T) {
+	_, uri := testnats.Start(t)
+	conn := testnats.Connect(t, uri)
+	t.Cleanup(conn.Close)
+	js, err := conn.JetStream()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const stream = "KV_kvwatch-test"
+	old, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: "kvwatch-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.Put("restored-key", []byte("1")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Snapshot the stream.
+	inbox := natsgo.NewInbox()
+	chunks, err := conn.SubscribeSync(inbox)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, _ := json.Marshal(map[string]any{"deliver_subject": inbox, "no_consumers": true})
+	msg, err := conn.Request("$JS.API.STREAM.SNAPSHOT."+stream, req, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snap struct {
+		Config json.RawMessage               `json:"config"`
+		State  json.RawMessage               `json:"state"`
+		Error  *struct{ Description string } `json:"error"`
+	}
+	if err := json.Unmarshal(msg.Data, &snap); err != nil || snap.Error != nil {
+		t.Fatalf("snapshot: %v %s", err, msg.Data)
+	}
+	var data [][]byte
+	for {
+		m, err := chunks.NextMsg(5 * time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(m.Data) == 0 {
+			break
+		}
+		data = append(data, append([]byte(nil), m.Data...))
+		if m.Reply != "" {
+			_ = conn.Publish(m.Reply, nil)
+		}
+	}
+
+	// Delete and create the bucket again: a newer stream the watcher installs.
+	if err := js.DeleteKeyValue("kvwatch-test"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	live, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: "kvwatch-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := live.Put("live-key", []byte("1")); err != nil {
+		t.Fatal(err)
+	}
+	into := newSeen()
+	w := kvwatch.New("probe cache", live, into.apply, into.reset)
+	t.Cleanup(w.Stop)
+	w.Start()
+	eventually(t, "the live bucket's key", func() bool { return into.has("live-key") })
+
+	// Delete it and restore the older snapshot in its place.
+	if err := js.DeleteKeyValue("kvwatch-test"); err != nil {
+		t.Fatal(err)
+	}
+	rreq, _ := json.Marshal(map[string]any{"config": snap.Config, "state": snap.State})
+	msg, err = conn.Request("$JS.API.STREAM.RESTORE."+stream, rreq, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rresp struct {
+		DeliverSubject string                        `json:"deliver_subject"`
+		Error          *struct{ Description string } `json:"error"`
+	}
+	if err := json.Unmarshal(msg.Data, &rresp); err != nil || rresp.Error != nil {
+		t.Fatalf("restore: %v %s", err, msg.Data)
+	}
+	for _, chunk := range data {
+		if _, err := conn.Request(rresp.DeliverSubject, chunk, 5*time.Second); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := conn.Request(rresp.DeliverSubject, nil, 10*time.Second); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := w.Check(); err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	for tick := 1; tick <= 3; tick++ {
+		if err := w.Rewatch(conn); err != nil {
+			t.Fatalf("tick %d Rewatch: %v", tick, err)
+		}
+		time.Sleep(300 * time.Millisecond)
+		_ = w.Check()
+	}
+	if w.Err() != nil || !into.has("restored-key") || into.has("live-key") || into.resetCount() == 0 {
+		t.Fatalf("after three Rewatches onto the restored bucket: Err=%v, restored-key=%v, live-key=%v, resets=%d; "+
+			"want the restored bucket's key only, after a reset", w.Err(), into.has("restored-key"), into.has("live-key"), into.resetCount())
 	}
 }

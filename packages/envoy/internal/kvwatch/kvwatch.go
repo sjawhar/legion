@@ -132,9 +132,10 @@ func (w *Watcher) KV() nats.KeyValue {
 // nats-server before v2.14.6 re-stamps a recovered stream's creation time in its file store, and
 // an in-place config update persists the re-stamped time (nats-io/nats-server#8471, fixed in
 // v2.14.6 and v2.15.0). So a stream config update after a server restart, followed by another
-// restart, reads here as a recreate. Its cost is bounded: /healthz answers 503 until the next
-// self-health rebuild, that rebuild refills the cache from the same bucket and adopts the new
-// time, and Check is quiet from then on.
+// restart, reads as a recreate. The reconnect hook's Rewatch after that restart usually meets it
+// first: it resets and refills the cache from the same bucket and adopts the new time, with no
+// 503. When Check meets it first, /healthz answers 503 until the next self-health rebuild does
+// the same. Either way the cost is one refill, and Check is quiet from then on.
 func (w *Watcher) Check() error {
 	stream, err := streamCreated(w.KV())
 	if err != nil {
@@ -196,9 +197,9 @@ func (w *Watcher) Stop() {
 // after this one computes recreated against the new stream and applies only after the reset. Two
 // Rewatches do overlap, the bus's reconnect hook and the listener's self-health rebuild. A watch
 // reads its stream before it arms its watcher and takes the locks, so it can arrive after a
-// newer watch has switched to a recreated bucket: a watch whose stream is older than the current
-// one's is discarded, and the current watcher stays. After Stop it arms nothing and only moves
-// the handle.
+// newer watch has switched to a recreated bucket: a watch whose stream is older than a running,
+// healthy watcher's is discarded, and that watcher stays. After Stop it arms nothing and only
+// moves the handle.
 func (w *Watcher) watch(kv nats.KeyValue) error {
 	if kv == nil {
 		return errors.New(w.name + ": KV unavailable")
@@ -232,10 +233,14 @@ func (w *Watcher) watch(kv nats.KeyValue) error {
 		discard(watcher)
 		return nil
 	}
-	if !w.stream.IsZero() && stream.Before(w.stream) {
-		// A newer watch already switched to a recreated bucket. This watcher may be on the old
-		// stream, so installing it would reset the cache the current watcher filled and feed it
-		// the old bucket's keys.
+	if w.watcher != nil && w.err == nil && !w.stream.IsZero() && stream.Before(w.stream) {
+		// A newer watch already switched to a recreated bucket and its watcher is running. This
+		// watcher may be on the old stream, so installing it would reset the cache the current
+		// watcher filled and feed it the old bucket's keys. The rule holds only against a live,
+		// healthy watcher: creation times do not always grow (a JetStream restore keeps the
+		// snapshot's, and a recreate can follow a clock step back), so when the current watcher
+		// has ended or Check has flagged its bucket, the watch installs and resets as usual, and
+		// if it did read the old stream the next Check flags that too.
 		w.mu.Unlock()
 		w.applyMu.Unlock()
 		discard(watcher)
@@ -271,7 +276,14 @@ func (w *Watcher) consume(watcher nats.KeyWatcher, generation uint64) {
 	for entry := range watcher.Updates() {
 		if entry == nil {
 			// WatchAll emits a nil sentinel once it has delivered the current value of every key.
-			w.signalReady()
+			// Only the current watcher's releases readiness: a replaced one's scan says nothing
+			// about what the current watcher has delivered.
+			w.mu.RLock()
+			current := generation == w.generation
+			w.mu.RUnlock()
+			if current {
+				w.signalReady()
+			}
 			continue
 		}
 		w.applyCurrent(entry, generation)
