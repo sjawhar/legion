@@ -26,7 +26,7 @@ func (s projectionStore) Issues(context.Context, pgx.Tx) ([]record.Issue, error)
 	return s.issues, nil
 }
 func (s projectionStore) Slots(context.Context, pgx.Tx) ([]record.Slot, error) { return s.slots, nil }
-func (projectionStore) PendingStatusWrites(context.Context, pgx.Tx) ([]record.OutboxRow, error) {
+func (projectionStore) PendingStatusWrites(context.Context, pgx.Tx, string) ([]record.OutboxRow, error) {
 	return nil, nil
 }
 func (s projectionStore) Phases(_ context.Context, _ pgx.Tx, issue string) ([]record.PhaseRow, error) {
@@ -51,7 +51,7 @@ func TestProjectShowsOnlySlotlessTodoIssuesInDispatchRankOrder(t *testing.T) {
 		},
 		slots: []record.Slot{{Issue: "LEGION-214", Index: 0, AdmittedAt: now}},
 	}
-	got, err := Project(context.Background(), nil, store, []supervise.Claim{})
+	got, err := Project(context.Background(), nil, store, "LEGION", []supervise.Claim{})
 	if err != nil {
 		t.Fatalf("Project: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestProjectShowsOperatorSpawnedClaimsWithoutRecordIssue(t *testing.T) {
 	const issue = "S2-1"
 	architect := claim.Token("legion-s2-1-architect")
 	implementer := claim.Token("legion-s2-1-implementer")
-	got, err := Project(context.Background(), nil, projectionStore{}, []supervise.Claim{
+	got, err := Project(context.Background(), nil, projectionStore{}, "LEGION", []supervise.Claim{
 		{Token: architect, Issue: issue, Role: claim.RoleArchitect, State: supervise.StateReady, Session: "session-1"},
 		{Token: implementer, Issue: issue, Role: claim.RoleImplementer, State: supervise.StateIdle, Session: "session-2"},
 	})
@@ -103,7 +103,7 @@ func TestProjectShowsLaunchUncertainClaimsWithoutALocator(t *testing.T) {
 			"LEGION-208": {{Issue: "LEGION-208", Role: claim.RoleArchitect, Claim: token}},
 		},
 	}
-	got, err := Project(context.Background(), nil, store, []supervise.Claim{{
+	got, err := Project(context.Background(), nil, store, "LEGION", []supervise.Claim{{
 		Token: token, Issue: "LEGION-208", Role: claim.RoleArchitect, State: supervise.StateLaunchUncertain,
 	}})
 	if err != nil {

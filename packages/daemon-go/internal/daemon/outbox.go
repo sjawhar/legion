@@ -52,21 +52,24 @@ type outbox struct {
 	tokens     appauth.Tokens
 	handlers   []intake.Handler
 	project    string
-	stateDir   string
-	repo       string
-	log        *slog.Logger
-	now        func() time.Time
-	provision  func(context.Context, workspace.Request) (workspace.Workspace, error)
-	remove     func(context.Context, workspace.Workspace) error
+	// dispatchProject is the Dispatch project whose issues' rows this outbox claims: the database
+	// is shared, and another project's rows are another daemon's.
+	dispatchProject string
+	stateDir        string
+	repo            string
+	log             *slog.Logger
+	now             func() time.Time
+	provision       func(context.Context, workspace.Request) (workspace.Workspace, error)
+	remove          func(context.Context, workspace.Workspace) error
 }
 
-func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client, publisher notify.Publisher, supervisor *supervisor, tokens appauth.Tokens, handlers []intake.Handler, project, stateDir string, configured config.Project, tools map[string]string, log *slog.Logger) *outbox {
+func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client, publisher notify.Publisher, supervisor *supervisor, tokens appauth.Tokens, handlers []intake.Handler, project, dispatchProject, stateDir string, configured config.Project, tools map[string]string, log *slog.Logger) *outbox {
 	if log == nil {
 		log = slog.Default()
 	}
 	return &outbox{
 		pool: pool, records: records, dispatch: client, notices: publisher, supervisor: supervisor, tokens: tokens,
-		handlers: handlers, project: project, stateDir: stateDir, repo: configured.Repo, log: log, now: time.Now,
+		handlers: handlers, project: project, dispatchProject: dispatchProject, stateDir: stateDir, repo: configured.Repo, log: log, now: time.Now,
 		provision: func(ctx context.Context, request workspace.Request) (workspace.Workspace, error) {
 			return workspace.Provision(ctx, workspace.NewRunner(workspace.CommandTimeout, tools), request)
 		},
@@ -113,7 +116,7 @@ func (r *outbox) RunOnce(ctx context.Context) error {
 	var rows []record.OutboxRow
 	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
 		var err error
-		rows, err = r.records.ClaimDue(ctx, tx, now, outboxBatchSize, outboxLease)
+		rows, err = r.records.ClaimDue(ctx, tx, r.dispatchProject, now, outboxBatchSize, outboxLease)
 		return err
 	}); err != nil {
 		return fmt.Errorf("claim due outbox rows: %w", err)

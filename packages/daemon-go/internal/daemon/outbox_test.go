@@ -139,7 +139,7 @@ func TestOutboxNoticePublishesIssueAndTreeTopics(t *testing.T) {
 	row.ID = 56
 	publisher := &outboxPublisher{}
 
-	if err := (&outbox{pool: pool, records: records, notices: publisher}).execute(context.Background(), row); err != nil {
+	if err := (&outbox{pool: pool, dispatchProject: "LEGION", records: records, notices: publisher}).execute(context.Background(), row); err != nil {
 		t.Fatalf("execute notice: %v", err)
 	}
 	if got := publisher.topics(); fmt.Sprint(got) != "[notifications.legion.legion.LEGION-2 notifications.legion.legion.LEGION-1]" { // the LEGION_PROJECT token panes subscribe under
@@ -159,7 +159,7 @@ func TestOutboxNoticeReturnsPublisherFailure(t *testing.T) {
 	row := mustOutboxRow(t, "LEGION-2", record.Notice{Kind: "held", Role: claim.RolePlanner, Phase: phase.Planning}, time.Now())
 	publisher := &outboxPublisher{err: errors.New("listener unavailable")}
 
-	if err := (&outbox{pool: pool, records: records, notices: publisher}).execute(context.Background(), row); err == nil || !strings.Contains(err.Error(), "listener unavailable") {
+	if err := (&outbox{pool: pool, dispatchProject: "LEGION", records: records, notices: publisher}).execute(context.Background(), row); err == nil || !strings.Contains(err.Error(), "listener unavailable") {
 		t.Fatalf("notice failure = %v, want listener failure", err)
 	}
 }
@@ -172,7 +172,7 @@ func TestOutboxGateSeedAppliesApprovedFactAndReturnsApprovalFailure(t *testing.T
 	version := new(int)
 	*version = 3
 	client := &outboxDispatch{approval: dispatch.Approval{State: "approved", LatestVersion: 3, Version: version}}
-	runner := &outbox{pool: pool, records: records, dispatch: client, handlers: []intake.Handler{handler}}
+	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, dispatch: client, handlers: []intake.Handler{handler}}
 
 	if err := runner.execute(context.Background(), row); err != nil {
 		t.Fatalf("execute gate seed: %v", err)
@@ -207,7 +207,7 @@ func TestOutboxGateSeedRaisesTheGateToTheVersionDispatchHolds(t *testing.T) {
 			pool := isolatedOutboxPool(t)
 			handler := &outboxFactHandler{}
 			row := mustOutboxRow(t, "LEGION-208", record.GateSeed{ArtifactID: "artifact-208", Version: 1}, time.Now())
-			runner := &outbox{pool: pool, records: record.NewStore(), dispatch: &outboxDispatch{approval: tc.approval}, handlers: []intake.Handler{handler}}
+			runner := &outbox{pool: pool, dispatchProject: "LEGION", records: record.NewStore(), dispatch: &outboxDispatch{approval: tc.approval}, handlers: []intake.Handler{handler}}
 			if err := runner.execute(context.Background(), row); err != nil {
 				t.Fatalf("execute gate seed: %v", err)
 			}
@@ -222,7 +222,7 @@ func TestOutboxLingerAppliesExpirationAndReturnsHandlerFailure(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	handler := &outboxFactHandler{}
 	row := mustOutboxRow(t, "LEGION-208", record.LingerClose{Generation: 7}, time.Now())
-	runner := &outbox{pool: pool, handlers: []intake.Handler{handler}}
+	runner := &outbox{pool: pool, dispatchProject: "LEGION", handlers: []intake.Handler{handler}}
 
 	if err := runner.execute(context.Background(), row); err != nil {
 		t.Fatalf("execute linger close: %v", err)
@@ -247,7 +247,8 @@ func TestOutboxWorkspaceRemovalUsesDeterministicLocationAndReturnsFailure(t *tes
 	row := mustOutboxRow(t, issue.Key, record.WorkspaceRemove{Generation: issue.Generation}, time.Now())
 	var removed workspace.Workspace
 	runner := &outbox{
-		pool: pool, records: records, supervisor: sup, log: quietLogger(),
+		dispatchProject: "LEGION",
+		pool:            pool, records: records, supervisor: sup, log: quietLogger(),
 		stateDir: t.TempDir(),
 		repo:     "acme/widgets",
 		remove: func(_ context.Context, got workspace.Workspace) error {
@@ -277,7 +278,8 @@ func TestOutboxSuperviseStartsResumesSuspendsStopsAndDeduplicatesDelivery(t *tes
 	sup, runtime := newOutboxSupervisor(t, "legion", t.TempDir())
 	provisioned := 0
 	runner := &outbox{
-		pool: pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets",
+		dispatchProject: "LEGION",
+		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets",
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
 			provisioned++
 			return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-208"}, nil
@@ -353,7 +355,7 @@ func TestOutboxStartRelaunchesAFailedClaim(t *testing.T) {
 	if got := machine.Claim().State; got != supervise.StateFailed {
 		t.Fatalf("claim state = %s, want failed", got)
 	}
-	runner := &outbox{pool: pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets"}
+	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets"}
 	row := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RoleImplementer, Task: "Continue. Reason: retry held phase.", Generation: issue.Generation}, time.Now())
 	row.ID = 91
 
@@ -403,7 +405,8 @@ func TestOutboxRetryStartForAPhaseTheIssueLeftRelaunchesNothing(t *testing.T) {
 	engine := workflow.New(records, workflow.Config{Project: "legion"}, quietLogger())
 	clock := time.Now().Add(time.Minute)
 	runner := &outbox{
-		pool: pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets",
+		dispatchProject: "LEGION",
+		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets",
 		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: issue.Key, Status: "in_progress"}}, notices: &outboxPublisher{},
 		handlers: []intake.Handler{engine}, now: func() time.Time { return clock }, log: quietLogger(),
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
@@ -518,7 +521,8 @@ func TestAResumedWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *test
 			engine := workflow.New(records, workflow.Config{Project: "legion", ReviewRoundCap: 10}, quietLogger())
 			clock := time.Now()
 			runner := &outbox{
-				pool: pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets",
+				dispatchProject: "LEGION",
+				pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets",
 				dispatch: &outboxDispatch{issue: dispatch.Issue{Key: issue.Key, Status: "needs_review"}}, notices: &outboxPublisher{},
 				handlers: []intake.Handler{engine}, now: func() time.Time { return clock }, log: quietLogger(),
 				provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
@@ -630,7 +634,8 @@ func TestOutboxSuperviseReturnsProvisioningFailure(t *testing.T) {
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 	row := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RolePlanner, Generation: issue.Generation}, time.Now())
 	runner := &outbox{
-		pool: pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets",
+		dispatchProject: "LEGION",
+		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets",
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
 			return workspace.Workspace{}, errors.New("provision failed")
 		},
@@ -934,7 +939,8 @@ func TestAClosedTreeSetBackToTodoRelaunchesItsArchitect(t *testing.T) {
 	engine := workflow.New(records, workflow.Config{Project: "legion"}, quietLogger())
 	admission := admit.New(records, 2, "legion", quietLogger())
 	runner := &outbox{
-		pool: pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets",
+		dispatchProject: "LEGION",
+		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets",
 		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: root.Key, Status: "todo"}}, handlers: []intake.Handler{engine, admission},
 		now: func() time.Time { return time.Now().Add(time.Hour) }, log: quietLogger(),
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
@@ -1001,7 +1007,8 @@ func TestAnEarlierGenerationsWorkspaceRemovalLeavesTheReadmittedTreesWorkspace(t
 	clock := time.Now().Add(time.Hour)
 	removals, busy := 0, true
 	runner := &outbox{
-		pool: pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets",
+		dispatchProject: "LEGION",
+		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets",
 		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: root.Key, Status: "todo"}}, handlers: []intake.Handler{engine, admission},
 		now: func() time.Time { return clock }, log: quietLogger(),
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
@@ -1051,7 +1058,8 @@ func TestARuntimeThatProvisionsInItsPodsLeavesTheHostWithoutWorkspaces(t *testin
 	rt.InPod = true
 	provisions, removals := 0, 0
 	runner := &outbox{
-		pool: pool, records: records, supervisor: sup, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets", log: quietLogger(),
+		dispatchProject: "LEGION",
+		pool:            pool, records: records, supervisor: sup, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets", log: quietLogger(),
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
 			provisions++
 			return workspace.Workspace{}, nil

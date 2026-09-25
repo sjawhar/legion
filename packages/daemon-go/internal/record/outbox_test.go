@@ -44,7 +44,7 @@ func TestOutboxPayloadsRoundTripThroughPostgres(t *testing.T) {
 			})
 			var claimed OutboxRow
 			inTx(t, st, func(tx pgx.Tx) {
-				rows, err := records.ClaimDue(ctx, tx, now, 1, time.Minute)
+				rows, err := records.ClaimDue(ctx, tx, "LEGION", now, 1, time.Minute)
 				must(t, err)
 				if len(rows) != 1 {
 					t.Fatalf("ClaimDue = %#v, want one row", rows)
