@@ -22,16 +22,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 )
 
-// ControllerLaunch says which side starts the interactive controller: the daemon opens it in a
-// pane it owns ("daemon", tmux), or the operator starts it on their own machine against the
-// daemon's API ("operator", a cluster the operator has no terminal in).
-type ControllerLaunch string
-
-const (
-	ControllerLaunchDaemon   ControllerLaunch = "daemon"
-	ControllerLaunchOperator ControllerLaunch = "operator"
-)
-
 // Runtime is what the supervisor has instead of a process table. Every method is about one
 // agent's process, addressed by the locator the runtime itself minted, except `Release`, which is
 // about a claim whether or not a process runs for it, and `Observe` and `ReconcileOrphans`, which
@@ -75,14 +65,20 @@ type Runtime interface {
 	Observe(ctx context.Context) (<-chan Observation, error)
 	// ReconcileOrphans ends what this runtime owns that belongs to no known claim — what a crash
 	// between spawning a process and persisting its locator leaves behind. known is every claim the
-	// daemon has not retired; the located ones also join the watch.
+	// daemon has not retired; the located ones also join the watch. What an earlier sweep adopted
+	// protects nothing: a process no sweep's known set names any more is the orphan sweep's. An
+	// entry that fails Validate is an error, and nothing of its claim is ended: tmux, which knows a
+	// claim's processes only by the locators it is given, then ends nothing at all; the sandbox,
+	// which finds a claim's Sandbox by the claim's own name, keeps that one and sweeps the rest.
 	ReconcileOrphans(ctx context.Context, known []Known, grace time.Duration) error
 	// AdoptWorkingCopy hands the agent's working copy the git identity its commits are authored
 	// with, in the place the working copy actually lives (which under a sandbox is not a
 	// directory the daemon can see).
 	AdoptWorkingCopy(ctx context.Context, loc Locator, id GitIdentity) error
-	// ControllerLaunch says which side starts the controller under this runtime.
-	ControllerLaunch() ControllerLaunch
+	// ProvisionsWorkspaces is whether the runtime provisions each claim's workspace where its
+	// process runs (a pod's init containers, on the tree volume). When it does, the daemon
+	// provisions and removes none on its own host.
+	ProvisionsWorkspaces() bool
 }
 
 // Known is one claim as a runtime is told of it — each entry of the orphan sweep's known set, and

@@ -291,7 +291,7 @@ func TestOutboxLeaseFencesConcurrentWorkersAndExpires(t *testing.T) {
 
 	tx1, err := st.BeginTx(ctx, pgx.TxOptions{})
 	must(t, err)
-	rows1, err := records.ClaimDue(ctx, tx1, now, 1, time.Minute)
+	rows1, err := records.ClaimDue(ctx, tx1, "LEGION", now, 1, time.Minute)
 	must(t, err)
 	if len(rows1) != 1 || rows1[0].LeaseToken == "" || rows1[0].LeaseUntil == nil {
 		t.Fatalf("first claim = %#v, want one row with a lease", rows1)
@@ -299,7 +299,7 @@ func TestOutboxLeaseFencesConcurrentWorkersAndExpires(t *testing.T) {
 
 	tx2, err := st.BeginTx(ctx, pgx.TxOptions{})
 	must(t, err)
-	rows2, err := records.ClaimDue(ctx, tx2, now, 1, time.Minute)
+	rows2, err := records.ClaimDue(ctx, tx2, "LEGION", now, 1, time.Minute)
 	must(t, err)
 	if len(rows2) != 0 {
 		t.Fatalf("second concurrent claim = %#v, want no locked row", rows2)
@@ -314,7 +314,7 @@ func TestOutboxLeaseFencesConcurrentWorkersAndExpires(t *testing.T) {
 
 	tx3, err := st.BeginTx(ctx, pgx.TxOptions{})
 	must(t, err)
-	rows3, err := records.ClaimDue(ctx, tx3, now.Add(2*time.Minute), 1, time.Minute)
+	rows3, err := records.ClaimDue(ctx, tx3, "LEGION", now.Add(2*time.Minute), 1, time.Minute)
 	must(t, err)
 	if len(rows3) != 1 || rows3[0].ID != rows1[0].ID {
 		t.Fatalf("expired lease claim = %#v, want the original outbox row", rows3)
@@ -323,10 +323,53 @@ func TestOutboxLeaseFencesConcurrentWorkersAndExpires(t *testing.T) {
 	must(t, tx3.Commit(ctx))
 
 	inTx(t, st, func(tx pgx.Tx) {
-		rows, err := records.ClaimDue(ctx, tx, now.Add(3*time.Minute), 1, time.Minute)
+		rows, err := records.ClaimDue(ctx, tx, "LEGION", now.Add(3*time.Minute), 1, time.Minute)
 		must(t, err)
 		if len(rows) != 0 {
 			t.Fatalf("finished row still due: %#v", rows)
+		}
+	})
+}
+
+// Daemons of different projects share one database, and each runs only its own project's outbox:
+// a claim leases no row of another project's issue, which stays due for its own daemon, and the
+// pending status writes list none of them. A project whose key another begins with is another.
+func TestTheOutboxIsEachProjectsOwn(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	status := json.RawMessage(`{"status":"in_progress"}`)
+	inTx(t, st, func(tx pgx.Tx) {
+		for _, issue := range []string{"LEGION-208", "OTHER-7", "LEGION2-5"} {
+			must(t, records.Enqueue(ctx, tx, OutboxRow{Kind: OutboxKindDispatchStatus, Issue: issue, Payload: status, NextAt: now}))
+		}
+		must(t, records.Enqueue(ctx, tx, OutboxRow{Kind: OutboxKindNotice, Issue: "OTHER-7", Payload: json.RawMessage(`{"kind":"phase-finished"}`), NextAt: now}))
+	})
+	issues := func(rows []OutboxRow) []string {
+		keys := []string{}
+		for _, row := range rows {
+			keys = append(keys, string(row.Kind)+":"+row.Issue)
+		}
+		return keys
+	}
+	inTx(t, st, func(tx pgx.Tx) {
+		claimed, err := records.ClaimDue(ctx, tx, "LEGION", now, 10, time.Minute)
+		must(t, err)
+		if got := issues(claimed); !reflect.DeepEqual(got, []string{"dispatch_status:LEGION-208"}) {
+			t.Errorf("LEGION's claim = %v, want its own status row alone", got)
+		}
+		pending, err := records.PendingStatusWrites(ctx, tx, "LEGION")
+		must(t, err)
+		if got := issues(pending); !reflect.DeepEqual(got, []string{"dispatch_status:LEGION-208"}) {
+			t.Errorf("LEGION's pending status writes = %v, want its own alone", got)
+		}
+	})
+	inTx(t, st, func(tx pgx.Tx) {
+		claimed, err := records.ClaimDue(ctx, tx, "OTHER", now, 10, time.Minute)
+		must(t, err)
+		if got := issues(claimed); !reflect.DeepEqual(got, []string{"dispatch_status:OTHER-7", "notice:OTHER-7"}) {
+			t.Errorf("OTHER's claim after LEGION's = %v, want both of its rows, due and unleased", got)
 		}
 	})
 }
@@ -349,13 +392,13 @@ func TestPendingStatusWritesListsEveryUnfinishedStatusEffect(t *testing.T) {
 	// LEGION-208's write fails and backs off a minute, as outbox.retry records it; LEGION-209's lands.
 	backoffUntil := now.Add(time.Minute)
 	inTx(t, st, func(tx pgx.Tx) {
-		rows, err := records.ClaimDue(ctx, tx, now, 10, time.Minute)
+		rows, err := records.ClaimDue(ctx, tx, "LEGION", now, 10, time.Minute)
 		must(t, err)
 		if len(rows) != 3 {
 			t.Fatalf("claimed %#v, want all three rows", rows)
 		}
 		// Leased for an attempt in flight, both status writes are still unfinished.
-		leased, err := records.PendingStatusWrites(ctx, tx)
+		leased, err := records.PendingStatusWrites(ctx, tx, "LEGION")
 		must(t, err)
 		if len(leased) != 2 || leased[0].Issue != "LEGION-208" || leased[1].Issue != "LEGION-209" {
 			t.Fatalf("pending status writes while leased = %#v, want the LEGION-208 and LEGION-209 status rows", leased)
@@ -378,7 +421,7 @@ func TestPendingStatusWritesListsEveryUnfinishedStatusEffect(t *testing.T) {
 	var pending []OutboxRow
 	inTx(t, st, func(tx pgx.Tx) {
 		var err error
-		pending, err = records.PendingStatusWrites(ctx, tx)
+		pending, err = records.PendingStatusWrites(ctx, tx, "LEGION")
 		must(t, err)
 	})
 	if len(pending) != 3 {

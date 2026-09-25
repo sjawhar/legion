@@ -28,7 +28,7 @@ func TestOutboxPayloadsRoundTripThroughPostgres(t *testing.T) {
 		SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RoleArchitect, Task: "Write the spec."},
 		GateSeed{ArtifactID: "artifact-208", Version: 4},
 		LingerClose{Generation: 7},
-		WorkspaceRemove{},
+		WorkspaceRemove{Generation: 3},
 	}
 	for _, payload := range payloads {
 		t.Run(string(payload.OutboxKind()), func(t *testing.T) {
@@ -44,7 +44,7 @@ func TestOutboxPayloadsRoundTripThroughPostgres(t *testing.T) {
 			})
 			var claimed OutboxRow
 			inTx(t, st, func(tx pgx.Tx) {
-				rows, err := records.ClaimDue(ctx, tx, now, 1, time.Minute)
+				rows, err := records.ClaimDue(ctx, tx, "LEGION", now, 1, time.Minute)
 				must(t, err)
 				if len(rows) != 1 {
 					t.Fatalf("ClaimDue = %#v, want one row", rows)

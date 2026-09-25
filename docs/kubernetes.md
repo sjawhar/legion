@@ -300,6 +300,16 @@ and resource allowance. Nothing in this mode uses a Job, a StatefulSet, or `acti
 
 ### Configuration
 
+This section is the TypeScript daemon's. The Go coordinator (`packages/daemon-go`, LEGION-208)
+reads the same `runtime.kubernetes` key with different rules, and refuses the examples below as
+written: its runtime selects the Legion pool itself, so `scheduling.node_selector` may not set
+`legion.dev/pool`; `resources` is keyed by role, with no `role_profiles`; `storage_class` and the
+`gateway` block (`url`, `audience`, `service_account`, `token_expiry_seconds`, 600 to 3600) are
+required; `bind` must be an address pods reach, never `0.0.0.0` or loopback, since every pod
+dials the worker stream at `tcp://<bind>:<worker_stream_port>`; and no Legion URL a pod is handed
+(`daemon_url`, `envoy_url`, `dispatch_url`, each `nats_urls` entry) may name a loopback or
+unspecified host (`packages/daemon-go/internal/config/kubernetes.go`).
+
 `runtime` is either the scalar `tmux` (the default) or a mapping whose single key selects the
 Kubernetes runtime and carries its settings:
 
@@ -396,7 +406,8 @@ with `runtime: kubernetes`. The state file intentionally holds the controller's 
 root and worker pod locators; the daemon routes them by process kind.
 
 Before this production cutover, run the local host-daemon smoke and its checkpoints on the stack
-head.
+head. The block below is the TypeScript daemon's; [Configuration](#configuration) says where the Go
+coordinator's rules differ.
 
 ```yaml
 runtime:

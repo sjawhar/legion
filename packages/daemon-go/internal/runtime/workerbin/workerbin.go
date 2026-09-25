@@ -1,7 +1,8 @@
 // Package workerbin installs the directories at the head of a Legion agent's PATH, under a root
 // directory: worker-bin, whose gh is the shim that routes the agent's gh through `legion gh`, and,
-// where the agents run on the daemon's own machine, bin, whose legion launcher execs the daemon's
-// executable. A pod's init container installs the shim alone, because a pod's PATH names the
+// where the agents run on a host, bin, whose legion launcher execs the legion that installed it: the
+// daemon's, for a tmux daemon's panes, and the operator's, for the controller `legion controller
+// start` runs. A pod's init container installs the shim alone, because a pod's PATH names the
 // image's legion.
 package workerbin
 
@@ -29,8 +30,9 @@ func InstallGh(root string) error {
 }
 
 // Install installs the gh shim and bin's legion launcher, which execs legionExecutable (the shipped
-// daemon's legionCliLauncherScript), so an agent on the daemon's machine never reaches another
-// `legion` on the operator's PATH.
+// daemon's legionCliLauncherScript), so an agent under root never reaches another `legion` on the
+// PATH it inherits. Its two callers pass their own executable: a tmux daemon's boot
+// (internal/daemon) and `legion controller start` on the operator's machine (cmd/legion).
 func Install(root, legionExecutable string) error {
 	if !filepath.IsAbs(legionExecutable) {
 		return fmt.Errorf("legion launcher target %q is not an absolute path", legionExecutable)

@@ -34,8 +34,8 @@ func TestOutboxLeaseLetsOnlyOneRunnerExecuteDueRow(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	client := &blockingDispatch{issue: dispatch.Issue{Key: "LEGION-208", Status: "todo"}, entered: entered, release: release}
-	first := &outbox{pool: pool, records: records, dispatch: client, now: func() time.Time { return now }}
-	second := &outbox{pool: pool, records: records, dispatch: client, now: func() time.Time { return now }}
+	first := &outbox{pool: pool, dispatchProject: "LEGION", records: records, dispatch: client, now: func() time.Time { return now }}
+	second := &outbox{pool: pool, dispatchProject: "LEGION", records: records, dispatch: client, now: func() time.Time { return now }}
 
 	done := make(chan error, 1)
 	go func() { done <- first.RunOnce(context.Background()) }()
@@ -61,7 +61,7 @@ func TestOutboxRetryBacksOffFailedEffect(t *testing.T) {
 	now := time.Now().UTC()
 	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, now))
 	client := &blockingDispatch{issue: dispatch.Issue{Key: "LEGION-208", Status: "todo"}, fail: errors.New("Dispatch down")}
-	runner := &outbox{pool: pool, records: records, dispatch: client, now: func() time.Time { return now }}
+	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, dispatch: client, now: func() time.Time { return now }}
 
 	if err := runner.RunOnce(context.Background()); err != nil {
 		t.Fatalf("run once: %v", err)
@@ -89,7 +89,7 @@ func TestOutboxRestartDrainsDueThenExpiredLeaseRows(t *testing.T) {
 
 	var claimed record.OutboxRow
 	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
-		rows, err := records.ClaimDue(context.Background(), tx, now, 1, outboxLease)
+		rows, err := records.ClaimDue(context.Background(), tx, "LEGION", now, 1, outboxLease)
 		if err != nil {
 			return err
 		}
@@ -103,7 +103,7 @@ func TestOutboxRestartDrainsDueThenExpiredLeaseRows(t *testing.T) {
 	}
 
 	client := &blockingDispatch{issue: dispatch.Issue{Key: "LEGION-208", Status: "todo"}}
-	restarted := &outbox{pool: pool, records: records, dispatch: client, now: func() time.Time { return now }}
+	restarted := &outbox{pool: pool, dispatchProject: "LEGION", records: records, dispatch: client, now: func() time.Time { return now }}
 	if err := restarted.RunOnce(context.Background()); err != nil {
 		t.Fatalf("drain due row after restart: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestOutboxStaleLeaseFinishLeavesNewLeaseRowUntouched(t *testing.T) {
 
 	var first, second record.OutboxRow
 	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
-		rows, err := records.ClaimDue(context.Background(), tx, now, 1, outboxLease)
+		rows, err := records.ClaimDue(context.Background(), tx, "LEGION", now, 1, outboxLease)
 		if err != nil {
 			return err
 		}
@@ -144,7 +144,7 @@ func TestOutboxStaleLeaseFinishLeavesNewLeaseRowUntouched(t *testing.T) {
 		t.Fatalf("claim first lease: %v", err)
 	}
 	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
-		rows, err := records.ClaimDue(context.Background(), tx, first.LeaseUntil.Add(time.Nanosecond), 1, outboxLease)
+		rows, err := records.ClaimDue(context.Background(), tx, "LEGION", first.LeaseUntil.Add(time.Nanosecond), 1, outboxLease)
 		if err != nil {
 			return err
 		}
@@ -295,7 +295,7 @@ func TestOutboxWritesOneIssuesStatusesInOrderWhenTheOlderFailsFirst(t *testing.T
 	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "in_progress", Status: "testing"}, now))
 	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "testing", Status: "needs_review"}, now))
 	board := &boardDispatch{status: "in_progress", failures: 1}
-	runner := &outbox{pool: pool, records: records, dispatch: board, now: func() time.Time { return now }}
+	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, dispatch: board, now: func() time.Time { return now }}
 
 	if err := runner.RunOnce(context.Background()); err != nil {
 		t.Fatalf("first run: %v", err)
@@ -355,7 +355,7 @@ func TestOutboxRunSurvivesAFailedClaimAndAFailedFinish(t *testing.T) {
 	}
 	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, now))
 	client := &blockingDispatch{issue: dispatch.Issue{Key: "LEGION-208", Status: "todo"}}
-	runner := &outbox{pool: pool, records: records, dispatch: client, now: clock, log: quietLogger()}
+	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, dispatch: client, now: clock, log: quietLogger()}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -385,7 +385,7 @@ type flakyOutboxStore struct {
 	finishesFailed int
 }
 
-func (s *flakyOutboxStore) ClaimDue(ctx context.Context, tx pgx.Tx, now time.Time, limit int, leaseFor time.Duration) ([]record.OutboxRow, error) {
+func (s *flakyOutboxStore) ClaimDue(ctx context.Context, tx pgx.Tx, project string, now time.Time, limit int, leaseFor time.Duration) ([]record.OutboxRow, error) {
 	s.mu.Lock()
 	fail := s.claimFailures > 0
 	if fail {
@@ -395,7 +395,7 @@ func (s *flakyOutboxStore) ClaimDue(ctx context.Context, tx pgx.Tx, now time.Tim
 	if fail {
 		return nil, errors.New("FATAL: terminating connection due to administrator command (SQLSTATE 57P01)")
 	}
-	return s.Store.ClaimDue(ctx, tx, now, limit, leaseFor)
+	return s.Store.ClaimDue(ctx, tx, project, now, limit, leaseFor)
 }
 
 func (s *flakyOutboxStore) FinishOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) error {
@@ -436,7 +436,7 @@ func TestOutboxTreeCloseRowEndsTheTreesRootClaim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create root claim: %v", err)
 	}
-	runner := &outbox{pool: pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets"}
+	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets"}
 
 	if err := runner.execute(context.Background(), mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "tree_close", Tree: issue.Tree, Role: claim.RoleArchitect, Generation: issue.Generation}, time.Now())); err != nil {
 		t.Fatalf("stop the root at its tree's close: %v", err)
@@ -619,7 +619,8 @@ func TestOutboxStartWaitingOnThePendingDeliveryIsNotAFailure(t *testing.T) {
 	var logs bytes.Buffer
 	now := time.Now().UTC()
 	runner := &outbox{
-		pool: pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets",
+		dispatchProject: "LEGION",
+		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets",
 		now: func() time.Time { return now }, log: slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 	}
 	enqueueOutbox(t, pool, records, mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RoleImplementer, Task: "the retry's task", Generation: issue.Generation}, now))

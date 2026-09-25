@@ -92,9 +92,7 @@ func (r *Runtime) ReconcileOrphans(ctx context.Context, known []runtime.Known, g
 	}
 	r.launchMu.Lock()
 	defer r.launchMu.Unlock()
-	for _, loc := range located {
-		r.track(loc, "")
-	}
+	r.adoptExactly(located)
 	knownWindows, knownPanes := map[string]bool{}, map[string]bool{}
 	for _, entry := range r.trackedProcesses() {
 		knownWindows[entry.locator.Tmux.Window] = true

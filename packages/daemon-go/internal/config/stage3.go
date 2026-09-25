@@ -49,6 +49,10 @@ type GitHubApps struct {
 	Review    GitHubApp
 }
 
+// missingDispatchTokenFile is the one refusal of a Dispatch URL without its bearer, in the daemon's
+// loader and the controller's.
+const missingDispatchTokenFile = "dispatch_token_file is required when dispatch_url is configured"
+
 var (
 	projectKeyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9]*$`)
 	roleNamePattern   = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
@@ -84,35 +88,25 @@ func readProject(value *yaml.Node, key string) (Project, error) {
 	if value.Kind != yaml.MappingNode {
 		return Project{}, fmt.Errorf("%s must be a mapping with repo", key)
 	}
+	fields, err := members(value, key, "repo", "merge_queue_role", "mergeQueueRole")
+	var unknown unknownKeyError
+	if errors.As(err, &unknown) {
+		// The shipped loader's own words (config.ts:664-667).
+		return Project{}, fmt.Errorf(`Unknown key %q`, key+"."+unknown.name)
+	}
+	if err != nil {
+		return Project{}, err
+	}
 	var project Project
-	seen := map[string]bool{}
-	for index := 0; index+1 < len(value.Content); index += 2 {
-		fieldNode, fieldValue := value.Content[index], value.Content[index+1]
-		field := fieldNode.Value
-		if seen[field] {
-			return Project{}, fmt.Errorf("%s names %s twice", key, field)
-		}
-		seen[field] = true
-		switch field {
-		case "repo":
-			read, err := readString(fieldValue, key+".repo")
-			if err != nil {
-				return Project{}, err
-			}
-			if read != nil {
-				project.Repo = *read
-			}
-		case "merge_queue_role", "mergeQueueRole":
-			read, err := readString(fieldValue, key+".merge_queue_role")
-			if err != nil {
-				return Project{}, err
-			}
-			if read != nil {
-				project.MergeQueueRole = *read
-			}
-		default:
-			return Project{}, fmt.Errorf(`Unknown key %q`, key+"."+field)
-		}
+	if project.Repo, err = stringOf(fields["repo"], key+".repo"); err != nil {
+		return Project{}, err
+	}
+	role := fields["merge_queue_role"]
+	if role == nil {
+		role = fields["mergeQueueRole"]
+	}
+	if project.MergeQueueRole, err = stringOf(role, key+".merge_queue_role"); err != nil {
+		return Project{}, err
 	}
 	if strings.Count(project.Repo, "/") != 1 || strings.HasPrefix(project.Repo, "/") || strings.HasSuffix(project.Repo, "/") {
 		got := project.Repo
@@ -120,6 +114,14 @@ func readProject(value *yaml.Node, key string) (Project, error) {
 			got = "undefined"
 		}
 		return Project{}, fmt.Errorf(`%s.repo must be "owner/name" (got %q)`, key, got)
+	}
+	owner, name, _ := strings.Cut(project.Repo, "/")
+	for _, segment := range []string{owner, name} {
+		if segment == "." || segment == ".." {
+			// Every path Legion derives from the repository joins these two names under the state
+			// directory, and a dot segment would name another directory than the repository's.
+			return Project{}, fmt.Errorf(`%s.repo %q has a %q segment, which names no GitHub owner or repository`, key, project.Repo, segment)
+		}
 	}
 	if project.MergeQueueRole != "" && !roleNamePattern.MatchString(project.MergeQueueRole) {
 		return Project{}, fmt.Errorf("%s.merge_queue_role is a bare role name (no notifications.role. prefix)", key)
@@ -131,23 +133,24 @@ func readGates(value *yaml.Node, key string) (*Gates, error) {
 	if value.Tag == "!!null" || value.Kind != yaml.MappingNode {
 		return nil, fmt.Errorf("%s must be a mapping", key)
 	}
-	gates := Gates{Design: DesignGateRootIssues}
 	for index := 0; index+1 < len(value.Content); index += 2 {
-		field, fieldValue := value.Content[index].Value, value.Content[index+1]
-		switch field {
-		case "merge":
+		// A present merge is refused whatever its value, null included, as the shipped loader
+		// refuses it (config.ts:975-982).
+		if value.Content[index].Value == "merge" {
 			return nil, errors.New(gatesMergeMessage)
-		case "design":
-			read, err := readString(fieldValue, key+".design")
-			if err != nil {
-				return nil, err
-			}
-			if read != nil {
-				gates.Design = DesignGate(*read)
-			}
-		default:
-			return nil, fmt.Errorf("unknown key %s.%s", key, field)
 		}
+	}
+	fields, err := members(value, key, "design")
+	if err != nil {
+		return nil, err
+	}
+	gates := Gates{Design: DesignGateRootIssues}
+	design, err := stringOf(fields["design"], key+".design")
+	if err != nil {
+		return nil, err
+	}
+	if design != "" {
+		gates.Design = DesignGate(design)
 	}
 	if gates.Design != DesignGateRootIssues && gates.Design != DesignGateOff {
 		return nil, fmt.Errorf("%s.design must be 'root-issues' or 'off'", key)
@@ -159,19 +162,12 @@ func readGitHubApps(value *yaml.Node, key string) (*GitHubApps, error) {
 	if value.Tag == "!!null" || value.Kind != yaml.MappingNode {
 		return nil, fmt.Errorf("%s must be a mapping", key)
 	}
-	roles := map[string]*yaml.Node{}
-	for index := 0; index+1 < len(value.Content); index += 2 {
-		name := value.Content[index].Value
-		if name != "implement" && name != "review" {
-			return nil, fmt.Errorf("unknown key %s.%s", key, name)
-		}
-		if _, exists := roles[name]; exists {
-			return nil, fmt.Errorf("%s names %s twice", key, name)
-		}
-		roles[name] = value.Content[index+1]
+	roles, err := members(value, key, "implement", "review")
+	if err != nil {
+		return nil, err
 	}
 	for _, role := range []string{"implement", "review"} {
-		if roles[role] == nil || roles[role].Tag == "!!null" {
+		if roles[role] == nil {
 			return nil, fmt.Errorf("%s.%s is required", key, role)
 		}
 	}
@@ -190,58 +186,28 @@ func readGitHubApp(value *yaml.Node, key string) (GitHubApp, error) {
 	if value.Kind != yaml.MappingNode {
 		return GitHubApp{}, fmt.Errorf("%s must be a mapping", key)
 	}
+	fields, err := members(value, key, "app_id", "private_key", "private_key_command", "private_key_secret", "installations")
+	if err != nil {
+		return GitHubApp{}, err
+	}
 	var app GitHubApp
-	seen := map[string]bool{}
-	for index := 0; index+1 < len(value.Content); index += 2 {
-		field, fieldValue := value.Content[index].Value, value.Content[index+1]
-		if seen[field] {
-			return GitHubApp{}, fmt.Errorf("%s names %s twice", key, field)
+	for _, field := range []struct {
+		name   string
+		target *string
+	}{
+		{"app_id", &app.AppID}, {"private_key", &app.PrivateKey},
+		{"private_key_command", &app.PrivateKeyCommand}, {"private_key_secret", &app.PrivateKeySecret},
+	} {
+		if *field.target, err = stringOf(fields[field.name], key+"."+field.name); err != nil {
+			return GitHubApp{}, err
 		}
-		seen[field] = true
-		switch field {
-		case "app_id":
-			read, err := readString(fieldValue, key+".app_id")
-			if err != nil {
-				return GitHubApp{}, err
-			}
-			if read != nil {
-				app.AppID = *read
-			}
-		case "private_key":
-			read, err := readString(fieldValue, key+".private_key")
-			if err != nil {
-				return GitHubApp{}, err
-			}
-			if read != nil {
-				app.PrivateKey = *read
-			}
-		case "private_key_command":
-			read, err := readString(fieldValue, key+".private_key_command")
-			if err != nil {
-				return GitHubApp{}, err
-			}
-			if read != nil {
-				app.PrivateKeyCommand = *read
-			}
-		case "private_key_secret":
-			read, err := readString(fieldValue, key+".private_key_secret")
-			if err != nil {
-				return GitHubApp{}, err
-			}
-			if read != nil {
-				app.PrivateKeySecret = *read
-			}
-			if strings.ContainsAny(app.PrivateKeySecret, " \t\n\r") {
-				return GitHubApp{}, fmt.Errorf("%s.private_key_secret must be a single secretsd key name (no whitespace)", key)
-			}
-		case "installations":
-			installations, err := readInstallations(fieldValue, key+".installations")
-			if err != nil {
-				return GitHubApp{}, err
-			}
-			app.Installations = installations
-		default:
-			return GitHubApp{}, fmt.Errorf("unknown key %s.%s", key, field)
+	}
+	if strings.ContainsAny(app.PrivateKeySecret, " \t\n\r") {
+		return GitHubApp{}, fmt.Errorf("%s.private_key_secret must be a single secretsd key name (no whitespace)", key)
+	}
+	if fields["installations"] != nil {
+		if app.Installations, err = readInstallations(fields["installations"], key+".installations"); err != nil {
+			return GitHubApp{}, err
 		}
 	}
 	if strings.TrimSpace(app.AppID) == "" {
@@ -452,7 +418,7 @@ func commandError(field string, err error) error {
 
 func resolveStage3(file fileConfig, configDir string, cfg *Config) error {
 	if file.DispatchURL != nil {
-		url, err := baseURL(*file.DispatchURL, "dispatch_url")
+		url, err := dispatchBase(*file.DispatchURL, "dispatch_url")
 		if err != nil {
 			return err
 		}
@@ -477,11 +443,17 @@ func resolveStage3(file fileConfig, configDir string, cfg *Config) error {
 	if file.GitHubApps != nil {
 		cfg.GitHubApps = *file.GitHubApps
 	}
-	// Boot reads the Dispatch bearer through this pointer (internal/daemon/workflow.go bind), so
-	// the file is refused here too, naming the key: `legion start --check-config` never passes a
-	// file `legion start` refuses for it.
-	if file.DispatchURL != nil && cfg.DispatchTokenFile == "" {
-		return errors.New("dispatch_token_file is required when dispatch_url is configured")
+	// A workflow boot needs its Dispatch bearer, its intake, and its own project's repository; each
+	// is refused here, so `legion start --check-config` never passes a file `legion start` refuses.
+	if file.DispatchURL != nil {
+		switch _, ok := cfg.Projects[cfg.Project]; {
+		case cfg.DispatchTokenFile == "":
+			return errors.New(missingDispatchTokenFile)
+		case len(cfg.NatsURLs) == 0:
+			return errors.New("nats_urls is required when dispatch_url is configured: the workflow's intake reads Envoy's notification stream")
+		case !ok:
+			return fmt.Errorf("projects must configure %s, the daemon's own project", cfg.Project)
+		}
 	}
 	if file.Linger != nil {
 		cfg.Linger = *file.Linger

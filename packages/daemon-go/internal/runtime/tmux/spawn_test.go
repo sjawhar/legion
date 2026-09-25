@@ -291,6 +291,44 @@ func TestRuntimeOwnedIsWhatEveryPaneIsToldByTheRuntime(t *testing.T) {
 	}
 }
 
+// Only a workspace that does not exist was never provisioned. A stat that fails for any other
+// reason says so, with its error, rather than sending an operator to look for a missing workspace;
+// and a file where the workspace belongs is not one.
+func TestAWorkspaceThatCannotBeReadIsNotReportedAsNeverProvisioned(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a directory whatever its mode")
+	}
+	stateDir := t.TempDir()
+	r := &Runtime{stateDir: stateDir}
+	spec := testSpec()
+	spec.Repository = "sjawhar/legion"
+	repositories := filepath.Join(stateDir, "workspaces", "sjawhar", "legion")
+	if err := os.MkdirAll(filepath.Join(repositories, "legion-43"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(repositories, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(repositories, 0o700) })
+	_, err := r.workspaceDir(spec)
+	if err == nil || strings.Contains(err.Error(), "never provisioned") || !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("workspaceDir under an unreadable directory = %v, want the stat's own failure", err)
+	}
+
+	if err := os.Chmod(repositories, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(repositories, "legion-43")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repositories, "legion-43"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.workspaceDir(spec); err == nil || strings.Contains(err.Error(), "never provisioned") || !strings.Contains(err.Error(), "is not a directory") {
+		t.Fatalf("workspaceDir over a file = %v, want it named as not a directory", err)
+	}
+}
+
 // A pane works in the issue's workspace under the daemon's state directory: the one the outbox
 // provisioned for the repository (workspace.Location), which a launch never makes up when it is
 // missing, or, with no repository configured, the issue's own directory, made on the way.

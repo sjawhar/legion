@@ -85,26 +85,10 @@ func LoadController(path, daemonURL string) (ControllerConfig, error) {
 	}
 
 	configDir := filepath.Dir(path)
-	optional := func(key string) (string, error) {
-		node, set := values[key]
-		if !set {
-			return "", nil
-		}
-		value, err := readNonEmptyString(node, key)
-		if err != nil || value == nil {
-			return "", err
-		}
-		return *value, nil
-	}
-	required := func(key string) (string, error) {
-		value, err := optional(key)
-		if err == nil && value == "" {
-			err = fmt.Errorf("%s is required in the controller configuration", key)
-		}
-		return value, err
-	}
+	const inController = " in the controller configuration"
+	required := func(key string) (string, error) { return requiredString(values[key], key, inController) }
 	optionalPath := func(key string) (string, error) {
-		value, err := optional(key)
+		value, err := optionalString(values[key], key)
 		if err != nil || value == "" {
 			return "", err
 		}
@@ -138,17 +122,8 @@ func LoadController(path, daemonURL string) (ControllerConfig, error) {
 		return ControllerConfig{}, err
 	}
 	if node, set := values["nats_urls"]; set {
-		urls, err := readStrings(node, "nats_urls")
-		if err != nil {
+		if cfg.NatsURLs, err = readNatsURLs(node, "nats_urls"); err != nil {
 			return ControllerConfig{}, err
-		}
-		for _, url := range urls {
-			if _, err := validURL(url, "nats_urls"); err != nil {
-				return ControllerConfig{}, fmt.Errorf("nats_urls entry %q must be a valid URL", url)
-			}
-			if !slices.Contains(cfg.NatsURLs, url) {
-				cfg.NatsURLs = append(cfg.NatsURLs, url)
-			}
 		}
 	}
 	if len(cfg.NatsURLs) == 0 {
@@ -157,7 +132,7 @@ func LoadController(path, daemonURL string) (ControllerConfig, error) {
 	if cfg.EnvoyTokenFile, err = optionalPath("envoy_token_file"); err != nil {
 		return ControllerConfig{}, err
 	}
-	dispatchURL, err := optional("dispatch_url")
+	dispatchURL, err := optionalString(values["dispatch_url"], "dispatch_url")
 	if err != nil {
 		return ControllerConfig{}, err
 	}
@@ -166,23 +141,18 @@ func LoadController(path, daemonURL string) (ControllerConfig, error) {
 	}
 	switch {
 	case dispatchURL != "" && cfg.DispatchTokenFile == "":
-		return ControllerConfig{}, errors.New("dispatch_url is set but dispatch_token_file is not")
+		return ControllerConfig{}, errors.New(missingDispatchTokenFile)
 	case dispatchURL == "" && cfg.DispatchTokenFile != "":
 		return ControllerConfig{}, errors.New("dispatch_token_file is set but dispatch_url is not")
 	case dispatchURL != "":
-		if cfg.DispatchURL, err = baseURL(dispatchURL, "dispatch_url"); err != nil {
+		if cfg.DispatchURL, err = dispatchBase(dispatchURL, "dispatch_url"); err != nil {
 			return ControllerConfig{}, err
-		}
-		// A trailing slash is already gone: `/mcp/` is the MCP endpoint too
-		// (packages/daemon/src/daemon/config.ts:754-760).
-		if strings.HasSuffix(cfg.DispatchURL, "/mcp") {
-			return ControllerConfig{}, errors.New("dispatch_url must be the dispatch service base URL, not the /mcp endpoint")
 		}
 	}
 	if cfg.InstructionsPath, err = optionalPath("instructions"); err != nil {
 		return ControllerConfig{}, err
 	}
-	if cfg.OmpInvocation, err = optional("omp_invocation"); err != nil {
+	if cfg.OmpInvocation, err = optionalString(values["omp_invocation"], "omp_invocation"); err != nil {
 		return ControllerConfig{}, err
 	}
 	if node, set := values["omp_launch_prefix"]; set {

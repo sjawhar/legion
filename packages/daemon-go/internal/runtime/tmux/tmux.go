@@ -266,9 +266,9 @@ func lookPath(command, searchPath string) (string, error) {
 // Socket is the private server's socket and session name, `legion-<project>`.
 func (r *Runtime) Socket() string { return r.socket }
 
-// ControllerLaunch is "daemon": under tmux the daemon opens the interactive controller in a pane
-// of its own server.
-func (r *Runtime) ControllerLaunch() runtime.ControllerLaunch { return runtime.ControllerLaunchDaemon }
+// ProvisionsWorkspaces is false: a pane runs in a workspace the daemon provisioned under its own
+// state directory before the launch.
+func (r *Runtime) ProvisionsWorkspaces() bool { return false }
 
 // result is one tmux invocation's outcome. timedOut is the budget the client was killed at, zero
 // when it returned on its own.
@@ -382,6 +382,33 @@ func (r *Runtime) untrack(loc runtime.Locator) {
 	delete(r.tracked, loc.Incarnation)
 }
 
+// adoptExactly makes what the runtime watches because a sweep told it of — an adopted process —
+// exactly the located known claims: each is watched, and one adopted before that the sweep no
+// longer names is let go. A sweep reads the daemon's claims before it reconciles, so one that read
+// them just before a claim's Release adopts the pane that Release let go; the next sweep, which no
+// longer names the retired claim, lets it go again and reaps it. The panes this runtime opened stay
+// watched until they are stopped or found gone.
+func (r *Runtime) adoptExactly(located []runtime.Locator) {
+	r.trackedMu.Lock()
+	defer r.trackedMu.Unlock()
+	named := map[string]bool{}
+	for _, loc := range located {
+		named[loc.Incarnation] = true
+	}
+	for incarnation, entry := range r.tracked {
+		if entry.issue == "" && !named[incarnation] {
+			delete(r.tracked, incarnation)
+		}
+	}
+	for _, loc := range located {
+		issue := ""
+		if existing, ok := r.tracked[loc.Incarnation]; ok {
+			issue = existing.issue
+		}
+		r.tracked[loc.Incarnation] = &trackedProcess{locator: loc, issue: issue}
+	}
+}
+
 // untrackClaim stops watching every process of the claim.
 func (r *Runtime) untrackClaim(token claim.Token) {
 	r.trackedMu.Lock()
@@ -424,7 +451,7 @@ func (r *Runtime) Suspend(ctx context.Context, loc runtime.Locator) error {
 // could not stop, or one a failed Suspend left running before the claim's Release with no locator,
 // is then the orphan sweep's once the daemon retires the claim, never protected by the watch until
 // it ends itself. A claim the daemon still knows with its locator — a stop the operator will ask
-// again — is watched again at the next sweep, which adopts every located known claim.
+// again — is watched again at the next sweep, which adopts exactly the located known claims.
 func (r *Runtime) Release(ctx context.Context, k runtime.Known) error {
 	if err := k.Validate(); err != nil {
 		return fmt.Errorf("release: %w", err)

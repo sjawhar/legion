@@ -589,7 +589,7 @@ func (e *Engine) lingerExpired(ctx context.Context, tx pgx.Tx, fact intake.Linge
 		if err := e.everyClaim(ctx, tx, member, "tree_close"); err != nil {
 			return intake.Result{}, err
 		}
-		if err := e.enqueue(ctx, tx, member.Key, record.WorkspaceRemove{}); err != nil {
+		if err := e.enqueue(ctx, tx, member.Key, record.WorkspaceRemove{Generation: member.Generation}); err != nil {
 			return intake.Result{}, err
 		}
 	}

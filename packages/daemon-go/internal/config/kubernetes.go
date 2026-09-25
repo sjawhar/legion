@@ -3,8 +3,10 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"regexp"
-	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -62,8 +64,11 @@ type Gateway struct {
 const (
 	kubernetesKey     = "runtime.kubernetes"
 	defaultTreeVolume = "20Gi"
-	// minTokenExpiry is the shortest projected service account token Kubernetes issues.
+	// minTokenExpiry is the shortest projected service account token Kubernetes issues, and
+	// maxTokenExpiry the longest the cluster's admission policy admits for a Legion pod
+	// (agent-c #20053, the legion-sandbox-pods fence).
 	minTokenExpiry = 600
+	maxTokenExpiry = 3600
 	// poolLabel is the node label that selects the Legion pool. The runtime sets it on every pod,
 	// and the cluster's admission policy requires its value.
 	poolLabel = "legion.dev/pool"
@@ -89,65 +94,36 @@ func readKubernetes(value *yaml.Node) (*Kubernetes, error) {
 	if fields["role_profiles"] != nil {
 		return nil, errors.New("unknown key runtime.kubernetes.role_profiles: each role's requests and limits are set under runtime.kubernetes.resources, and a role absent there gets none")
 	}
-	block := &Kubernetes{}
-
-	namespace, err := readNonEmptyString(fields["namespace"], kubernetesKey+".namespace")
-	if err != nil {
+	block := &Kubernetes{TreeVolume: defaultTreeVolume}
+	if block.Namespace, err = requiredString(fields["namespace"], kubernetesKey+".namespace", ""); err != nil {
 		return nil, err
 	}
-	if namespace == nil {
-		return nil, errors.New("runtime.kubernetes.namespace is required")
-	}
-	block.Namespace = *namespace
-
-	image, err := readString(fields["image"], kubernetesKey+".image")
-	if err != nil {
+	if block.Image, err = requiredString(fields["image"], kubernetesKey+".image", ""); err != nil {
 		return nil, err
 	}
-	if image == nil {
-		return nil, errors.New("runtime.kubernetes.image is required")
-	}
-	if !imageDigestRef.MatchString(*image) {
+	if !imageDigestRef.MatchString(block.Image) {
 		return nil, errors.New("runtime.kubernetes.image must be pinned by digest (@sha256:…)")
 	}
-	block.Image = *image
-
-	storageClass, err := readNonEmptyString(fields["storage_class"], kubernetesKey+".storage_class")
-	if err != nil {
+	if block.StorageClass, err = requiredString(fields["storage_class"], kubernetesKey+".storage_class",
+		": the cluster has no default storage class for the tree volume"); err != nil {
 		return nil, err
 	}
-	if storageClass == nil {
-		return nil, errors.New("runtime.kubernetes.storage_class is required: the cluster has no default storage class for the tree volume")
-	}
-	block.StorageClass = *storageClass
-
 	treeVolume, err := readQuantity(fields["tree_volume"], kubernetesKey+".tree_volume")
 	if err != nil {
 		return nil, err
 	}
-	block.TreeVolume = defaultTreeVolume
 	if treeVolume != "" {
 		block.TreeVolume = treeVolume
 	}
-
-	kubeconfig, err := readNonEmptyString(fields["kubeconfig"], kubernetesKey+".kubeconfig")
-	if err != nil {
+	if block.Kubeconfig, err = optionalString(fields["kubeconfig"], kubernetesKey+".kubeconfig"); err != nil {
 		return nil, err
 	}
-	kubeContext, err := readNonEmptyString(fields["context"], kubernetesKey+".context")
-	if err != nil {
+	if block.Context, err = optionalString(fields["context"], kubernetesKey+".context"); err != nil {
 		return nil, err
 	}
-	if kubeContext != nil && kubeconfig == nil {
+	if block.Context != "" && block.Kubeconfig == "" {
 		return nil, errors.New("runtime.kubernetes.context names a kubeconfig context, so it requires runtime.kubernetes.kubeconfig")
 	}
-	if kubeconfig != nil {
-		block.Kubeconfig = *kubeconfig
-	}
-	if kubeContext != nil {
-		block.Context = *kubeContext
-	}
-
 	if err := checkSessionStore(fields["session_store"], fields["session_dsn_secret"]); err != nil {
 		return nil, err
 	}
@@ -157,34 +133,24 @@ func readKubernetes(value *yaml.Node) (*Kubernetes, error) {
 	if block.Resources, err = readResources(fields["resources"]); err != nil {
 		return nil, err
 	}
-	if fields["gateway"] == nil {
-		return nil, errors.New("runtime.kubernetes.gateway is required: a pod reaches the model only through the gateway, with its projected service account token")
-	}
 	if block.Gateway, err = readGateway(fields["gateway"]); err != nil {
 		return nil, err
 	}
 	return block, nil
 }
 
-// members returns a mapping's members by name, refusing a name it does not know or names twice. A
-// member whose value is null is left out, as an unset key.
-func members(value *yaml.Node, key string, known ...string) (map[string]*yaml.Node, error) {
-	found := map[string]*yaml.Node{}
-	seen := map[string]bool{}
-	for i := 0; i+1 < len(value.Content); i += 2 {
-		name, member := value.Content[i].Value, value.Content[i+1]
-		if !slices.Contains(known, name) {
-			return nil, fmt.Errorf("unknown key %s.%s", key, name)
-		}
-		if seen[name] {
-			return nil, fmt.Errorf("%s names %s twice", key, name)
-		}
-		seen[name] = true
-		if member.Tag != "!!null" {
-			found[name] = member
-		}
+// resolveKubernetes settles `runtime: kubernetes`: the keys outside the block every pod needs, and
+// the block, its kubeconfig resolved against the file's directory.
+func resolveKubernetes(file fileConfig, configDir string, cfg *Config) error {
+	if err := checkKubernetesKeys(file); err != nil {
+		return err
 	}
-	return found, nil
+	block := *file.Kubernetes
+	if block.Kubeconfig != "" {
+		block.Kubeconfig = underConfig(block.Kubeconfig, configDir)
+	}
+	cfg.Runtime = Runtime{Name: "kubernetes", Kubernetes: &block}
+	return nil
 }
 
 // checkSessionStore reads `session_store` and `session_dsn_secret` only to refuse what the Go
@@ -208,8 +174,8 @@ func checkSessionStore(store, dsnSecret *yaml.Node) error {
 }
 
 // readQuantity reads a positive Kubernetes quantity as the file wrote it, "" when unset. A bare
-// YAML number (`tree_volume: 20`) is its text. Zero is refused with the negatives: the runtime
-// reads a zero tree volume as its default.
+// YAML number (`tree_volume: 20`) is its text. Zero is refused with the negatives: it is no size,
+// and the runtime refuses a zero tree volume.
 func readQuantity(value *yaml.Node, key string) (string, error) {
 	if value == nil || value.Tag == "!!null" {
 		return "", nil
@@ -241,12 +207,8 @@ func readScheduling(value *yaml.Node) (Scheduling, error) {
 	if scheduling.Tolerations, err = readTolerations(fields["tolerations"], key+".tolerations"); err != nil {
 		return Scheduling{}, err
 	}
-	priorityClass, err := readNonEmptyString(fields["priority_class"], key+".priority_class")
-	if err != nil {
+	if scheduling.PriorityClass, err = optionalString(fields["priority_class"], key+".priority_class"); err != nil {
 		return Scheduling{}, err
-	}
-	if priorityClass != nil {
-		scheduling.PriorityClass = *priorityClass
 	}
 	return scheduling, nil
 }
@@ -403,9 +365,12 @@ func readQuantities(value *yaml.Node, key string) (Quantities, error) {
 	return quantities, nil
 }
 
-// readGateway reads the model gateway, every member required: a pod has no other way to a model.
+// readGateway reads the model gateway, required with every member: a pod has no other way to a model.
 func readGateway(value *yaml.Node) (Gateway, error) {
 	const key = kubernetesKey + ".gateway"
+	if value == nil {
+		return Gateway{}, errors.New(key + " is required: a pod reaches the model only through the gateway, with its projected service account token")
+	}
 	if value.Kind != yaml.MappingNode {
 		return Gateway{}, fmt.Errorf("%s must be a mapping", key)
 	}
@@ -414,30 +379,18 @@ func readGateway(value *yaml.Node) (Gateway, error) {
 		return Gateway{}, err
 	}
 	var gateway Gateway
-	url, err := readString(fields["url"], key+".url")
+	url, err := requiredString(fields["url"], key+".url", "")
 	if err != nil {
 		return Gateway{}, err
 	}
-	if url == nil {
-		return Gateway{}, fmt.Errorf("%s.url is required", key)
-	}
-	if gateway.URL, err = baseURL(*url, key+".url"); err != nil {
+	if gateway.URL, err = baseURL(url, key+".url"); err != nil {
 		return Gateway{}, err
 	}
-	for _, part := range []struct {
-		name   string
-		target *string
-	}{
-		{"audience", &gateway.Audience}, {"service_account", &gateway.ServiceAccount},
-	} {
-		read, err := readNonEmptyString(fields[part.name], key+"."+part.name)
-		if err != nil {
-			return Gateway{}, err
-		}
-		if read == nil {
-			return Gateway{}, fmt.Errorf("%s.%s is required", key, part.name)
-		}
-		*part.target = *read
+	if gateway.Audience, err = requiredString(fields["audience"], key+".audience", ""); err != nil {
+		return Gateway{}, err
+	}
+	if gateway.ServiceAccount, err = requiredString(fields["service_account"], key+".service_account", ""); err != nil {
+		return Gateway{}, err
 	}
 	const expiryKey = key + ".token_expiry_seconds"
 	expiry, err := readInt(fields["token_expiry_seconds"], expiryKey)
@@ -448,8 +401,8 @@ func readGateway(value *yaml.Node) (Gateway, error) {
 		return Gateway{}, fmt.Errorf("%s is required", expiryKey)
 	case *expiry < minTokenExpiry:
 		return Gateway{}, fmt.Errorf("%s must be at least %d (the kubelet's minimum)", expiryKey, minTokenExpiry)
-	case *expiry > maxTimerSeconds:
-		return Gateway{}, fmt.Errorf("%s must be at most %d", expiryKey, maxTimerSeconds)
+	case *expiry > maxTokenExpiry:
+		return Gateway{}, fmt.Errorf("%s must be at most %d (the longest pod token the cluster's admission policy admits)", expiryKey, maxTokenExpiry)
 	}
 	gateway.TokenExpiry = time.Duration(*expiry) * time.Second
 	return gateway, nil
@@ -478,14 +431,56 @@ func checkKubernetesKeys(file fileConfig) error {
 			return fmt.Errorf("%s is required when runtime is kubernetes: %s", rule.key, rule.why)
 		}
 	}
-	for _, rule := range []struct{ key, why string }{
-		{"omp_invocation", "every pod runs the worker image's Oh My Pi"},
-		{"omp_launch_prefix", "every pod runs the worker image's Oh My Pi"},
-		{"provider_keys", "a pod reaches the model through runtime.kubernetes.gateway, and no provider key reaches a pod"},
+	for _, rule := range []struct {
+		key string
+		set bool
+		why string
+	}{
+		{"omp_invocation", file.OmpInvocation != nil, "every pod runs the worker image's Oh My Pi"},
+		{"omp_launch_prefix", file.OmpLaunchPrefix != nil, "every pod runs the worker image's Oh My Pi"},
+		{"provider_keys", file.ProviderKeys != nil, "a pod reaches the model through runtime.kubernetes.gateway, and no provider key reaches a pod"},
 	} {
-		if file.set[rule.key] {
+		if rule.set {
 			return fmt.Errorf("%s is not used when runtime is kubernetes: %s; remove %s", rule.key, rule.why, rule.key)
 		}
+	}
+	return nil
+}
+
+// checkPodReachable refuses an address pods are handed that no pod can reach. Every pod's shim
+// dials the worker stream at tcp://<bind>:<worker_stream_port>, so bind must name one of the
+// daemon host's own addresses, never loopback or the unspecified address it would listen on. Every
+// Legion URL a pod is handed - daemon_url, envoy_url, dispatch_url, and each nats_urls entry - must
+// name neither: a loopback host is, in a pod, the pod itself, and the unspecified address is no host
+// at all.
+func checkPodReachable(cfg Config) error {
+	if ip := net.ParseIP(cfg.Bind); strings.EqualFold(cfg.Bind, "localhost") || ip != nil && (ip.IsLoopback() || ip.IsUnspecified()) {
+		return fmt.Errorf("bind %s is not an address a pod can reach, and every pod's shim dials the worker stream at tcp://%s; bind the daemon host's own address when runtime is kubernetes",
+			cfg.Bind, net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.WorkerStreamPort)))
+	}
+	addresses := []struct{ key, value string }{
+		{"daemon_url", cfg.DaemonURL}, {"envoy_url", cfg.EnvoyURL}, {"dispatch_url", cfg.DispatchURL},
+	}
+	for _, raw := range cfg.NatsURLs {
+		addresses = append(addresses, struct{ key, value string }{"nats_urls", raw})
+	}
+	for _, address := range addresses {
+		parsed, err := url.Parse(address.value)
+		if err != nil {
+			return fmt.Errorf("%s must be a valid URL", address.key)
+		}
+		host := parsed.Hostname()
+		ip := net.ParseIP(host)
+		var why string
+		switch {
+		case strings.EqualFold(host, "localhost") || ip != nil && ip.IsLoopback():
+			why = "names a loopback host, which in a pod is the pod itself"
+		case ip != nil && ip.IsUnspecified():
+			why = "names the unspecified address, which is no host a pod can dial"
+		default:
+			continue
+		}
+		return fmt.Errorf("%s %s %s; name the host pods reach it at when runtime is kubernetes", address.key, address.value, why)
 	}
 	return nil
 }

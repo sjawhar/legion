@@ -1,7 +1,9 @@
 // Package config loads the daemon's `legion.yaml` and its `LEGION_*` environment.
 //
 // The file keeps the key names the shipped TypeScript daemon reads, so a key an operator carries
-// across means the same thing in either daemon. A key the Go daemon does not model falls into one
+// across means the same thing in either daemon, with one exception: `runtime.kubernetes.resources`
+// is keyed by role here and by profile (small, medium, large) there, and this loader refuses the
+// profile shape by name. A key the Go daemon does not model falls into one
 // of three classes the loader decides once, here: known-later keys a later stage models, accepted
 // and ignored with one log line each; tossed keys, refused naming the key and why the setting no
 // longer exists; and migration-only keys, refused with the TypeScript loader's own message text so
@@ -26,6 +28,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -159,7 +162,7 @@ var countKeys = []struct {
 
 // knownLaterKeys is every top-level key the shipped loader accepts, that no stage so far models
 // and a later stage does, mapped to that stage. A file carrying one loads; the key is logged and
-// dropped. The stages are the plan's: 3 the workflow on the devbox, 4 the Sandbox runtime.
+// dropped. The stage is the plan's that models the key.
 var knownLaterKeys = map[string]int{
 	"max_recursion_depth": 3,
 }
@@ -199,7 +202,6 @@ type fileConfig struct {
 	PostgresDSN       *string
 	StateDir          *string
 	AdmissionCap      *int
-	Runtime           *string
 	Kubernetes        *Kubernetes
 	DaemonURL         *string
 	OmpInvocation     *string
@@ -221,8 +223,6 @@ type fileConfig struct {
 	MaxFixAttempts    *int
 	Durations         map[string]int
 	Counts            map[string]int
-	// set names every top-level key whose value is not null.
-	set map[string]bool
 }
 
 // Load reads the daemon's complete runtime configuration. App private-key commands and secrets
@@ -286,7 +286,7 @@ func rootMapping(document *yaml.Node) (*yaml.Node, error) {
 // readKeys walks the top-level keys in file order, reading the modelled ones and classifying the
 // rest.
 func readKeys(root *yaml.Node) (fileConfig, error) {
-	file := fileConfig{Durations: map[string]int{}, Counts: map[string]int{}, set: map[string]bool{}}
+	file := fileConfig{Durations: map[string]int{}, Counts: map[string]int{}}
 	if root == nil {
 		return file, nil
 	}
@@ -307,7 +307,7 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 		case "admission_cap":
 			file.AdmissionCap, err = readInt(value, key)
 		case "runtime":
-			file.Runtime, file.Kubernetes, err = readRuntime(value)
+			file.Kubernetes, err = readRuntime(value)
 		case "daemon_url":
 			file.DaemonURL, err = readString(value, key)
 		case "omp_invocation":
@@ -325,7 +325,7 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 		case "envoy_url":
 			file.EnvoyURL, err = readString(value, key)
 		case "nats_urls":
-			file.NatsURLs, err = readStrings(value, key)
+			file.NatsURLs, err = readNatsURLs(value, key)
 		case "envoy_token_file":
 			file.EnvoyTokenFile, err = readNonEmptyString(value, key)
 		case "dispatch_url":
@@ -353,9 +353,6 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 		}
 		if err != nil {
 			return fileConfig{}, err
-		}
-		if value.Tag != "!!null" {
-			file.set[key] = true
 		}
 	}
 	return file, nil
@@ -444,31 +441,28 @@ func checkGates(value *yaml.Node) error {
 	return nil
 }
 
-// readRuntime reads `runtime`: the `tmux` or `kubernetes` scalar, or the shipped one-key
-// `{kubernetes: {...}}` mapping, whose block it reads. A bare `kubernetes` scalar carries no block,
-// which resolve refuses: the block is the only source of what a pod needs.
-func readRuntime(value *yaml.Node) (*string, *Kubernetes, error) {
+// readRuntime reads `runtime`: the `tmux` scalar (nil), or the shipped one-key `{kubernetes: {...}}`
+// mapping, whose block it reads. A bare `kubernetes` scalar is refused: it carries no block, and
+// the block is the only source of what a pod needs.
+func readRuntime(value *yaml.Node) (*Kubernetes, error) {
 	if value.Tag == "!!null" {
-		return nil, nil, nil
+		return nil, nil
 	}
 	if value.Kind == yaml.ScalarNode {
-		name := value.Value
-		if name != "tmux" && name != "kubernetes" {
-			return nil, nil, errors.New("runtime must be 'tmux' or 'kubernetes'")
+		switch value.Value {
+		case "tmux":
+			return nil, nil
+		case "kubernetes":
+			return nil, errors.New("runtime.kubernetes is required when runtime is kubernetes")
 		}
-		return &name, nil, nil
+		return nil, errors.New("runtime must be 'tmux' or 'kubernetes'")
 	}
 	if value.Kind != yaml.MappingNode ||
 		len(value.Content) != 2 ||
 		value.Content[0].Value != "kubernetes" {
-		return nil, nil, errors.New("runtime accepts tmux, kubernetes, or a mapping with the single key kubernetes")
+		return nil, errors.New("runtime accepts tmux, kubernetes, or a mapping with the single key kubernetes")
 	}
-	block, err := readKubernetes(value.Content[1])
-	if err != nil {
-		return nil, nil, err
-	}
-	name := "kubernetes"
-	return &name, block, nil
+	return readKubernetes(value.Content[1])
 }
 
 func logIgnored(key string, stage int) {
@@ -498,6 +492,92 @@ func readNonEmptyString(value *yaml.Node, key string) (*string, error) {
 		return nil, fmt.Errorf("%s must not be empty", key)
 	}
 	return read, nil
+}
+
+// stringOf is a string key's value, "" when it is unset.
+func stringOf(value *yaml.Node, key string) (string, error) {
+	read, err := readString(value, key)
+	if err != nil || read == nil {
+		return "", err
+	}
+	return *read, nil
+}
+
+// optionalString is a string key a blank value refuses, "" when it is unset.
+func optionalString(value *yaml.Node, key string) (string, error) {
+	read, err := readNonEmptyString(value, key)
+	if err != nil || read == nil {
+		return "", err
+	}
+	return *read, nil
+}
+
+// requiredString is optionalString refusing an unset key: "<key> is required" and why, which
+// carries its own leading punctuation.
+func requiredString(value *yaml.Node, key, why string) (string, error) {
+	read, err := optionalString(value, key)
+	if err == nil && read == "" {
+		err = errors.New(key + " is required" + why)
+	}
+	return read, err
+}
+
+// unknownKeyError is members' refusal of a name the mapping may not carry.
+type unknownKeyError struct{ key, name string }
+
+func (e unknownKeyError) Error() string { return fmt.Sprintf("unknown key %s.%s", e.key, e.name) }
+
+// members returns a mapping's members by name, refusing a name it does not know or names twice. A
+// member whose value is null is left out, as an unset key.
+func members(value *yaml.Node, key string, known ...string) (map[string]*yaml.Node, error) {
+	found := map[string]*yaml.Node{}
+	seen := map[string]bool{}
+	for i := 0; i+1 < len(value.Content); i += 2 {
+		name, member := value.Content[i].Value, value.Content[i+1]
+		if !slices.Contains(known, name) {
+			return nil, unknownKeyError{key, name}
+		}
+		if seen[name] {
+			return nil, fmt.Errorf("%s names %s twice", key, name)
+		}
+		seen[name] = true
+		if member.Tag != "!!null" {
+			found[name] = member
+		}
+	}
+	return found, nil
+}
+
+// readNatsURLs is `nats_urls`: valid URLs, in order, each once.
+func readNatsURLs(value *yaml.Node, key string) ([]string, error) {
+	read, err := readStrings(value, key)
+	if err != nil || read == nil {
+		return read, err
+	}
+	urls := make([]string, 0, len(read))
+	for _, raw := range read {
+		if _, err := validURL(raw, key); err != nil {
+			return nil, fmt.Errorf("%s entry %q must be a valid URL", key, raw)
+		}
+		if !slices.Contains(urls, raw) {
+			urls = append(urls, raw)
+		}
+	}
+	return urls, nil
+}
+
+// dispatchBase is `dispatch_url`: a base URL, never its clients' `/mcp` endpoint, which the clients
+// append themselves (the shipped `requireNoMcpSuffix`, config.ts:754-760). A trailing slash is gone
+// by then, so `/mcp/` is caught too.
+func dispatchBase(value, key string) (string, error) {
+	base, err := baseURL(value, key)
+	if err != nil {
+		return "", err
+	}
+	if strings.HasSuffix(base, "/mcp") {
+		return "", fmt.Errorf("%s must be the dispatch service base URL, not the /mcp endpoint", key)
+	}
+	return base, nil
 }
 
 // readStrings reads a sequence of non-empty strings, in order and with repeats — the shipped
@@ -563,7 +643,7 @@ func readProviderKeys(value *yaml.Node, key string) ([]ProviderKey, error) {
 		return nil, errors.New(providerKeysShape)
 	}
 	const nameRule = "must be an environment variable name (letters, digits, and underscores, not starting with a digit)"
-	var keys []ProviderKey
+	keys := []ProviderKey{}
 	seen := map[string]bool{}
 	for i := 0; i+1 < len(value.Content); i += 2 {
 		envNode, secretNode := value.Content[i], value.Content[i+1]
@@ -702,21 +782,10 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 		return Config{}, errors.New("bind must not be empty")
 	}
 
-	if file.Runtime != nil {
-		cfg.Runtime = Runtime{Name: *file.Runtime}
-	}
-	if cfg.Runtime.Name == "kubernetes" {
-		if file.Kubernetes == nil {
-			return Config{}, errors.New("runtime.kubernetes is required when runtime is kubernetes")
-		}
-		if err := checkKubernetesKeys(file); err != nil {
+	if file.Kubernetes != nil {
+		if err := resolveKubernetes(file, configDir, &cfg); err != nil {
 			return Config{}, err
 		}
-		block := *file.Kubernetes
-		if block.Kubeconfig != "" {
-			block.Kubeconfig = underConfig(block.Kubeconfig, configDir)
-		}
-		cfg.Runtime.Kubernetes = &block
 	}
 
 	switch {
@@ -738,6 +807,11 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 	}
 	if err := resolveStage3(file, configDir, &cfg); err != nil {
 		return Config{}, err
+	}
+	if cfg.Runtime.Name == "kubernetes" {
+		if err := checkPodReachable(cfg); err != nil {
+			return Config{}, err
+		}
 	}
 	return cfg, nil
 }
@@ -813,16 +887,7 @@ func resolveStage2(file fileConfig, configDir string, cfg *Config) error {
 		}
 		cfg.EnvoyURL = *file.EnvoyURL
 	}
-	seen := map[string]bool{}
-	for _, raw := range file.NatsURLs {
-		if _, err := validURL(raw, "nats_urls"); err != nil {
-			return fmt.Errorf("nats_urls entry %q must be a valid URL", raw)
-		}
-		if !seen[raw] {
-			seen[raw] = true
-			cfg.NatsURLs = append(cfg.NatsURLs, raw)
-		}
-	}
+	cfg.NatsURLs = file.NatsURLs
 	if file.EnvoyTokenFile != nil {
 		cfg.EnvoyTokenFile = underConfig(*file.EnvoyTokenFile, configDir)
 	}

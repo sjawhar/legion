@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -75,6 +76,12 @@ func testConfig(t *testing.T) config.Config {
 		t.Fatalf("write the operator token: %v", err)
 	}
 	port := freePort(t)
+	// Under kubernetes the worker stream is a TCP listener, so its port is one found free too: the
+	// API port's neighbour may be any process's.
+	stream := freePort(t)
+	for stream == port {
+		stream = freePort(t)
+	}
 	return config.Config{
 		Project:                                 "TEST" + randomSuffix(t),
 		Port:                                    port,
@@ -84,7 +91,7 @@ func testConfig(t *testing.T) config.Config {
 		Runtime:                                 config.Runtime{Name: "tmux"},
 		AdmissionCap:                            4,
 		DaemonURL:                               "http://127.0.0.1:" + strconv.Itoa(port),
-		WorkerStreamPort:                        port + 1,
+		WorkerStreamPort:                        stream,
 		WorkerBootTimeout:                       120 * time.Second,
 		WorkerBootRegistrationDeadlineIntervals: 3,
 		WorkerRPCTimeout:                        5 * time.Second,
@@ -135,22 +142,23 @@ type stopped struct{}
 
 func (stopped) Stop() bool { return true }
 
-// built is what the daemon handed the runtime it built: the connection directory and the address
-// every pane's shim dials.
+// built is what the daemon handed the runtime it built: the connection directory, the address
+// every pane's shim dials, and the workflow's App tokens.
 type built struct {
 	mu      sync.Mutex
 	conns   runtime.Conns
 	address string
+	apps    appauth.Tokens
 }
 
 // fakeRuntime is a daemon whose runtime is rt: the real stream listener, store, and machines,
 // with nothing launched for real.
 func fakeRuntime(rt *fake.Runtime, record *built) overrides {
 	return overrides{
-		runtime: func(_ context.Context, conns runtime.Conns, address string) (runtime.Runtime, error) {
+		runtime: func(_ context.Context, conns runtime.Conns, address string, apps appauth.Tokens) (runtime.Runtime, error) {
 			record.mu.Lock()
 			defer record.mu.Unlock()
-			record.conns, record.address = conns, address
+			record.conns, record.address, record.apps = conns, address, apps
 			return rt, nil
 		},
 		clock: stillClock{},
@@ -636,7 +644,7 @@ func TestWorkflowBootLogsItsDependencyOrder(t *testing.T) {
 	if got := tokens.Roles(); len(got) != 2 || got[0] != appauth.Implement || got[1] != appauth.Review {
 		t.Fatalf("App token roles = %v, want implement then review", got)
 	}
-	want := []string{"store", "config", "appauth", "prompts", "worker-bin", "dispatch", "admission", "intake", "outbox", "api"}
+	want := []string{"store", "config", "appauth", "prompts", "worker-bin", "dispatch", "intake", "admission", "outbox", "api"}
 	var got []string
 	for _, line := range strings.Split(strings.TrimSpace(logged.String()), "\n") {
 		var entry struct {
@@ -652,6 +660,92 @@ func TestWorkflowBootLogsItsDependencyOrder(t *testing.T) {
 	}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("workflow boot stages = %v, want %v\nlog:\n%s", got, want, logged.String())
+	}
+}
+
+// An issue moved to todo while boot reads its Dispatch listing, and missing from that listing, is
+// still admitted. A durable consumer created now delivers only what is published after it exists,
+// so boot creates the consumers before it lists: what the listing missed, the consumer delivers.
+func TestAnIssueMovedWhileBootListsIsStillAdmitted(t *testing.T) {
+	natsURL := workflowNATS(t)
+	js := workflowJetStream(t, natsURL)
+	cfg := workflowConfig(t, natsURL)
+	captured, err := os.ReadFile("../intake/testdata/dispatch/issue-updated.json")
+	if err != nil {
+		t.Fatalf("read the captured Dispatch issue.updated event: %v", err)
+	}
+	// The event is this daemon's project's, with an id of its own: processed events are deduplicated
+	// by Envoy's event id across the shared database.
+	moved := strings.ReplaceAll(strings.ReplaceAll(string(captured), "CAPTURE", cfg.Project), `"dispatch-15"`, `"dispatch-`+cfg.Project+`"`)
+	key := cfg.Project + "-3"
+	var once sync.Once
+	dispatchServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/issues" {
+			// Once the move is admitted, the outbox reads and writes this project's issue; those
+			// calls are not what this test is about. Another project's issue is never this daemon's.
+			if !strings.HasPrefix(r.URL.Path, "/api/v1/issues/"+cfg.Project+"-") {
+				t.Errorf("Dispatch request = %s %s", r.Method, r.URL.Path)
+			}
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		// The move lands while the listing is read, which is already past it.
+		once.Do(func() {
+			if _, err := js.Publish(r.Context(), "notifications.dispatch.issue."+key+".issue.updated", []byte(moved)); err != nil {
+				t.Errorf("publish the move: %v", err)
+			}
+		})
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode([]any{}); err != nil {
+			t.Errorf("write Dispatch issues: %v", err)
+		}
+	}))
+	t.Cleanup(dispatchServer.Close)
+	cfg.DispatchURL = dispatchServer.URL
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- run(ctx, cfg, quietLogger(), overrides{
+			runtime: fakeRuntime(fake.NewRuntime(), &built{}).runtime, clock: stillClock{}, workflowTokens: &workflowTokenRecorder{},
+		})
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("run: %v", err)
+			}
+		case <-time.After(15 * time.Second):
+			t.Error("daemon did not stop")
+		}
+	})
+
+	awaitHealthz(t, cfg, done)
+	// The move reaches admission through the consumer once supervision serves; on a loaded machine
+	// that takes seconds, not milliseconds.
+	var active []string
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		var state struct {
+			Admission struct {
+				Active []string `json:"active"`
+			} `json:"admission"`
+		}
+		if response, err := http.Get("http://127.0.0.1:" + strconv.Itoa(cfg.Port) + "/legion/v1/state"); err == nil {
+			err = json.NewDecoder(response.Body).Decode(&state)
+			response.Body.Close()
+			if err == nil && response.StatusCode == http.StatusOK {
+				active = state.Admission.Active
+				if slices.Contains(active, key) {
+					return
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("admission is %v, want %s, moved to todo while boot listed Dispatch", active, key)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 

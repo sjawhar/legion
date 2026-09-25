@@ -82,9 +82,9 @@ type ImageProbe struct {
 	Resources corev1.ResourceRequirements
 }
 
-// probePass is a pass the cache remembers (ImageProbeCacheSchema, worker-image-probe.ts:65-75):
-// the image by repository and digest, the contract it confirmed, and the probe pod it was proven
-// with and where (probePodFingerprint).
+// probePass is a pass the cache remembers (ImageProbeCacheSchema, worker-image-probe.ts:65-75): the
+// probe pod it was proven with and where (probePodFingerprint), which is what a pass is keyed on,
+// and, for whoever reads the file, the image and the contract that pod ran and when.
 type probePass struct {
 	Image              string    `json:"image"`
 	GoDaemonAPIVersion int       `json:"goDaemonApiVersion"`
@@ -159,10 +159,10 @@ func (r *Runtime) probePodFingerprint(apiServer string, pod corev1.PodSpec) stri
 	return string(encoded)
 }
 
-// passedBefore reports whether the cache holds a pass of this runtime's image at contract with
-// this probe pod. A file that cannot be read or decoded, or that records another image, contract,
-// or probe pod, is no pass: the probe runs again and rewrites it, and the log says why the file
-// was ignored.
+// passedBefore reports whether the cache holds a pass with this probe pod, which holds this
+// runtime's image and the contract it probes for. A file that cannot be read or decoded, or that
+// records another probe pod, is no pass: the probe runs again and rewrites it, and the log says why
+// the file was ignored.
 func (r *Runtime) passedBefore(cache string, contract int, pod string) bool {
 	raw, err := os.ReadFile(cache)
 	if errors.Is(err, os.ErrNotExist) {
@@ -181,13 +181,9 @@ func (r *Runtime) passedBefore(cache string, contract int, pod string) bool {
 	if err := decoder.Decode(&pass); err != nil {
 		return ignore(err.Error())
 	}
-	switch {
-	case pass.Image != r.image:
-		return ignore(fmt.Sprintf("it records image %s, this runtime runs %s", pass.Image, r.image))
-	case pass.GoDaemonAPIVersion != contract:
-		return ignore(fmt.Sprintf("it records Go daemon API contract %d, this daemon speaks %d", pass.GoDaemonAPIVersion, contract))
-	case pass.Pod != pod:
-		return ignore("the probe pod it records (its cluster, namespace, command, environment, volumes, or scheduling) differs from this runtime's")
+	if pass.Pod != pod {
+		return ignore(fmt.Sprintf("the probe pod it records (image %s at contract %d, or its cluster, namespace, command, environment, volumes, or scheduling) differs from this runtime's (image %s at contract %d)",
+			pass.Image, pass.GoDaemonAPIVersion, r.image, contract))
 	}
 	r.log.Info("sandbox runtime: the worker image passed its probe before; reusing the pass",
 		"image", r.image, "probedAt", pass.ProbedAt, "goDaemonApiVersion", contract, "file", cache)
@@ -429,7 +425,8 @@ func (r *Runtime) createProbe(ctx context.Context, name, digest string, manifest
 }
 
 // unfinished is the detail of an attempt whose pod did not finish within the budget: the pod's
-// phase, its container's waiting reason, and its events — or, with no pod, the Sandbox's Ready
+// phase, its container's waiting reason, its events, and what its probe container logged so far,
+// which names the model gateway a turn still waits on — or, with no pod, the Sandbox's Ready
 // condition, where the controller reports why it made none.
 func (r *Runtime) unfinished(ctx context.Context, name string, uid types.UID, budget time.Duration) string {
 	pod := r.storedPod(name)
@@ -446,7 +443,11 @@ func (r *Runtime) unfinished(ctx context.Context, name string, uid types.UID, bu
 	if reason := probeWaiting(pod); reason != "" {
 		detail += fmt.Sprintf(" (container %s waiting: %s)", probeContainer, reason)
 	}
-	return detail + "; events: " + r.events(ctx, pod)
+	detail += "; events: " + r.events(ctx, pod)
+	if tail, err := r.probeLog(ctx, name); err == nil && tail != "" {
+		detail += "; log tail: " + tail
+	}
+	return detail
 }
 
 // probeWaiting is the probe container's waiting reason, when the pod reports one.

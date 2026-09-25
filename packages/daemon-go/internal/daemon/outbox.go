@@ -35,6 +35,10 @@ const (
 	// second rather than ten times.
 	outboxFailedTickWait = time.Second
 	messageReadSkew      = 5 * time.Second
+	// pendingWaitWarnAttempts is when a row waiting on its claim's pending delivery is logged as a
+	// warning: past the backoff's climb to its cap, a wait of about two minutes, the turn it waits
+	// on is not ending on its own, and an operator should look.
+	pendingWaitWarnAttempts = 7
 )
 
 // outbox runs each effect that the workflow transaction committed. Claiming and finishing have
@@ -48,21 +52,24 @@ type outbox struct {
 	tokens     appauth.Tokens
 	handlers   []intake.Handler
 	project    string
-	stateDir   string
-	repo       string
-	log        *slog.Logger
-	now        func() time.Time
-	provision  func(context.Context, workspace.Request) (workspace.Workspace, error)
-	remove     func(context.Context, workspace.Workspace) error
+	// dispatchProject is the Dispatch project whose issues' rows this outbox claims: the database
+	// is shared, and another project's rows are another daemon's.
+	dispatchProject string
+	stateDir        string
+	repo            string
+	log             *slog.Logger
+	now             func() time.Time
+	provision       func(context.Context, workspace.Request) (workspace.Workspace, error)
+	remove          func(context.Context, workspace.Workspace) error
 }
 
-func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client, publisher notify.Publisher, supervisor *supervisor, tokens appauth.Tokens, handlers []intake.Handler, project, stateDir string, configured config.Project, tools map[string]string, log *slog.Logger) *outbox {
+func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client, publisher notify.Publisher, supervisor *supervisor, tokens appauth.Tokens, handlers []intake.Handler, project, dispatchProject, stateDir string, configured config.Project, tools map[string]string, log *slog.Logger) *outbox {
 	if log == nil {
 		log = slog.Default()
 	}
 	return &outbox{
 		pool: pool, records: records, dispatch: client, notices: publisher, supervisor: supervisor, tokens: tokens,
-		handlers: handlers, project: project, stateDir: stateDir, repo: configured.Repo, log: log, now: time.Now,
+		handlers: handlers, project: project, dispatchProject: dispatchProject, stateDir: stateDir, repo: configured.Repo, log: log, now: time.Now,
 		provision: func(ctx context.Context, request workspace.Request) (workspace.Workspace, error) {
 			return workspace.Provision(ctx, workspace.NewRunner(workspace.CommandTimeout, tools), request)
 		},
@@ -109,7 +116,7 @@ func (r *outbox) RunOnce(ctx context.Context) error {
 	var rows []record.OutboxRow
 	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
 		var err error
-		rows, err = r.records.ClaimDue(ctx, tx, now, outboxBatchSize, outboxLease)
+		rows, err = r.records.ClaimDue(ctx, tx, r.dispatchProject, now, outboxBatchSize, outboxLease)
 		return err
 	}); err != nil {
 		return fmt.Errorf("claim due outbox rows: %w", err)
@@ -119,7 +126,12 @@ func (r *outbox) RunOnce(ctx context.Context) error {
 			// A task meeting the claim's own pending delivery is a wait, not a failure: the row runs
 			// again on the same backoff once that delivery's turn is over.
 			if errors.Is(err, supervise.ErrDeliveryPending) {
-				r.log.Debug("outbox row waits for the claim's pending delivery", "row", row.ID, "attempts", row.Attempts, "error", err)
+				level := slog.LevelDebug
+				if row.Attempts >= pendingWaitWarnAttempts {
+					level = slog.LevelWarn
+				}
+				r.log.Log(ctx, level, "outbox row waits for the claim's pending delivery", "row", row.ID, "kind", row.Kind, "issue", row.Issue,
+					"attempts", row.Attempts, "error", err)
 			} else {
 				r.log.Error("outbox row failed", "row", row.ID, "kind", row.Kind, "error", err)
 			}
@@ -183,7 +195,7 @@ func (r *outbox) execute(ctx context.Context, row record.OutboxRow) error {
 	case record.LingerClose:
 		return r.linger(ctx, row, value)
 	case record.WorkspaceRemove:
-		return r.removeWorkspace(ctx, row)
+		return r.removeWorkspace(ctx, row, value)
 	default:
 		return fmt.Errorf("outbox row %d: no executor for %T", row.ID, payload)
 	}
@@ -357,7 +369,14 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 	}
 }
 
+// podsProvision is whether the runtime provisions each claim's workspace in the claim's own pod
+// (C4): then the daemon provisions and removes none on its host.
+func (r *outbox) podsProvision() bool { return r.supervisor.deps.Runtime.ProvisionsWorkspaces() }
+
 func (r *outbox) provisionWorkspace(ctx context.Context, issue record.Issue) error {
+	if r.podsProvision() {
+		return nil
+	}
 	if r.tokens == nil {
 		return errors.New("supervise executor has no GitHub App token manager")
 	}
@@ -412,9 +431,24 @@ func (r *outbox) linger(ctx context.Context, row record.OutboxRow, payload recor
 	return nil
 }
 
-func (r *outbox) removeWorkspace(ctx context.Context, row record.OutboxRow) error {
+func (r *outbox) removeWorkspace(ctx context.Context, row record.OutboxRow, payload record.WorkspaceRemove) error {
+	if r.supervisor == nil {
+		return errors.New("workspace removal has no claim supervisor")
+	}
+	if r.podsProvision() {
+		return nil
+	}
 	if r.repo == "" {
 		return errors.New("workspace removal has no configured repository")
+	}
+	issue, err := r.issue(ctx, row.Issue)
+	if err != nil {
+		return err
+	}
+	if payload.Generation != issue.Generation {
+		r.log.Info("outbox workspace removal serves an earlier generation; finished without acting", "row", row.ID, "issue", issue.Key,
+			"generation", payload.Generation, "current", issue.Generation)
+		return nil
 	}
 	working, err := workspace.Location(r.stateDir, r.repo, row.Issue)
 	if err != nil {

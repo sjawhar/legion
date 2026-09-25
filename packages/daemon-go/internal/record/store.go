@@ -366,11 +366,15 @@ func (s *Postgres) Enqueue(ctx context.Context, tx pgx.Tx, row OutboxRow) error 
 	return nil
 }
 
-// ClaimDue leases due rows, oldest first. An issue's Dispatch status writes run one at a time in
-// the order they were made: a status row waits while an older one for the same issue is unfinished,
+// ClaimDue leases project's due rows, oldest first. The database is shared by the daemons of
+// several projects, and a row belongs to its issue's project: an issue key is `<project>-<n>`, and
+// a project key has no hyphen (the configuration's projects keys, claim.IsIssueKey). The scope is in
+// the select, not a filter of what it returns, because the lease is what would take another
+// project's row from its own daemon. An issue's Dispatch status writes run one at a time in the
+// order they were made: a status row waits while an older one for the same issue is unfinished,
 // because each carries the status its predecessor leaves, and a newer write run first would find the
 // board short of it and finish unwritten as though a human had moved it.
-func (s *Postgres) ClaimDue(ctx context.Context, tx pgx.Tx, now time.Time, limit int, leaseFor time.Duration) ([]OutboxRow, error) {
+func (s *Postgres) ClaimDue(ctx context.Context, tx pgx.Tx, project string, now time.Time, limit int, leaseFor time.Duration) ([]OutboxRow, error) {
 	if limit <= 0 {
 		return []OutboxRow{}, nil
 	}
@@ -378,10 +382,10 @@ func (s *Postgres) ClaimDue(ctx context.Context, tx pgx.Tx, now time.Time, limit
 		return nil, fmt.Errorf("claim due outbox rows: lease duration must be positive")
 	}
 	rows, err := tx.Query(ctx, `select `+outboxColumns+` from outbox
-		where next_at <= $1 and (lease_until is null or lease_until <= $1)
+		where split_part(issue, '-', 1) = $4 and next_at <= $1 and (lease_until is null or lease_until <= $1)
 		and not (kind = $3 and exists (select 1 from outbox older
 			where older.kind = $3 and older.issue = outbox.issue and older.id < outbox.id))
-		order by next_at, id limit $2 for update skip locked`, now, limit, string(OutboxKindDispatchStatus))
+		order by next_at, id limit $2 for update skip locked`, now, limit, string(OutboxKindDispatchStatus), project)
 	if err != nil {
 		return nil, fmt.Errorf("claim due outbox rows: %w", err)
 	}
@@ -426,14 +430,15 @@ func (s *Postgres) RetryOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseTo
 	return nil
 }
 
-// PendingStatusWrites lists every Dispatch status write the outbox has not finished: due now, in
-// flight, backing off after a failed attempt, or waiting behind an older write for the same issue.
-// Finishing deletes the row, so each one left is a write the outbox has not finished; a write that
-// reached Dispatch whose finish failed stays listed until its lease expires and the rerun finishes
-// it. Oldest first: the order ClaimDue writes one issue's statuses in.
-func (s *Postgres) PendingStatusWrites(ctx context.Context, tx pgx.Tx) ([]OutboxRow, error) {
+// PendingStatusWrites lists every Dispatch status write of project's issues the outbox has not
+// finished: due now, in flight, backing off after a failed attempt, or waiting behind an older
+// write for the same issue. Finishing deletes the row, so each one left is a write the outbox has
+// not finished; a write that reached Dispatch whose finish failed stays listed until its lease
+// expires and the rerun finishes it. Oldest first: the order ClaimDue writes one issue's statuses
+// in.
+func (s *Postgres) PendingStatusWrites(ctx context.Context, tx pgx.Tx, project string) ([]OutboxRow, error) {
 	rows, err := tx.Query(ctx, `select `+outboxColumns+` from outbox
-		where kind = $1 order by id`, string(OutboxKindDispatchStatus))
+		where kind = $1 and split_part(issue, '-', 1) = $2 order by id`, string(OutboxKindDispatchStatus), project)
 	if err != nil {
 		return nil, fmt.Errorf("list pending Dispatch status writes: %w", err)
 	}

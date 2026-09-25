@@ -230,6 +230,9 @@ func (a *Admission) releaseDoneSlots(ctx context.Context, tx pgx.Tx) error {
 		if issue == nil {
 			return fmt.Errorf("slotted issue %s has no record", slot.Issue)
 		}
+		if issue.Project != a.project {
+			continue
+		}
 		if issue.Phase == phase.Done {
 			if err := a.store.ReleaseSlot(ctx, tx, issue.Key); err != nil {
 				return fmt.Errorf("release completed issue %s: %w", issue.Key, err)
@@ -252,6 +255,9 @@ func (a *Admission) releaseInactiveSlots(ctx context.Context, tx pgx.Tx) error {
 		if issue == nil {
 			return fmt.Errorf("slotted issue %s has no record", slot.Issue)
 		}
+		if issue.Project != a.project {
+			continue
+		}
 		if issue.Phase == phase.Done || record.OutOfWorkflow(issue.Status) {
 			if err := a.store.ReleaseSlot(ctx, tx, issue.Key); err != nil {
 				return fmt.Errorf("release inactive issue %s: %w", issue.Key, err)
@@ -273,8 +279,9 @@ func (a *Admission) promote(ctx context.Context, tx pgx.Tx) error {
 	if err != nil {
 		return fmt.Errorf("list admission slots: %w", err)
 	}
-	waiting := record.Waiting(issues, slots)
-	for len(slots) < a.cap && len(waiting) > 0 {
+	own := ownSlots(issues, slots)
+	waiting := record.Waiting(issues, own)
+	for len(own) < a.cap && len(waiting) > 0 {
 		candidate := waiting[0]
 		waiting = waiting[1:]
 		now := a.now()
@@ -293,9 +300,26 @@ func (a *Admission) promote(ctx context.Context, tx pgx.Tx) error {
 		if err := a.enqueue(ctx, tx, candidate.Key, record.SuperviseRequest{Op: "start", Tree: candidate.Tree, Role: claim.RoleArchitect, Generation: candidate.Generation}, now); err != nil {
 			return err
 		}
-		slots = append(slots, slot)
+		slots, own = append(slots, slot), append(own, slot)
 	}
 	return nil
+}
+
+// ownSlots is the slots of issues, this project's. The slots table is shared by every project's
+// daemon, and a slot's index is unique across it (0004_record), so the next index is chosen over
+// every slot while the cap counts this project's alone.
+func ownSlots(issues []record.Issue, slots []record.Slot) []record.Slot {
+	known := make(map[string]struct{}, len(issues))
+	for _, issue := range issues {
+		known[issue.Key] = struct{}{}
+	}
+	own := make([]record.Slot, 0, len(slots))
+	for _, slot := range slots {
+		if _, ok := known[slot.Issue]; ok {
+			own = append(own, slot)
+		}
+	}
+	return own
 }
 
 func (a *Admission) enqueue(ctx context.Context, tx pgx.Tx, issue string, payload record.OutboxPayload, now time.Time) error {

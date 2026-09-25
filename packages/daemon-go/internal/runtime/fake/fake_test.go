@@ -59,13 +59,9 @@ func TestRuntimeRecordsEveryCallInOrderWithItsArguments(t *testing.T) {
 	if err := fake.AdoptWorkingCopy(ctx, locator, identity); err != nil {
 		t.Fatalf("adopt: %v", err)
 	}
-	if launch := fake.ControllerLaunch(); launch != runtime.ControllerLaunchDaemon {
-		t.Fatalf("controller launch: got %q, want %q", launch, runtime.ControllerLaunchDaemon)
-	}
 
 	wantMethods := []string{
 		"Spawn", "Resume", "Suspend", "Release", "Release", "Probe", "ReconcileOrphans", "AdoptWorkingCopy",
-		"ControllerLaunch",
 	}
 	got := fake.Methods()
 	if len(got) != len(wantMethods) {
@@ -277,14 +273,6 @@ func TestAScriptedFailureReachesTheMethodItWasSetOn(t *testing.T) {
 	}
 }
 
-func TestControllerLaunchAnswersWhatTheRuntimeWasBuiltFor(t *testing.T) {
-	operator := NewRuntime()
-	operator.Launch = runtime.ControllerLaunchOperator
-	if got := operator.ControllerLaunch(); got != runtime.ControllerLaunchOperator {
-		t.Fatalf("controller launch: got %q, want %q", got, runtime.ControllerLaunchOperator)
-	}
-}
-
 func TestConnRecordsWhatTheDaemonAskedOfTheAgent(t *testing.T) {
 	ctx := context.Background()
 	conn := NewConn()
@@ -372,10 +360,7 @@ func TestConnsAnswersOnlyForClaimsWithALiveConnection(t *testing.T) {
 
 // The point of the fake: code written against the boundary takes it without knowing it is one.
 func TestTheFakesAreUsableThroughTheBoundaryInterfaces(t *testing.T) {
-	var asRuntime runtime.Runtime = NewRuntime()
-	if asRuntime.ControllerLaunch() != runtime.ControllerLaunchDaemon {
-		t.Fatalf("controller launch through the interface: %q", asRuntime.ControllerLaunch())
-	}
+	var _ runtime.Runtime = NewRuntime()
 	conns := NewConns()
 	conns.Register("legion-omp-LEGION-208-tester", NewConn())
 	var directory runtime.Conns = conns
