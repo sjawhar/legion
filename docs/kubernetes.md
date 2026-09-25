@@ -85,8 +85,9 @@ cache (`cache-from: type=gha`, `cache-to: type=gha,mode=max`), pushed with the w
 — no third-party builder, no project variable, no extra credential. It runs (1) from `release.yaml` after
 the `cli` job on every `main` push that touches the daemon, the plugin, or the Go module and its build
 inputs (below), (2) on every head of a pull request against `main` whose diff touches any of
-`packages/daemon/docker/**`, the OMP pin (`packages/daemon/src/daemon/omp-pin.ts`), the role prompts
-(`packages/pi-envoy/roles/**`), the code a pod runs, the Go build inputs, or the workflow itself — building
+`packages/daemon/docker/**`, the OMP pin (`packages/daemon/src/daemon/omp-pin.ts`), the plugin the image
+installs (`packages/pi-envoy/**`, its role prompts and agent definitions included) and the skills it ships
+(`skills/**`), the code a pod runs, the Go build inputs, or the workflow itself — building
 the PR head and publishing `sha-` only — and
 (3) by `gh workflow run worker-image.yaml --ref <ref>` once the workflow exists on `main`. What a pod
 executes is part of the image's behaviour, so a change to it builds the image it is proven on: the
