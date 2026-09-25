@@ -238,19 +238,13 @@ func stopEvent(_ http.ResponseWriter, _ *http.Request, c supervise.Claim) (super
 // linger expires. Without it a root the operator spawned could never end — under a sandbox, its
 // Sandbox and the tree volume would stay for good. A workflow issue's tree is the workflow's to
 // close, and a worker's claim is stopped, not closed.
-func (s *server) closeEvent(w http.ResponseWriter, r *http.Request, c supervise.Claim) (supervise.Event, bool) {
+//
+// Whether a workflow issue backs the tree is the supervisor's TreeClosable to answer, inside the
+// machine's own critical section; reading it here would leave a window in which an issue recorded
+// for the tree loses its root claim to this close.
+func (s *server) closeEvent(w http.ResponseWriter, _ *http.Request, c supervise.Claim) (supervise.Event, bool) {
 	if !claim.IsTreeArchitect(c.Role, c.Issue, c.Tree) {
 		writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf("close refused: %s is not its tree's root claim; stop it instead", c.Token)))
-		return nil, false
-	}
-	recorded, err := s.recordedIssue(r.Context(), c.Tree)
-	if err != nil {
-		s.log.Error("api: read the workflow issue of a tree the operator closes", "tree", c.Tree, "error", err)
-		writeJSON(w, http.StatusInternalServerError, errorBody(fmt.Sprintf("close %s: the daemon could not read whether a workflow issue backs tree %s", c.Token, c.Tree)))
-		return nil, false
-	}
-	if recorded != nil {
-		writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf("close refused: %s is a workflow issue's tree, which closes when its linger expires", c.Tree)))
 		return nil, false
 	}
 	return supervise.RequestStop{Claim: c.Token, TreeClose: true}, true

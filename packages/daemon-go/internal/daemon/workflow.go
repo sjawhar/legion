@@ -156,6 +156,26 @@ func phaseHolds(pool *pgxpool.Pool, records record.Store) func(context.Context, 
 	}
 }
 
+// treeClosable answers supervise's Deps.TreeClosable: a tree a workflow issue backs closes when
+// its linger expires, never on an operator's close of its root claim. The machine asks it inside
+// its own critical section, so an issue recorded while the close is in flight still refuses it.
+func treeClosable(pool *pgxpool.Pool, records record.Store) func(context.Context, supervise.Claim) error {
+	return func(ctx context.Context, c supervise.Claim) error {
+		var issue *record.Issue
+		if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+			var err error
+			issue, err = records.Issue(ctx, tx, c.Tree)
+			return err
+		}); err != nil {
+			return fmt.Errorf("read whether a workflow issue backs tree %s: %w", c.Tree, err)
+		}
+		if issue != nil {
+			return fmt.Errorf("%s is a workflow issue's tree, which closes when its linger expires", c.Tree)
+		}
+		return nil
+	}
+}
+
 func (w *workflowRuntime) reconcile(ctx context.Context) error {
 	issues, err := w.dispatch.ListIssues(ctx, w.dispatchProject, []string{"todo", "in_progress", "testing", "needs_review", "retro"})
 	if err != nil {

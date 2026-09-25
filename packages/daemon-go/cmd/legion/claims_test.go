@@ -528,7 +528,7 @@ func TestClaimsPrintsTheDaemonsRefusalAndFails(t *testing.T) {
 			args: func(d *operatorDaemon) []string {
 				return append(append([]string{"suspend"}, d.reach()...), "--claim", string(architectClaim))
 			},
-			want: "the daemon answered 409 Conflict: suspend refused: the claim is launching (the agent is not ready, so there is nothing to suspend yet)",
+			want: "the daemon answered 409 Conflict: suspend refused: the claim is launching (the agent has not registered)",
 		},
 		{
 			name: "the same refusal under --json",

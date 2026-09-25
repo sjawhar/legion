@@ -171,6 +171,10 @@ type Deps struct {
 	// the issue has left (daemon/outbox.go); a delivery queued before the phase moved on is that
 	// same staleness one step later, so it is dropped rather than sent. nil holds every delivery.
 	PhaseHolds func(ctx context.Context, c Claim) (bool, error)
+	// TreeClosable is asked before a tree close and refuses it by returning an error, which the
+	// caller sees as the stop's refusal. It is asked inside the machine's own critical section, so
+	// what it reads cannot change between the answer and the close. nil closes every tree.
+	TreeClosable func(ctx context.Context, c Claim) error
 }
 
 func (d Deps) check() error {

@@ -190,7 +190,7 @@ func TestSuspendResumeAndStopDriveTheClaimsMachine(t *testing.T) {
 	}
 
 	wantRefusal(t, h.operator(http.MethodPost, route(architectToken, "suspend"), nil), http.StatusConflict,
-		"suspend refused: the claim is launching (the agent is not ready, so there is nothing to suspend yet)")
+		"suspend refused: the claim is launching (the agent has not registered)")
 
 	registered := h.registered(h.bootToken(architectToken), "ses_architect")
 	if recorder := h.request(http.MethodPost, "/legion/v1/claims/ready", claim.ReadyRequest{

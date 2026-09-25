@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -167,6 +168,21 @@ func newHarness(t *testing.T) *harness {
 			Limits: supervise.Limits{LaunchFailures: 3, PromptFailures: 3, PromptRetires: 2},
 			Timeouts: supervise.Timeouts{
 				Boot: time.Minute, RegistrationIntervals: 3, RPC: 5 * time.Second, Probe: 30 * time.Second,
+			},
+			// The daemon's own wiring: a tree a workflow issue backs does not close here.
+			TreeClosable: func(ctx context.Context, c supervise.Claim) error {
+				var issue *record.Issue
+				if err := pgx.BeginFunc(ctx, st.Pool(), func(tx pgx.Tx) error {
+					var err error
+					issue, err = record.NewStore().Issue(ctx, tx, c.Tree)
+					return err
+				}); err != nil {
+					return err
+				}
+				if issue != nil {
+					return fmt.Errorf("%s is a workflow issue's tree, which closes when its linger expires", c.Tree)
+				}
+				return nil
 			},
 		},
 		store:    st,

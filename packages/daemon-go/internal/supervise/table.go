@@ -413,7 +413,7 @@ func fillTable(t *builder) {
 	t.row(onSuspend, "suspend: stop the process, keep the session", suspend, []ClaimState{StateSuspended},
 		StateRegistered, StateReady, StateWorking, StateIdle)
 	t.row(onSuspend, "already suspended", nothingToDo, nil, StateSuspended)
-	t.ignore(onSuspend, "the agent is not ready, so there is nothing to suspend yet",
+	t.ignore(onSuspend, notRegistered,
 		StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected)
 	t.ignore(onSuspend, failedClaim, StateFailed)
 	t.ignore(onSuspend, retiredClaim, StateRetired)
@@ -711,9 +711,18 @@ func retry(m *Machine, ctx context.Context, _ Event) error {
 // nothing, so the stop can be asked again. The tree's root claim ends only with its tree: a
 // retired root would leave the orphan sweep's known set, which would then take whatever the
 // runtime holds for the tree — under a sandbox, the tree volume. Any other stop of it is refused.
+//
+// A tree close is asked of TreeClosable here rather than by its caller, so the answer and the stop
+// it decides are one critical section: a workflow issue recorded for the tree between a caller's
+// read and this stop would otherwise have its root claim closed out from under it.
 func stop(m *Machine, ctx context.Context, ev Event) error {
 	if m.claim.treeRoot() && !ev.(RequestStop).TreeClose {
 		return &RefusedError{State: m.claim.State, Request: "stop", Err: rootStopRefusal(m.claim.State)}
+	}
+	if ev.(RequestStop).TreeClose && m.deps.TreeClosable != nil {
+		if err := m.deps.TreeClosable(ctx, m.claim); err != nil {
+			return &RefusedError{State: m.claim.State, Request: "close", Err: err}
+		}
 	}
 	if err := m.release(ctx); err != nil {
 		return err
