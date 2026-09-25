@@ -87,9 +87,9 @@ type Claim struct {
 	UncertainStreak int
 }
 
-// treeRoot is whether the claim is its tree's root: the architect of the issue the tree is named
-// for. A root claim ends only when its tree closes.
-func (c Claim) treeRoot() bool { return c.Role == claim.RoleArchitect && c.Issue == c.Tree }
+// treeRoot is whether the claim is its tree's root claim (claim.IsTreeArchitect), which ends only
+// when its tree closes.
+func (c Claim) treeRoot() bool { return claim.IsTreeArchitect(c.Role, c.Issue, c.Tree) }
 
 // Event is everything that reaches a machine. The set is sealed: RuntimeObservation,
 // StreamHello, StreamTurnStart, StreamTurnEnd, StreamClosed, StreamLateRefusal, PromptAcked,
@@ -189,16 +189,25 @@ func (d Deps) check() error {
 }
 
 // RefusedError is a request the claim's state does not allow — the answer an API route gives
-// its caller instead of pretending the request happened.
+// its caller instead of pretending the request happened. Err, when set, is the sentinel a caller
+// can act on (ErrDeliveryPending).
 type RefusedError struct {
 	State   ClaimState
 	Request string
 	Reason  string
+	Err     error
 }
 
 func (e *RefusedError) Error() string {
 	return fmt.Sprintf("%s refused: the claim is %s (%s)", e.Request, e.State, e.Reason)
 }
+
+func (e *RefusedError) Unwrap() error { return e.Err }
+
+// ErrDeliveryPending is a delivery refused because the claim already holds one: a wait, not a
+// fault — the claim takes the next task once its pending delivery's turn is over, so the caller
+// asks again later.
+var ErrDeliveryPending = errors.New("a delivery is already pending")
 
 // Machine is one claim's decision owner.
 type Machine struct {
@@ -220,9 +229,10 @@ type Machine struct {
 	// delivery it may already have sent, or a turn it saw start and may not have seen end. The
 	// machine asks the agent (get_state) before it acts on either.
 	askFirst bool
-	// previous is the incarnation the claim last ran — stopped by a suspension, or left behind by a
-	// retirement or a failure — which the next resume or retry hands the runtime to wait out. It is
-	// memory only: after a restart that process's stop is long complete.
+	// previous is the incarnation the claim last ran and no longer records — stopped by a
+	// suspension, retired, failed on, or found dead — which every launch of the same session hands
+	// the runtime to wait out until one starts. letGo is the one way a process gets here. It is
+	// memory only: after a restart the boot orphan sweep has reaped every process no claim records.
 	previous *runtime.Locator
 	// stale is every stale event already logged, so a repeated one is dropped in silence.
 	stale map[string]bool
@@ -464,25 +474,27 @@ func (m *Machine) dropStale(event, fence, got, held string) {
 }
 
 // launch starts a process for the claim at a new generation with a new boot token: the same
-// agent resumed from its session file when the claim has one — after prev's incarnation is gone,
-// when there is a prev to wait out — and a fresh spawn when it has none. The boot token's hash is
-// persisted before the process starts, so the shim's first hello resolves. A launch the runtime
-// or the spec refuses is a launch failure and is tried again at once, until the budget runs out.
-func (m *Machine) launch(ctx context.Context, prev *runtime.Locator) error {
+// agent resumed from its session file when the claim has one — after the process the claim last
+// ran is gone — and a fresh spawn when it has none. A process the claim still records is let go
+// first, so it is the one waited out. The boot token's hash is persisted before the process
+// starts, so the shim's first hello resolves. A launch the runtime or the spec refuses is a launch
+// failure and is tried again at once, waiting out the same process, until the budget runs out;
+// only a start that succeeds forgets it.
+func (m *Machine) launch(ctx context.Context) error {
+	m.letGo()
 	for {
 		m.disarmAll()
 		m.forgetSend()
-		m.previous = nil
 		m.claim.Generation++
 		token := rand.Text()
 		m.claim.BootTokenHash = HashBootToken(token)
 		m.claim.State = StateLaunching
-		m.claim.Locator = nil
 		if err := m.persist(ctx); err != nil {
 			return err
 		}
-		loc, err := m.start(ctx, token, prev)
+		loc, err := m.start(ctx, token)
 		if err == nil {
+			m.previous = nil
 			m.claim.Locator = &loc
 			m.armBoot()
 			m.log.Info("supervise: launched", "generation", m.claim.Generation, "incarnation", loc.Incarnation,
@@ -498,7 +510,7 @@ func (m *Machine) launch(ctx context.Context, prev *runtime.Locator) error {
 	}
 }
 
-func (m *Machine) start(ctx context.Context, token string, prev *runtime.Locator) (runtime.Locator, error) {
+func (m *Machine) start(ctx context.Context, token string) (runtime.Locator, error) {
 	spec, err := m.deps.Specs.SpawnSpec(ctx, m.claim)
 	if err != nil {
 		return runtime.Locator{}, fmt.Errorf("build the launch of %s: %w", m.claim.Token, err)
@@ -509,17 +521,16 @@ func (m *Machine) start(ctx context.Context, token string, prev *runtime.Locator
 		return m.deps.Runtime.Spawn(ctx, spec)
 	}
 	spec.ResumeSessionFile = m.claim.SessionFile
-	return m.deps.Runtime.Resume(ctx, prev, spec)
+	return m.deps.Runtime.Resume(ctx, m.previous, spec)
 }
 
 // died is the claim's process found gone — or found to be some other process — while it was
 // live: one launch failure, and the same session relaunched after it, or failed when the budget
 // is spent.
 func (m *Machine) died(ctx context.Context, observation runtime.Observation) error {
-	dead := *m.claim.Locator
-	m.log.Warn("supervise: process died", "incarnation", dead.Incarnation, "observed", string(observation.Kind),
+	m.log.Warn("supervise: process died", "incarnation", m.claim.Locator.Incarnation, "observed", string(observation.Kind),
 		"detail", observation.Detail)
-	return m.relaunchAfterFailure(ctx, &dead)
+	return m.relaunchAfterFailure(ctx)
 }
 
 // fail puts the claim where nothing relaunches it: its timers stop, its locator goes, and the
@@ -534,9 +545,8 @@ func (m *Machine) fail(ctx context.Context, why string) error {
 	}
 	m.disarmAll()
 	m.forgetSend()
-	m.rememberProcess()
+	m.letGo()
 	m.claim.State = StateFailed
-	m.claim.Locator = nil
 	m.log.Error("supervise: claim failed", "why", why, "launchFailures", m.claim.Budgets.LaunchFailures,
 		"promptFailures", m.claim.Budgets.PromptFailures, "promptRetires", m.claim.Budgets.PromptRetires)
 	if err := m.persist(ctx); err != nil {
@@ -546,31 +556,31 @@ func (m *Machine) fail(ctx context.Context, why string) error {
 	return nil
 }
 
-// release is the operator's stop: the runtime lets go of everything it holds for the claim — the
-// process, when one runs — and the claim retires. A release that fails changes nothing, so the
-// stop can be asked again.
+// release asks the runtime to let go of everything it holds for the claim — the process, when one
+// runs. It is the one place the machine hands the runtime a claim to end, so the claim is taken
+// once, from the claim the machine holds, for the operator's stop, the tree's close, and an exit.
 func (m *Machine) release(ctx context.Context) error {
 	if err := m.deps.Runtime.Release(ctx, runtime.Known{Claim: m.claim.Token, Locator: m.claim.Locator}); err != nil {
 		return fmt.Errorf("release %s: %w", m.claim.Token, err)
 	}
-	return m.retire(ctx)
+	return nil
 }
 
 // retire ends the claim: nothing of it runs any more and nothing relaunches it.
 func (m *Machine) retire(ctx context.Context) error {
 	m.disarmAll()
 	m.forgetSend()
-	m.rememberProcess()
+	m.letGo()
 	m.claim.State = StateRetired
-	m.claim.Locator = nil
 	return m.persist(ctx)
 }
 
-// rememberProcess keeps the process the claim records, when it records one, as the incarnation a
-// later retry waits out before it relaunches the same session.
-func (m *Machine) rememberProcess() {
+// letGo moves the process the claim records, when it records one, into previous: the claim no
+// longer runs it — it was stopped, found dead, or left behind — and the next launch of the same
+// session waits it out.
+func (m *Machine) letGo() {
 	if m.claim.Locator != nil {
-		m.previous = m.claim.Locator
+		m.previous, m.claim.Locator = m.claim.Locator, nil
 	}
 }
 

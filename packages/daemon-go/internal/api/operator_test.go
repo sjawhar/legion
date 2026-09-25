@@ -177,15 +177,16 @@ func TestDeliverQueuesATaskOnTheClaim(t *testing.T) {
 
 // suspend, resume, and stop are the machine's requests: each answers the claim as the request
 // left it, the machine's refusal when its state does not allow the request, and 404 for a claim
-// the daemon does not hold.
+// the daemon does not hold. The tree's root claim ends only when its tree closes, so the operator's
+// stop of it is refused and names suspend; a worker's claim it stops.
 func TestSuspendResumeAndStopDriveTheClaimsMachine(t *testing.T) {
 	h := newHarness(t)
 	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
-	route := func(action string) string {
-		return "/legion/v1/operator/claims/" + string(architectToken) + "/" + action
+	route := func(token claim.Token, action string) string {
+		return "/legion/v1/operator/claims/" + string(token) + "/" + action
 	}
 
-	wantRefusal(t, h.operator(http.MethodPost, route("suspend"), nil), http.StatusConflict,
+	wantRefusal(t, h.operator(http.MethodPost, route(architectToken, "suspend"), nil), http.StatusConflict,
 		"suspend refused: the claim is launching (the agent is not ready, so there is nothing to suspend yet)")
 
 	registered := h.registered(h.bootToken(architectToken), "ses_architect")
@@ -195,17 +196,25 @@ func TestSuspendResumeAndStopDriveTheClaimsMachine(t *testing.T) {
 		t.Fatalf("ready = %d; body %s", recorder.Code, recorder.Body)
 	}
 
+	worker := spawnBody()
+	worker.Issue, worker.Role = "LEGION-209", claim.RoleImplementer
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", worker)
+	workerToken, err := claim.NewToken("legion", worker.Issue, worker.Role)
+	if err != nil {
+		t.Fatal(err)
+	}
 	steps := []struct {
+		token  claim.Token
 		action string
 		want   supervise.ClaimState
 		method string
 	}{
-		{"suspend", supervise.StateSuspended, "Suspend"},
-		{"resume", supervise.StateLaunching, "Resume"},
-		{"stop", supervise.StateRetired, "Release"},
+		{architectToken, "suspend", supervise.StateSuspended, "Suspend"},
+		{architectToken, "resume", supervise.StateLaunching, "Resume"},
+		{workerToken, "stop", supervise.StateRetired, "Release"},
 	}
 	for _, step := range steps {
-		recorder := h.operator(http.MethodPost, route(step.action), nil)
+		recorder := h.operator(http.MethodPost, route(step.token, step.action), nil)
 		if recorder.Code != http.StatusOK {
 			t.Fatalf("%s = %d, want 200; body %s", step.action, recorder.Code, recorder.Body)
 		}
@@ -218,7 +227,15 @@ func TestSuspendResumeAndStopDriveTheClaimsMachine(t *testing.T) {
 			t.Fatalf("after %s the runtime saw %v, want one %s", step.action, h.runtime.Methods(), step.method)
 		}
 	}
-	wantRefusal(t, h.operator(http.MethodPost, route("resume"), nil), http.StatusConflict,
+	if releases := h.runtime.CallsOf("Release"); releases[0].Released.Claim != workerToken {
+		t.Errorf("released %s, want %s", releases[0].Released.Claim, workerToken)
+	}
+	wantRefusal(t, h.operator(http.MethodPost, route(architectToken, "stop"), nil), http.StatusConflict,
+		"stop refused: the claim is launching (the tree's root claim ends only when its tree closes; suspend it to stop its process)")
+	if releases := h.runtime.CallsOf("Release"); len(releases) != 1 {
+		t.Errorf("the refused stop of the root reached the runtime: %+v", releases)
+	}
+	wantRefusal(t, h.operator(http.MethodPost, route(workerToken, "resume"), nil), http.StatusConflict,
 		"resume refused: the claim is retired (the claim is retired)")
 
 	for _, action := range []string{"deliver", "suspend", "resume", "stop"} {

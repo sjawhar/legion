@@ -256,24 +256,6 @@ func TestTheRegistrationDeadlineRetiresALiveUnregisteredProcess(t *testing.T) {
 	}
 }
 
-// The registration deadline relaunches the claim, so it suspends the unregistered process and never
-// releases it: under a sandbox a release deletes the claim's objects, and a root's tree volume with
-// them.
-func TestTheRegistrationDeadlineRetiresARootThroughSuspendNeverRelease(t *testing.T) {
-	h := newHarnessOf(t, rootClaim())
-	h.launch()
-	alive := h.locator()
-
-	h.advance(deadline)
-
-	if suspends := h.wantCalls("Suspend", 1); suspends[0].Locator != alive {
-		t.Errorf("suspended %+v, want the root's live process", suspends[0].Locator)
-	}
-	h.wantCalls("Release", 0)
-	h.wantCalls("Spawn", 2)
-	h.wantState(StateLaunching)
-}
-
 func TestTheRegistrationDeadlineWithADeadProcessCountsOneFailureWithoutASuspension(t *testing.T) {
 	h := newHarness(t)
 	h.launch()
@@ -652,61 +634,56 @@ func TestAWorkerClaimsExitReleasesItAndRecordsWhy(t *testing.T) {
 	}
 }
 
-// The tree's root claim is not retired before its tree closes: its agent's exit suspends it, so
-// the claim keeps its session and stays resumable — and known to the orphan sweep, which under a
-// sandbox would otherwise delete its Sandbox and the tree volume with it.
-func TestARootClaimsExitSuspendsIt(t *testing.T) {
-	for _, state := range []ClaimState{StateRegistered, StateReady, StateWorking, StateIdle} {
-		t.Run(string(state), func(t *testing.T) {
-			h := newHarnessOf(t, rootClaim())
-			h.reach(state)
-			loc := h.locator()
+// A suspension — the operator's, or a root's exit — whose store cannot retire the finished phase's
+// task still revokes the agent's capability, in memory and in the stored claim: the stopped agent's
+// secret authenticates nothing while the failure is reported. The task left behind is retired by
+// the claim's next decision, before anything could hand it to the resumed agent, across a restart
+// too.
+func TestASuspensionWhoseTaskCannotBeRetiredStillRevokesTheCapability(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		c       Claim
+		end     func(h *harness) Event
+		restart bool
+	}{
+		{"suspend", queuedClaim(), func(h *harness) Event { return RequestSuspend{Claim: testToken} }, false},
+		{"root exit", rootClaim(), func(h *harness) Event {
+			return RequestExit{Claim: rootToken, Generation: h.generation(), Session: session, Reason: "tree waiting"}
+		}, false},
+		{"root exit, then a restart", rootClaim(), func(h *harness) Event {
+			return RequestExit{Claim: rootToken, Generation: h.generation(), Session: session, Reason: "tree waiting"}
+		}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarnessOf(t, tc.c)
+			h.reach(StateReady)
+			h.must(RequestDeliver{Claim: h.token, Task: "the finished phase's task"})
+			h.wantPrompts(1)
+			h.store.fail("RetireDelivery", errBoom)
 
-			h.must(RequestExit{Claim: rootToken, Generation: h.generation(), Session: session, Reason: "tree waiting"})
-
-			if suspend := h.wantCalls("Suspend", 1)[0]; suspend.Locator != loc {
-				t.Errorf("suspended %+v, want %+v", suspend.Locator, loc)
+			if err := h.handle(tc.end(h)); !errors.Is(err, errBoom) {
+				t.Fatalf("the suspension returned %v, want the store's failure reported", err)
 			}
-			h.wantCalls("Release", 0)
+
 			h.wantState(StateSuspended)
-			c := h.claim()
-			if c.Locator != nil || c.Session != session || c.SessionFile != sessionFile || h.clock.Live() != 0 {
-				t.Errorf("claim %+v with %d timers armed, want no locator, the session kept, and nothing armed", c, h.clock.Live())
+			if c := h.claim(); c.CapabilityHash != nil || c.Locator != nil {
+				t.Errorf("claim %+v, want the capability revoked and no process recorded", c)
 			}
-			if stored := h.store.load(rootToken); stored.State != StateSuspended || stored.Locator != nil {
-				t.Errorf("stored %+v, want the suspension persisted", stored)
+			if stored := h.store.load(h.token); stored.State != StateSuspended || stored.CapabilityHash != nil || stored.Locator != nil {
+				t.Errorf("stored %+v, want the suspension persisted with the capability revoked", stored)
 			}
 
-			h.must(RequestResume{Claim: rootToken})
-			if resume := h.wantCalls("Resume", 1)[0]; resume.Previous == nil || *resume.Previous != loc || resume.Spec.ResumeSessionFile != sessionFile {
-				t.Errorf("resumed %+v waiting out %+v, want the session after the suspended incarnation", resume.Spec, resume.Previous)
+			h.store.fail("RetireDelivery", nil)
+			if tc.restart {
+				h.restart()
 			}
+			h.must(RequestResume{Claim: h.token})
+			if d, ok := h.store.delivery(h.token); ok {
+				t.Errorf("stored delivery %+v after the resume, want the finished phase's task retired", d)
+			}
+			h.relaunched()
+			h.wantPrompts(1)
 		})
-	}
-}
-
-// An exit is the agent's own end, so a runtime that cannot suspend its process does not keep a
-// finished root live: the error is logged and the claim is suspended anyway, its secret revoked,
-// with the process remembered for the resume to wait out.
-func TestARootExitWhoseSuspendFailsStillSuspendsIt(t *testing.T) {
-	h := newHarnessOf(t, rootClaim())
-	h.reach(StateIdle)
-	loc := h.locator()
-	h.rt.FailSuspend(errBoom)
-
-	h.must(RequestExit{Claim: rootToken, Generation: h.generation(), Session: session, Reason: "tree waiting"})
-
-	h.wantState(StateSuspended)
-	if stored := h.store.load(rootToken); stored.State != StateSuspended || stored.Locator != nil || stored.CapabilityHash != nil {
-		t.Errorf("stored %+v, want the root suspended with no process and no capability", stored)
-	}
-	if lines := h.logs.lines("suspend", errBoom.Error()); len(lines) != 1 {
-		t.Errorf("logged %v, want the failed suspension named once", lines)
-	}
-	h.rt.FailSuspend(nil)
-	h.must(RequestResume{Claim: rootToken})
-	if resume := h.wantCalls("Resume", 1)[0]; resume.Previous == nil || *resume.Previous != loc {
-		t.Errorf("resumed waiting out %+v, want the exited process %+v", resume.Previous, loc)
 	}
 }
 
@@ -726,20 +703,6 @@ func TestAWorkerExitWhoseReleaseFailsStillRetiresIt(t *testing.T) {
 	if lines := h.logs.lines("release", errBoom.Error()); len(lines) != 1 {
 		t.Errorf("logged %v, want the failed release named once", lines)
 	}
-}
-
-// The tree's close is the one thing that releases its root: a root the daemon already suspended
-// has no process, so the release carries no locator.
-func TestTreeCloseReleasesASuspendedRootWithNoLocator(t *testing.T) {
-	h := newHarnessOf(t, rootClaim())
-	h.reach(StateIdle)
-	h.must(RequestExit{Claim: rootToken, Generation: h.generation(), Session: session, Reason: "tree waiting"})
-	h.wantState(StateSuspended)
-
-	h.must(RequestStop{Claim: rootToken})
-
-	wantReleasedWithNoLocator(t, h, rootToken)
-	h.wantState(StateRetired)
 }
 
 // The agent of a claim the daemon suspended, stopped, or gave up on reports its own end as it

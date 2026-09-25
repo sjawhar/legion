@@ -318,4 +318,33 @@ func TestRetryWaitsOutTheProcessTheClaimLastRan(t *testing.T) {
 		h.wantState(StateFailed)
 		wantRetryWaitsOut(t, h, last)
 	})
+	t.Run("failed when prompt retirements ran out", func(t *testing.T) {
+		h := newHarness(t)
+		h.reach(StateReady)
+		h.must(RequestDeliver{Claim: testToken, Task: "the task"})
+		for range 2 {
+			h.advance(testRPC)
+			h.observe(runtime.Alive)
+		}
+		h.advance(testRPC)
+		h.relaunched()
+		last := h.locator()
+		for range 2 {
+			h.advance(testRPC)
+			h.observe(runtime.Alive)
+		}
+		h.advance(testRPC)
+		h.wantState(StateFailed)
+		wantRetryWaitsOut(t, h, last)
+	})
+	t.Run("failed when a registration deadline spent the launches", func(t *testing.T) {
+		h := newHarness(t)
+		h.reach(StateReady)
+		h.observe(runtime.Gone)
+		h.advance(deadline)
+		last := h.locator()
+		h.advance(deadline)
+		h.wantState(StateFailed)
+		wantRetryWaitsOut(t, h, last)
+	})
 }

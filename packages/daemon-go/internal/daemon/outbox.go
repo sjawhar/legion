@@ -112,7 +112,13 @@ func (r *outbox) RunOnce(ctx context.Context) error {
 	}
 	for _, row := range rows {
 		if err := r.execute(ctx, row); err != nil {
-			r.log.Error("outbox row failed", "row", row.ID, "kind", row.Kind, "error", err)
+			// A task meeting the claim's own pending delivery is a wait, not a failure: the row runs
+			// again on the same backoff once that delivery's turn is over.
+			if errors.Is(err, supervise.ErrDeliveryPending) {
+				r.log.Debug("outbox row waits for the claim's pending delivery", "row", row.ID, "attempts", row.Attempts, "error", err)
+			} else {
+				r.log.Error("outbox row failed", "row", row.ID, "kind", row.Kind, "error", err)
+			}
 			if retryErr := r.retry(ctx, row, err); retryErr != nil {
 				r.log.Error("outbox row retry not recorded; it runs again when its lease expires", "row", row.ID, "error", retryErr)
 			}
@@ -335,7 +341,8 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		if !found {
 			return nil
 		}
-		if err := machine.Handle(ctx, supervise.RequestStop{Claim: token}); err != nil {
+		// Every stop row is a tree's close: lingerExpired enqueues one for each claim of the tree.
+		if err := machine.Handle(ctx, supervise.RequestStop{Claim: token, TreeClose: true}); err != nil {
 			return fmt.Errorf("stop claim %s: %w", token, err)
 		}
 		return nil

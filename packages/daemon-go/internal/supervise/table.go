@@ -113,8 +113,13 @@ type RequestSuspend struct{ Claim claim.Token }
 // RequestResume relaunches a suspended claim's session.
 type RequestResume struct{ Claim claim.Token }
 
-// RequestStop ends the claim.
-type RequestStop struct{ Claim claim.Token }
+// RequestStop ends the claim. TreeClose says the stop is its tree's close — the workflow stopping
+// every claim of a tree whose linger expired — which is the only stop that ends the tree's root
+// claim: any other stop of a root is refused, and suspending it is how its process is stopped.
+type RequestStop struct {
+	Claim     claim.Token
+	TreeClose bool
+}
 
 // RequestRetry relaunches a failed or retired claim's session with fresh budgets: the workflow's
 // decision that the role runs again — the tree's architect retrying a held phase, or a closed tree
@@ -401,7 +406,7 @@ func fillTable(t *builder) {
 	t.ignore(onResume, failedClaim, StateFailed)
 	t.ignore(onResume, retiredClaim, StateRetired)
 
-	t.row(onStop, "release the claim and retire it", stop, []ClaimState{StateRetired},
+	t.row(onStop, "release the claim and retire it; the tree's root only at the tree's close", stop, []ClaimState{StateRetired},
 		StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected, StateRegistered, StateReady, StateWorking, StateIdle,
 		StateSuspended, StateFailed)
 	t.row(onStop, "already retired", nothingToDo, nil, StateRetired)
@@ -590,15 +595,15 @@ func bootInterval(m *Machine, ctx context.Context, _ Event) error {
 // and tries again at the next probe interval.
 func registrationDeadline(m *Machine, ctx context.Context, _ Event) error {
 	return m.probe(ctx, func(ctx context.Context) error {
-		alive := *m.claim.Locator
-		if err := m.deps.Runtime.Suspend(ctx, alive); err != nil {
+		if err := m.deps.Runtime.Suspend(ctx, *m.claim.Locator); err != nil {
 			m.arm(TimerRegistration, m.deps.Timeouts.Probe, "")
 			return fmt.Errorf("retire %s, whose agent never registered: suspend: %w", m.claim.Token, err)
 		}
-		m.log.Warn("supervise: the agent never registered; retired its process", "incarnation", alive.Incarnation)
-		// The process is suspended: the claim records none, so a failure has nothing to suspend.
-		m.claim.Locator = nil
-		return m.relaunchAfterFailure(ctx, &alive)
+		m.log.Warn("supervise: the agent never registered; retired its process", "incarnation", m.claim.Locator.Incarnation)
+		// The process is suspended: let go, a failure has nothing to suspend, and the relaunch
+		// waits it out.
+		m.letGo()
+		return m.relaunchAfterFailure(ctx)
 	}, TimerRegistration, m.deps.Timeouts.Probe)
 }
 
@@ -606,7 +611,7 @@ func noTurn(m *Machine, ctx context.Context, _ Event) error {
 	return m.promptFailed(ctx, fmt.Sprintf("acknowledged, and no turn started within %s", m.deps.Timeouts.RPC))
 }
 
-func spawn(m *Machine, ctx context.Context, _ Event) error { return m.launch(ctx, nil) }
+func spawn(m *Machine, ctx context.Context, _ Event) error { return m.launch(ctx) }
 
 func register(m *Machine, ctx context.Context, ev Event) error {
 	r := ev.(RequestRegister)
@@ -639,43 +644,52 @@ func reready(m *Machine, ctx context.Context, _ Event) error { return m.sendPend
 
 // suspend stops the process and keeps the session. A suspension ends the claim's phase, so a task
 // still pending unconfirmed (acknowledged and then refused, or lost to the transport) is retired
-// with it: the next resume is started with its new phase's task, never handed the finished one's.
+// with it (settle): the next resume is started with its new phase's task, never handed the
+// finished one's.
 func suspend(m *Machine, ctx context.Context, _ Event) error {
-	suspending := *m.claim.Locator
-	if err := m.deps.Runtime.Suspend(ctx, suspending); err != nil {
+	if err := m.deps.Runtime.Suspend(ctx, *m.claim.Locator); err != nil {
 		return fmt.Errorf("suspend %s: %w", m.claim.Token, err)
 	}
-	return m.suspended(ctx, suspending)
+	return m.suspended(ctx)
 }
 
-// suspended moves the claim to suspended: its session kept, no process recorded, and the one it
-// stopped remembered for the resume to wait out.
-func (m *Machine) suspended(ctx context.Context, stopped runtime.Locator) error {
+// suspended moves the claim to suspended: its session kept, and the process it stopped let go for
+// the resume to wait out. It only persists — revoking the stopped agent's capability, in memory
+// even when the write fails. The finished phase's unconfirmed task is retired after it by settle,
+// which Handle runs after every row; a retirement that fails is reported, and the claim's next
+// decision retires it before anything else.
+func (m *Machine) suspended(ctx context.Context) error {
 	m.disarmAll()
 	m.forgetSend()
+	m.letGo()
 	m.claim.State = StateSuspended
-	m.claim.Locator = nil
-	m.previous = &stopped
-	if p := m.claim.Pending; p != nil && p.ConfirmedAt.IsZero() {
-		if err := m.deps.Store.RetireDelivery(ctx, m.claim.Token, p.ID); err != nil {
-			return err
-		}
-		m.claim.Pending = nil
-	}
 	return m.persist(ctx)
 }
 
-func resume(m *Machine, ctx context.Context, _ Event) error { return m.launch(ctx, m.previous) }
+func resume(m *Machine, ctx context.Context, _ Event) error { return m.launch(ctx) }
 
 // retry is a failed or retired claim given another run: its budgets start over, and its session,
 // when it has one, is relaunched after the process the claim last ran is gone. A pending delivery
 // the claim kept goes once the agent is ready.
 func retry(m *Machine, ctx context.Context, _ Event) error {
 	m.claim.Budgets = Budgets{}
-	return m.launch(ctx, m.previous)
+	return m.launch(ctx)
 }
 
-func stop(m *Machine, ctx context.Context, _ Event) error { return m.release(ctx) }
+// stop ends the claim: the runtime releases it, and it retires. A release that fails changes
+// nothing, so the stop can be asked again. The tree's root claim ends only with its tree: a
+// retired root would leave the orphan sweep's known set, which would then take whatever the
+// runtime holds for the tree — under a sandbox, the tree volume. Any other stop of it is refused.
+func stop(m *Machine, ctx context.Context, ev Event) error {
+	if m.claim.treeRoot() && !ev.(RequestStop).TreeClose {
+		return &RefusedError{State: m.claim.State, Request: "stop",
+			Reason: "the tree's root claim ends only when its tree closes; suspend it to stop its process"}
+	}
+	if err := m.release(ctx); err != nil {
+		return err
+	}
+	return m.retire(ctx)
+}
 
 func deliverLater(m *Machine, ctx context.Context, ev Event) error {
 	request := ev.(RequestDeliver)
@@ -695,7 +709,7 @@ func deliverResuming(m *Machine, ctx context.Context, ev Event) error {
 	if err := m.queue(ctx, request.Task, request.ID); err != nil {
 		return err
 	}
-	return m.launch(ctx, m.previous)
+	return m.launch(ctx)
 }
 
 // exit is the agent reporting its own end. A worker's or sub-architect's claim ends with it and is
@@ -707,14 +721,13 @@ func deliverResuming(m *Machine, ctx context.Context, ev Event) error {
 func exit(m *Machine, ctx context.Context, ev Event) error {
 	m.log.Info("supervise: the agent reported its exit", "reason", ev.(RequestExit).Reason)
 	if m.claim.treeRoot() {
-		exited := *m.claim.Locator
-		if err := m.deps.Runtime.Suspend(ctx, exited); err != nil {
+		if err := m.deps.Runtime.Suspend(ctx, *m.claim.Locator); err != nil {
 			m.log.Error("supervise: could not suspend the exited root's process; suspending its claim anyway",
-				"incarnation", exited.Incarnation, "error", err)
+				"incarnation", m.claim.Locator.Incarnation, "error", err)
 		}
-		return m.suspended(ctx, exited)
+		return m.suspended(ctx)
 	}
-	if err := m.deps.Runtime.Release(ctx, runtime.Known{Claim: m.claim.Token, Locator: m.claim.Locator}); err != nil {
+	if err := m.release(ctx); err != nil {
 		m.log.Error("supervise: could not release the exited agent's process; retiring its claim anyway", "error", err)
 	}
 	return m.retire(ctx)
