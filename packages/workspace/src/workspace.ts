@@ -289,15 +289,15 @@ async function createWorkspace(
         `Start from main instead: delete the branch on GitHub (the pull request's Delete branch button, or \`gh api -X DELETE repos/${deps.repo}/git/refs/heads/${bookmark}\`), and the next provisioning starts at main.`
     );
   } else if (origin?.present) {
-    const listed = origin.added[0];
+    const listedCommit = origin.added[0];
     await runChecked(deps, ["jj", "bookmark", "track", remote, "-R", repoCloneDir]);
     const tracked = (await readBookmark(deps, repoCloneDir, workspaceDir, bookmark)).local;
-    if (!tracked?.present || tracked.conflict || tracked.added[0] !== listed) {
+    if (!tracked?.present || tracked.conflict || tracked.added[0] !== listedCommit) {
       throw new Error(
-        `Bookmark ${remote} moved from ${listed} to ${tracked?.added.join(", ") || "nothing"} while it was being tracked; workspace ${workspaceDir} was not created. Provision again: the next provisioning starts at origin's branch as it is then.`
+        `Bookmark ${remote} moved from ${listedCommit} to ${listed(tracked?.added ?? [])} while it was being tracked; workspace ${workspaceDir} was not created. Provision again: the next provisioning starts at origin's branch as it is then.`
       );
     }
-    bookmarkCommit = listed;
+    bookmarkCommit = listedCommit;
   }
 
   await mkdir(path.dirname(workspaceDir), { recursive: true });
@@ -428,7 +428,12 @@ async function readBookmark(
  * conflict is a deletion (`- A + B`, where two targets are `- base + A + B`). */
 function conflictTargets(row: BookmarkRow): string {
   const deletion = row.added.length <= row.removed.length ? ", one side a deletion" : "";
-  return `(adds ${row.added.join(", ") || "nothing"}; removes ${row.removed.join(", ") || "nothing"})${deletion}`;
+  return `(adds ${listed(row.added)}; removes ${listed(row.removed)})${deletion}`;
+}
+
+/** A row's commits as a refusal names them: comma-separated, or "nothing". */
+function listed(commits: readonly string[]): string {
+  return commits.join(", ") || "nothing";
 }
 
 /** Removes a repository-scoped jj `user.name`/`user.email` from the shared clone. `--repo` on a
