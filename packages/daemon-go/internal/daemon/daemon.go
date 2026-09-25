@@ -143,10 +143,21 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 	if cfg.DispatchURL != "" {
 		log.Info("legion workflow boot stage", "stage", "store")
 	}
-	workflow, err := openWorkflow(boot, cfg, st, plan.project, log, o.workflowTokens)
+	// The App mint waits out GitHub's transient failures, which the boot budget does not bound, as
+	// it does not bound the plugin gate or the image probe: the work after it has a budget of its own.
+	workflow, err := openWorkflow(ctx, cfg, st, plan.project, log, o.workflowTokens)
 	if err != nil {
 		st.Close()
+		if ctx.Err() != nil {
+			log.Info("legion daemon stopped before its GitHub App tokens were minted", "project", cfg.Project)
+			return nil
+		}
 		return err
+	}
+	if workflow != nil {
+		var cancelAfterMint context.CancelFunc
+		boot, cancelAfterMint = context.WithTimeout(context.WithoutCancel(ctx), bootTimeout)
+		defer cancelAfterMint()
 	}
 	if workflow != nil {
 		plan.identity = workflow.identity

@@ -37,6 +37,23 @@ type Lease struct {
 	Identity  GitIdentity
 }
 
+// TransientError is a GitHub answer that says nothing about the App or its installation, so the
+// same request may pass when it is made again: no answer at all (a transport failure, including a
+// request cut off by its deadline), a 5xx, or a 429. Every other failure is GitHub's definitive
+// answer, or one about the configuration, and asking again changes nothing.
+type TransientError struct{ Err error }
+
+func (e *TransientError) Error() string { return e.Err.Error() }
+func (e *TransientError) Unwrap() error { return e.Err }
+
+// transient marks a response status that is GitHub's trouble rather than an answer.
+func transient(status int, err error) error {
+	if status >= http.StatusInternalServerError || status == http.StatusTooManyRequests {
+		return &TransientError{Err: err}
+	}
+	return err
+}
+
 // Tokens mints a GitHub installation token for an App and repository owner.
 type Tokens interface {
 	Token(ctx context.Context, role AppRole, owner string) (Lease, error)
@@ -240,11 +257,11 @@ func (m *Manager) discoverInstallations(ctx context.Context, app config.GitHubAp
 		m.appHeaders(request, jwt)
 		response, err := m.client.Do(request)
 		if err != nil {
-			return nil, fmt.Errorf("GitHub App installation discovery: %w", err)
+			return nil, &TransientError{Err: fmt.Errorf("GitHub App installation discovery: %w", err)}
 		}
 		if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 			response.Body.Close()
-			return nil, fmt.Errorf("GitHub App installation discovery failed (%d)", response.StatusCode)
+			return nil, transient(response.StatusCode, fmt.Errorf("GitHub App installation discovery failed (%d)", response.StatusCode))
 		}
 		var payload []struct {
 			ID      json.RawMessage `json:"id"`
@@ -291,12 +308,12 @@ func (m *Manager) exchange(ctx context.Context, jwt, installation string) (Lease
 	request.Header.Set("Accept", "application/vnd.github+v3+json")
 	response, err := m.client.Do(request)
 	if err != nil {
-		return Lease{}, fmt.Errorf("GitHub App token exchange: %w", err)
+		return Lease{}, &TransientError{Err: fmt.Errorf("GitHub App token exchange: %w", err)}
 	}
 	defer response.Body.Close()
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		body, _ := io.ReadAll(response.Body)
-		return Lease{}, fmt.Errorf("GitHub App token exchange failed (%d): %s", response.StatusCode, strings.TrimSpace(string(body)))
+		return Lease{}, transient(response.StatusCode, fmt.Errorf("GitHub App token exchange failed (%d): %s", response.StatusCode, strings.TrimSpace(string(body))))
 	}
 	var payload struct {
 		Token     string `json:"token"`
@@ -351,11 +368,11 @@ func (m *Manager) fetchIdentity(ctx context.Context, jwt, installationToken stri
 	m.appHeaders(request, jwt)
 	response, err := m.client.Do(request)
 	if err != nil {
-		return GitIdentity{}, fmt.Errorf("GitHub App identity lookup: %w", err)
+		return GitIdentity{}, &TransientError{Err: fmt.Errorf("GitHub App identity lookup: %w", err)}
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		response.Body.Close()
-		return GitIdentity{}, fmt.Errorf("GitHub App identity lookup failed (%d)", response.StatusCode)
+		return GitIdentity{}, transient(response.StatusCode, fmt.Errorf("GitHub App identity lookup failed (%d)", response.StatusCode))
 	}
 	var app struct {
 		Slug string `json:"slug"`
@@ -376,11 +393,11 @@ func (m *Manager) fetchIdentity(ctx context.Context, jwt, installationToken stri
 	request.Header.Set("User-Agent", "legion-daemon")
 	response, err = m.client.Do(request)
 	if err != nil {
-		return GitIdentity{}, fmt.Errorf("GitHub App bot identity lookup: %w", err)
+		return GitIdentity{}, &TransientError{Err: fmt.Errorf("GitHub App bot identity lookup: %w", err)}
 	}
 	defer response.Body.Close()
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return GitIdentity{}, fmt.Errorf("GitHub App bot identity lookup failed (%d)", response.StatusCode)
+		return GitIdentity{}, transient(response.StatusCode, fmt.Errorf("GitHub App bot identity lookup failed (%d)", response.StatusCode))
 	}
 	var bot struct {
 		ID json.RawMessage `json:"id"`

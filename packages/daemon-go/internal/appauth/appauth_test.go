@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -269,5 +270,66 @@ func TestTokensDeduplicatesConcurrentRequests(t *testing.T) {
 	defer mu.Unlock()
 	if exchanges != 1 {
 		t.Fatalf("token exchanges = %d, want 1", exchanges)
+	}
+}
+
+// GitHub's trouble is transient and its answers are not: a request GitHub never answered, a 5xx,
+// or a 429 may pass when it is made again, and a boot waits it out; any other status, or an owner
+// the App is not installed on, is refused at once. The boot's retry reads nothing else.
+func TestGitHubsTroubleIsTransientAndItsAnswersAreNot(t *testing.T) {
+	_, privatePEM := testAppKey(t)
+	for _, tc := range []struct {
+		name      string
+		discovery int // 0 answers the installation list
+		exchange  int // 0 answers with a token
+		transient bool
+	}{
+		{name: "discovery 502", discovery: http.StatusBadGateway, transient: true},
+		{name: "discovery 429", discovery: http.StatusTooManyRequests, transient: true},
+		{name: "discovery 401", discovery: http.StatusUnauthorized},
+		{name: "exchange 500", exchange: http.StatusInternalServerError, transient: true},
+		{name: "exchange 422", exchange: http.StatusUnprocessableEntity},
+		{name: "discovery never answers", discovery: -1, transient: true},
+		{name: "not installed on the owner", discovery: -2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/app/installations":
+					switch tc.discovery {
+					case 0:
+						fmt.Fprint(w, `[{"id":77,"account":{"login":"acme"}}]`)
+					case -1:
+						<-r.Context().Done()
+					case -2:
+						fmt.Fprint(w, `[{"id":77,"account":{"login":"someone-else"}}]`)
+					default:
+						http.Error(w, "{}", tc.discovery)
+					}
+				case "/app/installations/77/access_tokens":
+					if tc.exchange != 0 {
+						http.Error(w, "{}", tc.exchange)
+						return
+					}
+					fmt.Fprintf(w, `{"token":"installation-1","expires_at":%q}`, time.Now().Add(time.Hour).Format(time.RFC3339))
+				default:
+					t.Errorf("unexpected GitHub path %s", r.URL.Path)
+				}
+			}))
+			defer server.Close()
+			tokens := New(config.GitHubApps{Implement: config.GitHubApp{AppID: "12345", PrivateKey: privatePEM}},
+				Options{BaseURL: server.URL, HTTPClient: server.Client()})
+			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			defer cancel()
+
+			_, err := tokens.Token(ctx, Implement, "acme")
+			if err == nil {
+				t.Fatal("Token succeeded, want a failure")
+			}
+			var transient *TransientError
+			if got := errors.As(err, &transient); got != tc.transient {
+				t.Fatalf("Token = %v, transient %v, want transient %v", err, got, tc.transient)
+			}
+		})
 	}
 }

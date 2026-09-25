@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/appauth"
+	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
@@ -55,6 +57,35 @@ type workflowRuntime struct {
 	failed chan error
 }
 
+// appMintAttempt bounds one boot mint of a GitHub App token: installation discovery, the exchange
+// and the bot identity lookups each answer in well under a second, so an attempt that runs this
+// long is a request GitHub never answered.
+var appMintAttempt = 20 * time.Second
+
+// appMintRetry is the wait between boot mints that failed transiently: 5 s doubling to a minute,
+// five attempts, about three minutes at worst, after which GitHub's trouble refuses the boot with
+// the last failure named.
+var appMintRetry = bootprobe.Retry{Initial: 5 * time.Second, Max: time.Minute, Attempts: 5}
+
+// mintAtBoot mints role's token for owner, running it again after a failure GitHub reports as its
+// own trouble (appauth.TransientError); any other failure is refused at once.
+func mintAtBoot(ctx context.Context, tokens appauth.Tokens, role appauth.AppRole, owner string, log *slog.Logger) error {
+	return bootprobe.Run(ctx, string(role)+" GitHub App token mint", appMintRetry, log, func(ctx context.Context) bootprobe.Outcome {
+		attempt, cancel := context.WithTimeout(ctx, appMintAttempt)
+		defer cancel()
+		_, err := tokens.Token(attempt, role, owner)
+		var transient *appauth.TransientError
+		switch {
+		case err == nil:
+			return bootprobe.Outcome{Passed: true}
+		case errors.As(err, &transient):
+			return bootprobe.Outcome{Detail: err.Error()}
+		default:
+			return bootprobe.Outcome{Refusal: err}
+		}
+	})
+}
+
 func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, projectID string, log *slog.Logger, suppliedTokens appauth.Tokens) (*workflowRuntime, error) {
 	if cfg.DispatchURL == "" {
 		return nil, nil
@@ -69,7 +100,7 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 		tokens = appauth.New(cfg.GitHubApps, appauth.Options{})
 	}
 	for _, role := range []appauth.AppRole{appauth.Implement, appauth.Review} {
-		if _, err := tokens.Token(ctx, role, owner); err != nil {
+		if err := mintAtBoot(ctx, tokens, role, owner, log); err != nil {
 			return nil, fmt.Errorf("mint %s GitHub App token at boot: %w", role, err)
 		}
 	}
