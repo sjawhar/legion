@@ -452,7 +452,24 @@ func (s *server) getArtifactText(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusOK, map[string]any{"markdown": markdown, "version": nil, "token": token})
+	version, err := s.latestVersionNumber(r.Context(), artifact.ID)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	WriteJSON(w, http.StatusOK, map[string]any{"markdown": markdown, "version": version, "token": token})
+}
+
+// latestVersionNumber is the newest version a document has, or nil for one that has none. The
+// live markdown beside it can be ahead of that version while browser text is unsettled.
+func (s *server) latestVersionNumber(ctx context.Context, artifactID string) (*int, error) {
+	var number *int
+	if err := s.deps.Store.Pool.QueryRow(ctx, `
+		select max(number) from artifact_versions where artifact_id = $1
+	`, artifactID).Scan(&number); err != nil {
+		return nil, fmt.Errorf("read latest document version: %w", err)
+	}
+	return number, nil
 }
 
 func (s *server) getArtifactBlocks(w http.ResponseWriter, r *http.Request) {
@@ -703,14 +720,16 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 	documentCtx, ledger := s.deps.Docs.Join(r.Context(), tx)
 	defer ledger.Discard()
-	applied, err := s.deps.Docs.ApplyOps(documentCtx, artifact.ID, input.Ops, actor, input.Precondition)
+	edit, err := s.deps.Docs.ApplyOps(documentCtx, artifact.ID, input.Ops, actor, input.Precondition)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
 	var written *docs.VersionResult
 	var published []model.Event
-	if applied > 0 {
+	// A batch that left the document as it was names no version, however deliberate its summary:
+	// AGENTC-193 grew seven versions, five of them byte-identical, from edits that changed nothing.
+	if edit.Changed {
 		summary := strings.TrimSpace(input.Summary)
 		if summary != "" {
 			namedVersion, err := s.deps.Docs.NamedVersion(documentCtx, artifact.ID, summary, actor)
@@ -768,11 +787,20 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 	if written != nil {
 		version = &written.Version
 	}
-	if applied > 0 {
+	if edit.Applied > 0 {
 		s.deps.Docs.ScheduleSettlement(artifact.ID)
 	}
 	s.publishDocumentEvents(ledger, published...)
-	WriteJSON(w, http.StatusOK, withAdvice(map[string]any{"applied": applied, "version": version}, advice))
+	unchanged := edit.Unchanged
+	if unchanged == nil {
+		unchanged = []int{}
+	}
+	WriteJSON(w, http.StatusOK, withAdvice(map[string]any{
+		"applied":       edit.Applied,
+		"version":       version,
+		"changed":       edit.Changed,
+		"unchanged_ops": unchanged,
+	}, advice))
 }
 
 func (s *server) loadArtifacts(ctx context.Context, q queryer, issueKey string) ([]model.Artifact, error) {

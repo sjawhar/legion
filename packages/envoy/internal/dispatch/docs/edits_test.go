@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -25,13 +26,60 @@ func TestApplyOpsEditsLiveDocumentAndSettlesVersion(t *testing.T) {
 		{Op: "insert", Markdown: "!", After: "end"},
 		{Op: "delete", Find: "one ", Occurrence: &first},
 	}, actor, nil)
-	if err != nil || applied != 3 {
-		t.Fatalf("applied = %d, %v", applied, err)
+	if err != nil || applied.Applied != 3 || !applied.Changed {
+		t.Fatalf("applied = %#v, %v", applied, err)
 	}
 	waitForDocumentText(t, service, artifactID, "TWO one\n\n!\n")
 	version := waitForDocumentVersion(t, service.store, artifactID, 2)
 	if len(version.Authors) != 1 || version.Authors[0] != actor {
 		t.Fatalf("authors = %#v", version.Authors)
+	}
+}
+
+// An edit that leaves the canonical markdown as it was is not a failure and not a change: the
+// route mints no version for it, so ApplyOps carries the batch's own verdict out.
+func TestApplyOpsReportsABatchThatWroteNoUpdatesAsUnchanged(t *testing.T) {
+	service, artifactID := newTestService(t)
+	seedServiceText(t, service, artifactID, "before")
+	result, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{
+		{Op: "replace", Find: "before", With: "before"},
+	}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}, nil)
+	if err != nil {
+		t.Fatalf("no-op edit: %v", err)
+	}
+	if result.Applied != 1 || result.Changed || !reflect.DeepEqual(result.Unchanged, []int{0}) {
+		t.Fatalf("no-op edit = %#v, want 1 applied, unchanged, naming operation 0", result)
+	}
+	waitForDocumentText(t, service, artifactID, "before\n")
+}
+
+// The other no-op shape: operations that do write Yjs updates (here a fresh block id) and still
+// leave the canonical markdown byte-identical. It has to report exactly like the first.
+func TestApplyOpsReportsABatchThatWroteUpdatesAndNoMarkdownAsUnchanged(t *testing.T) {
+	service, artifactID := newTestService(t)
+	seedServiceText(t, service, artifactID, "before")
+	blocksBefore, err := service.Blocks(context.Background(), artifactID)
+	if err != nil {
+		t.Fatalf("read blocks: %v", err)
+	}
+	first := 0
+	result, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{
+		{Op: "insert", Markdown: "before", After: "end"},
+		{Op: "delete", Find: "before", Occurrence: &first},
+	}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}, nil)
+	if err != nil {
+		t.Fatalf("round-trip edit: %v", err)
+	}
+	if result.Applied != 2 || result.Changed {
+		t.Fatalf("round-trip edit = %#v, want 2 applied and unchanged", result)
+	}
+	waitForDocumentText(t, service, artifactID, "before\n")
+	blocksAfter, err := service.Blocks(context.Background(), artifactID)
+	if err != nil {
+		t.Fatalf("read blocks: %v", err)
+	}
+	if len(blocksBefore) != 1 || len(blocksAfter) != 1 || blocksBefore[0].ID == blocksAfter[0].ID {
+		t.Fatalf("block ids %v -> %v; the round trip must write a new block, not nothing", blocksBefore, blocksAfter)
 	}
 }
 
@@ -488,9 +536,13 @@ func TestApplyOperationExplainsRenderedQuoteMatching(t *testing.T) {
 		Find: "Use `missing`",
 		With: "updated",
 	}})
-	const want = `operation 0: quote not found; quotes match the block text as rendered (inline markdown is tolerated; use "heading:<title>", "block:<id>", "start", or "end" as insert and move anchors); nearest blocks: "Use config with care." | "Use it sparingly." | "Unrelated paragraph."`
-	if err == nil || err.Error() != want {
-		t.Fatalf("rendered quote error = %q, want %q", err, want)
+	var missing *ErrQuoteNotFound
+	if !errors.As(err, &missing) {
+		t.Fatalf("rendered quote error = %v, want *ErrQuoteNotFound", err)
+	}
+	want := []string{"Use config with care.", "Use it sparingly.", "Unrelated paragraph."}
+	if missing.Quote != "Use `missing`" || !reflect.DeepEqual(missing.Nearest, want) {
+		t.Fatalf("rendered quote miss = %q, nearest %q; want the quote and %q", missing.Quote, missing.Nearest, want)
 	}
 }
 
@@ -509,7 +561,7 @@ func TestApplyOperationDeletesABlockByID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	markdown, err := renderTree(next)
+	markdown, err := renderTree(next.tree)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -624,7 +676,7 @@ func TestApplyOperationDeletingABlocksWholeTextRemovesTheBlock(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			markdown, err := renderTree(next)
+			markdown, err := renderTree(next.tree)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -824,6 +876,173 @@ func TestApplyOperationReplaceRejectsBlockReplacements(t *testing.T) {
 	var invalid *ErrInvalidOp
 	if !errors.As(err, &invalid) || invalid.Field != "with" {
 		t.Fatalf("multi-paragraph replace error = %v, want invalid with", err)
+	}
+}
+
+// AGENTC-193's spec came back with `## ##`, `7. 7\.`, `4. 4\.` and `-    - `: a `with` carrying
+// the marker its own block already renders wrote that marker twice. The heading rename is the
+// one shape that keeps working, because `find` carried the marker through the match.
+func TestApplyOperationReplaceKeepsOneHeadingMarkerOnARename(t *testing.T) {
+	tree, err := parseInput("## New since we talked (2026-09-24)\n\nBody.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := applyOperation(tree, model.EditOp{
+		Op:   "replace",
+		Find: "## New since we talked (2026-09-24)",
+		With: "## New since we talked (2026-09-24) - SUPERSEDED, kept as record",
+	})
+	if err != nil {
+		t.Fatalf("rename heading: %v", err)
+	}
+	markdown, err := renderTree(next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "## New since we talked (2026-09-24) - SUPERSEDED, kept as record\n\nBody.\n"
+	if markdown != want {
+		t.Fatalf("renamed heading = %q, want %q", markdown, want)
+	}
+}
+
+func TestApplyOperationReplaceRefusesAWithThatRepeatsTheBlocksOwnMarker(t *testing.T) {
+	for _, test := range []struct {
+		name, markdown, find, with string
+	}{
+		{name: "heading marker find never carried", markdown: "## Design\n", find: "Design", with: "## Design notes"},
+		{name: "a different heading level", markdown: "## Design\n", find: "## Design", with: "### Design"},
+		{name: "ordered marker on an ordered item", markdown: "1. Launcher contract\n", find: "Launcher contract", with: "1. Launcher contract, ruled"},
+		{name: "bullet marker on a bullet item", markdown: "- Retracted\n", find: "Retracted", with: "- Retracted later"},
+		{name: "an indented bullet marker on a bullet item", markdown: "- Retracted\n", find: "Retracted", with: "   - Retracted later"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tree, err := parseInput(test.markdown)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = applyOperation(tree, model.EditOp{Op: "replace", Find: test.find, With: test.with})
+			var invalid *ErrInvalidOp
+			if !errors.As(err, &invalid) || invalid.Field != "with" {
+				t.Fatalf("replace with %q = %v, want invalid with", test.with, err)
+			}
+			if !strings.Contains(invalid.Reason, "omit the marker") {
+				t.Fatalf("reason = %q, want the omit-the-marker guidance", invalid.Reason)
+			}
+		})
+	}
+}
+
+// The refusal is about a duplicated marker, so a marker landing anywhere the renderer does not
+// write one stays the literal text it has always been.
+func TestApplyOperationReplaceKeepsAMarkerTheRendererDoesNotRepeatLiteral(t *testing.T) {
+	for _, test := range []struct {
+		name, markdown, find, with, want string
+	}{
+		{
+			name:     "mid-block, after the item's own marker",
+			markdown: "- Retracted later today\n",
+			find:     "later today",
+			with:     "- later today",
+			want:     "- Retracted - later today\n",
+		},
+		{
+			name:     "the start of an item's second paragraph, which renders no marker",
+			markdown: "- Retracted\n\n  Later today.\n",
+			find:     "Later today.",
+			with:     "- Later today.",
+			want:     "- Retracted\n\n  \\- Later today.\n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tree, err := parseInput(test.markdown)
+			if err != nil {
+				t.Fatal(err)
+			}
+			next, err := applyOperation(tree, model.EditOp{Op: "replace", Find: test.find, With: test.with})
+			if err != nil {
+				t.Fatalf("replace with %q: %v", test.with, err)
+			}
+			markdown, err := renderTree(next)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if markdown != test.want {
+				t.Fatalf("replace with %q = %q, want %q", test.with, markdown, test.want)
+			}
+		})
+	}
+}
+
+// AGENTC-193's anchor was a prefix of a longer heading, and all the agent was told was
+// `pmdoc: target not found`.
+func TestApplyOperationHeadingAnchorMissNamesTheAnchorAndNearestHeadings(t *testing.T) {
+	tree, err := parseInput("## New since we talked (2026-09-24) - SUPERSEDED, kept as record\n\nBody.\n\n## Acceptance\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = applyOperation(tree, model.EditOp{
+		Op:       "insert",
+		Markdown: "Intro.",
+		After:    "heading:New since we talked (2026-09-24)",
+	})
+	if !errors.Is(err, pmdoc.ErrTargetNotFound) {
+		t.Fatalf("heading anchor miss = %v, want ErrTargetNotFound", err)
+	}
+	message := err.Error()
+	for _, want := range []string{
+		`"New since we talked (2026-09-24)"`,
+		"New since we talked (2026-09-24) - SUPERSEDED, kept as record",
+		"Acceptance",
+		"nearest headings",
+	} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("heading anchor miss = %q, want it to name %q", message, want)
+		}
+	}
+	if strings.Contains(message, "pmdoc") {
+		t.Fatalf("heading anchor miss = %q, want no internal package name", message)
+	}
+}
+
+func TestApplyOperationsQuoteMissNamesTheOperationTheQuoteAndNearestBlocks(t *testing.T) {
+	tree, err := parseInput("Alpha block.\n\nBeta block.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = applyOperations(tree, []model.EditOp{
+		{Op: "replace", Find: "Alpha block.", With: "Alpha block!"},
+		{Op: "replace", Find: "Gamma block.", With: "Gamma block!"},
+	})
+	if !errors.Is(err, pmdoc.ErrTargetNotFound) {
+		t.Fatalf("quote miss = %v, want ErrTargetNotFound", err)
+	}
+	message := err.Error()
+	for _, want := range []string{"operation 1", `"Gamma block."`, "nearest blocks"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("quote miss = %q, want it to name %q", message, want)
+		}
+	}
+	if strings.Contains(message, "pmdoc") {
+		t.Fatalf("quote miss = %q, want no internal package name", message)
+	}
+}
+
+// A quote cut before its closing `**` can never match rendered text, and "quote not found"
+// sends the agent looking for the wrong mistake.
+func TestApplyOperationRefusesAFindWithAnUnbalancedInlineMark(t *testing.T) {
+	tree, err := parseInput("1. **SUPERSEDED by the ruling** and the rest.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, find := range []string{"**SUPERSEDED by the", "and the `rest"} {
+		_, err = applyOperation(tree, model.EditOp{Op: "replace", Find: find, With: "x"})
+		var invalid *ErrInvalidOp
+		if !errors.As(err, &invalid) || invalid.Field != "find" {
+			t.Fatalf("unbalanced find %q = %v, want invalid find", find, err)
+		}
+		if !strings.Contains(invalid.Reason, "balanced") {
+			t.Fatalf("unbalanced find %q reason = %q, want the balance rule", find, invalid.Reason)
+		}
 	}
 }
 

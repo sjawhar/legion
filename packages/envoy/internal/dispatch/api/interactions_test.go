@@ -1867,6 +1867,79 @@ func TestEditArtifactWithoutSummaryReturnsUnnamedVersion(t *testing.T) {
 	}
 }
 
+// AGENTC-193's spec grew versions 13 through 19 from edits that left it byte-identical, because
+// the batch's `summary` reached NamedVersion unconditionally. A batch that changes nothing mints
+// nothing and says so, with or without a summary.
+func TestEditArtifactThatChangesNothingMintsNoVersionAndSaysSo(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		request map[string]any
+	}{
+		{name: "with a summary", request: map[string]any{
+			"ops":     []map[string]string{{"op": "replace", "find": "before", "with": "before"}},
+			"summary": "Record the decision",
+			"actor":   sessionActor(),
+		}},
+		{name: "without a summary", request: map[string]any{
+			"ops":   []map[string]string{{"op": "replace", "find": "before", "with": "before"}},
+			"actor": sessionActor(),
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			handler := newTestHandler(t)
+			issue := createInteractionIssue(t, handler, "TEST", "Unchanged edit", "before")
+			edited := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", test.request)
+			if edited.Code != http.StatusOK {
+				t.Fatalf("edit document: status=%d body=%s", edited.Code, edited.Body.String())
+			}
+			result := decodeBody[struct {
+				Applied      int            `json:"applied"`
+				Version      *model.Version `json:"version"`
+				Changed      bool           `json:"changed"`
+				UnchangedOps []int          `json:"unchanged_ops"`
+			}](t, edited)
+			if result.Applied != 1 || result.Version != nil || result.Changed {
+				t.Fatalf("unchanged edit = %#v, want one applied operation, no version, changed=false", result)
+			}
+			if len(result.UnchangedOps) != 1 || result.UnchangedOps[0] != 0 {
+				t.Fatalf("unchanged operations = %v, want [0]", result.UnchangedOps)
+			}
+			read := sessionRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID, nil)
+			artifact := decodeBody[model.Artifact](t, read)
+			if len(artifact.Versions) != 1 {
+				t.Fatalf("versions after an unchanged edit = %d, want the creating version only", len(artifact.Versions))
+			}
+		})
+	}
+}
+
+func TestArtifactTextReportsTheLatestVersion(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Text version", "before")
+	readVersion := func() *int {
+		t.Helper()
+		response := sessionRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/text", nil)
+		if response.Code != http.StatusOK {
+			t.Fatalf("read text: status=%d body=%s", response.Code, response.Body.String())
+		}
+		return decodeBody[struct {
+			Version *int `json:"version"`
+		}](t, response).Version
+	}
+	if got := readVersion(); got == nil || *got != 1 {
+		t.Fatalf("text version after creation = %v, want 1", got)
+	}
+	if edited := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops":   []map[string]string{{"op": "replace", "find": "before", "with": "after"}},
+		"actor": sessionActor(),
+	}); edited.Code != http.StatusOK {
+		t.Fatalf("edit document: status=%d body=%s", edited.Code, edited.Body.String())
+	}
+	if got := readVersion(); got == nil || *got != 2 {
+		t.Fatalf("text version after an edit = %v, want 2", got)
+	}
+}
+
 func TestDoneIssueAllowsOnlyAStatusReopen(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Strict reopen", "before")

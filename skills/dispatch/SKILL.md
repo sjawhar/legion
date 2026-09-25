@@ -545,11 +545,21 @@ canonicalizes short ragged rows by padding missing cells, so column deletion pre
 `GET /api/v1/artifacts/<artifact UUID>/blocks` reports a table's own references plus its descendant cell anchors. A row or column
 deletion that would remove an open ask or unresolved comment anchor is `INVALID_OP` on `index`, naming the axis and anchor ids;
 answered asks and resolved comments are history and do not block it. A `find` or quote anchor tolerates inline Markdown
-(`**bold**`, `` `code` ``) and a leading `# ` selects a heading by its text; a miss names the three nearest blocks so the next quote
-lands. `replace` is inline: `with` is the new text of the matched span inside its block, so a leading list or heading
-marker (`4. Design`, `# Title`) stays literal text and never turns the block into a list or heading; `with` that forms more than one
+(`**bold**`, `` `code` ``) and a leading `# ` selects a heading by its text; a miss names the quote and the three nearest blocks so
+the next quote lands, and a `find` cut before a closing `**` or `` ` `` is refused as an unbalanced inline mark rather than reported
+as a miss. A `heading:` anchor matches the whole heading text exactly — a prefix of a longer heading is a miss, naming the anchor and
+the nearest headings. `replace` is inline: `with` is the new text of the matched span inside its block, so a marker of a *different*
+kind from the block's own (`4. Design` written into a heading, `# Title` into a paragraph) stays literal text and never turns the
+block into a list or heading. A `with` that opens with the marker the matched block already renders would write that marker twice and
+is rejected (`INVALID_OP` on `with`) — omit the marker to replace the block's text, or use `insert` plus `delete` to change the
+block's kind or number. The one exception is a heading rename whose `find` carried the same marker through the match:
+`replace(find="## Old", with="## New")` gives `## New`. `with` that forms more than one
 paragraph is rejected (`INVALID_OP` on `with`) — delete the block and insert new blocks instead. Use zero-based `occurrence` for a
 repeated target; re-read a missing or ambiguous target before retrying. Pass `summary` to name the version when recording a decision.
+
+A batch that leaves the document's canonical markdown exactly as it was mints no version, named or not: the response carries
+`changed: false` with `unchanged_ops` naming each operation that did nothing, and the tool result says nothing changed. A `summary`
+does not force a version for such a batch; `POST /api/v1/artifacts/<id>/versions`, which names the current state on purpose, still does.
 
 A `delete` whose `find` is a block's entire text removes the block itself — the bullet, paragraph, or heading, not just its words — and
 a list emptied of every item disappears with it; a partial match keeps the block with its remaining text. Deleting the text of a bullet

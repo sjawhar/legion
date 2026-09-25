@@ -19,7 +19,9 @@ type Range struct {
 	To   int `json:"to"`
 }
 
-var ErrTargetNotFound = errors.New("pmdoc: target not found")
+// ErrTargetNotFound is the text an agent reads when a quote, heading or block anchor does not
+// resolve, so it names no internal package.
+var ErrTargetNotFound = errors.New("target not found")
 var ErrTargetSpansBlocks = errors.New("pmdoc: target spans textblocks")
 
 // ErrQuoteNotFound reports a quote miss with up to three closest rendered textblocks, in
@@ -43,6 +45,26 @@ func QuoteBlocks(blocks []string) string {
 	}
 	return strings.Join(quoted, " | ")
 }
+
+// ErrHeadingNotFound reports a `heading:` anchor miss with the anchor text and the document's
+// closest headings. Heading anchors match the whole heading text exactly: a prefix of a longer
+// heading is a miss, because prefix matching would make every anchor ambiguous.
+type ErrHeadingNotFound struct {
+	Title   string
+	Nearest []string
+}
+
+func (e *ErrHeadingNotFound) Error() string {
+	if len(e.Nearest) == 0 {
+		return fmt.Sprintf("heading anchor %q not found; the document has no headings", e.Title)
+	}
+	return fmt.Sprintf(
+		"heading anchor %q not found; a heading anchor matches the whole heading text exactly; nearest headings: %s",
+		e.Title, QuoteBlocks(e.Nearest),
+	)
+}
+
+func (e *ErrHeadingNotFound) Unwrap() error { return ErrTargetNotFound }
 
 // nearestBlockCount is how many candidate blocks a quote miss names.
 const nearestBlockCount = 3
@@ -163,11 +185,11 @@ func FindHeading(doc *Node, title string, occurrence *int) (Range, error) {
 		pos = end
 	}
 	if len(matches) == 0 {
-		return Range{}, ErrTargetNotFound
+		return Range{}, headingNotFound(doc, title)
 	}
 	if occurrence != nil {
 		if *occurrence < 0 || *occurrence >= len(matches) {
-			return Range{}, ErrTargetNotFound
+			return Range{}, headingNotFound(doc, title)
 		}
 		return matches[*occurrence].Range, nil
 	}
@@ -175,6 +197,31 @@ func FindHeading(doc *Node, title string, occurrence *int) (Range, error) {
 		return matches[0].Range, nil
 	}
 	return Range{}, &ErrTargetAmbiguous{Candidates: matches}
+}
+
+// headingNotFound ranks the document's headings by their common prefix with title, the way a
+// quote miss ranks blocks: the anchor that missed is usually a prefix of the one meant.
+func headingNotFound(doc *Node, title string) error {
+	type ranked struct {
+		text   string
+		prefix int
+	}
+	var candidates []ranked
+	for _, child := range doc.Children {
+		if child.Type != "heading" {
+			continue
+		}
+		heading := textContent(child)
+		candidates = append(candidates, ranked{text: heading, prefix: commonPrefixLength(title, heading)})
+	}
+	sort.SliceStable(candidates, func(left, right int) bool {
+		return candidates[left].prefix > candidates[right].prefix
+	})
+	nearest := make([]string, 0, nearestBlockCount)
+	for _, candidate := range candidates[:min(nearestBlockCount, len(candidates))] {
+		nearest = append(nearest, firstRunes(candidate.text, 120))
+	}
+	return &ErrHeadingNotFound{Title: title, Nearest: nearest}
 }
 
 // Size returns the ProseMirror position immediately after the last block.

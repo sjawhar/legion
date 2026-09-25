@@ -2098,10 +2098,20 @@ export async function executeDispatchTool(
       const retyped = ops.filter((operation) => operation.op === "retype").length;
       const versionText =
         edited.version === null ? "no new version" : `version ${edited.version.number}`;
-      const applied =
-        retyped === 0
-          ? `Applied ${edited.applied} ops (${versionText})`
-          : `Applied ${edited.applied} ops; retyped ${retyped} block${retyped === 1 ? "" : "s"} (${versionText})`;
+      const retypedText =
+        retyped === 0 ? "" : `; retyped ${retyped} block${retyped === 1 ? "" : "s"}`;
+      // A batch that left the document as it was mints no version: say so, and name the
+      // operations that did nothing, so the next attempt is aimed at the quote, not the version.
+      const nothingChanged = edited.changed === false;
+      const head = nothingChanged
+        ? `Applied ${edited.applied} ops${retypedText}; nothing changed (${versionText})`
+        : `Applied ${edited.applied} ops${retypedText} (${versionText})`;
+      const unchangedOps = edited.unchanged_ops ?? [];
+      const unchangedText =
+        unchangedOps.length === 0
+          ? ""
+          : `; ${unchangedOps.length === 1 ? "operation" : "operations"} ${unchangedOps.join(", ")} changed nothing`;
+      const applied = `${head}${unchangedText}`;
       const adviceLines = renderAdvice(
         input.tool,
         resolvedTopic(resolved).label,
@@ -2113,6 +2123,7 @@ export async function executeDispatchTool(
         details: writeResultDetails(resolved, {
           applied: edited.applied,
           ...(edited.version === null ? {} : { version: edited.version.number }),
+          ...(nothingChanged ? { changed: false } : {}),
           ...(edited.advice === undefined ? {} : { advice: edited.advice }),
         }),
       };

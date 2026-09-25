@@ -29,13 +29,15 @@ func invalidOp(field string) error {
 	return &ErrInvalidOp{Field: field}
 }
 
-// ErrQuoteNotFound explains how document edit quotes are matched and names the closest blocks.
+// ErrQuoteNotFound names the quote that missed, explains how document edit quotes are matched,
+// and names the closest blocks.
 type ErrQuoteNotFound struct {
+	Quote   string
 	Nearest []string
 }
 
 func (e *ErrQuoteNotFound) Error() string {
-	return fmt.Sprintf(`quote not found; quotes match the block text as rendered (inline markdown is tolerated; use "heading:<title>", "block:<id>", "start", or "end" as insert and move anchors); nearest blocks: %s`, pmdoc.QuoteBlocks(e.Nearest))
+	return fmt.Sprintf(`quote %q not found; quotes match the block text as rendered (inline markdown is tolerated; use "heading:<title>", "block:<id>", "start", or "end" as insert and move anchors); nearest blocks: %s`, e.Quote, pmdoc.QuoteBlocks(e.Nearest))
 }
 
 func (e *ErrQuoteNotFound) Unwrap() error { return pmdoc.ErrTargetNotFound }
@@ -236,7 +238,7 @@ func operationPreconditionBlocks(tree *pmdoc.Node, op model.EditOp) ([]string, e
 }
 
 func quotePreconditionBlock(tree *pmdoc.Node, quote string, occurrence *int) ([]string, error) {
-	range_, err := findEditQuote(tree, quote, occurrence)
+	range_, err := findEditQuote(tree, "find", quote, occurrence)
 	if err != nil {
 		return nil, err
 	}
@@ -266,21 +268,44 @@ func removedBlockError(blockID string, removal batchRemoval) error {
 	return &ErrInvalidOp{Field: "block", Reason: reason + "; remove it from the atomic batch"}
 }
 
+// editBatch is what a resolved batch of operations produced: the tree to write, the canonical
+// markdown the document had before the batch, and every operation that left the tree as it was.
+type editBatch struct {
+	tree      *pmdoc.Node
+	before    string
+	unchanged []int
+}
+
+// outcome is the batch's verdict, rendered once the caller has stamped the block ids the write
+// carries, so the comparison is against exactly the markdown the document ends up with.
+func (b editBatch) outcome(applied int) (EditOutcome, error) {
+	after, err := renderTree(b.tree)
+	if err != nil {
+		return EditOutcome{}, err
+	}
+	return EditOutcome{Applied: applied, Changed: after != b.before, Unchanged: b.unchanged}, nil
+}
+
 // applyOperations applies each operation to its predecessor's tree so a
 // following operation resolves the structure created by the preceding one.
-func applyOperations(tree *pmdoc.Node, ops []model.EditOp) (*pmdoc.Node, error) {
+func applyOperations(tree *pmdoc.Node, ops []model.EditOp) (editBatch, error) {
 	return applyOperationsWithValidation(tree, ops, nil)
 }
 
-func applyOperationsWithValidation(tree *pmdoc.Node, ops []model.EditOp, validate operationValidator) (*pmdoc.Node, error) {
+func applyOperationsWithValidation(tree *pmdoc.Node, ops []model.EditOp, validate operationValidator) (editBatch, error) {
+	before, err := renderTree(tree)
+	if err != nil {
+		return editBatch{}, err
+	}
 	removed := make(map[string]batchRemoval)
+	var unchanged []int
 	for index, op := range ops {
 		if removal, alreadyRemoved := removed[op.Block]; op.Block != "" && alreadyRemoved {
-			return nil, fmt.Errorf("operation %d: %w", index, removedBlockError(op.Block, removal))
+			return editBatch{}, fmt.Errorf("operation %d: %w", index, removedBlockError(op.Block, removal))
 		}
 		if validate != nil {
 			if err := validate(tree, op); err != nil {
-				return nil, fmt.Errorf("operation %d: %w", index, err)
+				return editBatch{}, fmt.Errorf("operation %d: %w", index, err)
 			}
 		}
 		var removedIDs []string
@@ -289,13 +314,16 @@ func applyOperationsWithValidation(tree *pmdoc.Node, ops []model.EditOp, validat
 				var err error
 				removedIDs, err = pmdoc.BlockDescendantIDs(tree, op.Block)
 				if err != nil {
-					return nil, fmt.Errorf("operation %d: %w", index, err)
+					return editBatch{}, fmt.Errorf("operation %d: %w", index, err)
 				}
 			}
 		}
 		next, err := applyOperation(tree, op)
 		if err != nil {
-			return nil, fmt.Errorf("operation %d: %w", index, err)
+			return editBatch{}, fmt.Errorf("operation %d: %w", index, err)
+		}
+		if next.Equal(tree) {
+			unchanged = append(unchanged, index)
 		}
 		for _, blockID := range removedIDs {
 			removed[blockID] = batchRemoval{
@@ -306,7 +334,7 @@ func applyOperationsWithValidation(tree *pmdoc.Node, ops []model.EditOp, validat
 		}
 		tree = next
 	}
-	return tree, nil
+	return editBatch{tree: tree, before: before, unchanged: unchanged}, nil
 }
 
 func hasTableAnchorMutation(ops []model.EditOp) bool {
@@ -466,7 +494,7 @@ func verifyTableAnchorSnapshots(tree *pmdoc.Node, ops []model.EditOp, snapshots 
 	return nil
 }
 
-func (s *Service) applyOperations(ctx context.Context, artifactID string, tree *pmdoc.Node, ops []model.EditOp) (*pmdoc.Node, error) {
+func (s *Service) applyOperations(ctx context.Context, artifactID string, tree *pmdoc.Node, ops []model.EditOp) (editBatch, error) {
 	return applyOperationsWithValidation(tree, ops, func(tree *pmdoc.Node, op model.EditOp) error {
 		return s.validateTableEditAnchors(ctx, artifactID, tree, op)
 	})
@@ -558,11 +586,15 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		if op.Find == "" {
 			return nil, invalidOp("find")
 		}
-		r, err := findEditQuote(tree, op.Find, op.Occurrence)
+		r, err := findEditQuote(tree, "find", op.Find, op.Occurrence)
 		if err != nil {
 			return nil, err
 		}
-		with, err := inlineReplacement(op.With)
+		replacement, err := replacementMarkdown(tree, r, op.Find, op.With)
+		if err != nil {
+			return nil, err
+		}
+		with, err := inlineReplacement(replacement)
 		if err != nil {
 			return nil, err
 		}
@@ -578,7 +610,7 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		if op.Find == "" {
 			return nil, invalidOp("find or block")
 		}
-		r, err := findEditQuote(tree, op.Find, op.Occurrence)
+		r, err := findEditQuote(tree, "find", op.Find, op.Occurrence)
 		if err != nil {
 			return nil, err
 		}
@@ -598,7 +630,7 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		if err != nil {
 			return nil, err
 		}
-		target, plainText, err := insertTarget(tree, anchor, op.Occurrence)
+		target, plainText, err := insertTarget(tree, anchorField(after), anchor, op.Occurrence)
 		if err != nil {
 			return nil, err
 		}
@@ -651,7 +683,8 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		if err != nil {
 			return nil, err
 		}
-		target, _, err := insertTarget(tree, anchor, op.Occurrence)
+		field := anchorField(after)
+		target, _, err := insertTarget(tree, field, anchor, op.Occurrence)
 		if err != nil {
 			return nil, err
 		}
@@ -664,10 +697,6 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		}
 		out, err := pmdoc.MoveBlock(tree, op.Block, target, after)
 		if errors.Is(err, pmdoc.ErrMoveInsideItself) {
-			field := "before"
-			if op.After != "" {
-				field = "after"
-			}
 			return nil, &ErrInvalidOp{Field: field, Reason: err.Error()}
 		}
 		if errors.Is(err, pmdoc.ErrSchema) {
@@ -707,6 +736,38 @@ func anchorOf(op model.EditOp) (anchor string, after bool, err error) {
 		return op.After, true, nil
 	}
 	return op.Before, false, nil
+}
+
+// anchorField names the operation field an anchor came from, for the errors it produces.
+func anchorField(after bool) string {
+	if after {
+		return "after"
+	}
+	return "before"
+}
+
+// replacementMarkdown resolves `with` against the marker the matched block already renders.
+// A replace is inline, so a `with` that opens with the block's own marker would write that
+// marker twice (AGENTC-193 read back `## ##`, `7. 7\.`, `4. 4\.` and `-    - `). A heading
+// rename is the one shape that keeps working: `find` carried the marker through the match, so
+// an identical one in `with` is the block's, and it is dropped. Every other repetition is
+// refused, and a marker of a different kind stays the literal text it has always been.
+func replacementMarkdown(tree *pmdoc.Node, r pmdoc.Range, find, with string) (string, error) {
+	own, ok := pmdoc.MarkerAt(tree, r.From)
+	if !ok || own.Kind == pmdoc.MarkerNone {
+		return with, nil
+	}
+	written, width := pmdoc.LeadingBlockMarker(with)
+	if written.Kind != own.Kind {
+		return with, nil
+	}
+	if own.Kind == pmdoc.MarkerHeading && written.Level == own.Level && pmdoc.HeadingMarker(find) != "" {
+		return with[width:], nil
+	}
+	return "", &ErrInvalidOp{Field: "with", Reason: fmt.Sprintf(
+		"with begins with a marker of the same kind as the matched block's own (%s, which the block renders as %q), so the result would carry it twice; omit the marker to replace the block's text, or use insert plus delete to change the block's kind or number",
+		written.Kind, own.Markdown(),
+	)}
 }
 
 // invalidSchemaOp reports a tree operation that would leave a container outside
@@ -760,8 +821,9 @@ func invalidMarkdownOp(field string, err error) error {
 	return err
 }
 
-func findEditQuote(tree *pmdoc.Node, quote string, occurrence *int) (pmdoc.Range, error) {
-	r, err := resolveEditQuote(tree, quote, occurrence)
+// findEditQuote resolves the quote field names, so a miss reports the field the caller wrote.
+func findEditQuote(tree *pmdoc.Node, field, quote string, occurrence *int) (pmdoc.Range, error) {
+	r, err := resolveEditQuote(tree, field, quote, occurrence)
 	if err != nil {
 		return pmdoc.Range{}, err
 	}
@@ -771,19 +833,25 @@ func findEditQuote(tree *pmdoc.Node, quote string, occurrence *int) (pmdoc.Range
 	return r, nil
 }
 
-func resolveEditQuote(tree *pmdoc.Node, quote string, occurrence *int) (pmdoc.Range, error) {
+func resolveEditQuote(tree *pmdoc.Node, field, quote string, occurrence *int) (pmdoc.Range, error) {
 	r, err := pmdoc.FindQuote(tree, quote, occurrence, nil)
 	if err == nil {
 		return r, nil
 	}
 	var missing *pmdoc.ErrQuoteNotFound
 	if errors.As(err, &missing) {
-		return pmdoc.Range{}, &ErrQuoteNotFound{Nearest: missing.Nearest}
+		if delimiter, unbalanced := pmdoc.UnbalancedInlineMark(quote); unbalanced {
+			return pmdoc.Range{}, &ErrInvalidOp{Field: field, Reason: fmt.Sprintf(
+				"inline marks in %s must be balanced: %q opens a span the quote never closes, so it cannot match the text as rendered; quote the whole marked span or none of it",
+				field, delimiter,
+			)}
+		}
+		return pmdoc.Range{}, &ErrQuoteNotFound{Quote: quote, Nearest: missing.Nearest}
 	}
 	return pmdoc.Range{}, err
 }
 
-func insertTarget(tree *pmdoc.Node, anchor string, occurrence *int) (pmdoc.Range, bool, error) {
+func insertTarget(tree *pmdoc.Node, field, anchor string, occurrence *int) (pmdoc.Range, bool, error) {
 	switch anchor {
 	case "start":
 		return pmdoc.Range{}, false, nil
@@ -805,7 +873,7 @@ func insertTarget(tree *pmdoc.Node, anchor string, occurrence *int) (pmdoc.Range
 		r, err := pmdoc.BlockRange(tree, blockID)
 		return r, false, err
 	}
-	r, err := resolveEditQuote(tree, anchor, occurrence)
+	r, err := resolveEditQuote(tree, field, anchor, occurrence)
 	if err != nil {
 		return pmdoc.Range{}, true, err
 	}
