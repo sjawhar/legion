@@ -30,7 +30,7 @@ LEGION-42's production-like proof stood up the branch's real Legion API (`startL
 `TokenManager`, real `api.github.com`) and redeemed a **tester** grant and an **implementer**
 grant through `/legion/v1/gh-token`, then used each token against the sandbox repository. One
 negative control was "the tester's token cannot push". Run 1 reported the tester push as
-`exit=0` — the review App had pushed a commit to GitHub, which its permission set makes
+`exit=0` — the review App had pushed a commit to GitHub, which its permission set then made
 impossible.
 
 ## What happened
