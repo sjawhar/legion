@@ -515,11 +515,17 @@ func TestWorkspaceInitRefusesAResumeWhoseSessionIsGone(t *testing.T) {
 
 // The command side of workspace recovery (decision 11): a relaunch after a lost volume names the
 // ref it recovers from, and the recreated workspace records it, with the commit it was recreated
-// at, in .legion/workspace-recovered.json (workspace-init.ts:196-215).
+// at, in .legion/workspace-recovered.json (workspace-init.ts:196-215). The commit is read
+// uncolored, so an operator's `ui.color = "always"` never wraps it in escape codes.
 func TestWorkspaceInitRecordsTheRecoveryMarker(t *testing.T) {
 	v := newTreeVolume(t).withRemote(t)
 	v.fetch(t)
 	t.Setenv("LEGION_WORKSPACE_RECOVERED_FROM", "legion/LEGION-42")
+	colored := filepath.Join(t.TempDir(), "color-always.toml")
+	if err := os.WriteFile(colored, []byte("[ui]\ncolor = \"always\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("JJ_CONFIG", colored)
 
 	before := time.Now().UTC().Truncate(time.Millisecond)
 	code, _, stderr := runWorkspaceInitHere(v.args("LEGION-42"))
@@ -539,7 +545,7 @@ func TestWorkspaceInitRecordsTheRecoveryMarker(t *testing.T) {
 	if marker["fromRef"] != "legion/LEGION-42" || marker["reason"] != "volume-missing" {
 		t.Fatalf("the recovery marker is %s", body)
 	}
-	if sha := v.jj(t, "log", "-r", "@", "--no-graph", "-T", "commit_id", "--ignore-working-copy", "-R", workspace); marker["sha"] != sha {
+	if sha := v.jj(t, "log", "-r", "@", "--no-graph", "-T", "commit_id", "--ignore-working-copy", "--color=never", "-R", workspace); marker["sha"] != sha {
 		t.Fatalf("the recovery marker names commit %q, want the recreated working copy's %q", marker["sha"], sha)
 	}
 	at, err := time.Parse("2006-01-02T15:04:05.000Z", marker["recoveredAt"])
