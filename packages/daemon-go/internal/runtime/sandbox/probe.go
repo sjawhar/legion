@@ -536,7 +536,8 @@ type probeSpec struct {
 // pool, gVisor, the configured scheduling — with the workers' pod security, reaching the model
 // gateway as every worker does (C6: the Gateway's ServiceAccount, gatewayTokenVolume, and
 // LEGION_MODEL_GATEWAY_URL), and a single container running the image's Go `legion probe-image`
-// against contract, whose round trip goes through that route. Its command and env are escaped
+// against contract, loading the plugin from the root a pod loads it from (--plugin-root), with a
+// round trip through that route. Its command and env are escaped
 // against the kubelet's expansion as every worker container's are (kubeletLiteral).
 func (r *Runtime) probeManifest(name string, contract int, resources corev1.ResourceRequirements, shutdown time.Time) probeSandbox {
 	labels := map[string]string{labelProject: r.project, labelProbe: "image"}
@@ -544,7 +545,7 @@ func (r *Runtime) probeManifest(name string, contract int, resources corev1.Reso
 	container := corev1.Container{
 		Name:            probeContainer,
 		Image:           r.image,
-		Command:         []string{r.tools.Legion, "probe-image", "--go-daemon-api-version", strconv.Itoa(contract)},
+		Command:         []string{r.tools.Legion, "probe-image", "--go-daemon-api-version", strconv.Itoa(contract), "--plugin-root", legionPlugin},
 		Env:             []corev1.EnvVar{{Name: modelroute.EnvURL, Value: r.gateway.URL}},
 		VolumeMounts:    []corev1.VolumeMount{gatewayMount},
 		Resources:       resources,

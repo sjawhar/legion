@@ -92,7 +92,12 @@ type pluginGate struct {
 	// gateway route it goes through, and the file the profile's key command reads (ImageProbe); the
 	// round trip runs only when model is set.
 	model, route, keyFile string
-	log                   *slog.Logger
+	// pluginRoot is the plugin directory a pod passes Oh My Pi as its one explicit extension
+	// (ImageProbe): the load probe then runs as a pod runs, with discovery off, and the contract
+	// probe reads that root's manifest. Empty on tmux, where a pane loads the installed plugin
+	// through discovery.
+	pluginRoot string
+	log        *slog.Logger
 }
 
 // verify runs the two probes. A refusal names what the operator has to change; a gate the daemon's
@@ -101,6 +106,9 @@ func (g pluginGate) verify(ctx context.Context) error {
 	manifest, profile, err := pluginManifestPath(g.env)
 	if err != nil {
 		return err
+	}
+	if g.pluginRoot != "" {
+		manifest = filepath.Join(g.pluginRoot, "package.json")
 	}
 	version, err := verifyPluginContract(manifest, profile, g.contract)
 	if err != nil {
@@ -301,7 +309,14 @@ func owningManifest(file string) (string, error) {
 
 // probeLoad is one load-probe attempt, and, on a pass, where the plugin loaded from.
 func (g pluginGate) probeLoad(ctx context.Context, launch, probe, version, profile string) (bootprobe.Outcome, string) {
-	r, err := g.run(ctx, `exec `+launch+` models --extension "$1" --json >/dev/null`, probe)
+	script := `exec ` + launch + ` models --extension "$1" --json >/dev/null`
+	args := []string{probe}
+	if g.pluginRoot != "" {
+		// As a pod runs it: no discovery, the plugin as an explicit root beside the probe.
+		script = `exec ` + launch + ` models --no-extensions --extension "$1" --extension "$2" --json >/dev/null`
+		args = []string{g.pluginRoot, probe}
+	}
+	r, err := g.run(ctx, script, args...)
 	if err != nil {
 		return bootprobe.Outcome{Refusal: fmt.Errorf("boot gate: run the pi-legion-envoy load probe: %w", err)}, ""
 	}
@@ -511,6 +526,11 @@ type ImageProbe struct {
 	// when `legion probe-image` routed the profile (modelroute.Install), empty for no model round
 	// trip.
 	Model, Route, KeyFile string
+	// PluginRoot is the plugin directory the pod's Oh My Pi loads as its one explicit extension
+	// (`--no-extensions --extension <root>`): the load probe runs the same way, and the contract
+	// probe reads that root's manifest, so the probe certifies the lane a pod uses. Empty leaves
+	// both on Oh My Pi's discovery, as a tmux pane loads the plugin.
+	PluginRoot string
 }
 
 // imageProbeTimeout is each image-probe attempt's budget: the default
@@ -528,7 +548,8 @@ const imageProbeTimeout = 300 * time.Second
 func ProbeImage(ctx context.Context, p ImageProbe) error {
 	return pluginGate{
 		env: p.Env, workDir: p.WorkDir, invocation: p.Omp, timeout: imageProbeTimeout,
-		retry: bootprobe.Image, contract: p.Contract, model: p.Model, route: p.Route, keyFile: p.KeyFile, log: p.Log,
+		retry: bootprobe.Image, contract: p.Contract, model: p.Model, route: p.Route, keyFile: p.KeyFile,
+		pluginRoot: p.PluginRoot, log: p.Log,
 	}.verifyImage(ctx)
 }
 

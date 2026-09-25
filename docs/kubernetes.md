@@ -54,7 +54,8 @@ TypeScript daemon runs `legion probe-image` in a one-shot pod against the config
 Sandbox, `legion-probe-<project>-<digest12>`, with its own contract
 (`packages/daemon-go/internal/runtime/sandbox/probe.go`). To run them yourself:
 `docker run --rm --entrypoint legion ghcr.io/sjawhar/legion-worker@sha256:… probe-image`, and
-`docker run --rm --entrypoint /opt/legion/go/bin/legion ghcr.io/sjawhar/legion-worker@sha256:… probe-image`.
+`docker run --rm --entrypoint /opt/legion/go/bin/legion ghcr.io/sjawhar/legion-worker@sha256:… probe-image --plugin-root /opt/legion/pi-legion-envoy`
+(the plugin root a Sandbox pod loads the plugin from, so the Go probe loads it the same way).
 
 ### Pin by digest, never by tag
 

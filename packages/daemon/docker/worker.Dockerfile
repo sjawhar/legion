@@ -198,7 +198,8 @@ COPY --from=go /out/legion /opt/legion/go/bin/legion
 # The final step: the Go `legion` runs on this base and names the commit the workflow built. git resolves
 # to /usr/bin/git on the image PATH and the step refuses any other path, so git's absolute path is as fixed
 # as gh's and jj's (/usr/local/bin, copied above) and a pod environment can name all three. Then the Go
-# `legion probe-image` runs the three launch probes through the Go daemon's own code and holds the
+# `legion probe-image` runs the three launch probes through the Go daemon's own code, loading the plugin
+# the way a Sandbox pod does (--plugin-root: the one explicit extension, discovery off), and holds the
 # plugin to the Go daemon API contract this binary speaks, printing
 # `probe-image: OK (/opt/omp/bin/omp) session-storage=probed go-daemon-api-version=<N>`; the Go daemon's
 # probe Sandbox runs it again with its own contract and the pod's LEGION_MODEL_GATEWAY_URL and gateway
@@ -210,7 +211,7 @@ RUN set -eu; \
     git="$(command -v git)"; echo "git: $git"; test "$git" = /usr/bin/git; \
     version="$(/opt/legion/go/bin/legion version)"; echo "$version"; \
     test "$version" = "legion (devel) commit ${LEGION_REVISION}"; \
-    /opt/legion/go/bin/legion probe-image; \
+    /opt/legion/go/bin/legion probe-image --plugin-root /opt/legion/pi-legion-envoy; \
     rm -rf /home/legion/.omp/profiles/legion/logs
 # The Kubernetes runtime (packages/daemon/src/daemon/runtime-kubernetes.ts) sets every container's
 # command explicitly: the init container runs `legion workspace-init …` and the main container runs
