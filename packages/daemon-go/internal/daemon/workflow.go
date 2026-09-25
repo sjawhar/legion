@@ -138,10 +138,12 @@ func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config) error 
 // it: one role runs several phases — the implementer runs implementing, retro and the production
 // check — and a task written for the first is not the work of the third.
 //
-// A delivery of no phase holds. Only the workflow names one, so an operator's delivery made by
-// hand through the API is held whatever phase its issue is in: the operator asked for it, was
-// answered 200, and dropping it would make the work silently not happen. An architect's task
-// belongs to no phase and names none for the same reason.
+// A delivery of no phase holds here. Only the workflow names one, so an operator's delivery made
+// by hand through the API is not dropped for the phase its issue is in: the operator asked for
+// it, was answered 200, and dropping it would make the work silently not happen. An architect's
+// task belongs to no phase and names none for the same reason. This predicate is not the only
+// way a delivery ends: a suspension retires an unconfirmed one whatever its phase says
+// (supervise's settle).
 //
 // Nothing else on the delivery would answer this: the id is rotated by a prompt retry, and the
 // task text is the workflow's prose. The phase is typed data, persisted with the delivery, and no

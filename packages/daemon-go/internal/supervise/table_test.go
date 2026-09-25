@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"go/ast"
+	"go/importer"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"os"
 	"strconv"
 	"strings"
@@ -26,6 +28,7 @@ func sealed(t *testing.T) (events []string, states []ClaimState, timers []TimerK
 		t.Fatal(err)
 	}
 	files := token.NewFileSet()
+	var parsed []*ast.File
 	for _, entry := range entries {
 		name := entry.Name()
 		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
@@ -35,14 +38,9 @@ func sealed(t *testing.T) (events []string, states []ClaimState, timers []TimerK
 		if err != nil {
 			t.Fatal(err)
 		}
+		parsed = append(parsed, file)
 		for _, decl := range file.Decls {
 			switch decl := decl.(type) {
-			case *ast.FuncDecl:
-				if decl.Name.Name == "isEvent" && decl.Recv != nil {
-					if ident, ok := decl.Recv.List[0].Type.(*ast.Ident); ok {
-						events = append(events, ident.Name)
-					}
-				}
 			case *ast.GenDecl:
 				if decl.Tok != token.CONST {
 					continue
@@ -71,10 +69,42 @@ func sealed(t *testing.T) (events []string, states []ClaimState, timers []TimerK
 			}
 		}
 	}
+	events = eventTypes(t, files, parsed)
 	if len(events) == 0 || len(states) == 0 || len(timers) == 0 {
 		t.Fatalf("read no sealed set from the source: events %v, states %v, timers %v", events, states, timers)
 	}
 	return events, states, timers
+}
+
+// eventTypes is every type in this package that implements Event, as the compiler sees it rather
+// than as the source spells it: a type that embeds another inherits its isEvent, so a scan for
+// isEvent declarations would not see it, and such a type could be mapped onto an existing kind
+// and inherit every row that kind has.
+func eventTypes(t *testing.T, files *token.FileSet, parsed []*ast.File) []string {
+	t.Helper()
+	config := types.Config{Importer: importer.ForCompiler(files, "source", nil)}
+	pkg, err := config.Check("github.com/sjawhar/legion/daemon/internal/supervise", files, parsed, nil)
+	if err != nil {
+		t.Fatalf("type-check the package: %v", err)
+	}
+	event, ok := pkg.Scope().Lookup("Event").Type().Underlying().(*types.Interface)
+	if !ok {
+		t.Fatal("Event is not an interface")
+	}
+	var names []string
+	for _, name := range pkg.Scope().Names() {
+		declared, ok := pkg.Scope().Lookup(name).(*types.TypeName)
+		if !ok {
+			continue
+		}
+		if _, isInterface := declared.Type().Underlying().(*types.Interface); isInterface {
+			continue
+		}
+		if types.Implements(declared.Type(), event) {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 // samples is one event of every kind the table distinguishes, by Go type. A Timer is one kind per

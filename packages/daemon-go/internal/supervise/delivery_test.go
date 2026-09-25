@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -675,5 +676,41 @@ func TestRepeatOutboxDeliveryDoesNotQueueTheTaskTwice(t *testing.T) {
 	}
 	if prompts := h.wantPrompts(1); prompts[0].DeliveryID != "outbox:42" {
 		t.Fatalf("prompt = %#v, want outbox delivery id", prompts[0])
+	}
+}
+
+// Dropping a task for its phase clears the claim's pending delivery, and a restored claim also
+// carries the daemon's standing question for its agent: whether the turn it may be in is the
+// pending delivery's. Leaving that question armed with nothing pending made ready-with-no-task
+// reachable for the first time, and the next task then took the agent's own foreign turn as its
+// own — confirmed, never prompted, and retired at that turn's end, so the phase stalled with
+// nothing sent and the outbox row already finished.
+func TestDroppingATaskForItsPhaseAlsoDropsTheQuestionARestartLeft(t *testing.T) {
+	restored := fixture(StateReady)
+	restored.Pending.Phase = phase.Implementing
+	h := newHarnessOf(t, restored)
+	if err := h.store.PutDelivery(h.ctx, testToken, *restored.Pending); err != nil {
+		t.Fatalf("seed the restored delivery: %v", err)
+	}
+	h.conns.Register(testToken, h.conn)
+	h.deps.PhaseHolds = func(_ context.Context, _ Claim, d Delivery) (bool, error) { return d.Phase == "", nil }
+	h.start(restored)
+
+	// The issue has left the phase the restored task was queued for: it is dropped.
+	h.must(RequestReady{Claim: testToken, Generation: restored.Generation, Session: session})
+	if p := h.m.Claim().Pending; p != nil {
+		t.Fatalf("the finished phase's task is still pending as %+v", p)
+	}
+
+	// The agent is in a turn of its own, and an operator delivers a task of no phase.
+	h.conn.SetStreaming(true)
+	h.must(RequestDeliver{Claim: testToken, Task: "look at the tree"})
+
+	sent := h.wantPrompts(1)
+	if sent[0].Message != "look at the tree" {
+		t.Errorf("prompt = %+v, want the operator's task", sent[0])
+	}
+	if p := h.m.Claim().Pending; p == nil || !p.ConfirmedAt.IsZero() {
+		t.Fatalf("pending = %+v, want the operator's task unconfirmed: the agent's own turn is not its delivery's", p)
 	}
 }

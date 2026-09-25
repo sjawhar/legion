@@ -30,7 +30,8 @@ import (
 // Phase is the issue phase the task was queued for, which is what says whether the task is still
 // the work to do: it is carried here, persisted, because the id is rewritten by that rotation and
 // the task text is the workflow's to write. A delivery of no phase — an operator's own, an
-// architect's — is held whatever phase its issue reaches.
+// architect's — is never dropped for the phase its issue reaches. It is still retired with a
+// suspension, like any unconfirmed delivery (settle).
 type Delivery struct {
 	ID          string
 	Task        string
@@ -79,7 +80,7 @@ func (m *Machine) queue(ctx context.Context, request RequestDeliver) error {
 
 // sendPending sends the pending delivery if everything a send needs is true now: the claim is
 // ready or idle, the delivery is neither confirmed nor already on its way, the issue is still in
-// this role's phase, and the claim's connection is registered. A missing connection is not a
+// the phase the task was queued for, and the claim's connection is registered. A missing connection is not a
 // failure — the shim's next hello sends it. A delivery an earlier daemon may have sent is sent
 // again only after the agent says it is not already in a turn; if it is, that turn is taken as the
 // delivery's.
@@ -104,8 +105,13 @@ func (m *Machine) sendPending(ctx context.Context) error {
 		return err
 	}
 	if !holds {
-		m.log.Info("supervise: the issue has left this role's phase; the task is dropped rather than sent",
-			"delivery", p.ID, "issue", m.claim.Issue, "role", m.claim.Role)
+		m.log.Info("supervise: the issue has left the phase this task was queued for; it is dropped rather than sent",
+			"delivery", p.ID, "issue", m.claim.Issue, "queuedFor", p.Phase)
+		// The question a restart left — whether the turn the agent may be in is the pending
+		// delivery's — goes with the delivery it was about. Left armed with nothing pending, the
+		// next task takes the agent's own turn as its own: confirmed, never prompted, and retired
+		// at that turn's end.
+		m.askFirst = false
 		return m.retirePending(ctx)
 	}
 	if m.askFirst {
@@ -120,7 +126,7 @@ func (m *Machine) sendPending(ctx context.Context) error {
 	return nil
 }
 
-// phaseHolds asks whether the issue is still in the phase this claim's role works. A daemon with
+// phaseHolds asks whether the issue is still in the phase this task was queued for. A daemon with
 // no workflow configured supplies no answer, and every delivery holds.
 func (m *Machine) phaseHolds(ctx context.Context, d Delivery) (bool, error) {
 	if m.deps.PhaseHolds == nil {

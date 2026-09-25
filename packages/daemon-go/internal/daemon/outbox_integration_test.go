@@ -582,8 +582,13 @@ func TestAWorkflowTaskIsDroppedAfterItsRetryRewritesTheDelivery(t *testing.T) {
 	if got := machine.Claim().Pending; got != nil {
 		t.Fatalf("the finished phase's task is still pending as %+v, want it dropped", got)
 	}
-	if got := len(conn.Prompts()) - prompts; got != 0 {
-		t.Fatalf("the finished worker was handed its own finished task %d more times, want none", got)
+	// A send runs on its own goroutine, so counting the prompts as Handle returns can only ever
+	// see none: the count is watched over a window a send would land inside instead.
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+		if got := len(conn.Prompts()) - prompts; got != 0 {
+			t.Fatalf("the finished worker was handed its own finished task %d more times, want none", got)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
