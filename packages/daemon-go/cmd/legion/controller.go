@@ -54,8 +54,10 @@ func runController(ctx context.Context, args []string, stdout, stderr io.Writer)
 // launched until the daemon has answered: read the strict operator-side file; refuse an operator
 // token file others can read, and a blank or unreadable Envoy or Dispatch token file, a role-prompt
 // bundle missing a file, an instructions file that is missing or blank, an Oh My Pi invocation
-// that does not resolve, and a pi-legion-envoy in the operator's Oh My Pi profile that does not
-// speak this binary's Go daemon API contract (it would refuse the controller at session start);
+// that does not resolve, and a pi-legion-envoy manifest, at the plugin root this process's
+// environment names, that does not speak this binary's Go daemon API contract (it would refuse the
+// controller at session start; a dotenv file Oh My Pi reads itself or the launch prefix can move
+// that root, which this check does not see: daemon.VerifyPluginContract);
 // fetch the controller secret with the operator token as a bearer (the daemon mints a fresh
 // capability and revokes the previous controller's); write it 0600 under the local state
 // directory beside the gh shim, the `legion` launcher, and the deployment instructions;

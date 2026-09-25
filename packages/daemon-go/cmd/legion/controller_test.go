@@ -663,9 +663,10 @@ func TestControllerStartRefusesLocallyBeforeTheRequest(t *testing.T) {
 	})
 }
 
-// The contract check reads the manifest Oh My Pi loads under the operator's environment, which the
-// controller's Oh My Pi inherits whole (@oh-my-pi/pi-utils dirs.ts: getBaseConfigRoot,
-// DirResolver's constructor, resolveActiveAgentDirOverride, getPluginsDir). Each row installs the
+// The contract check reads the manifest Oh My Pi loads under the operator's process environment,
+// which the controller's Oh My Pi inherits (@oh-my-pi/pi-utils dirs.ts: getBaseConfigRoot,
+// DirResolver's constructor, resolveActiveAgentDirOverride, getPluginsDir); it cannot see a dotenv
+// file Oh My Pi reads itself or a launch prefix, and no row sets either. Each row installs the
 // release Oh My Pi loads where it loads it, and a plugin speaking another contract at the root a
 // wrong resolution would read: the controller starts only when the check read the first. An
 // honoured PI_CODING_AGENT_DIR moves the plugins only by turning the XDG data root off, so with

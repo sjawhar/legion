@@ -122,8 +122,8 @@ var (
 )
 
 // pluginManifestPath is the installed pi-legion-envoy manifest where Oh My Pi, started under env in
-// workDir, looks for its plugins, and the profile that decided it ("" for the default profile). The
-// resolution is Oh My Pi's own (@oh-my-pi/pi-utils 18.1.21, src/dirs.ts), ported whole:
+// workDir, looks for its plugins, and the profile that decided it ("" for the default profile). It
+// ports Oh My Pi's resolution (@oh-my-pi/pi-utils 18.1.21, src/dirs.ts) over env alone:
 //
 //   - the profile is OMP_PROFILE when it is set at all, even empty, else PI_PROFILE; trimmed, an
 //     empty name or "default" is the default profile, and a name Oh My Pi would refuse is refused
@@ -144,6 +144,13 @@ var (
 //   - the plugins are `plugins/node_modules` under the data root (getPluginsDir,
 //     getPluginsNodeModules, :607-617), and the manifest is the package's own `package.json`
 //     there (legionPluginManifestPath, packages/daemon/src/daemon/boot-probes.ts:240-244).
+//
+// env is all it reads. Before it resolves its directories, Oh My Pi fills XDG_DATA_HOME,
+// PI_CONFIG_DIR, OMP_CONFIG_DIR and PI_CODING_AGENT_DIR from dotenv files it reads itself (~/.env,
+// the config root's .env, the agent directory's .env, its working directory's .env; env.ts, then
+// refreshDirsFromEnv), and a launch prefix can set any variable; neither reaches env. Where either
+// moves the plugin root, this names another manifest than the one Oh My Pi loads. The load probe
+// (verifyLoaded, verifyLoadedFrom) watches what Oh My Pi loads and catches both.
 func pluginManifestPath(env map[string]string, workDir string) (string, string, error) {
 	requested, set := env["OMP_PROFILE"]
 	if !set {
@@ -222,11 +229,12 @@ func profileWords(profile string) string {
 
 // VerifyPluginContract is the boot gate's contract probe for an Oh My Pi started under env in
 // workDir: the pi-legion-envoy manifest where that Oh My Pi reads its plugins (pluginManifestPath)
-// must declare contract (verifyPluginContract). `legion controller start` runs it on the operator's
-// own environment, in the controller's working directory, before its one daemon call, since no
+// must declare contract (verifyPluginContract). `legion controller start` runs it on its own
+// process environment, in the controller's working directory, before its one daemon call, since no
 // boot gate checks the operator's machine and the mint it asks for revokes the incumbent
-// controller; the controller's Oh My Pi inherits that environment whole and starts there, so the
-// manifest checked is the one it loads. It answers the package version.
+// controller. It reads only that environment: a dotenv file Oh My Pi reads itself, or the launch
+// prefix, can move the plugin root it misses (pluginManifestPath), and controller start runs no
+// load probe. It answers the package version.
 func VerifyPluginContract(env map[string]string, workDir string, contract int) (string, error) {
 	manifest, profile, err := pluginManifestPath(env, workDir)
 	if err != nil {
