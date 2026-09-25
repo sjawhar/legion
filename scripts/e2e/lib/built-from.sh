@@ -36,8 +36,15 @@ else
   parents=$(git -C "$root" rev-parse HEAD)
   echo "source: $parents"
   if [ -n "$(git -C "$root" status --porcelain)" ]; then
-    echo "working-tree changes, sha256 $(git -C "$root" diff HEAD | sha256sum | cut -d' ' -f1):"
-    git -C "$root" diff HEAD --stat | sed 's/^/  /'
+    # git diff leaves untracked files out, and a new script copied in is one: the diff is taken
+    # against a copy of the index with every untracked file added as intent-to-add, so the checkout's
+    # own index is never written.
+    index=$(mktemp)
+    trap 'rm -f "$index"' EXIT
+    cp "$(git -C "$root" rev-parse --path-format=absolute --git-path index)" "$index"
+    GIT_INDEX_FILE=$index git -C "$root" add --intent-to-add --all
+    echo "working-tree changes, sha256 $(GIT_INDEX_FILE=$index git -C "$root" diff HEAD | sha256sum | cut -d' ' -f1):"
+    GIT_INDEX_FILE=$index git -C "$root" diff HEAD --stat | sed 's/^/  /'
   fi
 fi
 refuse() {

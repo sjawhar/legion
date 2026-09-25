@@ -14,24 +14,27 @@
 # $evidence/pane-endpoint-violation.txt, and the next bounded wait aborts naming it.
 
 # until_true SECONDS DESCRIPTION COMMAND... — all synchronization has a bounded named wait. It
-# polls COMMAND every half second, SECONDS*2 times, and says what it waits for on entry and every
-# 60 s while it does (polls and wall time, which includes each poll's own run), so a healthy wait
-# and a stall read differently to anyone watching a run's output.
+# polls COMMAND every half second until SECONDS of wall time have passed, each poll's own run
+# included, and says what it waits for on entry and every 60 s while it does (polls and seconds),
+# so a healthy wait and a stall read differently to anyone watching a run's output. A poll that
+# never returns would hold the wait past its bound, so a caller's remote calls carry their own
+# timeouts.
 until_true() {
-  local limit=$1 what=$2 i started=$SECONDS beat=$SECONDS
+  local limit=$1 what=$2 polls=0 started=$SECONDS beat=$SECONDS
   shift 2
   note "waiting up to ${limit}s for $what"
-  for ((i = 0; i < limit * 2; i++)); do
+  while ((SECONDS - started < limit)); do
     [ ! -s "$evidence/pane-endpoint-violation.txt" ] || fail "ABORT: $(cat "$evidence/pane-endpoint-violation.txt")"
+    polls=$((polls + 1))
     if "$@" >/dev/null 2>&1; then return 0; fi
     if ((SECONDS - beat >= 60)); then
       beat=$SECONDS
-      note "still waiting for $what: poll $((i + 1)) of $((limit * 2)), $((SECONDS - started))s"
+      note "still waiting for $what: poll $polls, $((SECONDS - started))s of ${limit}s"
     fi
     sleep 0.5
   done
   if [ -n "$timeout_hook" ]; then "$timeout_hook" || true; fi
-  fail "timed out after ${limit}s waiting for $what"
+  fail "timed out after ${limit}s ($polls polls) waiting for $what"
 }
 
 # pick_port VAR assigns VAR a port from lib/free-port.sh that is distinct from every earlier pick of

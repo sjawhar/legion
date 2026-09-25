@@ -21,7 +21,9 @@
 #   torn_down, compared   empty
 # and defines begin, note, pass and fail (which exits).
 
-op() { kubectl --context "$operator" -n "$namespace" "$@"; }
+# op bounds every call, so a wait's poll cannot hang past the wait (--foreground keeps kubectl in the
+# run's process group, where a Ctrl-C reaches it).
+op() { timeout --foreground 300 kubectl --context "$operator" -n "$namespace" "$@"; }
 
 # snapshot FILE: the namespace's Sandboxes, Secrets, PVCs, and pods that carry this run's project
 # label or no project label at all, as the operator sees them.
