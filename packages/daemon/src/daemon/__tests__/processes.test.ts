@@ -998,7 +998,7 @@ describe("ProcessManager", () => {
         "--all-remotes",
         "exact:legion/LEGION-42",
         "-T",
-        'if(remote, if(remote == "origin", "origin " ++ if(conflict, "conflicted " ++ added_targets.map(|c| c.commit_id()).join(","), if(tracked, "tracked ", "untracked ") ++ normal_target.commit_id()) ++ "\n"), "local " ++ if(conflict, "conflicted " ++ added_targets.map(|c| c.commit_id()).join(","), if(present, normal_target.commit_id(), "absent")) ++ "\n")',
+        'if(remote, if(remote == "origin", "origin " ++ if(conflict, "conflicted " ++ added_targets.map(|c| c.commit_id()).join(","), if(tracked, "tracked ", "untracked ") ++ normal_target.commit_id()) ++ "\n"), "local " ++ if(conflict, "conflicted " ++ added_targets.map(|c| c.commit_id()).join(","), if(present, "present " ++ normal_target.commit_id(), "absent")) ++ "\n")',
         "--ignore-working-copy",
         "-R",
         repo,

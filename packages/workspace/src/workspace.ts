@@ -245,32 +245,32 @@ async function createWorkspace(
   if (listed.exitCode !== 0) {
     throw new Error(`${unresolved}\n${commandFailure(listed, listArgs).message}`);
   }
-  let local: string[] | undefined;
-  let origin: string[] | undefined;
+  const rows: Partial<Record<string, BookmarkRow>> = {};
   for (const line of listed.stdout.split("\n")) {
     if (line === "") continue;
-    const [where, ...fields] = line.split(" ");
-    const commits = (fields.at(-1) ?? "").split(",");
+    const [where = "", state = "", ids = ""] = line.split(" ");
+    const commits = ids === "" ? [] : ids.split(",");
     if (
-      (where !== "local" && where !== "origin") ||
-      !commits.every((commit) => /^[0-9a-f]{40}$/.test(commit) || commit === "absent")
+      !BOOKMARK_ROW_STATES[where]?.includes(state) ||
+      (state === "absent") !== (commits.length === 0) ||
+      !commits.every((commit) => /^[0-9a-f]{40}$/.test(commit))
     ) {
       throw new Error(
         `${unresolved}\n\`${listArgs.join(" ")}\` printed a row it cannot print: ${line}`
       );
     }
-    if (where === "local") local = fields;
-    else origin = fields;
+    rows[where] = { state, commits };
   }
-  if (local?.[0] === "conflicted") {
+  const local = rows.local;
+  if (local?.state === "conflicted") {
     throw new Error(
-      `Bookmark ${bookmark} is conflicted (${local[1]?.split(",").join(", ")}); workspace ${workspaceDir} was not created. Resolve it with \`jj bookmark set ${bookmark} -r <commit> -R ${repoCloneDir}\`.`
+      `Bookmark ${bookmark} is conflicted (${local.commits.join(", ")}); workspace ${workspaceDir} was not created. Resolve it with \`jj bookmark set ${bookmark} -r <commit> -R ${repoCloneDir}\`.`
     );
   }
   const bookmarkCommit =
-    local !== undefined && local[0] !== "absent"
-      ? local[0]
-      : await adoptOriginBranch(deps, repoCloneDir, workspaceDir, bookmark, origin);
+    local?.state === "present"
+      ? local.commits[0]
+      : await adoptOriginBranch(deps, repoCloneDir, workspaceDir, bookmark, rows.origin);
 
   await mkdir(path.dirname(workspaceDir), { recursive: true });
   const gitDir = path.join(repoCloneDir, ".git");
@@ -316,13 +316,27 @@ async function createWorkspace(
   await runChecked(deps, ["jj", "bookmark", "set", bookmark, "-r", "@"], { cwd: workspaceDir });
 }
 
-/** The `jj bookmark list -T` template of `createWorkspace`'s one read. It prints `local <commit>`,
- * `local absent` for a local deletion whose origin row survives, and `origin tracked <commit>` or
- * `origin untracked <commit>`; either row prints `conflicted <commit>,<commit>…` (the conflict's
- * present targets) instead when jj holds it conflicted, where `normal_target` would print an
+/** The `jj bookmark list -T` template of `createWorkspace`'s one read: one `<where> <state>
+ * [<commit>,…]` line per row. The local row is `local present <commit>`, `local absent` (a local
+ * deletion whose origin row survives), or `local conflicted <commit>,…`; the `@origin` row is
+ * `origin tracked <commit>`, `origin untracked <commit>`, or `origin conflicted <commit>,…`. A
+ * conflicted row lists the conflict's present targets, where `normal_target` would print an
  * `<Error: …>` and exit 0. Other remotes and a colocated clone's `@git` row print nothing. */
 const BOOKMARK_ROWS =
-  'if(remote, if(remote == "origin", "origin " ++ if(conflict, "conflicted " ++ added_targets.map(|c| c.commit_id()).join(","), if(tracked, "tracked ", "untracked ") ++ normal_target.commit_id()) ++ "\n"), "local " ++ if(conflict, "conflicted " ++ added_targets.map(|c| c.commit_id()).join(","), if(present, normal_target.commit_id(), "absent")) ++ "\n")';
+  'if(remote, if(remote == "origin", "origin " ++ if(conflict, "conflicted " ++ added_targets.map(|c| c.commit_id()).join(","), if(tracked, "tracked ", "untracked ") ++ normal_target.commit_id()) ++ "\n"), "local " ++ if(conflict, "conflicted " ++ added_targets.map(|c| c.commit_id()).join(","), if(present, "present " ++ normal_target.commit_id(), "absent")) ++ "\n")';
+
+/** The states `BOOKMARK_ROWS` prints for each row. */
+const BOOKMARK_ROW_STATES: Record<string, readonly string[]> = {
+  local: ["present", "absent", "conflicted"],
+  origin: ["tracked", "untracked", "conflicted"],
+};
+
+/** One row of `BOOKMARK_ROWS`: its state, and its commit (or a conflict's commits; none when
+ * `absent`). */
+interface BookmarkRow {
+  readonly state: string;
+  readonly commits: readonly string[];
+}
 
 /** The issue's branch as origin has it, for an issue with no local bookmark: the commit of an
  * **untracked** `legion/<KEY>@origin` row, after tracking it, so the workspace starts on the
@@ -348,25 +362,25 @@ async function adoptOriginBranch(
   repoCloneDir: string,
   workspaceDir: string,
   bookmark: string,
-  origin: readonly string[] | undefined
+  origin: BookmarkRow | undefined
 ): Promise<string | undefined> {
   if (origin === undefined) return undefined;
-  const [state, target = ""] = origin;
-  if (state === "conflicted") {
+  if (origin.state === "conflicted") {
     throw new Error(
-      `Remote bookmark ${bookmark}@origin is conflicted (${target.split(",").join(", ")}); workspace ${workspaceDir} was not created.`
+      `Remote bookmark ${bookmark}@origin is conflicted (${origin.commits.join(", ")}); workspace ${workspaceDir} was not created.`
     );
   }
-  if (state === "tracked") {
+  const [commit] = origin.commits;
+  if (origin.state === "tracked") {
     throw new Error(
-      `Bookmark ${bookmark} was deleted in the shared clone ${repoCloneDir} and the deletion never pushed, while ${bookmark}@origin is tracked at ${target}; workspace ${workspaceDir} was not created. ` +
+      `Bookmark ${bookmark} was deleted in the shared clone ${repoCloneDir} and the deletion never pushed, while ${bookmark}@origin is tracked at ${commit}; workspace ${workspaceDir} was not created. ` +
         `Restore it: \`jj bookmark set ${bookmark} -r ${bookmark}@origin -R ${repoCloneDir}\`. ` +
         `Cancel the deletion, and the next provisioning adopts origin's branch: \`jj bookmark forget ${bookmark} -R ${repoCloneDir}\`. ` +
         "Start from main instead: delete the branch on GitHub; the next provisioning starts at main."
     );
   }
   await runChecked(deps, ["jj", "bookmark", "track", `${bookmark}@origin`, "-R", repoCloneDir]);
-  return target;
+  return commit;
 }
 
 /** Removes a repository-scoped jj `user.name`/`user.email` from the shared clone. `--repo` on a

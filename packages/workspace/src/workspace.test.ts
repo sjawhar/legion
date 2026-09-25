@@ -147,9 +147,9 @@ function credentialConfigCommands(gitDir: string, helper: string): string[][] {
     ["git", `--git-dir=${gitDir}`, "config", "credential.interactive", "false"],
   ];
 }
-/** The command `createWorkspace` runs before anything else: the bookmark's local row and its
- * `@origin` row, each its commit, `absent`, or `conflicted <commit>,<commit>…`, and the origin
- * row's tracking. */
+/** The command `createWorkspace` runs before anything else: the bookmark's local row
+ * (`present <commit>`, `absent`, or `conflicted <commit>,…`) and its `@origin` row (`tracked` or
+ * `untracked <commit>`, or `conflicted <commit>,…`). */
 function bookmarkRowsCommand(bookmark: string, repoCloneDir: string): string[] {
   return [
     "jj",
@@ -158,7 +158,7 @@ function bookmarkRowsCommand(bookmark: string, repoCloneDir: string): string[] {
     "--all-remotes",
     `exact:${bookmark}`,
     "-T",
-    'if(remote, if(remote == "origin", "origin " ++ if(conflict, "conflicted " ++ added_targets.map(|c| c.commit_id()).join(","), if(tracked, "tracked ", "untracked ") ++ normal_target.commit_id()) ++ "\n"), "local " ++ if(conflict, "conflicted " ++ added_targets.map(|c| c.commit_id()).join(","), if(present, normal_target.commit_id(), "absent")) ++ "\n")',
+    'if(remote, if(remote == "origin", "origin " ++ if(conflict, "conflicted " ++ added_targets.map(|c| c.commit_id()).join(","), if(tracked, "tracked ", "untracked ") ++ normal_target.commit_id()) ++ "\n"), "local " ++ if(conflict, "conflicted " ++ added_targets.map(|c| c.commit_id()).join(","), if(present, "present " ++ normal_target.commit_id(), "absent")) ++ "\n")',
     "--ignore-working-copy",
     "-R",
     repoCloneDir,
@@ -485,7 +485,7 @@ describe("provisionIssueWorkspace", () => {
           run: async (cmd, opts) => {
             calls.push({ cmd, opts });
             if (cmd[0] === "jj" && cmd[1] === "bookmark" && cmd[2] === "list") {
-              return { exitCode: 0, stdout: `local ${commit}\n`, stderr: "" };
+              return { exitCode: 0, stdout: `local present ${commit}\n`, stderr: "" };
             }
             if (cmd[0] === "jj" && cmd[1] === "workspace" && cmd[2] === "add") {
               await mkdir(workspaceDir, { recursive: true });
@@ -1595,7 +1595,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
           run: async (cmd, opts) => {
             calls.push({ cmd, opts });
             if (cmd[0] === "jj" && cmd[1] === "bookmark" && cmd[2] === "list") {
-              return { exitCode: 0, stdout: `local ${commit}\n`, stderr: "" };
+              return { exitCode: 0, stdout: `local present ${commit}\n`, stderr: "" };
             }
             if (cmd[0] === "jj" && cmd[1] === "workspace" && cmd[2] === "add") {
               workspaceAddAttempts += 1;
@@ -1745,40 +1745,57 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     expect(existsSync(workspaceDir)).toBeFalse();
   });
 
-  test("fails provisioning when the bookmark resolution fails, before any workspace add", async () => {
-    const stateDir = await temporaryDirectory();
-    const issue = "WIDGETS-42";
-    const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");
-    const workspaceDir = path.join(stateDir, "workspaces", "acme", "widgets", "widgets-42");
-    const calls: RunCall[] = [];
-    await mkdir(path.join(repoCloneDir, ".jj"), { recursive: true });
+  test("fails provisioning when the bookmark read fails or prints a row it cannot print, before any workspace add", async () => {
+    const errorRow = "origin untracked <Error: No Commit available>";
+    for (const { name, result, detail } of [
+      {
+        name: "read fails",
+        result: { exitCode: 1, stdout: "", stderr: "Error: Failed to read the operation log" },
+        detail: (command: string) =>
+          `Command failed (exit 1): ${command}\nError: Failed to read the operation log`,
+      },
+      {
+        // jj prints a template's evaluation error in place and exits 0.
+        name: "an <Error: …> row",
+        result: { exitCode: 0, stdout: `${errorRow}\n`, stderr: "" },
+        detail: (command: string) => `\`${command}\` printed a row it cannot print: ${errorRow}`,
+      },
+    ]) {
+      const stateDir = await temporaryDirectory();
+      const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");
+      const workspaceDir = path.join(stateDir, "workspaces", "acme", "widgets", "widgets-42");
+      const calls: RunCall[] = [];
+      await mkdir(path.join(repoCloneDir, ".jj"), { recursive: true });
 
-    await expect(
-      provisionIssueWorkspace(issue, {
-        repo: "acme/widgets",
-        stateDir,
-        provisioningToken: async () => "installation-token",
-        credentialHelper,
-        commandTimeoutMs,
-        run: async (cmd, opts) => {
-          calls.push({ cmd, opts });
-          if (cmd[0] === "jj" && cmd[1] === "bookmark" && cmd[2] === "list") {
-            return { exitCode: 1, stdout: "", stderr: "Error: Failed to read the operation log" };
-          }
-          return { exitCode: 0, stdout: "", stderr: "" };
-        },
-      })
-    ).rejects.toThrow(
-      `Bookmark legion/WIDGETS-42 could not be resolved; workspace ${workspaceDir} was not created.\nCommand failed (exit 1): ${bookmarkRowsCommand("legion/WIDGETS-42", repoCloneDir).join(" ")}\nError: Failed to read the operation log`
-    );
-    // Nothing is guessed from a failed resolution: no prune, no add, no bookmark write.
-    expect(calls.map((call) => call.cmd)).toEqual([
-      readKeepUnreachableCommitsCommand(repoCloneDir),
-      writeKeepUnreachableCommitsCommand(repoCloneDir),
-      ["jj", "git", "fetch", "-R", repoCloneDir],
-      bookmarkRowsCommand("legion/WIDGETS-42", repoCloneDir),
-    ]);
-    expect(existsSync(workspaceDir)).toBeFalse();
+      await expect(
+        provisionIssueWorkspace("WIDGETS-42", {
+          repo: "acme/widgets",
+          stateDir,
+          provisioningToken: async () => "installation-token",
+          credentialHelper,
+          commandTimeoutMs,
+          run: async (cmd, opts) => {
+            calls.push({ cmd, opts });
+            if (cmd[0] === "jj" && cmd[1] === "bookmark" && cmd[2] === "list") return result;
+            return { exitCode: 0, stdout: "", stderr: "" };
+          },
+        }),
+        name
+      ).rejects.toThrow(
+        `Bookmark legion/WIDGETS-42 could not be resolved; workspace ${workspaceDir} was not created.\n${detail(bookmarkRowsCommand("legion/WIDGETS-42", repoCloneDir).join(" "))}`
+      );
+      // Nothing is guessed from a failed read: no prune, no add, no bookmark write.
+      expect(
+        calls.map((call) => call.cmd),
+        name
+      ).toEqual([
+        readKeepUnreachableCommitsCommand(repoCloneDir),
+        writeKeepUnreachableCommitsCommand(repoCloneDir),
+        ["jj", "git", "fetch", "-R", repoCloneDir],
+        bookmarkRowsCommand("legion/WIDGETS-42", repoCloneDir),
+      ]);
+      expect(existsSync(workspaceDir), name).toBeFalse();
+    }
   });
 
   test("reports a clone killed at its budget as a timeout, leaves nothing at the final path, and clones fresh on the next attempt", async () => {

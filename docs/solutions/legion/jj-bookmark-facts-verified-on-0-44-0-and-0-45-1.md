@@ -75,7 +75,7 @@ Command forms, run from the clone with `--ignore-working-copy -R <clone>`:
 - **present**: `jj log -r 'present(legion/X)' --no-graph -T 'commit_id ++ "\n"'`
 - **exact**: `jj log -r 'bookmarks(exact:legion/X)' --no-graph -T 'commit_id ++ "\n"'`
 - **rows**: `jj bookmark list --all-remotes exact:legion/X -T <template>`, the template printing
-  `local <commit>` / `local absent` / `origin tracked|untracked <commit>`, or
+  `local present <commit>` / `local absent` / `origin tracked|untracked <commit>`, or
   `conflicted <commit>,<commit>…` from `added_targets` when the row's `conflict` is true
   (`createWorkspace`'s `BOOKMARK_ROWS` in `packages/workspace/src/workspace.ts`)
 
@@ -83,7 +83,7 @@ Command forms, run from the clone with `--ignore-working-copy -R <clone>`:
 | --- | --- | --- | --- | --- |
 | missing | exit 0, **no stdout**, stderr `Warning: No matching bookmarks for names: legion/X` | exit 0, 0 lines | exit 0, 0 lines | no stdout |
 | only `legion/X1` exists | as missing (positional name is exact, not a prefix) | 0 lines | 0 lines (`exact:` is exact) | no stdout |
-| normal | exit 0, one row `legion/X: <change> <commit> …` | exit 0, **1 line**, the commit id | exit 0, **1 line**, the commit id | `local <commit>`, plus `origin tracked <commit>` once pushed |
+| normal | exit 0, one row `legion/X: <change> <commit> …` | exit 0, **1 line**, the commit id | exit 0, **1 line**, the commit id | `local present <commit>`, plus `origin tracked <commit>` once pushed |
 | local deleted, `@origin` row survives (a `jj bookmark delete`, or a `jj abandon` of its commit) | exit 0, **2 rows**: `legion/X (deleted)` + `  @origin: …`, stderr `Hint: Bookmarks marked as deleted can be *deleted permanently* …` | exit 0, 0 lines | exit 0, 0 lines | `local absent` + `origin tracked <commit>` |
 | conflicted (two targets) | exit 0, **5–6 rows**: `legion/X (conflicted):`, `  - <base>`, `  + <A>`, `  + <B>`, stderr `Hint: Some bookmarks have conflicts …` | **exit 1**, 0 lines, stderr `Error: Name \`legion/X\` is conflicted` + `Hint: Use commit ID to select single revision from: <A>, <B>` + `Hint: Use \`bookmarks(legion/X)\` to select all revisions` | exit 0, **2 lines**, one commit id each | `local conflicted <A>,<B>` |
 | conflicted, one side a deletion (deleted locally, then origin moved to `<B>` and the clone fetched) | `legion/X (conflicted):`, `  - <base> (hidden)`, `  + <B>`, `  @origin: <B>` | stderr `Error: Name \`legion/X\` is conflicted`, its hint naming `<B>` alone | exit 0, **1 line**, `<B>`: **indistinguishable from normal** | `local conflicted <B>` + `origin tracked <B>` |
