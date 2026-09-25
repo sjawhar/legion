@@ -1,13 +1,10 @@
 package bus
 
 import (
-	"context"
 	"testing"
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/testnats"
-	"github.com/testcontainers/testcontainers-go"
-	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
 
 // LEGION-271. A Dispatch publish carries a JetStream MsgId built from the envelope's dedupe key,
@@ -16,17 +13,7 @@ import (
 // delivered. PublishReportingDuplicate returns it. Publish itself keeps its signature: it is an
 // interface method in cistore, outbox and webhook.
 func TestPublishReportingDuplicateReportsTheStreamsVerdict(t *testing.T) {
-	ctx := context.Background()
-	container, err := tcnats.Run(ctx, testnats.Image)
-	testcontainers.CleanupContainer(t, container)
-	if err != nil {
-		t.Fatalf("start NATS: %v", err)
-	}
-	uri, err := container.ConnectionString(ctx)
-	if err != nil {
-		t.Fatalf("NATS connection string: %v", err)
-	}
-	client, err := Connect([]string{uri})
+	client, err := Connect([]string{testnats.URL(t)})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}

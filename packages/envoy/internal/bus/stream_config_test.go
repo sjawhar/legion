@@ -121,7 +121,7 @@ func TestConnectWithContextBoundsMultipleUnresponsiveServers(t *testing.T) {
 
 func TestConnectWithContextDoesNotPoisonAutomaticReconnect(t *testing.T) {
 	baseCtx := context.Background()
-	_, uri := testnats.Start(t)
+	uri := testnats.URL(t)
 
 	// The property under test is that a connect context that is done by the time the server
 	// drops the connection does not poison automatic reconnect; cancel it explicitly instead of
@@ -169,7 +169,7 @@ func TestEnsureStreamWithConfig_updatesMaxAgeWhenExistingStreamDiffers(t *testin
 }
 
 func TestConnectMigratesExistingStreamDuplicatesWindow(t *testing.T) {
-	_, uri := testnats.Start(t)
+	uri := testnats.URL(t)
 	legacyConn := testnats.Connect(t, uri)
 	t.Cleanup(legacyConn.Close)
 	legacyJS, err := legacyConn.JetStream()
@@ -242,7 +242,7 @@ func TestEnsureStreamWithConfigPurgesRoleMessagesPublishedDuringMigration(t *tes
 }
 
 func TestConnectPurgesLegacyRoleMessagesBeforeDurableConsumerRestart(t *testing.T) {
-	_, uri := testnats.Start(t)
+	uri := testnats.URL(t)
 	legacyConn := testnats.Connect(t, uri)
 	legacyJS, err := legacyConn.JetStream()
 	if err != nil {
@@ -353,7 +353,7 @@ func TestEnsureStreamWithConfigReplacesTheLegacyRoleLaneCatchAll(t *testing.T) {
 // separately, and a rollback or a restart during a rollout starts a binary compiled with a
 // different subject list. Whichever starts must leave every subject the other still needs.
 func TestConnectKeepsTheSubjectsAnotherDeploymentOfTheStreamNeeds(t *testing.T) {
-	_, uri := testnats.Start(t)
+	uri := testnats.URL(t)
 	// The other deployment was compiled before notifications.legion.> existed and carries a
 	// subject this binary does not know.
 	other := *streamCfg
@@ -417,7 +417,7 @@ func assertStreamSubjectsInclude(t *testing.T, js nats.JetStreamContext, want []
 // splits a subject another deployment still holds, each start (and a rollback's) must still
 // succeed, with the starting binary's shape of that subject in the stream.
 func TestEnsureStreamWithConfigStartsWhenADeployedSubjectOverlapsItsOwn(t *testing.T) {
-	_, uri := testnats.Start(t)
+	uri := testnats.URL(t)
 	conn := testnats.Connect(t, uri)
 	t.Cleanup(conn.Close)
 	js, err := conn.JetStream()

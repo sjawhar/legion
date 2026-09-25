@@ -48,7 +48,7 @@ func setupTestEnv(t *testing.T, options ...testEnvOption) *testEnv {
 	ctx := context.Background()
 
 	// Start real NATS with JetStream
-	_, uri := testnats.Start(t)
+	uri := testnats.URL(t)
 
 	// Connect bus client
 	client, err := bus.Connect([]string{uri}, bus.WithReplicas(1))
