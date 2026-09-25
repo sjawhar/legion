@@ -81,7 +81,9 @@ and the deletion commit removes it with the rest. Rebasing the whole chain
 2. Every assignment and every completion summary names the head SHA it refers to.
 3. Append keyed round objects to your phase's handoff; never overwrite a prior round.
 4. 202: stop. 409: one `envoy_publish` to the architect's role topic, then stop.
-5. Build on and carry other roles' unpushed commits; never rebase only your own.
+5. Build on other roles' commits, and push only from a head that descends from
+   `legion/<KEY>@origin` (the push snippet in `skills/legion-worker/SKILL.md` checks it); when a
+   rebase is needed, rebase the whole chain, never only your own commits.
 
 ## Related
 

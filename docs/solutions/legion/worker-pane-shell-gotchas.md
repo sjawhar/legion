@@ -228,16 +228,18 @@ an assignment says "run the root suite", run the daemon package's suite and say 
 
 Workers commit with `jj split -m '…' <explicit paths>` (the worker skill's completion gate). After a split the issue
 bookmark sits on the **remaining** half — the new, undescribed working copy — not on the commit you just described.
-`jj bookmark set legion/<KEY>` then refuses (`Refusing to move bookmark backwards or sideways`). Before every push:
+`jj bookmark set legion/<KEY>` then refuses (`Refusing to move bookmark backwards or sideways`). Before every push,
+run the push snippet in `skills/legion-worker/SKILL.md`: it checks that `@-` descends from `legion/<KEY>@origin`, then
+sets the bookmark with `-r @- --allow-backwards` and pushes it.
 
-```bash
-jj -R "$LEGION_WORKSPACE" bookmark set legion/<KEY> -r @- --allow-backwards
-jj -R "$LEGION_WORKSPACE" git push --bookmark legion/<KEY>
-```
-
-The remote still moves **forward** — jj 0.45's push summary reads `Changes to push to origin:` followed by
-`bookmark: legion/<KEY> [move forward from <old> to <new>]`; `--allow-backwards` only
-concerns the local pointer stepping from the empty child to its described parent. Check `jj diff -r @- --stat` first:
+When `@-` descends from the remote branch, the remote moves **forward**: jj 0.45's push summary reads
+`Changes to push to origin:` followed by `bookmark: legion/<KEY> [move forward from <old> to <new>]`, and
+`--allow-backwards` only concerns the local pointer stepping from the empty child to its described parent. When it does
+not, the flag is not harmless. Every issue workspace shares one clone, so another role's push moves
+`legion/<KEY>@origin` for every workspace at once, and the same two commands push
+`bookmark: legion/<KEY> [move sideways from <theirs> to <yours>]`, dropping their commit from the branch (measured on
+jj 0.45.1, 2026-09-25, LEGION-285). That is why the snippet checks ancestry first. A clone that has not seen the other
+push is refused by jj's own lease (`unexpectedly moved on the remote`). Check `jj diff -r @- --stat` first:
 the described commit must hold exactly the paths you named.
 
 Related: every role pushes its own commits since LEGION-285 (2026-09-25; `../legion/one-role-keyed-table-decides-which-github-app-acts.md`).

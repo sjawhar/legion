@@ -238,6 +238,9 @@ own commits (below):
 
 ```bash
 cd -- "$LEGION_WORKSPACE" && \
+  behind=$(jj -R "$LEGION_WORKSPACE" log --no-graph -T 'commit_id.short() ++ "\n"' \
+    -r 'remote_bookmarks(exact:"legion/<KEY>", exact:"origin") ~ ::@-') && \
+  { [ -z "$behind" ] || { echo "legion/<KEY>@origin is at $behind, which @- does not descend from" >&2; false; }; } && \
   jj -R "$LEGION_WORKSPACE" bookmark set legion/<KEY> -r @- --allow-backwards && \
   jj -R "$LEGION_WORKSPACE" git push --bookmark legion/<KEY>
 ```
@@ -539,18 +542,31 @@ tests it wrote — advance the issue bookmark and push it with the provisioned c
 which authenticates as your role's App (`appRoleForLegionRole` in
 `packages/daemon/src/daemon/github-apps.ts`). `-r @-` puts the bookmark on the commit you just
 split off: the working copy left above it has no description, and `jj git push` refuses a
-commit without one. `--bookmark` also publishes the locally provisioned bookmark on its first
-push — a bookmark not yet tracking a remote one is tracked automatically:
+commit without one. `--allow-backwards` is for that local step alone: after a split the bookmark
+can sit on the undescribed working copy above `@-`. `--bookmark` also publishes the locally
+provisioned bookmark on its first push — a bookmark not yet tracking a remote one is tracked
+automatically:
 
 ```bash
 cd -- "$LEGION_WORKSPACE" && \
+  behind=$(jj -R "$LEGION_WORKSPACE" log --no-graph -T 'commit_id.short() ++ "\n"' \
+    -r 'remote_bookmarks(exact:"legion/<KEY>", exact:"origin") ~ ::@-') && \
+  { [ -z "$behind" ] || { echo "legion/<KEY>@origin is at $behind, which @- does not descend from" >&2; false; }; } && \
   jj -R "$LEGION_WORKSPACE" bookmark set legion/<KEY> -r @- --allow-backwards && \
   jj -R "$LEGION_WORKSPACE" git push --bookmark legion/<KEY>
 ```
 
+The `behind` check refuses unless `@-` descends from `legion/<KEY>@origin` (or the branch is not
+on GitHub yet). Every issue workspace shares one clone, so another role's push moves
+`legion/<KEY>@origin` here at once. With the flag and no check, `jj git push` then moves the
+remote branch sideways onto your commit and drops theirs (jj 0.45.1:
+`bookmark: legion/K [move sideways from <theirs> to <yours>]`). A clone that has not seen the other
+push is refused by jj itself (`unexpectedly moved on the remote`).
+
 Before the push, check ancestry and identity as above: the chain carries every earlier phase's
-commits, and pushing them with yours is expected. A push the remote rejects is a report to the
-architect with jj's output, never a force-push. The merger makes no commit and pushes nothing.
+commits, and pushing them with yours is expected. That refusal, and a push the remote rejects,
+is a report to the architect with the output, never a force-push. The merger makes no commit and
+pushes nothing.
 
 Do not report phase completion until the write, existence check, handoff commit, and push
 succeed. This is the committed copy the next phase
