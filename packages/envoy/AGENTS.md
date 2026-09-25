@@ -40,20 +40,49 @@ captured update in the same Postgres transaction as any resulting version and ev
 and compares canonical markdown. `envoy-dispatch backfill-block-ids` runs that closure across every
 document. Every write path that changes a document queues that closer once its transaction commits: a live edit (`POST /api/v1/artifacts/{id}/edits`), an uploaded document version (`POST /api/v1/issues/{key}/artifacts`, `POST /api/v1/projects/{key}/artifacts`), and a spec seeded at issue creation - so ask blocks written by any of them become asks without waiting for a later live change. The closer attributes the asks it indexes to the room's most recent mutating actor (`roomState.lastActor`, set by every edit, replacement and seed) when no pending author remains - an edit's own version write has already consumed `pending` by the time settlement runs. A free-text ask block (no bullet list) carries `options: []` on the wire, never JSON null.
 
-Each `doc_updates` row records `content_changed` - whether the update changed the document once
-anchor marks are stripped (`pmdoc.StripAnchorMarks` + `Equal`, the one measure the room's update
-observer and a transactional live write in `applyLive` both apply) - and settlement writes a version
-only when a content-class row lies past the latest version's `doc_update_version` cursor or ask
-reconciliation changed something, so a comment's quote mark or margin projection never versions a
-document. A handler joins its document operations to its transaction with `Docs.Join`, which
-returns the transaction's ledger (`docs/ledger.go`), the only way to give a document operation a
+Each `doc_updates` row records `content_changed` - whether the update changed the document's
+rendered markdown, the only document content a version stores (`pmdoc.Render` of the tree before and
+after; the one measure the room's update observer, `updateChangesMarkdown`, and a transactional live
+write in `applyLive` both apply) - and settlement writes a version only when a content-class row
+lies past the latest version's `doc_update_version` cursor or ask reconciliation changed something.
+An update that changes only what no rendering carries therefore versions no document by that route:
+a margin projection, the attributes a reader's browser editor derives on its own - each heading's
+`id` when it opens the document, and each ordered list item's `label` and `listType` on the first
+keyboard caret move or edit - or a comment's, suggestion's or ask's anchor mark, wherever it splits
+the text it covers. Routes that write a version on request do so whatever changed, so each can write
+a version whose markdown equals the previous one's and stale an approval pinned to it: an upload to
+an existing document (`POST /api/v1/issues/{key}/artifacts`,
+`POST /api/v1/projects/{key}/artifacts`) always inserts one; `POST /artifacts/{id}/versions` and
+accepting a suggestion always name one through `NamedVersion`; and `POST /edits` names one through
+`NamedVersion` when it is sent with a `summary` and its `changed` is true. That `changed` comes from
+`nodeToken`, which counts marks, so an edit that only drops an anchor qualifies. Without a `summary`
+that edit writes nothing, because `SnapshotVersion` compares renderings. LEGION-260's follow-up
+holds the fix: the edit route writes a version only when the rendered markdown changed, keeping
+`changed` as what it reports to the agent, and the upload route is weighed by the same rule.
+`pmdoc.Render` renders a document without its anchor marks, so an escape is decided over a whole run
+and `snake_case` never becomes `snake\_case` because a mark starts inside it; an anchored comment's
+or ask's `SnapshotVersion` compares that same rendering with the latest version's markdown, so
+marking a quote writes no version either - except at most once per document whose latest version an
+earlier server stored with markdown this server would render differently - an escape an anchor had
+split, whether one it did not need (`user\_id`) or one it was missing (`see [x](y)`, which parses
+back as a link), and, since #1326, a block marker in a paragraph line that now takes an escape
+(`## not a heading` renders `\## not a heading`), with or without an anchor in the document. The
+next snapshot of such a document writes today's rendering of that text, and when the stored version
+was approved it leaves the approval stale until a human approves the new one. A browser is credited
+as a version's author only for browser edits made while it is connected (`creditContentChange`),
+another browser's as well as its own, since a browser edit cannot be pinned on one connected peer;
+opening a document or an agent's edit credits it nothing, so a reader whose editor changes nothing
+the rendering carries causes no version and cannot stale an approval.
+A handler joins its document
+operations to its transaction with `Docs.Join`, which returns the transaction's ledger
+(`docs/ledger.go`), the only way to give a document operation a
 transaction. A joined operation never writes the room: it runs on the transaction's fork of the
 room's document (`docs/livewrite.go`), appends its update inside the transaction, and reads through
 the same fork. The handler ends the transaction with `ledger.Commit`, which commits, credits the
-writes' authors to their rooms (the actor, and the browsers connected when it changed the
-content), releases the authors a version the transaction wrote named, and only then applies and
-broadcasts the updates; it defers `ledger.Discard`, so a transaction that does not commit leaves
-the room, every connected browser, every version and the durable document as they were.
+writes' actor to their rooms, releases the authors a version the transaction wrote named, and only
+then applies and broadcasts the updates; it defers `ledger.Discard`, so a transaction that does not
+commit leaves the room, every connected browser, every version and the durable document as they
+were.
 While a transaction's write to a document is open it holds that room's writer slot, so another
 transaction's joined operation on the document waits for it to be published or discarded, and it
 holds off the room's settlement, which runs once the write is published or discarded. The docs

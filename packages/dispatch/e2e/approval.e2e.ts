@@ -1,15 +1,19 @@
 import { expect, test } from "@playwright/test";
 
 import {
+  createComment,
   createIssue,
   createIssueArtifact,
   createNamedVersion,
   createProject,
   editArtifact,
   getArtifact,
+  getArtifactText,
   getIssueEvents,
+  rejectSuggestion,
   requestApproval,
 } from "./api";
+import { documentEditor, openSpecAndAwaitHeadingIds } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -110,6 +114,145 @@ test("a spec's approval is a human review pinned to its version: requested by th
       version: pinned,
       reason: "Name the rollback path.",
       ask_id: null,
+    });
+  } finally {
+    await alice.close();
+  }
+});
+
+test("reading an approved spec and moving the caret through its numbered list leaves its approval current", async ({
+  browser,
+}) => {
+  await createProject({ key: "GATE", name: "Gate" });
+  // Numbered outcomes, as the default spec template asks for under Acceptance.
+  const issue = await createIssue({
+    project: "GATE",
+    spec: "## Acceptance\n\n1. The migration ships.\n2. The error rate stays flat.\n",
+    title: "Design gate",
+  });
+  const artifactID = issue.primary_artifact_id;
+  const requested = await requestApproval(artifactID, session);
+  const alice = await asUser(browser, "alice");
+  const bob = await asUser(browser, "bob");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/");
+    const card = page.getByTestId(`ask-${requested.ask.id}`);
+    await card.getByRole("radio", { name: /^Approve/ }).check();
+    await card.getByRole("button", { name: "Answer" }).click();
+    await expect
+      .poll(async () => (await getArtifact(artifactID, { login: "alice" })).approval?.state)
+      .toBe("approved");
+
+    // Bob reads the approved spec, and his editor gives its heading an id. Then he clicks into
+    // the list and moves the caret, typing nothing: the first such move has his editor label
+    // each numbered item, which changes the token again and none of the text.
+    const reader = await bob.newPage();
+    const opened = await openSpecAndAwaitHeadingIds(
+      reader,
+      issue.key,
+      artifactID,
+      "The error rate stays flat."
+    );
+    await documentEditor(reader).getByText("The migration ships.").click();
+    for (const key of ["ArrowDown", "ArrowUp", "End", "Home"]) {
+      await reader.keyboard.press(key);
+    }
+    await expect.poll(async () => (await getArtifactText(artifactID)).token).not.toBe(opened);
+    // Settlement runs two seconds after the room's last update, and a version it wrote for
+    // either update would leave the approval pinned to an older one.
+    await reader.waitForTimeout(3000);
+    const artifact = await getArtifact(artifactID, { login: "alice" });
+    expect(artifact.versions).toHaveLength(1);
+    expect(artifact.approval).toMatchObject({ latest_version: 1, state: "approved", version: 1 });
+  } finally {
+    await bob.close();
+    await alice.close();
+  }
+});
+
+test("an agent's comment on part of an identifier in an approved spec leaves its approval current", async ({
+  browser,
+}) => {
+  await createProject({ key: "GATE", name: "Gate" });
+  const issue = await createIssue({
+    project: "GATE",
+    spec: "## Plan\n\nRename the user_id column.\n",
+    title: "Design gate",
+  });
+  const artifactID = issue.primary_artifact_id;
+  const requested = await requestApproval(artifactID, session);
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/");
+    const card = page.getByTestId(`ask-${requested.ask.id}`);
+    await card.getByRole("radio", { name: /^Approve/ }).check();
+    await card.getByRole("button", { name: "Answer" }).click();
+    await expect
+      .poll(async () => (await getArtifact(artifactID, { login: "alice" })).approval?.state)
+      .toBe("approved");
+
+    // The comment's mark starts inside `user_id`, splitting the word's text where the
+    // underscore sits. That changes nothing a version stores.
+    await createComment(
+      issue.key,
+      { anchor: { artifact: "spec", quote: "id column" }, body: "Is this indexed?" },
+      session
+    );
+    // Settlement runs two seconds after the room's last update, and a version it wrote would
+    // leave the approval pinned to an older one.
+    await page.waitForTimeout(3000);
+    const artifact = await getArtifact(artifactID, { login: "alice" });
+    expect(artifact.versions).toHaveLength(1);
+    expect(artifact.approval).toMatchObject({ latest_version: 1, state: "approved", version: 1 });
+  } finally {
+    await alice.close();
+  }
+});
+
+test("rejecting a suggestion on part of an identifier in an approved spec leaves its approval current", async ({
+  browser,
+}) => {
+  await createProject({ key: "GATE", name: "Gate" });
+  const issue = await createIssue({
+    project: "GATE",
+    spec: "## Plan\n\nMigrate snake_case_name first.\n",
+    title: "Design gate",
+  });
+  const artifactID = issue.primary_artifact_id;
+  // The suggestion's mark starts inside `snake_case_name`, splitting the word's text beside an
+  // underscore; rejecting it removes the mark and joins the text again.
+  const suggestion = await createComment(
+    issue.key,
+    {
+      anchor: { artifact: "spec", quote: "case_name" },
+      body: "Name the column for what it holds.",
+      suggestion: { replace_with: "case_label" },
+    },
+    session
+  );
+  const requested = await requestApproval(artifactID, session);
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/");
+    const card = page.getByTestId(`ask-${requested.ask.id}`);
+    await card.getByRole("radio", { name: /^Approve/ }).check();
+    await card.getByRole("button", { name: "Answer" }).click();
+    await expect
+      .poll(async () => (await getArtifact(artifactID, { login: "alice" })).approval?.state)
+      .toBe("approved");
+    const approved = (await getArtifact(artifactID, { login: "alice" })).approval;
+
+    await rejectSuggestion(suggestion.id, { login: "bob" });
+    // Settlement runs two seconds after the room's last update, and a version it wrote would
+    // leave the approval pinned to an older one.
+    await page.waitForTimeout(3000);
+    expect((await getArtifact(artifactID, { login: "alice" })).approval).toMatchObject({
+      latest_version: approved?.version,
+      state: "approved",
+      version: approved?.version,
     });
   } finally {
     await alice.close();

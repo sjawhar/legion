@@ -22,6 +22,9 @@ type BlockOffset struct {
 	To   int
 }
 
+// Render returns doc as canonical Markdown. A mark the rendering does not write
+// (renderedMarkTypes) cannot change it: the document is rendered with its anchor marks stripped,
+// which merges the text runs an anchor split, and an escape is decided over a whole run.
 func Render(doc *Node) (string, error) {
 	r, err := render(doc)
 	if err != nil {
@@ -50,6 +53,10 @@ func render(doc *Node) (*renderer, error) {
 	if err := doc.Validate(); err != nil {
 		return nil, err
 	}
+	// Anchor marks render nothing, but one that starts or ends inside a word splits its text into
+	// runs, and an escape is decided within one run: rendering the document without them merges
+	// the runs, so a mark never changes the markdown (`snake_case`, never `snake\_case`).
+	doc = StripAnchorMarks(doc)
 	if len(doc.Children) == 1 && doc.Children[0].Type == "paragraph" && len(doc.Children[0].Children) == 0 {
 		return &renderer{}, nil
 	}
@@ -655,11 +662,18 @@ func nodeHasMark(node *Node, markType string) bool {
 	return false
 }
 
+// renderedMarkTypes are the marks canonical Markdown writes. Every other mark the schema allows
+// (markTypes) is an anchor, invisible to the rendering, and StripAnchorMarks removes exactly the
+// marks that are not here: what renders is one list, not two of opposite polarity that a new
+// invisible mark could fall between.
+var renderedMarkTypes = map[string]bool{
+	"link": true, "strong": true, "emphasis": true, "strike_through": true, "inlineCode": true,
+}
+
 func visibleMarks(marks []Mark) []Mark {
 	out := make([]Mark, 0, len(marks))
 	for _, mark := range marks {
-		switch mark.Type {
-		case "link", "strong", "emphasis", "strike_through", "inlineCode":
+		if renderedMarkTypes[mark.Type] {
 			out = append(out, mark)
 		}
 	}

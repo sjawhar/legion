@@ -116,7 +116,9 @@ type roomState struct {
 	// it indexes to nobody.
 	lastActor       *model.Actor
 	pendingVersions map[int]versionPending
-	contentTree     *pmdoc.Node
+	// contentMarkdown is the live document's rendered markdown when the room's update observer
+	// last saw it change, nil until the room loads.
+	contentMarkdown *string
 	updateClasses   []documentUpdateClass
 	pendingUpdates  int
 	settle          *time.Timer

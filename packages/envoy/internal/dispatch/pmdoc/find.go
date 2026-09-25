@@ -988,15 +988,16 @@ func markAttributeID(value any) string {
 	return id
 }
 
-// StripAnchorMarks returns a copy of doc with Proof and Dispatch anchors
-// removed, coalescing adjacent equal-mark text runs.
+// StripAnchorMarks returns a copy of doc with every mark the rendering does not write
+// (renderedMarkTypes) removed - Proof and Dispatch anchors - coalescing adjacent equal-mark text
+// runs.
 func StripAnchorMarks(node *Node) *Node {
 	if node == nil {
 		return nil
 	}
 	out := &Node{Type: node.Type, Attrs: cloneAttrs(node.Attrs), Text: node.Text}
 	for _, mark := range node.Marks {
-		if !strings.HasPrefix(mark.Type, "proof") && mark.Type != "dispatchAsk" {
+		if renderedMarkTypes[mark.Type] {
 			out.Marks = append(out.Marks, Mark{Type: mark.Type, Attrs: cloneAttrs(mark.Attrs)})
 		}
 	}

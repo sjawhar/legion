@@ -40,8 +40,8 @@ import (
 // slot is on the room state that recovery left: taken on a failed one, it would hold off
 // neither the reloaded room's settlement nor the next write.
 //
-// The write's actor, and the browsers connected when it changed the content, are credited to
-// the room once the transaction commits (Ledger.Commit), never while it may still roll back.
+// The write's actor, who made its content changes, is credited to the room once the transaction
+// commits (Ledger.Commit), never while it may still roll back.
 type liveWrite struct {
 	artifactID string
 	state      *roomState
@@ -279,18 +279,12 @@ func (s *Service) docView(ctx context.Context, artifactID string, read func(*crd
 }
 
 // creditLiveWrite records whom a joined content change is credited to once its transaction
-// commits: the actor, and every browser connected to the room, as a change that reaches the
-// room directly is credited (recordConnectedActors).
+// commits: its actor alone, as a service mutation that reaches the room directly is credited
+// (creditContentChange). A browser connected to the room made none of it.
 func (s *Service) creditLiveWrite(write *liveWrite, actor model.Actor) {
 	if write.credits == nil {
 		write.credits = make(map[string]model.Actor)
 	}
-	state := s.room(write.artifactID)
-	state.mu.Lock()
-	for _, connected := range state.connected {
-		write.credits[actorKey(connected)] = connected
-	}
-	state.mu.Unlock()
 	write.credits[actorKey(actor)] = actor
 	write.actor = new(actor)
 }
