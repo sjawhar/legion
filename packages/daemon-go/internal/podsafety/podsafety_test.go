@@ -147,6 +147,8 @@ func realOmp(t *testing.T) string {
 // On the pinned Oh My Pi, a repository whose .omp/config.yml turns remote compaction on reads it
 // off under Apply's environment, and an operator overlay named after the baseline reads the
 // operator's own endpoint: the baseline outranks the repository, and the operator outranks it.
+// Without Apply the repository's endpoint is read, so a binary that stopped reading the
+// repository's settings cannot pass the first row by accident.
 func TestTheBaselineHoldsARepositoryOffAndTheOperatorOverridesIt(t *testing.T) {
 	omp := realOmp(t)
 	dir := t.TempDir()
@@ -162,16 +164,21 @@ func TestTheBaselineHoldsARepositoryOffAndTheOperatorOverridesIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, tc := range map[string]struct {
-		pod  []string
-		want string
+		pod     []string
+		noApply bool
+		want    string
 	}{
-		"the repository's setting held off": {nil, ""},
-		"the operator's overlay wins":       {[]string{"PI_CONFIG_FILES=" + operator}, "https://operator.example/compact"},
+		"without the baseline, the repository's setting": {noApply: true, want: "https://repository.example/compact"},
+		"the repository's setting held off":              {want: ""},
+		"the operator's overlay wins":                    {pod: []string{"PI_CONFIG_FILES=" + operator}, want: "https://operator.example/compact"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			env, err := Apply(append([]string{"HOME=" + filepath.Join(dir, "home"), "PATH=/usr/bin:/bin"}, tc.pod...), t.TempDir())
-			if err != nil {
-				t.Fatal(err)
+			env := append([]string{"HOME=" + filepath.Join(dir, "home"), "PATH=/usr/bin:/bin"}, tc.pod...)
+			if !tc.noApply {
+				var err error
+				if env, err = Apply(env, t.TempDir()); err != nil {
+					t.Fatal(err)
+				}
 			}
 			cmd := exec.Command(omp, "config", "get", "compaction.remoteEndpoint", "--json")
 			cmd.Dir, cmd.Env = repo, env

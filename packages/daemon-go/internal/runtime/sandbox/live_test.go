@@ -186,7 +186,7 @@ func readOperatorPod(env liveEnv) (Pod, error) {
 	if renamed != 1 {
 		return Pod{}, fmt.Errorf("%s names ConfigMap %s in %d volumes, want one", env.operatorPodFile, fixtureConfigMap, renamed)
 	}
-	return Pod{Env: pod.Env, Volumes: pod.Volumes, VolumeMounts: pod.VolumeMounts, ServiceAccount: pod.ServiceAccount}, nil
+	return Pod(pod), nil
 }
 
 // claimState is where a claim stands, as the daemon's machine would record it.

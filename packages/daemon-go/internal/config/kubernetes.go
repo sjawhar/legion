@@ -62,8 +62,8 @@ type Quantities struct{ CPU, Memory, EphemeralStorage string }
 // probe's included, in the API's own types: variables and volume mounts for the agent's container,
 // the volumes they mount (each a Secret, a ConfigMap, or a projection of ServiceAccount tokens,
 // Secrets, and ConfigMaps), and the ServiceAccount the pods run as. It passes through as written:
-// the loader refuses a shape no pod could carry, the daemon's boot a name or path of Legion's own
-// or the worker image's (daemon.CheckOperatorPod), and the API server the rest when it creates the
+// the loader refuses a shape no pod could carry, the Sandbox runtime a name or path of Legion's own
+// or the worker image's (sandbox.CheckPod), and the API server the rest when it creates the
 // image probe's pod, which carries it, at boot.
 type PodConfig struct {
 	Env            map[string]string
@@ -200,9 +200,9 @@ func readPod(value *yaml.Node) (PodConfig, error) {
 }
 
 // readPodEnv is `pod.env`: a mapping of variable to value, refusing a variable shaped like a
-// credential's (runtime.IsSecretLikeName, its `_FILE` pointers allowed, as a spec's Env is judged
-// in runtime.ValidateSpawnSpec): a credential travels in a Secret, never as a plain value in the
-// pod's spec.
+// credential's value (runtime.HoldsSecretValue, as a spec's Env is judged in
+// runtime.ValidateSpawnSpec): a credential travels in a Secret, never as a plain value in the pod's
+// spec.
 func readPodEnv(value *yaml.Node) (map[string]string, error) {
 	const key = podKey + ".env"
 	if value == nil {
@@ -225,7 +225,7 @@ func readPodEnv(value *yaml.Node) (map[string]string, error) {
 		switch _, twice := env[name]; {
 		case twice:
 			return nil, fmt.Errorf("%s names %s twice", key, name)
-		case runtime.IsSecretLikeName(name) && !strings.HasSuffix(name, "_FILE"):
+		case runtime.HoldsSecretValue(name):
 			return nil, fmt.Errorf("%s sets %s, a credential-shaped name: a credential comes from a Secret, so mount one with %s.volumes or name its key in provider_keys",
 				key, name, podKey)
 		}
@@ -394,6 +394,10 @@ func readProjected(value *yaml.Node, key string) (*corev1.ProjectedVolumeSource,
 	return projected, nil
 }
 
+// minTokenExpiry is the shortest lifetime, in seconds, the API server issues a projected
+// ServiceAccount token for.
+const minTokenExpiry = 600
+
 // readTokenProjection is a projected ServiceAccount token: the file it is written to, and the
 // audience and lifetime it is issued for when set (the API server's own audience and default
 // lifetime when not).
@@ -418,6 +422,8 @@ func readTokenProjection(value *yaml.Node, key string) (*corev1.ServiceAccountTo
 		return nil, err
 	case expiry != nil && *expiry <= 0:
 		return nil, fmt.Errorf("%s.expiration_seconds must be a positive integer", key)
+	case expiry != nil && *expiry < minTokenExpiry:
+		return nil, fmt.Errorf("%s.expiration_seconds must be at least %d: the API server issues no projected token for less than 10 minutes", key, minTokenExpiry)
 	case expiry != nil:
 		seconds := int64(*expiry)
 		token.ExpirationSeconds = &seconds
@@ -480,40 +486,17 @@ func readPodMounts(value *yaml.Node, volumes []corev1.Volume) ([]corev1.VolumeMo
 	return mounts, nil
 }
 
-// resolveKubernetes settles `runtime: kubernetes`: the keys outside the block every pod needs, the
-// provider keys every pod mounts from the providers Secret, and the block, its kubeconfig resolved
-// against the file's directory.
+// resolveKubernetes settles `runtime: kubernetes`: the keys outside the block every pod needs, and
+// the block, its kubeconfig resolved against the file's directory.
 func resolveKubernetes(file fileConfig, configDir string, cfg *Config) error {
 	if err := checkKubernetesKeys(file); err != nil {
 		return err
 	}
 	block := *file.Kubernetes
-	if err := checkPodProviderKeys(file.ProviderKeys, block.Pod); err != nil {
-		return err
-	}
 	if block.Kubeconfig != "" {
 		block.Kubeconfig = underConfig(block.Kubeconfig, configDir)
 	}
 	cfg.Runtime = Runtime{Name: "kubernetes", Kubernetes: &block}
-	return nil
-}
-
-// checkPodProviderKeys refuses a provider key the worker's shim cannot export into Oh My Pi's
-// environment beside the operator's own variables (shim.ReadProviderEnv): one naming a variable
-// `pod.env` sets, which the shim refuses to override, and one whose `<NAME>_FILE` pointer it sets,
-// which the shim skips as a secret the process reads by file. The daemon's boot refuses one that
-// collides with a variable of Legion's (daemon.CheckOperatorPod).
-func checkPodProviderKeys(keys []ProviderKey, pod PodConfig) error {
-	for _, key := range keys {
-		_, podSets := pod.Env[key.Env]
-		_, podPoints := pod.Env[key.Env+"_FILE"]
-		switch {
-		case podSets:
-			return fmt.Errorf("provider_keys names %s, which %s.env also sets: the shim refuses to export a key its own environment names", key.Env, podKey)
-		case podPoints:
-			return fmt.Errorf("provider_keys names %s, whose pointer %s_FILE %s.env sets: the shim would skip the key", key.Env, key.Env, podKey)
-		}
-	}
 	return nil
 }
 

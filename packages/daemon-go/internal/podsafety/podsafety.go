@@ -42,6 +42,16 @@ var baseline = []struct{ name, value string }{
 	{"OMP_SESSION_STORAGE", "file"},
 }
 
+// Variables are the variables Apply sets: the settings overlays it composes, and each baseline
+// variable.
+func Variables() []string {
+	names := []string{settingsOverlays}
+	for _, v := range baseline {
+		names = append(names, v.name)
+	}
+	return names
+}
+
 // Apply is environ as a pod's Oh My Pi starts with it: the overlay written read-only to
 // <stateDir>/podsafety-overlay.yml and named first in PI_CONFIG_FILES, ahead of the overlays
 // environ already names, and each baseline variable set where environ leaves it unset or empty.

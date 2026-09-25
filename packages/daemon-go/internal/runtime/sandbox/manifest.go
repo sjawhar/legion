@@ -57,7 +57,8 @@ const podUser = 1000
 
 // runtimeOwned are the main container's variables the runtime sets itself: exactly the names
 // mainEnvironment sets (TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime), which the
-// shared validator refuses in a spec's Env and as a secret's pointer.
+// shared validator refuses in a spec's Env and as a secret's pointer, and CheckPod in the
+// operator's pod. The image probe's container sets none of its own.
 var runtimeOwned = map[string]bool{
 	"LEGION_DAEMON_API": true, "LEGION_TREE": true, "LEGION_ISSUE": true, "LEGION_ROLE": true,
 	"LEGION_GENERATION": true, "LEGION_PROJECT": true, "LEGION_DAEMON_URL": true,
@@ -69,22 +70,17 @@ var runtimeOwned = map[string]bool{
 	"POD_UID": true, bootTokenKey + "_FILE": true, dispatchTokenKey + "_FILE": true,
 }
 
-// LegionEnvNames are the variables Legion sets in the containers the operator's pod variables join
-// — the worker's, runtimeOwned; the image probe's sets none of its own — which the operator may not
-// set.
-func LegionEnvNames() []string { return slices.Sorted(maps.Keys(runtimeOwned)) }
-
-// LegionVolumeNames are the volumes Legion puts in a pod, a worker's or the probe's, whose names
+// legionVolumeNames are the volumes Legion puts in a pod, a worker's or the probe's, whose names
 // the operator's volumes may not take.
-func LegionVolumeNames() []string {
+func legionVolumeNames() []string {
 	names := []string{treeVolume, bootVolume, provisionVolume, feedVolume, stateVolume, tempVolume, configVolume, providersVolume}
 	slices.Sort(names)
 	return names
 }
 
-// LegionMountPaths are where Legion mounts a volume in the containers the operator's mounts join,
+// legionMountPaths are where Legion mounts a volume in the containers the operator's mounts join,
 // the worker's and the image probe's: an operator's mount may be neither at, under, nor above one.
-func LegionMountPaths() []string {
+func legionMountPaths() []string {
 	paths := []string{TreeRoot, ompSessionsDir, BootDir, StateDir, xdgConfigHome, ProvidersDir}
 	slices.Sort(paths)
 	return paths

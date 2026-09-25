@@ -746,8 +746,8 @@ func TestProviderKeysReachEveryPodAsTheProvidersSecretsFiles(t *testing.T) {
 	}
 }
 
-// LegionVolumeNames, LegionMountPaths, and LegionEnvNames — what the configuration refuses in the
-// operator's pod — are exactly what Legion's own pods carry: every volume of every pod a launch or
+// legionVolumeNames, legionMountPaths, and runtimeOwned — what CheckPod refuses in the operator's
+// pod — are exactly what Legion's own pods carry: every volume of every pod a launch or
 // the image probe runs, and every mount and variable of the containers the operator's pieces join
 // (the agent's and the probe's), with every optional piece the runtime adds configured and nothing
 // of a spec's or the operator's. A piece added to a pod and not to its list is one an operator
@@ -785,9 +785,9 @@ func TestLegionsOwnNamesAreWhatItsPodsCarry(t *testing.T) {
 		got     []string
 		carried map[string]bool
 	}{
-		{"LegionVolumeNames", LegionVolumeNames(), volumes},
-		{"LegionMountPaths", LegionMountPaths(), mounts},
-		{"LegionEnvNames", LegionEnvNames(), env},
+		{"legionVolumeNames", legionVolumeNames(), volumes},
+		{"legionMountPaths", legionMountPaths(), mounts},
+		{"runtimeOwned", slices.Collect(maps.Keys(runtimeOwned)), env},
 	} {
 		listed := map[string]bool{}
 		for _, entry := range list.got {
@@ -799,7 +799,7 @@ func TestLegionsOwnNamesAreWhatItsPodsCarry(t *testing.T) {
 	}
 }
 
-// ImageOwnedPaths covers every path in the image a pod runs or loads from, which an operator's
+// imageOwnedPaths covers every path in the image a pod runs or loads from, which an operator's
 // mount there would hide: Oh My Pi, the Legion plugin the agent loads, the Go legion every
 // container runs, the profile's installed plugins, and the databases Oh My Pi keeps in the
 // profile's agent directory.
@@ -808,10 +808,10 @@ func TestImageOwnedPathsCoverWhatAPodRunsFromTheImage(t *testing.T) {
 		defaultAgent, legionPlugin, testOptions().Tools.Legion,
 		ompProfileDir + "/plugins/node_modules", ompAgentDir + "/agent.db", ompAgentDir + "/models.db",
 	} {
-		if !slices.ContainsFunc(ImageOwnedPaths(), func(owned string) bool {
+		if !slices.ContainsFunc(imageOwnedPaths(), func(owned string) bool {
 			return used == owned || strings.HasPrefix(used, owned+"/")
 		}) {
-			t.Errorf("%s is not under ImageOwnedPaths %v", used, ImageOwnedPaths())
+			t.Errorf("%s is not under imageOwnedPaths %v", used, imageOwnedPaths())
 		}
 	}
 }

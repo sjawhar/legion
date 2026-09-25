@@ -610,6 +610,11 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			want: "runtime.kubernetes.pod.volumes[0].projected.sources[0].service_account_token.expiration_seconds must be a positive integer",
 		},
 		{
+			name: "a projected token shorter than the API server issues",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: token, projected: {sources: [{service_account_token: {path: token, expiration_seconds: 599}}]}}]\n",
+			want: "runtime.kubernetes.pod.volumes[0].projected.sources[0].service_account_token.expiration_seconds must be at least 600: the API server issues no projected token for less than 10 minutes",
+		},
+		{
 			name: "a mount naming no volume",
 			body: kubernetesFile + "    pod:\n      volume_mounts: [{volume: creds, mount_path: /etc/legion-operator}]\n",
 			want: "runtime.kubernetes.pod.volume_mounts[0].volume creds names no volume of runtime.kubernetes.pod.volumes",
@@ -639,16 +644,6 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			name: "a mount's read_only is no boolean",
 			body: kubernetesFile + "    pod:\n      volumes: [{name: creds, secret: {name: a}}]\n      volume_mounts: [{volume: creds, mount_path: /etc/legion-operator, read_only: sometimes}]\n",
 			want: "runtime.kubernetes.pod.volume_mounts[0].read_only must be true or false",
-		},
-		{
-			name: "a provider key the pod's env also sets",
-			body: kubernetesFile + "    pod:\n      env: {OPENAI_BASE_URL: https://gateway.internal.example}\nprovider_keys: {OPENAI_BASE_URL: openai_base_url}\n",
-			want: "provider_keys names OPENAI_BASE_URL, which runtime.kubernetes.pod.env also sets: the shim refuses to export a key its own environment names",
-		},
-		{
-			name: "a provider key whose pointer the pod's env sets",
-			body: kubernetesFile + "    pod:\n      env: {GEMINI_API_KEY_FILE: /var/run/operator/gemini}\nprovider_keys: {GEMINI_API_KEY: gemini}\n",
-			want: "provider_keys names GEMINI_API_KEY, whose pointer GEMINI_API_KEY_FILE runtime.kubernetes.pod.env sets: the shim would skip the key",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

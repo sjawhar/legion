@@ -76,8 +76,8 @@ type ImageProbe struct {
 	// for a kind cluster and for production, and a pass on one proves nothing on the other.
 	APIServer string
 	// Resources are the probe container's requests and limits (the TypeScript probe used the
-	// `small` profile): it runs Oh My Pi four times, the last a model turn through the gateway, and
-	// exits. None when zero.
+	// `small` profile): it runs Oh My Pi three times (pi.agents, the plugin's load, the
+	// session-storage setting) and exits. None when zero.
 	Resources corev1.ResourceRequirements
 }
 
@@ -141,8 +141,8 @@ func probeName(project, hex string) string {
 // environment and volumes, the ServiceAccount, the scheduling, the resources and the security
 // context — with the tolerations sorted, since Kubernetes reads them as a set
 // (schedulingFingerprint, worker-image-probe.ts:77-99). A pull from another registry at the same
-// digest, another probe command, or another way of reaching the model gateway proves nothing a
-// pass under the old one did, so any change to the pod probes again.
+// digest, another probe command, or another operator pod (the variables, volumes, and account it
+// adds) proves nothing a pass under the old one did, so any change to the pod probes again.
 func (r *Runtime) probePodFingerprint(apiServer string, pod corev1.PodSpec) string {
 	pod.Tolerations = slices.Clone(pod.Tolerations)
 	slices.SortFunc(pod.Tolerations, func(a, b corev1.Toleration) int {
@@ -425,8 +425,8 @@ func (r *Runtime) createProbe(ctx context.Context, name, digest string, manifest
 
 // unfinished is the detail of an attempt whose pod did not finish within the budget: the pod's
 // phase, its container's waiting reason, its events, and what its probe container logged so far,
-// which names the model gateway a turn still waits on — or, with no pod, the Sandbox's Ready
-// condition, where the controller reports why it made none.
+// which names the probe it was in — or, with no pod, the Sandbox's Ready condition, where the
+// controller reports why it made none.
 func (r *Runtime) unfinished(ctx context.Context, name string, uid types.UID, budget time.Duration) string {
 	pod := r.storedPod(name)
 	if !ownedBy(pod, uid) {

@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
-	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 )
@@ -89,7 +88,7 @@ func ValidateSpawnSpec(spec SpawnSpec, runtimeOwned map[string]bool) error {
 			return refuse("Env name %q is not an environment variable name", name)
 		case runtimeOwned[name]:
 			return refuse("Env sets %s, which the runtime sets itself", name)
-		case IsSecretLikeName(name) && !strings.HasSuffix(name, "_FILE"):
+		case HoldsSecretValue(name):
 			return refuse("Env carries %s, a credential-shaped name; a secret travels in Secrets, as a file", name)
 		}
 	}

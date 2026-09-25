@@ -33,9 +33,8 @@ type Tools struct{ GH, Git, JJ, Legion string }
 // (runtime.kubernetes.pod): variables and volume mounts for the agent's container (the worker's,
 // or the probe's), never an init container, the volumes those mounts name, beside Legion's own, and
 // the ServiceAccount the pods run as, the namespace's default when unset. A variable's value reaches the
-// process as written: the kubelet's `$(NAME)` expansion does not apply (kubeletLiteral). The
-// daemon's configuration refuses a name or path of Legion's own (LegionEnvNames,
-// LegionVolumeNames, LegionMountPaths, ImageOwnedPaths).
+// process as written: the kubelet's `$(NAME)` expansion does not apply (kubeletLiteral). CheckPod
+// refuses a name or path of Legion's own or the worker image's.
 type Pod struct {
 	Env            map[string]string
 	Volumes        []corev1.Volume
@@ -84,6 +83,10 @@ type Options struct {
 	// ProvidersDir and the worker's shim exports them into Oh My Pi's environment alone; with none,
 	// no pod mounts the Secret.
 	ProviderKeys map[string]string
+	// LaunchSecrets are the secrets every launch's spec carries (runtime.SpawnSpec.Secrets), by
+	// name, each reaching the agent as a `<NAME>_FILE` pointer, which CheckPod refuses the operator's
+	// pod and a provider key.
+	LaunchSecrets []string
 	// Agent is the command the shim wraps, before the Oh My Pi arguments the runtime appends
 	// (`--no-extensions --extension <plugin>`, `--resume`, `--mode rpc`,
 	// `--append-system-prompt`); Oh My Pi itself when nil.

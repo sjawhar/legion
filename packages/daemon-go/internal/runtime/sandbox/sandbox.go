@@ -164,6 +164,9 @@ func configure(opts Options) (*Runtime, error) {
 			return refuse("the image's %s path %q is not absolute", tool.name, tool.path)
 		}
 	}
+	if err := CheckPod(opts.Pod, opts.ProviderKeys, opts.Tools, opts.LaunchSecrets); err != nil {
+		return refuse("%v", err)
+	}
 	r := &Runtime{
 		namespace: opts.Namespace, project: opts.Project, image: opts.Image, storageClass: opts.StorageClass,
 		treeVolume: opts.TreeVolume, scheduling: opts.Scheduling, resources: opts.Resources,

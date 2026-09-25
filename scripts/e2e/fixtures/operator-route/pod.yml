@@ -4,8 +4,10 @@
 # "Operator configuration"). The shape is the one agent-c's admission policies admit for a Legion
 # pod (legion-sandbox-pods, legion-middleman-audience): ServiceAccount legion-worker, exactly one
 # projected serviceAccountToken source, alone in its volume, for audience middleman-legion, lasting
-# at most 3600 s. The ConfigMap legion-operator-route holds this directory's models.yml and
-# overlay.yml; a harness creates it in the namespace before any pod runs and deletes it after.
+# at most 3600 s. The ConfigMap named here, legion-operator-route, holds this directory's models.yml
+# and overlay.yml. A harness run creates its own copy, legion-operator-route-<project>, before any
+# pod runs, points the pods at it in place of this name, and deletes it after, so runs sharing the
+# namespace never share the route.
 env:
   # The operator's settings overlay (overlay.yml), named after Legion's pod baseline, so it
   # outranks the baseline and every repository's .omp/config.yml.

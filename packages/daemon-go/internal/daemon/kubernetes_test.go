@@ -240,7 +240,7 @@ func TestAKubernetesDaemonRefusesAnOperatorPodCollidingWithLegionsBeforeItsBoot(
 			change: func(cfg *config.Config) {
 				cfg.ProviderKeys = []config.ProviderKey{{Env: "ENVOY_TOKEN", Secret: "envoy"}}
 			},
-			want: "provider_keys names ENVOY_TOKEN, which every launch sets itself (the pointer to the launch secret ENVOY_TOKEN): the shim would not export the key",
+			want: "provider_keys names ENVOY_TOKEN, whose pointer ENVOY_TOKEN_FILE every launch sets (the pointer to the launch secret ENVOY_TOKEN): the shim skips a key whose pointer the pod sets",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -252,83 +252,6 @@ func TestAKubernetesDaemonRefusesAnOperatorPodCollidingWithLegionsBeforeItsBoot(
 			tc.change(&cfg)
 			if _, err := prepare(cfg, quietLogger(), overrides{}); err == nil || err.Error() != tc.want {
 				t.Fatalf("prepare = %v, want %q", err, tc.want)
-			}
-		})
-	}
-}
-
-// CheckOperatorPod refuses every operator piece that collides with what Legion puts in a pod,
-// naming both: a variable, volume, or mount path of the runtime's own, a path the worker image
-// owns, a variable every launch's spec sets, and a provider key the shim could not export — and
-// passes the Go live harnesses' operator pod (scripts/e2e/fixtures/operator-route/pod.yml).
-func TestCheckOperatorPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
-	mountAt := func(path string) config.PodConfig {
-		return config.PodConfig{
-			Volumes:      []corev1.Volume{{Name: "creds", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "legion-creds"}}}},
-			VolumeMounts: []corev1.VolumeMount{{Name: "creds", MountPath: path, ReadOnly: true}},
-		}
-	}
-	overlaps := func(path, owned, owner string) string {
-		if owner == "the image's" {
-			return "runtime.kubernetes.pod.volume_mounts[0].mount_path " + path + " overlaps " + owned + ", which the worker image owns: a mount may be neither at, under, nor above one of the image's"
-		}
-		return "runtime.kubernetes.pod.volume_mounts[0].mount_path " + path + " overlaps " + owned + ", which Legion mounts in every pod: a mount may be neither at, under, nor above one of Legion's"
-	}
-	secrets := map[string]secretPointer{"ENVOY_TOKEN": {"envoy_token_file", "/var/run/legion/ENVOY_TOKEN"}}
-	fixture, err := config.ReadPodFile(filepath.Join("..", "..", "..", "..", "scripts", "e2e", "fixtures", "operator-route", "pod.yml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, tc := range []struct {
-		name string
-		pod  config.PodConfig
-		keys []config.ProviderKey
-		want string
-	}{
-		{name: "a variable Legion sets", pod: config.PodConfig{Env: map[string]string{"LEGION_TREE": "LEGSMOKE-1"}},
-			want: "runtime.kubernetes.pod.env sets LEGION_TREE, which Legion sets in every pod itself"},
-		{name: "the pod's PATH", pod: config.PodConfig{Env: map[string]string{"PATH": "/usr/bin"}},
-			want: "runtime.kubernetes.pod.env sets PATH, which Legion sets in every pod itself"},
-		{name: "a variable of the App's git identity", pod: config.PodConfig{Env: map[string]string{"JJ_USER": "operator"}},
-			want: "runtime.kubernetes.pod.env sets JJ_USER, which every launch sets itself (the git identity the role's GitHub App commits as)"},
-		{name: "a variable pointing at a launch secret", pod: config.PodConfig{Env: map[string]string{"ENVOY_TOKEN_FILE": "/etc/envoy"}},
-			want: "runtime.kubernetes.pod.env sets ENVOY_TOKEN_FILE, which every launch sets itself (the pointer to the launch secret ENVOY_TOKEN)"},
-		{name: "a volume Legion names", pod: config.PodConfig{Volumes: []corev1.Volume{
-			{Name: "creds", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "legion-creds"}}}, {Name: "boot", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "a"}}},
-		}}, want: "runtime.kubernetes.pod.volumes[1].name boot is a volume Legion puts in every pod"},
-		{name: "a mount at a path Legion mounts", pod: mountAt("/var/run/legion/boot"),
-			want: overlaps("/var/run/legion/boot", "/var/run/legion/boot", "Legion's")},
-		{name: "a mount under a path Legion mounts", pod: mountAt("/legion/operator"),
-			want: overlaps("/legion/operator", "/legion", "Legion's")},
-		{name: "a mount above a path Legion mounts", pod: mountAt("/var/run/legion"),
-			want: overlaps("/var/run/legion", "/var/run/legion/boot", "Legion's")},
-		{name: "a mount above the sessions Legion mounts", pod: mountAt("/home/legion/.omp/profiles/legion/agent"),
-			want: overlaps("/home/legion/.omp/profiles/legion/agent", "/home/legion/.omp/profiles/legion/agent/sessions", "Legion's")},
-		{name: "a mount at the root", pod: mountAt("/"),
-			want: overlaps("/", "/home/legion/.config", "Legion's")},
-		{name: "a mount under a path the image owns", pod: mountAt("/opt/omp/bin"),
-			want: overlaps("/opt/omp/bin", "/opt/omp", "the image's")},
-		{name: "a mount over a database the image owns", pod: mountAt("/home/legion/.omp/profiles/legion/agent/agent.db"),
-			want: overlaps("/home/legion/.omp/profiles/legion/agent/agent.db", "/home/legion/.omp/profiles/legion/agent/agent.db", "the image's")},
-		{name: "a provider key Legion sets", keys: []config.ProviderKey{{Env: "PATH", Secret: "search_path"}},
-			want: "provider_keys names PATH, which Legion sets in every pod itself: the shim refuses to export a key its own environment names"},
-		{name: "a provider key whose pointer Legion sets", keys: []config.ProviderKey{{Env: "DISPATCH_TOKEN", Secret: "dispatch"}},
-			want: "provider_keys names DISPATCH_TOKEN, whose pointer DISPATCH_TOKEN_FILE Legion sets in every pod: the shim would skip the key"},
-		{name: "a provider key for the settings overlays", keys: []config.ProviderKey{{Env: "PI_CONFIG_FILES", Secret: "overlays"}},
-			want: "provider_keys names PI_CONFIG_FILES, the settings overlays Legion composes in every pod: the shim adds a provider key after the pod's own variables, so it would replace them"},
-		{name: "a provider key of the App's git identity", keys: []config.ProviderKey{{Env: "GIT_AUTHOR_NAME", Secret: "author"}},
-			want: "provider_keys names GIT_AUTHOR_NAME, which every launch sets itself (the git identity the role's GitHub App commits as): the shim would not export the key"},
-		{name: "a provider key a launch secret's pointer names", keys: []config.ProviderKey{{Env: "ENVOY_TOKEN", Secret: "envoy"}},
-			want: "provider_keys names ENVOY_TOKEN, which every launch sets itself (the pointer to the launch secret ENVOY_TOKEN): the shim would not export the key"},
-		{name: "the live harnesses' operator pod", pod: fixture, keys: []config.ProviderKey{{Env: "ANTHROPIC_API_KEY", Secret: "anthropic"}}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			err := checkOperatorPod(tc.pod, tc.keys, secrets)
-			switch {
-			case tc.want == "" && err != nil:
-				t.Fatalf("checkOperatorPod = %v, want no refusal", err)
-			case tc.want != "" && (err == nil || err.Error() != tc.want):
-				t.Fatalf("checkOperatorPod = %v, want %q", err, tc.want)
 			}
 		})
 	}
