@@ -12,6 +12,15 @@ import type { Component } from "@oh-my-pi/pi-tui";
 
 export interface SessionContext {
   readonly cwd: string;
+  /**
+   * Whether the host gave this run a UI context. Measured on the pinned build: false for
+   * `omp -p` and any other headless launch, true for a terminal and for an RPC host (every
+   * Legion pane). A run with no UI is disposed when its one run ends, so nothing can act on a
+   * message an extension sends at the stop. ACP supplies one too; there, a client that defers
+   * agent-initiated turns has the host queue such a message as hidden next-turn context rather
+   * than run a turn for it.
+   */
+  readonly hasUI: boolean;
   readonly taskDepth?: number;
   readonly sessionManager: {
     readonly getSessionId: () => string;

@@ -590,3 +590,9 @@ When blocked on lifecycle, scope, or cross-phase matters, `envoy_publish` the ow
 architect a concise message: issue, phase, verified observation, what you tried, and the
 decision required. Reach for `dispatch_ask` yourself only for a standalone human question
 outside that coordination.
+
+Never yield while blocked on a decision someone else owns. Before you stop, make the block
+visible where its owner will see it: a lifecycle, scope, or cross-phase decision goes to the
+owning architect as above, and a standalone human question goes in `dispatch_ask`. Otherwise
+proceed: proceeding is the default, and a phase that stops silently holds its issue until
+someone notices.

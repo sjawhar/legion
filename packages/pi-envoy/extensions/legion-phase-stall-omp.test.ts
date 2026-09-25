@@ -121,6 +121,23 @@ function userText(request: Request): string {
   );
 }
 
+/** How one pane differs from the implementer pane the phase-stall cases run. */
+interface PaneOptions {
+  /**
+   * False drops every `LEGION_*` variable, so the pane is an ordinary session: the Legion
+   * extension stays inert and the Envoy extension's run-end ask nudge is not excluded.
+   */
+  readonly legion?: boolean;
+  /** Configures Dispatch against the stand-in, whose open-ask snapshot answers with this count. */
+  readonly openAsks?: number;
+  /**
+   * Settle when the gateway has answered nothing for this long, instead of at the host's
+   * terminal `agent_end`. A `triggerTurn` steer sent from `agent_end` starts its continuation
+   * after that frame, so the terminal frame is not the end of the run's provider traffic.
+   */
+  readonly quietMs?: number;
+}
+
 /**
  * Runs one implementer pane on the real Oh My Pi until its run settles: the Legion and Envoy
  * extensions from this checkout, booted against a stand-in for the TypeScript daemon's worker
@@ -129,7 +146,12 @@ function userText(request: Request): string {
  * turns from `replies`, and a stand-in `legion` on PATH that records what it was run with. The
  * daemon's assignment arrives as the RPC `prompt`, as both daemons deliver it.
  */
-async function runPane(binary: string, replies: readonly (readonly Block[])[]): Promise<Pane> {
+async function runPane(
+  binary: string,
+  replies: readonly (readonly Block[])[],
+  options: PaneOptions = {}
+): Promise<Pane> {
+  const legionPane = options.legion ?? true;
   const root = await mkdtemp(path.join(os.tmpdir(), "legion-phase-stall-"));
   cleanup.push(() => rm(root, { recursive: true, force: true }));
   const home = path.join(root, "home");
@@ -146,6 +168,7 @@ async function runPane(binary: string, replies: readonly (readonly Block[])[]): 
   const requests: Request[] = [];
   let answered = 0;
   let grants = 0;
+  let lastAnsweredAt = 0;
   const server = Bun.serve({
     port: 0,
     hostname: "127.0.0.1",
@@ -157,6 +180,7 @@ async function runPane(binary: string, replies: readonly (readonly Block[])[]): 
       if (url.pathname === "/anthropic/v1/messages") {
         const reply = replies[answered];
         answered += 1;
+        lastAnsweredAt = Date.now();
         if (reply === undefined) {
           return Response.json(
             {
@@ -171,6 +195,17 @@ async function runPane(binary: string, replies: readonly (readonly Block[])[]): 
         });
       }
       if (url.pathname.startsWith("/anthropic/")) return Response.json({ data: [] });
+      if (url.pathname === "/api/v1/asks/open") {
+        return Response.json({
+          session_id: "",
+          as_of: new Date().toISOString(),
+          opened_since: false,
+          count: options.openAsks ?? 0,
+          waiting_on_human: 0,
+          waiting_on_agent: 0,
+          asks: [],
+        });
+      }
       if (url.pathname === "/legion/v1/worker/started") {
         return Response.json({
           roleToken: "legion-stall-stall-2-implementer",
@@ -277,15 +312,26 @@ async function runPane(binary: string, replies: readonly (readonly Block[])[]): 
         HOME: home,
         PATH: `${bin}:/usr/local/bin:/usr/bin:/bin`,
         ENVOY_URL: base,
-        LEGION_DAEMON_URL: base,
-        LEGION_ROLE: "implementer",
-        LEGION_TREE: "STALL-1",
-        LEGION_ISSUE: "STALL-2",
-        LEGION_GENERATION: "1",
-        LEGION_BOOT_TOKEN: "stall-boot",
-        LEGION_STATE_DIR: state,
-        LEGION_WORKSPACE: workspace,
-        LEGION_GRANT_FILE: path.join(state, "secrets", "legion-stall-stall-2-implementer-grant"),
+        ...(options.openAsks === undefined
+          ? {}
+          : { DISPATCH_URL: base, DISPATCH_TOKEN: "stall-dispatch-token" }),
+        ...(legionPane
+          ? {
+              LEGION_DAEMON_URL: base,
+              LEGION_ROLE: "implementer",
+              LEGION_TREE: "STALL-1",
+              LEGION_ISSUE: "STALL-2",
+              LEGION_GENERATION: "1",
+              LEGION_BOOT_TOKEN: "stall-boot",
+              LEGION_STATE_DIR: state,
+              LEGION_WORKSPACE: workspace,
+              LEGION_GRANT_FILE: path.join(
+                state,
+                "secrets",
+                "legion-stall-stall-2-implementer-grant"
+              ),
+            }
+          : {}),
       },
       stdin: "pipe",
       stdout: "pipe",
@@ -298,8 +344,10 @@ async function runPane(binary: string, replies: readonly (readonly Block[])[]): 
   });
 
   // The run has settled when the RPC stream reports its terminal agent_end: a continuation the
-  // host scheduled (the follow-up) starts its turn before that, under the same run. Both streams
-  // are read to the end, so a full pipe never blocks omp.
+  // host scheduled (the follow-up) starts its turn before that, under the same run. A steer the
+  // extension sends from `agent_end` instead starts its continuation after that frame, so
+  // `quietMs` waits for the gateway to fall silent rather than for the frame. Both streams are
+  // read to the end, so a full pipe never blocks omp.
   const stderr = new Response(child.stderr).text();
   const settled = Promise.withResolvers<void>();
   void (async () => {
@@ -326,7 +374,29 @@ async function runPane(binary: string, replies: readonly (readonly Block[])[]): 
   })();
   child.stdin.write(`${JSON.stringify({ type: "prompt", message: "Implement STALL-2." })}\n`);
   child.stdin.flush();
-  await settled.promise;
+  if (options.quietMs === undefined) {
+    await settled.promise;
+  } else {
+    // Nothing must be left unhandled: in quiet mode the settle frame is not what ends the wait.
+    settled.promise.catch(() => undefined);
+    const quietMs = options.quietMs;
+    const deadline = Date.now() + 90_000;
+    await Promise.race([
+      (async () => {
+        // A real clock, deliberately: the proposition is that the real host started no further
+        // turn, and a host that does nothing emits no signal to await. The whole point is to
+        // see the absence, and only elapsed time shows it.
+        while (Date.now() < deadline) {
+          await Bun.sleep(200);
+          if (answered > 0 && Date.now() - lastAnsweredAt >= quietMs) return;
+        }
+        throw new Error(`the stand-in gateway never went quiet for ${quietMs} ms`);
+      })(),
+      child.exited.then(async (code) => {
+        throw new Error(`omp exited (${code}) before the gateway went quiet:\n${await stderr}`);
+      }),
+    ]);
+  }
   child.stdin.end();
   await child.exited;
 
@@ -426,4 +496,33 @@ test.skipIf(omp === undefined && !onActions)(
     expect(await pane.phaseEntries()).toEqual([{ state: "open" }, { state: "quiet" }]);
   },
   120_000
+);
+
+// The run-end ask nudge (extensions/envoy.ts) rests on one host behaviour: a `triggerTurn`
+// continuation of an agent-attributed custom message re-enters no `before_agent_start`, so it arms
+// no period and the nudge cannot nudge its own continuation. If that ever changes, every ordinary
+// session nudges itself forever — an unbounded model-call loop with no cap in the design to stop
+// it. Only the real binary can say, so this is what a pin bump is re-run against.
+test.skipIf(omp === undefined && !onActions)(
+  "the nudge's own continuation arms no period, so an ask-free stop runs exactly one extra turn",
+  async () => {
+    if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
+    const pane = await runPane(
+      omp,
+      [[{ type: "text", text: "Done." }], [{ type: "text", text: "Understood." }]],
+      // An ordinary session, not a Legion pane: a Legion-driven one is excluded from the nudge.
+      { legion: false, openAsks: 0, quietMs: 8_000 }
+    );
+
+    const turns = pane.turns();
+    // Two, and the wait above proves no third: the user's turn, and the nudge's continuation.
+    expect(turns).toHaveLength(2);
+    expect(userText(turns[0] as Request)).not.toContain("unanswered asks in Dispatch");
+    expect(userText(turns[1] as Request)).toContain("unanswered asks in Dispatch");
+    // The stop queried Dispatch against the turn's own baseline; the continuation's stop found
+    // the period already fired and asked nothing, so there are exactly two open-ask reads.
+    const asks = pane.requests.filter((request) => request.path === "/api/v1/asks/open");
+    expect(asks).toHaveLength(2);
+  },
+  180_000
 );
