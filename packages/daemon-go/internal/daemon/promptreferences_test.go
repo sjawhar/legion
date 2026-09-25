@@ -106,9 +106,7 @@ func TestPromptReferencesReadTheSkillsTheAgentsAndTheRolePrompts(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := names.AddEncoded(references); err != nil {
-			t.Fatal(err)
-		}
+		names.Merge(references)
 		for _, words := range promptKinds {
 			if !maps.EqualFunc(names[words.kind], want[words.kind], slices.Equal) {
 				t.Errorf("the gate's names over %s: %ss = %v, want %v", rolesDir, words.noun, names[words.kind], want[words.kind])

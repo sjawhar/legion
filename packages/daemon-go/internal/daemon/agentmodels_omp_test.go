@@ -115,7 +115,7 @@ func TestTheAgentModelCheckOnTheRealOhMyPi(t *testing.T) {
 					contract: 3, skipAgentModels: testCase.skip, log: log}.verify(context.Background())
 			} else {
 				err = ProbeImage(context.Background(), ImageProbe{Omp: omp, Contract: 3, Env: env, WorkDir: dir, PluginRoot: root,
-					SkipAgentModels: testCase.skip, Log: log})
+					SkipAgentModels: testCase.skip, RoleReferences: promptrefs.New(), Log: log})
 			}
 
 			if len(testCase.want) == 0 {
@@ -175,7 +175,7 @@ func TestTheImageProbeResolvesTheAgentsTheDaemonsPromptsName(t *testing.T) {
 		t.Fatal(err)
 	}
 	env := map[string]string{"HOME": home, "OMP_PROFILE": "legion", "PATH": "/usr/local/bin:/usr/bin:/bin", "AWS_EC2_METADATA_DISABLED": "true"}
-	probe := func(references string) error {
+	probe := func(references promptrefs.Names) error {
 		return ProbeImage(context.Background(), ImageProbe{Omp: omp, Contract: 3, Env: env, WorkDir: dir, PluginRoot: root,
 			RoleReferences: references, Log: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))})
 	}

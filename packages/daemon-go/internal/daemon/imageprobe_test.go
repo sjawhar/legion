@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
+	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 )
 
 // imageOmp is an `omp` that answers each of the image's probes by its own plan, one step per
@@ -154,7 +155,7 @@ func TestProbeImageLoadsThePluginTheWayAPodDoes(t *testing.T) {
 
 	err := ProbeImage(context.Background(), ImageProbe{
 		Omp: f.path, Contract: 3, Env: imageEnv(home), WorkDir: t.TempDir(), PluginRoot: root,
-		Log: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		RoleReferences: promptrefs.New(), Log: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
 	})
 
 	if err != nil {
@@ -169,13 +170,32 @@ func TestProbeImageLoadsThePluginTheWayAPodDoes(t *testing.T) {
 	f = newImageOmp(t, []string{"available"}, []string{"yes"}, []string{"refuses"})
 	err = ProbeImage(context.Background(), ImageProbe{
 		Omp: f.path, Contract: 3, Env: imageEnv(imageHome(t, contractCurrent)), WorkDir: t.TempDir(),
-		Log: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		RoleReferences: promptrefs.New(), Log: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
 	})
 	if err == nil || !strings.Contains(err.Error(), "ImageProbe.PluginRoot is required") {
 		t.Fatalf("ProbeImage without a plugin root = %v, want it refused naming PluginRoot", err)
 	}
 	if calls := f.calls(t); len(calls) != 0 {
 		t.Errorf("ProbeImage without a plugin root ran %v, want no probe", calls)
+	}
+}
+
+// Without the references of the role prompts a pod is handed, the image probe would resolve the
+// plugin's names alone, so it is refused before any probe runs.
+func TestTheImageProbeRequiresTheRolePromptsReferences(t *testing.T) {
+	f := newImageOmp(t, []string{"available"}, []string{"yes"}, []string{"refuses"})
+	home := imageHome(t, contractCurrent)
+
+	err := ProbeImage(context.Background(), ImageProbe{
+		Omp: f.path, Contract: 3, Env: imageEnv(home), WorkDir: t.TempDir(), PluginRoot: filepath.Join(home, "opt-legion", "pi-legion-envoy"),
+		Log: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+	})
+
+	if err == nil || !strings.Contains(err.Error(), "ImageProbe.RoleReferences is required") {
+		t.Fatalf("ProbeImage without role references = %v, want it refused naming RoleReferences", err)
+	}
+	if calls := f.calls(t); len(calls) != 0 {
+		t.Errorf("ProbeImage without role references ran %v, want no probe", calls)
 	}
 }
 
@@ -188,7 +208,7 @@ func TestTheImageProbeResolvesARelativePluginRoot(t *testing.T) {
 
 	err := ProbeImage(context.Background(), ImageProbe{
 		Omp: f.path, Contract: 3, Env: imageEnv(home), WorkDir: home, PluginRoot: filepath.Join("opt-legion", "pi-legion-envoy"),
-		Log: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		RoleReferences: promptrefs.New(), Log: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
 	})
 
 	if err != nil {
@@ -250,7 +270,7 @@ func TestProbeImageRunsTheThreeProbesUnderTheImagesEnvironment(t *testing.T) {
 
 	err := ProbeImage(context.Background(), ImageProbe{
 		Omp: f.path, Contract: 3, Env: env, WorkDir: t.TempDir(), PluginRoot: filepath.Join(home, "opt-legion", "pi-legion-envoy"),
-		Log: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		RoleReferences: promptrefs.New(), Log: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
 	})
 
 	if err != nil {

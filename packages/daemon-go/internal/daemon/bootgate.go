@@ -25,6 +25,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/omplaunch"
+	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 	"github.com/sjawhar/legion/daemon/internal/runtime/tmux"
 	workershim "github.com/sjawhar/legion/daemon/internal/shim"
 )
@@ -107,8 +108,9 @@ type pluginGate struct {
 	// through discovery.
 	pluginRoot string
 	// roleReferences are the task agents and skills the role prompts the probed Oh My Pi is handed
-	// name (promptrefs.Roles), resolved beside the plugin's own. Empty resolves the plugin's alone.
-	roleReferences string
+	// name (promptrefs.Roles), resolved beside the plugin's own. The zero Names resolves the
+	// plugin's alone.
+	roleReferences promptrefs.Names
 	// skipAgentModels leaves the prompt-named task agents' models unresolved (ImageProbe's
 	// SkipAgentModels); every other gate holds each agent to its own model.
 	skipAgentModels bool
@@ -169,11 +171,7 @@ func (g pluginGate) verify(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if g.roleReferences != "" {
-		if err := names.AddEncoded(g.roleReferences); err != nil {
-			return fmt.Errorf("%s: %w", g.label(), err)
-		}
-	}
+	names.Merge(g.roleReferences)
 	check := promptCheck{names: names, skipAgentModels: g.skipAgentModels}
 	loadedFrom, err := g.loadedFrom(ctx, lane, lane.notLoaded(plugin.version), check)
 	if err != nil {
@@ -747,9 +745,9 @@ type ImageProbe struct {
 	// uses. A relative root is resolved against this process's working directory.
 	PluginRoot string
 	// RoleReferences are the task agents and skills the role prompts a pod is handed name
-	// (promptrefs.Roles): the daemon's own, which it inlines into every Sandbox pod, or the image's
-	// when the command is given none.
-	RoleReferences string
+	// (promptrefs.Roles), and are required: the daemon's own, which it inlines into every Sandbox pod,
+	// or the image's when the command is given none.
+	RoleReferences promptrefs.Names
 	// SkipAgentModels leaves the task agents' models unresolved: the image build's probe, which runs
 	// with none of the operator's model configuration.
 	SkipAgentModels bool
@@ -769,6 +767,9 @@ const defaultProbeTimeout = 300 * time.Second
 func ProbeImage(ctx context.Context, p ImageProbe) error {
 	if p.PluginRoot == "" {
 		return errors.New("image probe: ImageProbe.PluginRoot is required: the plugin directory a pod loads as its one explicit extension")
+	}
+	if p.RoleReferences.Zero() {
+		return errors.New("image probe: ImageProbe.RoleReferences is required: the references of the role prompts a pod is handed")
 	}
 	return pluginGate{
 		env: p.Env, workDir: p.WorkDir, invocation: p.Omp, timeout: defaultProbeTimeout,

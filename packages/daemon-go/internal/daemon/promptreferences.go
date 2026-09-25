@@ -46,7 +46,7 @@ var promptKinds = [...]promptKind{
 // a Markdown file under the plugin's skills directories (the manifest's `omp.skills`, read with its
 // contract, readPluginManifest) and its `agents/` directory, the agent definitions Oh My Pi
 // discovers there, each named relative to the plugin. The role prompts' references are added to
-// them from their encoding (promptrefs.Roles, AddEncoded).
+// them (promptrefs.Roles, Merge).
 func promptReferences(manifest string, skills []string) (promptrefs.Names, error) {
 	names := promptrefs.New()
 	root := filepath.Dir(manifest)
