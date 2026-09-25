@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { chmod, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { messageFor } from "@legion/envoy-client/errors";
 
@@ -7,7 +7,9 @@ import { messageFor } from "@legion/envoy-client/errors";
  * Writes `grantId` to the pane's `LEGION_GRANT_FILE` atomically: a `<file>.<pid>.<uuid>` temp
  * beside it (0600 — `writeFile`'s mode is umask-masked, so it is re-applied), then a `rename`
  * over the named file, so `legion` never reads a half-written grant and two hooks in flight for
- * one session (both live grants) never collide on the temp name. The path must be absolute: the
+ * one session (both live grants) never collide on the temp name. The directory is created 0700
+ * when absent: a tmux pane's `<state_dir>/secrets` exists (the daemon writes the boot token
+ * there), and an Agent Sandbox pod's state volume starts empty. The path must be absolute: the
  * daemon always names one, and a relative pointer (an operator's own export) would otherwise put
  * the temp file in OMP's cwd — the issue workspace. Any failure removes the temp best-effort and
  * throws naming the path; the caller blocks the command rather than let it run under whatever the
@@ -19,6 +21,7 @@ async function writeGrantFile(file: string, grantId: string): Promise<void> {
   }
   const temp = `${file}.${process.pid}.${randomUUID()}`;
   try {
+    await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
     await writeFile(temp, grantId, { encoding: "utf8", mode: 0o600 });
     await chmod(temp, 0o600);
     await rename(temp, file);
@@ -30,7 +33,8 @@ async function writeGrantFile(file: string, grantId: string): Promise<void> {
 
 /**
  * Mints a grant and writes it to the pane's `LEGION_GRANT_FILE`, where `legion` reads it: the one
- * path by which the bash hook and the `legion` tool's `handoff_complete` hand a command its grant.
+ * path by which the tool-call hook (before a bash command and before a call Oh My Pi serves with
+ * `gh`) and the `legion` tool's `handoff_complete` hand a command its grant.
  * A pane without the variable was launched by a daemon older than this plugin, so it is refused
  * before anything is minted.
  */
