@@ -380,10 +380,15 @@ test("moving between issue documents leaves one open document connection, not on
     // Reading around the tree the way a long-lived tab does — in-app navigation, no reload:
     // each document the reader leaves must take its connection with it, or the tab accumulates
     // live rooms until it stalls.
+    // Each return to the list moves the pointer off it first. A pointer left on the link it just
+    // followed rests on that link again once the list renders, and on a loaded machine rests long
+    // enough to open its preview card, which covers the next row and takes the click meant for it.
     for (let visit = 0; visit < 4; visit += 1) {
+      await page.mouse.move(0, 0);
       await page.goBack();
       await page.getByRole("link", { name: new RegExp(second.key) }).click();
       await expect(documentEditor(page)).toContainText("Second body.");
+      await page.mouse.move(0, 0);
       await page.goBack();
       await page.getByRole("link", { name: new RegExp(first.key) }).click();
       await expect(documentEditor(page)).toContainText("First body.");
