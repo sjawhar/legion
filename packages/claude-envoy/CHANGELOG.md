@@ -6,6 +6,10 @@
 
 - Added the nine native Dispatch tools and automatic subscriptions to each mutation result's issue topic.
 
+### Changed
+
+- The plugin is `claude-envoy` (package `@sjawhar/claude-envoy`, directory `packages/claude-envoy`), matching `pi-envoy`. Its channel entry is `plugin:claude-envoy@legion-plugins`, its tools are `mcp__plugin_claude-envoy_envoy__*`, its skills are `claude-envoy:<skill>`, and the managed-settings allowlist names `{ "marketplace": "legion-plugins", "plugin": "claude-envoy" }`. An install of `claude-envoy-bridge@legion-plugins` is not migrated: install `claude-envoy@legion-plugins` and uninstall the old one. Claude Code keys `CLAUDE_PLUGIN_DATA` on the plugin and marketplace names (`plugins/data/claude-envoy-legion-plugins`), so a `claude --resume` of a session started before the rename does not get its held role back.
+
 ## [0.3.0]
 
 ### Added

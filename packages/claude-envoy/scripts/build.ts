@@ -37,7 +37,7 @@ export async function buildBundles(outdir: string): Promise<void> {
 }
 
 async function checkBundles(distDirectory: string): Promise<string[]> {
-  const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-bridge-check-dist-"))
+  const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-check-dist-"))
   try {
     await buildBundles(scratch)
     const fresh = (await readdir(scratch)).sort()

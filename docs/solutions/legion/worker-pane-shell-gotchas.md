@@ -75,7 +75,7 @@ symptoms:
   - "jj log shows (divergent) next to your commit after jj squash --into; a second visible commit shares its change id"
   - "Error: Change ID `xxxx` is divergent — Hint: Use change offset to select single revision"
   - "the pane's `legion gh` performed the write the branch's shim refuses, and skill:// served the template the branch fixed"
-  - "packages/claude-envoy-bridge bun test: expected Bearer reply-token, received the pane's real Dispatch token (40 pass, 1 fail in a pane; 41 pass elsewhere)"
+  - "packages/claude-envoy bun test: expected Bearer reply-token, received the pane's real Dispatch token (40 pass, 1 fail in a pane; 41 pass elsewhere)"
   - "the pane's `legion handoff write` accepted a payload the branch's schema refuses; the committed handoff was written by the deployed build"
   - "spawn_worker: POST /legion/v1/worker/spawn failed with 400: requestId: Invalid input: expected string, received undefined (a sub-architect pane on a pre-release plugin)"
   - "jq --version prints jaq 2.3.0 in the bash tool; a jq expression that passed there fails (or a failing one passes) when the script runs"
@@ -210,9 +210,9 @@ tree launch markers`. Both suites now clear the whole variable family in `before
 list in `legion.test.ts`; `DISPATCH_TOKEN_FILE` beside `DISPATCH_URL`/`DISPATCH_TOKEN` in `envoy.test.ts`) and restore
 it in `afterEach`. Clear the variable *family the resolver consumes*, in its precedence order — clearing the familiar
 name and leaving the file-pointer alive disables nothing. The third package to carry the same leak is
-`packages/claude-envoy-bridge`: `tests/envoy-channel-server.test.ts` expects its fixture's `Bearer reply-token` on the
+`packages/claude-envoy`: `tests/envoy-channel-server.test.ts` expects its fixture's `Bearer reply-token` on the
 reply it posts to Dispatch and, in a pane, receives the real token from `DISPATCH_TOKEN_FILE` instead (LEGION-131's
-implementer, rebuilding the bridge bundles: `40 pass, 1 fail`; `env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE -u
+implementer, rebuilding the claude-envoy bundles: `40 pass, 1 fail`; `env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE -u
 DISPATCH_TOKEN bun test` → `41 pass`). Filed as LEGION-173; until it lands, run that package's suite with the three
 variables unset and say so in the proof.
 
@@ -220,7 +220,7 @@ Run it from `packages/daemon`, which is the `working-directory` of the `test` jo
 `.github/workflows/pr-and-main.yaml` (that job also sets `LEGION_E2E=1` and `LEGION_TMUX_LIVE=1`). There is no root
 test script, and `bun test` from the repository root is not a CI entry point: it picks up every package, and the
 per-package `bunfig.toml` preloads do not apply from the root, so `packages/dispatch/web` fails by the hundreds with
-`document is not defined`, and the `pi-envoy` and `claude-envoy-bridge` suites fail with `ECONNREFUSED` for want of a
+`document is not defined`, and the `pi-envoy` and `claude-envoy` suites fail with `ECONNREFUSED` for want of a
 live NATS broker. LEGION-14's tester spent a diagnosis cycle on 262 such failures, none in the changed package. When
 an assignment says "run the root suite", run the daemon package's suite and say which invocation you used.
 
