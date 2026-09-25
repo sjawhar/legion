@@ -518,6 +518,14 @@ EOF
   git -C "$dir" push -q origin "$fixture_branch" || fail "push the fixture branch $fixture_branch to $repo"
   note "pushed the repository-configuration fixture as $repo $fixture_branch ($(git -C "$dir" rev-parse --short HEAD))"
 }
+# assistant_said ISSUE ROLE TEXT: one of the claim's assistant turns has TEXT in its reply. The
+# instruction that asks for TEXT is a user turn, so a plain search of the session would match it.
+assistant_said() {
+  local text
+  text=$(claim_session_text "$1" "$2") || return 1
+  jq -R -s -e --arg want "$3" '[split("\n")[] | fromjson? | select(.type == "message" and .message.role == "assistant")
+    | .message.content[]? | select(.type == "text") | .text | select(contains($want))] | length > 0' <<<"$text" >/dev/null
+}
 fixture_markers() {
   local pod=$1
   pod_exec "$pod" sh -c 'ls /tmp/legion-fixture 2>/dev/null | sort | tr "\n" " "' 2>&1
@@ -836,17 +844,22 @@ note "the memory hog on tree 1's node $nodes1 was OOMKilled by its own 64Mi limi
 pass
 
 begin repository-configuration
-# Tree 2's pods carry the repository's own configuration (push_fixture). Read the markers after its
-# planner's first turn: each names a loading path, and which ones a pod's agent loads is the
-# boundary LEGION-263 owns. The argv the pod ran its agent with is recorded beside them.
-send_agent "$tree2" planner "Stage 4b proof planning operation: read this repository's README, write the required .legion/plan.json handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary."
-wait_for_phase "$tree2" implementing 900
-pod=$(claim_sandbox "$tree2" planner 2>/dev/null || tree_pod "$tree2")
-markers=$(fixture_markers "$pod")
+# Tree 2's pods carry the repository's own configuration (push_fixture). Each marker names a loading
+# path, and which ones a pod's agent loads is the boundary LEGION-263 owns. The markers live in the
+# pod's own /tmp, which goes with the pod once the planner's phase ends and its Sandbox suspends, so
+# they are read while the planner waits after its first turn; then it plans. The argv the pod ran
+# its agent with is recorded beside them.
+nonce="fixture-read-$RANDOM$RANDOM"
+send_agent "$tree2" planner "Stage 4b proof repository-configuration operation: read this repository's README and AGENTS.md, then reply with the single word $nonce and wait for the next instruction. Do not write a handoff yet."
+until_true 900 "tree 2's planner to answer $nonce" assistant_said "$tree2" planner "$nonce"
+pod=$(claim_sandbox "$tree2" planner) || fail "tree 2's planner has no Sandbox"
+markers=$(fixture_markers "$pod") || fail "the fixture markers could not be read in $pod: $markers"
 printf '%s\n' "$markers" >"$evidence/fixture-markers.txt"
 argv=$(op get pod "$pod" -o json | jq -c '[.spec.containers[] | select(.name == "worker") | .command[]?]')
 note "tree 2 pod $pod: fixture markers [${markers:-none}]; agent argv $argv"
 if grep -q -- '--no-extensions' <<<"$argv"; then note "the pod's agent runs with --no-extensions"; else note "the pod's agent runs without --no-extensions"; fi
+send_agent "$tree2" planner "Stage 4b proof planning operation: write the required .legion/plan.json handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary."
+wait_for_phase "$tree2" implementing 900
 pass
 
 begin issue-cap-moves
