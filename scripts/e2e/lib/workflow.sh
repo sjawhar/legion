@@ -5,7 +5,8 @@
 # negative controls. A stage proof sources lib/rig.sh first.
 #
 # Sourced, never run. The caller sets
-#   work           the run's scratch directory, holding dispatch-token, legion.yaml and operator-token
+#   work           the run's scratch directory, holding the two files the lib reads: dispatch-token,
+#                  the Dispatch bearer, and legion, the Go daemon binary it asks for state
 #   evidence       the evidence directory
 #   project        the Dispatch project the run's issues live in; the daemon writes as
 #                  legion-daemon:<project>
