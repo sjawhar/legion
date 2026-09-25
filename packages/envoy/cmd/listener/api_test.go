@@ -898,15 +898,17 @@ func TestRoleGetHandlerReturnsLiveHolder(t *testing.T) {
 		}
 	})
 }
+
+// A restored role claim routes while its holder is live, survives the holder's absence for one
+// session TTL after the registry opened, and is released after that. Deleting the holder's session
+// ends its liveness and the registry's clock ends the grace window, so no step waits on a real TTL
+// and none can lose a race with one.
 func TestRoleClaimRestoresWhileHolderIsLiveAndDropsAfterTTL(t *testing.T) {
 	client := setupPublishTestClient(t)
-	if err := client.JS().DeleteKeyValue(session.SessionBucket); err != nil &&
-		!errors.Is(err, nats.ErrBucketNotFound) && !errors.Is(err, nats.ErrStreamNotFound) {
-		t.Fatalf("reset session bucket TTL: %v", err)
-	}
 	const (
-		sessionID = "ses_role_restart"
-		role      = "restart-survivor"
+		sessionID  = "ses_role_restart"
+		role       = "restart-survivor"
+		sessionTTL = time.Minute
 	)
 	firstRegistry, err := store.Open(client.Conn, store.WithReplicas(1))
 	if err != nil {
@@ -915,7 +917,7 @@ func TestRoleClaimRestoresWhileHolderIsLiveAndDropsAfterTTL(t *testing.T) {
 	firstSessions, err := session.OpenSessionRegistry(
 		client.Conn,
 		session.WithSessionReplicas(1),
-		session.WithSessionTTL(100*time.Millisecond),
+		session.WithSessionTTL(sessionTTL),
 	)
 	if err != nil {
 		t.Fatalf("open first session registry: %v", err)
@@ -946,7 +948,10 @@ func TestRoleClaimRestoresWhileHolderIsLiveAndDropsAfterTTL(t *testing.T) {
 		t.Fatalf("persisted claim = %+v", persisted)
 	}
 
-	restoredRegistry, err := store.Open(client.Conn, store.WithReplicas(1))
+	var elapsed atomic.Int64
+	opened := time.Now()
+	clock := func() time.Time { return opened.Add(time.Duration(elapsed.Load())) }
+	restoredRegistry, err := store.Open(client.Conn, store.WithReplicas(1), store.WithClock(clock))
 	if err != nil {
 		t.Fatalf("restore role registry: %v", err)
 	}
@@ -954,7 +959,7 @@ func TestRoleClaimRestoresWhileHolderIsLiveAndDropsAfterTTL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("restore session registry: %v", err)
 	}
-	readyCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	readyCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := restoredSessions.WaitForCacheReady(readyCtx); err != nil {
 		t.Fatalf("restore session cache: %v", err)
@@ -984,22 +989,15 @@ func TestRoleClaimRestoresWhileHolderIsLiveAndDropsAfterTTL(t *testing.T) {
 		t.Fatalf("restored grace claim = %q, %v; want %q", holder, err, sessionID)
 	}
 
-	deadline := time.Now().Add(time.Second)
-	for {
-		if response := get(); response.Code != http.StatusNotFound {
-			t.Fatalf("expired role status = %d, want 404; body = %s", response.Code, response.Body.String())
-		}
-		holder, err := restoredRegistry.RoleHolder(role)
-		if err != nil {
-			t.Fatalf("read expired role claim: %v", err)
-		}
-		if holder == "" {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("expired role claim = %q, want removed", holder)
-		}
-		time.Sleep(10 * time.Millisecond)
+	if ttl := restoredSessions.TTL(); ttl != sessionTTL {
+		t.Fatalf("restored session TTL = %s, want the bucket's %s", ttl, sessionTTL)
+	}
+	elapsed.Store(int64(sessionTTL))
+	if response := get(); response.Code != http.StatusNotFound {
+		t.Fatalf("expired role status = %d, want 404; body = %s", response.Code, response.Body.String())
+	}
+	if holder, err := restoredRegistry.RoleHolder(role); err != nil || holder != "" {
+		t.Fatalf("expired role claim = %q, %v; want removed", holder, err)
 	}
 }
 

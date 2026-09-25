@@ -43,6 +43,7 @@ const (
 type Registry struct {
 	kv                    nats.KeyValue
 	roleKV                nats.KeyValue
+	now                   func() time.Time
 	openedAt              time.Time
 	restoredRoleRevisions map[string]uint64
 	mu                    sync.RWMutex
@@ -70,6 +71,7 @@ type openOpts struct {
 	replicas       int
 	interestBucket string
 	roleBucket     string
+	now            func() time.Time
 }
 
 // WithReplicas overrides the KV bucket replica count. Use 1 for single-node test NATS.
@@ -77,8 +79,14 @@ func WithReplicas(n int) OpenOption {
 	return func(o *openOpts) { o.replicas = n }
 }
 
+// WithClock sets the clock that times a restored role claim's grace window, which starts when Open
+// returns. Tests move it to end the window without waiting a session TTL.
+func WithClock(now func() time.Time) OpenOption {
+	return func(o *openOpts) { o.now = now }
+}
+
 func Open(conn *nats.Conn, options ...OpenOption) (*Registry, error) {
-	opts := openOpts{replicas: 1, interestBucket: Bucket, roleBucket: RoleBucket}
+	opts := openOpts{replicas: 1, interestBucket: Bucket, roleBucket: RoleBucket, now: time.Now}
 	for _, o := range options {
 		o(&opts)
 	}
@@ -104,7 +112,8 @@ func Open(conn *nats.Conn, options ...OpenOption) (*Registry, error) {
 		cache:                 map[string]Interest{},
 		cacheRevisions:        map[string]uint64{},
 		readyCh:               make(chan struct{}),
-		openedAt:              time.Now(),
+		now:                   opts.now,
+		openedAt:              opts.now(),
 		restoredRoleRevisions: restoredRoleRevisions,
 	}
 	// Skip eager load — watch() populates cache asynchronously via KV watcher.
@@ -477,7 +486,7 @@ func (r *Registry) ReleaseExpiredRoleClaim(role, sessionID string, sessionTTL ti
 	r.mu.RLock()
 	restoredRevision, restored := r.restoredRoleRevisions[role]
 	r.mu.RUnlock()
-	if restored && restoredRevision == entry.Revision() && sessionTTL > 0 && time.Since(r.openedAt) < sessionTTL {
+	if restored && restoredRevision == entry.Revision() && sessionTTL > 0 && r.now().Sub(r.openedAt) < sessionTTL {
 		return ExpiredRoleClaimRetained, nil
 	}
 	err = r.roleKV.Delete(role, nats.LastRevision(entry.Revision()))
