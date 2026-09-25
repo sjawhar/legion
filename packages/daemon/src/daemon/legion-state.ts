@@ -130,8 +130,8 @@ export interface PrState {
    * webhook for the current head whose `before` is this sha (handoff-only keeps the decision), by
    * any push for the current head that changes a path outside `.legion/` or cannot be classified
    * (drops it), by resync's compare of this sha against the current head (`.legion/`-only keeps
-   * it; anything else, a compare that fails included, drops it), or by a review the reducer
-   * records. */
+   * it; anything else, a compare that fails included, drops it), by a review the reducer
+   * records, or by a review of the current head that asks for no changes (drops it). */
   reviewDecisionUnsettledFrom?: string;
   /** Present exactly when the current `headSha`'s arrival in `resetPrHead` incremented
    * `fixAttempts` (prior verdict was red and no pending push classified this sha handoff-only). A

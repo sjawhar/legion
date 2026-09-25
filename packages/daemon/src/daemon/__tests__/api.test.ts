@@ -16,7 +16,7 @@ import { secretHash, spawnCapabilityKey } from "../api/auth";
 import { CONTROLLER_HAS_NO_REPOSITORY, EnvoyPublishError, SAME_AGENT_REFUSAL } from "../api/http";
 import { type LegionState, loadState, newLegionState, saveState } from "../legion-state";
 import { TreeClosingError } from "../processes";
-import { routeActive } from "../reducers";
+import { reduceGithubEvent, routeActive } from "../reducers";
 import { checkPr, fakeDispatchClient } from "./ci-fixtures";
 
 const root = "WIDGETS-1" as IssueKey;
@@ -4436,6 +4436,92 @@ describe("Legion HTTP API", () => {
     expect(complete.response.status).toBe(200);
     expect(statusWrites).toEqual([{ issue: root, status: "in_progress" }]);
   });
+
+  for (const review of ["approved", "commented"] as const) {
+    it(`writes retro when the reviewer's ${review} review of a real fix whose push was lost supersedes a kept changes-requested decision`, async () => {
+      const statusWrites: Array<{ issue: IssueKey; status: string }> = [];
+      await start({
+        dispatchClient: fakeDispatchClient({
+          setStatus: async (issue, status) => {
+            statusWrites.push({ issue, status });
+          },
+        }),
+      });
+      const branch = `legion/${root}`;
+      // Round 1 asked for changes at impl-sha; the reviewer's handoff push arrived without its
+      // push webhook, so the decision is kept and its range unsettled.
+      state.prs["acme/widgets#9"] = checkPr(root, {
+        number: 9,
+        headSha: "review-handoff-sha",
+        reviewDecision: "changes_requested",
+        reviewDecisionUnsettledFrom: "impl-sha",
+      });
+      state.prByBranch[`acme/widgets@${branch}`] = "acme/widgets#9";
+      const deliver = (payload: Record<string, unknown>) =>
+        reduceGithubEvent(
+          state,
+          "notifications.github.acme.widgets.issue.9",
+          { event_id: randomUUID(), issued_at: now, payload },
+          { maxFixAttempts: 3, projects: { WIDGETS: { repo: "acme/widgets" } } }
+        );
+      // The implementer's real fix: its synchronize lands, its push webhook is lost.
+      deliver({
+        kind: "pr",
+        action: "synchronize",
+        repo: "acme/widgets",
+        number: "9",
+        head_ref: branch,
+        head_sha: "fix-sha",
+      });
+      // The reviewer's next round, at the fix: APPROVE, or COMMENT (a clean round while the
+      // head still carries `.legion/`).
+      deliver({
+        kind: "review",
+        action: "submitted",
+        repo: "acme/widgets",
+        number: "9",
+        parent_kind: "pr",
+        author: "legion-reviewer[bot]",
+        url: "review-url",
+        state: review,
+        body: "Round 2",
+        commit_id: "fix-sha",
+        head_sha: "fix-sha",
+      });
+      const token = roleToken(state.project, root, "reviewer");
+      state.roles[token] = {
+        issue: root,
+        role: "reviewer",
+        generation: 1,
+        locator: {
+          runtime: "tmux",
+          tmuxSession: "legion-omp",
+          tmuxWindowId: "@42",
+          tmuxPaneId: "%1",
+          socketPath: "/state/workers/reviewer.sock",
+        },
+      };
+      const bootToken = await api?.mintWorkerBootToken(root, root, "reviewer", 1);
+      if (!bootToken) throw new Error("worker boot token was not minted");
+      const started = await json<{ secret: string }>("/legion/v1/worker/started", {
+        tree: root,
+        issue: root,
+        role: "reviewer",
+        bootToken,
+        sessionId: "ses_reviewer",
+        agentId: "agt_reviewer",
+        ompSessionFile: "/tmp/reviewer.json",
+      });
+      expect(started.response.status).toBe(200);
+      state.phases[root] = { phase: "reviewer", sessionId: "ses_reviewer" };
+      const grantId = await mintGrant(root, "ses_reviewer", started.body.secret);
+
+      const complete = await json("/legion/v1/phase/complete", { grantId, summary: "Round 2" });
+
+      expect(complete.response.status).toBe(200);
+      expect(statusWrites).toEqual([{ issue: root, status: "retro" }]);
+    });
+  }
 
   it("advances the issue to retro when a reviewer completes with an approved review", async () => {
     const statusWrites: Array<{ issue: IssueKey; status: string }> = [];

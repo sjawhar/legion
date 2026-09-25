@@ -1130,10 +1130,15 @@ function review(state: LegionState, payload: JsonRecord): Effect[] | undefined {
   // record from any commit because a new head that changes anything outside `.legion/` drops the
   // decision (`resetPrHead`, or `push` and resync once they classify that head), so a verdict
   // never outlives the round it was given for. A decision recorded here is settled: nothing
-  // unsettled carries over from the heads before it.
+  // unsettled carries over from the heads before it. A review of the current head that asks for
+  // no changes (the reviewer's clean round is a COMMENT while the head carries `.legion/`)
+  // supersedes a decision kept across heads nothing has classified yet: the reviewer read this
+  // head, so its earlier request no longer stands for it.
   if (decision === "changes_requested" || (isCurrentHead && decision === "approved")) {
     pr.reviewDecision = decision;
     delete pr.reviewDecisionUnsettledFrom;
+  } else if (isCurrentHead) {
+    settleReviewDecision(pr, false);
   }
   const result = routeActive(state, pr.key, {
     type: "pr-review",
