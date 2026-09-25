@@ -318,3 +318,71 @@ func TestStopMakesTheEndSilentAndRewatchANoOp(t *testing.T) {
 		t.Fatal("a Rewatch after Stop armed a watcher")
 	}
 }
+
+// An entry still buffered in a replaced watcher's updates never reaches the cache: once a Rewatch
+// has replaced the watcher, its late deliveries are dropped and the new watcher's scan delivers
+// each key once. Without that, a watcher replaced for a recreated bucket would apply old-bucket
+// entries after the reset that emptied the cache for the new one.
+func TestAReplacedWatchersBufferedEntryIsDropped(t *testing.T) {
+	_, uri := testnats.Start(t)
+	_, kv := bucket(t, uri)
+	secondConn, _ := bucket(t, uri)
+
+	var mu sync.Mutex
+	counts := map[string]int{}
+	count := func(key string) int {
+		mu.Lock()
+		defer mu.Unlock()
+		return counts[key]
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var blockOnce, releaseOnce sync.Once
+	releaseApply := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseApply)
+	apply := func(entry natsgo.KeyValueEntry) {
+		if entry.Key() == "late1" {
+			blocked := false
+			blockOnce.Do(func() { blocked = true })
+			if blocked {
+				close(entered)
+				<-release
+			}
+		}
+		mu.Lock()
+		counts[entry.Key()]++
+		mu.Unlock()
+	}
+
+	w := kvwatch.New("test cache", kv, apply, func() {})
+	w.Start()
+	t.Cleanup(w.Stop)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := w.WaitReady(ctx); err != nil {
+		t.Fatalf("WaitReady: %v", err)
+	}
+	if _, err := kv.Put("late1", []byte("1")); err != nil {
+		t.Fatalf("put late1: %v", err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first watcher never applied late1")
+	}
+	// late2 waits in the first watcher's updates while its apply of late1 is held.
+	if _, err := kv.Put("late2", []byte("2")); err != nil {
+		t.Fatalf("put late2: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if _, err := w.Rewatch(secondConn); err != nil {
+		t.Fatalf("Rewatch: %v", err)
+	}
+	releaseApply()
+
+	eventually(t, "the new watcher's scan to apply late2", func() bool { return count("late2") > 0 })
+	time.Sleep(300 * time.Millisecond)
+	if got := count("late2"); got != 1 {
+		t.Fatalf("late2 applied %d times, want once: the replaced watcher's buffered copy reached the cache", got)
+	}
+}
