@@ -52,19 +52,15 @@ export const HANDOFF_DESCRIPTION =
   "returns the command's output; a failed action changed nothing. What a later phase needs goes " +
   "in your handoff; a question for another live role goes to its role topic with envoy_publish.";
 
-/** The handoff phase each role writes, by the pane's LEGION_ROLE in either vocabulary, as the Go
- * CLI's `handoffFiles` maps it (`packages/daemon-go/cmd/legion/handoff.go`). The merger writes no
- * handoff. */
+/** The handoff phase each role writes, by the pane's LEGION_ROLE (always a claim role): the phase
+ * word of the file-backed phase it runs, the file the Go CLI's `handoffFiles` names for that phase
+ * (`packages/daemon-go/cmd/legion/handoff.go`). The merger writes no handoff. */
 const ROLE_HANDOFF_PHASE: Readonly<Record<string, string>> = {
   architect: "architect",
   planner: "plan",
-  plan: "plan",
   implementer: "implement",
-  implement: "implement",
   tester: "test",
-  test: "test",
   reviewer: "review",
-  review: "review",
 };
 
 /** The bash tool's default timeout, which bounded these commands when they ran through bash. */

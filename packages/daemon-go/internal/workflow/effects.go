@@ -13,8 +13,9 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
-// RoleFor is the role that works a phase: the one a transition starts, and the one it suspends
-// when the issue moves on. A phase no role works — awaiting_merge, done, held — has none.
+// RoleFor is the role that works a phase: the one a transition starts, the one it suspends when
+// the issue moves on, and the one whose handoff `legion handoff complete` resolves for a file-backed
+// phase (cmd/legion). A phase no role works — awaiting_merge, done, held — has none.
 //
 // It is exported for admission too, which starts the mid-phase children of a tree it re-admits
 // and needs each child's own phase's role to start it on.
