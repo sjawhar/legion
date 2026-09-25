@@ -632,7 +632,7 @@ the binary in it, are gone. Stage 1, Stage 2, Stage 3, Stage 4a and Stage 4b pri
 ```sh
 bash scripts/e2e/lib/built-from.sh "$root" "$work/legion"
 # source: <commit> on <parent>                     (jj: the working copy and its parent; git: HEAD)
-# legion: sha256 <hash>
+# legion: sha256 <hash>, stamped <commit> modified=<true|false>
 ```
 
 When the working copy has changes, as in a negative control, which runs a base with the new
@@ -640,6 +640,17 @@ script copied in, the source line says so. The next line gives the sha256 of `jj
 (`git diff HEAD` under git), followed by the diff's `--stat`, so the run shows what it held and
 not only that something changed. Without jj, or outside a jj workspace, it reads git, which is
 what CI's checkout is.
+
+Each binary is tied to that source by the stamp the Go toolchain writes at build time. The stamp has
+two fields: `vcs.revision`, the commit the checkout's git HEAD named, and `vcs.modified`, whether the
+tree differed from it. Under jj, HEAD is the working copy's first parent. The helper fails, naming
+both sides, when a binary:
+- carries no stamp (`-buildvcs=false`, or built outside a checkout);
+- was stamped with a commit that is not the source's;
+- has a modified flag that disagrees with the tree now.
+
+The stamp does not hash a changed tree, so an edit made after the build to a tree that was already
+changed goes unseen. Every caller runs the helper right after its build.
 
 ## lib/install-plugin-profile.sh
 
