@@ -369,11 +369,8 @@ func TestOutboxStartRelaunchesAFailedClaim(t *testing.T) {
 // claim still holds the task it was started with, so the retry task waits behind it and its row
 // is retried until that task's turn is over. That turn can finish the phase: the implementer
 // completes, and the transition suspends it and starts the tester. The waiting start was written
-// for a phase the issue has left, and it must neither relaunch the implementer nor hand it that
-// phase. The Stage 3 acceptance run at e9fb2004 (S393466070-2): outbox row 101 was refused twelve
-// times from 20:05:40Z, the implementer completed implementing at 20:12:20Z and the tester launched
-// at 20:12:21Z, and at 20:13:11Z the row resumed the implementer with "Phase: implementing. Reason:
-// retry held phase.", which rebased and pushed the pull request its tester was testing.
+// for a phase the issue has left, and it neither relaunches the implementer nor hands it that
+// phase, which would have it push to the pull request its tester is testing.
 func TestOutboxRetryStartForAPhaseTheIssueLeftRelaunchesNothing(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
@@ -492,15 +489,10 @@ func TestOutboxRetryStartForAPhaseTheIssueLeftRelaunchesNothing(t *testing.T) {
 // A task handed to a claim waits as its pending delivery until a turn confirms it. An agent that
 // refuses the prompt after acknowledging it — it was already in the turn a human's steer started —
 // has the delivery taken back, and it can finish the phase inside that turn: the transition then
-// suspends the claim with the task still pending. The claim's next start is for the issue's next
-// phase or round, yet the resume sends the task left pending, and the new start's own task, refused
-// behind it, is dropped once its phase ends. The Stage 3 acceptance run at 71fc8466 (S391995256-1):
-// the implementer's round-2 task (outbox:36) was refused after its acknowledgement at 21:33:26Z,
-// the implementer finished round 2 in the steer's turn and was suspended at 21:34:59Z, and at
-// 21:36:08Z its round-3 resume was handed "Reason: ... round 2" while row 50, the round-3 task, was
-// refused until the issue left implementing and dropped at 21:38:12Z. The tester's round-1 task
-// (outbox:28) reached it in round 2 the same way, and its round-2 task, row 40, was dropped.
-// Resumed for retro instead, the implementer is handed "Phase: implementing".
+// suspends the claim with the task still pending. The suspension retires that task, so the
+// claim's next start, for the issue's next phase or round, resumes it with the new start's own
+// task rather than the finished phase's — for the next round, or for retro, never "Phase:
+// implementing" again.
 func TestAResumedWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

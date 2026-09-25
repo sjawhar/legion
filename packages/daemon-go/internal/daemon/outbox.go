@@ -35,6 +35,10 @@ const (
 	// second rather than ten times.
 	outboxFailedTickWait = time.Second
 	messageReadSkew      = 5 * time.Second
+	// pendingWaitWarnAttempts is when a row waiting on its claim's pending delivery is logged as a
+	// warning: past the backoff's climb to its cap, a wait of about two minutes, the turn it waits
+	// on is not ending on its own, and an operator should look.
+	pendingWaitWarnAttempts = 7
 )
 
 // outbox runs each effect that the workflow transaction committed. Claiming and finishing have
@@ -119,7 +123,12 @@ func (r *outbox) RunOnce(ctx context.Context) error {
 			// A task meeting the claim's own pending delivery is a wait, not a failure: the row runs
 			// again on the same backoff once that delivery's turn is over.
 			if errors.Is(err, supervise.ErrDeliveryPending) {
-				r.log.Debug("outbox row waits for the claim's pending delivery", "row", row.ID, "attempts", row.Attempts, "error", err)
+				level := slog.LevelDebug
+				if row.Attempts >= pendingWaitWarnAttempts {
+					level = slog.LevelWarn
+				}
+				r.log.Log(ctx, level, "outbox row waits for the claim's pending delivery", "row", row.ID, "kind", row.Kind, "issue", row.Issue,
+					"attempts", row.Attempts, "error", err)
 			} else {
 				r.log.Error("outbox row failed", "row", row.ID, "kind", row.Kind, "error", err)
 			}
