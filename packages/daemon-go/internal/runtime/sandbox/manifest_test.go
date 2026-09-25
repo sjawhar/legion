@@ -259,7 +259,8 @@ func TestBothContainersShareOneInMemoryXDGConfigHome(t *testing.T) {
 // where it is, and no other container can write a volume workspace-fetch mounts — the feed it
 // fills is read-only in workspace-init, and its TMPDIR, where its one-shot credential goes, is an
 // in-memory volume no other container mounts. So workspace-fetch mounts neither the tree volume
-// nor the config home. Every pod's manifest holds to it.
+// nor the config home. Every pod's manifest holds to it, by every route Kubernetes offers into a
+// Secret, the worker's container included.
 func TestTheProvisionTokenSharesNoContainerWithAnythingTheTreeCanWrite(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
@@ -267,28 +268,53 @@ func TestTheProvisionTokenSharesNoContainerWithAnythingTheTreeCanWrite(t *testin
 	}
 	for name, tc := range manifestCases(t) {
 		t.Run(name, func(t *testing.T) {
-			pod := podOf(t, r, tc.spec, tc.colocate)
+			l, err := r.prepare(tc.spec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pod := r.podTemplate(l, tc.colocate).Spec
+			claimSecret := secretName(l.name)
 			volumes := map[string]corev1.Volume{}
 			for _, volume := range pod.Volumes {
 				volumes[volume.Name] = volume
 			}
-			projectsToken := func(c corev1.Container) bool {
+			// A Secret source that maps no keys maps every key.
+			maps := func(items []corev1.KeyToPath) bool {
+				return len(items) == 0 || slices.ContainsFunc(items, func(item corev1.KeyToPath) bool { return item.Key == provisionTokenKey })
+			}
+			reaches := func(c corev1.Container) []string {
+				var routes []string
 				for _, mount := range c.VolumeMounts {
-					if secret := volumes[mount.Name].Secret; secret != nil {
-						for _, item := range secret.Items {
-							if item.Key == provisionTokenKey {
-								return true
+					volume := volumes[mount.Name]
+					if secret := volume.Secret; secret != nil && secret.SecretName == claimSecret && maps(secret.Items) {
+						routes = append(routes, "secret volume "+mount.Name)
+					}
+					if projected := volume.Projected; projected != nil {
+						for _, source := range projected.Sources {
+							if secret := source.Secret; secret != nil && secret.Name == claimSecret && maps(secret.Items) {
+								routes = append(routes, "projected volume "+mount.Name)
 							}
 						}
 					}
 				}
-				return false
+				for _, v := range c.Env {
+					if from := v.ValueFrom; from != nil && from.SecretKeyRef != nil && from.SecretKeyRef.Name == claimSecret && from.SecretKeyRef.Key == provisionTokenKey {
+						routes = append(routes, "env "+v.Name)
+					}
+				}
+				for _, from := range c.EnvFrom {
+					if from.SecretRef != nil && from.SecretRef.Name == claimSecret {
+						routes = append(routes, "envFrom")
+					}
+				}
+				return routes
 			}
 			containers := slices.Concat(pod.InitContainers, pod.Containers)
 			for _, c := range containers {
 				_, pointed := envOf(c)["LEGION_PROVISION_TOKEN_FILE"]
-				if holds := c.Name == fetchContainer; projectsToken(c) != holds || pointed != holds {
-					t.Errorf("%s: the provisioning token projected %t, pointed at %t; want both %t", c.Name, projectsToken(c), pointed, holds)
+				routes := reaches(c)
+				if holds := c.Name == fetchContainer; (len(routes) > 0) != holds || pointed != holds {
+					t.Errorf("%s reaches the provisioning token by %v, pointed at %t; want %t for both", c.Name, routes, pointed, holds)
 				}
 			}
 			fetch := containerNamed(t, pod, fetchContainer)
