@@ -444,6 +444,21 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			want: "nats_urls nats://127.0.0.2:4222 names a loopback host, which in a pod is the pod itself; name the host pods reach it at when runtime is kubernetes",
 		},
 		{
+			name: "dispatch_url on loopback",
+			body: kubernetesWith("dispatch_url: https://dispatch.internal.example", "dispatch_url: http://127.0.0.1:8080"),
+			want: "dispatch_url http://127.0.0.1:8080 names a loopback host, which in a pod is the pod itself; name the host pods reach it at when runtime is kubernetes",
+		},
+		{
+			name: "daemon_url unspecified",
+			body: kubernetesWith("daemon_url: http://10.0.0.5:13370", "daemon_url: http://0.0.0.0:13370"),
+			want: "daemon_url http://0.0.0.0:13370 names the unspecified address, which is no host a pod can dial; name the host pods reach it at when runtime is kubernetes",
+		},
+		{
+			name: "a nats_urls entry IPv6 unspecified",
+			body: kubernetesWith("nats_urls: [nats://nats.internal.example:4222]", "nats_urls: [\"nats://[::]:4222\"]"),
+			want: "nats_urls nats://[::]:4222 names the unspecified address, which is no host a pod can dial; name the host pods reach it at when runtime is kubernetes",
+		},
+		{
 			name: "bind on loopback",
 			body: kubernetesWith("bind: 10.0.0.5", "bind: 127.0.0.1"),
 			want: "bind 127.0.0.1 is not an address a pod can reach, and every pod's shim dials the worker stream at tcp://127.0.0.1:13371; bind the daemon host's own address when runtime is kubernetes",

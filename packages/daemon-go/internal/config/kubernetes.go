@@ -449,14 +449,18 @@ func checkKubernetesKeys(file fileConfig) error {
 
 // checkPodReachable refuses an address pods are handed that no pod can reach. Every pod's shim
 // dials the worker stream at tcp://<bind>:<worker_stream_port>, so bind must name one of the
-// daemon host's own addresses, never loopback or the unspecified address it would listen on; and
-// a loopback host in daemon_url, envoy_url, or nats_urls is, in a pod, the pod itself.
+// daemon host's own addresses, never loopback or the unspecified address it would listen on. Every
+// Legion URL a pod is handed - daemon_url, envoy_url, dispatch_url, and each nats_urls entry - must
+// name neither: a loopback host is, in a pod, the pod itself, and the unspecified address is no host
+// at all.
 func checkPodReachable(cfg Config) error {
 	if ip := net.ParseIP(cfg.Bind); strings.EqualFold(cfg.Bind, "localhost") || ip != nil && (ip.IsLoopback() || ip.IsUnspecified()) {
 		return fmt.Errorf("bind %s is not an address a pod can reach, and every pod's shim dials the worker stream at tcp://%s; bind the daemon host's own address when runtime is kubernetes",
 			cfg.Bind, net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.WorkerStreamPort)))
 	}
-	addresses := []struct{ key, value string }{{"daemon_url", cfg.DaemonURL}, {"envoy_url", cfg.EnvoyURL}}
+	addresses := []struct{ key, value string }{
+		{"daemon_url", cfg.DaemonURL}, {"envoy_url", cfg.EnvoyURL}, {"dispatch_url", cfg.DispatchURL},
+	}
 	for _, raw := range cfg.NatsURLs {
 		addresses = append(addresses, struct{ key, value string }{"nats_urls", raw})
 	}
@@ -466,10 +470,17 @@ func checkPodReachable(cfg Config) error {
 			return fmt.Errorf("%s must be a valid URL", address.key)
 		}
 		host := parsed.Hostname()
-		if ip := net.ParseIP(host); strings.EqualFold(host, "localhost") || ip != nil && ip.IsLoopback() {
-			return fmt.Errorf("%s %s names a loopback host, which in a pod is the pod itself; name the host pods reach it at when runtime is kubernetes",
-				address.key, address.value)
+		ip := net.ParseIP(host)
+		var why string
+		switch {
+		case strings.EqualFold(host, "localhost") || ip != nil && ip.IsLoopback():
+			why = "names a loopback host, which in a pod is the pod itself"
+		case ip != nil && ip.IsUnspecified():
+			why = "names the unspecified address, which is no host a pod can dial"
+		default:
+			continue
 		}
+		return fmt.Errorf("%s %s %s; name the host pods reach it at when runtime is kubernetes", address.key, address.value, why)
 	}
 	return nil
 }
