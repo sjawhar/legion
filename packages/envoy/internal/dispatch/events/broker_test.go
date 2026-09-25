@@ -185,13 +185,12 @@ func TestAppendRejectsEventsWithoutAValidOwnerOrAgentTarget(t *testing.T) {
 }
 
 func TestChildAndParentPatchesCompleteWithoutDeadlock(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 	database := storetest.Open(t)
-	if _, err := database.Pool.Exec(ctx, `insert into projects (key, name) values ('PP', 'Project')`); err != nil {
+	seed := context.Background()
+	if _, err := database.Pool.Exec(seed, `insert into projects (key, name) values ('PP', 'Project')`); err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
-	if _, err := database.Pool.Exec(ctx, `
+	if _, err := database.Pool.Exec(seed, `
 		insert into issues (key, project_key, number, title, created_by, rank)
 		values
 			('PP-1', 'PP', 1, 'Parent', '{"kind":"user","id":"alice"}', 'U'),
@@ -199,6 +198,12 @@ func TestChildAndParentPatchesCompleteWithoutDeadlock(t *testing.T) {
 	`); err != nil {
 		t.Fatalf("seed parent and child: %v", err)
 	}
+	// The deadline bounds only the two patches, started once the database is provisioned and
+	// seeded, which on a loaded machine can take longer than the patches ever should. It is a
+	// ceiling on a hang, not a measure of speed: an inverted lock order ends in Postgres's
+	// deadlock error, and a patch that waits on the other for good never ends.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 	broker := NewBroker()
 	childEvent := model.Event{
 		IssueKey: new("PP-2"), Type: "issue.updated", Actor: model.Actor{Kind: "user", ID: "alice"}, Payload: map[string]any{},
