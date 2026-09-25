@@ -31,6 +31,24 @@ class WebSocketStub {
 
 globalThis.WebSocket = WebSocketStub as unknown as typeof WebSocket;
 
+// A failing assertion prints the values it compared, and happy-dom's DOM nodes print as their
+// whole object graph - megabytes for one element, which buries or replaces the failure. Nodes
+// print as their own markup instead. Bun asks a value for this only when a single-value matcher
+// reports (`toBe`, `toBeNull`, `toBeUndefined`, `toContain`); the diff matchers
+// (`toEqual`, `toStrictEqual`, `toMatchObject`, `toHaveBeenCalledWith`) and snapshots walk the
+// object themselves and ignore it, so compare a node with `toBe` or map it to a string first.
+Object.defineProperty(Node.prototype, Bun.inspect.custom, {
+  configurable: true,
+  value(this: Node): string {
+    // A document has no markup and an empty `textContent`, so the node name is what is left to
+    // print for one.
+    return this instanceof Element
+      ? this.outerHTML
+      : `${this.nodeName} ${JSON.stringify(this.textContent)}`;
+  },
+  writable: true,
+});
+
 // TanStack batches observer notifications through a scheduler that happy-dom does not
 // drive promptly; flushing synchronously keeps query updates inside React's act() scope
 // so assertions after setQueryData do not wait on a stalled timer.
