@@ -190,14 +190,16 @@ comments live on that path too, so edit them with `gh pr comment`) — printing
 Legion never reads or writes a GitHub issue (LEGION-78). `pr comment`, `pr review`,
 `api …/pulls/…`, `api graphql`, and issue reads are unaffected. The credential reaches `legion`
 through the file `$LEGION_GRANT_FILE` names, written by the extension before each of your bash
-commands and before each `read`/`grep` of a `pr://` or `issue://` URL (and by the `legion` tool
-before its `handoff_complete`); never `cat`, `echo`, copy, or
+commands, each `github` tool call, and each `read`/`grep` of a `pr://` or `issue://` URL (and by
+the `legion` tool before its `handoff_complete`); never `cat`, `echo`, copy, or
 `export` it — `legion credential`, `legion gh`, `jj git push`, and `handoff_complete` read it
-themselves. The file is the pane's, not the
-command's: a `task` subagent, an `eval` subprocess, or a background job in your pane reads the
-grant your last bash command minted, so its `legion gh` or `jj git push` succeeds only within 60
-seconds of that call and 403s afterwards — a timing artifact, not a broken credential; run
-credentialed commands from your own bash calls.
+themselves. The file is the pane's, not the command's, and a grant lives 60 seconds: a `task`
+subagent, an `eval` subprocess, or a background job in your pane reads the grant your last such
+call wrote, and a `github` tool `run_watch` keeps polling `gh` on the one written when the call
+began, so each succeeds only within 60 seconds of that call and 403s afterwards — a timing
+artifact, not a broken credential. Run credentialed commands from your own bash calls, and watch a
+run that may outlast a minute with `gh run watch` in bash, which redeems once and then runs on the
+token it got.
 
 ## GitHub PR comment attribution
 
