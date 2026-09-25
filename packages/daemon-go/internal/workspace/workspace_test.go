@@ -662,7 +662,7 @@ func TestProvisionAfterTheMergedBranchIsDeletedStartsFromMain(t *testing.T) {
 // would put a second branch beside the remote's, which the next push would drop. Provisioning
 // refuses that state by name, every time, before anything is registered, and each of the three
 // ways out the refusal names provisions as it says: restoring the bookmark and cancelling the
-// deletion start at origin's branch, and pushing that one deletion starts at main.
+// deletion start at origin's branch, and deleting the branch on GitHub starts at main.
 func TestProvisionRefusesALocalDeletionNeverPushed(t *testing.T) {
 	for _, way := range []struct {
 		name       string
@@ -672,7 +672,7 @@ func TestProvisionRefusesALocalDeletionNeverPushed(t *testing.T) {
 	}{
 		{"restore", func(b string) []string { return []string{"jj", "bookmark", "set", b, "-r", b + "@origin"} }, true, false},
 		{"cancel the deletion", func(b string) []string { return []string{"jj", "bookmark", "forget", b} }, true, false},
-		{"push the deletion", func(b string) []string { return []string{"jj", "git", "push", "--remote", "origin", "--bookmark", b} }, false, true},
+		{"delete the branch on GitHub", nil, false, true},
 	} {
 		t.Run(way.name, func(t *testing.T) {
 			run := newLocalRunner(t)
@@ -704,7 +704,7 @@ func TestProvisionRefusesALocalDeletionNeverPushed(t *testing.T) {
 					"Bookmark legion/WIDGETS-42 was deleted in the shared clone",
 					"Restore it: `jj bookmark set legion/WIDGETS-42 -r legion/WIDGETS-42@origin -R " + clone + "`",
 					"Cancel the deletion, and the next provisioning adopts origin's branch: `jj bookmark forget legion/WIDGETS-42 -R " + clone + "`",
-					"Start from main instead, deleting the branch on origin: `jj git push --remote origin --bookmark legion/WIDGETS-42 -R " + clone + "`",
+					"Start from main instead: delete the branch on GitHub (the pull request's Delete branch button, or `gh api -X DELETE repos/acme/widgets/git/refs/heads/legion/WIDGETS-42`), and the next provisioning starts at main",
 				} {
 					if !strings.Contains(err.Error(), want) {
 						t.Errorf("attempt %d: the refusal lacks %q:\n%v", attempt, want, err)
@@ -723,7 +723,12 @@ func TestProvisionRefusesALocalDeletionNeverPushed(t *testing.T) {
 				}
 			}
 
-			runSetup(t, clone, append(way.argv(first.Bookmark), "-R", clone)...)
+			if way.argv != nil {
+				runSetup(t, clone, append(way.argv(first.Bookmark), "-R", clone)...)
+			} else {
+				// GitHub's side of the branch deletion: the branch leaves the remote.
+				runSetup(t, req.StateDir, "git", "--git-dir="+run.remote, "branch", "-D", first.Bookmark)
+			}
 			working, err := Provision(context.Background(), run, req)
 			if err != nil {
 				t.Fatalf("provision after %s: %v", way.name, err)

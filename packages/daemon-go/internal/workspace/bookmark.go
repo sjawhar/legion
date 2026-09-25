@@ -25,9 +25,12 @@ var registeredWorkspace = regexp.MustCompile(`(?i)already (?:registered|exists)`
 //     clone) never pushed, where tracking changes nothing. It is refused by name, with the
 //     operator's three ways out: restore the bookmark (`jj bookmark set`); cancel the deletion
 //     (`jj bookmark forget`, which leaves the row untracked, so the next provisioning adopts
-//     origin's branch); or start from main instead, by pushing that one deletion
-//     (`jj git push --remote origin --bookmark legion/<KEY>`; `--deleted` would push every pending
-//     deletion in the shared clone, other issues' branches with it).
+//     origin's branch); or start from main instead, by deleting the branch on GitHub (the pull
+//     request's Delete branch button, or `gh api -X DELETE`), after which the next provisioning's
+//     fetch drops the row. A push of the deletion from the shared clone is not offered: the clone
+//     authenticates only through `legion credential`, which needs a tree's grant that no operator
+//     shell holds, and `jj git push --deleted` would push every pending deletion in the shared
+//     clone, other issues' branches with it.
 //   - No row at all is a brand-new issue, or a merged branch GitHub deleted. The workspace starts
 //     at main, with the bookmark created on it.
 func createWorkspace(ctx context.Context, run Runner, workspace Workspace) error {
@@ -48,8 +51,8 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace) error
 			return fmt.Errorf("Bookmark %s was deleted in the shared clone %s and the deletion never pushed, while %s is tracked at %s; workspace %s was not created. "+
 				"Restore it: `jj bookmark set %[1]s -r %[3]s -R %[2]s`. "+
 				"Cancel the deletion, and the next provisioning adopts origin's branch: `jj bookmark forget %[1]s -R %[2]s`. "+
-				"Start from main instead, deleting the branch on origin: `jj git push --remote origin --bookmark %[1]s -R %[2]s`",
-				workspace.Bookmark, cloneDir, remote, tracked[0], workspace.Dir)
+				"Start from main instead: delete the branch on GitHub (the pull request's Delete branch button, or `gh api -X DELETE repos/%[6]s/git/refs/heads/%[1]s`), and the next provisioning starts at main",
+				workspace.Bookmark, cloneDir, remote, tracked[0], workspace.Dir, workspace.Repo)
 		}
 		untracked, err := bookmarkCommits(ctx, run, cloneDir, "untracked_remote_bookmarks("+pattern+")", "Remote bookmark "+remote, workspace.Dir)
 		if err != nil {

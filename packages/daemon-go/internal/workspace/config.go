@@ -65,11 +65,13 @@ type Request struct {
 // Workspace is the durable location and branch bookmark for one issue. Dir has the shape
 // <state>/workspaces/<owner>/<repo>/<lowercase issue>; Clone, the shared clone every issue
 // workspace of the repository is a jj workspace of, <state>/repos/github.com/<owner>/<repo>. A
-// tree volume's init containers serialize on the file beside the clone, Clone + ".lock".
+// tree volume's init containers serialize on the file beside the clone, Clone + ".lock". Repo is
+// the repository, <owner>/<repo>.
 type Workspace struct {
 	Dir      string
 	Bookmark string
 	Clone    string
+	Repo     string
 }
 
 // In a pod, the one process that holds the provisioning token, Fetch, runs in a container that
