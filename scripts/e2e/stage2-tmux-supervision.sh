@@ -220,6 +220,13 @@ deadline_port=$(bash "$root/scripts/e2e/lib/free-port.sh" "$port") || fail "no f
 envoy_port=$(bash "$root/scripts/e2e/lib/free-port.sh" "$port" "$deadline_port") || fail "no free port for the Envoy listener"
 (cd "$root/packages/daemon-go" && go build -o "$work/legion" ./cmd/legion)
 (cd "$root/packages/envoy" && go build -o "$work/envoy-listener" ./cmd/listener)
+# The binary under proof, checkable after the run: the source it was built from and its hash.
+if command -v jj >/dev/null && jj -R "$root" root >/dev/null 2>&1; then
+  source_revision="$(jj -R "$root" log -r @ --no-graph -T 'commit_id ++ if(empty, " (working copy: no changes)", " (working copy has changes)")') on $(jj -R "$root" log -r @- --no-graph -T 'commit_id')"
+else
+  source_revision=$(git -C "$root" rev-parse HEAD)
+fi
+echo "   built legion from $source_revision; sha256 $(sha256sum "$work/legion" | cut -d' ' -f1)"
 
 if [ -z "${LEGION_E2E_PG_DSN:-}" ]; then
   docker ps >/dev/null # a broken docker is a failure of this run, not of the daemon
@@ -638,7 +645,19 @@ panes | grep -qxF "$worker_pane" || fail "the worker's pane $worker_pane is gone
 closed=$(claims close --json --claim "$c1") || fail "the operator's close of S2-1 through its root claim $c1 was refused"
 jq -e '.state == "retired"' <<<"$closed" >/dev/null || fail "the close of S2-1 left its root claim $(jq -c '{state, generation}' <<<"$closed")"
 claim_is "$c2" '.state == "retired"' || fail "the close of S2-1 left its worker $c2 $(claim_json "$c2" | jq -c '{state}'): a worker on a closed tree"
-pane_gone() { ! panes | grep -qxF "$1"; }
+# pane_gone PANE: PANE is not among the daemon's tmux panes. A listing that fails is no answer,
+# except that tmux's server exits with its last pane, so a server that no longer runs holds none:
+# `panes` drops tmux's stderr, and would read any failed listing as no panes at all.
+pane_gone() {
+  local listed
+  if ! listed=$(tm list-panes -a -F '#{pane_id}' 2>&1); then
+    case "$listed" in
+      *"no server running"* | *"error connecting to"*) return 0 ;;
+    esac
+    return 1
+  fi
+  ! grep -qxF "$1" <<<"$listed"
+}
 until_true 30 "the worker's pane $worker_pane to be gone" pane_gone "$worker_pane"
 legion stop --config "$work/legion.yaml" >/dev/null
 stop_daemon "$daemon_pid" "legion stop"
