@@ -1027,6 +1027,85 @@ func TestApplyOperationReplaceRefusesAWithThatParsesToNoText(t *testing.T) {
 	}
 }
 
+// A hard line break inside `with` puts the text after it at a true line start, where `1. `, `- `,
+// `# ` and `> ` are block markers — and replace is inline, so that text can only continue the
+// matched block as escaped literal prose, never open the list, heading or blockquote the caller
+// wrote the marker for. It used to be spliced in silently, which is the same silent structural
+// mismatch LEGION-280 closed at position 0, one hard break further in.
+func TestApplyOperationReplaceRejectsABlockMarkerAfterAHardBreak(t *testing.T) {
+	for _, test := range []struct{ name, with, marker string }{
+		{name: "a two-space break into an ordered one", with: "Body.  \n1. item", marker: "1. "},
+		{name: "a backslash break into a bullet", with: "Body.\\\n- item", marker: "- "},
+		{name: "a break into a heading", with: "Body.  \n# Heading", marker: "# "},
+		{name: "a break into a blockquote", with: "Body.  \n> Quote", marker: ">"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tree, err := parseInput("Body.\n")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
+			var invalid *ErrInvalidOp
+			if !errors.As(err, &invalid) || invalid.Field != "with" {
+				t.Fatalf("replace with %q = %v, want invalid with rather than a silent continuation line", test.with, err)
+			}
+			if !strings.Contains(invalid.Reason, "hard line break") {
+				t.Fatalf("reason = %q, want it to name the hard line break", invalid.Reason)
+			}
+			if !strings.Contains(invalid.Reason, `"`+test.marker+`"`) {
+				t.Fatalf("reason = %q, want it to name the %q marker", invalid.Reason, test.marker)
+			}
+		})
+	}
+}
+
+// The refusal is about a marker that genuinely opens a block at a true line start, and nothing
+// else: a bare newline is a soft break, which renders as a space; an ordered marker whose number
+// is not 1 cannot interrupt a paragraph, so `2024. was a year` after a break stays prose; and
+// marked text opens with its mark's delimiter, not the marker character. Each of these still
+// replaces, and its canonical markdown still reads back as the document it was rendered from.
+func TestApplyOperationReplaceKeepsAHardBreakThatOpensNoBlock(t *testing.T) {
+	for _, test := range []struct{ name, with string }{
+		{name: "a hard break into plain text", with: "Body.  \ntwo"},
+		{name: "a soft break into an ordered one", with: "Body.\n1. was a year"},
+		{name: "a hard break into an ordered marker that is not one", with: "Body.  \n4. was a year"},
+		{name: "a hard break into marked text", with: "Body.  \n**- bold**"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tree, err := parseInput("Body.\n")
+			if err != nil {
+				t.Fatal(err)
+			}
+			next, err := applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
+			if err != nil {
+				t.Fatalf("replace with %q: %v", test.with, err)
+			}
+			markdown, err := renderTree(next)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reparsed, err := parseInput(markdown)
+			if err != nil {
+				t.Fatalf("canonical markdown %q does not parse back: %v", markdown, err)
+			}
+			if !reparsed.Equal(next) {
+				t.Fatalf("canonical markdown %q reads back as a different document: the %q replacement changed the document's shape", markdown, test.with)
+			}
+			settled, err := renderTree(reparsed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			again, err := parseInput(settled)
+			if err != nil {
+				t.Fatalf("settled markdown %q does not parse back: %v", settled, err)
+			}
+			if !again.Equal(reparsed) {
+				t.Fatalf("markdown %q is not a fixed point: it reads back as a different document", settled)
+			}
+		})
+	}
+}
+
 // An empty `with` still deletes the matched span on purpose.
 func TestApplyOperationReplaceWithNothingStillDeletesTheMatch(t *testing.T) {
 	tree, err := parseInput("Keep this.\n")
