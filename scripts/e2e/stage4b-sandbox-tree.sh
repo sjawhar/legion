@@ -92,6 +92,7 @@ smoke_file=
 prod_baseline=
 audited=
 fixture_branch=
+pair_recorded=
 
 begin() {
   check=$1
@@ -145,6 +146,54 @@ pod_exec() {
   local pod=$1
   shift
   op exec "$pod" -c worker -- "$@"
+}
+
+# ---- the review pair: the reviewer's two thermonuclear task dispatches, as its session shows them ----
+
+pair_agents="thermonuclear-deep-review thermonuclear-code-quality"
+# pair_dispatch AGENT reads a reviewer session on stdin and prints what the session holds for AGENT:
+# every task call naming it, the tool result of each call (text, isError, details), and every
+# async-result delivery naming it. Nothing is summarised, so the evidence keeps each failure's text.
+pair_dispatch() {
+  jq -R -s -c --arg agent "$1" '[split("\n")[] | fromjson?] as $e
+    | [$e[] | select(.type == "message" and .message.role == "assistant") | .message.content[]?
+        | select(.type == "toolCall" and .name == "task" and (.arguments | tostring | contains($agent)))] as $calls
+    | ($calls | map(.id)) as $ids
+    | {agent: $agent,
+       calls: [$calls[] | {id, arguments}],
+       results: [$e[] | select(.type == "message" and .message.role == "toolResult" and (.message.toolCallId as $i | $ids | index($i)))
+         | .message | {toolCallId, isError, text: ([.content[]? | select(.type == "text") | .text] | join("\n")), details}],
+       deliveries: [$e[] | select(.type == "custom_message" and .customType == "async-result" and (.content | tostring | contains("agent=\"" + $agent + "\"")))
+         | {timestamp, content: (.content | tostring)}]}'
+}
+# pair_settled: the reviewer dispatched both agents and each dispatch has an outcome: a refused call,
+# a finished result naming the agent, or a delivered background result.
+pair_settled() {
+  local text agent
+  text=$(claim_session_text "$tree1" reviewer) || return 1
+  for agent in $pair_agents; do
+    pair_dispatch "$agent" <<<"$text" | jq -e --arg agent "$agent" '(.calls | length) > 0 and (
+      any(.results[]; .isError == true) or (.deliveries | length) > 0
+      or any(.results[].details.results[]?; .agent == $agent))' >/dev/null || return 1
+  done
+}
+# record_pair keeps the reviewer's session, the sessions of the subagents it started, and each
+# agent's dispatch under $evidence/review-pair, once.
+record_pair() {
+  local file pod text agent
+  [ -z "$pair_recorded" ] || return 0
+  file=$(claim_session_file "$tree1" reviewer) || return 1
+  pod=$(tree_pod "$tree1") || return 1
+  mkdir -p "$evidence/review-pair"
+  text=$(pod_exec "$pod" cat -- "$file") || return 1
+  printf '%s\n' "$text" >"$evidence/review-pair/reviewer.jsonl"
+  op exec "$pod" -c worker -- tar -C "$(dirname "$file")" -cf - "$(basename "$file" .jsonl)" 2>/dev/null |
+    tar -C "$evidence/review-pair" -xf - 2>/dev/null || true
+  for agent in $pair_agents; do
+    pair_dispatch "$agent" <<<"$text" >"$evidence/review-pair/$agent.json"
+  done
+  printf '%s\n' "$(basename "$file" .jsonl)" >"$evidence/review-pair/session-stem"
+  pair_recorded=1
 }
 claim_session_file() {
   "$work/legion" claims list --json --config "$work/legion.yaml" --operator-token-file "$work/operator-token" |
@@ -562,6 +611,7 @@ cleanup() {
   local status=$? p
   set +e
   stop_pid "$shape_pid"
+  [ -z "$tree1" ] || record_pair >/dev/null 2>&1
   stop_pid "$daemon_pid"
   collect_transcripts
   stop_pid "$watch_pid"
@@ -924,6 +974,9 @@ wait_for_phase "$tree1" reviewing 1200
 assert_handoff_committer "$tree1" tester testing 0
 wait_for_worker "$tree1" reviewer
 send_agent "$tree1" reviewer "Stage 4b proof review operation: review pull request #$pr_number in $repo as your role requires, running the deep and code-quality review passes your instructions name as task subagents, then submit APPROVE on it at its current head as legion-reviewer[bot] and complete the reviewer handoff."
+until_true 1800 "the reviewer's two thermonuclear dispatches to reach an outcome" pair_settled
+record_pair || fail "the reviewer's session and its review pair could not be recorded"
+note "the review pair's dispatches are kept in $evidence/review-pair ($(jq -r -s 'map("\(.agent): \(.calls | length) calls, \(.results | length) results, \(.deliveries | length) deliveries") | join("; ")' "$evidence"/review-pair/thermonuclear-*.json))"
 until_true 1800 "legion-reviewer[bot] approval of pull request #$pr_number at its head" reviewer_approved_head
 until_true 900 "$tree1 to leave reviewing for retro" issue_phase_in "$tree1" retro merging
 if issue_phase "$tree1" retro >/dev/null; then
@@ -938,20 +991,28 @@ note "$tree1 moved planner → implementer → tester → reviewer → retro →
 pass
 
 begin review-pair
-# The reviewer's two review passes are the image's thermonuclear agents, dispatched by name: the
-# reviewer session must hold a task call naming each, and each must have run (a subagent session
-# with a completed turn), not merely returned. A missing agent is refused to the model as
-# "Unknown agent", and a model that substitutes the bundled reviewer still posts a verdict, which
-# looks the same from outside.
-text=$(claim_session_text "$tree1" reviewer) || blocked "the reviewer's session could not be read"
-for agent in thermonuclear-deep-review thermonuclear-code-quality; do
-  jq -R -e --arg agent "$agent" 'fromjson? | select(.type == "message" and .message.role == "assistant")
-    | .message.content[]? | select(.type == "toolCall" and .name == "task") | .arguments | tostring | contains($agent)' <<<"$text" >/dev/null ||
-    fail "the reviewer dispatched no task naming $agent"
-  if grep -qF "Unknown agent \"$agent\"" <<<"$text"; then fail "the reviewer's task for $agent was refused: Unknown agent (the definition is not in the image)"; fi
-  if grep -qF 'No model selected' <<<"$text"; then fail "the reviewer's task for $agent did not run: No model selected"; fi
+# The reviewer's two review passes are the image's thermonuclear agents, dispatched by name, and each
+# must have run: a delivered background result names the agent as completed, and the subagent's own
+# session, beside the reviewer's, ends in an accepted yield. A missing agent is refused to the model
+# as "Unknown agent", an agent whose declared model the pod cannot resolve fails "No model
+# selected", and a model that substitutes the bundled reviewer still posts a verdict, which looks
+# the same from outside. tree-moved recorded the dispatches (record_pair); each failure below
+# quotes them.
+stem=$(cat "$evidence/review-pair/session-stem")
+for agent in $pair_agents; do
+  d=$evidence/review-pair/$agent.json
+  [ "$(jq '.calls | length' "$d")" -gt 0 ] || fail "the reviewer dispatched no task naming $agent"
+  said=$(jq -r '[.results[].text, .deliveries[].content] | join("\n")' "$d")
+  if grep -qF "Unknown agent \"$agent\"" <<<"$said"; then fail "the reviewer's task for $agent was refused: $(grep -F 'Unknown agent' <<<"$said" | head -1)"; fi
+  if grep -qF 'No model selected' <<<"$said"; then fail "the reviewer's task for $agent did not run: $(grep -F 'No model selected' <<<"$said" | head -1)"; fi
+  id=$(jq -r --arg agent "$agent" '[.deliveries[].content | capture("<task-result id=\"(?<id>[^\"]+)\" agent=\"" + $agent + "\" status=\"completed\"")? | .id] | first // empty' "$d")
+  [ -n "$id" ] || fail "the reviewer's task for $agent has no completed delivery: $(jq -c '[.results[] | {isError, text: .text[0:300]}] + [.deliveries[] | .content[0:300]]' "$d")"
+  sub=$evidence/review-pair/$stem/$id.jsonl
+  [ -s "$sub" ] || fail "$agent's session $stem/$id.jsonl is not beside the reviewer's"
+  jq -R -s -e '[split("\n")[] | fromjson? | select(.type == "message" and .message.role == "toolResult" and .message.toolName == "yield" and .message.isError == false)] | length > 0' "$sub" >/dev/null ||
+    fail "$agent's session $id holds no accepted yield"
+  note "$agent ran as $id: its delivery says completed and its session ends in an accepted yield"
 done
-note "the reviewer dispatched thermonuclear-deep-review and thermonuclear-code-quality, and neither was refused"
 pass
 
 begin first-turns

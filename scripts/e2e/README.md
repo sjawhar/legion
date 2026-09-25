@@ -478,8 +478,8 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 | `tree-separation` | tree 1's implementer and tree 2's planner run at once on different nodes, each tree on one node |
 | `repository-configuration` | tree 2's pods carry the fixture; the markers each loading path writes, and the agent's argv |
 | `issue-cap-moves` | tree 2 to backlog frees its slot, tree 3 is admitted, and tree 2's pods are gone |
-| `tree-moved` | tree 1 runs planner, implementer, tester, reviewer and retro to merging with real agents; the tester's adoption leaves a new empty change and keeps the implementer's author |
-| `review-pair` | the reviewer dispatched `thermonuclear-deep-review` and `thermonuclear-code-quality` by name, and each ran |
+| `tree-moved` | tree 1 runs planner, implementer, tester, reviewer and retro to merging with real agents; the tester's adoption leaves a new empty change and keeps the implementer's author; once both of the reviewer's thermonuclear dispatches have an outcome, the reviewer's session, its subagents' sessions and each dispatch are kept under `review-pair/` |
+| `review-pair` | the reviewer dispatched `thermonuclear-deep-review` and `thermonuclear-code-quality` by name; each one's delivered result says completed, and its own session ends in an accepted yield. A refusal (`Unknown agent`, `No model selected`) fails with its text |
 | `first-turns` | every role on tree 1 completed a first turn in its pod |
 | `token-rotation` | a pod's projected gateway token rotates, and a model turn after the rotation still goes through the gateway |
 | `idle-suspend` | a finished worker's Sandbox is Suspended with its pod gone and the tree volume bound |
