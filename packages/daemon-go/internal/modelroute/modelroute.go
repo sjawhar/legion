@@ -62,7 +62,8 @@ type Installed struct {
 // packages/coding-agent/src/config/settings.ts, at the pinned fork tag).
 const pinsVariable = "PI_CONFIG_FILES"
 
-// podVariables are the variables through which a repository's .env would reach what the pins hold:
+// podVariables are the variables through which a repository's .env would reach the route or what
+// the pins hold:
 // Oh My Pi fills a variable from the working directory's .env only when the process leaves it unset
 // or empty (packages/utils/src/env.ts at the pinned fork tag), so the pod's environment holds each.
 // An always variable replaces whatever the pod carried; the others are set only when the pod leaves
@@ -73,6 +74,11 @@ type podVariable struct {
 }
 
 var podVariables = []podVariable{
+	// Names the config root getAgentDir() joins under HOME (getConfigDirName, pi-utils dirs.ts), so it
+	// chooses the models.yml Oh My Pi reads the route from, which is no settings layer the pins
+	// outrank. parseEnvFile mirrors OMP_CONFIG_DIR onto it, so holding it closes both spellings; the
+	// image's root is .omp, where Install writes the profile.
+	{"PI_CONFIG_DIR", ".omp", true},
 	// Foundry puts FOUNDRY_BASE_URL ahead of a model's own baseUrl for every anthropic request
 	// (resolveDirectAnthropicBaseUrl, packages/ai/src/providers/anthropic-state.ts).
 	{"CLAUDE_CODE_USE_FOUNDRY", "0", true},
@@ -90,10 +96,11 @@ var podVariables = []podVariable{
 // overlays (PI_CONFIG_FILES; later files win), so for every single-value or list setting the pins
 // hold — disabledProviders, enabledModels, retry.modelFallback, the endpoints Oh My Pi posts to on
 // its own, and each role they name — a repository's own settings cannot override them, and with
-// podVariables held, so a repository's .env cannot reach them either. A record merges key by key,
-// so a repository can add keys the pins do not set (another fallback chain, another role); fallback
-// is off in the pins for that reason. It is environ unchanged when nothing was installed (a tmux
-// pane, the image build).
+// podVariables held, so a repository's .env cannot set those variables. That holds the variables
+// podVariables lists and no other path from the workspace into the process. A record merges key by
+// key, so a repository can add keys the pins do not set (another fallback chain, another role);
+// fallback is off in the pins for that reason. It is environ unchanged when nothing was installed
+// (a tmux pane, the image build).
 func (i Installed) Environ(environ []string) []string {
 	if i.Pins == "" {
 		return environ
