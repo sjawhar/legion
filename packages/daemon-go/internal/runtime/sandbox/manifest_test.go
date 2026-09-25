@@ -598,13 +598,18 @@ func TestTextSurvivesTheKubeletsExpansion(t *testing.T) {
 // A gateway URL that every pod's modelroute refuses is refused at configure, before any API call:
 // otherwise the image probe's refusal of it would read as the image failing its probe, and a URL
 // carrying credentials would be written in plain text into every pod template. The refusal never
-// repeats the credentials.
+// repeats the credentials, however malformed the userinfo is: the shapes url.Parse does not read
+// as userinfo included.
 func TestAGatewayURLEveryPodRefusesIsRefusedByConfigure(t *testing.T) {
 	for name, tc := range map[string]struct{ url, want string }{
-		"no scheme":   {"middleman.legion.internal", "is not an http(s) URL with a host"},
-		"ftp":         {"ftp://middleman.legion.internal", "is not an http(s) URL with a host"},
-		"credentials": {"https://legion:hunter2@middleman.legion.internal", "carries credentials"},
-		"a query":     {"https://middleman.legion.internal/?x=1", "carries a query or fragment"},
+		"no scheme":                        {"middleman.legion.internal", "is not an http(s) URL with a host"},
+		"ftp":                              {"ftp://middleman.legion.internal", "is not an http(s) URL with a host"},
+		"credentials":                      {"https://legion:hunter2@middleman.legion.internal", "carries credentials"},
+		"a query":                          {"https://middleman.legion.internal/?x=1", "carries a query or fragment"},
+		"credentials without a scheme":     {"legion:hunter2@middleman.legion.internal", "carries credentials"},
+		"credentials in an opaque URL":     {"https:legion:hunter2@middleman.legion.internal", "carries credentials"},
+		"credentials before a fragment":    {"https://legion:hunter2#x@middleman.legion.internal", "carries credentials"},
+		"credentials with a slash in them": {"https://legion:hun/ter2@middleman.legion.internal", "carries credentials"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			opts := testOptions()
@@ -613,7 +618,7 @@ func TestAGatewayURLEveryPodRefusesIsRefusedByConfigure(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("configure: %v, want a refusal containing %q", err, tc.want)
 			}
-			if strings.Contains(err.Error(), "hunter2") {
+			if strings.Contains(err.Error(), "hun") {
 				t.Fatalf("the refusal repeats the URL's password: %v", err)
 			}
 		})

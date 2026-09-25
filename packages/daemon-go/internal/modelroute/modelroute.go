@@ -165,12 +165,16 @@ func InstallKeyedBy(lookup func(string) (string, bool), tokenFile string) (Insta
 }
 
 // AnthropicRoute is the gateway's anthropic route, <gateway>/anthropic, for a gateway base URL that
-// is http(s) with a host and carries no credentials, query or fragment. A refusal never quotes a
-// URL's password. The shim and `legion probe-image` refuse to start on a URL it refuses, and the
+// is http(s) with a host and carries no credentials, query or fragment. A base URL has no use for
+// an `@`, so one anywhere is refused as credentials before the URL is parsed, and no refusal can
+// quote a password, however malformed the userinfo that url.Parse would misread. The shim and `legion probe-image` refuse to start on a URL it refuses, and the
 // Sandbox runtime refuses to be configured with one, so no pod is ever told it.
 func AnthropicRoute(raw string) (string, error) {
 	if raw == "" {
 		return "", fmt.Errorf("%s is set but empty: it must name the model gateway's base URL", EnvURL)
+	}
+	if strings.Contains(raw, "@") {
+		return "", fmt.Errorf("%s carries credentials; the gateway's key is the pod's projected token, never a URL's", EnvURL)
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -181,8 +185,6 @@ func AnthropicRoute(raw string) (string, error) {
 		return "", fmt.Errorf("%s is not an http(s) URL with a host: %w", EnvURL, err)
 	}
 	switch {
-	case u.User != nil:
-		return "", fmt.Errorf("%s carries credentials; the gateway's key is the pod's projected token, never a URL's", EnvURL)
 	case (u.Scheme != "http" && u.Scheme != "https") || u.Host == "":
 		return "", fmt.Errorf("%s %q is not an http(s) URL with a host", EnvURL, raw)
 	case u.RawQuery != "" || u.Fragment != "" || strings.ContainsAny(raw, "?#"):
