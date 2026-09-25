@@ -355,10 +355,10 @@ func TestRenamingAHeadingIsVersionedAndCredited(t *testing.T) {
 	}
 }
 
-// A browser that has a document open and changes nothing is a reader, not an author: a version
-// written for an agent's edit names only the agent, whether the edit reaches the room directly or
+// A browser that has a document open and changes nothing is no author of an agent's edit: the
+// version written for it names only the agent, whether the edit reaches the room directly or
 // through a committed transaction, and whether the reader left before it or is still connected.
-func TestAReaderWhoChangesNothingIsNoAuthorOfTheNextVersion(t *testing.T) {
+func TestAReaderIsNoAuthorOfAnAgentsVersion(t *testing.T) {
 	agent := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
 	edit := []model.EditOp{{Op: "replace", Find: "before", With: "after"}}
 	for _, test := range []struct {

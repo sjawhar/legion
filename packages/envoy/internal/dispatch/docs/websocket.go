@@ -353,15 +353,15 @@ func (s *Service) updateChangesMarkdown(room string, doc *crdt.Doc) bool {
 	return true
 }
 
-// recordConnectedActors credits an observed content change to whoever made it. A service
-// mutation (origin registered by serviceTransact) is its actor's alone, who joins `pending` and
+// recordConnectedActors credits an observed content change to its authors. A service mutation
+// (origin registered by serviceTransact) is its actor's alone, who joins `pending` and
 // becomes `lastActor`; a browser that was only connected while it happened is not credited. A
 // committed transaction's live write, which Ledger.Commit applies, was credited when the
 // transaction committed and is not credited again. Any other update is a browser edit by one of
-// the peers, which ygo applies while that peer's connection is registered, so the connected
-// peers all join `pending`: when exactly one is connected it is the latest edit source and
-// replaces `lastActor`, and otherwise the edit cannot be pinned on a single peer and no older
-// actor may stand in for it.
+// the peers, which ygo applies while that peer's connection is registered. ygo does not say which
+// connection sent it, so every connected peer joins `pending`: when exactly one is connected it is
+// the latest edit source and replaces `lastActor`, and otherwise the edit cannot be pinned on a
+// single peer and no older actor may stand in for it.
 func (s *Service) recordConnectedActors(room string, origin any) {
 	if _, published := origin.(*liveWriteOrigin); published {
 		return
@@ -394,9 +394,9 @@ func (s *Service) recordConnectedActors(room string, origin any) {
 	state.lastActor = sole
 }
 
-// addConnection registers a browser connected to room. It is credited only with content changes
-// observed while it is connected (recordConnectedActors), never for connecting: a reader who
-// changes nothing is no author of the next version.
+// addConnection registers a browser connected to room. It is credited only with browser edits
+// observed while it is connected (recordConnectedActors), never for connecting or for an agent's
+// edit.
 func (s *Service) addConnection(room string, id uint64, actor model.Actor) {
 	state := s.room(room)
 	state.mu.Lock()

@@ -47,9 +47,10 @@ and no rendering carries; the one measure the room's update observer and a trans
 in `applyLive` both apply) - and settlement writes a version only when a content-class row lies past
 the latest version's `doc_update_version` cursor or ask reconciliation changed something, so a
 comment's quote mark, a margin projection, or a reader's editor giving headings their ids never
-versions a document. A browser is credited as a version's author only for content changes made while
-it is connected (`recordConnectedActors`); opening a document credits nothing, so a reader who
-changes nothing is on no version and cannot stale an approval. A handler joins its document
+versions a document. A browser is credited as a version's author only for browser edits made while
+it is connected (`recordConnectedActors`), another browser's as well as its own, since a browser
+edit cannot be pinned on one connected peer; opening a document or an agent's edit credits it
+nothing, so a reader never causes a version and cannot stale an approval. A handler joins its document
 operations to its transaction with `Docs.Join`, which returns the transaction's ledger
 (`docs/ledger.go`), the only way to give a document operation a
 transaction. A joined operation never writes the room: it runs on the transaction's fork of the
