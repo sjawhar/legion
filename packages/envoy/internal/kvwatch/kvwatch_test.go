@@ -136,10 +136,10 @@ func TestAFirstStartFailingAfterARewatchLeavesTheLiveWatcherHealthy(t *testing.T
 	firstConn.Close()
 	into := newSeen()
 	w := kvwatch.New("test cache", first, into.apply, into.reset)
-	live, err := w.Rewatch(liveConn)
-	if err != nil {
+	if err := w.Rewatch(liveConn); err != nil {
 		t.Fatalf("rewatch: %v", err)
 	}
+	live := w.KV()
 
 	w.Start()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -183,7 +183,7 @@ func TestAFirstStartFailingDuringARewatchScanWaitsForThatScan(t *testing.T) {
 	}
 	w := kvwatch.New("test cache", first, apply, into.reset)
 	t.Cleanup(w.Stop)
-	if _, err := w.Rewatch(liveConn); err != nil {
+	if err := w.Rewatch(liveConn); err != nil {
 		t.Fatalf("rewatch: %v", err)
 	}
 	select {
@@ -220,10 +220,10 @@ func TestAWatcherThatEndsOnItsOwnRecordsItsError(t *testing.T) {
 	eventually(t, "the ended watcher's error", func() bool { return w.Err() != nil })
 
 	liveConn, _ := bucket(t, uri)
-	live, err := w.Rewatch(liveConn)
-	if err != nil {
+	if err := w.Rewatch(liveConn); err != nil {
 		t.Fatalf("rewatch: %v", err)
 	}
+	live := w.KV()
 	if err := w.Err(); err != nil {
 		t.Fatalf("a replacement watcher kept the old one's error: %v", err)
 	}
@@ -245,7 +245,7 @@ func TestAReplacedWatcherEndingRecordsNothing(t *testing.T) {
 	w := kvwatch.New("test cache", first, newSeen().apply, func() {})
 	w.Start()
 	eventually(t, "the first scan", w.Ready)
-	if _, err := w.Rewatch(secondConn); err != nil {
+	if err := w.Rewatch(secondConn); err != nil {
 		t.Fatalf("rewatch: %v", err)
 	}
 	firstConn.Close()
@@ -283,7 +283,7 @@ func TestARewatchOntoARecreatedBucketResetsTheCache(t *testing.T) {
 	if _, err := recreated.Put("fresh", []byte("1")); err != nil {
 		t.Fatalf("put: %v", err)
 	}
-	if _, err := w.Rewatch(conn); err != nil {
+	if err := w.Rewatch(conn); err != nil {
 		t.Fatalf("rewatch: %v", err)
 	}
 	eventually(t, "the recreated bucket's key", func() bool { return into.has("fresh") })
@@ -306,7 +306,7 @@ func TestCheckReportsABucketRecreatedUnderALiveWatcher(t *testing.T) {
 	w := kvwatch.New("test cache", kv, into.apply, into.reset)
 	w.Start()
 	eventually(t, "the ghost key", func() bool { return into.has("ghost") })
-	if err := w.Check(kv); err != nil || w.Err() != nil {
+	if err := w.Check(); err != nil || w.Err() != nil {
 		t.Fatalf("Check on the watched bucket = %v, Err %v, want both nil", err, w.Err())
 	}
 
@@ -320,7 +320,7 @@ func TestCheckReportsABucketRecreatedUnderALiveWatcher(t *testing.T) {
 	if _, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: "kvwatch-test"}); err != nil {
 		t.Fatalf("recreate bucket: %v", err)
 	}
-	if err := w.Check(kv); err != nil {
+	if err := w.Check(); err != nil {
 		t.Fatalf("Check on the recreated bucket: %v", err)
 	}
 	// The watcher may also have ended on its own by now, which records its own terminal error; either
@@ -329,7 +329,7 @@ func TestCheckReportsABucketRecreatedUnderALiveWatcher(t *testing.T) {
 		t.Fatal("Check on a recreated bucket left Err nil, so self-health would never rebuild the watcher")
 	}
 
-	if _, err := w.Rewatch(conn); err != nil {
+	if err := w.Rewatch(conn); err != nil {
 		t.Fatalf("rewatch: %v", err)
 	}
 	if err := w.Err(); err != nil {
@@ -357,10 +357,10 @@ func TestStopMakesTheEndSilentAndRewatchANoOp(t *testing.T) {
 	}
 
 	liveConn, _ := bucket(t, uri)
-	live, err := w.Rewatch(liveConn)
-	if err != nil {
+	if err := w.Rewatch(liveConn); err != nil {
 		t.Fatalf("a Rewatch after Stop returned an error: %v", err)
 	}
+	live := w.KV()
 	if _, err := live.Put("after-stop", []byte("1")); err != nil {
 		t.Fatalf("put: %v", err)
 	}
@@ -455,7 +455,7 @@ func TestAReplacedWatchersBufferedEntryIsDropped(t *testing.T) {
 	before := consumers()
 	rewatched := make(chan error, 1)
 	go func() {
-		_, err := w.Rewatch(secondConn)
+		err := w.Rewatch(secondConn)
 		rewatched <- err
 	}()
 	eventually(t, "the Rewatch's watcher", func() bool { return consumers() > before })
@@ -551,13 +551,13 @@ func TestConcurrentRewatchesOntoARecreatedBucketKeepTheNewKeys(t *testing.T) {
 	}
 
 	doneA := make(chan error, 1)
-	go func() { _, err := w.Rewatch(conn); doneA <- err }()
+	go func() { err := w.Rewatch(conn); doneA <- err }()
 	select {
 	case <-slow.entered:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Rewatch A never stopped the replaced watcher")
 	}
-	if _, err := w.Rewatch(conn); err != nil {
+	if err := w.Rewatch(conn); err != nil {
 		t.Fatalf("Rewatch B: %v", err)
 	}
 	eventually(t, "B's scan", func() bool { return into.has("fresh") })

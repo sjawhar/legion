@@ -74,17 +74,15 @@ func (s lastSeenSession) expired(now time.Time) bool {
 // GET /v1/sessions. This mirrors store.Registry, which already solved the same
 // problem for the interest registry.
 type SessionRegistry struct {
-	kv   nats.KeyValue
-	kvMu sync.RWMutex
-	ttl  time.Duration
+	ttl time.Duration
 
 	mu             sync.RWMutex
 	cache          map[string]cachedSession
 	cacheRevisions map[string]uint64
 	lastSeen       map[string]lastSeenSession
 
-	// watcher feeds the cache from the session bucket. Once it is ready the cache is consistent
-	// with the bucket.
+	// watcher feeds the cache from the session bucket and holds the handle the registry writes
+	// through. Once it is ready the cache is consistent with the bucket.
 	watcher *kvwatch.Watcher
 }
 
@@ -121,7 +119,6 @@ func OpenSessionRegistry(conn *nats.Conn, options ...SessionRegistryOption) (*Se
 		}
 	}
 	r := &SessionRegistry{
-		kv:             kv,
 		ttl:            ttl,
 		cache:          map[string]cachedSession{},
 		cacheRevisions: map[string]uint64{},
@@ -143,11 +140,7 @@ func (r *SessionRegistry) Ping() error {
 	if r == nil {
 		return ErrNoKV
 	}
-	kv := r.currentKV()
-	if kv == nil {
-		return ErrNoKV
-	}
-	if err := r.watcher.Check(kv); err != nil {
+	if err := r.watcher.Check(); err != nil {
 		return err
 	}
 	r.mu.Lock()
@@ -159,14 +152,10 @@ func (r *SessionRegistry) Ping() error {
 // ErrNoKV is returned when methods are called on a nil SessionRegistry.
 var ErrNoKV = fmt.Errorf("session registry: KV unavailable")
 
-// Rewatch moves the cache's watcher and the registry's handle to conn (kvwatch.Watcher.Rewatch).
+// Rewatch moves the cache's watcher and the handle the registry writes through to conn
+// (kvwatch.Watcher.Rewatch).
 func (r *SessionRegistry) Rewatch(conn *nats.Conn) error {
-	kv, err := r.watcher.Rewatch(conn)
-	if err != nil {
-		return err
-	}
-	r.setKV(kv)
-	return nil
+	return r.watcher.Rewatch(conn)
 }
 
 // resetCache empties the cache and its revision fence, for a recreated session bucket.
@@ -209,18 +198,6 @@ func (r *SessionRegistry) expiryFor(created time.Time, updatedAtMillis int64) ti
 		return time.UnixMilli(updatedAtMillis).Add(r.ttl)
 	}
 	return time.Now().Add(r.ttl)
-}
-
-func (r *SessionRegistry) currentKV() nats.KeyValue {
-	r.kvMu.RLock()
-	defer r.kvMu.RUnlock()
-	return r.kv
-}
-
-func (r *SessionRegistry) setKV(kv nats.KeyValue) {
-	r.kvMu.Lock()
-	r.kv = kv
-	r.kvMu.Unlock()
 }
 
 // StopWatch retires the cache's watcher for a shutdown (kvwatch.Watcher.Stop).
@@ -282,11 +259,7 @@ func (r *SessionRegistry) Put(sessionID string, entry SessionEntry) error {
 	if err != nil {
 		return err
 	}
-	kv := r.currentKV()
-	if kv == nil {
-		return ErrNoKV
-	}
-	revision, err := kv.Put(sessionID, buf)
+	revision, err := r.watcher.KV().Put(sessionID, buf)
 	if err != nil {
 		return err
 	}
@@ -332,10 +305,7 @@ func (r *SessionRegistry) Delete(sessionID string) error {
 		return ErrNoKV
 	}
 	revision := r.cachedRevision(sessionID)
-	kv := r.currentKV()
-	if kv == nil {
-		return ErrNoKV
-	}
+	kv := r.watcher.KV()
 	entry, err := kv.Get(sessionID)
 	opts := []nats.DeleteOpt{}
 	if err == nil {

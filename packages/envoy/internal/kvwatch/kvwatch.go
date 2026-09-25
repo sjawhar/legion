@@ -34,7 +34,10 @@ type Watcher struct {
 	// first is the handle Start watches.
 	first nats.KeyValue
 
-	mu         sync.RWMutex
+	mu sync.RWMutex
+	// kv is the handle the store reads and writes through: first, until a watch moves it together
+	// with the watcher, so the store writes through the connection its cache reads.
+	kv         nats.KeyValue
 	watcher    nats.KeyWatcher
 	generation uint64
 	stopped    bool
@@ -58,6 +61,7 @@ func New(name string, kv nats.KeyValue, apply func(nats.KeyValueEntry), reset fu
 		reset:  reset,
 		ready:  make(chan struct{}),
 		first:  kv,
+		kv:     kv,
 	}
 }
 
@@ -85,38 +89,46 @@ func (w *Watcher) Start() {
 	}()
 }
 
-// Rewatch opens the bucket on conn, replaces the current watcher with one there, clearing a
-// recorded terminal error once the replacement has started, and returns the handle so the store
-// writes through the same connection. After a server restart conn is the connection the store
-// opened on, reconnected in place; when the bus replaces a closed connection, conn is the new one
-// and the cache moves to it. A failure leaves the current watcher as it was. After Stop it arms
-// nothing and still returns the handle.
-func (w *Watcher) Rewatch(conn *nats.Conn) (nats.KeyValue, error) {
+// Rewatch opens the bucket on conn and replaces the current watcher with one there, clearing a
+// recorded terminal error once the replacement has started. The handle (KV) moves with it, so the
+// store writes through the connection its cache reads. After a server restart conn is the
+// connection the store opened on, reconnected in place; when the bus replaces a closed connection,
+// conn is the new one and the cache moves to it. A failure leaves the watcher and the handle as
+// they were. After Stop it arms nothing and still moves the handle.
+func (w *Watcher) Rewatch(conn *nats.Conn) error {
 	if conn == nil {
-		return nil, errors.New(w.name + ": no connection")
+		return errors.New(w.name + ": no connection")
 	}
 	js, err := conn.JetStream(nats.MaxWait(10 * time.Second))
 	if err != nil {
-		return nil, fmt.Errorf("open %s JetStream: %w", w.name, err)
+		return fmt.Errorf("open %s JetStream: %w", w.name, err)
 	}
 	kv, err := js.KeyValue(w.bucket)
 	if err != nil {
-		return nil, fmt.Errorf("open %s KV bucket: %w", w.name, err)
+		return fmt.Errorf("open %s KV bucket: %w", w.name, err)
 	}
 	if err := w.watch(kv); err != nil {
-		return nil, fmt.Errorf("watch %s KV bucket: %w", w.name, err)
+		return fmt.Errorf("watch %s KV bucket: %w", w.name, err)
 	}
-	return kv, nil
+	return nil
 }
 
-// Check reads kv's status, the round trip a store's health probe makes, returning its error, and
-// records a terminal error (Err) when the bucket's stream is not the one the current watcher reads:
-// the bucket was deleted and created again while the watcher ran. nats.go's ordered consumer can reset onto the new stream
-// without ending the watcher, and its revisions number from 1 again, so the cache would stay frozen
-// behind a live watcher. The recorded error makes the listener's self-health rebuild the watcher, and
-// that Rewatch resets the cache.
-func (w *Watcher) Check(kv nats.KeyValue) error {
-	stream, err := streamCreated(kv)
+// KV is the bucket handle the store reads and writes through.
+func (w *Watcher) KV() nats.KeyValue {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.kv
+}
+
+// Check reads the bucket's status through KV, the round trip a store's health probe makes,
+// returning its error, and records a terminal error (Err) when the bucket's stream is not the one
+// the current watcher reads: the bucket was deleted and created again while the watcher ran.
+// nats.go's ordered consumer can reset onto the new stream without ending the watcher, and its
+// revisions number from 1 again, so the cache would stay frozen behind a live watcher. The
+// recorded error makes the listener's self-health rebuild the watcher, and that Rewatch resets the
+// cache.
+func (w *Watcher) Check() error {
+	stream, err := streamCreated(w.KV())
 	if err != nil {
 		return err
 	}
@@ -169,19 +181,23 @@ func (w *Watcher) Stop() {
 	w.mu.Unlock()
 }
 
-// watch arms a watcher on kv and replaces the current one. The replaced watcher is stopped, and an
-// entry it still delivers is dropped. The switch to the new watcher and, for a recreated bucket,
-// the cache reset happen under applyMu, so no apply runs between them: an apply the replaced
-// watcher already started finishes first, and a watch that switches after this one computes
-// recreated against the new stream and applies only after the reset. Two Rewatches do overlap,
-// the bus's reconnect hook and the listener's self-health rebuild.
+// watch arms a watcher on kv and replaces the current one, moving the handle to kv. The replaced
+// watcher is stopped, and an entry it still delivers is dropped. The switch to the new watcher
+// and, for a recreated bucket, the cache reset happen under applyMu, so no apply runs between
+// them: an apply the replaced watcher already started finishes first, and a watch that switches
+// after this one computes recreated against the new stream and applies only after the reset. Two
+// Rewatches do overlap, the bus's reconnect hook and the listener's self-health rebuild. After
+// Stop it arms nothing and only moves the handle.
 func (w *Watcher) watch(kv nats.KeyValue) error {
 	if kv == nil {
 		return errors.New(w.name + ": KV unavailable")
 	}
-	w.mu.RLock()
+	w.mu.Lock()
 	stopped := w.stopped
-	w.mu.RUnlock()
+	if stopped {
+		w.kv = kv
+	}
+	w.mu.Unlock()
 	if stopped {
 		return nil
 	}
@@ -200,6 +216,7 @@ func (w *Watcher) watch(kv nats.KeyValue) error {
 		// outside the drain's deadline, so the drain ends its subscription; until then its
 		// updates are read and dropped, since nats.go blocks a watcher whose 256-entry buffer is
 		// full and a drain waits for every pending message to be delivered.
+		w.kv = kv
 		w.mu.Unlock()
 		w.applyMu.Unlock()
 		go func() {
@@ -213,6 +230,7 @@ func (w *Watcher) watch(kv nats.KeyValue) error {
 	w.generation++
 	generation := w.generation
 	w.watcher = watcher
+	w.kv = kv
 	w.stream = stream
 	w.err = nil
 	w.mu.Unlock()
