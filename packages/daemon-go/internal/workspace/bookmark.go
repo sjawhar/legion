@@ -1,7 +1,6 @@
 package workspace
 
 import (
-	"cmp"
 	"context"
 	"fmt"
 	"os"
@@ -51,12 +50,12 @@ var (
 //     shell holds, and `jj git push --deleted` would push every pending deletion in the shared
 //     clone, other issues' branches with it.
 //   - No row at all is a brand-new issue, or a merged branch GitHub deleted. The workspace starts
-//     at main, with the bookmark created on it.
+//     at main, resolved to one commit first (mainCommit), with the bookmark created on it.
 func createWorkspace(ctx context.Context, run Runner, workspace Workspace) error {
 	cloneDir := workspace.Clone
 	workspaceName := filepath.Base(workspace.Dir)
 	remote := workspace.Bookmark + "@origin"
-	rows, err := issueBookmark(ctx, run, workspace)
+	rows, err := readBookmark(ctx, run, workspace, workspace.Bookmark)
 	if err != nil {
 		return err
 	}
@@ -89,13 +88,19 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace) error
 			return err
 		}
 		revision = origin.added[0]
-		tracked, err := issueBookmark(ctx, run, workspace)
+		tracked, err := readBookmark(ctx, run, workspace, workspace.Bookmark)
 		if err != nil {
 			return err
 		}
 		if now := tracked.local; !now.present || now.conflict || now.added[0] != revision {
 			return fmt.Errorf("Bookmark %s moved from %s to %s while it was being tracked; workspace %s was not created. Provision again: the next provisioning starts at origin's branch as it is then",
 				remote, revision, listed(now.added), workspace.Dir)
+		}
+	}
+	fromMain := revision == ""
+	if fromMain {
+		if revision, err = mainCommit(ctx, run, workspace); err != nil {
+			return err
 		}
 	}
 	if err := os.MkdirAll(filepath.Dir(workspace.Dir), 0o700); err != nil {
@@ -109,7 +114,7 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace) error
 	// the add snapshots the clone's own working copy. Every other command provisioning and removal
 	// run on the clone, and every command a refusal prints, carries the flag.
 	add := []string{
-		"jj", "workspace", "add", workspace.Dir, "--name", workspaceName, "--revision", cmp.Or(revision, "main"), "-R", cloneDir,
+		"jj", "workspace", "add", workspace.Dir, "--name", workspaceName, "--revision", revision, "-R", cloneDir,
 	}
 	result, err := runCommand(ctx, run, add, nil, "")
 	if err != nil {
@@ -128,11 +133,33 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace) error
 			return err
 		}
 	}
-	if revision != "" {
+	if !fromMain {
 		return nil
 	}
 	_, err = RunChecked(ctx, run, []string{"jj", "bookmark", "set", workspace.Bookmark, "-r", "@"}, nil, workspace.Dir)
 	return err
+}
+
+// mainCommit is the commit a workspace with no issue branch starts at: main's, resolved to one
+// commit id as the issue bookmark is, since a `jj workspace add --revision main` jj cannot resolve
+// still registers the workspace, parented on the root commit, before it reports the error. An
+// absent main (a repository whose default branch is another) or a conflicted one is refused by
+// name before anything is added.
+func mainCommit(ctx context.Context, run Runner, workspace Workspace) (string, error) {
+	rows, err := readBookmark(ctx, run, workspace, "main")
+	if err != nil {
+		return "", err
+	}
+	switch main := rows.local; {
+	case main.conflict:
+		return "", fmt.Errorf("Bookmark main is conflicted %s; workspace %s was not created. Keep origin's: `jj bookmark set main -r main@origin --ignore-working-copy -R %s`, and the next provisioning starts there",
+			main.sides(), workspace.Dir, workspace.Clone)
+	case !main.present:
+		return "", fmt.Errorf("Bookmark main is not in the shared clone %s; workspace %s was not created. An issue with no branch starts at main, so the repository's default branch must be main",
+			workspace.Clone, workspace.Dir)
+	default:
+		return main.added[0], nil
+	}
 }
 
 // bookmarkRow is one row of `jj bookmark list --all-remotes`: whether the bookmark exists there,
@@ -153,8 +180,8 @@ func (r bookmarkRow) sides() string {
 	return sides
 }
 
-// bookmarkRows is the issue bookmark's local row and origin's. A row jj does not list is the zero
-// row: absent.
+// bookmarkRows is a bookmark's local row and origin's. A row jj does not list is the zero row:
+// absent.
 type bookmarkRows struct {
 	local, origin bookmarkRow
 }
@@ -164,26 +191,26 @@ type bookmarkRows struct {
 // ids, comma-separated.
 const bookmarkRowTemplate = `if(remote, remote, "local") ++ "|" ++ if(present, "1", "0") ++ "|" ++ if(conflict, "1", "0") ++ "|" ++ if(tracked, "1", "0") ++ "|" ++ added_targets.map(|c| c.commit_id()).join(",") ++ "|" ++ removed_targets.map(|c| c.commit_id()).join(",") ++ "\n"`
 
-// issueBookmark reads the issue's bookmark in the shared clone, its local row and origin's, in one
-// `jj bookmark list`. A bookmark that exists nowhere lists nothing. Every row must have the
+// readBookmark reads the bookmark name in the shared clone (the issue's, or main), its local row and
+// origin's, in one `jj bookmark list`. A bookmark that exists nowhere lists nothing. Every row must have the
 // template's shape, with 0/1 flags, full commit ids, one added commit on a present row that is not
 // conflicted and at least one on a conflicted row, and one row per place: a commit jj cannot load
 // prints an error value where its id goes, which a workspace add would take as a revision.
-func issueBookmark(ctx context.Context, run Runner, workspace Workspace) (bookmarkRows, error) {
-	list := []string{"jj", "bookmark", "list", "--all-remotes", "exact:" + workspace.Bookmark, "-T", bookmarkRowTemplate, "--ignore-working-copy", "--color=never", "-R", workspace.Clone}
+func readBookmark(ctx context.Context, run Runner, workspace Workspace, name string) (bookmarkRows, error) {
+	list := []string{"jj", "bookmark", "list", "--all-remotes", "exact:" + name, "-T", bookmarkRowTemplate, "--ignore-working-copy", "--color=never", "-R", workspace.Clone}
 	result, err := runCommand(ctx, run, list, nil, "")
 	if err != nil {
 		return bookmarkRows{}, fmt.Errorf("run %s: %w", strings.Join(list, " "), err)
 	}
 	if result.ExitCode != 0 {
-		return bookmarkRows{}, fmt.Errorf("Bookmark %s could not be resolved; workspace %s was not created: %w", workspace.Bookmark, workspace.Dir, commandFailure(list, result))
+		return bookmarkRows{}, fmt.Errorf("Bookmark %s could not be resolved; workspace %s was not created: %w", name, workspace.Dir, commandFailure(list, result))
 	}
 	var rows bookmarkRows
 	seen := map[string]bool{}
 	for _, line := range nonEmptyLines(result.Stdout) {
 		where, row, ok := parseBookmarkRow(line)
 		if !ok || seen[where] {
-			return bookmarkRows{}, fmt.Errorf("Bookmark %s's row %q is not the shape %s prints; workspace %s was not created", workspace.Bookmark, line, strings.Join(list, " "), workspace.Dir)
+			return bookmarkRows{}, fmt.Errorf("Bookmark %s's row %q is not the shape %s prints; workspace %s was not created", name, line, strings.Join(list, " "), workspace.Dir)
 		}
 		seen[where] = true
 		switch where {
