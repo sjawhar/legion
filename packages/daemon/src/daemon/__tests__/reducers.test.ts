@@ -1982,6 +1982,86 @@ describe("push fix-attempt classification", () => {
   });
 });
 
+describe("a review decision across a new head", () => {
+  const prKey = `${repo}#${prNumber}`;
+  const orders = ["push first", "synchronize first"] as const;
+
+  /** The two webhooks one push of `sha` fires, in `order`; `push` overrides the push envelope. */
+  function arrive(
+    state: LegionState,
+    sha: string,
+    order: (typeof orders)[number],
+    push: Record<string, unknown> = {}
+  ): void {
+    if (order === "push first") pushEffects(state, { after: sha, ...push });
+    effects(state, syncPayload(sha));
+    if (order === "synchronize first") pushEffects(state, { after: sha, ...push });
+  }
+
+  for (const order of orders) {
+    it(`the reviewer's handoff-only push keeps its changes-requested decision (${order})`, () => {
+      const state = rootState();
+      attachChild(state);
+      addPr(state, { reviewDecision: "changes_requested" });
+
+      if (order === "push first") pushEffects(state, { after: "review-handoff-sha" });
+      effects(state, syncPayload("review-handoff-sha"));
+      // Between the two webhooks the round is still the one the review asked changes of.
+      expect(state.prs[prKey]?.reviewDecision).toBe("changes_requested");
+      if (order === "synchronize first") pushEffects(state, { after: "review-handoff-sha" });
+
+      expect(state.prs[prKey]).toMatchObject({
+        headSha: "review-handoff-sha",
+        reviewDecision: "changes_requested",
+      });
+    });
+
+    it(`a handoff-only push still drops an approval, which is pinned to the head (${order})`, () => {
+      const state = rootState();
+      attachChild(state);
+      addPr(state, { reviewDecision: "approved" });
+
+      arrive(state, "review-handoff-sha", order);
+
+      expect(state.prs[prKey]?.reviewDecision).toBeUndefined();
+    });
+
+    for (const [name, push] of [
+      ["changes a path outside .legion/", { changed_paths: ".legion/implement.json\nsrc/fix.ts" }],
+      ["cannot be classified", { changed_paths: undefined, changed_paths_truncated: undefined }],
+    ] as const) {
+      it(`a push that ${name} ends the round and drops changes requested (${order})`, () => {
+        const state = rootState();
+        attachChild(state);
+        addPr(state, { reviewDecision: "changes_requested" });
+
+        arrive(state, "fix-sha", order, push);
+
+        expect(state.prs[prKey]?.headSha).toBe("fix-sha");
+        expect(state.prs[prKey]?.reviewDecision).toBeUndefined();
+      });
+    }
+  }
+
+  it("a push redelivered after it settled its head leaves a later review's decision alone", () => {
+    const state = rootState();
+    attachChild(state);
+    addPr(state, { reviewDecision: "changes_requested" });
+    const fix = { after: "fix-sha", changed_paths: "src/fix.ts" };
+    effects(state, syncPayload("fix-sha"));
+    pushEffects(state, fix);
+    expect(state.prs[prKey]?.reviewDecision).toBeUndefined();
+
+    effects(
+      state,
+      reviewPayload({ state: "changes_requested", commit_id: "fix-sha", head_sha: "fix-sha" })
+    );
+    pushEffects(state, fix);
+
+    expect(state.prs[prKey]?.reviewDecision).toBe("changes_requested");
+  });
+});
+
 describe("settleCiVerdict", () => {
   it("routes a CI settlement to the issue's active phase instead of a fixed role", () => {
     const state = rootState();

@@ -118,7 +118,17 @@ export interface PrState {
   /** True while a terminal GitHub read holds the tie at the stored attempt set; released when the set advances or a pending read clears it. */
   ciReconciled: boolean;
   fixAttempts: number;
+  /** `approved` is pinned to the head it was given at: every new head drops it. `changes_requested`
+   * lasts the review round: a new head that changes anything outside `.legion/` ends the round and
+   * drops it, and a handoff-only head (the reviewer's own `.legion/review.json` push) keeps it. */
   reviewDecision?: "approved" | "changes_requested";
+  /** Present exactly when the current `headSha`'s arrival in `resetPrHead` kept a
+   * `changes_requested` decision with no push classification for that sha yet (the synchronize
+   * arrived before its push webhook). The push webhook whose `after` equals `headSha` settles it:
+   * handoff-only keeps the decision, anything else drops it, and either way deletes this field, so
+   * a redelivered push never drops a decision a later review recorded. The next `resetPrHead` sets
+   * or deletes it afresh. Never written as `false`, like `headCounted`. */
+  reviewDecisionUnsettled?: true;
   /** Present exactly when the current `headSha`'s arrival in `resetPrHead` incremented
    * `fixAttempts` (prior verdict was red and no pending push classified this sha handoff-only). A
    * later handoff-only push webhook whose `after` equals `headSha` takes the attempt back and
@@ -307,7 +317,7 @@ export interface PersistedSpawnRequest {
 }
 
 export interface LegionState {
-  version: 33;
+  version: 34;
   project: string;
   issues: Record<IssueKey, IssueNode>;
   trees: Record<IssueKey, TreeState>;
@@ -487,6 +497,7 @@ const PrStateSchema = z
     ciReconciled: z.boolean(),
     fixAttempts: z.number().int().nonnegative(),
     reviewDecision: z.enum(["approved", "changes_requested"]).optional(),
+    reviewDecisionUnsettled: z.literal(true).optional(),
     headCounted: z.literal(true).optional(),
     pendingPush: z
       .object({ sha: z.string().min(1), handoffOnly: z.boolean() })
@@ -615,7 +626,7 @@ const ExternalControllerLocatorSchema = z
   .strict();
 const LegionStateSchema = z
   .object({
-    version: z.literal(33),
+    version: z.literal(34),
     project: z.string().refine(isLegionProjectToken, {
       message: "Expected valid Legion project token",
     }),
@@ -682,7 +693,7 @@ export function newLegionState(project: string, cap: number): LegionState {
   assertLegionProjectToken(project);
 
   return {
-    version: 33,
+    version: 34,
     project,
     issues: {},
     trees: {},
@@ -1548,6 +1559,14 @@ function migrateV32State(
   return { ...state, version: 33, controllerLocator };
 }
 
+/** v33 -> v34: PrState gains the optional `reviewDecisionUnsettled` marker. A pure bump: absent is
+ * the correct starting value for every PR, since a v33 daemon settled each decision when its head
+ * arrived, and the next head's `resetPrHead` decides afresh. */
+function migrateV33State(state: unknown): unknown {
+  if (!recordValue(state) || state.version !== 33) return state;
+  return { ...state, version: 34 };
+}
+
 export async function loadState(file: string, init: LegionStateInit): Promise<LegionState> {
   let raw: string;
   try {
@@ -1597,13 +1616,14 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
     (state) => migrateV30State(state, migratedAt),
     migrateV31State,
     (state) => migrateV32State(state, init.onHeadlessControllerStripped),
+    migrateV33State,
   ];
   const state = postGateMigrations.reduce((current, migrate) => migrate(current), gatedState);
   let version: unknown;
   if (typeof state === "object" && state !== null && "version" in state) {
     version = state.version;
   }
-  if (version !== 33) {
+  if (version !== 34) {
     throw new Error(`Unsupported Legion state version: ${String(version)}`);
   }
 

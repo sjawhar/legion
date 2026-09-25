@@ -44,7 +44,8 @@ not "no review yet"; it is "no review that branch protection counts".
 - The daemon already does this. `state.prs[...].reviewDecision` is **not** GitHub's field: the
   `review` reducer (`reducers.ts`) derives it from Envoy's normalized `pull_request_review` payload
   — `payload.state` lowercased, head-gated for `approved` against `pr.headSha`, recorded from any
-  commit for `changes_requested`, dropped on every new head by `resetPrHead` — and the worker
+  commit for `changes_requested`; a new head drops an approval always and `changes_requested` unless
+  the head is handoff-only (the reviewer's own `.legion/review.json` push) — and the worker
   catch-up reports it as `review: approved | changes_requested | pending`. `/worker/spawn`'s
   corrective-round status write keys on that daemon field. Keep it so: a future reader tempted to
   "confirm" against GitHub's `reviewDecision` would see `REVIEW_REQUIRED` forever and undo a real
