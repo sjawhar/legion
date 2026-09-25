@@ -39,6 +39,28 @@ func (e *ErrInvalidAskBlock) Error() string { return e.Reason.Error() }
 
 func (e *ErrInvalidAskBlock) Unwrap() error { return e.Reason }
 
+// SettlementActor writes what a document's settlement decides on its own: the retraction of an
+// ask whose block left the document. Crediting the room's last editor instead would put a
+// deletion nobody made in their name.
+var SettlementActor = model.Actor{Kind: "system", ID: "document-settlement"}
+
+// SettlementRetractionReason opens the reason of every retraction settlement writes, followed by
+// the version the block left in.
+const SettlementRetractionReason = "removed from the document in version"
+
+// settlementRetracted reports whether ask's retraction is one settlement wrote when its block
+// left the document, which returning the block undoes. A retraction a person or a session wrote
+// is their decision and stands, however the document moves. Retractions written before
+// settlement began naming itself carry only its reason, so that prefix still counts - which is
+// why resolveAsk refuses a caller reason that begins with it.
+func settlementRetracted(ask model.Ask) bool {
+	if ask.State != "resolved" || ask.Resolution == nil || ask.Resolution.Kind != "retracted" {
+		return false
+	}
+	return ask.Resolution.Actor.SameAs(SettlementActor) ||
+		strings.HasPrefix(ask.Resolution.Reason, SettlementRetractionReason)
+}
+
 func (s *Service) reconcileAskBlocks(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -97,7 +119,7 @@ func (s *Service) reconcileAskBlocks(
 		}
 		delete(rows, block.id)
 
-		if ask.State == "resolved" && ask.Resolution != nil && ask.Resolution.Kind == "retracted" {
+		if settlementRetracted(ask) {
 			restored, err := restoreRetractedAsk(ctx, tx, ask)
 			if err != nil {
 				return settlementReconciliation{}, err
@@ -171,8 +193,8 @@ func (s *Service) reconcileAskBlocks(
 		}
 		resolution := model.AskResolution{
 			Kind:   "retracted",
-			Reason: fmt.Sprintf("removed from the document in version %d", version),
-			Actor:  actor,
+			Reason: fmt.Sprintf("%s %d", SettlementRetractionReason, version),
+			Actor:  SettlementActor,
 			At:     time.Now().UTC(),
 		}
 		encoded, err := json.Marshal(resolution)
@@ -185,7 +207,7 @@ func (s *Service) reconcileAskBlocks(
 		ask.State = "resolved"
 		ask.Resolution = &resolution
 		reconciled.events = append(reconciled.events, documentAskEvent(
-			owner, artifactID, "ask.resolved", actor, model.NewAskEventPayload(ask, model.ReferenceChanges{}),
+			owner, artifactID, "ask.resolved", SettlementActor, model.NewAskEventPayload(ask, model.ReferenceChanges{}),
 		))
 	}
 	return reconciled, nil

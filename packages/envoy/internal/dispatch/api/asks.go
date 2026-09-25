@@ -337,16 +337,28 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+	// A block ask's text lives in its `:::ask` block and the row projects it, so writing both
+	// needs the document: the edit joins the ledger here, before it takes any lock.
+	//
+	// Locks, in the order this handler takes them: the owner row (requireOpenOwner), the ask
+	// row, then - inside the live write - the room's writer slot and the document's advisory
+	// lock. Settlement takes the owner row, the advisory lock, then the ask rows, so the two
+	// order the ask row and the advisory lock oppositely. They cannot deadlock because a block
+	// ask's owner row IS its block document's owner row: createAskBlock copies the document's
+	// owner onto the ask, so the owner row serialises both transactions before either takes a
+	// second lock. closeAsk relies on the same invariant.
+	documentCtx, ledger := s.deps.Docs.Join(r.Context(), tx)
+	defer ledger.Discard()
 	unlockedAsk, err := s.loadAsk(r.Context(), tx, r.PathValue("id"))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if err := s.requireOpenOwner(r.Context(), tx, ownerOf(unlockedAsk.IssueKey, unlockedAsk.ArtifactID)); err != nil {
+	if err := s.requireOpenOwner(documentCtx, tx, ownerOf(unlockedAsk.IssueKey, unlockedAsk.ArtifactID)); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	ask, err := s.lockAskForTransition(r.Context(), tx, unlockedAsk.ID)
+	ask, err := s.lockAskForTransition(documentCtx, tx, unlockedAsk.ID)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -382,13 +394,38 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 	if input.Urgency != nil {
 		ask.Urgency = requestedUrgency
 	}
+	// The block is the text's source of truth. Write it first, then take the row's values from
+	// what the block parses back to, so trimming can never leave the two disagreeing and the
+	// next settlement has nothing to reconcile. Only the fields this request named are written:
+	// the row holds the question as plain text, so rebuilding the whole body from it would strip
+	// an untouched question's formatting and links and orphan the anchors inside it.
+	if ask.BlockID != nil {
+		blockArtifact, err := blockArtifactOf(ask)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		edit := docs.AskBlockEdit{Question: input.Question, Options: input.Options, Multiple: input.Multiple}
+		if input.Urgency != nil {
+			edit.Urgency = &requestedUrgency
+		}
+		stored, err := s.deps.Docs.SetAskBlockText(documentCtx, blockArtifact, *ask.BlockID, edit, actor)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		ask.Question = stored.Question
+		ask.Options = stored.Options
+		ask.Multiple = stored.Multiple
+		ask.Urgency = stored.Urgency
+	}
 	options, err := encodeJSON(ask.Options)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
 	var editedAt time.Time
-	if err := tx.QueryRow(r.Context(), `
+	if err := tx.QueryRow(documentCtx, `
 		update asks
 		set question = $2, options = $3, multiple = $4, urgency = $5, edited_at = now()
 		where id = $1
@@ -398,12 +435,12 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ask.EditedAt = timestampPtr(&editedAt)
-	askChanges, err := s.replaceReferences(r.Context(), tx, "ask", ask.ID, ask.Question)
+	askChanges, err := s.replaceReferences(documentCtx, tx, "ask", ask.ID, ask.Question)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	event, err := s.appendEvent(r.Context(), tx, ownerOf(ask.IssueKey, ask.ArtifactID).event(
+	event, err := s.appendEvent(documentCtx, tx, ownerOf(ask.IssueKey, ask.ArtifactID).event(
 		"ask.edited",
 		actor,
 		model.NewAskEditEventPayload(ask, previous, actor, askChanges),
@@ -412,16 +449,25 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if err := refs.Stamp(r.Context(), tx, "ask", ask.ID, event.ID); err != nil {
+	if err := refs.Stamp(documentCtx, tx, "ask", ask.ID, event.ID); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if err := tx.Commit(r.Context()); err != nil {
+	if err := ledger.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publish(event)
+	s.publishDocumentEvents(ledger, event)
 	WriteJSON(w, http.StatusOK, ask)
+}
+
+// blockArtifactOf is the document an indexed ask's block lives in. Every write that touches the
+// block needs it, and a row carrying a block id without one is a broken invariant, not input.
+func blockArtifactOf(ask model.Ask) (string, error) {
+	if ask.BlockArtifactID == nil {
+		return "", fmt.Errorf("ask %q has block id without block artifact", ask.ID)
+	}
+	return *ask.BlockArtifactID, nil
 }
 
 func timestampPtr(value *time.Time) *string {

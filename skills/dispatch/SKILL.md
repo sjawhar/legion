@@ -417,10 +417,16 @@ At least one field besides `ask` is required. Use this only while the same decis
 log and invalidates any answer draft against the prior `edited_at` revision, so the human sees the new wording and explicitly reconfirms.
 An answered or resolved ask cannot be edited. If the decision is moot or superseded, retract the old ask and open a new one.
 
-An ask that lives as an `ask` block in a document takes its question and options from the document, so edit those with
-`dispatch_doc_edit` (`replace` on the block's text, or `delete`/`insert` on its option items), never with `dispatch_edit_ask`: the
-next document save reasserts the block's text over whatever `dispatch_edit_ask` wrote, and that reversal is logged as an edit by
-the document's saver. `dispatch_edit_ask` is for asks opened with `dispatch_ask` that have no block.
+An ask that lives as an `ask` block in a document keeps its question and options in the block, and `dispatch_edit_ask` writes the
+block along with the row, so the edit stands and the document reads the same. It changes only the fields you name: pass `urgency`
+alone and the question's own wording, formatting, links and comment anchors are untouched. Pass `question` or `options` and that part
+is rewritten, so anchors inside the text you replaced move as they would for any document edit. Either way it is a document edit: it
+writes a new version, which on a spec awaiting approval closes the design gate until the new version is approved. Editing the block
+with `dispatch_doc_edit` works too and is the way to change anything else about it, including adding formatting to a question.
+Re-sending a field unchanged rewrites nothing, so retrying the whole ask is safe.
+Two shapes the block cannot carry are refused outright, naming the field and writing nothing: an option label containing `": "`,
+which is what separates a label from its description, and a question with a line beginning `:::`. Blank lines separate paragraphs;
+a single newline is kept as a line break.
 
 An ask stays open until a human answers, unless its question no longer needs that answer. Retract a moot or superseded question, or
 self-resolve one after finding the answer:
@@ -432,7 +438,10 @@ dispatch_resolve_ask({
 })
 ```
 Use `retracted` when the question is obsolete and `resolved` when you found the answer. Include the reason because the question remains
-in its Conversation card and reply thread. Resolution is not an answer: it never records a human decision, and an answered ask cannot be
+in its Conversation card and reply thread; a reason beginning `removed from the document in version` is refused, because that is how a
+retraction the document's own settlement wrote is recognised. Resolving a block ask records it in the block too, so it stays resolved
+however the document moves afterwards — while deleting the block from the document is the other way to close one, and putting the block
+back reopens it. Resolution is not an answer: it never records a human decision, and an answered ask cannot be
 resolved. A human may reply to an open or answered ask; so may you, e.g. after finding the answer — use `reply_to_ask` on
 `dispatch_comment` (mutually exclusive with `reply_to`).
 A review comment you opened has its own closer, `dispatch_resolve_comment` — see

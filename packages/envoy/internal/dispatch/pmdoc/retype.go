@@ -126,3 +126,54 @@ func SetBlockAttributes(doc *Node, blockID string, attributes Attrs) (*Node, err
 	}
 	return out, nil
 }
+
+// SetBlockBody replaces a typed block's children, and the named attributes, in place. The block
+// keeps its position, its type, its identity, and every attribute the call does not name, so a
+// reader that finds it after the write finds the same block: replacing the node outright would
+// lose its id, the closer would stamp a fresh one, and a projection keyed by block id - an ask -
+// would be opened again as a new row and the original retracted as removed.
+func SetBlockBody(doc *Node, blockID string, children []*Node, attributes Attrs) (*Node, error) {
+	if doc == nil || doc.Type != "doc" {
+		return nil, fmt.Errorf("%w: SetBlockBody wants a doc", ErrSchema)
+	}
+	if blockID == "" {
+		return nil, fmt.Errorf("%w: block id is required", ErrSchema)
+	}
+
+	var targetPath []int
+	walk(doc, func(node *Node, path []int, _, _ int) bool {
+		if node.Attrs[BlockIDAttr] != blockID {
+			return true
+		}
+		if _, typed := typedBlock(node.Type); !typed {
+			return true
+		}
+		targetPath = append([]int(nil), path...)
+		return false
+	})
+	if targetPath == nil {
+		return nil, fmt.Errorf("%w: typed block %q", ErrTargetNotFound, blockID)
+	}
+
+	out := cloneNode(doc)
+	target := nodeAtPath(out, targetPath)
+	target.Children = make([]*Node, 0, len(children))
+	for _, child := range children {
+		target.Children = append(target.Children, cloneNode(child))
+	}
+	target.Attrs = cloneAttrs(target.Attrs)
+	for name, value := range attributes {
+		if name == BlockIDAttr {
+			continue
+		}
+		if value == nil {
+			delete(target.Attrs, name)
+			continue
+		}
+		target.Attrs[name] = value
+	}
+	if err := out.Validate(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
