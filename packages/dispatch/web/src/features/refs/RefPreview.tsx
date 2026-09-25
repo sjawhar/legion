@@ -67,20 +67,14 @@ function clearTimers(): void {
   window.clearTimeout(closeTimer);
 }
 
-function scheduleClose(anchor: HTMLElement): void {
-  window.clearTimeout(closeTimer);
-  closeTimer = window.setTimeout(() => {
-    if (state?.target.anchor === anchor) {
-      setState(undefined);
-    }
-  }, REF_PREVIEW_CLOSE_DELAY_MS);
-}
-
 /** The one hover card's controller. Module-level on purpose: "one card at a time" is a single
- * piece of state, and `RefPreviewHost` drives it from document-level listeners. */
-export const refPreview = {
-  /** Hover began on an anchor outside the open card's hover zone: open its card after the delay
-   * unless the pointer leaves first. */
+ * piece of state, and `RefPreviewHost` drives it from document-level listeners. Every transition
+ * but `close` is private because it is only correct once the caller has judged the event against
+ * `inHoverZone`, which `attachTriggers` alone does; `closeRefPreview` is the whole outside
+ * surface. */
+const refPreview = {
+  /** Hover began on an anchor outside the hover zone: open its card after the delay unless the
+   * pointer leaves first. */
   hoverStart(anchor: HTMLElement, route: DispatchReferenceRoute): void {
     clearTimers();
     const target: PreviewTarget = { anchor, route };
@@ -102,7 +96,10 @@ export const refPreview = {
       setState(undefined);
       return;
     }
-    scheduleClose(state.target.anchor);
+    // No in-flight check when this fires: every transition that changes the target clears this
+    // timer first, and `reenter` cancels it outright, so whatever is open is what it closes.
+    window.clearTimeout(closeTimer);
+    closeTimer = window.setTimeout(() => setState(undefined), REF_PREVIEW_CLOSE_DELAY_MS);
   },
   /** The pointer came back into the hover zone before the bridge delay ran out. */
   reenter(): void {
@@ -131,6 +128,12 @@ export const refPreview = {
   },
 };
 
+/** Close the hover card from outside this module: a surface that takes the pointer over (the
+ * board's drag lift) closes it rather than driving the hover transitions itself. */
+export function closeRefPreview(): void {
+  refPreview.close();
+}
+
 function subscribe(notify: () => void): () => void {
   subscribers.add(notify);
   return () => {
@@ -154,10 +157,10 @@ function cardContains(node: EventTarget | null): boolean {
   return node instanceof Element && node.closest(`#${CARD_ID}`) !== null;
 }
 
-/** The one region the pointer may roam without closing the card: the open card's own anchor, and
- * the card itself. Every pointer transition is judged against this predicate, in the document
- * listeners alone, so no close depends on the order in which two event systems see one
- * `pointerout`. */
+/** The one region the pointer may roam without closing the card: the current target's anchor -
+ * the open card's, or the one a pending hover is waiting on - and the card itself. Every pointer
+ * transition is judged against this predicate, in the document listeners alone, so no close
+ * depends on the order in which two event systems see one `pointerout`. */
 function inHoverZone(node: EventTarget | null): boolean {
   return state !== undefined && (triggerOf(node) === state.target.anchor || cardContains(node));
 }
