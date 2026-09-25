@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
@@ -199,6 +201,15 @@ func (s *server) resolveAsk(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "INVALID_RESOLUTION", http.StatusBadRequest, "resolution requires a kind and reason")
 		return
 	}
+	// Settlement's own retraction reason is how a resolution written before this rule is
+	// recognised as settlement's, and such a resolution is restored when its block comes back.
+	// A caller writing that reason would have their retract undone, so it is not theirs to
+	// write.
+	if strings.HasPrefix(reason, docs.SettlementRetractionReason) {
+		writeError(w, "INVALID_RESOLUTION", http.StatusBadRequest,
+			"reason may not begin with "+strconv.Quote(docs.SettlementRetractionReason)+", which marks a retraction the document's settlement wrote")
+		return
+	}
 	ask, err := s.closeAsk(r.Context(), r.PathValue("id"), actor, askTransition{
 		EventType: "ask.resolved",
 		Apply: func(ctx context.Context, tx pgx.Tx, ask model.Ask) (model.Ask, error) {
@@ -206,6 +217,18 @@ func (s *server) resolveAsk(w http.ResponseWriter, r *http.Request) {
 			resolutionJSON, err := encodeJSON(resolution)
 			if err != nil {
 				return model.Ask{}, err
+			}
+			// A block ask's closed state belongs in its block too, written by whoever closed
+			// it: left to settlement, the repair lands on whoever next touches the document.
+			if ask.BlockID != nil {
+				if ask.BlockArtifactID == nil {
+					return model.Ask{}, fmt.Errorf("ask %q has block id without block artifact", ask.ID)
+				}
+				if err := s.deps.Docs.SetBlockAttributes(ctx, *ask.BlockArtifactID, *ask.BlockID, map[string]any{
+					"state": "resolved",
+				}, actor); err != nil {
+					return model.Ask{}, err
+				}
 			}
 			if _, err := tx.Exec(ctx, `update asks set state = 'resolved', resolution = $2 where id = $1`, ask.ID, resolutionJSON); err != nil {
 				return model.Ask{}, err
