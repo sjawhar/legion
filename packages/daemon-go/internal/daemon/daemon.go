@@ -160,8 +160,6 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 		var cancelAfterMint context.CancelFunc
 		boot, cancelAfterMint = context.WithTimeout(context.WithoutCancel(ctx), bootTimeout)
 		defer cancelAfterMint()
-	}
-	if workflow != nil {
 		plan.identity = workflow.identity
 	}
 	plan.prompts, err = prompts.New(plan.rolesDir, cfg.StateDir)
