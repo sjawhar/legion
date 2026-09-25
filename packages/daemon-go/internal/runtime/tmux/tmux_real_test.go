@@ -837,8 +837,6 @@ func TestRealTmuxLifecycle(t *testing.T) {
 	}
 }
 
-// Panes of one issue share its window, while a pane there still verifies; another issue gets a
-// window of its own; and one claim never has two processes.
 // Spawn hands out a locator only once its pane runs the pane's own command. tmux reports a new
 // pane's pid at fork, and until that child execs its command it is a copy of the tmux server: its
 // /proc names the server, its argv included. A probe in that window read a starting agent as not
@@ -864,8 +862,16 @@ func TestRealTmuxSpawnReturnsOnlyOnceThePaneRunsItsCommand(t *testing.T) {
 		if err != nil {
 			return body, nil
 		}
-		parent, err := read(fmt.Sprintf("/proc/%d/stat", statParent(t, stat)))
-		if err != nil || statComm(t, parent) != "tmux: server" || statComm(t, stat) == "tmux: server" {
+		comm, parentPid, err := parseProcStatCommAndParent(string(stat))
+		if err != nil {
+			t.Errorf("read pid %d's stat: %v", pid, err)
+			return body, nil
+		}
+		parent, err := read(fmt.Sprintf("/proc/%d/stat", parentPid))
+		if err != nil {
+			return body, nil
+		}
+		if parentComm, _, err := parseProcStatCommAndParent(string(parent)); err != nil || parentComm != "tmux: server" || comm == "tmux: server" {
 			return body, nil
 		}
 		mu.Lock()
@@ -880,7 +886,7 @@ func TestRealTmuxSpawnReturnsOnlyOnceThePaneRunsItsCommand(t *testing.T) {
 		}
 		// Still the server's fork, as the kernel shows it before exec: its comm and argv.
 		if file == "cmdline" {
-			return read(fmt.Sprintf("/proc/%d/cmdline", statParent(t, stat)))
+			return read(fmt.Sprintf("/proc/%d/cmdline", parentPid))
 		}
 		open, end := strings.IndexByte(string(body), '('), strings.LastIndexByte(string(body), ')')
 		return []byte(string(body[:open+1]) + "tmux: server" + string(body[end:])), nil
@@ -898,26 +904,8 @@ func TestRealTmuxSpawnReturnsOnlyOnceThePaneRunsItsCommand(t *testing.T) {
 // procFile matches the /proc files a verification reads.
 var procFile = regexp.MustCompile(`^/proc/[0-9]+/(stat|cmdline)$`)
 
-// statComm and statParent are a /proc/<pid>/stat line's comm and parent pid.
-func statComm(t *testing.T, stat []byte) string {
-	t.Helper()
-	open, end := strings.IndexByte(string(stat), '('), strings.LastIndexByte(string(stat), ')')
-	if open < 0 || end < open {
-		t.Fatalf("malformed stat line %q", stat)
-	}
-	return string(stat[open+1 : end])
-}
-
-func statParent(t *testing.T, stat []byte) int {
-	t.Helper()
-	fields := strings.Fields(string(stat[strings.LastIndexByte(string(stat), ')')+1:]))
-	parent, err := strconv.Atoi(fields[1])
-	if err != nil {
-		t.Fatalf("stat line %q has no parent pid: %v", stat, err)
-	}
-	return parent
-}
-
+// Panes of one issue share its window, while a pane there still verifies; another issue gets a
+// window of its own; and one claim never has two processes.
 func TestRealTmuxSplitsIntoTheIssueWindow(t *testing.T) {
 	r := newRig(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
