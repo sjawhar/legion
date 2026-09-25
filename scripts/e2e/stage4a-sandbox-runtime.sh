@@ -10,7 +10,8 @@
 # Every pod carries the operator fixture's pod (scripts/e2e/fixtures/operator-route/pod.yml): its
 # model route, overlay, ServiceAccount and projected token. Legion holds none of it. The run
 # creates its own copy of the ConfigMap the fixture mounts, named for the run's project, before the
-# harness runs; the teardown deletes it with the rest of the run's objects.
+# harness runs, its models.yml pointed at LEGION_E2E_MODEL_GATEWAY_URL; the teardown deletes it
+# with the rest of the run's objects.
 #
 # Everything the run creates carries its own project label, s4a-<run id>, and lib/namespace-rig.sh
 # owns it: on any exit the teardown deletes by exact name every Sandbox the harness recorded, then
@@ -21,6 +22,8 @@
 # Inputs: LEGION_E2E_RUNTIME_CONTEXT (required) and LEGION_E2E_RUNTIME_KUBECONFIG (default
 # ~/.kube/legion-daemon-production) name the restricted identity; LEGION_E2E_OPERATOR_CONTEXT
 # (default production) the admin one; LEGION_E2E_IMAGE (required) the worker image by digest;
+# LEGION_E2E_MODEL_GATEWAY_URL (required) the model gateway's Anthropic endpoint, the route the
+# fixture's models.yml names;
 # STAGE4A_FROM a development entry point, which is never the proof; STAGE4A_EVIDENCE_DIR where the
 # transcript and the runtime's log go (default a fresh /tmp directory, kept and printed).
 set -euo pipefail
@@ -35,6 +38,7 @@ operator=${LEGION_E2E_OPERATOR_CONTEXT:-production}
 runtime_kubeconfig=${LEGION_E2E_RUNTIME_KUBECONFIG:-$HOME/.kube/legion-daemon-production}
 runtime_context=${LEGION_E2E_RUNTIME_CONTEXT:-}
 image=${LEGION_E2E_IMAGE:-}
+gateway=${LEGION_E2E_MODEL_GATEWAY_URL:-}
 from=${STAGE4A_FROM:-}
 evidence=${STAGE4A_EVIDENCE_DIR:-$(mktemp -d /tmp/legion-e2e4a-evidence.XXXXXXXX)}
 work=$(mktemp -d /tmp/legion-e2e4a.XXXXXXXX)
@@ -85,6 +89,14 @@ for tool in go kubectl aws curl ss secrets diff; do command -v "$tool" >/dev/nul
 [ -n "$runtime_context" ] || fail "LEGION_E2E_RUNTIME_CONTEXT is unset: the runtime must run as the Legion daemon's restricted identity, never the operator's"
 [ -r "$runtime_kubeconfig" ] || fail "the runtime kubeconfig $runtime_kubeconfig is not readable"
 case "$image" in *@sha256:*) ;; *) fail "LEGION_E2E_IMAGE must be the worker image pinned by digest (…@sha256:…), not '$image'" ;; esac
+[ -n "$gateway" ] ||
+  fail "LEGION_E2E_MODEL_GATEWAY_URL is unset: the model gateway's Anthropic endpoint, which the fixture's models.yml routes every pod to"
+# It replaces the fixture's placeholder as a plain YAML scalar, so it stays one URL-safe word.
+case "$gateway" in
+*[!A-Za-z0-9:/._~-]*) fail "LEGION_E2E_MODEL_GATEWAY_URL $gateway holds a character other than letters, digits and :/._~-" ;;
+https://?*) ;;
+*) fail "LEGION_E2E_MODEL_GATEWAY_URL must be an https:// URL, not '$gateway'" ;;
+esac
 imds=$(curl -sf -m 5 -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60') ||
   fail "instance metadata is unreachable; the harness binds the devbox's private address, read from it"
 host=$(curl -sf -m 5 -H "X-aws-ec2-metadata-token: $imds" http://169.254.169.254/latest/meta-data/local-ipv4) ||
@@ -111,10 +123,15 @@ snapshotted=1
 note "[operator] $(wc -l <"$evidence/namespace-before.txt") objects in $namespace carry no project label or project $project"
 
 begin operator-route
-op create configmap "$route_configmap" --from-file=models.yml="$fixture/models.yml" --from-file=overlay.yml="$fixture/overlay.yml" \
+# shellcheck disable=SC2016  # the fixture's literal placeholder, not an expansion
+placeholder='${LEGION_E2E_MODEL_GATEWAY_URL}'
+models=$(<"$fixture/models.yml")
+printf '%s\n' "${models//"$placeholder"/"$gateway"}" >"$work/models.yml"
+grep -qFx "    baseUrl: $gateway" "$work/models.yml" || fail "the fixture's models.yml has no baseUrl $placeholder to point at the gateway"
+op create configmap "$route_configmap" --from-file=models.yml="$work/models.yml" --from-file=overlay.yml="$fixture/overlay.yml" \
   --dry-run=client -o yaml | kubectl label --local -f - "legion.dev/project=$project" -o yaml | op create -f - >/dev/null ||
   fail "the operator could not create ConfigMap $route_configmap"
-note "[operator] ConfigMap $route_configmap: models.yml and overlay.yml from $fixture, label legion.dev/project=$project"
+note "[operator] ConfigMap $route_configmap: models.yml (baseUrl $gateway) and overlay.yml from $fixture, label legion.dev/project=$project"
 pass
 
 begin build

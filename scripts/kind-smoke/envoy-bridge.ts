@@ -7,8 +7,6 @@
 import { connect, type NatsConnection, type Subscription } from "nats";
 import { EnvelopeSchema } from "../../packages/contracts/src/envelope";
 
-export const DEFAULT_UPSTREAM_NATS_URL = "nats://envoy-nats.tailb86685.ts.net:4222";
-
 const requiredEnvelopeFields = [
   "event_id",
   "source",
@@ -60,10 +58,12 @@ export function bridgeConfigFromEnvironment(
   }
   const downstreamUrl = environment.SMOKE_RIG_NATS?.trim() ?? "";
   if (!downstreamUrl) throw new Error("SMOKE_RIG_NATS is required");
+  const upstreamUrl = environment.SMOKE_UPSTREAM_NATS?.trim() ?? "";
+  if (!upstreamUrl) throw new Error("SMOKE_UPSTREAM_NATS is required");
   return {
     repository,
     subjects: [`notifications.github.${repository.replace("/", ".")}.>`],
-    upstreamUrl: environment.SMOKE_UPSTREAM_NATS?.trim() || DEFAULT_UPSTREAM_NATS_URL,
+    upstreamUrl,
     downstreamUrl,
   };
 }

@@ -56,6 +56,12 @@ validate_inputs() {
     none | envoy) ;;
     *) fail "SMOKE_GITHUB_INGRESS must be none or envoy; got $github_ingress" ;;
   esac
+  # the operator names the production Envoy NATS by its fully-qualified name, never a bare alias a
+  # resolver's search domain would complete (README.md, Inputs)
+  upstream_nats="${SMOKE_UPSTREAM_NATS:-}"
+  if [ "$github_ingress" = envoy ] && [ -z "$upstream_nats" ]; then
+    fail "SMOKE_UPSTREAM_NATS is unset: SMOKE_GITHUB_INGRESS=envoy bridges from the production Envoy NATS, named by its fully-qualified name (nats://envoy-nats.<tailnet>.ts.net:4222; README.md)"
+  fi
   implement_app_id="${LEGION_IMPLEMENT_APP_ID:-3202636}"
   review_app_id="${LEGION_REVIEW_APP_ID:-3202653}"
   [[ "$implement_app_id$review_app_id" =~ ^[0-9]+$ ]] || fail "LEGION_IMPLEMENT_APP_ID and LEGION_REVIEW_APP_ID must be numeric"
@@ -669,17 +675,16 @@ keeper_summary() {
 # ---- SMOKE_GITHUB_INGRESS=envoy: the read-only bridge from production NATS, before the daemon ---
 # An unreachable upstream stops the run before anything in the cluster starts.
 
-upstream_nats() { printf '%s' "${SMOKE_UPSTREAM_NATS:-nats://envoy-nats.tailb86685.ts.net:4222}"; }
 start_bridge() {
   scrub_argv
-  start_process envoy-bridge "${scrub[@]}" SMOKE_REPO="$repo" SMOKE_RIG_NATS="nats://$gateway:$port_nats" SMOKE_UPSTREAM_NATS="$(upstream_nats)" \
+  start_process envoy-bridge "${scrub[@]}" SMOKE_REPO="$repo" SMOKE_RIG_NATS="nats://$gateway:$port_nats" SMOKE_UPSTREAM_NATS="$upstream_nats" \
     bun run "$repo_root/scripts/kind-smoke/envoy-bridge.ts"
   poll 60 "the GitHub bridge to report BRIDGE READY" bridge_ready ||
-    fail "the GitHub bridge could not subscribe upstream ($(upstream_nats)); see $state/logs/envoy-bridge.log"
+    fail "the GitHub bridge could not subscribe upstream ($upstream_nats); see $state/logs/envoy-bridge.log"
 }
 bridge_ready() {
   if grep -q 'BRIDGE UNHEALTHY' "$state/logs/envoy-bridge.log" 2>/dev/null || ! pid_is_live envoy-bridge; then
-    fail "the GitHub bridge could not subscribe upstream ($(upstream_nats)); see $state/logs/envoy-bridge.log"
+    fail "the GitHub bridge could not subscribe upstream ($upstream_nats); see $state/logs/envoy-bridge.log"
   fi
   grep -q 'BRIDGE READY' "$state/logs/envoy-bridge.log" 2>/dev/null
 }
@@ -852,7 +857,7 @@ daemon_summary() {
 }
 ingress_summary() {
   case "$github_ingress" in
-    envoy) printf 'envoy (bridge pid %s, upstream %s)' "$(<"$state/pids/envoy-bridge.pid")" "$(upstream_nats)" ;;
+    envoy) printf 'envoy (bridge pid %s, upstream %s)' "$(<"$state/pids/envoy-bridge.pid")" "$upstream_nats" ;;
     *) printf 'none (checkpoint done will report SKIPPED-BLOCKED)' ;;
   esac
 }

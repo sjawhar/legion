@@ -30,9 +30,9 @@ devbox joined to the tailnet, that can be production.
 On a user-defined Docker network, the embedded DNS server (`127.0.0.11`) answers container names
 and network aliases itself. A name no container on the network holds is forwarded to the host's
 resolvers. On this devbox those include Tailscale's MagicDNS, whose search domain
-(`tailb86685.ts.net`) turns a bare name into a tailnet host name. So `envoy-nats` resolves to the
-rig's container while one holds the alias, and to `envoy-nats.tailb86685.ts.net`, production's
-Envoy NATS (`100.127.163.46`), while none does.
+(`<tailnet>.ts.net`) turns a bare name into a tailnet host name. So `envoy-nats` resolves to the
+rig's container while one holds the alias, and to `envoy-nats.<tailnet>.ts.net`, production's
+Envoy NATS, while none does.
 
 A restart rehearsal creates that window by design. The old NATS container stops, and for the few
 seconds before the new one starts nothing holds the alias. A NATS client reconnecting in that gap

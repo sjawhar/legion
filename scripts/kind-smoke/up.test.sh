@@ -143,6 +143,8 @@ if ! grep -q session_dsn_secret "$here/../../packages/daemon/src/daemon/config.t
 fi
 # 8. bad mode values
 expect_refusal 'SMOKE_GITHUB_INGRESS must be none or envoy; got webhook' SMOKE_GITHUB_INGRESS=webhook
+# 8b. the bridge's upstream has no default: the operator names the production NATS
+expect_refusal 'SMOKE_UPSTREAM_NATS is unset: SMOKE_GITHUB_INGRESS=envoy bridges from the production Envoy NATS' SMOKE_GITHUB_INGRESS=envoy SMOKE_UPSTREAM_NATS=
 expect_refusal 'SMOKE_ROOT_ISSUES must be a positive integer; got 0' SMOKE_ROOT_ISSUES=0
 echo "up.test.sh: refusals OK"
 
@@ -519,7 +521,7 @@ cp "$FAKE_HTTP/state-plain.json" "$FAKE_HTTP/state.json"
 rm -f "$FAKE_TMUX/legion-smoket1"
 
 # GitHub ingress through the bridge: started before the daemon; an unhealthy bridge stops the run early
-run_up SMOKE_GITHUB_INGRESS=envoy >"$tmp/last.txt" || { cat "$tmp/last.txt" >&2; exit 1; }
+run_up SMOKE_GITHUB_INGRESS=envoy SMOKE_UPSTREAM_NATS=nats://envoy-nats.tailnet.example:4222 >"$tmp/last.txt" || { cat "$tmp/last.txt" >&2; exit 1; }
 [ -f "$tmp/state/pids/envoy-bridge.pid" ]
 grep -Fq 'STARTED envoy-bridge' "$tmp/last.txt"
 grep -Fxq SMOKE_UPSTREAM_NATS "$FAKE_ENV/envoy-bridge"
@@ -528,7 +530,7 @@ bridge_line="$(grep -n 'envoy-bridge.ts' "$FAKE_LOG" | head -n1 | cut -d: -f1)"
 apply_line="$(grep -n 'apply -k' "$FAKE_LOG" | tail -n1 | cut -d: -f1)"
 [ "$bridge_line" -lt "$apply_line" ]
 grep -Fq 'github ingress:  envoy (bridge pid' "$tmp/last.txt"
-grep -Fq 'upstream nats://envoy-nats.tailb86685.ts.net:4222' "$tmp/last.txt"
+grep -Fq 'upstream nats://envoy-nats.tailnet.example:4222' "$tmp/last.txt"
 kill "$(cat "$tmp/state/pids/envoy-bridge.pid")" 2>/dev/null || true
 rm -f "$tmp/state/pids/envoy-bridge.pid" "$tmp/state/pids/envoy-bridge.start" "$tmp/state/logs/envoy-bridge.log"
 calls_before="$(wc -l <"$FAKE_LOG")"
