@@ -163,94 +163,6 @@ func TestLastSeenRetentionDoesNotRestoreLiveSession(t *testing.T) {
 	}
 }
 
-func TestCacheReady_FalseBeforeSignalTrueAfter(t *testing.T) {
-	r := &SessionRegistry{cache: map[string]cachedSession{}, readyCh: make(chan struct{})}
-	if r.CacheReady() {
-		t.Fatal("expected not ready before signal")
-	}
-	r.signalReady()
-	if !r.CacheReady() {
-		t.Fatal("expected ready after signal")
-	}
-}
-
-func TestWatchError_EmptyByDefault(t *testing.T) {
-	r := &SessionRegistry{cache: map[string]cachedSession{}}
-	if r.WatchError() != "" {
-		t.Fatalf("expected empty watch error, got %q", r.WatchError())
-	}
-	r.watcher.Fail(errors.New("boom"))
-	if r.WatchError() != "boom" {
-		t.Fatalf("expected 'boom', got %q", r.WatchError())
-	}
-}
-
-func TestWatchHealthError_GatesOnReady(t *testing.T) {
-	// Before the initial scan completes, a watch error must NOT surface — the
-	// listener is still in normal startup and Ping() should stay healthy.
-	startup := &SessionRegistry{cache: map[string]cachedSession{}, readyCh: make(chan struct{})}
-	startup.watcher.Fail(errors.New("watcher stopped"))
-	if err := startup.watchHealthError(); err != nil {
-		t.Fatalf("expected nil during startup before scan, got %v", err)
-	}
-
-	// After the initial scan, a dead watcher must surface so /healthz and the
-	// self-health watchdog react instead of serving a frozen cache forever.
-	dead := &SessionRegistry{cache: map[string]cachedSession{}, readyCh: make(chan struct{})}
-	dead.signalReady()
-	dead.watcher.Fail(errors.New("watcher stopped"))
-	if err := dead.watchHealthError(); err == nil {
-		t.Fatal("expected watch error after ready, got nil")
-	}
-
-	// A healthy, ready watcher reports no error.
-	healthy := &SessionRegistry{cache: map[string]cachedSession{}, readyCh: make(chan struct{})}
-	healthy.signalReady()
-	if err := healthy.watchHealthError(); err != nil {
-		t.Fatalf("expected nil for healthy ready watcher, got %v", err)
-	}
-}
-
-func TestWaitForCacheReady_RespectsContextCancellation(t *testing.T) {
-	// No watch() goroutine, so readyCh never closes. WaitForCacheReady must
-	// return ctx.Err() instead of hanging.
-	r := &SessionRegistry{cache: map[string]cachedSession{}, readyCh: make(chan struct{})}
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	if err := r.WaitForCacheReady(ctx); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("expected context.DeadlineExceeded, got %v", err)
-	}
-}
-
-func TestWaitForCacheReady_IdempotentAfterReady(t *testing.T) {
-	r := &SessionRegistry{cache: map[string]cachedSession{}, readyCh: make(chan struct{})}
-	r.signalReady()
-	for i := 0; i < 3; i++ {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-		err := r.WaitForCacheReady(ctx)
-		cancel()
-		if err != nil {
-			t.Fatalf("call %d: expected nil after ready, got %v", i, err)
-		}
-	}
-}
-
-func TestNilReceiverAccessors(t *testing.T) {
-	var r *SessionRegistry
-	if r.CacheReady() {
-		t.Fatal("nil CacheReady should be false")
-	}
-	if r.CacheSize() != 0 {
-		t.Fatal("nil CacheSize should be 0")
-	}
-	if r.WatchError() != "" {
-		t.Fatal("nil WatchError should be empty")
-	}
-	if err := r.WaitForCacheReady(context.Background()); err != nil {
-		t.Fatalf("nil WaitForCacheReady should be nil, got %v", err)
-	}
-}
-
 // --- Integration tests (testcontainers NATS, shared via setupNATS) ---
 
 // pollSessionList retries List() until len matches want or timeout fires.
@@ -493,17 +405,17 @@ func TestSessionWatch_DeadWatcherFailsPing(t *testing.T) {
 		t.Fatalf("WaitForCacheReady: %v", err)
 	}
 	// Healthy watcher: no error yet.
-	if reg.WatchError() != "" {
-		t.Fatalf("expected no watch error while healthy, got %q", reg.WatchError())
+	if err := reg.WatchErr(); err != nil {
+		t.Fatalf("expected no watch error while healthy, got %v", err)
 	}
 
 	// Closing the connection closes the KV watcher's Updates() channel. Because
-	// this happens AFTER the initial scan, watch() must record a watch error so
+	// this happens AFTER the initial scan, the watcher must record a watch error so
 	// the frozen cache is no longer reported as healthy.
 	client.Close()
 
 	deadline := time.After(5 * time.Second)
-	for reg.WatchError() == "" {
+	for reg.WatchErr() == nil {
 		select {
 		case <-deadline:
 			t.Fatal("watch error was never set after Updates() closed post-scan")

@@ -297,41 +297,60 @@ func TestAReconnectInPlaceKeepsTheSubscriptionsNATSRestored(t *testing.T) {
 // A reconnect hook that fails after the client was stopped fails because of the stop: a SIGTERM
 // that lands while the listener's rewatch hook runs closes the connection the hook is reading
 // through. recover already reports that case as the stop; the reconnect path must too, at INFO
-// with the error kept on the line, never as a hook failure at ERROR.
-func TestAReconnectHookFailingAfterTheStopIsTheStop(t *testing.T) {
-	ctr, uri := testnats.StartRestartable(t)
-	client, err := bus.Connect([]string{uri})
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	t.Cleanup(client.Close)
-	hooked := make(chan struct{}, 1)
-	client.AddReconnectHook(func(*natsgo.Conn) error {
-		// The shutdown begins while the hook is still running, and the hook's next server request
-		// fails on the closed connection.
-		client.Close()
-		hooked <- struct{}{}
-		return errors.New("rewatch interest registry: nats: connection closed")
-	})
+// with the error kept on the line. A hook that fails with the client still running is a real
+// failure and stays an ERROR, so the INFO line cannot hide one.
+func TestAReconnectHookFailureIsAnErrorUnlessTheClientStopped(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		stop bool
+	}{
+		{name: "after the stop", stop: true},
+		{name: "without a stop", stop: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctr, uri := testnats.StartRestartable(t)
+			client, err := bus.Connect([]string{uri})
+			if err != nil {
+				t.Fatalf("connect: %v", err)
+			}
+			t.Cleanup(client.Close)
+			hooked := make(chan struct{}, 1)
+			client.AddReconnectHook(func(*natsgo.Conn) error {
+				if tc.stop {
+					// The shutdown begins while the hook is still running, and the hook's next
+					// server request fails on the closed connection.
+					client.Close()
+				}
+				hooked <- struct{}{}
+				return errors.New("rewatch interest cache: nats: connection closed")
+			})
 
-	logs := captureBusLogs(t)
-	testnats.Stop(t, ctr)
-	if err := ctr.Start(context.Background()); err != nil {
-		t.Fatalf("start NATS again: %v", err)
-	}
-	select {
-	case <-hooked:
-	case <-time.After(30 * time.Second):
-		t.Fatal("the reconnect never ran its hook")
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) && !strings.Contains(logs.String(), "reconnect hooks cancelled") && logs.errorLine() == "" {
-		time.Sleep(50 * time.Millisecond)
-	}
-	if line := logs.errorLine(); line != "" {
-		t.Fatalf("a hook failing after the stop logged an error: %s", line)
-	}
-	if !strings.Contains(logs.String(), "envoy nats reconnect hooks cancelled") || !strings.Contains(logs.String(), "connection closed") {
-		t.Fatalf("the stop was not reported with its error at INFO: %s", logs.String())
+			logs := captureBusLogs(t)
+			testnats.Stop(t, ctr)
+			if err := ctr.Start(context.Background()); err != nil {
+				t.Fatalf("start NATS again: %v", err)
+			}
+			select {
+			case <-hooked:
+			case <-time.After(30 * time.Second):
+				t.Fatal("the reconnect never ran its hook")
+			}
+			deadline := time.Now().Add(5 * time.Second)
+			for time.Now().Before(deadline) && !strings.Contains(logs.String(), "reconnect hooks cancelled") && logs.errorLine() == "" {
+				time.Sleep(50 * time.Millisecond)
+			}
+			if !tc.stop {
+				if line := logs.errorLine(); !strings.Contains(line, "envoy nats reconnect hook failed") || !strings.Contains(line, "connection closed") {
+					t.Fatalf("a hook failing with the client running was not logged at ERROR with its error: %q\n%s", line, logs.String())
+				}
+				return
+			}
+			if line := logs.errorLine(); line != "" {
+				t.Fatalf("a hook failing after the stop logged an error: %s", line)
+			}
+			if !strings.Contains(logs.String(), "envoy nats reconnect hooks cancelled") || !strings.Contains(logs.String(), "connection closed") {
+				t.Fatalf("the stop was not reported with its error at INFO: %s", logs.String())
+			}
+		})
 	}
 }

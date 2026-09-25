@@ -84,8 +84,8 @@ func TestStopWatchIsFinal(t *testing.T) {
 	}
 	time.Sleep(500 * time.Millisecond)
 
-	if registry.WatchFailed() {
-		t.Fatalf("the registry reports a failed watcher after StopWatch: %s", registry.WatchError())
+	if err := registry.WatchErr(); err != nil {
+		t.Fatalf("the registry reports a failed watcher after StopWatch: %v", err)
 	}
 	logsMu.Lock()
 	defer logsMu.Unlock()

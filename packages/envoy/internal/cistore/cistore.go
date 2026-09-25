@@ -226,12 +226,10 @@ type Store struct {
 	cache          map[string]State
 	heads          map[string]string
 	cacheRevisions map[string]uint64
-	readyCh        chan struct{}
-	readyOnce      sync.Once
 	// watcher feeds the cache. The summary loop reads only the cache (no KV fallback), so a dead
 	// watcher silently stops summaries; Ping exposes its terminal error to the listener, which
 	// re-establishes the watcher or exits for Docker to restart.
-	watcher kvwatch.Watcher
+	watcher *kvwatch.Watcher
 }
 
 type openOpts struct {
@@ -290,12 +288,9 @@ func Open(nc *nats.Conn, opts ...Option) (*Store, error) {
 		cache:          map[string]State{},
 		heads:          map[string]string{},
 		cacheRevisions: map[string]uint64{},
-		readyCh:        make(chan struct{}),
 	}
-	s.watcher.Name = "cistore"
-	s.watcher.Apply = s.applyWatched
-	s.watcher.Ready = s.signalReady
-	go s.watch()
+	s.watcher = kvwatch.New("cistore", kv, s.applyWatched, s.resetCache)
+	s.watcher.Start()
 	return s, nil
 }
 
@@ -308,39 +303,29 @@ func (s *Store) Ping() error {
 	if kv == nil {
 		return errors.New("cistore: KV unavailable")
 	}
-	if _, err := kv.Status(); err != nil {
+	if err := s.watcher.Check(kv); err != nil {
 		return err
 	}
 	return s.watcher.Err()
 }
 
-// Rewatch recreates the KV watcher against conn and clears a sticky terminal
-// watcher error only after the replacement watcher starts successfully.
+// Rewatch moves the cache's watcher and the store's handle to conn (kvwatch.Watcher.Rewatch).
 func (s *Store) Rewatch(conn *nats.Conn) error {
-	if s == nil || conn == nil {
-		return errors.New("cistore: KV unavailable")
-	}
-	js, err := conn.JetStream(nats.MaxWait(10 * time.Second))
+	kv, err := s.watcher.Rewatch(conn)
 	if err != nil {
-		return fmt.Errorf("open CI store JetStream: %w", err)
-	}
-	kv, err := js.KeyValue(s.currentKV().Bucket())
-	if err != nil {
-		return fmt.Errorf("open CI store KV bucket: %w", err)
-	}
-	if err := s.watcher.Watch(kv); err != nil {
-		return fmt.Errorf("watch CI store KV bucket: %w", err)
+		return err
 	}
 	s.setKV(kv)
 	return nil
 }
 
-func (s *Store) watch() {
-	if err := s.watcher.Watch(s.currentKV()); err != nil {
-		s.watcher.Fail(err)
-		slog.Error("cistore watch failed", slog.String("error", err.Error()))
-		s.signalReady()
-	}
+// resetCache empties the cache and its revision fence, for a recreated CI bucket.
+func (s *Store) resetCache() {
+	s.mu.Lock()
+	s.cache = map[string]State{}
+	s.heads = map[string]string{}
+	s.cacheRevisions = map[string]uint64{}
+	s.mu.Unlock()
 }
 
 // applyWatched applies one entry the KV watcher delivered to the cache.
@@ -426,54 +411,20 @@ func (s *Store) setKV(kv nats.KeyValue) {
 	s.kvMu.Unlock()
 }
 
-// WatchError returns the active watcher's terminal error string, or "" while
-// the watcher is running.
-func (s *Store) WatchError() string {
-	if s == nil {
-		return ""
-	}
-	if err := s.watcher.Err(); err != nil {
-		return err.Error()
-	}
-	return ""
+// WatchErr is the cache watcher's terminal error, or nil while it runs.
+func (s *Store) WatchErr() error {
+	return s.watcher.Err()
 }
 
-// WatchFailed reports whether the current watcher has stopped.
-func (s *Store) WatchFailed() bool {
-	if s == nil {
-		return false
-	}
-	return s.watcher.Err() != nil
-}
-
-// StopWatch retires the KV watcher for a shutdown, before the NATS drain ends it (kvwatch.Stop): its
-// end records no terminal error and logs nothing, and a Rewatch from a recovery or a self-health
-// rebuild still running at shutdown arms no watcher. A Rewatch that fails on the closing connection
-// instead is reported by the bus as the stop, at INFO.
+// StopWatch retires the cache's watcher for a shutdown (kvwatch.Watcher.Stop).
 func (s *Store) StopWatch() {
 	s.watcher.Stop()
 }
 
-func (s *Store) signalReady() {
-	s.readyOnce.Do(func() {
-		if s.readyCh != nil {
-			close(s.readyCh)
-		}
-	})
-}
-
-// WaitForCacheReady blocks until watch() has finished its initial scan of
-// existing KV entries, or until the context is cancelled.
+// WaitForCacheReady blocks until the watcher has delivered every existing key, or until ctx is
+// done.
 func (s *Store) WaitForCacheReady(ctx context.Context) error {
-	if s == nil || s.readyCh == nil {
-		return nil
-	}
-	select {
-	case <-s.readyCh:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	return s.watcher.WaitReady(ctx)
 }
 
 // Record folds one check observation into the per-commit state via CAS.
