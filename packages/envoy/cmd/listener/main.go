@@ -77,7 +77,9 @@ const (
 
 // applyListenerConsumerPolicy stamps the canonical consumer policy onto
 // config. Shared by the create and drift-correction paths so the policy has
-// exactly one definition.
+// exactly one definition. The idle heartbeat is not part of it: the create
+// path starts from a zero config, so a durable the listener creates has none,
+// and startListenerSubscription refuses an existing durable that has one.
 func applyListenerConsumerPolicy(config *nats.ConsumerConfig, subjects []string) {
 	config.FilterSubject = ""
 	config.FilterSubjects = subjects
@@ -89,7 +91,9 @@ func applyListenerConsumerPolicy(config *nats.ConsumerConfig, subjects []string)
 }
 
 // listenerConsumerPolicyDrifted reports whether a consumer's server-side
-// config diverges from the canonical policy.
+// config diverges from the canonical policy. It leaves the heartbeat out on
+// purpose: NATS cannot change a consumer's heartbeat in place, so a durable
+// that has one is refused before this check runs, never corrected.
 func listenerConsumerPolicyDrifted(config nats.ConsumerConfig, subjects []string) bool {
 	return config.FilterSubject != "" ||
 		!slices.Equal(config.FilterSubjects, subjects) ||
@@ -128,6 +132,12 @@ func startListenerSubscription(client *bus.Client, consumer string, handler nats
 		}
 	case err != nil:
 		return nil, err
+	case info.Config.Heartbeat != 0:
+		// The bus logs nats.ErrConsumerNotActive at WARN because only KV watchers' ordered
+		// consumers report it, and only while disconnected; a heartbeat here would make a stalled
+		// durable report that same WARN. NATS cannot change a consumer's heartbeat in place, and
+		// recreating the durable would drop its cursor, so the listener leaves it to an operator.
+		return nil, fmt.Errorf("durable consumer %s has an idle heartbeat of %s, which the listener's consumer policy forbids; delete it to let the listener recreate it without one", consumer, info.Config.Heartbeat)
 	case listenerConsumerPolicyDrifted(info.Config, subjects):
 		config := info.Config
 		applyListenerConsumerPolicy(&config, subjects)
@@ -655,9 +665,10 @@ func main() {
 			os.Exit(1)
 		}
 		// Check if auto-resubscribe (bus.Client.onReconnect) already succeeded
-		// while we were sleeping. If so, the subscription is in place, and a retry
-		// would only replace our own handle with a new bind of the same consumer,
-		// which can lose the server's release of its push binding.
+		// while we were sleeping. If so, the subscription is in place. A retry would
+		// replace our own handle with a new bind of the same consumer, and that bind
+		// races the server's release of the old one's push binding: it can be
+		// refused with "consumer is already bound to a subscription".
 		if client.SubOK() {
 			logger.Info("subscribe succeeded via auto-resubscribe during retry backoff")
 			break

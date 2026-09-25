@@ -1967,6 +1967,46 @@ func TestDurableConsumerSurvivesUnsubscribe(t *testing.T) {
 	_ = resub.Unsubscribe()
 }
 
+// The listener's durable carries no idle heartbeat. The bus logs nats.ErrConsumerNotActive at WARN
+// because the only consumers that report it are KV watchers' ordered consumers, which report it
+// only while disconnected; a heartbeat on the durable would make a real stall report that same
+// WARN. NATS refuses to change a consumer's heartbeat in place, so a durable that has one cannot be
+// corrected: the listener refuses it, by name, and leaves it for an operator rather than deleting a
+// cursor that may still hold undelivered messages.
+func TestAHeartbeatOnTheListenerDurableIsRefused(t *testing.T) {
+	client, err := bus.Connect([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("connect bus: %v", err)
+	}
+	t.Cleanup(client.Close)
+	consumer := "listener-heartbeat-refused"
+	_ = client.JS().DeleteConsumer(bus.Stream, consumer)
+	t.Cleanup(func() { _ = client.JS().DeleteConsumer(bus.Stream, consumer) })
+	config := natsgo.ConsumerConfig{Durable: consumer, DeliverSubject: natsgo.NewInbox()}
+	applyListenerConsumerPolicy(&config, bus.StreamSubjects())
+	config.Heartbeat = 5 * time.Second
+	created, err := client.JS().AddConsumer(bus.Stream, &config)
+	if err != nil {
+		t.Fatalf("add a durable with a heartbeat: %v", err)
+	}
+
+	sub, err := startListenerSubscription(client, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
+	if err == nil {
+		_ = sub.Unsubscribe()
+		t.Fatal("the listener bound a durable that carries an idle heartbeat")
+	}
+	if !strings.Contains(err.Error(), consumer) || !strings.Contains(err.Error(), "heartbeat") {
+		t.Fatalf("refusal = %q, want it to name the consumer and its heartbeat", err)
+	}
+	info, err := client.JS().ConsumerInfo(bus.Stream, consumer)
+	if err != nil {
+		t.Fatalf("the refused durable is gone: %v", err)
+	}
+	if !info.Created.Equal(created.Created) {
+		t.Fatalf("the refused durable was recreated at %s, want the original from %s", info.Created, created.Created)
+	}
+}
+
 // A self-health rebuild that recreates a lost durable consumer replaces the listener's
 // subscription rather than adding one beside it. The subscription bound to the lost consumer's
 // deliver inbox can never deliver again; left subscribed, each rebuild adds one more SUB the

@@ -25,6 +25,7 @@ events to the right session.
 | Webhook config         | `internal/webhook/config.go`                     | ENVOY_WEBHOOKS parsing, startup validation         |
 | Listener behavior      | `cmd/listener/main.go`                    | subscribe/match/deliver flow                       |
 | NATS client            | `internal/bus/nats.go`                    | reconnect/self-heal logic                          |
+| Stream subjects        | `internal/bus/stream.go`                  | `ENVOY_NOTIFICATIONS` subject reconciliation at start |
 | Session delivery       | `internal/session/session.go`             | hot delivery via prompt_async                      |
 | Interest storage       | `internal/store/kv.go`                    | JetStream KV subscriptions                         |
 | Topic matching         | `internal/routing/match.go`               | wildcard matching                                  |
