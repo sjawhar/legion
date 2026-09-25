@@ -212,13 +212,14 @@ func captureBusLogs(t *testing.T) *busLogs {
 	return logs
 }
 
-// A reconnect in place keeps every subscription nats.go restored. nats.go re-sends each
-// subscription's SUB on the connection it reconnected, so the subscription Subscribe returned still
-// delivers; tearing it down to bind the consumer again races the server's own release of the
-// consumer's push binding, which refuses the new bind with "consumer is already bound to a
-// subscription" and logs a resubscribe failure at ERROR (LEGION-278).
+// A reconnect in place keeps every subscription nats.go restored. After a server restart, nats.go
+// re-sends each subscription's SUB on the connection it reconnected, so the subscription Subscribe
+// returned still delivers, the durable's from the consumer the server kept on its file store;
+// tearing it down to bind the consumer again races the server's own release of the consumer's
+// push binding, which refuses the new bind with "consumer is already bound to a subscription" and
+// logs a resubscribe failure at ERROR (LEGION-278).
 func TestAReconnectInPlaceKeepsTheSubscriptionsNATSRestored(t *testing.T) {
-	_, uri := startNATS(t)
+	ctr, uri := testnats.StartRestartable(t)
 	client, err := bus.Connect([]string{uri})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
@@ -244,30 +245,41 @@ func TestAReconnectInPlaceKeepsTheSubscriptionsNATSRestored(t *testing.T) {
 	})
 
 	logs := captureBusLogs(t)
-	if err := client.Conn.ForceReconnect(); err != nil {
-		t.Fatalf("force reconnect: %v", err)
+	testnats.Stop(t, ctr)
+	if err := ctr.Start(context.Background()); err != nil {
+		t.Fatalf("start NATS again: %v", err)
 	}
 	select {
 	case <-reconnected:
-	case <-time.After(15 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("the reconnect never finished restoring the subscriptions")
 	}
 	if !durable.IsValid() || !role.IsValid() {
 		t.Fatalf("a reconnect in place tore down the subscriptions Subscribe returned (durable valid %t, role valid %t)", durable.IsValid(), role.IsValid())
 	}
 
-	if _, err := client.JS().Publish("notifications.github.test.in-place-reconnect", []byte(`{}`)); err != nil {
-		t.Fatalf("publish to the durable: %v", err)
+	// The restarted server answers core NATS before JetStream is ready, so the publish is retried
+	// until the stream acknowledges it: a publish that returned an error was not stored.
+	var publishErr error
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, publishErr = client.JS().Publish("notifications.github.test.in-place-reconnect", []byte(`{}`)); publishErr == nil {
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if publishErr != nil {
+		t.Fatalf("publish to the durable after the restart: %v", publishErr)
 	}
 	if err := client.Conn.Publish(roleSubject, []byte(`{}`)); err != nil {
 		t.Fatalf("publish to the role lane: %v", err)
 	}
-	waitFor(t, 5*time.Second, "both deliveries after the reconnect", func() bool {
+	waitFor(t, 10*time.Second, "both deliveries after the restart", func() bool {
 		return durableDeliveries.Load() >= 1 && roleDeliveries.Load() >= 1
 	})
 	time.Sleep(time.Second)
 	if durable, role := durableDeliveries.Load(), roleDeliveries.Load(); durable != 1 || role != 1 {
-		t.Fatalf("deliveries after the reconnect: durable %d, role %d, want one each", durable, role)
+		t.Fatalf("deliveries after the restart: durable %d, role %d, want one each", durable, role)
 	}
 	if line := logs.errorLine(); line != "" {
 		t.Fatalf("a reconnect in place logged an error: %s", line)
