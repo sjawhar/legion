@@ -172,11 +172,15 @@ func TestCache_BackgroundCleanup(t *testing.T) {
 	// Advance fake clock past TTL
 	clock.Advance(100 * time.Millisecond)
 
-	// Wait for the real ticker to fire and run cleanup
-	time.Sleep(150 * time.Millisecond)
-
-	if c.Len() != 0 {
-		t.Fatalf("expected 0 entries after background cleanup, got %d", c.Len())
+	// The cleanup goroutine runs on a real ticker, and a loaded machine may not schedule it within
+	// any fixed number of periods: wait for the pass that removes the expired entry. The deadline
+	// bounds a failure; it is not how long cleanup takes.
+	deadline := time.Now().Add(10 * time.Second)
+	for c.Len() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("expected 0 entries after background cleanup, got %d", c.Len())
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 

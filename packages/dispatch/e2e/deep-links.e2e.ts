@@ -279,7 +279,7 @@ test("a desktop document item link shows its far-away card and its quote", async
 test("a composer opened from the document is in the margin's view after a comment link", async ({
   browser,
 }, testInfo) => {
-  const { comment, issue } = await seedLongDocument();
+  const { comment, issue, markId } = await seedLongDocument();
   const context = await asUser(browser, "alice");
 
   try {
@@ -294,8 +294,12 @@ test("a composer opened from the document is in the margin's view after a commen
     }
     // The margin lands held on the linked card, far down its own scroll, and the composer
     // renders at the top of that scroll: opening one from the document has to end the hold
-    // and bring the form back.
+    // and bring the form back. Both halves of the landing come first: the card, and the quote
+    // the document scrolls to once the editor has projected its mark, which on a loaded machine
+    // is later than the card. A selection made before that scroll is carried off screen by it,
+    // and so is the fixed action bar placed beside the selection.
     await expect(card).toBeInViewport();
+    await expect(markSpan(page, markId)).toBeInViewport();
     await landingSettled(sheet);
 
     await selectEditorText(page, "Paragraph 2: surrounding context");
@@ -440,7 +444,7 @@ test("the margin stops holding a landed card once the reader works the document"
   // Anchored near the top: the quote is on screen from the first frame, so the landing needs no
   // correction at all. A hold that only lets go once it has corrected something never lets go
   // here, and the asks below drag the margin thousands of pixels while the reader reads.
-  const { comment, issue } = await seedLongDocument("Paragraph 1: surrounding context");
+  const { comment, issue, markId } = await seedLongDocument("Paragraph 1: surrounding context");
   const context = await asUser(browser, "alice");
 
   try {
@@ -450,6 +454,9 @@ test("the margin stops holding a landed card once the reader works the document"
     const sheet = page.getByTestId("margin-sheet");
     const card = sheet.locator(`[data-margin-item="${comment.id}"]`);
     await expect(card).toBeInViewport();
+    // The presses below must land in the document: its editor mounts, and the landing its mark
+    // starts, only after the card, and a press before that works nothing.
+    await expect(markSpan(page, markId)).toBeInViewport();
     const landed = await landingSettled(sheet);
     expect(landed.scrollTop).toBe(0);
 
