@@ -758,7 +758,7 @@ func (e *Engine) beginLinger(ctx context.Context, tx pgx.Tx, root record.Issue) 
 // for a claim that does not exist as done.
 func (e *Engine) everyClaim(ctx context.Context, tx pgx.Tx, issue record.Issue, op record.SuperviseOp) error {
 	for _, role := range claim.Roles {
-		if err := e.supervise(ctx, tx, issue, op, role, ""); err != nil {
+		if err := e.enqueue(ctx, tx, issue.Key, record.SuperviseRequest{Op: op, Tree: issue.Tree, Role: role, Generation: issue.Generation}); err != nil {
 			return err
 		}
 	}

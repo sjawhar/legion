@@ -32,11 +32,13 @@ func RoleFor(p phase.Phase) claim.Role {
 	}
 }
 
-// SuspendApplies is whether a transition's suspend of role still applies with the issue in phase
-// current: it stopped the role because the issue left the role's phases, so once the issue is back
-// in one of them the role has been handed its work again, and the suspend must not stop it there.
-func SuspendApplies(current phase.Phase, role claim.Role) bool {
-	return RoleFor(current) != role
+// SuspendApplies is whether a suspend still applies with the issue in phase current. leaves is the
+// phase a transition's suspend ends (record.SuperviseRequest.Leaves): it stopped that phase's role
+// because the issue left the role's phases, so once the issue is back in one of them the role has
+// been handed its work again and the suspend must not stop it there. A suspend with no such phase
+// (a linger's or a child's leave) stops every claim whatever phase its issue holds, and applies.
+func SuspendApplies(leaves, current phase.Phase) bool {
+	return leaves == "" || RoleFor(current) != RoleFor(leaves)
 }
 
 func (e *Engine) enqueue(ctx context.Context, tx pgx.Tx, issue string, payload record.OutboxPayload) error {
@@ -94,11 +96,6 @@ func (e *Engine) start(ctx context.Context, tx pgx.Tx, issue record.Issue, role 
 	}
 	return e.enqueue(ctx, tx, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: role, Task: task,
 		Generation: issue.Generation, Phase: issue.Phase})
-}
-
-// supervise enqueues op for the issue's role claim, stamped with the generation it serves.
-func (e *Engine) supervise(ctx context.Context, tx pgx.Tx, issue record.Issue, op record.SuperviseOp, role claim.Role, task string) error {
-	return e.enqueue(ctx, tx, issue.Key, record.SuperviseRequest{Op: op, Tree: issue.Tree, Role: role, Task: task, Generation: issue.Generation})
 }
 
 // task is what a started worker is told. It names the phase the worker starts, which the issue

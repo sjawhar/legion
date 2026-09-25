@@ -428,11 +428,13 @@ func TestASuspendFromBeforeItsRoleWasHandedWorkAgainNeverActs(t *testing.T) {
 }
 
 // A root a human moves out of the workflow lingers: only the root is parked in done, and every
-// claim of every tree member is suspended. A child keeps its phase, so its running worker is one
-// whose role works the child's phase, and its suspend must act all the same: nothing else stops
-// that worker before the linger's tree close, and a completion from it would still advance the child
-// inside a tree the human closed. Found by #1347's review, whose test this is.
-func TestARootLeavingTheWorkflowSuspendsItsChildsWorker(t *testing.T) {
+// claim of every tree member is suspended, the root's own worker and its children's. A child keeps
+// its phase, so its running worker is one whose role works the child's phase, and its suspend must
+// act all the same: nothing else stops that worker before the linger's tree close, and a completion
+// from it would still advance the child inside a tree the human closed. The root's worker is
+// suspended with the root in done, a phase no role works. Found by #1347's review, whose test this
+// extends.
+func TestARootLeavingTheWorkflowSuspendsEveryWorkerOfItsTree(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	ctx := context.Background()
@@ -447,26 +449,32 @@ func TestARootLeavingTheWorkflowSuspendsItsChildsWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
-	token, err := claim.NewToken("legion", child.Key, claim.RoleImplementer)
-	if err != nil {
-		t.Fatal(err)
-	}
-	machine, _, err := sup.Create(ctx, supervise.Claim{Token: token, Project: "legion", Tree: child.Tree, Issue: child.Key, Role: claim.RoleImplementer, State: supervise.StateQueued}, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := machine.Handle(ctx, supervise.RequestSpawn{Claim: token}); err != nil {
-		t.Fatal(err)
-	}
-	generation := machine.Claim().Generation
-	for _, ev := range []supervise.Event{
-		supervise.RequestRegister{Claim: token, Generation: generation, Session: "ses-impl", SessionFile: "/tmp/impl.jsonl"},
-		supervise.RequestReady{Claim: token, Generation: generation, Session: "ses-impl"},
-	} {
-		if err := machine.Handle(ctx, ev); err != nil {
-			t.Fatalf("handle %T: %v", ev, err)
+	// ready is a worker of issue running and ready, as it is between two of its turns.
+	ready := func(issue string) *supervise.Machine {
+		t.Helper()
+		token, err := claim.NewToken("legion", issue, claim.RoleImplementer)
+		if err != nil {
+			t.Fatal(err)
 		}
+		machine, _, err := sup.Create(ctx, supervise.Claim{Token: token, Project: "legion", Tree: root.Tree, Issue: issue, Role: claim.RoleImplementer, State: supervise.StateQueued}, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := machine.Handle(ctx, supervise.RequestSpawn{Claim: token}); err != nil {
+			t.Fatal(err)
+		}
+		generation := machine.Claim().Generation
+		for _, ev := range []supervise.Event{
+			supervise.RequestRegister{Claim: token, Generation: generation, Session: "ses-" + issue, SessionFile: "/tmp/" + issue + ".jsonl"},
+			supervise.RequestReady{Claim: token, Generation: generation, Session: "ses-" + issue},
+		} {
+			if err := machine.Handle(ctx, ev); err != nil {
+				t.Fatalf("handle %T: %v", ev, err)
+			}
+		}
+		return machine
 	}
+	rootWorker, childWorker := ready(root.Key), ready(child.Key)
 	engine := workflow.New(records, workflow.Config{Project: "legion"}, quietLogger())
 	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, project: "legion", log: quietLogger(), now: time.Now,
 		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: root.Key, Status: "backlog"}}, notices: &outboxPublisher{}, handlers: []intake.Handler{engine}}
@@ -477,7 +485,10 @@ func TestARootLeavingTheWorkflowSuspendsItsChildsWorker(t *testing.T) {
 	if err := runner.RunOnce(ctx); err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if got := machine.Claim().State; got != supervise.StateSuspended {
-		t.Fatalf("child implementer = %s after its root moved to backlog, want suspended", got)
+	if got := childWorker.Claim().State; got != supervise.StateSuspended {
+		t.Errorf("child implementer = %s after its root moved to backlog, want suspended", got)
+	}
+	if got := rootWorker.Claim().State; got != supervise.StateSuspended {
+		t.Errorf("root implementer = %s after its root moved to backlog, want suspended", got)
 	}
 }

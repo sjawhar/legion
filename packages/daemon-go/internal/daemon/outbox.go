@@ -352,7 +352,7 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		// would stop the worker in the phase it now serves. The phase is read before the suspend
 		// acts, not in one transaction with it: a transition committing in between costs one
 		// suspend, which that transition's own start then resumes.
-		if payload.Leaves != "" && !workflow.SuspendApplies(issue.Phase, payload.Role) {
+		if !workflow.SuspendApplies(payload.Leaves, issue.Phase) {
 			r.log.Info("outbox suspend of a role the issue is back in; finished without acting", "row", row.ID, "issue", issue.Key,
 				"leaves", payload.Leaves, "phase", issue.Phase, "role", payload.Role)
 			return nil
