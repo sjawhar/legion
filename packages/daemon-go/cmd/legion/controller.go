@@ -29,6 +29,11 @@ import (
 
 const controllerUsage = "usage: legion controller start --config <controller.yaml> [--daemon-url <url>]"
 
+// controllerSecretVariable names the controller capability's secret: its file is written under it,
+// and the session finds that file through the variable with "_FILE" appended, as every pane finds
+// a secret file.
+const controllerSecretVariable = "LEGION_CONTROLLER_SECRET"
+
 func runController(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || args[0] != "start" {
 		fmt.Fprintln(stderr, controllerUsage)
@@ -145,7 +150,7 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 		return 0, err
 	}
 
-	if _, err := runtime.WriteSecretFile(stateDir, token, "LEGION_CONTROLLER_SECRET", secret); err != nil {
+	if _, err := runtime.WriteSecretFile(stateDir, token, controllerSecretVariable, secret); err != nil {
 		return 0, fmt.Errorf("write the controller secret: %w", err)
 	}
 	executable, err := os.Executable()
@@ -219,7 +224,7 @@ func controllerEnvironment(cfg config.ControllerConfig, stateDir, token, secretF
 	if cfg.DispatchURL != "" {
 		env = append(env, [2]string{"DISPATCH_URL", cfg.DispatchURL}, [2]string{"DISPATCH_TOKEN_FILE", cfg.DispatchTokenFile})
 	}
-	env = append(env, [2]string{"LEGION_CONTROLLER_SECRET_FILE", secretFile})
+	env = append(env, [2]string{controllerSecretVariable + "_FILE", secretFile})
 	if cfg.EnvoyTokenFile != "" {
 		env = append(env, [2]string{"ENVOY_TOKEN_FILE", cfg.EnvoyTokenFile})
 	}
