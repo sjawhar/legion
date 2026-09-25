@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -209,4 +210,66 @@ func captureBusLogs(t *testing.T) *busLogs {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(logs, nil)))
 	t.Cleanup(func() { slog.SetDefault(previous) })
 	return logs
+}
+
+// A reconnect in place keeps every subscription nats.go restored. nats.go re-sends each
+// subscription's SUB on the connection it reconnected, so the subscription Subscribe returned still
+// delivers; tearing it down to bind the consumer again races the server's own release of the
+// consumer's push binding, which refuses the new bind with "consumer is already bound to a
+// subscription" and logs a resubscribe failure at ERROR (LEGION-278).
+func TestAReconnectInPlaceKeepsTheSubscriptionsNATSRestored(t *testing.T) {
+	_, uri := startNATS(t)
+	client, err := bus.Connect([]string{uri})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(client.Close)
+	var durableDeliveries, roleDeliveries atomic.Int32
+	durable, err := subscribeAllNotifications(client, func(message *natsgo.Msg) {
+		durableDeliveries.Add(1)
+		_ = message.Ack()
+	}, natsgo.Durable("in-place-reconnect"), natsgo.DeliverNew(), natsgo.AckExplicit(), natsgo.ManualAck())
+	if err != nil {
+		t.Fatalf("durable subscribe: %v", err)
+	}
+	const roleSubject = "notifications.role.in-place-reconnect"
+	role, err := client.SubscribeCore(roleSubject, func(*natsgo.Msg) { roleDeliveries.Add(1) }, "in-place-reconnect")
+	if err != nil {
+		t.Fatalf("role subscribe: %v", err)
+	}
+	reconnected := make(chan struct{}, 1)
+	client.AddReconnectHook(func(*natsgo.Conn) error {
+		reconnected <- struct{}{}
+		return nil
+	})
+
+	logs := captureBusLogs(t)
+	if err := client.Conn.ForceReconnect(); err != nil {
+		t.Fatalf("force reconnect: %v", err)
+	}
+	select {
+	case <-reconnected:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the reconnect never finished restoring the subscriptions")
+	}
+	if !durable.IsValid() || !role.IsValid() {
+		t.Fatalf("a reconnect in place tore down the subscriptions Subscribe returned (durable valid %t, role valid %t)", durable.IsValid(), role.IsValid())
+	}
+
+	if _, err := client.JS().Publish("notifications.github.test.in-place-reconnect", []byte(`{}`)); err != nil {
+		t.Fatalf("publish to the durable: %v", err)
+	}
+	if err := client.Conn.Publish(roleSubject, []byte(`{}`)); err != nil {
+		t.Fatalf("publish to the role lane: %v", err)
+	}
+	waitFor(t, 5*time.Second, "both deliveries after the reconnect", func() bool {
+		return durableDeliveries.Load() >= 1 && roleDeliveries.Load() >= 1
+	})
+	time.Sleep(time.Second)
+	if durable, role := durableDeliveries.Load(), roleDeliveries.Load(); durable != 1 || role != 1 {
+		t.Fatalf("deliveries after the reconnect: durable %d, role %d, want one each", durable, role)
+	}
+	if line := logs.errorLine(); line != "" {
+		t.Fatalf("a reconnect in place logged an error: %s", line)
+	}
 }
