@@ -165,6 +165,10 @@ func TestInstallRefusesWhatItCannotRoute(t *testing.T) {
 		"the default profile":  {func(env map[string]string) { env["OMP_PROFILE"] = "default" }, "OMP_PROFILE names no profile"},
 		"a path as a profile":  {func(env map[string]string) { env["OMP_PROFILE"] = "../legion" }, `OMP_PROFILE "../legion" is not a profile name`},
 		"a gateway on a space": {func(env map[string]string) { env[EnvURL] = "https://middle man.internal" }, EnvURL + " does not parse as a URL"},
+		// url.Parse gives `http://:8080` the Host ":8080", with no hostname.
+		"a port and no hostname": {func(env map[string]string) { env[EnvURL] = "http://:8080" }, EnvURL + " is not an http(s) URL with a host"},
+		"port 0":                 {func(env map[string]string) { env[EnvURL] = "https://middleman.internal:0" }, EnvURL + " names a port outside 1-65535"},
+		"port 65536":             {func(env map[string]string) { env[EnvURL] = "https://middleman.internal:65536" }, EnvURL + " names a port outside 1-65535"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			env := environment(t, "https://middleman.internal")
