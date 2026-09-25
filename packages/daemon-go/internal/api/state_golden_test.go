@@ -192,9 +192,9 @@ func TestRegisterResponseGolden(t *testing.T) {
 // A session that registered with the controller capability learns the project's controller token
 // and role, the capability's generation, and its registration's secret — no tree and no issue.
 func TestControllerRegisterResponseGolden(t *testing.T) {
-	golden(t, "register-controller.json", claim.RegisterResponse{
+	golden(t, "register-controller.json", ControllerRegisterResponse{
 		ClaimToken: "legion-legion-controller",
-		Role:       claim.RoleController,
+		Role:       ControllerRole,
 		Generation: 2,
 		Secret:     "Q29udHJvbGxlZEJ5TGVnaW9u",
 	})

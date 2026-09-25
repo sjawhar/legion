@@ -22,9 +22,3 @@ const (
 	RoleReviewer    Role = "reviewer"
 	RoleMerger      Role = "merger"
 )
-
-// RoleController is the project controller's role on the registration wire: what the claim
-// registration route answers a session that registered with the controller capability. It is no
-// claim's role — the controller is launched by the operator and supervised by nothing — so Roles
-// and IsRole leave it out.
-const RoleController Role = "controller"
