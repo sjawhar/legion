@@ -19,26 +19,47 @@ import (
 
 var anchorAttribute = regexp.MustCompile(`([a-zA-Z0-9_-]+)="([^"]*)"`)
 
-var markdownParser = goldmark.New(
-	goldmark.WithExtensions(extension.GFM, extension.Footnote, &frontmatter.Extender{
-		Formats: []frontmatter.Format{frontmatter.YAML},
-	}),
-	goldmark.WithParserOptions(parser.WithBlockParsers(
-		util.Prioritized(&typedDirectiveParser{}, 950),
-		util.Prioritized(&unsupportedDirectiveParser{}, 900),
-	)),
+// newMarkdownParser builds the one goldmark configuration Dispatch reads markdown with. Its two
+// uses differ only in the front-matter extension: a document with a closed front-matter block is
+// read with it, and everything else without it - a document whose leading `---` opens nothing,
+// which the extension would consume to the end of the input with every block after it, and the
+// renderer asking how a line it is about to write would be read.
+func newMarkdownParser(readFrontmatter bool) goldmark.Markdown {
+	extensions := []goldmark.Extender{extension.GFM, extension.Footnote}
+	if readFrontmatter {
+		extensions = append(extensions, &frontmatter.Extender{Formats: []frontmatter.Format{frontmatter.YAML}})
+	}
+	return goldmark.New(
+		goldmark.WithExtensions(extensions...),
+		goldmark.WithParserOptions(parser.WithBlockParsers(
+			util.Prioritized(&typedDirectiveParser{}, 950),
+			util.Prioritized(&unsupportedDirectiveParser{}, 900),
+		)),
+	)
+}
+
+var (
+	markdownParser        = newMarkdownParser(true)
+	unfrontmatteredParser = newMarkdownParser(false)
 )
 
 // Parse converts markdown into the closed Proof ProseMirror tree.
 func Parse(markdown string) (*Node, error) {
 	source := []byte(markdown)
-	root := markdownParser.Parser().Parse(gmtext.NewReader(source))
+	front := parseFrontmatterBlock(source)
+	// A document with no closed front-matter block is parsed without the extension: it has
+	// nothing for the extension to read, and an unclosed opener is text it would swallow.
+	md := markdownParser
+	if front == nil {
+		md = unfrontmatteredParser
+	}
+	root := md.Parser().Parse(gmtext.NewReader(source))
 	doc, err := parseBlock(root, source, footnoteLabels(root))
 	if err != nil {
 		return nil, err
 	}
-	if frontmatter := parseFrontmatterBlock(source); frontmatter != nil {
-		doc.Children = append([]*Node{frontmatter}, doc.Children...)
+	if front != nil {
+		doc.Children = append([]*Node{front}, doc.Children...)
 	}
 	if len(doc.Children) == 0 {
 		doc.Children = []*Node{{Type: "paragraph"}}

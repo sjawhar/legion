@@ -1469,6 +1469,147 @@ func TestApplyOperationReplaceDropsWhitespaceAtATextblocksEdges(t *testing.T) {
 	}
 }
 
+// A hard break ends a line as surely as a newline does, so the line after one can underline it
+// into a heading. This is the shape `replace` actually produces: ParseInline turns a soft newline
+// into a space, and a caller who wants two lines writes a hard break.
+func TestApplyOperationReplaceEscapesBlockMarkersAfterAHardBreak(t *testing.T) {
+	for _, with := range []string{
+		"Title\\\n==",
+		"Title  \n--",
+		"Title\\\n~~~",
+		"Title\\\n<div",
+		"a | b\\\n--- | ---",
+		"Title\\\n:--",
+		"Title  \n-:",
+		"Title\\\n:-:",
+	} {
+		t.Run(with, func(t *testing.T) {
+			tree, err := parseInput("Intro.\n\nBody.\n\nAfter.\n")
+			if err != nil {
+				t.Fatal(err)
+			}
+			tree, err = applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: with})
+			if err != nil {
+				t.Fatalf("replace: %v", err)
+			}
+			markdown, err := renderTree(tree)
+			if err != nil {
+				t.Fatal(err)
+			}
+			back, err := parseInput(markdown)
+			if err != nil {
+				t.Fatalf("parse %q: %v", markdown, err)
+			}
+			if len(back.Children) != 3 {
+				t.Fatalf("the replacement changed the document's blocks:\n%s", markdown)
+			}
+			for _, child := range back.Children {
+				if child.Type != "paragraph" {
+					t.Fatalf("the replacement became a %s:\n%s", child.Type, markdown)
+				}
+			}
+		})
+	}
+}
+
+// A `with` whose first line ends in a backslash keeps its hard break: the backslash form of the
+// break would read back as an escaped backslash and a soft break, so the text the caller wrote as
+// two lines would come back as one.
+func TestApplyOperationReplaceKeepsAHardBreakAfterATrailingBackslash(t *testing.T) {
+	tree, err := parseInput("Intro.\n\nBody.\n\nAfter.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree, err = applyOperation(tree, model.EditOp{
+		Op: "replace", Find: "Body.", With: "Ends in a backslash \\\\  \nnext line",
+	})
+	if err != nil {
+		t.Fatalf("replace: %v", err)
+	}
+	markdown, err := renderTree(tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := parseInput(markdown)
+	if err != nil {
+		t.Fatalf("parse %q: %v", markdown, err)
+	}
+	var kinds []string
+	for _, child := range back.Children[1].Children {
+		kinds = append(kinds, child.Type)
+	}
+	if strings.Join(kinds, ",") != "text,hardbreak,text" {
+		t.Fatalf("the rewritten paragraph is %v, rendered %q", kinds, markdown)
+	}
+}
+
+// A document whose block ends in a backslash renders exactly as it was written, so nothing about
+// it drifts: the canonical markdown a version records is the caller's own bytes.
+func TestADocumentEndingInABackslashRendersAsItWasStored(t *testing.T) {
+	service, artifactID := newTestService(t)
+	const stored = `The path is C:\` + "\n"
+	seedServiceText(t, service, artifactID, stored)
+
+	markdown, err := renderTree(liveTree(t, service, artifactID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if markdown != stored {
+		t.Fatalf("the document renders %q, where it is stored as %q", markdown, stored)
+	}
+}
+
+// A link whose text carries a `]` keeps its link: the escaped bracket `replace` accepts comes
+// back as a literal, where an unescaped one closes the label early and the link is gone.
+func TestApplyOperationReplaceKeepsALinkWhoseTextHasABracket(t *testing.T) {
+	tree, err := parseInput("Intro.\n\nBody.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree, err = applyOperation(tree, model.EditOp{
+		Op: "replace", Find: "Body.", With: `[a\]b](https://x.test)`,
+	})
+	if err != nil {
+		t.Fatalf("replace: %v", err)
+	}
+	markdown, err := renderTree(tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := parseInput(markdown)
+	if err != nil {
+		t.Fatalf("parse %q: %v", markdown, err)
+	}
+	first := back.Children[1].Children[0]
+	if first.Text != `a]b` || len(first.Marks) != 1 || first.Marks[0].Type != "link" {
+		t.Fatalf("the link is gone: %q (%#v)", markdown, first)
+	}
+}
+
+// Bold text ending in a backslash keeps its bold: the closing `**` would otherwise be escaped by
+// that backslash, and the document would read back as plain text with a stray marker.
+func TestApplyOperationReplaceKeepsAMarkAroundTextEndingInABackslash(t *testing.T) {
+	tree, err := parseInput("Intro.\n\nBody.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree, err = applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: `**a\\** tail`})
+	if err != nil {
+		t.Fatalf("replace: %v", err)
+	}
+	markdown, err := renderTree(tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := parseInput(markdown)
+	if err != nil {
+		t.Fatalf("parse %q: %v", markdown, err)
+	}
+	first := back.Children[1].Children[0]
+	if len(first.Marks) != 1 || first.Marks[0].Type != "strong" {
+		t.Fatalf("the bold is gone: %q (%#v)", markdown, first)
+	}
+}
 func TestApplyOperationReplaceRejectsBlockReplacements(t *testing.T) {
 	// The refusal is where an agent learns what to do instead, and each half of it is for a
 	// different `with`: paragraphs are rewritten one replace each, keeping their block ids - so a
@@ -2066,8 +2207,9 @@ func TestApplyOpsDeletingAnOpenAskBlockByIDRetractsItsAsk(t *testing.T) {
 }
 
 // An empty with deletes the matched text on purpose. Where it empties a whole paragraph the block
-// and its id stay, holding nothing, whatever blocks are around it; where the text it leaves reads
-// back as another block, the replace is refused naming that text.
+// and its id stay, holding nothing, whatever blocks are around it; where the text it leaves would
+// read back as another block, the renderer writes that text escaped, or the replace is refused
+// naming it.
 func TestApplyOperationReplaceWithNothingEmptiesTheParagraph(t *testing.T) {
 	for _, test := range []struct{ name, markdown string }{
 		{"before a list", "Intro.\n\nBody.\n\n- a\n"},
@@ -2119,16 +2261,23 @@ func TestApplyOperationReplaceWithNothingEmptiesTheParagraph(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = applyOperation(tree, model.EditOp{Op: "replace", Find: " x", With: ""})
-	var invalid *ErrInvalidOp
-	if !errors.As(err, &invalid) || invalid.Field != "with" || !strings.Contains(invalid.Reason, `leaves "---"`) || !strings.Contains(invalid.Reason, `the line "---" reads as a horizontal rule`) {
-		t.Fatalf("replace leaving \"---\" = %v, want INVALID_OP on with naming the text it leaves", err)
+	next, err := applyOperation(tree, model.EditOp{Op: "replace", Find: " x", With: ""})
+	if err != nil {
+		var invalid *ErrInvalidOp
+		if !errors.As(err, &invalid) || invalid.Field != "with" || !strings.Contains(invalid.Reason, `leaves "---"`) || !strings.Contains(invalid.Reason, `the line "---" reads as a horizontal rule`) {
+			t.Fatalf("replace leaving \"---\" = %v, want INVALID_OP on with naming the text it leaves", err)
+		}
+		return
+	}
+	if err := pmdoc.BlockShapeError(next.Children[1]); err != nil {
+		markdown, _ := renderTree(next)
+		t.Fatalf("replace leaving \"---\" stored %q, which reads back as another block: %v", markdown, err)
 	}
 }
 
 // An emptied paragraph is not written, so a block holding one is judged for shape as the blocks
-// it writes: a later replace in that block that would read back as another block is refused as it
-// is in a block that never held one.
+// it writes: a later replace in that block never stores text that reads back as another block,
+// which the renderer escapes, or which is refused as it is in a block that never held one.
 func TestApplyOperationReplaceJudgesABlockHoldingAnEmptiedParagraph(t *testing.T) {
 	for _, test := range []struct{ name, markdown, with string }{
 		{"a quote, dashes", "Intro.\n\n> Body.\n>\n> More.\n", "---"},
@@ -2146,23 +2295,30 @@ func TestApplyOperationReplaceJudgesABlockHoldingAnEmptiedParagraph(t *testing.T
 			if err != nil {
 				t.Fatalf("emptying the first paragraph = %v", err)
 			}
-			_, err = applyOperation(emptied, model.EditOp{Op: "replace", Find: "More.", With: test.with})
-			var invalid *ErrInvalidOp
-			if !errors.As(err, &invalid) || invalid.Field != "with" {
-				t.Fatalf("replace with %q beside an emptied paragraph = %v, want INVALID_OP on with", test.with, err)
+			next, err := applyOperation(emptied, model.EditOp{Op: "replace", Find: "More.", With: test.with})
+			if err != nil {
+				var invalid *ErrInvalidOp
+				if !errors.As(err, &invalid) || invalid.Field != "with" {
+					t.Fatalf("replace with %q beside an emptied paragraph = %v, want INVALID_OP on with", test.with, err)
+				}
+				return
+			}
+			if err := pmdoc.BlockShapeError(next.Children[1]); err != nil {
+				markdown, _ := renderTree(next)
+				t.Fatalf("replace with %q beside an emptied paragraph stored %q, which reads back as another block: %v", test.with, markdown, err)
 			}
 		})
 	}
 }
 
-// A replace writes text. Text that reads back as another block where it lands - a line of dashes
-// becomes a horizontal rule, a line of colons a typed block's fence - is refused with that cause,
-// whatever the block around it, and the advice is the insert that adds the block the caller
-// probably meant, except in a footnote definition: the document reads a definition at its end, so
-// a block inserted beside one reads back ahead of it, and the advice there is only to keep the
-// characters as text. The reason names the block the text reads back as, read in place, not at a
-// document's start, where a `---` line would open front matter.
-func TestApplyOperationReplaceRefusesTextThatReadsBackAsAnotherBlock(t *testing.T) {
+// A replace writes text, so it never stores text the document reads back as another block where
+// it lands - a line of dashes as a horizontal rule, a line of colons as a typed block's fence. The
+// renderer writes such text escaped where its rules reach it; where they do not, the replace is
+// refused with the block the text reads back as and the insert that adds that block, except in a
+// footnote definition: the document reads a definition at its end, so a block inserted beside one
+// reads back ahead of it, and the advice there is only to keep the characters as text. The block
+// is read in place, not at a document's start, where a `---` line would open front matter.
+func TestApplyOperationReplaceNeverStoresTextThatReadsBackAsAnotherBlock(t *testing.T) {
 	const footnote = "x[^1]\n\n[^1]: Body.\n"
 	for _, test := range []struct {
 		name, markdown, with string
@@ -2187,27 +2343,37 @@ func TestApplyOperationReplaceRefusesTextThatReadsBackAsAnotherBlock(t *testing.
 				t.Fatal(err)
 			}
 			pmdoc.EnsureBlockIDs(tree)
-			_, err = applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
-			var invalid *ErrInvalidOp
-			if !errors.As(err, &invalid) || invalid.Field != "with" {
-				t.Fatalf("replace with %q = %v, want INVALID_OP on with", test.with, err)
-			}
-			for _, want := range test.want {
-				if !strings.Contains(invalid.Reason, want) {
-					t.Fatalf("reason %q lacks %q", invalid.Reason, want)
+			next, err := applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
+			if err != nil {
+				var invalid *ErrInvalidOp
+				if !errors.As(err, &invalid) || invalid.Field != "with" {
+					t.Fatalf("replace with %q = %v, want INVALID_OP on with", test.with, err)
 				}
+				for _, want := range test.want {
+					if !strings.Contains(invalid.Reason, want) {
+						t.Fatalf("reason %q lacks %q", invalid.Reason, want)
+					}
+				}
+				if strings.Contains(invalid.Reason, "requires block children") {
+					t.Fatalf("reason %q names the document-start reading", invalid.Reason)
+				}
+				if offers := strings.Contains(invalid.Reason, "insert"); offers != test.insert {
+					t.Fatalf("reason %q offers an insert: %v, want %v", invalid.Reason, offers, test.insert)
+				}
+				if strings.Contains(invalid.Reason, "the a ") {
+					t.Fatalf("reason %q names a block twice over", invalid.Reason)
+				}
+				if strings.Contains(invalid.Reason, "Backlink") {
+					t.Fatalf("reason %q names the parser's node rather than the caller's footnote", invalid.Reason)
+				}
+				return
 			}
-			if strings.Contains(invalid.Reason, "requires block children") {
-				t.Fatalf("reason %q names the document-start reading", invalid.Reason)
+			markdown, err := renderTree(next)
+			if err != nil {
+				t.Fatal(err)
 			}
-			if offers := strings.Contains(invalid.Reason, "insert"); offers != test.insert {
-				t.Fatalf("reason %q offers an insert: %v, want %v", invalid.Reason, offers, test.insert)
-			}
-			if strings.Contains(invalid.Reason, "the a ") {
-				t.Fatalf("reason %q names a block twice over", invalid.Reason)
-			}
-			if strings.Contains(invalid.Reason, "Backlink") {
-				t.Fatalf("reason %q names the parser's node rather than the caller's footnote", invalid.Reason)
+			if err := pmdoc.BlockShapeError(next.Children[1]); err != nil {
+				t.Fatalf("replace with %q stored %q, which reads back as another block: %v", test.with, markdown, err)
 			}
 		})
 	}

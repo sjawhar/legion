@@ -489,9 +489,10 @@ list attributes any other document write gives it, and anchors inside the text a
 are affected as they are by any document edit. A field named but unchanged is not rewritten, so
 an idempotent retry of the whole ask writes nothing, versions nothing and keeps every anchor.
 Text the block cannot carry unchanged is refused `400 ASK_BLOCK_TEXT` naming the field, with
-nothing written - an option label containing `": "`, which separates a label from its
-description, or a question with a line beginning `:::`, which would leave the canonical markdown
-unparseable. A single newline is
+nothing written. The rule is a round trip through settlement's own parser and the canonical
+markdown a version records, never a list of forbidden characters: whatever the block cannot carry
+back unchanged is refused, and an option label containing `": "` - the separator between a label
+and its description - is one example rather than the only one. A single newline is
 carried as a hard break; surrounding whitespace is trimmed, as the parser trims it.
 Settlement retracts an ask whose block left the document in its own name,
 `{kind: "system", id: "document-settlement"}`, and restores only a retraction it wrote - a
