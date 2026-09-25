@@ -639,6 +639,88 @@ test("an inbox row sets its issue's priority in place", async ({ browser }, test
   }
 });
 
+// Deferring a row is only worth anything if it stops being asked about, so this case gates the
+// whole rule at the UI: the band, and the two counts that would otherwise keep nagging - the
+// Blocked-on-you banner and the rail's Needs-you badge - including after an agent replies,
+// which hands the turn back and is exactly what used to pull a deferred ask onto the list.
+test("a snoozed row leaves Later, the banner and the Needs-you badge alone until un-snoozed", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Deal with it later" });
+  const ask = await createAsk(issue.key, { question: "Which approach?" }, session);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/");
+    const row = page.getByRole("listitem").filter({ has: page.getByTestId(`ask-${ask.id}`) });
+    const banner = page.getByText(/Blocked on you: 1 item/);
+    const badge = page.getByText(/^Needs you 1$/);
+    await expect(page.getByRole("heading", { name: "Waiting on you" })).toBeVisible();
+    await expect(banner).toBeVisible();
+    await expect(badge.first()).toBeVisible();
+
+    const put = page.waitForRequest(
+      (request) =>
+        request.method() === "PUT" &&
+        new URL(request.url()).pathname === `/api/v1/me/asks/${ask.id}/snooze`
+    );
+    await row.getByLabel(`Snooze ${issue.key}`).selectOption("tomorrow");
+    expect(Date.parse((await put).postDataJSON().snoozed_until)).toBeGreaterThan(Date.now());
+
+    // Folded away, and off both counts: the viewer is not asked about it again until it
+    // returns. This is the point of the feature, not a side effect of the band.
+    const later = page.getByRole("button", { name: /^Later \(1\)/ });
+    await expect(later).toBeVisible();
+    await expect(row).toBeHidden();
+    await expect(banner).toBeHidden();
+    await expect(badge).toHaveCount(0);
+    await expect
+      .poll(async () => (await getInbox({ login: "alice" })).at(0)?.snoozed_until)
+      .not.toBeNull();
+
+    // The agent answers, handing the turn back: the row stays deferred and stays off both
+    // counts. Only the moment passing or the reader's own un-snooze returns it.
+    await createComment(issue.key, { ask_id: ask.id, body: "Here is what I found." }, session);
+    await page.reload();
+    await expect(page.getByRole("button", { name: /^Later \(1\)/ })).toBeVisible();
+    await expect(row).toBeHidden();
+    await expect(banner).toBeHidden();
+    await expect(badge).toHaveCount(0);
+
+    // The real pointer opens the disclosure; the row is there with its return time.
+    await later.click();
+    await expect(row).toBeVisible();
+    await expect(row).toHaveAttribute("data-inbox-section", "later");
+
+    const shot = testInfo.outputPath(`inbox-snooze-${testInfo.project.name}.png`);
+    await page.screenshot({ path: shot });
+    await testInfo.attach(`inbox snooze (${testInfo.project.name})`, {
+      contentType: "image/png",
+      path: shot,
+    });
+
+    const remove = page.waitForRequest(
+      (request) =>
+        request.method() === "DELETE" &&
+        new URL(request.url()).pathname === `/api/v1/me/asks/${ask.id}/snooze`
+    );
+    await row.getByRole("button", { name: `Un-snooze ${issue.key}` }).click();
+    await remove;
+    await expect(page.getByRole("heading", { name: "Waiting on you" })).toBeVisible();
+    await expect(row).toHaveAttribute("data-inbox-section", "human");
+    await expect(page.getByText(/Blocked on you: 1 item/)).toBeVisible();
+    // The row's link was not followed by any of it.
+    expect(new URL(page.url()).pathname).toBe("/");
+
+    await page.reload();
+    await expect(row).toHaveAttribute("data-inbox-section", "human");
+  } finally {
+    await alice.close();
+  }
+});
+
 test("an unanchored issue-level comment reaches Conversation, not document review", async ({
   browser,
 }, testInfo) => {
