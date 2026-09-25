@@ -105,9 +105,6 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	if err != nil {
 		return 0, err
 	}
-	if err := prompts.CheckRolePrompts(rolesDir); err != nil {
-		return 0, err
-	}
 	if cfg.InstructionsPath != "" {
 		if _, err := config.ReadDeploymentInstructions(cfg.InstructionsPath); err != nil {
 			return 0, err

@@ -354,6 +354,123 @@ test("keyboard focus on another reference outruns the close the pointer armed", 
   }
 });
 
+test("keyboard focus on the anchor the pointer just left outruns its close", () => {
+  const getIssue = mockIssues();
+  jest.useFakeTimers();
+  const view = render(<Harness />);
+  try {
+    const first = screen.getByRole("link", { name: "first" });
+    fireEvent.pointerOver(first, { pointerType: "mouse" });
+    act(() => {
+      jest.advanceTimersByTime(REF_PREVIEW_OPEN_DELAY_MS);
+    });
+    expect(screen.getByRole("tooltip").textContent).toContain("CORE-1");
+
+    // The same anchor, not another one: the cancel is by target identity, and `focus` mints a
+    // fresh target for the anchor already shown, so the close the pointer armed is cancelled.
+    fireEvent.pointerOut(first, { pointerType: "mouse", relatedTarget: document.body });
+    act(() => {
+      jest.advanceTimersByTime(REF_PREVIEW_CLOSE_DELAY_MS - 50);
+      first.focus();
+    });
+    act(() => {
+      jest.advanceTimersByTime(1000);
+    });
+    expect(screen.getByRole("tooltip").textContent).toContain("CORE-1");
+  } finally {
+    view.unmount();
+    getIssue.mockRestore();
+  }
+});
+
+test("two pointers leaving the zone within the delay leave one close timer", () => {
+  const getIssue = mockIssues();
+  jest.useFakeTimers();
+  const view = render(<Harness />);
+  try {
+    const first = screen.getByRole("link", { name: "first" });
+    fireEvent.pointerOver(first, { pointerType: "mouse" });
+    act(() => {
+      jest.advanceTimersByTime(REF_PREVIEW_OPEN_DELAY_MS);
+    });
+    const card = screen.getByRole("tooltip");
+
+    // A second pointer visits the card and leaves it, arming a close; 50 ms later the mouse
+    // leaves the anchor, which re-arms on the same target, and 50 ms after that the mouse comes
+    // back. One timer may be outstanding, or the first pointer's close fires under the second.
+    fireEvent.pointerOver(card, { pointerType: "pen", relatedTarget: document.body });
+    fireEvent.pointerOut(card, { pointerType: "pen", relatedTarget: document.body });
+    act(() => {
+      jest.advanceTimersByTime(50);
+    });
+    fireEvent.pointerOut(first, { pointerType: "mouse", relatedTarget: document.body });
+    act(() => {
+      jest.advanceTimersByTime(50);
+    });
+    fireEvent.pointerOver(first, { pointerType: "mouse", relatedTarget: document.body });
+    act(() => {
+      jest.advanceTimersByTime(1000);
+    });
+    expect(screen.getByRole("tooltip")).toBe(card);
+  } finally {
+    view.unmount();
+    getIssue.mockRestore();
+  }
+});
+
+test("a scroll that repositions a keyboard-opened card keeps the close the pointer armed", () => {
+  const getIssue = mockIssues();
+  jest.useFakeTimers();
+  const view = render(<Harness />);
+  try {
+    const first = screen.getByRole("link", { name: "first" });
+    act(() => {
+      first.focus();
+    });
+    expect(screen.getByRole("tooltip").textContent).toContain("CORE-1");
+
+    // The pointer visits the card and leaves it, arming the close; the page then scrolls under
+    // the focused anchor, which measures the card again. `reposition` keeps the target, so it
+    // keeps the armed close too, and the card still closes when the delay runs out.
+    const card = screen.getByRole("tooltip");
+    fireEvent.pointerOver(card, { pointerType: "mouse", relatedTarget: document.body });
+    fireEvent.pointerOut(card, { pointerType: "mouse", relatedTarget: document.body });
+    fireEvent.scroll(document);
+    expect(screen.getByRole("tooltip")).toBe(card);
+    act(() => {
+      jest.advanceTimersByTime(REF_PREVIEW_CLOSE_DELAY_MS);
+    });
+    expect(screen.queryByRole("tooltip")).toBeNull();
+  } finally {
+    view.unmount();
+    getIssue.mockRestore();
+  }
+});
+
+test("a click anywhere closes the card", () => {
+  const getIssue = mockIssues();
+  jest.useFakeTimers();
+  const view = render(<Harness />);
+  try {
+    const first = screen.getByRole("link", { name: "first" });
+    fireEvent.pointerOver(first, { pointerType: "mouse" });
+    act(() => {
+      jest.advanceTimersByTime(REF_PREVIEW_OPEN_DELAY_MS);
+    });
+    expect(screen.getByRole("tooltip")).toBeTruthy();
+
+    // The card is not interactive and a click means the reader is doing something else, so the
+    // window's own listener closes it - wherever the click landed.
+    act(() => {
+      fireEvent.click(document.body);
+    });
+    expect(screen.queryByRole("tooltip")).toBeNull();
+  } finally {
+    view.unmount();
+    getIssue.mockRestore();
+  }
+});
+
 test("scrolling under a hover-opened card closes it", () => {
   const getIssue = mockIssues();
   jest.useFakeTimers();

@@ -64,6 +64,7 @@ var liveChecks = []liveCheck{
 	{"installed", (*liveRig).checkInstalled},
 	{"boot-refusal-negative", (*liveRig).checkBootRefusal},
 	{"image-probe", (*liveRig).checkImageProbe},
+	{"image-probe-negative", (*liveRig).checkImageProbeRefusal},
 	{"root-ready", (*liveRig).checkRootReady},
 	{"gvisor", (*liveRig).checkGVisor},
 	{"operator-token", (*liveRig).checkOperatorToken},

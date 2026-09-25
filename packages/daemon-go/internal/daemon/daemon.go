@@ -36,6 +36,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/tmux"
 	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
+	workershim "github.com/sjawhar/legion/daemon/internal/shim"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/stream"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
@@ -44,8 +45,10 @@ import (
 const (
 	// bootTimeout bounds the work between the plugin gate passing and the API listening: an
 	// unreachable Postgres refuses in milliseconds, but a reachable one that never answers must
-	// not leave the daemon hanging with nothing on stderr. The gate itself is not bounded by it —
-	// it waits out host load for as long as that lasts (pluginGate).
+	// not leave the daemon hanging with nothing on stderr. The gate is not bounded by it — it waits
+	// out host load for as long as that lasts (pluginGate) — nor are the GitHub App tokens' mint
+	// and the image probe, which wait out GitHub's and the cluster's transient trouble within
+	// retries of their own (appMintRetry, imageProbeRetry); the work after each has a budget anew.
 	bootTimeout = 30 * time.Second
 	// shutdownTimeout bounds each half of the exit — draining the API, then stamping the boot.
 	shutdownTimeout = 10 * time.Second
@@ -104,8 +107,8 @@ type overrides struct {
 // ctx decides one thing: how long the daemon serves. The boot record and its stamp are the
 // daemon's own bookkeeping and run on a context the shutdown did not cancel, so a signal that
 // arrives mid-startup still leaves a recorded, stamped boot rather than a row with no end. A
-// signal that arrives while the plugin gate or the image probe waits ends the daemon there,
-// cleanly: it has served nothing and records nothing.
+// signal that arrives while the plugin gate, the GitHub App tokens' mint, or the image probe waits
+// ends the daemon there, cleanly: it has served nothing and records nothing.
 func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	return run(ctx, cfg, log, overrides{})
 }
@@ -143,12 +146,21 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 	if cfg.DispatchURL != "" {
 		log.Info("legion workflow boot stage", "stage", "store")
 	}
-	workflow, err := openWorkflow(boot, cfg, st, plan.project, log, o.workflowTokens)
+	// The App mint waits out GitHub's transient failures, which the boot budget does not bound, as
+	// it does not bound the plugin gate or the image probe: the work after it has a budget of its own.
+	workflow, err := openWorkflow(ctx, cfg, st, plan.project, log, o.workflowTokens)
 	if err != nil {
 		st.Close()
+		if ctx.Err() != nil {
+			log.Info("legion daemon stopped before its GitHub App tokens were minted", "project", cfg.Project)
+			return nil
+		}
 		return err
 	}
 	if workflow != nil {
+		var cancelAfterMint context.CancelFunc
+		boot, cancelAfterMint = context.WithTimeout(context.WithoutCancel(ctx), bootTimeout)
+		defer cancelAfterMint()
 		plan.identity = workflow.identity
 	}
 	plan.prompts, err = prompts.New(plan.rolesDir, cfg.StateDir)
@@ -419,17 +431,6 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 		if invocation, err = tmux.ResolveOmpInvocation(cfg.OmpInvocation, getenv); err != nil {
 			return err
 		}
-		p.gate = pluginGate{
-			env:        tmux.PaneEnvironment(os.Environ(), cfg.StateDir),
-			workDir:    cfg.StateDir,
-			invocation: invocation,
-			prefix:     cfg.OmpLaunchPrefix,
-			timeout:    cfg.SlowCommandTimeout,
-			retry:      bootprobe.Daemon,
-			contract:   api.GoDaemonAPIVersion,
-			rolesDir:   p.rolesDir,
-			log:        log,
-		}.verify
 		log.Info("legion daemon resolved OMP invocation for boot probes and panes", "invocation", invocation)
 	}
 	dispatchTokenFile := ""
@@ -449,6 +450,23 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 	if err != nil {
 		return err
 	}
+	if p.newRuntime == nil {
+		env, err := gateEnvironment(os.Environ(), cfg.StateDir, providerEnvDir)
+		if err != nil {
+			return err
+		}
+		p.gate = pluginGate{
+			env:        env,
+			workDir:    cfg.StateDir,
+			invocation: invocation,
+			prefix:     cfg.OmpLaunchPrefix,
+			timeout:    cfg.SlowCommandTimeout,
+			retry:      bootprobe.Daemon,
+			contract:   api.GoDaemonAPIVersion,
+			rolesDir:   p.rolesDir,
+			log:        log,
+		}.verify
+	}
 	// Only a configuration with a repository runs Legion's own gh, git, and jj.
 	if _, ok := cfg.Projects[cfg.Project]; ok {
 		if p.tools, err = resolveTools(func(name string) (string, bool) { return envValue(environ, name) }); err != nil {
@@ -459,6 +477,29 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 		p.newRuntime = tmuxRuntime(cfg, p.project, invocation, providerEnvDir, dispatchTokenFile, p.tools, log)
 	}
 	return nil
+}
+
+// gateEnvironment is the environment a pane's Oh My Pi runs with, which the boot gate probes under:
+// the pane environment, and each provider key the pane's shim exports from providerEnvDir as the
+// shim exports it (shim.ReadProviderEnv), so a task agent whose model's key comes only through a
+// provider key resolves as it will in a pane.
+func gateEnvironment(environ []string, stateDir, providerEnvDir string) (map[string]string, error) {
+	env := tmux.PaneEnvironment(environ, stateDir)
+	if providerEnvDir == "" {
+		return env, nil
+	}
+	pairs, err := workershim.ReadProviderEnv(providerEnvDir, func(name string) (string, bool) {
+		value, ok := env[name]
+		return value, ok
+	})
+	if err != nil {
+		return nil, fmt.Errorf("boot gate: %w", err)
+	}
+	for _, pair := range pairs {
+		name, value, _ := strings.Cut(pair, "=")
+		env[name] = value
+	}
+	return env, nil
 }
 
 // tmuxRuntime builds the tmux runtime over the worker stream: the listener is its connection

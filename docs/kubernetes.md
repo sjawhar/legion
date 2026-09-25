@@ -52,15 +52,19 @@ daemon's own code (`packages/daemon-go/internal/daemon/bootgate.go`), with the p
 daemon API contract (`legion.goDaemonApiVersion`) and every task agent and skill Legion's prompts
 name (`task(agent="…")`, `skill://…`) resolved by name through the same launch (the plugin ships
 `oracle`, `thermonuclear-deep-review` and `thermonuclear-code-quality` in `agents/`, and the pair's
-rubrics and `ce-simplify-code` with Legion's other skills in `dist/skills`), printing
-`probe-image: OK (/opt/omp/bin/omp) session-storage=probed go-daemon-api-version=<N>`. The in-cluster
+rubrics and `ce-simplify-code` with Legion's other skills in `dist/skills`). The build has none of
+the operator's model configuration, so it leaves those agents' models unresolved
+(`--skip-agent-models`), printing
+`probe-image: OK (/opt/omp/bin/omp) session-storage=probed agent-models=skipped go-daemon-api-version=<N>`. The in-cluster
 TypeScript daemon runs `legion probe-image` in a one-shot pod against the configured digest
 ([The probe pod](#the-probe-pod)); the Go daemon's Agent Sandbox runtime runs the Go command in a probe
-Sandbox, `legion-probe-<project>-<digest12>`, with its own contract
-(`packages/daemon-go/internal/runtime/sandbox/probe.go`). To run them yourself:
+Sandbox, `legion-probe-<project>-<digest12>`, with its own contract, under the operator's pod, at every
+boot, and requires `agent-models=resolved`: each agent's model resolves, with a working key, as the task
+tool resolves a subagent's (`packages/daemon-go/internal/runtime/sandbox/probe.go`). To run them yourself:
 `docker run --rm --entrypoint legion ghcr.io/sjawhar/legion-worker@sha256:… probe-image`, and
-`docker run --rm --entrypoint /opt/legion/go/bin/legion ghcr.io/sjawhar/legion-worker@sha256:… probe-image --plugin-root /opt/legion/pi-legion-envoy`
-(the plugin root a Sandbox pod loads the plugin from, so the Go probe loads it the same way).
+`docker run --rm --entrypoint /opt/legion/go/bin/legion ghcr.io/sjawhar/legion-worker@sha256:… probe-image --plugin-root /opt/legion/pi-legion-envoy --skip-agent-models`
+(the plugin root a Sandbox pod loads the plugin from, so the Go probe loads it the same way; without
+`--skip-agent-models` it also resolves each agent's model, which needs the operator's model roles).
 
 ### Pin by digest, never by tag
 

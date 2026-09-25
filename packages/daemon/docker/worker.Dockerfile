@@ -200,17 +200,20 @@ COPY --from=go /out/legion /opt/legion/go/bin/legion
 # `legion probe-image` runs the three launch probes through the Go daemon's own code, loading the plugin
 # the way a Sandbox pod does (--plugin-root: the one explicit extension, discovery off), holds the
 # plugin to the Go daemon API contract this binary speaks, and resolves by name every task agent and
-# skill Legion's prompts name (shipped in its agents/ and dist/skills directories), printing
-# `probe-image: OK (/opt/omp/bin/omp) session-storage=probed go-daemon-api-version=<N>`; the Go daemon's
-# probe Sandbox runs it again with its own contract, on the pod baseline and under the operator's pod,
-# before any claim runs on the image (packages/daemon-go/internal/runtime/sandbox/probe.go). It needs
-# the natives step 3 fetched, which the cached probe layer above carries.
+# skill Legion's prompts name (shipped in its agents/ and dist/skills directories). It leaves those
+# agents' models unresolved (--skip-agent-models): the build has none of the operator's model
+# configuration, which the pod brings. It prints `probe-image: OK (/opt/omp/bin/omp)
+# session-storage=probed agent-models=skipped go-daemon-api-version=<N>`; the Go daemon's probe
+# Sandbox runs it again with its own contract, on the pod baseline and under the operator's pod,
+# resolving every agent's model, and refuses a skipped result, before any claim runs on the image
+# (packages/daemon-go/internal/runtime/sandbox/probe.go). It needs the natives step 3 fetched, which
+# the cached probe layer above carries.
 ARG LEGION_REVISION
 RUN set -eu; \
     git="$(command -v git)"; echo "git: $git"; test "$git" = /usr/bin/git; \
     version="$(/opt/legion/go/bin/legion version)"; echo "$version"; \
     test "$version" = "legion (devel) commit ${LEGION_REVISION}"; \
-    /opt/legion/go/bin/legion probe-image --plugin-root /opt/legion/pi-legion-envoy; \
+    /opt/legion/go/bin/legion probe-image --plugin-root /opt/legion/pi-legion-envoy --skip-agent-models; \
     rm -rf /home/legion/.omp/profiles/legion/logs
 # The Kubernetes runtime (packages/daemon/src/daemon/runtime-kubernetes.ts) sets every container's
 # command explicitly: the init container runs `legion workspace-init …` and the main container runs

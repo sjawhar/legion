@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -258,8 +257,8 @@ func (r *liveRig) checkBootRefusal() error {
 	return nil
 }
 
-// image-probe: the probe Sandbox, carrying the operator's pod, passes on the stage image and
-// confirms the Go daemon API contract.
+// image-probe: the probe Sandbox, carrying the operator's pod, passes on the stage image, confirms
+// the Go daemon API contract, and resolved the model of every task agent the prompts dispatch.
 func (r *liveRig) checkImageProbe() error {
 	if err := r.startRuntimeOnce(); err != nil {
 		return err
@@ -269,12 +268,9 @@ func (r *liveRig) checkImageProbe() error {
 	if err := r.recordSandbox(name); err != nil {
 		return err
 	}
-	// Per run: a pass cached by an earlier run with the same evidence directory would skip the
-	// probe this check exists to run.
-	stateDir := filepath.Join(r.env.work, "probe-state-"+r.env.project)
 	err := r.rt.ProbeImage(r.ctx, ImageProbe{
-		Contract: api.GoDaemonAPIVersion, StateDir: stateDir, Budget: 10 * time.Minute,
-		Retry: bootprobe.Retry{Initial: 15 * time.Second, Max: time.Minute, Attempts: 3}, APIServer: r.rc.Host,
+		Contract: api.GoDaemonAPIVersion, Budget: 10 * time.Minute,
+		Retry: bootprobe.Retry{Initial: 15 * time.Second, Max: time.Minute, Attempts: 3},
 	})
 	if err != nil {
 		return err
@@ -289,6 +285,10 @@ func (r *liveRig) checkImageProbe() error {
 	}
 	note("runtime", "probe Sandbox %s passed: %s", passed["sandbox"], lastLine(passed["log"], bootprobe.OKPrefix))
 	note("runtime", "go-daemon-api-version=%d parsed, the daemon's contract", contract)
+	if models := bootprobe.AgentModels(passed["log"]); models != bootprobe.AgentModelsResolved {
+		return fmt.Errorf("the probe log says agent-models=%q, want %q: %s", models, bootprobe.AgentModelsResolved, passed["log"])
+	}
+	note("runtime", "agent-models=%s parsed: every task agent the prompts dispatch resolved its model under the operator's pod", bootprobe.AgentModelsResolved)
 	if err := r.poll(liveGoneLimit, "probe Sandbox "+name+" to be deleted", func() (bool, error) {
 		_, err := r.getSandbox(name)
 		return apierrors.IsNotFound(err), ignoreNotFound(err)
@@ -296,6 +296,66 @@ func (r *liveRig) checkImageProbe() error {
 		return err
 	}
 	note("runtime", "probe Sandbox %s deleted after the attempt", name)
+	return nil
+}
+
+// image-probe-negative: with modelRoles.oracle gone from the run's ConfigMap, the probe on the same
+// image refuses, naming the agent and the role no one configured, since the task tool would run
+// every oracle consult on the session's model; the ConfigMap is restored before the check ends,
+// and every later check boots on it.
+func (r *liveRig) checkImageProbeRefusal() error {
+	name := r.env.operatorConfigMap
+	overlay, err := r.kubectl("get", "configmap", name, "-o", `jsonpath={.data.overlay\.yml}`)
+	if err != nil {
+		return err
+	}
+	var kept []string
+	for line := range strings.Lines(overlay) {
+		if !strings.HasPrefix(line, "  oracle: ") {
+			kept = append(kept, line)
+		}
+	}
+	if removed := strings.Count(overlay, "\n") - strings.Count(strings.Join(kept, ""), "\n"); removed != 1 {
+		return fmt.Errorf("ConfigMap %s's overlay.yml holds %d modelRoles.oracle lines, want 1", name, removed)
+	}
+	patch := func(text string) error {
+		body, err := json.Marshal(map[string]any{"data": map[string]string{"overlay.yml": text}})
+		if err != nil {
+			return err
+		}
+		_, err = r.kubectl("patch", "configmap", name, "--type", "merge", "-p", string(body))
+		return err
+	}
+	if err := patch(strings.Join(kept, "")); err != nil {
+		return err
+	}
+	note("operator", "ConfigMap %s: modelRoles.oracle removed from overlay.yml", name)
+	refusal := r.rt.ProbeImage(r.ctx, ImageProbe{
+		Contract: api.GoDaemonAPIVersion, Budget: 10 * time.Minute,
+		Retry: bootprobe.Retry{Initial: 15 * time.Second, Max: time.Minute, Attempts: 3},
+	})
+	if err := patch(overlay); err != nil {
+		return fmt.Errorf("restore ConfigMap %s: %w", name, err)
+	}
+	note("operator", "ConfigMap %s: overlay.yml restored", name)
+	if refusal == nil {
+		return errors.New("ProbeImage passed with modelRoles.oracle removed from the operator's overlay")
+	}
+	for _, want := range []string{"task agent oracle (dispatched by ", "on its model @oracle: role oracle is not configured"} {
+		if !strings.Contains(refusal.Error(), want) {
+			return fmt.Errorf("the probe's refusal does not say %q: %v", want, refusal)
+		}
+	}
+	note("runtime", "refused: %s", firstLine(refusal.Error()))
+	_, digest, _ := strings.Cut(r.env.image, "@sha256:")
+	probe := probeName(r.env.project, digest)
+	if err := r.poll(liveGoneLimit, "probe Sandbox "+probe+" to be deleted", func() (bool, error) {
+		_, err := r.getSandbox(probe)
+		return apierrors.IsNotFound(err), ignoreNotFound(err)
+	}); err != nil {
+		return err
+	}
+	note("runtime", "probe Sandbox %s deleted after the attempt", probe)
 	return nil
 }
 

@@ -102,11 +102,35 @@ const sessionStorageMark = "session-storage=probed"
 // OKPrefix begins the line `legion probe-image` prints when every probe passed.
 const OKPrefix = "probe-image: OK"
 
-// OKLine is that line: the OMP invocation probed, the session-storage mark, and the Go daemon API
-// contract the image's plugin declared. The daemon's probe Sandbox passes the image only on a line
-// that confirms the daemon's own contract (ConfirmedContract).
-func OKLine(omp string, contract int) string {
-	return fmt.Sprintf("%s (%s) %s go-daemon-api-version=%d", OKPrefix, omp, sessionStorageMark, contract)
+// The agent-models mark's states: every task agent Legion's prompts dispatch ran on its own model
+// in the probe, or the probe skipped the check, as the image build's does.
+const (
+	AgentModelsResolved = "resolved"
+	AgentModelsSkipped  = "skipped"
+)
+
+// agentModelsMark carries one of those states on the OK line.
+const agentModelsMark = "agent-models="
+
+// OKLine is that line: the OMP invocation probed, the session-storage mark, the agent-models mark
+// (AgentModelsResolved or AgentModelsSkipped), and the Go daemon API contract the image's plugin
+// declared. The daemon's probe Sandbox passes the image only on a line that confirms the daemon's
+// own contract (ConfirmedContract) with the agents' models resolved (AgentModels).
+func OKLine(omp string, contract int, agentModels string) string {
+	return fmt.Sprintf("%s (%s) %s %s%s go-daemon-api-version=%d", OKPrefix, omp, sessionStorageMark, agentModelsMark, agentModels, contract)
+}
+
+// agentModelsState is the agent-models mark on an OK line.
+var agentModelsState = regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(OKPrefix) + ` .* ` + agentModelsMark + `(\S+) go-daemon-api-version=[0-9]+$`)
+
+// AgentModels is the agent-models state an OK line in output carries, and "" when output holds
+// none: no OK line, or one from a CLI that predates the agent-model check.
+func AgentModels(output string) string {
+	match := agentModelsState.FindStringSubmatch(output)
+	if match == nil {
+		return ""
+	}
+	return match[1]
 }
 
 // confirmation is an OK line ending with the Go contract token. The space before the token keeps

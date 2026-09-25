@@ -35,12 +35,46 @@ import (
 // initialization completes. HTTP handlers read these via atomic.Pointer to
 // avoid data races during the startup window.
 type listenerDeps struct {
-	client     *bus.Client
-	registry   *store.Registry
-	sessions   *session.SessionRegistry
-	ciStore    *cistore.Store
+	client   *bus.Client
+	registry *store.Registry
+	sessions *session.SessionRegistry
+	ciStore  *cistore.Store
+	// caches lists the three stores above, for the sites that treat every cache alike.
+	caches []listenerCache
+	// consumer names the durable whose lag /healthz reports.
+	consumer   string
 	streamName string
 	streamInfo streamInfoLookup
+}
+
+// kvCache is what the listener asks of each KV-backed cache it keeps.
+type kvCache interface {
+	Rewatch(*nats.Conn) error
+	WatchErr() error
+	Ping() error
+	StopWatch()
+}
+
+// listenerCache is one cache under the name /healthz and self-health report it by.
+type listenerCache struct {
+	name  string
+	cache kvCache
+}
+
+// listenerCaches lists the caches the listener keeps. It is the one place that names them, so
+// rewatch, self-health, /healthz and shutdown each reach every cache.
+func listenerCaches(registry *store.Registry, sessions *session.SessionRegistry, ciStore *cistore.Store) []listenerCache {
+	var caches []listenerCache
+	if registry != nil {
+		caches = append(caches, listenerCache{name: "interest", cache: registry})
+	}
+	if sessions != nil {
+		caches = append(caches, listenerCache{name: "session", cache: sessions})
+	}
+	if ciStore != nil {
+		caches = append(caches, listenerCache{name: "CI", cache: ciStore})
+	}
+	return caches
 }
 
 func newCIRecorder(deps *atomic.Pointer[listenerDeps]) webhook.CIRecorderFuncs {
@@ -205,21 +239,11 @@ func isSessionLive(sessions *session.SessionRegistry, sessionID string) bool {
 // rewatchListenerKVWatchers recreates cache watchers that are not represented
 // by bus.Client subscriptions. It attempts every one so a failed rebuild of one
 // cannot leave the other caches permanently stale too.
-func rewatchListenerKVWatchers(conn *nats.Conn, registry *store.Registry, sessions *session.SessionRegistry, ciStore *cistore.Store) error {
+func rewatchListenerKVWatchers(conn *nats.Conn, caches []listenerCache) error {
 	var errs []error
-	if registry != nil {
-		if err := registry.Rewatch(conn); err != nil {
-			errs = append(errs, fmt.Errorf("rewatch interest registry: %w", err))
-		}
-	}
-	if sessions != nil {
-		if err := sessions.Rewatch(conn); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	if ciStore != nil {
-		if err := ciStore.Rewatch(conn); err != nil {
-			errs = append(errs, err)
+	for _, c := range caches {
+		if err := c.cache.Rewatch(conn); err != nil {
+			errs = append(errs, fmt.Errorf("rewatch %s cache: %w", c.name, err))
 		}
 	}
 	return errors.Join(errs...)
@@ -228,22 +252,24 @@ func rewatchListenerKVWatchers(conn *nats.Conn, registry *store.Registry, sessio
 // isUnrecoverableSelfHealthFailure distinguishes state that must be rebuilt
 // from transient JetStream deadlines. Rebuild only while the NATS client is
 // connected; a disconnected client owns its own infinite reconnect loop.
-func isUnrecoverableSelfHealthFailure(err error, client *bus.Client, registry *store.Registry, sessions *session.SessionRegistry, ciStore *cistore.Store) bool {
+func isUnrecoverableSelfHealthFailure(err error, client *bus.Client, caches []listenerCache) bool {
 	if err == nil || client == nil || !client.Connected() {
 		return false
 	}
-	return errors.Is(err, nats.ErrConsumerNotFound) ||
-		errors.Is(err, nats.ErrConnectionClosed) ||
-		(registry != nil && registry.WatchFailed()) ||
-		(sessions != nil && sessions.WatchFailed()) ||
-		(ciStore != nil && ciStore.WatchFailed())
+	if errors.Is(err, nats.ErrConsumerNotFound) || errors.Is(err, nats.ErrConnectionClosed) {
+		return true
+	}
+	for _, c := range caches {
+		if c.cache.WatchErr() != nil {
+			return true
+		}
+	}
+	return false
 }
 
 func rebuildListenerDependencies(
 	client *bus.Client,
-	registry *store.Registry,
-	sessions *session.SessionRegistry,
-	ciStore *cistore.Store,
+	caches []listenerCache,
 	durableProbe func() error,
 	consumer string,
 	handler nats.MsgHandler,
@@ -251,7 +277,7 @@ func rebuildListenerDependencies(
 	if client == nil || !client.Connected() {
 		return nats.ErrConnectionClosed
 	}
-	err := rewatchListenerKVWatchers(client.Conn, registry, sessions, ciStore)
+	err := rewatchListenerKVWatchers(client.Conn, caches)
 	if durableProbe == nil || !errors.Is(durableProbe(), nats.ErrConsumerNotFound) {
 		return err
 	}
@@ -326,23 +352,13 @@ func runSelfHealthMonitor(
 	}
 }
 
-// checkSelfHealth pings the KV-backed registries and the optional durable
+// checkSelfHealth pings the KV-backed caches and the optional durable
 // consumer probe. Returns the first error encountered, or nil when all are
 // healthy.
-func checkSelfHealth(registry *store.Registry, sessions *session.SessionRegistry, ci *cistore.Store, durable func() error) error {
-	if registry != nil {
-		if err := registry.Ping(); err != nil {
-			return fmt.Errorf("interest kv: %w", err)
-		}
-	}
-	if sessions != nil {
-		if err := sessions.Ping(); err != nil {
-			return fmt.Errorf("session kv: %w", err)
-		}
-	}
-	if ci != nil {
-		if err := ci.Ping(); err != nil {
-			return fmt.Errorf("ci kv: %w", err)
+func checkSelfHealth(caches []listenerCache, durable func() error) error {
+	for _, c := range caches {
+		if err := c.cache.Ping(); err != nil {
+			return fmt.Errorf("%s kv: %w", strings.ToLower(c.name), err)
 		}
 	}
 	if durable != nil {
@@ -360,16 +376,23 @@ func sessionHealthFields(sessions *session.SessionRegistry) map[string]interface
 	if sessions == nil {
 		return nil
 	}
+	watchError := ""
+	if err := sessions.WatchErr(); err != nil {
+		watchError = err.Error()
+	}
 	return map[string]interface{}{
 		"session_cache_ready": sessions.CacheReady(),
 		"session_cache_size":  sessions.CacheSize(),
-		"session_watch_error": sessions.WatchError(),
+		"session_watch_error": watchError,
 	}
 }
 
-// healthzHandler is the listener's /healthz. consumer names the durable whose lag it reports; it is
-// empty until the subscription is set up.
-func healthzHandler(deps *atomic.Pointer[listenerDeps], consumer *string) http.HandlerFunc {
+// healthzHandler is the listener's /healthz. It answers 200 "starting" before NATS setup has
+// published deps, 200 "healthy" with the durable consumer's lag once every dependency answers,
+// 503 "unhealthy" when NATS is unavailable, the durable subscription is inactive, a cache's
+// watcher has stopped or the durable consumer is gone, and 200 "degraded" for a transient KV
+// failure the self-health monitor and the NATS reconnect retry.
+func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		d := deps.Load()
@@ -388,33 +411,15 @@ func healthzHandler(deps *atomic.Pointer[listenerDeps], consumer *string) http.H
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "unhealthy", "error": "subscription inactive"})
 			return
 		}
-		if d.registry != nil && d.registry.WatchFailed() {
-			writeDependencyHealth(w, "interest KV watcher", errors.New(d.registry.WatchError()), true)
-			return
-		}
-		if d.sessions != nil && d.sessions.WatchFailed() {
-			writeDependencyHealth(w, "session KV watcher", errors.New(d.sessions.WatchError()), true)
-			return
-		}
-		if d.ciStore != nil && d.ciStore.WatchFailed() {
-			writeDependencyHealth(w, "CI KV watcher", errors.New(d.ciStore.WatchError()), true)
-			return
-		}
-		if d.registry != nil {
-			if err := d.registry.Ping(); err != nil {
-				writeDependencyHealth(w, "interest KV", err, errors.Is(err, nats.ErrConnectionClosed))
+		for _, c := range d.caches {
+			if err := c.cache.WatchErr(); err != nil {
+				writeDependencyHealth(w, c.name+" KV watcher", err, true)
 				return
 			}
 		}
-		if d.sessions != nil {
-			if err := d.sessions.Ping(); err != nil {
-				writeDependencyHealth(w, "session KV", err, d.sessions.WatchFailed() || errors.Is(err, nats.ErrConnectionClosed))
-				return
-			}
-		}
-		if d.ciStore != nil {
-			if err := d.ciStore.Ping(); err != nil {
-				writeDependencyHealth(w, "CI KV", err, d.ciStore.WatchFailed() || errors.Is(err, nats.ErrConnectionClosed))
+		for _, c := range d.caches {
+			if err := c.cache.Ping(); err != nil {
+				writeDependencyHealth(w, c.name+" KV", err, c.cache.WatchErr() != nil || errors.Is(err, nats.ErrConnectionClosed))
 				return
 			}
 		}
@@ -422,17 +427,13 @@ func healthzHandler(deps *atomic.Pointer[listenerDeps], consumer *string) http.H
 		for k, v := range sessionHealthFields(d.sessions) {
 			response[k] = v
 		}
-		if *consumer != "" {
-			consumerInfo, err := d.client.JS().ConsumerInfo(bus.Stream, *consumer)
-			if err != nil {
-				writeDependencyHealth(w, "durable consumer", err, errors.Is(err, nats.ErrConsumerNotFound))
-				return
-			}
-			if consumerInfo != nil {
-				response["num_pending"] = consumerInfo.NumPending
-				response["num_ack_pending"] = consumerInfo.NumAckPending
-			}
+		consumerInfo, err := d.client.JS().ConsumerInfo(bus.Stream, d.consumer)
+		if err != nil {
+			writeDependencyHealth(w, "durable consumer", err, errors.Is(err, nats.ErrConsumerNotFound))
+			return
 		}
+		response["num_pending"] = consumerInfo.NumPending
+		response["num_ack_pending"] = consumerInfo.NumAckPending
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(response)
 	}
@@ -534,13 +535,8 @@ func main() {
 	// /metrics is always reachable — NOT gated by readiness.
 	mux.Handle("/metrics", met.Handler())
 
-	var healthzConsumer string
-	// /healthz is always reachable — returns 200 "starting" before NATS init,
-	// 200 "healthy" after init with live NATS, and 503 "unhealthy" when NATS,
-	// a terminal watcher, or the durable consumer is unavailable. Transient KV
-	// failures return 200 "degraded" while the monitor and NATS reconnect retry.
-	// Consumer lag metrics are included when available (after subscription setup).
-	mux.HandleFunc("/healthz", healthzHandler(&deps, &healthzConsumer))
+	// /healthz is always reachable, before NATS setup as well as after it.
+	mux.HandleFunc("/healthz", healthzHandler(&deps))
 
 	// GaugeFunc for consumer pending — queries NATS at scrape time
 
@@ -667,8 +663,9 @@ func main() {
 
 	// KV watchers are not bus subscriptions, so recreate them after every
 	// recovered NATS connection.
+	caches := listenerCaches(registry, sessions, ciStore)
 	client.AddReconnectHook(func(conn *nats.Conn) error {
-		return rewatchListenerKVWatchers(conn, registry, sessions, ciStore)
+		return rewatchListenerKVWatchers(conn, caches)
 	})
 
 	deliver := session.Deliverer{
@@ -689,7 +686,6 @@ func main() {
 	// cannot catch this slow-204 case. See #389.
 	attemptCache := dedupe.New(5 * time.Minute)
 
-	healthzConsumer = consumer
 	roleQueue := "envoy-listener-" + strings.ReplaceAll(cfg.MachineID, " ", "-")
 
 	// /healthz handler was registered early (before NATS) — no re-registration needed.
@@ -776,6 +772,8 @@ func main() {
 		registry:   registry,
 		sessions:   sessions,
 		ciStore:    ciStore,
+		caches:     caches,
+		consumer:   consumer,
 		streamName: bus.Stream,
 	})
 	logger.Info("envoy-listener ready (NATS connected)")
@@ -818,17 +816,15 @@ func main() {
 			monitorCtx,
 			logger,
 			func() error {
-				return checkSelfHealth(registry, sessions, ciStore, durableProbe)
+				return checkSelfHealth(caches, durableProbe)
 			},
 			func(err error) bool {
-				return isUnrecoverableSelfHealthFailure(err, client, registry, sessions, ciStore)
+				return isUnrecoverableSelfHealthFailure(err, client, caches)
 			},
 			func() error {
 				return rebuildListenerDependencies(
 					client,
-					registry,
-					sessions,
-					ciStore,
+					caches,
 					durableProbe,
 					consumer,
 					jetStreamDeliveryHandler(deliveryConfig),
@@ -864,7 +860,7 @@ func main() {
 	}
 
 	// 3. NATS — wait (within the HTTP deadline) for a self-health rebuild the monitor may still be
-	// running, so nothing re-subscribes or re-watches during the drain. Retire all three KV
+	// running, so nothing re-subscribes or re-watches during the drain. Retire every cache's KV
 	// watchers, so the drain ending their subscriptions reads as the shutdown it is rather than a
 	// watcher failure, and a reconnect hook still running cannot arm a new one; then drain in-flight
 	// deliveries without reconnecting, but never let a blocked NATS request pin the process after
@@ -874,9 +870,9 @@ func main() {
 	case <-shutdownCtx.Done():
 		logger.Warn("self-health monitor still running at shutdown")
 	}
-	registry.StopWatch()
-	sessions.StopWatch()
-	ciStore.StopWatch()
+	for _, c := range caches {
+		c.cache.StopWatch()
+	}
 	if err := client.Drain(10 * time.Second); err != nil {
 		logger.Warn("nats drain error", slog.String("error", err.Error()))
 	}

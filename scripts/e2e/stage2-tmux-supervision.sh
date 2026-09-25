@@ -335,6 +335,33 @@ mv "$work/rubric.aside" "$work/plugin/dist/skills/thermonuclear-deep-review"
 [ -f "$work/plugin/dist/skills/thermonuclear-deep-review/SKILL.md" ] || fail "the rubric was not restored"
 pass
 
+begin gate-refuses-a-skill-only-the-role-prompts-load
+# The gate also resolves the skills the daemon's role prompts load, beside the plugin's own:
+# legion-controller is loaded by roles/controller-root.md alone, so only a gate that reads the
+# daemon's roles directory can refuse the plugin without it.
+mv "$work/plugin/dist/skills/legion-controller" "$work/controller-skill.aside"
+expect_refusal prompt-only-skill "finds no skill legion-controller (loaded by roles/controller-root.md)"
+mv "$work/controller-skill.aside" "$work/plugin/dist/skills/legion-controller"
+[ -f "$work/plugin/dist/skills/legion-controller/SKILL.md" ] || fail "the legion-controller skill was not restored"
+pass
+
+begin gate-refuses-an-unconfigured-model-role
+# The gate's load probe also resolves each of those task agents' models as the task tool resolves a
+# subagent's, in the pane's own Oh My Pi under this profile. The profile without modelRoles.oracle
+# is refused, naming the agent and the role no one configured: the task tool would otherwise run
+# every oracle consult on the session's own model without a word.
+roles=$HOME/.omp/profiles/$profile/agent/config.yml
+cp -p "$roles" "$work/roles.orig"
+grep -v '^  oracle: ' "$work/roles.orig" >"$roles"
+! grep -q '^  oracle: ' "$roles" || fail "modelRoles.oracle is still in $roles"
+note "modelRoles.oracle removed from $roles"
+expect_refusal model-role "on its model @oracle: role oracle is not configured"
+grep -qF "task agent oracle (dispatched by " "$work/refusal-model-role.log" ||
+  fail "the refusal does not name task agent oracle and the prompts that dispatch it"
+cp -p "$work/roles.orig" "$roles"
+cmp -s "$work/roles.orig" "$roles" || fail "the profile's model roles were not restored"
+pass
+
 # ---- one real agent: register, claim its role, ready ----------------------------------------------
 
 begin architect-registers-and-is-ready
@@ -488,8 +515,9 @@ pass
 begin unregistered-agent-retired-at-the-deadline
 # A second daemon whose OMP answers the plugin gate and otherwise never runs the plugin: its pane's
 # process lives and its agent never registers. The gate also asks the load probe for the task agents
-# and skills Legion's prompts name (LEGION_PROMPT_AGENTS, LEGION_PROMPT_SKILLS), and the stub
-# answers that they resolve, as the real Oh My Pi does for this checkout's plugin. The deadline is
+# and skills Legion's prompts name (LEGION_PROMPT_AGENTS, LEGION_PROMPT_SKILLS) and whether each of
+# those agents' models resolves (LEGION_AGENT_MODELS), and the stub answers that they all resolve, as
+# the real Oh My Pi does for this checkout's plugin on the harness's model roles. The deadline is
 # worker_boot_timeout_seconds × worker_boot_registration_deadline_intervals = 10 s.
 cat >"$work/stub/omp" <<EOF
 #!/bin/sh
@@ -497,6 +525,7 @@ if [ "\$1" = models ]; then
   echo LEGION_PLUGIN_LOADED=yes >&2
   echo "LEGION_PLUGIN_LOADED_FROM=file://$work/plugin/dist/legion.js" >&2
   [ -n "\${LEGION_PROMPT_AGENTS:-}" ] && echo LEGION_PROMPT_AGENTS=resolved >&2
+  [ -n "\${LEGION_PROMPT_AGENTS:-}" ] && [ -z "\${LEGION_SKIP_AGENT_MODELS:-}" ] && echo LEGION_AGENT_MODELS=resolved >&2
   [ -n "\${LEGION_PROMPT_SKILLS:-}" ] && echo LEGION_PROMPT_SKILLS=resolved >&2
   exit 0
 fi

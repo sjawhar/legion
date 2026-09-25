@@ -91,6 +91,20 @@ const commentValidation: NonNullable<DispatchToolSpec["validation"]> = {
   message: `${commentOwner.message} turn requires reply_to_ask.`,
 };
 
+/**
+ * dispatch_message: `issue` is required for every message except the one kind that cannot have
+ * one - the answer to a human's direct message to this session, which Dispatch keeps in an
+ * issue-less conversation and threads by `in_reply_to` alone.
+ */
+const messageValidation: NonNullable<DispatchToolSpec["validation"]> = {
+  check: (value) => {
+    const input = value as { readonly issue?: unknown; readonly in_reply_to?: unknown };
+    return typeof input.issue === "string" || typeof input.in_reply_to === "string";
+  },
+  message:
+    "issue is required unless in_reply_to names a message delivered to this session, which is the one message with no issue.",
+};
+
 /** Component attachment modes an issue write accepts. */
 export const ISSUE_COMPONENTS_MODES = ["inherit", "explicit", "none"] as const;
 
@@ -569,18 +583,31 @@ export const dispatchToolSpecs = [
     description:
       "Post a note humans must read now: a reply to a human's message, a deliverable that landed, or a blocker only " +
       "they can clear. Never progress or status updates - Dispatch is a high-signal record, not a log. Not a decision " +
-      `(dispatch_ask) or document feedback (dispatch_comment). Body is at most 2,000 characters. ${ISSUE_REFERENCE}`,
+      "(dispatch_ask) or document feedback (dispatch_comment). To answer a human's direct message to this session - " +
+      "one sent from the Agents page, which names no issue - pass that message's bare id as in_reply_to and no issue; " +
+      "the reply lands in that conversation, and a second call with the same in_reply_to posts nothing because " +
+      "Dispatch keeps the one reply per message. Every other message names its issue. " +
+      `Body is at most 2,000 characters. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
-      issue: z.string().describe(ISSUE_REFERENCE),
+      issue: z
+        .string()
+        .describe(
+          `${ISSUE_REFERENCE} Omit it only when in_reply_to answers a human's direct message to this session.`
+        )
+        .optional(),
       body: z.string({ max: 2000 }).describe("Update text, at most 2,000 characters."),
       in_reply_to: z
         .string()
         .describe(
           "Optional message id or dispatch://KEY/message/<id> reference to reply to, threading " +
-            "this message under it so the reply stays with the original in the Conversation."
+            "this message under it so the reply stays with the original in the Conversation. " +
+            "A bare id with no issue answers a human's direct message to this session; a " +
+            "dispatch://KEY/message/<id> names the issue its message lives on, so that form is a " +
+            "reply on that issue."
         )
         .optional(),
     }),
+    validation: messageValidation,
   },
   {
     name: "dispatch_doc_edit",

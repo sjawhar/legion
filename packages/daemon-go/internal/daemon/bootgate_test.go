@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 )
 
@@ -629,5 +631,54 @@ func TestRunGatesThePluginUnderThePaneEnvironmentBeforeItBoots(t *testing.T) {
 				t.Fatalf("boots after a start the gate did not pass = %d, want 0", count)
 			}
 		})
+	}
+}
+
+// A pane's Oh My Pi gets each provider key from its shim, not from the daemon's environment, so the
+// gate probes with the keys the same way: a task agent whose model's only key is a provider key
+// resolves under the gate as it will in a pane. The daemon's own value of the variable, which no
+// pane carries, never reaches the probe.
+func TestTheGateProbesWithTheProviderKeysAPaneGets(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.ProviderKeys = []config.ProviderKey{{Env: "GEMINI_API_KEY", Secret: "GEMINI_API_KEY_TESTS"}}
+	stub := t.TempDir()
+	secrets := `#!/bin/sh
+case "$2:$3" in
+  GEMINI_API_KEY_TESTS:--no-request) echo '{"key":"GEMINI_API_KEY_TESTS","tier":"agent"}' ;;
+  GEMINI_API_KEY_TESTS:--value) printf 'the-provider-key\n' ;;
+  *) exit 99 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(stub, "secrets"), []byte(secrets), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("OMP_PROFILE", "gate")
+	t.Setenv("PATH", stub+":"+os.Getenv("PATH"))
+	t.Setenv("GEMINI_API_KEY", "the-daemons-own")
+	writeManifest(t, manifestAt(filepath.Join(home, ".omp", "profiles", "gate")),
+		`{"goDaemonApiVersion":`+strconv.Itoa(api.GoDaemonAPIVersion)+`}`)
+	f := newFakeOmp(t, "no")
+	o := fakeRuntime(fake.NewRuntime(), &built{})
+	o.runtime = nil
+	o.getenv = func(name string) string {
+		if name == "LEGION_OMP_PATH" {
+			return f.path
+		}
+		return ""
+	}
+
+	if err := run(context.Background(), cfg, quietLogger(), o); err == nil || !strings.Contains(err.Error(), "is installed but not loaded by omp") {
+		t.Fatalf("run = %v, want the gate's refusal", err)
+	}
+	var got []string
+	for _, line := range strings.Split(f.read(t, "env.1"), "\n") {
+		if strings.HasPrefix(line, "GEMINI_API_KEY=") {
+			got = append(got, line)
+		}
+	}
+	if want := []string{"GEMINI_API_KEY=the-provider-key"}; !slices.Equal(got, want) {
+		t.Errorf("the probe ran with %q, want %q: the provider key, as a pane's shim exports it", got, want)
 	}
 }

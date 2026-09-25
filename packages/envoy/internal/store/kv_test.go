@@ -16,6 +16,7 @@ import (
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/kvwatch"
 	"github.com/sjawhar/envoy/internal/testnats"
 	"github.com/testcontainers/testcontainers-go"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
@@ -573,7 +574,7 @@ func TestOpen_EmptyBucketSucceeds(t *testing.T) {
 // restart when watch() hasn't populated the cache yet.
 
 // coldRegistry creates a Registry with an empty cache backed by the given KV buckets.
-// No watch() goroutine is started, so the cache stays cold for the test's lifetime.
+// Its watcher is never started, so the cache stays cold for the test's lifetime.
 func coldRegistry(t *testing.T, conn *natsgo.Conn) (*Registry, natsgo.KeyValue) {
 	t.Helper()
 	js, err := conn.JetStream()
@@ -588,7 +589,9 @@ func coldRegistry(t *testing.T, conn *natsgo.Conn) (*Registry, natsgo.KeyValue) 
 	if err != nil {
 		t.Fatalf("failed to create role KV bucket: %v", err)
 	}
-	return &Registry{kv: kv, roleKV: roleKV, now: time.Now, cache: map[string]Interest{}}, kv
+	r := &Registry{kv: kv, roleKV: roleKV, now: time.Now, cache: map[string]Interest{}, cacheRevisions: map[string]uint64{}}
+	r.watcher = kvwatch.New("interest registry", kv, r.applyWatched, r.resetCache)
+	return r, kv
 }
 
 func TestGet_ColdCacheFallsBackToKV(t *testing.T) {
@@ -1323,38 +1326,6 @@ func TestWaitForCacheReady_PrePopulatedKVIsVisibleAfterReady(t *testing.T) {
 	}
 }
 
-func TestWaitForCacheReady_RespectsContextCancellation(t *testing.T) {
-	// Build a Registry with NO watch() goroutine running, so readyCh never closes.
-	// WaitForCacheReady must return ctx.Err() instead of hanging.
-	r := &Registry{cache: map[string]Interest{}, readyCh: make(chan struct{})}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	err := r.WaitForCacheReady(ctx)
-	if err == nil {
-		t.Fatal("WaitForCacheReady must return error when readyCh stays open and ctx expires")
-	}
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("expected context.DeadlineExceeded, got %v", err)
-	}
-}
-
-func TestWaitForCacheReady_IdempotentAfterReady(t *testing.T) {
-	// Calling WaitForCacheReady after the channel has been signaled must
-	// return immediately, not block or panic on double-close.
-	r := &Registry{cache: map[string]Interest{}, readyCh: make(chan struct{})}
-	close(r.readyCh)
-
-	for i := 0; i < 3; i++ {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-		err := r.WaitForCacheReady(ctx)
-		cancel()
-		if err != nil {
-			t.Fatalf("call %d: expected nil after readyCh closed, got %v", i, err)
-		}
-	}
-}
-
 func TestRemoveWritesThroughCache(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
@@ -2063,5 +2034,89 @@ func TestTheRegistryClockStampsWhatItRecords(t *testing.T) {
 	}
 	if claim.ClaimedAt != at.UnixMilli() {
 		t.Fatalf("role ClaimedAt = %d, want the registry clock's %d", claim.ClaimedAt, at.UnixMilli())
+	}
+}
+
+// A rebuild onto an interest bucket that was deleted and created again refills the cache from the
+// new bucket. The recreated stream numbers its revisions from 1, so a cache still fenced by the
+// old bucket's revisions would keep an old value for every key the new bucket has not yet written
+// past, and a key the new bucket does not hold at all.
+func TestRewatchOntoARecreatedBucketRefillsTheCache(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	reg, err := Open(conn, WithReplicas(1), withTestBuckets(t))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	t.Cleanup(reg.StopWatch)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := reg.WaitForCacheReady(ctx); err != nil {
+		t.Fatalf("WaitForCacheReady: %v", err)
+	}
+	for i := range 20 {
+		if _, err := reg.Upsert(Interest{SessionID: "ses_a", MachineID: "m1"}, []string{fmt.Sprintf("notifications.old.%d", i)}); err != nil {
+			t.Fatalf("upsert ses_a: %v", err)
+		}
+	}
+	if _, err := reg.Upsert(Interest{SessionID: "ses_ghost", MachineID: "m1"}, []string{"notifications.ghost"}); err != nil {
+		t.Fatalf("upsert ses_ghost: %v", err)
+	}
+	waitFor(t, 5*time.Second, func() bool { return len(reg.Match("m1", "notifications.ghost")) == 1 })
+
+	js, err := conn.JetStream()
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	bucket := testBuckets(t).interests
+	if err := js.DeleteKeyValue(bucket); err != nil {
+		t.Fatalf("delete the interest bucket: %v", err)
+	}
+	recreated, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: bucket, Replicas: 1, Storage: natsgo.FileStorage})
+	if err != nil {
+		t.Fatalf("recreate the interest bucket: %v", err)
+	}
+	putInterest(t, recreated, Interest{SessionID: "ses_a", MachineID: "m1", Topics: []string{"notifications.new"}})
+	putInterest(t, recreated, Interest{SessionID: "ses_b", MachineID: "m1", Topics: []string{"notifications.b"}})
+	if err := reg.Rewatch(conn); err != nil {
+		t.Fatalf("Rewatch: %v", err)
+	}
+
+	waitFor(t, 5*time.Second, func() bool {
+		return len(reg.Match("m1", "notifications.new")) == 1 && len(reg.Match("m1", "notifications.b")) == 1
+	})
+	if got := reg.Match("m1", "notifications.ghost"); len(got) != 0 {
+		t.Fatalf("the cache kept a session the recreated bucket does not hold: %v", got)
+	}
+}
+
+// A Rewatch that cannot open the role bucket on the new connection moves nothing: the interest
+// watcher and both bucket handles stay on the connection they were on, so the registry keeps
+// working there instead of writing interests through one connection and roles through another.
+func TestARewatchThatCannotOpenTheRoleBucketMovesNothing(t *testing.T) {
+	first, closeFirst := connectNATS(t)
+	defer closeFirst()
+	reg, err := Open(first, WithReplicas(1), withTestBuckets(t))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(reg.StopWatch)
+	js, err := first.JetStream()
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	if err := js.DeleteKeyValue(testBuckets(t).roles); err != nil {
+		t.Fatalf("delete the role bucket: %v", err)
+	}
+	second, closeSecond := connectNATS(t)
+	if err := reg.Rewatch(second); err == nil {
+		t.Fatal("Rewatch onto a connection without the role bucket succeeded")
+	}
+	closeSecond()
+	if _, err := reg.Upsert(Interest{SessionID: "ses_still_first", MachineID: "m1"}, []string{"notifications.agent.x"}); err != nil {
+		t.Fatalf("Upsert after the failed Rewatch: %v; the interest handle moved to the closed connection", err)
+	}
+	if err := reg.WatchErr(); err != nil {
+		t.Fatalf("WatchErr after the failed Rewatch: %v; the interest watcher moved to the closed connection", err)
 	}
 }

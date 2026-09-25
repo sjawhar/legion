@@ -63,18 +63,24 @@ func SourceRolePromptsDir() string {
 }
 
 // ResolveRolePromptsDir chooses the explicit absolute override when present, otherwise the
-// checkout source directory. It mirrors the shipped daemon's LEGION_ROLE_PROMPTS_DIR contract.
+// checkout source directory, and refuses one missing any file of the shared bundle
+// (CheckRolePrompts), naming LEGION_ROLE_PROMPTS_DIR, before any caller reads it. It mirrors the
+// shipped daemon's LEGION_ROLE_PROMPTS_DIR contract.
 func ResolveRolePromptsDir(lookupEnv func(string) (string, bool)) (string, error) {
 	if lookupEnv == nil {
 		lookupEnv = os.LookupEnv
 	}
+	dir := SourceRolePromptsDir()
 	if configured, set := lookupEnv("LEGION_ROLE_PROMPTS_DIR"); set {
 		if !filepath.IsAbs(configured) {
 			return "", fmt.Errorf("LEGION_ROLE_PROMPTS_DIR must be an absolute path (got %s)", configured)
 		}
-		return configured, nil
+		dir = configured
 	}
-	return SourceRolePromptsDir(), nil
+	if err := CheckRolePrompts(dir); err != nil {
+		return "", err
+	}
+	return dir, nil
 }
 
 // CheckRolePrompts refuses a role-prompt directory missing any file of the shared bundle, naming
