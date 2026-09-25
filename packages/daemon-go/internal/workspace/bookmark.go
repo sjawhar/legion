@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"os"
@@ -11,18 +12,22 @@ import (
 
 var registeredWorkspace = regexp.MustCompile(`(?i)already (?:registered|exists)`)
 
-// createWorkspace ports workspace.ts:198-296. It resolves a bookmark before pruning or adding a
-// workspace: a conflicted bookmark must not leave a registered working copy behind.
+// createWorkspace ports workspace.ts's createWorkspace. It resolves a bookmark before pruning or
+// adding a workspace: a conflicted bookmark must not leave a registered working copy behind.
 //
-// The workspace starts at the issue's bookmark legion/<KEY> when it resolves to one commit. When no
-// local bookmark exists, origin's row decides:
-//   - An untracked row is the issue's own branch, pushed from another clone before this workspace
-//     existed: a repository's fixture, or the branch a tree pushed before its volume was lost. A
-//     fresh clone tracks main alone, so such a branch is only a remote row. It is tracked, which
-//     creates the local bookmark at its commit, and the workspace starts there, so its commits are
-//     there and the issue's next push moves it.
-//   - A tracked row with no local bookmark is a local deletion (`jj bookmark delete` in the shared
-//     clone) never pushed, where tracking changes nothing. It is refused by name, with the
+// One read of the issue's bookmark legion/<KEY>, its local row and origin's (issueBookmark),
+// decides where the workspace starts:
+//   - A conflicted local bookmark is refused by name, with its targets. That includes a local
+//     deletion never pushed after origin's branch moved, which jj keeps as a conflict with a deleted
+//     side and resolves to origin's new commit alone.
+//   - A local bookmark on one commit is where the workspace starts.
+//   - With no local bookmark, an untracked origin row is the issue's own branch, pushed from another
+//     clone before this workspace existed: a repository's fixture, or the branch a tree pushed
+//     before its volume was lost. A fresh clone tracks main alone, so such a branch is only a remote
+//     row. It is tracked, which creates the local bookmark at its commit, and the workspace starts
+//     there, so its commits are there and the issue's next push moves it.
+//   - With no local bookmark, a tracked origin row is a local deletion (`jj bookmark delete` in the
+//     shared clone) never pushed, where tracking changes nothing. It is refused by name, with the
 //     operator's three ways out: restore the bookmark (`jj bookmark set`); cancel the deletion
 //     (`jj bookmark forget`, which leaves the row untracked, so the next provisioning adopts
 //     origin's branch); or start from main instead, by deleting the branch on GitHub (the pull
@@ -36,34 +41,31 @@ var registeredWorkspace = regexp.MustCompile(`(?i)already (?:registered|exists)`
 func createWorkspace(ctx context.Context, run Runner, workspace Workspace) error {
 	cloneDir := workspace.Clone
 	workspaceName := filepath.Base(workspace.Dir)
-	commits, err := bookmarkCommits(ctx, run, cloneDir, "bookmarks(exact:"+workspace.Bookmark+")", "Bookmark "+workspace.Bookmark, workspace.Dir)
+	remote := workspace.Bookmark + "@origin"
+	rows, err := issueBookmark(ctx, run, workspace)
 	if err != nil {
 		return err
 	}
-	if len(commits) == 0 {
-		remote := workspace.Bookmark + "@origin"
-		pattern := `exact:"` + workspace.Bookmark + `", exact:"origin"`
-		tracked, err := bookmarkCommits(ctx, run, cloneDir, "tracked_remote_bookmarks("+pattern+")", "Remote bookmark "+remote, workspace.Dir)
-		if err != nil {
+	var revision string
+	switch local, origin := rows["local"], rows["origin"]; {
+	case local.conflict:
+		return fmt.Errorf("Bookmark %s is conflicted (adds %s; removes %s); workspace %s was not created. Resolve it with `jj bookmark set %s -r <commit> -R %s`",
+			workspace.Bookmark, listed(local.added), listed(local.removed), workspace.Dir, workspace.Bookmark, cloneDir)
+	case local.present:
+		revision = local.added[0]
+	case origin.conflict:
+		return fmt.Errorf("Remote bookmark %s is conflicted (adds %s; removes %s); workspace %s was not created", remote, listed(origin.added), listed(origin.removed), workspace.Dir)
+	case origin.present && origin.tracked:
+		return fmt.Errorf("Bookmark %s was deleted in the shared clone %s and the deletion never pushed, while %s is tracked at %s; workspace %s was not created. "+
+			"Restore it: `jj bookmark set %[1]s -r %[3]s -R %[2]s`. "+
+			"Cancel the deletion, and the next provisioning adopts origin's branch: `jj bookmark forget %[1]s -R %[2]s`. "+
+			"Start from main instead: delete the branch on GitHub (the pull request's Delete branch button, or `gh api -X DELETE repos/%[6]s/git/refs/heads/%[1]s`), and the next provisioning starts at main",
+			workspace.Bookmark, cloneDir, remote, origin.added[0], workspace.Dir, workspace.Repo)
+	case origin.present:
+		if _, err := RunChecked(ctx, run, []string{"jj", "bookmark", "track", remote, "--ignore-working-copy", "-R", cloneDir}, nil, ""); err != nil {
 			return err
 		}
-		if len(tracked) == 1 {
-			return fmt.Errorf("Bookmark %s was deleted in the shared clone %s and the deletion never pushed, while %s is tracked at %s; workspace %s was not created. "+
-				"Restore it: `jj bookmark set %[1]s -r %[3]s -R %[2]s`. "+
-				"Cancel the deletion, and the next provisioning adopts origin's branch: `jj bookmark forget %[1]s -R %[2]s`. "+
-				"Start from main instead: delete the branch on GitHub (the pull request's Delete branch button, or `gh api -X DELETE repos/%[6]s/git/refs/heads/%[1]s`), and the next provisioning starts at main",
-				workspace.Bookmark, cloneDir, remote, tracked[0], workspace.Dir, workspace.Repo)
-		}
-		untracked, err := bookmarkCommits(ctx, run, cloneDir, "untracked_remote_bookmarks("+pattern+")", "Remote bookmark "+remote, workspace.Dir)
-		if err != nil {
-			return err
-		}
-		if len(untracked) == 1 {
-			if _, err := RunChecked(ctx, run, []string{"jj", "bookmark", "track", remote, "-R", cloneDir}, nil, ""); err != nil {
-				return err
-			}
-			commits = untracked
-		}
+		revision = origin.added[0]
 	}
 	if err := os.MkdirAll(filepath.Dir(workspace.Dir), 0o700); err != nil {
 		return fmt.Errorf("create workspace parent: %w", err)
@@ -71,12 +73,8 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace) error
 	prune := []string{"git", "--git-dir=" + filepath.Join(cloneDir, ".git"), "worktree", "prune"}
 	_, _ = runCommand(ctx, run, prune, nil, "")
 
-	revision := "main"
-	if len(commits) == 1 {
-		revision = commits[0]
-	}
 	add := []string{
-		"jj", "workspace", "add", workspace.Dir, "--name", workspaceName, "--revision", revision, "-R", cloneDir,
+		"jj", "workspace", "add", workspace.Dir, "--name", workspaceName, "--revision", cmp.Or(revision, "main"), "-R", cloneDir,
 	}
 	result, err := runCommand(ctx, run, add, nil, "")
 	if err != nil {
@@ -95,30 +93,64 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace) error
 			return err
 		}
 	}
-	if len(commits) == 1 {
+	if revision != "" {
 		return nil
 	}
 	_, err = RunChecked(ctx, run, []string{"jj", "bookmark", "set", workspace.Bookmark, "-r", "@"}, nil, workspace.Dir)
 	return err
 }
 
-// bookmarkCommits lists the commits revset names in the shared clone, one per line: none when the
-// bookmark does not exist, one normally, and more when it is conflicted, which is refused naming
-// what (the bookmark) before anything is pruned, added, or registered.
-func bookmarkCommits(ctx context.Context, run Runner, cloneDir, revset, what, workspaceDir string) ([]string, error) {
-	resolve := []string{"jj", "log", "-r", revset, "--no-graph", "-T", `commit_id ++ "\n"`, "--ignore-working-copy", "-R", cloneDir}
-	resolved, err := runCommand(ctx, run, resolve, nil, "")
+// bookmarkRow is one row of `jj bookmark list --all-remotes`: whether the bookmark exists there,
+// whether it is conflicted, whether a remote row is tracked, and the commits it adds and removes
+// (one added commit, none removed, when it is not conflicted).
+type bookmarkRow struct {
+	present, conflict, tracked bool
+	added, removed             []string
+}
+
+// bookmarkRowTemplate prints one line per row, its fields separated by "|": where it is (local,
+// origin, git), then present, conflict and tracked as 1 or 0, then the added and the removed commit
+// ids, comma-separated.
+const bookmarkRowTemplate = `if(remote, remote, "local") ++ "|" ++ if(present, "1", "0") ++ "|" ++ if(conflict, "1", "0") ++ "|" ++ if(tracked, "1", "0") ++ "|" ++ added_targets.map(|c| c.commit_id()).join(",") ++ "|" ++ removed_targets.map(|c| c.commit_id()).join(",") ++ "\n"`
+
+// issueBookmark reads the issue's bookmark in the shared clone, its local row and every remote's, in
+// one `jj bookmark list`, keyed by where each row is. A bookmark that exists nowhere lists nothing.
+func issueBookmark(ctx context.Context, run Runner, workspace Workspace) (map[string]bookmarkRow, error) {
+	list := []string{"jj", "bookmark", "list", "--all-remotes", "exact:" + workspace.Bookmark, "-T", bookmarkRowTemplate, "--ignore-working-copy", "-R", workspace.Clone}
+	listed, err := runCommand(ctx, run, list, nil, "")
 	if err != nil {
-		return nil, fmt.Errorf("run %s: %w", strings.Join(resolve, " "), err)
+		return nil, fmt.Errorf("run %s: %w", strings.Join(list, " "), err)
 	}
-	if resolved.ExitCode != 0 {
-		return nil, fmt.Errorf("%s could not be resolved; workspace %s was not created: %w", what, workspaceDir, commandFailure(resolve, resolved))
+	if listed.ExitCode != 0 {
+		return nil, fmt.Errorf("Bookmark %s could not be resolved; workspace %s was not created: %w", workspace.Bookmark, workspace.Dir, commandFailure(list, listed))
 	}
-	commits := nonEmptyLines(resolved.Stdout)
-	if len(commits) > 1 {
-		return nil, fmt.Errorf("%s is conflicted (%s); workspace %s was not created", what, strings.Join(commits, ", "), workspaceDir)
+	rows := map[string]bookmarkRow{}
+	for _, line := range nonEmptyLines(listed.Stdout) {
+		fields := strings.Split(line, "|")
+		if len(fields) != 6 {
+			return nil, fmt.Errorf("Bookmark %s's row %q is not the shape %s prints; workspace %s was not created", workspace.Bookmark, line, strings.Join(list, " "), workspace.Dir)
+		}
+		rows[fields[0]] = bookmarkRow{
+			present: fields[1] == "1", conflict: fields[2] == "1", tracked: fields[3] == "1",
+			added: commitList(fields[4]), removed: commitList(fields[5]),
+		}
 	}
-	return commits, nil
+	return rows, nil
+}
+
+func commitList(field string) []string {
+	if field == "" {
+		return nil
+	}
+	return strings.Split(field, ",")
+}
+
+// listed is a row's commits for a refusal: comma-separated, or "nothing".
+func listed(commits []string) string {
+	if len(commits) == 0 {
+		return "nothing"
+	}
+	return strings.Join(commits, ", ")
 }
 
 func nonEmptyLines(value string) []string {

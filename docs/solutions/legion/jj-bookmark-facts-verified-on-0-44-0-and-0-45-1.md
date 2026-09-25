@@ -91,7 +91,29 @@ What that means for a caller that needs "exactly one commit or stop":
   code. Fine when you only need present/absent of a *healthy* name.
 - **`bookmarks(exact:name)` lists every local target and exits 0**, so the caller's three
   branches — none / one / several — are all real paths. jj's own conflict hint names
-  `bookmarks(<name>)` as the way to select all targets. This is what `createWorkspace` uses.
+  `bookmarks(<name>)` as the way to select all targets. The TypeScript `createWorkspace` uses it.
+
+## One templated `jj bookmark list` reads every row's state
+
+Reproduced on 2026-09-25 on both binaries, identical (LEGION-286). `exact:` fails one state: a
+local deletion never pushed, followed by origin's branch moving and a fetch. jj keeps the local
+bookmark as a conflict with a deleted side (`- <pushed> + <moved>`), which `bookmarks(exact:)`
+resolves to `<moved>` **alone**, one line, so "one commit" does not mean "not conflicted". A
+template over the rows reads each state's flags directly:
+
+`jj bookmark list --all-remotes exact:legion/X -T 'if(remote, remote, "local") ++ "|" ++ if(present, "1", "0") ++ "|" ++ if(conflict, "1", "0") ++ "|" ++ if(tracked, "1", "0") ++ "|" ++ added_targets.map(|c| c.commit_id()).join(",") ++ "|" ++ removed_targets.map(|c| c.commit_id()).join(",") ++ "\n"'`
+
+| state of `legion/X` | rows (`where\|present\|conflict\|tracked\|added\|removed`) |
+| --- | --- |
+| missing | none, exit 0 |
+| only an untracked `@origin` row (another clone pushed it) | `origin\|1\|0\|0\|<A>\|` |
+| normal, tracked | `local\|1\|0\|0\|<A>\|`, `git\|1\|0\|1\|<A>\|`, `origin\|1\|0\|1\|<A>\|` |
+| local deleted, never pushed | `local\|0\|0\|0\|\|`, `origin\|1\|0\|1\|<A>\|` |
+| local deleted, then origin moved to `<B>` and a fetch | `local\|1\|1\|0\|<B>\|<A>`, `origin\|1\|0\|1\|<B>\|` |
+
+The separator is `|`, not a space, because the reader trims each line, which would drop an empty last field.
+The Go `createWorkspace` (`packages/daemon-go/internal/workspace/bookmark.go`) switches on these
+rows.
 
 ## `jj workspace add --revision <name>` registers before it errors
 
