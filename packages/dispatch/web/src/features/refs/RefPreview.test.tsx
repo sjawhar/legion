@@ -6,7 +6,7 @@ import { Link, MemoryRouter } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { IssueDetails } from "../../api/types";
-import { RefPreviewHost, referenceTriggerProps, refPreview } from "./RefPreview";
+import { closeRefPreview, RefPreviewHost, referenceTriggerProps } from "./RefPreview";
 import { REF_PREVIEW_CLOSE_DELAY_MS, REF_PREVIEW_OPEN_DELAY_MS } from "./ref-preview-timing";
 
 function issue(key: string, title: string): IssueDetails {
@@ -86,7 +86,7 @@ function mockIssues() {
 
 afterEach(() => {
   jest.useRealTimers();
-  refPreview.close();
+  closeRefPreview();
 });
 
 test("the card opens only after the hover delay, loads populated, and closes when the pointer leaves", async () => {
@@ -121,13 +121,13 @@ test("the card opens only after the hover delay, loads populated, and closes whe
     act(() => {
       jest.advanceTimersByTime(50);
     });
-    fireEvent.pointerEnter(card, { pointerType: "mouse" });
+    fireEvent.pointerOver(card, { pointerType: "mouse", relatedTarget: document.body });
     act(() => {
       jest.advanceTimersByTime(1000);
     });
     expect(screen.getByRole("tooltip")).toBe(card);
     // …and leaving the card closes it.
-    fireEvent.pointerLeave(card, { pointerType: "mouse" });
+    fireEvent.pointerOut(card, { pointerType: "mouse", relatedTarget: document.body });
     act(() => {
       jest.advanceTimersByTime(1000);
     });
