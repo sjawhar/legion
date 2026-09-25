@@ -258,8 +258,10 @@ assert_handoff_committer() {
   local commit identity want
   commit=$(handoff_fact_commit "$1" "$2" "$3" "$4")
   [ -n "$commit" ] || fail "$1 has no $2 $3 round $4 handoff fact"
-  identity=$(workspace_jj "$1" log -r "$commit" --no-graph -T 'author.name() ++ "|" ++ committer.name()' 2>&1) ||
-    fail "read $1's $2 $3 round $4 handoff commit $commit: $identity"
+  # Only stdout is the identity: jj reports on stderr when it imports the workspace's git refs,
+  # which an agent's own git push leaves it to do.
+  identity=$(workspace_jj "$1" log -r "$commit" --no-graph -T 'author.name() ++ "|" ++ committer.name()' 2>"$work/handoff-committer.err") ||
+    fail "read $1's $2 $3 round $4 handoff commit $commit: $(cat "$work/handoff-committer.err")"
   want="$(role_app "$2")|$(role_app "$2")"
   [ "$identity" = "$want" ] || fail "$1's $2 $3 round $4 handoff commit $commit is authored|committed by $identity, want $want"
   note "$2 $3 round $4 handoff $commit authored and committed by $identity"
