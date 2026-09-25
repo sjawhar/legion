@@ -19,8 +19,9 @@ import (
 // after Join, drops whatever a transaction that did not commit left behind.
 //
 // Settlement's operations run in a transaction of its own, which no caller joined, so its ledger
-// carries no `tx` and marks itself `settling` instead; a named version written outside any
-// transaction collects its events in a ledger with neither.
+// carries no `tx` and marks itself `settling` instead. A named version no caller joined makes its
+// own transaction too (NamedVersion's withTx), and collects its events in a ledger that is
+// neither joined nor settling.
 type Ledger struct {
 	service *Service
 	tx      pgx.Tx

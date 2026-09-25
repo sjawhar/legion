@@ -65,7 +65,8 @@ A joined write adds one more check (`applyJoined`). A room can fail between the 
 and its append, and the eviction can finish in that window, because the write does not hold
 the advisory lock yet. The reloaded room may then lack the write, and nothing holds it off
 between the commit and the publish, because the write's writer slot is on the failed room. So
-after its append the write checks the room it holds the slot on (`liveWrite.roomFailure`). From
+after its append the write checks the room it holds the slot on (`write.state.failure()`, the
+same body `Service.roomFailure` uses for the state registered now). From
 that point its lock keeps any later eviction from finishing until the transaction ends, so a
 reload after it holds the write.
 

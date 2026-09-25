@@ -608,13 +608,16 @@ an existing paragraph is the question that should become a decision.
 
 ### A document that is reloading
 
-Every call that touches a document's live text — `dispatch_doc_edit`, `dispatch_ask` and
-`dispatch_comment` with a quote, `dispatch_suggest`, `dispatch_artifact` on a document, and
-creating an issue with a spec — can answer `DOC_SERVICE_UNAVAILABLE` (HTTP 503). It means that
-document's live room failed and is reloading from its durable copy, so the server refused rather
-than wait for it; your call wrote nothing and the document is intact. Nothing retries it for you:
-the Dispatch client hands a 503 straight back. Wait a few seconds and make the same call again. A
-second refusal in a row is worth telling your human about, with the document's reference.
+These calls can answer `DOC_SERVICE_UNAVAILABLE` (HTTP 503), because each writes a document inside its
+transaction: `dispatch_doc_edit`; `dispatch_ask` and `dispatch_comment` on a quote or a decision block; a
+`dispatch_comment` reply in a thread whose first comment is anchored; `dispatch_suggest`;
+`dispatch_resolve_comment`; `dispatch_resolve_ask` for an ask that lives in a decision block; and
+`dispatch_artifact` replacing a document that already exists. Creating an issue with a spec, uploading a new
+document, `dispatch_edit_ask`, `dispatch_request_approval` and `dispatch_message` never answer it. It means
+that document's live room failed and is reloading from its durable copy, so the server refused rather than
+wait for it; your call wrote nothing and the document is intact. Nothing retries it for you: the Dispatch
+client hands a 503 straight back. Wait a few seconds and make the same call again. A second refusal in a row
+is worth telling your human about, with the document's reference.
 
 ## Typed blocks
 
