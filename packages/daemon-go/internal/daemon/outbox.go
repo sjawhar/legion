@@ -20,6 +20,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/workflow"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
@@ -345,6 +346,14 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		return nil
 	case "suspend":
 		if !found {
+			return nil
+		}
+		// A suspend stops a role because the issue left the role's phases. Once the issue is back
+		// in one of them the role has been handed its work again, and a suspend from before that
+		// return, retried late, would stop the worker in the phase it now serves.
+		if workflow.RoleFor(issue.Phase) == payload.Role {
+			r.log.Info("outbox suspend serves a role the issue is back in; finished without acting", "row", row.ID, "issue", issue.Key,
+				"phase", issue.Phase, "role", payload.Role)
 			return nil
 		}
 		switch machine.Claim().State {

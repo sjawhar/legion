@@ -268,3 +268,160 @@ func TestAChildAHumanMovesOutOfTheWorkflowStopsAndKeepsTheHumansStatus(t *testin
 		t.Fatalf("the daemon wrote %v over a child a human moved to backlog", client.statuses)
 	}
 }
+
+// A backward move between two of one role's phases (the implementer's retro back to implementing)
+// stops the worker and hands it the new phase. A suspend that fails and is retried must never land
+// after the worker has been handed that phase: it would stop the worker in its new phase and retire
+// the new task with it, and nothing would ever resume it, since the phase waits for that worker's
+// handoff. Here the runtime cannot stop the pane at first; the agent ends its retro turn and takes
+// whatever task it is sent; then the runtime recovers and every row runs to its end.
+func TestASameRoleBackwardMoveNeverStopsTheWorkerInItsNewPhase(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	ctx := context.Background()
+	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Retro, Generation: 1, Status: "retro", Rank: "U", LastDispatchSeq: 5}
+	putOutboxIssue(t, pool, records, issue)
+	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		return records.PutPhase(ctx, tx, record.PhaseRow{Issue: issue.Key, Role: claim.RoleImplementer, Claim: "claim"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
+	sup.deps.PhaseHolds = phaseHolds(pool, records)
+	clock := time.Now()
+	engine := workflow.New(records, workflow.Config{Project: "legion"}, quietLogger())
+	runner := &outbox{
+		dispatchProject: "LEGION",
+		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets",
+		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: issue.Key, Status: "retro"}}, notices: &outboxPublisher{}, handlers: []intake.Handler{engine},
+		log: quietLogger(), now: func() time.Time { return clock },
+		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
+			return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-208"}, nil
+		},
+	}
+	token, err := claim.NewToken("legion", issue.Key, claim.RoleImplementer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn := fake.NewConn()
+	sup.deps.Conns.(*fake.Conns).Register(token, conn)
+	// takeTask is the agent starting a turn on a task it was sent and has not yet taken.
+	takeTask := func() {
+		t.Helper()
+		machine, _ := sup.Machine(token)
+		for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+			if p := machine.Claim().Pending; p != nil && !p.DeliveredAt.IsZero() && p.ConfirmedAt.IsZero() {
+				if err := machine.Handle(ctx, supervise.StreamTurnStart{Claim: token, DeliveryID: p.ID}); err != nil {
+					t.Fatalf("start the turn: %v", err)
+				}
+				return
+			}
+		}
+	}
+	// boot is a launched process's agent coming up: its shim's hello, its registration, ready.
+	boot := func() {
+		t.Helper()
+		machine, _ := sup.Machine(token)
+		generation := machine.Claim().Generation
+		for _, ev := range []supervise.Event{
+			supervise.StreamHello{Claim: token, Generation: generation},
+			supervise.RequestRegister{Claim: token, Generation: generation, Session: "ses-impl", SessionFile: "/tmp/impl.jsonl"},
+			supervise.RequestReady{Claim: token, Generation: generation, Session: "ses-impl"},
+		} {
+			if err := machine.Handle(ctx, ev); err != nil {
+				t.Fatalf("handle %T: %v", ev, err)
+			}
+		}
+	}
+
+	// The implementer works on its retro.
+	if err := runner.execute(ctx, mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RoleImplementer,
+		Generation: 1, Phase: phase.Retro, Task: "Continue Workflow. Issue: LEGION-208. Phase: retro."}, clock)); err != nil {
+		t.Fatalf("start the implementer's retro: %v", err)
+	}
+	boot()
+	takeTask()
+	machine, _ := sup.Machine(token)
+	if got := machine.Claim().State; got != supervise.StateWorking {
+		t.Fatalf("implementer = %s, want working on its retro", got)
+	}
+
+	// It asks to go back to implementing while the runtime cannot stop its pane.
+	rt.FailSuspend(errors.New("the pane did not stop"))
+	if _, err := intake.ApplyFact(ctx, pool, "api", "retro-back", intake.BackwardMove{Issue: issue.Key, Requester: claim.RoleImplementer, To: phase.Implementing, Reason: "rework"}, engine); err != nil {
+		t.Fatalf("move back to implementing: %v", err)
+	}
+	run := func() {
+		t.Helper()
+		clock = clock.Add(10 * time.Minute)
+		if err := runner.RunOnce(ctx); err != nil {
+			t.Fatalf("run the outbox: %v", err)
+		}
+		takeTask()
+	}
+	run()
+	if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: token}); err != nil {
+		t.Fatalf("end the retro turn: %v", err)
+	}
+	run()
+
+	// The runtime recovers, and every row runs to its end.
+	rt.FailSuspend(nil)
+	run()
+	if state := machine.Claim().State; state == supervise.StateLaunching {
+		boot()
+		takeTask()
+	}
+	run()
+
+	if left := unfinishedSuperviseRows(t, pool); left != 0 {
+		t.Fatalf("unfinished supervise rows = %d, want every row run to its end", left)
+	}
+	final := machine.Claim()
+	if final.State == supervise.StateSuspended || final.Pending == nil || final.Pending.Phase != phase.Implementing {
+		t.Fatalf("implementer = %s holding %+v in implementing, want it running with the implementing task: a suspended worker holding no task is never resumed", final.State, final.Pending)
+	}
+}
+
+// A suspend that stops a role because the issue left the role's phases is stale once the issue is
+// back in one of them: the role was handed its work again, and a suspend retried from before that
+// return must not stop it. Here the implementer's suspend from the move to testing failed and backed
+// off; the tester failed the change, and the implementer is working on implementing again when the
+// old suspend comes due.
+func TestASuspendFromBeforeItsRoleWasHandedWorkAgainNeverActs(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	ctx := context.Background()
+	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"}
+	putOutboxIssue(t, pool, records, issue)
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	token, err := claim.NewToken("legion", issue.Key, claim.RoleImplementer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	machine, _, err := sup.Create(ctx, supervise.Claim{Token: token, Project: "legion", Tree: issue.Tree, Issue: issue.Key, Role: claim.RoleImplementer, State: supervise.StateQueued}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := machine.Handle(ctx, supervise.RequestSpawn{Claim: token}); err != nil {
+		t.Fatal(err)
+	}
+	generation := machine.Claim().Generation
+	for _, ev := range []supervise.Event{
+		supervise.RequestRegister{Claim: token, Generation: generation, Session: "ses-impl", SessionFile: "/tmp/impl.jsonl"},
+		supervise.RequestReady{Claim: token, Generation: generation, Session: "ses-impl"},
+	} {
+		if err := machine.Handle(ctx, ev); err != nil {
+			t.Fatalf("handle %T: %v", ev, err)
+		}
+	}
+	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, project: "legion", log: quietLogger(), now: time.Now}
+
+	stale := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "suspend", Tree: issue.Tree, Role: claim.RoleImplementer, Generation: 1}, time.Now())
+	if err := runner.execute(ctx, stale); err != nil {
+		t.Fatalf("the stale suspend = %v, want it finished", err)
+	}
+	if got := machine.Claim().State; got != supervise.StateReady {
+		t.Fatalf("implementer = %s after a suspend from before it was handed implementing again, want still ready", got)
+	}
+}

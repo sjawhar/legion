@@ -13,9 +13,9 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
-// roleFor is the role that works a phase: the one a transition starts, and the one it suspends
+// RoleFor is the role that works a phase: the one a transition starts, and the one it suspends
 // when the issue moves on. A phase no role works — awaiting_merge, done, held — has none.
-func roleFor(p phase.Phase) claim.Role {
+func RoleFor(p phase.Phase) claim.Role {
 	switch p {
 	case phase.Planning:
 		return claim.RolePlanner
