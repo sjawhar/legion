@@ -318,7 +318,7 @@ func TestAControllerRegistrationIsInTheStateAndSurvivesARestart(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("register the controller = %d; body %s", status, body)
 	}
-	var registration claim.RegisterResponse
+	var registration api.ControllerRegisterResponse
 	if err := json.Unmarshal(body, &registration); err != nil {
 		t.Fatalf("decode %s: %v", body, err)
 	}

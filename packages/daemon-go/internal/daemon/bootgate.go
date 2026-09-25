@@ -137,8 +137,9 @@ var (
 //     getPluginsNodeModules, :606-616), and the manifest is the package's own `package.json`
 //     there (legionPluginManifestPath, packages/daemon/src/daemon/boot-probes.ts:240-244).
 //
-// PI_CONFIG_DIR and PI_CODING_AGENT_DIR move the roots in Oh My Pi too (:281-283, :315-322);
-// neither is on the pane's allow-list, so no pane carries one.
+// PI_CONFIG_DIR and PI_CODING_AGENT_DIR move the roots in Oh My Pi too (:281-283, :315-322), and
+// this resolution does not follow them: neither is on the pane's allow-list, so no pane carries
+// one, and VerifyPluginContract refuses an environment that sets either.
 func pluginManifestPath(env map[string]string) (string, string, error) {
 	requested, set := env["OMP_PROFILE"]
 	if !set {
@@ -150,7 +151,7 @@ func pluginManifestPath(env map[string]string) (string, string, error) {
 	}
 	if profile != "" && (profile == "." || profile == ".." || strings.HasSuffix(profile, ".") ||
 		!profileName.MatchString(profile) || windowsReservedProfile.MatchString(profile)) {
-		return "", "", fmt.Errorf(`Invalid OMP profile %q in the pane environment. Profile names must match %s, cannot be "." or "..", cannot end with ".", and cannot be a Windows reserved device name (CON, PRN, AUX, NUL, COM0-9, LPT0-9, or any of those with an extension).`,
+		return "", "", fmt.Errorf(`Invalid OMP profile %q in the environment Oh My Pi starts under. Profile names must match %s, cannot be "." or "..", cannot end with ".", and cannot be a Windows reserved device name (CON, PRN, AUX, NUL, COM0-9, LPT0-9, or any of those with an extension).`,
 			requested, profileName)
 	}
 	home := env["HOME"]
@@ -189,8 +190,18 @@ func profileWords(profile string) string {
 // pi-legion-envoy manifest where that Oh My Pi reads its plugins (pluginManifestPath) must declare
 // contract (verifyPluginContract). `legion controller start` runs it on the operator's own
 // environment before its one daemon call, since no boot gate checks the operator's machine and the
-// mint it asks for revokes the incumbent controller. It answers the package version.
+// mint it asks for revokes the incumbent controller. That environment is inherited whole by the
+// controller's Oh My Pi, so an environment that sets PI_CONFIG_DIR or PI_CODING_AGENT_DIR, which
+// move the directories Oh My Pi reads its plugins from and which pluginManifestPath does not
+// follow, is refused naming the variable: the probe would otherwise vouch for, or refuse, a
+// manifest that Oh My Pi never loads. Oh My Pi reads an empty value as unset, and so does this. It
+// answers the package version.
 func VerifyPluginContract(env map[string]string, contract int) (string, error) {
+	for _, name := range []string{"PI_CONFIG_DIR", "PI_CODING_AGENT_DIR"} {
+		if value := env[name]; value != "" {
+			return "", fmt.Errorf("%s is set (%s): it moves the directories Oh My Pi reads its plugins from, which this contract check does not follow. Unset it, and select the plugin root with OMP_PROFILE, HOME or XDG_DATA_HOME", name, value)
+		}
+	}
 	manifest, profile, err := pluginManifestPath(env)
 	if err != nil {
 		return "", err

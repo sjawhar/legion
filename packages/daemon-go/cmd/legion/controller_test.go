@@ -203,6 +203,8 @@ func newControllerStart(t *testing.T, d *controllerDaemon, opts controllerOption
 	t.Setenv("XDG_STATE_HOME", "")
 	t.Setenv("XDG_DATA_HOME", "")
 	t.Setenv("OMP_PROFILE", "")
+	t.Setenv("PI_CONFIG_DIR", "")
+	t.Setenv("PI_CODING_AGENT_DIR", "")
 	t.Setenv("PATH", "/usr/bin:/bin:/opt/x/worker-bin")
 	t.Setenv("LEGION_OMP_PATH", omp)
 	t.Setenv("LEGION_ROLE_PROMPTS_DIR", prompts.SourceRolePromptsDir())
@@ -522,11 +524,16 @@ func TestControllerStartDaemonURLOverridesTheFile(t *testing.T) {
 	}
 }
 
-// A 403 names the URL and the likely cause; nothing is written and nothing launched.
+// A 403 names the URL and the one cause the route has: every Go daemon serves it, since none boots
+// without operator_token_file. Nothing is written and nothing launched.
 func TestControllerStartRefusedByTheDaemonWritesNothing(t *testing.T) {
 	d := newControllerDaemon(t)
 	c := newControllerStart(t, d, controllerOptions{tokenContents: "not-the-operator-token\n"})
-	c.refused(d.url + "/legion/v1/controller/secret answered 403: Invalid operator token — the operator token does not match the daemon's operator_token_file, or this daemon has none configured")
+	code, _, errb := c.run()
+	want := d.url + "/legion/v1/controller/secret answered 403: Invalid operator token — the operator token does not match the daemon's operator_token_file\n"
+	if code != 1 || !strings.HasSuffix(errb, want) {
+		t.Fatalf("legion controller start = %d, stderr %q; want 1 and a refusal ending %q", code, errb, want)
+	}
 	c.wantNothingLaunchedOrWritten(c.defaultDir)
 }
 
@@ -637,6 +644,21 @@ func TestControllerStartRefusesLocallyBeforeTheRequest(t *testing.T) {
 		c.wantNoSecretRequest()
 		c.wantNothingLaunchedOrWritten(c.defaultDir)
 	})
+	// The contract probe finds the manifest where Oh My Pi reads its plugins under the operator's
+	// environment, ported for HOME, XDG_DATA_HOME, OMP_PROFILE and PI_PROFILE. PI_CONFIG_DIR and
+	// PI_CODING_AGENT_DIR move those roots too, and the controller's Oh My Pi inherits them, so the
+	// probe would vouch for another manifest than the one it loads — after the mint has revoked the
+	// incumbent. Either set is refused, named, before the request.
+	for _, name := range []string{"PI_CONFIG_DIR", "PI_CODING_AGENT_DIR"} {
+		t.Run(name+" set in the operator's environment, naming it", func(t *testing.T) {
+			d := newControllerDaemon(t)
+			c := newControllerStart(t, d, controllerOptions{})
+			t.Setenv(name, filepath.Join(c.home, "elsewhere"))
+			c.refused(name + " is set")
+			c.wantNoSecretRequest()
+			c.wantNothingLaunchedOrWritten(c.defaultDir)
+		})
+	}
 	t.Run("an unknown key, naming it and the example", func(t *testing.T) {
 		d := newControllerDaemon(t)
 		c := newControllerStart(t, d, controllerOptions{lines: []string{

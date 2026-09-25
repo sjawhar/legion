@@ -233,7 +233,7 @@ func fetchControllerSecret(ctx context.Context, daemonURL, operatorToken string)
 		}
 		hint := ""
 		if status == http.StatusForbidden {
-			hint = " — the operator token does not match the daemon's operator_token_file, or this daemon has none configured"
+			hint = " — the operator token does not match the daemon's operator_token_file"
 		}
 		return "", fmt.Errorf("%s answered %d: %s%s", url, status, detail, hint)
 	}
