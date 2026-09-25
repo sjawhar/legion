@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/kvwatch"
 )
 
 const SessionBucket = "envoy_sessions"
@@ -81,13 +82,8 @@ type SessionRegistry struct {
 	cache          map[string]cachedSession
 	cacheRevisions map[string]uint64
 	lastSeen       map[string]lastSeenSession
-	watchErr       error
 
-	watcherMu         sync.Mutex
-	watcher           nats.KeyWatcher
-	watcherGeneration uint64
-	// watchStopped is set by StopWatch and never cleared: a stopped registry arms no watcher.
-	watchStopped bool
+	watcher kvwatch.Watcher
 
 	// readyCh is closed when watch() finishes its initial scan of existing KV
 	// entries (signalled by the nil sentinel WatchAll() emits after delivering
@@ -137,6 +133,9 @@ func OpenSessionRegistry(conn *nats.Conn, options ...SessionRegistryOption) (*Se
 		lastSeen:       map[string]lastSeenSession{},
 		readyCh:        make(chan struct{}),
 	}
+	r.watcher.Name = "session registry"
+	r.watcher.Apply = r.applyWatched
+	r.watcher.Ready = r.signalReady
 	// watch() populates the cache asynchronously via a long-lived KV watcher.
 	// The synchronous Keys()+per-key Get() loop it replaces blocks for seconds
 	// when the KV stream leader is on a remote node.
@@ -175,25 +174,16 @@ func (r *SessionRegistry) watchHealthError() error {
 	if r == nil || !r.CacheReady() {
 		return nil
 	}
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.watchErr
+	return r.watcher.Err()
 }
 
 // ErrNoKV is returned when methods are called on a nil SessionRegistry.
 var ErrNoKV = fmt.Errorf("session registry: KV unavailable")
 
-// errSessionWatcherStopped is the sentinel watchErr recorded when the KV
-// watcher's Updates() channel closes after the initial scan — typically the
-// underlying conn died and took the JetStream subscription with it. The cache
-// is frozen at that point, so Ping() exposes the failure.
-
-var errSessionWatcherStopped = fmt.Errorf("session registry watcher stopped")
-
 func (r *SessionRegistry) watch() {
-	if err := r.startWatch(r.currentKV()); err != nil {
+	if err := r.watcher.Watch(r.currentKV()); err != nil {
 		slog.Error("session registry watch failed", slog.String("error", err.Error()))
-		r.setWatchErr(err)
+		r.watcher.Fail(err)
 		// Unblock callers of WaitForCacheReady even on watcher failure — they'd
 		// rather see the empty-cache symptom (Put write-through still surfaces
 		// local sessions) than hang. /healthz exposes the unavailable registry.
@@ -215,98 +205,28 @@ func (r *SessionRegistry) Rewatch(conn *nats.Conn) error {
 	if err != nil {
 		return fmt.Errorf("open session registry KV bucket: %w", err)
 	}
-	if err := r.startWatch(kv); err != nil {
+	if err := r.watcher.Watch(kv); err != nil {
 		return fmt.Errorf("watch session registry KV bucket: %w", err)
 	}
-	return nil
-}
-
-func (r *SessionRegistry) startWatch(kv nats.KeyValue) error {
-	if kv == nil {
-		return ErrNoKV
-	}
-	r.watcherMu.Lock()
-	stopped := r.watchStopped
-	r.watcherMu.Unlock()
-	if stopped {
-		return nil
-	}
-	watcher, err := kv.WatchAll()
-	if err != nil {
-		return err
-	}
-
-	r.watcherMu.Lock()
-	if r.watchStopped {
-		// StopWatch ran while WatchAll was starting. Leave this watcher to the connection's
-		// drain, which ends its subscription; stopping it here would be a server request.
-		r.watcherMu.Unlock()
-		return nil
-	}
-	previous := r.watcher
-	r.watcherGeneration++
-	generation := r.watcherGeneration
-	r.watcher = watcher
 	r.setKV(kv)
-	r.watcherMu.Unlock()
-
-	r.setWatchErr(nil)
-	if previous != nil {
-		_ = previous.Stop()
-	}
-	go r.consumeWatch(watcher, generation)
 	return nil
 }
 
-func (r *SessionRegistry) consumeWatch(watcher nats.KeyWatcher, generation uint64) {
-	for entry := range watcher.Updates() {
-		if entry == nil {
-			// WatchAll() emits a nil sentinel after delivering the current value
-			// of each existing key. Treat that as "initial scan complete".
-			r.signalReady()
-			continue
-		}
-		r.mu.Lock()
-		if entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge {
+// applyWatched applies one entry the KV watcher delivered to the cache.
+func (r *SessionRegistry) applyWatched(entry nats.KeyValueEntry) {
+	r.mu.Lock()
+	if entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge {
+		r.evictCachedSessionLocked(entry.Key(), entry.Revision())
+	} else {
+		var item SessionEntry
+		if err := json.Unmarshal(entry.Value(), &item); err != nil {
 			r.evictCachedSessionLocked(entry.Key(), entry.Revision())
+			slog.Warn("session registry watcher evicted malformed value", slog.String("key", entry.Key()), slog.Uint64("revision", entry.Revision()), slog.String("error", err.Error()))
 		} else {
-			var item SessionEntry
-			if err := json.Unmarshal(entry.Value(), &item); err != nil {
-				r.evictCachedSessionLocked(entry.Key(), entry.Revision())
-				slog.Warn("session registry watcher evicted malformed value", slog.String("key", entry.Key()), slog.Uint64("revision", entry.Revision()), slog.String("error", err.Error()))
-			} else {
-				r.cacheSessionLocked(entry.Key(), item, r.expiryFor(entry.Created(), item.UpdatedAt), entry.Revision())
-			}
+			r.cacheSessionLocked(entry.Key(), item, r.expiryFor(entry.Created(), item.UpdatedAt), entry.Revision())
 		}
-		r.mu.Unlock()
 	}
-	if !r.finishWatch(generation) {
-		return
-	}
-	// Reaching here means watcher.Updates() closed: the watcher terminated (the
-	// conn dropped and took the JetStream subscription with it, or the bucket was
-	// removed). Without recording this, the cache would keep serving whatever it
-	// last held forever and /healthz would still report ready. Flag it; Ping()
-	// gates on CacheReady(), so a close before the initial scan completes still
-	// unblocks waiters via signalReady() without wedging /healthz mid-startup.
-	werr := watcherTerminalError(watcher)
-	r.setWatchErr(werr)
-	slog.Error("session registry watcher stopped", slog.String("error", werr.Error()))
-	r.signalReady()
-}
-
-// watcherTerminalError returns the watcher's terminal error if one was emitted
-// on its Error() channel (e.g. ErrKeyWatcherTimeout), falling back to a sentinel
-// when the channel closed cleanly without a specific cause.
-func watcherTerminalError(w nats.KeyWatcher) error {
-	select {
-	case err, ok := <-w.Error():
-		if ok && err != nil {
-			return err
-		}
-	default:
-	}
-	return errSessionWatcherStopped
+	r.mu.Unlock()
 }
 
 // expiryFor computes the local TTL deadline for a cached entry. It prefers the
@@ -338,34 +258,15 @@ func (r *SessionRegistry) setKV(kv nats.KeyValue) {
 	r.kvMu.Unlock()
 }
 
-func (r *SessionRegistry) finishWatch(generation uint64) bool {
-	r.watcherMu.Lock()
-	defer r.watcherMu.Unlock()
-	if generation != r.watcherGeneration {
-		return false
-	}
-	r.watcher = nil
-	return true
-}
-
-// StopWatch retires the KV watcher for a shutdown, before the NATS drain ends it. The watcher's end
-// then belongs to no live generation, so consumeWatch records no terminal error and logs nothing,
-// and the registry arms no watcher after it: a Rewatch from a recovery or a self-health rebuild
-// still running at shutdown is a no-op. It makes no request of the server (a watcher's Stop is a
-// synchronous consumer delete), because it runs outside the drain's deadline; the drain ends the
-// watcher's subscription.
+// StopWatch retires the KV watcher for a shutdown, before the NATS drain ends it (kvwatch.Stop): its
+// end records no terminal error and logs nothing, and a Rewatch from a recovery or a self-health
+// rebuild still running at shutdown is a no-op.
 func (r *SessionRegistry) StopWatch() {
-	r.watcherMu.Lock()
-	r.watchStopped = true
-	r.watcher = nil
-	r.watcherGeneration++
-	r.watcherMu.Unlock()
+	r.watcher.Stop()
 }
 
 func (r *SessionRegistry) setWatchErr(err error) {
-	r.mu.Lock()
-	r.watchErr = err
-	r.mu.Unlock()
+	r.watcher.Fail(err)
 }
 
 // signalReady closes readyCh exactly once, unblocking any callers of
@@ -434,12 +335,10 @@ func (r *SessionRegistry) WatchError() string {
 	if r == nil {
 		return ""
 	}
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	if r.watchErr == nil {
-		return ""
+	if err := r.watcher.Err(); err != nil {
+		return err.Error()
 	}
-	return r.watchErr.Error()
+	return ""
 }
 
 // WatchFailed reports whether the current watcher has stopped. The listener
@@ -448,9 +347,7 @@ func (r *SessionRegistry) WatchFailed() bool {
 	if r == nil {
 		return false
 	}
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.watchErr != nil
+	return r.watcher.Err() != nil
 }
 
 func (r *SessionRegistry) Put(sessionID string, entry SessionEntry) error {

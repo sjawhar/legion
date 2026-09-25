@@ -14,6 +14,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/kvwatch"
 	"github.com/sjawhar/envoy/internal/routing"
 )
 
@@ -41,6 +42,8 @@ const (
 )
 
 type Registry struct {
+	// kvMu guards kv and roleKV, which Rewatch moves to a replacement connection.
+	kvMu                  sync.RWMutex
 	kv                    nats.KeyValue
 	roleKV                nats.KeyValue
 	now                   func() time.Time
@@ -59,9 +62,8 @@ type Registry struct {
 	// every "is this session subscribed?" question without falling through.
 	readyCh   chan struct{}
 	readyOnce sync.Once
-	// watcherMu guards watcher, the KV watcher feeding the cache, which Rewatch replaces.
-	watcherMu sync.Mutex
-	watcher   nats.KeyWatcher
+	// watcher feeds the cache from the interest bucket.
+	watcher kvwatch.Watcher
 }
 
 // OpenOption configures the registry.
@@ -79,8 +81,9 @@ func WithReplicas(n int) OpenOption {
 	return func(o *openOpts) { o.replicas = n }
 }
 
-// WithClock sets the clock that times a restored role claim's grace window, which starts when Open
-// returns. Tests move it to end the window without waiting a session TTL.
+// WithClock sets the registry's clock: the time every interest and role claim records, the reaper's
+// staleness window, and a restored role claim's grace window, which starts when Open returns. Tests
+// move it to end a window without waiting for it.
 func WithClock(now func() time.Time) OpenOption {
 	return func(o *openOpts) { o.now = now }
 }
@@ -116,6 +119,9 @@ func Open(conn *nats.Conn, options ...OpenOption) (*Registry, error) {
 		openedAt:              opts.now(),
 		restoredRoleRevisions: restoredRoleRevisions,
 	}
+	r.watcher.Name = "interest registry"
+	r.watcher.Apply = r.applyWatched
+	r.watcher.Ready = r.signalReady
 	// Skip eager load — watch() populates cache asynchronously via KV watcher.
 	// The synchronous load() did N individual kv.Get() calls that block indefinitely
 	// when the KV stream leader is on a remote node.
@@ -127,13 +133,46 @@ func Open(conn *nats.Conn, options ...OpenOption) (*Registry, error) {
 // connection. /healthz and the listener monitor use failures to report an
 // unavailable dependency while NATS reconnects.
 func (r *Registry) Ping() error {
-	if _, err := r.kv.Status(); err != nil {
+	if _, err := r.interests().Status(); err != nil {
 		return err
 	}
-	if _, err := r.roleKV.Status(); err != nil {
+	if _, err := r.roles().Status(); err != nil {
 		return err
 	}
-	return nil
+	return r.watcher.Err()
+}
+
+// WatchFailed reports whether the cache's watcher has stopped, so the listener can tell a
+// rebuildable dead cache from a transient KV timeout.
+func (r *Registry) WatchFailed() bool {
+	return r.watcher.Err() != nil
+}
+
+// WatchError is the cache watcher's terminal error, or "" while it runs.
+func (r *Registry) WatchError() string {
+	if err := r.watcher.Err(); err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
+// StopWatch retires the cache's watcher for a shutdown, before the NATS drain ends it
+// (kvwatch.Stop): its end records no terminal error and logs nothing, and a Rewatch from a recovery
+// or a self-health rebuild still running at shutdown is a no-op.
+func (r *Registry) StopWatch() {
+	r.watcher.Stop()
+}
+
+func (r *Registry) interests() nats.KeyValue {
+	r.kvMu.RLock()
+	defer r.kvMu.RUnlock()
+	return r.kv
+}
+
+func (r *Registry) roles() nats.KeyValue {
+	r.kvMu.RLock()
+	defer r.kvMu.RUnlock()
+	return r.roleKV
 }
 
 func openBucket(js nats.JetStreamContext, bucket string, replicas int) (nats.KeyValue, error) {
@@ -199,7 +238,7 @@ func (r *Registry) evictCachedInterestLocked(sessionID string, revision uint64) 
 
 func (r *Registry) deleteInterest(sessionID string) error {
 	revision := r.cachedRevision(sessionID)
-	entry, err := r.kv.Get(sessionID)
+	entry, err := r.interests().Get(sessionID)
 	deleteOpts := []nats.DeleteOpt{}
 	if err == nil {
 		if entry.Revision() > revision {
@@ -209,11 +248,11 @@ func (r *Registry) deleteInterest(sessionID string) error {
 	} else if !errors.Is(err, nats.ErrKeyNotFound) {
 		return err
 	}
-	if err := r.kv.Delete(sessionID, deleteOpts...); err != nil {
+	if err := r.interests().Delete(sessionID, deleteOpts...); err != nil {
 		return err
 	}
 
-	entries, err := r.kv.History(sessionID)
+	entries, err := r.interests().History(sessionID)
 	if err == nil && len(entries) > 0 {
 		latest := entries[len(entries)-1]
 		if latest.Operation() == nats.KeyValueDelete || latest.Operation() == nats.KeyValuePurge {
@@ -251,8 +290,9 @@ func (r *Registry) deleteInterest(sessionID string) error {
 }
 
 func (r *Registry) watch() {
-	if err := r.Rewatch(); err != nil {
+	if err := r.watcher.Watch(r.interests()); err != nil {
 		slog.Error("registry watch failed", slog.String("error", err.Error()))
+		r.watcher.Fail(err)
 		// Unblock callers of WaitForCacheReady even on watcher failure — they'd
 		// rather see the empty-cache symptom than hang. /healthz then exposes
 		// the unavailable registry while NATS retries its connection.
@@ -260,64 +300,64 @@ func (r *Registry) watch() {
 	}
 }
 
-// Rewatch replaces the cache's watcher with a new one on the same bucket. A NATS server restart
-// loses the watcher's ordered consumer, and nats.go replaces it only once it notices the missed
-// heartbeats, up to twenty seconds later; until then the cache misses every write another
-// listener makes, and a drain deletes a consumer the server no longer has. The listener's
-// reconnect hook calls this, so the cache follows the bucket from the reconnect on. It watches
-// the bucket handle Open took, which a server restart leaves working because the bus reconnects
-// that connection in place. When the bus's recover path replaces a closed connection instead, the
-// handle is on the closed one and Rewatch fails with "nats: connection closed".
-func (r *Registry) Rewatch() error {
-	watcher, err := r.kv.WatchAll()
+// Rewatch reopens both buckets on conn and replaces the cache's watcher with one there. A NATS
+// server restart loses the watcher's ordered consumer, and nats.go replaces it only once it notices
+// the missed heartbeats, up to twenty seconds later; until then the cache misses every write
+// another listener makes, and a drain deletes a consumer the server no longer has. The listener's
+// reconnect hook calls this, so the cache follows the bucket from the reconnect on. After a server
+// restart conn is the connection Open took, reconnected in place; when the bus's recover path
+// replaces a closed connection, conn is the new one and the registry moves to it.
+func (r *Registry) Rewatch(conn *nats.Conn) error {
+	if conn == nil {
+		return errors.New("interest registry: no connection")
+	}
+	js, err := conn.JetStream(nats.MaxWait(10 * time.Second))
 	if err != nil {
-		return err
+		return fmt.Errorf("open interest registry JetStream: %w", err)
 	}
-	r.watcherMu.Lock()
-	previous := r.watcher
-	r.watcher = watcher
-	r.watcherMu.Unlock()
-	if previous != nil {
-		// Stop reports a consumer the server has lost to its caller, never at ERROR; the cache's
-		// revision fence keeps the previous watcher's last updates from undoing the new one's.
-		_ = previous.Stop()
+	kv, err := js.KeyValue(r.interests().Bucket())
+	if err != nil {
+		return fmt.Errorf("open interest registry KV bucket: %w", err)
 	}
-	go r.consumeWatch(watcher)
+	roleKV, err := js.KeyValue(r.roles().Bucket())
+	if err != nil {
+		return fmt.Errorf("open role KV bucket: %w", err)
+	}
+	if err := r.watcher.Watch(kv); err != nil {
+		return fmt.Errorf("watch interest registry KV bucket: %w", err)
+	}
+	r.kvMu.Lock()
+	r.kv, r.roleKV = kv, roleKV
+	r.kvMu.Unlock()
 	return nil
 }
 
-func (r *Registry) consumeWatch(w nats.KeyWatcher) {
-	for entry := range w.Updates() {
-		if entry == nil {
-			// NATS KV WatchAll() emits a nil sentinel after delivering the
-			// current value of each existing key. Treat that as "initial scan
-			// complete" and unblock cache-readiness gates.
-			r.signalReady()
-			continue
-		}
-		if entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge {
-			r.mu.Lock()
-			r.evictCachedInterestLocked(entry.Key(), entry.Revision())
-			r.mu.Unlock()
-			continue
-		}
-
-		var item Interest
-		if err := json.Unmarshal(entry.Value(), &item); err != nil {
-			r.mu.Lock()
-			r.evictCachedInterestLocked(entry.Key(), entry.Revision())
-			r.mu.Unlock()
-			slog.Warn("registry watcher evicted malformed value",
-				slog.String("key", entry.Key()),
-				slog.Uint64("revision", entry.Revision()),
-				slog.String("error", err.Error()),
-			)
-			continue
-		}
+// applyWatched applies one entry the KV watcher delivered to the cache. The revision fence in
+// cacheInterestLocked and evictCachedInterestLocked keeps a replaced watcher's last updates from
+// undoing a newer one's.
+func (r *Registry) applyWatched(entry nats.KeyValueEntry) {
+	if entry.Operation() == nats.KeyValueDelete || entry.Operation() == nats.KeyValuePurge {
 		r.mu.Lock()
-		r.cacheInterestLocked(entry.Key(), item, entry.Revision())
+		r.evictCachedInterestLocked(entry.Key(), entry.Revision())
 		r.mu.Unlock()
+		return
 	}
+
+	var item Interest
+	if err := json.Unmarshal(entry.Value(), &item); err != nil {
+		r.mu.Lock()
+		r.evictCachedInterestLocked(entry.Key(), entry.Revision())
+		r.mu.Unlock()
+		slog.Warn("registry watcher evicted malformed value",
+			slog.String("key", entry.Key()),
+			slog.Uint64("revision", entry.Revision()),
+			slog.String("error", err.Error()),
+		)
+		return
+	}
+	r.mu.Lock()
+	r.cacheInterestLocked(entry.Key(), item, entry.Revision())
+	r.mu.Unlock()
 }
 
 // signalReady closes readyCh exactly once, unblocking any callers of
@@ -352,7 +392,7 @@ func (r *Registry) WaitForCacheReady(ctx context.Context) error {
 
 func (r *Registry) Upsert(item Interest, topics []string) (Interest, error) {
 	cur, getErr := r.Get(item.SessionID)
-	merged, err := mergeForUpsert(cur, getErr, item, topics, time.Now().UnixMilli())
+	merged, err := mergeForUpsert(cur, getErr, item, topics, r.now().UnixMilli())
 	if err != nil {
 		return Interest{}, err
 	}
@@ -360,7 +400,7 @@ func (r *Registry) Upsert(item Interest, topics []string) (Interest, error) {
 	if err != nil {
 		return Interest{}, err
 	}
-	revision, err := r.kv.Put(merged.SessionID, buf)
+	revision, err := r.interests().Put(merged.SessionID, buf)
 	if err != nil {
 		return Interest{}, err
 	}
@@ -421,7 +461,7 @@ func decodeRoleClaim(value []byte) (RoleClaim, error) {
 }
 
 func (r *Registry) roleClaim(role string) (RoleClaim, nats.KeyValueEntry, error) {
-	entry, err := r.roleKV.Get(role)
+	entry, err := r.roles().Get(role)
 	if errors.Is(err, nats.ErrKeyNotFound) {
 		return RoleClaim{}, nil, nil
 	}
@@ -459,7 +499,7 @@ func (r *Registry) releaseRoleClaim(sessionID, role string) error {
 	if entry == nil || claim.HolderSessionID != sessionID {
 		return nil
 	}
-	err = r.roleKV.Delete(role, nats.LastRevision(entry.Revision()))
+	err = r.roles().Delete(role, nats.LastRevision(entry.Revision()))
 	if err != nil && !errors.Is(err, nats.ErrKeyExists) && !errors.Is(err, nats.ErrKeyNotFound) {
 		return err
 	}
@@ -491,7 +531,7 @@ func (r *Registry) ReleaseExpiredRoleClaim(role, sessionID string, sessionTTL ti
 	if restored && restoredRevision == entry.Revision() && sessionTTL > 0 && r.now().Sub(r.openedAt) < sessionTTL {
 		return ExpiredRoleClaimRetained, nil
 	}
-	err = r.roleKV.Delete(role, nats.LastRevision(entry.Revision()))
+	err = r.roles().Delete(role, nats.LastRevision(entry.Revision()))
 	switch {
 	case err == nil:
 		return ExpiredRoleClaimReleased, nil
@@ -505,7 +545,7 @@ func (r *Registry) ReleaseExpiredRoleClaim(role, sessionID string, sessionTTL ti
 }
 
 func (r *Registry) releaseAllRoleClaims(sessionID string) error {
-	roles, err := r.roleKV.Keys()
+	roles, err := r.roles().Keys()
 	if errors.Is(err, nats.ErrNoKeysFound) {
 		return nil
 	}
@@ -552,12 +592,12 @@ func (r *Registry) removeInterestTopics(sessionID string, topics []string) error
 	if len(item.Topics) == 0 {
 		return r.deleteInterest(sessionID)
 	}
-	item.UpdatedAt = time.Now().UnixMilli()
+	item.UpdatedAt = r.now().UnixMilli()
 	buf, err := json.Marshal(item)
 	if err != nil {
 		return err
 	}
-	revision, err := r.kv.Put(sessionID, buf)
+	revision, err := r.interests().Put(sessionID, buf)
 	if err != nil {
 		return err
 	}
@@ -612,7 +652,7 @@ func (r *Registry) SetRoleWithPrevious(sessionID, machineID, role, previousSessi
 
 	claim := RoleClaim{
 		HolderSessionID:   sessionID,
-		ClaimedAt:         time.Now().UnixMilli(),
+		ClaimedAt:         r.now().UnixMilli(),
 		PreviousSessionID: "",
 	}
 	if soft {
@@ -623,9 +663,9 @@ func (r *Registry) SetRoleWithPrevious(sessionID, machineID, role, previousSessi
 		return Interest{}, err
 	}
 	if entry == nil {
-		_, err = r.roleKV.Create(role, data)
+		_, err = r.roles().Create(role, data)
 	} else {
-		_, err = r.roleKV.Update(role, data, entry.Revision())
+		_, err = r.roles().Update(role, data, entry.Revision())
 	}
 	if err != nil {
 		holder, holderErr := r.RoleHolder(role)
@@ -687,7 +727,7 @@ func (r *Registry) Get(sessionID string) (Interest, error) {
 	if ok {
 		return item, nil
 	}
-	entry, err := r.kv.Get(sessionID)
+	entry, err := r.interests().Get(sessionID)
 	if err != nil {
 		return Interest{}, err
 	}
@@ -750,7 +790,7 @@ func curValue(value string) string {
 // available for its holder to re-register after a listener restart, and the
 // role delivery path drops it if that holder never becomes live again.
 func (r *Registry) Reap(isAlive func(string) bool, graceWindow time.Duration) (int, error) {
-	now := time.Now().UnixMilli()
+	now := r.now().UnixMilli()
 	graceMs := graceWindow.Milliseconds()
 
 	r.mu.RLock()
@@ -778,7 +818,7 @@ func (r *Registry) Reap(isAlive func(string) bool, graceWindow time.Duration) (i
 // session TTL elapsed. It is intentionally separate from Reap: the interest
 // reaper must not tear down a role during a listener restart grace window.
 func (r *Registry) ReapRoleClaims(isAlive func(string) bool, sessionTTL time.Duration) (int, error) {
-	roles, err := r.roleKV.Keys()
+	roles, err := r.roles().Keys()
 	if errors.Is(err, nats.ErrNoKeysFound) {
 		return 0, nil
 	}

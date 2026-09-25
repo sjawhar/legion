@@ -3627,7 +3627,7 @@ func TestRunSelfHealthMonitor_RebuildsTerminalWatcher(t *testing.T) {
 				return err
 			},
 			func(err error) bool {
-				return isUnrecoverableSelfHealthFailure(err, client, sessions, nil)
+				return isUnrecoverableSelfHealthFailure(err, client, nil, sessions, nil)
 			},
 			func() error {
 				rebuilds.Add(1)

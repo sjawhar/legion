@@ -157,7 +157,7 @@ func isSessionLive(sessions *session.SessionRegistry, sessionID string) bool {
 func rewatchListenerKVWatchers(conn *nats.Conn, registry *store.Registry, sessions *session.SessionRegistry, ciStore *cistore.Store) error {
 	var errs []error
 	if registry != nil {
-		if err := registry.Rewatch(); err != nil {
+		if err := registry.Rewatch(conn); err != nil {
 			errs = append(errs, fmt.Errorf("rewatch interest registry: %w", err))
 		}
 	}
@@ -177,12 +177,13 @@ func rewatchListenerKVWatchers(conn *nats.Conn, registry *store.Registry, sessio
 // isUnrecoverableSelfHealthFailure distinguishes state that must be rebuilt
 // from transient JetStream deadlines. Rebuild only while the NATS client is
 // connected; a disconnected client owns its own infinite reconnect loop.
-func isUnrecoverableSelfHealthFailure(err error, client *bus.Client, sessions *session.SessionRegistry, ciStore *cistore.Store) bool {
+func isUnrecoverableSelfHealthFailure(err error, client *bus.Client, registry *store.Registry, sessions *session.SessionRegistry, ciStore *cistore.Store) bool {
 	if err == nil || client == nil || !client.Connected() {
 		return false
 	}
 	return errors.Is(err, nats.ErrConsumerNotFound) ||
 		errors.Is(err, nats.ErrConnectionClosed) ||
+		(registry != nil && registry.WatchFailed()) ||
 		(sessions != nil && sessions.WatchFailed()) ||
 		(ciStore != nil && ciStore.WatchFailed())
 }
@@ -433,6 +434,10 @@ func main() {
 		if !d.client.SubOK() {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "unhealthy", "error": "subscription inactive"})
+			return
+		}
+		if d.registry != nil && d.registry.WatchFailed() {
+			writeDependencyHealth(w, "interest KV watcher", errors.New(d.registry.WatchError()), true)
 			return
 		}
 		if d.sessions != nil && d.sessions.WatchFailed() {
@@ -736,7 +741,7 @@ func main() {
 				return checkSelfHealth(registry, sessions, ciStore, durableProbe)
 			},
 			func(err error) bool {
-				return isUnrecoverableSelfHealthFailure(err, client, sessions, ciStore)
+				return isUnrecoverableSelfHealthFailure(err, client, registry, sessions, ciStore)
 			},
 			func() error {
 				return rebuildListenerDependencies(
@@ -779,16 +784,19 @@ func main() {
 	}
 
 	// 3. NATS — wait (within the HTTP deadline) for a self-health rebuild the monitor may still be
-	// running, so nothing re-subscribes or re-watches during the drain. Retire the session
-	// registry's watcher, so the drain ending its subscription reads as the shutdown it is rather
-	// than a watcher failure; then drain in-flight deliveries without reconnecting, but never let a
-	// blocked NATS request pin the process after its HTTP listener is gone.
+	// running, so nothing re-subscribes or re-watches during the drain. Retire all three KV
+	// watchers, so the drain ending their subscriptions reads as the shutdown it is rather than a
+	// watcher failure, and a reconnect hook still running cannot arm a new one; then drain in-flight
+	// deliveries without reconnecting, but never let a blocked NATS request pin the process after
+	// its HTTP listener is gone.
 	select {
 	case <-monitorDone:
 	case <-shutdownCtx.Done():
 		logger.Warn("self-health monitor still running at shutdown")
 	}
+	registry.StopWatch()
 	sessions.StopWatch()
+	ciStore.StopWatch()
 	if err := client.Drain(10 * time.Second); err != nil {
 		logger.Warn("nats drain error", slog.String("error", err.Error()))
 	}
