@@ -838,7 +838,9 @@ func (s *Service) SetBlockAttributes(
 		}
 		return nil
 	})
-	if err != nil {
+	// Setting attributes a block already carries writes nothing, which the live path reports as
+	// ErrNoChanges; the block holds what the caller asked for, so that is success.
+	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
 		return fmt.Errorf("set live block attributes: %w", err)
 	}
 	return nil

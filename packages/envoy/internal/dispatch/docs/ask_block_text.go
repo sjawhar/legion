@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/provider/websocket"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
@@ -20,6 +21,23 @@ type AskBlockText struct {
 	Options  []model.AskOption
 	Multiple bool
 	Urgency  string
+}
+
+// AskBlockEdit names the fields one edit changes. A nil field is not written, and the block keeps
+// the nodes it already has for it - with their inline marks and their inner block ids. An ask's
+// row holds the question as plain text (`nodeText`), so rebuilding the body from the row would
+// flatten a question's bold, code and links and mint fresh ids for the paragraphs a human's
+// comment anchors point into: an edit that names only the urgency must touch none of that.
+type AskBlockEdit struct {
+	Question *string
+	Options  *[]model.AskOption
+	Multiple *bool
+	Urgency  *string
+}
+
+// writesBody reports whether the edit replaces any of the block's children.
+func (e AskBlockEdit) writesBody() bool {
+	return e.Question != nil || e.Options != nil
 }
 
 // ErrAskBlockUnrepresentable reports text the `:::ask` block cannot carry unchanged. The ask row
@@ -35,39 +53,72 @@ func (e *ErrAskBlockUnrepresentable) Error() string {
 	return fmt.Sprintf("%s: %s", e.Field, e.Reason)
 }
 
-// SetAskBlockText writes want into the ask block blockID of artifactID and returns what the
-// block parses back to, which is what its ask row must hold. The caller writes the row from the
-// return value, never from its own request, so normalisation cannot leave the two disagreeing.
+// SetAskBlockText applies edit to the ask block blockID of artifactID and returns what the block
+// then parses back to, which is what its ask row must hold. The caller writes the row from the
+// return value, never from its own request, so normalisation cannot leave the two disagreeing,
+// and a field the edit did not name comes back as the block's own.
 //
 // It returns *ErrAskBlockUnrepresentable, having written nothing, when the block would not carry
 // the text unchanged.
 func (s *Service) SetAskBlockText(
 	ctx context.Context,
 	artifactID, blockID string,
-	want AskBlockText,
+	edit AskBlockEdit,
 	actor model.Actor,
 ) (AskBlockText, error) {
-	normalized := AskBlockText{
-		Question: normalizeAskQuestion(want.Question),
-		Options:  normalizeAskOptions(want.Options),
-		Multiple: want.Multiple,
-		Urgency:  want.Urgency,
-	}
+	var stored AskBlockText
 	err := s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
 		tree, err := treeOf(doc)
 		if err != nil {
 			return err
 		}
-		next, err := pmdoc.SetBlockBody(tree, blockID, askBlockChildren(normalized), pmdoc.Attrs{
-			"multiple": normalized.Multiple,
-			"urgency":  normalized.Urgency,
-		})
+		current, err := askBlockOf(tree, blockID)
 		if err != nil {
 			return err
 		}
-		if err := verifyAskBlockRoundTrip(next, blockID, normalized); err != nil {
+		want := AskBlockText{
+			Question: current.question,
+			Options:  current.options,
+			Multiple: current.multiple,
+			Urgency:  current.urgency,
+		}
+		attributes := pmdoc.Attrs{}
+		if edit.Multiple != nil {
+			want.Multiple = *edit.Multiple
+			attributes["multiple"] = *edit.Multiple
+		}
+		if edit.Urgency != nil {
+			want.Urgency = *edit.Urgency
+			attributes["urgency"] = *edit.Urgency
+		}
+		if edit.Question != nil {
+			want.Question = normalizeAskQuestion(*edit.Question)
+		}
+		if edit.Options != nil {
+			want.Options = normalizeAskOptions(*edit.Options)
+		}
+
+		var next *pmdoc.Node
+		if edit.writesBody() {
+			children, err := askBlockChildren(current, edit)
+			if err != nil {
+				return err
+			}
+			next, err = pmdoc.SetBlockBody(tree, blockID, children, attributes)
+			if err != nil {
+				return err
+			}
+		} else {
+			// Attributes alone: every child keeps its nodes, its marks and its identity.
+			next, err = pmdoc.SetBlockAttributes(tree, blockID, attributes)
+			if err != nil {
+				return err
+			}
+		}
+		if err := verifyAskBlockRoundTrip(next, blockID, want, edit.writesBody()); err != nil {
 			return err
 		}
+		stored = want
 		if next.EqualWithBlockIDs(tree) {
 			return nil
 		}
@@ -78,20 +129,96 @@ func (s *Service) SetAskBlockText(
 		})
 		return updateErr
 	})
-	if err != nil {
+	// An edit that re-sends the values the block already holds writes nothing, which the live
+	// path reports as ErrNoChanges. It is the same ask the caller asked for, so it succeeds.
+	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
 		var unrepresentable *ErrAskBlockUnrepresentable
 		if errors.As(err, &unrepresentable) {
 			return AskBlockText{}, err
 		}
 		return AskBlockText{}, fmt.Errorf("write ask block text: %w", err)
 	}
-	return normalized, nil
+	return stored, nil
 }
 
-// verifyAskBlockRoundTrip reads the written block back the two ways the rest of Dispatch reads
-// it - settlement's own parser, and the canonical markdown a version records and an upload
-// re-parses - and reports the first that does not return want.
-func verifyAskBlockRoundTrip(next *pmdoc.Node, blockID string, want AskBlockText) error {
+// askBlockChildren is the block's children after edit: the parts it names rebuilt, the parts it
+// does not left exactly as they are. A rebuilt part is the children the markdown pipeline
+// produces, not hand-built nodes, so a bullet list carries the list attributes every other
+// document write gives it.
+func askBlockChildren(current askBlock, edit AskBlockEdit) ([]*pmdoc.Node, error) {
+	paragraphs := []*pmdoc.Node{}
+	var list *pmdoc.Node
+	for _, child := range current.node.Children {
+		if child.Type == "bullet_list" {
+			list = child
+			continue
+		}
+		paragraphs = append(paragraphs, child)
+	}
+
+	if edit.Question != nil {
+		rebuilt, err := parsedBlockBody(questionParagraphs(normalizeAskQuestion(*edit.Question)))
+		if err != nil {
+			return nil, &ErrAskBlockUnrepresentable{Field: "question", Reason: err.Error()}
+		}
+		for _, node := range rebuilt {
+			if node.Type != "paragraph" {
+				return nil, &ErrAskBlockUnrepresentable{
+					Field:  "question",
+					Reason: "the text reads as a " + node.Type + " rather than a question paragraph",
+				}
+			}
+		}
+		if len(rebuilt) == 0 {
+			return nil, &ErrAskBlockUnrepresentable{Field: "question", Reason: "the question is empty"}
+		}
+		paragraphs = rebuilt
+	}
+
+	if edit.Options != nil {
+		options := normalizeAskOptions(*edit.Options)
+		list = nil
+		if len(options) > 0 {
+			rebuilt, err := parsedBlockBody([]*pmdoc.Node{optionList(options)})
+			if err != nil {
+				return nil, &ErrAskBlockUnrepresentable{Field: "options", Reason: err.Error()}
+			}
+			if len(rebuilt) != 1 || rebuilt[0].Type != "bullet_list" {
+				return nil, &ErrAskBlockUnrepresentable{
+					Field:  "options",
+					Reason: "the options do not read back as one bullet list",
+				}
+			}
+			list = rebuilt[0]
+		}
+	}
+
+	children := append([]*pmdoc.Node{}, paragraphs...)
+	if list != nil {
+		children = append(children, list)
+	}
+	return children, nil
+}
+
+// parsedBlockBody is what the document's own markdown pipeline makes of nodes: rendering escapes
+// the text so it reads back literally, and parsing supplies the attributes and block ids a
+// hand-built node has no business inventing.
+func parsedBlockBody(nodes []*pmdoc.Node) ([]*pmdoc.Node, error) {
+	markdown, err := renderTree(&pmdoc.Node{Type: "doc", Children: nodes})
+	if err != nil {
+		return nil, fmt.Errorf("the text cannot be written as document markdown: %w", err)
+	}
+	parsed, err := pmdoc.Parse(markdown)
+	if err != nil {
+		return nil, errors.New("the text would leave the document's markdown unreadable; a line may not begin with \":::\"")
+	}
+	return parsed.Children, nil
+}
+
+// verifyAskBlockRoundTrip reads the written block back the ways the rest of Dispatch reads it -
+// settlement's own parser, and, when this edit rewrote text, the canonical markdown a version
+// records and an upload re-parses - and reports the first that does not return want.
+func verifyAskBlockRoundTrip(next *pmdoc.Node, blockID string, want AskBlockText, wroteBody bool) error {
 	block, err := askBlockOf(next, blockID)
 	if err != nil {
 		return err
@@ -99,8 +226,9 @@ func verifyAskBlockRoundTrip(next *pmdoc.Node, blockID string, want AskBlockText
 	if err := compareAskBlockText(block, want); err != nil {
 		return err
 	}
-	// The block alone, rendered and re-parsed: a version records this markdown and an upload
-	// parses it back, so text that survives the tree but not the page is refused here too.
+	if !wroteBody {
+		return nil
+	}
 	markdown, err := renderTree(&pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{block.node}})
 	if err != nil {
 		return &ErrAskBlockUnrepresentable{Field: "question", Reason: "the text cannot be written as document markdown"}
@@ -160,19 +288,22 @@ func compareAskBlockText(block askBlock, want AskBlockText) error {
 	return nil
 }
 
-// askBlockChildren renders an ask's text as the block body parseAskBlock reads: one paragraph per
-// blank-line-separated part, a hard break for a single newline inside one, and a bullet per
-// option written `Label: Description`, or a bare `Label` when it has no description.
-func askBlockChildren(text AskBlockText) []*pmdoc.Node {
-	children := []*pmdoc.Node{}
-	for _, part := range strings.Split(text.Question, "\n\n") {
-		children = append(children, &pmdoc.Node{Type: "paragraph", Children: inlineWithHardBreaks(part)})
+// questionParagraphs renders a question as the paragraphs parseAskBlock reads back: one per
+// blank-line-separated part, with a hard break for a single newline inside one.
+func questionParagraphs(question string) []*pmdoc.Node {
+	parts := strings.Split(question, "\n\n")
+	paragraphs := make([]*pmdoc.Node, 0, len(parts))
+	for _, part := range parts {
+		paragraphs = append(paragraphs, &pmdoc.Node{Type: "paragraph", Children: inlineWithHardBreaks(part)})
 	}
-	if len(text.Options) == 0 {
-		return children
-	}
-	items := make([]*pmdoc.Node, 0, len(text.Options))
-	for _, option := range text.Options {
+	return paragraphs
+}
+
+// optionList renders options as the bullet list parseAskBlock reads back: one item per option,
+// written `Label: Description`, or a bare `Label` when it has no description.
+func optionList(options []model.AskOption) *pmdoc.Node {
+	items := make([]*pmdoc.Node, 0, len(options))
+	for _, option := range options {
 		line := option.Label
 		if option.Description != "" {
 			line += ": " + option.Description
@@ -182,7 +313,7 @@ func askBlockChildren(text AskBlockText) []*pmdoc.Node {
 			Children: []*pmdoc.Node{{Type: "paragraph", Children: inlineWithHardBreaks(line)}},
 		})
 	}
-	return append(children, &pmdoc.Node{Type: "bullet_list", Children: items})
+	return &pmdoc.Node{Type: "bullet_list", Children: items}
 }
 
 // inlineWithHardBreaks carries a single newline as the hardbreak node nodeText reads back as

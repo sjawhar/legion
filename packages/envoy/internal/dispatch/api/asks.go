@@ -397,18 +397,19 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	// The block is the text's source of truth. Write it first, then take the row's values from
 	// what the block parses back to, so trimming can never leave the two disagreeing and the
-	// next settlement has nothing to reconcile.
+	// next settlement has nothing to reconcile. Only the fields this request named are written:
+	// the row holds the question as plain text, so rebuilding the whole body from it would strip
+	// an untouched question's formatting and links and orphan the anchors inside it.
 	if ask.BlockID != nil {
 		if ask.BlockArtifactID == nil {
 			s.writeHandlerError(w, fmt.Errorf("ask %q has block id without block artifact", ask.ID))
 			return
 		}
-		stored, err := s.deps.Docs.SetAskBlockText(documentCtx, *ask.BlockArtifactID, *ask.BlockID, docs.AskBlockText{
-			Question: ask.Question,
-			Options:  ask.Options,
-			Multiple: ask.Multiple,
-			Urgency:  ask.Urgency,
-		}, actor)
+		edit := docs.AskBlockEdit{Question: input.Question, Options: input.Options, Multiple: input.Multiple}
+		if input.Urgency != nil {
+			edit.Urgency = &requestedUrgency
+		}
+		stored, err := s.deps.Docs.SetAskBlockText(documentCtx, *ask.BlockArtifactID, *ask.BlockID, edit, actor)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return

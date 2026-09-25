@@ -371,7 +371,16 @@ The block is therefore the source of truth for an ask's **text** (question, opti
 `urgency`) and the row for its **lifecycle** (`state`, `answer`, `resolution`), so a route that
 changes either writes both: `PATCH /api/v1/asks/{id}` on a block ask writes the block through
 the document ledger and then takes the row's values from what the block parses back to, and
-`POST /api/v1/asks/{id}/resolve` writes the block's `state`. Text the block cannot carry
+`POST /api/v1/asks/{id}/resolve` writes the block's `state`. An edit writes only the fields it
+names: the row holds the question as plain text, so rebuilding the whole body from it would
+flatten an untouched question's formatting and links and mint fresh ids for the paragraphs a
+comment anchors into. Naming `urgency` or `multiple` alone therefore goes through the attribute
+path and leaves every child node, mark and inner block id exactly as it was; naming `question`
+or `options` replaces that part with what the markdown pipeline parses, so it carries the same
+list attributes any other document write gives it, and anchors inside the text actually replaced
+are affected as they are by any document edit. Re-sending the values the block already holds
+writes nothing and succeeds.
+Text the block cannot carry
 unchanged is refused `400 ASK_BLOCK_TEXT` naming the field, with nothing written - an option
 label containing `": "`, which separates a label from its description, or a question with a line
 beginning `:::`, which would leave the canonical markdown unparseable. A single newline is

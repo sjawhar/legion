@@ -27,7 +27,7 @@ type API interface {
 	AcquireConditionalEdit(ctx context.Context, artifactID string) (func(), error)
 	ApplyOps(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor, precondition *model.EditPrecondition) (EditOutcome, error)
 	SetBlockAttributes(ctx context.Context, artifactID, blockID string, attributes map[string]any, actor model.Actor) error
-	SetAskBlockText(ctx context.Context, artifactID, blockID string, want AskBlockText, actor model.Actor) (AskBlockText, error)
+	SetAskBlockText(ctx context.Context, artifactID, blockID string, edit AskBlockEdit, actor model.Actor) (AskBlockText, error)
 	ScheduleSettlement(artifactID string)
 	MarkQuote(ctx context.Context, artifactID string, mark MarkSpec, quote string, occurrence *int) (Anchored, error)
 	VerifyMark(ctx context.Context, artifactID string, kind MarkKind, id string) (Anchored, error)

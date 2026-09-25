@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -549,4 +551,155 @@ func TestConcurrentBlockAskEditsAndSettlementsDoNotDeadlock(t *testing.T) {
 	if !strings.Contains(markdown, ask.Question) {
 		t.Fatalf("the row and the block disagree after concurrent writes: row=%q\n%s", ask.Question, markdown)
 	}
+}
+
+// An ask block written through the document carries formatting the ask row cannot hold: the row
+// is `nodeText`, plain. An edit that names only the urgency must leave every one of those
+// characters, and the links among them, exactly where they were - rebuilding the body from the
+// row would flatten them (LEGION-265 review, PROBE B).
+func TestUrgencyOnlyEditLeavesTheQuestionsFormattingAlone(t *testing.T) {
+	handler, _ := blockAskHandler(t)
+	const formatted = ":::ask{#decision urgency=\"med\" multiple=\"false\"}\nWhich **transport** ships [first](https://example.test/rfc)?\n\n" +
+		"- REST: Matches the platform\n:::\n"
+	issue, askID := seedBlockAsk(t, handler, "Block ask formatting", "decision", formatted,
+		"Which transport ships first?")
+	before := documentMarkdown(t, handler, issue.PrimaryArtifactID)
+
+	edited := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+askID, map[string]any{
+		"urgency": "high", "actor": sessionActor(),
+	})
+	if edited.Code != http.StatusOK {
+		t.Fatalf("urgency-only edit: status=%d body=%s", edited.Code, edited.Body.String())
+	}
+	settleDocument(t, handler, issue.PrimaryArtifactID, issue.Key, "after-urgency")
+
+	markdown := documentMarkdown(t, handler, issue.PrimaryArtifactID)
+	for _, want := range []string{"**transport**", "[first](https://example.test/rfc)", `urgency="high"`} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("urgency-only edit lost %q:\nbefore:\n%s\nafter:\n%s", want, before, markdown)
+		}
+	}
+	if ask := readBlockAsk(t, handler, askID); ask.Urgency != "high" || ask.Question != "Which transport ships first?" {
+		t.Fatalf("urgency-only edit changed the question: urgency=%q question=%q", ask.Urgency, ask.Question)
+	}
+}
+
+// The inner paragraph a human's comment is anchored to keeps its block id through an edit that
+// does not rewrite it, so the anchor stays attached (LEGION-265 review, PROBE D).
+func TestUrgencyOnlyEditLeavesAnAnchoredCommentAttached(t *testing.T) {
+	handler, _ := blockAskHandler(t)
+	issue, askID := seedBlockAsk(t, handler, "Block ask anchor", "decision", transportAsk, "Which transport?")
+
+	commented := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body":   "Why not both?",
+		"anchor": map[string]any{"artifact": "spec", "quote": "Which transport?"},
+	}, "alice")
+	if commented.Code != http.StatusCreated {
+		t.Fatalf("anchor a comment inside the ask block: status=%d body=%s", commented.Code, commented.Body.String())
+	}
+	comment := decodeBody[model.Comment](t, commented)
+	if comment.Anchor == nil || comment.Anchor.Orphaned {
+		t.Fatalf("the seeded comment is not anchored: %#v", comment.Anchor)
+	}
+
+	edited := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+askID, map[string]any{
+		"urgency": "blocking", "actor": sessionActor(),
+	})
+	if edited.Code != http.StatusOK {
+		t.Fatalf("urgency-only edit: status=%d body=%s", edited.Code, edited.Body.String())
+	}
+	settleDocument(t, handler, issue.PrimaryArtifactID, issue.Key, "after-anchor")
+
+	read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/"+comment.ID, nil, "alice")
+	if read.Code != http.StatusOK {
+		t.Fatalf("read the anchored comment: status=%d body=%s", read.Code, read.Body.String())
+	}
+	after := decodeBody[struct {
+		Comment model.Comment `json:"comment"`
+	}](t, read).Comment
+	if after.Anchor == nil || after.Anchor.Orphaned {
+		t.Fatalf("the urgency-only edit orphaned the comment's anchor: %#v", after.Anchor)
+	}
+}
+
+// Re-sending the values the block already holds writes nothing, which the live path reports as
+// ErrNoChanges. That is the ask the caller asked for, not a server fault (LEGION-265 review,
+// PROBE A2).
+func TestRepeatingABlockAskEditSucceeds(t *testing.T) {
+	handler, _ := blockAskHandler(t)
+	_, askID := seedBlockAsk(t, handler, "Block ask repeat", "decision", transportAsk, "Which transport?")
+
+	for round := range 2 {
+		edited := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+askID, map[string]any{
+			"question": "Which transport ships first?", "actor": sessionActor(),
+		})
+		if edited.Code != http.StatusOK {
+			t.Fatalf("round %d edit: status=%d body=%s", round, edited.Code, edited.Body.String())
+		}
+	}
+	if ask := readBlockAsk(t, handler, askID); ask.Question != "Which transport ships first?" {
+		t.Fatalf("question after two identical edits = %q", ask.Question)
+	}
+}
+
+// A rewritten body is the children the markdown pipeline produces, so the bullet list carries the
+// list attributes every other document write gives it rather than a hand-built node's defaults.
+func TestBlockAskOptionsEditWritesAParsedList(t *testing.T) {
+	handler, database := blockAskHandler(t)
+	issue, askID := seedBlockAsk(t, handler, "Block ask list attrs", "decision", transportAsk, "Which transport?")
+	seeded := askBlockListAttrs(t, database, issue.PrimaryArtifactID)
+
+	edited := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+askID, map[string]any{
+		"options": []map[string]string{{"label": "REST", "description": "Now"}, {"label": "Queue"}},
+		"actor":   sessionActor(),
+	})
+	if edited.Code != http.StatusOK {
+		t.Fatalf("options edit: status=%d body=%s", edited.Code, edited.Body.String())
+	}
+	settleDocument(t, handler, issue.PrimaryArtifactID, issue.Key, "after-options")
+
+	ask := readBlockAsk(t, handler, askID)
+	if len(ask.Options) != 2 || ask.Options[0].Description != "Now" || ask.Options[1].Label != "Queue" ||
+		ask.Options[1].Description != "" {
+		t.Fatalf("options = %#v", ask.Options)
+	}
+	if written := askBlockListAttrs(t, database, issue.PrimaryArtifactID); written != seeded {
+		t.Fatalf("the rewritten list attributes = %s, want the parser's own %s", written, seeded)
+	}
+}
+
+// askBlockListAttrs is the ask block's bullet-list attributes as the stored document holds them.
+func askBlockListAttrs(t *testing.T, database *store.Store, artifactID string) string {
+	t.Helper()
+	var markdown string
+	if err := database.Pool.QueryRow(context.Background(),
+		`select markdown from artifact_versions where artifact_id = $1 order by number desc limit 1`,
+		artifactID).Scan(&markdown); err != nil {
+		t.Fatalf("read the settled document: %v", err)
+	}
+	tree, err := pmdoc.Parse(markdown)
+	if err != nil {
+		t.Fatalf("parse the settled document: %v", err)
+	}
+	attrs := "(no list)"
+	var walk func(*pmdoc.Node)
+	walk = func(node *pmdoc.Node) {
+		if node.Type == "bullet_list" {
+			keys := make([]string, 0, len(node.Attrs))
+			for name := range node.Attrs {
+				if name == pmdoc.BlockIDAttr {
+					continue
+				}
+				keys = append(keys, fmt.Sprintf("%s=%v", name, node.Attrs[name]))
+			}
+			sort.Strings(keys)
+			attrs = strings.Join(keys, " ")
+			return
+		}
+		for _, child := range node.Children {
+			walk(child)
+		}
+	}
+	walk(tree)
+	return attrs
 }
