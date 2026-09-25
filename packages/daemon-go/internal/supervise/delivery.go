@@ -90,7 +90,7 @@ func (m *Machine) sendPending(ctx context.Context) error {
 		m.log.Info("supervise: no connection; the delivery waits for the shim's hello", "delivery", p.ID)
 		return nil
 	}
-	holds, err := m.phaseHolds(ctx)
+	holds, err := m.phaseHolds(ctx, *p)
 	if err != nil {
 		return err
 	}
@@ -113,11 +113,11 @@ func (m *Machine) sendPending(ctx context.Context) error {
 
 // phaseHolds asks whether the issue is still in the phase this claim's role works. A daemon with
 // no workflow configured supplies no answer, and every delivery holds.
-func (m *Machine) phaseHolds(ctx context.Context) (bool, error) {
+func (m *Machine) phaseHolds(ctx context.Context, d Delivery) (bool, error) {
 	if m.deps.PhaseHolds == nil {
 		return true, nil
 	}
-	holds, err := m.deps.PhaseHolds(ctx, m.claim)
+	holds, err := m.deps.PhaseHolds(ctx, m.claim, d)
 	if err != nil {
 		return false, fmt.Errorf("read the phase of %s: %w", m.claim.Token, err)
 	}

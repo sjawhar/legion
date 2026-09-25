@@ -137,11 +137,19 @@ func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config) error 
 // this one is stale and is dropped rather than sent. An architect's task belongs to no phase and
 // always holds.
 //
-// So does a claim on an issue the daemon does not record. The workflow never deletes an issue, so
-// there is no record only for a claim the workflow never made — the operator's own spawn, whose
-// task is not the workflow's to judge and whose issue key need not be one at all.
-func phaseHolds(pool *pgxpool.Pool, records record.Store) func(context.Context, supervise.Claim) (bool, error) {
-	return func(ctx context.Context, c supervise.Claim) (bool, error) {
+// Only a task the workflow itself queued is judged. The outbox mints every one of those with an
+// id it owns (outboxDeliveryPrefix), so a task an operator delivered by hand through the API is
+// held whatever phase its issue is in: the operator asked for that delivery, was answered 200, and
+// dropping it would make the work silently not happen.
+//
+// A claim on an issue the daemon does not record holds too. The workflow never deletes an issue,
+// so there is no record only for a claim the workflow never made — the operator's own spawn, whose
+// issue key need not be an issue key at all.
+func phaseHolds(pool *pgxpool.Pool, records record.Store) func(context.Context, supervise.Claim, supervise.Delivery) (bool, error) {
+	return func(ctx context.Context, c supervise.Claim, d supervise.Delivery) (bool, error) {
+		if !strings.HasPrefix(d.ID, outboxDeliveryPrefix) {
+			return true, nil
+		}
 		if c.Role == claim.RoleArchitect {
 			return true, nil
 		}
@@ -162,8 +170,10 @@ func phaseHolds(pool *pgxpool.Pool, records record.Store) func(context.Context, 
 
 // treeClosable answers supervise's Deps.TreeClosable: a tree a workflow issue backs closes when
 // its linger expires, never on an operator's close of its root claim. The machine asks it inside
-// its own critical section, so an issue recorded while the close is in flight still refuses it,
-// and only for the operator's own close — the workflow's linger close holds that same record.
+// it where the close is decided rather than a round trip before it, and only for the operator's own
+// close — the workflow's linger close holds that same record. It is not a lock on what it reads:
+// admission and the engine commit issue records in their own transactions and take no machine lock,
+// so one can still land between this answer and the retire.
 func treeClosable(pool *pgxpool.Pool, records record.Store) func(context.Context, supervise.Claim) (bool, error) {
 	return func(ctx context.Context, c supervise.Claim) (bool, error) {
 		var issue *record.Issue

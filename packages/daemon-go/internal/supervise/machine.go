@@ -165,11 +165,14 @@ type Deps struct {
 	// fresh, so the daemon can tell the tree's other claims (TreeVolumeLost): their sessions were on
 	// the same volume. nil tells no one.
 	VolumeLost func(c Claim)
-	// PhaseHolds says whether the issue is still in the phase this claim's role works. A task is
-	// enqueued for the phase the issue was in, and the outbox refuses to start a role for a phase
-	// the issue has left (daemon/outbox.go); a delivery queued before the phase moved on is that
-	// same staleness one step later, so it is dropped rather than sent. nil holds every delivery.
-	PhaseHolds func(ctx context.Context, c Claim) (bool, error)
+	// PhaseHolds says whether this delivery is still worth sending: the workflow enqueues a task
+	// for the phase its issue was in, and the outbox refuses to start a role for a phase the issue
+	// has left (daemon/outbox.go), so a delivery queued before the phase moved on is that same
+	// staleness one step later and is dropped rather than sent. It is given the delivery as well as
+	// the claim because only the caller that queued a task knows whether the workflow's phases
+	// govern it at all: a task an operator delivered by hand is not the workflow's to drop. nil
+	// holds every delivery.
+	PhaseHolds func(ctx context.Context, c Claim, d Delivery) (bool, error)
 	// TreeClosable answers whether the operator may close this claim's tree: false refuses the
 	// close, and an error is the read itself failing, which the caller sees as a failure rather
 	// than a refusal. It is asked only for the operator's own close — the workflow's linger close

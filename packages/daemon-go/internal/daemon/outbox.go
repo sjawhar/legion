@@ -25,8 +25,11 @@ import (
 
 const (
 	outboxBatchSize = 32
-	outboxLease     = 30 * time.Second
-	outboxPoll      = 100 * time.Millisecond
+	// outboxDeliveryPrefix marks a delivery the outbox queued, so the daemon can tell the
+	// workflow's own tasks from one an operator delivered by hand.
+	outboxDeliveryPrefix = "outbox:"
+	outboxLease          = 30 * time.Second
+	outboxPoll           = 100 * time.Millisecond
 	// outboxFailedTickWait spaces the ticks while the database refuses, so an outage logs once a
 	// second rather than ten times.
 	outboxFailedTickWait = time.Second
@@ -319,7 +322,7 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 			}
 		}
 		if payload.Task != "" {
-			if err := machine.Handle(ctx, supervise.RequestDeliver{Claim: token, Task: payload.Task, ID: fmt.Sprintf("outbox:%d", row.ID)}); err != nil {
+			if err := machine.Handle(ctx, supervise.RequestDeliver{Claim: token, Task: payload.Task, ID: fmt.Sprintf("%s%d", outboxDeliveryPrefix, row.ID)}); err != nil {
 				return fmt.Errorf("deliver to claim %s: %w", token, err)
 			}
 		}

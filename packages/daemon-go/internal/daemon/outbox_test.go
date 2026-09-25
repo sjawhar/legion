@@ -747,21 +747,28 @@ func TestPhaseHoldsAnswersFromTheIssuesCurrentPhase(t *testing.T) {
 	claimOf := func(role claim.Role, issue string) supervise.Claim {
 		return supervise.Claim{Token: claim.Token("legion-omp-" + issue + "-" + string(role)), Issue: issue, Role: role}
 	}
+	// The workflow's own task, as the outbox mints it, and one an operator delivered by hand.
+	queued := supervise.Delivery{ID: outboxDeliveryPrefix + "42", Task: "the task"}
+	byHand := supervise.Delivery{ID: "MKVV7QJ2", Task: "the task"}
 
 	for _, tc := range []struct {
-		name  string
-		claim supervise.Claim
-		want  bool
+		name     string
+		claim    supervise.Claim
+		delivery supervise.Delivery
+		want     bool
 	}{
-		{name: "the phase's own role", claim: claimOf(claim.RoleImplementer, "LEGION-208"), want: true},
-		{name: "a role the issue has moved past", claim: claimOf(claim.RoleTester, "LEGION-208"), want: false},
-		{name: "the architect, whose task is of no phase", claim: claimOf(claim.RoleArchitect, "LEGION-208"), want: true},
+		{name: "the phase's own role", claim: claimOf(claim.RoleImplementer, "LEGION-208"), delivery: queued, want: true},
+		{name: "a role the issue has moved past", claim: claimOf(claim.RoleTester, "LEGION-208"), delivery: queued, want: false},
+		// The operator asked for this one and was answered 200; dropping it would make the work
+		// silently not happen after a relaunch.
+		{name: "an operator's own delivery to that same role", claim: claimOf(claim.RoleTester, "LEGION-208"), delivery: byHand, want: true},
+		{name: "the architect, whose task is of no phase", claim: claimOf(claim.RoleArchitect, "LEGION-208"), delivery: queued, want: true},
 		// The workflow never deletes an issue, so no record means the claim is not the workflow's:
 		// an operator spawn, whose task the workflow has no standing to drop.
-		{name: "a claim the workflow never made", claim: claimOf(claim.RoleImplementer, "LEGION-999"), want: true},
+		{name: "a claim the workflow never made", claim: claimOf(claim.RoleImplementer, "LEGION-999"), delivery: queued, want: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := holds(context.Background(), tc.claim)
+			got, err := holds(context.Background(), tc.claim, tc.delivery)
 			if err != nil {
 				t.Fatalf("phaseHolds: %v", err)
 			}
@@ -775,7 +782,7 @@ func TestPhaseHoldsAnswersFromTheIssuesCurrentPhase(t *testing.T) {
 		Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "phase holds",
 		Phase: phase.Testing, Status: "testing", Rank: "00000",
 	})
-	implementer, err := holds(context.Background(), claimOf(claim.RoleImplementer, "LEGION-208"))
+	implementer, err := holds(context.Background(), claimOf(claim.RoleImplementer, "LEGION-208"), queued)
 	if err != nil {
 		t.Fatalf("phaseHolds after the phase moved: %v", err)
 	}

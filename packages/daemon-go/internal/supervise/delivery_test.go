@@ -350,7 +350,7 @@ func TestALateForeignTurnResendsTheTaskUnlessTheIssueLeftThePhase(t *testing.T) 
 			// The phase is this role's while the task is delivered; the late turn is the phase
 			// running, so by the time it ends the daemon may have advanced past it.
 			holds := true
-			h.deps.PhaseHolds = func(context.Context, Claim) (bool, error) { return holds, nil }
+			h.deps.PhaseHolds = func(context.Context, Claim, Delivery) (bool, error) { return holds, nil }
 			c := queuedClaim()
 			if err := h.store.PutClaim(h.ctx, c); err != nil {
 				t.Fatal(err)
