@@ -518,13 +518,16 @@ EOF
   git -C "$dir" push -q origin "$fixture_branch" || fail "push the fixture branch $fixture_branch to $repo"
   note "pushed the repository-configuration fixture as $repo $fixture_branch ($(git -C "$dir" rev-parse --short HEAD))"
 }
-# assistant_said ISSUE ROLE TEXT: one of the claim's assistant turns has TEXT in its reply. The
-# instruction that asks for TEXT is a user turn, so a plain search of the session would match it.
+# assistant_said ISSUE ROLE TEXT: one of the claim's assistant turns carries TEXT, in its reply text
+# or in a tool call's arguments: an agent answers a Dispatch message with dispatch_message, so the
+# answer is a call's body. The instruction that asks for TEXT is a delivered message, not an
+# assistant turn, so a plain search of the session would match it.
 assistant_said() {
   local text
   text=$(claim_session_text "$1" "$2") || return 1
   jq -R -s -e --arg want "$3" '[split("\n")[] | fromjson? | select(.type == "message" and .message.role == "assistant")
-    | .message.content[]? | select(.type == "text") | .text | select(contains($want))] | length > 0' <<<"$text" >/dev/null
+    | .message.content[]? | (if .type == "text" then .text elif .type == "toolCall" then (.arguments | tostring) else "" end)
+    | select(contains($want))] | length > 0' <<<"$text" >/dev/null
 }
 fixture_markers() {
   local pod=$1
@@ -850,7 +853,7 @@ begin repository-configuration
 # they are read while the planner waits after its first turn; then it plans. The argv the pod ran
 # its agent with is recorded beside them.
 nonce="fixture-read-$RANDOM$RANDOM"
-send_agent "$tree2" planner "Stage 4b proof repository-configuration operation: read this repository's README and AGENTS.md, then reply with the single word $nonce and wait for the next instruction. Do not write a handoff yet."
+send_agent "$tree2" planner "Stage 4b proof repository-configuration operation: read this repository's README and AGENTS.md, then answer this message with the single word $nonce and wait for the next instruction. Do not write a handoff yet."
 until_true 900 "tree 2's planner to answer $nonce" assistant_said "$tree2" planner "$nonce"
 pod=$(claim_sandbox "$tree2" planner) || fail "tree 2's planner has no Sandbox"
 markers=$(fixture_markers "$pod") || fail "the fixture markers could not be read in $pod: $markers"
