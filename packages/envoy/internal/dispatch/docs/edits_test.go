@@ -1095,15 +1095,103 @@ func TestApplyOperationsUnresolvedQuoteErrorsNameTheQuoteNotThePackage(t *testin
 }
 
 func TestApplyOperationReplaceRejectsBlockReplacements(t *testing.T) {
-	tree, err := parseInput("Body.\n")
+	// The refusal is where an agent learns what to do instead, and each half of it is for a
+	// different `with`: paragraphs are rewritten one replace each, keeping their block ids - so a
+	// comment on the rewritten text loses its quote but keeps its pin - while a heading, list or
+	// table is inserted beside a paragraph that is replaced, deleting the old block only when no
+	// paragraph is left to take its place. The advice this replaced - delete the block and insert
+	// new blocks - cost a paragraph its id for nothing.
+	for _, test := range []struct {
+		name string
+		with string
+		want []string
+	}{
+		{
+			name: "two paragraphs",
+			want: []string{"give each one its own replace"},
+			with: "one\n\ntwo",
+		},
+		{
+			name: "a heading before a paragraph",
+			want: []string{"replace keeps a block's kind", "insert it beside a paragraph you replace"},
+			with: "## New\n\nBody.",
+		},
+		{
+			name: "a list with nothing to take the block's place",
+			want: []string{"delete the old block only when no paragraph of the new text is left"},
+			with: "- a\n\n- b",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tree, err := parseInput("Body.\n")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
+			var invalid *ErrInvalidOp
+			if !errors.As(err, &invalid) || invalid.Field != "with" {
+				t.Fatalf("replace error = %v, want invalid with", err)
+			}
+			for _, want := range test.want {
+				if !strings.Contains(invalid.Reason, want) {
+					t.Fatalf("refusal = %q, want it to name %q", invalid.Reason, want)
+				}
+			}
+			if strings.Contains(invalid.Reason, "delete the block and insert") {
+				t.Fatalf("refusal = %q, still advises deleting the block first", invalid.Reason)
+			}
+		})
+	}
+}
+
+// The refusal's heading advice is worth following only if it keeps what deleting the block loses.
+// Replacing the paragraph with the new text's paragraph and inserting the heading beside it keeps
+// that paragraph's block id; inserting the heading and deleting the old paragraph gives the same
+// markdown and a new id. The id is what this saves - a rewrite drops the anchor marks on the text
+// it rewrites either way (TestApplyOpsReportsAnEditThatOnlyDropsAnAnchorMarkAsChanged), and the
+// surviving block is what an orphaned comment stays pinned to.
+func TestReplacePlusInsertKeepsTheParagraphsBlockID(t *testing.T) {
+	tree, err := parseInput("Intro.\n\nBody.\n\nAfter.\n")
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: "one\n\ntwo"})
-	var invalid *ErrInvalidOp
-	if !errors.As(err, &invalid) || invalid.Field != "with" {
-		t.Fatalf("multi-paragraph replace error = %v, want invalid with", err)
+	pmdoc.EnsureBlockIDs(tree)
+	before := blockIDOfText(t, tree, "Body.")
+
+	batch, err := applyOperations(tree, []model.EditOp{
+		{Op: "replace", Find: "Body.", With: "Body text."},
+		{Op: "insert", Markdown: "## New", Before: "Body text."},
+	})
+	if err != nil {
+		t.Fatalf("replace then insert: %v", err)
 	}
+	tree = batch.tree
+	markdown, err := pmdoc.Render(tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if markdown != "Intro.\n\n## New\n\nBody text.\n\nAfter.\n" {
+		t.Fatalf("markdown = %q", markdown)
+	}
+	if after := blockIDOfText(t, tree, "Body text."); after != before {
+		t.Fatalf("block id = %q, want the paragraph's own %q", after, before)
+	}
+}
+
+func blockIDOfText(t *testing.T, tree *pmdoc.Node, text string) string {
+	t.Helper()
+	for _, child := range tree.Children {
+		if child.Type != "paragraph" || len(child.Children) == 0 || child.Children[0].Text != text {
+			continue
+		}
+		id, _ := child.Attrs[pmdoc.BlockIDAttr].(string)
+		if id == "" {
+			t.Fatalf("paragraph %q has no block id", text)
+		}
+		return id
+	}
+	t.Fatalf("no paragraph reads %q", text)
+	return ""
 }
 
 // AGENTC-193's spec came back with `## ##`, `7. 7\.`, `4. 4\.` and `-    - `: a `with` carrying

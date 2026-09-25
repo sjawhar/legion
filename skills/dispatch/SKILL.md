@@ -45,6 +45,15 @@ vocabulary, and is often on a phone. Write for that person.
   came from — never a compressed standalone ask (his words are quoted under [Design changes are
   brainstormed here](#design-changes-are-brainstormed-here)). Give the reader the options, what
   each costs, and your recommendation with its reason; do not prescribe yourself a form.
+- Describe a change by what its reader stands to lose, not by what the system does. The
+  engineering sentence names the change; the reader's sentence names who can do what today, what
+  they will not be able to do after it, what still works, and what you cannot tell. It is a
+  different sentence, not a shorter one — shortening keeps the nouns — and the test before
+  sending is whether its first sentence has a human subject. Run it even on a sentence you have
+  already simplified: a lead that names what a change does inside a system leaves the reader
+  nothing to act on, and the same options and recommendation, led with who loses what, are
+  answerable at once. Where the judgment rule below applies, the judgment leads and this rule
+  shapes the sentence under it.
 - Before posting, test it: could Sami, reading only this text on his phone, know what he is being
   told or asked? If not, rewrite it. Length is not the problem; density is.
 - When an ask or message communicates a judgment, lead with that judgment in one sentence and put the mechanism underneath it. Do not make the reader ask a second time whether the result is a win. This shapes communication only when a judgment exists; it does not pre-decide an open question or remove its genuine options. Inferred from the AGENTC-186 12-hour-cap incident (platform PO, 2026-09-17).
@@ -279,7 +288,7 @@ Sami, 2026-09-16, verbatim, rejecting two asks the same night: "All of these \"d
 completely disconnected from any discussion of design or trade-offs. This is not a very useful way
 of having this discussion" (on a report-table shape), and "What's a fenced PutObject or phantom
 eval_id? What's an R4 model header? What exactly is the question or uncertainty here?" (on a
-production import). Every `dispatch_ask` passes three gates first:
+production import). Every `dispatch_ask` passes four gates first:
 
 1. **Does it need his authority, taste, or risk appetite?** This is the bar for a decision
    written as an `:::ask` block in context ([Decision blocks](#decision-blocks)). Technical
@@ -293,11 +302,23 @@ production import). Every `dispatch_ask` passes three gates first:
    without uncertainty is permission for an action only a human can authorise — a production
    write, an external send, a console action — and then the question is that action in one
    sentence, with options that name its outcomes (below).
-3. **Can someone who has not read the code answer it on a phone?** What he can see today, what
-   changes for a reader, two options with what each costs, your recommendation. No slice or
+3. **Can someone who has not read the code answer it on a phone?** Write it as
+   [Writing for the human](#writing-for-the-human) says — who can do what today and what changes
+   for them, then two options with what each costs and your recommendation — and no slice or
    decision numbers, no coined nouns, no internal identifiers he has never used, no jargon you
-   would have to define. This is the phone test in [Writing for the human](#writing-for-the-human).
-   If you cannot write it that way, you do not understand it well enough to ask.
+   would have to define. If you cannot write it that way, you do not understand it well enough to ask.
+4. **Is it outside what he has already told you he wants?** If not, that want is settled, and so
+   is every choice inside it his words do not make: build it and ask nothing about it or beside it
+   until it is delivered, whatever the ask says about the build. Afterwards, ask only about a choice his own
+   message raises and leaves open, quoting his words and naming what you delivered. A cause you
+   diagnosed, or a behaviour next to the one he named, is not in his message: neither ask about
+   it nor build it — fixing the cause of the thing he named is delivering what he asked for, and
+   is not what this forbids; changing something else is. An ask that turns his complaint about
+   one control into a choice about another does not address what he asked, and changing that
+   other control is a change he never asked for. One thing is still an ask the moment you know
+   it, even before delivery: a
+   credential, an approval, a setting or a console action only he can take that the delivery
+   waits on — see "Anything that needs the human is an ask", further down.
 
 The platform PO audits open asks. One that fails a gate — or that points at another message in
 prose instead of carrying its content (below) — is retracted, with the PO's answer as the record.
@@ -386,7 +407,7 @@ It returns the imported commit, or the recorded error when the model was rejecte
 
 Before saying you are waiting for human input, call `dispatch_open_asks`. With no arguments it lists this session's active asks across open issues and project documents, including whether the human or agent owes the next reply. With `dispatch_open_asks({ project })` it lists every open ask in that project — on its issues and on its documents, whoever authored them — which is how you audit what a whole project is waiting on rather than just your own asks.
 
-**Unsettled product shape needs a decision before implementation.** When a page, navigation entry, table key, customer-scoping rule, or persisted sidecar would set product shape that Sami has not already settled, send a one-line ask before the first implementation commit. A lane's schema decision or a platform-PO contract ruling does not settle product shape. This does not turn a user-specified decision or routine implementation into an approval request; it is inferred from AGENTC-186's 2026-09-16 retro (platform PO, 2026-09-17).
+**Unsettled product shape needs a decision before implementation.** When a page, navigation entry, table key, customer-scoping rule, or persisted sidecar would set product shape that Sami has not already settled, send a one-line ask before the first implementation commit. A lane's schema decision or a platform-PO contract ruling does not settle product shape. This does not turn a user-specified decision or routine implementation into an approval request; it is inferred from AGENTC-186's 2026-09-16 retro (platform PO, 2026-09-17). A control or behaviour the human asked for in words is settled by those words, together with every choice inside it that his words do not make (where it sits, its defaults, its options): build it without an ask, as gate 4 of [Before you ask](#before-you-ask) says. This rule covers only product shape outside what he asked for, and its ask comes before the commit that sets that shape.
 
 **Anything that needs the human is an ask, or it does not exist.** An approval, a credential,
 a setting only they can change, a review click, a conflict between two of their own rules - if
@@ -578,10 +599,29 @@ plus `delete` to change the block's kind, level or number. The one exception is 
 marker: `replace(find="## Old", with="## New")` gives `## New`. A different level in `with` applies only when `find` named the
 heading's actual level — `find="## Old"`, `with="### New"` retitles and makes it an h3 — because `# ` is the level-blind selector,
 so `find="# Old"` renames the text and keeps whatever level it selected. `with` that forms more than one
-paragraph is rejected (`INVALID_OP` on `with`) — delete the block and insert new blocks instead; so is any non-empty `with` that
+paragraph is rejected (`INVALID_OP` on `with`) — see the recipe for a multi-paragraph rewrite below; so is any non-empty `with` that
 renders to no text, which a line indented four spaces or a tab does (markdown reads that as a code block), as does whitespace
 alone. An empty `with` is the one that deletes the matched text on purpose. Use zero-based `occurrence` for a
 repeated target; re-read a missing or ambiguous target before retrying. Pass `summary` to name the version when recording a decision.
+
+**Rewriting several paragraphs is one `replace` per paragraph, then a read-back.** `replace` is inline:
+each `with` is the new text of one paragraph, and a `with` that forms two paragraphs is refused whatever the
+text says. Give each paragraph you rewrite its own `replace`, which keeps that paragraph's block id and every
+anchor outside the text you rewrite. A comment or ask anchored to the text you rewrite loses its quote but keeps
+its pin to the block, so the dashboard still shows it beside that paragraph; a delete (below) loses both. When
+the new text has more paragraphs than the old, `insert` the extra ones
+with `after` quoting the last paragraph you rewrote exactly as it now reads (the operations in one batch
+apply in order); they land after the top-level block that holds the quote, so beside a paragraph inside a
+list item or a typed block they go after the whole list or block. When it has fewer, `delete` each leftover
+paragraph, with its whole text as `find` or its id as `block`. All of that holds while the new text is
+paragraphs: `replace` keeps a block's kind, so a heading, list, table or code fence cannot be replaced into place —
+a heading, list or table marker is written as literal text, and a code fence becomes an inline code span with the
+fence gone. When the new text adds one beside paragraphs, `insert` it beside the paragraph you replaced, which keeps
+that paragraph's id; only when no paragraph of the new text is left to take the old block's place is it an `insert`
+of the new block plus a `delete` of the old, and a delete is what costs a block its id. Then read the document back with
+`dispatch_doc_read` and read the passage and its neighbours, not a grep for the words you added: an empty
+`with` deletes the matched text on purpose, so a `replace` whose `with` you meant to fill empties that
+paragraph — the block and its id stay, holding nothing — and only a read shows what the document now says.
 
 A batch that leaves the document's semantic identity unchanged — including its inline anchor marks, so an edit that only orphans a
 comment or ask anchor still mints its version — mints no version, named or not: the response carries
