@@ -15,6 +15,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/api"
 	legionclaim "github.com/sjawhar/legion/daemon/internal/claim" // main_test.go's `claim` helper holds the bare name
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/daemon"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
 	"github.com/sjawhar/legion/daemon/internal/registry"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -52,10 +53,12 @@ func runController(ctx context.Context, args []string, stdout, stderr io.Writer)
 // packages/daemon/src/cli/controller-start.ts:262-384). In order, and nothing is written or
 // launched until the daemon has answered: read the strict operator-side file; refuse an operator
 // token file others can read, and a blank or unreadable Envoy or Dispatch token file, a role-prompt
-// bundle missing a file, an instructions file that is missing or blank, and an Oh My Pi invocation
-// that does not resolve; fetch the controller secret with the operator token as a bearer (the
-// daemon mints a fresh capability and revokes the previous controller's); write it 0600 under the
-// local state directory beside the gh shim, the `legion` launcher, and the deployment instructions;
+// bundle missing a file, an instructions file that is missing or blank, an Oh My Pi invocation
+// that does not resolve, and a pi-legion-envoy in the operator's Oh My Pi profile that does not
+// speak this binary's Go daemon API contract (it would refuse the controller at session start);
+// fetch the controller secret with the operator token as a bearer (the daemon mints a fresh
+// capability and revokes the previous controller's); write it 0600 under the local state
+// directory beside the gh shim, the `legion` launcher, and the deployment instructions;
 // then run Oh My Pi interactive — the launch prefix and the resolved invocation, one joined
 // `--append-system-prompt`, no `--resume`, no `--mode rpc` — in the foreground with the shared
 // controller environment, and answer its exit code.
@@ -103,6 +106,9 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	}
 	invocation, err := tmux.ResolveOmpInvocation(cfg.OmpInvocation, os.Getenv)
 	if err != nil {
+		return 0, err
+	}
+	if _, err := daemon.VerifyPluginContract(processEnvironment(), api.GoDaemonAPIVersion); err != nil {
 		return 0, err
 	}
 

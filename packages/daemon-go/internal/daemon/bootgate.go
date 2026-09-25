@@ -185,6 +185,19 @@ func profileWords(profile string) string {
 	return "OMP profile " + profile
 }
 
+// VerifyPluginContract is the boot gate's contract probe for an Oh My Pi started under env: the
+// pi-legion-envoy manifest where that Oh My Pi reads its plugins (pluginManifestPath) must declare
+// contract (verifyPluginContract). `legion controller start` runs it on the operator's own
+// environment before its one daemon call, since no boot gate checks the operator's machine and the
+// mint it asks for revokes the incumbent controller. It answers the package version.
+func VerifyPluginContract(env map[string]string, contract int) (string, error) {
+	manifest, profile, err := pluginManifestPath(env)
+	if err != nil {
+		return "", err
+	}
+	return verifyPluginContract(manifest, profile, contract)
+}
+
 // verifyPluginContract is the contract probe (verifyLegionPluginContract, boot-probes.ts:267-298,
 // on the Go daemon's own field): the manifest's `legion.goDaemonApiVersion` must be contract. A
 // manifest that is missing, unreadable, or without the field is the same refusal, never a

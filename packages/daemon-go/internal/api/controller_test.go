@@ -1,9 +1,9 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -88,6 +88,24 @@ func TestAControllerRegistersWithTheMintedCapability(t *testing.T) {
 	record, found, err := h.store.Controller(context.Background(), testProject)
 	if err != nil || !found || record.Session != "ses_controller" {
 		t.Fatalf("controller record = %+v, %v, %v, want ses_controller registered", record, found, err)
+	}
+}
+
+// The operator's Oh My Pi is checked by no boot gate — the daemon gates only its own panes — so the
+// registration holds the controller's plugin to this daemon's contract, naming both, and records
+// no registration for a plugin that speaks another.
+func TestAControllerSpeakingAnotherContractIsRefusedNamingBoth(t *testing.T) {
+	h := newHarness(t)
+	capability := h.mintedSecret()
+	recorder := h.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
+		BootToken: capability, SessionID: "ses_controller", OmpSessionFile: "/sessions/ses_controller.jsonl",
+		AgentID: "agent-ses_controller", PluginContract: GoDaemonAPIVersion + 1,
+	}, nil)
+	wantRefusal(t, recorder, http.StatusConflict, fmt.Sprintf(
+		"pi-legion-envoy speaks Go daemon API contract %d; this daemon requires %d", GoDaemonAPIVersion+1, GoDaemonAPIVersion))
+	record, found, err := h.store.Controller(context.Background(), testProject)
+	if err != nil || !found || record.Registered() {
+		t.Fatalf("controller record = %+v, %v, %v, want the capability minted and no session registered", record, found, err)
 	}
 }
 

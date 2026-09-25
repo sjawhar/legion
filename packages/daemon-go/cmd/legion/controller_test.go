@@ -201,10 +201,27 @@ func newControllerStart(t *testing.T, d *controllerDaemon, opts controllerOption
 	}
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_STATE_HOME", "")
+	t.Setenv("XDG_DATA_HOME", "")
+	t.Setenv("OMP_PROFILE", "")
 	t.Setenv("PATH", "/usr/bin:/bin:/opt/x/worker-bin")
 	t.Setenv("LEGION_OMP_PATH", omp)
 	t.Setenv("LEGION_ROLE_PROMPTS_DIR", prompts.SourceRolePromptsDir())
+	c.installPlugin(api.GoDaemonAPIVersion)
 	return c
+}
+
+// installPlugin installs, in the operator's default Oh My Pi profile, a pi-legion-envoy manifest
+// declaring contract.
+func (c *operatorMachine) installPlugin(contract int) {
+	c.t.Helper()
+	dir := filepath.Join(c.home, ".omp", "plugins", "node_modules", "@sjawhar", "pi-legion-envoy")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		c.t.Fatal(err)
+	}
+	manifest := fmt.Sprintf(`{"name":"@sjawhar/pi-legion-envoy","version":"9.9.9","legion":{"goDaemonApiVersion":%d}}`, contract)
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(manifest), 0o600); err != nil {
+		c.t.Fatal(err)
+	}
 }
 
 func (c *operatorMachine) write(name, contents string, mode os.FileMode) {
@@ -594,6 +611,29 @@ func TestControllerStartRefusesLocallyBeforeTheRequest(t *testing.T) {
 		c := newControllerStart(t, d, controllerOptions{})
 		t.Setenv("LEGION_OMP_PATH", "")
 		c.refused("omp_invocation is not set: set it to 'mise x <tool> -- omp', or set LEGION_OMP_PATH to an absolute executable path")
+		c.wantNoSecretRequest()
+		c.wantNothingLaunchedOrWritten(c.defaultDir)
+	})
+	// The mint revokes the incumbent controller, so an Oh My Pi whose plugin would refuse the Go
+	// controller at session start is found before it: a second start from a profile nobody
+	// updated leaves the working controller alone.
+	t.Run("a plugin in the operator's Oh My Pi profile that speaks another contract, naming both", func(t *testing.T) {
+		d := newControllerDaemon(t)
+		c := newControllerStart(t, d, controllerOptions{})
+		c.installPlugin(api.GoDaemonAPIVersion - 1)
+		manifest := filepath.Join(c.home, ".omp", "plugins", "node_modules", "@sjawhar", "pi-legion-envoy", "package.json")
+		c.refused(fmt.Sprintf("pi-legion-envoy at %s (package 9.9.9) speaks Go daemon API contract %d; this daemon requires %d.",
+			manifest, api.GoDaemonAPIVersion-1, api.GoDaemonAPIVersion))
+		c.wantNoSecretRequest()
+		c.wantNothingLaunchedOrWritten(c.defaultDir)
+	})
+	t.Run("no plugin in the operator's Oh My Pi profile", func(t *testing.T) {
+		d := newControllerDaemon(t)
+		c := newControllerStart(t, d, controllerOptions{})
+		if err := os.RemoveAll(filepath.Join(c.home, ".omp")); err != nil {
+			t.Fatal(err)
+		}
+		c.refused("pi-legion-envoy manifest at " + filepath.Join(c.home, ".omp", "plugins", "node_modules", "@sjawhar", "pi-legion-envoy", "package.json") + " could not be read")
 		c.wantNoSecretRequest()
 		c.wantNothingLaunchedOrWritten(c.defaultDir)
 	})

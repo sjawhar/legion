@@ -478,6 +478,18 @@ func newFlags(name string, stderr io.Writer) *flag.FlagSet {
 	return flags
 }
 
+// processEnvironment is this process's environment by name, the last entry for a name winning as
+// it does for a child the process starts.
+func processEnvironment() map[string]string {
+	env := map[string]string{}
+	for _, pair := range os.Environ() {
+		if name, value, ok := strings.Cut(pair, "="); ok {
+			env[name] = value
+		}
+	}
+	return env
+}
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
