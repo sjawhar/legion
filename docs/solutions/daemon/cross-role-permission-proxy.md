@@ -28,9 +28,8 @@ status: active
 In Legion's multi-app GitHub setup, each worker role (implement, review) runs with a
 separate GitHub App token that has intentionally limited permissions. The review bot
 (`legion-review`) has `pull_requests:write` but intentionally lacks `contents:write`
-to prevent the reviewer from pushing code. (So it read when this was written. On 2026-09-25 App
-3202653's installations hold `contents: write`, and only the workflow keeps the reviewer from
-pushing.)
+to prevent the reviewer from pushing code. (So it read when this was written. Since LEGION-200 every role pushes its own commits; the Apps'
+permissions are in `packages/daemon/src/daemon/AGENTS.md`, GitHub Apps.)
 
 However, GitHub's `markPullRequestReadyForReview` and `convertPullRequestToDraft`
 GraphQL mutations require `contents:write` — not just `pull_requests:write`. This is

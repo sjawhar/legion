@@ -91,8 +91,7 @@ is cheap enough (40 s here) that it was re-run anyway.
 - After every `jj split` or `jj squash` that rewrites the head, re-run
   `jj bookmark set legion/<KEY> -r @- --allow-backwards` before pushing; the bookmark otherwise
   points at the undescribed working-copy commit, which `jj git push` refuses.
-- A reviewer's locally committed handoff sits above origin in the shared workspace (only the
-  implementer pushes). It rides along on the implementer's next push; confirm it is an ancestor of your
+- A reviewer's handoff commit sits in the chain below yours; confirm it is an ancestor of your
   commit with `jj log` before building on it, and mention it in the push summary.
 
 ## 6. `jj diff --from main --to <branch>` is not the pull request's diff once `main` moves again

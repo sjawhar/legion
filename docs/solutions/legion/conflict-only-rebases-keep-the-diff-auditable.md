@@ -70,8 +70,8 @@ moved before deciding a conflict is new.
 ## What a conflict-only rebase may change
 
 `jj rebase -s 'roots(main@origin..@)' -d main@origin` moves the whole chain — plan doc, plan
-handoff, fix, comment sweep, every later handoff — so the push carries other roles' unpushed
-commits (only the implementer pushes). Resolve inside the working copy and `jj squash --from @
+handoff, fix, comment sweep, every later handoff — so the rebase carries other roles'
+commits too. Resolve inside the working copy and `jj squash --from @
 --into <owning commit> <paths>` so each resolution lands in the commit that owns the file; the
 descendants re-apply. The rules for what the resolution may contain:
 

@@ -148,8 +148,7 @@ the rebase comment.
 1. Before rebasing: `jj git fetch`, then hash the current tip with the one-fileset command and
    keep the number.
 2. `jj rebase -s 'roots(main@origin..@)' -d main@origin` — the whole chain, so the tester's and
-   reviewer's local handoff commits move with yours (only the implementer pushes, and its push
-   carries them).
+   reviewer's handoff commits move with yours.
 3. Resolve each conflicted commit at the commit that owns the file (`jj new <rev>`, edit the
    file to the resolved text, `jj squash`), first conflicted commit first; the descendants
    re-apply and often clear several commits at once. A later commit that rewrote the same

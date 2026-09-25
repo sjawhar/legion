@@ -18,6 +18,8 @@ related_issues:
 
 # A retired reviewer cannot see a workspace-only commit
 
+**Superseded 2026-09-25 (LEGION-200):** every role now pushes its own commits, and the reviewer resolves the threads it accepts (`skills/legion-worker/SKILL.md`; the Apps' permissions are in `packages/daemon/src/daemon/AGENTS.md`, GitHub Apps). What follows records the earlier workflow. Step 3 (push the corrective head before asking for `Accepted:`) still holds; step 4 does not, since the reviewer now runs `legion threads resolve` itself after its `Accepted:` replies.
+
 The `legion-worker` skill's corrective sequence reads: fix, reply on the thread, wait for the
 reviewer's `Accepted:`, run `legion threads resolve`, push. It assumes a reviewer that is live
 and watching. In practice a phase worker is retired within `worker_idle_retire_seconds` (default

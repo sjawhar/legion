@@ -106,12 +106,12 @@ and the correct response to a missing predecessor is to stop and ask the archite
 who skips a phase owns telling each worker it spawns (implementer, tester, reviewer) that the
 phase was skipped and what stands in for its output — here, the spec's Design table.
 
-## 3. The reviewer's `review.json` commit stays local until the implementer's cleanup push carries it
+## 3. The reviewer's `review.json` commit stayed local until the implementer's cleanup push carried it
 
-No role acting as the review App pushes (`packages/daemon/src/daemon/AGENTS.md`, GitHub Apps; App
-3202653 holds `contents: write` as of 2026-09-25, so the rule is the workflow's, not GitHub's), so
-the reviewer's `jj split -m "review: record handoff" .legion/review.json` produces a commit that
-stays local. On
+**Superseded 2026-09-25 (LEGION-200):** every role now pushes its own commits, and the reviewer resolves the threads it accepts (`skills/legion-worker/SKILL.md`; the Apps' permissions are in `packages/daemon/src/daemon/AGENTS.md`, GitHub Apps). What follows records the earlier workflow.
+
+Then, the reviewer's `jj split -m "review: record handoff" .legion/review.json` produced a
+commit that stayed local. On
 #1008 that commit was `62196d55`. When the implementer was sent back for the `.legion/` deletion,
 `jj status` showed it as the parent of the working copy and `jj bookmark list --all-remotes` showed
 `legion/LEGION-38@origin (behind by 2 commits)`. That is the expected state, not drift: do not
