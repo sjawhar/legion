@@ -193,17 +193,19 @@ func feedRemote(feed, repo, bookmark string) remote {
 // Fetch clones the repository from GitHub, bare, into the feed, with the provisioning token and
 // no configuration but the one-shot credential's and the pins: the process of a pod's first init
 // container, the only one that holds the token, whose feed is its own and which mounts nothing a
-// tree agent can write. Provision then clones and fetches the shared clone from the feed with no
-// credential. It returns the feed repository.
+// tree agent can write. It reaches GitHub as the tmux runtime's Source does, so the token's two
+// holders share one credential rule. Provision then clones and fetches the shared clone from the
+// feed with no credential. It returns the feed repository.
 func Fetch(ctx context.Context, run Runner, request FetchRequest) (string, error) {
 	feed, err := feedRepository(request.Feed, request.Repo)
 	if err != nil {
 		return "", err
 	}
-	if request.CredentialDir == "" {
-		return "", errors.New("workspace credential directory is required")
+	github := gitHubSource{token: request.Token, credentialDir: request.CredentialDir}
+	if err := github.check(request.Repo); err != nil {
+		return "", err
 	}
-	credential, err := newProvisioningCredential(request.CredentialDir, request.Token)
+	credential, err := github.open(request.Repo, "")
 	if err != nil {
 		return "", err
 	}
