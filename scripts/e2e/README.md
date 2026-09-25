@@ -413,7 +413,7 @@ The checks, in order, each printing what it observed and then `CHECK <name>: PAS
 | `concurrent-provision` | a new tree's root and a child worker spawned at once: both provision their workspace, the two `workspace-init` runs do not overlap (the runtime serializes them; `flock` does not reach across gVisor pods), and the volume holds one clone, with both jj workspaces, that passes `git fsck --connectivity-only` |
 | `re-adopt` | the listener and runtime closed, one worker killed while none runs, then a fresh listener and `sandbox.New` with `ReconcileOrphans(known)`: the living claims are alive with their recorded incarnations and unchanged pods and Sandbox generations, the killed one is gone with its recorded uid, and every living shim says hello again with its current token |
 | `orphan-sweep` | a running claim left out of `known` survives a sweep with a 1-hour grace and is deleted by one with a 1-second grace; the suspended claim's Sandbox and every known one survive both |
-| `release-tree` | Release of every claim, the suspended one with a nil locator: no Sandbox, `-boot` Secret, pod, or tree PVC of the run is left |
+| `release-tree` | Release of every claim, the suspended one with a nil locator: no Sandbox, `-boot` Secret, pod, or tree PVC of the run is left (the operator's providers Secret stays for the teardown: Release never deletes an operator's object) |
 | `namespace-clean` | the script's last step, after the teardown and outside the harness: the namespace's Sandboxes, Secrets, PVCs, pods and ConfigMaps that carry the run's project label or none are exactly the snapshot taken before the run |
 
 Everything the run creates carries the project label `s4a-<UTC timestamp>-<4 hex>`, and the
@@ -421,8 +421,9 @@ claim tokens carry the same value without its dashes. The harness appends each S
 a record before the Sandbox can exist. On any exit the `EXIT` trap runs
 [`lib/namespace-rig.sh`](#libnamespace-rigsh)'s teardown: it refuses to act on a project without
 the `s4a-` prefix, deletes every recorded Sandbox by its exact name and then the Sandboxes
-labelled with that exact project (never by label existence) and the run's ConfigMap by the same
-label, waits for the owned Secrets, pods and PVCs to follow, deletes by the same exact label any Secret or PVC still left after 90
+labelled with that exact project (never by label existence), the run's ConfigMap by the same
+label and its providers Secret by name, waits for the owned Secrets, pods and PVCs to follow,
+deletes by the same exact label any Secret or PVC still left after 90
 listings, and runs `namespace-clean` when the harness did not get to it. Nothing outside `legion`
 is touched.
 

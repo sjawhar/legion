@@ -826,7 +826,9 @@ func (r *liveRig) checkOrphanSweep() error {
 }
 
 // release-tree: releasing every claim, a suspended one with no locator included, leaves nothing
-// of the run: every Sandbox, every -boot Secret, and each tree volume go.
+// of the run the runtime created: every Sandbox, every -boot Secret, and each tree volume go. The
+// operator's providers Secret carries the run's label too, for the teardown, but it is the
+// operator's, which Release never deletes, so the check leaves it out by name.
 func (r *liveRig) checkReleaseTree() error {
 	if err := r.startRuntimeOnce(); err != nil {
 		return err
@@ -850,16 +852,17 @@ func (r *liveRig) checkReleaseTree() error {
 	}
 	note("runtime", "Released %s", strings.Join(released, ", "))
 	selector := labelProject + "=" + r.env.project
+	providers := ProvidersSecretName(r.env.project)
 	var left string
 	err := r.poll(liveGoneLimit, "every object of the run to go", func() (bool, error) {
-		out, err := r.kubectl("get", "sandboxes,secrets,pvc,pods", "-l", selector, "-o", "name")
+		out, err := r.kubectl("get", "sandboxes,secrets,pvc,pods", "-l", selector, "--field-selector", "metadata.name!="+providers, "-o", "name")
 		left = strings.TrimSpace(out)
 		return left == "", err
 	})
 	if err != nil {
 		return fmt.Errorf("%w; left: %s", err, oneLine(left))
 	}
-	note("operator", "kubectl get sandboxes,secrets,pvc,pods -l %s: none — every Sandbox, -boot Secret, and tree PVC (%s, %s) gone",
-		selector, TreeClaimName(r.claim("root").token), TreeClaimName(r.claim("root2").token))
+	note("operator", "kubectl get sandboxes,secrets,pvc,pods -l %s, less the operator's %s: none — every Sandbox, -boot Secret, and tree PVC (%s, %s) gone",
+		selector, providers, TreeClaimName(r.claim("root").token), TreeClaimName(r.claim("root2").token))
 	return nil
 }
