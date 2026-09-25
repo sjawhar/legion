@@ -728,10 +728,15 @@ async function getCiStatusBatchWithOptions(
 const COMPARE_FILE_LIMIT = 300;
 
 /** The paths GitHub's compare of `base...head` changes: each file's name and, for a rename, its
- * previous name. `truncated` when GitHub listed its maximum of files, so the list may be partial. */
+ * previous name. `truncated` when GitHub listed its maximum of files, so the list may be partial.
+ * `authors` holds each listed commit's author as GitHub attributes it (`author.login`, the account
+ * its email resolves to, `null` when it resolves to none); `commitsTruncated` when the range holds
+ * more commits than GitHub listed (`total_commits`; it lists at most 250). */
 export interface ComparedPaths {
   paths: string[];
   truncated: boolean;
+  authors: Array<string | null>;
+  commitsTruncated: boolean;
 }
 
 /** Reads `GET repos/<repo>/compare/<base>...<head>` through `gh api` (`repo` is `owner/name`).
@@ -751,14 +756,26 @@ export async function getComparedPaths(
   if (exitCode !== 0) {
     throw new GitHubAPIError(`compare ${range} failed: ${stderr.trim() || `exit ${exitCode}`}`);
   }
-  let files: unknown;
+  let answer: Record<string, unknown> | undefined;
   try {
-    files = recordValue(JSON.parse(stdout))?.files ?? [];
+    answer = recordValue(JSON.parse(stdout));
   } catch (error) {
     throw new GitHubAPIError(`compare ${range} answered unparsable JSON: ${error}`);
   }
-  if (!Array.isArray(files))
+  const files = answer?.files ?? [];
+  const commits = answer?.commits;
+  const totalCommits = answer?.total_commits;
+  if (!Array.isArray(files) || !Array.isArray(commits) || typeof totalCommits !== "number")
     throw new GitHubAPIError(`compare ${range} answered an unexpected shape`);
+  const authors: Array<string | null> = [];
+  for (const commit of commits) {
+    const author = recordValue(commit)?.author;
+    const login = author === null ? null : recordValue(author)?.login;
+    if (login !== null && typeof login !== "string") {
+      throw new GitHubAPIError(`compare ${range} answered an unexpected shape`);
+    }
+    authors.push(login);
+  }
   const paths: string[] = [];
   for (const file of files) {
     const entry = recordValue(file);
@@ -770,5 +787,10 @@ export async function getComparedPaths(
     paths.push(filename);
     if (previous !== undefined) paths.push(previous);
   }
-  return { paths, truncated: files.length >= COMPARE_FILE_LIMIT };
+  return {
+    paths,
+    truncated: files.length >= COMPARE_FILE_LIMIT,
+    authors,
+    commitsTruncated: totalCommits > commits.length,
+  };
 }

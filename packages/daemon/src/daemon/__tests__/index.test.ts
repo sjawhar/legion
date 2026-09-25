@@ -470,7 +470,11 @@ describe("startDaemon", () => {
     const runner: CommandRunner = async (command, options) => {
       commands.push({ command, token: options?.env?.GH_TOKEN });
       return {
-        stdout: JSON.stringify({ files: [{ filename: "src/fix.ts" }] }),
+        stdout: JSON.stringify({
+          files: [{ filename: "src/fix.ts" }],
+          commits: [{ author: { login: "legion-implement[bot]" } }],
+          total_commits: 1,
+        }),
         stderr: "",
         exitCode: 0,
       };
@@ -491,7 +495,12 @@ describe("startDaemon", () => {
       PATH: "/pane/bin",
     })("acme/api", "base-sha", "head-sha");
 
-    expect(compared).toEqual({ paths: ["src/fix.ts"], truncated: false });
+    expect(compared).toEqual({
+      paths: ["src/fix.ts"],
+      truncated: false,
+      authors: ["legion-implement[bot]"],
+      commitsTruncated: false,
+    });
     expect(tokenCalls).toEqual([{ role: "implement", owner: "acme" }]);
     expect(commands).toEqual([
       {

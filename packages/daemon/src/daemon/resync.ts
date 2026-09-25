@@ -214,8 +214,9 @@ async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<CiFetchFa
 }
 
 /** Settles `pr`'s unsettled `changes_requested` from GitHub's compare of `base` against its head:
- * a `.legion/`-only range keeps the decision; a real change drops it; and so does a range the
- * compare cannot classify (the call fails, the file list is truncated or empty), logged once. */
+ * a range whose every commit the review App authored, or a `.legion/`-only range, keeps the
+ * decision; a real change by another account drops it; and so does a range the compare cannot
+ * classify (the call fails, the file list is truncated or empty), logged once. */
 async function settleFromCompare(
   deps: RunResyncDeps,
   prKey: string,
@@ -223,12 +224,17 @@ async function settleFromCompare(
   pr: PrState
 ): Promise<void> {
   let unclassified: string | undefined;
-  let handoffOnly = false;
+  let keep = false;
   try {
     const compared = await deps.compareChangedPaths(pr.repo, base, pr.headSha);
-    if (compared.truncated) unclassified = "GitHub listed its maximum of files";
+    const reviewAppOnly =
+      !compared.commitsTruncated &&
+      compared.authors.length > 0 &&
+      compared.authors.every((author) => author === deps.config.reviewAppLogin);
+    if (reviewAppOnly) keep = true;
+    else if (compared.truncated) unclassified = "GitHub listed its maximum of files";
     else if (compared.paths.length === 0) unclassified = "no changed paths";
-    else handoffOnly = handoffOnlyPaths(compared.paths);
+    else keep = handoffOnlyPaths(compared.paths);
   } catch (error) {
     unclassified = error instanceof Error ? error.message : String(error);
   }
@@ -237,7 +243,7 @@ async function settleFromCompare(
       `[legion] resync could not classify ${prKey} ${base}...${pr.headSha} (${unclassified}); dropping its changes_requested decision`
     );
   }
-  settleReviewDecision(pr, handoffOnly);
+  settleReviewDecision(pr, keep);
 }
 
 /** Retries each failed daemon-owned Dispatch status write against a single fresh remote read: a

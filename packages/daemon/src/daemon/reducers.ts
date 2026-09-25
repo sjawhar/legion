@@ -942,9 +942,11 @@ function registerPrFenced(
  * sha describes a newer push whose synchronize has not arrived and is left in place.
  *
  * An approval is dropped on every new head. `changes_requested` lasts while every change since
- * the round's head is under `.legion/` — the reviewer's own handoff push after it asked for
- * changes is still that round. A pending classification of this head that changes anything else
- * drops it. A handoff-only one keeps it and settles the head when it covers every change since
+ * the round's head is under `.legion/` or the review App's own — the reviewer's handoff push after
+ * it asked for changes is still that round, and no commit the review App pushes (a tester's
+ * tests, an architect's or reviewer's own commit) answers a request made of the implementer. A
+ * pending classification of this head by another account that changes anything else drops it. A
+ * handoff-only or review-App one keeps it and settles the head when it covers every change since
  * the head it replaces (its `before` is that head, and nothing earlier is unsettled). Otherwise
  * the decision is kept and the range recorded (`reviewDecisionUnsettledFrom`, the first
  * unclassified head's predecessor) for a push webhook or resync's compare to settle
@@ -977,7 +979,10 @@ export function resetPrHead(pr: PrState, headSha: string): void {
   pr.ciSettlementGeneration = null;
   pr.ciSnapshot = null;
   pr.ciReconciled = false;
-  if (pr.reviewDecision !== "changes_requested" || (pending && !pending.handoffOnly)) {
+  if (
+    pr.reviewDecision !== "changes_requested" ||
+    (pending && !pending.handoffOnly && !pending.byReviewApp)
+  ) {
     delete pr.reviewDecision;
     delete pr.reviewDecisionUnsettledFrom;
     delete pr.changesRequest;
@@ -988,11 +993,12 @@ export function resetPrHead(pr: PrState, headSha: string): void {
 }
 
 /** Settles a `changes_requested` decision `resetPrHead` kept across unclassified heads, once the
- * whole range from `reviewDecisionUnsettledFrom` to the current head is classified: handoff-only
- * keeps it, anything else drops it. No-op when nothing is unsettled. */
-export function settleReviewDecision(pr: PrState, handoffOnly: boolean): void {
+ * whole range from `reviewDecisionUnsettledFrom` to the current head is classified: a range of
+ * handoff-only changes or of the review App's own commits keeps it (`keep`), anything else drops
+ * it. No-op when nothing is unsettled. */
+export function settleReviewDecision(pr: PrState, keep: boolean): void {
   if (pr.reviewDecisionUnsettledFrom === undefined) return;
-  if (!handoffOnly) {
+  if (!keep) {
     delete pr.reviewDecision;
     delete pr.changesRequest;
   }
@@ -1089,7 +1095,7 @@ function push(
       pr.fixAttempts -= 1;
       delete pr.headCounted;
     }
-    if (!classification.handoffOnly) settleReviewDecision(pr, false);
+    if (!classification.handoffOnly && !byReviewApp) settleReviewDecision(pr, false);
     else if (stringValue(payload.before) === pr.reviewDecisionUnsettledFrom) {
       settleReviewDecision(pr, true);
     }
@@ -1167,9 +1173,9 @@ function review(state: LegionState, payload: JsonRecord): Effect[] | undefined {
   // the exact commit that would merge. Changes requested is not — a reviewer
   // legitimately pins its review to the implementation commit it read rather than to a later
   // handoff commit, and any such verdict still means the PR is not reviewer-clean. Safe to
-  // record from any commit because a new head that changes anything outside `.legion/` drops the
-  // decision (`resetPrHead`, or `push` and resync once they classify that head), so a verdict
-  // never outlives the round it was given for. A review of the current head is settled; one of an
+  // record from any commit because a new head by another account than the review App that
+  // changes anything outside `.legion/` drops the decision (`resetPrHead`, or `push` and resync
+  // once they classify that head), so a verdict never outlives the round it was given for. A review of the current head is settled; one of an
   // earlier commit (late, redelivered, or pinned below a handoff) opens the range from that commit,
   // so what landed since it is classified before the decision is trusted. The account that asked
   // for changes ends its own request with a non-empty review of a later head that asks for none

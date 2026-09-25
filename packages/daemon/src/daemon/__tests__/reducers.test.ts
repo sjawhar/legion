@@ -2157,6 +2157,23 @@ describe("a review decision across a new head", () => {
       });
     });
 
+    it(`a code push by the review App keeps changes requested, since none of its commits answers a request made of the implementer (${order})`, () => {
+      const state = rootState();
+      attachChild(state);
+      addPr(state, { reviewDecision: "changes_requested" });
+
+      arrive(state, "red-tests-sha", order, {
+        pusher: "legion-reviewer[bot]",
+        changed_paths: "src/widget.test.ts",
+      });
+
+      expect(state.prs[prKey]).toMatchObject({
+        headSha: "red-tests-sha",
+        reviewDecision: "changes_requested",
+      });
+      expect(state.prs[prKey]?.reviewDecisionUnsettledFrom).toBeUndefined();
+    });
+
     it(`a handoff-only push still drops an approval, which is pinned to the head (${order})`, () => {
       const state = rootState();
       attachChild(state);

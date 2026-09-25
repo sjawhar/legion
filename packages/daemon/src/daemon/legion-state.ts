@@ -119,8 +119,9 @@ export interface PrState {
   ciReconciled: boolean;
   fixAttempts: number;
   /** `approved` is pinned to the head it was given at: every new head drops it. `changes_requested`
-   * lasts the review round: a new head that changes anything outside `.legion/` ends the round and
-   * drops it, and a handoff-only head (the reviewer's own `.legion/review.json` push) keeps it. */
+   * lasts the review round: a new head by another account than the review App that changes
+   * anything outside `.legion/` ends the round and drops it, and a handoff-only head (the
+   * reviewer's own `.legion/review.json` push) or one the review App pushed keeps it. */
   reviewDecision?: "approved" | "changes_requested";
   /** Present exactly when `changes_requested` is being kept across heads that nothing has
    * classified yet: the base of the range still to classify. `resetPrHead` sets it to the head a
@@ -129,10 +130,11 @@ export interface PrState {
    * while further unclassified heads arrive; the `review` reducer sets it to the commit a
    * `changes_requested` review named when that is not the current head (a late or redelivered
    * review, or one pinned to the implementation commit below a handoff). It is settled, and
-   * deleted, by a push webhook for the current head whose `before` is this sha (handoff-only keeps
-   * the decision), by any push for the current head that changes a path outside `.legion/` or
-   * cannot be classified (drops it), and by resync's compare of this sha against the current head
-   * (`.legion/`-only keeps it; anything else, a compare that fails included, drops it). */
+   * deleted, by a push webhook for the current head whose `before` is this sha (handoff-only or
+   * the review App's keeps the decision), by any push for the current head by another account
+   * that changes a path outside `.legion/` or cannot be classified (drops it), and by resync's
+   * compare of this sha against the current head (every commit the review App's, or `.legion/`-only,
+   * keeps it; anything else, a compare that fails included, drops it). */
   reviewDecisionUnsettledFrom?: string;
   /** Who asked for the current `changes_requested` and at which commit: present with that
    * decision when its review carried both (absent on one a v33 daemon recorded). A non-empty

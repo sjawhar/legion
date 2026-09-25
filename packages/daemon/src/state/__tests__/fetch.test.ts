@@ -1109,11 +1109,21 @@ describe("getCiStatusBatch", () => {
 });
 
 describe("getComparedPaths", () => {
-  /** A runner answering GitHub's compare with `files`, recording each command. */
-  function compareRunner(files: unknown[], commands: string[][] = []): CommandRunner {
+  /** A runner answering GitHub's compare with `files` and `commits` (`total_commits` defaulting
+   * to their count), recording each command. */
+  function compareRunner(
+    files: unknown[],
+    commands: string[][] = [],
+    commits: unknown[] = [{ author: { login: "legion-implementer[bot]" } }],
+    totalCommits = commits.length
+  ): CommandRunner {
     return async (command) => {
       commands.push(command);
-      return { stdout: JSON.stringify({ status: "ahead", files }), stderr: "", exitCode: 0 };
+      return {
+        stdout: JSON.stringify({ status: "ahead", files, commits, total_commits: totalCommits }),
+        stderr: "",
+        exitCode: 0,
+      };
     };
   }
 
@@ -1136,7 +1146,23 @@ describe("getComparedPaths", () => {
     expect(compared).toEqual({
       paths: [".legion/review.json", ".legion/notes.md", "src/notes.md"],
       truncated: false,
+      authors: ["legion-implementer[bot]"],
+      commitsTruncated: false,
     });
+  });
+
+  it("names each commit's author as GitHub attributes it, and a range holding more commits than it listed as truncated", async () => {
+    const commits = [
+      { author: { login: "legion-reviewer[bot]" } },
+      { author: null },
+      { author: { login: "legion-implementer[bot]" } },
+    ];
+    const listed = await getComparedPaths("a/b", "x", "y", compareRunner([], [], commits));
+    expect(listed.authors).toEqual(["legion-reviewer[bot]", null, "legion-implementer[bot]"]);
+    expect(listed.commitsTruncated).toBe(false);
+
+    const partial = await getComparedPaths("a/b", "x", "y", compareRunner([], [], commits, 251));
+    expect(partial.commitsTruncated).toBe(true);
   });
 
   it("reads GitHub's 300-file maximum as truncated, and 299 files as complete", async () => {
@@ -1161,6 +1187,17 @@ describe("getComparedPaths", () => {
       new GitHubAPIError("compare a/b x...y failed: gh: Not Found (HTTP 404)")
     );
     await expect(getComparedPaths("a/b", "x", "y", compareRunner([{ name: "f" }]))).rejects.toThrow(
+      "compare a/b x...y answered an unexpected shape"
+    );
+    await expect(
+      getComparedPaths("a/b", "x", "y", compareRunner([], [], [{ author: { id: 7 } }]))
+    ).rejects.toThrow("compare a/b x...y answered an unexpected shape");
+    const noCommits: CommandRunner = async () => ({
+      stdout: JSON.stringify({ files: [] }),
+      stderr: "",
+      exitCode: 0,
+    });
+    await expect(getComparedPaths("a/b", "x", "y", noCommits)).rejects.toThrow(
       "compare a/b x...y answered an unexpected shape"
     );
   });

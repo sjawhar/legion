@@ -1899,12 +1899,17 @@ describe("runResync settles a changes-requested decision no push webhook settled
       },
     });
   }
-  /** GitHub's compare, answering `paths` for any range and recording each range asked. */
-  function compareAnswering(paths: string[], asked: Array<[string, string]>) {
+  /** GitHub's compare, answering `paths` and the commits' `authors` for any range and recording
+   * each range asked. */
+  function compareAnswering(
+    paths: string[],
+    asked: Array<[string, string]>,
+    authors: Array<string | null> = ["legion-implementer[bot]"]
+  ) {
     return async (repo: string, base: string, head: string) => {
       expect(repo).toBe("sjawhar/legion");
       asked.push([base, head]);
-      return { paths, truncated: false };
+      return { paths, truncated: false, authors, commitsTruncated: false };
     };
   }
 
@@ -2017,6 +2022,66 @@ describe("runResync settles a changes-requested decision no push webhook settled
     expect(asked).toEqual([["impl-sha", "fix-sha"]]);
   });
 
+  for (const order of ["push first", "synchronize first"] as const) {
+    it(`keeps a request pinned below a code head the review App pushed mid-review, whose every commit it authored (${order})`, async () => {
+      const state = reviewedState();
+      const reviewed = state.prs[prKey];
+      if (!reviewed) throw new Error("no pull request");
+      delete reviewed.reviewDecision;
+      // The head moves to the review App's code commit while the reviewer reads head-0 ...
+      if (order === "push first") push(state, "head-0", "app-code-sha", "src/widget.test.ts");
+      synchronize(state, "app-code-sha", "2026-08-23T12:00:00.000Z");
+      if (order === "synchronize first")
+        push(state, "head-0", "app-code-sha", "src/widget.test.ts");
+      // ... and the review it submits names head-0, below the head.
+      deliver(state, {
+        kind: "review",
+        action: "submitted",
+        repo: "sjawhar/legion",
+        number: "7",
+        parent_kind: "pr",
+        author: "legion-reviewer[bot]",
+        url: "review-url",
+        state: "changes_requested",
+        body: "C1 blocks",
+        commit_id: "head-0",
+        head_sha: "app-code-sha",
+      });
+      const asked: Array<[string, string]> = [];
+
+      await runResync({
+        ...resyncDeps(state),
+        fetchCiStatusBatch: readAt("app-code-sha"),
+        compareChangedPaths: compareAnswering(["src/widget.test.ts"], asked, [
+          "legion-reviewer[bot]",
+        ]),
+      });
+
+      expect(state.prs[prKey]?.reviewDecision).toBe("changes_requested");
+      expect(state.prs[prKey]?.reviewDecisionUnsettledFrom).toBeUndefined();
+      expect(asked).toEqual([["head-0", "app-code-sha"]]);
+    });
+  }
+
+  it("drops it when the range holds another account's commit, or more commits than GitHub listed", async () => {
+    for (const compared of [
+      { authors: ["legion-reviewer[bot]", "legion-implementer[bot]"], commitsTruncated: false },
+      { authors: ["legion-reviewer[bot]", null], commitsTruncated: false },
+      { authors: ["legion-reviewer[bot]"], commitsTruncated: true },
+    ]) {
+      const state = reviewedState();
+      synchronize(state, "fix-sha", "2026-08-23T12:00:00.000Z");
+
+      await runResync({
+        ...resyncDeps(state),
+        fetchCiStatusBatch: readAt("fix-sha"),
+        compareChangedPaths: async () => ({ paths: ["src/fix.ts"], truncated: false, ...compared }),
+      });
+
+      expect(state.prs[prKey]?.reviewDecision, JSON.stringify(compared)).toBeUndefined();
+    }
+  });
+
   it("drops it when GitHub's compare cannot classify the head", async () => {
     for (const compare of [
       async () => {
@@ -2025,8 +2090,15 @@ describe("runResync settles a changes-requested decision no push webhook settled
       async () => ({
         paths: Array.from({ length: 300 }, (_, n) => `.legion/x${n}.json`),
         truncated: true,
+        authors: ["legion-implementer[bot]"],
+        commitsTruncated: false,
       }),
-      async () => ({ paths: [], truncated: false }),
+      async () => ({
+        paths: [],
+        truncated: false,
+        authors: ["legion-implementer[bot]"],
+        commitsTruncated: false,
+      }),
     ]) {
       const state = reviewedState();
       synchronize(state, "fix-sha", "2026-08-23T12:00:00.000Z");
