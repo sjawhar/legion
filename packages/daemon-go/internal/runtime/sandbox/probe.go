@@ -494,8 +494,9 @@ type probeSpec struct {
 // against p's contract as a worker runs: on the pod's baseline (--pod-safety), loading the plugin
 // from the root a pod loads it from (--plugin-root), with the providers Secret's keys exported as
 // the worker's shim exports them (--provider-env-dir) when any are configured, and resolving the
-// daemon's own role prompts' references (--role-references) when given. Its command and env are
-// escaped against the kubelet's expansion as every worker container's are (kubeletLiteral).
+// daemon's own role prompts' references (--role-references), which ProbeImage requires. Its
+// command and env are escaped against the kubelet's expansion as every worker container's are
+// (kubeletLiteral).
 func (r *Runtime) probeManifest(name string, p ImageProbe, shutdown time.Time) probeSandbox {
 	labels := map[string]string{labelProject: r.project, labelProbe: "image"}
 	providers, providersMounts := r.providers()

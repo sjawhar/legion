@@ -189,3 +189,19 @@ func TestAgentModelRefusalReadsTheProbesAnswer(t *testing.T) {
 		})
 	}
 }
+
+// A probe that could not discover the task agents registers no model check, so no answer on their
+// models can come: the refusal is the discovery's alone, and names no slow key as a cause.
+func TestAnAgentDiscoveryThatFailedIsTheWholeRefusal(t *testing.T) {
+	check := promptCheck{names: promptrefs.New()}
+	check.names[promptrefs.TaskAgents]["oracle"] = []string{"dist/skills/legion-oracle/SKILL.md"}
+
+	err := check.refusal("LEGION_PLUGIN_LOADED=yes\nLEGION_PROMPT_AGENTS_UNRESOLVABLE=Cannot find module task/discovery\n", "in a pane of the default profile")
+
+	if err == nil || !strings.Contains(err.Error(), "could not resolve task agents for the load probe (Cannot find module task/discovery)") {
+		t.Fatalf("refusal = %v, want the discovery's refusal", err)
+	}
+	if strings.Contains(err.Error(), "gave no answer") {
+		t.Errorf("refusal = %v, want no word on the models, which the probe never checked", err)
+	}
+}

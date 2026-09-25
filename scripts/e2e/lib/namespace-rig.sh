@@ -13,7 +13,8 @@
 #   project_prefix   the prefix every run project of this proof carries (e.g. s4a-): the teardown
 #                    refuses any other, so a mistyped project can never select another run's objects
 #   record           a file holding one Sandbox name per line, each deleted by name
-#   providers_secret the providers Secret the operator created for the run, deleted by name
+#   providers_secret (optional) the providers Secret the operator created for the run, deleted by
+#                    name; unset or empty when the run creates none
 #   work, evidence   the run's scratch and evidence directories
 #   torn_down, compared   empty
 # and defines begin, note, pass and fail (which exits).
@@ -21,7 +22,7 @@
 op() { kubectl --context "$operator" -n "$namespace" "$@"; }
 
 # kinds are what a run creates: the runtime's Sandboxes, their Secrets, PVCs and pods, the
-# ConfigMaps an operator's pod mounts, and the operator's providers Secret.
+# ConfigMaps an operator's pod mounts, and the operator's providers Secret when the run has one.
 kinds=sandboxes,secrets,pvc,pods,configmaps
 
 # snapshot FILE: the namespace's objects of those kinds that carry this run's project label or no
@@ -56,7 +57,7 @@ teardown() {
   # files until it goes. The Secret goes by name, so the runtime's own Secrets still go with their
   # Sandboxes first.
   op delete configmaps -l "legion.dev/project=$project" --ignore-not-found --wait=false || true
-  op delete secret "$providers_secret" --ignore-not-found --wait=false || true
+  [ -z "${providers_secret:-}" ] || op delete secret "$providers_secret" --ignore-not-found --wait=false || true
   for i in $(seq 1 150); do
     if ! left=$(op get "$kinds" -l "legion.dev/project=$project" -o name 2>"$work/teardown.err"); then
       # A transient API error is waited out; three in a row mean the context cannot answer.

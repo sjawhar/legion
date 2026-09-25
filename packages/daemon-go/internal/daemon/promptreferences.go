@@ -117,16 +117,19 @@ func (c promptCheck) refusal(output, lane string) error {
 // agentModelRefusal judges the load probe's answer on the models of agents, the task agents
 // Legion's prompts name: nil when there are none or each runs on its own model, else the refusal
 // naming each that does not, the files that dispatch it, its model, and why. An agent the probe did
-// not find is refused by name already (the task agents' kind), and has no model to judge.
+// not find is refused by name already (the task agents' kind), and has no model to judge; and a
+// probe that could not discover the task agents at all is refused by that kind too, and never asked
+// about their models, so it gives no answer here to judge.
 func agentModelRefusal(output string, agents map[string][]string, lane string) error {
 	if len(agents) == 0 {
 		return nil
 	}
+	discoveryFailed := promptrefs.TaskAgents.Variable() + "_UNRESOLVABLE="
 	var unresolved []string
 	for line := range strings.Lines(output) {
 		line = strings.TrimSpace(line)
 		switch {
-		case line == agentModelsResolved:
+		case line == agentModelsResolved, strings.HasPrefix(line, discoveryFailed):
 			return nil
 		case strings.HasPrefix(line, agentModelsUnresolvable):
 			return fmt.Errorf("Oh My Pi, %s, could not resolve task agents' models for the load probe (%s): pin a fork release whose model resolver the probe can import",

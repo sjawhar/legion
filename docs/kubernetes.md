@@ -447,15 +447,16 @@ claim's pod and the image probe's.
   `OTEL_SDK_DISABLED=true` and `PI_AUTO_QA=0` unless the pod sets them, and keeps the operator's value
   when it does. It sets `PI_CONFIG_DIR=.omp` and `OMP_SESSION_STORAGE=file`, which an operator's pod
   may not set, since they decide where Oh My Pi keeps the session a resume reads.
-- **Model roles.** Legion's shipped agents dispatch by role alias: `oracle` as `@oracle`, both review
-  agents as `@review`. The boot gate refuses, by agent, any whose role the operator's settings
-  (`modelRoles`, or `task.agentModelOverrides`) leave unconfigured, or whose model's key does not
-  work, because Oh My Pi's task tool would quietly run it on the parent session's model. The bundled
-  agents Legion's prompts also dispatch use Oh My Pi's built-in roles: `scout` is `@smol` and
-  `reviewer` is `@slow`. A built-in role left unset in every layer inherits the default role's model,
-  which the gate accepts. Settings records merge key by key across layers, though, so a role the
-  operator's overlay does not name can be named by a repository's `.omp/config.yml`. Name each role
-  those agents use (`review`, `oracle`, `smol`, `slow`) to keep the choice the operator's.
+- **Model roles.** Legion's shipped agents dispatch by role alias: `oracle` as `@oracle`, both
+  review agents as `@review`. The boot gate refuses, by agent, any whose role the operator's
+  settings (`modelRoles`, or `task.agentModelOverrides`) leave unconfigured, or whose model's key
+  does not work, because Oh My Pi's task tool would quietly run it on the parent session's model.
+  The bundled agents Legion's prompts also dispatch use Oh My Pi's built-in roles: `scout` is
+  `@smol` and `reviewer` is `@slow`. `smol` and `slow`, left unset in every layer, inherit the
+  default role's model, which the gate accepts (no other role inherits it). Settings records merge
+  key by key across layers, though, so a role the operator's overlay does not name can be named by a
+  repository's `.omp/config.yml`. Name each role those agents use (`review`, `oracle`, `smol`,
+  `slow`) to keep the choice the operator's.
 - **The repository `.env`.** Oh My Pi's runtime loads the working directory's `.env` into its
   environment at start, filling every variable the pod left unset. A repository can therefore set
   anything Oh My Pi reads from its environment: a provider's API key, `PI_SMOL_MODEL`,
@@ -473,10 +474,11 @@ claim's pod and the image probe's.
 - **A key that fails at boot refuses the boot.** The image probe runs every provider key command the
   agents' models need, at every boot. A command that fails is "no working credentials", whether the
   cause is a revoked token or a network blip: the gate cannot tell the two apart, and passing on a
-  failed key is the fallback the gate exists to stop. The in-cluster daemon's Deployment restarts
-  it, and a daemon started by hand is started again. On the devbox harness, Stage 3 at `6963c3d6`
-  ran the gateway's key command 29 times: it minted one key, served the rest from its cache, and
-  failed none (`scripts/e2e/lib/install-model-gateway.sh`'s key log).
+  failed key is the fallback the gate exists to stop. Nothing restarts the Go daemon on its own: it
+  runs off the cluster, and whoever started it starts it again (the in-cluster Deployment runs the
+  TypeScript daemon). On the devbox harness, Stage 3 at `6963c3d6` ran the gateway's key command 29
+  times: it minted one key, served the rest from its cache, and failed none
+  (`scripts/e2e/lib/install-model-gateway.sh`'s key log).
 
 ### Cutting over an instance from tmux to pods
 
