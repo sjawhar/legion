@@ -68,23 +68,21 @@ jobs:
 
 
 
-      - name: Install daemon live-test tools
+      - uses: ./.github/actions/install-jj
+
+      # The workspace suite also drives stock jj 0.44 as a second binary (STOCK_JJ in
+      # packages/workspace/src/workspace.test.ts, through `mise x`), installed here beside the
+      # worker image's jj on PATH so no test downloads it.
+      - name: Install the workspace suite's stock jj
         env:
-          MISE_VERSION: v2026.8.12
           MISE_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          curl https://mise.run | sh
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          echo "$HOME/.local/share/mise/shims" >> "$GITHUB_PATH"
-          "$HOME/.local/bin/mise" use -g github:jj-vcs/jj@0.44.0
+        run: mise install github:jj-vcs/jj@0.44.0
 
       - name: Verify daemon live-test tools
         run: |
           command -v git
           command -v gh
           command -v tmux
-          mise env --json
-          jj --version
 
       - name: Install dependencies
         run: bun install --frozen-lockfile

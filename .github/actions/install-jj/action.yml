@@ -1,0 +1,30 @@
+name: Install jj
+description: >-
+  Installs the jj the worker image ships, the fork pinned by `ARG JJ_TOOL` in
+  packages/daemon/docker/worker.Dockerfile, with the mise that file pins, as the image does: the
+  binary itself at ~/.local/bin/jj, never a mise shim. Provisioning's tests give jj a fresh
+  XDG_CONFIG_HOME, as a pod's init container has, and a shim looks its version up in the mise
+  configuration under it ("No version is set for shim: jj"). mise stays at ~/.local/bin/mise, on
+  PATH for later steps. Needs the repository checked out.
+runs:
+  using: composite
+  steps:
+    - name: Install the worker image's jj
+      shell: bash
+      env:
+        MISE_GITHUB_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        dockerfile=packages/daemon/docker/worker.Dockerfile
+        jj_tool=$(sed -n 's/^ARG JJ_TOOL=//p' "$dockerfile")
+        MISE_VERSION=$(sed -n 's/^ARG MISE_VERSION=//p' "$dockerfile")
+        if [ -z "$jj_tool" ] || [ -z "$MISE_VERSION" ]; then
+          echo "$dockerfile names no ARG JJ_TOOL or ARG MISE_VERSION" >&2
+          exit 1
+        fi
+        export MISE_VERSION
+        curl -fsSL https://mise.run | sh
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        install -m 0755 "$("$HOME/.local/bin/mise" x "$jj_tool" -- sh -c 'command -v jj')" "$HOME/.local/bin/jj"
+        echo "$jj_tool: $HOME/.local/bin/jj"
+        "$HOME/.local/bin/jj" --version

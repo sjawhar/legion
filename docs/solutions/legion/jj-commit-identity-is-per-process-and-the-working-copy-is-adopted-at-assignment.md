@@ -33,7 +33,7 @@ and the last worker to boot — in any tree — became the committer of every co
 commits (LEGION-30's implementer commit `95f0f339` carried committer `legion-reviewer[bot]`; a
 LEGION-20 reviewer flipped the config under a committing LEGION-20 implementer). The fix
 (sjawhar/legion#1025) rests on five jj facts, all verified on the box's fork `jj 0.45.1-sami` and
-on stock `jj 0.44.0` (what CI runs). Each fact rules out a design that looks right on paper.
+on stock `jj 0.44.0` (what CI ran then). Each fact rules out a design that looks right on paper.
 
 ## Fact 1 — repository-scoped config is one file for every workspace of the clone
 

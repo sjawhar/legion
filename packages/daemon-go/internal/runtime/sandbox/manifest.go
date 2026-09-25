@@ -5,10 +5,12 @@ import (
 	"maps"
 	"math"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -20,16 +22,20 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
-// The pod's containers.
+// The pod's containers: workspace-fetch, the one that holds the provisioning token and mounts
+// nothing a tree agent can write; workspace-init, which works on the tree volume without it; and
+// the agent's.
 const (
-	initContainer = "workspace-init"
-	mainContainer = "worker"
+	fetchContainer = "workspace-fetch"
+	initContainer  = "workspace-init"
+	mainContainer  = "worker"
 )
 
 // The pod's volumes.
 const (
 	bootVolume      = "boot"
 	provisionVolume = "provision"
+	feedVolume      = "feed"
 	stateVolume     = "state"
 	tempVolume      = "tmp"
 	configVolume    = "config"
@@ -84,7 +90,7 @@ type launch struct {
 	// prompt is the one --append-system-prompt value.
 	prompt string
 	// resumeFile is the recorded session in the main container's path, and initResumeFile the same
-	// file in the init container's; both "" for a Spawn.
+	// file in the workspace-init container's; both "" for a Spawn.
 	resumeFile, initResumeFile string
 }
 
@@ -179,9 +185,9 @@ func systemPrompt(parts runtime.PromptParts) (string, error) {
 	return strings.Join(fragments, "\n\n"), nil
 }
 
-// initSessionPath is where the init container sees a main-container session file: the volume's
-// sessions directory is mounted at Oh My Pi's sessions directory in the main container and sits
-// under TreeRoot in the init container. A session anywhere else is not on the volume, so no pod
+// initSessionPath is where the workspace-init container sees a main-container session file: the
+// volume's sessions directory is mounted at Oh My Pi's sessions directory in the main container and
+// sits under TreeRoot in the workspace-init container. A session anywhere else is not on the volume, so no pod
 // can resume it (k8s-manifests.ts:168-181).
 func initSessionPath(file string) (string, error) {
 	rest, ok := strings.CutPrefix(file, ompSessionsDir+"/")
@@ -216,12 +222,14 @@ func (r *Runtime) labels(spec runtime.SpawnSpec) map[string]string {
 }
 
 // sandboxManifest is the Sandbox a relaunch creates when none exists: Suspended, so no pod starts
-// before the claim's Secret is written, with the root's tree volume template on the root.
-func (r *Runtime) sandboxManifest(l launch, affinity bool) sandbox {
+// before the claim's Secret is written, with the root's tree volume template on the root. Its pod
+// template never runs: the relaunch's Running patch replaces it with the template the launch
+// computes, affinity and all, before the controller creates a pod.
+func (r *Runtime) sandboxManifest(l launch) sandbox {
 	s := sandbox{
 		TypeMeta:   metav1.TypeMeta{APIVersion: sandboxGVR.GroupVersion().String(), Kind: "Sandbox"},
 		ObjectMeta: metav1.ObjectMeta{Name: l.name, Namespace: r.namespace, Labels: r.labels(l.spec)},
-		Spec:       sandboxSpec{PodTemplate: r.podTemplate(l, affinity), OperatingMode: modeSuspended},
+		Spec:       sandboxSpec{PodTemplate: r.podTemplate(l, false), OperatingMode: modeSuspended},
 	}
 	if l.isRoot {
 		storageClass := r.storageClass
@@ -244,21 +252,20 @@ func (r *Runtime) sandboxManifest(l launch, affinity bool) sandbox {
 // same claim from its template, so root and workers read alike. The pod runs as the gateway's
 // ServiceAccount, and its worker container alone mounts the gateway token (C6).
 //
-// affinity is whether another pod of the tree is scheduled right now. The tree volume is a
-// single-node EBS volume every tree pod mounts, so a pod placed on another node would fail to
-// attach it; with no other pod scheduled, any node will do. The controller applies a template only
-// to the next pod it creates, so the template is rebuilt for every relaunch.
+// Two init containers provision the issue's workspace, so the provisioning token never shares a
+// process with anything a tree agent can write (Stage 4b Task 4b.6b): workspace-fetch mounts the
+// provisioning Secret, its own TMPDIR, and the feed, and clones the repository from GitHub into
+// the feed; workspace-init mounts the tree volume, the feed read-only, and the config home, and
+// does all the tree volume's work from the feed, with no credential.
 //
-// Every tree pod also refuses a node that holds a pod of another tree (Stage 4b decision 2): the
-// pool's floor sizes a node for one tree, and pods carry no requests, since under required
-// colocation the first pod placed decides the node and a request on a later one would strand it.
-// The selector is the tree label present and not this tree's, so a pod with no tree label, the
-// image probe's, never counts.
-func (r *Runtime) podTemplate(l launch, affinity bool) podTemplate {
+// colocate is whether another pod of the tree is scheduled right now, which decides the pod's
+// affinity. The controller applies a template only to the next pod it creates, so the template is
+// rebuilt for every relaunch.
+func (r *Runtime) podTemplate(l launch, colocate bool) podTemplate {
 	resources := r.resources[l.spec.Role]
 	legion := r.tools.Legion
 	helper := "!" + legion + " credential"
-	gateway, gatewayMount := gatewayTokenVolume(r.gateway)
+	_, gatewayMount := gatewayTokenVolume(r.gateway)
 	spec := corev1.PodSpec{
 		RestartPolicy:                 corev1.RestartPolicyNever,
 		TerminationGracePeriodSeconds: new(int64(math.Ceil(r.terminationGrace.Seconds()))),
@@ -271,21 +278,34 @@ func (r *Runtime) podTemplate(l launch, affinity bool) podTemplate {
 		RuntimeClassName:  new(gvisor),
 		NodeSelector:      r.nodeSelector(),
 		Tolerations:       r.tolerations(),
+		Affinity:          r.affinity(l.spec.Tree, colocate),
 		PriorityClassName: r.scheduling.PriorityClass,
-		Volumes:           append(r.volumes(l), gateway),
+		Volumes:           r.volumes(l),
 		InitContainers: []corev1.Container{{
+			Name:       fetchContainer,
+			Image:      r.image,
+			Command:    []string{legion, "workspace-init", "fetch", "--repo", l.spec.Repository, "--feed", FeedDir},
+			Env:        fetchEnvironment(),
+			WorkingDir: FeedDir,
+			VolumeMounts: []corev1.VolumeMount{
+				{Name: provisionVolume, MountPath: ProvisionDir, ReadOnly: true},
+				{Name: tempVolume, MountPath: initTempDir},
+				{Name: feedVolume, MountPath: FeedDir},
+			},
+			Resources:       resources,
+			SecurityContext: restrictedContainer(),
+		}, {
 			Name:  initContainer,
 			Image: r.image,
 			Command: []string{
-				legion, "workspace-init", "--issue", l.spec.Issue, "--repo", l.spec.Repository, "--root", TreeRoot,
-				"--credential-helper", helper,
+				legion, "workspace-init", "provision", "--issue", l.spec.Issue, "--repo", l.spec.Repository, "--root", TreeRoot,
+				"--credential-helper", helper, "--feed", FeedDir,
 			},
 			Env:        r.initEnvironment(l),
 			WorkingDir: TreeRoot,
 			VolumeMounts: []corev1.VolumeMount{
 				{Name: treeVolume, MountPath: TreeRoot},
-				{Name: provisionVolume, MountPath: ProvisionDir, ReadOnly: true},
-				{Name: tempVolume, MountPath: initTempDir},
+				{Name: feedVolume, MountPath: FeedDir, ReadOnly: true},
 				{Name: configVolume, MountPath: xdgConfigHome},
 			},
 			Resources:       resources,
@@ -310,24 +330,6 @@ func (r *Runtime) podTemplate(l launch, affinity bool) podTemplate {
 			Resources:       resources,
 			SecurityContext: restrictedContainer(),
 		}},
-	}
-	tree := labelValue(l.spec.Tree)
-	spec.Affinity = &corev1.Affinity{PodAntiAffinity: &corev1.PodAntiAffinity{
-		RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
-			LabelSelector: &metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{
-				{Key: labelTree, Operator: metav1.LabelSelectorOpExists},
-				{Key: labelTree, Operator: metav1.LabelSelectorOpNotIn, Values: []string{tree}},
-			}},
-			TopologyKey: corev1.LabelHostname,
-		}},
-	}}
-	if affinity {
-		spec.Affinity.PodAffinity = &corev1.PodAffinity{
-			RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
-				LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{labelProject: r.project, labelTree: tree}},
-				TopologyKey:   corev1.LabelHostname,
-			}},
-		}
 	}
 	for i := range spec.InitContainers {
 		kubeletLiteral(&spec.InitContainers[i])
@@ -357,12 +359,15 @@ func kubeletLiteral(c *corev1.Container) {
 	}
 }
 
-// volumes are the tree volume, the claim's Secret projected twice (its boot half for the main
-// container, its provisioning token for the init container alone), and three in-memory
-// directories: the main container's state directory, the init container's TMPDIR, and the XDG
-// config home both containers share.
+// volumes are every volume of the pod: the tree volume, the claim's Secret projected twice (its
+// boot half for the main container, its provisioning token for the workspace-fetch container
+// alone), the feed workspace-fetch fills and workspace-init reads, on the node's disk because it
+// holds a clone of the repository, three in-memory directories — the main container's state
+// directory, workspace-fetch's TMPDIR, and the XDG config home workspace-init and the main
+// container share — and the model gateway's token.
 func (r *Runtime) volumes(l launch) []corev1.Volume {
 	var boot []corev1.KeyToPath
+	gateway, _ := gatewayTokenVolume(r.gateway)
 	for _, name := range sortedKeys(l.secrets) {
 		boot = append(boot, corev1.KeyToPath{Key: name, Path: name})
 	}
@@ -378,17 +383,34 @@ func (r *Runtime) volumes(l launch) []corev1.Volume {
 			SecretName: secretName(l.name), Items: []corev1.KeyToPath{{Key: provisionTokenKey, Path: provisionTokenKey}},
 			DefaultMode: new(int32(0o440)),
 		}}},
+		{Name: feedVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 		{Name: stateVolume, VolumeSource: memory},
 		{Name: tempVolume, VolumeSource: memory},
 		{Name: configVolume, VolumeSource: memory},
+		gateway,
 	}
 }
 
-// The XDG base directories, at the standard offsets from the image's HOME, the same in both
-// containers. The config home is the pod's shared in-memory volume: jj keeps a repository's
-// `--repo` configuration under $XDG_CONFIG_HOME/jj/repos/, so what workspace-init sets there
-// (git.abandon-unreachable-commits false, no repository identity) is what the agent's jj reads.
-// It starts empty in every pod, so nothing an agent wrote reaches the init container's jj.
+// gatewayTokenVolume is the one projected volume a pod reaches the model gateway with, and its
+// read-only mount: a single serviceAccountToken source for g's audience, living g.TokenExpiry,
+// projected at modelroute.TokenFile, the file the image's Oh My Pi profile reads its gateway key
+// from. Every pod that calls the gateway, a worker's and the image probe's, mounts exactly this.
+func gatewayTokenVolume(g Gateway) (corev1.Volume, corev1.VolumeMount) {
+	expiry := int64(g.TokenExpiry / time.Second)
+	volume := corev1.Volume{Name: gatewayVolume, VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{
+		Sources: []corev1.VolumeProjection{{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
+			Audience: g.Audience, ExpirationSeconds: &expiry, Path: path.Base(modelroute.TokenFile),
+		}}},
+	}}}
+	return volume, corev1.VolumeMount{Name: gatewayVolume, MountPath: path.Dir(modelroute.TokenFile), ReadOnly: true}
+}
+
+// The XDG base directories, at the standard offsets from the image's HOME, the same in the
+// workspace-init and main containers. The config home is the pod's shared in-memory volume: jj
+// keeps a repository's `--repo` configuration under $XDG_CONFIG_HOME/jj/repos/, so what
+// workspace-init sets there (git.abandon-unreachable-commits false, no repository identity) is
+// what the agent's jj reads. It starts empty in every pod, so nothing an agent wrote reaches
+// workspace-init's jj.
 const (
 	xdgConfigHome = podHome + "/.config"
 	xdgCacheHome  = podHome + "/.cache"
@@ -405,17 +427,26 @@ func xdgEnvironment() []corev1.EnvVar {
 	}
 }
 
-// initEnvironment is workspace-init's contract (research runtime §2.3). Its PATH is the image's
-// alone, naming no directory on the tree volume, so the git and jj it resolves from PATH are
-// never ones an agent put there; it carries no tool-path variables. A resume names the recorded
-// session the command must find on the volume, and a relaunch after the volume was lost names the
-// ref the recreated workspace is recovered from; both are workspace-init's alone, never the
-// agent's.
-func (r *Runtime) initEnvironment(l launch) []corev1.EnvVar {
-	env := []corev1.EnvVar{
+// fetchEnvironment is `workspace-init fetch`'s: the image's PATH alone, its own TMPDIR, and the
+// mounted provisioning token. Its git reads no configuration but its own, so it is told no config
+// home.
+func fetchEnvironment() []corev1.EnvVar {
+	return []corev1.EnvVar{
 		{Name: "PATH", Value: imagePath},
 		{Name: "TMPDIR", Value: initTempDir},
 		{Name: "LEGION_PROVISION_TOKEN_FILE", Value: ProvisionDir + "/" + provisionTokenKey},
+	}
+}
+
+// initEnvironment is `workspace-init provision`'s contract (research runtime §2.3). Its PATH is
+// the image's alone, naming no directory on the tree volume, so the git and jj it resolves from
+// PATH are never ones an agent put there; it carries no tool-path variables, and it is never
+// pointed at the provisioning token. A resume names the recorded session the command must find on
+// the volume, and a relaunch after the volume was lost names the ref the recreated workspace is
+// recovered from; both are workspace-init's alone, never the agent's.
+func (r *Runtime) initEnvironment(l launch) []corev1.EnvVar {
+	env := []corev1.EnvVar{
+		{Name: "PATH", Value: imagePath},
 		{Name: "LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS", Value: strconv.FormatInt(r.initWaitSeconds(), 10)},
 	}
 	if l.initResumeFile != "" {
@@ -501,6 +532,36 @@ func (r *Runtime) tolerations() []corev1.Toleration {
 	return append([]corev1.Toleration{{
 		Key: poolKey, Operator: corev1.TolerationOpEqual, Value: poolValue, Effect: corev1.TaintEffectNoSchedule,
 	}}, r.scheduling.Tolerations...)
+}
+
+// affinity is a tree pod's placement. It refuses a node that holds a pod of another tree (Stage 4b
+// decision 2): the pool's floor sizes a node for one tree, and pods carry no requests, since under
+// required colocation the first pod placed decides the node and a request on a later one would
+// strand it. The selector is the tree label present and not this tree's, so a pod with no tree
+// label, the image probe's, never counts. With colocate — another pod of the tree scheduled right
+// now — it also requires that pod's node: the tree volume is a single-node EBS volume every tree
+// pod mounts, so a pod placed on another node would fail to attach it; with no other pod
+// scheduled, any node will do.
+func (r *Runtime) affinity(tree string, colocate bool) *corev1.Affinity {
+	tree = labelValue(tree)
+	affinity := &corev1.Affinity{PodAntiAffinity: &corev1.PodAntiAffinity{
+		RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
+			LabelSelector: &metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{
+				{Key: labelTree, Operator: metav1.LabelSelectorOpExists},
+				{Key: labelTree, Operator: metav1.LabelSelectorOpNotIn, Values: []string{tree}},
+			}},
+			TopologyKey: corev1.LabelHostname,
+		}},
+	}}
+	if colocate {
+		affinity.PodAffinity = &corev1.PodAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
+				LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{labelProject: r.project, labelTree: tree}},
+				TopologyKey:   corev1.LabelHostname,
+			}},
+		}
+	}
+	return affinity
 }
 
 // restrictedContainer is the Pod Security "restricted" container context

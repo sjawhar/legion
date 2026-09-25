@@ -13,6 +13,8 @@ on:
       - "packages/pi-envoy/**"
       - "packages/dispatch/**"
       - "packages/daemon-go/**"
+      - "packages/daemon/docker/worker.Dockerfile"
+      - ".github/actions/install-jj/**"
       - "go.work"
       - "go.work.sum"
       - "scripts/e2e/**"
@@ -29,6 +31,8 @@ on:
       - "packages/pi-envoy/**"
       - "packages/dispatch/**"
       - "packages/daemon-go/**"
+      - "packages/daemon/docker/worker.Dockerfile"
+      - ".github/actions/install-jj/**"
       - "go.work"
       - "go.work.sum"
       - "scripts/e2e/**"
@@ -83,6 +87,9 @@ jobs:
               # The Oh My Pi pin the phase-stall test runs (extensions/legion-phase-stall-omp.test.ts).
               - 'packages/daemon/src/daemon/omp-pin.ts'
               - '.github/actions/install-omp/**'
+              # The jj its tests drive is the worker image's.
+              - 'packages/daemon/docker/worker.Dockerfile'
+              - '.github/actions/install-jj/**'
             dispatch:
               - 'packages/dispatch/**'
               - 'packages/contracts/**'
@@ -95,6 +102,9 @@ jobs:
               - 'go.work'
               - 'go.work.sum'
               - 'scripts/e2e/**'
+              # The jj its tests drive is the worker image's.
+              - 'packages/daemon/docker/worker.Dockerfile'
+              - '.github/actions/install-jj/**'
               # Stage 3's live proof consumes the Go wire fixtures and the native Dispatch
               # server through the Go client. Any change on either side must run the Go lanes.
               - 'packages/contracts/fixtures/**'
@@ -183,22 +193,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/setup-bun
-      - name: Install extension test tools
-        env:
-          MISE_VERSION: v2026.8.12
-          MISE_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          curl https://mise.run | sh
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          echo "$HOME/.local/share/mise/shims" >> "$GITHUB_PATH"
-          "$HOME/.local/bin/mise" use -g github:jj-vcs/jj@0.44.0
-      - name: Verify extension test tools
-        run: |
-          mise env --json
-          jj --version
+      - uses: ./.github/actions/install-jj
       # extensions/legion-phase-stall-omp.test.ts runs the pinned Oh My Pi against stand-ins and
       # refuses on GitHub Actions without one. The pin is read from omp-pin.ts, the repository's one
-      # copy of it, installed through the mise above (.github/actions/install-omp).
+      # copy of it, installed through the mise install-jj leaves at ~/.local/bin/mise
+      # (.github/actions/install-omp).
       - uses: ./.github/actions/install-omp
       - run: bun install --frozen-lockfile
       - name: Build contracts for pi-envoy
@@ -438,21 +437,10 @@ jobs:
       # and the daemon supervises under tmux and refuses to start without it.
       - name: Install tmux
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends tmux
-      # The workspace tests drive a real jj, and the daemon resolves jj at boot and refuses to
-      # start without it. The same pinned jj the pi-envoy job installs, but the binary itself on
-      # PATH, as the worker image installs it, never a mise shim: the provisioning tests give jj a
-      # fresh XDG_CONFIG_HOME, as a pod's init container has, and a shim looks its version up in
-      # the mise configuration under it ("No version is set for shim: jj").
-      - name: Install jj
-        env:
-          MISE_VERSION: v2026.8.12
-          MISE_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          curl https://mise.run | sh
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          install -m 0755 "$("$HOME/.local/bin/mise" x github:jj-vcs/jj@0.44.0 -- sh -c 'command -v jj')" "$HOME/.local/bin/jj"
-      - name: Verify jj
-        run: command -v jj && jj --version
+      # The workspace and boundary tests drive a real jj, the one the worker image ships (its
+      # working-copy filters are among what they plant), and the daemon resolves jj at boot and
+      # refuses to start without it.
+      - uses: ./.github/actions/install-jj
       # internal/modelroute's route test runs the Oh My Pi the worker image ships against a stand-in
       # for the model gateway, and refuses on GitHub Actions without one. The pin is read from
       # omp-pin.ts, the repository's one copy of it, installed through the mise above

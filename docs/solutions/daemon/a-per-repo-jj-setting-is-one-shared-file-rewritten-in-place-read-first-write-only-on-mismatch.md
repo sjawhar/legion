@@ -27,7 +27,7 @@ LEGION-84 made provisioning set `git.abandon-unreachable-commits = false` on the
 clone so a fetch that deletes a merged branch's bookmark no longer abandons the branch's commits
 under a live issue workspace. The setting itself is one line; what is reusable is where jj keeps
 a `--repo` setting, who reads it, and why the write is guarded. Every fact below was verified on
-jj 0.44.0 (CI) and 0.45.1 (the box) with `jj config get`, `jj config path --repo`, `jj op log`,
+jj 0.44.0 (CI at the time) and 0.45.1 (the box) with `jj config get`, `jj config path --repo`, `jj op log`,
 and `jj status --ignore-working-copy` before and after each command.
 
 ## Where `jj config set --repo` actually writes

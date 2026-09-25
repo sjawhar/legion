@@ -43,7 +43,8 @@ type Gateway struct {
 // minTokenExpiry is the shortest projected service account token the API server issues.
 const minTokenExpiry = 10 * time.Minute
 
-// ProvisionTokens mints the installation token workspace-init clones with, for a repository owner.
+// ProvisionTokens mints the installation token a pod's workspace-fetch container clones the
+// repository with, for a repository owner.
 // The daemon's is appauth; a harness's may be a token file read on every call.
 type ProvisionTokens interface {
 	Token(ctx context.Context, owner string) (string, error)
@@ -84,7 +85,7 @@ type Options struct {
 	// BootTimeout bounds each wait of a relaunch, and is how long a pod may stay unscheduled
 	// before it counts as gone (worker_boot_timeout_seconds).
 	BootTimeout time.Duration
-	// BootIntervals is the registration deadline in boot intervals; the init container's lock
+	// BootIntervals is the registration deadline in boot intervals; workspace-init's lock
 	// wait is sized from it (worker_boot_registration_deadline_intervals).
 	BootIntervals int
 	// TerminationGrace is the pods' terminationGracePeriodSeconds, and how long Suspend and Release

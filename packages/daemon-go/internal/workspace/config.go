@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -49,12 +50,15 @@ type Request struct {
 	StateDir         string
 	Repo             string
 	Issue            string
-	Token            string
 	CredentialHelper string
+	// Feed is a pod's feed directory, where Fetch cloned the repository in the pod's first init
+	// container: the shared clone clones and fetches from it with no credential, and Token and
+	// CredentialDir stay empty. With no Feed — the tmux runtime — the shared clone clones and
+	// fetches from GitHub itself with Token.
+	Feed  string
+	Token string
 	// CredentialDir is where the one-shot clone and fetch credential, token file included, is
-	// created and removed again; required. The tmux daemon names its state directory; a pod's init
-	// container names its own filesystem, because its StateDir is the tree volume every container of
-	// the tree mounts.
+	// created and removed again; required with Token. The tmux daemon names its state directory.
 	CredentialDir string
 }
 
@@ -68,21 +72,26 @@ type Workspace struct {
 	Clone    string
 }
 
-// Every agent of a tree writes the shared clone, and in a pod every provisioning process can read
-// the mounted provisioning Secret (the credentialed clone and fetch also name the one-shot token
-// file), so what the runner adds below keeps provisioning from running anything a tree agent
-// configured there. On the tmux runtime panes share the daemon's uid and can read the daemon's
-// files anyway, so there it is defence, not a boundary.
+// In a pod, the one process that holds the provisioning token, Fetch, runs in a container that
+// mounts nothing a tree agent can write, and every process that touches the tree volume runs in a
+// container the provisioning Secret is not mounted in: that boundary, not what the runner adds
+// below, is what keeps the token from a tree agent. On the tmux runtime the credentialed clone and
+// fetch run in the shared clone, and panes share the daemon's uid and can read the daemon's files
+// anyway, so there what the runner adds is defence, not a boundary: it keeps provisioning from
+// running anything a tree agent configured in the shared clone.
 
 // pinnedGitConfig is git configuration every process provisioning starts reads last, after the
 // shared clone's and after the command's own: no hook runs, wherever the clone's hooks directory
-// or its core.hooksPath points.
+// or its core.hooksPath points. git would read GIT_CONFIG_PARAMETERS (its `-c`) after the pins, so
+// no process provisioning starts inherits it.
 var pinnedGitConfig = [][2]string{{"core.hooksPath", "/dev/null"}}
 
-// pinnedEnvironment is set on every process provisioning starts, after the command's own
-// environment. git reaches a remote over https alone, so a url.<base>.insteadOf the tree wrote
-// cannot turn a clone or fetch into an ext:: command, an ssh command, or a local path.
-var pinnedEnvironment = []string{"GIT_ALLOW_PROTOCOL=https"}
+// transportEnvironment is set on every process provisioning starts before the command's own
+// environment: git reaches a remote over https alone, so a url.<base>.insteadOf the tree wrote
+// cannot turn a clone or fetch into an ext:: command, an ssh command, or a local path. A command
+// that reaches a local repository on purpose — the shared clone's, from a pod's feed — names the
+// file transport alone instead.
+var transportEnvironment = []string{"GIT_ALLOW_PROTOCOL=https"}
 
 type execRunner struct {
 	timeout time.Duration
@@ -124,11 +133,11 @@ func (r execRunner) Run(ctx context.Context, command Command) (Result, error) {
 	}
 	child := exec.CommandContext(bounded, executable, args...)
 	child.Dir = command.Dir
-	env, err := pinGitConfig(merge(os.Environ(), command.Env))
+	env, err := pinGitConfig(without(merge(merge(os.Environ(), transportEnvironment), command.Env), "GIT_CONFIG_PARAMETERS"))
 	if err != nil {
 		return Result{}, err
 	}
-	child.Env = merge(env, pinnedEnvironment)
+	child.Env = env
 	var stdout, stderr bytes.Buffer
 	child.Stdout = &stdout
 	child.Stderr = &stderr
@@ -163,6 +172,11 @@ func merge(base, overrides []string) []string {
 		environment = append(environment, entry)
 	}
 	return environment
+}
+
+// without is environment with no entry named key.
+func without(environment []string, key string) []string {
+	return slices.DeleteFunc(environment, func(entry string) bool { return environmentKey(entry) == key })
 }
 
 // pinGitConfig appends pinnedGitConfig after the GIT_CONFIG_COUNT/GIT_CONFIG_KEY_n/
@@ -231,7 +245,7 @@ func commandFailure(argv []string, result Result) error {
 	return fmt.Errorf("command failed (exit %d): %s\n%s", result.ExitCode, command, strings.TrimSpace(result.Stderr))
 }
 
-func ensureFetchConfiguration(ctx context.Context, run Runner, cloneDir string, credentialEnv []string) error {
+func ensureFetchConfiguration(ctx context.Context, run Runner, cloneDir string, source remote) error {
 	setting, err := RunChecked(ctx, run, []string{
 		"jj", "config", "get", "git.abandon-unreachable-commits", "-R", cloneDir,
 	}, nil, "")
@@ -245,10 +259,14 @@ func ensureFetchConfiguration(ctx context.Context, run Runner, cloneDir string, 
 			return err
 		}
 	}
-	// The credentialed fetch takes no snapshot of the clone's working copy: a snapshot runs the
-	// working-copy filter, fsmonitor, and signing programs jj's configuration names, which a tree
-	// agent can set (see execRunner.Run).
-	_, err = RunChecked(ctx, run, []string{"jj", "git", "fetch", "--ignore-working-copy", "-R", cloneDir}, credentialEnv, "")
+	// The fetch takes no snapshot of the clone's working copy: a snapshot runs the working-copy
+	// filter, fsmonitor, and signing programs jj's configuration names, which a tree agent can set,
+	// and on the tmux runtime this fetch holds the one-shot credential.
+	fetch := []string{"jj", "git", "fetch", "--ignore-working-copy"}
+	for _, branch := range source.branches {
+		fetch = append(fetch, "--branch", "exact:"+branch)
+	}
+	_, err = RunChecked(ctx, run, append(fetch, "-R", cloneDir), source.env, "")
 	return err
 }
 

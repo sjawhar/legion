@@ -530,6 +530,41 @@ of every tool the agent runs; refusing to start at all, naming the key and its f
 already a variable of the shim's own environment (see the providers Secret, below) — and never into
 its own (`/proc/1/environ` inside the pod carries no key; the OMP child's does, by design).
 
+### Trust model: the provisioning token
+
+The provisioning token, the implement App's installation token, is a credential for the whole
+repository, and every agent of a tree can write the tree volume: the shared clone's hooks, its git
+and jj configuration (a legacy `.jj/workspace-config.toml` included), its remote URL, its
+`http.proxy`. git and jj obey all of it — they run hooks, the git jj is told to run, working-copy
+filters and `ext::` transports, and send credentials through the proxy the configuration names —
+so no process that can read the token may touch the tree volume. The Go coordinator's pods
+(`packages/daemon-go`) keep to that with two init containers:
+
+- **`workspace-fetch`** mounts the provisioning Secret, an in-memory `TMPDIR` of its own, and the
+  pod's `feed` `emptyDir`, and runs `legion workspace-init fetch --repo <owner>/<repo> --feed
+  /var/run/legion/feed`: one `git clone --bare` of `https://github.com/<owner>/<repo>` into the feed,
+  reading no git configuration but its own (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`,
+  `GIT_CONFIG_PARAMETERS` unset), with a one-shot credential git asks for `https://github.com` alone.
+  It mounts neither the tree volume nor the config home.
+- **`workspace-init`** mounts the tree volume, the feed read-only, and the config home — never the
+  Secret — and runs `legion workspace-init provision`: the shared clone's clone and fetch reach
+  `https://github.com/<owner>/<repo>`, the remote its origin names, at the feed over git's file
+  transport, then the workspace add, `update-stale`, and the configuration writes. What a tree agent
+  planted can run there, with nothing to take that the agent does not already hold.
+
+`packages/daemon-go/internal/runtime/sandbox/boundary_test.go` runs both containers exactly as the
+manifest states them against nine such plants, with every one of provisioning's git and jj pins made
+ineffective. The TypeScript daemon's pods, which this section describes, still provision in one init
+container with the Secret mounted for its whole life (LEGION-223).
+
+On the **tmux** runtime there is no such boundary: panes run under the daemon's uid and can read its
+0600 credential files, and the daemon's credentialed clone and fetch run in the shared clone itself.
+Provisioning's pins there — no git hook (`core.hooksPath=/dev/null`), the git the daemon resolved at
+boot as jj's `git.executable-path`, `GIT_ALLOW_PROTOCOL=https`, no working-copy snapshot in the
+credentialed fetch, the one-shot credential scoped to `https://github.com` with no askpass, and
+`GIT_CONFIG_PARAMETERS` unset — are defence, not a boundary: a tree-written `http.proxy` with
+`http.sslVerify=false` still sees the token on its way to github.com.
+
 ### The providers Secret
 
 `legion-<project>-providers` (where `<project>` is `legion.yaml`'s `project` lowercased with
