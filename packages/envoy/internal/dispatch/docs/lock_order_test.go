@@ -105,7 +105,7 @@ func TestConditionalEditDoesNotInvertTheRoomLockOrder(t *testing.T) {
 
 	snapshotDone := make(chan error, 1)
 	go func() {
-		_, err := service.SnapshotVersion(joinedOne, txOne, id, alice)
+		_, err := service.SnapshotVersion(joinedOne, id, alice)
 		snapshotDone <- err
 	}()
 

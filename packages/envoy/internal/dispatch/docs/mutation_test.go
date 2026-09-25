@@ -18,6 +18,19 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
+// A snapshot or a seed outside Join would write a version or an update that no ledger records,
+// whose authors would never be credited or released, so both refuse to run.
+func TestTransactionalDocumentOperationsRefuseAnUnjoinedContext(t *testing.T) {
+	service, artifactID := newTestService(t)
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	if _, err := service.SnapshotVersion(context.Background(), artifactID, alice); !errors.Is(err, errUnjoined) {
+		t.Fatalf("unjoined snapshot error = %v, want errUnjoined", err)
+	}
+	if _, err := service.SeedText(context.Background(), artifactID, "seeded", alice); !errors.Is(err, errUnjoined) {
+		t.Fatalf("unjoined seed error = %v, want errUnjoined", err)
+	}
+}
+
 func TestSeedTextStoresTreeAndReturnsCanonicalMarkdown(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "")
@@ -27,11 +40,13 @@ func TestSeedTextStoresTreeAndReturnsCanonicalMarkdown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	canonical, err := service.SeedText(context.Background(), tx, artifactID, "## Database\nUse SQLite", model.Actor{Kind: "user", ID: "seed"})
+	seedCtx, ledger := service.Join(context.Background(), tx)
+	defer ledger.Discard()
+	canonical, err := service.SeedText(seedCtx, artifactID, "## Database\nUse SQLite", model.Actor{Kind: "user", ID: "seed"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := tx.Commit(context.Background()); err != nil {
+	if err := ledger.Commit(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if canonical != "## Database\n\nUse SQLite\n" {
@@ -67,12 +82,14 @@ func TestSeedTextRollsBackWithCreatingTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin seed transaction: %v", err)
 	}
-	if _, err := service.SeedText(context.Background(), tx, artifactID, "# Rolled back", model.Actor{Kind: "user", ID: "seed"}); err != nil {
+	seedCtx, ledger := service.Join(context.Background(), tx)
+	if _, err := service.SeedText(seedCtx, artifactID, "# Rolled back", model.Actor{Kind: "user", ID: "seed"}); err != nil {
 		t.Fatalf("seed text: %v", err)
 	}
 	if err := tx.Rollback(context.Background()); err != nil {
 		t.Fatalf("rollback seed transaction: %v", err)
 	}
+	ledger.Discard()
 
 	var updates int
 	if err := database.Pool.QueryRow(context.Background(), `select count(*) from doc_updates where artifact_id = $1`, artifactID).Scan(&updates); err != nil {
@@ -283,7 +300,9 @@ func TestSnapshotVersionDoesNotAttributeUnchangedDocument(t *testing.T) {
 		t.Fatalf("begin snapshot transaction: %v", err)
 	}
 	defer tx.Rollback(context.Background())
-	versionResult, err := service.SnapshotVersion(context.Background(), tx, artifactID, snapshotter)
+	snapshotCtx, ledger := service.Join(context.Background(), tx)
+	defer ledger.Discard()
+	versionResult, err := service.SnapshotVersion(snapshotCtx, artifactID, snapshotter)
 	version, wrote := versionResult.Version, versionResult.Wrote
 	if err != nil {
 		t.Fatalf("snapshot unchanged document: %v", err)
@@ -291,7 +310,7 @@ func TestSnapshotVersionDoesNotAttributeUnchangedDocument(t *testing.T) {
 	if wrote || version.Number != 1 {
 		t.Fatalf("unchanged snapshot = %#v wrote=%t, want version 1 without a write", version, wrote)
 	}
-	if err := tx.Commit(context.Background()); err != nil {
+	if err := ledger.Commit(context.Background()); err != nil {
 		t.Fatalf("commit snapshot transaction: %v", err)
 	}
 
@@ -317,18 +336,18 @@ func TestCommittedSnapshotAndNamedVersionsClearPendingAuthors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin snapshot transaction: %v", err)
 	}
-	versionResult, err := service.SnapshotVersion(context.Background(), tx, artifactID, snapshotter)
-	version, wrote := versionResult.Version, versionResult.Wrote
+	snapshotCtx, ledger := service.Join(context.Background(), tx)
+	defer ledger.Discard()
+	versionResult, err := service.SnapshotVersion(snapshotCtx, artifactID, snapshotter)
 	if err != nil {
 		t.Fatalf("snapshot version: %v", err)
 	}
-	if !wrote {
+	if !versionResult.Wrote {
 		t.Fatal("snapshot did not write dirty document")
 	}
-	if err := tx.Commit(context.Background()); err != nil {
+	if err := ledger.Commit(context.Background()); err != nil {
 		t.Fatalf("commit snapshot transaction: %v", err)
 	}
-	service.commitVersion(artifactID, version)
 	state := service.room(artifactID)
 	state.mu.Lock()
 	pending := len(state.pending)
@@ -341,15 +360,14 @@ func TestCommittedSnapshotAndNamedVersionsClearPendingAuthors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin named version transaction: %v", err)
 	}
-	namedResult, err := service.NamedVersion(joined(service, tx), artifactID, "checkpoint", snapshotter)
-	version = namedResult.Version
-	if err != nil {
+	namedCtx, namedLedger := service.Join(context.Background(), tx)
+	defer namedLedger.Discard()
+	if _, err := service.NamedVersion(namedCtx, artifactID, "checkpoint", snapshotter); err != nil {
 		t.Fatalf("named version: %v", err)
 	}
-	if err := tx.Commit(context.Background()); err != nil {
+	if err := namedLedger.Commit(context.Background()); err != nil {
 		t.Fatalf("commit named version transaction: %v", err)
 	}
-	service.commitVersion(artifactID, version)
 	state.mu.Lock()
 	pending = len(state.pending)
 	state.mu.Unlock()
@@ -371,7 +389,9 @@ func TestVersionCaptureDoesNotClearAuthorsFromLaterEdits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin snapshot transaction: %v", err)
 	}
-	versionResult, err := service.SnapshotVersion(context.Background(), tx, artifactID, first)
+	snapshotCtx, ledger := service.Join(context.Background(), tx)
+	defer ledger.Discard()
+	versionResult, err := service.SnapshotVersion(snapshotCtx, artifactID, first)
 	version, wrote := versionResult.Version, versionResult.Wrote
 	if err != nil || !wrote {
 		t.Fatalf("snapshot dirty document = %#v, wrote=%t, err=%v", version, wrote, err)
@@ -379,10 +399,9 @@ func TestVersionCaptureDoesNotClearAuthorsFromLaterEdits(t *testing.T) {
 	if _, err := service.ReplaceText(context.Background(), artifactID, "second", second); err != nil {
 		t.Fatalf("later edit: %v", err)
 	}
-	if err := tx.Commit(context.Background()); err != nil {
+	if err := ledger.Commit(context.Background()); err != nil {
 		t.Fatalf("commit snapshot transaction: %v", err)
 	}
-	service.commitVersion(artifactID, version)
 	state := service.room(artifactID)
 	state.mu.Lock()
 	_, retained := state.pending[actorKey(second)]
@@ -395,18 +414,17 @@ func TestVersionCaptureDoesNotClearAuthorsFromLaterEdits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin named transaction: %v", err)
 	}
-	namedResult, err := service.NamedVersion(joined(service, tx), artifactID, "checkpoint", first)
-	version = namedResult.Version
-	if err != nil {
+	namedCtx, namedLedger := service.Join(context.Background(), tx)
+	defer namedLedger.Discard()
+	if _, err := service.NamedVersion(namedCtx, artifactID, "checkpoint", first); err != nil {
 		t.Fatalf("name document version: %v", err)
 	}
 	if _, err := service.ReplaceText(context.Background(), artifactID, "third", second); err != nil {
 		t.Fatalf("later named-version edit: %v", err)
 	}
-	if err := tx.Commit(context.Background()); err != nil {
+	if err := namedLedger.Commit(context.Background()); err != nil {
 		t.Fatalf("commit named transaction: %v", err)
 	}
-	service.commitVersion(artifactID, version)
 	state.mu.Lock()
 	_, retained = state.pending[actorKey(second)]
 	state.mu.Unlock()
@@ -440,15 +458,16 @@ func TestColdSnapshotCapturesFirstEditAfterWarm(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin snapshot transaction: %v", err)
 	}
-	versionResult, err := service.SnapshotVersion(context.Background(), tx, artifactID, snapshotter)
+	snapshotCtx, ledger := service.Join(context.Background(), tx)
+	defer ledger.Discard()
+	versionResult, err := service.SnapshotVersion(snapshotCtx, artifactID, snapshotter)
 	version, wrote := versionResult.Version, versionResult.Wrote
 	if err != nil || !wrote {
 		t.Fatalf("cold snapshot = %#v, wrote=%t, err=%v; want a version after first edit", version, wrote, err)
 	}
-	if err := tx.Commit(context.Background()); err != nil {
+	if err := ledger.Commit(context.Background()); err != nil {
 		t.Fatalf("commit snapshot transaction: %v", err)
 	}
-	service.commitVersion(artifactID, version)
 	var markdown string
 	if err := service.store.Pool.QueryRow(context.Background(), `
 		select markdown from artifact_versions where artifact_id = $1 and number = $2
@@ -659,11 +678,13 @@ func TestVersionWritersReportChangedReferenceTargets(t *testing.T) {
 		t.Fatalf("begin snapshot transaction: %v", err)
 	}
 	defer tx.Rollback(context.Background())
-	snapshot, err := service.SnapshotVersion(context.Background(), tx, artifactID, actor)
+	snapshotCtx, ledger := service.Join(context.Background(), tx)
+	defer ledger.Discard()
+	snapshot, err := service.SnapshotVersion(snapshotCtx, artifactID, actor)
 	if err != nil {
 		t.Fatalf("snapshot version: %v", err)
 	}
-	if err := tx.Commit(context.Background()); err != nil {
+	if err := ledger.Commit(context.Background()); err != nil {
 		t.Fatalf("commit snapshot: %v", err)
 	}
 	want := []model.ChangedReference{{Kind: "ask", ID: askIDs[0], IssueKey: &issueKey}}

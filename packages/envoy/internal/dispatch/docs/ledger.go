@@ -2,6 +2,7 @@ package docs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -40,6 +41,10 @@ type ledgerVersion struct {
 
 type ledgerContextKey struct{}
 
+// errUnjoined refuses a transactional operation called outside Join: its writes would reach no
+// ledger, so their authors would never be credited or released.
+var errUnjoined = errors.New("docs: the operation needs a transaction joined with Service.Join")
+
 // Join joins the document operations run with the returned context to tx, recording what they
 // produce in the returned ledger.
 func (s *Service) Join(ctx context.Context, tx pgx.Tx) (context.Context, *Ledger) {
@@ -77,23 +82,19 @@ func collectEvent(ctx context.Context, event model.Event) {
 	}
 }
 
-// Events returns the events the transaction's document operations appended, for the caller to
-// publish once Commit has returned.
-func (l *Ledger) Events() []model.Event {
-	if l == nil {
-		return nil
-	}
-	return l.events
-}
-
 // Commit commits the transaction, then credits, releases and publishes what its document
-// operations recorded (see Ledger). When the commit returns an error its outcome is unknown, so
-// the rooms the transaction wrote are failed and reload the durable document.
+// operations recorded (see Ledger), and last publishes the events they appended, so a caller's
+// own events, published after Commit returns, follow them. When the commit returns an error its
+// outcome is unknown, so the rooms the transaction wrote are failed and reload the durable
+// document.
 func (l *Ledger) Commit(ctx context.Context) error {
 	if err := l.commit(ctx); err != nil {
 		return err
 	}
 	l.publish()
+	for _, event := range l.events {
+		l.service.events.Publish(event)
+	}
 	return nil
 }
 

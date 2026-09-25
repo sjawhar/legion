@@ -983,7 +983,7 @@ func (s *Service) settleRoom(room string, generation uint64) {
 			s.retrySettle(room, generation, writeErr)
 			return
 		}
-		published = append(published, ledger.Events()...)
+		published = append(published, ledger.events...)
 		// A document body cites nodes whose rows carry a backlink count, so the version event
 		// names what this settle moved exactly as a message or comment write does.
 		versionEvent := model.Event{

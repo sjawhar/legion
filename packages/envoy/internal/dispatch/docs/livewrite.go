@@ -164,10 +164,12 @@ func (s *Service) awaitLiveWriter(ctx context.Context, artifactID string) error 
 func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, error) {
 	var gained []byte
 	var room *crdt.Doc
+	var incremental bool
 	err := s.srv.Apply(ctx, write.artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
 		room = doc
+		incremental = write.fork != nil && doc == write.forkedFrom
 		var since crdt.StateVector
-		if write.fork != nil && doc == write.forkedFrom {
+		if incremental {
 			since = write.fork.StateVector()
 		}
 		gained = crdt.EncodeStateAsUpdateV1(doc, since)
@@ -175,7 +177,24 @@ func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
 		return nil, err
 	}
-	if write.fork != nil && room == write.forkedFrom {
+	fork, err := buildFork(write, incremental, gained)
+	if err != nil {
+		// A fork an update failed to reach is in an unknown state, and so is the rendering taken
+		// from it: the next operation rebuilds both.
+		write.fork, write.forkedFrom = nil, nil
+		write.dropRendering()
+		return nil, err
+	}
+	write.fork, write.forkedFrom = fork, room
+	return fork, nil
+}
+
+// buildFork brings write's kept fork up to date with gained, what its room gained since the fork
+// was last brought up to date, or, when the fork cannot be kept, builds a new one from gained,
+// the room's whole state, and the transaction's writes. Either way it drops a rendering the
+// fork has moved past.
+func buildFork(write *liveWrite, incremental bool, gained []byte) (*crdt.Doc, error) {
+	if incremental {
 		// Content the room gained moves the fork, so the rendering taken from it no longer
 		// describes the document. What says the fork moved is the fork itself, read on either
 		// side of this one apply: nothing else can be trusted. Two reads of the room are two
@@ -190,8 +209,6 @@ func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 			wasClocks, wasDeletes = write.fork.StateVector(), crdt.DeleteSetFromDoc(write.fork)
 		}
 		if err := crdt.ApplyUpdateV1(write.fork, gained, nil); err != nil {
-			write.fork = nil
-			write.dropRendering()
 			return nil, fmt.Errorf("bring live document fork up to date: %w", err)
 		}
 		if write.tree != nil && !forkHeld(wasClocks, wasDeletes, write.fork) {
@@ -208,8 +225,6 @@ func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 			return nil, fmt.Errorf("fork live document with transaction writes: %w", err)
 		}
 	}
-	write.fork = fork
-	write.forkedFrom = room
 	// A rebuilt fork is a different document from the one the rendering was taken from.
 	write.dropRendering()
 	return fork, nil
