@@ -3903,3 +3903,95 @@ func TestHealthzAnswersUnhealthyWhileTheInterestWatcherIsDead(t *testing.T) {
 		t.Fatalf("with the interest watcher dead: /healthz = %d %v, want 503 unhealthy naming the interest KV watcher", code, body)
 	}
 }
+
+// consumerCreates counts the JetStream consumer create and update requests for one durable on the
+// stream; UpdateConsumer rides the same subject as AddConsumer.
+func consumerCreates(t *testing.T, conn *natsgo.Conn, consumer string) *atomic.Int32 {
+	t.Helper()
+	var creates atomic.Int32
+	for _, subject := range []string{
+		"$JS.API.CONSUMER.CREATE." + bus.Stream + "." + consumer,
+		"$JS.API.CONSUMER.CREATE." + bus.Stream + "." + consumer + ".>",
+		"$JS.API.CONSUMER.DURABLE.CREATE." + bus.Stream + "." + consumer,
+	} {
+		sub, err := conn.Subscribe(subject, func(*natsgo.Msg) { creates.Add(1) })
+		if err != nil {
+			t.Fatalf("subscribe %s: %v", subject, err)
+		}
+		t.Cleanup(func() { _ = sub.Unsubscribe() })
+	}
+	if err := conn.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	return &creates
+}
+
+// The drift correction writes a durable only when the policy would change it: a new durable is
+// created once and a healthy one is left alone on every later start, and a durable drifted in a
+// setting NATS can update is corrected once and then left alone. A correction that updated on
+// every start would pass every other test, while every listener start rewrote its durable.
+func TestTheDriftCorrectionWritesADurableOnlyWhenThePolicyChangesIt(t *testing.T) {
+	uri := sharedListenerTestNATSURI(t)
+	client, err := bus.Connect([]string{uri}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("connect bus: %v", err)
+	}
+	t.Cleanup(client.Close)
+	observer := testnats.Connect(t, uri)
+	t.Cleanup(observer.Close)
+
+	bind := func(consumer string) {
+		t.Helper()
+		sub, err := startListenerSubscription(client, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
+		if err != nil {
+			t.Fatalf("startListenerSubscription(%s): %v", consumer, err)
+		}
+		if err := sub.Unsubscribe(); err != nil {
+			t.Fatalf("unsubscribe %s: %v", consumer, err)
+		}
+	}
+	settle := func(creates *atomic.Int32, want int32, what string) {
+		t.Helper()
+		if err := observer.Flush(); err != nil {
+			t.Fatalf("flush: %v", err)
+		}
+		time.Sleep(200 * time.Millisecond)
+		if got := creates.Swap(0); got != want {
+			t.Fatalf("%s: %d consumer create requests, want %d", what, got, want)
+		}
+	}
+
+	fresh := "listener-drift-fresh"
+	_ = client.JS().DeleteConsumer(bus.Stream, fresh)
+	t.Cleanup(func() { _ = client.JS().DeleteConsumer(bus.Stream, fresh) })
+	creates := consumerCreates(t, observer, fresh)
+	bind(fresh)
+	settle(creates, 1, "first start on a new durable")
+	bind(fresh)
+	settle(creates, 0, "second start on a healthy durable")
+	bind(fresh)
+	settle(creates, 0, "third start on a healthy durable")
+
+	drifted := "listener-drift-corrected"
+	_ = client.JS().DeleteConsumer(bus.Stream, drifted)
+	t.Cleanup(func() { _ = client.JS().DeleteConsumer(bus.Stream, drifted) })
+	config := natsgo.ConsumerConfig{Durable: drifted, DeliverSubject: natsgo.NewInbox()}
+	applyListenerConsumerPolicy(&config, bus.StreamSubjects())
+	config.AckWait = 30 * time.Second
+	config.MaxDeliver = 5
+	if _, err := client.JS().AddConsumer(bus.Stream, &config); err != nil {
+		t.Fatalf("add a drifted durable: %v", err)
+	}
+	creates = consumerCreates(t, observer, drifted)
+	bind(drifted)
+	settle(creates, 1, "first start on a drifted durable")
+	info, err := client.JS().ConsumerInfo(bus.Stream, drifted)
+	if err != nil {
+		t.Fatalf("consumer info: %v", err)
+	}
+	if info.Config.AckWait != consumerAckWait || info.Config.MaxDeliver != consumerMaxDeliver {
+		t.Fatalf("corrected durable: ack wait %s, max deliver %d, want %s and %d", info.Config.AckWait, info.Config.MaxDeliver, consumerAckWait, consumerMaxDeliver)
+	}
+	bind(drifted)
+	settle(creates, 0, "second start on the corrected durable")
+}
