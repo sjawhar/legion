@@ -18,8 +18,14 @@ var (
 // createWorkspace ports workspace.ts's createWorkspace. It resolves a bookmark before pruning or
 // adding a workspace: a conflicted bookmark must not leave a registered working copy behind.
 //
-// One read of the issue's bookmark legion/<KEY>, its local row and origin's (issueBookmark),
+// One read of the issue's bookmark legion/<KEY>, its local row and origin's (readBookmark),
 // decides where the workspace starts:
+//   - A local bookmark conflicted with a deletion whose origin row is tracked with no commit (GitHub
+//     deleted the branch after the bookmark moved on without a push) is set aside when nothing the
+//     move added beyond what it removed is described (undescribedMove): jj pushes no undescribed
+//     commit, so the move was never meant to reach GitHub, and this is the unmoved merged bookmark
+//     in intent. The local bookmark is deleted, the commits' ids are logged (they stay visible, the
+//     clone never abandoning unreachable commits), and the workspace starts at main.
 //   - A conflicted local bookmark is refused by name, with its sides. That includes a conflict with
 //     a deleted side, which `bookmarks(exact:)` resolves to the other side alone: a local deletion
 //     never pushed and then origin's branch moving, or a local move never pushed and then the
@@ -51,7 +57,7 @@ var (
 //     clone, other issues' branches with it.
 //   - No row at all is a brand-new issue, or a merged branch GitHub deleted. The workspace starts
 //     at main, resolved to one commit first (mainCommit), with the bookmark created on it.
-func createWorkspace(ctx context.Context, run Runner, workspace Workspace) error {
+func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log func(string)) error {
 	cloneDir := workspace.Clone
 	workspaceName := filepath.Base(workspace.Dir)
 	remote := workspace.Bookmark + "@origin"
@@ -59,8 +65,21 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace) error
 	if err != nil {
 		return err
 	}
+	local, origin := rows.local, rows.origin
+	var setAside []string
+	if local.conflict && len(local.added) <= len(local.removed) && origin.tracked && !origin.present {
+		if setAside, err = undescribedMove(ctx, run, workspace, local); err != nil {
+			return err
+		}
+	}
 	var revision string
-	switch local, origin := rows.local, rows.origin; {
+	switch {
+	case setAside != nil:
+		if _, err := RunChecked(ctx, run, []string{"jj", "bookmark", "delete", workspace.Bookmark, "--ignore-working-copy", "-R", cloneDir}, nil, ""); err != nil {
+			return err
+		}
+		log(fmt.Sprintf("Bookmark %s was moved after its last push onto commits nobody described (%s), and GitHub deleted its branch: workspace %s starts at main. Those commits stay visible in the shared clone %s (git.abandon-unreachable-commits is false), recoverable by id",
+			workspace.Bookmark, listed(setAside), workspace.Dir, cloneDir))
 	case local.conflict:
 		keep, commit := "its added commit", local.added[0]
 		if len(local.added) > 1 {
@@ -138,6 +157,30 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace) error
 	}
 	_, err = RunChecked(ctx, run, []string{"jj", "bookmark", "set", workspace.Bookmark, "-r", "@"}, nil, workspace.Dir)
 	return err
+}
+
+// undescribedMove is what the local bookmark's move added beyond what it removed
+// (`<removed>..<added>`), when no commit of it is described; nil when one is. jj pushes no
+// undescribed commit, so such a move was never meant to reach GitHub.
+func undescribedMove(ctx context.Context, run Runner, workspace Workspace, local bookmarkRow) ([]string, error) {
+	revset := "(" + strings.Join(local.removed, " | ") + ")..(" + strings.Join(local.added, " | ") + ")"
+	read := []string{"jj", "log", "-r", revset, "--no-graph", "-T", `commit_id ++ "|" ++ if(description, "1", "0") ++ "\n"`, "--ignore-working-copy", "--color=never", "-R", workspace.Clone}
+	result, err := RunChecked(ctx, run, read, nil, "")
+	if err != nil {
+		return nil, err
+	}
+	commits := []string{}
+	for _, line := range nonEmptyLines(result.Stdout) {
+		id, described, ok := strings.Cut(line, "|")
+		if !ok || !commitID.MatchString(id) || described != "0" && described != "1" {
+			return nil, fmt.Errorf("Bookmark %s's move %s printed %q, not a commit id and 0 or 1; workspace %s was not created", workspace.Bookmark, revset, line, workspace.Dir)
+		}
+		if described == "1" {
+			return nil, nil
+		}
+		commits = append(commits, id)
+	}
+	return commits, nil
 }
 
 // mainCommit is the commit a workspace with no issue branch starts at: main's, resolved to one

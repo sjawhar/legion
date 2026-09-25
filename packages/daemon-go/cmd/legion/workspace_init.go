@@ -181,6 +181,7 @@ func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, fee
 	run := workspace.NewRunner(workspace.CommandTimeout, tools)
 	provisioned, err := workspace.Provision(ctx, run, workspace.Request{
 		StateDir: root, Repo: repo, Issue: issue, CredentialHelper: credentialHelper, Source: workspace.FromFeed(feed),
+		Log: func(line string) { fmt.Fprintln(stdout, "workspace-init: "+line) },
 	})
 	if err != nil {
 		return err

@@ -53,6 +53,9 @@ type Request struct {
 	CredentialHelper string
 	// Source is how the shared clone reaches the repository: FromFeed or FromGitHub.
 	Source Source
+	// Log takes the one line provisioning logs: the commits it set aside when it started a merged
+	// issue's workspace at main (createWorkspace).
+	Log func(line string)
 }
 
 // Workspace is the durable location and branch bookmark for one issue. Dir has the shape

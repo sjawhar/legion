@@ -35,7 +35,7 @@ func TestCreateWorkspaceRefusesARowItCannotRead(t *testing.T) {
 	}
 
 	before := len(run.Calls())
-	err = createWorkspace(context.Background(), run, first)
+	err = createWorkspace(context.Background(), run, first, req.Log)
 	if err == nil || !strings.Contains(err.Error(), "Bookmark legion/WIDGETS-42's row \"local|1|0|0|<Error:") || !strings.Contains(err.Error(), "is not the shape") {
 		t.Fatalf("createWorkspace on an unreadable bookmark: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestCreateWorkspaceRefusesAnOriginRowConcurrentFetchesConflicted(t *testing
 	fromOrigin(t, run, clone, "jj", "--at-op", operation, "git", "fetch", "-R", clone)
 
 	before := len(run.Calls())
-	err = createWorkspace(context.Background(), run, workspace)
+	err = createWorkspace(context.Background(), run, workspace, req.Log)
 	want := "Remote bookmark legion/WIDGETS-42@origin is conflicted (adds " + moved + "; removes " + listed + "), one side a deletion, which concurrent fetches leave"
 	if err == nil || !strings.Contains(err.Error(), want) {
 		t.Fatalf("createWorkspace on a conflicted origin row: %v\nwant it to contain %q", err, want)
@@ -251,7 +251,7 @@ func feedRequest(t *testing.T, run *recordingRunner, req Request) Request {
 	if _, err := Fetch(context.Background(), run, fetch); err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
-	return Request{StateDir: req.StateDir, Repo: req.Repo, Issue: req.Issue, CredentialHelper: req.CredentialHelper, Source: FromFeed(fetch.Feed)}
+	return Request{StateDir: req.StateDir, Repo: req.Repo, Issue: req.Issue, CredentialHelper: req.CredentialHelper, Source: FromFeed(fetch.Feed), Log: req.Log}
 }
 
 // pushRemoteBranch pushes one commit adding file to branch on the bare remote, from a clone of its
@@ -636,6 +636,95 @@ func TestProvisionRefusesAWorkspaceWithNoBranchWhenMainDoesNotResolve(t *testing
 					t.Fatalf("attempt %d: %v\nwant one of %q", attempt, err, refusals)
 				}
 				nothingProvisioned(t, run, before, next, fmt.Sprintf("attempt %d", attempt))
+			}
+		})
+	}
+}
+
+// A local bookmark moved after its last push onto commits nobody described, whose branch GitHub
+// then deleted (the pull request merged), is the unmoved merged bookmark in intent: jj pushes no
+// undescribed commit. Provisioning sets those commits aside (they stay visible in the shared clone,
+// which never abandons unreachable commits) and starts the workspace at main, logging the ids once,
+// and provisioning again changes nothing. A described commit anywhere in the move keeps the
+// refusal. This is the shape a daemon that re-pointed the bookmark at a pane's working copy left in
+// the shared clone: an undescribed child of the pushed commit that adds only an empty file.
+func TestProvisionStartsAtMainWhenAMergedBranchWasMovedOntoNothingDescribed(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		described []bool // the commits the local move adds, oldest first: described or not
+		setAside  bool
+	}{
+		{"an undescribed child adding only an empty file", []bool{false}, true},
+		{"a described child", []bool{true}, false},
+		{"an undescribed child on a described one", []bool{true, false}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := pushedThenLost(t, "pushed.txt")
+			var logged []string
+			l.req.Log = func(line string) { logged = append(logged, line) }
+			var moved []string
+			for i, described := range tc.described {
+				parent := l.first.Bookmark
+				if len(moved) > 0 {
+					parent = moved[len(moved)-1]
+				}
+				runSetup(t, l.clone, "jj", "new", parent, "-R", l.clone)
+				if err := os.MkdirAll(filepath.Join(l.clone, ".omp"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(l.clone, ".omp", fmt.Sprintf("config-%d.yml", i)), nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if described {
+					runSetup(t, l.clone, "jj", "describe", "-m", "implement: record handoff", "-R", l.clone)
+				}
+				// Read with a snapshot, which records the file: commitOf reads without one.
+				moved = append(moved, strings.TrimSpace(runSetup(t, l.clone, "jj", "log", "-r", "@", "--no-graph", "-T", "commit_id", "--color=never", "-R", l.clone)))
+			}
+			runSetup(t, l.clone, "jj", "bookmark", "set", l.first.Bookmark, "-r", "@", "--allow-backwards", "-R", l.clone)
+			runSetup(t, l.clone, "jj", "new", "main", "-R", l.clone)
+			runSetup(t, l.req.StateDir, "git", "--git-dir="+l.run.remote, "update-ref", "-d", "refs/heads/"+l.first.Bookmark)
+
+			if !tc.setAside {
+				refusal := l.refusedBeforeAnything(t, 1)
+				if !strings.HasPrefix(refusal, "Bookmark "+l.first.Bookmark+" is conflicted (adds "+moved[len(moved)-1]+"; removes "+l.pushed+"), one side a deletion") {
+					t.Fatalf("refusal: %s", refusal)
+				}
+				if len(logged) != 0 {
+					t.Errorf("logged %q", logged)
+				}
+				return
+			}
+			working, err := Provision(context.Background(), l.run, l.req)
+			if err != nil {
+				t.Fatalf("provision: %v", err)
+			}
+			if at, main := commitOf(t, working.Dir, "@-"), commitOf(t, l.clone, "main"); at != main {
+				t.Errorf("the workspace starts at %s, want main's %s", at, main)
+			}
+			if bookmark, at := commitOf(t, l.clone, l.first.Bookmark), commitOf(t, working.Dir, "@"); bookmark != at {
+				t.Errorf("the bookmark is on %s, want the fresh working copy %s", bookmark, at)
+			}
+			want := "Bookmark " + l.first.Bookmark + " was moved after its last push onto commits nobody described (" + strings.Join(moved, ", ") + "), and GitHub deleted its branch: workspace " + working.Dir + " starts at main. Those commits stay visible in the shared clone " + l.clone + " (git.abandon-unreachable-commits is false), recoverable by id"
+			if !slices.Equal(logged, []string{want}) {
+				t.Errorf("logged %q, want %q", logged, want)
+			}
+			for _, commit := range moved {
+				runSetup(t, l.clone, "jj", "log", "-r", commit, "--no-graph", "--ignore-working-copy", "-R", l.clone)
+			}
+
+			before := len(l.run.Calls())
+			again, err := Provision(context.Background(), l.run, l.req)
+			if err != nil || again != working {
+				t.Fatalf("second provision = %+v, %v; want %+v", again, err, working)
+			}
+			for _, call := range l.run.Calls()[before:] {
+				if commandWith(call.Argv, "jj", "bookmark") || commandWith(call.Argv, "jj", "workspace", "add") {
+					t.Errorf("the second provision ran %q", call.Argv)
+				}
+			}
+			if len(logged) != 1 {
+				t.Errorf("the second provision logged again: %q", logged)
 			}
 		})
 	}

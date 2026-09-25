@@ -23,6 +23,9 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 	if request.CredentialHelper == "" {
 		return Workspace{}, fmt.Errorf("workspace credential helper is required")
 	}
+	if request.Log == nil {
+		return Workspace{}, errors.New("workspace request names no log")
+	}
 	if request.Source == nil {
 		return Workspace{}, errors.New("workspace request names no way to the repository: FromFeed or FromGitHub")
 	}
@@ -57,7 +60,7 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 	}
 
 	if !exists {
-		if err := createWorkspace(ctx, run, workspace); err != nil {
+		if err := createWorkspace(ctx, run, workspace, request.Log); err != nil {
 			return Workspace{}, err
 		}
 	}
