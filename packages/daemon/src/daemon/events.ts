@@ -29,7 +29,7 @@ import {
 
 const CHECKS_TOPIC = /^notifications\.github\.([^.]+)\.([^.]+)\.pr\.(\d+)\.checks$/;
 const EXCEPTION_TOPIC = "notifications.envoy.exceptions.notifications.role.";
-/** JetStream stream carrying durable notifications; mirrors packages/envoy/internal/bus/nats.go:18. */
+/** JetStream stream carrying durable notifications; mirrors `Stream` in packages/envoy/internal/bus/stream.go. */
 const NOTIFICATION_STREAM = "ENVOY_NOTIFICATIONS";
 /** Fixed nak delay for a durable delivery that fails for a reason that may be transient (see processDurableMessage). */
 const DURABLE_NAK_DELAY_MS = 30_000;
