@@ -40,7 +40,13 @@ root=$(cd "$(dirname "$0")/../.." && pwd)
 work=$(mktemp -d /tmp/legion-e2e4b.XXXXXXXX)
 evidence=${STAGE4B_EVIDENCE_DIR:-$(mktemp -d /tmp/legion-e2e4b-evidence.XXXXXXXX)}
 mkdir -p "$evidence/logs" "$evidence/transcripts" "$evidence/pods" "$evidence/controls"
-exec > >(tee -a "$evidence/transcript.log") 2>&1
+# tee shares the driver's process group, so a signal to the group (Ctrl-C, a closed pane, timeout's
+# TERM) would end it before cleanup writes, and cleanup's first write would die of SIGPIPE: tee
+# ignores the signals the driver traps, and outlives the driver's last line.
+exec > >(trap '' HUP INT TERM && exec tee -a "$evidence/transcript.log") 2>&1
+# fd 7 keeps the transcript for cleanup: a signal runs the EXIT trap under the redirections of the
+# command it interrupted, whose output may be /dev/null or an evidence file.
+exec 7>&1
 
 namespace=legion
 operator=${LEGION_E2E_OPERATOR_CONTEXT:-production}
@@ -63,7 +69,8 @@ gateway_url=https://middleman.hawk.internal.trajectorylabs.com
 port_daemon=13370
 port_worker_stream=13371
 stream=ENVOY_NOTIFICATIONS
-lock=${XDG_STATE_HOME:-$HOME/.local/state}/legion/e2e/stage4b.lock
+# One path for every run on the devbox, whatever its environment names as its state directory.
+lock=$HOME/.local/state/legion/e2e/stage4b.lock
 record=$work/sandboxes
 pg_container=legion-e2e4b-pg-$$
 profile=legion-e2e4b-$$-$(date +%s)
@@ -313,7 +320,7 @@ EOF
 }
 start_daemon() {
   env -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -u GH_AGENT_APP_PRIVATE_KEY_B64 \
-    -u GH_REVIEW_APP_PRIVATE_KEY_B64 "$work/legion" start --config "$work/legion.yaml" >>"$daemon_log" 2>&1 9>&- &
+    -u GH_REVIEW_APP_PRIVATE_KEY_B64 "$work/legion" start --config "$work/legion.yaml" >>"$daemon_log" 2>&1 9>&- 7>&- &
   daemon_pid=$!
   timeout_hook=report_boot
   # A daemon that exits (a refused image probe, a config it will not run) ends the wait at once.
@@ -359,10 +366,10 @@ start_pod_watch() {
   # kubectl itself, not a subshell around a function, so the recorded pid is what cleanup stops; and
   # fd 9, the run lock, stays out of every background child, so none can outlive the run holding it.
   kubectl --context "$operator" -n "$namespace" get pods -l "legion.dev/project=$run_label" -w -o json --output-watch-events \
-    >"$evidence/pod-watch.json" 2>"$evidence/logs/pod-watch.err" 9>&- &
+    >"$evidence/pod-watch.json" 2>"$evidence/logs/pod-watch.err" 9>&- 7>&- &
   watch_pid=$!
   kubectl --context "$operator" get events -A -w -o json --field-selector involvedObject.kind=Node \
-    >"$evidence/node-events.json" 2>"$evidence/logs/node-events.err" 9>&- &
+    >"$evidence/node-events.json" 2>"$evidence/logs/node-events.err" 9>&- 7>&- &
   events_pid=$!
   ( # Node memory for the nodes the run's pods are on, every 30 s (metrics-server).
     trap - EXIT ERR
@@ -375,7 +382,7 @@ start_pod_watch() {
       done
       sleep 30
     done
-  ) >>"$evidence/node-memory.txt" 2>&1 9>&- &
+  ) >>"$evidence/node-memory.txt" 2>&1 9>&- 7>&- &
   sampler_pid=$!
 }
 
@@ -609,6 +616,9 @@ collect_transcripts() {
 }
 cleanup() {
   local status=$? p
+  # A second signal must not cut the teardown short, and a closed output must not end it.
+  trap '' HUP INT TERM PIPE
+  exec >&7 2>&7
   set +e
   stop_pid "$shape_pid"
   [ -z "$tree1" ] || record_pair >/dev/null 2>&1
@@ -618,11 +628,14 @@ cleanup() {
   stop_pid "$events_pid"
   stop_pid "$sampler_pid"
   # The namespace label, the durable consumers and the project are shared by every Stage 4b run,
-  # so a run that never took the lock owns none of them and removes nothing.
+  # so a run that never passed prerequisites' ownership checks (the lock, the ports, no leftover
+  # objects or consumers) owns none of them and removes nothing.
   if [ -n "$locked" ]; then
+    # The teardown waits for the run's labelled pods to go but deletes no pod itself, so the run's
+    # own control pods (the memory hog, the reachability pod) go first.
+    op delete pod -l "legion.dev/project=$run_label,legion.dev/e2e-control" --ignore-not-found --wait=false >/dev/null 2>&1
     teardown
     if [ -z "$compared" ] && [ -n "$snapshotted" ]; then (namespace_clean) || status=1; fi
-    op delete pod -l "legion.dev/e2e-control" --ignore-not-found --wait=false >/dev/null 2>&1
     delete_consumers
     [ -z "$fixture_branch" ] || gh api -X DELETE "repos/$repo/git/refs/heads/$fixture_branch" >/dev/null 2>&1
     if [ -z "$audited" ] && [ -n "$prod_baseline" ]; then production_audit || status=1; fi
@@ -732,7 +745,6 @@ case "$image" in *@sha256:*) ;; *) fail "LEGION_E2E_IMAGE must be the worker ima
 mkdir -p "$(dirname "$lock")"
 exec 9>"$lock"
 flock -n 9 || fail "another Stage 4b run holds $lock: one run at a time"
-locked=1
 for port in "$port_daemon" "$port_worker_stream"; do
   [ -z "$(ss -Hltn "sport = :$port")" ] || fail "port $port is taken on the devbox: $(ss -Hltnp "sport = :$port")"
 done
@@ -745,6 +757,9 @@ leftover=$(op get sandboxes,pods,pvc -l "legion.dev/project=$run_label" -o name 
 stale_consumers=$(bun "$root/scripts/e2e/lib/nats-stream.ts" consumers "$nats_url" "$stream" "legion-go-$project-") ||
   fail "production NATS $stream could not list its consumers"
 [ -z "$stale_consumers" ] || fail "production NATS already holds durable consumers of $project, which another run left or owns: $(jq -r .name <<<"$stale_consumers" | tr '\n' ' ')"
+# The run owns the namespace label, the consumers and the project only from here: a run refused
+# above leaves another run's objects alone.
+locked=1
 built=$(bash "$root/scripts/e2e/lib/built-from.sh" "$root") || fail "lib/built-from.sh could not read the source revision"
 revision=$(sed -n 's/^source: //p' <<<"$built")
 jq -n --arg revision "$revision" --arg image "$image" --arg plugin "$(jq -r '.name + "@" + .version' "$root/packages/pi-envoy/package.json")" \
@@ -882,7 +897,7 @@ until_true 300 "two roots admitted and one waiting in rank order" sh -c \
 state_file admission
 note "active $(jq -c .admission.active "$evidence/admission.json"), waiting $(jq -c .admission.waiting "$evidence/admission.json")"
 shape_pid=
-pod_shape_watcher 9>&- &
+pod_shape_watcher 9>&- 7>&- &
 shape_pid=$!
 pass
 

@@ -44,7 +44,13 @@ compared=
 ok=
 
 mkdir -p "$evidence"
-exec > >(tee -a "$evidence/transcript.log") 2>&1
+# tee shares the driver's process group, so a signal to the group (Ctrl-C, a closed pane, timeout's
+# TERM) would end it before cleanup writes, and cleanup's first write would die of SIGPIPE: tee
+# ignores the signals the driver traps, and outlives the driver's last line.
+exec > >(trap '' HUP INT TERM && exec tee -a "$evidence/transcript.log") 2>&1
+# fd 7 keeps the transcript for cleanup: a signal runs the EXIT trap under the redirections of the
+# command it interrupted, whose output may be /dev/null or an evidence file.
+exec 7>&1
 
 begin() {
   check=$1
@@ -61,6 +67,9 @@ fail() {
 
 cleanup() {
   local status=$?
+  # A second signal must not cut the teardown short, and a closed output must not end it.
+  trap '' HUP INT TERM PIPE
+  exec >&7 2>&7
   set +e
   teardown
   if [ -z "$compared" ] && [ -n "$snapshotted" ]; then (namespace_clean) || status=1; fi
