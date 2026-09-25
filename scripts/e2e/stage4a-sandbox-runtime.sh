@@ -92,11 +92,7 @@ note "run project $project (every object's legion.dev/project label)"
 note "image $image"
 note "worker stream tcp://$host:$port (the devbox's private address)"
 note "runtime identity: context $runtime_context in $runtime_kubeconfig; operator: context $operator"
-if command -v jj >/dev/null && jj -R "$root" root >/dev/null 2>&1; then
-  note "source: $(jj -R "$root" log -r @ --no-graph -T 'commit_id ++ if(empty, " (working copy: no changes)", " (working copy has changes)")') on $(jj -R "$root" log -r @- --no-graph -T 'commit_id')"
-else
-  note "source: $(git -C "$root" rev-parse HEAD)"
-fi
+while IFS= read -r line; do note "$line"; done < <(bash "$root/scripts/e2e/lib/built-from.sh" "$root")
 [ -z "$from" ] || note "STAGE4A_FROM=$from: a development run, never the proof"
 
 begin snapshot

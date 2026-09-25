@@ -562,7 +562,7 @@ host=$(curl -sf -m 5 -H "X-aws-ec2-metadata-token: $imds" http://169.254.169.254
 unset imds
 leftover=$(op get sandboxes,pods,pvc -l "legion.dev/project=$run_label" -o name 2>&1) || fail "the operator context cannot list namespace $namespace: $leftover"
 [ -z "$leftover" ] || fail "namespace $namespace already holds objects labelled legion.dev/project=$run_label, which another run left or owns: $(tr '\n' ' ' <<<"$leftover")"
-revision=$(jj -R "$root" log -r @ --no-graph -T 'commit_id ++ if(empty, "", " (working copy has changes)")' 2>/dev/null || git -C "$root" rev-parse HEAD)
+revision=$(bash "$root/scripts/e2e/lib/built-from.sh" "$root" | sed -n 's/^source: //p')
 jq -n --arg revision "$revision" --arg image "$image" --arg plugin "$(jq -r '.name + "@" + .version' "$root/packages/pi-envoy/package.json")" \
   --arg started "$(date -u +%FT%TZ)" '{revision: $revision, image: $image, plugin: $plugin, started: $started}' >"$evidence/run.json"
 note "source $revision; image $image; plugin $(jq -r .plugin "$evidence/run.json")"
@@ -653,6 +653,7 @@ pass
 
 begin boot
 (cd "$root/packages/daemon-go" && go build -o "$work/legion" ./cmd/legion)
+while IFS= read -r line; do note "$line"; done < <(bash "$root/scripts/e2e/lib/built-from.sh" "$root" "$work/legion")
 docker run -d --name "$pg_container" --mount type=tmpfs,destination=/var/lib/postgresql/data \
   -e POSTGRES_USER=legion -e POSTGRES_PASSWORD="$(cat "$work/postgres-password")" -e POSTGRES_DB=legion \
   -p "127.0.0.1::5432" postgres:16 >/dev/null

@@ -533,6 +533,24 @@ It exits non-zero, printing the reason on stderr and nothing on stdout, when:
   room above 20000`).
 - 50 draws find no free port (`no free port found below <n>`).
 
+## lib/built-from.sh
+
+Prints what a stage proof ran, so a run can be tied to a commit after its scratch directory, and
+the binary in it, are gone. Stage 1, Stage 3, Stage 4a and Stage 4b print it through their own
+`note`.
+
+```sh
+bash scripts/e2e/lib/built-from.sh "$root" "$work/legion"
+# source: <commit> on <parent>                     (jj: the working copy and its parent; git: HEAD)
+# legion: sha256 <hash>
+```
+
+When the working copy has changes, as in a negative control, which runs a base with the new
+script copied in, the source line says so. The next line gives the sha256 of `jj diff --git`
+(`git diff HEAD` under git), followed by the diff's `--stat`, so the run shows what it held and
+not only that something changed. Without jj, or outside a jj workspace, it reads git, which is
+what CI's checkout is.
+
 ## lib/install-plugin-profile.sh
 
 Installs this checkout's `@sjawhar/pi-legion-envoy` into a named OMP profile, packed the way the

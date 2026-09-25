@@ -71,6 +71,7 @@ command -v tmux >/dev/null || {
 # it (scripts/e2e/lib/free-port.sh). The restart reuses it.
 port=$(bash "$root/scripts/e2e/lib/free-port.sh")
 cd "$root/packages/daemon-go" && go build -o "$work/legion" ./cmd/legion
+bash "$root/scripts/e2e/lib/built-from.sh" "$root" "$work/legion" | sed 's/^/   /'
 
 # CI passes its service's DSN; the devbox brings its own container on an ephemeral port.
 if [ -z "${LEGION_E2E_PG_DSN:-}" ]; then
