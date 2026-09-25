@@ -6,12 +6,8 @@ import { Link, MemoryRouter } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { IssueDetails } from "../../api/types";
-import {
-  REF_PREVIEW_OPEN_DELAY_MS,
-  RefPreviewHost,
-  referenceTriggerProps,
-  refPreview,
-} from "./RefPreview";
+import { RefPreviewHost, referenceTriggerProps, refPreview } from "./RefPreview";
+import { REF_PREVIEW_CLOSE_DELAY_MS, REF_PREVIEW_OPEN_DELAY_MS } from "./ref-preview-timing";
 
 function issue(key: string, title: string): IssueDetails {
   return {
@@ -177,6 +173,37 @@ test("a pointer moved straight from a reference onto its card keeps it open, and
       jest.advanceTimersByTime(1000);
     });
     expect(screen.queryByRole("tooltip")).toBeNull();
+  } finally {
+    view.unmount();
+    getIssue.mockRestore();
+  }
+});
+
+test("a card the pointer moved straight onto still closes when the pointer leaves it for the page", async () => {
+  const getIssue = mockIssues();
+  jest.useFakeTimers();
+  const view = render(<Harness />);
+  try {
+    const first = screen.getByRole("link", { name: "first" });
+    fireEvent.pointerOver(first, { pointerType: "mouse" });
+    act(() => {
+      jest.advanceTimersByTime(REF_PREVIEW_OPEN_DELAY_MS);
+    });
+    const card = screen.getByRole("tooltip");
+    await act(async () => {});
+    fireEvent.pointerOut(first, { pointerType: "mouse", relatedTarget: card });
+    fireEvent.pointerOver(card, { pointerType: "mouse", relatedTarget: first });
+
+    fireEvent.pointerOut(card, { pointerType: "mouse", relatedTarget: document.body });
+    act(() => {
+      jest.advanceTimersByTime(REF_PREVIEW_CLOSE_DELAY_MS - 1);
+    });
+    expect(screen.getByRole("tooltip")).toBe(card);
+    act(() => {
+      jest.advanceTimersByTime(1);
+    });
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    expect(first.hasAttribute("aria-describedby")).toBe(false);
   } finally {
     view.unmount();
     getIssue.mockRestore();

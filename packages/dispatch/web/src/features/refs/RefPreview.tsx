@@ -17,6 +17,7 @@ import {
 import { type IssueStatus, statusLabel } from "../project/board-model";
 import { actorLabel } from "./actor";
 import { shortForm } from "./RefLink";
+import { REF_PREVIEW_CLOSE_DELAY_MS, REF_PREVIEW_OPEN_DELAY_MS } from "./ref-preview-timing";
 import {
   buildDispatchReference,
   buildReferencePath,
@@ -33,10 +34,6 @@ import {
   useReferenceData,
 } from "./Unfurl";
 
-/** How long the pointer rests on a reference before its card opens. */
-export const REF_PREVIEW_OPEN_DELAY_MS = 300;
-/** The hover bridge: leaving the anchor gives the pointer this long to reach the card. */
-const CLOSE_DELAY_MS = 150;
 const CARD_ID = "ref-preview";
 /** Every hover-card trigger: a Markdown anchor `collectReferenceAnchors` tagged, a Proof link
  * mark (`data-dispatch-href`, the sanitized mark's real target), or a React link that set
@@ -76,7 +73,7 @@ function scheduleClose(anchor: HTMLElement): void {
     if (state?.target.anchor === anchor) {
       setState(undefined);
     }
-  }, CLOSE_DELAY_MS);
+  }, REF_PREVIEW_CLOSE_DELAY_MS);
 }
 
 /** The one hover card's controller. Module-level on purpose: "one card at a time" is a single
