@@ -1026,13 +1026,13 @@ func inlineReplacement(markdown string) (*pmdoc.Node, error) {
 		}
 		return nil, err
 	}
-	// An empty `with` deletes the matched span on purpose, but a `with` the caller wrote that
-	// parses to nothing does not: markdown reads a line indented four spaces or a tab as a code
-	// block, which has no inline content, and splicing that over the match would silently delete
-	// the text they meant to replace (LEGION-280).
-	if len(inline) == 0 && strings.TrimSpace(markdown) != "" {
+	// An empty `with` deletes the matched span on purpose, and is the only `with` that does: one
+	// the caller wrote and that renders to nothing — a line indented four spaces or a tab, which
+	// markdown reads as a code block, or whitespace alone — would splice nothing over the match
+	// and silently delete the text they meant to replace (LEGION-280).
+	if len(inline) == 0 && markdown != "" {
 		return nil, &ErrInvalidOp{Field: "with", Reason: fmt.Sprintf(
-			"with %q produced no text: markdown reads a line indented four spaces or a tab as a code block, and replace is inline, so there would be nothing to put in the match's place; remove the leading indentation, or use insert plus delete to add a code block",
+			"with %q renders to no text (a line indented four spaces or a tab is a code block, and whitespace alone has no inline content), and replace is inline, so there would be nothing to put in the match's place; pass an empty with to delete the matched text, remove the leading indentation, or use insert plus delete to add a code block",
 			markdown,
 		)}
 	}

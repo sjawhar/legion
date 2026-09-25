@@ -557,8 +557,9 @@ plus `delete` to change the block's kind, level or number. The one exception is 
 marker: `replace(find="## Old", with="## New")` gives `## New`. A different level in `with` applies only when `find` named the
 heading's actual level — `find="## Old"`, `with="### New"` retitles and makes it an h3 — because `# ` is the level-blind selector,
 so `find="# Old"` renames the text and keeps whatever level it selected. `with` that forms more than one
-paragraph is rejected (`INVALID_OP` on `with`) — delete the block and insert new blocks instead; so is a non-empty `with` that
-parses to no text, which a line indented four spaces or a tab does, since markdown reads that as a code block. Use zero-based `occurrence` for a
+paragraph is rejected (`INVALID_OP` on `with`) — delete the block and insert new blocks instead; so is any non-empty `with` that
+renders to no text, which a line indented four spaces or a tab does (markdown reads that as a code block), as does whitespace
+alone. An empty `with` is the one that deletes the matched text on purpose. Use zero-based `occurrence` for a
 repeated target; re-read a missing or ambiguous target before retrying. Pass `summary` to name the version when recording a decision.
 
 A batch that leaves the document's semantic identity unchanged — including its inline anchor marks, so an edit that only orphans a

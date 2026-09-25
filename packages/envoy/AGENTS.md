@@ -88,8 +88,9 @@ fills legacy anchors only when their cached quote has one current match.
 Document edits (`POST /api/v1/artifacts/{id}/edits`, `docs/edits.go` `applyOperation`) are
 `replace`, `delete`, `insert`, `retype`, `move`, `delete_row`, and `delete_column`. `replace` is
 inline: `with` parses through `pmdoc.ParseInline` (paragraph-only block grammar), so a multi-paragraph
-`with` is `INVALID_OP`, so is a non-empty `with` that parses to no inline content (a line indented
-four spaces or a tab, which markdown reads as a code block — refusing it is LEGION-280, since
+`with` is `INVALID_OP`, so is any non-empty `with` that renders to no inline content (a line
+indented four spaces or a tab, which markdown reads as a code block, or whitespace alone — an
+empty `with` is the one that deletes the match on purpose; refusing the rest is LEGION-280, since
 splicing nothing over the match silently deleted the caller's text), and a leading marker of a
 *different* kind from the matched block's own is
 literal escaped text. A `with` opening with a marker of the *same* kind as that block's own would

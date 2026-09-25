@@ -995,14 +995,20 @@ func TestApplyOperationReplaceKeepsAnIndentedMarkerFromChangingTheDocument(t *te
 	}
 }
 
-// At four spaces or a tab the parser is reading a code block, which has no inline content, and
-// splicing that over the match used to delete the caller's text and report the batch applied.
-// This is LEGION-280, reachable from the escape the marker refusal suggests (Quality1326, Deep1326).
+// A `with` the caller wrote that renders to nothing used to splice nothing over the match,
+// deleting their text and reporting the batch applied: four spaces or a tab is a code block, and
+// whitespace alone has no inline content. An empty `with` is the only one that deletes on
+// purpose. This is LEGION-280, reachable from the escape the marker refusal suggests
+// (Quality1326, Deep1326).
 func TestApplyOperationReplaceRefusesAWithThatParsesToNoText(t *testing.T) {
 	for _, test := range []struct{ name, with string }{
 		{name: "four spaces", with: "    - Not a bullet"},
 		{name: "a tab", with: "\t- Not a bullet"},
 		{name: "indented prose", with: "    plain indented prose"},
+		{name: "one space", with: " "},
+		{name: "one tab", with: "\t"},
+		{name: "one newline", with: "\n"},
+		{name: "mixed whitespace", with: "  \t  "},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			tree, err := parseInput("Body.\n")
@@ -1014,7 +1020,7 @@ func TestApplyOperationReplaceRefusesAWithThatParsesToNoText(t *testing.T) {
 			if !errors.As(err, &invalid) || invalid.Field != "with" {
 				t.Fatalf("replace with %q = %v, want invalid with rather than a silent deletion", test.with, err)
 			}
-			if !strings.Contains(invalid.Reason, "produced no text") {
+			if !strings.Contains(invalid.Reason, "renders to no text") {
 				t.Fatalf("reason = %q, want it to name the empty replacement", invalid.Reason)
 			}
 		})
