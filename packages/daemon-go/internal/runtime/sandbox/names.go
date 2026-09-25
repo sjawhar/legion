@@ -54,6 +54,9 @@ const (
 	imagePath = "/opt/legion/bin:/opt/omp/bin:/usr/local/bin:/usr/bin:/bin"
 	// defaultAgent is Oh My Pi, by the path the image installs it at (LEGION_OMP_PATH).
 	defaultAgent = "/opt/omp/bin/omp"
+	// legionPlugin is the packed pi-legion-envoy the image carries, whose package.json names its
+	// extensions and skills.
+	legionPlugin = "/opt/legion/pi-legion-envoy"
 	// workerBin is where workspace-init installs the gh shim on the tree volume.
 	workerBin = TreeRoot + "/worker-bin"
 	// initTempDir is the init container's TMPDIR, an in-memory volume: workspace-init keeps its

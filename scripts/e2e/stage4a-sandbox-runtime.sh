@@ -78,12 +78,6 @@ for tool in go kubectl aws curl ss secrets diff; do command -v "$tool" >/dev/nul
 [ -n "$runtime_context" ] || fail "LEGION_E2E_RUNTIME_CONTEXT is unset: the runtime must run as the Legion daemon's restricted identity, never the operator's"
 [ -r "$runtime_kubeconfig" ] || fail "the runtime kubeconfig $runtime_kubeconfig is not readable"
 case "$image" in *@sha256:*) ;; *) fail "LEGION_E2E_IMAGE must be the worker image pinned by digest (…@sha256:…), not '$image'" ;; esac
-case "$from" in
-  "" | installed | boot-refusal-negative | image-probe | root-ready | gvisor | adopt-working-copy | worker-colocated | suspend | \
-    no-affinity | resume | same-agent-negative | kill-pod | respawn-before-register | concurrent-provision | re-adopt | \
-    orphan-sweep | release-tree) ;;
-  *) fail "STAGE4A_FROM=$from is not an entry point (a check after identity, other than stale-incarnation)" ;;
-esac
 imds=$(curl -sf -m 5 -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60') ||
   fail "instance metadata is unreachable; the harness binds the devbox's private address, read from it"
 host=$(curl -sf -m 5 -H "X-aws-ec2-metadata-token: $imds" http://169.254.169.254/latest/meta-data/local-ipv4) ||
