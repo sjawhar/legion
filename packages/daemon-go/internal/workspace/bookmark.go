@@ -22,9 +22,12 @@ var registeredWorkspace = regexp.MustCompile(`(?i)already (?:registered|exists)`
 //     creates the local bookmark at its commit, and the workspace starts there, so its commits are
 //     there and the issue's next push moves it.
 //   - A tracked row with no local bookmark is a local deletion (`jj bookmark delete` in the shared
-//     clone) never pushed, where tracking changes nothing. It is refused by name: restoring the
-//     bookmark and forgetting it are the operator's two ways out, and either one's result
-//     provisions.
+//     clone) never pushed, where tracking changes nothing. It is refused by name, with the
+//     operator's three ways out: restore the bookmark (`jj bookmark set`); cancel the deletion
+//     (`jj bookmark forget`, which leaves the row untracked, so the next provisioning adopts
+//     origin's branch); or start from main instead, by pushing that one deletion
+//     (`jj git push --remote origin --bookmark legion/<KEY>`; `--deleted` would push every pending
+//     deletion in the shared clone, other issues' branches with it).
 //   - No row at all is a brand-new issue, or a merged branch GitHub deleted. The workspace starts
 //     at main, with the bookmark created on it.
 func createWorkspace(ctx context.Context, run Runner, workspace Workspace) error {
@@ -42,8 +45,11 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace) error
 			return err
 		}
 		if len(tracked) == 1 {
-			return fmt.Errorf("Bookmark %s was deleted in the shared clone %s and the deletion never pushed, while %s is tracked at %s; workspace %s was not created. Restore it with `jj bookmark set %s -r %s -R %s`, or drop it with `jj bookmark forget %s -R %s`",
-				workspace.Bookmark, cloneDir, remote, tracked[0], workspace.Dir, workspace.Bookmark, remote, cloneDir, workspace.Bookmark, cloneDir)
+			return fmt.Errorf("Bookmark %s was deleted in the shared clone %s and the deletion never pushed, while %s is tracked at %s; workspace %s was not created. "+
+				"Restore it: `jj bookmark set %[1]s -r %[3]s -R %[2]s`. "+
+				"Cancel the deletion, and the next provisioning adopts origin's branch: `jj bookmark forget %[1]s -R %[2]s`. "+
+				"Start from main instead, deleting the branch on origin: `jj git push --remote origin --bookmark %[1]s -R %[2]s`",
+				workspace.Bookmark, cloneDir, remote, tracked[0], workspace.Dir)
 		}
 		untracked, err := bookmarkCommits(ctx, run, cloneDir, "untracked_remote_bookmarks("+pattern+")", "Remote bookmark "+remote, workspace.Dir)
 		if err != nil {
