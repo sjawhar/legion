@@ -58,6 +58,9 @@ type Registry struct {
 	// every "is this session subscribed?" question without falling through.
 	readyCh   chan struct{}
 	readyOnce sync.Once
+	// watcherMu guards watcher, the KV watcher feeding the cache, which Rewatch replaces.
+	watcherMu sync.Mutex
+	watcher   nats.KeyWatcher
 }
 
 // OpenOption configures the registry.
@@ -239,15 +242,40 @@ func (r *Registry) deleteInterest(sessionID string) error {
 }
 
 func (r *Registry) watch() {
-	w, err := r.kv.WatchAll()
-	if err != nil {
+	if err := r.Rewatch(); err != nil {
 		slog.Error("registry watch failed", slog.String("error", err.Error()))
 		// Unblock callers of WaitForCacheReady even on watcher failure — they'd
 		// rather see the empty-cache symptom than hang. /healthz then exposes
 		// the unavailable registry while NATS retries its connection.
 		r.signalReady()
-		return
 	}
+}
+
+// Rewatch replaces the cache's watcher with a new one on the same bucket. A NATS server restart
+// loses the watcher's ordered consumer, and nats.go replaces it only once it notices the missed
+// heartbeats, up to twenty seconds later; until then the cache misses every write another
+// listener makes, and a drain deletes a consumer the server no longer has. The listener's
+// reconnect hook calls this, so the cache follows the bucket from the reconnect on. The bucket
+// handle stays the one Open took: the bus reconnects that connection in place.
+func (r *Registry) Rewatch() error {
+	watcher, err := r.kv.WatchAll()
+	if err != nil {
+		return err
+	}
+	r.watcherMu.Lock()
+	previous := r.watcher
+	r.watcher = watcher
+	r.watcherMu.Unlock()
+	if previous != nil {
+		// Stop reports a consumer the server has lost to its caller, never at ERROR; the cache's
+		// revision fence keeps the previous watcher's last updates from undoing the new one's.
+		_ = previous.Stop()
+	}
+	go r.consumeWatch(watcher)
+	return nil
+}
+
+func (r *Registry) consumeWatch(w nats.KeyWatcher) {
 	for entry := range w.Updates() {
 		if entry == nil {
 			// NATS KV WatchAll() emits a nil sentinel after delivering the

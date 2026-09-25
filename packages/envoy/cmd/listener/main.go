@@ -152,10 +152,15 @@ func isSessionLive(sessions *session.SessionRegistry, sessionID string) bool {
 }
 
 // rewatchListenerKVWatchers recreates cache watchers that are not represented
-// by bus.Client subscriptions. It attempts both so a failed session watcher
-// rebuild cannot leave the CI cache permanently stale too.
-func rewatchListenerKVWatchers(conn *nats.Conn, sessions *session.SessionRegistry, ciStore *cistore.Store) error {
+// by bus.Client subscriptions. It attempts every one so a failed rebuild of one
+// cannot leave the other caches permanently stale too.
+func rewatchListenerKVWatchers(conn *nats.Conn, registry *store.Registry, sessions *session.SessionRegistry, ciStore *cistore.Store) error {
 	var errs []error
+	if registry != nil {
+		if err := registry.Rewatch(); err != nil {
+			errs = append(errs, fmt.Errorf("rewatch interest registry: %w", err))
+		}
+	}
 	if sessions != nil {
 		if err := sessions.Rewatch(conn); err != nil {
 			errs = append(errs, err)
@@ -184,6 +189,7 @@ func isUnrecoverableSelfHealthFailure(err error, client *bus.Client, sessions *s
 
 func rebuildListenerDependencies(
 	client *bus.Client,
+	registry *store.Registry,
 	sessions *session.SessionRegistry,
 	ciStore *cistore.Store,
 	durableProbe func() error,
@@ -193,7 +199,7 @@ func rebuildListenerDependencies(
 	if client == nil || !client.Connected() {
 		return nats.ErrConnectionClosed
 	}
-	err := rewatchListenerKVWatchers(client.Conn, sessions, ciStore)
+	err := rewatchListenerKVWatchers(client.Conn, registry, sessions, ciStore)
 	if durableProbe == nil || !errors.Is(durableProbe(), nats.ErrConsumerNotFound) {
 		return err
 	}
@@ -579,7 +585,7 @@ func main() {
 	// KV watchers are not bus subscriptions, so recreate them after every
 	// recovered NATS connection.
 	client.AddReconnectHook(func(conn *nats.Conn) error {
-		return rewatchListenerKVWatchers(conn, sessions, ciStore)
+		return rewatchListenerKVWatchers(conn, registry, sessions, ciStore)
 	})
 
 	deliver := session.Deliverer{
@@ -730,6 +736,7 @@ func main() {
 			func() error {
 				return rebuildListenerDependencies(
 					client,
+					registry,
 					sessions,
 					ciStore,
 					durableProbe,

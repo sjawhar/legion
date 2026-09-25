@@ -3492,7 +3492,7 @@ func TestRunSelfHealthMonitor_RebuildsTerminalWatcher(t *testing.T) {
 			},
 			func() error {
 				rebuilds.Add(1)
-				return rewatchListenerKVWatchers(client.Conn, sessions, nil)
+				return rewatchListenerKVWatchers(client.Conn, nil, sessions, nil)
 			},
 			func() { terminated <- struct{}{} },
 			time.Millisecond,
