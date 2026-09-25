@@ -272,8 +272,9 @@ func TestTheOperatorSuspendsARegisteredRootAndRevokesItsSecret(t *testing.T) {
 }
 
 // A tree no workflow issue backs — one the operator spawned — has no linger to close it, so the
-// operator closes it: close ends the tree's root claim, whatever its state, as the workflow's
-// tree_close does. Its Sandbox and tree volume would otherwise outlive every use under a sandbox.
+// operator closes it: close ends the tree's root claim, here its only claim, whatever its state, as
+// the workflow's tree_close does. Its Sandbox and tree volume would otherwise outlive every use
+// under a sandbox.
 func TestTheOperatorClosesATreeNoWorkflowIssueBacks(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -399,6 +400,31 @@ func TestTheOperatorsCloseNamesTheWorkersItCouldNotStop(t *testing.T) {
 		if state := h.stored(worker).State; state != supervise.StateRetired {
 			t.Errorf("%s is %s after the second close, want retired", worker, state)
 		}
+	}
+}
+
+// A claim of the tree the daemon supervises no machine for cannot be stopped, so the close does not
+// answer 200 over it: it is named with that reason beside the closed root.
+func TestTheOperatorsCloseNamesAClaimItSupervisesNoMachineFor(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	worker := spawnBody()
+	worker.Issue, worker.Role = "LEGION-209", claim.RoleImplementer
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", worker)
+	h.supervisor.mu.Lock()
+	delete(h.supervisor.machines, "legion-legion-legion-209-implementer")
+	h.supervisor.mu.Unlock()
+
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/close", nil)
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("close = %d, want 500; body %s", recorder.Code, recorder.Body)
+	}
+	if want := "legion-legion-legion-209-implementer (the daemon supervises no machine for it)"; !strings.Contains(recorder.Body.String(), want) {
+		t.Errorf("the refusal %s does not say %q", recorder.Body, want)
+	}
+	if state := h.stored(architectToken).State; state != supervise.StateRetired {
+		t.Errorf("the root is %s, want it closed", state)
 	}
 }
 

@@ -242,8 +242,11 @@ func stopEvent(_ http.ResponseWriter, _ *http.Request, c supervise.Claim) (super
 // The root goes first, since its close is where the supervisor's TreeClosable answers whether a
 // workflow issue backs the tree: a refused close stops nothing. Then every other claim of the tree
 // that has not retired is stopped, as tree_close stops each, so no worker is left on a tree volume
-// that is being deleted (Kubernetes deletes the volume once no pod mounts it). A worker whose stop
-// fails is named in a 500, with the root already closed; `legion claims stop` ends it.
+// that is being deleted (Kubernetes deletes the volume once no pod mounts it). A claim of the tree
+// left running is named in a 500 with its reason — a stop that failed, or a claim the daemon
+// supervises no machine for — and the root is already closed by then, its release already
+// removing the tree (under a sandbox, the tree volume), so the 500 says to stop each now with
+// `legion claims stop`. Nothing retries it for the operator.
 func (s *server) closeTree(w http.ResponseWriter, r *http.Request) {
 	token := claim.Token(r.PathValue("token"))
 	root, ok := s.supervisor.Machine(token)
@@ -274,6 +277,8 @@ func (s *server) closeTree(w http.ResponseWriter, r *http.Request) {
 		}
 		m, ok := s.supervisor.Machine(other.Token)
 		if !ok {
+			s.log.Error("api: a claim of a tree the operator closed has no machine to stop", "claim", other.Token)
+			unstopped = append(unstopped, fmt.Sprintf("%s (the daemon supervises no machine for it)", other.Token))
 			continue
 		}
 		if err := m.Handle(ctx, supervise.RequestStop{Claim: other.Token}); err != nil {
@@ -282,7 +287,7 @@ func (s *server) closeTree(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if len(unstopped) > 0 {
-		writeJSON(w, http.StatusInternalServerError, errorBody(fmt.Sprintf("closed %s's root claim %s, but these claims of the tree were not stopped: %s; stop each with legion claims stop",
+		writeJSON(w, http.StatusInternalServerError, errorBody(fmt.Sprintf("closed %s's root claim %s, but these claims of the tree were not stopped: %s. The root's release is already removing the tree (under a sandbox, its tree volume), so stop each now with legion claims stop",
 			c.Tree, token, strings.Join(unstopped, "; "))))
 		return
 	}

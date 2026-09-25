@@ -124,7 +124,8 @@ func (r *Runtime) FailSuspend(err error) { r.fail("Suspend", err) }
 // FailRelease makes every later Release return err.
 func (r *Runtime) FailRelease(err error) { r.fail("Release", err) }
 
-// FailReleaseOf makes every later Release of token's claim return err; nil lets it through again.
+// FailReleaseOf makes every later Release of token's claim return err. nil clears this claim's
+// failure; a FailRelease still applies to it.
 func (r *Runtime) FailReleaseOf(token claim.Token, err error) { r.fail("Release:"+string(token), err) }
 
 // FailObserve makes every later Observe return err instead of a sweep.

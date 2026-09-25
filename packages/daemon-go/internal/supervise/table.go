@@ -135,8 +135,8 @@ type RequestStop struct{ Claim claim.Token }
 // TreeClosable refuses on, so asking would refuse exactly the closes it is entitled to make.
 type RequestTreeClose struct{ Claim claim.Token }
 
-// RequestOperatorClose is the operator closing a tree through the API, the root claim's included.
-// It is put to TreeClosable: an operator may close a tree no workflow issue backs, and a tree one
+// RequestOperatorClose is the operator closing a tree through the API, through its root claim; the
+// tree's other claims are stopped, not closed (api.closeTree). It is put to TreeClosable: an operator may close a tree no workflow issue backs, and a tree one
 // does back closes when its linger expires, never by hand.
 type RequestOperatorClose struct{ Claim claim.Token }
 
