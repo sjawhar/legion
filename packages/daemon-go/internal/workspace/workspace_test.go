@@ -249,6 +249,58 @@ func assertCredentialedEnvironment(t *testing.T, command Command) {
 	}
 }
 
+// tokenProbe runs every command through runner, first recording whether a one-shot token file
+// exists under dir while the command runs.
+type tokenProbe struct {
+	Runner
+	dir string
+	mu  sync.Mutex
+	ran []string
+}
+
+func (p *tokenProbe) Run(ctx context.Context, command Command) (Result, error) {
+	tokens, err := filepath.Glob(filepath.Join(p.dir, "provisioning-credential-*", "token"))
+	if err != nil {
+		return Result{}, err
+	}
+	p.mu.Lock()
+	p.ran = append(p.ran, fmt.Sprintf("%s token=%t", strings.Join(command.Argv, " "), len(tokens) > 0))
+	p.mu.Unlock()
+	return p.Runner.Run(ctx, command)
+}
+
+// The one-shot token file exists only while the clone and the fetch need it: an existing
+// workspace's `jj workspace update-stale`, which runs first, runs before it is written.
+func TestProvisionWritesTheTokenFileAfterUpdatingAStaleWorkspace(t *testing.T) {
+	run := newLocalRunner(t)
+	req := provisionRequest(t)
+	if _, err := Provision(context.Background(), run, req); err != nil {
+		t.Fatalf("first provision: %v", err)
+	}
+	probe := &tokenProbe{Runner: run, dir: req.StateDir}
+	if _, err := Provision(context.Background(), probe, req); err != nil {
+		t.Fatalf("second provision: %v", err)
+	}
+	var updated, fetched bool
+	for _, ran := range probe.ran {
+		switch {
+		case strings.HasPrefix(ran, "jj workspace update-stale "):
+			updated = true
+			if !strings.HasSuffix(ran, "token=false") {
+				t.Errorf("%s: the token file already existed", ran)
+			}
+		case strings.HasPrefix(ran, "jj git fetch "):
+			fetched = true
+			if !strings.HasSuffix(ran, "token=true") {
+				t.Errorf("%s: the fetch ran without its token file", ran)
+			}
+		}
+	}
+	if !updated || !fetched {
+		t.Fatalf("the second provision ran no update-stale or no fetch: %q", probe.ran)
+	}
+}
+
 func TestProvisionClonesThroughTemporarySiblingWithCredentialReset(t *testing.T) {
 	run := newLocalRunner(t)
 	req := provisionRequest(t)

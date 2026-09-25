@@ -114,6 +114,8 @@ type FetchRequest struct {
 // pod's feed with no credential (FromFeed), or from GitHub with the one-shot credential
 // (FromGitHub). Only this package's two constructors make one.
 type Source interface {
+	// check refuses a Source that cannot reach repository, before provisioning runs anything.
+	check(repository string) error
 	// open is the remote the clone and the fetch of repository use, with bookmark the issue's own;
 	// the caller removes it.
 	open(repository, bookmark string) (remote, error)
@@ -125,6 +127,11 @@ type Source interface {
 func FromFeed(dir string) Source { return feedSource(dir) }
 
 type feedSource string
+
+func (dir feedSource) check(repository string) error {
+	_, err := feedRepository(string(dir), repository)
+	return err
+}
 
 func (dir feedSource) open(repository, bookmark string) (remote, error) {
 	feed, err := feedRepository(string(dir), repository)
@@ -142,10 +149,14 @@ func FromGitHub(token, credentialDir string) Source {
 
 type gitHubSource struct{ token, credentialDir string }
 
-func (s gitHubSource) open(string, string) (remote, error) {
+func (s gitHubSource) check(string) error {
 	if s.credentialDir == "" {
-		return remote{}, errors.New("workspace credential directory is required")
+		return errors.New("workspace credential directory is required")
 	}
+	return nil
+}
+
+func (s gitHubSource) open(string, string) (remote, error) {
 	return newProvisioningCredential(s.credentialDir, s.token)
 }
 

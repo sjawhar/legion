@@ -26,13 +26,9 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 	if request.Source == nil {
 		return Workspace{}, errors.New("workspace request names no way to the repository: FromFeed or FromGitHub")
 	}
-	source, err := request.Source.open(request.Repo, workspace.Bookmark)
-	if err != nil {
+	if err := request.Source.check(request.Repo); err != nil {
 		return Workspace{}, err
 	}
-	defer func() {
-		_ = source.remove()
-	}()
 
 	exists, err := pathExists(workspace.Dir)
 	if err != nil {
@@ -43,6 +39,13 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 			return Workspace{}, err
 		}
 	}
+	source, err := request.Source.open(request.Repo, workspace.Bookmark)
+	if err != nil {
+		return Workspace{}, err
+	}
+	defer func() {
+		_ = source.remove()
+	}()
 	if err := ensureRepoClone(ctx, run, workspace.Clone, "https://github.com/"+request.Repo, source.env); err != nil {
 		return Workspace{}, err
 	}
