@@ -11,14 +11,15 @@
 # The sequence runs in the checkout this script lives in, because a copy of packages/pi-envoy cannot
 # build: prepack.sh copies ../../skills, and the bundle resolves @legion/* through the workspace
 # root's node_modules (`bun install --frozen-lockfile` at the root first).
-#   1. save package.json, arm the EXIT trap    release.yaml:359
-#   2. omp.extensions -> the packed bundles    release.yaml:360-362; worker.Dockerfile:74-75
-#   3. bun pm pack; its prepack builds dist/   release.yaml:364-367; prepack.sh:9-17
-#   4. put package.json back                   release.yaml:379-384
-#   5. unpack the tarball into <dir>           worker.Dockerfile:70-72, :77-78
-#   6. OMP_PROFILE=<name> omp plugin install   worker.Dockerfile:192
+#   1. save package.json, arm the EXIT trap    release.yaml pi_envoy "Point extensions at the packed bundles"
+#   2. omp.extensions -> the packed bundles    that step's jq; worker.Dockerfile's `jq '.omp.extensions = …'`
+#   3. bun pm pack; its prepack builds dist/   release.yaml "Pack extension"; prepack.sh's `bun build`
+#   4. put package.json back                   release.yaml "Restore committed manifest"
+#   5. unpack the tarball into <dir>           worker.Dockerfile's `tar xzf ./*.tgz -C /out/pi-legion-envoy`
+#   6. OMP_PROFILE=<name> omp plugin install   worker.Dockerfile's `omp plugin install /opt/legion/pi-legion-envoy`
 #   7. verify with OMP_PROFILE=<name> omp plugin list
-# release.yaml:342-347 (set the release version) is not a step here: the profile gets the
+# Each source is cited by what it runs, never by line number: the lines move with every edit
+# above them. release.yaml's "Set release version" is not a step here: the profile gets the
 # checkout's own version. The packed manifest and the tarball are written under this run's temp
 # directory rather than beside package.json, so an interrupted run strands neither a tmp.json nor
 # a .tgz in the checkout (the release's `rm -f ./*.tgz` guards the same stale-glob case).

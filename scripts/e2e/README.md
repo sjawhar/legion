@@ -14,6 +14,7 @@ through `scripts/e2e/.shellcheckrc`.
 | `stage1-skeleton.sh` | `legion start` boots against a local Postgres, serves `/healthz` and `GET /legion/v1/state`, answers `legion state`, registers itself in the Go daemon's own legions registry, survives a restart against the same store with its first boot time intact, and refuses an unreachable Postgres by the host it could not reach and never by the password |
 | `stage2-tmux-supervision.sh` | the Go daemon supervises real Oh My Pi sessions — the pinned build with this checkout's plugin in an isolated profile — in its private tmux server, against a real Envoy listener and NATS: the plugin gate refuses another contract and a disabled plugin; an agent registers, holds its Envoy role and is ready; a task queued before ready runs once, its model turn through the Hawk model gateway, and a retried frame starts no second turn; a killed pane resumes the same session; suspend and resume keep it; a stale hello is refused; an agent that never registers is retired at the deadline and counted; a restart re-adopts every live pane; an orphan is reaped after the grace; the OMP process's environment is the isolated one. Devbox only |
 | `stage4a-sandbox-runtime.sh` | the Agent Sandbox runtime (`internal/runtime/sandbox`) on the production cluster, driven through the Legion daemon's restricted identity and nothing more: the Agent Sandbox install check accepts and refuses by name; the image probe Sandbox passes; a root provisions its workspace, registers, runs under gVisor and adopts its working copy's author; workers join the root's node, and schedule anywhere when no tree pod is scheduled; suspend, resume, a same-agent refusal, a pod killed in place, a relaunch before registration, and two concurrent provisions each hold; a fresh runtime re-adopts every live pod; the orphan sweep honours its grace; releasing the tree leaves nothing, and the namespace matches its snapshot. Devbox only |
+| `controller-start-tmux.sh` | the operator-launched controller on the Go daemon under tmux: `legion start --check-config` passes a real config and names the key on each broken variant, running no key command; the boot gate refuses a plugin of another contract; `legion state --config` runs no key command; `legion controller start` refuses a group-readable operator token file, claims the controller role, shows in `controllerLocator`, runs Oh My Pi interactive with the controller environment and its secret only as a file, leaves Ctrl-C to Oh My Pi, and exits with its code; `legion status` from an operator shell mints its grant with the operator bearer; a second start revokes the first's capability and grants; the controller liveness probe reads the live listener. Devbox only |
 | `verifiers-staging-token.sh` | `dispatch` and the Envoy listener authenticate a projected service-account token the staging EKS cluster actually minted — the right audience is accepted, the other binary's audience and a missing bearer are refused, each shared token still works, half an OIDC pair and an issuer that does not answer refuse the boot, and a refused token leaves its failure class in the log and nowhere else |
 | `TestRealGitHubCredentialSurface` | the real `api.NewServer` and built `legion` binary use the implementer and reviewer Apps to identify as their bots, list the smoke repository's pull requests, refuse a merge before GitHub receives it, and clone the smoke repository through `legion credential` alone. Devbox only |
 
@@ -407,6 +408,40 @@ What the run had to learn about production:
 - gVisor on production reports `4.19.0-gvisor` from `uname -r`.
 - The worker image has no `kill` binary; the exec runs the shell's builtin.
 
+## controller-start-tmux.sh
+
+Task 4b.5's acceptance for `legion controller start`, on tmux. The Go daemon runs on a real Postgres
+with this checkout's plugin in an isolated OMP profile, against a real Envoy listener and NATS, and
+the command runs in real tmux panes, as an operator would. The pinned Oh My Pi is launched through
+mise. The controller takes no model turn, so the run needs no model route.
+
+```bash
+bash scripts/e2e/controller-start-tmux.sh
+```
+
+Each check prints `== <name>`, what it observed, and `ok <name>`. The first check that fails ends the
+run non-zero and names itself. On any exit the run removes its scratch directory, the isolated
+profile, both tmux servers, and its Postgres and NATS containers. `CONTROLLER_START_EVIDENCE_DIR`
+keeps the daemon and listener logs and, under `checks/`, each check's own output (the controllers'
+stderr and exit codes, the refusal, the route answers, the prober's log) and both controller panes
+as they were at exit, so a failed run keeps what failed; it defaults to a fresh `/tmp` directory,
+which is printed. No secret is written there.
+
+| check | what it holds, and 4b.5's acceptance item |
+| :--- | :--- |
+| `check-config-passes` | `legion start --check-config` passes the run's tmux config. 4b.5's "`--check-config` passes on the proof's config" is the full-tree driver's, whose config is `runtime: kubernetes`: `stage4b-sandbox-tree.sh`'s `boot` checkpoint runs it before the daemon starts |
+| `check-config-names-each-broken-key` | an unknown key, a zero `admission_cap`, a bad `envoy_url`, and a Dispatch URL without its token file are each refused by name, and neither App's `private_key_command` runs (names the key on each broken variant) |
+| `gate-refuses-the-previous-contract` | the boot gate refuses the plugin with its manifest set to the contract before the checkout's, naming both contracts (the plugin at the bumped contract refuses the previous one by name) |
+| `daemon-serves` | the daemon answers `/healthz` with no `controllerLocator` yet |
+| `state-config-runs-no-key-command` | `legion state --config` on a config whose key command would fail still reads the state, and the command never runs (`legion state --config` runs no key command) |
+| `operator-token-file-others-can-read-is-refused` | a 0640 operator token file is refused by path and mode, the daemon mints nothing, and no state directory is written (a group-readable operator token file is refused naming it) |
+| `controller-claims-the-role` | the controller registers, `GET /legion/v1/state` shows `controllerLocator` (`runtime: tmux`, `external: true`), the Envoy role `legion-<project>-controller` names its session, and its Oh My Pi has the controller environment, its secret only as a 0600 file, interactive (claims the controller role, shows `controllerLocator`) |
+| `ctrl-c-reaches-omp-not-the-cli` | one Ctrl-C leaves both `legion controller start` and Oh My Pi running (decision 3: Oh My Pi owns the terminal) |
+| `status-from-an-operator-shell` | `legion status --operator-token-file` mints a grant with the operator bearer and reaches the status route; the rig has no Dispatch, so the route answers 500 naming it. A wrong bearer is refused 403 (decision 3's operator path; the status write itself is the full-tree proof's) |
+| `second-start-revokes-the-first` | a second start takes the role and the locator, the daemon logs mints 1 and 2, the first capability's registration is refused 403, and a grant minted before the second start, which redeemed then (500 `DISPATCH_UNAVAILABLE`, past the grant check), is refused 403 `GRANT_UNAVAILABLE` after it (a second start revokes the first's capability) |
+| `liveness-probe-against-the-listener` | `controller.Prober` on the live listener calls the second session alive and the first gone |
+| `exit-code-is-oh-my-pis` | Ctrl-D quits Oh My Pi cleanly and the command exits 0, as Oh My Pi did. A non-zero code is carried through too; the stub-omp unit test (`cmd/legion/controller_test.go`, exit 3) holds that |
+
 ## verifiers-staging-token.sh
 
 ```sh
@@ -527,17 +562,25 @@ because `prepack.sh` copies `../../skills` and the bundle resolves `@legion/*` t
 `node_modules`:
 
 1. save `packages/pi-envoy/package.json` and arm an `EXIT` trap that copies it back byte-identical
-   (`.github/workflows/release.yaml:359`);
-2. rewrite `omp.extensions` to `["dist/envoy.js","dist/legion.js"]` with `jq` (`release.yaml:360-362`,
-   `packages/daemon/docker/worker.Dockerfile:74-75`);
-3. `bun pm pack`, whose `prepack` builds `dist/` (`release.yaml:364-367`, `packages/pi-envoy/scripts/prepack.sh`);
-4. copy the saved manifest back and check it byte for byte (`release.yaml:379-384`);
-5. unpack the tarball into `<dir>` (`worker.Dockerfile:70-72, :77-78`);
-6. `OMP_PROFILE=<name> omp plugin install <dir>` (`worker.Dockerfile:192`);
+   (`.github/workflows/release.yaml`'s pi_envoy job saves it to `$RUNNER_TEMP/pi-envoy-manifest.json`
+   in "Point extensions at the packed bundles");
+2. rewrite `omp.extensions` to `["dist/envoy.js","dist/legion.js"]` with `jq` (the same step, and the
+   `jq '.omp.extensions = …'` line of `packages/daemon/docker/worker.Dockerfile`'s plugin `RUN`);
+3. `bun pm pack`, whose `prepack` builds `dist/` (the release's "Pack extension" step,
+   `packages/pi-envoy/scripts/prepack.sh`);
+4. copy the saved manifest back and check it byte for byte (the release's "Restore committed
+   manifest");
+5. unpack the tarball into `<dir>` (`worker.Dockerfile`'s `mkdir -p /out/pi-legion-envoy` and
+   `tar xzf ./*.tgz -C /out/pi-legion-envoy --strip-components=1`);
+6. `OMP_PROFILE=<name> omp plugin install <dir>` (`worker.Dockerfile`'s
+   `omp plugin install /opt/legion/pi-legion-envoy`);
 7. `OMP_PROFILE=<name> omp plugin list --json` must show the plugin at the checkout's version,
    enabled, and resolving to `<dir>`.
 
-The release's version bump (`release.yaml:342-347`) is not a step: the profile gets the checkout's
+Each step cites its source by what it runs, never by line number: the lines move with every edit
+above them.
+
+The release's version bump (its "Set release version" step) is not a step: the profile gets the checkout's
 own version. The packed manifest and the tarball are written to the run's `mktemp -d` directory,
 never beside `package.json`, so an interrupted run strands no `tmp.json` or `.tgz` in the checkout.
 
