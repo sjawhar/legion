@@ -56,13 +56,15 @@ async function resolve(variable, discover) {
   }
 }
 
-// agentModels answers whether each agent runs on its own model, resolved as the task tool resolves
-// a subagent's (task/structured-subagent.ts, task/executor.ts at the pin): the operator's
-// `task.agentModelOverrides` entry, else the agent's frontmatter model, expanded through the
-// configured roles, then resolveModelOverrideWithAuthFallback with the operator's default role as
-// the parent's model, and the model's key. Where the task tool would quietly run the agent on the
-// parent's model instead — a role with no configured model, or a model whose key does not work —
-// the agent is unresolved.
+// agentModels answers whether each agent runs on its own model, selected and resolved as the task
+// tool does a subagent's at the pin (resolveEffectiveAgentModelSelection in config/model-resolver.ts,
+// resolveModelOverrideWithAuthFallback from task/executor.ts): the operator's
+// `task.agentModelOverrides` entry when it expands to a model, else the agent's frontmatter model,
+// expanded through the configured roles, then resolved with the operator's default role as the
+// parent's model, then the model's key. Where the task tool would quietly run the agent on the
+// parent's model instead (a role with no configured model, or a model whose key does not work) the
+// agent is unresolved. An agent that names no model runs on the session's own by design, and is
+// not judged.
 async function agentModels(agents, ctx) {
   try {
     const resolver = await import("@oh-my-pi/pi-coding-agent/config/model-resolver");
@@ -70,37 +72,43 @@ async function agentModels(agents, ctx) {
     const { settings } = await import("@oh-my-pi/pi-coding-agent/config/settings");
     const overrides = settings.get("task.agentModelOverrides") ?? {};
     const parent = settings.getModelRole("default");
+
+    // problem is why the task tool would not run an agent on the model it declares, or undefined.
+    const problem = async (declared) => {
+      const patterns = resolver.resolveConfiguredModelPatterns(declared, settings);
+      const result =
+        patterns.length === 0
+          ? {}
+          : await resolver.resolveModelOverrideWithAuthFallback(patterns, parent, ctx.modelRegistry, settings);
+      if (!result.model) {
+        // A role alias no configured role expands stays an alias: the role is not configured.
+        const left = patterns.length > 0 ? patterns : declared;
+        const roles = left.filter((pattern) => pattern.startsWith("@"));
+        if (roles.length === left.length) {
+          return `role ${roles.map((role) => role.slice(1).split(":")[0]).join(",")} is not configured`;
+        }
+        return `no available model matches ${left.join(",")}`;
+      }
+      const model = `${result.model.provider}/${result.model.id}`;
+      if (result.authFallbackUsed) {
+        return `${patterns.join(",")} has no working credentials, so Oh My Pi runs it on the parent's model ${model}`;
+      }
+      const key = await ctx.modelRegistry.getApiKey(result.model);
+      if (key !== kNoAuth && !isAuthenticated(key)) return `its model ${model} has no working credentials`;
+      return undefined;
+    };
+
     const unresolved = [];
     for (const agent of agents) {
-      const declared = resolver.normalizeModelPatternList(overrides[agent.name] ?? agent.model);
-      const selector = declared.length > 0 ? declared : resolver.normalizeModelPatternList(parent);
-      const shown = declared.length > 0 ? declared.join(",") : "(the session's model)";
-      const why = await problem();
-      if (why) unresolved.push(`${agent.name} ${shown} ${why}`);
-
-      async function problem() {
-        const patterns = resolver.resolveConfiguredModelPatterns(selector, settings);
-        const result =
-          patterns.length === 0
-            ? {}
-            : await resolver.resolveModelOverrideWithAuthFallback(patterns, parent, ctx.modelRegistry, settings);
-        if (!result.model) {
-          // A role alias no configured role expands stays an alias: the role is not configured.
-          const left = patterns.length > 0 ? patterns : selector;
-          const roles = left.filter((pattern) => pattern.startsWith("@"));
-          if (roles.length === left.length) {
-            return `role ${roles.map((role) => role.slice(1).split(":")[0]).join(",")} is not configured`;
-          }
-          return `no available model matches ${left.join(",")}`;
-        }
-        const model = `${result.model.provider}/${result.model.id}`;
-        if (result.authFallbackUsed) {
-          return `${patterns.join(",")} has no working credentials, so Oh My Pi runs it on the parent's model ${model}`;
-        }
-        const key = await ctx.modelRegistry.getApiKey(result.model);
-        if (key !== kNoAuth && !isAuthenticated(key)) return `its model ${model} has no working credentials`;
-        return undefined;
-      }
+      const override = overrides[agent.name];
+      const declared = resolver.normalizeModelPatternList(
+        resolver.resolveConfiguredModelPatterns(override, settings).length > 0 ? override : agent.model
+      );
+      if (declared.length === 0) continue;
+      const why = await problem(declared);
+      // <agent> <model> <why>: the gate splits the answer on its first two spaces, and a model
+      // pattern holds none.
+      if (why) unresolved.push(`${agent.name} ${declared.join(",")} ${why}`);
     }
     process.stderr.write(
       unresolved.length === 0

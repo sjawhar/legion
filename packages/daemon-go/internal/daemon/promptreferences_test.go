@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -94,5 +95,42 @@ func TestPromptReferencesReadTheSkillsTheAgentsAndTheRolePrompts(t *testing.T) {
 				t.Errorf("promptReferences over %s: %ss = %v, want %v", rolesDir, kind.noun, names[i], want[i])
 			}
 		}
+	}
+}
+
+// The manifest's `omp.skills` names the directories whose skills dispatch agents, so a manifest the
+// gate cannot read them from is refused rather than checked as shipping none; absent or null, it
+// ships none.
+func TestReadPluginManifestRefusesSkillsItCannotRead(t *testing.T) {
+	for _, testCase := range []struct {
+		name, omp, want string
+		skills          []string
+	}{
+		{name: "skills listed", omp: `,"omp":{"skills":["dist/skills"]}`, skills: []string{"dist/skills"}},
+		{name: "no omp", omp: ""},
+		{name: "a null omp", omp: `,"omp":null`},
+		{name: "null skills", omp: `,"omp":{"skills":null}`},
+		{name: "an omp that is not an object", omp: `,"omp":"dist/skills"`, want: "has an `omp` that is not an object"},
+		{name: "skills that are not a list", omp: `,"omp":{"skills":"dist/skills"}`, want: "has an `omp.skills` that is not a list of directories"},
+		{name: "an entry that is not a directory name", omp: `,"omp":{"skills":[3]}`, want: "lists a skills entry 3 that is not a directory name"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			manifest := filepath.Join(t.TempDir(), "package.json")
+			if err := os.WriteFile(manifest, []byte(`{"version":"1.0.0","legion":{"goDaemonApiVersion":3}`+testCase.omp+`}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			plugin, err := readPluginManifest(manifest, "the test", 3)
+
+			if testCase.want != "" {
+				if err == nil || !strings.Contains(err.Error(), testCase.want) {
+					t.Fatalf("readPluginManifest = %v, want a refusal saying %q", err, testCase.want)
+				}
+				return
+			}
+			if err != nil || !slices.Equal(plugin.skills, testCase.skills) {
+				t.Fatalf("readPluginManifest = %v skills %v, want skills %v", err, plugin.skills, testCase.skills)
+			}
+		})
 	}
 }

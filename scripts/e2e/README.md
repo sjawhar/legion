@@ -439,7 +439,9 @@ What the run had to learn about production:
 Task 4b.5's acceptance for `legion controller start`, on tmux. The Go daemon runs on a real Postgres
 with this checkout's plugin in an isolated OMP profile, against a real Envoy listener and NATS, and
 the command runs in real tmux panes, as an operator would. The pinned Oh My Pi is launched through
-mise. The controller takes no model turn, so the run needs no model route.
+mise. The controller takes no model turn, so the run needs no model route: the profile names the
+roles the task agents use (`review`, `oracle`) and the default on a static-key provider that listens
+nowhere, which is all the boot gate's agent-model check resolves.
 
 ```bash
 bash scripts/e2e/controller-start-tmux.sh

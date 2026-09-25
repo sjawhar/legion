@@ -313,8 +313,16 @@ func readPluginManifest(manifest, installInto string, contract int) (pluginManif
 	declared, present := legion["goDaemonApiVersion"]
 	if number, ok := declared.(float64); ok && number == float64(contract) {
 		plugin := pluginManifest{version: version}
-		omp, _ := record["omp"].(map[string]any)
-		listed, _ := omp["skills"].([]any)
+		// `omp` and `omp.skills` may be absent or null; any other shape is a manifest the gate
+		// cannot read the shipped skills from, and every agent they dispatch would go unchecked.
+		omp, isObject := record["omp"].(map[string]any)
+		if value := record["omp"]; value != nil && !isObject {
+			return pluginManifest{}, fmt.Errorf("pi-legion-envoy manifest at %s has an `omp` that is not an object (%v). %s", manifest, value, install)
+		}
+		listed, isList := omp["skills"].([]any)
+		if value := omp["skills"]; value != nil && !isList {
+			return pluginManifest{}, fmt.Errorf("pi-legion-envoy manifest at %s has an `omp.skills` that is not a list of directories (%v). %s", manifest, value, install)
+		}
 		for _, entry := range listed {
 			dir, ok := entry.(string)
 			if !ok {

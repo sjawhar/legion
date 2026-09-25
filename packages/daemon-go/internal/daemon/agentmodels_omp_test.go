@@ -11,9 +11,9 @@ import (
 	"testing"
 )
 
-// agentModelPlugin lays out a pi-legion-envoy under dir whose one skill dispatches two task agents
-// the plugin ships, each declaring its model by role: oracle as `@oracle`, reviewer as the list
-// `["@review"]`.
+// agentModelPlugin lays out a pi-legion-envoy under dir whose one skill dispatches three task agents
+// the plugin ships: oracle declaring its model as `@oracle`, reviewer as the list `["@review"]`, and
+// plain declaring none.
 func agentModelPlugin(t *testing.T, dir string) string {
 	t.Helper()
 	root := filepath.Join(dir, "pi-legion-envoy")
@@ -23,9 +23,10 @@ func agentModelPlugin(t *testing.T, dir string) string {
 		filepath.Join("dist", "legion.js"): "globalThis[Symbol.for(\"legion.pi-envoy.legion-loaded\")] = import.meta.url;\n" +
 			"export default function () {}\n",
 		filepath.Join("dist", "skills", "legion-worker", "SKILL.md"): "---\nname: legion-worker\ndescription: test\n---\n" +
-			"Run `task(agent=\"oracle\")`, then `task(agent=\"reviewer\")`.\n",
+			"Run `task(agent=\"oracle\")`, then `task(agent=\"reviewer\")`, then `task(agent=\"plain\")`.\n",
 		filepath.Join("agents", "oracle.md"):   "---\nname: oracle\ndescription: test\nmodel: \"@oracle\"\n---\nConsult.\n",
 		filepath.Join("agents", "reviewer.md"): "---\nname: reviewer\ndescription: test\nmodel: [\"@review\"]\n---\nReview.\n",
+		filepath.Join("agents", "plain.md"):    "---\nname: plain\ndescription: test\n---\nHelp.\n",
 	} {
 		path := filepath.Join(root, name)
 		mkdir(t, filepath.Dir(path))
@@ -42,8 +43,10 @@ func agentModelPlugin(t *testing.T, dir string) string {
 // model no available provider serves, a model whose key does not work while the parent's does (the
 // tool's silent fallback to the parent's model), and a model whose key does not work at all. A key
 // the environment supplies, as a worker's shim exports one from the providers Secret, counts. A
-// build-time probe skips the check. The profile's providers listen nowhere, so no model is called
-// and no credential the machine carries decides the run.
+// build-time probe skips the check. The operator's override counts only when it expands to a model,
+// as the task tool takes it, and an agent that declares no model runs on the session's own and is
+// not judged. The profile's providers listen nowhere, so no model is called and no credential the
+// machine carries decides the run.
 func TestTheAgentModelCheckOnTheRealOhMyPi(t *testing.T) {
 	omp := os.Getenv("LEGION_TEST_OMP")
 	switch {
@@ -61,10 +64,12 @@ func TestTheAgentModelCheckOnTheRealOhMyPi(t *testing.T) {
 	for _, testCase := range []struct {
 		name  string
 		roles string
-		env   map[string]string
-		pane  bool
-		skip  bool
-		want  []string
+		// config is the rest of the profile's config.yml, after modelRoles.
+		config string
+		env    map[string]string
+		pane   bool
+		skip   bool
+		want   []string
 	}{
 		{name: "every agent's role configured", roles: "  default: fake/m1\n  review: fake/m1\n  oracle: fake/m1\n"},
 		{name: "a role not configured", roles: "  default: fake/m1\n  review: fake/m1\n",
@@ -80,13 +85,18 @@ func TestTheAgentModelCheckOnTheRealOhMyPi(t *testing.T) {
 		{name: "that provider's key from the environment", roles: "  default: fake/m1\n  review: fake/m1\n  oracle: anthropic/claude-sonnet-4-5\n",
 			env: map[string]string{"ANTHROPIC_API_KEY": "sk-test-not-a-key"}},
 		{name: "a build-time probe", roles: "  default: fake/m1\n", skip: true},
+		{name: "an empty override", roles: "  default: fake/m1\n  review: fake/m1\n", config: "task:\n  agentModelOverrides:\n    oracle: \"\"\n",
+			want: []string{"task agent oracle " + dispatched, "@oracle", "role oracle is not configured"}},
+		{name: "an override that expands to a model", roles: "  default: fake/m1\n  review: fake/m1\n",
+			config: "task:\n  agentModelOverrides:\n    oracle: fake/m1\n"},
+		{name: "an agent that declares no model, with no default role", roles: "  review: fake/m1\n  oracle: fake/m1\n"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			dir := t.TempDir()
 			home := filepath.Join(dir, "home")
 			agent := filepath.Join(home, ".omp", "profiles", "legion", "agent")
 			mkdir(t, agent)
-			for name, content := range map[string]string{"models.yml": models, "config.yml": "modelRoles:\n" + testCase.roles} {
+			for name, content := range map[string]string{"models.yml": models, "config.yml": "modelRoles:\n" + testCase.roles + testCase.config} {
 				if err := os.WriteFile(filepath.Join(agent, name), []byte(content), 0o600); err != nil {
 					t.Fatal(err)
 				}

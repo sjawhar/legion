@@ -336,8 +336,11 @@ func (r *Runtime) createProbe(ctx context.Context, name, digest string, manifest
 // the kubelet cannot mount.
 const providersMountRecheck = 15 * time.Second
 
-// providersMountFailure is the kubelet's FailedMount message for the providers volume — the Secret,
-// or one of the keys it is asked for, missing — or "" when the pod's events hold none.
+// providersMountFailure is the kubelet's FailedMount message for the providers volume when the
+// Secret, or one of the keys it is asked for, is missing (`secret "<name>" not found`, `references
+// non-existent secret key: <key>`, pkg/volume/secret), or "" when the pod's events hold none. Every
+// other FailedMount, such as `failed to sync secret cache: timed out waiting for the condition`
+// while the kubelet's watch catches up, is one the kubelet retries, and is left to the budget.
 func (r *Runtime) providersMountFailure(ctx context.Context, pod *corev1.Pod) string {
 	reading, cancel := call(ctx)
 	defer cancel()
@@ -347,7 +350,11 @@ func (r *Runtime) providersMountFailure(ctx context.Context, pod *corev1.Pod) st
 		return ""
 	}
 	for _, event := range list.Items {
-		if event.Reason == "FailedMount" && strings.Contains(event.Message, `volume "`+providersVolume+`"`) {
+		if event.Reason != "FailedMount" || !strings.Contains(event.Message, `volume "`+providersVolume+`"`) {
+			continue
+		}
+		if strings.Contains(event.Message, `secret "`+ProvidersSecretName(r.project)+`" not found`) ||
+			strings.Contains(event.Message, "references non-existent secret key: ") {
 			return event.Message
 		}
 	}
@@ -414,7 +421,12 @@ func (r *Runtime) probeLog(ctx context.Context, name string) (string, error) {
 // refused, not waved through; one that confirmed another contract is refused naming both. And it
 // must say the prompt-named agents' models resolved: an image whose CLI predates that check says
 // nothing, and one that skipped it is a build-time probe's result, neither of which proves the
-// workers run their agents on their models.
+// workers run their agents on their models. Given the daemon's role references, an image whose CLI
+// predates the check never gets that far: it stops at the probe command's flags, and its Failed pod
+// is refused naming the flag its CLI lacks.
+// undefinedFlag is Go's flag package refusing a flag the probed CLI does not define.
+var undefinedFlag = regexp.MustCompile(`flag provided but not defined: (-\S+)`)
+
 func (r *Runtime) judge(name, digest string, pod *corev1.Pod, logTail string, contract int) bootprobe.Outcome {
 	if pod.Status.Phase == corev1.PodFailed {
 		ended := ""
@@ -422,6 +434,10 @@ func (r *Runtime) judge(name, digest string, pod *corev1.Pod, logTail string, co
 			if t := status.State.Terminated; status.Name == probeContainer && t != nil {
 				ended = fmt.Sprintf(" (container %s terminated: %s, exit code %d)", probeContainer, t.Reason, t.ExitCode)
 			}
+		}
+		if flag := undefinedFlag.FindStringSubmatch(logTail); flag != nil {
+			return imageRefusal(digest, "pod %s Failed%s: its legion CLI has no %s, a flag this daemon's probe passes, so the worker image predates this daemon (the agent-model check, LEGION-270, added --role-references and --provider-env-dir); build it from this daemon's commit — log tail: %s",
+				name, ended, flag[1], logTail)
 		}
 		return imageRefusal(digest, "pod %s Failed%s — log tail: %s", name, ended, logTail)
 	}

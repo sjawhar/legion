@@ -242,6 +242,9 @@ func TestProbeImageRefusesWhatTheProbePodAnswered(t *testing.T) {
 		{"a CLI that predates the agent-model check", func(g *probeRig) {
 			g.succeeds("probe-image: OK (/opt/omp/bin/omp) session-storage=probed go-daemon-api-version=3")
 		}, []string{"without resolving the prompt-named agents' models: the worker image predates the agent-model check (LEGION-270)"}},
+		{"a CLI that predates a flag the probe passes", func(g *probeRig) {
+			g.fails("flag provided but not defined: -role-references\nUsage of legion probe-image:")
+		}, []string{"Failed (container probe terminated", "its legion CLI has no -role-references, a flag this daemon's probe passes, so the worker image predates this daemon"}},
 		{"a build-time probe's result", func(g *probeRig) { g.succeeds(bootprobe.OKLine("/opt/omp/bin/omp", 3, bootprobe.AgentModelsSkipped)) },
 			[]string{"with the agents' models skipped: a build-time probe's result reached boot"}},
 		{"an image name the kubelet cannot use", func(g *probeRig) { g.waits("InvalidImageName") },
@@ -485,26 +488,51 @@ func TestEveryBootProbesTheImage(t *testing.T) {
 	}
 }
 
-// A providers Secret the kubelet cannot mount leaves the probe pod Pending, never Failed; its
-// FailedMount event is the answer, a refusal naming the Secret, the keys provider_keys asks of it,
-// and the kubelet's message, given once rather than retried to the budget.
+// A providers Secret the kubelet cannot mount leaves the probe pod Pending, never Failed: a
+// FailedMount event saying the Secret, or one of the keys provider_keys asks of it, is missing is
+// the answer, a refusal naming the Secret, the keys, and the kubelet's message, given once rather
+// than retried to the budget. Any other FailedMount on the volume is one the kubelet retries (its
+// Secret watch not yet synced, kubernetes/kubernetes#99475), and the attempt runs to its budget.
 func TestProbeImageRefusesAProvidersSecretThePodCannotMount(t *testing.T) {
-	g := newProbeRig(t, nil, withOptions(func(o *Options) { o.ProviderKeys = map[string]string{"ANTHROPIC_API_KEY": "anthropic"} }))
-	g.waits("ContainerCreating")
-	message := `MountVolume.SetUp failed for volume "providers" : secret "` + ProvidersSecretName(testProject) + `" not found`
-	if _, err := g.kube.CoreV1().Events(testNamespace).Create(g.ctx, &corev1.Event{
-		ObjectMeta:     metav1.ObjectMeta{Name: probeSandboxName + ".mount", Namespace: testNamespace},
-		InvolvedObject: corev1.ObjectReference{Kind: "Pod", Name: probeSandboxName, Namespace: testNamespace},
-		Reason:         "FailedMount", Type: corev1.EventTypeWarning, Message: message,
-	}, metav1.CreateOptions{}); err != nil {
-		t.Fatal(err)
-	}
+	mount := `MountVolume.SetUp failed for volume "providers" : `
+	for _, testCase := range []struct {
+		name, message string
+		refused       bool
+	}{
+		{"the Secret missing", mount + `secret "` + ProvidersSecretName(testProject) + `" not found`, true},
+		{"a key missing", mount + "references non-existent secret key: ANTHROPIC_API_KEY", true},
+		{"the kubelet's secret cache not synced", mount + "failed to sync secret cache: timed out waiting for the condition", false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			g := newProbeRig(t, nil, withOptions(func(o *Options) { o.ProviderKeys = map[string]string{"ANTHROPIC_API_KEY": "anthropic"} }))
+			g.waits("ContainerCreating")
+			if _, err := g.kube.CoreV1().Events(testNamespace).Create(g.ctx, &corev1.Event{
+				ObjectMeta:     metav1.ObjectMeta{Name: probeSandboxName + ".mount", Namespace: testNamespace},
+				InvolvedObject: corev1.ObjectReference{Kind: "Pod", Name: probeSandboxName, Namespace: testNamespace},
+				Reason:         "FailedMount", Type: corev1.EventTypeWarning, Message: testCase.message,
+			}, metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			p := probeOptions(t)
+			p.Budget = unfinishedBudget
 
-	err := g.probe(probeOptions(t))
+			err := g.probe(p)
 
-	wantContains(t, err, "cannot mount the providers Secret "+ProvidersSecretName(testProject), "(anthropic)", message)
-	if n := g.creates.Load(); n != 1 {
-		t.Errorf("ran the probe %d times for a Secret the pod cannot mount, want once", n)
+			if testCase.refused {
+				wantContains(t, err, "cannot mount the providers Secret "+ProvidersSecretName(testProject), "(anthropic)", testCase.message)
+				if n := g.creates.Load(); n != 1 {
+					t.Errorf("ran the probe %d times for a Secret the pod cannot mount, want once", n)
+				}
+				return
+			}
+			wantContains(t, err, "the worker image probe never completed within its retry budget (2 attempts)")
+			if err != nil && strings.Contains(err.Error(), "cannot mount the providers Secret") {
+				t.Errorf("ProbeImage = %v, refused a mount failure the kubelet retries", err)
+			}
+			if n := g.creates.Load(); n != 2 {
+				t.Errorf("ran the probe %d times, want the retry's 2", n)
+			}
+		})
 	}
 }
 
