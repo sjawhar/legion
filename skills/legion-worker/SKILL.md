@@ -372,7 +372,7 @@ this proof.
   `E2E` line's head to the new SHA with
   `rebase re-check <old-sha> → <new-sha>: fingerprint unchanged, bare gates only`; the
   real-surface verification is not repeated. Different: a full test round.
-- **The implementer runs `ce-simplify-code` once per pull request, after the last review round
+- **The implementer runs `skill://ce-simplify-code` once per pull request, after the last review round
   closes and before the reviewer's final pass, when the diff touches runtime code; a docs-only
   diff gets none.** It is scoped to the pull request's own diff, at the head where the last review
   round closed: nothing applied leaves that head final; applied → the applied head is the final

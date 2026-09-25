@@ -10,7 +10,7 @@ Review only the supplied diff and changed-file context. Return findings with fil
 
 ## Process
 
-1. Load `thermonuclear-deep-review` and use its complete rubric.
+1. Load `skill://thermonuclear-deep-review` and use its complete rubric.
 2. Trace effects across callers, package boundaries, configuration, and public contracts.
 3. Check feature gates and developer workflows when the change can affect either.
 4. Complete an independent review before reading PR discussion.

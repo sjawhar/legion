@@ -1,11 +1,9 @@
 ---
 name: oracle
 description: |
-  Strategic technical advisor on a non-Anthropic model. Read-only. Use for architecture
-  decisions, hard tradeoffs, and complex debugging where correctness matters more than
-  speed. Consulted by the /sdd workflow for strategy questions.
-model:
-  - "openai-codex/gpt-5.5:high"
+  Strategic technical advisor. Read-only. Use for architecture decisions, hard tradeoffs,
+  and complex debugging where correctness matters more than speed.
+model: ["@oracle"]
 tools: read, glob, grep, todo
 color: cyan
 ---

@@ -10,7 +10,7 @@ Review only the supplied diff and changed-file context. Return findings with fil
 
 ## Process
 
-1. Load `thermonuclear-code-quality` and treat its rubric as complete.
+1. Load `skill://thermonuclear-code-quality` and treat its rubric as complete.
 2. Look first for structural simplification and deletion of accidental complexity.
 3. Trace module boundaries, call sites, and type contracts before claiming a problem.
 4. Prioritize structural issues over cosmetic nits.
