@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,8 +24,9 @@ import (
 
 // Daemons of several projects share one database, and admission is each project's own. Another
 // project's slots count against none of this daemon's cap, its waiting root is not this daemon's
-// to promote, its stale slot is not this daemon's to release, and none of its issues is this
-// daemon's to touch in Dispatch.
+// to promote, its stale slot is not this daemon's to release, and its outbox row, due before any of
+// this daemon's, is not this daemon's to run: none of its issues is this daemon's to touch in
+// Dispatch.
 func TestAnotherProjectsIssuesAreNotThisDaemonsToAdmit(t *testing.T) {
 	cfg := workflowConfig(t, workflowNATS(t))
 	cfg.AdmissionCap = 2
@@ -67,12 +69,30 @@ func TestAnotherProjectsIssuesAreNotThisDaemonsToAdmit(t *testing.T) {
 				return err
 			}
 		}
-		return nil
+		// Due a minute ago, so an outbox that claimed across projects would run it before any row
+		// this daemon's admission enqueues.
+		row, err := record.NewOutboxRow(running, record.StatusWrite{Status: "in_progress", ObservedStatus: "todo"}, now.Add(-time.Minute))
+		if err != nil {
+			return err
+		}
+		return records.Enqueue(ctx, tx, row)
 	}); err != nil {
 		t.Fatalf("seed another project's admission: %v", err)
 	}
+	t.Cleanup(func() {
+		if _, err := st.Pool().Exec(context.Background(), `delete from outbox where issue like $1`, other+"-%"); err != nil {
+			t.Errorf("remove the seeded outbox row: %v", err)
+		}
+	})
 
+	// ownRun closes when the outbox first reaches Dispatch for this project's issue: its first batch
+	// after admission has run, and the other project's older row would have run before it.
+	ownRun := make(chan struct{})
+	var ownOnce sync.Once
 	dispatchServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/v1/issues/"+own) {
+			ownOnce.Do(func() { close(ownRun) })
+		}
 		if strings.Contains(r.URL.Path, other) {
 			t.Errorf("the daemon asked Dispatch about another project's issue: %s %s", r.Method, r.URL.Path)
 		}
@@ -128,6 +148,12 @@ func TestAnotherProjectsIssuesAreNotThisDaemonsToAdmit(t *testing.T) {
 			active = state.Admission.Active
 		}
 		response.Body.Close()
+	}
+
+	select {
+	case <-ownRun:
+	case <-time.After(60 * time.Second):
+		t.Fatalf("the outbox never reached Dispatch for %s after admitting it", own)
 	}
 
 	var slots []string
