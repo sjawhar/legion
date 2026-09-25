@@ -237,3 +237,38 @@ func awaitHealthz(t *testing.T, cfg config.Config, done chan error) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// Each duration key reaches the runtime option that takes it, under either runtime: every value
+// here is distinct, so feeding an option from its neighbouring key fails a row.
+// worker_stop_timeout_seconds in particular has no other test: it is tmux's stop grace and the
+// sandbox's termination grace.
+func TestEveryDurationKeyReachesTheRuntimeOptionThatTakesIt(t *testing.T) {
+	cfg := kubernetesConfig(t, "https://127.0.0.1:1")
+	cfg.WorkerStopTimeout, cfg.WorkerBootTimeout, cfg.ProbeInterval, cfg.SlowCommandTimeout = 11*time.Second, 22*time.Second, 33*time.Second, 44*time.Second
+	cfg.WorkerBootRegistrationDeadlineIntervals = 5
+
+	opts, err := sandboxOptions(cfg, *cfg.Runtime.Kubernetes, "test", "tcp://10.0.0.5:13371", "", quietLogger())
+	if err != nil {
+		t.Fatalf("sandboxOptions: %v", err)
+	}
+	panes := tmuxOptions(cfg, "test", "omp", "", "", nil, quietLogger())
+	for _, row := range []struct {
+		option    string
+		got, want time.Duration
+	}{
+		{"sandbox TerminationGrace", opts.TerminationGrace, cfg.WorkerStopTimeout},
+		{"sandbox BootTimeout", opts.BootTimeout, cfg.WorkerBootTimeout},
+		{"sandbox ProbeInterval", opts.ProbeInterval, cfg.ProbeInterval},
+		{"sandbox AdoptTimeout", opts.AdoptTimeout, cfg.SlowCommandTimeout},
+		{"tmux StopGrace", panes.StopGrace, cfg.WorkerStopTimeout},
+		{"tmux ProbeInterval", panes.ProbeInterval, cfg.ProbeInterval},
+		{"tmux AdoptTimeout", panes.AdoptTimeout, cfg.SlowCommandTimeout},
+	} {
+		if row.got != row.want {
+			t.Errorf("%s = %s, want %s", row.option, row.got, row.want)
+		}
+	}
+	if opts.BootIntervals != cfg.WorkerBootRegistrationDeadlineIntervals {
+		t.Errorf("sandbox BootIntervals = %d, want %d", opts.BootIntervals, cfg.WorkerBootRegistrationDeadlineIntervals)
+	}
+}

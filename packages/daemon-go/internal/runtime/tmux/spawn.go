@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
@@ -105,8 +106,14 @@ func (r *Runtime) workspaceDir(spec runtime.SpawnSpec) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if info, err := os.Stat(working.Dir); err != nil || !info.IsDir() {
-		return "", fmt.Errorf("workspace %s is not a directory: the issue's workspace was never provisioned", working.Dir)
+	info, err := os.Stat(working.Dir)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return "", fmt.Errorf("workspace %s does not exist: the issue's workspace was never provisioned", working.Dir)
+	case err != nil:
+		return "", fmt.Errorf("the workspace: %w", err)
+	case !info.IsDir():
+		return "", fmt.Errorf("workspace %s is not a directory", working.Dir)
 	}
 	return working.Dir, nil
 }

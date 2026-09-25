@@ -76,7 +76,10 @@ type Runtime interface {
 	// ReconcileOrphans ends what this runtime owns that belongs to no known claim — what a crash
 	// between spawning a process and persisting its locator leaves behind. known is every claim the
 	// daemon has not retired; the located ones also join the watch. What an earlier sweep adopted
-	// protects nothing: a process no sweep's known set names any more is the orphan sweep's.
+	// protects nothing: a process no sweep's known set names any more is the orphan sweep's. An
+	// entry that fails Validate is an error, and nothing of its claim is ended: tmux, which knows a
+	// claim's processes only by the locators it is given, then ends nothing at all; the sandbox,
+	// which finds a claim's Sandbox by the claim's own name, keeps that one and sweeps the rest.
 	ReconcileOrphans(ctx context.Context, known []Known, grace time.Duration) error
 	// AdoptWorkingCopy hands the agent's working copy the git identity its commits are authored
 	// with, in the place the working copy actually lives (which under a sandbox is not a

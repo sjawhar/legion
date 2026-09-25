@@ -1433,7 +1433,7 @@ func TestRealTmuxAReleasedClaimsPaneIsTheSweeps(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Spawn root: %v", err)
 	}
-	launching, err := r.rt.Spawn(ctx, r.spec("legion-t-LEGION-6-planner", "LEGION-3", "LEGION-6", claim.RoleTester))
+	launching, err := r.rt.Spawn(ctx, r.spec("legion-t-LEGION-6-planner", "LEGION-3", "LEGION-6", claim.RolePlanner))
 	if err != nil {
 		t.Fatalf("Spawn launching: %v", err)
 	}

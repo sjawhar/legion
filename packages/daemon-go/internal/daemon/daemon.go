@@ -454,25 +454,9 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 // environment is scrubbed before anything is launched on it.
 func tmuxRuntime(cfg config.Config, project, invocation, providerEnvDir, dispatchTokenFile string, tools map[string]string, log *slog.Logger) runtimeFactory {
 	return func(ctx context.Context, conns runtime.Conns, streamAddress string, _ appauth.Tokens) (runtime.Runtime, error) {
-		rt, err := tmux.New(tmux.Options{
-			Project:           project,
-			StateDir:          cfg.StateDir,
-			StreamAddress:     streamAddress,
-			DaemonURL:         cfg.DaemonURL,
-			EnvoyURL:          cfg.EnvoyURL,
-			NatsURLs:          cfg.NatsURLs,
-			DispatchURL:       cfg.DispatchURL,
-			DispatchTokenFile: dispatchTokenFile,
-			Tools:             paneTools(tools),
-			OmpInvocation:     invocation,
-			OmpLaunchPrefix:   cfg.OmpLaunchPrefix,
-			StopGrace:         cfg.WorkerStopTimeout,
-			ProbeInterval:     cfg.ProbeInterval,
-			AdoptTimeout:      cfg.SlowCommandTimeout,
-			ProviderEnvDir:    providerEnvDir,
-			Conns:             conns,
-			Log:               log,
-		})
+		opts := tmuxOptions(cfg, project, invocation, providerEnvDir, dispatchTokenFile, tools, log)
+		opts.StreamAddress, opts.Conns = streamAddress, conns
+		rt, err := tmux.New(opts)
 		if err != nil {
 			return nil, err
 		}
@@ -484,6 +468,28 @@ func tmuxRuntime(cfg config.Config, project, invocation, providerEnvDir, dispatc
 			log.Info("tmux runtime: removed variables the pane environment does not carry", "removed", removed)
 		}
 		return rt, nil
+	}
+}
+
+// tmuxOptions translates the configuration into the tmux runtime's Options, all but the worker
+// stream, which boot hands the factory.
+func tmuxOptions(cfg config.Config, project, invocation, providerEnvDir, dispatchTokenFile string, tools map[string]string, log *slog.Logger) tmux.Options {
+	return tmux.Options{
+		Project:           project,
+		StateDir:          cfg.StateDir,
+		DaemonURL:         cfg.DaemonURL,
+		EnvoyURL:          cfg.EnvoyURL,
+		NatsURLs:          cfg.NatsURLs,
+		DispatchURL:       cfg.DispatchURL,
+		DispatchTokenFile: dispatchTokenFile,
+		Tools:             paneTools(tools),
+		OmpInvocation:     invocation,
+		OmpLaunchPrefix:   cfg.OmpLaunchPrefix,
+		StopGrace:         cfg.WorkerStopTimeout,
+		ProbeInterval:     cfg.ProbeInterval,
+		AdoptTimeout:      cfg.SlowCommandTimeout,
+		ProviderEnvDir:    providerEnvDir,
+		Log:               log,
 	}
 }
 
