@@ -311,8 +311,9 @@ production audit. A passing run's last three checks stop every process, kill the
 server and remove both containers (`services-stopped`), check the model route
 (`model-turns-through-the-gateway`), and close every pull request the run still has open on the
 smoke repository — its own, by branch: the daemon's `legion/<project>-*` and the proof human's
-`proof/clean-main-<project>` — before removing the isolated OMP profile and the scratch work
-directory, the agents' workspaces with it (`cleanup-is-complete`); each shows what it removed gone.
+`proof/clean-main-<project, lowercased>` — before removing the isolated OMP profile and the scratch
+work directory, the agents' workspaces with it (`cleanup-is-complete`); each shows what it removed
+gone.
 The proof merges only the pull request its human-merge check merges, so the held-worker and outbox
 proofs are open when the run reaches here. A close GitHub refuses fails the check with gh's reason;
 a close whose branch delete failed is reported as closed with the reason the branch stayed.

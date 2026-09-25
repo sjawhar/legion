@@ -237,11 +237,15 @@ run_pull_requests() {
 # close_run_pull_requests closes each of them with its branch, printing one line per pull request
 # with gh's reason on anything short of a full close, and returns 1 when a pull request stays open
 # or the list itself fails. `gh pr close --delete-branch` also exits non-zero when the close
-# succeeded and only the branch delete failed; that one is read back and reported as closed.
+# succeeded and only the branch delete failed; that one is read back and reported as closed. Only
+# the listing's stdout is parsed: gh can write to stderr on a listing that succeeds (the devbox shim
+# names an inherited GH_TOKEN on every call), and a word of that line would become a
+# `gh pr close <word>`, which gh reads as a branch name. The listing's stderr, its reason on a
+# failure included, goes to the caller's stderr.
 close_run_pull_requests() {
   local prs pr out refused=0
-  prs=$(run_pull_requests 2>&1) || {
-    printf 'could not list the open pull requests on %s: %s\n' "$repo" "$prs"
+  prs=$(run_pull_requests) || {
+    printf "could not list the open pull requests on %s (gh's reason is on stderr)\n" "$repo"
     return 1
   }
   for pr in $prs; do

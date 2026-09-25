@@ -1037,7 +1037,7 @@ begin cleanup-is-complete
 # reads only main's tree, so it never sees them. This run's own are closed here (run_pull_requests
 # names them), and the EXIT trap closes them for a run that fails or is interrupted.
 closed=$(close_run_pull_requests) || fail "closing this run's pull requests on $repo: $closed"
-open=$(run_pull_requests) || fail "list the open pull requests on $repo: $open"
+open=$(run_pull_requests) || fail "list the open pull requests on $repo (gh's reason is on stderr)"
 [ -z "$open" ] || fail "this run's pull requests are still open on $repo: $(printf '%s' "$open" | tr '\n' ' ')"
 note "${closed:-no pull request of this run was open on $repo}"
 
