@@ -507,6 +507,12 @@ Write the phase-specific handoff: call the `legion` tool with `op: "handoff_writ
 and `data`: a JSON object of the phase-specific fields only. It runs `legion handoff write` in
 `$LEGION_WORKSPACE` and returns its output.
 
+A handoff built from the one already on disk (a test handoff that accumulates review rounds can
+pass 128 KiB) can instead be piped from bash, so you never re-emit the whole payload:
+`jq 'del(.schemaVersion, .phase, .completed) | <your edit>' .legion/<phase>.json | legion handoff write --phase <phase>`.
+With `--data` omitted, `legion handoff write` reads the JSON object from stdin. The CLI adds
+`schemaVersion`, `phase` and `completed` itself and refuses them in the data, hence the `del`.
+
 `handoff_write` validates the payload against the phase's schema before writing: an
 implement handoff without a well-formed `proof`, or a test handoff that reports no failure and
 carries no `proof` of its own, exits 1 naming the field and writes nothing.
@@ -558,9 +564,9 @@ approved head and restarts the review loop this rule exists to end.
 ## Completion: report to the architect, then stay
 
 Report completion to the architect: call the `legion` tool with `op: "handoff_complete"` and
-`summary`: two sentences for the architect. A worker never runs `legion handoff` from bash: the
-tool call is what the extension records, and a turn that ends with the phase still open gets one
-reminder.
+`summary`: two sentences for the architect. A worker never runs `legion handoff complete` from
+bash, where the extension refuses it: the tool call is what the extension records, and a turn that
+ends with the phase still open gets one reminder.
 
 This publishes your phase's completion to the architect's role and clears the daemon's
 record of this issue's active phase. Do not add pipeline labels, run a controller loop, or

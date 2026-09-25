@@ -152,7 +152,9 @@ ahead of every role gate so that it binds a `task` subagent too — a `bash` com
 a chain, and `eval` code or a `hub` process start by a plain-text rule, exactly as it refuses the jj
 operation-log rewrites (`PANE_RULES` in `extensions/legion.ts`). A completion run from the shell
 would never reach the phase stall below. `legion handoff write` and `read` stay open to the shell:
-they leave no phase open, and a root architect reads committed handoffs with `legion handoff read`.
+they leave no phase open, a root architect reads committed handoffs with `legion handoff read`, and
+a worker can pipe a handoff built from the one on disk to `legion handoff write` on stdin
+(`skills/legion-worker/SKILL.md`, the handoff write section).
 
 In a phase-worker session (planner, implementer, tester, reviewer, merger: never an architect, the
 controller, a session with no Legion environment, or a `task` subagent), `src/legion/phase-stall.ts`
