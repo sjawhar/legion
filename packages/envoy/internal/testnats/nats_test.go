@@ -1,8 +1,11 @@
 package testnats
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"runtime"
 	"strings"
@@ -139,4 +142,23 @@ func TestASecondTakeByTheSameTestFailsAtOnce(t *testing.T) {
 	if !strings.Contains(again.message, "already holds the shared NATS server") {
 		t.Errorf("a second take by the same test failed with %q, not the re-entry refusal", again.message)
 	}
+}
+
+// A restart keeps its server's URL even when something else takes the URL's port while the server is
+// stopped, as another test's container or a free-port pick can on a busy host: #1387's CI lost the
+// port between a stop and a start ("address already in use" on restart 3).
+func TestARestartKeepsItsURLWhenThePortIsContendedWhileStopped(t *testing.T) {
+	ctr, uri := StartRestartable(t)
+	Stop(t, ctr)
+	u, err := url.Parse(uri)
+	if err != nil {
+		t.Fatalf("parse %s: %v", uri, err)
+	}
+	if taken, err := net.Listen("tcp", u.Host); err == nil {
+		t.Cleanup(func() { _ = taken.Close() })
+	}
+	if err := ctr.Start(context.Background()); err != nil {
+		t.Fatalf("start NATS again: %v", err)
+	}
+	Connect(t, uri).Close()
 }
