@@ -2034,13 +2034,9 @@ func TestARefusedDurableStopsTheListenerAtOnce(t *testing.T) {
 	}
 
 	listener := startListenerProcess(t, buildListener(t), client.Conn.ConnectedUrl(), "refused-durable-startup")
-	cmd, output := listener.cmd, listener.output
-	select {
-	case <-listener.exited:
-	case <-time.After(30 * time.Second):
-		t.Fatalf("the listener was still running 30s after meeting a refused durable:\n%s", output.String())
-	}
-	if code := cmd.ProcessState.ExitCode(); code != 1 {
+	listener.waitExit(t, "meeting a refused durable")
+	output := listener.output
+	if code := listener.cmd.ProcessState.ExitCode(); code != 1 {
 		t.Fatalf("exit code = %d, want 1:\n%s", code, output.String())
 	}
 	if strings.Contains(output.String(), "subscribe failed, retrying") {
