@@ -170,13 +170,11 @@ func (names promptNames) collect(base, dir, prefix string) error {
 }
 
 // promptCheck is what the load probe must also find: names, the task agents and skills Legion's
-// prompts name; with agentModels, that each of those agents runs on its own model (the probe's
-// agentModels); and profile, the words for the OMP profile a pane loads the plugin from, which a
-// refusal on the pane lane names (probeLoad decides the lane). The zero value asks for nothing.
+// prompts name; and, with agentModels, that each of those agents runs on its own model (the
+// probe's agentModels). The zero value asks for nothing.
 type promptCheck struct {
 	names       promptNames
 	agentModels bool
-	profile     string
 }
 
 // The load probe's answers on the task agents' models (probe.mjs agentModels).

@@ -30,6 +30,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/omplaunch"
 	"github.com/sjawhar/legion/daemon/internal/projection"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -428,7 +429,7 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 			getenv = os.Getenv
 		}
 		var err error
-		if invocation, err = tmux.ResolveOmpInvocation(cfg.OmpInvocation, getenv); err != nil {
+		if invocation, err = omplaunch.ResolveInvocation(cfg.OmpInvocation, getenv); err != nil {
 			return err
 		}
 		log.Info("legion daemon resolved OMP invocation for boot probes and panes", "invocation", invocation)
@@ -436,7 +437,7 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 	dispatchTokenFile := ""
 	if dispatchToken != "" {
 		var err error
-		if dispatchTokenFile, err = tmux.WriteDispatchTokenFile(cfg.StateDir, dispatchToken); err != nil {
+		if dispatchTokenFile, err = runtime.WriteDispatchTokenFile(cfg.StateDir, dispatchToken); err != nil {
 			return fmt.Errorf("write the pane Dispatch token file: %w", err)
 		}
 	}

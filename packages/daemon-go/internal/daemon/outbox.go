@@ -19,6 +19,8 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
+	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
@@ -399,8 +401,8 @@ func (r *outbox) provisionWorkspace(ctx context.Context, issue record.Issue) err
 		return fmt.Errorf("mint implement App token to provision %s: %w", issue.Key, err)
 	}
 	if _, err := r.provision(ctx, workspace.Request{
-		StateDir: r.stateDir, Repo: r.repo, Issue: issue.Key, Token: lease.Token, CredentialHelper: credentialHelper(r.stateDir),
-		CredentialDir: r.stateDir,
+		StateDir: r.stateDir, Repo: r.repo, Issue: issue.Key, CredentialHelper: credentialHelper(r.stateDir),
+		Source: workspace.FromGitHub(lease.Token, r.stateDir),
 	}); err != nil {
 		return fmt.Errorf("provision workspace for %s: %w", issue.Key, err)
 	}
@@ -488,5 +490,5 @@ func (r *outbox) issue(ctx context.Context, key string) (record.Issue, error) {
 // credentialHelper is the git credential helper every issue workspace names: this daemon's pane
 // launcher by its absolute path, so a push from any directory reaches `legion credential`.
 func credentialHelper(stateDir string) string {
-	return "!'" + strings.ReplaceAll(filepath.Join(stateDir, "bin", "legion"), "'", `'\''`) + "' credential"
+	return "!" + shellprefix.Literal(filepath.Join(workerbin.LauncherDir(stateDir), "legion")) + " credential"
 }

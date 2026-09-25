@@ -19,15 +19,11 @@ import (
 	"time"
 
 	legionclaim "github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
-const (
-	workspaceFetchUsage     = "legion workspace-init fetch --repo <owner>/<repo> --feed <dir>"
-	workspaceProvisionUsage = "legion workspace-init provision --issue <KEY> --repo <owner>/<repo> [--root /legion] --credential-helper <git helper> --feed <dir>"
-)
+const workspaceProvisionUsage = "legion workspace-init provision --issue <KEY> --repo <owner>/<repo> [--root /legion] --credential-helper <git helper> --feed <dir>"
 
 const (
 	// workspaceLostExitCode is the status that tells the runtime the tree volume itself was lost —
@@ -114,38 +110,6 @@ func parseWorkspaceInitFlags(flags *flag.FlagSet, args []string, usage string, s
 	return 0, true
 }
 
-// workspaceFetch reads the provisioning token and clones the repository from GitHub into the
-// feed, the container's own volume, with no git configuration but its own. It resolves git alone
-// and touches nothing but the feed and its own TMPDIR, where the one-shot credential goes.
-func workspaceFetch(ctx context.Context, repo, feed string, stdout io.Writer) error {
-	if _, _, ok := splitRepoFlag(repo); !ok {
-		return fmt.Errorf("--repo must be <owner>/<name> (got %q)", repo)
-	}
-	if !filepath.IsAbs(feed) {
-		return fmt.Errorf("--feed must be an absolute path (got %q)", feed)
-	}
-	tokenFile, set := os.LookupEnv(provisionTokenFileEnv)
-	if !set {
-		return errors.New(provisionTokenFileEnv + " is not set")
-	}
-	token, err := config.ReadSecretPointer(provisionTokenFileEnv, tokenFile)
-	if err != nil {
-		return err
-	}
-	tools, err := provisioningTools("git")
-	if err != nil {
-		return err
-	}
-	fed, err := workspace.Fetch(ctx, workspace.NewRunner(workspace.CommandTimeout, tools), workspace.FetchRequest{
-		Repo: repo, Token: token, CredentialDir: os.TempDir(), Feed: feed,
-	})
-	if err != nil {
-		return err
-	}
-	fmt.Fprintf(stdout, "workspace-init fetch: https://github.com/%s into %s\n", repo, fed)
-	return nil
-}
-
 // workspaceInit validates everything before it touches the volume, and refuses to run where the
 // provisioning token is pointed at: this is the process that runs git and jj against what every
 // agent of the tree can write. Then it installs the gh shim, creates the directories the main
@@ -154,9 +118,6 @@ func workspaceFetch(ctx context.Context, repo, feed string, stdout io.Writer) er
 func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, feed string, stdout io.Writer) error {
 	if !legionclaim.IsIssueKey(issue) {
 		return fmt.Errorf("--issue must be a Dispatch issue key like LEGION-1 (got %q)", issue)
-	}
-	if _, _, ok := splitRepoFlag(repo); !ok {
-		return fmt.Errorf("--repo must be <owner>/<name> (got %q)", repo)
 	}
 	if !filepath.IsAbs(root) {
 		return fmt.Errorf("--root must be an absolute path (got %q)", root)
@@ -219,7 +180,7 @@ func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, fee
 	defer release()
 	run := workspace.NewRunner(workspace.CommandTimeout, tools)
 	provisioned, err := workspace.Provision(ctx, run, workspace.Request{
-		StateDir: root, Repo: repo, Issue: issue, CredentialHelper: credentialHelper, Feed: feed,
+		StateDir: root, Repo: repo, Issue: issue, CredentialHelper: credentialHelper, Source: workspace.FromFeed(feed),
 	})
 	if err != nil {
 		return err

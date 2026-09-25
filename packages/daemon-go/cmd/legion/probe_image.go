@@ -22,14 +22,17 @@ import (
 var digits = regexp.MustCompile(`^[0-9]+$`)
 
 // runProbeImage is `legion probe-image` (packages/daemon/src/cli/index.ts:946-976, cmdProbeImage
-// :355-397), run inside the worker image: bare by its build's final step
+// :355-397), run inside the worker image: by its build's final step
 // (packages/daemon/docker/worker.Dockerfile), and with the daemon's own contract by the daemon's
 // probe Sandbox, which reads the OK line back from the pod's log (internal/runtime/sandbox,
-// ProbeImage). It runs the image's launch probes under the image's own environment
-// (daemon.ProbeImage) and, when every one passes, prints bootprobe.OKLine; a failure is the
-// probe's message, exit 1, so a broken image never publishes. Unlike the TypeScript command, the
-// contract is always checked: bare, against this binary's own GoDaemonAPIVersion, which the
-// plugin packed from the same commit must declare. The load probe also holds every task agent the
+// ProbeImage). Both pass --plugin-root, the plugin directory a pod loads as its one explicit
+// extension, and the command refuses a run without it (exit 2): the probe certifies the lane a pod
+// uses, so a build line that lost the flag fails the build instead of probing a lane no pod loads.
+// It runs the image's launch probes under the image's own environment (daemon.ProbeImage) and,
+// when every one passes, prints bootprobe.OKLine; a failure is the probe's message, exit 1, so a
+// broken image never publishes. Unlike the TypeScript command, the contract is always checked:
+// with none named, against this binary's own GoDaemonAPIVersion, which the plugin packed from the
+// same commit must declare. The load probe also holds every task agent the
 // prompts dispatch to its own model; the OK line says so (agent-models=resolved), or that the
 // build's probe, which has no operator model configuration, skipped it (--skip-agent-models). The
 // probe Sandbox runs it as a worker runs: with --pod-safety, on the pod's baseline as a worker's
@@ -42,7 +45,7 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 	omp := flags.String("omp", "", "the OMP executable to probe (default: $LEGION_OMP_PATH)")
 	contract := flags.String("go-daemon-api-version", strconv.Itoa(api.GoDaemonAPIVersion),
 		"the Go daemon API contract the image's pi-legion-envoy must declare (the daemon's probe Sandbox passes its own)")
-	pluginRoot := flags.String("plugin-root", "", "the plugin directory a pod loads as its one explicit extension; the load probe runs the same way")
+	pluginRoot := flags.String("plugin-root", "", "the plugin directory a pod loads as its one explicit extension, which the load probe loads the same way (required)")
 	podSafety := flags.Bool("pod-safety", false, "run the probes on a pod's baseline (internal/podsafety), as a pod's shim starts Oh My Pi")
 	providerEnvDir := flags.String("provider-env-dir", "", "a directory whose files NAME=contents the probes' Oh My Pi gets, as a worker's shim exports them")
 	skipAgentModels := flags.Bool("skip-agent-models", false, "leave the prompt-named task agents' models unresolved (the image build's probe)")
@@ -52,6 +55,10 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 	}
 	if flags.NArg() > 0 {
 		fmt.Fprintf(stderr, "legion probe-image: unexpected argument %q\n", flags.Arg(0))
+		return 2
+	}
+	if *pluginRoot == "" {
+		fmt.Fprintln(stderr, "legion probe-image: --plugin-root is required: the plugin directory a pod loads as its one explicit extension, which the load probe loads the same way")
 		return 2
 	}
 	invocation := *omp

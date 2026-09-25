@@ -32,6 +32,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
@@ -448,7 +449,7 @@ func (r *rig) newRuntime(adjust ...func(*Options)) *Runtime {
 		DaemonURL:      r.daemon.server.URL,
 		EnvoyURL:       "http://127.0.0.1:9020",
 		NatsURLs:       []string{"nats://127.0.0.1:4222"},
-		OmpInvocation:  shellPath(r.omp),
+		OmpInvocation:  shellprefix.Word(r.omp),
 		StopGrace:      5 * time.Second,
 		ProbeInterval:  100 * time.Millisecond,
 		AdoptTimeout:   5 * time.Second,
@@ -1414,7 +1415,7 @@ func TestRealTmuxOMPGetsTheConfiguredDispatchURLAndTokenFile(t *testing.T) {
 	ctx := context.Background()
 	token := "dispatch-" + randomHex(t, 8)
 	r := newRig(t, func(o *Options) {
-		file, err := WriteDispatchTokenFile(o.StateDir, token)
+		file, err := runtime.WriteDispatchTokenFile(o.StateDir, token)
 		if err != nil {
 			t.Fatalf("WriteDispatchTokenFile: %v", err)
 		}

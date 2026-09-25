@@ -7,6 +7,7 @@ package shellprefix
 
 import (
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -25,3 +26,15 @@ func For(dirs ...string) string {
 
 // Literal is value as one single-quoted shell word, each `'` closed, escaped, and reopened.
 func Literal(value string) string { return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'" }
+
+// shellUnsafe is any character outside the set a POSIX shell reads literally in a bare word.
+var shellUnsafe = regexp.MustCompile(`[^A-Za-z0-9_./:-]`)
+
+// Word renders value as one shell word: bare when every character is literal, else Literal
+// (runtime.ts:327-329).
+func Word(value string) string {
+	if !shellUnsafe.MatchString(value) {
+		return value
+	}
+	return Literal(value)
+}

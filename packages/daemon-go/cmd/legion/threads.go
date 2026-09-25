@@ -10,6 +10,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
 const reviewThreadsQuery = `query($owner: String!, $name: String!, $number: Int!, $after: String) {
@@ -36,9 +38,9 @@ func runThreads(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 {
 		return 2
 	}
-	owner, name, ok := splitRepoFlag(*repo)
-	if !ok {
-		fmt.Fprintln(stderr, "legion threads resolve: --repo must be <owner>/<repo>")
+	owner, name, err := ghrepo.Split("--repo", *repo)
+	if err != nil {
+		fmt.Fprintf(stderr, "legion threads resolve: %v\n", err)
 		return 2
 	}
 	number, err := strconv.Atoi(*pr)
@@ -91,13 +93,6 @@ func runThreads(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		fmt.Fprintf(stdout, "resolved %s\n", thread.url)
 	}
 	return 0
-}
-
-// splitRepoFlag is a --repo value's owner and name: <owner>/<name>, neither part empty nor holding
-// a slash or whitespace (review-threads.ts:149-153).
-func splitRepoFlag(value string) (owner, name string, ok bool) {
-	owner, name, ok = strings.Cut(value, "/")
-	return owner, name, ok && owner != "" && name != "" && !strings.ContainsAny(owner+name, " \t\r\n/")
 }
 
 func threadFailure(stderr io.Writer, url string, err error) int {

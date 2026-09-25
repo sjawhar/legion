@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/sjawhar/legion/daemon/internal/testomp"
 )
 
 // The overlay holds off every setting a repository could name that sends a pod's conversation
@@ -128,29 +130,13 @@ func TestApplySetsEachBaselineVariableOnlyWhereThePodLeavesItUnset(t *testing.T)
 	}
 }
 
-// realOmp is the pinned Oh My Pi binary LEGION_TEST_OMP names (.github/actions/install-omp). A run
-// without one skips, except on GitHub Actions, where a skip would hide the only check of the
-// baseline on the binary the image ships.
-func realOmp(t *testing.T) string {
-	t.Helper()
-	omp := os.Getenv("LEGION_TEST_OMP")
-	switch {
-	case omp != "":
-		return omp
-	case os.Getenv("GITHUB_ACTIONS") == "true":
-		t.Fatal("LEGION_TEST_OMP is unset on GitHub Actions: name the pinned Oh My Pi binary (the daemon-go job installs it)")
-	}
-	t.Skip("LEGION_TEST_OMP names no Oh My Pi binary")
-	return ""
-}
-
 // On the pinned Oh My Pi, a repository whose .omp/config.yml turns remote compaction on reads it
 // off under Apply's environment, and an operator overlay named after the baseline reads the
 // operator's own endpoint: the baseline outranks the repository, and the operator outranks it.
 // Without Apply the repository's endpoint is read, so a binary that stopped reading the
 // repository's settings cannot pass the first row by accident.
 func TestTheBaselineHoldsARepositoryOffAndTheOperatorOverridesIt(t *testing.T) {
-	omp := realOmp(t)
+	omp := testomp.Binary(t)
 	dir := t.TempDir()
 	repo := filepath.Join(dir, "repo")
 	if err := os.MkdirAll(filepath.Join(repo, ".omp"), 0o700); err != nil {

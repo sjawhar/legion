@@ -3,6 +3,8 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"github.com/sjawhar/legion/daemon/internal/bootprobe"
+	"github.com/sjawhar/legion/daemon/internal/testomp"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -48,13 +50,7 @@ func agentModelPlugin(t *testing.T, dir string) string {
 // not judged. The profile's providers listen nowhere, so no model is called and no credential the
 // machine carries decides the run.
 func TestTheAgentModelCheckOnTheRealOhMyPi(t *testing.T) {
-	omp := os.Getenv("LEGION_TEST_OMP")
-	switch {
-	case omp == "" && os.Getenv("GITHUB_ACTIONS") == "true":
-		t.Fatal("LEGION_TEST_OMP is unset on GitHub Actions: name the pinned Oh My Pi binary (the daemon-go job installs it)")
-	case omp == "":
-		t.Skip("LEGION_TEST_OMP names no Oh My Pi binary")
-	}
+	omp := testomp.Binary(t)
 	const models = "providers:\n" +
 		"  fake:\n    baseUrl: http://127.0.0.1:9\n    auth: apiKey\n    api: anthropic-messages\n    apiKey: static-key\n" +
 		"    models:\n      - id: m1\n        name: M1\n" +
@@ -106,8 +102,8 @@ func TestTheAgentModelCheckOnTheRealOhMyPi(t *testing.T) {
 			for name, value := range testCase.env {
 				env[name] = value
 			}
-			probe := ImageProbe{Omp: omp, Contract: 3, Env: env, WorkDir: dir, SkipAgentModels: testCase.skip,
-				Log: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))}
+			log := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+			var err error
 			if testCase.pane {
 				install := exec.Command(omp, "plugin", "install", root)
 				for name, value := range env {
@@ -116,11 +112,14 @@ func TestTheAgentModelCheckOnTheRealOhMyPi(t *testing.T) {
 				if out, err := install.CombinedOutput(); err != nil {
 					t.Fatalf("omp plugin install: %v\n%s", err, out)
 				}
+				// A pane loads the plugin through discovery, as the daemon's boot gate on tmux
+				// probes it.
+				err = pluginGate{env: env, workDir: dir, invocation: omp, timeout: defaultProbeTimeout, retry: bootprobe.Image,
+					contract: 3, skipAgentModels: testCase.skip, log: log}.verify(context.Background())
 			} else {
-				probe.PluginRoot = root
+				err = ProbeImage(context.Background(), ImageProbe{Omp: omp, Contract: 3, Env: env, WorkDir: dir, PluginRoot: root,
+					SkipAgentModels: testCase.skip, Log: log})
 			}
-
-			err := ProbeImage(context.Background(), probe)
 
 			if len(testCase.want) == 0 {
 				if err != nil {
@@ -145,13 +144,7 @@ func TestTheAgentModelCheckOnTheRealOhMyPi(t *testing.T) {
 // agent only the daemon's copy dispatches, which the image's plugin lacks, is refused naming the
 // daemon's prompt file, though the image's own roles never name it.
 func TestTheImageProbeResolvesTheAgentsTheDaemonsPromptsName(t *testing.T) {
-	omp := os.Getenv("LEGION_TEST_OMP")
-	switch {
-	case omp == "" && os.Getenv("GITHUB_ACTIONS") == "true":
-		t.Fatal("LEGION_TEST_OMP is unset on GitHub Actions: name the pinned Oh My Pi binary (the daemon-go job installs it)")
-	case omp == "":
-		t.Skip("LEGION_TEST_OMP names no Oh My Pi binary")
-	}
+	omp := testomp.Binary(t)
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")
 	agent := filepath.Join(home, ".omp", "profiles", "legion", "agent")
