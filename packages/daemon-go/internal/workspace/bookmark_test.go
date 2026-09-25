@@ -427,10 +427,31 @@ func (l lostWorkspace) runWayOut(t *testing.T, refusal, prefix, commit string) s
 	command := strings.ReplaceAll(codeSpan(t, refusal, prefix), "<commit>", commit)
 	if ref, ok := strings.CutPrefix(command, githubDelete); ok {
 		runSetup(t, l.req.StateDir, "git", "--git-dir="+l.run.remote, "update-ref", "-d", "refs/heads/"+ref)
-	} else {
-		runSetup(t, l.clone, strings.Fields(command)...)
+		return command
+	}
+	// A pending change in the shared clone's own working copy, which a snapshot would record: the
+	// way out, run from an operator's shell, must take none (and so runs no filter the tree
+	// planted there).
+	planted := filepath.Join(l.clone, "way-out-pending.txt")
+	if err := os.WriteFile(planted, []byte("pending\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before := cloneSnapshots(t, l.clone)
+	runSetup(t, l.clone, strings.Fields(command)...)
+	if after := cloneSnapshots(t, l.clone); after != before {
+		t.Errorf("%q snapshotted the shared clone's working copy (%d snapshots, then %d)", command, before, after)
+	}
+	if err := os.Remove(planted); err != nil {
+		t.Fatal(err)
 	}
 	return command
+}
+
+// cloneSnapshots is how many operations in the shared clone's log snapshotted its working copy.
+func cloneSnapshots(t *testing.T, clone string) int {
+	t.Helper()
+	log := runSetup(t, clone, "jj", "op", "log", "--no-graph", "-T", `description ++ "\n"`, "--ignore-working-copy", "--color=never", "-R", clone)
+	return strings.Count(log, "snapshot working copy\n")
 }
 
 // A local legion/<KEY> deleted in the shared clone (`jj bookmark delete`) and never pushed leaves

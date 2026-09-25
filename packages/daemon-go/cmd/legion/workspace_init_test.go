@@ -794,7 +794,7 @@ func TestWorkspaceInitSerializesTwoProcessesOnOneVolume(t *testing.T) {
 			t.Fatalf("the second cloned again: %q", call)
 		}
 	}
-	if want := "second config get git.abandon-unreachable-commits -R " + v.clone(); calls[firstOfSecond] != want {
+	if want := "second config get git.abandon-unreachable-commits --ignore-working-copy --color=never -R " + v.clone(); calls[firstOfSecond] != want {
 		t.Fatalf("the second opened with %q, want %q on the clone the first landed", calls[firstOfSecond], want)
 	}
 }
