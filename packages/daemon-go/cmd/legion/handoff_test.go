@@ -74,6 +74,23 @@ func TestHandoffWriteReadsAPayloadOverTheArgvCapFromStdin(t *testing.T) {
 	}
 }
 
+// The command writes a handoff's schemaVersion, phase and completed itself. A payload carrying them
+// — an agent copying handoff_read's output into data — is refused naming every one it carries and
+// that the command writes them, so the next call succeeds; nothing is written.
+func TestHandoffWriteRefusesTheFieldsItWritesNamingEach(t *testing.T) {
+	workspace := t.TempDir()
+	var out, errb bytes.Buffer
+	code := run(context.Background(), []string{"legion", "handoff", "write", "--workspace", workspace, "--phase", "implement",
+		"--data", `{"schemaVersion":1,"completed":"2026-09-25T00:00:00Z","proof":["ran it"]}`}, &out, &errb)
+	refusal := errb.String()
+	if code != 1 || !strings.Contains(refusal, "schemaVersion") || !strings.Contains(refusal, "completed") || !strings.Contains(refusal, "writes") {
+		t.Fatalf("handoff write with schemaVersion and completed in data = %d, stderr %q; want one refusal naming both and that the command writes them", code, refusal)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, ".legion")); !os.IsNotExist(err) {
+		t.Fatalf(".legion after the refused write: %v, want none", err)
+	}
+}
+
 // A tester whose handoff is missing is refused before any request, and the refusal names the file
 // its phase ends with, .legion/test.json.
 func TestHandoffCompleteRefusesAMissingPhaseFileBeforeTheRequest(t *testing.T) {

@@ -81,11 +81,15 @@ func runHandoffWrite(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "legion handoff write: data must be a JSON object")
 		return 1
 	}
+	var carried []string
 	for _, reserved := range []string{"schemaVersion", "phase", "completed"} {
 		if _, present := payload[reserved]; present {
-			fmt.Fprintf(stderr, "legion handoff write: handoff data field %s is not allowed\n", reserved)
-			return 1
+			carried = append(carried, reserved)
 		}
+	}
+	if len(carried) > 0 {
+		fmt.Fprintf(stderr, "legion handoff write: data carries %s, which this command writes itself (schemaVersion, phase and completed); send only the phase's own fields\n", strings.Join(carried, ", "))
+		return 1
 	}
 	workspace, err := resolveWorkspace(*workspaceFlag)
 	if err != nil {

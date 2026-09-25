@@ -7,6 +7,7 @@ import {
   HANDOFF_OPERATIONS,
   handoffSchemaFields,
   isHandoffOperation,
+  rootArchitectHandoffRefusal,
   runHandoffAction,
 } from "./handoff-actions";
 
@@ -130,7 +131,7 @@ export function createGoLegionTool(deps: {
         const operation = requiredString(parameters, "legion", "op");
         if (isHandoffOperation(operation)) {
           if (active.kind === "architect" && active.issue === active.tree) {
-            throw new Error(`${operation} is not available to a root architect session`);
+            throw new Error(rootArchitectHandoffRefusal(operation));
           }
           return await runHandoffAction({
             operation,

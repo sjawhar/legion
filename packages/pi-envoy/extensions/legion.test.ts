@@ -4892,7 +4892,12 @@ describe("Legion OMP extension", () => {
       ).resolves.toMatchObject({
         isError: true,
         content: [
-          { type: "text", text: "handoff_complete is not available to a root architect session" },
+          {
+            type: "text",
+            text: expect.stringContaining(
+              "handoff_complete is not available to a root architect session; a root architect reads handoffs with `legion handoff read"
+            ),
+          },
         ],
       });
     });
