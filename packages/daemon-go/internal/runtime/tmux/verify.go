@@ -197,6 +197,35 @@ func (r *Runtime) startTicks(pid int) (ticks uint64, alive bool, err error) {
 	return ticks, true, nil
 }
 
+// serverFork is whether pid is still the tmux server's copy of a new pane, not yet the pane's
+// command: a forked child carries its parent's comm until it execs, and the server's comm is
+// tmux's own. A process that is gone is not one (the caller's next read reports it).
+func (r *Runtime) serverFork(pid int) (bool, error) {
+	stat, err := r.readProc(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		if processGone(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	comm, parent, err := parseProcStatCommAndParent(string(stat))
+	if err != nil {
+		return false, err
+	}
+	parentStat, err := r.readProc(fmt.Sprintf("/proc/%d/stat", parent))
+	if err != nil {
+		if processGone(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	parentComm, _, err := parseProcStatCommAndParent(string(parentStat))
+	if err != nil {
+		return false, err
+	}
+	return comm == parentComm, nil
+}
+
 // runsOmp is whether pid's command line names OMP. It is asked only just after pid's stat was
 // read, so a command line that has vanished since means the process exited in between — not OMP
 // any more (runtime-tmux.ts:859-873).
@@ -209,6 +238,24 @@ func (r *Runtime) runsOmp(pid int) (bool, error) {
 		return false, err
 	}
 	return strings.Contains(string(cmdline), "omp"), nil
+}
+
+// parseProcStatCommAndParent is a /proc/<pid>/stat line's comm (field 2, between the first `(` and
+// the last `)`, since it may itself hold spaces and parentheses) and parent pid (field 4).
+func parseProcStatCommAndParent(stat string) (string, int, error) {
+	open, end := strings.IndexByte(stat, '('), strings.LastIndexByte(stat, ')')
+	if open < 0 || end < open {
+		return "", 0, fmt.Errorf("malformed /proc/<pid>/stat line (no comm): %s", strings.TrimSpace(stat))
+	}
+	fields := strings.Fields(stat[end+1:])
+	if len(fields) < 2 {
+		return "", 0, fmt.Errorf("malformed /proc/<pid>/stat line (no parent pid): %s", strings.TrimSpace(stat))
+	}
+	parent, err := strconv.Atoi(fields[1])
+	if err != nil {
+		return "", 0, fmt.Errorf("malformed /proc/<pid>/stat line (no parent pid): %s", strings.TrimSpace(stat))
+	}
+	return stat[open+1 : end], parent, nil
 }
 
 // parseProcStatStartTicks is field 22 (starttime) of a /proc/<pid>/stat line, counted only after

@@ -13,9 +13,9 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
-// roleFor is the role that works a phase: the one a transition starts, and the one it suspends
+// RoleFor is the role that works a phase: the one a transition starts, and the one it suspends
 // when the issue moves on. A phase no role works — awaiting_merge, done, held — has none.
-func roleFor(p phase.Phase) claim.Role {
+func RoleFor(p phase.Phase) claim.Role {
 	switch p {
 	case phase.Planning:
 		return claim.RolePlanner
@@ -30,6 +30,15 @@ func roleFor(p phase.Phase) claim.Role {
 	default:
 		return ""
 	}
+}
+
+// SuspendApplies is whether a suspend still applies with the issue in phase current. leaves is the
+// phase a transition's suspend ends (record.SuperviseRequest.Leaves): it stopped that phase's role
+// because the issue left the role's phases, so once the issue is back in one of them the role has
+// been handed its work again and the suspend must not stop it there. A suspend with no such phase
+// (a linger's or a child's leave) stops every claim whatever phase its issue holds, and applies.
+func SuspendApplies(leaves, current phase.Phase) bool {
+	return leaves == "" || RoleFor(current) != RoleFor(leaves)
 }
 
 func (e *Engine) enqueue(ctx context.Context, tx pgx.Tx, issue string, payload record.OutboxPayload) error {
@@ -72,11 +81,12 @@ func (e *Engine) clearHandoff(ctx context.Context, tx pgx.Tx, issue string, role
 	return e.store.PutPhase(ctx, tx, row)
 }
 
-func (e *Engine) suspend(ctx context.Context, tx pgx.Tx, issue record.Issue, role claim.Role) error {
+// suspend stops the role the issue leaves, the transition's suspend stamped with the phase it ends.
+func (e *Engine) suspend(ctx context.Context, tx pgx.Tx, issue record.Issue, role claim.Role, leaves phase.Phase) error {
 	if role == "" || role == claim.RoleArchitect {
 		return nil
 	}
-	return e.supervise(ctx, tx, issue, "suspend", role, "")
+	return e.enqueue(ctx, tx, issue.Key, record.SuperviseRequest{Op: "suspend", Tree: issue.Tree, Role: role, Generation: issue.Generation, Leaves: leaves})
 }
 
 // start starts the phase worker of the issue's current phase, a start stamped with that phase.
@@ -86,11 +96,6 @@ func (e *Engine) start(ctx context.Context, tx pgx.Tx, issue record.Issue, role 
 	}
 	return e.enqueue(ctx, tx, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: role, Task: task,
 		Generation: issue.Generation, Phase: issue.Phase})
-}
-
-// supervise enqueues op for the issue's role claim, stamped with the generation it serves.
-func (e *Engine) supervise(ctx context.Context, tx pgx.Tx, issue record.Issue, op record.SuperviseOp, role claim.Role, task string) error {
-	return e.enqueue(ctx, tx, issue.Key, record.SuperviseRequest{Op: op, Tree: issue.Tree, Role: role, Task: task, Generation: issue.Generation})
 }
 
 // task is what a started worker is told. It names the phase the worker starts, which the issue

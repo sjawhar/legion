@@ -71,7 +71,12 @@ func backwardRows() []Row {
 	rows := make([]Row, 0, len(ordered)*(len(ordered)-1)/2)
 	for fromIndex, from := range ordered {
 		for _, to := range ordered[:fromIndex] {
-			rows = append(rows, Row{From: from, Trigger: TriggerBackward, Guard: allow, To: to, Status: statusForBackward(to), Effects: []EffectKind{EffectStatus, EffectSuspend, EffectStart, EffectNotice}})
+			effects := []EffectKind{EffectStatus, EffectSuspend, EffectStart, EffectNotice}
+			if RoleFor(from) == RoleFor(to) {
+				// A move between two phases of one role suspends nothing (Engine.transition).
+				effects = []EffectKind{EffectStatus, EffectStart, EffectNotice}
+			}
+			rows = append(rows, Row{From: from, Trigger: TriggerBackward, Guard: allow, To: to, Status: statusForBackward(to), Effects: effects})
 		}
 	}
 	return rows

@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -549,6 +550,28 @@ func probe(t *testing.T, rt *Runtime, loc runtime.Locator) runtime.Observation {
 	return obs
 }
 
+// awaitGone re-probes loc until it reads Gone, and fails if the process is ever Alive again. A stop
+// returns once its process no longer runs, and the pane then passes through states a single probe
+// cannot call Gone (LEGION-274): the exited process not yet reaped, whose pane still lists its pid
+// with an empty command line (NotRecordedProcess), and, for the server's last pane, the server
+// exiting under the probe's own list-panes. Both converge on Gone.
+func awaitGone(t *testing.T, rt *Runtime, loc runtime.Locator, after string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		obs := probe(t, rt, loc)
+		switch {
+		case obs.Kind == runtime.Gone:
+			return
+		case obs.Kind == runtime.Alive:
+			t.Fatalf("Probe after %s = %+v: the stopped process is running", after, obs)
+		case time.Now().After(deadline):
+			t.Fatalf("Probe after %s = %+v, want gone within 10s", after, obs)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 func panePid(t *testing.T, loc runtime.Locator) int {
 	t.Helper()
 	inc, err := parseIncarnation(loc.Incarnation)
@@ -761,9 +784,7 @@ func TestRealTmuxLifecycle(t *testing.T) {
 	if hasKillPane(r.recorded()[before:]) {
 		t.Errorf("a graceful stop killed the pane")
 	}
-	if obs := probe(t, r.rt, loc); obs.Kind != runtime.Gone {
-		t.Fatalf("Probe after suspend = %+v, want gone", obs)
-	}
+	awaitGone(t, r.rt, loc, "suspend")
 
 	// Resume: the same session, from the file it registered, in a new incarnation.
 	resumed := r.spec("legion-t-LEGION-1-architect", "LEGION-1", "LEGION-1", claim.RoleArchitect)
@@ -795,9 +816,7 @@ func TestRealTmuxLifecycle(t *testing.T) {
 	if !hasKillPane(r.recorded()[before:]) {
 		t.Errorf("an agent that ignored its shutdown was not killed")
 	}
-	if obs := probe(t, r.rt, loc2); obs.Kind != runtime.Gone {
-		t.Fatalf("Probe after release = %+v, want gone", obs)
-	}
+	awaitGone(t, r.rt, loc2, "release")
 
 	// Releasing a claim with no process — a suspended one — asks tmux nothing: a pane holds nothing
 	// of a claim once its process is gone.
@@ -817,6 +836,73 @@ func TestRealTmuxLifecycle(t *testing.T) {
 		t.Errorf("Resume from a missing session file = %v", err)
 	}
 }
+
+// Spawn hands out a locator only once its pane runs the pane's own command. tmux reports a new
+// pane's pid at fork, and until that child execs its command it is a copy of the tmux server: its
+// /proc names the server, its argv included. A probe in that window read a starting agent as not
+// running OMP, which supervision takes for a death, relaunching the claim over its still-starting
+// process (LEGION-274, window 1). Here every pane reads as the server's copy for its first half
+// second, as a pane does on a loaded host for as long as its exec waits.
+func TestRealTmuxSpawnReturnsOnlyOnceThePaneRunsItsCommand(t *testing.T) {
+	r := newRig(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	read := r.rt.readProc
+	var mu sync.Mutex
+	firstSeen := map[int]time.Time{}
+	r.rt.readProc = func(path string) ([]byte, error) {
+		body, err := read(path)
+		var pid int
+		var file string
+		if err != nil || !procFile.MatchString(path) {
+			return body, err
+		}
+		fmt.Sscanf(strings.TrimPrefix(path, "/proc/"), "%d/%s", &pid, &file)
+		stat, err := read(fmt.Sprintf("/proc/%d/stat", pid))
+		if err != nil {
+			return body, nil
+		}
+		comm, parentPid, err := parseProcStatCommAndParent(string(stat))
+		if err != nil {
+			t.Errorf("read pid %d's stat: %v", pid, err)
+			return body, nil
+		}
+		parent, err := read(fmt.Sprintf("/proc/%d/stat", parentPid))
+		if err != nil {
+			return body, nil
+		}
+		if parentComm, _, err := parseProcStatCommAndParent(string(parent)); err != nil || parentComm != "tmux: server" || comm == "tmux: server" {
+			return body, nil
+		}
+		mu.Lock()
+		seen, ok := firstSeen[pid]
+		if !ok {
+			seen = time.Now()
+			firstSeen[pid] = seen
+		}
+		mu.Unlock()
+		if time.Since(seen) > 500*time.Millisecond {
+			return body, nil
+		}
+		// Still the server's fork, as the kernel shows it before exec: its comm and argv.
+		if file == "cmdline" {
+			return read(fmt.Sprintf("/proc/%d/cmdline", parentPid))
+		}
+		open, end := strings.IndexByte(string(body), '('), strings.LastIndexByte(string(body), ')')
+		return []byte(string(body[:open+1]) + "tmux: server" + string(body[end:])), nil
+	}
+
+	loc, err := r.rt.Spawn(ctx, r.spec("legion-t-LEGION-8-architect", "LEGION-8", "LEGION-8", claim.RoleArchitect))
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if obs := probe(t, r.rt, loc); obs.Kind != runtime.Alive {
+		t.Fatalf("Probe right after Spawn = %+v, want alive: the locator was handed out while its pane was still tmux's fork", obs)
+	}
+}
+
+// procFile matches the /proc files a verification reads.
+var procFile = regexp.MustCompile(`^/proc/[0-9]+/(stat|cmdline)$`)
 
 // Panes of one issue share its window, while a pane there still verifies; another issue gets a
 // window of its own; and one claim never has two processes.
