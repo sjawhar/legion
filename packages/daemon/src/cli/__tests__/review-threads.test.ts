@@ -6,6 +6,8 @@ const PR = "https://github.com/sjawhar/legion/pull/993#discussion_r";
 interface Comment {
   login: string;
   body: string;
+  /** GitHub's `PullRequestReviewCommentState`; a PENDING comment is visible only to its author. */
+  state?: "PENDING" | "SUBMITTED";
 }
 
 function thread(id: string, n: number, opener: string, newest: Comment, isResolved = false) {
@@ -13,7 +15,11 @@ function thread(id: string, n: number, opener: string, newest: Comment, isResolv
     id,
     isResolved,
     opener: { nodes: [{ url: `${PR}${n}`, author: { login: opener } }] },
-    newest: { nodes: [{ author: { login: newest.login }, body: newest.body }] },
+    newest: {
+      nodes: [
+        { author: { login: newest.login }, body: newest.body, state: newest.state ?? "SUBMITTED" },
+      ],
+    },
   };
 }
 
@@ -370,6 +376,47 @@ describe("legion threads resolve", () => {
     expect(lines).toEqual([`resolved ${PR}1`]);
     // The query's and the mutation's, verbatim: the mutation acts as that token's owner.
     expect(written).toEqual([warning, warning]);
+  });
+
+  it("--gh leaves open a thread whose newest comment is the opener's Accepted: still pending in an unsubmitted review", async () => {
+    // Outside a pane the caller can be the account that opened every thread (sjawhar-agent on
+    // sjawhar/*), and GitHub shows a pending review's drafts to their author: the grant path's
+    // role App never sees another account's draft, so --gh must not act on one either.
+    const account = "sjawhar-agent";
+    const gh = fakeGh(
+      {
+        null: page(
+          [
+            thread("T1", 1, account, {
+              login: account,
+              body: "Accepted: drafted, not yet submitted",
+              state: "PENDING",
+            }),
+            thread("T2", 2, account, { login: account, body: "Accepted: fixed in abc1234" }),
+          ],
+          null
+        ),
+      },
+      resolvedOk
+    );
+    const lines: string[] = [];
+
+    await cmdThreadsResolve(
+      { repo: "sjawhar/legion", pr: "993", gh: true },
+      {
+        env: {},
+        fetch: noFetch,
+        runGh: gh.runGh,
+        log: (line) => lines.push(line),
+        stderr: () => undefined,
+      }
+    );
+
+    expect(gh.resolved).toEqual(["T2"]);
+    expect(lines).toEqual([
+      `left open ${PR}1 — newest reply by sjawhar-agent is an unsubmitted draft in a pending review`,
+      `resolved ${PR}2`,
+    ]);
   });
 
   it("--gh exits 1 with gh's own message when gh fails, resolving nothing", async () => {

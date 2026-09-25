@@ -99,11 +99,12 @@ function daemonUrl(env: NodeJS.ProcessEnv, explicit?: string): string {
   );
 }
 
-/** The grant `legion gh`, `legion credential`, and `legion handoff complete` redeem:
- * `LEGION_GRANT_FILE` (the file the daemon names on every pane and the pi-envoy extension writes
- * before each bash command runs — never command text or the bash tool's `env`, see LEGION-12 and
- * LEGION-52) ahead of `LEGION_GRANT`, an operator's own manual export. */
-function grantFrom(env: NodeJS.ProcessEnv): string {
+/** The grant `legion gh`, `legion credential`, `legion handoff complete`, and `legion threads
+ * resolve` (without `--gh`) redeem: `LEGION_GRANT_FILE` (the file the daemon names on every pane
+ * and the pi-envoy extension writes before each bash command runs — never command text or the bash
+ * tool's `env`, see LEGION-12 and LEGION-52) ahead of `LEGION_GRANT`, an operator's own manual
+ * export. `withoutGrant` ends the no-grant refusal with a command's own way to run without one. */
+function grantFrom(env: NodeJS.ProcessEnv, withoutGrant = ""): string {
   const file = env.LEGION_GRANT_FILE;
   if (file !== undefined) {
     try {
@@ -122,7 +123,7 @@ function grantFrom(env: NodeJS.ProcessEnv): string {
   const grant = env.LEGION_GRANT;
   if (!grant) {
     throw new CliError(
-      "LEGION_GRANT_FILE is missing (and LEGION_GRANT is unset): the Legion daemon names the grant file on every pane and the pi-envoy extension writes it before each bash command runs"
+      `LEGION_GRANT_FILE is missing (and LEGION_GRANT is unset): the Legion daemon names the grant file on every pane and the pi-envoy extension writes it before each bash command runs${withoutGrant}`
     );
   }
   return grant;
@@ -244,11 +245,11 @@ function isGitHubIssueWriteInvocation(args: string[]): boolean {
   );
 }
 
-async function redeemGitHubToken(deps: GrantRedemptionDeps): Promise<string> {
+async function redeemGitHubToken(deps: GrantRedemptionDeps, withoutGrant = ""): Promise<string> {
   const response = await deps.fetch(`${daemonUrl(deps.env, deps.daemonUrl)}/legion/v1/gh-token`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ grantId: grantFrom(deps.env) }),
+    body: JSON.stringify({ grantId: grantFrom(deps.env, withoutGrant) }),
   });
   if (!response.ok) {
     const body = await response.text();
@@ -292,10 +293,11 @@ export async function cmdGh(args: string[], deps: GhCommandDeps): Promise<void> 
   if (exitCode !== 0) throw new CliError(`gh exited with status ${exitCode}`, exitCode);
 }
 
-/** `legion threads resolve --pr <n> --repo <owner>/<name>`: as the App of the role running it,
- * resolves every unresolved review thread whose newest comment is its opener's own `Accepted:`
- * reply and names every other unresolved thread as left open (`resolveAcceptedThreads`). GitHub
- * lets only the pull request's author or an account with write (push) access to the repository
+/** `legion threads resolve --pr <n> --repo <owner>/<name>`: as the App of the role running it
+ * (with `gh`, as whoever the caller's own `gh` authenticates as), resolves every unresolved review
+ * thread whose newest comment is its opener's own submitted `Accepted:` reply and names every
+ * other unresolved thread as left open (`resolveAcceptedThreads`). GitHub lets only the pull
+ * request's author or an account with write (push) access to the repository
  * resolve a thread or push to its branch; the review App is neither by design (`pull_requests:
  * write`, no `contents`), so the threads it opens are resolved here by the implementer — before
  * every push that answers a review — and by the merger once more before READY. Both flags are
@@ -311,7 +313,13 @@ export async function cmdThreadsResolve(
   const number = parsePullNumber(options.pr);
   const graphql = options.gh
     ? ghGraphql(deps.runGh, deps.env, repo, deps.stderr)
-    : githubGraphql(deps.fetch, await redeemGitHubToken(deps));
+    : githubGraphql(
+        deps.fetch,
+        await redeemGitHubToken(
+          deps,
+          "; a session outside a Legion pane has no grant and adds --gh to resolve through its own gh"
+        )
+      );
   await resolveAcceptedThreads(graphql, repo, number, deps.log);
 }
 
@@ -746,7 +754,7 @@ const threadsResolveCommand = defineCommand({
   meta: {
     name: "resolve",
     description:
-      "Resolve every review thread whose newest comment is its opener's `Accepted:` reply, as the GitHub App of the role running it",
+      "Resolve every review thread whose newest comment is its opener's submitted `Accepted:` reply, as the GitHub App of the role running it (with --gh, as whoever your own gh authenticates as)",
   },
   args: {
     pr: { type: "string", required: true, description: "Pull request number" },

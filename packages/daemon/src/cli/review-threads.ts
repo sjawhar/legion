@@ -4,9 +4,11 @@ export type Fetch = (input: string | URL | Request, init?: RequestInit) => Promi
 
 const GITHUB_GRAPHQL_URL = "https://api.github.com/graphql";
 
-/** One GraphQL call against GitHub as the App whose token was redeemed. Rejects with a CliError
- * carrying GitHub's own message (HTTP status + body for a transport failure, the `errors[]`
- * messages for a GraphQL-level refusal such as `Resource not accessible by integration`). */
+/** One GraphQL call against GitHub as the identity its transport carries: the App whose token a
+ * grant redeemed (`githubGraphql`), or whoever the caller's own `gh` authenticates as
+ * (`ghGraphql`). Rejects with a CliError carrying GitHub's own message (HTTP status + body for a
+ * transport failure, gh's stderr for a failed `gh`, the `errors[]` messages for a GraphQL-level
+ * refusal such as `Resource not accessible by integration`). */
 export type GraphqlCall = <T>(query: string, variables: Record<string, unknown>) => Promise<T>;
 
 export interface GitHubRepo {
@@ -15,13 +17,15 @@ export interface GitHubRepo {
 }
 
 /** An unresolved review thread reduced to what the acceptance rule reads. A thread has no URL of
- * its own on GitHub; `url` is its opening comment's, the anchor the PR page scrolls to. */
+ * its own on GitHub; `url` is its opening comment's, the anchor the PR page scrolls to.
+ * `newestPending` marks a newest comment that is a draft in a pending, unsubmitted review. */
 interface UnresolvedThread {
   id: string;
   url: string;
   openerLogin: string | null;
   newestLogin: string | null;
   newestBody: string;
+  newestPending: boolean;
 }
 
 interface Actor {
@@ -37,7 +41,9 @@ interface ThreadsPage {
           id: string;
           isResolved: boolean;
           opener: { nodes: Array<{ url: string; author: Actor | null }> };
-          newest: { nodes: Array<{ author: Actor | null; body: string }> };
+          newest: {
+            nodes: Array<{ author: Actor | null; body: string; state: "PENDING" | "SUBMITTED" }>;
+          };
         }>;
       };
     } | null;
@@ -53,7 +59,7 @@ const THREADS_QUERY = `query($owner: String!, $name: String!, $number: Int!, $af
           id
           isResolved
           opener: comments(first: 1) { nodes { url author { login } } }
-          newest: comments(last: 1) { nodes { author { login } body } }
+          newest: comments(last: 1) { nodes { author { login } body state } }
         }
       }
     }
@@ -133,10 +139,14 @@ function isAcceptance(body: string): boolean {
   return body.trimStart().startsWith("Accepted:");
 }
 
-/** True when the thread's newest comment is its opener's own `Accepted:` reply: the account that
- * raised the point is the one closing it, and nobody has replied since. */
+/** True when the thread's newest comment is its opener's own submitted `Accepted:` reply: the
+ * account that raised the point is the one closing it, and nobody has replied since. A draft in a
+ * pending review never counts: GitHub shows it only to its author, so counting it would let the
+ * answer depend on who runs the command, and an outside-a-pane caller posting as the opener's
+ * account would resolve on an acceptance the reviewer has not submitted. */
 function acceptedByOpener(thread: UnresolvedThread): boolean {
   return (
+    !thread.newestPending &&
     thread.openerLogin !== null &&
     thread.openerLogin === thread.newestLogin &&
     isAcceptance(thread.newestBody)
@@ -173,6 +183,7 @@ async function listUnresolvedThreads(
         openerLogin: opener.author?.login ?? null,
         newestLogin: newest.author?.login ?? null,
         newestBody: newest.body,
+        newestPending: newest.state === "PENDING",
       });
     }
     const { pageInfo } = pullRequest.reviewThreads;
@@ -181,7 +192,7 @@ async function listUnresolvedThreads(
   return threads;
 }
 
-/** One `resolveReviewThread` mutation; a refusal surfaces as the CliError `githubGraphql` throws. */
+/** One `resolveReviewThread` mutation; a refusal surfaces as the CliError `graphql` throws. */
 async function resolveThread(graphql: GraphqlCall, threadId: string): Promise<void> {
   await graphql(RESOLVE_MUTATION, { threadId });
 }
@@ -201,12 +212,12 @@ export function parsePullNumber(value: string): number {
   return Number(value);
 }
 
-/** The policy `legion threads resolve` applies, as the App whose token `graphql` carries: every
- * unresolved review thread whose newest comment is its opener's own `Accepted:` reply is resolved
- * (one `resolveReviewThread` per thread, in GitHub's order) and every other unresolved thread is
- * named as left open; no unresolved thread at all prints exactly `no unresolved threads`. A thread
- * GitHub refuses rejects with a CliError naming the thread's URL and GitHub's message, and nothing
- * after it is attempted. */
+/** The policy `legion threads resolve` applies, as whichever identity `graphql` carries: every
+ * unresolved review thread whose newest comment is its opener's own submitted `Accepted:` reply is
+ * resolved (one `resolveReviewThread` per thread, in GitHub's order) and every other unresolved
+ * thread is named as left open; no unresolved thread at all prints exactly `no unresolved
+ * threads`. A thread GitHub refuses rejects with a CliError naming the thread's URL and GitHub's
+ * message, and nothing after it is attempted. */
 export async function resolveAcceptedThreads(
   graphql: GraphqlCall,
   repo: GitHubRepo,
@@ -221,7 +232,10 @@ export async function resolveAcceptedThreads(
   for (const thread of threads) {
     if (!acceptedByOpener(thread)) {
       const by = thread.newestLogin ?? "an unknown account";
-      log(`left open ${thread.url} — newest reply by ${by} is not an acceptance`);
+      const reason = thread.newestPending
+        ? "an unsubmitted draft in a pending review"
+        : "not an acceptance";
+      log(`left open ${thread.url} — newest reply by ${by} is ${reason}`);
       continue;
     }
     try {
