@@ -308,6 +308,49 @@ func TestTheOperatorClosesATreeNoWorkflowIssueBacks(t *testing.T) {
 	}
 }
 
+// The operator's close is the whole tree's, as the workflow's tree_close is: the root claim first,
+// whose close asks whether the tree may be closed, then every other claim of the tree, whatever its
+// state. A worker left running would stay on a tree volume that is being deleted. Another tree's
+// claims are left alone.
+func TestTheOperatorsCloseStopsEveryClaimOfTheTree(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	for _, spawn := range []SpawnRequest{
+		{Tree: "LEGION-208", Issue: "LEGION-209", Role: claim.RoleImplementer, Prompt: "Reply ready and wait."},
+		{Tree: "LEGION-208", Issue: "LEGION-210", Role: claim.RoleTester, Prompt: "Reply ready and wait."},
+		{Tree: "LEGION-300", Issue: "LEGION-300", Role: claim.RoleArchitect, Prompt: "Reply ready and wait."},
+		{Tree: "LEGION-300", Issue: "LEGION-301", Role: claim.RoleImplementer, Prompt: "Reply ready and wait."},
+	} {
+		if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims", spawn); recorder.Code != http.StatusCreated {
+			t.Fatalf("spawn %s %s = %d; body %s", spawn.Issue, spawn.Role, recorder.Code, recorder.Body)
+		}
+	}
+	h.registered(h.bootToken("legion-legion-legion-210-tester"), "ses_tester")
+
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/close", nil)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("close = %d, want 200; body %s", recorder.Code, recorder.Body)
+	}
+	var released []claim.Token
+	for _, call := range h.runtime.CallsOf("Release") {
+		released = append(released, call.Released.Claim)
+	}
+	if len(released) != 3 || released[0] != architectToken {
+		t.Fatalf("released %v, want the root first and then the tree's two workers", released)
+	}
+	for _, token := range []claim.Token{architectToken, "legion-legion-legion-209-implementer", "legion-legion-legion-210-tester"} {
+		if state := h.stored(token).State; state != supervise.StateRetired {
+			t.Errorf("%s is %s after its tree closed, want retired", token, state)
+		}
+	}
+	for _, token := range []claim.Token{"legion-legion-legion-300-architect", "legion-legion-legion-301-implementer"} {
+		if state := h.stored(token).State; state == supervise.StateRetired {
+			t.Errorf("%s, of another tree, was retired by this tree's close", token)
+		}
+	}
+}
+
 // The operator closes only a tree no workflow issue backs, and only through its root claim: a
 // workflow issue's tree closes when its linger expires, and a worker's claim is stopped. Each
 // refusal changes nothing.

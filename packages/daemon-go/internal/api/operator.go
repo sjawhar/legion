@@ -233,21 +233,60 @@ func stopEvent(_ http.ResponseWriter, _ *http.Request, c supervise.Claim) (super
 	return supervise.RequestStop{Claim: c.Token}, true
 }
 
-// closeEvent is the operator closing a tree no workflow issue backs, through its root claim: the
-// tree's close, which ends the root as the workflow's tree_close does for a tree it closes when its
-// linger expires. Without it a root the operator spawned could never end — under a sandbox, its
-// Sandbox and the tree volume would stay for good. A workflow issue's tree is the workflow's to
-// close, and a worker's claim is stopped, not closed.
+// closeTree is the operator closing a tree no workflow issue backs, through its root claim: the
+// tree's close, as the workflow's tree_close is for a tree whose linger expired. Without it a
+// root the operator spawned could never end — under a sandbox, its Sandbox and the tree volume
+// would stay for good. A workflow issue's tree is the workflow's to close, and a worker's claim is
+// stopped, not closed.
 //
-// Whether a workflow issue backs the tree is the supervisor's TreeClosable to answer, where the
-// answer and the close it decides sit together; the refusal an operator sees is the same one this
-// handler used to write.
-func (s *server) closeEvent(w http.ResponseWriter, _ *http.Request, c supervise.Claim) (supervise.Event, bool) {
-	if !claim.IsTreeArchitect(c.Role, c.Issue, c.Tree) {
-		writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf("close refused: %s is not its tree's root claim; stop it instead", c.Token)))
-		return nil, false
+// The root goes first, since its close is where the supervisor's TreeClosable answers whether a
+// workflow issue backs the tree: a refused close stops nothing. Then every other claim of the tree
+// that has not retired is stopped, as tree_close stops each, so no worker is left on a tree volume
+// that is being deleted (Kubernetes deletes the volume once no pod mounts it). A worker whose stop
+// fails is named in a 500, with the root already closed; `legion claims stop` ends it.
+func (s *server) closeTree(w http.ResponseWriter, r *http.Request) {
+	token := claim.Token(r.PathValue("token"))
+	root, ok := s.supervisor.Machine(token)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, errorBody("no claim "+string(token)))
+		return
 	}
-	return supervise.RequestOperatorClose{Claim: c.Token}, true
+	c := root.Claim()
+	if !claim.IsTreeArchitect(c.Role, c.Issue, c.Tree) {
+		writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf("close refused: %s is not its tree's root claim; stop it instead", token)))
+		return
+	}
+	ctx := context.WithoutCancel(r.Context())
+	if err := root.Handle(ctx, supervise.RequestOperatorClose{Claim: token}); err != nil {
+		s.operatorFailure(w, "close", token, err)
+		return
+	}
+	claims, err := s.supervisor.Claims(ctx)
+	if err != nil {
+		s.log.Error("api: read the claims of a tree the operator closed", "tree", c.Tree, "error", err)
+		writeJSON(w, http.StatusInternalServerError, errorBody(fmt.Sprintf("closed %s's root claim %s, but the daemon could not read the tree's other claims to stop them", c.Tree, token)))
+		return
+	}
+	var unstopped []string
+	for _, other := range claims {
+		if other.Tree != c.Tree || other.Token == token || other.State == supervise.StateRetired {
+			continue
+		}
+		m, ok := s.supervisor.Machine(other.Token)
+		if !ok {
+			continue
+		}
+		if err := m.Handle(ctx, supervise.RequestStop{Claim: other.Token}); err != nil {
+			s.log.Error("api: stop a claim of a tree the operator closed", "claim", other.Token, "error", err)
+			unstopped = append(unstopped, fmt.Sprintf("%s (%v)", other.Token, err))
+		}
+	}
+	if len(unstopped) > 0 {
+		writeJSON(w, http.StatusInternalServerError, errorBody(fmt.Sprintf("closed %s's root claim %s, but these claims of the tree were not stopped: %s; stop each with legion claims stop",
+			c.Tree, token, strings.Join(unstopped, "; "))))
+		return
+	}
+	writeJSON(w, http.StatusOK, operatorView(root.Claim()))
 }
 
 // list answers every claim the daemon supervises, in token order.
