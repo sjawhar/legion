@@ -65,6 +65,8 @@ type Runtime struct {
 	natsURLs                                []string
 	tools                                   Tools
 	gateway                                 Gateway
+	pod                                     Pod
+	providerKeys                            map[string]string
 	agent                                   []string
 	bootTimeout                             time.Duration
 	bootIntervals                           int
@@ -181,6 +183,7 @@ func configure(opts Options) (*Runtime, error) {
 		treeVolume: opts.TreeVolume, scheduling: opts.Scheduling, resources: opts.Resources,
 		streamURL: opts.StreamURL, daemonURL: opts.DaemonURL, envoyURL: opts.EnvoyURL, dispatchURL: opts.DispatchURL,
 		dispatchToken: opts.DispatchToken, natsURLs: opts.NATSURLs, tools: opts.Tools, gateway: opts.Gateway,
+		pod: opts.Pod, providerKeys: opts.ProviderKeys,
 		bootTimeout: opts.BootTimeout, bootIntervals: opts.BootIntervals, terminationGrace: opts.TerminationGrace,
 		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent,
 		tokens: opts.Tokens, conns: opts.Conns, now: opts.Now, log: opts.Log,

@@ -43,6 +43,20 @@ type Gateway struct {
 // minTokenExpiry is the shortest projected service account token the API server issues.
 const minTokenExpiry = 10 * time.Minute
 
+// Pod is what the operator adds to every pod Legion runs, the image probe's included
+// (runtime.kubernetes.pod): variables and volume mounts for the agent's container (the worker's,
+// or the probe's), never an init container, the volumes those mounts name, beside Legion's own, and
+// the ServiceAccount the pods run as, the gateway's when unset. A variable's value reaches the
+// process as written: the kubelet's `$(NAME)` expansion does not apply (kubeletLiteral). The
+// daemon's configuration refuses a name or path of Legion's own (LegionEnvNames,
+// LegionVolumeNames, LegionMountPaths, ImageOwnedPaths).
+type Pod struct {
+	Env            map[string]string
+	Volumes        []corev1.Volume
+	VolumeMounts   []corev1.VolumeMount
+	ServiceAccount string
+}
+
 // ProvisionTokens mints the installation token a pod's workspace-fetch container clones the
 // repository with, for a repository owner.
 // The daemon's is appauth; a harness's may be a token file read on every call.
@@ -78,6 +92,13 @@ type Options struct {
 	NATSURLs []string
 	Tools    Tools
 	Gateway  Gateway
+	// Pod is the operator's pod configuration, added to every worker pod and to the probe pod.
+	Pod Pod
+	// ProviderKeys maps each variable Oh My Pi reads to the key of the providers Secret
+	// (ProvidersSecretName) that holds its value. With any, every pod mounts exactly those keys at
+	// ProvidersDir and the worker's shim exports them into Oh My Pi's environment alone; with none,
+	// no pod mounts the Secret.
+	ProviderKeys map[string]string
 	// Agent is the command the shim wraps, before the Oh My Pi arguments the runtime appends
 	// (`--no-extensions --extension <plugin>`, `--resume`, `--mode rpc`,
 	// `--append-system-prompt`); Oh My Pi itself when nil.

@@ -15,7 +15,9 @@ import (
 // TreeRoot. The claim's Secret is projected twice: its boot half at BootDir for the main
 // container, its provisioning token at ProvisionDir for the workspace-fetch container alone.
 // FeedDir is the feed workspace-fetch fills and workspace-init reads. StateDir is the main
-// container's in-memory LEGION_STATE_DIR.
+// container's in-memory LEGION_STATE_DIR. ProvidersDir is where the main container mounts the
+// configured keys of the providers Secret (ProvidersSecretName), one file per variable Oh My Pi
+// reads, which the shim exports into Oh My Pi's environment alone (--provider-env-dir).
 const (
 	TreeRoot        = "/legion"
 	SessionsSubPath = "sessions"
@@ -23,13 +25,17 @@ const (
 	ProvisionDir    = "/var/run/legion/provision"
 	FeedDir         = "/var/run/legion/feed"
 	StateDir        = "/var/run/legion/state"
+	ProvidersDir    = "/var/run/legion/providers"
 )
 
 // The image's own paths (packages/daemon/docker/worker.Dockerfile: ENV and the COPY lines).
 const (
-	// ompSessionsDir is Oh My Pi's sessions directory under the image's HOME and OMP_PROFILE:
-	// <HOME>/.omp/profiles/<profile>/agent/sessions.
-	ompSessionsDir = "/home/legion/.omp/profiles/legion/agent/sessions"
+	// ompProfileDir is the image's Oh My Pi profile, <HOME>/.omp/profiles/<OMP_PROFILE>, whose
+	// plugins/ holds the plugin the image installed; ompAgentDir is the profile's agent directory,
+	// where Oh My Pi keeps its databases, and ompSessionsDir the sessions directory in it.
+	ompProfileDir  = podHome + "/.omp/profiles/legion"
+	ompAgentDir    = ompProfileDir + "/agent"
+	ompSessionsDir = ompAgentDir + "/sessions"
 	// podHome is the image's HOME, which the XDG base directories sit under.
 	podHome = "/home/legion"
 	// imagePath is the image's PATH. A container's env PATH replaces the image's, so the pod's
@@ -47,6 +53,14 @@ const (
 	// container mounts.
 	initTempDir = "/tmp"
 )
+
+// ImageOwnedPaths are the paths in the worker image a pod runs or loads from, which an operator's
+// mount there would hide: Legion's binaries, plugin, and role prompts (/opt/legion), Oh My Pi
+// (/opt/omp), the profile's installed plugins, and the databases Oh My Pi keeps in the profile's
+// agent directory. An operator's mount may be neither at, under, nor above one.
+func ImageOwnedPaths() []string {
+	return []string{"/opt/legion", "/opt/omp", ompProfileDir + "/plugins", ompAgentDir + "/agent.db", ompAgentDir + "/models.db"}
+}
 
 // The keys of a claim's Secret that the runtime fills itself: the boot token and the provisioning
 // token for every claim, and the Dispatch bearer when Dispatch is configured.
@@ -87,6 +101,12 @@ func TreeClaimName(root claim.Token) string { return treeVolume + "-" + SandboxN
 
 // secretName is the claim's Secret, which its Sandbox owns.
 func secretName(sandbox string) string { return sandbox + "-boot" }
+
+// ProvidersSecretName is the Secret the operator keeps the provider keys in, the TypeScript
+// runtime's legion-<project>-providers (k8s-manifests.ts, providersSecretName), project being the
+// project token (claim.ProjectToken: lowercase letters and digits). Every pod mounts from it exactly
+// the keys provider_keys names.
+func ProvidersSecretName(project string) string { return "legion-" + project + "-providers" }
 
 var (
 	notDNS     = regexp.MustCompile(`[^a-z0-9-]`)

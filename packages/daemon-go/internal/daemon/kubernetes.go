@@ -4,8 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -46,8 +49,8 @@ var imageProbeRetry = bootprobe.Image
 // configuration becomes, the worker stream on tcp://<bind>:<worker_stream_port> (the address
 // every pod's shim dials), and the image probe. None of the host's own agent machinery runs: no Oh
 // My Pi invocation or plugin gate (the image probe proves the image's), no Dispatch token file (a
-// pod reads its bearer from its claim's Secret), no provider keys (a pod reaches the model through
-// the gateway alone), and no host gh, git, or jj (a pod runs the image's).
+// pod reads its bearer from its claim's Secret), no secretsd provider keys (a pod mounts its keys
+// from the providers Secret), and no host gh, git, or jj (a pod runs the image's).
 func prepareSandbox(cfg config.Config, log *slog.Logger, o overrides, dispatchToken string, p *plan) error {
 	k := *cfg.Runtime.Kubernetes
 	rc, err := kubeClient(k)
@@ -55,6 +58,9 @@ func prepareSandbox(cfg config.Config, log *slog.Logger, o overrides, dispatchTo
 		return err
 	}
 	p.stream = "tcp://" + net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.WorkerStreamPort))
+	if err := CheckOperatorPod(cfg); err != nil {
+		return err
+	}
 	opts, err := sandboxOptions(cfg, k, p.project, p.stream, dispatchToken, log)
 	if err != nil {
 		return err
@@ -142,6 +148,8 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, stream, dis
 		Gateway: sandbox.Gateway{
 			URL: k.Gateway.URL, Audience: k.Gateway.Audience, ServiceAccount: k.Gateway.ServiceAccount, TokenExpiry: k.Gateway.TokenExpiry,
 		},
+		Pod:              sandboxPod(k.Pod),
+		ProviderKeys:     providerSecretKeys(cfg.ProviderKeys),
 		BootTimeout:      cfg.WorkerBootTimeout,
 		BootIntervals:    cfg.WorkerBootRegistrationDeadlineIntervals,
 		TerminationGrace: cfg.WorkerStopTimeout,
@@ -149,6 +157,160 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, stream, dis
 		AdoptTimeout:     cfg.SlowCommandTimeout,
 		Log:              log,
 	}, nil
+}
+
+// CheckOperatorPod refuses a piece of the operator's pod (runtime.kubernetes.pod) or a provider key
+// that collides with what Legion itself puts in a pod, naming both: a variable, volume, or mount
+// path of the runtime's own (sandbox.LegionEnvNames, LegionVolumeNames, LegionMountPaths), a path
+// the worker image owns (sandbox.ImageOwnedPaths), and a variable every launch's spec sets
+// (specs.SpawnSpec) — the git identity the role's App commits as, and the `<NAME>_FILE` pointer of
+// each launch secret. A variable would reach the worker container twice, a volume name the pod
+// twice; a mount at, under, or above one of Legion's hides it or is hidden by it; and the shim
+// refuses to export a provider key its environment names, skips one whose pointer it has
+// (shim.ReadProviderEnv), and would replace PI_CONFIG_FILES, the settings overlays Legion composes
+// for Oh My Pi. The loader has refused every shape no pod could carry; boot and `legion start
+// --check-config` both run this, before anything is launched.
+func CheckOperatorPod(cfg config.Config) error {
+	if cfg.Runtime.Kubernetes == nil {
+		return nil
+	}
+	return checkOperatorPod(cfg.Runtime.Kubernetes.Pod, cfg.ProviderKeys, launchSecrets(cfg))
+}
+
+// checkOperatorPod is CheckOperatorPod over the operator's pod, the provider keys, and the launch
+// secrets by name.
+func checkOperatorPod(pod config.PodConfig, keys []config.ProviderKey, secrets map[string]secretPointer) error {
+	legion := map[string]bool{}
+	for _, name := range sandbox.LegionEnvNames() {
+		legion[name] = true
+	}
+	launch := map[string]string{}
+	for name := range gitIdentityEnv(runtime.GitIdentity{}) {
+		launch[name] = "the git identity the role's GitHub App commits as"
+	}
+	for name := range secrets {
+		launch[name+"_FILE"] = "the pointer to the launch secret " + name
+	}
+	for _, name := range slices.Sorted(maps.Keys(pod.Env)) {
+		if legion[name] {
+			return fmt.Errorf("runtime.kubernetes.pod.env sets %s, which Legion sets in every pod itself", name)
+		}
+		if why, set := launch[name]; set {
+			return fmt.Errorf("runtime.kubernetes.pod.env sets %s, which every launch sets itself (%s)", name, why)
+		}
+	}
+	legionVolumes := sandbox.LegionVolumeNames()
+	for i, volume := range pod.Volumes {
+		if slices.Contains(legionVolumes, volume.Name) {
+			return fmt.Errorf("runtime.kubernetes.pod.volumes[%d].name %s is a volume Legion puts in every pod", i, volume.Name)
+		}
+	}
+	for i, mount := range pod.VolumeMounts {
+		for _, owner := range []struct {
+			paths       []string
+			owns, whose string
+		}{
+			{sandbox.LegionMountPaths(), "Legion mounts in every pod", "Legion's"},
+			{sandbox.ImageOwnedPaths(), "the worker image owns", "the image's"},
+		} {
+			for _, owned := range owner.paths {
+				if overlaps(mount.MountPath, owned) {
+					return fmt.Errorf("runtime.kubernetes.pod.volume_mounts[%d].mount_path %s overlaps %s, which %s: a mount may be neither at, under, nor above one of %s",
+						i, mount.MountPath, owned, owner.owns, owner.whose)
+				}
+			}
+		}
+	}
+	for _, key := range keys {
+		switch {
+		case key.Env == "PI_CONFIG_FILES":
+			return fmt.Errorf("provider_keys names %s, the settings overlays Legion composes in every pod: the shim adds a provider key after the pod's own variables, so it would replace them", key.Env)
+		case legion[key.Env]:
+			return fmt.Errorf("provider_keys names %s, which Legion sets in every pod itself: the shim refuses to export a key its own environment names", key.Env)
+		case legion[key.Env+"_FILE"]:
+			return fmt.Errorf("provider_keys names %s, whose pointer %s_FILE Legion sets in every pod: the shim would skip the key", key.Env, key.Env)
+		}
+		why, set := launch[key.Env]
+		if !set {
+			why, set = launch[key.Env+"_FILE"]
+		}
+		if set {
+			return fmt.Errorf("provider_keys names %s, which every launch sets itself (%s): the shim would not export the key", key.Env, why)
+		}
+	}
+	return nil
+}
+
+// overlaps reports whether one of two clean absolute paths is the other or lies under it.
+func overlaps(a, b string) bool {
+	under := func(child, parent string) bool { return parent == "/" || strings.HasPrefix(child, parent+"/") }
+	return a == b || under(a, b) || under(b, a)
+}
+
+// sandboxPod is runtime.kubernetes.pod as the runtime's Pod: each volume with its one source, a
+// projected token's unset lifetime left to the API server's default, and each mount as written.
+func sandboxPod(configured config.PodConfig) sandbox.Pod {
+	pod := sandbox.Pod{Env: configured.Env, ServiceAccount: configured.ServiceAccount}
+	for _, v := range configured.Volumes {
+		volume := corev1.Volume{Name: v.Name}
+		switch {
+		case v.Secret != nil:
+			volume.Secret = &corev1.SecretVolumeSource{SecretName: v.Secret.Name, Items: keyPaths(v.Secret.Items)}
+		case v.ConfigMap != nil:
+			volume.ConfigMap = &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: v.ConfigMap.Name}, Items: keyPaths(v.ConfigMap.Items),
+			}
+		case v.Projected != nil:
+			volume.Projected = &corev1.ProjectedVolumeSource{}
+			for _, s := range v.Projected.Sources {
+				var source corev1.VolumeProjection
+				switch {
+				case s.ServiceAccountToken != nil:
+					token := &corev1.ServiceAccountTokenProjection{Audience: s.ServiceAccountToken.Audience, Path: s.ServiceAccountToken.Path}
+					if seconds := s.ServiceAccountToken.ExpirationSeconds; seconds != 0 {
+						token.ExpirationSeconds = &seconds
+					}
+					source.ServiceAccountToken = token
+				case s.Secret != nil:
+					source.Secret = &corev1.SecretProjection{
+						LocalObjectReference: corev1.LocalObjectReference{Name: s.Secret.Name}, Items: keyPaths(s.Secret.Items),
+					}
+				case s.ConfigMap != nil:
+					source.ConfigMap = &corev1.ConfigMapProjection{
+						LocalObjectReference: corev1.LocalObjectReference{Name: s.ConfigMap.Name}, Items: keyPaths(s.ConfigMap.Items),
+					}
+				}
+				volume.Projected.Sources = append(volume.Projected.Sources, source)
+			}
+		}
+		pod.Volumes = append(pod.Volumes, volume)
+	}
+	for _, m := range configured.VolumeMounts {
+		pod.VolumeMounts = append(pod.VolumeMounts, corev1.VolumeMount{Name: m.Volume, MountPath: m.MountPath, SubPath: m.SubPath, ReadOnly: m.ReadOnly})
+	}
+	return pod
+}
+
+// keyPaths are a source's configured items as the API's.
+func keyPaths(items []config.KeyPath) []corev1.KeyToPath {
+	var paths []corev1.KeyToPath
+	for _, item := range items {
+		paths = append(paths, corev1.KeyToPath{Key: item.Key, Path: item.Path})
+	}
+	return paths
+}
+
+// providerSecretKeys are provider_keys as the runtime takes them: each variable Oh My Pi reads,
+// to the key of the providers Secret that holds it; nil when the file names none.
+func providerSecretKeys(keys []config.ProviderKey) map[string]string {
+	if len(keys) == 0 {
+		return nil
+	}
+	secretKeys := make(map[string]string, len(keys))
+	for _, key := range keys {
+		secretKeys[key.Env] = key.Secret
+	}
+	return secretKeys
 }
 
 // roleRequirements is one role's configured requests and limits as a container's, refusing a

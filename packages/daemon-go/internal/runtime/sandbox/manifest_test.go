@@ -144,6 +144,29 @@ func TestManifestMatchesTheSandboxCRD(t *testing.T) {
 	}
 }
 
+// What the operator adds to a pod — a Secret, a ConfigMap by sub_path, a projected token, a
+// variable, an account, and the providers Secret's keys — is sent in fields the CRD declares, in
+// the worker's Sandbox and the probe's alike, so the API server keeps every one of them.
+func TestTheOperatorsPodIsSentInFieldsTheSandboxCRDDeclares(t *testing.T) {
+	opts := goldenOptions()
+	opts.Pod = operatorPod()
+	opts.ProviderKeys = map[string]string{"ANTHROPIC_API_KEY": "anthropic"}
+	r, err := configure(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe, err := encodeProbe(r.probeManifest("legion-probe", 5, corev1.ResourceRequirements{}, time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	schema := sandboxSchema(t)
+	for name, manifest := range map[string]any{"worker": manifestOf(t, r, workerSpec(t), true), "probe": wire(t, probe.Object)} {
+		if found := schemaViolations(manifest, schema, ""); len(found) > 0 {
+			t.Errorf("the %s manifest has fields the CRD does not declare as sent:\n%s", name, strings.Join(found, "\n"))
+		}
+	}
+}
+
 // podOf is the pod template a launch of spec runs.
 func podOf(t *testing.T, r *Runtime, spec runtime.SpawnSpec, affinity bool) corev1.PodSpec {
 	t.Helper()
@@ -594,6 +617,238 @@ func TestAPodReachesTheModelGatewayAsItsServiceAccount(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// operatorPod is an operator's runtime.kubernetes.pod: a variable, a Secret volume, a ConfigMap
+// volume mounted by sub_path into the profile's agent directory, a projected ServiceAccount token
+// alone in its volume, and the account the pods run as.
+func operatorPod() Pod {
+	expiry := int64(3600)
+	return Pod{
+		Env: map[string]string{"PI_CONFIG_FILES": "/etc/legion-operator/overlay.yml"},
+		Volumes: []corev1.Volume{
+			{Name: "operator-creds", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "legion-operator-creds"}}},
+			{Name: "operator-config", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: "legion-operator"},
+				Items:                []corev1.KeyToPath{{Key: "models.yml", Path: "models.yml"}},
+			}}},
+			{Name: "operator-token", VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{Sources: []corev1.VolumeProjection{{
+				ServiceAccountToken: &corev1.ServiceAccountTokenProjection{Audience: "operator-audience", ExpirationSeconds: &expiry, Path: "token"},
+			}}}}},
+		},
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: "operator-creds", MountPath: "/etc/legion-operator/creds", ReadOnly: true},
+			{Name: "operator-config", MountPath: ompAgentDir + "/models.yml", SubPath: "models.yml", ReadOnly: true},
+			{Name: "operator-token", MountPath: "/var/run/operator", ReadOnly: true},
+		},
+		ServiceAccount: "operator-worker",
+	}
+}
+
+// The operator's pod (runtime.kubernetes.pod) reaches every pod Legion runs — the root's, a
+// worker's, and the image probe's — exactly as configured: its volumes beside Legion's, its
+// variables and mounts in the agent's container alone, never in an init container, and its account
+// as the pod's.
+func TestTheOperatorsPodReachesEveryPodLegionRuns(t *testing.T) {
+	opts := testOptions()
+	opts.Pod = operatorPod()
+	r, err := configure(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name  string
+		pod   corev1.PodSpec
+		agent string
+	}{
+		{"root", podOf(t, r, rootSpec(t), false), mainContainer},
+		{"worker", podOf(t, r, workerSpec(t), true), mainContainer},
+		{"probe", r.probeManifest("legion-probe", 5, corev1.ResourceRequirements{}, time.Time{}).Spec.PodTemplate.Spec, probeContainer},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.pod.ServiceAccountName != opts.Pod.ServiceAccount {
+				t.Errorf("serviceAccountName = %q, want the operator's %q", tc.pod.ServiceAccountName, opts.Pod.ServiceAccount)
+			}
+			for _, want := range opts.Pod.Volumes {
+				var got []corev1.Volume
+				for _, volume := range tc.pod.Volumes {
+					if volume.Name == want.Name {
+						got = append(got, volume)
+					}
+				}
+				if len(got) != 1 || !reflect.DeepEqual(got[0], want) {
+					t.Errorf("the pod's volumes named %s are %+v, want exactly %+v", want.Name, got, want)
+				}
+			}
+			agent := containerNamed(t, tc.pod, tc.agent)
+			for _, want := range opts.Pod.VolumeMounts {
+				if !slices.ContainsFunc(agent.VolumeMounts, func(m corev1.VolumeMount) bool { return reflect.DeepEqual(m, want) }) {
+					t.Errorf("%s mounts %+v, want %+v among them", tc.agent, agent.VolumeMounts, want)
+				}
+			}
+			if got := envOf(agent)["PI_CONFIG_FILES"]; got != opts.Pod.Env["PI_CONFIG_FILES"] {
+				t.Errorf("%s's PI_CONFIG_FILES = %q, want the operator's %q", tc.agent, got, opts.Pod.Env["PI_CONFIG_FILES"])
+			}
+			for _, init := range tc.pod.InitContainers {
+				for _, mount := range init.VolumeMounts {
+					if strings.HasPrefix(mount.Name, "operator-") {
+						t.Errorf("%s mounts the operator's %s", init.Name, mount.Name)
+					}
+				}
+				if _, set := envOf(init)["PI_CONFIG_FILES"]; set {
+					t.Errorf("%s is told the operator's PI_CONFIG_FILES", init.Name)
+				}
+			}
+		})
+	}
+}
+
+// With provider keys, every pod Legion runs mounts exactly the configured keys of the providers
+// Secret — the TypeScript runtime's legion-<project token>-providers — each as a file named for the
+// variable Oh My Pi reads, read-only at ProvidersDir in the agent's container alone, and the
+// worker's shim exports that directory into Oh My Pi's environment (--provider-env-dir); with none,
+// no pod mounts the Secret and no shim is told a directory.
+func TestProviderKeysReachEveryPodAsTheProvidersSecretsFiles(t *testing.T) {
+	const providersSecret = "legion-" + testProject + "-providers"
+	for name, keys := range map[string]map[string]string{
+		"configured": {"GEMINI_API_KEY": "gemini", "ANTHROPIC_API_KEY": "anthropic"},
+		"none":       nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			opts := testOptions()
+			opts.ProviderKeys = keys
+			r, err := configure(opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			worker := podOf(t, r, workerSpec(t), false)
+			for _, tc := range []struct {
+				pod   corev1.PodSpec
+				agent string
+			}{
+				{worker, mainContainer},
+				{r.probeManifest("legion-probe", 5, corev1.ResourceRequirements{}, time.Time{}).Spec.PodTemplate.Spec, probeContainer},
+			} {
+				var volumes []corev1.Volume
+				for _, volume := range tc.pod.Volumes {
+					if volume.Secret != nil && volume.Secret.SecretName == providersSecret {
+						volumes = append(volumes, volume)
+					}
+				}
+				mounted := func(c corev1.Container) []corev1.VolumeMount {
+					var mounts []corev1.VolumeMount
+					for _, mount := range c.VolumeMounts {
+						if slices.ContainsFunc(volumes, func(v corev1.Volume) bool { return v.Name == mount.Name }) || mount.MountPath == ProvidersDir {
+							mounts = append(mounts, mount)
+						}
+					}
+					return mounts
+				}
+				agent := containerNamed(t, tc.pod, tc.agent)
+				if keys == nil {
+					if len(volumes) != 0 || len(mounted(agent)) != 0 {
+						t.Errorf("%s: with no provider keys the pod has %+v and mounts %+v", tc.agent, volumes, mounted(agent))
+					}
+					continue
+				}
+				want := &corev1.SecretVolumeSource{
+					SecretName:  providersSecret,
+					Items:       []corev1.KeyToPath{{Key: "anthropic", Path: "ANTHROPIC_API_KEY"}, {Key: "gemini", Path: "GEMINI_API_KEY"}},
+					DefaultMode: new(int32(0o440)),
+				}
+				if len(volumes) != 1 || !reflect.DeepEqual(volumes[0].Secret, want) {
+					t.Fatalf("%s's pod holds the providers Secret as %+v, want once as %+v", tc.agent, volumes, *want)
+				}
+				if got := mounted(agent); len(got) != 1 || got[0].MountPath != ProvidersDir || !got[0].ReadOnly || got[0].SubPath != "" {
+					t.Errorf("%s mounts the providers Secret as %+v, want once, read-only, at %s", tc.agent, got, ProvidersDir)
+				}
+				for _, init := range tc.pod.InitContainers {
+					if got := mounted(init); len(got) != 0 {
+						t.Errorf("%s mounts the providers Secret: %+v", init.Name, got)
+					}
+				}
+			}
+			main := containerNamed(t, worker, mainContainer)
+			shim := main.Command[:slices.Index(main.Command, "--")]
+			at := slices.Index(shim, "--provider-env-dir")
+			switch {
+			case keys == nil && at >= 0:
+				t.Errorf("with no provider keys the shim is told %v", shim)
+			case keys != nil && (at < 0 || at+1 == len(shim) || shim[at+1] != ProvidersDir):
+				t.Errorf("the shim runs as %v, want --provider-env-dir %s", shim, ProvidersDir)
+			}
+		})
+	}
+}
+
+// LegionVolumeNames, LegionMountPaths, and LegionEnvNames — what the configuration refuses in the
+// operator's pod — are exactly what Legion's own pods carry: every volume of every pod a launch or
+// the image probe runs, and every mount and variable of the containers the operator's pieces join
+// (the agent's and the probe's), with every optional piece the runtime adds configured and nothing
+// of a spec's or the operator's. A piece added to a pod and not to its list is one an operator
+// could collide with unrefused; one left in a list that no pod carries is refused for nothing.
+func TestLegionsOwnNamesAreWhatItsPodsCarry(t *testing.T) {
+	opts := goldenOptions()
+	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal", "dispatch-bearer"
+	opts.ProviderKeys = map[string]string{"ANTHROPIC_API_KEY": "anthropic"}
+	r, err := configure(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	volumes, mounts, env := map[string]bool{}, map[string]bool{}, map[string]bool{}
+	carry := func(pod corev1.PodSpec, agent corev1.Container) {
+		for _, volume := range pod.Volumes {
+			volumes[volume.Name] = true
+		}
+		for _, mount := range agent.VolumeMounts {
+			mounts[mount.MountPath] = true
+		}
+		for _, variable := range agent.Env {
+			env[variable.Name] = true
+		}
+	}
+	for _, tc := range manifestCases(t) {
+		spec := tc.spec
+		spec.Env, spec.Secrets = nil, nil
+		pod := podOf(t, r, spec, tc.colocate)
+		carry(pod, containerNamed(t, pod, mainContainer))
+	}
+	probe := r.probeManifest("legion-probe", 5, corev1.ResourceRequirements{}, time.Time{}).Spec.PodTemplate.Spec
+	carry(probe, containerNamed(t, probe, probeContainer))
+	for _, list := range []struct {
+		name    string
+		got     []string
+		carried map[string]bool
+	}{
+		{"LegionVolumeNames", LegionVolumeNames(), volumes},
+		{"LegionMountPaths", LegionMountPaths(), mounts},
+		{"LegionEnvNames", LegionEnvNames(), env},
+	} {
+		listed := map[string]bool{}
+		for _, entry := range list.got {
+			listed[entry] = true
+		}
+		if !maps.Equal(listed, list.carried) {
+			t.Errorf("%s is %v, and Legion's pods carry %v", list.name, slices.Sorted(maps.Keys(listed)), slices.Sorted(maps.Keys(list.carried)))
+		}
+	}
+}
+
+// ImageOwnedPaths covers every path in the image a pod runs or loads from, which an operator's
+// mount there would hide: Oh My Pi, the Legion plugin the agent loads, the Go legion every
+// container runs, the profile's installed plugins, and the databases Oh My Pi keeps in the
+// profile's agent directory.
+func TestImageOwnedPathsCoverWhatAPodRunsFromTheImage(t *testing.T) {
+	for _, used := range []string{
+		defaultAgent, legionPlugin, testOptions().Tools.Legion,
+		ompProfileDir + "/plugins/node_modules", ompAgentDir + "/agent.db", ompAgentDir + "/models.db",
+	} {
+		if !slices.ContainsFunc(ImageOwnedPaths(), func(owned string) bool {
+			return used == owned || strings.HasPrefix(used, owned+"/")
+		}) {
+			t.Errorf("%s is not under ImageOwnedPaths %v", used, ImageOwnedPaths())
+		}
 	}
 }
 

@@ -412,6 +412,55 @@ func TestStartCheckConfigNamesTheBrokenKey(t *testing.T) {
 	}
 }
 
+// Under runtime: kubernetes, --check-config also makes the boot's refusal of an operator pod that
+// collides with Legion's own (daemon.CheckOperatorPod): a mount at Legion's boot projection is
+// refused naming both paths, with no App key command run.
+func TestStartCheckConfigRefusesAnOperatorPodCollidingWithLegions(t *testing.T) {
+	legionState(t)
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "private-key-command-ran")
+	command := "touch " + marker + "; exit 1"
+	body := fmt.Sprintf(`project: DEMO
+postgres_dsn: postgres://legion:legion@127.0.0.1:1/legion
+state_dir: %s
+bind: 10.0.0.5
+daemon_url: http://10.0.0.5:13370
+envoy_url: http://envoy-listener.internal.example:9020
+envoy_token_file: ./envoy-token
+operator_token_file: ./operator-token
+dispatch_url: https://dispatch.internal.example
+dispatch_token_file: ./dispatch-token
+nats_urls: [nats://nats.internal.example:4222]
+projects:
+  DEMO: { repo: acme/widgets }
+github_apps:
+  implement: { app_id: "1", private_key_command: %q }
+  review: { app_id: "2", private_key_command: %q }
+runtime:
+  kubernetes:
+    namespace: legion
+    image: ghcr.io/sjawhar/legion-worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    storage_class: gp2
+    gateway: { url: "https://middleman.internal.example", audience: middleman-legion, service_account: legion-worker, token_expiry_seconds: 600 }
+    pod:
+      volumes: [{name: creds, secret: {name: legion-creds}}]
+      volume_mounts: [{volume: creds, mount_path: /var/run/legion/boot}]
+`, filepath.Join(dir, "state"), command, command)
+	config := filepath.Join(dir, "legion.yaml")
+	if err := os.WriteFile(config, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errb bytes.Buffer
+	code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
+	want := "legion start: runtime.kubernetes.pod.volume_mounts[0].mount_path /var/run/legion/boot overlaps /var/run/legion/boot, which Legion mounts in every pod: a mount may be neither at, under, nor above one of Legion's\n"
+	if code != 1 || errb.String() != want || out.Len() != 0 {
+		t.Fatalf("exit code = %d, stdout %q, stderr %q; want 1 and %q", code, out.String(), errb.String(), want)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("the private_key_command ran (marker stat: %v)", err)
+	}
+}
+
 // `legion state --config` reads where the file says the daemon answers, and nothing else of it:
 // both GitHub Apps' private_key_command would fail, and the state is read all the same, with
 // neither command run.

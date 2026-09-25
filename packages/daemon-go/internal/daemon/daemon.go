@@ -340,12 +340,12 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 		return plan{}, err
 	}
 	secrets := map[string]string{}
-	if cfg.EnvoyTokenFile != "" {
-		envoyToken, err := config.ReadSecretPointer("envoy_token_file", cfg.EnvoyTokenFile)
+	for name, pointer := range launchSecrets(cfg) {
+		value, err := config.ReadSecretPointer(pointer.key, pointer.file)
 		if err != nil {
 			return plan{}, err
 		}
-		secrets["ENVOY_TOKEN"] = envoyToken
+		secrets[name] = value
 	}
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 		return plan{}, fmt.Errorf("create state directory %s: %w", cfg.StateDir, err)
@@ -387,6 +387,18 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 		return plan{}, err
 	}
 	return p, nil
+}
+
+// secretPointer is a configuration key naming a secret's file, and the file.
+type secretPointer struct{ key, file string }
+
+// launchSecrets are the secrets every launch's spec carries (specs.SpawnSpec), each by its name and
+// the key and file the configuration reads it from: the Envoy bearer, when the daemon has one.
+func launchSecrets(cfg config.Config) map[string]secretPointer {
+	if cfg.EnvoyTokenFile == "" {
+		return nil
+	}
+	return map[string]secretPointer{"ENVOY_TOKEN": {"envoy_token_file", cfg.EnvoyTokenFile}}
 }
 
 // prepareTmux is what panes on this host need: the OMP invocation every pane runs and the plugin
