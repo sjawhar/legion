@@ -52,10 +52,10 @@ func testOptions() Options {
 		Image:        testImage,
 		StorageClass: "gp2",
 		TreeVolume:   resource.MustParse("20Gi"),
-		StreamURL:    "tcp://10.1.20.250:13371",
-		DaemonURL:    "http://10.1.20.250:13370",
-		EnvoyURL:     "http://10.1.20.250:9020",
-		NATSURLs:     []string{"nats://10.1.20.250:4222"},
+		StreamURL:    "tcp://192.0.2.250:13371",
+		DaemonURL:    "http://192.0.2.250:13370",
+		EnvoyURL:     "http://192.0.2.250:9020",
+		NATSURLs:     []string{"nats://192.0.2.250:4222"},
 		Tools: Tools{
 			GH: "/usr/local/bin/gh", Git: "/usr/bin/git", JJ: "/usr/local/bin/jj", Legion: "/opt/legion/go/bin/legion",
 		},
@@ -365,7 +365,7 @@ func (g *rig) createPod(s *sandbox) {
 		Status: corev1.PodStatus{Phase: corev1.PodPending},
 	}
 	if g.autoStart.Load() {
-		pod.Spec.NodeName = "ip-10-1-40-7"
+		pod.Spec.NodeName = "ip-192-0-2-7"
 		pod.Status = runningStatus()
 	}
 	_ = g.kube.Tracker().Add(pod)

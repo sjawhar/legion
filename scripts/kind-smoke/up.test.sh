@@ -143,8 +143,22 @@ if ! grep -q session_dsn_secret "$here/../../packages/daemon/src/daemon/config.t
 fi
 # 8. bad mode values
 expect_refusal 'SMOKE_GITHUB_INGRESS must be none or envoy; got webhook' SMOKE_GITHUB_INGRESS=webhook
-# 8b. the bridge's upstream has no default: the operator names the production NATS
+# 8b. the bridge's upstream has no default: the operator names the production NATS by its
+# fully-qualified name, unset, empty, and blank alike refused before anything starts
+(
+  unset SMOKE_UPSTREAM_NATS
+  expect_refusal 'SMOKE_UPSTREAM_NATS is unset: SMOKE_GITHUB_INGRESS=envoy bridges from the production Envoy NATS' SMOKE_GITHUB_INGRESS=envoy
+)
 expect_refusal 'SMOKE_UPSTREAM_NATS is unset: SMOKE_GITHUB_INGRESS=envoy bridges from the production Envoy NATS' SMOKE_GITHUB_INGRESS=envoy SMOKE_UPSTREAM_NATS=
+expect_refusal 'SMOKE_UPSTREAM_NATS is unset: SMOKE_GITHUB_INGRESS=envoy bridges from the production Envoy NATS' SMOKE_GITHUB_INGRESS=envoy 'SMOKE_UPSTREAM_NATS=   '
+# a bare alias is refused, and so is anything after the authority (the client dials what follows the
+# last "://") or a list; no refusal repeats the value
+for upstream in nats://bare-alias-canary:4222 bare-alias-canary:4222 nats://user:pw@bare-alias-canary \
+  nats://ok.example/nats://bare-alias-canary:4222 'nats://ok.example:4222?x=nats://bare-alias-canary:4222' \
+  'nats://ok.example:4222#nats://bare-alias-canary' nats://bare-alias-canary.example:4222,nats://ok.example:4222; do
+  expect_refusal 'SMOKE_UPSTREAM_NATS is not one NATS URL naming a fully-qualified host' SMOKE_GITHUB_INGRESS=envoy "SMOKE_UPSTREAM_NATS=$upstream"
+  refute grep -Fq bare-alias-canary "$tmp/last.txt"
+done
 expect_refusal 'SMOKE_ROOT_ISSUES must be a positive integer; got 0' SMOKE_ROOT_ISSUES=0
 echo "up.test.sh: refusals OK"
 
@@ -415,8 +429,9 @@ case "$all" in
     ;;
   *envoy-bridge.ts)
     env | cut -d= -f1 | sort >"$FAKE_ENV/envoy-bridge"
+    printf '%s\n' "$SMOKE_UPSTREAM_NATS" >"$FAKE_ENV/envoy-bridge-upstream"
     if [ -n "${FAKE_BRIDGE_UNHEALTHY:-}" ]; then echo "BRIDGE UNHEALTHY upstream unreachable"; exit 1; fi
-    echo "BRIDGE READY subjects=notifications.github.sjawhar.legion-smoke.> upstream=$SMOKE_UPSTREAM_NATS downstream=$SMOKE_RIG_NATS"; exec sleep 300 ;;
+    echo "BRIDGE READY subjects=notifications.github.sjawhar.legion-smoke.> upstream=SMOKE_UPSTREAM_NATS downstream=$SMOKE_RIG_NATS"; exec sleep 300 ;;
 esac
 EOF
 fake mise <<'EOF'
@@ -520,22 +535,30 @@ grep -Fxq '  - --' "$tmp/state/controller/controller.yaml"
 cp "$FAKE_HTTP/state-plain.json" "$FAKE_HTTP/state.json"
 rm -f "$FAKE_TMUX/legion-smoket1"
 
-# GitHub ingress through the bridge: started before the daemon; an unhealthy bridge stops the run early
-run_up SMOKE_GITHUB_INGRESS=envoy SMOKE_UPSTREAM_NATS=nats://envoy-nats.tailnet.example:4222 >"$tmp/last.txt" || { cat "$tmp/last.txt" >&2; exit 1; }
+# GitHub ingress through the bridge: started before the daemon; an unhealthy bridge stops the run
+# early. A fresh bridge starts on an empty log, so an earlier run's lines neither decide readiness
+# nor stay.
+mkdir -p "$tmp/state/logs"
+echo 'BRIDGE READY subjects=x upstream=nats://stale-run-canary.example:4222 downstream=y' >"$tmp/state/logs/envoy-bridge.log"
+run_up SMOKE_GITHUB_INGRESS=envoy 'SMOKE_UPSTREAM_NATS= nats://envoy-nats.tailnet.example:4222 ' >"$tmp/last.txt" || { cat "$tmp/last.txt" >&2; exit 1; }
 [ -f "$tmp/state/pids/envoy-bridge.pid" ]
 grep -Fq 'STARTED envoy-bridge' "$tmp/last.txt"
 grep -Fxq SMOKE_UPSTREAM_NATS "$FAKE_ENV/envoy-bridge"
+grep -Fxq nats://envoy-nats.tailnet.example:4222 "$FAKE_ENV/envoy-bridge-upstream"   # trimmed
 refute grep -Eq '^(LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64|GH_REVIEW_APP_PRIVATE_KEY_B64|ANTHROPIC_API_KEY)$' "$FAKE_ENV/envoy-bridge"
 bridge_line="$(grep -n 'envoy-bridge.ts' "$FAKE_LOG" | head -n1 | cut -d: -f1)"
 apply_line="$(grep -n 'apply -k' "$FAKE_LOG" | tail -n1 | cut -d: -f1)"
 [ "$bridge_line" -lt "$apply_line" ]
 grep -Fq 'github ingress:  envoy (bridge pid' "$tmp/last.txt"
-grep -Fq 'upstream nats://envoy-nats.tailnet.example:4222' "$tmp/last.txt"
+grep -Fq 'upstream SMOKE_UPSTREAM_NATS)' "$tmp/last.txt"
+refute grep -rFq envoy-nats.tailnet.example "$tmp/last.txt" "$tmp/state"   # the value names production: never printed or recorded
+refute grep -Fq stale-run-canary "$tmp/state/logs/envoy-bridge.log"
 kill "$(cat "$tmp/state/pids/envoy-bridge.pid")" 2>/dev/null || true
 rm -f "$tmp/state/pids/envoy-bridge.pid" "$tmp/state/pids/envoy-bridge.start" "$tmp/state/logs/envoy-bridge.log"
 calls_before="$(wc -l <"$FAKE_LOG")"
 if run_up SMOKE_GITHUB_INGRESS=envoy FAKE_BRIDGE_UNHEALTHY=1 SMOKE_UPSTREAM_NATS=nats://nowhere.example:4222 >"$tmp/last.txt"; then echo "unhealthy bridge should fail" >&2; exit 1; fi
-grep -Fq 'the GitHub bridge could not subscribe upstream (nats://nowhere.example:4222); see '"$tmp"'/state/logs/envoy-bridge.log' "$tmp/last.txt"
+grep -Fq 'the GitHub bridge could not subscribe upstream (SMOKE_UPSTREAM_NATS); see '"$tmp"'/state/logs/envoy-bridge.log' "$tmp/last.txt"
+refute grep -Fq nowhere.example "$tmp/last.txt"
 refute grep -Fq 'apply -k' <(tail -n +"$((calls_before + 1))" "$FAKE_LOG")
 echo "up.test.sh: controller, bridge, root issues, summary OK"
 

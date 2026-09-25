@@ -546,10 +546,18 @@ case "$until" in
 esac
 [ -z "$from" ] || [ -z "$until" ] || fail "set STAGE3_FROM or STAGE3_UNTIL, not both"
 # The bridge dials the production Envoy NATS by the operator's fully-qualified name for it, never
-# a bare alias a resolver's search domain would complete.
+# a bare alias a resolver's search domain would complete. The value is never printed.
 upstream_nats=${SMOKE_UPSTREAM_NATS:-}
+upstream_nats=${upstream_nats#"${upstream_nats%%[![:space:]]*}"}
+upstream_nats=${upstream_nats%"${upstream_nats##*[![:space:]]}"}
 [ -n "$upstream_nats" ] ||
   fail "SMOKE_UPSTREAM_NATS is unset: the production Envoy NATS the GitHub bridge subscribes on, by its fully-qualified name (nats://envoy-nats.<tailnet>.ts.net:4222)"
+# One URL: optional scheme and user info, a host with a dot, optional port, nothing after it (the
+# client dials what follows the last "://"); scripts/kind-smoke/envoy-bridge.ts holds the same
+# pattern.
+nats_url='^([A-Za-z][A-Za-z0-9+.-]*://)?([^@/?#,[:space:]]+@)?[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)+(:[0-9]+)?/?$'
+[[ "$upstream_nats" =~ $nats_url ]] ||
+  fail "SMOKE_UPSTREAM_NATS is not one NATS URL naming a fully-qualified host: a bare alias resolves through whatever search domain the box has; name the production Envoy NATS as nats://envoy-nats.<tailnet>.ts.net:4222"
 development=${from:+from $from}${until:+until $until}
 # The daemon runs gh by the path it resolves at boot. This box's PATH heads with a gh wrapper
 # (the dotfiles shim, which hands an agent's explicit GH_TOKEN on to `knives gh`), so the proof

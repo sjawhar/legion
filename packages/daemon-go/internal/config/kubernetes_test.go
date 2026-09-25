@@ -685,8 +685,8 @@ func TestLoadForValidationAcceptsTheStage4bProofConfig(t *testing.T) {
 	path := writeConfigFile(t, `project: LEGSMOKE
 port: 13370
 worker_stream_port: 13371
-bind: 10.1.20.30
-daemon_url: http://10.1.20.30:13370
+bind: 192.0.2.30
+daemon_url: http://192.0.2.30:13370
 postgres_dsn: postgres://legion:secret@127.0.0.1:5432/legion?sslmode=disable
 state_dir: /tmp/stage4b/state
 operator_token_file: /tmp/stage4b/operator-token

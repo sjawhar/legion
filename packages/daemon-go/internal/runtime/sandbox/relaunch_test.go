@@ -243,7 +243,7 @@ func TestAPodOfATreeRunsOnlyOnceNoOtherIsInitializing(t *testing.T) {
 	if got := steps(t, g.writes(), worker); slices.Contains(got, "run") {
 		t.Fatalf("the worker was set Running while the root was still in workspace-init: %v", got)
 	}
-	g.update(g.pod(root), func(p *corev1.Pod) { p.Spec.NodeName, p.Status = "ip-10-1-40-7", runningStatus() })
+	g.update(g.pod(root), func(p *corev1.Pod) { p.Spec.NodeName, p.Status = "ip-192-0-2-7", runningStatus() })
 	select {
 	case err := <-done:
 		if err != nil {

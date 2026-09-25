@@ -38,7 +38,6 @@ operator=${LEGION_E2E_OPERATOR_CONTEXT:-production}
 runtime_kubeconfig=${LEGION_E2E_RUNTIME_KUBECONFIG:-$HOME/.kube/legion-daemon-production}
 runtime_context=${LEGION_E2E_RUNTIME_CONTEXT:-}
 image=${LEGION_E2E_IMAGE:-}
-gateway=${LEGION_E2E_MODEL_GATEWAY_URL:-}
 from=${STAGE4A_FROM:-}
 evidence=${STAGE4A_EVIDENCE_DIR:-$(mktemp -d /tmp/legion-e2e4a-evidence.XXXXXXXX)}
 work=$(mktemp -d /tmp/legion-e2e4a.XXXXXXXX)
@@ -89,14 +88,8 @@ for tool in go kubectl aws curl ss secrets diff; do command -v "$tool" >/dev/nul
 [ -n "$runtime_context" ] || fail "LEGION_E2E_RUNTIME_CONTEXT is unset: the runtime must run as the Legion daemon's restricted identity, never the operator's"
 [ -r "$runtime_kubeconfig" ] || fail "the runtime kubeconfig $runtime_kubeconfig is not readable"
 case "$image" in *@sha256:*) ;; *) fail "LEGION_E2E_IMAGE must be the worker image pinned by digest (…@sha256:…), not '$image'" ;; esac
-[ -n "$gateway" ] ||
-  fail "LEGION_E2E_MODEL_GATEWAY_URL is unset: the model gateway's Anthropic endpoint, which the fixture's models.yml routes every pod to"
-# It replaces the fixture's placeholder as a plain YAML scalar, so it stays one URL-safe word.
-case "$gateway" in
-*[!A-Za-z0-9:/._~-]*) fail "LEGION_E2E_MODEL_GATEWAY_URL $gateway holds a character other than letters, digits and :/._~-" ;;
-https://?*) ;;
-*) fail "LEGION_E2E_MODEL_GATEWAY_URL must be an https:// URL, not '$gateway'" ;;
-esac
+gateway=$(bash "$root/scripts/e2e/lib/model-gateway-url.sh") ||
+  fail "LEGION_E2E_MODEL_GATEWAY_URL is not a model gateway URL the fixture's models.yml can name (the reason is above)"
 imds=$(curl -sf -m 5 -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60') ||
   fail "instance metadata is unreachable; the harness binds the devbox's private address, read from it"
 host=$(curl -sf -m 5 -H "X-aws-ec2-metadata-token: $imds" http://169.254.169.254/latest/meta-data/local-ipv4) ||
@@ -131,7 +124,7 @@ grep -qFx "    baseUrl: $gateway" "$work/models.yml" || fail "the fixture's mode
 op create configmap "$route_configmap" --from-file=models.yml="$work/models.yml" --from-file=overlay.yml="$fixture/overlay.yml" \
   --dry-run=client -o yaml | kubectl label --local -f - "legion.dev/project=$project" -o yaml | op create -f - >/dev/null ||
   fail "the operator could not create ConfigMap $route_configmap"
-note "[operator] ConfigMap $route_configmap: models.yml (baseUrl $gateway) and overlay.yml from $fixture, label legion.dev/project=$project"
+note "[operator] ConfigMap $route_configmap: models.yml (baseUrl from LEGION_E2E_MODEL_GATEWAY_URL) and overlay.yml from $fixture, label legion.dev/project=$project"
 pass
 
 begin build

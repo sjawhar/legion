@@ -6,8 +6,7 @@
 #   scripts/e2e/lib/install-model-gateway.sh --profile <name> --dest <dir> --cache-dir <dir>
 #
 # LEGION_E2E_MODEL_GATEWAY_URL is required: the gateway's Anthropic endpoint, the one hawk-token's
-# default HAWK_API_URL mints for (the anthropic provider's baseUrl in the operator's own
-# ~/.omp/agent/models.yml).
+# default HAWK_API_URL mints for, checked by lib/model-gateway-url.sh.
 #
 # Stdout is one line, the key command's path; every refusal goes to stderr. It writes:
 #   <dir>/hawk-token      the key command the profile names: hawk-token, run with the caller's
@@ -91,15 +90,8 @@ hawk_token=$(command -v hawk-token) ||
 hawk_token=$(realpath -- "$hawk_token")
 [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ] ||
   fail "DBUS_SESSION_BUS_ADDRESS is unset: hawk-token reads the hawk login from the keyring over the session bus"
-# The URL is written into YAML as a plain scalar, so it stays one URL-safe word.
-gateway=${LEGION_E2E_MODEL_GATEWAY_URL:-}
-[ -n "$gateway" ] ||
-  fail "LEGION_E2E_MODEL_GATEWAY_URL is unset: set it to the model gateway's Anthropic endpoint, the anthropic provider's baseUrl in your own ~/.omp/agent/models.yml"
-case "$gateway" in
-*[!A-Za-z0-9:/._~-]*) fail "LEGION_E2E_MODEL_GATEWAY_URL $gateway holds a character other than letters, digits and :/._~-" ;;
-https://?*) ;;
-*) fail "LEGION_E2E_MODEL_GATEWAY_URL must be an https:// URL, not '$gateway'" ;;
-esac
+# The helper names the variable in its own refusal.
+gateway=$(bash "$(dirname -- "${BASH_SOURCE[0]}")/model-gateway-url.sh") || exit 1
 
 dest=$(realpath -m -- "$dest")
 # The path is written into YAML as an OMP `!command`, so it stays one plain word.
@@ -225,5 +217,5 @@ modelRoles:
   task: $model
   advisor: $model
 EOF
-echo "$me: OMP profile $profile routes $model through $gateway, keyed by $key_command" >&2
+echo "$me: OMP profile $profile routes $model through LEGION_E2E_MODEL_GATEWAY_URL, keyed by $key_command" >&2
 printf '%s\n' "$key_command"
