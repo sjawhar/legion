@@ -592,14 +592,15 @@ trap 'exit 143' TERM
 
 # ---- the production audit (checkpoint production-audit) --------------------------------------------
 
+# production_baseline dates the audit's window, once production Dispatch answers.
 production_baseline() {
-  prod_baseline=$(dispatch_get "issues?project=$project&limit=1" | jq -r 'length') || fail "read production Dispatch"
+  dispatch_get "issues?project=$project" >/dev/null || fail "read production Dispatch"
   prod_baseline=$(date -u +%FT%TZ)
 }
-# production_audit fails on any production write the run made outside LEGSMOKE, and on any session
-# of the run holding a role outside legion-legsmoke-*.
+# production_audit fails on any production write the run made outside LEGSMOKE, and on any sampled
+# interest of the run's sessions outside it.
 production_audit() {
-  local sessions actors key touched
+  local sessions actors
   audited=1
   sessions=$(jq -R -s -c 'split("\n") | map(fromjson? | select(.msg == "api: claim registered") | .session) | unique' "$daemon_log")
   printf '%s\n' "$sessions" >"$evidence/run-sessions.json"
@@ -607,7 +608,8 @@ production_audit() {
   # LEGSMOKE updated since the baseline is the run's write only when one of its events names one
   # of the run's own writers: its agents' sessions, the daemon, and the proof human.
   actors=$(jq -c --arg daemon "legion-daemon:$project" --arg human "$dispatch_actor" '. + [$daemon, $human]' <<<"$sessions")
-  touched_outside "$actors" >"$evidence/production-issues-touched-outside.json"
+  touched_outside "$actors" >"$evidence/production-issues-touched-outside.json" ||
+    printf '"the production issues outside %s could not be read"\n' "$project" >"$evidence/production-issues-touched-outside.json"
   # Envoy lists no roles, and a session's interests leave the listener with it, so the run samples
   # its sessions' interests at every checkpoint while its daemon runs (interests_snapshot). A
   # registered session with no sample leaves the audit unable to vouch for it.
@@ -627,12 +629,14 @@ production_audit() {
 # one stops the read rather than counting as older than the baseline.
 event_time_def='def event_time: .created_at // error("event \(.seq) of \(.issue_key) has no created_at");'
 # touched_outside ACTORS prints, as one JSON array, every event since the baseline on a production
-# issue outside LEGSMOKE whose actor is one of ACTORS (a JSON array of actor ids).
+# issue outside LEGSMOKE whose actor is one of ACTORS (a JSON array of actor ids), or fails when a
+# read fails, so a Dispatch it could not read never passes as untouched.
 touched_outside() {
-  local actors=$1 key touched='[]'
-  for key in $(dispatch_get "issues?updated_since=$prod_baseline" | jq -r --arg p "$project-" '.[].key | select(startswith($p) | not)'); do
+  local actors=$1 keys key touched='[]'
+  keys=$(dispatch_get "issues?updated_since=$prod_baseline" | jq -r --arg p "$project-" '.[].key | select(startswith($p) | not)') || return 1
+  for key in $keys; do
     touched=$(dispatch_events "$key" | jq -c --argjson actors "$actors" --arg since "$prod_baseline" --arg key "$key" --argjson so_far "$touched" \
-      "$event_time_def"' $so_far + [.[] | select(event_time >= $since and (.actor.id as $id | $actors | index($id))) | {issue: $key, seq, type, actor: .actor.id, created_at}]')
+      "$event_time_def"' $so_far + [.[] | select(event_time >= $since and (.actor.id as $id | $actors | index($id))) | {issue: $key, seq, type, actor: .actor.id, created_at}]') || return 1
   done
   printf '%s\n' "$touched"
 }
