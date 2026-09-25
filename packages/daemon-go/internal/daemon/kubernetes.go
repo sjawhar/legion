@@ -8,7 +8,6 @@ import (
 	"net"
 	"slices"
 	"strconv"
-	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -39,9 +38,9 @@ var workerImageTools = sandbox.Tools{GH: "/usr/local/bin/gh", Git: "/usr/bin/git
 
 // imageProbeRetry is how often the daemon tries its worker image again after an attempt that said
 // nothing definitive: the daemon's backoff, bounded like `legion probe-image`'s at six attempts.
-// The probe pod answers a failure it cannot tell from the network the same way every time (exit 75),
-// so an unbounded retry would hold a deterministic refusal, such as a memory limit too small for
-// the turn, as a boot that never ends.
+// Its transient outcomes (a pod that never finished, a kubelet failure) can repeat for a reason no
+// wait changes, such as a memory limit too small for Oh My Pi, so an unbounded retry would hold a
+// deterministic refusal as a boot that never ends.
 var imageProbeRetry = bootprobe.Image
 
 // prepareSandbox is what Agent Sandbox needs before anything is opened (C1's translation, C3):
@@ -76,7 +75,7 @@ func prepareSandbox(cfg config.Config, log *slog.Logger, o overrides, dispatchTo
 			return fmt.Errorf("the image probe needs the Agent Sandbox runtime, not %T", rt)
 		}
 		return sandboxed.ProbeImage(ctx, sandbox.ImageProbe{
-			Contract: api.GoDaemonAPIVersion, StateDir: cfg.StateDir, Budget: imageProbeBudget(cfg.SlowCommandTimeout),
+			Contract: api.GoDaemonAPIVersion, StateDir: cfg.StateDir, Budget: cfg.SlowCommandTimeout,
 			Retry: imageProbeRetry, APIServer: rc.Host,
 		})
 	}
@@ -143,15 +142,11 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, stream, dis
 		Resources:  resources,
 		StreamURL:  stream,
 		DaemonURL:  cfg.DaemonURL, EnvoyURL: cfg.EnvoyURL, DispatchURL: cfg.DispatchURL, DispatchToken: dispatchToken,
-		NATSURLs: cfg.NatsURLs,
-		Tools:    workerImageTools,
-		Gateway: sandbox.Gateway{
-			URL: k.Gateway.URL, Audience: k.Gateway.Audience, ServiceAccount: k.Gateway.ServiceAccount, TokenExpiry: k.Gateway.TokenExpiry,
-		},
-		Pod: sandbox.Pod{
-			Env: k.Pod.Env, Volumes: k.Pod.Volumes, VolumeMounts: k.Pod.VolumeMounts, ServiceAccount: k.Pod.ServiceAccount,
-		},
+		NATSURLs:         cfg.NatsURLs,
+		Tools:            workerImageTools,
+		Pod:              sandbox.Pod(k.Pod),
 		ProviderKeys:     providerSecretKeys(cfg.ProviderKeys),
+		LaunchSecrets:    launchSecretNames(cfg),
 		BootTimeout:      cfg.WorkerBootTimeout,
 		BootIntervals:    cfg.WorkerBootRegistrationDeadlineIntervals,
 		TerminationGrace: cfg.WorkerStopTimeout,
@@ -161,92 +156,21 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, stream, dis
 	}, nil
 }
 
-// CheckOperatorPod refuses a piece of the operator's pod (runtime.kubernetes.pod) or a provider key
-// that collides with what Legion itself puts in a pod, naming both: a variable, volume, or mount
-// path of the runtime's own (sandbox.LegionEnvNames, LegionVolumeNames, LegionMountPaths), a path
-// the worker image owns (sandbox.ImageOwnedPaths), and a variable every launch's spec sets
-// (specs.SpawnSpec) — the git identity the role's App commits as, and the `<NAME>_FILE` pointer of
-// each launch secret. A variable would reach the worker container twice, a volume name the pod
-// twice; a mount at, under, or above one of Legion's hides it or is hidden by it; and the shim
-// refuses to export a provider key its environment names, skips one whose pointer it has
-// (shim.ReadProviderEnv), and would replace PI_CONFIG_FILES, the settings overlays Legion composes
-// for Oh My Pi. The loader has refused every shape no pod could carry; boot and `legion start
-// --check-config` both run this, before anything is launched.
+// CheckOperatorPod is the Sandbox runtime's refusal of an operator pod or provider key that
+// collides with Legion's own (sandbox.CheckPod) over the configuration, run before anything is
+// opened: boot runs it, and so does `legion start --check-config`, which starts no runtime.
 func CheckOperatorPod(cfg config.Config) error {
 	if cfg.Runtime.Kubernetes == nil {
 		return nil
 	}
-	return checkOperatorPod(cfg.Runtime.Kubernetes.Pod, cfg.ProviderKeys, launchSecrets(cfg))
+	return sandbox.CheckPod(sandbox.Pod(cfg.Runtime.Kubernetes.Pod), providerSecretKeys(cfg.ProviderKeys),
+		workerImageTools, launchSecretNames(cfg))
 }
 
-// checkOperatorPod is CheckOperatorPod over the operator's pod, the provider keys, and the launch
-// secrets by name.
-func checkOperatorPod(pod config.PodConfig, keys []config.ProviderKey, secrets map[string]secretPointer) error {
-	legion := map[string]bool{}
-	for _, name := range sandbox.LegionEnvNames() {
-		legion[name] = true
-	}
-	launch := map[string]string{}
-	for name := range gitIdentityEnv(runtime.GitIdentity{}) {
-		launch[name] = "the git identity the role's GitHub App commits as"
-	}
-	for name := range secrets {
-		launch[name+"_FILE"] = "the pointer to the launch secret " + name
-	}
-	for _, name := range slices.Sorted(maps.Keys(pod.Env)) {
-		if legion[name] {
-			return fmt.Errorf("runtime.kubernetes.pod.env sets %s, which Legion sets in every pod itself", name)
-		}
-		if why, set := launch[name]; set {
-			return fmt.Errorf("runtime.kubernetes.pod.env sets %s, which every launch sets itself (%s)", name, why)
-		}
-	}
-	legionVolumes := sandbox.LegionVolumeNames()
-	for i, volume := range pod.Volumes {
-		if slices.Contains(legionVolumes, volume.Name) {
-			return fmt.Errorf("runtime.kubernetes.pod.volumes[%d].name %s is a volume Legion puts in every pod", i, volume.Name)
-		}
-	}
-	for i, mount := range pod.VolumeMounts {
-		for _, owner := range []struct {
-			paths       []string
-			owns, whose string
-		}{
-			{sandbox.LegionMountPaths(), "Legion mounts in every pod", "Legion's"},
-			{sandbox.ImageOwnedPaths(), "the worker image owns", "the image's"},
-		} {
-			for _, owned := range owner.paths {
-				if overlaps(mount.MountPath, owned) {
-					return fmt.Errorf("runtime.kubernetes.pod.volume_mounts[%d].mount_path %s overlaps %s, which %s: a mount may be neither at, under, nor above one of %s",
-						i, mount.MountPath, owned, owner.owns, owner.whose)
-				}
-			}
-		}
-	}
-	for _, key := range keys {
-		switch {
-		case key.Env == "PI_CONFIG_FILES":
-			return fmt.Errorf("provider_keys names %s, the settings overlays Legion composes in every pod: the shim adds a provider key after the pod's own variables, so it would replace them", key.Env)
-		case legion[key.Env]:
-			return fmt.Errorf("provider_keys names %s, which Legion sets in every pod itself: the shim refuses to export a key its own environment names", key.Env)
-		case legion[key.Env+"_FILE"]:
-			return fmt.Errorf("provider_keys names %s, whose pointer %s_FILE Legion sets in every pod: the shim would skip the key", key.Env, key.Env)
-		}
-		why, set := launch[key.Env]
-		if !set {
-			why, set = launch[key.Env+"_FILE"]
-		}
-		if set {
-			return fmt.Errorf("provider_keys names %s, which every launch sets itself (%s): the shim would not export the key", key.Env, why)
-		}
-	}
-	return nil
-}
-
-// overlaps reports whether one of two clean absolute paths is the other or lies under it.
-func overlaps(a, b string) bool {
-	under := func(child, parent string) bool { return parent == "/" || strings.HasPrefix(child, parent+"/") }
-	return a == b || under(a, b) || under(b, a)
+// launchSecretNames are the names of the secrets every launch's spec carries (launchSecrets), which
+// the runtime refuses the operator's pod and a provider key for.
+func launchSecretNames(cfg config.Config) []string {
+	return slices.Sorted(maps.Keys(launchSecrets(cfg)))
 }
 
 // providerSecretKeys are provider_keys as the runtime takes them: each variable Oh My Pi reads,
@@ -336,12 +260,4 @@ func (t implementTokens) Token(ctx context.Context, owner string) (string, error
 		return "", err
 	}
 	return lease.Token, nil
-}
-
-// imageProbeBudget is one image-probe attempt's wait for the probe pod: the slow-command budget
-// for the pod's start and its launch probes, with the pod's model turn, which `legion probe-image`
-// bounds on its own (modelTurnTimeout), on top, so the attempt outlasts the turn however the budget
-// is configured.
-func imageProbeBudget(slowCommand time.Duration) time.Duration {
-	return slowCommand + modelTurnTimeout
 }

@@ -17,7 +17,6 @@ import (
 // imageOmp is an `omp` that answers each of the image's probes by its own plan, one step per
 // attempt of that probe (the last step repeats), telling them apart by argv as a real Oh My Pi
 // would run them, and recording the order they ran in and each attempt's argv and environment.
-// The model round trip's plan and answers are planModel's (modelprobe_test.go).
 type imageOmp struct{ dir, path string }
 
 func newImageOmp(t *testing.T, agents, load, session []string) imageOmp {

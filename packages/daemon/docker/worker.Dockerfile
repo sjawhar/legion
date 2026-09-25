@@ -21,11 +21,10 @@
 # to the Go daemon API contract, and prints the OK line the Go daemon's probe Sandbox reads. A broken
 # image never publishes.
 #
-# The `legion` profile carries no model route: Oh My Pi reads a models.yml baseUrl literally, and the
-# model gateway's URL is the daemon's configuration. In a pod, the Go `legion` writes the route from
-# LEGION_MODEL_GATEWAY_URL when it starts Oh My Pi (packages/daemon-go/internal/modelroute: the worker
-# shim, and `legion probe-image`, whose round trip through it the daemon's probe Sandbox requires as
-# `model-gateway=` on the OK line). The build has no gateway, so its probe makes no round trip.
+# The `legion` profile carries no model route, and neither does Legion: an operator's pod supplies it
+# (runtime.kubernetes.pod, docs/kubernetes.md). In a pod, the Go `legion` starts Oh My Pi on Legion's
+# pod baseline (packages/daemon-go/internal/podsafety: the worker shim, and `legion probe-image`, each
+# with --pod-safety), which names no model, provider or route.
 
 # Pins not derived from daemon code. The OMP fork pin is deliberately NOT an ARG: it is printed from
 # packages/daemon/src/daemon/omp-pin.ts (the single source config.ts's DEFAULT_OMP_INVOCATION uses).
@@ -203,10 +202,9 @@ COPY --from=go /out/legion /opt/legion/go/bin/legion
 # plugin to the Go daemon API contract this binary speaks, and resolves by name every task agent and
 # skill Legion's prompts name (shipped in its agents/ and dist/skills directories), printing
 # `probe-image: OK (/opt/omp/bin/omp) session-storage=probed go-daemon-api-version=<N>`; the Go daemon's
-# probe Sandbox runs it again with its own contract and the pod's LEGION_MODEL_GATEWAY_URL and gateway
-# token, adding the model round trip and `model-gateway=<model>` before any claim runs on the image
-# (packages/daemon-go/internal/runtime/sandbox/probe.go). It needs the natives step 3 fetched, which the
-# cached probe layer above carries.
+# probe Sandbox runs it again with its own contract, on the pod baseline and under the operator's pod,
+# before any claim runs on the image (packages/daemon-go/internal/runtime/sandbox/probe.go). It needs
+# the natives step 3 fetched, which the cached probe layer above carries.
 ARG LEGION_REVISION
 RUN set -eu; \
     git="$(command -v git)"; echo "git: $git"; test "$git" = /usr/bin/git; \

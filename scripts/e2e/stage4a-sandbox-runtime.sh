@@ -7,6 +7,11 @@
 # hash, the namespace list) use the admin context. Each check prints what it observed, naming the
 # identity, then `CHECK <name>: PASS`; the first that fails ends the run non-zero, naming it.
 #
+# Every pod carries the operator fixture's pod (scripts/e2e/fixtures/operator-route/pod.yml): its
+# model route, overlay, ServiceAccount and projected token. Legion holds none of it. The run
+# creates its own copy of the ConfigMap the fixture mounts, named for the run's project, before the
+# harness runs; the teardown deletes it with the rest of the run's objects.
+#
 # Everything the run creates carries its own project label, s4a-<run id>, and lib/namespace-rig.sh
 # owns it: on any exit the teardown deletes by exact name every Sandbox the harness recorded, then
 # everything labelled with that exact project — never by label existence — and namespace-clean
@@ -35,6 +40,8 @@ evidence=${STAGE4A_EVIDENCE_DIR:-$(mktemp -d /tmp/legion-e2e4a-evidence.XXXXXXXX
 work=$(mktemp -d /tmp/legion-e2e4a.XXXXXXXX)
 project_prefix=s4a-
 project="${project_prefix}$(date -u +%Y%m%d%H%M%S)-$(od -An -N2 -tx1 /dev/urandom | tr -d ' \n')"
+fixture=$root/scripts/e2e/fixtures/operator-route
+route_configmap=legion-operator-route-$project
 record=$work/sandboxes
 check=setup
 torn_down=
@@ -103,6 +110,13 @@ snapshot "$evidence/namespace-before.txt" || fail "the operator could not list n
 snapshotted=1
 note "[operator] $(wc -l <"$evidence/namespace-before.txt") objects in $namespace carry no project label or project $project"
 
+begin operator-route
+op create configmap "$route_configmap" --from-file=models.yml="$fixture/models.yml" --from-file=overlay.yml="$fixture/overlay.yml" \
+  --dry-run=client -o yaml | kubectl label --local -f - "legion.dev/project=$project" -o yaml | op create -f - >/dev/null ||
+  fail "the operator could not create ConfigMap $route_configmap"
+note "[operator] ConfigMap $route_configmap: models.yml and overlay.yml from $fixture, label legion.dev/project=$project"
+pass
+
 begin build
 go -C "$root/packages/daemon-go" test -c -tags e2e -o "$work/stage4a.test" ./internal/runtime/sandbox
 note "built the e2e harness from the checkout"
@@ -123,6 +137,8 @@ if env \
   LEGION_E2E_RECORD="$record" \
   LEGION_E2E_WORK="$evidence" \
   LEGION_E2E_FROM="$from" \
+  LEGION_E2E_OPERATOR_POD="$fixture/pod.yml" \
+  LEGION_E2E_OPERATOR_CONFIGMAP="$route_configmap" \
   "$work/stage4a.test" -test.run '^TestStage4aSandboxRuntimeLive$' -test.v -test.timeout 150m; then
   harness_ok=1
 fi

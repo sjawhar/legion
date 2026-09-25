@@ -40,7 +40,6 @@ import (
 	"k8s.io/client-go/tools/cache"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/modelroute"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -64,7 +63,6 @@ type Runtime struct {
 	dispatchURL, dispatchToken              string
 	natsURLs                                []string
 	tools                                   Tools
-	gateway                                 Gateway
 	pod                                     Pod
 	providerKeys                            map[string]string
 	agent                                   []string
@@ -148,21 +146,9 @@ func configure(opts Options) (*Runtime, error) {
 	case (opts.DispatchURL == "") != (opts.DispatchToken == ""):
 		return refuse("the Dispatch URL and its bearer are configured together (URL %q, bearer given: %t)",
 			opts.DispatchURL, opts.DispatchToken != "")
-	case opts.Gateway.URL == "":
-		return refuse("no model gateway URL: a pod reaches the models through the gateway alone")
-	case opts.Gateway.Audience == "":
-		return refuse("no model gateway audience for the pods' projected token")
-	case opts.Gateway.ServiceAccount == "":
-		return refuse("no ServiceAccount for the pods to run as and project the gateway token for")
-	case opts.Gateway.TokenExpiry < minTokenExpiry:
-		return refuse("the gateway token's expiry %s must be at least %s, the shortest projected token the API server issues",
-			opts.Gateway.TokenExpiry, minTokenExpiry)
 	case poolSet:
 		return refuse("scheduling node selector sets %s=%q: %s is the runtime's, which puts every pod on the %s pool agent-c's policy requires",
 			poolKey, pool, poolKey, poolValue)
-	}
-	if _, err := modelroute.AnthropicRoute(opts.Gateway.URL); err != nil {
-		return refuse("the model gateway URL is one every pod would refuse: %v", err)
 	}
 	if errs := validation.IsValidLabelValue(opts.Project); len(errs) > 0 {
 		return refuse("project %q is not a label value: %s", opts.Project, strings.Join(errs, "; "))
@@ -178,11 +164,14 @@ func configure(opts Options) (*Runtime, error) {
 			return refuse("the image's %s path %q is not absolute", tool.name, tool.path)
 		}
 	}
+	if err := CheckPod(opts.Pod, opts.ProviderKeys, opts.Tools, opts.LaunchSecrets); err != nil {
+		return refuse("%v", err)
+	}
 	r := &Runtime{
 		namespace: opts.Namespace, project: opts.Project, image: opts.Image, storageClass: opts.StorageClass,
 		treeVolume: opts.TreeVolume, scheduling: opts.Scheduling, resources: opts.Resources,
 		streamURL: opts.StreamURL, daemonURL: opts.DaemonURL, envoyURL: opts.EnvoyURL, dispatchURL: opts.DispatchURL,
-		dispatchToken: opts.DispatchToken, natsURLs: opts.NATSURLs, tools: opts.Tools, gateway: opts.Gateway,
+		dispatchToken: opts.DispatchToken, natsURLs: opts.NATSURLs, tools: opts.Tools,
 		pod: opts.Pod, providerKeys: opts.ProviderKeys,
 		bootTimeout: opts.BootTimeout, bootIntervals: opts.BootIntervals, terminationGrace: opts.TerminationGrace,
 		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent,

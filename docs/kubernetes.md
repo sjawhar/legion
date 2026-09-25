@@ -307,9 +307,9 @@ and resource allowance. Nothing in this mode uses a Job, a StatefulSet, or `acti
 This section is the TypeScript daemon's. The Go coordinator (`packages/daemon-go`, LEGION-208)
 reads the same `runtime.kubernetes` key with different rules, and refuses the examples below as
 written: its runtime selects the Legion pool itself, so `scheduling.node_selector` may not set
-`legion.dev/pool`; `resources` is keyed by role, with no `role_profiles`; `storage_class` and the
-`gateway` block (`url`, `audience`, `service_account`, `token_expiry_seconds`, 600 to 3600) are
-required; `bind` must be an address pods reach, never `0.0.0.0` or loopback, since every pod
+`legion.dev/pool`; `resources` is keyed by role, with no `role_profiles`; `storage_class` is
+required, and a `gateway` block is refused as removed (LEGION-270: a pod's model route is the
+operator's `pod` below); `bind` must be an address pods reach, never `0.0.0.0` or loopback, since every pod
 dials the worker stream at `tcp://<bind>:<worker_stream_port>`; and no Legion URL a pod is handed
 (`daemon_url`, `envoy_url`, `dispatch_url`, each `nats_urls` entry) may name a loopback or
 unspecified host (`packages/daemon-go/internal/config/kubernetes.go`). It also reads
@@ -318,6 +318,10 @@ source), `volume_mounts` (read-only unless `read_only: false`), and `service_acc
 adds to every pod, the image probe's included, refusing any name or path of Legion's own or the
 worker image's; and under it `provider_keys` maps each variable Oh My Pi reads to a key of the
 providers Secret below, which every pod then mounts, those keys alone, for the shim to export.
+Legion holds no model route: everything a pod's Oh My Pi needs to reach a model — a `models.yml`,
+a settings overlay in `PI_CONFIG_FILES`, a token — is the operator's, through `pod` and
+`provider_keys`. `scripts/e2e/fixtures/operator-route/` is one such operator's (the Go live
+harnesses': the Hawk model gateway, keyed by a projected ServiceAccount token).
 
 `runtime` is either the scalar `tmux` (the default) or a mapping whose single key selects the
 Kubernetes runtime and carries its settings:

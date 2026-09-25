@@ -38,18 +38,8 @@ one line. The work was the proof.
 | `.github/workflows/worker-image.yaml` | `pull_request.paths` names `omp-pin.ts`, so a PR that touches it builds the image |
 | `.github/workflows/envoy-and-contracts.yaml` | the `daemon-go` job installs the pin and exports `LEGION_TEST_OMP`, so the Go daemon's real-binary tests run on it |
 
-One thing is derived *from the release* rather than read from the constant: the closed provider set
-a Sandbox pod's Oh My Pi runs under (`packages/daemon-go/internal/modelroute/config.yml`'s
-`disabledProviders`, every provider id the pinned catalog and auth rules know but anthropic) and its
-test input `testdata/provider-keys.txt`. A release can add providers, so `config.yml` records the
-release it was derived at (`# derived at:`), and `TestTheClosedProviderSetWasDerivedAtThePin` holds
-that line to `omp-pin.ts`. That test is the one deliberate check of the version string: it exists
-to make a bump re-derive the list (the commands are in both files' headers). Whether the list closes
-the set is checked on the binary by `internal/modelroute/omp_test.go`.
-
 So a bump is `grep -rn "<old version>" .` (excluding `.jj`, `.git`, `node_modules`) to confirm
-nothing else names it, edit line 4, re-derive the closed set and the key list at the new tag, and
-run the Go daemon's real-binary tests with `LEGION_TEST_OMP` at the new pin (the 18.1.21 → 18.2.9
+nothing else names it, edit line 4, and run the Go daemon's real-binary tests with `LEGION_TEST_OMP` at the new pin (the 18.1.21 → 18.2.9
 bump, LEGION-208 4b.16, found a changed key-failure message and a changed catalog cost that way).
 Do not add any other test that asserts the new string: it repeats the constant, fails on every
 legitimate bump, and defends no behavior.

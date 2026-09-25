@@ -54,11 +54,12 @@ const (
 	initTempDir = "/tmp"
 )
 
-// ImageOwnedPaths are the paths in the worker image a pod runs or loads from, which an operator's
+// imageOwnedPaths are the paths in the worker image a pod runs or loads from, which an operator's
 // mount there would hide: Legion's binaries, plugin, and role prompts (/opt/legion), Oh My Pi
 // (/opt/omp), the profile's installed plugins, and the databases Oh My Pi keeps in the profile's
-// agent directory. An operator's mount may be neither at, under, nor above one.
-func ImageOwnedPaths() []string {
+// agent directory; CheckPod adds the Tools. An operator's mount may be neither at, under, nor
+// above one.
+func imageOwnedPaths() []string {
 	return []string{"/opt/legion", "/opt/omp", ompProfileDir + "/plugins", ompAgentDir + "/agent.db", ompAgentDir + "/models.db"}
 }
 

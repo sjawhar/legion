@@ -11,8 +11,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-
-	"github.com/sjawhar/legion/daemon/internal/modelroute"
 )
 
 // testPlugin lays out a pi-legion-envoy under dir as the image unpacks one: a manifest declaring
@@ -52,9 +50,9 @@ func testPlugin(t *testing.T, dir string, agent, rubric bool) string {
 // Pi's own agent and skill discovery, on the lane the probed Oh My Pi loads the plugin by: a pod's
 // one explicit root with discovery off, or a pane's installed plugins. Only the real binary shows
 // that the probe's imports of that discovery work and see what the launch sees, the profile's skill
-// settings included, since a session drops a skill they disable or ignore. The profile is routed
-// through a gateway nothing listens on, so no credential the machine carries decides the run
-// (no probe here makes a model call).
+// settings included, since a session drops a skill they disable or ignore. The profile's one model
+// is an operator's provider nothing listens on, so no credential the machine carries decides the
+// run (no probe here makes a model call).
 func TestThePromptReferenceProbeOnTheRealOhMyPi(t *testing.T) {
 	omp := os.Getenv("LEGION_TEST_OMP")
 	switch {
@@ -88,17 +86,20 @@ func TestThePromptReferenceProbeOnTheRealOhMyPi(t *testing.T) {
 			home := filepath.Join(dir, "home")
 			mkdir(t, home)
 			root := testPlugin(t, dir, testCase.agent, testCase.rubric)
-			token := filepath.Join(dir, "token")
-			if err := os.WriteFile(token, []byte("unused\n"), 0o600); err != nil {
-				t.Fatal(err)
+			agentDir := filepath.Join(home, ".omp", "profiles", "legion", "agent")
+			mkdir(t, agentDir)
+			for name, content := range map[string]string{
+				"models.yml": "providers:\n  operator:\n    baseUrl: http://127.0.0.1:9\n    auth: apiKey\n    api: anthropic-messages\n" +
+					"    apiKey: unused\n    models:\n      - id: probe-test\n        name: Probe test\n",
+				"config.yml": "modelRoles:\n  default: operator/probe-test\n",
+			} {
+				if err := os.WriteFile(filepath.Join(agentDir, name), []byte(content), 0o600); err != nil {
+					t.Fatal(err)
+				}
 			}
-			installed, err := modelroute.InstallKeyedBy([]string{"HOME=" + home, "OMP_PROFILE=legion",
-				modelroute.EnvURL + "=http://127.0.0.1:9", "PATH=/usr/local/bin:/usr/bin:/bin"}, token)
-			if err != nil {
-				t.Fatal(err)
-			}
+			environ := []string{"HOME=" + home, "OMP_PROFILE=legion", "PATH=/usr/local/bin:/usr/bin:/bin", "AWS_EC2_METADATA_DISABLED=true"}
 			if testCase.settings != "" {
-				config, err := os.OpenFile(filepath.Join(home, ".omp", "profiles", "legion", "agent", "config.yml"), os.O_APPEND|os.O_WRONLY, 0)
+				config, err := os.OpenFile(filepath.Join(agentDir, "config.yml"), os.O_APPEND|os.O_WRONLY, 0)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -110,7 +111,7 @@ func TestThePromptReferenceProbeOnTheRealOhMyPi(t *testing.T) {
 				}
 			}
 			env := map[string]string{}
-			for _, pair := range installed.Environ {
+			for _, pair := range environ {
 				name, value, _ := strings.Cut(pair, "=")
 				env[name] = value
 			}
@@ -119,13 +120,13 @@ func TestThePromptReferenceProbeOnTheRealOhMyPi(t *testing.T) {
 				probe.PluginRoot = root
 			} else {
 				install := exec.Command(omp, "plugin", "install", root)
-				install.Env = installed.Environ
+				install.Env = environ
 				if out, err := install.CombinedOutput(); err != nil {
 					t.Fatalf("omp plugin install: %v\n%s", err, out)
 				}
 			}
 
-			err = ProbeImage(context.Background(), probe)
+			err := ProbeImage(context.Background(), probe)
 
 			switch {
 			case testCase.refusal == "" && err != nil:

@@ -98,10 +98,6 @@ type pluginGate struct {
 	// contract is the Go daemon API contract the plugin must declare: the daemon's own
 	// GoDaemonAPIVersion, or the one `legion probe-image` is asked for.
 	contract int
-	// model, route and keyFile are the model the image's round trip must be answered by, the
-	// gateway route it goes through, and the file the profile's key command reads (ImageProbe); the
-	// round trip runs only when model is set.
-	model, route, keyFile string
 	// pluginRoot is the plugin directory a pod passes Oh My Pi as its one explicit extension
 	// (ImageProbe): the load probe then runs as a pod runs, with discovery off, and the contract
 	// probe reads that root's manifest. Empty on tmux, where a pane loads the installed plugin
@@ -803,11 +799,6 @@ type ImageProbe struct {
 	WorkDir string
 	// Log receives each transient failure the retry waits out.
 	Log *slog.Logger
-	// Model is the model the image's Oh My Pi profile must answer a turn from, Route the gateway
-	// route the profile sends it through, and KeyFile the file the profile's key command reads: set
-	// when `legion probe-image` routed the profile (modelroute.Install), empty for no model round
-	// trip.
-	Model, Route, KeyFile string
 	// PluginRoot is the plugin directory the pod's Oh My Pi loads as its one explicit extension
 	// (`--no-extensions --extension <root>`): the load probe runs the same way, and the contract
 	// probe reads that root's manifest, so the probe certifies the lane a pod uses. Empty leaves
@@ -825,15 +816,14 @@ const defaultProbeTimeout = 300 * time.Second
 
 // ProbeImage runs the image's launch probes: pi.agents; then the daemon's own gate — the plugin
 // held to Contract, then loaded, from the manifest it was held by; then the session-storage
-// setting, which only the image runs (boot-probes.ts:11-21); then, when the profile is routed
-// through a gateway, one model round trip through it (verifyModelRoute). The contract comes before
+// setting, which only the image runs (boot-probes.ts:11-21). The contract comes before
 // the load, as in the daemon's gate, so a plugin of another contract is refused as a reinstall
 // rather than sent to `omp plugin list`. Each attempt is bounded by defaultProbeTimeout and retried
 // under bootprobe.Image: an image build has no supervisor and must finish.
 func ProbeImage(ctx context.Context, p ImageProbe) error {
 	return pluginGate{
 		env: p.Env, workDir: p.WorkDir, invocation: p.Omp, timeout: defaultProbeTimeout,
-		retry: bootprobe.Image, contract: p.Contract, model: p.Model, route: p.Route, keyFile: p.KeyFile,
+		retry: bootprobe.Image, contract: p.Contract,
 		pluginRoot: p.PluginRoot, rolesDir: p.RolesDir, log: p.Log,
 	}.verifyImage(ctx)
 }
@@ -846,13 +836,7 @@ func (g pluginGate) verifyImage(ctx context.Context) error {
 	if err := g.verify(ctx); err != nil {
 		return err
 	}
-	if err := g.verifySessionStorage(ctx); err != nil {
-		return err
-	}
-	if g.model == "" {
-		return nil
-	}
-	return g.verifyModelRoute(ctx)
+	return g.verifySessionStorage(ctx)
 }
 
 // ControllerProbe is `legion controller start`'s gate on the operator's Oh My Pi, run before the

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -15,7 +16,7 @@ import (
 const workerImage = "ghcr.io/sjawhar/legion-worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 // kubernetesFile is the smallest file `runtime: kubernetes` loads: every key a pod needs to reach
-// the daemon, Envoy, NATS, Dispatch, and the model, and the required members of the block. The App
+// the daemon, Envoy, NATS, and Dispatch, and the required members of the block. The App
 // keys are commands that fail, so a passing LoadForValidation also shows it never ran them. The
 // block comes last, so a test appends a member of it by appending a four-space-indented line.
 const kubernetesFile = `project: LEGSMOKE
@@ -39,11 +40,6 @@ runtime:
     namespace: legion
     image: ` + workerImage + `
     storage_class: gp2
-    gateway:
-      url: https://middleman.internal.example/
-      audience: middleman-legion
-      service_account: legion-worker
-      token_expiry_seconds: 600
 `
 
 // kubernetesWith is kubernetesFile with one line replaced; it panics when the line is not there,
@@ -121,12 +117,6 @@ provider_keys: {ANTHROPIC_API_KEY: anthropic_api_key}
 			},
 			claim.RoleTester: {Limits: Quantities{CPU: "4"}},
 		},
-		Gateway: Gateway{
-			URL:            "https://middleman.internal.example",
-			Audience:       "middleman-legion",
-			ServiceAccount: "legion-worker",
-			TokenExpiry:    600 * time.Second,
-		},
 		Pod: PodConfig{
 			Env: map[string]string{
 				"PI_CONFIG_FILES": "/etc/legion-operator/overlay.yml", "CLAUDE_CODE_USE_FOUNDRY": "0",
@@ -189,7 +179,6 @@ func TestLoadForValidationDefaultsTheKubernetesBlock(t *testing.T) {
 		{"kubeconfig", block.Kubeconfig, ""},
 		{"context", block.Context, ""},
 		{"pod", block.Pod, PodConfig{}},
-		{"gateway.url, trailing slash dropped", block.Gateway.URL, "https://middleman.internal.example"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if !reflect.DeepEqual(tc.got, tc.want) {
@@ -219,6 +208,11 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			name: "an unknown member",
 			body: kubernetesFile + "    frobnicate: 1\n",
 			want: "unknown key runtime.kubernetes.frobnicate",
+		},
+		{
+			name: "the removed gateway block",
+			body: kubernetesFile + "    gateway:\n      url: https://middleman.internal.example\n      audience: middleman-legion\n      service_account: legion-worker\n      token_expiry_seconds: 600\n",
+			want: "runtime.kubernetes.gateway was removed (LEGION-270): configure pods with runtime.kubernetes.pod (docs/kubernetes.md, Operator configuration)",
 		},
 		{
 			name: "a member named twice",
@@ -406,71 +400,6 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			name: "session_dsn_secret with the volume store",
 			body: kubernetesFile + "    session_dsn_secret: SESSION_DSN\n",
 			want: "runtime.kubernetes.session_dsn_secret is not used when runtime.kubernetes.session_store is pvc; remove it",
-		},
-		{
-			name: "gateway absent",
-			body: kubernetesWith(kubernetesFile[strings.Index(kubernetesFile, "    gateway:"):], ""),
-			want: "runtime.kubernetes.gateway is required: a pod reaches the model only through the gateway, with its projected service account token",
-		},
-		{
-			name: "gateway not a mapping",
-			body: kubernetesWith(kubernetesFile[strings.Index(kubernetesFile, "    gateway:"):], "    gateway: https://middleman.internal.example\n"),
-			want: "runtime.kubernetes.gateway must be a mapping",
-		},
-		{
-			name: "an unknown gateway member",
-			body: kubernetesWith("      audience: middleman-legion\n", "      audience: middleman-legion\n      api_key: sk-nope\n"),
-			want: "unknown key runtime.kubernetes.gateway.api_key",
-		},
-		{
-			name: "gateway url absent",
-			body: kubernetesWith("      url: https://middleman.internal.example/\n", ""),
-			want: "runtime.kubernetes.gateway.url is required",
-		},
-		{
-			name: "gateway url not a URL",
-			body: kubernetesWith("https://middleman.internal.example/", "middleman"),
-			want: "runtime.kubernetes.gateway.url must be a valid URL",
-		},
-		{
-			name: "gateway url with a query string",
-			body: kubernetesWith("https://middleman.internal.example/", "https://middleman.internal.example/?x=1"),
-			want: "runtime.kubernetes.gateway.url must not include a query string or fragment",
-		},
-		{
-			name: "gateway audience absent",
-			body: kubernetesWith("      audience: middleman-legion\n", ""),
-			want: "runtime.kubernetes.gateway.audience is required",
-		},
-		{
-			name: "gateway service_account absent",
-			body: kubernetesWith("      service_account: legion-worker\n", ""),
-			want: "runtime.kubernetes.gateway.service_account is required",
-		},
-		{
-			name: "gateway service_account blank",
-			body: kubernetesWith("      service_account: legion-worker\n", "      service_account: \"\"\n"),
-			want: "runtime.kubernetes.gateway.service_account must not be empty",
-		},
-		{
-			name: "gateway token_expiry_seconds absent",
-			body: kubernetesWith("      token_expiry_seconds: 600\n", ""),
-			want: "runtime.kubernetes.gateway.token_expiry_seconds is required",
-		},
-		{
-			name: "gateway token_expiry_seconds below the kubelet's minimum",
-			body: kubernetesWith("token_expiry_seconds: 600", "token_expiry_seconds: 599"),
-			want: "runtime.kubernetes.gateway.token_expiry_seconds must be at least 600 (the kubelet's minimum)",
-		},
-		{
-			name: "gateway token_expiry_seconds past the lifetime the cluster admits",
-			body: kubernetesWith("token_expiry_seconds: 600", "token_expiry_seconds: 3601"),
-			want: "runtime.kubernetes.gateway.token_expiry_seconds must be at most 3600 (the longest pod token the cluster's admission policy admits)",
-		},
-		{
-			name: "gateway token_expiry_seconds not an integer",
-			body: kubernetesWith("token_expiry_seconds: 600", "token_expiry_seconds: 10m"),
-			want: "runtime.kubernetes.gateway.token_expiry_seconds must be an integer",
 		},
 		{
 			name: "daemon_url empty",
@@ -681,6 +610,11 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			want: "runtime.kubernetes.pod.volumes[0].projected.sources[0].service_account_token.expiration_seconds must be a positive integer",
 		},
 		{
+			name: "a projected token shorter than the API server issues",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: token, projected: {sources: [{service_account_token: {path: token, expiration_seconds: 599}}]}}]\n",
+			want: "runtime.kubernetes.pod.volumes[0].projected.sources[0].service_account_token.expiration_seconds must be at least 600: the API server issues no projected token for less than 10 minutes",
+		},
+		{
 			name: "a mount naming no volume",
 			body: kubernetesFile + "    pod:\n      volume_mounts: [{volume: creds, mount_path: /etc/legion-operator}]\n",
 			want: "runtime.kubernetes.pod.volume_mounts[0].volume creds names no volume of runtime.kubernetes.pod.volumes",
@@ -711,21 +645,6 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			body: kubernetesFile + "    pod:\n      volumes: [{name: creds, secret: {name: a}}]\n      volume_mounts: [{volume: creds, mount_path: /etc/legion-operator, read_only: sometimes}]\n",
 			want: "runtime.kubernetes.pod.volume_mounts[0].read_only must be true or false",
 		},
-		{
-			name: "a pod account other than the gateway's",
-			body: kubernetesFile + "    pod:\n      service_account: operator-worker\n",
-			want: "runtime.kubernetes.pod.service_account operator-worker differs from runtime.kubernetes.gateway.service_account legion-worker: a pod runs as one account",
-		},
-		{
-			name: "a provider key the pod's env also sets",
-			body: kubernetesFile + "    pod:\n      env: {OPENAI_BASE_URL: https://gateway.internal.example}\nprovider_keys: {OPENAI_BASE_URL: openai_base_url}\n",
-			want: "provider_keys names OPENAI_BASE_URL, which runtime.kubernetes.pod.env also sets: the shim refuses to export a key its own environment names",
-		},
-		{
-			name: "a provider key whose pointer the pod's env sets",
-			body: kubernetesFile + "    pod:\n      env: {GEMINI_API_KEY_FILE: /var/run/operator/gemini}\nprovider_keys: {GEMINI_API_KEY: gemini}\n",
-			want: "provider_keys names GEMINI_API_KEY, whose pointer GEMINI_API_KEY_FILE runtime.kubernetes.pod.env sets: the shim would skip the key",
-		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := LoadForValidation(writeConfigFile(t, tc.body), noEnv)
@@ -739,11 +658,29 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 	}
 }
 
+// operatorRoutePod is the Go live harnesses' operator pod (scripts/e2e/fixtures/operator-route/
+// pod.yml), indented to sit under `runtime.kubernetes.pod`.
+func operatorRoutePod(t *testing.T) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "scripts", "e2e", "fixtures", "operator-route", "pod.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var indented strings.Builder
+	for _, line := range strings.SplitAfter(string(raw), "\n") {
+		if line != "" {
+			indented.WriteString("      " + line)
+		}
+	}
+	return indented.String()
+}
+
 // The Stage 4b proof's configuration (the LEGION-208 Stage 4b plan, decisions 1, 2, 4, 5, 6, 7):
 // the daemon on the devbox's private address driving production's namespace legion through the
 // restricted role's kubeconfig and context, against production Dispatch, the Envoy listener, and
-// NATS, with the gate off, a linger of 0.3 hours, and pods reaching the model through middleman
-// with a 600-second token. No node selector and no requests: the pool's floor sizes the node.
+// NATS, with the gate off, a linger of 0.3 hours, and pods routed to middleman by the harnesses'
+// operator pod, the fixture itself. No node selector and no requests: the pool's floor sizes the
+// node.
 func TestLoadForValidationAcceptsTheStage4bProofConfig(t *testing.T) {
 	path := writeConfigFile(t, `project: LEGSMOKE
 port: 13370
@@ -781,12 +718,8 @@ runtime:
     storage_class: gp2
     kubeconfig: /home/ubuntu/.kube/legion-daemon-production
     context: legion-daemon@production
-    gateway:
-      url: https://middleman.hawk.internal.trajectorylabs.com
-      audience: middleman-legion
-      service_account: legion-worker
-      token_expiry_seconds: 600
-`)
+    pod:
+`+operatorRoutePod(t))
 
 	cfg, err := LoadForValidation(path, noEnv)
 	if err != nil {
@@ -800,5 +733,9 @@ runtime:
 	}
 	if block := cfg.Runtime.Kubernetes; block.Context != "legion-daemon@production" || block.Resources != nil || block.Scheduling.NodeSelector != nil {
 		t.Errorf("kubernetes block = %+v, want the restricted context, no requests, and no node selector", *block)
+	}
+	if pod := cfg.Runtime.Kubernetes.Pod; pod.ServiceAccount != "legion-worker" || len(pod.Volumes) != 2 || len(pod.VolumeMounts) != 3 ||
+		pod.Env["PI_CONFIG_FILES"] != "/etc/legion-operator/overlay.yml" {
+		t.Errorf("the operator pod settled as %+v, want the fixture's account, two volumes, three mounts, and its overlay", pod)
 	}
 }
