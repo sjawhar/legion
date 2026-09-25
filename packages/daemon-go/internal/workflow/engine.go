@@ -516,10 +516,12 @@ func (e *Engine) advanceApproved(ctx context.Context, tx pgx.Tx, pr record.PullR
 }
 
 // merged records the pull request merged, whatever the issue's phase, and advances an issue that
-// awaited the merge.
+// awaited the merge. A merge before awaiting_merge is the architect's to act on, as the shipped
+// daemon routes it: it is told, and the issue moves on to the production check once it reaches
+// awaiting_merge (transition). A redelivered merge changes nothing.
 func (e *Engine) merged(ctx context.Context, tx pgx.Tx, fact intake.PullRequestMerged) (intake.Result, error) {
 	pr, err := e.pullRequest(ctx, tx, fact.Repo, fact.Number)
-	if err != nil || pr == nil {
+	if err != nil || pr == nil || pr.State == record.PullRequestMerged {
 		return intake.Result{}, err
 	}
 	pr.State = record.PullRequestMerged
@@ -527,20 +529,34 @@ func (e *Engine) merged(ctx context.Context, tx pgx.Tx, fact intake.PullRequestM
 		return intake.Result{}, err
 	}
 	issue, err := e.store.Issue(ctx, tx, pr.Issue)
-	if err != nil || issue == nil || issue.Phase != phase.AwaitingMerge {
+	if err != nil || issue == nil {
 		return intake.Result{}, err
 	}
-	return intake.Result{}, e.transition(ctx, tx, *issue, TriggerPullRequestMerged, "", record.PhaseRow{}, pr, "")
+	if issue.Phase == phase.AwaitingMerge {
+		return intake.Result{}, e.transition(ctx, tx, *issue, TriggerPullRequestMerged, "", record.PhaseRow{}, pr, "")
+	}
+	return intake.Result{}, e.notice(ctx, tx, issue.Key, record.Notice{Kind: "pr-merged", Role: claim.RoleArchitect,
+		Reason: fmt.Sprintf("pull request #%d merged while %s was in %s, not awaiting_merge", pr.Number, issue.Key, issue.Phase)})
 }
 
-// closed records the pull request closed unmerged; a re-admitted generation drops it.
+// closed records the pull request closed unmerged, which a re-admitted generation drops, and tells
+// the architect, whose decision it is whether the work is reopened, reassigned, or cancelled, as the
+// shipped daemon routes it. A redelivered close changes nothing.
 func (e *Engine) closed(ctx context.Context, tx pgx.Tx, fact intake.PullRequestClosed) (intake.Result, error) {
 	pr, err := e.pullRequest(ctx, tx, fact.Repo, fact.Number)
-	if err != nil || pr == nil {
+	if err != nil || pr == nil || pr.State == record.PullRequestClosed {
 		return intake.Result{}, err
 	}
 	pr.State = record.PullRequestClosed
-	return intake.Result{}, e.store.PutPullRequest(ctx, tx, *pr)
+	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
+		return intake.Result{}, err
+	}
+	issue, err := e.store.Issue(ctx, tx, pr.Issue)
+	if err != nil || issue == nil {
+		return intake.Result{}, err
+	}
+	return intake.Result{}, e.notice(ctx, tx, issue.Key, record.Notice{Kind: "pr-closed-unmerged", Role: claim.RoleArchitect,
+		Reason: fmt.Sprintf("pull request #%d closed without merging while %s was in %s", pr.Number, issue.Key, issue.Phase)})
 }
 
 func (e *Engine) claimFailed(ctx context.Context, tx pgx.Tx, fact intake.ClaimFailed) (intake.Result, error) {
@@ -679,6 +695,11 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 		return err
 	}
 	if row.To == phase.AwaitingMerge {
+		// A pull request that merged before the issue reached awaiting_merge leaves nothing to merge:
+		// the issue moves on to the production check at once, and no READY asks a human to merge it.
+		if pr != nil && pr.State == record.PullRequestMerged {
+			return e.transition(ctx, tx, issue, TriggerPullRequestMerged, "", record.PhaseRow{}, pr, "")
+		}
 		return e.ready(ctx, tx, issue, handoff.Summary)
 	}
 	if row.To == phase.Done {
