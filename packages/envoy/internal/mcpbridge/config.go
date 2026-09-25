@@ -20,7 +20,7 @@ type ServerConfig struct {
 	Source        string            `json:"source"`
 	TopicTemplate string            `json:"topic_template"`
 	URIPattern    string            `json:"uri_pattern"`
-	compiled *regexp.Regexp
+	compiled      *regexp.Regexp
 }
 
 type Config struct {
