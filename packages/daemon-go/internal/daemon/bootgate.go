@@ -78,7 +78,7 @@ const (
 // and refuses a plugin that does not declare the gate's contract; the load probe runs Oh My Pi the
 // way a pane does and refuses a plugin it did not load — installed but disabled, or not
 // registered — or one it loaded from another root than the manifest the contract probe read, and
-// refuses, by name, a task agent the plugin's skills dispatch that the same Oh My Pi cannot find.
+// refuses, by name, a task agent or a skill Legion's prompts name that the same Oh My Pi cannot find.
 //
 // Inside the worker image the same gate is `legion probe-image` (ProbeImage), which adds the two
 // probes only the image runs: pi.agents and the session-storage setting.

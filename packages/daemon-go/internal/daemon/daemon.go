@@ -300,7 +300,7 @@ type plan struct {
 	dispatchToken string
 	prompts       *prompts.Composer
 	// rolesDir is the role prompts directory (prompts.ResolveRolePromptsDir), resolved before the
-	// gate, which resolves every task agent its prompts dispatch.
+	// gate, which resolves every task agent and skill its prompts name.
 	rolesDir string
 	// stream is the worker stream's address: the listener binds it, and every agent's shim dials it.
 	stream     string
