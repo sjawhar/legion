@@ -88,15 +88,14 @@ the architect over Envoy with the work already pushed; do not retry in a loop.
 holds: the workflow, not GitHub, keeps the review App's roles from pushing. `resolveReviewThread`
 is still refused; its token reads `viewerCanResolve: false` on every thread.
 
-The `legion-reviewer` GitHub App holds `pull_requests: write` and no `contents` permission, and
-GitHub lets only the pull request's author or an account with write (push) access to the repository
-resolve a review thread or push to its branch. The review App is neither by design, so
-`resolveReviewThread` from it returns `Resource not accessible by integration`, and its `git push`
-is refused with `remote: Repository not found.` (GitHub hides the repository from a token without
-`contents` over git; the REST text appears only on API writes). Since LEGION-42 (#1021) the
-planner, tester, and architects act as the review App too, so the same applies to their handoff
-commits (`../legion/one-role-keyed-table-decides-which-github-app-acts.md`). Widening the review
-App is rejected by design, not because it would not work. So in every round:
+When this was written, the `legion-reviewer` GitHub App held `pull_requests: write` and no
+`contents` permission. `resolveReviewThread` from it returned `Resource not accessible by
+integration`, and its `git push` was refused with `remote: Repository not found.` (GitHub hides the
+repository from a token without `contents` over git; the REST text appears only on API writes).
+The resolve refusal still holds; the push refusal does not. Since LEGION-42 (#1021) the planner,
+tester, and architects act as the review App too, so the same rule applies to their handoff commits
+(`../legion/one-role-keyed-table-decides-which-github-app-acts.md`): they never push. So in every
+round:
 
 - the reviewer's `.legion/review.json` commit exists only in the shared workspace until the
   implementer's next push carries it (check `jj log` that it is an ancestor before building on it);

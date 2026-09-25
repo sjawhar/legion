@@ -1,9 +1,9 @@
 #!/bin/bash
-# Tarballs ship only dist/: the release workflow rewrites omp.extensions to
-# the packed bundles before packing and restores the committed manifest
-# afterwards (see .github/workflows/release.yaml). Packing with the committed
-# source manifest would publish a package whose extension files are absent
-# from the tarball, so fail fast instead.
+# Tarballs ship dist/ and agents/ (package.json `files`). The release
+# workflow rewrites omp.extensions to the packed bundles before packing and
+# restores the committed manifest afterwards (see .github/workflows/release.yaml).
+# Packing with the committed source manifest would publish a package whose
+# extension files are absent from the tarball, so fail fast instead.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 if ! jq -e '.omp.extensions == ["dist/envoy.js","dist/legion.js"]' package.json >/dev/null; then
