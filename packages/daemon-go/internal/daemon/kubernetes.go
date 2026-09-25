@@ -146,7 +146,7 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, stream, dis
 		Tools:            workerImageTools,
 		Pod:              sandbox.Pod(k.Pod),
 		ProviderKeys:     providerSecretKeys(cfg.ProviderKeys),
-		LaunchSecrets:    slices.Sorted(maps.Keys(launchSecrets(cfg))),
+		LaunchSecrets:    launchSecretNames(cfg),
 		BootTimeout:      cfg.WorkerBootTimeout,
 		BootIntervals:    cfg.WorkerBootRegistrationDeadlineIntervals,
 		TerminationGrace: cfg.WorkerStopTimeout,
@@ -164,7 +164,13 @@ func CheckOperatorPod(cfg config.Config) error {
 		return nil
 	}
 	return sandbox.CheckPod(sandbox.Pod(cfg.Runtime.Kubernetes.Pod), providerSecretKeys(cfg.ProviderKeys),
-		workerImageTools, slices.Sorted(maps.Keys(launchSecrets(cfg))))
+		workerImageTools, launchSecretNames(cfg))
+}
+
+// launchSecretNames are the names of the secrets every launch's spec carries (launchSecrets), which
+// the runtime refuses the operator's pod and a provider key for.
+func launchSecretNames(cfg config.Config) []string {
+	return slices.Sorted(maps.Keys(launchSecrets(cfg)))
 }
 
 // providerSecretKeys are provider_keys as the runtime takes them: each variable Oh My Pi reads,

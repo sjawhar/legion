@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -92,13 +93,7 @@ func Apply(environ []string, stateDir string) ([]string, error) {
 
 // removed is environ without its entries for name.
 func removed(environ []string, name string) []string {
-	kept := environ[:0]
-	for _, pair := range environ {
-		if !strings.HasPrefix(pair, name+"=") {
-			kept = append(kept, pair)
-		}
-	}
-	return kept
+	return slices.DeleteFunc(environ, func(pair string) bool { return strings.HasPrefix(pair, name+"=") })
 }
 
 // writeReadOnly writes body to file at mode 0444, through a temporary file renamed into place, so
