@@ -14,6 +14,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -305,8 +306,17 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 	if RoleFor(issue.Phase) != fact.Role {
 		return refused("HANDOFF_NOT_CURRENT_PHASE", fmt.Sprintf("the %s does not run phase %s of %s; this completion changed nothing", fact.Role, issue.Phase, issue.Key)), nil
 	}
-	if issue.Phase == phase.Merging && !fact.Ready {
-		return refused("READY_REQUIRED", "the merger's completion is READY: call the legion tool's handoff_complete with ready: true; this completion changed nothing"), nil
+	if issue.Phase == phase.Merging {
+		if !fact.Ready {
+			return refused("READY_REQUIRED", "the merger's completion is READY: call the legion tool's handoff_complete with ready: true; this completion changed nothing"), nil
+		}
+		// The READY packet is posted as one Dispatch message when the issue reaches awaiting_merge,
+		// and Dispatch refuses a body over its cap on every attempt, so a packet it cannot post would
+		// never reach the human: the merger is told now, while it can send one that fits.
+		if length := dispatch.MessageBodyLength(fact.Summary); length > dispatch.MessageBodyLimit {
+			return refused("READY_PACKET_TOO_LONG", fmt.Sprintf("the READY packet is %d characters over Dispatch's %d-character message limit (%d/%d), and the daemon posts it as one message: link the pull request body's ## Verification section instead of quoting it, then call handoff_complete again; this completion changed nothing",
+				length-dispatch.MessageBodyLimit, dispatch.MessageBodyLimit, length, dispatch.MessageBodyLimit)), nil
+		}
 	}
 	row, err := e.phaseRow(ctx, tx, fact.Issue, fact.Role)
 	if err != nil {

@@ -4,7 +4,23 @@ package dispatch
 import (
 	"context"
 	"time"
+	"unicode/utf16"
 )
+
+// MessageBodyLimit is the longest message body Dispatch accepts, in UTF-16 code units: the server
+// refuses a longer one with CAP_EXCEEDED on every attempt (packages/envoy/internal/dispatch/api/
+// messages.go maxMessageBody16, counted by server.go len16).
+const MessageBodyLimit = 2000
+
+// MessageBodyLength is body's length as Dispatch counts it against MessageBodyLimit: UTF-16 code
+// units, so a character outside the Basic Multilingual Plane counts twice.
+func MessageBodyLength(body string) int {
+	length := 0
+	for _, r := range body {
+		length += utf16.RuneLen(r)
+	}
+	return length
+}
 
 // Client is the Dispatch surface the workflow needs. It deliberately exposes only the reads and
 // writes the daemon owns; callers preserve the order ListIssues returns when deciding admission.
