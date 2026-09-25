@@ -3,7 +3,8 @@ import { type FocusEvent, type ReactNode, useCallback, useEffect, useRef, useSta
 import { Link, useLocation, useNavigate } from "react-router-dom";
 
 import { inboxQuery, whoAmIQuery } from "../../api/queries";
-import type { AskTurn, InboxRow } from "../../api/types";
+import type { InboxRow } from "../../api/types";
+import { DisclosureToggle } from "../../components/DisclosureToggle";
 import { EmptyState } from "../../components/EmptyState";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import { LabelPill } from "../../components/Pill";
@@ -42,6 +43,17 @@ import { useUserPreference } from "../shell/userPreference";
 import { ViewportAnchor } from "../shell/ViewportAnchor";
 import { AskCard } from "./AskCard";
 import { BlockedOnYou, waitingOnYou } from "./BlockedOnYou";
+import { SnoozeControl } from "./SnoozeControl";
+import {
+  COLLAPSED_SECTIONS,
+  INBOX_SECTIONS,
+  type InboxSection,
+  isMine,
+  isTurnSection,
+  isUnassigned,
+  SECTION_TITLES,
+  sectionOf,
+} from "./sections";
 
 function ReplyChip({ children }: { children: ReactNode }): ReactNode {
   return <LabelPill>{children}</LabelPill>;
@@ -120,14 +132,12 @@ function AssignToMe({
   );
 }
 
-/** Where a row sits: whose turn it is, or - in the Mine view - the Unassigned band. */
-type InboxSection = AskTurn | "unassigned";
-
 function InboxItem({
   ask,
   assignLive,
   onAnswered,
   onAssignLive,
+  onSnoozeLive,
   onRelease,
   section,
   threadUpdatedAt,
@@ -139,6 +149,9 @@ function InboxItem({
   assignLive: boolean;
   onAnswered: (id: string) => void;
   onAssignLive: (askId: string, live: boolean) => void;
+  /** The same registration for this row's snooze write; the Inbox keeps a live row rendered
+   *  even when its band is folded, so `Snoozing…` and a refusal survive the fold. */
+  onSnoozeLive: (askId: string, live: boolean) => void;
   /** Set on the held row - one the server dropped or moved to another section that stays where
    *  the reader last saw it while they are still on it; called when their focus or pointer
    *  leaves it. */
@@ -212,6 +225,12 @@ function InboxItem({
             viewer={viewer}
           />
         ) : null}
+        <SnoozeControl
+          askId={ask.id}
+          label={owner ?? title}
+          onLive={onSnoozeLive}
+          snoozedUntil={section === "later" ? ask.snoozed_until : null}
+        />
       </div>
       <AskCard
         ask={ask}
@@ -221,23 +240,6 @@ function InboxItem({
       />
     </li>
   );
-}
-
-const SECTION_TITLES: Record<InboxSection, string> = {
-  agent: "Waiting on agents",
-  human: "Waiting on you",
-  unassigned: "Unassigned",
-};
-
-/** The viewer's own rows: asks on issues assigned to their lowercase login. */
-function isMine(row: InboxRow, viewer: string): boolean {
-  return row.issue?.assignee === viewer;
-}
-
-/** Rows nobody holds: asks on unassigned issues, and every document ask (a document has no
- *  assignee). */
-function isUnassigned(row: InboxRow): boolean {
-  return (row.issue?.assignee ?? null) === null;
 }
 
 /** A row as the reader last saw it: the section it sat in, whatever the server says now. */
@@ -270,7 +272,8 @@ function withHeld(
 /** The row to keep where the reader last saw it, if any. Dropped from the list: kept as last
  *  seen. Moved between the two turn sections: whose turn it is changed under the reader's hand,
  *  so the listed row is kept in the section they saw it in. A move into or out of the Unassigned
- *  band is an assignment, shown at once. */
+ *  band is an assignment and a move into or out of Later is a snooze - both the reader's own
+ *  click, shown at once. */
 function heldRow(
   seen: PlacedRow | undefined,
   listed: InboxRow | undefined,
@@ -279,10 +282,7 @@ function heldRow(
   if (seen === undefined) return undefined;
   if (listed === undefined) return seen;
   const movedBetweenTurnSections =
-    now !== undefined &&
-    now !== seen.section &&
-    now !== "unassigned" &&
-    seen.section !== "unassigned";
+    now !== undefined && now !== seen.section && isTurnSection(now) && isTurnSection(seen.section);
   return movedBetweenTurnSections ? { ask: listed, section: seen.section } : undefined;
 }
 
@@ -321,6 +321,21 @@ export function Inbox(): ReactNode {
       return next;
     });
   }, []);
+  // The same registration for snooze writes: a row whose write is live stays rendered even
+  // when Later is folded, so `Snoozing…` and a refusal are not unmounted by the fold the
+  // optimistic update triggers (see `SnoozeControl`).
+  const [snoozing, setSnoozing] = useState<ReadonlySet<string>>(() => new Set());
+  const onSnoozeLive = useCallback((askId: string, live: boolean) => {
+    setSnoozing((current) => {
+      if (current.has(askId) === live) return current;
+      const next = new Set(current);
+      if (live) next.add(askId);
+      else next.delete(askId);
+      return next;
+    });
+  }, []);
+  // Later starts folded: its rows are the ones the reader has already dealt with by deferring.
+  const [laterOpen, setLaterOpen] = useState(false);
   const listRef = useRef<HTMLElement>(null);
   // The row the reader's hand is on (focus or pointer), read from the DOM as last committed. When
   // the server has dropped it (answered or resolved elsewhere) or handed its turn the other way
@@ -426,15 +441,15 @@ export function Inbox(): ReactNode {
   const inView = (rows: readonly InboxRow[]) =>
     view === "everyone" ? rows : rows.filter((row) => isMine(row, viewer) || isUnassigned(row));
   const shown = inView(filter.section === "needs-you" ? waitingOnYou(fromAgent) : fromAgent);
-  // A row the inbox lists without a turn belongs to no section, exactly as before the views.
-  const sectionOf = (row: InboxRow): InboxSection | undefined =>
-    view === "mine" && !isMine(row, viewer) ? "unassigned" : row.waiting_on;
+  // Where each row sits, judged against the clock at render: a snoozed row rejoins its turn
+  // band on the first render after its moment passes.
+  const place = { now: Date.now(), view, viewer };
   const seen =
     anchor === null || anchor.id === answered.current
       ? undefined
       : presented.current.find(({ ask }) => ask.id === anchor.id);
   const listed = seen === undefined ? undefined : shown.find((ask) => ask.id === seen.ask.id);
-  const now = listed === undefined ? undefined : sectionOf(listed);
+  const now = listed === undefined ? undefined : sectionOf(listed, place);
   const held = heldRow(seen, listed, now);
   const viewSwitch = (
     <fieldset className={`inline-flex rounded-xl border p-1 ${borderDefault}`}>
@@ -497,14 +512,25 @@ export function Inbox(): ReactNode {
 
   const rowsIn = (section: InboxSection) =>
     withHeld(
-      shown.filter((ask) => sectionOf(ask) === section && ask.id !== held?.ask.id),
+      shown.filter((ask) => sectionOf(ask, place) === section && ask.id !== held?.ask.id),
       held?.section === section ? held.ask : undefined,
       presented.current
     );
-  const sections = (["human", "agent", "unassigned"] as const)
-    .map((section) => [section, rowsIn(section)] as const)
-    .filter(([, rows]) => rows.length > 0);
-  presented.current = sections.flatMap(([section, rows]) => rows.map((ask) => ({ ask, section })));
+  const sections = INBOX_SECTIONS.map((section) => {
+    const rows = rowsIn(section);
+    // A folded band renders its heading and count but none of its rows - except a row whose
+    // snooze write is still live, which stays until it settles - so keyboard roving, the
+    // viewport anchor, and `presented` all see exactly what the reader sees.
+    const folded = COLLAPSED_SECTIONS[section] === true && !laterOpen;
+    return {
+      rows,
+      section,
+      shownRows: folded ? rows.filter((ask) => snoozing.has(ask.id)) : rows,
+    };
+  }).filter(({ rows }) => rows.length > 0);
+  presented.current = sections.flatMap(({ section, shownRows }) =>
+    shownRows.map((ask) => ({ ask, section }))
+  );
 
   // One list, keyed by ask id, with the section headings as items between the rows: a row that
   // changes section moves within the same parent, so React moves its node instead of remounting
@@ -521,23 +547,33 @@ export function Inbox(): ReactNode {
       {chip}
       {agent === undefined ? <BlockedOnYou asks={inView(inbox.data)} /> : null}
       <ul className="space-y-3">
-        {sections.flatMap(([section, rows], index) => [
+        {sections.flatMap(({ rows, section, shownRows }, index) => [
           <li
             className={index === 0 ? undefined : "pt-3"}
             key={`heading-${section}`}
             role="presentation"
           >
             <h2 className={`text-base font-semibold ${textMutedOnCanvas}`}>
-              {SECTION_TITLES[section]}
+              {COLLAPSED_SECTIONS[section] === true ? (
+                <DisclosureToggle
+                  expanded={laterOpen}
+                  label={`${SECTION_TITLES[section]} (${rows.length})`}
+                  onToggle={() => setLaterOpen((open) => !open)}
+                  textClassName={textMutedOnCanvas}
+                />
+              ) : (
+                SECTION_TITLES[section]
+              )}
             </h2>
           </li>,
-          ...rows.map((ask) => (
+          ...shownRows.map((ask) => (
             <InboxItem
               ask={ask}
               assignLive={assigning.has(ask.id)}
               key={ask.id}
               onAnswered={recordAnswered}
               onAssignLive={onAssignLive}
+              onSnoozeLive={onSnoozeLive}
               onRelease={ask.id === held?.ask.id ? release : undefined}
               section={section}
               threadUpdatedAt={inbox.dataUpdatedAt}

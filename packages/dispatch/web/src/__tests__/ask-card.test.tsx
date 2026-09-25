@@ -1076,6 +1076,7 @@ test("AskCard restores its inbox entry if an optimistic answer fails", async () 
   const inboxInput: InboxRow = {
     ...input,
     priority: null,
+    snoozed_until: null,
     thread: { edits: [], followers: [], replies: [] },
   };
   queryClient.setQueryData<InboxRow[]>(["inbox"], [inboxInput]);
@@ -1506,7 +1507,12 @@ test("a document ask links its project and document page", async () => {
     issue_key: null,
   });
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([
-    { ...input, priority: null, thread: { edits: [], followers: [], replies: [] } },
+    {
+      ...input,
+      priority: null,
+      snoozed_until: null,
+      thread: { edits: [], followers: [], replies: [] },
+    },
   ]);
   const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });

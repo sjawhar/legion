@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
@@ -31,7 +32,11 @@ type inboxAsk struct {
 	Document  *inboxDocument      `json:"document,omitempty"`
 	Priority  *int                `json:"priority"`
 	LastReply *model.AskLastReply `json:"last_reply"`
-	Thread    inboxAskThread      `json:"thread"`
+	// SnoozedUntil is the caller's own snooze on this row, null when they have not snoozed it.
+	// It is surfaced, never filtered: the row stays in everyone's inbox including its snoozer's,
+	// who folds it away while this moment is still ahead and sees it again once it passes.
+	SnoozedUntil *string        `json:"snoozed_until"`
+	Thread       inboxAskThread `json:"thread"`
 }
 
 // inboxAssigneeFilter turns ?assignee= into the SQL mode and login the inbox query binds:
@@ -67,10 +72,12 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := s.deps.Store.Pool.Query(r.Context(), `
 		select `+askReadColumns+`,
-		       i.key, i.title, i.assignee, i.priority, ar.project_key, ar.slug, ar.name
+		       i.key, i.title, i.assignee, i.priority, ar.project_key, ar.slug, ar.name,
+		       sn.snoozed_until
 		`+askReadFrom+`
 		left join issues i on i.key = a.issue_key
 		left join artifacts ar on ar.id = a.artifact_id
+		left join user_ask_snooze sn on sn.ask_id = a.id and sn.login = $4
 		where a.state = 'open'
 		  and (i.key is null or i.closed_at is null)
 		  and ($1 = '' or coalesce(i.project_key, ar.project_key) = $1)
@@ -79,7 +86,7 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 		       or ($2 = 'login' and i.assignee = $3))
 		order by i.priority asc nulls last, coalesce(lr.turn, 'human') = 'agent' asc,
 		         coalesce(lr.created_at, a.created_at) desc, a.id desc
-	`, project, assigneeMode, assigneeLogin)
+	`, project, assigneeMode, assigneeLogin, canonicalLogin(caller.ID))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -89,13 +96,18 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var ask inboxAsk
 		var issueKey, issueTitle, issueAssignee, documentProject, documentSlug, documentName *string
-		row, reply, err := scanAskRead(rows, &issueKey, &issueTitle, &issueAssignee, &ask.Priority, &documentProject, &documentSlug, &documentName)
+		var snoozedUntil *time.Time
+		row, reply, err := scanAskRead(rows, &issueKey, &issueTitle, &issueAssignee, &ask.Priority, &documentProject, &documentSlug, &documentName, &snoozedUntil)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
 		ask.Ask = row
 		ask.LastReply = reply
+		if snoozedUntil != nil {
+			stamp := timestampValue(*snoozedUntil)
+			ask.SnoozedUntil = &stamp
+		}
 		if issueKey != nil {
 			ask.Issue = &inboxIssue{Key: *issueKey, Title: *issueTitle, Assignee: issueAssignee}
 		}
