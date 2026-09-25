@@ -666,6 +666,9 @@ function githubClassificationState(state: LegionState): Record<string, unknown> 
           ...(pr.reviewDecisionUnsettledFrom === undefined
             ? {}
             : { reviewDecisionUnsettledFrom: pr.reviewDecisionUnsettledFrom }),
+          ...(pr.changesRequestedBy === undefined
+            ? {}
+            : { changesRequestedBy: pr.changesRequestedBy }),
         },
       ])
     ),
@@ -962,6 +965,7 @@ export function resetPrHead(pr: PrState, headSha: string): void {
   if (pr.reviewDecision !== "changes_requested" || (pending && !pending.handoffOnly)) {
     delete pr.reviewDecision;
     delete pr.reviewDecisionUnsettledFrom;
+    delete pr.changesRequestedBy;
   } else if (
     !pending ||
     pending.before !== priorHead ||
@@ -976,7 +980,10 @@ export function resetPrHead(pr: PrState, headSha: string): void {
  * keeps it, anything else drops it. No-op when nothing is unsettled. */
 export function settleReviewDecision(pr: PrState, handoffOnly: boolean): void {
   if (pr.reviewDecisionUnsettledFrom === undefined) return;
-  if (!handoffOnly) delete pr.reviewDecision;
+  if (!handoffOnly) {
+    delete pr.reviewDecision;
+    delete pr.changesRequestedBy;
+  }
   delete pr.reviewDecisionUnsettledFrom;
 }
 
@@ -1123,6 +1130,8 @@ function review(state: LegionState, payload: JsonRecord): Effect[] | undefined {
   // all: the approval is never recorded, but the phase worker still hears about the review.
   const isCurrentHead = commitId !== undefined && commitId === pr.headSha;
   const prior = pr.reviewDecision;
+  const author = stringValue(payload.author) ?? "";
+  const body = stringValue(payload.body) ?? "";
   // Approval is head-gated: it feeds `pr-ready`, which must only ever fire for an approval of
   // the exact commit that would merge. Changes requested is not — a reviewer
   // legitimately pins its review to the implementation commit it read rather than to a later
@@ -1130,21 +1139,28 @@ function review(state: LegionState, payload: JsonRecord): Effect[] | undefined {
   // record from any commit because a new head that changes anything outside `.legion/` drops the
   // decision (`resetPrHead`, or `push` and resync once they classify that head), so a verdict
   // never outlives the round it was given for. A decision recorded here is settled: nothing
-  // unsettled carries over from the heads before it. A review of the current head that asks for
-  // no changes (the reviewer's clean round is a COMMENT while the head carries `.legion/`)
-  // supersedes a decision kept across heads nothing has classified yet: the reviewer read this
-  // head, so its earlier request no longer stands for it.
-  if (decision === "changes_requested" || (isCurrentHead && decision === "approved")) {
+  // unsettled carries over from the heads before it. While its range is unsettled, the account
+  // that asked for changes supersedes its own request by a non-empty review of the current head
+  // that asks for none (its clean round is a COMMENT while the head carries `.legion/`): it read
+  // this head. The empty-body review GitHub fires for every thread reply, and any other account's
+  // review, leave the request standing.
+  if (decision === "changes_requested") {
     pr.reviewDecision = decision;
     delete pr.reviewDecisionUnsettledFrom;
-  } else if (isCurrentHead) {
+    if (author) pr.changesRequestedBy = author;
+    else delete pr.changesRequestedBy;
+  } else if (isCurrentHead && decision === "approved") {
+    pr.reviewDecision = decision;
+    delete pr.reviewDecisionUnsettledFrom;
+    delete pr.changesRequestedBy;
+  } else if (isCurrentHead && body.trim() !== "" && author === pr.changesRequestedBy) {
     settleReviewDecision(pr, false);
   }
   const result = routeActive(state, pr.key, {
     type: "pr-review",
     state: decision,
-    author: stringValue(payload.author) ?? "",
-    body: stringValue(payload.body) ?? "",
+    author,
+    body,
   });
   if (isCurrentHead && decision === "approved" && prior !== "approved" && pr.verdict === "green") {
     result.push(...routeActive(state, pr.key, { type: "pr-ready", pr: number }));

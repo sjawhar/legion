@@ -131,8 +131,15 @@ export interface PrState {
    * any push for the current head that changes a path outside `.legion/` or cannot be classified
    * (drops it), by resync's compare of this sha against the current head (`.legion/`-only keeps
    * it; anything else, a compare that fails included, drops it), by a review the reducer
-   * records, or by a review of the current head that asks for no changes (drops it). */
+   * records, or by a non-empty review of the current head from `changesRequestedBy` that asks for
+   * no changes (drops it). */
   reviewDecisionUnsettledFrom?: string;
+  /** The login whose review recorded the current `changes_requested` decision; present exactly
+   * with that decision (absent on one a v33 daemon recorded). Only a non-empty review of the
+   * current head from this login can supersede the decision while its range is unsettled: the
+   * empty-body review GitHub fires for every thread reply, and every other account's review,
+   * leave it standing. */
+  changesRequestedBy?: string;
   /** Present exactly when the current `headSha`'s arrival in `resetPrHead` incremented
    * `fixAttempts` (prior verdict was red and no pending push classified this sha handoff-only). A
    * later handoff-only push webhook whose `after` equals `headSha` takes the attempt back and
@@ -503,6 +510,7 @@ const PrStateSchema = z
     fixAttempts: z.number().int().nonnegative(),
     reviewDecision: z.enum(["approved", "changes_requested"]).optional(),
     reviewDecisionUnsettledFrom: z.string().min(1).optional(),
+    changesRequestedBy: z.string().min(1).optional(),
     headCounted: z.literal(true).optional(),
     pendingPush: z
       .object({
@@ -1568,10 +1576,11 @@ function migrateV32State(
   return { ...state, version: 33, controllerLocator };
 }
 
-/** v33 -> v34: PrState gains the optional `reviewDecisionUnsettledFrom`, and `pendingPush` the
- * optional `before`. A pure bump: absent is the correct starting value for both, since a v33
- * daemon settled each decision when its head arrived, and a pending slot without `before` is
- * never taken to cover the head it replaces. */
+/** v33 -> v34: PrState gains the optional `reviewDecisionUnsettledFrom` and `changesRequestedBy`,
+ * and `pendingPush` the optional `before`. A pure bump: absent is the correct starting value for
+ * each, since a v33 daemon settled each decision when its head arrived, a pending slot without
+ * `before` is never taken to cover the head it replaces, and a decision with no recorded author is
+ * superseded by no review. */
 function migrateV33State(state: unknown): unknown {
   if (!recordValue(state) || state.version !== 33) return state;
   return { ...state, version: 34 };

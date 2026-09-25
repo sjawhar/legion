@@ -2051,6 +2051,51 @@ describe("a review decision across a new head", () => {
     }
   }
 
+  /** The reviewer asks for changes at `old-sha`; the implementer's fix `fix-sha` arrives by its
+   * synchronize alone (its push webhook lost), so the decision is kept with its range open. */
+  function lostPushRound(): LegionState {
+    const state = rootState();
+    attachChild(state);
+    addPr(state);
+    effects(
+      state,
+      reviewPayload({
+        state: "changes_requested",
+        author: "legion-reviewer[bot]",
+        body: "C1 blocks",
+      })
+    );
+    effects(state, syncPayload("fix-sha"));
+    return state;
+  }
+  const atFix = { state: "commented", commit_id: "fix-sha", head_sha: "fix-sha" };
+
+  for (const [who, author, body] of [
+    ["CodeRabbit's review", "coderabbitai[bot]", "Actionable comments posted: 1"],
+    ["the implementer's empty-body thread reply", "legion-implementer[bot]", ""],
+    ["a human's comment", "sami", "Looks fine to me"],
+    ["the reviewer's own empty-body thread reply", "legion-reviewer[bot]", ""],
+  ] as const) {
+    it(`${who} at the fix leaves an open-range changes-requested decision standing`, () => {
+      const state = lostPushRound();
+
+      effects(state, reviewPayload({ ...atFix, author, body }));
+
+      expect(state.prs[prKey]?.reviewDecision).toBe("changes_requested");
+    });
+  }
+
+  it("the reviewer's own non-empty COMMENT at the fix supersedes an open-range decision", () => {
+    const state = lostPushRound();
+
+    effects(
+      state,
+      reviewPayload({ ...atFix, author: "legion-reviewer[bot]", body: "Round 2: clean" })
+    );
+
+    expect(state.prs[prKey]?.reviewDecision).toBeUndefined();
+  });
+
   it("a push redelivered after it settled its head leaves a later review's decision alone", () => {
     const state = rootState();
     attachChild(state);

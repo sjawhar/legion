@@ -4455,6 +4455,7 @@ describe("Legion HTTP API", () => {
         headSha: "review-handoff-sha",
         reviewDecision: "changes_requested",
         reviewDecisionUnsettledFrom: "impl-sha",
+        changesRequestedBy: "legion-reviewer[bot]",
       });
       state.prByBranch[`acme/widgets@${branch}`] = "acme/widgets#9";
       const deliver = (payload: Record<string, unknown>) =>
