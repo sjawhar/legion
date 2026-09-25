@@ -1,6 +1,8 @@
 # Legion on Kubernetes
 
-This runbook covers the worker image, the Kubernetes runtime, the session store, the in-cluster daemon, and the kind smoke that proves them on a throwaway cluster.
+This runbook covers the worker image, the session store, the two Kubernetes runtimes, the in-cluster daemon, and the kind smoke.
+
+There are two daemons, and each has its own runtime. The Go coordinator (`packages/daemon-go`, LEGION-208) runs each process as an Agent Sandbox; its live proof is `scripts/e2e/stage4b-sandbox-tree.sh` on the production cluster. The TypeScript daemon (`packages/daemon`) runs bare pods; its live proof is the kind smoke. The TypeScript runtime, its in-cluster Deployment and the kind smoke go with `packages/daemon` at Stage 7 (LEGION-223).
 
 ## Worker image
 
@@ -286,9 +288,170 @@ runs again. Because the image builds the `legion` CLI and the `@sjawhar/pi-legio
 checkout, an image that prints the token also carries the plugin's storage-independent subagent guard
 ([The extension under SQL storage](#the-extension-under-sql-storage)).
 
-## Kubernetes runtime
+## Kubernetes runtime: the Go daemon on Agent Sandbox
 
-With `runtime: kubernetes`, the daemon runs the tree's root architects and phase workers as one
+Under the Go coordinator, `runtime: kubernetes` runs every claim as one Agent Sandbox: each root
+architect, sub-architect and phase worker gets a `agents.x-k8s.io` `Sandbox` (kubernetes-sigs/agent-sandbox,
+LEGION-206), and its pod runs under gVisor on the Legion pool. The Sandbox is named by the claim token,
+`legion-<project>-<issue>-<role>`, and keeps that name across generations: a new generation rotates
+the boot token and takes the Sandbox `Suspended` and then `Running` again
+(`packages/daemon-go/internal/runtime/sandbox`). The daemon runs on a host its pods can reach and
+serves the worker stream they dial. The controller is `legion controller start` on the operator's
+machine ([Operator-launched controller](#operator-launched-controller)).
+
+### Configuration
+
+```yaml
+runtime:
+  kubernetes:
+    namespace: legion
+    image: ghcr.io/sjawhar/legion-worker@sha256:<64 hex>   # digest only
+    storage_class: gp2          # required: the tree volume's class (the cluster has no default)
+    tree_volume: 20Gi           # default 20Gi
+    kubeconfig: /home/ubuntu/.kube/legion-daemon-production   # relative to legion.yaml's directory
+    context: legion-daemon@production   # required when the kubeconfig sets no current context
+    scheduling:                 # optional, beyond the Legion pool the runtime always selects
+      node_selector: {}         # merged over legion.dev/pool=legion, which it may not name
+      tolerations: []
+      priority_class: legion
+    resources:                  # optional; a role absent here gets no requests or limits
+      tester: { limits: { memory: 8Gi } }
+    gateway:                    # required: a pod reaches the model only through the gateway
+      url: https://middleman.hawk.internal.trajectorylabs.com
+      audience: middleman-legion
+      service_account: legion-worker
+      token_expiry_seconds: 600
+bind: <the daemon host's own address>   # pods dial tcp://<bind>:<worker_stream_port>
+worker_stream_port: 13371
+daemon_url: http://<the daemon host's own address>:13370
+```
+
+`packages/daemon-go/internal/config/kubernetes.go` reads the block and refuses, naming the key:
+- anything it does not model: `role_profiles`, since each role's requests and limits go under
+  `resources`;
+- an image that is not pinned by digest;
+- `session_store: postgres` until Stage 6, since a pod's session lives on the tree volume, and a
+  `session_dsn_secret` under `pvc`.
+
+Under `runtime: kubernetes` it also requires `daemon_url`, `envoy_url`, `nats_urls`,
+`envoy_token_file`, `operator_token_file`, `dispatch_url`, `github_apps` and `projects`. It refuses
+`omp_invocation`, `omp_launch_prefix` and `provider_keys`: every pod runs the worker image's Oh My
+Pi, and no provider key reaches a pod. Every address a pod is handed must be one a pod can reach, so
+`bind`, `daemon_url`, `envoy_url`, `dispatch_url` and each `nats_urls` entry may be neither loopback
+nor the unspecified address. `legion start --check-config` runs all of it without starting the
+daemon or running a key command.
+
+### Anatomy of a Sandbox pod
+
+Each object of a claim carries `legion.dev/project`, `legion.dev/tree`, `legion.dev/issue` and
+`legion.dev/role` (`names.go`). The pod template (`manifest.go`) has two init containers and one
+main container:
+
+1. `workspace-fetch` clones the repository into the pod's feed. It is the only process that holds
+   the provisioning token ([Trust model](#trust-model-the-provisioning-token)).
+2. `workspace-init` provisions the tree volume's shared clone and the issue's jj workspace from the
+   read-only feed.
+3. `worker` runs `legion worker-shim --connect tcp://<bind>:<worker_stream_port>
+   --boot-token-file …` with Oh My Pi under it.
+
+The tree volume is the root Sandbox's `volumeClaimTemplates` entry, and each worker Sandbox
+references that claim by name. The main container mounts it at `/legion`, and again at Oh My Pi's
+sessions directory through a `subPath`, so a session survives its pod. The claim's Secret is
+projected twice: its boot half into the worker, read-only, and its provisioning half into
+`workspace-fetch` alone. The gateway volume holds one projected ServiceAccount token (`audience`,
+`token_expiry_seconds`) at `/var/run/legion/gateway`, read-only. State, `/tmp` and the XDG config
+home are in-memory.
+
+Every pod runs:
+- with `runtimeClassName: gvisor`;
+- with `serviceAccountName` set to the gateway's ServiceAccount and `automountServiceAccountToken:
+  false`;
+- under Pod Security "restricted": non-root user 1000 on the pod, and on each container no
+  privilege escalation, ALL capabilities dropped and the RuntimeDefault seccomp profile;
+- on the Legion pool, with its node selector and toleration;
+- annotated `karpenter.sh/do-not-disrupt: "true"`.
+
+The image probe runs as a Sandbox of its own, `legion-probe-<project>-<digest12>`, with
+`shutdownPolicy: Delete` ([The image is probed before it publishes](#the-image-is-probed-before-it-publishes)).
+
+### Tree sizing: one tree per node
+
+The pool's floor, not the pod, decides node size. Legion pods carry no
+`karpenter.k8s.aws/instance-cpu` selector and no resource requests. The `legion` NodePool's
+`karpenter.k8s.aws/instance-cpu Gt 3` requirement makes Karpenter launch the cheapest 4-vCPU type.
+
+Every tree pod carries two rules:
+- a required pod affinity to the pods of its own tree, since the volume attaches to one node;
+- a required anti-affinity against the pods of every other tree (`legion.dev/tree Exists` and
+  `NotIn [<own tree>]`, at `kubernetes.io/hostname`).
+
+So concurrent trees never share a node. Requests stay unset because under required colocation the
+first pod placed decides the node, and a request on a later pod would strand it.
+
+**The bound.** The pool's `limits.cpu: 64`, with one tree per 4-vCPU node, caps concurrently running
+trees at **16**. The TypeScript production configuration runs `admission_cap: 29`. Stage 7's cutover
+raises the pool's `limits.cpu` in agent-c's Legion component to at least `4 × admission_cap`; until
+then an `admission_cap` above 16 admits trees whose pods cannot schedule.
+
+### Trust model: the provisioning token
+
+The provisioning token, the implement App's installation token, is a credential for the whole
+repository, and every agent of a tree can write the tree volume: the shared clone's hooks, its git
+and jj configuration (a legacy `.jj/workspace-config.toml` included), its remote URL, its
+`http.proxy`. git and jj obey all of it — they run hooks, the git jj is told to run, working-copy
+filters and `ext::` transports, and send credentials through the proxy the configuration names —
+so no process that can read the token may touch the tree volume. The Go coordinator's pods
+(`packages/daemon-go`) keep to that with two init containers:
+
+- **`workspace-fetch`** mounts the provisioning Secret, an in-memory `TMPDIR` of its own, and the
+  pod's `feed` `emptyDir`, and runs `legion workspace-init fetch --repo <owner>/<repo> --feed
+  /var/run/legion/feed`: one `git clone --bare` of `https://github.com/<owner>/<repo>` into the feed,
+  reading no git configuration but its own (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`,
+  `GIT_CONFIG_PARAMETERS` unset), with a one-shot credential git asks for `https://github.com` alone.
+  It mounts neither the tree volume nor the config home.
+- **`workspace-init`** mounts the tree volume, the feed read-only, and the config home — never the
+  Secret — and runs `legion workspace-init provision`: the shared clone's clone and fetch reach
+  `https://github.com/<owner>/<repo>`, the remote its origin names, at the feed over git's file
+  transport, then the workspace add, `update-stale`, and the configuration writes. What a tree agent
+  planted can run there, with nothing to take that the agent does not already hold.
+
+`packages/daemon-go/internal/runtime/sandbox/boundary_test.go` runs both containers exactly as the
+manifest states them against nine such plants, with every one of provisioning's git and jj pins made
+ineffective. The TypeScript daemon's pods, which this section describes, still provision in one init
+container with the Secret mounted for its whole life (LEGION-223).
+
+On the **tmux** runtime there is no such boundary: panes run under the daemon's uid and can read its
+0600 credential files, and the daemon's credentialed clone and fetch run in the shared clone itself.
+Provisioning's pins there — no git hook (`core.hooksPath=/dev/null`), the git the daemon resolved at
+boot as jj's `git.executable-path`, `GIT_ALLOW_PROTOCOL=https`, no working-copy snapshot in the
+credentialed fetch, the one-shot credential scoped to `https://github.com` with no askpass, and
+`GIT_CONFIG_PARAMETERS` unset — are defence, not a boundary: a tree-written `http.proxy` with
+`http.sslVerify=false` still sees the token on its way to github.com.
+
+### RBAC the Go daemon needs
+
+The daemon runs as a restricted identity (production: the `legion-daemon` group, as the
+`production-legion-daemon` role). It needs:
+- `sandboxes`: create, get, list, watch, patch, delete; `sandboxes/status`: get;
+- `secrets`: create, delete, update, get, but never list;
+- `pods`: get, list, watch, which the incarnation fence's pod informer reads; `pods/log`: get;
+- `events`: list;
+- a cluster-scoped get on `customresourcedefinitions` named `sandboxes.agents.x-k8s.io`, and a get
+  on the `agent-sandbox-controller` Deployment in `agent-sandbox-system`, for the boot refusal when
+  either is missing.
+
+It has no pod create or delete and no PVC verb (LEGION-206 Requirement 8).
+
+### The live proof
+
+`scripts/e2e/stage4b-sandbox-tree.sh` drives three real issue trees through the Go daemon on this
+runtime, in the production cluster's namespace `legion`, against production Dispatch, the Envoy
+listener and NATS, with real agents. What it holds, and what it touches in production, is in
+[`scripts/e2e/README.md`](../scripts/e2e/README.md#stage4b-sandbox-treesh).
+
+## Kubernetes runtime (TypeScript daemon)
+
+This section is the TypeScript daemon's runtime, which goes with `packages/daemon` at Stage 7. With `runtime: kubernetes`, the daemon runs the tree's root architects and phase workers as one
 Kubernetes pod per process, on one disk volume per issue tree. The controller always remains an
 interactive tmux pane on the daemon host: `runtime: kubernetes` selects where roots and workers run,
 never the controller. Attach with `tmux -L legion-<project> attach -t legion-<project>`. LEGION-25
@@ -540,41 +703,6 @@ which `DISPATCH_TOKEN_FILE` points at), so a file-pointed token is never also an
 of every tool the agent runs; refusing to start at all, naming the key and its file, when a `NAME` is
 already a variable of the shim's own environment (see the providers Secret, below) — and never into
 its own (`/proc/1/environ` inside the pod carries no key; the OMP child's does, by design).
-
-### Trust model: the provisioning token
-
-The provisioning token, the implement App's installation token, is a credential for the whole
-repository, and every agent of a tree can write the tree volume: the shared clone's hooks, its git
-and jj configuration (a legacy `.jj/workspace-config.toml` included), its remote URL, its
-`http.proxy`. git and jj obey all of it — they run hooks, the git jj is told to run, working-copy
-filters and `ext::` transports, and send credentials through the proxy the configuration names —
-so no process that can read the token may touch the tree volume. The Go coordinator's pods
-(`packages/daemon-go`) keep to that with two init containers:
-
-- **`workspace-fetch`** mounts the provisioning Secret, an in-memory `TMPDIR` of its own, and the
-  pod's `feed` `emptyDir`, and runs `legion workspace-init fetch --repo <owner>/<repo> --feed
-  /var/run/legion/feed`: one `git clone --bare` of `https://github.com/<owner>/<repo>` into the feed,
-  reading no git configuration but its own (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`,
-  `GIT_CONFIG_PARAMETERS` unset), with a one-shot credential git asks for `https://github.com` alone.
-  It mounts neither the tree volume nor the config home.
-- **`workspace-init`** mounts the tree volume, the feed read-only, and the config home — never the
-  Secret — and runs `legion workspace-init provision`: the shared clone's clone and fetch reach
-  `https://github.com/<owner>/<repo>`, the remote its origin names, at the feed over git's file
-  transport, then the workspace add, `update-stale`, and the configuration writes. What a tree agent
-  planted can run there, with nothing to take that the agent does not already hold.
-
-`packages/daemon-go/internal/runtime/sandbox/boundary_test.go` runs both containers exactly as the
-manifest states them against nine such plants, with every one of provisioning's git and jj pins made
-ineffective. The TypeScript daemon's pods, which this section describes, still provision in one init
-container with the Secret mounted for its whole life (LEGION-223).
-
-On the **tmux** runtime there is no such boundary: panes run under the daemon's uid and can read its
-0600 credential files, and the daemon's credentialed clone and fetch run in the shared clone itself.
-Provisioning's pins there — no git hook (`core.hooksPath=/dev/null`), the git the daemon resolved at
-boot as jj's `git.executable-path`, `GIT_ALLOW_PROTOCOL=https`, no working-copy snapshot in the
-credentialed fetch, the one-shot credential scoped to `https://github.com` with no askpass, and
-`GIT_CONFIG_PARAMETERS` unset — are defence, not a boundary: a tree-written `http.proxy` with
-`http.sslVerify=false` still sees the token on its way to github.com.
 
 ### The providers Secret
 
@@ -905,7 +1033,9 @@ line once per interval. Failures name what to fix: a wrong token —
 a closed port-forward — `could not reach the Legion daemon at http://127.0.0.1:13370: …; is the port-forward running? (never falls back to another address)`;
 a tmux daemon — `answered 403: This daemon has no operator_token_file configured; the controller secret route is disabled`.
 
-## Runbook: the kind smoke
+## Runbook: the kind smoke (TypeScript daemon only)
+
+`scripts/kind-smoke/` proves only the TypeScript daemon's Kubernetes runtime: its checkpoints read the TypeScript state shape, and it goes with `packages/daemon` at Stage 7. The Go daemon's proof is `scripts/e2e/stage4b-sandbox-tree.sh` ([The live proof](#the-live-proof)).
 
 `scripts/kind-smoke/` proves the Kubernetes worker runtime on a throwaway kind cluster. Its default
 `SMOKE_DAEMON_MODE=cluster` runs the daemon in the worker image. `SMOKE_DAEMON_MODE=host` instead

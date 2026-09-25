@@ -10,8 +10,10 @@ events plus GitHub PR/CI artifacts, records root-process session locators, and p
 verdict changes each role needs. Root processes run in tmux; phase workers are headless
 `omp --mode rpc` processes the daemon spawns directly, one tmux pane per worker, bridged through
 `legion worker-shim`. Under `runtime: kubernetes` each of those processes is instead one pod of
-the published worker image in a cluster (`docs/kubernetes.md`); `scripts/kind-smoke/` is that
-runtime's live proof on a throwaway kind cluster.
+the published worker image in a cluster (`docs/kubernetes.md`): an Agent Sandbox under the Go
+coordinator, whose live proof is `scripts/e2e/stage4b-sandbox-tree.sh` on the production cluster,
+and a bare pod under the TypeScript daemon, whose live proof is `scripts/kind-smoke/` on a
+throwaway kind cluster (both TypeScript pieces go with `packages/daemon` at Stage 7).
 
 - **TypeScript daemon** — webhook intake, reducers, durable `LegionState`, root-process lifecycle,
   credential grants, resync, and recovery.
@@ -105,7 +107,7 @@ projects:
 | Envoy OMP adapter      | `packages/pi-envoy/`                          | See @packages/pi-envoy/AGENTS.md          |
 | Worker image (Kubernetes) | `packages/daemon/docker/worker.Dockerfile`, `.github/workflows/worker-image.yaml` | See `docs/kubernetes.md` |
 | In-cluster daemon (Kubernetes) | `deploy/kubernetes/daemon/`, `packages/daemon/src/daemon/worker-image-probe.ts` | Kustomize base + kind overlay; the probe pod. See `docs/kubernetes.md` "In-cluster daemon" and @packages/daemon/src/daemon/AGENTS.md "In-cluster mode" |
-| Prove the Kubernetes runtime live | `scripts/kind-smoke/` | `up.sh` / `checkpoints.sh` / `down.sh`; `docs/kubernetes.md` "Runbook: the kind smoke" |
+| Prove the Kubernetes runtime live | `scripts/e2e/stage4b-sandbox-tree.sh` (Go daemon); `scripts/kind-smoke/` (TypeScript daemon only) | the Go driver against the production cluster, `scripts/e2e/README.md`; the kind smoke's `up.sh` / `checkpoints.sh` / `down.sh`, `docs/kubernetes.md` "Runbook: the kind smoke (TypeScript daemon only)" |
 | Native Dispatch workspace | `packages/dispatch/`, `packages/envoy/cmd/dispatch/` | React SPA and native Dispatch server |
 | Go coordinator (in progress) | `packages/daemon-go/` | LEGION-208's Go rewrite: a separate module bound by the root `go.work`, sharing no file with `packages/daemon`, which stays the shipped daemon until Stage 7. `cmd/legion` is its CLI, `internal/api/state.go` owns its wire shape, `packages/contracts/src/legion-go-api.ts` mirrors it, `scripts/e2e/` holds each stage's live proof |
 
