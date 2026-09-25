@@ -4,17 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
-	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	legionclaim "github.com/sjawhar/legion/daemon/internal/claim" // main_test.go's `claim` helper holds the bare name
-	"github.com/sjawhar/legion/daemon/internal/config"
 )
 
 // claimsUsage names every subcommand of `legion claims`.
@@ -46,149 +43,39 @@ func runClaims(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	return sub(ctx, args[1:], stdout, stderr)
 }
 
-// claimsCall is one `legion claims` subcommand: the flags every one of them takes — where the
-// daemon is, the file holding the operator bearer, and whether to print the daemon's answer as it
-// came — and the streams it reports on.
-//
-// The bearer is only ever a file's contents: no flag takes it as a value, so it is in no argv, and
-// once read it goes into the request's Authorization header and nowhere else — no line this
-// command prints carries it.
+// claimsRoute is the root of the daemon's operator claim routes.
+const claimsRoute = "/legion/v1/operator/claims"
+
+// claimsCall is one `legion claims` subcommand: an operator command whose bearer is required, and
+// which can print the daemon's answer as it came.
 type claimsCall struct {
-	name           string
-	flags          *flag.FlagSet
-	tokenFile      *string
-	configPath     *string
-	port           *int
-	asJSON         *bool
-	stdout, stderr io.Writer
+	*operatorCall
+	asJSON *bool
 }
 
 func newClaimsCall(sub string, stdout, stderr io.Writer) *claimsCall {
-	flags := newFlags("claims "+sub, stderr)
-	return &claimsCall{
-		name:       "legion claims " + sub,
-		flags:      flags,
-		tokenFile:  flags.String("operator-token-file", "", "file holding the operator bearer the daemon's operator_token_file names (required)"),
-		configPath: flags.String("config", "", "path to legion.yaml (default "+defaultConfigPath+")"),
-		port:       flags.Int("port", 0, "port to reach, overriding the configured one"),
-		asJSON:     flags.Bool("json", false, "print the daemon's answer as it served it"),
-		stdout:     stdout,
-		stderr:     stderr,
-	}
+	c := newOperatorCall("claims "+sub, "file holding the operator bearer the daemon's operator_token_file names (required)", stdout, stderr)
+	return &claimsCall{operatorCall: c, asJSON: c.flags.Bool("json", false, "print the daemon's answer as it served it")}
 }
 
-// parse reads args, then refuses a word that is not a flag and any required flag left out or
-// empty, by name — each a usage error, before anything is read or sent.
+// parse is operatorCall.parse with --operator-token-file among the required flags.
 func (c *claimsCall) parse(args []string, required ...string) bool {
-	if err := c.flags.Parse(args); err != nil {
-		return false
-	}
-	if c.flags.NArg() > 0 {
-		fmt.Fprintf(c.stderr, "%s: unexpected argument %q\n", c.name, c.flags.Arg(0))
-		return false
-	}
-	for _, name := range append([]string{"operator-token-file"}, required...) {
-		if c.flags.Lookup(name).Value.String() == "" {
-			fmt.Fprintf(c.stderr, "%s: --%s is required\n", c.name, name)
-			return false
-		}
-	}
-	return true
+	return c.operatorCall.parse(args, append([]string{"operator-token-file"}, required...)...)
 }
 
-// operator is a daemon's operator routes, and the bearer that opens them.
-type operator struct {
-	base   string
-	bearer string
-}
-
-// connect reads the bearer by the rules every secret pointer is read by — an unreadable or blank
-// file is refused naming its path, never its contents — and finds the daemon the way `legion
-// state` does.
-func (c *claimsCall) connect() (operator, bool) {
-	bearer, err := config.ReadSecretPointer("--operator-token-file", *c.tokenFile)
-	if err != nil {
-		fmt.Fprintf(c.stderr, "%s: %v\n", c.name, err)
-		return operator{}, false
-	}
-	address, err := stateAddress(*c.configPath, *c.port)
-	if err != nil {
-		fmt.Fprintf(c.stderr, "%s: %v\n", c.name, err)
-		return operator{}, false
-	}
-	return operator{base: "http://" + address + "/legion/v1/operator/claims", bearer: bearer}, true
-}
-
-// send makes one operator request and reports its answer: a 2xx is printed by print — or, under
-// --json, written as the daemon served it — and anything else is the daemon's refusal, printed
-// with its status and sentence, and the command fails.
-//
-// The request carries no deadline of its own. What it asks for waits on the runtime — a suspend
-// or stop waits out the worker's stop grace, a resume that and a launch — and every step is
-// bounded by the daemon's configuration, which this command may not have read; a signal to this
-// process ends the wait.
+// send is operatorCall.send on an operator claim route: a 2xx is printed by print, or under --json
+// written as the daemon served it.
 func (c *claimsCall) send(ctx context.Context, op operator, method, path string, body any, print func(io.Writer, []byte) error) int {
-	var reader io.Reader
-	if body != nil {
-		encoded, err := json.Marshal(body)
-		if err != nil {
-			fmt.Fprintf(c.stderr, "%s: encode the request: %v\n", c.name, err)
-			return 1
-		}
-		reader = bytes.NewReader(encoded)
-	}
-	request, err := http.NewRequestWithContext(ctx, method, op.base+path, reader)
-	if err != nil {
-		fmt.Fprintf(c.stderr, "%s: %v\n", c.name, err)
-		return 1
-	}
-	request.Header.Set("Authorization", "Bearer "+op.bearer)
-	if body != nil {
-		request.Header.Set("Content-Type", "application/json")
-	}
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		fmt.Fprintf(c.stderr, "%s: %v\n", c.name, err)
-		return 1
-	}
-	defer response.Body.Close()
-	answer, err := io.ReadAll(response.Body)
-	if err != nil {
-		fmt.Fprintf(c.stderr, "%s: read the answer to %s %s: %v\n", c.name, method, request.URL, err)
-		return 1
-	}
-
-	if response.StatusCode/100 != 2 {
-		fmt.Fprintf(c.stderr, "%s: %s\n", c.name, refusal(response.StatusCode, answer))
-		return 1
-	}
 	if *c.asJSON {
-		if _, err := c.stdout.Write(answer); err != nil {
-			fmt.Fprintf(c.stderr, "%s: %v\n", c.name, err)
-			return 1
-		}
-		return 0
+		print = writeAnswer
 	}
-	if err := print(c.stdout, answer); err != nil {
-		fmt.Fprintf(c.stderr, "%s: read the answer %s served: %v\n", c.name, request.URL, err)
-		return 1
-	}
-	return 0
+	return c.operatorCall.send(ctx, op, method, claimsRoute+path, body, print)
 }
 
-// refusal is an answer outside 2xx as the operator reads it: the status, and the sentence the
-// daemon's `{"error"}` body carries — or the body itself when it carries none, so nothing the
-// daemon said is lost.
-func refusal(status int, body []byte) string {
-	refused := legionclaim.Refusal{Status: status}
-	if err := json.Unmarshal(body, &refused); err != nil || refused.Message == "" {
-		refused.Message = strings.TrimSpace(string(body))
-	}
-	answered := fmt.Sprintf("the daemon answered %d %s", refused.Status, http.StatusText(refused.Status))
-	if refused.Message == "" {
-		return answered
-	}
-	return answered + ": " + refused.Message
+// writeAnswer writes a 2xx answer as the daemon served it.
+func writeAnswer(w io.Writer, answer []byte) error {
+	_, err := w.Write(answer)
+	return err
 }
 
 // decodeAnswer reads a 2xx answer into into, refusing a member the struct does not have: a daemon

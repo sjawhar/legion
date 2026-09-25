@@ -71,7 +71,7 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	if err != nil {
 		return 0, err
 	}
-	operatorToken, err := readOperatorTokenFile(cfg.OperatorTokenFile)
+	operatorToken, err := config.ReadOperatorTokenFile("operator_token_file", cfg.OperatorTokenFile)
 	if err != nil {
 		return 0, err
 	}
@@ -208,45 +208,16 @@ func controllerEnvironment(cfg config.ControllerConfig, stateDir, token, secretF
 	return env
 }
 
-// readOperatorTokenFile is the operator token: a regular file readable by its owner only, trimmed
-// non-empty contents. It is refused before anything is fetched or written — the token is the one
-// thing that buys a controller secret, and a group- or world-readable copy is a second way in
-// (packages/daemon/src/cli/controller-start.ts:177-199).
-func readOperatorTokenFile(file string) (string, error) {
-	info, err := os.Stat(file)
-	if err != nil {
-		return "", fmt.Errorf("operator_token_file names %s, which could not be read: %w", file, err)
-	}
-	if !info.Mode().IsRegular() {
-		return "", fmt.Errorf("operator_token_file names %s, which is not a regular file", file)
-	}
-	if mode := info.Mode().Perm(); mode&0o077 != 0 {
-		return "", fmt.Errorf("operator_token_file %s is readable by its group or others (mode %#o); chmod 0600 it", file, mode)
-	}
-	return config.ReadSecretPointer("operator_token_file", file)
-}
-
 // fetchControllerSecret is `POST /legion/v1/controller/secret` with the operator token as a
 // bearer. A failed request names the daemon URL and never tries another address; a refusal
 // quotes the daemon's `error` (packages/daemon/src/cli/controller-start.ts:214-260).
 func fetchControllerSecret(ctx context.Context, daemonURL, operatorToken string) (string, error) {
 	url := daemonURL + "/legion/v1/controller/secret"
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader("{}"))
-	if err != nil {
-		return "", fmt.Errorf("%s: %w", url, err)
-	}
-	request.Header.Set("Authorization", "Bearer "+operatorToken)
-	request.Header.Set("Content-Type", "application/json")
-	response, err := http.DefaultClient.Do(request)
+	status, body, err := operator{base: daemonURL, bearer: operatorToken}.do(ctx, http.MethodPost, "/legion/v1/controller/secret", struct{}{})
 	if err != nil {
 		return "", fmt.Errorf("could not reach the Legion daemon at %s: %v; is the port-forward running? (never falls back to another address)", daemonURL, err)
 	}
-	defer response.Body.Close()
-	body, err := io.ReadAll(response.Body)
-	if err != nil {
-		return "", fmt.Errorf("read %s's answer: %w", url, err)
-	}
-	if response.StatusCode/100 != 2 {
+	if status/100 != 2 {
 		detail := strings.TrimSpace(string(body))
 		var refusal struct {
 			Error string `json:"error"`
@@ -255,10 +226,10 @@ func fetchControllerSecret(ctx context.Context, daemonURL, operatorToken string)
 			detail = refusal.Error
 		}
 		hint := ""
-		if response.StatusCode == http.StatusForbidden {
+		if status == http.StatusForbidden {
 			hint = " — the operator token does not match the daemon's operator_token_file, or this daemon has none configured"
 		}
-		return "", fmt.Errorf("%s answered %d: %s%s", url, response.StatusCode, detail, hint)
+		return "", fmt.Errorf("%s answered %d: %s%s", url, status, detail, hint)
 	}
 	var answer api.ControllerSecretResponse
 	if err := json.Unmarshal(body, &answer); err != nil {

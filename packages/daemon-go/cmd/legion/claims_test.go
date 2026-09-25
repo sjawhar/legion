@@ -669,8 +669,9 @@ func TestClaimsRefusesAMissingFlagBeforeReachingTheDaemon(t *testing.T) {
 	}
 }
 
-// The bearer is read by ReadSecretPointer's rules: a token file that cannot be read, or holds
-// nothing but whitespace, fails the command naming the path, and nothing is sent.
+// The bearer is read by config.ReadOperatorTokenFile's rules: a token file that cannot be read,
+// holds nothing but whitespace, is not a regular file, or that its group or others can read fails
+// the command naming the path, and nothing is sent.
 func TestClaimsRefusesAnOperatorTokenFileItCannotRead(t *testing.T) {
 	files := map[string]func(t *testing.T) string{
 		"absent": func(t *testing.T) string { return filepath.Join(t.TempDir(), "absent") },
@@ -685,6 +686,13 @@ func TestClaimsRefusesAnOperatorTokenFileItCannotRead(t *testing.T) {
 			}
 			path := writeFile(t, "operator-token", claimsOperatorToken)
 			if err := os.Chmod(path, 0); err != nil {
+				t.Fatalf("chmod %s: %v", path, err)
+			}
+			return path
+		},
+		"group-readable": func(t *testing.T) string {
+			path := writeFile(t, "operator-token", claimsOperatorToken)
+			if err := os.Chmod(path, 0o640); err != nil {
 				t.Fatalf("chmod %s: %v", path, err)
 			}
 			return path
@@ -711,8 +719,10 @@ func TestClaimsRefusesAnOperatorTokenFileItCannotRead(t *testing.T) {
 				if code != 1 || out != "" {
 					t.Fatalf("exit %d, stdout %q; want 1 and nothing on stdout", code, out)
 				}
-				if want := "legion claims " + sub[0] + ": --operator-token-file names " + path + ", which "; !strings.HasPrefix(errb, want) {
-					t.Fatalf("stderr = %q, want it to start %q", errb, want)
+				want := "legion claims " + sub[0] + ": --operator-token-file "
+				if !strings.HasPrefix(errb, want+"names "+path+", which ") &&
+					!strings.HasPrefix(errb, want+path+" is readable by its group or others (mode 0640); chmod 0600 it") {
+					t.Fatalf("stderr = %q, want it to start %q and name the path", errb, want)
 				}
 				d.wantNothingReached()
 			})
