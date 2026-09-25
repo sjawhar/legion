@@ -232,7 +232,7 @@ function daemonTestDependencies(
       },
       dispatchClient: fakeDispatchClient(),
       tokenManager: {
-        getToken: async (role: "implement" | "review") => ({
+        getToken: async (role: GitHubAppRole) => ({
           token: "test-token",
           expiresAt: "2026-08-25T00:00:00.000Z",
           gitIdentity: {
@@ -512,7 +512,7 @@ describe("startDaemon", () => {
       };
     };
     const tokenManager = {
-      getToken: async (role: "implement" | "review") => ({
+      getToken: async (role: GitHubAppRole) => ({
         token: "ghs_acme_app_token",
         expiresAt: "2099-01-01T00:00:00.000Z",
         gitIdentity: {
@@ -612,7 +612,7 @@ describe("startDaemon", () => {
           envoyPublish: async () => {},
           dispatchClient: fakeDispatchClient(),
           tokenManager: {
-            getToken: async (role: "implement" | "review") => ({
+            getToken: async (role: GitHubAppRole) => ({
               token: "test-token",
               expiresAt: "2026-08-25T00:00:00.000Z",
               gitIdentity: {
@@ -889,7 +889,7 @@ describe("startDaemon", () => {
           dispatchClient: fakeDispatchClient(),
           readPluginManifest: async () => validLegionPluginManifest,
           tokenManager: {
-            getToken: async (role: "implement" | "review") => ({
+            getToken: async (role: GitHubAppRole) => ({
               token: "test-token",
               expiresAt: "2026-08-25T00:00:00.000Z",
               gitIdentity: {
@@ -1015,7 +1015,7 @@ describe("startDaemon", () => {
           },
           dispatchClient: fakeDispatchClient(),
           tokenManager: {
-            getToken: async (role: "implement" | "review") => ({
+            getToken: async (role: GitHubAppRole) => ({
               token: "test-token",
               expiresAt: "2026-08-25T00:00:00.000Z",
               gitIdentity: {
@@ -1366,7 +1366,7 @@ describe("startDaemon", () => {
           },
           dispatchClient: fakeDispatchClient(),
           tokenManager: {
-            getToken: async (role: "implement" | "review") => ({
+            getToken: async (role: GitHubAppRole) => ({
               token: "test-token",
               expiresAt: "2026-08-25T00:00:00.000Z",
               gitIdentity: {
@@ -1571,7 +1571,7 @@ describe("startDaemon", () => {
             },
           }),
           tokenManager: {
-            getToken: async (role: "implement" | "review") => ({
+            getToken: async (role: GitHubAppRole) => ({
               token: "test-token",
               expiresAt: "2026-08-25T00:00:00.000Z",
               gitIdentity: {
@@ -1753,7 +1753,7 @@ describe("startDaemon", () => {
           envoyPublish: async () => {},
           dispatchClient: fakeDispatchClient(),
           tokenManager: {
-            getToken: async (role: "implement" | "review") => ({
+            getToken: async (role: GitHubAppRole) => ({
               token: "test-token",
               expiresAt: "2026-08-25T00:00:00.000Z",
               gitIdentity: {
@@ -1950,7 +1950,7 @@ describe("startDaemon", () => {
           envoyPublish: async () => {},
           dispatchClient: fakeDispatchClient(),
           tokenManager: {
-            getToken: async (role: "implement" | "review") => {
+            getToken: async (role: GitHubAppRole) => {
               if (booted) throw new Error("GitHub App token request failed");
               return {
                 token: "test-token",
@@ -2390,7 +2390,7 @@ describe("startDaemon", () => {
           envoyPublish: async () => {},
           dispatchClient: fakeDispatchClient(),
           tokenManager: {
-            getToken: async (role: "implement" | "review") => ({
+            getToken: async (role: GitHubAppRole) => ({
               token: "test-token",
               expiresAt: "2026-08-25T00:00:00.000Z",
               gitIdentity: {
@@ -2462,7 +2462,7 @@ describe("startDaemon", () => {
           envoyPublish: async () => {},
           dispatchClient: fakeDispatchClient(),
           tokenManager: {
-            getToken: async (role: "implement" | "review") => ({
+            getToken: async (role: GitHubAppRole) => ({
               token: "test-token",
               expiresAt: "2026-08-25T00:00:00.000Z",
               gitIdentity: {
@@ -2917,7 +2917,7 @@ describe("startDaemon", () => {
           dispatchClient: fakeDispatchClient(),
           readPluginManifest: async () => validLegionPluginManifest,
           tokenManager: {
-            getToken: async (role: "implement" | "review") => ({
+            getToken: async (role: GitHubAppRole) => ({
               token: "test-token",
               expiresAt: "2099-01-01T00:00:00.000Z",
               gitIdentity: {
@@ -3043,7 +3043,7 @@ describe("startDaemon", () => {
           dispatchClient: fakeDispatchClient(),
           readPluginManifest: async () => validLegionPluginManifest,
           tokenManager: {
-            getToken: async (role: "implement" | "review") => ({
+            getToken: async (role: GitHubAppRole) => ({
               token: "test-token",
               expiresAt: "2099-01-01T00:00:00.000Z",
               gitIdentity: {
@@ -3226,7 +3226,7 @@ describe("startDaemon", () => {
         envoyPublish: async () => {},
         dispatchClient: fakeDispatchClient(),
         tokenManager: {
-          getToken: async (role: "implement" | "review") => ({
+          getToken: async (role: GitHubAppRole) => ({
             token: "test-token",
             expiresAt: "2026-08-25T00:00:00.000Z",
             gitIdentity: {
@@ -3294,7 +3294,7 @@ describe("startDaemon", () => {
           envoyPublish: async () => {},
           dispatchClient: fakeDispatchClient(),
           tokenManager: {
-            getToken: async (role: "implement" | "review") => ({
+            getToken: async (role: GitHubAppRole) => ({
               token: "test-token",
               expiresAt: "2026-08-25T00:00:00.000Z",
               gitIdentity: {
@@ -3404,7 +3404,7 @@ describe("startDaemon", () => {
           envoyPublish: async () => {},
           dispatchClient: fakeDispatchClient(),
           tokenManager: {
-            getToken: async (role: "implement" | "review") => ({
+            getToken: async (role: GitHubAppRole) => ({
               token: "test-token",
               expiresAt: "2026-08-25T00:00:00.000Z",
               gitIdentity: {
@@ -3494,7 +3494,7 @@ describe("startDaemon", () => {
           envoyPublish: async () => {},
           dispatchClient: fakeDispatchClient(),
           tokenManager: {
-            getToken: async (role: "implement" | "review") => ({
+            getToken: async (role: GitHubAppRole) => ({
               token: "test-token",
               expiresAt: "2026-08-25T00:00:00.000Z",
               gitIdentity: {
@@ -3681,7 +3681,7 @@ describe("startDaemon", () => {
         envoyPublish: async () => {},
         dispatchClient: fakeDispatchClient(),
         tokenManager: {
-          getToken: async (role: "implement" | "review") => ({
+          getToken: async (role: GitHubAppRole) => ({
             token: "test-token",
             expiresAt: "2026-08-25T00:00:00.000Z",
             gitIdentity: {
@@ -3979,7 +3979,7 @@ describe("startDaemon", () => {
         },
         dispatchClient: fakeDispatchClient(),
         tokenManager: {
-          getToken: async (role: "implement" | "review") => ({
+          getToken: async (role: GitHubAppRole) => ({
             token: "test-token",
             expiresAt: "2026-08-25T00:00:00.000Z",
             gitIdentity: {
@@ -4053,7 +4053,7 @@ describe("startDaemon", () => {
       envoyPublish: async () => {},
       dispatchClient: fakeDispatchClient(),
       tokenManager: {
-        getToken: async (role: "implement" | "review") => ({
+        getToken: async (role: GitHubAppRole) => ({
           token: "test-token",
           expiresAt: "2026-08-25T00:00:00.000Z",
           gitIdentity: {

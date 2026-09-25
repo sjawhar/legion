@@ -10,7 +10,7 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { type DaemonConfig, repoForIssue } from "../config";
+import { type DaemonConfig, type GitHubAppRole, repoForIssue } from "../config";
 import { materializeDeploymentInstructions } from "../deployment-instructions";
 import { newLegionState } from "../legion-state";
 import { locatorsForIssue, ProcessManager, type ProcessManagerDeps } from "../processes";
@@ -173,7 +173,7 @@ describe("real deployment instructions fragment (real tmux, the controller's bar
           runner: async () => ({ stdout: "[]", stderr: "", exitCode: 0 }),
           baseEnv: {},
           tokenManager: {
-            getToken: async (role: "implement" | "review") => ({
+            getToken: async (role: GitHubAppRole) => ({
               token: "worker-token",
               expiresAt: "2099-01-01T00:00:00.000Z",
               gitIdentity: {
