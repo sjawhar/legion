@@ -7,6 +7,7 @@ import {
   createProject,
   editArtifact,
   getArtifact,
+  getArtifactText,
   getIssueEvents,
   requestApproval,
 } from "./api";
@@ -112,6 +113,49 @@ test("a spec's approval is a human review pinned to its version: requested by th
       ask_id: null,
     });
   } finally {
+    await alice.close();
+  }
+});
+
+test("reading an approved spec leaves its approval current", async ({ browser }) => {
+  await createProject({ key: "GATE", name: "Gate" });
+  const issue = await createIssue({
+    project: "GATE",
+    spec: "## Plan\n\nShip the migration.\n",
+    title: "Design gate",
+  });
+  const artifactID = issue.primary_artifact_id;
+  const requested = await requestApproval(artifactID, session);
+  const alice = await asUser(browser, "alice");
+  const bob = await asUser(browser, "bob");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/");
+    const card = page.getByTestId(`ask-${requested.ask.id}`);
+    await card.getByRole("radio", { name: /^Approve/ }).check();
+    await card.getByRole("button", { name: "Answer" }).click();
+    await expect
+      .poll(async () => (await getArtifact(artifactID, { login: "alice" })).approval?.state)
+      .toBe("approved");
+
+    // Bob reads the approved spec. His editor gives its heading an id from its text, which
+    // changes the document's full-state token and none of its text: waiting for the token is
+    // waiting for that update to reach the room.
+    const before = (await getArtifactText(artifactID)).token;
+    const reader = await bob.newPage();
+    await reader.goto(`/issues/${issue.key}/spec`);
+    await expect(reader.getByRole("textbox", { name: "Document editor" })).toContainText(
+      "Ship the migration."
+    );
+    await expect.poll(async () => (await getArtifactText(artifactID)).token).not.toBe(before);
+    // Settlement runs two seconds after the room's last update, and a version it wrote would
+    // leave the approval pinned to an older one.
+    await reader.waitForTimeout(3000);
+    const artifact = await getArtifact(artifactID, { login: "alice" });
+    expect(artifact.versions).toHaveLength(1);
+    expect(artifact.approval).toMatchObject({ latest_version: 1, state: "approved", version: 1 });
+  } finally {
+    await bob.close();
     await alice.close();
   }
 });

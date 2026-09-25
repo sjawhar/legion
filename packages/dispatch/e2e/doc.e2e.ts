@@ -1,12 +1,14 @@
-import { expect, test } from "@playwright/test";
+import { type BrowserContext, expect, test } from "@playwright/test";
 
 import {
   createComment,
   createIssue,
   createMessage,
+  createNamedVersion,
   createProject,
   editArtifact,
   getArtifact,
+  getArtifactText,
   getArtifactVersion,
 } from "./api";
 import {
@@ -105,6 +107,62 @@ test("the spec opens as a formatted, editable document with no source pane", asy
       ).toBe(true);
     }
     await page.screenshot({ path: testInfo.outputPath("rendered-document.png"), fullPage: true });
+  } finally {
+    await alice.close();
+  }
+});
+
+test("reading a document gives its headings ids without versioning it or crediting the reader, however the headings got there", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  // An agent writes the spec, as an architect does, so every heading in it reaches the reader
+  // without the id the editor derives.
+  const issue = await createIssue(
+    {
+      project: "CORE",
+      spec: "## Plan\n\nShip it.\n\n## Plan\n\nShip it again.\n",
+      title: "Headed spec",
+    },
+    session
+  );
+  const artifactId = issue.primary_artifact_id;
+  // The editor gives each heading an id from its text as it opens the document, which changes
+  // the document's full-state token but none of its text. Waiting for the token is waiting for
+  // that update to reach the room.
+  const readAs = async (context: BrowserContext, text: string) => {
+    const before = (await getArtifactText(artifactId)).token;
+    const page = await context.newPage();
+    await page.goto(`/issues/${issue.key}/spec`);
+    await expect(documentEditor(page)).toContainText(text);
+    await expect.poll(async () => (await getArtifactText(artifactId)).token).not.toBe(before);
+    await page.close();
+  };
+  // A named version is written at once and names every pending author, so it is the next
+  // version only if the read minted none, and it names only its namer only if the read credited
+  // nobody.
+  const nameVersion = async (summary: string) => {
+    const named = await createNamedVersion(artifactId, summary, { login: "bob" });
+    expect(named.authors.map(({ id }) => id)).toEqual(["bob"]);
+    return named.number;
+  };
+
+  const alice = await asUser(browser, "alice");
+  try {
+    await readAs(alice, "Ship it again.");
+    expect(await nameVersion("after the first read")).toBe(2);
+
+    // An agent adds a heading, and the next reader's editor ids it.
+    await editArtifact(
+      artifactId,
+      { ops: [{ after: "end", markdown: "## Rollout\n\nOne region first.", op: "insert" }] },
+      session
+    );
+    await expect
+      .poll(async () => (await getArtifact(artifactId)).versions.map(({ number }) => number))
+      .toEqual([1, 2, 3]);
+    await readAs(alice, "One region first.");
+    expect(await nameVersion("after the agent's heading")).toBe(4);
   } finally {
     await alice.close();
   }

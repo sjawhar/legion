@@ -120,9 +120,9 @@ func (s *Service) applyJoined(ctx context.Context, tx pgx.Tx, artifactID string,
 		return err
 	}
 	// The same measure the room's update observer classifies a live update by: a write that only
-	// adds or moves anchor marks, or projects a mark record, leaves the content - and so the
-	// settled version - alone.
-	contentChanged := !pmdoc.StripAnchorMarks(before).Equal(pmdoc.StripAnchorMarks(tree))
+	// adds or moves anchor marks, projects a mark record, or re-ids a heading leaves the content -
+	// and so the settled version - alone.
+	contentChanged := !pmdoc.VersionedContent(before).Equal(pmdoc.VersionedContent(tree))
 	if _, err := s.persistence.AppendUpdateTx(ctx, tx, artifactID, update, contentChanged); err != nil {
 		return fmt.Errorf("append transactional live document update: %w", err)
 	}

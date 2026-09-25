@@ -399,6 +399,7 @@ func TestDocumentBearerCannotForgeVerifiedServiceSubject(t *testing.T) {
 			t.Errorf("shutdown document service: %v", err)
 		}
 	})
+	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "before")
 
 	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
@@ -415,6 +416,9 @@ func TestDocumentBearerCannotForgeVerifiedServiceSubject(t *testing.T) {
 		t.Fatalf("connect as document bearer: response=%#v err=%v", response, err)
 	}
 	t.Cleanup(func() { _ = connection.Close() })
+	// A connection is credited with the content changes made while it is open, so a change now
+	// puts the connection's actor on the next version, as the server persists it.
+	editLiveTree(t, service, artifactID, replaceRun("before", "after"))
 
 	named, err := service.NamedVersion(context.Background(), artifactID,
 		"checkpoint", model.Actor{Kind: "user", ID: "alice"})

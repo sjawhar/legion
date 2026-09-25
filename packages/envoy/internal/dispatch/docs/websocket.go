@@ -320,7 +320,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	state := s.room(room)
 	state.mu.Lock()
 	state.closed = !open
-	state.contentTree = pmdoc.StripAnchorMarks(tree)
+	state.contentTree = pmdoc.VersionedContent(tree)
 	state.mu.Unlock()
 	doc.OnUpdate(func(update []byte, origin any) {
 		if _, identityRepair := origin.(*identityClosureOrigin); identityRepair {
@@ -342,7 +342,7 @@ func (s *Service) updateChangesMarkdown(room string, doc *crdt.Doc) bool {
 		slog.Error("dispatch: read updated document", "room", room, "error", err)
 		return true
 	}
-	content := pmdoc.StripAnchorMarks(tree)
+	content := pmdoc.VersionedContent(tree)
 	state := s.room(room)
 	state.mu.Lock()
 	defer state.mu.Unlock()
@@ -391,11 +391,13 @@ func (s *Service) recordConnectedActors(room string, origin any) {
 	state.lastActor = sole
 }
 
+// addConnection registers a browser connected to room. It is credited only with content changes
+// observed while it is connected (recordConnectedActors), never for connecting: a reader who
+// changes nothing is no author of the next version.
 func (s *Service) addConnection(room string, id uint64, actor model.Actor) {
 	state := s.room(room)
 	state.mu.Lock()
 	state.connected[id] = actor
-	state.pending[actorKey(actor)] = actor
 	state.mu.Unlock()
 }
 

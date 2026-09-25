@@ -40,13 +40,18 @@ captured update in the same Postgres transaction as any resulting version and ev
 and compares canonical markdown. `envoy-dispatch backfill-block-ids` runs that closure across every
 document. Every write path that changes a document queues that closer once its transaction commits: a live edit (`POST /api/v1/artifacts/{id}/edits`), an uploaded document version (`POST /api/v1/issues/{key}/artifacts`, `POST /api/v1/projects/{key}/artifacts`), and a spec seeded at issue creation - so ask blocks written by any of them become asks without waiting for a later live change. The closer attributes the asks it indexes to the room's most recent mutating actor (`roomState.lastActor`, set by every edit, replacement and seed) when no pending author remains - an edit's own version write has already consumed `pending` by the time settlement runs. A free-text ask block (no bullet list) carries `options: []` on the wire, never JSON null.
 
-Each `doc_updates` row records `content_changed` - whether the update changed the document once
-anchor marks are stripped (`pmdoc.StripAnchorMarks` + `Equal`, the one measure the room's update
-observer and a transactional live write in `applyLive` both apply) - and settlement writes a version
-only when a content-class row lies past the latest version's `doc_update_version` cursor or ask
-reconciliation changed something, so a comment's quote mark or margin projection never versions a
-document. A handler joins its document operations to its transaction with `Docs.Join`, which
-returns the transaction's ledger (`docs/ledger.go`), the only way to give a document operation a
+Each `doc_updates` row records `content_changed` - whether the update changed what a version
+records (`pmdoc.VersionedContent` + `Equal`: the tree with anchor marks stripped and without each
+heading's `id`, which the browser editor derives from the heading's text when it opens the document
+and no rendering carries; the one measure the room's update observer and a transactional live write
+in `applyLive` both apply) - and settlement writes a version only when a content-class row lies past
+the latest version's `doc_update_version` cursor or ask reconciliation changed something, so a
+comment's quote mark, a margin projection, or a reader's editor giving headings their ids never
+versions a document. A browser is credited as a version's author only for content changes made while
+it is connected (`recordConnectedActors`); opening a document credits nothing, so a reader who
+changes nothing is on no version and cannot stale an approval. A handler joins its document
+operations to its transaction with `Docs.Join`, which returns the transaction's ledger
+(`docs/ledger.go`), the only way to give a document operation a
 transaction. A joined operation never writes the room: it runs on the transaction's fork of the
 room's document (`docs/livewrite.go`), appends its update inside the transaction, and reads through
 the same fork. The handler ends the transaction with `ledger.Commit`, which commits, credits the

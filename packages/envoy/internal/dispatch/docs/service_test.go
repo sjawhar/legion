@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -305,6 +306,96 @@ func TestSettleRendersTreeAndWritesVersion(t *testing.T) {
 	}
 	if markdown != "after\n" || version.Named {
 		t.Fatalf("version 2 = %q named=%v", markdown, version.Named)
+	}
+}
+
+// The browser editor gives every heading an id derived from its text as soon as it opens the
+// document (Milkdown's syncHeadingIdPlugin); the server parses headings with an empty one. A
+// version never renders the id, so that update changes nothing a version records: it credits no
+// connected reader and settles without a version, which would otherwise stale an approval.
+func TestAnEditorsHeadingIDsSettleWithoutAVersion(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "## Database\n\nUse SQLite")
+	alignLatestVersionWithUpdates(t, service, artifactID)
+	reader := model.Actor{Kind: "user", ID: "bob"}
+	service.addConnection(artifactID, service.nextConnection.Add(1), reader)
+
+	editLiveTree(t, service, artifactID, setHeadingID("database"))
+	settleCurrentGeneration(t, service, artifactID)
+
+	assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 1, 0)
+	if pending := pendingAuthors(service, artifactID); len(pending) != 0 {
+		t.Fatalf("pending authors after a heading id = %v, want none (reader %v changed nothing)", pending, reader)
+	}
+}
+
+// Renaming a heading changes its text, and the editor re-derives its id with it: that is a real
+// edit, versioned and credited to the reader connected when it happened.
+func TestRenamingAHeadingIsVersionedAndCredited(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "## Database\n\nUse SQLite")
+	alignLatestVersionWithUpdates(t, service, artifactID)
+	reader := model.Actor{Kind: "user", ID: "bob"}
+	service.addConnection(artifactID, service.nextConnection.Add(1), reader)
+
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		return setHeadingID("storage")(replaceRun("Database", "Storage")(tree))
+	})
+	settleCurrentGeneration(t, service, artifactID)
+
+	version := waitForDocumentVersion(t, service.store, artifactID, 2)
+	var markdown string
+	if err := service.store.Pool.QueryRow(context.Background(), `select markdown from artifact_versions where artifact_id = $1 and number = 2`, artifactID).Scan(&markdown); err != nil {
+		t.Fatalf("read version 2: %v", err)
+	}
+	if markdown != "## Storage\n\nUse SQLite\n" || !reflect.DeepEqual(version.Authors, []model.Actor{reader}) {
+		t.Fatalf("version 2 = %q by %v, want the renamed heading by %v", markdown, version.Authors, reader)
+	}
+}
+
+// A browser that opens a document and leaves without changing it is a reader, not an author:
+// the next version, written for someone else's edit, names only that editor.
+func TestAReaderWhoChangesNothingIsNoAuthorOfTheNextVersion(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "before")
+	alignLatestVersionWithUpdates(t, service, artifactID)
+	reader := model.Actor{Kind: "user", ID: "bob"}
+	connectionID := service.nextConnection.Add(1)
+	service.addConnection(artifactID, connectionID, reader)
+	service.removeConnection(artifactID, connectionID)
+
+	agent := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
+	if _, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{Op: "replace", Find: "before", With: "after"}}, agent, nil); err != nil {
+		t.Fatalf("agent edit: %v", err)
+	}
+	settleCurrentGeneration(t, service, artifactID)
+
+	version := waitForDocumentVersion(t, service.store, artifactID, 2)
+	if !reflect.DeepEqual(version.Authors, []model.Actor{agent}) {
+		t.Fatalf("version 2 authors = %v, want only the agent %v (reader %v changed nothing)", version.Authors, agent, reader)
+	}
+}
+
+func pendingAuthors(service *Service, artifactID string) []model.Actor {
+	state := service.room(artifactID)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return actorSlice(state.pending)
+}
+
+// setHeadingID returns a live edit that gives every heading id, as the editor's heading plugin
+// does for a heading whose text slugs to id.
+func setHeadingID(id string) func(*pmdoc.Node) *pmdoc.Node {
+	return func(tree *pmdoc.Node) *pmdoc.Node {
+		for _, block := range tree.Children {
+			if block.Type == "heading" {
+				block.Attrs["id"] = id
+			}
+		}
+		return tree
 	}
 }
 
