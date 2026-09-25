@@ -81,6 +81,22 @@ describe("formatZodIssues", () => {
     ]);
   });
 
+  // The allowed keys of a nested object are its own, not the tool's: a model told its mistyped
+  // `replace` could be `issue, project, artifact, ref, ops, precondition, summary` would retry
+  // the same op.
+  test("names the operation's own keys for an unknown key inside a document edit op", () => {
+    expect(
+      problemsFor("dispatch_doc_edit", {
+        issue: "DSP-42",
+        artifact: "spec",
+        ops: [{ op: "replace", find: "old", replace: "new" }],
+      })
+    ).toEqual([
+      'unknown field "replace" in ops.0; allowed: op, find, with, occurrence, markdown, after, ' +
+        "before, block, index, type, attributes",
+    ]);
+  });
+
   test("carries the number to trim for an over-limit string and the item count for an array", () => {
     expect(
       problemsFor("dispatch_ask", {
