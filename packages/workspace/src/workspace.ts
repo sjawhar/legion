@@ -49,6 +49,12 @@ export interface ProvisionIssueWorkspaceDeps {
    * config writes): each waits on the network or a credential helper, so the daemon passes its
    * `slow_command_timeout_seconds` here rather than the runner's generic default. */
   readonly commandTimeoutMs: number;
+  /** Whether provisioning's credentialed clone and fetch read no system or global git
+   * configuration: true in a pod's init container, whose git needs none. The tmux runtime passes
+   * false, since the daemon host's global configuration can carry the operator's own proxy. There
+   * the isolation would close nothing: a pane can write the shared clone's configuration, which
+   * the fetch reads whatever this says. */
+  readonly isolateGitConfig: boolean;
 }
 
 /** Neither kill is an ordinary `Command failed (exit N)`: the runner's own report is what the
@@ -90,12 +96,12 @@ async function runChecked(
 }
 
 const PROVISIONING_TOKEN_ENV = "LEGION_PROVISIONING_TOKEN";
-const PROVISIONING_ASKPASS_SCRIPT = `#!/bin/sh
-case "$1" in
-  *Username*) printf '%s\n' x-access-token ;;
-  *Password*) printf '%s\n' "$LEGION_PROVISIONING_TOKEN" ;;
-  *) exit 1 ;;
-esac
+/** The one-shot credential: a git credential helper that answers `get` with the token. git asks it
+ * for https://github.com alone (`credential.https://github.com.helper`), so a remote a URL rewrite
+ * sends to another scheme, host or port gets nothing (the Go twin's provisioningHelper). */
+const PROVISIONING_CREDENTIAL_HELPER = `#!/bin/sh
+[ "$1" = get ] || exit 0
+printf 'username=x-access-token\npassword=%s\n' "$LEGION_PROVISIONING_TOKEN"
 `;
 
 interface ProvisioningCredential {
@@ -104,40 +110,41 @@ interface ProvisioningCredential {
 }
 
 /** The credential — and the git configuration — provisioning's own `jj git clone` and
- * `jj git fetch` run with. The token travels only through the askpass script (`GIT_ASKPASS`
- * answers `x-access-token` and `$LEGION_PROVISIONING_TOKEN`), never as a config value or an
- * argument. The clone's persisted config is the pane's: `credential.helper` and the
- * github.com-specific entry name the pane helper (`deps.credentialHelper`), and
- * `credential.interactive=false` keeps a pane's git from ever prompting. Provisioning runs with
- * no grant — the daemon host, a pod's init container — so that helper must not be consulted:
- * it fails there, and from git 2.44 on (the worker image ships 2.47) `credential.interactive=false`
- * then forbids the askpass fallback too, `fatal: unable to get password from user` on every second
- * provisioning of a clone (LEGION-178). So the environment resets the helper chain and re-enables
- * askpass for these commands alone, as `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n`
+ * `jj git fetch` run with. The token reaches git only through the one-shot helper, which reads
+ * `$LEGION_PROVISIONING_TOKEN`, never as a config value or an argument. The clone's persisted
+ * config is the pane's: `credential.helper` and the github.com-specific entry name the pane helper
+ * (`deps.credentialHelper`), which provisioning, running with no grant, must not consult: it fails
+ * there (LEGION-178). So the environment resets the helper chain and then names the one-shot
+ * helper for https://github.com, as `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n`
  * pairs rather than `-c` flags: jj, not this code, spawns the git that fetches. Git reads that
- * environment config after the repository's, so the empty `credential.helper` clears every helper
- * read before it — the general entry and the URL-specific one alike — and `credential.interactive`
- * is last-wins. The persisted config is untouched. */
+ * environment config after every file, so the empty `credential.helper` clears every helper read
+ * before it — the general entry and the URL-specific one alike, the operator's and the tree's.
+ * `GIT_ASKPASS` is set empty, which git reads as no askpass at all, neither `core.askPass` nor
+ * `SSH_ASKPASS`, and terminal prompts are off, so a host the helper does not answer gets nothing.
+ * With `isolate`, git also reads no system or global configuration. The persisted config is
+ * untouched. */
 async function createProvisioningCredential(
   stateDir: string,
-  token: string
+  token: string,
+  isolate: boolean
 ): Promise<ProvisioningCredential> {
   await mkdir(stateDir, { recursive: true });
   const directory = await mkdtemp(path.join(stateDir, "provisioning-credential-"));
-  const askpass = path.join(directory, "askpass");
-  await writeFile(askpass, PROVISIONING_ASKPASS_SCRIPT, { mode: 0o700 });
-  await chmod(askpass, 0o700);
+  const helper = path.join(directory, "helper");
+  await writeFile(helper, PROVISIONING_CREDENTIAL_HELPER, { mode: 0o700 });
+  await chmod(helper, 0o700);
   return {
     directory,
     env: {
-      GIT_ASKPASS: askpass,
+      GIT_ASKPASS: "",
       GIT_TERMINAL_PROMPT: "0",
       [PROVISIONING_TOKEN_ENV]: token,
       GIT_CONFIG_COUNT: "2",
       GIT_CONFIG_KEY_0: "credential.helper",
       GIT_CONFIG_VALUE_0: "",
-      GIT_CONFIG_KEY_1: "credential.interactive",
-      GIT_CONFIG_VALUE_1: "true",
+      GIT_CONFIG_KEY_1: "credential.https://github.com.helper",
+      GIT_CONFIG_VALUE_1: `!'${helper.replaceAll("'", "'\\''")}'`,
+      ...(isolate ? { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } : {}),
     },
   };
 }
@@ -578,7 +585,8 @@ export async function provisionIssueWorkspace(
 
   const credential = await createProvisioningCredential(
     deps.stateDir,
-    await deps.provisioningToken()
+    await deps.provisioningToken(),
+    deps.isolateGitConfig
   );
   try {
     await ensureRepoClone(deps, repoCloneDir, owner, repo, credential.env);

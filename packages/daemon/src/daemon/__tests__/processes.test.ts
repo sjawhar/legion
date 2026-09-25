@@ -1141,14 +1141,16 @@ describe("ProcessManager", () => {
       command: ["jj", "git", "fetch", "-R", repo],
       opts: {
         env: {
-          GIT_ASKPASS: expect.stringMatching(/provisioning-credential-.+\/askpass$/),
+          GIT_ASKPASS: "",
           GIT_TERMINAL_PROMPT: "0",
           LEGION_PROVISIONING_TOKEN: "daemon-installation-token",
           GIT_CONFIG_COUNT: "2",
           GIT_CONFIG_KEY_0: "credential.helper",
           GIT_CONFIG_VALUE_0: "",
-          GIT_CONFIG_KEY_1: "credential.interactive",
-          GIT_CONFIG_VALUE_1: "true",
+          GIT_CONFIG_KEY_1: "credential.https://github.com.helper",
+          GIT_CONFIG_VALUE_1: expect.stringMatching(
+            /^!'.+\/provisioning-credential-[^/]+\/helper'$/
+          ),
         },
         timeoutMs: 300_000,
       },

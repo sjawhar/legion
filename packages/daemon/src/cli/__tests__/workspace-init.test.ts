@@ -90,19 +90,21 @@ describe("cmdWorkspaceInit", () => {
       expect.stringContaining(`${cloneDir}.clone-`),
     ]);
     // The clone and the fetch run with the one provisioning environment `@legion/workspace`
-    // builds, exactly: the askpass credential, and the five pairs that reset the clone's
-    // credential-helper chain and re-enable askpass for that command — without them the pane
-    // helper the clone's config names runs in an init container that has no grant, and git >= 2.44
-    // (the worker image's) then refuses the askpass fallback (LEGION-178).
+    // builds for a pod, exactly: the pairs that reset the clone's credential-helper chain (the
+    // pane helper it names has no grant in an init container, LEGION-178) and then name the
+    // one-shot helper for https://github.com alone, no askpass, and no system or global git
+    // configuration.
     const provisioningEnv = {
-      GIT_ASKPASS: expect.stringContaining(`${root}/`),
+      GIT_ASKPASS: "",
       GIT_TERMINAL_PROMPT: "0",
       LEGION_PROVISIONING_TOKEN: "ghs_x",
       GIT_CONFIG_COUNT: "2",
       GIT_CONFIG_KEY_0: "credential.helper",
       GIT_CONFIG_VALUE_0: "",
-      GIT_CONFIG_KEY_1: "credential.interactive",
-      GIT_CONFIG_VALUE_1: "true",
+      GIT_CONFIG_KEY_1: "credential.https://github.com.helper",
+      GIT_CONFIG_VALUE_1: expect.stringContaining(`${root}/`),
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_CONFIG_NOSYSTEM: "1",
     };
     expect(commands[0]?.opts?.env).toEqual(provisioningEnv);
     const fetchCommand = commands.find(

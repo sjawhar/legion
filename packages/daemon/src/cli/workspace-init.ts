@@ -26,9 +26,10 @@ export interface WorkspaceInitCommandDeps {
  * workspace-init` for provisioning and `legion worker-shim` for the working-copy adoption. Every
  * command runs with the process's own environment (`env`: the pod's PATH, HOME, the image's tool
  * locations) beneath the env the caller supplies — `createProvisioningCredential`'s for the clone
- * and the fetch (`GIT_ASKPASS`, `GIT_TERMINAL_PROMPT`, `LEGION_PROVISIONING_TOKEN`, and the
+ * and the fetch (`GIT_ASKPASS`, `GIT_TERMINAL_PROMPT`, `LEGION_PROVISIONING_TOKEN`, the
  * `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` pairs that reset the clone's
- * credential-helper chain for those commands, LEGION-178); `JJ_USER`/`JJ_EMAIL` for the adoption —
+ * credential-helper chain and name the one-shot helper for https://github.com, LEGION-178, and
+ * `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_NOSYSTEM`); `JJ_USER`/`JJ_EMAIL` for the adoption —
  * the caller's winning. `defaultRunner` spawns with exactly the env it is given, and the caller's
  * env alone has no PATH: on the daemon host `createDaemonRunner` merges the resolved tool
  * environment the same way; a pod has no such wrapper, so this is where `jj` and `git` become
@@ -190,6 +191,7 @@ export async function cmdWorkspaceInit(
       provisioningToken: async () => token,
       credentialHelper: flags.credentialHelper,
       commandTimeoutMs: DEFAULT_SLOW_COMMAND_TIMEOUT_SECONDS * 1000,
+      isolateGitConfig: true,
       run: deps.run,
     })
   );
