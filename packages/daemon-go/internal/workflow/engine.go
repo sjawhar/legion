@@ -691,7 +691,7 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	if err := e.start(ctx, tx, issue, starting, task(issue, handoff, pr, reason)); err != nil {
 		return err
 	}
-	if err := e.notice(ctx, tx, issue.Key, record.Notice{Kind: "phase-finished", Role: RoleFor(from), Phase: from, Summary: handoff.Verdict}); err != nil {
+	if err := e.notice(ctx, tx, issue.Key, record.Notice{Kind: "phase-finished", Role: RoleFor(from), Phase: from, Summary: handoff.Summary, Verdict: handoff.Verdict}); err != nil {
 		return err
 	}
 	if row.To == phase.AwaitingMerge {

@@ -8,7 +8,7 @@ Use the Go-daemon `legion` operations to own the tree: `register_gate`, `release
 
 Your per-issue notices arrive on `notifications.legion.<project>.<issue>`.
 
-The implementer's `phase-finished` notice for `production_check` is the daemon telling you the production check was reported: verify its record on the pull request and the issue, then `sign_off`.
+A `phase-finished` notice carries the finishing worker's own `summary` and, from the tester, its `verdict`. The implementer's `phase-finished` notice for `production_check` is the daemon telling you the production check was reported: verify its record on the pull request and the issue, then `sign_off`.
 
 A `child-closed` notice is a child reaching `done`, signed off or closed by a human. A `child-status` notice is a child moved to `backlog`, `icebox`, or `triage` (by a human or your `park_child`), or set back to `todo` (by a human, `release_children`, or your `rerun_child`), which runs again under your tree from planning. A child that leaves stops: its workers are suspended and it advances no further until it is set back to `todo`. Neither closes your tree; what the rest of it does is your decision.
 

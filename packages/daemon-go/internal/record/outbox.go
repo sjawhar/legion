@@ -46,12 +46,14 @@ func (MessagePost) OutboxKind() OutboxKind { return OutboxKindDispatchMessage }
 // NoticeKind identifies one persisted notice delivery.
 type NoticeKind string
 
-// Notice is a role-facing workflow observation.
+// Notice is a role-facing workflow observation. A phase-finished notice carries the finishing
+// worker's own summary and, beside it, the verdict it gave (the tester's pass or fail).
 type Notice struct {
 	Kind    NoticeKind  `json:"kind"`
 	Role    claim.Role  `json:"role,omitempty"`
 	Phase   phase.Phase `json:"phase,omitempty"`
 	Summary string      `json:"summary,omitempty"`
+	Verdict string      `json:"verdict,omitempty"`
 	Version int         `json:"version,omitempty"`
 	Reason  string      `json:"reason,omitempty"`
 }

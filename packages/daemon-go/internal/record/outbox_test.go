@@ -24,7 +24,7 @@ func TestOutboxPayloadsRoundTripThroughPostgres(t *testing.T) {
 	payloads := []OutboxPayload{
 		StatusWrite{Status: "testing", ObservedStatus: "in_progress"},
 		MessagePost{Body: "Pull request checks are blocked."},
-		Notice{Kind: "phase-finished", Role: claim.RoleTester, Phase: phase.Testing, Summary: "Tests passed", Version: 4, Reason: ""},
+		Notice{Kind: "phase-finished", Role: claim.RoleTester, Phase: phase.Testing, Summary: "Tests passed", Verdict: "pass", Version: 4, Reason: ""},
 		SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RoleArchitect, Task: "Write the spec."},
 		GateSeed{ArtifactID: "artifact-208", Version: 4},
 		LingerClose{Generation: 7},

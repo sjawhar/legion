@@ -461,6 +461,33 @@ func TestProductionCheckCompletionTellsTheArchitectAndAwaitsSignOff(t *testing.T
 	assertOutboxKinds(t, pool, []string{"notice"})
 }
 
+// The architect learns what a phase produced from its phase-finished notice: the worker's own
+// summary, and beside it the verdict the tester gave. Neither stands in for the other; a notice
+// that carried the verdict in its summary told the architect "pass" and nothing the tester wrote.
+func TestAPhaseFinishedNoticeCarriesTheWorkersSummaryAndItsVerdict(t *testing.T) {
+	pool := migratedPool(t)
+	ctx := context.Background()
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim"})
+
+	if _, err := intake.ApplyFact(ctx, pool, "api", "tester-passed", intake.HandoffComplete{
+		Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim", Generation: 1, Summary: "twelve scenarios pass against the head", Verdict: "pass", Commit: "test-handoff",
+	}, testEngine(), admissionStub{}); err != nil {
+		t.Fatalf("ApplyFact tester completion: %v", err)
+	}
+	var payload []byte
+	if err := pool.QueryRow(ctx, "select payload from outbox where kind = 'notice' and payload->>'kind' = 'phase-finished'").Scan(&payload); err != nil {
+		t.Fatalf("read the phase-finished notice: %v", err)
+	}
+	var notice map[string]any
+	if err := json.Unmarshal(payload, &notice); err != nil {
+		t.Fatalf("decode notice %s: %v", payload, err)
+	}
+	if notice["role"] != "tester" || notice["phase"] != "testing" || notice["summary"] != "twelve scenarios pass against the head" || notice["verdict"] != "pass" {
+		t.Fatalf("phase-finished notice = %s, want the tester's summary and its verdict pass", payload)
+	}
+}
+
 // Linger suspends, and its expiry stops, every claim the tree holds — the root architect admission
 // started and a worker that never reported a handoff included, neither of which has a phase row.
 func TestSignOffLingersOnceAndExpiryStopsTreeAndRemovesEveryWorkspace(t *testing.T) {
