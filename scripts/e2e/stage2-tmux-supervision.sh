@@ -37,6 +37,7 @@ pg_container=legion-e2e2-pg-$$
 state=$work/state
 daemon_log=$work/daemon.log
 check=setup
+timeout_hook=
 
 # ---- reporting and waiting ------------------------------------------------------------------------
 
@@ -51,6 +52,7 @@ fail() {
   exit 1
 }
 # until_true SECONDS WHAT CMD… polls CMD every half second, failing the current check with WHAT.
+# A check that set timeout_hook has it run first, to say what the last poll saw (lib/rig.sh's).
 until_true() {
   local limit=$1 what=$2 i
   shift 2
@@ -58,6 +60,7 @@ until_true() {
     if "$@" >/dev/null 2>&1; then return 0; fi
     sleep 0.5
   done
+  if [ -n "$timeout_hook" ]; then "$timeout_hook" || true; fi
   fail "timed out after ${limit}s waiting for $what"
 }
 
@@ -127,6 +130,23 @@ claim_json() { claims list --json | jq -ce --arg t "$1" '.claims[] | select(.tok
 claim_is() { claim_json "$1" | jq -e "$2" >/dev/null; } # claim_is TOKEN JQ-PREDICATE
 tm() { tmux -L "legion-$ptoken" "$@"; }
 panes() { tm list-panes -a -F '#{pane_id}' 2>/dev/null | sort; }
+# pane_gone PANE: PANE is not among the daemon's tmux panes. It reads tmux's own answer rather than
+# `panes`, which drops tmux's stderr and so reads any failed listing as no panes at all: a listing
+# that fails is no answer, except that tmux's server exits with its last pane, so a gone server
+# holds none: tmux 3.7 leaves its socket behind, so "no server running" is the usual answer, and a
+# socket that no longer exists is the other. report_panes is the timeout_hook that says what tmux
+# last answered.
+pane_gone() {
+  local listed
+  if ! listed=$(tm list-panes -a -F '#{pane_id}' 2>&1); then
+    case "$listed" in
+      *"no server running"* | *"error connecting to"*"(No such file or directory)"*) return 0 ;;
+    esac
+    return 1
+  fi
+  ! grep -qxF "$1" <<<"$listed"
+}
+report_panes() { note "tmux list-panes answered: $(tm list-panes -a -F '#{pane_id}' 2>&1 | tr '\n' ' ')"; }
 # log_count MSG [DELIVERY]: how many JSON lines of the daemon log carry MSG (and that delivery id).
 log_count() {
   jq -R --arg m "$1" --arg d "${2:-}" 'fromjson? | select(.msg == $m and ($d == "" or .delivery == $d))' \
@@ -220,6 +240,18 @@ deadline_port=$(bash "$root/scripts/e2e/lib/free-port.sh" "$port") || fail "no f
 envoy_port=$(bash "$root/scripts/e2e/lib/free-port.sh" "$port" "$deadline_port") || fail "no free port for the Envoy listener"
 (cd "$root/packages/daemon-go" && go build -o "$work/legion" ./cmd/legion)
 (cd "$root/packages/envoy" && go build -o "$work/envoy-listener" ./cmd/listener)
+# The binary under proof, checkable after the run: the source it was built from and its hash.
+if command -v jj >/dev/null && jj -R "$root" root >/dev/null 2>&1; then
+  source_revision="$(jj -R "$root" log -r @ --no-graph -T 'commit_id ++ if(empty, " (working copy: no changes)", " (working copy has changes)")') on $(jj -R "$root" log -r @- --no-graph -T 'commit_id')"
+else
+  source_revision=$(git -C "$root" rev-parse HEAD)
+fi
+note "built legion from $source_revision; sha256 $(sha256sum "$work/legion" | cut -d' ' -f1)"
+# What a changed working copy holds, so a run on one (a negative control) says what it ran.
+if [ "${source_revision#*working copy has changes}" != "$source_revision" ]; then
+  note "the working copy's changes (jj diff --stat; sha256 of jj diff --git $(jj -R "$root" diff --git | sha256sum | cut -d' ' -f1)):"
+  jj -R "$root" diff --stat | sed 's/^/     /'
+fi
 
 if [ -z "${LEGION_E2E_PG_DSN:-}" ]; then
   docker ps >/dev/null # a broken docker is a failure of this run, not of the daemon
@@ -423,7 +455,7 @@ before=$(claim_json "$c1")
 pane=$(jq -r .locator.tmux.pane <<<"$before")
 claims suspend --claim "$c1" >/dev/null
 until_true 60 "claim $c1 to be suspended" claim_is "$c1" '.state == "suspended" and .locator == null'
-panes | grep -qxF "$pane" && fail "pane $pane still exists after the suspension"
+pane_gone "$pane" || { report_panes; fail "pane $pane still exists after the suspension"; }
 [ "$(claim_json "$c1" | jq -r .session)" = "$session1" ] || fail "the suspension dropped the session"
 session_file1=$(claim_json "$c1" | jq -r .sessionFile)
 [ -s "$session_file1" ] || fail "the session file $session_file1 is gone"
@@ -615,8 +647,10 @@ pass
 begin stop
 # The tree's root claim ends only when its tree closes: the operator's stop of it is refused, names
 # suspend, and changes nothing — not its state, its generation, or its pane. Suspending it stops its
-# process; the worker's claim is stopped. No workflow issue backs S2-1, so the operator closes it,
-# which ends its root claim.
+# process. A worker's claim is the operator's to stop: a second worker of S2-1 is stopped, retired
+# with its pane gone. No workflow issue backs S2-1, so the operator then closes it while its first
+# worker still runs: the close ends the root claim and then every other claim of the tree, so that
+# worker's claim is retired and its pane is gone too.
 root_before=$(claim_json "$c1" | jq -c '{generation, pane: .locator.tmux.pane}')
 if refusal=$(claims stop --claim "$c1" 2>&1 >/dev/null); then
   fail "the operator's stop of the root claim $c1 was accepted"
@@ -630,16 +664,28 @@ claim_is "$c1" '.state == "ready" or .state == "idle"' ||
 root_after=$(claim_json "$c1" | jq -c '{generation, pane: .locator.tmux.pane}')
 [ "$root_after" = "$root_before" ] || fail "the refused stop moved $c1 from $root_before to $root_after"
 claims suspend --claim "$c1" >/dev/null
-claims stop --claim "$c2" >/dev/null
-until_true 60 "the root to be suspended and the worker retired" sh -c \
-  "'$work/legion' claims list --json --config '$work/legion.yaml' --operator-token-file '$work/operator-token' | jq -e --arg r '$c1' --arg w '$c2' '([.claims[] | select(.token == \$r) | .state] == [\"suspended\"]) and ([.claims[] | select(.token == \$w) | .state] == [\"retired\"])'"
+until_true 60 "the root to be suspended" claim_is "$c1" '.state == "suspended"'
+timeout_hook=report_panes
+c3=$(claims spawn --json --tree S2-1 --issue S2-3 --role tester --prompt-file "$work/worker.md" | jq -r .token)
+until_true 240 "the second worker $c3 to be ready" claim_is "$c3" '.state == "ready"'
+stopped_pane=$(claim_json "$c3" | jq -r .locator.tmux.pane)
+claims stop --claim "$c3" >/dev/null || fail "the operator's stop of the worker $c3 was refused"
+until_true 60 "the stopped worker $c3 to be retired" claim_is "$c3" '.state == "retired"'
+until_true 30 "the stopped worker's pane $stopped_pane to be gone" pane_gone "$stopped_pane"
+worker_pane=$(claim_json "$c2" | jq -r .locator.tmux.pane)
+claim_is "$c2" '.state == "ready" or .state == "idle"' || fail "the worker $c2 is not live before the close: $(claim_json "$c2" | jq -c '{state}')"
+panes | grep -qxF "$worker_pane" || fail "the worker's pane $worker_pane is gone before the close"
 closed=$(claims close --json --claim "$c1") || fail "the operator's close of S2-1 through its root claim $c1 was refused"
 jq -e '.state == "retired"' <<<"$closed" >/dev/null || fail "the close of S2-1 left its root claim $(jq -c '{state, generation}' <<<"$closed")"
+claim_is "$c2" '.state == "retired"' || fail "the close of S2-1 left its worker $c2 $(claim_json "$c2" | jq -c '{state}'): a worker on a closed tree"
+until_true 30 "the worker's pane $worker_pane to be gone" pane_gone "$worker_pane"
+timeout_hook=
 legion stop --config "$work/legion.yaml" >/dev/null
 stop_daemon "$daemon_pid" "legion stop"
 daemon_pid=
 note "the root's stop was refused, generation and pane unchanged ($root_after): $refusal"
-note "the root suspended, the worker retired; the operator's close of S2-1 retired the root; the daemon stopped with exit 0"
+note "the root suspended; the operator's stop of the second worker $c3 retired it and its pane $stopped_pane is gone"
+note "the operator's close of S2-1, with its worker $c2 still live in pane $worker_pane, retired the root and the worker, and the pane is gone; the daemon stopped with exit 0"
 pass
 
 begin every-turn-through-the-gateway

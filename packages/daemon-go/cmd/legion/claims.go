@@ -19,7 +19,7 @@ const claimsUsage = "usage: legion claims spawn|deliver|suspend|resume|stop|clos
 
 // claimsCommands is the operator's hand on the daemon's claims, one subcommand per operator route
 // (internal/api/operator.go). close is the tree's close, through its root claim, for a tree no
-// workflow issue backs.
+// workflow issue backs: the root, then every other claim of the tree.
 var claimsCommands = map[string]command{
 	"spawn":   runClaimsSpawn,
 	"deliver": runClaimsDeliver,

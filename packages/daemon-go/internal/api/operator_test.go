@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"slices"
 	"strings"
@@ -271,8 +272,9 @@ func TestTheOperatorSuspendsARegisteredRootAndRevokesItsSecret(t *testing.T) {
 }
 
 // A tree no workflow issue backs — one the operator spawned — has no linger to close it, so the
-// operator closes it: close ends the tree's root claim, whatever its state, as the workflow's
-// tree_close does. Its Sandbox and tree volume would otherwise outlive every use under a sandbox.
+// operator closes it: close ends the tree's root claim, here its only claim, whatever its state, as
+// the workflow's tree_close does. Its Sandbox and tree volume would otherwise outlive every use
+// under a sandbox.
 func TestTheOperatorClosesATreeNoWorkflowIssueBacks(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -305,6 +307,127 @@ func TestTheOperatorClosesATreeNoWorkflowIssueBacks(t *testing.T) {
 				t.Fatalf("releases = %+v, want the root released once", releases)
 			}
 		})
+	}
+}
+
+// The operator's close is the whole tree's, as the workflow's tree_close is: the root claim first,
+// whose close asks whether the tree may be closed, then every other claim of the tree, whatever its
+// state. A worker left running would stay on a tree volume that is being deleted. Another tree's
+// claims are left alone.
+func TestTheOperatorsCloseStopsEveryClaimOfTheTree(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	for _, spawn := range []SpawnRequest{
+		{Tree: "LEGION-208", Issue: "LEGION-209", Role: claim.RoleImplementer, Prompt: "Reply ready and wait."},
+		{Tree: "LEGION-208", Issue: "LEGION-210", Role: claim.RoleTester, Prompt: "Reply ready and wait."},
+		{Tree: "LEGION-300", Issue: "LEGION-300", Role: claim.RoleArchitect, Prompt: "Reply ready and wait."},
+		{Tree: "LEGION-300", Issue: "LEGION-301", Role: claim.RoleImplementer, Prompt: "Reply ready and wait."},
+	} {
+		if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims", spawn); recorder.Code != http.StatusCreated {
+			t.Fatalf("spawn %s %s = %d; body %s", spawn.Issue, spawn.Role, recorder.Code, recorder.Body)
+		}
+	}
+	h.registered(h.bootToken("legion-legion-legion-210-tester"), "ses_tester")
+
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/close", nil)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("close = %d, want 200; body %s", recorder.Code, recorder.Body)
+	}
+	var released []claim.Token
+	for _, call := range h.runtime.CallsOf("Release") {
+		released = append(released, call.Released.Claim)
+	}
+	if len(released) != 3 || released[0] != architectToken {
+		t.Fatalf("released %v, want the root first and then the tree's two workers", released)
+	}
+	for _, token := range []claim.Token{architectToken, "legion-legion-legion-209-implementer", "legion-legion-legion-210-tester"} {
+		if state := h.stored(token).State; state != supervise.StateRetired {
+			t.Errorf("%s is %s after its tree closed, want retired", token, state)
+		}
+	}
+	for _, token := range []claim.Token{"legion-legion-legion-300-architect", "legion-legion-legion-301-implementer"} {
+		if state := h.stored(token).State; state == supervise.StateRetired {
+			t.Errorf("%s, of another tree, was retired by this tree's close", token)
+		}
+	}
+}
+
+// A worker whose stop fails is named with its reason, the root stays closed, and the other workers
+// are still stopped: the close does not end at the first failure. Asking again once the fault clears
+// is the recovery. The retired root takes its "already retired" row, and the workers' stops go
+// through.
+func TestTheOperatorsCloseNamesTheWorkersItCouldNotStop(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	workers := []claim.Token{"legion-legion-legion-209-implementer", "legion-legion-legion-210-tester"}
+	for _, spawn := range []SpawnRequest{
+		{Tree: "LEGION-208", Issue: "LEGION-209", Role: claim.RoleImplementer, Prompt: "Reply ready and wait."},
+		{Tree: "LEGION-208", Issue: "LEGION-210", Role: claim.RoleTester, Prompt: "Reply ready and wait."},
+	} {
+		if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims", spawn); recorder.Code != http.StatusCreated {
+			t.Fatalf("spawn %s %s = %d; body %s", spawn.Issue, spawn.Role, recorder.Code, recorder.Body)
+		}
+	}
+	for _, worker := range workers {
+		h.runtime.FailReleaseOf(worker, errors.New("the API server timed out"))
+	}
+
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/close", nil)
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("close = %d, want 500; body %s", recorder.Code, recorder.Body)
+	}
+	for _, want := range []string{"closed LEGION-208's root claim " + string(architectToken), string(workers[0]), string(workers[1]), "the API server timed out", "legion claims stop"} {
+		if !strings.Contains(recorder.Body.String(), want) {
+			t.Errorf("the refusal %s does not say %q", recorder.Body, want)
+		}
+	}
+	if state := h.stored(architectToken).State; state != supervise.StateRetired {
+		t.Errorf("the root is %s, want it closed", state)
+	}
+	for _, worker := range workers {
+		if state := h.stored(worker).State; state == supervise.StateRetired {
+			t.Errorf("%s retired although its stop failed", worker)
+		}
+		h.runtime.FailReleaseOf(worker, nil)
+	}
+
+	if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/close", nil); recorder.Code != http.StatusOK {
+		t.Fatalf("the second close = %d, want 200; body %s", recorder.Code, recorder.Body)
+	}
+	for _, worker := range workers {
+		if state := h.stored(worker).State; state != supervise.StateRetired {
+			t.Errorf("%s is %s after the second close, want retired", worker, state)
+		}
+	}
+}
+
+// A claim of the tree the daemon supervises no machine for cannot be stopped, so the close does not
+// answer 200 over it: it is named with that reason, and with the restart that makes it stoppable,
+// since the stop route answers 404 for it, beside the closed root.
+func TestTheOperatorsCloseNamesAClaimItSupervisesNoMachineFor(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	worker := spawnBody()
+	worker.Issue, worker.Role = "LEGION-209", claim.RoleImplementer
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", worker)
+	h.supervisor.mu.Lock()
+	delete(h.supervisor.machines, "legion-legion-legion-209-implementer")
+	h.supervisor.mu.Unlock()
+
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/close", nil)
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("close = %d, want 500; body %s", recorder.Code, recorder.Body)
+	}
+	for _, want := range []string{"legion-legion-legion-209-implementer (the daemon supervises no machine for it", "until the daemon restarts"} {
+		if !strings.Contains(recorder.Body.String(), want) {
+			t.Errorf("the refusal %s does not say %q", recorder.Body, want)
+		}
+	}
+	if state := h.stored(architectToken).State; state != supervise.StateRetired {
+		t.Errorf("the root is %s, want it closed", state)
 	}
 }
 
