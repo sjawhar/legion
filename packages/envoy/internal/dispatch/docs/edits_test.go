@@ -1198,12 +1198,16 @@ func TestApplyOperationReplaceRejectsBlockReplacements(t *testing.T) {
 	}{
 		{
 			name: "two paragraphs",
-			want: []string{"give each one its own replace"},
+			want: []string{"give each one its own replace", "in one insert", "after the whole list"},
 			with: "one\n\ntwo",
 		},
 		{
 			name: "a heading before a paragraph",
-			want: []string{"replace keeps a block's kind", "insert it beside a paragraph you replace"},
+			want: []string{
+				"any block that is not a paragraph",
+				"replace keeps a block's kind",
+				"insert it beside a paragraph you replace",
+			},
 			with: "## New\n\nBody.",
 		},
 		{
@@ -1245,7 +1249,6 @@ func TestReplacePlusInsertKeepsTheParagraphsBlockID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pmdoc.EnsureBlockIDs(tree)
 	before := blockIDOfText(t, tree, "Body.")
 
 	batch, err := applyOperations(tree, []model.EditOp{
@@ -1268,20 +1271,22 @@ func TestReplacePlusInsertKeepsTheParagraphsBlockID(t *testing.T) {
 	}
 }
 
+// blockIDOfText resolves a block the way the edit path does: the quote, then the block that
+// holds it. Parsing mints the ids, so nothing stamps them here.
 func blockIDOfText(t *testing.T, tree *pmdoc.Node, text string) string {
 	t.Helper()
-	for _, child := range tree.Children {
-		if child.Type != "paragraph" || len(child.Children) == 0 || child.Children[0].Text != text {
-			continue
-		}
-		id, _ := child.Attrs[pmdoc.BlockIDAttr].(string)
-		if id == "" {
-			t.Fatalf("paragraph %q has no block id", text)
-		}
-		return id
+	r, err := pmdoc.FindQuote(tree, text, nil, nil)
+	if err != nil {
+		t.Fatalf("find %q: %v", text, err)
 	}
-	t.Fatalf("no paragraph reads %q", text)
-	return ""
+	id, err := pmdoc.BlockIDForRange(tree, r)
+	if err != nil {
+		t.Fatalf("block id for %q: %v", text, err)
+	}
+	if id == "" {
+		t.Fatalf("the block holding %q has no id", text)
+	}
+	return id
 }
 
 // AGENTC-193's spec came back with `## ##`, `7. 7\.`, `4. 4\.` and `-    - `: a `with` carrying
