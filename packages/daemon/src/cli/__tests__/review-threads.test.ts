@@ -39,6 +39,14 @@ const resolvedOk = (threadId: string) => ({
   data: { resolveReviewThread: { thread: { id: threadId, isResolved: true } } },
 });
 
+/** A page as GitHub serves it for `query`: GitHub answers only the fields a query selects, so each
+ * newest comment's `state` is dropped unless the query's `newest` selection names it. */
+function served(query: string, page: unknown): unknown {
+  const newest = query.split("\n").find((line) => line.includes("newest:")) ?? "";
+  if (page === undefined || /\bstate\b/.test(newest)) return page;
+  return JSON.parse(JSON.stringify(page), (key, value) => (key === "state" ? undefined : value));
+}
+
 /** A fake daemon + GitHub: `/legion/v1/gh-token` redeems the grant; `api.github.com/graphql`
  * serves `reviewThreads` pages keyed by the `after` cursor ("null" for the first page) and
  * records every `resolveReviewThread` mutation. */
@@ -64,18 +72,18 @@ function fakeGitHub(
       resolved.push(threadId);
       return Response.json(mutation(threadId));
     }
-    return Response.json(pages[String(body.variables.after)]);
+    return Response.json(served(body.query, pages[String(body.variables.after)]));
   };
   return { fetch, requests, graphqlBodies, resolved };
 }
 
-/** The grant path never runs gh, so it has no gh stderr to show. */
+/** For a run that must never reach gh: the grant path, and `--gh` refused inside a pane. */
 const noGh = {
   runGh: async (): Promise<never> => {
-    throw new Error("the grant path ran gh");
+    throw new Error("gh ran");
   },
   stderr: (): never => {
-    throw new Error("the grant path wrote gh's stderr");
+    throw new Error("gh's stderr was written");
   },
 };
 
@@ -97,7 +105,8 @@ function fakeGh(
       resolved.push(threadId);
       return { exitCode: 0, stdout: JSON.stringify(mutation(threadId)), stderr };
     }
-    return { exitCode: 0, stdout: JSON.stringify(pages[String(body.variables.after)]), stderr };
+    const page = served(body.query, pages[String(body.variables.after)]);
+    return { exitCode: 0, stdout: JSON.stringify(page), stderr };
   };
   return { runGh, calls, resolved };
 }
@@ -378,21 +387,63 @@ describe("legion threads resolve", () => {
     expect(written).toEqual([warning, warning]);
   });
 
-  it("--gh leaves open a thread whose newest comment is the opener's Accepted: still pending in an unsubmitted review", async () => {
-    // Outside a pane the caller can be the account that opened every thread (sjawhar-agent on
-    // sjawhar/*), and GitHub shows a pending review's drafts to their author: the grant path's
-    // role App never sees another account's draft, so --gh must not act on one either.
+  it("leaves open a thread whose newest comment is the opener's Accepted: still pending in an unsubmitted review, on both paths", async () => {
+    // GitHub shows a pending review's drafts to their author only. Outside a pane the caller can
+    // be the account that opened every thread (sjawhar-agent on sjawhar/*), and a role App can
+    // have drafts of its own: neither path may act on one.
     const account = "sjawhar-agent";
-    const gh = fakeGh(
+    const pages = {
+      null: page(
+        [
+          thread("T1", 1, account, {
+            login: account,
+            body: "Accepted: drafted, not yet submitted",
+            state: "PENDING",
+          }),
+          thread("T2", 2, account, { login: account, body: "Accepted: fixed in abc1234" }),
+        ],
+        null
+      ),
+    };
+    const github = fakeGitHub(pages, resolvedOk);
+    const gh = fakeGh(pages, resolvedOk);
+    const runs = [
+      {
+        gh: false,
+        deps: { env: { LEGION_GRANT: "grant-123" }, fetch: github.fetch, ...noGh },
+        resolved: github.resolved,
+      },
+      {
+        gh: true,
+        deps: { env: {}, fetch: noFetch, runGh: gh.runGh, stderr: () => undefined },
+        resolved: gh.resolved,
+      },
+    ];
+
+    for (const run of runs) {
+      const lines: string[] = [];
+      await cmdThreadsResolve(
+        { repo: "sjawhar/legion", pr: "993", gh: run.gh },
+        { ...run.deps, log: (line) => lines.push(line) }
+      );
+
+      expect(run.resolved).toEqual(["T2"]);
+      expect(lines).toEqual([
+        `left open ${PR}1 — newest reply by sjawhar-agent is an unsubmitted draft in a pending review`,
+        `resolved ${PR}2`,
+      ]);
+    }
+  });
+
+  it("trims only space, tab, CR and LF before Accepted:, as the Go CLI does", async () => {
+    // The shared vector with threads_test.go: both CLIs must answer these the same way.
+    const reviewer = "legion-reviewer";
+    const github = fakeGitHub(
       {
         null: page(
           [
-            thread("T1", 1, account, {
-              login: account,
-              body: "Accepted: drafted, not yet submitted",
-              state: "PENDING",
-            }),
-            thread("T2", 2, account, { login: account, body: "Accepted: fixed in abc1234" }),
+            thread("T1", 1, reviewer, { login: reviewer, body: " \t\r\nAccepted: fixed" }),
+            thread("T2", 2, reviewer, { login: reviewer, body: "\u00a0Accepted: fixed" }),
           ],
           null
         ),
@@ -402,21 +453,78 @@ describe("legion threads resolve", () => {
     const lines: string[] = [];
 
     await cmdThreadsResolve(
-      { repo: "sjawhar/legion", pr: "993", gh: true },
+      { repo: "sjawhar/legion", pr: "993" },
       {
-        env: {},
-        fetch: noFetch,
-        runGh: gh.runGh,
+        env: { LEGION_GRANT: "grant-123" },
+        fetch: github.fetch,
+        ...noGh,
         log: (line) => lines.push(line),
-        stderr: () => undefined,
       }
     );
 
-    expect(gh.resolved).toEqual(["T2"]);
+    expect(github.resolved).toEqual(["T1"]);
     expect(lines).toEqual([
-      `left open ${PR}1 — newest reply by sjawhar-agent is an unsubmitted draft in a pending review`,
-      `resolved ${PR}2`,
+      `resolved ${PR}1`,
+      `left open ${PR}2 — newest reply by legion-reviewer is not an acceptance`,
     ]);
+  });
+
+  it("refuses a newest comment that carries no state, resolving nothing", async () => {
+    // GitHub always answers `state` when the query selects it; its absence means the query or the
+    // response changed shape, and treating it as submitted would bring back resolve-on-a-draft.
+    const reviewer = "legion-reviewer";
+    const github = fakeGitHub(
+      {
+        null: page(
+          [
+            {
+              id: "T1",
+              isResolved: false,
+              opener: { nodes: [{ url: `${PR}1`, author: { login: reviewer } }] },
+              newest: { nodes: [{ author: { login: reviewer }, body: "Accepted: fixed" }] },
+            },
+          ],
+          null
+        ),
+      },
+      resolvedOk
+    );
+
+    await expect(
+      cmdThreadsResolve(
+        { repo: "sjawhar/legion", pr: "993" },
+        { env: { LEGION_GRANT: "grant-123" }, fetch: github.fetch, ...noGh, log: () => undefined }
+      )
+    ).rejects.toEqual(
+      expect.objectContaining({
+        message:
+          'review thread T1: its newest comment carried state undefined, not "PENDING" or "SUBMITTED"',
+        code: 1,
+      })
+    );
+    expect(github.resolved).toEqual([]);
+  });
+
+  it("refuses an unresolved thread with no comments, as the Go CLI does", async () => {
+    const github = fakeGitHub(
+      {
+        null: page(
+          [{ id: "T1", isResolved: false, opener: { nodes: [] }, newest: { nodes: [] } }],
+          null
+        ),
+      },
+      resolvedOk
+    );
+
+    await expect(
+      cmdThreadsResolve(
+        { repo: "sjawhar/legion", pr: "993" },
+        { env: { LEGION_GRANT: "grant-123" }, fetch: github.fetch, ...noGh, log: () => undefined }
+      )
+    ).rejects.toEqual(
+      expect.objectContaining({ message: "review thread T1 has no comments", code: 1 })
+    );
+    expect(github.resolved).toEqual([]);
   });
 
   it("--gh exits 1 with gh's own message when gh fails, resolving nothing", async () => {
@@ -425,7 +533,6 @@ describe("legion threads resolve", () => {
       stdout: "",
       stderr: "gh: To use GitHub CLI in automation, set the GH_TOKEN environment variable.\n",
     });
-
     const written: string[] = [];
 
     await expect(

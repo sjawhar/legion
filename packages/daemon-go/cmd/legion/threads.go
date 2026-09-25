@@ -68,9 +68,11 @@ func runThreads(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	}
 	for _, thread := range threads {
 		// A draft in a pending review never counts: GitHub shows it only to its author, so a caller
-		// posting as the opener's account would otherwise resolve on an unsubmitted acceptance. A
-		// caller's own newer draft leaves the thread open for that caller only: the rule fails closed
-		// per caller (review-threads.ts acceptedByOpener).
+		// posting as the opener's account would otherwise resolve on an unsubmitted acceptance. For
+		// every caller a thread is resolved only when its newest submitted comment is the opener's
+		// Accepted:; a caller's own newer draft can only make it leave the thread open. Only space,
+		// tab, CR and LF may precede Accepted:. This is the TypeScript CLI's rule (review-threads.ts
+		// acceptedByOpener and isAcceptance); threads_test.go and review-threads.test.ts share vectors.
 		if thread.newestPending || thread.openerLogin == "" || thread.openerLogin != thread.newestLogin || !strings.HasPrefix(strings.TrimLeft(thread.newestBody, " \t\r\n"), "Accepted:") {
 			by := thread.newestLogin
 			if by == "" {
@@ -121,10 +123,18 @@ func unresolvedReviewThreads(ctx context.Context, token, owner, name string, num
 			return nil, fmt.Errorf("%s/%s#%d was not found by GitHub", owner, name, number)
 		}
 		for _, node := range page.Data.Repository.PullRequest.ReviewThreads.Nodes {
-			if node.IsResolved || len(node.Opening.Nodes) == 0 || len(node.Newest.Nodes) == 0 {
+			if node.IsResolved {
 				continue
 			}
+			if len(node.Opening.Nodes) == 0 || len(node.Newest.Nodes) == 0 {
+				return nil, fmt.Errorf("review thread %s has no comments", node.ID)
+			}
 			opening, newest := node.Opening.Nodes[0], node.Newest.Nodes[0]
+			// GitHub always answers state when the query selects it. Anything else means the query or
+			// the response changed shape, and reading it as submitted would resolve on a draft.
+			if newest.State != "PENDING" && newest.State != "SUBMITTED" {
+				return nil, fmt.Errorf("review thread %s: its newest comment carried state %q, not \"PENDING\" or \"SUBMITTED\"", node.ID, newest.State)
+			}
 			all = append(all, reviewThread{id: node.ID, url: opening.URL, openerLogin: opening.Author.Login, newestLogin: newest.Author.Login, newestBody: newest.Body, newestPending: newest.State == "PENDING"})
 		}
 		info := page.Data.Repository.PullRequest.ReviewThreads.PageInfo

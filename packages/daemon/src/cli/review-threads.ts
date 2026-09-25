@@ -42,7 +42,8 @@ interface ThreadsPage {
           isResolved: boolean;
           opener: { nodes: Array<{ url: string; author: Actor | null }> };
           newest: {
-            nodes: Array<{ author: Actor | null; body: string; state: "PENDING" | "SUBMITTED" }>;
+            // `state` is absent only when the query stops selecting it; listUnresolvedThreads refuses that.
+            nodes: Array<{ author: Actor | null; body: string; state?: "PENDING" | "SUBMITTED" }>;
           };
         }>;
       };
@@ -132,20 +133,22 @@ function graphqlData<T>(response: unknown): T {
   return payload.data;
 }
 
-/** The reviewer's acceptance reply form: the comment's first non-blank line begins `Accepted:`
- * (`Accepted: fixed in <commit> — <one line>` or `Accepted: not a defect — <reason>`). Anything
- * else — `Still open: …`, `Accepted (round 2): …`, a bare "fixed" — is not an acceptance. */
+/** The reviewer's acceptance reply form: the comment begins `Accepted:` after any leading space,
+ * tab, CR or LF (`Accepted: fixed in <commit> — <one line>` or `Accepted: not a defect —
+ * <reason>`). Anything else — `Still open: …`, `Accepted (round 2): …`, a bare "fixed", or
+ * `Accepted:` after other whitespace such as a no-break space — is not an acceptance. The Go CLI
+ * trims the same four characters (`threads.go`), so both CLIs apply one rule. */
 function isAcceptance(body: string): boolean {
-  return body.trimStart().startsWith("Accepted:");
+  return body.replace(/^[ \t\r\n]+/, "").startsWith("Accepted:");
 }
 
 /** True when the thread's newest comment is its opener's own submitted `Accepted:` reply: the
  * account that raised the point is the one closing it, and nobody has replied since. A draft in a
  * pending review never counts. GitHub shows a draft only to its author, so without this check an
  * outside-a-pane caller posting as the opener's account would resolve on an acceptance the
- * reviewer has not submitted. The caller still sees its own drafts: one newer than a submitted
- * acceptance hides that acceptance from this caller, and the thread stays open for it. The rule
- * fails closed per caller: it can leave open what another caller would resolve, never the reverse. */
+ * reviewer has not submitted. For every caller, then, a thread is resolved only when its newest
+ * submitted comment is the opener's `Accepted:`. A caller still sees its own drafts, and one newer
+ * than a submitted acceptance can only make that caller leave the thread open. */
 function acceptedByOpener(thread: UnresolvedThread): boolean {
   return (
     !thread.newestPending &&
@@ -179,6 +182,13 @@ async function listUnresolvedThreads(
       const opener = node.opener.nodes[0];
       const newest = node.newest.nodes[0];
       if (!opener || !newest) throw new CliError(`review thread ${node.id} has no comments`);
+      // GitHub always answers `state` when the query selects it. Anything else means the query or
+      // the response changed shape, and reading it as submitted would resolve on a draft.
+      if (newest.state !== "PENDING" && newest.state !== "SUBMITTED") {
+        throw new CliError(
+          `review thread ${node.id}: its newest comment carried state ${JSON.stringify(newest.state)}, not "PENDING" or "SUBMITTED"`
+        );
+      }
       threads.push({
         id: node.id,
         url: opener.url,

@@ -129,7 +129,8 @@ Quote GitHub's sentence when writing the *why*; do not re-derive it from the int
 **Why the reply grammar is exact.** GitHub stores no verdict on a thread — `isResolved` is the only
 state, and the review App cannot set it — so the reviewer's reply text is the only machine-readable
 signal. `isAcceptance` (`packages/daemon/src/cli/review-threads.ts`) is a strict prefix check on
-the newest comment after `trimStart()`: `Accepted (round 2): …` (sjawhar/legion#966's own wording),
+the newest comment after stripping leading space, tab, CR and LF only, the same four characters the
+Go CLI strips: `Accepted (round 2): …` (sjawhar/legion#966's own wording),
 `Fixed in …`, a bare "fixed, thanks", or an `Accepted:` written by anyone but the thread's opener
 leaves the thread open, silently and by design (the unit test pins each). The opener's own later
 follow-up leaves it open too — the rule reads the newest comment only — so nobody replies after an
