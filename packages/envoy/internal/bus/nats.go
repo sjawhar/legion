@@ -155,11 +155,19 @@ func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB 
 		}
 	}
 	opts.AsyncErrorCB = func(_ *nats.Conn, sub *nats.Subscription, err error) {
+		level := slog.LevelError
+		if errors.Is(err, nats.ErrConsumerNotActive) {
+			// Every consumer Envoy runs with idle heartbeats is a KV watcher's ordered consumer,
+			// which reports missed heartbeats only while the connection is not connected; once it
+			// is connected again, nats.go resets the consumer instead. The report restates the
+			// disconnect logged above, once per watcher.
+			level = slog.LevelWarn
+		}
 		if sub != nil {
-			slog.Error("envoy nats async error", slog.String("subject", sub.Subject), slog.String("error", err.Error()))
+			slog.Log(context.Background(), level, "envoy nats async error", slog.String("subject", sub.Subject), slog.String("error", err.Error()))
 			return
 		}
-		slog.Error("envoy nats async error", slog.String("error", err.Error()))
+		slog.Log(context.Background(), level, "envoy nats async error", slog.String("error", err.Error()))
 	}
 	return opts
 }
