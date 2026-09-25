@@ -857,13 +857,16 @@ func replacementMarkdown(tree *pmdoc.Node, r pmdoc.Range, find, with string) (te
 		return with, 0, nil
 	}
 	// A `find` that carried the heading's own marker is renaming that heading, so the marker in
-	// `with` is the block's and is dropped. A different level is the obvious way to say "and make
-	// it that level", so it is applied rather than refused.
+	// `with` is the block's and is dropped. A different level applies only when `find` named the
+	// block's actual level: the caller has then shown they know what it is. `# ` is the documented
+	// level-blind way to select a heading, so a generic `find` renames the text and keeps the
+	// level it selected.
 	if own.Kind == pmdoc.MarkerHeading && pmdoc.HeadingMarker(find) != "" {
-		if written.Level == own.Level {
-			return with[width:], 0, nil
+		selector, _ := pmdoc.LeadingBlockMarker(find)
+		if selector.Level == own.Level && written.Level != own.Level {
+			return with[width:], written.Level, nil
 		}
-		return with[width:], written.Level, nil
+		return with[width:], 0, nil
 	}
 	return "", 0, &ErrInvalidOp{Field: "with", Reason: fmt.Sprintf(
 		"with begins with a marker of the same kind as the matched block's own (%s, which the block renders as %q), so the result would carry it twice; omit the marker to replace the block's text, backslash-escape it (%s) to keep prose that merely looks like a marker, or use insert plus delete to change the block's kind, level or number",
@@ -871,11 +874,20 @@ func replacementMarkdown(tree *pmdoc.Node, r pmdoc.Range, find, with string) (te
 	)}
 }
 
-// escapedMarkerExample shows the caller their own marker escaped, which is how prose that merely
-// opens like one (`1999. was a year`) is written as text.
+// escapedMarkerExample is the caller's own text with a backslash before the character that makes
+// its opening a marker, which is how prose that merely looks like one (`1999. was a year`) is
+// written as text. Everything else, the separator the marker needs included, stays as written: an
+// example the caller cannot paste back verbatim teaches the wrong escape.
 func escapedMarkerExample(with string, width int) string {
-	marker := strings.TrimRight(with[:width], " \t")
-	return strconv.Quote(marker[:len(marker)-1] + `\` + marker[len(marker)-1:] + with[width:])
+	marker := with[:width]
+	cut := strings.IndexAny(marker, "#-*+")
+	if punctuation := strings.IndexAny(marker, ".)"); punctuation >= 0 {
+		cut = punctuation
+	}
+	if cut < 0 {
+		return "`" + with + "`"
+	}
+	return "`" + marker[:cut] + `\` + marker[cut:] + with[width:] + "`"
 }
 
 // invalidSchemaOp reports a tree operation that would leave a container outside
@@ -1013,6 +1025,16 @@ func inlineReplacement(markdown string) (*pmdoc.Node, error) {
 			return nil, &ErrInvalidOp{Field: "with", Reason: fmt.Sprintf("replace is inline; %v (delete the block and insert new blocks instead)", err)}
 		}
 		return nil, err
+	}
+	// An empty `with` deletes the matched span on purpose, but a `with` the caller wrote that
+	// parses to nothing does not: markdown reads a line indented four spaces or a tab as a code
+	// block, which has no inline content, and splicing that over the match would silently delete
+	// the text they meant to replace (LEGION-280).
+	if len(inline) == 0 && strings.TrimSpace(markdown) != "" {
+		return nil, &ErrInvalidOp{Field: "with", Reason: fmt.Sprintf(
+			"with %q produced no text: markdown reads a line indented four spaces or a tab as a code block, and replace is inline, so there would be nothing to put in the match's place; remove the leading indentation, or use insert plus delete to add a code block",
+			markdown,
+		)}
 	}
 	paragraph := &pmdoc.Node{Type: "paragraph", Children: inline}
 	continueText(paragraph, markdown)

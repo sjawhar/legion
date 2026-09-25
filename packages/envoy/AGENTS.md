@@ -88,12 +88,17 @@ fills legacy anchors only when their cached quote has one current match.
 Document edits (`POST /api/v1/artifacts/{id}/edits`, `docs/edits.go` `applyOperation`) are
 `replace`, `delete`, `insert`, `retype`, `move`, `delete_row`, and `delete_column`. `replace` is
 inline: `with` parses through `pmdoc.ParseInline` (paragraph-only block grammar), so a multi-paragraph
-`with` is `INVALID_OP` and a leading marker of a *different* kind from the matched block's own is
+`with` is `INVALID_OP`, so is a non-empty `with` that parses to no inline content (a line indented
+four spaces or a tab, which markdown reads as a code block — refusing it is LEGION-280, since
+splicing nothing over the match silently deleted the caller's text), and a leading marker of a
+*different* kind from the matched block's own is
 literal escaped text. A `with` opening with a marker of the *same* kind as that block's own would
 render it twice and is `INVALID_OP` on `with` (`replacementMarkdown`), naming the marker the block
-renders and the backslash escape for prose that merely looks like one; the exception is a heading
-rename whose `find` carried the heading marker, where the repeated marker is dropped and a
-different level retitles the heading and sets that level. A batch that leaves the document's
+renders and, in backticks the caller can paste back, their own text with the marker's significant
+character escaped; the exception is a heading
+rename whose `find` carried a heading marker, where the repeated marker is dropped, and `with` may
+change the level only when `find` named the block's actual level — `# ` is the level-blind
+selector, so a generic `find` renames the text and keeps the level. A batch that leaves the document's
 semantic identity unchanged — `nodeToken` over the whole tree, inline marks included — mints no
 version, named or not, and the response carries `changed: false` with `unchanged_ops` naming each
 operation that changed nothing (`docs.EditOutcome`). Every refusal names its operation index and

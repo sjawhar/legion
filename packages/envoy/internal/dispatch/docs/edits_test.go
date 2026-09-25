@@ -947,7 +947,8 @@ func TestApplyOperationReplaceKeepsAHeadingMarkerLiteralInATextblock(t *testing.
 // leading indentation — the parser strips it, and no escape exists for a space — so the round
 // trip these rows can hold is the one that matters: the canonical markdown parses at all (inside
 // a list item it used to be outside the Proof schema), no block changes type, and rendering it is
-// a fixed point. Rows named by Deep1326 and Rev1326.
+// a fixed point. Rows named by Deep1326 and Rev1326. Four spaces or a tab is past this boundary:
+// the parser reads that as a code block, so it is refused instead — see the sibling test.
 func TestApplyOperationReplaceKeepsAnIndentedMarkerFromChangingTheDocument(t *testing.T) {
 	for _, test := range []struct {
 		name, markdown, find, with string
@@ -991,6 +992,51 @@ func TestApplyOperationReplaceKeepsAnIndentedMarkerFromChangingTheDocument(t *te
 				t.Fatalf("markdown %q is not a fixed point: it reads back as a different document", settled)
 			}
 		})
+	}
+}
+
+// At four spaces or a tab the parser is reading a code block, which has no inline content, and
+// splicing that over the match used to delete the caller's text and report the batch applied.
+// This is LEGION-280, reachable from the escape the marker refusal suggests (Quality1326, Deep1326).
+func TestApplyOperationReplaceRefusesAWithThatParsesToNoText(t *testing.T) {
+	for _, test := range []struct{ name, with string }{
+		{name: "four spaces", with: "    - Not a bullet"},
+		{name: "a tab", with: "\t- Not a bullet"},
+		{name: "indented prose", with: "    plain indented prose"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tree, err := parseInput("Body.\n")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
+			var invalid *ErrInvalidOp
+			if !errors.As(err, &invalid) || invalid.Field != "with" {
+				t.Fatalf("replace with %q = %v, want invalid with rather than a silent deletion", test.with, err)
+			}
+			if !strings.Contains(invalid.Reason, "produced no text") {
+				t.Fatalf("reason = %q, want it to name the empty replacement", invalid.Reason)
+			}
+		})
+	}
+}
+
+// An empty `with` still deletes the matched span on purpose.
+func TestApplyOperationReplaceWithNothingStillDeletesTheMatch(t *testing.T) {
+	tree, err := parseInput("Keep this.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := applyOperation(tree, model.EditOp{Op: "replace", Find: "this", With: ""})
+	if err != nil {
+		t.Fatalf("empty replacement: %v", err)
+	}
+	markdown, err := renderTree(next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if markdown != "Keep .\n" {
+		t.Fatalf("empty replacement = %q, want %q", markdown, "Keep .\n")
 	}
 }
 
@@ -1082,13 +1128,15 @@ func TestApplyOperationReplaceKeepsOneHeadingMarkerOnARename(t *testing.T) {
 
 func TestApplyOperationReplaceRefusesAWithThatRepeatsTheBlocksOwnMarker(t *testing.T) {
 	for _, test := range []struct {
-		name, markdown, find, with string
+		name, markdown, find, with, escaped string
 	}{
-		{name: "heading marker find never carried", markdown: "## Design\n", find: "Design", with: "## Design notes"},
-		{name: "a heading marker on a heading whose find carried none", markdown: "## Design\n", find: "Design", with: "# Design"},
-		{name: "ordered marker on an ordered item", markdown: "1. Launcher contract\n", find: "Launcher contract", with: "1. Launcher contract, ruled"},
-		{name: "bullet marker on a bullet item", markdown: "- Retracted\n", find: "Retracted", with: "- Retracted later"},
-		{name: "an indented bullet marker on a bullet item", markdown: "- Retracted\n", find: "Retracted", with: "   - Retracted later"},
+		{name: "heading marker find never carried", markdown: "## Design\n", find: "Design", with: "## Design notes", escaped: "## \\## Design notes\n"},
+		{name: "a heading marker on a heading whose find carried none", markdown: "## Design\n", find: "Design", with: "# Design", escaped: "## \\# Design\n"},
+		{name: "ordered marker on an ordered item", markdown: "1. Launcher contract\n", find: "Launcher contract", with: "1. Launcher contract, ruled", escaped: "1. 1\\. Launcher contract, ruled\n"},
+		{name: "prose that merely looks like an ordered marker", markdown: "1. Launcher contract\n", find: "Launcher contract", with: "1999. was a year", escaped: "1. 1999\\. was a year\n"},
+		{name: "bullet marker on a bullet item", markdown: "- Retracted\n", find: "Retracted", with: "- Retracted later", escaped: "- \\- Retracted later\n"},
+		{name: "an indented bullet marker on a bullet item", markdown: "- Retracted\n", find: "Retracted", with: "   - Retracted later", escaped: "-    \\- Retracted later\n"},
+		{name: "a tab inside the marker", markdown: "- Retracted\n", find: "Retracted", with: "+\t3 degrees", escaped: "- \\+\t3 degrees\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			tree, err := parseInput(test.markdown)
@@ -1103,20 +1151,53 @@ func TestApplyOperationReplaceRefusesAWithThatRepeatsTheBlocksOwnMarker(t *testi
 			if !strings.Contains(invalid.Reason, "omit the marker") {
 				t.Fatalf("reason = %q, want the omit-the-marker guidance", invalid.Reason)
 			}
+			// The escape the refusal offers is its one actionable remedy, so it has to be the
+			// caller's own text: accepted when fed back, and rendering the prose they wrote.
+			suggestion := backtickedSuggestion(t, invalid.Reason)
+			next, err := applyOperation(tree, model.EditOp{Op: "replace", Find: test.find, With: suggestion})
+			if err != nil {
+				t.Fatalf("the suggested escape %q was refused: %v", suggestion, err)
+			}
+			markdown, err := renderTree(next)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if markdown != test.escaped {
+				t.Fatalf("the suggested escape %q rendered %q, want %q", suggestion, markdown, test.escaped)
+			}
 		})
 	}
 }
 
-// A rename that carries the heading's own marker through `find` may also carry a different level:
-// that is the obvious way to say "and make it that level", so it applies rather than being
-// refused (Rev1326, Main's item 6).
-func TestApplyOperationReplaceSetsAHeadingLevelFromItsReplacementMarker(t *testing.T) {
+// backtickedSuggestion is the single backtick-quoted example a refusal carries.
+func backtickedSuggestion(t *testing.T, reason string) string {
+	t.Helper()
+	open := strings.Index(reason, "(`")
+	if open < 0 {
+		t.Fatalf("reason = %q, want a backticked escape example", reason)
+	}
+	rest := reason[open+2:]
+	close := strings.Index(rest, "`)")
+	if close < 0 {
+		t.Fatalf("reason = %q, want a closed backticked escape example", reason)
+	}
+	return rest[:close]
+}
+
+// A rename whose `find` names the heading's actual level may also carry a different level in
+// `with`: the caller has shown they know the current one, so that is how they say "and make it
+// that level". A level-blind `find` — the `# ` selector both descriptions teach — renames the
+// text and keeps the level it selected, rather than silently flattening the section (Deep1326).
+func TestApplyOperationReplaceSetsAHeadingLevelOnlyFromALevelNamingFind(t *testing.T) {
 	for _, test := range []struct {
 		name, markdown, find, with, want string
 	}{
 		{name: "deeper", markdown: "## Design\n\nBody.\n", find: "## Design", with: "### Design", want: "### Design\n\nBody.\n"},
 		{name: "shallower, with a rename", markdown: "### Design\n", find: "### Design", with: "# Design notes", want: "# Design notes\n"},
-		{name: "a level-blind find still renames", markdown: "## Design\n", find: "# Design", with: "## Design notes", want: "## Design notes\n"},
+		{name: "a level-blind find renames and keeps the level", markdown: "## Design\n", find: "# Design", with: "## Design notes", want: "## Design notes\n"},
+		{name: "a level-blind find never flattens", markdown: "## Design\n", find: "# Design", with: "# Design notes", want: "## Design notes\n"},
+		{name: "a level-blind find never flattens a deep heading", markdown: "#### Deep\n", find: "# Deep", with: "# Deeper", want: "#### Deeper\n"},
+		{name: "a level-blind find that only renames", markdown: "## Design\n", find: "# Design", with: "# Design", want: "## Design\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			tree, err := parseInput(test.markdown)

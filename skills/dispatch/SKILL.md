@@ -508,7 +508,7 @@ omitted `artifact` reads the issue specification; a project needs `artifact`; an
 dispatch_doc_edit({ issue?, project?, artifact, ops, precondition?, summary? })
 ```
 It returns issue or project-document owner details plus `applied`, optional `version`, `changed`, and
-`unchanged_ops`. `ops` is an array of this
+`unchanged_ops`. `ops` is an array of this exact `EditOp` shape:
 
 ```ts
 type EditOp = {
@@ -553,10 +553,12 @@ kind from the block's own (`4. Design` written into a heading, `# Title` into a 
 block into a list or heading. A `with` that opens with a marker of the *same* kind as the matched block's own would write it twice and
 is rejected (`INVALID_OP` on `with`) — including prose that merely looks like a marker (`1999. was a year` into an ordered item),
 which is written as text with a backslash escape (`1999\. was a year`) — omit the marker to replace the block's text, or use `insert`
-plus `delete` to change the block's kind or number. The one exception is a heading rename whose `find` carried the same marker
-through the match: `replace(find="## Old", with="## New")` gives `## New`, and a different level there — `with="### New"` — retitles
-the heading and sets that level. `with` that forms more than one
-paragraph is rejected (`INVALID_OP` on `with`) — delete the block and insert new blocks instead. Use zero-based `occurrence` for a
+plus `delete` to change the block's kind, level or number. The one exception is a heading rename whose `find` carried a heading
+marker: `replace(find="## Old", with="## New")` gives `## New`. A different level in `with` applies only when `find` named the
+heading's actual level — `find="## Old"`, `with="### New"` retitles and makes it an h3 — because `# ` is the level-blind selector,
+so `find="# Old"` renames the text and keeps whatever level it selected. `with` that forms more than one
+paragraph is rejected (`INVALID_OP` on `with`) — delete the block and insert new blocks instead; so is a non-empty `with` that
+parses to no text, which a line indented four spaces or a tab does, since markdown reads that as a code block. Use zero-based `occurrence` for a
 repeated target; re-read a missing or ambiguous target before retrying. Pass `summary` to name the version when recording a decision.
 
 A batch that leaves the document's semantic identity unchanged — including its inline anchor marks, so an edit that only orphans a

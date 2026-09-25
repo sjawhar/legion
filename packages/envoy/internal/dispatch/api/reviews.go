@@ -33,7 +33,7 @@ var approvalAskOptions = []model.AskOption{
 	{Label: approvalOptionRequestChanges, Description: "Say what must change before it can be approved."},
 }
 
-// latestVersionNumber is the newest settled version of an artifact, nil when it has none.
+// latestVersionNumber is the newest version an artifact has, nil when it has none.
 func latestVersionNumber(ctx context.Context, q queryer, artifactID string) (*int, error) {
 	var latest *int
 	if err := q.QueryRow(ctx, `select max(number) from artifact_versions where artifact_id = $1`, artifactID).Scan(&latest); err != nil {
