@@ -118,8 +118,9 @@ commit that stayed local. On
 abandon or rewrite it.
 
 The cleanup commit is made on top of it in the ordinary way — `rm -r .legion`, then
-`jj split -m "chore(legion): remove phase handoffs before merge" .legion`, bookmark set with
-`-r @- --allow-backwards`, push. The push advances the remote two commits
+`jj split -m "chore(legion): remove phase handoffs before merge" .legion`, then the push
+procedure in `skills/legion-worker/SKILL.md` (bookmark set with `-r @- --allow-backwards` after its
+ancestry check, then push). The push advances the remote two commits
 (`move forward from 614eefeef587 to d4970b559f9c`), and the deletion commit's own diff still lists
 only `.legion/implement.json`, `.legion/test.json`, `.legion/review.json` — the reviewer's commit
 is a parent of the deletion, not part of it. The reviewer then confirms the approved head against

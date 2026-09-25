@@ -229,8 +229,10 @@ an assignment says "run the root suite", run the daemon package's suite and say 
 Workers commit with `jj split -m '…' <explicit paths>` (the worker skill's completion gate). After a split the issue
 bookmark sits on the **remaining** half — the new, undescribed working copy — not on the commit you just described.
 `jj bookmark set legion/<KEY>` then refuses (`Refusing to move bookmark backwards or sideways`). Before every push,
-run the push snippet in `skills/legion-worker/SKILL.md`: it checks that `@-` descends from `legion/<KEY>@origin`, then
-sets the bookmark with `-r @- --allow-backwards` and pushes it.
+run the push procedure in `skills/legion-worker/SKILL.md`: it checks that `@-` descends from `legion/<KEY>@origin`, then
+sets the bookmark with `-r @- --allow-backwards` and pushes it. A rebase, a retarget, or a squash into a pushed commit
+leaves the pushed tip outside `::@-`; record that tip first (*Rewriting pushed commits* there), and the same push
+accepts the recorded tip and refuses any other.
 
 When `@-` descends from the remote branch, the remote moves **forward**: jj 0.45's push summary reads
 `Changes to push to origin:` followed by `bookmark: legion/<KEY> [move forward from <old> to <new>]`, and

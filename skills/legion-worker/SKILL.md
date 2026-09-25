@@ -233,17 +233,8 @@ commit is `plan: record handoff`.
 ## Implementer push and pull request
 
 The implementer opens the pull request. After its implementation commit and verification, it
-pushes the issue branch under this exact name, with the procedure every role uses to push its
-own commits (below):
-
-```bash
-cd -- "$LEGION_WORKSPACE" && \
-  behind=$(jj -R "$LEGION_WORKSPACE" log --no-graph -T 'commit_id.short() ++ "\n"' \
-    -r 'remote_bookmarks(exact:"legion/<KEY>", exact:"origin") ~ ::@-') && \
-  { [ -z "$behind" ] || { echo "legion/<KEY>@origin is at $behind, which @- does not descend from" >&2; false; }; } && \
-  jj -R "$LEGION_WORKSPACE" bookmark set legion/<KEY> -r @- --allow-backwards && \
-  jj -R "$LEGION_WORKSPACE" git push --bookmark legion/<KEY>
-```
+pushes the issue branch under this exact name with the one push procedure every role uses
+(*Every role pushes its own commits*, below).
 
 The provisioned issue workspace configures `credential.helper` with the daemon's absolute
 credential command, so `jj -R "$LEGION_WORKSPACE" git push` authenticates transparently
@@ -289,7 +280,7 @@ Verified the implementer's proof by <re-running its command | driving the same s
 **Fast-follow:** <one named cleanup item and where it will land>, or "none".
 
 **Chain:** stacked on <base bookmark> frozen at <sha> / not stacked.
-**Retarget:** Retargeting a pull request to a new base does not re-run Tests; after a retarget, rebase onto the new base and push — the new head runs Tests against the new merge result — and cite that run in the PR body.
+**Retarget:** Retargeting a pull request to a new base does not re-run Tests; after a retarget, record the pushed tip, rebase onto the new base, and push with `legion-worker`'s procedure for rewritten commits — the new head runs Tests against the new merge result — and cite that run in the PR body.
 ```
 
 **A proof** is the changed behaviour exercised on the surface a user reaches it through, recorded
@@ -344,7 +335,8 @@ this proof.
   tip; post one PR comment (Legion footer):
   `rebase <old-tip-sha> → <new-tip-sha>; fingerprint <before> → <after>; unchanged|changed`.
   Rebase the whole chain — `jj -R "$LEGION_WORKSPACE" rebase -s 'roots(main@origin..@)' -d main@origin` —
-  so the tester's and reviewer's commits move with yours.
+  so the tester's and reviewer's commits move with yours. Record the pushed tip before it and
+  push the rebased chain with the push procedure (*Rewriting pushed commits*, below).
 - **No deferrals.** Sami, 2026-09-11, verbatim: "My rule is no deferrals." The `Fast-follow:`
   field names naming, duplication, or wording cleanup only; anything that changes behaviour,
   hides an error, or breaks a gate lands in this PR.
@@ -545,15 +537,18 @@ split off: the working copy left above it has no description, and `jj git push` 
 commit without one. `--allow-backwards` is for that local step alone: after a split the bookmark
 can sit on the undescribed working copy above `@-`. `--bookmark` also publishes the locally
 provisioned bookmark on its first push — a bookmark not yet tracking a remote one is tracked
-automatically:
+automatically. This is the one push procedure; every push of the issue branch uses it:
 
 ```bash
 cd -- "$LEGION_WORKSPACE" && \
+  tip_file="${TMPDIR:-/tmp}/legion-<KEY>-$LEGION_ROLE-rewritten-tip" && \
+  old=$(cat -- "$tip_file" 2>/dev/null || true) && \
   behind=$(jj -R "$LEGION_WORKSPACE" log --no-graph -T 'commit_id.short() ++ "\n"' \
-    -r 'remote_bookmarks(exact:"legion/<KEY>", exact:"origin") ~ ::@-') && \
+    -r "remote_bookmarks(exact:\"legion/<KEY>\", exact:\"origin\") ~ (::@-${old:+ | $old})") && \
   { [ -z "$behind" ] || { echo "legion/<KEY>@origin is at $behind, which @- does not descend from" >&2; false; }; } && \
   jj -R "$LEGION_WORKSPACE" bookmark set legion/<KEY> -r @- --allow-backwards && \
-  jj -R "$LEGION_WORKSPACE" git push --bookmark legion/<KEY>
+  jj -R "$LEGION_WORKSPACE" git push --bookmark legion/<KEY> && \
+  rm -f -- "$tip_file"
 ```
 
 The `behind` check refuses unless `@-` descends from `legion/<KEY>@origin` (or the branch is not
@@ -563,9 +558,28 @@ remote branch sideways onto your commit and drops theirs (jj 0.45.1:
 `bookmark: legion/K [move sideways from <theirs> to <yours>]`). A clone that has not seen the other
 push is refused by jj itself (`unexpectedly moved on the remote`).
 
+**Rewriting pushed commits** — the conflict-forced rebase, the rebase after a retarget, or a
+`jj squash --into` a commit already on GitHub — leaves the pushed tip outside `::@-`, so record
+that tip first, after a fetch and while your chain still descends from it:
+
+```bash
+cd -- "$LEGION_WORKSPACE" && \
+  jj -R "$LEGION_WORKSPACE" git fetch && \
+  behind=$(jj -R "$LEGION_WORKSPACE" log --no-graph -T 'commit_id.short() ++ "\n"' \
+    -r 'remote_bookmarks(exact:"legion/<KEY>", exact:"origin") ~ ::@-') && \
+  { [ -z "$behind" ] || { echo "legion/<KEY>@origin is at $behind, which @- does not descend from" >&2; false; }; } && \
+  jj -R "$LEGION_WORKSPACE" log --no-graph -T 'commit_id' \
+    -r 'remote_bookmarks(exact:"legion/<KEY>", exact:"origin")' \
+    >"${TMPDIR:-/tmp}/legion-<KEY>-$LEGION_ROLE-rewritten-tip"
+```
+
+Then rewrite, resolve, and push with the procedure above. It lets the remote branch sit on the
+tip you recorded, which the rewrite replaced, and on nothing else: when another role pushed after
+you recorded it, the push is refused. The push deletes the file.
+
 Before the push, check ancestry and identity as above: the chain carries every earlier phase's
-commits, and pushing them with yours is expected. That refusal, and a push the remote rejects,
-is a report to the architect with the output, never a force-push. The merger makes no commit and
+commits, and pushing them with yours is expected. A refusal, and a push the remote rejects, is a
+report to the architect with the output, never a force-push. The merger makes no commit and
 pushes nothing.
 
 Do not report phase completion until the write, existence check, handoff commit, and push

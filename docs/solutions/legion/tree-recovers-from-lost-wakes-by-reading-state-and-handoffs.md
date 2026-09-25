@@ -82,8 +82,9 @@ and the deletion commit removes it with the rest. Rebasing the whole chain
 3. Append keyed round objects to your phase's handoff; never overwrite a prior round.
 4. 202: stop. 409: one `envoy_publish` to the architect's role topic, then stop.
 5. Build on other roles' commits, and push only from a head that descends from
-   `legion/<KEY>@origin` (the push snippet in `skills/legion-worker/SKILL.md` checks it); when a
-   rebase is needed, rebase the whole chain, never only your own commits.
+   `legion/<KEY>@origin` (the push procedure in `skills/legion-worker/SKILL.md` checks it); when a
+   rebase is needed, rebase the whole chain, never only your own commits, and record the pushed
+   tip before it so the push of the rebased chain is checked against that tip.
 
 ## Related
 

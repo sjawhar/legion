@@ -88,9 +88,11 @@ is cheap enough (40 s here) that it was re-run anyway.
   Neither is under the bookmark and neither holds tracked content; `jj edit <one of them>` puts the
   working copy back on the tip. The worker skill forbids `jj abandon`, so leave the other in place
   and note it in the handoff.
-- After every `jj split` or `jj squash` that rewrites the head, re-run
-  `jj bookmark set legion/<KEY> -r @- --allow-backwards` before pushing; the bookmark otherwise
-  points at the undescribed working-copy commit, which `jj git push` refuses.
+- After every `jj split` or `jj squash` that rewrites the head, push with `skills/legion-worker/SKILL.md`'s push procedure,
+  which sets the bookmark with `-r @- --allow-backwards`; the bookmark otherwise points at the
+  undescribed working-copy commit, which `jj git push` refuses. A rebase or a squash into a pushed
+  commit records the pushed tip first (*Rewriting pushed commits* there), so the push is refused
+  if another role pushed in between.
 - A reviewer's handoff commit sits in the chain below yours; confirm it is an ancestor of your
   commit with `jj log` before building on it, and mention it in the push summary.
 

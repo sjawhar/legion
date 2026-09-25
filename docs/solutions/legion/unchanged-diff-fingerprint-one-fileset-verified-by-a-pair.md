@@ -162,7 +162,9 @@ the rebase comment.
 5. Hash the new tip; post one PR comment (Legion footer) in the form
    `rebase <old> → <new>; fingerprint <before> → <after>; unchanged|changed`, with the per-file
    attribution when changed.
-6. Bookmark with `-r @- --allow-backwards`, push, re-read `mergeable,mergeStateStatus` — `main`
+6. Push with `skills/legion-worker/SKILL.md`'s push procedure (record the pushed tip before step 1's rebase, as its *Rewriting
+   pushed commits* says, so the push is refused if another role pushed meanwhile), then re-read
+   `mergeable,mergeStateStatus` — `main`
    can move again while CI queues (rebase 2 here was reported `CONFLICTING` within a minute of
    the round-4 push).
 
