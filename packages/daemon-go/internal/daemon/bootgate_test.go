@@ -634,6 +634,39 @@ func TestRunGatesThePluginUnderThePaneEnvironmentBeforeItBoots(t *testing.T) {
 	}
 }
 
+// The tmux gate asks the load probe for the skills and task agents the daemon's role prompts name,
+// beside the plugin's own: legion-controller is loaded by roles/controller-root.md alone.
+func TestTheTmuxGateAsksForWhatTheRolePromptsName(t *testing.T) {
+	cfg := testConfig(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("OMP_PROFILE", "gate")
+	writeManifest(t, manifestAt(filepath.Join(home, ".omp", "profiles", "gate")),
+		`{"goDaemonApiVersion":`+strconv.Itoa(api.GoDaemonAPIVersion)+`}`)
+	f := newFakeOmp(t, "no")
+	o := fakeRuntime(fake.NewRuntime(), &built{})
+	o.runtime = nil
+	o.getenv = func(name string) string {
+		if name == "LEGION_OMP_PATH" {
+			return f.path
+		}
+		return ""
+	}
+
+	if err := run(context.Background(), cfg, quietLogger(), o); err == nil {
+		t.Fatal("run passed the gate, want the fake's not-loaded refusal")
+	}
+	var skills string
+	for _, line := range strings.Split(f.read(t, "env.1"), "\n") {
+		if value, ok := strings.CutPrefix(line, "LEGION_PROMPT_SKILLS="); ok {
+			skills = value
+		}
+	}
+	if !slices.Contains(strings.Split(skills, ","), "legion-controller") {
+		t.Errorf("the load probe was asked for the skills %q, want legion-controller among them", skills)
+	}
+}
+
 // A pane's Oh My Pi gets each provider key from its shim, not from the daemon's environment, so the
 // gate probes with the keys the same way: a task agent whose model's only key is a provider key
 // resolves under the gate as it will in a pane. The daemon's own value of the variable, which no

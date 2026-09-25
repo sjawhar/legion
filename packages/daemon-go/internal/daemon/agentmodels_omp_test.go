@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 )
 
 // agentModelPlugin lays out a pi-legion-envoy under dir whose one skill dispatches three task agents
@@ -18,25 +20,13 @@ import (
 // plain declaring none.
 func agentModelPlugin(t *testing.T, dir string) string {
 	t.Helper()
-	root := filepath.Join(dir, "pi-legion-envoy")
-	for name, content := range map[string]string{
-		"package.json": `{"name":"@sjawhar/pi-legion-envoy","version":"0.0.0-test","legion":{"goDaemonApiVersion":3},` +
-			`"omp":{"extensions":["dist/legion.js"],"skills":["dist/skills"]}}`,
-		filepath.Join("dist", "legion.js"): "globalThis[Symbol.for(\"legion.pi-envoy.legion-loaded\")] = import.meta.url;\n" +
-			"export default function () {}\n",
+	return testPlugin(t, dir, map[string]string{
 		filepath.Join("dist", "skills", "legion-worker", "SKILL.md"): "---\nname: legion-worker\ndescription: test\n---\n" +
 			"Run `task(agent=\"oracle\")`, then `task(agent=\"reviewer\")`, then `task(agent=\"plain\")`.\n",
 		filepath.Join("agents", "oracle.md"):   "---\nname: oracle\ndescription: test\nmodel: \"@oracle\"\n---\nConsult.\n",
 		filepath.Join("agents", "reviewer.md"): "---\nname: reviewer\ndescription: test\nmodel: [\"@review\"]\n---\nReview.\n",
 		filepath.Join("agents", "plain.md"):    "---\nname: plain\ndescription: test\n---\nHelp.\n",
-	} {
-		path := filepath.Join(root, name)
-		mkdir(t, filepath.Dir(path))
-		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return root
+	})
 }
 
 // The load probe resolves the model of every task agent Legion's prompts dispatch as the task tool
@@ -140,7 +130,7 @@ func TestTheAgentModelCheckOnTheRealOhMyPi(t *testing.T) {
 }
 
 // A Sandbox pod runs on the role prompts the daemon inlines from its own directory, not the image's
-// copy, so the image's probe resolves what the daemon's prompts name (RolePromptReferences): an
+// copy, so the image's probe resolves what the daemon's prompts name (promptrefs.Roles): an
 // agent only the daemon's copy dispatches, which the image's plugin lacks, is refused naming the
 // daemon's prompt file, though the image's own roles never name it.
 func TestTheImageProbeResolvesTheAgentsTheDaemonsPromptsName(t *testing.T) {
@@ -169,16 +159,20 @@ func TestTheImageProbeResolvesTheAgentsTheDaemonsPromptsName(t *testing.T) {
 	}
 	image := roles("image-roles", "Consult `task(agent=\"oracle\")`.\n")
 	daemonCopy := roles("daemon-roles", "Consult `task(agent=\"oracle\")`, then `task(agent=\"daemon-only\")`.\n")
-	references, err := RolePromptReferences(daemonCopy)
+	imageReferences, err := promptrefs.Roles(image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	references, err := promptrefs.Roles(daemonCopy)
 	if err != nil {
 		t.Fatal(err)
 	}
 	env := map[string]string{"HOME": home, "OMP_PROFILE": "legion", "PATH": "/usr/local/bin:/usr/bin:/bin", "AWS_EC2_METADATA_DISABLED": "true"}
 	probe := func(references string) error {
 		return ProbeImage(context.Background(), ImageProbe{Omp: omp, Contract: 3, Env: env, WorkDir: dir, PluginRoot: root,
-			RolesDir: image, RoleReferences: references, Log: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))})
+			RoleReferences: references, Log: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))})
 	}
-	if err := probe(""); err != nil {
+	if err := probe(imageReferences); err != nil {
 		t.Fatalf("ProbeImage on the image's own roles = %v, want a pass: they name only agents the plugin ships", err)
 	}
 	err = probe(references)
