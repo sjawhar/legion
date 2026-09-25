@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"os/exec"
 	"strconv"
 	"strings"
 	"syscall"
@@ -23,30 +22,8 @@ import (
 // window deletes a consumer the server no longer has and logs the refusal at ERROR (LEGION-278).
 func TestListenerFollowsTheInterestRegistryAcrossNATSRestarts(t *testing.T) {
 	ctr, uri := testnats.StartRestartable(t)
-	binary := buildListener(t)
-	port := freeTCPPort(t)
-	output := &lockedBuffer{}
-	cmd := exec.Command(binary)
-	cmd.Env = []string{
-		"PORT=" + strconv.Itoa(port),
-		"ENVOY_LISTEN_HOST=127.0.0.1",
-		"ENVOY_MACHINE_ID=restart-test",
-		"NATS_URLS=" + uri,
-		"ENVOY_API_TOKEN=sigterm-test-token",
-	}
-	cmd.Stdout, cmd.Stderr = output, output
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start the listener: %v", err)
-	}
-	exited := make(chan struct{})
-	go func() {
-		_ = cmd.Wait()
-		close(exited)
-	}()
-	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		<-exited
-	})
+	listener := startListenerProcess(t, buildListener(t), uri, "restart-test")
+	port, cmd, output, exited := listener.port, listener.cmd, listener.output, listener.exited
 	waitHealthy(t, port, cmd, output)
 
 	for restart := 1; restart <= 3; restart++ {
