@@ -238,7 +238,7 @@ own commits (below):
 
 ```bash
 cd -- "$LEGION_WORKSPACE" && \
-  jj -R "$LEGION_WORKSPACE" bookmark set legion/<KEY> && \
+  jj -R "$LEGION_WORKSPACE" bookmark set legion/<KEY> -r @- --allow-backwards && \
   jj -R "$LEGION_WORKSPACE" git push --bookmark legion/<KEY>
 ```
 
@@ -265,6 +265,10 @@ later phase keeps it current rather than replacing it:
 **Threads:** <n> resolved, 0 unresolved. Each disposed individually, never in bulk:
 - Thread <id>: fixed in <commit-sha> — <one line>.
 - Thread <id>: not a defect — <reason>.
+`legion threads resolve --pr <n> --repo <owner>/<repo>` at <head-sha>:
+resolved <thread URL>
+left open <thread URL> — newest reply by <login> is not an acceptance
+left open <thread URL> — newest reply by <login> is an unsubmitted draft in a pending review
 
 **Thermo:** `ce-simplify-code` once at <head-sha>: <0 applied | applied → new head <sha>>; thermonuclear pair at the final head <sha>:
 <verdict>. (omitted entirely on a docs-only PR — there is no code for either pass, so neither runs)
@@ -310,16 +314,18 @@ this proof.
   `Accepted: not a defect — <reason>`, or `Still open: <what remains>`; nothing else is an
   acceptance, and nobody replies after an `Accepted:` (any later reply that is not itself an
   `Accepted:` — the opener's own follow-up included — leaves the thread open, since the command
-  reads only the newest comment). The **reviewer** resolves the threads it accepts: after its
-  `Accepted:` replies it runs `legion threads resolve --pr <number> --repo <owner>/<repo>` and
-  quotes the output in its review body (GitHub lets an account resolve a thread it opened;
-  `packages/daemon/src/daemon/AGENTS.md`, GitHub Apps). The command resolves each unresolved
-  thread whose newest comment is the opener's own `Accepted:` reply, one `resolveReviewThread`
-  per thread, prints `resolved <url>` or `left open <url> — newest reply by <login> is not an acceptance`,
+  reads only the newest comment). The review App can reply on a thread but cannot resolve it:
+  GitHub grants resolving a review thread to the pull request's author, and the implementer opens
+  every Legion pull request (`packages/daemon/src/daemon/AGENTS.md`, GitHub Apps). So the
+  **implementer** runs `legion threads resolve --pr <number> --repo <owner>/<repo>` before every
+  push that answers a review (the corrective push and the final `.legion/` deletion push) and
+  pastes its output into the `Threads` section. The command resolves each unresolved thread
+  whose newest comment is the opener's own `Accepted:` reply, one `resolveReviewThread` per
+  thread, prints `resolved <url>` or `left open <url> — newest reply by <login> is not an acceptance`,
   and exits 1 naming the thread's URL and GitHub's message when GitHub refuses one; report that
   exit to the architect, which opens an ask for a human to resolve the thread by hand —
-  never skip it silently. The merger does not publish READY while any review thread is
-  unresolved.
+  never skip it silently. The merger runs the same command once more before publishing READY
+  and does not publish while any `left open` line remains.
 - **Correctness fixes land in this PR; cleanup is one named fast-follow.** A finding that
   changes behavior, hides an error, or breaks a gate is fixed here — never deferred.
   Findings about naming, duplication, or wording are batched into the single `Fast-follow`
@@ -400,10 +406,10 @@ this proof.
   that review was `COMMENT` or `REQUEST_CHANGES`: continue that round against the new head;
   nothing restarts. Different: a new round — thermo again, one review.
   When you re-review after a corrective push, answer every thread you opened in one of the
-  three forms above — `Accepted:` is the only reply `legion threads resolve` acts on — then run
-  `legion threads resolve --pr <number> --repo <owner>/<repo>` yourself and quote its output in
-  that round's review body. Approve only once every thread you opened carries your `Accepted:`
-  reply and shows `isResolved: true` in `gh api graphql`.
+  three forms above — `Accepted:` is the only reply the implementer's `legion threads resolve`
+  acts on — and approve only once every thread you opened carries your `Accepted:` reply and the
+  implementer's run has resolved it (verify `isResolved: true` with `gh api graphql`, never from
+  the PR body).
 - Once a base is frozen for others to stack on, never rewrite it — fixes land as new
   commits on top, and the `Chain` line records what is frozen.
 - **Retro's commit does not void the reviewer's approval.** After the reviewer approves the
@@ -412,8 +418,10 @@ this proof.
   reviewer. Anything else above the approved head does void it, and the merger tells the
   architect the head must return to review instead of publishing. A conflict-forced rebase
   after retro moves those documents with the branch; retro never re-runs.
-- The merger reads the pull request's review threads and does not publish while any is
-  unresolved (report the thread URLs to the architect instead), then proves that rule with two commands.
+- The merger runs `legion threads resolve --pr <n> --repo <owner>/<repo>` (it acts as the same
+  code-writing App as the implementer; resolving a thread changes no commit, so this run never
+  invalidates the approval), does not publish while any `left open` line remains or the command
+  exits 1 (report the thread to the architect instead), then proves that rule with two commands.
   First `cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R
   "$LEGION_WORKSPACE" diff --from <approved-sha> --to <tip-sha> --summary`, whose output is quoted
   in READY (an empty output is quoted as `no file changes above the approved head`); then the same
@@ -529,12 +537,14 @@ cd -- "$LEGION_WORKSPACE" && \
 **Every role pushes its own commits.** After the handoff commit — and, for the tester, the red
 tests it wrote — advance the issue bookmark and push it with the provisioned credential helper,
 which authenticates as your role's App (`appRoleForLegionRole` in
-`packages/daemon/src/daemon/github-apps.ts`). `--bookmark` also publishes the locally provisioned
-bookmark on its first push — a bookmark not yet tracking a remote one is tracked automatically:
+`packages/daemon/src/daemon/github-apps.ts`). `-r @-` puts the bookmark on the commit you just
+split off: the working copy left above it has no description, and `jj git push` refuses a
+commit without one. `--bookmark` also publishes the locally provisioned bookmark on its first
+push — a bookmark not yet tracking a remote one is tracked automatically:
 
 ```bash
 cd -- "$LEGION_WORKSPACE" && \
-  jj -R "$LEGION_WORKSPACE" bookmark set legion/<KEY> && \
+  jj -R "$LEGION_WORKSPACE" bookmark set legion/<KEY> -r @- --allow-backwards && \
   jj -R "$LEGION_WORKSPACE" git push --bookmark legion/<KEY>
 ```
 

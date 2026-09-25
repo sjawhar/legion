@@ -270,8 +270,9 @@ it. Do not let the merger publish `READY` for an obsolete approval.
 If a worker reports that `legion threads resolve` exited 1 naming a review thread GitHub refused
 to resolve, open a `dispatch_ask` that names the thread's URL and GitHub's message for a human to
 resolve it by hand, with options for resolved / could not; the merger does not publish while it
-is open. That is the one review-thread step a human takes: the reviewer's own run of the command
-closes every thread it opened and accepted.
+is open. That is the one review-thread step a human takes: the review App cannot resolve a thread
+on a pull request the implementer opened, and the implementer's and merger's runs of the command
+close every accepted one.
 
 ## 7. Close
 

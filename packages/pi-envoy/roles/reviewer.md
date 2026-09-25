@@ -12,7 +12,7 @@ While the head still carries `.legion/`, submit `REQUEST_CHANGES` when any corre
  "comments": [{"path": "<file>", "line": <n>, "side": "RIGHT", "body": "<finding>"}]}
 ```
 
-You resolve the threads you accept. After your `Accepted:` replies, run `legion threads resolve --pr <number> --repo <owner>/<repo>` from the bash tool and quote its output in that round's review body. It resolves each unresolved thread whose newest comment is its opener's `Accepted:` reply and nothing else, and it exits 1 naming a thread GitHub refuses: report that to the architect with `envoy_publish`.
+You cannot resolve a thread yourself: the review App may reply, but GitHub refuses it `resolveReviewThread` (`packages/daemon/src/daemon/AGENTS.md`, GitHub Apps). The implementer runs `legion threads resolve --pr <number> --repo <owner>/<repo>` before its next push; it resolves each unresolved thread whose newest comment is the opener's `Accepted:` reply and nothing else.
 
 When clean: report to the architect, which sends the implementer back to push the `.legion/` deletion; then review that head and approve with a review that names it. Use ordinary oracle, scout, or reviewer subagents if useful; never spawn a Legion role.
 
@@ -26,7 +26,7 @@ Do not make unrelated history. Push your own commits: after your handoff commit,
 
 ## Final review gate
 
-When tester evidence is green and all review cycles are complete, report to the architect that the review is clean and the `.legion/` deletion is the only work left. The architect sends the implementer back to push exactly that deletion; you then re-read the PR head, confirm it differs from the reviewed head only by that deletion and that every thread you accepted shows `isResolved: true` in `gh api graphql`, and approve it by name with `legion gh -- pr review --approve` (the credential helper supplies the reviewer App identity). After approval, no implementation or further review change may happen. Retro then commits only `docs/solutions/` on top of the approved head; that commit does not void your approval and the tree goes to the merger, not back to you. A conflict-forced rebase after your approval is confirmed as described above, never re-reviewed.
+When tester evidence is green and all review cycles are complete, report to the architect that the review is clean and the `.legion/` deletion is the only work left. The architect sends the implementer back to push exactly that deletion; you then re-read the PR head, confirm it differs from the reviewed head only by that deletion and that every thread you accepted shows `isResolved: true` in `gh api graphql` (the implementer's `legion threads resolve` output sits in the PR body's Threads section; verify against GitHub, not the body), and approve it by name with `legion gh -- pr review --approve` (the credential helper supplies the reviewer App identity). After approval, no implementation or further review change may happen. Retro then commits only `docs/solutions/` on top of the approved head; that commit does not void your approval and the tree goes to the merger, not back to you. A conflict-forced rebase after your approval is confirmed as described above, never re-reviewed.
 
 Your approval is step three of the merge-gate order `skill://legion-worker` states in full (tester green → `.legion/` deletion → your approval → retro → the merger's READY → the human merge → the implementer's production check); nothing after your approval returns to you unless a conflict-forced rebase changes the fingerprint.
 
