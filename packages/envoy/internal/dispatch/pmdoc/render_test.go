@@ -707,6 +707,11 @@ func TestRenderIsTheSameWhereverAnAnchorMarkSplitsText(t *testing.T) {
 			want: "Use snake_case here.\n",
 		},
 		{
+			name: "a comment ending between a link's brackets and its target",
+			runs: []*Node{{Type: "text", Text: "see [x]", Marks: comment}, {Type: "text", Text: "(y) here."}},
+			want: "see \\[x]\\(y) here.\n",
+		},
+		{
 			name: "an ask on the start of a word",
 			runs: []*Node{{Type: "text", Text: "Rename the "}, {Type: "text", Text: "user", Marks: ask}, {Type: "text", Text: "_id column."}},
 			want: "Rename the user_id column.\n",
