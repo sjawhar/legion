@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+
 	"github.com/sjawhar/legion/daemon/internal/claim"
 )
 
@@ -70,6 +72,26 @@ func TestLoadForValidationSettlesEveryMemberOfTheKubernetesBlock(t *testing.T) {
         limits: {memory: 6Gi, ephemeral_storage: 30Gi}
       tester:
         limits: {cpu: 4}
+    pod:
+      env: {PI_CONFIG_FILES: /etc/legion-operator/overlay.yml, CLAUDE_CODE_USE_FOUNDRY: 0, GEMINI_API_KEY_FILE: /var/run/operator/gemini}
+      service_account: legion-worker
+      volumes:
+        - name: operator-config
+          config_map: {name: legion-operator, items: [{key: models.yml, path: models.yml}, {key: overlay.yml, path: overlay.yml}]}
+        - name: operator-token
+          projected:
+            sources:
+              - service_account_token: {audience: middleman-legion, expiration_seconds: 3600, path: token}
+              - secret: {name: legion-operator-ca, items: [{key: ca.crt, path: ca.crt}]}
+              - config_map: {name: legion-operator-routes}
+        - name: operator-creds
+          secret: {name: legion-operator-creds}
+      volume_mounts:
+        - {volume: operator-config, mount_path: /home/legion/.omp/profiles/legion/agent/models.yml, sub_path: models.yml}
+        - {volume: operator-config, mount_path: /etc/legion-operator/overlay.yml, sub_path: overlay.yml}
+        - {volume: operator-token, mount_path: /var/run/operator}
+        - {volume: operator-creds, mount_path: /etc/legion-operator/creds, read_only: false}
+provider_keys: {ANTHROPIC_API_KEY: anthropic_api_key}
 `)
 
 	cfg, err := LoadForValidation(path, noEnv)
@@ -105,6 +127,33 @@ func TestLoadForValidationSettlesEveryMemberOfTheKubernetesBlock(t *testing.T) {
 			ServiceAccount: "legion-worker",
 			TokenExpiry:    600 * time.Second,
 		},
+		Pod: PodConfig{
+			Env: map[string]string{
+				"PI_CONFIG_FILES": "/etc/legion-operator/overlay.yml", "CLAUDE_CODE_USE_FOUNDRY": "0",
+				"GEMINI_API_KEY_FILE": "/var/run/operator/gemini",
+			},
+			ServiceAccount: "legion-worker",
+			Volumes: []corev1.Volume{
+				{Name: "operator-config", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "legion-operator"},
+					Items:                []corev1.KeyToPath{{Key: "models.yml", Path: "models.yml"}, {Key: "overlay.yml", Path: "overlay.yml"}},
+				}}},
+				{Name: "operator-token", VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{Sources: []corev1.VolumeProjection{
+					{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{Audience: "middleman-legion", ExpirationSeconds: new(int64(3600)), Path: "token"}},
+					{Secret: &corev1.SecretProjection{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "legion-operator-ca"}, Items: []corev1.KeyToPath{{Key: "ca.crt", Path: "ca.crt"}},
+					}},
+					{ConfigMap: &corev1.ConfigMapProjection{LocalObjectReference: corev1.LocalObjectReference{Name: "legion-operator-routes"}}},
+				}}}},
+				{Name: "operator-creds", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "legion-operator-creds"}}},
+			},
+			VolumeMounts: []corev1.VolumeMount{
+				{Name: "operator-config", MountPath: "/home/legion/.omp/profiles/legion/agent/models.yml", SubPath: "models.yml", ReadOnly: true},
+				{Name: "operator-config", MountPath: "/etc/legion-operator/overlay.yml", SubPath: "overlay.yml", ReadOnly: true},
+				{Name: "operator-token", MountPath: "/var/run/operator", ReadOnly: true},
+				{Name: "operator-creds", MountPath: "/etc/legion-operator/creds"},
+			},
+		},
 	}}
 	if cfg.Runtime.Name != want.Name || cfg.Runtime.Kubernetes == nil {
 		t.Fatalf("Runtime = %+v, want %q with its block", cfg.Runtime, want.Name)
@@ -112,11 +161,15 @@ func TestLoadForValidationSettlesEveryMemberOfTheKubernetesBlock(t *testing.T) {
 	if !reflect.DeepEqual(*cfg.Runtime.Kubernetes, *want.Kubernetes) {
 		t.Errorf("kubernetes block =\n%+v\nwant\n%+v", *cfg.Runtime.Kubernetes, *want.Kubernetes)
 	}
+	if want := []ProviderKey{{Env: "ANTHROPIC_API_KEY", Secret: "anthropic_api_key"}}; !reflect.DeepEqual(cfg.ProviderKeys, want) {
+		t.Errorf("ProviderKeys = %+v, want %+v: under runtime kubernetes each names a key of the providers Secret", cfg.ProviderKeys, want)
+	}
 }
 
 // What a block that sets only its required members settles to: the tree volume at 20Gi, no
 // requests or limits on any role (one tree per node, the pool's floor sizing the node), no
-// scheduling beyond the Legion pool the runtime selects, and in-cluster credentials.
+// scheduling beyond the Legion pool the runtime selects, in-cluster credentials, and nothing of the
+// operator's in any pod.
 func TestLoadForValidationDefaultsTheKubernetesBlock(t *testing.T) {
 	cfg, err := LoadForValidation(writeConfigFile(t, kubernetesFile), noEnv)
 	if err != nil {
@@ -135,6 +188,7 @@ func TestLoadForValidationDefaultsTheKubernetesBlock(t *testing.T) {
 		{"scheduling", block.Scheduling, Scheduling{}},
 		{"kubeconfig", block.Kubeconfig, ""},
 		{"context", block.Context, ""},
+		{"pod", block.Pod, PodConfig{}},
 		{"gateway.url, trailing slash dropped", block.Gateway.URL, "https://middleman.internal.example"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -532,14 +586,145 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			want: "omp_launch_prefix is not used when runtime is kubernetes: every pod runs the worker image's Oh My Pi; remove omp_launch_prefix",
 		},
 		{
-			name: "provider_keys set",
-			body: kubernetesFile + "provider_keys: {ANTHROPIC_API_KEY: ANTHROPIC_API_KEY}\n",
-			want: "provider_keys is not used when runtime is kubernetes: a pod reaches the model through runtime.kubernetes.gateway, and no provider key reaches a pod; remove provider_keys",
+			name: "the pod block is not a mapping",
+			body: kubernetesFile + "    pod: [env]\n",
+			want: "runtime.kubernetes.pod must be a mapping",
 		},
 		{
-			name: "provider_keys set to an empty mapping",
-			body: kubernetesFile + "provider_keys: {}\n",
-			want: "provider_keys is not used when runtime is kubernetes: a pod reaches the model through runtime.kubernetes.gateway, and no provider key reaches a pod; remove provider_keys",
+			name: "an unknown pod member",
+			body: kubernetesFile + "    pod:\n      containers: []\n",
+			want: "unknown key runtime.kubernetes.pod.containers",
+		},
+		{
+			name: "pod env is not a mapping",
+			body: kubernetesFile + "    pod:\n      env: [OPENAI_BASE_URL]\n",
+			want: "runtime.kubernetes.pod.env must be a mapping of variable to value",
+		},
+		{
+			name: "a pod variable that is no variable name",
+			body: kubernetesFile + "    pod:\n      env: {1PASSWORD: vault}\n",
+			want: `runtime.kubernetes.pod.env key "1PASSWORD" must be an environment variable name (letters, digits, and underscores, not starting with a digit)`,
+		},
+		{
+			name: "a pod variable whose value is no string",
+			body: kubernetesFile + "    pod:\n      env: {OPENAI_BASE_URL: {host: x}}\n",
+			want: "runtime.kubernetes.pod.env value for OPENAI_BASE_URL must be a string",
+		},
+		{
+			name: "a credential-shaped pod variable",
+			body: kubernetesFile + "    pod:\n      env: {ANTHROPIC_API_KEY: sk-ant}\n",
+			want: "runtime.kubernetes.pod.env sets ANTHROPIC_API_KEY, a credential-shaped name: a credential comes from a Secret, so mount one with runtime.kubernetes.pod.volumes or name its key in provider_keys",
+		},
+		{
+			name: "pod volumes are not a sequence",
+			body: kubernetesFile + "    pod:\n      volumes: {creds: {}}\n",
+			want: "runtime.kubernetes.pod.volumes must be an array",
+		},
+		{
+			name: "a pod volume with no source",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: creds}]\n",
+			want: "runtime.kubernetes.pod.volumes[0] must set exactly one of secret, config_map, projected",
+		},
+		{
+			name: "a pod volume with two sources",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: creds, secret: {name: a}, config_map: {name: b}}]\n",
+			want: "runtime.kubernetes.pod.volumes[0] must set exactly one of secret, config_map, projected",
+		},
+		{
+			name: "a pod volume of another kind",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: scratch, empty_dir: {}}]\n",
+			want: "unknown key runtime.kubernetes.pod.volumes[0].empty_dir",
+		},
+		{
+			name: "a pod volume with no name",
+			body: kubernetesFile + "    pod:\n      volumes: [{secret: {name: a}}]\n",
+			want: "runtime.kubernetes.pod.volumes[0].name is required",
+		},
+		{
+			name: "a pod volume named twice",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: creds, secret: {name: a}}, {name: creds, config_map: {name: b}}]\n",
+			want: "runtime.kubernetes.pod.volumes names creds twice",
+		},
+		{
+			name: "a Secret volume with no Secret",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: creds, secret: {items: [{key: a, path: a}]}}]\n",
+			want: "runtime.kubernetes.pod.volumes[0].secret.name is required",
+		},
+		{
+			name: "an item with no path",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: operator-config, config_map: {name: legion-operator, items: [{key: models.yml}]}}]\n",
+			want: "runtime.kubernetes.pod.volumes[0].config_map.items[0].path is required",
+		},
+		{
+			name: "a projected volume with no sources",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: token, projected: {sources: []}}]\n",
+			want: "runtime.kubernetes.pod.volumes[0].projected.sources must name at least one source",
+		},
+		{
+			name: "a projected source of another kind",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: token, projected: {sources: [{downward_api: {}}]}}]\n",
+			want: "unknown key runtime.kubernetes.pod.volumes[0].projected.sources[0].downward_api",
+		},
+		{
+			name: "a projected source of two kinds",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: token, projected: {sources: [{secret: {name: a}, config_map: {name: b}}]}}]\n",
+			want: "runtime.kubernetes.pod.volumes[0].projected.sources[0] must set exactly one of service_account_token, secret, config_map",
+		},
+		{
+			name: "a projected token with no path",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: token, projected: {sources: [{service_account_token: {audience: operator}}]}}]\n",
+			want: "runtime.kubernetes.pod.volumes[0].projected.sources[0].service_account_token.path is required",
+		},
+		{
+			name: "a projected token that expires at once",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: token, projected: {sources: [{service_account_token: {path: token, expiration_seconds: 0}}]}}]\n",
+			want: "runtime.kubernetes.pod.volumes[0].projected.sources[0].service_account_token.expiration_seconds must be a positive integer",
+		},
+		{
+			name: "a mount naming no volume",
+			body: kubernetesFile + "    pod:\n      volume_mounts: [{volume: creds, mount_path: /etc/legion-operator}]\n",
+			want: "runtime.kubernetes.pod.volume_mounts[0].volume creds names no volume of runtime.kubernetes.pod.volumes",
+		},
+		{
+			name: "a mount with no path",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: creds, secret: {name: a}}]\n      volume_mounts: [{volume: creds}]\n",
+			want: "runtime.kubernetes.pod.volume_mounts[0].mount_path is required",
+		},
+		{
+			name: "a relative mount path",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: creds, secret: {name: a}}]\n      volume_mounts: [{volume: creds, mount_path: etc/legion-operator}]\n",
+			want: "runtime.kubernetes.pod.volume_mounts[0].mount_path etc/legion-operator must be a clean absolute path",
+		},
+		{
+			name: "a mount path that is not clean",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: creds, secret: {name: a}}]\n      volume_mounts: [{volume: creds, mount_path: /etc/x/../../var/run/legion/boot}]\n",
+			want: "runtime.kubernetes.pod.volume_mounts[0].mount_path /etc/x/../../var/run/legion/boot must be a clean absolute path",
+		},
+		{
+			name: "two mounts at one path",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: creds, secret: {name: a}}, {name: operator-config, config_map: {name: b}}]\n" +
+				"      volume_mounts: [{volume: creds, mount_path: /etc/legion-operator}, {volume: operator-config, mount_path: /etc/legion-operator}]\n",
+			want: "runtime.kubernetes.pod.volume_mounts[1].mount_path /etc/legion-operator is also runtime.kubernetes.pod.volume_mounts[0]'s",
+		},
+		{
+			name: "a mount's read_only is no boolean",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: creds, secret: {name: a}}]\n      volume_mounts: [{volume: creds, mount_path: /etc/legion-operator, read_only: sometimes}]\n",
+			want: "runtime.kubernetes.pod.volume_mounts[0].read_only must be true or false",
+		},
+		{
+			name: "a pod account other than the gateway's",
+			body: kubernetesFile + "    pod:\n      service_account: operator-worker\n",
+			want: "runtime.kubernetes.pod.service_account operator-worker differs from runtime.kubernetes.gateway.service_account legion-worker: a pod runs as one account",
+		},
+		{
+			name: "a provider key the pod's env also sets",
+			body: kubernetesFile + "    pod:\n      env: {OPENAI_BASE_URL: https://gateway.internal.example}\nprovider_keys: {OPENAI_BASE_URL: openai_base_url}\n",
+			want: "provider_keys names OPENAI_BASE_URL, which runtime.kubernetes.pod.env also sets: the shim refuses to export a key its own environment names",
+		},
+		{
+			name: "a provider key whose pointer the pod's env sets",
+			body: kubernetesFile + "    pod:\n      env: {GEMINI_API_KEY_FILE: /var/run/operator/gemini}\nprovider_keys: {GEMINI_API_KEY: gemini}\n",
+			want: "provider_keys names GEMINI_API_KEY, whose pointer GEMINI_API_KEY_FILE runtime.kubernetes.pod.env sets: the shim would skip the key",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

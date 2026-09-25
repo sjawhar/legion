@@ -312,7 +312,12 @@ written: its runtime selects the Legion pool itself, so `scheduling.node_selecto
 required; `bind` must be an address pods reach, never `0.0.0.0` or loopback, since every pod
 dials the worker stream at `tcp://<bind>:<worker_stream_port>`; and no Legion URL a pod is handed
 (`daemon_url`, `envoy_url`, `dispatch_url`, each `nats_urls` entry) may name a loopback or
-unspecified host (`packages/daemon-go/internal/config/kubernetes.go`).
+unspecified host (`packages/daemon-go/internal/config/kubernetes.go`). It also reads
+`runtime.kubernetes.pod` — `env`, `volumes` (each one `secret`, `config_map`, or `projected`
+source), `volume_mounts` (read-only unless `read_only: false`), and `service_account` — which it
+adds to every pod, the image probe's included, refusing any name or path of Legion's own or the
+worker image's; and under it `provider_keys` maps each variable Oh My Pi reads to a key of the
+providers Secret below, which every pod then mounts, those keys alone, for the shim to export.
 
 `runtime` is either the scalar `tmux` (the default) or a mapping whose single key selects the
 Kubernetes runtime and carries its settings:

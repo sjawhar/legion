@@ -40,6 +40,7 @@ const (
 	tempVolume      = "tmp"
 	configVolume    = "config"
 	gatewayVolume   = "gateway"
+	providersVolume = "providers"
 )
 
 // maxArgBytes is Linux's MAX_ARG_STRLEN, the largest single argv string exec accepts, counting
@@ -70,6 +71,31 @@ var runtimeOwned = map[string]bool{
 	"PI_SHELL_PREFIX": true, "GIT_TERMINAL_PROMPT": true, "LEGION_GRANT_FILE": true,
 	"XDG_CONFIG_HOME": true, "XDG_CACHE_HOME": true, "XDG_DATA_HOME": true, "XDG_STATE_HOME": true,
 	"POD_UID": true, bootTokenKey + "_FILE": true, dispatchTokenKey + "_FILE": true,
+}
+
+// LegionEnvNames are the variables Legion sets in the containers the operator's pod variables join
+// — the worker's (runtimeOwned) and the image probe's (probeOwned) — which the operator may not
+// set.
+func LegionEnvNames() []string {
+	names := maps.Clone(runtimeOwned)
+	maps.Copy(names, probeOwned)
+	return slices.Sorted(maps.Keys(names))
+}
+
+// LegionVolumeNames are the volumes Legion puts in a pod, a worker's or the probe's, whose names
+// the operator's volumes may not take.
+func LegionVolumeNames() []string {
+	names := []string{treeVolume, bootVolume, provisionVolume, feedVolume, stateVolume, tempVolume, configVolume, gatewayVolume, providersVolume}
+	slices.Sort(names)
+	return names
+}
+
+// LegionMountPaths are where Legion mounts a volume in the containers the operator's mounts join,
+// the worker's and the image probe's: an operator's mount may be neither at, under, nor above one.
+func LegionMountPaths() []string {
+	paths := []string{TreeRoot, ompSessionsDir, BootDir, StateDir, xdgConfigHome, path.Dir(modelroute.TokenFile), ProvidersDir}
+	slices.Sort(paths)
+	return paths
 }
 
 // launch is one relaunch's inputs, checked and resolved before anything touches the cluster.
@@ -249,8 +275,10 @@ func (r *Runtime) sandboxManifest(l launch) sandbox {
 
 // podTemplate is the pod a launch runs (decisions 7 and 10). Every tree pod mounts the tree volume
 // by its claim's name, the root included: the controller replaces the root's `tree` volume with the
-// same claim from its template, so root and workers read alike. The pod runs as the gateway's
-// ServiceAccount, and its worker container alone mounts the gateway token (C6).
+// same claim from its template, so root and workers read alike. The pod runs as the operator's
+// ServiceAccount, else the gateway's, and its worker container alone mounts the gateway token (C6),
+// the providers Secret's configured keys, and the operator's mounts, and is told the operator's
+// variables.
 //
 // Two init containers provision the issue's workspace, so the provisioning token never shares a
 // process with anything a tree agent can write (Stage 4b Task 4b.6b): workspace-fetch mounts the
@@ -266,11 +294,16 @@ func (r *Runtime) podTemplate(l launch, colocate bool) podTemplate {
 	legion := r.tools.Legion
 	helper := "!" + legion + " credential"
 	_, gatewayMount := gatewayTokenVolume(r.gateway)
+	_, providersMounts := r.providers()
+	shim := []string{legion, "worker-shim", "--connect", r.streamURL, "--boot-token-file", BootDir + "/" + bootTokenKey}
+	if len(providersMounts) > 0 {
+		shim = append(shim, "--provider-env-dir", ProvidersDir)
+	}
 	spec := corev1.PodSpec{
 		RestartPolicy:                 corev1.RestartPolicyNever,
 		TerminationGracePeriodSeconds: new(int64(math.Ceil(r.terminationGrace.Seconds()))),
 		AutomountServiceAccountToken:  new(false),
-		ServiceAccountName:            r.gateway.ServiceAccount,
+		ServiceAccountName:            r.serviceAccount(),
 		EnableServiceLinks:            new(false),
 		SecurityContext: &corev1.PodSecurityContext{
 			RunAsNonRoot: new(true), RunAsUser: new(int64(podUser)), RunAsGroup: new(int64(podUser)), FSGroup: new(int64(podUser)),
@@ -312,21 +345,19 @@ func (r *Runtime) podTemplate(l launch, colocate bool) podTemplate {
 			SecurityContext: restrictedContainer(),
 		}},
 		Containers: []corev1.Container{{
-			Name:  mainContainer,
-			Image: r.image,
-			Command: append([]string{
-				legion, "worker-shim", "--connect", r.streamURL, "--boot-token-file", BootDir + "/" + bootTokenKey, "--",
-			}, l.agentArgv(r.agent)...),
+			Name:       mainContainer,
+			Image:      r.image,
+			Command:    slices.Concat(shim, []string{"--"}, l.agentArgv(r.agent)),
 			Env:        r.mainEnvironment(l, helper),
 			WorkingDir: l.workspace,
-			VolumeMounts: []corev1.VolumeMount{
+			VolumeMounts: slices.Concat([]corev1.VolumeMount{
 				{Name: treeVolume, MountPath: TreeRoot},
 				{Name: treeVolume, MountPath: ompSessionsDir, SubPath: SessionsSubPath},
 				{Name: bootVolume, MountPath: BootDir, ReadOnly: true},
 				{Name: stateVolume, MountPath: StateDir},
 				{Name: configVolume, MountPath: xdgConfigHome},
 				gatewayMount,
-			},
+			}, providersMounts, r.pod.VolumeMounts),
 			Resources:       resources,
 			SecurityContext: restrictedContainer(),
 		}},
@@ -364,15 +395,17 @@ func kubeletLiteral(c *corev1.Container) {
 // alone), the feed workspace-fetch fills and workspace-init reads, on the node's disk because it
 // holds a clone of the repository, three in-memory directories — the main container's state
 // directory, workspace-fetch's TMPDIR, and the XDG config home workspace-init and the main
-// container share — and the model gateway's token.
+// container share — the model gateway's token, the providers Secret's configured keys when there
+// are any, and the operator's volumes.
 func (r *Runtime) volumes(l launch) []corev1.Volume {
 	var boot []corev1.KeyToPath
 	gateway, _ := gatewayTokenVolume(r.gateway)
+	providers, _ := r.providers()
 	for _, name := range sortedKeys(l.secrets) {
 		boot = append(boot, corev1.KeyToPath{Key: name, Path: name})
 	}
 	memory := corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory}}
-	return []corev1.Volume{
+	return slices.Concat([]corev1.Volume{
 		{Name: treeVolume, VolumeSource: corev1.VolumeSource{
 			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: TreeClaimName(l.root)},
 		}},
@@ -388,7 +421,43 @@ func (r *Runtime) volumes(l launch) []corev1.Volume {
 		{Name: tempVolume, VolumeSource: memory},
 		{Name: configVolume, VolumeSource: memory},
 		gateway,
+	}, providers, r.pod.Volumes)
+}
+
+// serviceAccount is the account every pod runs as: the operator's, when runtime.kubernetes.pod
+// names one, else the gateway's.
+func (r *Runtime) serviceAccount() string {
+	if r.pod.ServiceAccount != "" {
+		return r.pod.ServiceAccount
 	}
+	return r.gateway.ServiceAccount
+}
+
+// providers are the providers Secret's volume and its read-only mount at ProvidersDir: the
+// configured keys alone, each a file named for the variable Oh My Pi reads, which is what the shim
+// exports into Oh My Pi's environment (--provider-env-dir, shim.ReadProviderEnv). Neither without
+// provider keys, so a deployment with none needs no such Secret.
+func (r *Runtime) providers() ([]corev1.Volume, []corev1.VolumeMount) {
+	if len(r.providerKeys) == 0 {
+		return nil, nil
+	}
+	var items []corev1.KeyToPath
+	for _, variable := range sortedKeys(r.providerKeys) {
+		items = append(items, corev1.KeyToPath{Key: r.providerKeys[variable], Path: variable})
+	}
+	return []corev1.Volume{{Name: providersVolume, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+			SecretName: ProvidersSecretName(r.project), Items: items, DefaultMode: new(int32(0o440)),
+		}}}},
+		[]corev1.VolumeMount{{Name: providersVolume, MountPath: ProvidersDir, ReadOnly: true}}
+}
+
+// operatorEnv is the operator's variables for the agent's container, in name order.
+func (r *Runtime) operatorEnv() []corev1.EnvVar {
+	var env []corev1.EnvVar
+	for _, name := range sortedKeys(r.pod.Env) {
+		env = append(env, corev1.EnvVar{Name: name, Value: r.pod.Env[name]})
+	}
+	return env
 }
 
 // gatewayTokenVolume is the one projected volume a pod reaches the model gateway with, and its
@@ -468,10 +537,12 @@ func (r *Runtime) initWaitSeconds() int64 {
 
 // mainEnvironment is the pane contract with a pod's values (decision 10): the variables every
 // tmux pane is told (runtime/tmux/spawn.go, panePairs) and the model gateway's URL, which the
-// image's Oh My Pi profile routes its provider to, then the spec's own, then one `<NAME>_FILE`
-// pointer per secret into the boot projection. LEGION_GRANT_FILE names runtime.GrantFile on the
-// state volume, which is empty at start: the extension makes its directory. POD_UID is the pod's
-// own incarnation, from the downward API.
+// image's Oh My Pi profile routes its provider to, then the operator's (runtime.kubernetes.pod),
+// then the spec's own, then one `<NAME>_FILE` pointer per secret into the boot projection. None of
+// them repeats another: the runtime refuses a spec naming one of its own (runtimeOwned), and the
+// daemon an operator's variable naming one of the runtime's or a spec's. LEGION_GRANT_FILE names
+// runtime.GrantFile on the state volume, which is empty at start: the extension makes its
+// directory. POD_UID is the pod's own incarnation, from the downward API.
 func (r *Runtime) mainEnvironment(l launch, credentialHelper string) []corev1.EnvVar {
 	spec := l.spec
 	var env []corev1.EnvVar
@@ -510,6 +581,7 @@ func (r *Runtime) mainEnvironment(l launch, credentialHelper string) []corev1.En
 	env = append(env, corev1.EnvVar{Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{
 		FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"},
 	}})
+	env = append(env, r.operatorEnv()...)
 	for _, name := range sortedKeys(spec.Env) {
 		add(name, spec.Env[name])
 	}

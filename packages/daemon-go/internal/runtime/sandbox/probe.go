@@ -56,6 +56,10 @@ const (
 // is unusable (DEFINITIVE_WAITING_REASONS, worker-image-probe.ts:60-64).
 var definitiveWaiting = map[string]bool{"InvalidImageName": true, "ErrImageNeverPull": true}
 
+// probeOwned are the probe container's variables the runtime sets itself: exactly the names
+// probeManifest sets with no operator variable (TestLegionsOwnNamesAreWhatItsPodsCarry).
+var probeOwned = map[string]bool{modelroute.EnvURL: true}
+
 // digestHex is a sha256 digest's 64 hex.
 var digestHex = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
@@ -534,21 +538,23 @@ type probeSpec struct {
 
 // probeManifest is the probe Sandbox: Running from the start (it holds no Secret to write first),
 // deleted by the controller at shutdown, placed exactly as every worker is placed — the Legion
-// pool, gVisor, the configured scheduling — with the workers' pod security, reaching the model
-// gateway as every worker does (C6: the Gateway's ServiceAccount, gatewayTokenVolume, and
-// LEGION_MODEL_GATEWAY_URL), and a single container running the image's Go `legion probe-image`
-// against contract, loading the plugin from the root a pod loads it from (--plugin-root), with a
-// round trip through that route. Its command and env are escaped
-// against the kubelet's expansion as every worker container's are (kubeletLiteral).
+// pool, gVisor, the configured scheduling — with the workers' pod security and what the operator
+// adds to every pod (its ServiceAccount, volumes, mounts, and variables, and the providers
+// Secret's configured keys), reaching the model gateway as every worker does (C6:
+// gatewayTokenVolume and LEGION_MODEL_GATEWAY_URL), and a single container running the image's Go
+// `legion probe-image` against contract, loading the plugin from the root a pod loads it from
+// (--plugin-root), with a round trip through that route. Its command and env are escaped against
+// the kubelet's expansion as every worker container's are (kubeletLiteral).
 func (r *Runtime) probeManifest(name string, contract int, resources corev1.ResourceRequirements, shutdown time.Time) probeSandbox {
 	labels := map[string]string{labelProject: r.project, labelProbe: "image"}
 	gateway, gatewayMount := gatewayTokenVolume(r.gateway)
+	providers, providersMounts := r.providers()
 	container := corev1.Container{
 		Name:            probeContainer,
 		Image:           r.image,
 		Command:         []string{r.tools.Legion, "probe-image", "--go-daemon-api-version", strconv.Itoa(contract), "--plugin-root", legionPlugin},
-		Env:             []corev1.EnvVar{{Name: modelroute.EnvURL, Value: r.gateway.URL}},
-		VolumeMounts:    []corev1.VolumeMount{gatewayMount},
+		Env:             append([]corev1.EnvVar{{Name: modelroute.EnvURL, Value: r.gateway.URL}}, r.operatorEnv()...),
+		VolumeMounts:    slices.Concat([]corev1.VolumeMount{gatewayMount}, providersMounts, r.pod.VolumeMounts),
 		Resources:       resources,
 		SecurityContext: restrictedContainer(),
 	}
@@ -566,7 +572,7 @@ func (r *Runtime) probeManifest(name string, contract int, resources corev1.Reso
 					RestartPolicy:                 corev1.RestartPolicyNever,
 					TerminationGracePeriodSeconds: new(int64(probeTerminationGrace)),
 					AutomountServiceAccountToken:  new(false),
-					ServiceAccountName:            r.gateway.ServiceAccount,
+					ServiceAccountName:            r.serviceAccount(),
 					EnableServiceLinks:            new(false),
 					SecurityContext: &corev1.PodSecurityContext{
 						RunAsNonRoot: new(true), RunAsUser: new(int64(podUser)), RunAsGroup: new(int64(podUser)), FSGroup: new(int64(podUser)),
@@ -575,7 +581,7 @@ func (r *Runtime) probeManifest(name string, contract int, resources corev1.Reso
 					NodeSelector:      r.nodeSelector(),
 					Tolerations:       r.tolerations(),
 					PriorityClassName: r.scheduling.PriorityClass,
-					Volumes:           []corev1.Volume{gateway},
+					Volumes:           slices.Concat([]corev1.Volume{gateway}, providers, r.pod.Volumes),
 					Containers:        []corev1.Container{container},
 				},
 			},

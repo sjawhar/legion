@@ -67,10 +67,11 @@ type Config struct {
 	// `secrets`: a pane's XDG home is the daemon's isolated one, where the secrets client finds
 	// neither its config nor sops's age identity (ProviderKeys is how a provider key reaches OMP).
 	OmpLaunchPrefix []string
-	// ProviderKeys are the provider credentials every pane's OMP receives in its environment, in
-	// file order: the variable OMP reads, and the secretsd key that holds it. Boot resolves each
-	// once, as the daemon (MaterializeProviderKeys), into a daemon-held 0600 file; a pane never
-	// holds the secret store itself.
+	// ProviderKeys are the provider credentials every pane's or pod's OMP receives in its
+	// environment, in file order: the variable OMP reads, and the key that holds it. Under tmux the
+	// key is a secretsd key, which boot resolves once, as the daemon (MaterializeProviderKeys), into
+	// a daemon-held 0600 file, so a pane never holds the secret store itself; under kubernetes it is
+	// a key of the providers Secret, which every pod mounts as the file the shim exports.
 	ProviderKeys []ProviderKey
 	// InstructionsPath is the operator's deployment instructions, "" when none; boot copies it to
 	// `<state_dir>/deployment-instructions.md` (MaterializeDeploymentInstructions).
@@ -620,20 +621,23 @@ func readLaunchPrefix(value *yaml.Node, key string) ([]string, error) {
 // environment, and a single argv word for `secrets get`, never a command line.
 var envVarName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
+// envNameRule is the refusal's words for a name envVarName does not match.
+const envNameRule = "must be an environment variable name (letters, digits, and underscores, not starting with a digit)"
+
 // ProviderKey is one `provider_keys` entry: Env, the variable Oh My Pi reads (GEMINI_API_KEY), and
-// Secret, the secretsd key that holds its value in this deployment (GEMINI_API_KEY_TESTS) — named
-// apart because a deployment names its secrets per environment while the provider's variable is
-// fixed.
+// Secret, the key that holds its value in this deployment (GEMINI_API_KEY_TESTS) — a secretsd key
+// under tmux, a key of the providers Secret under kubernetes — named apart because a deployment
+// names its secrets per environment while the provider's variable is fixed.
 type ProviderKey struct {
 	Env    string
 	Secret string
 }
 
 // providerKeysShape is the refusal for anything but the mapping.
-const providerKeysShape = "provider_keys must be a mapping of the variable OMP reads to the secretsd key that holds it, e.g. {GEMINI_API_KEY: GEMINI_API_KEY_TESTS}"
+const providerKeysShape = "provider_keys must be a mapping of the variable OMP reads to the key that holds it (a secretsd key; under runtime kubernetes, a key of the providers Secret), e.g. {GEMINI_API_KEY: GEMINI_API_KEY_TESTS}"
 
-// readProviderKeys is `provider_keys`: a mapping of the variable OMP reads to its secretsd key
-// name, both sides environment variable names, in file order. A variable named twice is refused
+// readProviderKeys is `provider_keys`: a mapping of the variable OMP reads to the key that holds
+// it, both sides environment variable names, in file order. A variable named twice is refused
 // rather than one entry silently winning.
 func readProviderKeys(value *yaml.Node, key string) ([]ProviderKey, error) {
 	if value.Tag == "!!null" {
@@ -642,14 +646,13 @@ func readProviderKeys(value *yaml.Node, key string) ([]ProviderKey, error) {
 	if value.Kind != yaml.MappingNode {
 		return nil, errors.New(providerKeysShape)
 	}
-	const nameRule = "must be an environment variable name (letters, digits, and underscores, not starting with a digit)"
 	keys := []ProviderKey{}
 	seen := map[string]bool{}
 	for i := 0; i+1 < len(value.Content); i += 2 {
 		envNode, secretNode := value.Content[i], value.Content[i+1]
 		env := envNode.Value
 		if envNode.Kind != yaml.ScalarNode || !envVarName.MatchString(env) {
-			return nil, fmt.Errorf("%s key %q (the variable OMP reads) %s", key, env, nameRule)
+			return nil, fmt.Errorf("%s key %q (the variable OMP reads) %s", key, env, envNameRule)
 		}
 		if seen[env] {
 			return nil, fmt.Errorf("%s names %s twice", key, env)
@@ -657,10 +660,10 @@ func readProviderKeys(value *yaml.Node, key string) ([]ProviderKey, error) {
 		seen[env] = true
 		var secret string
 		if secretNode.Kind != yaml.ScalarNode || secretNode.Decode(&secret) != nil {
-			return nil, fmt.Errorf("%s value for %s (the secretsd key name) must be a string", key, env)
+			return nil, fmt.Errorf("%s value for %s (the key that holds it) must be a string", key, env)
 		}
 		if !envVarName.MatchString(secret) {
-			return nil, fmt.Errorf("%s value %q for %s (the secretsd key name) %s", key, secret, env, nameRule)
+			return nil, fmt.Errorf("%s value %q for %s (the key that holds it) %s", key, secret, env, envNameRule)
 		}
 		keys = append(keys, ProviderKey{Env: env, Secret: secret})
 	}
