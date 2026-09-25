@@ -108,9 +108,10 @@ phase was skipped and what stands in for its output — here, the spec's Design 
 
 ## 3. The reviewer's `review.json` commit stays local until the implementer's cleanup push carries it
 
-The review App holds `pull_requests: write` and no `contents` permission
-(`packages/daemon/src/daemon/AGENTS.md`, GitHub Apps), so the reviewer's
-`jj split -m "review: record handoff" .legion/review.json` produces a commit it cannot push. On
+No role acting as the review App pushes (`packages/daemon/src/daemon/AGENTS.md`, GitHub Apps; App
+3202653 holds `contents: write` as of 2026-09-25, so the rule is the workflow's, not GitHub's), so
+the reviewer's `jj split -m "review: record handoff" .legion/review.json` produces a commit that
+stays local. On
 #1008 that commit was `62196d55`. When the implementer was sent back for the `.legion/` deletion,
 `jj status` showed it as the parent of the working copy and `jj bookmark list --all-remotes` showed
 `legion/LEGION-38@origin (behind by 2 commits)`. That is the expected state, not drift: do not

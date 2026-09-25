@@ -152,12 +152,13 @@ Consequences a tester or reviewer meets:
 - **The implement App cannot create check runs** (`checks:read`) — `POST /check-runs` from an
   implementer or merger grant is the same 403. That was the pre-fix failure, and it is the
   negative control to keep in any App-identity proof.
-- **Only the implement App can push.** Over git the review App's refused push reads
-  `remote: Repository not found.` — *not* the REST text. The REST/GraphQL form
-  (`Resource not accessible by integration`) appears on `POST /git/refs` or
-  `resolveReviewThread`. A worker matching on the REST text will never recognize its own refused
-  push. The planner, tester, reviewer, and architects therefore commit their handoff locally and
-  it rides the implementer's next push; the merger acts as the implement App but pushes nothing.
+- **Only the implement App pushes.** Until 2026-09-25 the review App's installation had no
+  `contents` permission, and over git its refused push read `remote: Repository not found.` —
+  *not* the REST text, whose form (`Resource not accessible by integration`) appears on
+  `POST /git/refs` or `resolveReviewThread`. App 3202653 now holds `contents: write`, so its push
+  succeeds and the workflow alone keeps it off the branch: the planner, tester, reviewer, and
+  architects commit their handoff locally and it rides the implementer's next push; the merger
+  acts as the implement App but pushes nothing.
 
 ## Related
 

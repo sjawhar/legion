@@ -314,10 +314,9 @@ this proof.
   `Accepted: not a defect — <reason>`, or `Still open: <what remains>`; nothing else is an
   acceptance, and nobody replies after an `Accepted:` (any later reply that is not itself an
   `Accepted:` — the opener's own follow-up included — leaves the thread open, since the command
-  reads only the newest comment). The review App can reply on a thread but can neither resolve it
-  nor push — GitHub grants both only to the pull request's author or an account with write (push)
-  access to the repository, and the review App is neither by design
-  (`packages/daemon/src/daemon/AGENTS.md`, GitHub Apps) — so the
+  reads only the newest comment). The review App can reply on a thread, but GitHub refuses it
+  `resolveReviewThread` (its token reads `viewerCanResolve: false`), and the workflow gives
+  pushing to the implementer alone (`packages/daemon/src/daemon/AGENTS.md`, GitHub Apps) — so the
   **implementer** runs `legion threads resolve --pr <number> --repo <owner>/<repo>` before every
   push that answers a review (the corrective push and the final `.legion/` deletion push) and
   pastes its output into the `Threads` section. The command resolves each unresolved thread
@@ -400,7 +399,7 @@ this proof.
   Legion footer), and a `comments[]` array of `{path, line, side, body}`, one entry per
   finding — never one `pr review` call per finding (each submission fires a `pr-review` wake).
   Then return the issue to the architect; when clean, have the architect send the implementer
-  back to push the `.legion/` deletion (the review App cannot push), then review **that** head
+  back to push the `.legion/` deletion (only the implementer pushes the issue branch), then review **that** head
   and approve it by name. After a conflict-forced rebase, compute the fingerprint at the
   `commit_id` of your last submitted review and at the new head. Equal and that review was
   `APPROVE`: submit one more `APPROVE` naming the new head by SHA, its body naming both SHAs
@@ -551,12 +550,11 @@ cd -- "$LEGION_WORKSPACE" && \
 ```
 
 Every other role — planner, tester, reviewer, architects — acts as the review App
-(`legion-reviewer[bot]`), which cannot push: the `split` above is your last step, and the commit
+(`legion-reviewer[bot]`) and never pushes: the `split` above is your last step, and the commit
 rides the implementer's next push (the corrective push after a review, or the final `.legion/`
-deletion). A push from one of those roles is refused — over git it reads
-`remote: Repository not found.`; the REST API's form of the same refusal is
-`Resource not accessible by integration` — and that refusal is expected, not a failure to report
-or retry.
+deletion). GitHub does not stop a push from one of those roles: the review App's installation
+holds `contents: write`, so the push would succeed. The rule is the workflow's, and nothing but
+the rule enforces it.
 
 Do not report phase completion until the write, existence check, and handoff commit succeed —
 and, for the implementer, until the push has too. This is the committed copy the next phase

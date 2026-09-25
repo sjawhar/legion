@@ -69,8 +69,9 @@ stops — never retries, never rewrites the handoff. On LEGION-11 the architect 
 putting "your `legion handoff complete` may 409 (LEGION-37) — use `envoy_publish` either way" in
 the assignment, which removed the decision from the worker entirely.
 
-**The reviewer's local commits ride on the implementer's next push.** The review App has no
-`contents` permission, so `.legion/review.json` sits unpushed on the shared workspace's chain.
+**The reviewer's local commits ride on the implementer's next push.** No role acting as the review
+App pushes (the workflow's rule; App 3202653 holds `contents: write` as of 2026-09-25), so
+`.legion/review.json` sits unpushed on the shared workspace's chain.
 The implementer builds on it (confirm with `jj log -r '<sha> & ancestors(@-)'` before pushing)
 and the deletion commit removes it with the rest. Rebasing the whole chain
 (`jj rebase -s 'roots(main@origin..@)' -d main@origin`) keeps those commits in order.

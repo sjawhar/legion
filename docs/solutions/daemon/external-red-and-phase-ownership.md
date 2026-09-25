@@ -81,7 +81,12 @@ relaunch. Check `phases[<KEY>]` in the daemon's `state.json` (not `GET /state`, 
 *supersedes* the caller's phase by design (`skills/legion-architect/SKILL.md`). Report the 409 to
 the architect over Envoy with the work already pushed; do not retry in a loop.
 
-## 3. The review App can neither push nor resolve threads; the implementer App does both
+## 3. The review App cannot resolve threads, and only the implementer App pushes
+
+**2026-09-25:** App 3202653 (`legion-reviewer`) holds `contents: write` on both installations
+(`GET /app/installations` with the App's own JWT), so the push refusal recorded below no longer
+holds: the workflow, not GitHub, keeps the review App's roles from pushing. `resolveReviewThread`
+is still refused; its token reads `viewerCanResolve: false` on every thread.
 
 The `legion-reviewer` GitHub App holds `pull_requests: write` and no `contents` permission, and
 GitHub lets only the pull request's author or an account with write (push) access to the repository
