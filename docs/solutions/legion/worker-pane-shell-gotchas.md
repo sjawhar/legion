@@ -401,10 +401,11 @@ has the same rule for the symmetric case; check `jj log -r '::main@origin ~ ::<b
 
 **Already recorded, so read these rather than re-deriving:** the 409 after a daemon restart and the architect's
 re-derived status write are §11 above and
-[external-red-and-phase-ownership](../daemon/external-red-and-phase-ownership.md) §2 (LEGION-37); who pushed and who
-resolved threads before LEGION-285, including `legion threads resolve --pr <n> --repo <owner>/<repo>` (LEGION-34,
-sjawhar/legion#1003 — until that release is deployed the pane's `legion` has no `threads` subcommand, see §13; a
-worker on LEGION-54 was told to run it before it existed on any branch), is §3 of that same note; the tester completion's status write is
+[external-red-and-phase-ownership](../daemon/external-red-and-phase-ownership.md) §2 (LEGION-37); who pushed before
+LEGION-285, and the implementer resolving the threads the reviewer accepted with
+`legion threads resolve --pr <n> --repo <owner>/<repo>` (LEGION-34, sjawhar/legion#1003 — until that release is
+deployed the pane's `legion` has no `threads` subcommand, see §13; a worker on LEGION-54 was told to run it before it
+existed on any branch), is §3 of that same note; the tester completion's status write is
 verdict-blind (`phaseCompleteStatus` in `api/routes/workers.ts` returns `needs_review` for a tester whatever it
 found), so a FAIL is carried by the tester's comment and the architect's own `set_status in_progress` seconds later —
 a sibling architect reading Dispatch status alone will see `needs_review` flash by. The daemon-provisioned

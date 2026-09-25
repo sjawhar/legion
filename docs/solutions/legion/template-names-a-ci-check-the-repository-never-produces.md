@@ -108,7 +108,7 @@ phase was skipped and what stands in for its output — here, the spec's Design 
 
 ## 3. The reviewer's `review.json` commit stayed local until the implementer's cleanup push carried it
 
-**Superseded 2026-09-25 (LEGION-285):** every role now pushes its own commits, and the reviewer resolves the threads it accepts (`skills/legion-worker/SKILL.md`; the Apps' permissions are in `packages/daemon/src/daemon/AGENTS.md`, GitHub Apps). What follows records the earlier workflow.
+**Superseded 2026-09-25 (LEGION-285):** every role now pushes its own commits (`skills/legion-worker/SKILL.md`; the Apps' permissions are in `packages/daemon/src/daemon/AGENTS.md`, GitHub Apps). What follows records the earlier workflow.
 
 Then, the reviewer's `jj split -m "review: record handoff" .legion/review.json` produced a
 commit that stayed local. On

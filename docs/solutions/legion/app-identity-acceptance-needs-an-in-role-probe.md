@@ -42,8 +42,6 @@ shape below, and a thread the reviewer opens in its own round is still the truth
 
 ## The pattern
 
-**Superseded 2026-09-25 (LEGION-285):** every role now pushes its own commits, and the reviewer resolves the threads it accepts (`skills/legion-worker/SKILL.md`; the Apps' permissions are in `packages/daemon/src/daemon/AGENTS.md`, GitHub Apps). What follows records the earlier workflow. The probe's shape still holds; the account that closes the thread is now the reviewer's own.
-
 Plan the probe into the review round, not into the tester's E2E:
 
 1. **The planner names it.** The plan's review step says: submit the first review with at least one
@@ -70,7 +68,7 @@ truthful.
 ## When to apply
 
 Any criterion of the shape "App X can act on App Y's artifact", or "the App of role R is refused
-X" — thread resolution, a push the review App must not be able to make, a permission boundary
+X" — thread resolution, a permission boundary
 between the two Apps. The tester's negative control (a deliberately not-accepted thread reported
 `left open`) still belongs to the tester; what the tester cannot do is *be* the other App. If no
 phase runs as the App the criterion names, the tester names that missing surface as the blocker
@@ -79,6 +77,7 @@ instead of passing the phase (the `legion-worker` skill's production-like-surfac
 ## Related
 
 - [external-red-and-phase-ownership](../daemon/external-red-and-phase-ownership.md) §3 — why the
-  thread rules before LEGION-285, the reply grammar, and the GraphQL facts.
+  review App can reply but not resolve a thread on the implementer's pull request, the reply
+  grammar, and the GraphQL facts.
 - [worker-pane-shell-gotchas](worker-pane-shell-gotchas.md) §13 — the pane's `legion` is the
   deployed build; a new subcommand is exercised live as `bun packages/daemon/src/cli/index.ts …`.

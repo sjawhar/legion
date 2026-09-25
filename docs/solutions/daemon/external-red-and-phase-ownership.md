@@ -81,9 +81,9 @@ relaunch. Check `phases[<KEY>]` in the daemon's `state.json` (not `GET /state`, 
 *supersedes* the caller's phase by design (`skills/legion-architect/SKILL.md`). Report the 409 to
 the architect over Envoy with the work already pushed; do not retry in a loop.
 
-## 3. Who pushed and who resolved threads, before LEGION-285
+## 3. Who pushed before LEGION-285, and who resolves review threads
 
-**Superseded 2026-09-25 (LEGION-285):** every role now pushes its own commits, and the reviewer resolves the threads it accepts (`skills/legion-worker/SKILL.md`; the Apps' permissions are in `packages/daemon/src/daemon/AGENTS.md`, GitHub Apps). What follows records the earlier workflow.
+**Superseded 2026-09-25 (LEGION-285):** every role now pushes its own commits (`skills/legion-worker/SKILL.md`; the Apps' permissions are in `packages/daemon/src/daemon/AGENTS.md`, GitHub Apps). What follows records the earlier workflow.
 
 When this was written, the `legion-reviewer` GitHub App held `pull_requests: write` and no
 `contents` permission. `resolveReviewThread` from it returned `Resource not accessible by
@@ -125,7 +125,11 @@ review App *is* the author of every comment in the threads it opens and is still
 the whole reason the command exists. Two corollaries the same draft got wrong: "widening the App
 does not change that" is false (an App with `contents: write` would satisfy the rule — the design
 decision is to keep the review App without it), and the same rule governs pushing to the branch.
-Quote GitHub's sentence when writing the *why*; do not re-derive it from the intent.
+Quote GitHub's sentence when writing the *why*; do not re-derive it from the intent. (2026-09-25,
+LEGION-285: measured false for an App. The review App's installation holds `contents: write` and
+still cannot resolve a thread on a pull request the implement App opened; GitHub grants the
+resolve to the pull request's author's App. See `packages/daemon/src/daemon/AGENTS.md`, GitHub
+Apps.)
 
 **Why the reply grammar is exact.** GitHub stores no verdict on a thread — `isResolved` is the only
 state, and the review App cannot set it — so the reviewer's reply text is the only machine-readable
