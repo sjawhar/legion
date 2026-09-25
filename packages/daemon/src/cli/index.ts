@@ -297,10 +297,9 @@ export async function cmdGh(args: string[], deps: GhCommandDeps): Promise<void> 
 /** `legion threads resolve --pr <n> --repo <owner>/<name>`: as the App of the role running it
  * (with `gh`, as whoever the caller's own `gh` authenticates as), resolves every unresolved review
  * thread whose newest comment is its opener's own submitted `Accepted:` reply and names every
- * other unresolved thread as left open (`resolveAcceptedThreads`). GitHub lets only the pull
- * request's author or an account with write (push) access to the repository
- * resolve a thread or push to its branch; the review App is neither by design (`pull_requests:
- * write`, no `contents`), so the threads it opens are resolved here by the implementer — before
+ * other unresolved thread as left open (`resolveAcceptedThreads`). GitHub refuses the review App
+ * `resolveReviewThread` (its token reads `viewerCanResolve: false`, though its installation holds
+ * `contents: write`), so the threads it opens are resolved here by the implementer — before
  * every push that answers a review — and by the merger once more before READY. Both flags are
  * validated before any grant is redeemed. With `gh`, a session outside a Legion pane, which has
  * no grant, applies the same rule through its own `gh` (`ghGraphql`), from any directory: GH_REPO
