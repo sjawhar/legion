@@ -205,15 +205,8 @@ func (r *Runtime) probeAttempt(ctx context.Context, p ImageProbe, name, digest s
 	case verdict != nil:
 		return *verdict
 	}
-	logTail, err := r.probeLog(ctx, name)
-	if why := kubeletFailure(finished); why != "" {
-		// Whatever the container wrote before the kubelet ended it is quoted when it could be read.
-		return bootprobe.Outcome{Detail: fmt.Sprintf("pod %s Failed: %s; the kubelet ended it, not the image — log tail: %s", name, why, logTail)}
-	}
-	if err != nil {
-		return apiOutcome(digest, err, fmt.Sprintf("read probe pod %s's log", name), false)
-	}
-	return r.judge(name, digest, finished, logTail, p.Contract)
+	logTail, logErr := r.probeLog(ctx, name)
+	return r.judge(name, digest, finished, logTail, logErr, p.Contract)
 }
 
 // kubeletFailure is why the kubelet failed pod for reasons of its own, or "" when the pod is the
@@ -413,9 +406,11 @@ func (r *Runtime) probeLog(ctx context.Context, name string) (string, error) {
 // undefinedFlag is Go's flag package refusing a flag the probed CLI does not define.
 var undefinedFlag = regexp.MustCompile(`flag provided but not defined: (-\S+)`)
 
-// judge is the verdict a finished probe pod's log gives (judgeProbeLog, worker-image-probe.ts:
-// 470-508). A Failed pod here is one whose probe container exited on its own (kubeletFailure has
-// ruled out the rest): the image's refusal. The OK line must confirm this daemon's contract: an
+// judge is the verdict on a finished probe pod and its log, logErr when the log could not be read
+// (judgeProbeLog, worker-image-probe.ts:470-508), in this order. A pod the kubelet failed for
+// reasons of its own (kubeletFailure) is transient, whatever of its log could be read, and an
+// unread log is judged by the read's error. A Failed pod past those is one whose probe container
+// exited on its own: the image's refusal. The OK line must confirm this daemon's contract: an
 // image whose CLI predates the Go contract check prints none, having checked no contract, and is
 // refused, not waved through; one that confirmed another contract is refused naming both. And it
 // must say the prompt-named agents' models resolved: an image whose CLI predates that check says
@@ -423,7 +418,14 @@ var undefinedFlag = regexp.MustCompile(`flag provided but not defined: (-\S+)`)
 // workers run their agents on their models. Given the daemon's role references, an image whose CLI
 // predates the check never gets that far: it stops at the probe command's flags, and its Failed pod
 // is refused naming the flag its CLI lacks.
-func (r *Runtime) judge(name, digest string, pod *corev1.Pod, logTail string, contract int) bootprobe.Outcome {
+func (r *Runtime) judge(name, digest string, pod *corev1.Pod, logTail string, logErr error, contract int) bootprobe.Outcome {
+	if why := kubeletFailure(pod); why != "" {
+		// Whatever the container wrote before the kubelet ended it is quoted when it could be read.
+		return bootprobe.Outcome{Detail: fmt.Sprintf("pod %s Failed: %s; the kubelet ended it, not the image — log tail: %s", name, why, logTail)}
+	}
+	if logErr != nil {
+		return apiOutcome(digest, logErr, fmt.Sprintf("read probe pod %s's log", name), false)
+	}
 	if pod.Status.Phase == corev1.PodFailed {
 		ended := ""
 		for _, status := range pod.Status.ContainerStatuses {
