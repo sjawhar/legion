@@ -352,10 +352,14 @@ check_pod_shape() {
         then "the projected gateway token source is not the one middleman-legion token" else empty end),
       (if $s.nodeSelector["legion.dev/pool"] != "legion" then "nodeSelector \($s.nodeSelector)" else empty end),
       (if ([$s.tolerations[]? | select(.key == "legion.dev/pool")] | length) == 0 then "no legion.dev/pool toleration" else empty end),
+      # Pod Security "restricted": non-root and RuntimeDefault seccomp may be set on the pod; the
+      # escalation and capability rules are set on each container.
       ([$s.initContainers[]?, $s.containers[]] | .[] as $c
-        | (if $c.securityContext.allowPrivilegeEscalation != false or $c.securityContext.runAsNonRoot != true
+        | (if $c.securityContext.allowPrivilegeEscalation != false
+             or ($c.securityContext.runAsNonRoot // $s.securityContext.runAsNonRoot) != true
+             or ($c.securityContext.seccompProfile.type // $s.securityContext.seccompProfile.type) != "RuntimeDefault"
              or ($c.securityContext.capabilities.drop // []) != ["ALL"]
-            then "container \($c.name) is not restricted" else empty end)),
+            then "container \($c.name) is not restricted: \({container: $c.securityContext, pod: $s.securityContext} | tostring)" else empty end)),
       ([$s.initContainers[]? | select(.name != "workspace-fetch") | .volumeMounts[]? | select(.mountPath == "/var/run/legion/provision")] | if length > 0 then "the provision volume is mounted outside workspace-fetch" else empty end),
       ([$s.containers[] | select(.name == "worker") | .volumeMounts[]? | select(.mountPath == "/var/run/legion/provision")] | if length > 0 then "the worker mounts the provision volume" else empty end),
       ([$s.initContainers[]? | select(.name == "workspace-init") | .volumeMounts[]? | select(.name == "feed" and .readOnly != true)] | if length > 0 then "workspace-init mounts the feed writable" else empty end)
@@ -396,6 +400,7 @@ pod_shape_watcher() {
     while IFS=$'\t' read -r pod uid; do
       [ -n "$pod" ] || continue
       grep -qF " $uid " "$evidence/pods-checked.txt" 2>/dev/null && continue
+      op get pod "$pod" -o json >"$evidence/pods/$uid.json" 2>/dev/null
       problems=$(check_pod_shape "$pod")
       if [ -n "$problems" ]; then
         printf 'pod %s (uid %s): %s\n' "$pod" "$uid" "$(tr '\n' ';' <<<"$problems")" >"$evidence/pane-endpoint-violation.txt"
