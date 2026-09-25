@@ -870,8 +870,11 @@ type source struct {
 }
 
 // projectRecords scopes the shared daemon database to the daemon's configured project without
-// widening record.Store's fixed transaction interface. Project only starts from Issues, so every
-// subsequent record read is necessarily within this filtered set.
+// widening record.Store's fixed transaction interface; the workflow and the state route read the
+// store through it. Every read that starts from Issues is within this filtered set. Slots are not
+// filtered here: a slot's index is unique across every project's slots, so admission chooses the
+// next one over all of them and counts only its own against its cap (admit.ownSlots). The outbox's
+// claim is scoped in its SQL instead, because the lease it takes is itself the damage.
 type projectRecords struct {
 	record.Store
 	project string

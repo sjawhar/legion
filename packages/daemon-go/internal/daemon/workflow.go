@@ -74,7 +74,8 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 		}
 	}
 	log.Info("legion workflow boot stage", "stage", "appauth")
-	records := record.NewStore()
+	// The database is shared by every project's daemon: the workflow reads this project's issues.
+	records := projectRecords{Store: record.NewStore(), project: cfg.Project}
 	engine := workflow.New(records, engineConfig(cfg), log)
 	admission := admit.New(records, cfg.AdmissionCap, cfg.Project, log)
 	return &workflowRuntime{
