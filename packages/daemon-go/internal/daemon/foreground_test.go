@@ -78,6 +78,38 @@ func TestATerminalAttemptIgnoresSIGTSTP(t *testing.T) {
 	}
 }
 
+// A terminal attempt the operator's Ctrl-C ended is an interrupt whether it died of SIGINT or, as
+// Oh My Pi does, caught it and exited 130; any other end is judged as an answer, and an attempt
+// away from a terminal is never an interrupt.
+func TestATerminalAttemptEndedByCtrlCIsInterrupted(t *testing.T) {
+	ended := func(script string) *os.ProcessState {
+		t.Helper()
+		cmd := exec.Command("sh", "-c", script)
+		_ = cmd.Run()
+		return cmd.ProcessState
+	}
+	job := &terminalJob{}
+	for _, tc := range []struct {
+		name   string
+		script string
+		want   bool
+	}{
+		{"died of SIGINT", "kill -INT $$", true},
+		{"caught it and exited 130", "exit 130", true},
+		{"exited 1", "exit 1", false},
+		{"died of SIGTERM", "kill -TERM $$", false},
+		{"exited 0", "exit 0", false},
+	} {
+		if got := job.interrupted(ended(tc.script)); got != tc.want {
+			t.Errorf("%s: interrupted = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	var background *terminalJob
+	if background.interrupted(ended("exit 130")) {
+		t.Error("an attempt away from a terminal that exited 130 counts as interrupted")
+	}
+}
+
 type chunks []string
 
 func (c *chunks) Write(p []byte) (int, error) {

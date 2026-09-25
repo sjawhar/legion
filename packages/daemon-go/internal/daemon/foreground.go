@@ -96,13 +96,17 @@ func (j *terminalJob) release() {
 
 // interrupted is whether the terminal's Ctrl-C ended the attempt. At the terminal the SIGINT
 // reaches the attempt and not this process, and an attempt it ended is the operator's answer, not
-// a transient failure to retry.
+// a transient failure to retry: a retry would go on to mint, revoking the controller the operator
+// stopped for. The attempt either dies of the signal (a prefix's `sleep`) or answers it and exits
+// 128+SIGINT, as Oh My Pi does, which catches SIGINT and exits 130 — after the load marker, that
+// exit would otherwise read as the plugin loaded and Oh My Pi dying under load.
 func (j *terminalJob) interrupted(state *os.ProcessState) bool {
 	if j == nil || state == nil {
 		return false
 	}
 	status, ok := state.Sys().(syscall.WaitStatus)
-	return ok && status.Signaled() && status.Signal() == syscall.SIGINT
+	return ok && (status.Signaled() && status.Signal() == syscall.SIGINT ||
+		status.Exited() && status.ExitStatus() == 128+int(syscall.SIGINT))
 }
 
 // marker begins each line of the load probe's own report on stderr (loadedMarker,
