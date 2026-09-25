@@ -56,7 +56,11 @@ let closeTimer = 0;
 const subscribers = new Set<() => void>();
 
 /** A new target, or none, cancels both timers, so a timer's callback always acts on the target
- * that armed it and no transition has to remember to clear them. */
+ * that armed it and no transition has to clear them for a target change. The comparison is by
+ * object identity, and `hoverStart` and `focus` mint a fresh `PreviewTarget` on every call, so
+ * keyboard focus landing on the very anchor the pointer just left still cancels that anchor's
+ * close. A transition that re-arms a timer on the target already shown clears it itself, which
+ * is `leave` alone. */
 function setState(next: PreviewState | undefined): void {
   if (next?.target !== state?.target) {
     window.clearTimeout(openTimer);
@@ -72,8 +76,8 @@ function setState(next: PreviewState | undefined): void {
  * piece of state, and `RefPreviewHost` drives it from document-level listeners. Each transition
  * has a precondition its one caller checks - `hoverStart`, `leave` and `reenter` the hover zone
  * (`attachTriggers` alone judges that), `focus` `:focus-visible`, `blur` that focus is not moving
- * into the card, and the scroll handler's `reposition` the anchor it names - so all of them are
- * private and `closeRefPreview` below is the whole outside surface. */
+ * into the card, and the scroll handler's `reposition` that the card's anchor holds focus - so
+ * all of them are private and `closeRefPreview` below is the whole outside surface. */
 const refPreview = {
   /** Hover began on an anchor outside the hover zone: open its card after the delay unless the
    * pointer leaves first. */
@@ -95,6 +99,9 @@ const refPreview = {
       setState(undefined);
       return;
     }
+    // Re-arming on the target already shown, which `setState` does not clear for: two pointers
+    // leaving the zone within the delay must leave one close timer, not two, or the first one
+    // closes the card under the pointer that came back.
     window.clearTimeout(closeTimer);
     closeTimer = window.setTimeout(() => setState(undefined), REF_PREVIEW_CLOSE_DELAY_MS);
   },
@@ -428,7 +435,6 @@ export function RefPreviewHost(): ReactNode {
         closeRefPreview();
       }
     };
-    const onClose = () => closeRefPreview();
     // Only an open card reacts to scroll. A pending hover is left alone — the pointer often
     // comes to rest on a link while the page is still settling (smooth scrolling, a
     // scrollIntoView), and the card is measured fresh when it opens anyway.
@@ -445,12 +451,12 @@ export function RefPreviewHost(): ReactNode {
     document.addEventListener("keydown", onKeyDown, true);
     // Bubble phase, after React's own delegated handlers (the card is portaled into `body`,
     // where React listens): a click on the card must still reach its link and navigate.
-    window.addEventListener("click", onClose);
+    window.addEventListener("click", closeRefPreview);
     document.addEventListener("scroll", onScroll, { capture: true, passive: true });
     return () => {
       detachTriggers();
       document.removeEventListener("keydown", onKeyDown, true);
-      window.removeEventListener("click", onClose);
+      window.removeEventListener("click", closeRefPreview);
       document.removeEventListener("scroll", onScroll, { capture: true });
       closeRefPreview();
     };

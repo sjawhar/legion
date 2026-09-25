@@ -542,8 +542,8 @@ test("Unassigned: the picker PATCHes an explicit set, the row leaves the list at
     });
     pane.getArchitecture.mockResolvedValue(moved);
     resolve({} as never);
-    // Not `waitFor(() => expect(query()).toBeNull())`: a failing `toBeNull` on a happy-dom
-    // element spends seconds inspecting it, starving the retry loop past the test timeout.
+    // Not `waitFor(() => expect(query()).toBeNull())`: that retries an assertion whose failure
+    // prints the element, where this waits for the node to go and says so in one line.
     await waitForElementToBeRemoved(() =>
       within(list).queryByRole("link", { name: "CORE-7 · Loose end" })
     );
