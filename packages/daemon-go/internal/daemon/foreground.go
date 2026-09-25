@@ -45,17 +45,23 @@ func foregroundOf(stdin io.Reader, echo io.Writer) *terminalJob {
 	return &terminalJob{fd: fd, owner: owner, echo: echo}
 }
 
-// script is the attempt's shell script. At the terminal the attempt inherits SIGTSTP ignored: a
-// Ctrl-Z would stop it as the terminal's foreground job while this process, a background job that
-// waits only for its exit, stays where it is, leaving a terminal nothing answers until the budget
-// kills the attempt. Only the attempt ignores it; this process's own disposition is untouched, so
-// a Ctrl-Z of the controller it launches later still stops the command. A Ctrl-C still ends the
-// attempt (interrupted).
+// script is the attempt's shell script. At the terminal the attempt runs under a shell that stays
+// between it and Oh My Pi:
+//   - It ignores SIGTSTP, which the launch inherits. A Ctrl-Z would stop the attempt as the
+//     terminal's foreground job while this process, a background job that waits only for its exit,
+//     stays where it is, leaving a terminal nothing answers until the budget kills the attempt.
+//     Only the attempt ignores it; this process's own disposition is untouched, so a Ctrl-Z of the
+//     controller it launches later still stops the command.
+//   - It records a Ctrl-C and then exits 130, whatever the launch's own status. Oh My Pi catches
+//     SIGINT: early it exits 130, but late in `omp models` it finishes and exits 0, and a status
+//     that says nothing of the Ctrl-C would pass the probe and mint. The shell is in the same
+//     process group, so the terminal's SIGINT reaches it too, and it runs the trap once the launch
+//     has ended.
 func (j *terminalJob) script(script string) string {
 	if j == nil {
 		return script
 	}
-	return "trap '' TSTP; " + script
+	return "trap '' TSTP; trap 'interrupted=1' INT; (\n" + script + "\n); status=$?; [ -z \"${interrupted:-}\" ] || exit 130; exit $status"
 }
 
 // attach makes cmd the terminal's foreground job, and copies its stderr to echo without the load
@@ -97,9 +103,8 @@ func (j *terminalJob) release() {
 // interrupted is whether the terminal's Ctrl-C ended the attempt. At the terminal the SIGINT
 // reaches the attempt and not this process, and an attempt it ended is the operator's answer, not
 // a transient failure to retry: a retry would go on to mint, revoking the controller the operator
-// stopped for. The attempt either dies of the signal (a prefix's `sleep`) or answers it and exits
-// 128+SIGINT, as Oh My Pi does, which catches SIGINT and exits 130 — after the load marker, that
-// exit would otherwise read as the plugin loaded and Oh My Pi dying under load.
+// stopped for. The attempt's shell exits 130 once it has seen the SIGINT (script), and an attempt
+// that died of it counts too.
 func (j *terminalJob) interrupted(state *os.ProcessState) bool {
 	if j == nil || state == nil {
 		return false

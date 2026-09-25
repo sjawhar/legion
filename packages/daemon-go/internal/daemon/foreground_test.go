@@ -7,14 +7,15 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
-// ignoredBy is the SigIgn mask of the process `sh -c script` ends in, which reads its own
-// /proc/self/status: a probe attempt's script, or the empty one a later child such as the
-// controller's Oh My Pi stands for.
-func ignoredBy(t *testing.T, script string) uint64 {
+// ignoredBy is the SigIgn mask of a process that reads its own /proc/self/status, run as wrap has
+// it run: inside a probe attempt's script, or bare, as a later child such as the controller's Oh My
+// Pi runs.
+func ignoredBy(t *testing.T, wrap func(string) string) uint64 {
 	t.Helper()
-	out, err := exec.Command("sh", "-c", script+"exec sed -n 's/^SigIgn:[[:space:]]*//p' /proc/self/status").Output()
+	out, err := exec.Command("sh", "-c", wrap("exec sed -n 's/^SigIgn:[[:space:]]*//p' /proc/self/status")).Output()
 	if err != nil {
 		t.Fatalf("read a child's SigIgn: %v", err)
 	}
@@ -26,6 +27,8 @@ func ignoredBy(t *testing.T, script string) uint64 {
 }
 
 func bit(sig syscall.Signal) uint64 { return 1 << (uint(sig) - 1) }
+
+func bare(command string) string { return command }
 
 func requireProcStatus(t *testing.T) {
 	t.Helper()
@@ -39,7 +42,7 @@ func requireProcStatus(t *testing.T) {
 // leaves in place.
 func TestATerminalAttemptLeavesLaterChildrenSIGTTOUsDefault(t *testing.T) {
 	requireProcStatus(t)
-	before := ignoredBy(t, "")
+	before := ignoredBy(t, bare)
 	if before&bit(syscall.SIGTTOU) != 0 {
 		t.Skip("this test process was started with SIGTTOU ignored")
 	}
@@ -52,11 +55,11 @@ func TestATerminalAttemptLeavesLaterChildrenSIGTTOUsDefault(t *testing.T) {
 	attempt := exec.Command("true")
 	attempt.SysProcAttr = &syscall.SysProcAttr{}
 	job.attach(attempt)
-	if during := ignoredBy(t, ""); during&bit(syscall.SIGTTOU) == 0 {
+	if during := ignoredBy(t, bare); during&bit(syscall.SIGTTOU) == 0 {
 		t.Fatalf("while the attempt holds the terminal, SigIgn = %#x: SIGTTOU is not ignored", during)
 	}
 	job.release()
-	if after := ignoredBy(t, ""); after != before {
+	if after := ignoredBy(t, bare); after != before {
 		t.Fatalf("after release a child's SigIgn = %#x, want %#x as before the attempt", after, before)
 	}
 }
@@ -66,14 +69,14 @@ func TestATerminalAttemptLeavesLaterChildrenSIGTTOUsDefault(t *testing.T) {
 func TestATerminalAttemptIgnoresSIGTSTP(t *testing.T) {
 	requireProcStatus(t)
 	var background *terminalJob
-	if mask := ignoredBy(t, background.script("")); mask&bit(syscall.SIGTSTP) != 0 {
+	if mask := ignoredBy(t, background.script); mask&bit(syscall.SIGTSTP) != 0 {
 		t.Skip("this test process was started with SIGTSTP ignored")
 	}
 	job := &terminalJob{}
-	if mask := ignoredBy(t, job.script("")); mask&bit(syscall.SIGTSTP) == 0 {
+	if mask := ignoredBy(t, job.script); mask&bit(syscall.SIGTSTP) == 0 {
 		t.Fatalf("a terminal attempt's SigIgn = %#x: SIGTSTP is not ignored", mask)
 	}
-	if mask := ignoredBy(t, ""); mask&bit(syscall.SIGTSTP) != 0 {
+	if mask := ignoredBy(t, bare); mask&bit(syscall.SIGTSTP) != 0 {
 		t.Fatalf("this process's own SIGTSTP changed: a child's SigIgn = %#x", mask)
 	}
 }
@@ -107,6 +110,39 @@ func TestATerminalAttemptEndedByCtrlCIsInterrupted(t *testing.T) {
 	var background *terminalJob
 	if background.interrupted(ended("exit 130")) {
 		t.Error("an attempt away from a terminal that exited 130 counts as interrupted")
+	}
+}
+
+// At the terminal a Ctrl-C ends the attempt as interrupted even when the launch answers it and
+// exits 0, as Oh My Pi does when the SIGINT lands late in `omp models`: the attempt's shell records
+// the signal rather than reading it from the launch's status. Without a Ctrl-C the launch's own
+// status comes through.
+func TestATerminalAttemptRecordsACtrlCTheLaunchExitsZeroOn(t *testing.T) {
+	job := &terminalJob{}
+	// The launch ignores SIGINT and finishes normally, exit 0: the case no exit status carries.
+	launch := `exec sh -c 'trap "" INT; sleep 1; exit 0'`
+	run := func(ctrlC bool) *os.ProcessState {
+		t.Helper()
+		cmd := exec.Command("sh", "-c", job.script(launch))
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		if ctrlC {
+			time.Sleep(300 * time.Millisecond)
+			// The terminal's Ctrl-C reaches the whole foreground process group.
+			if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGINT); err != nil {
+				t.Fatal(err)
+			}
+		}
+		_ = cmd.Wait()
+		return cmd.ProcessState
+	}
+	if state := run(true); state.ExitCode() != 130 || !job.interrupted(state) {
+		t.Fatalf("a Ctrl-C the launch answered with exit 0: exit %d, interrupted %v; want 130 and interrupted", state.ExitCode(), job.interrupted(state))
+	}
+	if state := run(false); state.ExitCode() != 0 || job.interrupted(state) {
+		t.Fatalf("no Ctrl-C: exit %d, interrupted %v; want the launch's 0 and not interrupted", state.ExitCode(), job.interrupted(state))
 	}
 }
 
