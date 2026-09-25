@@ -51,15 +51,8 @@ type Request struct {
 	Repo             string
 	Issue            string
 	CredentialHelper string
-	// Feed is a pod's feed directory, where Fetch cloned the repository in the pod's first init
-	// container: the shared clone clones and fetches from it with no credential, and Token and
-	// CredentialDir stay empty. With no Feed — the tmux runtime — the shared clone clones and
-	// fetches from GitHub itself with Token.
-	Feed  string
-	Token string
-	// CredentialDir is where the one-shot clone and fetch credential, token file included, is
-	// created and removed again; required with Token. The tmux daemon names its state directory.
-	CredentialDir string
+	// Source is how the shared clone reaches the repository: FromFeed or FromGitHub.
+	Source Source
 }
 
 // Workspace is the durable location and branch bookmark for one issue. Dir has the shape

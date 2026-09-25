@@ -110,9 +110,48 @@ type FetchRequest struct {
 	Feed          string
 }
 
-// FeedRepository is where Fetch clones repository under a feed directory, and where Provision
-// clones and fetches it from.
-func FeedRepository(feed, repository string) (string, error) {
+// Source is how provisioning reaches the repository for the shared clone's clone and fetch: from a
+// pod's feed with no credential (FromFeed), or from GitHub with the one-shot credential
+// (FromGitHub). Only this package's two constructors make one.
+type Source interface {
+	// open is the remote the clone and the fetch of repository use, with bookmark the issue's own;
+	// the caller removes it.
+	open(repository, bookmark string) (remote, error)
+}
+
+// FromFeed is a pod's feed directory, where Fetch cloned the repository in the pod's first init
+// container: the shared clone clones and fetches from it with no credential, in the second, which
+// the provisioning Secret is not mounted in.
+func FromFeed(dir string) Source { return feedSource(dir) }
+
+type feedSource string
+
+func (dir feedSource) open(repository, bookmark string) (remote, error) {
+	feed, err := feedRepository(string(dir), repository)
+	if err != nil {
+		return remote{}, err
+	}
+	return feedRemote(feed, repository, bookmark), nil
+}
+
+// FromGitHub is GitHub itself, reached with the one-shot credential holding token, created under
+// credentialDir and removed again: the tmux runtime, which names its state directory.
+func FromGitHub(token, credentialDir string) Source {
+	return gitHubSource{token: token, credentialDir: credentialDir}
+}
+
+type gitHubSource struct{ token, credentialDir string }
+
+func (s gitHubSource) open(string, string) (remote, error) {
+	if s.credentialDir == "" {
+		return remote{}, errors.New("workspace credential directory is required")
+	}
+	return newProvisioningCredential(s.credentialDir, s.token)
+}
+
+// feedRepository is where Fetch clones repository under a feed directory, and where a feed
+// Source clones and fetches it from.
+func feedRepository(feed, repository string) (string, error) {
 	owner, repo, err := ghrepo.Split("workspace repository", repository)
 	if err != nil {
 		return "", err
@@ -146,7 +185,7 @@ func feedRemote(feed, repo, bookmark string) remote {
 // tree agent can write. Provision then clones and fetches the shared clone from the feed with no
 // credential. It returns the feed repository.
 func Fetch(ctx context.Context, run Runner, request FetchRequest) (string, error) {
-	feed, err := FeedRepository(request.Feed, request.Repo)
+	feed, err := feedRepository(request.Feed, request.Repo)
 	if err != nil {
 		return "", err
 	}

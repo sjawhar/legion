@@ -401,8 +401,8 @@ func (r *outbox) provisionWorkspace(ctx context.Context, issue record.Issue) err
 		return fmt.Errorf("mint implement App token to provision %s: %w", issue.Key, err)
 	}
 	if _, err := r.provision(ctx, workspace.Request{
-		StateDir: r.stateDir, Repo: r.repo, Issue: issue.Key, Token: lease.Token, CredentialHelper: credentialHelper(r.stateDir),
-		CredentialDir: r.stateDir,
+		StateDir: r.stateDir, Repo: r.repo, Issue: issue.Key, CredentialHelper: credentialHelper(r.stateDir),
+		Source: workspace.FromGitHub(lease.Token, r.stateDir),
 	}); err != nil {
 		return fmt.Errorf("provision workspace for %s: %w", issue.Key, err)
 	}

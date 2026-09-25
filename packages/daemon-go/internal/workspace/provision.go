@@ -13,9 +13,8 @@ import (
 // Provision ports packages/workspace/src/workspace.ts:402-515. It updates an existing working
 // copy, obtains the shared clone through a temporary sibling, protects unreachable worker commits
 // before every fetch, resolves a bookmark before adding, and leaves pane credentials on the clone.
-// The clone and the fetch reach the repository through request.Feed with no credential — a pod's
-// second init container, which the provisioning Secret is not mounted in — or, with no feed, from
-// GitHub with the one-shot credential.
+// The clone and the fetch reach the repository through request.Source: a pod's feed with no
+// credential, or GitHub with the one-shot credential.
 func Provision(ctx context.Context, run Runner, request Request) (Workspace, error) {
 	workspace, err := Location(request.StateDir, request.Repo, request.Issue)
 	if err != nil {
@@ -24,17 +23,16 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 	if request.CredentialHelper == "" {
 		return Workspace{}, fmt.Errorf("workspace credential helper is required")
 	}
-	var feed string
-	switch {
-	case request.Feed != "" && (request.Token != "" || request.CredentialDir != ""):
-		return Workspace{}, errors.New("workspace request names a feed and a provisioning token; provisioning from a feed holds no credential")
-	case request.Feed != "":
-		if feed, err = FeedRepository(request.Feed, request.Repo); err != nil {
-			return Workspace{}, err
-		}
-	case request.CredentialDir == "":
-		return Workspace{}, fmt.Errorf("workspace credential directory is required")
+	if request.Source == nil {
+		return Workspace{}, errors.New("workspace request names no way to the repository: FromFeed or FromGitHub")
 	}
+	source, err := request.Source.open(request.Repo, workspace.Bookmark)
+	if err != nil {
+		return Workspace{}, err
+	}
+	defer func() {
+		_ = source.remove()
+	}()
 
 	exists, err := pathExists(workspace.Dir)
 	if err != nil {
@@ -45,16 +43,6 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 			return Workspace{}, err
 		}
 	}
-
-	var source remote
-	if feed != "" {
-		source = feedRemote(feed, request.Repo, workspace.Bookmark)
-	} else if source, err = newProvisioningCredential(request.CredentialDir, request.Token); err != nil {
-		return Workspace{}, err
-	}
-	defer func() {
-		_ = source.remove()
-	}()
 	if err := ensureRepoClone(ctx, run, workspace.Clone, "https://github.com/"+request.Repo, source.env); err != nil {
 		return Workspace{}, err
 	}

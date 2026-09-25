@@ -164,25 +164,23 @@ func provisionRequest(t *testing.T) Request {
 		StateDir:         state,
 		Repo:             "acme/widgets",
 		Issue:            "WIDGETS-42",
-		Token:            "test-installation-token",
 		CredentialHelper: "!/opt/legion/bin/legion credential",
-		CredentialDir:    state,
+		Source:           FromGitHub("test-installation-token", state),
 	}
 }
 
 // Where the one-shot credential goes is every caller's decision, and a request reaches the
-// repository one way: through a pod's feed with no credential, or from GitHub with the token and a
-// credential directory. A request that names neither, or both, is refused before provisioning runs
-// anything or touches the state directory.
+// repository one way, its Source: through a pod's feed with no credential, or from GitHub with the
+// token and a credential directory. A request with no Source, or a GitHub one with no credential
+// directory, is refused before provisioning runs anything or touches the state directory.
 func TestProvisionRefusesARequestWithNoOneWayToTheRepository(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		edit func(*Request)
 		want string
 	}{
-		{"a token and no credential directory", func(r *Request) { r.CredentialDir = "" }, "workspace credential directory is required"},
-		{"a feed and a token", func(r *Request) { r.Feed = "/var/run/legion/feed" }, "workspace request names a feed and a provisioning token"},
-		{"a feed and a credential directory", func(r *Request) { r.Feed, r.Token = "/var/run/legion/feed", "" }, "workspace request names a feed and a provisioning token"},
+		{"a token and no credential directory", func(r *Request) { r.Source = FromGitHub("test-installation-token", "") }, "workspace credential directory is required"},
+		{"no way to the repository", func(r *Request) { r.Source = nil }, "workspace request names no way to the repository: FromFeed or FromGitHub"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			run := newLocalRunner(t)
@@ -392,7 +390,7 @@ func TestProvisionFromAFeedHoldsNoCredential(t *testing.T) {
 		readOnly(t, fetch.Feed)
 		before := len(run.Calls())
 		working, err := Provision(context.Background(), run, Request{
-			StateDir: state, Repo: "acme/widgets", Issue: issue, CredentialHelper: "!/opt/legion/bin/legion credential", Feed: fetch.Feed,
+			StateDir: state, Repo: "acme/widgets", Issue: issue, CredentialHelper: "!/opt/legion/bin/legion credential", Source: FromFeed(fetch.Feed),
 		})
 		if err != nil {
 			t.Fatalf("provision %s from the feed: %v", issue, err)
@@ -435,7 +433,7 @@ func TestProvisionFromAFeedKeepsABookmarkPushedAfterTheSnapshot(t *testing.T) {
 	run := newLocalRunner(t)
 	state := filepath.Join(t.TempDir(), "state")
 	request := func(issue, feed string) Request {
-		return Request{StateDir: state, Repo: "acme/widgets", Issue: issue, CredentialHelper: "!/opt/legion/bin/legion credential", Feed: feed}
+		return Request{StateDir: state, Repo: "acme/widgets", Issue: issue, CredentialHelper: "!/opt/legion/bin/legion credential", Source: FromFeed(feed)}
 	}
 	first := fetchRequest(t)
 	if _, err := Fetch(context.Background(), run, first); err != nil {
@@ -578,7 +576,7 @@ func feedRequest(t *testing.T, run *recordingRunner, req Request) Request {
 	if _, err := Fetch(context.Background(), run, fetch); err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
-	return Request{StateDir: req.StateDir, Repo: req.Repo, Issue: req.Issue, CredentialHelper: req.CredentialHelper, Feed: fetch.Feed}
+	return Request{StateDir: req.StateDir, Repo: req.Repo, Issue: req.Issue, CredentialHelper: req.CredentialHelper, Source: FromFeed(fetch.Feed)}
 }
 
 // pushRemoteBranch pushes one commit adding file to branch on the bare remote, from a clone of its

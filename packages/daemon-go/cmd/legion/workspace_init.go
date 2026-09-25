@@ -213,7 +213,7 @@ func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, fee
 	defer release()
 	run := workspace.NewRunner(workspace.CommandTimeout, tools)
 	provisioned, err := workspace.Provision(ctx, run, workspace.Request{
-		StateDir: root, Repo: repo, Issue: issue, CredentialHelper: credentialHelper, Feed: feed,
+		StateDir: root, Repo: repo, Issue: issue, CredentialHelper: credentialHelper, Source: workspace.FromFeed(feed),
 	})
 	if err != nil {
 		return err
