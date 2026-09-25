@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"text/template"
 
@@ -178,7 +179,8 @@ func InstallKeyedBy(environ []string, tokenFile string) (Installed, error) {
 }
 
 // AnthropicRoute is the gateway's anthropic route, <gateway>/anthropic, for a gateway base URL that
-// is http(s) with a host and carries no credentials, query or fragment. A base URL has no use for
+// is http(s) with a hostname, a port in 1-65535 if it names one, and no credentials, query or
+// fragment. A base URL has no use for
 // an `@`, so one anywhere is refused as credentials. A malformed value can hold a password
 // anywhere, so no refusal quotes the value or url.Parse's error: each names EnvURL and the rule
 // the value broke. The shim and `legion probe-image` refuse to start on a URL it refuses, and the
@@ -194,12 +196,21 @@ func AnthropicRoute(raw string) (string, error) {
 	switch {
 	case err != nil:
 		return "", fmt.Errorf("%s does not parse as a URL", EnvURL)
-	case (u.Scheme != "http" && u.Scheme != "https") || u.Host == "":
+	case (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "":
 		return "", fmt.Errorf("%s is not an http(s) URL with a host", EnvURL)
+	case u.Port() != "" && !validPort(u.Port()):
+		return "", fmt.Errorf("%s names a port outside 1-65535", EnvURL)
 	case u.RawQuery != "" || u.Fragment != "" || strings.ContainsAny(raw, "?#"):
 		return "", fmt.Errorf("%s carries a query or fragment: it must be the gateway's base URL", EnvURL)
 	}
 	return u.JoinPath("anthropic").String(), nil
+}
+
+// validPort reports whether port, the digits url.Parse accepted after the host's colon, is a TCP
+// port.
+func validPort(port string) bool {
+	n, err := strconv.Atoi(port)
+	return err == nil && n >= 1 && n <= 65535
 }
 
 // agentDir is Oh My Pi's agent directory for the named profile under HOME
