@@ -35,7 +35,7 @@ func TestComposeOrdersSharedRolePartsBeforeTheGoDaemonPart(t *testing.T) {
 		{"implementer", claim.RoleImplementer, false, []string{"core/common.md", "core/implementer.md", "mechanics/headless.md", "implementer.md"}, "implementer.md", []string{`op: "handoff_complete"`}},
 		{"tester", claim.RoleTester, false, []string{"core/common.md", "core/tester.md", "mechanics/headless.md", "tester.md"}, "tester.md", []string{`op: "handoff_complete"`, `verdict: "pass"`, `verdict: "fail"`}},
 		{"reviewer", claim.RoleReviewer, false, []string{"core/common.md", "core/reviewer.md", "mechanics/headless.md", "reviewer.md"}, "reviewer.md", []string{`op: "handoff_complete"`}},
-		{"merger", claim.RoleMerger, false, []string{"mechanics/headless.md", "merger.md"}, "merger.md", []string{"Do not choose or start the next phase or publish READY yourself", `op: "handoff_complete"`, "`ready: true`", "refusal names the current required spec version", "daemon advances the phase itself"}},
+		{"merger", claim.RoleMerger, false, []string{"mechanics/headless.md", "merger.md"}, "merger.md", []string{`op: "handoff_complete"`, "`ready: true`"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			parts, err := composer.Compose(tc.role, tc.isRoot)

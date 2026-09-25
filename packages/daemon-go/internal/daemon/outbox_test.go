@@ -19,6 +19,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -161,6 +162,47 @@ func TestOutboxNoticeReturnsPublisherFailure(t *testing.T) {
 
 	if err := (&outbox{pool: pool, dispatchProject: "LEGION", records: records, notices: publisher}).execute(context.Background(), row); err == nil || !strings.Contains(err.Error(), "listener unavailable") {
 		t.Fatalf("notice failure = %v, want listener failure", err)
+	}
+}
+
+// The READY packet reaches the project's merge queue role as the message of one publish to its
+// role topic, keyed by the row so a retried row is one delivery.
+func TestOutboxMergeQueuePublishSendsThePacketToTheRole(t *testing.T) {
+	row := mustOutboxRow(t, "LEGION-2", record.MergeQueuePublish{Role: "merge-queue", Packet: "READY #7 at abc (approved at abc) for LEGION-2 (https://example.test/7)"}, time.Now())
+	row.ID = 57
+	publisher, client := &outboxPublisher{}, &outboxDispatch{}
+
+	if err := (&outbox{notices: publisher, dispatch: client}).execute(context.Background(), row); err != nil {
+		t.Fatalf("execute merge queue publish: %v", err)
+	}
+	if got := publisher.publishes(); len(got) != 1 || got[0] != (outboxPublish{topic: "notifications.role.merge-queue", message: "READY #7 at abc (approved at abc) for LEGION-2 (https://example.test/7)", key: "legion-outbox:57"}) {
+		t.Fatalf("publishes = %#v, want the packet on the merge queue role's topic once", got)
+	}
+	if len(client.messages) != 0 {
+		t.Fatalf("Dispatch messages = %q, want none when the role took the packet", client.messages)
+	}
+}
+
+// A merge queue role with no live holder cannot take the packet, and waiting would retry forever:
+// the Dispatch message already carries it, so the issue is told the role had no holder, as the
+// shared merger prompt has the merger say, and the row is done.
+func TestOutboxMergeQueueWithNoLiveHolderSaysSoOnTheIssue(t *testing.T) {
+	row := mustOutboxRow(t, "LEGION-2", record.MergeQueuePublish{Role: "merge-queue", Packet: "READY #7"}, time.Now())
+	row.ID = 58
+	publisher := &outboxPublisher{err: fmt.Errorf("publish notice to notifications.role.merge-queue: %w: no holder for role merge-queue", notify.ErrNoHolder)}
+	client := &outboxDispatch{}
+	runner := &outbox{notices: publisher, dispatch: client, now: func() time.Time { return time.Date(2026, 9, 25, 3, 4, 5, 0, time.UTC) }}
+
+	if err := runner.execute(context.Background(), row); err != nil {
+		t.Fatalf("execute merge queue publish with no holder: %v", err)
+	}
+	if got := client.messages; len(got) != 1 || !strings.HasPrefix(got[0], "merge queue role merge-queue had no live holder at 2026-09-25T03:04:05Z") || !strings.HasSuffix(got[0], "<!-- legion-outbox:58 -->") {
+		t.Fatalf("Dispatch messages = %q, want one naming the role with no live holder", got)
+	}
+
+	publisher.err = errors.New("listener unavailable")
+	if err := runner.execute(context.Background(), row); err == nil || !strings.Contains(err.Error(), "listener unavailable") {
+		t.Fatalf("merge queue publish failure = %v, want the listener failure, retried", err)
 	}
 }
 
@@ -805,14 +847,20 @@ type outboxPublisher struct {
 }
 
 type outboxPublish struct {
-	topic, key string
+	topic, message, key string
 }
 
-func (p *outboxPublisher) Publish(_ context.Context, topic, _ string, _ any, key string) error {
+func (p *outboxPublisher) Publish(_ context.Context, topic, message string, _ any, key string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.publish = append(p.publish, outboxPublish{topic: topic, key: key})
+	p.publish = append(p.publish, outboxPublish{topic: topic, message: message, key: key})
 	return p.err
+}
+
+func (p *outboxPublisher) publishes() []outboxPublish {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]outboxPublish(nil), p.publish...)
 }
 
 func (p *outboxPublisher) topics() []string {

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,6 +18,11 @@ const requestTimeout = 10 * time.Second
 // refusalBodyLimit bounds how much of a refused publish's body the error carries: the listener
 // answers `{"error": ...}` (packages/envoy/cmd/listener/api.go writeJSONError).
 const refusalBodyLimit = 4096
+
+// ErrNoHolder is the listener's refusal of a publish to a role topic whose role has no live holder,
+// its only 404 on the publish route (packages/envoy/cmd/listener/api.go publishHandler,
+// writeRoleHolderError). Nothing a retry changes until the role is claimed again.
+var ErrNoHolder = errors.New("the role has no live holder")
 
 // Topic is the persisted issue topic workers and architects subscribe to. project is the project
 // token panes are told as LEGION_PROJECT (packages/pi-envoy/src/legion/go-bootstrap.ts:154-159),
@@ -75,7 +81,11 @@ func (p *HTTPPublisher) Publish(ctx context.Context, topic, message string, payl
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(response.Body, refusalBodyLimit))
-		return fmt.Errorf("publish notice to %s: listener returned %s: %s", topic, response.Status, strings.TrimSpace(string(body)))
+		refusal := fmt.Errorf("listener returned %s: %s", response.Status, strings.TrimSpace(string(body)))
+		if response.StatusCode == http.StatusNotFound {
+			return fmt.Errorf("publish notice to %s: %w: %w", topic, ErrNoHolder, refusal)
+		}
+		return fmt.Errorf("publish notice to %s: %w", topic, refusal)
 	}
 	return nil
 }

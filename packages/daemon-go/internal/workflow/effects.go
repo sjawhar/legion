@@ -69,19 +69,20 @@ func refused(code, message string) intake.Result {
 	return intake.Result{Refusal: &intake.Refusal{Status: 409, Code: code, Message: message}}
 }
 
-// clearHandoff empties the handoff a role reported for its previous phase, keeping its claim and
-// the review rounds, when a transition starts it on a new phase. A role's recorded handoff is then
-// always its current phase's: the implementer's round-1 commit cannot advance round 2, and the
-// production check is recorded only by the production check's own completion.
+// clearHandoff empties the handoff a role reported for its previous phase — its commit, verdict,
+// and summary — keeping its claim and the review rounds, when a transition starts it on a new
+// phase. A role's recorded handoff is then always its current phase's: the implementer's round-1
+// commit cannot advance round 2, the production check is recorded only by the production check's
+// own completion, and a merger sent back to verify again has no READY packet until its next one.
 func (e *Engine) clearHandoff(ctx context.Context, tx pgx.Tx, issue string, role claim.Role) error {
 	if role == "" {
 		return nil
 	}
 	row, err := e.phaseRow(ctx, tx, issue, role)
-	if err != nil || row.HandoffCommit == "" && row.Verdict == "" {
+	if err != nil || row.HandoffCommit == "" && row.Verdict == "" && row.Summary == "" {
 		return err
 	}
-	row.HandoffCommit, row.Verdict = "", ""
+	row.HandoffCommit, row.Verdict, row.Summary = "", "", ""
 	return e.store.PutPhase(ctx, tx, row)
 }
 

@@ -3,6 +3,7 @@ package notify
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -70,5 +71,27 @@ func TestHTTPPublisherRefusalNamesTheListenerError(t *testing.T) {
 	err := New(server.URL, "").Publish(context.Background(), "notifications.legion.LEGION.LEGION-208", "pr-blocked on LEGION-208", map[string]string{"kind": "pr-blocked"}, "legion-outbox:7")
 	if err == nil || !strings.Contains(err.Error(), "nats: no response from stream") {
 		t.Fatalf("publish error = %v, want the listener's error body", err)
+	}
+}
+
+// The listener answers a publish to a role topic whose role has no live holder with 404, and only
+// then (packages/envoy/cmd/listener/api.go publishHandler, writeRoleHolderError). That refusal is
+// ErrNoHolder, so a caller can tell it from a failure worth retrying; any other refusal is not.
+func TestHTTPPublisherNamesARoleWithNoLiveHolder(t *testing.T) {
+	status := http.StatusNotFound
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(`{"error":"no holder for role merge-queue","reason":"unclaimed"}`))
+	}))
+	defer server.Close()
+
+	err := New(server.URL, "").Publish(context.Background(), "notifications.role.merge-queue", "READY #42", map[string]string{"kind": "ready"}, "legion-outbox:9")
+	if !errors.Is(err, ErrNoHolder) || !strings.Contains(err.Error(), "no holder for role merge-queue") {
+		t.Fatalf("publish error = %v, want ErrNoHolder carrying the listener's error", err)
+	}
+	status = http.StatusInternalServerError
+	if err := New(server.URL, "").Publish(context.Background(), "notifications.role.merge-queue", "READY #42", map[string]string{"kind": "ready"}, "legion-outbox:9"); err == nil || errors.Is(err, ErrNoHolder) {
+		t.Fatalf("publish error on a 500 = %v, want a failure that is not ErrNoHolder", err)
 	}
 }

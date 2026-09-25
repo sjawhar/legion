@@ -1,0 +1,165 @@
+package workflow
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/record"
+)
+
+const readyPacket = "READY #42 at head (approved at head) for LEGION-208 (https://github.com/sjawhar/legion/pull/42)\n\nno file changes above the approved head"
+
+// The daemon, not the merger, tells the human a pull request is ready to merge: the merger's READY
+// completion carries the packet as its summary, and merging -> awaiting_merge posts it verbatim on
+// the Dispatch issue and, when the project names a merge queue role, publishes it there too.
+func TestTheDaemonPostsTheMergersREADYPacket(t *testing.T) {
+	for _, tc := range []struct {
+		name, mergeQueue string
+	}{
+		{name: "no merge queue"},
+		{name: "a merge queue role", mergeQueue: "merge-queue"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "U"})
+			seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 4, ApprovedVersion: new(4)})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim"})
+			engine := readyEngine(tc.mergeQueue)
+
+			result, err := intake.ApplyFact(context.Background(), pool, "api", "ready", intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim", Generation: 1, Ready: true, Summary: readyPacket, Commit: "head"}, engine, admissionStub{})
+			if err != nil || result.Refusal != nil {
+				t.Fatalf("ApplyFact READY = %#v, %v", result, err)
+			}
+			assertPhase(t, pool, phase.AwaitingMerge)
+			if got := messageBodies(t, pool); len(got) != 1 || got[0] != readyPacket {
+				t.Fatalf("Dispatch messages = %q, want the READY packet once", got)
+			}
+			published := mergeQueuePublishes(t, pool)
+			if tc.mergeQueue == "" && len(published) != 0 {
+				t.Fatalf("merge queue publishes = %v, want none without a merge queue role", published)
+			}
+			if tc.mergeQueue != "" && (len(published) != 1 || published[0] != (record.MergeQueuePublish{Role: tc.mergeQueue, Packet: readyPacket})) {
+				t.Fatalf("merge queue publishes = %v, want the packet to %s once", published, tc.mergeQueue)
+			}
+		})
+	}
+}
+
+// A READY the design gate refused is posted when a human approves: the packet is kept with the
+// merger's completion across the refusal, and nothing is posted before the approval.
+func TestAREADYTheGateRefusedIsPostedWhenAHumanApproves(t *testing.T) {
+	pool := migratedPool(t)
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "U"})
+	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 4})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim"})
+	engine := readyEngine("merge-queue")
+
+	result, err := intake.ApplyFact(context.Background(), pool, "api", "ready", intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim", Generation: 1, Ready: true, Summary: readyPacket, Commit: "head"}, engine, admissionStub{})
+	if err != nil || result.Refusal == nil || result.Refusal.Code != "DESIGN_GATE_CLOSED" {
+		t.Fatalf("ApplyFact READY = %#v, %v; want the design gate's refusal", result, err)
+	}
+	if got := messageBodies(t, pool); len(got) != 0 {
+		t.Fatalf("Dispatch messages after the refusal = %q, want none", got)
+	}
+	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "approval", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactApproved, Version: 4}, engine, admissionStub{}); err != nil {
+		t.Fatalf("ApplyFact approval: %v", err)
+	}
+	assertPhase(t, pool, phase.AwaitingMerge)
+	if got := messageBodies(t, pool); len(got) != 1 || got[0] != readyPacket {
+		t.Fatalf("Dispatch messages after the approval = %q, want the kept READY packet once", got)
+	}
+	if got := mergeQueuePublishes(t, pool); len(got) != 1 || got[0].Packet != readyPacket {
+		t.Fatalf("merge queue publishes = %v, want the kept packet once", got)
+	}
+}
+
+// A READY the gate refused belongs to that merging phase. When the merger sends the issue back
+// (its head must return to review), the refusal is void: the approval that arrives while the next
+// merger verifies does not move the issue on, and the old packet is never posted.
+func TestABackwardMoveOutOfMergingVoidsTheRefusedREADY(t *testing.T) {
+	pool := migratedPool(t)
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "U"})
+	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 4})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implementer-claim"})
+	engine := readyEngine("")
+	apply := func(id string, fact intake.Fact) intake.Result {
+		t.Helper()
+		result, err := intake.ApplyFact(context.Background(), pool, "api", id, fact, engine, admissionStub{})
+		if err != nil {
+			t.Fatalf("ApplyFact %s: %v", id, err)
+		}
+		return result
+	}
+
+	if result := apply("ready", intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim", Generation: 1, Ready: true, Summary: readyPacket, Commit: "head"}); result.Refusal == nil {
+		t.Fatal("READY with the gate closed was not refused")
+	}
+	apply("back-to-retro", intake.BackwardMove{Issue: "LEGION-208", Requester: claim.RoleMerger, To: phase.Retro, Reason: "a commit above the approved head changes product code"})
+	assertPhase(t, pool, phase.Retro)
+	apply("retro-done", intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implementer-claim", Generation: 1, Summary: "retro recorded", Commit: "retro"})
+	assertPhase(t, pool, phase.Merging)
+	apply("approval", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactApproved, Version: 4})
+	assertPhase(t, pool, phase.Merging)
+	if got := messageBodies(t, pool); len(got) != 0 {
+		t.Fatalf("Dispatch messages = %q, want the void READY never posted", got)
+	}
+}
+
+func readyEngine(mergeQueue string) *Engine {
+	return New(record.NewStore(), Config{
+		Project: "LEGION", DesignGate: config.DesignGateRootIssues, MergeQueueRole: mergeQueue, Linger: time.Hour,
+		Clock: func() time.Time { return time.Date(2026, 9, 25, 0, 0, 0, 0, time.UTC) },
+	}, nil)
+}
+
+// messageBodies is every Dispatch message the outbox holds, in order.
+func messageBodies(t *testing.T, pool *pgxpool.Pool) []string {
+	t.Helper()
+	rows, err := pool.Query(t.Context(), "select payload->>'body' from outbox where kind = 'dispatch_message' order by id")
+	if err != nil {
+		t.Fatalf("read Dispatch messages: %v", err)
+	}
+	defer rows.Close()
+	bodies := []string{}
+	for rows.Next() {
+		var body string
+		if err := rows.Scan(&body); err != nil {
+			t.Fatalf("scan Dispatch message: %v", err)
+		}
+		bodies = append(bodies, body)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate Dispatch messages: %v", err)
+	}
+	return bodies
+}
+
+// mergeQueuePublishes is every merge-queue publish the outbox holds, in order.
+func mergeQueuePublishes(t *testing.T, pool *pgxpool.Pool) []record.MergeQueuePublish {
+	t.Helper()
+	rows, err := pool.Query(t.Context(), "select payload->>'role', payload->>'packet' from outbox where kind = 'merge_queue_publish' order by id")
+	if err != nil {
+		t.Fatalf("read merge queue publishes: %v", err)
+	}
+	defer rows.Close()
+	published := []record.MergeQueuePublish{}
+	for rows.Next() {
+		var publish record.MergeQueuePublish
+		if err := rows.Scan(&publish.Role, &publish.Packet); err != nil {
+			t.Fatalf("scan merge queue publish: %v", err)
+		}
+		published = append(published, publish)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate merge queue publishes: %v", err)
+	}
+	return published
+}

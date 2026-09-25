@@ -616,9 +616,9 @@ func TestRemainingForwardRowsApplyThroughIntake(t *testing.T) {
 				seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact", LatestVersion: 1, ApprovedVersion: new(1)})
 			},
 			fact: func() intake.Fact {
-				return intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "claim", Ready: true}
+				return intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "claim", Generation: 1, Ready: true, Summary: "READY #42 at head (approved at head) for LEGION-208 (https://github.com/sjawhar/legion/pull/42)"}
 			},
-			wantPhase: phase.AwaitingMerge, wantStatus: "retro", wantOutbox: []string{"supervise", "notice"},
+			wantPhase: phase.AwaitingMerge, wantStatus: "retro", wantOutbox: []string{"supervise", "notice", "dispatch_message"},
 		},
 		{
 			name: "merged pull request", current: phase.AwaitingMerge,

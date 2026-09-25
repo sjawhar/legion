@@ -52,6 +52,9 @@ type PhaseRow struct {
 	HandoffCommit string
 	Rounds        int
 	Verdict       string
+	// Summary is what the role reported with its completion. The merger's is its READY packet,
+	// which the daemon posts when the issue reaches awaiting_merge.
+	Summary string
 	// LastHandoff is the carrying commit the role last reported for a file-backed phase. Unlike
 	// HandoffCommit it survives the next phase's start, so a completion reporting it again is known
 	// to carry no handoff written since.

@@ -20,13 +20,15 @@ import (
 )
 
 // Config supplies the project-scoped workflow limits and the clock used only to stamp durable
-// outbox deadlines. Zero limits take their shipped defaults.
+// outbox deadlines. Zero limits take their shipped defaults. MergeQueueRole is the project's
+// `merge_queue_role`, the role the merger's READY is published to; empty, it is posted only.
 type Config struct {
 	Project        string
 	DesignGate     config.DesignGate
 	ReviewRoundCap int
 	MaxFixAttempts int
 	Linger         time.Duration
+	MergeQueueRole string
 	Clock          func() time.Time
 	// ReviewAppLogin is the review App's bot login (<slug>[bot]) from its boot token lease. A push
 	// by it is never a fix attempt, and a red on its red tests is planned. Empty matches no push.
@@ -316,7 +318,7 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 		}
 		row.LastHandoff = fact.Commit
 	}
-	row.Claim, row.HandoffCommit, row.Verdict = fact.Claim, fact.Commit, fact.Verdict
+	row.Claim, row.HandoffCommit, row.Verdict, row.Summary = fact.Claim, fact.Commit, fact.Verdict, fact.Summary
 	if err := e.store.PutPhase(ctx, tx, row); err != nil {
 		return intake.Result{}, err
 	}
@@ -648,7 +650,9 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	if row.Status != "" {
 		issue.Status = row.Status
 	}
-	if trigger == TriggerReady {
+	// A READY the gate refused belongs to the merging phase it was sent in: leaving that phase by
+	// any trigger voids it, so a later approval never advances the next merger's phase on it.
+	if from == phase.Merging {
 		issue.ReadyPendingVersion = nil
 	}
 	if err := e.store.PutIssue(ctx, tx, issue); err != nil {
@@ -674,10 +678,29 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	if err := e.notice(ctx, tx, issue.Key, record.Notice{Kind: "phase-finished", Role: RoleFor(from), Phase: from, Summary: handoff.Verdict}); err != nil {
 		return err
 	}
+	if row.To == phase.AwaitingMerge {
+		return e.ready(ctx, tx, issue, handoff.Summary)
+	}
 	if row.To == phase.Done {
 		return e.leave(ctx, tx, issue, "done")
 	}
 	return nil
+}
+
+// ready tells the human the pull request is ready to merge. The packet is the merger's READY
+// completion's summary — its first line `READY #<n> at <sha> (approved at <sha>) for <KEY>
+// (<url>)`, then the diff summary and the gate facts (the shared merger prompt's step 4) — posted
+// verbatim on the Dispatch issue and, when the project names a merge queue role, published to it.
+// The daemon posts it, not the merger, so the READY is told exactly when the issue reaches
+// awaiting_merge: on the completion itself, or on the approval that opens a gate that refused it.
+func (e *Engine) ready(ctx context.Context, tx pgx.Tx, issue record.Issue, packet string) error {
+	if err := e.enqueue(ctx, tx, issue.Key, record.MessagePost{Body: packet}); err != nil {
+		return err
+	}
+	if e.cfg.MergeQueueRole == "" {
+		return nil
+	}
+	return e.enqueue(ctx, tx, issue.Key, record.MergeQueuePublish{Role: e.cfg.MergeQueueRole, Packet: packet})
 }
 
 func (e *Engine) row(from phase.Phase, trigger TriggerKind, target phase.Phase, snapshot Snapshot) (Row, bool) {

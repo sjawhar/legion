@@ -241,6 +241,8 @@ func (r *outbox) execute(ctx context.Context, row record.OutboxRow) error {
 		return r.linger(ctx, row, value)
 	case record.WorkspaceRemove:
 		return r.removeWorkspace(ctx, row, value)
+	case record.MergeQueuePublish:
+		return r.mergeQueue(ctx, row, value)
 	default:
 		return fmt.Errorf("outbox row %d: no executor for %T", row.ID, payload)
 	}
@@ -310,6 +312,25 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 		if err := r.notices.Publish(ctx, notify.Topic(token, issue.Tree), message, payload, dedupeKey); err != nil {
 			return fmt.Errorf("publish tree notice for %s: %w", row.Issue, err)
 		}
+	}
+	return nil
+}
+
+// mergeQueue publishes the merger's READY packet to the project's merge queue role, keyed by the
+// row so a retried row is one delivery. A role with no live holder refuses every attempt until
+// someone claims it, so waiting would retry forever; the Dispatch message the same READY posted
+// already carries the packet, so the issue is told the role had no holder, as the shared merger
+// prompt has the merger say (packages/pi-envoy/roles/merger.md step 4), and the row is done.
+func (r *outbox) mergeQueue(ctx context.Context, row record.OutboxRow, payload record.MergeQueuePublish) error {
+	if r.notices == nil {
+		return errors.New("merge queue executor has no Envoy publisher")
+	}
+	err := r.notices.Publish(ctx, roleTopicPrefix+payload.Role, payload.Packet, payload.Packet, fmt.Sprintf("legion-outbox:%d", row.ID))
+	if errors.Is(err, notify.ErrNoHolder) {
+		return r.message(ctx, row, record.MessagePost{Body: fmt.Sprintf("merge queue role %s had no live holder at %s", payload.Role, r.now().UTC().Format(time.RFC3339))})
+	}
+	if err != nil {
+		return fmt.Errorf("publish READY for %s to merge queue role %s: %w", row.Issue, payload.Role, err)
 	}
 	return nil
 }

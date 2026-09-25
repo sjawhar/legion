@@ -15,13 +15,14 @@ import (
 type OutboxKind string
 
 const (
-	OutboxKindDispatchStatus  OutboxKind = "dispatch_status"
-	OutboxKindDispatchMessage OutboxKind = "dispatch_message"
-	OutboxKindNotice          OutboxKind = "notice"
-	OutboxKindSupervise       OutboxKind = "supervise"
-	OutboxKindGateSeed        OutboxKind = "gate_seed"
-	OutboxKindLingerClose     OutboxKind = "linger_close"
-	OutboxKindWorkspaceRemove OutboxKind = "workspace_remove"
+	OutboxKindDispatchStatus    OutboxKind = "dispatch_status"
+	OutboxKindDispatchMessage   OutboxKind = "dispatch_message"
+	OutboxKindNotice            OutboxKind = "notice"
+	OutboxKindSupervise         OutboxKind = "supervise"
+	OutboxKindGateSeed          OutboxKind = "gate_seed"
+	OutboxKindLingerClose       OutboxKind = "linger_close"
+	OutboxKindWorkspaceRemove   OutboxKind = "workspace_remove"
+	OutboxKindMergeQueuePublish OutboxKind = "merge_queue_publish"
 )
 
 // OutboxPayload is the sealed vocabulary of payloads a workflow may enqueue.
@@ -112,6 +113,15 @@ type WorkspaceRemove struct {
 
 func (WorkspaceRemove) OutboxKind() OutboxKind { return OutboxKindWorkspaceRemove }
 
+// MergeQueuePublish is the merger's READY packet published to the project's merge queue role,
+// `projects.<KEY>.merge_queue_role`: its bare name, which the runner addresses as a role topic.
+type MergeQueuePublish struct {
+	Role   string `json:"role"`
+	Packet string `json:"packet"`
+}
+
+func (MergeQueuePublish) OutboxKind() OutboxKind { return OutboxKindMergeQueuePublish }
+
 // NewOutboxRow encodes one validated payload for durable delivery at nextAt.
 func NewOutboxRow(issue string, payload OutboxPayload, nextAt time.Time) (OutboxRow, error) {
 	if err := validateOutboxPayload(payload); err != nil {
@@ -186,6 +196,12 @@ func decodeOutboxJSON(row OutboxRow) (OutboxPayload, error) {
 			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
 		}
 		payload = value
+	case OutboxKindMergeQueuePublish:
+		value := MergeQueuePublish{}
+		if err := decoder.Decode(&value); err != nil {
+			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
+		}
+		payload = value
 	default:
 		return nil, fmt.Errorf("decode outbox row %d: unknown kind %q", row.ID, row.Kind)
 	}
@@ -227,6 +243,13 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		}
 		if value.Op == "start" && value.Role == "" {
 			return fmt.Errorf("supervise start requires role")
+		}
+	case MergeQueuePublish:
+		if value.Role == "" {
+			return fmt.Errorf("merge queue publish requires role")
+		}
+		if value.Packet == "" {
+			return fmt.Errorf("merge queue publish requires packet")
 		}
 	default:
 		return fmt.Errorf("unknown outbox payload %T", payload)
