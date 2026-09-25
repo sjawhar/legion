@@ -164,6 +164,11 @@ export interface PrState {
    * `.legion/` push), whether the classification arrives in the pending slot or by the push
    * webhook for the current head. A review-App push is itself never a fix attempt either way. */
   plannedRed?: true;
+  /** Present exactly when `plannedRed` was carried onto the current head with no classification
+   * of that head yet (its synchronize, or resync's read, came before its push). The push for the
+   * current head settles it; resync clears both, counting the head as a code change by someone
+   * other than the review App, since a push it has not seen by then may never arrive. */
+  plannedRedCarried?: true;
   /** The `fixAttempts` value the last `pr-blocked` was published for. `reduceCiEmission`
    * publishes `pr-blocked` only when `fixAttempts >= maxFixAttempts` AND `fixAttempts !==
    * blockedAttempts`, then records `fixAttempts` here. A take-back whose pre-decrement
@@ -525,6 +530,7 @@ const PrStateSchema = z
       .optional(),
     headCounted: z.literal(true).optional(),
     plannedRed: z.literal(true).optional(),
+    plannedRedCarried: z.literal(true).optional(),
     pendingPush: z
       .object({
         sha: z.string().min(1),
@@ -1590,8 +1596,8 @@ function migrateV32State(
   return { ...state, version: 33, controllerLocator };
 }
 
-/** v33 -> v34: PrState gains the optional `reviewDecisionUnsettledFrom`, `changesRequest` and
- * `plannedRed`, and `pendingPush` the optional `before` and `byReviewApp`. A pure bump:
+/** v33 -> v34: PrState gains the optional `reviewDecisionUnsettledFrom`, `changesRequest`,
+ * `plannedRed` and `plannedRedCarried`, and `pendingPush` the optional `before` and `byReviewApp`. A pure bump:
  * absent is the correct starting value for each, since a v33 daemon settled each decision when its
  * head arrived, a pending slot without `before` is never taken to cover the head it replaces, a
  * decision with no recorded request is ended by no review, and a head or slot not marked as the

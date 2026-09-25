@@ -665,6 +665,9 @@ function githubClassificationState(state: LegionState): Record<string, unknown> 
           ...(pr.blockedAttempts === undefined ? {} : { blockedAttempts: pr.blockedAttempts }),
           ...(pr.headCounted === undefined ? {} : { headCounted: pr.headCounted }),
           ...(pr.plannedRed === undefined ? {} : { plannedRed: pr.plannedRed }),
+          ...(pr.plannedRedCarried === undefined
+            ? {}
+            : { plannedRedCarried: pr.plannedRedCarried }),
           ...(pr.pendingPush === undefined ? {} : { pendingPush: { ...pr.pendingPush } }),
           ...(pr.reviewDecision === undefined ? {} : { reviewDecision: pr.reviewDecision }),
           ...(pr.reviewDecisionUnsettledFrom === undefined
@@ -962,6 +965,8 @@ export function resetPrHead(pr: PrState, headSha: string): void {
     if (pending.byReviewApp) pr.plannedRed = true;
     else delete pr.plannedRed;
   }
+  if (!pending && pr.plannedRed) pr.plannedRedCarried = true;
+  else delete pr.plannedRedCarried;
   pr.headSha = headSha;
   pr.verdict = null;
   pr.failing = [];
@@ -1076,6 +1081,7 @@ function push(
       if (byReviewApp) pr.plannedRed = true;
       else delete pr.plannedRed;
     }
+    delete pr.plannedRedCarried;
     if ((classification.handoffOnly || byReviewApp) && pr.headCounted) {
       if (pr.blockedAttempts === pr.fixAttempts) delete pr.blockedAttempts;
       pr.fixAttempts -= 1;

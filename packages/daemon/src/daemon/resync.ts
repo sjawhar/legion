@@ -156,6 +156,13 @@ async function reconcilePrs(deps: RunResyncDeps, now: number): Promise<CiFetchFa
     if (pr.reviewDecisionUnsettledFrom !== undefined) {
       await settleFromCompare(deps, prKey, pr.reviewDecisionUnsettledFrom, pr);
     }
+    // A planned red carried onto a head no push has classified: a push resync has not seen may
+    // never arrive, so count the head as a code change by someone other than the review App (the
+    // next head after a red counts), never the other way.
+    if (pr.plannedRedCarried) {
+      delete pr.plannedRed;
+      delete pr.plannedRedCarried;
+    }
     // GitHub's rollup carries an attempt set with no listener identity. It
     // advances the stored fence, applies at an equal set, applies unfenced, or
     // is an older or inconsistent view and is skipped — acceptGitHubFence decides.

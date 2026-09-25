@@ -2044,3 +2044,97 @@ describe("runResync settles a changes-requested decision no push webhook settled
     }
   });
 });
+
+describe("runResync clears a planned red carried onto a head no push classified", () => {
+  const prKey = "sjawhar/legion#7";
+  const branch = `legion/${issue}`;
+  let seq = 0;
+  function deliver(state: LegionState, payload: Record<string, unknown>): void {
+    seq += 1;
+    reduceGithubEvent(
+      state,
+      "notifications.github.sjawhar.legion.pull_request",
+      { event_id: `planned-${seq}`, issued_at: Date.parse("2026-08-23T12:00:00.000Z"), payload },
+      resyncDeps(state).config
+    );
+  }
+  function arrive(
+    state: LegionState,
+    before: string,
+    sha: string,
+    pusher: string | null,
+    at: string
+  ): void {
+    if (pusher !== null) {
+      deliver(state, {
+        kind: "push",
+        repo: "sjawhar/legion",
+        ref: `refs/heads/${branch}`,
+        before,
+        after: sha,
+        pusher,
+        head_subject: sha,
+        commit_count: "1",
+        compare_url: "https://example.invalid/compare",
+        changed_paths: "src/widget.test.ts",
+        changed_paths_truncated: "false",
+      });
+    }
+    deliver(state, {
+      kind: "pr",
+      action: "synchronize",
+      repo: "sjawhar/legion",
+      number: "7",
+      head_ref: branch,
+      head_sha: sha,
+      updated_at: at,
+    });
+  }
+  const readRedAt =
+    (sha: string): RunResyncDeps["fetchCiStatusBatch"] =>
+    async () => ({
+      [prKey]: {
+        ciStatus: "failing" as const,
+        mergeableStatus: null,
+        headSha: sha,
+        updatedAt: "2026-08-24T00:00:00.000Z",
+        checkRuns: [{ name: "test", id: 1 }],
+        failingChecks: ["test"],
+        failingStatuses: [],
+        isOpen: true,
+      },
+    });
+
+  it("so the fix after a fix whose push was lost counts one attempt", async () => {
+    const state = newLegionState("omp", 1);
+    trackIssue(state);
+    state.prs[prKey] = checkPr(issue, {
+      repo: "sjawhar/legion",
+      headSha: "impl-sha",
+      headUpdatedAt: Date.parse("2026-08-23T00:00:00.000Z"),
+      verdict: "green",
+      ciSettledAt: 1,
+    });
+    state.prByBranch[`sjawhar/legion@${branch}`] = prKey;
+    // The tester's red tests: a planned red.
+    arrive(state, "impl-sha", "red-tests-sha", "legion-reviewer[bot]", "2026-08-23T12:00:00.000Z");
+    state.prs[prKey] = {
+      ...state.prs[prKey],
+      verdict: "red",
+      failing: ["test"],
+      ciSettledAt: 2,
+    } as PrState;
+    // The implementer's fix: its synchronize lands, its push webhook is lost.
+    arrive(state, "red-tests-sha", "fix-sha", null, "2026-08-23T12:01:00.000Z");
+    expect(state.prs[prKey]?.fixAttempts).toBe(0);
+
+    // Resync reads the fix head and its red rollup.
+    await runResync({ ...resyncDeps(state), fetchCiStatusBatch: readRedAt("fix-sha") });
+    expect(state.prs[prKey]).toMatchObject({ headSha: "fix-sha", verdict: "red" });
+
+    // After resync's read, so its synchronize is newer than the head resync recorded.
+    arrive(state, "fix-sha", "fix-2-sha", "legion-implementer[bot]", "2026-08-24T01:00:00.000Z");
+
+    expect(state.prs[prKey]?.fixAttempts).toBe(1);
+  });
+});
