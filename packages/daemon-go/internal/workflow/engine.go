@@ -283,11 +283,20 @@ func (e *Engine) dispatchArtifact(ctx context.Context, tx pgx.Tx, fact intake.Di
 		if err := e.notice(ctx, tx, fact.Key, record.Notice{Kind: "design-approved", Version: fact.Version}); err != nil {
 			return intake.Result{}, err
 		}
-		issue, err := e.store.Issue(ctx, tx, fact.Key)
-		if err != nil || issue == nil {
-			return intake.Result{}, err
-		}
-		if err := e.advanceAdmittedTree(ctx, tx, *issue, updated); err != nil {
+	}
+	root, err := e.store.Issue(ctx, tx, fact.Key)
+	if err != nil || root == nil {
+		return intake.Result{}, err
+	}
+	// A lingering tree has left the workflow, and linger holds each member where it stood: the gate
+	// still records what Dispatch says, but nothing in the tree advances on an approval — no planner
+	// starts for an admitted child, and no READY a merger sent before the tree closed is posted or
+	// published.
+	if root.LingerUntil != nil {
+		return intake.Result{}, nil
+	}
+	if !wasOpen && isOpen {
+		if err := e.advanceAdmittedTree(ctx, tx, *root, updated); err != nil {
 			return intake.Result{}, err
 		}
 	}
