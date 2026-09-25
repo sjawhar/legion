@@ -406,7 +406,7 @@ case "$all" in
     state_dir="$(dirname "$config")"
     "$state_dir/exec-token.sh" >/dev/null
     if [ -n "${FAKE_DAEMON_BOOT_DELAY:-}" ]; then
-      (sleep "$FAKE_DAEMON_BOOT_DELAY"; echo 'legion daemon listening on 0.0.0.0:41004'; touch "$FAKE_ENV/daemon-booted") &
+      (sleep "$FAKE_DAEMON_BOOT_DELAY"; touch "$FAKE_ENV/daemon-booted"; echo 'legion daemon listening on 0.0.0.0:41004') &
     fi
     echo 'kubeconfig exec plugin minted a token'
     exec sleep 300
