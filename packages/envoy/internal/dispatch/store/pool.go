@@ -9,6 +9,7 @@ import (
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -21,15 +22,17 @@ import (
 // One caller, one connection, is the rule the pool cannot survive without. A transaction
 // holds its connection until it commits; a caller that asks for a second one while it holds a
 // row or advisory lock waits for a connection only the callers queued behind that lock can
-// release, and they are waiting for the lock. At four connections - production's pool, one
-// Fargate task at cpu="512" - two anchored writes and two document settlements on one issue are
-// enough, and nothing but pg_terminate_backend recovers it. Rationing connections cannot fix
-// that, because the queue behind one writer's issue lock is unbounded: a settlement per
-// document, every issue-owned event append, the architecture importer.
+// release, and they are waiting for the lock. Two anchored writes and two document
+// settlements on one issue closed that cycle on a four-connection pool, and nothing but
+// pg_terminate_backend recovered it. Rationing connections cannot fix it, and neither can
+// sharedPoolSize's sixteen: the queue behind one writer's issue lock is unbounded - a
+// settlement per document, every issue-owned event append, the architecture importer - so a
+// bigger pool only moves the number of callers it takes.
 //
 // So work that genuinely needs a connection of its own while a transaction is open takes it
-// from the rooms pool (Pool.Rooms), not from here. Everything else reads through the
-// transaction it is already inside.
+// from a pool of its own - the rooms pool (Pool.Rooms) for a document load, the health pool
+// (Pool.Healthy) for the load balancer's probe - not from here. Everything else reads through
+// the transaction it is already inside.
 //
 // This error makes the rule enforce itself. Every entry point that opens one of this pool's
 // transactions marks its context (api.Register marks every route; settlement, the architecture
@@ -110,10 +113,12 @@ func logRefusal() {
 // so no caller can reach past the refusal.
 type Pool struct {
 	pool *pgxpool.Pool
-	// mu guards the rooms pool's creation against its close: one lock, so a Rooms that wins
-	// the race returns the error rather than opening a pool nothing will ever close.
+	// mu guards each separate pool's creation against this pool's close: one lock, so a
+	// caller that loses the race is told the pool is closed rather than opening one nothing
+	// will ever close.
 	mu     sync.Mutex
 	rooms  *pgxpool.Pool
+	health *pgxpool.Pool
 	closed bool
 }
 
@@ -122,11 +127,45 @@ func NewPool(pool *pgxpool.Pool) *Pool {
 	return &Pool{pool: pool}
 }
 
+// sharedPoolSize bounds the shared pool, deliberately and in code. pgx's default,
+// max(4, NumCPU), is four on production's one Fargate task at cpu="512", and a connection per
+// blocked writer is all it takes to starve everything else: with four writers parked on one
+// issue's row lock, a read of an unrelated issue waited the whole seventeen seconds the lock
+// was held, where sixteen connections served 3,853 such reads at a four-millisecond median.
+// The shared Aurora cluster has thousands of connections spare, so the ceiling is picked here
+// rather than derived from the task's CPU allotment or read out of the DSN another
+// repository's URL builder writes.
+const sharedPoolSize = 16
+
 // roomsPoolSize bounds the connections document loads use. Loading takes no lock and always
 // finishes, so one is enough for the pool to be deadlock-free; a few let cold rooms load
 // concurrently. Measured on the real server, eight cold rooms loading at once are no faster at
 // eight connections than at one, so this is small on purpose.
 const roomsPoolSize = 4
+
+// healthPoolSize bounds the connections the health probe uses. The probe answers one question -
+// is Postgres reachable - and asks it on a connection nothing else can take, so one is not a
+// ration but the whole design.
+const healthPoolSize = 1
+
+// healthProbeTimeout bounds the health probe's own wait, dial and query together, and owns the
+// argument for why the probe is bounded at all. Every prober treats silence as a dead process:
+// the ALB fails a poll at five seconds and three consecutive failures replace the task,
+// cancelling every in-flight request of every other client, and the compose healthcheck and
+// the deploy script are tighter still at three (deploy/compose/dispatch.compose.yml,
+// deploy/scripts/autodeploy.sh). Two seconds fits inside the tightest of them, so a database
+// that has stopped answering comes back as a 503 they can read.
+//
+// Nothing else bounds it usefully. A cold dial is floored at two minutes, not unbounded -
+// pgxpool sets ConnectTimeout to two minutes whenever the config leaves it at zero, under
+// pgx's own "ensure that a connect won't hang forever", and pgconn applies that to the whole
+// connection process - but two minutes is forty times the tightest deadline above. Once the
+// connection is up nothing bounds the query at all, because an http.Server request context
+// carries no deadline, and warm is production's normal state: the probe runs every few seconds
+// and an idle connection lives for half an hour. A link that drops packets - a security-group
+// change, an availability-zone partition, an endpoint that accepts and then stalls - is the
+// unbounded case whenever the connection was already open.
+const healthProbeTimeout = 2 * time.Second
 
 // ErrPoolClosed is a connection asked for after the pool was released.
 var ErrPoolClosed = errors.New("connection pool is closed")
@@ -139,26 +178,56 @@ var ErrPoolClosed = errors.New("connection pool is closed")
 // the loads have their own, opened on demand and closed with this pool: one per store, not one
 // per caller who wants to read a document.
 func (p *Pool) Rooms() (*pgxpool.Pool, error) {
+	return p.separate(&p.rooms, roomsPoolSize, "document rooms")
+}
+
+// Healthy reports whether Postgres is reachable, within healthProbeTimeout, on a connection of
+// a pool nothing else uses. /healthz asks it, and it must never queue behind a writer: proving
+// the shared pool has a free connection is the wrong question, because during a busy period it
+// legitimately has none. Like the rooms pool this one is outside the nested-acquire guard,
+// because a separate pool cannot close the cycle the guard prevents.
+func (p *Pool) Healthy(ctx context.Context) error {
+	health, err := p.separate(&p.health, healthPoolSize, "health probe")
+	if err != nil {
+		return err
+	}
+	// Derived from the caller's context, so a request the client already gave up on ends with
+	// it instead of holding the probe's one connection for the full bound.
+	ctx, cancel := context.WithTimeout(ctx, healthProbeTimeout)
+	defer cancel()
+	return health.Ping(ctx)
+}
+
+// separate opens the pool held at field on demand, sized at size and copied from the shared
+// pool's configuration, and closes it with the shared pool. Each caller holds mu for the whole
+// check-and-open so two of them cannot open two pools, and one opened after Close would be a
+// pool nobody closes.
+func (p *Pool) separate(field **pgxpool.Pool, size int32, name string) (*pgxpool.Pool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.closed {
 		return nil, ErrPoolClosed
 	}
-	if p.rooms != nil {
-		return p.rooms, nil
+	if *field != nil {
+		return *field, nil
 	}
 	config := p.pool.Config().Copy()
-	config.MaxConns = roomsPoolSize
+	config.MaxConns = size
+	// Both minimums, not just MinConns: a floor inherited from the shared pool's DSN would be
+	// a target these pools cannot reach - pool_min_idle_conns=2 on a one-connection health
+	// pool - which pgxpool re-attempts, and puddle refuses as full, every health-check period.
 	config.MinConns = 0
-	rooms, err := pgxpool.NewWithConfig(context.Background(), config)
+	config.MinIdleConns = 0
+	opened, err := pgxpool.NewWithConfig(context.Background(), config)
 	if err != nil {
-		return nil, fmt.Errorf("open document rooms pool: %w", err)
+		return nil, fmt.Errorf("open %s pool: %w", name, err)
 	}
-	p.rooms = rooms
-	return p.rooms, nil
+	*field = opened
+	return opened, nil
 }
 
-// Close releases every connection the pool holds, the document rooms included.
+// Close releases every connection the pool holds, the document rooms and the health probe
+// included.
 func (p *Pool) Close() {
 	p.mu.Lock()
 	if p.closed {
@@ -166,11 +235,14 @@ func (p *Pool) Close() {
 		return
 	}
 	p.closed = true
-	rooms := p.rooms
-	p.rooms = nil
+	rooms, health := p.rooms, p.health
+	p.rooms, p.health = nil, nil
 	p.mu.Unlock()
 	if rooms != nil {
 		rooms.Close()
+	}
+	if health != nil {
+		health.Close()
 	}
 	p.pool.Close()
 }
@@ -180,14 +252,6 @@ func (p *Pool) Config() *pgxpool.Config { return p.pool.Config() }
 
 // Stat reports the pool's current connection counts.
 func (p *Pool) Stat() *pgxpool.Stat { return p.pool.Stat() }
-
-// Ping checks the database is reachable on a pooled connection.
-func (p *Pool) Ping(ctx context.Context) error {
-	if err := p.guard(ctx); err != nil {
-		return err
-	}
-	return p.pool.Ping(ctx)
-}
 
 func (p *Pool) guard(ctx context.Context) error {
 	if !holdsConnection(ctx) {
@@ -333,8 +397,9 @@ func (p *Pool) BeginTx(ctx context.Context, options pgx.TxOptions) (pgx.Tx, erro
 }
 
 // begin is the guarded body both transaction entry points share: guard runs in the exported
-// method, as it does in every other method of this pool, so a refusal records the caller that
-// asked for the transaction rather than one of this pool's own frames.
+// method, as it does in every exported method that hands out one of this pool's connections,
+// so a refusal records the caller that asked for the transaction rather than one of this
+// pool's own frames.
 func (p *Pool) begin(ctx context.Context, options pgx.TxOptions) (pgx.Tx, error) {
 	tx, err := p.pool.BeginTx(ctx, options)
 	if err != nil {

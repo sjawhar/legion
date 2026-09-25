@@ -173,14 +173,14 @@ took the room lock before its event's owner lock deadlocked against a settlement
 taken with `Acquire` - acquires a second one from it, and nothing a connection-holder waits for
 needs one either. A transaction holds its connection until it commits, and a caller that asks
 for another one while holding a row or advisory lock waits for a connection only the callers
-queued behind that lock can release. At production's pool - one Fargate task at `cpu="512"`,
-pgx's default `max(4, NumCPU)`, so four - two anchored writes and two settlements of that
-issue's other documents are enough, and only `pg_terminate_backend` recovers it. Rationing
-connections does not fix it: the queue behind one writer's issue lock is unbounded (a
-settlement per document, every issue-owned event append, the architecture importer).
+queued behind that lock can release. Two anchored writes and two settlements of one issue's
+other documents closed that cycle on a four-connection pool, and only `pg_terminate_backend`
+recovered it. Rationing connections does not fix it and neither does a bigger pool: the queue
+behind one writer's issue lock is unbounded (a settlement per document, every issue-owned event
+append, the architecture importer), so the size only moves the number of callers it takes.
 
 The rule enforces itself. `store.Pool` keeps the pgx pool private and every way it hands out a
-connection - `Query`, `QueryRow`, `Exec`, `Ping`, `Acquire`, `AcquireFunc`, `AcquireAllIdle`,
+connection - `Query`, `QueryRow`, `Exec`, `Acquire`, `AcquireFunc`, `AcquireAllIdle`,
 `CopyFrom`, `SendBatch`, `Begin`, `BeginTx` - refuses one taken while the caller already holds
 one, with `store.ErrNestedAcquire`, so a second acquisition fails a test instead of wedging
 production. Every entry point that opens one of this pool's transactions marks its context with
@@ -199,16 +199,43 @@ log; the error itself is returned every time. `store/pool_test.go` and
 concurrent anchored writes, and two settlements queued behind one held write on a
 four-connection pool.
 
+**Every pool's size is set in code.** `store.Open` fixes `MaxConns` at `store.sharedPoolSize`
+(16), so neither the task's CPU allotment nor the DSN another repository's URL builder writes
+decides it, and a `DATABASE_URL` that carries `pool_max_conns` is **refused at open** rather
+than silently overridden — the parameter is read from `pgx.ParseConfig`'s `RuntimeParams`,
+because `pgxpool.ParseConfig` is the layer that folds it into `MaxConns` and deletes it, so
+pgxpool's own parse cannot answer the question and a raw-string scan answers a different one.
+The other pool parameters are not refused, because the shared pool keeps whatever minimums the
+connection string sets. pgx's default, `max(4, NumCPU)`, is four on production's one Fargate
+task at `cpu="512"`, and four is a connection per blocked writer: with four writers parked on
+one issue's row lock a read of an unrelated issue waited the whole seventeen seconds the lock
+was held, where sixteen connections served 3,853 such reads at a four-millisecond median. The
+shared Aurora cluster has thousands of connections spare, so 16 is deliberate headroom, not a
+limit anything measured needs.
+
 Work that genuinely needs its own connection while a transaction is open does not take it from
-the shared one. A cold document room loads on the rooms pool (`store.Pool.Rooms`, four
-connections, opened on demand and closed with the pool that owns it): that load is deliberately
-outside the writer's transaction, because the room outlives the request and its updates must
-not roll back with it. Everything the load needs comes from that pool, `onLoadDocument`'s issue
-read included - a writer holding a connection and the issue's row lock waits for the load, so a
-load that waited for the shared pool would close the same cycle without a transaction of its
-own. The pool belongs to the store rather than to each `PgVersioned`, so a caller that
-constructs one to read a document borrows those connections instead of opening more, and it is
-deliberately unguarded: a load taken under an open transaction must be served, not refused.
+the shared one; it takes it from a pool of its own, opened on demand from a copy of the shared
+pool's configuration and closed with it (`store.Pool.separate`). A cold document room loads on
+the rooms pool (`store.Pool.Rooms`, four connections): that load is deliberately outside the
+writer's transaction, because the room outlives the request and its updates must not roll back
+with it. Everything the load needs comes from that pool, `onLoadDocument`'s issue read included
+- a writer holding a connection and the issue's row lock waits for the load, so a load that
+waited for the shared pool would close the same cycle without a transaction of its own. The
+pool belongs to the store rather than to each `PgVersioned`, so a caller that constructs one to
+read a document borrows those connections instead of opening more. The load balancer's probe
+takes the other one: `store.Pool.Healthy` pings the health pool (one connection, used by
+nothing else) under a `store.healthProbeTimeout` deadline derived from the caller's context,
+two seconds covering dial and query, and `/healthz` answers with the result. That constant's
+doc owns the argument for the bound: every prober reads silence as a dead process, the
+tightest of them allows three seconds (`deploy/compose/dispatch.compose.yml`,
+`deploy/scripts/autodeploy.sh`) against the ALB's five, and nothing else bounds the wait
+usefully — a cold dial is floored at two minutes by `pgxpool`, forty times that tightest
+deadline, and once the connection is up nothing bounds the query at all, because a request
+context carries no deadline. Warm is production's normal state, so the unbounded case is the
+one it runs. Both separate pools zero `MinConns` and `MinIdleConns`, so a floor meant for the
+shared pool cannot become a target a one- or four-connection pool can never reach, and both
+are deliberately unguarded — a load or a probe taken under an open transaction must be served,
+not refused, and a separate pool cannot close the cycle the guard prevents.
 
 Everywhere else a read runs through the transaction it is already inside: the issue state an
 anchored write checks before it stamps its mark (`issueOpen` through `queryFrom`), table anchor
@@ -229,10 +256,10 @@ its connection until it closes.
 connection bounds how many of the pool's connections a caller takes; this bounds how long it
 keeps the one it has. The listener is a cross-service HTTP call bounded only by its five-second
 client timeout (`internal/dispatch/envoy/client.go`), and production runs one Dispatch task on
-pgx's default pool of four connections, so a call made inside a transaction holds one of those
-four - and the rows it locked - until the listener answers; four concurrent ones empty the pool
-and stall every unrelated request, which a listener restart alone is enough to cause. A read
-(`Sessions`, `Role`, `Interest`, `ListInterests`) is resolved first, with nothing held; the
+a pool of `store.sharedPoolSize` connections, so a call made inside a transaction holds one of
+them - and the rows it locked - until the listener answers; that many concurrent ones empty the
+pool and stall every unrelated request, which a listener restart alone is enough to cause. A
+read (`Sessions`, `Role`, `Interest`, `ListInterests`) is resolved first, with nothing held; the
 transaction then re-reads under its own lock whatever the resolution depended on and decides
 with the resolution only while the locked row still agrees, taking it once more when it does
 not and answering a conflict after that. `api/envoy_resolve.go` owns that loop

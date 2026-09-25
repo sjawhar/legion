@@ -5,15 +5,20 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
@@ -171,6 +176,172 @@ func TestDispatchHandlerReportsDisconnectedNATS(t *testing.T) {
 	}
 	if nats, ok := health["nats"].(bool); !ok || nats {
 		t.Fatalf("healthz nats = %#v, want false", nats)
+	}
+}
+
+// /healthz answers while every connection of the shared pool is held. A busy period
+// legitimately empties that pool - writers queued on one issue's row lock hold theirs until
+// they commit - and a probe that queues behind them is read as a dead process: the ALB fails
+// it at five seconds, ECS replaces the task, and every in-flight request of every other client
+// is cancelled. The probe therefore takes its connection from a pool of its own, and the short
+// client timeout here is what tells a queued probe from an answered one.
+func TestHealthzAnswersWhileEveryPooledConnectionIsHeld(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := context.Background()
+	for held := int32(0); held < database.Pool.Config().MaxConns; held++ {
+		connection, err := database.Pool.Acquire(ctx)
+		if err != nil {
+			t.Fatalf("hold pooled connection %d: %v", held, err)
+		}
+		defer connection.Release()
+	}
+
+	server := httptest.NewServer(dispatchHandler(http.NewServeMux(), database, nil))
+	defer server.Close()
+	client := &http.Client{Timeout: 3 * time.Second}
+	started := time.Now()
+	response, err := client.Get(server.URL + "/healthz")
+	if err != nil {
+		t.Fatalf("health probe with every pooled connection held: %v (after %s)", err, time.Since(started))
+	}
+	defer response.Body.Close()
+	var health map[string]any
+	if err := json.NewDecoder(response.Body).Decode(&health); err != nil {
+		t.Fatalf("decode health response: %v", err)
+	}
+	if response.StatusCode != http.StatusOK || health["ok"] != true || health["db"] != true {
+		t.Fatalf("health probe = %d %#v, want 200 with ok and db true", response.StatusCode, health)
+	}
+}
+
+// /healthz answers inside the load balancer's timeout when Postgres stops answering at all:
+// packets dropped, nothing refused and nothing reset, which is what a security-group change, an
+// availability-zone partition, or an endpoint that accepts and then stalls looks like to the
+// client. A stopped container cannot produce it - its port refuses instantly - so the probe's
+// own wait only shows here. Without store.healthProbeTimeout that wait is two minutes on a
+// cold dial, which pgxpool floors it at, and unbounded once the connection is up, because an
+// http.Server request context carries no deadline: either way the probe does not answer, and
+// three polls that never answer replace the task and cancel every in-flight request of every
+// other client - the outcome the health pool exists to prevent. 503 is the right answer here;
+// silence is not.
+//
+// The health pool opens on the first probe, so black-holing the link before that probe leaves
+// nothing to race: the connection this test hangs on is dialled after the outage begins. That
+// makes this the cold case; the warm one, which production actually runs, is the unbounded
+// one and is measured against the real binary rather than here.
+func TestHealthzAnswersWhilePostgresStopsAnswering(t *testing.T) {
+	migrated := storetest.Open(t)
+	dsn, err := url.Parse(migrated.Pool.Config().ConnString())
+	if err != nil {
+		t.Fatalf("parse the test database URL: %v", err)
+	}
+	var blackholed atomic.Bool
+	dsn.Host = blackholePostgres(t, dsn.Host, &blackholed)
+
+	database, err := store.Open(context.Background(), dsn.String())
+	if err != nil {
+		t.Fatalf("open the store through the proxy: %v", err)
+	}
+	t.Cleanup(func() {
+		blackholed.Store(false)
+		database.Pool.Close()
+	})
+
+	server := httptest.NewServer(dispatchHandler(http.NewServeMux(), database, nil))
+	defer server.Close()
+	// The shared pool's own round trip is the control: the link works right up to the outage.
+	if _, err := database.Pool.Exec(context.Background(), "select 1"); err != nil {
+		t.Fatalf("query through the proxy before the outage: %v", err)
+	}
+
+	// The load balancer's own timeout: a poll it has not heard back from in five seconds is a
+	// failure, and three consecutive failures replace the task.
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	blackholed.Store(true)
+	started := time.Now()
+	response, err := client.Get(server.URL + "/healthz")
+	if err != nil {
+		t.Fatalf("health probe with Postgres unreachable: %v (after %s)", err, time.Since(started))
+	}
+	defer response.Body.Close()
+	var health map[string]any
+	if err := json.NewDecoder(response.Body).Decode(&health); err != nil {
+		t.Fatalf("decode health response: %v", err)
+	}
+	if response.StatusCode != http.StatusServiceUnavailable || health["db"] != false {
+		t.Fatalf("health probe with Postgres unreachable = %d %#v, want 503 with db false",
+			response.StatusCode, health)
+	}
+}
+
+// blackholePostgres puts a proxy in front of upstream and returns its address. While blackholed
+// is set, bytes stop moving in both directions and nothing is refused, reset or closed, so a
+// client waiting on a reply waits for as long as its own deadline allows.
+func blackholePostgres(t *testing.T, upstream string, blackholed *atomic.Bool) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for the Postgres proxy: %v", err)
+	}
+	t.Cleanup(func() { listener.Close() })
+	go func() {
+		for {
+			client, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go proxyPostgresConnection(client, upstream, blackholed)
+		}
+	}()
+	return listener.Addr().String()
+}
+
+// proxyPostgresConnection completes the client's handshake even while the link is black-holed
+// and only then dials upstream, which is what a dropped SYN-ACK path leaves a client holding: a
+// connected socket nobody is answering on.
+func proxyPostgresConnection(client net.Conn, upstream string, blackholed *atomic.Bool) {
+	defer client.Close()
+	for blackholed.Load() {
+		time.Sleep(20 * time.Millisecond)
+	}
+	server, err := net.Dial("tcp", upstream)
+	if err != nil {
+		return
+	}
+	defer server.Close()
+	done := make(chan struct{}, 2)
+	go pumpUntilBlackholed(server, client, blackholed, done)
+	go pumpUntilBlackholed(client, server, blackholed, done)
+	<-done
+}
+
+// pumpUntilBlackholed copies src to dst, freezing while the link is black-holed rather than
+// tearing the connection down: a dropped packet does not close a socket.
+func pumpUntilBlackholed(dst, src net.Conn, blackholed *atomic.Bool, done chan<- struct{}) {
+	defer func() { done <- struct{}{} }()
+	buffer := make([]byte, 32*1024)
+	for {
+		if blackholed.Load() {
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+		if err := src.SetReadDeadline(time.Now().Add(20 * time.Millisecond)); err != nil {
+			return
+		}
+		read, err := src.Read(buffer)
+		if read > 0 {
+			if _, err := dst.Write(buffer[:read]); err != nil {
+				return
+			}
+		}
+		if err != nil {
+			var timeout net.Error
+			if errors.As(err, &timeout) && timeout.Timeout() {
+				continue
+			}
+			return
+		}
 	}
 }
 

@@ -79,6 +79,67 @@ func randomDatabaseSuffix(t *testing.T) string {
 	return hex.EncodeToString(bytes[:])
 }
 
+// A connection string that asks for a pool size is refused rather than quietly overridden,
+// and the question is put to pgx's own parser rather than to the string. Every row here is a
+// shape pgx accepts: a keyword may be separated from its "=" by whitespace, and a value may be
+// quoted or backslash-escaped and may contain the parameter's own name. A scanner gets the
+// first wrong in the dangerous direction - the pool is silently pinned and the refusal never
+// fires - and the last two wrong in the worse one, refusing to boot on a valid password.
+func TestOpenRefusesAConnectionStringThatSetsThePoolSize(t *testing.T) {
+	base := testDatabaseURL(t)
+	withPoolSize, err := url.Parse(base)
+	if err != nil {
+		t.Fatalf("parse test database URL: %v", err)
+	}
+	query := withPoolSize.Query()
+	query.Set(poolSizeParam, "4")
+	withPoolSize.RawQuery = query.Encode()
+
+	// The rows that must not be refused point at a closed port: the observable is whether the
+	// refusal fired, not whether the credentials are real.
+	unreachable := "host=127.0.0.1 port=1 "
+	for name, tc := range map[string]struct {
+		databaseURL string
+		refused     bool
+	}{
+		"url query":            {withPoolSize.String(), true},
+		"keyword value":        {"host=127.0.0.1 " + poolSizeParam + "=4", true},
+		"keyword value spaced": {"host=127.0.0.1 " + poolSizeParam + " = 4", true},
+		"quoted value containing the parameter": {
+			unreachable + "password='a " + poolSizeParam + "=1 b'", false,
+		},
+		"escaped value containing the parameter": {
+			unreachable + `password=a\ ` + poolSizeParam + `=1`, false,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store, err := Open(context.Background(), tc.databaseURL)
+			if err == nil {
+				store.Pool.Close()
+			}
+			refused := err != nil &&
+				strings.Contains(err.Error(), poolSizeParam) &&
+				strings.Contains(err.Error(), strconv.Itoa(sharedPoolSize))
+			if refused != tc.refused {
+				t.Fatalf("refused = %v, want %v; open returned %v", refused, tc.refused, err)
+			}
+			// A row that must not be refused has to reach the dial. Reading `refused` off
+			// the message alone would pass a detector that rejected a valid quoted
+			// password as unparseable, which is the same boot outage under another name.
+			if !tc.refused && err != nil && strings.Contains(err.Error(), "parse Postgres URL") {
+				t.Fatalf("connection string rejected at the parse, want it to reach the dial: %v", err)
+			}
+		})
+	}
+
+	// The refusal is specific: the same connection string without the parameter still opens.
+	store, err := Open(context.Background(), base)
+	if err != nil {
+		t.Fatalf("open without %s: %v", poolSizeParam, err)
+	}
+	t.Cleanup(store.Pool.Close)
+}
+
 func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	store := openEmptyTestStore(t)

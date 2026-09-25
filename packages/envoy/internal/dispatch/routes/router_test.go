@@ -451,7 +451,7 @@ func TestStaticHandlerRoutingRules(t *testing.T) {
 
 	for _, tc := range []struct {
 		path string
-		want string // "404" | "shell" | "health"
+		want string // "404" | "shell"
 	}{
 		// Exact reserved roots: no static asset or SPA route lives here.
 		{path: "/api", want: "404"},
@@ -474,10 +474,11 @@ func TestStaticHandlerRoutingRules(t *testing.T) {
 		{path: "/apix", want: "shell"},
 		// A missing static asset outside any reserved root.
 		{path: "/favicon.png", want: "404"},
-		// The exact "GET /healthz" mux route has its own dedicated handler
-		// and must stay unaffected by the static-fallback rules above:
-		// neither a 404 nor the SPA shell, but the real health body.
-		{path: "/healthz", want: "health"},
+		// /healthz belongs to the process's outer mux (cmd/dispatch), mounted above this
+		// router; the router has no health route of its own. The root stays reserved so a
+		// probe that reaches the fallback gets a JSON 404 rather than a dashboard shell
+		// that any 200-checking prober would read as healthy.
+		{path: "/healthz", want: "404"},
 	} {
 		t.Run(tc.path, func(t *testing.T) {
 			response := httptest.NewRecorder()
@@ -497,13 +498,6 @@ func TestStaticHandlerRoutingRules(t *testing.T) {
 				}
 				if response.Body.String() != "<!doctype html>" {
 					t.Fatalf("%s body: got %q, want dashboard shell", tc.path, response.Body.String())
-				}
-			case "health":
-				if response.Body.String() == "<!doctype html>" {
-					t.Fatalf("%s served the SPA shell instead of the health handler", tc.path)
-				}
-				if !strings.Contains(response.Body.String(), `"ok"`) {
-					t.Fatalf("%s body: got %q, want the health handler's JSON", tc.path, response.Body.String())
 				}
 			}
 		})

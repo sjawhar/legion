@@ -47,8 +47,10 @@ func TestPoolRefusesASecondConnectionInsideATransaction(t *testing.T) {
 	if _, err := database.Pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly}); !errors.Is(err, ErrNestedAcquire) {
 		t.Fatalf("second transaction with options: %v, want ErrNestedAcquire", err)
 	}
-	if err := database.Pool.Ping(ctx); !errors.Is(err, ErrNestedAcquire) {
-		t.Fatalf("ping inside a transaction: %v, want ErrNestedAcquire", err)
+	// Healthy is the deliberate exception: it probes its own pool, so it cannot close the
+	// cycle the guard prevents and must answer even for a caller holding a connection.
+	if err := database.Pool.Healthy(ctx); err != nil {
+		t.Fatalf("health probe inside a transaction: %v, want success", err)
 	}
 	if _, err := database.Pool.Acquire(ctx); !errors.Is(err, ErrNestedAcquire) {
 		t.Fatalf("connection acquired inside a transaction: %v, want ErrNestedAcquire", err)
