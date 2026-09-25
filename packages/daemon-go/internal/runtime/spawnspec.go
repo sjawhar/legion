@@ -18,15 +18,24 @@ var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 // IsEnvName reports whether name is one a shell accepts as an environment variable's.
 func IsEnvName(name string) bool { return envName.MatchString(name) }
 
-// GrantFile is the file an agent's LEGION_GRANT_FILE names under a runtime's state directory:
-// `<state_dir>/secrets/<claim>-grant` — under tmux beside the claim's other secret files, which the
-// daemon prunes it with, and in a pod on the worker container's memory-backed state volume. Every
+// SecretsDir is the one directory under a runtime's state directory that holds secret files: under
+// tmux each pane's boot token, its other secrets and its grant file, the daemon's Dispatch token,
+// the operator-launched controller's secret, and the daemon's provider-env directory; in a pod, the
+// grant file on the worker container's memory-backed state volume. The daemon prunes a claim's
+// files from it when the claim's process ends.
+func SecretsDir(stateDir string) string { return filepath.Join(stateDir, "secrets") }
+
+// SecretFilePath is the secret file name in SecretsDir: `<state_dir>/secrets/<name>`.
+func SecretFilePath(stateDir, name string) string { return filepath.Join(SecretsDir(stateDir), name) }
+
+// GrantFile is the file an agent's LEGION_GRANT_FILE names: `<state_dir>/secrets/<claim>-grant`,
+// under tmux beside the claim's other secret files, which the daemon prunes it with. Every
 // runtime names it in the agent's environment from the process's start, because Oh My Pi copies
 // that environment once for every `gh` it runs to serve a pr:// or issue:// read, and none writes
 // it: the pi-envoy extension writes a fresh grant there before each tool call that redeems one, and
 // `legion credential`, `legion gh` and `legion handoff complete` read it.
 func GrantFile(stateDir string, token claim.Token) string {
-	return filepath.Join(stateDir, "secrets", string(token)+"-grant")
+	return SecretFilePath(stateDir, string(token)+"-grant")
 }
 
 // ValidateSpawnSpec is the refusal every runtime makes before anything touches its disk, its

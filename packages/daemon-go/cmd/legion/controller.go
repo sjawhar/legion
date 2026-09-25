@@ -130,7 +130,7 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	// One environment, probed and then launched: the operator's own with the controller's set on
 	// top, later pairs replacing inherited values of the same name.
 	env := processEnvironment()
-	for _, pair := range controllerEnvironment(cfg, stateDir, token, tmux.SecretFilePath(stateDir, token)) {
+	for _, pair := range controllerEnvironment(cfg, stateDir, token, runtime.SecretFilePath(stateDir, token)) {
 		env[pair[0]] = pair[1]
 	}
 	created, err := makeDirs(controllerDir)
