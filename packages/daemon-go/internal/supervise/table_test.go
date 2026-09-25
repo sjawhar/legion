@@ -148,6 +148,27 @@ func TestTheTableHasARowOrANamedIgnoreForEveryEventInEveryState(t *testing.T) {
 	}
 }
 
+// Two event types keyed on one kind would share every row the table holds for it, which is how an
+// event meant to be answered its own way answers as another: the close split is worth nothing if a
+// later close can be aliased onto onStop in kindOf. A Timer is the one type that spreads over
+// several kinds, by its TimerKind, and each of those is one kind of one type.
+func TestNoTwoEventTypesShareAKind(t *testing.T) {
+	byKind := map[eventKind]string{}
+	for name, events := range samples(t) {
+		for _, ev := range events {
+			k := kindOf(ev)
+			if k == "" {
+				t.Errorf("%s has no kind: kindOf answers nothing for it, so the table cannot key on it", name)
+				continue
+			}
+			if owner, taken := byKind[k]; taken && owner != name {
+				t.Errorf("%s and %s are both kind %q: each event type answers its own way, so each takes its own kind", owner, name, k)
+			}
+			byKind[k] = name
+		}
+	}
+}
+
 // fixture is a claim restored in state with everything an event needs to pass its fences: the
 // generation, a recorded session, a locator for the states that have a process, and a pending
 // delivery (confirmed while working, as a delivered turn leaves it).

@@ -277,7 +277,7 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 	if err != nil || issue == nil {
 		return intake.Result{}, err
 	}
-	if RoleFor(issue.Phase) != fact.Role {
+	if roleFor(issue.Phase) != fact.Role {
 		return refused("HANDOFF_NOT_CURRENT_PHASE", fmt.Sprintf("the %s does not run phase %s of %s; this completion changed nothing", fact.Role, issue.Phase, issue.Key)), nil
 	}
 	if issue.Phase == phase.Merging && !fact.Ready {
@@ -504,7 +504,7 @@ func (e *Engine) closed(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 
 func (e *Engine) claimFailed(ctx context.Context, tx pgx.Tx, fact intake.ClaimFailed) (intake.Result, error) {
 	issue, err := e.store.Issue(ctx, tx, fact.Issue)
-	if err != nil || issue == nil || issue.Phase == phase.Held || RoleFor(issue.Phase) != fact.Role {
+	if err != nil || issue == nil || issue.Phase == phase.Held || roleFor(issue.Phase) != fact.Role {
 		return intake.Result{}, err
 	}
 	from := issue.Phase
@@ -534,7 +534,7 @@ func (e *Engine) retryOrEscalate(ctx context.Context, tx pgx.Tx, fact intake.Ret
 	if err := e.store.PutIssue(ctx, tx, *issue); err != nil {
 		return intake.Result{}, err
 	}
-	return intake.Result{}, e.start(ctx, tx, *issue, RoleFor(from), task(*issue, record.PhaseRow{}, nil, "retry held phase"))
+	return intake.Result{}, e.start(ctx, tx, *issue, roleFor(from), task(*issue, record.PhaseRow{}, nil, "retry held phase"))
 }
 
 func (e *Engine) backward(ctx context.Context, tx pgx.Tx, fact intake.BackwardMove) (intake.Result, error) {
@@ -542,7 +542,7 @@ func (e *Engine) backward(ctx context.Context, tx pgx.Tx, fact intake.BackwardMo
 	if err != nil || issue == nil {
 		return intake.Result{}, err
 	}
-	if RoleFor(issue.Phase) == "" || RoleFor(issue.Phase) != fact.Requester || phaseIndex(fact.To) >= phaseIndex(issue.Phase) || phaseIndex(fact.To) < 0 {
+	if roleFor(issue.Phase) == "" || roleFor(issue.Phase) != fact.Requester || phaseIndex(fact.To) >= phaseIndex(issue.Phase) || phaseIndex(fact.To) < 0 {
 		return intake.Result{Refusal: &intake.Refusal{Status: 409, Code: "BACKWARD_REFUSED", Message: "backward moves require the current role and an earlier workflow phase"}}, nil
 	}
 	row, err := e.phaseRow(ctx, tx, issue.Key, fact.Requester)
@@ -615,16 +615,16 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	if err := e.store.PutIssue(ctx, tx, issue); err != nil {
 		return err
 	}
-	if err := e.clearHandoff(ctx, tx, issue.Key, RoleFor(row.To)); err != nil {
+	if err := e.clearHandoff(ctx, tx, issue.Key, roleFor(row.To)); err != nil {
 		return err
 	}
-	if err := e.suspend(ctx, tx, issue, RoleFor(from)); err != nil {
+	if err := e.suspend(ctx, tx, issue, roleFor(from)); err != nil {
 		return err
 	}
-	if err := e.start(ctx, tx, issue, RoleFor(row.To), task(issue, handoff, pr, reason)); err != nil {
+	if err := e.start(ctx, tx, issue, roleFor(row.To), task(issue, handoff, pr, reason)); err != nil {
 		return err
 	}
-	if err := e.notice(ctx, tx, issue.Key, record.Notice{Kind: "phase-finished", Role: RoleFor(from), Phase: from, Summary: handoff.Verdict}); err != nil {
+	if err := e.notice(ctx, tx, issue.Key, record.Notice{Kind: "phase-finished", Role: roleFor(from), Phase: from, Summary: handoff.Verdict}); err != nil {
 		return err
 	}
 	if row.To == phase.Done {
