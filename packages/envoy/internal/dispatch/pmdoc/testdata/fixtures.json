@@ -1525,6 +1525,280 @@
     "rendered_by_milkdown": "[https://example.com/x](https://example.com/x \"title\")\n"
   },
   {
+    "name": "footnote-block-indents",
+    "markdown": "Refs[^1][^2][^3][^4][^5].\n\n[^1]: ```\n     x\n    ```\n\n[^2]: - a\n      ```\n      x\n      ```\n\n[^3]: - a\n\n      b\n\n[^4]: > ```\n    >  x\n    > ```\n\n[^5]: 1. a\n       ```\n        y\n       ```\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Refs"
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "1"
+              }
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "2"
+              }
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "3"
+              }
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "4"
+              }
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "5"
+              }
+            },
+            {
+              "type": "text",
+              "text": "."
+            }
+          ]
+        },
+        {
+          "type": "footnote_definition",
+          "attrs": {
+            "label": "1",
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "code_block",
+              "attrs": {
+                "language": null,
+                "blockId": "b-000003"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": " x"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "footnote_definition",
+          "attrs": {
+            "label": "2",
+            "blockId": "b-000004"
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false,
+                "blockId": "b-000005"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000006"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000007"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null,
+                        "blockId": "b-000008"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "x"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "footnote_definition",
+          "attrs": {
+            "label": "3",
+            "blockId": "b-000009"
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false,
+                "blockId": "b-000010"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": true,
+                    "checked": null,
+                    "blockId": "b-000011"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000012"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000013"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "b"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "footnote_definition",
+          "attrs": {
+            "label": "4",
+            "blockId": "b-000014"
+          },
+          "content": [
+            {
+              "type": "blockquote",
+              "attrs": {
+                "blockId": "b-000015"
+              },
+              "content": [
+                {
+                  "type": "code_block",
+                  "attrs": {
+                    "language": null,
+                    "blockId": "b-000016"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": " x"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "footnote_definition",
+          "attrs": {
+            "label": "5",
+            "blockId": "b-000017"
+          },
+          "content": [
+            {
+              "type": "ordered_list",
+              "attrs": {
+                "order": 1,
+                "spread": false,
+                "blockId": "b-000018"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000019"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000020"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null,
+                        "blockId": "b-000021"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": " y"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AVoBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQEEUmVmc4cBAQMSZm9vdG5vdGVfcmVmZXJlbmNlKAABBgVsYWJlbAF3ATGHAQYDEmZvb3Rub3RlX3JlZmVyZW5jZSgAAQgFbGFiZWwBdwEyhwEIAxJmb290bm90ZV9yZWZlcmVuY2UoAAEKBWxhYmVsAXcBM4cBCgMSZm9vdG5vdGVfcmVmZXJlbmNlKAABDAVsYWJlbAF3ATSHAQwDEmZvb3Rub3RlX3JlZmVyZW5jZSgAAQ4FbGFiZWwBdwE1hwEOBgQAARABLigAAQAHYmxvY2tJZAF3CGItMDAwMDAxhwEAAxNmb290bm90ZV9kZWZpbml0aW9uBwABEwMKY29kZV9ibG9jawcAARQGBAABFQIgeCgAARQHYmxvY2tJZAF3CGItMDAwMDAzKAABEwVsYWJlbAF3ATEoAAETB2Jsb2NrSWQBdwhiLTAwMDAwMocBEwMTZm9vdG5vdGVfZGVmaW5pdGlvbgcAARsDC2J1bGxldF9saXN0BwABHAMJbGlzdF9pdGVtBwABHQMJcGFyYWdyYXBoBwABHgYEAAEfAWEoAAEeB2Jsb2NrSWQBdwhiLTAwMDAwN4cBHgMKY29kZV9ibG9jawcAASIGBAABIwF4KAABIgdibG9ja0lkAXcIYi0wMDAwMDgoAAEdBWxhYmVsAXcD4oCiKAABHQhsaXN0VHlwZQF3BmJ1bGxldCgAAR0Gc3ByZWFkAXkoAAEdB2Jsb2NrSWQBdwhiLTAwMDAwNigAARwGc3ByZWFkAXkoAAEcB2Jsb2NrSWQBdwhiLTAwMDAwNSgAARsFbGFiZWwBdwEyKAABGwdibG9ja0lkAXcIYi0wMDAwMDSHARsDE2Zvb3Rub3RlX2RlZmluaXRpb24HAAEuAwtidWxsZXRfbGlzdAcAAS8DCWxpc3RfaXRlbQcAATADCXBhcmFncmFwaAcAATEGBAABMgFhKAABMQdibG9ja0lkAXcIYi0wMDAwMTKHATEDCXBhcmFncmFwaAcAATUGBAABNgFiKAABNQdibG9ja0lkAXcIYi0wMDAwMTMoAAEwBWxhYmVsAXcD4oCiKAABMAhsaXN0VHlwZQF3BmJ1bGxldCgAATAGc3ByZWFkAXgoAAEwB2Jsb2NrSWQBdwhiLTAwMDAxMSgAAS8Gc3ByZWFkAXkoAAEvB2Jsb2NrSWQBdwhiLTAwMDAxMCgAAS4FbGFiZWwBdwEzKAABLgdibG9ja0lkAXcIYi0wMDAwMDmHAS4DE2Zvb3Rub3RlX2RlZmluaXRpb24HAAFBAwpibG9ja3F1b3RlBwABQgMKY29kZV9ibG9jawcAAUMGBAABRAIgeCgAAUMHYmxvY2tJZAF3CGItMDAwMDE2KAABQgdibG9ja0lkAXcIYi0wMDAwMTUoAAFBBWxhYmVsAXcBNCgAAUEHYmxvY2tJZAF3CGItMDAwMDE0hwFBAxNmb290bm90ZV9kZWZpbml0aW9uBwABSwMMb3JkZXJlZF9saXN0BwABTAMJbGlzdF9pdGVtBwABTQMJcGFyYWdyYXBoBwABTgYEAAFPAWEoAAFOB2Jsb2NrSWQBdwhiLTAwMDAyMIcBTgMKY29kZV9ibG9jawcAAVIGBAABUwIgeSgAAVIHYmxvY2tJZAF3CGItMDAwMDIxKAABTQVsYWJlbAF3A+KAoigAAU0IbGlzdFR5cGUBdwZidWxsZXQoAAFNBnNwcmVhZAF5KAABTQdibG9ja0lkAXcIYi0wMDAwMTkoAAFMBW9yZGVyAX0BKAABTAZzcHJlYWQBeSgAAUwHYmxvY2tJZAF3CGItMDAwMDE4KAABSwVsYWJlbAF3ATUoAAFLB2Jsb2NrSWQBdwhiLTAwMDAxNwA=",
+    "rendered_by_milkdown": "Refs[^1][^2][^3][^4][^5].\n\n[^1]: ```\n     x\n    ```\n\n[^2]: * a\n      ```\n      x\n      ```\n\n[^3]: * a\n\n      b\n\n[^4]: > ```\n    >  x\n    > ```\n\n[^5]: 1. a\n       ```\n        y\n       ```\n"
+  },
+  {
     "name": "footnote-ending-in-a-block",
     "markdown": "Code[^1], a list[^2], a quote[^3] and a callout[^4].\n\n[^1]: Note.\n\n    ```\n    code\n    ```\n\n[^2]: Note.\n\n    - item\n\n[^3]: Note.\n\n    > quoted\n\n[^4]: :::callout{#footnote-callout kind=\"note\" title=\"In a footnote\"}\n    Body.\n    :::\n",
     "pm_json": {

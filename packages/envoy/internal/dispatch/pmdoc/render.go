@@ -24,6 +24,9 @@ type renderer struct {
 	// and footnoteLabel is its label as written, so that the line is read after a reference to it.
 	footnoteLineAt int
 	footnoteLabel  string
+	// footnoteLabels is every footnote label the document defines, lowercased: text shaped like a
+	// reference to one would read as that reference.
+	footnoteLabels map[string]bool
 	err            error
 	blockOffsets   []BlockOffset
 }
@@ -74,7 +77,7 @@ func render(doc *Node) (*renderer, error) {
 	if len(doc.Children) == 1 && doc.Children[0].Type == "paragraph" && len(doc.Children[0].Children) == 0 {
 		return &renderer{}, nil
 	}
-	r := &renderer{}
+	r := &renderer{footnoteLabels: definedFootnoteLabels(doc)}
 	r.blocks(doc.Children, "")
 	if r.err != nil {
 		return nil, r.err
@@ -88,6 +91,20 @@ func render(doc *Node) (*renderer, error) {
 		copy(r.b.Bytes(), "***")
 	}
 	return r, nil
+}
+
+// definedFootnoteLabels is every label doc's footnote definitions carry, lowercased, since the
+// browser editor's parser matches a reference to its definition whatever the case.
+func definedFootnoteLabels(doc *Node) map[string]bool {
+	labels := make(map[string]bool)
+	for _, child := range doc.Children {
+		if child.Type == "footnote_definition" {
+			if label, ok := child.Attrs["label"].(string); ok {
+				labels[strings.ToLower(label)] = true
+			}
+		}
+	}
+	return labels
 }
 
 func (r *renderer) blocks(nodes []*Node, prefix string) {

@@ -67,6 +67,10 @@ func TestTypedBlockFenceOutgrowsTheColonLinesItHolds(t *testing.T) {
 		fence string
 	}{
 		{"a callout in a callout", callout("c1", callout("c2", paragraph("x"))), "::::callout"},
+		{"a callout in a callout, then a paragraph", callout("c1", callout("c2", paragraph("x")), paragraph("y")), "::::callout"},
+		{"a paragraph, then a callout in a callout", callout("c1", paragraph("y"), callout("c2", paragraph("x"))), "::::callout"},
+		{"a rule first", callout("c1", &Node{Type: "hr"}, paragraph("y")), ":::callout"},
+		{"a rule alone", callout("c1", &Node{Type: "hr"}), ":::callout"},
 		{"three deep", callout("c1", callout("c2", callout("c3", paragraph("x")))), ":::::callout"},
 		{"code holding a closing line", callout("c1", code("a\n:::\nb")), "::::callout"},
 		{"code holding a longer line", callout("c1", paragraph("Intro."), code(":::::  ")), "::::::callout"},

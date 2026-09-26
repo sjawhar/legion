@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"html"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/yuin/goldmark"
@@ -26,7 +27,7 @@ type markdownReader struct {
 }
 
 var blockReader = markdownReader{md: goldmark.New(
-	goldmark.WithExtensions(extension.Linkify, lazyAwareTable{}, extension.Strikethrough, extension.TaskList, extension.Footnote),
+	goldmark.WithExtensions(extension.Linkify, lazyAwareTable{}, extension.Strikethrough, extension.TaskList, footnotes{}),
 	goldmark.WithParserOptions(
 		parser.WithBlockParsers(
 			util.Prioritized(&typedDirectiveParser{}, 950),
@@ -71,6 +72,62 @@ var inlineMarkdownParser = parser.NewParser(
 		util.Prioritized(extension.NewLinkifyParser(), 999),
 	),
 )
+
+// footnoteRunParser reads inline markdown as inlineMarkdownParser does, with footnote definitions
+// after it so that the references in it read as references (parseInlineWithDefinitions).
+var footnoteRunParser = parser.NewParser(
+	parser.WithBlockParsers(
+		util.Prioritized(footnoteDefinitionParser{extension.NewFootnoteBlockParser()}, 999),
+		util.Prioritized(lineRecordingParagraph{parser.NewParagraphParser()}, 1000),
+	),
+	parser.WithInlineParsers(parser.DefaultInlineParsers()...),
+	parser.WithInlineParsers(
+		util.Prioritized(extension.NewStrikethroughParser(), 500),
+		util.Prioritized(extension.NewLinkifyParser(), 999),
+		util.Prioritized(extension.NewFootnoteParser(), 101),
+	),
+	parser.WithASTTransformers(util.Prioritized(extension.NewFootnoteASTTransformer(), 999)),
+)
+
+// parseInlineWithDefinitions reads one textblock's inline markdown as ParseInline does, after a
+// definition for each of labels, the footnote labels it refers to. It is the renderer's read-back
+// of a run it wrote, where a reference is only a reference beside its definition.
+func parseInlineWithDefinitions(markdown string, labels []string) ([]*Node, error) {
+	if len(labels) == 0 {
+		return ParseInline(markdown)
+	}
+	var full strings.Builder
+	full.WriteString(markdown)
+	for _, label := range labels {
+		full.WriteString("\n\n[^" + escapeFootnoteLabel(label) + "]: x")
+	}
+	source := []byte(full.String())
+	root := withLineStarts(footnoteRunParser, lineEnds(source), parser.NewContext())
+	first, ok := root.FirstChild().(*ast.Paragraph)
+	if !ok {
+		return nil, fmt.Errorf("%w: inline markdown does not read as a paragraph", ErrSchema)
+	}
+	paragraph, err := parseBlock(first, source, footnoteLabels(root))
+	if err != nil {
+		return nil, err
+	}
+	sortNodeMarks(paragraph)
+	return paragraph.Children, nil
+}
+
+// referencedLabels is the footnote labels nodes refer to, each once, in order.
+func referencedLabels(nodes []*Node) []string {
+	var labels []string
+	for _, node := range nodes {
+		if node.Type != "footnote_reference" {
+			continue
+		}
+		if label, ok := node.Attrs["label"].(string); ok && !slices.Contains(labels, label) {
+			labels = append(labels, label)
+		}
+	}
+	return labels
+}
 
 // ParseInline converts one textblock's worth of inline markdown into inline
 // nodes. Markdown that forms more than one paragraph, or holds text after its
@@ -325,6 +382,39 @@ func (reader markdownReader) parseLined(lined, source []byte) ast.Node {
 	context := parser.NewContext()
 	context.Set(sourceKey, source)
 	return withLineStarts(reader.md.Parser(), lined, context)
+}
+
+// footnotes is goldmark's footnote extension with its definition parser taking every space and
+// tab after a definition's `]:` as part of its prefix, as the browser editor's parser does, so the
+// definition's first block starts at the column its later lines are measured from: goldmark left
+// them to that block, which read a fence opening the definition as indented by one (and dropped a
+// space from each code line) and a list's marker one column in (which put its item's later blocks
+// outside it).
+type footnotes struct{}
+
+func (footnotes) Extend(m goldmark.Markdown) {
+	m.Parser().AddOptions(
+		parser.WithBlockParsers(util.Prioritized(footnoteDefinitionParser{extension.NewFootnoteBlockParser()}, 999)),
+		parser.WithInlineParsers(util.Prioritized(extension.NewFootnoteParser(), 101)),
+		parser.WithASTTransformers(util.Prioritized(extension.NewFootnoteASTTransformer(), 999)),
+	)
+}
+
+type footnoteDefinitionParser struct{ parser.BlockParser }
+
+func (p footnoteDefinitionParser) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
+	node, state := p.BlockParser.Open(parent, reader, pc)
+	if node != nil && state&parser.HasChildren != 0 {
+		line, _ := reader.PeekLine()
+		skip := 0
+		for skip < len(line) && (line[skip] == ' ' || line[skip] == '\t') {
+			skip++
+		}
+		if skip < len(line) && !util.IsBlank(line[skip:]) {
+			reader.Advance(skip)
+		}
+	}
+	return node, state
 }
 
 // lineRecordingParagraph is goldmark's paragraph parser, recording each line it takes as the

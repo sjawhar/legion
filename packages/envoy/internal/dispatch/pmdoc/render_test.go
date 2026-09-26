@@ -812,3 +812,39 @@ func TestRenderKeepsTheBlocksOfATightListItem(t *testing.T) {
 		})
 	}
 }
+
+// A footnote reference reads as one only when its label is defined, so text shaped like one - `[^1]`
+// where the document defines `1` - is written with its bracket escaped, and a run beside a
+// reference is read back with its definition, so delimiters that pair around the reference are
+// escaped as they are anywhere else.
+func TestRenderKeepsTextAroundFootnoteReferences(t *testing.T) {
+	definition := func(label string) *Node {
+		return &Node{Type: "footnote_definition", Attrs: Attrs{"label": label}, Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: "x"}}}}}
+	}
+	text := func(value string) *Node { return &Node{Type: "text", Text: value} }
+	reference := func(label string) *Node { return &Node{Type: "footnote_reference", Attrs: Attrs{"label": label}} }
+	paragraph := func(children ...*Node) *Node { return &Node{Type: "paragraph", Children: children} }
+	for name, doc := range map[string]*Node{
+		"reference-shaped text":             {Type: "doc", Children: []*Node{paragraph(text("see [^1] here"), reference("1")), definition("1")}},
+		"reference-shaped text, other case": {Type: "doc", Children: []*Node{paragraph(text("[^Note]"), reference("note")), definition("note")}},
+		"reference-shaped text in its definition": {Type: "doc", Children: []*Node{paragraph(text("a"), reference("1")),
+			{Type: "footnote_definition", Attrs: Attrs{"label": "1"}, Children: []*Node{paragraph(text("[^1]"))}}}},
+		"asterisks before a reference":   {Type: "doc", Children: []*Node{paragraph(text("*-*"), reference("1")), definition("1")}},
+		"underscores around a reference": {Type: "doc", Children: []*Node{paragraph(text("_a"), reference("1"), text("b_")), definition("1")}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			markdown := mustRender(t, doc)
+			back, err := Parse(markdown)
+			if err != nil {
+				t.Fatalf("Parse(%q) = %v", markdown, err)
+			}
+			if !back.Equal(doc) {
+				t.Fatalf("Render() = %q, which reads back as %q", markdown, mustRender(t, back))
+			}
+		})
+	}
+	undefined := &Node{Type: "doc", Children: []*Node{paragraph(text("[^2] stays"), reference("1")), definition("1")}}
+	if got := mustRender(t, undefined); !strings.HasPrefix(got, "[^2] stays") {
+		t.Fatalf("Render() = %q, want text naming an undefined label written as main writes it", got)
+	}
+}

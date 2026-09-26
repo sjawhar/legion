@@ -25,6 +25,8 @@ type escapeContext struct {
 	// lineFeedNext reports whether the next node's text begins with a line feed, so that a
 	// carriage return ending this text is half of a line break rather than one of its own.
 	lineFeedNext bool
+	// footnoteLabels is every footnote label the document defines, lowercased.
+	footnoteLabels map[string]bool
 	// textLineStart is where the character's line of text begins inside this node, or -1 when it
 	// began in an earlier one: the writer's long-standing list, heading, quote and ordered-list
 	// escapes are judged here, in headings, cells and inside marks as well, so that the markdown
@@ -82,7 +84,7 @@ func needsInlineEscape(value string, offset int, char rune, context escapeContex
 		// A label whose brackets cannot pair as written escapes them all: a stray `]` closes it
 		// early, and a `[` left raw would then pair with its own closer.
 		return context.label == labelBracketsEscaped ||
-			context.label != labelBracketsWritten && linkOpener(value, offset)
+			context.label != labelBracketsWritten && (linkOpener(value, offset) || footnoteReferenceText(value, offset, context.footnoteLabels))
 	case '(':
 		return offset > 0 && value[offset-1] == ']'
 	case ']':
@@ -503,6 +505,16 @@ func emphasisDelimiter(value string, offset int, delimiter byte) bool {
 	before := start > 0 && isASCIIAlphaNumeric(value[start-1])
 	after := end < len(value) && isASCIIAlphaNumeric(value[end])
 	return (delimiter != '_' || !before || !after) && (before || after)
+}
+
+// footnoteReferenceText reports whether the text at offset, a `[`, reads as a reference to one of
+// labels, the document's defined footnote labels lowercased: `[^label]`.
+func footnoteReferenceText(value string, offset int, labels map[string]bool) bool {
+	if offset+1 >= len(value) || value[offset+1] != '^' {
+		return false
+	}
+	closing := strings.IndexByte(value[offset+2:], ']')
+	return closing > 0 && labels[strings.ToLower(value[offset+2:offset+2+closing])]
 }
 
 func linkOpener(value string, offset int) bool {

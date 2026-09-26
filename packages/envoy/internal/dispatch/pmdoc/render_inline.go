@@ -99,13 +99,14 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlin
 }
 
 // runReadsBack reports whether the inline markdown written since from reads back as nodes: the
-// run's own lines, with the prefix its later lines are written behind taken off.
+// run's own lines, with the prefix its later lines are written behind taken off, read after a
+// definition for each footnote label it refers to, since a reference reads as one only then.
 func (r *renderer) runReadsBack(from int, prefix string, nodes []*Node) bool {
 	source := string(r.b.Bytes()[from:])
 	if prefix != "" {
 		source = strings.ReplaceAll(source, "\n"+prefix, "\n")
 	}
-	parsed, err := ParseInline(source)
+	parsed, err := parseInlineWithDefinitions(source, referencedLabels(nodes))
 	return err == nil && slices.Equal(inlineSignature(parsed), inlineSignature(nodes))
 }
 
@@ -144,16 +145,17 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 				label = r.labelBrackets
 			}
 			r.writeInlineText(n, &position, prefix, escapeContext{
-				lineFeedNext: index+1 < len(nodes) && strings.HasPrefix(nodes[index+1].Text, "\n"),
-				tableCell:    escapePipes,
-				urlSchemes:   !hasLink,
-				label:        label,
-				followed:     index+1 < len(nodes) || len(next) > 0,
-				delimiters:   escapes,
-				heading:      context.heading,
-				marked:       len(next) > 0,
-				opener:       adjacentDelimiter(next[common:]),
-				closer:       adjacentDelimiter(next[sharedMarks(next, following):]),
+				lineFeedNext:   index+1 < len(nodes) && strings.HasPrefix(nodes[index+1].Text, "\n"),
+				footnoteLabels: r.footnoteLabels,
+				tableCell:      escapePipes,
+				urlSchemes:     !hasLink,
+				label:          label,
+				followed:       index+1 < len(nodes) || len(next) > 0,
+				delimiters:     escapes,
+				heading:        context.heading,
+				marked:         len(next) > 0,
+				opener:         adjacentDelimiter(next[common:]),
+				closer:         adjacentDelimiter(next[sharedMarks(next, following):]),
 			})
 		case "hardbreak":
 			r.closeMarks(active, escapePipes)
