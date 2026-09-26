@@ -268,19 +268,42 @@ Dispatch execution; the shared client also imposes a 60-second HTTP deadline.
 turn carrying the user's own text, the snapshot's `as_of` becoming the baseline. It runs that query only for a
 session the stop could actually nudge — the host awaits this handler, so a session that is excluded below would
 otherwise pay up to `OPEN_ASKS_TIMEOUT_MS` at the head of every turn for an answer nothing reads. `agent_end` is
-the nudge's stop signal, and the trigger is how the run ended plus Dispatch state, never the text of what the
-agent last said: a session whose run settles normally (`willContinue` unset and the last assistant reply ended
-`stopReason: "stop"` — an interrupt, a provider error, a truncation, or a run with no reply of its own is never
-nudged, and asks Dispatch nothing) with nothing open, nothing opened since the turn's baseline, and no ask of its
-own opened during the turn gets one hidden `dispatch-ask-reminder` steer with `triggerTurn`, telling it to open an
-ask if it is waiting on a human and otherwise carry on. One per
-stop: firing latches the arming period, and only a turn carrying the user's own text arms the next one, so the
-nudge's own continuation — which re-enters no `before_agent_start` at all — cannot arm anything
-(`extensions/legion-phase-stall-omp.test.ts` holds the host to that on the pinned binary, since without it a
-session would nudge itself without bound). One stop-time check runs at a time: `agent_end` handlers are not
-awaited by the host, so a latch held across the Dispatch round trip is what keeps a second stop inside it from
-checking or nudging again. The latch and the period are in memory only — a cold start or a session switch begins
-at period 0, which nudges nothing until the next genuine user turn arms one.
+the nudge's stop signal, and Dispatch state is only its cheap precondition: a session whose run settles normally
+(`willContinue` unset and the last assistant reply ended `stopReason: "stop"` — an interrupt, a provider error, a
+truncation, or a run with no reply of its own is never nudged, and asks Dispatch nothing) with nothing open,
+nothing opened since the turn's baseline, and no ask of its own opened during the turn then runs a **silent
+self-check**: one `pi.askEphemeral` call — the host's one-shot, tool-free model call over a snapshot of the
+conversation, the same channel a targeted Dispatch BTW uses — asking the agent for one word, WAITING or
+PROCEEDING. Only a reply whose first word is WAITING produces the one hidden `dispatch-ask-reminder` steer with
+`triggerTurn`, which tells the agent it said it is waiting on a human with no open ask and to open one now with
+`dispatch_ask` (or `dispatch_request_approval` for a document). **Every other outcome is silent**: PROCEEDING,
+an unparsable reply, an `askEphemeral` failure, the timeout, and a host with no `pi.askEphemeral` at all — that
+last one arms no period either, so it pays no round trip. The timeout is the extension's own clock, not the
+host's: the call is given an `AbortSignal` so a host that honours it stops paying for an answer nobody will
+read, but the handler races that call against `ASK_SELF_CHECK_TIMEOUT_MS` (60 s, moved by
+`ENVOY_SELF_CHECK_TIMEOUT_MS`) and always settles there, because a host that ignored the signal would otherwise
+hold the one-check-at-a-time latch — and every later check with it — for as long as its call hung. A late answer
+is dropped. A failure is logged once per session (`logger.warn`), never notified: a broken self-check must not
+put a warning in front of the user for a reminder they were not going to get. The cost of the common case is
+therefore one hidden model call per normally-settled turn that has no open ask, and nothing on screen.
+
+The check is owed and spent like the host's own todo reminder rather than once per period: the arming turn owes
+one, running it spends it whatever came back, and the agent's next real work — a successful `tool_result` whose
+tool is not a `dispatch_*` one — owes another, so a run that keeps working keeps being checked without the user
+typing again. `ASK_CHECKS_PER_PERIOD` (5) caps what one armed period pays for. A settled turn that only replies
+calls no tool, so the nudge's own continuation owes nothing and cannot nudge itself; that, plus the continuation
+re-entering no `before_agent_start` at all, is the loop safety
+(`extensions/legion-phase-stall-omp.test.ts` holds the host to both on the pinned binary). An ask the agent
+opened itself (`saw_ask`) suppresses the rest of the period outright. One stop-time check runs at a time:
+`agent_end` handlers are not awaited by the host, so a latch held across both the Dispatch round trip and the
+self-check is what keeps a second stop inside either from checking or nudging again, and the staleness list is
+re-read after each await. The latch, the period and its budget are in memory only — a cold start or a session
+switch begins at period 0, which nudges nothing until the next genuine user turn arms one. Both the guard and
+the staleness list compare only the host's **live** session id against the one the period was armed with, never
+the module-level `sessionID` the registration heartbeat maintains: a fresh TUI mints its id after
+`session_start`, so those two disagree for up to `ENVOY_HEARTBEAT_MS` and a brand-new terminal went unchecked
+for that whole window. A switch or rebind resets the period to 0 and bumps the generation, and a `task`
+subagent's instance arms no period at all, so nothing was resting on the module id.
 
 What the arming rule excludes is as load-bearing as what it covers. An Envoy delivery wakes a session through the
 same agent-initiated path the nudge itself uses, which emits no `before_agent_start`, so an event-woken turn arms
