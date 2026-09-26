@@ -750,9 +750,9 @@ func (r *liveRig) checkReAdopt() error {
 		if !ok || alive.Kind != runtime.Alive || !sameLocator(alive.Locator, loc) {
 			return fmt.Errorf("%s's first observation after re-adoption is %+v, want alive with its recorded %s", c.name, alive, loc.Incarnation)
 		}
-		reg, ok := r.reg.await(c.token, c.gen, restarted, 2*time.Minute)
-		if !ok || reg.hash != tokenHash(c.bootToken) {
-			return fmt.Errorf("%s's shim did not say hello again with its generation-%d token", c.name, c.gen)
+		reg, err := r.awaitHelloAgain(c, restarted)
+		if err != nil {
+			return err
 		}
 		uid, err := r.kubectl("get", "pod", SandboxName(c.token), "-o", "jsonpath={.metadata.uid}")
 		if err != nil {
@@ -839,8 +839,8 @@ func (r *liveRig) checkOrphanSweep() error {
 	note("runtime", "sweep with grace 1s: %s deleted; every known claim's Sandbox, the suspended %s included, survives", name, keep)
 	orphan.loc, orphan.state = nil, stateReleased
 	for _, c := range r.live() {
-		if reg, ok := r.reg.await(c.token, c.gen, restarted, 2*time.Minute); !ok || reg.hash != tokenHash(c.bootToken) {
-			return fmt.Errorf("%s's shim did not say hello again to the replaced runtime with its generation-%d token", c.name, c.gen)
+		if _, err := r.awaitHelloAgain(c, restarted); err != nil {
+			return err
 		}
 	}
 	return nil

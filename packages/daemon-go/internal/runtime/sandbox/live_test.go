@@ -839,6 +839,16 @@ func (r *liveRig) awaitRunning(c *liveClaim, since time.Time) (registration, err
 	return reg, nil
 }
 
+// awaitHelloAgain is c's shim saying hello, since the runtime and listener were replaced at since,
+// with its current generation's boot token: a live claim reconnecting to a new runtime.
+func (r *liveRig) awaitHelloAgain(c *liveClaim, since time.Time) (registration, error) {
+	reg, ok := r.reg.await(c.token, c.gen, since, 2*time.Minute)
+	if !ok || reg.hash != tokenHash(c.bootToken) {
+		return reg, fmt.Errorf("%s's shim did not say hello again with its generation-%d token", c.name, c.gen)
+	}
+	return reg, nil
+}
+
 // networkPathFailure names what a pod that runs but never says hello points at: the devbox
 // address and port it dials, and the security groups of the node it runs on (from the node's
 // EC2NodeClass, read as the operator).

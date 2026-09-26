@@ -551,13 +551,11 @@ func (r *Runtime) Release(ctx context.Context, k runtime.Known) error {
 		if err := r.checkLocator(*k.Locator); err != nil {
 			return err
 		}
+		r.shutdown(ctx, *k.Locator)
 	}
 	// From here the claim is no longer this runtime's to keep: a Sandbox a failed delete leaves is
 	// the orphan sweep's once the daemon has retired the claim.
 	r.disown(k.Claim)
-	if k.Locator != nil {
-		r.shutdown(ctx, *k.Locator)
-	}
 	name := SandboxName(k.Claim)
 	deleting, cancel := call(ctx)
 	defer cancel()
