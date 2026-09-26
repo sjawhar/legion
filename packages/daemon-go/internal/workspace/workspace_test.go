@@ -166,6 +166,7 @@ func provisionRequest(t *testing.T) Request {
 		Issue:            "WIDGETS-42",
 		CredentialHelper: "!/opt/legion/bin/legion credential",
 		Source:           FromGitHub("test-installation-token", state),
+		Log:              func(line string) { t.Logf("provisioning logged: %s", line) },
 	}
 }
 
@@ -181,6 +182,7 @@ func TestProvisionRefusesARequestWithNoOneWayToTheRepository(t *testing.T) {
 	}{
 		{"a token and no credential directory", func(r *Request) { r.Source = FromGitHub("test-installation-token", "") }, "workspace credential directory is required"},
 		{"no way to the repository", func(r *Request) { r.Source = nil }, "workspace request names no way to the repository: FromFeed or FromGitHub"},
+		{"no log", func(r *Request) { r.Log = nil }, "workspace request names no log"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			run := newLocalRunner(t)
@@ -443,6 +445,7 @@ func TestProvisionFromAFeedHoldsNoCredential(t *testing.T) {
 		before := len(run.Calls())
 		working, err := Provision(context.Background(), run, Request{
 			StateDir: state, Repo: "acme/widgets", Issue: issue, CredentialHelper: "!/opt/legion/bin/legion credential", Source: FromFeed(fetch.Feed),
+			Log: func(line string) { t.Logf("provisioning logged: %s", line) },
 		})
 		if err != nil {
 			t.Fatalf("provision %s from the feed: %v", issue, err)
@@ -485,7 +488,8 @@ func TestProvisionFromAFeedKeepsABookmarkPushedAfterTheSnapshot(t *testing.T) {
 	run := newLocalRunner(t)
 	state := filepath.Join(t.TempDir(), "state")
 	request := func(issue, feed string) Request {
-		return Request{StateDir: state, Repo: "acme/widgets", Issue: issue, CredentialHelper: "!/opt/legion/bin/legion credential", Source: FromFeed(feed)}
+		return Request{StateDir: state, Repo: "acme/widgets", Issue: issue, CredentialHelper: "!/opt/legion/bin/legion credential", Source: FromFeed(feed),
+			Log: func(line string) { t.Logf("provisioning logged: %s", line) }}
 	}
 	first := fetchRequest(t)
 	if _, err := Fetch(context.Background(), run, first); err != nil {

@@ -181,6 +181,7 @@ func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, fee
 	run := workspace.NewRunner(workspace.CommandTimeout, tools)
 	provisioned, err := workspace.Provision(ctx, run, workspace.Request{
 		StateDir: root, Repo: repo, Issue: issue, CredentialHelper: credentialHelper, Source: workspace.FromFeed(feed),
+		Log: func(line string) { fmt.Fprintln(stdout, "workspace-init: "+line) },
 	})
 	if err != nil {
 		return err
@@ -286,7 +287,7 @@ func flock(fd, how int) error {
 // recreated at in .legion/workspace-recovered.json (workspace-init.ts:196-215). recoveredAt is an
 // ISO instant in milliseconds, UTC, as JavaScript's toISOString writes it.
 func writeRecoveryMarker(ctx context.Context, run workspace.Runner, dir, fromRef string) error {
-	result, err := workspace.RunChecked(ctx, run, []string{"jj", "log", "-r", "@", "--no-graph", "-T", "commit_id"}, nil, dir)
+	result, err := workspace.RunChecked(ctx, run, []string{"jj", "log", "-r", "@", "--no-graph", "-T", "commit_id", "--color=never"}, nil, dir)
 	if err != nil {
 		return err
 	}
