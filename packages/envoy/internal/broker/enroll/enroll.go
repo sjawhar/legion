@@ -73,19 +73,38 @@ type Service struct {
 
 func hash(token string) []byte { s := sha256.Sum256([]byte(token)); return s[:] }
 
-func (s *Service) MintLauncherCredential(ctx context.Context, operator *string, service *string, host, askID string) (uuid.UUID, string, error) {
+// execer is satisfied by both *pgxpool.Pool (via Store.Pool) and pgx.Tx, so mintLauncherCredential
+// can run either standalone (MintLauncherCredential) or joined to a caller's own transaction
+// (MintLauncherCredentialTx) — the latter is what launcher.Service's applyAsk uses, so a crash
+// between minting the credential and flipping its own request row to "issued" rolls back both
+// together instead of leaving an orphaned, unrecoverable credential.
+type execer interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+func (s *Service) mintLauncherCredential(ctx context.Context, exec execer, operator, service *string, host, askID string) (uuid.UUID, string, error) {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
 		return uuid.Nil, "", err
 	}
 	token := base64.RawURLEncoding.EncodeToString(raw)
 	id := uuid.New()
-	_, err := s.Store.Pool.Exec(ctx, `insert into launcher_credentials (id, operator, service, host, token_hash, issued_via_ask) values ($1,$2,$3,$4,$5,$6)`,
+	_, err := exec.Exec(ctx, `insert into launcher_credentials (id, operator, service, host, token_hash, issued_via_ask) values ($1,$2,$3,$4,$5,$6)`,
 		id, operator, service, host, hash(token), nullable(askID))
 	if err != nil {
 		return uuid.Nil, "", err
 	}
 	return id, token, nil
+}
+
+func (s *Service) MintLauncherCredential(ctx context.Context, operator *string, service *string, host, askID string) (uuid.UUID, string, error) {
+	return s.mintLauncherCredential(ctx, s.Store.Pool, operator, service, host, askID)
+}
+
+// MintLauncherCredentialTx is MintLauncherCredential run inside a caller-owned transaction, so the
+// insert commits or rolls back atomically with whatever else that transaction does.
+func (s *Service) MintLauncherCredentialTx(ctx context.Context, tx pgx.Tx, operator, service *string, host, askID string) (uuid.UUID, string, error) {
+	return s.mintLauncherCredential(ctx, tx, operator, service, host, askID)
 }
 
 func (s *Service) AuthenticateLauncher(ctx context.Context, bearer string) (Credential, error) {

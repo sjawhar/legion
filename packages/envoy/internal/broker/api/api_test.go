@@ -10,11 +10,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/dispatch"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
+	"github.com/sjawhar/envoy/internal/broker/launcher"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/requests"
 	"github.com/sjawhar/envoy/internal/broker/rules"
@@ -602,5 +604,165 @@ func TestReadSelfListsGrantsAndRenewEnforcesOwnID(t *testing.T) {
 	decodeJSON(t, oresp, &oout)
 	if oout["lease_expires_at"] == nil {
 		t.Fatalf("renew response %+v missing lease_expires_at", oout)
+	}
+}
+
+// fakeLauncherDispatch is a small, self-contained CreateAsk/GetAsk/ListIssues/CreateIssue double
+// for the httptest-level launcher-route test below, independent of launcher package's own test
+// fake (an unexported type this package cannot reach). It structurally satisfies launcher.Service's
+// unexported Dispatch field type without needing to name it.
+type fakeLauncherDispatch struct {
+	mu     sync.Mutex
+	nextID int
+	asks   map[string]*dispatch.Ask
+	issues []dispatch.IssueSummary
+}
+
+func (f *fakeLauncherDispatch) CreateAsk(_ context.Context, _, _ string, _ []dispatch.Option, _ string) (dispatch.Ask, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nextID++
+	id := fmt.Sprintf("launcher-ask-%d", f.nextID)
+	ask := dispatch.Ask{ID: id, State: "open"}
+	if f.asks == nil {
+		f.asks = map[string]*dispatch.Ask{}
+	}
+	f.asks[id] = &ask
+	return ask, nil
+}
+
+func (f *fakeLauncherDispatch) GetAsk(_ context.Context, id string) (dispatch.Ask, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	a, ok := f.asks[id]
+	if !ok {
+		return dispatch.Ask{}, fmt.Errorf("fakeLauncherDispatch: no such ask %q", id)
+	}
+	return *a, nil
+}
+
+func (f *fakeLauncherDispatch) ListIssues(_ context.Context, _, _ string) ([]dispatch.IssueSummary, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]dispatch.IssueSummary, len(f.issues))
+	copy(out, f.issues)
+	return out, nil
+}
+
+func (f *fakeLauncherDispatch) CreateIssue(_ context.Context, _, title string, assignee *string, labels []string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := fmt.Sprintf("PROJ-%d", len(f.issues)+1)
+	f.issues = append(f.issues, dispatch.IssueSummary{Key: key, Title: title, Assignee: assignee, Labels: labels})
+	return key, nil
+}
+
+// approve answers the one ask this test opens; it assumes exactly one ask has been created.
+func (f *fakeLauncherDispatch) approve(user string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, a := range f.asks {
+		a.State = "answered"
+		a.Answer = &dispatch.Answer{User: user, Selected: []string{"Approve"}, At: time.Now()}
+	}
+}
+
+// TestLauncherCredentialRoutesIssueAndReadTokenOnce is Important Finding 3's regression: the two
+// real authNone routes, exercised over real HTTP with a real launcher.Service (Postgres-backed)
+// instead of the deleted 501 stub. POST opens a request and returns 202 with a pending_id; GET on
+// an unknown pending id is 404; GET while still pending reports state "pending"; once the fake
+// Dispatch answers Approve and Reconcile runs, the first GET returns the token and the second GET
+// returns state "issued" with the "token" key entirely absent from the JSON body (not present-but-
+// null), which is what makes the token single-use on the wire.
+func TestLauncherCredentialRoutesIssueAndReadTokenOnce(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, testDatabaseURL(t))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { st.Pool.Close() })
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	fakeLD := &fakeLauncherDispatch{}
+	enr := &enroll.Service{Store: st, Lease: time.Hour}
+	ls := &launcher.Service{Store: st, Dispatch: fakeLD, Enroll: enr, Project: "PROJ"}
+
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	Register(mux, Deps{
+		PublicURL: srv.URL,
+		Enroll:    enr,
+		Proof:     &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, Replay: enr.Replay},
+		Dispatch:  dispatch.New("http://127.0.0.1:0", "unused-in-this-test", http.DefaultClient),
+		Launcher:  ls,
+	})
+
+	postResp, err := srv.Client().Post(srv.URL+"/v1/launcher-credentials", "application/json",
+		bytes.NewReader([]byte(`{"operator":"sjawhar","host":"sami-agents"}`)))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	if postResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST status = %d, want 202", postResp.StatusCode)
+	}
+	var postOut map[string]any
+	decodeJSON(t, postResp, &postOut)
+	pendingID, _ := postOut["pending_id"].(string)
+	if pendingID == "" {
+		t.Fatalf("POST response missing pending_id: %v", postOut)
+	}
+
+	unknownResp, err := srv.Client().Get(srv.URL + "/v1/launcher-credentials/does-not-exist")
+	if err != nil {
+		t.Fatalf("GET unknown: %v", err)
+	}
+	unknownResp.Body.Close()
+	if unknownResp.StatusCode != http.StatusNotFound {
+		t.Fatalf("GET unknown status = %d, want 404", unknownResp.StatusCode)
+	}
+
+	pendResp, err := srv.Client().Get(srv.URL + "/v1/launcher-credentials/" + pendingID)
+	if err != nil {
+		t.Fatalf("GET pending: %v", err)
+	}
+	var pendOut map[string]any
+	decodeJSON(t, pendResp, &pendOut)
+	if pendOut["state"] != "pending" {
+		t.Fatalf("GET pending = %v, want state pending", pendOut)
+	}
+
+	fakeLD.approve("sjawhar")
+	if err := ls.Reconcile(ctx); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	firstResp, err := srv.Client().Get(srv.URL + "/v1/launcher-credentials/" + pendingID)
+	if err != nil {
+		t.Fatalf("GET issued (1st): %v", err)
+	}
+	var firstOut map[string]any
+	decodeJSON(t, firstResp, &firstOut)
+	if firstOut["state"] != "issued" {
+		t.Fatalf("GET issued (1st) = %v, want state issued", firstOut)
+	}
+	token, _ := firstOut["token"].(string)
+	if token == "" {
+		t.Fatalf("GET issued (1st) = %v, want a non-empty token", firstOut)
+	}
+
+	secondResp, err := srv.Client().Get(srv.URL + "/v1/launcher-credentials/" + pendingID)
+	if err != nil {
+		t.Fatalf("GET issued (2nd): %v", err)
+	}
+	var secondOut map[string]any
+	decodeJSON(t, secondResp, &secondOut)
+	if secondOut["state"] != "issued" {
+		t.Fatalf("GET issued (2nd) = %v, want state issued", secondOut)
+	}
+	if _, ok := secondOut["token"]; ok {
+		t.Fatalf("GET issued (2nd) = %v, want no \"token\" key at all", secondOut)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -31,17 +32,24 @@ type createCall struct {
 // fakeDispatch is launcher.Service's dispatchClient: it opens and answers asks entirely
 // in-memory (askID -> *dispatch.Ask, mutated by answer between Request and Reconcile) and keeps a
 // project's issues in a slice, following the same fake-over-httptest-server precedent as
-// requests.fakeOpener and requests.fakeAskReader.
+// requests.fakeOpener and requests.fakeAskReader. mu guards every field: TestStanding
+// SerializesConcurrentCreateForNewOperator drives Standing from multiple goroutines to prove
+// Postgres's own advisory lock — not this fake — is what serializes the find-or-create race, and
+// listIssuesDelay widens that race window so the test would fail without the lock.
 type fakeDispatch struct {
-	nextAsk      int
-	asks         map[string]*dispatch.Ask
-	createCalls  []createCall
-	getAskCalls  []string
-	issues       []dispatch.IssueSummary
-	createIssueN int
+	mu              sync.Mutex
+	nextAsk         int
+	asks            map[string]*dispatch.Ask
+	createCalls     []createCall
+	getAskCalls     []string
+	issues          []dispatch.IssueSummary
+	createIssueN    int
+	listIssuesDelay time.Duration
 }
 
 func (f *fakeDispatch) CreateAsk(_ context.Context, issue, question string, options []dispatch.Option, urgency string) (dispatch.Ask, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.nextAsk++
 	id := fmt.Sprintf("ask-%d", f.nextAsk)
 	ask := dispatch.Ask{ID: id, State: "open"}
@@ -54,6 +62,8 @@ func (f *fakeDispatch) CreateAsk(_ context.Context, issue, question string, opti
 }
 
 func (f *fakeDispatch) GetAsk(_ context.Context, id string) (dispatch.Ask, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.getAskCalls = append(f.getAskCalls, id)
 	a, ok := f.asks[id]
 	if !ok {
@@ -63,16 +73,31 @@ func (f *fakeDispatch) GetAsk(_ context.Context, id string) (dispatch.Ask, error
 }
 
 func (f *fakeDispatch) ListIssues(_ context.Context, _, _ string) ([]dispatch.IssueSummary, error) {
+	f.mu.Lock()
+	delay := f.listIssuesDelay
 	out := make([]dispatch.IssueSummary, len(f.issues))
 	copy(out, f.issues)
+	f.mu.Unlock()
+	if delay > 0 {
+		time.Sleep(delay)
+	}
 	return out, nil
 }
 
 func (f *fakeDispatch) CreateIssue(_ context.Context, _, title string, assignee *string, labels []string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.createIssueN++
 	key := fmt.Sprintf("PROJ-%d", f.createIssueN)
 	f.issues = append(f.issues, dispatch.IssueSummary{Key: key, Title: title, Assignee: assignee, Labels: labels})
 	return key, nil
+}
+
+// createIssueCount safely reads createIssueN after concurrent Standing calls have settled.
+func (f *fakeDispatch) createIssueCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.createIssueN
 }
 
 // answer sets an ask's state to answered with the given approver and selection so the next
@@ -285,5 +310,44 @@ func TestReadUnknownPendingID(t *testing.T) {
 	svc, _ := newTestService(t)
 	if _, _, err := svc.Read(ctx, "not-a-real-pending-id"); err != ErrNotFound {
 		t.Fatalf("Read(unknown) error = %v, want ErrNotFound", err)
+	}
+}
+
+// TestStandingSerializesConcurrentCreateForNewOperator pins the fix for the find-or-create race:
+// Dispatch's own issue creation has no unique constraint on (project, title, label), so two
+// concurrent Standing calls for the same never-before-seen operator could otherwise each observe
+// zero matching issues and each create one. listIssuesDelay widens the window between ListIssues
+// and CreateIssue so this test would reliably fail (two created issues) if Standing's advisory
+// lock were removed; with it, exactly one goroutine creates the issue and the other reuses it.
+func TestStandingSerializesConcurrentCreateForNewOperator(t *testing.T) {
+	ctx := context.Background()
+	svc, fake := newTestService(t)
+	fake.listIssuesDelay = 100 * time.Millisecond
+
+	const n = 5
+	var wg sync.WaitGroup
+	keys := make([]string, n)
+	errs := make([]error, n)
+	for i := range n {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			keys[i], errs[i] = svc.Standing(ctx, "race-operator")
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("Standing(%d): %v", i, err)
+		}
+	}
+	for i, key := range keys {
+		if key != keys[0] {
+			t.Fatalf("Standing(%d) = %q, want the same issue as Standing(0) = %q", i, key, keys[0])
+		}
+	}
+	if n := fake.createIssueCount(); n != 1 {
+		t.Fatalf("CreateIssue calls = %d, want exactly 1 despite %d concurrent callers", n, len(keys))
 	}
 }

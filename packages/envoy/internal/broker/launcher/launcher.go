@@ -12,9 +12,11 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -65,12 +67,10 @@ type Service struct {
 //
 // service, when non-nil, requests a service credential (like the Legion daemon's shared
 // enrollment authority) rather than a personal one: the ask still opens on operator's own standing
-// issue (operator is who approves it), but the credential minted on approval carries service with
-// a nil operator instead of the reverse. The schema this table shares with enroll.Service has no
-// column for that in-flight fact, so it rides in token_once — otherwise unused while the row is
-// pending — until Reconcile overwrites it with the real one-time token at the moment of minting;
-// Read never exposes it early because its own clearing update only ever fires once state is
-// "issued" (see Read).
+// issue (operator is who approves it), but the credential minted on approval (applyAsk) carries
+// service with a nil operator instead of the reverse. It is stored verbatim in this row's own
+// service column so it survives from Request through to Reconcile without depending on any other
+// column's incidental behavior.
 func (s *Service) Request(ctx context.Context, operator, host string, service *string) (string, error) {
 	issueKey, err := s.Standing(ctx, operator)
 	if err != nil {
@@ -87,15 +87,23 @@ func (s *Service) Request(ctx context.Context, operator, host string, service *s
 	if err != nil {
 		return "", err
 	}
-	var serviceScratch *string
-	if service != nil && *service != "" {
-		serviceScratch = service
-	}
-	_, err = s.Store.Pool.Exec(ctx, `insert into launcher_credential_requests
-		(pending_id_hash, operator, host, ask_id, ask_edited_at, state, token_once, expires_at)
-		values ($1,$2,$3,$4,$5,'pending',$6,$7)`,
-		hashPendingID(pendingID), operator, host, ask.ID, ask.EditedAt, serviceScratch, time.Now().Add(pendingTTL))
+	tx, err := s.Store.Pool.Begin(ctx)
 	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `insert into launcher_credential_requests
+		(pending_id_hash, operator, host, service, ask_id, ask_edited_at, state, expires_at)
+		values ($1,$2,$3,$4,$5,$6,'pending',$7)`,
+		hashPendingID(pendingID), operator, host, service, ask.ID, ask.EditedAt, time.Now().Add(pendingTTL)); err != nil {
+		return "", err
+	}
+	if err := auditLauncher(ctx, tx, "launcher_request.created", "launcher:"+host, auditDetail(map[string]any{
+		"operator": operator, "host": host, "service": service, "ask_id": ask.ID,
+	})); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return "", err
 	}
 	return pendingID, nil
@@ -103,10 +111,8 @@ func (s *Service) Request(ctx context.Context, operator, host string, service *s
 
 // Read answers the launcher's poll: "pending", "denied", "expired", or "issued" with the raw
 // one-time token exactly once. It locks the row for update and clears token_once only after
-// reading it back, and only when state is "issued" (a pending, denied, or expired row is never
-// mutated here, so a Read while pending never disturbs Request's service scratch value sitting in
-// token_once); a Read that observes "issued" a second time, after the first clear committed,
-// therefore finds token_once already null.
+// reading it back, and only when state is "issued"; a Read that observes "issued" a second time,
+// after the first clear committed, finds token_once already null.
 func (s *Service) Read(ctx context.Context, pendingID string) (state, token string, err error) {
 	h := hashPendingID(pendingID)
 	tx, err := s.Store.Pool.Begin(ctx)
@@ -180,7 +186,10 @@ func (s *Service) Reconcile(ctx context.Context) error {
 // applyAsk moves one pending row on an ask read, exactly like requests.Machine.ApplyAnswer: a
 // single transaction re-reads and locks the row (it may already have been decided or expired by a
 // concurrent pass), decides granted/denied from the ask, and — on approval — mints the credential
-// and records it in the same update that flips state to "issued".
+// (MintLauncherCredentialTx, joined to this same transaction so a crash between minting and
+// flipping this row to "issued" rolls back both together instead of orphaning an unrecoverable
+// credential) and records it, and its own audit row, in the same transaction that commits the
+// state change.
 func (s *Service) applyAsk(ctx context.Context, pendingHash []byte, ask dispatch.Ask) error {
 	tx, err := s.Store.Pool.Begin(ctx)
 	if err != nil {
@@ -188,10 +197,10 @@ func (s *Service) applyAsk(ctx context.Context, pendingHash []byte, ask dispatch
 	}
 	defer tx.Rollback(ctx)
 	var operator, host, storedAskID string
-	var recordedEdited, serviceScratch *string
-	err = tx.QueryRow(ctx, `select operator, host, ask_id, ask_edited_at, token_once
+	var recordedEdited, service *string
+	err = tx.QueryRow(ctx, `select operator, host, ask_id, ask_edited_at, service
 		from launcher_credential_requests where pending_id_hash=$1 and state='pending' for update`, pendingHash).
-		Scan(&operator, &host, &storedAskID, &recordedEdited, &serviceScratch)
+		Scan(&operator, &host, &storedAskID, &recordedEdited, &service)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil // already decided (or expired) since Reconcile listed it
 	}
@@ -201,24 +210,41 @@ func (s *Service) applyAsk(ctx context.Context, pendingHash []byte, ask dispatch
 	if ask.State == "open" {
 		return nil
 	}
-	approved := storedAskID == ask.ID &&
-		ask.State == "answered" && ask.Answer != nil &&
-		sameEdit(recordedEdited, ask.EditedAt) &&
-		ask.Answer.User == operator &&
-		len(ask.Answer.Selected) == 1 && ask.Answer.Selected[0] == "Approve"
+	approved, denyReason := true, ""
+	switch {
+	case storedAskID != ask.ID:
+		approved, denyReason = false, "ask id does not match the request's own ask"
+	case ask.State != "answered" || ask.Answer == nil:
+		approved, denyReason = false, "ask was "+ask.State+" without an approval"
+	case !sameEdit(recordedEdited, ask.EditedAt):
+		approved, denyReason = false, "ask was edited after it was opened"
+	case ask.Answer.User != operator:
+		approved, denyReason = false, "answered by "+ask.Answer.User+", not the requesting operator"
+	case len(ask.Answer.Selected) != 1 || ask.Answer.Selected[0] != "Approve":
+		approved, denyReason = false, "approver chose "+strings.Join(ask.Answer.Selected, ",")
+	}
+	by := ""
+	if ask.Answer != nil {
+		by = ask.Answer.User
+	}
 	if !approved {
 		if _, err := tx.Exec(ctx, `update launcher_credential_requests set state='denied' where pending_id_hash=$1 and state='pending'`, pendingHash); err != nil {
+			return err
+		}
+		if err := auditLauncher(ctx, tx, "launcher_request.denied", "human:"+by, auditDetail(map[string]any{
+			"operator": operator, "host": host, "ask_id": storedAskID, "reason": denyReason,
+		})); err != nil {
 			return err
 		}
 		return tx.Commit(ctx)
 	}
 	var operatorArg, serviceArg *string
-	if serviceScratch != nil {
-		serviceArg = serviceScratch
+	if service != nil {
+		serviceArg = service
 	} else {
 		operatorArg = &operator
 	}
-	id, token, err := s.Enroll.MintLauncherCredential(ctx, operatorArg, serviceArg, host, storedAskID)
+	id, token, err := s.Enroll.MintLauncherCredentialTx(ctx, tx, operatorArg, serviceArg, host, storedAskID)
 	if err != nil {
 		return fmt.Errorf("mint launcher credential: %w", err)
 	}
@@ -226,20 +252,74 @@ func (s *Service) applyAsk(ctx context.Context, pendingHash []byte, ask dispatch
 		where pending_id_hash=$1 and state='pending'`, pendingHash, id, token); err != nil {
 		return err
 	}
+	if err := auditLauncher(ctx, tx, "launcher_request.issued", "human:"+by, auditDetail(map[string]any{
+		"operator": operator, "service": service, "host": host, "ask_id": storedAskID, "credential_id": id.String(),
+	})); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }
 
+// expirePending expires every pending row past its expires_at and writes one audit row per
+// expired request, all in one transaction (the same shape as requests.Machine.ExpirePending).
 func (s *Service) expirePending(ctx context.Context, now time.Time) error {
-	_, err := s.Store.Pool.Exec(ctx, `update launcher_credential_requests set state='expired'
-		where state='pending' and expires_at < $1`, now)
-	return err
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	rows, err := tx.Query(ctx, `update launcher_credential_requests set state='expired'
+		where state='pending' and expires_at < $1 returning operator, host`, now)
+	if err != nil {
+		return err
+	}
+	type expiredRow struct{ operator, host string }
+	var expired []expiredRow
+	for rows.Next() {
+		var r expiredRow
+		if err := rows.Scan(&r.operator, &r.host); err != nil {
+			rows.Close()
+			return err
+		}
+		expired = append(expired, r)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	for _, r := range expired {
+		if err := auditLauncher(ctx, tx, "launcher_request.expired", "launcher:"+r.host, auditDetail(map[string]any{
+			"operator": r.operator, "host": r.host,
+		})); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
 }
 
 // Standing finds operator's standing secrets issue (title "Secret requests: <login>", labeled
 // agent-secrets) in s.Project, creating it once when it doesn't exist yet. It is a method value,
 // not a struct field, so Task 14's requests.Machine.StandingIssue field (func(ctx, operator
 // string) (string, error)) can be wired directly as ls.Standing.
+//
+// Dispatch's issue creation has no unique constraint on (project, title, label), so two
+// concurrent Request calls for the same never-before-seen operator could each see zero matching
+// issues and each create one. A Postgres advisory transaction lock keyed on project+operator
+// (the same pattern internal/dispatch/api/issue_rank.go's lockProjectRankAllocation uses for its
+// own find/allocate race) serializes concurrent broker-process callers around the whole
+// list-then-create pair; it protects no row of this transaction's own, so the transaction is held
+// open across the Dispatch HTTP calls purely to hold the lock; the tests recreate that race with a
+// fake ListIssues delay to prove exactly one issue gets created.
 func (s *Service) Standing(ctx context.Context, operator string) (string, error) {
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext('launcher-standing:' || $1))`, s.Project+":"+operator); err != nil {
+		return "", fmt.Errorf("lock standing issue allocation: %w", err)
+	}
 	title := "Secret requests: " + operator
 	issues, err := s.Dispatch.ListIssues(ctx, s.Project, standingLabel)
 	if err != nil {
@@ -247,10 +327,14 @@ func (s *Service) Standing(ctx context.Context, operator string) (string, error)
 	}
 	for _, issue := range issues {
 		if issue.Title == title {
-			return issue.Key, nil
+			return issue.Key, tx.Commit(ctx)
 		}
 	}
-	return s.Dispatch.CreateIssue(ctx, s.Project, title, &operator, []string{standingLabel})
+	key, err := s.Dispatch.CreateIssue(ctx, s.Project, title, &operator, []string{standingLabel})
+	if err != nil {
+		return "", err
+	}
+	return key, tx.Commit(ctx)
 }
 
 func launcherQuestion(host string, service *string) string {
@@ -278,4 +362,25 @@ func randomToken() (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+// auditLauncher writes one audit row for a launcher-credential-request state change. This table's
+// enrollment_id/request_id/grant_id columns are all nullable and address rows in the enroll and
+// requests packages' own uuid-keyed tables, which this bytea-keyed table has no matching row for,
+// so all three are left null here; every identifying fact instead rides in detail, which must
+// never carry a bearer token or a raw (unhashed) pending id.
+func auditLauncher(ctx context.Context, tx pgx.Tx, kind, actor, detail string) error {
+	_, err := tx.Exec(ctx, `insert into audit (kind, actor, detail) values ($1,$2,$3::jsonb)`, kind, actor, detail)
+	return err
+}
+
+func auditDetail(fields map[string]any) string {
+	b, err := json.Marshal(fields)
+	if err != nil {
+		// fields is always built from this package's own string/*string values, so Marshal
+		// cannot fail in practice; fall back to an empty object rather than losing the whole
+		// audit row over an unmarshalable field a future change might add.
+		return "{}"
+	}
+	return string(b)
 }
