@@ -447,7 +447,7 @@ func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.
 	}
 	byReviewApp := e.cfg.ReviewAppLogin != "" && fact.Pusher == e.cfg.ReviewAppLogin
 	classification := classify.ClassifyPush(classify.PushPayload{ChangedPaths: fact.ChangedPaths, ChangedPathsTruncated: fact.Truncated})
-	*pr = classify.ApplyPush(*pr, fact.After, classification, byReviewApp)
+	*pr = classify.ApplyPush(*pr, fact.Before, fact.After, classification, byReviewApp)
 	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
 		return intake.Result{}, err
 	}

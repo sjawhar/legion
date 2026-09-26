@@ -133,6 +133,8 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 		name  string
 		steps []string
 		want  phase.Phase
+		// unsettled seeds the approved head with its checks still running, rather than green.
+		unsettled bool
 	}{
 		{name: "approval, then the reviewer's handoff push", steps: []string{"approve head", "sync", "push handoff", "green", "complete"}, want: phase.Retro},
 		{name: "the reviewer's handoff push, then the approval", steps: []string{"sync", "push handoff", "green", "approve head", "complete"}, want: phase.Retro},
@@ -145,25 +147,42 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 		{name: "a push with no paths marker, then the approval of the head before it", steps: []string{"sync", "push unmarked", "green", "approve head", "complete"}, want: phase.Reviewing},
 		{name: "a comment between a code push and its new head", steps: []string{"approve head", "push code", "comment", "sync", "green", "complete"}, want: phase.Reviewing},
 		{name: "a comment on the handoff head after the approval", steps: []string{"approve head", "sync", "push handoff", "comment", "green", "complete"}, want: phase.Retro},
+		{name: "a code push whose new head has not arrived", steps: []string{"approve head", "push code", "complete"}, want: phase.Reviewing},
+		{name: "a code push whose new head has not arrived, then the approved head's checks", steps: []string{"approve head", "complete", "push code", "green head"}, want: phase.Reviewing, unsettled: true},
+		{name: "a late code push for a head already replaced", steps: []string{"approve head", "sync", "push handoff", "push code head-x", "green", "complete"}, want: phase.Retro},
+		{name: "two handoff pushes, each before its head", steps: []string{"approve head", "push handoff", "sync", "push handoff head-3", "sync head-3", "green head-3", "complete"}, want: phase.Retro},
+		{name: "two handoff pushes, each after its head", steps: []string{"approve head", "sync", "push handoff", "sync head-3", "push handoff head-3", "green head-3", "complete"}, want: phase.Retro},
 		{name: "recorded before the chain: an approval of the current head", steps: []string{"approve head", "complete"}, want: phase.Retro},
 		{name: "recorded before the chain: an approval of an earlier head", steps: []string{"approve older", "complete"}, want: phase.Reviewing},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
 			ctx := context.Background()
-			seedReview(t, pool, "green")
+			verdict := "green"
+			if tc.unsettled {
+				verdict = ""
+			}
+			seedReview(t, pool, verdict)
 			engine := testEngine()
+			// A head's push replaces the head before it; head-x is a late push's, whose head was
+			// never the current one.
+			before := map[string]string{"head-2": "head", "head-3": "head-2", "head-x": "older"}
 			for i, step := range tc.steps {
+				head := "head-2"
+				if words := strings.Fields(step); len(words) > 1 && strings.HasPrefix(words[len(words)-1], "head") {
+					head = words[len(words)-1]
+					step = strings.Join(words[:len(words)-1], " ")
+				}
 				var fact intake.Fact
 				switch step {
-				case "approve head", "approve older":
-					commit := "head"
+				case "approve", "approve older":
+					commit := head
 					if step == "approve older" {
 						commit = "older"
 					}
 					fact = intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: commit}
 				case "sync":
-					fact = intake.PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-2"}
+					fact = intake.PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: head}
 				case "comment":
 					fact = intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "commented", CommitID: "head-2", Body: "a comment"}
 				case "push handoff", "push code", "push truncated", "push unmarked":
@@ -177,11 +196,11 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 					case "push unmarked":
 						marker = nil
 					}
-					fact = intake.Push{Repo: "sjawhar/legion", Branch: "legion/LEGION-208", After: "head-2",
+					fact = intake.Push{Repo: "sjawhar/legion", Branch: "legion/LEGION-208", Before: before[head], After: head,
 						ChangedPaths: &paths, Truncated: marker, Pusher: "legion-reviewer[bot]"}
 				case "green":
-					fact = intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head-2",
-						CheckRuns: []record.AttemptRun{{Name: "ci", ID: 2}}, Generation: 2, Snapshot: "green-2", Verdict: "green", Failing: []string{}}
+					fact = intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: head,
+						CheckRuns: []record.AttemptRun{{Name: "ci", ID: 2}}, Generation: 2, Snapshot: "green-" + head, Verdict: "green", Failing: []string{}}
 				case "complete":
 					fact = intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim",
 						Summary: "reviewed", Commit: "review-1"}

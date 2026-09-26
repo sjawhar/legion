@@ -43,7 +43,7 @@ func AdvancePullRequestHead(pr record.PullRequest, headSHA string) record.PullRe
 // ApplyPush stores a new-head push classification or, for the current head, settles its planned
 // mark and takes back exactly its counted fix attempt when the late push is handoff-only or the
 // review App's (byReviewApp: its pusher is the review App's bot login).
-func ApplyPush(pr record.PullRequest, after string, classification PushClassification, byReviewApp bool) record.PullRequest {
+func ApplyPush(pr record.PullRequest, before, after string, classification PushClassification, byReviewApp bool) record.PullRequest {
 	if pr.HeadSHA == after {
 		if !classification.HandoffOnly {
 			pr.PlannedRed = byReviewApp
@@ -59,7 +59,7 @@ func ApplyPush(pr record.PullRequest, after string, classification PushClassific
 		}
 		return pr
 	}
-	pr.PendingPush = &record.PendingPush{SHA: after, HandoffOnly: classification.HandoffOnly, Unknown: classification.Unknown, ByReviewApp: byReviewApp}
+	pr.PendingPush = &record.PendingPush{SHA: after, Before: before, HandoffOnly: classification.HandoffOnly, Unknown: classification.Unknown, ByReviewApp: byReviewApp}
 	return pr
 }
 
@@ -97,9 +97,15 @@ func chainAt(heads []string, head string) []string {
 // ApprovalStands says whether an approval of reviewed approves the pull request's current head:
 // it names that head, or the code chain ends at the current head and holds reviewed, so every
 // push since reviewed changed only .legion/. A chain ending anywhere else says nothing: the pushes
-// after its end changed code, or have not been classified yet.
+// after its end changed code, or have not been classified yet. Nothing stands while a push that
+// may change code is replacing the current head and its new head has not arrived: the push event
+// can come first, and the approval is then of a head already on its way out. A pending push that
+// replaced some other head arrived late for a head already gone, and changes nothing.
 func ApprovalStands(pr record.PullRequest, reviewed string) bool {
 	if reviewed == "" {
+		return false
+	}
+	if p := pr.PendingPush; p != nil && !p.HandoffOnly && p.Before == pr.HeadSHA {
 		return false
 	}
 	if reviewed == pr.HeadSHA {

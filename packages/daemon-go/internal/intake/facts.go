@@ -132,8 +132,10 @@ func (PullRequestClosed) isFact() {}
 
 // Push records a branch push. Nil ChangedPaths and Truncated preserve an omitted normalized field.
 type Push struct {
-	Repo         string
-	Branch       string
+	Repo   string
+	Branch string
+	// Before is the head the push replaced, After the head it left.
+	Before       string
 	After        string
 	ChangedPaths *string
 	Truncated    *string

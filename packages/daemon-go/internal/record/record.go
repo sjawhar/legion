@@ -20,7 +20,10 @@ type AttemptRun struct {
 
 // PendingPush is the branch push still waiting to be classified.
 type PendingPush struct {
-	SHA         string `json:"sha"`
+	SHA string `json:"sha"`
+	// Before is the head the push replaced: a pending push replacing the current head is on its
+	// way, where one replacing any other head arrived late for a head already gone.
+	Before      string `json:"before,omitempty"`
 	HandoffOnly bool   `json:"handoffOnly"`
 	Unknown     string `json:"unknown,omitempty"`
 	// ByReviewApp is whether the push was the review App's (its pusher is the review App's bot login).

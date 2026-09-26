@@ -240,7 +240,7 @@ func replayGitHubDecision(input json.RawMessage) ([]byte, error) {
 		}
 	case "push":
 		login := decoded.Config.ReviewAppLogin
-		pr = ApplyPush(pr, stringValue(payload, "after"), ClassifyPush(PushPayload{
+		pr = ApplyPush(pr, stringValue(payload, "before"), stringValue(payload, "after"), ClassifyPush(PushPayload{
 			ChangedPaths: optionalString(payload, "changed_paths"), ChangedPathsTruncated: optionalString(payload, "changed_paths_truncated"),
 		}), login != "" && stringValue(payload, "pusher") == login)
 	case "review":
