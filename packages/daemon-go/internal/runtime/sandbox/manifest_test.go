@@ -153,7 +153,7 @@ func TestTheOperatorsPodIsSentInFieldsTheSandboxCRDDeclares(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	probe, err := encodeProbe(r.probeManifest("legion-probe", ImageProbe{Contract: 5}, time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)))
+	probe, err := encodeProbe(r.probeManifest("legion-probe", ImageProbe{Contract: 5, RoleReferences: testRoleReferences}, time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -418,7 +418,7 @@ func TestALaunchItCannotHonourIsRefused(t *testing.T) {
 		want string
 	}{
 		"no repository":       {func(s *runtime.SpawnSpec) { s.Repository = "" }, "no repository"},
-		"not owner/repo":      {func(s *runtime.SpawnSpec) { s.Repository = "sjawhar/legion-smoke/extra" }, "must be owner/repository"},
+		"not owner/repo":      {func(s *runtime.SpawnSpec) { s.Repository = "sjawhar/legion-smoke/extra" }, `workspace repository must be "owner/name"`},
 		"session off volume":  {func(s *runtime.SpawnSpec) { s.ResumeSessionFile = "/home/legion/elsewhere.jsonl" }, "cannot be resumed on this runtime"},
 		"runtime-owned env":   {func(s *runtime.SpawnSpec) { s.Env["PATH"] = "/bin" }, "Env sets PATH"},
 		"credential in env":   {func(s *runtime.SpawnSpec) { s.Env["GH_TOKEN"] = "x" }, "credential-shaped"},

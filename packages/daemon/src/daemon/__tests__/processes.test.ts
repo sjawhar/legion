@@ -20932,10 +20932,14 @@ describe("ProcessManager", () => {
           resyncIntervalMs: 600_000,
           projects: { LEGION: { repo: "sjawhar/legion" } },
           maxFixAttempts: 3,
+          reviewAppLogin: "legion-reviewer[bot]",
         },
         dispatchClient: fakeDispatchClient(),
         saveState: async () => {},
         fetchCiStatusBatch: async () => ({}),
+        compareChangedPaths: async () => {
+          throw new Error("no compare expected in this test");
+        },
         now: () => Date.parse("2026-08-24T00:00:00.000Z"),
         applyEffects: async (effects) => {
           for (const effect of effects) {
@@ -21078,10 +21082,14 @@ describe("ProcessManager", () => {
           resyncIntervalMs: 600_000,
           projects: { LEGION: { repo: "sjawhar/legion" } },
           maxFixAttempts: 3,
+          reviewAppLogin: "legion-reviewer[bot]",
         },
         dispatchClient: fakeDispatchClient(),
         saveState: async () => {},
         fetchCiStatusBatch: async () => ({}),
+        compareChangedPaths: async () => {
+          throw new Error("no compare expected in this test");
+        },
         now: () => Date.parse("2026-08-24T00:00:00.000Z"),
         applyEffects: async (effects) => {
           dispatched.push(effects);
@@ -21125,10 +21133,14 @@ describe("ProcessManager", () => {
           resyncIntervalMs: 600_000,
           projects: { LEGION: { repo: "sjawhar/legion" } },
           maxFixAttempts: 3,
+          reviewAppLogin: "legion-reviewer[bot]",
         },
         dispatchClient: fakeDispatchClient(),
         saveState: async () => {},
         fetchCiStatusBatch: async () => ({}),
+        compareChangedPaths: async () => {
+          throw new Error("no compare expected in this test");
+        },
         now: () => Date.parse("2026-08-24T00:00:00.000Z"),
         applyEffects: async () => {},
         reconcileAdmissionDrift: () => processes.reconcileAdmissionDrift(),

@@ -17,6 +17,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
 // Each mutating architecture operation must be explicitly registered. A 404 here silently turns
@@ -168,7 +169,32 @@ func newLiveClaim(t *testing.T, h *harness, issue string, role claim.Role) liveC
 	token, boot := h.launch(issue, role)
 	session := "ses_" + string(role) + "_" + issue
 	registration := h.registered(boot, session)
-	return liveClaim{h: h, token: token, session: session, secret: registration.Secret, tree: issue, issue: issue}
+	c := liveClaim{h: h, token: token, session: session, secret: registration.Secret, tree: issue, issue: issue}
+	// A worker reports a completion inside the turn of the task it was given, and the daemon
+	// attributes the completion to that delivery, so a live claim in these tests holds one.
+	working(t, h, token, issue)
+	return c
+}
+
+// working hands the claim a task of the issue's current generation and starts its turn, which is
+// what a pane looks like when it calls handoff complete.
+func working(t *testing.T, h *harness, token claim.Token, _ string) {
+	t.Helper()
+	machine, ok := h.supervisor.Machine(token)
+	if !ok {
+		t.Fatalf("no machine for %s", token)
+	}
+	generation := uint64(1)
+	if err := machine.Handle(context.Background(), supervise.RequestReady{Claim: token, Generation: machine.Claim().Generation, Session: machine.Claim().Session}); err != nil {
+		t.Fatalf("ready %s: %v", token, err)
+	}
+	id := "outbox:" + string(token)
+	if err := machine.Handle(context.Background(), supervise.RequestDeliver{Claim: token, Task: "the task", ID: id, Generation: generation}); err != nil {
+		t.Fatalf("deliver to %s: %v", token, err)
+	}
+	if err := machine.Handle(context.Background(), supervise.StreamTurnStart{Claim: token, DeliveryID: id}); err != nil {
+		t.Fatalf("start the turn on %s: %v", token, err)
+	}
 }
 
 // replaceRegistration registers the claim's session again, which issues a new secret and so revokes
@@ -403,6 +429,39 @@ func TestWaveReleaseReleasesUnreleasedChildrenOfTheTreeOverTheDispatchGraph(t *t
 	}, nil), http.StatusForbidden, "ISSUE_OUTSIDE_TREE")
 	if len(statuses.writes) != 2 {
 		t.Fatalf("Dispatch writes after refusals = %#v, want only the released pair", statuses.writes)
+	}
+}
+
+// release_children writes one child at a time, so a Dispatch failure part way through leaves the
+// earlier children released and answers 502. The architect's retry is the whole wave again, and a
+// child already todo is exactly what this call produces: it is released, not refused, and is not
+// written a second time. Before, the retry met ISSUE_ALREADY_RELEASED on its own earlier work and
+// no retry could ever finish the wave.
+func TestWaveReleaseRetryFinishesAWaveAPartialFailureLeftHalfReleased(t *testing.T) {
+	h, _, statuses := newArchitectHarness(t, nil, nil)
+	seedTree(t, h, "LEGION-208")
+	root := "LEGION-208"
+	statuses.issues = map[string]dispatch.Issue{
+		"LEGION-208": {Key: "LEGION-208", Status: "in_progress"},
+		"LEGION-209": {Key: "LEGION-209", Status: "todo", Parent: &root},    // the first attempt released it
+		"LEGION-210": {Key: "LEGION-210", Status: "backlog", Parent: &root}, // its write is the one that failed
+	}
+	architect := newLiveClaim(t, h, "LEGION-208", claim.RoleArchitect)
+
+	recorder := h.request(http.MethodPost, "/legion/v1/waves/release", map[string]any{
+		"grantId": architect.grant(t), "issues": []string{"LEGION-209", "LEGION-210"},
+	}, nil)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("wave release retry = %d: %s", recorder.Code, recorder.Body)
+	}
+	var response WaveReleaseResponse
+	decodeInto(t, recorder, &response)
+	if len(response.Released) != 2 {
+		t.Fatalf("released = %#v, want the whole wave", response.Released)
+	}
+	if len(statuses.writes) != 1 || statuses.writes[0] != (statusWrite{issue: "LEGION-210", status: "todo"}) {
+		t.Fatalf("Dispatch writes = %#v, want only the child the failed attempt had not released", statuses.writes)
 	}
 }
 

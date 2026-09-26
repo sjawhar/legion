@@ -66,10 +66,9 @@ func validateSpawnSpec(spec runtime.SpawnSpec, providerKeys []string) error {
 	if err := runtime.ValidateSpawnSpec(spec, runtimeOwned); err != nil {
 		return err
 	}
+	// The token names the pane's secret files, and it is one file name: the shared validation
+	// above holds it to the one claim.NewToken derives, which has no separator in it.
 	token := string(spec.Claim)
-	if token == "." || token == ".." || strings.ContainsAny(token, "/\x00") {
-		return fmt.Errorf("spawn %q: the claim token names the pane's secret files and must be one file name", token)
-	}
 	refuse := func(format string, args ...any) error {
 		return fmt.Errorf("spawn %s: "+format, append([]any{token}, args...)...)
 	}
@@ -128,70 +127,21 @@ func sortedKeys(m map[string]string) []string {
 	return keys
 }
 
-// secretFile is one secret's file: the variable its pointer is named after, and the path.
-type secretFile struct {
-	name, path, value string
-}
-
 // secretFiles are the files a spec's secrets are written to, under `<state_dir>/secrets`: the
 // boot token as `<claim>`, each other secret as `<claim>-<lowercased name>`, so one claim token
 // names every file its pane holds (runtime-tmux.ts:619-635, secrets.ts:63-69). The boot token's
 // pointer is LEGION_BOOT_TOKEN_FILE and comes first; the rest follow sorted by name.
-func secretFiles(stateDir string, spec runtime.SpawnSpec) []secretFile {
+func secretFiles(stateDir string, spec runtime.SpawnSpec) []runtime.SecretFile {
 	dir := runtime.SecretsDir(stateDir)
-	files := []secretFile{{name: "LEGION_BOOT_TOKEN", path: filepath.Join(dir, string(spec.Claim)), value: spec.BootToken}}
+	files := []runtime.SecretFile{{Variable: "LEGION_BOOT_TOKEN", Path: filepath.Join(dir, string(spec.Claim)), Value: spec.BootToken}}
 	for _, name := range sortedKeys(spec.Secrets) {
-		files = append(files, secretFile{
-			name:  name,
-			path:  filepath.Join(dir, string(spec.Claim)+"-"+strings.ToLower(name)),
-			value: spec.Secrets[name],
+		files = append(files, runtime.SecretFile{
+			Variable: name,
+			Path:     filepath.Join(dir, string(spec.Claim)+"-"+strings.ToLower(name)),
+			Value:    spec.Secrets[name],
 		})
 	}
 	return files
-}
-
-// writeSecretFiles writes each secret to its 0600 file in a 0700 directory, re-applying both modes
-// on every write — a directory's mkdir mode is masked and ignored when it exists, and a file's is
-// applied only on create (secrets.ts:83-98). The caller owns the files' lifetimes.
-func writeSecretFiles(stateDir string, files []secretFile) error {
-	dir := runtime.SecretsDir(stateDir)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return err
-	}
-	for _, file := range files {
-		if err := os.WriteFile(file.path, []byte(file.value), 0o600); err != nil {
-			return fmt.Errorf("write the %s file: %w", file.name, err)
-		}
-		if err := os.Chmod(file.path, 0o600); err != nil {
-			return fmt.Errorf("write the %s file: %w", file.name, err)
-		}
-	}
-	return nil
-}
-
-// DispatchTokenFileName is the daemon-held Dispatch bearer every pane reads through
-// DISPATCH_TOKEN_FILE, as the shipped daemon names it under `<state_dir>/secrets`.
-const DispatchTokenFileName = "dispatch-token"
-
-// WriteDispatchTokenFile writes the Dispatch bearer as a 0600 file in the 0700 secrets directory,
-// returning the path every pane receives. The value never enters tmux's argv or a pane's
-// environment.
-func WriteDispatchTokenFile(stateDir, token string) (string, error) {
-	return WriteSecretFile(stateDir, DispatchTokenFileName, token)
-}
-
-// WriteSecretFile writes value as runtime.SecretFilePath, a 0600 file in the 0700 secrets
-// directory, and returns its path: what a process outside a pane (`legion controller start`'s
-// controller secret) is handed as a `<NAME>_FILE` pointer, never the value.
-func WriteSecretFile(stateDir, name, value string) (string, error) {
-	path := runtime.SecretFilePath(stateDir, name)
-	if err := writeSecretFiles(stateDir, []secretFile{{name: name, path: path, value: value}}); err != nil {
-		return "", err
-	}
-	return path, nil
 }
 
 // paneInputs are the runtime's own values a pane's -e pairs carry.
@@ -208,7 +158,7 @@ type paneInputs struct {
 // LEGION_GRANT_FILE, runtime.GrantFile), the four XDG base directories under `<state_dir>/home`,
 // the spec's own variables sorted, then a `<NAME>_FILE` pointer per secret file. PATH is never
 // among them — tmux would replace it (LEGION-91) — and neither is any secret's value.
-func panePairs(spec runtime.SpawnSpec, in paneInputs, files []secretFile) []string {
+func panePairs(spec runtime.SpawnSpec, in paneInputs, files []runtime.SecretFile) []string {
 	var pairs []string
 	add := func(name, value string) { pairs = append(pairs, "-e", name+"="+value) }
 	add("LEGION_DAEMON_API", "go")
@@ -243,7 +193,7 @@ func panePairs(spec runtime.SpawnSpec, in paneInputs, files []secretFile) []stri
 		}
 	}
 	for _, file := range files {
-		add(file.name+"_FILE", file.path)
+		add(file.Variable+"_FILE", file.Path)
 	}
 	return pairs
 }
@@ -380,7 +330,7 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 		}
 	}
 	files := secretFiles(r.stateDir, spec)
-	if err := writeSecretFiles(r.stateDir, files); err != nil {
+	if err := runtime.WriteSecretFiles(r.stateDir, files); err != nil {
 		return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
 	}
 	path := r.paneEnv["PATH"]
@@ -389,7 +339,7 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 	}
 	path = workerbin.Path(path, r.stateDir)
 	inner := innerCommand(r.ompPrefix, r.ompInvocation, spec.ResumeSessionFile, spec.Prompt)
-	command := shimShellCommand(r.socket, path, workDir, r.legion, r.streamAddress, files[0].path, r.providerEnvDir, inner)
+	command := shimShellCommand(r.socket, path, workDir, r.legion, r.streamAddress, files[0].Path, r.providerEnvDir, inner)
 	pairs := panePairs(spec, paneInputs{
 		stateDir: r.stateDir, workspace: workDir, daemonURL: r.daemonURL, envoyURL: r.envoyURL, natsURLs: r.natsURLs,
 		dispatchURL: r.dispatchURL, dispatchTokenFile: r.dispatchToken, tools: r.tools,

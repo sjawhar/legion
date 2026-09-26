@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -79,10 +80,22 @@ type Claim struct {
 	// exception to resuming the agent a claim recorded. It records no session, and every launch
 	// recreates its workspace, fresh, until a new agent registers.
 	WorkspaceLost bool
-	Locator       *runtime.Locator
-	State         ClaimState
-	Budgets       Budgets
-	Pending       *Delivery
+	// ServingGeneration is the issue generation of the last confirmed delivery this claim retired:
+	// the run it goes on working until another delivery of a run replaces it. It is the second of
+	// the three sources a completion is attributed from (api/handoff.go): the pending delivery
+	// whose turn is running, then this, then — for a claim serving no run — a pending task the
+	// agent may have read. It is what answers for a worker told to wait, whose turn's end retired
+	// its delivery and whose next turn an Envoy notice starts with no delivery behind it. Zero is
+	// a claim that has retired no confirmed task of a run.
+	ServingGeneration uint64
+	// LastStartRow is the outbox row id of the newest start run against this claim, and 0 for one
+	// no start has run for. A stop from an older row is one the newer start superseded: it was
+	// written to end a run that is over, and acting on it would stop the run that start began.
+	LastStartRow int64
+	Locator      *runtime.Locator
+	State        ClaimState
+	Budgets      Budgets
+	Pending      *Delivery
 	// BootTokenHash is the hash of the current launch's boot token, which the shim's hello and the
 	// agent's registration are resolved by. CapabilityHash is the hash of the secret the agent's
 	// registration was issued.
@@ -106,7 +119,9 @@ type Event interface{ isEvent() }
 type Store interface {
 	PutClaim(ctx context.Context, c Claim) error
 	PutDelivery(ctx context.Context, token claim.Token, d Delivery) error
-	RetireDelivery(ctx context.Context, token claim.Token, deliveryID string) error
+	// RetireDelivery ends the claim's delivery and writes the claim it is given in the same
+	// transaction: the run a claim serves is set by the retiring of the task that ran.
+	RetireDelivery(ctx context.Context, c Claim, deliveryID string) error
 }
 
 // Specs builds the part of a launch the claim does not carry — the pane's environment, its
@@ -165,14 +180,13 @@ type Deps struct {
 	// fresh, so the daemon can tell the tree's other claims (TreeVolumeLost): their sessions were on
 	// the same volume. nil tells no one.
 	VolumeLost func(c Claim)
-	// PhaseHolds says whether this delivery is still worth sending: the workflow enqueues a task
-	// for the phase its issue was in, and the outbox refuses to start a role for a phase the issue
-	// has left (daemon/outbox.go), so a delivery queued before the phase moved on is that same
-	// staleness one step later and is dropped rather than sent. It is given the delivery as well as
-	// the claim because only the caller that queued a task knows whether the workflow's phases
-	// govern it at all: a task an operator delivered by hand is not the workflow's to drop. nil
-	// holds every delivery.
-	PhaseHolds func(ctx context.Context, c Claim, d Delivery) (bool, error)
+	// PhaseHolds says whether issue is still in phase: the workflow enqueues a task for the phase
+	// its issue was in, and the outbox refuses to start a role for a phase the issue has left
+	// (daemon/outbox.go), so a delivery queued before the phase moved on is that same staleness
+	// one step later and is dropped rather than sent. It is asked only about a delivery that names
+	// a phase; a task an operator delivered by hand names none and is never put to it, which the
+	// machine decides rather than this answer. nil holds every delivery.
+	PhaseHolds func(ctx context.Context, issue string, p phase.Phase) (bool, error)
 	// TreeClosable answers whether the operator may close this claim's tree: false refuses the
 	// close, and an error is the read itself failing, which the caller sees as a failure rather
 	// than a refusal. It is asked only for the operator's own close — the workflow's linger close
@@ -372,6 +386,19 @@ func (m *Machine) ReleaseUncertainLaunch(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+// StartedBy records the outbox row of the start being run against this claim, so a stop written
+// before it can be told apart from one written after. A stop is retried until the runtime takes
+// it, and a retry that lands after this start would suspend the run this start began.
+func (m *Machine) StartedBy(ctx context.Context, row int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if row <= m.claim.LastStartRow {
+		return nil
+	}
+	m.claim.LastStartRow = row
+	return m.persist(ctx)
 }
 
 // Claim is a copy of the claim as the machine holds it now.

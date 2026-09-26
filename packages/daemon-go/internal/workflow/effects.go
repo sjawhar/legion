@@ -15,6 +15,9 @@ import (
 
 // RoleFor is the role that works a phase: the one a transition starts, and the one it suspends
 // when the issue moves on. A phase no role works — awaiting_merge, done, held — has none.
+//
+// It is exported for admission too, which starts the mid-phase children of a tree it re-admits
+// and needs each child's own phase's role to start it on.
 func RoleFor(p phase.Phase) claim.Role {
 	switch p {
 	case phase.Planning:
@@ -102,7 +105,7 @@ func (e *Engine) start(ctx context.Context, tx pgx.Tx, issue record.Issue, role 
 // record already holds: one role runs several phases (the implementer runs implementing, retro,
 // and production_check), and a resumed session cannot otherwise tell a new phase from its last.
 func task(issue record.Issue, handoff record.PhaseRow, pr *record.PullRequest, reason string) string {
-	text := fmt.Sprintf("Continue %s. Issue: %s. Phase: %s.", issue.Title, issue.Key, issue.Phase)
+	text := continueLine(issue)
 	if handoff.HandoffCommit != "" {
 		text += " Handoff commit: " + handoff.HandoffCommit + "."
 	}
@@ -121,12 +124,17 @@ func task(issue record.Issue, handoff record.PhaseRow, pr *record.PullRequest, r
 	return text
 }
 
-func (e *Engine) lingerAt() time.Time { return e.now().Add(e.cfg.LingerHours) }
-
-// parentOf is an observed parent key as the record holds it: nil for none.
-func parentOf(key string) *string {
-	if key == "" {
-		return nil
-	}
-	return &key
+func continueLine(issue record.Issue) string {
+	return fmt.Sprintf("Continue %s. Issue: %s. Phase: %s.", issue.Title, issue.Key, issue.Phase)
 }
+
+// ResumePhaseTask is what a worker started for a phase already under way is told. No handoff
+// begins that phase — the run that did is over — so the task names the phase and says to carry
+// the work on, which is what a resumed session needs to tell this phase from its last. Admission
+// sends it to the mid-phase children of a tree it re-admits, whose workers the tree's close
+// retired and whose phase rows the new generation cleared.
+func ResumePhaseTask(issue record.Issue) string {
+	return continueLine(issue) + " Resume the existing phase work."
+}
+
+func (e *Engine) lingerAt() time.Time { return e.now().Add(e.cfg.Linger) }

@@ -73,10 +73,9 @@ var deps atomic.Pointer[listenerDeps]
   after all deps are initialized. Does NOT use the atomic pointer. This is correct and
   intentional; adding an atomic read on every NATS message would be unnecessary overhead.
 
-**`sessions` can be nil even after init.** `session.OpenSessionRegistry` failure is non-fatal
-(graceful degradation to file-only delivery). The atomic pointer being non-nil does not
-guarantee all fields are non-nil. The `SessionRegistry` type uses nil-receiver methods that
-return `ErrNoKV`, so nil dereference is safe — but callers should handle the error.
+**A non-nil `deps` carries non-nil stores.** The listener exits when the interest registry, the
+session registry or the CI store cannot open, and stores `deps` only after all three are open, so
+a handler that loaded a non-nil pointer never meets a nil store.
 
 ## Readiness Gate Middleware
 

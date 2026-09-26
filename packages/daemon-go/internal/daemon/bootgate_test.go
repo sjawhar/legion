@@ -252,7 +252,9 @@ func newFakeOmp(t *testing.T, plan ...string) fakeOmp {
 	script := `#!/bin/sh
 dir=` + dir + `
 n=$(( $(cat "$dir/count" 2>/dev/null || echo 0) + 1 ))
-echo "$n" >"$dir/count"
+# Renamed into place: the test reads this file while a later attempt writes it, and a plain
+# redirection truncates before it writes, so the reader can see it empty.
+echo "$n" >"$dir/count.$n" && mv "$dir/count.$n" "$dir/count"
 printf '%s\n' "$*" >"$dir/argv.$n"
 env >"$dir/env.$n"
 cp "$3" "$dir/probe.$n"
@@ -569,7 +571,20 @@ func TestTheLoadProbeStopsWithTheDaemon(t *testing.T) {
 	gate, _ := gateUnder(t, f, contractCurrent)
 	gate.timeout = time.Minute
 	ctx, cancel := context.WithCancel(context.Background())
-	time.AfterFunc(300*time.Millisecond, cancel)
+	// The cancellation this test is about is one that lands on a probe in flight, so it waits for
+	// the probe to be running rather than for a span: a fixed delay on a loaded machine fires
+	// before the probe starts, and the gate then cancels having run nothing.
+	go func() {
+		defer cancel()
+		for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); {
+			// Read here rather than through attempts: a helper that fails the test belongs to the
+			// test's own goroutine, and this one only needs to know the probe started.
+			if raw, err := os.ReadFile(filepath.Join(f.dir, "count")); err == nil && strings.TrimSpace(string(raw)) == "1" {
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
 
 	started := time.Now()
 	err := gate.verify(ctx)
@@ -631,6 +646,39 @@ func TestRunGatesThePluginUnderThePaneEnvironmentBeforeItBoots(t *testing.T) {
 				t.Fatalf("boots after a start the gate did not pass = %d, want 0", count)
 			}
 		})
+	}
+}
+
+// The tmux gate asks the load probe for the skills and task agents the daemon's role prompts name,
+// beside the plugin's own: legion-controller is loaded by roles/controller-root.md alone.
+func TestTheTmuxGateAsksForWhatTheRolePromptsName(t *testing.T) {
+	cfg := testConfig(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("OMP_PROFILE", "gate")
+	writeManifest(t, manifestAt(filepath.Join(home, ".omp", "profiles", "gate")),
+		`{"goDaemonApiVersion":`+strconv.Itoa(api.GoDaemonAPIVersion)+`}`)
+	f := newFakeOmp(t, "no")
+	o := fakeRuntime(fake.NewRuntime(), &built{})
+	o.runtime = nil
+	o.getenv = func(name string) string {
+		if name == "LEGION_OMP_PATH" {
+			return f.path
+		}
+		return ""
+	}
+
+	if err := run(context.Background(), cfg, quietLogger(), o); err == nil {
+		t.Fatal("run passed the gate, want the fake's not-loaded refusal")
+	}
+	var skills string
+	for _, line := range strings.Split(f.read(t, "env.1"), "\n") {
+		if value, ok := strings.CutPrefix(line, "LEGION_PROMPT_SKILLS="); ok {
+			skills = value
+		}
+	}
+	if !slices.Contains(strings.Split(skills, ","), "legion-controller") {
+		t.Errorf("the load probe was asked for the skills %q, want legion-controller among them", skills)
 	}
 }
 

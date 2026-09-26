@@ -10,6 +10,10 @@ import * as path from "node:path";
 // CI's pi-envoy job installs; on the devbox, `mise where <pin>`/bin/omp. A run without one skips,
 // except on GitHub Actions, where a skip would hide the only run of the check on the host that
 // ships it (GITHUB_ACTIONS, not CI: agent harnesses on the devbox export CI=true).
+// It is also the only check that the run-end nudge's hidden self-check starts no run: the nudge
+// treats any `agent_start` after a settle as a newer run and withholds its steer, so a host that
+// counted `pi.askEphemeral` as a run would silence the nudge with every unit test still green.
+// The WAITING self-check case below fails if that ever changes.
 const omp = process.env.LEGION_TEST_OMP;
 const onActions = process.env.GITHUB_ACTIONS === "true";
 const extensions = path.join(import.meta.dir);
@@ -26,12 +30,25 @@ interface Request {
 interface Pane {
   /** Every request the stand-in served: the model gateway's, the daemon's, and the listener's. */
   readonly requests: Request[];
-  /** The Messages requests the model gateway answered, in order. */
+  /** The Messages requests that were turns of the conversation, in order. */
   readonly turns: () => Request[];
+  /** The Messages requests that were `pi.askEphemeral` calls, in order. */
+  readonly selfChecks: () => Request[];
   /** One line per invocation of the stand-in `legion`: its arguments, then the grant it read. */
   readonly legionLog: () => Promise<string[]>;
   /** The persisted transcript's phase-stall entries, in order. */
   readonly phaseEntries: () => Promise<unknown[]>;
+}
+
+/**
+ * Whether a Messages request is a `pi.askEphemeral` call rather than a turn. The host sends one
+ * as an ordinary Messages request over a snapshot of the conversation whose last message is the
+ * `<btw>` block it wraps the question in — measured on the pin, which is the only thing that can
+ * say — so the stand-in answers it distinctly and nothing about it reaches the transcript.
+ */
+function isSelfCheck(request: Request): boolean {
+  const messages = Array.isArray(request.body.messages) ? request.body.messages : [];
+  return JSON.stringify(messages.at(-1) ?? null).includes("<btw>");
 }
 
 const cleanup: (() => Promise<void>)[] = [];
@@ -121,6 +138,25 @@ function userText(request: Request): string {
   );
 }
 
+/** How one pane differs from the implementer pane the phase-stall cases run. */
+interface PaneOptions {
+  /**
+   * False drops every `LEGION_*` variable, so the pane is an ordinary session: the Legion
+   * extension stays inert and the Envoy extension's run-end ask nudge is not excluded.
+   */
+  readonly legion?: boolean;
+  /** Configures Dispatch against the stand-in, whose open-ask snapshot answers with this count. */
+  readonly openAsks?: number;
+  /**
+   * Settle when the gateway has answered nothing for this long, instead of at the host's
+   * terminal `agent_end`. A `triggerTurn` steer sent from `agent_end` starts its continuation
+   * after that frame, so the terminal frame is not the end of the run's provider traffic.
+   */
+  readonly quietMs?: number;
+  /** The one word the gateway answers the run-end self-check with. */
+  readonly selfCheck?: string;
+}
+
 /**
  * Runs one implementer pane on the real Oh My Pi until its run settles: the Legion and Envoy
  * extensions from this checkout, booted against a stand-in for the TypeScript daemon's worker
@@ -129,7 +165,12 @@ function userText(request: Request): string {
  * turns from `replies`, and a stand-in `legion` on PATH that records what it was run with. The
  * daemon's assignment arrives as the RPC `prompt`, as both daemons deliver it.
  */
-async function runPane(binary: string, replies: readonly (readonly Block[])[]): Promise<Pane> {
+async function runPane(
+  binary: string,
+  replies: readonly (readonly Block[])[],
+  options: PaneOptions = {}
+): Promise<Pane> {
+  const legionPane = options.legion ?? true;
   const root = await mkdtemp(path.join(os.tmpdir(), "legion-phase-stall-"));
   cleanup.push(() => rm(root, { recursive: true, force: true }));
   const home = path.join(root, "home");
@@ -145,7 +186,9 @@ async function runPane(binary: string, replies: readonly (readonly Block[])[]): 
 
   const requests: Request[] = [];
   let answered = 0;
+  let selfChecks = 0;
   let grants = 0;
+  let lastAnsweredAt = 0;
   const server = Bun.serve({
     port: 0,
     hostname: "127.0.0.1",
@@ -155,6 +198,18 @@ async function runPane(binary: string, replies: readonly (readonly Block[])[]): 
       const body = text === "" ? {} : (JSON.parse(text) as Record<string, unknown>);
       requests.push({ path: url.pathname, body });
       if (url.pathname === "/anthropic/v1/messages") {
+        lastAnsweredAt = Date.now();
+        // The self-check is not a turn: it consumes no scripted reply, and the conversation's
+        // next turn is answered as if it had never happened — which is what the host's snapshot
+        // makes true.
+        if (isSelfCheck({ path: url.pathname, body })) {
+          selfChecks += 1;
+          const verdict = options.selfCheck ?? "PROCEEDING";
+          return new Response(
+            messageStream([{ type: "text", text: verdict }], `btw_${selfChecks}`),
+            { headers: { "content-type": "text/event-stream" } }
+          );
+        }
         const reply = replies[answered];
         answered += 1;
         if (reply === undefined) {
@@ -171,6 +226,17 @@ async function runPane(binary: string, replies: readonly (readonly Block[])[]): 
         });
       }
       if (url.pathname.startsWith("/anthropic/")) return Response.json({ data: [] });
+      if (url.pathname === "/api/v1/asks/open") {
+        return Response.json({
+          session_id: "",
+          as_of: new Date().toISOString(),
+          opened_since: false,
+          count: options.openAsks ?? 0,
+          waiting_on_human: 0,
+          waiting_on_agent: 0,
+          asks: [],
+        });
+      }
       if (url.pathname === "/legion/v1/worker/started") {
         return Response.json({
           roleToken: "legion-stall-stall-2-implementer",
@@ -277,15 +343,26 @@ async function runPane(binary: string, replies: readonly (readonly Block[])[]): 
         HOME: home,
         PATH: `${bin}:/usr/local/bin:/usr/bin:/bin`,
         ENVOY_URL: base,
-        LEGION_DAEMON_URL: base,
-        LEGION_ROLE: "implementer",
-        LEGION_TREE: "STALL-1",
-        LEGION_ISSUE: "STALL-2",
-        LEGION_GENERATION: "1",
-        LEGION_BOOT_TOKEN: "stall-boot",
-        LEGION_STATE_DIR: state,
-        LEGION_WORKSPACE: workspace,
-        LEGION_GRANT_FILE: path.join(state, "secrets", "legion-stall-stall-2-implementer-grant"),
+        ...(options.openAsks === undefined
+          ? {}
+          : { DISPATCH_URL: base, DISPATCH_TOKEN: "stall-dispatch-token" }),
+        ...(legionPane
+          ? {
+              LEGION_DAEMON_URL: base,
+              LEGION_ROLE: "implementer",
+              LEGION_TREE: "STALL-1",
+              LEGION_ISSUE: "STALL-2",
+              LEGION_GENERATION: "1",
+              LEGION_BOOT_TOKEN: "stall-boot",
+              LEGION_STATE_DIR: state,
+              LEGION_WORKSPACE: workspace,
+              LEGION_GRANT_FILE: path.join(
+                state,
+                "secrets",
+                "legion-stall-stall-2-implementer-grant"
+              ),
+            }
+          : {}),
       },
       stdin: "pipe",
       stdout: "pipe",
@@ -298,8 +375,10 @@ async function runPane(binary: string, replies: readonly (readonly Block[])[]): 
   });
 
   // The run has settled when the RPC stream reports its terminal agent_end: a continuation the
-  // host scheduled (the follow-up) starts its turn before that, under the same run. Both streams
-  // are read to the end, so a full pipe never blocks omp.
+  // host scheduled (the follow-up) starts its turn before that, under the same run. A steer the
+  // extension sends from `agent_end` instead starts its continuation after that frame, so
+  // `quietMs` waits for the gateway to fall silent rather than for the frame. Both streams are
+  // read to the end, so a full pipe never blocks omp.
   const stderr = new Response(child.stderr).text();
   const settled = Promise.withResolvers<void>();
   void (async () => {
@@ -326,13 +405,42 @@ async function runPane(binary: string, replies: readonly (readonly Block[])[]): 
   })();
   child.stdin.write(`${JSON.stringify({ type: "prompt", message: "Implement STALL-2." })}\n`);
   child.stdin.flush();
-  await settled.promise;
+  if (options.quietMs === undefined) {
+    await settled.promise;
+  } else {
+    // Nothing must be left unhandled: in quiet mode the settle frame is not what ends the wait.
+    settled.promise.catch(() => undefined);
+    const quietMs = options.quietMs;
+    const deadline = Date.now() + 90_000;
+    await Promise.race([
+      (async () => {
+        // A real clock, deliberately: the proposition is that the real host started no further
+        // turn, and a host that does nothing emits no signal to await. The whole point is to
+        // see the absence, and only elapsed time shows it.
+        while (Date.now() < deadline) {
+          await Bun.sleep(200);
+          if (answered > 0 && Date.now() - lastAnsweredAt >= quietMs) return;
+        }
+        throw new Error(`the stand-in gateway never went quiet for ${quietMs} ms`);
+      })(),
+      child.exited.then(async (code) => {
+        throw new Error(`omp exited (${code}) before the gateway went quiet:\n${await stderr}`);
+      }),
+    ]);
+  }
   child.stdin.end();
   await child.exited;
 
   return {
     requests,
-    turns: () => requests.filter((request) => request.path === "/anthropic/v1/messages"),
+    turns: () =>
+      requests.filter(
+        (request) => request.path === "/anthropic/v1/messages" && !isSelfCheck(request)
+      ),
+    selfChecks: () =>
+      requests.filter(
+        (request) => request.path === "/anthropic/v1/messages" && isSelfCheck(request)
+      ),
     legionLog: async () => {
       // No log file: the stand-in never ran.
       const text = await readFile(legionLog, "utf8").catch((error: NodeJS.ErrnoException) => {
@@ -426,4 +534,63 @@ test.skipIf(omp === undefined && !onActions)(
     expect(await pane.phaseEntries()).toEqual([{ state: "open" }, { state: "quiet" }]);
   },
   120_000
+);
+
+// The run-end ask nudge (extensions/envoy.ts) is a hidden `pi.askEphemeral` self-check whose
+// WAITING verdict — and nothing else — buys one steered turn. Two host behaviours carry it, and
+// only the real binary can say either: an ephemeral call is served as a Messages request over a
+// snapshot of the conversation that the transcript never keeps, and a `triggerTurn` continuation
+// of an agent-attributed custom message re-enters no `before_agent_start`, so it arms no period.
+// The check the period owes is re-armed by the agent's own work, and a continuation that only
+// replies calls no tool, so it owes none: those two together are why the nudge cannot nudge
+// itself. If either changed, an ordinary session would nudge itself to the per-period cap after
+// every settle. This is what a pin bump is re-run against.
+test.skipIf(omp === undefined && !onActions)(
+  "a PROCEEDING self-check leaves an ask-free stop with no visible turn at all",
+  async () => {
+    if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
+    const pane = await runPane(
+      omp,
+      // A second reply is scripted so a turn that should not happen shows up as a turn rather
+      // than as the gateway's "no reply scripted" refusal.
+      [[{ type: "text", text: "Done." }], [{ type: "text", text: "Understood." }]],
+      // An ordinary session, not a Legion pane: a Legion-driven one is excluded from the nudge.
+      { legion: false, openAsks: 0, selfCheck: "PROCEEDING", quietMs: 8_000 }
+    );
+
+    // One turn, and the wait proves no second: the user's own. The agent said it is not waiting
+    // on anyone, so the whole stop cost one hidden call the user never saw.
+    expect(pane.turns()).toHaveLength(1);
+    const selfChecks = pane.selfChecks();
+    expect(selfChecks).toHaveLength(1);
+    expect(userText(selfChecks[0] as Request)).toContain("WAITING or PROCEEDING");
+    const asks = pane.requests.filter((request) => request.path === "/api/v1/asks/open");
+    expect(asks).toHaveLength(2);
+  },
+  180_000
+);
+
+test.skipIf(omp === undefined && !onActions)(
+  "a WAITING self-check runs exactly one extra turn, whose own stop asks nothing more",
+  async () => {
+    if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
+    const pane = await runPane(
+      omp,
+      [[{ type: "text", text: "Done." }], [{ type: "text", text: "Understood." }]],
+      { legion: false, openAsks: 0, selfCheck: "WAITING", quietMs: 8_000 }
+    );
+
+    const turns = pane.turns();
+    // Two, and the wait proves no third: the user's turn, and the nudge's continuation.
+    expect(turns).toHaveLength(2);
+    expect(userText(turns[0] as Request)).not.toContain("no open ask in Dispatch");
+    expect(userText(turns[1] as Request)).toContain("no open ask in Dispatch");
+    expect(userText(turns[1] as Request)).toContain("dispatch_ask");
+    // The continuation's own stop found the period already fired, so it ran no second
+    // self-check and read no third open-ask snapshot: one nudge per period, and no loop.
+    expect(pane.selfChecks()).toHaveLength(1);
+    const asks = pane.requests.filter((request) => request.path === "/api/v1/asks/open");
+    expect(asks).toHaveLength(2);
+  },
+  180_000
 );

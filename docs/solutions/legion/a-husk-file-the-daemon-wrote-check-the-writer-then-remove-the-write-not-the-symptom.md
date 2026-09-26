@@ -220,7 +220,7 @@ directory layout; that layout is a jj-version detail.
   still leaves `legion/<KEY>` on the empty, undescribed working copy, and `jj git push --bookmark`
   is still refused `Won't push commit … since it has no description`; only
   `jj bookmark set legion/<KEY> -r @- --allow-backwards` before the push fixes that
-  (`worker-pane-shell-gotchas` §3). The file was never the cause of the refusal — it was only the
+  (`worker-pane-shell-gotchas` §3; today `skills/legion-worker/SKILL.md`'s push procedure does it after an ancestry check). The file was never the cause of the refusal — it was only the
   reason the refused commit was non-empty. Verified on jj 0.45.1-sami with no `.omp` present.
 - **In-flight workspaces keep their copy.** A tree provisioned before the fixed daemon deployed
   can retain `A .omp/config.yml` until it closes; the fix deliberately does not edit a live

@@ -63,8 +63,9 @@ follows from one decision — never move it.
 - **Divergent change ids are normal** on a branch other workspaces still point at (old copies stay
   visible); address commits by commit id and leave the divergence alone. `jj abandon` is off the
   table on the shared repository anyway.
-- **Push by bookmark**, `jj bookmark set legion/<KEY> -r <commit id> --allow-backwards` then
-  `jj git push --bookmark legion/<KEY>`; never commit `.omp/config.yml`.
+- **Push by bookmark**, with `skills/legion-worker/SKILL.md`'s push procedure (it sets `legion/<KEY>` with `-r @- --allow-backwards`
+  only after checking that the remote branch is an ancestor, or the tip recorded before a
+  rewrite); never commit `.omp/config.yml`.
 
 The same discipline made two conflict-forced rebases inside one hour cheap: all conflicts were in
 the daemon `AGENTS.md` and one doc comment, each resolved in place in minutes, with the suites

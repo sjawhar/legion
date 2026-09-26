@@ -142,7 +142,9 @@ file. Mechanics and history: `worker-pane-shell-gotchas.md` §11,
   legion/<KEY> -r @-` refuses (`Refusing to move bookmark backwards or sideways`) until
   `--allow-backwards`. Every later `set -r @-` is a forward move and needs no flag. `jj git push
   --bookmark` refuses a bookmark on a commit with no description, which is the loud version of the
-  same mistake. Always `jj split` with explicit paths so `.omp/config.yml` enters no commit (see
+  same mistake. `skills/legion-worker/SKILL.md`'s push procedure sets it that way after checking
+  that the remote branch is an ancestor of `@-`. Always `jj split` with explicit paths so
+  `.omp/config.yml` enters no commit (see
   `jj-bookmark-facts-verified-on-0-44-0-and-0-45-1.md` for why the bookmark starts on `@`).
 - **`bun install` first.** A fresh issue workspace has no `node_modules`; the first `bun test`
   fails with `Cannot find module '@legion/contracts'` (also noted in

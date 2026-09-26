@@ -32,6 +32,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
@@ -448,7 +449,7 @@ func (r *rig) newRuntime(adjust ...func(*Options)) *Runtime {
 		DaemonURL:      r.daemon.server.URL,
 		EnvoyURL:       "http://127.0.0.1:9020",
 		NatsURLs:       []string{"nats://127.0.0.1:4222"},
-		OmpInvocation:  shellPath(r.omp),
+		OmpInvocation:  shellprefix.Word(r.omp),
 		StopGrace:      5 * time.Second,
 		ProbeInterval:  100 * time.Millisecond,
 		AdoptTimeout:   5 * time.Second,
@@ -500,8 +501,15 @@ func (r *rig) mustTmux(args ...string) string {
 // spec is a spawn spec for a claim, with a boot token minted for this launch and known to the
 // daemon, no repository — so the runtime makes the issue's own workspace (rig.workspace) — a PATH
 // distinguishable from the daemon's, and an Envoy secret.
-func (r *rig) spec(token, tree, issue string, role claim.Role) runtime.SpawnSpec {
+func (r *rig) spec(tree, issue string, role claim.Role) runtime.SpawnSpec {
 	r.t.Helper()
+	// The token is the one the claim's coordinates derive, as the daemon mints it and as
+	// runtime.ValidateSpawnSpec holds every spec to.
+	derived, err := claim.NewToken(r.project, issue, role)
+	if err != nil {
+		r.t.Fatalf("claim token for %s/%s: %v", issue, role, err)
+	}
+	token := string(derived)
 	bootToken := "boot-" + randomHex(r.t, 8)
 	r.daemon.mu.Lock()
 	r.daemon.claims[bootToken] = bootClaim{token: claim.Token(token), tree: tree, issue: issue, role: role, generation: 1}
@@ -640,17 +648,31 @@ func descendant(t *testing.T, root int, name string) int {
 	return found
 }
 
+// readReport is what the Oh My Pi stand-in recorded about its own launch. The stand-in writes it
+// as it starts, which is after the pane exists and after its agent registered, so the file is
+// waited for rather than read once: on a loaded machine the process is running before its first
+// write lands, and reading in that window is not a failed launch.
 func readReport(t *testing.T, workspace string, pid int) map[string]any {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join(workspace, fmt.Sprintf("standin-%d.json", pid)))
-	if err != nil {
-		t.Fatal(err)
+	path := filepath.Join(workspace, fmt.Sprintf("standin-%d.json", pid))
+	deadline := time.Now().Add(30 * time.Second)
+	if testDeadline, ok := t.Deadline(); ok && testDeadline.Add(-time.Second).Before(deadline) {
+		deadline = testDeadline.Add(-time.Second)
 	}
-	var report map[string]any
-	if err := json.Unmarshal(raw, &report); err != nil {
-		t.Fatal(err)
+	for {
+		raw, err := os.ReadFile(path)
+		if err == nil {
+			var report map[string]any
+			if err := json.Unmarshal(raw, &report); err != nil {
+				t.Fatalf("the stand-in's report at %s: %v", path, err)
+			}
+			return report
+		}
+		if !errors.Is(err, os.ErrNotExist) || time.Now().After(deadline) {
+			t.Fatalf("read the stand-in's report at %s: %v", path, err)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	return report
 }
 
 func hasKillPane(argvs [][]string) bool {
@@ -670,7 +692,7 @@ func TestRealTmuxLifecycle(t *testing.T) {
 	r := newRig(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	spec := r.spec("legion-t-LEGION-1-architect", "LEGION-1", "LEGION-1", claim.RoleArchitect)
+	spec := r.spec("LEGION-1", "LEGION-1", claim.RoleArchitect)
 
 	loc, err := r.rt.Spawn(ctx, spec)
 	if err != nil {
@@ -787,7 +809,7 @@ func TestRealTmuxLifecycle(t *testing.T) {
 	awaitGone(t, r.rt, loc, "suspend")
 
 	// Resume: the same session, from the file it registered, in a new incarnation.
-	resumed := r.spec("legion-t-LEGION-1-architect", "LEGION-1", "LEGION-1", claim.RoleArchitect)
+	resumed := r.spec("LEGION-1", "LEGION-1", claim.RoleArchitect)
 	resumed.ResumeSessionFile = registration.OmpSessionFile
 	loc2, err := r.rt.Resume(ctx, &loc, resumed)
 	if err != nil {
@@ -829,7 +851,7 @@ func TestRealTmuxLifecycle(t *testing.T) {
 	}
 
 	// Resuming from a session file that is gone is a refusal, never a fresh agent.
-	missing := r.spec("legion-t-LEGION-1-architect", "LEGION-1", "LEGION-1", claim.RoleArchitect)
+	missing := r.spec("LEGION-1", "LEGION-1", claim.RoleArchitect)
 	missing.ResumeSessionFile = filepath.Join(r.dir, "no-such-session.jsonl")
 	if _, err := r.rt.Resume(ctx, &loc2, missing); err == nil ||
 		err.Error() != "Refusing to start LEGION-1 fresh while resurrecting: recorded OMP session file is missing: "+missing.ResumeSessionFile {
@@ -892,7 +914,7 @@ func TestRealTmuxSpawnReturnsOnlyOnceThePaneRunsItsCommand(t *testing.T) {
 		return []byte(string(body[:open+1]) + "tmux: server" + string(body[end:])), nil
 	}
 
-	loc, err := r.rt.Spawn(ctx, r.spec("legion-t-LEGION-8-architect", "LEGION-8", "LEGION-8", claim.RoleArchitect))
+	loc, err := r.rt.Spawn(ctx, r.spec("LEGION-8", "LEGION-8", claim.RoleArchitect))
 	if err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
@@ -911,15 +933,15 @@ func TestRealTmuxSplitsIntoTheIssueWindow(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	architect, err := r.rt.Spawn(ctx, r.spec("legion-t-LEGION-2-architect", "LEGION-2", "LEGION-2", claim.RoleArchitect))
+	architect, err := r.rt.Spawn(ctx, r.spec("LEGION-2", "LEGION-2", claim.RoleArchitect))
 	if err != nil {
 		t.Fatalf("Spawn architect: %v", err)
 	}
-	tester, err := r.rt.Spawn(ctx, r.spec("legion-t-LEGION-2-tester", "LEGION-2", "LEGION-2", claim.RoleTester))
+	tester, err := r.rt.Spawn(ctx, r.spec("LEGION-2", "LEGION-2", claim.RoleTester))
 	if err != nil {
 		t.Fatalf("Spawn tester: %v", err)
 	}
-	other, err := r.rt.Spawn(ctx, r.spec("legion-t-LEGION-3-architect", "LEGION-3", "LEGION-3", claim.RoleArchitect))
+	other, err := r.rt.Spawn(ctx, r.spec("LEGION-3", "LEGION-3", claim.RoleArchitect))
 	if err != nil {
 		t.Fatalf("Spawn on another issue: %v", err)
 	}
@@ -949,12 +971,12 @@ func TestRealTmuxSplitsIntoTheIssueWindow(t *testing.T) {
 
 	// One claim, one process: a second spawn of a live claim is refused, and a resume waits for
 	// the previous incarnation to go — and refuses when it does not.
-	if _, err := r.rt.Spawn(ctx, r.spec("legion-t-LEGION-2-tester", "LEGION-2", "LEGION-2", claim.RoleTester)); err == nil ||
+	if _, err := r.rt.Spawn(ctx, r.spec("LEGION-2", "LEGION-2", claim.RoleTester)); err == nil ||
 		!strings.Contains(err.Error(), "is still running in pane "+tester.Tmux.Pane) {
 		t.Errorf("a second spawn of a live claim = %v", err)
 	}
 	impatient := r.newRuntime(func(o *Options) { o.StopGrace = 300 * time.Millisecond })
-	resume := r.spec("legion-t-LEGION-2-tester", "LEGION-2", "LEGION-2", claim.RoleTester)
+	resume := r.spec("LEGION-2", "LEGION-2", claim.RoleTester)
 	resume.ResumeSessionFile = r.rolePrompt
 	if _, err := impatient.Resume(ctx, &tester, resume); err == nil ||
 		!strings.Contains(err.Error(), "previous incarnation "+tester.Incarnation+" is still running") {
@@ -1042,7 +1064,7 @@ func TestRealTmuxScrubRemovesAPlantedVariableAndKeepsTheAllowList(t *testing.T) 
 	r := newRig(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	loc, err := r.rt.Spawn(ctx, r.spec("legion-t-LEGION-5-architect", "LEGION-5", "LEGION-5", claim.RoleArchitect))
+	loc, err := r.rt.Spawn(ctx, r.spec("LEGION-5", "LEGION-5", claim.RoleArchitect))
 	if err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
@@ -1107,7 +1129,7 @@ func TestRealTmuxReconcilesAWindowWhoseReportWasLost(t *testing.T) {
 	r := newRig(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	spec := r.spec("lost-report", "LEGION-1", "LEGION-9", claim.RoleReviewer)
+	spec := r.spec("LEGION-1", "LEGION-9", claim.RoleReviewer)
 	base := r.rt.run
 	dropped := false
 	r.rt.run = func(ctx context.Context, argv []string) (result, error) {
@@ -1148,7 +1170,7 @@ func TestRealTmuxReconcileOrphans(t *testing.T) {
 	r := newRig(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	live, err := r.rt.Spawn(ctx, r.spec("legion-t-LEGION-4-architect", "LEGION-4", "LEGION-4", claim.RoleArchitect))
+	live, err := r.rt.Spawn(ctx, r.spec("LEGION-4", "LEGION-4", claim.RoleArchitect))
 	if err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
@@ -1212,7 +1234,7 @@ func TestRealTmuxObserveReportsGoneOnce(t *testing.T) {
 	r := newRig(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	loc, err := r.rt.Spawn(ctx, r.spec("legion-t-LEGION-6-architect", "LEGION-6", "LEGION-6", claim.RoleArchitect))
+	loc, err := r.rt.Spawn(ctx, r.spec("LEGION-6", "LEGION-6", claim.RoleArchitect))
 	if err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
@@ -1251,7 +1273,7 @@ func TestRealTmuxNeverKillsAPaneThatIsNotTheRecordedProcess(t *testing.T) {
 	r := newRig(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	live, err := r.rt.Spawn(ctx, r.spec("legion-t-LEGION-7-architect", "LEGION-7", "LEGION-7", claim.RoleArchitect))
+	live, err := r.rt.Spawn(ctx, r.spec("LEGION-7", "LEGION-7", claim.RoleArchitect))
 	if err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
@@ -1356,7 +1378,7 @@ func TestRealTmuxProviderKeysReachOMPAndNothingElse(t *testing.T) {
 	}
 	r.environ = append(r.environ, "SOPS_AGE_KEY_FILE="+ageIdentity, "SECRETSD_CONFIG=/home/legion/.config/secretsd/config.toml")
 	rt := r.newRuntime(func(o *Options) { o.ProviderEnvDir = dir })
-	spec := r.spec("legion-t-LEGION-8-architect", "LEGION-8", "LEGION-8", claim.RoleArchitect)
+	spec := r.spec("LEGION-8", "LEGION-8", claim.RoleArchitect)
 
 	loc, err := rt.Spawn(ctx, spec)
 	if err != nil {
@@ -1414,14 +1436,14 @@ func TestRealTmuxOMPGetsTheConfiguredDispatchURLAndTokenFile(t *testing.T) {
 	ctx := context.Background()
 	token := "dispatch-" + randomHex(t, 8)
 	r := newRig(t, func(o *Options) {
-		file, err := WriteDispatchTokenFile(o.StateDir, token)
+		file, err := runtime.WriteDispatchTokenFile(o.StateDir, token)
 		if err != nil {
 			t.Fatalf("WriteDispatchTokenFile: %v", err)
 		}
 		o.DispatchURL = "http://127.0.0.1:18766"
 		o.DispatchTokenFile = file
 	})
-	spec := r.spec("legion-t-LEGION-9-architect", "LEGION-9", "LEGION-9", claim.RoleArchitect)
+	spec := r.spec("LEGION-9", "LEGION-9", claim.RoleArchitect)
 
 	loc, err := r.rt.Spawn(ctx, spec)
 	if err != nil {
@@ -1469,7 +1491,7 @@ func TestRealTmuxPaneResolvesThisDaemonsLegionCLI(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(decoy, "legion"), []byte("#!/bin/sh\necho decoy-legion\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	spec := r.spec("legion-t-LEGION-10-architect", "LEGION-10", "LEGION-10", claim.RoleArchitect)
+	spec := r.spec("LEGION-10", "LEGION-10", claim.RoleArchitect)
 	spec.Env["PATH"] = decoy + ":" + os.Getenv("PATH")
 
 	loc, err := r.rt.Spawn(ctx, spec)
@@ -1514,15 +1536,15 @@ func TestRealTmuxAReleasedClaimsPaneIsTheSweeps(t *testing.T) {
 	r := newRig(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	worker, err := r.rt.Spawn(ctx, r.spec("legion-t-LEGION-5-tester", "LEGION-3", "LEGION-5", claim.RoleTester))
+	worker, err := r.rt.Spawn(ctx, r.spec("LEGION-3", "LEGION-5", claim.RoleTester))
 	if err != nil {
 		t.Fatalf("Spawn worker: %v", err)
 	}
-	root, err := r.rt.Spawn(ctx, r.spec("legion-t-LEGION-3-architect", "LEGION-3", "LEGION-3", claim.RoleArchitect))
+	root, err := r.rt.Spawn(ctx, r.spec("LEGION-3", "LEGION-3", claim.RoleArchitect))
 	if err != nil {
 		t.Fatalf("Spawn root: %v", err)
 	}
-	launching, err := r.rt.Spawn(ctx, r.spec("legion-t-LEGION-6-planner", "LEGION-3", "LEGION-6", claim.RolePlanner))
+	launching, err := r.rt.Spawn(ctx, r.spec("LEGION-3", "LEGION-6", claim.RolePlanner))
 	if err != nil {
 		t.Fatalf("Spawn launching: %v", err)
 	}
@@ -1574,11 +1596,11 @@ func TestRealTmuxAPaneAStaleSweepAdoptedIsReapedByTheNextSweep(t *testing.T) {
 	r := newRig(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	worker, err := r.rt.Spawn(ctx, r.spec("legion-t-LEGION-5-tester", "LEGION-3", "LEGION-5", claim.RoleTester))
+	worker, err := r.rt.Spawn(ctx, r.spec("LEGION-3", "LEGION-5", claim.RoleTester))
 	if err != nil {
 		t.Fatalf("Spawn worker: %v", err)
 	}
-	kept, err := r.rt.Spawn(ctx, r.spec("legion-t-LEGION-6-reviewer", "LEGION-3", "LEGION-6", claim.RoleReviewer))
+	kept, err := r.rt.Spawn(ctx, r.spec("LEGION-3", "LEGION-6", claim.RoleReviewer))
 	if err != nil {
 		t.Fatalf("Spawn kept: %v", err)
 	}

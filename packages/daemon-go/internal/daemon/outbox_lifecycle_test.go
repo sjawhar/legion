@@ -288,7 +288,7 @@ func TestASameRoleBackwardMoveNeverStopsTheWorkerInItsNewPhase(t *testing.T) {
 		t.Fatal(err)
 	}
 	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
-	sup.deps.PhaseHolds = phaseHolds(pool, records)
+	sup.deps.PhaseHolds = (&workflowRuntime{pool: pool, records: records}).phaseHolds // exactly what the daemon wires
 	clock := time.Now()
 	engine := workflow.New(records, workflow.Config{Project: "legion"}, quietLogger())
 	runner := &outbox{
@@ -424,6 +424,91 @@ func TestASuspendFromBeforeItsRoleWasHandedWorkAgainNeverActs(t *testing.T) {
 	}
 	if got := machine.Claim().State; got != supervise.StateReady {
 		t.Fatalf("implementer = %s after a suspend from before it was handed implementing again, want still ready", got)
+	}
+}
+
+// A stop ends the run it was written for. It is retried until the runtime takes it — a pane that
+// will not stop can refuse for minutes — so a retry can land long after the start that replaced
+// that run has delivered its task. Acting then suspends the run the start began and retires its
+// task, leaving the phase with nobody in it. The claim records the newest start run against it,
+// so the stop knows it is superseded whatever the timing was: no ordering, no window.
+func TestAStopSupersededByANewerStartNeverActs(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	ctx := context.Background()
+	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Planning, Generation: 2, Status: "in_progress", Rank: "U"}
+	putOutboxIssue(t, pool, records, issue)
+	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
+	token, err := claim.NewToken("legion", issue.Key, claim.RolePlanner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	machine, _, err := sup.Create(ctx, supervise.Claim{Token: token, Project: "legion", Tree: issue.Tree, Issue: issue.Key, Role: claim.RolePlanner, State: supervise.StateQueued}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := machine.Handle(ctx, supervise.RequestSpawn{Claim: token}); err != nil {
+		t.Fatal(err)
+	}
+	generation := machine.Claim().Generation
+	for _, ev := range []supervise.Event{
+		supervise.RequestRegister{Claim: token, Generation: generation, Session: "ses-plan", SessionFile: "/tmp/plan.jsonl"},
+		supervise.RequestReady{Claim: token, Generation: generation, Session: "ses-plan"},
+	} {
+		if err := machine.Handle(ctx, ev); err != nil {
+			t.Fatalf("handle %T: %v", ev, err)
+		}
+	}
+	conn := fake.NewConn()
+	sup.deps.Conns.(*fake.Conns).Register(token, conn)
+	now := time.Now().UTC()
+	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, project: "legion", log: quietLogger(), now: func() time.Time { return now }}
+
+	// The re-entry's stop, refused by the runtime for as long as it likes, and then the start of
+	// the run that replaces it.
+	rt.FailSuspend(errors.New("the pane will not stop"))
+	stop := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "suspend", Tree: issue.Tree, Role: claim.RolePlanner, Generation: 2}, now)
+	stop.ID = 41
+	if err := runner.execute(ctx, stop); err == nil {
+		t.Fatal("the stop's first attempt succeeded, want the runtime's refusal")
+	}
+	start := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RolePlanner, Generation: 2, Phase: phase.Planning, Task: "plan it again"}, now)
+	start.ID = stop.ID + 1
+	if err := runner.execute(ctx, start); err != nil {
+		t.Fatalf("the new run's start: %v", err)
+	}
+
+	// The runtime recovers and the stop is retried. It is the old run's, and the old run is over.
+	rt.FailSuspend(nil)
+	if err := runner.execute(ctx, stop); err != nil {
+		t.Fatalf("the retried stop = %v, want it finished as superseded", err)
+	}
+
+	if got := machine.Claim().State; got == supervise.StateSuspended {
+		t.Error("the superseded stop suspended the run that replaced it")
+	}
+	if p := machine.Claim().Pending; p == nil || p.Task != "plan it again" {
+		t.Fatalf("pending after the retried stop = %+v, want the new run's task kept", p)
+	}
+	if suspends := len(rt.CallsOf("Suspend")); suspends != 1 {
+		t.Errorf("Suspend calls = %d, want the one refused attempt", suspends)
+	}
+
+	// The process that survived is the one launched before the re-entry, and it is now serving the
+	// new run's task: Spawn once, Resume never. So the completion it reports for that task belongs
+	// to the new run, and the one it would have reported for the task it held before does not —
+	// which is what the delivery's generation says, and the pane's own environment cannot.
+	if spawns, resumes := len(rt.CallsOf("Spawn")), len(rt.CallsOf("Resume")); spawns != 1 || resumes != 0 {
+		t.Fatalf("spawns=%d resumes=%d, want the pane launched before the re-entry still serving", spawns, resumes)
+	}
+	if pending := machine.Claim().Pending; pending.Generation != 2 {
+		t.Fatalf("the task being served names generation %d, want the new run's 2", pending.Generation)
+	}
+	if err := machine.Handle(ctx, supervise.StreamTurnStart{Claim: token, DeliveryID: machine.Claim().Pending.ID}); err != nil {
+		t.Fatalf("start the new task's turn: %v", err)
+	}
+	if pending := machine.Claim().Pending; pending == nil || pending.ConfirmedAt.IsZero() || pending.Generation != 2 {
+		t.Fatalf("the confirmed delivery is %+v, want the new run's task: a completion now is generation 2's", pending)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strings"
 )
 
 type Attrs map[string]any
@@ -173,14 +174,15 @@ func validateTypedBlock(n *Node, typ BlockTypeSchema) error {
 	case BlockContentParagraphsOptionalBulletList:
 		// Browser edits can transiently put another block in an ask. Retain that
 		// structurally valid body so Dispatch can stamp its semantic parse error;
-		// agent mutations still reject it through validateAskBlocks.
+		// uploads and edits refuse an ask they write that breaks the rule
+		// (AskContentError).
 		if n.Type == "ask" {
 			if len(n.Children) == 0 || !childrenAreBlocks(n.Children) {
 				return fmt.Errorf("%w: typed block %q requires block children", ErrSchema, n.Type)
 			}
 			break
 		}
-		if !paragraphsThenOptionalBulletList(n.Children) {
+		if askContentBreak(n.Children) != "" {
 			return fmt.Errorf("%w: typed block %q content %q requires paragraphs followed by an optional bullet list", ErrSchema, n.Type, typ.Content)
 		}
 	default:
@@ -215,20 +217,82 @@ func validateTypedBlock(n *Node, typ BlockTypeSchema) error {
 	return nil
 }
 
-func paragraphsThenOptionalBulletList(children []*Node) bool {
-	if len(children) == 0 || children[0] == nil || children[0].Type != "paragraph" {
-		return false
-	}
-	for index, child := range children {
-		if child == nil {
+// AskContentError reports the first ask block in node that breaks its content rule, paragraph+
+// bullet_list? - one or more paragraphs, then at most one bullet list, last - or nil. Validate
+// lets an ask hold other blocks, since a browser edit can briefly leave one there and settlement
+// flags it; markdown written in whole is held to the rule, as the browser editor's parser holds it.
+func AskContentError(node *Node) error {
+	var found error
+	walk(node, func(ask *Node, _ []int, _, _ int) bool {
+		if found != nil {
 			return false
 		}
-		if child.Type == "paragraph" {
-			continue
+		if ask.Type != "ask" {
+			return true
 		}
-		return child.Type == "bullet_list" && index == len(children)-1
+		broken := askContentBreak(ask.Children)
+		if broken == "" {
+			return true
+		}
+		id, _ := ask.Attrs[BlockIDAttr].(string)
+		found = fmt.Errorf("ask block %q%s holds %s where its content rule, %s, allows one or more paragraphs and then at most one bullet list, last", id, askQuestionOpening(ask), broken, BlockContentParagraphsOptionalBulletList)
+		return false
+	})
+	return found
+}
+
+// askQuestionOpening is `, asking "<its question's opening words>"`, or "" for an ask that opens
+// with no question. A refusal names an ask by its block id, which the parser makes up when the
+// markdown gives none, so the question is how its author knows which ask is meant.
+func askQuestionOpening(ask *Node) string {
+	if len(ask.Children) == 0 || ask.Children[0] == nil || ask.Children[0].Type != "paragraph" {
+		return ""
 	}
-	return true
+	question := []rune(strings.Join(strings.Fields(textContent(ask.Children[0])), " "))
+	if len(question) == 0 {
+		return ""
+	}
+	const opening = 40
+	if len(question) > opening {
+		question = append([]rune(strings.TrimRight(string(question[:opening]), " ")), '…')
+	}
+	return fmt.Sprintf(", asking %q,", string(question))
+}
+
+// askContentBreak names the first child that breaks the content rule paragraph+ bullet_list? -
+// one or more paragraphs, then at most one bullet list, last - or is "" when the children keep it.
+func askContentBreak(children []*Node) string {
+	if len(children) == 0 {
+		return "nothing"
+	}
+	for index, child := range children {
+		switch {
+		case child == nil:
+			return "a missing block"
+		case index == 0 && child.Type != "paragraph":
+			return blockName(child.Type) + " before its question"
+		case child.Type == "paragraph" && index > 0 && children[index-1].Type == "bullet_list":
+			return "a paragraph after its options"
+		case child.Type == "bullet_list" && index > 0 && children[index-1].Type == "bullet_list":
+			return "a second bullet list"
+		case child.Type != "paragraph" && child.Type != "bullet_list":
+			return blockName(child.Type)
+		}
+	}
+	return ""
+}
+
+// blockName is a block type as a reader names it, with its article: "a code block", "an
+// ordered list", "a horizontal rule".
+func blockName(nodeType string) string {
+	name := strings.ReplaceAll(nodeType, "_", " ")
+	if nodeType == "hr" {
+		name = "horizontal rule"
+	}
+	if strings.ContainsRune("aeiou", rune(name[0])) {
+		return "an " + name
+	}
+	return "a " + name
 }
 
 func childrenAre(children []*Node, typeName string) bool {

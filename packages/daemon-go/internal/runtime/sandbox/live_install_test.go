@@ -23,6 +23,8 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
+	"github.com/sjawhar/legion/daemon/internal/promptrefs"
+	"github.com/sjawhar/legion/daemon/internal/prompts"
 )
 
 // identity: the runtime's client is the restricted Legion daemon identity, and nothing more.
@@ -268,11 +270,11 @@ func (r *liveRig) checkImageProbe() error {
 	if err := r.recordSandbox(name); err != nil {
 		return err
 	}
-	err := r.rt.ProbeImage(r.ctx, ImageProbe{
-		Contract: api.GoDaemonAPIVersion, Budget: 10 * time.Minute,
-		Retry: bootprobe.Retry{Initial: 15 * time.Second, Max: time.Minute, Attempts: 3},
-	})
+	p, err := r.imageProbe()
 	if err != nil {
+		return err
+	}
+	if err := r.rt.ProbeImage(r.ctx, p); err != nil {
 		return err
 	}
 	passed, ok := r.logs.find("sandbox runtime: the worker image passed its probe")
@@ -330,10 +332,11 @@ func (r *liveRig) checkImageProbeRefusal() error {
 		return err
 	}
 	note("operator", "ConfigMap %s: modelRoles.oracle removed from overlay.yml", name)
-	refusal := r.rt.ProbeImage(r.ctx, ImageProbe{
-		Contract: api.GoDaemonAPIVersion, Budget: 10 * time.Minute,
-		Retry: bootprobe.Retry{Initial: 15 * time.Second, Max: time.Minute, Attempts: 3},
-	})
+	p, err := r.imageProbe()
+	if err != nil {
+		return err
+	}
+	refusal := r.rt.ProbeImage(r.ctx, p)
 	if err := patch(overlay); err != nil {
 		return fmt.Errorf("restore ConfigMap %s: %w", name, err)
 	}
@@ -357,6 +360,24 @@ func (r *liveRig) checkImageProbeRefusal() error {
 	}
 	note("runtime", "probe Sandbox %s deleted after the attempt", probe)
 	return nil
+}
+
+// imageProbe is the probe as the daemon asks for it: its contract, and the references of the role
+// prompts it hands every pod, the checkout's (promptrefs.Roles over prompts.SourceRolePromptsDir).
+// The probe command it sends, with --role-references and, the run having a provider key,
+// --provider-env-dir, is noted.
+func (r *liveRig) imageProbe() (ImageProbe, error) {
+	references, err := promptrefs.Roles(prompts.SourceRolePromptsDir())
+	if err != nil {
+		return ImageProbe{}, err
+	}
+	p := ImageProbe{
+		Contract: api.GoDaemonAPIVersion, Budget: 10 * time.Minute, RoleReferences: references,
+		Retry: bootprobe.Retry{Initial: 15 * time.Second, Max: time.Minute, Attempts: 3},
+	}
+	command := r.rt.probeManifest("probe", p, time.Now()).Spec.PodTemplate.Spec.Containers[0].Command
+	note("runtime", "the probe command: %s", strings.Join(command, " "))
+	return p, nil
 }
 
 func lastLine(text, prefix string) string {

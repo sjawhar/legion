@@ -137,19 +137,29 @@ type Push struct {
 	After        string
 	ChangedPaths *string
 	Truncated    *string
+	// Pusher is the push's pusher login (the listener's `pusher`, GitHub's pusher.name).
+	Pusher string
 }
 
 func (Push) isFact() {}
 
 // HandoffComplete is an API-originated phase-completion fact.
 type HandoffComplete struct {
-	Issue   string
-	Role    claim.Role
-	Claim   claim.Token
-	Summary string
-	Verdict string
-	Ready   bool
-	Commit  string
+	Issue string
+	Role  claim.Role
+	Claim claim.Token
+	// Generation is the run whose task the worker took, which the daemon reads from the claim —
+	// the delivery whose turn is running, or the run the claim is left serving once that turn
+	// ends. A run that was interrupted — a child taken back to todo, its stop refused by the
+	// runtime — keeps working and reports a completion of the run that is over; nothing on the
+	// worker's own request tells the two apart, since the claim token is stable across runs and
+	// the session is kept across a suspend. The route refuses a claim that has taken no task, so
+	// a fact reaching the workflow always names a run.
+	Generation uint64
+	Summary    string
+	Verdict    string
+	Ready      bool
+	Commit     string
 }
 
 func (HandoffComplete) isFact() {}
@@ -245,6 +255,14 @@ type Refusal struct {
 // Facts apply one at a time. Handlers read and rewrite whole records, and admission's slots span
 // every tree, so two facts in flight together would each act on what the other is about to change;
 // the transaction-scoped advisory lock makes the second wait for the first to commit.
+//
+// The lock is deliberately one lock for every fact, not one per tree. A per-tree lock does not
+// hold: admission's promotion writes the issue record, admission slot and outbox rows of a tree
+// other than the fact's — the candidate it promotes off the waiting line — so it would mutate a
+// tree whose lock nobody holds, racing that tree's own handler on the same read-modify-write.
+// Making per-tree locking correct means promotion taking the candidate tree's lock as well, which
+// is cross-tree lock ordering, which is a deadlock a daemon supervising long-lived agents would
+// hold until a human noticed. Serial facts are a throughput cost; that is the trade being made.
 func ApplyFact(ctx context.Context, pool *pgxpool.Pool, source, eventID string, fact Fact, handlers ...Handler) (Result, error) {
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {

@@ -514,3 +514,43 @@ func TestParseMintsAnOmittedTypedBlockID(t *testing.T) {
 		t.Fatalf("generated typed block id = %#v, want generated-id", got)
 	}
 }
+
+// A refused ask is named by the opening words of its question as well as its block id, which the
+// parser makes up when the markdown gives none.
+func TestAskContentErrorNamesTheAskByItsQuestion(t *testing.T) {
+	doc, err := Parse("Intro.\n\n:::ask{urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich transport should we expose to the partners first?\n\n```\ncode\n```\n:::\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := AskContentError(doc); err == nil || !strings.Contains(err.Error(), `"Which transport should we expose to the…"`) {
+		t.Fatalf("AskContentError = %v, want it to name the question's opening words", err)
+	}
+	broken, err := Parse("Intro.\n\n:::ask{urgency=\"med\" multiple=\"false\" state=\"open\"}\nShould we\\\nship this?\n\n```\ncode\n```\n:::\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := AskContentError(broken); err == nil || !strings.Contains(err.Error(), `"Should we ship this?"`) {
+		t.Fatalf("AskContentError = %v, want a hard break in the question read as a space", err)
+	}
+}
+
+// An ask holding a block its content rule does not allow is refused naming that block as a
+// reader would, with its article.
+func TestAskContentErrorNamesTheBlockThatBreaksTheRule(t *testing.T) {
+	paragraph := func(text string) *Node {
+		return &Node{Type: "paragraph", Children: []*Node{{Type: "text", Text: text}}}
+	}
+	for _, test := range []struct {
+		child *Node
+		want  string
+	}{
+		{&Node{Type: "ordered_list", Attrs: Attrs{"order": float64(1), "spread": false}, Children: []*Node{{Type: "list_item", Children: []*Node{paragraph("one")}}}}, "holds an ordered list"},
+		{&Node{Type: "hr"}, "holds a horizontal rule"},
+		{&Node{Type: "code_block", Attrs: Attrs{"language": nil}, Children: []*Node{{Type: "text", Text: "x"}}}, "holds a code block"},
+	} {
+		ask := &Node{Type: "ask", Attrs: Attrs{BlockIDAttr: "a1"}, Children: []*Node{paragraph("Which?"), test.child}}
+		if err := AskContentError(&Node{Type: "doc", Children: []*Node{ask}}); err == nil || !strings.Contains(err.Error(), test.want) {
+			t.Fatalf("AskContentError = %v, want it to say %q", err, test.want)
+		}
+	}
+}

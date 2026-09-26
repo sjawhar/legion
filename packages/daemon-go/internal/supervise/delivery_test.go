@@ -335,30 +335,30 @@ func TestAReplayedTurnStartIsFencedOnItsDeliveryID(t *testing.T) {
 // A turn that starts after the no-turn bound carries no delivery id and nothing is in flight to
 // attribute it to, so it is a foreign turn and confirms nothing (the divergence from the shipped
 // daemon, which commits a late start as the same delivery). The task is re-sent when that turn
-// ends — unless the issue has left this role's phase meanwhile, in which case the late turn was
-// the phase itself and re-sending would hand a finished worker its own finished task.
+// ends — unless the issue has left the phase the task was queued for meanwhile, in which case the
+// late turn was that phase running and re-sending would hand a finished worker its finished task.
 func TestALateForeignTurnResendsTheTaskUnlessTheIssueLeftThePhase(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
 		holdsAfterRun bool
 		prompts       int
 	}{
-		{name: "the phase is still this role's", holdsAfterRun: true, prompts: 2},
-		{name: "the issue left this role's phase", holdsAfterRun: false, prompts: 1},
+		{name: "the issue is still in the phase the task names", holdsAfterRun: true, prompts: 2},
+		{name: "the issue left the phase the task names", holdsAfterRun: false, prompts: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newBareHarness(t)
-			// The phase is this role's while the task is delivered; the late turn is the phase
+			// The issue is in the task's phase while it is delivered; the late turn is that phase
 			// running, so by the time it ends the daemon may have advanced past it.
 			holds := true
-			h.deps.PhaseHolds = func(context.Context, Claim, Delivery) (bool, error) { return holds, nil }
+			h.deps.PhaseHolds = func(context.Context, string, phase.Phase) (bool, error) { return holds, nil }
 			c := queuedClaim()
 			if err := h.store.PutClaim(h.ctx, c); err != nil {
 				t.Fatal(err)
 			}
 			h.start(c)
 			h.reach(StateReady)
-			h.must(RequestDeliver{Claim: testToken, Task: "the task"})
+			h.must(RequestDeliver{Claim: testToken, Task: "the task", Phase: phase.Implementing})
 			first := h.wantPrompts(1)[0]
 
 			h.advance(testRPC) // the bound passes with no turn: charged, and the id rotated
@@ -428,8 +428,9 @@ func TestADeliveryDuringAForeignTurnIsSentWhenTheTurnEnds(t *testing.T) {
 }
 
 // A late refusal under a turn that confirmed the delivery: the turn may be foreign and really
-// running, so the claim stays working; only the delivery is taken back, rotated, and charged,
-// and it is sent again once that turn ends.
+// running, so the claim stays working and only the delivery is taken back and rotated. Nothing is
+// charged — the agent is in a turn, not refusing to work — and the task is sent again once that
+// turn ends.
 func TestALateRefusalUnderAConfirmingTurnReversesOnlyTheDelivery(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateReady)
@@ -441,7 +442,7 @@ func TestALateRefusalUnderAConfirmingTurnReversesOnlyTheDelivery(t *testing.T) {
 	h.must(StreamLateRefusal{Claim: testToken, DeliveryID: refused, Error: "agent busy"})
 
 	h.wantState(StateWorking)
-	h.wantBudgets(Budgets{PromptFailures: 1})
+	h.wantBudgets(Budgets{})
 	p := h.pending()
 	if p.ID == refused || !p.ConfirmedAt.IsZero() {
 		t.Fatalf("pending %+v, want the delivery unconfirmed under a rotated id", p)
@@ -460,9 +461,10 @@ func TestALateRefusalUnderAConfirmingTurnReversesOnlyTheDelivery(t *testing.T) {
 }
 
 // A late refusal while the acknowledged prompt is still waiting for its turn: the no-turn timer
-// for the refused id is cancelled, so the one failure is charged once, and the rotated delivery
-// goes at the next sweep.
-func TestALateRefusalWhileAwaitingTheTurnCancelsTheTimerAndChargesOnce(t *testing.T) {
+// for the refused id is cancelled, so the prompt it belonged to charges nothing later, and the
+// rotated delivery goes as soon as the agent says its own turn is over. The prompt that carries
+// it is an ordinary one: acknowledged and starting no turn, it charges as any other does.
+func TestALateRefusalCancelsTheRefusedPromptsTurnTimer(t *testing.T) {
 	for _, state := range prompted {
 		t.Run(string(state), func(t *testing.T) {
 			h := newHarness(t)
@@ -470,26 +472,72 @@ func TestALateRefusalWhileAwaitingTheTurnCancelsTheTimerAndChargesOnce(t *testin
 			base := len(h.prompts())
 			h.must(RequestDeliver{Claim: testToken, Task: "the task"})
 			refused := h.wantPrompts(base + 1)[base].DeliveryID
+			h.conn.SetStreaming(true) // a turn of the agent's own: the collision, not a refusal to work
 			h.advance(time.Second)
 
 			h.must(StreamLateRefusal{Claim: testToken, DeliveryID: refused, Error: "agent busy"})
 
 			h.wantState(state)
-			h.wantBudgets(Budgets{PromptFailures: 1})
+			h.wantBudgets(Budgets{})
 			rotated := h.pending().ID
 			if rotated == refused {
 				t.Fatal("the delivery id was not rotated after the late refusal")
 			}
-			h.advance(testRPC - time.Second) // the refused prompt's timer would have fired here
-			h.wantBudgets(Budgets{PromptFailures: 1})
-			h.wantPrompts(base + 1)
-
-			h.observe(runtime.Alive)
-			if resent := h.wantPrompts(base + 2)[base+1]; resent.DeliveryID != rotated {
-				t.Fatalf("re-sent %+v at the sweep, want the task under the rotated id %s", resent, rotated)
+			h.advance(testRPC) // the refused prompt's timer would have fired here
+			h.wantBudgets(Budgets{})
+			if prompts := h.prompts(); len(prompts) != base+1 {
+				t.Fatalf("prompts sent = %d, want the refused one alone: the turn the agent is in sends the task at its end", len(prompts))
 			}
-			h.advance(testRPC) // the re-sent prompt's own timer
-			h.wantBudgets(Budgets{PromptFailures: 2})
+			if p := h.pending(); p.ID != rotated || !p.ConfirmedAt.IsZero() {
+				t.Fatalf("pending = %+v, want the task waiting unconfirmed under the rotated id %s", p, rotated)
+			}
+
+			// The turn the agent was in ends, and the task goes under its rotated id. Leaving the
+			// refused prompt's timer armed loses it here: that timer confirms the foreign turn as
+			// this delivery's and retires the task with it.
+			h.must(StreamTurnStart{Claim: testToken})
+			h.must(StreamTurnEnd{Claim: testToken})
+			if sent := h.wantPrompts(base + 2)[base+1]; sent.DeliveryID != rotated {
+				t.Fatalf("sent %+v at the turn's end, want the task under the rotated id %s", sent, rotated)
+			}
+		})
+	}
+}
+
+// A late refusal for a turn the agent really is in is what a notice delivered to the pane
+// produces: an assignment prompt sent a moment after that notice is refused the same way. That is
+// not the agent failing to take work, and charging it let the daemon's own notices walk a healthy
+// worker toward the retirement its prompt budget ends in. Two witnesses say the turn is real, and
+// either is enough: Oh My Pi's own busy answer, and a turn the stream saw start. The task is
+// taken back under a new id, nothing is charged, and it is not re-sent on the spot — the turn's
+// end sends it.
+func TestALateRefusalIsTheAgentsTurn(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		working bool
+	}{
+		{name: "Oh My Pi's own answer says so"},
+		{name: "the stream saw the turn start", working: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.reach(StateReady)
+			h.must(RequestDeliver{Claim: testToken, Task: "the task"})
+			refused := h.wantPrompts(1)[0].DeliveryID
+			if tc.working {
+				// Oh My Pi's busy answer is not the only witness: a turn the stream saw start is
+				// one the daemon knows about without asking.
+				h.must(StreamTurnStart{Claim: testToken})
+			}
+
+			h.must(StreamLateRefusal{Claim: testToken, DeliveryID: refused, Error: "Agent is already processing. Use steer() or followUp() to queue messages"})
+
+			h.wantBudgets(Budgets{})
+			rotated := h.pending()
+			if rotated.ID == "" || rotated.ID == refused || !rotated.ConfirmedAt.IsZero() {
+				t.Fatalf("pending after the refusal = %+v, want the task kept, unconfirmed, under a new id", rotated)
+			}
+			h.wantPrompts(1) // nothing is re-sent on the spot: the turn's end or the sweep sends it
 		})
 	}
 }
@@ -693,7 +741,7 @@ func TestDroppingATaskForItsPhaseAlsoDropsTheQuestionARestartLeft(t *testing.T) 
 		t.Fatalf("seed the restored delivery: %v", err)
 	}
 	h.conns.Register(testToken, h.conn)
-	h.deps.PhaseHolds = func(_ context.Context, _ Claim, d Delivery) (bool, error) { return d.Phase == "", nil }
+	h.deps.PhaseHolds = func(context.Context, string, phase.Phase) (bool, error) { return false, nil }
 	h.start(restored)
 
 	// The issue has left the phase the restored task was queued for: it is dropped.
@@ -712,5 +760,154 @@ func TestDroppingATaskForItsPhaseAlsoDropsTheQuestionARestartLeft(t *testing.T) 
 	}
 	if p := h.m.Claim().Pending; p == nil || !p.ConfirmedAt.IsZero() {
 		t.Fatalf("pending = %+v, want the operator's task unconfirmed: the agent's own turn is not its delivery's", p)
+	}
+}
+
+// Dropping a restored claim's task for its phase must answer the question the restart left, not
+// discard it: its agent may still be mid-turn. Clearing the question outright left the claim ready
+// while the agent worked, so the next task was prompted into a busy agent, charged, and the worker
+// relaunched mid-turn. Asked instead, the claim moves to working and the next task waits for the
+// turn to end.
+func TestDroppingATaskAsksWhetherTheAgentIsStillInATurn(t *testing.T) {
+	restored := fixture(StateReady)
+	restored.Pending.Phase = phase.Implementing
+	h := newHarnessOf(t, restored)
+	if err := h.store.PutDelivery(h.ctx, testToken, *restored.Pending); err != nil {
+		t.Fatalf("seed the restored delivery: %v", err)
+	}
+	h.conns.Register(testToken, h.conn)
+	h.conn.SetStreaming(true) // the agent is in a turn an earlier daemon saw start
+	h.deps.PhaseHolds = func(context.Context, string, phase.Phase) (bool, error) { return false, nil }
+	h.start(restored)
+
+	h.must(RequestReady{Claim: testToken, Generation: restored.Generation, Session: session})
+
+	if p := h.m.Claim().Pending; p != nil {
+		t.Fatalf("the finished phase's task is still pending as %+v", p)
+	}
+	h.wantState(StateWorking)
+
+	// A task delivered while that turn runs waits for it rather than being prompted into it.
+	h.must(RequestDeliver{Claim: testToken, Task: "look at the tree"})
+	h.wantPrompts(0)
+	h.wantBudgets(Budgets{})
+
+	h.must(StreamTurnEnd{Claim: testToken})
+
+	if sent := h.wantPrompts(1)[0]; sent.Message != "look at the tree" {
+		t.Errorf("prompt after the turn = %+v, want the operator's task", sent)
+	}
+}
+
+// A suspension ends the claim's phase, so the workflow task it leaves is the finished phase's and
+// goes with it. An operator's task belongs to no phase: the operator asked for it, was answered
+// 200, and a phase change they had no part in must not take it. It waits out the suspension and
+// is delivered when the claim resumes.
+func TestAnOperatorsTaskSurvivesASuspensionAndGoesOnResume(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateRegistered) // registered, not ready: the task is queued rather than sent
+	h.must(RequestDeliver{Claim: testToken, Task: "look at the tree"})
+	h.wantPrompts(0)
+
+	h.must(RequestSuspend{Claim: testToken})
+	h.wantState(StateSuspended)
+
+	if pending := h.pending(); pending.Task != "look at the tree" {
+		t.Fatalf("pending across the suspension = %+v, want the operator's task kept", pending)
+	}
+	if stored, ok := h.store.delivery(testToken); !ok || stored.Task != "look at the tree" {
+		t.Fatalf("stored delivery across the suspension = %+v (%v), want the operator's task kept", stored, ok)
+	}
+
+	h.must(RequestResume{Claim: testToken})
+	h.reach(StateReady)
+
+	if sent := h.wantPrompts(1)[0]; sent.Message != "look at the tree" {
+		t.Errorf("prompt after the resume = %+v, want the operator's task", sent)
+	}
+}
+
+// An agent that cannot start a turn at all answers every prompt with a late refusal: Oh My Pi
+// acknowledges the prompt and then rejects it, and a provider failure thrown before the turn
+// begins ("No API key found for …") arrives by that same route. Resending on the spot and
+// charging nothing made that an unbounded loop — the worker was never relaunched, failed or
+// held, and the prompt budget that exists to end it never moved. A refusal with no turn of the
+// agent's own running is the agent refusing to work: it is charged, and the retry waits for the
+// sweep that follows the charge.
+func TestAPersistentLateRefusalIsChargedAndNotResentOnTheSpot(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateReady)
+	h.must(RequestDeliver{Claim: testToken, Task: "the task"})
+	refused := h.wantPrompts(1)[0].DeliveryID
+	h.conn.SetStreaming(false) // no turn of its own: the agent could not start one
+
+	h.must(StreamLateRefusal{Claim: testToken, DeliveryID: refused, Error: "No API key found for anthropic."})
+
+	h.wantBudgets(Budgets{PromptFailures: 1})
+	if prompts := h.conn.Prompts(); len(prompts) != 1 {
+		t.Fatalf("prompts = %d, want the refused one alone: the retry waits for the sweep", len(prompts))
+	}
+	rotated := h.pending()
+	if rotated.ID == refused || !rotated.ConfirmedAt.IsZero() {
+		t.Fatalf("pending after the refusal = %+v, want the task kept, unconfirmed, under a new id", rotated)
+	}
+
+	// The sweep that follows sends it again, once, under the rotated id. The refused prompt's own
+	// timer must be gone by then: left armed, it charges a second failure for a prompt nobody is
+	// waiting on, and confirms whatever turn runs next as this delivery's.
+	h.advance(testRPC)
+	h.observe(runtime.Alive)
+	if sent := h.wantPrompts(2)[1]; sent.DeliveryID != rotated.ID {
+		t.Fatalf("re-sent %+v at the sweep, want the task under the rotated id %s", sent, rotated.ID)
+	}
+	h.wantBudgets(Budgets{PromptFailures: 1})
+}
+
+// A task's delivered mark says a worker may have read it, which is what lets a completion from a
+// turn the daemon did not deliver be attributed to that task. The bound keeps it: a turn that has
+// not started within the wait may still be this task's, starting late. Both refusals drop it: the
+// agent refusing in a turn of its own never saw this prompt, and one refused with no turn running
+// did not run at all.
+func TestOnlyTheTurnBoundLeavesTheTaskMarkedAsRead(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		refuse func(h *harness, delivery string)
+		read   bool
+	}{
+		{
+			name:   "no turn within the bound",
+			refuse: func(h *harness, _ string) { h.advance(2 * testRPC) },
+			read:   true,
+		},
+		{
+			name: "refused in a turn of the agent's own",
+			refuse: func(h *harness, delivery string) {
+				h.must(StreamLateRefusal{Claim: testToken, DeliveryID: delivery, Error: "Agent is already processing"})
+			},
+		},
+		{
+			name: "refused with no turn running",
+			refuse: func(h *harness, delivery string) {
+				h.must(StreamLateRefusal{Claim: testToken, DeliveryID: delivery, Error: "No API key found for provider anthropic"})
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.reach(StateReady)
+			base := len(h.prompts())
+
+			h.must(RequestDeliver{Claim: testToken, Task: "the task"})
+			sent := h.wantPrompts(base + 1)[base]
+			if p := h.pending(); p.DeliveredAt.IsZero() {
+				t.Fatalf("pending after the acknowledgement = %+v, want it marked delivered", p)
+			}
+
+			tc.refuse(h, sent.DeliveryID)
+
+			if p := h.pending(); p.DeliveredAt.IsZero() == tc.read {
+				t.Fatalf("pending after %s = %+v, want DeliveredAt set = %t", tc.name, p, tc.read)
+			}
+		})
 	}
 }

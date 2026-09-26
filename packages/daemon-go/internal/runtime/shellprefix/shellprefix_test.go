@@ -59,3 +59,19 @@ func TestThePrefixResolvesItsDirectoriesAheadOfAnRcsAndIsStable(t *testing.T) {
 		t.Fatalf("resolved\n%s\nwant\n%s", out, want)
 	}
 }
+
+// Word leaves a word of the safe set bare and single-quotes anything else, closing and
+// reopening the quote around a `'` (runtime.ts:327-329).
+func TestWord(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"/usr/local/bin/omp", "/usr/local/bin/omp"},
+		{"github:sjawhar/oh-my-pi@18", "'github:sjawhar/oh-my-pi@18'"},
+		{"/state dir/worker-bin:/usr/bin", "'/state dir/worker-bin:/usr/bin'"},
+		{"it's", `'it'\''s'`},
+		{"$HOME", "'$HOME'"},
+	} {
+		if got := Word(tc.in); got != tc.want {
+			t.Errorf("Word(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

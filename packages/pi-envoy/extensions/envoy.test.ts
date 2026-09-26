@@ -8,10 +8,11 @@ import {
   dispatchToolSpecs,
 } from "@legion/contracts";
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
+import { logger } from "@oh-my-pi/pi-utils";
 import { decode } from "@toon-format/toon";
 import { z } from "zod";
 import { LOCAL_ENVOY_NOTICE } from "../src/legion/phase-stall";
-import { onEnvoyRoleRegained } from "../src/legion/role-claim-bridge";
+import { claimEnvoyRole, onEnvoyRoleRegained } from "../src/legion/role-claim-bridge";
 import type { MessageRenderer, MessageRendererTheme, PiApi } from "../src/pi-types";
 import { hostAgentRegistryMock, testAgentRoster } from "./test-host-registry";
 
@@ -77,13 +78,17 @@ type TestPi = {
       | "session_tree"
       | "session_shutdown"
       | "before_agent_start"
+      | "agent_end"
       | "message_start"
       | "session_stop"
       | "input"
       | "tool_result",
     handler: (event: unknown, context: SessionContext) => Promise<unknown>
   ) => void;
-  readonly sendMessage: (message: { readonly content: string }, options: unknown) => void;
+  readonly sendMessage: (
+    message: { readonly content: string; readonly customType?: string; readonly display?: boolean },
+    options: unknown
+  ) => void;
   readonly askEphemeral?: (input: {
     readonly prompt: string;
     readonly signal?: AbortSignal;
@@ -305,7 +310,9 @@ function createPi(options: { readonly clipboardError?: Error; readonly zod?: typ
   const messages: string[] = [];
   const deliveries: {
     readonly content: string;
+    readonly customType?: string;
     readonly details?: unknown;
+    readonly display?: boolean;
     readonly options: unknown;
   }[] = [];
   // Persisted custom entries, in the shape a later `getBranch()` returns them.
@@ -324,7 +331,9 @@ function createPi(options: { readonly clipboardError?: Error; readonly zod?: typ
       messages.push(message.content);
       deliveries.push({
         content: message.content,
+        customType: message.customType,
         details: "details" in message ? message.details : undefined,
+        display: message.display,
         options,
       });
     },
@@ -353,9 +362,10 @@ const topLevelSession = {
   ensureOnDisk: async (): Promise<void> => undefined,
 };
 
-function sessionContext(sessionID = "ses_omp"): SessionContext {
+function sessionContext(sessionID = "ses_omp", hasUI = true): SessionContext {
   return {
     cwd: "/tmp/envoy-omp-test",
+    hasUI,
     sessionManager: { ...topLevelSession, getSessionId: () => sessionID },
     setInterval: () => undefined,
     ui: {
@@ -485,6 +495,204 @@ function responseWithRegistration(
 
 const dispatchToolNames = dispatchToolSpecs.map((spec) => spec.name);
 
+const UNASKED_WAIT_NUDGE =
+  "You just said you are waiting on a human, but you have no open ask in Dispatch, so nobody knows you are waiting. Open it now with dispatch_ask — or dispatch_request_approval when what you need is approval of a document — naming exactly what you need and from whom. Do not reply just to acknowledge this reminder.";
+
+/** Custom-message type of the nudge itself, which a session hears amid other deliveries. */
+const ASK_REMINDER_TYPE = "dispatch-ask-reminder";
+
+/**
+ * Boots one session against a Dispatch whose open-ask snapshot each call reads from
+ * `snapshot(since)` — `since` being the window the extension queried with, so a test can answer
+ * `opened_since` the way the server does — and hands back the lifecycle edges the run-end nudge
+ * lives between: a user turn (`before_agent_start`, which arms a period, then `agent_start`),
+ * a run nobody typed (`agent_start` alone — an Envoy delivery waking the session), a stop
+ * (`agent_end`), a tool result, and a tick of every interval the session registered. The host
+ * answers the hidden self-check WAITING unless `selfCheck` says otherwise, since that is the
+ * only verdict that reaches the visible steer.
+ */
+async function bootAskNudge(
+  envoyExtension: (pi: TestPi) => void,
+  sessionID: string,
+  snapshot: (since: string | undefined) => {
+    readonly as_of?: string;
+    readonly count?: number;
+    readonly opened_since?: boolean;
+  },
+  options: {
+    /** Transcript this session resumes from, as `getBranch()` returns it. */
+    readonly branch?: readonly unknown[];
+    /** False is a headless run (`omp -p`), where the host supplies no UI context. */
+    readonly hasUI?: boolean;
+    /** Awaited before the stop-time query answers, to hold its round trip open. */
+    readonly holdStopQuery?: () => Promise<void>;
+    /**
+     * How the host answers the hidden self-check; `null` is a host with no `pi.askEphemeral`
+     * at all, which is every OMP build that cannot serve a Dispatch BTW either. A host
+     * initialised without the capability installs a stub that throws synchronously instead of
+     * rejecting, so this may throw rather than return a promise.
+     */
+    readonly selfCheck?:
+      | ((input: {
+          readonly prompt: string;
+          readonly signal?: AbortSignal;
+        }) => Promise<{ readonly replyText: string }>)
+      | null;
+    /**
+     * A fresh TUI, whose session id the host mints only after `session_start`: the extension's
+     * own `sessionID` stays empty until the registration heartbeat heals the drift.
+     */
+    readonly lazySessionID?: boolean;
+    /** `ENVOY_SELF_CHECK_TIMEOUT_MS` for this instance, so a hung host is bounded in ms. */
+    readonly selfCheckTimeoutMs?: number;
+  } = {}
+) {
+  const branch = options.branch ?? [];
+  // A distinct server clock per query, so a period's window can only be the `as_of` of the
+  // snapshot it was taken from: a regression that pinned it to the arming turn, or that failed
+  // to move it, shows up in the `since=` of a later stop.
+  let asOfCalls = 0;
+  let lastAsOf = "";
+  process.env.DISPATCH_URL = "http://dispatch.test";
+  process.env.DISPATCH_TOKEN = "token";
+  const queries: string[] = [];
+  const registrations: string[] = [];
+  let registration = Promise.withResolvers<void>();
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(input.toString());
+    if (url.pathname === "/v1/roles/set") {
+      const body = JSON.parse(init?.body?.toString() ?? "{}") as { readonly role?: string };
+      return response({
+        session_id: sessionID,
+        machine_id: "test",
+        dir: "/tmp/envoy-omp-test",
+        topics: [`notifications.role.${body.role ?? ""}`],
+      });
+    }
+    if (url.pathname === "/v1/interests/subscribe") {
+      registrations.push(url.pathname);
+      registration.resolve();
+    }
+    if (url.pathname !== "/api/v1/asks/open") return responseWithRegistration(input, init, {});
+    queries.push(url.search);
+    if (url.search.includes("since=")) await options.holdStopQuery?.();
+    const open = snapshot(url.searchParams.get("since") ?? undefined);
+    asOfCalls += 1;
+    lastAsOf = open.as_of ?? `2026-09-13T00:00:0${asOfCalls}Z`;
+    // DispatchClient parses a body only when the response says it is JSON.
+    return new Response(
+      JSON.stringify({
+        session_id: sessionID,
+        as_of: lastAsOf,
+        opened_since: open.opened_since ?? false,
+        count: open.count ?? 0,
+        waiting_on_human: 0,
+        waiting_on_agent: 0,
+        asks: [],
+      }),
+      { headers: { "Content-Type": "application/json" } }
+    );
+  };
+  const fixture = createPi();
+  const asked: { readonly prompt: string; readonly signal?: AbortSignal }[] = [];
+  const selfCheck = options.selfCheck;
+  if (options.selfCheckTimeoutMs === undefined) delete process.env.ENVOY_SELF_CHECK_TIMEOUT_MS;
+  else process.env.ENVOY_SELF_CHECK_TIMEOUT_MS = String(options.selfCheckTimeoutMs);
+  envoyExtension(
+    selfCheck === null
+      ? fixture.pi
+      : {
+          ...fixture.pi,
+          // Deliberately not an `async` wrapper: a host stub that throws synchronously must
+          // reach the extension as a synchronous throw, which is the whole of that case.
+          askEphemeral: (input) => {
+            asked.push(input);
+            return selfCheck === undefined
+              ? Promise.resolve({ replyText: "WAITING" })
+              : selfCheck(input);
+          },
+        }
+  );
+  // A fresh TUI has no session yet at `session_start`; the host mints the id before the first
+  // turn, and the extension's own `sessionID` heals only on the next heartbeat.
+  let live = options.lazySessionID === true ? "" : sessionID;
+  const intervals: (() => void)[] = [];
+  const context: SessionContext = {
+    ...sessionContext(sessionID, options.hasUI ?? true),
+    sessionManager: {
+      ...topLevelSession,
+      getSessionId: () => live,
+      getBranch: () => branch,
+    },
+    setInterval: (callback) => intervals.push(callback),
+  };
+  await fixture.handlers.get("session_start")?.({}, context);
+  live = sessionID;
+  const beforeAgentStart = fixture.handlers.get("before_agent_start");
+  const agentStart = fixture.handlers.get("agent_start");
+  const agentEnd = fixture.handlers.get("agent_end");
+  const toolResult = fixture.handlers.get("tool_result");
+  if (
+    beforeAgentStart === undefined ||
+    agentStart === undefined ||
+    agentEnd === undefined ||
+    toolResult === undefined
+  ) {
+    throw new Error("the run-end nudge's lifecycle handlers were not registered");
+  }
+  return {
+    asked,
+    /** The server clock of the last open-asks snapshot this Dispatch served. */
+    asOf: () => lastAsOf,
+    context,
+    fixture,
+    queries,
+    registrations,
+    /** Resolves the next time the extension registers this session with the listener. */
+    nextRegistration: () => {
+      registration = Promise.withResolvers<void>();
+      return registration.promise;
+    },
+    /**
+     * Runs every interval the session registered — the registration heartbeat, and the
+     * `session_start` retry loop when NATS was down. The tick re-establishes the session
+     * through the extension's own establishment queue, so its local-state restore lands in the
+     * microtasks this yields to; `awaiting` is the signal for work that goes further than that
+     * (`nextRegistration()`), never a wait on the clock.
+     */
+    heartbeat: async (awaiting?: Promise<unknown>) => {
+      for (const tick of intervals) tick();
+      await Promise.resolve();
+      await Promise.resolve();
+      if (awaiting !== undefined) await awaiting;
+    },
+    /** The host's order: `before_agent_start` is awaited, then the run starts. */
+    userTurn: async (prompt = "finish the task") => {
+      const injected = await beforeAgentStart({ prompt }, context);
+      await agentStart({}, context);
+      return injected;
+    },
+    /** A run the user did not type: an Envoy delivery, or another extension's continuation. */
+    runStart: () => agentStart({}, context),
+    /** A stop defaults to a normal settle: the run's last reply ended `stopReason: "stop"`. */
+    stop: (
+      event: {
+        readonly willContinue?: boolean;
+        readonly messages?: readonly { readonly role?: string; readonly stopReason?: string }[];
+      } = {}
+    ) => agentEnd({ messages: [{ role: "assistant", stopReason: "stop" }], ...event }, context),
+    toolResult: (event: Record<string, unknown>) => toolResult(event, context),
+  };
+}
+
+/**
+ * The same host with the run-end self-check available. Without `askEphemeral` the nudge has no
+ * trigger at all, so neither lifecycle edge reads Dispatch.
+ */
+function withSelfCheck(pi: TestPi): TestPi {
+  return { ...pi, askEphemeral: async () => ({ replyText: "PROCEEDING" }) };
+}
+
 describe("envoy OMP extension", () => {
   test("discovers the bundled envoy skill from the repository root", async () => {
     const { default: envoyExtension } = await import("./envoy.ts?resources-discover");
@@ -508,7 +716,7 @@ describe("envoy OMP extension", () => {
     expect(existsSync(join(result.skillPaths[0], "envoy", "SKILL.md"))).toBe(true);
   });
 
-  test("injects an authored-ask summary", async () => {
+  test("injects nothing at turn start and reads open asks only to arm the run-end nudge", async () => {
     process.env.DISPATCH_URL = "http://dispatch.test";
     process.env.DISPATCH_TOKEN = "token";
     const requests: string[] = [];
@@ -533,24 +741,18 @@ describe("envoy OMP extension", () => {
     };
     const { default: envoyExtension } = await import("./envoy.ts?open-ask-summary");
     const fixture = createPi();
-    envoyExtension(fixture.pi);
+    envoyExtension(withSelfCheck(fixture.pi));
     const context = sessionContext("ses_reminder");
     await fixture.handlers.get("session_start")?.({}, context);
     const beforeAgentStart = fixture.handlers.get("before_agent_start");
     if (beforeAgentStart === undefined) throw new Error("before_agent_start was not registered");
 
-    const summary = await beforeAgentStart({ prompt: "finish the task" }, context);
-    expect(summary).toMatchObject({
-      message: {
-        customType: "dispatch-open-asks",
-        attribution: "agent",
-        content: expect.stringContaining("There are no unanswered asks for this session."),
-      },
-    });
+    const injected = await beforeAgentStart({ prompt: "finish the task" }, context);
+    expect(injected).toBeUndefined();
     expect(requests).toEqual(["/api/v1/asks/open?author_session=ses_reminder"]);
   });
 
-  test("renders an unavailable authored-ask summary and warns once", async () => {
+  test("injects nothing and warns once when the open-ask check is unavailable", async () => {
     process.env.DISPATCH_URL = "http://dispatch.test";
     process.env.DISPATCH_TOKEN = "token";
     const notifications: string[] = [];
@@ -562,7 +764,7 @@ describe("envoy OMP extension", () => {
     };
     const { default: envoyExtension } = await import("./envoy.ts?open-ask-unavailable");
     const fixture = createPi();
-    envoyExtension(fixture.pi);
+    envoyExtension(withSelfCheck(fixture.pi));
     const context = {
       ...sessionContext("ses_unknown"),
       ui: {
@@ -574,10 +776,8 @@ describe("envoy OMP extension", () => {
     const beforeAgentStart = fixture.handlers.get("before_agent_start");
     if (beforeAgentStart === undefined) throw new Error("before_agent_start was not registered");
 
-    const summary = await beforeAgentStart({ prompt: "wait" }, context);
-    expect(summary).toMatchObject({
-      message: { content: expect.stringContaining("unavailable"), attribution: "agent" },
-    });
+    const injected = await beforeAgentStart({ prompt: "wait" }, context);
+    expect(injected).toBeUndefined();
     expect(notifications).toEqual([expect.stringContaining("Dispatch open-ask check unavailable")]);
   });
 
@@ -607,7 +807,7 @@ describe("envoy OMP extension", () => {
     };
     const { default: envoyExtension } = await import("./envoy.ts?open-ask-availability-latch");
     const fixture = createPi();
-    envoyExtension(fixture.pi);
+    envoyExtension(withSelfCheck(fixture.pi));
     const context = {
       ...sessionContext(),
       sessionManager: { ...topLevelSession, getSessionId: () => activeSessionID },
@@ -637,6 +837,1086 @@ describe("envoy OMP extension", () => {
     available = false;
     await beforeAgentStart({ prompt: "first session failed again" }, context);
     expect(notifications).toHaveLength(3);
+  });
+
+  test("nudges a WAITING stop, and its own reply-only continuation nudges nothing", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-fires");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_fires", () => ({}));
+
+    await session.userTurn();
+    await session.stop();
+    expect(session.fixture.deliveries).toEqual([
+      {
+        content: UNASKED_WAIT_NUDGE,
+        customType: "dispatch-ask-reminder",
+        details: undefined,
+        display: false,
+        options: { deliverAs: "steer", triggerTurn: true },
+      },
+    ]);
+
+    // The nudge's own continuation: it replies and stops, having called no tool, so it owes the
+    // period no check and cannot nudge itself. This is the whole loop safety of the design.
+    await session.stop();
+    expect(session.fixture.deliveries).toHaveLength(1);
+
+    await session.userTurn("now the next thing");
+    await session.stop();
+    expect(session.fixture.deliveries).toHaveLength(2);
+    // One query per user turn, one per stop, and each stop carries the baseline of the turn
+    // that armed its own period — the second stop queries from the second turn's `as_of`, not
+    // the first's.
+    expect(session.queries).toEqual([
+      "?author_session=ses_nudge_fires",
+      "?author_session=ses_nudge_fires&since=2026-09-13T00%3A00%3A01Z",
+      "?author_session=ses_nudge_fires",
+      "?author_session=ses_nudge_fires&since=2026-09-13T00%3A00%3A03Z",
+    ]);
+    // One self-check per checked stop — the continuation's stop ran none — and each asks for
+    // the one word the steer hangs on.
+    expect(session.asked.map((ask) => ask.prompt)).toEqual([
+      expect.stringContaining("WAITING or PROCEEDING"),
+      expect.stringContaining("WAITING or PROCEEDING"),
+    ]);
+    expect(session.asked[0]?.signal?.aborted).toBe(false);
+    // The arming period lives in memory only: nothing about it reaches the transcript.
+    expect(session.fixture.entries).toEqual([]);
+  });
+
+  test("stays silent when the self-check answers PROCEEDING", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-proceeding");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_proceeding", () => ({}), {
+      selfCheck: async () => ({ replyText: "PROCEEDING" }),
+    });
+
+    await session.userTurn();
+    await session.stop();
+    // The agent said it is not waiting on anyone: the whole check cost one hidden call and
+    // the user saw nothing.
+    expect(session.asked).toHaveLength(1);
+    expect(session.fixture.deliveries).toEqual([]);
+  });
+
+  test("the agent's next real work owes the period another check", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-rearm");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_rearm", () => ({}), {
+      selfCheck: async () => ({ replyText: "PROCEEDING" }),
+    });
+
+    await session.userTurn();
+    await session.stop();
+    expect(session.asked).toHaveLength(1);
+
+    // Nothing happened between the two settles, so the second is not worth a second opinion.
+    await session.stop();
+    expect(session.asked).toHaveLength(1);
+
+    // A successful tool call that is not a Dispatch write is work: the agent has moved, so the
+    // settle after it is checked again without the user typing anything.
+    await session.toolResult({
+      toolName: "bash",
+      toolCallId: "call-1",
+      input: {},
+      details: {},
+      isError: false,
+    });
+    await session.stop();
+    expect(session.asked).toHaveLength(2);
+    // Each check moved the window it reads Dispatch through: the second asks what happened
+    // since the first one's snapshot, not since the turn that armed the period, so an ask the
+    // agent opened and a human has since answered stops counting against it.
+    expect(session.queries).toEqual([
+      "?author_session=ses_nudge_rearm",
+      "?author_session=ses_nudge_rearm&since=2026-09-13T00%3A00%3A01Z",
+      "?author_session=ses_nudge_rearm&since=2026-09-13T00%3A00%3A02Z",
+    ]);
+  });
+
+  test("neither a Dispatch write nor a failed tool call re-arms the check", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-rearm-excluded");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_rearm_no", () => ({}), {
+      selfCheck: async () => ({ replyText: "PROCEEDING" }),
+    });
+
+    await session.userTurn();
+    await session.stop();
+    expect(session.asked).toHaveLength(1);
+
+    // A Dispatch read or write is the agent talking to the humans this nudge is about, not the
+    // work it would be nudged for; a tool that failed moved nothing at all.
+    for (const event of [
+      { toolName: "dispatch_read", isError: false },
+      { toolName: "dispatch_comment", isError: false },
+      { toolName: "bash", isError: true },
+    ]) {
+      await session.toolResult({ toolCallId: "call", input: {}, details: {}, ...event });
+      await session.stop();
+    }
+    expect(session.asked).toHaveLength(1);
+    expect(session.fixture.deliveries).toEqual([]);
+  });
+
+  test("one armed period pays for at most five checks however much work happens", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-rearm-cap");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_rearm_cap", () => ({}), {
+      selfCheck: async () => ({ replyText: "PROCEEDING" }),
+    });
+
+    await session.userTurn();
+    for (let step = 0; step < 9; step += 1) {
+      await session.stop();
+      await session.toolResult({
+        toolName: "bash",
+        toolCallId: `call-${step}`,
+        input: {},
+        details: {},
+        isError: false,
+      });
+    }
+    // Nine settles' worth of work, five hidden calls: the cap holds an unattended run's cost.
+    expect(session.asked).toHaveLength(5);
+
+    // The budget belongs to the period, so the user's next turn starts a fresh one.
+    await session.userTurn("now the next thing");
+    await session.stop();
+    expect(session.asked).toHaveLength(6);
+  });
+
+  test("a host that never answers the self-check is bounded by the extension's own clock", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-hangs");
+    // A host that ignores the AbortSignal: the call it started never settles, ever. Without a
+    // bound of its own the handler would hold the in-flight latch — and every later check with
+    // it — for as long as that call hung.
+    const hung = Promise.withResolvers<{ readonly replyText: string }>();
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_hangs", () => ({}), {
+      selfCheck: () => hung.promise,
+      selfCheckTimeoutMs: 40,
+    });
+
+    await session.userTurn();
+    await session.stop();
+    expect(session.asked).toHaveLength(1);
+    expect(session.fixture.deliveries).toEqual([]);
+
+    // The latch was released, so the next check the period owes still runs.
+    await session.toolResult({
+      toolName: "bash",
+      toolCallId: "call-1",
+      input: {},
+      details: {},
+      isError: false,
+    });
+    await session.stop();
+    expect(session.asked).toHaveLength(2);
+    // The first call was told to stop even though its host never listened.
+    expect(session.asked[0]?.signal?.aborted).toBe(true);
+
+    // A late answer changes nothing: the check it belonged to was spent long ago.
+    hung.resolve({ replyText: "WAITING" });
+    await Promise.resolve();
+    expect(session.fixture.deliveries).toEqual([]);
+  });
+
+  test("checks a fresh TUI whose session id the extension has not healed to yet", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-lazy-id");
+    // `session_start` ran before the host minted an id, so the extension's own `sessionID` is
+    // empty until the registration heartbeat heals it — up to two minutes of a brand-new
+    // terminal. The period carries the id that armed it, which is the live one.
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_lazy", () => ({}), {
+      lazySessionID: true,
+    });
+
+    await session.userTurn();
+    await session.stop();
+    expect(session.asked).toHaveLength(1);
+    expect(session.fixture.deliveries).toHaveLength(1);
+  });
+
+  test("work re-arms the check in a fresh TUI too", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-lazy-rearm");
+    // The same drift window as above, now on the edge that re-arms: a `tool_result` that read
+    // the module's own `sessionID` would match nothing until the heartbeat healed it, so a
+    // brand-new terminal got one check for the whole window and none of the re-arming this
+    // period is built on.
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_lazy_rearm", () => ({}), {
+      lazySessionID: true,
+      selfCheck: async () => ({ replyText: "PROCEEDING" }),
+    });
+
+    await session.userTurn();
+    await session.stop();
+    expect(session.asked).toHaveLength(1);
+
+    await session.toolResult({
+      toolName: "bash",
+      toolCallId: "call-1",
+      input: {},
+      details: {},
+      isError: false,
+    });
+    await session.stop();
+    expect(session.asked).toHaveLength(2);
+  });
+
+  test("the heartbeat's drift heal leaves a fresh TUI's armed period alone", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-drift-heal");
+    // The heal re-establishes the session the extension is already in — it is how a fresh TUI's
+    // id reaches the registry at all — so it must not count as a session change. It fires every
+    // `ENVOY_HEARTBEAT_MS` (120 s), and a first turn routinely runs longer than that.
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_drift", () => ({}), {
+      lazySessionID: true,
+      selfCheck: async () => ({ replyText: "PROCEEDING" }),
+    });
+
+    await session.userTurn();
+    await session.heartbeat(session.nextRegistration());
+    // The heal ran: the session the extension started with no id is now registered under one.
+    expect(session.registrations).toHaveLength(1);
+
+    await session.stop();
+    expect(session.asked).toHaveLength(1);
+  });
+
+  test("re-establishing the same session during an Envoy outage keeps the armed period", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-nats-retry");
+    // NATS is down when the session starts, so the extension retries `establishSession` every
+    // `NATS_RETRY_INTERVAL_MS` for the whole outage, each attempt re-entering the restore path
+    // a `/fork` uses. The nudge is not an Envoy feature — it reads Dispatch — so an outage must
+    // not silently disable it.
+    natsState.failConnects = 99;
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_outage", () => ({}), {
+      selfCheck: async () => ({ replyText: "PROCEEDING" }),
+    });
+
+    await session.userTurn();
+    await session.heartbeat();
+    await session.stop();
+    expect(session.asked).toHaveLength(1);
+  });
+
+  test("a session change resets the period and aborts the check it invalidated", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-switch");
+    const { promise: held, resolve: release } = Promise.withResolvers<void>();
+    const started = Promise.withResolvers<void>();
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_switch", () => ({}), {
+      selfCheck: async () => {
+        started.resolve();
+        await held;
+        return { replyText: "WAITING" };
+      },
+    });
+
+    await session.userTurn();
+    const stopped = session.stop();
+    await started.promise;
+    // A `/fork`, `/handoff` or resume mints a different id: the conversation the pending verdict
+    // describes is not the one this session is in any more.
+    await session.fixture.handlers.get("session_switch")?.(
+      { reason: "fork" },
+      sessionContext("ses_nudge_forked")
+    );
+    // The superseded call is told to stop now, not once it answers: the abort is what spares the
+    // host a whole-context request nobody will read.
+    expect(session.asked[0]?.signal?.aborted).toBe(true);
+    release();
+    await stopped;
+
+    // The fork's own stale-identity notice is the only thing the session hears.
+    expect(
+      session.fixture.deliveries.filter((delivery) => delivery.customType === ASK_REMINDER_TYPE)
+    ).toEqual([]);
+  });
+
+  test("never self-checks in a task subagent's own instance", async () => {
+    const fixture = transcriptFixture();
+    try {
+      // OMP's layout: the subagent's transcript sits inside the parent's directory. Its own
+      // extension instance arms no period — `before_agent_start` returns for a subagent — so
+      // the stop has nothing to check, with no session-id comparison doing the work.
+      const parentFile = fixture.transcript("2026-09-23T00-00-00-000Z_ses_parent.jsonl");
+      const childFile = fixture.transcript("2026-09-23T00-00-00-000Z_ses_parent/Scout.jsonl");
+      process.env.DISPATCH_URL = "http://dispatch.test";
+      process.env.DISPATCH_TOKEN = "token";
+      const queries: string[] = [];
+      globalThis.fetch = async (input, init) => {
+        const url = new URL(input.toString());
+        if (url.pathname === "/api/v1/asks/open") {
+          queries.push(url.search);
+          return new Response(
+            JSON.stringify({
+              session_id: "ses_child",
+              as_of: "2026-09-13T00:00:00Z",
+              opened_since: false,
+              count: 0,
+              waiting_on_human: 0,
+              waiting_on_agent: 0,
+              asks: [],
+            }),
+            { headers: { "Content-Type": "application/json" } }
+          );
+        }
+        return responseWithRegistration(input, init, {});
+      };
+      const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-subagent");
+      const asked: string[] = [];
+      const parent = createPi();
+      envoyExtension({ ...parent.pi, askEphemeral: async () => ({ replyText: "WAITING" }) });
+      await parent.handlers.get("session_start")?.(
+        {},
+        sessionWithTranscript("ses_parent", parentFile, [])
+      );
+      const child = createPi();
+      envoyExtension({
+        ...child.pi,
+        askEphemeral: async () => {
+          asked.push("child");
+          return { replyText: "WAITING" };
+        },
+      });
+      const childContext = sessionWithTranscript("ses_child", childFile, []);
+      await child.handlers.get("session_start")?.({}, childContext);
+
+      await child.handlers.get("before_agent_start")?.({ prompt: "scout the repo" }, childContext);
+      await child.handlers.get("agent_end")?.(
+        { messages: [{ role: "assistant", stopReason: "stop" }] },
+        childContext
+      );
+      expect(asked).toEqual([]);
+      expect(child.deliveries).toEqual([]);
+      expect(queries).toEqual([]);
+    } finally {
+      fixture.remove();
+    }
+  });
+
+  test("stays silent when the self-check answers anything but WAITING", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-unparsed");
+    let verdict = "I think I am probably waiting on Sami here.";
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_unparsed", () => ({}), {
+      selfCheck: async () => ({ replyText: verdict }),
+    });
+
+    // A verdict that did not answer the question is not a verdict; silence is the safe reading.
+    await session.userTurn();
+    await session.stop();
+    expect(session.fixture.deliveries).toEqual([]);
+
+    // A reply that names both words is the model echoing the choice back, not making it. The
+    // steer it would produce asserts "you just said you are waiting", which sends an agent that
+    // said no such thing to page a human with a question nobody had.
+    for (const echo of ["WAITING or PROCEEDING", "WAITING/PROCEEDING", "WAITING or PROCEEDING?"]) {
+      verdict = echo;
+      await session.userTurn(`and now ${echo}`);
+      await session.stop();
+    }
+    expect(session.fixture.deliveries).toEqual([]);
+
+    // Markdown emphasis and a trailing clause are still WAITING, as in the phase-stall reply.
+    verdict = "**WAITING** — on your call about the schema.";
+    await session.userTurn("and now this");
+    await session.stop();
+    expect(session.fixture.deliveries).toHaveLength(1);
+  });
+
+  test("stays silent when the self-check fails, and logs it once per session", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-selfcheck-fails");
+    const warnings: { readonly message: string; readonly context?: unknown }[] = [];
+    const stopSink = logger.registerLogSink((entry) => {
+      if (entry.level === "warn") warnings.push({ message: entry.message, context: entry.context });
+    });
+    try {
+      const session = await bootAskNudge(envoyExtension, "ses_nudge_selfcheck_fails", () => ({}), {
+        selfCheck: async ({ signal }) => {
+          // What a host reports when the bound below expires, and what a dead provider throws.
+          signal?.throwIfAborted();
+          throw new Error("provider unavailable");
+        },
+      });
+
+      await session.userTurn();
+      await session.stop();
+      expect(session.fixture.deliveries).toEqual([]);
+
+      // A second failing period says nothing new; the log is one line per session.
+      await session.userTurn("try again");
+      await session.stop();
+      expect(session.fixture.deliveries).toEqual([]);
+      expect(warnings).toEqual([
+        {
+          message: expect.stringContaining("self-check failed"),
+          context: {
+            sessionID: "ses_nudge_selfcheck_fails",
+            error: expect.stringContaining("provider unavailable"),
+          },
+        },
+      ]);
+    } finally {
+      stopSink();
+    }
+  });
+
+  test("survives a host whose ephemeral call throws instead of rejecting", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-selfcheck-throws");
+    const warnings: string[] = [];
+    const stopSink = logger.registerLogSink((entry) => {
+      if (entry.level === "warn") warnings.push(entry.message);
+    });
+    try {
+      // An extension host initialised without the capability installs a stub that throws
+      // synchronously, so `.then(onRejected)` never sees it: the throw would leave the handler
+      // before the check was spent, and every later settle would pay another Dispatch round
+      // trip and throw again, with the cap never engaging.
+      const session = await bootAskNudge(envoyExtension, "ses_nudge_throws", () => ({}), {
+        selfCheck: () => {
+          throw new Error("This extension host does not support ephemeral questions");
+        },
+      });
+
+      await session.userTurn();
+      for (let step = 0; step < 9; step += 1) {
+        await session.stop();
+        await session.toolResult({
+          toolName: "bash",
+          toolCallId: `call-${step}`,
+          input: {},
+          details: {},
+          isError: false,
+        });
+      }
+
+      // Each throw spent the check it ran for, so the period's five bound the damage: one
+      // arming query and five checked stops, then nothing.
+      expect(session.asked).toHaveLength(5);
+      expect(session.queries).toHaveLength(6);
+      expect(session.fixture.deliveries).toEqual([]);
+      expect(warnings).toEqual([expect.stringContaining("self-check failed")]);
+    } finally {
+      stopSink();
+    }
+  });
+
+  test("never nudges on a host that cannot ask ephemerally", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-no-ephemeral");
+    // The same OMP builds that cannot serve a Dispatch BTW: with no self-check there is no
+    // trigger, so the session does not pay the arming round trip either.
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_no_ephemeral", () => ({}), {
+      selfCheck: null,
+    });
+
+    await session.userTurn();
+    await session.stop();
+    expect(session.fixture.deliveries).toEqual([]);
+    expect(session.queries).toEqual([]);
+  });
+
+  test("stays silent when a new user turn arrives while the self-check is in flight", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-selfcheck-stale");
+    const { promise: held, resolve: release } = Promise.withResolvers<void>();
+    const started = Promise.withResolvers<void>();
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_selfcheck_stale", () => ({}), {
+      selfCheck: async () => {
+        started.resolve();
+        await held;
+        return { replyText: "WAITING" };
+      },
+    });
+
+    await session.userTurn();
+    const stopped = session.stop();
+    await started.promise;
+    // The user typed again while the hidden call was open: the WAITING it is about to answer
+    // describes a run the user has already moved past, and steering it would talk over them.
+    await session.userTurn("actually, do this instead");
+    // And the call the user superseded is told to stop while it is still running: it is a
+    // whole-context request, competing with the turn they are waiting on for the same provider.
+    expect(session.asked[0]?.signal?.aborted).toBe(true);
+    release();
+    await stopped;
+    expect(session.fixture.deliveries).toEqual([]);
+  });
+
+  test("drops the verdict when the agent opened the ask itself while the check was in flight", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-ask-midflight");
+    const { promise: held, resolve: release } = Promise.withResolvers<void>();
+    const started = Promise.withResolvers<void>();
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_midflight", () => ({}), {
+      selfCheck: async () => {
+        started.resolve();
+        await held;
+        return { replyText: "WAITING" };
+      },
+    });
+
+    await session.userTurn();
+    const stopped = session.stop();
+    await started.promise;
+    // An Envoy delivery woke the session while the hidden call was open, and that turn opened
+    // the ask. Steering "you have no open ask" at an agent that has just opened one would send
+    // it to open a second.
+    await session.toolResult({
+      toolName: "dispatch_ask",
+      toolCallId: "call-1",
+      input: {},
+      details: { ask: "ask-1" },
+      isError: false,
+    });
+    // A verdict it can no longer use is not left running either.
+    expect(session.asked[0]?.signal?.aborted).toBe(true);
+    release();
+    await stopped;
+    expect(session.fixture.deliveries).toEqual([]);
+  });
+
+  test("a slow arming query does not let a superseded check steer the turn just typed", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-slow-arming");
+    const { promise: held, resolve: release } = Promise.withResolvers<void>();
+    const started = Promise.withResolvers<void>();
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_slow_arming", () => ({}), {
+      selfCheck: async () => {
+        started.resolve();
+        await held;
+        return { replyText: "WAITING" };
+      },
+    });
+
+    await session.userTurn();
+    const stopped = session.stop();
+    await started.promise;
+    // The user types again while the hidden call is open, and Dispatch is slow, so the arming
+    // query their turn makes has not answered when the verdict does.
+    const arming = Promise.withResolvers<void>();
+    const dispatch = globalThis.fetch;
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      if (url.pathname === "/api/v1/asks/open" && !url.search.includes("since=")) {
+        await arming.promise;
+      }
+      return dispatch(input, init);
+    };
+    try {
+      const typed = session.userTurn("actually, do this instead");
+      for (let tick = 0; tick < 20; tick += 1) await Promise.resolve();
+      release();
+      await stopped;
+      expect(
+        session.fixture.deliveries.filter((delivery) => delivery.customType === ASK_REMINDER_TYPE)
+      ).toEqual([]);
+      arming.resolve();
+      await typed;
+    } finally {
+      globalThis.fetch = dispatch;
+    }
+  });
+
+  test("a run that starts while the check is open is not steered, and its own settle is checked", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-run-midflight");
+    const { promise: held, resolve: release } = Promise.withResolvers<void>();
+    const started = Promise.withResolvers<void>();
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_run_midflight", () => ({}), {
+      selfCheck: async () => {
+        started.resolve();
+        await held;
+        return { replyText: "WAITING" };
+      },
+    });
+
+    await session.userTurn();
+    const stopped = session.stop();
+    await started.promise;
+    // An Envoy delivery wakes the session while the hidden call is open — perhaps the very reply
+    // the agent was waiting for. The WAITING about to arrive describes the run before it.
+    await session.runStart();
+    release();
+    await stopped;
+    expect(session.fixture.deliveries).toEqual([]);
+
+    // The check still counted, but it did not spend what the period owes: the newer run's own
+    // settle is checked, and that verdict is about where the session is now.
+    await session.stop();
+    expect(session.asked).toHaveLength(2);
+    expect(
+      session.fixture.deliveries.filter((delivery) => delivery.customType === ASK_REMINDER_TYPE)
+    ).toHaveLength(1);
+  });
+
+  test("a run that settles while the check is open is checked once the open check ends", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-settle-midflight");
+    const { promise: held, resolve: release } = Promise.withResolvers<void>();
+    const started = Promise.withResolvers<void>();
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_settle_midflight", () => ({}), {
+      selfCheck: async () => {
+        started.resolve();
+        await held;
+        return { replyText: "WAITING" };
+      },
+    });
+
+    await session.userTurn();
+    const first = session.stop();
+    await started.promise;
+    // The woken run is short: it starts and settles inside the check's window, so its stop
+    // arrives while the first check still holds the one-at-a-time slot.
+    await session.runStart();
+    const second = session.stop();
+    release();
+    await Promise.all([first, second]);
+
+    // Nothing else will settle, so the newer stop is checked as soon as the open check ends —
+    // once, with a verdict about the run the session actually finished.
+    expect(session.asked).toHaveLength(2);
+    expect(
+      session.fixture.deliveries.filter((delivery) => delivery.customType === ASK_REMINDER_TYPE)
+    ).toHaveLength(1);
+  });
+
+  test("a recorded settle that a newer turn has overtaken is not re-checked into that turn", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-settle-overtaken");
+    const { promise: held, resolve: release } = Promise.withResolvers<void>();
+    const started = Promise.withResolvers<void>();
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_settle_overtaken", () => ({}), {
+      selfCheck: async () => {
+        started.resolve();
+        await held;
+        return { replyText: "WAITING" };
+      },
+    });
+
+    await session.userTurn();
+    const first = session.stop();
+    await started.promise;
+    // A woken run works and settles inside the check's window, so its stop is recorded…
+    await session.runStart();
+    await session.toolResult({
+      toolName: "bash",
+      toolCallId: "call-1",
+      input: {},
+      details: {},
+      isError: false,
+    });
+    const woken = session.stop();
+    // …and then the user types, before the check comes back. The recorded stop is about a run
+    // the user has already moved past: re-checking it would steer into the turn they just typed.
+    await session.userTurn("actually, do this instead");
+    release();
+    await Promise.all([first, woken]);
+    expect(
+      session.fixture.deliveries.filter((delivery) => delivery.customType === ASK_REMINDER_TYPE)
+    ).toEqual([]);
+    // Nor does it pay for a Dispatch read: two arming queries and the first stop's, nothing more.
+    expect(session.queries).toHaveLength(3);
+
+    // The typed turn's own stop is where the check belongs.
+    await session.stop();
+    expect(
+      session.fixture.deliveries.filter((delivery) => delivery.customType === ASK_REMINDER_TYPE)
+    ).toHaveLength(1);
+  });
+
+  test("a run that starts while Dispatch answers the stop pays for no check", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-run-during-query");
+    const query = Promise.withResolvers<void>();
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_run_during_query", () => ({}), {
+      holdStopQuery: () => query.promise,
+    });
+
+    await session.userTurn();
+    const stopped = session.stop();
+    await session.runStart();
+    query.resolve();
+    await stopped;
+    // The conversation a check would read is already past this settle: no model call, and the
+    // check the period owes waits for the newer run's settle.
+    expect(session.asked).toEqual([]);
+    expect(session.fixture.deliveries).toEqual([]);
+
+    await session.stop();
+    expect(session.asked).toHaveLength(1);
+  });
+
+  test("a check this extension aborts is not logged as a failure", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-abort-quiet");
+    const warnings: { readonly message: string; readonly context?: unknown }[] = [];
+    const stopSink = logger.registerLogSink((entry) => {
+      if (entry.level === "warn") warnings.push({ message: entry.message, context: entry.context });
+    });
+    try {
+      const started = Promise.withResolvers<void>();
+      let calls = 0;
+      const session = await bootAskNudge(envoyExtension, "ses_nudge_abort_quiet", () => ({}), {
+        selfCheck: ({ signal }) => {
+          calls += 1;
+          if (calls > 1) return Promise.reject(new Error("provider unavailable"));
+          // A host that honours the signal rejects with its reason, as the pin's does.
+          const pending = Promise.withResolvers<{ readonly replyText: string }>();
+          signal?.addEventListener("abort", () => pending.reject(signal.reason));
+          started.resolve();
+          return pending.promise;
+        },
+      });
+
+      await session.userTurn();
+      const stopped = session.stop();
+      await started.promise;
+      // The user typing supersedes the check: an ordinary event, not a failure to report.
+      await session.userTurn("actually, do this instead");
+      await stopped;
+      expect(warnings).toEqual([]);
+
+      // So the one warning a session gets is still there for the failure that matters.
+      await session.stop();
+      expect(warnings).toEqual([
+        {
+          message: expect.stringContaining("self-check failed"),
+          context: {
+            sessionID: "ses_nudge_abort_quiet",
+            error: expect.stringContaining("provider unavailable"),
+          },
+        },
+      ]);
+    } finally {
+      stopSink();
+    }
+  });
+
+  test("stays silent at a stop that leaves an ask open", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-open");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_open", () => ({ count: 1 }));
+
+    await session.userTurn();
+    await session.stop();
+    // Dispatch already knows the agent is waiting: nothing is asked of the model.
+    expect(session.fixture.deliveries).toEqual([]);
+    expect(session.asked).toEqual([]);
+  });
+
+  test("stays silent when an ask was opened after the turn began", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-opened-since");
+    // Answered and closed within the turn: nothing is open at the stop, but the session did
+    // put a question to a human, so it is not silently waiting.
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_since", () => ({
+      opened_since: true,
+    }));
+
+    await session.userTurn();
+    await session.stop();
+    expect(session.fixture.deliveries).toEqual([]);
+    expect(session.asked).toEqual([]);
+  });
+
+  test("the ask the agent opens itself spends the check the period owed", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-opens-ask");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_opens", () => ({}));
+
+    await session.userTurn();
+    await session.toolResult({
+      toolName: "dispatch_ask",
+      toolCallId: "call-1",
+      input: {},
+      details: { ask: "ask-1" },
+      isError: false,
+    });
+    await session.stop();
+    expect(session.fixture.deliveries).toEqual([]);
+
+    // The next user turn arms a fresh period, and an approval request settles it the same way.
+    await session.userTurn("write the spec");
+    await session.toolResult({
+      toolName: "dispatch_request_approval",
+      toolCallId: "call-2",
+      input: {},
+      details: { ask: "ask-2" },
+      isError: false,
+    });
+    await session.stop();
+    expect(session.fixture.deliveries).toEqual([]);
+    expect(session.asked).toEqual([]);
+  });
+
+  test("an ask that stays open keeps every settle silent and spends none of the period", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-ask-open-budget");
+    // The rule the server implements (`packages/envoy/internal/dispatch/api/asks.go`):
+    // `opened_since` is true when this session authored any ask at or after `since`, whatever
+    // state it is in now, and `count` is what is open at the snapshot.
+    const asks: { readonly created_at: string; open: boolean }[] = [];
+    const session = await bootAskNudge(
+      envoyExtension,
+      "ses_nudge_ask_budget",
+      (since) => ({
+        count: asks.filter((ask) => ask.open).length,
+        opened_since: since !== undefined && asks.some((ask) => ask.created_at >= since),
+      }),
+      { selfCheck: async () => ({ replyText: "PROCEEDING" }) }
+    );
+
+    await session.userTurn();
+    asks.push({ created_at: session.asOf(), open: true });
+    await session.toolResult({
+      toolName: "dispatch_ask",
+      toolCallId: "call-ask",
+      input: {},
+      details: { ask: "ask-1" },
+      isError: false,
+    });
+
+    // The agent carries on with what it can while the human is away. Dispatch answers that its
+    // question is open at every one of those settles, so none of them asks the model anything.
+    for (let step = 0; step < 6; step += 1) {
+      await session.toolResult({
+        toolName: "bash",
+        toolCallId: `call-${step}`,
+        input: {},
+        details: {},
+        isError: false,
+      });
+      await session.stop();
+    }
+    expect(session.asked).toEqual([]);
+
+    // More settles than the period's five checks have gone by, and the budget is untouched:
+    // the human answers, and the next stop after real work is checked as usual.
+    const answered = asks[0];
+    if (answered === undefined) throw new Error("the fixture recorded no ask");
+    answered.open = false;
+    await session.toolResult({
+      toolName: "bash",
+      toolCallId: "call-after",
+      input: {},
+      details: {},
+      isError: false,
+    });
+    await session.stop();
+    expect(session.asked).toHaveLength(1);
+  });
+
+  test("work re-arms the check once the agent's own ask has been answered", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-ask-answered");
+    const asks: { readonly created_at: string; open: boolean }[] = [];
+    const session = await bootAskNudge(
+      envoyExtension,
+      "ses_nudge_answered",
+      (since) => ({
+        count: asks.filter((ask) => ask.open).length,
+        opened_since: since !== undefined && asks.some((ask) => ask.created_at >= since),
+      }),
+      { selfCheck: async () => ({ replyText: "WAITING" }) }
+    );
+
+    await session.userTurn();
+    asks.push({ created_at: session.asOf(), open: true });
+    await session.toolResult({
+      toolName: "dispatch_ask",
+      toolCallId: "call-ask",
+      input: {},
+      details: { ask: "ask-1" },
+      isError: false,
+    });
+    await session.toolResult({
+      toolName: "bash",
+      toolCallId: "call-1",
+      input: {},
+      details: {},
+      isError: false,
+    });
+    await session.stop();
+    expect(session.asked).toEqual([]);
+
+    // The human answers, and the ask closes. A standing session is woken by that answer through
+    // Envoy, which arms no period of its own, so nothing but the moving window can let the
+    // nudge speak again — and the second silent wait is exactly what it exists to catch.
+    const answered = asks[0];
+    if (answered === undefined) throw new Error("the fixture recorded no ask");
+    answered.open = false;
+    await session.toolResult({
+      toolName: "bash",
+      toolCallId: "call-2",
+      input: {},
+      details: {},
+      isError: false,
+    });
+    await session.stop();
+    expect(session.asked).toHaveLength(1);
+    expect(session.fixture.deliveries).toHaveLength(1);
+  });
+
+  test("waits for the real stop when OMP has already scheduled a continuation", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-will-continue");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_continue", () => ({}));
+
+    await session.userTurn();
+    await session.stop({ willContinue: true });
+    expect(session.fixture.deliveries).toEqual([]);
+
+    await session.stop();
+    expect(session.fixture.deliveries).toHaveLength(1);
+  });
+
+  test("never nudges a Legion-managed session", async () => {
+    const extension = await import("./envoy.ts?ask-nudge-legion");
+    const session = await bootAskNudge(extension.default, "ses_nudge_legion", () => ({}));
+    await claimEnvoyRole("ses_nudge_legion", "legion-project-issue-worker", session.context);
+
+    await session.userTurn("complete the handoff");
+    await session.stop();
+    expect(session.fixture.deliveries).toEqual([]);
+    // Neither edge asks Dispatch anything, and no hidden model call is made: a session that
+    // cannot be nudged does not pay the arming round trip either.
+    expect(session.queries).toEqual([]);
+    expect(session.asked).toEqual([]);
+    // The claim is recorded in the transcript, which is the only thing a fresh process can read.
+    expect(session.fixture.entries).toContainEqual({
+      type: "custom",
+      customType: "legion-managed-session",
+      data: { session_id: "ses_nudge_legion" },
+    });
+  });
+
+  test("a transcript that records Legion driving the session excludes it under any id", async () => {
+    // A fresh process has only the transcript; a `/fork` or `/handoff` then carries that
+    // transcript into a newly minted id while the session stays Legion-driven, so the entry is
+    // never matched against the id the guard runs under.
+    for (const recordedID of ["ses_nudge_restored", "ses_nudge_before_the_fork"]) {
+      const extension = await import(`./envoy.ts?ask-nudge-legion-resume-${recordedID}`);
+      const session = await bootAskNudge(extension.default, "ses_nudge_restored", () => ({}), {
+        branch: [
+          {
+            type: "custom",
+            customType: "legion-managed-session",
+            data: { session_id: recordedID },
+          },
+        ],
+      });
+
+      await session.userTurn("carry on with the issue");
+      await session.stop();
+      expect(session.fixture.deliveries).toEqual([]);
+      expect(session.queries).toEqual([]);
+      expect(session.asked).toEqual([]);
+    }
+  });
+
+  test("stays silent when Dispatch could not be reached this turn", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-unreachable");
+    let reachable = false;
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_offline", () => {
+      if (!reachable) throw new Error("network offline");
+      return {};
+    });
+
+    await session.userTurn();
+    reachable = true;
+    await session.stop();
+    expect(session.fixture.deliveries).toEqual([]);
+    expect(session.asked).toEqual([]);
+  });
+
+  test("does not arm a period for a turn that carries no user text", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-synthetic");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_synthetic", () => ({}));
+
+    await session.userTurn();
+    await session.stop();
+    expect(session.fixture.deliveries).toHaveLength(1);
+
+    // Whatever the host prepares without the user in it cannot re-arm the nudge — least of
+    // all the nudge's own steered turn, or the session would talk to itself forever.
+    await session.userTurn("");
+    await session.stop();
+    expect(session.fixture.deliveries).toHaveLength(1);
+  });
+
+  test("a session that starts cold cannot nudge until a user turn arms a period", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-resume");
+    // The arming period never reaches the transcript, so a resumed session restores none: it
+    // begins at period 0, which the stop guard refuses outright — it does not even ask
+    // Dispatch. A prior process's own nudge in the branch changes nothing.
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_resume", () => ({}), {
+      branch: [
+        {
+          type: "custom_message",
+          customType: "dispatch-ask-reminder",
+          content: UNASKED_WAIT_NUDGE,
+        },
+      ],
+    });
+
+    await session.stop();
+    expect(session.fixture.deliveries).toEqual([]);
+    expect(session.queries).toEqual([]);
+
+    // The user's first turn after the resume arms the next period, which nudges as usual.
+    await session.userTurn();
+    await session.stop();
+    expect(session.fixture.deliveries).toHaveLength(1);
+  });
+
+  test("a second stop inside one Dispatch round trip is one nudge and one query", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-race");
+    const { promise: held, resolve: release } = Promise.withResolvers<void>();
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_race", () => ({}), {
+      holdStopQuery: () => held,
+    });
+
+    await session.userTurn();
+    // The host does not await `agent_end`, so a second stop can arrive while the first one's
+    // query is still in flight — an inbound steer or a host continuation starts a turn that
+    // ends on a bare reply well inside the three-second window. Both nudging is what "one per
+    // stop" forbids; both querying is a Dispatch round trip whose answer can change nothing.
+    const first = session.stop();
+    const second = session.stop();
+    release();
+    await Promise.all([first, second]);
+
+    expect(session.fixture.deliveries).toHaveLength(1);
+    // The second stop returned on the latch without asking Dispatch anything.
+    expect(session.queries).toEqual([
+      "?author_session=ses_nudge_race",
+      "?author_session=ses_nudge_race&since=2026-09-13T00%3A00%3A01Z",
+    ]);
+  });
+
+  test("never nudges a headless run the host gave no UI context", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-headless");
+    // `omp -p`: the host disposes the session when its one run ends and has already printed its
+    // output, so a steered continuation is either aborted or billed for text nobody reads.
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_headless", () => ({}), {
+      hasUI: false,
+    });
+
+    await session.userTurn();
+    await session.stop();
+    expect(session.fixture.deliveries).toEqual([]);
+    // Neither edge asks Dispatch anything and no hidden model call is made: a headless run does
+    // not pay the arming round trip.
+    expect(session.queries).toEqual([]);
+    expect(session.asked).toEqual([]);
+  });
+
+  test("never nudges a stop the run did not settle normally", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-unsettled");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_unsettled", () => ({}));
+
+    await session.userTurn();
+    // An interrupt, a provider failure, a truncation, and a run with no reply of its own:
+    // steering any of them answers the user's cancel, or a failure, with a turn nobody asked for.
+    for (const messages of [
+      [{ role: "assistant", stopReason: "aborted" }],
+      [
+        { role: "assistant", stopReason: "stop" },
+        { role: "assistant", stopReason: "error" },
+      ],
+      [{ role: "assistant", stopReason: "length" }],
+      [{ role: "user" }],
+    ]) {
+      await session.stop({ messages });
+    }
+    expect(session.fixture.deliveries).toEqual([]);
+    // Only the arming query ran: an unsettled stop asks Dispatch nothing, asks the model
+    // nothing, and latches nothing.
+    expect(session.queries).toHaveLength(1);
+    expect(session.asked).toEqual([]);
+
+    await session.stop();
+    expect(session.fixture.deliveries).toHaveLength(1);
   });
 
   test("registers the shared eight-tool contract and delegates HTTP operations to EnvoyClient", async () => {

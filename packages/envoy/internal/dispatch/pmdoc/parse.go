@@ -179,14 +179,6 @@ func endOf(nodeType string) string {
 	return "the " + strings.ReplaceAll(nodeType, "_", " ") + "'s end"
 }
 
-// blockName is a block type as a reader names it.
-func blockName(nodeType string) string {
-	if nodeType == "hr" {
-		return "a horizontal rule"
-	}
-	return "a " + strings.ReplaceAll(nodeType, "_", " ")
-}
-
 // readAlone is the document a block is read in on its own. It follows a paragraph, as a block
 // holding a match does, since at a document's start a `---` line opens front matter; front matter
 // is read first, where it is written, and a footnote definition after a reference to it, since

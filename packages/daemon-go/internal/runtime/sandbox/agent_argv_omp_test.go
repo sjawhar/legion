@@ -9,22 +9,9 @@ import (
 	"strings"
 	"testing"
 	"time"
-)
 
-// realOmp is the pinned Oh My Pi binary LEGION_TEST_OMP names, as for internal/podsafety's baseline
-// test; GitHub Actions installs it (.github/actions/install-omp), so a run there never skips.
-func realOmp(t *testing.T) string {
-	t.Helper()
-	omp := os.Getenv("LEGION_TEST_OMP")
-	switch {
-	case omp != "":
-		return omp
-	case os.Getenv("GITHUB_ACTIONS") == "true":
-		t.Fatal("LEGION_TEST_OMP is unset on GitHub Actions: name the pinned Oh My Pi binary (the daemon-go job installs it)")
-	}
-	t.Skip("LEGION_TEST_OMP names no Oh My Pi binary")
-	return ""
-}
+	"github.com/sjawhar/legion/daemon/internal/testomp"
+)
 
 // importMarker is a module whose top-level code writes name into the test's marker directory, so
 // a marker is present exactly when Oh My Pi imported the module.
@@ -40,7 +27,7 @@ func importMarker(name string) string {
 // extension. The control drops --no-extensions and keeps the plugin root, and imports all four:
 // without it, a missing marker could mean a fixture Oh My Pi never looks at.
 func TestTheAgentArgvImportsNoRepositoryExtensionHookOrCommand(t *testing.T) {
-	omp := realOmp(t)
+	omp := testomp.Binary(t)
 	dir := t.TempDir()
 	plugin, repo, home := filepath.Join(dir, "plugin"), filepath.Join(dir, "repo"), filepath.Join(dir, "home")
 	for path, content := range map[string]string{

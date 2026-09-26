@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -66,7 +67,7 @@ func ghIssueWrite(args []string) bool {
 			}
 		}
 	}
-	if !contains(positional, "api") || ghAPIWriteMethod(args) == httpMethodGet {
+	if !slices.Contains(positional, "api") || ghAPIWriteMethod(args) == httpMethodGet {
 		return false
 	}
 	for _, word := range positional {
@@ -91,14 +92,14 @@ func ghMergeIntent(args []string) bool {
 		}
 	}
 	for i, word := range positional {
-		if word == "pr" && contains(positional[i+1:], "merge") {
+		if word == "pr" && slices.Contains(positional[i+1:], "merge") {
 			return true
 		}
 	}
-	if contains(positional, "alias") || contains(positional, "extension") {
+	if slices.Contains(positional, "alias") || slices.Contains(positional, "extension") {
 		return true
 	}
-	if !contains(positional, "api") {
+	if !slices.Contains(positional, "api") {
 		return false
 	}
 	for _, word := range positional {
@@ -107,7 +108,7 @@ func ghMergeIntent(args []string) bool {
 			return true
 		}
 	}
-	if !contains(positional, "graphql") && !anyGraphQLEndpoint(positional) {
+	if !slices.Contains(positional, "graphql") && !anyGraphQLEndpoint(positional) {
 		return false
 	}
 	bodies, known := inlineGraphQLBodies(args)
@@ -165,15 +166,6 @@ func inlineGraphQLBodies(args []string) ([]string, bool) {
 		}
 	}
 	return bodies, true
-}
-
-func contains(words []string, target string) bool {
-	for _, word := range words {
-		if word == target {
-			return true
-		}
-	}
-	return false
 }
 
 func runGh(ctx context.Context, args []string, stdout, stderr io.Writer) int {

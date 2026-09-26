@@ -118,7 +118,32 @@ export interface PrState {
   /** True while a terminal GitHub read holds the tie at the stored attempt set; released when the set advances or a pending read clears it. */
   ciReconciled: boolean;
   fixAttempts: number;
+  /** `approved` is pinned to the head it was given at: every new head drops it. `changes_requested`
+   * lasts the review round: a new head by another account than the review App that changes
+   * anything outside `.legion/` ends the round and drops it, and a handoff-only head (the
+   * reviewer's own `.legion/review.json` push) or one the review App pushed keeps it. */
   reviewDecision?: "approved" | "changes_requested";
+  /** Present exactly when `changes_requested` is being kept across heads that nothing has
+   * classified yet: the base of the range still to classify. `resetPrHead` sets it to the head a
+   * new head arrived from when no push classification covers that head (the synchronize came
+   * first, the push webhook was lost, or resync's read found the head), and keeps the first value
+   * while further unclassified heads arrive; the `review` reducer sets it to the commit a
+   * `changes_requested` review named when that is not the current head (a late or redelivered
+   * review, or one pinned to the implementation commit below a handoff). It is settled, and
+   * deleted, by a push webhook for the current head whose `before` is this sha (handoff-only or
+   * the review App's keeps the decision), by any push for the current head by another account
+   * that changes a path outside `.legion/` or cannot be classified (drops it), and by resync's
+   * compare of this sha against the current head (every commit the review App's, or
+   * `.legion/`-only, keeps it; anything else, a compare that fails included, drops it). */
+  reviewDecisionUnsettledFrom?: string;
+  /** Who asked for the current `changes_requested` and at which commit: present with that
+   * decision when its review carried both (absent on one a v33 daemon recorded). A non-empty
+   * review of a later current head by the same login that neither approves nor requests changes
+   * — the reviewer's clean round is a COMMENT while the head carries `.legion/` — ends the
+   * request, whether or not a range is open. The empty-body review GitHub fires for every thread
+   * reply, every other account's review, and the requester's follow-up at the commit it named
+   * leave it standing. */
+  changesRequest?: { by: string; at: string };
   /** Present exactly when the current `headSha`'s arrival in `resetPrHead` incremented
    * `fixAttempts` (prior verdict was red and no pending push classified this sha handoff-only). A
    * later handoff-only push webhook whose `after` equals `headSha` takes the attempt back and
@@ -127,12 +152,25 @@ export interface PrState {
    * `reviewDecision`'s set/delete handling. */
   headCounted?: true;
   /** The latest push webhook's classification for a head that has not arrived yet (push `after`
-   * !== `headSha`). A later push for another not-yet-arrived sha overwrites it (latest push wins,
-   * one slot). `resetPrHead` consumes (deletes) it when a head with that exact sha arrives — from
-   * the synchronize webhook or from resync's GitHub read alike. A push for the CURRENT head never
-   * touches this slot (it only takes back). Keyed by sha, so a stale slot can only ever describe
-   * the commit it names. */
-  pendingPush?: { sha: string; handoffOnly: boolean };
+   * !== `headSha`), with the push's `before`. A later push for another not-yet-arrived sha
+   * overwrites it (latest push wins, one slot). `resetPrHead` consumes (deletes) it when a head
+   * with that exact sha arrives — from the synchronize webhook or from resync's GitHub read alike.
+   * A push for the CURRENT head never touches this slot (it only takes back). Keyed by sha, so a
+   * stale slot can only ever describe the commit it names; `before` says whether it describes
+   * every change since the head it replaces (absent in a slot a v33 daemon wrote). */
+  pendingPush?: { sha: string; handoffOnly: boolean; before?: string; byReviewApp?: true };
+  /** Present while the newest head that changed a path outside `.legion/` was the review App's
+   * (`ReducerConfig.reviewAppLogin`, the push's `pusher`): the tester's red tests. A red on it is
+   * planned, so the next head is not a fix attempt. Set by such a head, cleared by a code-changing
+   * head from anyone else, and carried unchanged across handoff-only heads (every role's
+   * `.legion/` push), whether the classification arrives in the pending slot or by the push
+   * webhook for the current head. A review-App push is itself never a fix attempt either way. */
+  plannedRed?: true;
+  /** Present exactly when `plannedRed` was carried onto the current head with no classification
+   * of that head yet (its synchronize, or resync's read, came before its push). The push for the
+   * current head settles it; resync clears both, counting the head as a code change by someone
+   * other than the review App, since a push it has not seen by then may never arrive. */
+  plannedRedCarried?: true;
   /** The `fixAttempts` value the last `pr-blocked` was published for. `reduceCiEmission`
    * publishes `pr-blocked` only when `fixAttempts >= maxFixAttempts` AND `fixAttempts !==
    * blockedAttempts`, then records `fixAttempts` here. A take-back whose pre-decrement
@@ -307,7 +345,7 @@ export interface PersistedSpawnRequest {
 }
 
 export interface LegionState {
-  version: 33;
+  version: 34;
   project: string;
   issues: Record<IssueKey, IssueNode>;
   trees: Record<IssueKey, TreeState>;
@@ -487,9 +525,21 @@ const PrStateSchema = z
     ciReconciled: z.boolean(),
     fixAttempts: z.number().int().nonnegative(),
     reviewDecision: z.enum(["approved", "changes_requested"]).optional(),
+    reviewDecisionUnsettledFrom: z.string().min(1).optional(),
+    changesRequest: z
+      .object({ by: z.string().min(1), at: z.string().min(1) })
+      .strict()
+      .optional(),
     headCounted: z.literal(true).optional(),
+    plannedRed: z.literal(true).optional(),
+    plannedRedCarried: z.literal(true).optional(),
     pendingPush: z
-      .object({ sha: z.string().min(1), handoffOnly: z.boolean() })
+      .object({
+        sha: z.string().min(1),
+        handoffOnly: z.boolean(),
+        before: z.string().min(1).optional(),
+        byReviewApp: z.literal(true).optional(),
+      })
       .strict()
       .optional(),
     blockedAttempts: z.number().int().nonnegative().optional(),
@@ -615,7 +665,7 @@ const ExternalControllerLocatorSchema = z
   .strict();
 const LegionStateSchema = z
   .object({
-    version: z.literal(33),
+    version: z.literal(34),
     project: z.string().refine(isLegionProjectToken, {
       message: "Expected valid Legion project token",
     }),
@@ -682,7 +732,7 @@ export function newLegionState(project: string, cap: number): LegionState {
   assertLegionProjectToken(project);
 
   return {
-    version: 33,
+    version: 34,
     project,
     issues: {},
     trees: {},
@@ -1548,6 +1598,17 @@ function migrateV32State(
   return { ...state, version: 33, controllerLocator };
 }
 
+/** v33 -> v34: PrState gains the optional `reviewDecisionUnsettledFrom`, `changesRequest`,
+ * `plannedRed` and `plannedRedCarried`, and `pendingPush` the optional `before` and `byReviewApp`. A pure bump:
+ * absent is the correct starting value for each, since a v33 daemon settled each decision when its
+ * head arrived, a pending slot without `before` is never taken to cover the head it replaces, a
+ * decision with no recorded request is ended by no review, and a head or slot not marked as the
+ * review App's counts as before. */
+function migrateV33State(state: unknown): unknown {
+  if (!recordValue(state) || state.version !== 33) return state;
+  return { ...state, version: 34 };
+}
+
 export async function loadState(file: string, init: LegionStateInit): Promise<LegionState> {
   let raw: string;
   try {
@@ -1597,13 +1658,14 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
     (state) => migrateV30State(state, migratedAt),
     migrateV31State,
     (state) => migrateV32State(state, init.onHeadlessControllerStripped),
+    migrateV33State,
   ];
   const state = postGateMigrations.reduce((current, migrate) => migrate(current), gatedState);
   let version: unknown;
   if (typeof state === "object" && state !== null && "version" in state) {
     version = state.version;
   }
-  if (version !== 33) {
+  if (version !== 34) {
     throw new Error(`Unsupported Legion state version: ${String(version)}`);
   }
 

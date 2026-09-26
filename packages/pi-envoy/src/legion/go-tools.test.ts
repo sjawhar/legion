@@ -7,6 +7,7 @@ import { createGoLegionTool } from "./go-tools";
 function context(sessionId = "ses_208"): SessionContext {
   return {
     cwd: "/workspace",
+    hasUI: true,
     setInterval: () => undefined,
     sessionManager: {
       getSessionId: () => sessionId,
