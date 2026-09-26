@@ -66,7 +66,8 @@ type BudgetsView struct {
 }
 
 // DeliveryView is the claim's pending task (`supervise.Delivery`): DeliveredAt is the latest
-// send's acknowledgement, ConfirmedAt the turn it started; each absent until it happens.
+// acknowledgement of this task's prompt, cleared when that prompt is refused, and ConfirmedAt the
+// turn a send started; each absent until it happens.
 type DeliveryView struct {
 	ID   string `json:"id"`
 	Task string `json:"task"`
