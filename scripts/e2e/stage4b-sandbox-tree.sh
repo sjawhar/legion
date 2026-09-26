@@ -1475,6 +1475,12 @@ until issue_phase "$tree3" held >/dev/null 2>&1; do
     "'$work/legion' state --json --config '$work/legion.yaml' | jq -e --arg i '$tree3' --arg u '$uid' '.issues[\$i].phase == \"held\" or ((.issues[\$i].workers.planner.claim.locator.incarnation // \"\") as \$n | \$n != \"\" and \$n != \$u)' >/dev/null"
 done
 note "$tree3 is held after $kills ended planner launches"
+# The hold is the launch budget's: the daemon failed the planner's claim because its launches ran
+# out, and no other path that also holds an issue (a prompt budget, the architect's escalation).
+planner_claim=$(claim_token "$tree3" planner)
+why=$(log_lines "supervise: claim failed" | jq -r --arg c "$planner_claim" 'select(.claim == $c) | .why' | tail -1)
+[ "$why" = "launch failures ran out" ] || fail "$tree3's planner claim $planner_claim failed with '${why:-no logged failure}', not 'launch failures ran out'"
+note "the daemon failed $planner_claim because $why"
 # The held notice reaches the controller: its session, on this machine, holds the Envoy delivery.
 controller_notice() {
   local file
