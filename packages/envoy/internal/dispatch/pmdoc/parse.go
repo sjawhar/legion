@@ -173,7 +173,8 @@ func BlockShapeError(block *Node) error {
 // block beside the ones around it: two lists of one kind side by side read back as one list.
 func DocumentShapeError(doc *Node) error {
 	markdown, err := Render(doc)
-	if err != nil {
+	if err != nil || markdown == "" {
+		// Nothing written reads back as Parse's one empty paragraph, the tree it was written from.
 		return err
 	}
 	back, err := Parse(markdown)
@@ -207,6 +208,10 @@ func shapeDifference(want, got *Node) (string, string) {
 	for index := 0; index < max(len(written), len(got.Children)); index++ {
 		switch {
 		case index >= len(written):
+			if (want.Type == "bullet_list" || want.Type == "ordered_list") && got.Children[index].Type == "list_item" {
+				// A list of the same kind right after it continues it.
+				return blockName(want.Type) + " beside another of its kind", "one list"
+			}
 			return endOf(want.Type), blockName(got.Children[index].Type)
 		case index >= len(got.Children):
 			return blockName(written[index].Type), "nothing"

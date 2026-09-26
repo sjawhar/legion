@@ -168,8 +168,10 @@ its rendered markdown (`refuseTypedAcceptRoundTrip`), so a nested typed directiv
 fences read back as another tree is refused. Last, the whole document round-trips
 (`refuseAcceptedDocumentShape`: `pmdoc.DocumentShapeError`), which reads each block beside the
 ones around it: a list written beside a list of its kind reads back as one list, whether at the
-document's level or beside a typed block the accept rewrites or consumes. Each check passes over
-a block, or for the last a document, that already read back otherwise. An empty callout reaches
+document's level or beside a typed block the accept rewrites or consumes, and its refusal names
+that and advises rejecting, since where the join removes what stood between two lists no text
+keeps them apart. A document that writes nothing reads back as its one empty paragraph. Each check
+passes over a block, or for the last a document, that already read back otherwise. An empty callout reaches
 the read check, because its empty paragraph renders to no content and its `block+` rule cannot
 carry that. An accept parses its text as blocks
 written into the document (`pmdoc.ParseFragment`: a leading `---` is a rule, as `***` is, except

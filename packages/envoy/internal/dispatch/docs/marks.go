@@ -348,7 +348,7 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 			if err := refuseTypedAcceptRoundTrip(tree, next, range_, at, with, replacement); err != nil {
 				return err
 			}
-			if err := refuseAcceptedDocumentShape(tree, next, range_, at, with, replacement); err != nil {
+			if err := refuseAcceptedDocumentShape(tree, next, with); err != nil {
 				return err
 			}
 		}
@@ -419,13 +419,17 @@ func refuseTypedAcceptRoundTrip(before, after *pmdoc.Node, match pmdoc.Range, at
 // reading back as blocks of another shape. The checks before it read each block the accept changed
 // on its own, or its typed block whole; this one reads the document's blocks beside each other,
 // where a list written beside a list of its kind reads back as one list. A document that already
-// read back otherwise is left to those checks.
-func refuseAcceptedDocumentShape(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.TextblockAt, with string, replacement *pmdoc.Node) error {
+// read back otherwise is left to those checks. The refusal names what reads back and advises only
+// rejecting: where the accept removes what stood between two lists, no text over the match keeps
+// them apart.
+func refuseAcceptedDocumentShape(before, after *pmdoc.Node, with string) error {
 	broke := pmdoc.DocumentShapeError(after)
 	if broke == nil || pmdoc.DocumentShapeError(before) != nil {
 		return nil
 	}
-	return &ErrInvalidOp{Field: "replace_with", Reason: acceptRefusal(before, after, match, at, with, replacement, broke)}
+	return &ErrInvalidOp{Field: "replace_with", Reason: fmt.Sprintf(
+		"replace_with %q leaves blocks the document reads back otherwise (%v); reject the suggestion", with, broke,
+	)}
 }
 
 // refuseBrokenAsks refuses the first ask a write left unreadable whose id the document could read

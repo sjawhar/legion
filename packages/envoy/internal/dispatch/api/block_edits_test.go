@@ -292,8 +292,6 @@ func TestAcceptingASuggestionRefusesAReplacementTheDocumentCannotCarryBack(t *te
 		blockquote = "Intro.\n\n> Body.\n"
 		callout    = "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n"
 		footnote   = "x[^1]\n\n[^1]: Body.\n"
-		listAfter  = "Intro.\n\nBody.\n\n- y\n"
-		listBefore = "Intro.\n\n- y\n\nBody.\n"
 	)
 	text := func(artifactID string) string {
 		markdown, err := documentService.Text(context.Background(), artifactID)
@@ -330,13 +328,6 @@ func TestAcceptingASuggestionRefusesAReplacementTheDocumentCannotCarryBack(t *te
 		{"nothing in a footnote definition", footnote, "", "reject the suggestion, or delete the footnote in the document, its reference along with this definition"},
 		{"a rule in a footnote definition", footnote, "***", "writes a horizontal rule in this footnote definition"},
 		{"a list in a footnote definition", footnote, "- a", "writes a bullet list in this footnote definition"},
-		// Two lists of one kind side by side read back as one list, so a list written beside
-		// another is refused wherever the two stand, the document's own level included.
-		{"a list before a list", listAfter, "- x", "writes a bullet list in this document, which the document cannot read back there (the bullet list's end reads back as a list item)"},
-		{"a list after a list", listBefore, "- x", "writes a bullet list in this document, which the document cannot read back there (the bullet list's end reads back as a list item)"},
-		{"an ordered list before an ordered list", "Intro.\n\nBody.\n\n1. y\n", "1. x", "writes an ordered list in this document, which the document cannot read back there (the ordered list's end reads back as a list item)"},
-		{"two bullet lists", paragraph, "- a\n\n* b", "writes two bullet lists in this document, which the document cannot read back there (the bullet list's end reads back as a list item)"},
-		{"a list beside a callout's rewrite, before a list", "- y\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n", "- x\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::", "writes a bullet list and a callout in this document, which the document cannot read back there (the bullet list's end reads back as a list item)"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			artifactID, comment := suggest(t, "R"+string(rune('A'+index)), test.spec, test.with)
@@ -387,6 +378,8 @@ func TestAcceptingASuggestionRefusesAReplacementTheDocumentCannotCarryBack(t *te
 		{"colons in a paragraph", paragraph, ":::\nb", "Intro.\n\n\\::: b\n\nAfter.\n"},
 		{"colons in a blockquote", blockquote, ":::\nb", "Intro.\n\n> \\::: b\n"},
 		{"colons in a callout", callout, ":::", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n\\:::\n:::\n"},
+		// A document that writes nothing reads back as the one empty paragraph it holds.
+		{"nothing over a document's only paragraph", "Body.\n", "", ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			artifactID, comment := suggest(t, "K"+string(rune('A'+index)), test.spec, test.with)
@@ -409,6 +402,65 @@ func TestAcceptingASuggestionRefusesAReplacementTheDocumentCannotCarryBack(t *te
 	}
 	if opening["---"] != opening["***"] {
 		t.Fatalf("accepting `---` over an opening heading = %q, want what `***` writes, %q", opening["---"], opening["***"])
+	}
+}
+
+// Two lists of one kind side by side read back as one list, so an accept that leaves them so is
+// refused wherever they meet, the document's own level included: a list written beside one, text
+// that joins away what stood between two, or blocks an accept writes where a callout it rewrites
+// or consumes stood. The refusal names what reads back and advises rejecting, since no text over
+// the match keeps two lists apart where the join removes what stood between them.
+func TestAcceptingASuggestionRefusesListsThatReadBackAsOne(t *testing.T) {
+	var documentService *docs.Service
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	const (
+		bullets = "a bullet list beside another of its kind reads back as one list"
+		callout = ":::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::"
+	)
+	for index, test := range []struct{ name, spec, quote, with, says string }{
+		{"a list before a list", "Intro.\n\nBody.\n\n- y\n", "Body.", "- x", bullets},
+		{"a list after a list", "Intro.\n\n- y\n\nBody.\n", "Body.", "- x", bullets},
+		{"an ordered list before an ordered list", "Intro.\n\nBody.\n\n1. y\n", "Body.", "1. x", "an ordered list beside another of its kind reads back as one list"},
+		{"two bullet lists", "Intro.\n\nBody.\n\nAfter.\n", "Body.", "- a\n\n* b", bullets},
+		{"nothing between two lists", "- a\n\nBody.\n\n- b\n", "Body.", "", bullets},
+		{"text joining a list item to the paragraph before a list", "- y\n- Body.\n\nAfter here.\n\n- z\n", "Body. After", "x", bullets},
+		{"a list beside a callout's rewrite, before a list", "- y\n\n" + callout + "\n", "Body.", "- x\n\n" + callout, bullets},
+		{"a list consuming a callout beside a list", "Intro.\n\n" + callout + "\n\n- After here.\n", "Body. After", "- a", bullets},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			issue := createInteractionIssue(t, handler, "L"+string(rune('A'+index)), test.name, test.spec)
+			created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+				"body": "suggest", "anchor": map[string]any{"artifact": "spec", "quote": test.quote},
+				"suggestion": map[string]string{"replace_with": test.with}, "actor": sessionActor(),
+			})
+			if created.Code != http.StatusCreated {
+				t.Fatalf("create suggestion: status=%d body=%s", created.Code, created.Body.String())
+			}
+			comment := decodeBody[model.Comment](t, created)
+			before, err := documentService.Text(context.Background(), issue.PrimaryArtifactID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
+			var refusal struct{ Code, Error string }
+			if err := json.Unmarshal(accepted.Body.Bytes(), &refusal); err != nil || accepted.Code != http.StatusBadRequest || refusal.Code != "INVALID_OP" {
+				t.Fatalf("accept: status=%d body=%s, want 400 INVALID_OP", accepted.Code, accepted.Body.String())
+			}
+			if want := "leaves blocks the document reads back otherwise (" + test.says + "); reject the suggestion"; !strings.HasSuffix(refusal.Error, want) {
+				t.Fatalf("refusal %q, want it to end %q", refusal.Error, want)
+			}
+			if after, err := documentService.Text(context.Background(), issue.PrimaryArtifactID); err != nil || after != before {
+				t.Fatalf("after refused accept = %q (%v), want unchanged %q", after, err, before)
+			}
+			read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/"+comment.ID, nil, "alice")
+			if read.Code != http.StatusOK || decodeBody[model.Comment](t, read).Resolved {
+				t.Fatalf("suggestion after refusal: status=%d body=%s, want it open", read.Code, read.Body.String())
+			}
+		})
 	}
 }
 
@@ -462,7 +514,7 @@ func TestAcceptingAnEmptySuggestionRefusesAnUnreadableTypedBlock(t *testing.T) {
 
 // An accept in or around a typed block is refused when the document it stores reads back as
 // another tree: two typed fences of one length close at the first, and two lists of one kind side
-// by side read back as one, inside a callout or beside one the accept rewrites or consumes.
+// by side read back as one inside a callout.
 func TestAcceptingASuggestionAroundATypedBlockRefusesWhatCannotRoundTrip(t *testing.T) {
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
@@ -481,7 +533,6 @@ func TestAcceptingASuggestionAroundATypedBlockRefusesWhatCannotRoundTrip(t *test
 		{"an ask rewritten into a new callout", "Intro.\n\n" + ask, "Body.", ":::callout{#c9 kind=\"note\" title=\"\"}\n" + strings.Replace(ask, "Body.", "Reworded?", 1)},
 		{"a list beside a list in a callout", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n\n- y\n:::\n", "Body.", "- x"},
 		{"a list beside a list in a blockquote inside a callout", ":::callout{#c1 kind=\"note\" title=\"T\"}\n> Body.\n>\n> - y\n:::\n", "Body.", "- x"},
-		{"a list consuming a callout beside a list", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n\n- After here.\n", "Body. After", "- a"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			issue := createInteractionIssue(t, handler, "N"+string(rune('A'+index)), test.name, test.spec)

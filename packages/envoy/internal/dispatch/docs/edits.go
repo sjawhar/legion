@@ -1110,16 +1110,13 @@ func refuseAcceptBy(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.Textb
 // removes only the paragraph where the rest of its block stands without it; blocks written at a
 // list item's start leave the item's own line empty ahead of them.
 func acceptRefusal(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.TextblockAt, with string, replacement *pmdoc.Node, broke error) string {
-	holder := holderName(at.Ancestors[0])
+	holder := "document"
+	if parent := at.Ancestors[0]; parent.Type != "doc" {
+		holder = strings.ReplaceAll(parent.Type, "_", " ")
+	}
 	landed, found := pmdoc.ContainingTextblock(after, match.From)
 	emptied := found && emptyTextblock(landed.Node)
 	if !isInlineDocument(replacement) {
-		// Blocks that rewrite a typed block around the match in place land where it stood.
-		parent := at.Ancestors[0]
-		for index := 1; index < len(at.Ancestors) && pmdoc.IsTypedBlock(parent.Type) && pmdoc.RewritesBlock(replacement.Children, parent); index++ {
-			parent = at.Ancestors[index]
-		}
-		holder = holderName(parent)
 		where, ask := "in this "+holder, "text the "+holder+" can hold"
 		if holder == "list item" && emptied {
 			where, ask = "at the start of this list item", "the block to follow text on the item's line"
@@ -1150,14 +1147,6 @@ func acceptRefusal(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.Textbl
 		"replace_with %q leaves text the document reads back as another block where it lands (%v); reject the suggestion, or reply asking for the text inside a line",
 		with, broke,
 	)
-}
-
-// holderName names a block holding a match as a reader names it.
-func holderName(parent *pmdoc.Node) string {
-	if parent.Type == "doc" {
-		return "document"
-	}
-	return strings.ReplaceAll(parent.Type, "_", " ")
 }
 
 // replacementBroke is what check says of a document-level block the write changed, when it said
