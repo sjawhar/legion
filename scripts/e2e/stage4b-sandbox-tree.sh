@@ -1450,28 +1450,31 @@ drive_spec "$tree3"
 wait_for_worker "$tree3" planner
 killed=" "
 kills=0
-# new_planner_pod: tree 3's planner claim runs a pod none of the kills took, and its worker has
-# registered from it: the claim takes the pod's incarnation at launch, before the pod runs, and an
-# exec's kill of a pod whose worker has not started reaches nothing. It runs in this shell: the
-# killed list is a here-string, which the sh of an `sh -c` (dash) refuses as a syntax error.
+# The daemon holds a phase when its claim's launches fail launch_failure_limit (3) times in a row,
+# and a failed launch is one that never became a working agent: the count restarts at the agent's
+# ready (supervise/budgets.go). So each relaunch is ended before it is ready, by deleting its pod the
+# moment the claim names it; an exec's kill cannot, since the pod's worker container has not
+# started. The first end takes the ready planner, and the two after it take relaunches.
+# new_planner_pod: tree 3's planner claim names a pod none of the ends took. It runs in this shell:
+# the ended list is a here-string, which the sh of an `sh -c` (dash) refuses as a syntax error.
 new_planner_pod() {
-  local claim inc
-  claim=$("$work/legion" state --json --config "$work/legion.yaml" | jq -c --arg i "$tree3" '.issues[$i].workers.planner.claim // {}')
-  inc=$(jq -r '.locator.incarnation // empty' <<<"$claim")
-  [ -n "$inc" ] && ! grep -qF " $inc " <<<"$killed" && jq -e '.state | IN("ready", "working", "idle")' <<<"$claim" >/dev/null
+  local inc
+  inc=$("$work/legion" state --json --config "$work/legion.yaml" | jq -r --arg i "$tree3" '.issues[$i].workers.planner.claim.locator.incarnation // empty')
+  [ -n "$inc" ] && ! grep -qF " $inc " <<<"$killed"
 }
 until issue_phase "$tree3" held >/dev/null 2>&1; do
-  [ "$kills" -lt 8 ] || fail "$tree3 was not held after $kills killed planner launches"
-  until_true 600 "a new planner pod on $tree3 to register" new_planner_pod
-  end_claim_pod "$tree3" planner kill
+  [ "$kills" -lt 8 ] || fail "$tree3 was not held after $kills ended planner launches"
+  until_true 600 "a new planner pod on $tree3" new_planner_pod
+  state=$(claim_view "$tree3" planner | jq -r '.state // "none"')
+  end_claim_pod "$tree3" planner delete
   uid=$ended_pod_uid
   killed="$killed$uid "
   kills=$((kills + 1))
-  note "killed planner launch $kills of $tree3 (uid $uid)"
+  note "ended planner launch $kills of $tree3 (uid $uid), its claim $state"
   until_true 600 "$tree3 to be held or its planner relaunched" sh -c \
     "'$work/legion' state --json --config '$work/legion.yaml' | jq -e --arg i '$tree3' --arg u '$uid' '.issues[\$i].phase == \"held\" or ((.issues[\$i].workers.planner.claim.locator.incarnation // \"\") as \$n | \$n != \"\" and \$n != \$u)' >/dev/null"
 done
-note "$tree3 is held after $kills killed planner launches"
+note "$tree3 is held after $kills ended planner launches"
 # The held notice reaches the controller: its session, on this machine, holds the Envoy delivery.
 controller_notice() {
   local file
