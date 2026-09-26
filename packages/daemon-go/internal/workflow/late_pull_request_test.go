@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -14,28 +15,33 @@ import (
 // lateApplied is the clock of the newest lifecycle event the seeded pull request has applied.
 var lateApplied = time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
 
-// pullRequestView is what a late event could overwrite.
+// pullRequestView is the pull request state and reviewer-round decision a lifecycle event must
+// preserve or update.
 type pullRequestView struct {
 	head, verdict, decision string
 	state                   record.PullRequestState
 }
 
-// afterEvents seeds a reviewing issue whose pull request is at head-c, green and approved, with
-// lateApplied as its clock, applies facts in order, and reads the pull request back.
+// afterEvents seeds a reviewing issue whose pull request is at head-c, green and whose reviewer
+// round is approved, with lateApplied as its clock. It applies facts and reads both records back.
 func afterEvents(t *testing.T, state record.PullRequestState, facts ...intake.Fact) pullRequestView {
 	t.Helper()
 	pool := migratedPool(t)
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
 	seedPR(t, pool, record.PullRequest{State: state, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208",
-		HeadSHA: "head-c", HeadUpdatedAt: lateApplied, HeadUpdatedAtSource: "webhook", Verdict: "green", ReviewDecision: "approved",
+		HeadSHA: "head-c", HeadUpdatedAt: lateApplied, HeadUpdatedAtSource: "webhook", Verdict: "green",
 		Failing: []string{}, FailingStatuses: []string{}, CheckRuns: []record.AttemptRun{}})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer,
+		Decision: &record.ReviewDecision{State: "approved", Head: "head-c"}})
 	for i, fact := range facts {
 		if _, err := intake.ApplyFact(context.Background(), pool, "github", fmt.Sprintf("step-%d", i), fact, testEngine(), admissionStub{}); err != nil {
 			t.Fatalf("step %d: %v", i, err)
 		}
 	}
 	var got pullRequestView
-	if err := pool.QueryRow(context.Background(), "select head_sha, verdict, review_decision, state from pull_requests where issue = 'LEGION-208'").
+	if err := pool.QueryRow(context.Background(), `select pr.head_sha, pr.verdict, coalesce(reviewer.decision ->> 'state', ''), pr.state
+		from pull_requests pr left join phases reviewer on reviewer.issue = pr.issue and reviewer.role = $1
+		where pr.issue = $2`, string(claim.RoleReviewer), "LEGION-208").
 		Scan(&got.head, &got.verdict, &got.decision, &got.state); err != nil {
 		t.Fatalf("read pull request: %v", err)
 	}
@@ -61,10 +67,11 @@ func lateClosed(head string, at time.Time) intake.Fact {
 // GitHub redelivers a failed delivery on request, hours late if need be, and nothing orders a
 // webhook against those that followed it. Every pull request lifecycle event carries the pull
 // request's updated_at, so one older than the newest applied is a late redelivery and changes
-// nothing: it neither moves the head back and clears what was decided at the newer head, nor
-// reopens or closes the pull request against a newer close or reopen. An event at the same clock
-// applies (GitHub's clock is to the second, so two real events can share one), and so does one
-// that carries no clock.
+// nothing: it neither moves the head back nor reopens or closes the pull request against a newer
+// close or reopen. The decision belongs to the reviewer round, rather than the pull request,
+// because the reviewer's handoff push itself moves the head; lifecycle observations leave it until
+// the round ends. An event at the same clock applies (GitHub's clock is to the second, so two real
+// events can share one), and so does one that carries no clock.
 func TestALatePullRequestEventChangesNothing(t *testing.T) {
 	earlier, later := lateApplied.Add(-time.Hour), lateApplied.Add(time.Minute)
 	kept := pullRequestView{head: "head-c", verdict: "green", decision: "approved", state: record.PullRequestOpen}
@@ -84,13 +91,13 @@ func TestALatePullRequestEventChangesNothing(t *testing.T) {
 		{"a close older than the reopen", record.PullRequestOpen, lateClosed("head-c", earlier), kept},
 		{"a reopen older than the close", record.PullRequestClosed, lateReopened("head-c", earlier), closed},
 
-		{"a newer synchronize", record.PullRequestOpen, lateSync("head-d", later), pullRequestView{head: "head-d", state: record.PullRequestOpen}},
-		{"a synchronize at the same clock", record.PullRequestOpen, lateSync("head-d", lateApplied), pullRequestView{head: "head-d", state: record.PullRequestOpen}},
-		{"a synchronize with no clock", record.PullRequestOpen, lateSync("head-d", time.Time{}), pullRequestView{head: "head-d", state: record.PullRequestOpen}},
+		{"a newer synchronize", record.PullRequestOpen, lateSync("head-d", later), pullRequestView{head: "head-d", decision: "approved", state: record.PullRequestOpen}},
+		{"a synchronize at the same clock", record.PullRequestOpen, lateSync("head-d", lateApplied), pullRequestView{head: "head-d", decision: "approved", state: record.PullRequestOpen}},
+		{"a synchronize with no clock", record.PullRequestOpen, lateSync("head-d", time.Time{}), pullRequestView{head: "head-d", decision: "approved", state: record.PullRequestOpen}},
 		{"a newer close", record.PullRequestOpen, lateClosed("head-c", later), closed},
 		{"a close with no clock", record.PullRequestOpen, lateClosed("head-c", time.Time{}), closed},
-		{"a newer reopen", record.PullRequestClosed, lateReopened("head-c", later), pullRequestView{head: "head-c", state: record.PullRequestOpen}},
-		{"a reopen at the same clock as the close", record.PullRequestClosed, lateReopened("head-c", lateApplied), pullRequestView{head: "head-c", state: record.PullRequestOpen}},
+		{"a newer reopen", record.PullRequestClosed, lateReopened("head-c", later), pullRequestView{head: "head-c", decision: "approved", state: record.PullRequestOpen}},
+		{"a reopen at the same clock as the close", record.PullRequestClosed, lateReopened("head-c", lateApplied), pullRequestView{head: "head-c", decision: "approved", state: record.PullRequestOpen}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := afterEvents(t, tc.seed, tc.fact); got != tc.want {
@@ -139,9 +146,9 @@ func TestACloseOrReopenCarriesItsHead(t *testing.T) {
 		want  pullRequestView
 	}{
 		{"a close delivered before the synchronize it followed", record.PullRequestOpen,
-			[]intake.Fact{lateClosed("head-d", finished), lateSync("head-d", synchronized)}, pullRequestView{head: "head-d", state: record.PullRequestClosed}},
+			[]intake.Fact{lateClosed("head-d", finished), lateSync("head-d", synchronized)}, pullRequestView{head: "head-d", decision: "approved", state: record.PullRequestClosed}},
 		{"a reopen delivered before the synchronize it followed", record.PullRequestClosed,
-			[]intake.Fact{lateReopened("head-e", finished), lateSync("head-e", synchronized)}, pullRequestView{head: "head-e", state: record.PullRequestOpen}},
+			[]intake.Fact{lateReopened("head-e", finished), lateSync("head-e", synchronized)}, pullRequestView{head: "head-e", decision: "approved", state: record.PullRequestOpen}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := afterEvents(t, tc.seed, tc.facts...); got != tc.want {

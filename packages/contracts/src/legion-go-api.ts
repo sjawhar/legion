@@ -97,7 +97,9 @@ const legionGoPhaseView = z.strictObject({
   rounds: z.number().int().nonnegative(),
 });
 
-/** `api.PullRequestView` — the pull request as the daemon observes it from GitHub. */
+/** `api.PullRequestView` — the pull request as the daemon observes it from GitHub.
+ * `reviewDecision` is the open review round's decision, the one the workflow ends the round on
+ * when the reviewer completes; absent until a review in the round decides. */
 const legionGoPullRequestView = z.strictObject({
   number: z.number().int().positive(),
   head: nonEmptyString,
