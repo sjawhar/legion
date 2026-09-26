@@ -69,12 +69,12 @@ func GithubEnvelopes(input GithubEnvelopeInput, trigger string) []Envelope {
 	if num != "" {
 		// notifications.github.owner.repo.pr.7706.mention
 		mention := item
-		mention.Topic = GithubSubject(owner, repo, base+"."+num+".mention")
+		mention.Topic = GithubSubject(owner, repo, base+"."+num+"."+githubMentionKind)
 		mentions = append(mentions, mention)
 	}
 	// Also publish repo-wide mention: notifications.github.owner.repo.mention
 	mention := item
-	mention.Topic = GithubSubject(owner, repo, "mention")
+	mention.Topic = GithubSubject(owner, repo, githubMentionKind)
 	mentions = append(mentions, mention)
 	return append(mentions, item)
 }
@@ -376,14 +376,18 @@ var githubEventKinds = map[string]string{
 
 const githubDefaultKind = "comment"
 
+// githubMentionKind is the kind a mention copy is published under, after the repository or after
+// the mentioning resource.
+const githubMentionKind = "mention"
+
 // GithubTopicKinds are the tokens that follow a GitHub topic's owner and name, sorted: every kind
-// and parent kind the two tables name, githubDefaultKind, and `mention`, under which the mention
-// copies are published (the push, workflow and checks topics begin `push`, `workflow` and `pr`). A
-// token there that is none of these is not a GitHub topic kind.
+// and parent kind the two tables name, githubDefaultKind, and githubMentionKind (the push, workflow
+// and checks topics begin `push`, `workflow` and `pr`). A token there that is none of these is not
+// a GitHub topic kind.
 var GithubTopicKinds = githubTopicKinds()
 
 func githubTopicKinds() []string {
-	kinds := []string{githubDefaultKind, "mention"}
+	kinds := []string{githubDefaultKind, githubMentionKind}
 	for _, kind := range githubEventKinds {
 		kinds = append(kinds, kind)
 	}
