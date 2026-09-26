@@ -1,0 +1,10 @@
+{
+  // What `bun run typecheck` reads. Dropping the sibling's `paths` leaves the upstream
+  // specifiers unresolved, which is the boundary every consumer sees: proof-sdk's sources are
+  // emitted with `noCheck` and do not type-check, so no program may open them. Bun and Vite
+  // resolve them for real — see tsconfig.json and packages/dispatch/web/vite.config.ts.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "paths": {}
+  }
+}

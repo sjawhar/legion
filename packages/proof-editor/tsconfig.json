@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["bun"],
+    // How Bun resolves the upstream modules at runtime: proof-sdk's package.json `exports`
+    // publishes only its built dist, so its sources are unreachable by bare specifier.
+    // packages/dispatch/web/vite.config.ts carries the same mapping for the browser build;
+    // tsconfig.check.json drops it, because no tsc program may open those sources.
+    "paths": {
+      "proof-sdk-upstream/src/*": ["./node_modules/proof-sdk-upstream/src/*"]
+    }
+  },
+  "include": ["src/**/*.ts"]
+}
