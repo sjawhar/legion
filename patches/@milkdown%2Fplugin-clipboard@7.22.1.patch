@@ -1,16 +1,16 @@
 diff --git a/lib/index.js b/lib/index.js
-index a1094153e619ca57d9a444896d85d0a840a0ec24..33020b3e6d1f16db1169dbe562ec1c0aa10897b4 100644
+index a1094153e619ca57d9a444896d85d0a840a0ec24..a82274507b906df120ffd601d436eee816bbb1e6 100644
 --- a/lib/index.js
 +++ b/lib/index.js
 @@ -1,6 +1,6 @@
  import { editorViewOptionsCtx, parserCtx, schemaCtx, serializerCtx } from "@milkdown/core";
  import { getNodeFromSchema, isTextOnlySlice } from "@milkdown/prose";
 -import { DOMParser, DOMSerializer } from "@milkdown/prose/model";
-+import { DOMParser, DOMSerializer, Slice } from "@milkdown/prose/model";
++import { DOMParser, DOMSerializer, Fragment, Slice } from "@milkdown/prose/model";
  import { Plugin, PluginKey, TextSelection } from "@milkdown/prose/state";
  import { $prose } from "@milkdown/utils";
  //#region src/__internal__/is-pure-text.ts
-@@ -24,6 +24,38 @@ function withMeta(plugin, meta) {
+@@ -24,6 +24,65 @@ function withMeta(plugin, meta) {
  	return plugin;
  }
  //#endregion
@@ -45,17 +45,70 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..33020b3e6d1f16db1169dbe562ec1c0a
 +	for (let i = 0; i < slice.openEnd; i++) end = end.lastChild.content;
 +	return [start.firstChild, end.lastChild].every((node) => !node?.type.spec.isolating || fitsBeforeIsolating($pos, node.type));
 +}
++function inTableCell($pos) {
++	for (let depth = $pos.depth; depth > 0; depth--) {
++		const role = $pos.node(depth).type.spec.tableRole;
++		if (role === "cell" || role === "header_cell") return true;
++	}
++	return false;
++}
++function inlineSlice(fragment, schema) {
++	const inline = [];
++	fragment.descendants((node) => {
++		if (!node.isTextblock) return true;
++		if (node.content.size === 0) return false;
++		if (inline.length > 0) inline.push(schema.text(" "));
++		node.content.forEach((child) => {
++			if (child.isText) inline.push(schema.text(child.text.replace(/\s*\n\s*/g, " "), child.marks));
++			else if (child.isLeaf && /\n/.test(child.type.spec.leafText?.(child) ?? "")) inline.push(schema.text(" ", child.marks));
++			else inline.push(child);
++		});
++		return false;
++	});
++	return new Slice(Fragment.from(inline), 0, 0);
++}
++function plainTextSlice($pos, opened, schema) {
++	if (inTableCell($pos)) return inlineSlice(opened.content, schema);
++	const closed = Slice.maxOpen(opened.content, false);
++	return closedEdgesFit($pos, closed) ? closed : inlineSlice(opened.content, schema);
++}
 +//#endregion
  //#region src/index.ts
  function dispatchPasteSlice(view, slice) {
  	const node = isTextOnlySlice(slice);
-@@ -84,6 +116,9 @@ var clipboard = $prose((ctx) => {
- 					const slice = parser(text);
- 					if (!slice || typeof slice === "string") return false;
- 					dom = DOMSerializer.fromSchema(schema).serializeFragment(slice.content);
-+					const opened = domParser.parseSlice(dom);
-+					const closed = Slice.maxOpen(opened.content, false);
-+					return dispatchPasteSlice(view, closedEdgesFit(view.state.selection.$from, closed) ? closed : opened);
+@@ -53,12 +112,21 @@ var clipboard = $prose((ctx) => {
+ 			return html;
+ 		}
+ 	}));
++	const parsePlainText = (text) => {
++		const doc = ctx.get(parserCtx)(text);
++		if (!doc || typeof doc === "string") return null;
++		return DOMParser.fromSchema(schema).parseSlice(DOMSerializer.fromSchema(schema).serializeFragment(doc.content));
++	};
+ 	const key = new PluginKey("MILKDOWN_CLIPBOARD");
+ 	return new Plugin({
+ 		key,
+ 		props: {
++			clipboardTextParser: (text, $context) => {
++				if (!inTableCell($context)) return null;
++				const opened = parsePlainText(text);
++				return opened && inlineSlice(opened.content, schema);
++			},
+ 			handlePaste: (view, event, preProcessedSlice) => {
+-				const parser = ctx.get(parserCtx);
+ 				const editable = view.props.editable?.(view.state);
+ 				const { clipboardData } = event;
+ 				if (!editable || !clipboardData) return false;
+@@ -81,9 +149,9 @@ var clipboard = $prose((ctx) => {
+ 				const domParser = DOMParser.fromSchema(schema);
+ 				let dom;
+ 				if (html.length === 0) {
+-					const slice = parser(text);
+-					if (!slice || typeof slice === "string") return false;
+-					dom = DOMSerializer.fromSchema(schema).serializeFragment(slice.content);
++					const opened = parsePlainText(text);
++					if (!opened) return false;
++					return dispatchPasteSlice(view, plainTextSlice(view.state.selection.$from, opened, schema));
  				} else {
  					const template = document.createElement("template");
  					template.innerHTML = html;
