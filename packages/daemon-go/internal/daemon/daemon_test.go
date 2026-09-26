@@ -921,7 +921,8 @@ func (r *workflowTokenRecorder) Token(_ context.Context, role appauth.AppRole, _
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.roles = append(r.roles, role)
-	return appauth.Lease{Token: "workflow-test-token", ExpiresAt: time.Now().Add(time.Hour)}, nil
+	// Each App has its own bot login, as a real token manager's leases do.
+	return appauth.Lease{Token: "workflow-test-token", ExpiresAt: time.Now().Add(time.Hour), Identity: appauth.GitIdentity{Name: "legion-" + string(role) + "[bot]"}}, nil
 }
 
 func (r *workflowTokenRecorder) Roles() []appauth.AppRole {

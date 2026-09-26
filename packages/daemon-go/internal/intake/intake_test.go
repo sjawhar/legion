@@ -188,7 +188,7 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 			name:    "branch push",
 			subject: "notifications.github.sjawhar.legion.push.branch.legion/LEGION-208",
 			file:    "github/push.json",
-			want:    Push{Repo: "sjawhar/legion", Branch: "legion/LEGION-208", After: "head-captured", ChangedPaths: new(".legion/plan.json\nsource.go"), Truncated: new("false")},
+			want:    Push{Repo: "sjawhar/legion", Branch: "legion/LEGION-208", After: "head-captured", ChangedPaths: new(".legion/plan.json\nsource.go"), Truncated: new("false"), Pusher: "author"},
 		},
 		{
 			name:    "comment",

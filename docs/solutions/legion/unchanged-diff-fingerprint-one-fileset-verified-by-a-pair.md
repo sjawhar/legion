@@ -148,8 +148,7 @@ the rebase comment.
 1. Before rebasing: `jj git fetch`, then hash the current tip with the one-fileset command and
    keep the number.
 2. `jj rebase -s 'roots(main@origin..@)' -d main@origin` — the whole chain, so the tester's and
-   reviewer's local handoff commits move with yours (only the implementer pushes, and its push
-   carries them).
+   reviewer's handoff commits move with yours.
 3. Resolve each conflicted commit at the commit that owns the file (`jj new <rev>`, edit the
    file to the resolved text, `jj squash`), first conflicted commit first; the descendants
    re-apply and often clear several commits at once. A later commit that rewrote the same
@@ -163,7 +162,9 @@ the rebase comment.
 5. Hash the new tip; post one PR comment (Legion footer) in the form
    `rebase <old> → <new>; fingerprint <before> → <after>; unchanged|changed`, with the per-file
    attribution when changed.
-6. Bookmark with `-r @- --allow-backwards`, push, re-read `mergeable,mergeStateStatus` — `main`
+6. Push with `skills/legion-worker/SKILL.md`'s push procedure (record the pushed tip before step 1's rebase, as its *Rewriting
+   pushed commits* says, so the push is refused if another role pushed meanwhile), then re-read
+   `mergeable,mergeStateStatus` — `main`
    can move again while CI queues (rebase 2 here was reported `CONFLICTING` within a minute of
    the round-4 push).
 

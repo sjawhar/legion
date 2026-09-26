@@ -6,11 +6,10 @@ export { generateJwt } from "./github-app-crypto";
 export { buildRoleEnv } from "./github-app-env";
 
 /** The one place a Legion role is mapped to the GitHub App it acts as. The implementer and
- * merger write code: they act as the implement App, and they alone push the issue branch (the
- * review App's installation holds `contents: write` too; the workflow, not GitHub, keeps its roles
- * from pushing). Every other role — planner, tester, reviewer, root and
- * sub-architects — posts verdicts and reviews as the review App. Exhaustive over `LegionRole`:
- * a new role fails to compile until it is placed here. */
+ * merger act as the implement App. Every other role — planner, tester, reviewer, root and
+ * sub-architects — acts as the review App, posting verdicts and reviews and pushing its own
+ * commits (the Apps' permissions: `AGENTS.md`, GitHub Apps). Exhaustive over `LegionRole`: a new
+ * role fails to compile until it is placed here. */
 const APP_ROLE_FOR_LEGION_ROLE: Record<LegionRole, GitHubAppRole> = {
   architect: "review",
   planner: "review",

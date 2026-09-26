@@ -28,6 +28,9 @@ type Config struct {
 	MaxFixAttempts int
 	Linger         time.Duration
 	Clock          func() time.Time
+	// ReviewAppLogin is the review App's bot login (<slug>[bot]) from its boot token lease. A push
+	// by it is never a fix attempt, and a red on its red tests is planned. Empty matches no push.
+	ReviewAppLogin string
 }
 
 // Engine interprets Table and writes only records and outbox rows through the supplied Store.
@@ -433,7 +436,8 @@ func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.
 	if err != nil || pr == nil {
 		return intake.Result{}, err
 	}
-	*pr = classify.ApplyPush(*pr, fact.After, classify.ClassifyPush(classify.PushPayload{ChangedPaths: fact.ChangedPaths, ChangedPathsTruncated: fact.Truncated}))
+	byReviewApp := e.cfg.ReviewAppLogin != "" && fact.Pusher == e.cfg.ReviewAppLogin
+	*pr = classify.ApplyPush(*pr, fact.After, classify.ClassifyPush(classify.PushPayload{ChangedPaths: fact.ChangedPaths, ChangedPathsTruncated: fact.Truncated}), byReviewApp)
 	return intake.Result{}, e.store.PutPullRequest(ctx, tx, *pr)
 }
 
