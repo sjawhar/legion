@@ -9,12 +9,15 @@ import (
 	"fmt"
 	"github.com/sjawhar/envoy/internal/cistore"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestGithubPullRequestHeadRequiresStrictPRNumber(t *testing.T) {
@@ -918,5 +921,117 @@ func TestGitHubHandlerReadsABodyUpToGitHubsPayloadCap(t *testing.T) {
 				t.Fatalf("published %d, recorded %d checks and %d heads; want nothing", len(pub.published), len(recorder.calls), len(recorder.headCalls))
 			}
 		})
+	}
+}
+
+// heldBody is a request body of size bytes that calls started on its first read and then waits
+// for release before yielding anything, so a test can see which requests are reading at once.
+type heldBody struct {
+	remaining int
+	started   func()
+	release   <-chan struct{}
+	read      int
+}
+
+func (b *heldBody) Read(p []byte) (int, error) {
+	if b.read == 0 && b.started != nil {
+		b.started()
+		<-b.release
+	}
+	if b.remaining == 0 {
+		return 0, io.EOF
+	}
+	n := min(len(p), b.remaining)
+	b.remaining -= n
+	b.read += n
+	return n, nil
+}
+
+// A body declared larger than GitHub delivers is refused before a byte of it is read.
+func TestGitHubHandlerRefusesADeclaredOversizeBodyUnread(t *testing.T) {
+	body := &heldBody{remaining: githubMaxBody + 1}
+	req := httptest.NewRequest(http.MethodPost, "/webhook/github", body)
+	req.ContentLength = githubMaxBody + 1
+	req.Header.Set("X-GitHub-Delivery", "delivery-declared-oversize")
+	req.Header.Set("X-GitHub-Event", "push")
+	rr := httptest.NewRecorder()
+
+	GitHubHandler("s", "@legion", "", &mockPublisher{}, &mockRecorder{}).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413; body = %s", rr.Code, rr.Body.String())
+	}
+	if body.read != 0 {
+		t.Fatalf("read %d bytes of a body declared over the cap, want none", body.read)
+	}
+}
+
+// The handler buffers a body whole before it can check the signature, so anyone who can reach the
+// route can make it hold a body. It holds at most githubBodyBudget of them at once, across every
+// request; the rest wait their turn and are then served. Here six cap-sized bodies with a wrong
+// signature arrive together and each is answered 401, while no more than the budget's worth were
+// ever being read at the same time.
+func TestGitHubHandlerHoldsAtMostItsBodyBudgetAtOnce(t *testing.T) {
+	const requests = 6
+	allowed := githubBodyBudget / githubMaxBody
+	handler := GitHubHandler("s", "@legion", "", &mockPublisher{}, &mockRecorder{})
+	var mu sync.Mutex
+	entered, reading, most := 0, 0, 0
+	release := make(chan struct{})
+	codes := make([]int, requests)
+	var wg sync.WaitGroup
+	for i := range requests {
+		body := &heldBody{remaining: githubMaxBody, release: release, started: func() {
+			mu.Lock()
+			reading++
+			most = max(most, reading)
+			mu.Unlock()
+		}}
+		req := httptest.NewRequest(http.MethodPost, "/webhook/github", body)
+		req.ContentLength = githubMaxBody
+		req.Header.Set("X-GitHub-Delivery", fmt.Sprintf("delivery-budget-%d", i))
+		req.Header.Set("X-GitHub-Event", "push")
+		req.Header.Set("X-Hub-Signature-256", "sha256=0000")
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			mu.Lock()
+			entered++
+			mu.Unlock()
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+			mu.Lock()
+			if body.read > 0 {
+				reading--
+			}
+			mu.Unlock()
+			codes[i] = rr.Code
+		}()
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		mu.Lock()
+		ready := entered == requests && reading >= allowed
+		mu.Unlock()
+		if ready {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d requests entered and %d bodies are being read, want all %d entered and %d reading", entered, reading, requests, allowed)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// Give any request that is not held back time to start reading too, before the first finishes.
+	time.Sleep(20 * time.Millisecond)
+	close(release)
+	wg.Wait()
+
+	if most > allowed {
+		t.Fatalf("%d cap-sized bodies were read at once, want at most %d (a %d MiB budget)", most, allowed, githubBodyBudget>>20)
+	}
+	for i, code := range codes {
+		if code != http.StatusUnauthorized {
+			t.Fatalf("request %d: status = %d, want 401 once its turn came", i, code)
+		}
 	}
 }

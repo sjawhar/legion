@@ -14,6 +14,7 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/id"
 	"github.com/sjawhar/envoy/internal/verify"
+	"golang.org/x/sync/semaphore"
 )
 
 // githubEvent returns true for event types where sender logging and bot filtering apply.
@@ -102,18 +103,54 @@ func githubPullRequestHead(event string, payload map[string]any) (owner, repo, n
 // githubMaxBody is the largest webhook body the handler reads: GitHub's documented payload cap,
 // 25 MB, read as MiB so no delivery GitHub sends is refused. A push of a thousand commits is
 // several megabytes, and a refused delivery is lost for good, since a redelivery is the same body.
-// The body is buffered whole, because its signature covers every byte, so this is also the bound
-// on what one request holds before it is parsed.
 const githubMaxBody = 25 << 20
+
+// githubBodyBudget bounds the webhook body bytes the handler holds at once, across all requests.
+// The body is buffered whole before its signature can be checked, so without it anyone who can
+// reach the route could make the listener hold 25 MiB per connection; a request waits for room
+// before it reads its body, and holds it until the handler returns. A signed body decodes to
+// about two and a half times its size again, so the process stays near 200 MB even when every
+// request is a signed cap-sized push (measured with eight at once). It is at least githubMaxBody,
+// so any body GitHub sends gets its turn.
+const githubBodyBudget = 64 << 20
+
+// readGitHubBody reads the request body into a buffer of the declared length, so the read never
+// grows the buffer past the body; a body of undeclared length is read up to githubMaxBody.
+func readGitHubBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
+	if r.ContentLength < 0 {
+		return io.ReadAll(http.MaxBytesReader(w, r.Body, githubMaxBody))
+	}
+	body := make([]byte, r.ContentLength)
+	if _, err := io.ReadFull(r.Body, body); err != nil {
+		return nil, err
+	}
+	return body, nil
+}
 
 // GitHubHandler returns the HTTP handler for GitHub webhook events.
 func GitHubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publisher, ci CIRecorder) http.HandlerFunc {
+	bodies := semaphore.NewWeighted(githubBodyBudget)
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, githubMaxBody))
+		if r.ContentLength > githubMaxBody {
+			http.Error(w, "body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		// A body of undeclared length is charged the whole cap it may grow to.
+		held := r.ContentLength
+		if held < 0 {
+			held = githubMaxBody
+		}
+		if err := bodies.Acquire(r.Context(), held); err != nil {
+			// The caller went away while it waited for room.
+			http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		defer bodies.Release(held)
+		body, err := readGitHubBody(w, r)
 		if err != nil {
 			var maxBytesErr *http.MaxBytesError
 			if errors.As(err, &maxBytesErr) {
