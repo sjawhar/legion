@@ -39,8 +39,9 @@ type Conn interface {
 	// AdoptWorkingCopy makes the agent's side set the author of its working copy, for a
 	// workspace the daemon cannot reach itself.
 	AdoptWorkingCopy(ctx context.Context, id GitIdentity, timeout time.Duration) error
-	// Prompted is whether this connection has written a prompt of the delivery, answered or not.
-	Prompted(deliveryID string) bool
+	// Sequence is the order the connection was registered in: one registered later has a larger
+	// sequence, so a caller can tell a connection newer than another.
+	Sequence() uint64
 }
 
 // Conns is the directory of live connections, keyed by claim. A claim with no connection is not

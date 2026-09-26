@@ -277,8 +277,12 @@ type Machine struct {
 	send            *sending
 	helloDuringSend bool
 	// unsaved is a pending delivery that memory changed and the store did not take: settle writes
-	// it again before the next decision (putPending).
+	// it again, with the claim, before the next decision (saved).
 	unsaved bool
+	// sentThrough is the registration sequence of the newest connection a prompt was sent through
+	// (takesBackConfirmed). A send always goes through the connection registered last, so it only
+	// rises.
+	sentThrough uint64
 	// askFirst is a restored claim whose agent an earlier daemon was talking to: a pending
 	// delivery it may already have sent, or a turn it saw start and may not have seen end. The
 	// machine asks the agent (get_state) before it acts on either.
@@ -809,6 +813,7 @@ func (m *Machine) disarmAll() {
 // or none, has no memory of the old one's prompts.
 func (m *Machine) forgetSend() {
 	m.send, m.helloDuringSend, m.askFirst = nil, false, false
+	m.sentThrough = 0
 }
 
 // persist writes the claim alone. A capability belongs to a registered agent whose process runs,

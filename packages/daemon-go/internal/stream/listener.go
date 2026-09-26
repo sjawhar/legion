@@ -75,6 +75,8 @@ type Listener struct {
 	// listener ends: Await's wake-up.
 	registered chan struct{}
 	closed     bool
+	// registrations numbers the connections in the order they were registered (Conn.Sequence).
+	registrations uint64
 
 	wg sync.WaitGroup
 }
@@ -329,6 +331,8 @@ func (l *Listener) register(nc net.Conn, token claim.Token, generation uint64) (
 		return nil, "connection closed before hello_ack"
 	}
 	conn := newConn(nc, token, l.timeout, l.log, l.events)
+	l.registrations++
+	conn.seq = l.registrations
 	// The ack is written before the connection is registered, so it reaches the shim ahead of any
 	// frame a caller sends the moment Conn or Await returns it — a shim drops every line that
 	// precedes its hello_ack (worker-shim.ts:492-497). The lock is held across the write because

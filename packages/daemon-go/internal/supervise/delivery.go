@@ -220,16 +220,21 @@ func (m *Machine) retirePending(ctx context.Context) error {
 	return nil
 }
 
-// putPending writes the pending delivery as memory holds it. Memory changes first, since the
-// decision it records has been made whether or not the store takes it; a write that fails leaves
-// the delivery unsaved, and settle writes it again before the next decision. So once the store
-// takes writes again, a restart reads what the machine decided - a task taken back, a mark
-// cleared - rather than the delivery it replaced. A restart before that reads the older row, as
-// one after a crash between a decision and its write does.
-func (m *Machine) putPending(ctx context.Context) error {
-	err := m.deps.Store.PutDelivery(ctx, m.claim.Token, *m.claim.Pending)
+// saved records the outcome of a write of the pending delivery that memory changed first, since
+// the decision it records has been made whether or not the store takes it. A write that failed
+// leaves the delivery unsaved, and settle writes it again, with the claim, before the next decision
+// - confirm's write covers both, and a delivery written confirmed beside a claim still ready is a
+// turn a restart would find over. So once the store takes writes again, a restart reads what the
+// machine decided rather than what it replaced; one before that reads the older rows, as a restart
+// after a crash between a decision and its write does.
+func (m *Machine) saved(err error) error {
 	m.unsaved = err != nil
 	return err
+}
+
+// putPending writes the pending delivery as memory holds it (saved).
+func (m *Machine) putPending(ctx context.Context) error {
+	return m.saved(m.deps.Store.PutDelivery(ctx, m.claim.Token, *m.claim.Pending))
 }
 
 // streaming asks the agent whether a turn is in flight. An agent that cannot say is taken as not
@@ -250,6 +255,9 @@ func (m *Machine) streaming(ctx context.Context, conn runtime.Conn) bool {
 func (m *Machine) startSend(conn runtime.Conn, d Delivery) {
 	token, generation, role, loc := m.claim.Token, m.claim.Generation, m.claim.Role, m.claim.Locator
 	m.send, m.helloDuringSend = &sending{id: d.ID, generation: generation}, false
+	if seq := conn.Sequence(); seq > m.sentThrough {
+		m.sentThrough = seq
+	}
 	m.goroutines++
 	go func() {
 		err := m.adopt(role, loc)
@@ -300,9 +308,7 @@ func (m *Machine) confirm(ctx context.Context) error {
 	m.disarm(TimerTurn)
 	m.askFirst = false
 	m.claim.Budgets.PromptFailures, m.claim.Budgets.PromptRetires = 0, 0
-	err := m.deps.Store.PutClaimAndDelivery(ctx, m.stored(), *p)
-	m.unsaved = err != nil
-	return err
+	return m.saved(m.deps.Store.PutClaimAndDelivery(ctx, m.stored(), *p))
 }
 
 // settle retires a delivery whose life is over, and runs around every decision, so that two things
@@ -322,7 +328,7 @@ func (m *Machine) settle(ctx context.Context) error {
 		return nil
 	}
 	if m.unsaved {
-		if err := m.putPending(ctx); err != nil {
+		if err := m.saved(m.deps.Store.PutClaimAndDelivery(ctx, m.stored(), *p)); err != nil {
 			m.log.Warn("supervise: the pending delivery is still not written", "delivery", p.ID, "error", err)
 		}
 	}
@@ -424,7 +430,7 @@ func (m *Machine) markUnread(ctx context.Context) error {
 // holds it, so what it established — not confirmed, and not read when taken back unread — holds at
 // once, whether or not the write recording it lands. Only the new id waits for the write, so the
 // claim's id is always one the store holds; a write that fails leaves the delivery unsaved, and
-// settle writes it again under the id it kept (putPending).
+// settle writes it again under the id it kept (saved).
 func (m *Machine) takeBackPending(ctx context.Context, read bool) error {
 	m.disarm(TimerTurn)
 	p := m.claim.Pending
@@ -434,10 +440,9 @@ func (m *Machine) takeBackPending(ctx context.Context, read bool) error {
 	}
 	next := *p
 	next.ID = rand.Text()
-	if err := m.deps.Store.PutDelivery(ctx, m.claim.Token, next); err != nil {
-		m.unsaved = true
+	if err := m.saved(m.deps.Store.PutDelivery(ctx, m.claim.Token, next)); err != nil {
 		return err
 	}
-	p.ID, m.unsaved = next.ID, false
+	p.ID = next.ID
 	return nil
 }

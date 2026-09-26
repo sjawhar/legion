@@ -357,7 +357,8 @@ func (c *stubConn) GetState(ctx context.Context) (runtime.ConnState, error) {
 
 func (c *stubConn) Shutdown(context.Context) error { return c.writer.WriteFrame(shimwire.Shutdown{}) }
 
-func (c *stubConn) Prompted(string) bool { return false }
+// Sequence is the stub's registration order: it is the only connection its tests register.
+func (c *stubConn) Sequence() uint64 { return 1 }
 
 func (c *stubConn) AdoptWorkingCopy(context.Context, runtime.GitIdentity, time.Duration) error {
 	return errors.New("the stream stub does not adopt working copies")

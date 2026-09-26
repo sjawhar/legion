@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -31,6 +32,7 @@ type Adoption struct {
 // Conn is one agent's connection as a double: it records what was asked of the agent and answers
 // what the test told it to. The zero value is not usable; call NewConn.
 type Conn struct {
+	seq       uint64
 	mu        sync.Mutex
 	prompts   []Prompt
 	adoptions []Adoption
@@ -39,10 +41,17 @@ type Conn struct {
 	failures  map[string]error
 }
 
-// NewConn is a connection that accepts everything and reports no turn in flight.
+// sequence numbers the fake connections in the order they were made, as the listener numbers the
+// connections it registers.
+var sequence atomic.Uint64
+
+// NewConn is a connection that accepts everything and reports no turn in flight. Each is newer
+// than every one made before it (Sequence).
 func NewConn() *Conn {
-	return &Conn{failures: map[string]error{}}
+	return &Conn{seq: sequence.Add(1), failures: map[string]error{}}
 }
+
+func (c *Conn) Sequence() uint64 { return c.seq }
 
 func (c *Conn) Prompt(_ context.Context, deliveryID, message string) error {
 	c.mu.Lock()
@@ -75,17 +84,6 @@ func (c *Conn) AdoptWorkingCopy(_ context.Context, id runtime.GitIdentity, timeo
 }
 
 // Prompts is every prompt frame sent over this connection, in order.
-func (c *Conn) Prompted(deliveryID string) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for _, p := range c.prompts {
-		if p.DeliveryID == deliveryID {
-			return true
-		}
-	}
-	return false
-}
-
 func (c *Conn) Prompts() []Prompt {
 	c.mu.Lock()
 	defer c.mu.Unlock()

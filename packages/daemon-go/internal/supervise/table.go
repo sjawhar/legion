@@ -51,10 +51,12 @@ type StreamLateRefusal struct {
 	// replaying what Oh My Pi answered while no daemon was connected. It answers an earlier prompt,
 	// possibly of the very delivery this connection is re-sending, so it charges nothing, and it
 	// clears the mark that prompt set. It takes the task back only when a turn not its own confirmed
-	// it and the connection it arrived on has not prompted it (takesBackConfirmed).
+	// it and the task was not sent through the connection it arrived on or a newer one
+	// (takesBackConfirmed).
 	Replayed bool
-	// Conn is the connection the refusal arrived on, which keeps the prompts it wrote.
-	Conn runtime.Conn
+	// ConnSequence is the registration sequence of the connection the refusal arrived on
+	// (runtime.Conn.Sequence).
+	ConnSequence uint64
 }
 
 // PromptAcked is a send's prompt acknowledged, posted by the send's own goroutine.
@@ -644,18 +646,19 @@ func refusedElsewhere(m *Machine, ctx context.Context, r StreamLateRefusal) (boo
 }
 
 // takesBackConfirmed is whether a replayed refusal of the pending prompt says the turn that
-// confirmed the task was not the task's. It is when no send is in flight and the connection the
-// refusal arrived on has not prompted the task: then the confirmation came from a turn the agent
-// was already in, and the refused prompt was an earlier connection's. A send in flight, or one that
-// connection made, may be the prompt whose turn confirmed the task, so the task stays confirmed and
-// the refusal clears only the mark. The connection keeps what it wrote, so this holds whichever
-// order its sends, its hello and the re-send's acknowledgement reach the machine in: a sweep can
-// send through a connection before its hello is handled, and an acknowledgement is handled by its
-// send's own goroutine.
+// confirmed the task was not the task's. It is when no send is in flight and the task was not sent
+// through the connection the refusal arrived on or a newer one: then the confirmation came from a
+// turn the agent was already in, and the refused prompt was an older connection's. A send in
+// flight, or one through that connection or a later one, may be the prompt whose turn confirmed
+// the task, so the task stays confirmed and the refusal clears only the mark. Connections are
+// compared by the order they were registered in, not by the order the machine handles their
+// events in: a sweep can send through a connection before its hello is handled, the shim can redial
+// before the machine reaches the old connection's backlog, and an acknowledgement is handled by
+// its send's own goroutine.
 func (m *Machine) takesBackConfirmed(r StreamLateRefusal) bool {
 	p := m.claim.Pending
 	return r.Replayed && p != nil && r.DeliveryID == p.ID && !p.ConfirmedAt.IsZero() &&
-		m.send == nil && !r.Conn.Prompted(p.ID)
+		m.send == nil && m.sentThrough < r.ConnSequence
 }
 
 // refusedUnprompted is a refusal landing while the claim cannot be prompted: relaunching after the

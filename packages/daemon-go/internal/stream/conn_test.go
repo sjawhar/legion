@@ -334,7 +334,7 @@ func TestALateRefusalIsOneEventCarryingTheDeliveryID(t *testing.T) {
 	p.conn.Close()
 	want := []Event{
 		TurnStart{Claim: testClaim},
-		LateRefusal{Claim: testClaim, DeliveryID: "delivery-1", Error: "Agent is busy", Conn: conn},
+		LateRefusal{Claim: testClaim, DeliveryID: "delivery-1", Error: "Agent is busy", ConnSequence: conn.Sequence()},
 		Closed{Claim: testClaim},
 	}
 	var got []Event
@@ -432,7 +432,7 @@ func TestARefusalReplayedOnAReplacementConnectionNamesItsDelivery(t *testing.T) 
 	replacement.send(shimwire.Response{ID: frame.ID, Command: shimwire.TypePrompt, Success: false, Error: "Agent is busy"})
 	replacement.conn.Close()
 	want := []Event{
-		LateRefusal{Claim: testClaim, DeliveryID: "delivery-1", Error: "Agent is busy", Replayed: true, Conn: replaced},
+		LateRefusal{Claim: testClaim, DeliveryID: "delivery-1", Error: "Agent is busy", Replayed: true, ConnSequence: replaced.Sequence()},
 		Closed{Claim: testClaim},
 	}
 	var got []Event
@@ -442,11 +442,10 @@ func TestARefusalReplayedOnAReplacementConnectionNamesItsDelivery(t *testing.T) 
 	if !slices.Equal(got, want) {
 		t.Fatalf("events = %#v, want %#v", got, want)
 	}
-	// Each connection answers for the prompts it wrote itself, which is what the supervisor asks
-	// the connection a refusal arrived on.
-	if !first.Prompted("delivery-1") || first.Prompted("delivery-2") || replaced.Prompted("delivery-1") {
-		t.Fatalf("prompted: first %v/%v, replacement %v; want only the first connection's own delivery-1",
-			first.Prompted("delivery-1"), first.Prompted("delivery-2"), replaced.Prompted("delivery-1"))
+	// The listener numbers connections in the order it registers them, which is how the supervisor
+	// tells a connection newer than the one it sent through.
+	if first.Sequence() == 0 || replaced.Sequence() <= first.Sequence() {
+		t.Fatalf("sequences: first %d, replacement %d; want the replacement's larger", first.Sequence(), replaced.Sequence())
 	}
 }
 
