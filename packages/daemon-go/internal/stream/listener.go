@@ -53,6 +53,9 @@ type Options struct {
 	RPCTimeout time.Duration
 	// Log receives the listener's lines; nil is slog.Default().
 	Log *slog.Logger
+	// Listen opens a tcp address's listener; nil is net.Listen. A unix address is always the
+	// stream's own, which replaces a stale socket file.
+	Listen func(network, address string) (net.Listener, error)
 }
 
 // Listener accepts shim connections and keeps the live one for each claim. Its life is the
@@ -92,7 +95,12 @@ func Listen(ctx context.Context, addr string, resolve HelloResolver, opts Option
 	if err != nil {
 		return nil, err
 	}
-	ln, err := listen(network, address, opts.RPCTimeout)
+	var ln net.Listener
+	if network == "tcp" && opts.Listen != nil {
+		ln, err = opts.Listen(network, address)
+	} else {
+		ln, err = listen(network, address, opts.RPCTimeout)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("worker stream %s is unavailable: %w", addr, err)
 	}

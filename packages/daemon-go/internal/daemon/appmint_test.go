@@ -115,6 +115,7 @@ func bootsOrExits(t *testing.T, cfg config.Config, tokens appauth.Tokens, within
 	done := make(chan error, 1)
 	go func() {
 		done <- run(ctx, cfg, quietLogger(), overrides{
+			listen:         heldListen,
 			runtime:        fakeRuntime(fake.NewRuntime(), &built{}).runtime,
 			clock:          stillClock{},
 			workflowTokens: tokens,
@@ -146,7 +147,7 @@ func bootsOrExits(t *testing.T, cfg config.Config, tokens appauth.Tokens, within
 			return err
 		default:
 		}
-		if response, err := http.Get("http://127.0.0.1:" + strconv.Itoa(cfg.Port) + "/healthz"); err == nil {
+		if response, err := pollClient.Get("http://127.0.0.1:" + strconv.Itoa(cfg.Port) + "/healthz"); err == nil {
 			response.Body.Close()
 			if response.StatusCode == http.StatusOK {
 				return nil

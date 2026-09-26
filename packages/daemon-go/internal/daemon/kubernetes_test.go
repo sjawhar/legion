@@ -75,7 +75,7 @@ func TestAKubernetesDaemonRefusesAClusterWithoutAgentSandboxBeforeItsBoot(t *tes
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	err := run(ctx, cfg, quietLogger(), overrides{clock: stillClock{}})
+	err := run(ctx, cfg, quietLogger(), overrides{clock: stillClock{}, listen: heldListen})
 	if err == nil {
 		t.Fatal("the daemon booted on a cluster without Agent Sandbox")
 	}
@@ -300,7 +300,7 @@ func awaitHealthz(t *testing.T, cfg config.Config, done chan error) {
 	t.Helper()
 	deadline := time.Now().Add(15 * time.Second)
 	for {
-		response, err := http.Get("http://127.0.0.1:" + strconv.Itoa(cfg.Port) + "/healthz")
+		response, err := pollClient.Get("http://127.0.0.1:" + strconv.Itoa(cfg.Port) + "/healthz")
 		if err == nil {
 			response.Body.Close()
 			if response.StatusCode == http.StatusOK {

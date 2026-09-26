@@ -92,6 +92,8 @@ type overrides struct {
 	// workflowTokens replaces the GitHub App token manager in a workflow integration test. The
 	// production daemon always mints through appauth.New.
 	workflowTokens appauth.Tokens
+	// listen opens the API listener and, under kubernetes, the worker stream's; nil is net.Listen.
+	listen func(network, address string) (net.Listener, error)
 }
 
 // Run is the daemon. It refuses what it cannot run on before it touches anything — the
@@ -200,7 +202,11 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 	}
 
 	address := net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.Port))
-	listener, err := net.Listen("tcp", address)
+	listen := net.Listen
+	if o.listen != nil {
+		listen = o.listen
+	}
+	listener, err := listen("tcp", address)
 	if err != nil {
 		workflow.stop()
 		st.Close()
@@ -337,6 +343,8 @@ type plan struct {
 	probe       func(ctx context.Context, rt runtime.Runtime) error
 	clock       supervise.Clock
 	orphanSweep time.Duration
+	// listen opens the worker stream's tcp listener (overrides.listen); nil is net.Listen.
+	listen func(network, address string) (net.Listener, error)
 }
 
 // runtimeFactory builds the runtime over the worker stream (C3): ctx is supervision's lifetime,
@@ -402,7 +410,7 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 	}
 	p := plan{
 		project: project, operatorToken: operatorToken, secrets: secrets, instructions: instructions,
-		dispatchToken: dispatchToken, rolesDir: rolesDir, roleReferences: roleReferences, clock: clock, orphanSweep: orphanSweep,
+		dispatchToken: dispatchToken, rolesDir: rolesDir, roleReferences: roleReferences, clock: clock, orphanSweep: orphanSweep, listen: o.listen,
 	}
 	switch cfg.Runtime.Name {
 	case "tmux":
@@ -572,7 +580,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 	tokens := api.NewBootTokens(st)
 	sup := newSupervisor(supervising, st, p.project, cfg.StateDir, log)
 	listener, err := stream.Listen(streaming, p.stream,
-		sup.helloResolver(tokens, cfg.WorkerRPCTimeout), stream.Options{RPCTimeout: cfg.WorkerRPCTimeout, Log: log})
+		sup.helloResolver(tokens, cfg.WorkerRPCTimeout), stream.Options{RPCTimeout: cfg.WorkerRPCTimeout, Log: log, Listen: p.listen})
 	if err != nil {
 		cancel()
 		cancelStream()

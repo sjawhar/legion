@@ -112,6 +112,7 @@ func TestAnotherProjectsIssuesAreNotThisDaemonsToAdmit(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- run(runCtx, cfg, quietLogger(), overrides{
+			listen:  heldListen,
 			runtime: fakeRuntime(fake.NewRuntime(), &built{}).runtime, clock: stillClock{}, workflowTokens: &workflowTokenRecorder{},
 		})
 	}()
@@ -140,7 +141,7 @@ func TestAnotherProjectsIssuesAreNotThisDaemonsToAdmit(t *testing.T) {
 				Active []string `json:"active"`
 			} `json:"admission"`
 		}
-		response, err := http.Get("http://127.0.0.1:" + strconv.Itoa(cfg.Port) + "/legion/v1/state")
+		response, err := pollClient.Get("http://127.0.0.1:" + strconv.Itoa(cfg.Port) + "/legion/v1/state")
 		if err != nil {
 			continue
 		}
