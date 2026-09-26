@@ -6,12 +6,20 @@ import (
 )
 
 // Parse holds every input to one rule: exactly `<owner>/<name>`, both non-empty, no whitespace,
-// and no `.` or `..` segment, and each refusal names the input and the value.
+// no `.` or `..` segment, and GitHub's own grammar for each name, and each refusal names the input
+// and the value. The names GitHub allows parse, dotted and underscored ones included.
 func TestParse(t *testing.T) {
 	repository, err := Parse("--repo", "acme/widgets")
 	if err != nil || repository.Owner() != "acme" || repository.Name() != "widgets" || repository.String() != "acme/widgets" {
 		t.Fatalf(`Parse("acme/widgets") = %#v (%s), %v, want acme, widgets`, repository, repository, err)
 	}
+	for _, valid := range []string{"sjawhar/.github", "sjawhar/legion-smoke", "my-org/a_b.c", "A1/-lead", "a/b..c", "o/..."} {
+		if parsed, err := Parse("--repo", valid); err != nil || parsed.String() != valid {
+			t.Errorf("Parse(%q) = %s, %v, want it read as written", valid, parsed, err)
+		}
+	}
+	const owner = `, whose owner GitHub does not allow: letters, digits and single hyphens, not beginning or ending with a hyphen`
+	const name = `, whose name GitHub does not allow: letters, digits, "-", "_" and "."`
 	for _, tc := range []struct{ repository, want string }{
 		{"", `--repo must be "owner/name" (got "")`},
 		{"acme", `--repo must be "owner/name" (got "acme")`},
@@ -22,6 +30,25 @@ func TestParse(t *testing.T) {
 		{"acme\t/widgets", `--repo "acme\t/widgets" holds whitespace, which no GitHub owner or repository name does`},
 		{"./widgets", `--repo "./widgets" has a "." segment, which names no GitHub owner or repository`},
 		{"acme/..", `--repo "acme/.." has a ".." segment, which names no GitHub owner or repository`},
+		// Control bytes, which a log line or a terminal would act on.
+		{"a/\x00b", `--repo "a/\x00b"` + name},
+		{"a/\x1b[31m", `--repo "a/\x1b[31m"` + name},
+		{"\x7fa/b", `--repo "\x7fa/b"` + owner},
+		// URL metacharacters, which end the path of the URL a clone names.
+		{"a/b#frag", `--repo "a/b#frag"` + name},
+		{"a/b?x", `--repo "a/b?x"` + name},
+		{"a%2F/b", `--repo "a%2F/b"` + owner},
+		// A hyphen where GitHub allows none in an owner.
+		{"-a/b", `--repo "-a/b"` + owner},
+		{"a-/b", `--repo "a-/b"` + owner},
+		{"a--b/c", `--repo "a--b/c"` + owner},
+		// NATS wildcards, which in intake's GitHub filter would match other repositories.
+		{"a/*", `--repo "a/*"` + name},
+		{"a/>", `--repo "a/>"` + name},
+		{"*/b", `--repo "*/b"` + owner},
+		{">/b", `--repo ">/b"` + owner},
+		// Dots in an owner, which GitHub allows only in a repository's name.
+		{".acme/b", `--repo ".acme/b"` + owner},
 	} {
 		if _, err := Parse("--repo", tc.repository); err == nil || err.Error() != tc.want {
 			t.Errorf("Parse(%q) = %v, want %q", tc.repository, err, tc.want)
