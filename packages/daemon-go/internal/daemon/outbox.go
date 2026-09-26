@@ -367,13 +367,9 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		// start that reaches its claim after the close (queued before it and backing off) finishes
 		// without acting and records no start, so the close's suspend still applies. Re-admission
 		// starts the member again (admit's startMidPhaseChildren).
-		var lingers bool
-		if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
-			var err error
-			lingers, err = record.TreeLingers(ctx, r.records, tx, issue.Tree)
+		lingers, err := r.treeLingers(ctx, issue)
+		if err != nil {
 			return err
-		}); err != nil {
-			return fmt.Errorf("read whether the tree of %s lingers: %w", issue.Key, err)
 		}
 		if lingers {
 			r.log.Info("outbox start of a member of a lingering tree; finished without acting", "row", row.ID, "issue", issue.Key,
@@ -425,10 +421,14 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 			}
 		}
 		// A resume task is the phase's own task again. A claim that holds a task for the same
-		// generation and phase once relaunched is given that one when it is ready, so the resume
-		// task is not delivered: it would be the same task twice. Read here, after the relaunch,
-		// the pending delivery is the one that goes (a relaunch retires a task whose turn is over).
-		if pending := machine.Claim().Pending; payload.ResumeTask && pending != nil && pending.Generation == payload.Generation && pending.Phase == payload.Phase {
+		// generation and phase that will still be worked (not yet confirmed, or confirmed in the turn
+		// the claim is working) is given that one, so the resume task is not delivered: it would be
+		// the same task twice. A confirmed task on a claim not working is over, and the claim's next
+		// decision retires it (a launch whose outcome was uncertain makes that decision only when it
+		// is released and spawned again, after this start), so the resume task goes in its place.
+		held := machine.Claim()
+		if pending := held.Pending; payload.ResumeTask && pending != nil && pending.Generation == payload.Generation && pending.Phase == payload.Phase &&
+			(pending.ConfirmedAt.IsZero() || held.State == supervise.StateWorking) {
 			r.log.Info("outbox start's resume task is already held by the claim; not delivered again", "row", row.ID, "issue", issue.Key,
 				"role", payload.Role, "held", pending.ID)
 			return nil
@@ -467,6 +467,18 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		if !found {
 			return nil
 		}
+		// The close belongs to the linger it expired. Once re-admission ends the linger, a close
+		// still backing off (a release the runtime refused) would retire the claim the tree's new
+		// run relaunched, and the task it holds with it; it finishes without acting instead.
+		lingers, err := r.treeLingers(ctx, issue)
+		if err != nil {
+			return err
+		}
+		if !lingers {
+			r.log.Info("outbox tree close of a tree that runs again; finished without acting", "row", row.ID, "issue", issue.Key,
+				"tree", issue.Tree, "role", payload.Role)
+			return nil
+		}
 		if err := machine.Handle(ctx, supervise.RequestTreeClose{Claim: token}); err != nil {
 			return fmt.Errorf("close the tree of claim %s: %w", token, err)
 		}
@@ -474,6 +486,20 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 	default:
 		return fmt.Errorf("outbox row %d has unknown supervise operation %q", row.ID, payload.Op)
 	}
+}
+
+// treeLingers says whether issue's tree lingers after its close (record.TreeLingers), read in a
+// transaction of its own just before the executor acts on the row.
+func (r *outbox) treeLingers(ctx context.Context, issue record.Issue) (bool, error) {
+	var lingers bool
+	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+		var err error
+		lingers, err = record.TreeLingers(ctx, r.records, tx, issue.Tree)
+		return err
+	}); err != nil {
+		return false, fmt.Errorf("read whether the tree of %s lingers: %w", issue.Key, err)
+	}
+	return lingers, nil
 }
 
 // podsProvision is whether the runtime provisions each claim's workspace in the claim's own pod
@@ -556,6 +582,17 @@ func (r *outbox) removeWorkspace(ctx context.Context, row record.OutboxRow, payl
 	if payload.Generation != issue.Generation {
 		r.log.Info("outbox workspace removal serves an earlier generation; finished without acting", "row", row.ID, "issue", issue.Key,
 			"generation", payload.Generation, "current", issue.Generation)
+		return nil
+	}
+	// The removal belongs to the linger it expired. Once re-admission ends the linger, the tree's
+	// new run may already work in the workspace again, so a removal still backing off finishes
+	// without acting.
+	lingers, err := r.treeLingers(ctx, issue)
+	if err != nil {
+		return err
+	}
+	if !lingers {
+		r.log.Info("outbox workspace removal of a tree that runs again; finished without acting", "row", row.ID, "issue", issue.Key, "tree", issue.Tree)
 		return nil
 	}
 	working, err := workspace.Location(r.stateDir, r.repo, row.Issue)
