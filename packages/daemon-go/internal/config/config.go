@@ -92,8 +92,9 @@ type Config struct {
 	// ProbeInterval is how often the runtime sweeps every recorded process.
 	ProbeInterval time.Duration
 
-	// The supervision budgets: launches that failed, prompts acknowledged without a turn, and
-	// panes retired for those, each before the claim is failed.
+	// The supervision budgets: launches that failed (and, under the same limit, deaths of a ready
+	// agent while it had work outstanding), prompts acknowledged without a turn, and panes retired
+	// for those, each before the claim is failed.
 	LaunchFailureLimit int
 	PromptFailureLimit int
 	PromptRetireLimit  int

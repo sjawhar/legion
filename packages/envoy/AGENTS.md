@@ -465,9 +465,10 @@ list attributes any other document write gives it, and anchors inside the text a
 are affected as they are by any document edit. A field named but unchanged is not rewritten, so
 an idempotent retry of the whole ask writes nothing, versions nothing and keeps every anchor.
 Text the block cannot carry unchanged is refused `400 ASK_BLOCK_TEXT` naming the field, with
-nothing written - an option label containing `": "`, which separates a label from its
-description, or a question with a line beginning `:::`, which would leave the canonical markdown
-unparseable. A single newline is
+nothing written. The rule is a round trip through settlement's own parser and the canonical
+markdown a version records, never a list of forbidden characters: whatever the block cannot carry
+back unchanged is refused, and an option label containing `": "` - the separator between a label
+and its description - is one example rather than the only one. A single newline is
 carried as a hard break; surrounding whitespace is trimmed, as the parser trims it.
 Settlement retracts an ask whose block left the document in its own name,
 `{kind: "system", id: "document-settlement"}`, and restores only a retraction it wrote - a
@@ -534,7 +535,7 @@ canonical markdown.
 - Role lanes use core NATS, not JetStream: the listener queue subscriber resolves the live holder at delivery time, then makes a receipt-backed request to that holder's agent subject (`bus.Client.RequestCoreTo`). The agent pump returns an empty receipt after accepting the envelope. No receipt within two seconds from a registered, live holder is `receipt_timeout` (the message was forwarded and not acknowledged; the Legion daemon treats it as delivered to a live process) — keyed on `bus.ErrReceiptTimeout`, which `RequestCoreTo` returns only after the publish and the flush both succeeded and the receipt wait ran out; the flush is bounded by the same two-second window, and a forward whose window ends while NATS is reconnecting, or a flush that fails or times out (a stalled connection still buffering the forward), is the client's own error, so it is `delivery_failed`, never `receipt_timeout`. `delivery_failed` is a claim whose message is not known to have reached the holder (holder lookup failed, holder stale, the publish or flush failed); `no_holder` is no claim at all. Every reason emits an exception; the attempt cache holds an entry only while a forward is in flight and both forward failures roll it back, while the dedupe cache records a forward only when its receipt arrived — so a publish that re-uses a `dedupe_key` after a `receipt_timeout` is forwarded again, while one after a delivered forward is skipped. Do not add durable role consumers or retry transit for role messages.
 - Role ownership is durable in the `envoy_roles` JetStream KV bucket. Each role key records `holder_session_id`, `claimed_at`, and `previous_session_id`; listener restart restores the claim from that record, but routes only while the holder is present in the `envoy_sessions` registry. Reaping stale interests never releases a role; a restored absent holder gets one registry TTL to re-register, then loses its claim atomically on the role reaper or next resolution, while the first core role delivery still emits its normal delivery exception.
 - A failed control delivery or a terminal capability refusal during generic fanout emits `notifications.envoy.exceptions.<original-topic>`. Control exceptions keep their ordinary transport; a generic fanout refusal uses core NATS because the fanout API accepts arbitrary non-control topics, so retaining every possible exception subject would also retain role exception lanes. The payload preserves `original_topic`, `event_id`, `reason` (one of `no_holder`, `delivery_failed`, `receipt_timeout`), `recipient_session` when a recipient is known (the receiving session, not `source_session`; omitted rather than empty when unknown), `payload_summary`, the original machine `payload`, `dedupe_key`, `source`, and `source_session`; the exception lane is not recursively exceptional. Each refusal records its recipient before publishing its exception, so an identical redelivery emits at most one exception during the attempt-cache window and never NAKs the original envelope. An API publish to an unheld role is rejected synchronously with 404 instead.
-- **Source-specific vs generic ingestion**: Envoy has two ingestion paths: listener-hosted webhook handlers behind `readinessGate` (`internal/webhook/{github,slack,ghostwispr}.go`) and the generic MCP bridge (`cmd/mcp/`). The MCP bridge connects to any MCP server that publishes resources, so it's the low-maintenance default for new sources. Building source-specific webhook logic adds maintenance burden — consider whether the cost justifies the benefit over the generic MCP bridge before adding custom source-specific logic to Envoy. When using the MCP bridge, Envoy should stay naive about the message content — the MCP server owns the domain logic.
+- **Source-specific vs generic ingestion**: Envoy has two ingestion paths: listener-hosted webhook handlers behind the listener's starting gate (`internal/webhook/{github,slack,ghostwispr}.go`, `startingGate` in `cmd/listener/main.go`) and the generic MCP bridge (`cmd/mcp/`). The MCP bridge connects to any MCP server that publishes resources, so it's the low-maintenance default for new sources. Building source-specific webhook logic adds maintenance burden — consider whether the cost justifies the benefit over the generic MCP bridge before adding custom source-specific logic to Envoy. When using the MCP bridge, Envoy should stay naive about the message content — the MCP server owns the domain logic.
 
 ## Security
 
@@ -581,7 +582,7 @@ Dispatch treats an agent endpoint and bearer token as one trust-bound configurat
 `expects_reply`, and `expires_at`, and `publish` additionally `dedupe_key`; empty optional
 fields are omitted. `urgency` is `low`, `med`, `high`, or `blocking`; `expects_reply` is
 `none`, `optional`, or `required`. Every `/v1` 4xx/5xx response, including the startup
-readiness gate, is JSON: `{"error":"<message>","expected":["field"]}`. `expected` appears
+gate's 503, is JSON: `{"error":"<message>","expected":["field"]}`. `expected` appears
 when the caller must provide a field.
 
 ## Targeted Dispatch messages

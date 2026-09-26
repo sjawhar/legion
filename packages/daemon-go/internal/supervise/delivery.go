@@ -52,6 +52,19 @@ type Delivery struct {
 	QueuedAt    time.Time
 	DeliveredAt time.Time
 	ConfirmedAt time.Time
+	// Interrupted says a turn of the task was running when its process died (interrupted), so the
+	// task is sent behind interruptedTask from then on (message). The task text stays as the
+	// workflow wrote it.
+	Interrupted bool
+}
+
+// message is the prompt a delivery is sent as: its task, behind interruptedTask once a process
+// died in a turn of it.
+func (d Delivery) message() string {
+	if d.Interrupted {
+		return interruptedTask + d.Task
+	}
+	return d.Task
 }
 
 // HashBootToken is the one hash a boot token is stored and looked up by. A launch mints the token
@@ -189,6 +202,8 @@ func (m *Machine) retirePending(ctx context.Context) error {
 	if !p.ConfirmedAt.IsZero() && p.Generation != 0 {
 		retired.ServingGeneration = p.Generation
 	}
+	// The deaths were charged against this task, so they end with it, in the same write.
+	retired.Budgets.Deaths = 0
 	if err := m.deps.Store.RetireDelivery(ctx, retired, p.ID); err != nil {
 		return err
 	}
@@ -219,7 +234,7 @@ func (m *Machine) startSend(conn runtime.Conn, d Delivery) {
 		err := m.adopt(role, loc)
 		if err == nil {
 			sending, cancel := context.WithTimeout(m.ctx, m.deps.Timeouts.RPC)
-			err = conn.Prompt(sending, d.ID, d.Task)
+			err = conn.Prompt(sending, d.ID, d.message())
 			cancel()
 		}
 		var ev Event = PromptAcked{Claim: token, Generation: generation, DeliveryID: d.ID}
@@ -268,9 +283,11 @@ func (m *Machine) confirm(ctx context.Context) error {
 }
 
 // settle retires a delivery whose life is over, and runs around every decision, so that two things
-// hold however the claim got where it is — the turn ending, a suspension, a death — and hold again
-// at once for a claim restored from a store a crash left in between: a confirmed delivery lives
-// exactly as long as its turn, and a suspended claim holds no task the suspension finished.
+// hold however the claim got where it is — the turn ending, a suspension — and hold again at once
+// for a claim restored from a store a crash left in between: a confirmed delivery lives exactly as
+// long as its turn, and a suspended claim holds no task the suspension finished. A death is not
+// one of them: it takes the task whose turn it ended back first (interrupted), so settle finds
+// nothing of it to retire.
 //
 // A suspension ends the claim's phase, so a task queued for a phase is the finished phase's and
 // goes with it; the next resume is handed its new phase's task, never that one. A task of no
@@ -300,6 +317,40 @@ func (m *Machine) promptFailed(ctx context.Context, why string, read bool) error
 		return err
 	}
 	return m.chargePrompt(ctx, why)
+}
+
+// interruptedTask begins a task re-sent because the process running its turn died. Oh My Pi does
+// not continue an interrupted turn when its session is resumed, and the resumed session already
+// holds the task, so the agent is told to carry on from where the turn stopped, not start over.
+const interruptedTask = "Your previous turn on this task was interrupted when your process died. " +
+	"Before repeating anything, check what that turn already did in your workspace and on the " +
+	"issue's branch, then continue the task.\n\n"
+
+// interrupted takes back the pending task whose turn the claim's dead process was running, so the
+// relaunched agent's ready sends it again: Oh My Pi does not resume the turn itself. The turn ran,
+// so the agent read the task and it keeps its read mark; it goes back unconfirmed under a new id
+// the new process's shim has no record of, marked Interrupted, so it is sent behind
+// interruptedTask. It is neither retired nor its run marked served, since the turn never
+// finished. A task with no turn running is left as it is: the relaunch sends it as it was.
+//
+// The taken-back task becomes the claim's only once its write has landed. A write that fails
+// leaves the task confirmed in memory as in the store, and the process is still recorded, so the
+// sweep finds it gone again and this takes the task back then — where a task taken back in memory
+// alone would be skipped by that death, relaunched from a store still holding it confirmed, and
+// retired as served by a restart.
+func (m *Machine) interrupted(ctx context.Context) error {
+	p := m.claim.Pending
+	if p == nil || p.ConfirmedAt.IsZero() {
+		return nil
+	}
+	m.log.Warn("supervise: the process died in the task's turn; the task waits for the relaunch", "delivery", p.ID)
+	next := *p
+	next.ID, next.ConfirmedAt, next.Interrupted = rand.Text(), time.Time{}, true
+	if err := m.deps.Store.PutDelivery(ctx, m.claim.Token, next); err != nil {
+		return err
+	}
+	*p = next
+	return nil
 }
 
 // taskRead and taskUnread say whether the agent may have read a task being taken back: the task
@@ -335,17 +386,28 @@ func (m *Machine) markUnread(ctx context.Context) error {
 	return m.deps.Store.PutDelivery(ctx, m.claim.Token, *p)
 }
 
-// takeBackPending returns the pending delivery to waiting: unconfirmed if a turn had confirmed
-// it, under a new id so the retry is a new prompt rather than an echo the shim answers from its
-// record, and with the wait for its turn disarmed. A task taken back unread loses the mark, so
-// nothing the worker reports from whatever turn follows belongs to it.
+// takeBackPending returns the pending delivery to waiting after a prompt came to nothing:
+// unconfirmed if a turn had confirmed it, under a new id so the retry is a new prompt rather than
+// an echo the shim answers from its record, and with the wait for its turn disarmed. A task taken
+// back unread loses the mark, so nothing the worker reports from whatever turn follows belongs to
+// it.
+//
+// The refusal or timeout behind it arrives once, and settle and ServingRun read the claim as memory
+// holds it, so what it established — not confirmed, and not read when taken back unread — holds at
+// once, whether or not the write recording it lands. Only the new id waits for the write, so the
+// claim's id is always one the store holds.
 func (m *Machine) takeBackPending(ctx context.Context, read bool) error {
 	m.disarm(TimerTurn)
 	p := m.claim.Pending
-	p.ID = rand.Text()
 	p.ConfirmedAt = time.Time{}
 	if !read {
 		m.clearReadMark(p)
 	}
-	return m.deps.Store.PutDelivery(ctx, m.claim.Token, *p)
+	next := *p
+	next.ID = rand.Text()
+	if err := m.deps.Store.PutDelivery(ctx, m.claim.Token, next); err != nil {
+		return err
+	}
+	p.ID = next.ID
+	return nil
 }

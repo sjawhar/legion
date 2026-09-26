@@ -369,8 +369,18 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		case supervise.StateFailed:
 			// Only the workflow starts a role whose claim failed: the architect retrying the
 			// held phase, or a later transition that needs the role again.
+			kept := machine.Claim().Pending
 			if err := machine.Handle(ctx, supervise.RequestRetry{Claim: token}); err != nil {
 				return fmt.Errorf("retry claim %s: %w", token, err)
+			}
+			// A failed claim keeps the task it held, and its relaunch sends it: held after its agent
+			// kept dying in a turn of it, that task goes behind the sentence saying so. When it is
+			// this row's phase and run, the row's own task would follow it as a second prompt for
+			// work already under way, so the row is done once the claim is relaunched.
+			if kept != nil && payload.Phase != "" && kept.Phase == payload.Phase && kept.Generation == payload.Generation {
+				r.log.Info("outbox retry of a claim that kept its phase's task; relaunched without a second delivery", "row", row.ID,
+					"issue", issue.Key, "role", payload.Role, "phase", payload.Phase, "delivery", kept.ID)
+				return nil
 			}
 		case supervise.StateRetired:
 			// A retired claim's tree closed, and its linger removed the workspace; the tree was
