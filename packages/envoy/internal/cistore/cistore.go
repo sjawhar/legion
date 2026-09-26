@@ -33,11 +33,16 @@ import (
 // Bucket is the JetStream KV bucket name for per-commit CI state.
 const Bucket = "envoy_ci_state"
 
-// recordBudget bounds how long one write of a commit's record retries its compare-and-swap loop.
-// Concurrent observations of one commit within this process are combined into one write (update),
-// so the writers that conflict on the KV revision are the few that remain: the summary loop's
-// settlement transitions and another listener task during a deploy. Each backs off with jitter
-// before retrying, so a bounded time budget lets them serialize rather than a fixed attempt count.
+// recordBudget bounds how long one write of a commit's record retries. It retries a lost
+// compare-and-swap, and a transient KV error (kvErrorLasts), from a fresh read. Concurrent
+// observations of one commit within this process are combined into one write (update), so the
+// writers that conflict on the KV revision are the few that remain: the summary loop's settlement
+// transitions and another listener task during a deploy. Each backs off with jitter before
+// retrying, so a bounded time budget lets them serialize rather than a fixed attempt count. The
+// transient errors it outlasts are a NATS reconnect (a request refused while the connection
+// reconnects, since the reconnect buffer is off) and a JetStream 503 while a server restarts; it
+// cannot outlast a timeout, because every KV call waits up to the JetStream MaxWait (10 s, Open)
+// first, five times this budget, so a call that times out returns after the budget has run out.
 // A caller that queues behind a write in progress waits for that write and then its own, so a
 // Record returns within two budgets. The webhook handler records a check_run once for each PR it
 // lists, one after another, so a delivery listing k PRs can take up to 2k budgets, past the
@@ -473,31 +478,37 @@ func (s *Store) RecordSuite(observation contracts.CIObservation) error {
 
 // write applies mutate to the current state of identity's record, a new one carrying only the
 // identity when there is none, and writes it with a compare-and-swap. A lost compare-and-swap or a
-// transient KV error is retried from a fresh read until recordBudget runs out: the write carries
-// every observation of a batch, so one transient error must not fail them all, and GitHub does not
-// redeliver a delivery the listener refused. A lasting error (kvErrorLasts) fails it at once.
+// transient KV error (kvErrorLasts) is retried from a fresh read until recordBudget runs out: the
+// write carries every observation of a batch, so a NATS reconnect or a JetStream 503 during a
+// server restart must not fail them all, and GitHub does not redeliver a delivery the listener
+// refused. A lasting error fails it at once.
 func (s *Store) write(identity State, mutate func(*State) bool) error {
 	kv := s.watcher.KV()
 	key := Key(identity.Owner, identity.Repo, identity.Number, identity.SHA)
 	deadline := time.Now().Add(recordBudget)
+	var retryErr error
 	for attempt := 0; ; attempt++ {
-		if attempt > 0 {
+		if retryErr != nil {
+			if time.Now().After(deadline) {
+				return retryErr
+			}
 			time.Sleep(casBackoff(attempt - 1))
 		}
-		entry, getErr := kv.Get(key)
+		entry, err := kv.Get(key)
 		var st State
 		var rev uint64
 		switch {
-		case getErr == nil:
+		case err == nil:
 			if err := json.Unmarshal(entry.Value(), &st); err != nil {
 				return err
 			}
 			rev = entry.Revision()
-		case errors.Is(getErr, nats.ErrKeyNotFound):
+		case errors.Is(err, nats.ErrKeyNotFound):
 			st = identity
-		case kvErrorLasts(getErr) || time.Now().After(deadline):
-			return getErr
+		case kvErrorLasts(err):
+			return err
 		default:
+			retryErr = err
 			continue
 		}
 		beforeHash := st.Hash()
@@ -512,43 +523,22 @@ func (s *Store) write(identity State, mutate func(*State) bool) error {
 		if err != nil {
 			return err
 		}
-		var writeErr error
 		if rev == 0 {
-			_, writeErr = kv.Create(key, buf)
+			_, err = kv.Create(key, buf)
 		} else {
-			_, writeErr = kv.Update(key, buf, rev)
+			_, err = kv.Update(key, buf, rev)
 		}
 		switch {
-		case writeErr == nil:
+		case err == nil:
 			return nil
-		case isCASConflict(writeErr):
-			if time.Now().After(deadline) {
-				return errors.New("cistore: record exceeded CAS budget")
-			}
-		case kvErrorLasts(writeErr) || time.Now().After(deadline):
-			return writeErr
+		case kvErrorLasts(err):
+			return err
+		case isCASConflict(err):
+			retryErr = errors.New("cistore: record exceeded CAS budget")
+		default:
+			retryErr = err
 		}
 	}
-}
-
-// kvErrorLasts reports whether a KV error will outlast a retry within a write's budget: the
-// connection is closed or draining, no stream answers for the record (a deleted bucket, like a key
-// no stream serves, answers no responders), or JetStream refuses the request itself (a 4xx, an
-// invalid key, a record over the payload limit). Anything else, a timeout or a server it could not
-// reach, is transient.
-func kvErrorLasts(err error) bool {
-	if errors.Is(err, nats.ErrConnectionClosed) || errors.Is(err, nats.ErrConnectionDraining) ||
-		errors.Is(err, nats.ErrBucketNotFound) || errors.Is(err, nats.ErrNoResponders) ||
-		errors.Is(err, nats.ErrInvalidKey) || errors.Is(err, nats.ErrMaxPayload) {
-		return true
-	}
-	var jsErr nats.JetStreamError
-	if errors.As(err, &jsErr) {
-		if api := jsErr.APIError(); api != nil && api.Code >= 400 && api.Code < 500 {
-			return true
-		}
-	}
-	return false
 }
 
 func rearm(st *State) {
@@ -694,6 +684,33 @@ func casBackoff(attempt int) time.Duration {
 // when the revision moved.
 func isCASConflict(err error) bool {
 	return errors.Is(err, nats.ErrKeyExists) || strings.Contains(err.Error(), "wrong last sequence")
+}
+
+// kvErrorLasts reports whether a KV error will outlast a retry within a write's budget. A
+// compare-and-swap conflict never does: both kinds are JetStream 400s (ErrKeyExists, wrong last
+// sequence), so it is answered first, and a caller need not ask isCASConflict before it. Lasting:
+// the connection is closed or draining, no stream answers for the record (a deleted bucket, like a
+// key no stream serves, answers no responders), or JetStream refuses the request itself (any other
+// 4xx, an invalid key, a record over the payload limit). Anything else is transient, and what the
+// retry actually rescues is a NATS reconnect (ErrReconnectBufExceeded, a request refused while the
+// connection reconnects) and a JetStream 503 while a server restarts; a timeout is transient too,
+// but it arrives only after the JetStream MaxWait, past the whole budget (recordBudget).
+func kvErrorLasts(err error) bool {
+	if isCASConflict(err) {
+		return false
+	}
+	if errors.Is(err, nats.ErrConnectionClosed) || errors.Is(err, nats.ErrConnectionDraining) ||
+		errors.Is(err, nats.ErrBucketNotFound) || errors.Is(err, nats.ErrNoResponders) ||
+		errors.Is(err, nats.ErrInvalidKey) || errors.Is(err, nats.ErrMaxPayload) {
+		return true
+	}
+	var jsErr nats.JetStreamError
+	if errors.As(err, &jsErr) {
+		if api := jsErr.APIError(); api != nil && api.Code >= 400 && api.Code < 500 {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Store) casState(key string, apply func(st *State) (ok bool, err error)) (State, bool, error) {

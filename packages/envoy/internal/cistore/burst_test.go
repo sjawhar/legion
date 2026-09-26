@@ -215,6 +215,62 @@ func waitAll(t testing.TB, wg *sync.WaitGroup, what string) {
 	}
 }
 
+// calls runs numbered calls against one record, each in its own goroutine, and keeps each one's
+// error.
+type calls struct {
+	t    *testing.T
+	s    *Store
+	key  string
+	call func(i int) error
+	wg   sync.WaitGroup
+	errs []error
+}
+
+func newCalls(t *testing.T, s *Store, key string, n int, call func(i int) error) *calls {
+	return &calls{t: t, s: s, key: key, call: call, errs: make([]error, n)}
+}
+
+func (c *calls) start(i int) {
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		c.errs[i] = c.call(i)
+	}()
+}
+
+// queue starts calls from..to-1 in order, each once the one before it has queued behind the write
+// in progress on the record, so they form the next batch in arrival order.
+func (c *calls) queue(from, to int) {
+	c.t.Helper()
+	for i := from; i < to; i++ {
+		c.start(i)
+		waitQueued(c.t, c.s, c.key, i-from+1)
+	}
+}
+
+// behind starts call 0, waits for its write to report on entered, and queues calls 1..to-1 behind
+// that write, so they form the next batch in arrival order.
+func (c *calls) behind(entered <-chan struct{}, to int) {
+	c.t.Helper()
+	c.start(0)
+	recv(c.t, entered, "call 0's write")
+	c.queue(1, to)
+}
+
+// wait waits up to 10 s for every call started and returns their errors.
+func (c *calls) wait(what string) []error {
+	c.t.Helper()
+	waitAll(c.t, &c.wg, what)
+	return c.errs
+}
+
+// checkCall is a call that records the completed check check-i of h with run id base+i.
+func checkCall(s *Store, h head, base uint64) func(i int) error {
+	return func(i int) error {
+		return s.Record(h.check(fmt.Sprintf("check-%d", i), base+uint64(i), "completed", "success", "2026-09-24T01:00:00Z"))
+	}
+}
+
 // recordAsOneBatch records observations[0] while its write is held, queues observations[1:] behind
 // it in that order, and then lets the write through, so observations[1:] are written as one batch
 // in arrival order. observations[0] must change the record, or there is no write to hold.
@@ -222,34 +278,28 @@ func recordAsOneBatch(t *testing.T, s *Store, kv *writeKV, observations []contra
 	t.Helper()
 	key := Key(observations[0].Owner, observations[0].Repo, observations[0].Number, observations[0].SHA)
 	entered, release := kv.holdNextWrite()
-	errs := make([]error, len(observations))
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		errs[0] = record(s, observations[0])
-	}()
-	recv(t, entered, "the held write of the first observation")
-	for i := 1; i < len(observations); i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			errs[i] = record(s, observations[i])
-		}()
-		waitQueued(t, s, key, i)
-	}
+	batch := newCalls(t, s, key, len(observations), func(i int) error { return record(s, observations[i]) })
+	batch.behind(entered, len(observations))
 	release()
-	waitAll(t, &wg, "recordAsOneBatch")
+	errs := batch.wait("recordAsOneBatch")
 	kv.onWrite(nil)
 	return errs
 }
 
+// requireNoErrors fails the test when any call failed, naming how many did and the first.
 func requireNoErrors(t *testing.T, what string, errs []error) {
 	t.Helper()
+	failed, first := 0, -1
 	for i, err := range errs {
 		if err != nil {
-			t.Fatalf("%s: observation %d: %v", what, i, err)
+			failed++
+			if first < 0 {
+				first = i
+			}
 		}
+	}
+	if failed > 0 {
+		t.Fatalf("%s: %d of %d calls failed (first, call %d: %v)", what, failed, len(errs), first, errs[first])
 	}
 }
 
@@ -448,19 +498,7 @@ func TestABurstOfObservationsOnOneHeadIsRecordedUnderSlowWrites(t *testing.T) {
 	errs := recordBurst(t, s, h, n)
 
 	writes := len(kv.states(h.key()))
-	failed := 0
-	var first error
-	for _, err := range errs {
-		if err != nil {
-			failed++
-			if first == nil {
-				first = err
-			}
-		}
-	}
-	if failed > 0 {
-		t.Fatalf("%d of %d observations refused (first: %v) after %d writes", failed, n, first, writes)
-	}
+	requireNoErrors(t, fmt.Sprintf("a burst of %d observations in %d writes", n, writes), errs)
 	if checks := len(getState(t, s, h.owner, h.repo, h.number, h.sha).Checks); checks != n {
 		t.Fatalf("record holds %d checks after %d writes, want all %d", checks, writes, n)
 	}
@@ -469,15 +507,6 @@ func TestABurstOfObservationsOnOneHeadIsRecordedUnderSlowWrites(t *testing.T) {
 
 // failureHead is the head the failure-path tests write.
 var failureHead = head{"example-org", "example-repo", "42", "3333333333333333333333333333333333333333"}
-
-// startCheck records check-i of failureHead in its own goroutine, storing its error in errs[i].
-func startCheck(s *Store, errs []error, wg *sync.WaitGroup, i int) {
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		errs[i] = s.Record(failureHead.check(fmt.Sprintf("check-%d", i), uint64(500+i), "completed", "success", "2026-09-24T01:00:00Z"))
-	}()
-}
 
 // A batch's write that fails for good reaches every caller in the batch as that failure, the
 // writer's role passes to the callers that queued meanwhile, and their write goes through: a failed
@@ -505,22 +534,13 @@ func TestAFailedBatchWriteReachesEveryCallerAndTheNextBatchIsWritten(t *testing.
 			}
 			return nil
 		})
-		errs := make([]error, 7)
-		var wg sync.WaitGroup
-		startCheck(s, errs, &wg, 0)
-		recv(t, enteredFirst, "check-0's write")
-		for i := 1; i <= 4; i++ {
-			startCheck(s, errs, &wg, i)
-			waitQueued(t, s, h.key(), i)
-		}
+		batch := newCalls(t, s, h.key(), 7, checkCall(s, h, 500))
+		batch.behind(enteredFirst, 5)
 		close(releaseFirst)
 		recv(t, enteredSecond, "the write of check-1..4's batch")
-		for i := 5; i <= 6; i++ {
-			startCheck(s, errs, &wg, i)
-			waitQueued(t, s, h.key(), i-4)
-		}
+		batch.queue(5, 7)
 		close(releaseSecond)
-		waitAll(t, &wg, "a KV failure")
+		errs := batch.wait("a KV failure")
 
 		for i, err := range errs {
 			want := error(nil)
@@ -558,22 +578,16 @@ func TestAFailedBatchWriteReachesEveryCallerAndTheNextBatchIsWritten(t *testing.
 			}
 			return nil
 		})
-		errs := make([]error, 4)
 		var recovered any
-		var wg sync.WaitGroup
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			defer func() { recovered = recover() }()
-			errs[0] = s.Record(h.check("check-0", 500, "completed", "success", "2026-09-24T01:00:00Z"))
-		}()
-		recv(t, entered, "check-0's write")
-		for i := 1; i <= 3; i++ {
-			startCheck(s, errs, &wg, i)
-			waitQueued(t, s, h.key(), i)
-		}
+		batch := newCalls(t, s, h.key(), 4, func(i int) error {
+			if i == 0 {
+				defer func() { recovered = recover() }()
+			}
+			return checkCall(s, h, 500)(i)
+		})
+		batch.behind(entered, 4)
 		close(release)
-		waitAll(t, &wg, "a write that panics")
+		errs := batch.wait("a write that panics")
 		if recovered != "injected panic" {
 			t.Fatalf("the writer's panic = %v, want it re-raised to the writer", recovered)
 		}
@@ -625,17 +639,10 @@ func TestALostCompareAndSwapRetriesTheWholeBatch(t *testing.T) {
 		}
 		return nil
 	})
-	errs := make([]error, 4)
-	var wg sync.WaitGroup
-	startCheck(s, errs, &wg, 0)
-	recv(t, entered, "check-0's write")
-	for i := 1; i <= 3; i++ {
-		startCheck(s, errs, &wg, i)
-		waitQueued(t, s, h.key(), i)
-	}
+	batch := newCalls(t, s, h.key(), 4, checkCall(s, h, 500))
+	batch.behind(entered, 4)
 	close(release)
-	waitAll(t, &wg, "a lost compare-and-swap")
-	requireNoErrors(t, "a lost compare-and-swap", errs)
+	requireNoErrors(t, "a lost compare-and-swap", batch.wait("a lost compare-and-swap"))
 	if attempts := kv.writeCalls(); attempts < 3 {
 		t.Fatalf("%d write attempts, want the batch's lost one and its retry after check-0's", attempts)
 	}
@@ -656,24 +663,12 @@ func TestQueuedCallersReturnPromptlyWhenTheConnectionCloses(t *testing.T) {
 	s, kv := wrapStore(t, conn, 0)
 	h := head{"example-org", "example-repo", "42", "4444444444444444444444444444444444444444"}
 	entered, release := kv.holdNextWrite()
-	errs := make([]error, 10)
-	var wg sync.WaitGroup
-	for i := range errs {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			errs[i] = s.Record(h.check(fmt.Sprintf("check-%d", i), uint64(600+i), "completed", "success", "2026-09-24T01:00:00Z"))
-		}()
-		if i == 0 {
-			recv(t, entered, "check-0's write")
-		} else {
-			waitQueued(t, s, h.key(), i)
-		}
-	}
+	batch := newCalls(t, s, h.key(), 10, checkCall(s, h, 600))
+	batch.behind(entered, 10)
 	conn.Close()
 	began := time.Now()
 	release()
-	waitAll(t, &wg, "closed connection")
+	errs := batch.wait("closed connection")
 	if elapsed := time.Since(began); elapsed > 3*time.Second {
 		t.Fatalf("callers took %s to return after the connection closed", elapsed)
 	}
@@ -684,49 +679,36 @@ func TestQueuedCallersReturnPromptlyWhenTheConnectionCloses(t *testing.T) {
 	}
 }
 
-// A transient KV error during a burst, here the batch's read timing out once, is retried within
-// the write's budget as a lost compare-and-swap is, so it fails none of the batch's callers:
-// GitHub does not redeliver a delivery the listener refused, and one error must not lose a batch.
+// A transient KV error during a burst is retried within the write's budget as a lost
+// compare-and-swap is, so it fails none of the batch's callers: GitHub does not redeliver a
+// delivery the listener refused, and one error must not lose a batch. The errors the retry can
+// outlast are the ones a server restart produces, each injected here into the batch's read: a
+// request refused while NATS reconnects, and a JetStream 503. (A timeout arrives only after the
+// JetStream MaxWait, past the whole budget, so no retry within it can rescue one.)
 func TestATransientKVErrorFailsNoCallerInABurst(t *testing.T) {
-	conn, cleanup := connectNATS(t)
-	defer cleanup()
-	s, kv := wrapStore(t, conn, 0)
-	h := head{"example-org", "example-repo", "42", "5555555555555555555555555555555555555555"}
-	const n = 80
-	entered, release := kv.holdNextWrite()
-	errs := make([]error, n)
-	var wg sync.WaitGroup
-	for i := range n {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			errs[i] = s.Record(h.check(fmt.Sprintf("check-%d", i), uint64(700+i), "completed", "success", "2026-09-24T01:00:00Z"))
-		}()
-		if i == 0 {
-			recv(t, entered, "check-0's write")
-		} else {
-			waitQueued(t, s, h.key(), i)
-		}
-	}
-	kv.failNextGet(natsgo.ErrTimeout)
-	release()
-	waitAll(t, &wg, "a burst with one transient KV error")
-
-	failed := 0
-	var first error
-	for _, err := range errs {
-		if err != nil {
-			failed++
-			if first == nil {
-				first = err
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"a request refused while NATS reconnects", natsgo.ErrReconnectBufExceeded},
+		{"a JetStream 503", &natsgo.APIError{Code: 503, ErrorCode: 10008, Description: "JetStream system temporarily unavailable"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, cleanup := connectNATS(t)
+			defer cleanup()
+			s, kv := wrapStore(t, conn, 0)
+			h := head{"example-org", "example-repo", "42", "5555555555555555555555555555555555555555"}
+			const n = 80
+			entered, release := kv.holdNextWrite()
+			batch := newCalls(t, s, h.key(), n, checkCall(s, h, 700))
+			batch.behind(entered, n)
+			kv.failNextGet(tc.err)
+			release()
+			requireNoErrors(t, "a burst with one transient KV error", batch.wait("a burst with one transient KV error"))
+			if checks := len(getState(t, s, h.owner, h.repo, h.number, h.sha).Checks); checks != n {
+				t.Fatalf("record holds %d checks, want all %d", checks, n)
 			}
-		}
-	}
-	if failed > 0 {
-		t.Fatalf("one transient KV error failed %d of %d callers (first: %v), want none", failed, n, first)
-	}
-	if checks := len(getState(t, s, h.owner, h.repo, h.number, h.sha).Checks); checks != n {
-		t.Fatalf("record holds %d checks, want all %d", checks, n)
+		})
 	}
 }
 
