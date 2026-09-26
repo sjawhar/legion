@@ -748,6 +748,10 @@ export type DeliveryCapability = (typeof DELIVERY_CAPABILITIES)[number];
  * It equals the stream's retention: past it the stream holds neither the message nor its
  * MsgId, so a same-mode retry publishes a second frame and the agent is handed the same
  * instruction again.
+ *
+ * It also bounds webhook redelivery dedupe: a GitHub, Slack or Ghost Wispr envelope publishes
+ * under a MsgId of its delivery id, and GitHub redelivers deliveries up to three days old, so a
+ * window shorter than that lets a GitHub redelivery publish a second copy.
  */
 export const DELIVERY_DUPLICATE_WINDOW_MS = 72 * 60 * 60 * 1000;
 
