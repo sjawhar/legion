@@ -718,3 +718,34 @@ test("a paste from Google Docs keeps the editor's own cleanup of its wrapper", a
     await alice.close();
   }
 });
+
+// Typed blocks pasted as plain text are read as markdown, and the editor renders what it parsed
+// to HTML before parsing that back: the rendering carries a typed block's section and content
+// only, so a pasted decision's question and a callout's text arrive as written, never with the
+// block's attribute list in front of them.
+test("typed blocks pasted as plain text arrive as written", async ({ browser }) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", spec: "End.\n", title: "Plain text paste" });
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}`);
+    await selectEditorText(page, "End.");
+    await page.keyboard.press("ArrowRight");
+    await expect(actionBar(page)).toBeHidden();
+    await paste(page, {
+      html: "",
+      text:
+        ':::ask{#d2 urgency="med" multiple="false"}\nWhich one?\n\n- A\n- B\n:::\n\n' +
+        ':::callout{#c2 kind="warning" title="Risk"}\nCareful.\n:::\n',
+    });
+
+    await expect
+      .poll(async () => (await getIssue(issue.key)).open_asks.map((ask) => ask.question))
+      .toEqual(["Which one?"]);
+    const stored = (await getArtifactText(issue.primary_artifact_id)).markdown;
+    expect(stored).toMatch(/:::callout\{#c2[^}]*\}\nCareful\.\n:::/);
+  } finally {
+    await alice.close();
+  }
+});

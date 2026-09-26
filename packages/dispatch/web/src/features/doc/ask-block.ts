@@ -5,9 +5,8 @@ import {
 } from "@milkdown/kit/prose/model";
 import { type EditorState, Plugin, PluginKey } from "@milkdown/kit/prose/state";
 import type { EditorView, NodeView, ViewMutationRecord } from "@milkdown/kit/prose/view";
-import type { HostBlockRenderer } from "@sjawhar/proof-editor";
 
-import type { AskOption, AskUrgency } from "../../api/types";
+import type { AskOption, AskUrgency, BlockSchema } from "../../api/types";
 import {
   askBlockTint,
   askUrgencyAccent,
@@ -17,55 +16,78 @@ import {
 } from "../../theme/classes";
 import { URGENCY_LABELS } from "../inbox/ask-urgency";
 
-/** Renders a document's host-owned typed blocks other than `ask`, which `AskBlockView` owns. */
-export const renderTypedBlock: HostBlockRenderer = (node) => [
-  "section",
-  {
-    class: `proof-typed-block proof-typed-block-${node.type.name}`,
-    "data-proof-block-type": node.type.name,
-  },
-  [
-    "header",
-    { "data-proof-block-summary": "" },
-    ["span", { "data-proof-block-name": "" }, node.type.name],
+/**
+ * Draws a document's host-owned typed blocks other than `ask`, which `AskBlockView` owns: the
+ * block's name and attributes as a header the reader sees, above its content. It is the node
+ * view's drawing (`TypedBlockView`), never the node's `toDOM`: HTML of the document - a copy, a
+ * drag, or the editor's plain-text paste, which renders the markdown it parsed through `toDOM` -
+ * carries only the block's section and content, which is all its parse rule reads.
+ */
+export function renderTypedBlock(node: ProseMirrorNode): DOMOutputSpec {
+  return [
+    "section",
+    {
+      class: `proof-typed-block proof-typed-block-${node.type.name}`,
+      "data-proof-block-type": node.type.name,
+    },
     [
-      "dl",
-      { "data-proof-block-attributes": "" },
-      ...Object.entries(node.attrs).flatMap(([name, value]) => [
-        ["dt", {}, name],
-        [
-          "dd",
-          { "data-proof-block-attribute": name },
-          Array.isArray(value) ? JSON.stringify(value) : String(value),
-        ],
-      ]),
+      "header",
+      { contenteditable: "false", "data-proof-block-summary": "" },
+      ["span", { "data-proof-block-name": "" }, node.type.name],
+      [
+        "dl",
+        { "data-proof-block-attributes": "" },
+        ...Object.entries(node.attrs).flatMap(([name, value]) => [
+          ["dt", {}, name],
+          [
+            "dd",
+            { "data-proof-block-attribute": name },
+            Array.isArray(value) ? JSON.stringify(value) : String(value),
+          ],
+        ]),
+      ],
     ],
-  ],
-  ["div", { "data-proof-block-content": "" }, 0],
-];
+    ["div", { "data-proof-block-content": "" }, 0],
+  ];
+}
+
+/** A host-owned typed block other than `ask`, drawn by `renderTypedBlock`. */
+class TypedBlockView implements NodeView {
+  readonly dom: HTMLElement;
+  readonly contentDOM: HTMLElement;
+
+  constructor(
+    private node: ProseMirrorNode,
+    document: Document
+  ) {
+    const { dom, contentDOM } = DOMSerializer.renderSpec(document, renderTypedBlock(node));
+    this.dom = dom as HTMLElement;
+    this.contentDOM = contentDOM as HTMLElement;
+    this.dom.dataset.blockId = String(node.attrs.blockId ?? "");
+  }
+
+  /** Content changes stay in place; a change to the block's attributes redraws its header. */
+  update(node: ProseMirrorNode): boolean {
+    if (node.type !== this.node.type || !node.sameMarkup(this.node)) {
+      return false;
+    }
+    this.node = node;
+    return true;
+  }
+}
 
 /** The header `renderTypedBlock` draws inside a typed block's section. */
 const typedBlockHeader = "section[data-proof-block-type] > header[data-proof-block-summary]";
 
 /**
- * Puts a typed block on the clipboard as its section and its content, without the attribute
- * header `renderTypedBlock` draws: a typed block's parse rule reads every child of its section as
- * content, so a copied header came back as the block's first paragraphs (a pasted decision's
- * question read as its attribute list). Pasted HTML that still carries the header, as a tab on an
- * older build copies it, has the header removed first, after the editor's own cleanup of pasted
- * HTML (a Google Docs wrapper, for one) has run.
+ * Removes the attribute header `renderTypedBlock` draws from pasted HTML that still carries it, as
+ * a tab on an older build copies it: a typed block's parse rule reads every child of its section
+ * as content, so a pasted header would come back as the block's first paragraphs. It runs after
+ * the editor's own cleanup of pasted HTML (a Google Docs wrapper, for one).
  */
-export function installTypedBlockClipboard(view: EditorView): void {
-  const rendered = DOMSerializer.fromSchema(view.state.schema);
-  const nodes = Object.fromEntries(
-    Object.entries(rendered.nodes).map(([name, render]) => [
-      name,
-      (node: ProseMirrorNode) => withoutTypedBlockHeader(render(node)),
-    ])
-  );
+export function installTypedBlockPaste(view: EditorView): void {
   const previous = view.props.transformPastedHTML;
   view.setProps({
-    clipboardSerializer: new DOMSerializer(nodes, rendered.marks),
     transformPastedHTML: (pasted, pastedView) => {
       const html = previous ? previous(pasted, pastedView) : pasted;
       const template = view.dom.ownerDocument.createElement("template");
@@ -80,20 +102,6 @@ export function installTypedBlockClipboard(view: EditorView): void {
       return template.innerHTML;
     },
   });
-}
-
-/** A typed block's rendered section with its content directly inside it. */
-function withoutTypedBlockHeader(spec: DOMOutputSpec): DOMOutputSpec {
-  if (!Array.isArray(spec)) {
-    return spec;
-  }
-  const [tag, attrs] = spec;
-  const typedBlock =
-    typeof attrs === "object" &&
-    attrs !== null &&
-    !Array.isArray(attrs) &&
-    "data-proof-block-type" in attrs;
-  return typedBlock ? [tag, attrs, 0] : spec;
 }
 
 /** What an `ask` node says about itself, read once per render from its attributes and content. */
@@ -319,6 +327,7 @@ export const askBlockEditingPlugin = new Plugin({
  * whenever it changes. Call once per editor, right after it is created. */
 export function installAskBlockView(
   view: EditorView,
+  blockSchema: BlockSchema,
   onHostsChange: (hosts: readonly AskBlockHost[]) => void
 ): void {
   const registry = new Map<number, AskBlockHost>();
@@ -334,6 +343,14 @@ export function installAskBlockView(
   view.setProps({
     nodeViews: {
       ...view.props.nodeViews,
+      ...Object.fromEntries(
+        blockSchema.types
+          .filter((type) => type.name !== "ask")
+          .map((type) => [
+            type.name,
+            (node: ProseMirrorNode) => new TypedBlockView(node, view.dom.ownerDocument),
+          ])
+      ),
       ask: (node) => new AskBlockView(node, view.dom.ownerDocument, registry, publish),
     },
     plugins: [...(view.props.plugins ?? []), askBlockEditingPlugin],
