@@ -347,25 +347,30 @@ type lineCandidate struct {
 	prefix string
 }
 
-// inlineWithEscapes writes one textblock's inline nodes. GFM reads a single tilde as a
-// strikethrough delimiter and refuses a run of three, so tildes in text can pair into a strike the
-// text never had, or break one it has. A run whose text holds a tilde is read back after it is
-// written, and when it does not come back as written it is written again with its text's tildes
-// as references - kept only if that reads back, so a run that fails for another reason keeps the
-// bytes it had.
+// inlineWithEscapes writes one textblock's inline nodes. Delimiters in text the escape rules leave
+// alone can still pair into a mark the text never had, or break one it has: GFM reads a single
+// tilde as a strikethrough delimiter and refuses a run of three, and asterisks and underscores pair
+// across a hard break, around a reference or inside a link label. A run whose text holds one is
+// read back after it is written, and when it does not come back as written it is written again
+// with its text's tildes escaped, then with its asterisks and underscores escaped as well - each
+// kept only if it reads back, so a run that fails for another reason keeps the bytes it had.
 func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlineContext) {
 	from := r.b.Len()
-	r.writeInlineRun(nodes, prefix, context, false)
-	if r.err != nil || !tildeInText(nodes) || r.runReadsBack(from, prefix, nodes) {
+	r.writeInlineRun(nodes, prefix, context, delimitersAsRuled)
+	held := delimitersInText(nodes)
+	if r.err != nil || held == delimitersAsRuled || r.runReadsBack(from, prefix, nodes) {
 		return
 	}
 	written := string(r.b.Bytes()[from:])
-	r.b.Truncate(from)
-	r.writeInlineRun(nodes, prefix, context, true)
-	if r.err == nil && !r.runReadsBack(from, prefix, nodes) {
+	for escapes := held; escapes <= delimitersAll; escapes++ {
 		r.b.Truncate(from)
-		r.b.WriteString(written)
+		r.writeInlineRun(nodes, prefix, context, escapes)
+		if r.err == nil && r.runReadsBack(from, prefix, nodes) {
+			return
+		}
 	}
+	r.b.Truncate(from)
+	r.b.WriteString(written)
 }
 
 // runReadsBack reports whether the inline markdown written since from reads back as nodes: the
@@ -379,7 +384,7 @@ func (r *renderer) runReadsBack(from int, prefix string, nodes []*Node) bool {
 	return err == nil && slices.Equal(inlineSignature(parsed), inlineSignature(nodes))
 }
 
-func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineContext, tildes bool) {
+func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineContext, escapes delimiterEscapes) {
 	escapePipes := context.tableCell
 	var active []Mark
 	position := inlinePosition{atLineStart: context.startsLine, atTextStart: true}
@@ -418,7 +423,7 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 				urlSchemes: !hasLink,
 				label:      label,
 				followed:   index+1 < len(nodes) || len(next) > 0,
-				tildes:     tildes,
+				delimiters: escapes,
 				heading:    context.heading,
 				marked:     len(next) > 0,
 				opener:     adjacentDelimiter(next[common:]),

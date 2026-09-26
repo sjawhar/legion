@@ -40,9 +40,9 @@ type escapeContext struct {
 	// link's `]`, a hard break's backslash, the next node's first character. A block-final
 	// backslash reads back as itself and is left as written.
 	followed bool
-	// tildes reports whether the text's tildes are escaped, because the run they are in does not
-	// read back with them as written (inlineWithEscapes).
-	tildes bool
+	// delimiters is which of the text's delimiter characters are escaped beyond the rules, because
+	// the run they are in does not read back with them as written (inlineWithEscapes).
+	delimiters delimiterEscapes
 	// heading reports whether the text is a heading's.
 	heading bool
 	// marked reports whether the text is written inside a mark's syntax, where the parser keeps
@@ -68,13 +68,14 @@ func needsInlineEscape(value string, offset int, char rune, context escapeContex
 				needsInlineEscape(value, offset+1, rune(value[offset+1]), context)
 	case '*':
 		return (blockStart(value, textLineStart, offset) && markerTerminator(value, offset+1)) ||
-			emphasisDelimiter(value, offset, '*') || besideDelimiter(value, offset, '*', context)
+			emphasisDelimiter(value, offset, '*') || besideDelimiter(value, offset, '*', context) ||
+			context.delimiters == delimitersAll
 	case '_':
-		return emphasisDelimiter(value, offset, '_')
+		return emphasisDelimiter(value, offset, '_') || context.delimiters == delimitersAll
 	case '`':
 		return true
 	case '~':
-		return context.tildes
+		return context.delimiters >= delimitersTildes
 	case '[':
 		// A label whose brackets cannot pair as written escapes them all: a stray `]` closes it
 		// early, and a `[` left raw would then pair with its own closer.
@@ -140,14 +141,73 @@ func textEscape(char rune) string {
 	return escaped(char)
 }
 
-// tildeInText reports whether any text node among nodes, outside a code span, holds a tilde.
-func tildeInText(nodes []*Node) bool {
+// delimiterEscapes is which delimiter characters in text the writer escapes beyond its rules.
+type delimiterEscapes int
+
+const (
+	// delimitersAsRuled: only where the rules escape them.
+	delimitersAsRuled delimiterEscapes = iota
+	// delimitersTildes: every tilde as well.
+	delimitersTildes
+	// delimitersAll: every tilde, asterisk and underscore.
+	delimitersAll
+)
+
+// delimitersInText is the first escape a run's text could need: delimitersTildes when a text node
+// outside a code span holds a tilde; delimitersAll when asterisks or underscores could pair - two
+// free runs of one of them, or one free run of asterisks beside bold or italic text, whose markers
+// are asterisks too; and delimitersAsRuled otherwise, when nothing is read back.
+func delimitersInText(nodes []*Node) delimiterEscapes {
+	stars, underscores := 0, 0
 	for _, node := range nodes {
-		if node.Type == "text" && !nodeHasMark(node, "inlineCode") && strings.ContainsRune(node.Text, '~') {
-			return true
+		if node.Type != "text" || nodeHasMark(node, "inlineCode") {
+			continue
+		}
+		if strings.ContainsRune(node.Text, '~') {
+			return delimitersTildes
+		}
+		stars += freeDelimiterRuns(node.Text, '*')
+		underscores += freeDelimiterRuns(node.Text, '_')
+		if nodeHasMark(node, "strong") || nodeHasMark(node, "emphasis") {
+			stars++
 		}
 	}
-	return false
+	if stars >= 2 || underscores >= 2 {
+		return delimitersAll
+	}
+	return delimitersAsRuled
+}
+
+// freeDelimiterRuns counts the runs of delimiter in text that the rules leave unescaped and that
+// could still open or close emphasis: no letter or digit beside them, which the rules escape,
+// and not whitespace on both sides, which can do neither. A text's edge may be anything.
+func freeDelimiterRuns(text string, delimiter byte) int {
+	runs := 0
+	for start := 0; start < len(text); start++ {
+		if text[start] != delimiter {
+			continue
+		}
+		end := start + 1
+		for end < len(text) && text[end] == delimiter {
+			end++
+		}
+		before, after := byte('!'), byte('!')
+		if start > 0 {
+			before = text[start-1]
+		}
+		if end < len(text) {
+			after = text[end]
+		}
+		if !isASCIIAlphaNumeric(before) && !isASCIIAlphaNumeric(after) && !(isLineWhitespace(before) && isLineWhitespace(after)) {
+			runs++
+		}
+		start = end - 1
+	}
+	return runs
+}
+
+func isLineWhitespace(value byte) bool {
+	return value == ' ' || value == '\t' || value == '\n'
 }
 
 // inlineSignature describes inline nodes as the reader sees them: each run of text with the marks

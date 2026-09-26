@@ -351,6 +351,47 @@ func TestRenderKeepsWhitespaceAtAMarksEdges(t *testing.T) {
 	}
 }
 
+// Asterisks and underscores the writer's rules leave unescaped can still pair into emphasis the
+// text never had: across a hard break, around a reference, inside a link label, or with a mark's
+// own delimiter. A run that does not read back as written is written again with them escaped.
+func TestRenderKeepsAsterisksAndUnderscoresThatWouldPair(t *testing.T) {
+	text := func(value string, marks ...Mark) *Node { return &Node{Type: "text", Text: value, Marks: marks} }
+	hardBreak := &Node{Type: "hardbreak", Attrs: Attrs{"isInline": false}}
+	link := Mark{Type: "link", Attrs: Attrs{"href": "https://x.test"}}
+	paragraph := func(children ...*Node) *Node {
+		return &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: children}}}
+	}
+	for name, tree := range map[string]*Node{
+		"underscores across a hard break": paragraph(text(" _"), hardBreak, text(" _")),
+		"asterisks across a hard break":   paragraph(text("-*\\"), hardBreak, text("-*\\")),
+		"inside italic text":              paragraph(text(":*\\", Mark{Type: "emphasis"}), text(" after")),
+		"inside a link label":             paragraph(text("*[*", link), text(" after")),
+	} {
+		t.Run(name, func(t *testing.T) {
+			markdown := mustRender(t, tree)
+			back, err := Parse(markdown)
+			if err != nil {
+				t.Fatalf("Parse(%q) = %v", markdown, err)
+			}
+			if got, want := inlineSignature(back.Children[0].Children), inlineSignature(tree.Children[0].Children); !slices.Equal(got, want) {
+				t.Fatalf("Parse(%q) = %q, want %q", markdown, got, want)
+			}
+		})
+	}
+	// A run that reads back as written keeps main's bytes, snake_case and a lone asterisk included.
+	for _, test := range []struct {
+		tree *Node
+		want string
+	}{
+		{paragraph(text("user_id and 2 * 3")), "user_id and 2 * 3\n"},
+		{paragraph(text("a * b"), hardBreak, text("c * d")), "a * b\\\nc * d\n"},
+	} {
+		if got := mustRender(t, test.tree); got != test.want {
+			t.Fatalf("Render() = %q, want the bytes main writes, %q", got, test.want)
+		}
+	}
+}
+
 // A paragraph's second line of dashes or equals signs underlines its first into a heading, so
 // the escape applies to a marker line anywhere in the paragraph, not only its first.
 func TestRenderEscapesSetextUnderlinesInsideParagraphs(t *testing.T) {
