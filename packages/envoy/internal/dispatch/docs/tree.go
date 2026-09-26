@@ -20,7 +20,8 @@ func parseInput(markdown string) (*pmdoc.Node, error) {
 }
 
 // parseFragmentInput parses text written into a document rather than one that begins it, such as
-// an accepted suggestion's, where a leading `---` is a rule rather than front matter.
+// an accepted suggestion's or an insert's that lands after the document's start, where a leading
+// `---` is a rule rather than front matter.
 func parseFragmentInput(markdown string) (*pmdoc.Node, error) {
 	return parsedInput(pmdoc.ParseFragment(markdown))
 }

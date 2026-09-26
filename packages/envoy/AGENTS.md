@@ -192,7 +192,10 @@ list into the place of a bullet whose text goes, and refuses a bullet with other
 `ErrListItemContent` naming `delete {block:"<item id>"}`; `pmdoc.DeleteBlock` serves `block` and
 reports any emptied container's content rule as `INVALID_OP`). `move` relocates the block with
 `block` to the document-level boundary of an insert anchor (`pmdoc.MoveBlock`); insert and move
-anchors are a quote, `start`, `end`, `heading:<title>`, or `block:<id>`.
+anchors are a quote, `start`, `end`, `heading:<title>`, or `block:<id>`. An insert's `markdown` is
+read as text written into the document (`pmdoc.ParseFragment`), so a leading `---` line is a rule,
+as `***` is, except where the insert lands at the document's start (`start`, or before the first
+block), where front matter opens a document and the insert reads it.
 
 `delete_row` and `delete_column` each take a table `block` id and a zero-based `index`, and mutate
 the table in place. Row `0` is the header; deleting it promotes the first body row into the header,

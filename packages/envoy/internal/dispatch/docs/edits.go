@@ -759,16 +759,6 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		if plainText && pmdoc.TargetSpansBlocks(tree, target) {
 			return nil, &ErrQuoteSpansBlocks{Quote: anchor}
 		}
-		with, err := parseInput(op.Markdown)
-		if err != nil {
-			return nil, invalidMarkdownOp("markdown", err)
-		}
-		if err := refuseDuplicateBlockIDs(tree, with); err != nil {
-			return nil, err
-		}
-		if out, inserted, err := pmdoc.InsertTableRows(tree, target, op.Markdown, after); err != nil || inserted {
-			return out, err
-		}
 		position := target.From
 		if after {
 			position = target.To
@@ -778,6 +768,22 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 			if err != nil {
 				return nil, err
 			}
+		}
+		// The markdown is written into the document, where a leading `---` line is a rule, as `***`
+		// is. Only the document's start can hold front matter, so an insert landing there reads it.
+		parse := parseFragmentInput
+		if position == 0 {
+			parse = parseInput
+		}
+		with, err := parse(op.Markdown)
+		if err != nil {
+			return nil, invalidMarkdownOp("markdown", err)
+		}
+		if err := refuseDuplicateBlockIDs(tree, with); err != nil {
+			return nil, err
+		}
+		if out, inserted, err := pmdoc.InsertTableRows(tree, target, op.Markdown, after); err != nil || inserted {
+			return out, err
 		}
 		return pmdoc.Splice(tree, pmdoc.Range{From: position, To: position}, with)
 	case "delete_row":
