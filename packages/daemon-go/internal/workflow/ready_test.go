@@ -238,6 +238,7 @@ func TestNoFactMovesAMemberOfALingeringTree(t *testing.T) {
 		at, want phase.Phase
 		hold     *record.Hold
 		pr       record.PullRequest
+		decision *record.ReviewDecision
 		fact     intake.Fact
 		refusal  string
 	}{
@@ -245,7 +246,7 @@ func TestNoFactMovesAMemberOfALingeringTree(t *testing.T) {
 			fact: intake.PullRequestMerged{Repo: "sjawhar/legion", Number: 42, MergeSHA: "merge"}},
 		{name: "an approval of a green head", at: phase.Reviewing, pr: record.PullRequest{Verdict: "green"},
 			fact: intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head", HeadSHA: "head"}},
-		{name: "green checks on an approved head", at: phase.Reviewing, pr: record.PullRequest{ReviewDecision: "approved"},
+		{name: "green checks on an approved head", at: phase.Reviewing, decision: &record.ReviewDecision{State: "approved", Head: "head"},
 			fact: intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, Snapshot: "green-1", Verdict: "green", Failing: []string{}}},
 		{name: "red checks at max_fix_attempts", at: phase.Testing, pr: record.PullRequest{FixAttempts: 3},
 			fact: intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 2}}, Generation: 1, Snapshot: "red-1", Verdict: "red", Failing: []string{"ci"}}},
@@ -268,8 +269,14 @@ func TestNoFactMovesAMemberOfALingeringTree(t *testing.T) {
 			pr.Failing, pr.FailingStatuses = []string{}, []string{}
 			seedPR(t, pool, pr)
 			// The implementer is one round short of the review round cap, so a counted round would
-			// post the cap message and notify the architect.
-			for _, row := range []record.PhaseRow{{Role: claim.RoleImplementer, Rounds: 2}, {Role: claim.RoleTester}, {Role: claim.RoleReviewer}} {
+			// post the cap message and notify the architect. A review ends when both of its halves
+			// are in (advanceReview), so the reviewer of a child in reviewing has completed its round,
+			// and the review decides the rest.
+			reviewer := record.PhaseRow{Role: claim.RoleReviewer, Decision: tc.decision}
+			if tc.at == phase.Reviewing {
+				reviewer.HandoffCommit = "review-handoff"
+			}
+			for _, row := range []record.PhaseRow{{Role: claim.RoleImplementer, Rounds: 2}, {Role: claim.RoleTester}, reviewer} {
 				row.Issue, row.Claim = "LEGION-209", claim.Token(string(row.Role)+"-claim")
 				seedPhase(t, pool, row)
 			}

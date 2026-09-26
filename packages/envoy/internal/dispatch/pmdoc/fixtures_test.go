@@ -101,7 +101,7 @@ func TestFixturesAreWithinSchema(t *testing.T) {
 	fixtures := loadFixtures(t)
 	wantNames := []string{
 		"ask-answered", "ask", "bare-url", "blockquote", "callout-blocks", "callout", "code-directive-example", "code-fence",
-		"code", "directive-like-text", "emphasis", "empty", "escapes", "explicit-url-space",
+		"code", "directive-like-text", "emphasis", "empty", "escaped-block-markers", "escapes", "explicit-url-space",
 		"explicit-url-title",
 		"footnote", "frontmatter", "headings", "hr", "html", "image-delimiters", "image",
 		"inline-code-backticks", "inline-code-spaces", "link-delimiters", "links", "lists", "long",

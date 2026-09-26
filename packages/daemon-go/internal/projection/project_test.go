@@ -17,9 +17,10 @@ import (
 
 type projectionStore struct {
 	record.Store
-	issues []record.Issue
-	phases map[string][]record.PhaseRow
-	slots  []record.Slot
+	issues       []record.Issue
+	phases       map[string][]record.PhaseRow
+	slots        []record.Slot
+	pullRequests map[string]*record.PullRequest
 }
 
 func (s projectionStore) Issues(context.Context, pgx.Tx) ([]record.Issue, error) {
@@ -32,8 +33,8 @@ func (projectionStore) PendingStatusWrites(context.Context, pgx.Tx, string) ([]r
 func (s projectionStore) Phases(_ context.Context, _ pgx.Tx, issue string) ([]record.PhaseRow, error) {
 	return s.phases[issue], nil
 }
-func (projectionStore) PullRequest(context.Context, pgx.Tx, string) (*record.PullRequest, error) {
-	return nil, nil
+func (s projectionStore) PullRequest(_ context.Context, _ pgx.Tx, issue string) (*record.PullRequest, error) {
+	return s.pullRequests[issue], nil
 }
 func (projectionStore) Gate(context.Context, pgx.Tx, string) (*record.DesignGate, error) {
 	return nil, nil
@@ -121,5 +122,36 @@ func TestProjectShowsLaunchUncertainClaimsWithoutALocator(t *testing.T) {
 	}
 	if view.State != string(supervise.StateLaunchUncertain) || view.Locator != nil {
 		t.Fatalf("launch_uncertain architect = %#v, want its state with no locator", view)
+	}
+}
+
+// The pull request's review decision on the state route is the open review round's, the one the
+// workflow ends the round on when the reviewer completes - whether or not the reviewer's pane is
+// running - and no decision shows before a review in the round decides.
+func TestProjectShowsTheReviewRoundsDecisionOnThePullRequest(t *testing.T) {
+	store := projectionStore{
+		issues: []record.Issue{
+			{Key: "LEGION-208", Tree: "LEGION-208", Status: "needs_review", Phase: phase.Reviewing},
+			{Key: "LEGION-209", Tree: "LEGION-209", Status: "needs_review", Phase: phase.Reviewing},
+		},
+		phases: map[string][]record.PhaseRow{
+			"LEGION-208": {{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "gone-reviewer", ReviewSeen: 12,
+				Decision: &record.ReviewDecision{State: "changes_requested", Body: "rename it", Head: "head", ID: 12}}},
+			"LEGION-209": {{Issue: "LEGION-209", Role: claim.RoleReviewer, Claim: "gone-reviewer", ReviewSeen: 9}},
+		},
+		pullRequests: map[string]*record.PullRequest{
+			"LEGION-208": {Issue: "LEGION-208", Number: 42, HeadSHA: "head-2"},
+			"LEGION-209": {Issue: "LEGION-209", Number: 43, HeadSHA: "head"},
+		},
+	}
+	got, err := Project(context.Background(), nil, store, "LEGION", []supervise.Claim{})
+	if err != nil {
+		t.Fatalf("Project: %v", err)
+	}
+	if pr := got.Issues["LEGION-208"].PullRequest; pr == nil || pr.ReviewDecision != "changes_requested" {
+		t.Fatalf("LEGION-208's pull request = %+v, want the round's changes_requested", pr)
+	}
+	if pr := got.Issues["LEGION-209"].PullRequest; pr == nil || pr.ReviewDecision != "" {
+		t.Fatalf("LEGION-209's pull request = %+v, want no decision before one is made", pr)
 	}
 }

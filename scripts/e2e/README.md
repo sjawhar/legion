@@ -269,14 +269,16 @@ audit uses the Dispatch token already in `~/.config/opencode/envoy.json` and wri
 It proves admission order and slotless children, then drives a root from `todo` through an
 architect's spec and gate registration, the human approval, planner, implementer pull request,
 tester, reviewer, retro, merger READY, the ordinary human squash merge, production check, and
-architect sign-off. It also proves three changes-requested rounds, each naming one concrete
-correction the spec permits (a distinct line appended to the smoke file, the one product file the
+architect sign-off. It also proves three changes-requested rounds, each posted by the reviewer
+pane and ended by that reviewer's completion — a review ends when its reviewer completes it, so
+the round returns to implementing only once the reviewer's handoff is recorded, authored and
+committed by the review App — and each naming one concrete correction the spec permits (a distinct line appended to the smoke file, the one product file the
 implementer's pull request changed, which the run records and requires to be exactly one; the
 correction counts only in that file's patch on the pull request) and reaching testing only on
 that round's own implementer handoff (the daemon's phase record must hold the implementer's
 handoff for that round when the issue reaches testing, and the commit carrying every planner,
-implementer, and tester handoff is authored and committed by that role's own App, read from the
-issue's workspace),
+implementer, tester, and reviewer handoff is authored and committed by that role's own App, read
+from the issue's workspace),
 and `pr-blocked`, READY refusing after a later spec version until a human approves it, a held
 worker after its launch budget and the architect's retry relaunching it, restart during
 implementation, a pending status write while Dispatch is down, and the Go pane's

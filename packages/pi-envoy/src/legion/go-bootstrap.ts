@@ -114,12 +114,13 @@ async function callGoReadyWithRetry(label: string, call: () => Promise<void>): P
  * daemon's own answer.
  * The subscription is a live wake only: an Oh My Pi session subscribes over core NATS, so a notice
  * published while no controller runs never reaches one, and the controller skill reads `legion
- * state` at boot for what it missed. Its grants are minted with the registration's own secret,
- * which a later `legion controller start` revokes. Nothing re-runs on a role regain: the Go daemon
- * holds nothing for a controller, and the Envoy heartbeat keeps the role itself. A refusal is
- * logged and propagates without exiting — the operator started this session and reads it; a
- * refused capability was replaced by a later start. The transcript is reported on every claim, a
- * takeover's included, because the route requires one; the Go daemon records only the session.
+ * state` and Dispatch's triage listing at boot for what it missed. Its grants are minted with the
+ * registration's own secret, which a later `legion controller start` revokes. Nothing re-runs on a
+ * role regain: the Go daemon holds nothing for a controller, and the Envoy heartbeat keeps the role
+ * itself. A refusal is logged and propagates without exiting — the operator started this session
+ * and reads it; a refused capability was replaced by a later start. The transcript is reported on
+ * every claim, a takeover's included, because the route requires one; the Go daemon records only
+ * the session.
  */
 export function goControllerDaemon(
   daemon: () => LegionGoDaemonClient,
