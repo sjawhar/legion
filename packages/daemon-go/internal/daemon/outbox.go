@@ -367,9 +367,13 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		// start that reaches its claim after the close (queued before it and backing off) finishes
 		// without acting and records no start, so the close's suspend still applies. Re-admission
 		// starts the member again (admit's startMidPhaseChildren).
-		lingers, err := r.treeLingers(ctx, issue)
-		if err != nil {
+		var lingers bool
+		if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+			var err error
+			lingers, err = record.TreeLingers(ctx, r.records, tx, issue.Tree)
 			return err
+		}); err != nil {
+			return fmt.Errorf("read whether the tree of %s lingers: %w", issue.Key, err)
 		}
 		if lingers {
 			r.log.Info("outbox start of a member of a lingering tree; finished without acting", "row", row.ID, "issue", issue.Key,
@@ -433,29 +437,17 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		if !found {
 			return nil
 		}
-		// A transition's suspend, retried after the issue came back to a phase its role works,
-		// would stop the worker in the phase it now serves. The phase is read before the suspend
-		// acts, not in one transaction with it: a transition committing in between costs one
-		// suspend, which that transition's own start then resumes.
-		if !workflow.SuspendApplies(payload.Leaves, issue.Phase) {
-			r.log.Info("outbox suspend of a role the issue is back in; finished without acting", "row", row.ID, "issue", issue.Key,
-				"leaves", payload.Leaves, "phase", issue.Phase, "role", payload.Role)
-			return nil
-		}
 		switch machine.Claim().State {
 		case supervise.StateFailed, supervise.StateRetired:
 			// The claim runs nothing, so there is nothing to suspend.
 			return nil
 		}
-		// A stop ends the run it was written for. A newer start has already replaced that run, so
-		// this stop is superseded: acting on it would suspend the run that start began and retire
-		// the task with it, leaving the phase with nobody in it. It is finished instead, whatever
-		// the retry timing was — the runtime may have refused it for minutes. A row with no id of
-		// its own is not older than anything: the store gives every row one, and an unknown id
-		// must not silently drop a stop.
-		if last := machine.Claim().LastStartRow; row.ID > 0 && row.ID < last {
-			r.log.Info("outbox stop superseded by a newer start; finished without acting",
-				"row", row.ID, "issue", issue.Key, "role", payload.Role, "start-row", last)
+		// Whether the suspend still acts is workflow.StopActs's rule, which promotion reads too. The
+		// phase is read before the suspend acts, not in one transaction with it: a transition
+		// committing in between costs one suspend, which that transition's own start then resumes.
+		if last := machine.Claim().LastStartRow; !workflow.StopActs(row.ID, payload, issue.Phase, last) {
+			r.log.Info("outbox suspend no longer acts: its role's phase is back, or a newer start superseded it; finished without acting",
+				"row", row.ID, "issue", issue.Key, "role", payload.Role, "leaves", payload.Leaves, "phase", issue.Phase, "start-row", last)
 			return nil
 		}
 		if err := machine.Handle(ctx, supervise.RequestSuspend{Claim: token}); err != nil {
@@ -473,18 +465,6 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 	default:
 		return fmt.Errorf("outbox row %d has unknown supervise operation %q", row.ID, payload.Op)
 	}
-}
-
-// treeLingers says whether issue's tree lingers after its close: its root's linger deadline is set.
-func (r *outbox) treeLingers(ctx context.Context, issue record.Issue) (bool, error) {
-	root := issue
-	if issue.Tree != issue.Key {
-		var err error
-		if root, err = r.issue(ctx, issue.Tree); err != nil {
-			return false, err
-		}
-	}
-	return root.LingerUntil != nil, nil
 }
 
 // podsProvision is whether the runtime provisions each claim's workspace in the claim's own pod

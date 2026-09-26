@@ -36,7 +36,7 @@ func (e *Engine) advancePendingReady(ctx context.Context, tx pgx.Tx, rootKey str
 	if !classify.DesignGateOpen(gate) {
 		return nil
 	}
-	if lingers, err := e.treeLingers(ctx, tx, rootKey); err != nil || lingers {
+	if lingers, err := record.TreeLingers(ctx, e.store, tx, rootKey); err != nil || lingers {
 		return err
 	}
 	issues, err := e.store.Issues(ctx, tx)

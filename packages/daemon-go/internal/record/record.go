@@ -10,6 +10,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
 // AttemptRun is the latest check-run id the daemon observed for one check name.
@@ -159,9 +160,46 @@ type Store interface {
 	FinishOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) error
 	RetryOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string, nextAt time.Time, lastErr string) error
 	PendingStatusWrites(ctx context.Context, tx pgx.Tx, project string) ([]OutboxRow, error)
-	// RoleStarted says whether issue's role is already started for the run of generation and
-	// phase: the newest of its supervise operations for generation that will still act is a start.
-	RoleStarted(ctx context.Context, tx pgx.Tx, issue string, role claim.Role, generation uint64, p phase.Phase) (bool, error)
+	// RoleRun reads one role's run of an issue generation: its queued supervise rows and the claim
+	// with token.
+	RoleRun(ctx context.Context, tx pgx.Tx, token claim.Token, issue string, role claim.Role, generation uint64) (RoleRun, error)
+}
+
+// RoleRun is what the store holds of one role's run of an issue generation: the role's supervise
+// rows for the generation still queued, oldest first (finishing deletes a row, so each is one the
+// outbox has not run), and this daemon's claim on the role, nil when it has none.
+type RoleRun struct {
+	Queued []QueuedSupervise
+	Claim  *RoleClaim
+}
+
+// QueuedSupervise is one queued supervise row: its id, which orders it against the others and
+// against the newest start run on the claim, and its request.
+type QueuedSupervise struct {
+	ID      int64
+	Request SuperviseRequest
+}
+
+// RoleClaim is a claim as RoleRun reads it: its state, the newest start the outbox ran against it
+// (last_start_row), and whether it holds a task undelivered or unconfirmed, with that task's
+// generation and phase.
+type RoleClaim struct {
+	State             supervise.ClaimState
+	LastStartRow      int64
+	Pending           bool
+	PendingGeneration uint64
+	PendingPhase      phase.Phase
+}
+
+// TreeLingers says whether tree lingers after its close: its root is recorded with a linger
+// deadline, which re-admission clears. Linger holds every member where it stood, so nothing in such
+// a tree transitions, starts a worker, or records a completion.
+func TreeLingers(ctx context.Context, store Store, tx pgx.Tx, tree string) (bool, error) {
+	root, err := store.Issue(ctx, tx, tree)
+	if err != nil || root == nil {
+		return false, err
+	}
+	return root.LingerUntil != nil, nil
 }
 
 // ParentOf is an observed parent key as a record holds it: nil for none. Dispatch says "no parent"

@@ -283,6 +283,12 @@ func TestPromotionStartsAChildUnlessItsWorkerIsStartedForTheRun(t *testing.T) {
 	type seed struct {
 		enqueue func(op record.SuperviseOp, generation uint64) int64
 		claim   func(state string, serving uint64, lastStart int64)
+		// pending gives the claim a task it holds undelivered or unconfirmed.
+		pending func(generation uint64, p phase.Phase)
+		// otherClaim records a claim on the same issue and role under another daemon's project token.
+		otherClaim func(state string, lastStart int64)
+		// suspendLeaving queues a transition's suspend, which ends phase leaves.
+		suspendLeaving func(leaves phase.Phase)
 	}
 	for _, tc := range []struct {
 		name  string
@@ -320,6 +326,29 @@ func TestPromotionStartsAChildUnlessItsWorkerIsStartedForTheRun(t *testing.T) {
 		}, want: 0},
 		{name: "a suspended claim serving the generation", setup: func(s seed) { s.claim("suspended", 1, 7) }, want: 1},
 		{name: "a failed claim serving the generation", setup: func(s seed) { s.claim("failed", 1, 7) }, want: 1},
+		{name: "a launch-uncertain claim holding the phase's task", setup: func(s seed) {
+			s.claim("launch_uncertain", 1, 7)
+			s.pending(1, phase.Testing)
+		}, want: 0},
+		{name: "a launch-uncertain claim holding an earlier phase's task", setup: func(s seed) {
+			s.claim("launch_uncertain", 1, 7)
+			s.pending(1, phase.Implementing)
+		}, want: 1},
+		{name: "a claim holding the phase's task that the close's suspend will still stop", setup: func(s seed) {
+			s.claim("launch_uncertain", 1, 0)
+			s.pending(1, phase.Testing)
+			s.enqueue("suspend", 1)
+		}, want: 1},
+		{name: "another daemon's live claim on the same issue and role", setup: func(s seed) { s.otherClaim("working", 0) }, want: 1},
+		{name: "another daemon's claim beside this daemon's, with the close's suspend queued", setup: func(s seed) {
+			s.claim("working", 1, 0)
+			s.otherClaim("working", 0)
+			s.enqueue("suspend", 1)
+		}, want: 1},
+		{name: "a live claim with only a suspend of the phase the child is back in queued", setup: func(s seed) {
+			s.claim("working", 1, 0)
+			s.suspendLeaving(phase.Testing)
+		}, want: 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
@@ -340,36 +369,59 @@ func TestPromotionStartsAChildUnlessItsWorkerIsStartedForTheRun(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			enqueueRequest := func(payload record.SuperviseRequest) int64 {
+				t.Helper()
+				row, err := record.NewOutboxRow(child.Key, payload, fixedNow)
+				if err != nil {
+					t.Fatal(err)
+				}
+				inTx(t, pool, func(tx pgx.Tx) {
+					if err := record.NewStore().Enqueue(context.Background(), tx, row); err != nil {
+						t.Fatalf("enqueue %s: %v", payload.Op, err)
+					}
+				})
+				var id int64
+				if err := pool.QueryRow(context.Background(), `select max(id) from outbox`).Scan(&id); err != nil {
+					t.Fatalf("read the %s row's id: %v", payload.Op, err)
+				}
+				return id
+			}
+			putClaim := func(token claim.Token, project, state string, serving uint64, lastStart int64) {
+				t.Helper()
+				if _, err := pool.Exec(context.Background(), `insert into claims (token, project, tree, issue, role, generation, session, session_file, state,
+					launch_failures, prompt_failures, prompt_retires, uncertain_streak, serving_generation, last_start_row)
+					values ($1, $2, 'LEGION-208', 'LEGION-209', 'tester', 1, 'ses_tester', '', $3, 0, 0, 0, 0, $4, $5)`,
+					string(token), project, state, int64(serving), lastStart); err != nil {
+					t.Fatalf("record the %s claim %s: %v", state, token, err)
+				}
+			}
 			tc.setup(seed{
 				enqueue: func(op record.SuperviseOp, generation uint64) int64 {
-					t.Helper()
 					payload := record.SuperviseRequest{Op: op, Tree: root.Key, Role: claim.RoleTester, Generation: generation}
 					if op == "start" {
 						payload.Phase, payload.Task = child.Phase, workflow.ResumePhaseTask(child)
 					}
-					row, err := record.NewOutboxRow(child.Key, payload, fixedNow)
+					return enqueueRequest(payload)
+				},
+				claim: func(state string, serving uint64, lastStart int64) {
+					putClaim(token, project, state, serving, lastStart)
+				},
+				pending: func(generation uint64, p phase.Phase) {
+					t.Helper()
+					if _, err := pool.Exec(context.Background(), `insert into pending_task_deliveries (claim_token, delivery_id, task, queued_at, generation, phase)
+						values ($1, 'outbox:7', 'Carry on.', now(), $2, $3)`, string(token), int64(generation), string(p)); err != nil {
+						t.Fatalf("record the pending task: %v", err)
+					}
+				},
+				otherClaim: func(state string, lastStart int64) {
+					other, err := claim.NewToken("otherlegion", child.Key, claim.RoleTester)
 					if err != nil {
 						t.Fatal(err)
 					}
-					inTx(t, pool, func(tx pgx.Tx) {
-						if err := record.NewStore().Enqueue(context.Background(), tx, row); err != nil {
-							t.Fatalf("enqueue %s: %v", op, err)
-						}
-					})
-					var id int64
-					if err := pool.QueryRow(context.Background(), `select max(id) from outbox`).Scan(&id); err != nil {
-						t.Fatalf("read the %s row's id: %v", op, err)
-					}
-					return id
+					putClaim(other, "otherlegion", state, 1, lastStart)
 				},
-				claim: func(state string, serving uint64, lastStart int64) {
-					t.Helper()
-					if _, err := pool.Exec(context.Background(), `insert into claims (token, project, tree, issue, role, generation, session, session_file, state,
-						launch_failures, prompt_failures, prompt_retires, uncertain_streak, serving_generation, last_start_row)
-						values ($1, $2, 'LEGION-208', 'LEGION-209', 'tester', 1, 'ses_tester', '', $3, 0, 0, 0, 0, $4, $5)`,
-						string(token), project, state, int64(serving), lastStart); err != nil {
-						t.Fatalf("record the %s claim: %v", state, err)
-					}
+				suspendLeaving: func(leaves phase.Phase) {
+					enqueueRequest(record.SuperviseRequest{Op: "suspend", Tree: root.Key, Role: claim.RoleTester, Generation: child.Generation, Leaves: leaves})
 				},
 			})
 			testerStarts := func() int {
@@ -428,7 +480,7 @@ func TestReadmissionStartsTheNewGenerationWithoutTheOldGenerationsFacts(t *testi
 	const key, artifact = "LEGION-LINGER", "4f2a9c1e-8b3d-4e7f-9a60-2c5d8e1b7f34"
 	until, pending, approved := fixedNow.Add(time.Hour), 1, 1
 	putIssue(t, pool, record.Issue{Key: key, Project: "LEGION", Title: "lingering", Tree: key, Phase: phase.Done, Generation: 1, Status: "done", Rank: "A", LingerUntil: &until, LastDispatchSeq: 1, ReadyPendingVersion: &pending})
-	const child = "LEGION-CHILD"
+	const child = "LEGION-2"
 	parent := key
 	putIssue(t, pool, record.Issue{Key: child, Project: "LEGION", Title: "child", Tree: key, Parent: &parent, Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "B", LastDispatchSeq: 1, ReadyPendingVersion: &pending})
 	inTx(t, pool, func(tx pgx.Tx) {
@@ -443,7 +495,7 @@ func TestReadmissionStartsTheNewGenerationWithoutTheOldGenerationsFacts(t *testi
 		if err := records.PutPhase(ctx, tx, record.PhaseRow{Issue: key, Role: claim.RoleImplementer, Claim: "implementer", HandoffCommit: "gen1-handoff", LastHandoff: "gen1-handoff", Rounds: 2}); err != nil {
 			t.Fatalf("seed implementer: %v", err)
 		}
-		if err := records.PutPhase(ctx, tx, record.PhaseRow{Issue: child, Role: claim.RoleMerger, Claim: "merger", Summary: "READY #85 at gen1 (approved at gen1) for LEGION-CHILD"}); err != nil {
+		if err := records.PutPhase(ctx, tx, record.PhaseRow{Issue: child, Role: claim.RoleMerger, Claim: "merger", Summary: "READY #85 at gen1 (approved at gen1) for " + child}); err != nil {
 			t.Fatalf("seed the child's merger: %v", err)
 		}
 	})

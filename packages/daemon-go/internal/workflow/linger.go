@@ -13,17 +13,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
-// treeLingers says whether a tree has left the workflow: its root lingers after its close or
-// sign-off. Linger holds every member where it stood, so nothing in such a tree transitions,
-// starts a worker, or records a completion.
-func (e *Engine) treeLingers(ctx context.Context, tx pgx.Tx, tree string) (bool, error) {
-	root, err := e.store.Issue(ctx, tx, tree)
-	if err != nil || root == nil {
-		return false, err
-	}
-	return root.LingerUntil != nil, nil
-}
-
 // leave is an issue leaving the workflow for status (done, backlog, icebox, or triage). A root
 // takes its tree with it into linger. A child ends only itself: it leaves the table, its phase
 // parked in done and every one of its claims suspended, so no transition or status write follows

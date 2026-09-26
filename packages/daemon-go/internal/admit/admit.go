@@ -366,10 +366,15 @@ func ownSlots(issues []record.Issue, slots []record.Slot) []record.Slot {
 // worker is already started for this run (a fact moved it while the root waited for its slot, and
 // that start is queued or has run) is not started a second time: the task would be delivered
 // twice. A child whose claim a stop from the tree's close will still suspend is started, so this
-// start ends last or supersedes the stop (RoleStarted). The check lives here, where the second
-// start would be written, rather than in the start's executor, which could tell a repeated task
-// only if the claim also recorded the phase of the task it serves.
+// start ends last or supersedes the stop (workflow.RoleStarted, over the role's queued rows and
+// this daemon's own claim). The check lives here, where the second start would be written, rather
+// than in the start's executor, which could tell a repeated task only if the claim also recorded
+// the phase of the task it serves.
 func (a *Admission) startMidPhaseChildren(ctx context.Context, tx pgx.Tx, root record.Issue, issues []record.Issue, now time.Time) error {
+	project, err := claim.ProjectToken(a.project)
+	if err != nil {
+		return err
+	}
 	for _, child := range issues {
 		if child.Key == root.Key || child.Tree != root.Tree {
 			continue
@@ -378,11 +383,15 @@ func (a *Admission) startMidPhaseChildren(ctx context.Context, tx pgx.Tx, root r
 		if role == "" || record.OutOfWorkflow(child.Status) {
 			continue
 		}
-		started, err := a.store.RoleStarted(ctx, tx, child.Key, role, child.Generation, child.Phase)
+		token, err := claim.NewToken(project, child.Key, role)
 		if err != nil {
 			return err
 		}
-		if started {
+		run, err := a.store.RoleRun(ctx, tx, token, child.Key, role, child.Generation)
+		if err != nil {
+			return err
+		}
+		if workflow.RoleStarted(run, child.Generation, child.Phase) {
 			continue
 		}
 		payload := record.SuperviseRequest{Op: "start", Tree: child.Tree, Role: role, Generation: child.Generation,

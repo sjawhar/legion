@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -11,6 +12,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
 // RoleFor is the role that works a phase: the one a transition starts, the one it suspends when
@@ -45,6 +47,58 @@ func SuspendApplies(leaves, current phase.Phase) bool {
 	return leaves == "" || RoleFor(current) != RoleFor(leaves)
 }
 
+// StopActs is whether a queued stop, row id, still acts on its claim when the outbox runs it, with
+// the issue in phase current and lastStart the newest start the outbox ran against the claim (its
+// last_start_row). The outbox executor asks it of every suspend, and RoleStarted of every queued
+// stop, so both read one rule. A tree close always acts. A suspend acts unless the issue is back
+// in a phase its role works (SuspendApplies), or a newer start has already run: that start
+// replaced the run the stop was written for, so acting would suspend the run it began and retire
+// the task with it, whatever the retry timing was. A row with no id is not older than anything:
+// the store gives every row one, and an unknown id must not silently drop a stop. Any other
+// operation is not a stop.
+func StopActs(id int64, stop record.SuperviseRequest, current phase.Phase, lastStart int64) bool {
+	switch stop.Op {
+	case "tree_close":
+		return true
+	case "suspend":
+		return SuspendApplies(stop.Leaves, current) && (id <= 0 || id >= lastStart)
+	default:
+		return false
+	}
+}
+
+// RoleStarted is whether run already starts its role for generation in phase current: whether the
+// newest of its operations that will still act is a start. A stop that still acts (StopActs) undoes
+// any older start, which may run first, so past one only a newer queued start for current counts.
+// With none, a queued start for current counts, and so does the claim when it is live or holds
+// current's task for generation undelivered or unconfirmed (a launch whose outcome is uncertain
+// still holds the task its start gave it): no start acts while the tree lingers, and the tree's
+// close queues a suspend of every claim, so such a claim was started since the tree ran again. A
+// suspended, failed, retired or unlaunched claim holding no such task runs nothing.
+func RoleStarted(run record.RoleRun, generation uint64, current phase.Phase) bool {
+	var lastStart int64
+	if run.Claim != nil {
+		lastStart = run.Claim.LastStartRow
+	}
+	var stop int64
+	for _, queued := range run.Queued {
+		if StopActs(queued.ID, queued.Request, current, lastStart) {
+			stop = max(stop, queued.ID)
+		}
+	}
+	for _, queued := range run.Queued {
+		if queued.Request.Op == "start" && queued.Request.Phase == current && queued.ID > stop {
+			return true
+		}
+	}
+	if stop != 0 || run.Claim == nil {
+		return false
+	}
+	held := run.Claim
+	return slices.Contains(supervise.LiveStates(), held.State) ||
+		held.Pending && held.PendingGeneration == generation && held.PendingPhase == current
+}
+
 func (e *Engine) enqueue(ctx context.Context, tx pgx.Tx, issue string, payload record.OutboxPayload) error {
 	row, err := record.NewOutboxRow(issue, payload, e.now())
 	if err != nil {
@@ -70,7 +124,7 @@ func refused(code, message string) intake.Result {
 }
 
 // refusedLingering refuses a worker's request on issue while its tree lingers: linger holds the
-// member where it stood (treeLingers), so the request changed nothing.
+// member where it stood (record.TreeLingers), so the request changed nothing.
 func refusedLingering(issue record.Issue, request string) intake.Result {
 	return refused("TREE_LINGERING", fmt.Sprintf("the tree %s is lingering after it left the workflow, so %s of %s changed nothing", issue.Tree, request, issue.Key))
 }

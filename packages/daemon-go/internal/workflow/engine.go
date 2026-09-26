@@ -305,8 +305,8 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 		return refused("HANDOFF_NOT_CURRENT_PHASE", fmt.Sprintf("the %s does not run phase %s of %s; this completion changed nothing", fact.Role, issue.Phase, issue.Key)), nil
 	}
 	// A worker still in its turn when its tree's root closed can yet complete; linger holds the
-	// member where it stood (treeLingers), so the completion records nothing.
-	lingers, err := e.treeLingers(ctx, tx, issue.Tree)
+	// member where it stood (record.TreeLingers), so the completion records nothing.
+	lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree)
 	if err != nil {
 		return intake.Result{}, err
 	}
@@ -497,7 +497,7 @@ func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestR
 		return intake.Result{}, err
 	}
 	if pr.ReviewDecision == "changes_requested" {
-		if lingers, err := e.treeLingers(ctx, tx, issue.Tree); err != nil || lingers {
+		if lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree); err != nil || lingers {
 			return intake.Result{}, err
 		}
 		if err := e.recordRound(ctx, tx, issue.Key); err != nil {
@@ -547,7 +547,7 @@ func (e *Engine) merged(ctx context.Context, tx pgx.Tx, fact intake.PullRequestM
 		return intake.Result{}, err
 	}
 	if issue.Phase == phase.AwaitingMerge {
-		lingers, err := e.treeLingers(ctx, tx, issue.Tree)
+		lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree)
 		if err != nil {
 			return intake.Result{}, err
 		}
@@ -593,7 +593,7 @@ func (e *Engine) claimFailed(ctx context.Context, tx pgx.Tx, fact intake.ClaimFa
 	if err != nil || issue == nil || issue.Phase == phase.Held || RoleFor(issue.Phase) != fact.Role {
 		return intake.Result{}, err
 	}
-	if lingers, err := e.treeLingers(ctx, tx, issue.Tree); err != nil || lingers {
+	if lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree); err != nil || lingers {
 		return intake.Result{}, err
 	}
 	from := issue.Phase
@@ -618,7 +618,7 @@ func (e *Engine) retryOrEscalate(ctx context.Context, tx pgx.Tx, fact intake.Ret
 	if fact.Decision != intake.RetryDecision {
 		return intake.Result{}, nil
 	}
-	if lingers, err := e.treeLingers(ctx, tx, issue.Tree); err != nil || lingers {
+	if lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree); err != nil || lingers {
 		return intake.Result{}, err
 	}
 	from := *issue.HeldFrom
@@ -637,7 +637,7 @@ func (e *Engine) backward(ctx context.Context, tx pgx.Tx, fact intake.BackwardMo
 	if RoleFor(issue.Phase) == "" || RoleFor(issue.Phase) != fact.Requester || phaseIndex(fact.To) >= phaseIndex(issue.Phase) || phaseIndex(fact.To) < 0 {
 		return intake.Result{Refusal: &intake.Refusal{Status: 409, Code: "BACKWARD_REFUSED", Message: "backward moves require the current role and an earlier workflow phase"}}, nil
 	}
-	lingers, err := e.treeLingers(ctx, tx, issue.Tree)
+	lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree)
 	if err != nil {
 		return intake.Result{}, err
 	}
@@ -680,7 +680,7 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	if !ok {
 		return nil
 	}
-	if lingers, err := e.treeLingers(ctx, tx, issue.Tree); err != nil || lingers {
+	if lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree); err != nil || lingers {
 		return err
 	}
 	if err := e.status(ctx, tx, issue, row.Status); err != nil {
