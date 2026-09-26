@@ -28,7 +28,7 @@ var (
 	sharedNATSContainer *tcnats.NATSContainer
 )
 
-func sharedTestNATSURI(t *testing.T) string {
+func sharedTestNATSURI(t testing.TB) string {
 	t.Helper()
 	sharedNATSOnce.Do(func() {
 		ctr, err := tcnats.Run(context.Background(), testnats.Image)
@@ -77,13 +77,13 @@ func testBucket(t testing.TB) string {
 }
 
 // connectNATS creates an isolated connection to the package's shared NATS server.
-func connectNATS(t *testing.T) (*natsgo.Conn, func()) {
+func connectNATS(t testing.TB) (*natsgo.Conn, func()) {
 	t.Helper()
 	conn := testnats.Connect(t, sharedTestNATSURI(t))
 	return conn, conn.Close
 }
 
-func openStore(t *testing.T, conn *natsgo.Conn) *Store {
+func openStore(t testing.TB, conn *natsgo.Conn) *Store {
 	t.Helper()
 	name := testBucket(t)
 	st, err := Open(conn, WithReplicas(1), WithTTL(time.Hour), func(o *openOpts) { o.bucket = name })
@@ -179,7 +179,7 @@ func getState(t *testing.T, s *Store, owner, repo, number, sha string) State {
 
 // useKV rebuilds the store's watcher over kv, a wrapper of its bucket handle, so the store writes
 // through kv from here on. The replaced watcher is stopped first.
-func useKV(t *testing.T, s *Store, kv natsgo.KeyValue) {
+func useKV(t testing.TB, s *Store, kv natsgo.KeyValue) {
 	t.Helper()
 	s.watcher.Stop()
 	s.watcher = kvwatch.New("cistore", kv, s.applyWatched, s.resetCache)

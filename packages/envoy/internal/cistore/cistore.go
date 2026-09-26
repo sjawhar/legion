@@ -2,11 +2,12 @@
 
 // Each check_run and check_suite webhook folds into a per-commit State record
 // in a JetStream KV bucket via compare-and-swap rather than being published
-// raw. A reconcile ticker (see loop.go) emits one checks envelope when the
-// current head is quiet and its recorded CI work is complete. All coordination
-// state lives in KV, so aggregation is durable, restart-safe, and correct
-// across listener replicas; the only in-memory state is a rebuildable WatchAll
-// read-cache.
+// raw; concurrent observations of one commit share one write (see update). A
+// reconcile ticker (see loop.go) emits one checks envelope when the current head
+// is quiet and its recorded CI work is complete. All coordination state lives in
+// KV, so aggregation is durable, restart-safe, and correct across listener
+// replicas; the in-memory state is a rebuildable WatchAll read-cache and the
+// queue of observations waiting for their commit's write.
 package cistore
 
 import (
@@ -32,16 +33,16 @@ import (
 // Bucket is the JetStream KV bucket name for per-commit CI state.
 const Bucket = "envoy_ci_state"
 
-// recordBudget bounds how long Record retries its compare-and-swap loop under
-// contention. Concurrent writers (parallel webhook handlers, multiple replicas)
-// racing on the same commit conflict on the KV revision; each backs off with
-// jitter before retrying, so a bounded time budget lets them serialize rather
-// than a fixed attempt count that can starve when many checks for one SHA land
-// at once. Kept well under the listener's 10s HTTP WriteTimeout because Record
-// runs synchronously in the webhook handler and a check_run can fan out over
-// several PRs sequentially. NOTE: this bounds only the retry loop; a single
-// hung KV call can still block up to the JetStream MaxWait (a systemic limit of
-// the legacy nats.go KV API, shared with internal/store).
+// recordBudget bounds how long one write of a commit's record retries its compare-and-swap loop.
+// Concurrent observations of one commit within this process are combined into one write (update),
+// so the writers that conflict on the KV revision are the few that remain: the summary loop's
+// settlement transitions and another listener task during a deploy. Each backs off with jitter
+// before retrying, so a bounded time budget lets them serialize rather than a fixed attempt count.
+// A caller that queues behind a write in progress waits for that write and then its own, so a
+// Record returns within two budgets, well under the listener's 10s HTTP WriteTimeout even when a
+// check_run fans out over several PRs sequentially. NOTE: this bounds only the retry loop; a
+// single hung KV call can still block up to the JetStream MaxWait (a systemic limit of the legacy
+// nats.go KV API, shared with internal/store).
 const recordBudget = 2 * time.Second
 const recordBackoffCap = 50 * time.Millisecond
 
@@ -228,6 +229,30 @@ type Store struct {
 	// exposes its terminal error to the listener, which re-establishes the watcher or exits for
 	// Docker to restart.
 	watcher *kvwatch.Watcher
+
+	// combineMu guards combiners, which holds, for each commit's record, the mutations waiting to
+	// be written to it (update).
+	combineMu sync.Mutex
+	combiners map[string]*keyCombiner
+}
+
+// keyCombiner queues one record's pending mutations while one of their callers writes a batch.
+type keyCombiner struct {
+	queue   []*pendingMutation
+	writing bool
+}
+
+// pendingMutation is one caller's mutation and the channel that tells it the outcome: the error of
+// the write that carried it, or that it now writes the next batch itself. The channel receives at
+// most one message, so a send never blocks.
+type pendingMutation struct {
+	mutate func(*State) bool
+	done   chan combineOutcome
+}
+
+type combineOutcome struct {
+	err  error
+	lead bool
 }
 
 type openOpts struct {
@@ -285,6 +310,7 @@ func Open(nc *nats.Conn, opts ...Option) (*Store, error) {
 		cache:          map[string]State{},
 		heads:          map[string]string{},
 		cacheRevisions: map[string]uint64{},
+		combiners:      map[string]*keyCombiner{},
 	}
 	s.watcher = kvwatch.New("cistore", kv, s.applyWatched, s.resetCache)
 	s.watcher.Start()
@@ -461,7 +487,82 @@ func (s *Store) RecordSuite(observation contracts.CIObservation) error {
 	})
 }
 
+// update folds mutate into the record of one commit. Every check of a head writes that one record,
+// and a check_run burst is many concurrent webhooks, so concurrent calls for a record are combined:
+// one caller at a time writes, applying every mutation queued when its write starts, in arrival
+// order, in one compare-and-swap, and every caller in that batch returns the write's outcome; the
+// first caller that queued during the write then writes the next batch. Written one at a time, N
+// concurrent observations cost O(N) rounds in which every writer decodes, hashes and re-encodes the
+// whole record and only one wins, and the last ones run out of the budget. Each mutation's own
+// rules still decide whether it applies, so a batch leaves the record as the same mutations written
+// one at a time in that order would, except that generation advances once for the write that
+// changed the record rather than once per observation: it still strictly increases whenever the
+// snapshot changes.
 func (s *Store) update(owner, repo, number, sha string, mutate func(*State) bool) error {
+	key := Key(owner, repo, number, sha)
+	own := &pendingMutation{mutate: mutate, done: make(chan combineOutcome, 1)}
+	s.combineMu.Lock()
+	c := s.combiners[key]
+	if c == nil {
+		c = &keyCombiner{}
+		s.combiners[key] = c
+	}
+	c.queue = append(c.queue, own)
+	writer := !c.writing
+	c.writing = true
+	s.combineMu.Unlock()
+	if !writer {
+		if outcome := <-own.done; !outcome.lead {
+			return outcome.err
+		}
+	}
+	return s.writeBatch(key, c, own, owner, repo, number, sha)
+}
+
+// writeBatch writes every mutation queued for the record in one compare-and-swap, tells each
+// queued caller the outcome, and hands the writer's role to the first caller that queued since.
+// It reports and hands over even when the write panics, so no queued caller waits forever.
+func (s *Store) writeBatch(key string, c *keyCombiner, own *pendingMutation, owner, repo, number, sha string) (err error) {
+	s.combineMu.Lock()
+	batch := c.queue
+	c.queue = nil
+	s.combineMu.Unlock()
+	defer func() {
+		recovered := recover()
+		if recovered != nil {
+			err = fmt.Errorf("cistore: record write panicked: %v", recovered)
+		}
+		s.combineMu.Lock()
+		for _, pending := range batch {
+			if pending != own {
+				pending.done <- combineOutcome{err: err}
+			}
+		}
+		if len(c.queue) > 0 {
+			c.queue[0].done <- combineOutcome{lead: true}
+		} else {
+			c.writing = false
+			delete(s.combiners, key)
+		}
+		s.combineMu.Unlock()
+		if recovered != nil {
+			panic(recovered)
+		}
+	}()
+	return s.write(owner, repo, number, sha, func(st *State) bool {
+		changed := false
+		for _, pending := range batch {
+			if pending.mutate(st) {
+				changed = true
+			}
+		}
+		return changed
+	})
+}
+
+// write applies mutate to the record's current state and writes it with a compare-and-swap,
+// retrying on a revision conflict until recordBudget runs out.
+func (s *Store) write(owner, repo, number, sha string, mutate func(*State) bool) error {
 	kv := s.watcher.KV()
 	key := Key(owner, repo, number, sha)
 	deadline := time.Now().Add(recordBudget)
