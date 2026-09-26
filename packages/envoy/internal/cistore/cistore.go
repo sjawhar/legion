@@ -40,19 +40,54 @@ const Bucket = "envoy_ci_state"
 // transitions and another listener task during a deploy. Each backs off with jitter before
 // retrying, so a bounded time budget lets them serialize rather than a fixed attempt count. The
 // transient errors it outlasts are a NATS reconnect (a request refused while the connection
-// reconnects, since the reconnect buffer is off) and a JetStream 503 while a server restarts; it
-// cannot outlast a timeout, because every KV call waits up to the JetStream MaxWait (10 s, Open)
-// first, five times this budget, so a call that times out returns after the budget has run out.
+// reconnects, since the reconnect buffer is off, and a request that was in flight when the
+// connection went away, given up on when it reconnects: kvCall) and a JetStream 503 while a server
+// restarts. It cannot outlast a timeout on a connection that stays up, because every KV call waits
+// up to the JetStream MaxWait (10 s, Open) first, five times this budget, so a call that times out
+// returns after the budget has run out.
 // A caller that queues behind a write in progress waits for that write and then its own, so a
 // Record returns within two budgets. The webhook handler records a check_run once for each PR it
 // lists, one after another, so a delivery listing k PRs can take up to 2k budgets, past the
 // listener's 10s HTTP WriteTimeout at three; that needs a write to lose its compare-and-swap for its
 // whole budget, and after combining only the summary loop's transitions and another listener
-// task's batches write the same record. NOTE: this bounds only the retry loop; a single hung KV
-// call can still block up to the JetStream MaxWait (a systemic limit of the legacy nats.go KV API,
-// shared with internal/store).
+// task's batches write the same record. NOTE: this bounds only the retry loop; a KV call on a
+// connection that stays up can still wait up to the JetStream MaxWait (a systemic limit of the
+// legacy nats.go KV API, shared with internal/store).
 const recordBudget = 2 * time.Second
 const recordBackoffCap = 50 * time.Millisecond
+
+// errKVReconnected is what a KV call answers when the connection it was sent on reconnected
+// before its answer came.
+var errKVReconnected = errors.New("cistore: NATS reconnected before the KV call was answered")
+
+// kvCall returns call's answer, or errKVReconnected if reconnected closes first. A legacy nats.go
+// KV call takes no context and waits up to the JetStream MaxWait for its answer. One sent just
+// before the server went away gets none, so it would hold its write, and every caller queued
+// behind the write, for the whole wait; given up on at the reconnect (Rewatch), it is retried on
+// the new connection within the write's budget. A call on a connection that stays up is waited for
+// as long as the server takes, up to the MaxWait: a server that stalls and then answers loses
+// nothing. A call given up on ends on its own, with its answer or at the MaxWait. A write it
+// carried is a compare-and-swap at the revision its attempt read, so if the server applies it
+// after the retry's write it conflicts, and if before, the retry's fresh read finds the batch's
+// observations already there and writes nothing.
+func kvCall[T any](reconnected <-chan struct{}, call func() (T, error)) (T, error) {
+	type answer struct {
+		value T
+		err   error
+	}
+	answered := make(chan answer, 1)
+	go func() {
+		value, err := call()
+		answered <- answer{value, err}
+	}()
+	select {
+	case a := <-answered:
+		return a.value, a.err
+	case <-reconnected:
+		var zero T
+		return zero, errKVReconnected
+	}
+}
 
 // checkRunID is a GitHub check-run id. Records written before ids were
 // validated at ingress carry it as a decimal string; new records carry a
@@ -238,6 +273,12 @@ type Store struct {
 	// Docker to restart.
 	watcher *kvwatch.Watcher
 
+	// reconnectMu guards reconnected, which Rewatch closes and replaces. Rewatch runs on every NATS
+	// reconnect (and when the listener's self-health rebuilds a watcher), so a KV call still waiting
+	// when it closes may have been sent on a connection that went away (kvCall).
+	reconnectMu sync.Mutex
+	reconnected chan struct{}
+
 	// combineMu guards combiners, which holds, for each commit's record, the mutations waiting to
 	// be written to it (update).
 	combineMu sync.Mutex
@@ -300,6 +341,7 @@ func Open(nc *nats.Conn, opts ...Option) (*Store, error) {
 		heads:          map[string]string{},
 		cacheRevisions: map[string]uint64{},
 		combiners:      map[string]*keyCombiner{},
+		reconnected:    make(chan struct{}),
 	}
 	s.watcher = kvwatch.New("cistore", kv, s.applyWatched, s.resetCache)
 	s.watcher.Start()
@@ -315,9 +357,23 @@ func (s *Store) Ping() error {
 }
 
 // Rewatch moves the cache's watcher and the handle the store writes through to conn
-// (kvwatch.Watcher.Rewatch).
+// (kvwatch.Watcher.Rewatch), and then gives up on every write's KV call still waiting for an
+// answer (kvCall), since it runs on every reconnect: their retries take the handle it installed.
+// It gives them up even when the move fails, since the connection they were sent on reconnected.
 func (s *Store) Rewatch(conn *nats.Conn) error {
-	return s.watcher.Rewatch(conn)
+	err := s.watcher.Rewatch(conn)
+	s.reconnectMu.Lock()
+	close(s.reconnected)
+	s.reconnected = make(chan struct{})
+	s.reconnectMu.Unlock()
+	return err
+}
+
+// nextReconnect returns the channel the next Rewatch closes.
+func (s *Store) nextReconnect() <-chan struct{} {
+	s.reconnectMu.Lock()
+	defer s.reconnectMu.Unlock()
+	return s.reconnected
 }
 
 // resetCache empties the cache and its revision fence, for a recreated CI bucket.
@@ -481,9 +537,9 @@ func (s *Store) RecordSuite(observation contracts.CIObservation) error {
 // transient KV error (kvErrorLasts) is retried from a fresh read until recordBudget runs out: the
 // write carries every observation of a batch, so a NATS reconnect or a JetStream 503 during a
 // server restart must not fail them all, and GitHub does not redeliver a delivery the listener
-// refused. A lasting error fails it at once.
+// refused. A lasting error fails it at once. Each attempt takes the handle the latest Rewatch
+// installed, and each KV call is given up on if the connection reconnects before it is answered.
 func (s *Store) write(identity State, mutate func(*State) bool) error {
-	kv := s.watcher.KV()
 	key := Key(identity.Owner, identity.Repo, identity.Number, identity.SHA)
 	deadline := time.Now().Add(recordBudget)
 	var retryErr error
@@ -494,7 +550,8 @@ func (s *Store) write(identity State, mutate func(*State) bool) error {
 			}
 			time.Sleep(casBackoff(attempt - 1))
 		}
-		entry, err := kv.Get(key)
+		kv := s.watcher.KV()
+		entry, err := kvCall(s.nextReconnect(), func() (nats.KeyValueEntry, error) { return kv.Get(key) })
 		var st State
 		var rev uint64
 		switch {
@@ -523,11 +580,12 @@ func (s *Store) write(identity State, mutate func(*State) bool) error {
 		if err != nil {
 			return err
 		}
-		if rev == 0 {
-			_, err = kv.Create(key, buf)
-		} else {
-			_, err = kv.Update(key, buf, rev)
-		}
+		_, err = kvCall(s.nextReconnect(), func() (uint64, error) {
+			if rev == 0 {
+				return kv.Create(key, buf)
+			}
+			return kv.Update(key, buf, rev)
+		})
 		switch {
 		case err == nil:
 			return nil

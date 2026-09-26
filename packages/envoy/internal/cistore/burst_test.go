@@ -22,16 +22,20 @@ type writtenState struct {
 }
 
 // writeKV is the CI bucket seen through a store whose writes a test can slow, hold or fail, whose
-// next read it can fail once, and whose every successful write it records. Watches pass straight
-// through.
+// next read it can hold or fail once, and whose every successful write it records. Watches pass
+// straight through.
 type writeKV struct {
 	natsgo.KeyValue
 	delay time.Duration
+
+	// inFlight counts the calls in progress through this wrapper.
+	inFlight sync.WaitGroup
 
 	mu      sync.Mutex
 	act     func(call int) error
 	calls   int
 	getErr  error
+	getHold func()
 	written map[string][]writtenState
 }
 
@@ -42,11 +46,30 @@ func (k *writeKV) failNextGet(err error) {
 	k.mu.Unlock()
 }
 
-func (k *writeKV) Get(key string) (natsgo.KeyValueEntry, error) {
+// holdNextGet makes the next Get report on entered and wait until release is called before it
+// reads. Later reads pass.
+func (k *writeKV) holdNextGet() (entered <-chan struct{}, release func()) {
+	reached := make(chan struct{})
+	gate := make(chan struct{})
 	k.mu.Lock()
-	err := k.getErr
-	k.getErr = nil
+	k.getHold = func() {
+		close(reached)
+		<-gate
+	}
 	k.mu.Unlock()
+	return reached, func() { close(gate) }
+}
+
+func (k *writeKV) Get(key string) (natsgo.KeyValueEntry, error) {
+	k.inFlight.Add(1)
+	defer k.inFlight.Done()
+	k.mu.Lock()
+	err, hold := k.getErr, k.getHold
+	k.getErr, k.getHold = nil, nil
+	k.mu.Unlock()
+	if hold != nil {
+		hold()
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -62,6 +85,8 @@ func (k *writeKV) Update(key string, value []byte, last uint64) (uint64, error) 
 }
 
 func (k *writeKV) write(key string, value []byte, do func() (uint64, error)) (uint64, error) {
+	k.inFlight.Add(1)
+	defer k.inFlight.Done()
 	time.Sleep(k.delay)
 	k.mu.Lock()
 	act := k.act
@@ -125,6 +150,26 @@ func recv(t *testing.T, ch <-chan struct{}, what string) {
 	case <-time.After(10 * time.Second):
 		t.Fatalf("%s never happened", what)
 	}
+}
+
+// storedRecord is a record as the bucket holds it.
+type storedRecord struct {
+	state    State
+	revision uint64
+}
+
+// getRecord reads key from the bucket through the handle the store writes through.
+func getRecord(t *testing.T, s *Store, key string) storedRecord {
+	t.Helper()
+	entry, err := s.watcher.KV().Get(key)
+	if err != nil {
+		t.Fatalf("kv get: %v", err)
+	}
+	var st State
+	if err := json.Unmarshal(entry.Value(), &st); err != nil {
+		t.Fatalf("decode state: %v", err)
+	}
+	return storedRecord{st, entry.Revision()}
 }
 
 // states returns every state written to key, in revision order.
@@ -510,8 +555,8 @@ var failureHead = head{"example-org", "example-repo", "42", "3333333333333333333
 
 // A batch's write that fails for good reaches every caller in the batch as that failure, the
 // writer's role passes to the callers that queued meanwhile, and their write goes through: a failed
-// write leaves nobody waiting and the record accepting writes. A write that panics fails its batch
-// instead of stranding it.
+// write leaves nobody waiting and the record accepting writes. A mutation that panics fails its
+// batch instead of stranding it.
 func TestAFailedBatchWriteReachesEveryCallerAndTheNextBatchIsWritten(t *testing.T) {
 	h := failureHead
 	t.Run("a KV failure", func(t *testing.T) {
@@ -565,29 +610,26 @@ func TestAFailedBatchWriteReachesEveryCallerAndTheNextBatchIsWritten(t *testing.
 		}
 	})
 
-	t.Run("a write that panics", func(t *testing.T) {
+	t.Run("a mutation that panics", func(t *testing.T) {
 		conn, cleanup := connectNATS(t)
 		defer cleanup()
-		s, kv := wrapStore(t, conn, 0)
+		s, _ := wrapStore(t, conn, 0)
 		entered, release := make(chan struct{}), make(chan struct{})
-		kv.onWrite(func(call int) error {
-			if call == 1 {
+		var recovered any
+		batch := newCalls(t, s, h.key(), 4, func(i int) error {
+			if i > 0 {
+				return checkCall(s, h, 500)(i)
+			}
+			defer func() { recovered = recover() }()
+			return s.update(h.owner, h.repo, h.number, h.sha, func(*State) bool {
 				close(entered)
 				<-release
 				panic("injected panic")
-			}
-			return nil
-		})
-		var recovered any
-		batch := newCalls(t, s, h.key(), 4, func(i int) error {
-			if i == 0 {
-				defer func() { recovered = recover() }()
-			}
-			return checkCall(s, h, 500)(i)
+			})
 		})
 		batch.behind(entered, 4)
 		close(release)
-		errs := batch.wait("a write that panics")
+		errs := batch.wait("a mutation that panics")
 		if recovered != "injected panic" {
 			t.Fatalf("the writer's panic = %v, want it re-raised to the writer", recovered)
 		}
@@ -709,6 +751,82 @@ func TestATransientKVErrorFailsNoCallerInABurst(t *testing.T) {
 				t.Fatalf("record holds %d checks, want all %d", checks, n)
 			}
 		})
+	}
+}
+
+// A KV call sent just before the NATS server went away never gets an answer, and would wait
+// JetStream's MaxWait (10 s), five times the write's budget, with every caller queued behind the
+// write waiting too. The listener rewatches the store on every reconnect, and the write gives up
+// on the call then and retries it on the new connection, so every caller is written within the
+// budget. Here check-0's read, or its write, never answers while nine callers queue behind it, and
+// then the store is rewatched as the listener's reconnect hook does. The call given up on ends once
+// it is let through, and a write it carried lands nowhere: it conflicts with the retry's.
+func TestAKVCallInFlightAtAReconnectIsRetriedOnTheNewConnection(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		hang func(*writeKV) (<-chan struct{}, func())
+	}{
+		{"a read that never answers", (*writeKV).holdNextGet},
+		{"a write that never answers", (*writeKV).holdNextWrite},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, cleanup := connectNATS(t)
+			defer cleanup()
+			s, kv := wrapStore(t, conn, 0)
+			h := head{"example-org", "example-repo", "42", "7777777777777777777777777777777777777777"}
+			const n = 10
+			entered, release := tc.hang(kv)
+			released := false
+			defer func() {
+				if !released {
+					release()
+				}
+			}()
+			batch := newCalls(t, s, h.key(), n, checkCall(s, h, 900))
+			batch.behind(entered, n)
+			began := time.Now()
+			if err := s.Rewatch(conn); err != nil {
+				t.Fatalf("rewatch: %v", err)
+			}
+			requireNoErrors(t, "a burst with a KV call in flight at a reconnect", batch.wait("a KV call in flight at a reconnect"))
+			if elapsed := time.Since(began); elapsed > recordBudget {
+				t.Fatalf("the callers took %s after the reconnect, want within the %s budget", elapsed.Round(time.Millisecond), recordBudget)
+			}
+			before := getRecord(t, s, h.key())
+			if len(before.state.Checks) != n {
+				t.Fatalf("record holds %d checks, want all %d", len(before.state.Checks), n)
+			}
+
+			release()
+			released = true
+			waitAll(t, &kv.inFlight, "the KV call given up on")
+			if written := kv.states(h.key()); len(written) != 0 {
+				t.Fatalf("the KV call given up on wrote the record %d times, want none", len(written))
+			}
+			if after := getRecord(t, s, h.key()); after.revision != before.revision {
+				t.Fatalf("the record moved from revision %d to %d after the call given up on ended", before.revision, after.revision)
+			}
+		})
+	}
+}
+
+// A server that stalls and then answers loses nothing: a KV call on a connection that has not
+// reconnected is waited for, even past the write's budget. Here check-0's write is held for longer
+// than the budget and then let through.
+func TestASlowKVCallOnALiveConnectionIsWaitedFor(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s, kv := wrapStore(t, conn, 0)
+	h := head{"example-org", "example-repo", "42", "8888888888888888888888888888888888888888"}
+	const n = 10
+	entered, release := kv.holdNextWrite()
+	batch := newCalls(t, s, h.key(), n, checkCall(s, h, 950))
+	batch.behind(entered, n)
+	time.Sleep(recordBudget + 500*time.Millisecond)
+	release()
+	requireNoErrors(t, "a burst behind a slow KV call", batch.wait("a slow KV call"))
+	if checks := len(getState(t, s, h.owner, h.repo, h.number, h.sha).Checks); checks != n {
+		t.Fatalf("record holds %d checks, want all %d", checks, n)
 	}
 }
 
