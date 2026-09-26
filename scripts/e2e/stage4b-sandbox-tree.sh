@@ -459,6 +459,14 @@ end_claim_pod() {
   ended_pod=$(jq -r '.locator.sandbox.name // empty' <<<"$claim")
   [ -n "$ended_pod_uid" ] && [ -n "$ended_pod" ] || fail "the $role claim of $issue names no pod to end: $claim"
   state=$(jq -r '.state // "none"' <<<"$claim")
+  # Every pod whose worker became ready is shape-checked (pod-shape), and the watcher reads a pod's
+  # spec after it is ready, so a pod ended the moment its agent is ready waits for its check: gone
+  # before the watcher read it, it would fail the run as a pod whose spec could not be read.
+  case $state in
+    ready | working | idle)
+      [ -z "$shape_pid" ] || until_true 180 "pod $ended_pod_uid to be shape-checked before it is ended" shape_checked "$ended_pod_uid"
+      ;;
+  esac
   case $method in
     kill)
       case $state in
@@ -662,6 +670,8 @@ pod_shape_watcher() {
     sleep 3
   done
 }
+# shape_checked UID is whether the shape watcher has checked the pod with that uid.
+shape_checked() { grep -qF " $1 " "$evidence/pods-checked.txt" 2>/dev/null; }
 unchecked_sandbox_pods() {
   local uid
   for uid in $(jq -r 'select(.object.kind == "Pod") | .object | select(.metadata.labels["legion.dev/probe"] == null and .metadata.labels["legion.dev/e2e-control"] == null)
