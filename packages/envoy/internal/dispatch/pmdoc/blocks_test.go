@@ -77,7 +77,7 @@ func TestDeleteBlockReportsUnknownAndUnremovableBlocks(t *testing.T) {
 func TestDeleteTextblockRemovesTheBlockWhoseWholeTextIsDeleted(t *testing.T) {
 	sequentialBlockIDs(t)
 	const fixture = "- first item\n- second item\n\nA paragraph.\n\n| Key | Value |\n| --- | --- |\n| A10 | old |\n"
-	const table = "| Key | Value |\n| :--- | :--- |\n| A10 | old |\n"
+	const table = "| Key | Value |\n| --- | --- |\n| A10 | old |\n"
 	for _, test := range []struct {
 		name, quote string
 		removed     bool

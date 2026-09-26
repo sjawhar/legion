@@ -685,15 +685,20 @@ func escapeTableSyntaxPipes(value string) string {
 	return rendered.String()
 }
 
+// tableAlignment is the delimiter row's cell for a column's alignment. A column with none - null,
+// or the "none" this parser once stored - is written `---`, which both parsers read as no
+// alignment; `:---` reads as left.
 func tableAlignment(value any) string {
 	alignment, _ := value.(string)
 	switch alignment {
+	case "left":
+		return ":---"
 	case "center":
 		return ":---:"
 	case "right":
 		return "---:"
 	default:
-		return ":---"
+		return "---"
 	}
 }
 

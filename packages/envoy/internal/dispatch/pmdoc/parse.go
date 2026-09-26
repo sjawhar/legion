@@ -704,9 +704,15 @@ func parseTableRow(row ast.Node, header bool, source []byte, footnotes map[int]s
 		if err != nil {
 			return nil, err
 		}
+		// A column its delimiter row aligns nowhere (`---`) has no alignment, as the browser
+		// editor reads it; goldmark names that "none".
+		var alignment any
+		if cell.Alignment != extensionast.AlignNone {
+			alignment = cell.Alignment.String()
+		}
 		children = append(children, &Node{
 			Type:  cellType,
-			Attrs: Attrs{"colspan": 1, "rowspan": 1, "colwidth": nil, "alignment": cell.Alignment.String()},
+			Attrs: Attrs{"colspan": 1, "rowspan": 1, "colwidth": nil, "alignment": alignment},
 			Children: []*Node{{
 				Type:     "paragraph",
 				Children: content,

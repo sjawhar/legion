@@ -453,7 +453,7 @@ func TestDocumentEditsDeleteTableHeaderRowInPlace(t *testing.T) {
 	text := decodeBody[struct {
 		Markdown string `json:"markdown"`
 	}](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/text", nil, "alice"))
-	const want = "| A10 | old |\n| :--- | :--- |\n| A11 | new |\n"
+	const want = "| A10 | old |\n| --- | --- |\n| A11 | new |\n"
 	if text.Markdown != want {
 		t.Fatalf("after header-row deletion = %q, want %q", text.Markdown, want)
 	}
@@ -484,7 +484,7 @@ func TestDocumentEditsRejectInvalidTableIndicesWithoutChangingDocument(t *testin
 	if tableID == "" {
 		t.Fatalf("blocks = %#v, want a table", blocks)
 	}
-	const want = "| Key | Value |\n| :--- | :--- |\n| A10 | old |\n| A11 | new |\n"
+	const want = "| Key | Value |\n| --- | --- |\n| A10 | old |\n| A11 | new |\n"
 	for _, test := range []struct {
 		name     string
 		hasIndex bool
@@ -551,7 +551,7 @@ func TestDocumentEditsDeleteTableColumnInPlace(t *testing.T) {
 	text := decodeBody[struct {
 		Markdown string `json:"markdown"`
 	}](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/text", nil, "alice"))
-	const want = "| Key | Notes |\n| :--- | :--- |\n| A10 | first |\n| A11 | second |\n"
+	const want = "| Key | Notes |\n| --- | --- |\n| A10 | first |\n| A11 | second |\n"
 	if text.Markdown != want {
 		t.Fatalf("after column deletion = %q, want %q", text.Markdown, want)
 	}
@@ -591,7 +591,7 @@ func TestDocumentEditsCanonicalizeRaggedTableBeforeColumnDeletion(t *testing.T) 
 	after := decodeBody[struct {
 		Markdown string `json:"markdown"`
 	}](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/text", nil, "alice"))
-	const want = "| One | Three |\n| :--- | :--- |\n| first | third |\n| only |  |\n"
+	const want = "| One | Three |\n| --- | --- |\n| first | third |\n| only |  |\n"
 	if after.Markdown != want {
 		t.Fatalf("ragged column deletion = %q, want %q", after.Markdown, want)
 	}
@@ -780,7 +780,7 @@ func TestDocumentEditsProtectLiveCellAnchorsAndListThemOnTheirTable(t *testing.T
 	text := decodeBody[struct {
 		Markdown string `json:"markdown"`
 	}](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/text", nil, "alice"))
-	const want = "| Key | Keep |\n| :--- | :--- |\n| A10 | first |\n| A11 | second |\n"
+	const want = "| Key | Keep |\n| --- | --- |\n| A10 | first |\n| A11 | second |\n"
 	if text.Markdown != want {
 		t.Fatalf("table after deleting historical anchors = %q, want %q", text.Markdown, want)
 	}
@@ -816,7 +816,7 @@ func TestDocumentEditsExplainCascadedTableInAtomicBatch(t *testing.T) {
 	text := decodeBody[struct {
 		Markdown string `json:"markdown"`
 	}](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/text", nil, "alice"))
-	const want = "| Key |\n| :--- |\n| A10 |\n"
+	const want = "| Key |\n| --- |\n| A10 |\n"
 	if text.Markdown != want {
 		t.Fatalf("cascaded table batch changed document = %q, want %q", text.Markdown, want)
 	}

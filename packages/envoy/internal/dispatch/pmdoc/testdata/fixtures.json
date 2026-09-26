@@ -6772,7 +6772,7 @@
   },
   {
     "name": "table",
-    "markdown": "| Left | Center | Right |\n| :--- | :----: | ---: |\n| **a** | *b* | `c` |\n",
+    "markdown": "| Left | Center | Right |\n| :--- | :----: | ---: |\n| **a** | *b* | `c` |\n\n| Plain | Also plain |\n| - | --- |\n| 1 | 2 |\n",
     "pm_json": {
       "type": "doc",
       "content": [
@@ -6964,11 +6964,131 @@
               ]
             }
           ]
+        },
+        {
+          "type": "table",
+          "attrs": {
+            "blockId": "b-000016"
+          },
+          "content": [
+            {
+              "type": "table_header_row",
+              "attrs": {
+                "blockId": "b-000017"
+              },
+              "content": [
+                {
+                  "type": "table_header",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1,
+                    "colwidth": null,
+                    "alignment": null,
+                    "blockId": "b-000018"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000019"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "Plain"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "table_header",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1,
+                    "colwidth": null,
+                    "alignment": null,
+                    "blockId": "b-000020"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000021"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "Also plain"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "table_row",
+              "attrs": {
+                "blockId": "b-000022"
+              },
+              "content": [
+                {
+                  "type": "table_cell",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1,
+                    "colwidth": null,
+                    "alignment": null,
+                    "blockId": "b-000023"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000024"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "1"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "table_cell",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1,
+                    "colwidth": null,
+                    "alignment": null,
+                    "blockId": "b-000025"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000026"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "2"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
         }
       ]
     },
-    "yjs_update_v1_b64": "AUIBAAcBC3Byb3NlbWlycm9yAwV0YWJsZQcAAQADEHRhYmxlX2hlYWRlcl9yb3cHAAEBAwx0YWJsZV9oZWFkZXIHAAECAwlwYXJhZ3JhcGgHAAEDBgQAAQQETGVmdCgAAQMHYmxvY2tJZAF3CGItMDAwMDA0KAABAgdjb2xzcGFuAX0BKAABAgdyb3dzcGFuAX0BKAABAglhbGlnbm1lbnQBdwRsZWZ0KAABAgdibG9ja0lkAXcIYi0wMDAwMDOHAQIDDHRhYmxlX2hlYWRlcgcAAQ4DCXBhcmFncmFwaAcAAQ8GBAABEAZDZW50ZXIoAAEPB2Jsb2NrSWQBdwhiLTAwMDAwNigAAQ4HY29sc3BhbgF9ASgAAQ4Hcm93c3BhbgF9ASgAAQ4JYWxpZ25tZW50AXcGY2VudGVyKAABDgdibG9ja0lkAXcIYi0wMDAwMDWHAQ4DDHRhYmxlX2hlYWRlcgcAARwDCXBhcmFncmFwaAcAAR0GBAABHgVSaWdodCgAAR0HYmxvY2tJZAF3CGItMDAwMDA4KAABHAdjb2xzcGFuAX0BKAABHAdyb3dzcGFuAX0BKAABHAlhbGlnbm1lbnQBdwVyaWdodCgAARwHYmxvY2tJZAF3CGItMDAwMDA3KAABAQdibG9ja0lkAXcIYi0wMDAwMDKHAQEDCXRhYmxlX3JvdwcAASoDCnRhYmxlX2NlbGwHAAErAwlwYXJhZ3JhcGgHAAEsBgYAAS0Gc3Ryb25nDnsibWFya2VyIjoiKiJ9hAEuAWGGAS8Gc3Ryb25nBG51bGwoAAEsB2Jsb2NrSWQBdwhiLTAwMDAxMSgAASsHY29sc3BhbgF9ASgAASsHcm93c3BhbgF9ASgAASsJYWxpZ25tZW50AXcEbGVmdCgAASsHYmxvY2tJZAF3CGItMDAwMDEwhwErAwp0YWJsZV9jZWxsBwABNgMJcGFyYWdyYXBoBwABNwYGAAE4CGVtcGhhc2lzDnsibWFya2VyIjoiKiJ9hAE5AWKGAToIZW1waGFzaXMEbnVsbCgAATcHYmxvY2tJZAF3CGItMDAwMDEzKAABNgdjb2xzcGFuAX0BKAABNgdyb3dzcGFuAX0BKAABNglhbGlnbm1lbnQBdwZjZW50ZXIoAAE2B2Jsb2NrSWQBdwhiLTAwMDAxMocBNgMKdGFibGVfY2VsbAcAAUEDCXBhcmFncmFwaAcAAUIGBgABQwppbmxpbmVDb2RlAnt9hAFEAWOGAUUKaW5saW5lQ29kZQRudWxsKAABQgdibG9ja0lkAXcIYi0wMDAwMTUoAAFBB2NvbHNwYW4BfQEoAAFBB3Jvd3NwYW4BfQEoAAFBCWFsaWdubWVudAF3BXJpZ2h0KAABQQdibG9ja0lkAXcIYi0wMDAwMTQoAAEqB2Jsb2NrSWQBdwhiLTAwMDAwOSgAAQAHYmxvY2tJZAF3CGItMDAwMDAxAA==",
-    "rendered_by_milkdown": "| Left  | Center | Right |\n| :---- | :----: | ----: |\n| **a** |   *b*  |   `c` |\n"
+    "yjs_update_v1_b64": "AWgBAAcBC3Byb3NlbWlycm9yAwV0YWJsZQcAAQADEHRhYmxlX2hlYWRlcl9yb3cHAAEBAwx0YWJsZV9oZWFkZXIHAAECAwlwYXJhZ3JhcGgHAAEDBgQAAQQETGVmdCgAAQMHYmxvY2tJZAF3CGItMDAwMDA0KAABAgdjb2xzcGFuAX0BKAABAgdyb3dzcGFuAX0BKAABAglhbGlnbm1lbnQBdwRsZWZ0KAABAgdibG9ja0lkAXcIYi0wMDAwMDOHAQIDDHRhYmxlX2hlYWRlcgcAAQ4DCXBhcmFncmFwaAcAAQ8GBAABEAZDZW50ZXIoAAEPB2Jsb2NrSWQBdwhiLTAwMDAwNigAAQ4HY29sc3BhbgF9ASgAAQ4Hcm93c3BhbgF9ASgAAQ4JYWxpZ25tZW50AXcGY2VudGVyKAABDgdibG9ja0lkAXcIYi0wMDAwMDWHAQ4DDHRhYmxlX2hlYWRlcgcAARwDCXBhcmFncmFwaAcAAR0GBAABHgVSaWdodCgAAR0HYmxvY2tJZAF3CGItMDAwMDA4KAABHAdjb2xzcGFuAX0BKAABHAdyb3dzcGFuAX0BKAABHAlhbGlnbm1lbnQBdwVyaWdodCgAARwHYmxvY2tJZAF3CGItMDAwMDA3KAABAQdibG9ja0lkAXcIYi0wMDAwMDKHAQEDCXRhYmxlX3JvdwcAASoDCnRhYmxlX2NlbGwHAAErAwlwYXJhZ3JhcGgHAAEsBgYAAS0Gc3Ryb25nDnsibWFya2VyIjoiKiJ9hAEuAWGGAS8Gc3Ryb25nBG51bGwoAAEsB2Jsb2NrSWQBdwhiLTAwMDAxMSgAASsHY29sc3BhbgF9ASgAASsHcm93c3BhbgF9ASgAASsJYWxpZ25tZW50AXcEbGVmdCgAASsHYmxvY2tJZAF3CGItMDAwMDEwhwErAwp0YWJsZV9jZWxsBwABNgMJcGFyYWdyYXBoBwABNwYGAAE4CGVtcGhhc2lzDnsibWFya2VyIjoiKiJ9hAE5AWKGAToIZW1waGFzaXMEbnVsbCgAATcHYmxvY2tJZAF3CGItMDAwMDEzKAABNgdjb2xzcGFuAX0BKAABNgdyb3dzcGFuAX0BKAABNglhbGlnbm1lbnQBdwZjZW50ZXIoAAE2B2Jsb2NrSWQBdwhiLTAwMDAxMocBNgMKdGFibGVfY2VsbAcAAUEDCXBhcmFncmFwaAcAAUIGBgABQwppbmxpbmVDb2RlAnt9hAFEAWOGAUUKaW5saW5lQ29kZQRudWxsKAABQgdibG9ja0lkAXcIYi0wMDAwMTUoAAFBB2NvbHNwYW4BfQEoAAFBB3Jvd3NwYW4BfQEoAAFBCWFsaWdubWVudAF3BXJpZ2h0KAABQQdibG9ja0lkAXcIYi0wMDAwMTQoAAEqB2Jsb2NrSWQBdwhiLTAwMDAwOSgAAQAHYmxvY2tJZAF3CGItMDAwMDAxhwEAAwV0YWJsZQcAAU4DEHRhYmxlX2hlYWRlcl9yb3cHAAFPAwx0YWJsZV9oZWFkZXIHAAFQAwlwYXJhZ3JhcGgHAAFRBgQAAVIFUGxhaW4oAAFRB2Jsb2NrSWQBdwhiLTAwMDAxOSgAAVAHY29sc3BhbgF9ASgAAVAHcm93c3BhbgF9ASgAAVAHYmxvY2tJZAF3CGItMDAwMDE4hwFQAwx0YWJsZV9oZWFkZXIHAAFcAwlwYXJhZ3JhcGgHAAFdBgQAAV4KQWxzbyBwbGFpbigAAV0HYmxvY2tJZAF3CGItMDAwMDIxKAABXAdjb2xzcGFuAX0BKAABXAdyb3dzcGFuAX0BKAABXAdibG9ja0lkAXcIYi0wMDAwMjAoAAFPB2Jsb2NrSWQBdwhiLTAwMDAxN4cBTwMJdGFibGVfcm93BwABbgMKdGFibGVfY2VsbAcAAW8DCXBhcmFncmFwaAcAAXAGBAABcQExKAABcAdibG9ja0lkAXcIYi0wMDAwMjQoAAFvB2NvbHNwYW4BfQEoAAFvB3Jvd3NwYW4BfQEoAAFvB2Jsb2NrSWQBdwhiLTAwMDAyM4cBbwMKdGFibGVfY2VsbAcAAXcDCXBhcmFncmFwaAcAAXgGBAABeQEyKAABeAdibG9ja0lkAXcIYi0wMDAwMjYoAAF3B2NvbHNwYW4BfQEoAAF3B3Jvd3NwYW4BfQEoAAF3B2Jsb2NrSWQBdwhiLTAwMDAyNSgAAW4HYmxvY2tJZAF3CGItMDAwMDIyKAABTgdibG9ja0lkAXcIYi0wMDAwMTYA",
+    "rendered_by_milkdown": "| Left  | Center | Right |\n| :---- | :----: | ----: |\n| **a** |   *b*  |   `c` |\n\n| Plain | Also plain |\n| ----- | ---------- |\n| 1     | 2          |\n"
   },
   {
     "name": "task-markers",

@@ -415,7 +415,7 @@ func TestApplyOperationInsertsParagraphAfterTableContainingCellAnchor(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	const want = "| Key | Value |\n| :--- | :--- |\n| A10 | old |\n\nInserted paragraph\n\nAfter.\n"
+	const want = "| Key | Value |\n| --- | --- |\n| A10 | old |\n\nInserted paragraph\n\nAfter.\n"
 	if markdown != want {
 		t.Fatalf("paragraph after cell anchor = %q, want %q", markdown, want)
 	}
@@ -484,7 +484,7 @@ func TestApplyOperationExtendsTableAfterCellAnchor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const want = "| Key | Value |\n| :--- | :--- |\n| A10 | old |\n| A11 | new |\n"
+	const want = "| Key | Value |\n| --- | --- |\n| A10 | old |\n| A11 | new |\n"
 	if markdown != want {
 		t.Fatalf("table-row insertion = %q, want %q", markdown, want)
 	}
@@ -683,7 +683,7 @@ func TestApplyOperationDeletingABlocksWholeTextRemovesTheBlock(t *testing.T) {
 			name:     "table cell text is removed but the cell stays",
 			markdown: "| Key | Value |\n| --- | --- |\n| A10 | old |\n",
 			ops:      []model.EditOp{{Op: "delete", Find: "old"}},
-			want:     "| Key | Value |\n| :--- | :--- |\n| A10 |  |\n",
+			want:     "| Key | Value |\n| --- | --- |\n| A10 |  |\n",
 		},
 		{
 			name:     "a parent bullet's nested list is hoisted into its place",

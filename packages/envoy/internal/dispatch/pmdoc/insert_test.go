@@ -51,7 +51,7 @@ func TestBlockInsertAtTableCellAnchorFollowsEnclosingTable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertRenderedMarkdown(t, out, "| Key | Value |\n| :--- | :--- |\n| A10 | old |\n\n## Added\n\nNext.\n")
+	assertRenderedMarkdown(t, out, "| Key | Value |\n| --- | --- |\n| A10 | old |\n\n## Added\n\nNext.\n")
 }
 
 func TestTableRowInsertAfterCellAnchorExtendsContainingTable(t *testing.T) {
@@ -74,7 +74,7 @@ func TestTableRowInsertAfterCellAnchorExtendsContainingTable(t *testing.T) {
 	if strings.Contains(markdown, "||") || strings.Contains(markdown, "\\| A11") {
 		t.Fatalf("table row rendered as inline text: %q", markdown)
 	}
-	assertRenderedMarkdown(t, out, "| Key | Value |\n| :--- | :--- |\n| A10 | old |\n| A11 | new |\n")
+	assertRenderedMarkdown(t, out, "| Key | Value |\n| --- | --- |\n| A10 | old |\n| A11 | new |\n")
 }
 
 func TestTableRowInsertBeforeCellAnchorExtendsContainingTable(t *testing.T) {
@@ -93,7 +93,7 @@ func TestTableRowInsertBeforeCellAnchorExtendsContainingTable(t *testing.T) {
 	if !inserted {
 		t.Fatal("row fragment was not inserted into the table")
 	}
-	assertRenderedMarkdown(t, out, "| Key | Value |\n| :--- | :--- |\n| A10 | old |\n| A11 | new |\n| A12 | later |\n")
+	assertRenderedMarkdown(t, out, "| Key | Value |\n| --- | --- |\n| A10 | old |\n| A11 | new |\n| A12 | later |\n")
 }
 
 func TestTableRowInsertRejectsRowsWiderThanContainingTable(t *testing.T) {
@@ -127,7 +127,7 @@ func TestTableRowInsertPadsRowsToContainingTableWidth(t *testing.T) {
 	if !inserted {
 		t.Fatal("short row fragment was not inserted into the table")
 	}
-	assertRenderedMarkdown(t, out, "| Key | Value |\n| :--- | :--- |\n| A10 | old |\n| A11 |  |\n")
+	assertRenderedMarkdown(t, out, "| Key | Value |\n| --- | --- |\n| A10 | old |\n| A11 |  |\n")
 }
 
 func renderedMarkdown(t *testing.T, doc *Node) string {

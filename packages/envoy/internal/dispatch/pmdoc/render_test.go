@@ -99,7 +99,7 @@ func TestRenderTableCellEscapesPipes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "| head\\|er |\n| :--- |\n| cel\\|l |\n" {
+	if got != "| head\\|er |\n| --- |\n| cel\\|l |\n" {
 		t.Fatalf("Render(table) = %q", got)
 	}
 }
@@ -116,7 +116,7 @@ func TestRenderTableCellParagraph(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if markdown != "| header |\n| :--- |\n| cell |\n" {
+	if markdown != "| header |\n| --- |\n| cell |\n" {
 		t.Fatalf("Render(table) = %q", markdown)
 	}
 }
@@ -654,7 +654,7 @@ func TestRenderTableHTMLPipeCanonicalizesToEntity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("render table: %v", err)
 	}
-	const want = "| header |\n| :--- |\n| <span data-label=\"one&#124;two\"> |\n"
+	const want = "| header |\n| --- |\n| <span data-label=\"one&#124;two\"> |\n"
 	if rendered != want {
 		t.Fatalf("rendered table = %q, want %q", rendered, want)
 	}
