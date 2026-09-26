@@ -16,7 +16,7 @@
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
-work=$(mktemp -d /tmp/legion-e2e-controller.XXXXXXXX)
+work=$(mktemp -d "/tmp/legion-e2e-controller.$$.XXXXXXXX")
 evidence=${CONTROLLER_START_EVIDENCE_DIR:-$(mktemp -d /tmp/legion-e2e-controller-evidence.XXXXXXXX)}
 mkdir -p "$evidence/logs" "$evidence/checks"
 ok=
@@ -42,6 +42,8 @@ pass() { echo "ok $check"; }
 fail() { echo "FAIL $check: $*" >&2; exit 1; }
 # shellcheck source-path=SCRIPTDIR source=lib/rig.sh
 . "$root/scripts/e2e/lib/rig.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/leftovers.sh
+. "$root/scripts/e2e/lib/leftovers.sh"
 
 # Unconditional: every run removes what it made, whatever it ended on.
 cleanup() {
@@ -96,6 +98,7 @@ pick_port envoy_port
 (cd "$root/packages/envoy" && go build -o "$work/envoy-listener" ./cmd/listener)
 note "legion $("$work/legion" version); OMP pin $pin; daemon port $daemon_port; listener port $envoy_port"
 
+refuse_leftovers legion-e2e-controller
 (umask 077 && head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/postgres-password")
 # Docker assigns the containers' host ports when it binds them, so neither can lose a race.
 docker run -d --name "$pg_container" --mount type=tmpfs,destination=/var/lib/postgresql/data \
