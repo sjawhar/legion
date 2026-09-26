@@ -74,7 +74,7 @@ Replace it with a captured delivery once one exists, but do not wait for one to 
 
 ## The skip runs after signature verification, and one subtest pins that
 
-The handler's order is method → body (1 MiB cap) → `X-GitHub-Delivery`/`X-GitHub-Event` →
+The handler's order is method → body (25 MiB cap, GitHub's payload maximum; 413 over it) → `X-GitHub-Delivery`/`X-GitHub-Event` →
 `verify.Github(secret, body, signature)` (401) → JSON decode → sender log → `githubSkip(event)`
 (200 `ok`, return) → head recording → CI observations → envelopes → publish. `githubSkip` was the
 designed hook for "acknowledge and drop" and already sat after verification; the change is one

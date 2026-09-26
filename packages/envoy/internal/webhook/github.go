@@ -99,6 +99,13 @@ func githubPullRequestHead(event string, payload map[string]any) (owner, repo, n
 	return owner, repo, number, sha, updatedAt, owner != "" && repo != "" && number != "" && sha != ""
 }
 
+// githubMaxBody is the largest webhook body the handler reads: GitHub's documented payload cap,
+// 25 MB, read as MiB so no delivery GitHub sends is refused. A push of a thousand commits is
+// several megabytes, and a refused delivery is lost for good, since a redelivery is the same body.
+// The body is buffered whole, because its signature covers every byte, so this is also the bound
+// on what one request holds before it is parsed.
+const githubMaxBody = 25 << 20
+
 // GitHubHandler returns the HTTP handler for GitHub webhook events.
 func GitHubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publisher, ci CIRecorder) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -106,8 +113,13 @@ func GitHubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, githubMaxBody))
 		if err != nil {
+			var maxBytesErr *http.MaxBytesError
+			if errors.As(err, &maxBytesErr) {
+				http.Error(w, "body too large", http.StatusRequestEntityTooLarge)
+				return
+			}
 			http.Error(w, "invalid body", http.StatusBadRequest)
 			return
 		}

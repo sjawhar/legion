@@ -1,9 +1,11 @@
 package webhook
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"github.com/sjawhar/envoy/internal/cistore"
 	"github.com/sjawhar/envoy/internal/contracts"
@@ -800,4 +802,121 @@ func TestGitHubHandlerTreatsMalformedHeadFieldsAsCallerData(t *testing.T) {
 			t.Fatalf("published = %d, want 1", len(pub.published))
 		}
 	})
+}
+
+// largePushPayload is a push listing commits commits, each carrying the fields GitHub sends for
+// one and touching several files, the shape of a large branch push.
+func largePushPayload(t *testing.T, commits int) []byte {
+	t.Helper()
+	list := make([]map[string]any, commits)
+	for i := range list {
+		sha := fmt.Sprintf("%040x", i+1)
+		person := map[string]any{"name": "Example Author", "email": "author@example.com", "username": "example-author"}
+		paths := make([]string, 12)
+		for j := range paths {
+			paths[j] = fmt.Sprintf("services/component-%03d/internal/package-%02d/source_file_%02d.go", i%50, j, j)
+		}
+		list[i] = map[string]any{
+			"id":        sha,
+			"tree_id":   fmt.Sprintf("%040x", i+1_000_000),
+			"distinct":  true,
+			"message":   fmt.Sprintf("Change %d\n\n%s", i, strings.Repeat("A longer commit message body line. ", 68)),
+			"timestamp": "2026-09-24T01:29:00Z",
+			"url":       "https://example-host/acme/widgets/commit/" + sha,
+			"author":    person,
+			"committer": person,
+			"added":     paths[:4],
+			"removed":   paths[4:6],
+			"modified":  paths[6:],
+		}
+	}
+	body, err := json.Marshal(map[string]any{
+		"ref":         "refs/heads/main",
+		"before":      fmt.Sprintf("%040x", 0),
+		"after":       fmt.Sprintf("%040x", commits),
+		"compare":     "https://example-host/acme/widgets/compare",
+		"commits":     list,
+		"head_commit": list[len(list)-1],
+		"pusher":      map[string]any{"name": "example-author"},
+		"sender":      map[string]any{"login": "example-author", "type": "User"},
+		"repository":  map[string]any{"name": "widgets", "owner": map[string]any{"login": "acme"}, "full_name": "acme/widgets"},
+	})
+	if err != nil {
+		t.Fatalf("marshal push: %v", err)
+	}
+	return body
+}
+
+// A push of about a thousand commits is a delivery of several megabytes, well inside the 25 MB
+// GitHub delivers. The handler publishes it like any other push; refusing it loses the event for
+// good, since a redelivery is the same body.
+func TestGitHubHandlerPublishesAPushOfSeveralMegabytes(t *testing.T) {
+	const secret = "s"
+	body := largePushPayload(t, 1000)
+	if len(body) < 3_500_000 {
+		t.Fatalf("the push is %d bytes, want the ~3.6 MB of a thousand-commit push", len(body))
+	}
+	pub := &mockPublisher{}
+	handler := GitHubHandler(secret, "@legion", "", pub, &mockRecorder{})
+	req := httptest.NewRequest(http.MethodPost, "/webhook/github", bytes.NewReader(body))
+	req.Header.Set("X-GitHub-Delivery", "delivery-large-push")
+	req.Header.Set("X-GitHub-Event", "push")
+	req.Header.Set("X-Hub-Signature-256", githubSign(secret, body))
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rr.Code, rr.Body.String())
+	}
+	if len(pub.published) != 1 {
+		t.Fatalf("published = %d, want 1", len(pub.published))
+	}
+	var payload map[string]string
+	if err := json.Unmarshal([]byte(pub.published[0].Payload), &payload); err != nil {
+		t.Fatalf("decode the push payload: %v", err)
+	}
+	if payload["commit_count"] != "1000" || payload["changed_paths_truncated"] != "true" {
+		t.Fatalf("push payload commit_count = %q, changed_paths_truncated = %q; want 1000 and true",
+			payload["commit_count"], payload["changed_paths_truncated"])
+	}
+}
+
+// GitHub delivers nothing over 25 MB, so the handler reads a body up to that size and refuses a
+// larger one as too large, before verifying or parsing any of it.
+func TestGitHubHandlerReadsABodyUpToGitHubsPayloadCap(t *testing.T) {
+	const secret = "s"
+	for _, tc := range []struct {
+		name string
+		size int
+		want int
+	}{
+		// A body of exactly the cap is read whole and reaches the JSON decode, which refuses it.
+		{name: "at the cap", size: 25 << 20, want: http.StatusBadRequest},
+		{name: "one byte over the cap", size: 25<<20 + 1, want: http.StatusRequestEntityTooLarge},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := bytes.Repeat([]byte("x"), tc.size)
+			pub := &mockPublisher{}
+			recorder := &mockRecorder{}
+			handler := GitHubHandler(secret, "@legion", "", pub, recorder)
+			req := httptest.NewRequest(http.MethodPost, "/webhook/github", bytes.NewReader(body))
+			req.Header.Set("X-GitHub-Delivery", "delivery-oversized")
+			req.Header.Set("X-GitHub-Event", "push")
+			req.Header.Set("X-Hub-Signature-256", githubSign(secret, body))
+			rr := httptest.NewRecorder()
+
+			handler.ServeHTTP(rr, req)
+
+			if rr.Code != tc.want {
+				t.Fatalf("status = %d, want %d; body = %s", rr.Code, tc.want, rr.Body.String())
+			}
+			if tc.want == http.StatusBadRequest && !strings.Contains(rr.Body.String(), "invalid json") {
+				t.Fatalf("body = %q, want the JSON decode's refusal: a body at the cap must be read whole", rr.Body.String())
+			}
+			if len(pub.published) != 0 || len(recorder.calls) != 0 || len(recorder.headCalls) != 0 {
+				t.Fatalf("published %d, recorded %d checks and %d heads; want nothing", len(pub.published), len(recorder.calls), len(recorder.headCalls))
+			}
+		})
+	}
 }
