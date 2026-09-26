@@ -105,6 +105,7 @@ locked=
 timeout_hook=
 daemon_pid=
 watch_pid=
+leaks_pid=
 events_pid=
 sampler_pid=
 interests_pid=
@@ -459,14 +460,6 @@ end_claim_pod() {
   ended_pod=$(jq -r '.locator.sandbox.name // empty' <<<"$claim")
   [ -n "$ended_pod_uid" ] && [ -n "$ended_pod" ] || fail "the $role claim of $issue names no pod to end: $claim"
   state=$(jq -r '.state // "none"' <<<"$claim")
-  # Every pod whose worker became ready is shape-checked (pod-shape), and the watcher reads a pod's
-  # spec after it is ready, so a pod ended the moment its agent is ready waits for its check: gone
-  # before the watcher read it, it would fail the run as a pod whose spec could not be read.
-  case $state in
-    ready | working | idle)
-      [ -z "$shape_pid" ] || until_true 180 "pod $ended_pod_uid to be shape-checked before it is ended" shape_checked "$ended_pod_uid"
-      ;;
-  esac
   case $method in
     kill)
       case $state in
@@ -522,17 +515,62 @@ pod_watch_verdict() {
   ' "$watch" | tee "$work/pod-watch-verdict.txt"
   [ ! -s "$work/pod-watch-verdict.txt" ]
 }
+# watch_raw FILE KIND PATH writes every watch event of the API collection PATH (with its query) to
+# FILE, one JSON object a line, for the rest of the run. kubectl's own watch ends, silently, when the
+# API server closes it at its watch timeout (a full run's pod watch once stopped 56 minutes in), so
+# this lists the collection, watches from the list's resourceVersion, and resumes from the last
+# version it saw each time a watch ends; a version the server no longer holds (410 Gone) is listed
+# again. Each list, end and resume is noted in the transcript. A list's items are recorded as ADDED
+# events of KIND, as the watch reports them.
+watch_raw() {
+  local file=$1 kind=$2 path=$3 version='' list line type next
+  trap - EXIT ERR
+  set +e
+  while kill -0 "$$" 2>/dev/null; do
+    if [ -z "$version" ]; then
+      if ! list=$(kubectl --context "$operator" get --raw "$path" 2>>"$evidence/logs/$(basename "$file" .json).err"); then
+        sleep 2
+        continue
+      fi
+      version=$(jq -r '.metadata.resourceVersion' <<<"$list")
+      jq -c --arg kind "$kind" '.items[] | {type: "ADDED", object: (. + {kind: $kind})}' <<<"$list" >>"$file"
+      echo "   [watch] $(basename "$file"): listed at resourceVersion $version"
+    fi
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      # An ERROR carries the status code in place of a version.
+      IFS=$'\t' read -r type next < <(jq -r 'if .type == "ERROR" then "ERROR\t\(.object.code // "")" else "\(.type)\t\(.object.metadata.resourceVersion // "")" end' <<<"$line")
+      case "$type" in
+        ERROR)
+          echo "   [watch] $(basename "$file"): the server ended the watch at resourceVersion $version with code $next$([ "$next" = 410 ] && echo '; listing again')"
+          [ "$next" != 410 ] || version=
+          break
+          ;;
+        BOOKMARK) version=$next ;;
+        *)
+          printf '%s\n' "$line" >>"$file"
+          [ -z "$next" ] || version=$next
+          ;;
+      esac
+    done < <(setpriv --pdeathsig KILL kubectl --context "$operator" get --raw "$path&watch=1&allowWatchBookmarks=true&resourceVersion=$version" 2>>"$evidence/logs/$(basename "$file" .json).err")
+    [ -z "$version" ] || echo "   [watch] $(basename "$file"): the watch ended; resuming at resourceVersion $version"
+  done
+}
 start_pod_watch() {
-  # kubectl itself, not a subshell around a function, so the recorded pid is what cleanup stops; and
   # fd 9, the run lock, stays out of every background child, so none can outlive the run holding it.
   # Each watch and loop also ends with the driver itself, however it ends: a killed driver runs no
-  # cleanup, so a watch dies with it (setpriv --pdeathsig) and a loop stops at its next pass.
-  setpriv --pdeathsig KILL kubectl --context "$operator" -n "$namespace" get pods -l "legion.dev/project=$run_label" -w -o json --output-watch-events \
-    >"$evidence/pod-watch.json" 2>"$evidence/logs/pod-watch.err" 9>&- 7>&- &
+  # cleanup, so a kubectl dies with it (setpriv --pdeathsig) and a loop stops at its next pass.
+  : >"$evidence/pod-watch.json"
+  watch_raw "$evidence/pod-watch.json" Pod "/api/v1/namespaces/$namespace/pods?labelSelector=legion.dev%2Fproject%3D$run_label" 9>&- 7>&- &
   watch_pid=$!
-  setpriv --pdeathsig KILL kubectl --context "$operator" get events -A -w -o json --field-selector involvedObject.kind=Node \
-    >"$evidence/node-events.json" 2>"$evidence/logs/node-events.err" 9>&- 7>&- &
+  : >"$evidence/node-events.json"
+  watch_raw "$evidence/node-events.json" Event "/api/v1/events?fieldSelector=involvedObject.kind%3DNode" 9>&- 7>&- &
   events_pid=$!
+  # Every value the run's Secrets hold, kept in memory by lib/secret-leaks.ts and judged against the
+  # recorded pods at pod-shape; no value is printed or written.
+  setpriv --pdeathsig KILL bun "$root/scripts/e2e/lib/secret-leaks.ts" "$operator" "$namespace" "legion.dev/project=$run_label" \
+    "$evidence/pod-watch.json" "$work/secret-leaks.json" 2>>"$evidence/logs/secret-leaks.err" 9>&- 7>&- &
+  leaks_pid=$!
   ( # Node memory for the nodes the run's pods are on, every 30 s (metrics-server).
     trap - EXIT ERR
     set +e
@@ -582,18 +620,15 @@ hog_oomkilled() {
 
 # ---- the pod-shape watcher (checkpoint pod-shape) --------------------------------------------------
 
-# check_pod_shape POD UID prints each way the pod departs from the shape every Sandbox pod has, or
-# nothing: gVisor, the operator's ServiceAccount and its one projected token, the run's own copy of
+# check_pod_shape SPEC prints each way the pod object SPEC departs from the shape every Sandbox pod
+# has, or nothing, with its Secret's values as they are now: gVisor, the operator's ServiceAccount and its one projected token, the run's own copy of
 # the operator's route ConfigMap mounted where the profile reads models.yml, the pool, the restricted
 # security context, no token value in a container's environment, command or args, and 4b.6b's split
 # provisioning (the provisioning token only in workspace-fetch, the feed read-only in workspace-init,
 # no provision directory in the worker).
-check_pod_shape() {
-  local pod=$1 spec tokens
-  spec=$(op get pod "$pod" -o json) || {
-    echo "the pod's spec could not be read"
-    return
-  }
+# shape_problems prints each way the pod object on stdin departs from that shape, or nothing. It
+# judges the object alone, so a pod the watch recorded is judged after it is gone.
+shape_problems() {
   jq -r --arg route "$route_configmap" '
     .spec as $s
     | (if $s.runtimeClassName != "gvisor" then "runtimeClassName \($s.runtimeClassName)" else empty end),
@@ -619,7 +654,11 @@ check_pod_shape() {
       ([$s.initContainers[]? | select(.name != "workspace-fetch") | .volumeMounts[]? | select(.mountPath == "/var/run/legion/provision")] | if length > 0 then "the provision volume is mounted outside workspace-fetch" else empty end),
       ([$s.containers[] | select(.name == "worker") | .volumeMounts[]? | select(.mountPath == "/var/run/legion/provision")] | if length > 0 then "the worker mounts the provision volume" else empty end),
       ([$s.initContainers[]? | select(.name == "workspace-init") | .volumeMounts[]? | select(.name == "feed" and .readOnly != true)] | if length > 0 then "workspace-init mounts the feed writable" else empty end)
-  ' <<<"$spec"
+  '
+}
+check_pod_shape() {
+  local spec=$1 tokens
+  shape_problems <<<"$spec"
   tokens=$(op get secret "$(jq -r '.metadata.name' <<<"$spec")-boot" -o json 2>/dev/null | jq -r '.data // {} | .[] | @base64d') || tokens=
   if [ -n "$tokens" ]; then
     jq -r '[.spec.initContainers[]?, .spec.containers[]] | .[] | [.command[]?, .args[]?, (.env[]? | .value // empty)] | .[]' <<<"$spec" >"$work/shape-words"
@@ -646,18 +685,22 @@ pod_facts() {
       jq -c '{node: .node.nodeName, ephemeralUsedBytes: .node.fs.usedBytes, ephemeralCapacityBytes: .node.fs.capacityBytes}'
   } >"$evidence/pods/$pod.$(op get pod "$pod" -o jsonpath='{.metadata.uid}').txt" 2>&1
 }
-# pod_shape_watcher checks every Sandbox pod of the run once it is Running, and records its facts. A
-# departure is recorded as the run's violation, and the next bounded wait aborts naming it.
+# pod_shape_watcher checks each Sandbox pod of the run it finds Running, and records its facts: uname
+# -r from inside and the init timeline, which only a live pod gives. A departure is recorded as the
+# run's violation, and the next bounded wait aborts naming it. It is the early warning; pod-shape's
+# verdict judges every pod from the pod watch's record, whether or not this reached it.
 pod_shape_watcher() {
-  local pod uid problems
+  local pod uid problems spec
   trap - EXIT ERR
   set +e
   while kill -0 "$$" 2>/dev/null; do
     while IFS=$'\t' read -r pod uid; do
       [ -n "$pod" ] || continue
       grep -qF " $uid " "$evidence/pods-checked.txt" 2>/dev/null && continue
-      op get pod "$pod" -o json >"$evidence/pods/$uid.json" 2>/dev/null
-      problems=$(check_pod_shape "$pod")
+      # A pod gone before it is read is the verdict's to judge, from the spec the pod watch recorded.
+      spec=$(op get pod "$pod" -o json 2>/dev/null) || continue
+      printf '%s\n' "$spec" >"$evidence/pods/$uid.json"
+      problems=$(check_pod_shape "$spec")
       if [ -n "$problems" ]; then
         printf 'pod %s (uid %s): %s\n' "$pod" "$uid" "$(tr '\n' ';' <<<"$problems")" >"$evidence/pane-endpoint-violation.txt"
         return 0
@@ -670,14 +713,32 @@ pod_shape_watcher() {
     sleep 3
   done
 }
-# shape_checked UID is whether the shape watcher has checked the pod with that uid.
-shape_checked() { grep -qF " $1 " "$evidence/pods-checked.txt" 2>/dev/null; }
-unchecked_sandbox_pods() {
-  local uid
-  for uid in $(jq -r 'select(.object.kind == "Pod") | .object | select(.metadata.labels["legion.dev/probe"] == null and .metadata.labels["legion.dev/e2e-control"] == null)
-      | select(any(.status.containerStatuses[]?; .name == "worker" and .ready)) | .metadata.uid' "$evidence/pod-watch.json" | sort -u); do
-    grep -qF " $uid " "$evidence/pods-checked.txt" 2>/dev/null || printf '%s\n' "$uid"
-  done
+# pod_shape_verdict WATCH prints, for each Sandbox pod whose worker the watch ever saw ready (the
+# image probe and the run's controls aside), each way the spec the watch last recorded for it while
+# ready departs from the pod shape. It reads the record only, so a pod gone before any poll reached
+# it is judged too.
+pod_shape_verdict() {
+  local watch=$1 uid spec problems
+  while IFS=$'\t' read -r uid spec; do
+    problems=$(shape_problems <<<"$spec")
+    [ -z "$problems" ] || printf '%s: %s\n' "$uid" "$(tr '\n' ';' <<<"$problems")"
+  done < <(jq -c 'select(.object.kind == "Pod") | .object
+      | select(.metadata.labels["legion.dev/probe"] == null and .metadata.labels["legion.dev/e2e-control"] == null)
+      | select(any(.status.containerStatuses[]?; .name == "worker" and .ready))' "$watch" |
+    jq -s -r 'group_by(.metadata.uid)[] | last | "\(.metadata.uid)\t\(tojson)"')
+}
+# stream_missing WATCH prints each Sandbox pod uid the run knows from another source that the watch
+# never recorded: a pod the shape watcher read, a pod the driver ended, and every incarnation the
+# daemon launched. A watch that went silent partway through the run fails here, naming what it
+# missed, rather than leaving later pods unjudged.
+stream_missing() {
+  local watch=$1
+  comm -23 \
+    <({ awk '{print $2}' "$evidence/pods-checked.txt" 2>/dev/null
+        awk '{print $2}' "$evidence/driver-actions.txt" 2>/dev/null
+        jq -R -r 'fromjson? | select(.msg == "supervise: launched") | .incarnation // empty' "$daemon_log"
+      } | grep -E '^[0-9a-f]{8}-' | sort -u) \
+    <(jq -r 'select(.object.kind == "Pod") | .object.metadata.uid' "$watch" | sort -u)
 }
 
 # ---- the smoke repository's fixture (tree 2) --------------------------------------------------------
@@ -815,8 +876,9 @@ cleanup() {
   [ -z "$tree1" ] || record_pair >/dev/null 2>&1
   stop_pid "$daemon_pid"
   collect_transcripts
-  stop_pid "$watch_pid"
-  stop_pid "$events_pid"
+  stop_tree "$watch_pid"
+  stop_tree "$events_pid"
+  stop_pid "$leaks_pid"
   stop_tree "$sampler_pid"
   stop_tree "$interests_pid"
   # The namespace label, the durable consumers and the project are shared by every Stage 4b run,
@@ -1782,10 +1844,31 @@ note "the operator's close of $optree, with its worker $op_worker live, retired 
 pass
 
 begin pod-shape
-every=$(unchecked_sandbox_pods)
-[ -z "$every" ] || fail "Sandbox pods were never shape-checked: $every"
-unames=$(cat "$evidence"/pods/*.txt | sed -n 's/^uname=//p' | sort -u | tr '\n' ' ')
-note "$(wc -l <"$evidence/pods-checked.txt") Sandbox pods shape-checked (gVisor uname -r: $unames)"
+missing=$(stream_missing "$evidence/pod-watch.json")
+[ -z "$missing" ] || fail "the pod watch never recorded pods the run knows from other sources: $(tr '\n' ' ' <<<"$missing")"
+bad=$(pod_shape_verdict "$evidence/pod-watch.json")
+[ -z "$bad" ] || fail "Sandbox pods depart from the pod shape: $(tr '\n' ' ' <<<"$bad")"
+judged=$(jq -r 'select(.object.kind == "Pod") | .object | select(.metadata.labels["legion.dev/probe"] == null and .metadata.labels["legion.dev/e2e-control"] == null)
+  | select(any(.status.containerStatuses[]?; .name == "worker" and .ready)) | .metadata.uid' "$evidence/pod-watch.json" | sort -u | wc -l)
+# The Secret-value check: the helper judges the recorded pods against every value it held, on TERM.
+stop_pid "$leaks_pid"
+leaks_pid=
+[ -s "$work/secret-leaks.json" ] || fail "lib/secret-leaks.ts wrote no verdict ($evidence/logs/secret-leaks.err)"
+jq -e '.leaks == [] and .unseen == []' "$work/secret-leaks.json" >/dev/null ||
+  fail "Sandbox pods carry a value of their Sandbox's Secret, or name a Secret the check never saw: $(jq -c '{leaks, unseen}' "$work/secret-leaks.json")"
+note "$judged Sandbox pods judged from the pod watch's record, deleted ones included; every pod another source names is in it"
+note "no pod's command, args or environment carries a value of its Sandbox's Secret: $(jq -r '"\(.pods) pods, \(.secrets) Secrets, \(.values) values held in memory, none printed"' "$work/secret-leaks.json")"
+# Negative controls: a recorded pod with another runtime class, and a pod the watch never recorded.
+jq -c 'select(.object.kind == "Pod" and any(.object.status.containerStatuses[]?; .name == "worker" and .ready))' "$evidence/pod-watch.json" | tail -1 |
+  jq -c '.object.spec.runtimeClassName = "runc"' >"$work/wrong-shape.json"
+cat "$evidence/pod-watch.json" "$work/wrong-shape.json" >"$evidence/controls/pod-watch-wrong-shape.json"
+expect_failure pod-shape-wrong-runtime test -z "$(pod_shape_verdict "$evidence/controls/pod-watch-wrong-shape.json")"
+cp "$evidence/driver-actions.txt" "$work/driver-actions.saved"
+printf 'kill 00000000-e2e4-4b00-0000-000000000000 control\n' >>"$evidence/driver-actions.txt"
+expect_failure pod-shape-unrecorded-pod test -z "$(stream_missing "$evidence/pod-watch.json")"
+mv "$work/driver-actions.saved" "$evidence/driver-actions.txt"
+unames=$(cat "$evidence"/pods/*.txt 2>/dev/null | sed -n 's/^uname=//p' | sort -u | tr '\n' ' ')
+note "$(wc -l <"$evidence/pods-checked.txt") of them also read live by the shape watcher (gVisor uname -r: $unames)"
 grep -h '"init"' "$evidence"/pods/*.txt | jq -s -c 'map({role, init: [.init[] | select(.name == "workspace-fetch") | {started, finished}]})' >"$evidence/workspace-fetch.json"
 note "workspace-fetch per pod (started, finished) and node ephemeral-storage use: $evidence/workspace-fetch.json, $evidence/pods/"
 pass
@@ -1793,6 +1876,8 @@ pass
 begin pod-watch-verdict
 stop_pid "$shape_pid"
 shape_pid=
+missing=$(stream_missing "$evidence/pod-watch.json")
+[ -z "$missing" ] || fail "the pod watch never recorded pods the run knows from other sources: $(tr '\n' ' ' <<<"$missing")"
 if ! pod_watch_verdict "$evidence/pod-watch.json" "$evidence/driver-actions.txt" "$daemon_log"; then
   fail "the pod watch saw terminations the run cannot account for: $(tr '\n' ';' <"$work/pod-watch-verdict.txt")"
 fi
