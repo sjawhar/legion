@@ -116,19 +116,30 @@ async function openAnsweredDecision(browser: Browser) {
   return { alice, blockAsk, issue, page };
 }
 
-/** Opens a spec holding "End." as alice, with the caret collapsed at its start or its end: the
- * selection bar is gone once the selection collapses, and a paste before that replaces the
+/** Opens `spec` as alice, with the caret collapsed at the start or the end of the text `quote`:
+ * the selection bar is gone once the selection collapses, and a paste before that replaces the
  * selected text. */
-async function openEnd(browser: Browser, title: string, caret: "start" | "end") {
+async function openWithCaret(
+  browser: Browser,
+  title: string,
+  spec: string,
+  quote: string,
+  caret: "start" | "end"
+) {
   await createProject({ key: "CORE", name: "Core" });
-  const issue = await createIssue({ project: "CORE", spec: "End.\n", title });
+  const issue = await createIssue({ project: "CORE", spec, title });
   const alice = await asUser(browser, "alice");
   const page = await alice.newPage();
   await page.goto(`/issues/${issue.key}`);
-  await selectEditorText(page, "End.");
+  await selectEditorText(page, quote);
   await page.keyboard.press(caret === "start" ? "ArrowLeft" : "ArrowRight");
   await expect(actionBar(page)).toBeHidden();
   return { alice, issue, page };
+}
+
+/** Opens a spec holding only "End.", with the caret at its start or its end. */
+function openEnd(browser: Browser, title: string, caret: "start" | "end") {
+  return openWithCaret(browser, title, "End.\n", "End.", caret);
 }
 
 async function alertsIn(page: Page): Promise<Locator> {
@@ -797,6 +808,110 @@ for (const [caret, where] of [
     }
   });
 }
+
+/** A document's markdown with each directive's attributes dropped, so a row compares the blocks and
+ * the text around them. */
+function withoutAttributes(markdown: string): string {
+  return markdown.replace(/\{#([^ }]+)[^}]*\}/g, "{#$1}");
+}
+
+// The pasted block keeps its own block wherever the caret's container, or one around it inside the
+// same typed block or table cell, can hold it.
+for (const [target, spec, quote, pasted, stored] of [
+  [
+    "a blockquote",
+    "Intro.\n\n> Quoted.\n",
+    "Quoted.",
+    loneAsk,
+    "Intro.\n\n> Quoted.\n>\n> :::ask{#d2}\n> Which one?\n>\n> - A\n> - B\n> :::\n",
+  ],
+  [
+    "a blockquote",
+    "Intro.\n\n> Quoted.\n",
+    "Quoted.",
+    loneCallout,
+    "Intro.\n\n> Quoted.\n>\n> :::callout{#c2}\n> Careful.\n> :::\n",
+  ],
+  [
+    "a callout",
+    ':::callout{#k1 kind="note" title=""}\nInside.\n:::\n',
+    "Inside.",
+    loneAsk,
+    ":::callout{#k1}\nInside.\n:::\n\n:::ask{#d2}\nWhich one?\n\n- A\n- B\n:::\n",
+  ],
+  [
+    "a callout",
+    ':::callout{#k1 kind="note" title=""}\nInside.\n:::\n',
+    "Inside.",
+    loneCallout,
+    ":::callout{#k1}\nInside.\n:::\n\n:::callout{#c2}\nCareful.\n:::\n",
+  ],
+  [
+    "a list item",
+    "- Listed.\n- Second.\n",
+    "Listed.",
+    loneAsk,
+    "- Listed.\n  :::ask{#d2}\n  Which one?\n\n  - A\n  - B\n  :::\n- Second.\n",
+  ],
+  [
+    "a list item",
+    "- Listed.\n- Second.\n",
+    "Listed.",
+    loneCallout,
+    "- Listed.\n  :::callout{#c2}\n  Careful.\n  :::\n- Second.\n",
+  ],
+] as const) {
+  const block = pasted === loneAsk ? "ask" : "callout";
+  test(`a lone ${block} pasted as plain text into ${target} keeps its block`, async ({
+    browser,
+  }) => {
+    const { alice, issue, page } = await openWithCaret(browser, "Paste", spec, quote, "end");
+    try {
+      await paste(page, { html: "", text: pasted });
+
+      await expect
+        .poll(async () =>
+          withoutAttributes((await getArtifactText(issue.primary_artifact_id)).markdown)
+        )
+        .toBe(stored);
+      await expect
+        .poll(async () => (await getIssue(issue.key)).open_asks.map((ask) => ask.question))
+        .toEqual(block === "ask" ? ["Which one?"] : []);
+    } finally {
+      await alice.close();
+    }
+  });
+}
+
+// Where nothing inside the caret's typed block can hold the pasted block, the paste is what it was
+// before blocks were kept closed. A callout pasted into an ask's question once split the ask: the
+// question stayed, the callout went after it, and the options moved to a new ask under an empty
+// question.
+test("a lone callout pasted as plain text into an ask's question leaves the ask whole", async ({
+  browser,
+}) => {
+  const { alice, issue, page } = await openWithCaret(
+    browser,
+    "Paste into a question",
+    ':::ask{#q1 urgency="med" multiple="false"}\nWhich here?\n\n- X\n- Y\n:::\n',
+    "Which here?",
+    "end"
+  );
+  try {
+    await paste(page, { html: "", text: loneCallout });
+
+    await expect
+      .poll(async () =>
+        withoutAttributes((await getArtifactText(issue.primary_artifact_id)).markdown)
+      )
+      .toBe(":::ask{#q1}\nWhich here?Careful.\n\n- X\n- Y\n:::\n");
+    await expect
+      .poll(async () => (await getIssue(issue.key)).open_asks.map((ask) => ask.block_id))
+      .toEqual(["q1"]);
+  } finally {
+    await alice.close();
+  }
+});
 
 // Plain text that holds no typed block pastes as it always has: its first paragraph or list item
 // joins the text before the caret and its last one the text after it.
