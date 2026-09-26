@@ -780,15 +780,15 @@ func (e *Engine) leave(ctx context.Context, tx pgx.Tx, issue record.Issue, statu
 	return e.notice(ctx, tx, issue.Key, record.Notice{Kind: kind, Role: claim.RoleArchitect, Reason: fmt.Sprintf("%s is %s", issue.Key, status)})
 }
 
-// beginLinger suspends the root's whole tree and arms its linger deadline; a second call while it
-// lingers changes nothing.
+// beginLinger suspends the root's whole tree and arms its linger deadline, ending the root's hold
+// if it has one, as a child's leave does; a second call while it lingers changes nothing.
 func (e *Engine) beginLinger(ctx context.Context, tx pgx.Tx, root record.Issue) error {
 	if root.LingerUntil != nil {
 		return nil
 	}
 	until := e.lingerAt()
 	root.LingerUntil = &until
-	root.Phase = phase.Done
+	root.Phase, root.HeldFrom = phase.Done, nil
 	if err := e.store.PutIssue(ctx, tx, root); err != nil {
 		return err
 	}

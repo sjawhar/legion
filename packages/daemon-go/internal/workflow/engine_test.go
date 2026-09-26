@@ -501,31 +501,55 @@ func TestAnEscalationIsRecordedOnTheHoldForAControllerThatStartsLater(t *testing
 	ctx := context.Background()
 	from := phase.Planning
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Held, HeldFrom: &from, Generation: 1, Status: "in_progress", Rank: "U"})
-	holdReason := func() (phase.Phase, string) {
-		t.Helper()
-		var state api.State
-		if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-			var err error
-			state, err = projection.Project(ctx, tx, record.NewStore(), "LEGION", nil)
-			return err
-		}); err != nil {
-			t.Fatalf("project the state: %v", err)
-		}
-		return state.Issues["LEGION-208"].Phase, state.Issues["LEGION-208"].HoldReason
-	}
-
 	if _, err := intake.ApplyFact(ctx, pool, "architect", "escalate", intake.RetryOrEscalate{Issue: "LEGION-208", Decision: intake.EscalateDecision}, testEngine(), admissionStub{}); err != nil {
 		t.Fatalf("escalate: %v", err)
 	}
-	if got, reason := holdReason(); got != phase.Held || reason != "escalated" {
+	if got, reason := projectedHold(t, pool, "LEGION-208"); got != phase.Held || reason != "escalated" {
 		t.Fatalf("after the escalation the state reads phase %s hold reason %q, want held and escalated", got, reason)
 	}
 	if _, err := intake.ApplyFact(ctx, pool, "architect", "retry", intake.RetryOrEscalate{Issue: "LEGION-208", Decision: intake.RetryDecision}, testEngine(), admissionStub{}); err != nil {
 		t.Fatalf("retry: %v", err)
 	}
-	if got, reason := holdReason(); got != phase.Planning || reason != "" {
+	if got, reason := projectedHold(t, pool, "LEGION-208"); got != phase.Planning || reason != "" {
 		t.Fatalf("after the retry the state reads phase %s hold reason %q, want planning and none", got, reason)
 	}
+}
+
+// A held root moved out of the workflow ends its hold, and an escalation with it: its tree lingers
+// with the root's phase done and no hold reason, so the state never shows a closed root escalated.
+func TestAClosedRootEndsItsHoldAndItsEscalation(t *testing.T) {
+	pool := migratedPool(t)
+	ctx := context.Background()
+	from := phase.Planning
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Held, HeldFrom: &from, Generation: 1, Status: "in_progress", Rank: "U", LastDispatchSeq: 1})
+	if _, err := intake.ApplyFact(ctx, pool, "architect", "escalate", intake.RetryOrEscalate{Issue: "LEGION-208", Decision: intake.EscalateDecision}, testEngine(), admissionStub{}); err != nil {
+		t.Fatalf("escalate: %v", err)
+	}
+	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "root-backlog", intake.DispatchIssue{Key: "LEGION-208", Seq: 2, Type: "issue.updated", Status: "backlog", Title: "root", Rank: "U"}, testEngine(), admissionStub{}); err != nil {
+		t.Fatalf("move the root to backlog: %v", err)
+	}
+	var held bool
+	if err := pool.QueryRow(ctx, "select held_from is not null from issues where key = $1", "LEGION-208").Scan(&held); err != nil {
+		t.Fatalf("read the root: %v", err)
+	}
+	if got, reason := projectedHold(t, pool, "LEGION-208"); got != phase.Done || reason != "" || held {
+		t.Fatalf("after the backlog move the state reads phase %s hold reason %q, held from a phase %t; want done, none, and not held", got, reason, held)
+	}
+	assertOutboxCount(t, pool, "linger_close", 1)
+}
+
+// projectedHold is the issue's phase and hold reason as the state view shows them.
+func projectedHold(t *testing.T, pool *pgxpool.Pool, key string) (phase.Phase, string) {
+	t.Helper()
+	var state api.State
+	if err := pgx.BeginFunc(t.Context(), pool, func(tx pgx.Tx) error {
+		var err error
+		state, err = projection.Project(t.Context(), tx, record.NewStore(), "LEGION", nil)
+		return err
+	}); err != nil {
+		t.Fatalf("project the state: %v", err)
+	}
+	return state.Issues[key].Phase, state.Issues[key].HoldReason
 }
 
 // The controller is told every hold and the tree architect's own death, each in an outbox row of its
