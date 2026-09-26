@@ -690,9 +690,16 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		if err != nil {
 			return nil, err
 		}
-		with, err := inlineReplacement(replacement)
+		atStart, atEnd := pmdoc.TextblockEdges(tree, r)
+		with, err := inlineReplacement(replacement, atStart, atEnd)
 		if err != nil {
 			return nil, err
+		}
+		if hasHardBreak(with) && pmdoc.OneLineTextblock(tree, r.From) {
+			return nil, &ErrInvalidOp{Field: "with", Reason: fmt.Sprintf(
+				"with %q carries a hard break, which a heading or a table cell cannot hold: it is written on one line, so the break would end the block there; write the text without the break, or insert a new block after this one",
+				op.With,
+			)}
 		}
 		next, err := pmdoc.Splice(tree, r, with)
 		if err == nil && level != 0 {
@@ -1072,39 +1079,59 @@ func refuseUnreadableReplacement(before, after *pmdoc.Node, match pmdoc.Range, w
 	if err != nil {
 		return err
 	}
-	unreadable := blockReadError(after.Children[index])
-	if unreadable == nil || blockReadError(before.Children[index]) != nil {
+	unreadable := pmdoc.BlockReadError(after.Children[index])
+	if unreadable == nil || pmdoc.BlockReadError(before.Children[index]) != nil {
 		return nil
 	}
-	return &ErrInvalidOp{Field: "with", Reason: fmt.Sprintf(
-		"with %q leaves markdown the document cannot read back where it lands (%v); keep HTML inside a line, where it opens no block",
-		with, unreadable,
-	)}
+	return &ErrInvalidOp{Field: "with", Reason: unreadableReason(before, after, match, with, unreadable)}
 }
 
-// blockReadError is the parser's refusal of a document-level block's markdown, or nil when the
-// parser reads it back. The parser drops a footnote definition nothing refers to without reading
-// it, so a definition is read after a reference to it.
-func blockReadError(block *pmdoc.Node) error {
-	blocks := []*pmdoc.Node{block}
-	if block.Type == "footnote_definition" {
-		reference := &pmdoc.Node{Type: "footnote_reference", Attrs: pmdoc.Attrs{"label": block.Attrs["label"]}}
-		blocks = []*pmdoc.Node{{Type: "paragraph", Children: []*pmdoc.Node{reference}}, block}
+// unreadableReason says why a replace left its block unreadable and what to do instead, by cause.
+// An emptied paragraph is one the block holding it cannot be written without. The advice is the
+// delete that removes it: by find where deleting the text removes the emptied block
+// (pmdoc.DeleteTextblock), and otherwise by the holding block's id, which a typed block, a
+// footnote definition and a list item holding more than the paragraph all need.
+func unreadableReason(before, after *pmdoc.Node, match pmdoc.Range, with string, unreadable error) string {
+	if textblock, parent := pmdoc.ContainingTextblock(after, match.From); textblock != nil && emptyTextblock(textblock) {
+		holder := strings.ReplaceAll(parent.Type, "_", " ")
+		if _, removed, err := pmdoc.DeleteTextblock(before, match); err == nil && removed {
+			return fmt.Sprintf(
+				"with %q empties the paragraph this %s holds, and the %s cannot be written without it; to remove the text, delete it with delete and find, which removes the emptied %s too",
+				with, holder, holder, holder,
+			)
+		}
+		block := "its block id"
+		if id, _ := parent.Attrs[pmdoc.BlockIDAttr].(string); id != "" {
+			block = fmt.Sprintf("block %q", id)
+		}
+		return fmt.Sprintf(
+			"with %q empties the paragraph this %s holds, and the %s cannot be written without it; remove the whole %s with delete and %s, or give with some text",
+			with, holder, holder, holder, block,
+		)
 	}
-	markdown, err := pmdoc.Render(&pmdoc.Node{Type: "doc", Children: blocks})
-	if err != nil {
-		return err
+	if errors.Is(unreadable, pmdoc.ErrBlockHTML) {
+		return fmt.Sprintf(
+			"with %q is HTML that opens a block where it lands, and the Proof schema carries no block HTML; keep the HTML inside a line, where it opens no block",
+			with,
+		)
 	}
-	if _, err := pmdoc.Parse(markdown); errors.Is(err, pmdoc.ErrSchema) {
-		return err
+	return fmt.Sprintf("with %q leaves markdown the document cannot read back where it lands (%v)", with, unreadable)
+}
+
+// emptyTextblock reports whether a textblock holds no text but whitespace.
+func emptyTextblock(textblock *pmdoc.Node) bool {
+	for _, child := range textblock.Children {
+		if child.Type != "text" || strings.TrimSpace(child.Text) != "" {
+			return false
+		}
 	}
-	return nil
+	return true
 }
 
 // inlineReplacement parses replace's `with` as one textblock's inline content:
 // a quote-anchored replace stays inside its textblock, so a leading list or
 // heading marker is text, never a new block.
-func inlineReplacement(markdown string) (*pmdoc.Node, error) {
+func inlineReplacement(markdown string, atStart, atEnd bool) (*pmdoc.Node, error) {
 	inline, err := pmdoc.ParseInline(markdown)
 	if err != nil {
 		if errors.Is(err, pmdoc.ErrSchema) {
@@ -1129,7 +1156,7 @@ func inlineReplacement(markdown string) (*pmdoc.Node, error) {
 		)}
 	}
 	paragraph := &pmdoc.Node{Type: "paragraph", Children: inline}
-	continueText(paragraph, markdown)
+	continueText(paragraph, markdown, atStart, atEnd)
 	return pmdoc.StripAnchorMarks(&pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{paragraph}}), nil
 }
 
@@ -1147,6 +1174,18 @@ var (
 	hardBreakOrderedMarker    = regexp.MustCompile(`^[ \t]*0{0,8}1[.)][ \t]`)
 	hardBreakBlockquoteMarker = regexp.MustCompile(`^[ \t]*>`)
 )
+
+// hasHardBreak reports whether a parsed replacement carries a hard break.
+func hasHardBreak(with *pmdoc.Node) bool {
+	for _, paragraph := range with.Children {
+		for _, node := range paragraph.Children {
+			if node.Type == "hardbreak" {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // blockMarkerAfterHardBreak reports the block marker a `with` opens a line with after a hard line
 // break, and the kind of block that marker names. A hard break puts what follows it at a true
@@ -1180,13 +1219,13 @@ func blockMarkerAfterHardBreak(inline []*pmdoc.Node) (marker, kind string) {
 
 // inlineAware parses a suggestion's replacement as blocks, keeping the edge
 // whitespace of a replacement that stays inline.
-func inlineAware(markdown string) (*pmdoc.Node, error) {
+func inlineAware(markdown string, atStart, atEnd bool) (*pmdoc.Node, error) {
 	tree, err := parseInput(markdown)
 	if err != nil {
 		return nil, err
 	}
 	if isInlineDocument(tree) {
-		continueText(tree.Children[0], markdown)
+		continueText(tree.Children[0], markdown, atStart, atEnd)
 	}
 	return tree, nil
 }
@@ -1195,19 +1234,22 @@ func inlineAware(markdown string) (*pmdoc.Node, error) {
 // replacement continues the text around it. They go in unmarked text at the paragraph's own
 // edges - ` **x**` is a space and then bold, not a bold ` x`, and ` `c` ` leaves the code span's
 // text alone. A line break at an edge is no part of an inline replacement and is not restored,
-// and whitespace the parser keeps, such as a no-break space, is in the text already.
-func continueText(paragraph *pmdoc.Node, markdown string) {
+// and whitespace the parser keeps, such as a no-break space, is in the text already. At the start
+// or the end of the textblock the replacement lands in there is no text to continue: whitespace
+// kept there would be stripped on the next read, or, after a footnote's marker, open indented
+// code, so it is left off.
+func continueText(paragraph *pmdoc.Node, markdown string, atStart, atEnd bool) {
 	if len(paragraph.Children) == 0 {
 		return
 	}
-	if leading := edgeSpace(markdown[:len(markdown)-len(strings.TrimLeft(markdown, markdownSpace))]); leading != "" {
+	if leading := edgeSpace(markdown[:len(markdown)-len(strings.TrimLeft(markdown, markdownSpace))]); leading != "" && !atStart {
 		if first := paragraph.Children[0]; first.Type == "text" && len(first.Marks) == 0 {
 			first.Text = leading + first.Text
 		} else {
 			paragraph.Children = append([]*pmdoc.Node{{Type: "text", Text: leading}}, paragraph.Children...)
 		}
 	}
-	if trailing := edgeSpace(markdown[len(strings.TrimRight(markdown, markdownSpace)):]); trailing != "" {
+	if trailing := edgeSpace(markdown[len(strings.TrimRight(markdown, markdownSpace)):]); trailing != "" && !atEnd {
 		if last := paragraph.Children[len(paragraph.Children)-1]; last.Type == "text" && len(last.Marks) == 0 {
 			last.Text += trailing
 		} else {

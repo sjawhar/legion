@@ -63,7 +63,8 @@ var inlineMarkdownParser = parser.NewParser(
 )
 
 // ParseInline converts one textblock's worth of inline markdown into inline
-// nodes. Markdown that forms more than one paragraph is ErrSchema.
+// nodes. Markdown that forms more than one paragraph, or holds text after its
+// paragraph's last line, is ErrSchema.
 func ParseInline(markdown string) ([]*Node, error) {
 	source := []byte(markdown)
 	root := inlineMarkdownParser.Parse(gmtext.NewReader(source))
@@ -84,37 +85,34 @@ func ParseInline(markdown string) ([]*Node, error) {
 	return paragraph.Children, nil
 }
 
-// textOutside is the first run of source text the paragraph's lines do not hold. The inline
-// parser knows only paragraphs, so a line it cannot open one on - an indented code block after the
-// first paragraph - is skipped rather than refused, and everything after it with it; a caller who
-// is told nothing loses that text.
-func textOutside(paragraph ast.Node, source []byte) string {
-	covered := make([]bool, len(source))
-	lines := paragraph.Lines()
-	for index := 0; index < lines.Len(); index++ {
-		segment := lines.At(index)
-		for offset := segment.Start; offset < segment.Stop && offset < len(source); offset++ {
-			covered[offset] = true
-		}
+// BlockReadError is the parser's refusal of a document-level block's markdown, or nil when the
+// parser reads it back. The parser reads a footnote definition only when something refers to it,
+// so a definition is read after a reference to it.
+func BlockReadError(block *Node) error {
+	blocks := []*Node{block}
+	if block.Type == "footnote_definition" {
+		reference := &Node{Type: "footnote_reference", Attrs: Attrs{"label": block.Attrs["label"]}}
+		blocks = []*Node{{Type: "paragraph", Children: []*Node{reference}}, block}
 	}
-	for offset := 0; offset < len(source); offset++ {
-		if covered[offset] || isMarkdownSpace(source[offset]) {
-			continue
-		}
-		end := offset
-		for end < len(source) && source[end] != '\n' {
-			end++
-		}
-		if dropped := strings.TrimSpace(string(source[offset:end])); dropped != "" {
-			return dropped
-		}
-		offset = end
+	markdown, err := Render(&Node{Type: "doc", Children: blocks})
+	if err != nil {
+		return err
 	}
-	return ""
+	_, err = Parse(markdown)
+	return err
 }
 
-func isMarkdownSpace(char byte) bool {
-	return char == ' ' || char == '\t' || char == '\n' || char == '\r'
+// textOutside is the first line of text after the paragraph's last line. The inline parser knows
+// only paragraphs and stops at the first line it cannot open one on - an indented code block
+// after a blank line - so everything from there on is skipped rather than refused, and a caller
+// who is told nothing loses it. A second paragraph is refused before this is asked.
+func textOutside(paragraph ast.Node, source []byte) string {
+	lines := paragraph.Lines()
+	rest := strings.TrimSpace(string(source[lines.At(lines.Len()-1).Stop:]))
+	if end := strings.IndexByte(rest, '\n'); end >= 0 {
+		rest = strings.TrimSpace(rest[:end])
+	}
+	return rest
 }
 
 func parseTableRows(markdown string, width int) ([]*Node, bool, error) {
@@ -325,7 +323,7 @@ func parseBlock(node ast.Node, source []byte, footnotes map[int]string) (*Node, 
 		return &Node{Type: "hr"}, nil
 	case *ast.HTMLBlock:
 		// Proof's doc accepts blocks only, while html is an inline atom.
-		return nil, fmt.Errorf("%w: block HTML is not accepted by Proof", ErrSchema)
+		return nil, ErrBlockHTML
 	case *extensionast.Footnote:
 		children, err := parseBlocks(current, source, footnotes)
 		if err != nil {
@@ -342,7 +340,7 @@ func parseBlock(node ast.Node, source []byte, footnotes map[int]string) (*Node, 
 	case *extensionast.Table:
 		return parseTable(current, source, footnotes)
 	default:
-		return nil, fmt.Errorf("%w: unsupported markdown block %T", ErrSchema, node)
+		return nil, fmt.Errorf("%w: unsupported markdown block %s", ErrSchema, node.Kind())
 	}
 }
 
@@ -410,7 +408,7 @@ func parseList(list *ast.List, source []byte, footnotes map[int]string) (*Node, 
 	for child := list.FirstChild(); child != nil; child = child.NextSibling() {
 		item, ok := child.(*ast.ListItem)
 		if !ok {
-			return nil, fmt.Errorf("%w: list contains %T", ErrSchema, child)
+			return nil, fmt.Errorf("%w: list contains %s", ErrSchema, child.Kind())
 		}
 		parsed, err := parseListItem(item, source, footnotes)
 		if err != nil {
@@ -464,7 +462,7 @@ func parseTable(table *extensionast.Table, source []byte, footnotes map[int]stri
 			}
 			children = append(children, parsed)
 		default:
-			return nil, fmt.Errorf("%w: unsupported table child %T", ErrSchema, child)
+			return nil, fmt.Errorf("%w: unsupported table child %s", ErrSchema, child.Kind())
 		}
 	}
 	return &Node{Type: "table", Children: children}, nil
@@ -481,7 +479,7 @@ func parseTableRow(row ast.Node, header bool, source []byte, footnotes map[int]s
 	for child := row.FirstChild(); child != nil; child = child.NextSibling() {
 		cell, ok := child.(*extensionast.TableCell)
 		if !ok {
-			return nil, fmt.Errorf("%w: unsupported table cell %T", ErrSchema, child)
+			return nil, fmt.Errorf("%w: unsupported table cell %s", ErrSchema, child.Kind())
 		}
 		content, err := parseTableCellInline(cell, source, nil, footnotes)
 		if err != nil {
@@ -615,7 +613,7 @@ func parseInlineWithTableCellLinks(parent ast.Node, source []byte, initial []Mar
 			}
 			children = append(children, &Node{Type: "html", Attrs: Attrs{"value": value}})
 		default:
-			return nil, fmt.Errorf("%w: unsupported markdown inline %T", ErrSchema, child)
+			return nil, fmt.Errorf("%w: unsupported markdown inline %s", ErrSchema, child.Kind())
 		}
 	}
 	return children, nil

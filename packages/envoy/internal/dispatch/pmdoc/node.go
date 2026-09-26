@@ -26,6 +26,10 @@ type Node struct {
 
 var ErrSchema = errors.New("outside Proof schema")
 
+// ErrBlockHTML is the refusal of HTML that markdown reads as a block: the Proof schema carries
+// inline HTML only.
+var ErrBlockHTML = fmt.Errorf("%w: block HTML is not accepted by Proof", ErrSchema)
+
 var nodeTypes = map[string]bool{
 	"doc": true, "paragraph": true, "heading": true, "blockquote": true, "bullet_list": true,
 	"ordered_list": true, "list_item": true, "code_block": true, "hr": true, "hardbreak": true,

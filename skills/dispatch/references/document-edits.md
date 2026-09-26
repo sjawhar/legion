@@ -65,7 +65,9 @@ heading's actual level — `find="## Old"`, `with="### New"` retitles and makes 
 so `find="# Old"` renames the text and keeps whatever level it selected. `with` that forms more than one
 paragraph is rejected (`INVALID_OP` on `with`) — see the recipe for a multi-paragraph rewrite below; so is any non-empty `with` that
 renders to no text, which a line indented four spaces or a tab does (markdown reads that as a code block), as does whitespace
-alone. An empty `with` is the one that deletes the matched text on purpose. Use zero-based `occurrence` for a
+alone. An empty `with` deletes the matched text on purpose; where the block holding it cannot be written without that
+paragraph, the replace is `INVALID_OP`, and the refusal names the `delete` that removes it instead. Use zero-based
+`occurrence` for a
 repeated target; re-read a missing or ambiguous target before retrying. Pass `summary` to name the version when recording a decision.
 
 **Rewriting several paragraphs is one `replace` per paragraph, then a read-back.** `replace` is inline:
@@ -100,8 +102,8 @@ block before or after it. The delete is what costs the id (below); a typed block
 carries it, which works only in that order, because an insert carrying an id the document still holds is refused.
 Then read the document back with
 `dispatch_doc_read` and read the passage and its neighbours, not a grep for the words you added: an empty
-`with` deletes the matched text on purpose, so a `replace` whose `with` you meant to fill empties that
-paragraph — the block and its id stay, holding nothing — and only a read shows what the document now says.
+`with` deletes the matched text on purpose where the block allows it, so a `replace` whose `with` you meant to fill
+empties that paragraph — the block and its id stay, holding nothing — and only a read shows what the document now says.
 
 A batch that leaves the document's semantic identity unchanged — including its inline anchor marks, so an edit that only orphans a
 comment or ask anchor still mints its version — mints no version, named or not: the response carries
@@ -119,8 +121,8 @@ attributes — a moved `ask` keeps its ask and answer. **A block loses its id on
 which is why they are refused while an open ask or unresolved comment sits on them; and a `move` that takes the last block out of a
 blockquote or list item removes that emptied container, the list too when no item remains, and each enclosing container that
 held nothing else (`> - Only.` loses the blockquote as well as the item and the list). The moved block itself keeps its id,
-as do `replace` (an empty `with` and a heading-level change included), `insert` and `retype`; `retype` carries the paragraph's id
-onto the typed block it becomes. Block ids are the `#id` a typed block renders
+as do `replace` (an accepted empty `with` and a heading-level change included), `insert` and `retype`; `retype` carries the
+paragraph's id onto the typed block it becomes. Block ids are the `#id` a typed block renders
 (`:::ask{#5467e5ce-…}`) and, for every block including untyped ones, the `id` rows from
 `GET /api/v1/artifacts/<artifact UUID>/blocks` (or `/api/v1/issues/{key}/artifacts/{slug}/blocks`), each with its `type` and byte range
 in canonical markdown; the UUID route does not accept a slug. A later operation in the same atomic batch that names a block removed by

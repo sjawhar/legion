@@ -299,7 +299,8 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		if !accept {
 			with = ""
 		}
-		replacement, err := inlineAware(with)
+		atStart, atEnd := pmdoc.TextblockEdges(tree, range_)
+		replacement, err := inlineAware(with, atStart, atEnd)
 		if err != nil {
 			return err
 		}

@@ -1406,6 +1406,69 @@ func TestApplyOperationReplaceKeepsItsEdgeWhitespaceOnceOutsideTheMarks(t *testi
 	}
 }
 
+// A heading and a table cell are each written on one line, so a hard break replaced into one
+// ends the block there: the heading reads back as a heading and a paragraph, the cell's row as two
+// rows. A hard break in a paragraph or a list item is kept.
+func TestApplyOperationReplaceRefusesAHardBreakInAHeadingOrTableCell(t *testing.T) {
+	for _, test := range []struct {
+		document string
+		refused  bool
+	}{
+		{document: "# Body.\n", refused: true},
+		{document: "| h |\n| --- |\n| Body. |\n", refused: true},
+		{document: "| Body. |\n| --- |\n| v |\n", refused: true},
+		{document: "Intro.\n\nBody.\n", refused: false},
+		{document: "- Body.\n", refused: false},
+		{document: "> Body.\n", refused: false},
+	} {
+		for _, with := range []string{"x  \ny", "x\\\ny"} {
+			t.Run(test.document+with, func(t *testing.T) {
+				tree, err := parseInput(test.document)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, err = applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: with})
+				var invalid *ErrInvalidOp
+				refused := errors.As(err, &invalid) && invalid.Field == "with"
+				if refused != test.refused || (!refused && err != nil) {
+					t.Fatalf("replace = %v, want refused %v", err, test.refused)
+				}
+			})
+		}
+	}
+}
+
+// Whitespace at the edges of a replacement continues the text around it; at the start or the end
+// of the textblock it lands in there is no text to continue, and whitespace kept there would be
+// stripped on the next read - or, after a footnote's marker, open indented code.
+func TestApplyOperationReplaceDropsWhitespaceAtATextblocksEdges(t *testing.T) {
+	for _, test := range []struct{ document, with, want string }{
+		{document: "Intro.\n\nBody.\n", with: "   x", want: "Intro.\n\nx\n"},
+		{document: "Intro.\n\nBody.\n", with: "x   ", want: "Intro.\n\nx\n"},
+		{document: "x[^1]\n\n[^1]: Body.\n", with: "   x", want: "x[^1]\n\n[^1]: x\n"},
+		{document: "Intro.\n\nBody. tail\n", with: "  x ", want: "Intro.\n\nx  tail\n"},
+		{document: "Intro.\n\nhead Body.\n", with: " x  ", want: "Intro.\n\nhead  x\n"},
+	} {
+		t.Run(test.document+test.with, func(t *testing.T) {
+			tree, err := parseInput(test.document)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out, err := applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
+			if err != nil {
+				t.Fatal(err)
+			}
+			markdown, err := pmdoc.Render(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if markdown != test.want {
+				t.Fatalf("replace with %q wrote %q, want %q", test.with, markdown, test.want)
+			}
+		})
+	}
+}
+
 func TestApplyOperationReplaceRejectsBlockReplacements(t *testing.T) {
 	// The refusal is where an agent learns what to do instead, and each half of it is for a
 	// different `with`: paragraphs are rewritten one replace each, keeping their block ids - so a
@@ -1546,7 +1609,9 @@ func TestApplyOperationReplaceRefusesAWithThatRepeatsTheBlocksOwnMarker(t *testi
 		{name: "ordered marker on an ordered item", markdown: "1. Launcher contract\n", find: "Launcher contract", with: "1. Launcher contract, ruled", escaped: "1. 1\\. Launcher contract, ruled\n"},
 		{name: "prose that merely looks like an ordered marker", markdown: "1. Launcher contract\n", find: "Launcher contract", with: "1999. was a year", escaped: "1. 1999\\. was a year\n"},
 		{name: "bullet marker on a bullet item", markdown: "- Retracted\n", find: "Retracted", with: "- Retracted later", escaped: "- \\- Retracted later\n"},
-		{name: "an indented bullet marker on a bullet item", markdown: "- Retracted\n", find: "Retracted", with: "   - Retracted later", escaped: "-    \\- Retracted later\n"},
+		// The leading spaces land at the item's text start, where there is no text for them to
+		// continue, so they are dropped: kept, `-    \- …` reads back as `- \- …` anyway.
+		{name: "an indented bullet marker on a bullet item", markdown: "- Retracted\n", find: "Retracted", with: "   - Retracted later", escaped: "- \\- Retracted later\n"},
 		{name: "a tab inside the marker", markdown: "- Retracted\n", find: "Retracted", with: "+\t3 degrees", escaped: "- \\+\t3 degrees\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {

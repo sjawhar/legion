@@ -107,6 +107,42 @@ func textblockMarker(doc, node *Node, path []int) BlockMarker {
 	return BlockMarker{}
 }
 
+// ContainingTextblock returns the textblock whose content holds position and the node that
+// holds it, or nils when position is in no textblock.
+func ContainingTextblock(doc *Node, position int) (textblock, parent *Node) {
+	walk(doc, func(node *Node, path []int, pos, end int) bool {
+		if !isTextblock(node.Type) || position < pos+1 || position > end-1 {
+			return true
+		}
+		textblock, parent = node, nodeAtPath(doc, path[:len(path)-1])
+		return false
+	})
+	return textblock, parent
+}
+
+// TextblockEdges reports whether r starts where the content of the textblock containing it starts,
+// and whether it ends where that content ends.
+func TextblockEdges(doc *Node, r Range) (atStart, atEnd bool) {
+	walk(doc, func(node *Node, _ []int, pos, end int) bool {
+		if !isTextblock(node.Type) || r.From < pos+1 || r.From > end-1 {
+			return true
+		}
+		atStart, atEnd = r.From == pos+1, r.To == end-1
+		return false
+	})
+	return atStart, atEnd
+}
+
+// OneLineTextblock reports whether the textblock containing position is written on one markdown
+// line - a heading, or a table cell's paragraph - where a hard break would end the block.
+func OneLineTextblock(doc *Node, position int) bool {
+	textblock, parent := ContainingTextblock(doc, position)
+	if textblock == nil {
+		return false
+	}
+	return textblock.Type == "heading" || parent.Type == "table_cell" || parent.Type == "table_header"
+}
+
 // SetHeadingLevel returns a copy of doc with the level of the heading whose own text begins at
 // position set to level. A `replace` that carried a heading marker through `find` is renaming the
 // heading, so a different level in its replacement is how the caller says "and make it that one".

@@ -64,11 +64,9 @@ func TestDocumentEditsAddressBlocksByID(t *testing.T) {
 	}
 }
 
-// A table is one addressable block. Deleting its header promotes the first body
-// row so the table keeps its identity and remains valid Markdown.
-// A replace is refused only when it makes the block it lands in unreadable. A document already
-// holding a block the parser refuses - left by a delete, or stored before the refusal existed -
-// still takes replaces elsewhere and inside that block, as main takes them.
+// A replace is refused only when it makes the block it lands in unreadable. A document that
+// already holds a block the parser refuses, as a delete can leave one, still takes replaces
+// elsewhere and inside that block.
 func TestDocumentEditsReplaceBesideAnUnreadableBlockIsAccepted(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Unreadable block", "Intro.\n\nfoo <div>x</div> bar\n\nOther text.\n")
@@ -90,6 +88,49 @@ func TestDocumentEditsReplaceBesideAnUnreadableBlockIsAccepted(t *testing.T) {
 	}
 }
 
+// A replace that leaves its block unreadable is refused with advice for its cause: HTML that
+// opens a block keeps to a line; an emptied paragraph is removed by deleting its text where that
+// delete removes it, and by deleting the block that holds it where the delete would be refused -
+// a typed block, a footnote definition, a list item holding more than the paragraph. No refusal
+// names a Go type.
+func TestDocumentEditsRefuseAnUnreadableReplaceWithAdviceForItsCause(t *testing.T) {
+	handler := newTestHandler(t)
+	for index, test := range []struct {
+		name, spec, with string
+		advice, absent   []string
+	}{
+		{"block HTML", "Intro.\n\nBody.\n", "<div>x</div>", []string{"HTML", "inside a line"}, nil},
+		{"emptied list item", "- Body.\n- two\n", "", []string{"delete", "find"}, []string{"HTML"}},
+		{"emptied blockquote", "Intro.\n\n> Body.\n", "", []string{"delete", "find"}, []string{"HTML"}},
+		{"emptied typed block", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n", "", []string{"delete", "block"}, []string{"HTML"}},
+		{"emptied footnote", "x[^1]\n\n[^1]: Body.\n", "", []string{"delete", "block"}, []string{"HTML"}},
+		{"emptied list item holding more", "- Body.\n\n  ```\n  code\n  ```\n", "", []string{"delete", "block"}, []string{"find", "HTML"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			issue := createInteractionIssue(t, handler, "T"+string(rune('A'+index)), test.name, test.spec)
+			response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+				"ops": []map[string]any{{"op": "replace", "find": "Body.", "with": test.with}},
+			}, "alice")
+			body := response.Body.String()
+			if response.Code != http.StatusBadRequest || !strings.Contains(body, `"code":"INVALID_OP"`) {
+				t.Fatalf("replace: status=%d body=%s", response.Code, body)
+			}
+			for _, want := range test.advice {
+				if !strings.Contains(body, want) {
+					t.Fatalf("refusal %s lacks %q", body, want)
+				}
+			}
+			for _, unwanted := range append(test.absent, "*ast.") {
+				if strings.Contains(body, unwanted) {
+					t.Fatalf("refusal %s says %q", body, unwanted)
+				}
+			}
+		})
+	}
+}
+
+// A table is one addressable block. Deleting its header promotes the first body
+// row so the table keeps its identity and remains valid Markdown.
 func TestDocumentEditsDeleteTableHeaderRowInPlace(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Table row edit", "| Key | Value |\n| --- | --- |\n| A10 | old |\n| A11 | new |\n")

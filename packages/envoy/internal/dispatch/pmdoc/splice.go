@@ -59,10 +59,7 @@ func BlockIndex(doc *Node, target Range) (int, error) {
 }
 
 func documentBlock(doc *Node, target Range, caller string) (index, start, end int, err error) {
-	if doc == nil || doc.Type != "doc" {
-		return 0, 0, 0, fmt.Errorf("%w: %s wants a document", ErrSchema, caller)
-	}
-	if err := doc.Validate(); err != nil {
+	if err := wantDocument(doc, caller); err != nil {
 		return 0, 0, 0, err
 	}
 	position := 0

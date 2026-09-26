@@ -127,7 +127,8 @@ Document edits (`POST /api/v1/artifacts/{id}/edits`, `docs/edits.go` `applyOpera
 inline: `with` parses through `pmdoc.ParseInline` (paragraph-only block grammar), so a multi-paragraph
 `with` is `INVALID_OP`, so is any non-empty `with` that renders to no inline content (a line
 indented four spaces or a tab, which markdown reads as a code block, or whitespace alone — an
-empty `with` is the one that deletes the match on purpose; refusing the rest is LEGION-280, since
+empty `with` deletes the match on purpose, except where the block holding it cannot be written
+without that paragraph, which is refused naming the `delete` that removes it instead; refusing the rest is LEGION-280, since
 splicing nothing over the match silently deleted the caller's text), and a leading marker of a
 *different* kind from the matched block's own is
 literal escaped text. A `with` opening with a marker of the *same* kind as that block's own would
@@ -140,7 +141,9 @@ selector, so a generic `find` renames the text and keeps the level. A hard line 
 — two trailing spaces or a backslash before the newline — puts what follows it at a true line
 start, where a heading, bullet, `1.`/`1)` ordered or `>` blockquote marker is `INVALID_OP` on
 `with` as well (`blockMarkerAfterHardBreak`), since replace is inline and that marker can only be
-written as escaped literal text continuing the matched block, never as the block it names. A bare
+written as escaped literal text continuing the matched block, never as the block it names. A hard
+break is itself `INVALID_OP` when the matched textblock is a heading or a table cell
+(`pmdoc.OneLineTextblock`), which are written on one line, so the break would end the block. A bare
 newline is a soft break, which renders as a space and reaches no line start; an ordered marker
 whose start number is not 1 cannot interrupt a paragraph, and leading zeros do not change that
 number, so `01.` and `001)` are refused with `1.`, while `02.`, `10.` and a run of zeros past the
