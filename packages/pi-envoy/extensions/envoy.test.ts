@@ -11,6 +11,7 @@ import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
 import { logger } from "@oh-my-pi/pi-utils";
 import { decode } from "@toon-format/toon";
 import { z } from "zod";
+import { resetEnvoySessionForTests } from "../src/envoy-session";
 import { LOCAL_ENVOY_NOTICE } from "../src/legion/phase-stall";
 import { claimEnvoyRole, onEnvoyRoleRegained } from "../src/legion/role-claim-bridge";
 import type { MessageRenderer, MessageRendererTheme, PiApi } from "../src/pi-types";
@@ -252,8 +253,11 @@ const originalTmuxPane = process.env.TMUX_PANE;
 
 beforeEach(() => {
   // `bun test` runs every file in one process: a Legion suite's bootstrapped-session record on
-  // globalThis would otherwise make every transcript here look like a subagent's.
+  // globalThis would otherwise make every transcript here look like a subagent's, and the
+  // top-level session one test publishes would be the reply address the next test's subagent
+  // instance reports.
   resetLegionBootstrappedSessionForTests();
+  resetEnvoySessionForTests();
   testAgentRoster().splice(0);
   process.env.ENVOY_NATS_URL = "nats://nats-under-test:4222";
   // A test that never stubs fetch must not register its `ses_*` fixture on the real listener
@@ -4492,11 +4496,209 @@ describe("envoy OMP extension", () => {
       expect(heartbeats).toHaveLength(1);
       expect(natsState.connectedNames.length - connectsBefore).toBe(1);
       expect(natsState.subscriptions.has("notifications.agent.ses_child")).toBe(false);
-      // With no identity of its own, a subagent's tools carry no source session.
+      // No identity of its own, so whoami names the reachable one — the parent that spawned
+      // it — and reports the subagent's own host session id beside it.
       const whoami = child.tools.find((tool) => tool.name === "envoy_whoami");
       if (whoami === undefined) throw new Error("envoy_whoami was not registered");
-      const result = await whoami.execute("call-1", {});
-      expect(result.details).toMatchObject({ sessionID: "" });
+      const childContext = sessionWithTranscript("ses_child", childFile, heartbeats);
+      const result = await whoami.execute("call-1", {}, undefined, undefined, childContext);
+      expect(result.details).toMatchObject({
+        sessionID: "ses_parent",
+        subagent: { session_id: "ses_child" },
+      });
+      expect(JSON.parse(result.content[0]?.text ?? "{}")).toMatchObject({
+        session_id: "ses_parent",
+        // Its instance stored no directory either, so the live one answers for it.
+        dir: childContext.cwd,
+        subagent: { session_id: "ses_child" },
+      });
+    } finally {
+      fixture.remove();
+    }
+  });
+
+  type MessageBody = Record<string, unknown> & { readonly source_session?: string };
+
+  /** The message bodies a fixture's tools posted, by listener path. */
+  function recordingMessages(): { readonly path: string; readonly body: MessageBody }[] {
+    const posted: { readonly path: string; readonly body: MessageBody }[] = [];
+    globalThis.fetch = async (input, init) => {
+      const path = new URL(input.toString()).pathname;
+      if (path === "/v1/messages/send" || path === "/v1/messages/publish") {
+        posted.push({ path, body: JSON.parse(init?.body?.toString() ?? "{}") });
+        return response({
+          event_id: "evt_subagent",
+          source: "agent",
+          source_event_id: "evt_subagent",
+          topic: "notifications.agent.ses_target",
+          dedupe_key: "dedupe_subagent",
+          issued_at: 1,
+          payload_summary: "message",
+          trace_id: "trace_subagent",
+        });
+      }
+      return responseWithRegistration(input, init, {});
+    };
+    return posted;
+  }
+
+  /**
+   * A process whose top-level session is `parentID`, plus the subagent instance `transcript`
+   * nests under. Both instances come from one module import, as they do in a real process.
+   */
+  async function subagentProcess(
+    query: string,
+    parentID: string,
+    transcript: (name: string) => string
+  ) {
+    const { default: envoyExtension } = await import(`./envoy.ts?${query}`);
+    const heartbeats: (() => void)[] = [];
+    const parentFile = transcript(`2026-09-23T00-00-00-000Z_${parentID}.jsonl`);
+    const parent = createPi();
+    envoyExtension(parent.pi);
+    await parent.handlers.get("session_start")?.(
+      {},
+      sessionWithTranscript(parentID, parentFile, heartbeats)
+    );
+    const spawn = async (id: string, file: string) => {
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+      const context = sessionWithTranscript(id, file, heartbeats);
+      await fixture.handlers.get("session_start")?.({}, context);
+      return { ...fixture, context };
+    };
+    return { heartbeats, parent, spawn };
+  }
+
+  test("a task subagent's sends name the parent as their source session", async () => {
+    const fixture = transcriptFixture();
+    try {
+      const posted = recordingMessages();
+      const host = await subagentProcess("subagent-source", "ses_parent", fixture.transcript);
+      const child = await host.spawn(
+        "ses_child",
+        fixture.transcript("2026-09-23T00-00-00-000Z_ses_parent/Scout.jsonl")
+      );
+
+      await child.tools
+        .find((tool) => tool.name === "envoy_send")
+        ?.execute("call-send", { session_id: "ses_target", message: "from the subagent" });
+      await child.tools
+        .find((tool) => tool.name === "envoy_publish")
+        ?.execute("call-publish", { topic: "notifications.role.controller", message: "broadcast" });
+
+      expect(posted).toEqual([
+        {
+          path: "/v1/messages/send",
+          body: {
+            source: "agent",
+            source_session: "ses_parent",
+            target_session: "ses_target",
+            message: "from the subagent",
+            idempotency_key: expect.any(String),
+          },
+        },
+        {
+          path: "/v1/messages/publish",
+          body: {
+            source: "agent",
+            source_session: "ses_parent",
+            topic: "notifications.role.controller",
+            message: "broadcast",
+            idempotency_key: expect.any(String),
+          },
+        },
+      ]);
+    } finally {
+      fixture.remove();
+    }
+  });
+
+  test("a subagent of a subagent names the process's top-level session", async () => {
+    const fixture = transcriptFixture();
+    try {
+      recordingRegistrations();
+      const host = await subagentProcess("nested-subagent", "ses_parent", fixture.transcript);
+      await host.spawn(
+        "ses_child",
+        fixture.transcript("2026-09-23T00-00-00-000Z_ses_parent/Scout.jsonl")
+      );
+      // OMP nests a subagent's own subagent one directory deeper.
+      const nested = await host.spawn(
+        "ses_nested",
+        fixture.transcript("2026-09-23T00-00-00-000Z_ses_parent/Scout/Oracle.jsonl")
+      );
+
+      const whoami = nested.tools.find((tool) => tool.name === "envoy_whoami");
+      const result = await whoami?.execute("call-1", {}, undefined, undefined, nested.context);
+      expect(result?.details).toMatchObject({
+        sessionID: "ses_parent",
+        subagent: { session_id: "ses_nested" },
+      });
+    } finally {
+      fixture.remove();
+    }
+  });
+
+  test("a subagent follows the parent to the session id a switch minted", async () => {
+    const fixture = transcriptFixture();
+    try {
+      const posted = recordingMessages();
+      const host = await subagentProcess("switched-parent", "ses_parent", fixture.transcript);
+      const child = await host.spawn(
+        "ses_child",
+        fixture.transcript("2026-09-23T00-00-00-000Z_ses_parent/Scout.jsonl")
+      );
+      // A /fork or /handoff mints a new id for the same conversation; the parent's instance
+      // republishes it, and the subagent's reply address must move with it.
+      await host.parent.handlers.get("session_switch")?.(
+        { reason: "fork" },
+        sessionWithTranscript(
+          "ses_parent_next",
+          fixture.transcript("2026-09-23T00-01-00-000Z_ses_parent_next.jsonl"),
+          host.heartbeats
+        )
+      );
+
+      const whoami = child.tools.find((tool) => tool.name === "envoy_whoami");
+      const result = await whoami?.execute("call-1", {}, undefined, undefined, child.context);
+      expect(result?.details).toMatchObject({ sessionID: "ses_parent_next" });
+      await child.tools
+        .find((tool) => tool.name === "envoy_send")
+        ?.execute("call-send", { session_id: "ses_target", message: "after the switch" });
+      expect(posted.map((request) => request.body.source_session)).toEqual(["ses_parent_next"]);
+    } finally {
+      fixture.remove();
+    }
+  });
+
+  test("a subagent of a process with no Envoy identity reports none", async () => {
+    const fixture = transcriptFixture();
+    try {
+      const posted = recordingMessages();
+      // Nothing ever ran a top-level session_start here: no Envoy config, so no identity to
+      // inherit. The tool must say so rather than name the subagent's unreachable host id.
+      const { default: envoyExtension } = await import("./envoy.ts?identityless-subagent");
+      fixture.transcript("2026-09-23T00-00-00-000Z_ses_parent.jsonl");
+      const child = createPi();
+      envoyExtension(child.pi);
+      const context = sessionWithTranscript(
+        "ses_child",
+        fixture.transcript("2026-09-23T00-00-00-000Z_ses_parent/Scout.jsonl"),
+        []
+      );
+      await child.handlers.get("session_start")?.({}, context);
+
+      const whoami = child.tools.find((tool) => tool.name === "envoy_whoami");
+      const result = await whoami?.execute("call-1", {}, undefined, undefined, context);
+      expect(result?.details).toMatchObject({ sessionID: "" });
+      expect(result?.details).not.toHaveProperty("subagent");
+      await child.tools
+        .find((tool) => tool.name === "envoy_send")
+        ?.execute("call-send", { session_id: "ses_target", message: "orphaned" });
+      // An empty source session is dropped by the listener's own JSON on the way out, which
+      // leaves the recipient no sender and no reply hint: the field must be absent instead.
+      expect(posted[0]?.body).not.toHaveProperty("source_session");
     } finally {
       fixture.remove();
     }

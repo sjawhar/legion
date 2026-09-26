@@ -50,6 +50,7 @@ import {
 import { logger } from "@oh-my-pi/pi-utils";
 import { encode } from "@toon-format/toon";
 import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
+import { envoyProcessSession, recordEnvoySession } from "../src/envoy-session";
 import { LOCAL_ENVOY_NOTICE } from "../src/legion/phase-stall";
 import {
   type LegionNoticeSubscription,
@@ -393,6 +394,11 @@ export default function envoyExtension(pi: PiApi): void {
   const restoreLocalSessionState = (context: SessionContext): void => {
     sessionDirectory = context.cwd;
     sessionID = context.sessionManager.getSessionId();
+    // Only the top-level instance ever reaches here — a subagent's session_start and switch
+    // events return early — so this record names the session the process registered, whatever
+    // moved the id: a start, a switch, or the heartbeat's drift heal. The subagent instances
+    // in this process read it as the address a reply to them reaches.
+    recordEnvoySession(sessionID);
     activeSessionContext = context;
     const branch = context.sessionManager.getBranch?.() ?? [];
     // Only a genuine session change clears the armed period — a `/fork`, `/handoff`, resume or
@@ -414,6 +420,19 @@ export default function envoyExtension(pi: PiApi): void {
     }
     legionManagedTranscript = branch.some(isLegionManagedEntry);
   };
+
+  /**
+   * The Envoy address a reply to this instance reaches, and the source session its sends carry.
+   *
+   * A `task` subagent registers nothing of its own, so its module `sessionID` is empty and its
+   * host session id is an address no message can be delivered to: its parent — the top-level
+   * session of this process, which spawned it and relays over hub — is the reachable one.
+   * `liveSessionID` is the host's current id, which the slash command passes because a session
+   * created lazily after `session_start` has moved past the module copy; the tool path has no
+   * newer id to offer. Empty when this process never took a session at all.
+   */
+  const replyAddress = (liveSessionID = ""): string =>
+    sessionID === "" ? envoyProcessSession() || liveSessionID : liveSessionID || sessionID;
 
   pi.on("resources_discover", async () => ({ skillPaths: [SKILLS_DIRECTORY] }));
   registerEnvoyMessageRenderer(pi);
@@ -1134,7 +1153,8 @@ export default function envoyExtension(pi: PiApi): void {
       description: spec.description,
       parameters: schemaFor(pi, spec.operation),
       lenientArgValidation: true,
-      execute: async (_id, parameters) => execute(spec.operation, parameters),
+      execute: async (_id, parameters, _signal, _onUpdate, context) =>
+        execute(spec.operation, parameters, context),
     });
   }
 
@@ -1174,7 +1194,7 @@ export default function envoyExtension(pi: PiApi): void {
     }
   }
 
-  registerEnvoyWhoamiCommand(pi, () => sessionID);
+  registerEnvoyWhoamiCommand(pi, replyAddress);
 
   // Turn start injects nothing into the conversation; its open-asks query only arms the run-end
   // nudge below, the snapshot's `as_of` becoming the period's baseline. A session the stop can
@@ -1485,7 +1505,8 @@ export default function envoyExtension(pi: PiApi): void {
 
   async function execute(
     operation: EnvoyToolOperation,
-    rawParameters: Record<string, unknown>
+    rawParameters: Record<string, unknown>,
+    context: SessionContext
   ): Promise<ToolResult> {
     try {
       // The host hands raw arguments through (lenientArgValidation); this is the one
@@ -1558,7 +1579,7 @@ export default function envoyExtension(pi: PiApi): void {
         case EnvoyToolOperation.send: {
           const targetSessionID = stringFor(parameters, "session_id");
           const result = await client.send({
-            sourceSessionID: sessionID,
+            sourceSessionID: replyAddress(),
             targetSessionID,
             message: stringFor(parameters, "message"),
             ...toMessageMetadata(parameters as MessageMetadataArguments),
@@ -1572,7 +1593,7 @@ export default function envoyExtension(pi: PiApi): void {
         case EnvoyToolOperation.publish: {
           const topic = stringFor(parameters, "topic");
           const result = await client.publish({
-            sourceSessionID: sessionID,
+            sourceSessionID: replyAddress(),
             topic,
             message: stringFor(parameters, "message"),
             ...toMessageMetadata(parameters as MessageMetadataArguments),
@@ -1598,15 +1619,34 @@ export default function envoyExtension(pi: PiApi): void {
           return toolSuccess(JSON.stringify(role, null, 2), role);
         }
         case EnvoyToolOperation.whoami: {
+          const address = replyAddress();
+          // A `task` subagent registers no Envoy session of its own, so the address a reply
+          // reaches is its parent's. Its own host id is reported beside that, never as the
+          // reply address: nothing is listening on it.
+          const subagent =
+            sessionID === "" && address !== ""
+              ? {
+                  session_id: context.sessionManager.getSessionId(),
+                  note: "This session is a task subagent and registers no Envoy session of its own; a reply to session_id reaches the parent that spawned it, which relays it over hub.",
+                }
+              : undefined;
           return toolSuccess(
             JSON.stringify(
-              { session_id: sessionID, machine_id: machineID(), dir: sessionDirectory },
+              {
+                session_id: address,
+                machine_id: machineID(),
+                // A subagent's instance stored no directory either (`restoreLocalSessionState`
+                // never ran for it), so the host's live one answers for it.
+                dir: sessionDirectory || context.cwd,
+                ...(subagent === undefined ? {} : { subagent }),
+              },
               null,
               2
             ),
             {
-              sessionID,
+              sessionID: address,
               topics: [...subscriptions.keys()],
+              ...(subagent === undefined ? {} : { subagent }),
             }
           );
         }

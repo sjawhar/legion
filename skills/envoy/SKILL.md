@@ -106,6 +106,15 @@ envoy_send(
 )
 ```
 
+### Your own address, and a subagent's
+
+`envoy_whoami`'s `session_id` is the address a reply to you reaches. Inside a `task` subagent it
+is the session that spawned you: a subagent registers no Envoy session of its own, so a peer
+answering it reaches the parent, which relays over hub. The `subagent` field in that output
+carries your own host session id — it is not an address, so never hand it to a peer. When a
+process took no Envoy identity at all, `session_id` is empty and messages you send carry no
+sender: say who you are in the message body.
+
 ### Delivery capabilities
 
 Each session row from `envoy_sessions` carries `capabilities`, the targeted-delivery modes that
