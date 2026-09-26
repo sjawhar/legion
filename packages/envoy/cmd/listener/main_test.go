@@ -152,11 +152,12 @@ func TestStartingGate_Closed_Returns503(t *testing.T) {
 // so a probe that reads healthy never meets a 503 "service starting" from a webhook or /v1.
 func TestOpenListener_PublishesOnlyOnceTheRoutesServe(t *testing.T) {
 	var gate startingGate
-	hooks := []webhookRoute{{"/webhook/github", func(*listenerDeps) http.Handler {
+	hooks := []webhookRoute{{"/webhook/github", func(*bus.Client, *cistore.Store) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	}}}
+	routes := openWebhooks(&gate, hooks, nil, nil)
 	published := false
-	openListener(&gate, hooks, &listenerDeps{}, "test-machine", logging.New("test"), func(*listenerDeps) {
+	openListener(&gate, routes, &listenerDeps{}, "test-machine", logging.New("test"), func(*listenerDeps) {
 		published = true
 		for path, want := range map[string]int{"/webhook/github": http.StatusOK, "/v1/not-a-route": http.StatusNotFound} {
 			recorder := httptest.NewRecorder()
