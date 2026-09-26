@@ -89,7 +89,8 @@ type ReviewDecision struct {
 // predates submitted_at carried, one whose time could not be read, and every mark recorded before
 // the field. Among reviews that all carry a time the order does not depend on delivery; with an
 // untimed review in play it is not transitive, so the outcome can depend on the order reviews are
-// delivered in. No stored mark can recover a time it never had.
+// delivered in. No stored mark can recover a time it never had. The order decides a round only
+// among reviews that arrive before it ends (workflow's review).
 type ReviewOrder struct {
 	SubmittedAt time.Time
 	ID          int64

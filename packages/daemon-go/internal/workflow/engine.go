@@ -511,11 +511,13 @@ func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestR
 		return intake.Result{}, nil
 	}
 	// Deciding reviews are ordered by when they were submitted, then by GitHub's review id
-	// (record.ReviewOrder): among reviews that all carry a time, whatever order they are delivered
-	// in; with a review without a time in play, the outcome can depend on delivery order. The pull
-	// request keeps the newest it has had across rounds, so a review submitted before one already
-	// processed - redelivered, or from an earlier round - records nothing. A review without an id is
-	// ordered by when it arrives.
+	// (record.ReviewOrder). Among reviews that all carry a time and arrive before the round ends,
+	// the newest decides whatever order they are delivered in; with a review without a time in
+	// play, the outcome can depend on delivery order. A round ends once both of its halves are in,
+	// so a review arriving after that decides nothing for it. The pull request keeps the newest it
+	// has had across rounds, so a review submitted before one already processed - redelivered, or
+	// from an earlier round - records nothing. A review without an id is ordered by when it
+	// arrives.
 	if fact.ID != 0 {
 		order := record.ReviewOrder{SubmittedAt: fact.SubmittedAt, ID: fact.ID}
 		if !order.After(pr.ReviewSeen) {
