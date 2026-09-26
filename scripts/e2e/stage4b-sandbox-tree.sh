@@ -776,7 +776,7 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT
-trap 'echo "CHECK $check: FAIL: line $LINENO exited $?: $BASH_COMMAND"' ERR
+trap 'echo "CHECK $check: FAIL: line $LINENO exited $?: $BASH_COMMAND" >&2' ERR
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM

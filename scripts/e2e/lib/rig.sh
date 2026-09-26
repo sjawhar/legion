@@ -119,13 +119,16 @@ stop_pid() {
 # while its children go. PID is signalled only while its parent is PARENT (default this shell), so a
 # pid the watcher left and another process reused is never hit. An empty PID is a watcher that
 # never started: nothing to stop.
+# pgrep exits 1 for a process with no children, which is no error: under a driver's `set -E` it would
+# run the ERR trap inside the substitution, and a trap that prints there would hand its words over
+# as child pids (the `0` of an `exit 0` among them).
 stop_tree() {
   local pid=${1:-} parent=${2:-$$} child
   [ -n "$pid" ] || return 0
   signalable "$pid" || return 0
   [ "$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')" = "$parent" ] || return 0
   kill -STOP "$pid" 2>/dev/null || return 0
-  for child in $(pgrep -P "$pid"); do stop_tree "$child" "$pid"; done
+  for child in $(pgrep -P "$pid" || true); do stop_tree "$child" "$pid"; done
   kill -KILL "$pid" 2>/dev/null || true
 }
 
