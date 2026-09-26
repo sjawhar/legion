@@ -76,18 +76,18 @@ initialized locals directly.
 
 ```go
 type startingGate struct {
-    handler atomic.Pointer[http.Handler]
+    mux atomic.Pointer[http.ServeMux]
 }
 
-func (g *startingGate) open(handler http.Handler) { g.handler.Store(&handler) }
+func (g *startingGate) open(mux *http.ServeMux) { g.mux.Store(mux) }
 
 func (g *startingGate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-    handler := g.handler.Load()
-    if handler == nil {
+    mux := g.mux.Load()
+    if mux == nil {
         writeJSONError(w, http.StatusServiceUnavailable, "service starting")
         return
     }
-    (*handler).ServeHTTP(w, r)
+    mux.ServeHTTP(w, r)
 }
 ```
 

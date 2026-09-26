@@ -150,10 +150,12 @@ func TestStartingGate_Closed_Returns503(t *testing.T) {
 func TestStartingGate_Open_PassesThrough(t *testing.T) {
 	var called bool
 	var handler startingGate
-	handler.open(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/interests/subscribe", func(w http.ResponseWriter, r *http.Request) {
 		called = true
 		w.WriteHeader(http.StatusOK)
-	}))
+	})
+	handler.open(mux)
 
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, httptest.NewRequest("GET", "/v1/interests/subscribe", nil))

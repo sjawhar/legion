@@ -458,22 +458,22 @@ func webhookRoutes(cfg *webhook.WebhookConfig) []webhookRoute {
 	return routes
 }
 
-// startingGate answers 503 "service starting" until open hands it the handler to serve. main
-// builds that handler only once every store is open, so a request never reaches a handler over a
+// startingGate answers 503 "service starting" until open hands it the mux to serve. main
+// builds that mux only once every store is open, so a request never reaches a handler over a
 // dependency that is not there.
 type startingGate struct {
-	handler atomic.Pointer[http.Handler]
+	mux atomic.Pointer[http.ServeMux]
 }
 
-func (g *startingGate) open(handler http.Handler) { g.handler.Store(&handler) }
+func (g *startingGate) open(mux *http.ServeMux) { g.mux.Store(mux) }
 
 func (g *startingGate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	handler := g.handler.Load()
-	if handler == nil {
+	mux := g.mux.Load()
+	if mux == nil {
 		writeJSONError(w, http.StatusServiceUnavailable, "service starting")
 		return
 	}
-	(*handler).ServeHTTP(w, r)
+	mux.ServeHTTP(w, r)
 }
 
 func main() {
