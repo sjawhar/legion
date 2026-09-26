@@ -10,6 +10,7 @@ import (
 var orderedMarker = regexp.MustCompile(`(?m)^\d+\.\s*`)
 var spanTag = regexp.MustCompile(`</?span(?:\s[^>]*)?>`)
 var linkDestination = regexp.MustCompile(`\]\([^)]*\)`)
+var emptyAttribute = regexp.MustCompile(`(\s[A-Za-z][\w-]*)=""`)
 
 func TestRenderMatchesMilkdownForFixtures(t *testing.T) {
 	for _, fx := range loadFixtures(t) {
@@ -127,6 +128,9 @@ var typedFenceRun = regexp.MustCompile(`(?m)^(\s*):{3,}`)
 
 func plain(markdown string) string {
 	markdown = typedFenceRun.ReplaceAllString(markdown, "$1:::")
+	// An attribute holding the empty string reads the same written bare, as the engine writes
+	// it (`title`), or quoted, as the renderer does (`title=""`).
+	markdown = emptyAttribute.ReplaceAllString(markdown, "$1")
 	markdown = html.UnescapeString(markdown)
 	markdown = orderedMarker.ReplaceAllString(markdown, "")
 	markdown = spanTag.ReplaceAllString(markdown, "")

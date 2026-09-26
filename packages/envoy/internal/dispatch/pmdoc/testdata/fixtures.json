@@ -1973,7 +1973,7 @@
   },
   {
     "name": "callout",
-    "markdown": ":::callout{#callout-1 kind=\"warning\" title=\"Read this\"}\nBody text.\n:::\n",
+    "markdown": ":::callout{#callout-1 kind=\"warning\" title=\"Read this\"}\nBody text.\n:::\n\n:::callout{#c9 kind=\"note\" title}\nA title left empty, as the browser editor writes it.\n:::\n",
     "pm_json": {
       "type": "doc",
       "content": [
@@ -1998,11 +1998,33 @@
               ]
             }
           ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "kind": "note",
+            "title": "",
+            "blockId": "c9"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000002"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "A title left empty, as the browser editor writes it."
+                }
+              ]
+            }
+          ]
         }
       ]
     },
-    "yjs_update_v1_b64": "AQgBAAcBC3Byb3NlbWlycm9yAwdjYWxsb3V0BwABAAMJcGFyYWdyYXBoBwABAQYEAAECCkJvZHkgdGV4dC4oAAEBB2Jsb2NrSWQBdwhiLTAwMDAwMSgAAQAEa2luZAF3B3dhcm5pbmcoAAEABXRpdGxlAXcJUmVhZCB0aGlzKAABAAdibG9ja0lkAXcJY2FsbG91dC0xAA==",
-    "rendered_by_milkdown": ":::callout{#callout-1 kind=\"warning\" title=\"Read this\"}\nBody text.\n:::\n"
+    "yjs_update_v1_b64": "ARABAAcBC3Byb3NlbWlycm9yAwdjYWxsb3V0BwABAAMJcGFyYWdyYXBoBwABAQYEAAECCkJvZHkgdGV4dC4oAAEBB2Jsb2NrSWQBdwhiLTAwMDAwMSgAAQAEa2luZAF3B3dhcm5pbmcoAAEABXRpdGxlAXcJUmVhZCB0aGlzKAABAAdibG9ja0lkAXcJY2FsbG91dC0xhwEAAwdjYWxsb3V0BwABEQMJcGFyYWdyYXBoBwABEgYEAAETNEEgdGl0bGUgbGVmdCBlbXB0eSwgYXMgdGhlIGJyb3dzZXIgZWRpdG9yIHdyaXRlcyBpdC4oAAESB2Jsb2NrSWQBdwhiLTAwMDAwMigAAREEa2luZAF3BG5vdGUoAAERBXRpdGxlAXcAKAABEQdibG9ja0lkAXcCYzkA",
+    "rendered_by_milkdown": ":::callout{#callout-1 kind=\"warning\" title=\"Read this\"}\nBody text.\n:::\n\n:::callout{#c9 kind=\"note\" title}\nA title left empty, as the browser editor writes it.\n:::\n"
   },
   {
     "name": "code-directive-example",

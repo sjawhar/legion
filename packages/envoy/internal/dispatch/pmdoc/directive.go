@@ -287,12 +287,24 @@ func parseDirectiveAttributes(value string) (Attrs, error) {
 			for offset < len(value) && directiveNameByte(value[offset]) {
 				offset++
 			}
-			if start == offset || offset == len(value) || value[offset] != '=' {
+			if start == offset {
 				return nil, fmt.Errorf("expected key=\"value\"")
 			}
 			name := value[start:offset]
+			if attrs[name] != nil {
+				return nil, fmt.Errorf("repeated attribute %q", name)
+			}
+			// A name alone is an empty value: the browser editor writes an attribute holding
+			// the empty string so (`title`), and reads it back as `title=""`.
+			if offset == len(value) || unicode.IsSpace(rune(value[offset])) {
+				attrs[name] = ""
+				continue
+			}
+			if value[offset] != '=' {
+				return nil, fmt.Errorf("expected key=\"value\"")
+			}
 			offset++
-			if offset == len(value) || value[offset] != '"' || attrs[name] != nil {
+			if offset == len(value) || value[offset] != '"' {
 				return nil, fmt.Errorf("expected quoted value for %q", name)
 			}
 			offset++
