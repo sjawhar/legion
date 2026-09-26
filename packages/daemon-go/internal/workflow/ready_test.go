@@ -118,9 +118,8 @@ func TestAnApprovalVoidsAREADYTheGateRefusedWithNoPacketAndTellsTheArchitect(t *
 			if got := mergeQueuePublishes(t, pool); len(got) != 0 {
 				t.Fatalf("merge queue publishes = %v, want none for a READY with no packet", got)
 			}
-			var role, reason string
-			if err := pool.QueryRow(t.Context(), "select payload->>'role', payload->>'reason' from outbox where kind = 'notice' and payload->>'kind' = 'ready-refused'").Scan(&role, &reason); err != nil || role != string(claim.RoleArchitect) || !strings.HasPrefix(reason, "READY_PACKET_MISSING: design version 4 is approved") {
-				t.Fatalf("ready-refused notice = role %q, reason %q, %v; want the architect told READY_PACKET_MISSING", role, reason, err)
+			if got := architectNotices(t, pool); len(got) != 1 || got[0].Kind != "ready-refused" || !strings.HasPrefix(got[0].Reason, "READY_PACKET_MISSING: design version 4 is approved") {
+				t.Fatalf("architect notices = %+v, want one ready-refused naming READY_PACKET_MISSING", got)
 			}
 		})
 	}
@@ -135,15 +134,7 @@ func TestABackwardMoveOutOfMergingVoidsTheRefusedREADY(t *testing.T) {
 	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 4})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implementer-claim"})
-	engine := readyEngine("")
-	apply := func(id string, fact intake.Fact) intake.Result {
-		t.Helper()
-		result, err := intake.ApplyFact(context.Background(), pool, "api", id, fact, engine, admissionStub{})
-		if err != nil {
-			t.Fatalf("ApplyFact %s: %v", id, err)
-		}
-		return result
-	}
+	apply := applyFacts(t, pool, readyEngine(""))
 
 	if result := apply("ready", intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim", Generation: 1, Ready: true, Summary: readyPacket, Commit: "head"}); result.Refusal == nil {
 		t.Fatal("READY with the gate closed was not refused")
@@ -171,15 +162,7 @@ func TestAnApprovalOnALingeringTreeAdvancesNoMember(t *testing.T) {
 	seedIssue(t, pool, record.Issue{Key: "LEGION-210", Tree: "LEGION-208", Project: "LEGION", Title: "waiting child", Parent: &parent, Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "W"})
 	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 5, ApprovedVersion: new(4)})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-209", Role: claim.RoleMerger, Claim: "merger-claim"})
-	engine := readyEngine("merge-queue")
-	apply := func(id string, fact intake.Fact) intake.Result {
-		t.Helper()
-		result, err := intake.ApplyFact(context.Background(), pool, "api", id, fact, engine, admissionStub{})
-		if err != nil {
-			t.Fatalf("ApplyFact %s: %v", id, err)
-		}
-		return result
-	}
+	apply := applyFacts(t, pool, readyEngine("merge-queue"))
 
 	if result := apply("ready", intake.HandoffComplete{Issue: "LEGION-209", Role: claim.RoleMerger, Claim: "merger-claim", Generation: 1, Ready: true, Summary: readyPacket, Commit: "head"}); result.Refusal == nil || result.Refusal.Code != "DESIGN_GATE_CLOSED" {
 		t.Fatalf("the child's READY with the tree's gate closed = %#v, want DESIGN_GATE_CLOSED", result.Refusal)
@@ -215,15 +198,7 @@ func TestAMergersREADYOnALingeringTreeIsRefused(t *testing.T) {
 	seedIssue(t, pool, record.Issue{Key: "LEGION-209", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent, Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "V"})
 	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 4, ApprovedVersion: new(4)})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-209", Role: claim.RoleMerger, Claim: "merger-claim"})
-	engine := readyEngine("merge-queue")
-	apply := func(id string, fact intake.Fact) intake.Result {
-		t.Helper()
-		result, err := intake.ApplyFact(context.Background(), pool, "api", id, fact, engine, admissionStub{})
-		if err != nil {
-			t.Fatalf("ApplyFact %s: %v", id, err)
-		}
-		return result
-	}
+	apply := applyFacts(t, pool, readyEngine("merge-queue"))
 
 	apply("close-root", intake.DispatchIssue{Key: "LEGION-208", Seq: 2, Type: "issue.closed", Status: "done", Title: "root", Rank: "U"})
 	if result := apply("ready", intake.HandoffComplete{Issue: "LEGION-209", Role: claim.RoleMerger, Claim: "merger-claim", Generation: 1, Ready: true, Summary: readyPacket, Commit: "head"}); result.Refusal == nil || result.Refusal.Code != "TREE_LINGERING" {
@@ -247,6 +222,19 @@ func readyEngine(mergeQueue string) *Engine {
 		Project: "LEGION", DesignGate: config.DesignGateRootIssues, MergeQueueRole: mergeQueue, Linger: time.Hour,
 		Clock: func() time.Time { return time.Date(2026, 9, 25, 0, 0, 0, 0, time.UTC) },
 	}, nil)
+}
+
+// applyFacts applies each fact to pool through engine, failing the test on an error, and returns
+// the fact's result.
+func applyFacts(t *testing.T, pool *pgxpool.Pool, engine *Engine) func(id string, fact intake.Fact) intake.Result {
+	return func(id string, fact intake.Fact) intake.Result {
+		t.Helper()
+		result, err := intake.ApplyFact(context.Background(), pool, "api", id, fact, engine, admissionStub{})
+		if err != nil {
+			t.Fatalf("ApplyFact %s: %v", id, err)
+		}
+		return result
+	}
 }
 
 // messageBodies is every Dispatch message the outbox holds, in order.
