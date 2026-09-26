@@ -656,9 +656,9 @@ func TestGithubSubjectsWriteADottedOwnerOrNameAsOneSegment(t *testing.T) {
 }
 
 // The listener reads GithubTopicKinds as where a repository name ends in a topic, so every token
-// Envoy publishes right after a repository's owner and name is one: every kind githubKind and
-// every parent kind githubParentKind return, the mention, push, workflow and checks topics, and
-// every golden envelope's topic.
+// Envoy publishes right after a repository's owner and name is one: the kind and parent kind of
+// every event the two tables name and of one they don't, the mention, push, workflow and checks
+// topics, and every golden envelope's topic.
 func TestGithubTopicKindsHoldEveryTokenAfterTheRepository(t *testing.T) {
 	const prefix = "notifications.github.example-org.example-repo."
 	topics := []string{
@@ -667,7 +667,14 @@ func TestGithubTopicKindsHoldEveryTokenAfterTheRepository(t *testing.T) {
 		GithubWorkflowSubject("example-org", "example-repo", "ci.yml", "completed"),
 		GithubSubject("example-org", "example-repo", "pr.7.checks"),
 	}
-	for _, event := range []string{"pull_request", "issues", "sub_issues", "push", "check_run", "check_suite", "workflow_run", "issue_comment", "pull_request_review", "pull_request_review_comment", "merge_group"} {
+	events := []string{"merge_group"}
+	for event := range githubEventKinds {
+		events = append(events, event)
+	}
+	for event := range githubEventParents {
+		events = append(events, event)
+	}
+	for _, event := range events {
 		topics = append(topics, prefix+githubKind(event))
 		for _, body := range []map[string]any{{}, {"issue": map[string]any{"pull_request": map[string]any{}}}} {
 			if parent := githubParentKind(event, body); parent != "" {
