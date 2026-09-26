@@ -574,6 +574,12 @@ func (e *Engine) retryOrEscalate(ctx context.Context, tx pgx.Tx, fact intake.Ret
 		return intake.Result{}, err
 	}
 	if fact.Decision == intake.EscalateDecision {
+		// Recorded on the issue as well as sent: the controller reads holds from the record at every
+		// start, so an escalation made while none ran still reaches it.
+		issue.HoldReason = "escalated"
+		if err := e.store.PutIssue(ctx, tx, *issue); err != nil {
+			return intake.Result{}, err
+		}
 		return intake.Result{}, e.notice(ctx, tx, issue.Key, record.Notice{Kind: "held", Phase: *issue.HeldFrom, Reason: "escalated"})
 	}
 	if fact.Decision != intake.RetryDecision {

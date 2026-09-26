@@ -17,10 +17,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/projection"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	legionstore "github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
@@ -488,6 +490,41 @@ func TestATreeArchitectsFailedClaimIsNoticedAndHoldsNoPhase(t *testing.T) {
 	toController.Controller = true
 	if got := outboxNotices(t, pool); !slices.Equal(got, []record.Notice{died, toController}) {
 		t.Fatalf("notices = %+v, want %+v to the issue and then to the controller", got, died)
+	}
+}
+
+// An escalation is recorded on the held issue as well as sent, so a controller that starts after
+// it finds it in the state it reads at boot (issues.<KEY>.holdReason); the retry that ends the hold
+// clears it.
+func TestAnEscalationIsRecordedOnTheHoldForAControllerThatStartsLater(t *testing.T) {
+	pool := migratedPool(t)
+	ctx := context.Background()
+	from := phase.Planning
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Held, HeldFrom: &from, Generation: 1, Status: "in_progress", Rank: "U"})
+	holdReason := func() (phase.Phase, string) {
+		t.Helper()
+		var state api.State
+		if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+			var err error
+			state, err = projection.Project(ctx, tx, record.NewStore(), "LEGION", nil)
+			return err
+		}); err != nil {
+			t.Fatalf("project the state: %v", err)
+		}
+		return state.Issues["LEGION-208"].Phase, state.Issues["LEGION-208"].HoldReason
+	}
+
+	if _, err := intake.ApplyFact(ctx, pool, "architect", "escalate", intake.RetryOrEscalate{Issue: "LEGION-208", Decision: intake.EscalateDecision}, testEngine(), admissionStub{}); err != nil {
+		t.Fatalf("escalate: %v", err)
+	}
+	if got, reason := holdReason(); got != phase.Held || reason != "escalated" {
+		t.Fatalf("after the escalation the state reads phase %s hold reason %q, want held and escalated", got, reason)
+	}
+	if _, err := intake.ApplyFact(ctx, pool, "architect", "retry", intake.RetryOrEscalate{Issue: "LEGION-208", Decision: intake.RetryDecision}, testEngine(), admissionStub{}); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if got, reason := holdReason(); got != phase.Planning || reason != "" {
+		t.Fatalf("after the retry the state reads phase %s hold reason %q, want planning and none", got, reason)
 	}
 }
 

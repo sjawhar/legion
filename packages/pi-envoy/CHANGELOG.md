@@ -18,6 +18,7 @@
 
 ### Changed
 
+- `legion.goDaemonApiVersion` is 7. Contract 7 adds `holdReason` to an issue on `/legion/v1/state` (`escalated` while an escalated issue stays held), which the controller skill reads at every start. A plugin at 6 refuses a state response carrying it, and a Go daemon at 7 refuses to boot beside a plugin at 6.
 - `legion.goDaemonApiVersion` is 6. Contract 6 adds `phase` to a claim's pending delivery on
   `/legion/v1/state` (the issue phase the task was queued for; absent for an operator's or an
   architect's task, which belong to none) and `unrecorded` as the phase and status the state route

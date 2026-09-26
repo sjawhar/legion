@@ -67,6 +67,7 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 			Generation: issue.Generation,
 			Phase:      issue.Phase,
 			Status:     issue.Status,
+			HoldReason: issue.HoldReason,
 			Workers:    map[claim.Role]api.PhaseView{},
 		}
 		if slot, ok := slotViews[issue.Key]; ok {

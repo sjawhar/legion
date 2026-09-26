@@ -77,7 +77,7 @@ renumbers above the first.
 
 ### The Go daemon: `legion.goDaemonApiVersion`
 
-`legion.goDaemonApiVersion` (currently 6) is the contract with `packages/daemon-go`: the claim,
+`legion.goDaemonApiVersion` (currently 7) is the contract with `packages/daemon-go`: the claim,
 credential, workflow, controller, and state shapes `src/legion/go-daemon-client.ts` parses strictly
 through `@legion/contracts/legion-go-api` (its first consumer), and the Go pane's environment —
 `LEGION_DAEMON_API=go`, the identity variables above, `LEGION_BOOT_TOKEN_FILE`,
@@ -109,6 +109,9 @@ not one it read, so it answers for none of them. `POST /legion/v1/handoff/comple
 `HANDOFF_NO_RUN` to a claim that has taken no task at all, and the workflow refuses
 `HANDOFF_STALE_GENERATION` for a run the issue has left. The pane's `LEGION_GENERATION` is the
 claim's launch counter and says nothing about the run; nothing reads it for this.
+Contract 7 adds `holdReason` to an issue on `/legion/v1/state`: `escalated` while an issue its
+architect escalated stays held, absent otherwise. The controller skill reads it at every start,
+since the escalation's wake reaches only a controller running when it is published (#1420).
 The Go daemon's boot gate (`internal/daemon/bootgate.go`) refuses to start unless the installed
 manifest's field equals its `GoDaemonAPIVersion` (`internal/api/version.go`) — the manifest at the
 plugin root Oh My Pi resolves under the environment a pane will get, and the plugin a pane's Oh My
