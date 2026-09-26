@@ -24,7 +24,7 @@ const refusalBodyLimit = 4096
 // claimed it, or its holder's registration lapsed (writeRoleHolderError,
 // packages/envoy/cmd/listener/api.go). It is the ordinary state before a role's session claims it,
 // not a broken publish path, so a caller can hold what it published until one does.
-var ErrNoHolder = errors.New("no live session holds the role")
+var ErrNoHolder = errors.New("the role has no live holder")
 
 // roleHolderReasons are the reasons the listener's 404 names for a role with no live holder
 // (roleHolderUnclaimed, roleHolderLapsed). A 404 without one of them is some other refusal — a route
