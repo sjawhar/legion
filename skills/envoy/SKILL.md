@@ -18,6 +18,10 @@ envoy_subscribe([
 ])
 ```
 
+The owner and the repository are one token each, with every dot in the name written `_`:
+`acme/site.io`'s PR family is `notifications.github.acme.site_io.pr.42.>`, and a topic spelled
+`acme.site.io` receives nothing.
+
 NATS `>` matches **one or more** trailing tokens, so it does not match the lifecycle base
 `pr.42` itself. Envoy registers that concrete base automatically when you subscribe to
 `<subject>.>`, making `pr.<n>.>` the recommended default: one call receives both the lifecycle
