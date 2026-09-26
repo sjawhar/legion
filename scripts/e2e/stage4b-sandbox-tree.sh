@@ -486,6 +486,36 @@ end_claim_pod() {
   until_true "$bound" "the $method of pod $ended_pod_uid to land" sh -c \
     "timeout 120 kubectl --context '$operator' -n '$namespace' get sandbox '$ended_pod' -o json | jq -e '.metadata.generation as \$g | .status.conditions[]? | select(.type == \"Finished\" and .status == \"True\" and .observedGeneration == \$g)' >/dev/null || '$work/legion' state --json --config '$work/legion.yaml' | jq -e --arg i '$issue' --arg r '$role' --arg u '$ended_pod_uid' '.issues[\$i].phase == \"held\" or (((if \$r == \"architect\" then .issues[\$i].architect else .issues[\$i].workers[\$r].claim end).locator.incarnation // \"\") as \$n | \$n != \"\" and \$n != \$u)' >/dev/null"
 }
+# relaunch_kill_budget CLAIM UID... prints one line for each UID, a relaunch of CLAIM the driver
+# deleted: when the driver's delete, the relaunch's registration (the first `api: claim registered`
+# of CLAIM between its `supervise: launched` and its `supervise: process died`) and its death fell,
+# in seconds after its launch. Its last line is the one budget those ends can run out: `launch
+# failures ran out` when no relaunch registered before it died, since a process that never
+# registered never became ready and is a launch failure (supervise/budgets.go);
+# `deaths with work outstanding ran out` when every one did, since a deleted pod that is still
+# starting can run on, register and take its task before its containers are stopped; and
+# `mixed`, or `incomplete` when the log lacks a relaunch's launch or death, otherwise.
+relaunch_kill_budget() {
+  local claim=$1
+  shift
+  jq -n -r --arg c "$claim" --rawfile log "$daemon_log" --rawfile actions "$evidence/driver-actions.txt" '
+    def secs: (.[0:19] + "Z" | fromdateiso8601) + (.[19:] | rtrimstr("Z") | if . == "" then 0 else "0" + . | tonumber end);
+    def since($t): . - $t | . * 100 | round / 100 | tostring;
+    ($log | split("\n") | map(fromjson? // empty | select(.claim == $c))) as $lines
+    | ($actions | split("\n") | map(split(" ") | select(length == 3 and .[0] == "delete") | {key: .[1], value: .[2]}) | from_entries) as $deletes
+    | [$ARGS.positional[] as $u
+        | ($lines | map(select(.msg == "supervise: launched" and .incarnation == $u)) | first) as $launch
+        | ($lines | map(select(.msg == "supervise: process died" and .incarnation == $u)) | first) as $death
+        | if $launch == null or $death == null then {u: $u, kind: "incomplete", line: "relaunch \($u): the daemon log has no \(if $launch == null then "launch" else "death" end) of it"}
+          else ($launch.time | secs) as $l | ($death.time | secs) as $d
+            | ($lines | map(select(.msg == "api: claim registered") | .time | secs | select(. > $l and . < $d)) | first) as $r
+            | {u: $u, kind: (if $r == null then "before" else "after" end),
+               line: "relaunch \($u[0:8]): delete issued +\(($deletes[$u] // "") | if . == "" then "(none recorded)" else secs | since($l) + " s" end), \(if $r == null then "never registered" else "registered +" + ($r | since($l)) + " s" end), died +\($d | since($l)) s"}
+          end] as $ends
+    | ($ends[].line),
+      ([$ends[].kind] | unique | if . == ["before"] then "launch failures ran out" elif . == ["after"] then "deaths with work outstanding ran out" elif any(. == "incomplete") then "incomplete" else "mixed" end)
+  ' --args "$@"
+}
 # pod_watch_verdict WATCH ACTIONS DAEMONLOG prints every pod of the run the node ended (Evicted, or
 # a container OOMKilled), and every claim process the daemon found dead (`supervise: process died`,
 # naming the pod uid as the incarnation) that no driver action ended, and exits 1 when there is any.
@@ -1647,9 +1677,12 @@ killed=" "
 kills=0
 # The daemon holds a phase when its claim's launches fail launch_failure_limit (3) times in a row,
 # and a failed launch is one that never became a working agent: the count restarts at the agent's
-# ready (supervise/budgets.go). So each relaunch is ended before it is ready, by deleting its pod the
-# moment the claim names it; an exec's kill cannot, since the pod's worker container has not
-# started. The first end takes the ready planner, and the two after it take relaunches.
+# ready (supervise/budgets.go). So each relaunch is deleted the moment the claim names it; an exec's
+# kill cannot reach it, since the pod's worker container has not started. The first end takes the
+# ready planner, and the ones after it take relaunches. A deleted pod that is still starting can
+# run on, register and take its task before its containers are stopped, and each such relaunch dies
+# with work outstanding: then the deaths budget runs out instead, which the check below accepts
+# only when every relaunch registered before it died.
 # new_planner_pod: tree 3's planner claim names a pod none of the ends took. It runs in this shell:
 # the ended list is a here-string, which the sh of an `sh -c` (dash) refuses as a syntax error.
 new_planner_pod() {
@@ -1670,12 +1703,22 @@ until issue_phase "$tree3" held >/dev/null 2>&1; do
     "'$work/legion' state --json --config '$work/legion.yaml' | jq -e --arg i '$tree3' --arg u '$uid' '.issues[\$i].phase == \"held\" or ((.issues[\$i].workers.planner.claim.locator.incarnation // \"\") as \$n | \$n != \"\" and \$n != \$u)' >/dev/null"
 done
 note "$tree3 is held after $kills ended planner launches"
-# The hold is the launch budget's: the daemon failed the planner's claim because its launches ran
-# out, and no other path that also holds an issue (a prompt budget, the architect's escalation).
+# The hold is one of the planner claim's own supervise budgets, the one its ends can run out, and no
+# other path that also holds an issue (a prompt budget, the architect's escalation).
 planner_claim=$(claim_token "$tree3" planner)
 why=$(log_lines "supervise: claim failed" | jq -r --arg c "$planner_claim" 'select(.claim == $c) | .why' | tail -1)
-[ "$why" = "launch failures ran out" ] || fail "$tree3's planner claim $planner_claim failed with '${why:-no logged failure}', not 'launch failures ran out'"
-note "the daemon failed $planner_claim because $why"
+# The first end takes the ready planner; every later one is a relaunch, and whether each registered
+# before it died is the budget the ends ran out (relaunch_kill_budget).
+read -r -a ended <<<"$killed"
+budget=$(relaunch_kill_budget "$planner_claim" "${ended[@]:1}") || fail "the ends of $tree3's planner relaunches could not be read from the daemon log"
+while IFS= read -r line; do note "$line"; done < <(sed '$d' <<<"$budget")
+expected=$(tail -1 <<<"$budget")
+case $expected in
+  "launch failures ran out" | "deaths with work outstanding ran out") ;;
+  *) fail "$tree3's planner relaunches were ended $expected: some registered before they died and some did not, or the log lacks one, so no one budget is theirs" ;;
+esac
+[ "$why" = "$expected" ] || fail "$tree3's planner claim $planner_claim failed with '${why:-no logged failure}', but its relaunch ends can run out only '$expected'"
+note "the daemon failed $planner_claim because $why, the budget its relaunch ends ran out"
 # The held notice reaches the controller: its session, on this machine, holds the Envoy delivery.
 controller_notice() {
   local file
