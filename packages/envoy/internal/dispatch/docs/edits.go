@@ -717,10 +717,7 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		if code {
 			return next, refuseCodeThatEndsItsBlock(tree, next, r, at, "with", op.With)
 		}
-		if err := refuseUnreadableReplacement(tree, next, r, op.With); err != nil {
-			return nil, err
-		}
-		return next, refuseReshapedReplacement(tree, next, r, op.With)
+		return next, refuseUnreadableReplacement(tree, next, r, op.With)
 	case "delete":
 		if op.Block != "" {
 			if op.Find != "" {
@@ -1065,35 +1062,12 @@ func refuseUnreadableReplacement(before, after *pmdoc.Node, match pmdoc.Range, w
 	return &ErrInvalidOp{Field: "with", Reason: unreadableReason(before, after, match, with, unreadable)}
 }
 
-// refuseReshapedReplacement refuses a replace whose text the document reads back as blocks of
-// another kind where it lands - a paragraph whose new text is `---` reads back as a horizontal
-// rule - since a replace writes text and the document could not carry it back as text. An empty
-// with that leaves such text behind is refused naming that text; one that empties its paragraph
-// changes no shape, since an empty paragraph is not written (pmdoc.BlockShapeError).
-func refuseReshapedReplacement(before, after *pmdoc.Node, match pmdoc.Range, with string) error {
-	reshaped, err := replacementBroke(before, after, match, pmdoc.BlockShapeError)
-	if err != nil || reshaped == nil {
-		return err
-	}
-	at, _ := pmdoc.ContainingTextblock(after, match.From)
-	if with == "" {
-		left := nodeText(at.Node)
-		return &ErrInvalidOp{Field: "with", Reason: fmt.Sprintf(
-			"with \"\" leaves %q, text the document reads back as another block where it lands (%v); %s",
-			left, reshaped, blockSyntaxAdvice(left, at),
-		)}
-	}
-	return &ErrInvalidOp{Field: "with", Reason: fmt.Sprintf(
-		"with %q is text the document reads back as another block where it lands (%v); %s",
-		with, reshaped, blockSyntaxAdvice(with, at),
-	)}
-}
-
 // refuseBrokenAccept refuses an accepted suggestion whose text leaves a document-level block the
-// document cannot read back, or reads back as blocks of another kind, where it lands: the checks
-// refuseUnreadableReplacement and refuseReshapedReplacement run for a replace, over every block
-// the accept writes. The person accepting cannot change the text, so acceptRefusal says what the
-// text does there and what they can do.
+// document cannot read back, or reads back as blocks of another kind, where it lands, over every
+// block the accept writes: the check refuseUnreadableReplacement runs for a replace, and the shape
+// check, since an accept writes blocks - two paragraphs in a tight list item read back as one. The
+// person accepting cannot change the text, so acceptRefusal says what the text does there and what
+// they can do.
 func refuseBrokenAccept(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.TextblockAt, with string, replacement *pmdoc.Node) error {
 	broke, err := replacementBroke(before, after, match, pmdoc.BlockReadError)
 	if err == nil && broke == nil {
@@ -1128,27 +1102,17 @@ func acceptRefusal(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.Textbl
 			with, pmdoc.BlockNames(replacement.Children), where, broke, ask,
 		)
 	}
-	text := with
-	if emptyTextblock(replacement.Children[0]) {
-		if !found || emptied {
-			advice := "reject the suggestion, or delete the " + holder + " in the document"
-			if len(at.Ancestors[0].Children) > 1 {
-				advice = "reject the suggestion, since the rest of the " + holder + " cannot be written without this paragraph"
-				if _, err := pmdoc.DeleteBlock(before, blockID(at.Node)); err == nil {
-					advice = "reject the suggestion, or delete the paragraph in the document, which leaves the rest of the " + holder
-				}
+	if emptyTextblock(replacement.Children[0]) && (!found || emptied) {
+		advice := "reject the suggestion, or delete the " + holder + " in the document"
+		if len(at.Ancestors[0].Children) > 1 {
+			advice = "reject the suggestion, since the rest of the " + holder + " cannot be written without this paragraph"
+			if _, err := pmdoc.DeleteBlock(before, blockID(at.Node)); err == nil {
+				advice = "reject the suggestion, or delete the paragraph in the document, which leaves the rest of the " + holder
 			}
-			return fmt.Sprintf(
-				"replace_with %q empties the paragraph this %s holds, and the %s cannot be written with it empty; %s",
-				with, holder, holder, advice,
-			)
 		}
-		text = nodeText(landed.Node)
-	}
-	if line, reads, _ := blockSyntaxLine(text); reads != "" {
 		return fmt.Sprintf(
-			"replace_with %q leaves the line %q, which reads as %s where it lands (%v); reject the suggestion, or reply asking for other text on that line",
-			with, line, reads, broke,
+			"replace_with %q empties the paragraph this %s holds, and the %s cannot be written with it empty; %s",
+			with, holder, holder, advice,
 		)
 	}
 	return fmt.Sprintf(
@@ -1185,55 +1149,6 @@ func replacementBroke(before, after *pmdoc.Node, match pmdoc.Range, check func(*
 	}
 	return nil, nil
 }
-
-// blockSyntaxAdvice says what to do with text that reads as block syntax where it lands, in the
-// textblock at: a line of only `-`, `*` or `_` is a horizontal rule and a line of only colons a
-// typed block's fence, and anything else is left to the reader of the reason before it. The block
-// the caller probably meant is inserted beside the one holding the text, except in a footnote
-// definition: the document reads a definition at its end, so a block added beside one reads back
-// ahead of it, and the text stays the only way to keep what the caller wrote there.
-func blockSyntaxAdvice(with string, at pmdoc.TextblockAt) string {
-	footnote := inFootnoteDefinition(at)
-	if line, reads, insert := blockSyntaxLine(with); reads != "" {
-		if footnote {
-			return fmt.Sprintf("the line %q reads as %s; to keep the characters as text, put other text on that line (a footnote definition is read at the document's end, so a block added beside it reads back ahead of it)", line, reads)
-		}
-		return fmt.Sprintf("the line %q reads as %s; %s, and to keep the characters as text, put other text on that line", line, reads, insert)
-	}
-	if footnote {
-		return "write it inside a line of text"
-	}
-	return "write it inside a line of text, or insert the block you mean as its own block"
-}
-
-// blockSyntaxLine finds the first line of text that reads as block syntax where it starts a line -
-// a horizontal rule or a typed block's fence - naming what it reads as and the insert that adds
-// that block instead.
-func blockSyntaxLine(text string) (line, reads, insert string) {
-	for _, line := range strings.Split(strings.ReplaceAll(text, "\\\n", "\n"), "\n") {
-		switch {
-		case thematicBreakLine.MatchString(strings.Trim(line, " \t\r")):
-			return strings.Trim(line, " \t\r"), "a horizontal rule", fmt.Sprintf("to add a rule, insert it as its own block beside this one (insert with markdown %q)", "***")
-		case pmdoc.TypedFenceLine(line):
-			return strings.Trim(line, " \t\r"), "a typed block's fence", "to add a typed block, insert it as its own block beside this one"
-		}
-	}
-	return "", "", ""
-}
-
-// inFootnoteDefinition reports whether a textblock is inside a footnote definition.
-func inFootnoteDefinition(at pmdoc.TextblockAt) bool {
-	for _, ancestor := range at.Ancestors {
-		if ancestor.Type == "footnote_definition" {
-			return true
-		}
-	}
-	return false
-}
-
-// thematicBreakLine is a line CommonMark reads as a thematic break: three or more of one of
-// `-`, `*` or `_`, with spaces between them allowed.
-var thematicBreakLine = regexp.MustCompile(`^(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$`)
 
 // unreadableReason says why a replace left its block unreadable and what to do instead, by cause.
 // An emptied paragraph is one the block holding it cannot be written without. The advice is the
@@ -1282,7 +1197,7 @@ func unreadableReason(before, after *pmdoc.Node, match pmdoc.Range, with string,
 			with,
 		)
 	}
-	return fmt.Sprintf("with %q leaves markdown the document cannot read back where it lands (%v); %s", with, unreadable, blockSyntaxAdvice(with, at))
+	return fmt.Sprintf("with %q leaves markdown the document cannot read back where it lands (%v); write it inside a line of text, or insert the block you mean as its own block", with, unreadable)
 }
 
 // emptyTextblock reports whether a textblock holds no text but whitespace.

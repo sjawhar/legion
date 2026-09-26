@@ -195,8 +195,12 @@ func Decode(raw string) (Names, error) {
 		})
 	})
 	if err == nil {
-		if _, next := dec.Token(); next != io.EOF {
+		switch _, next := dec.Token(); {
+		case next == io.EOF:
+		case next == nil:
 			err = errors.New("more than one JSON value")
+		default:
+			err = errors.New("trailing data after the object")
 		}
 	}
 	for _, kind := range Kinds {
@@ -217,12 +221,8 @@ func members(dec *json.Decoder, what string, member func(key string) error) erro
 	if err != nil {
 		return err
 	}
-	switch open {
-	case json.Delim('{'):
-	case nil:
-		return fmt.Errorf("%s is null, not an object", what)
-	default:
-		return fmt.Errorf("%s is %v, not an object", what, open)
+	if open != json.Delim('{') {
+		return fmt.Errorf("%s is %s, not an object", what, scalarKind(open))
 	}
 	for dec.More() {
 		key, err := dec.Token()
@@ -235,4 +235,25 @@ func members(dec *json.Decoder, what string, member func(key string) error) erro
 	}
 	_, err = dec.Token()
 	return err
+}
+
+// scalarKind names value's JSON type rather than its content: null, a string, a boolean, a
+// number, or an array, the only shapes a fresh Token can read where members expects an object
+// (Decode never calls UseNumber, and Token never returns a stray delimiter or a partial value).
+// Decode's own refusal already quotes the whole raw input, so naming the shape is what this adds.
+func scalarKind(value any) string {
+	if value == nil {
+		return "null"
+	}
+	switch value.(type) {
+	case string:
+		return "a string"
+	case bool:
+		return "a boolean"
+	case float64:
+		return "a number"
+	case json.Delim:
+		return "an array"
+	}
+	panic(fmt.Sprintf("promptrefs: scalarKind: %#v is not a shape members can hand it", value))
 }

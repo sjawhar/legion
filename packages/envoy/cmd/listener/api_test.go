@@ -1169,6 +1169,70 @@ func TestUnwiredRepositoryWarningSkipsWildcardRepositorySegment(t *testing.T) {
 	}
 }
 
+// A GitHub topic writes each dot in a repository's name as `_`, and the token after the name is
+// one of contracts.GithubTopicKinds, so a subscription whose token there is not a kind or a
+// wildcard would receive nothing, and the listener warns. When a kind follows the extra tokens,
+// or the name holds an empty token, the topic spells a dotted name with its dot, and the warning
+// names the spelling Envoy publishes. Otherwise the token is a mistyped kind, and the warning names
+// the kinds rather than suggesting a name that receives nothing either. A row per kind and
+// wildcard holds that no published kind is mistaken for either.
+func TestSubscribeHandlerWarnsWhenAGitHubTopicSpellsARepositoryWithADot(t *testing.T) {
+	client := setupPublishTestClient(t)
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	inspector := &fakeStreamInfo{info: &nats.StreamInfo{State: nats.StreamState{Subjects: map[string]uint64{"notifications.github.example-org.example-repo.pr.1": 1}}}}
+	state := &listenerDeps{client: client, registry: registry, sessions: sessions, streamName: "notifications", streamInfo: inspector}
+	warnings := func(t *testing.T, topic string) []string {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{"session_id": "ses_subscriber", "self_subscribed": true, "topics": []string{topic}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		recorder := httptest.NewRecorder()
+		subscribeHandler(state, "test-machine", logging.New("test")).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(string(body))))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("subscribe %s: status %d, body %s", topic, recorder.Code, recorder.Body.String())
+		}
+		var response struct {
+			Warnings []string `json:"warnings"`
+		}
+		if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+			t.Fatal(err)
+		}
+		return response.Warnings
+	}
+	for _, kind := range append(append([]string{}, contracts.GithubTopicKinds...), "*", ">") {
+		topic := "notifications.github.example-org.example-repo." + kind
+		if kind != ">" {
+			topic += ".>"
+		}
+		if got := warnings(t, topic); len(got) != 0 {
+			t.Errorf("subscribe %s: warnings %q, want none", topic, got)
+		}
+	}
+	for _, tc := range []struct{ topic, spelled string }{
+		{"notifications.github.acme.site.io.pr.7.>", "notifications.github.acme.site_io.pr.7.>"},
+		{"notifications.github.acme.a.b.c.pr.>", "notifications.github.acme.a_b_c.pr.>"},
+		{"notifications.github.sjawhar..github.>", "notifications.github.sjawhar._github.>"},
+	} {
+		want := tc.topic + ` spells a repository name with a dot, and GitHub topics write each dot in a name as "_": subscribe to ` + tc.spelled
+		if got := warnings(t, tc.topic); len(got) != 1 || got[0] != want {
+			t.Errorf("subscribe %s: warnings %q, want [%q]", tc.topic, got, want)
+		}
+	}
+	kinds := strings.Join(contracts.GithubTopicKinds, ", ")
+	for _, tc := range []struct{ topic, token, repository string }{
+		{"notifications.github.acme.widgets.checks.>", "checks", "acme/widgets"},
+		{"notifications.github.acme.widgets.pull_request.>", "pull_request", "acme/widgets"},
+		{"notifications.github.acme.widgets.release.>", "release", "acme/widgets"},
+		{"notifications.github.acme.a.b.c.>", "b", "acme/a"},
+	} {
+		want := tc.topic + `: "` + tc.token + `" after ` + tc.repository + ` is not a GitHub topic kind (` + kinds + `), and a dot in a repository name is written "_"`
+		if got := warnings(t, tc.topic); len(got) != 1 || got[0] != want {
+			t.Errorf("subscribe %s: warnings %q, want [%q]", tc.topic, got, want)
+		}
+	}
+}
+
 func TestSubscribeHandlerDoesNotBlockOnUnwiredRepositoryCheck(t *testing.T) {
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, nil)

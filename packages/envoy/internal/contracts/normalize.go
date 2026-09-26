@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -68,12 +69,12 @@ func GithubEnvelopes(input GithubEnvelopeInput, trigger string) []Envelope {
 	if num != "" {
 		// notifications.github.owner.repo.pr.7706.mention
 		mention := item
-		mention.Topic = GithubSubject(owner, repo, base+"."+num+".mention")
+		mention.Topic = GithubSubject(owner, repo, base+"."+num+"."+githubMentionKind)
 		mentions = append(mentions, mention)
 	}
 	// Also publish repo-wide mention: notifications.github.owner.repo.mention
 	mention := item
-	mention.Topic = GithubSubject(owner, repo, "mention")
+	mention.Topic = GithubSubject(owner, repo, githubMentionKind)
 	mentions = append(mentions, mention)
 	return append(mentions, item)
 }
@@ -335,45 +336,66 @@ func nestedNumberString(body map[string]any, keys ...string) string {
 // githubParentKind returns the entity type that owns the number.
 // For issue_comment, checks body["issue"]["pull_request"] to distinguish PR vs issue.
 func githubParentKind(event string, body map[string]any) string {
-	switch event {
-	case "pull_request", "pull_request_review", "pull_request_review_comment":
+	if event == "issue_comment" && nested(body, "issue", "pull_request") != nil {
 		return "pr"
-	case "issues":
-		return "issue"
-	case "sub_issues":
-		return "issue"
-	case "issue_comment":
-		if nested(body, "issue", "pull_request") != nil {
-			return "pr"
-		}
-		return "issue"
 	}
-	return ""
+	return githubEventParents[event]
+}
+
+// githubEventParents names the resource an event's number belongs to; an issue_comment on a pull
+// request belongs to the pull request instead (githubParentKind).
+var githubEventParents = map[string]string{
+	"pull_request":                "pr",
+	"pull_request_review":         "pr",
+	"pull_request_review_comment": "pr",
+	"issues":                      "issue",
+	"sub_issues":                  "issue",
+	"issue_comment":               "issue",
 }
 
 func githubKind(event string) string {
-	switch event {
-	case "pull_request":
-		return "pr"
-	case "issues":
-		return "issue"
-	case "sub_issues":
-		return "sub_issue"
-	case "push":
-		return "push"
-	case "check_run", "check_suite":
-		return "ci"
-	case "workflow_run":
-		return "workflow"
-	case "issue_comment":
-		return "comment"
-	case "pull_request_review":
-		return "review"
-	case "pull_request_review_comment":
-		return "comment"
-	default:
-		return "comment"
+	if kind, ok := githubEventKinds[event]; ok {
+		return kind
 	}
+	return githubDefaultKind
+}
+
+// githubEventKinds names each GitHub event's topic kind; any other event is githubDefaultKind.
+var githubEventKinds = map[string]string{
+	"pull_request":                "pr",
+	"issues":                      "issue",
+	"sub_issues":                  "sub_issue",
+	"push":                        "push",
+	"check_run":                   "ci",
+	"check_suite":                 "ci",
+	"workflow_run":                "workflow",
+	"issue_comment":               "comment",
+	"pull_request_review":         "review",
+	"pull_request_review_comment": "comment",
+}
+
+const githubDefaultKind = "comment"
+
+// githubMentionKind is the kind a mention copy is published under, after the repository or after
+// the mentioning resource.
+const githubMentionKind = "mention"
+
+// GithubTopicKinds are the tokens that follow a GitHub topic's owner and name, sorted: every kind
+// and parent kind the two tables name, githubDefaultKind, and githubMentionKind (the push, workflow
+// and checks topics begin `push`, `workflow` and `pr`). A token there that is none of these is not
+// a GitHub topic kind.
+var GithubTopicKinds = githubTopicKinds()
+
+func githubTopicKinds() []string {
+	kinds := []string{githubDefaultKind, githubMentionKind}
+	for _, kind := range githubEventKinds {
+		kinds = append(kinds, kind)
+	}
+	for _, parent := range githubEventParents {
+		kinds = append(kinds, parent)
+	}
+	slices.Sort(kinds)
+	return slices.Compact(kinds)
 }
 
 // GithubPRNumber returns a non-negative integer encoded as a JSON number or decimal-digit string.
