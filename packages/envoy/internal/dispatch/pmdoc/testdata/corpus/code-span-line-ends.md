@@ -13,3 +13,11 @@ foo
 
 x `a
  b` y
+
+x ` 
+foo
+ ` y
+
+x ` 
+foo
+ ` y

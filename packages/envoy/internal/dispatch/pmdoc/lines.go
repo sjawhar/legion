@@ -220,11 +220,19 @@ func multilineCodeSpanText(span *ast.CodeSpan, source []byte) (text string, ok b
 		}
 	}
 	text = content.String()
-	head, tail := codePadding(text, true), codePadding(text, false)
-	if head > 0 && tail > 0 && head+tail <= len(text) && strings.Trim(strings.ReplaceAll(text, "\r\n", "\n"), " \n") != "" {
+	if head, tail, padded := codeSpanPadded(text); padded {
 		text = text[head : len(text)-tail]
 	}
 	return text, true
+}
+
+// codeSpanPadded reports whether a code span's text is one the parser takes its padding off: both
+// ends a space or a line ending (codePadding), with something else between, and how long the
+// padding at each end is.
+func codeSpanPadded(text string) (head, tail int, padded bool) {
+	head, tail = codePadding(text, true), codePadding(text, false)
+	padded = head > 0 && tail > 0 && head+tail <= len(text) && strings.Trim(strings.ReplaceAll(text, "\r\n", "\n"), " \n") != ""
+	return head, tail, padded
 }
 
 // codePadding is the length of the space or the line ending - a line feed, or a carriage return

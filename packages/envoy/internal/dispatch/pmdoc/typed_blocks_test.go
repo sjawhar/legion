@@ -79,6 +79,12 @@ func TestTypedBlockFenceOutgrowsTheColonLinesItHolds(t *testing.T) {
 		{"a list item's code, two columns in", callout("c1", listItem(paragraph("item"), code(":::"))), "::::callout"},
 		{"a list item's code, four columns in", callout("c1", listItem(paragraph("item"), code("  :::"))), ":::callout"},
 		{"a blockquote's code", callout("c1", &Node{Type: "blockquote", Children: []*Node{code(":::")}}), ":::callout"},
+		// Only a trailing carriage return, half of a CR LF, is part of a colon line here: a line a
+		// lone carriage return begins is written as main wrote it, a tab or four spaces after it
+		// indenting it past any fence.
+		{"code holding colons after a lone carriage return and a tab", callout("c1", code("\r\t::::")), ":::callout"},
+		{"code holding colons after a lone carriage return and four spaces", callout("c1", code("\r    ::::")), ":::callout"},
+		{"code holding colons before a carriage return", callout("c1", code("::::\r\nb")), ":::::callout"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			doc := &Node{Type: "doc", Children: []*Node{test.tree, paragraph("After.")}}
