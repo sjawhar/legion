@@ -163,7 +163,6 @@ func (c *Conns) Conn(token claim.Token) (runtime.Conn, bool) {
 	return conn, ok
 }
 
-// Register is a claim's agent connecting.
 // Register is conn connecting for the claim. A fake connection, or one that embeds it, is
 // numbered newer than every connection registered before it.
 func (c *Conns) Register(token claim.Token, conn runtime.Conn) {
