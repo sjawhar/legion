@@ -324,6 +324,44 @@ func TestSuggestionActionsAreRefusedOnlyForAnAskAnAcceptBroke(t *testing.T) {
 	}
 }
 
+// A replacement carrying an ask block under the id of an ask the document already holds would
+// write two asks with one id, and the document's id repair keeps the id for the first in document
+// order, so the new ask would take over the existing ask's row and its answer. The accept refuses
+// it, and the document and the existing ask stay as they were.
+func TestSuggestionAcceptRefusesAnAskUnderAnIdTheDocumentHolds(t *testing.T) {
+	var documentService *docs.Service
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "An ask under a held id",
+		"Intro typo.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich one?\n:::\n")
+	before, err := documentService.Text(context.Background(), issue.PrimaryArtifactID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "ask first", "anchor": map[string]any{"artifact": "spec", "quote": "Intro typo."},
+		"suggestion": map[string]string{"replace_with": ":::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nOther?\n:::\n"},
+		"actor":      sessionActor(),
+	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create the suggestion: status=%d body=%s", created.Code, created.Body.String())
+	}
+	comment := decodeBody[model.Comment](t, created)
+
+	accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
+
+	if accepted.Code != http.StatusBadRequest || !strings.Contains(accepted.Body.String(), `"code":"INVALID_ASK_BLOCK"`) ||
+		!strings.Contains(accepted.Body.String(), `duplicate ask block id \"a1\"`) {
+		t.Fatalf("accept an ask under a held id: status=%d body=%s", accepted.Code, accepted.Body.String())
+	}
+	if after, err := documentService.Text(context.Background(), issue.PrimaryArtifactID); err != nil || after != before {
+		t.Fatalf("document after the refused accept = %q (%v), want it unchanged: %q", after, err, before)
+	}
+}
+
 // A replacement no level of the document can hold where the suggestion sits, such as a code block
 // over a table cell's whole text, is the caller's to fix: the accept is refused naming replace_with, and
 // the document stays as it was, where the splice's schema error once reached the handler as a 500.
