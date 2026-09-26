@@ -85,7 +85,7 @@ func (footnotes) Extend(m goldmark.Markdown) {
 }
 
 // footnoteParserOptions registers footnotes: the definition parser (footnoteDefinitionParser),
-// goldmark's reference parser, and its transformer, which gathers the definitions at the end.
+// goldmark's reference parser, and its transformer, which numbers the references and definitions.
 func footnoteParserOptions() []parser.Option {
 	return []parser.Option{
 		parser.WithBlockParsers(util.Prioritized(footnoteDefinitionParser{extension.NewFootnoteBlockParser()}, 999)),
@@ -144,19 +144,45 @@ func (taskMarkerParser) Parse(parent ast.Node, block gmtext.Reader, _ parser.Con
 	return extensionast.NewTaskCheckBox(line[1] == 'x' || line[1] == 'X')
 }
 
-// openedDefinitionsKey holds every footnote definition the parser opens while a document parses,
-// and openedDefinitionsAttr on the document root afterwards (withLineStarts): goldmark's
-// transformer moves each referenced definition to the document's end and drops the rest.
+// footnoteSlot stands where a footnote definition is written while the document parses:
+// goldmark's footnote extension moves each definition it closes into the list it gathers at the
+// document's end, and its transformer drops the ones nothing refers to. definitionsInPlace puts
+// each back in its slot, where the browser editor's parser keeps it.
+type footnoteSlot struct {
+	ast.BaseBlock
+	definition ast.Node
+}
+
 var (
-	openedDefinitionsKey  = parser.NewContextKey()
-	openedDefinitionsAttr = []byte("pmdoc-opened-definitions")
+	kindFootnoteSlot = ast.NewNodeKind("FootnoteSlot")
+	footnoteSlotsKey = parser.NewContextKey()
 )
 
-// openedDefinition is a footnote definition as the parser opened it: nested when it opened inside
-// another block rather than at the document's level.
-type openedDefinition struct {
-	node   ast.Node
-	nested bool
+func (s *footnoteSlot) Kind() ast.NodeKind { return kindFootnoteSlot }
+
+func (s *footnoteSlot) Dump(source []byte, level int) { ast.DumpHelper(s, source, level, nil, nil) }
+
+func (p footnoteDefinitionParser) Close(node ast.Node, reader gmtext.Reader, pc parser.Context) {
+	slot := &footnoteSlot{definition: node}
+	node.Parent().InsertBefore(node.Parent(), node, slot)
+	slots, _ := pc.Get(footnoteSlotsKey).([]*footnoteSlot)
+	pc.Set(footnoteSlotsKey, append(slots, slot))
+	p.BlockParser.Close(node, reader, pc)
+}
+
+// definitionsInPlace puts each footnote definition back where it is written, in place of its slot,
+// and removes the list goldmark gathered them in.
+func definitionsInPlace(root ast.Node, context parser.Context) {
+	slots, _ := context.Get(footnoteSlotsKey).([]*footnoteSlot)
+	for _, slot := range slots {
+		if parent := slot.definition.Parent(); parent != nil {
+			parent.RemoveChild(parent, slot.definition)
+		}
+		slot.Parent().ReplaceChild(slot.Parent(), slot, slot.definition)
+	}
+	if list, ok := root.LastChild().(*extensionast.FootnoteList); ok {
+		root.RemoveChild(root, list)
+	}
 }
 
 func (p footnoteDefinitionParser) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
@@ -164,8 +190,6 @@ func (p footnoteDefinitionParser) Open(parent ast.Node, reader gmtext.Reader, pc
 	if node == nil {
 		return node, state
 	}
-	opened, _ := pc.Get(openedDefinitionsKey).([]openedDefinition)
-	pc.Set(openedDefinitionsKey, append(opened, openedDefinition{node, parent.Kind() != ast.KindDocument}))
 	if state&parser.HasChildren != 0 {
 		line, _ := reader.PeekLine()
 		skip := 0
@@ -221,15 +245,13 @@ func recordLine(line gmtext.Segment, source []byte, pc parser.Context) {
 	recorded[line.TrimLeftSpace(source).Start] = line
 }
 
-// withLineStarts parses source with context and leaves the lines lineRecordingParagraph recorded
-// and the footnote definitions footnoteDefinitionParser opened on the document root.
+// withLineStarts parses source with context, with each footnote definition where it is written
+// (definitionsInPlace), and leaves the lines lineRecordingParagraph recorded on the document root.
 func withLineStarts(p parser.Parser, source []byte, context parser.Context) ast.Node {
 	root := p.Parse(gmtext.NewReader(source), parser.WithContext(context))
+	definitionsInPlace(root, context)
 	if recorded := context.Get(untrimmedLinesKey); recorded != nil {
 		root.SetAttribute(untrimmedLinesAttr, recorded)
-	}
-	if opened := context.Get(openedDefinitionsKey); opened != nil {
-		root.SetAttribute(openedDefinitionsAttr, opened)
 	}
 	return root
 }

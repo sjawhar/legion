@@ -4100,6 +4100,437 @@
     "rendered_by_milkdown": "Code[^1], a list[^2], a quote[^3] and a callout[^4].\n\n[^1]: Note.\n\n    ```\n    code\n    ```\n\n[^2]: Note.\n\n    * item\n\n[^3]: Note.\n\n    > quoted\n\n[^4]: :::callout{#footnote-callout kind=\"note\" title=\"In a footnote\"}\n    Body.\n    :::\n"
   },
   {
+    "name": "footnote-placement",
+    "markdown": "Text[^a], then[^c], then[^b].\n\n> Quoted[^q].\n>\n> [^q]: In the quote.\n>\n>     - a\n>     - b\n>\n>\n>     After the list, in the definition.\n\n[^b]: Referenced last, written first.\n\n    - l\n\nAfter the definition.\n\n[^u]: Nothing refers to this.\n\nBetween.\n\n- An item[^i].\n\n  [^i]: In the item.\n\n[^a]: Referenced first.\n\n    > - x\n    >\n    >\n    > In the quote.\n\n[^c]: C.\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Text"
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "a"
+              }
+            },
+            {
+              "type": "text",
+              "text": ", then"
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "c"
+              }
+            },
+            {
+              "type": "text",
+              "text": ", then"
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "b"
+              }
+            },
+            {
+              "type": "text",
+              "text": "."
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000003"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Quoted"
+                },
+                {
+                  "type": "footnote_reference",
+                  "attrs": {
+                    "label": "q"
+                  }
+                },
+                {
+                  "type": "text",
+                  "text": "."
+                }
+              ]
+            },
+            {
+              "type": "footnote_definition",
+              "attrs": {
+                "label": "q",
+                "blockId": "b-000004"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000005"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "In the quote."
+                    }
+                  ]
+                },
+                {
+                  "type": "bullet_list",
+                  "attrs": {
+                    "spread": true,
+                    "blockId": "b-000006"
+                  },
+                  "content": [
+                    {
+                      "type": "list_item",
+                      "attrs": {
+                        "label": "•",
+                        "listType": "bullet",
+                        "spread": false,
+                        "checked": null,
+                        "blockId": "b-000007"
+                      },
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "attrs": {
+                            "blockId": "b-000008"
+                          },
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "a"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "list_item",
+                      "attrs": {
+                        "label": "•",
+                        "listType": "bullet",
+                        "spread": false,
+                        "checked": null,
+                        "blockId": "b-000009"
+                      },
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "attrs": {
+                            "blockId": "b-000010"
+                          },
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "b"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000011"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "After the list, in the definition."
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "footnote_definition",
+          "attrs": {
+            "label": "b",
+            "blockId": "b-000012"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000013"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Referenced last, written first."
+                }
+              ]
+            },
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false,
+                "blockId": "b-000014"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000015"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000016"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "l"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000017"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "After the definition."
+            }
+          ]
+        },
+        {
+          "type": "footnote_definition",
+          "attrs": {
+            "label": "u",
+            "blockId": "b-000018"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000019"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Nothing refers to this."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000020"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Between."
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "spread": false,
+            "blockId": "b-000021"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": true,
+                "checked": null,
+                "blockId": "b-000022"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000023"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "An item"
+                    },
+                    {
+                      "type": "footnote_reference",
+                      "attrs": {
+                        "label": "i"
+                      }
+                    },
+                    {
+                      "type": "text",
+                      "text": "."
+                    }
+                  ]
+                },
+                {
+                  "type": "footnote_definition",
+                  "attrs": {
+                    "label": "i",
+                    "blockId": "b-000024"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000025"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "In the item."
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "footnote_definition",
+          "attrs": {
+            "label": "a",
+            "blockId": "b-000026"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000027"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Referenced first."
+                }
+              ]
+            },
+            {
+              "type": "blockquote",
+              "attrs": {
+                "blockId": "b-000028"
+              },
+              "content": [
+                {
+                  "type": "bullet_list",
+                  "attrs": {
+                    "spread": false,
+                    "blockId": "b-000029"
+                  },
+                  "content": [
+                    {
+                      "type": "list_item",
+                      "attrs": {
+                        "label": "•",
+                        "listType": "bullet",
+                        "spread": true,
+                        "checked": null,
+                        "blockId": "b-000030"
+                      },
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "attrs": {
+                            "blockId": "b-000031"
+                          },
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "x"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000032"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "In the quote."
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "footnote_definition",
+          "attrs": {
+            "label": "c",
+            "blockId": "b-000033"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000034"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "C."
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AZMBAQAHAQtwcm9zZW1pcnJvcgMJcGFyYWdyYXBoBwABAAYEAAEBBFRleHSHAQEDEmZvb3Rub3RlX3JlZmVyZW5jZSgAAQYFbGFiZWwBdwFhhwEGBgQAAQgGLCB0aGVuhwEIAxJmb290bm90ZV9yZWZlcmVuY2UoAAEPBWxhYmVsAXcBY4cBDwYEAAERBiwgdGhlbocBEQMSZm9vdG5vdGVfcmVmZXJlbmNlKAABGAVsYWJlbAF3AWKHARgGBAABGgEuKAABAAdibG9ja0lkAXcIYi0wMDAwMDGHAQADCmJsb2NrcXVvdGUHAAEdAwlwYXJhZ3JhcGgHAAEeBgQAAR8GUXVvdGVkhwEfAxJmb290bm90ZV9yZWZlcmVuY2UoAAEmBWxhYmVsAXcBcYcBJgYEAAEoAS4oAAEeB2Jsb2NrSWQBdwhiLTAwMDAwM4cBHgMTZm9vdG5vdGVfZGVmaW5pdGlvbgcAASsDCXBhcmFncmFwaAcAASwGBAABLQ1JbiB0aGUgcXVvdGUuKAABLAdibG9ja0lkAXcIYi0wMDAwMDWHASwDC2J1bGxldF9saXN0BwABPAMJbGlzdF9pdGVtBwABPQMJcGFyYWdyYXBoBwABPgYEAAE/AWEoAAE+B2Jsb2NrSWQBdwhiLTAwMDAwOCgAAT0FbGFiZWwBdwPigKIoAAE9CGxpc3RUeXBlAXcGYnVsbGV0KAABPQZzcHJlYWQBeSgAAT0HYmxvY2tJZAF3CGItMDAwMDA3hwE9AwlsaXN0X2l0ZW0HAAFGAwlwYXJhZ3JhcGgHAAFHBgQAAUgBYigAAUcHYmxvY2tJZAF3CGItMDAwMDEwKAABRgVsYWJlbAF3A+KAoigAAUYIbGlzdFR5cGUBdwZidWxsZXQoAAFGBnNwcmVhZAF5KAABRgdibG9ja0lkAXcIYi0wMDAwMDkoAAE8BnNwcmVhZAF4KAABPAdibG9ja0lkAXcIYi0wMDAwMDaHATwDCXBhcmFncmFwaAcAAVEGBAABUiJBZnRlciB0aGUgbGlzdCwgaW4gdGhlIGRlZmluaXRpb24uKAABUQdibG9ja0lkAXcIYi0wMDAwMTEoAAErBWxhYmVsAXcBcSgAASsHYmxvY2tJZAF3CGItMDAwMDA0KAABHQdibG9ja0lkAXcIYi0wMDAwMDKHAR0DE2Zvb3Rub3RlX2RlZmluaXRpb24HAAF5AwlwYXJhZ3JhcGgHAAF6BgQAAXsfUmVmZXJlbmNlZCBsYXN0LCB3cml0dGVuIGZpcnN0LigAAXoHYmxvY2tJZAF3CGItMDAwMDEzhwF6AwtidWxsZXRfbGlzdAcAAZwBAwlsaXN0X2l0ZW0HAAGdAQMJcGFyYWdyYXBoBwABngEGBAABnwEBbCgAAZ4BB2Jsb2NrSWQBdwhiLTAwMDAxNigAAZ0BBWxhYmVsAXcD4oCiKAABnQEIbGlzdFR5cGUBdwZidWxsZXQoAAGdAQZzcHJlYWQBeSgAAZ0BB2Jsb2NrSWQBdwhiLTAwMDAxNSgAAZwBBnNwcmVhZAF5KAABnAEHYmxvY2tJZAF3CGItMDAwMDE0KAABeQVsYWJlbAF3AWIoAAF5B2Jsb2NrSWQBdwhiLTAwMDAxMocBeQMJcGFyYWdyYXBoBwABqgEGBAABqwEVQWZ0ZXIgdGhlIGRlZmluaXRpb24uKAABqgEHYmxvY2tJZAF3CGItMDAwMDE3hwGqAQMTZm9vdG5vdGVfZGVmaW5pdGlvbgcAAcIBAwlwYXJhZ3JhcGgHAAHDAQYEAAHEARdOb3RoaW5nIHJlZmVycyB0byB0aGlzLigAAcMBB2Jsb2NrSWQBdwhiLTAwMDAxOSgAAcIBBWxhYmVsAXcBdSgAAcIBB2Jsb2NrSWQBdwhiLTAwMDAxOIcBwgEDCXBhcmFncmFwaAcAAd8BBgQAAeABCEJldHdlZW4uKAAB3wEHYmxvY2tJZAF3CGItMDAwMDIwhwHfAQMLYnVsbGV0X2xpc3QHAAHqAQMJbGlzdF9pdGVtBwAB6wEDCXBhcmFncmFwaAcAAewBBgQAAe0BB0FuIGl0ZW2HAe0BAxJmb290bm90ZV9yZWZlcmVuY2UoAAH1AQVsYWJlbAF3AWmHAfUBBgQAAfcBAS4oAAHsAQdibG9ja0lkAXcIYi0wMDAwMjOHAewBAxNmb290bm90ZV9kZWZpbml0aW9uBwAB+gEDCXBhcmFncmFwaAcAAfsBBgQAAfwBDEluIHRoZSBpdGVtLigAAfsBB2Jsb2NrSWQBdwhiLTAwMDAyNSgAAfoBBWxhYmVsAXcBaSgAAfoBB2Jsb2NrSWQBdwhiLTAwMDAyNCgAAesBBWxhYmVsAXcD4oCiKAAB6wEIbGlzdFR5cGUBdwZidWxsZXQoAAHrAQZzcHJlYWQBeCgAAesBB2Jsb2NrSWQBdwhiLTAwMDAyMigAAeoBBnNwcmVhZAF5KAAB6gEHYmxvY2tJZAF3CGItMDAwMDIxhwHqAQMTZm9vdG5vdGVfZGVmaW5pdGlvbgcAAZICAwlwYXJhZ3JhcGgHAAGTAgYEAAGUAhFSZWZlcmVuY2VkIGZpcnN0LigAAZMCB2Jsb2NrSWQBdwhiLTAwMDAyN4cBkwIDCmJsb2NrcXVvdGUHAAGnAgMLYnVsbGV0X2xpc3QHAAGoAgMJbGlzdF9pdGVtBwABqQIDCXBhcmFncmFwaAcAAaoCBgQAAasCAXgoAAGqAgdibG9ja0lkAXcIYi0wMDAwMzEoAAGpAgVsYWJlbAF3A+KAoigAAakCCGxpc3RUeXBlAXcGYnVsbGV0KAABqQIGc3ByZWFkAXgoAAGpAgdibG9ja0lkAXcIYi0wMDAwMzAoAAGoAgZzcHJlYWQBeSgAAagCB2Jsb2NrSWQBdwhiLTAwMDAyOYcBqAIDCXBhcmFncmFwaAcAAbQCBgQAAbUCDUluIHRoZSBxdW90ZS4oAAG0AgdibG9ja0lkAXcIYi0wMDAwMzIoAAGnAgdibG9ja0lkAXcIYi0wMDAwMjgoAAGSAgVsYWJlbAF3AWEoAAGSAgdibG9ja0lkAXcIYi0wMDAwMjaHAZICAxNmb290bm90ZV9kZWZpbml0aW9uBwABxwIDCXBhcmFncmFwaAcAAcgCBgQAAckCAkMuKAAByAIHYmxvY2tJZAF3CGItMDAwMDM0KAABxwIFbGFiZWwBdwFjKAABxwIHYmxvY2tJZAF3CGItMDAwMDMzAA==",
+    "rendered_by_milkdown": "Text[^a], then[^c], then[^b].\n\n> Quoted[^q].\n>\n> [^q]: In the quote.\n>\n>     * a\n>\n>     * b\n>\n>     After the list, in the definition.\n\n[^b]: Referenced last, written first.\n\n    * l\n\nAfter the definition.\n\n[^u]: Nothing refers to this.\n\nBetween.\n\n* An item[^i].\n\n  [^i]: In the item.\n\n[^a]: Referenced first.\n\n    > * x\n    >\n    > In the quote.\n\n[^c]: C.\n"
+  },
+  {
     "name": "footnote-unreferenced",
     "markdown": "Text[^1].\n\n[^1]: Referenced.\n\n[^q]: Nothing refers to this.\n\n    It has two paragraphs.\n",
     "pm_json": {
@@ -5084,6 +5515,900 @@
     },
     "yjs_update_v1_b64": "AQ4BAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgYAAQEEbGluayt7ImhyZWYiOiJodHRwczovL2V4YW1wbGUuY29tIiwidGl0bGUiOm51bGx9hAECCHVudGl0bGVkhgEKBGxpbmsEbnVsbIQBCwUgYW5kIIYBEARsaW5rLnsiaHJlZiI6Imh0dHBzOi8vZXhhbXBsZS5vcmciLCJ0aXRsZSI6IlRpdGxlIn2EAREGdGl0bGVkhgEXBGxpbmsEbnVsbIQBGAUgYW5kIIYBHQRsaW5rK3siaHJlZiI6Imh0dHBzOi8vZXhhbXBsZS5uZXQiLCJ0aXRsZSI6bnVsbH2EAR4TaHR0cHM6Ly9leGFtcGxlLm5ldIYBMQRsaW5rBG51bGwoAAEAB2Jsb2NrSWQBdwhiLTAwMDAwMQA=",
     "rendered_by_milkdown": "[untitled](https://example.com) and [titled](https://example.org \"Title\") and <https://example.net>\n"
+  },
+  {
+    "name": "list-spacing-in-containers",
+    "markdown": "Text.\n\n> - a\n>\n> - b\n\nText.\n\n> - a\n>\n>\n> After.\n\nText.\n\n> - a\n>\n> > q\n\nText.\n\n> - a\n>   - n\n>\n>\n> - b\n>   - n\n>\n> After.\n\nText.\n\n> - a\n> ```\n> code\n> ```\n\nText.\n\n> :::callout{#c1 kind=\"note\" title=\"T\"}\n> - a\n> ***\n> :::\n\nText.\n\n> ::::callout{#c2 kind=\"note\" title=\"T\"}\n> - a\n> :::callout{#c3 kind=\"note\" title=\"T\"}\n> inner\n> :::\n> ::::\n\nSee the notes[^1][^2][^3].\n\n[^1]: One.\n\n    - a\n\n    - b\n\n[^2]: Two.\n\n    - a\n\n    > q\n\n[^3]: Three.\n\n    - a\n      - n\n\n    > q\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Text."
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": true,
+                "blockId": "b-000003"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000004"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000005"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000006"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000007"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "b"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000008"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Text."
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000009"
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": true,
+                "blockId": "b-000010"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000011"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000012"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000013"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "After."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000014"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Text."
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000015"
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": true,
+                "blockId": "b-000016"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000017"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000018"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "blockquote",
+              "attrs": {
+                "blockId": "b-000019"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000020"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "q"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000021"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Text."
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000022"
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false,
+                "blockId": "b-000023"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000024"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000025"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "bullet_list",
+                      "attrs": {
+                        "spread": true,
+                        "blockId": "b-000026"
+                      },
+                      "content": [
+                        {
+                          "type": "list_item",
+                          "attrs": {
+                            "label": "•",
+                            "listType": "bullet",
+                            "spread": false,
+                            "checked": null,
+                            "blockId": "b-000027"
+                          },
+                          "content": [
+                            {
+                              "type": "paragraph",
+                              "attrs": {
+                                "blockId": "b-000028"
+                              },
+                              "content": [
+                                {
+                                  "type": "text",
+                                  "text": "n"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000029"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000030"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "b"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "bullet_list",
+                      "attrs": {
+                        "spread": false,
+                        "blockId": "b-000031"
+                      },
+                      "content": [
+                        {
+                          "type": "list_item",
+                          "attrs": {
+                            "label": "•",
+                            "listType": "bullet",
+                            "spread": false,
+                            "checked": null,
+                            "blockId": "b-000032"
+                          },
+                          "content": [
+                            {
+                              "type": "paragraph",
+                              "attrs": {
+                                "blockId": "b-000033"
+                              },
+                              "content": [
+                                {
+                                  "type": "text",
+                                  "text": "n"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000034"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "After."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000035"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Text."
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000036"
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false,
+                "blockId": "b-000037"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000038"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000039"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "code_block",
+              "attrs": {
+                "language": null,
+                "blockId": "b-000040"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "code"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000041"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Text."
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000042"
+          },
+          "content": [
+            {
+              "type": "callout",
+              "attrs": {
+                "kind": "note",
+                "title": "T",
+                "blockId": "c1"
+              },
+              "content": [
+                {
+                  "type": "bullet_list",
+                  "attrs": {
+                    "spread": false,
+                    "blockId": "b-000043"
+                  },
+                  "content": [
+                    {
+                      "type": "list_item",
+                      "attrs": {
+                        "label": "•",
+                        "listType": "bullet",
+                        "spread": false,
+                        "checked": null,
+                        "blockId": "b-000044"
+                      },
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "attrs": {
+                            "blockId": "b-000045"
+                          },
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "a"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "hr",
+                  "attrs": {
+                    "blockId": "b-000046"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000047"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Text."
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000048"
+          },
+          "content": [
+            {
+              "type": "callout",
+              "attrs": {
+                "kind": "note",
+                "title": "T",
+                "blockId": "c2"
+              },
+              "content": [
+                {
+                  "type": "bullet_list",
+                  "attrs": {
+                    "spread": false,
+                    "blockId": "b-000049"
+                  },
+                  "content": [
+                    {
+                      "type": "list_item",
+                      "attrs": {
+                        "label": "•",
+                        "listType": "bullet",
+                        "spread": false,
+                        "checked": null,
+                        "blockId": "b-000050"
+                      },
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "attrs": {
+                            "blockId": "b-000051"
+                          },
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "a"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "callout",
+                  "attrs": {
+                    "kind": "note",
+                    "title": "T",
+                    "blockId": "c3"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000052"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "inner"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000053"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "See the notes"
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "1"
+              }
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "2"
+              }
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "3"
+              }
+            },
+            {
+              "type": "text",
+              "text": "."
+            }
+          ]
+        },
+        {
+          "type": "footnote_definition",
+          "attrs": {
+            "label": "1",
+            "blockId": "b-000054"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000055"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "One."
+                }
+              ]
+            },
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false,
+                "blockId": "b-000056"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": true,
+                    "checked": null,
+                    "blockId": "b-000057"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000058"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000059"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000060"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "b"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "footnote_definition",
+          "attrs": {
+            "label": "2",
+            "blockId": "b-000061"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000062"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Two."
+                }
+              ]
+            },
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false,
+                "blockId": "b-000063"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": true,
+                    "checked": null,
+                    "blockId": "b-000064"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000065"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "blockquote",
+              "attrs": {
+                "blockId": "b-000066"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000067"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "q"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "footnote_definition",
+          "attrs": {
+            "label": "3",
+            "blockId": "b-000068"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000069"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Three."
+                }
+              ]
+            },
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false,
+                "blockId": "b-000070"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000071"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000072"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "bullet_list",
+                      "attrs": {
+                        "spread": false,
+                        "blockId": "b-000073"
+                      },
+                      "content": [
+                        {
+                          "type": "list_item",
+                          "attrs": {
+                            "label": "•",
+                            "listType": "bullet",
+                            "spread": true,
+                            "checked": null,
+                            "blockId": "b-000074"
+                          },
+                          "content": [
+                            {
+                              "type": "paragraph",
+                              "attrs": {
+                                "blockId": "b-000075"
+                              },
+                              "content": [
+                                {
+                                  "type": "text",
+                                  "text": "n"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "blockquote",
+              "attrs": {
+                "blockId": "b-000076"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000077"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "q"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AbICAQAHAQtwcm9zZW1pcnJvcgMJcGFyYWdyYXBoBwABAAYEAAEBBVRleHQuKAABAAdibG9ja0lkAXcIYi0wMDAwMDGHAQADCmJsb2NrcXVvdGUHAAEIAwtidWxsZXRfbGlzdAcAAQkDCWxpc3RfaXRlbQcAAQoDCXBhcmFncmFwaAcAAQsGBAABDAFhKAABCwdibG9ja0lkAXcIYi0wMDAwMDUoAAEKBWxhYmVsAXcD4oCiKAABCghsaXN0VHlwZQF3BmJ1bGxldCgAAQoGc3ByZWFkAXkoAAEKB2Jsb2NrSWQBdwhiLTAwMDAwNIcBCgMJbGlzdF9pdGVtBwABEwMJcGFyYWdyYXBoBwABFAYEAAEVAWIoAAEUB2Jsb2NrSWQBdwhiLTAwMDAwNygAARMFbGFiZWwBdwPigKIoAAETCGxpc3RUeXBlAXcGYnVsbGV0KAABEwZzcHJlYWQBeSgAARMHYmxvY2tJZAF3CGItMDAwMDA2KAABCQZzcHJlYWQBeCgAAQkHYmxvY2tJZAF3CGItMDAwMDAzKAABCAdibG9ja0lkAXcIYi0wMDAwMDKHAQgDCXBhcmFncmFwaAcAAR8GBAABIAVUZXh0LigAAR8HYmxvY2tJZAF3CGItMDAwMDA4hwEfAwpibG9ja3F1b3RlBwABJwMLYnVsbGV0X2xpc3QHAAEoAwlsaXN0X2l0ZW0HAAEpAwlwYXJhZ3JhcGgHAAEqBgQAASsBYSgAASoHYmxvY2tJZAF3CGItMDAwMDEyKAABKQVsYWJlbAF3A+KAoigAASkIbGlzdFR5cGUBdwZidWxsZXQoAAEpBnNwcmVhZAF5KAABKQdibG9ja0lkAXcIYi0wMDAwMTEoAAEoBnNwcmVhZAF4KAABKAdibG9ja0lkAXcIYi0wMDAwMTCHASgDCXBhcmFncmFwaAcAATQGBAABNQZBZnRlci4oAAE0B2Jsb2NrSWQBdwhiLTAwMDAxMygAAScHYmxvY2tJZAF3CGItMDAwMDA5hwEnAwlwYXJhZ3JhcGgHAAE+BgQAAT8FVGV4dC4oAAE+B2Jsb2NrSWQBdwhiLTAwMDAxNIcBPgMKYmxvY2txdW90ZQcAAUYDC2J1bGxldF9saXN0BwABRwMJbGlzdF9pdGVtBwABSAMJcGFyYWdyYXBoBwABSQYEAAFKAWEoAAFJB2Jsb2NrSWQBdwhiLTAwMDAxOCgAAUgFbGFiZWwBdwPigKIoAAFICGxpc3RUeXBlAXcGYnVsbGV0KAABSAZzcHJlYWQBeSgAAUgHYmxvY2tJZAF3CGItMDAwMDE3KAABRwZzcHJlYWQBeCgAAUcHYmxvY2tJZAF3CGItMDAwMDE2hwFHAwpibG9ja3F1b3RlBwABUwMJcGFyYWdyYXBoBwABVAYEAAFVAXEoAAFUB2Jsb2NrSWQBdwhiLTAwMDAyMCgAAVMHYmxvY2tJZAF3CGItMDAwMDE5KAABRgdibG9ja0lkAXcIYi0wMDAwMTWHAUYDCXBhcmFncmFwaAcAAVoGBAABWwVUZXh0LigAAVoHYmxvY2tJZAF3CGItMDAwMDIxhwFaAwpibG9ja3F1b3RlBwABYgMLYnVsbGV0X2xpc3QHAAFjAwlsaXN0X2l0ZW0HAAFkAwlwYXJhZ3JhcGgHAAFlBgQAAWYBYSgAAWUHYmxvY2tJZAF3CGItMDAwMDI1hwFlAwtidWxsZXRfbGlzdAcAAWkDCWxpc3RfaXRlbQcAAWoDCXBhcmFncmFwaAcAAWsGBAABbAFuKAABawdibG9ja0lkAXcIYi0wMDAwMjgoAAFqBWxhYmVsAXcD4oCiKAABaghsaXN0VHlwZQF3BmJ1bGxldCgAAWoGc3ByZWFkAXkoAAFqB2Jsb2NrSWQBdwhiLTAwMDAyNygAAWkGc3ByZWFkAXgoAAFpB2Jsb2NrSWQBdwhiLTAwMDAyNigAAWQFbGFiZWwBdwPigKIoAAFkCGxpc3RUeXBlAXcGYnVsbGV0KAABZAZzcHJlYWQBeSgAAWQHYmxvY2tJZAF3CGItMDAwMDI0hwFkAwlsaXN0X2l0ZW0HAAF5AwlwYXJhZ3JhcGgHAAF6BgQAAXsBYigAAXoHYmxvY2tJZAF3CGItMDAwMDMwhwF6AwtidWxsZXRfbGlzdAcAAX4DCWxpc3RfaXRlbQcAAX8DCXBhcmFncmFwaAcAAYABBgQAAYEBAW4oAAGAAQdibG9ja0lkAXcIYi0wMDAwMzMoAAF/BWxhYmVsAXcD4oCiKAABfwhsaXN0VHlwZQF3BmJ1bGxldCgAAX8Gc3ByZWFkAXkoAAF/B2Jsb2NrSWQBdwhiLTAwMDAzMigAAX4Gc3ByZWFkAXkoAAF+B2Jsb2NrSWQBdwhiLTAwMDAzMSgAAXkFbGFiZWwBdwPigKIoAAF5CGxpc3RUeXBlAXcGYnVsbGV0KAABeQZzcHJlYWQBeSgAAXkHYmxvY2tJZAF3CGItMDAwMDI5KAABYwZzcHJlYWQBeSgAAWMHYmxvY2tJZAF3CGItMDAwMDIzhwFjAwlwYXJhZ3JhcGgHAAGQAQYEAAGRAQZBZnRlci4oAAGQAQdibG9ja0lkAXcIYi0wMDAwMzQoAAFiB2Jsb2NrSWQBdwhiLTAwMDAyMocBYgMJcGFyYWdyYXBoBwABmgEGBAABmwEFVGV4dC4oAAGaAQdibG9ja0lkAXcIYi0wMDAwMzWHAZoBAwpibG9ja3F1b3RlBwABogEDC2J1bGxldF9saXN0BwABowEDCWxpc3RfaXRlbQcAAaQBAwlwYXJhZ3JhcGgHAAGlAQYEAAGmAQFhKAABpQEHYmxvY2tJZAF3CGItMDAwMDM5KAABpAEFbGFiZWwBdwPigKIoAAGkAQhsaXN0VHlwZQF3BmJ1bGxldCgAAaQBBnNwcmVhZAF5KAABpAEHYmxvY2tJZAF3CGItMDAwMDM4KAABowEGc3ByZWFkAXkoAAGjAQdibG9ja0lkAXcIYi0wMDAwMzeHAaMBAwpjb2RlX2Jsb2NrBwABrwEGBAABsAEEY29kZSgAAa8BB2Jsb2NrSWQBdwhiLTAwMDA0MCgAAaIBB2Jsb2NrSWQBdwhiLTAwMDAzNocBogEDCXBhcmFncmFwaAcAAbcBBgQAAbgBBVRleHQuKAABtwEHYmxvY2tJZAF3CGItMDAwMDQxhwG3AQMKYmxvY2txdW90ZQcAAb8BAwdjYWxsb3V0BwABwAEDC2J1bGxldF9saXN0BwABwQEDCWxpc3RfaXRlbQcAAcIBAwlwYXJhZ3JhcGgHAAHDAQYEAAHEAQFhKAABwwEHYmxvY2tJZAF3CGItMDAwMDQ1KAABwgEFbGFiZWwBdwPigKIoAAHCAQhsaXN0VHlwZQF3BmJ1bGxldCgAAcIBBnNwcmVhZAF5KAABwgEHYmxvY2tJZAF3CGItMDAwMDQ0KAABwQEGc3ByZWFkAXkoAAHBAQdibG9ja0lkAXcIYi0wMDAwNDOHAcEBAwJocigAAc0BB2Jsb2NrSWQBdwhiLTAwMDA0NigAAcABBGtpbmQBdwRub3RlKAABwAEFdGl0bGUBdwFUKAABwAEHYmxvY2tJZAF3AmMxKAABvwEHYmxvY2tJZAF3CGItMDAwMDQyhwG/AQMJcGFyYWdyYXBoBwAB0wEGBAAB1AEFVGV4dC4oAAHTAQdibG9ja0lkAXcIYi0wMDAwNDeHAdMBAwpibG9ja3F1b3RlBwAB2wEDB2NhbGxvdXQHAAHcAQMLYnVsbGV0X2xpc3QHAAHdAQMJbGlzdF9pdGVtBwAB3gEDCXBhcmFncmFwaAcAAd8BBgQAAeABAWEoAAHfAQdibG9ja0lkAXcIYi0wMDAwNTEoAAHeAQVsYWJlbAF3A+KAoigAAd4BCGxpc3RUeXBlAXcGYnVsbGV0KAAB3gEGc3ByZWFkAXkoAAHeAQdibG9ja0lkAXcIYi0wMDAwNTAoAAHdAQZzcHJlYWQBeSgAAd0BB2Jsb2NrSWQBdwhiLTAwMDA0OYcB3QEDB2NhbGxvdXQHAAHpAQMJcGFyYWdyYXBoBwAB6gEGBAAB6wEFaW5uZXIoAAHqAQdibG9ja0lkAXcIYi0wMDAwNTIoAAHpAQRraW5kAXcEbm90ZSgAAekBBXRpdGxlAXcBVCgAAekBB2Jsb2NrSWQBdwJjMygAAdwBBGtpbmQBdwRub3RlKAAB3AEFdGl0bGUBdwFUKAAB3AEHYmxvY2tJZAF3AmMyKAAB2wEHYmxvY2tJZAF3CGItMDAwMDQ4hwHbAQMJcGFyYWdyYXBoBwAB+QEGBAAB+gENU2VlIHRoZSBub3Rlc4cB+gEDEmZvb3Rub3RlX3JlZmVyZW5jZSgAAYgCBWxhYmVsAXcBMYcBiAIDEmZvb3Rub3RlX3JlZmVyZW5jZSgAAYoCBWxhYmVsAXcBMocBigIDEmZvb3Rub3RlX3JlZmVyZW5jZSgAAYwCBWxhYmVsAXcBM4cBjAIGBAABjgIBLigAAfkBB2Jsb2NrSWQBdwhiLTAwMDA1M4cB+QEDE2Zvb3Rub3RlX2RlZmluaXRpb24HAAGRAgMJcGFyYWdyYXBoBwABkgIGBAABkwIET25lLigAAZICB2Jsb2NrSWQBdwhiLTAwMDA1NYcBkgIDC2J1bGxldF9saXN0BwABmQIDCWxpc3RfaXRlbQcAAZoCAwlwYXJhZ3JhcGgHAAGbAgYEAAGcAgFhKAABmwIHYmxvY2tJZAF3CGItMDAwMDU4KAABmgIFbGFiZWwBdwPigKIoAAGaAghsaXN0VHlwZQF3BmJ1bGxldCgAAZoCBnNwcmVhZAF4KAABmgIHYmxvY2tJZAF3CGItMDAwMDU3hwGaAgMJbGlzdF9pdGVtBwABowIDCXBhcmFncmFwaAcAAaQCBgQAAaUCAWIoAAGkAgdibG9ja0lkAXcIYi0wMDAwNjAoAAGjAgVsYWJlbAF3A+KAoigAAaMCCGxpc3RUeXBlAXcGYnVsbGV0KAABowIGc3ByZWFkAXkoAAGjAgdibG9ja0lkAXcIYi0wMDAwNTkoAAGZAgZzcHJlYWQBeSgAAZkCB2Jsb2NrSWQBdwhiLTAwMDA1NigAAZECBWxhYmVsAXcBMSgAAZECB2Jsb2NrSWQBdwhiLTAwMDA1NIcBkQIDE2Zvb3Rub3RlX2RlZmluaXRpb24HAAGwAgMJcGFyYWdyYXBoBwABsQIGBAABsgIEVHdvLigAAbECB2Jsb2NrSWQBdwhiLTAwMDA2MocBsQIDC2J1bGxldF9saXN0BwABuAIDCWxpc3RfaXRlbQcAAbkCAwlwYXJhZ3JhcGgHAAG6AgYEAAG7AgFhKAABugIHYmxvY2tJZAF3CGItMDAwMDY1KAABuQIFbGFiZWwBdwPigKIoAAG5AghsaXN0VHlwZQF3BmJ1bGxldCgAAbkCBnNwcmVhZAF4KAABuQIHYmxvY2tJZAF3CGItMDAwMDY0KAABuAIGc3ByZWFkAXkoAAG4AgdibG9ja0lkAXcIYi0wMDAwNjOHAbgCAwpibG9ja3F1b3RlBwABxAIDCXBhcmFncmFwaAcAAcUCBgQAAcYCAXEoAAHFAgdibG9ja0lkAXcIYi0wMDAwNjcoAAHEAgdibG9ja0lkAXcIYi0wMDAwNjYoAAGwAgVsYWJlbAF3ATIoAAGwAgdibG9ja0lkAXcIYi0wMDAwNjGHAbACAxNmb290bm90ZV9kZWZpbml0aW9uBwABzAIDCXBhcmFncmFwaAcAAc0CBgQAAc4CBlRocmVlLigAAc0CB2Jsb2NrSWQBdwhiLTAwMDA2OYcBzQIDC2J1bGxldF9saXN0BwAB1gIDCWxpc3RfaXRlbQcAAdcCAwlwYXJhZ3JhcGgHAAHYAgYEAAHZAgFhKAAB2AIHYmxvY2tJZAF3CGItMDAwMDcyhwHYAgMLYnVsbGV0X2xpc3QHAAHcAgMJbGlzdF9pdGVtBwAB3QIDCXBhcmFncmFwaAcAAd4CBgQAAd8CAW4oAAHeAgdibG9ja0lkAXcIYi0wMDAwNzUoAAHdAgVsYWJlbAF3A+KAoigAAd0CCGxpc3RUeXBlAXcGYnVsbGV0KAAB3QIGc3ByZWFkAXgoAAHdAgdibG9ja0lkAXcIYi0wMDAwNzQoAAHcAgZzcHJlYWQBeSgAAdwCB2Jsb2NrSWQBdwhiLTAwMDA3MygAAdcCBWxhYmVsAXcD4oCiKAAB1wIIbGlzdFR5cGUBdwZidWxsZXQoAAHXAgZzcHJlYWQBeSgAAdcCB2Jsb2NrSWQBdwhiLTAwMDA3MSgAAdYCBnNwcmVhZAF5KAAB1gIHYmxvY2tJZAF3CGItMDAwMDcwhwHWAgMKYmxvY2txdW90ZQcAAe4CAwlwYXJhZ3JhcGgHAAHvAgYEAAHwAgFxKAAB7wIHYmxvY2tJZAF3CGItMDAwMDc3KAAB7gIHYmxvY2tJZAF3CGItMDAwMDc2KAABzAIFbGFiZWwBdwEzKAABzAIHYmxvY2tJZAF3CGItMDAwMDY4AA==",
+    "rendered_by_milkdown": "Text.\n\n> * a\n>\n> * b\n\nText.\n\n> * a\n>\n> After.\n\nText.\n\n> * a\n>\n> > q\n\nText.\n\n> * a\n>   * n\n> * b\n>   * n\n>\n> After.\n\nText.\n\n> * a\n>\n> ```\n> code\n> ```\n\nText.\n\n> :::callout{#c1 kind=\"note\" title=\"T\"}\n> * a\n>\n> ***\n> :::\n\nText.\n\n> ::::callout{#c2 kind=\"note\" title=\"T\"}\n> * a\n>\n> :::callout{#c3 kind=\"note\" title=\"T\"}\n> inner\n> :::\n> ::::\n\nSee the notes[^1][^2][^3].\n\n[^1]: One.\n\n    * a\n    * b\n\n[^2]: Two.\n\n    * a\n\n    > q\n\n[^3]: Three.\n\n    * a\n      * n\n\n    > q\n"
   },
   {
     "name": "lists",

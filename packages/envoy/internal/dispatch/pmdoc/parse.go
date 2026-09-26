@@ -140,17 +140,9 @@ func parseUnstamped(markdown string) (*Node, error) {
 	if err := browserListSpacing(root, source); err != nil {
 		return nil, err
 	}
-	footnotes := footnoteLabels(root)
-	doc, err := parseBlock(root, source, footnotes)
+	doc, err := parseBlock(root, source, footnoteLabels(root))
 	if err != nil {
 		return nil, err
-	}
-	for _, definition := range droppedDefinitions(root) {
-		parsed, err := parseBlock(definition, source, footnotes)
-		if err != nil {
-			return nil, err
-		}
-		doc.Children = append(doc.Children, parsed)
 	}
 	if front != nil {
 		doc.Children = append([]*Node{front}, doc.Children...)
@@ -451,21 +443,6 @@ func tableDelimiterRow(cells []string) bool {
 	return true
 }
 
-// droppedDefinitions is each footnote definition nothing refers to, in the order written.
-// Goldmark's transformer drops one; the browser editor's parser keeps it, so this parser keeps it
-// after the definitions goldmark gathers at the document's end.
-func droppedDefinitions(root ast.Node) []ast.Node {
-	value, _ := root.Attribute(openedDefinitionsAttr)
-	opened, _ := value.([]openedDefinition)
-	var dropped []ast.Node
-	for _, definition := range opened {
-		if definition.node.Parent() == nil {
-			dropped = append(dropped, definition.node)
-		}
-	}
-	return dropped
-}
-
 func footnoteLabels(root ast.Node) map[int]string {
 	labels := make(map[int]string)
 	var walk func(ast.Node)
@@ -559,16 +536,6 @@ func parseBlock(node ast.Node, source []byte, footnotes map[int]string) (*Node, 
 func parseBlocks(parent ast.Node, source []byte, footnotes map[int]string) ([]*Node, error) {
 	children := make([]*Node, 0, parent.ChildCount())
 	for child := parent.FirstChild(); child != nil; child = child.NextSibling() {
-		if footnoteList, ok := child.(*extensionast.FootnoteList); ok {
-			for definition := footnoteList.FirstChild(); definition != nil; definition = definition.NextSibling() {
-				parsed, err := parseBlock(definition, source, footnotes)
-				if err != nil {
-					return nil, err
-				}
-				children = append(children, parsed)
-			}
-			continue
-		}
 		// Goldmark puts a footnote's backlink after a definition's last block when that block is
 		// not a paragraph; it is the HTML renderer's decoration, not content.
 		if _, ok := child.(*extensionast.FootnoteBacklink); ok {

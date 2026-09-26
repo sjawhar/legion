@@ -586,21 +586,30 @@ another block after it does not render, and an edit that would leave one is refu
 An empty list item that would interrupt a paragraph is not opened, as that parser reads it on the
 whole line (`emptyItemGuard`): after `- a`, the line `  - -` is an item holding the text `-`.
 
-A document holding one of those shapes, or a footnote definition that ends in a block other than
-a paragraph, has its lists' spacing read as that parser reads it (`browserListSpacing`): outside
+Every document's lists are spaced as that parser reads them (`browserListSpacing`): outside
 quotes and footnote definitions a blank line between two items spreads the list, and one between
-an item's blocks spreads the item; in a footnote definition a list is never spread and only an
-item's own blank lines spread it; in a quote a list is read only when no blank line lies at or
-after it but the one before flow content the quote goes on with, and then nothing is spread. Where
-that parser's spread depends on more - a blank line after an item in a footnote definition, any
-other blank line in a quote, a typed block holding one in a list item - the document is refused,
-and so it is where goldmark reads its blocks otherwise: an empty list item and a blank line before
-a block its outer item holds, and a footnote definition inside another block, ahead of another
-block, or out of the order goldmark writes definitions in (by first reference, then those nothing
-refers to, which this parser keeps after the rest where goldmark drops them), since goldmark
-moves them. Every other document keeps goldmark's looseness - a loose list's items holding more
-than one block are spread, the list when none is - which is how the documents Dispatch stores were
-read.
+an item's blocks spreads the item; in a footnote definition a list is never spread, and an item is
+spread by a blank line between its blocks or after it, before the next item or a quote or list the
+definition goes on with; in a quote a blank line after an item spreads the list, and so do blank
+lines after its last item, one before a quote or a list (or anything, in a typed block inside the
+quote) and two before anything else; blank lines after an item that ends in a quote or a list are
+that block's; and a quote and a footnote definition together mix the two
+(`footnotedQuoteListSpread`). The renderer writes each spacing so that it reads back
+(`blanksAfterList`, `blankAfterItem`): no blank line before a block that opens on the line after
+a list where one would spread what it follows, and none inside a list item after a list ending in
+an empty item, where goldmark ends the item at a blank line. Where the lines alone do not decide
+the spread - a typed block holding a blank line in a list item, a blank line at the end of a quote
+after a list, or at or after a list in a typed block in a footnote definition - a document holding
+one of those shapes, or a footnote definition that ends in a block other than a paragraph, is
+refused, and so it is where goldmark reads its blocks otherwise: an empty list item and a blank
+line before a block its outer item holds. Every other document keeps goldmark's looseness there -
+a loose list's items holding more than one block are spread, the list when none is - which is how
+the documents Dispatch stores were read.
+
+A footnote definition is read where it is written, as that parser keeps it: inside another block,
+ahead of other blocks, in any order, and whether or not anything refers to it. Goldmark gathers
+the definitions it keeps at the document's end in the order of their first references and drops
+the rest, so the parser puts each back where it was written (`definitionsInPlace`).
 
 A typed block renders its `blockId`, defaulted attributes, and every explicitly set optional
 attribute. Parsing mints an omitted id, while live document reads and writes validate each node

@@ -13,40 +13,40 @@ import (
 // it, on the goldmark node, where browserListSpacing computed it for parseList.
 var browserSpreadAttr = []byte("pmdoc-browser-spread")
 
-// browserListSpacing reads the lists of a document holding a shape the browser editor's parser
-// and this one read alike only since this one learned it (browserOnlyShape) with that parser's
-// spacing, or refuses the document where it cannot. Every other document keeps goldmark's
-// looseness - a loose list's items holding more than one block are spread, and the list is spread
-// when none of them is - which is how the documents Dispatch stores were read and rendered, though
-// the browser editor reads some of them otherwise.
+// browserListSpacing reads every document's lists with the browser editor's parser's spacing,
+// wherever the lines alone decide it (readListSpacing). Where they do not, a document holding a
+// shape the two parsers read alike only since this one learned it (browserOnlyShape) is refused,
+// and every other document keeps goldmark's looseness - a loose list's items holding more than one
+// block are spread, and the list is spread when none of them is - which is how the documents
+// Dispatch stores were read.
 //
 // That parser takes a list's spread from blank lines between its items and an item's from blank
 // lines between its blocks, and, where the lines carry a quote's or a footnote definition's
 // prefix, from what follows the list as well:
 //   - outside quotes and footnote definitions, a list is spread when a blank line separates two of
 //     its items and an item when one separates two of its blocks, as goldmark records on each
-//     block (blankBefore), or when a typed block among them holds one, which is refused;
-//   - in a footnote definition, a list is never spread, and an item is spread when a blank line
-//     separates two of its blocks, or follows it before the next item or before a quote, list or
-//     item the definition goes on with, which the renderer cannot write, so it is refused;
-//   - in a quote, and in a typed block in a footnote definition, a blank line at or after the list
-//     spreads it or its last item by what comes next, so a list there is read, spread nowhere,
-//     only when no blank line lies between its first line and the next block but, in a quote, the
-//     one the renderer writes before flow content the quote goes on with, and refused otherwise.
+//     block (blankBefore);
+//   - in a footnote definition, a list is never spread, and an item is spread by a blank line
+//     between two of its blocks or after it, before the next item or before a quote or list the
+//     definition goes on with (blankAfterItem);
+//   - in a quote, a list is spread by a blank line after an item, or by blank lines after its
+//     last item before what the quote goes on with (quotedListSpread);
+//   - in a quote and a footnote definition, as footnotedQuoteListSpread reads;
+//   - and blank lines after an item that ends in a quote or a list are that block's.
 //
-// Such a document is also refused where goldmark reads its blocks otherwise: an empty list item
-// before a blank line and a block its outer item holds, where goldmark ends the outer item
-// (emptyItemEndsOuterItem), and a footnote definition goldmark moves (movedFootnote).
+// The lines alone do not decide a typed block holding a blank line in a list item, a blank line at
+// the end of a quote after a list, or at or after a list in a typed block in a footnote
+// definition. A document holding such a shape is also refused where goldmark reads its blocks
+// otherwise: an empty list item before a blank line and a block its outer item holds, where
+// goldmark ends the outer item (emptyItemEndsOuterItem).
 func browserListSpacing(root ast.Node, source []byte) error {
 	shape := browserOnlyShape(root)
 	if shape == "" {
+		readExactListSpacing(root, newSourceLines(source))
 		return nil
 	}
 	refuse := func(reason string) error {
 		return fmt.Errorf("%w: %s, in a document holding %s, which is read as the browser editor reads it", ErrSchema, reason, shape)
-	}
-	if reason := movedFootnote(root); reason != "" {
-		return refuse(reason)
 	}
 	lines := newSourceLines(source)
 	return ast.Walk(root, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
@@ -71,6 +71,23 @@ func browserListSpacing(root ast.Node, source []byte) error {
 	})
 }
 
+// readExactListSpacing reads, in a document holding no shape only the browser editor's parser and
+// this one read alike, each list whose spacing the lines alone decide as that parser reads it
+// (readListSpacing), and leaves every other list to goldmark's looseness.
+func readExactListSpacing(root ast.Node, lines sourceLines) {
+	_ = ast.Walk(root, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
+		switch node := node.(type) {
+		case *ast.Paragraph, *ast.TextBlock, *ast.Heading:
+			return ast.WalkSkipChildren, nil
+		case *ast.List:
+			if entering {
+				readListSpacing(node, lines)
+			}
+		}
+		return ast.WalkContinue, nil
+	})
+}
+
 // emptyItemEndsOuterItem reports whether goldmark ends the list item around item, an empty one,
 // at a blank line before a block the browser editor's parser keeps in it: one indented at least
 // as far as the outer item's content.
@@ -80,7 +97,7 @@ func emptyItemEndsOuterItem(item *ast.ListItem, lines sourceLines) bool {
 		return false
 	}
 	next := nextBlock(item)
-	return next != nil && blankBefore(next) && !isAncestor(outer, next) &&
+	return next != nil && lines.blanksBefore(startOf(next), markersOrWhitespace) > 0 && !isAncestor(outer, next) &&
 		lines.textColumn(startOf(next)) >= lines.textColumn(startOf(outer.FirstChild()))
 }
 
@@ -129,86 +146,152 @@ func browserOnlyShape(root ast.Node) string {
 	return shape
 }
 
-// movedFootnote names how goldmark moves a footnote definition the browser editor's parser keeps
-// where it stands, or returns "" when it moves none: goldmark gathers every definition it keeps
-// at the document's end, in the order of their first references, and this parser writes the ones
-// nothing refers to after them (droppedDefinitions).
-func movedFootnote(root ast.Node) string {
-	value, _ := root.Attribute(openedDefinitionsAttr)
-	opened, _ := value.([]openedDefinition)
-	for _, definition := range opened {
-		if definition.nested {
-			return "a footnote definition inside another block, which goldmark moves to the document's end"
-		}
-	}
-	var written []ast.Node
-	if list, ok := root.LastChild().(*extensionast.FootnoteList); ok {
-		for definition := list.FirstChild(); definition != nil; definition = definition.NextSibling() {
-			written = append(written, definition)
-		}
-	}
-	written = append(written, droppedDefinitions(root)...)
-	if len(written) == 0 {
-		return ""
-	}
-	for index := 1; index < len(written); index++ {
-		if written[index].Pos() < written[index-1].Pos() {
-			return "footnote definitions out of the order of their first references, with those nothing refers to last, which goldmark writes them in"
-		}
-	}
-	for child := root.FirstChild(); child != nil; child = child.NextSibling() {
-		if _, gathered := child.(*extensionast.FootnoteList); !gathered && startOf(child) > written[0].Pos() {
-			return "a block after a footnote definition, which goldmark moves the definition past"
-		}
-	}
-	return ""
-}
-
 // readListSpacing records list's and its items' spread as the browser editor's parser reads them
-// (browserListSpacing), or names why the document is refused.
+// (browserListSpacing), or names why they cannot be read from the lines alone.
 func readListSpacing(list *ast.List, lines sourceLines) string {
 	quote, quoted := ancestor[*ast.Blockquote](list)
-	_, typed := ancestor[*typedDirective](list)
+	directive, typed := ancestor[*typedDirective](list)
 	definition, footnoted := ancestor[*extensionast.Footnote](list)
-	switch {
-	case quoted:
-		// One blank line before flow content the quote goes on with - the renderer's spacing -
-		// spreads nothing, unless a typed block holds the list.
-		next := nextBlock(list)
-		blanks := lines.blankLines(list, next, quoteBlankLine)
-		spacedBeforeFlow := len(blanks) == 1 && next != nil && blanks[0] == lines.lineOf(startOf(next))-1 &&
-			!startsContainer(next) && isAncestor(quote, next) && !typed
-		if len(blanks) > 0 && !spacedBeforeFlow {
-			return "a blank line in a quote at or after a list, which the browser editor reads as spacing the list by what follows it"
-		}
-		setSpread(list, false, spreadsNothing)
-		return ""
-	case footnoted && typed:
-		if len(lines.blankLines(list, nextBlock(list), whitespaceLine)) > 0 {
-			return "a blank line at or after a list in a typed block in a footnote definition, which the browser editor reads as spacing the list by what follows it"
-		}
-		setSpread(list, false, spreadsNothing)
-		return ""
-	}
-	spread := false
 	for item := list.FirstChild(); item != nil; item = item.NextSibling() {
-		spread = spread || item != list.FirstChild() && blankBefore(item)
 		for child := item.FirstChild(); child != nil; child = child.NextSibling() {
 			if directive, ok := child.(*typedDirective); ok && lines.blankInside(directive) {
 				return "a typed block holding a blank line inside a list item, which the browser editor reads as spacing the item"
 			}
 		}
 	}
-	if footnoted {
-		if spread {
-			return "a blank line between two items of a list in a footnote definition, which the browser editor reads as spacing the item before it"
+	switch {
+	case quoted && footnoted:
+		spread, lastSpread, reason := footnotedQuoteListSpread(list, quote, definition, lines)
+		if reason != "" {
+			return reason
 		}
-		if next := nextBlock(list); next != nil && blankBefore(next) && startsContainer(next) && isAncestor(definition, next) {
-			return "a blank line after a list in a footnote definition, before the quote, list or item the definition goes on with, which the browser editor reads as spacing the list's last item"
+		setSpread(list, spread, func(item ast.Node) bool {
+			if next := item.NextSibling(); next != nil {
+				return blankBetweenBlocks(item) || blankBefore(next)
+			}
+			return blankBetweenBlocks(item) || lastSpread
+		})
+	case quoted:
+		spread, reason := quotedListSpread(list, quote, directive, typed && isAncestor(quote, directive), lines)
+		if reason != "" {
+			return reason
+		}
+		setSpread(list, spread, blankBetweenBlocks)
+	case footnoted && typed:
+		if len(lines.blankLines(list, nextBlock(list), whitespaceLine)) > 0 {
+			return "a blank line at or after a list in a typed block in a footnote definition, which the browser editor reads as spacing the list by what follows it"
+		}
+		setSpread(list, false, spreadsNothing)
+	case footnoted:
+		setSpread(list, false, func(item ast.Node) bool {
+			return blankBetweenBlocks(item) || blankAfterItem(item, definition)
+		})
+	default:
+		spread := false
+		for item := list.FirstChild().NextSibling(); item != nil; item = item.NextSibling() {
+			spread = spread || blankBefore(item)
+		}
+		setSpread(list, spread, blankBetweenBlocks)
+	}
+	return ""
+}
+
+// quotedListSpread is a list's spread in a quote, as the browser editor's parser reads it: spread
+// by a blank line after an item that does not end in a quote or a list, or, when the last item
+// does not, by blank lines between it and what the quote goes on with: one before a quote, list
+// or item, two before anything else, one before anything in a typed block inside the quote.
+func quotedListSpread(list *ast.List, quote, directive ast.Node, inDirective bool, lines sourceLines) (bool, string) {
+	for item := list.FirstChild(); item.NextSibling() != nil; item = item.NextSibling() {
+		if blankBefore(item.NextSibling()) && !endsWithContainer(item) {
+			return true, ""
 		}
 	}
-	setSpread(list, spread, blankBetweenBlocks)
-	return ""
+	if endsWithContainer(list.LastChild()) {
+		return false, ""
+	}
+	next := nextBlock(list)
+	if _, enclosingItem := next.(*ast.ListItem); enclosingItem {
+		// The next item of a list around this one: two blank lines before it spread this list.
+		return lines.blanksBefore(startOf(next), quoteBlankLine) >= 2, ""
+	}
+	within := quote
+	if inDirective {
+		within = directive
+	}
+	if next == nil || !isAncestor(within, next) {
+		if lines.blanksEnding(next, quoteBlankLine) > 0 {
+			return false, "a blank line at the end of a quote after a list, which the browser editor reads as spacing the list"
+		}
+		return false, ""
+	}
+	blanks := lines.blanksBefore(startOf(next), quoteBlankLine)
+	switch {
+	case blanks == 0:
+		return false, ""
+	case inDirective || startsContainer(next):
+		return true, ""
+	default:
+		return blanks >= 2, ""
+	}
+}
+
+// footnotedQuoteListSpread is the spread of a list in a quote and a footnote definition, and of its
+// last item, as the browser editor's parser reads them; an item before it is spread by a blank
+// line before the next item. Blank lines between the list and what the nearer of the two goes on
+// with space the last item, one before a quote or a list, and two before anything else when the
+// quote stands inside the definition; with the definition inside the quote, two before anything
+// else space the list. Blank lines after a last item that ends in a quote or a list are that
+// block's.
+func footnotedQuoteListSpread(list *ast.List, quote, definition ast.Node, lines sourceLines) (spread, lastSpread bool, reason string) {
+	if endsWithContainer(list.LastChild()) {
+		return false, false, ""
+	}
+	quoteInside := isAncestor(definition, quote)
+	within := definition
+	if quoteInside {
+		within = quote
+	}
+	next := nextBlock(list)
+	if _, enclosingItem := next.(*ast.ListItem); enclosingItem {
+		return false, false, ""
+	}
+	if next == nil || !isAncestor(within, next) {
+		if lines.blanksEnding(next, quoteBlankLine) > 0 {
+			return false, false, "a blank line at the end of a quote or a footnote definition after a list, which the browser editor reads as spacing the list"
+		}
+		return false, false, ""
+	}
+	blanks := lines.blanksBefore(startOf(next), quoteBlankLine)
+	if startsContainer(next) {
+		return false, blanks > 0, ""
+	}
+	return !quoteInside && blanks >= 2, quoteInside && blanks >= 2, ""
+}
+
+// blankAfterItem reports whether a blank line follows item, in a footnote definition, before the
+// next item or before a quote, list or item the definition goes on with.
+func blankAfterItem(item, definition ast.Node) bool {
+	if next := item.NextSibling(); next != nil {
+		return blankBefore(next)
+	}
+	if endsWithContainer(item) {
+		return false
+	}
+	next := nextBlock(item.Parent())
+	if _, enclosingItem := next.(*ast.ListItem); enclosingItem {
+		return false
+	}
+	return next != nil && blankBefore(next) && startsContainer(next) && isAncestor(definition, next)
+}
+
+// endsWithContainer reports whether item's last block is a quote or a list, whose own lines the
+// browser editor's parser reads a blank line after as belonging to.
+func endsWithContainer(item ast.Node) bool {
+	switch item.LastChild().(type) {
+	case *ast.Blockquote, *ast.List:
+		return true
+	}
+	return false
 }
 
 func setSpread(list *ast.List, spread bool, itemSpread func(ast.Node) bool) {
@@ -282,18 +365,13 @@ func isAncestor(ancestor, node ast.Node) bool {
 
 // nextBlock is the block that follows node's last line in the document, or nil at its end: node's
 // next sibling, or that of its nearest ancestor that has one, past a footnote definition's
-// backlink and into the definitions goldmark gathered at the document's end (movedFootnote has
-// found them there in the order they are written).
+// backlink.
 func nextBlock(node ast.Node) ast.Node {
 	for ; node != nil; node = node.Parent() {
 		for next := node.NextSibling(); next != nil; next = next.NextSibling() {
-			switch next.(type) {
-			case *extensionast.FootnoteBacklink:
-				continue
-			case *extensionast.FootnoteList:
-				return next.FirstChild()
+			if _, backlink := next.(*extensionast.FootnoteBacklink); !backlink {
+				return next
 			}
-			return next
 		}
 	}
 	return nil
@@ -378,6 +456,33 @@ func (l sourceLines) blanks(first, last int, blank func([]byte) bool) []int {
 	return blanks
 }
 
+// blanksBefore is how many blank lines come right before position's line.
+func (l sourceLines) blanksBefore(position int, blank func([]byte) bool) int {
+	count := 0
+	for line := l.lineOf(position) - 1; line >= 0 && blank(l.text(line)); line-- {
+		count++
+	}
+	return count
+}
+
+// blanksEnding is how many blank lines end the container before next (nil for the source's
+// end): the lines blank(line) holds that come right before the whitespace-only lines, if any,
+// right before next's line.
+func (l sourceLines) blanksEnding(next ast.Node, blank func([]byte) bool) int {
+	line := len(l.starts) - 1
+	if next != nil {
+		line = l.lineOf(startOf(next)) - 1
+	}
+	for line >= 0 && whitespaceLine(l.text(line)) {
+		line--
+	}
+	count := 0
+	for ; line >= 0 && blank(l.text(line)); line-- {
+		count++
+	}
+	return count
+}
+
 // blankInside reports whether a line between typed block directive's opening and closing fences
 // is blank; one that runs to its parent's end runs to the next block.
 func (l sourceLines) blankInside(directive *typedDirective) bool {
@@ -385,6 +490,11 @@ func (l sourceLines) blankInside(directive *typedDirective) bool {
 		return len(l.blankLines(directive, nextBlock(directive), whitespaceLine)) > 0
 	}
 	return len(l.blanks(l.lineOf(directive.Pos())+1, l.lineOf(directive.closer), whitespaceLine)) > 0
+}
+
+// markersOrWhitespace reports whether line holds nothing but whitespace and quote markers.
+func markersOrWhitespace(line []byte) bool {
+	return len(bytes.Trim(line, " \t>\n")) == 0
 }
 
 func whitespaceLine(line []byte) bool {
