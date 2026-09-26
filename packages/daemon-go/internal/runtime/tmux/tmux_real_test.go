@@ -1147,8 +1147,17 @@ func TestRealTmuxReconcilesAWindowWhoseReportWasLost(t *testing.T) {
 	panes := func() string {
 		return r.mustTmux("list-panes", "-a", "-F", "#{pane_id}\t#{window_id}\t#{@legion_owner}\t#{pane_start_command}")
 	}
-	eventually(t, 10*time.Second, "the unrecorded worker-shim pane to start", func() bool {
-		return strings.Contains(panes(), "worker-shim")
+	// The pane marks its window as this runtime's from its own shell, after tmux has started it, and
+	// reconciliation reaps only a marked window: the start command names the worker-shim from the
+	// pane's creation, so waiting for that alone let a loaded host reconcile before the mark was set.
+	eventually(t, 30*time.Second, "the unrecorded worker-shim pane to mark its window", func() bool {
+		for _, line := range strings.Split(panes(), "\n") {
+			fields := strings.SplitN(line, "\t", 4)
+			if len(fields) == 4 && fields[2] == r.rt.Socket() && strings.Contains(fields[3], "worker-shim") {
+				return true
+			}
+		}
+		return false
 	})
 	if !strings.Contains(panes(), "sleep 3600") {
 		t.Fatalf("the private server has no unmarked bootstrap pane before reconciliation:\n%s", panes())
