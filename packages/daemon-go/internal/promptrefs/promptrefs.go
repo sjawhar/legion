@@ -221,11 +221,7 @@ func members(dec *json.Decoder, what string, member func(key string) error) erro
 	if err != nil {
 		return err
 	}
-	switch open {
-	case json.Delim('{'):
-	case nil:
-		return fmt.Errorf("%s is null, not an object", what)
-	default:
+	if open != json.Delim('{') {
 		return fmt.Errorf("%s is %s, not an object", what, scalarKind(open))
 	}
 	for dec.More() {
@@ -241,21 +237,23 @@ func members(dec *json.Decoder, what string, member func(key string) error) erro
 	return err
 }
 
-// scalarKind names a JSON value's own type, for a refusal that reports the wrong shape without
-// quoting the value itself: a name or a role prompt reference that misspells the encoding should
-// not have its content echoed where the message describes only the mistaken JSON type.
+// scalarKind names value's JSON type rather than its content: null, a string, a boolean, a
+// number, or an array, the only shapes a fresh Token can read where members expects an object
+// (Decode never calls UseNumber, and Token never returns a stray delimiter or a partial value).
+// Decode's own refusal already quotes the whole raw input, so naming the shape is what this adds.
 func scalarKind(value any) string {
-	switch v := value.(type) {
+	if value == nil {
+		return "null"
+	}
+	switch value.(type) {
 	case string:
 		return "a string"
 	case bool:
 		return "a boolean"
-	case float64, json.Number:
+	case float64:
 		return "a number"
 	case json.Delim:
-		if v == '[' {
-			return "an array"
-		}
+		return "an array"
 	}
-	return fmt.Sprintf("%v", value)
+	panic(fmt.Sprintf("promptrefs: scalarKind: %#v is not a shape members can hand it", value))
 }
