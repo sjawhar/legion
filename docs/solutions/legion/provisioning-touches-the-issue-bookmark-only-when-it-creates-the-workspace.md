@@ -86,13 +86,17 @@ not exist. In order:
      <listed> to <now> while it was being tracked; workspace <dir> was not created. Provision
      again: the next provisioning starts at origin's branch as it is then.`).
 
-   The Go twin's printed ways out carry `--ignore-working-copy` (`jj bookmark
-   set|delete|forget|track … --ignore-working-copy -R <clone>`), so an operator running one from
+   The Go twin prints each way out as the argv its own clone commands use (`onClone`), every word
+   through `shellprefix.Word`: it carries `--ignore-working-copy`, so an operator running one from
    their shell takes no snapshot of the shared clone and runs no working-copy filter a tree
-   planted there. The TypeScript twin (`packages/workspace/src/workspace.ts`) keeps the text
-   without it. That is the shipped daemon's provisioning, not dead code: `packages/daemon` stays
-   the shipped daemon until the Stage 7 cutover deletes it (LEGION-223), and LEGION-223 records
-   this gap among the TypeScript twins of the Go provisioning fixes.
+   planted there, and it names the clone as one shell word, so it runs as printed from a state
+   directory whose path holds a space. It also carries `--color=never`, and `@`, `=` and such a
+   path come out single-quoted: `jj bookmark track 'main@origin' --ignore-working-copy
+   '--color=never' -R <clone>`. The TypeScript twin (`packages/workspace/src/workspace.ts`) keeps
+   the text without the flag, and puts the clone path in unquoted, so its ways out fail as printed
+   under such a state directory. That is the shipped daemon's provisioning, not dead code:
+   `packages/daemon` stays the shipped daemon until the Stage 7 cutover deletes it (LEGION-223),
+   and LEGION-223 records the missing flag among the TypeScript twins of the Go provisioning fixes.
 
    In Go, one conflicted state is set aside instead of refused. The local bookmark is conflicted
    with a deletion, and origin's row is tracked with no commit: GitHub deleted the branch after the
@@ -117,14 +121,15 @@ not exist. In order:
    - with neither (a brand-new issue, or a merged branch GitHub deleted), `main`. In Go it is read
      with the same template and added by its commit id (`mainCommit`), and each state in which it
      does not resolve is refused by name before anything is added:
-     - a conflicted `main`: keep origin's (`jj bookmark set main -r main@origin --allow-backwards
-       --ignore-working-copy -R <clone>`, since jj refuses a sideways move off two local moves);
+     - a conflicted `main`: keep origin's (`jj bookmark set main -r 'main@origin' --allow-backwards
+       --ignore-working-copy '--color=never' -R <clone>`, since jj refuses a sideways move off two
+       local moves);
      - no local `main` and a conflicted `main@origin`, which concurrent fetches leave: provision
        again, and the next provisioning's fetch sets the row to origin's `main`;
      - `main` deleted in the shared clone while `main@origin` is tracked: restore it (the same
        command without `--allow-backwards`);
      - `main` forgotten (`jj bookmark forget main`, which leaves `main@origin` untracked): track it
-       (`jj bookmark track main@origin --ignore-working-copy -R <clone>`);
+       (`jj bookmark track 'main@origin' --ignore-working-copy '--color=never' -R <clone>`);
      - no `main` at all: a repository whose default branch is another, with no way out printed.
 
      TypeScript still adds `main` by name.
