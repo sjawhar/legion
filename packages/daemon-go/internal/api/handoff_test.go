@@ -210,6 +210,31 @@ func TestHandoffCompleteRefusesAREADYPacketTheDaemonCannotPostAndAppliesTheShort
 	}
 }
 
+// A completion the workflow refused while the child's tree lingered is recorded as processed under
+// its key. Re-admission starts a new generation of the tree, bumping only the root's generation,
+// and restarts the child's worker in the phase it stood in; the same completion there belongs to
+// the new generation, so the key names the tree's generation and the completion is applied rather
+// than answered already received.
+func TestHandoffCompleteAppliesAfterReadmissionTheCompletionALingeringTreeRefused(t *testing.T) {
+	h, facts, _ := newArchitectHarness(t, nil, &intake.Refusal{Status: http.StatusConflict, Code: "TREE_LINGERING", Message: "the tree LEGION-208 is lingering after it left the workflow"})
+	seedTree(t, h, "LEGION-208", "LEGION-209")
+	planner := newLiveClaim(t, h, "LEGION-209", claim.RolePlanner)
+	request := HandoffCompleteRequest{GrantID: planner.grant(t), Summary: "planned", Commit: "facade"}
+	assertFailure(t, h.request(http.MethodPost, "/legion/v1/handoff/complete", request, nil), http.StatusConflict, "TREE_LINGERING")
+
+	facts.mu.Lock()
+	facts.refusal = nil
+	facts.mu.Unlock()
+	setIssue(t, h, "LEGION-208", func(issue *record.Issue) { issue.Generation++ })
+	request.GrantID = planner.grant(t)
+	if recorder := h.request(http.MethodPost, "/legion/v1/handoff/complete", request, nil); recorder.Code != http.StatusOK {
+		t.Fatalf("the same completion after re-admission = %d: %s", recorder.Code, recorder.Body)
+	}
+	if got := facts.recorded(); len(got) != 2 {
+		t.Fatalf("handoff facts = %#v, want the refused completion and the new generation's", got)
+	}
+}
+
 // A worker told to wait replies WAITING and its turn ends, which retires the delivery. A notice
 // then wakes it — Envoy starts that turn itself — and the completion it reports there is still the
 // run's whose task it took: a tester waiting on CI, an implementer waiting on a review, a merger
