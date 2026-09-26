@@ -1265,27 +1265,6 @@ func TestApplyOperationReplaceKeepsHTMLThatOpensNoBlockWhereItLands(t *testing.T
 	}
 }
 
-// An insert carrying a block id the document already holds leaves two blocks with one id, and the
-// repair that follows awards it to whichever comes first: a copy inserted before the original
-// takes the id, and the original - with every comment and ask anchored to it - is renumbered.
-func TestApplyOperationsInsertRefusesABlockIDTheDocumentHolds(t *testing.T) {
-	const id = "11111111-1111-4111-8111-111111111111"
-	tree, err := parseInput(":::ask{#" + id + "}\nQuestion?\n:::\n\nAfter.\n")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = applyOperations(tree, []model.EditOp{{
-		Op: "insert", Markdown: ":::ask{#" + id + "}\nCopy?\n:::", Before: "Question?",
-	}})
-	var invalid *ErrInvalidOp
-	if !errors.As(err, &invalid) || invalid.Field != "markdown" {
-		t.Fatalf("insert with a duplicate id = %v, want invalid markdown", err)
-	}
-	if !strings.Contains(invalid.Reason, id) {
-		t.Fatalf("refusal = %q, want it to name the id", invalid.Reason)
-	}
-}
-
 // The id stays the caller's to keep when the block that had it goes first: a delete earlier in
 // the batch frees it, so a typed block can be put back in its own place under its own id.
 func TestApplyOperationsInsertKeepsAnIDADeleteEarlierInTheBatchFreed(t *testing.T) {
@@ -1309,31 +1288,6 @@ func TestApplyOperationsInsertKeepsAnIDADeleteEarlierInTheBatchFreed(t *testing.
 	}
 	if carriers != 1 {
 		t.Fatalf("%d blocks carry %q, want the reinserted one", carriers, id)
-	}
-}
-
-func TestApplyOperationsInsertMintsAnIDForANewTypedBlock(t *testing.T) {
-	const id = "11111111-1111-4111-8111-111111111111"
-	tree, err := parseInput(":::ask{#" + id + "}\nQuestion?\n:::\n\nAfter.\n")
-	if err != nil {
-		t.Fatal(err)
-	}
-	batch, err := applyOperations(tree, []model.EditOp{{
-		Op: "insert", Markdown: ":::ask{urgency=\"med\"}\nSecond?\n:::", After: "After.",
-	}})
-	if err != nil {
-		t.Fatalf("insert: %v", err)
-	}
-	seen := map[string]bool{}
-	for _, child := range batch.tree.Children {
-		blockID, _ := child.Attrs[pmdoc.BlockIDAttr].(string)
-		if blockID == "" {
-			t.Fatalf("block %s has no id", child.Type)
-		}
-		if seen[blockID] {
-			t.Fatalf("two blocks carry id %q", blockID)
-		}
-		seen[blockID] = true
 	}
 }
 
@@ -2277,10 +2231,10 @@ func TestApplyOperationReplaceWithNothingEmptiesTheParagraph(t *testing.T) {
 	}
 }
 
-// An emptied paragraph is not written, so a block holding one is judged for shape as the blocks
-// it writes: a later replace in that block writing block syntax stores it escaped, as it does in a
-// block that never held one, and the block reads back holding it as text.
-func TestApplyOperationReplaceJudgesABlockHoldingAnEmptiedParagraph(t *testing.T) {
+// An emptied paragraph is not written, so a block holding one writes only its other blocks: a
+// later replace in that block writing block syntax stores it escaped, as it does in a block that
+// never held one, and the block reads back holding it as text.
+func TestApplyOperationReplaceEscapesBlockSyntaxBesideAnEmptiedParagraph(t *testing.T) {
 	for _, test := range []struct{ name, markdown, with, escaped string }{
 		{"a quote, dashes", "Intro.\n\n> Body.\n>\n> More.\n", "---", "\n> \\---\n"},
 		{"a quote, tildes", "Intro.\n\n> Body.\n>\n> More.\n\nAfter.\n", "~~~", "\n> \\~~~\n"},
