@@ -29,6 +29,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/stream"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 // fakeOMPEnv makes this test binary the fake OMP: the shim passes its own environment to the
@@ -275,18 +276,6 @@ func (d *daemonEnd) warnings() []string {
 	return other
 }
 
-// eventually polls cond until it holds, failing the test with what it was waiting for.
-func eventually(t *testing.T, what string, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(integrationWait)
-	for !cond() {
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for %s", what)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
 func count(lines []string, want string) int {
 	n := 0
 	for _, line := range lines {
@@ -399,7 +388,7 @@ func bridge(t *testing.T, legion, addr string) {
 
 	// hello → refused while the token resolves to nothing: the shim redials with its hello, and
 	// never spawns OMP without an ack.
-	eventually(t, "two hellos refused", func() bool { _, hellos := g.state(); return hellos >= 2 })
+	testwait.Eventually(t, "two hellos refused", func() bool { _, hellos := g.state(); return hellos >= 2 })
 	if childStarted() {
 		t.Fatal("the shim spawned OMP before any hello was acked")
 	}
@@ -407,7 +396,7 @@ func bridge(t *testing.T, legion, addr string) {
 	// hello → hello_ack → spawn.
 	g.opened()
 	first.expect(t, stream.Hello{Claim: integrationClaim, Generation: integrationGeneration})
-	eventually(t, "the shim to spawn OMP after the ack", childStarted)
+	testwait.Eventually(t, "the shim to spawn OMP after the ack", childStarted)
 	ctx := context.Background()
 	await, cancelAwait := context.WithTimeout(ctx, integrationWait)
 	defer cancelAwait()
@@ -439,7 +428,7 @@ func bridge(t *testing.T, legion, addr string) {
 	if lines := first.warnings(); len(lines) != 0 {
 		t.Fatalf("the first listener logged %q", lines)
 	}
-	eventually(t, "the shim to notice the stream closed", func() bool {
+	testwait.Eventually(t, "the shim to notice the stream closed", func() bool {
 		return strings.Contains(shimOut.String(), "daemon stream "+strings.SplitN(addr, "://", 2)[1]+" closed")
 	})
 
@@ -457,7 +446,7 @@ func bridge(t *testing.T, legion, addr string) {
 	if err := syscall.Kill(childPid, syscall.SIGUSR1); err != nil {
 		t.Fatalf("signal the fake OMP: %v", err)
 	}
-	eventually(t, "the shim to read every turn OMP reported during the gap", func() bool {
+	testwait.Eventually(t, "the shim to read every turn OMP reported during the gap", func() bool {
 		lines := shimOut.lines()
 		return count(lines, shimwire.TypeAgentStart) == startsBefore+gapTurns &&
 			count(lines, shimwire.TypeAgentEnd) == endsBefore+gapTurns

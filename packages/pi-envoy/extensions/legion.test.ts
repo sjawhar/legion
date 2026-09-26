@@ -424,6 +424,7 @@ function sessionContext(
 ): SessionContext {
   return {
     cwd: "/tmp/legion-workspace",
+    hasUI: true,
     taskDepth: 0,
     sessionManager: {
       getSessionId: () => sessionID,

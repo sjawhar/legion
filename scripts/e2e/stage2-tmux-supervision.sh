@@ -12,13 +12,13 @@
 # (TMUX_TMPDIR under the work directory), and its legions registry (XDG_STATE_HOME). The work
 # directory survives a failure, because its logs are the evidence, and goes when the run passed.
 #
-# The one input: LEGION_E2E_PG_DSN, the Postgres to run against; unset, the run starts its own
-# postgres:16 on tmpfs. The agents' model is Anthropic through the Hawk model gateway on the
-# operator's own hawk login (lib/install-model-gateway.sh), so the operator's keyring must be
-# unlocked; no Anthropic key reaches a pane. The provider-key path is proven with
-# GEMINI_API_KEY_TESTS from the secret store (agent tier: no YubiKey touch), which the daemon
-# itself resolves at boot and hands every pane's shim as a daemon-held file (`provider_keys`); the
-# run never reads it.
+# Inputs: LEGION_E2E_PG_DSN, the Postgres to run against; unset, the run starts its own
+# postgres:16 on tmpfs. LEGION_E2E_MODEL_GATEWAY_URL (required): the agents' model is Anthropic
+# through the Hawk model gateway at that URL on the operator's own hawk login
+# (lib/install-model-gateway.sh), so the operator's keyring must be unlocked; no Anthropic key
+# reaches a pane. The provider-key path is proven with GEMINI_API_KEY_TESTS from the secret store
+# (agent tier: no YubiKey touch), which the daemon itself resolves at boot and hands every pane's
+# shim as a daemon-held file (`provider_keys`); the run never reads it.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -241,11 +241,9 @@ envoy_port=$(bash "$root/scripts/e2e/lib/free-port.sh" "$port" "$deadline_port")
 (cd "$root/packages/daemon-go" && go build -o "$work/legion" ./cmd/legion)
 (cd "$root/packages/envoy" && go build -o "$work/envoy-listener" ./cmd/listener)
 # The binary under proof, checkable after the run: the source it was built from and its hash.
-if command -v jj >/dev/null && jj -R "$root" root >/dev/null 2>&1; then
-  source_revision="$(jj -R "$root" log -r @ --no-graph -T 'commit_id ++ if(empty, " (working copy: no changes)", " (working copy has changes)")') on $(jj -R "$root" log -r @- --no-graph -T 'commit_id')"
-else
-  source_revision=$(git -C "$root" rev-parse HEAD)
-fi
+# shellcheck source-path=SCRIPTDIR source=lib/built-revision.sh
+. "$root/scripts/e2e/lib/built-revision.sh"
+source_revision=$(built_revision "$root")
 note "built legion from $source_revision; sha256 $(sha256sum "$work/legion" | cut -d' ' -f1)"
 # What a changed working copy holds, so a run on one (a negative control) says what it ran.
 if [ "${source_revision#*working copy has changes}" != "$source_revision" ]; then

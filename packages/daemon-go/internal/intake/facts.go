@@ -137,6 +137,8 @@ type Push struct {
 	After        string
 	ChangedPaths *string
 	Truncated    *string
+	// Pusher is the push's pusher login (the listener's `pusher`, GitHub's pusher.name).
+	Pusher string
 }
 
 func (Push) isFact() {}

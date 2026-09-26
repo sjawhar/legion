@@ -52,6 +52,9 @@ export interface EnvelopeJson {
 export interface ReducerConfig {
   maxFixAttempts: number;
   projects: DaemonConfig["projects"];
+  /** The review App's bot login (`<slug>[bot]`), taken from its token lease at boot: a push whose
+   * `pusher` is this login is never a fix attempt, and neither is the head after a red it earned. */
+  reviewAppLogin: string;
 }
 
 export type CiEmission =
@@ -661,8 +664,16 @@ function githubClassificationState(state: LegionState): Record<string, unknown> 
           fixAttempts: pr.fixAttempts,
           ...(pr.blockedAttempts === undefined ? {} : { blockedAttempts: pr.blockedAttempts }),
           ...(pr.headCounted === undefined ? {} : { headCounted: pr.headCounted }),
+          ...(pr.plannedRed === undefined ? {} : { plannedRed: pr.plannedRed }),
+          ...(pr.plannedRedCarried === undefined
+            ? {}
+            : { plannedRedCarried: pr.plannedRedCarried }),
           ...(pr.pendingPush === undefined ? {} : { pendingPush: { ...pr.pendingPush } }),
           ...(pr.reviewDecision === undefined ? {} : { reviewDecision: pr.reviewDecision }),
+          ...(pr.reviewDecisionUnsettledFrom === undefined
+            ? {}
+            : { reviewDecisionUnsettledFrom: pr.reviewDecisionUnsettledFrom }),
+          ...(pr.changesRequest === undefined ? {} : { changesRequest: { ...pr.changesRequest } }),
         },
       ])
     ),
@@ -923,21 +934,42 @@ function registerPrFenced(
 }
 
 /** A new head arrived (the synchronize webhook, or resync's GitHub read). It counts as a fix
- * attempt when the prior verdict was red — unless the push webhook already classified this exact
- * sha handoff-only (`pendingPush`, consumed here whatever it says); `headCounted` records the
- * decision so a handoff-only push webhook arriving later can take the attempt back (see `push`). A
- * pending slot naming a different sha describes a newer push whose synchronize has not arrived and
- * is left in place. */
+ * attempt when the prior verdict was red, unless that red was planned (`plannedRed`: the newest
+ * code-changing head was the review App's, the tester's red tests) or the push webhook already
+ * classified this exact sha handoff-only or the review App's (`pendingPush`, consumed here
+ * whatever it says); `headCounted` records the decision so a handoff-only or review-App push
+ * webhook arriving later can take the attempt back (see `push`). A pending slot naming a different
+ * sha describes a newer push whose synchronize has not arrived and is left in place.
+ *
+ * An approval is dropped on every new head. `changes_requested` lasts while every change since
+ * the round's head is under `.legion/` or the review App's own — the reviewer's handoff push after
+ * it asked for changes is still that round, and no commit the review App pushes (a tester's
+ * tests, an architect's or reviewer's own commit) answers a request made of the implementer. A
+ * pending classification of this head by another account that changes anything else drops it. A
+ * handoff-only or review-App one keeps it and settles the head when it covers every change since
+ * the head it replaces (its `before` is that head, and nothing earlier is unsettled). Otherwise
+ * the decision is kept and the range recorded (`reviewDecisionUnsettledFrom`, the first
+ * unclassified head's predecessor) for a push webhook or resync's compare to settle
+ * (`settleReviewDecision`), so a reviewer completing before either still writes `in_progress`. */
 export function resetPrHead(pr: PrState, headSha: string): void {
-  const pending = pr.pendingPush;
-  const handoffOnly = pending?.sha === headSha && pending.handoffOnly;
-  if (pending?.sha === headSha) delete pr.pendingPush;
-  if (pr.verdict === "red" && !handoffOnly) {
+  const pending = pr.pendingPush?.sha === headSha ? pr.pendingPush : undefined;
+  const priorHead = pr.headSha;
+  if (pending) delete pr.pendingPush;
+  if (pr.verdict === "red" && !pr.plannedRed && !pending?.handoffOnly && !pending?.byReviewApp) {
     pr.fixAttempts += 1;
     pr.headCounted = true;
   } else {
     delete pr.headCounted;
   }
+  // A head that changes code decides the planned mark: the review App's (the tester's red tests)
+  // sets it, anyone else's clears it. A handoff-only head, or one whose push has not arrived yet
+  // (`push` settles it), carries the previous head's mark.
+  if (pending && !pending.handoffOnly) {
+    if (pending.byReviewApp) pr.plannedRed = true;
+    else delete pr.plannedRed;
+  }
+  if (!pending && pr.plannedRed) pr.plannedRedCarried = true;
+  else delete pr.plannedRedCarried;
   pr.headSha = headSha;
   pr.verdict = null;
   pr.failing = [];
@@ -947,10 +979,40 @@ export function resetPrHead(pr: PrState, headSha: string): void {
   pr.ciSettlementGeneration = null;
   pr.ciSnapshot = null;
   pr.ciReconciled = false;
-  delete pr.reviewDecision;
+  if (
+    pr.reviewDecision !== "changes_requested" ||
+    (pending && !pending.handoffOnly && !pending.byReviewApp)
+  ) {
+    delete pr.reviewDecision;
+    delete pr.reviewDecisionUnsettledFrom;
+    delete pr.changesRequest;
+  } else if (pending?.before !== priorHead) {
+    // No classification covers this head, so the range stays open from its first unsettled base.
+    pr.reviewDecisionUnsettledFrom ??= priorHead;
+  }
+}
+
+/** Settles a `changes_requested` decision `resetPrHead` kept across unclassified heads, once the
+ * whole range from `reviewDecisionUnsettledFrom` to the current head is classified: a range of
+ * handoff-only changes or of the review App's own commits keeps it (`keep`), anything else drops
+ * it. No-op when nothing is unsettled. */
+export function settleReviewDecision(pr: PrState, keep: boolean): void {
+  if (pr.reviewDecisionUnsettledFrom === undefined) return;
+  if (!keep) {
+    delete pr.reviewDecision;
+    delete pr.changesRequest;
+  }
+  delete pr.reviewDecisionUnsettledFrom;
 }
 
 const HANDOFF_PATH_PREFIX = ".legion/";
+
+/** The one `.legion/` rule: a change is handoff-only when it lists at least one path and every
+ * path is under `.legion/`. `classifyPush` applies it to a push's paths, resync to GitHub's
+ * compare of two heads. */
+export function handoffOnlyPaths(paths: readonly string[]): boolean {
+  return paths.length > 0 && paths.every((path) => path.startsWith(HANDOFF_PATH_PREFIX));
+}
 
 type PushClassification = { handoffOnly: true } | { handoffOnly: false; unknown?: string };
 
@@ -973,7 +1035,7 @@ export function classifyPush(payload: JsonRecord): PushClassification {
           ? { handoffOnly: false, unknown: `changed_paths_truncated=${truncated} unrecognised` }
           : !changedPaths
             ? { handoffOnly: false, unknown: "no commits listed" }
-            : changedPaths.split("\n").every((path) => path.startsWith(HANDOFF_PATH_PREFIX))
+            : handoffOnlyPaths(changedPaths.split("\n"))
               ? { handoffOnly: true }
               : { handoffOnly: false };
   if (classificationFixtureRecorder !== noClassificationFixtureRecorder) {
@@ -995,10 +1057,18 @@ export function classifyPush(payload: JsonRecord): PushClassification {
  * `main`, a tag, or a legion branch with no PR maps to nothing). Its classification either takes
  * back the attempt the current head was counted for (its synchronize arrived first — the take-back
  * also forgets a `pr-blocked` published for that count, so the next real fix publishes it again)
- * or is remembered for the head that has not arrived yet (`pendingPush`, latest push wins). A push
- * that cannot be classified counts as before and, when that count is real, says so through a `log`
- * effect. */
-function push(state: LegionState, payload: JsonRecord): Effect[] | undefined {
+ * or is remembered for the head that has not arrived yet (`pendingPush`, latest push wins, with
+ * the push's `before`). For the current head it also settles a `changes_requested` decision
+ * `resetPrHead` kept unsettled: a push that changes a path outside `.legion/`, or cannot be
+ * classified, drops it; a handoff-only push keeps it only when it starts at the range's base
+ * (`before` is `reviewDecisionUnsettledFrom`), and otherwise leaves the range for resync. A push
+ * that cannot be classified counts as before and, when that count is real, says so through a
+ * `log` effect. */
+function push(
+  state: LegionState,
+  payload: JsonRecord,
+  config: ReducerConfig
+): Effect[] | undefined {
   if (payload.kind !== "push") return undefined;
   const repo = stringValue(payload.repo);
   const ref = stringValue(payload.ref);
@@ -1009,19 +1079,43 @@ function push(state: LegionState, payload: JsonRecord): Effect[] | undefined {
   const pr = prKey === undefined ? undefined : state.prs[prKey];
   if (!pr) return [];
   const classification = classifyPush(payload);
+  const byReviewApp = stringValue(payload.pusher) === config.reviewAppLogin;
   // Whether this push's count is real — judged before any mutation below: the current head's
   // recorded decision, or, for a head still to arrive, the verdict `resetPrHead` will see.
-  const counted = pr.headSha === after ? pr.headCounted === true : pr.verdict === "red";
+  const counted =
+    pr.headSha === after ? pr.headCounted === true : pr.verdict === "red" && !pr.plannedRed;
   if (pr.headSha === after) {
-    if (classification.handoffOnly && pr.headCounted) {
+    if (!classification.handoffOnly) {
+      if (byReviewApp) pr.plannedRed = true;
+      else delete pr.plannedRed;
+    }
+    delete pr.plannedRedCarried;
+    if ((classification.handoffOnly || byReviewApp) && pr.headCounted) {
       if (pr.blockedAttempts === pr.fixAttempts) delete pr.blockedAttempts;
       pr.fixAttempts -= 1;
       delete pr.headCounted;
     }
+    if (!classification.handoffOnly && !byReviewApp) settleReviewDecision(pr, false);
+    else if (stringValue(payload.before) === pr.reviewDecisionUnsettledFrom) {
+      settleReviewDecision(pr, true);
+    }
   } else {
-    pr.pendingPush = { sha: after, handoffOnly: classification.handoffOnly };
+    const before = stringValue(payload.before);
+    pr.pendingPush = {
+      sha: after,
+      handoffOnly: classification.handoffOnly,
+      ...(before === undefined ? {} : { before }),
+      ...(byReviewApp ? { byReviewApp: true as const } : {}),
+    };
   }
-  if (classification.handoffOnly || classification.unknown === undefined || !counted) return [];
+  if (
+    classification.handoffOnly ||
+    byReviewApp ||
+    classification.unknown === undefined ||
+    !counted
+  ) {
+    return [];
+  }
   return [
     {
       kind: "log",
@@ -1073,20 +1167,48 @@ function review(state: LegionState, payload: JsonRecord): Effect[] | undefined {
   // all: the approval is never recorded, but the phase worker still hears about the review.
   const isCurrentHead = commitId !== undefined && commitId === pr.headSha;
   const prior = pr.reviewDecision;
+  const author = stringValue(payload.author) ?? "";
+  const body = stringValue(payload.body) ?? "";
   // Approval is head-gated: it feeds `pr-ready`, which must only ever fire for an approval of
   // the exact commit that would merge. Changes requested is not — a reviewer
   // legitimately pins its review to the implementation commit it read rather than to a later
   // handoff commit, and any such verdict still means the PR is not reviewer-clean. Safe to
-  // record from any commit because `resetPrHead` drops the decision on every new head, so a
-  // verdict never outlives the round it was given for.
-  if (decision === "changes_requested" || (isCurrentHead && decision === "approved")) {
+  // record from any commit because a new head by another account than the review App that
+  // changes anything outside `.legion/` drops the decision (`resetPrHead`, or `push` and resync
+  // once they classify that head), so a verdict never outlives the round it was given for. A
+  // review of the current head is settled; one of an earlier commit (late, redelivered, or
+  // pinned below a handoff) opens the range from that commit,
+  // so what landed since it is classified before the decision is trusted. The account that asked
+  // for changes ends its own request with a non-empty review of a later head that asks for none
+  // (its clean round is a COMMENT while the head carries `.legion/`): it read the new head. The
+  // empty-body review GitHub fires for every thread reply, another account's review, and the
+  // requester's follow-up at the commit it named leave the request standing.
+  if (decision === "changes_requested") {
     pr.reviewDecision = decision;
+    if (commitId !== undefined && !isCurrentHead) pr.reviewDecisionUnsettledFrom = commitId;
+    else delete pr.reviewDecisionUnsettledFrom;
+    if (author && commitId !== undefined) pr.changesRequest = { by: author, at: commitId };
+    else delete pr.changesRequest;
+  } else if (isCurrentHead && decision === "approved") {
+    pr.reviewDecision = decision;
+    delete pr.reviewDecisionUnsettledFrom;
+    delete pr.changesRequest;
+  } else if (
+    isCurrentHead &&
+    pr.reviewDecision === "changes_requested" &&
+    body.trim() !== "" &&
+    pr.changesRequest?.by === author &&
+    pr.changesRequest.at !== pr.headSha
+  ) {
+    delete pr.reviewDecision;
+    delete pr.reviewDecisionUnsettledFrom;
+    delete pr.changesRequest;
   }
   const result = routeActive(state, pr.key, {
     type: "pr-review",
     state: decision,
-    author: stringValue(payload.author) ?? "",
-    body: stringValue(payload.body) ?? "",
+    author,
+    body,
   });
   if (isCurrentHead && decision === "approved" && prior !== "approved" && pr.verdict === "green") {
     result.push(...routeActive(state, pr.key, { type: "pr-ready", pr: number }));
@@ -1214,7 +1336,7 @@ export function reduceGithubEvent(
       prComment(state, payload) ??
         review(state, payload) ??
         pullRequest(state, payload, source, config) ??
-        push(state, payload) ??
+        push(state, payload, config) ??
         []
     );
   }
@@ -1225,7 +1347,7 @@ export function reduceGithubEvent(
       topic,
       payload: envelope.payload,
       state: stateInput,
-      config: { projects: config.projects },
+      config: { projects: config.projects, reviewAppLogin: config.reviewAppLogin },
     },
     before,
     state,

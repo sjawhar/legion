@@ -871,7 +871,8 @@ export interface SearchResult {
   /**
    * Mirrors `owner` for issue-owned hits so agent clients built before the owner-only shape
    * (#1119) keep rendering; remove once no installed pi-legion-envoy / opencode-legion-envoy /
-   * claude-envoy-bridge predates it. Clients built after #1119 read `owner`, never this.
+   * claude-envoy (or a legacy claude-envoy-bridge install) predates it. Clients built after #1119
+   * read `owner`, never this.
    */
   readonly issue?: {
     readonly key: string;

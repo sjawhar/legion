@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
 const testTimeout = 30 * time.Second
@@ -156,16 +158,19 @@ func newLocalRunner(t *testing.T) *recordingRunner {
 }
 
 // provisionRequest is a host provisioning's request, the tmux runtime's: the one-shot credential
-// goes under the state directory.
+// goes under the state directory. That directory's path holds a space, as state_dir and --root
+// may, so every refusal's way out a test runs through sh proves it names the shared clone as one
+// word.
 func provisionRequest(t *testing.T) Request {
 	t.Helper()
-	state := filepath.Join(t.TempDir(), "state")
+	state := filepath.Join(t.TempDir(), "legion state")
 	return Request{
 		StateDir:         state,
-		Repo:             "acme/widgets",
+		Repo:             ghrepo.MustParse("acme/widgets"),
 		Issue:            "WIDGETS-42",
 		CredentialHelper: "!/opt/legion/bin/legion credential",
 		Source:           FromGitHub("test-installation-token", state),
+		Log:              func(line string) { t.Logf("provisioning logged: %s", line) },
 	}
 }
 
@@ -181,6 +186,7 @@ func TestProvisionRefusesARequestWithNoOneWayToTheRepository(t *testing.T) {
 	}{
 		{"a token and no credential directory", func(r *Request) { r.Source = FromGitHub("test-installation-token", "") }, "workspace credential directory is required"},
 		{"no way to the repository", func(r *Request) { r.Source = nil }, "workspace request names no way to the repository: FromFeed or FromGitHub"},
+		{"no log", func(r *Request) { r.Log = nil }, "workspace request names no log"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			run := newLocalRunner(t)
@@ -351,7 +357,7 @@ func TestProvisionClonesThroughTemporarySiblingWithCredentialReset(t *testing.T)
 func fetchRequest(t *testing.T) FetchRequest {
 	t.Helper()
 	return FetchRequest{
-		Repo: "acme/widgets", Token: "test-installation-token", CredentialDir: t.TempDir(), Feed: filepath.Join(t.TempDir(), "feed"),
+		Repo: ghrepo.MustParse("acme/widgets"), Token: "test-installation-token", CredentialDir: t.TempDir(), Feed: filepath.Join(t.TempDir(), "feed"),
 	}
 }
 
@@ -442,7 +448,8 @@ func TestProvisionFromAFeedHoldsNoCredential(t *testing.T) {
 		readOnly(t, fetch.Feed)
 		before := len(run.Calls())
 		working, err := Provision(context.Background(), run, Request{
-			StateDir: state, Repo: "acme/widgets", Issue: issue, CredentialHelper: "!/opt/legion/bin/legion credential", Source: FromFeed(fetch.Feed),
+			StateDir: state, Repo: ghrepo.MustParse("acme/widgets"), Issue: issue, CredentialHelper: "!/opt/legion/bin/legion credential", Source: FromFeed(fetch.Feed),
+			Log: func(line string) { t.Logf("provisioning logged: %s", line) },
 		})
 		if err != nil {
 			t.Fatalf("provision %s from the feed: %v", issue, err)
@@ -485,7 +492,8 @@ func TestProvisionFromAFeedKeepsABookmarkPushedAfterTheSnapshot(t *testing.T) {
 	run := newLocalRunner(t)
 	state := filepath.Join(t.TempDir(), "state")
 	request := func(issue, feed string) Request {
-		return Request{StateDir: state, Repo: "acme/widgets", Issue: issue, CredentialHelper: "!/opt/legion/bin/legion credential", Source: FromFeed(feed)}
+		return Request{StateDir: state, Repo: ghrepo.MustParse("acme/widgets"), Issue: issue, CredentialHelper: "!/opt/legion/bin/legion credential", Source: FromFeed(feed),
+			Log: func(line string) { t.Logf("provisioning logged: %s", line) }}
 	}
 	first := fetchRequest(t)
 	if _, err := Fetch(context.Background(), run, first); err != nil {
@@ -625,7 +633,7 @@ func TestRemoveForgetsTheWorkspace(t *testing.T) {
 }
 
 func TestLocationMatchesProvisionedWorkspacePath(t *testing.T) {
-	working, err := Location("/state", "acme/widgets", "WIDGETS-42")
+	working, err := Location("/state", ghrepo.MustParse("acme/widgets"), "WIDGETS-42")
 	if err != nil {
 		t.Fatalf("Location: %v", err)
 	}
@@ -636,27 +644,36 @@ func TestLocationMatchesProvisionedWorkspacePath(t *testing.T) {
 }
 
 // A `.` or `..` segment would put the shared clone somewhere else under the state directory, and
-// provisioning removes an incomplete clone there (`--repo ../..` removed the tree volume's root):
-// every path the package derives from a repository refuses one, naming it.
-func TestARepositoryWithADotSegmentIsRefused(t *testing.T) {
-	for _, tc := range []struct{ repo, segment string }{
-		{"../x", ".."}, {"acme/..", ".."}, {"./..", "."}, {"../..", ".."}, {"acme/.", "."},
-	} {
-		want := `workspace repository "` + tc.repo + `" has a "` + tc.segment + `" segment`
-		if _, err := Location("/state", tc.repo, "WIDGETS-42"); err == nil || !strings.Contains(err.Error(), want) {
-			t.Errorf("Location(%q) = %v, want an error naming %q", tc.repo, err, want)
-		}
+// provisioning removes an incomplete clone there: `--repo ../..` once removed the tree volume's
+// root. A Repository cannot hold one: Parse refuses every such input, and only Parse makes a
+// non-zero Repository (ghrepo's TestParse and TestRepositoryExportsNoField). The one value a caller
+// can build, the zero Repository, is refused by Provision and Fetch before either runs a command or
+// touches the state directory.
+func TestAZeroRepositoryNeverReachesTheVolume(t *testing.T) {
+	state := t.TempDir()
+	if err := os.WriteFile(filepath.Join(state, "volume-root.txt"), []byte("the tree volume's root\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-}
-
-// A repository whose names hold whitespace is no GitHub repository, as a project's configured repo
-// and `legion threads --repo` refuse it: Location refuses it too, naming it.
-func TestARepositoryHoldingWhitespaceIsRefused(t *testing.T) {
-	for _, repo := range []string{"acme/wid gets", "ac me/widgets", "acme/widgets\n"} {
-		want := `workspace repository "` + strings.ReplaceAll(repo, "\n", `\n`) + `" holds whitespace`
-		if _, err := Location("/state", repo, "WIDGETS-42"); err == nil || !strings.Contains(err.Error(), want) {
-			t.Errorf("Location(%q) = %v, want an error naming %q", repo, err, want)
-		}
+	run := newLocalRunner(t)
+	request := provisionRequest(t)
+	request.StateDir, request.Repo = state, ghrepo.Repository{}
+	if _, err := Provision(context.Background(), run, request); err == nil || err.Error() != "workspace repository is required" {
+		t.Errorf("Provision with the zero Repository = %v, want it refused", err)
+	}
+	fetch := fetchRequest(t)
+	fetch.Feed, fetch.Repo = state, ghrepo.Repository{}
+	if _, err := Fetch(context.Background(), run, fetch); err == nil || err.Error() != "workspace repository is required" {
+		t.Errorf("Fetch with the zero Repository = %v, want it refused", err)
+	}
+	if calls := run.Calls(); len(calls) != 0 {
+		t.Errorf("the refusals ran %q", calls)
+	}
+	entries, err := os.ReadDir(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "volume-root.txt" {
+		t.Errorf("the state directory holds %v after the refusals, want only its sentinel", entries)
 	}
 }
 
@@ -667,7 +684,7 @@ func TestAnIssueWithADotSegmentIsRefused(t *testing.T) {
 	state := t.TempDir()
 	for _, issue := range []string{".", ".."} {
 		want := `workspace issue "` + issue + `" is a "` + issue + `" segment`
-		if _, err := Location(state, "acme/widgets", issue); err == nil || !strings.Contains(err.Error(), want) {
+		if _, err := Location(state, ghrepo.MustParse("acme/widgets"), issue); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("Location(%q) = %v, want an error naming %q", issue, err, want)
 		}
 	}

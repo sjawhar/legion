@@ -246,9 +246,10 @@ func (v *treeVolume) lockIsFree(t *testing.T) bool {
 }
 
 // Every refusal `provision` makes happens before anything touches the volume or runs a tool
-// (workspace-init.ts:148-163): an init container refused on its input leaves the tree volume as it
-// found it, and holds no lock another pod would wait on. It refuses to run pointed at the
-// provisioning token, which `fetch` alone holds; and the command refuses no subcommand, or another.
+// (cmdWorkspaceInit's flag and token checks, workspace-init.ts): an init container refused on its
+// input leaves the tree volume as it found it, and holds no lock another pod would wait on. It
+// refuses to run pointed at the provisioning token, which `fetch` alone holds; and the command
+// refuses no subcommand, or another.
 func TestWorkspaceInitRefusesBeforeTouchingTheVolume(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -293,7 +294,7 @@ func TestWorkspaceInitRefusesBeforeTouchingTheVolume(t *testing.T) {
 				return []string{"provision", "--issue", "LEGION-42", "--repo", "acme", "--root", v.root, "--credential-helper", "x", "--feed", v.feed}
 			},
 			code: 1,
-			says: func(*treeVolume) string { return `workspace repository must be "owner/name" (got "acme")` },
+			says: func(*treeVolume) string { return `--repo must be "owner/name" (got "acme")` },
 		},
 		{
 			name: "a --repo with a .. segment",
@@ -301,7 +302,25 @@ func TestWorkspaceInitRefusesBeforeTouchingTheVolume(t *testing.T) {
 				return []string{"provision", "--issue", "LEGION-42", "--repo", "../x", "--root", v.root, "--credential-helper", "x", "--feed", v.feed}
 			},
 			code: 1,
-			says: func(*treeVolume) string { return `workspace repository "../x" has a ".." segment` },
+			says: func(*treeVolume) string { return `--repo "../x" has a ".." segment` },
+		},
+		{
+			name: "a --repo holding whitespace",
+			args: func(v *treeVolume) []string {
+				return []string{"provision", "--issue", "LEGION-42", "--repo", "acme/wid gets", "--root", v.root, "--credential-helper", "x", "--feed", v.feed}
+			},
+			code: 1,
+			says: func(*treeVolume) string { return `--repo "acme/wid gets" holds whitespace` },
+		},
+		{
+			// --repo is read first: every other input here is wrong too.
+			name: "a bad --repo, before every other input",
+			args: func(*treeVolume) []string {
+				return []string{"provision", "--issue", "nope", "--repo", "../..", "--root", "legion-root", "--feed", "feed"}
+			},
+			env:  func(t *testing.T, v *treeVolume) { t.Setenv("LEGION_PROVISION_TOKEN_FILE", v.token) },
+			code: 1,
+			says: func(*treeVolume) string { return `--repo "../.." has a ".." segment` },
 		},
 		{
 			name: "no --credential-helper",
@@ -464,11 +483,12 @@ func TestWorkspaceInitProvisionsTheIssueWorkspace(t *testing.T) {
 	holdsNoToken(t, v.root, "after provisioning")
 }
 
-// The same-agent invariant, checked before the repository lock (workspace-init.ts:167-185): a
-// recorded OMP session missing from the volume is a launch failure, never a fresh agent. With the
-// clone gone too the volume itself was lost, which the runtime reads from exit code 3; with the
-// clone present only the session is gone, exit 1. Neither provisions or takes the lock, and a
-// session that is present lets the same invocation through.
+// The same-agent invariant, checked before the repository lock (cmdWorkspaceInit's
+// LEGION_RESUME_SESSION_FILE check, workspace-init.ts): a recorded OMP session missing from the
+// volume is a launch failure, never a fresh agent. With the clone gone too the volume itself was
+// lost, which the runtime reads from exit code 3; with the clone present only the session is gone,
+// exit 1. Neither provisions or takes the lock, and a session that is present lets the same
+// invocation through.
 func TestWorkspaceInitRefusesAResumeWhoseSessionIsGone(t *testing.T) {
 	v := newTreeVolume(t).withRemote(t)
 	v.fetch(t)
@@ -515,11 +535,18 @@ func TestWorkspaceInitRefusesAResumeWhoseSessionIsGone(t *testing.T) {
 
 // The command side of workspace recovery (decision 11): a relaunch after a lost volume names the
 // ref it recovers from, and the recreated workspace records it, with the commit it was recreated
-// at, in .legion/workspace-recovered.json (workspace-init.ts:196-215).
+// at, in .legion/workspace-recovered.json (cmdWorkspaceInit's LEGION_WORKSPACE_RECOVERED_FROM
+// branch, workspace-init.ts). The commit is read uncolored, so an operator's `ui.color = "always"`
+// never wraps it in escape codes.
 func TestWorkspaceInitRecordsTheRecoveryMarker(t *testing.T) {
 	v := newTreeVolume(t).withRemote(t)
 	v.fetch(t)
 	t.Setenv("LEGION_WORKSPACE_RECOVERED_FROM", "legion/LEGION-42")
+	colored := filepath.Join(t.TempDir(), "color-always.toml")
+	if err := os.WriteFile(colored, []byte("[ui]\ncolor = \"always\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("JJ_CONFIG", colored)
 
 	before := time.Now().UTC().Truncate(time.Millisecond)
 	code, _, stderr := runWorkspaceInitHere(v.args("LEGION-42"))
@@ -539,7 +566,7 @@ func TestWorkspaceInitRecordsTheRecoveryMarker(t *testing.T) {
 	if marker["fromRef"] != "legion/LEGION-42" || marker["reason"] != "volume-missing" {
 		t.Fatalf("the recovery marker is %s", body)
 	}
-	if sha := v.jj(t, "log", "-r", "@", "--no-graph", "-T", "commit_id", "--ignore-working-copy", "-R", workspace); marker["sha"] != sha {
+	if sha := v.jj(t, "log", "-r", "@", "--no-graph", "-T", "commit_id", "--ignore-working-copy", "--color=never", "-R", workspace); marker["sha"] != sha {
 		t.Fatalf("the recovery marker names commit %q, want the recreated working copy's %q", marker["sha"], sha)
 	}
 	at, err := time.Parse("2006-01-02T15:04:05.000Z", marker["recoveredAt"])
@@ -753,7 +780,7 @@ func (v *treeVolume) waitingLine() string {
 // Two pods of one tree admitted together provision against one shared clone. The second waits —
 // saying so in its init log and running nothing — while the first provisions, then provisions
 // its own workspace on the clone the first landed: every command of the first before any of the
-// second's, and no second clone (workspace-init.ts:74-109).
+// second's, and no second clone (withWorkspaceInitLock, workspace-init.ts).
 func TestWorkspaceInitSerializesTwoProcessesOnOneVolume(t *testing.T) {
 	v := newTreeVolume(t).withRemote(t)
 	first, release := v.holder(t)
@@ -794,7 +821,7 @@ func TestWorkspaceInitSerializesTwoProcessesOnOneVolume(t *testing.T) {
 			t.Fatalf("the second cloned again: %q", call)
 		}
 	}
-	if want := "second config get git.abandon-unreachable-commits -R " + v.clone(); calls[firstOfSecond] != want {
+	if want := "second config get git.abandon-unreachable-commits --ignore-working-copy --color=never -R " + v.clone(); calls[firstOfSecond] != want {
 		t.Fatalf("the second opened with %q, want %q on the clone the first landed", calls[firstOfSecond], want)
 	}
 }

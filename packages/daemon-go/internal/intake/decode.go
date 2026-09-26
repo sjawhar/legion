@@ -298,7 +298,8 @@ func decodePush(raw map[string]json.RawMessage) (Fact, error) {
 	}
 	changedPaths := rawStringPointer(raw, "changed_paths")
 	truncated := rawStringPointer(raw, "changed_paths_truncated")
-	return Push{Repo: repo, Branch: strings.TrimPrefix(ref, "refs/heads/"), After: after, ChangedPaths: changedPaths, Truncated: truncated}, nil
+	pusher, _ := rawString(raw, "pusher")
+	return Push{Repo: repo, Branch: strings.TrimPrefix(ref, "refs/heads/"), After: after, ChangedPaths: changedPaths, Truncated: truncated, Pusher: pusher}, nil
 }
 
 func decodeChecks(subject string, raw map[string]json.RawMessage, issuedAt int64) (Fact, error) {
