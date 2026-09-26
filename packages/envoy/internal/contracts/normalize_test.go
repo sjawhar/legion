@@ -636,6 +636,24 @@ func TestGithubResourceSubject(t *testing.T) {
 	}
 }
 
+// A GitHub repository's name may hold a dot, and a NATS subject splits on dots, so every GitHub
+// subject writes the owner and the name each as one segment, a dot as `_` (SanitizeSubjectSegment):
+// `sjawhar/.github` is otherwise an empty token no stream stores, and `acme/a.b` lands inside
+// `acme/a`'s `notifications.github.acme.a.>`. A name without a dot is written as it is.
+func TestGithubSubjectsWriteADottedOwnerOrNameAsOneSegment(t *testing.T) {
+	for _, tc := range []struct{ got, want string }{
+		{GithubSubject("sjawhar", ".github", "mention"), "notifications.github.sjawhar._github.mention"},
+		{GithubResourceSubject("acme", "a.b", "pr", "7"), "notifications.github.acme.a_b.pr.7"},
+		{GithubPushSubject("my-org", "a_b.c", "branch", "legion/X-1"), "notifications.github.my-org.a_b_c.push.branch.legion/X-1"},
+		{GithubWorkflowSubject("acme", "site.io", "ci.yml", "completed"), "notifications.github.acme.site_io.workflow.ci_yml.completed"},
+		{GithubSubject("acme", "widgets", "pr.7.checks"), "notifications.github.acme.widgets.pr.7.checks"},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("subject = %s, want %s", tc.got, tc.want)
+		}
+	}
+}
+
 // CI events (check_run/check_suite) are not published raw. They fold into
 // envoy_ci_state via the webhook handler's CIRecorder; the summary loop emits
 // one settled checks envelope when the head's CI is complete.

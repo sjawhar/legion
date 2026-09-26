@@ -222,6 +222,73 @@ func TestCapturedIssueUpdatedEnvelopeDecodes(t *testing.T) {
 	}
 }
 
+// Envoy's goldens (packages/contracts/fixtures/github-envelopes, which its golden test writes from
+// its webhook fixtures) are the subjects its listener publishes. For each, the consumer configured
+// with the payload's repository filters on a prefix of the golden's topic and decodes the workflow
+// fact the golden carries: the two sides spell a repository's subject segments alike, a dotted name
+// included.
+func TestEnvoyGoldenSubjectsReachTheirRepositorysConsumer(t *testing.T) {
+	goldens, err := filepath.Glob(filepath.Join("..", "..", "..", "contracts", "fixtures", "github-envelopes", "*.json"))
+	if err != nil || len(goldens) == 0 {
+		t.Fatalf("Envoy golden envelopes: %v, %d found", err, len(goldens))
+	}
+	for _, path := range goldens {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var golden struct {
+				Topic          string         `json:"topic"`
+				PayloadSummary string         `json:"payload_summary"`
+				Payload        map[string]any `json:"payload"`
+			}
+			if err := json.Unmarshal(data, &golden); err != nil {
+				t.Fatalf("decode golden: %v", err)
+			}
+			repository := ghrepo.MustParse(golden.Payload["repo"].(string))
+			filter := githubFilters([]ghrepo.Repository{repository})[0]
+			if !strings.HasPrefix(golden.Topic, strings.TrimSuffix(filter, ">")) {
+				t.Fatalf("%s's consumer filters %s, which does not match Envoy's %s", repository, filter, golden.Topic)
+			}
+			payload, err := json.Marshal(golden.Payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			envelope, err := json.Marshal(map[string]any{
+				"event_id": "golden", "source": "github", "source_event_id": "golden", "topic": golden.Topic,
+				"dedupe_key": "golden", "issued_at": 1, "payload_summary": golden.PayloadSummary,
+				"payload": string(payload), "trace_id": "golden",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			decoded, err := decodeMessage(golden.Topic, "GOLDEN", []ghrepo.Repository{repository}, envelope)
+			if err != nil {
+				t.Fatalf("decode %s: %v", golden.Topic, err)
+			}
+			if kind := golden.Payload["kind"]; (kind == "pr" || kind == "review" || kind == "push") && decoded.Fact == nil {
+				t.Fatalf("%s's %s event decoded no fact", repository, kind)
+			}
+		})
+	}
+}
+
+// A checks settlement names its pull request in its subject, where a dotted repository name is one
+// segment, a dot as `_`: the settlement decodes for the repository its payload names.
+func TestDecodeChecksForADottedRepository(t *testing.T) {
+	data := capturedGitHubEnvelope(t, "checks.json")
+	data = bytes.ReplaceAll(data, []byte("sjawhar/legion"), []byte("sjawhar/legion.x"))
+	data = bytes.ReplaceAll(data, []byte("sjawhar.legion."), []byte("sjawhar.legion_x."))
+	decoded, err := decodeMessage("notifications.github.sjawhar.legion_x.pr.42.checks", "CAPTURE", []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion.x")}, data)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if checks, ok := decoded.Fact.(PullRequestChecks); !ok || checks.Repo != "sjawhar/legion.x" || checks.Number != 42 {
+		t.Fatalf("fact = %#v, want sjawhar/legion.x#42's checks", decoded.Fact)
+	}
+}
+
 func TestConsumeTermsPoisonMessagesOnce(t *testing.T) {
 	pool := migratedPool(t)
 	createWrites(t, pool)
