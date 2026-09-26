@@ -340,6 +340,46 @@ func TestSuggestionAcceptKeepsTheCalloutItLandsIn(t *testing.T) {
 	}
 }
 
+// Two paragraphs over a word of an answered ask's question land inside the ask, as ProseMirror's
+// fit puts them there: the ask's content rule allows a question of several paragraphs. The ask
+// keeps its id, its options, its row and its answer. The fit once climbed out of the ask and split
+// it, leaving the answered row on "Which" and the options under a minted id as a new open ask "?".
+func TestSuggestionAcceptKeepsTheAskItLandsIn(t *testing.T) {
+	handler, _ := blockAskHandler(t)
+	issue, askID := seedBlockAsk(t, handler, "Two paragraphs in a question", "decision", transportAsk, "Which transport?")
+	read := readBlockAsk(t, handler, askID)
+	if answered := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+askID+"/answer", map[string]any{
+		"selected": []string{"REST"}, "text": "REST first.", "expected_edited_at": read.EditedAt,
+	}, "alice"); answered.Code != http.StatusOK {
+		t.Fatalf("answer the ask: status=%d body=%s", answered.Code, answered.Body.String())
+	}
+	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "suggested", "anchor": map[string]any{"artifact": "spec", "quote": "transport"},
+		"suggestion": map[string]string{"replace_with": "one\n\ntwo\n"}, "actor": sessionActor(),
+	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create the suggestion: status=%d body=%s", created.Code, created.Body.String())
+	}
+	comment := decodeBody[model.Comment](t, created)
+
+	accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
+
+	if accepted.Code != http.StatusOK {
+		t.Fatalf("accept: status=%d body=%s", accepted.Code, accepted.Body.String())
+	}
+	settleDocument(t, handler, issue.PrimaryArtifactID, issue.Key, "after-accept")
+	asks := decodeBody[[]model.Ask](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/asks?state=all", nil, "alice"))
+	if len(asks) != 2 {
+		t.Fatalf("asks after the accept = %+v, want the answered ask and settleDocument's marker", asks)
+	}
+	ask := readBlockAsk(t, handler, askID)
+	if ask.BlockID == nil || *ask.BlockID != "decision" || ask.State != "answered" || len(ask.Options) != 2 ||
+		ask.Question != "Which\n\none\n\ntwo\n\n?" {
+		t.Fatalf("the answered ask after the accept: block=%v state=%q options=%d question=%q",
+			ask.BlockID, ask.State, len(ask.Options), ask.Question)
+	}
+}
+
 // askSpec is a document holding one open ask, a1, between two paragraphs.
 const askSpec = "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich one?\n:::\n\nAfter.\n"
 
