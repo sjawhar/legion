@@ -487,13 +487,11 @@ invalid outside code blocks. An unclosed typed block at document level is reject
 inside another block runs to that parent’s end.
 
 A carriage return that no line feed follows is text here, as goldmark reads it and as the writer
-writes it (`lineEnds`, `endsMarkdownLine`), though CommonMark and the browser editor's parser end a
-line at one, so the helpers that read and write it as a line ending (`afterLoneCarriageReturn`,
-`loneCarriageReturn`, `lazyLineReadsAsText` and the writer's `afterCarriageReturn`) are inert. A
-code span keeps the whitespace that
+writes it, though CommonMark and the browser editor's parser end a line at one. A code span keeps the whitespace that
 starts each of its later lines past the prefix of the containers around it, as the browser editor's
 parser reads it, a line holding only whitespace before the closer included; goldmark's paragraph
-trims it (`lineRecordingParagraph`, `multilineCodeSpanText`). A lazy continuation line - one that
+trims it (`lineRecordingParagraph`, `multilineCodeSpanText`). A space, a line feed, or a carriage
+return and line feed together is the padding such a span sheds at each end. A lazy continuation line - one that
 continues a paragraph in a list item, a quote or a footnote definition without the container's
 prefix - is never a table's header or delimiter row (`lazyTableRows`), as in GFM.
 A task list item's marker (`[ ]`, `[x]` or `[X]` opening a list item's first paragraph) is read as

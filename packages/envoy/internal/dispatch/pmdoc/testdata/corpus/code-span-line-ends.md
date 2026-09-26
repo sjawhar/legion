@@ -6,3 +6,10 @@ x `a
 
 x `a
   ` y
+
+x `
+foo
+` y
+
+x `a
+ b` y
