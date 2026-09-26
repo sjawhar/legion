@@ -167,12 +167,18 @@ it, so the paste is flattened instead: the textblocks' inline content in order, 
 space, with each line break a space too. A lone ask pasted into a question adds its question and
 options to that question as text. So a lone typed block pasted beside a paragraph's text stays a
 block, while the first and last paragraphs or list items of other pasted text still join the text
-on either side of the caret. Inside a table cell every plain-text paste is flattened the same way,
-since a GFM cell holds one line. The patch's `clipboardTextParser` returns the flattened slice
-there as well, because prosemirror-tables' paste handler runs before the text branch and would
-otherwise overwrite the caret's cell and spread the pasted lines into new cells of the row. The
-patch applies to that one version: raising `@milkdown/plugin-clipboard` means carrying the patch to
-the new version, and `ask-blocks.e2e.ts`'s paste rows fail without it.
+on either side of the caret. Tables are handled before any plugin sees the paste, by a
+`handlePaste` the patch adds to the editor's own view props (`pasteIntoTable`), since
+prosemirror-tables' plugin handler would otherwise overwrite the caret's cell and spread the pasted
+lines into new cells of the row. A paste with the caret in a cell's text, plain text or HTML, is
+flattened the same way, marks and links kept, since a GFM cell holds one line. A paste onto a
+selection of whole cells (a `CellSelection`) is prosemirror-tables' grid paste (`__pastedCells`,
+`__clipCells`, `__insertCells`), with two changes. Tab-separated text fills the cells one value
+each. Every cell is retyped for the row it lands in, because Milkdown's header row holds only
+`table_header` cells and a body row only `table_cell` ones, and prosemirror-tables' own insert
+threw on a selection that reached the header row. The patch applies to that one version: raising
+`@milkdown/plugin-clipboard` means carrying the patch to the new version, and the paste rows in
+`ask-blocks.e2e.ts` and `editor-paste.e2e.ts` fail without it.
 
 `ask` is the host-rendered decision type. A live document's open block decisions appear in one compact, cycling `#b-<blockId>` navigation link beneath the tab row. There is one ask component on every surface: a decision block *hosts* the Inbox's `AskCard` (compact variant, thread collapsed, `frame="block"`) for its indexed ask row, so answering, **Ask back** (a clarification posted as a reply on the ask — `createComment` on an issue document's ask, `createArtifactComment` on a project document's — which leaves the decision open), the folded reply-count disclosure over the exchange, the question-shaped-answer prompt, the `ASK_EDITED` reload, the answered and resolved records (`AskCompletionCard`), and the retryable save error all behave exactly as they do in the Inbox, and a reply or answer made in either place shows in the other. An ask block marked `invalid`, or one with a missing question or option label, renders its raw content as a malformed decision without a card until the block text is repaired. The editor library supplies its schema-aware Insert and Turn into block-menu entries; Dispatch passes the server schema rather than duplicating those commands.
 

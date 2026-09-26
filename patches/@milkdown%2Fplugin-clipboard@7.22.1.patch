@@ -1,18 +1,19 @@
 diff --git a/lib/index.js b/lib/index.js
-index a1094153e619ca57d9a444896d85d0a840a0ec24..76d3542a30cef7afb96e90c7431d5a73ac4a393c 100644
+index a1094153e619ca57d9a444896d85d0a840a0ec24..0ab2bf1c689d8e6f70357891b8b8a2609dbe991a 100644
 --- a/lib/index.js
 +++ b/lib/index.js
-@@ -1,7 +1,8 @@
+@@ -1,7 +1,9 @@
  import { editorViewOptionsCtx, parserCtx, schemaCtx, serializerCtx } from "@milkdown/core";
  import { getNodeFromSchema, isTextOnlySlice } from "@milkdown/prose";
 -import { DOMParser, DOMSerializer } from "@milkdown/prose/model";
 +import { DOMParser, DOMSerializer, Fragment, Slice } from "@milkdown/prose/model";
  import { Plugin, PluginKey, TextSelection } from "@milkdown/prose/state";
-+import { cellAround } from "@milkdown/prose/tables";
++import { CellSelection, __clipCells, __insertCells, __pastedCells, cellAround, selectedRect, tableNodeTypes } from "@milkdown/prose/tables";
++import { Transform } from "@milkdown/prose/transform";
  import { $prose } from "@milkdown/utils";
  //#region src/__internal__/is-pure-text.ts
  function isPureText(content) {
-@@ -24,6 +25,61 @@ function withMeta(plugin, meta) {
+@@ -24,6 +26,103 @@ function withMeta(plugin, meta) {
  	return plugin;
  }
  //#endregion
@@ -48,7 +49,7 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..76d3542a30cef7afb96e90c7431d5a73
 +	return [start.firstChild, end.lastChild].every((node) => !node?.type.spec.isolating || fitsBeforeIsolating($pos, node.type));
 +}
 +function inTableCell($pos) {
-+	return $pos.parent.isTextblock && cellAround($pos) !== null;
++	return cellAround($pos) !== null;
 +}
 +function inlineSlice(fragment, schema) {
 +	const inline = [];
@@ -66,38 +67,81 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..76d3542a30cef7afb96e90c7431d5a73
 +	return new Slice(Fragment.from(inline), 0, 0);
 +}
 +function plainTextSlice($pos, opened, schema) {
-+	if (inTableCell($pos)) return inlineSlice(opened.content, schema);
 +	const closed = Slice.maxOpen(opened.content, false);
 +	return closedEdgesFit($pos, closed) ? closed : inlineSlice(opened.content, schema);
++}
++function tsvCells(text, schema) {
++	const { cell, row } = tableNodeTypes(schema);
++	const lines = text.replace(/\r\n?/g, "\n").replace(/\n$/, "").split("\n");
++	const rows = lines.map((line) => row.create(null, line.split("\t").map((value) => cell.create(null, schema.nodes.paragraph.create(null, value ? schema.text(value) : null)))));
++	return __pastedCells(new Slice(Fragment.from(rows), 0, 0));
++}
++function fitCell(cellType, slice) {
++	const cell = cellType.createAndFill();
++	return new Transform(cell).replace(0, cell.content.size, slice).doc;
++}
++function typedCells(cells, rect) {
++	return {
++		...cells,
++		rows: cells.rows.map((row, index) => {
++			const type = rect.table.child(rect.top + index).type.contentMatch.defaultType;
++			const typed = [];
++			row.forEach((cell) => typed.push(cell.type === type ? cell : type.create(cell.attrs, cell.content, cell.marks)));
++			return Fragment.from(typed);
++		})
++	};
++}
++function pasteIntoTable(view, event, slice, parsePlainText) {
++	const { state } = view;
++	const { selection, schema } = state;
++	if (!event.clipboardData) return false;
++	const text = event.clipboardData.getData("text/plain");
++	const html = event.clipboardData.getData("text/html");
++	if (selection instanceof CellSelection) {
++		const rect = selectedRect(state);
++		const pasted = html.length === 0 && text.includes("\t") ? tsvCells(text, schema) : __pastedCells(slice) ?? {
++			width: 1,
++			height: 1,
++			rows: [Fragment.from(fitCell(tableNodeTypes(schema).cell, slice))]
++		};
++		__insertCells(state, view.dispatch, rect.tableStart, rect, typedCells(__clipCells(pasted, rect.right - rect.left, rect.bottom - rect.top), rect));
++		return true;
++	}
++	if (!inTableCell(selection.$from)) return false;
++	const content = html.length === 0 ? parsePlainText(text)?.content : slice.content;
++	if (!content) return false;
++	view.dispatch(state.tr.replaceSelection(inlineSlice(content, schema)).scrollIntoView());
++	return true;
 +}
 +//#endregion
  //#region src/index.ts
  function dispatchPasteSlice(view, slice) {
  	const node = isTextOnlySlice(slice);
-@@ -53,12 +109,21 @@ var clipboard = $prose((ctx) => {
- 			return html;
- 		}
- 	}));
+@@ -40,9 +139,15 @@ function dispatchPasteSlice(view, slice) {
+ }
+ var clipboard = $prose((ctx) => {
+ 	const schema = ctx.get(schemaCtx);
 +	const parsePlainText = (text) => {
 +		const doc = ctx.get(parserCtx)(text);
 +		if (!doc || typeof doc === "string") return null;
 +		return DOMParser.fromSchema(schema).parseSlice(DOMSerializer.fromSchema(schema).serializeFragment(doc.content));
 +	};
- 	const key = new PluginKey("MILKDOWN_CLIPBOARD");
- 	return new Plugin({
+ 	ctx.update(editorViewOptionsCtx, (prev) => ({
+ 		...prev,
+ 		editable: prev.editable ?? (() => true),
++		handlePaste: (view, event, slice) => prev.handlePaste?.(view, event, slice) || pasteIntoTable(view, event, slice, parsePlainText),
+ 		transformPastedHTML: (html, view) => {
+ 			const prevTransform = prev.transformPastedHTML;
+ 			if (prevTransform) html = prevTransform(html, view);
+@@ -58,7 +163,6 @@ var clipboard = $prose((ctx) => {
  		key,
  		props: {
-+			clipboardTextParser: (text, $context) => {
-+				if (!inTableCell($context)) return null;
-+				const opened = parsePlainText(text);
-+				return opened && inlineSlice(opened.content, schema);
-+			},
  			handlePaste: (view, event, preProcessedSlice) => {
 -				const parser = ctx.get(parserCtx);
  				const editable = view.props.editable?.(view.state);
  				const { clipboardData } = event;
  				if (!editable || !clipboardData) return false;
-@@ -81,9 +146,9 @@ var clipboard = $prose((ctx) => {
+@@ -81,9 +185,9 @@ var clipboard = $prose((ctx) => {
  				const domParser = DOMParser.fromSchema(schema);
  				let dom;
  				if (html.length === 0) {
