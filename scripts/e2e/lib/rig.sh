@@ -82,10 +82,29 @@ start_process() {
   printf -v "${name}_pid" '%s' "$!"
 }
 
+# signalable PID is whether PID can name one process the run started: a number without a leading
+# zero other than 1, this shell, and this shell's process group leader. 0, however many digits spell
+# it, and a negative number name a whole process group, so `kill -STOP 0` would stop the caller with
+# everything else in its group and a later `kill -KILL 0` end them all; no pid is written with a
+# leading zero. A refusal is printed, since a caller that hands one over has a bug.
+signalable() {
+  local pid=$1
+  case "$pid" in
+    '' | *[!0-9]* | 0* | 1) ;;
+    *)
+      [ "$pid" != "$$" ] && [ "$pid" != "$BASHPID" ] &&
+        [ "$pid" != "$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ')" ] && return 0
+      ;;
+  esac
+  echo "refused to signal pid '$pid': it is not one process this run started" >&2
+  return 1
+}
+
 # stop_pid is intentionally best effort: a failed cleanup must never obscure the check that failed.
 stop_pid() {
   local pid=${1:-} i
   [ -n "$pid" ] || return 0
+  signalable "$pid" || return 0
   kill -TERM "$pid" 2>/dev/null || return 0
   for i in $(seq 1 50); do
     kill -0 "$pid" 2>/dev/null || return 0
@@ -98,10 +117,12 @@ stop_pid() {
 # stop_tree PID stops PID and every process under it. A watcher is a loop whose kubectl, jq or sleep
 # outlives the loop when only the loop is stopped; the loop is frozen first, so it starts nothing new
 # while its children go. PID is signalled only while its parent is PARENT (default this shell), so a
-# pid the watcher left and another process reused is never hit.
+# pid the watcher left and another process reused is never hit. An empty PID is a watcher that
+# never started: nothing to stop.
 stop_tree() {
   local pid=${1:-} parent=${2:-$$} child
   [ -n "$pid" ] || return 0
+  signalable "$pid" || return 0
   [ "$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')" = "$parent" ] || return 0
   kill -STOP "$pid" 2>/dev/null || return 0
   for child in $(pgrep -P "$pid"); do stop_tree "$child" "$pid"; done
