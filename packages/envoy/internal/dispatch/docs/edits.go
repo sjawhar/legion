@@ -718,7 +718,10 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		if code {
 			return next, refuseCodeThatEndsItsBlock(tree, next, r, at, "with", op.With)
 		}
-		return next, refuseUnreadableReplacement(tree, next, r, op.With)
+		if err := refuseUnreadableReplacement(tree, next, r, op.With); err != nil {
+			return nil, err
+		}
+		return next, refuseReshapedReplacement(tree, next, r, op.With)
 	case "delete":
 		if op.Block != "" {
 			if op.Find != "" {
@@ -1061,6 +1064,21 @@ func refuseUnreadableReplacement(before, after *pmdoc.Node, match pmdoc.Range, w
 		return err
 	}
 	return &ErrInvalidOp{Field: "with", Reason: unreadableReason(before, after, match, with, unreadable)}
+}
+
+// refuseReshapedReplacement refuses a replace whose text the document reads back as blocks of
+// another shape where it lands: a heading and a table cell are written on one line, so a line
+// break inside a code span or inline HTML there ends the block, as a hard break would
+// (hasHardBreak), and the document reads back a heading and a paragraph, or a row as two rows.
+func refuseReshapedReplacement(before, after *pmdoc.Node, match pmdoc.Range, with string) error {
+	reshaped, err := replacementBroke(before, after, match, pmdoc.BlockShapeError)
+	if err != nil || reshaped == nil {
+		return err
+	}
+	return &ErrInvalidOp{Field: "with", Reason: fmt.Sprintf(
+		"with %q is text the document reads back as another block where it lands (%v); write it inside a line of text",
+		with, reshaped,
+	)}
 }
 
 // replacementBroke is what check says of the document-level block holding the match after the

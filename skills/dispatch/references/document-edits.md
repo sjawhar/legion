@@ -106,8 +106,9 @@ only when it stands alone as a paragraph or a list item. The same HTML inside a 
 heading is inline HTML and is kept as written.
 
 A hard line break in `with` (two trailing spaces or a backslash before a newline) is refused in a heading or a
-table cell (`INVALID_OP` on `with`): both are written on one line, so the break would end the block there. Write
-the text without the break, or `insert` a new block after this one.
+table cell (`INVALID_OP` on `with`): both are written on one line, so the break would end the block there. A line
+break inside a code span or inline HTML there is refused the same way. Write the text without the break, or
+`insert` a new block after this one.
 
 When the new text adds a block that is not a paragraph beside paragraphs, `insert` it beside the
 paragraph you replaced, which keeps that paragraph's id; only when no paragraph of the new text is left to take

@@ -174,7 +174,9 @@ start, where a heading, bullet, `1.`/`1)` ordered or `>` blockquote marker is `I
 `with` as well (`blockMarkerAfterHardBreak`), since replace is inline and that marker can only be
 written as escaped literal text continuing the matched block, never as the block it names. A hard
 break is itself `INVALID_OP` when the matched textblock is a heading or a table cell
-(`pmdoc.TextblockAt.OneLine`), which are written on one line, so the break would end the block. A bare
+(`pmdoc.TextblockAt.OneLine`), which are written on one line, so the break would end the block; a
+line break inside a code span or inline HTML there ends it too, and the replace is refused because
+the block would read back as blocks of another shape (`refuseReshapedReplacement`). A bare
 newline is a soft break, which renders as a space and reaches no line start; an ordered marker
 whose start number is not 1 cannot interrupt a paragraph, and leading zeros do not change that
 number, so `01.` and `001)` are refused with `1.`, while `02.`, `10.` and a run of zeros past the
