@@ -520,7 +520,10 @@ paragraph (`emptyParagraphFirst`): an empty list item (`-`), quote (`>`), typed 
 definition, and a list item that opens with another block (`- # h`) holds an empty paragraph ahead
 of it. A table with no body row holds one empty row, which the renderer writes as nothing. The
 renderer writes a list item's empty first paragraph as nothing, with the next block on the
-marker's line.
+marker's line, a rule there as `***` (`- ---` is a thematic break at the list's level). A task
+item cannot be written so, since its marker's line would carry the next block as the task's text
+and the browser reads no other form of it as a task: a task item whose emptied first paragraph has
+another block after it does not render, and an edit that would leave one is refused.
 An empty list item that would interrupt a paragraph is not opened, as that parser reads it on the
 whole line (`emptyItemGuard`): after `- a`, the line `  - -` is an item holding the text `-`.
 

@@ -271,9 +271,17 @@ func (r *renderer) list(n *Node, prefix string) {
 		indent := prefix + strings.Repeat(" ", len(marker))
 		// An empty first paragraph is written as nothing, with the next block on the marker's line:
 		// a blank line after an empty marker line would end the item, and both parsers read an item
-		// that opens with another block as holding an empty paragraph first (`- # h`).
+		// that opens with another block as holding an empty paragraph first (`- # h`). A rule there
+		// is written `***`, since `- ---` is a thematic break at the list's level. A task item cannot
+		// be written so: its marker's line would carry the next block as the task's text, and the
+		// browser editor reads no other form of it as a task.
 		children := item.Children
-		if len(children) > 1 && children[0].Type == "paragraph" && len(children[0].Children) == 0 {
+		skipped := len(children) > 1 && children[0].Type == "paragraph" && len(children[0].Children) == 0
+		if skipped {
+			if _, task := item.Attrs["checked"].(bool); task {
+				r.err = fmt.Errorf("%w: a task item whose first paragraph is empty cannot hold another block after it; the browser editor reads no such item as a task", ErrSchema)
+				return
+			}
 			children = children[1:]
 		}
 		for childIndex, child := range children {
@@ -289,7 +297,7 @@ func (r *renderer) list(n *Node, prefix string) {
 					r.writeSyntax("\n" + indent)
 				}
 			}
-			r.asteriskRule = child.Type == "hr" && afterParagraph && item.Attrs["spread"] != true
+			r.asteriskRule = child.Type == "hr" && (afterParagraph && item.Attrs["spread"] != true || skipped && childIndex == 0)
 			r.block(child, indent)
 		}
 	}

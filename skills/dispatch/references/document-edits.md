@@ -66,7 +66,8 @@ so `find="# Old"` renames the text and keeps whatever level it selected. `with` 
 paragraph is rejected (`INVALID_OP` on `with`) — see the recipe for a multi-paragraph rewrite below; so is any non-empty `with` that
 renders to no text, which a line indented four spaces or a tab does (markdown reads that as a code block), as does whitespace
 alone. An empty `with` deletes the matched text on purpose; a list item, quote, typed block or footnote definition left
-holding only the emptied paragraph keeps it, and reads back holding it. Inside a code
+holding only the emptied paragraph keeps it, and reads back holding it. Emptying a task item's first paragraph while
+another block follows it in the item is `INVALID_OP`, since the browser editor reads no such item as a task. Inside a code
 block none of this applies: `with` is the code's literal text, written as sent, whitespace, markdown syntax and
 references included, except that line breaks at the end of the code's text, and a line holding only whitespace in a
 list item's code, do not survive the next read. A line of colons in code inside a typed block is kept: Dispatch writes

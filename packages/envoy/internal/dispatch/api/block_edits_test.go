@@ -161,6 +161,45 @@ func TestDocumentEditsEmptyingAContainersParagraphIsTaken(t *testing.T) {
 	}
 }
 
+// A list item whose first paragraph is empty is written with its next block on the marker's line,
+// so a rule there is written `***`: `- ---` would be a thematic break at the list's level, and the
+// item and the list around it would be lost, here and in the browser editor. A task item's emptied
+// first paragraph beside another block is refused, since the browser editor reads no form of that
+// item as a task: the marker's line would carry the next block as the task's text.
+func TestDocumentEditsEmptyingAListItemsFirstParagraphKeepsTheItem(t *testing.T) {
+	handler := newTestHandler(t)
+	for index, test := range []struct{ name, spec, with, want string }{
+		{"a rule after it", "- Body.\n\n  ***\n- two\n", "", "- ***\n- two\n"},
+		{"a rule an edit does not touch", "- ***\n\nBody.\n", "x", "- ***\n\nx\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			issue := createInteractionIssue(t, handler, "L"+string(rune('A'+index)), test.name, test.spec)
+			response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+				"ops": []map[string]any{{"op": "replace", "find": "Body.", "with": test.with}},
+			}, "alice")
+			if response.Code != http.StatusOK {
+				t.Fatalf("replace: status=%d body=%s", response.Code, response.Body.String())
+			}
+			if markdown := documentMarkdown(t, handler, issue.PrimaryArtifactID); markdown != test.want {
+				t.Fatalf("stored %q, want %q", markdown, test.want)
+			}
+		})
+	}
+	for index, spec := range []string{"- [ ] Body.\n  - sub\n", "- [ ] Body.\n\n  ```\n  code\n  ```\n"} {
+		issue := createInteractionIssue(t, handler, "LT"+string(rune('A'+index)), "a task item", spec)
+		before := documentMarkdown(t, handler, issue.PrimaryArtifactID)
+		response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+			"ops": []map[string]any{{"op": "replace", "find": "Body.", "with": ""}},
+		}, "alice")
+		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"INVALID_OP"`) || !strings.Contains(response.Body.String(), "task") {
+			t.Fatalf("emptying a task item's first paragraph in %q: status=%d body=%s", spec, response.Code, response.Body.String())
+		}
+		if after := documentMarkdown(t, handler, issue.PrimaryArtifactID); after != before {
+			t.Fatalf("a refused replace changed the document: %q, was %q", after, before)
+		}
+	}
+}
+
 // The browser editor's parser ends a typed block at a line of at least its fence's colons starting
 // less than four columns past the typed block's own lines, even inside fenced code the typed block
 // holds; list markers add their width to a code line's indentation, a tab advances to the next
