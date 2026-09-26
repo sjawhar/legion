@@ -460,6 +460,18 @@ func TestParseMintsAnOmittedTypedBlockID(t *testing.T) {
 	}
 }
 
+// A refused ask is named by the opening words of its question as well as its block id, which the
+// parser makes up when the markdown gives none.
+func TestAskContentErrorNamesTheAskByItsQuestion(t *testing.T) {
+	doc, err := Parse("Intro.\n\n:::ask{urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich transport should we expose to the partners first?\n\n```\ncode\n```\n:::\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := AskContentError(doc); err == nil || !strings.Contains(err.Error(), `"Which transport should we expose to the…"`) {
+		t.Fatalf("AskContentError = %v, want it to name the question's opening words", err)
+	}
+}
+
 // An ask holding a block its content rule does not allow is refused naming that block as a
 // reader would, with its article.
 func TestAskContentErrorNamesTheBlockThatBreaksTheRule(t *testing.T) {

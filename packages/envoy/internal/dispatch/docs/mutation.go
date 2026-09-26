@@ -184,10 +184,6 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 	if !joined {
 		return "", errUnjoined
 	}
-	// The seeding actor is the caller's own first version author (written directly by the
-	// caller, never through writeVersionTx), so it must not join `pending` - only the
-	// settlement that indexes the seeded ask blocks needs to know who wrote them.
-	s.recordLastActor(artifactID, actor)
 	tree, err := parseInput(markdown)
 	if err != nil {
 		return "", err
@@ -210,6 +206,12 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 	if _, err := s.persistence.AppendUpdateTx(ctx, tx, artifactID, crdt.EncodeStateAsUpdateV1(doc, nil), true); err != nil {
 		return "", fmt.Errorf("seed live document: %w", err)
 	}
+	// The seeding actor is the caller's own first version author (written directly by the
+	// caller, never through writeVersionTx), so it must not join `pending` - only the
+	// settlement that indexes the seeded ask blocks needs to know who wrote them. Recording it
+	// makes the document's room, so it waits for the seed to be written: a room leaves only when
+	// it is evicted, and a refused seed would hold one of the live-room slots for good.
+	s.recordLastActor(artifactID, actor)
 	return canonical, nil
 }
 

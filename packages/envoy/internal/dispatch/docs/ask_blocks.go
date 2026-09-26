@@ -30,7 +30,9 @@ type settlementReconciliation struct {
 	events  []model.Event
 }
 
-// ErrInvalidAskBlock rejects an agent edit that would leave an indexed ask malformed.
+// ErrInvalidAskBlock refuses a write that would leave an ask it writes or changes unreadable: an
+// upload (a spec at issue creation, a new document or version) or an edit whose ask breaks the
+// content rule paragraph+ bullet_list?, or an edit whose ask settlement cannot read.
 type ErrInvalidAskBlock struct {
 	Reason error
 }
@@ -222,9 +224,6 @@ type invalidAskBlock struct {
 // validateEditedAskBlocks refuses an edit that leaves an ask unreadable - breaking its content
 // rule, or holding what settlement cannot read - when the edit wrote or changed it.
 func validateEditedAskBlocks(before, after *pmdoc.Node) error {
-	if _, _, err := collectAskBlocksForSettlement(after); err != nil {
-		return err
-	}
 	return refuseChangedAsks(before, after, func(ask *pmdoc.Node) error {
 		if err := pmdoc.AskContentError(ask); err != nil {
 			return err

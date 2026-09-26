@@ -298,35 +298,37 @@ func TestSettlementMarksUnsupportedAskBodyInvalid(t *testing.T) {
 }
 
 // appendToAsk is a browser edit that appends block to the document's first ask.
+// firstAsk is the document's first top-level ask.
+func firstAsk(tree *pmdoc.Node) *pmdoc.Node {
+	for _, child := range tree.Children {
+		if child.Type == "ask" {
+			return child
+		}
+	}
+	panic("the document holds no ask")
+}
+
 // setAskAttrs sets attributes on the document's first ask, as settlement or an answer does.
 func setAskAttrs(attrs pmdoc.Attrs) func(*pmdoc.Node) *pmdoc.Node {
 	return func(tree *pmdoc.Node) *pmdoc.Node {
-		for _, child := range tree.Children {
-			if child.Type == "ask" {
-				for name, value := range attrs {
-					child.Attrs[name] = value
-				}
-				return tree
-			}
+		for name, value := range attrs {
+			firstAsk(tree).Attrs[name] = value
 		}
-		panic("no ask to set attributes on")
+		return tree
+	}
+}
+
+// appendToAsk adds a block to the end of the document's first ask, as a browser edit can.
+func appendToAsk(block *pmdoc.Node) func(*pmdoc.Node) *pmdoc.Node {
+	return func(tree *pmdoc.Node) *pmdoc.Node {
+		ask := firstAsk(tree)
+		ask.Children = append(ask.Children, block)
+		return tree
 	}
 }
 
 func codeBlockNode(text string) *pmdoc.Node {
 	return &pmdoc.Node{Type: "code_block", Attrs: pmdoc.Attrs{"language": nil}, Children: []*pmdoc.Node{{Type: "text", Text: text}}}
-}
-
-func appendToAsk(block *pmdoc.Node) func(*pmdoc.Node) *pmdoc.Node {
-	return func(tree *pmdoc.Node) *pmdoc.Node {
-		for _, child := range tree.Children {
-			if child.Type == "ask" {
-				child.Children = append(child.Children, block)
-				return tree
-			}
-		}
-		panic("no ask to append to")
-	}
 }
 
 // A version's markdown carries what a rendering writes, and an upload's server-owned ask
@@ -344,7 +346,7 @@ func TestReplaceCarriesAnUnreadableAskWithWhatNoRenderingWrites(t *testing.T) {
 			if _, err := service.MarkQuote(context.Background(), artifactID, MarkSpec{Kind: MarkComment, ID: "c1", By: actor}, "this week", nil); err != nil {
 				t.Fatal(err)
 			}
-			editLiveTree(t, service, artifactID, appendToAsk(&pmdoc.Node{Type: "code_block", Attrs: pmdoc.Attrs{"language": nil}, Children: []*pmdoc.Node{{Type: "text", Text: "code"}}}))
+			editLiveTree(t, service, artifactID, appendToAsk(codeBlockNode("code")))
 		}},
 		{"a heading with the id a browser derived", func(t *testing.T, service *Service, artifactID string) {
 			editLiveTree(t, service, artifactID, appendToAsk(&pmdoc.Node{Type: "heading", Attrs: pmdoc.Attrs{"level": float64(2), "id": "decision"}, Children: []*pmdoc.Node{{Type: "text", Text: "Decision"}}}))
@@ -369,6 +371,33 @@ func TestReplaceCarriesAnUnreadableAskWithWhatNoRenderingWrites(t *testing.T) {
 			}
 			if _, err := service.ReplaceText(context.Background(), artifactID, strings.Replace(current, "Intro.", "Introduction.", 1), actor); err != nil {
 				t.Fatalf("ReplaceText carrying the unreadable ask = %v, want it taken", err)
+			}
+		})
+	}
+}
+
+// A refused seed leaves no room behind. A room leaves the service only when it is evicted, and every
+// room counts toward the live-room limit, so a room made for a document that was never written
+// would hold a slot for good.
+func TestARefusedSeedLeavesNoRoom(t *testing.T) {
+	for _, test := range []struct{ name, markdown string }{
+		{"an ask breaking its content rule", "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich?\n\n```\ncode\n```\n:::\n"},
+		{"markdown outside the schema", "<div>\nblock html\n</div>\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			tx, err := service.store.Pool.Begin(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback(context.Background())
+			seedCtx, ledger := service.Join(context.Background(), tx)
+			defer ledger.Discard()
+			if _, err := service.SeedText(seedCtx, artifactID, test.markdown, model.Actor{Kind: "user", ID: "alice"}); err == nil {
+				t.Fatal("SeedText took the markdown, want it refused")
+			}
+			if _, ok := service.rooms.Load(artifactID); ok {
+				t.Fatal("the refused seed left a room for the document")
 			}
 		})
 	}
@@ -408,7 +437,7 @@ func TestReplaceCarriesAnAskTheBrowserLeftUnreadable(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nShould we ship?\n:::\n")
-	editLiveTree(t, service, artifactID, appendToAsk(&pmdoc.Node{Type: "code_block", Attrs: pmdoc.Attrs{"language": nil}, Children: []*pmdoc.Node{{Type: "text", Text: "code"}}}))
+	editLiveTree(t, service, artifactID, appendToAsk(codeBlockNode("code")))
 	current, err := service.Text(context.Background(), artifactID)
 	if err != nil {
 		t.Fatal(err)
@@ -431,7 +460,7 @@ func TestEditsBesideAnAskTheBrowserLeftUnreadableAreAccepted(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nShould we ship?\n:::\n\nAfter.\n")
-	editLiveTree(t, service, artifactID, appendToAsk(&pmdoc.Node{Type: "code_block", Attrs: pmdoc.Attrs{"language": nil}, Children: []*pmdoc.Node{{Type: "text", Text: "code"}}}))
+	editLiveTree(t, service, artifactID, appendToAsk(codeBlockNode("code")))
 	actor := model.Actor{Kind: "user", ID: "alice"}
 
 	if _, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{Op: "replace", Find: "After.", With: "Later."}}, actor, nil); err != nil {
