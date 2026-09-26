@@ -233,8 +233,7 @@ Preserve this order exactly:
 
 1. tester green and review cycles complete;
 2. on a clean review, `spawn_worker` the implementer once more to push only the `.legion/`
-   deletion (only the implementer pushes the issue branch), then the reviewer approves that
-   head. The deletion must land before that approval, which is head-pinned. An implementer
+   deletion, then the reviewer approves that head. The deletion must land before that approval, which is head-pinned. An implementer
    completion advances the status only from `in_progress` to `testing`; this push, like retro
    later, leaves the status where it is, so you set nothing by hand — on its `phase-complete`
    wake, `spawn_worker` the reviewer to approve that head (a finished reviewer may already be
@@ -259,8 +258,8 @@ What returns the tree to review: a changed diff — a commit above the approved 
 touches anything outside `docs/solutions/`, or a rebase whose fingerprint
 (`skill://legion-worker`'s unchanged-diff check) differs from the approved head's. What does not: retro's
 `docs/solutions/` commit, and a rebase forced by a GitHub-reported conflict whose fingerprint
-is unchanged. For that rebase the order is: the implementer rebases and posts the before/after
-fingerprints; the tester re-runs the bare gates only; the reviewer confirms and approves the new
+is unchanged. For that rebase the order is: the implementer rebases, pushes the rebased chain with
+`legion-worker`'s procedure for rewritten commits, and posts the before/after fingerprints; the tester re-runs the bare gates only; the reviewer confirms and approves the new
 head by SHA (or continues its round if it had not approved); the merger republishes READY.
 Retro does not re-run. A rebase happens only when GitHub reports `CONFLICTING`
 (`legion gh -- pr view <n> --json mergeable,mergeStateStatus`); read that on every end-game
@@ -271,8 +270,9 @@ it. Do not let the merger publish `READY` for an obsolete approval.
 If a worker reports that `legion threads resolve` exited 1 naming a review thread GitHub refused
 to resolve, open a `dispatch_ask` that names the thread's URL and GitHub's message for a human to
 resolve it by hand, with options for resolved / could not; the merger does not publish while it
-is open. That is the one review-thread step a human takes: the review App cannot resolve threads,
-and the implementer's and merger's runs of the command close every accepted one.
+is open. That is the one review-thread step a human takes: the review App cannot resolve a thread
+on a pull request the implementer opened, and the implementer's and merger's runs of the command
+close every accepted one.
 
 ## 7. Close
 
@@ -311,7 +311,7 @@ active phase worker.
 | `worker-recovered` | Payload `{type:"worker-recovered", issue, role, fromRef, delivery?}`. The worker's tree volume was lost and the daemon replaced it from the committed handoff on `fromRef`. `delivery: "spawned"` means the current assignment was preserved on the new worker; do not resend it. `delivery: "queued"` means that preserved assignment awaits capacity; wait for `worker-started`. Without `delivery`, inspect `.legion/` and the active phase before deciding whether work needs a new assignment. |
 | `pr-ready` | Verify the live PR head, green status, and review state. Continue the review/retro/merger order only for that current head. |
 | `pr-review` | Payload `{type:"pr-review", state, author, body}`. Delivered to whichever role is currently active for the issue, falling back to you when no worker phase is active. Follows the same verdict rule as a reviewer's `phase-complete`: `state: "changes_requested"` sends the implementer back in with the review findings, then tester, then reviewer — never the reviewer again and never retro; that `spawn_worker` returns the issue to `in_progress` on its own (the daemon writes it for a corrective implementer whenever the PR's latest recorded review is changes requested, a human's after approval included), so you set nothing by hand; `state: "approved"` proceeds toward retro (step 5) once the step 6 integration/merge-gate conditions are met. `state: "approved"` on a rebased head whose body names an unchanged fingerprint is that confirmation: proceed to retro if it has not run, otherwise to the merger — never to a second retro or test round. |
-| `pr-blocked` | Payload `{type:"pr-blocked", pr, attempts}`. `attempts` counts heads pushed onto a red verdict that changed something outside `.legion/` — handoff-only pushes (`.legion/` paths only) never count; a push the daemon cannot classify (a listener without `changed_paths`, a list capped at 100, a push listing no commits) does. Published once per exhausted count, not on every later red verdict for that count. Read the failed CI evidence and recovery attempts. Assign a focused implementer or corrective child, then return it through testing and review; do not treat the blocked PR as final. |
+| `pr-blocked` | Payload `{type:"pr-blocked", pr, attempts}`. `attempts` counts heads pushed onto a red verdict that changed something outside `.legion/` — handoff-only pushes (`.legion/` paths only) never count, a push by the review App (a planner's, tester's, reviewer's or architect's) never counts, and the head after a red the tester's red tests earned (a review-App push that changed a path outside `.legion/`, however many handoff-only pushes follow it) does not count either — so after the tester's handoff-only push onto the implementer's red, the implementer's next push does count; a push the daemon cannot classify (a listener without `changed_paths`, a list capped at 100, a push listing no commits) does. Published once per exhausted count, not on every later red verdict for that count. Read the failed CI evidence and recovery attempts. Assign a focused implementer or corrective child, then return it through testing and review; do not treat the blocked PR as final. |
 | `pr-merged` | Payload `{type:"pr-merged", pr, mergeCommitSha}`. The PR merged because a human merged it under the repository's rules. `spawn_worker` the **implementer** with the production-check task naming that merge commit (it resumes the same agent; a retired role has no live holder, so never `envoy_publish` for this). Its `phase-complete` is what brings you to step 7: verify the record on the pull request and this issue first, then sign off naming it and set the issue `done`. A merge is not the close. |
 | `pr-closed-unmerged` | Decide from current scope whether to reopen the work, send a fresh implementer, or cancel it with a reason. Delegate the repository action to the responsible phase worker and keep ownership. |
 | `issue-comment` | Interpret the comment in the issue's design context. Answer it, adjust the plan, or relay it via `envoy_publish` to the responsible worker's role token; scope and product decisions remain with you. |

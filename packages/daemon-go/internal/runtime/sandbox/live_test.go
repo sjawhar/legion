@@ -46,6 +46,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/stream"
 )
@@ -127,7 +128,8 @@ var stubAgent = []string{"/bin/sh", "-c", `printf '%s\n' "$POD_UID" >>"$LEGION_E
 // liveEnv is what the script hands the harness.
 type liveEnv struct {
 	runtimeKubeconfig, runtimeContext, operatorContext string
-	namespace, project, claimProject, image, repo      string
+	namespace, project, claimProject, image            string
+	repo                                               ghrepo.Repository
 	streamHost, streamPort                             string
 	appID, appKeyName                                  string
 	record, work, from                                 string
@@ -153,7 +155,6 @@ func readLiveEnv(t *testing.T) liveEnv {
 		namespace:         get("LEGION_E2E_NAMESPACE"),
 		project:           get("LEGION_E2E_PROJECT"),
 		image:             get("LEGION_E2E_IMAGE"),
-		repo:              get("LEGION_E2E_REPO"),
 		streamHost:        get("LEGION_E2E_STREAM_HOST"),
 		streamPort:        get("LEGION_E2E_STREAM_PORT"),
 		appID:             get("LEGION_E2E_IMPLEMENT_APP_ID"),
@@ -164,6 +165,12 @@ func readLiveEnv(t *testing.T) liveEnv {
 		operatorPodFile:   get("LEGION_E2E_OPERATOR_POD"),
 		operatorConfigMap: get("LEGION_E2E_OPERATOR_CONFIGMAP"),
 	}
+	repo, err := ghrepo.Parse("LEGION_E2E_REPO", get("LEGION_E2E_REPO"))
+	if err != nil {
+		fmt.Printf("CHECK identity: FAIL: %v\n", err)
+		t.FailNow()
+	}
+	env.repo = repo
 	if !strings.HasPrefix(env.project, "s4a-") {
 		fmt.Printf("CHECK identity: FAIL: the run project %q lacks the reserved prefix s4a-\n", env.project)
 		t.FailNow()
@@ -835,6 +842,16 @@ func (r *liveRig) awaitRunning(c *liveClaim, since time.Time) (registration, err
 	reg, ok := r.reg.await(c.token, c.gen, since, liveBootTimeout)
 	if !ok {
 		return registration{}, r.networkPathFailure(pod)
+	}
+	return reg, nil
+}
+
+// awaitHelloAgain is c's shim saying hello, since the runtime and listener were replaced at since,
+// with its current generation's boot token: a live claim reconnecting to a new runtime.
+func (r *liveRig) awaitHelloAgain(c *liveClaim, since time.Time) (registration, error) {
+	reg, ok := r.reg.await(c.token, c.gen, since, 2*time.Minute)
+	if !ok || reg.hash != tokenHash(c.bootToken) {
+		return reg, fmt.Errorf("%s's shim did not say hello again with its generation-%d token", c.name, c.gen)
 	}
 	return reg, nil
 }

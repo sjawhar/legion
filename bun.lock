@@ -13,8 +13,8 @@
         "@biomejs/biome": "^2.3.14",
       },
     },
-    "packages/claude-envoy-bridge": {
-      "name": "@sjawhar/claude-envoy-bridge",
+    "packages/claude-envoy": {
+      "name": "@sjawhar/claude-envoy",
       "version": "0.3.0",
       "dependencies": {
         "@legion/contracts": "workspace:*",
@@ -44,7 +44,7 @@
     },
     "packages/daemon": {
       "name": "legion",
-      "version": "1.27.3",
+      "version": "6.0.1",
       "bin": {
         "legion": "src/cli/index.ts",
       },
@@ -129,7 +129,7 @@
     },
     "packages/envoy-plugin": {
       "name": "@sjawhar/opencode-legion-envoy",
-      "version": "1.45.2",
+      "version": "2.1.0",
       "dependencies": {
         "@opencode-ai/plugin": "~1.14.46",
       },
@@ -149,7 +149,7 @@
     },
     "packages/pi-envoy": {
       "name": "@sjawhar/pi-legion-envoy",
-      "version": "1.56.3",
+      "version": "3.1.0",
       "devDependencies": {
         "@biomejs/biome": "^2.3.14",
         "@legion/contracts": "workspace:*",
@@ -595,7 +595,7 @@
 
     "@shuding/opentype.js": ["@shuding/opentype.js@1.4.0-beta.0", "", { "dependencies": { "fflate": "^0.7.3", "string.prototype.codepointat": "^0.2.1" }, "bin": { "ot": "bin/ot" } }, "sha512-3NgmNyH3l/Hv6EvsWJbsvpcpUba6R8IREQ83nH83cyakCw7uM1arZKNfHwv1Wz6jgqrF/j4x5ELvR6PnK9nTcA=="],
 
-    "@sjawhar/claude-envoy-bridge": ["@sjawhar/claude-envoy-bridge@workspace:packages/claude-envoy-bridge"],
+    "@sjawhar/claude-envoy": ["@sjawhar/claude-envoy@workspace:packages/claude-envoy"],
 
     "@sjawhar/dispatch": ["@sjawhar/dispatch@workspace:packages/dispatch"],
 
