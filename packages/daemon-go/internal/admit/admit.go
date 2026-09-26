@@ -362,7 +362,9 @@ func ownSlots(issues []record.Issue, slots []record.Slot) []record.Slot {
 // moves it, and the architect cannot release a child already in the workflow. Each start carries
 // the child's own generation and phase, which is what the outbox fences it against, and the task
 // that says to carry the phase on: a start with no task leaves the resumed agent holding its old
-// transcript with nothing asked of it, and only its own handoff moves the phase.
+// transcript with nothing asked of it, and only its own handoff moves the phase. A child whose start
+// is still queued, from a fact that moved it while the root waited for its slot, is not started a
+// second time: the task would be delivered twice.
 func (a *Admission) startMidPhaseChildren(ctx context.Context, tx pgx.Tx, root record.Issue, issues []record.Issue, now time.Time) error {
 	for _, child := range issues {
 		if child.Key == root.Key || child.Tree != root.Tree {
@@ -370,6 +372,13 @@ func (a *Admission) startMidPhaseChildren(ctx context.Context, tx pgx.Tx, root r
 		}
 		role := workflow.RoleFor(child.Phase)
 		if role == "" || record.OutOfWorkflow(child.Status) {
+			continue
+		}
+		queued, err := a.store.PendingStart(ctx, tx, child.Key, role, child.Generation, child.Phase)
+		if err != nil {
+			return err
+		}
+		if queued {
 			continue
 		}
 		payload := record.SuperviseRequest{Op: "start", Tree: child.Tree, Role: role, Generation: child.Generation,

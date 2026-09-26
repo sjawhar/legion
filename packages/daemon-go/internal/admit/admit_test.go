@@ -273,6 +273,51 @@ func TestAMergeWhileTheTreeLingersIsTheChildsProductionCheckOnceTheTreeRunsAgain
 	}
 }
 
+// A re-admitted root that waits for a slot no longer lingers, so a fact in that window moves its
+// child and queues the child's worker start. The root's promotion then starts its mid-phase
+// children; a child whose start is still queued for the same role, generation and phase is not
+// started a second time, which would deliver the same task twice.
+func TestPromotionDoesNotStartAChildWhoseStartIsQueued(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	seedSlotted(t, pool, "LEGION-100", "A")
+	root := record.Issue{Key: "LEGION-208", Project: "LEGION", Title: "root", Tree: "LEGION-208", Phase: phase.Admitted, Generation: 2, Status: "todo", Rank: "B", LastDispatchSeq: 2}
+	putIssue(t, pool, root)
+	parentKey := root.Key
+	putIssue(t, pool, record.Issue{Key: "LEGION-209", Project: "LEGION", Title: "merged child", Tree: root.Key, Parent: &parentKey,
+		Phase: phase.AwaitingMerge, Generation: 1, Status: "in_progress", Rank: "C", LastDispatchSeq: 1})
+	inTx(t, pool, func(tx pgx.Tx) {
+		if err := record.NewStore().PutPullRequest(context.Background(), tx, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-209", Repo: "sjawhar/legion", Number: 42,
+			Branch: "legion/LEGION-209", HeadSHA: "head", Failing: []string{}, FailingStatuses: []string{}}); err != nil {
+			t.Fatalf("seed pull request: %v", err)
+		}
+	})
+	implementerStarts := func() int {
+		t.Helper()
+		var starts int
+		if err := pool.QueryRow(context.Background(), `select count(*) from outbox where issue = 'LEGION-209' and kind = 'supervise'
+			and payload->>'op' = 'start' and payload->>'role' = 'implementer' and payload->>'phase' = 'production_check'`).Scan(&starts); err != nil {
+			t.Fatalf("count the child's starts: %v", err)
+		}
+		return starts
+	}
+
+	if _, err := intake.ApplyFact(context.Background(), pool, "github", "merged", intake.PullRequestMerged{Repo: "sjawhar/legion", Number: 42, MergeSHA: "merge"}, engine, admission); err != nil {
+		t.Fatalf("ApplyFact merge: %v", err)
+	}
+	if starts := implementerStarts(); starts != 1 {
+		t.Fatalf("implementer starts after the merge while the root waits = %d, want 1", starts)
+	}
+	apply(t, pool, admission, "free-the-slot", intake.DispatchIssue{Key: "LEGION-100", Seq: 2, Type: "issue.closed", Status: "done", Title: "LEGION-100", Rank: "A"}, engine)
+	if slotted := issue(t, pool, root.Key); slotted.Status != "in_progress" {
+		t.Fatalf("the waiting root after the slot freed = %s, want it promoted", slotted.Status)
+	}
+	if starts := implementerStarts(); starts != 1 {
+		t.Fatalf("implementer starts after the promotion = %d, want the one already queued", starts)
+	}
+}
+
 // Every newer Dispatch observation is recorded, not only a status change: re-ranking a waiting
 // root, renaming it, or re-parenting it arrives as an issue.updated at the same status, and the
 // waiting line has to follow Dispatch rank order at once, not after the next boot's read. It runs

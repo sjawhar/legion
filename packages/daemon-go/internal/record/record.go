@@ -159,6 +159,9 @@ type Store interface {
 	FinishOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) error
 	RetryOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string, nextAt time.Time, lastErr string) error
 	PendingStatusWrites(ctx context.Context, tx pgx.Tx, project string) ([]OutboxRow, error)
+	// PendingStart says whether the outbox holds an unfinished start of issue's role for the
+	// generation and phase.
+	PendingStart(ctx context.Context, tx pgx.Tx, issue string, role claim.Role, generation uint64, p phase.Phase) (bool, error)
 }
 
 // ParentOf is an observed parent key as a record holds it: nil for none. Dispatch says "no parent"

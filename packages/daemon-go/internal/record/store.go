@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -465,6 +466,18 @@ func (s *Postgres) RetryOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseTo
 		return fmt.Errorf("retry outbox row %d: %w", id, err)
 	}
 	return nil
+}
+
+// PendingStart says whether the outbox holds an unfinished start of issue's role for the generation
+// and phase: finishing deletes the row, so one left is a start the outbox has not finished.
+func (s *Postgres) PendingStart(ctx context.Context, tx pgx.Tx, issue string, role claim.Role, generation uint64, p phase.Phase) (bool, error) {
+	var pending bool
+	if err := tx.QueryRow(ctx, `select exists (select 1 from outbox where issue = $1 and kind = $2 and payload->>'op' = 'start'
+		and payload->>'role' = $3 and payload->>'generation' = $4 and coalesce(payload->>'phase', '') = $5)`,
+		issue, string(OutboxKindSupervise), string(role), strconv.FormatUint(generation, 10), string(p)).Scan(&pending); err != nil {
+		return false, fmt.Errorf("read the pending %s start of %s: %w", role, issue, err)
+	}
+	return pending, nil
 }
 
 // PendingStatusWrites lists every Dispatch status write of project's issues the outbox has not
