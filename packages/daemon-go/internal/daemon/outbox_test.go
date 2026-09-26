@@ -155,8 +155,7 @@ func TestOutboxNoticePublishesIssueAndTreeTopics(t *testing.T) {
 }
 
 // A controller notice row goes to the controller topic of the daemon's own project, the one its
-// controller subscribes to, and to no issue topic, under the row's own key, with the notice the
-// issue topic carries.
+// controller subscribes to, and to no issue topic, under the row's own key, as the Notice it is.
 func TestOutboxControllerNoticeGoesToTheControllerTopicAlone(t *testing.T) {
 	row := mustOutboxRow(t, "LEGION-2", record.ControllerNotice{Kind: "held", Role: claim.RolePlanner, Phase: phase.Planning}, time.Now())
 	row.ID = 57

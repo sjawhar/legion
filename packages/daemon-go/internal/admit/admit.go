@@ -38,9 +38,10 @@ func New(store record.Store, cap int, project string, log *slog.Logger) *Admissi
 }
 
 // Apply records root and orphan todo observations and every newer observation of a recorded issue,
-// releases slots that the workflow completed, and promotes waiting roots while capacity remains.
-// The workflow handler runs first: it records every live-tree child, leaving admission to record
-// only a still-unrecorded root or orphan.
+// wakes the controller for a root created in triage (a controller notice, not a record), releases
+// slots that the workflow completed, and promotes waiting roots while capacity remains. The
+// workflow handler runs first: it records every live-tree child, leaving admission to record only
+// a still-unrecorded root or orphan.
 func (a *Admission) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake.Result, error) {
 	if err := a.releaseDoneSlots(ctx, tx); err != nil {
 		return intake.Result{}, err
@@ -59,6 +60,15 @@ func (a *Admission) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (int
 		return intake.Result{}, fmt.Errorf("read admission issue %s: %w", observation.Key, err)
 	}
 	if stored == nil {
+		// A root created in triage is the controller's to triage. Its creation is the one
+		// observation that comes once per issue, so it alone wakes the controller; the record stays
+		// empty, as for any root not yet todo. The boot listing (Reconcile) never sees it: it reads
+		// only the workflow's statuses, todo to retro.
+		if observation.Type == "issue.created" && observation.Status == "triage" && observation.Parent == "" {
+			if err := a.enqueue(ctx, tx, observation.Key, record.ControllerNotice{Kind: "triage"}, a.now()); err != nil {
+				return intake.Result{}, err
+			}
+		}
 		if observation.Status != "todo" {
 			return intake.Result{}, nil
 		}

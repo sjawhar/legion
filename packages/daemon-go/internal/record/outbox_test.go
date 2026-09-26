@@ -72,6 +72,7 @@ func TestNewOutboxRowRefusesInvalidPayloads(t *testing.T) {
 	}{
 		{name: "empty status", payload: StatusWrite{}, reason: "empty status"},
 		{name: "unknown notice", payload: Notice{Kind: "unknown"}, reason: "unknown notice kind"},
+		{name: "a triage notice for the issue topic", payload: Notice{Kind: "triage"}, reason: "unknown notice kind"},
 		{name: "unknown supervise operation", payload: SuperviseRequest{Op: "unknown"}, reason: "unknown supervise operation"},
 		{name: "a stop that is not a tree close", payload: SuperviseRequest{Op: "stop", Tree: "LEGION-208", Role: claim.RoleArchitect}, reason: "unknown supervise operation"},
 		{name: "start without tree", payload: SuperviseRequest{Op: "start", Role: claim.RoleArchitect}, reason: "start requires tree"},
