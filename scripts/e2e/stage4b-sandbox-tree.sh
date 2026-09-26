@@ -24,6 +24,12 @@
 #   ~/.kube/legion-daemon-production) name the restricted identity the daemon runs as.
 # - LEGION_E2E_OPERATOR_CONTEXT (default production) names the admin context.
 # - LEGION_E2E_IMAGE (required) is the worker image, by digest.
+# - LEGION_E2E_MODEL_GATEWAY_URL (required) is the model gateway's Anthropic endpoint, the route the
+#   operator fixture's models.yml and the controller's profile name (lib/model-gateway-url.sh).
+# - LEGION_E2E_DISPATCH_URL, LEGION_E2E_ENVOY_URL and LEGION_E2E_NATS_URL (required) are production
+#   Dispatch, the production Envoy listener and production NATS, by the operator's fully-qualified
+#   names for them: an https:// URL, an http(s):// URL and a nats://host:port, none with a path. The
+#   repository carries none of them, and the run never prints them.
 # - STAGE4B_UNTIL=<checkpoint> stops after that checkpoint. A run with it set is a development run,
 #   never the proof, and never prints PASS.
 # - STAGE4B_SKIP_CONTROLLER=1, in a development run only, runs none of `controller`'s checks and only
@@ -63,13 +69,12 @@ project=LEGSMOKE
 run_label=legsmoke
 label_exact=legsmoke
 repo=sjawhar/legion-smoke
-dispatch_base=https://dispatch.internal.trajectorylabs.com
+dispatch_base=${LEGION_E2E_DISPATCH_URL:-}
 # The proof human writes with the agents' bearer, so it names a session of its own: one that holds
 # no claim, whose status writes the workflow therefore reads as a human's.
 dispatch_actor=legion-e2e4b-proof-human-$$
-envoy_url=http://envoy-listener.internal.trajectorylabs.com:9020
-nats_url=nats://nats.internal.trajectorylabs.com:4222
-gateway_url=https://middleman.hawk.internal.trajectorylabs.com
+envoy_url=${LEGION_E2E_ENVOY_URL:-}
+nats_url=${LEGION_E2E_NATS_URL:-}
 # The operator's pod configuration (scripts/e2e/fixtures/operator-route): the model route, overlay,
 # ServiceAccount and projected token every pod carries. Legion holds none of it. The run creates its
 # own copy of the ConfigMap the fixture mounts, labelled with the run's label, which the teardown
@@ -385,10 +390,15 @@ EOF
 # create_route_configmap is the operator's step before any pod runs: the fixture's models.yml and
 # overlay.yml in the ConfigMap the run's pods mount.
 create_route_configmap() {
-  op create configmap "$route_configmap" --from-file=models.yml="$fixture/models.yml" --from-file=overlay.yml="$fixture/overlay.yml" \
+  # shellcheck disable=SC2016  # the fixture's literal placeholder, not an expansion
+  local placeholder='${LEGION_E2E_MODEL_GATEWAY_URL}' models
+  models=$(<"$fixture/models.yml")
+  printf '%s\n' "${models//"$placeholder"/"$gateway"}" >"$work/models.yml"
+  grep -qFx "    baseUrl: $gateway" "$work/models.yml" || fail "the fixture's models.yml has no baseUrl $placeholder to point at the gateway"
+  op create configmap "$route_configmap" --from-file=models.yml="$work/models.yml" --from-file=overlay.yml="$fixture/overlay.yml" \
     --dry-run=client -o yaml | kubectl label --local -f - "legion.dev/project=$run_label" -o yaml | op create -f - >/dev/null ||
     fail "the operator could not create ConfigMap $route_configmap"
-  note "[operator] ConfigMap $route_configmap: models.yml and overlay.yml from $fixture, label legion.dev/project=$run_label"
+  note "[operator] ConfigMap $route_configmap: models.yml (baseUrl from LEGION_E2E_MODEL_GATEWAY_URL) and overlay.yml from $fixture, label legion.dev/project=$run_label"
 }
 start_daemon() {
   env -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -u GH_AGENT_APP_PRIVATE_KEY_B64 \
@@ -998,6 +1008,20 @@ for tool in go docker jq curl ss kubectl aws gh bun jj mise shellcheck secrets; 
 [ -n "$runtime_context" ] || fail "LEGION_E2E_RUNTIME_CONTEXT is unset: the daemon runs as the Legion daemon's restricted identity, never the operator's"
 [ -r "$runtime_kubeconfig" ] || fail "the runtime kubeconfig $runtime_kubeconfig is not readable"
 case "$image" in *@sha256:*) ;; *) fail "LEGION_E2E_IMAGE must be the worker image by digest (…@sha256:…), not '$image'" ;; esac
+# The production services, each a fully-qualified host (a bare alias resolves through whatever
+# search domain the box or the pod has) and no path. A refusal names the variable, never its value.
+host='[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+'
+[[ $dispatch_base =~ ^https://$host(:[0-9]+)?$ ]] ||
+  fail "LEGION_E2E_DISPATCH_URL is unset or not production Dispatch's https:// URL: a fully-qualified host, an optional port, no path"
+[[ $envoy_url =~ ^https?://$host(:[0-9]+)?$ ]] ||
+  fail "LEGION_E2E_ENVOY_URL is unset or not the production Envoy listener's http(s):// URL: a fully-qualified host, an optional port, no path"
+[[ $nats_url =~ ^nats://$host:[0-9]+$ ]] ||
+  fail "LEGION_E2E_NATS_URL is unset or not production NATS as nats://host:port with a fully-qualified host"
+nats_host=${nats_url#nats://} && nats_port=${nats_host##*:} && nats_host=${nats_host%:*}
+gateway=$(bash "$root/scripts/e2e/lib/model-gateway-url.sh") ||
+  fail "LEGION_E2E_MODEL_GATEWAY_URL is not a model gateway URL the fixture's models.yml can name (the reason is above)"
+# The gateway's health endpoint is at its origin.
+gateway_origin=$(sed -E 's#^(https://[^/]+).*#\1#' <<<"$gateway")
 mkdir -p "$(dirname "$lock")"
 exec 9>"$lock"
 flock -n 9 || fail "another Stage 4b run holds $lock: one run at a time"
@@ -1089,14 +1113,14 @@ spec:
           # The image has no curl: bun answers the HTTP services, bash's /dev/tcp the NATS port. A
           # fresh node's first outbound connection can fail while the node settles, so each service
           # gets three tries, 5 s apart, and one that never answers is printed with every try's error.
-          for url in $dispatch_base/healthz $envoy_url/healthz $gateway_url/health; do
+          for url in $dispatch_base/healthz $envoy_url/healthz $gateway_origin/health; do
             printf '%s ' "\$url"
             URL="\$url" bun -e 'const errors = []; for (let attempt = 1; attempt <= 3; attempt++) { const r = await fetch(process.env.URL, { signal: AbortSignal.timeout(10000) }).catch((e) => e); if (r instanceof Response) { console.log(r.status); process.exit(0); } errors.push("attempt " + attempt + ": " + String(r && r.name) + ": " + String(r && r.message).replace(/\s+/g, " ")); if (attempt < 3) await Bun.sleep(5000); } console.log("unreachable (" + errors.join("; ") + ")");'
           done
           printf '%s ' $nats_url
           errors=
           for attempt in 1 2 3; do
-            answer=\$(timeout 5 bash -c 'exec 3<>/dev/tcp/nats.internal.trajectorylabs.com/4222 && head -c 4 <&3' 2>&1) && break
+            answer=\$(timeout 5 bash -c 'exec 3<>/dev/tcp/$nats_host/$nats_port && head -c 4 <&3' 2>&1) && break
             errors="\$errors attempt \$attempt: \$(tr '\n' ' ' <<<"\${answer:-no answer}");"
             answer=
             [ "\$attempt" = 3 ] || sleep 5

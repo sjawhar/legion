@@ -10,6 +10,13 @@ events and sends them to the current Claude Code session as supported
   `bin/envoy-channel.ts`; see "The bundle" below). It declares the experimental `claude/channel`
   capability, so Claude Code accepts its event notifications; it also exposes Envoy messaging and
   native Dispatch tools through that same MCP server.
+- `.omp-plugin/plugin.json` declares an empty `mcpServers`, so Oh My Pi starts no server from this
+  plugin: the channel server needs Claude Code's session identity and exits without it, and an omp
+  session already gets Envoy and Dispatch from `@sjawhar/pi-legion-envoy`. omp reads that manifest
+  before `.claude-plugin/plugin.json` and a manifest `mcpServers` replaces `.mcp.json` instead of
+  merging with it; Claude Code reads only `.claude-plugin/plugin.json`, so it still launches the
+  server. Omitting the key would not work — omp would fall through to `.mcp.json`. Skills are
+  unaffected: both harnesses resolve them from `.claude-plugin/plugin.json`.
 - `hooks/hooks.json` runs `dist/open-asks-hook.js` on every `SessionStart` (startup, resume, clear,
   compact, fork). It records the current session id for the channel server and puts the session's
   open Dispatch asks into the model's context (`Dispatch authored-ask summary:`;
