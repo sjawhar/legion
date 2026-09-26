@@ -486,12 +486,17 @@ no whitespace between `name` and `{`; Pandoc fenced divs, leaf directives, and t
 invalid outside code blocks. An unclosed typed block at document level is rejected, while one nested
 inside another block runs to that parent’s end.
 
-A carriage return that no line feed follows is text here, as goldmark reads it and as the writer
-writes it, though CommonMark and the browser editor's parser end a line at one. A code span keeps the whitespace that
+Text a caller writes reaches the parser with line feeds alone: `pmdoc.LineFeeds` writes each CR LF
+and each lone carriage return as a line feed, as CommonMark and the browser editor's parser read
+both, in `ParseForWrite` (a spec, an upload, an insert), in `ParseInline` (a replace or an accepted
+suggestion in text), in a replace's `with` in code (`codeReplacement`), in a suggestion's
+`replace_with` when it is created, and in a block ask's edited question and options. No stored
+document holds a carriage return. A code span keeps the whitespace that
 starts each of its later lines past the prefix of the containers around it, as the browser editor's
 parser reads it, a line holding only whitespace before the closer included; goldmark's paragraph
-trims it (`lineRecordingParagraph`, `multilineCodeSpanText`). A space, a line feed, or a carriage
-return and line feed together is the padding such a span sheds at each end. A lazy continuation line - one that
+trims it (`lineRecordingParagraph`, `multilineCodeSpanText`). A space or a line feed is the padding
+such a span sheds at each end (`codeSpanPadded`), and the writer pads a span whose text starts and
+ends with one. A lazy continuation line - one that
 continues a paragraph in a list item, a quote or a footnote definition without the container's
 prefix - is never a table's header or delimiter row (`lazyTableRows`), as in GFM.
 A task list item's marker (`[ ]`, `[x]` or `[X]` opening a list item's first paragraph) is read as

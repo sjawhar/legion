@@ -73,7 +73,8 @@ list item's code, do not survive the next read. A line of colons in code inside 
 that typed block's fence longer than any such line the browser editor would end it at. Text a `replace` writes that
 would read as block syntax at a line start is stored escaped and reads back as the characters you sent: `---` over a
 paragraph is stored `\---`, not a rule, so to add a rule, `insert` it beside the paragraph (`insert` with markdown
-`***`). Use zero-based
+`***`). A CR LF or a lone carriage return in any text you write - an insert's markdown, a `with` in text or in code,
+a suggestion, an upload or a spec - is stored as a line feed, as the browser editor reads both. Use zero-based
 `occurrence` for a
 repeated target; re-read a missing or ambiguous target before retrying. Pass `summary` to name the version when recording a decision.
 

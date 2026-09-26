@@ -567,7 +567,11 @@ export const dispatchToolSpecs = [
         .optional(),
       ref: z.string().describe("Optional dispatch:// issue or document reference.").optional(),
       quote: z.string().describe("Exact document text to replace."),
-      replace_with: z.string().describe("Replacement text."),
+      replace_with: z
+        .string()
+        .describe(
+          "Replacement text; a CR LF or a lone carriage return in it is written as a line feed."
+        ),
       body: z
         .string({ max: 2000 })
         .describe("Optional rationale, at most 2,000 characters.")
@@ -654,14 +658,19 @@ export const dispatchToolSpecs = [
               with: z
                 .string()
                 .describe(
-                  "Replacement text for replace: inside a code block, the code's literal text as sent (line breaks at its end do not survive a read); text that would read as block syntax at a line start, such as '---' over a paragraph, is stored escaped and reads back as those characters, so a rule is added with insert beside the paragraph; elsewhere parsed as inline markdown within the matched block; a marker of a different kind from the block's own is literal text, one of the same kind is refused unless it is a heading rename (where a level named by find is what lets with change it), a backslash escape keeps prose that merely looks like a marker, a block marker after a hard line break is refused because replace cannot open a new block, and any non-empty value that renders to no text is refused - only an empty value deletes the match."
+                  "Replacement text for replace: inside a code block, the code's literal text as sent (line breaks at its end do not survive a read); text that would read as block syntax at a line start, such as '---' over a paragraph, is stored escaped and reads back as those characters, so a rule is added with insert beside the paragraph; elsewhere parsed as inline markdown within the matched block; a marker of a different kind from the block's own is literal text, one of the same kind is refused unless it is a heading rename (where a level named by find is what lets with change it), a backslash escape keeps prose that merely looks like a marker, a block marker after a hard line break is refused because replace cannot open a new block, and any non-empty value that renders to no text is refused - only an empty value deletes the match. A CR LF or a lone carriage return in it is written as a line feed."
                 )
                 .optional(),
               occurrence: z
                 .number({ int: true, min: 0 })
                 .describe("Optional zero-based match occurrence.")
                 .optional(),
-              markdown: z.string().describe("Markdown to insert.").optional(),
+              markdown: z
+                .string()
+                .describe(
+                  "Markdown to insert; a CR LF or a lone carriage return in it is written as a line feed."
+                )
+                .optional(),
               after: z
                 .string()
                 .describe(
@@ -781,7 +790,12 @@ export const dispatchToolSpecs = [
       project: z.string().describe("Project key for an unlinked document.").optional(),
       name: z.string().describe("Artifact filename shown in Dispatch."),
       path: z.string().describe("Local path to the file to upload.").optional(),
-      content: z.string().describe("Inline text to store as a Markdown document.").optional(),
+      content: z
+        .string()
+        .describe(
+          "Inline text to store as a Markdown document; a CR LF or a lone carriage return in it is stored as a line feed."
+        )
+        .optional(),
       summary: z.string().describe("Optional version summary.").optional(),
     }),
     validation: {
