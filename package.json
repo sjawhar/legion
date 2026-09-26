@@ -29,6 +29,7 @@
   },
   "patchedDependencies": {
     "@sjawhar/proof-editor@0.3.13": "patches/@sjawhar%2Fproof-editor@0.3.13.patch",
-    "@milkdown/preset-gfm@7.22.1": "patches/@milkdown%2Fpreset-gfm@7.22.1.patch"
+    "@milkdown/preset-gfm@7.22.1": "patches/@milkdown%2Fpreset-gfm@7.22.1.patch",
+    "@milkdown/plugin-clipboard@7.22.1": "patches/@milkdown%2Fplugin-clipboard@7.22.1.patch"
   }
 }
