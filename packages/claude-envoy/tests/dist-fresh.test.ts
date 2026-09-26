@@ -2,94 +2,57 @@ import { expect, test } from "bun:test"
 import { cp, mkdtemp, readdir, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
+import ts from "typescript"
 import { BUNDLE_ENTRYPOINTS, buildBundles } from "../scripts/build"
 
 const packageRoot = resolve(import.meta.dir, "..")
 const distDirectory = join(packageRoot, "dist")
 
-interface JavaScriptToken {
-  readonly kind: "identifier" | "string" | "punctuation"
-  readonly value: string
-}
-
-const identifierCharacter = /[A-Za-z0-9_$]/
-
-function tokenizeJavaScript(source: string): JavaScriptToken[] {
-  const tokens: JavaScriptToken[] = []
-  for (let index = 0; index < source.length; ) {
-    const character = source[index]!
-    if (/\s/.test(character)) {
-      index += 1
-      continue
-    }
-    if (character === "/" && source[index + 1] === "/") {
-      const lineEnd = source.indexOf("\n", index + 2)
-      if (lineEnd === -1) break
-      index = lineEnd + 1
-      continue
-    }
-    if (character === "/" && source[index + 1] === "*") {
-      const commentEnd = source.indexOf("*/", index + 2)
-      if (commentEnd === -1) break
-      index = commentEnd + 2
-      continue
-    }
-    if (character === "'" || character === '"' || character === "`") {
-      const quote = character
-      let value = ""
-      index += 1
-      while (index < source.length && source[index] !== quote) {
-        if (source[index] === "\\" && index + 1 < source.length) index += 1
-        value += source[index]!
-        index += 1
-      }
-      if (source[index] === quote) index += 1
-      tokens.push({ kind: "string", value })
-      continue
-    }
-    if (identifierCharacter.test(character)) {
-      const start = index
-      do index += 1
-      while (index < source.length && identifierCharacter.test(source[index]!))
-      tokens.push({ kind: "identifier", value: source.slice(start, index) })
-      continue
-    }
-    tokens.push({ kind: "punctuation", value: character })
-    index += 1
-  }
-  return tokens
-}
-
-function scanImportMetaRequirePaths(source: string): string[] {
-  const tokens = tokenizeJavaScript(source)
-  const paths: string[] = []
-  for (let index = 0; index + 6 < tokens.length; index += 1) {
-    const importToken = tokens[index]!
-    const firstDot = tokens[index + 1]!
-    const metaToken = tokens[index + 2]!
-    const secondDot = tokens[index + 3]!
-    const requireToken = tokens[index + 4]!
-    const openParenthesis = tokens[index + 5]!
-    const path = tokens[index + 6]!
-    if (
-      importToken.value === "import" &&
-      firstDot.value === "." &&
-      metaToken.value === "meta" &&
-      secondDot.value === "." &&
-      requireToken.value === "require" &&
-      openParenthesis.value === "(" &&
-      path.kind === "string"
-    ) {
-      paths.push(path.value)
-    }
-  }
-  return paths
-}
-
 function findExternalDependencySpecifiers(source: string): string[] {
-  const paths = new Bun.Transpiler({ loader: "js" }).scanImports(source).map(({ path }) => path)
-  paths.push(...scanImportMetaRequirePaths(source))
-  return paths.filter((path) => path.includes("node_modules/"))
+  const parsed = ts.createSourceFile(
+    "bundle.js",
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.JS,
+  )
+  const specifiers: string[] = []
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node)) {
+      let kind: string | undefined
+      if (ts.isIdentifier(node.expression) && node.expression.text === "require") {
+        kind = "require()"
+      } else if (
+        ts.isPropertyAccessExpression(node.expression) &&
+        node.expression.name.text === "require" &&
+        ts.isMetaProperty(node.expression.expression) &&
+        node.expression.expression.keywordToken === ts.SyntaxKind.ImportKeyword &&
+        node.expression.expression.name.text === "meta"
+      ) {
+        kind = "import.meta.require()"
+      } else if (node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+        kind = "import()"
+      }
+      if (kind) {
+        const argument = node.arguments[0]
+        if (!argument || !ts.isStringLiteral(argument)) {
+          specifiers.push(`<non-literal ${kind}>`)
+        } else if (argument.text.includes("node_modules/")) {
+          specifiers.push(argument.text)
+        }
+      }
+    } else if (
+      (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
+      node.moduleSpecifier &&
+      ts.isStringLiteral(node.moduleSpecifier) &&
+      node.moduleSpecifier.text.includes("node_modules/")
+    ) {
+      specifiers.push(node.moduleSpecifier.text)
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(parsed)
+  return specifiers
 }
 
 test("the committed bundle starts without node_modules and demands ENVOY_NATS_URL", async () => {
@@ -121,6 +84,7 @@ test("the dependency guard ignores comments and detects runtime node_modules spe
   const comments = [
     '// require("/tmp/node_modules/comment.js")',
     '/* import.meta.require("/tmp/node_modules/comment.js") */',
+    'const mention = "require(\\"/tmp/node_modules/escaped.js\\")"',
   ].join("\n")
   expect(findExternalDependencySpecifiers(comments)).toEqual([])
 
@@ -155,10 +119,27 @@ test("the dependency guard detects calls after comment-like strings", () => {
         'const opener = "/*"; require("/tmp/node_modules/block.js"); const closer = "*/"',
       path: "/tmp/node_modules/block.js",
     },
+    {
+      source: 'const template = `${import.meta.require("/tmp/node_modules/template.js")}`',
+      path: "/tmp/node_modules/template.js",
+    },
+    {
+      source: 'const matcher = /"\\//; import.meta.require("/tmp/node_modules/regex.js")',
+      path: "/tmp/node_modules/regex.js",
+    },
   ]
   for (const { source, path } of cases) {
     expect(findExternalDependencySpecifiers(source)).toContain(path)
   }
+})
+
+test("the dependency guard rejects nonliteral module specifiers", () => {
+  const source = 'require(path); import.meta.require(path); import(path)'
+  expect(findExternalDependencySpecifiers(source)).toEqual([
+    "<non-literal require()>",
+    "<non-literal import.meta.require()>",
+    "<non-literal import()>",
+  ])
 })
 
 test("the committed bundles contain no external dependency call specifiers", async () => {
