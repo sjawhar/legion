@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
@@ -47,6 +48,20 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	if req.Ready && grant.Role != claim.RoleMerger {
 		writeFailure(w, http.StatusBadRequest, "READY_ROLE_FORBIDDEN", "only a merger may report ready")
 		return
+	}
+	// The daemon posts the READY packet as one Dispatch message, the outbox's marker appended, and
+	// Dispatch refuses a longer body on every attempt, so a packet over record.MessagePostLimit
+	// would never reach the human. It is refused here, before the fact is applied: a refusal the
+	// workflow committed is recorded as processed under this completion's key, which leaves the
+	// summary out, so the shortened packet at the same commit would be answered
+	// HANDOFF_ALREADY_RECORDED and the issue would stay in merging.
+	if req.Ready {
+		if length := dispatch.MessageBodyLength(req.Summary); length > record.MessagePostLimit {
+			writeFailure(w, http.StatusBadRequest, "READY_PACKET_TOO_LONG", fmt.Sprintf(
+				"the READY packet is %d characters over the %d the daemon can post as one Dispatch message (%d/%d): link the pull request body's ## Verification section instead of quoting it, then call handoff_complete again; this completion changed nothing",
+				length-record.MessagePostLimit, record.MessagePostLimit, length, record.MessagePostLimit))
+			return
+		}
 	}
 	if s.pool == nil || s.records == nil {
 		writeFailure(w, http.StatusInternalServerError, "FACTS_UNAVAILABLE", "fact intake is unavailable")

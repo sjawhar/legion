@@ -2,9 +2,11 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -164,6 +166,47 @@ func TestHandoffCompleteAppliesTheMergersCorrectedReadyAtTheSameCommit(t *testin
 	}
 	if fact, ok := got[1].(intake.HandoffComplete); !ok || !fact.Ready || fact.Commit != "facade" {
 		t.Fatalf("corrected fact = %#v, want READY at facade", got[1])
+	}
+}
+
+// The daemon posts the READY packet as one Dispatch message with the outbox's marker, so a packet
+// over record.MessagePostLimit would be refused by Dispatch on every attempt. The route refuses it
+// before the fact is applied, naming how far over it is, and records nothing: the merger's
+// shortened packet at the same commit, the call the refusal asks for, is applied. The limit counts
+// UTF-16 units, as Dispatch does, so a character outside the Basic Multilingual Plane counts twice.
+func TestHandoffCompleteRefusesAREADYPacketTheDaemonCannotPostAndAppliesTheShortenedRetry(t *testing.T) {
+	h, facts, _ := newArchitectHarness(t, nil, nil)
+	seedIssueAt(t, h, "LEGION-208", phase.Merging)
+	merger := newLiveClaim(t, h, "LEGION-208", claim.RoleMerger)
+	const emoji = "\U0001F600"
+	over := emoji + strings.Repeat("x", record.MessagePostLimit-1)
+	recorder := h.request(http.MethodPost, "/legion/v1/handoff/complete", HandoffCompleteRequest{
+		GrantID: merger.grant(t), Summary: over, Ready: true, Commit: "facade",
+	}, nil)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("READY one unit over the limit = %d, want 400; body %s", recorder.Code, recorder.Body)
+	}
+	var failure Failure
+	decodeInto(t, recorder, &failure)
+	if want := fmt.Sprintf("1 characters over the %d the daemon can post as one Dispatch message (%d/%d)", record.MessagePostLimit, record.MessagePostLimit+1, record.MessagePostLimit); failure.Code != "READY_PACKET_TOO_LONG" || !strings.Contains(failure.Error, want) {
+		t.Fatalf("refusal = %+v, want READY_PACKET_TOO_LONG naming %q", failure, want)
+	}
+	if got := facts.recorded(); len(got) != 0 {
+		t.Fatalf("handoff facts after the refusal = %#v, want none recorded", got)
+	}
+
+	shortened := emoji + strings.Repeat("x", record.MessagePostLimit-2)
+	if recorder := h.request(http.MethodPost, "/legion/v1/handoff/complete", HandoffCompleteRequest{
+		GrantID: merger.grant(t), Summary: shortened, Ready: true, Commit: "facade",
+	}, nil); recorder.Code != http.StatusOK {
+		t.Fatalf("shortened READY at the same commit = %d: %s", recorder.Code, recorder.Body)
+	}
+	got := facts.recorded()
+	if len(got) != 1 {
+		t.Fatalf("handoff facts = %#v, want the shortened READY", got)
+	}
+	if fact, ok := got[0].(intake.HandoffComplete); !ok || !fact.Ready || fact.Commit != "facade" || fact.Summary != shortened {
+		t.Fatalf("applied fact = %#v, want the shortened READY at facade", got[0])
 	}
 }
 

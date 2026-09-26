@@ -1,6 +1,7 @@
 package prompts
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
 // A broken role sequence drops the shared core, uses a root prompt for a child, or makes the Go
@@ -39,7 +41,8 @@ func TestComposeOrdersSharedRolePartsBeforeTheGoDaemonPart(t *testing.T) {
 		{"implementer", claim.RoleImplementer, false, []string{"core/common.md", "core/implementer.md", "mechanics/headless.md", "implementer.md"}, "implementer.md", []string{`op: "handoff_complete"`}},
 		{"tester", claim.RoleTester, false, []string{"core/common.md", "core/tester.md", "mechanics/headless.md", "tester.md"}, "tester.md", []string{`op: "handoff_complete"`, `verdict: "pass"`, `verdict: "fail"`}},
 		{"reviewer", claim.RoleReviewer, false, []string{"core/common.md", "core/reviewer.md", "mechanics/headless.md", "reviewer.md"}, "reviewer.md", []string{`op: "handoff_complete"`}},
-		{"merger", claim.RoleMerger, false, []string{"mechanics/headless.md", "merger.md"}, "merger.md", []string{`op: "handoff_complete"`, "`ready: true`"}},
+		// The packet limit the merger is told is the one the handoff route enforces.
+		{"merger", claim.RoleMerger, false, []string{"mechanics/headless.md", "merger.md"}, "merger.md", []string{`op: "handoff_complete"`, "`ready: true`", fmt.Sprintf("at most %d characters", record.MessagePostLimit)}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			parts, err := composer.Compose(tc.role, tc.isRoot)

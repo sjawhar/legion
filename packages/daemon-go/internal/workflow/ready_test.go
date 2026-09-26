@@ -2,7 +2,6 @@ package workflow
 
 import (
 	"context"
-	"strings"
 	"testing"
 	"time"
 
@@ -78,58 +77,6 @@ func TestAREADYTheGateRefusedIsPostedWhenAHumanApproves(t *testing.T) {
 	}
 	if got := mergeQueuePublishes(t, pool); len(got) != 1 || got[0].Packet != readyPacket {
 		t.Fatalf("merge queue publishes = %v, want the kept packet once", got)
-	}
-}
-
-// The daemon posts the READY packet as one Dispatch message, and Dispatch refuses a body over its
-// message cap (2,000 UTF-16 units) on every attempt, so a packet it cannot post never reaches the
-// human. The merger's completion is refused instead, naming how far over it is, and nothing is
-// recorded or queued: the merger sends a packet that fits. The cap counts UTF-16 units, as Dispatch
-// does, so a character outside the Basic Multilingual Plane counts twice.
-func TestAREADYPacketDispatchCannotPostIsRefused(t *testing.T) {
-	const emoji = "\U0001F600"
-	for _, tc := range []struct {
-		name, packet string
-		refused      bool
-	}{
-		{name: "one unit over the cap", packet: emoji + strings.Repeat("x", 1999), refused: true},
-		{name: "at the cap", packet: emoji + strings.Repeat("x", 1998)},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			pool := migratedPool(t)
-			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "U"})
-			seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 4, ApprovedVersion: new(4)})
-			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim"})
-
-			result, err := intake.ApplyFact(context.Background(), pool, "api", "ready", intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim", Generation: 1, Ready: true, Summary: tc.packet, Commit: "head"}, readyEngine("merge-queue"), admissionStub{})
-			if err != nil {
-				t.Fatalf("ApplyFact READY: %v", err)
-			}
-			if !tc.refused {
-				if result.Refusal != nil {
-					t.Fatalf("READY at the cap = %#v, want it accepted", result.Refusal)
-				}
-				assertPhase(t, pool, phase.AwaitingMerge)
-				if got := messageBodies(t, pool); len(got) != 1 || got[0] != tc.packet {
-					t.Fatalf("Dispatch messages = %d, want the packet at the cap posted once", len(got))
-				}
-				return
-			}
-			if result.Refusal == nil || result.Refusal.Code != "READY_PACKET_TOO_LONG" || !strings.Contains(result.Refusal.Message, "1 characters over Dispatch's 2000-character message limit (2001/2000)") {
-				t.Fatalf("READY over the cap = %#v, want READY_PACKET_TOO_LONG naming 2001/2000", result.Refusal)
-			}
-			assertPhase(t, pool, phase.Merging)
-			if got := messageBodies(t, pool); len(got) != 0 {
-				t.Fatalf("Dispatch messages = %d, want none for a packet Dispatch refuses", len(got))
-			}
-			if got := mergeQueuePublishes(t, pool); len(got) != 0 {
-				t.Fatalf("merge queue publishes = %d, want none", len(got))
-			}
-			var stored string
-			if err := pool.QueryRow(t.Context(), "select summary from phases where issue = 'LEGION-208' and role = 'merger'").Scan(&stored); err != nil || stored != "" {
-				t.Fatalf("merger row summary = %d bytes, %v; want nothing recorded", len(stored), err)
-			}
-		})
 	}
 }
 

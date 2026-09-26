@@ -272,7 +272,7 @@ func (r *outbox) message(ctx context.Context, row record.OutboxRow, payload reco
 	if r.dispatch == nil {
 		return errors.New("dispatch message executor has no Dispatch client")
 	}
-	marker := fmt.Sprintf("<!-- legion-outbox:%d -->", row.ID)
+	marker := record.MessageMarker(row.ID)
 	bodies, err := r.dispatch.MessageBodiesSince(ctx, row.Issue, row.CreatedAt.Add(-messageReadSkew))
 	if err != nil {
 		return fmt.Errorf("read Dispatch messages for %s: %w", row.Issue, err)
@@ -282,7 +282,7 @@ func (r *outbox) message(ctx context.Context, row record.OutboxRow, payload reco
 			return nil
 		}
 	}
-	if err := r.dispatch.PostMessage(ctx, row.Issue, payload.Body+"\n\n"+marker); err != nil {
+	if err := r.dispatch.PostMessage(ctx, row.Issue, payload.Posted(row.ID)); err != nil {
 		return fmt.Errorf("post Dispatch message for %s: %w", row.Issue, err)
 	}
 	return nil

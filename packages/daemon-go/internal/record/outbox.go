@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strconv"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 )
 
@@ -36,12 +38,37 @@ type StatusWrite struct {
 
 func (StatusWrite) OutboxKind() OutboxKind { return OutboxKindDispatchStatus }
 
-// MessagePost is a Dispatch message body. The runner appends its outbox marker.
+// MessagePost is a Dispatch message body. The runner posts it as Posted: the body, then its outbox
+// marker.
 type MessagePost struct {
 	Body string `json:"body"`
 }
 
 func (MessagePost) OutboxKind() OutboxKind { return OutboxKindDispatchMessage }
+
+// The outbox marker closes every message the runner posts. It names the row, so a retried row
+// finds the post it already made instead of posting twice.
+const (
+	messageSeparator   = "\n\n"
+	messageMarkerOpen  = "<!-- legion-outbox:"
+	messageMarkerClose = " -->"
+)
+
+// MessagePostLimit is the longest body the runner can post, in UTF-16 code units: Dispatch's cap
+// less the separator and the marker at its longest, whose row id (a bigserial) has at most the 19
+// digits of math.MaxInt64. The marker is ASCII, so its length in bytes is its length in units.
+const MessagePostLimit = dispatch.MessageBodyLimit -
+	len(messageSeparator+messageMarkerOpen+messageMarkerClose) - len("9223372036854775807")
+
+// MessageMarker is the marker of outbox row id.
+func MessageMarker(id int64) string {
+	return messageMarkerOpen + strconv.FormatInt(id, 10) + messageMarkerClose
+}
+
+// Posted is the message the runner posts for row id: the body, then the row's marker.
+func (m MessagePost) Posted(id int64) string {
+	return m.Body + messageSeparator + MessageMarker(id)
+}
 
 // NoticeKind identifies one persisted notice delivery.
 type NoticeKind string
