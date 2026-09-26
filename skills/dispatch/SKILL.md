@@ -752,8 +752,8 @@ Suggest only what the quoted block can hold. The accept, not the suggestion, che
 accept whose `replace_with` would break an ask block that was readable before it is refused with
 `INVALID_ASK_BLOCK` - a question given a code block, text after an ask's options, a second option
 list, an emptied question, or an ask under an id the document already holds - and one no part of
-the document can hold where it sits (a code block over a table cell's whole text), or that runs
-from one ask or callout into the next, with `INVALID_OP`. Either changes nothing: the human sees the reason with no Retry, and the suggestion
+the document can hold where it sits (a code block over a table cell's whole text), or whose quote
+runs into an ask or callout from the text before it, with `INVALID_OP`. Either changes nothing: the human sees the reason with no Retry, and the suggestion
 stays open until someone rejects or replaces it.
 
 ## Artifacts

@@ -181,10 +181,10 @@ and answer to whichever comes first. A reject (`POST /api/v1/comments/{id}/rejec
 the same `applySuggestion`) is never checked, since removing the text a browser insert added gives
 back the document the insert started from. A replacement no level of the document can hold where
 the suggestion sits, such as a code block over a table cell's whole text, is `400 INVALID_OP` on
-`replace_with` (`pmdoc.ErrReplacementDoesNotFit`), and inline text over a range that runs from one
-ask's or callout's text into the next's is `400 INVALID_OP` on `anchor`
-(`pmdoc.ErrJoinEmptiesTypedBlock`): ProseMirror's join would leave the second block empty, and the
-browser editor drops it, which for an ask retracts it. A refused accept writes nothing, and the
+`replace_with` (`pmdoc.ErrReplacementDoesNotFit`), and inline text over a range that runs into an
+ask or callout from the text before it, at any depth (inside a blockquote, a list item or another
+callout too), is `400 INVALID_OP` on `anchor` (`pmdoc.ErrJoinEmptiesTypedBlock`): ProseMirror's
+join would leave that block empty, and the browser editor drops it, which for an ask retracts it. A refused accept writes nothing, and the
 suggestion stays open; the dashboard's margin shows the refusal's message and offers no Retry for
 `INVALID_ASK_BLOCK` or `INVALID_OP` (`useCommentActionQueue` `actionFailure`), since the same accept
 is refused every time.

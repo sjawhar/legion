@@ -305,8 +305,8 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		}
 		next, err := pmdoc.Splice(tree, range_, replacement)
 		if errors.Is(err, pmdoc.ErrJoinEmptiesTypedBlock) {
-			return &ErrInvalidOp{Field: "anchor", Reason: "the suggestion runs from one ask or callout into the next, " +
-				"and replacing it would join the two and leave the second empty; suggest a change inside one of them"}
+			return &ErrInvalidOp{Field: "anchor", Reason: "the suggestion runs into an ask or callout from the text before it, " +
+				"and replacing it would join the two and leave the ask or callout empty; suggest a change inside one of them"}
 		}
 		if errors.Is(err, pmdoc.ErrReplacementDoesNotFit) {
 			return &ErrInvalidOp{Field: "replace_with", Reason: "no part of the document can hold it where the suggestion sits " +

@@ -43,11 +43,12 @@ var ErrTableWidth = errors.New("table row exceeds table width")
 // range sits: a code block over the whole text of a table cell, whose only content is inline text.
 var ErrReplacementDoesNotFit = errors.New("replacement does not fit document")
 
-// ErrJoinEmptiesTypedBlock is an inline replacement over a range that runs from one typed block's
-// text into the next typed block's: ProseMirror's join would pull the rest of the second into the
-// first and leave the second with nothing, which its content rule refuses. The browser editor
-// drops that block, so the join is refused rather than repaired.
-var ErrJoinEmptiesTypedBlock = errors.New("the range runs from one typed block into the next, and joining them would leave the second empty")
+// ErrJoinEmptiesTypedBlock is an inline replacement over a range that runs into a typed block's
+// text from the text before it, at any depth: ProseMirror's join would pull the rest of that
+// block's first textblock out to the open side and leave the typed block with nothing, which its
+// content rule refuses. The browser editor drops that block, so the join is refused rather than
+// repaired.
+var ErrJoinEmptiesTypedBlock = errors.New("the range runs into a typed block from the text before it, and joining them would leave that block empty")
 
 // BlockBoundary returns the document-level boundary before or after the block
 // containing target.
@@ -476,10 +477,8 @@ func joinSiblingsAtBoundary(doc *Node, parentPath, leftPath, rightPath []int, me
 		return nil, false, nil
 	}
 	closeRemainder := closeSideRemainder(parent.Children[rightIndex], rightPath[1:])
-	if closeRemainder != nil && len(closeRemainder.Children) == 0 {
-		if _, typed := typedBlock(closeRemainder.Type); typed {
-			return nil, false, fmt.Errorf("%w: %w", ErrSchema, ErrJoinEmptiesTypedBlock)
-		}
+	if holdsEmptyTypedBlock(closeRemainder) {
+		return nil, false, fmt.Errorf("%w: %w", ErrSchema, ErrJoinEmptiesTypedBlock)
 	}
 	out := cloneNode(doc)
 	outParent := nodeAtPath(out, parentPath)
@@ -494,6 +493,22 @@ func joinSiblingsAtBoundary(doc *Node, parentPath, leftPath, rightPath []int, me
 		return nil, false, err
 	}
 	return out, true, nil
+}
+
+// holdsEmptyTypedBlock reports whether node is, or contains, a typed block with no children.
+func holdsEmptyTypedBlock(node *Node) bool {
+	if node == nil {
+		return false
+	}
+	if _, typed := typedBlock(node.Type); typed && len(node.Children) == 0 {
+		return true
+	}
+	for _, child := range node.Children {
+		if holdsEmptyTypedBlock(child) {
+			return true
+		}
+	}
+	return false
 }
 
 func closeOpenSide(node *Node, path []int, replacement *Node) (*Node, bool) {

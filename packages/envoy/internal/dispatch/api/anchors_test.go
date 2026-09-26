@@ -276,9 +276,10 @@ const askSpec = "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\
 //     ask.
 //   - A code block over a table cell's whole text fits nowhere; the splice's schema error once
 //     reached the handler as a 500.
-//   - Inline text over a range that runs from one ask or callout into the next would join the two
-//     and leave the second empty (the engine drops it, which for an ask retracts it); the
-//     splice's schema error once reached the handler as a 500.
+//   - Inline text over a range that runs into an ask or callout from the text before it, at any
+//     depth (in a blockquote, a list item, a callout), would join the two and leave that block
+//     empty (the engine drops it, which for an ask retracts it); the splice's schema error once
+//     reached the handler as a 500.
 func TestSuggestionAcceptRefusals(t *testing.T) {
 	codeQuestion := "Which?\n\n```\ncode\n```\n"
 	for _, test := range []struct {
@@ -312,6 +313,17 @@ func TestSuggestionAcceptRefusals(t *testing.T) {
 			quote: "one? Ship", replaceWith: "", code: "INVALID_OP", reason: `field \"anchor\"`},
 		{name: "text from one callout into the next", spec: ":::callout{#c1}\nWhich one?\n:::\n\n:::callout{#c2}\nShip it?\n:::\n",
 			quote: "one? Ship", replaceWith: "x", code: "INVALID_OP", reason: `field \"anchor\"`},
+		{name: "text from one ask into the next inside a blockquote", quote: "one? Ship", replaceWith: "x",
+			spec: ":::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich one?\n:::\n\n" + "> :::ask{#a2 urgency=\"med\" multiple=\"false\" state=\"open\"}\n> Ship it?\n> :::\n", code: "INVALID_OP", reason: `field \"anchor\"`},
+		{name: "text from one ask into the next inside a list item", quote: "one? Lead. Ship", replaceWith: "x",
+			spec: ":::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich one?\n:::\n\n" + "- Lead.\n\n  :::ask{#a2 urgency=\"med\" multiple=\"false\" state=\"open\"}\n  Ship it?\n  :::\n", code: "INVALID_OP", reason: `field \"anchor\"`},
+		{name: "text from one callout into the next inside a blockquote", quote: "one? Ship", replaceWith: "x",
+			spec: ":::callout{#c1}\nWhich one?\n:::\n\n> :::callout{#c2}\n> Ship it?\n> :::\n", code: "INVALID_OP", reason: `field \"anchor\"`},
+		{name: "text from one ask into an ask that is a callout's only content", quote: "one? Ship", replaceWith: "x",
+			spec: ":::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich one?\n:::\n\n" + ":::callout{#c2}\n:::ask{#a2 urgency=\"med\" multiple=\"false\" state=\"open\"}\nShip it?\n:::\n:::\n", code: "INVALID_OP", reason: `field \"anchor\"`},
+		{name: "text from one ask into a callout nested in a list item", quote: "one? Lead. Ship", replaceWith: "x",
+			spec: ":::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich one?\n:::\n\n- Lead.\n\n  :::callout{#c2}\n  Ship it?\n  :::\n",
+			code: "INVALID_OP", reason: `field \"anchor\"`},
 		{name: "a code block over a table cell's whole text", spec: "| head |\n| :--- |\n| a target c |\n", quote: "a target c",
 			replaceWith: "```\ncode\n```\n", code: "INVALID_OP", reason: `field \"replace_with\"`},
 	} {
