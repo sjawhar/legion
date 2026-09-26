@@ -197,12 +197,12 @@ func TestSuggestionAcceptSpansParagraphs(t *testing.T) {
 // not the accept's, but the ask it breaks is. The same text as a replace is refused by the edit
 // route too.
 func TestSuggestionAcceptRefusesAReplacementItsAskCannotHold(t *testing.T) {
-	for name, spec := range map[string]string{
-		"alone": "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich one?\n:::\n\nAfter.\n",
-		"beside a malformed ask": "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich one?\n:::\n\n" +
-			strings.NewReplacer("#a1", "#a2", "Which one?", "Ship it?").Replace(malformedAsk),
+	for _, test := range []struct{ name, spec string }{
+		{name: "alone", spec: "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich one?\n:::\n\nAfter.\n"},
+		{name: "beside a malformed ask", spec: "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich one?\n:::\n\n" +
+			strings.NewReplacer("#a1", "#a2", "Which one?", "Ship it?").Replace(malformedAsk)},
 	} {
-		t.Run(name, func(t *testing.T) { acceptBreakingAnAsk(t, spec) })
+		t.Run(test.name, func(t *testing.T) { acceptBreakingAnAsk(t, test.spec) })
 	}
 }
 

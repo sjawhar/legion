@@ -337,22 +337,23 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 // started from.
 func refuseBrokenAsks(before, after *pmdoc.Node) error {
 	_, broken, err := collectAskBlocksForSettlement(after)
+	if err == nil && len(broken) == 0 {
+		return nil
+	}
+	_, brokenBefore, errBefore := collectAskBlocksForSettlement(before)
 	if err != nil {
-		if _, _, already := collectAskBlocksForSettlement(before); already == nil {
+		// A duplicate ask id: refused only when the document had none before the splice.
+		if errBefore == nil {
 			return &ErrInvalidAskBlock{Reason: err}
 		}
 		return nil
 	}
-	if len(broken) == 0 {
-		return nil
-	}
-	_, alreadyBroken, _ := collectAskBlocksForSettlement(before)
-	was := make(map[string]bool, len(alreadyBroken))
-	for _, ask := range alreadyBroken {
-		was[ask.id] = true
+	malformedBefore := make(map[string]bool, len(brokenBefore))
+	for _, ask := range brokenBefore {
+		malformedBefore[ask.id] = true
 	}
 	for _, ask := range broken {
-		if !was[ask.id] {
+		if !malformedBefore[ask.id] {
 			return &ErrInvalidAskBlock{Reason: ask.reason}
 		}
 	}
