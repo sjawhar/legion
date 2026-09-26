@@ -422,6 +422,35 @@ func (m *Machine) OwnerOf(ctx context.Context, requestID string) (string, error)
 	return owner, err
 }
 
+// Grant is a live grant's public summary, added in Task 11 for GET /v1/enrollments/self, which
+// needs an enrollment's own live grants and has no existing read to reuse. It follows the same
+// query pattern as OwnerOf and enrollment above.
+type Grant struct {
+	ID        string    `json:"grant_id"`
+	RequestID string    `json:"request_id"`
+	Approver  *string   `json:"approver"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// LiveGrants lists this enrollment's own live (not revoked, not expired) grants.
+func (m *Machine) LiveGrants(ctx context.Context, enrollmentID string) ([]Grant, error) {
+	rows, err := m.Store.Pool.Query(ctx, `select id, request_id, approver, expires_at from grants
+		where enrollment_id=$1 and revoked_at is null and expires_at > now() order by expires_at`, enrollmentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var grants []Grant
+	for rows.Next() {
+		var g Grant
+		if err := rows.Scan(&g.ID, &g.RequestID, &g.Approver, &g.ExpiresAt); err != nil {
+			return nil, err
+		}
+		grants = append(grants, g)
+	}
+	return grants, rows.Err()
+}
+
 func (m *Machine) enrollment(ctx context.Context, id string) (enrollmentRow, error) {
 	var e enrollmentRow
 	err := m.Store.Pool.QueryRow(ctx, `select id, kind, operator, approver_kind, approver_issue, runtime_id from enrollments where id=$1 and revoked_at is null`, id).

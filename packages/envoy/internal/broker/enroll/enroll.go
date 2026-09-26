@@ -237,6 +237,21 @@ func (s *Service) Lookup(ctx context.Context, id string) (string, bool, error) {
 	return thumbprint, live, err
 }
 
+// Get answers this enrollment's own metadata (kind, operator, lease expiry) for
+// GET /v1/enrollments/self. Added in Task 11 for that read, following the same query pattern as
+// Lookup above. Unlike Lookup, which proof.Verifier calls with an untrusted, possibly malformed id
+// straight off a forged proof, Get is only ever called with an id a proof has already
+// authenticated, so it need not guard against a non-UUID id the way Lookup does.
+func (s *Service) Get(ctx context.Context, id string) (Enrollment, error) {
+	var e Enrollment
+	err := s.Store.Pool.QueryRow(ctx, `select id, kind, runtime_id, operator, lease_expires_at from enrollments where id=$1 and revoked_at is null`, id).
+		Scan(&e.ID, &e.Kind, &e.RuntimeID, &e.Operator, &e.LeaseExpires)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Enrollment{}, ErrNotLive
+	}
+	return e, err
+}
+
 // Replay records a jti; a unique violation means it was seen. Expired rows are pruned here too,
 // so the table stays bounded without a separate job.
 func (s *Service) Replay(ctx context.Context, jti string, expires time.Time) (bool, error) {
