@@ -52,19 +52,26 @@ func (reader markdownReader) parseLined(lined, source []byte) ast.Node {
 type footnotes struct{}
 
 func (footnotes) Extend(m goldmark.Markdown) {
-	m.Parser().AddOptions(
+	m.Parser().AddOptions(footnoteParserOptions()...)
+}
+
+// footnoteParserOptions registers footnotes: the definition parser (footnoteDefinitionParser),
+// goldmark's reference parser, and its transformer, which gathers the definitions at the end.
+func footnoteParserOptions() []parser.Option {
+	return []parser.Option{
 		parser.WithBlockParsers(util.Prioritized(footnoteDefinitionParser{extension.NewFootnoteBlockParser()}, 999)),
 		parser.WithInlineParsers(util.Prioritized(extension.NewFootnoteParser(), 101)),
 		parser.WithASTTransformers(util.Prioritized(extension.NewFootnoteASTTransformer(), 999)),
-	)
+	}
 }
 
 type footnoteDefinitionParser struct{ parser.BlockParser }
 
 // taskList reads a task list item's marker as the browser editor's parser does: `[ ]`, `[x]` or
 // `[X]` opening a list item's first paragraph, followed by a space or a tab and then more text on
-// the line, or by a line ending the paragraph continues past. The marker takes the one space, tab
-// or line ending after it. Goldmark's reads a marker with anything after it, and takes every space
+// the line, or by a line ending, after any spaces and tabs, that the paragraph continues past. The
+// marker takes the one space or tab after it, or the line ending when the line holds nothing more
+// but a hard break's spaces, which stay a hard break. Goldmark's reads a marker with anything after it, and takes every space
 // after it, so it read a link opening a list item (`- [x](https://…)`) as a checked task.
 type taskList struct{}
 
@@ -84,22 +91,22 @@ func (taskMarkerParser) Parse(parent ast.Node, block gmtext.Reader, _ parser.Con
 	if len(line) < 4 || !strings.ContainsRune(" \txX", rune(line[1])) || line[2] != ']' {
 		return nil
 	}
+	rest := line[3:]
+	blank := len(rest) - len(bytes.TrimLeft(rest, " \t"))
 	width := 4
-	switch after := line[3]; {
-	case after == ' ' || after == '\t':
-		if util.IsBlank(line[4:]) {
-			return nil
-		}
-	case after == '\r' && len(line) > 4 && line[4] == '\n':
-		width = 5
-		fallthrough
-	case after == '\n':
+	switch {
+	case blank > 0 && !util.IsBlank(rest):
+	case rest[blank] == '\n' || rest[blank] == '\r':
 		row, segment := block.Position()
 		block.AdvanceLine()
 		next, _ := block.PeekLine()
 		block.SetPosition(row, segment)
 		if next == nil {
 			return nil
+		}
+		width = len(line)
+		if spaces := len(rest) - len(bytes.TrimLeft(rest, " ")); spaces >= 2 {
+			width = 3
 		}
 	default:
 		return nil

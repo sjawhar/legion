@@ -519,8 +519,11 @@ Front matter is read as the browser editor's parser reads it (`pmdoc.parseFrontm
 first line that is `---`, with any spaces or tabs after it, opens it, the first later line that is
 the same closes it, and its text is stored between plain `---` fences with line feeds between its
 lines. A `---` opener nothing closes is a thematic break. That parser, having tried such an opener
-as front matter to the document's end, reads no list, quote or footnote definition in the rest, so
-the renderer writes a rule that opens a document as `***`.
+as front matter to the document's end, reads no list, quote or footnote definition at the
+document's level in the rest. So the renderer writes a rule that opens a document as `***` where
+`---` would be misread - a later `---` line would close front matter, or the document holds a
+list, quote or footnote definition at its level (`holdsAContainerTheBrowserDrops`) - and `---`
+everywhere else.
 
 A typed block renders its `blockId`, defaulted attributes, and every explicitly set optional
 attribute. Parsing mints an omitted id, while live document reads and writes validate each node

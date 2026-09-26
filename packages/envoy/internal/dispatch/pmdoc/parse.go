@@ -106,11 +106,7 @@ var inlineMarkdownParser = parser.NewParser(inlineParserOptions()...)
 
 // footnoteRunParser reads inline markdown as inlineMarkdownParser does, with footnote definitions
 // after it so that the references in it read as references (parseInlineWithDefinitions).
-var footnoteRunParser = parser.NewParser(append(inlineParserOptions(),
-	parser.WithBlockParsers(util.Prioritized(footnoteDefinitionParser{extension.NewFootnoteBlockParser()}, 999)),
-	parser.WithInlineParsers(util.Prioritized(extension.NewFootnoteParser(), 101)),
-	parser.WithASTTransformers(util.Prioritized(extension.NewFootnoteASTTransformer(), 999)),
-)...)
+var footnoteRunParser = parser.NewParser(append(inlineParserOptions(), footnoteParserOptions()...)...)
 
 // parseInlineWithDefinitions reads one textblock's inline markdown as ParseInline does, after a
 // definition for each of labels, the footnote labels it refers to. It is the renderer's read-back
