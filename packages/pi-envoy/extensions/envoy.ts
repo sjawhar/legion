@@ -95,20 +95,32 @@ const ASK_REMINDER_MESSAGE = "dispatch-ask-reminder";
 
 /**
  * What the hidden self-check asks the agent, over a snapshot of its own conversation. One word
- * comes back; only WAITING buys the visible turn below.
+ * comes back; only WAITING buys the visible turn below. It asks nothing about Dispatch: the
+ * extension has already read from Dispatch that nothing is open, the model is not a better
+ * witness of that than the API is, and the agent this exists to catch is one that asked the
+ * human in chat text — which such an agent can reasonably read as having asked.
  */
 const ASK_SELF_CHECK_PROMPT =
   "Your run has just ended. Answer with exactly one word and nothing else: WAITING or PROCEEDING. " +
-  "WAITING — you stopped because you need a decision, an approval, or information from a human, " +
-  "and you have not asked for it in Dispatch. PROCEEDING — you finished, you will carry on by " +
-  "yourself, or you are waiting only on tools, subagents, or events.";
+  "WAITING — you stopped because you need a decision, an approval, or information from a human. " +
+  "PROCEEDING — you finished, you will carry on by yourself, or you are waiting only on tools, " +
+  "subagents, or events.";
 
 /**
  * A verdict whose first word is WAITING, after any markdown emphasis or quoting — the reply
  * convention the Legion phase-stall follow-up already uses (`src/legion/phase-stall.ts`).
- * Anything else counts as PROCEEDING, because silence is the safe answer.
+ * Case-sensitive and first-word-only on purpose: "NOT WAITING", "I am WAITING on Sami" and
+ * "Waiting." are all PROCEEDING here, because a false WAITING is the expensive error — the
+ * steer it buys asserts the agent said it is waiting, which sends it to page a human with a
+ * question nobody had, while a false PROCEEDING is only the silence of the status quo.
  */
 const WAITING_VERDICT = /^\W*WAITING\b/;
+
+/** The other choice, named anywhere in the reply: the model echoing the question, not answering it. */
+const ECHOED_CHOICE = /\bPROCEEDING\b/;
+
+const isWaitingVerdict = (reply: string): boolean =>
+  WAITING_VERDICT.test(reply) && !ECHOED_CHOICE.test(reply);
 
 /**
  * Bound on the self-check, imposed by the extension's own clock rather than the host's: it is a
@@ -136,17 +148,23 @@ const ASK_OPENING_TOOLS: readonly string[] = ["dispatch_ask", "dispatch_request_
 const DISPATCH_TOOL_PREFIX = "dispatch_";
 
 /**
- * One arming period of the run-end nudge. A genuine user turn arms a period, and nothing is
- * checked in it once the agent opened an ask itself (`saw_ask`). `check_due` is the outstanding
- * check, in the shape of the host's own todo reminder: arming owes one, a completed check spends
- * it, and the agent's next real work — a successful tool call that is not a Dispatch write —
- * owes another. A turn that only replies and stops does no work, so the nudge's own continuation
- * can never owe one, which is what keeps it from nudging itself forever. `checks` counts the
- * ones spent, capped at `ASK_CHECKS_PER_PERIOD`. `baseline_as_of` is the server clock the period
- * started at, so every stop-time query in it can tell an ask opened during the period from one
- * that was already open.
+ * One arming period of the run-end nudge. A genuine user turn arms a period. `check_due` is the
+ * outstanding check, in the shape of the host's own todo reminder: arming owes one, a completed
+ * check spends it, the agent's next real work — a successful tool call that is not a Dispatch
+ * write — owes another, and opening the ask itself spends it, since the nudge has nothing left
+ * to say about that stop. A turn that only replies and stops does no work, so the nudge's own
+ * continuation can never owe one, which is what keeps it from nudging itself forever. `checks`
+ * counts the ones spent, capped at `ASK_CHECKS_PER_PERIOD`.
  *
- * In-memory only, for the life of this process's session. A cold start or a session switch
+ * `baseline_as_of` is the server clock the period's next Dispatch read asks from, and it moves:
+ * every settle that resolves — silently, because an ask is open, or by spending a check —
+ * carries it to that snapshot's `as_of`. Pinned to the arming turn it would never move, and
+ * `opened_since` counts every ask this session authored after it, open or long answered, so one
+ * ask would silence the rest of the period however long the session lived. A standing session
+ * is woken by a human's answer through Envoy, which arms no period, so the window is the only
+ * thing that can let the nudge speak again.
+ *
+ * In-memory only, for the life of this process's session. A cold start or a session change
  * begins at period 0, which the stop guard refuses, so nothing nudges before the next genuine
  * user turn arms a period — no transcript entry buys anything beyond that.
  */
@@ -156,7 +174,6 @@ interface AskAwarenessState {
   readonly baseline_as_of: string | null;
   readonly check_due: boolean;
   readonly checks: number;
-  readonly saw_ask: boolean;
 }
 
 interface LegionManagedEntry {
@@ -261,10 +278,9 @@ export default function envoyExtension(pi: PiApi): void {
     baseline_as_of: null,
     check_due: false,
     checks: 0,
-    saw_ask: false,
   };
   // Bumped by everything that invalidates a stop-time check already in flight: a new arming
-  // period, and a session rebind. The period alone cannot carry that — a rebound session's
+  // period, and a session change. The period alone cannot carry that — a rebound session's
   // restored period may equal the one the pending check read.
   let awarenessGeneration = 0;
   // One stop-time check at a time. `agent_end` handlers are not awaited by the host, so a second
@@ -275,6 +291,14 @@ export default function envoyExtension(pi: PiApi): void {
   // the structure rather than an ordering a re-check happens to win: held from before the query
   // until after `check_due` is spent.
   let askCheckInFlight = false;
+  // The self-check in flight, so whatever invalidates it can stop it. Dropping the verdict is
+  // not enough: the call is a whole-context request on the session's own model, and one the
+  // user superseded by typing competes with the turn they are waiting on for the same provider.
+  let askCheckAbort: AbortController | undefined;
+  const abortSelfCheck = (reason: string): void => {
+    askCheckAbort?.abort(new Error(reason));
+    askCheckAbort = undefined;
+  };
   // Whether this session's transcript records Legion driving it. Not matched against the id the
   // guard runs under: `/fork` and `/handoff` mint a new id and carry the transcript, and the
   // session stays Legion-driven across one — the role-claim reader beside it is id-agnostic for
@@ -346,16 +370,24 @@ export default function envoyExtension(pi: PiApi): void {
     sessionID = context.sessionManager.getSessionId();
     activeSessionContext = context;
     const branch = context.sessionManager.getBranch?.() ?? [];
-    askAwareness = {
-      session_id: sessionID,
-      period: 0,
-      baseline_as_of: null,
-      check_due: false,
-      checks: 0,
-      saw_ask: false,
-    };
+    // Only a genuine session change clears the armed period — a `/fork`, `/handoff`, resume or
+    // switch, each of which mints a different id and leaves the period describing a
+    // conversation this session is no longer in. Re-establishing the *same* session is not one:
+    // the heartbeat's drift heal runs this for every fresh TUI once the host mints its id, and
+    // the `session_start` NATS retry runs it every 15 s for the length of an Envoy outage.
+    // Clearing on those disabled the nudge for exactly the sessions it was opened up for.
+    if (askAwareness.session_id !== sessionID) {
+      abortSelfCheck(`session changed from ${askAwareness.session_id || "none"} to ${sessionID}`);
+      askAwareness = {
+        session_id: sessionID,
+        period: 0,
+        baseline_as_of: null,
+        check_due: false,
+        checks: 0,
+      };
+      awarenessGeneration++;
+    }
     legionManagedTranscript = branch.some(isLegionManagedEntry);
-    awarenessGeneration++;
   };
 
   pi.on("resources_discover", async () => ({ skillPaths: [SKILLS_DIRECTORY] }));
@@ -1158,13 +1190,14 @@ export default function envoyExtension(pi: PiApi): void {
   function armAskAwareness(id: string, prompt: string, asOf: string): void {
     if (prompt.trim() === "") return;
     awarenessGeneration++;
+    // The verdict of a check still in flight describes a run the user has already moved past.
+    abortSelfCheck("a new user turn superseded the self-check");
     askAwareness = {
       session_id: id,
       period: (askAwareness.session_id === id ? askAwareness.period : 0) + 1,
       baseline_as_of: asOf,
       check_due: true,
       checks: 0,
-      saw_ask: false,
     };
   }
 
@@ -1174,11 +1207,11 @@ export default function envoyExtension(pi: PiApi): void {
   // made the model announce "nothing outstanding" after nearly every turn, so it is now only the
   // cheap precondition of a hidden self-check (below), and the steer follows the self-check's
   // WAITING verdict alone. The check itself is owed and spent like the host's own todo reminder:
-  // the arming turn owes one, the check spends it whatever the verdict, and the agent's next
-  // real work owes another (`tool_result` below), so a run that keeps working keeps being
-  // checked without a new user turn. A settled turn that only replies does no work, so the
-  // nudge's own continuation never owes a check and cannot nudge itself; `ASK_CHECKS_PER_PERIOD`
-  // bounds the rest.
+  // the arming turn owes one, the check spends it whatever the verdict, opening the ask spends
+  // it too, and the agent's next real work owes another (`tool_result` below), so a run that
+  // keeps working keeps being checked without a new user turn. A settled turn that only replies
+  // does no work, so the nudge's own continuation never owes a check and cannot nudge itself;
+  // `ASK_CHECKS_PER_PERIOD` bounds the rest.
   //
   // A run with no UI (`omp -p`, and any other headless launch) never gets it: the host disposes
   // the session at the end of that one run, and its output is already printed, so the steered
@@ -1203,15 +1236,14 @@ export default function envoyExtension(pi: PiApi): void {
       // The host's live id, never the module's `sessionID`: a fresh TUI mints its id after
       // `session_start`, so the two disagree until the registration heartbeat heals the drift
       // (up to `ENVOY_HEARTBEAT_MS`, 120 s by default) and a brand-new terminal went unchecked
-      // for that whole window. The period already carries the id that armed it, and a switch or
-      // rebind resets the period to 0 and bumps the generation, so this is the discriminator —
-      // `before_agent_start` arms against the live id for the same reason. A `task` subagent
-      // arms no period at all (it returns there), so it never reaches the check either.
+      // for that whole window. The period already carries the id that armed it, and a session
+      // change resets the period to 0 and bumps the generation, so this is the discriminator —
+      // `before_agent_start` and `tool_result` read the live id for the same reason. A `task`
+      // subagent arms no period at all (it returns there), so it never reaches the check either.
       askAwareness.session_id !== id ||
       askAwareness.period === 0 ||
       !askAwareness.check_due ||
       askAwareness.checks >= ASK_CHECKS_PER_PERIOD ||
-      askAwareness.saw_ask ||
       askAwareness.baseline_as_of === null ||
       askCheckInFlight ||
       askEphemeral === undefined
@@ -1222,8 +1254,10 @@ export default function envoyExtension(pi: PiApi): void {
     const generation = awarenessGeneration;
     askCheckInFlight = true;
     try {
-      // Both awaits below are windows in which a new user turn can arm another period, or a
-      // switch can move the session. The two re-checks read one list, so they cannot drift.
+      // Both awaits below are windows in which a new user turn can arm another period, a
+      // session change can move the session, or the agent's own next run can open the ask this
+      // check is about — which clears the check it owed. The re-checks read one list, so they
+      // cannot drift.
       const stale = (): boolean =>
         shuttingDown ||
         generation !== awarenessGeneration ||
@@ -1232,7 +1266,7 @@ export default function envoyExtension(pi: PiApi): void {
         legionManaged(id) ||
         askAwareness.session_id !== id ||
         askAwareness.period !== period ||
-        askAwareness.saw_ask;
+        !askAwareness.check_due;
       let open: { readonly snapshot: OpenAsksResponse; readonly url: string } | null;
       try {
         open = await queryOpenAsks(id, askAwareness.baseline_as_of);
@@ -1241,7 +1275,19 @@ export default function envoyExtension(pi: PiApi): void {
         return;
       }
       if (open === null || stale()) return;
-      if (open.snapshot.count > 0 || open.snapshot.opened_since) return;
+      if (open.snapshot.count > 0 || open.snapshot.opened_since) {
+        // Dispatch knows this session is waiting, or knows it asked since the window opened, so
+        // there is nothing for the model to tell anyone: the settle is silent and no check is
+        // spent. The window moves to this snapshot, which is what stops one ask from silencing
+        // the rest of the period: `opened_since` counts every ask authored after `since`,
+        // answered or not, so a window pinned to the arming turn stays true forever.
+        askAwareness = {
+          ...askAwareness,
+          check_due: false,
+          baseline_as_of: open.snapshot.as_of,
+        };
+        return;
+      }
       // The self-check: one hidden, tool-free model call over a snapshot of this conversation
       // (`pi.askEphemeral`, the channel a targeted Dispatch BTW already uses), which adds nothing
       // to the transcript and which the user never sees. Only a WAITING verdict — the agent
@@ -1256,13 +1302,24 @@ export default function envoyExtension(pi: PiApi): void {
       // its call hung. A late answer is dropped; its rejection is already handled, so it can
       // never surface as an unhandled one.
       const abort = new AbortController();
-      const answered = askEphemeral({ prompt: ASK_SELF_CHECK_PROMPT, signal: abort.signal }).then(
-        (reply): string | undefined => reply.replyText,
-        (error: unknown): string | undefined => {
-          logSelfCheckFailure(id, error);
-          return undefined;
-        }
-      );
+      askCheckAbort = abort;
+      let answered: Promise<string | undefined>;
+      try {
+        answered = askEphemeral({ prompt: ASK_SELF_CHECK_PROMPT, signal: abort.signal }).then(
+          (reply): string | undefined => reply.replyText,
+          (error: unknown): string | undefined => {
+            logSelfCheckFailure(id, error);
+            return undefined;
+          }
+        );
+      } catch (error) {
+        // A host initialised without the capability installs a stub that throws synchronously
+        // rather than rejecting, so `.then(onRejected)` never sees it. Left to escape, the
+        // throw would leave the check unspent and every later settle would pay another Dispatch
+        // round trip and throw again, with the cap never engaging.
+        logSelfCheckFailure(id, error);
+        answered = Promise.resolve(undefined);
+      }
       const expiry = Promise.withResolvers<undefined>();
       const expire = setTimeout(() => {
         const timedOut = new Error(`self-check timed out after ${selfCheckTimeoutMs} ms`);
@@ -1275,12 +1332,23 @@ export default function envoyExtension(pi: PiApi): void {
         verdict = await Promise.race([answered, expiry.promise]);
       } finally {
         clearTimeout(expire);
+        if (askCheckAbort === abort) askCheckAbort = undefined;
       }
-      if (stale()) return;
-      // The check ran: it spends the period's outstanding one and counts against the cap,
-      // whatever came back. Only work re-arms it.
-      askAwareness = { ...askAwareness, check_due: false, checks: askAwareness.checks + 1 };
-      if (verdict === undefined || !WAITING_VERDICT.test(verdict.trim())) return;
+      if (stale()) {
+        // Whatever invalidated this check aborted it already if it could reach it; a host that
+        // is still working on an answer nobody will read stops paying here.
+        abort.abort(new Error("the self-check was superseded before its verdict arrived"));
+        return;
+      }
+      // The check ran: it spends the period's outstanding one, counts against the cap, and
+      // moves the window on, whatever came back. Only work re-arms it.
+      askAwareness = {
+        ...askAwareness,
+        check_due: false,
+        checks: askAwareness.checks + 1,
+        baseline_as_of: open.snapshot.as_of,
+      };
+      if (verdict === undefined || !isWaitingVerdict(verdict.trim())) return;
       // `deliverAs: "nextTurn"` with `triggerTurn` is the host's documented form for a message
       // sent during prompt teardown; on the pin this steer produced exactly one continuation in
       // every interactive and RPC run, so it stays the channel `deliver` already uses.
@@ -1303,11 +1371,21 @@ export default function envoyExtension(pi: PiApi): void {
       { deliverAs: "steer", triggerTurn: false }
     );
   });
-  pi.on("tool_result", async (event) => {
+  pi.on("tool_result", async (event, context) => {
     if (event.isError) return;
-    if (askAwareness.session_id === sessionID && askAwareness.period > 0 && !askAwareness.saw_ask) {
+    // The host's live id, never the module's `sessionID`, for the reason the stop guard reads
+    // it: in a fresh TUI's drift window the two disagree, and the period is armed against the
+    // live one, so a comparison against the module copy matched nothing for up to a heartbeat —
+    // the window this nudge was opened up for.
+    if (
+      askAwareness.session_id === context.sessionManager.getSessionId() &&
+      askAwareness.period > 0
+    ) {
       if (ASK_OPENING_TOOLS.includes(event.toolName)) {
-        askAwareness = { ...askAwareness, saw_ask: true };
+        // The agent asked the humans itself, so this stop has nothing left for the nudge to
+        // say: it spends the check the period owed rather than ending the period. The ask is
+        // still what keeps later settles silent — Dispatch is re-read at every one of them.
+        askAwareness = { ...askAwareness, check_due: false };
       } else if (!event.toolName.startsWith(DISPATCH_TOOL_PREFIX)) {
         // Real work: it owes the period another check, the way finishing a step re-arms the
         // host's todo reminder. A Dispatch write is the agent talking to the humans this nudge
