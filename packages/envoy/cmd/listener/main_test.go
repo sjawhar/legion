@@ -3704,6 +3704,108 @@ func TestRunSelfHealthMonitor_ExitsAfterRepeatedFailedRebuilds(t *testing.T) {
 	}
 }
 
+// TestRunSelfHealthMonitor_KeepsRunningThroughFaultsEachRebuildRepairs lands a different terminal
+// fault between every two probe intervals, the way three separate buckets or the durable can be
+// deleted one after another, and each rebuild repairs its fault. No fault outlives its recovery,
+// so the monitor must not count them as one persistent failure and terminate the listener.
+func TestRunSelfHealthMonitor_KeepsRunningThroughFaultsEachRebuildRepairs(t *testing.T) {
+	const interval = 100 * time.Millisecond
+	faults := []error{
+		errors.New("ci KV watcher stopped"),
+		errors.New("interest KV watcher stopped"),
+		errors.New("durable consumer: consumer not found"),
+		errors.New("session KV watcher stopped"),
+	}
+	var mu sync.Mutex
+	var current error
+	next := 0
+	landsAt := time.Now()
+	// Each fault lands half an interval after the previous one was repaired, so it arrives
+	// after the repair and before the next interval's probe.
+	probe := func() error {
+		mu.Lock()
+		defer mu.Unlock()
+		if current == nil && next < len(faults) && !time.Now().Before(landsAt) {
+			current = faults[next]
+			next++
+		}
+		return current
+	}
+	isTerminal := func(err error) bool { return err != nil }
+	var rebuilds atomic.Int32
+	rebuild := func() error {
+		rebuilds.Add(1)
+		mu.Lock()
+		defer mu.Unlock()
+		current = nil
+		landsAt = time.Now().Add(interval / 2)
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	terminated := make(chan struct{}, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runSelfHealthMonitor(ctx, logging.New("test"), probe, isTerminal, rebuild,
+			func() { terminated <- struct{}{} }, interval, 3)
+	}()
+
+	deadline := time.After(time.Duration(len(faults)+3) * interval * 2)
+	for rebuilds.Load() < int32(len(faults)) {
+		select {
+		case <-terminated:
+			t.Fatalf("the monitor terminated after %d repaired faults, each gone before the next landed", rebuilds.Load())
+		case <-deadline:
+			t.Fatalf("rebuilds = %d, want %d: the monitor stopped rebuilding", rebuilds.Load(), len(faults))
+		case <-time.After(interval / 10):
+		}
+	}
+	select {
+	case <-terminated:
+		t.Fatal("the monitor terminated after the last fault was repaired")
+	case <-time.After(2 * interval):
+	}
+	cancel()
+	<-done
+}
+
+// TestRunSelfHealthMonitor_ExitsWhenRebuildsLeaveTheFault is the persistent failure the threshold
+// exists for: every rebuild reports success, but the next probe still reads the same terminal
+// fault, so the listener is terminated for its runtime to replace.
+func TestRunSelfHealthMonitor_ExitsWhenRebuildsLeaveTheFault(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stuck := errors.New("ci KV watcher stopped")
+	var rebuilds atomic.Int32
+	terminated := make(chan struct{}, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runSelfHealthMonitor(ctx, logging.New("test"),
+			func() error { return stuck },
+			func(err error) bool { return errors.Is(err, stuck) },
+			func() error {
+				rebuilds.Add(1)
+				return nil
+			},
+			func() { terminated <- struct{}{} },
+			time.Millisecond,
+			3,
+		)
+	}()
+	select {
+	case <-terminated:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the monitor never terminated a fault every rebuild left in place")
+	}
+	if got := rebuilds.Load(); got != 3 {
+		t.Fatalf("rebuilds = %d, want 3", got)
+	}
+	<-done
+}
+
 // monitorUntilRecovered runs the self-health monitor with the listener's threshold of three over
 // probe, isUnrecoverable and rebuild, until a probe passes. It fails the test when the monitor
 // terminates first or nothing recovers within wait, naming what should have recovered.

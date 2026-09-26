@@ -268,8 +268,11 @@ func rebuildListenerDependencies(
 
 // runSelfHealthMonitor leaves transient dependency timeouts degraded while
 // NATS reconnects. A terminal watcher, closed KV handle, or missing durable
-// consumer is rebuilt immediately; repeated terminal observations enter the
-// bounded shutdown path so Docker can replace an unrecoverable listener.
+// consumer is rebuilt immediately, and a rebuild that reports success is
+// probed at once: a healthy probe is a recovery and resets the count, so
+// separate faults that each rebuild repairs never add up. Only a terminal
+// failure still there after threshold consecutive rebuilds enters the bounded
+// shutdown path so Docker can replace an unrecoverable listener.
 // A probe that lands in a reconnect gap is that transient case: it fails at
 // once with "outbound buffer limit exceeded" while the bus is disconnected (its
 // reconnect buffer is off), or at its deadline when the reconnect lands during
@@ -316,6 +319,12 @@ func runSelfHealthMonitor(
 				logger.Error("self-health rebuild failed", slog.Int("consecutive", terminalFailures), slog.String("error", rebuildErr.Error()))
 			} else {
 				logger.Info("self-health rebuild started", slog.Int("consecutive", terminalFailures))
+				if probe() == nil {
+					logger.Info("self-health recovered", slog.Int("prior_consecutive_failures", failures))
+					failures = 0
+					terminalFailures = 0
+					continue
+				}
 			}
 		}
 		if terminalFailures < threshold {
