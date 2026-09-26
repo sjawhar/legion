@@ -317,7 +317,7 @@ echo '{"items":[{"status":{"containerStatuses":[{"restartCount":0}]}}]}' >"$FAKE
 run_up SMOKE_INSTANCE=t-1 SMOKE_STOP_AFTER=daemon >"$tmp/last.txt" || { echo "daemon run failed:" >&2; cat "$tmp/last.txt" >&2; exit 1; }
 o="$tmp/state/overlay"
 digest="sha256:$(printf 'a%.0s' $(seq 64))"
-cluster_project="$("$REAL_BUN" -e "import { legionProjectToken } from \"$here/../../packages/daemon/src/daemon/config.ts\"; console.log(legionProjectToken('smoke-t1', 'LEGION_ID'))")"
+cluster_project="$("$REAL_BUN" -e "import { legionProjectToken } from \"$here/../../packages/contracts/src/legion-roles.ts\"; console.log(legionProjectToken('smoke-t1', 'LEGION_ID'))")"
 assert_eq "$(<"$tmp/state/records/project")" "$cluster_project"
 grep -Fxq "project: $cluster_project" "$o/legion.yaml"
 grep -Fxq "    image: $good_image" "$o/legion.yaml"
@@ -596,7 +596,7 @@ assert_record daemon-mode host
 assert_record project smoket1
 assert_record controller-tmux-server legion-smoket1
 grep -Fq 'omp config set setupVersion 2' "$FAKE_LOG"
-daemon_project="$("$REAL_BUN" -e "import { legionProjectToken } from \"$here/../../packages/daemon/src/daemon/config.ts\"; console.log(legionProjectToken('smoke-t1', 'LEGION_ID'))")"
+daemon_project="$("$REAL_BUN" -e "import { legionProjectToken } from \"$here/../../packages/contracts/src/legion-roles.ts\"; console.log(legionProjectToken('smoke-t1', 'LEGION_ID'))")"
 assert_eq "$(<"$state/records/project")" "$daemon_project"
 assert_record omp-profile legion-smoke-t1
 assert_record controller 'host: daemon-managed'
