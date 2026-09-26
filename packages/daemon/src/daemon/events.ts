@@ -796,6 +796,14 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
         envelope
       );
     } else if (isGithubMention(subject)) {
+      // A subject spells a repository lossily (a dot as `_`), so the payload's repository says
+      // whose mention it is: another repository's is acknowledged without reaching the controller.
+      const repo = recordPayload(envelope)?.repo;
+      if (typeof repo !== "string") {
+        console.warn(`legion: ignored a GitHub mention whose payload names no repo on ${subject}`);
+        return;
+      }
+      if (!projectRepos(deps.config).some((configured) => configured === repo)) return;
       // A GitHub mention has no reducer or state to fall back on if it's
       // lost — unlike every other durable effect, it keeps the
       // publish-and-nak-on-failure contract (including on a 404 no
