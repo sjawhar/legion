@@ -238,7 +238,7 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 	stored.Status = "todo"
 	stored.Rank = rank
 	stored.LingerUntil = nil
-	stored.HeldFrom = nil
+	stored.Hold = nil
 	stored.ReadyPendingVersion = nil
 	stored.LastDispatchSeq = seq
 	if err := a.store.PutIssue(ctx, tx, stored); err != nil {

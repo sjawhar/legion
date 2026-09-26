@@ -748,6 +748,10 @@ export type DeliveryCapability = (typeof DELIVERY_CAPABILITIES)[number];
  * It equals the stream's retention: past it the stream holds neither the message nor its
  * MsgId, so a same-mode retry publishes a second frame and the agent is handed the same
  * instruction again.
+ *
+ * It also bounds webhook redelivery dedupe: a GitHub, Slack or Ghost Wispr envelope publishes
+ * under a MsgId of its delivery id, and GitHub redelivers deliveries up to three days old, so a
+ * window shorter than that lets a GitHub redelivery publish a second copy.
  */
 export const DELIVERY_DUPLICATE_WINDOW_MS = 72 * 60 * 60 * 1000;
 
@@ -1584,6 +1588,10 @@ export interface EditArtifactResponse {
   readonly changed?: boolean;
   /** Zero-based index of each operation that left the document as it found it. */
   readonly unchanged_ops?: number[];
+  /** Opaque SHA-256 token for the full Proof document state this edit produced, including inline
+   *  marks: the document precondition for the caller's next edit, with no read in between. Absent
+   *  from a Dispatch server predating it. */
+  readonly token?: string;
   readonly advice?: WriteAdvice;
 }
 

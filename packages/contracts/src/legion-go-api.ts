@@ -141,6 +141,9 @@ const legionGoIssue = z.strictObject({
   generation: z.number().int().nonnegative(),
   phase: z.enum(LEGION_GO_PHASES),
   status: nonEmptyString,
+  /** Why a held issue is held, when its hold has one: `escalated` once its architect sent it to
+   * the controller. Absent while the issue's tree lingers or is closed, until it is re-admitted. */
+  holdReason: z.literal("escalated").optional(),
   architect: legionGoClaimView.optional(),
   workers: z.partialRecord(z.enum(LEGION_ROLES), legionGoPhaseView),
   pullRequest: legionGoPullRequestView.optional(),
@@ -227,17 +230,20 @@ export const LegionGoErrorResponse = z.union([
   z.strictObject({ code: nonEmptyString, error: nonEmptyString }),
 ]);
 
-/** `api.DeliveryView` — the claim's pending task; `deliveredAt` is the latest send's
- * acknowledgement and `confirmedAt` the turn it started, each absent until it happens. `phase` is
- * the issue phase the task was queued for, which is what says whether it is still the work to do;
- * a task of no phase — an operator's own, an architect's — carries none. */
+/** `api.DeliveryView` — the claim's pending task; `deliveredAt` is the latest acknowledgement of
+ * this task's prompt, and with it whether the agent may have read the task (a refusal of that
+ * prompt clears it, since an agent that refused it never read it), and `confirmedAt` the turn a
+ * send started, each absent until it happens. `phase` is the issue phase the task was queued for, which is what
+ * says whether it is still the work to do; a task of no phase — an operator's own, an
+ * architect's — carries none. */
 const legionGoDeliveryView = z.strictObject({
   id: nonEmptyString,
   task: nonEmptyString,
-  phase: z.enum(LEGION_GO_PHASES).optional(),
+  phase: z.enum(LEGION_GO_WORKFLOW_PHASES).optional(),
   queuedAt: timestamp,
   deliveredAt: timestamp.optional(),
   confirmedAt: timestamp.optional(),
+  interrupted: z.literal(true).optional(),
 });
 
 /** `api.OperatorClaim`, the body of the operator routes that act on one claim (`POST
@@ -255,6 +261,7 @@ export const LegionGoOperatorClaimResponse = z.strictObject({
   locator: legionGoLocator.optional(),
   budgets: z.strictObject({
     launchFailures: z.number().int().nonnegative(),
+    deaths: z.number().int().nonnegative(),
     promptFailures: z.number().int().nonnegative(),
     promptRetires: z.number().int().nonnegative(),
   }),

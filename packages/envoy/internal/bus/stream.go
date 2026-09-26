@@ -14,7 +14,10 @@ const Stream = "ENVOY_NOTIFICATIONS"
 
 // streamDuplicateWindow covers the entire retained notification lifetime, so
 // an outbox retry after a crash before published_at is recorded cannot create a
-// second retained Dispatch event while the original remains observable.
+// second retained Dispatch event while the original remains observable, and a
+// webhook redelivery of an event the stream already holds adds no second copy.
+// GitHub redelivers only deliveries from the past three days, so its whole
+// redelivery horizon falls inside this window.
 //
 // It is the same window the dashboard gates its "retrying is safe" promise on: past it the
 // stream holds neither the message nor its MsgId, so a same-mode retry delivers a second time.
@@ -27,7 +30,8 @@ var streamSubjects = []string{
 	"notifications.dispatch.>",
 	"notifications.github.>",
 	"notifications.slack.>",
-	// The Go Legion daemon's per-issue workflow notices (notifications.legion.<project>.<issue>).
+	// The Go Legion daemon's workflow notices: per issue (notifications.legion.<project>.<issue>) and
+	// for the project's controller (notifications.legion.<project>.controller).
 	"notifications.legion.>",
 	"notifications.ghostwispr.>",
 	"notifications.whatsapp.>",

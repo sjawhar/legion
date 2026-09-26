@@ -15,13 +15,14 @@ import (
 type OutboxKind string
 
 const (
-	OutboxKindDispatchStatus  OutboxKind = "dispatch_status"
-	OutboxKindDispatchMessage OutboxKind = "dispatch_message"
-	OutboxKindNotice          OutboxKind = "notice"
-	OutboxKindSupervise       OutboxKind = "supervise"
-	OutboxKindGateSeed        OutboxKind = "gate_seed"
-	OutboxKindLingerClose     OutboxKind = "linger_close"
-	OutboxKindWorkspaceRemove OutboxKind = "workspace_remove"
+	OutboxKindDispatchStatus   OutboxKind = "dispatch_status"
+	OutboxKindDispatchMessage  OutboxKind = "dispatch_message"
+	OutboxKindNotice           OutboxKind = "notice"
+	OutboxKindControllerNotice OutboxKind = "controller_notice"
+	OutboxKindSupervise        OutboxKind = "supervise"
+	OutboxKindGateSeed         OutboxKind = "gate_seed"
+	OutboxKindLingerClose      OutboxKind = "linger_close"
+	OutboxKindWorkspaceRemove  OutboxKind = "workspace_remove"
 )
 
 // OutboxPayload is the sealed vocabulary of payloads a workflow may enqueue.
@@ -56,6 +57,13 @@ type Notice struct {
 }
 
 func (Notice) OutboxKind() OutboxKind { return OutboxKindNotice }
+
+// ControllerNotice is a Notice for the project's controller topic (notify.ControllerTopic) alone,
+// in an outbox row of its own, so its publish retries apart from the issue's. It is published as
+// the Notice it is, the payload the issue's topic carries.
+type ControllerNotice Notice
+
+func (ControllerNotice) OutboxKind() OutboxKind { return OutboxKindControllerNotice }
 
 // SuperviseOp identifies a worker-session operation: "start" starts, resumes, or retries the role's
 // claim; "suspend" stops its process and keeps its session; "tree_close" is the tree's close —
@@ -162,6 +170,12 @@ func decodeOutboxJSON(row OutboxRow) (OutboxPayload, error) {
 			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
 		}
 		payload = value
+	case OutboxKindControllerNotice:
+		value := ControllerNotice{}
+		if err := decoder.Decode(&value); err != nil {
+			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
+		}
+		payload = value
 	case OutboxKindSupervise:
 		value := SuperviseRequest{}
 		if err := decoder.Decode(&value); err != nil {
@@ -217,6 +231,10 @@ func validateOutboxPayload(payload OutboxPayload) error {
 	case Notice:
 		if !validNoticeKind(value.Kind) {
 			return fmt.Errorf("unknown notice kind %q", value.Kind)
+		}
+	case ControllerNotice:
+		if !validNoticeKind(value.Kind) {
+			return fmt.Errorf("unknown controller notice kind %q", value.Kind)
 		}
 	case SuperviseRequest:
 		if !validSuperviseOp(value.Op) {

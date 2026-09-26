@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import projectTokens from "../fixtures/project-tokens.json";
 import {
   controllerToken,
   LEGION_ROLES,
+  legionProjectToken,
   parseRoleToken,
   roleToken,
   roleTopic,
@@ -62,6 +64,24 @@ describe("role token grammar", () => {
   test("rejects a token for another project or an unknown role", () => {
     expect(parseRoleToken("other", controllerToken("omp"))).toBeUndefined();
     expect(parseRoleToken("omp", "legion-omp-legion-42-operator")).toBeUndefined();
+  });
+});
+
+// The Go daemon's claim.ProjectToken reads the same fixture: a project an operator writes names one
+// controller role under either daemon and in the plugin that compares them.
+describe("legionProjectToken", () => {
+  test("spells every project as fixtures/project-tokens.json does", () => {
+    for (const [project, token] of Object.entries(projectTokens.tokens)) {
+      expect(legionProjectToken(project, "project")).toBe(token);
+    }
+  });
+
+  test("refuses a project with no alphanumeric character, naming the field", () => {
+    for (const project of projectTokens.refused) {
+      expect(() => legionProjectToken(project, "project")).toThrow(
+        "project must include at least one alphanumeric character"
+      );
+    }
   });
 });
 

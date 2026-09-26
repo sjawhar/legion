@@ -6,11 +6,11 @@
 # both name the same instance — the value is sanitized like the daemon's (lowercased, every
 # non-alphanumeric dropped) before it names the controller token and LEGION_PROJECT.
 project: demo
-# The in-cluster daemon. Reach it through a port-forward, then either set this to the forwarded
-# address or pass --daemon-url:  kubectl -n legion port-forward svc/legion-daemon-demo 13370:13370
+# The daemon's API. From another machine, reach it through a port-forward or a tunnel, then either
+# set this to the forwarded address or pass --daemon-url.
 daemon_url: http://127.0.0.1:13370
-# The value of the cluster Secret legion-demo-operator's OPERATOR_TOKEN, in a file only you can read
-# (chmod 0600); a group- or world-readable file is refused before anything is fetched.
+# The daemon's operator token (the value its own operator_token_file holds), in a file only you can
+# read (chmod 0600); a group- or world-readable file is refused before anything is fetched.
 operator_token_file: ./operator-token
 # The Envoy listener and NATS the controller talks to, and the listener's bearer (the providers
 # Secret's ENVOY_TOKEN). envoy_token_file is optional for a loopback dev listener.

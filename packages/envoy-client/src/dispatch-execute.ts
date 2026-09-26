@@ -2165,12 +2165,21 @@ export async function executeDispatchTool(
         edited.advice,
         {}
       );
+      // The token of the document this edit produced, rendered as dispatch_doc_read renders it:
+      // the next guarded edit passes it as `precondition.document` with no read in between. A
+      // Dispatch server predating it returns none, and the result reads as it always did.
+      const tokenTrailer = edited.token === undefined ? [] : [`Document token: ${edited.token}`];
       return {
-        text: [`${applied} ${notSubscribed(resolvedTopic(resolved))}`, ...adviceLines].join("\n"),
+        text: [
+          `${applied} ${notSubscribed(resolvedTopic(resolved))}`,
+          ...tokenTrailer,
+          ...adviceLines,
+        ].join("\n"),
         details: writeResultDetails(resolved, {
           applied: edited.applied,
           ...(edited.version === null ? {} : { version: edited.version.number }),
           ...(nothingChanged ? { changed: false } : {}),
+          ...(edited.token === undefined ? {} : { token: edited.token }),
           ...(edited.advice === undefined ? {} : { advice: edited.advice }),
         }),
       };

@@ -2864,7 +2864,7 @@ describe("executeDispatchTool", () => {
         });
       }
       if (path === "/api/v1/artifacts/artifact-42/edits") {
-        return response({ applied: 2, version: null });
+        return response({ applied: 2, version: null, token: "sha256:after-edit" });
       }
       throw new Error(`unexpected request: ${path}`);
     };
@@ -2888,8 +2888,10 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result).toEqual({
-      text: "Applied 2 ops (no new version) (not subscribed to DSP-42; envoy_subscribe notifications.dispatch.issue.DSP-42.> for every event on it)",
-      details: { issue: "DSP-42", applied: 2 },
+      text:
+        "Applied 2 ops (no new version) (not subscribed to DSP-42; envoy_subscribe notifications.dispatch.issue.DSP-42.> for every event on it)\n" +
+        "Document token: sha256:after-edit",
+      details: { issue: "DSP-42", applied: 2, token: "sha256:after-edit" },
     });
     expect(JSON.parse(requests[1]?.init.body as string)).toMatchObject({
       ops: [{ op: "replace", find: "draft", with: "final" }],
@@ -2909,7 +2911,13 @@ describe("executeDispatchTool", () => {
         });
       }
       if (path === "/api/v1/artifacts/artifact-42/edits") {
-        return response({ applied: 2, version: null, changed: false, unchanged_ops: [0, 1] });
+        return response({
+          applied: 2,
+          version: null,
+          changed: false,
+          unchanged_ops: [0, 1],
+          token: "sha256:unchanged",
+        });
       }
       throw new Error(`unexpected request: ${path}`);
     };
@@ -2936,9 +2944,53 @@ describe("executeDispatchTool", () => {
 
     expect(result.text).toBe(
       "Applied 2 ops; nothing changed (no new version); operations 0, 1 changed nothing" +
-        " (not subscribed to DSP-42; envoy_subscribe notifications.dispatch.issue.DSP-42.> for every event on it)"
+        " (not subscribed to DSP-42; envoy_subscribe notifications.dispatch.issue.DSP-42.> for every event on it)\n" +
+        "Document token: sha256:unchanged"
     );
-    expect(result.details).toEqual({ issue: "DSP-42", applied: 2, changed: false });
+    expect(result.details).toEqual({
+      issue: "DSP-42",
+      applied: 2,
+      changed: false,
+      token: "sha256:unchanged",
+    });
+  });
+
+  // A Dispatch server predating the edit token returns none, and the result reads as it always
+  // did: no trailer to mistake for a token, and nothing in details to pass as a precondition.
+  test("omits the document token when the server returns none", async () => {
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const path = new URL(String(url)).pathname;
+      if (path === "/api/v1/issues/DSP-42") {
+        return response({
+          key: "DSP-42",
+          primary_artifact_id: "artifact-42",
+          artifacts: [{ id: "artifact-42", slug: "spec", name: "spec.md", primary: true }],
+        });
+      }
+      if (path === "/api/v1/artifacts/artifact-42/edits") {
+        return response({ applied: 1, version: null });
+      }
+      throw new Error(`unexpected request: ${path}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_doc_edit",
+      args: {
+        issue: "DSP-42",
+        artifact: "spec",
+        ops: [{ op: "replace", find: "draft", with: "final" }],
+      },
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-42",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).not.toContain("Document token:");
+    expect(result.details).toEqual({ issue: "DSP-42", applied: 1 });
   });
 
   test("names the issue's document slugs and display names when the requested one is missing", async () => {

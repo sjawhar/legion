@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -26,7 +27,7 @@ const (
 // and configured repositories; intake owns only the fixed stream and consumer identities.
 type ConsumerSpec struct {
 	Project      string
-	Repositories []string
+	Repositories []ghrepo.Repository
 	AckWait      time.Duration
 	NakDelay     time.Duration
 	Logger       *slog.Logger
@@ -125,7 +126,7 @@ func consumeConsumer(ctx context.Context, consumer jetstream.Consumer, spec Cons
 }
 
 func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpec, pool *pgxpool.Pool, handlers []Handler) {
-	decoded, err := decodeMessage(message.Subject(), spec.Project, message.Data())
+	decoded, err := decodeMessage(message.Subject(), spec.Project, spec.Repositories, message.Data())
 	if err != nil {
 		logMessage(spec.Logger, slog.LevelError, "poison JetStream message", message, "error", err)
 		if termErr := message.Term(); termErr != nil {
@@ -184,10 +185,8 @@ func normalizedSpec(spec ConsumerSpec) (ConsumerSpec, error) {
 	if len(spec.Repositories) == 0 {
 		return ConsumerSpec{}, fmt.Errorf("intake consumer repositories are required")
 	}
-	for _, repo := range spec.Repositories {
-		if _, _, err := ghrepo.Split("intake consumer repository", repo); err != nil {
-			return ConsumerSpec{}, err
-		}
+	if slices.ContainsFunc(spec.Repositories, ghrepo.Repository.IsZero) {
+		return ConsumerSpec{}, fmt.Errorf("intake consumer repository is required")
 	}
 	if spec.AckWait <= 0 {
 		spec.AckWait = defaultAckWait
@@ -201,13 +200,22 @@ func normalizedSpec(spec ConsumerSpec) (ConsumerSpec, error) {
 	return spec, nil
 }
 
-func githubFilters(repositories []string) []string {
+func githubFilters(repositories []ghrepo.Repository) []string {
 	filters := make([]string, 0, len(repositories))
 	for _, repo := range repositories {
-		owner, name, _ := strings.Cut(repo, "/")
-		filters = append(filters, "notifications.github."+owner+"."+name+".>")
+		filters = append(filters, githubRepositoryPrefix(repo)+".>")
 	}
 	return filters
+}
+
+// githubRepositoryPrefix is what every GitHub subject Envoy publishes for repo begins with: the
+// owner and the name each one segment, every dot written `_`, since a repository name may hold a
+// dot and a subject splits on dots. It is this module's copy of the contracts' githubRepositoryPrefix
+// (packages/contracts/src/subject.ts), which the Go coordinator cannot import from Envoy; the golden
+// tests hold the two to Envoy's published subjects. The spelling is lossy, `a.b` and `a_b` alike, so
+// the payload's repository, not the subject, says whose event it is.
+func githubRepositoryPrefix(repo ghrepo.Repository) string {
+	return "notifications.github." + strings.ReplaceAll(repo.Owner(), ".", "_") + "." + strings.ReplaceAll(repo.Name(), ".", "_")
 }
 
 func dispatchConsumerName(project string) string {
