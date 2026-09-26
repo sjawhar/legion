@@ -728,8 +728,9 @@ func TestQueuedCallersReturnPromptlyWhenTheConnectionCloses(t *testing.T) {
 // compare-and-swap is, so it fails none of the batch's callers: GitHub does not redeliver a
 // delivery the listener refused, and one error must not lose a batch. The errors the retry can
 // outlast are the ones a server restart produces, each injected here into the batch's read: a
-// request refused while NATS reconnects, and a JetStream 503. (A timeout arrives only after the
-// JetStream MaxWait, past the whole budget, so no retry within it can rescue one.)
+// request refused while NATS reconnects, a JetStream 503, and no responders, which is what a
+// request gets while the server it names is away. (A timeout arrives only after the JetStream
+// MaxWait, past the whole budget, so no retry within it can rescue one.)
 func TestATransientKVErrorFailsNoCallerInABurst(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -737,6 +738,7 @@ func TestATransientKVErrorFailsNoCallerInABurst(t *testing.T) {
 	}{
 		{"a request refused while NATS reconnects", natsgo.ErrReconnectBufExceeded},
 		{"a JetStream 503", &natsgo.APIError{Code: 503, ErrorCode: 10008, Description: "JetStream system temporarily unavailable"}},
+		{"no responders while the server restarts", natsgo.ErrNoResponders},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			conn, cleanup := connectNATS(t)
@@ -833,35 +835,9 @@ func TestASlowKVCallOnALiveConnectionIsWaitedFor(t *testing.T) {
 	}
 }
 
-// A KV error that retrying cannot fix fails the write at once rather than after the budget: a
-// deleted bucket, and each error the store classifies as lasting, injected into the write's read.
+// A KV error that retrying cannot fix fails the write at once rather than after the budget: each
+// error the store classifies as lasting, injected into the write's read.
 func TestALastingKVErrorFailsAWriteAtOnce(t *testing.T) {
-	h := head{"example-org", "example-repo", "42", "6666666666666666666666666666666666666666"}
-	requireFailsAtOnce := func(t *testing.T, s *Store, want error) {
-		t.Helper()
-		began := time.Now()
-		err := record(s, h.check("check-0", 800, "completed", "success", "2026-09-24T01:00:00Z"))
-		elapsed := time.Since(began)
-		if err == nil || (want != nil && !errors.Is(err, want)) {
-			t.Fatalf("the write returned %v, want %v", err, want)
-		}
-		if elapsed >= recordBudget/2 {
-			t.Fatalf("the write took %s to fail (%v), want well under the %s budget", elapsed, err, recordBudget)
-		}
-	}
-	t.Run("a deleted bucket", func(t *testing.T) {
-		conn, cleanup := connectNATS(t)
-		defer cleanup()
-		s, _ := wrapStore(t, conn, 0)
-		js, err := conn.JetStream()
-		if err != nil {
-			t.Fatalf("jetstream: %v", err)
-		}
-		if err := js.DeleteKeyValue(testBucket(t)); err != nil {
-			t.Fatalf("delete the bucket: %v", err)
-		}
-		requireFailsAtOnce(t, s, nil)
-	})
 	for _, lasting := range []error{
 		natsgo.ErrInvalidConnection, natsgo.ErrAuthorization, natsgo.ErrAuthExpired,
 		natsgo.ErrPermissionViolation, natsgo.ErrJetStreamNotEnabled, natsgo.ErrJetStreamNotEnabledForAccount,
@@ -871,8 +847,44 @@ func TestALastingKVErrorFailsAWriteAtOnce(t *testing.T) {
 			defer cleanup()
 			s, kv := wrapStore(t, conn, 0)
 			kv.failNextGet(lasting)
-			requireFailsAtOnce(t, s, lasting)
+			h := head{"example-org", "example-repo", "42", "6666666666666666666666666666666666666666"}
+			began := time.Now()
+			err := record(s, h.check("check-0", 800, "completed", "success", "2026-09-24T01:00:00Z"))
+			elapsed := time.Since(began)
+			if !errors.Is(err, lasting) {
+				t.Fatalf("the write returned %v, want %v", err, lasting)
+			}
+			if elapsed >= recordBudget/2 {
+				t.Fatalf("the write took %s to fail (%v), want well under the %s budget", elapsed, err, recordBudget)
+			}
 		})
+	}
+}
+
+// A bucket deleted under a live handle answers no responders, which a request also gets while the
+// server it names is restarting, so the store retries it rather than failing the batch (write).
+// The write therefore spends its budget before it fails, and what matters is that it does fail,
+// within the budget, rather than waiting on JetStream's MaxWait.
+func TestADeletedBucketFailsAWriteWithinTheBudget(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s, _ := wrapStore(t, conn, 0)
+	js, err := conn.JetStream()
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	if err := js.DeleteKeyValue(testBucket(t)); err != nil {
+		t.Fatalf("delete the bucket: %v", err)
+	}
+	h := head{"example-org", "example-repo", "42", "6666666666666666666666666666666666666666"}
+	began := time.Now()
+	writeErr := record(s, h.check("check-0", 800, "completed", "success", "2026-09-24T01:00:00Z"))
+	elapsed := time.Since(began)
+	if writeErr == nil {
+		t.Fatal("the write succeeded against a deleted bucket, want an error")
+	}
+	if elapsed > recordBudget+time.Second {
+		t.Fatalf("the write took %s to fail (%v), want within the %s budget", elapsed.Round(time.Millisecond), writeErr, recordBudget)
 	}
 }
 

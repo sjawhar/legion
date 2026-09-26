@@ -139,16 +139,23 @@ func (s *Store) nextRewatch() <-chan struct{} {
 // compare-and-swap conflict never does: both kinds are JetStream 400s (ErrKeyExists, wrong last
 // sequence), so it is answered first, and a caller need not ask isCASConflict before it. Lasting:
 // the connection is closed, draining or invalid; the connection is not allowed the request
-// (authorization, an expired credential, a permissions violation); no stream answers for the
-// record (a deleted bucket, like a key no stream serves, answers no responders); JetStream is not
-// enabled for the server or the account, which JetStream reports as a 503 but which is
-// configuration no retry within the budget changes, unlike the 503 of a server restarting; or
-// JetStream refuses the request itself (any other 4xx, an invalid key, a record over the payload
-// limit). Anything else is transient, and what the retry actually rescues is a NATS reconnect
-// (ErrReconnectBufExceeded, a request refused while the connection reconnects, and errKVRewatched,
-// a request given up on at the rewatch that follows it) and a JetStream 503 while a server
-// restarts; a timeout is transient too, but it arrives only after the JetStream MaxWait, past the
-// whole budget (recordBudget).
+// (authorization, an expired credential, a permissions violation); the bucket is not there when
+// the handle is taken; JetStream is not enabled for the server or the account, which JetStream
+// reports as a 503 but which is configuration no retry within the budget changes, unlike the 503
+// of a server restarting; or JetStream refuses the request itself (any other 4xx, an invalid key,
+// a record over the payload limit). Anything else is transient, and what the retry actually
+// rescues is a NATS reconnect (ErrReconnectBufExceeded, a request refused while the connection
+// reconnects, and errKVRewatched, a request given up on at the rewatch that follows it), a
+// JetStream 503 while a server restarts, and no responders, which a request gets whenever no
+// server answers for the stream it names; a timeout is transient too, but it arrives only after
+// the JetStream MaxWait, past the whole budget (recordBudget).
+//
+// No responders is transient because it cannot be told apart from a restart: a restarting server
+// answers it for as long as it is away, and a batch that should have been retried failed instead.
+// The trade is the case it also covers, a bucket deleted under a live handle, which answers no
+// responders like a key no stream serves: such a write now spends the whole budget before it
+// fails, rather than failing at once. It still fails, within the budget, and nothing is written
+// either way.
 func kvErrorLasts(err error) bool {
 	if isCASConflict(err) {
 		return false
@@ -171,7 +178,7 @@ func kvErrorLasts(err error) bool {
 var lastingKVErrors = []error{
 	nats.ErrConnectionClosed, nats.ErrConnectionDraining, nats.ErrInvalidConnection,
 	nats.ErrAuthorization, nats.ErrAuthExpired, nats.ErrPermissionViolation,
-	nats.ErrBucketNotFound, nats.ErrNoResponders,
+	nats.ErrBucketNotFound,
 	nats.ErrJetStreamNotEnabled, nats.ErrJetStreamNotEnabledForAccount,
 	nats.ErrInvalidKey, nats.ErrMaxPayload,
 }
