@@ -12,6 +12,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -59,7 +60,7 @@ func TestAnEarlierGenerationsSuperviseRowNeverActsOnTheNextGeneration(t *testing
 	client := &outboxDispatch{issue: dispatch.Issue{Key: root.Key, Status: "todo"}}
 	runner := &outbox{
 		dispatchProject: "LEGION",
-		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets",
+		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
 		dispatch: client, notices: &outboxPublisher{}, handlers: handlers, log: quietLogger(), now: time.Now,
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
 			return workspace.Workspace{}, nil
@@ -293,7 +294,7 @@ func TestASameRoleBackwardMoveNeverStopsTheWorkerInItsNewPhase(t *testing.T) {
 	engine := workflow.New(records, workflow.Config{Project: "legion"}, quietLogger())
 	runner := &outbox{
 		dispatchProject: "LEGION",
-		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets",
+		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
 		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: issue.Key, Status: "retro"}}, notices: &outboxPublisher{}, handlers: []intake.Handler{engine},
 		log: quietLogger(), now: func() time.Time { return clock },
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {

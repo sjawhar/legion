@@ -220,7 +220,7 @@ type SearchResult struct {
 	Owner SearchOwner `json:"owner"`
 	// Issue mirrors Owner for issue-owned hits so agent clients built before the owner-only
 	// shape (#1119) keep rendering; remove once no installed pi-legion-envoy /
-	// opencode-legion-envoy / claude-envoy-bridge predates it.
+	// opencode-legion-envoy / claude-envoy (or a legacy claude-envoy-bridge install) predates it.
 	Issue    *SearchIssue    `json:"issue,omitempty"`
 	Artifact *SearchArtifact `json:"artifact,omitempty"`
 	ID       string          `json:"id"`

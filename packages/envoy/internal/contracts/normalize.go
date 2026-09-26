@@ -676,11 +676,13 @@ func githubPayload(event string, body map[string]any) string {
 			"author":      nestedString(body, "review", "user", "login"),
 			"url":         nestedString(body, "review", "html_url"),
 			"state":       nestedString(body, "review", "state"),
-			// review_id is GitHub's review id, which rises with every review submitted: consumers
-			// order reviews by it rather than by delivery.
-			"review_id": GithubPRNumber(nested(body, "review", "id")),
-			"commit_id": nestedString(body, "review", "commit_id"),
-			"head_sha":  nestedString(body, "pull_request", "head", "sha"),
+			// Consumers order reviews by submitted_at, then review_id, rather than by delivery. The id
+			// alone is not enough: GitHub assigns it when a review is created, and a pending review
+			// keeps it when it is submitted later.
+			"review_id":    GithubPRNumber(nested(body, "review", "id")),
+			"submitted_at": nestedString(body, "review", "submitted_at"),
+			"commit_id":    nestedString(body, "review", "commit_id"),
+			"head_sha":     nestedString(body, "pull_request", "head", "sha"),
 		}
 		markLegionFooter(data, reviewBody)
 		addCappedBody(data, reviewBody)

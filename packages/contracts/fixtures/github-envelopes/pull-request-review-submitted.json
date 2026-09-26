@@ -13,6 +13,7 @@
     "repo": "example-org/example-repo",
     "review_id": "555000111",
     "state": "approved",
+    "submitted_at": "2026-09-10T00:12:00Z",
     "title": "Add local acceptance driver",
     "url": "https://example.invalid/example-org/example-repo/pull/42#pullrequestreview-555000111"
   }

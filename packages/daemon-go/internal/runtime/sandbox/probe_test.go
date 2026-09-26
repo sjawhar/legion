@@ -107,7 +107,7 @@ func (g *probeRig) finishes(finish func(*corev1.Pod)) *probeRig {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.finish = func(p *corev1.Pod) {
-		p.Spec.NodeName = "ip-10-1-40-7"
+		p.Spec.NodeName = "ip-192-0-2-7"
 		finish(p)
 	}
 	return g
@@ -118,7 +118,7 @@ func (g *probeRig) waits(reason string) *probeRig {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.finish = func(p *corev1.Pod) {
-		p.Spec.NodeName = "ip-10-1-40-7"
+		p.Spec.NodeName = "ip-192-0-2-7"
 		p.Status = corev1.PodStatus{Phase: corev1.PodPending, ContainerStatuses: []corev1.ContainerStatus{{
 			Name: probeContainer, State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: reason}},
 		}}}

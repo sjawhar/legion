@@ -23,6 +23,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	legionstore "github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
@@ -372,7 +373,7 @@ func TestAnExistingConsumerKeepsItsPosition(t *testing.T) {
 		}
 	}
 
-	spec.Repositories = []string{"sjawhar/legion", "acme/widgets"}
+	spec.Repositories = []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion"), ghrepo.MustParse("acme/widgets")}
 	if _, err := OpenConsumers(context.Background(), js, spec); err != nil {
 		t.Fatalf("OpenConsumers over existing consumers: %v", err)
 	}
@@ -436,10 +437,21 @@ func TestConsumeCommitsRefusalAndAcknowledges(t *testing.T) {
 	assertNoAckPending(t, stream, dispatchConsumerName(spec.Project))
 }
 
+// Every carrier of a ghrepo.Repository refuses the zero value, and intake is one: a zero
+// repository would subscribe to `notifications.github...>`, a subject no repository publishes on,
+// and intake would wait on it silently. The spec is refused by name before any consumer opens.
+func TestOpenConsumersRefusesAZeroRepository(t *testing.T) {
+	spec := consumerSpec(&lockedBuffer{})
+	spec.Repositories = append(spec.Repositories, ghrepo.Repository{})
+	if _, err := normalizedSpec(spec); err == nil || err.Error() != "intake consumer repository is required" {
+		t.Fatalf("normalizedSpec with a zero repository = %v, want \"intake consumer repository is required\"", err)
+	}
+}
+
 func consumerSpec(logs *lockedBuffer) ConsumerSpec {
 	return ConsumerSpec{
 		Project:      "CAPTURE",
-		Repositories: []string{"sjawhar/legion"},
+		Repositories: []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion")},
 		AckWait:      200 * time.Millisecond,
 		NakDelay:     25 * time.Millisecond,
 		Logger:       slog.New(slog.NewTextHandler(logs, nil)),
