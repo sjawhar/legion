@@ -139,9 +139,8 @@ func BlockShapeError(block *Node) error {
 
 // shapeDifference names the first block of want that got holds as another kind, or holds where
 // want has none, or lacks; both are empty when the two have the same shape. An empty paragraph is
-// not written, so it is not expected back - except in a table cell, which is written with its
-// paragraph however little it holds, and a footnote definition holding only that paragraph, which
-// reads back holding an empty one as a cell does.
+// not written, so it is not expected back, except as its container's only child: a table cell or a
+// footnote definition holding only an empty paragraph reads back holding one.
 func shapeDifference(want, got *Node) (string, string) {
 	if want.Type != got.Type {
 		return blockName(want.Type), blockName(got.Type)
@@ -149,10 +148,10 @@ func shapeDifference(want, got *Node) (string, string) {
 	if isTextblock(want.Type) {
 		return "", ""
 	}
-	keep := want.Type == "table_cell" || want.Type == "table_header" || (want.Type == "footnote_definition" && len(want.Children) == 1)
+	only := len(want.Children) == 1
 	written := make([]*Node, 0, len(want.Children))
 	for _, child := range want.Children {
-		if keep || child.Type != "paragraph" || len(child.Children) != 0 {
+		if only || child.Type != "paragraph" || len(child.Children) != 0 {
 			written = append(written, child)
 		}
 	}
