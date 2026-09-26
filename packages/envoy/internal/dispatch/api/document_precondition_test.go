@@ -170,6 +170,24 @@ func TestDocumentEditPreconditionChecksEmptyBatch(t *testing.T) {
 	if accepted.Code != http.StatusOK || !strings.Contains(accepted.Body.String(), `"applied":0`) {
 		t.Fatalf("fresh empty precondition: status=%d body=%s", accepted.Code, accepted.Body.String())
 	}
+	// The check applied no operation, so the document it read is the one the caller's next
+	// guarded edit meets: the response carries that token, not an empty one.
+	if token := decodeBody[documentEditResult](t, accepted).Token; token != fresh.Token {
+		t.Fatalf("checked empty batch token = %q, want the document's current token %q", token, fresh.Token)
+	}
+	// Under a block guard there is no document token in the request to echo back, and the answer
+	// is still the whole-document token the next guarded edit needs.
+	blocks := readDocumentPreconditionBlocks(t, handler, issue.PrimaryArtifactID)
+	guarded := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops":          []any{},
+		"precondition": map[string]any{"blocks": []map[string]string{{"id": blocks[0].ID, "token": blocks[0].Token}}},
+	}, "alice")
+	if guarded.Code != http.StatusOK {
+		t.Fatalf("block-guarded empty precondition: status=%d body=%s", guarded.Code, guarded.Body.String())
+	}
+	if token := decodeBody[documentEditResult](t, guarded).Token; token != fresh.Token {
+		t.Fatalf("block-guarded empty batch token = %q, want the document's current token %q", token, fresh.Token)
+	}
 	updatesFinal, versionsFinal, eventsFinal := documentMutationCounts(t, database, issue.PrimaryArtifactID)
 	if updatesFinal != updatesBefore || versionsFinal != versionsBefore || eventsFinal != eventsBefore {
 		t.Fatalf("fresh empty precondition mutated updates/versions/events: got %d/%d/%d, want %d/%d/%d", updatesFinal, versionsFinal, eventsFinal, updatesBefore, versionsBefore, eventsBefore)
