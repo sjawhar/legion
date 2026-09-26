@@ -21,6 +21,9 @@ jobs:
       - name: Check every Bun install reads .bun-version
         run: .github/scripts/check-bun-version.sh
 
+      - name: Check frozen Bun installs copy every workspace manifest
+        run: .github/scripts/check-bun-workspace-manifests.sh
+
       - name: Setup Bun
         uses: ./.github/actions/setup-bun
 
@@ -92,6 +95,9 @@ jobs:
 
       - name: Test the Bun pin check
         run: .github/scripts/check-bun-version.test.sh
+
+      - name: Test the frozen Bun workspace manifest check
+        run: .github/scripts/check-bun-workspace-manifests.test.sh
 
       - name: Test the live proofs' GitHub ingress bridge
         run: bun test scripts/e2e/lib
