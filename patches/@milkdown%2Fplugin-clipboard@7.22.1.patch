@@ -1,0 +1,20 @@
+diff --git a/lib/index.js b/lib/index.js
+index a1094153e619ca57d9a444896d85d0a840a0ec24..373ae9e5cd3b08d891413d63f4697c67330b1b61 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -1,6 +1,6 @@
+ import { editorViewOptionsCtx, parserCtx, schemaCtx, serializerCtx } from "@milkdown/core";
+ import { getNodeFromSchema, isTextOnlySlice } from "@milkdown/prose";
+-import { DOMParser, DOMSerializer } from "@milkdown/prose/model";
++import { DOMParser, DOMSerializer, Slice } from "@milkdown/prose/model";
+ import { Plugin, PluginKey, TextSelection } from "@milkdown/prose/state";
+ import { $prose } from "@milkdown/utils";
+ //#region src/__internal__/is-pure-text.ts
+@@ -84,6 +84,7 @@ var clipboard = $prose((ctx) => {
+ 					const slice = parser(text);
+ 					if (!slice || typeof slice === "string") return false;
+ 					dom = DOMSerializer.fromSchema(schema).serializeFragment(slice.content);
++					return dispatchPasteSlice(view, Slice.maxOpen(domParser.parseSlice(dom).content, false));
+ 				} else {
+ 					const template = document.createElement("template");
+ 					template.innerHTML = html;
