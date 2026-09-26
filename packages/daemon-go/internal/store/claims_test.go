@@ -122,6 +122,31 @@ func TestAClaimRoundTripsWithItsLocatorAndDelivery(t *testing.T) {
 	sameClaim(t, onlyClaim(t, store), want)
 }
 
+// A task is queued uninterrupted, and a death marks it interrupted by writing the same delivery
+// again: the mark only ever reaches the store through the upsert's update. It has to survive that
+// write, or a restart re-sends the task without the sentence saying its turn was interrupted.
+func TestARePutDeliveryCarriesItsInterruption(t *testing.T) {
+	ctx := context.Background()
+	store := migratedStore(t)
+	c := tmuxClaim("legion-LEGION-209-implementer")
+	if err := store.PutClaim(ctx, c); err != nil {
+		t.Fatalf("put claim: %v", err)
+	}
+	queued := supervise.Delivery{ID: "delivery-1", Task: "implement the plan", Phase: phase.Implementing, Generation: 4, QueuedAt: at(1)}
+	if err := store.PutDelivery(ctx, c.Token, queued); err != nil {
+		t.Fatalf("queue the delivery: %v", err)
+	}
+	interrupted := queued
+	interrupted.ID, interrupted.Interrupted = "delivery-2", true
+	if err := store.PutDelivery(ctx, c.Token, interrupted); err != nil {
+		t.Fatalf("mark it interrupted: %v", err)
+	}
+
+	if got := onlyClaim(t, store).Pending; got == nil || got.ID != "delivery-2" || !got.Interrupted {
+		t.Fatalf("delivery read back = %+v, want the re-put delivery, interrupted", got)
+	}
+}
+
 // The phase a task was queued for is what says the task is still the work to do, and it has to
 // survive the path that rewrites the delivery: a prompt refused or unanswered is re-put under a
 // new id, and a restart then reads the delivery back from this table. A phase lost on either side
