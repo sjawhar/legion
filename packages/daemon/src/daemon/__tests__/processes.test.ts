@@ -990,7 +990,15 @@ describe("ProcessManager", () => {
     expect(commands).toEqual([
       ["jj", "config", "get", "git.abandon-unreachable-commits", "-R", repo],
       ["jj", "config", "set", "--repo", "git.abandon-unreachable-commits", "false", "-R", repo],
-      ["jj", "git", "fetch", "-R", repo, "--config=git.executable-path=git"],
+      [
+        "jj",
+        "git",
+        "fetch",
+        "--ignore-working-copy",
+        "-R",
+        repo,
+        "--config=git.executable-path=git",
+      ],
       [
         "jj",
         "bookmark",
@@ -1138,7 +1146,15 @@ describe("ProcessManager", () => {
       opts: { cwd: workspace, timeoutMs: 300_000 },
     });
     expect(workspaceCalls).toContainEqual({
-      command: ["jj", "git", "fetch", "-R", repo, "--config=git.executable-path=git"],
+      command: [
+        "jj",
+        "git",
+        "fetch",
+        "--ignore-working-copy",
+        "-R",
+        repo,
+        "--config=git.executable-path=git",
+      ],
       opts: {
         env: {
           GIT_ASKPASS: "",

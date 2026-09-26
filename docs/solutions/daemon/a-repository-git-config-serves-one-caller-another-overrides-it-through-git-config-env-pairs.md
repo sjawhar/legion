@@ -59,19 +59,18 @@ The override is seven environment pairs in `createProvisioningCredential`:
 GIT_CONFIG_COUNT=3
 GIT_CONFIG_KEY_0=credential.helper                     GIT_CONFIG_VALUE_0=     # empty: resets the list
 GIT_CONFIG_KEY_1=credential.https://github.com.helper  GIT_CONFIG_VALUE_1=!'<the one-shot helper>'
-GIT_CONFIG_KEY_2=core.hooksPath                        GIT_CONFIG_VALUE_2=/dev/null  # no hook the clone carries runs with the token
+GIT_CONFIG_KEY_2=core.hooksPath                        GIT_CONFIG_VALUE_2=/dev/null  # no hook runs
 ```
 
 beside an empty `GIT_ASKPASS` (git reads it as no askpass program at all, not `core.askPass`
-either), `GIT_TERMINAL_PROMPT=0`, and `GIT_ALLOW_PROTOCOL=https`, which refuses every transport
-but the one github.com needs (so no rewrite reaches a program through a local path's
-`uploadpack`, `core.sshCommand` or `ext::`). The clone and the fetch also pass
-`--config=git.executable-path=git`, so a repository's `git.executable-path` never runs. The one-shot helper answers `get` with the installation
-token; git asks it for https://github.com alone, so a remote that a URL rewrite in the clone's
-config sends to another scheme, host or port is asked for nothing. That rewrite is the reason the
-helper is scoped: every agent of a tree writes the shared clone's config. The fix LEGION-178
-first shipped kept an askpass that answered every prompt, and re-enabled it with
-`credential.interactive=true`; that askpass handed the token to whatever host a rewrite named.
+either), `GIT_TERMINAL_PROMPT=0` and `GIT_ALLOW_PROTOCOL=https`. The clone and the fetch also pass
+`--config=git.executable-path=git`, and the fetch `--ignore-working-copy`. What each of these pins,
+and what remains, is described once, in `createProvisioningCredential`'s doc comment
+(`packages/workspace/src/workspace.ts`). The one-shot helper answers `get` with the installation
+token, and git asks it for https://github.com alone. It is scoped because every agent of a tree
+writes the shared clone's config: the fix LEGION-178 first shipped kept an askpass that answered
+every prompt, re-enabled with `credential.interactive=true`, and so answered whichever host that
+config sent git to.
 
 Three git facts make the helper reset work:
 

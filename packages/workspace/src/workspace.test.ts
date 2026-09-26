@@ -238,6 +238,18 @@ function bookmarkRowsCommand(bookmark: string, repoCloneDir: string): string[] {
     repoCloneDir,
   ];
 }
+/** The credentialed fetch provisioning runs: no working-copy snapshot, jj's pinned git. */
+function fetchCommand(repoCloneDir: string): string[] {
+  return [
+    "jj",
+    "git",
+    "fetch",
+    "--ignore-working-copy",
+    "-R",
+    repoCloneDir,
+    "--config=git.executable-path=git",
+  ];
+}
 /** The read provisioning runs after the clone step and before every fetch: the clone's per-repo
  * `git.abandon-unreachable-commits` setting (LEGION-84). */
 function readKeepUnreachableCommitsCommand(repoCloneDir: string): string[] {
@@ -488,7 +500,7 @@ describe("provisionIssueWorkspace", () => {
       ],
       readKeepUnreachableCommitsCommand(repoCloneDir),
       writeKeepUnreachableCommitsCommand(repoCloneDir),
-      ["jj", "git", "fetch", "-R", repoCloneDir, "--config=git.executable-path=git"],
+      fetchCommand(repoCloneDir),
       bookmarkRowsCommand(bookmark, repoCloneDir),
       ["git", `--git-dir=${repoCloneDir}/.git`, "worktree", "prune"],
       workspaceAddCommand(workspaceDir, "widgets-42", "main", repoCloneDir),
@@ -637,7 +649,7 @@ describe("provisionIssueWorkspace", () => {
     expect(calls.map((call) => call.cmd)).toEqual([
       readKeepUnreachableCommitsCommand(repoCloneDir),
       writeKeepUnreachableCommitsCommand(repoCloneDir),
-      ["jj", "git", "fetch", "-R", repoCloneDir, "--config=git.executable-path=git"],
+      fetchCommand(repoCloneDir),
       bookmarkRowsCommand(bookmark, repoCloneDir),
       ["git", `--git-dir=${repoCloneDir}/.git`, "worktree", "prune"],
       workspaceAddCommand(workspaceDir, "widgets-42", commit, repoCloneDir),
@@ -1051,7 +1063,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       ["jj", "workspace", "update-stale"],
       readKeepUnreachableCommitsCommand(repoCloneDir),
       writeKeepUnreachableCommitsCommand(repoCloneDir),
-      ["jj", "git", "fetch", "-R", repoCloneDir, "--config=git.executable-path=git"],
+      fetchCommand(repoCloneDir),
       ...credentialConfigCommands(`${repoCloneDir}/.git`, credentialHelper),
       ...identityProbeCommands(repoCloneDir),
     ]);
@@ -1310,12 +1322,12 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       expect(firstProvisioning, name).toEqual([
         readKeepUnreachableCommitsCommand(repoCloneDir),
         writeKeepUnreachableCommitsCommand(repoCloneDir),
-        ["jj", "git", "fetch", "-R", repoCloneDir, "--config=git.executable-path=git"],
+        fetchCommand(repoCloneDir),
       ]);
       expect(calls, name).toEqual([
         ["jj", "workspace", "update-stale"],
         readKeepUnreachableCommitsCommand(repoCloneDir),
-        ["jj", "git", "fetch", "-R", repoCloneDir, "--config=git.executable-path=git"],
+        fetchCommand(repoCloneDir),
         ...credentialConfigCommands(`${repoCloneDir}/.git`, credentialHelper),
         ...identityProbeCommands(repoCloneDir),
       ]);
@@ -1454,10 +1466,10 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     );
   }
 
-  // A program the shared clone's configuration names, which git or jj would run on provisioning's
-  // credentialed fetch with LEGION_PROVISIONING_TOKEN in its environment. The fetch allows the
-  // https transport alone, so a rewrite to a local path, ssh or ext:: never reaches the program,
-  // and it names jj's git itself, so a repository's git.executable-path is never run.
+  // Each case plants, in the shared clone's configuration, a program the credentialed fetch would
+  // otherwise run, and the program records whether the token was in its environment. Two of
+  // createProvisioningCredential's pins keep every case from running: the https transport alone,
+  // and jj's pinned git.
   for (const { route, plant } of [
     {
       route: "an upload-pack program on a local-path remote",
@@ -1497,7 +1509,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       },
     },
   ]) {
-    test(`the credentialed fetch runs no program the shared clone names: ${route}`, async () => {
+    test(`the credentialed fetch does not run ${route}`, async () => {
       for (const { name, command } of JJ_BINARIES) {
         const rig = await realJjRig(command, path.join(await temporaryDirectory(), "state"), {
           allowFile: false,
@@ -1518,6 +1530,72 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       }
     }, 60_000);
   }
+
+  // A snapshot runs the programs jj's configuration names on the working copy: a working-copy
+  // filter on every changed file, a signing program for the commit it writes. The shared clone's
+  // working copy and configuration are the tree's to write, repo-scoped or through a legacy
+  // `.jj/workspace-config.toml` jj migrates. The credentialed fetch takes no snapshot, so neither
+  // planted program runs with the token in its environment; each still runs, without it, in the
+  // uncredentialed `jj workspace add`, so the test cannot pass by planting nothing. Filters are the
+  // jj fork's (the worker image's, which CI puts on PATH); stock jj has none, so this refuses it.
+  test("the credentialed fetch takes no snapshot of the shared clone's working copy", async () => {
+    const probe = await runCommand(
+      ["jj", "config", "list", "--include-defaults", "git.filter.enabled"],
+      {
+        env: {
+          JJ_CONFIG: path.join(await temporaryDirectory(), "none.toml"),
+          XDG_CONFIG_HOME: await temporaryDirectory(),
+          HOME: await temporaryDirectory(),
+        },
+      }
+    );
+    expect(
+      probe.stdout.trim(),
+      "this jj has no working-copy filters: provisioning is proven against the jj the worker image ships (packages/daemon/docker/worker.Dockerfile, ARG JJ_TOOL), which CI installs"
+    ).not.toBe("");
+    const rig = await realJjRig(["jj"], path.join(await temporaryDirectory(), "state"));
+    const witness = async (label: string, tail: string) => {
+      const sink = path.join(await temporaryDirectory(), `${label}.log`);
+      const script = path.join(await temporaryDirectory(), label);
+      await writeFile(
+        script,
+        `#!/bin/sh\nprintf '${label} token=%s\\n' "\${LEGION_PROVISIONING_TOKEN:+set}" >> ${JSON.stringify(sink)}\n${tail}\n`,
+        { mode: 0o700 }
+      );
+      return { sink, script };
+    };
+    const filter = await witness("filter", "exec cat");
+    const signer = await witness("signer", "exit 1");
+    await writeFile(
+      path.join(rig.repoCloneDir, ".jj", "workspace-config.toml"),
+      `[git.filter]\nenabled = true\n[git.filter.drivers.planted]\nclean = [${JSON.stringify(filter.script)}]\nsmudge = ["cat"]\nrequired = false\n`
+    );
+    for (const [key, value] of [
+      ["signing.behavior", "force"],
+      ["signing.backend", "gpg"],
+      ["signing.backends.gpg.program", signer.script],
+    ]) {
+      await rig.jj(["config", "set", "--repo", key, value, "-R", rig.repoCloneDir]);
+    }
+    await writeFile(path.join(rig.repoCloneDir, ".gitattributes"), "*.txt filter=planted\n");
+    await writeFile(path.join(rig.repoCloneDir, "planted.txt"), "a tree's change\n");
+
+    const failure = await provisionIssueWorkspace("WIDGETS-42", rig.deps).then(
+      () => "provisioned",
+      (error: Error) => error.message
+    );
+    for (const { sink } of [filter, signer]) {
+      const ran = (existsSync(sink) ? await readFile(sink, "utf8") : "").trim().split("\n");
+      expect(
+        ran.filter((line) => line.endsWith("token=set")),
+        sink
+      ).toEqual([]);
+      expect(ran[0], sink).toMatch(/ token=$/);
+    }
+    // The planted signer refuses to sign, so provisioning fails in the uncredentialed workspace
+    // add, after the fetch.
+    expect(failure).toContain("jj workspace add");
+  }, 60_000);
 
   test("the credentialed fetch runs no hook the shared clone carries, in .git/hooks or under a configured core.hooksPath", async () => {
     for (const { name, command } of JJ_BINARIES) {
@@ -2030,7 +2108,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     expect(calls.map((call) => call.cmd)).toEqual([
       readKeepUnreachableCommitsCommand(repoCloneDir),
       writeKeepUnreachableCommitsCommand(repoCloneDir),
-      ["jj", "git", "fetch", "-R", repoCloneDir, "--config=git.executable-path=git"],
+      fetchCommand(repoCloneDir),
       bookmarkRowsCommand("legion/WIDGETS-42", repoCloneDir),
       ["git", `--git-dir=${gitDir}`, "worktree", "prune"],
       workspaceAddCommand(workspaceDir, "widgets-42", commit, repoCloneDir),
@@ -2090,7 +2168,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     expect(calls.map((call) => call.cmd)).toEqual([
       readKeepUnreachableCommitsCommand(repoCloneDir),
       writeKeepUnreachableCommitsCommand(repoCloneDir),
-      ["jj", "git", "fetch", "-R", repoCloneDir, "--config=git.executable-path=git"],
+      fetchCommand(repoCloneDir),
       bookmarkRowsCommand("legion/WIDGETS-42", repoCloneDir),
       ["git", `--git-dir=${gitDir}`, "worktree", "prune"],
       workspaceAddCommand(workspaceDir, "widgets-42", "main", repoCloneDir),
@@ -2149,7 +2227,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     expect(calls.map((call) => call.cmd)).toEqual([
       readKeepUnreachableCommitsCommand(repoCloneDir),
       writeKeepUnreachableCommitsCommand(repoCloneDir),
-      ["jj", "git", "fetch", "-R", repoCloneDir, "--config=git.executable-path=git"],
+      fetchCommand(repoCloneDir),
       bookmarkRowsCommand("legion/WIDGETS-42", repoCloneDir),
     ]);
     expect(existsSync(workspaceDir)).toBeFalse();
@@ -2217,7 +2295,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       ).toEqual([
         readKeepUnreachableCommitsCommand(repoCloneDir),
         writeKeepUnreachableCommitsCommand(repoCloneDir),
-        ["jj", "git", "fetch", "-R", repoCloneDir, "--config=git.executable-path=git"],
+        fetchCommand(repoCloneDir),
         bookmarkRowsCommand("legion/WIDGETS-42", repoCloneDir),
       ]);
       expect(existsSync(workspaceDir), name).toBeFalse();
@@ -2415,7 +2493,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
             : { exitCode: 0, stdout: "", stderr: "" },
       })
     ).rejects.toThrow(
-      `Command failed (exit 1): jj git fetch -R ${repoCloneDir} --config=git.executable-path=git\nfatal: x`
+      `Command failed (exit 1): jj git fetch --ignore-working-copy -R ${repoCloneDir} --config=git.executable-path=git\nfatal: x`
     );
   });
 
