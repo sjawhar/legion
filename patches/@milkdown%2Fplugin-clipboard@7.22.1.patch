@@ -1,16 +1,18 @@
 diff --git a/lib/index.js b/lib/index.js
-index a1094153e619ca57d9a444896d85d0a840a0ec24..2678db061f9d9ace08b7b0d1e0a6b09e1e47d4ff 100644
+index a1094153e619ca57d9a444896d85d0a840a0ec24..76d3542a30cef7afb96e90c7431d5a73ac4a393c 100644
 --- a/lib/index.js
 +++ b/lib/index.js
-@@ -1,6 +1,6 @@
+@@ -1,7 +1,8 @@
  import { editorViewOptionsCtx, parserCtx, schemaCtx, serializerCtx } from "@milkdown/core";
  import { getNodeFromSchema, isTextOnlySlice } from "@milkdown/prose";
 -import { DOMParser, DOMSerializer } from "@milkdown/prose/model";
 +import { DOMParser, DOMSerializer, Fragment, Slice } from "@milkdown/prose/model";
  import { Plugin, PluginKey, TextSelection } from "@milkdown/prose/state";
++import { cellAround } from "@milkdown/prose/tables";
  import { $prose } from "@milkdown/utils";
  //#region src/__internal__/is-pure-text.ts
-@@ -24,6 +24,66 @@ function withMeta(plugin, meta) {
+ function isPureText(content) {
+@@ -24,6 +25,61 @@ function withMeta(plugin, meta) {
  	return plugin;
  }
  //#endregion
@@ -46,12 +48,7 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..2678db061f9d9ace08b7b0d1e0a6b09e
 +	return [start.firstChild, end.lastChild].every((node) => !node?.type.spec.isolating || fitsBeforeIsolating($pos, node.type));
 +}
 +function inTableCell($pos) {
-+	if (!$pos.parent.isTextblock) return false;
-+	for (let depth = $pos.depth; depth > 0; depth--) {
-+		const role = $pos.node(depth).type.spec.tableRole;
-+		if (role === "cell" || role === "header_cell") return true;
-+	}
-+	return false;
++	return $pos.parent.isTextblock && cellAround($pos) !== null;
 +}
 +function inlineSlice(fragment, schema) {
 +	const inline = [];
@@ -77,7 +74,7 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..2678db061f9d9ace08b7b0d1e0a6b09e
  //#region src/index.ts
  function dispatchPasteSlice(view, slice) {
  	const node = isTextOnlySlice(slice);
-@@ -53,12 +113,21 @@ var clipboard = $prose((ctx) => {
+@@ -53,12 +109,21 @@ var clipboard = $prose((ctx) => {
  			return html;
  		}
  	}));
@@ -100,7 +97,7 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..2678db061f9d9ace08b7b0d1e0a6b09e
  				const editable = view.props.editable?.(view.state);
  				const { clipboardData } = event;
  				if (!editable || !clipboardData) return false;
-@@ -81,9 +150,9 @@ var clipboard = $prose((ctx) => {
+@@ -81,9 +146,9 @@ var clipboard = $prose((ctx) => {
  				const domParser = DOMParser.fromSchema(schema);
  				let dom;
  				if (html.length === 0) {
