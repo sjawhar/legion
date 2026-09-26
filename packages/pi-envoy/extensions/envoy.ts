@@ -274,7 +274,8 @@ export default function envoyExtension(pi: PiApi): void {
   // topic, go-bootstrap.ts). They are never registered with the listener, so a resumed process
   // cannot recover them: the role's claim is their only source, and `endRole` closes them.
   const roleNoticeSubjects = new Set<string>();
-  // Counts role ends, so a role-bound subscription still opening when its role ended can tell.
+  // Counts role ends, so a role-bound subscription still opening when its role ended can tell
+  // (subscribeUnlessRoleEnds).
   let roleEnds = 0;
   let activeSessionContext: SessionContext | undefined;
   const inbox: {
@@ -608,7 +609,7 @@ export default function envoyExtension(pi: PiApi): void {
         // A close that landed during the delay leaves the marker for us instead
         // of the pump end-path. Consume it here so it cannot outlive the timer.
         if (intentionallyClosed.delete(topic)) return;
-        void subscribe(topic).catch(() => retry(NATS_RETRY_INTERVAL_MS));
+        void subscribeUnlessRoleEnds(topic).catch(() => retry(NATS_RETRY_INTERVAL_MS));
       }, delayMs);
     };
     retry(RESUBSCRIBE_DELAY_MS);
@@ -637,6 +638,19 @@ export default function envoyExtension(pi: PiApi): void {
     roleEnds += 1;
     for (const subject of roleNoticeSubjects) closeIntentionally(subject);
     roleNoticeSubjects.clear();
+  };
+
+  // Opens `topic`. A role-bound subject whose role ends while the connection is being made (a
+  // first subscribe, or the pump's retry after a dropped connection) is closed again as soon as
+  // it opens, before any registration can carry it. Answers whether the topic is still wanted.
+  const subscribeUnlessRoleEnds = async (topic: string): Promise<boolean> => {
+    const subjects = expandSubscriptionTopics([topic]);
+    const roleBound = subjects.some((subject) => roleNoticeSubjects.has(subject));
+    const endsBefore = roleEnds;
+    await subscribe(topic);
+    if (!roleBound || roleEnds === endsBefore) return true;
+    for (const subject of subjects) closeIntentionally(subject);
+    return false;
   };
 
   // The listener delivers nothing to a self-subscribed session (it takes its topics over its own
@@ -1004,8 +1018,6 @@ export default function envoyExtension(pi: PiApi): void {
       );
     }
     if (sessionID !== targetSessionID) await establishSession(context);
-    const subjects = expandSubscriptionTopics([topic]);
-    const endsBefore = roleEnds;
     if (whileHolding !== undefined) {
       if (claimedRoleTopic !== ROLE_TOPIC_PREFIX + whileHolding) {
         throw new Error(
@@ -1013,14 +1025,9 @@ export default function envoyExtension(pi: PiApi): void {
         );
       }
       // Marked before the subscription opens, so no registration ever carries it.
-      for (const subject of subjects) roleNoticeSubjects.add(subject);
+      for (const subject of expandSubscriptionTopics([topic])) roleNoticeSubjects.add(subject);
     }
-    await subscribe(topic);
-    // The role ended while the subscription waited for its connection: close what just opened.
-    if (whileHolding !== undefined && roleEnds !== endsBefore) {
-      for (const subject of subjects) closeIntentionally(subject);
-      return;
-    }
+    if (!(await subscribeUnlessRoleEnds(topic))) return;
     await registerSession();
   };
 

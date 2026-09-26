@@ -68,17 +68,24 @@ const natsConnections: {
   readonly subjects: string[];
   readonly unsubscribed: string[];
   closed: boolean;
+  /** The connection dies: every subscription's iterator ends, as nats.js ends them. */
+  readonly drop: () => void;
 }[] = [];
-/** A connect for a connection name waits on its gate, when a test sets one. */
-const natsConnectGates = new Map<string, Promise<void>>();
+/** A connect for a connection name calls its gate, when a test sets one, and waits on it. */
+const natsConnectGates = new Map<string, () => Promise<void>>();
 mock.module("nats", () => ({
   connect: async (options: { readonly name: string }) => {
-    await natsConnectGates.get(options.name);
+    await natsConnectGates.get(options.name)?.();
+    const endings: (() => void)[] = [];
     const connection = {
       name: options.name,
       subjects: [] as string[],
       unsubscribed: [] as string[],
       closed: false,
+      drop: () => {
+        connection.closed = true;
+        for (const end of endings.splice(0)) end();
+      },
     };
     natsConnections.push(connection);
     return {
@@ -88,13 +95,18 @@ mock.module("nats", () => ({
       publish: () => undefined,
       subscribe: (subject: string) => {
         connection.subjects.push(subject);
+        const ended = Promise.withResolvers<void>();
+        endings.push(ended.resolve);
         return {
           unsubscribe: () => {
             connection.unsubscribed.push(subject);
           },
-          [Symbol.asyncIterator]: async function* () {
-            await new Promise<never>(() => undefined);
-          },
+          [Symbol.asyncIterator]: () => ({
+            next: async () => {
+              await ended.promise;
+              return { done: true, value: undefined };
+            },
+          }),
         };
       },
     };
@@ -5796,10 +5808,7 @@ describe("the Go daemon's operator-launched controller (LEGION_DAEMON_API=go, LE
           (candidate) => candidate.name === "omp-ses_go_controller_first"
         );
         if (live !== undefined) live.closed = true;
-        natsConnectGates.set(
-          "omp-ses_go_controller_first",
-          connectGate.promise.finally(() => undefined)
-        );
+        natsConnectGates.set("omp-ses_go_controller_first", () => connectGate.promise);
         reconnecting.resolve();
         return undefined;
       },
@@ -5840,6 +5849,77 @@ describe("the Go daemon's operator-launched controller (LEGION_DAEMON_API=go, LE
           request.path === "/v1/interests/subscribe" && JSON.stringify(request.body).includes(topic)
       )
     ).toEqual([]);
+  });
+
+  test("a controller whose role ends while its dropped topic waits to resubscribe does not take it back", async () => {
+    const topic = "notifications.legion.omp.controller";
+    process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "1";
+    try {
+      const first = await goController({ sessionId: "ses_go_controller_first" });
+      const ticks: (() => void)[] = [];
+      const refused = Promise.withResolvers<void>();
+      await first.handlers.get("session_start")?.(
+        {},
+        {
+          ...first.context("ses_go_controller_first"),
+          setInterval: (callback) => ticks.push(callback),
+          ui: {
+            notify: (message) => {
+              if (message.includes("this session no longer holds it")) refused.resolve();
+            },
+          },
+        }
+      );
+      // The connection dies; each subject's pump retries (the agent subject's and the topic's),
+      // and both reconnects wait on the gate.
+      const connectGate = Promise.withResolvers<void>();
+      const reconnecting = Promise.withResolvers<void>();
+      let reconnects = 0;
+      natsConnectGates.set("omp-ses_go_controller_first", () => {
+        reconnects += 1;
+        if (reconnects === 2) reconnecting.resolve();
+        return connectGate.promise;
+      });
+      natsConnections.find((candidate) => candidate.name === "omp-ses_go_controller_first")?.drop();
+      await reconnecting.promise;
+      // Meanwhile a later `legion controller start` takes the role, and the first session's
+      // heartbeat is refused.
+      resetLegionBootstrappedSessionForTests();
+      const second = createPi();
+      legionExtension(second.pi);
+      await second.handlers.get("session_start")?.({}, first.context("ses_go_controller_second"));
+      for (const tick of ticks) tick();
+      await refused.promise;
+      connectGate.resolve();
+      // Every continuation of the reconnect settles before the next macrotask; then one more
+      // heartbeat registers whatever the session holds.
+      const settled = Promise.withResolvers<void>();
+      setImmediate(settled.resolve);
+      await settled.promise;
+      for (const tick of ticks) tick();
+      const registered = Promise.withResolvers<void>();
+      setImmediate(registered.resolve);
+      await registered.promise;
+
+      const openSubjects = natsConnections
+        .filter(
+          (candidate) => candidate.name === "omp-ses_go_controller_first" && !candidate.closed
+        )
+        .flatMap((connection) =>
+          connection.subjects.filter((subject) => !connection.unsubscribed.includes(subject))
+        );
+      expect(openSubjects).toContain("notifications.agent.ses_go_controller_first");
+      expect(openSubjects).not.toContain(topic);
+      expect(
+        first.requests.filter(
+          (request) =>
+            request.path === "/v1/interests/subscribe" &&
+            JSON.stringify(request.body).includes(topic)
+        )
+      ).toEqual([]);
+    } finally {
+      delete process.env.ENVOY_RESUBSCRIBE_DELAY_MS;
+    }
   });
 
   test("mints a controller grant with its registration secret for every bash command", async () => {
