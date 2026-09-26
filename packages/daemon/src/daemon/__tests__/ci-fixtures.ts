@@ -32,9 +32,9 @@ const WAIT_TIMEOUT_MS = 4_000;
  * write, a socket, a tmux or child process) is bounded by the clock, never by a count of ticks
  * or polls: on a loaded host the count runs out while the I/O is still queued (beside 48 CPU
  * spinners and 8 fsync writers, a launch's filesystem prep outlasted 100 one-millisecond polls,
- * and a controller relaunch 20,000 macrotask ticks). The condition is checked on every macrotask
- * tick for the first 20 ms, as promptly as a tick loop over resolved fakes, then every 5 ms, so a
- * long wait leaves the CPU to the I/O it waits for. */
+ * and a controller relaunch 20,000 macrotask ticks). The condition is polled every 2 ms rather
+ * than spun on `setImmediate`: a spin costs the I/O it waits for the very CPU that is scarce when
+ * these waits matter, and 2 ms is below the resolution of anything a test here asserts on. */
 export async function waitFor(
   condition: () => boolean,
   timeoutMs = WAIT_TIMEOUT_MS,
@@ -44,18 +44,10 @@ export async function waitFor(
     .replace(/\s+/g, " ")
 ): Promise<void> {
   const start = performance.now();
-  for (;;) {
-    if (condition()) return;
-    const elapsed = performance.now() - start;
-    if (elapsed >= timeoutMs)
+  while (!condition()) {
+    if (performance.now() - start >= timeoutMs)
       throw new Error(`timed out after ${timeoutMs} ms waiting for ${what}`);
-    if (elapsed < 20) {
-      const { promise, resolve } = Promise.withResolvers<void>();
-      setImmediate(resolve);
-      await promise;
-    } else {
-      await Bun.sleep(5);
-    }
+    await Bun.sleep(2);
   }
 }
 

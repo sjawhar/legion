@@ -1,4 +1,4 @@
-import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, describe, expect, it, setDefaultTimeout, vi } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -65,6 +65,13 @@ const HARNESS_IDENTITY_ENV = {
   GIT_COMMITTER_NAME: HARNESS_GIT_IDENTITY.name,
   GIT_COMMITTER_EMAIL: HARNESS_GIT_IDENTITY.email,
 };
+/** Every test here writes real files, and many drive a real tmux server or a real child process,
+ * so bun's 5 s default is itself a bound a loaded host outruns: beside 48 CPU spinners and 8 fsync
+ * writers, a workspace prep or a pane teardown that ordinarily takes milliseconds crossed it. A
+ * wait that never ends still fails fast and by name, since `waitFor`'s own deadline is 4 s; this
+ * bound only has to outlast the real work. */
+setDefaultTimeout(20_000);
+
 const tempDirs: string[] = [];
 const liveManagers: ProcessManager[] = [];
 
