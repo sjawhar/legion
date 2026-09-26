@@ -45,10 +45,10 @@ removed its temp dir, and the detached relaunch was still running against it.
 
 ## The rule
 
-`flushEventLoopUntil` is for chains built entirely from injected fakes (a manual clock, an
-instantly-resolving `sleep`), where every step is a microtask or a tick away. The moment the chain
-does real I/O, wait on **the signal the production code emits at the end of the chain**, resolved
-from inside the injected dependency that receives it:
+When the chain does real I/O, wait on **the signal the production code emits at the end of the
+chain**, resolved from inside the injected dependency that receives it. (`flushEventLoopUntil`, the
+tick loop this failure was found with, is gone; where no injected dependency carries the signal,
+the wait is `waitFor`, below.)
 
 ```ts
 const promoted = Promise.withResolvers<void>();

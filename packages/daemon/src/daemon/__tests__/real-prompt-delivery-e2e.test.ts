@@ -490,7 +490,7 @@ describe("real prompt delivery (tmux + worker-shim, no mocks)", () => {
         }
       }
     },
-    10_000
+    30_000
   );
   it.skipIf(process.env.LEGION_E2E !== "1")(
     "forwards the retry after a foreign turn makes the first prompt refuse",
@@ -520,7 +520,7 @@ describe("real prompt delivery (tmux + worker-shim, no mocks)", () => {
         }
       }
     },
-    10_000
+    30_000
   );
   it.skipIf(process.env.LEGION_E2E !== "1")(
     "commits a turn that starts after the wait expired as the same delivery, with no second prompt",

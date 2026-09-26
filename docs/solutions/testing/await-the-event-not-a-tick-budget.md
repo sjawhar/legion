@@ -45,6 +45,8 @@ gone in 661 ms while the relaunch's `mkdir` + `new-window` were still in flight.
 #1027 generalised that into one fixture convention and converted all 53 sites: 33 positive waits
 now await their event, 19 negative drains stay with a one-line reason, `flushEventLoopUntil` is
 gone. Raising the tick budget was rejected in the spec: it moves the threshold, the race stays.
+(The helper came back with later tests; on 2026-09-26 its 22 remaining sites became `waitFor`,
+which is bounded by the clock rather than by a raised count.)
 
 ## The convention
 
@@ -146,8 +148,8 @@ and a rationale that needs more than one line goes above the marker, not between
 LEGION-93's terminal test (#1082, `e7e0b7ed`) wrote a three-line comment with the `Negative wait:`
 line first and two explanatory lines under it, which the audit misses — 21 of 22 sites matched at
 that head; the fold to one line is a LEGION-146 item. A branch that predates this conversion and
-carries its own `flushEventLoopUntil`/`onceEventLoop` waits must adopt the marker form when it
-adapts to the new harness (see `../legion/mains-test-fixture-change-is-a-conflict-mergeable-does-not-see.md`).
+carries its own tick-loop waits converts each positive one to an observer or to `waitFor`, and
+each negative one to the marker form, when it adapts to the new harness (see `../legion/mains-test-fixture-change-is-a-conflict-mergeable-does-not-see.md`).
 
 Two assertions became tautologies once the wait was exact (`attemptsBeforeDispose > 0` right
 after `connects.reached(10)`; `listPanesCalls >= 2` right after
@@ -172,17 +174,19 @@ exhaust — a fail-loud timeout on more real I/O than its siblings. The root-dea
 the same kind of I/O already carried the explicit timeout; the plan's instruction to keep those
 applies to every test in that class.
 
-## `waitFor` is the one exception, and it names its missing seam
+## `waitFor` is the wait for a condition no injected dependency signals
 
-`TmuxRuntime.preparePane` calls `writeSecretFile` from `secrets.ts` directly; `TmuxRuntimeDeps`
-has no `writeSecret`, and the next injected call (`split-window`) is lane-serialised behind the
-older generation by design. The generation-race test therefore polls the file's content on a real
-5 ms timer with no tick cap — bounded only by bun's per-test timeout, so it fails loud, never
-silently. Adding the seam would be a production change the issue's acceptance 5 forbade; the
-architect ruled to keep the poll. The rule for polling as a last resort is already in
-`wait-for-a-subprocess-file-by-polling-not-by-watching.md` and
-`socket-tests-observe-the-peer-not-the-clock.md` §3; this is its third instance, and the doc
-comment on `waitFor` names the seam so nobody reaches for it by default.
+An observer is exact, so it comes first whenever the fake sees the event. Where none does, the
+test waits on the condition with the shared `waitFor(condition, timeoutMs, what)` in
+`ci-fixtures.ts`, the suite's one positive wait for a condition. It polls every 2 ms and throws
+`timed out after N ms waiting for <what>` at a real-time deadline, 4 s by default and under the
+test's own timeout, so a wait that never ends fails fast and by name. The generation-race test is
+the case that first needed it: `TmuxRuntime.preparePane` calls `writeSecretFile` from `secrets.ts`
+directly, `TmuxRuntimeDeps` has no `writeSecret`, and the next injected call (`split-window`) is
+lane-serialised behind the older generation by design, so the test waits for the file's content.
+Real subprocesses and sockets use it the same way
+(`wait-for-a-subprocess-file-by-polling-not-by-watching.md`,
+`socket-tests-observe-the-peer-not-the-clock.md` §3).
 
 ## Reproducing the race: the load recipe
 
