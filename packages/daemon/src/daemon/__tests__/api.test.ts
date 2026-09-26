@@ -17,7 +17,7 @@ import { CONTROLLER_HAS_NO_REPOSITORY, EnvoyPublishError, SAME_AGENT_REFUSAL } f
 import { type LegionState, loadState, newLegionState, saveState } from "../legion-state";
 import { TreeClosingError } from "../processes";
 import { reduceGithubEvent, routeActive } from "../reducers";
-import { checkPr, fakeDispatchClient } from "./ci-fixtures";
+import { checkPr, fakeDispatchClient, waitFor } from "./ci-fixtures";
 
 const root = "WIDGETS-1" as IssueKey;
 const child = "WIDGETS-2" as IssueKey;
@@ -3851,19 +3851,6 @@ describe("Legion HTTP API", () => {
     expect(spawnedWorkers).toEqual([]);
   });
 
-  /** Polls `condition` across real macrotask ticks (`setImmediate`, never a wall-clock wait)
-   * until it holds — the awaited chain is an HTTP request reaching a handler on the same event
-   * loop — bounded so a broken expectation fails the test instead of hanging it. */
-  async function waitUntil(condition: () => boolean, maxTicks = 20_000): Promise<void> {
-    for (let tick = 0; tick < maxTicks; tick += 1) {
-      if (condition()) return;
-      const { promise, resolve } = Promise.withResolvers<void>();
-      setImmediate(resolve);
-      await promise;
-    }
-    throw new Error("condition did not hold within the wait bound");
-  }
-
   /** Fires two spawn requests with one body and holds the caller until both have reached the
    * daemon: the first is inside `spawnWorkerImpl` (`started()` true) and the second has been
    * answered from the ledger (its `repeated` log line). Without the second wait a request still
@@ -3873,7 +3860,7 @@ describe("Legion HTTP API", () => {
     try {
       const a = json<T>("/legion/v1/worker/spawn", body);
       const b = json<T>("/legion/v1/worker/spawn", body);
-      await waitUntil(
+      await waitFor(
         () =>
           started() &&
           infoSpy.mock.calls.some(

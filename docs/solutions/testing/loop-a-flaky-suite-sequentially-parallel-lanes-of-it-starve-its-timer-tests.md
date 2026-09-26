@@ -46,8 +46,9 @@ proves nothing about the race and would have sent a reader chasing four unrelate
 ## Why lanes of the same suite are the wrong load generator
 
 The daemon suite has tests whose correctness depends on a timer firing within a bounded window
-relative to another operation — a `flushEventLoopUntil(cond)` that gives up after a tick budget,
-a deadline armed at `setTimeout(…, 20)` that must land before a fake pane's next event. Running
+relative to another operation — a `waitFor(cond)` that gives up at its clock deadline (a
+`flushEventLoopUntil(cond)` tick budget when this was written), a deadline armed at
+`setTimeout(…, 20)` that must land before a fake pane's next event. Running
 eight copies of that suite at once multiplies the number of such windows competing for the same
 cores; when a window is missed the test fails on *its* assertion, not on the provisioning race.
 Those failures are real starvation, but of the wrong thing: they measure how robust the suite's

@@ -45,10 +45,10 @@ removed its temp dir, and the detached relaunch was still running against it.
 
 ## The rule
 
-`flushEventLoopUntil` is for chains built entirely from injected fakes (a manual clock, an
-instantly-resolving `sleep`), where every step is a microtask or a tick away. The moment the chain
-does real I/O, wait on **the signal the production code emits at the end of the chain**, resolved
-from inside the injected dependency that receives it:
+When the chain does real I/O, wait on **the signal the production code emits at the end of the
+chain**, resolved from inside the injected dependency that receives it. (`flushEventLoopUntil`, the
+tick loop this failure was found with, is gone; where no injected dependency carries the signal,
+the wait is `waitFor`, below.)
 
 ```ts
 const promoted = Promise.withResolvers<void>();
@@ -66,8 +66,23 @@ await promoted.promise; // the relaunch published worker-started: claim written,
 claim written, token dequeued, persisted), so every assertion behind it is deterministic, and a wait
 that never resolves fails on bun's own test timeout with the assertions unreached — never a false
 green. The same file already had this idiom (`windowCounter` for `new-window` launches; the
-`publishRole` hook in the queued-promotion tests); reuse it rather than adding a wall-clock poll,
-which is a third convention and still a guess.
+`publishRole` hook in the queued-promotion tests); reuse it first.
+
+**When no injected dependency carries the signal, the wait is bounded by the clock.** That is
+`waitFor(condition, timeoutMs, what)` in `ci-fixtures.ts`, the file's one positive wait: it polls
+every 2 ms and throws `timed out after N ms waiting for <what>` at its deadline, 4 s by default,
+under bun's own per-test timeout. It replaced every tick and poll count in the daemon tests on
+2026-09-26, after the same failure recurred across the family: beside 48 CPU spinners and 8 fsync
+writers, `retires its own just-opened pane and reports TreeClosingError` ran out of its 100
+one-millisecond polls at 847 ms with the launch still in its filesystem prep, and
+`resurrects a controller whose pane died before /controller/ready` ran out of 20,000 macrotask
+ticks. Ten loaded rounds of `processes.test.ts` and `worker-stream-e2e.test.ts` at loadavg 85-242
+failed 8 times before the change and 0 times after.
+
+**The per-test timeout is a bound of the same kind.** bun's 5 s default is a count of milliseconds
+over work that is not bounded by milliseconds, so a file whose every test writes real files raises
+it once (`setDefaultTimeout(20_000)` in `processes.test.ts`, `30_000` where real CLI children dial a
+listener). The named 4 s wait still fires first, so a hang fails fast and says what it waited for.
 
 After the change the file passed 10 of 10 whole-file runs at loadavg 97–101 and, after the
 conflict-forced rebase, 10 of 10 more at loadavg 116–123 (the tester's failing range); the tester's

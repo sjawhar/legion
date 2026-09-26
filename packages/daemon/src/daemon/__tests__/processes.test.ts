@@ -1,4 +1,4 @@
-import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, describe, expect, it, setDefaultTimeout, vi } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -43,7 +43,7 @@ import { type ControllerLocator, type Locator, sameProcess, type TmuxLocator } f
 import { TmuxRuntime, type TmuxRuntimeDeps } from "../runtime-tmux";
 import { installWorkerGhShim, pathWithoutWorkerBin } from "../worker-bin";
 import { connectWorkerRpc } from "../worker-rpc";
-import { checkPr, fakeDispatchClient, procStatLine } from "./ci-fixtures";
+import { checkPr, fakeDispatchClient, procStatLine, waitFor } from "./ci-fixtures";
 import { FakeRuntime, type FakeWorkerRpcClient, fakeWorkerRpcClient } from "./fake-runtime";
 import { createTmuxTestServer, waitForSocket } from "./real-tmux-fixture";
 
@@ -65,6 +65,13 @@ const HARNESS_IDENTITY_ENV = {
   GIT_COMMITTER_NAME: HARNESS_GIT_IDENTITY.name,
   GIT_COMMITTER_EMAIL: HARNESS_GIT_IDENTITY.email,
 };
+/** Every test here writes real files, and many drive a real tmux server or a real child process,
+ * so bun's 5 s default is itself a bound a loaded host outruns: beside 48 CPU spinners and 8 fsync
+ * writers, a workspace prep or a pane teardown that ordinarily takes milliseconds crossed it. A
+ * wait that never ends still fails fast and by name, since `waitFor`'s own deadline is 4 s; this
+ * bound only has to outlast the real work. */
+setDefaultTimeout(20_000);
+
 const tempDirs: string[] = [];
 const liveManagers: ProcessManager[] = [];
 
@@ -95,22 +102,15 @@ function onceEventLoop(): Promise<void> {
  * injected fake, so a tick count IS the whole event (the fired deadline or clock reaches its
  * identity/role/disposed check by microtask hops and returns). Every positive wait awaits its
  * event through the fixture's observers (`saves`, `runs`, `sleeps`, `published`, an
- * `eventCounter`) or a gate the test's own fake resolves (`Promise.withResolvers`, settled from
- * inside the fake at the event); a drain must never be the thing a test waits on for work that
- * includes a file write or an injected `run`, because its tick budget races that I/O under
- * load. Each caller carries a `// Negative wait:` line naming the decline it drains over. */
+ * `eventCounter`), a gate the test's own fake resolves (`Promise.withResolvers`, settled from
+ * inside the fake at the event), or `waitFor`'s clock-bounded poll of a condition; a drain must
+ * never be the thing a test waits on for work that includes a file write or an injected `run`,
+ * because its tick budget races that I/O under load. Each caller carries a `// Negative wait:`
+ * line naming the decline it drains over. */
 async function flushEventLoop(ticks = 2_000): Promise<void> {
   for (let tick = 0; tick < ticks; tick += 1) {
     await onceEventLoop();
   }
-}
-
-async function flushEventLoopUntil(predicate: () => boolean, ticks = 2_000): Promise<void> {
-  for (let tick = 0; tick < ticks; tick += 1) {
-    if (predicate()) return;
-    await onceEventLoop();
-  }
-  throw new Error("condition did not become true");
 }
 
 /** Captures every `console.error` line written while `fn` runs, restoring the console after. */
@@ -200,18 +200,6 @@ function keyed<K, T>(create: () => T): (key: K) => T {
  * deadline sleep it awaits instead of a literal. */
 function registrationDeadlineMs(config: DaemonConfig): number {
   return config.workerBootTimeoutSeconds * 1000 * config.workerBootRegistrationDeadlineIntervals;
-}
-
-/** Polls `condition` every 5 ms of real time until it holds. The timer is a poll interval, never
- * a wait budget: the wait ends the moment the condition holds and is bounded only by bun's
- * per-test timeout, so a condition that never holds fails the test loud with its assertion
- * unreached. Fake time cannot drive this one: it is reserved for an effect with no injectable
- * seam -- today the secret-file write `TmuxRuntime.preparePane` makes through `secrets.ts`
- * directly, with no injected dep between it and a tmux call the test can hold -- so there is no
- * fake to resolve from. Every other positive wait in this file awaits its event through the
- * fixture's observers or a gate its own fake resolves (see `flushEventLoop`). */
-async function waitFor(condition: () => boolean): Promise<void> {
-  while (!condition()) await new Promise<void>((resolve) => setTimeout(resolve, 5));
 }
 
 async function temporaryDir(): Promise<string> {
@@ -4446,7 +4434,7 @@ describe("ProcessManager", () => {
       });
       // The linger's own background retire sends both frames without any further call; the
       // explicit retire below only joins it (or finds nothing left).
-      await flushEventLoopUntil(() => shutdowns.length === 2);
+      await waitFor(() => shutdowns.length === 2);
       await processes.retireTreeProcesses(root);
     });
 
@@ -4487,7 +4475,7 @@ describe("ProcessManager", () => {
       await processes.beginLinger(root);
       // Resolved with the stop still pending: the frame goes out on its own, and nothing has
       // released the root's socket yet.
-      await flushEventLoopUntil(() => shutdowns.length === 1);
+      await waitFor(() => shutdowns.length === 1);
       expect(shutdowns).toEqual(["/state/workers/architect.sock"]);
       expect(state.trees[root]).toMatchObject({
         status: "lingering",
@@ -4539,7 +4527,7 @@ describe("ProcessManager", () => {
     try {
       await processes.beginLinger(root);
       const lines = () => errors.mock.calls.map((call) => call.map(String).join(" "));
-      await flushEventLoopUntil(() =>
+      await waitFor(() =>
         lines().some((line) =>
           line.includes(`retiring the processes of lingering tree ${root} failed after linger`)
         )
@@ -4793,7 +4781,7 @@ describe("ProcessManager", () => {
 
     await capturingErrors(async () => {
       await processes.beginLinger(root);
-      await flushEventLoopUntil(() => shutdowns.length === 1);
+      await waitFor(() => shutdowns.length === 1);
       expect(state.admission).toEqual({ cap: 1, active: [], queue: [] });
       // The human reopens the issue while the root is still answering its shutdown frame: the
       // re-admission takes the free slot and its launch waits on the retire.
@@ -4835,7 +4823,7 @@ describe("ProcessManager", () => {
 
     await capturingErrors(async () => {
       await processes.beginLinger(root);
-      await flushEventLoopUntil(() => shutdowns.length === 1);
+      await waitFor(() => shutdowns.length === 1);
       // The freed slot goes to the occupant; the reopen then finds the cap full and queues.
       state.admission.active = [occupant];
       const rootIssue = state.issues[root];
@@ -4928,7 +4916,7 @@ describe("ProcessManager", () => {
       // A retire from the previous tick is still holding the root when the sweep finds the tree
       // expired and its close joins that retire.
       const retiring = processes.retireTreeProcesses(root);
-      await flushEventLoopUntil(() => shutdowns.length === 1);
+      await waitFor(() => shutdowns.length === 1);
       const closing = processes.closeTree(root);
       // The human reopens the issue during the join.
       const rootIssue = state.issues[root];
@@ -5428,10 +5416,7 @@ describe("ProcessManager", () => {
 
     const closing = processes.closeTree(root);
 
-    for (let attempt = 0; attempt < 100 && !reportRootExitSettled; attempt++) {
-      await new Promise((resolve) => setTimeout(resolve, 1));
-    }
-    expect(reportRootExitSettled).toBe(true);
+    await waitFor(() => reportRootExitSettled);
 
     await closing;
 
@@ -5854,9 +5839,9 @@ describe("ProcessManager", () => {
         const closing = processes.closeTree(root);
         // The root leg is awaited before the worker leg runs, so each held shutdown is released
         // as it arrives; three callers, two shutdown frames in total.
-        await flushEventLoopUntil(() => shutdowns.length === 1);
+        await waitFor(() => shutdowns.length === 1);
         releases[0]?.();
-        await flushEventLoopUntil(() => shutdowns.length === 2);
+        await waitFor(() => shutdowns.length === 2);
         releases[1]?.();
         await Promise.all([first, second, closing]);
       });
@@ -5917,7 +5902,7 @@ describe("ProcessManager", () => {
       // The promoted launch's real workspace I/O ends at its `new-window`, the event awaited; what
       // follows it (the claim's locator, the queue shift, the fixture's no-op save) is microtasks.
       await launched;
-      await flushEventLoopUntil(() => managedState.workerAdmission.queue.length === 0);
+      await waitFor(() => managedState.workerAdmission.queue.length === 0);
 
       const promoted = managedState.roles[queuedToken];
       if (!promoted || !("issue" in promoted)) throw new Error("queued claim missing");
@@ -8446,11 +8431,10 @@ describe("ProcessManager", () => {
     // The pane hangs past the deadline and then exits on its own, never having claimed.
     paneAlive = false;
     sleepGate.resolve();
-    await flushEventLoopUntil(
+    await waitFor(
       () =>
         managedState.controllerLocator?.runtime === "tmux" &&
-        managedState.controllerLocator.tmuxWindowId === "@44",
-      20_000
+        managedState.controllerLocator.tmuxWindowId === "@44"
     );
 
     // Nothing to kill (already dead), no fresh start: the recorded transcript is resumed.
@@ -8531,7 +8515,7 @@ describe("ProcessManager", () => {
     // Incarnation 2 dies during boot, before it ever posts /controller/ready.
     deadPanes.add("%2");
     sleepGate.resolve();
-    await flushEventLoopUntil(() => paneOf() === "%3", 20_000);
+    await waitFor(() => paneOf() === "%3");
 
     const spawnCommands = commands.filter((command) => command[3] === "new-window");
     expect(spawnCommands).toHaveLength(2);
@@ -11922,7 +11906,7 @@ describe("ProcessManager", () => {
         // The pane is killed under the daemon. tmux reaps it out of its table a few ms after the
         // process exits, so the kill is awaited through tmux's own listing, never a fixed delay.
         await commandRunner(["tmux", "-L", session, "kill-pane", "-t", pane.tmuxPaneId]);
-        await waitFor(() => !existsSync(`/proc/${pane.panePid}`));
+        await waitFor(() => !existsSync(`/proc/${pane.panePid}`), 20_000);
 
         await processes.probeWorkerClaim(token);
 
@@ -12022,17 +12006,21 @@ describe("ProcessManager", () => {
         // relaunch writes and the process it starts, never a fixed delay: both happen in other
         // processes (tmux, the new shim) no fake clock can advance.
         await commandRunner(["tmux", "-L", session, "kill-pane", "-t", pane.tmuxPaneId]);
-        await waitFor(() => {
-          const current = state.roles[token];
-          const fresh = current && "issue" in current ? tmuxFields(current.locator) : undefined;
-          return (
-            current !== undefined &&
-            "issue" in current &&
-            current.generation === 2 &&
-            fresh?.panePid !== undefined &&
-            existsSync(`/proc/${fresh.panePid}`)
-          );
-        });
+        await waitFor(
+          () => {
+            const current = state.roles[token];
+            const fresh = current && "issue" in current ? tmuxFields(current.locator) : undefined;
+            return (
+              current !== undefined &&
+              "issue" in current &&
+              current.generation === 2 &&
+              fresh?.panePid !== undefined &&
+              existsSync(`/proc/${fresh.panePid}`)
+            );
+          },
+          20_000,
+          "the generation-2 relaunch's pane process"
+        );
 
         const relaunched = claim();
         expect(relaunched.launchFailures).toBe(1);
@@ -13338,17 +13326,9 @@ describe("ProcessManager", () => {
     });
 
     const spawnPromise = processes.spawnWorker(root, child, "tester", "verify #41");
-    // Poll (real macrotask ticks, not just microtasks -- the workspace/socket prep this crosses
-    // first are real fs operations) until the launch has actually reached its blocked
-    // `new-window` call before starting the race.
-    for (
-      let attempt = 0;
-      attempt < 100 && !commands.some((c) => c[3] === "new-window");
-      attempt++
-    ) {
-      await new Promise((resolve) => setTimeout(resolve, 1));
-    }
-    expect(commands.some((c) => c[3] === "new-window")).toBe(true);
+    // The launch crosses real fs work (workspace and socket prep) before its blocked `new-window`
+    // call, so the race starts once that call is observed, on the clock (see `waitFor`).
+    await waitFor(() => commands.some((c) => c[3] === "new-window"));
 
     const closePromise = processes.closeTree(root);
     paneOpenGate.resolve();
@@ -13410,14 +13390,7 @@ describe("ProcessManager", () => {
     });
 
     const spawnPromise = processes.spawnWorker(root, child, "tester", "verify #41");
-    for (
-      let attempt = 0;
-      attempt < 100 && !commands.some((c) => c[3] === "new-window");
-      attempt++
-    ) {
-      await new Promise((resolve) => setTimeout(resolve, 1));
-    }
-    expect(commands.some((c) => c[3] === "new-window")).toBe(true);
+    await waitFor(() => commands.some((c) => c[3] === "new-window"));
 
     let closeSettled = false;
     const closePromise = processes.closeTree(root).then(() => {
@@ -13488,13 +13461,7 @@ describe("ProcessManager", () => {
     });
 
     const spawnPromise = processes.spawnWorker(root, child, "tester", "verify #41");
-    for (
-      let attempt = 0;
-      attempt < 100 && !commands.some((c) => c[3] === "new-window");
-      attempt++
-    ) {
-      await new Promise((resolve) => setTimeout(resolve, 1));
-    }
+    await waitFor(() => commands.some((c) => c[3] === "new-window"));
     const closePromise = processes.closeTree(root);
     paneOpenGate.resolve();
 
@@ -13566,9 +13533,7 @@ describe("ProcessManager", () => {
     });
 
     const spawnPromise = processes.spawnWorker(root, root, "tester", "verify again");
-    for (let attempt = 0; attempt < 100 && stuckClient.getStateCalls === 0; attempt++) {
-      await new Promise((resolve) => setTimeout(resolve, 1));
-    }
+    await waitFor(() => stuckClient.getStateCalls > 0);
     expect(stuckClient.getStateCalls).toBe(1);
 
     let closeSettled = false;
@@ -16830,14 +16795,7 @@ describe("ProcessManager", () => {
     // Poll until the launch has actually reached its blocked `split-window` call before racing:
     // `inFlightLaunches` makes `closeTree` await this exact decision before concluding the
     // tree is empty, so starting the race any earlier would just serialize the two calls.
-    for (
-      let attempt = 0;
-      attempt < 100 && !commands.some((c) => c[3] === "split-window");
-      attempt++
-    ) {
-      await new Promise((resolve) => setTimeout(resolve, 1));
-    }
-    expect(commands.some((c) => c[3] === "split-window")).toBe(true);
+    await waitFor(() => commands.some((c) => c[3] === "split-window"));
 
     const closePromise = processes.closeTree(root);
     launchGate.resolve();
@@ -16900,14 +16858,7 @@ describe("ProcessManager", () => {
     // queue-drain, never through `spawnWorker`.
     const drainPromise = processes.reconcileWorkerAdmission();
 
-    for (
-      let attempt = 0;
-      attempt < 100 && !commands.some((c) => c[3] === "split-window");
-      attempt++
-    ) {
-      await new Promise((resolve) => setTimeout(resolve, 1));
-    }
-    expect(commands.some((c) => c[3] === "split-window")).toBe(true);
+    await waitFor(() => commands.some((c) => c[3] === "split-window"));
 
     let closeSettled = false;
     const closePromise = processes.closeTree(root).then(() => {
@@ -22241,10 +22192,10 @@ describe("ProcessManager", () => {
     try {
       const ready = processes.workerReady(root, "tester", "ses_tester", 1);
       for (const delay of [5_000, 15_000, 45_000, 90_000, 180_000]) {
-        await flushEventLoopUntil(() => clock.pending.some((wait) => wait.ms === delay));
+        await waitFor(() => clock.pending.some((wait) => wait.ms === delay));
         expect(clock.fire(delay)).toBeTrue();
       }
-      await flushEventLoopUntil(() => clock.pending.some((wait) => wait.ms === 180_000));
+      await waitFor(() => clock.pending.some((wait) => wait.ms === 180_000));
       expect(state.roles[token]?.promptFailures).toBe(1);
       // Five retry lines, then the cycle's single exhausted line names the verdict; the retrier
       // itself logs nothing for the final attempt.
@@ -22265,7 +22216,7 @@ describe("ProcessManager", () => {
       ]);
 
       expect(clock.fire(180_000)).toBeTrue();
-      await flushEventLoopUntil(() => clock.pending.some((wait) => wait.ms === 5_000));
+      await waitFor(() => clock.pending.some((wait) => wait.ms === 5_000));
       expect(errors.mock.calls.filter((call) => call[0] === workerPrefix)).toHaveLength(2);
       const claim = state.roles[token];
       if (!claim || !("issue" in claim)) throw new Error("worker claim disappeared");
@@ -22313,10 +22264,10 @@ describe("ProcessManager", () => {
     });
     const ready = processes.workerReady(root, "tester", "ses_tester", 1);
     for (const delay of [5_000, 15_000, 45_000, 90_000, 180_000]) {
-      await flushEventLoopUntil(() => clock.pending.some((wait) => wait.ms === delay));
+      await waitFor(() => clock.pending.some((wait) => wait.ms === delay));
       expect(clock.fire(delay)).toBeTrue();
     }
-    await flushEventLoopUntil(() => clock.pending.some((wait) => wait.ms === 180_000));
+    await waitFor(() => clock.pending.some((wait) => wait.ms === 180_000));
     processes.dispose();
     expect(clock.fire(180_000)).toBeTrue();
     await ready;
@@ -22364,10 +22315,10 @@ describe("ProcessManager", () => {
     try {
       const ready = processes.workerReady(root, "tester", "ses_tester", 1);
       for (const delay of [5_000, 15_000, 45_000, 90_000, 180_000]) {
-        await flushEventLoopUntil(() => clock.pending.some((wait) => wait.ms === delay));
+        await waitFor(() => clock.pending.some((wait) => wait.ms === delay));
         expect(clock.fire(delay)).toBeTrue();
       }
-      await flushEventLoopUntil(() => clock.pending.some((wait) => wait.ms === 180_000));
+      await waitFor(() => clock.pending.some((wait) => wait.ms === 180_000));
       const claim = state.roles[token];
       if (!claim || !("issue" in claim)) throw new Error("worker claim disappeared");
       expect(claim.promptRetires).toBeUndefined();
@@ -22426,7 +22377,7 @@ describe("ProcessManager", () => {
     try {
       const ready = processes.workerReady(root, "tester", "ses_tester", 1);
       for (const delay of [5_000, 15_000, 45_000, 90_000, 180_000]) {
-        await flushEventLoopUntil(() => clock.pending.some((wait) => wait.ms === delay));
+        await waitFor(() => clock.pending.some((wait) => wait.ms === delay));
         expect(clock.fire(delay)).toBeTrue();
       }
       await ready;
@@ -22498,7 +22449,7 @@ describe("ProcessManager", () => {
     });
     await processes.workerReady(root, "tester", "ses_tester", 1);
     client.emitLateRefusal();
-    await flushEventLoopUntil(() => {
+    await waitFor(() => {
       const current = state.roles[token];
       return current !== undefined && "issue" in current && current.pendingAssignment !== undefined;
     });
@@ -22543,7 +22494,7 @@ describe("ProcessManager", () => {
     const { manager: processes } = manager(state, { connectWorkerRpc: async () => client });
     await processes.workerReady(root, "tester", "ses_tester", 1);
     client.emitLateRefusal();
-    await flushEventLoopUntil(() => {
+    await waitFor(() => {
       const current = state.roles[token];
       return current !== undefined && "issue" in current && current.pendingAssignment !== undefined;
     });
@@ -22606,7 +22557,7 @@ describe("ProcessManager", () => {
       },
     });
     const ready = processes.workerReady(root, "tester", "ses_tester", 1);
-    await flushEventLoopUntil(() => clock.pending.some((wait) => wait.ms === 5_000));
+    await waitFor(() => clock.pending.some((wait) => wait.ms === 5_000));
     expect(clock.fire(5_000)).toBeTrue();
     await ready;
     expect(metaedits).toHaveLength(2);
