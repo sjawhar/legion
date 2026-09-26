@@ -111,7 +111,8 @@ var inlineMarkdownParser = parser.NewParser(
 )
 
 // ParseInline converts one textblock's worth of inline markdown into inline
-// nodes. Markdown that forms more than one paragraph is ErrSchema.
+// nodes. Markdown that forms more than one paragraph, or holds text after its
+// paragraph's last line, is ErrSchema.
 func ParseInline(markdown string) ([]*Node, error) {
 	source := []byte(markdown)
 	root := inlineMarkdownParser.Parse(gmtext.NewReader(source))
@@ -121,12 +122,116 @@ func ParseInline(markdown string) ([]*Node, error) {
 	if root.ChildCount() == 0 {
 		return nil, nil
 	}
+	if dropped := textOutside(root.FirstChild(), source); dropped != "" {
+		return nil, fmt.Errorf("%w: inline markdown holds text outside its paragraph, %q, which would be lost", ErrSchema, dropped)
+	}
 	paragraph, err := parseBlock(root.FirstChild(), source, nil)
 	if err != nil {
 		return nil, err
 	}
 	sortNodeMarks(paragraph)
 	return paragraph.Children, nil
+}
+
+// BlockReadError is the parser's refusal of a document-level block's markdown, or nil when the
+// parser reads it back.
+func BlockReadError(block *Node) error {
+	markdown, err := Render(readAlone(block))
+	if err != nil {
+		return err
+	}
+	_, err = Parse(markdown)
+	return err
+}
+
+// BlockShapeError says what a document-level block's markdown reads back as when that is not
+// blocks of the same kinds nested the same way - the first block that reads back as another - or
+// is nil when it reads back so, or the parser's refusal of the markdown. What a textblock holds is
+// not compared.
+func BlockShapeError(block *Node) error {
+	doc := readAlone(block)
+	markdown, err := Render(doc)
+	if err != nil {
+		return err
+	}
+	back, err := Parse(markdown)
+	if err != nil {
+		return err
+	}
+	if want, got := shapeDifference(doc, back); want != "" {
+		return fmt.Errorf("%s reads back as %s", want, got)
+	}
+	return nil
+}
+
+// shapeDifference names the first block of want that got holds as another kind, or holds where
+// want has none, or lacks; both are empty when the two have the same shape. An empty paragraph is
+// not written, so it is not expected back - except in a table cell, which is written with its
+// paragraph however little it holds, and reads back holding one.
+func shapeDifference(want, got *Node) (string, string) {
+	if want.Type != got.Type {
+		return blockName(want.Type), blockName(got.Type)
+	}
+	if isTextblock(want.Type) {
+		return "", ""
+	}
+	cell := want.Type == "table_cell" || want.Type == "table_header"
+	written := make([]*Node, 0, len(want.Children))
+	for _, child := range want.Children {
+		if cell || child.Type != "paragraph" || len(child.Children) != 0 {
+			written = append(written, child)
+		}
+	}
+	for index := 0; index < max(len(written), len(got.Children)); index++ {
+		switch {
+		case index >= len(written):
+			return endOf(want.Type), blockName(got.Children[index].Type)
+		case index >= len(got.Children):
+			return blockName(written[index].Type), "nothing"
+		}
+		if w, g := shapeDifference(written[index], got.Children[index]); w != "" {
+			return w, g
+		}
+	}
+	return "", ""
+}
+
+// endOf names where a block's children end, as a reader names it.
+func endOf(nodeType string) string {
+	if nodeType == "doc" {
+		return "the document's end"
+	}
+	return "the " + strings.ReplaceAll(nodeType, "_", " ") + "'s end"
+}
+
+// readAlone is the document a block is read in on its own. It follows a paragraph, as a block
+// holding a match does, since at a document's start a `---` line opens front matter; front matter
+// is read first, where it is written, and a footnote definition after a reference to it, since
+// the parser reads a definition only when something refers to it.
+func readAlone(block *Node) *Node {
+	switch block.Type {
+	case "frontmatter":
+		return &Node{Type: "doc", Children: []*Node{block}}
+	case "footnote_definition":
+		reference := &Node{Type: "footnote_reference", Attrs: Attrs{"label": block.Attrs["label"]}}
+		return &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{reference}}, block}}
+	default:
+		lead := &Node{Type: "paragraph", Children: []*Node{{Type: "text", Text: "Before."}}}
+		return &Node{Type: "doc", Children: []*Node{lead, block}}
+	}
+}
+
+// textOutside is the first line of text after the paragraph's last line. The inline parser knows
+// only paragraphs and stops at the first line it cannot open one on - an indented code block
+// after a blank line - so everything from there on is skipped rather than refused, and a caller
+// who is told nothing loses it. A second paragraph is refused before this is asked.
+func textOutside(paragraph ast.Node, source []byte) string {
+	lines := paragraph.Lines()
+	rest := strings.TrimSpace(string(source[lines.At(lines.Len()-1).Stop:]))
+	if end := strings.IndexByte(rest, '\n'); end >= 0 {
+		rest = strings.TrimSpace(rest[:end])
+	}
+	return rest
 }
 
 func parseTableRows(markdown string, width int) ([]*Node, bool, error) {
@@ -337,7 +442,7 @@ func parseBlock(node ast.Node, source []byte, footnotes map[int]string) (*Node, 
 		return &Node{Type: "hr"}, nil
 	case *ast.HTMLBlock:
 		// Proof's doc accepts blocks only, while html is an inline atom.
-		return nil, fmt.Errorf("%w: block HTML is not accepted by Proof", ErrSchema)
+		return nil, ErrBlockHTML
 	case *extensionast.Footnote:
 		children, err := parseBlocks(current, source, footnotes)
 		if err != nil {
@@ -354,7 +459,7 @@ func parseBlock(node ast.Node, source []byte, footnotes map[int]string) (*Node, 
 	case *extensionast.Table:
 		return parseTable(current, source, footnotes)
 	default:
-		return nil, fmt.Errorf("%w: unsupported markdown block %T", ErrSchema, node)
+		return nil, fmt.Errorf("%w: unsupported markdown block %s", ErrSchema, node.Kind())
 	}
 }
 
@@ -370,6 +475,11 @@ func parseBlocks(parent ast.Node, source []byte, footnotes map[int]string) ([]*N
 				children = append(children, parsed)
 			}
 			continue
+		}
+		// Goldmark puts a footnote's backlink after a definition's last block when that block is
+		// not a paragraph, which this parser does not read.
+		if _, ok := child.(*extensionast.FootnoteBacklink); ok && len(children) > 0 {
+			return nil, fmt.Errorf("%w: a footnote definition that ends in %s rather than a paragraph", ErrSchema, blockName(children[len(children)-1].Type))
 		}
 		parsed, err := parseBlock(child, source, footnotes)
 		if err != nil {
@@ -422,7 +532,7 @@ func parseList(list *ast.List, source []byte, footnotes map[int]string) (*Node, 
 	for child := list.FirstChild(); child != nil; child = child.NextSibling() {
 		item, ok := child.(*ast.ListItem)
 		if !ok {
-			return nil, fmt.Errorf("%w: list contains %T", ErrSchema, child)
+			return nil, fmt.Errorf("%w: list contains %s", ErrSchema, child.Kind())
 		}
 		parsed, err := parseListItem(item, source, footnotes)
 		if err != nil {
@@ -476,7 +586,7 @@ func parseTable(table *extensionast.Table, source []byte, footnotes map[int]stri
 			}
 			children = append(children, parsed)
 		default:
-			return nil, fmt.Errorf("%w: unsupported table child %T", ErrSchema, child)
+			return nil, fmt.Errorf("%w: unsupported table child %s", ErrSchema, child.Kind())
 		}
 	}
 	return &Node{Type: "table", Children: children}, nil
@@ -493,7 +603,7 @@ func parseTableRow(row ast.Node, header bool, source []byte, footnotes map[int]s
 	for child := row.FirstChild(); child != nil; child = child.NextSibling() {
 		cell, ok := child.(*extensionast.TableCell)
 		if !ok {
-			return nil, fmt.Errorf("%w: unsupported table cell %T", ErrSchema, child)
+			return nil, fmt.Errorf("%w: unsupported table cell %s", ErrSchema, child.Kind())
 		}
 		content, err := parseTableCellInline(cell, source, nil, footnotes)
 		if err != nil {
@@ -627,7 +737,7 @@ func parseInlineWithTableCellLinks(parent ast.Node, source []byte, initial []Mar
 			}
 			children = append(children, &Node{Type: "html", Attrs: Attrs{"value": value}})
 		default:
-			return nil, fmt.Errorf("%w: unsupported markdown inline %T", ErrSchema, child)
+			return nil, fmt.Errorf("%w: unsupported markdown inline %s", ErrSchema, child.Kind())
 		}
 	}
 	return children, nil

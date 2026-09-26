@@ -10,7 +10,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"unicode"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
@@ -688,19 +687,41 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		if err != nil {
 			return nil, err
 		}
-		replacement, level, err := replacementMarkdown(tree, r, op.Find, op.With)
-		if err != nil {
-			return nil, err
+		at, _ := pmdoc.ContainingTextblock(tree, r.From)
+		code := at.Node.Type == "code_block"
+		var with *pmdoc.Node
+		level := 0
+		if code {
+			with = codeReplacement(op.With)
+		} else {
+			var replacement string
+			if replacement, level, err = replacementMarkdown(tree, r, op.Find, op.With); err != nil {
+				return nil, err
+			}
+			if with, err = inlineReplacement(replacement, edgesOf(at, r)); err != nil {
+				return nil, err
+			}
 		}
-		with, err := inlineReplacement(replacement)
-		if err != nil {
-			return nil, err
+		if hasHardBreak(with) && at.OneLine() {
+			return nil, &ErrInvalidOp{Field: "with", Reason: fmt.Sprintf(
+				"with %q carries a hard break, which a heading or a table cell cannot hold: it is written on one line, so the break would end the block there; write the text without the break, or insert a new block after this one",
+				op.With,
+			)}
 		}
 		next, err := pmdoc.Splice(tree, r, with)
-		if err != nil || level == 0 {
-			return next, err
+		if err == nil && level != 0 {
+			next, err = pmdoc.SetHeadingLevel(next, r.From, level)
 		}
-		return pmdoc.SetHeadingLevel(next, r.From, level)
+		if err != nil {
+			return nil, err
+		}
+		if code {
+			return next, refuseCodeThatEndsItsBlock(tree, next, r, at, "with", op.With)
+		}
+		if err := refuseUnreadableReplacement(tree, next, r, op.With); err != nil {
+			return nil, err
+		}
+		return next, refuseReshapedReplacement(tree, next, r, op.With)
 	case "delete":
 		if op.Block != "" {
 			if op.Find != "" {
@@ -1029,10 +1050,121 @@ func insertTarget(tree *pmdoc.Node, field, anchor string, occurrence *int) (pmdo
 	return r, true, nil
 }
 
+// refuseUnreadableReplacement refuses a replace that makes the document-level block it lands in
+// unreadable: one the parser read back before the replace and refuses after it. What markdown
+// reads as a block depends on where the text lands, so the rendered block decides it rather than
+// the replacement alone: `<div>x</div>` over a whole paragraph, at a list item's start or after a
+// hard break opens an HTML block the Proof schema does not carry, while the same HTML inside a
+// line, a table cell or a heading is inline HTML and is kept. A block that was already unreadable,
+// or another block that is, is no reason to refuse this replace. A replace stays inside its
+// textblock, so the block holds the same index before and after.
+func refuseUnreadableReplacement(before, after *pmdoc.Node, match pmdoc.Range, with string) error {
+	unreadable, err := replacementBroke(before, after, match, pmdoc.BlockReadError)
+	if err != nil || unreadable == nil {
+		return err
+	}
+	return &ErrInvalidOp{Field: "with", Reason: unreadableReason(before, after, match, with, unreadable)}
+}
+
+// refuseReshapedReplacement refuses a replace whose text the document reads back as blocks of
+// another shape where it lands: a heading and a table cell are written on one line, so a line
+// break inside a code span or inline HTML there ends the block, as a hard break would
+// (hasHardBreak), and the document reads back a heading and a paragraph, or a row as two rows.
+func refuseReshapedReplacement(before, after *pmdoc.Node, match pmdoc.Range, with string) error {
+	reshaped, err := replacementBroke(before, after, match, pmdoc.BlockShapeError)
+	if err != nil || reshaped == nil {
+		return err
+	}
+	return &ErrInvalidOp{Field: "with", Reason: fmt.Sprintf(
+		"with %q is text the document reads back as another block where it lands (%v); write it inside a line of text",
+		with, reshaped,
+	)}
+}
+
+// replacementBroke is what check says of the document-level block holding the match after the
+// replace, when it said nothing of that block before: a block that already failed the check, or
+// another block that does, is no reason to refuse this replace. A replace stays inside its
+// textblock, so the block holds the same index before and after.
+func replacementBroke(before, after *pmdoc.Node, match pmdoc.Range, check func(*pmdoc.Node) error) (broke, err error) {
+	index, err := pmdoc.BlockIndex(before, match)
+	if err != nil {
+		return nil, err
+	}
+	if broke = check(after.Children[index]); broke == nil || check(before.Children[index]) != nil {
+		return nil, nil
+	}
+	return broke, nil
+}
+
+// unreadableReason says why a replace left its block unreadable and what to do instead, by cause.
+// An emptied paragraph is one the block holding it cannot be written without. The advice is the
+// delete that removes it: by find where deleting the text removes the emptied block
+// (pmdoc.DeleteTextblock), and otherwise by the id of the nearest block around the text that
+// pmdoc.DeleteBlock removes from the document as it was - the holder itself for a footnote
+// definition or a list item holding more than the paragraph, and a block further out when
+// removing the holder would empty one that needs a block, such as a callout holding only it.
+func unreadableReason(before, after *pmdoc.Node, match pmdoc.Range, with string, unreadable error) string {
+	at, ok := pmdoc.ContainingTextblock(after, match.From)
+	if ok && emptyTextblock(at.Node) {
+		holder := strings.ReplaceAll(at.Ancestors[0].Type, "_", " ")
+		if _, removed, err := pmdoc.DeleteTextblock(before, match); err == nil && removed {
+			return fmt.Sprintf(
+				"with %q empties the paragraph this %s holds, and the %s cannot be written without it; to remove the text, delete it with delete and find, which removes the emptied %s too",
+				with, holder, holder, holder,
+			)
+		}
+		// A top-level block is always removable, since an emptied document keeps one empty
+		// paragraph, so the walk ends at the latest there.
+		blocks := append([]*pmdoc.Node{at.Node}, at.Ancestors[:len(at.Ancestors)-1]...)
+		target := blocks[len(blocks)-1]
+		for _, block := range blocks[:len(blocks)-1] {
+			if _, err := pmdoc.DeleteBlock(before, blockID(block)); err == nil {
+				target = block
+				break
+			}
+		}
+		var removal string
+		switch target {
+		case at.Node:
+			removal = "the paragraph"
+		case at.Ancestors[0]:
+			removal = "the whole " + holder
+		default:
+			removal = "the " + strings.ReplaceAll(target.Type, "_", " ") + " holding it"
+		}
+		return fmt.Sprintf(
+			"with %q empties the paragraph this %s holds, and the %s cannot be written without it; remove %s with delete {block:%q}, or give with some text",
+			with, holder, holder, removal, blockID(target),
+		)
+	}
+	if errors.Is(unreadable, pmdoc.ErrBlockHTML) {
+		return fmt.Sprintf(
+			"with %q is HTML that opens a block where it lands, and the Proof schema carries no block HTML; keep the HTML inside a line, where it opens no block",
+			with,
+		)
+	}
+	return fmt.Sprintf("with %q leaves markdown the document cannot read back where it lands (%v); write it inside a line of text, or insert the block you mean as its own block", with, unreadable)
+}
+
+// emptyTextblock reports whether a textblock holds no text but whitespace.
+func emptyTextblock(textblock *pmdoc.Node) bool {
+	for _, child := range textblock.Children {
+		if child.Type != "text" || strings.TrimSpace(child.Text) != "" {
+			return false
+		}
+	}
+	return true
+}
+
+func blockID(block *pmdoc.Node) string {
+	id, _ := block.Attrs[pmdoc.BlockIDAttr].(string)
+	return id
+}
+
 // inlineReplacement parses replace's `with` as one textblock's inline content:
 // a quote-anchored replace stays inside its textblock, so a leading list or
 // heading marker is text, never a new block.
-func inlineReplacement(markdown string) (*pmdoc.Node, error) {
+func inlineReplacement(markdown string, edges textEdges) (*pmdoc.Node, error) {
 	inline, err := pmdoc.ParseInline(markdown)
 	if err != nil {
 		if errors.Is(err, pmdoc.ErrSchema) {
@@ -1057,7 +1189,7 @@ func inlineReplacement(markdown string) (*pmdoc.Node, error) {
 		)}
 	}
 	paragraph := &pmdoc.Node{Type: "paragraph", Children: inline}
-	continueText(paragraph, markdown)
+	continueText(paragraph, markdown, edges)
 	return pmdoc.StripAnchorMarks(&pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{paragraph}}), nil
 }
 
@@ -1075,6 +1207,18 @@ var (
 	hardBreakOrderedMarker    = regexp.MustCompile(`^[ \t]*0{0,8}1[.)][ \t]`)
 	hardBreakBlockquoteMarker = regexp.MustCompile(`^[ \t]*>`)
 )
+
+// hasHardBreak reports whether a parsed replacement carries a hard break.
+func hasHardBreak(with *pmdoc.Node) bool {
+	for _, paragraph := range with.Children {
+		for _, node := range paragraph.Children {
+			if node.Type == "hardbreak" {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // blockMarkerAfterHardBreak reports the block marker a `with` opens a line with after a hard line
 // break, and the kind of block that marker names. A hard break puts what follows it at a true
@@ -1108,40 +1252,118 @@ func blockMarkerAfterHardBreak(inline []*pmdoc.Node) (marker, kind string) {
 
 // inlineAware parses a suggestion's replacement as blocks, keeping the edge
 // whitespace of a replacement that stays inline.
-func inlineAware(markdown string) (*pmdoc.Node, error) {
+func inlineAware(markdown string, edges textEdges) (*pmdoc.Node, error) {
 	tree, err := parseInput(markdown)
 	if err != nil {
 		return nil, err
 	}
 	if isInlineDocument(tree) {
-		continueText(tree.Children[0], markdown)
+		continueText(tree.Children[0], markdown, edges)
 	}
 	return tree, nil
 }
 
-// continueText restores the leading and trailing whitespace markdown parsing
-// drops so a replacement can continue the text around it.
-func continueText(paragraph *pmdoc.Node, markdown string) {
-	leading := markdown[:len(markdown)-len(strings.TrimLeftFunc(markdown, unicode.IsSpace))]
-	trailing := markdown[len(strings.TrimRightFunc(markdown, unicode.IsSpace)):]
-	if leading == "" && trailing == "" {
-		return
+// refuseCodeThatEndsItsBlock refuses a replacement into a code block that leaves the
+// document-level block holding it reading back as blocks of another shape. The directive parser -
+// the browser editor's as well as this one - ends a typed block at a line that is `:::` even inside
+// a fenced code block it holds, so such a line in code directly inside a callout cuts the callout
+// short on the next read, and the rest of the code and everything after it leave the callout. Code
+// that only reads back with different whitespace keeps its shape and is not refused.
+func refuseCodeThatEndsItsBlock(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.TextblockAt, field, with string) error {
+	broke, err := replacementBroke(before, after, match, codeFenceOrShape)
+	if err != nil || broke == nil {
+		return err
 	}
-	var first, last *pmdoc.Node
-	for _, child := range paragraph.Children {
-		if child.Type == "text" {
-			if first == nil {
-				first = child
-			}
-			last = child
+	holder := "block"
+	for _, ancestor := range at.Ancestors {
+		if pmdoc.IsTypedBlock(ancestor.Type) {
+			holder = ancestor.Type
+			break
 		}
 	}
-	if first == nil {
+	var fence fenceLineInCode
+	if errors.As(broke, &fence) {
+		return &ErrInvalidOp{Field: field, Reason: fmt.Sprintf(
+			"%s %q puts the line %q in code the %s around it reads as its closing fence: the browser editor ends a typed block at a line of three or more colons indented less than four columns from where the typed block's own lines start, even inside fenced code, so the %s would end there and the code after it would leave it; indent that line four or more spaces, or move the code block out of the %s",
+			field, with, fence.line, holder, holder, holder,
+		)}
+	}
+	return &ErrInvalidOp{Field: field, Reason: fmt.Sprintf(
+		"%s %q changes how the %s holding this code block reads back (%v); move the code block out of the %s",
+		field, with, holder, broke, holder,
+	)}
+}
+
+// fenceLineInCode is a line of code the browser editor's parser reads as a typed block's fence.
+type fenceLineInCode struct{ line string }
+
+func (f fenceLineInCode) Error() string {
+	return fmt.Sprintf("the code line %q reads as a typed block's closing fence", f.line)
+}
+
+// codeFenceOrShape is what keeps a block holding edited code from reading back as it was written:
+// a code line the browser editor ends a typed block at, or, failing that, another shape on read.
+func codeFenceOrShape(block *pmdoc.Node) error {
+	if line, ok := pmdoc.TypedFenceLineInCode(block); ok {
+		return fenceLineInCode{line: line}
+	}
+	return pmdoc.BlockShapeError(block)
+}
+
+// codeReplacement is what a replacement landing in a code block splices in: a code block's text
+// is literal, whitespace, markdown syntax and references alike, so it is the replacement as sent.
+func codeReplacement(text string) *pmdoc.Node {
+	paragraph := &pmdoc.Node{Type: "paragraph"}
+	if text != "" {
+		paragraph.Children = []*pmdoc.Node{{Type: "text", Text: text}}
+	}
+	return &pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{paragraph}}
+}
+
+// textEdges reports which of a replacement's edges meet the edges of the text it lands in, where
+// no text is left to continue and whitespace kept there is stripped on the next read, or, after a
+// footnote's marker, opens indented code.
+type textEdges struct{ start, end bool }
+
+func edgesOf(at pmdoc.TextblockAt, r pmdoc.Range) textEdges {
+	return textEdges{start: r.From == at.Content.From, end: r.To == at.Content.To}
+}
+
+// continueText restores the spaces and tabs parsing strips from a replacement's edges, so the
+// replacement continues the text around it. They go in unmarked text at the paragraph's own
+// edges - ` **x**` is a space and then bold, not a bold ` x`, and ` `c` ` leaves the code span's
+// text alone. A line break at an edge is no part of an inline replacement and is not restored,
+// and whitespace the parser keeps, such as a no-break space, is in the text already. An edge that
+// meets the edge of the text it lands in (textEdges) is left off.
+func continueText(paragraph *pmdoc.Node, markdown string, edges textEdges) {
+	if len(paragraph.Children) == 0 {
 		return
 	}
-	first.Text = leading + first.Text
-	last.Text += trailing
+	if leading := edgeSpace(markdown[:len(markdown)-len(strings.TrimLeft(markdown, markdownSpace))]); leading != "" && !edges.start {
+		if first := paragraph.Children[0]; first.Type == "text" && len(first.Marks) == 0 {
+			first.Text = leading + first.Text
+		} else {
+			paragraph.Children = append([]*pmdoc.Node{{Type: "text", Text: leading}}, paragraph.Children...)
+		}
+	}
+	if trailing := edgeSpace(markdown[len(strings.TrimRight(markdown, markdownSpace)):]); trailing != "" && !edges.end {
+		if last := paragraph.Children[len(paragraph.Children)-1]; last.Type == "text" && len(last.Marks) == 0 {
+			last.Text += trailing
+		} else {
+			paragraph.Children = append(paragraph.Children, &pmdoc.Node{Type: "text", Text: trailing})
+		}
+	}
 }
+
+// markdownSpace is the whitespace a paragraph's parse strips from its edges.
+const markdownSpace = " \t\r\n"
+
+// edgeSpace is an edge's whitespace without its line breaks.
+func edgeSpace(run string) string {
+	return lineBreaks.Replace(run)
+}
+
+var lineBreaks = strings.NewReplacer("\r", "", "\n", "")
 
 func isInlineLeaf(node *pmdoc.Node) bool {
 	switch node.Type {
