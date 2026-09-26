@@ -565,6 +565,13 @@ document's level in the rest. So the renderer writes a rule that opens a documen
 list, quote or footnote definition at its level (`holdsAContainerTheBrowserDrops`) - and `---`
 everywhere else.
 
+Two lists of one kind side by side read back as one when written with one marker, so the
+renderer writes a list whose kind matches the block before it - past an empty paragraph, which
+it writes as nothing - with its kind's other marker, `*` after `-` and `)` after `.`, alternating
+as the browser editor does (`otherListMarkers`); a list anywhere else keeps `-` or `.`. An edit
+that leaves two lists side by side (deleting or emptying what stood between them, inserting or
+accepting a list beside one) therefore stores the two lists it made.
+
 A container that holds nothing is read as the browser editor's parser reads it, holding one empty
 paragraph (`emptyParagraphFirst`): an empty list item (`-`), quote (`>`), typed block or footnote
 definition, and a list item that opens with another block (`- # h`) holds an empty paragraph ahead
