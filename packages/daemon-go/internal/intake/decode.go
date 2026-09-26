@@ -20,6 +20,9 @@ type decodedMessage struct {
 	Source  string
 	EventID string
 	Fact    Fact
+	// Unread names each optional field the decoder could not read and took as absent. The consumer
+	// logs it; the message is not poison.
+	Unread []string
 }
 
 type envoyEnvelope struct {
@@ -46,6 +49,7 @@ func decodeMessage(subject, project string, data []byte) (decodedMessage, error)
 	}
 
 	var fact Fact
+	var unread []string
 	var err error
 	switch {
 	case strings.HasPrefix(subject, "notifications.dispatch.issue."):
@@ -57,14 +61,14 @@ func decodeMessage(subject, project string, data []byte) (decodedMessage, error)
 		if envelope.Source != "github" {
 			return decodedMessage{}, fmt.Errorf("GitHub subject has envelope source %q", envelope.Source)
 		}
-		fact, err = decodeGitHubFact(subject, envelope.Payload, envelope.IssuedAt)
+		fact, unread, err = decodeGitHubFact(subject, envelope.Payload, envelope.IssuedAt)
 	default:
 		return decodedMessage{}, fmt.Errorf("unsupported durable subject %q", subject)
 	}
 	if err != nil {
 		return decodedMessage{}, err
 	}
-	return decodedMessage{Source: envelope.Source, EventID: envelope.EventID, Fact: fact}, nil
+	return decodedMessage{Source: envelope.Source, EventID: envelope.EventID, Fact: fact, Unread: unread}, nil
 }
 
 func (e envoyEnvelope) valid() error {
@@ -210,30 +214,30 @@ func isJSONObject(raw json.RawMessage) bool {
 	return json.Unmarshal(raw, &item) == nil && item != nil
 }
 
-func decodeGitHubFact(subject, payload string, issuedAt int64) (Fact, error) {
+func decodeGitHubFact(subject, payload string, issuedAt int64) (Fact, []string, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(payload), &raw); err != nil || raw == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 	kind, ok := rawString(raw, "kind")
 	if !ok {
-		return nil, nil
+		return nil, nil, nil
 	}
+	var fact Fact
+	var err error
 	switch kind {
 	case "pr":
-		return decodePullRequest(raw)
+		fact, err = decodePullRequest(raw)
 	case "review":
 		return decodeReview(raw)
 	case "push":
-		return decodePush(raw)
+		fact, err = decodePush(raw)
 	case "checks":
-		return decodeChecks(subject, raw, issuedAt)
-	case "comment":
-		// Comments route to the current role but do not change the durable workflow record.
-		return nil, nil
-	default:
-		return nil, nil
+		fact, err = decodeChecks(subject, raw, issuedAt)
 	}
+	// Comments, and every other kind, route to the current role but do not change the durable
+	// workflow record.
+	return fact, nil, err
 }
 
 func decodePullRequest(raw map[string]json.RawMessage) (Fact, error) {
@@ -270,10 +274,10 @@ func decodePullRequest(raw map[string]json.RawMessage) (Fact, error) {
 	}
 }
 
-func decodeReview(raw map[string]json.RawMessage) (Fact, error) {
+func decodeReview(raw map[string]json.RawMessage) (Fact, []string, error) {
 	repo, number, action, ok := githubIdentity(raw)
 	if !ok || action != "submitted" {
-		return nil, nil
+		return nil, nil, nil
 	}
 	state, _ := rawString(raw, "state")
 	commitID, _ := rawString(raw, "commit_id")
@@ -286,21 +290,24 @@ func decodeReview(raw map[string]json.RawMessage) (Fact, error) {
 	if text, ok := rawString(raw, "review_id"); ok && text != "" {
 		parsed, err := strconv.ParseInt(text, 10, 64)
 		if err != nil || parsed <= 0 {
-			return nil, fmt.Errorf("review_id %q is not a positive integer", text)
+			return nil, nil, fmt.Errorf("review_id %q is not a positive integer", text)
 		}
 		id = parsed
 	}
-	// submitted_at is GitHub's RFC 3339 time; a listener that predates it carries none.
+	// submitted_at is GitHub's RFC 3339 time; a listener that predates it carries none. One that
+	// cannot be read is taken as none, and reported: a review without a time is ordered by its id,
+	// so it is recorded rather than lost as poison.
 	var submittedAt time.Time
+	var unread []string
 	if text, ok := rawString(raw, "submitted_at"); ok && text != "" {
-		parsed, err := time.Parse(time.RFC3339, text)
-		if err != nil {
-			return nil, fmt.Errorf("submitted_at %q is not an RFC 3339 time", text)
+		if parsed, err := time.Parse(time.RFC3339, text); err == nil {
+			submittedAt = parsed.UTC()
+		} else {
+			unread = append(unread, fmt.Sprintf("submitted_at %q is not an RFC 3339 time", text))
 		}
-		submittedAt = parsed.UTC()
 	}
 	return PullRequestReview{Repo: repo, Number: number, ID: id, SubmittedAt: submittedAt, State: strings.ToLower(state),
-		CommitID: commitID, HeadSHA: headSHA, Author: author, Body: body}, nil
+		CommitID: commitID, HeadSHA: headSHA, Author: author, Body: body}, unread, nil
 }
 
 func decodePush(raw map[string]json.RawMessage) (Fact, error) {

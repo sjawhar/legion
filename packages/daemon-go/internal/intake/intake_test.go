@@ -785,10 +785,11 @@ func TestDecodeDispatchIssueNamesASessionActor(t *testing.T) {
 
 // The listener's forced marker, GitHub's review id and the review's submission time reach the
 // facts: the workflow reads a push without the marker as forced and orders reviews by submission
-// time then id, so each must survive decoding exactly, and a review id that is not a positive
-// integer, or a time that is not RFC 3339, is refused rather than read as none.
+// time then id, so each must survive decoding exactly. A review id that is not a positive integer
+// is refused rather than read as none. A time that cannot be read is taken as none and reported,
+// since a review without one is still ordered, by its id.
 func TestDecodingCarriesThePushForcedMarkerAndTheReviewOrder(t *testing.T) {
-	withPayload := func(t *testing.T, name, subject string, set map[string]string) (Fact, error) {
+	withPayload := func(t *testing.T, name, subject string, set map[string]string) (decodedMessage, error) {
 		t.Helper()
 		var envelope map[string]any
 		if err := json.Unmarshal(capturedGitHubEnvelope(t, name), &envelope); err != nil {
@@ -811,28 +812,30 @@ func TestDecodingCarriesThePushForcedMarkerAndTheReviewOrder(t *testing.T) {
 		if err != nil {
 			t.Fatalf("encode %s: %v", name, err)
 		}
-		decoded, err := decodeMessage(subject, "CAPTURE", data)
-		return decoded.Fact, err
+		return decodeMessage(subject, "CAPTURE", data)
 	}
 	pushSubject := "notifications.github.sjawhar.legion.push.branch.legion/LEGION-208"
 	reviewSubject := "notifications.github.sjawhar.legion.pr.42.review"
 
 	for _, forced := range []string{"true", "false"} {
-		fact, err := withPayload(t, "push.json", pushSubject, map[string]string{"forced": forced})
-		if push, ok := fact.(Push); err != nil || !ok || push.Forced == nil || *push.Forced != forced {
-			t.Fatalf("push with forced %q = %#v, %v", forced, fact, err)
+		decoded, err := withPayload(t, "push.json", pushSubject, map[string]string{"forced": forced})
+		if push, ok := decoded.Fact.(Push); err != nil || !ok || push.Forced == nil || *push.Forced != forced {
+			t.Fatalf("push with forced %q = %#v, %v", forced, decoded.Fact, err)
 		}
 	}
-	fact, err := withPayload(t, "review.json", reviewSubject, map[string]string{"review_id": "5325101010",
+	decoded, err := withPayload(t, "review.json", reviewSubject, map[string]string{"review_id": "5325101010",
 		"submitted_at": "2026-09-26T12:03:00+02:00"})
 	submitted := time.Date(2026, 9, 26, 10, 3, 0, 0, time.UTC)
-	if review, ok := fact.(PullRequestReview); err != nil || !ok || review.ID != 5325101010 || !review.SubmittedAt.Equal(submitted) {
-		t.Fatalf("review with an id and a submission time = %#v, %v", fact, err)
+	if review, ok := decoded.Fact.(PullRequestReview); err != nil || !ok || review.ID != 5325101010 ||
+		!review.SubmittedAt.Equal(submitted) || len(decoded.Unread) != 0 {
+		t.Fatalf("review with an id and a submission time = %#v, unread %q, %v", decoded.Fact, decoded.Unread, err)
 	}
 	if _, err := withPayload(t, "review.json", reviewSubject, map[string]string{"review_id": "not-a-number"}); err == nil {
 		t.Fatal("a review id that is not a number decoded")
 	}
-	if _, err := withPayload(t, "review.json", reviewSubject, map[string]string{"submitted_at": "yesterday"}); err == nil {
-		t.Fatal("a submission time that is not RFC 3339 decoded")
+	decoded, err = withPayload(t, "review.json", reviewSubject, map[string]string{"review_id": "5325101010", "submitted_at": "yesterday"})
+	if review, ok := decoded.Fact.(PullRequestReview); err != nil || !ok || review.ID != 5325101010 || !review.SubmittedAt.IsZero() ||
+		len(decoded.Unread) != 1 || !strings.Contains(decoded.Unread[0], "submitted_at") {
+		t.Fatalf("review with an unreadable time = %#v, unread %q, %v; want it untimed and the field reported", decoded.Fact, decoded.Unread, err)
 	}
 }

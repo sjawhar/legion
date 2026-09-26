@@ -128,8 +128,9 @@ func issuePhase(t *testing.T, pool *pgxpool.Pool) phase.Phase {
 // approval stands for the current head when every push since the head it names changed only
 // .legion/, whichever of the approval, the new heads and the pushes' paths is processed first. A
 // push that changes code, whose changed paths are not known, or that rewrote history - or did not
-// say whether it did - carries no approval across. Reviews are ordered by GitHub's review id, so
-// the newest one written decides. A pull request recorded before the daemon kept its pushes has
+// say whether it did - carries no approval across. Deciding reviews are ordered by when they were
+// submitted, then by GitHub's review id, so the newest one submitted decides; a review without a
+// submission time is ordered by id against any other. A pull request recorded before the daemon kept its pushes has
 // none, so only an approval of its current head stands.
 func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.T) {
 	for _, tc := range []struct {
@@ -174,6 +175,8 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 		{name: "a draft's request for changes submitted after a one-step approval", steps: []string{"approve head id=101 at=2", "cr head id=100 at=3", "complete"}, want: phase.Implementing},
 		{name: "a draft's request for changes submitted after a one-step approval, delivered first", steps: []string{"cr head id=100 at=3", "approve head id=101 at=2", "complete"}, want: phase.Implementing},
 		{name: "a draft's approval submitted after a request for changes", steps: []string{"cr head id=101 at=2", "approve head id=100 at=3", "complete"}, want: phase.Retro},
+		{name: "an untimed request for changes, then an older approval redelivered with a time", steps: []string{"cr head id=12", "approve head id=11 at=2", "complete"}, want: phase.Implementing},
+		{name: "a timed approval, then a newer untimed request for changes", steps: []string{"approve head id=11 at=2", "cr head id=12", "complete"}, want: phase.Implementing},
 		{name: "a code push delivered after the branch was reset to the approved head", steps: []string{"approve head", "sync", "sync head-3", "push code", "push handoff forced from=head-3 head", "sync head", "green head", "complete"}, want: phase.Reviewing},
 		{name: "a code push delivered after the branch was reset to the approved head, then the reviewer's handoff push", steps: []string{"approve head", "sync", "sync head-3", "push code", "push handoff forced from=head-3 head", "sync head", "green head", "complete", "push handoff from=head head-4", "sync head-4", "green head-4"}, want: phase.Retro},
 		{name: "recorded before the chain: an approval of the current head", steps: []string{"approve head", "complete"}, want: phase.Retro},
@@ -308,8 +311,8 @@ func TestACommentLeavesTheRoundsRequestForChanges(t *testing.T) {
 	}
 }
 
-// Reviews are ordered by GitHub's review id, which rises with every review written, and the order
-// holds across rounds: a review from an earlier round, delivered again while a later round is
+// Deciding reviews are ordered by when they were submitted, then by GitHub's review id, and the
+// order holds across rounds: a review from an earlier round, delivered again while a later round is
 // open, is no newer than one already processed and records nothing, so the reviewer's completion
 // waits for the round's own review.
 func TestAReviewFromAnEarlierRoundDeliveredAgainRecordsNothing(t *testing.T) {

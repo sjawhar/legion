@@ -85,16 +85,18 @@ type ReviewDecision struct {
 
 // ReviewOrder is where a review falls among the pull request's reviews: when it was submitted, then
 // GitHub's review id. The id alone is not enough, since GitHub assigns it when a review is created
-// and a draft keeps it when it is submitted later. A listener that predates submitted_at leaves
-// SubmittedAt zero, which orders such reviews by id among themselves.
+// and a draft keeps it when it is submitted later. SubmittedAt is zero for a review a listener that
+// predates submitted_at carried, and for every mark recorded before the field.
 type ReviewOrder struct {
 	SubmittedAt time.Time
 	ID          int64
 }
 
-// After is whether o was submitted after other.
+// After is whether o was submitted after other. Submission times decide when both reviews have one
+// and they differ; otherwise the ids do, so a review without a time is ordered by id against any
+// other, rather than losing to every review that has one.
 func (o ReviewOrder) After(other ReviewOrder) bool {
-	if !o.SubmittedAt.Equal(other.SubmittedAt) {
+	if !o.SubmittedAt.IsZero() && !other.SubmittedAt.IsZero() && !o.SubmittedAt.Equal(other.SubmittedAt) {
 		return o.SubmittedAt.After(other.SubmittedAt)
 	}
 	return o.ID > other.ID

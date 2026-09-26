@@ -89,8 +89,9 @@ type PullRequestReview struct {
 	// keeps the id it was created with when it is submitted later. Zero when the listener did not
 	// carry it.
 	ID int64
-	// SubmittedAt is when the review was submitted, zero when the listener did not carry it.
-	// Reviews are ordered by it first, then by ID.
+	// SubmittedAt is when the review was submitted, zero when the listener did not carry it or
+	// carried one that could not be read. Reviews are ordered by it, then by ID
+	// (record.ReviewOrder).
 	SubmittedAt time.Time
 	State       string
 	CommitID    string
