@@ -1,7 +1,6 @@
 package webhook
 
 import (
-	"container/list"
 	"context"
 	"io"
 	"net/http"
@@ -18,22 +17,25 @@ const bodyFirstRead = 512
 // charges its read buffer as the buffer grows, which is as its body arrives, starting at the bytes
 // its first read delivered and doubling as it fills: a sender that sends only headers holds no
 // room, and one that trickles its body holds at most twice what it has sent, never what it
-// declared. A request whose next piece does not fit waits for room, except the one that has held
-// its place longest, which always proceeds: it is either still reading, and nothing stops it, or
-// done and about to give everything back, so the requests in flight always drain and no set of
-// half-read bodies waits on each other. That one request can take the total past the limit by at
-// most its own body (twice its buffer for the moment the buffer grows).
+// declared. A request whose next piece does not fit waits for room, except one request at a time:
+// the first whose piece did not fit while no other held that right proceeds past the limit, and
+// keeps the right until it gives everything back. Only a request whose body bytes have arrived
+// asks for room, so the right goes to one that is reading, never to a connection that has sent
+// nothing; it is either still reading, and nothing stops it, or done and about to give everything
+// back, so the requests in flight always drain and no set of half-read bodies waits on each other.
+// That one request can take the total past the limit by at most its own body (twice its buffer
+// for the moment the buffer grows).
 type bodyBudget struct {
-	mu      sync.Mutex
-	limit   int64
-	held    int64
-	most    int64         // the most held at once, which the bound above caps
-	holders *list.List    // the requests holding a place, longest first
-	room    chan struct{} // closed and replaced whenever held falls or the longest holder leaves
+	mu    sync.Mutex
+	limit int64
+	held  int64
+	most  int64         // the most held at once, which the bound above caps
+	over  *bodyRead     // the one request that may take held past limit, or nil
+	room  chan struct{} // closed and replaced whenever held falls or over is given back
 }
 
 func newBodyBudget(limit int64) *bodyBudget {
-	return &bodyBudget{limit: limit, holders: list.New(), room: make(chan struct{})}
+	return &bodyBudget{limit: limit, room: make(chan struct{})}
 }
 
 // mostHeld is the most the budget has held at once.
@@ -43,29 +45,30 @@ func (b *bodyBudget) mostHeld() int64 {
 	return b.most
 }
 
-// bodyRead is one request's place in a budget. release must be called once the request no longer
-// holds its body.
+// bodyRead is one request's read against a budget. It holds nothing until its body's bytes
+// arrive, and release must be called once the request no longer holds its body.
 type bodyRead struct {
 	budget  *bodyBudget
-	place   *list.Element
 	charged int64
 }
 
-// begin takes a place in the budget.
+// begin starts a request's read against the budget.
 func (b *bodyBudget) begin() *bodyRead {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	read := &bodyRead{budget: b}
-	read.place = b.holders.PushBack(read)
-	return read
+	return &bodyRead{budget: b}
 }
 
-// charge waits until n more bytes fit the budget or this is the longest holder, then holds them.
+// charge waits until n more bytes fit the budget or this read may go past the limit, then holds
+// them. A read whose n does not fit takes the right to go past the limit when no other holds it.
 func (r *bodyRead) charge(ctx context.Context, n int64) error {
 	b := r.budget
 	for {
 		b.mu.Lock()
-		if b.held+n <= b.limit || b.holders.Front() == r.place {
+		fits := b.held+n <= b.limit
+		if !fits && (b.over == nil || b.over == r) {
+			b.over = r
+			fits = true
+		}
+		if fits {
 			b.held += n
 			b.most = max(b.most, b.held)
 			r.charged += n
@@ -92,14 +95,19 @@ func (r *bodyRead) refund(n int64) {
 	b.signalLocked()
 }
 
-// release gives back everything the read holds and its place.
+// release gives back everything the read holds, and the right to go past the limit if it has it.
 func (r *bodyRead) release() {
 	b := r.budget
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if r.charged == 0 && b.over != r {
+		return
+	}
 	b.held -= r.charged
 	r.charged = 0
-	b.holders.Remove(r.place)
+	if b.over == r {
+		b.over = nil
+	}
 	b.signalLocked()
 }
 
