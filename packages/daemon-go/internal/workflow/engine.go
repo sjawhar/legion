@@ -554,11 +554,15 @@ func (e *Engine) merged(ctx context.Context, tx pgx.Tx, fact intake.PullRequestM
 		if !lingers {
 			return intake.Result{}, e.transition(ctx, tx, *issue, TriggerPullRequestMerged, "", record.PhaseRow{}, pr, "")
 		}
-		issue.Phase = phase.ProductionCheck
+		row, ok := e.row(issue.Phase, TriggerPullRequestMerged, "", Snapshot{Phase: issue.Phase, HasPR: true})
+		if !ok {
+			return intake.Result{}, nil
+		}
+		issue.Phase = row.To
 		if err := e.store.PutIssue(ctx, tx, *issue); err != nil {
 			return intake.Result{}, err
 		}
-		return intake.Result{}, e.clearHandoff(ctx, tx, issue.Key, claim.RoleImplementer)
+		return intake.Result{}, e.clearHandoff(ctx, tx, issue.Key, RoleFor(row.To))
 	}
 	return intake.Result{}, e.notice(ctx, tx, issue.Key, record.Notice{Kind: "pr-merged", Role: claim.RoleArchitect,
 		Reason: fmt.Sprintf("pull request #%d merged while %s was in %s, not awaiting_merge", pr.Number, issue.Key, issue.Phase)})
