@@ -246,22 +246,12 @@ func mainCommit(ctx context.Context, run Runner, workspace Workspace) (string, e
 // shared clone that onClone builds, so it takes no snapshot of the clone's working copy, in
 // backticks.
 func wayOut(cloneDir string, args ...string) string {
-	return "`" + shellCommand(onClone(cloneDir, args...)) + "`"
+	return "`" + shellprefix.Command(onClone(cloneDir, args...)) + "`"
 }
 
 // deleteOnGitHub is the printed command that deletes the issue's branch on GitHub.
 func deleteOnGitHub(workspace Workspace) string {
-	return "`" + shellCommand([]string{"gh", "api", "-X", "DELETE", "repos/" + workspace.Repo.String() + "/git/refs/heads/" + workspace.Bookmark}) + "`"
-}
-
-// shellCommand is argv as a shell reads it back: each element one word (shellprefix.Word), so a
-// printed command runs as printed whatever the state directory's path holds.
-func shellCommand(argv []string) string {
-	words := make([]string, len(argv))
-	for i, arg := range argv {
-		words[i] = shellprefix.Word(arg)
-	}
-	return strings.Join(words, " ")
+	return "`" + shellprefix.Command([]string{"gh", "api", "-X", "DELETE", "repos/" + workspace.Repo.String() + "/git/refs/heads/" + workspace.Bookmark}) + "`"
 }
 
 // bookmarkRow is one row of `jj bookmark list --all-remotes`: whether the bookmark exists there,

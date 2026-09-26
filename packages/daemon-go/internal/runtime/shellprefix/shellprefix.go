@@ -31,10 +31,22 @@ func Literal(value string) string { return "'" + strings.ReplaceAll(value, "'", 
 var shellUnsafe = regexp.MustCompile(`[^A-Za-z0-9_./:-]`)
 
 // Word renders value as one shell word: bare when every character is literal, else Literal
-// (runtime.ts:327-329).
+// (shellPath, runtime.ts).
 func Word(value string) string {
 	if !shellUnsafe.MatchString(value) {
 		return value
 	}
 	return Literal(value)
+}
+
+// Command renders argv as one shell command line, each element one Word, so a shell reads it back
+// as the same argv. Every element must be non-empty: Word renders "" as nothing, which a shell
+// drops (every caller's argv is a launch prefix the config loader holds to non-empty strings, or a
+// command whose every word is set).
+func Command(argv []string) string {
+	words := make([]string, len(argv))
+	for i, arg := range argv {
+		words[i] = Word(arg)
+	}
+	return strings.Join(words, " ")
 }

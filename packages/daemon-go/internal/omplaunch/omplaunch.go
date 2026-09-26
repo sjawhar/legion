@@ -22,7 +22,7 @@ import (
 var miseInvocation = regexp.MustCompile(`^mise x (\S+) -- omp$`)
 
 // ResolveInvocation is the OMP launch fragment every pane and boot probe runs, resolved from
-// the configured invocation and the daemon's own environment (environment.ts:312-341).
+// the configured invocation and the daemon's own environment (resolveOmpInvocation, environment.ts).
 // `LEGION_OMP_PATH` names a binary directly — the worker image, a build under test — and is used
 // as its resolved real path. Otherwise the invocation must be `mise x <tool> -- omp`: mise resolves
 // the configured tool's own `bin/omp`, and the fragment still runs it through `mise x` so the
@@ -80,7 +80,7 @@ func resolveMiseOmp(mise, tool string) (string, error) {
 }
 
 // configuredPath reads a `LEGION_<TOOL>_PATH` override: unset or empty is no override, and a set
-// one must be absolute (environment.ts:139-146).
+// one must be absolute (configuredPath, environment.ts).
 func configuredPath(env func(string) string, variable string) (string, error) {
 	configured := env(variable)
 	if configured == "" {
@@ -93,7 +93,7 @@ func configuredPath(env func(string) string, variable string) (string, error) {
 }
 
 // resolveMise is mise's absolute path: `LEGION_MISE_PATH`, else the first executable `mise` on the
-// daemon's PATH (environment.ts:148-156, 471-476).
+// daemon's PATH (resolveConfiguredOrFound and tmuxDaemonEnvironment, environment.ts).
 func resolveMise(env func(string) string) (string, error) {
 	missing := errors.New("Missing required daemon tool: mise (set LEGION_MISE_PATH to an absolute executable path)")
 	configured, err := configuredPath(env, "LEGION_MISE_PATH")
@@ -117,7 +117,8 @@ func resolveMise(env func(string) string) (string, error) {
 	return "", missing
 }
 
-// resolveExecutable is path's real path when it names an executable file (environment.ts:122-137).
+// resolveExecutable is path's real path when it names an executable file
+// (defaultResolveExecutable, environment.ts).
 func resolveExecutable(path string) (string, bool) {
 	info, err := os.Stat(path)
 	if err != nil || info.IsDir() || info.Mode().Perm()&0o111 == 0 {
@@ -139,7 +140,8 @@ var doubleQuoteEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`, `$`, `\$`, "`
 // addressing text, then the deployment instructions file, separated by a blank line. It is one
 // double-quoted word holding `$(cat <files>)`, so the pane's own shell reads the files — their
 // size and quoting never pass through tmux's argv — and the addressing text is escaped for the
-// double quotes (runtime-tmux.ts:79-103). The caller has checked there is a role prompt.
+// double quotes (systemPromptArguments and shellDoubleQuoted, runtime-tmux.ts). The caller has
+// checked there is a role prompt.
 func SystemPromptArgument(parts runtime.PromptParts) string {
 	quoted := make([]string, len(parts.RolePromptPaths))
 	for i, path := range parts.RolePromptPaths {
@@ -155,16 +157,13 @@ func SystemPromptArgument(parts runtime.PromptParts) string {
 	return `--append-system-prompt "` + strings.Join(fragments, "\n\n") + `"`
 }
 
-// WithPrefix prepends the configured launch prefix, each element quoted on its own, to
-// the OMP invocation — a fragment already fit for the shell (runtime-tmux.ts:105-118). Every pane
-// runs it, and so does the daemon's boot gate, which must launch Oh My Pi exactly as a pane will.
+// WithPrefix prepends the configured launch prefix, each element quoted on its own
+// (shellprefix.Command), to the OMP invocation — a fragment already fit for the shell
+// (withOmpLaunchPrefix, runtime-tmux.ts). Every pane runs it, and so does the daemon's boot gate,
+// which must launch Oh My Pi exactly as a pane will.
 func WithPrefix(prefix []string, invocation string) string {
 	if len(prefix) == 0 {
 		return invocation
 	}
-	quoted := make([]string, len(prefix))
-	for i, word := range prefix {
-		quoted[i] = shellprefix.Word(word)
-	}
-	return strings.Join(quoted, " ") + " " + invocation
+	return shellprefix.Command(prefix) + " " + invocation
 }

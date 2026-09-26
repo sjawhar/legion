@@ -45,6 +45,6 @@ func workspaceFetch(ctx context.Context, repo, feed string, stdout io.Writer) er
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "workspace-init fetch: https://github.com/%s into %s\n", repository, fed)
+	fmt.Fprintf(stdout, "workspace-init fetch: %s into %s\n", workspace.GitHubURL(repository), fed)
 	return nil
 }
