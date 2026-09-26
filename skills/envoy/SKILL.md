@@ -141,8 +141,10 @@ envoy_subscribe([
 
 A warning says no GitHub event for that repository occurred within the stream's 72-hour retention
 window; it does not mean the repository was never seen. Verify the GitHub App is installed before
-relying on a wakeup. A topic that spells a repository name with its dot draws a warning naming the
-spelling Envoy publishes (`acme.site_io` for `acme/site.io`); subscribe to that one instead.
+relying on a wakeup. A topic that spells a repository name with its dot, followed by a kind, draws
+a warning naming the spelling Envoy publishes (`acme.site_io` for `acme/site.io`); subscribe to
+that one instead. A token after the repository that is not a GitHub topic kind (`checks` in
+`acme.widgets.checks.>`) draws a warning naming the kinds.
 
 ## Roles
 
