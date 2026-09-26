@@ -1,20 +1,23 @@
 /**
- * The upstream types this package re-exports on its public surface.
+ * The upstream types this package's public surface names.
  *
- * `src/lib.ts` re-exports `StoredMark` to Dispatch, which builds mark records against it. The
- * rest of the copied tree reaches upstream through `proof-sdk-upstream/src/…`, a specifier no
- * tsc program resolves (packages/proof-editor/AGENTS.md § The upstream boundary), so a type
- * re-exported from there arrives at a consumer as `any` — `kind: "replaced"` type-checks. These
- * declarations are copied verbatim from proof-sdk `src/formats/marks.ts` at
- * 24a5fc94915cda5704897c497af6312c140db40d, so the consumer sees the real shape;
- * `tests/upstream-types-match-the-pin.test.ts` fails when the pinned file stops agreeing with
- * them. This file is checked by tsc; it carries no `@ts-nocheck`.
- *
- * Upstream types that reach a consumer any other way are still `any`. `HeatMapMode`, which
- * `CreateProofEditorOptions.heatMapMode` names, is the one that does: `lib.ts` imports it
- * alongside two values in a single statement, and rewriting that statement is more than the
- * import-specifier edit the copy allows.
+ * `src/lib.ts` re-exports `StoredMark` to Dispatch, which builds mark records against it, and
+ * names `HeatMapMode` in `CreateProofEditorOptions`. The copied tree reaches upstream through
+ * `proof-sdk-upstream/src/…`, a specifier no tsc program resolves (packages/proof-editor/
+ * AGENTS.md § The upstream boundary), so a type that arrived that way would reach a consumer as
+ * `any` — `kind: "replaced"` and `heatMapMode: "hiden"` would both type-check. These
+ * declarations are copied verbatim from proof-sdk at
+ * 24a5fc94915cda5704897c497af6312c140db40d, each region naming the file it came from, so the
+ * consumer sees the real shape; `tests/upstream-pin.test.ts` reads those regions and fails when
+ * the pinned files stop agreeing with them. This file is checked by tsc; it carries no
+ * `@ts-nocheck`.
  */
+
+/* --- copied from proof-sdk src/editor/plugins/heatmap-decorations.ts @ 24a5fc94 --- */
+
+export type HeatMapMode = 'hidden' | 'subtle' | 'background' | 'full';
+
+/* --- end copy --- */
 
 /* --- copied from proof-sdk src/formats/marks.ts @ 24a5fc94 --- */
 
