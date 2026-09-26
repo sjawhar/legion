@@ -14,7 +14,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -29,6 +28,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/controller"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/omplaunch"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -584,7 +584,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		cancelStream()
 		return nil, fmt.Errorf("build the %s runtime: %w", cfg.Runtime.Name, err)
 	}
-	repo := ""
+	var repo ghrepo.Repository
 	if configured, ok := cfg.Projects[cfg.Project]; ok {
 		repo = configured.Repo
 	}
@@ -976,6 +976,5 @@ func githubOwner(cfg config.Config) string {
 	if !ok {
 		return ""
 	}
-	owner, _, _ := strings.Cut(project.Repo, "/")
-	return owner
+	return project.Repo.Owner
 }

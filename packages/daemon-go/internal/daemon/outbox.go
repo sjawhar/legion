@@ -17,6 +17,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -60,7 +61,7 @@ type outbox struct {
 	// is shared, and another project's rows are another daemon's.
 	dispatchProject string
 	stateDir        string
-	repo            string
+	repo            ghrepo.Repository
 	log             *slog.Logger
 	now             func() time.Time
 	provision       func(context.Context, workspace.Request) (workspace.Workspace, error)
@@ -452,11 +453,10 @@ func (r *outbox) provisionWorkspace(ctx context.Context, issue record.Issue) err
 	if r.tokens == nil {
 		return errors.New("supervise executor has no GitHub App token manager")
 	}
-	owner, _, ok := strings.Cut(r.repo, "/")
-	if !ok || owner == "" {
-		return fmt.Errorf("supervise executor has invalid repository %q", r.repo)
+	if r.repo == (ghrepo.Repository{}) {
+		return errors.New("workspace provisioning has no configured repository")
 	}
-	lease, err := r.tokens.Token(ctx, appauth.Implement, owner)
+	lease, err := r.tokens.Token(ctx, appauth.Implement, r.repo.Owner)
 	if err != nil {
 		return fmt.Errorf("mint implement App token to provision %s: %w", issue.Key, err)
 	}
@@ -511,7 +511,7 @@ func (r *outbox) removeWorkspace(ctx context.Context, row record.OutboxRow, payl
 	if r.podsProvision() {
 		return nil
 	}
-	if r.repo == "" {
+	if r.repo == (ghrepo.Repository{}) {
 		return errors.New("workspace removal has no configured repository")
 	}
 	issue, err := r.issue(ctx, row.Issue)

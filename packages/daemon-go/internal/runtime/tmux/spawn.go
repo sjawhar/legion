@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
@@ -95,7 +96,7 @@ func validateSpawnSpec(spec runtime.SpawnSpec, providerKeys []string) error {
 // (workspace.Location), which must exist, or, for a configuration with no repository,
 // `<state_dir>/workspaces/<issue>`, made here.
 func (r *Runtime) workspaceDir(spec runtime.SpawnSpec) (string, error) {
-	if spec.Repository == "" {
+	if spec.Repository == (ghrepo.Repository{}) {
 		dir := filepath.Join(r.stateDir, "workspaces", spec.Issue)
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return "", fmt.Errorf("the workspace: %w", err)

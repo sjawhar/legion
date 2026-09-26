@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
@@ -40,14 +41,14 @@ func TestSpawnSpecCarriesTheRoleAppIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SpawnSpec: %v", err)
 	}
-	if spec.Repository != "" {
+	if spec.Repository != (ghrepo.Repository{}) {
 		t.Errorf("the launch names repository %q with none configured", spec.Repository)
 	}
-	s.repo = "acme/widgets"
-	if spec, err := s.SpawnSpec(context.Background(), c); err != nil || spec.Repository != "acme/widgets" {
+	s.repo = ghrepo.Repository{Owner: "acme", Name: "widgets"}
+	if spec, err := s.SpawnSpec(context.Background(), c); err != nil || spec.Repository != (ghrepo.Repository{Owner: "acme", Name: "widgets"}) {
 		t.Errorf("SpawnSpec with a configured repository = %q, %v; want acme/widgets, the runtime's to locate the workspace from", spec.Repository, err)
 	}
-	s.repo = ""
+	s.repo = ghrepo.Repository{}
 	for name, want := range map[string]string{
 		"JJ_USER": bot.Name, "JJ_EMAIL": bot.Email,
 		"GIT_AUTHOR_NAME": bot.Name, "GIT_AUTHOR_EMAIL": bot.Email,

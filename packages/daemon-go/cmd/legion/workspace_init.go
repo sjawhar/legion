@@ -19,6 +19,7 @@ import (
 	"time"
 
 	legionclaim "github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
@@ -110,12 +111,16 @@ func parseWorkspaceInitFlags(flags *flag.FlagSet, args []string, usage string, s
 	return 0, true
 }
 
-// workspaceInit validates everything before it touches the volume, and refuses to run where the
-// provisioning token is pointed at: this is the process that runs git and jj against what every
+// workspaceInit validates everything before it touches the volume, --repo first, and refuses to
+// run where the provisioning token is pointed at: this is the process that runs git and jj against what every
 // agent of the tree can write. Then it installs the gh shim, creates the directories the main
 // container mounts, holds a resume to the same agent, and provisions from the feed under the
 // repository lock, which it holds until it returns.
 func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, feed string, stdout io.Writer) error {
+	repository, err := ghrepo.Parse("--repo", repo)
+	if err != nil {
+		return err
+	}
 	if !legionclaim.IsIssueKey(issue) {
 		return fmt.Errorf("--issue must be a Dispatch issue key like LEGION-1 (got %q)", issue)
 	}
@@ -139,7 +144,7 @@ func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, fee
 	if err != nil {
 		return err
 	}
-	located, err := workspace.Location(root, repo, issue)
+	located, err := workspace.Location(root, repository, issue)
 	if err != nil {
 		return err
 	}
@@ -173,14 +178,14 @@ func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, fee
 		}
 	}
 
-	release, err := lockRepository(ctx, cloneDir+".lock", repo, lockWait, stdout)
+	release, err := lockRepository(ctx, cloneDir+".lock", repository, lockWait, stdout)
 	if err != nil {
 		return err
 	}
 	defer release()
 	run := workspace.NewRunner(workspace.CommandTimeout, tools)
 	provisioned, err := workspace.Provision(ctx, run, workspace.Request{
-		StateDir: root, Repo: repo, Issue: issue, CredentialHelper: credentialHelper, Source: workspace.FromFeed(feed),
+		StateDir: root, Repo: repository, Issue: issue, CredentialHelper: credentialHelper, Source: workspace.FromFeed(feed),
 		Log: func(line string) { fmt.Fprintln(stdout, "workspace-init: "+line) },
 	})
 	if err != nil {
@@ -236,7 +241,7 @@ const lockPollInterval = 250 * time.Millisecond
 // nothing); the first refused one logs one line, so a pod stuck behind another's provisioning says
 // so in its init log, and the attempts continue every lockPollInterval, bounded by waitSeconds and
 // by ctx (workspace-init.ts:74-139).
-func lockRepository(ctx context.Context, lockPath, repo string, waitSeconds int64, log io.Writer) (release func(), err error) {
+func lockRepository(ctx context.Context, lockPath string, repo ghrepo.Repository, waitSeconds int64, log io.Writer) (release func(), err error) {
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
 		return nil, fmt.Errorf("create %s: %w", filepath.Dir(lockPath), err)
 	}

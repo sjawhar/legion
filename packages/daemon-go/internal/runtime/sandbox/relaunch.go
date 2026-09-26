@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -90,7 +89,7 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	}
 	// Minted now, not before the waits: an installation token can be handed out with minutes left.
 	// Bounded like an API call, since the tree's launch turn is held while it runs.
-	owner, _, _ := strings.Cut(l.spec.Repository, "/")
+	owner := l.spec.Repository.Owner
 	minting, cancel := call(ctx)
 	provisionToken, err := r.tokens.Token(minting, owner)
 	cancel()

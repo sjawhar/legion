@@ -18,6 +18,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -823,7 +824,7 @@ func testJetStream(t *testing.T) jetstream.JetStream {
 func startConsume(t *testing.T, js jetstream.JetStream, pool *pgxpool.Pool, engine *Engine) func() {
 	t.Helper()
 	consumers, err := intake.OpenConsumers(t.Context(), js, intake.ConsumerSpec{
-		Project: "CAPTURE", Repositories: []string{"sjawhar/legion"}, AckWait: time.Second, NakDelay: time.Millisecond,
+		Project: "CAPTURE", Repositories: []ghrepo.Repository{{Owner: "sjawhar", Name: "legion"}}, AckWait: time.Second, NakDelay: time.Millisecond,
 		Logger: slog.Default(),
 	})
 	if err != nil {

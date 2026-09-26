@@ -104,7 +104,7 @@ var isolatedGitConfig = []string{"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSY
 // FetchRequest is a pod's first init container's: the repository, the provisioning token, the
 // directory its one-shot credential goes under, and the feed directory.
 type FetchRequest struct {
-	Repo          string
+	Repo          ghrepo.Repository
 	Token         string
 	CredentialDir string
 	Feed          string
@@ -115,10 +115,10 @@ type FetchRequest struct {
 // (FromGitHub). Only this package's two constructors make one.
 type Source interface {
 	// check refuses a Source that cannot reach repository, before provisioning runs anything.
-	check(repository string) error
+	check(repository ghrepo.Repository) error
 	// open is the remote the clone and the fetch of repository use, with bookmark the issue's own;
 	// the caller removes it.
-	open(repository, bookmark string) (remote, error)
+	open(repository ghrepo.Repository, bookmark string) (remote, error)
 }
 
 // FromFeed is a pod's feed directory, where Fetch cloned the repository in the pod's first init
@@ -128,12 +128,12 @@ func FromFeed(dir string) Source { return feedSource(dir) }
 
 type feedSource string
 
-func (dir feedSource) check(repository string) error {
+func (dir feedSource) check(repository ghrepo.Repository) error {
 	_, err := feedRepository(string(dir), repository)
 	return err
 }
 
-func (dir feedSource) open(repository, bookmark string) (remote, error) {
+func (dir feedSource) open(repository ghrepo.Repository, bookmark string) (remote, error) {
 	feed, err := feedRepository(string(dir), repository)
 	if err != nil {
 		return remote{}, err
@@ -149,28 +149,24 @@ func FromGitHub(token, credentialDir string) Source {
 
 type gitHubSource struct{ token, credentialDir string }
 
-func (s gitHubSource) check(string) error {
+func (s gitHubSource) check(ghrepo.Repository) error {
 	if s.credentialDir == "" {
 		return errors.New("workspace credential directory is required")
 	}
 	return nil
 }
 
-func (s gitHubSource) open(string, string) (remote, error) {
+func (s gitHubSource) open(ghrepo.Repository, string) (remote, error) {
 	return newProvisioningCredential(s.credentialDir, s.token)
 }
 
 // feedRepository is where Fetch clones repository under a feed directory, and where a feed
 // Source clones and fetches it from.
-func feedRepository(feed, repository string) (string, error) {
-	owner, repo, err := ghrepo.Split("workspace repository", repository)
-	if err != nil {
-		return "", err
-	}
+func feedRepository(feed string, repository ghrepo.Repository) (string, error) {
 	if feed == "" {
 		return "", errors.New("workspace feed directory is required")
 	}
-	return filepath.Join(feed, owner, repo+".git"), nil
+	return filepath.Join(feed, repository.Owner, repository.Name+".git"), nil
 }
 
 // feedRemote reaches https://github.com/<repo>, the remote the shared clone's origin names, at the
@@ -178,13 +174,13 @@ func feedRepository(feed, repository string) (string, error) {
 // feed is GitHub as it stood when the pod's workspace-fetch ran, and a tree agent may have pushed
 // since, so a fetch from it brings main and the issue's own bookmark alone: every other bookmark
 // keeps its target and its tracking.
-func feedRemote(feed, repo, bookmark string) remote {
+func feedRemote(feed string, repo ghrepo.Repository, bookmark string) remote {
 	return remote{
 		env: []string{
 			"GIT_ALLOW_PROTOCOL=file",
 			"GIT_CONFIG_COUNT=1",
 			"GIT_CONFIG_KEY_0=url." + feed + ".insteadOf",
-			"GIT_CONFIG_VALUE_0=https://github.com/" + repo,
+			"GIT_CONFIG_VALUE_0=https://github.com/" + repo.String(),
 		},
 		branches: []string{"main", bookmark},
 	}
@@ -215,7 +211,7 @@ func Fetch(ctx context.Context, run Runner, request FetchRequest) (string, error
 	if err := os.MkdirAll(filepath.Dir(feed), 0o700); err != nil {
 		return "", fmt.Errorf("create feed parent: %w", err)
 	}
-	clone := []string{"git", "clone", "--bare", "--quiet", "https://github.com/" + request.Repo, feed}
+	clone := []string{"git", "clone", "--bare", "--quiet", "https://github.com/" + request.Repo.String(), feed}
 	if _, err := RunChecked(ctx, run, clone, merge(credential.env, isolatedGitConfig), ""); err != nil {
 		return "", err
 	}

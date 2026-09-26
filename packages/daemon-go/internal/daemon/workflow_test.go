@@ -12,6 +12,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
 // linger_hours reaches the workflow engine as the duration it names, a decimal included: the
@@ -46,7 +47,7 @@ func (t loginTokens) Token(_ context.Context, role appauth.AppRole, _ string) (a
 func TestOpenWorkflowRefusesAReviewLoginItCannotTellFromTheImplementers(t *testing.T) {
 	cfg := config.Config{
 		Project: "demo", DispatchURL: "http://127.0.0.1:1",
-		Projects: map[string]config.Project{"demo": {Repo: "acme/widgets"}},
+		Projects: map[string]config.Project{"demo": {Repo: ghrepo.Repository{Owner: "acme", Name: "widgets"}}},
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	for name, tokens := range map[string]loginTokens{

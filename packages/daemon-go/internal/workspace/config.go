@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
 // CommandTimeout is the slow-command budget both runtimes' provisioning gives every command it
@@ -48,7 +50,7 @@ type Runner interface {
 // configured GitHub owner/repository name, for example "sjawhar/legion-smoke".
 type Request struct {
 	StateDir         string
-	Repo             string
+	Repo             ghrepo.Repository
 	Issue            string
 	CredentialHelper string
 	// Source is how the shared clone reaches the repository: FromFeed or FromGitHub.
@@ -62,12 +64,12 @@ type Request struct {
 // <state>/workspaces/<owner>/<repo>/<lowercase issue>; Clone, the shared clone every issue
 // workspace of the repository is a jj workspace of, <state>/repos/github.com/<owner>/<repo>. A
 // tree volume's init containers serialize on the file beside the clone, Clone + ".lock". Repo is
-// the repository, <owner>/<repo>.
+// the repository.
 type Workspace struct {
 	Dir      string
 	Bookmark string
 	Clone    string
-	Repo     string
+	Repo     ghrepo.Repository
 }
 
 // In a pod, the one process that holds the provisioning token, Fetch, runs in a container that

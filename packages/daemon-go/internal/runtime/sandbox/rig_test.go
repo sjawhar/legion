@@ -26,6 +26,7 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 )
@@ -98,7 +99,7 @@ func testSpec(t *testing.T, token claim.Token, role claim.Role, issue string) ru
 			RolePromptPaths: []string{rolePrompt}, Addressing: "Legion addressing: your role topic is `notifications.role." + string(token) + "`.",
 			DeploymentInstructionsPath: instructions,
 		},
-		Repository: "sjawhar/legion-smoke",
+		Repository: ghrepo.Repository{Owner: "sjawhar", Name: "legion-smoke"},
 	}
 }
 

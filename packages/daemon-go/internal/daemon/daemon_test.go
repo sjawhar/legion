@@ -28,6 +28,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
@@ -876,7 +877,7 @@ func workflowConfig(t *testing.T, natsURL string) config.Config {
 	if err := os.WriteFile(cfg.DispatchTokenFile, []byte("dispatch-test-token\n"), 0o600); err != nil {
 		t.Fatalf("write Dispatch token: %v", err)
 	}
-	cfg.Projects = map[string]config.Project{cfg.Project: {Repo: "acme/widgets"}}
+	cfg.Projects = map[string]config.Project{cfg.Project: {Repo: ghrepo.Repository{Owner: "acme", Name: "widgets"}}}
 	cfg.NatsURLs = []string{natsURL}
 	return cfg
 }

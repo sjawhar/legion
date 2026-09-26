@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
 const testTimeout = 30 * time.Second
@@ -162,7 +164,7 @@ func provisionRequest(t *testing.T) Request {
 	state := filepath.Join(t.TempDir(), "state")
 	return Request{
 		StateDir:         state,
-		Repo:             "acme/widgets",
+		Repo:             ghrepo.Repository{Owner: "acme", Name: "widgets"},
 		Issue:            "WIDGETS-42",
 		CredentialHelper: "!/opt/legion/bin/legion credential",
 		Source:           FromGitHub("test-installation-token", state),
@@ -353,7 +355,7 @@ func TestProvisionClonesThroughTemporarySiblingWithCredentialReset(t *testing.T)
 func fetchRequest(t *testing.T) FetchRequest {
 	t.Helper()
 	return FetchRequest{
-		Repo: "acme/widgets", Token: "test-installation-token", CredentialDir: t.TempDir(), Feed: filepath.Join(t.TempDir(), "feed"),
+		Repo: ghrepo.Repository{Owner: "acme", Name: "widgets"}, Token: "test-installation-token", CredentialDir: t.TempDir(), Feed: filepath.Join(t.TempDir(), "feed"),
 	}
 }
 
@@ -444,7 +446,7 @@ func TestProvisionFromAFeedHoldsNoCredential(t *testing.T) {
 		readOnly(t, fetch.Feed)
 		before := len(run.Calls())
 		working, err := Provision(context.Background(), run, Request{
-			StateDir: state, Repo: "acme/widgets", Issue: issue, CredentialHelper: "!/opt/legion/bin/legion credential", Source: FromFeed(fetch.Feed),
+			StateDir: state, Repo: ghrepo.Repository{Owner: "acme", Name: "widgets"}, Issue: issue, CredentialHelper: "!/opt/legion/bin/legion credential", Source: FromFeed(fetch.Feed),
 			Log: func(line string) { t.Logf("provisioning logged: %s", line) },
 		})
 		if err != nil {
@@ -488,7 +490,7 @@ func TestProvisionFromAFeedKeepsABookmarkPushedAfterTheSnapshot(t *testing.T) {
 	run := newLocalRunner(t)
 	state := filepath.Join(t.TempDir(), "state")
 	request := func(issue, feed string) Request {
-		return Request{StateDir: state, Repo: "acme/widgets", Issue: issue, CredentialHelper: "!/opt/legion/bin/legion credential", Source: FromFeed(feed),
+		return Request{StateDir: state, Repo: ghrepo.Repository{Owner: "acme", Name: "widgets"}, Issue: issue, CredentialHelper: "!/opt/legion/bin/legion credential", Source: FromFeed(feed),
 			Log: func(line string) { t.Logf("provisioning logged: %s", line) }}
 	}
 	first := fetchRequest(t)
@@ -629,38 +631,13 @@ func TestRemoveForgetsTheWorkspace(t *testing.T) {
 }
 
 func TestLocationMatchesProvisionedWorkspacePath(t *testing.T) {
-	working, err := Location("/state", "acme/widgets", "WIDGETS-42")
+	working, err := Location("/state", ghrepo.Repository{Owner: "acme", Name: "widgets"}, "WIDGETS-42")
 	if err != nil {
 		t.Fatalf("Location: %v", err)
 	}
 	if working.Dir != "/state/workspaces/acme/widgets/widgets-42" || working.Bookmark != "legion/WIDGETS-42" ||
 		working.Clone != "/state/repos/github.com/acme/widgets" {
 		t.Fatalf("Location = %#v, want workspace path, bookmark, and shared clone", working)
-	}
-}
-
-// A `.` or `..` segment would put the shared clone somewhere else under the state directory, and
-// provisioning removes an incomplete clone there (`--repo ../..` removed the tree volume's root):
-// every path the package derives from a repository refuses one, naming it.
-func TestARepositoryWithADotSegmentIsRefused(t *testing.T) {
-	for _, tc := range []struct{ repo, segment string }{
-		{"../x", ".."}, {"acme/..", ".."}, {"./..", "."}, {"../..", ".."}, {"acme/.", "."},
-	} {
-		want := `workspace repository "` + tc.repo + `" has a "` + tc.segment + `" segment`
-		if _, err := Location("/state", tc.repo, "WIDGETS-42"); err == nil || !strings.Contains(err.Error(), want) {
-			t.Errorf("Location(%q) = %v, want an error naming %q", tc.repo, err, want)
-		}
-	}
-}
-
-// A repository whose names hold whitespace is no GitHub repository, as a project's configured repo
-// and `legion threads --repo` refuse it: Location refuses it too, naming it.
-func TestARepositoryHoldingWhitespaceIsRefused(t *testing.T) {
-	for _, repo := range []string{"acme/wid gets", "ac me/widgets", "acme/widgets\n"} {
-		want := `workspace repository "` + strings.ReplaceAll(repo, "\n", `\n`) + `" holds whitespace`
-		if _, err := Location("/state", repo, "WIDGETS-42"); err == nil || !strings.Contains(err.Error(), want) {
-			t.Errorf("Location(%q) = %v, want an error naming %q", repo, err, want)
-		}
 	}
 }
 
@@ -671,7 +648,7 @@ func TestAnIssueWithADotSegmentIsRefused(t *testing.T) {
 	state := t.TempDir()
 	for _, issue := range []string{".", ".."} {
 		want := `workspace issue "` + issue + `" is a "` + issue + `" segment`
-		if _, err := Location(state, "acme/widgets", issue); err == nil || !strings.Contains(err.Error(), want) {
+		if _, err := Location(state, ghrepo.Repository{Owner: "acme", Name: "widgets"}, issue); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("Location(%q) = %v, want an error naming %q", issue, err, want)
 		}
 	}

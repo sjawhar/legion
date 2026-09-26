@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
@@ -30,7 +31,7 @@ type specs struct {
 	project      string
 	instructions string
 	secrets      map[string]string
-	repo         string
+	repo         ghrepo.Repository
 	prompts      *prompts.Composer
 	// identity is the role's App bot identity every pane commits as; nil for a daemon with no
 	// GitHub Apps.

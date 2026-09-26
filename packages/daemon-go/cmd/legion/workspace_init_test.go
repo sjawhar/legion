@@ -293,7 +293,7 @@ func TestWorkspaceInitRefusesBeforeTouchingTheVolume(t *testing.T) {
 				return []string{"provision", "--issue", "LEGION-42", "--repo", "acme", "--root", v.root, "--credential-helper", "x", "--feed", v.feed}
 			},
 			code: 1,
-			says: func(*treeVolume) string { return `workspace repository must be "owner/name" (got "acme")` },
+			says: func(*treeVolume) string { return `--repo must be "owner/name" (got "acme")` },
 		},
 		{
 			name: "a --repo with a .. segment",
@@ -301,7 +301,25 @@ func TestWorkspaceInitRefusesBeforeTouchingTheVolume(t *testing.T) {
 				return []string{"provision", "--issue", "LEGION-42", "--repo", "../x", "--root", v.root, "--credential-helper", "x", "--feed", v.feed}
 			},
 			code: 1,
-			says: func(*treeVolume) string { return `workspace repository "../x" has a ".." segment` },
+			says: func(*treeVolume) string { return `--repo "../x" has a ".." segment` },
+		},
+		{
+			name: "a --repo holding whitespace",
+			args: func(v *treeVolume) []string {
+				return []string{"provision", "--issue", "LEGION-42", "--repo", "acme/wid gets", "--root", v.root, "--credential-helper", "x", "--feed", v.feed}
+			},
+			code: 1,
+			says: func(*treeVolume) string { return `--repo "acme/wid gets" holds whitespace` },
+		},
+		{
+			// --repo is read first: every other input here is wrong too.
+			name: "a bad --repo, before every other input",
+			args: func(*treeVolume) []string {
+				return []string{"provision", "--issue", "nope", "--repo", "../..", "--root", "legion-root", "--feed", "feed"}
+			},
+			env:  func(t *testing.T, v *treeVolume) { t.Setenv("LEGION_PROVISION_TOKEN_FILE", v.token) },
+			code: 1,
+			says: func(*treeVolume) string { return `--repo "../.." has a ".." segment` },
 		},
 		{
 			name: "no --credential-helper",

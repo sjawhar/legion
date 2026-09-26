@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
 func spawnSpec() SpawnSpec {
@@ -18,7 +19,7 @@ func spawnSpec() SpawnSpec {
 		Env:        map[string]string{"JJ_USER": "legion-tester", "GH_CONFIG_DIR": "/state/gh"},
 		Secrets:    map[string]string{"ENVOY_TOKEN": "envoy-secret"},
 		Prompt:     PromptParts{RolePromptPaths: []string{"/roles/tester.md"}},
-		Repository: "sjawhar/legion",
+		Repository: ghrepo.Repository{Owner: "sjawhar", Name: "legion"},
 	}
 }
 
@@ -66,7 +67,7 @@ func TestValidateSpawnSpecRefusesWhatNoRuntimeCouldHonour(t *testing.T) {
 	}
 	for name, mutate := range map[string]func(*SpawnSpec){
 		"as it is":                    func(*SpawnSpec) {},
-		"with no repository":          func(s *SpawnSpec) { s.Repository = "" },
+		"with no repository":          func(s *SpawnSpec) { s.Repository = ghrepo.Repository{} },
 		"with a credential's pointer": func(s *SpawnSpec) { s.Env["GH_TOKEN_FILE"] = "/state/gh-token" },
 		"resuming a session":          func(s *SpawnSpec) { s.ResumeSessionFile = "/sessions/tester.jsonl" },
 		"recovering a lost workspace": func(s *SpawnSpec) { s.WorkspaceRecoveredFrom = "legion/LEGION-43" },
