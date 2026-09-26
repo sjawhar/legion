@@ -555,8 +555,8 @@ var failureHead = head{"example-org", "example-repo", "42", "3333333333333333333
 
 // A batch's write that fails for good reaches every caller in the batch as that failure, the
 // writer's role passes to the callers that queued meanwhile, and their write goes through: a failed
-// write leaves nobody waiting and the record accepting writes. A mutation that panics fails its
-// batch instead of stranding it.
+// write leaves nobody waiting and the record accepting writes. A write that panics fails its batch
+// instead of stranding it.
 func TestAFailedBatchWriteReachesEveryCallerAndTheNextBatchIsWritten(t *testing.T) {
 	h := failureHead
 	t.Run("a KV failure", func(t *testing.T) {
@@ -610,26 +610,29 @@ func TestAFailedBatchWriteReachesEveryCallerAndTheNextBatchIsWritten(t *testing.
 		}
 	})
 
-	t.Run("a mutation that panics", func(t *testing.T) {
+	t.Run("a write that panics", func(t *testing.T) {
 		conn, cleanup := connectNATS(t)
 		defer cleanup()
-		s, _ := wrapStore(t, conn, 0)
+		s, kv := wrapStore(t, conn, 0)
 		entered, release := make(chan struct{}), make(chan struct{})
-		var recovered any
-		batch := newCalls(t, s, h.key(), 4, func(i int) error {
-			if i > 0 {
-				return checkCall(s, h, 500)(i)
-			}
-			defer func() { recovered = recover() }()
-			return s.update(h.owner, h.repo, h.number, h.sha, func(*State) bool {
+		kv.onWrite(func(call int) error {
+			if call == 1 {
 				close(entered)
 				<-release
 				panic("injected panic")
-			})
+			}
+			return nil
+		})
+		var recovered any
+		batch := newCalls(t, s, h.key(), 4, func(i int) error {
+			if i == 0 {
+				defer func() { recovered = recover() }()
+			}
+			return checkCall(s, h, 500)(i)
 		})
 		batch.behind(entered, 4)
 		close(release)
-		errs := batch.wait("a mutation that panics")
+		errs := batch.wait("a write that panics")
 		if recovered != "injected panic" {
 			t.Fatalf("the writer's panic = %v, want it re-raised to the writer", recovered)
 		}
@@ -810,8 +813,8 @@ func TestAKVCallInFlightAtAReconnectIsRetriedOnTheNewConnection(t *testing.T) {
 	}
 }
 
-// A server that stalls and then answers loses nothing: a KV call on a connection that has not
-// reconnected is waited for, even past the write's budget. Here check-0's write is held for longer
+// A server that stalls and then answers loses nothing: a KV call is waited for until the store is
+// rewatched, even past the write's budget. Here check-0's write is held for longer
 // than the budget and then let through.
 func TestASlowKVCallOnALiveConnectionIsWaitedFor(t *testing.T) {
 	conn, cleanup := connectNATS(t)
@@ -830,32 +833,47 @@ func TestASlowKVCallOnALiveConnectionIsWaitedFor(t *testing.T) {
 	}
 }
 
-// A KV error that retrying cannot fix fails the write at once rather than after the budget: here
-// the bucket has been deleted.
+// A KV error that retrying cannot fix fails the write at once rather than after the budget: a
+// deleted bucket, and each error the store classifies as lasting, injected into the write's read.
 func TestALastingKVErrorFailsAWriteAtOnce(t *testing.T) {
-	conn, cleanup := connectNATS(t)
-	defer cleanup()
-	s, _ := wrapStore(t, conn, 0)
-	js, err := conn.JetStream()
-	if err != nil {
-		t.Fatalf("jetstream: %v", err)
-	}
-	if err := js.DeleteKeyValue(testBucket(t)); err != nil {
-		t.Fatalf("delete the bucket: %v", err)
-	}
 	h := head{"example-org", "example-repo", "42", "6666666666666666666666666666666666666666"}
-
-	began := time.Now()
-	err = record(s, h.check("check-0", 800, "completed", "success", "2026-09-24T01:00:00Z"))
-	elapsed := time.Since(began)
-
-	if err == nil {
-		t.Fatal("a write to a deleted bucket succeeded")
+	requireFailsAtOnce := func(t *testing.T, s *Store, want error) {
+		t.Helper()
+		began := time.Now()
+		err := record(s, h.check("check-0", 800, "completed", "success", "2026-09-24T01:00:00Z"))
+		elapsed := time.Since(began)
+		if err == nil || (want != nil && !errors.Is(err, want)) {
+			t.Fatalf("the write returned %v, want %v", err, want)
+		}
+		if elapsed >= recordBudget/2 {
+			t.Fatalf("the write took %s to fail (%v), want well under the %s budget", elapsed, err, recordBudget)
+		}
 	}
-	if elapsed >= recordBudget/2 {
-		t.Fatalf("a write to a deleted bucket took %s to fail (%v), want well under the %s budget", elapsed, err, recordBudget)
+	t.Run("a deleted bucket", func(t *testing.T) {
+		conn, cleanup := connectNATS(t)
+		defer cleanup()
+		s, _ := wrapStore(t, conn, 0)
+		js, err := conn.JetStream()
+		if err != nil {
+			t.Fatalf("jetstream: %v", err)
+		}
+		if err := js.DeleteKeyValue(testBucket(t)); err != nil {
+			t.Fatalf("delete the bucket: %v", err)
+		}
+		requireFailsAtOnce(t, s, nil)
+	})
+	for _, lasting := range []error{
+		natsgo.ErrInvalidConnection, natsgo.ErrAuthorization, natsgo.ErrAuthExpired,
+		natsgo.ErrPermissionViolation, natsgo.ErrJetStreamNotEnabled, natsgo.ErrJetStreamNotEnabledForAccount,
+	} {
+		t.Run(lasting.Error(), func(t *testing.T) {
+			conn, cleanup := connectNATS(t)
+			defer cleanup()
+			s, kv := wrapStore(t, conn, 0)
+			kv.failNextGet(lasting)
+			requireFailsAtOnce(t, s, lasting)
+		})
 	}
-	t.Logf("failed in %s: %v", elapsed.Round(time.Millisecond), err)
 }
 
 // BenchmarkRecordBurst records a burst of concurrent observations on one fresh head per
