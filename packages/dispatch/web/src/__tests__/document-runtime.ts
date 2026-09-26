@@ -1,3 +1,4 @@
+import { Schema } from "@milkdown/kit/prose/model";
 import { Awareness } from "y-protocols/awareness";
 import * as Y from "yjs";
 
@@ -56,6 +57,11 @@ const blockSchema = {
   ],
   version: 1,
 };
+
+/** The schema the fake view reports; the editor setup reads it to build the clipboard serializer. */
+const fakeSchema = new Schema({
+  nodes: { doc: { content: "block+" }, paragraph: { content: "text*", group: "block" }, text: {} },
+});
 
 export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentRuntime {
   const callbacks: ConnectionCallbacks[] = [];
@@ -134,7 +140,7 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
         setProps(next: Record<string, unknown>) {
           Object.assign(editor.viewProps, next);
         },
-        state: { doc: { descendants() {} }, tr: transaction },
+        state: { doc: { descendants() {} }, schema: fakeSchema, tr: transaction },
       },
     } as unknown as EditorHandle;
     editors.push(editor);

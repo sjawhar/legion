@@ -1,4 +1,4 @@
-import { expect, type Locator, type Page, test } from "@playwright/test";
+import { type Browser, expect, type Locator, type Page, test } from "@playwright/test";
 
 import {
   answerAsk,
@@ -12,7 +12,7 @@ import {
   patchIssue,
   resolveAsk,
 } from "./api";
-import { documentEditor } from "./editor";
+import { documentEditor, selectEditorText } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -53,6 +53,62 @@ async function indexedBlockAsk(issueKey: string, blockId: string) {
     throw new Error(`the ${blockId} decision was not indexed`);
   }
   return blockAsk;
+}
+
+interface Clipboard {
+  html: string;
+  text: string;
+}
+
+/** Copies the whole document through the editor's own copy handler: ProseMirror serializes the
+ * selection into the copy event's clipboardData, which is what a browser's clipboard receives. */
+async function copyWholeDocument(page: Page): Promise<Clipboard> {
+  const editor = documentEditor(page);
+  await editor.click();
+  await page.keyboard.press("ControlOrMeta+A");
+  return editor.evaluate((root) => {
+    const data = new DataTransfer();
+    root.dispatchEvent(
+      new ClipboardEvent("copy", { bubbles: true, cancelable: true, clipboardData: data })
+    );
+    return { html: data.getData("text/html"), text: data.getData("text/plain") };
+  });
+}
+
+/** Pastes clipboard contents at the start of the text `quote`, through the editor's own paste
+ * handler. */
+async function pasteBefore(page: Page, quote: string, clipboard: Clipboard): Promise<void> {
+  await selectEditorText(page, quote);
+  await page.keyboard.press("ArrowLeft");
+  await documentEditor(page).evaluate((root, { html, text }) => {
+    const data = new DataTransfer();
+    data.setData("text/html", html);
+    data.setData("text/plain", text);
+    root.dispatchEvent(
+      new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: data })
+    );
+  }, clipboard);
+}
+
+const answeredDecisionSpec =
+  'Intro.\n\n:::ask{#decision urgency="med" multiple="false"}\nWhich one?\n\n- A\n- B\n:::\n\nAfter.\n';
+
+/** Seeds a spec holding the decision `decision`, answers it with A, and opens it as alice. */
+async function openAnsweredDecision(browser: Browser) {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: answeredDecisionSpec,
+    title: "Copied ask",
+  });
+  const blockAsk = await indexedBlockAsk(issue.key, "decision");
+  await answerAsk(blockAsk.id, { expected_edited_at: null, selected: ["A"], text: "Go A." });
+  const alice = await asUser(browser, "alice");
+  const page = await alice.newPage();
+  await page.goto(`/issues/${issue.key}`);
+  const decision = documentEditor(page).locator('[data-dispatch-ask-block="decision"]');
+  await expect((await expectHosted(decision)).getByText("Go A.")).toBeVisible();
+  return { alice, blockAsk, issue, page };
 }
 
 async function alertsIn(page: Page): Promise<Locator> {
@@ -555,6 +611,68 @@ test("decision blocks read as urgency-accented cards in the document and its ver
     await expect(historical.getByRole("radio")).toHaveCount(0);
     await expect(historical.getByRole("button", { exact: true, name: "Answer" })).toHaveCount(0);
     await page.screenshot({ path: testInfo.outputPath("decisions-version-1280-light.png") });
+  } finally {
+    await alice.close();
+  }
+});
+
+// A typed block goes onto the clipboard as its content. The editor's block renderer draws the
+// block's attributes as a header inside its DOM, and the clipboard once carried it: pasted back,
+// the block's parse rule read the header too, so a copied decision's question became its
+// attribute list ("ask urgency med multiple false state answered ... blockId decision Which
+// one?"). HTML an older tab copied still carries that header, and a paste drops it.
+test("a copied decision block carries its content, not its attribute header", async ({
+  browser,
+}) => {
+  const { alice, issue, page } = await openAnsweredDecision(browser);
+  try {
+    const clipboard = await copyWholeDocument(page);
+    expect(clipboard.html).toContain("Which one?");
+    expect(clipboard.html).not.toContain("data-proof-block-summary");
+    expect(clipboard.html).not.toContain("answered_by");
+
+    const header =
+      '<header data-proof-block-summary=""><span data-proof-block-name="">ask</span>' +
+      '<dl data-proof-block-attributes=""><dt>urgency</dt><dd data-proof-block-attribute="urgency">med</dd>' +
+      '<dt>answer</dt><dd data-proof-block-attribute="answer">Go A.</dd></dl></header>';
+    const olderTab = clipboard.html.replace(
+      /(<section[^>]*data-proof-block-type="ask"[^>]*>)/,
+      `$1${header}`
+    );
+    expect(olderTab).toContain("data-proof-block-summary");
+    await pasteBefore(page, "Intro.", { html: olderTab, text: clipboard.text });
+
+    await expect
+      .poll(async () => (await getIssue(issue.key)).open_asks.map((ask) => ask.question))
+      .toEqual(["Which one?"]);
+  } finally {
+    await alice.close();
+  }
+});
+
+// A copy of an answered decision pasted above it is a new block. The editor keeps a block's id on
+// the block that held it before the paste and mints one for the copy, so the answered ask stays
+// on the original and the copy is indexed as a fresh open ask with the same question. The editor
+// once kept the id on whichever of the two came first, so the copy took the original's ask, its
+// answer with it, and the original came back as a fresh ask.
+test("a copy of an answered decision pasted above it leaves the answer on the original", async ({
+  browser,
+}) => {
+  const { alice, blockAsk, issue, page } = await openAnsweredDecision(browser);
+  try {
+    await pasteBefore(page, "Intro.", await copyWholeDocument(page));
+
+    await expect
+      .poll(async () => (await getIssue(issue.key)).open_asks.map((ask) => ask.question))
+      .toEqual(["Which one?"]);
+    const copy = (await getIssue(issue.key)).open_asks[0];
+    expect(copy?.block_id).not.toBe("decision");
+    const held = (await getAsk(blockAsk.id)).ask;
+    expect({ block: held.block_id, question: held.question, state: held.state }).toEqual({
+      block: "decision",
+      question: "Which one?",
+      state: "answered",
+    });
   } finally {
     await alice.close();
   }

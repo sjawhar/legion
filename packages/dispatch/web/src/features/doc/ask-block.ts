@@ -1,4 +1,8 @@
-import type { Node as ProseMirrorNode } from "@milkdown/kit/prose/model";
+import {
+  type DOMOutputSpec,
+  DOMSerializer,
+  type Node as ProseMirrorNode,
+} from "@milkdown/kit/prose/model";
 import { type EditorState, Plugin, PluginKey } from "@milkdown/kit/prose/state";
 import type { EditorView, NodeView, ViewMutationRecord } from "@milkdown/kit/prose/view";
 import type { HostBlockRenderer } from "@sjawhar/proof-editor";
@@ -39,6 +43,55 @@ export const renderTypedBlock: HostBlockRenderer = (node) => [
   ],
   ["div", { "data-proof-block-content": "" }, 0],
 ];
+
+/** The header `renderTypedBlock` draws inside a typed block's section. */
+const typedBlockHeader = "section[data-proof-block-type] > header[data-proof-block-summary]";
+
+/**
+ * Puts a typed block on the clipboard as its section and its content, without the attribute
+ * header `renderTypedBlock` draws: a typed block's parse rule reads every child of its section as
+ * content, so a copied header came back as the block's first paragraphs (a pasted decision's
+ * question read as its attribute list). Pasted HTML that still carries the header, as a tab on an
+ * older build copies it, has the header removed first.
+ */
+export function installTypedBlockClipboard(view: EditorView): void {
+  const rendered = DOMSerializer.fromSchema(view.state.schema);
+  const nodes = Object.fromEntries(
+    Object.entries(rendered.nodes).map(([name, render]) => [
+      name,
+      (node: ProseMirrorNode) => withoutTypedBlockHeader(render(node)),
+    ])
+  );
+  view.setProps({
+    clipboardSerializer: new DOMSerializer(nodes, rendered.marks),
+    transformPastedHTML: (html) => {
+      const template = view.dom.ownerDocument.createElement("template");
+      template.innerHTML = html;
+      const headers = template.content.querySelectorAll(typedBlockHeader);
+      if (headers.length === 0) {
+        return html;
+      }
+      for (const header of headers) {
+        header.remove();
+      }
+      return template.innerHTML;
+    },
+  });
+}
+
+/** A typed block's rendered section with its content directly inside it. */
+function withoutTypedBlockHeader(spec: DOMOutputSpec): DOMOutputSpec {
+  if (!Array.isArray(spec)) {
+    return spec;
+  }
+  const [tag, attrs] = spec;
+  const typedBlock =
+    typeof attrs === "object" &&
+    attrs !== null &&
+    !Array.isArray(attrs) &&
+    "data-proof-block-type" in attrs;
+  return typedBlock ? [tag, attrs, 0] : spec;
+}
 
 /** What an `ask` node says about itself, read once per render from its attributes and content. */
 export interface AskBlockFacts {
