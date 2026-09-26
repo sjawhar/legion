@@ -104,6 +104,7 @@ func TestAClaimRoundTripsWithItsLocatorAndDelivery(t *testing.T) {
 		Generation:  4,
 		QueuedAt:    at(1),
 		DeliveredAt: at(2),
+		Interrupted: true,
 	}
 
 	if err := store.PutClaim(ctx, want); err != nil {

@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -53,6 +52,19 @@ type Delivery struct {
 	QueuedAt    time.Time
 	DeliveredAt time.Time
 	ConfirmedAt time.Time
+	// Interrupted says a turn of the task was running when its process died (interrupted), so the
+	// task is sent behind interruptedTask from then on (message). The task text stays as the
+	// workflow wrote it.
+	Interrupted bool
+}
+
+// message is the prompt a delivery is sent as: its task, behind interruptedTask once a process
+// died in a turn of it.
+func (d Delivery) message() string {
+	if d.Interrupted {
+		return interruptedTask + d.Task
+	}
+	return d.Task
 }
 
 // HashBootToken is the one hash a boot token is stored and looked up by. A launch mints the token
@@ -222,7 +234,7 @@ func (m *Machine) startSend(conn runtime.Conn, d Delivery) {
 		err := m.adopt(role, loc)
 		if err == nil {
 			sending, cancel := context.WithTimeout(m.ctx, m.deps.Timeouts.RPC)
-			err = conn.Prompt(sending, d.ID, d.Task)
+			err = conn.Prompt(sending, d.ID, d.message())
 			cancel()
 		}
 		var ev Event = PromptAcked{Claim: token, Generation: generation, DeliveryID: d.ID}
@@ -317,7 +329,7 @@ const interruptedTask = "Your previous turn on this task was interrupted when yo
 // interrupted takes back the pending task whose turn the claim's dead process was running, so the
 // relaunched agent's ready sends it again: Oh My Pi does not resume the turn itself. The turn ran,
 // so the agent read the task and it keeps its read mark; it goes back unconfirmed under a new id
-// (takeBackPending), behind interruptedTask once however often it is interrupted. It is neither
+// (takeBackPending), marked Interrupted, so it is sent behind interruptedTask. It is neither
 // retired nor its run marked served, since the turn never finished. A task with no turn running
 // is left as it is: the relaunch sends it as it was.
 func (m *Machine) interrupted(ctx context.Context) error {
@@ -325,9 +337,7 @@ func (m *Machine) interrupted(ctx context.Context) error {
 	if p == nil || p.ConfirmedAt.IsZero() {
 		return nil
 	}
-	if !strings.HasPrefix(p.Task, interruptedTask) {
-		p.Task = interruptedTask + p.Task
-	}
+	p.Interrupted = true
 	m.log.Warn("supervise: the process died in the task's turn; the task waits for the relaunch", "delivery", p.ID)
 	return m.takeBackPending(ctx, taskRead)
 }

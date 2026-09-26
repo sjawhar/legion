@@ -71,8 +71,9 @@ func TestADeliveryToAnIdleClaimIsSentAtOnce(t *testing.T) {
 // A worker whose process dies mid-turn is relaunched as the same session, and Oh My Pi does not
 // continue an interrupted turn on resume. So the task goes back to waiting: unconfirmed, under a
 // new id the new process's shim has no record of, and re-sent when the relaunched agent is ready,
-// behind the one sentence that says its turn was interrupted — once, however often that happens.
-// The task is not retired and its run is not marked served until a turn of it ends.
+// behind the one sentence that says its turn was interrupted — once, however often that happens,
+// and never written into the task text, which stays the workflow's. The task is not retired and
+// its run is not marked served until a turn of it ends.
 func TestATaskInterruptedByADeathIsResentToTheRelaunchedAgent(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateReady)
@@ -95,9 +96,13 @@ func TestATaskInterruptedByADeathIsResentToTheRelaunchedAgent(t *testing.T) {
 		if p := h.pending(); !p.ConfirmedAt.IsZero() || p.ID != resent.DeliveryID {
 			t.Fatalf("death %d: pending %+v, want the re-sent task, unconfirmed until its turn starts", death, p)
 		}
-		if stored := h.store.load(testToken); stored.ServingGeneration != 0 || stored.Pending == nil {
+		stored := h.store.load(testToken)
+		if stored.ServingGeneration != 0 || stored.Pending == nil {
 			t.Fatalf("death %d: stored claim serving run %d with pending %+v, want no run served and the task kept",
 				death, stored.ServingGeneration, stored.Pending)
+		}
+		if p := stored.Pending; p.Task != "implement the plan" || !p.Interrupted {
+			t.Fatalf("death %d: stored task %q interrupted=%v, want the workflow's text marked interrupted", death, p.Task, p.Interrupted)
 		}
 		sent = resent.DeliveryID
 		h.must(StreamTurnStart{Claim: testToken})
