@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -149,21 +151,30 @@ func TestAWrappedRefusalIsStillIdentifiable(t *testing.T) {
 // The project word every token and the private tmux server carry is the shipped daemon's
 // (`legionProjectToken`, packages/contracts/src/legion-roles.ts): the operator's `project`
 // lowercased, with everything outside [a-z0-9] dropped, so `sjawhar/legion` and `LEGION` name the
-// same server either daemon would.
+// same server either daemon would. Both read packages/contracts/fixtures/project-tokens.json, so the
+// plugin, which compares its LEGION_PROJECT with the project this daemon reports, agrees with both.
 func TestProjectTokenIsTheShippedSpelling(t *testing.T) {
-	for project, want := range map[string]string{
-		"legion":           "legion",
-		"E2E1234567":       "e2e1234567",
-		"sjawhar/legion":   "sjawharlegion",
-		"  Acme Widgets-2": "acmewidgets2",
-	} {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "contracts", "fixtures", "project-tokens.json"))
+	if err != nil {
+		t.Fatalf("read the project-token fixture: %v", err)
+	}
+	var fixture struct {
+		Tokens  map[string]string `json:"tokens"`
+		Refused []string          `json:"refused"`
+	}
+	if err := json.Unmarshal(raw, &fixture); err != nil {
+		t.Fatalf("decode the project-token fixture: %v", err)
+	}
+	for project, want := range fixture.Tokens {
 		got, err := ProjectToken(project)
 		if err != nil || got != want {
 			t.Errorf("ProjectToken(%q) = %q, %v; want %q", project, got, err, want)
 		}
 	}
-	if _, err := ProjectToken("-/_ "); err == nil || !strings.Contains(err.Error(), "project") {
-		t.Errorf("ProjectToken of a project with no alphanumeric character = %v, want a refusal naming project", err)
+	for _, project := range fixture.Refused {
+		if _, err := ProjectToken(project); err == nil || !strings.Contains(err.Error(), "project") {
+			t.Errorf("ProjectToken(%q) = %v, want a refusal naming project", project, err)
+		}
 	}
 }
 

@@ -1,0 +1,16 @@
+{
+  "tokens": {
+    "legion": "legion",
+    "LEGION": "legion",
+    "OMP": "omp",
+    "E2E1234567": "e2e1234567",
+    "CS12345678": "cs12345678",
+    "S312345678": "s312345678",
+    "sjawhar/legion": "sjawharlegion",
+    "  Acme Widgets-2": "acmewidgets2",
+    "Ünïcode-9": "ncode9",
+    "\u212Aelvin": "kelvin",
+    "\u0130stanbul": "istanbul"
+  },
+  "refused": ["", "-/_ ", "ÜÖ"]
+}
