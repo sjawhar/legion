@@ -101,7 +101,7 @@ func TestFixturesAreWithinSchema(t *testing.T) {
 	fixtures := loadFixtures(t)
 	wantNames := []string{
 		"ask-answered", "ask", "bare-url", "blockquote", "callout-blocks", "callout", "code-directive-example", "code-fence",
-		"code", "directive-like-text", "emphasis", "empty", "escapes", "explicit-url-space",
+		"code", "directive-like-text", "emphasis", "empty", "escaped-block-markers", "escapes", "explicit-url-space",
 		"explicit-url-title",
 		"footnote", "frontmatter", "headings", "hr", "html", "image-delimiters", "image",
 		"inline-code-backticks", "inline-code-spaces", "link-delimiters", "links", "lists", "long",
@@ -137,7 +137,7 @@ func TestSpliceFixturesHaveRequiredCoverage(t *testing.T) {
 		"insert-inline-after-quote", "insert-inline-at-textblock-start", "insert-inline-at-textblock-end",
 		"insert-blocks-after-quote-splits-paragraph", "insert-block-at-doc-start", "insert-block-at-doc-end",
 		"insert-block-after-heading-textblock", "insert-block-before-heading-textblock",
-		"insert-paragraph-after-list-item-textblock",
+		"insert-paragraph-after-list-item-textblock", "callout-paragraph-and-code", "callout-paragraph-and-list", "callout-paragraph-and-heading", "callout-in-list-item-code", "callout-in-blockquote-code", "nested-callout-code", "callout-across-paragraphs-code",
 	}
 	if len(fixtures) != len(wantNames) {
 		t.Fatalf("splice fixture count = %d, want %d", len(fixtures), len(wantNames))

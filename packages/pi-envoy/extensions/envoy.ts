@@ -7,6 +7,7 @@ import {
   type DeliveryCapability,
   dispatchToolSchema,
   dispatchToolSpecs,
+  type OpenAsk,
   type OpenAsksResponse,
   ROLE_TOPIC_PREFIX,
   zodSchemaApi,
@@ -50,6 +51,7 @@ import {
 import { logger } from "@oh-my-pi/pi-utils";
 import { encode } from "@toon-format/toon";
 import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
+import { recordEnvoySession, resolveEnvoySession } from "../src/envoy-session";
 import { LOCAL_ENVOY_NOTICE } from "../src/legion/phase-stall";
 import {
   type LegionNoticeSubscription,
@@ -59,7 +61,11 @@ import {
   type RoleRegainReason,
 } from "../src/legion/role-claim-bridge";
 import type { PiApi, SessionContext, SessionSwitchReason, ToolResult } from "../src/pi-types";
-import { isRegisteredSubagent, subagentSessionCheck } from "../src/subagent-session";
+import {
+  isRegisteredSubagent,
+  type SessionIdentityContext,
+  subagentSessionCheck,
+} from "../src/subagent-session";
 import { toolFailure, toolSuccess } from "../src/tool-result";
 import { registerEnvoyMessageRenderer } from "./envoy-message-renderer";
 import { registerEnvoyWhoamiCommand } from "./envoy-whoami-command";
@@ -92,19 +98,64 @@ const LEGION_MANAGED_ENTRY = "legion-managed-session";
 
 /** Custom-message type of the run-end nudge itself; never displayed. */
 const ASK_REMINDER_MESSAGE = "dispatch-ask-reminder";
+/** Unicode line separators that terminate a displayed ask question. */
+const ASK_PROMPT_LINE_SEPARATOR = /\r\n|[\r\n\u0085\u2028\u2029]/;
 
 /**
- * What the hidden self-check asks the agent, over a snapshot of its own conversation. One word
- * comes back; only WAITING buys the visible turn below. It asks nothing about Dispatch: the
- * extension has already read from Dispatch that nothing is open, the model is not a better
- * witness of that than the API is, and the agent this exists to catch is one that asked the
- * human in chat text — which such an agent can reasonably read as having asked.
+ * Return the first display line while keeping all other C0/C1 controls visibly inert. The
+ * separator search handles CRLF, bare CR/LF, NEL, and Unicode line separators; every other
+ * control becomes one space before the bounded prompt line is formed.
  */
-const ASK_SELF_CHECK_PROMPT =
-  "Your run has just ended. Answer with exactly one word and nothing else: WAITING or PROCEEDING. " +
-  "WAITING — you stopped because you need a decision, an approval, or information from a human. " +
-  "PROCEEDING — you finished, you will carry on by yourself, or you are waiting only on tools, " +
-  "subagents, or events.";
+function askPromptQuestionHead(question: string): string {
+  const firstLineEnd = question.search(ASK_PROMPT_LINE_SEPARATOR);
+  const firstLine = firstLineEnd === -1 ? question : question.slice(0, firstLineEnd);
+  let normalized: string[] | undefined;
+  let segmentStart = 0;
+  for (let index = 0; index < firstLine.length; index += 1) {
+    const codePoint = firstLine.charCodeAt(index);
+    if (codePoint > 0x1f && (codePoint < 0x7f || codePoint > 0x9f)) continue;
+    normalized ??= [];
+    normalized.push(firstLine.slice(segmentStart, index), " ");
+    segmentStart = index + 1;
+  }
+  return (normalized === undefined
+    ? firstLine
+    : `${normalized.join("")}${firstLine.slice(segmentStart)}`).trim();
+}
+/**
+ * What the hidden self-check asks the agent, over a snapshot of its own conversation. It names
+ * the asks Dispatch already knows about, then asks whether the agent is waiting on a human for
+ * something those asks do not cover. One word comes back; only WAITING buys the visible turn.
+ */
+const ASK_SELF_CHECK_PROMPT = (asks: readonly Pick<OpenAsk, "question">[]): string => {
+  const askLimit = 5;
+  const questionLimit = 120;
+  const promptAsks =
+    asks.length === 0
+      ? "There are no open asks in Dispatch."
+      : [
+          "Your open asks in Dispatch:",
+          ...asks.slice(0, askLimit).map((ask) => {
+            const firstLine = askPromptQuestionHead(ask.question);
+            const question =
+              firstLine.length <= questionLimit
+                ? firstLine
+                : `${firstLine.slice(0, questionLimit - 1)}…`;
+            return `- ${question}`;
+          }),
+          ...(asks.length > askLimit ? [`+${asks.length - askLimit} more`] : []),
+        ].join("\n");
+
+  return (
+    "Your run has just ended. " +
+    `${promptAsks}\n\n` +
+    "Are you right now waiting on a human for anything none of those asks covers? " +
+    "Answer with exactly one word and nothing else: WAITING or PROCEEDING. " +
+    "WAITING — you stopped because you need a decision, an approval, or information from a human. " +
+    "PROCEEDING — you finished, you will carry on by yourself, or you are waiting only on tools, " +
+    "subagents, or events."
+  );
+};
 
 /**
  * A verdict whose first word is WAITING, after any markdown emphasis or quoting — the reply
@@ -139,7 +190,7 @@ const ASK_SELF_CHECK_TIMEOUT_MS = 60_000;
 const ASK_CHECKS_PER_PERIOD = 5;
 
 const UNASKED_WAIT_REMINDER =
-  "You just said you are waiting on a human, but you have no open ask in Dispatch, so nobody knows you are waiting. Open it now with dispatch_ask — or dispatch_request_approval when what you need is approval of a document — naming exactly what you need and from whom. Do not reply just to acknowledge this reminder.";
+  "You just said you are waiting on a human for something no open ask in Dispatch covers. Open an ask for it now with dispatch_ask (or dispatch_request_approval for a document), naming exactly what you need and from whom.";
 
 /** Tools whose success means the agent opened the ask itself, so the nudge has nothing to say. */
 const ASK_OPENING_TOOLS: readonly string[] = ["dispatch_ask", "dispatch_request_approval"];
@@ -156,13 +207,9 @@ const DISPATCH_TOOL_PREFIX = "dispatch_";
  * continuation can never owe one, which is what keeps it from nudging itself forever. `checks`
  * counts the ones spent, capped at `ASK_CHECKS_PER_PERIOD`.
  *
- * `baseline_as_of` is the server clock the period's next Dispatch read asks from, and it moves:
- * every settle that resolves — silently, because an ask is open, or by spending a check —
- * carries it to that snapshot's `as_of`. Pinned to the arming turn it would never move, and
- * `opened_since` counts every ask this session authored after it, open or long answered, so one
- * ask would silence the rest of the period however long the session lived. A standing session
- * is woken by a human's answer through Envoy, which arms no period, so the window is the only
- * thing that can let the nudge speak again.
+ * `baseline_as_of` is the server clock the period's next Dispatch read asks from, and it moves
+ * after every self-check to that snapshot's `as_of`. This keeps the check's view current while
+ * the session works between settles.
  *
  * In-memory only, for the life of this process's session. A cold start or a session change
  * begins at period 0, which the stop guard refuses, so nothing nudges before the next genuine
@@ -204,6 +251,12 @@ interface RoleClaimEntry {
 
 interface EstablishSessionOptions {
   readonly carryPreviousSessionRole?: boolean;
+}
+
+/** Whether a topic served the session's role, and how many roles had ended, at one moment. */
+interface RoleSnapshot {
+  readonly roleBound: boolean;
+  readonly endsBefore: number;
 }
 
 function isRoleClaimEntry(entry: unknown): entry is RoleClaimEntry {
@@ -268,8 +321,20 @@ export default function envoyExtension(pi: PiApi): void {
   let connection: NatsConnection | undefined;
   let sessionDirectory = "";
   let sessionID = "";
+  // The key this instance last published its session under, so a switch that changes the id or
+  // the transcript path leaves no entry behind for a subagent to resolve (`src/envoy-session.ts`).
+  let recordedSessionKey: string | undefined;
   let heartbeatRegistered = false;
   let claimedRoleTopic: string | undefined;
+  // The session id `claimedRoleTopic` was claimed under (endOutgoingRole).
+  let claimedRoleSessionID: string | undefined;
+  // Notice subjects this session takes only while it holds `claimedRoleTopic` (the Go controller's
+  // topic, go-bootstrap.ts). They are never registered with the listener, so a resumed process
+  // cannot recover them: the role's claim is their only source, and `endRole` closes them.
+  const roleNoticeSubjects = new Set<string>();
+  // Counts role ends, so a role-bound subscription still opening when its role ended can tell
+  // (subscribeUnlessRoleEnds).
+  let roleEnds = 0;
   let activeSessionContext: SessionContext | undefined;
   const inbox: {
     event_id: string;
@@ -393,6 +458,15 @@ export default function envoyExtension(pi: PiApi): void {
   const restoreLocalSessionState = (context: SessionContext): void => {
     sessionDirectory = context.cwd;
     sessionID = context.sessionManager.getSessionId();
+    // Only a top-level instance reaches here — a subagent's session_start and switch events
+    // return early — so this publishes the session this process registered, whatever moved the
+    // id: a start, a switch, or the heartbeat's drift heal. The subagent instances in this
+    // process resolve it from their own transcript path as their reply address.
+    recordedSessionKey = recordEnvoySession({
+      previousKey: recordedSessionKey,
+      sessionFile: context.sessionManager.getSessionFile(),
+      sessionID,
+    });
     activeSessionContext = context;
     const branch = context.sessionManager.getBranch?.() ?? [];
     // Only a genuine session change clears the armed period — a `/fork`, `/handoff`, resume or
@@ -591,7 +665,10 @@ export default function envoyExtension(pi: PiApi): void {
     // Otherwise the iterator only ended because the connection was closed or
     // errored out from under nats.js's own reconnect handling. Re-establish
     // rather than staying silently deaf while the HTTP registration heartbeat
-    // keeps the session looking healthy in the registry.
+    // keeps the session looking healthy in the registry. Whether the topic served a role, and how
+    // many roles had ended, are taken once, here: every retry of the chain, a failed reconnect's
+    // included, compares against them, so a role that ends mid-chain keeps the topic closed.
+    const snapshot = roleSnapshot(topic);
     const retry = (delayMs: number): void => {
       awaitingRetry.add(topic);
       setTimeout(() => {
@@ -602,7 +679,7 @@ export default function envoyExtension(pi: PiApi): void {
         // A close that landed during the delay leaves the marker for us instead
         // of the pump end-path. Consume it here so it cannot outlive the timer.
         if (intentionallyClosed.delete(topic)) return;
-        void subscribe(topic).catch(() => retry(NATS_RETRY_INTERVAL_MS));
+        void subscribeUnlessRoleEnds(topic, snapshot).catch(() => retry(NATS_RETRY_INTERVAL_MS));
       }, delayMs);
     };
     retry(RESUBSCRIBE_DELAY_MS);
@@ -624,11 +701,61 @@ export default function envoyExtension(pi: PiApi): void {
     return true;
   };
 
+  // The session stops holding its role: close the notice subjects it took for it, so a holder
+  // another session replaced stops taking the role's wakes.
+  const endRole = (): void => {
+    claimedRoleTopic = undefined;
+    claimedRoleSessionID = undefined;
+    roleEnds += 1;
+    for (const subject of roleNoticeSubjects) closeIntentionally(subject);
+    roleNoticeSubjects.clear();
+  };
+
+  // A `new` or `resume` switch installs an unrelated transcript, so the outgoing session's role is
+  // not carried into it. A role claimed under the current session id is not the outgoing one's:
+  // Oh My Pi moves on to legion.ts's handler when envoy.ts's outlasts its budget, so the Legion
+  // reclaim can claim for the new session before this rebind runs, and that claim, with the notice
+  // subjects it opened, stays.
+  const endOutgoingRole = (): void => {
+    if (claimedRoleSessionID !== sessionID) endRole();
+  };
+
+  // Whether `topic` serves the role this session holds, and how many roles had ended, at one
+  // moment: what a role-bound subscribe compares against once its connection is made.
+  const roleSnapshot = (topic: string): RoleSnapshot => ({
+    roleBound: expandSubscriptionTopics([topic]).some((subject) => roleNoticeSubjects.has(subject)),
+    endsBefore: roleEnds,
+  });
+
+  // Opens `topic` unless it served a role that has ended since `snapshot` was taken (a first
+  // subscribe, or any retry of a dropped topic's chain): a role-bound subject is not reopened, and
+  // one whose role ends while its connection is made is closed as soon as it opens, before any
+  // registration can carry it. Answers whether the topic is still wanted.
+  const subscribeUnlessRoleEnds = async (
+    topic: string,
+    snapshot: RoleSnapshot
+  ): Promise<boolean> => {
+    const roleEnded = () => snapshot.roleBound && roleEnds !== snapshot.endsBefore;
+    if (roleEnded()) return false;
+    await subscribe(topic);
+    if (!roleEnded()) return true;
+    for (const subject of expandSubscriptionTopics([topic])) closeIntentionally(subject);
+    return false;
+  };
+
+  // The listener delivers nothing to a self-subscribed session (it takes its topics over its own
+  // NATS subscriptions), so the registered topics serve recovery on resume; a role-bound subject
+  // stays out of them.
   const registerSession = () =>
     client.subscribe({
       sessionID,
       directory: sessionDirectory,
-      topics: [...new Set([agentSubject(sessionID), ...subscriptions.keys()])],
+      topics: [
+        ...new Set([
+          agentSubject(sessionID),
+          ...[...subscriptions.keys()].filter((subject) => !roleNoticeSubjects.has(subject)),
+        ]),
+      ],
       port: 0,
       // Read at every registration: the heartbeat re-registers, which picks up
       // titles assigned after session_start and later renames.
@@ -681,7 +808,7 @@ export default function envoyExtension(pi: PiApi): void {
         return;
       }
       if (!result.claimed) {
-        claimedRoleTopic = undefined;
+        endRole();
         logger.warn("envoy: role re-assertion refused; held by another live session", {
           role,
           sessionID: id,
@@ -811,10 +938,13 @@ export default function envoyExtension(pi: PiApi): void {
         sessionID,
         holder: result.holder,
       });
-      claimedRoleTopic = undefined;
+      endRole();
       return false;
     }
+    // Moving to another role ends the one this session held.
+    if (previousTopic !== undefined && previousTopic !== topic) endRole();
     claimedRoleTopic = topic;
+    claimedRoleSessionID = sessionID;
     // The transcript is the one thing `omp --resume` guarantees, so it is
     // the durable record of the claim: the listener reaps a dead session's
     // interest row (role claim included) after its ten-minute stale-interest
@@ -868,10 +998,10 @@ export default function envoyExtension(pi: PiApi): void {
     // re-assert and a rebind is a clean move. Must run after registerSession:
     // the listener rejects a claim from an unregistered session. Quiet on
     // failure: session start must not depend on it.
-    if (!carryPreviousSessionRole) claimedRoleTopic = undefined;
+    if (!carryPreviousSessionRole) endOutgoingRole();
     const remembered = transcriptClaimedRole(branch);
     if (remembered === null) {
-      claimedRoleTopic = undefined;
+      endRole();
       return;
     }
     let role = remembered ?? claimedRoleTopic?.slice(ROLE_TOPIC_PREFIX.length);
@@ -909,7 +1039,7 @@ export default function envoyExtension(pi: PiApi): void {
     previousSessionID = sessionID
   ): Promise<void> => {
     const previousTopic = previousSessionID === "" ? undefined : agentSubject(previousSessionID);
-    if (options.carryPreviousSessionRole === false) claimedRoleTopic = undefined;
+    if (options.carryPreviousSessionRole === false) endOutgoingRole();
     restoreLocalSessionState(context);
     const branch = context.sessionManager.getBranch?.() ?? [];
     const resumed = branch.length > 0;
@@ -969,7 +1099,8 @@ export default function envoyExtension(pi: PiApi): void {
   const subscribeNotice: LegionNoticeSubscription = async (
     targetSessionID,
     topic,
-    callerContext
+    callerContext,
+    whileHolding
   ) => {
     const context = callerContext ?? activeSessionContext;
     if (context === undefined || context.sessionManager.getSessionId() !== targetSessionID) {
@@ -978,7 +1109,16 @@ export default function envoyExtension(pi: PiApi): void {
       );
     }
     if (sessionID !== targetSessionID) await establishSession(context);
-    await subscribe(topic);
+    if (whileHolding !== undefined) {
+      if (claimedRoleTopic !== ROLE_TOPIC_PREFIX + whileHolding) {
+        throw new Error(
+          `Envoy session ${targetSessionID} does not hold role ${whileHolding} for a notice subscription`
+        );
+      }
+      // Marked before the subscription opens, so no registration ever carries it.
+      for (const subject of expandSubscriptionTopics([topic])) roleNoticeSubjects.add(subject);
+    }
+    if (!(await subscribeUnlessRoleEnds(topic, roleSnapshot(topic)))) return;
     await registerSession();
   };
 
@@ -997,8 +1137,29 @@ export default function envoyExtension(pi: PiApi): void {
   // tests, either enough: the transcript layout (file storage), and the host's own roster
   // (any storage, any transcript or none).
   const isSubagentTranscript = subagentSessionCheck();
-  const isSubagent = async (context: SessionContext): Promise<boolean> =>
+  const isSubagent = async (context: SessionIdentityContext): Promise<boolean> =>
     (await isSubagentTranscript(context)) || isRegisteredSubagent(context);
+
+  /**
+   * The Envoy address a reply to this instance reaches, and the source session its sends carry.
+   *
+   * An instance that took a session of its own answers with it — `liveSessionID` first, which
+   * the slash command passes because a session created lazily after `session_start` has moved
+   * past the module copy. A `task` subagent took none: it registers nothing, so its own host
+   * session id is an address no message can be delivered to, and the reachable session is the
+   * top-level one that spawned it, resolved from its transcript path
+   * (`resolveEnvoySession`). That resolves to `""` when this process cannot say which
+   * top-level session that is, and an empty address is what the caller reports and sends —
+   * naming an unrelated live session would send peers to a session that never spawned it.
+   */
+  const replyAddress = async (
+    context: SessionIdentityContext,
+    liveSessionID = ""
+  ): Promise<string> => {
+    if (sessionID !== "") return liveSessionID || sessionID;
+    if (!(await isSubagent(context))) return liveSessionID;
+    return resolveEnvoySession(context.sessionManager.getSessionFile());
+  };
 
   pi.on("session_start", async (_event, context) => {
     if (await isSubagent(context)) return;
@@ -1103,6 +1264,14 @@ export default function envoyExtension(pi: PiApi): void {
     shuttingDown = true;
     const bound = bridge.instances.indexOf(claimInstance);
     if (bound !== -1) bridge.instances.splice(bound, 1);
+    // This session is about to deregister with the listener, so it stops being an address a
+    // reply can reach: a subagent still running in this process must report none rather than
+    // name it, and a dead entry must not be what makes some other session ambiguous.
+    recordedSessionKey = recordEnvoySession({
+      previousKey: recordedSessionKey,
+      sessionFile: undefined,
+      sessionID: "",
+    });
     const deadline = Promise.withResolvers<void>();
     const timer = setTimeout(deadline.resolve, 1_000);
     try {
@@ -1134,7 +1303,8 @@ export default function envoyExtension(pi: PiApi): void {
       description: spec.description,
       parameters: schemaFor(pi, spec.operation),
       lenientArgValidation: true,
-      execute: async (_id, parameters) => execute(spec.operation, parameters),
+      execute: async (_id, parameters, _signal, _onUpdate, context) =>
+        execute(spec.operation, parameters, context),
     });
   }
 
@@ -1174,7 +1344,7 @@ export default function envoyExtension(pi: PiApi): void {
     }
   }
 
-  registerEnvoyWhoamiCommand(pi, () => sessionID);
+  registerEnvoyWhoamiCommand(pi, replyAddress);
 
   // Turn start injects nothing into the conversation; its open-asks query only arms the run-end
   // nudge below, the snapshot's `as_of` becoming the period's baseline. A session the stop can
@@ -1237,15 +1407,13 @@ export default function envoyExtension(pi: PiApi): void {
   }
 
   // The run-end nudge. `agent_end` is the bare stop signal — no message, no shape to read — so
-  // the first trigger is Dispatch state: the agent stopped, this period opened no ask, and none
-  // is open. That alone said nothing about whether the agent was waiting, and steering on it
-  // made the model announce "nothing outstanding" after nearly every turn, so it is now only the
-  // cheap precondition of a hidden self-check (below), and the steer follows the self-check's
-  // WAITING verdict alone. The check itself is owed and spent like the host's own todo reminder:
-  // the arming turn owes one, the check spends it whatever the verdict, opening the ask spends
-  // it too, and the agent's next real work owes another (`tool_result` below), so a run that
-  // keeps working keeps being checked without a new user turn. A settled turn that only replies
-  // does no work, so the nudge's own continuation never owes a check and cannot nudge itself;
+  // Dispatch supplies the open asks the self-check names. The hidden self-check decides whether
+  // the agent is waiting for something outside that list; only its WAITING verdict buys the
+  // steer. The check itself is owed and spent like the host's own todo reminder: the arming turn
+  // owes one, the check spends it whatever the verdict, opening the ask spends it too, and the
+  // agent's next real work owes another (`tool_result` below), so a run that keeps working keeps
+  // being checked without a new user turn. A settled turn that only replies does no work, so the
+  // nudge's own continuation never owes a check and cannot nudge itself;
   // `ASK_CHECKS_PER_PERIOD` bounds the rest.
   //
   // A run with no UI (`omp -p`, and any other headless launch) never gets it: the host disposes
@@ -1353,25 +1521,15 @@ export default function envoyExtension(pi: PiApi): void {
     // A run started while Dispatch answered: the conversation a self-check would read is past
     // this settle. Nothing is spent, so the newer run's own settle is where the check happens.
     if (runSeq !== seenRun) return;
-    if (open.snapshot.count > 0 || open.snapshot.opened_since) {
-      // Dispatch knows this session is waiting, or knows it asked since the window opened, so
-      // there is nothing for the model to tell anyone: the settle is silent and no check is
-      // spent. The window moves to this snapshot, which is what stops one ask from silencing
-      // the rest of the period: `opened_since` counts every ask authored after `since`,
-      // answered or not, so a window pinned to the arming turn stays true forever.
-      askAwareness = {
-        ...askAwareness,
-        check_due: false,
-        baseline_as_of: open.snapshot.as_of,
-      };
-      return;
-    }
+    // Every normal settle takes the one path: Dispatch supplies the current open asks for the
+    // prompt, not a reason to suppress it. `opened_since` remains part of the snapshot's
+    // contract, but does not alter the self-check.
     // The self-check: one hidden, tool-free model call over a snapshot of this conversation
     // (`pi.askEphemeral`, the channel a targeted Dispatch BTW already uses), which adds nothing
     // to the transcript and which the user never sees. Only a WAITING verdict — the agent
-    // saying it stopped on a human it has not asked — buys the visible turn. PROCEEDING, any
-    // other answer, a timeout, and a failure are all silent, so an ordinary settle costs one
-    // hidden call and shows nothing.
+    // saying it is waiting on a human for something its open asks do not cover — buys the visible
+    // turn. PROCEEDING, any other answer, a timeout, and a failure are all silent, so an ordinary
+    // settle costs one hidden call and shows nothing.
     //
     // The bound is this handler's own clock, not the host's: the signal is still passed, so a
     // host that honours it stops paying for an answer nobody will read, but the await always
@@ -1383,7 +1541,7 @@ export default function envoyExtension(pi: PiApi): void {
     askCheckAbort = abort;
     let answered: Promise<string | undefined>;
     try {
-      answered = askEphemeral({ prompt: ASK_SELF_CHECK_PROMPT, signal: abort.signal }).then(
+      answered = askEphemeral({ prompt: ASK_SELF_CHECK_PROMPT(open.snapshot.asks), signal: abort.signal }).then(
         (reply): string | undefined => reply.replyText,
         (error: unknown): string | undefined => {
           // An abort this extension made — a superseded check, or its own timeout, which logs
@@ -1467,9 +1625,9 @@ export default function envoyExtension(pi: PiApi): void {
     ) {
       if (ASK_OPENING_TOOLS.includes(event.toolName)) {
         // The agent asked the humans itself, so this stop has nothing left for the nudge to
-        // say: it spends the check the period owed rather than ending the period, and stops a
-        // check in flight, whose verdict can no longer be used. The ask is still what keeps
-        // later settles silent — Dispatch is re-read at every one of them.
+        // say: it spends the check the period owed rather than ending the period, and aborts a
+        // check in flight before its verdict can be used. Later real work can re-arm a fresh
+        // check, whose prompt names the ask.
         askAwareness = { ...askAwareness, check_due: false };
         abortSelfCheck("the agent opened the ask itself");
       } else if (!event.toolName.startsWith(DISPATCH_TOOL_PREFIX)) {
@@ -1485,7 +1643,8 @@ export default function envoyExtension(pi: PiApi): void {
 
   async function execute(
     operation: EnvoyToolOperation,
-    rawParameters: Record<string, unknown>
+    rawParameters: Record<string, unknown>,
+    context: SessionContext
   ): Promise<ToolResult> {
     try {
       // The host hands raw arguments through (lenientArgValidation); this is the one
@@ -1558,7 +1717,7 @@ export default function envoyExtension(pi: PiApi): void {
         case EnvoyToolOperation.send: {
           const targetSessionID = stringFor(parameters, "session_id");
           const result = await client.send({
-            sourceSessionID: sessionID,
+            sourceSessionID: await replyAddress(context),
             targetSessionID,
             message: stringFor(parameters, "message"),
             ...toMessageMetadata(parameters as MessageMetadataArguments),
@@ -1571,20 +1730,35 @@ export default function envoyExtension(pi: PiApi): void {
         }
         case EnvoyToolOperation.publish: {
           const topic = stringFor(parameters, "topic");
+          const source = await replyAddress(context);
           const result = await client.publish({
-            sourceSessionID: sessionID,
+            sourceSessionID: source,
             topic,
             message: stringFor(parameters, "message"),
             ...toMessageMetadata(parameters as MessageMetadataArguments),
           });
-          return toolSuccess(
+          // The listener never delivers a message to the session it names as its source — the
+          // role lane skips the resolved holder and the fanout skips any interest whose session
+          // is the source — and a subagent's source is its parent, so a publish to a role its
+          // own parent holds is accepted, answers with that holder, and reaches nobody. Only
+          // the role case is visible here (a plain topic's subscribers are not in the answer);
+          // AGENTS.md and the envoy skill carry the general rule. A direct envoy_send is
+          // unaffected: the agent-subject lane has no such skip.
+          const undelivered =
+            source !== "" && result.holder === source && (await isSubagent(context));
+          const published =
             result.holder === undefined
               ? `published ${result.envelope.event_id}`
-              : `published ${result.envelope.event_id}; holder ${result.holder}`,
+              : `published ${result.envelope.event_id}; holder ${result.holder}`;
+          return toolSuccess(
+            undelivered
+              ? `${published}\nNot delivered: that holder is the session this subagent sends as, and the listener drops a message whose source session is its recipient, so the agent that spawned you did not receive it. Reach it over hub instead.`
+              : published,
             {
               event_id: result.envelope.event_id,
               topic,
               ...(result.holder === undefined ? {} : { holder: result.holder }),
+              ...(undelivered ? { undelivered_echo: true } : {}),
             }
           );
         }
@@ -1598,15 +1772,37 @@ export default function envoyExtension(pi: PiApi): void {
           return toolSuccess(JSON.stringify(role, null, 2), role);
         }
         case EnvoyToolOperation.whoami: {
+          const inSubagent = await isSubagent(context);
+          const address = await replyAddress(context);
+          // A `task` subagent registers no Envoy session of its own, so the address a reply
+          // reaches is the session that spawned it. Its own host id is reported beside that,
+          // never as the reply address: nothing is listening on it.
+          const subagent = inSubagent
+            ? {
+                session_id: context.sessionManager.getSessionId(),
+                note:
+                  address === ""
+                    ? "This session is a task subagent and registers no Envoy session of its own, and this process records no top-level session its transcript traces back to, so it has no reply address at all: say who you are in the message body, and reach the agent that spawned you over hub."
+                    : "This session is a task subagent and registers no Envoy session of its own; a reply to session_id reaches the agent that spawned it, which relays over hub. Your own envoy_publish never reaches that agent — use hub for that hop.",
+              }
+            : undefined;
           return toolSuccess(
             JSON.stringify(
-              { session_id: sessionID, machine_id: machineID(), dir: sessionDirectory },
+              {
+                session_id: address,
+                machine_id: machineID(),
+                // A subagent's instance stored no directory either (`restoreLocalSessionState`
+                // never ran for it), so the host's live one answers for it.
+                dir: sessionDirectory || context.cwd,
+                ...(subagent === undefined ? {} : { subagent }),
+              },
               null,
               2
             ),
             {
-              sessionID,
+              sessionID: address,
               topics: [...subscriptions.keys()],
+              ...(subagent === undefined ? {} : { subagent }),
             }
           );
         }

@@ -39,7 +39,7 @@ test("an issue margin offers Comments and Pinned, Comments first", () => {
         },
         composer: undefined,
         items: {
-          actionErrorId: undefined,
+          actionFailure: undefined,
           answeredAsksPending: false,
           asksPending: false,
           commentsPending: false,
@@ -129,7 +129,7 @@ test("a document owner shows the Comments tab and comment composer only", () => 
           },
           composer: { anchor: undefined, kind: "comment" },
           items: {
-            actionErrorId: undefined,
+            actionFailure: undefined,
             answeredAsksPending: false,
             asksPending: false,
             commentsError: false,
@@ -255,7 +255,7 @@ test("MarginSheet shows the selected phone thread in a full-height view with a B
             },
             composer: undefined,
             items: {
-              actionErrorId: undefined,
+              actionFailure: undefined,
               answeredAsksPending: false,
               asksPending: false,
               commentsError: false,
@@ -402,7 +402,7 @@ test("the standalone document phone sheet shows each suggestion's diff and Accep
             },
             composer: undefined,
             items: {
-              actionErrorId: undefined,
+              actionFailure: undefined,
               answeredAsksPending: false,
               asksPending: false,
               commentsError: false,
