@@ -148,8 +148,7 @@ refused (`refuseCodeThatEndsItsBlock`), because the browser editor's parser ends
 it even inside fenced code. That measure counts the width of the list markers and `> ` around the
 code, advances a tab to the next multiple of four from the column it stands at, so a tab in a
 callout two columns in advances two, trims only spaces, tabs and a line-ending carriage return around
-the colons (`pmdoc.TypedFenceLine`), and finds nothing
-closing in a blockquote inside the typed block (`pmdoc.TypedFenceLineInCode`, held to the engine's
+the colons, and finds nothing closing in a blockquote inside the typed block (`pmdoc.TypedFenceLineInCode`, held to the engine's
 own verdicts in `pmdoc/testdata/typed-fence-lines.json`, which the fixture generator writes for a
 callout at the top and inside a blockquote, list items and a footnote definition); the advice is
 four spaces, which no layout closes. Text a `replace` writes that would read as block syntax at a

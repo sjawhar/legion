@@ -84,7 +84,7 @@ func (p *typedDirectiveParser) Close(_ ast.Node, _ gmtext.Reader, _ parser.Conte
 
 // TypedFenceLineInCode returns a line of code inside a typed block that the browser editor's
 // parser reads as the typed block's closing fence, and false when block holds none. That parser
-// ends a typed block at a typed-fence line (TypedFenceLine) whose text starts at most three columns
+// ends a typed block at a typed-fence line (typedFenceLine) whose text starts at most three columns
 // past the typed block's own content column, even inside a fenced code block it holds. Columns are the written line's: a blockquote's `> ` adds two, a list marker its
 // width, a footnote definition four, and a tab advances to the next multiple of four from the column
 // it stands at. A line inside a blockquote begins with its `>`, so it closes no typed block outside
@@ -103,7 +103,7 @@ func TypedFenceLineInCode(block *Node) (string, bool) {
 			}
 			for _, text := range node.Children {
 				for _, line := range strings.Split(text.Text, "\n") {
-					if TypedFenceLine(line) && textColumn(line, column)-fence <= 3 {
+					if typedFenceLine(line) && textColumn(line, column)-fence <= 3 {
 						return line, true
 					}
 				}
@@ -154,11 +154,11 @@ func textColumn(line string, column int) int {
 	return column
 }
 
-// TypedFenceLine reports whether the browser editor's parser reads line, where it stands, as a
+// typedFenceLine reports whether the browser editor's parser reads line, where it stands, as a
 // typed block's fence: three or more colons with only spaces and tabs around them, and the carriage
 // return of a line that ends in one, since a carriage return before a line feed is part of the
 // line ending.
-func TypedFenceLine(line string) bool {
+func typedFenceLine(line string) bool {
 	return colonLine(strings.Trim(line, " \t\r")) >= 3
 }
 
