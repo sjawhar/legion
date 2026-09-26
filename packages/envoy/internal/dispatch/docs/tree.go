@@ -16,7 +16,7 @@ var ErrInvalidMarkdown = errors.New("markdown is not a Proof document")
 var ErrDocSchema = errors.New("document is outside the Proof schema")
 
 func parseInput(markdown string) (*pmdoc.Node, error) {
-	tree, err := pmdoc.Parse(markdown)
+	tree, err := pmdoc.ParseForWrite(markdown)
 	if err != nil {
 		if errors.Is(err, pmdoc.ErrSchema) {
 			return nil, fmt.Errorf("%w: %v", ErrInvalidMarkdown, err)

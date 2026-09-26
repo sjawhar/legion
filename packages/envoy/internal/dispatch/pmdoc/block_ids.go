@@ -1,6 +1,7 @@
 package pmdoc
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/google/uuid"
@@ -36,6 +37,46 @@ func mintBlockID() string {
 // unchanged; on duplicate IDs, the first document-order occurrence keeps its identity.
 func EnsureBlockIDs(tree *Node) bool {
 	return EnsureBlockIDsCount(tree) > 0
+}
+
+// RepeatedBlockIDError is a write that would put one block id on two blocks.
+type RepeatedBlockIDError struct{ ID string }
+
+func (e *RepeatedBlockIDError) Error() string {
+	return fmt.Sprintf("block id %q would name two blocks; give one of them another id, or omit {#%s} to have one minted", e.ID, e.ID)
+}
+
+// RepeatedBlockID reports the first block id that two blocks across trees carry, read in order,
+// or nil. Only a typed block's markdown can name its id, so this is how a write finds one it is
+// about to repeat: an inserted fragment against the document it goes into, or markdown against
+// itself (ParseForWrite). A repeated id is not a repair to leave to EnsureBlockIDs, which keeps
+// the id for the first holder in document order: the write would move the id, and the ask row or
+// anchor keyed on it, onto whichever of the two blocks comes first.
+func RepeatedBlockID(trees ...*Node) error {
+	seen := make(map[string]struct{})
+	var repeated error
+	for _, tree := range trees {
+		walk(tree, func(node *Node, _ []int, _, _ int) bool {
+			if repeated != nil {
+				return false
+			}
+			if node.Type == "doc" || isInlineNodeType(node.Type) {
+				return true
+			}
+			if id, _ := node.Attrs[BlockIDAttr].(string); id != "" {
+				if _, held := seen[id]; held {
+					repeated = &RepeatedBlockIDError{ID: id}
+					return false
+				}
+				seen[id] = struct{}{}
+			}
+			return true
+		})
+		if repeated != nil {
+			return repeated
+		}
+	}
+	return nil
 }
 
 // BlockIDRepairCount reports how many block IDs EnsureBlockIDs would mint.

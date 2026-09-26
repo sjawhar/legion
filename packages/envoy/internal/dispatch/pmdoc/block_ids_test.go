@@ -2,6 +2,9 @@ package pmdoc
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -152,4 +155,34 @@ func equalStrings(got, want []string) bool {
 		}
 	}
 	return true
+}
+
+// A document that names no block id twice parses under ParseForWrite exactly as under Parse: the
+// same tree, the same ids and the same rendering, for every corpus document, typed blocks with and
+// without an explicit id included.
+func TestParseForWriteParsesADocumentWithoutRepeatsAsParseDoes(t *testing.T) {
+	paths, err := filepath.Glob("testdata/corpus/*.md")
+	if err != nil || len(paths) == 0 {
+		t.Fatalf("corpus: %v (%d documents)", err, len(paths))
+	}
+	t.Cleanup(func() { SetBlockIDGenerator(nil) })
+	for _, path := range paths {
+		markdown, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		SetBlockIDGenerator(counterBlockIDs())
+		parsed, err := Parse(string(markdown))
+		if err != nil {
+			t.Fatalf("%s: Parse: %v", path, err)
+		}
+		SetBlockIDGenerator(counterBlockIDs())
+		written, err := ParseForWrite(string(markdown))
+		if err != nil {
+			t.Fatalf("%s: ParseForWrite: %v", path, err)
+		}
+		if !reflect.DeepEqual(written, parsed) {
+			t.Fatalf("%s: ParseForWrite and Parse differ:\n%#v\n%#v", path, written, parsed)
+		}
+	}
 }

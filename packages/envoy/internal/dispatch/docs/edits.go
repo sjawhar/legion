@@ -742,6 +742,9 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		if err != nil {
 			return nil, invalidMarkdownOp("markdown", err)
 		}
+		if err := pmdoc.RepeatedBlockID(tree, with); err != nil {
+			return nil, &ErrInvalidOp{Field: "markdown", Reason: err.Error()}
+		}
 		if out, inserted, err := pmdoc.InsertTableRows(tree, target, op.Markdown, after); err != nil || inserted {
 			return out, err
 		}

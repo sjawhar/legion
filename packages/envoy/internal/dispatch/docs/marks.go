@@ -303,6 +303,9 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		if err != nil {
 			return err
 		}
+		if err := pmdoc.RepeatedBlockID(tree, replacement); err != nil {
+			return &ErrInvalidOp{Field: "replace_with", Reason: err.Error()}
+		}
 		next, err := pmdoc.Splice(tree, range_, replacement)
 		if err != nil {
 			return err

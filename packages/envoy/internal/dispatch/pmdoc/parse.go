@@ -31,6 +31,32 @@ var markdownParser = goldmark.New(
 
 // Parse converts markdown into the closed Proof ProseMirror tree.
 func Parse(markdown string) (*Node, error) {
+	doc, err := parseUnstamped(markdown)
+	if err != nil {
+		return nil, err
+	}
+	EnsureBlockIDs(doc)
+	return doc, nil
+}
+
+// ParseForWrite parses markdown a caller is writing into a document as Parse does, except that a
+// block id the markdown names on two blocks is refused (ErrSchema, RepeatedBlockIDError) instead
+// of repaired, since the repair would silently give the id to whichever block comes first.
+func ParseForWrite(markdown string) (*Node, error) {
+	doc, err := parseUnstamped(markdown)
+	if err != nil {
+		return nil, err
+	}
+	if err := RepeatedBlockID(doc); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrSchema, err)
+	}
+	EnsureBlockIDs(doc)
+	return doc, nil
+}
+
+// parseUnstamped is Parse before EnsureBlockIDs: blocks keep the ids their markdown names, and a
+// block that names none has none yet.
+func parseUnstamped(markdown string) (*Node, error) {
 	source := []byte(markdown)
 	root := markdownParser.Parser().Parse(gmtext.NewReader(source))
 	doc, err := parseBlock(root, source, footnoteLabels(root))
@@ -47,7 +73,6 @@ func Parse(markdown string) (*Node, error) {
 	if err := doc.Validate(); err != nil {
 		return nil, err
 	}
-	EnsureBlockIDs(doc)
 	return doc, nil
 }
 

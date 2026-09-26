@@ -36,7 +36,15 @@ events to the right session.
 | Deploy/runtime         | `deploy/`                                 | compose, rollout scripts, NATS peer setup          |
 
 Every non-inline Proof node has a stable `blockId`. `pmdoc.Parse` mints IDs in document order,
-and `EnsureBlockIDs` repairs legacy or duplicate IDs before agent updates are written. Document
+and `EnsureBlockIDs` repairs legacy or duplicate IDs before agent updates are written. That repair
+keeps a repeated id for the first holder in document order, and ask rows and anchors are keyed on
+block ids, so a write never repeats one itself: a block written ahead of an answered ask under
+its id would leave the ask's row and answer on that block, and the question would come back as a
+fresh open ask. Markdown a caller writes (a spec seeded at issue creation, an uploaded document or
+version, an edit's `insert`, an accepted suggestion) is parsed with `pmdoc.ParseForWrite`, which
+refuses an id it names on two blocks (`400 INVALID_MARKDOWN`), and an `insert` or accept whose
+markdown names an id the document already holds is `400 INVALID_OP` on `markdown` or
+`replace_with` (`pmdoc.RepeatedBlockID`). Only a typed block's markdown can name its id. Document
 settlement is two-phase: it first applies `EnsureBlockIDs` in one Yjs transaction and persists that
 captured update in the same Postgres transaction as any resulting version and event, then renders
 and compares canonical markdown. `envoy-dispatch backfill-block-ids` runs that closure across every
