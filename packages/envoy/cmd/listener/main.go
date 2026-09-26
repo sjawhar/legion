@@ -476,6 +476,19 @@ func (g *startingGate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	mux.ServeHTTP(w, r)
 }
 
+// openListener builds the webhook and /v1 routes over the complete dependencies, opens the gate
+// onto them, and only then publishes the dependencies. Publishing is what turns /healthz healthy,
+// so a probe that reads healthy always finds every route open.
+func openListener(gate *startingGate, hooks []webhookRoute, ready *listenerDeps, machineID string, logger *logging.Logger, publish func(*listenerDeps)) {
+	routes := http.NewServeMux()
+	for _, hook := range hooks {
+		routes.Handle(hook.path, hook.handler(ready))
+	}
+	registerV1Routes(routes, ready, machineID, logger)
+	gate.open(routes)
+	publish(ready)
+}
+
 func main() {
 	// Phase 1: Load config (synchronous, fast).
 	cfg, err := config.Load(9020)
@@ -552,14 +565,15 @@ func main() {
 	// GaugeFunc for consumer pending — queries NATS at scrape time
 
 	// The webhook and /v1 routes answer 503 "service starting" until NATS and every store are open;
-	// then each gate opens onto handlers built over the complete dependencies (Phase 6).
-	var webhooks, v1 startingGate
+	// then the gate opens onto handlers built over the complete dependencies (Phase 6). The webhook
+	// paths reach it bare, /v1 through apiAuth.
+	var gate startingGate
 	hooks := webhookRoutes(webhookCfg)
 	for _, hook := range hooks {
-		mux.Handle(hook.path, &webhooks)
+		mux.Handle(hook.path, &gate)
 	}
 	// Serve /v1/* on the listener port for local plugin registration.
-	v1Handler := apiAuth(apiToken, apiVerifier, logger, &v1)
+	v1Handler := apiAuth(apiToken, apiVerifier, logger, &gate)
 	mux.Handle("/v1", v1Handler)
 	mux.Handle("/v1/", v1Handler)
 
@@ -753,7 +767,7 @@ func main() {
 	}
 	_ = roleSub
 
-	// Phase 6: Publish initialized state, then open the webhook and /v1 routes onto it.
+	// Phase 6: Open the webhook and /v1 routes onto the initialized state, then publish it.
 	ready := &listenerDeps{
 		client:     client,
 		registry:   registry,
@@ -763,15 +777,7 @@ func main() {
 		consumer:   consumer,
 		streamName: bus.Stream,
 	}
-	deps.Store(ready)
-	hookMux := http.NewServeMux()
-	for _, hook := range hooks {
-		hookMux.Handle(hook.path, hook.handler(ready))
-	}
-	webhooks.open(hookMux)
-	v1Mux := http.NewServeMux()
-	registerV1Routes(v1Mux, ready, cfg.MachineID, logger)
-	v1.open(v1Mux)
+	openListener(&gate, hooks, ready, cfg.MachineID, logger, deps.Store)
 	logger.Info("envoy-listener ready (NATS connected)")
 
 	// Phase 6b: Start interest reaper for stale KV cleanup.

@@ -41,7 +41,7 @@ orchestrators (Pulumi, Kubernetes) time out and kill the container.
 3. Build HTTP mux           — /healthz always available, /v1/* and webhooks behind a gate
 4. go server.Serve(ln)      — HTTP live immediately, /healthz returns {"status":"starting"}
 5. Slow init in main()      — NATS connect, store open, consumer subscribe
-6. deps.Store(...)           — atomic publish; handlers built, gates open for /v1/* and webhooks
+6. gate.open, deps.Store     — handlers built, the gate opens for /v1/* and webhooks, then the atomic publish
 7. log.Fatal(<-fatal)        — block on HTTP server error channel
 ```
 
@@ -91,18 +91,25 @@ func (g *startingGate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 ```
 
-main registers the `/v1` paths on one gate and every enabled webhook path on another before
-`server.Serve`, so those paths answer 503 while the listener starts. In phase 6 it builds each
-family's mux over the complete deps and opens its gate onto it:
+main registers one gate before `server.Serve`, bare on every enabled webhook path and inside
+`apiAuth` on `/v1`, so those paths answer 503 while the listener starts. In phase 6
+`openListener` builds one mux of every route over the complete deps, opens the gate onto it, and
+only then stores `deps`:
 
 ```go
-var webhooks, v1 startingGate
-mux.Handle("/v1/", apiAuth(apiToken, apiVerifier, logger, &v1))
+var gate startingGate
+for _, hook := range hooks {
+    mux.Handle(hook.path, &gate)
+}
+mux.Handle("/v1/", apiAuth(apiToken, apiVerifier, logger, &gate))
 // ... phase 6, once every store is open:
-v1Mux := http.NewServeMux()
-registerV1Routes(v1Mux, ready, cfg.MachineID, logger)
-v1.open(v1Mux)
+openListener(&gate, hooks, ready, cfg.MachineID, logger, deps.Store)
 ```
+
+**Open the gate before publishing `deps`.** Storing `deps` is what turns `/healthz` healthy, so
+the other order leaves a window in which `/healthz` says healthy while every route still answers
+503 -- and a caller that waits for healthy, as the shutdown test does, meets the 503.
+`TestOpenListener_PublishesOnlyOnceTheRoutesServe` holds the order.
 
 ## Health States
 
@@ -177,9 +184,3 @@ were silently invisible to `git`/`jj`.
 **Fix**: Root-anchor binary names with `/listener`. For Go projects, always anchor compiled
 binary ignores: `/github`, `/listener`, `/slack` — never bare names.
 
-## Applicability to Other Receivers
-
-The `github` and `slack` receivers (`cmd/github/main.go`, `cmd/slack/main.go`) have the same
-NATS-before-HTTP pattern but are simpler (publish-only, no JetStream consumer). The same
-7-phase startup and the starting gate apply directly; `startingGate` holds nothing
-listener-specific and can be copied verbatim.

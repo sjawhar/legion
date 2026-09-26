@@ -147,6 +147,30 @@ func TestStartingGate_Closed_Returns503(t *testing.T) {
 	}
 }
 
+// TestOpenListener_PublishesOnlyOnceTheRoutesServe holds the order /healthz depends on: the
+// dependencies are published, which turns /healthz healthy, only after the gate serves every route,
+// so a probe that reads healthy never meets a 503 "service starting" from a webhook or /v1.
+func TestOpenListener_PublishesOnlyOnceTheRoutesServe(t *testing.T) {
+	var gate startingGate
+	hooks := []webhookRoute{{"/webhook/github", func(*listenerDeps) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	}}}
+	published := false
+	openListener(&gate, hooks, &listenerDeps{}, "test-machine", logging.New("test"), func(*listenerDeps) {
+		published = true
+		for path, want := range map[string]int{"/webhook/github": http.StatusOK, "/v1/not-a-route": http.StatusNotFound} {
+			recorder := httptest.NewRecorder()
+			gate.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, path, nil))
+			if recorder.Code != want {
+				t.Errorf("%s when the dependencies were published: status = %d, want %d; body = %s", path, recorder.Code, want, recorder.Body.String())
+			}
+		}
+	})
+	if !published {
+		t.Fatal("openListener never published the dependencies")
+	}
+}
+
 func TestStartingGate_Open_PassesThrough(t *testing.T) {
 	var called bool
 	var handler startingGate
