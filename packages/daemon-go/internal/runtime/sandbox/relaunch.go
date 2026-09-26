@@ -64,6 +64,9 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	}
 	// This launch replaces whatever process the claim ran, so nothing more is reported about it.
 	r.forget(spec.Claim)
+	// The claim's Sandbox is this runtime's from before it can exist until the claim's release, so
+	// the orphan sweep never deletes it for missing from a known set read before the launch.
+	r.own(spec.Claim)
 	if prev != nil {
 		r.log.Info("sandbox runtime: relaunching", "claim", spec.Claim, "previous", prev.Incarnation, "resume", l.resumeFile != "")
 	}
