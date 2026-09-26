@@ -141,7 +141,8 @@ to `failed` — a rose dot — and renders the error under the toolbar rather th
 Playwright. The editor entry, typed blocks and block ids are legion's own, in
 `packages/proof-editor` (its AGENTS.md has the boundary); a gap there is fixed there. Only the
 editor modules that package imports — marks, the mark popover, the schema plugins — still belong
-to `sjawhar/proof-sdk`, and a gap in one of those is fixed there, not worked around here.
+to `sjawhar/proof-sdk`, pinned at its cleaned `library` source commit. That source itself keeps
+decoration paint out of inline attributes, so a Dark Reader rewrite cannot trigger an editor redraw loop.
 Live document block links use `#b-<blockId>`: once Proof is ready, Dispatch focuses and pulses that stable block. Copying a document block link uses the selected block's `blockId`; historical versions stay read-only markdown views.
 
 Before constructing Proof, Dispatch fetches `/api/v1/schema/blocks` once and keeps the schema by

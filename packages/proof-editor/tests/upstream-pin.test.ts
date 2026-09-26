@@ -1,15 +1,10 @@
 /**
- * The pinned dependency has to arrive patched, and its types have to agree with the copy this
- * package re-exports on its public surface. Both fail silently otherwise.
+ * The pinned dependency must carry the Dark Reader fix and agree with the upstream type regions
+ * this package re-exports. Both otherwise fail silently.
  *
- * `patchedDependencies` keys a patch on `<name>@<version>`, and a git dependency's version is its
- * ref string. Bun applies nothing when the key stops matching — no warning, exit 0 — so a pin
- * bump that misses the root `package.json` key (LEGION-287 step 2 moves the pin) puts peer-cursor
- * colours and mark decorations back into inline `style` attributes, which is the Dark Reader
- * redraw loop legion #1234 fixed. Nothing else observes that before a browser tab wedges: the
- * decorations are built inside the mark plugin's own view, with no exported seam, so the patched
- * lines are read where they live. Each string below is one hunk of
- * patches/proof-sdk-upstream@24a5fc94.patch.
+ * Dark Reader rewrites inline decoration styles inside the contenteditable, which ProseMirror
+ * observes as mutations and redraws indefinitely. The source pin carries the upstream fix, so
+ * the guard reads those editor modules directly.
  */
 
 import { expect, test } from "bun:test";
@@ -18,28 +13,25 @@ import { join } from "node:path";
 
 const upstreamSrc = join(import.meta.dir, "..", "node_modules", "proof-sdk-upstream", "src");
 
-test("the pinned dependency arrives with the Dark Reader patch applied", () => {
+test("the pinned dependency carries the Dark Reader fix", () => {
   const marks = readFileSync(join(upstreamSrc, "editor/plugins/marks.ts"), "utf8");
+  expect(marks).not.toContain("const STYLES =");
   expect(marks).not.toContain("style: STYLES.compose_anchor");
   expect(marks).not.toContain("span.style.cssText = STYLES.insert");
-  expect(marks).toContain(
-    "class: [cssClass, glowClass].filter(Boolean).join(' '),\n            'data-mark-id': mark.id,"
-  );
+  expect(marks).toContain("class: [cssClass, glowClass].filter(Boolean).join(' '),");
 
   const cursors = readFileSync(join(upstreamSrc, "editor/plugins/collab-cursors.ts"), "utf8");
-  expect(cursors).not.toContain("cursorWidget.style.setProperty('--proof-collab-cursor-color'");
-  expect(cursors).toContain(
-    "cursorWidget.setAttribute('data-proof-collab-cursor', proofSelectionStyleFor(color));"
-  );
-  expect(cursors).toContain("'data-proof-collab-selection': proofSelectionStyleFor(color),");
-  expect(cursors).toContain("proof-collab-selection-styles");
+  expect(cursors).not.toContain("cursorWidget.style.setProperty");
+  expect(cursors).not.toContain("'data-proof-collab-selection':");
+  expect(cursors).toContain("function ensureCollabColorStyles");
+  expect(cursors).toContain("proof-collab-selection--${token}");
 });
 
 test("src/upstream-types.ts still describes the files it was copied from", () => {
   const copied = readFileSync(join(import.meta.dir, "..", "src", "upstream-types.ts"), "utf8");
   const regions = [
     ...copied.matchAll(
-      /\/\* --- copied from proof-sdk src\/(\S+) @ 24a5fc94 --- \*\/([\s\S]*?)\/\* --- end copy --- \*\//g
+      /\/\* --- copied from proof-sdk src\/(\S+) @ 9140b699 --- \*\/([\s\S]*?)\/\* --- end copy --- \*\//g
     ),
   ];
   const named: Record<string, string[]> = {};

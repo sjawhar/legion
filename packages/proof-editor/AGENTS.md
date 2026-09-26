@@ -7,8 +7,8 @@ release, an npm publish and a pin bump.
 
 ## Where the code came from
 
-`src/` is proof-sdk's source at **24a5fc94915cda5704897c497af6312c140db40d** (the `library`
-branch's v0.3.13, the release `main` now pins), copied byte for byte:
+`src/` is proof-sdk's source at **9140b699646b1a61190bb9a13f2bce087d04da17** (the cleaned
+`library` branch commit that Legion pins), copied byte for byte:
 
 | File | What it is |
 | --- | --- |
@@ -36,7 +36,7 @@ name follow, since this package has no build and there is no distribution left t
 `// @ts-nocheck` banner on every one of them (below).
 
 To audit a copied file, diff it against `jj --ignore-working-copy -R <proof-sdk> file show -r
-24a5fc94 root:src/<file>`; every file in the table above has that counterpart, and the only
+9140b699 root:src/<file>`; every file in the table above has that counterpart, and the only
 lines that differ should be the four kinds. `src/upstream-types.ts` is checked the other way,
 by `tests/upstream-pin.test.ts`, which reads each of its copied regions out of the pinned file
 that region names.
@@ -72,14 +72,12 @@ surface reaches a consumer that way. `StoredMark`, which `src/lib.ts` re-exports
 `tests/upstream-pin.test.ts`. A type added to that surface belongs there too; reaching for
 `proof-sdk-upstream/src/…` in an exported signature silently makes it `any`.
 
-`patches/proof-sdk-upstream@24a5fc94.patch` keeps peer-cursor colours and mark decorations out of
-inline `style` attributes: Dark Reader rewrites inline colours inside the contenteditable and
-ProseMirror reads those writes as content mutations, an endless redraw that wedges the tab
-(legion #1234). It is that fix moved from the published `dist` onto the fork's source, which does
-not carry it. A `patchedDependencies` key that stops matching applies nothing, with no warning
-and exit 0, so `tests/upstream-pin.test.ts` reads the installed files and fails instead. Moving
-the pin means editing all three of: the key in the root `package.json`, the dependency in
-`package.json`, and the patch file (whose hunks are line-anchored in the fork's source).
+The pinned source commit carries the Dark Reader fix: peer-cursor colours and mark decorations
+avoid inline `style` attributes, because Dark Reader rewrites those attributes inside the
+contenteditable and ProseMirror reads the writes as content mutations. That can cause an endless
+redraw loop that wedges the tab. `tests/upstream-pin.test.ts` reads the installed modules so a
+pin that loses the fix fails. Moving the pin changes the package dependency, `bun.lock`, and this
+file's source audit references; no Bun patch applies to this source.
 
 ## No build step
 
