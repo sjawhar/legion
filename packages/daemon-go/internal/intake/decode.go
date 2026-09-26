@@ -280,7 +280,18 @@ func decodeReview(raw map[string]json.RawMessage) (Fact, error) {
 	headSHA, _ := rawString(raw, "head_sha")
 	author, _ := rawString(raw, "author")
 	body, _ := rawString(raw, "body")
-	return PullRequestReview{Repo: repo, Number: number, State: strings.ToLower(state), CommitID: commitID, HeadSHA: headSHA, Author: author, Body: body}, nil
+	// The listener carries GitHub's review id as a decimal string; one that predates it carries
+	// none, and the review is then ordered by when it is processed.
+	var id int64
+	if text, ok := rawString(raw, "review_id"); ok && text != "" {
+		parsed, err := strconv.ParseInt(text, 10, 64)
+		if err != nil || parsed <= 0 {
+			return nil, fmt.Errorf("review_id %q is not a positive integer", text)
+		}
+		id = parsed
+	}
+	return PullRequestReview{Repo: repo, Number: number, ID: id, State: strings.ToLower(state), CommitID: commitID, HeadSHA: headSHA,
+		Author: author, Body: body}, nil
 }
 
 func decodePush(raw map[string]json.RawMessage) (Fact, error) {
@@ -299,9 +310,10 @@ func decodePush(raw map[string]json.RawMessage) (Fact, error) {
 	before, _ := rawString(raw, "before")
 	changedPaths := rawStringPointer(raw, "changed_paths")
 	truncated := rawStringPointer(raw, "changed_paths_truncated")
+	forced := rawStringPointer(raw, "forced")
 	pusher, _ := rawString(raw, "pusher")
 	return Push{Repo: repo, Branch: strings.TrimPrefix(ref, "refs/heads/"), Before: before, After: after, ChangedPaths: changedPaths,
-		Truncated: truncated, Pusher: pusher}, nil
+		Truncated: truncated, Forced: forced, Pusher: pusher}, nil
 }
 
 func decodeChecks(subject string, raw map[string]json.RawMessage, issuedAt int64) (Fact, error) {

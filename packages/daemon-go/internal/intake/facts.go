@@ -83,8 +83,11 @@ func (PullRequestSynchronized) isFact() {}
 
 // PullRequestReview is a submitted review on a pull request.
 type PullRequestReview struct {
-	Repo     string
-	Number   int
+	Repo   string
+	Number int
+	// ID is GitHub's review id, which rises with every review submitted: the order reviews were
+	// written in, whatever order they are delivered in. Zero when the listener did not carry it.
+	ID       int64
 	State    string
 	CommitID string
 	HeadSHA  string
@@ -139,6 +142,9 @@ type Push struct {
 	After        string
 	ChangedPaths *string
 	Truncated    *string
+	// Forced is the listener's "true" or "false" for whether the push rewrote history; absent from
+	// a listener that predates the field.
+	Forced *string
 	// Pusher is the push's pusher login (the listener's `pusher`, GitHub's pusher.name).
 	Pusher string
 }

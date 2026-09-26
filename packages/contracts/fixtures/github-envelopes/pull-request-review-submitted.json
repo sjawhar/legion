@@ -11,6 +11,7 @@
     "number": "42",
     "parent_kind": "pr",
     "repo": "example-org/example-repo",
+    "review_id": "555000111",
     "state": "approved",
     "title": "Add local acceptance driver",
     "url": "https://example.invalid/example-org/example-repo/pull/42#pullrequestreview-555000111"

@@ -623,8 +623,8 @@ do:
   tell which run you are reporting. Your pane is completing outside any assignment. Say so to the
   architect; do not re-run the phase. The same answer comes when your turn started before your task
   reached you: a notice or a message started it, and the task, refused while that turn ran, is sent
-  when the turn ends. Once it arrives in this session, call `handoff_complete` again for the work
-  you already committed. Do not redo that work or write a second handoff.
+  when the turn ends. When a task arrives, do what it asks; if the work it asks for is already
+  committed, call `handoff_complete` again, and never redo the work or write a second handoff.
 - `HANDOFF_ALREADY_RECORDED` — names your role, the phase, the review round and the commit. This
   exact call was received before, and its first answer stands — accepted, or one of the refusals
   above. Sending it again changes nothing; if you did not see that first answer, tell the

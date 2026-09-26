@@ -782,3 +782,51 @@ func TestDecodeDispatchIssueNamesASessionActor(t *testing.T) {
 		t.Fatalf("fact = %#v, want no session actor for a user", human.Fact)
 	}
 }
+
+// The listener's forced marker and GitHub's review id reach the facts: the workflow reads a push
+// without the marker as forced and orders reviews by the id, so each must survive decoding exactly,
+// and a review id that is not a positive integer is refused rather than read as none.
+func TestDecodingCarriesThePushForcedMarkerAndTheReviewID(t *testing.T) {
+	withPayload := func(t *testing.T, name, subject string, set map[string]string) (Fact, error) {
+		t.Helper()
+		var envelope map[string]any
+		if err := json.Unmarshal(capturedGitHubEnvelope(t, name), &envelope); err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		// The envelope carries its payload as JSON text.
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(envelope["payload"].(string)), &payload); err != nil {
+			t.Fatalf("parse %s's payload: %v", name, err)
+		}
+		for key, value := range set {
+			payload[key] = value
+		}
+		text, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatalf("encode %s's payload: %v", name, err)
+		}
+		envelope["payload"] = string(text)
+		data, err := json.Marshal(envelope)
+		if err != nil {
+			t.Fatalf("encode %s: %v", name, err)
+		}
+		decoded, err := decodeMessage(subject, "CAPTURE", data)
+		return decoded.Fact, err
+	}
+	pushSubject := "notifications.github.sjawhar.legion.push.branch.legion/LEGION-208"
+	reviewSubject := "notifications.github.sjawhar.legion.pr.42.review"
+
+	for _, forced := range []string{"true", "false"} {
+		fact, err := withPayload(t, "push.json", pushSubject, map[string]string{"forced": forced})
+		if push, ok := fact.(Push); err != nil || !ok || push.Forced == nil || *push.Forced != forced {
+			t.Fatalf("push with forced %q = %#v, %v", forced, fact, err)
+		}
+	}
+	fact, err := withPayload(t, "review.json", reviewSubject, map[string]string{"review_id": "5325101010"})
+	if review, ok := fact.(PullRequestReview); err != nil || !ok || review.ID != 5325101010 {
+		t.Fatalf("review with an id = %#v, %v", fact, err)
+	}
+	if _, err := withPayload(t, "review.json", reviewSubject, map[string]string{"review_id": "not-a-number"}); err == nil {
+		t.Fatal("a review id that is not a number decoded")
+	}
+}

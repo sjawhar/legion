@@ -4,29 +4,13 @@ import "github.com/sjawhar/legion/daemon/internal/record"
 
 // AdvancePullRequestHead applies the shipped resetPrHead fix-attempt decision to a new observed
 // head. A red prior verdict counts once, unless the red was planned (PlannedRed: the review App's
-// red tests) or the matching push was handoff-only or the review App's. A code-changing head
+// red tests) or the head's own push was handoff-only or the review App's. A code-changing head
 // decides the planned mark (the review App's sets it, anyone else's clears it); a handoff-only
 // head, or one whose push has not arrived (ApplyPush settles it), carries it. All other
-// head-scoped state is reset regardless of its source. The code chain (CodeHeads) grows by a
-// head whose push changed only .legion/ and replaced the head the chain ends at; any other head -
-// a code push's, one whose push is still to come, or one whose push replaced a head that never
-// arrived here - leaves it ending at the head replaced, which is then no longer the current one.
+// head-scoped state is reset regardless of its source. The pushes it keeps are keptPushes'.
 func AdvancePullRequestHead(pr record.PullRequest, headSHA string) record.PullRequest {
-	var pending *record.PendingPush
-	for i, p := range pr.PendingPushes {
-		if p.SHA == headSHA {
-			pending = &p
-			pr.PendingPushes = append(append([]record.PendingPush(nil), pr.PendingPushes[:i]...), pr.PendingPushes[i+1:]...)
-			break
-		}
-	}
-	// A push that did not say which head it replaced claimed the one just replaced, unless it is
-	// the push this head's arrival consumed: it is dropped with the late ones.
-	pr.PendingPushes = pathFrom(pr.PendingPushes, headSHA, false)
-	pr.CodeHeads = chainAt(pr.CodeHeads, pr.HeadSHA)
-	if pending != nil && pending.HandoffOnly && pending.Before == pr.HeadSHA {
-		pr.CodeHeads = append(pr.CodeHeads, headSHA)
-	}
+	pending := headPush(pr.Pushes, pr.HeadSHA, headSHA)
+	pr.Pushes = keptPushes(pr.Pushes, headSHA)
 	if pr.Verdict == "red" && !pr.PlannedRed && (pending == nil || (!pending.HandoffOnly && !pending.ByReviewApp)) {
 		pr.FixAttempts++
 		pr.HeadCounted = headSHA
@@ -44,37 +28,75 @@ func AdvancePullRequestHead(pr record.PullRequest, headSHA string) record.PullRe
 	pr.Generation = 0
 	pr.Snapshot = ""
 	pr.Reconciled = false
-	pr.ReviewDecision = ""
 	return pr
 }
 
-// ApplyPush stores a new-head push classification or, for the current head, settles its planned
-// mark and takes back exactly its counted fix attempt when the late push is handoff-only or the
-// review App's (byReviewApp: its pusher is the review App's bot login).
-func ApplyPush(pr record.PullRequest, before, after string, classification PushClassification, byReviewApp bool) record.PullRequest {
-	if pr.HeadSHA == after {
-		if !classification.HandoffOnly {
-			pr.PlannedRed = byReviewApp
-		} else if n := len(pr.CodeHeads); n > 0 && pr.CodeHeads[n-1] == before {
-			pr.CodeHeads = append(append([]string(nil), pr.CodeHeads...), after)
+// headPush is the push that left head: the one that replaced previous when the branch has one,
+// else any push that left head - a head a force push returned to can have been left before.
+func headPush(pushes []record.ClassifiedPush, previous, head string) *record.ClassifiedPush {
+	var found *record.ClassifiedPush
+	for i := range pushes {
+		if pushes[i].SHA != head {
+			continue
 		}
-		if (classification.HandoffOnly || byReviewApp) && pr.HeadCounted == after {
-			if pr.BlockedAttempts == pr.FixAttempts {
-				pr.BlockedAttempts = 0
-			}
-			pr.FixAttempts--
-			pr.HeadCounted = ""
+		if pushes[i].Before == previous {
+			return &pushes[i]
 		}
-		return pr
+		if found == nil {
+			found = &pushes[i]
+		}
 	}
-	pushes := make([]record.PendingPush, 0, len(pr.PendingPushes)+1)
-	for _, p := range pr.PendingPushes {
-		if p.SHA != after {
+	return found
+}
+
+// keptPushes is what a head's arrival keeps: every push that changed only .legion/, did not
+// rewrite history and said which head it replaced - a fact about two commits, true whenever it is
+// learned, which an approval is carried across - and the pushes still on their way from the new
+// head. Any other push is spent once its head arrives, or was late for a head already gone.
+func keptPushes(pushes []record.ClassifiedPush, head string) []record.ClassifiedPush {
+	onPath := map[string]bool{}
+	for _, p := range pathFrom(pushes, head, false) {
+		onPath[p.SHA] = true
+	}
+	var kept []record.ClassifiedPush
+	for _, p := range pushes {
+		if carriesApproval(p) || onPath[p.SHA] {
+			kept = append(kept, p)
+		}
+	}
+	return kept
+}
+
+// carriesApproval is whether an approval of the head a push replaced also approves the head it
+// left: the push changed only .legion/, did not rewrite history, and said which head it replaced.
+func carriesApproval(p record.ClassifiedPush) bool {
+	return !p.MayChangeCode() && p.Before != ""
+}
+
+// ApplyPush records a push and, for the current head, settles its planned mark and takes back
+// exactly its counted fix attempt when the late push is handoff-only or the review App's. A push
+// replaces an earlier record of the same two heads, so a redelivered push is recorded once.
+func ApplyPush(pr record.PullRequest, push record.ClassifiedPush) record.PullRequest {
+	pushes := make([]record.ClassifiedPush, 0, len(pr.Pushes)+1)
+	for _, p := range pr.Pushes {
+		if p.SHA != push.SHA || p.Before != push.Before {
 			pushes = append(pushes, p)
 		}
 	}
-	pr.PendingPushes = append(pushes, record.PendingPush{SHA: after, Before: before, HandoffOnly: classification.HandoffOnly,
-		Unknown: classification.Unknown, ByReviewApp: byReviewApp})
+	pr.Pushes = append(pushes, push)
+	if pr.HeadSHA != push.SHA {
+		return pr
+	}
+	if !push.HandoffOnly {
+		pr.PlannedRed = push.ByReviewApp
+	}
+	if (push.HandoffOnly || push.ByReviewApp) && pr.HeadCounted == push.SHA {
+		if pr.BlockedAttempts == pr.FixAttempts {
+			pr.BlockedAttempts = 0
+		}
+		pr.FixAttempts--
+		pr.HeadCounted = ""
+	}
 	return pr
 }
 
@@ -96,25 +118,11 @@ func ApplySettlement(pr record.PullRequest, candidate SettlementCandidate) (reco
 	return pr, true
 }
 
-// chainAt is the code chain ending at head, the head a new one replaces: the recorded chain when
-// it already reaches head, else head alone - a head carries its own code, and nothing proves the
-// heads before it carried the same.
-func chainAt(heads []string, head string) []string {
-	if n := len(heads); n > 0 && heads[n-1] == head {
-		return append([]string(nil), heads...)
-	}
-	if head == "" {
-		return nil
-	}
-	return []string{head}
-}
-
-// pathFrom is the pending pushes that lie on the path from head: each replaced head or the head a
-// push already on the path left. With unplaced, a push that did not say which head it replaced is
-// on the path too, the reading that never lets it pass unseen. Any other pending push arrived late
-// for a head already gone.
-func pathFrom(pushes []record.PendingPush, head string, unplaced bool) []record.PendingPush {
-	var path []record.PendingPush
+// pathFrom is the pushes that lie on the path forward from head: each that replaced head or the
+// head a push already on the path left. With unplaced, a push that did not say which head it
+// replaced is on the path too, the reading that never lets it pass unseen.
+func pathFrom(pushes []record.ClassifiedPush, head string, unplaced bool) []record.ClassifiedPush {
+	var path []record.ClassifiedPush
 	reached := map[string]bool{head: true}
 	for grew := true; grew; {
 		grew = false
@@ -130,45 +138,35 @@ func pathFrom(pushes []record.PendingPush, head string, unplaced bool) []record.
 }
 
 // ApprovalStands says whether an approval of reviewed approves the pull request's current head:
-// it names that head, or the code chain ends at the current head and holds reviewed, so every
-// push since reviewed changed only .legion/. A chain ending anywhere else says nothing: the pushes
-// after its end changed code, or have not been classified yet. Nothing stands while a push that
-// may change code lies on the path from the current head (pathFrom) and its new head has not
-// arrived: the push event can come first, and the approval is then of a head already on its way
-// out. A pending push that replaced some other head arrived late for a head already gone, and
-// changes nothing.
+// walking back from the current head through pushes that carry an approval across
+// (carriesApproval) reaches reviewed, so every push between them changed only .legion/. Nothing
+// stands while a push that may change code lies on the path forward from the current head and its
+// new head has not arrived: the push event can come first, and the approval is then of a head
+// already on its way out.
 func ApprovalStands(pr record.PullRequest, reviewed string) bool {
 	if reviewed == "" {
 		return false
 	}
-	for _, p := range pathFrom(pr.PendingPushes, pr.HeadSHA, true) {
-		if !p.HandoffOnly {
+	for _, p := range pathFrom(pr.Pushes, pr.HeadSHA, true) {
+		if p.MayChangeCode() {
 			return false
 		}
 	}
-	if reviewed == pr.HeadSHA {
-		return true
-	}
-	n := len(pr.CodeHeads)
-	return n > 0 && pr.CodeHeads[n-1] == pr.HeadSHA && holds(pr.CodeHeads, reviewed)
-}
-
-func holds(heads []string, head string) bool {
-	for _, h := range heads {
-		if h == head {
+	reached := map[string]bool{pr.HeadSHA: true}
+	for frontier := []string{pr.HeadSHA}; len(frontier) > 0; {
+		head := frontier[0]
+		frontier = frontier[1:]
+		if head == reviewed {
 			return true
+		}
+		for _, p := range pr.Pushes {
+			if p.SHA == head && carriesApproval(p) && !reached[p.Before] {
+				reached[p.Before] = true
+				frontier = append(frontier, p.Before)
+			}
 		}
 	}
 	return false
-}
-
-// ApplyReview stores a changes-requested review from any reviewed head, or an approval only when
-// it is pinned to the current head. A new head clears the decision through AdvancePullRequestHead.
-func ApplyReview(pr record.PullRequest, state, commitID string) record.PullRequest {
-	if state == "changes_requested" || (state == "approved" && commitID != "" && commitID == pr.HeadSHA) {
-		pr.ReviewDecision = state
-	}
-	return pr
 }
 
 // BlockFixAttempt marks and reports one exhausted fix-attempt count when the settlement just

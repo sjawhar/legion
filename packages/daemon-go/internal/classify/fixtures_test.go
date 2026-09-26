@@ -240,11 +240,12 @@ func replayGitHubDecision(input json.RawMessage) ([]byte, error) {
 		}
 	case "push":
 		login := decoded.Config.ReviewAppLogin
-		pr = ApplyPush(pr, stringValue(payload, "before"), stringValue(payload, "after"), ClassifyPush(PushPayload{
+		classification := ClassifyPush(PushPayload{
 			ChangedPaths: optionalString(payload, "changed_paths"), ChangedPathsTruncated: optionalString(payload, "changed_paths_truncated"),
-		}), login != "" && stringValue(payload, "pusher") == login)
-	case "review":
-		pr = ApplyReview(pr, lowerASCII(stringValue(payload, "state")), stringValue(payload, "commit_id"))
+		})
+		pr = ApplyPush(pr, record.ClassifiedPush{SHA: stringValue(payload, "after"), Before: stringValue(payload, "before"),
+			HandoffOnly: classification.HandoffOnly, Unknown: classification.Unknown,
+			ByReviewApp: login != "" && stringValue(payload, "pusher") == login})
 	case "checks":
 		candidate := SettlementCandidate{CheckRuns: attemptRuns(payload), Generation: int64(numberValue(payload, "generation")), Snapshot: stringValue(payload, "snapshot"), Verdict: stringValue(payload, "verdict"), Failing: stringSlice(payload, "failing")}
 		if settled, applied := ApplySettlement(pr, candidate); applied {
@@ -333,26 +334,27 @@ func canonicalOutcome(outcome CiOutcome) ([]byte, error) {
 }
 
 type fixturePullRequest struct {
-	Key                 string               `json:"key"`
-	Repo                string               `json:"repo"`
-	Number              int                  `json:"number"`
-	Branch              string               `json:"branch"`
-	HeadSHA             string               `json:"headSha"`
-	HeadUpdatedAt       json.RawMessage      `json:"headUpdatedAt"`
-	HeadUpdatedAtSource string               `json:"headUpdatedAtSource"`
-	Verdict             string               `json:"verdict"`
-	Failing             []string             `json:"failing"`
-	FailingStatuses     []string             `json:"failingStatuses"`
-	ReviewDecision      string               `json:"reviewDecision"`
-	FixAttempts         int                  `json:"fixAttempts"`
-	BlockedAttempts     *int                 `json:"blockedAttempts"`
-	CheckRuns           *[]record.AttemptRun `json:"ciCheckRuns"`
-	Generation          *int64               `json:"ciSettlementGeneration"`
-	Snapshot            *string              `json:"ciSnapshot"`
-	Reconciled          bool                 `json:"ciReconciled"`
-	PendingPush         *record.PendingPush  `json:"pendingPush"`
-	HeadCounted         *bool                `json:"headCounted"`
-	PlannedRed          bool                 `json:"plannedRed"`
+	Key                 string          `json:"key"`
+	Repo                string          `json:"repo"`
+	Number              int             `json:"number"`
+	Branch              string          `json:"branch"`
+	HeadSHA             string          `json:"headSha"`
+	HeadUpdatedAt       json.RawMessage `json:"headUpdatedAt"`
+	HeadUpdatedAtSource string          `json:"headUpdatedAtSource"`
+	Verdict             string          `json:"verdict"`
+	Failing             []string        `json:"failing"`
+	FailingStatuses     []string        `json:"failingStatuses"`
+	// ReviewDecision is the shipped state's; the Go record keeps it on the review round instead.
+	ReviewDecision  string                 `json:"reviewDecision"`
+	FixAttempts     int                    `json:"fixAttempts"`
+	BlockedAttempts *int                   `json:"blockedAttempts"`
+	CheckRuns       *[]record.AttemptRun   `json:"ciCheckRuns"`
+	Generation      *int64                 `json:"ciSettlementGeneration"`
+	Snapshot        *string                `json:"ciSnapshot"`
+	Reconciled      bool                   `json:"ciReconciled"`
+	PendingPush     *record.ClassifiedPush `json:"pendingPush"`
+	HeadCounted     *bool                  `json:"headCounted"`
+	PlannedRed      bool                   `json:"plannedRed"`
 }
 
 func (fixture fixturePullRequest) record() record.PullRequest {
@@ -377,15 +379,15 @@ func (fixture fixturePullRequest) record() record.PullRequest {
 		headCounted = fixture.HeadSHA
 	}
 	// The shipped state holds one pending push; the Go record keeps every one.
-	var pendingPushes []record.PendingPush
+	var pushes []record.ClassifiedPush
 	if fixture.PendingPush != nil {
-		pendingPushes = []record.PendingPush{*fixture.PendingPush}
+		pushes = []record.ClassifiedPush{*fixture.PendingPush}
 	}
 	return record.PullRequest{Issue: fixture.Key, Repo: fixture.Repo, Number: fixture.Number, Branch: fixture.Branch, HeadSHA: fixture.HeadSHA,
 		HeadUpdatedAt: timestampJSON(fixture.HeadUpdatedAt), HeadUpdatedAtSource: fixture.HeadUpdatedAtSource, Verdict: fixture.Verdict,
-		Failing: append([]string{}, fixture.Failing...), FailingStatuses: append([]string{}, fixture.FailingStatuses...), ReviewDecision: fixture.ReviewDecision,
+		Failing: append([]string{}, fixture.Failing...), FailingStatuses: append([]string{}, fixture.FailingStatuses...),
 		FixAttempts: fixture.FixAttempts, BlockedAttempts: blocked, CheckRuns: checkRuns, Generation: generation, Snapshot: snapshot,
-		Reconciled: fixture.Reconciled, PendingPushes: pendingPushes, HeadCounted: headCounted, PlannedRed: fixture.PlannedRed}
+		Reconciled: fixture.Reconciled, Pushes: pushes, HeadCounted: headCounted, PlannedRed: fixture.PlannedRed}
 }
 
 type fixtureHeadClock struct {
@@ -538,7 +540,6 @@ func fixtureVersion(values map[string]any) int {
 	}
 	return 0
 }
-func lowerASCII(value string) string                        { return strings.ToLower(value) }
 func attemptRuns(values map[string]any) []record.AttemptRun { return nil }
 func stringSlice(values map[string]any, key string) []string {
 	raw, _ := values[key].([]any)

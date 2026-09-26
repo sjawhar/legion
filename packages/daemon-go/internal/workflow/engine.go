@@ -318,12 +318,7 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 		}
 		row.LastHandoff = fact.Commit
 	}
-	row.Claim, row.HandoffCommit = fact.Claim, fact.Commit
-	// A reviewer reports no verdict: its decision is the review it posted, recorded on the round
-	// when GitHub reports it, and its completion must not erase it.
-	if fact.Role != claim.RoleReviewer {
-		row.Verdict = fact.Verdict
-	}
+	row.Claim, row.HandoffCommit, row.Verdict = fact.Claim, fact.Commit, fact.Verdict
 	if err := e.store.PutPhase(ctx, tx, row); err != nil {
 		return intake.Result{}, err
 	}
@@ -445,19 +440,29 @@ func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.
 	if err != nil || pr == nil {
 		return intake.Result{}, err
 	}
-	byReviewApp := e.cfg.ReviewAppLogin != "" && fact.Pusher == e.cfg.ReviewAppLogin
 	classification := classify.ClassifyPush(classify.PushPayload{ChangedPaths: fact.ChangedPaths, ChangedPathsTruncated: fact.Truncated})
-	*pr = classify.ApplyPush(*pr, fact.Before, fact.After, classification, byReviewApp)
+	*pr = classify.ApplyPush(*pr, record.ClassifiedPush{SHA: fact.After, Before: fact.Before,
+		HandoffOnly: classification.HandoffOnly, Unknown: classification.Unknown,
+		ByReviewApp: e.cfg.ReviewAppLogin != "" && fact.Pusher == e.cfg.ReviewAppLogin,
+		// A push that does not say it was not forced - a listener that predates the field - is
+		// read as forced: its changed paths cannot then be trusted to describe the head it replaced.
+		Forced: fact.Forced == nil || *fact.Forced != "false"})
 	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
 		return intake.Result{}, err
 	}
 	// A push classified after its head arrived can be what lets an approval of an earlier head
 	// stand, so an open review is asked again.
+	return intake.Result{}, e.advanceOpenReview(ctx, tx, pr)
+}
+
+// advanceOpenReview asks the review open on the pull request's issue, if its issue is in
+// reviewing, whether both of its halves are now in (advanceReview).
+func (e *Engine) advanceOpenReview(ctx context.Context, tx pgx.Tx, pr *record.PullRequest) error {
 	issue, err := e.store.Issue(ctx, tx, pr.Issue)
 	if err != nil || issue == nil || issue.Phase != phase.Reviewing {
-		return intake.Result{}, err
+		return err
 	}
-	return intake.Result{}, e.advanceReview(ctx, tx, *issue, pr)
+	return e.advanceReview(ctx, tx, *issue, pr)
 }
 
 func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestChecks) (intake.Result, error) {
@@ -479,11 +484,7 @@ func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 		return intake.Result{}, err
 	}
 	if !blocked {
-		issue, err := e.store.Issue(ctx, tx, pr.Issue)
-		if err != nil || issue == nil || issue.Phase != phase.Reviewing {
-			return intake.Result{}, err
-		}
-		return intake.Result{}, e.advanceReview(ctx, tx, *issue, pr)
+		return intake.Result{}, e.advanceOpenReview(ctx, tx, pr)
 	}
 	message := fmt.Sprintf("Pull request #%d reached max_fix_attempts=%d.", pr.Number, e.cfg.MaxFixAttempts)
 	if err := e.enqueue(ctx, tx, pr.Issue, record.MessagePost{Body: message}); err != nil {
@@ -497,31 +498,38 @@ func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestR
 	if err != nil || pr == nil {
 		return intake.Result{}, err
 	}
-	state := strings.ToLower(fact.State)
-	*pr = classify.ApplyReview(*pr, state, fact.CommitID)
-	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
-		return intake.Result{}, err
-	}
 	issue, err := e.store.Issue(ctx, tx, pr.Issue)
-	if err != nil || issue == nil || issue.Phase != phase.Reviewing {
+	if err != nil || issue == nil {
 		return intake.Result{}, err
-	}
-	// The decision belongs to this review round, not to the pull request's head: the reviewer's
-	// own handoff push is a new head, which resets every head-scoped reading, and the round must
-	// still know what its reviewer decided, on which head, and what the review said for the next
-	// round's implementer, when the reviewer completes. An approval is judged against the head it
-	// names when the review ends (classify.ApprovalStands), since the approval and the pushes after
-	// it arrive in no promised order. Entering reviewing clears all three with the rest of the
-	// reviewer's round.
-	if state != "changes_requested" && state != "approved" {
-		return intake.Result{}, nil
 	}
 	row, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
 	if err != nil {
 		return intake.Result{}, err
 	}
-	row.Verdict, row.Reason, row.ReviewedHead = state, fact.Body, fact.CommitID
-	if err := e.store.PutPhase(ctx, tx, row); err != nil {
+	// Reviews are ordered by GitHub's review id, which rises with every review written, whatever
+	// order they are delivered in; the newest id the issue has had is kept across rounds, so a
+	// review written before one already processed - redelivered, or from an earlier round -
+	// records nothing. A review without an id is ordered by when it arrives.
+	if fact.ID != 0 {
+		if fact.ID <= row.ReviewSeen {
+			return intake.Result{}, nil
+		}
+		row.ReviewSeen = fact.ID
+	}
+	// The decision belongs to the review round, not to the pull request's head: the reviewer's own
+	// handoff push is a new head, and the round must still know, when the reviewer completes, what
+	// the review decided, on which head, and what it said for the next round's implementer. Only a
+	// review in the round decides it, and only changes_requested and approved decide anything; an
+	// approval is judged against the head it names when the review ends (classify.ApprovalStands).
+	state := strings.ToLower(fact.State)
+	decides := issue.Phase == phase.Reviewing && (state == "changes_requested" || state == "approved")
+	if decides {
+		row.Decision = &record.ReviewDecision{State: state, Body: fact.Body, Head: fact.CommitID, ID: fact.ID}
+	}
+	if fact.ID == 0 && !decides {
+		return intake.Result{}, nil
+	}
+	if err := e.store.PutPhase(ctx, tx, row); err != nil || !decides {
 		return intake.Result{}, err
 	}
 	return intake.Result{}, e.advanceReview(ctx, tx, *issue, pr)
@@ -536,17 +544,17 @@ func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestR
 // that the issue stays in reviewing, as a tester's that never completes stays in testing.
 func (e *Engine) advanceReview(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest) error {
 	row, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
-	if err != nil || row.HandoffCommit == "" {
+	if err != nil || row.HandoffCommit == "" || row.Decision == nil {
 		return err
 	}
-	switch row.Verdict {
+	switch row.Decision.State {
 	case "changes_requested":
 		if err := e.recordRound(ctx, tx, issue.Key); err != nil {
 			return err
 		}
-		return e.transition(ctx, tx, issue, TriggerReviewRejected, "", row, pr, row.Reason)
+		return e.transition(ctx, tx, issue, TriggerReviewRejected, "", row, pr, row.Decision.Body)
 	case "approved":
-		if pr == nil || pr.Verdict != "green" || !classify.ApprovalStands(*pr, row.ReviewedHead) {
+		if pr == nil || pr.Verdict != "green" || !classify.ApprovalStands(*pr, row.Decision.Head) {
 			return nil
 		}
 		return e.transition(ctx, tx, issue, TriggerReviewApproved, "", row, pr, "")

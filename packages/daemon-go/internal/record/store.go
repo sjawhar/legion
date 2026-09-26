@@ -114,7 +114,7 @@ func scanIssue(row scanner) (*Issue, error) {
 }
 
 func (s *Postgres) Phases(ctx context.Context, tx pgx.Tx, issue string) ([]PhaseRow, error) {
-	rows, err := tx.Query(ctx, `select issue, role, claim, handoff_commit, rounds, verdict, last_handoff, reason, reviewed_head from phases
+	rows, err := tx.Query(ctx, `select issue, role, claim, handoff_commit, rounds, verdict, last_handoff, decision, review_seen from phases
 		where issue = $1 order by role`, issue)
 	if err != nil {
 		return nil, fmt.Errorf("list phases for %s: %w", issue, err)
@@ -135,14 +135,21 @@ func (s *Postgres) Phases(ctx context.Context, tx pgx.Tx, issue string) ([]Phase
 }
 
 func (s *Postgres) PutPhase(ctx context.Context, tx pgx.Tx, phase PhaseRow) error {
-	_, err := tx.Exec(ctx, `insert into phases (issue, role, claim, handoff_commit, rounds, verdict, last_handoff, reason,
-		reviewed_head)
+	var decision []byte
+	if phase.Decision != nil {
+		var err error
+		if decision, err = json.Marshal(phase.Decision); err != nil {
+			return fmt.Errorf("put %s phase on %s: encode the review decision: %w", phase.Role, phase.Issue, err)
+		}
+	}
+	_, err := tx.Exec(ctx, `insert into phases (issue, role, claim, handoff_commit, rounds, verdict, last_handoff, decision,
+		review_seen)
 		values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		on conflict (issue, role) do update set claim = excluded.claim,
 		handoff_commit = excluded.handoff_commit, rounds = excluded.rounds, verdict = excluded.verdict,
-		last_handoff = excluded.last_handoff, reason = excluded.reason, reviewed_head = excluded.reviewed_head`,
+		last_handoff = excluded.last_handoff, decision = excluded.decision, review_seen = excluded.review_seen`,
 		phase.Issue, string(phase.Role), string(phase.Claim), phase.HandoffCommit, phase.Rounds, phase.Verdict, phase.LastHandoff,
-		phase.Reason, phase.ReviewedHead,
+		decision, phase.ReviewSeen,
 	)
 	if err != nil {
 		return fmt.Errorf("put %s phase on %s: %w", phase.Role, phase.Issue, err)
@@ -153,17 +160,24 @@ func (s *Postgres) PutPhase(ctx context.Context, tx pgx.Tx, phase PhaseRow) erro
 func scanPhase(row scanner) (PhaseRow, error) {
 	var phase PhaseRow
 	var role, token string
-	if err := row.Scan(&phase.Issue, &role, &token, &phase.HandoffCommit, &phase.Rounds, &phase.Verdict, &phase.LastHandoff, &phase.Reason,
-		&phase.ReviewedHead); err != nil {
+	var decision []byte
+	if err := row.Scan(&phase.Issue, &role, &token, &phase.HandoffCommit, &phase.Rounds, &phase.Verdict, &phase.LastHandoff, &decision,
+		&phase.ReviewSeen); err != nil {
 		return PhaseRow{}, err
+	}
+	if decision != nil {
+		phase.Decision = &ReviewDecision{}
+		if err := json.Unmarshal(decision, phase.Decision); err != nil {
+			return PhaseRow{}, fmt.Errorf("decode the review decision: %w", err)
+		}
 	}
 	phase.Role, phase.Claim = claim.Role(role), claim.Token(token)
 	return phase, nil
 }
 
 const pullRequestColumns = `issue, repo, number, branch, head_sha, head_updated_at, head_updated_at_source,
-	verdict, failing, failing_statuses, review_decision, fix_attempts, blocked_attempts, check_runs,
-	generation, snapshot, reconciled, pending_pushes, head_counted, planned_red, state, code_heads`
+	verdict, failing, failing_statuses, fix_attempts, blocked_attempts, check_runs,
+	generation, snapshot, reconciled, pushes, head_counted, planned_red, state`
 
 func (s *Postgres) PullRequest(ctx context.Context, tx pgx.Tx, issue string) (*PullRequest, error) {
 	pr, err := scanPullRequest(tx.QueryRow(ctx, "select "+pullRequestColumns+" from pull_requests where issue = $1", issue))
@@ -214,32 +228,26 @@ func (s *Postgres) PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest
 	if err != nil {
 		return fmt.Errorf("put pull request for %s: encode check runs: %w", pr.Issue, err)
 	}
-	codeHeads, err := json.Marshal(append([]string{}, pr.CodeHeads...))
+	pushes, err := json.Marshal(append([]ClassifiedPush{}, pr.Pushes...))
 	if err != nil {
-		return fmt.Errorf("put pull request for %s: encode code heads: %w", pr.Issue, err)
-	}
-	pendingPushes, err := json.Marshal(append([]PendingPush{}, pr.PendingPushes...))
-	if err != nil {
-		return fmt.Errorf("put pull request for %s: encode pending pushes: %w", pr.Issue, err)
+		return fmt.Errorf("put pull request for %s: encode pushes: %w", pr.Issue, err)
 	}
 	_, err = tx.Exec(ctx, `insert into pull_requests (issue, repo, number, branch, head_sha, head_updated_at,
-		head_updated_at_source, verdict, failing, failing_statuses, review_decision, fix_attempts,
-		blocked_attempts, check_runs, generation, snapshot, reconciled, pending_pushes, head_counted, planned_red, state,
-		code_heads)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+		head_updated_at_source, verdict, failing, failing_statuses, fix_attempts,
+		blocked_attempts, check_runs, generation, snapshot, reconciled, pushes, head_counted, planned_red, state)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
 		on conflict (issue) do update set repo = excluded.repo, number = excluded.number, branch = excluded.branch,
 		head_sha = excluded.head_sha, head_updated_at = excluded.head_updated_at,
 		head_updated_at_source = excluded.head_updated_at_source, verdict = excluded.verdict,
 		failing = excluded.failing, failing_statuses = excluded.failing_statuses,
-		review_decision = excluded.review_decision, fix_attempts = excluded.fix_attempts,
+		fix_attempts = excluded.fix_attempts,
 		blocked_attempts = excluded.blocked_attempts, check_runs = excluded.check_runs,
 		generation = excluded.generation, snapshot = excluded.snapshot, reconciled = excluded.reconciled,
-		pending_pushes = excluded.pending_pushes, head_counted = excluded.head_counted,
-		planned_red = excluded.planned_red, state = excluded.state, code_heads = excluded.code_heads`,
+		pushes = excluded.pushes, head_counted = excluded.head_counted,
+		planned_red = excluded.planned_red, state = excluded.state`,
 		pr.Issue, pr.Repo, pr.Number, pr.Branch, pr.HeadSHA, pr.HeadUpdatedAt, pr.HeadUpdatedAtSource,
-		pr.Verdict, failing, failingStatuses, pr.ReviewDecision, pr.FixAttempts, pr.BlockedAttempts, checkRuns,
-		pr.Generation, pr.Snapshot, pr.Reconciled, pendingPushes, pr.HeadCounted, pr.PlannedRed, pr.State,
-		codeHeads,
+		pr.Verdict, failing, failingStatuses, pr.FixAttempts, pr.BlockedAttempts, checkRuns,
+		pr.Generation, pr.Snapshot, pr.Reconciled, pushes, pr.HeadCounted, pr.PlannedRed, pr.State,
 	)
 	if err != nil {
 		return fmt.Errorf("put pull request for %s: %w", pr.Issue, err)
@@ -273,13 +281,14 @@ func clearGeneration(ctx context.Context, tx pgx.Tx, where string, key string, d
 	for _, statement := range []string{
 		"delete from pull_requests where " + where + " and state <> 'open'",
 		// An open pull request is kept across a new generation, but the last one's reading of it is
-		// not: its counters, its checks verdict and the review decision are all of a head nobody
-		// has judged since.
+		// not: its counters and its checks verdict are of a head nobody has judged since, and the
+		// review round's decision goes with the phases below. Its pushes stay: each is a fact about
+		// two commits.
 		"update pull_requests set fix_attempts = 0, blocked_attempts = 0, head_counted = '', " +
-			"planned_red = false, verdict = '', review_decision = '', failing = '[]'::jsonb, " +
+			"planned_red = false, verdict = '', failing = '[]'::jsonb, " +
 			"failing_statuses = '[]'::jsonb, check_runs = '[]'::jsonb, reconciled = false where " + where,
 		"delete from design_gates where " + where,
-		"update phases set handoff_commit = '', rounds = 0, verdict = '' where " + where,
+		"update phases set handoff_commit = '', rounds = 0, verdict = '', decision = null where " + where,
 	} {
 		if _, err := tx.Exec(ctx, statement, key); err != nil {
 			return fmt.Errorf("%s: %w", describe, err)
@@ -290,11 +299,11 @@ func clearGeneration(ctx context.Context, tx pgx.Tx, where string, key string, d
 
 func scanPullRequest(row scanner) (*PullRequest, error) {
 	var pr PullRequest
-	var failing, failingStatuses, checkRuns, pendingPushes, codeHeads []byte
+	var failing, failingStatuses, checkRuns, pushes []byte
 	if err := row.Scan(&pr.Issue, &pr.Repo, &pr.Number, &pr.Branch, &pr.HeadSHA, &pr.HeadUpdatedAt,
-		&pr.HeadUpdatedAtSource, &pr.Verdict, &failing, &failingStatuses, &pr.ReviewDecision,
+		&pr.HeadUpdatedAtSource, &pr.Verdict, &failing, &failingStatuses,
 		&pr.FixAttempts, &pr.BlockedAttempts, &checkRuns, &pr.Generation, &pr.Snapshot, &pr.Reconciled,
-		&pendingPushes, &pr.HeadCounted, &pr.PlannedRed, &pr.State, &codeHeads); err != nil {
+		&pushes, &pr.HeadCounted, &pr.PlannedRed, &pr.State); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal(failing, &pr.Failing); err != nil {
@@ -306,11 +315,8 @@ func scanPullRequest(row scanner) (*PullRequest, error) {
 	if err := json.Unmarshal(checkRuns, &pr.CheckRuns); err != nil {
 		return nil, fmt.Errorf("decode check runs: %w", err)
 	}
-	if err := json.Unmarshal(codeHeads, &pr.CodeHeads); err != nil {
-		return nil, fmt.Errorf("decode code heads: %w", err)
-	}
-	if err := json.Unmarshal(pendingPushes, &pr.PendingPushes); err != nil {
-		return nil, fmt.Errorf("decode pending pushes: %w", err)
+	if err := json.Unmarshal(pushes, &pr.Pushes); err != nil {
+		return nil, fmt.Errorf("decode pushes: %w", err)
 	}
 	return &pr, nil
 }

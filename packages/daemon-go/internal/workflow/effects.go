@@ -77,10 +77,12 @@ func (e *Engine) clearHandoff(ctx context.Context, tx pgx.Tx, issue string, role
 		return nil
 	}
 	row, err := e.phaseRow(ctx, tx, issue, role)
-	if err != nil || row.HandoffCommit == "" && row.Verdict == "" && row.Reason == "" && row.ReviewedHead == "" {
+	if err != nil || row.HandoffCommit == "" && row.Verdict == "" && row.Decision == nil {
 		return err
 	}
-	row.HandoffCommit, row.Verdict, row.Reason, row.ReviewedHead = "", "", "", ""
+	// The review round's decision ends with the round; the newest review id seen (ReviewSeen) does
+	// not, since it orders every review the issue will have.
+	row.HandoffCommit, row.Verdict, row.Decision = "", "", nil
 	return e.store.PutPhase(ctx, tx, row)
 }
 

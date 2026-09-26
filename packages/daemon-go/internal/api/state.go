@@ -149,6 +149,9 @@ type PhaseView struct {
 }
 
 // PullRequestView is the issue's pull request as the daemon observes it from GitHub.
+// ReviewDecision is the open review round's decision (changes_requested or approved), the one the
+// workflow ends the round on when the reviewer completes; absent until a review in the round
+// decides.
 type PullRequestView struct {
 	Number         int    `json:"number"`
 	Head           string `json:"head"`

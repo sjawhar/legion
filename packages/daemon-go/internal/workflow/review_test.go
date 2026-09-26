@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -124,10 +125,11 @@ func issuePhase(t *testing.T, pool *pgxpool.Pool) phase.Phase {
 // shown - the tester's handoff head - and its own handoff push then replaces that head, while the
 // approval event and the push arrive by different webhook paths in no promised order. So an
 // approval stands for the current head when every push since the head it names changed only
-// .legion/, whichever of the approval, the new head and the push's paths is processed first. A
-// push that changes code, or whose changed paths are not known, starts again: an approval of any
-// earlier head then approves nothing. A pull request recorded before the daemon kept that chain
-// has none, so only an approval of its current head stands.
+// .legion/, whichever of the approval, the new heads and the pushes' paths is processed first. A
+// push that changes code, whose changed paths are not known, or that rewrote history - or did not
+// say whether it did - carries no approval across. Reviews are ordered by GitHub's review id, so
+// the newest one written decides. A pull request recorded before the daemon kept its pushes has
+// none, so only an approval of its current head stands.
 func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -144,7 +146,7 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 		{name: "a code push, then the approval of the head before it", steps: []string{"sync", "push code", "green", "approve head", "complete"}, want: phase.Reviewing},
 		{name: "the approval, then a code push", steps: []string{"approve head", "sync", "push code", "green", "complete"}, want: phase.Reviewing},
 		{name: "a push of truncated paths, then the approval of the head before it", steps: []string{"sync", "push truncated", "green", "approve head", "complete"}, want: phase.Reviewing},
-		{name: "a push with no paths marker, then the approval of the head before it", steps: []string{"sync", "push unmarked", "green", "approve head", "complete"}, want: phase.Reviewing},
+		{name: "a push with no paths marker, then the approval of the head before it", steps: []string{"sync", "push paths unmarked", "green", "approve head", "complete"}, want: phase.Reviewing},
 		{name: "a comment between a code push and its new head", steps: []string{"approve head", "push code", "comment", "sync", "green", "complete"}, want: phase.Reviewing},
 		{name: "a comment on the handoff head after the approval", steps: []string{"approve head", "sync", "push handoff", "comment", "green", "complete"}, want: phase.Retro},
 		{name: "a code push whose new head has not arrived", steps: []string{"approve head", "push code", "complete"}, want: phase.Reviewing},
@@ -157,6 +159,15 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 		{name: "a late code push for a head already replaced", steps: []string{"approve head", "sync", "push handoff", "push code head-x", "green", "complete"}, want: phase.Retro},
 		{name: "two handoff pushes, each before its head", steps: []string{"approve head", "push handoff", "sync", "push handoff head-3", "sync head-3", "green head-3", "complete"}, want: phase.Retro},
 		{name: "two handoff pushes, each after its head", steps: []string{"approve head", "sync", "push handoff", "sync head-3", "push handoff head-3", "green head-3", "complete"}, want: phase.Retro},
+		{name: "two handoff pushes, both classified after both heads, the second first", steps: []string{"approve head", "sync", "sync head-3", "push handoff head-3", "push handoff", "green head-3", "complete"}, want: phase.Retro},
+		{name: "two handoff pushes, both classified after both heads, in order", steps: []string{"approve head", "sync", "sync head-3", "push handoff", "push handoff head-3", "green head-3", "complete"}, want: phase.Retro},
+		{name: "two handoff pushes, the second classified between the heads", steps: []string{"approve head", "sync", "push handoff head-3", "sync head-3", "push handoff", "green head-3", "complete"}, want: phase.Retro},
+		{name: "a force push to a handoff commit on an older base, its push first", steps: []string{"approve head", "push handoff forced head-l", "sync head-l", "green head-l", "complete"}, want: phase.Reviewing},
+		{name: "a force push to a handoff commit on an older base, its head first", steps: []string{"approve head", "sync head-l", "push handoff forced head-l", "green head-l", "complete"}, want: phase.Reviewing},
+		{name: "a handoff push that does not say whether it was forced", steps: []string{"approve head", "sync", "push handoff unmarked", "green", "complete"}, want: phase.Reviewing},
+		{name: "a request for changes written after the approval, delivered first", steps: []string{"cr head id=12", "approve head id=11", "complete"}, want: phase.Implementing},
+		{name: "a request for changes written after the approval, delivered after", steps: []string{"approve head id=11", "cr head id=12", "complete"}, want: phase.Implementing},
+		{name: "an approval written after the request for changes", steps: []string{"cr head id=11", "approve head id=12", "complete"}, want: phase.Retro},
 		{name: "recorded before the chain: an approval of the current head", steps: []string{"approve head", "complete"}, want: phase.Retro},
 		{name: "recorded before the chain: an approval of an earlier head", steps: []string{"approve older", "complete"}, want: phase.Reviewing},
 	} {
@@ -171,26 +182,44 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 			engine := testEngine()
 			// A head's push replaces the head before it; head-x is a late push's, whose head was
 			// never the current one.
-			before := map[string]string{"head-2": "head", "head-3": "head-2", "head-x": "older"}
+			before := map[string]string{"head-2": "head", "head-3": "head-2", "head-x": "older", "head-l": "head"}
 			for i, step := range tc.steps {
-				head := "head-2"
-				if words := strings.Fields(step); len(words) > 1 && strings.HasPrefix(words[len(words)-1], "head") {
-					head = words[len(words)-1]
-					step = strings.Join(words[:len(words)-1], " ")
+				// A step is its name, then optional words: a head it names (head, head-2, ...), a review
+				// id (id=N), "forced" for a push that rewrote history, "unmarked" for a push whose
+				// listener did not say.
+				head, id, forced := "head-2", int64(0), "false"
+				var name []string
+				for _, word := range strings.Fields(step) {
+					switch {
+					case strings.HasPrefix(word, "head"):
+						head = word
+					case strings.HasPrefix(word, "id="):
+						id, _ = strconv.ParseInt(strings.TrimPrefix(word, "id="), 10, 64)
+					case word == "forced":
+						forced = "true"
+					case word == "unmarked":
+						forced = ""
+					default:
+						name = append(name, word)
+					}
 				}
+				step := strings.Join(name, " ")
 				var fact intake.Fact
 				switch step {
-				case "approve", "approve older":
-					commit := head
+				case "approve", "approve older", "cr":
+					commit, state := head, "approved"
 					if step == "approve older" {
 						commit = "older"
 					}
-					fact = intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: commit}
+					if step == "cr" {
+						state = "changes_requested"
+					}
+					fact = intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: id, State: state, CommitID: commit, Body: step}
 				case "sync":
 					fact = intake.PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: head}
 				case "comment":
 					fact = intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "commented", CommitID: "head-2", Body: "a comment"}
-				case "push handoff", "push code", "push code unplaced", "push truncated", "push unmarked":
+				case "push handoff", "push code", "push code unplaced", "push truncated", "push paths unmarked":
 					paths, truncated := ".legion/review.json", "false"
 					marker := &truncated
 					switch step {
@@ -198,15 +227,19 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 						paths = ".legion/review.json\nsrc/widget.go"
 					case "push truncated":
 						truncated = "true"
-					case "push unmarked":
+					case "push paths unmarked":
 						marker = nil
+					}
+					var forcedMarker *string
+					if forced != "" {
+						forcedMarker = &forced
 					}
 					replaced := before[head]
 					if step == "push code unplaced" {
 						replaced = ""
 					}
 					fact = intake.Push{Repo: "sjawhar/legion", Branch: "legion/LEGION-208", Before: replaced, After: head,
-						ChangedPaths: &paths, Truncated: marker, Pusher: "legion-reviewer[bot]"}
+						ChangedPaths: &paths, Truncated: marker, Forced: forcedMarker, Pusher: "legion-reviewer[bot]"}
 				case "green":
 					fact = intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: head,
 						CheckRuns: []record.AttemptRun{{Name: "ci", ID: 2}}, Generation: 2, Snapshot: "green-" + head, Verdict: "green", Failing: []string{}}
@@ -252,5 +285,39 @@ func TestACommentLeavesTheRoundsRequestForChanges(t *testing.T) {
 	}
 	if !strings.Contains(task, "rename the widget") || strings.Contains(task, "one more thought") {
 		t.Fatalf("the implementer's task = %q, want the request for changes' body and not the comment's", task)
+	}
+}
+
+// Reviews are ordered by GitHub's review id, which rises with every review written, and the order
+// holds across rounds: a review from an earlier round, delivered again while a later round is
+// open, is no newer than one already processed and records nothing, so the reviewer's completion
+// waits for the round's own review.
+func TestAReviewFromAnEarlierRoundDeliveredAgainRecordsNothing(t *testing.T) {
+	pool := migratedPool(t)
+	ctx := context.Background()
+	seedReview(t, pool, "green")
+	engine := testEngine()
+	requestChanges := intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: 10, State: "changes_requested", CommitID: "head", Body: "round 1"}
+	for i, fact := range []intake.Fact{
+		requestChanges,
+		intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-1"},
+		intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Summary: "fixed", Commit: "round-2"},
+		intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim", Summary: "tested", Verdict: "pass", Commit: "test-2"},
+		requestChanges,
+		intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-2"},
+		intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: 11, State: "approved", CommitID: "head", Body: "round 2"},
+	} {
+		if result, err := intake.ApplyFact(ctx, pool, "test", fmt.Sprintf("step-%d", i), fact, engine); err != nil || result.Refusal != nil {
+			t.Fatalf("step %d = %+v, %v", i, result.Refusal, err)
+		}
+		switch got := issuePhase(t, pool); {
+		case i == 1 && got != phase.Implementing:
+			t.Fatalf("after round 1 the issue is in %s, want implementing", got)
+		case i == 5 && got != phase.Reviewing:
+			t.Fatalf("after round 1's review delivered again and round 2's completion the issue is in %s, want reviewing", got)
+		}
+	}
+	if got := issuePhase(t, pool); got != phase.Retro {
+		t.Fatalf("the issue is in %s, want retro: round 2's approval is the newest review", got)
 	}
 }

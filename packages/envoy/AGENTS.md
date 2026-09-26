@@ -647,10 +647,15 @@ the synchronous listener call records the sent or failed attempt instead of blin
   `removed`, and `modified` lists, in first-seen order, newline-separated, at most 100; omitted
   when no commit is listed, since the payload drops empty strings), and `changed_paths_truncated`
   (`"true"` when more than 100 unique paths were seen, else `"false"` — present on every push, so
-  its absence alone tells a consumer the listener predates the field). Envoy forwards what GitHub
-  sent; what counts as a handoff-only push is the Legion daemon's rule, not the listener's.
+  its absence alone tells a consumer the listener predates the field), and `forced` (`"true"` or
+  `"false"`, GitHub's own flag, present on every push the same way). A forced push's commits are
+  listed from the merge base, so its `changed_paths` do not describe what it did to the head it
+  replaced. Envoy forwards what GitHub sent; what counts as a handoff-only push is the Legion
+  daemon's rule, not the listener's.
 - A `pull_request_review` payload carries the review's own `commit_id` and the PR's current
-  `head_sha` so consumers can tell whether the review is at head; `pull_request_review_comment`
+  `head_sha` so consumers can tell whether the review is at head, and `review_id`, GitHub's review
+  id as a decimal string, which rises with every review submitted, so consumers can order reviews
+  by when they were written rather than by delivery; `pull_request_review_comment`
   carries `head_sha` too, and all three comment/review events set `legion_footer: "true"` when the
   uncapped body contains a `<!-- legion:` worker footer.
 - NATS `>` matches one or more trailing tokens, not its base subject. A subscription to a concrete

@@ -1748,6 +1748,41 @@ func TestGithubPayloadFields(t *testing.T) {
 			omitted: []string{"changed_paths"},
 		},
 		{
+			name:  "a forced push says so",
+			event: "push",
+			body: map[string]any{
+				"repository": map[string]any{"full_name": "example-org/example-repo"},
+				"ref":        "refs/heads/legion/X",
+				"forced":     true,
+				"commits": []any{
+					map[string]any{"id": "1", "added": []any{}, "removed": []any{}, "modified": []any{".legion/review.json"}},
+				},
+			},
+			want: map[string]string{"forced": "true", "changed_paths": ".legion/review.json"},
+		},
+		{
+			name:  "a push that was not forced says so, as does one whose body leaves it out",
+			event: "push",
+			body: map[string]any{
+				"repository": map[string]any{"full_name": "example-org/example-repo"},
+				"ref":        "refs/heads/legion/X",
+				"commits":    []any{},
+			},
+			want: map[string]string{"forced": "false"},
+		},
+		{
+			name:  "a review carries GitHub's review id",
+			event: "pull_request_review",
+			body: map[string]any{
+				"action":       "submitted",
+				"repository":   map[string]any{"full_name": "example-org/example-repo"},
+				"pull_request": map[string]any{"number": 19, "head": map[string]any{"sha": "head-sha"}},
+				"review": map[string]any{"id": float64(5325101010), "state": "approved", "commit_id": "head-sha",
+					"user": map[string]any{"login": "reviewer"}},
+			},
+			want: map[string]string{"review_id": "5325101010", "state": "approved", "commit_id": "head-sha"},
+		},
+		{
 			name:  "push removing the .legion handoffs lists the removed paths",
 			event: "push",
 			body: map[string]any{
