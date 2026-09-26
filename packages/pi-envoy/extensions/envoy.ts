@@ -7,6 +7,7 @@ import {
   type DeliveryCapability,
   dispatchToolSchema,
   dispatchToolSpecs,
+  type OpenAsk,
   type OpenAsksResponse,
   ROLE_TOPIC_PREFIX,
   zodSchemaApi,
@@ -99,17 +100,42 @@ const LEGION_MANAGED_ENTRY = "legion-managed-session";
 const ASK_REMINDER_MESSAGE = "dispatch-ask-reminder";
 
 /**
- * What the hidden self-check asks the agent, over a snapshot of its own conversation. One word
- * comes back; only WAITING buys the visible turn below. It asks nothing about Dispatch: the
- * extension has already read from Dispatch that nothing is open, the model is not a better
- * witness of that than the API is, and the agent this exists to catch is one that asked the
- * human in chat text — which such an agent can reasonably read as having asked.
+ * What the hidden self-check asks the agent, over a snapshot of its own conversation. It names
+ * the asks Dispatch already knows about, then asks whether the agent is waiting on a human for
+ * something those asks do not cover. One word comes back; only WAITING buys the visible turn.
  */
-const ASK_SELF_CHECK_PROMPT =
-  "Your run has just ended. Answer with exactly one word and nothing else: WAITING or PROCEEDING. " +
-  "WAITING — you stopped because you need a decision, an approval, or information from a human. " +
-  "PROCEEDING — you finished, you will carry on by yourself, or you are waiting only on tools, " +
-  "subagents, or events.";
+const ASK_SELF_CHECK_PROMPT = (asks: readonly Pick<OpenAsk, "question">[]): string => {
+  const askLimit = 5;
+  const questionLimit = 120;
+  const promptAsks =
+    asks.length === 0
+      ? "There are no open asks in Dispatch."
+      : [
+          "Your open asks in Dispatch:",
+          ...asks.slice(0, askLimit).map((ask) => {
+            const firstLineEnd = ask.question.indexOf("\n");
+            const firstLine = (
+              firstLineEnd === -1 ? ask.question : ask.question.slice(0, firstLineEnd)
+            ).trim();
+            const question =
+              firstLine.length <= questionLimit
+                ? firstLine
+                : `${firstLine.slice(0, questionLimit - 1)}…`;
+            return `- ${question}`;
+          }),
+          ...(asks.length > askLimit ? [`+${asks.length - askLimit} more`] : []),
+        ].join("\n");
+
+  return (
+    "Your run has just ended. " +
+    `${promptAsks}\n\n` +
+    "Are you right now waiting on a human for anything none of those asks covers? " +
+    "Answer with exactly one word and nothing else: WAITING or PROCEEDING. " +
+    "WAITING — you stopped because you need a decision, an approval, or information from a human. " +
+    "PROCEEDING — you finished, you will carry on by yourself, or you are waiting only on tools, " +
+    "subagents, or events."
+  );
+};
 
 /**
  * A verdict whose first word is WAITING, after any markdown emphasis or quoting — the reply
@@ -144,7 +170,7 @@ const ASK_SELF_CHECK_TIMEOUT_MS = 60_000;
 const ASK_CHECKS_PER_PERIOD = 5;
 
 const UNASKED_WAIT_REMINDER =
-  "You just said you are waiting on a human, but you have no open ask in Dispatch, so nobody knows you are waiting. Open it now with dispatch_ask — or dispatch_request_approval when what you need is approval of a document — naming exactly what you need and from whom. Do not reply just to acknowledge this reminder.";
+  "You just said you are waiting on a human for something no open ask in Dispatch covers. Open an ask for it now with dispatch_ask (or dispatch_request_approval for a document), naming exactly what you need and from whom.";
 
 /** Tools whose success means the agent opened the ask itself, so the nudge has nothing to say. */
 const ASK_OPENING_TOOLS: readonly string[] = ["dispatch_ask", "dispatch_request_approval"];
@@ -161,13 +187,9 @@ const DISPATCH_TOOL_PREFIX = "dispatch_";
  * continuation can never owe one, which is what keeps it from nudging itself forever. `checks`
  * counts the ones spent, capped at `ASK_CHECKS_PER_PERIOD`.
  *
- * `baseline_as_of` is the server clock the period's next Dispatch read asks from, and it moves:
- * every settle that resolves — silently, because an ask is open, or by spending a check —
- * carries it to that snapshot's `as_of`. Pinned to the arming turn it would never move, and
- * `opened_since` counts every ask this session authored after it, open or long answered, so one
- * ask would silence the rest of the period however long the session lived. A standing session
- * is woken by a human's answer through Envoy, which arms no period, so the window is the only
- * thing that can let the nudge speak again.
+ * `baseline_as_of` is the server clock the period's next Dispatch read asks from, and it moves
+ * after every self-check to that snapshot's `as_of`. This keeps the check's view current while
+ * the session works between settles.
  *
  * In-memory only, for the life of this process's session. A cold start or a session change
  * begins at period 0, which the stop guard refuses, so nothing nudges before the next genuine
@@ -1284,15 +1306,13 @@ export default function envoyExtension(pi: PiApi): void {
   }
 
   // The run-end nudge. `agent_end` is the bare stop signal — no message, no shape to read — so
-  // the first trigger is Dispatch state: the agent stopped, this period opened no ask, and none
-  // is open. That alone said nothing about whether the agent was waiting, and steering on it
-  // made the model announce "nothing outstanding" after nearly every turn, so it is now only the
-  // cheap precondition of a hidden self-check (below), and the steer follows the self-check's
-  // WAITING verdict alone. The check itself is owed and spent like the host's own todo reminder:
-  // the arming turn owes one, the check spends it whatever the verdict, opening the ask spends
-  // it too, and the agent's next real work owes another (`tool_result` below), so a run that
-  // keeps working keeps being checked without a new user turn. A settled turn that only replies
-  // does no work, so the nudge's own continuation never owes a check and cannot nudge itself;
+  // Dispatch supplies the open asks the self-check names. The hidden self-check decides whether
+  // the agent is waiting for something outside that list; only its WAITING verdict buys the
+  // steer. The check itself is owed and spent like the host's own todo reminder: the arming turn
+  // owes one, the check spends it whatever the verdict, opening the ask spends it too, and the
+  // agent's next real work owes another (`tool_result` below), so a run that keeps working keeps
+  // being checked without a new user turn. A settled turn that only replies does no work, so the
+  // nudge's own continuation never owes a check and cannot nudge itself;
   // `ASK_CHECKS_PER_PERIOD` bounds the rest.
   //
   // A run with no UI (`omp -p`, and any other headless launch) never gets it: the host disposes
@@ -1400,25 +1420,15 @@ export default function envoyExtension(pi: PiApi): void {
     // A run started while Dispatch answered: the conversation a self-check would read is past
     // this settle. Nothing is spent, so the newer run's own settle is where the check happens.
     if (runSeq !== seenRun) return;
-    if (open.snapshot.count > 0 || open.snapshot.opened_since) {
-      // Dispatch knows this session is waiting, or knows it asked since the window opened, so
-      // there is nothing for the model to tell anyone: the settle is silent and no check is
-      // spent. The window moves to this snapshot, which is what stops one ask from silencing
-      // the rest of the period: `opened_since` counts every ask authored after `since`,
-      // answered or not, so a window pinned to the arming turn stays true forever.
-      askAwareness = {
-        ...askAwareness,
-        check_due: false,
-        baseline_as_of: open.snapshot.as_of,
-      };
-      return;
-    }
+    // Every normal settle takes the one path: Dispatch supplies the current open asks for the
+    // prompt, not a reason to suppress it. `opened_since` remains part of the snapshot's
+    // contract, but does not alter the self-check.
     // The self-check: one hidden, tool-free model call over a snapshot of this conversation
     // (`pi.askEphemeral`, the channel a targeted Dispatch BTW already uses), which adds nothing
     // to the transcript and which the user never sees. Only a WAITING verdict — the agent
-    // saying it stopped on a human it has not asked — buys the visible turn. PROCEEDING, any
-    // other answer, a timeout, and a failure are all silent, so an ordinary settle costs one
-    // hidden call and shows nothing.
+    // saying it is waiting on a human for something its open asks do not cover — buys the visible
+    // turn. PROCEEDING, any other answer, a timeout, and a failure are all silent, so an ordinary
+    // settle costs one hidden call and shows nothing.
     //
     // The bound is this handler's own clock, not the host's: the signal is still passed, so a
     // host that honours it stops paying for an answer nobody will read, but the await always
@@ -1430,7 +1440,7 @@ export default function envoyExtension(pi: PiApi): void {
     askCheckAbort = abort;
     let answered: Promise<string | undefined>;
     try {
-      answered = askEphemeral({ prompt: ASK_SELF_CHECK_PROMPT, signal: abort.signal }).then(
+      answered = askEphemeral({ prompt: ASK_SELF_CHECK_PROMPT(open.snapshot.asks), signal: abort.signal }).then(
         (reply): string | undefined => reply.replyText,
         (error: unknown): string | undefined => {
           // An abort this extension made — a superseded check, or its own timeout, which logs
@@ -1514,9 +1524,9 @@ export default function envoyExtension(pi: PiApi): void {
     ) {
       if (ASK_OPENING_TOOLS.includes(event.toolName)) {
         // The agent asked the humans itself, so this stop has nothing left for the nudge to
-        // say: it spends the check the period owed rather than ending the period, and stops a
-        // check in flight, whose verdict can no longer be used. The ask is still what keeps
-        // later settles silent — Dispatch is re-read at every one of them.
+        // say: it spends the check the period owed rather than ending the period, and aborts a
+        // check in flight before its verdict can be used. Later real work can re-arm a fresh
+        // check, whose prompt names the ask.
         askAwareness = { ...askAwareness, check_due: false };
         abortSelfCheck("the agent opened the ask itself");
       } else if (!event.toolName.startsWith(DISPATCH_TOOL_PREFIX)) {

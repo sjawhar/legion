@@ -500,7 +500,7 @@ function responseWithRegistration(
 const dispatchToolNames = dispatchToolSpecs.map((spec) => spec.name);
 
 const UNASKED_WAIT_NUDGE =
-  "You just said you are waiting on a human, but you have no open ask in Dispatch, so nobody knows you are waiting. Open it now with dispatch_ask — or dispatch_request_approval when what you need is approval of a document — naming exactly what you need and from whom. Do not reply just to acknowledge this reminder.";
+  "You just said you are waiting on a human for something no open ask in Dispatch covers. Open an ask for it now with dispatch_ask (or dispatch_request_approval for a document), naming exactly what you need and from whom.";
 
 /** Custom-message type of the nudge itself, which a session hears amid other deliveries. */
 const ASK_REMINDER_TYPE = "dispatch-ask-reminder";
@@ -522,6 +522,7 @@ async function bootAskNudge(
     readonly as_of?: string;
     readonly count?: number;
     readonly opened_since?: boolean;
+    readonly asks?: readonly { readonly question: string }[];
   },
   options: {
     /** Transcript this session resumes from, as `getBranch()` returns it. */
@@ -589,10 +590,23 @@ async function bootAskNudge(
         session_id: sessionID,
         as_of: lastAsOf,
         opened_since: open.opened_since ?? false,
-        count: open.count ?? 0,
+        count: open.count ?? open.asks?.length ?? 0,
         waiting_on_human: 0,
         waiting_on_agent: 0,
-        asks: [],
+        asks: (open.asks ?? []).map((ask, index) => ({
+          id: `ask-${index}`,
+          ref: `/issues/LEGION-${index}#ask-${index}`,
+          question: ask.question,
+          kind: "question",
+          urgency: "normal",
+          created_at: "2026-09-13T00:00:00Z",
+          age_seconds: 0,
+          priority: null,
+          owner: { issue: { key: `LEGION-${index}`, title: "Test" } },
+          human_replied: false,
+          last_reply: null,
+          waiting_on: "human",
+        })),
       }),
       { headers: { "Content-Type": "application/json" } }
     );
@@ -1582,29 +1596,68 @@ describe("envoy OMP extension", () => {
     }
   });
 
-  test("stays silent at a stop that leaves an ask open", async () => {
-    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-open");
-    const session = await bootAskNudge(envoyExtension, "ses_nudge_open", () => ({ count: 1 }));
-
-    await session.userTurn();
-    await session.stop();
-    // Dispatch already knows the agent is waiting: nothing is asked of the model.
-    expect(session.fixture.deliveries).toEqual([]);
-    expect(session.asked).toEqual([]);
-  });
-
-  test("stays silent when an ask was opened after the turn began", async () => {
-    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-opened-since");
-    // Answered and closed within the turn: nothing is open at the stop, but the session did
-    // put a question to a human, so it is not silently waiting.
-    const session = await bootAskNudge(envoyExtension, "ses_nudge_since", () => ({
-      opened_since: true,
+  test("nudges a WAITING session even when it already holds an open ask", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-held-waiting");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_held_waiting", () => ({
+      asks: [{ question: "Which deployment window should I use?" }],
     }));
 
     await session.userTurn();
     await session.stop();
+
+    expect(session.fixture.deliveries).toEqual([
+      expect.objectContaining({ content: UNASKED_WAIT_NUDGE }),
+    ]);
+    expect(session.asked[0]?.prompt).toContain("Which deployment window should I use?");
+  });
+
+  test("leaves a held ask silent when the self-check answers PROCEEDING", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-held-proceeding");
+    const session = await bootAskNudge(
+      envoyExtension,
+      "ses_nudge_held_proceeding",
+      () => ({ asks: [{ question: "Which deployment window should I use?" }] }),
+      { selfCheck: async () => ({ replyText: "PROCEEDING" }) }
+    );
+
+    await session.userTurn();
+    await session.stop();
+
+    expect(session.asked).toHaveLength(1);
     expect(session.fixture.deliveries).toEqual([]);
-    expect(session.asked).toEqual([]);
+  });
+
+  test("names no open asks or the first five held ask questions in the self-check", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-prompt-asks");
+    const longQuestion = `A held question that exceeds the prompt limit: ${"x".repeat(130)}`;
+    const heldQuestions = [
+      "First held question",
+      "Second held question\nwith details that do not belong in the prompt",
+      "Third held question",
+      "Fourth held question",
+      longQuestion,
+      "Sixth held question",
+    ];
+    const held = await bootAskNudge(envoyExtension, "ses_nudge_prompt_held", () => ({
+      asks: heldQuestions.map((question) => ({ question })),
+    }));
+    await held.userTurn();
+    await held.stop();
+
+    const heldPrompt = held.asked[0]?.prompt ?? "";
+    for (const question of heldQuestions.slice(0, 4)) {
+      expect(heldPrompt).toContain(question.split("\n")[0] ?? "");
+    }
+    expect(heldPrompt).toContain(`${longQuestion.slice(0, 119)}…`);
+    expect(heldPrompt).not.toContain(longQuestion);
+    expect(heldPrompt).not.toContain("with details that do not belong in the prompt");
+    expect(heldPrompt).not.toContain("Sixth held question");
+    expect(heldPrompt).toContain("+1 more");
+
+    const none = await bootAskNudge(envoyExtension, "ses_nudge_prompt_none", () => ({}));
+    await none.userTurn();
+    await none.stop();
+    expect(none.asked[0]?.prompt).toContain("There are no open asks");
   });
 
   test("the ask the agent opens itself spends the check the period owed", async () => {
@@ -1636,35 +1689,18 @@ describe("envoy OMP extension", () => {
     expect(session.asked).toEqual([]);
   });
 
-  test("an ask that stays open keeps every settle silent and spends none of the period", async () => {
-    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-ask-open-budget");
-    // The rule the server implements (`packages/envoy/internal/dispatch/api/asks.go`):
-    // `opened_since` is true when this session authored any ask at or after `since`, whatever
-    // state it is in now, and `count` is what is open at the snapshot.
-    const asks: { readonly created_at: string; open: boolean }[] = [];
+  test("the five-check period budget applies while the session holds open asks", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-held-budget");
     const session = await bootAskNudge(
       envoyExtension,
-      "ses_nudge_ask_budget",
-      (since) => ({
-        count: asks.filter((ask) => ask.open).length,
-        opened_since: since !== undefined && asks.some((ask) => ask.created_at >= since),
-      }),
+      "ses_nudge_held_budget",
+      () => ({ asks: [{ question: "Which deployment window should I use?" }] }),
       { selfCheck: async () => ({ replyText: "PROCEEDING" }) }
     );
 
     await session.userTurn();
-    asks.push({ created_at: session.asOf(), open: true });
-    await session.toolResult({
-      toolName: "dispatch_ask",
-      toolCallId: "call-ask",
-      input: {},
-      details: { ask: "ask-1" },
-      isError: false,
-    });
-
-    // The agent carries on with what it can while the human is away. Dispatch answers that its
-    // question is open at every one of those settles, so none of them asks the model anything.
-    for (let step = 0; step < 6; step += 1) {
+    for (let step = 0; step < 9; step += 1) {
+      await session.stop();
       await session.toolResult({
         toolName: "bash",
         toolCallId: `call-${step}`,
@@ -1672,74 +1708,10 @@ describe("envoy OMP extension", () => {
         details: {},
         isError: false,
       });
-      await session.stop();
     }
-    expect(session.asked).toEqual([]);
 
-    // More settles than the period's five checks have gone by, and the budget is untouched:
-    // the human answers, and the next stop after real work is checked as usual.
-    const answered = asks[0];
-    if (answered === undefined) throw new Error("the fixture recorded no ask");
-    answered.open = false;
-    await session.toolResult({
-      toolName: "bash",
-      toolCallId: "call-after",
-      input: {},
-      details: {},
-      isError: false,
-    });
-    await session.stop();
-    expect(session.asked).toHaveLength(1);
-  });
-
-  test("work re-arms the check once the agent's own ask has been answered", async () => {
-    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-ask-answered");
-    const asks: { readonly created_at: string; open: boolean }[] = [];
-    const session = await bootAskNudge(
-      envoyExtension,
-      "ses_nudge_answered",
-      (since) => ({
-        count: asks.filter((ask) => ask.open).length,
-        opened_since: since !== undefined && asks.some((ask) => ask.created_at >= since),
-      }),
-      { selfCheck: async () => ({ replyText: "WAITING" }) }
-    );
-
-    await session.userTurn();
-    asks.push({ created_at: session.asOf(), open: true });
-    await session.toolResult({
-      toolName: "dispatch_ask",
-      toolCallId: "call-ask",
-      input: {},
-      details: { ask: "ask-1" },
-      isError: false,
-    });
-    await session.toolResult({
-      toolName: "bash",
-      toolCallId: "call-1",
-      input: {},
-      details: {},
-      isError: false,
-    });
-    await session.stop();
-    expect(session.asked).toEqual([]);
-
-    // The human answers, and the ask closes. A standing session is woken by that answer through
-    // Envoy, which arms no period of its own, so nothing but the moving window can let the
-    // nudge speak again — and the second silent wait is exactly what it exists to catch.
-    const answered = asks[0];
-    if (answered === undefined) throw new Error("the fixture recorded no ask");
-    answered.open = false;
-    await session.toolResult({
-      toolName: "bash",
-      toolCallId: "call-2",
-      input: {},
-      details: {},
-      isError: false,
-    });
-    await session.stop();
-    expect(session.asked).toHaveLength(1);
-    expect(session.fixture.deliveries).toHaveLength(1);
+    expect(session.asked).toHaveLength(5);
+    expect(session.fixture.deliveries).toEqual([]);
   });
 
   test("waits for the real stop when OMP has already scheduled a continuation", async () => {
