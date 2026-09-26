@@ -585,7 +585,7 @@ Dispatch treats an agent endpoint and bearer token as one trust-bound configurat
 | `/v1/messages/publish` | POST | Publishes a non-agent topic. An optional `dedupe_key` is used verbatim as the envelope's dedupe key (how a re-sent copy stays recognisable to the receiver's own dedupe); it is mutually exclusive with `idempotency_key` — both present is a 400 whose `expected` names both fields — it may not begin with the reserved forward mark `envoy.role.forward.` (a 400 naming `dedupe_key`; the role arbiter drops such an envelope on sight, so accepting it would be a 200 for a message that vanishes), and an empty string is absent; without either key the key is minted. A `notifications.role.<role>` topic requires a live holder and returns that session ID in `holder`. Its 404 adds `reason: "unclaimed"` for a role with no claim, or `reason: "holder_lapsed"` with the prior `holder`, `claim_released`, and a `last_seen` timestamp when the final heartbeat remains in its one-TTL diagnostic window. |
 | `/v1/roles/<role>` | GET | Returns the live role holder, including its capabilities and `last_seen`. A 404 has `reason: "unclaimed"` when no role claim exists; for an absent holder it has `reason: "holder_lapsed"` with the prior holder's ID, whether this lookup released the claim, and any final last-seen time retained for one TTL. |
 | `/v1/roles/set` | POST | Claims a role for a live session and registers its role topic. Last-claim-wins by default. With `"soft": true` the claim lands only if the role is unheld, already this session's, held by a session that is no longer live, or held by the declared `previous_session_id` (the id a fork/branch continues); any other live holder answers `409 {error, role, holder}` and nothing changes. |
-| `/v1/interests/subscribe` | POST | Persists session topics, route metadata, and optional delivery `capabilities`; registrations without capabilities persist `[]`. The response can include `warnings` when a GitHub repository has no retained events. |
+| `/v1/interests/subscribe` | POST | Persists session topics, route metadata, and optional delivery `capabilities`; registrations without capabilities persist `[]`. The response can include `warnings` when a GitHub repository has no retained events, and when a GitHub topic's token after its owner and name is not one of `contracts.GithubTopicKinds` or a wildcard. When a kind follows the extra tokens, or the name holds an empty token, the name was spelled with its dot, and the warning names the spelling Envoy publishes (`notifications.github.acme.site.io.pr.7.>` → `acme.site_io`). Otherwise the warning says the token is not a GitHub topic kind and names the kinds (`notifications.github.acme.widgets.checks.>`). |
 | `/v1/interests/unsubscribe` | POST | Removes the supplied topics and returns them in `removed`. |
 | `/v1/sessions` | GET | Lists live sessions; optional case-sensitive substring filters are `dir` and `title`. Rows include `roles`, `capabilities`, and `last_seen`. |
 | `/v1/interests/` | GET | Lists persisted interests. |
@@ -663,7 +663,8 @@ the synchronous listener call records the sent or failed attempt instead of blin
 
 ## Topic shapes
 
-- GitHub repository topics start with `notifications.github.<owner>.<repo>`.
+- GitHub repository topics start with `notifications.github.<owner>.<repo>`, each name one
+  segment with a dot written `_` (`sjawhar/.github` is `notifications.github.sjawhar._github`).
   Pull requests use `pr.<n>` for lifecycle (a closed event carries
   `merged`, `merge_commit_sha`, `merged_by`, and `head_sha`), plus
   `pr.<n>.comment`, `pr.<n>.review`, `pr.<n>.mention`, and
