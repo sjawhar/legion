@@ -3,6 +3,8 @@ package secrets
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -74,5 +76,43 @@ func TestFakeReadReturnsValueForPresentName(t *testing.T) {
 	}
 	if v != "shh" {
 		t.Fatalf("expected %q, got %q", "shh", v)
+	}
+}
+
+func TestFakeFromFileParsesNameValueLinesSkippingCommentsAndBlanks(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "secrets.env")
+	content := "# a comment\n\nDEEL_API_KEY=deel-v1\nAUTO_TOKEN=auto-v1\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	fake, err := FakeFromFile(path)
+	if err != nil {
+		t.Fatalf("FakeFromFile: %v", err)
+	}
+	if len(fake) != 2 || fake["DEEL_API_KEY"] != "deel-v1" || fake["AUTO_TOKEN"] != "auto-v1" {
+		t.Fatalf("fake = %v, want 2 entries", fake)
+	}
+}
+
+func TestFakeFromFileRejectsMissingFile(t *testing.T) {
+	_, err := FakeFromFile(filepath.Join(t.TempDir(), "missing.env"))
+	if err == nil {
+		t.Fatal("expected an error for a missing file")
+	}
+}
+
+func TestFakeFromFileRejectsLineWithNoEquals(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "secrets.env")
+	if err := os.WriteFile(path, []byte("NOT_A_LINE\n"), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	_, err := FakeFromFile(path)
+	if err == nil {
+		t.Fatal("expected an error for a malformed line")
+	}
+	if !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "1") {
+		t.Fatalf("error %q should name the path and line number", err.Error())
 	}
 }

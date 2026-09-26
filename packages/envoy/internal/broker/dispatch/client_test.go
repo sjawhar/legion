@@ -57,3 +57,28 @@ func TestCreateAndGetAsk(t *testing.T) {
 		t.Fatalf("answer at: %v", ask.Answer.At)
 	}
 }
+
+func TestIssueAssignee(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/issues/AGENTC-1":
+			w.Write([]byte(`{"key":"AGENTC-1","title":"t","assignee":"alice","labels":[]}`))
+		case "/api/v1/issues/AGENTC-2":
+			w.Write([]byte(`{"key":"AGENTC-2","title":"t","assignee":null,"labels":[]}`))
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "tok", srv.Client())
+
+	assignee, err := c.IssueAssignee(context.Background(), "AGENTC-1")
+	if err != nil || assignee != "alice" {
+		t.Fatalf("IssueAssignee(AGENTC-1) = %q, %v, want alice, nil", assignee, err)
+	}
+
+	assignee, err = c.IssueAssignee(context.Background(), "AGENTC-2")
+	if err != nil || assignee != "" {
+		t.Fatalf("IssueAssignee(AGENTC-2) = %q, %v, want empty, nil", assignee, err)
+	}
+}

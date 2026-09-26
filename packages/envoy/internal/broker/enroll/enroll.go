@@ -299,6 +299,27 @@ func (s *Service) Get(ctx context.Context, id string) (Enrollment, error) {
 	return e, err
 }
 
+// SessionID answers a live (non-revoked) enrollment's own session_id — the Envoy session a
+// launcher recorded at Create time — for wake.Envoy's notification target. It follows Get's own
+// "non-revoked" filter, not Lookup's stricter lease-not-expired one: main.go's waker calls this
+// only as a fallback after requests.Machine.SessionID and discards its error, so a null
+// session_id or an id that matches no live row both answer ("", nil); only a genuine Postgres
+// failure is a non-nil error.
+func (s *Service) SessionID(ctx context.Context, id string) (string, error) {
+	var sessionID *string
+	err := s.Store.Pool.QueryRow(ctx, `select session_id from enrollments where id=$1 and revoked_at is null`, id).Scan(&sessionID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if sessionID == nil {
+		return "", nil
+	}
+	return *sessionID, nil
+}
+
 // Replay records a jti; a unique violation means it was seen. Expired rows are pruned here too,
 // so the table stays bounded without a separate job.
 func (s *Service) Replay(ctx context.Context, jti string, expires time.Time) (bool, error) {

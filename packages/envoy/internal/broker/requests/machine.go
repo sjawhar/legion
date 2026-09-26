@@ -422,6 +422,26 @@ func (m *Machine) OwnerOf(ctx context.Context, requestID string) (string, error)
 	return owner, err
 }
 
+// SessionID answers a request row's own optional session_id — an override supplied in the
+// request body at Create time, distinct from the enrollment's own session_id — for
+// wake.Envoy's notification target. main.go's waker tries this first and discards its error, so
+// a null session_id or a request id that no longer exists both answer ("", nil); only a genuine
+// Postgres failure is a non-nil error.
+func (m *Machine) SessionID(ctx context.Context, id string) (string, error) {
+	var sessionID *string
+	err := m.Store.Pool.QueryRow(ctx, `select session_id from requests where id=$1`, id).Scan(&sessionID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if sessionID == nil {
+		return "", nil
+	}
+	return *sessionID, nil
+}
+
 // Grant is a live grant's public summary, added in Task 11 for GET /v1/enrollments/self, which
 // needs an enrollment's own live grants and has no existing read to reuse. It follows the same
 // query pattern as OwnerOf and enrollment above.

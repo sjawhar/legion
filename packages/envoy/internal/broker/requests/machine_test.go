@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/sjawhar/envoy/internal/broker/dispatch"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/rules"
@@ -586,5 +588,33 @@ func TestExpirePendingAuditsEveryExpiredRequest(t *testing.T) {
 		if auditCount != 1 {
 			t.Fatalf("audit rows for %s = %d, want exactly 1 (state transition and audit must commit together)", id, auditCount)
 		}
+	}
+}
+
+// TestMachineSessionID covers Machine.SessionID's three answers: a request created with a
+// session_id override, one created without, and a request id that does not exist — every case
+// answers ("", nil) except the first.
+func TestMachineSessionID(t *testing.T) {
+	m, _, _, enrA, _ := newFixture(t)
+	ctx := context.Background()
+
+	withSession, err := m.Create(ctx, enrA.ID.String(), []string{"AUTO_TOKEN"}, "need it", "", "session-abc")
+	if err != nil {
+		t.Fatalf("Create(withSession): %v", err)
+	}
+	if got, err := m.SessionID(ctx, withSession.ID); err != nil || got != "session-abc" {
+		t.Fatalf("SessionID(withSession) = %q, %v, want %q, nil", got, err, "session-abc")
+	}
+
+	noSession, err := m.Create(ctx, enrA.ID.String(), []string{"AUTO_TOKEN"}, "need it", "", "")
+	if err != nil {
+		t.Fatalf("Create(noSession): %v", err)
+	}
+	if got, err := m.SessionID(ctx, noSession.ID); err != nil || got != "" {
+		t.Fatalf("SessionID(noSession) = %q, %v, want empty, nil", got, err)
+	}
+
+	if got, err := m.SessionID(ctx, uuid.NewString()); err != nil || got != "" {
+		t.Fatalf("SessionID(nonexistent) = %q, %v, want empty, nil", got, err)
 	}
 }

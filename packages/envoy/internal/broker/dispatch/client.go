@@ -111,6 +111,26 @@ func (c *Client) Whoami(ctx context.Context, bearer string) (Identity, error) {
 	return id, err
 }
 
+// issueDetail is the small slice of GET /api/v1/issues/{key}'s response IssueAssignee needs.
+// That route's full response carries additional fields (title, status, labels, ...) this
+// package has no use for, so it decodes into this local struct rather than IssueSummary, whose
+// shape belongs to ListIssues's own contract.
+type issueDetail struct {
+	Assignee *string `json:"assignee"`
+}
+
+// IssueAssignee answers issue's current assignee login, or "" when the issue has none.
+func (c *Client) IssueAssignee(ctx context.Context, issue string) (string, error) {
+	var detail issueDetail
+	if err := c.do(ctx, http.MethodGet, "/api/v1/issues/"+issue, c.token, nil, &detail); err != nil {
+		return "", err
+	}
+	if detail.Assignee == nil {
+		return "", nil
+	}
+	return *detail.Assignee, nil
+}
+
 func (c *Client) do(ctx context.Context, method, path, bearer string, body io.Reader, out any) error {
 	req, err := http.NewRequestWithContext(ctx, method, c.base+path, body)
 	if err != nil {

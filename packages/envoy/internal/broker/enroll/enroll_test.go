@@ -621,3 +621,52 @@ func TestLookupRejectsNonUUIDWithoutError(t *testing.T) {
 		t.Fatalf("Lookup(non-UUID) thumbprint = %q, want empty", thumbprint)
 	}
 }
+
+// TestSessionID covers enroll.Service.SessionID's three answers: a live enrollment's own
+// session_id, a live enrollment with none (null), and an id with no live row at all (revoked or
+// never existed) — every case answers ("", nil) except the first.
+func TestSessionID(t *testing.T) {
+	svc := newService(t)
+	ctx := context.Background()
+	_, token, err := svc.MintLauncherCredential(ctx, str("sjawhar"), nil, "devbox", "ask-1")
+	if err != nil {
+		t.Fatalf("MintLauncherCredential: %v", err)
+	}
+	cred, err := svc.AuthenticateLauncher(ctx, token)
+	if err != nil {
+		t.Fatalf("AuthenticateLauncher: %v", err)
+	}
+
+	withSession, err := svc.Create(ctx, cred, Enrollment{
+		Kind: "box", RuntimeID: "box-with-session", Operator: str("sjawhar"),
+		ApproverKind: "operator", Thumbprint: "tp-with-session", SessionID: str("session-123"),
+	})
+	if err != nil {
+		t.Fatalf("Create(withSession): %v", err)
+	}
+	if got, err := svc.SessionID(ctx, withSession.ID.String()); err != nil || got != "session-123" {
+		t.Fatalf("SessionID(withSession) = %q, %v, want %q, nil", got, err, "session-123")
+	}
+
+	noSession, err := svc.Create(ctx, cred, Enrollment{
+		Kind: "box", RuntimeID: "box-no-session", Operator: str("sjawhar"),
+		ApproverKind: "operator", Thumbprint: "tp-no-session",
+	})
+	if err != nil {
+		t.Fatalf("Create(noSession): %v", err)
+	}
+	if got, err := svc.SessionID(ctx, noSession.ID.String()); err != nil || got != "" {
+		t.Fatalf("SessionID(noSession) = %q, %v, want empty, nil", got, err)
+	}
+
+	if err := svc.Revoke(ctx, cred, withSession.ID.String(), "launcher:"+cred.ID.String()); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	if got, err := svc.SessionID(ctx, withSession.ID.String()); err != nil || got != "" {
+		t.Fatalf("SessionID(revoked) = %q, %v, want empty, nil", got, err)
+	}
+
+	if got, err := svc.SessionID(ctx, uuid.NewString()); err != nil || got != "" {
+		t.Fatalf("SessionID(nonexistent) = %q, %v, want empty, nil", got, err)
+	}
+}
