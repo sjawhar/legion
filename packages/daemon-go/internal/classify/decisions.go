@@ -142,7 +142,10 @@ func pathFrom(pushes []record.ClassifiedPush, head string, unplaced bool) []reco
 // (carriesApproval) reaches reviewed, so every push between them changed only .legion/. Nothing
 // stands while a push that may change code lies on the path forward from the current head and its
 // new head has not arrived: the push event can come first, and the approval is then of a head
-// already on its way out.
+// already on its way out. That includes a push delivered late, after its new head arrived and the
+// branch returned to this one: nothing tells it from the same two heads pushed again, so it blocks
+// until the next head arrives, by design. In Legion's flow one always follows an approval (the
+// reviewer's handoff push).
 func ApprovalStands(pr record.PullRequest, reviewed string) bool {
 	if reviewed == "" {
 		return false

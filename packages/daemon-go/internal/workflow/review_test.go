@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -170,6 +171,11 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 		{name: "a comment written after a request for changes, delivered first", steps: []string{"comment id=12", "cr head id=11", "complete"}, want: phase.Implementing},
 		{name: "a comment written after an approval, delivered first", steps: []string{"comment id=12", "approve head id=11", "complete"}, want: phase.Retro},
 		{name: "an approval written after the request for changes", steps: []string{"cr head id=11", "approve head id=12", "complete"}, want: phase.Retro},
+		{name: "a draft's request for changes submitted after a one-step approval", steps: []string{"approve head id=101 at=2", "cr head id=100 at=3", "complete"}, want: phase.Implementing},
+		{name: "a draft's request for changes submitted after a one-step approval, delivered first", steps: []string{"cr head id=100 at=3", "approve head id=101 at=2", "complete"}, want: phase.Implementing},
+		{name: "a draft's approval submitted after a request for changes", steps: []string{"cr head id=101 at=2", "approve head id=100 at=3", "complete"}, want: phase.Retro},
+		{name: "a code push delivered after the branch was reset to the approved head", steps: []string{"approve head", "sync", "sync head-3", "push code", "push handoff forced from=head-3 head", "sync head", "green head", "complete"}, want: phase.Reviewing},
+		{name: "a code push delivered after the branch was reset to the approved head, then the reviewer's handoff push", steps: []string{"approve head", "sync", "sync head-3", "push code", "push handoff forced from=head-3 head", "sync head", "green head", "complete", "push handoff from=head head-4", "sync head-4", "green head-4"}, want: phase.Retro},
 		{name: "recorded before the chain: an approval of the current head", steps: []string{"approve head", "complete"}, want: phase.Retro},
 		{name: "recorded before the chain: an approval of an earlier head", steps: []string{"approve older", "complete"}, want: phase.Reviewing},
 	} {
@@ -187,9 +193,12 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 			before := map[string]string{"head-2": "head", "head-3": "head-2", "head-x": "older", "head-l": "head"}
 			for i, step := range tc.steps {
 				// A step is its name, then optional words: a head it names (head, head-2, ...), a review
-				// id (id=N), "forced" for a push that rewrote history, "unmarked" for a push whose
+				// id (id=N), a review's submission time (at=N, minutes past noon), the head a push
+				// replaced when the map below does not say (from=H), "forced" for a push that
+				// rewrote history, "unmarked" for a push whose
 				// listener did not say.
-				head, id, forced := "head-2", int64(0), "false"
+				head, id, forced, from := "head-2", int64(0), "false", ""
+				var submitted time.Time
 				var name []string
 				for _, word := range strings.Fields(step) {
 					switch {
@@ -197,6 +206,11 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 						head = word
 					case strings.HasPrefix(word, "id="):
 						id, _ = strconv.ParseInt(strings.TrimPrefix(word, "id="), 10, 64)
+					case strings.HasPrefix(word, "at="):
+						minutes, _ := strconv.Atoi(strings.TrimPrefix(word, "at="))
+						submitted = time.Date(2026, 9, 26, 12, minutes, 0, 0, time.UTC)
+					case strings.HasPrefix(word, "from="):
+						from = strings.TrimPrefix(word, "from=")
 					case word == "forced":
 						forced = "true"
 					case word == "unmarked":
@@ -216,7 +230,8 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 					if step == "cr" {
 						state = "changes_requested"
 					}
-					fact = intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: id, State: state, CommitID: commit, Body: step}
+					fact = intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: id, SubmittedAt: submitted, State: state,
+						CommitID: commit, Body: step}
 				case "sync":
 					fact = intake.PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: head}
 				case "comment":
@@ -237,6 +252,9 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 						forcedMarker = &forced
 					}
 					replaced := before[head]
+					if from != "" {
+						replaced = from
+					}
 					if step == "push code unplaced" {
 						replaced = ""
 					}
@@ -361,5 +379,69 @@ func TestAReviewOutsideReviewingRecordsNoRound(t *testing.T) {
 	}
 	if got := rounds(); got != before {
 		t.Fatalf("the implementer's rounds went from %d to %d on a review outside reviewing", before, got)
+	}
+}
+
+// A review can be processed while its issue is held from reviewing: the reviewer's launch budget
+// ran out after it posted the review. That review still decides the round, so once the retry puts
+// the issue back in reviewing, the reviewer's completion ends the round on it.
+func TestAReviewWhileHeldFromReviewingDecidesTheRound(t *testing.T) {
+	for _, tc := range []struct {
+		state string
+		want  phase.Phase
+	}{
+		{state: "approved", want: phase.Retro},
+		{state: "changes_requested", want: phase.Implementing},
+	} {
+		t.Run(tc.state, func(t *testing.T) {
+			pool := migratedPool(t)
+			ctx := context.Background()
+			seedReview(t, pool, "green")
+			engine := testEngine()
+			for i, fact := range []intake.Fact{
+				intake.ClaimFailed{Issue: "LEGION-208", Role: claim.RoleReviewer},
+				intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: 11, State: tc.state, CommitID: "head", Body: "the review"},
+				intake.RetryOrEscalate{Issue: "LEGION-208", Decision: intake.RetryDecision},
+				intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-1"},
+			} {
+				if i == 1 {
+					if got := issuePhase(t, pool); got != phase.Held {
+						t.Fatalf("before the review the issue is in %s, want held", got)
+					}
+				}
+				result, err := intake.ApplyFact(ctx, pool, "test", fmt.Sprintf("held-%d", i), fact, engine)
+				if err != nil || result.Refusal != nil {
+					t.Fatalf("fact %d (%T) = %+v, %v", i, fact, result.Refusal, err)
+				}
+			}
+			if got := issuePhase(t, pool); got != tc.want {
+				t.Fatalf("the issue is in %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// Reviews are ordered across the pull request's whole life: reopening it keeps the newest deciding
+// review it has had, so an earlier review delivered again after the reopen records nothing.
+func TestAReopenedPullRequestKeepsItsNewestReview(t *testing.T) {
+	pool := migratedPool(t)
+	ctx := context.Background()
+	seedReview(t, pool, "green")
+	engine := testEngine()
+	for i, fact := range []intake.Fact{
+		intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: 12, State: "approved", CommitID: "head", Body: "approved"},
+		intake.PullRequestOpened{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head"},
+		intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 3}},
+			Generation: 3, Snapshot: "green-again", Verdict: "green", Failing: []string{}},
+		intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: 11, State: "changes_requested", CommitID: "head", Body: "redelivered"},
+		intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-1"},
+	} {
+		result, err := intake.ApplyFact(ctx, pool, "test", fmt.Sprintf("reopen-%d", i), fact, engine)
+		if err != nil || result.Refusal != nil {
+			t.Fatalf("fact %d (%T) = %+v, %v", i, fact, result.Refusal, err)
+		}
+	}
+	if got := issuePhase(t, pool); got != phase.Retro {
+		t.Fatalf("the issue is in %s, want retro: the redelivered request for changes is older than the approval", got)
 	}
 }

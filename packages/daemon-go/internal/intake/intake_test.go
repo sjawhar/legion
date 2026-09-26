@@ -783,10 +783,11 @@ func TestDecodeDispatchIssueNamesASessionActor(t *testing.T) {
 	}
 }
 
-// The listener's forced marker and GitHub's review id reach the facts: the workflow reads a push
-// without the marker as forced and orders reviews by the id, so each must survive decoding exactly,
-// and a review id that is not a positive integer is refused rather than read as none.
-func TestDecodingCarriesThePushForcedMarkerAndTheReviewID(t *testing.T) {
+// The listener's forced marker, GitHub's review id and the review's submission time reach the
+// facts: the workflow reads a push without the marker as forced and orders reviews by submission
+// time then id, so each must survive decoding exactly, and a review id that is not a positive
+// integer, or a time that is not RFC 3339, is refused rather than read as none.
+func TestDecodingCarriesThePushForcedMarkerAndTheReviewOrder(t *testing.T) {
 	withPayload := func(t *testing.T, name, subject string, set map[string]string) (Fact, error) {
 		t.Helper()
 		var envelope map[string]any
@@ -822,11 +823,16 @@ func TestDecodingCarriesThePushForcedMarkerAndTheReviewID(t *testing.T) {
 			t.Fatalf("push with forced %q = %#v, %v", forced, fact, err)
 		}
 	}
-	fact, err := withPayload(t, "review.json", reviewSubject, map[string]string{"review_id": "5325101010"})
-	if review, ok := fact.(PullRequestReview); err != nil || !ok || review.ID != 5325101010 {
-		t.Fatalf("review with an id = %#v, %v", fact, err)
+	fact, err := withPayload(t, "review.json", reviewSubject, map[string]string{"review_id": "5325101010",
+		"submitted_at": "2026-09-26T12:03:00+02:00"})
+	submitted := time.Date(2026, 9, 26, 10, 3, 0, 0, time.UTC)
+	if review, ok := fact.(PullRequestReview); err != nil || !ok || review.ID != 5325101010 || !review.SubmittedAt.Equal(submitted) {
+		t.Fatalf("review with an id and a submission time = %#v, %v", fact, err)
 	}
 	if _, err := withPayload(t, "review.json", reviewSubject, map[string]string{"review_id": "not-a-number"}); err == nil {
 		t.Fatal("a review id that is not a number decoded")
+	}
+	if _, err := withPayload(t, "review.json", reviewSubject, map[string]string{"submitted_at": "yesterday"}); err == nil {
+		t.Fatal("a submission time that is not RFC 3339 decoded")
 	}
 }

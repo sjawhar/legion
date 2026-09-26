@@ -73,11 +73,6 @@ type PhaseRow struct {
 	// reported for the round that carried one, kept until the round ends, since the reviewer's
 	// completion can come after the review it posted. Nil until a review decides.
 	Decision *ReviewDecision
-	// ReviewSeen is the id of the newest deciding review (changes requested or approved) GitHub
-	// reported for the issue, on the reviewer's row and kept across rounds: a deciding review no
-	// newer than it was written before one already processed, and records nothing. A comment
-	// decides nothing and leaves it as it is.
-	ReviewSeen int64
 }
 
 // ReviewDecision is what one review decided: its state (changes_requested or approved), its body,
@@ -86,7 +81,23 @@ type ReviewDecision struct {
 	State string `json:"state"`
 	Body  string `json:"body,omitempty"`
 	Head  string `json:"head,omitempty"`
-	ID    int64  `json:"id,omitempty"`
+}
+
+// ReviewOrder is where a review falls among the pull request's reviews: when it was submitted, then
+// GitHub's review id. The id alone is not enough, since GitHub assigns it when a review is created
+// and a draft keeps it when it is submitted later. A listener that predates submitted_at leaves
+// SubmittedAt zero, which orders such reviews by id among themselves.
+type ReviewOrder struct {
+	SubmittedAt time.Time
+	ID          int64
+}
+
+// After is whether o was submitted after other.
+func (o ReviewOrder) After(other ReviewOrder) bool {
+	if !o.SubmittedAt.Equal(other.SubmittedAt) {
+		return o.SubmittedAt.After(other.SubmittedAt)
+	}
+	return o.ID > other.ID
 }
 
 // PullRequest is the daemon's latest GitHub observation for one issue's pull request.
@@ -115,6 +126,11 @@ type PullRequest struct {
 	// PlannedRed is whether the newest head that changed a path outside .legion/ was the review
 	// App's (the tester's red tests): a red on it is planned, so the next head is not a fix attempt.
 	PlannedRed bool
+	// ReviewSeen is the newest deciding review (changes requested or approved) GitHub reported for
+	// the pull request, kept across rounds and generations: a deciding review not after it was
+	// submitted before one already processed, and records nothing. A comment decides nothing and
+	// leaves it as it is.
+	ReviewSeen ReviewOrder
 	State      PullRequestState
 }
 

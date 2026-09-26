@@ -534,8 +534,8 @@ func TestRecordMigrationCreatesTheRequiredColumns(t *testing.T) {
 	st := migratedStore(t)
 	want := map[string][]string{
 		"issues":           {"key", "tree", "project", "title", "parent", "phase", "generation", "status", "rank", "linger_until", "held_from", "last_dispatch_seq", "ready_pending_version"},
-		"phases":           {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "last_handoff", "decision", "review_seen"},
-		"pull_requests":    {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "head_updated_at_source", "verdict", "failing", "failing_statuses", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "reconciled", "pushes", "head_counted", "planned_red", "state"},
+		"phases":           {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "last_handoff", "decision"},
+		"pull_requests":    {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "head_updated_at_source", "verdict", "failing", "failing_statuses", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "reconciled", "pushes", "head_counted", "planned_red", "review_seen", "review_seen_at", "state"},
 		"design_gates":     {"issue", "artifact_id", "latest_version", "approved_version"},
 		"slots":            {"issue", "index", "admitted_at"},
 		"processed_events": {"source", "event_id", "processed_at"},
@@ -558,6 +558,69 @@ func TestRecordMigrationCreatesTheRequiredColumns(t *testing.T) {
 			if !reflect.DeepEqual(got, expected) {
 				t.Fatalf("%s columns = %v, want %v", table, got, expected)
 			}
+		}
+	})
+}
+
+// Migration 0019 moves the newest deciding review off the reviewer's phase row onto the pull
+// request, so a database the daemon ran on before it keeps ordering the reviews it has seen, and
+// the round's decision keeps what it decided without the id it no longer carries.
+func TestReviewOrderMigrationCarriesTheReviewersMarkToThePullRequest(t *testing.T) {
+	ctx := context.Background()
+	st := emptyStore(t)
+	all, err := migrations.All()
+	must(t, err)
+	for _, migration := range all {
+		if migration.Version >= 19 {
+			break
+		}
+		inTx(t, st, func(tx pgx.Tx) {
+			must(t, func() error {
+				if _, err := tx.Exec(ctx, migration.SQL); err != nil {
+					return err
+				}
+				_, err := tx.Exec(ctx, "insert into schema_version (version) values ($1)", migration.Version)
+				return err
+			}())
+		})
+	}
+	inTx(t, st, func(tx pgx.Tx) {
+		for _, statement := range []string{
+			`insert into issues (key, tree, project, title, phase, generation, status, rank, last_dispatch_seq)
+				values ('LEGION-208', 'LEGION-208', 'LEGION', 'the issue', 'reviewing', 1, 'needs_review', 'U', 0)`,
+			`insert into pull_requests (issue, repo, number, branch, head_sha, head_updated_at, head_updated_at_source,
+				verdict, failing, failing_statuses, fix_attempts, blocked_attempts, check_runs, generation, snapshot,
+				reconciled, pushes, head_counted, planned_red, state)
+				values ('LEGION-208', 'sjawhar/legion', 42, 'legion/LEGION-208', 'head', now(), 'webhook', '', '[]', '[]',
+				0, 0, '[]', 0, '', false, '[]', '', false, 'open')`,
+			`insert into phases (issue, role, claim, handoff_commit, rounds, verdict, last_handoff, decision, review_seen)
+				values ('LEGION-208', 'reviewer', 'review-claim', '', 0, '', '',
+				'{"state": "approved", "body": "ship it", "head": "head", "id": 12}', 12)`,
+		} {
+			_, err := tx.Exec(ctx, statement)
+			must(t, err)
+		}
+	})
+
+	_, err = st.Migrate(ctx)
+	must(t, err)
+	records := NewStore()
+	inTx(t, st, func(tx pgx.Tx) {
+		pr, err := records.PullRequest(ctx, tx, "LEGION-208")
+		must(t, err)
+		if pr == nil || pr.ReviewSeen.ID != 12 || !pr.ReviewSeen.SubmittedAt.IsZero() {
+			t.Fatalf("pull request after 0019 = %+v, want the reviewer's mark 12 with no submission time", pr)
+		}
+		phases, err := records.Phases(ctx, tx, "LEGION-208")
+		must(t, err)
+		want := &ReviewDecision{State: "approved", Body: "ship it", Head: "head"}
+		if len(phases) != 1 || !reflect.DeepEqual(phases[0].Decision, want) {
+			t.Fatalf("reviewer phase after 0019 = %+v, want the decision %+v", phases, want)
+		}
+		var keepsID bool
+		must(t, tx.QueryRow(ctx, `select decision ? 'id' from phases where issue = 'LEGION-208'`).Scan(&keepsID))
+		if keepsID {
+			t.Fatal("the stored decision still carries its review id")
 		}
 	})
 }

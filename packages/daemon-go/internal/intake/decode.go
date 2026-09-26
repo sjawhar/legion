@@ -290,8 +290,17 @@ func decodeReview(raw map[string]json.RawMessage) (Fact, error) {
 		}
 		id = parsed
 	}
-	return PullRequestReview{Repo: repo, Number: number, ID: id, State: strings.ToLower(state), CommitID: commitID, HeadSHA: headSHA,
-		Author: author, Body: body}, nil
+	// submitted_at is GitHub's RFC 3339 time; a listener that predates it carries none.
+	var submittedAt time.Time
+	if text, ok := rawString(raw, "submitted_at"); ok && text != "" {
+		parsed, err := time.Parse(time.RFC3339, text)
+		if err != nil {
+			return nil, fmt.Errorf("submitted_at %q is not an RFC 3339 time", text)
+		}
+		submittedAt = parsed.UTC()
+	}
+	return PullRequestReview{Repo: repo, Number: number, ID: id, SubmittedAt: submittedAt, State: strings.ToLower(state),
+		CommitID: commitID, HeadSHA: headSHA, Author: author, Body: body}, nil
 }
 
 func decodePush(raw map[string]json.RawMessage) (Fact, error) {

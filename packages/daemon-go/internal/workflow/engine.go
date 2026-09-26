@@ -397,7 +397,7 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 		return intake.Result{}, err
 	}
 	if recorded != nil && recorded.Repo == fact.Repo && recorded.Number == fact.Number {
-		pr.FixAttempts, pr.BlockedAttempts = recorded.FixAttempts, recorded.BlockedAttempts
+		pr.FixAttempts, pr.BlockedAttempts, pr.ReviewSeen = recorded.FixAttempts, recorded.BlockedAttempts, recorded.ReviewSeen
 	}
 	if err := e.store.PutPullRequest(ctx, tx, pr); err != nil {
 		return intake.Result{}, err
@@ -502,40 +502,44 @@ func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestR
 	if err != nil || issue == nil {
 		return intake.Result{}, err
 	}
-	row, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
-	if err != nil {
-		return intake.Result{}, err
-	}
 	// Only changes_requested and approved decide anything; a comment orders nothing either, so a
 	// comment written after a decision but delivered before it cannot make the decision look old.
 	state := strings.ToLower(fact.State)
 	if state != "changes_requested" && state != "approved" {
 		return intake.Result{}, nil
 	}
-	// Deciding reviews are ordered by GitHub's review id, which rises with every review written,
-	// whatever order they are delivered in; the newest id the issue has had is kept across rounds,
-	// so a review written before one already processed - redelivered, or from an earlier round -
-	// records nothing. A review without an id is ordered by when it arrives.
+	// Deciding reviews are ordered by when they were submitted, then by GitHub's review id,
+	// whatever order they are delivered in (record.ReviewOrder). The pull request keeps the newest
+	// it has had across rounds, so a review submitted before one already processed - redelivered,
+	// or from an earlier round - records nothing. A review without an id is ordered by when it
+	// arrives.
 	if fact.ID != 0 {
-		if fact.ID <= row.ReviewSeen {
+		order := record.ReviewOrder{SubmittedAt: fact.SubmittedAt, ID: fact.ID}
+		if !order.After(pr.ReviewSeen) {
 			return intake.Result{}, nil
 		}
-		row.ReviewSeen = fact.ID
+		pr.ReviewSeen = order
+		if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
+			return intake.Result{}, err
+		}
 	}
 	// The decision belongs to the review round, not to the pull request's head: the reviewer's own
 	// handoff push is a new head, and the round must still know, when the reviewer completes, what
-	// the review decided, on which head, and what it said for the next round's implementer. A
-	// review outside the round decides nothing and counts no round, though it still raises the
-	// newest id. An approval is judged against the head it names when the review ends
-	// (classify.ApprovalStands).
-	if issue.Phase != phase.Reviewing {
-		if fact.ID == 0 {
-			return intake.Result{}, nil
-		}
-		return intake.Result{}, e.store.PutPhase(ctx, tx, row)
+	// the review decided, on which head, and what it said for the next round's implementer. The
+	// round is open while the issue is in reviewing, and while it is held from reviewing, since the
+	// retry puts it back there with the reviewer's work kept. A review outside the round decides
+	// nothing and counts no round. An approval is judged against the head it names when the
+	// review ends (classify.ApprovalStands).
+	held := issue.Phase == phase.Held && issue.HeldFrom != nil && *issue.HeldFrom == phase.Reviewing
+	if issue.Phase != phase.Reviewing && !held {
+		return intake.Result{}, nil
 	}
-	row.Decision = &record.ReviewDecision{State: state, Body: fact.Body, Head: fact.CommitID, ID: fact.ID}
-	if err := e.store.PutPhase(ctx, tx, row); err != nil {
+	row, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
+	if err != nil {
+		return intake.Result{}, err
+	}
+	row.Decision = &record.ReviewDecision{State: state, Body: fact.Body, Head: fact.CommitID}
+	if err := e.store.PutPhase(ctx, tx, row); err != nil || held {
 		return intake.Result{}, err
 	}
 	return intake.Result{}, e.advanceReview(ctx, tx, *issue, pr)
