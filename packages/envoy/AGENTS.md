@@ -144,7 +144,16 @@ end, so a block inserted beside one reads back ahead of it (`refuseReshapedRepla
 paragraph is not written, so the shape comparison (`pmdoc.BlockShapeError`) expects none back: an
 empty `with` that empties its paragraph changes no shape, a block holding an emptied paragraph is
 still judged for every later replace, and an empty `with` leaving text that reads back as another
-block is refused, naming the text. Everywhere else `replace` is
+block is refused, naming the text. Accepting a suggestion (`POST /api/v1/comments/{id}/accept`,
+`docs/marks.go` `applySuggestion`) runs the same two checks outside a code block
+(`refuseUnreadableReplacement` and `refuseReshapedReplacement`, naming `replace_with`) over every
+document-level block the accept writes. An accept parses its text as blocks, so a rule or a list
+over a whole paragraph is written as that block and kept, while one that leaves a block the
+document cannot read back, such as a list in a list item's only paragraph or `:::` in a callout,
+is refused: the document stays as it was and the suggestion stays open. A reject is not checked,
+since it gives back the text the insert started from. Neither route can see a lone carriage
+return, which this parser reads as text where CommonMark and the browser editor end the line.
+Everywhere else `replace` is
 inline: `with` parses through `pmdoc.ParseInline` (paragraph-only block grammar), so a multi-paragraph
 `with` is `INVALID_OP`, so is any non-empty `with` that renders to no inline content (a line
 indented four spaces or a tab, which markdown reads as a code block, or whitespace alone — an
