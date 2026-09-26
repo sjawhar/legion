@@ -82,8 +82,10 @@ func TestHandoffWriteRefusesTheFieldsItWritesNamingEach(t *testing.T) {
 	var out, errb bytes.Buffer
 	code := run(context.Background(), []string{"legion", "handoff", "write", "--workspace", workspace, "--phase", "implement",
 		"--data", `{"schemaVersion":1,"completed":"2026-09-25T00:00:00Z","proof":["ran it"]}`}, &out, &errb)
+	// The refusal's fixed parenthetical names every reserved field, so the carried list is asserted
+	// where the refusal lists what the data carries.
 	refusal := errb.String()
-	if code != 1 || !strings.Contains(refusal, "schemaVersion") || !strings.Contains(refusal, "completed") || !strings.Contains(refusal, "writes") {
+	if code != 1 || !strings.Contains(refusal, "data carries schemaVersion, completed, which this command writes itself") {
 		t.Fatalf("handoff write with schemaVersion and completed in data = %d, stderr %q; want one refusal naming both and that the command writes them", code, refusal)
 	}
 	if _, err := os.Stat(filepath.Join(workspace, ".legion")); !os.IsNotExist(err) {
