@@ -28,7 +28,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/controller"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
-	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/omplaunch"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -585,10 +584,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		cancelStream()
 		return nil, fmt.Errorf("build the %s runtime: %w", cfg.Runtime.Name, err)
 	}
-	var repo ghrepo.Repository
-	if configured, ok := cfg.Projects[cfg.Project]; ok {
-		repo = configured.Repo
-	}
+	repo := cfg.Projects[cfg.Project].Repo
 
 	sup.deps = supervise.Deps{
 		Runtime: rt,
@@ -973,9 +969,5 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 // githubOwner is the owner of the configured project's repository: the account both GitHub Apps
 // are installed on. A Stage 2 configuration has no repository and so no owner.
 func githubOwner(cfg config.Config) string {
-	project, ok := cfg.Projects[cfg.Project]
-	if !ok {
-		return ""
-	}
-	return project.Repo.Owner()
+	return cfg.Projects[cfg.Project].Repo.Owner()
 }
