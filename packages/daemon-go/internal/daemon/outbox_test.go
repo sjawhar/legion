@@ -583,6 +583,38 @@ func TestAResumeStartDeliversItsTaskUnlessTheClaimHoldsTheOneItResumes(t *testin
 	}
 }
 
+// A resume start holds back its task for a confirmed task of its generation and phase while the
+// claim is working that task's turn: the claim is doing the work the resume task asks for.
+func TestAResumeStartHoldsBackItsTaskForTheTurnTheClaimIsWorking(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	ctx := context.Background()
+	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.ProductionCheck, Generation: 1, Status: "in_progress"}
+	putOutboxIssue(t, pool, records, issue)
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	token, err := claim.NewToken("legion", issue.Key, claim.RoleImplementer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	machine, _, err := sup.Create(ctx, supervise.Claim{Token: token, Project: "legion", Tree: issue.Tree, Issue: issue.Key, Role: claim.RoleImplementer,
+		State: supervise.StateWorking, Session: "ses_impl", SessionFile: "/sessions/impl.jsonl",
+		Pending: &supervise.Delivery{ID: "outbox:30", Task: "Check it.", Generation: 1, Phase: phase.ProductionCheck, ConfirmedAt: time.Now().Add(-time.Minute)}}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets"}
+	start := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RoleImplementer, Generation: 1, Phase: phase.ProductionCheck,
+		Task: "Carry on the production check.", ResumeTask: true}, time.Now())
+	start.ID = 92
+
+	if err := runner.execute(ctx, start); err != nil {
+		t.Fatalf("resume start = %v, want it finished with the working turn's task left alone", err)
+	}
+	if got := machine.Claim(); got.State != supervise.StateWorking || got.Pending == nil || got.Pending.ID != "outbox:30" {
+		t.Fatalf("implementer after the resume start = %s holding %+v, want working on outbox:30", got.State, got.Pending)
+	}
+}
+
 // A tree's close and its workspace removal belong to the linger they expired. A row still backing
 // off when re-admission ends the linger (a release the runtime refused) finishes without acting:
 // it neither retires the claim the tree's new run relaunched, with the task it holds, nor removes
@@ -1251,7 +1283,9 @@ func TestAClosedTreeSetBackToTodoRelaunchesItsArchitect(t *testing.T) {
 
 // A tree's workspace removal serves the generation whose linger expired. One still waiting out its
 // backoff when the tree is re-admitted finishes without acting: the workspace there now is the next
-// generation's, just provisioned for the relaunched architect.
+// generation's, just provisioned for the relaunched architect. That holds even when the re-admitted
+// generation has closed and lingers in turn before the old removal retries (its backoff can reach
+// 64 seconds): the tree lingers again, but the removal serves the earlier generation.
 func TestAnEarlierGenerationsWorkspaceRemovalLeavesTheReadmittedTreesWorkspace(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
@@ -1293,6 +1327,20 @@ func TestAnEarlierGenerationsWorkspaceRemovalLeavesTheReadmittedTreesWorkspace(t
 	busy = false
 	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "todo-again", intake.DispatchIssue{Key: root.Key, Seq: 6, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: root.Rank}, engine, admission); err != nil {
 		t.Fatalf("apply the todo: %v", err)
+	}
+	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		readmitted, err := records.Issue(ctx, tx, root.Key)
+		if err != nil || readmitted == nil {
+			return err
+		}
+		if readmitted.Generation != 4 {
+			t.Errorf("re-admitted generation = %d, want 4", readmitted.Generation)
+		}
+		lingering := time.Now().Add(time.Hour)
+		readmitted.Phase, readmitted.Status, readmitted.LingerUntil = phase.Done, "done", &lingering
+		return records.PutIssue(ctx, tx, *readmitted)
+	}); err != nil {
+		t.Fatalf("close the re-admitted generation: %v", err)
 	}
 	clock = clock.Add(2 * time.Minute)
 	if err := runner.RunOnce(ctx); err != nil {
