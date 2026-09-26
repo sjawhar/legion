@@ -120,20 +120,19 @@ func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB 
 			closedCB()
 		}
 	}
-	opts.AsyncErrorCB = func(nc *nats.Conn, sub *nats.Subscription, err error) {
+	opts.AsyncErrorCB = func(_ *nats.Conn, sub *nats.Subscription, err error) {
 		level := slog.LevelError
 		switch {
-		case err == nats.ErrConsumerNotFound && nc != nil && (nc.IsDraining() || nc.IsClosed()):
+		case err == nats.ErrConsumerNotFound:
 			// A drain ends each subscription whose consumer nats.go created, then deletes that
 			// consumer. At shutdown the listener leaves a KV watcher the last reconnect has not yet
-			// replaced for the drain to end, and the server can already have dropped that watcher's
-			// ephemeral consumer (after a NATS restart, once no interest outlasts its inactive
-			// threshold), so the delete finds it gone: the state the delete was for. The report can
-			// run after the drain has closed the connection: nats.go runs it on the goroutine that
-			// also runs ReconnectedCB, and so the bus's reconnect hooks, and the close does not wait
-			// for a hook still running. DeleteConsumer returns the sentinel itself; the one other
-			// report of this error, an ordered consumer nats.go failed to recreate, wraps it, and
-			// stays an ERROR in any connection state.
+			// replaced for the drain to end, and that watcher's ordered consumer can already be gone:
+			// a NATS restart loses it outright (nats.go keeps it in memory), and a disconnect longer
+			// than its inactive threshold lets the server delete it. So the delete finds it gone:
+			// the state the delete was for. At the pinned nats.go (v1.50.0) that delete, in
+			// checkDrained, is the only report of the bare sentinel, which DeleteConsumer returns;
+			// re-check that on a nats.go bump. The one other report of this error, an ordered
+			// consumer nats.go failed to recreate, wraps it and stays an ERROR.
 			level = slog.LevelWarn
 		case errors.Is(err, nats.ErrConsumerNotActive):
 			// Every consumer Envoy runs with idle heartbeats is a KV watcher's ordered consumer,
