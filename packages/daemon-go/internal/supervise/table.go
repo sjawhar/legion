@@ -47,6 +47,16 @@ type StreamLateRefusal struct {
 	Claim      claim.Token
 	DeliveryID string
 	Error      string
+	// Replayed is a refusal the connection did not send the prompt for: the shim's backlog
+	// replaying what Oh My Pi answered while no daemon was connected. It answers an earlier prompt,
+	// possibly of the very delivery this connection is re-sending, so it charges nothing, and it
+	// clears the mark that prompt set. It takes the task back only when a turn not its own confirmed
+	// it and the task was not sent through the connection it arrived on or a newer one
+	// (takesBackConfirmed).
+	Replayed bool
+	// ConnSequence is the registration sequence of the connection the refusal arrived on
+	// (runtime.Conn.Sequence).
+	ConnSequence uint64
 }
 
 // PromptAcked is a send's prompt acknowledged, posted by the send's own goroutine.
@@ -379,8 +389,8 @@ func fillTable(t *builder) {
 
 	t.row(onLateRefusal, "the agent refused an acknowledged prompt", lateRefused,
 		[]ClaimState{StateLaunching, StateFailed}, StateReady, StateIdle, StateWorking)
-	t.ignore(onLateRefusal, noSend, unready...)
-	t.ignore(onLateRefusal, noSend, gone...)
+	t.row(onLateRefusal, "a prompt was refused while no process can be prompted: the mark it set goes",
+		refusedUnprompted, nil, slices.Concat(unready, gone)...)
 
 	// Turns.
 	t.row(onTurnStart, "a turn started", turnStarted, []ClaimState{StateWorking}, prompted...)
@@ -573,7 +583,7 @@ func acked(m *Machine, ctx context.Context, _ Event) error {
 	p := m.claim.Pending
 	m.markRead(p)
 	m.arm(TimerTurn, m.deps.Timeouts.RPC, p.ID)
-	return m.deps.Store.PutDelivery(ctx, m.claim.Token, *p)
+	return m.putPending(ctx)
 }
 
 // refused is a prompt that did not reach a turn from its own send: the agent refused it
@@ -591,7 +601,7 @@ func refused(m *Machine, ctx context.Context, ev Event) error {
 	m.helloDuringSend = false
 	if p := m.claim.Pending; !p.ConfirmedAt.IsZero() {
 		p.ConfirmedAt = time.Time{}
-		if err := m.deps.Store.PutDelivery(ctx, m.claim.Token, *p); err != nil {
+		if err := m.putPending(ctx); err != nil {
 			return err
 		}
 	}
@@ -604,6 +614,66 @@ func refused(m *Machine, ctx context.Context, ev Event) error {
 		return m.sendPending(ctx)
 	}
 	return nil
+}
+
+// refusedElsewhere is the part of a late refusal every state shares, and it reports whether that
+// was all of it. Two kinds say only that a prompt this task was sent under never ran:
+//
+//   - A refusal naming a prompt other than the pending one. It is the prompt whose acknowledgement
+//     set the read mark (the fence lets no other through). The wait that gave up on it already
+//     re-queued the task under a new id and charged the prompt, so the mark goes and nothing else;
+//     rotating or charging again would spend the budget twice for one prompt.
+//   - A refusal the shim replayed from its backlog, answering a prompt an earlier connection sent.
+//     The pending id may be the very delivery this connection is re-sending, whose own answer is
+//     still to come, so it clears only the mark it set.
+//
+// A replayed refusal that takes back a task a turn not its own confirmed is the exception
+// (takesBackConfirmed): the task goes back unread, charged nothing, so that turn's end sends it
+// again rather than retiring it as served.
+func refusedElsewhere(m *Machine, ctx context.Context, r StreamLateRefusal) (bool, error) {
+	p := m.claim.Pending
+	switch {
+	case m.takesBackConfirmed(r):
+		m.log.Warn("supervise: a replayed refusal names the prompt a foreign turn confirmed; the task goes back unread",
+			"delivery", r.DeliveryID, "error", r.Error)
+		return true, m.takeBackPending(ctx, taskUnread)
+	case r.Replayed || r.DeliveryID != p.ID:
+		m.log.Warn("supervise: a refused prompt had marked the task as read; the mark is cleared",
+			"delivery", r.DeliveryID, "replayed", r.Replayed, "error", r.Error)
+		return true, m.markUnread(ctx)
+	}
+	return false, nil
+}
+
+// takesBackConfirmed is whether a replayed refusal of the pending prompt says the turn that
+// confirmed the task was not the task's. It is when no send is in flight and the task was not sent
+// through the connection the refusal arrived on or a newer one: then the confirmation came from a
+// turn the agent was already in, and the refused prompt was an older connection's. A send in
+// flight, or one through that connection or a later one, may be the prompt whose turn confirmed
+// the task, so the task stays confirmed and the refusal clears only the mark. Connections are
+// compared by the order they were registered in, not by the order the machine handles their
+// events in: a sweep can send through a connection before its hello is handled, the shim can redial
+// before the machine reaches the old connection's backlog, and an acknowledgement is handled by
+// its send's own goroutine.
+func (m *Machine) takesBackConfirmed(r StreamLateRefusal) bool {
+	p := m.claim.Pending
+	return r.Replayed && p != nil && r.DeliveryID == p.ID && !p.ConfirmedAt.IsZero() &&
+		m.send == nil && m.sentThrough < r.ConnSequence
+}
+
+// refusedUnprompted is a refusal landing while the claim cannot be prompted: relaunching after the
+// process that refused died, or stopped. Nothing is charged or re-sent here, since the process that
+// refused is not the one that will be prompted next. It still says the prompt never ran, so the
+// mark it set goes; a task still carrying that prompt's id also goes back under a new one, so the
+// next send is a new prompt that no refusal of the old one can name.
+func refusedUnprompted(m *Machine, ctx context.Context, ev Event) error {
+	r := ev.(StreamLateRefusal)
+	if done, err := refusedElsewhere(m, ctx, r); done {
+		return err
+	}
+	m.log.Warn("supervise: a prompt was refused while no process can be prompted; the task goes back unread",
+		"delivery", r.DeliveryID, "state", string(m.claim.State), "error", r.Error)
+	return m.takeBackPending(ctx, taskUnread)
 }
 
 // lateRefused is the agent refusing a prompt it had acknowledged. OMP answers that way when it
@@ -626,15 +696,8 @@ func refused(m *Machine, ctx context.Context, ev Event) error {
 // on the spot for ever against an agent that cannot start a turn at all.
 func lateRefused(m *Machine, ctx context.Context, ev Event) error {
 	r := ev.(StreamLateRefusal)
-	// A refusal naming the prompt whose acknowledgement marked the task, where that is no longer the
-	// pending id, says that prompt never ran, so the task loses its read mark — and nothing else.
-	// The wait that gave up on it already re-queued the task under a new id and charged the prompt;
-	// rotating or charging again would spend the budget twice for one prompt. A turn of the task's
-	// own that is running meanwhile keeps its run: that is its confirmation, not this mark (markedBy).
-	if r.DeliveryID != m.claim.Pending.ID {
-		m.log.Warn("supervise: the prompt that marked the task as read was refused; the mark is cleared",
-			"delivery", r.DeliveryID, "error", r.Error)
-		return m.markUnread(ctx)
+	if done, err := refusedElsewhere(m, ctx, r); done {
+		return err
 	}
 	conn, connected := m.deps.Conns.Conn(m.claim.Token)
 	if m.claim.State == StateWorking || agentBusy(r.Error) || (connected && m.streaming(ctx, conn)) {

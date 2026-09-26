@@ -326,6 +326,7 @@ func TestALateRefusalIsOneEventCarryingTheDeliveryID(t *testing.T) {
 	if err := awaitResult(t, result); err != nil {
 		t.Fatalf("Prompt: %v", err)
 	}
+	conn := h.conn()
 	p.send(shimwire.AgentStart{})
 	p.send(shimwire.Response{ID: frame.ID, Command: shimwire.TypePrompt, Success: false, Error: "Agent is busy"})
 	// The same refusal again is no longer late for anything.
@@ -333,7 +334,7 @@ func TestALateRefusalIsOneEventCarryingTheDeliveryID(t *testing.T) {
 	p.conn.Close()
 	want := []Event{
 		TurnStart{Claim: testClaim},
-		LateRefusal{Claim: testClaim, DeliveryID: "delivery-1", Error: "Agent is busy"},
+		LateRefusal{Claim: testClaim, DeliveryID: "delivery-1", Error: "Agent is busy", ConnSequence: conn.Sequence()},
 		Closed{Claim: testClaim},
 	}
 	var got []Event
@@ -355,10 +356,9 @@ func TestALateRefusalIsOneEventCarryingTheDeliveryID(t *testing.T) {
 	}
 }
 
-// A refusal that belongs to no acknowledged prompt on this connection — an id it never sent, a
-// prompt whose turn already ended (worker-rpc.test.ts:320-347), or one acknowledged on a
-// connection that has since closed, replayed from the shim's backlog on its replacement —
-// reverses nothing: no event, one log line.
+// A refusal that belongs to no acknowledged prompt this connection sent — an id no prompt carried,
+// a prompt whose turn already ended (worker-rpc.test.ts:320-347), or one a later prompt
+// superseded — reverses nothing: no event, one log line.
 func TestARefusalForNoAcknowledgedPromptEmitsNothingAndLogsOnce(t *testing.T) {
 	refusal := func(id string) shimwire.Response {
 		return shimwire.Response{ID: id, Command: shimwire.TypePrompt, Success: false, Error: "Agent is busy"}
@@ -393,18 +393,6 @@ func TestARefusalForNoAcknowledgedPromptEmitsNothingAndLogsOnce(t *testing.T) {
 			p.expect(shimwire.TypePrompt) // left unanswered: the connection closes under it
 			return p, first.ID
 		}},
-		{"after the connection closed", func(h *harness, p *peer) (*peer, string) {
-			frame, result := h.prompt(p, "delivery-1", "verify #41")
-			p.send(shimwire.Response{ID: frame.ID, Command: shimwire.TypePrompt, Success: true})
-			if err := awaitResult(h.t, result); err != nil {
-				h.t.Fatalf("Prompt: %v", err)
-			}
-			p.conn.Close()
-			if event := h.next(); event != (Closed{Claim: testClaim}) {
-				h.t.Fatalf("event = %#v, want Closed", event)
-			}
-			return h.connect(testToken), frame.ID
-		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			h := startListener(t, harnessOptions{})
@@ -419,6 +407,45 @@ func TestARefusalForNoAcknowledgedPromptEmitsNothingAndLogsOnce(t *testing.T) {
 				t.Fatalf("logs = %q, want one line for the unattributable refusal", logs)
 			}
 		})
+	}
+}
+
+// A refusal OMP gave while no daemon was connected is replayed from the shim's backlog on the next
+// connection — after a reconnect, or on a restarted daemon — which never sent that request. The
+// request id carries the delivery its prompt named, so the refusal still names it: whether it
+// still matters is the claim's to judge, against the prompt that set its read mark.
+func TestARefusalReplayedOnAReplacementConnectionNamesItsDelivery(t *testing.T) {
+	h := startListener(t, harnessOptions{})
+	p := h.connect(testToken)
+	frame, result := h.prompt(p, "delivery-1", "verify #41")
+	p.send(shimwire.Response{ID: frame.ID, Command: shimwire.TypePrompt, Success: true})
+	if err := awaitResult(t, result); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	first := h.conn()
+	p.conn.Close()
+	if event := h.next(); event != (Closed{Claim: testClaim}) {
+		t.Fatalf("event = %#v, want Closed", event)
+	}
+	replacement := h.connect(testToken)
+	replaced := h.conn()
+	replacement.send(shimwire.Response{ID: frame.ID, Command: shimwire.TypePrompt, Success: false, Error: "Agent is busy"})
+	replacement.conn.Close()
+	want := []Event{
+		LateRefusal{Claim: testClaim, DeliveryID: "delivery-1", Error: "Agent is busy", Replayed: true, ConnSequence: replaced.Sequence()},
+		Closed{Claim: testClaim},
+	}
+	var got []Event
+	for range want {
+		got = append(got, h.next())
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("events = %#v, want %#v", got, want)
+	}
+	// The listener numbers connections in the order it registers them, which is how the supervisor
+	// tells a connection newer than the one it sent through.
+	if first.Sequence() == 0 || replaced.Sequence() <= first.Sequence() {
+		t.Fatalf("sequences: first %d, replacement %d; want the replacement's larger", first.Sequence(), replaced.Sequence())
 	}
 }
 

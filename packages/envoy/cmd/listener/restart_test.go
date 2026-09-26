@@ -19,7 +19,8 @@ import (
 // ordered consumer among them. nats.go replaces a lost ordered consumer only once it notices the
 // missed heartbeats, up to twenty seconds later, so a watcher the reconnect does not replace keeps
 // serving the cache it had while another listener's subscriptions go unseen, and a drain in that
-// window deletes a consumer the server no longer has and logs the refusal at ERROR (LEGION-278).
+// window deletes a consumer the server no longer has, which the bus reports at WARN because the
+// consumer is gone either way (LEGION-278). Every ERROR line fails the test.
 func TestListenerFollowsTheInterestRegistryAcrossNATSRestarts(t *testing.T) {
 	ctr, uri := testnats.StartRestartable(t)
 	listener := startListenerProcess(t, buildListener(t), uri, "restart-test")

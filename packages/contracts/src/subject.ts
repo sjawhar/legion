@@ -60,7 +60,17 @@ export type GithubSubject<
   Owner extends string = string,
   Repo extends string = string,
   Kind extends string = string,
-> = `notifications.github.${Owner}.${Repo}.${Kind}`;
+> = `notifications.github.${ReplaceDotsWithUnderscores<Owner>}.${ReplaceDotsWithUnderscores<Repo>}.${Kind}`;
+
+/**
+ * Every GitHub subject begins with its repository's owner and name, each one segment: a name may
+ * hold a dot, which a NATS subject splits on, so both go through `sanitizeSubjectSegment`
+ * (`sjawhar/.github` is `notifications.github.sjawhar._github`). The payload's `repo` is the exact
+ * name; a subscriber matching the subject only is matching a dot and an underscore alike.
+ */
+function githubRepositoryPrefix(owner: string, repo: string): string {
+  return `notifications.github.${sanitizeSubjectSegment(owner)}.${sanitizeSubjectSegment(repo)}`;
+}
 
 export function githubSubject<Owner extends string, Repo extends string, Kind extends string>(
   owner: Owner,
@@ -68,7 +78,7 @@ export function githubSubject<Owner extends string, Repo extends string, Kind ex
   kind: Kind
 ): GithubSubject<Owner, Repo, Kind>;
 export function githubSubject(owner: string, repo: string, kind: string) {
-  return `notifications.github.${owner}.${repo}.${kind}`;
+  return `${githubRepositoryPrefix(owner, repo)}.${kind}`;
 }
 
 export type SlackSubject<
@@ -88,7 +98,8 @@ export function slackSubject(team: string, channel: string, kind: string) {
 
 /**
  * Replaces dots in a NATS subject segment with underscores so the segment
- * stays a single token. Mirrored on the Go side as `SanitizeSubjectSegment`.
+ * stays a single token. Mirrored on the Go side as `SanitizeSubjectSegment`, and in the Go
+ * coordinator's intake (`packages/daemon-go/internal/intake`), which filters on the GitHub subjects.
  *
  * Note: this is intentionally lossy; subscribers needing the exact identifier
  * should inspect the envelope payload.
@@ -128,7 +139,7 @@ export type GithubResourceSubject<
   Repo extends string = string,
   ResourceType extends string = string,
   ResourceNumber extends string | number = string | number,
-> = `notifications.github.${Owner}.${Repo}.${ResourceType}.${ResourceNumber}`;
+> = `notifications.github.${ReplaceDotsWithUnderscores<Owner>}.${ReplaceDotsWithUnderscores<Repo>}.${ResourceType}.${ResourceNumber}`;
 
 export function githubResourceSubject<
   Owner extends string,
@@ -147,7 +158,7 @@ export function githubResourceSubject(
   resourceType: string,
   resourceNumber: number | string
 ) {
-  return `notifications.github.${owner}.${repo}.${resourceType}.${resourceNumber}`;
+  return `${githubRepositoryPrefix(owner, repo)}.${resourceType}.${resourceNumber}`;
 }
 
 export type GithubPushRefType = "branch" | "tag";
@@ -157,7 +168,7 @@ export type GithubPushSubject<
   Repo extends string = string,
   RefType extends GithubPushRefType = GithubPushRefType,
   RefName extends string = string,
-> = `notifications.github.${Owner}.${Repo}.push.${RefType}.${ReplaceDotsWithUnderscores<RefName>}`;
+> = `notifications.github.${ReplaceDotsWithUnderscores<Owner>}.${ReplaceDotsWithUnderscores<Repo>}.push.${RefType}.${ReplaceDotsWithUnderscores<RefName>}`;
 
 export function githubPushSubject<
   Owner extends string,
@@ -176,7 +187,7 @@ export function githubPushSubject(
   refType: GithubPushRefType,
   refName: string
 ) {
-  return `notifications.github.${owner}.${repo}.push.${refType}.${sanitizeSubjectSegment(refName)}`;
+  return `${githubRepositoryPrefix(owner, repo)}.push.${refType}.${sanitizeSubjectSegment(refName)}`;
 }
 
 export type GithubWorkflowAction = "requested" | "in_progress" | "completed";
@@ -186,7 +197,7 @@ export type GithubWorkflowSubject<
   Repo extends string = string,
   Workflow extends string = string,
   Action extends GithubWorkflowAction = GithubWorkflowAction,
-> = `notifications.github.${Owner}.${Repo}.workflow.${ReplaceDotsWithUnderscores<Workflow>}.${Action}`;
+> = `notifications.github.${ReplaceDotsWithUnderscores<Owner>}.${ReplaceDotsWithUnderscores<Repo>}.workflow.${ReplaceDotsWithUnderscores<Workflow>}.${Action}`;
 
 export function githubWorkflowSubject<
   Owner extends string,
@@ -205,7 +216,7 @@ export function githubWorkflowSubject(
   workflowFilename: string,
   action: GithubWorkflowAction
 ) {
-  return `notifications.github.${owner}.${repo}.workflow.${sanitizeSubjectSegment(workflowFilename)}.${action}`;
+  return `${githubRepositoryPrefix(owner, repo)}.workflow.${sanitizeSubjectSegment(workflowFilename)}.${action}`;
 }
 
 export const GHOSTWISPR_TOPIC_PREFIX = "notifications.ghostwispr." as const;

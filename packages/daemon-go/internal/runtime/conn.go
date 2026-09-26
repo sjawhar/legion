@@ -22,7 +22,7 @@ var ErrPromptRefused = errors.New("runtime: the agent refused the prompt")
 // whole of LEGION-10).
 //
 // The interface lives in this package so that the runtime, its fake, and the supervisor depend
-// on these four methods rather than on the stream's own struct.
+// on these methods rather than on the stream's own struct.
 type Conn interface {
 	// Prompt hands the agent a task and returns when Oh My Pi has acknowledged the frame — or
 	// refused it, or the transport failed. A refusal wraps ErrPromptRefused; every other error
@@ -39,6 +39,9 @@ type Conn interface {
 	// AdoptWorkingCopy makes the agent's side set the author of its working copy, for a
 	// workspace the daemon cannot reach itself.
 	AdoptWorkingCopy(ctx context.Context, id GitIdentity, timeout time.Duration) error
+	// Sequence is the order the connection was registered in: one registered later has a larger
+	// sequence, so a caller can tell a connection newer than another.
+	Sequence() uint64
 }
 
 // Conns is the directory of live connections, keyed by claim. A claim with no connection is not

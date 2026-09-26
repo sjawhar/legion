@@ -7,7 +7,9 @@ suites are aggregated first; raw CI observations are not published.
 
 Each commit uses the KV key `<owner>.<repo>.pr<number>.<sha>` in
 `envoy_ci_state`; the PR head is a separate durable `head.<owner>.<repo>.<number>`
-record. State contains checks, suites, a state-version `Generation`, `EmittedCount`,
+record. A dot in a segment is written `=` (`sjawhar/.github` keys as
+`sjawhar.=github...`): a KV key's tokens must not be empty, and no GitHub name holds
+`=`, so `foo.bar` and `foo_bar` keep distinct keys. State contains checks, suites, a state-version `Generation`, `EmittedCount`,
 `SettledEmitted`, and an optional claim `{hash, generation, claimed_at}`.
 
 1. `Record` and `RecordSuite` CAS-update the aggregate. A new record starts at
