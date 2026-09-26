@@ -267,6 +267,35 @@ func TestConsumeAcknowledgesAnotherProjectsDispatchEventWithoutApplyingIt(t *tes
 	}
 }
 
+// A subject inside a repository's filter does not prove the event is that repository's: a
+// repository whose name holds a dot (`sjawhar/legion.x`) publishes under more segments than an owner
+// and a name, which `sjawhar/legion`'s filter matches. The payload's repository decides, as the
+// shipped daemon's does (reducers.ts registerPrFenced: a pull request whose repository is not its
+// issue's is not registered), so another repository's pull request on a `legion/<KEY>` branch is
+// acknowledged and never reaches a handler.
+func TestConsumeAcknowledgesAnotherRepositorysGitHubEventWithoutApplyingIt(t *testing.T) {
+	pool := migratedPool(t)
+	createWrites(t, pool)
+	js, stream := testJetStream(t)
+	spec := consumerSpec(&lockedBuffer{})
+	stop := startConsume(t, js, spec, pool, writeHandler("foreign", nil))
+	defer stop()
+
+	foreign := bytes.ReplaceAll(capturedGitHubEnvelope(t, "pr-opened.json"), []byte("sjawhar/legion"), []byte("sjawhar/legion.x"))
+	publish(t, js, "notifications.github.sjawhar.legion.x.pr.42", foreign)
+	eventually(t, "the foreign pull request acknowledged", func() bool {
+		consumer, err := stream.Consumer(context.Background(), githubConsumerName(spec.Project))
+		if err != nil {
+			return false
+		}
+		info, err := consumer.Info(context.Background())
+		return err == nil && info.AckFloor.Consumer == 1 && info.NumAckPending == 0
+	})
+	if got := writeCount(t, pool); got != 0 {
+		t.Fatalf("handler writes for another repository's pull request = %d, want 0", got)
+	}
+}
+
 func TestConsumeDeduplicatesOneEventAcrossDeliveries(t *testing.T) {
 	pool := migratedPool(t)
 	createWrites(t, pool)
