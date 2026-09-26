@@ -86,15 +86,30 @@ func render(doc *Node) (*renderer, error) {
 	if r.err != nil {
 		return nil, r.err
 	}
-	// A rule opening the document is written `***`, the same length as the `---` it takes
-	// everywhere else. A `---` there opens front matter: a later line that is just `---` - a
-	// second rule, a code line - closes it, and with no such line the browser editor's parser,
-	// having tried the front matter to the document's end, reads no list, quote or footnote
-	// definition in the rest.
+	// A rule opening the document is written `---`, as it always was, except where that is
+	// misread; there it is `***`, the same length. A `---` there opens front matter: a later line
+	// that is `---` - a second rule, a code line - closes it and everything up to there reads as
+	// front matter, and with no such line the browser editor's parser, having tried the front
+	// matter to the document's end, reads no list, quote or footnote definition in the rest.
 	if doc.Children[0].Type == "hr" {
-		copy(r.b.Bytes(), "***")
+		if front, _ := parseFrontmatterBlock(lineEnds(r.b.Bytes())); front != nil || holdsAContainerTheBrowserDrops(doc) {
+			copy(r.b.Bytes(), "***")
+		}
 	}
 	return r, nil
+}
+
+// holdsAContainerTheBrowserDrops reports whether doc holds, at its top level, a block the browser
+// editor's parser reads no more after an unclosed `---` opener: a list, a quote or a footnote
+// definition.
+func holdsAContainerTheBrowserDrops(doc *Node) bool {
+	for _, child := range doc.Children {
+		switch child.Type {
+		case "bullet_list", "ordered_list", "blockquote", "footnote_definition":
+			return true
+		}
+	}
+	return false
 }
 
 // definedFootnoteLabels is every label doc's footnote definitions carry, lowercased, since the

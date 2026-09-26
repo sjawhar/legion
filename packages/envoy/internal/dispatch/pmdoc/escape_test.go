@@ -90,43 +90,47 @@ func TestRenderKeepsTheBlocksAfterALineThatWouldOpenAFenceOrCloseATypedBlock(t *
 	}
 }
 
-// A rule that opens the document is written `***`. Written `---`, it opens front matter: a later
-// line that is just `---` - a second rule, a code line - closes it and everything up to there is
-// read as front matter, and with no such line the browser editor's parser, having tried the
-// front matter to the document's end, reads no list, quote or footnote definition in the rest.
-func TestRenderWritesALeadingRuleAsAsterisks(t *testing.T) {
-	text := func(value string) *Node { return &Node{Type: "text", Text: value} }
-	paragraph := func(value string) *Node { return &Node{Type: "paragraph", Children: []*Node{text(value)}} }
-	rule := func() *Node { return &Node{Type: "hr"} }
-	code := &Node{Type: "code_block", Attrs: Attrs{"language": ""}, Children: []*Node{text("---")}}
-	list := &Node{Type: "bullet_list", Children: []*Node{{Type: "list_item", Children: []*Node{paragraph("a")}}}}
-	quote := &Node{Type: "blockquote", Children: []*Node{paragraph("q")}}
-	for name, doc := range map[string]*Node{
-		"a second rule":     {Type: "doc", Children: []*Node{rule(), paragraph("x"), rule(), paragraph("y")}},
-		"a code line ---":   {Type: "doc", Children: []*Node{rule(), paragraph("x"), code}},
-		"no later --- line": {Type: "doc", Children: []*Node{rule(), paragraph("x")}},
-		"a list":            {Type: "doc", Children: []*Node{rule(), list}},
-		"a quote":           {Type: "doc", Children: []*Node{rule(), quote}},
+// A rule that opens the document is written `---`, as it always was, except where that form is
+// misread. A `---` there opens front matter: a later line that is just `---` - a second rule, a
+// code line - closes it, and everything up to there reads as front matter; and with no such line
+// the browser editor's parser, having tried the front matter to the document's end, reads no
+// list, quote or footnote definition in the rest. Those documents write the rule `***`.
+func TestRenderWritesALeadingRuleAsAsterisksOnlyWhereDashesAreMisread(t *testing.T) {
+	for name, test := range map[string]struct{ after, opener string }{
+		"alone":                     {"", "---"},
+		"a paragraph":               {"a\n", "---"},
+		"two paragraphs":            {"a\n\nb\n", "---"},
+		"a heading":                 {"# a\n", "---"},
+		"code":                      {"```\nc\n```\n", "---"},
+		"an image":                  {"![a](https://x.test/i.png)\n", "---"},
+		"a callout":                 {":::callout{#c1 kind=\"note\" title=\"T\"}\nx\n:::\n", "---"},
+		"a heading, then text":      {"## title: x\n\nBody.\n", "---"},
+		"a second rule":             {"x\n\n***\n\ny\n", "***"},
+		"a code line ---":           {"x\n\n```\n---\n```\n", "***"},
+		"a code line --- and space": {"x\n\n```\n--- \n```\n", "***"},
+		"a list":                    {"- a\n", "***"},
+		"a quote":                   {"> q\n", "***"},
+		"a footnote definition":     {"x[^1]\n\n[^1]: n\n", "***"},
 	} {
 		t.Run(name, func(t *testing.T) {
+			source := "***\n"
+			if test.after != "" {
+				source += "\n" + test.after
+			}
+			doc, err := Parse(source)
+			if err != nil {
+				t.Fatal(err)
+			}
 			markdown := mustRender(t, doc)
+			if !strings.HasPrefix(markdown, test.opener+"\n") {
+				t.Fatalf("Render() = %q, want the leading rule written %s", markdown, test.opener)
+			}
 			back, err := Parse(markdown)
 			if err != nil {
 				t.Fatalf("Parse(%q) = %v", markdown, err)
 			}
-			if len(back.Children) != len(doc.Children) {
+			if !back.Equal(doc) {
 				t.Fatalf("Parse(%q) = %q, want every block back", markdown, mustRender(t, back))
-			}
-			for index, block := range doc.Children {
-				if back.Children[index].Type != block.Type {
-					t.Fatalf("Parse(%q) block %d is a %s, want a %s", markdown, index, back.Children[index].Type, block.Type)
-				}
-			}
-			if again := mustRender(t, back); again != markdown {
-				t.Fatalf("Render(Parse(%q)) = %q", markdown, again)
-			}
-			if !strings.HasPrefix(markdown, "***\n") {
-				t.Fatalf("Render() = %q, want the leading rule written ***", markdown)
 			}
 		})
 	}
