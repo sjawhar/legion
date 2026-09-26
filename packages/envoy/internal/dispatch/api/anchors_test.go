@@ -397,7 +397,7 @@ const askSpec = "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\
 //   - Deleting an ask's whole question leaves an ask with no question.
 //   - A replacement carrying an ask under a1's id would write two asks with one id, and the id
 //     repair keeps the id for the first in document order, handing a1's row and answer to the new
-//     ask.
+//     ask; the write's block-id check refuses it before the ask check runs.
 //   - A code block over a table cell's whole text fits nowhere; the splice's schema error once
 //     reached the handler as a 500.
 //   - Inline text over a range that runs into an ask or callout from the text before it, at any
@@ -427,10 +427,10 @@ func TestSuggestionAcceptRefusals(t *testing.T) {
 			code: "INVALID_ASK_BLOCK", reason: `ask block \"a1\" has an empty question`},
 		{name: "an ask under a held id", spec: "Intro typo.\n\n" + askSpec, quote: "Intro typo.",
 			replaceWith: ":::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nOther?\n:::\n",
-			code:        "INVALID_ASK_BLOCK", reason: `duplicate ask block id \"a1\"`},
+			code:        "INVALID_MARKDOWN", reason: `block id \"a1\" would name two blocks`},
 		{name: "an ask under an id held malformed", spec: "Intro typo.\n", browser: "Intro typo.\n\n" + malformedAsk, quote: "Intro typo.",
 			replaceWith: ":::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nOther?\n:::\n",
-			code:        "INVALID_ASK_BLOCK", reason: `duplicate ask block id \"a1\"`},
+			code:        "INVALID_MARKDOWN", reason: `block id \"a1\" would name two blocks`},
 		{name: "text from one ask's question into the next's", spec: "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich one?\n:::\n\n" +
 			":::ask{#a2 urgency=\"med\" multiple=\"false\" state=\"open\"}\nShip it?\n:::\n",
 			quote: "one? Ship", replaceWith: "x", code: "INVALID_OP", reason: `field \"anchor\"`},

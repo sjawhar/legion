@@ -180,20 +180,23 @@ splices its `replace_with`, which unlike an edit's `with` may be blocks, with Pr
 fitting (`pmdoc.Splice`). A replacement fitted into a typed block stays inside it, and a fit never
 replaces the typed block it lands in: a callout takes what its content rule allows, a code block
 included (the engine oracle's `callout-paragraph-and-code` case), and an ask takes any block at this
-step, since `Validate` lets an ask hold other blocks while a browser edit passes through. The accept
+step, since `Validate` lets an ask hold other blocks while a browser edit passes through. The one
+exception is a replacement that is a single block of the typed block's own type, which is that block
+rewritten (the same id, new text): it replaces the block rather than nesting inside it. The accept
 then reads each ask by its id before and after the splice (`docs/ask_blocks.go` `askReadability`,
 `docs/marks.go` `refuseBrokenAsks`): an ask is unreadable when settlement's parse fails, when its
 children break the content rule `paragraph+ bullet_list?` (`pmdoc.AskContentError`: a paragraph
 after its options or a second bullet list parses, but the browser editor drops such an ask from the
 shared document when it renders it, and settlement then retracts it), or when it repeats an earlier
 ask's id. The first ask left unreadable whose id was readable before is `400 INVALID_ASK_BLOCK` with
-that reason, so a question given a code block, a paragraph after the options, a second list, an
-emptied question or an ask under a held id is refused. An id the document already held unreadable
+that reason, so a question given a code block, a paragraph after the options, a second list or an
+emptied question is refused. An ask under a held id is refused one step earlier, by the write's
+block-id check (`400 INVALID_MARKDOWN`, the block-id paragraph above). An id the document already held unreadable
 (a browser edit can leave one, and an upload can carry it on) does not refuse an accept, whether the
 accept leaves that ask alone or writes into it, unless the accept adds a second ask under it: an id
 that gains an ask is refused whatever it held, since the id repair would hand the held ask's row
-and answer to whichever comes first. A reject (`POST /api/v1/comments/{id}/reject`,
-the same `applySuggestion`) is never checked, since removing the text a browser insert added gives
+and answer to whichever comes first. A reject's asks (`POST /api/v1/comments/{id}/reject`,
+the same `applySuggestion`) are never checked, since removing the text a browser insert added gives
 back the document the insert started from. A replacement no level of the document can hold where
 the suggestion sits, such as a code block over a table cell's whole text, is `400 INVALID_OP` on
 `replace_with` (`pmdoc.ErrReplacementDoesNotFit`), and inline text over a range that runs into an
