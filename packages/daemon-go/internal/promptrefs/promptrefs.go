@@ -195,8 +195,12 @@ func Decode(raw string) (Names, error) {
 		})
 	})
 	if err == nil {
-		if _, next := dec.Token(); next != io.EOF {
+		switch _, next := dec.Token(); {
+		case next == io.EOF:
+		case next == nil:
 			err = errors.New("more than one JSON value")
+		default:
+			err = errors.New("trailing data after the object")
 		}
 	}
 	for _, kind := range Kinds {
@@ -222,7 +226,7 @@ func members(dec *json.Decoder, what string, member func(key string) error) erro
 	case nil:
 		return fmt.Errorf("%s is null, not an object", what)
 	default:
-		return fmt.Errorf("%s is %v, not an object", what, open)
+		return fmt.Errorf("%s is %s, not an object", what, scalarKind(open))
 	}
 	for dec.More() {
 		key, err := dec.Token()
@@ -235,4 +239,23 @@ func members(dec *json.Decoder, what string, member func(key string) error) erro
 	}
 	_, err = dec.Token()
 	return err
+}
+
+// scalarKind names a JSON value's own type, for a refusal that reports the wrong shape without
+// quoting the value itself: a name or a role prompt reference that misspells the encoding should
+// not have its content echoed where the message describes only the mistaken JSON type.
+func scalarKind(value any) string {
+	switch v := value.(type) {
+	case string:
+		return "a string"
+	case bool:
+		return "a boolean"
+	case float64, json.Number:
+		return "a number"
+	case json.Delim:
+		if v == '[' {
+			return "an array"
+		}
+	}
+	return fmt.Sprintf("%v", value)
 }
