@@ -51,18 +51,15 @@ func (m *Machine) relaunchAfterFailure(ctx context.Context) error {
 }
 
 // chargeDeath counts a process that died after its agent was ready while it had work
-// outstanding, and fails the claim when those deaths reach the limit: it reports whether it did.
-func (m *Machine) chargeDeath(ctx context.Context) (bool, error) {
+// outstanding, and reports whether those deaths have reached the limit.
+func (m *Machine) chargeDeath() bool {
 	if m.claim.Pending == nil || slices.Contains(unready, m.claim.State) {
-		return false, nil
+		return false
 	}
 	m.claim.Budgets.Deaths++
 	m.log.Warn("supervise: the agent died with work outstanding", "deaths", m.claim.Budgets.Deaths,
 		"limit", m.deps.Limits.LaunchFailures)
-	if m.claim.Budgets.Deaths < m.deps.Limits.LaunchFailures {
-		return false, nil
-	}
-	return true, m.fail(ctx, "deaths with work outstanding ran out")
+	return m.claim.Budgets.Deaths >= m.deps.Limits.LaunchFailures
 }
 
 // chargePrompt counts one prompt failure. At the limit the process is retired — suspended, the
