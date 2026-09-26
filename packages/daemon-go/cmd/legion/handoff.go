@@ -211,15 +211,9 @@ func runHandoffComplete(ctx context.Context, args []string, stdout, stderr io.Wr
 	return 0
 }
 
-// handoffFiles names the handoff file each file-backed phase ends with: the phase word its role's
-// prompt gives the legion tool's handoff_write (packages/pi-envoy/roles/*.md).
-var handoffFiles = map[phase.Phase]string{
-	phase.Planning: "plan", phase.Implementing: "implement", phase.Testing: "test", phase.Reviewing: "review",
-}
-
 // handoffCommit is the commit a completion of phase current reports, resolved with the jj the
 // daemon resolved at boot, which it names on every pane as LEGION_JJ_PATH. The phase decides, not
-// the role. A phase phase.FileBacked names ends with its role's handoff, and the completion reports
+// the role. A phase phase.HandoffFile names ends with its role's handoff, and the completion reports
 // the commit that carries it: the last commit on the issue branch that changed .legion/<phase>.json,
 // which in the end game is the committed .legion/ deletion. That handoff must be committed — none of
 // it only in the working copy — and committed on this branch, never inherited from the base: a pane
@@ -234,10 +228,10 @@ func handoffCommit(workspace string, role legionclaim.Role, current phase.Phase)
 	if !filepath.IsAbs(jj) {
 		return "", errors.New("LEGION_JJ_PATH is not an absolute path; the Legion daemon names the jj it resolved at boot on every pane")
 	}
-	if !phase.FileBacked(current) || workflow.RoleFor(current) != role {
+	word, fileBacked := phase.HandoffFile(current)
+	if !fileBacked || workflow.RoleFor(current) != role {
 		return standingCommit(jj, workspace)
 	}
-	word := handoffFiles[current]
 	file := filepath.Join(".legion", word+".json")
 	fileset := fmt.Sprintf("root:%q", filepath.ToSlash(file))
 	uncommitted, err := jjOutput(jj, workspace, file, "diff", "-r", "@", "--name-only", fileset)

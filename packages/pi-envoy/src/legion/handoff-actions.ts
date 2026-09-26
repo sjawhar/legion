@@ -60,8 +60,8 @@ export function rootArchitectHandoffRefusal(operation: string): string {
 }
 
 /** The handoff phase each role writes, by the pane's LEGION_ROLE (always a claim role): the phase
- * word of the file-backed phase it runs, the file the Go CLI's `handoffFiles` names for that phase
- * (`packages/daemon-go/cmd/legion/handoff.go`). The merger writes no handoff. */
+ * word of the file-backed phase it runs, the file the Go daemon's `phase.HandoffFile` names for that
+ * phase (`packages/daemon-go/internal/phase/phase.go`). The merger writes no handoff. */
 const ROLE_HANDOFF_PHASE: Readonly<Record<string, string>> = {
   architect: "architect",
   planner: "plan",
