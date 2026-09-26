@@ -159,10 +159,12 @@ func newLocalRunner(t *testing.T) *recordingRunner {
 }
 
 // provisionRequest is a host provisioning's request, the tmux runtime's: the one-shot credential
-// goes under the state directory.
+// goes under the state directory. That directory's path holds a space, as state_dir and --root
+// may, so every refusal's way out a test runs through sh proves it names the shared clone as one
+// word.
 func provisionRequest(t *testing.T) Request {
 	t.Helper()
-	state := filepath.Join(t.TempDir(), "state")
+	state := filepath.Join(t.TempDir(), "legion state")
 	return Request{
 		StateDir:         state,
 		Repo:             ghrepo.MustParse("acme/widgets"),

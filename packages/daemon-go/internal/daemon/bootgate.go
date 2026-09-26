@@ -25,6 +25,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/omplaunch"
+	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 	"github.com/sjawhar/legion/daemon/internal/runtime/tmux"
 	workershim "github.com/sjawhar/legion/daemon/internal/shim"
 )
@@ -849,7 +850,7 @@ func ProbeController(ctx context.Context, p ControllerProbe) error {
 	// The controller's lane is discovery's, with its own refusal: it reads no manifest, and a check
 	// that names nothing needs no words for how the plugin loaded.
 	location, err := g.loadedFrom(ctx, pluginLane{flags: discoveryFlags}, fmt.Errorf("Oh My Pi, launched as the controller launches it (%q, in %s), did not load pi-legion-envoy (not installed, disabled, or unregistered). Install the @sjawhar/pi-legion-envoy release built from this daemon's commit into the Oh My Pi the controller runs, and check it with `cd %s && %s plugin list` under the controller's environment: a .env or a project plugin root there applies",
-		launch, p.WorkDir, p.WorkDir, launch), promptCheck{})
+		launch, p.WorkDir, shellprefix.Word(p.WorkDir), launch), promptCheck{})
 	if err != nil {
 		return err
 	}

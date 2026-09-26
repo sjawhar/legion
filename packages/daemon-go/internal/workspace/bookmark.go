@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+
+	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 )
 
 var (
@@ -76,6 +78,7 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 		}
 	}
 	var revision string
+	words := wordsOf(workspace)
 	switch {
 	case undescribed:
 		// Set aside once main resolves, below.
@@ -84,23 +87,23 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 		if len(local.added) > 1 {
 			keep, commit = "one of its added commits", "<commit>"
 		}
-		startAtMain := fmt.Sprintf("`jj bookmark delete %s --ignore-working-copy -R %s`", workspace.Bookmark, cloneDir)
+		startAtMain := fmt.Sprintf("`jj bookmark delete %s --ignore-working-copy -R %s`", workspace.Bookmark, words.clone)
 		if origin.present {
-			startAtMain = fmt.Sprintf("delete the branch on GitHub (the pull request's Delete branch button, or `gh api -X DELETE repos/%s/git/refs/heads/%s`) and run %s", workspace.Repo, workspace.Bookmark, startAtMain)
+			startAtMain = fmt.Sprintf("delete the branch on GitHub (the pull request's Delete branch button, or `gh api -X DELETE %s`) and run %s", words.branchRef, startAtMain)
 		}
 		return fmt.Errorf("Bookmark %s is conflicted %s; workspace %s was not created. Keep %s: `jj bookmark set %s -r %s --ignore-working-copy -R %s`. Start from main instead: %s, and the next provisioning starts at main",
-			workspace.Bookmark, local.sides(), workspace.Dir, keep, workspace.Bookmark, commit, cloneDir, startAtMain)
+			workspace.Bookmark, local.sides(), workspace.Dir, keep, workspace.Bookmark, commit, words.clone, startAtMain)
 	case local.present:
 		revision = local.added[0]
 	case origin.conflict:
 		return fmt.Errorf("Remote bookmark %s is conflicted %s, which concurrent fetches leave; workspace %s was not created. Provision again: the next provisioning's fetch sets the row to origin's branch as it is then",
 			remote, origin.sides(), workspace.Dir)
 	case origin.present && origin.tracked:
-		return fmt.Errorf("Bookmark %s was deleted in the shared clone %s and the deletion never pushed, while %s is tracked at %s; workspace %s was not created. "+
-			"Restore it: `jj bookmark set %[1]s -r %[3]s --ignore-working-copy -R %[2]s`. "+
-			"Cancel the deletion, and the next provisioning adopts origin's branch: `jj bookmark forget %[1]s --ignore-working-copy -R %[2]s`. "+
-			"Start from main instead: delete the branch on GitHub (the pull request's Delete branch button, or `gh api -X DELETE repos/%[6]s/git/refs/heads/%[1]s`), and the next provisioning starts at main",
-			workspace.Bookmark, cloneDir, remote, origin.added[0], workspace.Dir, workspace.Repo)
+		return fmt.Errorf("Bookmark %[1]s was deleted in the shared clone %[2]s and the deletion never pushed, while %[3]s is tracked at %[4]s; workspace %[5]s was not created. "+
+			"Restore it: `jj bookmark set %[1]s -r %[3]s --ignore-working-copy -R %[6]s`. "+
+			"Cancel the deletion, and the next provisioning adopts origin's branch: `jj bookmark forget %[1]s --ignore-working-copy -R %[6]s`. "+
+			"Start from main instead: delete the branch on GitHub (the pull request's Delete branch button, or `gh api -X DELETE %[7]s`), and the next provisioning starts at main",
+			workspace.Bookmark, cloneDir, remote, origin.added[0], workspace.Dir, words.clone, words.branchRef)
 	case origin.present:
 		if _, err := RunChecked(ctx, run, onClone(cloneDir, "bookmark", "track", remote), nil, ""); err != nil {
 			return err
@@ -209,24 +212,40 @@ func mainCommit(ctx context.Context, run Runner, workspace Workspace) (string, e
 	if err != nil {
 		return "", err
 	}
+	clone := wordsOf(workspace).clone
 	switch main, origin := rows.local, rows.origin; {
 	case main.conflict:
 		return "", fmt.Errorf("Bookmark main is conflicted %s; workspace %s was not created. Keep origin's: `jj bookmark set main -r main@origin --allow-backwards --ignore-working-copy -R %s`, and the next provisioning starts there",
-			main.sides(), workspace.Dir, workspace.Clone)
+			main.sides(), workspace.Dir, clone)
 	case main.present:
 		return main.added[0], nil
 	case origin.conflict:
 		return "", fmt.Errorf("Remote bookmark main@origin is conflicted %s, which concurrent fetches leave, and main is not in the shared clone %s; workspace %s was not created. Provision again: the next provisioning's fetch sets the row to origin's main as it is then",
 			origin.sides(), workspace.Clone, workspace.Dir)
 	case origin.present && origin.tracked:
-		return "", fmt.Errorf("Bookmark main was deleted in the shared clone %s while main@origin is tracked at %s; workspace %s was not created. Restore it: `jj bookmark set main -r main@origin --ignore-working-copy -R %[1]s`, and the next provisioning starts there",
-			workspace.Clone, origin.added[0], workspace.Dir)
+		return "", fmt.Errorf("Bookmark main was deleted in the shared clone %s while main@origin is tracked at %s; workspace %s was not created. Restore it: `jj bookmark set main -r main@origin --ignore-working-copy -R %s`, and the next provisioning starts there",
+			workspace.Clone, origin.added[0], workspace.Dir, clone)
 	case origin.present:
-		return "", fmt.Errorf("Bookmark main is not tracked in the shared clone %s, where main@origin is at %s untracked; workspace %s was not created. Track it: `jj bookmark track main@origin --ignore-working-copy -R %[1]s`, and the next provisioning starts there",
-			workspace.Clone, origin.added[0], workspace.Dir)
+		return "", fmt.Errorf("Bookmark main is not tracked in the shared clone %s, where main@origin is at %s untracked; workspace %s was not created. Track it: `jj bookmark track main@origin --ignore-working-copy -R %s`, and the next provisioning starts there",
+			workspace.Clone, origin.added[0], workspace.Dir, clone)
 	default:
 		return "", fmt.Errorf("Bookmark main is not in the shared clone %s; workspace %s was not created. An issue with no branch starts at main, so the repository's default branch must be main",
 			workspace.Clone, workspace.Dir)
+	}
+}
+
+// wayOutWords is what a refusal's printed commands name that an operator's shell could split: the
+// shared clone's path, which holds whatever the state directory or --root does, and the issue
+// branch's GitHub ref. Each is one shell word, so a way out runs as printed.
+type wayOutWords struct {
+	clone, branchRef string
+}
+
+// wordsOf is workspace's wayOutWords.
+func wordsOf(workspace Workspace) wayOutWords {
+	return wayOutWords{
+		clone:     shellprefix.Word(workspace.Clone),
+		branchRef: shellprefix.Word("repos/" + workspace.Repo.String() + "/git/refs/heads/" + workspace.Bookmark),
 	}
 }
 
