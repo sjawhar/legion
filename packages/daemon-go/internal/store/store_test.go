@@ -663,3 +663,54 @@ func TestTheServingRunBackfillsForARelaunchingClaim(t *testing.T) {
 		})
 	}
 }
+
+// Every outbox kind the daemon writes is one the schema's check admits, on a fresh database and on
+// one that ran main's migrations before this build's, with a controller notice queued. 0016
+// (merge_queue_publish) and 0020 (controller_notice) would each redefine the check with the other's
+// kind missing, and a database past 0020 applies the lower 0016 late, where a check without
+// controller_notice would refuse the queued row and the upgrade: neither sets the list, 0021 does,
+// after both.
+func TestTheOutboxCheckAdmitsEveryKindWhicheverOrderTheMigrationsRan(t *testing.T) {
+	all, err := migrations.All()
+	if err != nil {
+		t.Fatalf("read the embedded migrations: %v", err)
+	}
+	kinds := []record.OutboxKind{record.OutboxKindDispatchStatus, record.OutboxKindDispatchMessage, record.OutboxKindNotice, record.OutboxKindControllerNotice,
+		record.OutboxKindSupervise, record.OutboxKindGateSeed, record.OutboxKindLingerClose, record.OutboxKindWorkspaceRemove, record.OutboxKindMergeQueuePublish}
+	insert := "insert into outbox (kind, issue, payload, attempts, next_at, last_error) values ($1, 'LEGION-208', '{}', 0, now(), '')"
+	for _, tc := range []struct {
+		name  string
+		first func(migrations.Migration) bool
+	}{
+		{"a fresh database", func(migrations.Migration) bool { return false }},
+		{"a database that ran 0020 before 0016", func(m migrations.Migration) bool { return m.Version <= 20 && m.Version != 16 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := emptyStore(t)
+			for _, migration := range all {
+				if !tc.first(migration) {
+					continue
+				}
+				if _, err := store.apply(ctx, migration); err != nil {
+					t.Fatalf("apply %s: %v", migration.Name, err)
+				}
+			}
+			if version, err := store.SchemaVersion(ctx); err != nil {
+				t.Fatalf("read the schema version: %v", err)
+			} else if version >= 20 {
+				if _, err := store.pool.Exec(ctx, insert, string(record.OutboxKindControllerNotice)); err != nil {
+					t.Fatalf("queue a controller notice at schema %d: %v", version, err)
+				}
+			}
+			if _, err := store.Migrate(ctx); err != nil {
+				t.Fatalf("migrate: %v", err)
+			}
+			for _, kind := range kinds {
+				if _, err := store.pool.Exec(ctx, insert, string(kind)); err != nil {
+					t.Errorf("an outbox row of kind %s: %v", kind, err)
+				}
+			}
+		})
+	}
+}

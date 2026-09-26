@@ -402,10 +402,23 @@ func (f *heldWriteFixture) assertLiveTextLacks(t *testing.T, text string) {
 
 func (f *heldWriteFixture) waitForLiveText(t *testing.T, want string) {
 	t.Helper()
+	waitForLiveText(t, f.docs, f.issue.PrimaryArtifactID, want)
+}
+
+// waitForLiveText waits until the live document's text holds want.
+func waitForLiveText(t *testing.T, documentService *docs.Service, artifactID, want string) {
+	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
-	for !strings.Contains(f.liveText(t), want) {
+	for {
+		text, err := documentService.Text(context.Background(), artifactID)
+		if err != nil {
+			t.Fatalf("read live document: %v", err)
+		}
+		if strings.Contains(text, want) {
+			return
+		}
 		if time.Now().After(deadline) {
-			t.Fatalf("live document never showed %q", want)
+			t.Fatalf("live document never showed %q; it holds %q", want, text)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

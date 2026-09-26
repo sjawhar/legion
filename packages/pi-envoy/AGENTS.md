@@ -77,7 +77,7 @@ renumbers above the first.
 
 ### The Go daemon: `legion.goDaemonApiVersion`
 
-`legion.goDaemonApiVersion` (currently 6) is the contract with `packages/daemon-go`: the claim,
+`legion.goDaemonApiVersion` (currently 7) is the contract with `packages/daemon-go`: the claim,
 credential, workflow, controller, and state shapes `src/legion/go-daemon-client.ts` parses strictly
 through `@legion/contracts/legion-go-api` (its first consumer), and the Go pane's environment —
 `LEGION_DAEMON_API=go`, the identity variables above, `LEGION_BOOT_TOKEN_FILE`,
@@ -109,6 +109,10 @@ not one it read, so it answers for none of them. `POST /legion/v1/handoff/comple
 `HANDOFF_NO_RUN` to a claim that has taken no task at all, and the workflow refuses
 `HANDOFF_STALE_GENERATION` for a run the issue has left. The pane's `LEGION_GENERATION` is the
 claim's launch counter and says nothing about the run; nothing reads it for this.
+Contract 7 adds `holdReason` to an issue on `/legion/v1/state`: `escalated` while an issue its
+architect escalated stays held in a tree that runs, absent otherwise (a tree that lingers or is
+closed shows none until it is re-admitted). The controller skill reads it at every start,
+since the escalation's wake reaches only a controller running when it is published (#1420).
 The Go daemon's boot gate (`internal/daemon/bootgate.go`) refuses to start unless the installed
 manifest's field equals its `GoDaemonAPIVersion` (`internal/api/version.go`) — the manifest at the
 plugin root Oh My Pi resolves under the environment a pane will get, and the plugin a pane's Oh My
@@ -153,10 +157,30 @@ a symlinked state directory) moves the check with it. And the daemon refuses a c
 registration whose `pluginContract` is not its `GoDaemonAPIVersion` with 409, naming both. That
 session goes through the controller session (`src/legion/controller-session.ts`) with the Go adapter
 (`goControllerDaemon`, `go-bootstrap.ts`), not `bootstrapGoClaim`, and gets no Go `legion` tool:
+`GET /legion/v1/state` first, since a registration replaces the running controller: an unset
+`LEGION_PROJECT`, or one whose controller role is not that of the project the state names
+(`legionProjectToken` in `@legion/contracts`, the daemon's own rule), stops the claim there; then
 `claims/register` with the capability in place of a boot token, answered with
 `api.ControllerRegisterResponse` (`LegionGoControllerRegisterResponse`), then the Envoy role
-`legion-<project>-controller`, then a controller grant per credentialed tool call from the `/grants`
-controller-session form with the secret the registration was issued. A later
+`legion-<project>-controller`, then a subscription to the project's controller topic
+`notifications.legion.<project>.controller` (`legionControllerNoticeSubject`, the project from
+`LEGION_PROJECT`), then a controller grant per credentialed tool call from the `/grants`
+controller-session form with the secret the registration was issued. What the Go daemon publishes
+on that topic is listed at `notify.ControllerTopic` (`packages/daemon-go/internal/notify`). The
+subscription lasts while the session holds the controller role (`subscribeLegionNotice`'s
+`whileHolding`): once another live session holds it, the heartbeat's refused re-assertion closes
+it, so a replaced controller stops taking wakes within one heartbeat, and a dropped connection's
+retries, each compared with the role's state when the connection dropped, do not reopen it once
+the role has ended. A `/new` or `/resume` keeps it open whichever extension handles the switch
+first: Oh My Pi runs the manifest's order but moves on from a handler that outlasts its 30-second
+budget, and the switch's drop of the outgoing role (`endOutgoingRole`) leaves a role already
+claimed under the new session id alone. It is never registered with
+the listener, so a replaced controller resumed later gets it back only by claiming the role, which
+the daemon refuses its replaced capability. It is a live wake that changes no
+request, response or pane variable, and a daemon publishes to the topic whether anyone listens. A
+controller on an earlier plugin release never runs against this daemon: contract 7 ships with the
+subscription, `legion controller start` refuses to launch an Oh My Pi whose plugin speaks another
+contract, and the daemon refuses its registration with 409. A later
 `legion controller start` mints a new capability, so the earlier session's grants stop working.
 `legion status <issue> <status>` in that session reads the grant file; from an operator shell it
 takes `--operator-token-file`, which buys a controller grant over the operator's bearer and, like
@@ -264,83 +288,57 @@ comment anchor. A question about a document is written as an `ask` block through
 directive, not as an issue-level `dispatch_ask`. The extension passes the host tool AbortSignal to every
 Dispatch execution; the shared client also imposes a 60-second HTTP deadline.
 
-`before_agent_start` injects nothing into the conversation; its open-asks query only arms the run-end nudge for a
-turn carrying the user's own text, the snapshot's `as_of` becoming the period's first window. It runs that query
-only for a session the stop could actually nudge — the host awaits this handler, so a session that is excluded
-below would otherwise pay up to `OPEN_ASKS_TIMEOUT_MS` at the head of every turn for an answer nothing reads.
-`agent_end` is the nudge's stop signal, and Dispatch state is only its cheap precondition: a session whose run
-settles normally (`willContinue` unset and the last assistant reply ended `stopReason: "stop"` — an interrupt, a
-provider error, a truncation, or a run with no reply of its own is never nudged, and asks Dispatch nothing) with
-nothing open and nothing opened since the window it reads from then runs a **silent self-check**: one
-`pi.askEphemeral` call — the host's one-shot, tool-free model call over a snapshot of the conversation, the same
-channel a targeted Dispatch BTW uses — asking the agent for one word, WAITING or PROCEEDING. The prompt asks
-nothing about Dispatch: the extension has just read from Dispatch that nothing is open, and the agent this
-catches is one that asked the human in chat text, which such an agent can read as having asked. Only a reply
-whose first word is WAITING, and which does not also name PROCEEDING (a model echoing the choice back rather
-than making it), produces the one hidden `dispatch-ask-reminder` steer with `triggerTurn`, which tells the agent
-it said it is waiting on a human with no open ask and to open one now with `dispatch_ask` (or
-`dispatch_request_approval` for a document). The parse is case-sensitive and first-word-only because a false
-WAITING is the expensive error — its steer asserts the agent said it is waiting, which sends it to page a human
-with a question nobody had — while a false PROCEEDING is only the silence of the status quo. **Every other
-outcome is silent**: PROCEEDING, an unparsable reply, an `askEphemeral` failure — a rejection or the synchronous
-throw a host initialised without the capability installs, both caught and both spending the check — the timeout,
-and a host with no `pi.askEphemeral` at all, that last one arming no period either, so it pays no round trip.
-The timeout is the extension's own clock, not the host's: the call is given an `AbortSignal` so a host that
-honours it stops paying for an answer nobody will read, but the handler races that call against
-`ASK_SELF_CHECK_TIMEOUT_MS` (60 s, moved by `ENVOY_SELF_CHECK_TIMEOUT_MS`) and always settles there, because a
-host that ignored the signal would otherwise hold the one-check-at-a-time latch — and every later check with it
-— for as long as its call hung. A late answer is dropped, and the controller is reachable while the call is
-open, so everything that invalidates a check aborts it rather than leaving a whole-context request running
-beside the turn the user is waiting on: the user typing (at the start of `before_agent_start`, ahead of its
-arming query, so a Dispatch that is slow or unreachable cannot hold the old check live into the new turn), a
-session change, the agent opening the ask itself, and a staleness the post-race re-read finds. A failure is
-logged once per session (`logger.warn`), never notified: a broken self-check must not put a warning in front of
-the user for a reminder they were not going to get. An abort the extension made — a superseded check, or its
-own timeout, which logs itself — is not a failure and is not logged, so the one warning stays for the failure
-that matters. The cost of the common case is therefore one hidden model call per normally-settled turn that has
-no open ask, and nothing on screen.
+`before_agent_start` injects nothing into the conversation; its open-asks query arms the run-end
+nudge only for a turn carrying the user's own text, its snapshot `as_of` becoming the period's
+first window. It runs only for a session the stop could actually nudge — the host awaits this
+handler, so an excluded session does not pay up to `OPEN_ASKS_TIMEOUT_MS` for an answer nothing
+reads.
 
-The check is owed and spent like the host's own todo reminder rather than once per period: the arming turn owes
-one, running it spends it whatever came back, the agent opening the ask itself (`dispatch_ask`,
-`dispatch_request_approval`) spends it too, and the agent's next real work — a successful `tool_result` whose
-tool is not a `dispatch_*` one — owes another, so a run that keeps working keeps being checked without the user
-typing again. Loop safety is two properties, not one: a settled turn that only replies calls no tool, so the
-nudge's own continuation owes nothing and cannot nudge itself (that, plus the continuation re-entering no
-`before_agent_start` at all, is what `extensions/legion-phase-stall-omp.test.ts` holds the pinned binary to);
-and a continuation that ignores the steer and does work instead does re-arm, which is bounded by
-`ASK_CHECKS_PER_PERIOD` (5), the cap on what one armed period pays for.
+`agent_end` is the nudge's stop signal. Every normally settled, UI-hosted session with an armed
+period runs one **silent self-check**: one `pi.askEphemeral` call — the host's one-shot, tool-free
+model call over a snapshot of the conversation, the same channel a targeted Dispatch BTW uses.
+The handler uses the open-asks snapshot it already reads to name the session's own open asks in
+the prompt: the first line of at most five questions, each truncated to about 120 characters,
+followed by `+N more`; with no asks it says so. Every Unicode line separator ends that displayed
+first line, and other C0/C1 controls become spaces, so a listed ask cannot add prompt lines. The
+one prompt asks whether the agent is waiting on a human for anything those asks do not cover,
+answered with exactly WAITING or PROCEEDING. An open ask or `opened_since` never suppresses this
+check.
 
-The window each stop reads Dispatch from moves. Every settle that resolves — silently because an ask is open or
-was opened since, or by spending a check — carries `baseline_as_of` to that snapshot's `as_of`. A window pinned
-to the arming turn never moves, and the server's `opened_since` is true for every ask the session authored after
-`since` whatever state it is in now (`packages/envoy/internal/dispatch/api/asks.go`), so one ask would silence
-the rest of the period however long the session lived — and a human's answer arrives through Envoy, which arms
-no period, so nothing else would ever re-open it. Nothing latches an ask for the period: a genuinely open one
-keeps settles silent through the live `count > 0` read, which every stop re-reads. One stop-time check runs at a
-time: `agent_end` handlers are not awaited by the host, so a latch held across both the Dispatch round trip and
-the self-check is what keeps a second stop inside either from checking or nudging again, and the staleness list
-is re-read after each await — including the owed check itself, so an ask the agent opens while a check is in
-flight drops that verdict instead of steering "you have no open ask" at a session that has just opened one.
-Every run the host starts bumps a counter (`agent_start`), and a check compares it with the value it read at its
-settle: a run that started meanwhile — an Envoy delivery waking the session, perhaps with the very reply the
-agent was waiting for — means the verdict describes a run the session has moved past. Such a verdict is never
-steered; the check still counts against the cap, but what the period owes stays owed, for the newer run's
-settle. A run that starts while the Dispatch query is open pays for no check at all. A stop that arrives while a
-check holds the latch is recorded, not dropped, with the run count read at that settle, and checked as soon as
-the open check ends if a check is still owed and no run has started since it — otherwise a woken run that
-settled inside the check's window, the usual case, would go unchecked until some later run. Each such pass needs
-another real settle during the last, and every check that reaches the model counts against the cap, so the
-re-check cannot loop. The latch, the period and its budget are in memory only — a cold start or a session change
-begins at period 0, which nudges nothing until the next genuine user turn arms one. The guard, the staleness
-list and the `tool_result` edge compare only the host's **live** session id against the one the period was armed
-with, never the module-level `sessionID` the registration heartbeat maintains: a fresh TUI mints its id after
-`session_start`, so those two disagree for up to `ENVOY_HEARTBEAT_MS` and a brand-new terminal went unchecked,
-and unable to re-arm, for that whole window. Only a change of session id resets the period and bumps the
-generation — a `/fork`, `/handoff`, resume or switch. Re-establishing the *same* session does not: the
-heartbeat's drift heal runs for every fresh TUI once the host mints its id, and the `session_start` NATS retry
-runs every `NATS_RETRY_INTERVAL_MS` for the length of an Envoy outage, and clearing the period on those disabled
-the nudge exactly where it was meant to work. A `task` subagent's instance arms no period at all, so nothing
-rests on the module id.
+Only a reply whose first word is WAITING, and which does not also name PROCEEDING (a model echoing
+the choice rather than making it), produces the one hidden `dispatch-ask-reminder` steer with
+`triggerTurn`: it says the agent is waiting on a human for something no open ask covers, and tells
+it to open an ask with `dispatch_ask` (or `dispatch_request_approval` for a document), naming
+exactly what it needs and from whom. The parse is case-sensitive and first-word-only because a
+false WAITING is the expensive error — its steer tells an agent to page a human with a question it
+does not need — while a false PROCEEDING is only silence. PROCEEDING, an unparsable reply, an
+`askEphemeral` failure, the timeout, and a host without `pi.askEphemeral` are silent; the last also
+arms no period.
+
+The timeout is the extension's own clock, not the host's: the call gets an `AbortSignal`, but the
+handler races it against `ASK_SELF_CHECK_TIMEOUT_MS` (60 s, moved by
+`ENVOY_SELF_CHECK_TIMEOUT_MS`) and always settles there so a host that ignores the signal cannot
+hold the one-check-at-a-time latch. A late answer is dropped. A user typing, a session change, the
+agent opening an ask itself, and a post-race staleness re-check abort the in-flight call; an ask
+opened mid-check never produces its verdict. A failure is logged once per session (`logger.warn`),
+never notified.
+
+The check is owed and spent like the host's todo reminder rather than once per period: the arming
+turn owes one, running it spends it whatever came back, the agent opening the ask itself
+(`dispatch_ask`, `dispatch_request_approval`) spends it too, and the agent's next real work — a
+successful `tool_result` whose tool is not a `dispatch_*` one — owes another. A settled turn that
+only replies calls no tool, so the nudge's continuation cannot re-arm itself; work is bounded by
+`ASK_CHECKS_PER_PERIOD` (5).
+
+Each completed check carries `baseline_as_of` to its snapshot's `as_of`, keeping the next
+open-asks read current. One stop-time check runs at a time: `agent_end` handlers are not awaited by
+the host, so a latch spans the Dispatch read and self-check; a settle recorded while it is held is
+re-checked when the first check ends only if its run counter still matches and a check remains due.
+Every run the host starts increments that counter, so an Envoy delivery or another newer run makes
+an old verdict stale and unsteerable. The latch, period, and budget are in memory only; a cold start
+or session change begins at period 0, which nudges nothing until the next genuine user turn arms
+one. The normal-settle, UI-host, Legion-managed, task-subagent, generation, staleness, and
+one-check-at-a-time guards remain load-bearing.
 
 What the arming rule excludes is as load-bearing as what it covers. An Envoy delivery wakes a session through the
 same agent-initiated path the nudge itself uses, which emits no `before_agent_start`, so an event-woken turn arms
@@ -376,7 +374,7 @@ state never nudges.
 - Keep direct NATS subscription lifecycle and Pi delivery adapter-local. Register `["aside", "btw", "steer"]` when `pi.askEphemeral` exists and `["aside", "steer"]` otherwise — both built from the contracts' `DELIVERY_CAPABILITIES`, never spelled here; an advertised `btw` frame never falls back to steering. Deliver targeted **Aside** / **Steer** with `triggerTurn: true`; reject an unparsed targeted frame without primary-turn injection, log it, and post its error to Dispatch whenever it has a reply address.
 - Render every inbound envelope through `renderInbound`. Keep its bounded 50-item `envoy_inbox` metadata-only; use the shared `envoy_role_get` transport operation for current role holders.
 - The registration heartbeat (`ensureHeartbeat`, `ENVOY_HEARTBEAT_MS`, default 120 s) re-asserts the session's held role after every successful re-registration: it reads `GET /v1/roles/<role>` and issues a soft `POST /v1/roles/set` only when the listener does not name this session as the live holder — a healthy tick writes nothing and appends no `envoy-role-claim` transcript entry. A 409 (a different live holder) drops the local claim, warns once, and ends re-assertion for that role; the newer holder is correct. A regain — or the first healthy tick after a failed registration, when a surviving claim may still have been unresolvable — fires `onEnvoyRoleRegained` detached from the heartbeat chain (a slow daemon never blocks the next re-registration), which re-runs the controller's `/controller/ready` and a root architect's `/process/ready` with bounded retries; a phase worker needs nothing, the daemon's own no-holder recovery prompts its catch-up. `legion.ts` registers that listener on the `LEGION_ROLE_CLAIM_BRIDGE` slot only once it holds a Legion identity (`claimController`, `bootstrapRoot`), since a `task` subagent's re-bound instance shares the process and would otherwise replace it.
-- A `task` subagent's session shares its parent's identity in both extensions (`isSubagentSession` in `src/subagent-session.ts`): in a Legion process it claims no role, calls no daemon route, installs no tool gate, and never exits (`extensions/legion.ts`), and in every process `extensions/envoy.ts` skips its `session_start` and switch events entirely — no listener registration, no agent-subject subscription, no heartbeat — so `envoy ps` lists only top-level sessions and a finished subagent leaves no row heartbeating for the life of the parent process. envoy.ts additionally asks the host's own roster (`isRegisteredSubagent`: `AgentRegistry.global()` from `@oh-my-pi/pi-coding-agent`, where `createAgentSession` registers every session as `main`, `sub`, or `advisor` before `session_start` fires), which needs no transcript and so also covers a subagent under `OMP_SESSION_STORAGE=sql` or of a `--no-session` parent, and stays per session rather than per process (an ACP host runs several top-level sessions in one process). The transcript-based check is recognised by either of two signals: the process-local one — `bootstrapRoot`, `bootstrapWorker`, and the controller's `session_start` record the bootstrapped session's transcript path on `globalThis` under `Symbol.for("legion.pi-envoy.bootstrapped-session")`, and any later `session_start` in the same process with a different transcript path is a subagent — or OMP's on-disk layout for file storage (the parent's `.jsonl` sits beside the subagent's transcript directory). The process-local signal is what holds when the transcript is a SQL row rather than a file (LEGION-80: `OMP_SESSION_STORAGE=sql`); the on-disk check stays as the fallback for a process that has not bootstrapped anything.
+- A `task` subagent's session shares its parent's identity in both extensions (`isSubagentSession` in `src/subagent-session.ts`): in a Legion process it claims no role, calls no daemon route, installs no tool gate, and never exits (`extensions/legion.ts`), and in every process `extensions/envoy.ts` skips its `session_start` and switch events entirely — no listener registration, no agent-subject subscription, no heartbeat — so `envoy ps` lists only top-level sessions and a finished subagent leaves no row heartbeating for the life of the parent process. envoy.ts additionally asks the host's own roster (`isRegisteredSubagent`: `AgentRegistry.global()` from `@oh-my-pi/pi-coding-agent`, where `createAgentSession` registers every session as `main`, `sub`, or `advisor` before `session_start` fires), which needs no transcript and so also covers a subagent under `OMP_SESSION_STORAGE=sql` or of a `--no-session` parent, and stays per session rather than per process (an ACP host runs several top-level sessions in one process). The transcript-based check is recognised by either of two signals: the process-local one — `bootstrapRoot`, `bootstrapWorker`, and the controller's `session_start` record the bootstrapped session's transcript path on `globalThis` under `Symbol.for("legion.pi-envoy.bootstrapped-session")`, and any later `session_start` in the same process with a different transcript path is a subagent — or OMP's on-disk layout for file storage (the parent's `.jsonl` sits beside the subagent's transcript directory). The process-local signal is what holds when the transcript is a SQL row rather than a file (LEGION-80: `OMP_SESSION_STORAGE=sql`); the on-disk check stays as the fallback for a process that has not bootstrapped anything. The identity it shares is its reply address. Every top-level instance publishes its own session on `globalThis` under `Symbol.for("legion.pi-envoy.envoy-session")` (`src/envoy-session.ts`), keyed by its transcript path, at the one chokepoint that moves the module id — `restoreLocalSessionState`, which a start, a switch and the heartbeat's drift heal all run — and deletes its previous key when its id or transcript path changes, so a retired session leaves no entry to resolve. A session is recorded from its `session_start`, before the host has minted its id — under its transcript path, with the empty id it has — so a fresh TUI's subagent resolves that session and reports no address until the drift heal fills the id in, rather than falling through to another live session; and `session_shutdown` deletes the entry, since a deregistered session is not an address a reply reaches. It is a map, not one slot, because an ACP host runs several top-level sessions in one process: one slot would hand a subagent whichever of them last started. A subagent, whose module `sessionID` stays empty, resolves its own by walking OMP's layout up — `dirname(<own transcript>) + ".jsonl"`, repeated for a nested subagent — until a recorded session matches, and `envoy_whoami`, the `/whoami` command, and the `source_session` of `envoy_send` and `envoy_publish` all name that session. `envoy_whoami` reports it as `session_id` and the subagent's own host id under `subagent`. Where the walk matches nothing, one recorded session is used only when it is the only one in the process; otherwise there is no reply address at all — `session_id` is empty, the `subagent` note says so, and `packages/envoy-client/src/transport.ts` omits `source_session` rather than send an empty one, which the listener's `omitempty` erases on the way out, costing the recipient both the sender label and the reply hint. Naming an unrelated live session is never the answer. A subagent's `envoy_publish` never reaches its own parent: the listener delivers nothing to the session an envelope names as its source — `roleTopicDelivery` skips the resolved holder and `fanoutDelivery` skips any interest whose session is the source — so a publish to a role the parent holds, or to any topic it subscribes to, is accepted and delivered to nobody. The publish tool result says so for the role case, where the answer names the holder; the hop a subagent actually has to its parent is hub. A direct `envoy_send` is unaffected, the agent-subject lane having no such skip. The host's own `AgentRegistry` carries a `parentId`, but it is undocumented and a host upgrade could change it silently; the published record is this package's own.
 - A daemon refusal of the boot registration itself — `/process/started` for a root, `/worker/started` for a phase worker or sub-architect — ends the process (`exitOnRegistrationRefusal` in `extensions/legion.ts`: one log line naming the route, the status, and the daemon's message, then `exitProcess(1)`) for every 4xx: a 400 or 404 (a request or a route the daemon does not have), a 403 (the boot token is stale, consumed, or unknown), and every 409 those routes answer — the same-agent rule (`Worker respawn must resume the same agent session`: this session is not the one the resumed claim recorded; under a database session store that is Oh My Pi having started a fresh session at a path whose row is gone), a stale generation (`Stale process generation` / `Stale worker generation`: the daemon already owns a newer launch of this role), and a tree being closed (`TreeClosingError`). None changes on retry, and a process that stayed up unregistered would sit alive under the daemon's boot watchdog with nothing ever retiring it; exiting hands the outcome to the daemon, which already holds the decision each 409 names (count the launch failure and decide the respawn, keep the newer generation, finish the close). Every other error there — a 5xx, a transport failure — propagates out of `session_start` without exiting, exactly as before (LEGION-81; `extensions/legion.test.ts` pins both routes for 403, 409, and the 500 negative control, and `/worker/started` for 400). The Go daemon's `/legion/v1/claims/register` has the same rule (`exitOnGoRegistrationRefusal`; see Daemon contract).
 - A daemon `403 Invalid session secret` is recovered once per forgotten secret, shared by every request in flight: `src/legion/daemon-client.ts` keeps, per session id, the newest recovered secret and the recovery in flight — a refused request retries with a newer secret already known, else awaits the in-flight recovery, else starts the one `/legion/v1/worker-session` recovery, one retry per request and a second refusal returned to the caller — and `roleDaemon()` in `extensions/legion.ts` hands every caller the same client so that record is shared (LEGION-73).
 - `spawnWorker` in `src/legion/daemon-client.ts` carries the caller's `requestId` (minted once per `legion` `spawn_worker` call in `src/legion/tools.ts`) and retries only a `fetch` that rejected — never a `LegionDaemonApiError`, whatever its status, and never a response-shape error — up to `SPAWN_WORKER_ATTEMPTS` (3) with `SPAWN_WORKER_RETRY_DELAYS_MS` between attempts, the same id every time so the daemon's ledger dedupes it; the last rejected fetch is a `LegionDaemonTransportError` naming the cause, attempts, and id. A response whose headers arrived but body cannot be read is not retried because `fetch` fulfilled; it is a `LegionDaemonResponseReadError` with the same request id and `legion state` guidance. The 403 recovery above composes with both paths unchanged (LEGION-102).

@@ -232,11 +232,11 @@ func TestAMergersREADYOnALingeringTreeIsRefused(t *testing.T) {
 // refused, so it is told nothing moved. A merge is the one fact GitHub never sends again: it moves
 // the child on to its production check, and still starts nobody.
 func TestNoFactMovesAMemberOfALingeringTree(t *testing.T) {
-	heldFrom := phase.Testing
+	hold := record.Hold{From: phase.Testing}
 	for _, tc := range []struct {
 		name     string
 		at, want phase.Phase
-		heldFrom *phase.Phase
+		hold     *record.Hold
 		pr       record.PullRequest
 		fact     intake.Fact
 		refusal  string
@@ -253,7 +253,7 @@ func TestNoFactMovesAMemberOfALingeringTree(t *testing.T) {
 			fact: intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "changes_requested", CommitID: "head", HeadSHA: "head", Body: "fix it"}},
 		{name: "the worker's backward move", at: phase.Testing, refusal: "TREE_LINGERING",
 			fact: intake.BackwardMove{Issue: "LEGION-209", Requester: claim.RoleTester, To: phase.Implementing, Reason: "the head changed"}},
-		{name: "the architect's retry of a held phase", at: phase.Held, heldFrom: &heldFrom,
+		{name: "the architect's retry of a held phase", at: phase.Held, hold: &hold,
 			fact: intake.RetryOrEscalate{Issue: "LEGION-209", Decision: intake.RetryDecision}},
 		{name: "a failed claim", at: phase.Testing,
 			fact: intake.ClaimFailed{Issue: "LEGION-209", Role: claim.RoleTester}},
@@ -262,7 +262,7 @@ func TestNoFactMovesAMemberOfALingeringTree(t *testing.T) {
 			pool := migratedPool(t)
 			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"})
 			parent := "LEGION-208"
-			seedIssue(t, pool, record.Issue{Key: "LEGION-209", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent, Phase: tc.at, HeldFrom: tc.heldFrom, Generation: 1, Status: "in_progress", Rank: "V"})
+			seedIssue(t, pool, record.Issue{Key: "LEGION-209", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent, Phase: tc.at, Hold: tc.hold, Generation: 1, Status: "in_progress", Rank: "V"})
 			pr := tc.pr
 			pr.State, pr.Issue, pr.Repo, pr.Number, pr.Branch, pr.HeadSHA = record.PullRequestOpen, "LEGION-209", "sjawhar/legion", 42, "legion/LEGION-209", "head"
 			pr.Failing, pr.FailingStatuses = []string{}, []string{}
@@ -289,9 +289,9 @@ func TestNoFactMovesAMemberOfALingeringTree(t *testing.T) {
 			if err := pool.QueryRow(t.Context(), `select phase,
 				(select count(*) from outbox where issue = 'LEGION-209' and kind = 'supervise' and payload->>'op' = 'start'),
 				(select rounds from phases where issue = 'LEGION-209' and role = 'implementer'),
-				(select count(*) from outbox where issue = 'LEGION-209' and kind in ('dispatch_message', 'notice'))
+				(select count(*) from outbox where issue = 'LEGION-209' and kind in ('dispatch_message', 'notice', 'controller_notice'))
 				from issues where key = 'LEGION-209'`).Scan(&got, &starts, &rounds, &told); err != nil || got != want || starts != 0 || rounds != 2 || told != 0 {
-				t.Fatalf("the lingering tree's LEGION-209 = %q, %d worker starts, %d rounds, %d messages and notices, %v; want %s, none, 2, none", got, starts, rounds, told, err, want)
+				t.Fatalf("the lingering tree's LEGION-209 = %q, %d worker starts, %d rounds, %d messages and notices (the controller's included), %v; want %s, none, 2, none", got, starts, rounds, told, err, want)
 			}
 		})
 	}

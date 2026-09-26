@@ -155,6 +155,28 @@ func TestOutboxNoticePublishesIssueAndTreeTopics(t *testing.T) {
 	}
 }
 
+// A controller notice row goes to the controller topic of the daemon's own project, the one its
+// controller subscribes to, and to no issue topic, under the row's own key, with the notice the
+// issue topic carries.
+func TestOutboxControllerNoticeGoesToTheControllerTopicAlone(t *testing.T) {
+	row := mustOutboxRow(t, "LEGION-2", record.ControllerNotice{Kind: "held", Role: claim.RolePlanner, Phase: phase.Planning}, time.Now())
+	row.ID = 57
+	publisher := &outboxPublisher{}
+
+	if err := (&outbox{project: "legion", notices: publisher}).execute(context.Background(), row); err != nil {
+		t.Fatalf("execute controller notice: %v", err)
+	}
+	if got := publisher.topics(); fmt.Sprint(got) != "[notifications.legion.legion.controller]" {
+		t.Fatalf("controller notice topics = %v, want the controller topic alone", got)
+	}
+	if got := publisher.keys(); fmt.Sprint(got) != "[legion-outbox:57]" {
+		t.Fatalf("controller notice keys = %v, want the row's own key", got)
+	}
+	if got, want := publisher.payloads()[0], (record.Notice{Kind: "held", Role: claim.RolePlanner, Phase: phase.Planning}); got != want {
+		t.Fatalf("controller notice payload = %+v, want the notice %+v", got, want)
+	}
+}
+
 func TestOutboxNoticeReturnsPublisherFailure(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
@@ -170,14 +192,15 @@ func TestOutboxNoticeReturnsPublisherFailure(t *testing.T) {
 // The READY packet reaches the project's merge queue role as the message of one publish to its
 // role topic, keyed by the row so a retried row is one delivery.
 func TestOutboxMergeQueuePublishSendsThePacketToTheRole(t *testing.T) {
-	row := mustOutboxRow(t, "LEGION-2", record.MergeQueuePublish{Role: "merge-queue", Packet: "READY #7 at abc (approved at abc) for LEGION-2 (https://example.test/7)"}, time.Now())
+	const packet = "READY #7 at abc (approved at abc) for LEGION-2 (https://example.test/7)"
+	row := mustOutboxRow(t, "LEGION-2", record.MergeQueuePublish{Role: "merge-queue", Packet: packet}, time.Now())
 	row.ID = 57
 	publisher, client := &outboxPublisher{}, &outboxDispatch{}
 
 	if err := (&outbox{notices: publisher, dispatch: client}).execute(context.Background(), row); err != nil {
 		t.Fatalf("execute merge queue publish: %v", err)
 	}
-	if got := publisher.publishes(); len(got) != 1 || got[0] != (outboxPublish{topic: "notifications.role.merge-queue", message: "READY #7 at abc (approved at abc) for LEGION-2 (https://example.test/7)", key: "legion-outbox:57"}) {
+	if got := publisher.publishes(); len(got) != 1 || got[0] != (outboxPublish{topic: "notifications.role.merge-queue", message: packet, key: "legion-outbox:57", payload: packet}) {
 		t.Fatalf("publishes = %#v, want the packet on the merge queue role's topic once", got)
 	}
 	if len(client.messages) != 0 {
@@ -823,8 +846,7 @@ func TestOutboxRetryStartForAPhaseTheIssueLeftRelaunchesNothing(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	ctx := context.Background()
-	heldFrom := phase.Implementing
-	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Held, HeldFrom: &heldFrom, Generation: 1, Status: "in_progress"}
+	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Held, Hold: &record.Hold{From: phase.Implementing}, Generation: 1, Status: "in_progress"}
 	putOutboxIssue(t, pool, records, issue)
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		return records.PutPullRequest(ctx, tx, record.PullRequest{Issue: issue.Key, Repo: "acme/widgets", Number: 114, Branch: "legion/LEGION-208", HeadSHA: "f8f30933", Failing: []string{}, FailingStatuses: []string{}, State: record.PullRequestOpen})
@@ -1144,7 +1166,8 @@ func TestTerminalReplayAfterPersistedFailureHoldsOnceAndEmitsOneWorkerDiedNotice
 	if held != string(phase.Held) {
 		t.Fatalf("workflow phase after replay = %s, want held", held)
 	}
-	rows, err := pool.Query(context.Background(), "select payload->>'kind' from outbox where kind = $1 order by id", string(record.OutboxKindNotice))
+	rows, err := pool.Query(context.Background(), `select payload->>'kind' || case when kind = $2 then ' (controller)' else '' end
+		from outbox where kind in ($1, $2) order by id`, string(record.OutboxKindNotice), string(record.OutboxKindControllerNotice))
 	if err != nil {
 		t.Fatalf("read failure notices: %v", err)
 	}
@@ -1160,8 +1183,8 @@ func TestTerminalReplayAfterPersistedFailureHoldsOnceAndEmitsOneWorkerDiedNotice
 	if err := rows.Err(); err != nil {
 		t.Fatalf("iterate failure notices: %v", err)
 	}
-	if fmt.Sprint(notices) != "[held worker-died]" {
-		t.Fatalf("failure notices = %v, want exactly held and worker-died once", notices)
+	if fmt.Sprint(notices) != "[held held (controller) worker-died]" {
+		t.Fatalf("failure notices = %v, want held to the issue and the controller and worker-died, each once", notices)
 	}
 }
 
@@ -1252,12 +1275,13 @@ type outboxPublisher struct {
 
 type outboxPublish struct {
 	topic, message, key string
+	payload             any
 }
 
-func (p *outboxPublisher) Publish(_ context.Context, topic, message string, _ any, key string) error {
+func (p *outboxPublisher) Publish(_ context.Context, topic, message string, payload any, key string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.publish = append(p.publish, outboxPublish{topic: topic, message: message, key: key})
+	p.publish = append(p.publish, outboxPublish{topic: topic, message: message, key: key, payload: payload})
 	return p.err
 }
 
@@ -1285,6 +1309,16 @@ func (p *outboxPublisher) keys() []string {
 		keys[i] = published.key
 	}
 	return keys
+}
+
+func (p *outboxPublisher) payloads() []any {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	payloads := make([]any, len(p.publish))
+	for i, published := range p.publish {
+		payloads[i] = published.payload
+	}
+	return payloads
 }
 
 type outboxFactHandler struct {

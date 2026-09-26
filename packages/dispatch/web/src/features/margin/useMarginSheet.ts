@@ -153,7 +153,7 @@ export function useMarginSheet(): MarginSheetModel {
     [owner, queryClient]
   );
   const {
-    actionErrorId,
+    actionFailure,
     answeredAsksPending,
     asksPending,
     commentsError,
@@ -498,7 +498,7 @@ export function useMarginSheet(): MarginSheetModel {
     },
     composer,
     items: {
-      actionErrorId,
+      actionFailure,
       answeredAsksPending,
       asksPending,
       commentsError,

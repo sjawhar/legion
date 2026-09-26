@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -46,6 +47,43 @@ func TestAPullRequestFinishingOutsideAwaitingMergeTellsTheArchitectOnce(t *testi
 			}
 		})
 	}
+}
+
+// A close older than the pull request's newest lifecycle event is a late redelivery
+// (classify.LateLifecycle): it neither closes the pull request nor tells the architect. The newer
+// close closes it at the head it carries and tells the architect once, and that close redelivered at
+// its own clock, which is not late, tells it nothing more, since the pull request is already closed.
+func TestALateCloseTellsTheArchitectNothingAndARedeliveredCloseNothingMore(t *testing.T) {
+	earlier, later := lateApplied.Add(-time.Hour), lateApplied.Add(time.Minute)
+	pool := migratedPool(t)
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-c",
+		HeadUpdatedAt: lateApplied, HeadUpdatedAtSource: "webhook", Failing: []string{}, FailingStatuses: []string{}, CheckRuns: []record.AttemptRun{}})
+	for _, step := range []struct {
+		id      string
+		fact    intake.Fact
+		head    string
+		state   record.PullRequestState
+		notices int
+	}{
+		{"late-close", lateClosed("head-b", earlier), "head-c", record.PullRequestOpen, 0},
+		{"close", lateClosed("head-d", later), "head-d", record.PullRequestClosed, 1},
+		{"redelivered-close", lateClosed("head-d", later), "head-d", record.PullRequestClosed, 1},
+	} {
+		if _, err := intake.ApplyFact(context.Background(), pool, "github", step.id, step.fact, testEngine(), admissionStub{}); err != nil {
+			t.Fatalf("ApplyFact %s: %v", step.id, err)
+		}
+		var head string
+		var state record.PullRequestState
+		if err := pool.QueryRow(t.Context(), "select head_sha, state from pull_requests where issue = 'LEGION-208'").Scan(&head, &state); err != nil {
+			t.Fatalf("read the pull request after %s: %v", step.id, err)
+		}
+		got := architectNotices(t, pool)
+		if head != step.head || state != step.state || len(got) != step.notices {
+			t.Fatalf("after %s the pull request is at %s, %s, with architect notices %+v; want %s, %s, and %d", step.id, head, state, got, step.head, step.state, step.notices)
+		}
+	}
+	assertPhase(t, pool, phase.Reviewing)
 }
 
 // An issue that reaches awaiting_merge with its pull request already merged has nothing left to

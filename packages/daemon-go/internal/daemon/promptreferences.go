@@ -96,7 +96,7 @@ func (c promptCheck) assignments() []string {
 func (c promptCheck) refusal(output, lane string) error {
 	var refusals []error
 	for _, kind := range promptrefs.Kinds {
-		refusals = append(refusals, promptKinds[kind].refusal(kind, output, c.names[kind], lane))
+		refusals = append(refusals, kindRefusal(kind, output, c.names[kind], lane))
 	}
 	if !c.skipAgentModels {
 		refusals = append(refusals, agentModelRefusal(output, c.names[promptrefs.TaskAgents], lane))
@@ -149,12 +149,13 @@ func agentModelRefusal(output string, agents map[string][]string, lane string) e
 // unresolvable begins the load probe's answer that it could not discover a kind's names at all.
 func unresolvable(kind promptrefs.Kind) string { return kind.Variable() + "_UNRESOLVABLE=" }
 
-// refusal judges the load probe's answer on named, kind's names, in k's words: nil when there are
-// none or Oh My Pi found every one.
-func (k promptKind) refusal(kind promptrefs.Kind, output string, named map[string][]string, lane string) error {
+// kindRefusal judges the load probe's answer on named, kind's names, in kind's words
+// (promptKinds): nil when there are none or Oh My Pi found every one.
+func kindRefusal(kind promptrefs.Kind, output string, named map[string][]string, lane string) error {
 	if len(named) == 0 {
 		return nil
 	}
+	k := promptKinds[kind]
 	variable := kind.Variable()
 	for line := range strings.Lines(output) {
 		line = strings.TrimSpace(line)

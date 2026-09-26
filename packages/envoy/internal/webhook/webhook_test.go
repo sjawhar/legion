@@ -1,16 +1,22 @@
 package webhook
 
 import (
+	"sync"
+
 	"github.com/sjawhar/envoy/internal/contracts"
 )
 
-// mockPublisher records published envelopes for test assertions.
+// mockPublisher records published envelopes for test assertions. Requests the handler serves at
+// once can publish at once, as they may with the real publisher.
 type mockPublisher struct {
+	mu        sync.Mutex
 	published []contracts.Envelope
 	err       error
 }
 
 func (m *mockPublisher) Publish(item contracts.Envelope) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.published = append(m.published, item)
 	return m.err
 }

@@ -122,18 +122,18 @@ type listenerProcess struct {
 }
 
 // startListenerProcess starts binary as machine machineID against the NATS at uri, on a free port,
-// and kills it when the test ends if it is still running.
-func startListenerProcess(t *testing.T, binary, uri, machineID string) *listenerProcess {
+// with env added to its environment, and kills it when the test ends if it is still running.
+func startListenerProcess(t *testing.T, binary, uri, machineID string, env ...string) *listenerProcess {
 	t.Helper()
 	process := &listenerProcess{port: freeTCPPort(t), output: &lockedBuffer{}, exited: make(chan struct{})}
 	process.cmd = exec.Command(binary)
-	process.cmd.Env = []string{
+	process.cmd.Env = append([]string{
 		"PORT=" + strconv.Itoa(process.port),
 		"ENVOY_LISTEN_HOST=127.0.0.1",
 		"ENVOY_MACHINE_ID=" + machineID,
 		"NATS_URLS=" + uri,
 		"ENVOY_API_TOKEN=" + listenerTestToken,
-	}
+	}, env...)
 	process.cmd.Stdout, process.cmd.Stderr = process.output, process.output
 	if err := process.cmd.Start(); err != nil {
 		t.Fatalf("start the listener %s: %v", machineID, err)

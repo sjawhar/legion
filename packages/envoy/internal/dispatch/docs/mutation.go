@@ -230,7 +230,7 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 		if err != nil {
 			return err
 		}
-		target, err := parseInput(markdown)
+		target, err := parseReplacing(current, markdown)
 		if err != nil {
 			return err
 		}
@@ -642,6 +642,26 @@ func (s *Service) warmLiveDocument(ctx context.Context, artifactID string) error
 	return nil
 }
 
+// currentToken is the whole-document token of the document the caller sees, for an edit that
+// applies no operation and so writes no tree of its own to take one from.
+func (s *Service) currentToken(ctx context.Context, artifactID string) (string, error) {
+	var (
+		token   string
+		readErr error
+	)
+	if err := s.docView(ctx, artifactID, func(doc *crdt.Doc) {
+		tree, err := treeOf(doc)
+		if err != nil {
+			readErr = err
+			return
+		}
+		token, readErr = nodeToken(tree)
+	}); err != nil {
+		return "", err
+	}
+	return token, readErr
+}
+
 // ApplyOps resolves every requested operation against the document's one Yjs
 // transaction. A conditional edit checks its precondition, resolves the batch,
 // and writes the plan inside that transaction, so no live writer can enter the
@@ -667,14 +687,22 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 		return EditOutcome{}, err
 	}
 	if len(ops) == 0 {
-		var checkErr error
+		// No operation to apply, so the document this check read is the document the caller's
+		// next edit meets: its token is that edit's precondition.
+		var (
+			checkErr error
+			token    string
+		)
 		err := s.docView(ctx, artifactID, func(doc *crdt.Doc) {
 			tree, err := treeOf(doc)
 			if err != nil {
 				checkErr = err
 				return
 			}
-			checkErr = checkEditPrecondition(tree, *precondition)
+			if checkErr = checkEditPrecondition(tree, *precondition); checkErr != nil {
+				return
+			}
+			token, checkErr = nodeToken(tree)
 		})
 		if checkErr != nil {
 			return EditOutcome{}, checkErr
@@ -682,7 +710,7 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 		if err != nil {
 			return EditOutcome{}, fmt.Errorf("check empty document edit precondition: %w", err)
 		}
-		return EditOutcome{}, nil
+		return EditOutcome{Token: token}, nil
 	}
 	var (
 		err       error
@@ -764,7 +792,13 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 // validation and live-mutation behavior.
 func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor) (EditOutcome, error) {
 	if len(ops) == 0 {
-		return EditOutcome{}, nil
+		// Nothing to apply: the caller still gets the token of the document as it stands, the
+		// precondition its next edit passes.
+		token, err := s.currentToken(ctx, artifactID)
+		if err != nil {
+			return EditOutcome{}, err
+		}
+		return EditOutcome{Token: token}, nil
 	}
 	var outcome EditOutcome
 	err := s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {

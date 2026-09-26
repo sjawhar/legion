@@ -180,7 +180,7 @@ async function executeWrite(tool: string, args: Record<string, unknown>, advice?
       });
     }
     if (target.pathname === "/api/v1/artifacts/artifact-42/edits" && method === "POST") {
-      return response(withAdvice({ applied: 1, version: null }, advice));
+      return response(withAdvice({ applied: 1, version: null, token: "sha256:edited" }, advice));
     }
     if (target.pathname === "/api/v1/issues/DSP-42" && method === "PATCH") {
       return response(
@@ -499,8 +499,8 @@ describe("Dispatch write advice", () => {
         artifact: "spec",
         ops: [{ op: "replace", find: "draft", with: "final" }],
       },
-      `Applied 1 ops (no new version) ${issueSuffix}`,
-      { issue: "DSP-42", applied: 1 },
+      `Applied 1 ops (no new version) ${issueSuffix}\nDocument token: sha256:edited`,
+      { issue: "DSP-42", applied: 1, token: "sha256:edited" },
     ],
     [
       "dispatch_issue_update",
