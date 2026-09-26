@@ -2,10 +2,22 @@ import { expect, test } from "bun:test"
 import { cp, mkdtemp, readdir, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import { buildBundles } from "../scripts/build"
+import { BUNDLE_ENTRYPOINTS, buildBundles } from "../scripts/build"
 
 const packageRoot = resolve(import.meta.dir, "..")
 const distDirectory = join(packageRoot, "dist")
+
+const externalDependencySpecifierPatterns = [
+  /\b(?:require|import\.meta\.require|import)\s*\(\s*(["'])[^"'\r\n]*node_modules\/[^"'\r\n]*\1\s*\)/g,
+  /\b(?:import|export)\s+(?:[^\r\n;]*?\s+from\s+)?(["'])[^"'\r\n]*node_modules\/[^"'\r\n]*\1/g,
+]
+
+function findExternalDependencySpecifiers(source: string): string[] {
+  const code = source.replace(/\/\*[\s\S]*?\*\/|\/\/[^\r\n]*/g, "")
+  return externalDependencySpecifierPatterns.flatMap((pattern) =>
+    Array.from(code.matchAll(pattern), ([match]) => match),
+  )
+}
 
 test("the committed bundle starts without node_modules and demands ENVOY_NATS_URL", async () => {
   const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-dist-"))
@@ -29,6 +41,31 @@ test("the committed bundle starts without node_modules and demands ENVOY_NATS_UR
     expect(stderr).toContain("ENVOY_NATS_URL is required")
   } finally {
     await rm(scratch, { recursive: true, force: true })
+  }
+})
+
+test("the dependency guard ignores comments and detects runtime node_modules specifiers", async () => {
+  const comments = [
+    '// require("/tmp/node_modules/comment.js")',
+    '/* import.meta.require("/tmp/node_modules/comment.js") */',
+  ].join("\n")
+  expect(findExternalDependencySpecifiers(comments)).toEqual([])
+
+  const specifiers = [
+    'require("/tmp/node_modules/require.js")',
+    'import.meta.require("/tmp/node_modules/meta-require.js")',
+    'import("/tmp/node_modules/import.js")',
+    'import dependency from "/tmp/node_modules/static-import.js"',
+    'export { dependency } from "/tmp/node_modules/static-export.js"',
+  ]
+  const matches = findExternalDependencySpecifiers(specifiers.join("\n"))
+  for (const specifier of specifiers) expect(matches).toContain(specifier)
+})
+
+test("the committed bundles contain no external dependency call specifiers", async () => {
+  for (const name of Object.keys(BUNDLE_ENTRYPOINTS)) {
+    const bundle = await readFile(join(distDirectory, `${name}.js`), "utf8")
+    expect(findExternalDependencySpecifiers(bundle)).toEqual([])
   }
 })
 
