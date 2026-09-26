@@ -1,10 +1,11 @@
 /**
- * The pinned dependency must carry the Dark Reader fix and agree with the upstream type regions
- * this package re-exports. Both otherwise fail silently.
+ * The pin has to carry every fix the fork's `library` line carries, and has to agree with the
+ * upstream type regions this package re-exports. Both otherwise fail silently: nothing in this
+ * repository reads those editor modules until a browser renders a document with them.
  *
- * Dark Reader rewrites inline decoration styles inside the contenteditable, which ProseMirror
- * observes as mutations and redraws indefinitely. The source pin carries the upstream fix, so
- * the guard reads those editor modules directly.
+ * Each case below is one member of that line, read where it lives, because none of them has an
+ * exported seam a unit test could call. A cut that loses one — the first cut of the cleaned
+ * line lost the cursor label — passes every other check in the repository.
  */
 
 import { expect, test } from "bun:test";
@@ -25,6 +26,26 @@ test("the pinned dependency carries the Dark Reader fix", () => {
   expect(cursors).not.toContain("'data-proof-collab-selection':");
   expect(cursors).toContain("function ensureCollabColorStyles");
   expect(cursors).toContain("proof-collab-selection--");
+});
+
+test("the pinned dependency keeps the collaboration cursor label inline", () => {
+  // A block label lets a browser move a post-update text selection into the cursor decoration,
+  // which interrupts local typing after a remote edit.
+  const cursors = readFileSync(join(upstreamSrc, "editor/plugins/collab-cursors.ts"), "utf8");
+  expect(cursors).toContain("const label = document.createElement('span');");
+  expect(cursors).toContain("label.contentEditable = 'false';");
+  expect(cursors).not.toContain("const label = document.createElement('div');");
+});
+
+test("the pinned dependency renders replacement suggestions", () => {
+  // The suggestion mark's DOM attributes have to stay primitive: spreading the ctx attrs put
+  // "[object Object]" on the span. And the replace-insert widget is keyed by its replacement,
+  // so a changed replacement redraws instead of keeping the first content it rendered.
+  const proofMarks = readFileSync(join(upstreamSrc, "editor/schema/proof-marks.ts"), "utf8");
+  expect(proofMarks).not.toContain("const attrs = ctx.get(proofSuggestionAttr.key)(mark);");
+
+  const marks = readFileSync(join(upstreamSrc, "editor/plugins/marks.ts"), "utf8");
+  expect(marks).toMatch(/key: `replace-insert-\$\{mark\.id\}-\$\{replacementContent\}`/);
 });
 
 test("src/upstream-types.ts still describes the files it was copied from", () => {
