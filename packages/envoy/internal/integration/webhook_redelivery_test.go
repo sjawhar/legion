@@ -114,8 +114,7 @@ func unusedCIRecorder(t *testing.T) webhook.CIRecorder {
 	return refusingRecorder{t: t}
 }
 
-// refusingRecorder fails the test on any CI record: none of these fixtures is a pull_request or a
-// CI event, so a call means the fixture is not the event it claims to be.
+// refusingRecorder is the webhook.CIRecorder unusedCIRecorder returns.
 type refusingRecorder struct{ t *testing.T }
 
 func (r refusingRecorder) refuse(kind string) error {
@@ -130,11 +129,17 @@ func (r refusingRecorder) RecordHead(_, _, _, _, _ string) error     { return r.
 
 func postGitHub(t *testing.T, handler http.Handler, event, delivery, body string) {
 	t.Helper()
+	postGitHubExpecting(t, handler, event, delivery, body, http.StatusOK)
+}
+
+// postGitHubExpecting posts a signed GitHub delivery and requires the handler's own status.
+func postGitHubExpecting(t *testing.T, handler http.Handler, event, delivery, body string, want int) {
+	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/webhook/github", strings.NewReader(body))
 	req.Header.Set("X-GitHub-Delivery", delivery)
 	req.Header.Set("X-GitHub-Event", event)
 	req.Header.Set("X-Hub-Signature-256", "sha256="+hmacHex(redeliverySecret, body))
-	serveOK(t, handler, req)
+	serve(t, handler, req, want)
 }
 
 func postSlack(t *testing.T, handler http.Handler, body string) {
@@ -159,10 +164,16 @@ func postGhostWispr(t *testing.T, handler http.Handler, delivery, body string) {
 // redelivery the stream recognises must still be answered 200.
 func serveOK(t *testing.T, handler http.Handler, req *http.Request) {
 	t.Helper()
+	serve(t, handler, req, http.StatusOK)
+}
+
+// serve serves req and requires the status want.
+func serve(t *testing.T, handler http.Handler, req *http.Request, want int) {
+	t.Helper()
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("%s answered %d %q, want 200", req.URL.Path, rec.Code, rec.Body.String())
+	if rec.Code != want {
+		t.Fatalf("%s answered %d %q, want %d", req.URL.Path, rec.Code, rec.Body.String(), want)
 	}
 }
 
@@ -268,18 +279,4 @@ func (p *failAfter) Publish(item contracts.Envelope) error {
 	}
 	p.published++
 	return nil
-}
-
-// postGitHubExpecting posts a signed GitHub delivery and requires the handler's own status.
-func postGitHubExpecting(t *testing.T, handler http.Handler, event, delivery, body string, want int) {
-	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/webhook/github", strings.NewReader(body))
-	req.Header.Set("X-GitHub-Delivery", delivery)
-	req.Header.Set("X-GitHub-Event", event)
-	req.Header.Set("X-Hub-Signature-256", "sha256="+hmacHex(redeliverySecret, body))
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	if rec.Code != want {
-		t.Fatalf("%s answered %d %q, want %d", req.URL.Path, rec.Code, rec.Body.String(), want)
-	}
 }
