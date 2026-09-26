@@ -650,9 +650,13 @@ func TestSettledVersionNamesChangedReferenceTargets(t *testing.T) {
 
 // SnapshotVersion and NamedVersion are the two version writers the API's document handlers call,
 // and each reports what its markdown moved in the reference graph: the caller names those targets
-// on the artifact event it appends, so a batched backlink count refreshes without a reload.
+// on the artifact event it appends, so a batched backlink count refreshes without a reload. Each
+// edit also arms the room's settlement, which writes the same version itself once its delay
+// passes, and then the writer under test finds nothing to write and reports no change. So
+// settlement waits an hour here, as in every test of a version writer's own write.
 func TestVersionWritersReportChangedReferenceTargets(t *testing.T) {
 	service, artifactID := newTestService(t)
+	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "# First\n\nPending.")
 	actor := model.Actor{Kind: "user", ID: "alice"}
 	issueKey := "DOC-1"
