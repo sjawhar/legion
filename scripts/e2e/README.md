@@ -337,6 +337,30 @@ directory and prints its path. For a run that did not pass, the trap also closes
 pull requests, best effort: it prints each close to stderr, and a close GitHub refuses leaves that
 pull request open and prints gh's reason, with a line saying some may still be open.
 
+## stage3-4b13b-acceptance.sh
+
+```sh
+LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic SMOKE_UPSTREAM_NATS=nats://envoy-nats.<tailnet>.ts.net:4222 \
+ACCEPT_PG_CONTAINER=<postgres container> ACCEPT_PG_PORT=<its host port> ACCEPT_NATS_BIN=<nats-server> \
+  bash scripts/e2e/stage3-4b13b-acceptance.sh     # → "acceptance 4b.13b: PASS at <head>", exit 0
+```
+
+**Devbox only; CI does not run this script.** The live acceptance of LEGION-208 task 4b.13b. It
+stands up the Stage 3 rig from the same `lib/rig.sh` and `lib/workflow.sh`, with the same two
+required inputs and the same model route and proof human as
+[`stage3-devbox-workflow.sh`](#stage3-devbox-workflowsh), but creates no Docker container: the daemon
+and Dispatch take their own databases in the running Postgres container `ACCEPT_PG_CONTAINER` names
+(user `postgres`, password `ci`), and NATS is the native `ACCEPT_NATS_BIN`. Real agents drive the
+task's surfaces through it: a Go prompt part a restart rewrites, the refused root stops, the pane's
+refusal of `legion handoff complete` from a shell in every pane kind, park and re-run, the
+phase-finished notice's summary and verdict, the daemon posting and publishing the merger's READY
+(directly, across a refused gate, with and without a merge queue holder, and refused at
+`record.MessagePostLimit` one unit over), and the early-merge and closed-unmerged notices. Every
+proof pull request is retargeted to a scratch base before any merge (the one merged at
+`awaiting_merge` to a base of its own, cut from the same main commit), so the smoke main is never
+merged into, and both bases are deleted at the end. The evidence is kept in `ACCEPT_EVIDENCE_DIR`
+(default the kept scratch work directory's `evidence/`).
+
 ## stage4a-sandbox-runtime.sh
 
 ```sh
