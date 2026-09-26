@@ -22,9 +22,10 @@ const provisioningTokenFileEnv = "LEGION_PROVISIONING_TOKEN_FILE"
 // so a remote rewritten to another scheme, host, or port gets nothing, and no askpass is asked in
 // its place. In a pod the one process holding it, Fetch, reads no configuration a tree agent can
 // write, so the only remote it asks for is the one its own argv names. On the tmux runtime the
-// credentialed clone and fetch read the shared clone's configuration, where an http.proxy the tree
-// wrote with http.sslVerify off still sees the token on its way to github.com: there the scope is
-// defence, not a boundary (config.go).
+// credentialed clone and fetch read the shared clone's configuration, so there the scope is
+// defence, not a boundary (config.go). One example of what it leaves open: an http.proxy the tree
+// wrote with http.sslVerify off still sees the token on its way to github.com. It is an example,
+// not the whole list.
 const provisioningHelper = `#!/bin/sh
 [ "$1" = get ] || exit 0
 printf 'username=x-access-token\npassword=%s\n' "$(cat "$LEGION_PROVISIONING_TOKEN_FILE")"

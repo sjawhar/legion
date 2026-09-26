@@ -77,8 +77,8 @@ type Workspace struct {
 // container the provisioning Secret is not mounted in: that boundary, not what the runner adds
 // below, is what keeps the token from a tree agent. On the tmux runtime the credentialed clone and
 // fetch run in the shared clone, and panes share the daemon's uid and can read the daemon's files
-// anyway, so there what the runner adds is defence, not a boundary: it keeps provisioning from
-// running anything a tree agent configured in the shared clone.
+// anyway, so there what the runner adds is defence, not a boundary: it holds the settings it names
+// below, and does not claim that nothing else the shared clone's configuration names can run.
 
 // pinnedGitConfig is git configuration every process provisioning starts reads last, after the
 // shared clone's and after the command's own: no hook runs, wherever the clone's hooks directory
