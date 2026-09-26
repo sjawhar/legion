@@ -399,6 +399,7 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 			return intake.Result{}, nil
 		}
 		pr.FixAttempts, pr.BlockedAttempts = recorded.FixAttempts, recorded.BlockedAttempts
+		pr.HeadUpdatedAt = classify.LatestClock(recorded.HeadUpdatedAt, fact.UpdatedAt)
 	}
 	if err := e.store.PutPullRequest(ctx, tx, pr); err != nil {
 		return intake.Result{}, err
@@ -421,7 +422,7 @@ func (e *Engine) pullRequestSynchronized(ctx context.Context, tx pgx.Tx, fact in
 	if fact.HeadSHA != "" && fact.HeadSHA != pr.HeadSHA {
 		*pr = classify.AdvancePullRequestHead(*pr, fact.HeadSHA)
 	}
-	pr.HeadUpdatedAt, pr.HeadUpdatedAtSource = fact.UpdatedAt, "webhook"
+	pr.HeadUpdatedAt, pr.HeadUpdatedAtSource = classify.LatestClock(pr.HeadUpdatedAt, fact.UpdatedAt), "webhook"
 	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
 		return intake.Result{}, err
 	}
@@ -536,17 +537,16 @@ func (e *Engine) merged(ctx context.Context, tx pgx.Tx, fact intake.PullRequestM
 	return intake.Result{}, e.transition(ctx, tx, *issue, TriggerPullRequestMerged, "", record.PhaseRow{}, pr, "")
 }
 
-// closed records the pull request closed unmerged; a re-admitted generation drops it. The close's
-// clock becomes the pull request's, so a reopen older than it, redelivered late, changes nothing.
+// closed records the pull request closed unmerged; a re-admitted generation drops it. The pull
+// request keeps the close's clock when it is the later one, so a reopen older than the close,
+// redelivered late, changes nothing.
 func (e *Engine) closed(ctx context.Context, tx pgx.Tx, fact intake.PullRequestClosed) (intake.Result, error) {
 	pr, err := e.pullRequest(ctx, tx, fact.Repo, fact.Number)
 	if err != nil || pr == nil || classify.LateLifecycle(fact.UpdatedAt, pr.HeadUpdatedAt) {
 		return intake.Result{}, err
 	}
 	pr.State = record.PullRequestClosed
-	if !fact.UpdatedAt.IsZero() {
-		pr.HeadUpdatedAt, pr.HeadUpdatedAtSource = fact.UpdatedAt, "webhook"
-	}
+	pr.HeadUpdatedAt = classify.LatestClock(pr.HeadUpdatedAt, fact.UpdatedAt)
 	return intake.Result{}, e.store.PutPullRequest(ctx, tx, *pr)
 }
 

@@ -65,9 +65,9 @@ type PullRequest struct {
 	Number  int
 	Branch  string
 	HeadSHA string
-	// HeadUpdatedAt is the pull request's updated_at at the newest lifecycle observation applied
-	// (opened, reopened, synchronize or closed): an older one is a late redelivery and changes
-	// nothing (classify.LateLifecycle).
+	// HeadUpdatedAt is the latest updated_at among the lifecycle observations applied (opened,
+	// reopened, synchronize or closed; one with no clock never lowers it): an older one is a late
+	// redelivery and changes nothing (classify.LateLifecycle).
 	HeadUpdatedAt       time.Time
 	HeadUpdatedAtSource string
 	Verdict             string

@@ -85,6 +85,51 @@ func TestALatePullRequestEventChangesNothing(t *testing.T) {
 	}
 }
 
+// An event with no clock (from a listener that did not carry updated_at) is applied, but it never
+// lowers the pull request's clock: the stored clock stays the latest one known, so an older
+// timestamped event redelivered afterwards is still late and changes nothing.
+func TestAnEventWithNoClockKeepsTheLatestClock(t *testing.T) {
+	applied := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	earlier, later := applied.Add(-time.Hour), applied.Add(time.Minute)
+	sync := func(head string, at time.Time) intake.Fact {
+		return intake.PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: head, UpdatedAt: at}
+	}
+	for _, tc := range []struct {
+		name  string
+		seed  record.PullRequestState
+		facts []intake.Fact
+		head  string
+		state record.PullRequestState
+	}{
+		{"a synchronize with no clock, then an older one", record.PullRequestOpen,
+			[]intake.Fact{sync("head-d", later), sync("head-e", time.Time{}), sync("head-b", applied)}, "head-e", record.PullRequestOpen},
+		{"a reopen with no clock, then an older synchronize", record.PullRequestOpen,
+			[]intake.Fact{intake.PullRequestOpened{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-c"}, sync("head-b", earlier)}, "head-c", record.PullRequestOpen},
+		{"a close with no clock, then an older reopen", record.PullRequestOpen,
+			[]intake.Fact{intake.PullRequestClosed{Repo: "sjawhar/legion", Number: 42}, intake.PullRequestOpened{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-c", UpdatedAt: earlier}}, "head-c", record.PullRequestClosed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
+			seedPR(t, pool, record.PullRequest{State: tc.seed, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208",
+				HeadSHA: "head-c", HeadUpdatedAt: applied, HeadUpdatedAtSource: "webhook", Failing: []string{}, FailingStatuses: []string{}, CheckRuns: []record.AttemptRun{}})
+			for i, fact := range tc.facts {
+				if _, err := intake.ApplyFact(context.Background(), pool, "github", fmt.Sprintf("step-%d", i), fact, testEngine(), admissionStub{}); err != nil {
+					t.Fatalf("step %d: %v", i, err)
+				}
+			}
+			var head string
+			var state record.PullRequestState
+			if err := pool.QueryRow(context.Background(), "select head_sha, state from pull_requests where issue = 'LEGION-208'").Scan(&head, &state); err != nil {
+				t.Fatalf("read pull request: %v", err)
+			}
+			if head != tc.head || state != tc.state {
+				t.Fatalf("pull request at %s, %s; want %s, %s", head, state, tc.head, tc.state)
+			}
+		})
+	}
+}
+
 func describe(head, verdict, decision string, state record.PullRequestState) string {
 	return fmt.Sprintf("{head %s, verdict %q, decision %q, %s}", head, verdict, decision, state)
 }

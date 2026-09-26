@@ -86,6 +86,16 @@ func LateLifecycle(observed, applied time.Time) bool {
 	return !observed.IsZero() && !applied.IsZero() && observed.Before(applied)
 }
 
+// LatestClock is the clock a pull request keeps after applying an observation at observed: the
+// later of the two. An observation with no clock is applied but never lowers the stored one, which
+// would let an older observation redelivered after it pass LateLifecycle.
+func LatestClock(applied, observed time.Time) time.Time {
+	if observed.After(applied) {
+		return observed
+	}
+	return applied
+}
+
 // ApplyReview stores a changes-requested review from any reviewed head, or an approval only when
 // it is pinned to the current head. A new head clears the decision through AdvancePullRequestHead.
 func ApplyReview(pr record.PullRequest, state, commitID string) record.PullRequest {
