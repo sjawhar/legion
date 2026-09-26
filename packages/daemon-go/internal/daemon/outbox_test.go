@@ -454,6 +454,44 @@ func TestOutboxStartRelaunchesAFailedClaim(t *testing.T) {
 	}
 }
 
+// A claim whose launches failed keeps the task its start gave it. A re-admitted tree's promotion
+// starts such a claim with no task of its own (workflow.StartFor): the relaunch keeps the held
+// task, which goes once the agent is ready, and no second delivery is queued.
+func TestATasklessStartRelaunchesAFailedClaimWithTheTaskItHolds(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	ctx := context.Background()
+	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Testing, Generation: 1, Status: "testing"}
+	putOutboxIssue(t, pool, records, issue)
+	sup, runtime := newOutboxSupervisor(t, "legion", t.TempDir())
+	token, err := claim.NewToken("legion", issue.Key, claim.RoleTester)
+	if err != nil {
+		t.Fatal(err)
+	}
+	machine, _, err := sup.Create(ctx, supervise.Claim{Token: token, Project: "legion", Tree: issue.Tree, Issue: issue.Key, Role: claim.RoleTester, State: supervise.StateQueued}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := machine.Handle(ctx, supervise.RequestDeliver{Claim: token, Task: "Test it.", ID: "outbox:40", Phase: phase.Testing, Generation: 1}); err != nil {
+		t.Fatalf("queue the tester's task: %v", err)
+	}
+	runtime.ScriptSpawn(fake.SpawnResult{Err: errors.New("pane launch failed")}, fake.SpawnResult{Err: errors.New("pane launch failed")})
+	_ = machine.Handle(ctx, supervise.RequestSpawn{Claim: token})
+	if got := machine.Claim(); got.State != supervise.StateFailed || got.Pending == nil || got.Pending.ID != "outbox:40" {
+		t.Fatalf("tester after its launches failed = %+v, want failed holding its task", got)
+	}
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets"}
+	row := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RoleTester, Generation: 1, Phase: phase.Testing}, time.Now())
+	row.ID = 92
+
+	if err := runner.execute(ctx, row); err != nil {
+		t.Fatalf("taskless start of the failed claim: %v", err)
+	}
+	if got := machine.Claim(); got.State != supervise.StateLaunching || got.Pending == nil || got.Pending.ID != "outbox:40" || got.Pending.Task != "Test it." {
+		t.Fatalf("relaunched tester = %+v, want launching with the task it held pending", got)
+	}
+}
+
 // The architect's retry of a held phase writes a start carrying the retry task. The relaunched
 // claim still holds the task it was started with, so the retry task waits behind it and its row
 // is retried until that task's turn is over. That turn can finish the phase: the implementer

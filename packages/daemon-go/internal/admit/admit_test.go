@@ -294,6 +294,8 @@ func TestPromotionStartsAChildUnlessItsWorkerIsStartedForTheRun(t *testing.T) {
 		name  string
 		setup func(s seed)
 		want  int
+		// taskless is a start that hands no task: the claim delivers the one it holds once relaunched.
+		taskless bool
 	}{
 		{name: "no worker", setup: func(seed) {}, want: 1},
 		{name: "the window's start still queued", setup: func(s seed) { s.enqueue("start", 1) }, want: 0},
@@ -339,6 +341,22 @@ func TestPromotionStartsAChildUnlessItsWorkerIsStartedForTheRun(t *testing.T) {
 			s.pending(1, phase.Testing)
 			s.enqueue("suspend", 1)
 		}, want: 1},
+		{name: "a failed claim holding the phase's task", setup: func(s seed) {
+			s.claim("failed", 1, 7)
+			s.pending(1, phase.Testing)
+		}, want: 1, taskless: true},
+		{name: "a retired claim holding the phase's task", setup: func(s seed) {
+			s.claim("retired", 1, 7)
+			s.pending(1, phase.Testing)
+		}, want: 1, taskless: true},
+		{name: "a suspended claim holding the phase's task", setup: func(s seed) {
+			s.claim("suspended", 1, 7)
+			s.pending(1, phase.Testing)
+		}, want: 1, taskless: true},
+		{name: "a queued claim holding the phase's task", setup: func(s seed) {
+			s.claim("queued", 1, 7)
+			s.pending(1, phase.Testing)
+		}, want: 1, taskless: true},
 		{name: "another daemon's live claim on the same issue and role", setup: func(s seed) { s.otherClaim("working", 0) }, want: 1},
 		{name: "another daemon's claim beside this daemon's, with the close's suspend queued", setup: func(s seed) {
 			s.claim("working", 1, 0)
@@ -424,23 +442,28 @@ func TestPromotionStartsAChildUnlessItsWorkerIsStartedForTheRun(t *testing.T) {
 					enqueueRequest(record.SuperviseRequest{Op: "suspend", Tree: root.Key, Role: claim.RoleTester, Generation: child.Generation, Leaves: leaves})
 				},
 			})
-			testerStarts := func() int {
+			testerStarts := func() (starts, withTask int) {
 				t.Helper()
-				var starts int
-				if err := pool.QueryRow(context.Background(), `select count(*) from outbox where issue = 'LEGION-209' and kind = 'supervise'
-					and payload->>'op' = 'start' and payload->>'role' = 'tester' and payload->>'phase' = 'testing'`).Scan(&starts); err != nil {
+				if err := pool.QueryRow(context.Background(), `select count(*), count(*) filter (where coalesce(payload->>'task', '') <> '') from outbox
+					where issue = 'LEGION-209' and kind = 'supervise' and payload->>'op' = 'start' and payload->>'role' = 'tester' and payload->>'phase' = 'testing'`).
+					Scan(&starts, &withTask); err != nil {
 					t.Fatalf("count the child's starts: %v", err)
 				}
-				return starts
+				return starts, withTask
 			}
-			before := testerStarts()
+			before, beforeWithTask := testerStarts()
 
 			apply(t, pool, admission, "free-the-slot", intake.DispatchIssue{Key: "LEGION-100", Seq: 2, Type: "issue.closed", Status: "done", Title: "LEGION-100", Rank: "A"}, engine)
 			if slotted := issue(t, pool, root.Key); slotted.Status != "in_progress" {
 				t.Fatalf("the waiting root after the slot freed = %s, want it promoted", slotted.Status)
 			}
-			if added := testerStarts() - before; added != tc.want {
-				t.Fatalf("tester starts the promotion added = %d, want %d", added, tc.want)
+			after, afterWithTask := testerStarts()
+			wantWithTask := tc.want
+			if tc.taskless {
+				wantWithTask = 0
+			}
+			if added, addedWithTask := after-before, afterWithTask-beforeWithTask; added != tc.want || addedWithTask != wantWithTask {
+				t.Fatalf("tester starts the promotion added = %d, %d of them with a task; want %d, %d with a task", added, addedWithTask, tc.want, wantWithTask)
 			}
 		})
 	}

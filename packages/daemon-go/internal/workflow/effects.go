@@ -49,7 +49,7 @@ func SuspendApplies(leaves, current phase.Phase) bool {
 
 // StopActs is whether a queued stop, row id, still acts on its claim when the outbox runs it, with
 // the issue in phase current and lastStart the newest start the outbox ran against the claim (its
-// last_start_row). The outbox executor asks it of every suspend, and RoleStarted of every queued
+// last_start_row). The outbox executor asks it of every suspend, and StartFor of every queued
 // stop, so both read one rule. A tree close always acts. A suspend acts unless the issue is back
 // in a phase its role works (SuspendApplies), or a newer start has already run: that start
 // replaced the run the stop was written for, so acting would suspend the run it began and retire
@@ -67,15 +67,22 @@ func StopActs(id int64, stop record.SuperviseRequest, current phase.Phase, lastS
 	}
 }
 
-// RoleStarted is whether run already starts its role for generation in phase current: whether the
-// newest of its operations that will still act is a start. A stop that still acts (StopActs) undoes
-// any older start, which may run first, so past one only a newer queued start for current counts.
-// With none, a queued start for current counts, and so does the claim when it is live or holds
-// current's task for generation undelivered or unconfirmed (a launch whose outcome is uncertain
-// still holds the task its start gave it): no start acts while the tree lingers, and the tree's
-// close queues a suspend of every claim, so such a claim was started since the tree ran again. A
-// suspended, failed, retired or unlaunched claim holding no such task runs nothing.
-func RoleStarted(run record.RoleRun, generation uint64, current phase.Phase) bool {
+// StartFor is how a re-admitted tree's promotion starts the role of a mid-phase child from run, the
+// role's queued rows and claim for generation, with the child in phase current. start is false
+// when the role is already started for this run: the newest of its operations that will still act
+// is a start. A stop that still acts (StopActs) undoes any older start, which may run first, so
+// past one only a newer queued start for current counts. With none, a queued start for current
+// counts, and so does a claim that may have a process: a live one, or one whose launch is
+// uncertain holding current's task for generation (the task its start gave it). No start acts
+// while the tree lingers, and the tree's close queues a suspend of every claim, so such a claim was
+// started since the tree ran again.
+//
+// withTask is whether the start hands the role current's task. A claim that runs nothing (failed,
+// retired, suspended, queued) but still holds that task, undelivered or unconfirmed, delivers it
+// once its relaunch is ready, so its start carries none: a second task would be the same one
+// twice. With a stop still to act the start carries the task all the same, since a suspend that
+// runs first retires the one the claim holds.
+func StartFor(run record.RoleRun, generation uint64, current phase.Phase) (start, withTask bool) {
 	var lastStart int64
 	if run.Claim != nil {
 		lastStart = run.Claim.LastStartRow
@@ -88,15 +95,22 @@ func RoleStarted(run record.RoleRun, generation uint64, current phase.Phase) boo
 	}
 	for _, queued := range run.Queued {
 		if queued.Request.Op == "start" && queued.Request.Phase == current && queued.ID > stop {
-			return true
+			return false, false
 		}
 	}
 	if stop != 0 || run.Claim == nil {
-		return false
+		return true, true
 	}
 	held := run.Claim
-	return slices.Contains(supervise.LiveStates(), held.State) ||
-		held.Pending && held.PendingGeneration == generation && held.PendingPhase == current
+	holds := held.Pending && held.PendingGeneration == generation && held.PendingPhase == current
+	switch {
+	case slices.Contains(supervise.LiveStates(), held.State), holds && held.State == supervise.StateLaunchUncertain:
+		return false, false
+	case holds:
+		return true, false
+	default:
+		return true, true
+	}
 }
 
 func (e *Engine) enqueue(ctx context.Context, tx pgx.Tx, issue string, payload record.OutboxPayload) error {

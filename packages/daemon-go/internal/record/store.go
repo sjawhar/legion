@@ -471,7 +471,7 @@ func (s *Postgres) RetryOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseTo
 // RoleRun reads one role's run of an issue generation as the store holds it: the role's supervise
 // rows for the generation still queued, oldest first, and the claim with token (this daemon's own
 // claim on the role), with the task it holds undelivered or unconfirmed. It decides nothing:
-// workflow.RoleStarted reads it.
+// workflow.StartFor reads it.
 func (s *Postgres) RoleRun(ctx context.Context, tx pgx.Tx, token claim.Token, issue string, role claim.Role, generation uint64) (RoleRun, error) {
 	rows, err := tx.Query(ctx, `select `+outboxColumns+` from outbox
 		where issue = $1 and kind = $2 and payload->>'role' = $3 and payload->>'generation' = $4 order by id`,

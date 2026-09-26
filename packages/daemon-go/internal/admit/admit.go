@@ -362,14 +362,14 @@ func ownSlots(issues []record.Issue, slots []record.Slot) []record.Slot {
 // moves it, and the architect cannot release a child already in the workflow. Each start carries
 // the child's own generation and phase, which is what the outbox fences it against, and the task
 // that says to carry the phase on: a start with no task leaves the resumed agent holding its old
-// transcript with nothing asked of it, and only its own handoff moves the phase. A child whose
-// worker is already started for this run (a fact moved it while the root waited for its slot, and
-// that start is queued or has run) is not started a second time: the task would be delivered
-// twice. A child whose claim a stop from the tree's close will still suspend is started, so this
-// start ends last or supersedes the stop (workflow.RoleStarted, over the role's queued rows and
-// this daemon's own claim). The check lives here, where the second start would be written, rather
-// than in the start's executor, which could tell a repeated task only if the claim also recorded
-// the phase of the task it serves.
+// transcript with nothing asked of it, and only its own handoff moves the phase, unless the claim
+// still holds that task and delivers it once relaunched. A child whose worker is already started
+// for this run (a fact moved it while the root waited for its slot, and that start is queued or
+// has run) is not started a second time: the task would be delivered twice. A child whose claim a
+// stop from the tree's close will still suspend is started, so this start ends last or supersedes
+// the stop (workflow.StartFor, over the role's queued rows and this daemon's own claim). The check
+// lives here, where the second start would be written, rather than in the start's executor, which
+// could tell a repeated task only if the claim also recorded the phase of the task it serves.
 func (a *Admission) startMidPhaseChildren(ctx context.Context, tx pgx.Tx, root record.Issue, issues []record.Issue, now time.Time) error {
 	project, err := claim.ProjectToken(a.project)
 	if err != nil {
@@ -391,11 +391,14 @@ func (a *Admission) startMidPhaseChildren(ctx context.Context, tx pgx.Tx, root r
 		if err != nil {
 			return err
 		}
-		if workflow.RoleStarted(run, child.Generation, child.Phase) {
+		start, withTask := workflow.StartFor(run, child.Generation, child.Phase)
+		if !start {
 			continue
 		}
-		payload := record.SuperviseRequest{Op: "start", Tree: child.Tree, Role: role, Generation: child.Generation,
-			Phase: child.Phase, Task: workflow.ResumePhaseTask(child)}
+		payload := record.SuperviseRequest{Op: "start", Tree: child.Tree, Role: role, Generation: child.Generation, Phase: child.Phase}
+		if withTask {
+			payload.Task = workflow.ResumePhaseTask(child)
+		}
 		if err := a.enqueue(ctx, tx, child.Key, payload, now); err != nil {
 			return err
 		}
