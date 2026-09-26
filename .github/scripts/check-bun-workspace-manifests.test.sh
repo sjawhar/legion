@@ -89,4 +89,45 @@ check "exits 1" "$(is "$status" 1)"
 check "still names the manifest copied too late" \
   "$(contains "$out" 'missing COPY for packages/beta/package.json before bun install --frozen-lockfile')"
 
+echo "case: a COPY whose JSON-array form cannot be decoded fails loudly"
+root=$(fixture malformed-json-copy)
+cat > "$root/docker/worker.Dockerfile" <<'DOCKERFILE'
+FROM oven/bun:1.3.14 AS cli
+WORKDIR /repo
+COPY package.json bun.lock ./
+COPY packages/alpha/package.json packages/alpha/package.json
+COPY ["packages/beta/package.json", "packages/beta/package.json"
+RUN bun install --frozen-lockfile
+DOCKERFILE
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the Dockerfile and the line of the COPY it could not read" \
+  "$(contains "$out" 'docker/worker.Dockerfile:5: malformed JSON-array COPY')"
+
+echo "case: a COPY whose shell form cannot be split fails loudly"
+root=$(fixture unparseable-shell-copy)
+cat > "$root/docker/worker.Dockerfile" <<'DOCKERFILE'
+FROM oven/bun:1.3.14 AS cli
+WORKDIR /repo
+COPY package.json bun.lock ./
+COPY packages/alpha/package.json packages/alpha/package.json
+COPY "packages/beta/package.json packages/beta/package.json
+RUN bun install --frozen-lockfile
+DOCKERFILE
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the Dockerfile and the line of the COPY it could not read" \
+  "$(contains "$out" 'docker/worker.Dockerfile:5: unparseable COPY')"
+
+echo "case: a tree where the check covers no frozen install at all is a failure"
+root=$(fixture zero-covered)
+cat > "$root/docker/worker.Dockerfile" <<'DOCKERFILE'
+FROM debian:bookworm-slim
+RUN echo no-bun-install
+DOCKERFILE
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "says nothing was covered" \
+  "$(contains "$out" 'no Dockerfile runs bun install --frozen-lockfile')"
+
 summary "check-bun-workspace-manifests.sh"

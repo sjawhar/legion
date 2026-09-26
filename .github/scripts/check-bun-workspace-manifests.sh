@@ -69,20 +69,31 @@ def joined_lines(text: str):
         yield start, pending.strip()
 
 
+class CopyParseError(ValueError):
+    """A COPY instruction this check cannot read. Reading zero sources from one would look
+    exactly like a manifest that is copied, so it is reported at its line instead."""
+
+
 def copy_sources(instruction: str) -> list[str]:
     """Source paths for one Docker COPY instruction; flags and destination do not count."""
     arguments = instruction[4:].strip()
     if arguments.startswith("["):
         try:
             entries = json.loads(arguments)
-        except json.JSONDecodeError:
-            return []
-        return entries[:-1] if isinstance(entries, list) and all(isinstance(item, str) for item in entries) else []
+        except json.JSONDecodeError as error:
+            raise CopyParseError(f"malformed JSON-array COPY: {error.msg}") from error
+        if not isinstance(entries, list) or not all(isinstance(item, str) for item in entries):
+            raise CopyParseError("malformed JSON-array COPY: not an array of strings")
+        if len(entries) < 2:
+            raise CopyParseError("malformed JSON-array COPY: no source and destination")
+        return [entry.removeprefix("./") for entry in entries[:-1]]
     try:
         entries = shlex.split(arguments)
-    except ValueError:
-        return []
+    except ValueError as error:
+        raise CopyParseError(f"unparseable COPY: {error}") from error
     paths = [entry.removeprefix("./") for entry in entries if not entry.startswith("--")]
+    if len(paths) < 2:
+        raise CopyParseError("unparseable COPY: no source and destination")
     return paths[:-1]
 
 
@@ -104,8 +115,9 @@ if missing_manifests:
         print(f"::error file=package.json::workspace manifest {manifest} is missing", file=sys.stderr)
     raise SystemExit(1)
 
-problems = []
+problems: list[tuple[str, str]] = []
 checked = dockerfiles()
+covered_installs = 0
 for dockerfile in checked:
     copied: set[str] = set()
     frozen_installs = 0
@@ -114,7 +126,10 @@ for dockerfile in checked:
         if command == "FROM":
             copied.clear()
         elif command == "COPY":
-            copied.update(copy_sources(instruction))
+            try:
+                copied.update(copy_sources(instruction))
+            except CopyParseError as error:
+                problems.append((str(dockerfile), f"{dockerfile}:{line}: {error}"))
         elif command == "RUN" and FROZEN_INSTALL.search(instruction):
             frozen_installs += 1
             print(
@@ -124,22 +139,37 @@ for dockerfile in checked:
             for manifest in manifests:
                 if manifest not in copied:
                     problems.append(
-                        f"{dockerfile}:{line}: missing COPY for {manifest} before "
-                        "bun install --frozen-lockfile"
+                        (
+                            str(dockerfile),
+                            f"{dockerfile}:{line}: missing COPY for {manifest} before "
+                            "bun install --frozen-lockfile",
+                        )
                     )
+    covered_installs += frozen_installs
     if not frozen_installs:
         print(f"{dockerfile}: checked {len(manifests)} root workspaces; no bun install --frozen-lockfile")
 
-if not checked:
-    print(f"checked 0 Dockerfiles; {len(manifests)} root workspaces")
-for problem in problems:
-    print(f"::error file={problem.split(':', 1)[0]}::{problem}", file=sys.stderr)
+# Zero covered installs is the one result that would pass while checking nothing: a renamed
+# Dockerfile, a moved install step, or a walk that found no Dockerfile at all.
+if not covered_installs:
+    problems.append(
+        (
+            "package.json",
+            "no Dockerfile runs bun install --frozen-lockfile: this check covered 0 frozen "
+            f"installs across {len(checked)} Dockerfile(s), so it proves nothing",
+        )
+    )
+
+for path, problem in problems:
+    print(f"::error file={path}::{problem}", file=sys.stderr)
 if problems:
     print(
-        f"::error::{len(problems)} workspace manifest COPY requirement(s) failed across "
-        f"{len(checked)} Dockerfile(s)",
+        f"::error::{len(problems)} problem(s) across {len(checked)} Dockerfile(s)",
         file=sys.stderr,
     )
     raise SystemExit(1)
-print(f"every frozen Bun install copies {len(manifests)} root workspace manifests")
+print(
+    f"every frozen Bun install copies {len(manifests)} root workspace manifests "
+    f"({covered_installs} frozen install(s) across {len(checked)} Dockerfile(s))"
+)
 PY
