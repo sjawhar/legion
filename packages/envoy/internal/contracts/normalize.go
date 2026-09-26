@@ -747,7 +747,7 @@ func githubPayload(event string, body map[string]any) string {
 			"after":                   stringValue(body["after"]),
 			"before":                  stringValue(body["before"]),
 			"pusher":                  nestedString(body, "pusher", "name"),
-			"head_subject":            firstNonEmptyLine(nestedString(body, "head_commit", "message")),
+			"head_subject":            first(nestedString(body, "head_commit", "message"), maxEnvelopeTextRunes),
 			"commit_count":            strconv.Itoa(len(sliceValue(body["commits"]))),
 			"compare_url":             stringValue(body["compare"]),
 			"changed_paths":           strings.Join(changedPaths, "\n"),
@@ -1140,12 +1140,19 @@ func truncateWithEllipsis(s string, maxRunes int) string {
 	return string(runes[:maxRunes]) + "…"
 }
 
+// maxEnvelopeTextRunes caps the free-text fields a GitHub envelope copies from its webhook body
+// that GitHub bounds loosely or not at all: a comment or review body (up to 65,536 characters) and
+// a push's head_subject (a commit message has no limit); titles come capped at 256 characters by
+// GitHub. The listener publishes an envelope to NATS whole, and a publish larger than the server's
+// max payload (1 MiB by default) fails, so no field may grow with the webhook it came from.
+const maxEnvelopeTextRunes = 2048
+
 func capBody(s string) (string, bool) {
 	runes := []rune(s)
-	if len(runes) <= 2048 {
+	if len(runes) <= maxEnvelopeTextRunes {
 		return s, false
 	}
-	return string(runes[:2048]), true
+	return string(runes[:maxEnvelopeTextRunes]), true
 }
 
 func shortSHA(sha string) string {
