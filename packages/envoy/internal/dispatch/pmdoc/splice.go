@@ -497,18 +497,13 @@ func joinSiblingsAtBoundary(doc *Node, parentPath, leftPath, rightPath []int, me
 
 // holdsEmptyTypedBlock reports whether node is, or contains, a typed block with no children.
 func holdsEmptyTypedBlock(node *Node) bool {
-	if node == nil {
-		return false
-	}
-	if _, typed := typedBlock(node.Type); typed && len(node.Children) == 0 {
-		return true
-	}
-	for _, child := range node.Children {
-		if holdsEmptyTypedBlock(child) {
-			return true
-		}
-	}
-	return false
+	found := false
+	Walk(node, func(child *Node) bool {
+		_, typed := typedBlock(child.Type)
+		found = typed && len(child.Children) == 0
+		return !found
+	})
+	return found
 }
 
 func closeOpenSide(node *Node, path []int, replacement *Node) (*Node, bool) {

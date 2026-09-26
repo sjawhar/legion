@@ -256,6 +256,50 @@ func TestSuggestionActionsAreRefusedOnlyForAnAskAnAcceptBroke(t *testing.T) {
 	}
 }
 
+// A block replacement over a callout's only paragraph lands inside the callout, as ProseMirror's
+// fit puts it there, so the callout keeps its id, kind and title whatever the blocks are. The fit
+// once climbed out of the callout and replaced it with the blocks, which both parsers read back as
+// written, so nothing downstream could notice the callout was gone.
+func TestSuggestionAcceptKeepsTheCalloutItLandsIn(t *testing.T) {
+	for _, test := range []struct{ name, replaceWith, body string }{
+		{name: "a rule", replaceWith: "***\n", body: "---\n"},
+		{name: "a list", replaceWith: "- a\n", body: "- a\n"},
+		{name: "a heading", replaceWith: "# h\n", body: "# h\n"},
+		{name: "a blockquote", replaceWith: "> q\n", body: "> q\n"},
+		{name: "a code block", replaceWith: "```\ncode\n```\n", body: "```\ncode\n```\n"},
+		{name: "two paragraphs", replaceWith: "a\n\nb\n", body: "a\n\nb\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var documentService *docs.Service
+			handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+				documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
+				t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+				return documentService
+			})
+			issue := createInteractionIssue(t, handler, "TEST", "A callout's only paragraph",
+				"Intro.\n\n:::callout{#c1 kind=\"warning\" title=\"T\"}\nOnly.\n:::\n")
+			created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+				"body": "suggested", "anchor": map[string]any{"artifact": "spec", "quote": "Only."},
+				"suggestion": map[string]string{"replace_with": test.replaceWith}, "actor": sessionActor(),
+			})
+			if created.Code != http.StatusCreated {
+				t.Fatalf("create the suggestion: status=%d body=%s", created.Code, created.Body.String())
+			}
+			comment := decodeBody[model.Comment](t, created)
+
+			accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
+
+			if accepted.Code != http.StatusOK {
+				t.Fatalf("accept: status=%d body=%s", accepted.Code, accepted.Body.String())
+			}
+			want := "Intro.\n\n:::callout{#c1 kind=\"warning\" title=\"T\"}\n" + test.body + ":::\n"
+			if text, err := documentService.Text(context.Background(), issue.PrimaryArtifactID); err != nil || text != want {
+				t.Fatalf("document after the accept = %q (%v), want %q", text, err, want)
+			}
+		})
+	}
+}
+
 // askSpec is a document holding one open ask, a1, between two paragraphs.
 const askSpec = "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich one?\n:::\n\nAfter.\n"
 
@@ -293,10 +337,12 @@ func TestSuggestionAcceptRefusals(t *testing.T) {
 			code: "INVALID_ASK_BLOCK", reason: `ask block \"a1\" has unsupported body node \"code_block\"`, sameThroughEdits: true},
 		{name: "a paragraph after a free-text ask's new options", spec: askSpec, quote: "Which one?",
 			replaceWith: "Which database?\n\n- Postgres\n- SQLite\n\nPick one by Friday.\n",
-			code:        "INVALID_ASK_BLOCK", reason: `ask block \"a1\" holds a paragraph after its options`},
+			code:        "INVALID_ASK_BLOCK", reason: `holds a paragraph after its options`},
 		{name: "a second bullet list in an ask with options", quote: "Which one?", replaceWith: "Which?\n\n- X\n",
 			spec: "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich one?\n\n- A\n- B\n:::\n",
-			code: "INVALID_ASK_BLOCK", reason: `ask block \"a1\" holds a second bullet list`},
+			code: "INVALID_ASK_BLOCK", reason: `holds a second bullet list`},
+		{name: "an ask's only question replaced by a heading", spec: askSpec, quote: "Which one?", replaceWith: "# h\n",
+			code: "INVALID_ASK_BLOCK", reason: `ask block \"a1\" has unsupported body node \"heading\"`},
 		{name: "an ask's whole question deleted", spec: askSpec, quote: "Which one?", replaceWith: "",
 			code: "INVALID_ASK_BLOCK", reason: `ask block \"a1\" has an empty question`},
 		{name: "an ask under a held id", spec: "Intro typo.\n\n" + askSpec, quote: "Intro typo.",

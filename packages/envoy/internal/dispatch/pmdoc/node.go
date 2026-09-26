@@ -178,7 +178,7 @@ func validateTypedBlock(n *Node, typ BlockTypeSchema) error {
 			}
 			break
 		}
-		if !paragraphsThenOptionalBulletList(n.Children) {
+		if askContentBreak(n.Children) != "" {
 			return fmt.Errorf("%w: typed block %q content %q requires paragraphs followed by an optional bullet list", ErrSchema, n.Type, typ.Content)
 		}
 	default:
@@ -223,20 +223,59 @@ func AskContentError(node *Node) error {
 		if found != nil {
 			return false
 		}
-		if ask.Type != "ask" || paragraphsThenOptionalBulletList(ask.Children) {
+		if ask.Type != "ask" {
+			return true
+		}
+		broken := askContentBreak(ask.Children)
+		if broken == "" {
 			return true
 		}
 		id, _ := ask.Attrs[BlockIDAttr].(string)
-		found = fmt.Errorf("ask block %q holds %s where its content rule, %s, allows one or more paragraphs and then at most one bullet list, last", id, askContentBreak(ask.Children), BlockContentParagraphsOptionalBulletList)
+		found = fmt.Errorf("ask block %q%s holds %s where its content rule, %s, allows one or more paragraphs and then at most one bullet list, last", id, askQuestionOpening(ask), broken, BlockContentParagraphsOptionalBulletList)
 		return false
 	})
 	return found
 }
 
-// askContentBreak names the first child that breaks an ask's content rule.
+// askQuestionOpening is `, asking "<its question's opening words>"`, or "" for an ask that opens
+// with no question. A refusal names an ask by its block id, which the parser makes up when the
+// markdown gives none, so the question is how its author knows which ask is meant.
+func askQuestionOpening(ask *Node) string {
+	if len(ask.Children) == 0 || ask.Children[0] == nil || ask.Children[0].Type != "paragraph" {
+		return ""
+	}
+	var text strings.Builder
+	var collect func(*Node)
+	collect = func(node *Node) {
+		if node.Type == "text" {
+			text.WriteString(node.Text)
+		}
+		for _, child := range node.Children {
+			collect(child)
+		}
+	}
+	collect(ask.Children[0])
+	question := []rune(strings.Join(strings.Fields(text.String()), " "))
+	if len(question) == 0 {
+		return ""
+	}
+	const opening = 40
+	if len(question) > opening {
+		question = append([]rune(strings.TrimRight(string(question[:opening]), " ")), '…')
+	}
+	return fmt.Sprintf(", asking %q,", string(question))
+}
+
+// askContentBreak names the first child that breaks the content rule paragraph+ bullet_list? -
+// one or more paragraphs, then at most one bullet list, last - or is "" when the children keep it.
 func askContentBreak(children []*Node) string {
+	if len(children) == 0 {
+		return "nothing"
+	}
 	for index, child := range children {
 		switch {
+		case child == nil:
+			return "a missing block"
 		case index == 0 && child.Type != "paragraph":
 			return askBlockName(child.Type) + " before its question"
 		case child.Type == "paragraph" && index > 0 && children[index-1].Type == "bullet_list":
@@ -247,7 +286,7 @@ func askContentBreak(children []*Node) string {
 			return askBlockName(child.Type)
 		}
 	}
-	return "nothing"
+	return ""
 }
 
 // askBlockName is a block type as a reader names it, with its article: "a code block", "an
@@ -261,22 +300,6 @@ func askBlockName(nodeType string) string {
 		return "an " + name
 	}
 	return "a " + name
-}
-
-func paragraphsThenOptionalBulletList(children []*Node) bool {
-	if len(children) == 0 || children[0] == nil || children[0].Type != "paragraph" {
-		return false
-	}
-	for index, child := range children {
-		if child == nil {
-			return false
-		}
-		if child.Type == "paragraph" {
-			continue
-		}
-		return child.Type == "bullet_list" && index == len(children)-1
-	}
-	return true
 }
 
 func childrenAre(children []*Node, typeName string) bool {
