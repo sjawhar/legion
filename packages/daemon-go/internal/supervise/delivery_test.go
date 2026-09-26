@@ -68,6 +68,86 @@ func TestADeliveryToAnIdleClaimIsSentAtOnce(t *testing.T) {
 	}
 }
 
+// A worker whose process dies mid-turn is relaunched as the same session, and Oh My Pi does not
+// continue an interrupted turn on resume. So the task goes back to waiting: unconfirmed, under a
+// new id the new process's shim has no record of, and re-sent when the relaunched agent is ready,
+// behind the one sentence that says its turn was interrupted — once, however often that happens.
+// The task is not retired and its run is not marked served until a turn of it ends.
+func TestATaskInterruptedByADeathIsResentToTheRelaunchedAgent(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateReady)
+	h.must(RequestDeliver{Claim: testToken, Task: "implement the plan", Generation: 5})
+	h.must(StreamTurnStart{Claim: testToken})
+	sent := h.wantPrompts(1)[0].DeliveryID
+
+	for death := 1; death <= 2; death++ {
+		h.observe(runtime.Gone)
+		h.relaunched()
+
+		prompts := h.wantPrompts(1 + death)
+		resent := prompts[death]
+		if resent.DeliveryID == sent {
+			t.Fatalf("death %d: the task was re-sent as %s, the id the dead process's turn ran under", death, sent)
+		}
+		if want := interruptedTask + "implement the plan"; resent.Message != want {
+			t.Fatalf("death %d: re-sent %q, want %q", death, resent.Message, want)
+		}
+		if p := h.pending(); !p.ConfirmedAt.IsZero() || p.ID != resent.DeliveryID {
+			t.Fatalf("death %d: pending %+v, want the re-sent task, unconfirmed until its turn starts", death, p)
+		}
+		if stored := h.store.load(testToken); stored.ServingGeneration != 0 || stored.Pending == nil {
+			t.Fatalf("death %d: stored claim serving run %d with pending %+v, want no run served and the task kept",
+				death, stored.ServingGeneration, stored.Pending)
+		}
+		sent = resent.DeliveryID
+		h.must(StreamTurnStart{Claim: testToken})
+		h.wantState(StateWorking)
+	}
+
+	h.must(StreamTurnEnd{Claim: testToken})
+
+	if stored := h.store.load(testToken); stored.ServingGeneration != 5 || stored.Pending != nil {
+		t.Fatalf("stored claim serving run %d with pending %+v, want run 5 served once the re-sent turn ended",
+			stored.ServingGeneration, stored.Pending)
+	}
+}
+
+// A task acknowledged and not yet begun when the process died was never run, so the relaunched
+// agent is sent it as it was: nothing was interrupted.
+func TestATaskNotYetBegunWhenTheProcessDiedIsResentAsItWas(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateReady)
+	h.must(RequestDeliver{Claim: testToken, Task: "implement the plan", Generation: 5})
+	h.wantPrompts(1)
+
+	h.observe(runtime.Gone)
+	h.relaunched()
+
+	if resent := h.wantPrompts(2)[1]; resent.Message != "implement the plan" {
+		t.Fatalf("re-sent %q, want the task as it was", resent.Message)
+	}
+}
+
+// The re-sent task keeps the read mark the interrupted turn earned, and the relaunched agent's
+// acknowledgement takes that mark over: a refusal of the re-sent prompt is judged against it, so
+// the task goes back unread and the prompt is charged, as for any prompt its agent refused.
+func TestARefusalOfTheResentTaskIsJudgedAgainstItsOwnAcknowledgement(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateReady)
+	h.must(RequestDeliver{Claim: testToken, Task: "implement the plan", Generation: 5})
+	h.must(StreamTurnStart{Claim: testToken})
+	h.observe(runtime.Gone)
+	h.relaunched()
+	resent := h.wantPrompts(2)[1].DeliveryID
+
+	h.must(StreamLateRefusal{Claim: testToken, DeliveryID: resent, Error: "the model provider refused the request"})
+
+	h.wantBudgets(Budgets{PromptFailures: 1})
+	if p := h.pending(); p.ID == resent || !p.DeliveredAt.IsZero() || !p.ConfirmedAt.IsZero() {
+		t.Fatalf("pending after the refusal = %+v, want the task kept unread and unconfirmed under a new id", p)
+	}
+}
+
 func TestATaskGivenBeforeReadyWaitsForReady(t *testing.T) {
 	for _, state := range []ClaimState{StateQueued, StateLaunching, StateShimConnected, StateRegistered} {
 		t.Run(string(state), func(t *testing.T) {

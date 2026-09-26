@@ -341,14 +341,6 @@ func TestAProcessFoundGoneIsRelaunchedAsTheSameSession(t *testing.T) {
 				if resume.Previous == nil || *resume.Previous != dead || resume.Spec.ResumeSessionFile != sessionFile || resume.Spec.Generation != 2 {
 					t.Errorf("resumed %+v from %+v, want the same session after the dead incarnation, at generation 2", resume.Spec, resume.Previous)
 				}
-				if state == StateWorking {
-					if p := h.claim().Pending; p != nil {
-						t.Errorf("pending %+v, want the delivery the dead turn had confirmed retired", p)
-					}
-					if _, ok := h.store.delivery(testToken); ok {
-						t.Error("the store still holds the confirmed delivery")
-					}
-				}
 			})
 		}
 	}

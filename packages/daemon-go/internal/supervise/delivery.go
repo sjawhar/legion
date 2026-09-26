@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -300,6 +301,31 @@ func (m *Machine) promptFailed(ctx context.Context, why string, read bool) error
 		return err
 	}
 	return m.chargePrompt(ctx, why)
+}
+
+// interruptedTask begins a task re-sent because the process running its turn died. Oh My Pi does
+// not continue an interrupted turn when its session is resumed, and the resumed session already
+// holds the task, so the agent is told to carry on from where the turn stopped, not start over.
+const interruptedTask = "Your previous turn on this task was interrupted when your process died. " +
+	"Before repeating anything, check what that turn already did in your workspace and on the " +
+	"issue's branch, then continue the task.\n\n"
+
+// interrupted takes back the pending task whose turn the claim's dead process was running, so the
+// relaunched agent's ready sends it again: Oh My Pi does not resume the turn itself. The turn ran,
+// so the agent read the task and it keeps its read mark; it goes back unconfirmed under a new id
+// (takeBackPending), behind interruptedTask once however often it is interrupted. It is neither
+// retired nor its run marked served, since the turn never finished. A task with no turn running
+// is left as it is: the relaunch sends it as it was.
+func (m *Machine) interrupted(ctx context.Context) error {
+	p := m.claim.Pending
+	if p == nil || p.ConfirmedAt.IsZero() {
+		return nil
+	}
+	if !strings.HasPrefix(p.Task, interruptedTask) {
+		p.Task = interruptedTask + p.Task
+	}
+	m.log.Warn("supervise: the process died in the task's turn; the task waits for the relaunch", "delivery", p.ID)
+	return m.takeBackPending(ctx, taskRead)
 }
 
 // taskRead and taskUnread say whether the agent may have read a task being taken back: the task
