@@ -109,8 +109,24 @@ secrets:
 	}
 }
 
+const singleDocBase = "version: 1\nsecrets:\n  X:\n    source: s\n    owner: o\n    delivery: inject\n    max_lifetime_seconds: 60\n    requesters: []\n"
+
+func TestSingleDocumentAccepted(t *testing.T) {
+	cases := map[string]string{
+		"plain document":                    singleDocBase,
+		"trailing whitespace and comments":  singleDocBase + "\n# a trailing comment\n\n",
+		"explicit end marker plus comments": singleDocBase + "...\n# a trailing comment\n",
+		"trailing bare document separator":  singleDocBase + "---\n",
+	}
+	for name, data := range cases {
+		if _, err := Parse([]byte(data)); err != nil {
+			t.Fatalf("%s: expected acceptance, got %v", name, err)
+		}
+	}
+}
+
 func TestMultiDocumentRefused(t *testing.T) {
-	data := []byte("version: 1\nsecrets:\n  X:\n    source: s\n    owner: o\n    delivery: inject\n    max_lifetime_seconds: 60\n    requesters: []\n---\nanything: goes\n")
+	data := []byte(singleDocBase + "---\nanything: goes\n")
 	if _, err := Parse(data); err == nil {
 		t.Fatal("expected multi-document rules file to be refused")
 	}

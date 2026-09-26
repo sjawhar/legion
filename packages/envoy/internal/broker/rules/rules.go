@@ -84,11 +84,14 @@ func Parse(data []byte) (*Set, error) {
 	if err := dec.Decode(&f); err != nil {
 		return nil, fmt.Errorf("rules: %w", err)
 	}
-	if err := dec.Decode(new(yaml.Node)); err != io.EOF {
-		if err == nil {
+	var extra yaml.Node
+	if err := dec.Decode(&extra); err != io.EOF {
+		if err != nil {
+			return nil, fmt.Errorf("rules: %w", err)
+		}
+		if !isEmptyDocument(&extra) {
 			return nil, fmt.Errorf("rules: file has more than one YAML document")
 		}
-		return nil, fmt.Errorf("rules: %w", err)
 	}
 	if f.Version != 1 {
 		return nil, fmt.Errorf("rules: version must be 1, got %d", f.Version)
@@ -147,6 +150,16 @@ func Parse(data []byte) (*Set, error) {
 			MaxLifetime: time.Duration(r.MaxLifetimeSeconds) * time.Second, Requesters: *r.Requesters, Proxy: r.Proxy}
 	}
 	return set, nil
+}
+
+// isEmptyDocument reports whether a decoded yaml.Node is the trailing "---" YAML.v3 emits for a
+// document separator with nothing meaningful after it (no content, or a lone null scalar) rather
+// than a genuine second document, which Parse must refuse.
+func isEmptyDocument(n *yaml.Node) bool {
+	if len(n.Content) == 0 {
+		return true
+	}
+	return len(n.Content) == 1 && n.Content[0].Kind == yaml.ScalarNode && n.Content[0].Tag == "!!null"
 }
 
 func (s *Set) Evaluate(name string, r Requester) (Decision, error) {
