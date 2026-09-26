@@ -538,6 +538,37 @@ func TestAClosedRootEndsItsHoldAndItsEscalation(t *testing.T) {
 	assertOutboxCount(t, pool, "linger_close", 1)
 }
 
+// A held child keeps its hold when its tree closes, escalation included, since the tree's
+// re-admission leaves it held and the escalation still unanswered. While the tree lingers or is
+// closed, the escalation waits on nobody, so the state the controller reads at every start shows
+// the child held with no hold reason.
+func TestAnEscalatedChildOfAClosedTreeKeepsItsHoldButShowsNoEscalation(t *testing.T) {
+	pool := migratedPool(t)
+	ctx := context.Background()
+	root, from := "LEGION-208", phase.Implementing
+	seedIssue(t, pool, record.Issue{Key: root, Tree: root, Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U", LastDispatchSeq: 1})
+	seedIssue(t, pool, record.Issue{Key: "LEGION-209", Tree: root, Parent: &root, Project: "LEGION", Title: "child", Phase: phase.Held, HeldFrom: &from, Generation: 1, Status: "in_progress", Rank: "V", LastDispatchSeq: 1})
+	if _, err := intake.ApplyFact(ctx, pool, "architect", "escalate", intake.RetryOrEscalate{Issue: "LEGION-209", Decision: intake.EscalateDecision}, testEngine(), admissionStub{}); err != nil {
+		t.Fatalf("escalate the child: %v", err)
+	}
+	if got, reason := projectedHold(t, pool, "LEGION-209"); got != phase.Held || reason != "escalated" {
+		t.Fatalf("in a running tree the state reads the child's phase %s hold reason %q, want held and escalated", got, reason)
+	}
+	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "root-backlog", intake.DispatchIssue{Key: root, Seq: 2, Type: "issue.updated", Status: "backlog", Title: "root", Rank: "U"}, testEngine(), admissionStub{}); err != nil {
+		t.Fatalf("move the root to backlog: %v", err)
+	}
+	if got, reason := projectedHold(t, pool, "LEGION-209"); got != phase.Held || reason != "" {
+		t.Fatalf("with its tree closed the state reads the child's phase %s hold reason %q, want held and none", got, reason)
+	}
+	var heldFrom, holdReason string
+	if err := pool.QueryRow(ctx, "select held_from, hold_reason from issues where key = $1", "LEGION-209").Scan(&heldFrom, &holdReason); err != nil {
+		t.Fatalf("read the child's hold: %v", err)
+	}
+	if heldFrom != string(from) || holdReason != "escalated" {
+		t.Fatalf("the child's record holds it from %q for %q, want from %s for escalated", heldFrom, holdReason, from)
+	}
+}
+
 // projectedHold is the issue's phase and hold reason as the state view shows them.
 func projectedHold(t *testing.T, pool *pgxpool.Pool, key string) (phase.Phase, string) {
 	t.Helper()

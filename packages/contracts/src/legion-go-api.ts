@@ -142,7 +142,7 @@ const legionGoIssue = z.strictObject({
   phase: z.enum(LEGION_GO_PHASES),
   status: nonEmptyString,
   /** Why a held issue is held, when its hold has one: `escalated` once its architect sent it to
-   * the controller. */
+   * the controller. Absent while the issue's tree lingers or is closed, until it is re-admitted. */
   holdReason: z.literal("escalated").optional(),
   architect: legionGoClaimView.optional(),
   workers: z.partialRecord(z.enum(LEGION_ROLES), legionGoPhaseView),

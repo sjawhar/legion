@@ -90,8 +90,10 @@ Envoy hands an Oh My Pi session no retained copy of a notice published before it
 hold or a tree architect's failed claim from while no controller ran never arrives as a wake. At
 every start, before anything else, read `legion state --json` and handle each issue whose
 `issues.<KEY>.phase` is `held` (its `issues.<KEY>.holdReason` is `escalated` when its architect
-sent it to you, and absent while the architect is still deciding), and each tree whose
-`issues.<KEY>.architect.state` is `failed`, exactly as the matching wake below. The issue record is the truth; the topic is the wake.
+sent it to you, and absent while the architect is still deciding or while its tree lingers or is
+closed, where the hold waits for the tree's re-admission and needs nothing from you), and each
+tree whose `issues.<KEY>.architect.state` is `failed`, exactly as the matching wake below. The
+issue record is the truth; the topic is the wake.
 
 ## Deployment instructions
 

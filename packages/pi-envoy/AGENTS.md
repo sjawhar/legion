@@ -110,7 +110,8 @@ not one it read, so it answers for none of them. `POST /legion/v1/handoff/comple
 `HANDOFF_STALE_GENERATION` for a run the issue has left. The pane's `LEGION_GENERATION` is the
 claim's launch counter and says nothing about the run; nothing reads it for this.
 Contract 7 adds `holdReason` to an issue on `/legion/v1/state`: `escalated` while an issue its
-architect escalated stays held, absent otherwise. The controller skill reads it at every start,
+architect escalated stays held in a tree that runs, absent otherwise (a tree that lingers or is
+closed shows none until it is re-admitted). The controller skill reads it at every start,
 since the escalation's wake reaches only a controller running when it is published (#1420).
 The Go daemon's boot gate (`internal/daemon/bootgate.go`) refuses to start unless the installed
 manifest's field equals its `GoDaemonAPIVersion` (`internal/api/version.go`) — the manifest at the
