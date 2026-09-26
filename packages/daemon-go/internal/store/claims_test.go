@@ -63,8 +63,13 @@ func sameClaim(t *testing.T, got, want supervise.Claim) {
 	if gotPending == nil {
 		return
 	}
-	if gotPending.ID != wantPending.ID || gotPending.Task != wantPending.Task ||
-		gotPending.Phase != wantPending.Phase || gotPending.Generation != wantPending.Generation {
+	// Every field but the times is compared whole, so a field added to the delivery is read back
+	// or this fails; the times are compared below as instants.
+	untimed := func(d supervise.Delivery) supervise.Delivery {
+		d.QueuedAt, d.DeliveredAt, d.ConfirmedAt = time.Time{}, time.Time{}, time.Time{}
+		return d
+	}
+	if !reflect.DeepEqual(untimed(*gotPending), untimed(*wantPending)) {
 		t.Errorf("pending delivery read back = %+v, want %+v", *gotPending, *wantPending)
 	}
 	for _, field := range []struct {
