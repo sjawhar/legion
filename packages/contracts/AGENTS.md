@@ -69,6 +69,11 @@ the native Dispatch tool suite:
   token because they depend on document order.
   Tokens include inline marks, so a new anchored ask or comment rejects a stale edit. A stale guard
   returns `PRECONDITION_FAILED` with the current tokens and applies no part of the batch.
+  Every edit response carries the whole-document token its own edit produced
+  (`EditArtifactResponse.token`, optional because a server predating it omits it), which the
+  executor renders as a `Document token: <token>` line and in `details.token`: a chain of
+  guarded edits passes each result's token as the next `precondition` with no `dispatch_doc_read`
+  between them.
   Ask lifecycle payloads include nullable `block_id`; `block.repaired` restores server-owned
   attributes and `block.invalid` records a malformed browser-authored ask block.
 - Quote anchors retain their quote display cache and inline mark while carrying nullable `block_id`;

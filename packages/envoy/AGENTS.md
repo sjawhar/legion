@@ -213,7 +213,14 @@ holds the same transaction-scoped room lock for every durable `doc_updates` appe
 returns `409 PRECONDITION_FAILED` with each mismatched block or document token and current tokens,
 and commits no update, version, or event. An uncovered block guard returns `400 INVALID_PRECONDITION`
 before mutation. This lock orders commits rather than timestamps, so transaction-start `created_at`
-values and a different lock cannot admit a stale write.
+values and a different lock cannot admit a stale write. Every edit response carries `token`, the
+whole-document token of the tree that edit's own transaction wrote, taken while it still held the
+room's writer slot (`docs.EditOutcome.Token`, from `editBatch.outcome`; a batch with no operation
+reports the document as it stands). It is never re-read after the commit, where a concurrent
+writer's change would fold into it and let the caller's next guarded edit pass without having seen
+it. Settlement cannot move it: `tokenAttrs` hashes neither block ids nor server-owned attributes.
+So a chain of guarded edits passes each response's token as the next `precondition.document` and
+reads the document once.
 
 The room lock and the document's **owner row** — the artifact itself for a project document, its
 issue otherwise — are governed by two rules, both load-bearing. **Level:** no lock on `issues`,

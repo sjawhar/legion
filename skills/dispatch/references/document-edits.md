@@ -8,8 +8,9 @@ reject a stale edit.
 ```ts
 dispatch_doc_edit({ issue?, project?, artifact, ops, precondition?, summary? })
 ```
-It returns issue or project-document owner details plus `applied`, optional `version`, `changed`, and
-`unchanged_ops`. `ops` is an array of this exact `EditOp` shape:
+It returns issue or project-document owner details plus `applied`, optional `version`, `changed`,
+`unchanged_ops`, and the document token this edit produced, rendered as a `Document token: <token>`
+line. `ops` is an array of this exact `EditOp` shape:
 
 ```ts
 type EditOp = {
@@ -127,8 +128,11 @@ whose anchor lies inside the moved block, or a delete that would leave a typed b
 
 `GET /api/v1/artifacts/<artifact UUID>/blocks` includes a full-state `token` on every block, including
 inline marks. To reject a stale edit, pass `precondition` with exactly one of
-`{ document: "<token from dispatch_doc_read>" }` or
-`{ blocks: [{ id: "<block id>", token: "<block token>" }] }`. The server resolves the whole batch before
+`{ document: "<document token>" }` or
+`{ blocks: [{ id: "<block id>", token: "<block token>" }] }`. A document token comes from
+`dispatch_doc_read` or from the previous `dispatch_doc_edit`, whose result carries the token its
+own edit produced: a run of guarded edits passes each result's token to the next one and reads the
+document once, not once per edit. The server resolves the whole batch before
 mutation: a block guard must cover every content block it changes, or Dispatch returns
 `400 INVALID_PRECONDITION` without applying anything. Use a document token for insert and move because they
 depend on document order. A block token lets other sections change concurrently; a new anchored ask or comment
