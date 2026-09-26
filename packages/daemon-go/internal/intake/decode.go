@@ -278,7 +278,7 @@ func decodePullRequest(repository ghrepo.Repository, raw map[string]json.RawMess
 			mergeSHA, _ := rawString(raw, "merge_commit_sha")
 			return PullRequestMerged{Repo: repo, Number: number, MergeSHA: mergeSHA}, nil
 		}
-		return PullRequestClosed{Repo: repo, Number: number}, nil
+		return PullRequestClosed{Repo: repo, Number: number, UpdatedAt: updatedAt}, nil
 	default:
 		return nil, nil
 	}

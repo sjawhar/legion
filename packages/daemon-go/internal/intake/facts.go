@@ -122,10 +122,12 @@ type PullRequestMerged struct {
 
 func (PullRequestMerged) isFact() {}
 
-// PullRequestClosed records GitHub's terminal, unmerged close observation.
+// PullRequestClosed records GitHub's unmerged close observation. UpdatedAt is the pull request's
+// updated_at, which orders it against a reopen.
 type PullRequestClosed struct {
-	Repo   string
-	Number int
+	Repo      string
+	Number    int
+	UpdatedAt time.Time
 }
 
 func (PullRequestClosed) isFact() {}

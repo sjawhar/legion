@@ -60,11 +60,14 @@ type PhaseRow struct {
 
 // PullRequest is the daemon's latest GitHub observation for one issue's pull request.
 type PullRequest struct {
-	Issue               string
-	Repo                string
-	Number              int
-	Branch              string
-	HeadSHA             string
+	Issue   string
+	Repo    string
+	Number  int
+	Branch  string
+	HeadSHA string
+	// HeadUpdatedAt is the pull request's updated_at at the newest lifecycle observation applied
+	// (opened, reopened, synchronize or closed): an older one is a late redelivery and changes
+	// nothing (classify.LateLifecycle).
 	HeadUpdatedAt       time.Time
 	HeadUpdatedAtSource string
 	Verdict             string

@@ -395,6 +395,9 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 		return intake.Result{}, err
 	}
 	if recorded != nil && recorded.Repo == fact.Repo && recorded.Number == fact.Number {
+		if classify.LateLifecycle(fact.UpdatedAt, recorded.HeadUpdatedAt) {
+			return intake.Result{}, nil
+		}
 		pr.FixAttempts, pr.BlockedAttempts = recorded.FixAttempts, recorded.BlockedAttempts
 	}
 	if err := e.store.PutPullRequest(ctx, tx, pr); err != nil {
@@ -412,7 +415,7 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 
 func (e *Engine) pullRequestSynchronized(ctx context.Context, tx pgx.Tx, fact intake.PullRequestSynchronized) (intake.Result, error) {
 	pr, err := e.store.PullRequestByBranch(ctx, tx, fact.Repo, fact.Branch)
-	if err != nil || pr == nil {
+	if err != nil || pr == nil || classify.LateLifecycle(fact.UpdatedAt, pr.HeadUpdatedAt) {
 		return intake.Result{}, err
 	}
 	if fact.HeadSHA != "" && fact.HeadSHA != pr.HeadSHA {
@@ -533,13 +536,17 @@ func (e *Engine) merged(ctx context.Context, tx pgx.Tx, fact intake.PullRequestM
 	return intake.Result{}, e.transition(ctx, tx, *issue, TriggerPullRequestMerged, "", record.PhaseRow{}, pr, "")
 }
 
-// closed records the pull request closed unmerged; a re-admitted generation drops it.
+// closed records the pull request closed unmerged; a re-admitted generation drops it. The close's
+// clock becomes the pull request's, so a reopen older than it, redelivered late, changes nothing.
 func (e *Engine) closed(ctx context.Context, tx pgx.Tx, fact intake.PullRequestClosed) (intake.Result, error) {
 	pr, err := e.pullRequest(ctx, tx, fact.Repo, fact.Number)
-	if err != nil || pr == nil {
+	if err != nil || pr == nil || classify.LateLifecycle(fact.UpdatedAt, pr.HeadUpdatedAt) {
 		return intake.Result{}, err
 	}
 	pr.State = record.PullRequestClosed
+	if !fact.UpdatedAt.IsZero() {
+		pr.HeadUpdatedAt, pr.HeadUpdatedAtSource = fact.UpdatedAt, "webhook"
+	}
 	return intake.Result{}, e.store.PutPullRequest(ctx, tx, *pr)
 }
 

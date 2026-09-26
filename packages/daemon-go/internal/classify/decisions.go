@@ -1,6 +1,10 @@
 package classify
 
-import "github.com/sjawhar/legion/daemon/internal/record"
+import (
+	"time"
+
+	"github.com/sjawhar/legion/daemon/internal/record"
+)
 
 // AdvancePullRequestHead applies the shipped resetPrHead fix-attempt decision to a new observed
 // head. A red prior verdict counts once, unless the red was planned (PlannedRed: the review App's
@@ -71,6 +75,15 @@ func ApplySettlement(pr record.PullRequest, candidate SettlementCandidate) (reco
 	pr.FailingStatuses = append([]string(nil), outcome.FailingStatuses...)
 	pr.Reconciled = classification == SettlementRefresh
 	return pr, true
+}
+
+// LateLifecycle reports whether a pull request lifecycle observation (opened, reopened,
+// synchronize or closed) at observed is older than the newest one applied, at applied: a late
+// redelivery, which must change nothing. Both are the pull request's updated_at. An equal clock is
+// not late, since GitHub's clock is to the second and two real events can share one; a missing
+// clock on either side fences nothing.
+func LateLifecycle(observed, applied time.Time) bool {
+	return !observed.IsZero() && !applied.IsZero() && observed.Before(applied)
 }
 
 // ApplyReview stores a changes-requested review from any reviewed head, or an approval only when

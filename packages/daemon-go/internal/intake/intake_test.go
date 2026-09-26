@@ -166,7 +166,7 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 			name:    "pull request closed",
 			subject: "notifications.github.sjawhar.legion.pr.42",
 			file:    "github/pr-closed.json",
-			want:    PullRequestClosed{Repo: "sjawhar/legion", Number: 42},
+			want:    PullRequestClosed{Repo: "sjawhar/legion", Number: 42, UpdatedAt: updatedAt},
 		},
 		{
 			name:    "pull request merged",
