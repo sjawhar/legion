@@ -344,6 +344,8 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 		if fact.Verdict == "pass" {
 			return intake.Result{}, e.transition(ctx, tx, *issue, TriggerTesterPassed, "", row, pr, "")
 		}
+	case phase.Reviewing:
+		return intake.Result{}, e.advanceReview(ctx, tx, *issue, pr)
 	case phase.Retro:
 		return intake.Result{}, e.transition(ctx, tx, *issue, TriggerRetroCompleted, "", row, pr, "")
 	case phase.ProductionCheck:
@@ -382,7 +384,9 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 
 // pullRequestOpened records the pull request a branch opened, and a reopen is the same pull
 // request: its fix and blocked attempts are what bound the review rounds, so they are carried
-// over rather than rebuilt at zero, which made closing and reopening a way to buy a fresh cap.
+// over rather than rebuilt at zero, which made closing and reopening a way to buy a fresh cap, and
+// so is its newest review, which orders every review it will have. A new generation deletes a
+// pull request that is not open, and all three with it.
 func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.PullRequestOpened) (intake.Result, error) {
 	issue, err := e.issueForBranch(ctx, tx, fact.Branch)
 	if err != nil || issue == nil {
@@ -395,7 +399,13 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 		return intake.Result{}, err
 	}
 	if recorded != nil && recorded.Repo == fact.Repo && recorded.Number == fact.Number {
-		pr.FixAttempts, pr.BlockedAttempts = recorded.FixAttempts, recorded.BlockedAttempts
+		// GitHub sends opened once per pull request, so an opened for one already recorded is a
+		// redelivery whatever its clock; a reopen is fenced by its clock.
+		if !fact.Reopened || classify.LateLifecycle(fact.UpdatedAt, recorded.HeadUpdatedAt) {
+			return intake.Result{}, nil
+		}
+		pr.FixAttempts, pr.BlockedAttempts, pr.ReviewSeen = recorded.FixAttempts, recorded.BlockedAttempts, recorded.ReviewSeen
+		pr.HeadUpdatedAt = classify.LatestClock(recorded.HeadUpdatedAt, fact.UpdatedAt)
 	}
 	if err := e.store.PutPullRequest(ctx, tx, pr); err != nil {
 		return intake.Result{}, err
@@ -412,13 +422,13 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 
 func (e *Engine) pullRequestSynchronized(ctx context.Context, tx pgx.Tx, fact intake.PullRequestSynchronized) (intake.Result, error) {
 	pr, err := e.store.PullRequestByBranch(ctx, tx, fact.Repo, fact.Branch)
-	if err != nil || pr == nil {
+	if err != nil || pr == nil || classify.LateLifecycle(fact.UpdatedAt, pr.HeadUpdatedAt) {
 		return intake.Result{}, err
 	}
 	if fact.HeadSHA != "" && fact.HeadSHA != pr.HeadSHA {
 		*pr = classify.AdvancePullRequestHead(*pr, fact.HeadSHA)
 	}
-	pr.HeadUpdatedAt, pr.HeadUpdatedAtSource = fact.UpdatedAt, "webhook"
+	pr.HeadUpdatedAt, pr.HeadUpdatedAtSource = classify.LatestClock(pr.HeadUpdatedAt, fact.UpdatedAt), "webhook"
 	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
 		return intake.Result{}, err
 	}
@@ -438,9 +448,29 @@ func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.
 	if err != nil || pr == nil {
 		return intake.Result{}, err
 	}
-	byReviewApp := e.cfg.ReviewAppLogin != "" && fact.Pusher == e.cfg.ReviewAppLogin
-	*pr = classify.ApplyPush(*pr, fact.After, classify.ClassifyPush(classify.PushPayload{ChangedPaths: fact.ChangedPaths, ChangedPathsTruncated: fact.Truncated}), byReviewApp)
-	return intake.Result{}, e.store.PutPullRequest(ctx, tx, *pr)
+	classification := classify.ClassifyPush(classify.PushPayload{ChangedPaths: fact.ChangedPaths, ChangedPathsTruncated: fact.Truncated})
+	*pr = classify.ApplyPush(*pr, record.ClassifiedPush{SHA: fact.After, Before: fact.Before,
+		HandoffOnly: classification.HandoffOnly, Unknown: classification.Unknown,
+		ByReviewApp: e.cfg.ReviewAppLogin != "" && fact.Pusher == e.cfg.ReviewAppLogin,
+		// A push that does not say it was not forced - a listener that predates the field - is
+		// read as forced: its changed paths cannot then be trusted to describe the head it replaced.
+		Forced: fact.Forced == nil || *fact.Forced != "false"})
+	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
+		return intake.Result{}, err
+	}
+	// A push classified after its head arrived can be what lets an approval of an earlier head
+	// stand, so an open review is asked again.
+	return intake.Result{}, e.advanceOpenReview(ctx, tx, pr)
+}
+
+// advanceOpenReview asks the review open on the pull request's issue, if its issue is in
+// reviewing, whether both of its halves are now in (advanceReview).
+func (e *Engine) advanceOpenReview(ctx context.Context, tx pgx.Tx, pr *record.PullRequest) error {
+	issue, err := e.store.Issue(ctx, tx, pr.Issue)
+	if err != nil || issue == nil {
+		return err
+	}
+	return e.advanceReview(ctx, tx, *issue, pr)
 }
 
 func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestChecks) (intake.Result, error) {
@@ -462,7 +492,7 @@ func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 		return intake.Result{}, err
 	}
 	if !blocked {
-		return intake.Result{}, e.advanceApproved(ctx, tx, *pr)
+		return intake.Result{}, e.advanceOpenReview(ctx, tx, pr)
 	}
 	message := fmt.Sprintf("Pull request #%d reached max_fix_attempts=%d.", pr.Number, e.cfg.MaxFixAttempts)
 	if err := e.enqueue(ctx, tx, pr.Issue, record.MessagePost{Body: message}); err != nil {
@@ -476,43 +506,85 @@ func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestR
 	if err != nil || pr == nil {
 		return intake.Result{}, err
 	}
-	*pr = classify.ApplyReview(*pr, strings.ToLower(fact.State), fact.CommitID)
-	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
-		return intake.Result{}, err
-	}
 	issue, err := e.store.Issue(ctx, tx, pr.Issue)
-	if err != nil || issue == nil || issue.Phase != phase.Reviewing {
+	if err != nil || issue == nil {
 		return intake.Result{}, err
 	}
-	row, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
-	if err != nil {
-		return intake.Result{}, err
+	// Only changes_requested and approved decide anything; a comment orders nothing either, so a
+	// comment written after a decision but delivered before it cannot make the decision look old.
+	state := strings.ToLower(fact.State)
+	if state != "changes_requested" && state != "approved" {
+		return intake.Result{}, nil
 	}
-	if pr.ReviewDecision == "changes_requested" {
-		if err := e.recordRound(ctx, tx, issue.Key); err != nil {
+	// Deciding reviews are ordered by when they were submitted, then by GitHub's review id
+	// (record.ReviewOrder). Among reviews that all carry a time and arrive before the round ends,
+	// the newest decides whatever order they are delivered in; with a review without a time in
+	// play, the outcome can depend on delivery order. A round ends once both of its halves are in,
+	// so a review arriving after that decides nothing for it. The pull request keeps the newest it
+	// has had across rounds, so a review submitted before one already processed - redelivered, or
+	// from an earlier round - records nothing. A review without an id is ordered by when it
+	// arrives.
+	if fact.ID != 0 {
+		order := record.ReviewOrder{SubmittedAt: fact.SubmittedAt, ID: fact.ID}
+		if !order.After(pr.ReviewSeen) {
+			return intake.Result{}, nil
+		}
+		pr.ReviewSeen = order
+		if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
 			return intake.Result{}, err
 		}
-		return intake.Result{}, e.transition(ctx, tx, *issue, TriggerReviewRejected, "", row, pr, fact.Body)
 	}
-	return intake.Result{}, e.advanceApproved(ctx, tx, *pr)
-}
-
-// advanceApproved moves a reviewing issue to retro once its pull request is both approved at the
-// current head and green there. Either may come second: the reviewer usually approves the head it
-// was just shown, before CI settles on it, so the checks' settlement asks again.
-func (e *Engine) advanceApproved(ctx context.Context, tx pgx.Tx, pr record.PullRequest) error {
-	if pr.ReviewDecision != "approved" || pr.Verdict != "green" {
-		return nil
-	}
-	issue, err := e.store.Issue(ctx, tx, pr.Issue)
-	if err != nil || issue == nil || issue.Phase != phase.Reviewing {
-		return err
+	// The decision belongs to the review round, not to the pull request's head: the reviewer's own
+	// handoff push is a new head, and the round must still know, when the reviewer completes, what
+	// the review decided, on which head, and what it said for the next round's implementer. The
+	// round is open while the issue is in reviewing, and while it is held from reviewing, since the
+	// retry puts it back there with the reviewer's work kept. A review outside the round decides
+	// nothing and counts no round. An approval is judged against the head it names when the
+	// review ends (classify.ApprovalStands).
+	held := issue.Phase == phase.Held && issue.Hold != nil && issue.Hold.From == phase.Reviewing
+	if issue.Phase != phase.Reviewing && !held {
+		return intake.Result{}, nil
 	}
 	row, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
 	if err != nil {
+		return intake.Result{}, err
+	}
+	row.Decision = &record.ReviewDecision{State: state, Body: fact.Body, Head: fact.CommitID}
+	if err := e.store.PutPhase(ctx, tx, row); err != nil {
+		return intake.Result{}, err
+	}
+	return intake.Result{}, e.advanceReview(ctx, tx, *issue, pr)
+}
+
+// advanceReview ends a review once both of its halves are in: the reviewer's completion, which is
+// its handoff landing — part of its phase's contract, as every role's is — and the decision it
+// posted on GitHub, recorded on the round. Either may arrive second, and an approval also waits
+// for the head's checks to settle green, which the settlement asks about in turn. A review whose
+// reviewer never completes is not ended by the decision alone: the reviewer's pane gets one
+// follow-up turn when a turn ends with its phase open (pi-envoy's phase-stall check), and past
+// that the issue stays in reviewing, as a tester's that never completes stays in testing.
+func (e *Engine) advanceReview(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest) error {
+	// Only a round in reviewing ends: one held from reviewing ends after the retry restores it.
+	if issue.Phase != phase.Reviewing {
+		return nil
+	}
+	row, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
+	if err != nil || row.HandoffCommit == "" || row.Decision == nil {
 		return err
 	}
-	return e.transition(ctx, tx, *issue, TriggerReviewApproved, "", row, &pr, "")
+	switch row.Decision.State {
+	case "changes_requested":
+		if err := e.recordRound(ctx, tx, issue.Key); err != nil {
+			return err
+		}
+		return e.transition(ctx, tx, issue, TriggerReviewRejected, "", row, pr, row.Decision.Body)
+	case "approved":
+		if pr == nil || pr.Verdict != "green" || !classify.ApprovalStands(*pr, row.Decision.Head) {
+			return nil
+		}
+		return e.transition(ctx, tx, issue, TriggerReviewApproved, "", row, pr, "")
+	}
+	return nil
 }
 
 // merged records the pull request merged, whatever the issue's phase, and advances an issue that
@@ -533,27 +605,45 @@ func (e *Engine) merged(ctx context.Context, tx pgx.Tx, fact intake.PullRequestM
 	return intake.Result{}, e.transition(ctx, tx, *issue, TriggerPullRequestMerged, "", record.PhaseRow{}, pr, "")
 }
 
-// closed records the pull request closed unmerged; a re-admitted generation drops it.
+// closed records the pull request closed unmerged; a re-admitted generation drops it. It records
+// the head the close carries, which every synchronize before it left, and keeps the close's clock
+// when it is the later one, so a reopen or a synchronize older than the close, redelivered late,
+// changes nothing.
 func (e *Engine) closed(ctx context.Context, tx pgx.Tx, fact intake.PullRequestClosed) (intake.Result, error) {
 	pr, err := e.pullRequest(ctx, tx, fact.Repo, fact.Number)
-	if err != nil || pr == nil {
+	if err != nil || pr == nil || classify.LateLifecycle(fact.UpdatedAt, pr.HeadUpdatedAt) {
 		return intake.Result{}, err
 	}
+	if fact.HeadSHA != "" && fact.HeadSHA != pr.HeadSHA {
+		*pr = classify.AdvancePullRequestHead(*pr, fact.HeadSHA)
+	}
 	pr.State = record.PullRequestClosed
+	pr.HeadUpdatedAt = classify.LatestClock(pr.HeadUpdatedAt, fact.UpdatedAt)
 	return intake.Result{}, e.store.PutPullRequest(ctx, tx, *pr)
 }
 
+// claimFailed holds the issue whose phase worker's claim failed — a budget ran out — and tells the
+// architect and the controller of the hold; the worker-died that comes with it is the architect's
+// alone. The tree's architect failing holds nothing, since a phase is its worker's; it is told as a
+// worker-died of the architect, to the issue's topic and the controller, because every other notice
+// of the tree reaches the architect and nobody inside the tree is left to act on its own.
 func (e *Engine) claimFailed(ctx context.Context, tx pgx.Tx, fact intake.ClaimFailed) (intake.Result, error) {
 	issue, err := e.store.Issue(ctx, tx, fact.Issue)
-	if err != nil || issue == nil || issue.Phase == phase.Held || RoleFor(issue.Phase) != fact.Role {
+	if err != nil || issue == nil {
 		return intake.Result{}, err
 	}
+	if claim.IsTreeArchitect(fact.Role, issue.Key, issue.Tree) {
+		return intake.Result{}, e.noticeWithController(ctx, tx, issue.Key, record.Notice{Kind: "worker-died", Role: fact.Role, Phase: issue.Phase})
+	}
+	if issue.Phase == phase.Held || RoleFor(issue.Phase) != fact.Role {
+		return intake.Result{}, nil
+	}
 	from := issue.Phase
-	issue.Phase, issue.HeldFrom = phase.Held, &from
+	issue.Phase, issue.Hold = phase.Held, &record.Hold{From: from}
 	if err := e.store.PutIssue(ctx, tx, *issue); err != nil {
 		return intake.Result{}, err
 	}
-	if err := e.notice(ctx, tx, issue.Key, record.Notice{Kind: "held", Role: fact.Role, Phase: from}); err != nil {
+	if err := e.noticeWithController(ctx, tx, issue.Key, record.Notice{Kind: "held", Role: fact.Role, Phase: from}); err != nil {
 		return intake.Result{}, err
 	}
 	return intake.Result{}, e.notice(ctx, tx, issue.Key, record.Notice{Kind: "worker-died", Role: fact.Role, Phase: from})
@@ -561,19 +651,41 @@ func (e *Engine) claimFailed(ctx context.Context, tx pgx.Tx, fact intake.ClaimFa
 
 func (e *Engine) retryOrEscalate(ctx context.Context, tx pgx.Tx, fact intake.RetryOrEscalate) (intake.Result, error) {
 	issue, err := e.store.Issue(ctx, tx, fact.Issue)
-	if err != nil || issue == nil || issue.Phase != phase.Held || issue.HeldFrom == nil {
+	if err != nil || issue == nil || issue.Phase != phase.Held || issue.Hold == nil {
 		return intake.Result{}, err
 	}
 	if fact.Decision == intake.EscalateDecision {
-		return intake.Result{}, e.notice(ctx, tx, issue.Key, record.Notice{Kind: "held", Phase: *issue.HeldFrom, Reason: "escalated"})
+		// Recorded on the issue as well as sent: the controller reads holds from the record at every
+		// start, so an escalation made while none ran still reaches it.
+		issue.Hold.Reason = record.HoldEscalated
+		if err := e.store.PutIssue(ctx, tx, *issue); err != nil {
+			return intake.Result{}, err
+		}
+		return intake.Result{}, e.noticeWithController(ctx, tx, issue.Key, record.Notice{Kind: "held", Phase: issue.Hold.From, Reason: string(record.HoldEscalated)})
 	}
 	if fact.Decision != intake.RetryDecision {
 		return intake.Result{}, nil
 	}
-	from := *issue.HeldFrom
-	issue.Phase, issue.HeldFrom = from, nil
+	from := issue.Hold.From
+	issue.Phase, issue.Hold = from, nil
 	if err := e.store.PutIssue(ctx, tx, *issue); err != nil {
 		return intake.Result{}, err
+	}
+	// A review round held open may already have both of its halves: the reviewer completed before
+	// the hold, and its review was recorded while held. The round ends here, and the reviewer is
+	// started only if it is still open - a second completion of the same commit would be refused as
+	// not new.
+	if from == phase.Reviewing {
+		pr, err := e.store.PullRequest(ctx, tx, issue.Key)
+		if err != nil {
+			return intake.Result{}, err
+		}
+		if err := e.advanceReview(ctx, tx, *issue, pr); err != nil {
+			return intake.Result{}, err
+		}
+		if issue, err = e.store.Issue(ctx, tx, issue.Key); err != nil || issue == nil || issue.Phase != phase.Reviewing {
+			return intake.Result{}, err
+		}
 	}
 	return intake.Result{}, e.start(ctx, tx, *issue, RoleFor(from), task(*issue, record.PhaseRow{}, nil, "retry held phase"))
 }
@@ -646,7 +758,7 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 		return err
 	}
 	from := issue.Phase
-	issue.Phase, issue.HeldFrom = row.To, nil
+	issue.Phase, issue.Hold = row.To, nil
 	if row.Status != "" {
 		issue.Status = row.Status
 	}
@@ -750,7 +862,7 @@ func (e *Engine) leave(ctx context.Context, tx pgx.Tx, issue record.Issue, statu
 		return e.beginLinger(ctx, tx, issue)
 	}
 	if issue.Phase != phase.Done {
-		issue.Phase, issue.HeldFrom, issue.ReadyPendingVersion = phase.Done, nil, nil
+		issue.Phase, issue.Hold, issue.ReadyPendingVersion = phase.Done, nil, nil
 		if err := e.store.PutIssue(ctx, tx, issue); err != nil {
 			return err
 		}
@@ -765,15 +877,15 @@ func (e *Engine) leave(ctx context.Context, tx pgx.Tx, issue record.Issue, statu
 	return e.notice(ctx, tx, issue.Key, record.Notice{Kind: kind, Role: claim.RoleArchitect, Reason: fmt.Sprintf("%s is %s", issue.Key, status)})
 }
 
-// beginLinger suspends the root's whole tree and arms its linger deadline; a second call while it
-// lingers changes nothing.
+// beginLinger suspends the root's whole tree and arms its linger deadline, ending the root's hold
+// if it has one, as a child's leave does; a second call while it lingers changes nothing.
 func (e *Engine) beginLinger(ctx context.Context, tx pgx.Tx, root record.Issue) error {
 	if root.LingerUntil != nil {
 		return nil
 	}
 	until := e.lingerAt()
 	root.LingerUntil = &until
-	root.Phase = phase.Done
+	root.Phase, root.Hold = phase.Done, nil
 	if err := e.store.PutIssue(ctx, tx, root); err != nil {
 		return err
 	}

@@ -668,7 +668,7 @@ test("clicking a Markdown dispatch:// link in the live editor navigates in-app w
     await page.goto(`/issues/${source.key}/spec`);
 
     const editor = documentEditor(page);
-    // The live editor keeps the author's own link text (`@sjawhar/proof-editor` exposes no
+    // The live editor keeps the author's own link text (`@legion/proof-editor` exposes no
     // decoration hook to safely replace a live editable mark's rendered text) and surfaces the
     // resolved target in the hover card instead.
     const link = editor.getByRole("link", { name: "the other issue" });

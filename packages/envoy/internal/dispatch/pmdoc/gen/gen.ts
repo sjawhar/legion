@@ -5,8 +5,8 @@ import * as Y from "yjs";
 import type { Node as ProseMirrorNode } from "prosemirror-model";
 import { prosemirrorToYXmlFragment } from "y-prosemirror";
 import { Transform } from "prosemirror-transform";
-import { setBlockIdGenerator } from "@sjawhar/proof-editor";
-import { createHeadlessProof, type HeadlessProofEditor } from "@sjawhar/proof-editor/headless";
+import { setBlockIdGenerator } from "@legion/proof-editor";
+import { createHeadlessProof, type HeadlessProofEditor } from "@legion/proof-editor/headless";
 
 const here = import.meta.dir;
 const corpus = join(here, "..", "testdata", "corpus");
@@ -88,6 +88,13 @@ const replaceRangeCases: ReplaceRangeCase[] = [
   { name: "insert-block-after-heading-textblock", markdown: "# Title\n\nBody.\n", at: "Title", point: "after-textblock", replacement: "Intro.\n" },
   { name: "insert-block-before-heading-textblock", markdown: "# Title\n\nBody.\n", at: "Title", point: "before-textblock", replacement: "Lead.\n" },
   { name: "insert-paragraph-after-list-item-textblock", markdown: "- one\n- two\n", at: "one", point: "after-textblock", replacement: "extra\n" },
+  { name: "callout-paragraph-and-code", markdown: "Intro.\n\n:::callout{#c1}\nWhich one?\n:::\n", from: "Which", to: "one?", replacement: "Which?\n\n```\ncode\n```\n" },
+  { name: "callout-paragraph-and-list", markdown: ":::callout{#c1}\nWhich one?\n:::\n", from: "Which", to: "one?", replacement: "Which?\n\n- X\n- Y\n" },
+  { name: "callout-paragraph-and-heading", markdown: ":::callout{#c1}\nWhich one?\n:::\n", from: "Which", to: "one?", replacement: "Which?\n\n## Heading\n" },
+  { name: "callout-in-list-item-code", markdown: "- item\n\n  :::callout{#c1}\n  Which one?\n  :::\n", from: "Which", to: "one?", replacement: "Which?\n\n```\ncode\n```\n" },
+  { name: "callout-in-blockquote-code", markdown: "> :::callout{#c1}\n> Which one?\n> :::\n", from: "Which", to: "one?", replacement: "Which?\n\n```\ncode\n```\n" },
+  { name: "nested-callout-code", markdown: ":::callout{#outer}\nOuter.\n\n:::callout{#inner}\nWhich one?\n:::\n", from: "Which", to: "one?", replacement: "Which?\n\n```\ncode\n```\n" },
+  { name: "callout-across-paragraphs-code", markdown: ":::callout{#c1}\nFirst tail.\n\nhead second.\n:::\n", from: "tail", to: "head", replacement: "X\n\n```\ncode\n```\n" },
 ].map(({ name, markdown, from, to, at, point, replacement, inline = false }) => {
   const doc = engine.parseMarkdown(markdown);
   const inserted = engine.parseMarkdown(replacement);

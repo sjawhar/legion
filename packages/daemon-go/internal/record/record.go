@@ -18,13 +18,26 @@ type AttemptRun struct {
 	ID   int64  `json:"id"`
 }
 
-// PendingPush is the branch push still waiting to be classified.
-type PendingPush struct {
-	SHA         string `json:"sha"`
+// ClassifiedPush is one branch push as its changed paths classify it: a fact about two commits,
+// the head it replaced (Before) and the head it left (SHA), true whenever it is learned.
+type ClassifiedPush struct {
+	SHA string `json:"sha"`
+	// Before is the head the push replaced, empty when the push did not say.
+	Before      string `json:"before,omitempty"`
 	HandoffOnly bool   `json:"handoffOnly"`
 	Unknown     string `json:"unknown,omitempty"`
 	// ByReviewApp is whether the push was the review App's (its pusher is the review App's bot login).
 	ByReviewApp bool `json:"byReviewApp,omitempty"`
+	// Forced is a push that rewrote history, or did not say whether it did. Its changed paths list
+	// the commits it added since the merge base, not what it did to the head it replaced, so it
+	// never carries an approval across.
+	Forced bool `json:"forced,omitempty"`
+}
+
+// MayChangeCode is whether the push may have changed anything outside .legion/ in the head it
+// replaced.
+func (p ClassifiedPush) MayChangeCode() bool {
+	return !p.HandoffOnly || p.Forced
 }
 
 // Issue is one durable workflow record. Status is the last Dispatch status the daemon observed.
@@ -39,10 +52,23 @@ type Issue struct {
 	Status              string
 	Rank                string
 	LingerUntil         *time.Time
-	HeldFrom            *phase.Phase
+	Hold                *Hold
 	LastDispatchSeq     int64
 	ReadyPendingVersion *int
 }
+
+// Hold is a held issue's hold: the phase it left, and why it is held when the hold has a reason.
+// An issue whose phase is not held has none, so ending a hold (Issue.Hold = nil) ends its reason.
+type Hold struct {
+	From   phase.Phase
+	Reason HoldReason
+}
+
+// HoldReason is why a held issue is held.
+type HoldReason string
+
+// HoldEscalated is a hold its architect sent to the controller.
+const HoldEscalated HoldReason = "escalated"
 
 // PhaseRow is the durable part of a role's work on an issue; live claim facts are joined for state.
 type PhaseRow struct {
@@ -56,32 +82,78 @@ type PhaseRow struct {
 	// HandoffCommit it survives the next phase's start, so a completion reporting it again is known
 	// to carry no handoff written since.
 	LastHandoff string
+	// Decision is the review round's decision, on the reviewer's row: the newest review GitHub
+	// reported for the round that carried one, kept until the round ends, since the reviewer's
+	// completion can come after the review it posted. Nil until a review decides.
+	Decision *ReviewDecision
+}
+
+// ReviewDecision is what one review decided: its state (changes_requested or approved), its body,
+// handed to the next implementer, and the head it was written on, whose code an approval approves.
+type ReviewDecision struct {
+	State string `json:"state"`
+	Body  string `json:"body,omitempty"`
+	Head  string `json:"head,omitempty"`
+}
+
+// ReviewOrder is where a review falls among the pull request's reviews: when it was submitted, then
+// GitHub's review id. The id alone is not enough, since GitHub assigns it when a review is created
+// and a draft keeps it when it is submitted later. SubmittedAt is zero for a review a listener that
+// predates submitted_at carried, one whose time could not be read, and every mark recorded before
+// the field. Among reviews that all carry a time the order does not depend on delivery; with an
+// untimed review in play it is not transitive, so the outcome can depend on the order reviews are
+// delivered in. No stored mark can recover a time it never had. The order decides a round only
+// among reviews that arrive before it ends (workflow's review).
+type ReviewOrder struct {
+	SubmittedAt time.Time
+	ID          int64
+}
+
+// After is whether o was submitted after other. Submission times decide when both reviews have one
+// and they differ; otherwise the ids do, so a review without a time is ordered by id against any
+// other, rather than losing to every review that has one.
+func (o ReviewOrder) After(other ReviewOrder) bool {
+	if !o.SubmittedAt.IsZero() && !other.SubmittedAt.IsZero() && !o.SubmittedAt.Equal(other.SubmittedAt) {
+		return o.SubmittedAt.After(other.SubmittedAt)
+	}
+	return o.ID > other.ID
 }
 
 // PullRequest is the daemon's latest GitHub observation for one issue's pull request.
 type PullRequest struct {
-	Issue               string
-	Repo                string
-	Number              int
-	Branch              string
-	HeadSHA             string
+	Issue   string
+	Repo    string
+	Number  int
+	Branch  string
+	HeadSHA string
+	// HeadUpdatedAt is the latest updated_at among the lifecycle observations applied (opened,
+	// reopened, synchronize or closed; one with no clock never lowers it): an older one is a late
+	// redelivery and changes nothing (classify.LateLifecycle).
 	HeadUpdatedAt       time.Time
 	HeadUpdatedAtSource string
 	Verdict             string
 	Failing             []string
 	FailingStatuses     []string
-	ReviewDecision      string
 	FixAttempts         int
 	BlockedAttempts     int
 	CheckRuns           []AttemptRun
 	Generation          int64
 	Snapshot            string
 	Reconciled          bool
-	PendingPush         *PendingPush
-	HeadCounted         string
+	// Pushes are the branch's pushes as they were classified: every push that changed only .legion/
+	// and said which head it replaced, which carry an approval across, and the pushes whose heads
+	// have not arrived yet. A push that may change code is spent once its head arrives.
+	Pushes      []ClassifiedPush
+	HeadCounted string
 	// PlannedRed is whether the newest head that changed a path outside .legion/ was the review
 	// App's (the tester's red tests): a red on it is planned, so the next head is not a fix attempt.
 	PlannedRed bool
+	// ReviewSeen is the newest deciding review (changes requested or approved) GitHub reported for
+	// the pull request: a deciding review not after it was submitted before one already processed,
+	// and records nothing. A comment decides nothing and leaves it as it is. It lasts as long as the
+	// pull request's record: across rounds, a reopen, and a new generation while the pull request
+	// is open; a new generation deletes one that is not.
+	ReviewSeen ReviewOrder
 	State      PullRequestState
 }
 

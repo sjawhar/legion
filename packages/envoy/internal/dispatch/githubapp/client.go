@@ -280,22 +280,28 @@ func (c *Client) do(ctx context.Context, method, target, authorization string) (
 }
 
 func (c *Client) doLimited(ctx context.Context, method, target, authorization string, limit int64) ([]byte, int, error) {
+	body, status, _, err := c.request(ctx, method, target, authorization, limit)
+	return body, status, err
+}
+
+// request performs one API call and returns its body (read up to limit), status and headers.
+func (c *Client) request(ctx context.Context, method, target, authorization string, limit int64) ([]byte, int, http.Header, error) {
 	request, err := http.NewRequestWithContext(ctx, method, target, nil)
 	if err != nil {
-		return nil, 0, fmt.Errorf("build %s %s: %w", method, target, err)
+		return nil, 0, nil, fmt.Errorf("build %s %s: %w", method, target, err)
 	}
 	request.Header.Set("Authorization", authorization)
 	request.Header.Set("Accept", "application/vnd.github+json")
 	response, err := c.http.Do(request)
 	if err != nil {
-		return nil, 0, fmt.Errorf("%s %s: %w", method, target, err)
+		return nil, 0, nil, fmt.Errorf("%s %s: %w", method, target, err)
 	}
 	defer response.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(response.Body, limit))
 	if err != nil {
-		return nil, 0, fmt.Errorf("read %s %s response: %w", method, target, err)
+		return nil, 0, nil, fmt.Errorf("read %s %s response: %w", method, target, err)
 	}
-	return body, response.StatusCode, nil
+	return body, response.StatusCode, response.Header, nil
 }
 
 // Ref resolves branch to its commit SHA under an installation token

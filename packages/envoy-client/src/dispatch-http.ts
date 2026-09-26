@@ -98,7 +98,6 @@ function requestSignal(signal: AbortSignal | undefined): AbortSignal {
 export class DispatchClient {
   readonly #baseUrl: string;
   readonly #resolvedIssues = new Map<string, Promise<string>>();
-  readonly #creatingIssues = new Map<string, Promise<string>>();
   readonly #signal: AbortSignal;
 
   constructor(
@@ -113,6 +112,11 @@ export class DispatchClient {
 
   async issue(input: CreateIssueInput): Promise<Advised<Issue>> {
     return this.#json("POST", ["api", "v1", "issues"], input);
+  }
+
+  /** Resolves an existing native key or external reference without creating an issue. */
+  async resolveIssue(issueReference: string): Promise<string> {
+    return this.#resolveIssue(issueReference);
   }
 
   async listIssues(options: ListIssuesOptions = {}): Promise<IssueSummary[]> {
@@ -461,44 +465,6 @@ export class DispatchClient {
         : { kind: query.kind.join(",") }),
       ...(query.since === undefined ? {} : { since: query.since }),
     });
-  }
-
-  async ensureIssue(issueReference: string, actor: Actor): Promise<string> {
-    if (!issueReference.includes("#")) return issueReference;
-    try {
-      return await this.#resolveIssue(issueReference);
-    } catch (error) {
-      if (!(error instanceof DispatchServiceError) || error.status !== 404) throw error;
-    }
-
-    let creating = this.#creatingIssues.get(issueReference);
-    if (!creating) {
-      creating = this.#createExternalIssue(issueReference, actor);
-      this.#creatingIssues.set(issueReference, creating);
-    }
-    try {
-      return await creating;
-    } finally {
-      if (this.#creatingIssues.get(issueReference) === creating) {
-        this.#creatingIssues.delete(issueReference);
-      }
-    }
-  }
-
-  async #createExternalIssue(issueReference: string, actor: Actor): Promise<string> {
-    try {
-      const created = await this.#json<Issue>("POST", ["api", "v1", "issues"], {
-        external: issueReference,
-        actor,
-      });
-      this.#resolvedIssues.set(issueReference, Promise.resolve(created.key));
-      return created.key;
-    } catch (error) {
-      if (error instanceof DispatchServiceError && (error.status === 409 || error.status === 500)) {
-        return this.#resolveIssue(issueReference);
-      }
-      throw error;
-    }
   }
 
   async #resolveIssue(issueReference: string): Promise<string> {

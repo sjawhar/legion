@@ -108,8 +108,12 @@ type Issue struct {
 	Generation uint64      `json:"generation"`
 	Phase      phase.Phase `json:"phase"`
 	// Status is the last Dispatch status the daemon observed for the issue.
-	Status    string     `json:"status"`
-	Architect *ClaimView `json:"architect,omitempty"`
+	Status string `json:"status"`
+	// HoldReason is why a held issue is held, when its hold has one: `escalated` once its architect
+	// sent it to the controller. Absent otherwise, and absent while the issue's tree lingers or is
+	// closed: the record keeps the reason, and the view shows it again once the tree is re-admitted.
+	HoldReason string     `json:"holdReason,omitempty"`
+	Architect  *ClaimView `json:"architect,omitempty"`
 	// Workers is keyed by the role that holds the claim; the vocabulary of a claim belongs to
 	// `internal/claim`, which the runtime, the worker stream, and the supervisor all speak
 	// without importing this package.
@@ -149,6 +153,11 @@ type PhaseView struct {
 }
 
 // PullRequestView is the issue's pull request as the daemon observes it from GitHub.
+// ReviewDecision is the latest review round's decision (changes_requested or approved), the one
+// the workflow ends the round on when the reviewer completes. It shows from the review that
+// decided it until the next round opens or a new generation clears it, so a request for changes
+// stays through implementing and testing, and an approval through retro and every phase after
+// it; absent until a review in a round decides.
 type PullRequestView struct {
 	Number         int    `json:"number"`
 	Head           string `json:"head"`

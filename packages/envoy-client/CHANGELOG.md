@@ -9,6 +9,6 @@
 
 ### Fixed
 
-- External issue references now create their native issue on first use, and `dispatch_read` follows
-  ask and comment references to their targeted results.
+- Non-creation tools resolve external issue references to linked native issues without creating
+  them, and `dispatch_read` follows ask and comment references to their targeted results.
 - Suggestions without a rationale omit `body` from their request.

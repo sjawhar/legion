@@ -166,7 +166,7 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 			name:    "pull request closed",
 			subject: "notifications.github.sjawhar.legion.pr.42",
 			file:    "github/pr-closed.json",
-			want:    PullRequestClosed{Repo: "sjawhar/legion", Number: 42},
+			want:    PullRequestClosed{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head-captured", UpdatedAt: updatedAt},
 		},
 		{
 			name:    "pull request merged",
@@ -190,7 +190,7 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 			name:    "branch push",
 			subject: "notifications.github.sjawhar.legion.push.branch.legion/LEGION-208",
 			file:    "github/push.json",
-			want:    Push{Repo: "sjawhar/legion", Branch: "legion/LEGION-208", After: "head-captured", ChangedPaths: new(".legion/plan.json\nsource.go"), Truncated: new("false"), Pusher: "author"},
+			want:    Push{Repo: "sjawhar/legion", Branch: "legion/LEGION-208", Before: "before-captured", After: "head-captured", ChangedPaths: new(".legion/plan.json\nsource.go"), Truncated: new("false"), Pusher: "author"},
 		},
 		{
 			name:    "comment",
@@ -830,7 +830,8 @@ func TestApplyFactSerializesConcurrentFacts(t *testing.T) {
 }
 
 // A reopened pull request is open again, recorded as when it opened: a closed pull request's record
-// is dropped at the next re-admission, so one reopened in between must not stay closed.
+// is dropped at the next re-admission, so one reopened in between must not stay closed. The fact
+// says it is a reopen, since GitHub sends opened only once and a second one is a redelivery.
 func TestDecodeReopenedPullRequestAsOpened(t *testing.T) {
 	data, err := os.ReadFile("testdata/github/pr-opened.json")
 	if err != nil {
@@ -853,7 +854,7 @@ func TestDecodeReopenedPullRequestAsOpened(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode reopened: %v", err)
 	}
-	if opened, ok := got.Fact.(PullRequestOpened); !ok || opened.Number != 42 || opened.Branch != "legion/LEGION-208" || opened.HeadSHA != "head-captured" {
+	if opened, ok := got.Fact.(PullRequestOpened); !ok || opened.Number != 42 || opened.Branch != "legion/LEGION-208" || opened.HeadSHA != "head-captured" || !opened.Reopened {
 		t.Fatalf("reopened fact = %#v, want the pull request opened again", got.Fact)
 	}
 }
@@ -891,5 +892,70 @@ func TestDecodeDispatchIssueNamesASessionActor(t *testing.T) {
 	}
 	if issue, ok := human.Fact.(DispatchIssue); !ok || issue.ActorSession != "" {
 		t.Fatalf("fact = %#v, want no session actor for a user", human.Fact)
+	}
+}
+
+// The listener's forced marker, GitHub's review id and the review's submission time reach the
+// facts: the workflow reads a push without the marker as forced and orders reviews by submission
+// time then id, so each must survive decoding exactly. A review id that is not a positive integer
+// is refused rather than read as none. A time that cannot be read is taken as none and reported,
+// since a review without one is still ordered, by its id.
+func TestDecodingCarriesThePushForcedMarkerAndTheReviewOrder(t *testing.T) {
+	withPayload := func(t *testing.T, name, subject string, set map[string]any) (decodedMessage, error) {
+		t.Helper()
+		var envelope map[string]any
+		if err := json.Unmarshal(capturedGitHubEnvelope(t, name), &envelope); err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		// The envelope carries its payload as JSON text.
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(envelope["payload"].(string)), &payload); err != nil {
+			t.Fatalf("parse %s's payload: %v", name, err)
+		}
+		for key, value := range set {
+			payload[key] = value
+		}
+		text, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatalf("encode %s's payload: %v", name, err)
+		}
+		envelope["payload"] = string(text)
+		data, err := json.Marshal(envelope)
+		if err != nil {
+			t.Fatalf("encode %s: %v", name, err)
+		}
+		return decodeMessage(subject, "CAPTURE", capturedRepositories, data)
+	}
+	pushSubject := "notifications.github.sjawhar.legion.push.branch.legion/LEGION-208"
+	reviewSubject := "notifications.github.sjawhar.legion.pr.42.review"
+
+	for _, forced := range []string{"true", "false"} {
+		decoded, err := withPayload(t, "push.json", pushSubject, map[string]any{"forced": forced})
+		if push, ok := decoded.Fact.(Push); err != nil || !ok || push.Forced == nil || *push.Forced != forced {
+			t.Fatalf("push with forced %q = %#v, %v", forced, decoded.Fact, err)
+		}
+	}
+	decoded, err := withPayload(t, "review.json", reviewSubject, map[string]any{"review_id": "5325101010",
+		"submitted_at": "2026-09-26T12:03:00+02:00"})
+	submitted := time.Date(2026, 9, 26, 10, 3, 0, 0, time.UTC)
+	if review, ok := decoded.Fact.(PullRequestReview); err != nil || !ok || review.ID != 5325101010 ||
+		!review.SubmittedAt.Equal(submitted) || len(decoded.Unread) != 0 {
+		t.Fatalf("review with an id and a submission time = %#v, unread %q, %v", decoded.Fact, decoded.Unread, err)
+	}
+	if _, err := withPayload(t, "review.json", reviewSubject, map[string]any{"review_id": "not-a-number"}); err == nil {
+		t.Fatal("a review id that is not a number decoded")
+	}
+	for _, unreadable := range []any{"yesterday", 1.72735218e+09, true, map[string]any{"t": "2026-09-26T12:03:00Z"}} {
+		decoded, err = withPayload(t, "review.json", reviewSubject, map[string]any{"review_id": "5325101010", "submitted_at": unreadable})
+		if review, ok := decoded.Fact.(PullRequestReview); err != nil || !ok || review.ID != 5325101010 || !review.SubmittedAt.IsZero() ||
+			len(decoded.Unread) != 1 || !strings.Contains(decoded.Unread[0], "submitted_at") {
+			t.Fatalf("review with the time %#v = %#v, unread %q, %v; want it untimed and the field reported", unreadable, decoded.Fact, decoded.Unread, err)
+		}
+	}
+	for _, absent := range []any{nil, ""} {
+		decoded, err = withPayload(t, "review.json", reviewSubject, map[string]any{"review_id": "5325101010", "submitted_at": absent})
+		if review, ok := decoded.Fact.(PullRequestReview); err != nil || !ok || !review.SubmittedAt.IsZero() || len(decoded.Unread) != 0 {
+			t.Fatalf("review with the time %#v = %#v, unread %q, %v; want it untimed and nothing reported", absent, decoded.Fact, decoded.Unread, err)
+		}
 	}
 }
