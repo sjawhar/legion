@@ -144,6 +144,38 @@ func TestCreateWorkspaceRefusesAMainAtOriginConcurrentFetchesConflicted(t *testi
 	}
 }
 
+// A refusal's way out is run from an operator's shell exactly as printed, and state_dir and --root
+// both accept a path holding a space. The forgotten main's way out, run through sh as printed from
+// a state directory whose path holds one, must name the shared clone as one word: it tracks
+// main@origin, and the next provisioning starts there.
+func TestAForgottenMainsWayOutRunsAsPrintedFromAStateDirectoryHoldingASpace(t *testing.T) {
+	run := newLocalRunner(t)
+	req := provisionRequest(t)
+	req.StateDir = filepath.Join(t.TempDir(), "legion state")
+	req.Source = FromGitHub("test-installation-token", req.StateDir)
+	first, err := Provision(context.Background(), run, req)
+	if err != nil {
+		t.Fatalf("provision the shared clone: %v", err)
+	}
+	clone := first.Clone
+	runSetup(t, clone, "jj", "bookmark", "forget", "main", "--ignore-working-copy", "-R", clone)
+
+	req.Issue = "WIDGETS-43"
+	_, err = Provision(context.Background(), run, req)
+	if err == nil {
+		t.Fatal("provisioning with main forgotten succeeded; want the untracked main@origin refusal")
+	}
+	command := codeSpan(t, err.Error(), "jj bookmark track main@origin")
+	runSetup(t, t.TempDir(), "sh", "-c", command)
+	working, err := Provision(context.Background(), run, req)
+	if err != nil {
+		t.Fatalf("provision after running %q through sh: %v", command, err)
+	}
+	if parent, main := commitOf(t, working.Dir, "@-"), commitOf(t, clone, "main@origin"); parent != main {
+		t.Errorf("after %q the workspace's @- is %s, want origin's main %s", command, parent, main)
+	}
+}
+
 // trackRace runs a function once, just before the first `jj bookmark track` it is asked to run.
 type trackRace struct {
 	*recordingRunner
