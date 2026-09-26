@@ -1096,40 +1096,60 @@ thumbprint (and, for a pod, a projected service-account token); `internal/broker
 `internal/broker/secrets` reads the granted value from AWS Secrets Manager, or a fake local file
 for development.
 
-`config.Load` (`internal/broker/config/config.go`) reads the broker's complete `BROKER_*`
-environment: `BROKER_LISTEN_ADDR` (default `127.0.0.1:13380`), `BROKER_DATABASE_URL`,
+`config.Load` (`internal/broker/config/config.go`) reads the broker's `BROKER_*` environment:
+`BROKER_LISTEN_ADDR` (default `127.0.0.1:13380`), `BROKER_DATABASE_URL`,
 `BROKER_PUBLIC_URL`, `BROKER_DISPATCH_URL`, `BROKER_DISPATCH_PROJECT` (these four required),
 `BROKER_RULES_FILE` / `BROKER_RULES_S3_URI` (exactly one, the latter `s3://<bucket>/<key>`),
 `BROKER_K8S_OIDC_ISSUER` / `BROKER_K8S_OIDC_AUDIENCE` (set together or not at all),
-`BROKER_ENVOY_URL` (optional; setting it makes `BROKER_ENVOY_TOKEN` required),
-`BROKER_DISPATCH_TOKEN` (required), `BROKER_LEASE_SECONDS` (default 900, max 3600),
-`BROKER_ASK_POLL_SECONDS` (default 5, max 60), `BROKER_PROOF_SKEW_SECONDS` (default 60, max 300),
-`BROKER_MAX_GRANT_SECONDS` (default 43200, max 43200), and `BROKER_RULES_RELOAD_SECONDS` (default
-300, max 3600). `BROKER_DISPATCH_TOKEN` and `BROKER_ENVOY_TOKEN` follow the broker's `_FILE`
-secret-loading convention: `<NAME>_FILE`, when set, names a file whose trimmed contents win over a
-bare `<NAME>`, and a named-but-unreadable or empty file is a startup error naming the file, never a
-silent fallback to an unset value. A missing required variable, a malformed URL, or two disagreeing
-sources for one value refuses to start, naming the offending variable.
+`BROKER_ENVOY_URL` (optional; turns on best-effort wake notifications to the requesting session
+through Envoy's `/v1/messages/send`, sent with `BROKER_ENVOY_TOKEN` — which is read only when the
+URL is set, and is not itself required at startup), `BROKER_DISPATCH_TOKEN` (required),
+`BROKER_LEASE_SECONDS` (default 900, max 3600), `BROKER_ASK_POLL_SECONDS` (default 5, max 60),
+`BROKER_PROOF_SKEW_SECONDS` (default 60, max 300), `BROKER_MAX_GRANT_SECONDS` (default 43200, max
+43200), and `BROKER_RULES_RELOAD_SECONDS` (default 300, max 3600). `BROKER_DISPATCH_TOKEN` and
+`BROKER_ENVOY_TOKEN` follow the broker's `_FILE` secret-loading convention: `<NAME>_FILE`, when
+set, names a file whose trimmed contents win over a bare `<NAME>` — with both set, the file wins
+silently, nothing is refused — and a named-but-unreadable or empty file is a startup error naming
+the file, never a silent fallback to an unset value. `config.Load` refuses to start on: a missing
+required variable; a `BROKER_PUBLIC_URL` or `BROKER_DISPATCH_URL` that isn't an absolute URL with
+no path; both or neither of `BROKER_RULES_FILE`/`BROKER_RULES_S3_URI` set; and an out-of-range
+integer among the `_SECONDS` variables. `cmd/broker/main.go` reads one more variable directly,
+outside `config.Load`: when `BROKER_RULES_FILE` selects local rules (rather than
+`BROKER_RULES_S3_URI`, which is what selects AWS Secrets Manager for secret values), `main.go`
+requires `BROKER_FAKE_SECRETS_FILE` and refuses to start without it — a local-dev-only path, since
+production pairs `BROKER_RULES_S3_URI` with Secrets Manager instead.
 
 `internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's HTTP routes — a
-new route is a new row there, never a bare `mux.HandleFunc` — and its own comment says the wire
-contract for every row (request/response shapes, status codes, which of `authNone`,
-`authLauncher`, `authProof`, or `authHumanOrProof` it requires) is the AGENTC-393 overview
-document, not this file; read `routes()` for the current, authoritative route list.
+new route is a new row there, never a bare `mux.HandleFunc`. Its own comment says the wire
+contract for every row — request/response shapes, status codes — is the AGENTC-393 overview
+document; each row's own `Auth` field (`authNone`, `authLauncher`, `authProof`, or
+`authHumanOrProof`) is what `api/server.go` actually enforces for authentication, not something
+deferred to that document. Read `routes()` for the current, authoritative route list.
 
-`internal/broker/requests` is the state machine. Terminal states — a request's `granted`,
-`denied`, `cancelled`, `expired`, and a grant's own `revoked` — are final: every transition is an
-`UPDATE` guarded by `state='pending'` inside one transaction that also writes its `audit` row, so a
-duplicate or late answer (a second poller tick, a re-delivered ask read) changes nothing. A grant
-belongs to exactly one enrollment; `Values()` and `reuseLiveGrant()` both treat a still-live grant
-(not revoked, not expired) as authoritative regardless of a later rules change, so a caller already
-holding one is never re-asked and never re-evaluated against updated policy. Audit rows never carry
-secret values — `audit()` takes only `kind`, `enrollment_id`, `request_id`, an optional
-`grant_id`, `actor`, and a non-secret JSON `detail` (the ask id, the approver, the refusal reason);
-the granted value itself is read fresh from `secrets.Reader` when a grant is released and is never
-persisted.
+`internal/broker/requests` is the state machine. A request's terminal states — `granted`,
+`denied`, `cancelled`, `expired` — are final: every transition is an `UPDATE` guarded by
+`state='pending'` inside one transaction that also writes its `audit` row, so a duplicate or late
+answer (a second poller tick, a re-delivered ask read) changes nothing. A grant's revocation is
+guarded differently: `RevokeGrant` sets `revoked_at`/`revoked_by` guarded by `revoked_at is null`,
+so `revoked_at`, once set, is never overwritten — but the guard doesn't check whether the update
+actually matched a row, so a second revoke of an already-revoked grant still returns success and
+writes a second `grant.revoked` audit row (potentially naming a different actor). A grant belongs
+to exactly one enrollment; `reuseLiveGrant()` returns a still-live grant (not revoked, not
+expired) for the exact same set of requested names as-is — no new request, no policy
+re-evaluation, no new ask. `Values()` likewise skips re-running the approval decision for a live
+grant, but it does check each requested name against the *current* rules: a name the rules no
+longer carry fails the whole release with `ErrGrantNotLive`, and a name the rules now deliver only
+by proxy is withheld from the response and returned in `proxy_only` instead. Audit rows never
+carry secret values — `audit()` takes only `kind`, `enrollment_id`, `request_id`, an optional
+`grant_id`, `actor`, and a non-secret JSON `detail`; `detail` carries things like the ask id, the
+refusal reason, or the requested secret names depending on the event, while the `actor` column
+(e.g. `human:<login>`) records who acted, including an approver. The granted value itself is read
+fresh from `secrets.Reader` when a grant is released and is never persisted.
 
 Tests: `cd packages/envoy && go vet ./... && go test ./internal/broker/... ./cmd/broker/...
-./cmd/agent-secrets/...`. The Postgres-backed tests need
-`BROKER_TEST_DATABASE_URL=postgres://postgres:pw@127.0.0.1:15433/postgres?sslmode=disable` pointed
-at a live Postgres.
+./cmd/agent-secrets/...`. The Postgres-backed tests skip, rather than fail, when
+`BROKER_TEST_DATABASE_URL` is unset (`t.Skip`, e.g. `internal/broker/store`,
+`internal/broker/requests`); `packages/envoy/scripts/dev-postgres.sh` starts a local Postgres for
+them, the same script `cmd/dispatch/AGENTS.md` documents for its own Postgres-backed tests, and
+CI's `envoy-go` job (`.github/workflows/envoy-and-contracts.yaml`) points
+`BROKER_TEST_DATABASE_URL` at the same server as `DISPATCH_TEST_DATABASE_URL`.
