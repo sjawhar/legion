@@ -6,6 +6,7 @@ import (
 
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -380,6 +381,51 @@ func TestSuggestionAcceptKeepsTheAskItLandsIn(t *testing.T) {
 	}
 }
 
+// Only the typed block itself, rewritten under its own id, is replaced by a replacement of its
+// type. One under no id is a new block, so it lands inside the callout as any block does, and the
+// callout keeps its id; the inner callout of two, rewritten under its own id, is replaced where it
+// sits, inside the outer one.
+func TestSuggestionAcceptRewritesOnlyTheTypedBlockUnderItsOwnID(t *testing.T) {
+	minted := regexp.MustCompile(`#[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
+	for _, test := range []struct{ name, spec, quote, replaceWith, want string }{
+		{name: "a callout under no id", spec: "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\nA note.\n:::\n",
+			quote: "A note.", replaceWith: ":::callout{kind=\"note\"}\nReworded.\n:::\n",
+			want: "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n:::callout{#<minted> kind=\"note\" title=\"\"}\nReworded.\n:::\n:::\n"},
+		{name: "the inner of two callouts under its own id",
+			spec:  ":::callout{#outer kind=\"note\" title=\"\"}\nOuter.\n\n:::callout{#inner kind=\"note\" title=\"\"}\nWhich one?\n:::\n:::\n",
+			quote: "Which one?", replaceWith: ":::callout{#inner kind=\"warning\" title=\"\"}\nReworded.\n:::\n",
+			want: ":::callout{#outer kind=\"note\" title=\"\"}\nOuter.\n\n:::callout{#inner kind=\"warning\" title=\"\"}\nReworded.\n:::\n:::\n\n:::\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var documentService *docs.Service
+			handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+				documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
+				t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+				return documentService
+			})
+			issue := createInteractionIssue(t, handler, "TEST", "A typed block rewritten", test.spec)
+			created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+				"body": "suggested", "anchor": map[string]any{"artifact": "spec", "quote": test.quote},
+				"suggestion": map[string]string{"replace_with": test.replaceWith}, "actor": sessionActor(),
+			})
+			if created.Code != http.StatusCreated {
+				t.Fatalf("create the suggestion: status=%d body=%s", created.Code, created.Body.String())
+			}
+			comment := decodeBody[model.Comment](t, created)
+
+			accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
+
+			if accepted.Code != http.StatusOK {
+				t.Fatalf("accept: status=%d body=%s", accepted.Code, accepted.Body.String())
+			}
+			text, err := documentService.Text(context.Background(), issue.PrimaryArtifactID)
+			if got := minted.ReplaceAllString(text, "#<minted>"); err != nil || got != test.want {
+				t.Fatalf("document after the accept = %q (%v), want %q", got, err, test.want)
+			}
+		})
+	}
+}
+
 // askSpec is a document holding one open ask, a1, between two paragraphs.
 const askSpec = "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich one?\n:::\n\nAfter.\n"
 
@@ -431,6 +477,12 @@ func TestSuggestionAcceptRefusals(t *testing.T) {
 		{name: "an ask under an id held malformed", spec: "Intro typo.\n", browser: "Intro typo.\n\n" + malformedAsk, quote: "Intro typo.",
 			replaceWith: ":::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nOther?\n:::\n",
 			code:        "INVALID_MARKDOWN", reason: `block id \"a1\" would name two blocks`},
+		{name: "an ask rewritten under another id", spec: askSpec, quote: "Which one?",
+			replaceWith: ":::ask{#a2 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich one, first?\n:::\n",
+			code:        "INVALID_ASK_BLOCK", reason: `ask block \"a1\" has unsupported body node \"ask\"`},
+		{name: "an ask rewritten under no id", spec: askSpec, quote: "Which one?",
+			replaceWith: ":::ask{urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich one, first?\n:::\n",
+			code:        "INVALID_ASK_BLOCK", reason: `ask block \"a1\" has unsupported body node \"ask\"`},
 		{name: "text from one ask's question into the next's", spec: "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich one?\n:::\n\n" +
 			":::ask{#a2 urgency=\"med\" multiple=\"false\" state=\"open\"}\nShip it?\n:::\n",
 			quote: "one? Ship", replaceWith: "x", code: "INVALID_OP", reason: `field \"anchor\"`},

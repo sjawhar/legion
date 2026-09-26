@@ -645,11 +645,13 @@ func fitReplacement(parent, with, openingListItem *Node, hasPrefixParagraph bool
 		// A typed block takes the replacement as it is, and fitContent's Validate applies the
 		// block's content rule, which for an ask admits any block (validateTypedBlock), so a fit
 		// never climbs out of a typed block to replace it, as ProseMirror fits one into a callout.
-		// The one exception is a replacement that is a single block of the typed block's own type:
-		// that is the block rewritten (the same id, new text), so the fit climbs and the rewrite
-		// replaces the block instead of nesting inside it under the same id.
+		// The one exception is a replacement that is a single block of the typed block's own type
+		// under its id: that is the block rewritten (the same id, new text), so the fit climbs and
+		// the rewrite replaces the block instead of nesting inside it under the same id. One under
+		// another id, or a minted one, is a different block and stays inside.
 		if _, typed := typedBlock(parent.Type); typed {
-			if len(source) == 1 && source[0].Type == parent.Type {
+			if len(source) == 1 && source[0].Type == parent.Type &&
+				source[0].Attrs[BlockIDAttr] == parent.Attrs[BlockIDAttr] {
 				return nil, false
 			}
 			return source, true

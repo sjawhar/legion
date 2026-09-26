@@ -20,7 +20,7 @@ export interface CommentActionFailure {
 }
 
 /** Refusals of the document an accept would write: the suggestion itself has to change. */
-const permanentRefusals = new Set(["INVALID_ASK_BLOCK", "INVALID_OP"]);
+const permanentRefusals = new Set(["INVALID_ASK_BLOCK", "INVALID_MARKDOWN", "INVALID_OP"]);
 
 function actionFailure(id: string, error: Error): CommentActionFailure {
   const refused =

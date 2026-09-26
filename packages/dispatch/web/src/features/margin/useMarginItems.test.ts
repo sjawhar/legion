@@ -535,6 +535,13 @@ test("a failed action carries the API's reason, and a refusal of what it writes 
       want: { message: 'invalid document operation field "replace_with"', retryable: false },
     },
     {
+      error: new ApiError(400, {
+        code: "INVALID_MARKDOWN",
+        error: 'block id "a1" would name two blocks',
+      }),
+      want: { message: 'block id "a1" would name two blocks', retryable: false },
+    },
+    {
       error: new ApiError(409, {
         code: "ANCHOR_MISSING",
         error: "the suggestion's text is still loading",

@@ -41,9 +41,9 @@ func TestSpliceKeepsAnAskItsReplacementDoesNotFit(t *testing.T) {
 	}
 }
 
-// A replacement that is one typed block of the same type as the typed block it lands in is that
-// block rewritten, the way the dispatch skill tells a writer to edit one (the same id, the new
-// text), so the fit replaces the block rather than nesting the rewrite inside it: the document
+// A replacement that is one typed block of the same type as the typed block it lands in, under its
+// id, is that block rewritten, the way the dispatch skill tells a writer to edit one (the same id,
+// the new text), so the fit replaces the block rather than nesting the rewrite inside it: the document
 // holds the id once, as main's server stores it. ProseMirror would leave the old ask emptied
 // beside the new one, under the same id, which the write's block-id check would refuse.
 func TestSpliceRewritesATypedBlockAReplacementOfItsTypeCovers(t *testing.T) {
@@ -80,6 +80,56 @@ func TestSpliceRewritesATypedBlockAReplacementOfItsTypeCovers(t *testing.T) {
 			}
 			if rendered, err := Render(got); err != nil || rendered != test.want {
 				t.Fatalf("Splice() = %q (%v), want %q", rendered, err, test.want)
+			}
+		})
+	}
+}
+
+// Only the block itself rewritten climbs out: a replacement of the same type under another id, or
+// under none, is a different block, and a fit never replaces the typed block it lands in, so it
+// stays inside the block, which keeps its id, for the document service's checks to judge.
+func TestSpliceKeepsATypedBlockAReplacementOfItsTypeUnderAnotherIDLandsIn(t *testing.T) {
+	for _, test := range []struct{ name, markdown, quote, replacement, parent, id string }{
+		{name: "an ask under another id",
+			markdown:    "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich one?\n:::\n",
+			quote:       "Which one?",
+			replacement: ":::ask{#a2 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich one, first?\n:::\n",
+			parent:      "ask", id: "a1"},
+		{name: "an ask under no id",
+			markdown:    "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich one?\n:::\n",
+			quote:       "Which one?",
+			replacement: ":::ask{urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich one, first?\n:::\n",
+			parent:      "ask", id: "a1"},
+		{name: "a callout under no id",
+			markdown:    "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\nA note.\n:::\n",
+			quote:       "A note.",
+			replacement: ":::callout{kind=\"note\"}\nReworded.\n:::\n",
+			parent:      "callout", id: "c1"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			doc, err := Parse(test.markdown)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, err := FindQuote(doc, test.quote, nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			with, err := Parse(test.replacement)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			got, err := Splice(doc, r, with)
+
+			if err != nil {
+				t.Fatalf("Splice() error = %v", err)
+			}
+			block := got.Children[1]
+			if block.Type != test.parent || block.Attrs[BlockIDAttr] != test.id || len(block.Children) != 1 ||
+				block.Children[0].Type != test.parent || block.Children[0].Attrs[BlockIDAttr] == test.id {
+				rendered, _ := Render(got)
+				t.Fatalf("Splice() = %q, want %s %s holding the replacement %s under its own id", rendered, test.parent, test.id, test.parent)
 			}
 		})
 	}
