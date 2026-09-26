@@ -81,7 +81,7 @@ type messageBody struct {
 
 // sendResponse is the answer to a targeted send. Duplicate reports that JetStream already held
 // this message, so nothing new reached the agent's subject; it can only be true for a send whose
-// source publishes under a MsgId (bus's dedupedSources: dispatch, github, slack, ghostwispr), and
+// dedupe key names the upstream event (contracts.DedupeKeyNamesTheUpstreamEvent), and
 // Dispatch is the one sender that uses it. Absent means false, which is what an older listener's
 // answer reads as.
 type sendResponse struct {

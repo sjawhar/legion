@@ -59,7 +59,7 @@ func TestPublishReportingDuplicateReportsTheStreamsVerdict(t *testing.T) {
 		t.Fatalf("a different dedupe key must not report a duplicate")
 	}
 
-	// An agent-sourced envelope carries no MsgId at all (dedupedSources in nats.go), so the stream
+	// An agent-sourced envelope carries no MsgId at all (contracts.DedupeKeyNamesTheUpstreamEvent),
 	// cannot recognise a repeat and never reports one.
 	agent := envelope("fourth")
 	agent.Source = "agent"
