@@ -13,17 +13,28 @@
 # and defines note and fail (which exits). A production guard that finds a violation writes it to
 # $evidence/pane-endpoint-violation.txt, and the next bounded wait aborts naming it.
 
-# until_true SECONDS DESCRIPTION COMMAND... — all synchronization has a bounded named wait.
+# until_true SECONDS DESCRIPTION COMMAND... — all synchronization has a bounded named wait. It
+# polls COMMAND every half second until SECONDS of wall time have passed, each poll's own run
+# included, and says what it waits for on entry and every 60 s while it does (polls and seconds),
+# so a healthy wait and a stall read differently to anyone watching a run's output. A poll that
+# never returns would hold the wait past its bound, so a caller's remote calls carry their own
+# timeouts.
 until_true() {
-  local limit=$1 what=$2 i
+  local limit=$1 what=$2 polls=0 started=$SECONDS beat=$SECONDS
   shift 2
-  for ((i = 0; i < limit * 2; i++)); do
+  note "waiting up to ${limit}s for $what"
+  while ((SECONDS - started < limit)); do
     [ ! -s "$evidence/pane-endpoint-violation.txt" ] || fail "ABORT: $(cat "$evidence/pane-endpoint-violation.txt")"
+    polls=$((polls + 1))
     if "$@" >/dev/null 2>&1; then return 0; fi
+    if ((SECONDS - beat >= 60)); then
+      beat=$SECONDS
+      note "still waiting for $what: poll $polls, $((SECONDS - started))s of ${limit}s"
+    fi
     sleep 0.5
   done
   if [ -n "$timeout_hook" ]; then "$timeout_hook" || true; fi
-  fail "timed out after ${limit}s waiting for $what"
+  fail "timed out after ${limit}s ($polls polls) waiting for $what"
 }
 
 # pick_port VAR assigns VAR a port from lib/free-port.sh that is distinct from every earlier pick of
@@ -82,6 +93,17 @@ stop_pid() {
   done
   kill -KILL "$pid" 2>/dev/null || true
   return 0
+}
+
+# stop_tree PID stops PID and every process under it. A watcher is a loop whose kubectl, jq or sleep
+# outlives the loop when only the loop is stopped; the loop is frozen first, so it starts nothing new
+# while its children go.
+stop_tree() {
+  local pid=${1:-} child
+  [ -n "$pid" ] || return 0
+  kill -STOP "$pid" 2>/dev/null || return 0
+  for child in $(pgrep -P "$pid"); do stop_tree "$child"; done
+  kill -KILL "$pid" 2>/dev/null || true
 }
 
 run_processes() {

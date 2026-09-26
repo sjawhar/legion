@@ -240,16 +240,10 @@ deadline_port=$(bash "$root/scripts/e2e/lib/free-port.sh" "$port") || fail "no f
 envoy_port=$(bash "$root/scripts/e2e/lib/free-port.sh" "$port" "$deadline_port") || fail "no free port for the Envoy listener"
 (cd "$root/packages/daemon-go" && go build -o "$work/legion" ./cmd/legion)
 (cd "$root/packages/envoy" && go build -o "$work/envoy-listener" ./cmd/listener)
-# The binary under proof, checkable after the run: the source it was built from and its hash.
-# shellcheck source-path=SCRIPTDIR source=lib/built-revision.sh
-. "$root/scripts/e2e/lib/built-revision.sh"
-source_revision=$(built_revision "$root")
-note "built legion from $source_revision; sha256 $(sha256sum "$work/legion" | cut -d' ' -f1)"
-# What a changed working copy holds, so a run on one (a negative control) says what it ran.
-if [ "${source_revision#*working copy has changes}" != "$source_revision" ]; then
-  note "the working copy's changes (jj diff --stat; sha256 of jj diff --git $(jj -R "$root" diff --git | sha256sum | cut -d' ' -f1)):"
-  jj -R "$root" diff --stat | sed 's/^/     /'
-fi
+# The binary under proof, checkable after the run: the source it was built from, what a changed
+# working copy held (a negative control's), and its hash (lib/built-from.sh).
+built=$(bash "$root/scripts/e2e/lib/built-from.sh" "$root" "$work/legion") || fail "lib/built-from.sh could not say what the run built"
+while IFS= read -r line; do note "$line"; done <<<"$built"
 
 if [ -z "${LEGION_E2E_PG_DSN:-}" ]; then
   docker ps >/dev/null # a broken docker is a failure of this run, not of the daemon
