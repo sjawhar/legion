@@ -111,6 +111,8 @@ interests_pid=
 shape_pid=
 controller_session=
 host=
+# The production services' hosts, which scrub keeps out of what the run prints (set in prerequisites).
+service_hosts=()
 pin=
 tree1=
 tree2=
@@ -307,16 +309,22 @@ pod_endpoint_mismatch() {
     printf 'no readable spec\n'
     return 0
   }
+  local source
   for name in DISPATCH_URL ENVOY_URL ENVOY_NATS_URL LEGION_DAEMON_URL; do
     case "$name" in
-      DISPATCH_URL) want=$dispatch_base ;;
-      ENVOY_URL) want=$envoy_url ;;
-      ENVOY_NATS_URL) want=$nats_url ;;
-      LEGION_DAEMON_URL) want="http://$host:$port_daemon" ;;
+      DISPATCH_URL) want=$dispatch_base source=LEGION_E2E_DISPATCH_URL ;;
+      ENVOY_URL) want=$envoy_url source=LEGION_E2E_ENVOY_URL ;;
+      ENVOY_NATS_URL) want=$nats_url source=LEGION_E2E_NATS_URL ;;
+      LEGION_DAEMON_URL) want="http://$host:$port_daemon" source= ;;
     esac
     got=$(sed -n "s/^$name=//p" <<<"$env")
     if [ "$got" != "$want" ]; then
-      printf '%s=%s, want %s\n' "$name" "${got:-<unset>}" "$want"
+      # A production service's address is never printed: the mismatch names the run's input.
+      if [ -n "$source" ]; then
+        printf '%s %s\n' "$name" "$([ -n "$got" ] && echo "differs from $source" || echo "unset, want $source")"
+      else
+        printf '%s=%s, want %s\n' "$name" "${got:-<unset>}" "$want"
+      fi
       return 0
     fi
   done
@@ -340,7 +348,17 @@ read_bearers() {
     head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/postgres-password")
   [ -s "$work/dispatch-token" ] && [ -s "$work/envoy-token" ] || fail "Secrets Manager returned an empty bearer"
 }
-nats_stream() { bun "$root/scripts/e2e/lib/nats-stream.ts" "$@"; }
+# scrub replaces each production service's host with the variable that names it: the run prints
+# none of them, and a tool's error (a refused connection, an unresolved name) may carry one.
+scrub() {
+  local args=() i names=(LEGION_E2E_DISPATCH_URL LEGION_E2E_ENVOY_URL LEGION_E2E_NATS_URL LEGION_E2E_MODEL_GATEWAY_URL) h
+  for i in "${!service_hosts[@]}"; do
+    h=${service_hosts[$i]%%:*}
+    [ -n "$h" ] && args+=(-e "s#${h//./\\.}#<${names[$i]}>#g")
+  done
+  if [ "${#args[@]}" -eq 0 ]; then cat; else sed "${args[@]}"; fi
+}
+nats_stream() { bun "$root/scripts/e2e/lib/nats-stream.ts" "$@" 2> >(scrub >&2); }
 
 # ---- the daemon ----------------------------------------------------------------------------------
 
@@ -915,7 +933,7 @@ interests_sample() {
   for session in $(jq -R -r 'fromjson? | select(.msg | IN("api: claim registered", "api: controller registered")) | .session' "$daemon_log" | sort -u); do
     now=$(date -u +%FT%T.%3NZ)
     if ! code=$(curl -sS --max-time 20 -o "$tmp" -w '%{http_code}' -H "@$work/envoy-auth-header" "$envoy_url/v1/interests/$session" 2>&1); then
-      printf '%s %s error unreachable: %s\n' "$now" "$session" "$(tr '\n' ' ' <<<"$code")" >>"$evidence/interests-outcomes.txt"
+      printf '%s %s error unreachable: %s\n' "$now" "$session" "$(tr '\n' ' ' <<<"$code" | scrub)" >>"$evidence/interests-outcomes.txt"
       continue
     fi
     case "$code" in
@@ -1010,18 +1028,19 @@ for tool in go docker jq curl ss kubectl aws gh bun jj mise shellcheck secrets; 
 case "$image" in *@sha256:*) ;; *) fail "LEGION_E2E_IMAGE must be the worker image by digest (…@sha256:…), not '$image'" ;; esac
 # The production services, each a fully-qualified host (a bare alias resolves through whatever
 # search domain the box or the pod has) and no path. A refusal names the variable, never its value.
-host='[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+'
-[[ $dispatch_base =~ ^https://$host(:[0-9]+)?$ ]] ||
+fqdn='[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+'
+[[ $dispatch_base =~ ^https://$fqdn(:[0-9]+)?$ ]] ||
   fail "LEGION_E2E_DISPATCH_URL is unset or not production Dispatch's https:// URL: a fully-qualified host, an optional port, no path"
-[[ $envoy_url =~ ^https?://$host(:[0-9]+)?$ ]] ||
+[[ $envoy_url =~ ^https?://$fqdn(:[0-9]+)?$ ]] ||
   fail "LEGION_E2E_ENVOY_URL is unset or not the production Envoy listener's http(s):// URL: a fully-qualified host, an optional port, no path"
-[[ $nats_url =~ ^nats://$host:[0-9]+$ ]] ||
+[[ $nats_url =~ ^nats://$fqdn:[0-9]+$ ]] ||
   fail "LEGION_E2E_NATS_URL is unset or not production NATS as nats://host:port with a fully-qualified host"
 nats_host=${nats_url#nats://} && nats_port=${nats_host##*:} && nats_host=${nats_host%:*}
 gateway=$(bash "$root/scripts/e2e/lib/model-gateway-url.sh") ||
   fail "LEGION_E2E_MODEL_GATEWAY_URL is not a model gateway URL the fixture's models.yml can name (the reason is above)"
 # The gateway's health endpoint is at its origin.
 gateway_origin=$(sed -E 's#^(https://[^/]+).*#\1#' <<<"$gateway")
+service_hosts=("${dispatch_base#https://}" "${envoy_url#*://}" "$nats_host" "${gateway_origin#https://}")
 mkdir -p "$(dirname "$lock")"
 exec 9>"$lock"
 flock -n 9 || fail "another Stage 4b run holds $lock: one run at a time"
@@ -1034,7 +1053,7 @@ host=$(curl -sf -m 5 -H "X-aws-ec2-metadata-token: $imds" http://169.254.169.254
 unset imds
 leftover=$(op get sandboxes,pods,pvc,configmaps -l "legion.dev/project=$run_label" -o name 2>&1) || fail "the operator context cannot list namespace $namespace: $leftover"
 [ -z "$leftover" ] || fail "namespace $namespace already holds objects labelled legion.dev/project=$run_label, which another run left or owns: $(tr '\n' ' ' <<<"$leftover")"
-stale_consumers=$(bun "$root/scripts/e2e/lib/nats-stream.ts" consumers "$nats_url" "$stream" "legion-go-$project-") ||
+stale_consumers=$(nats_stream consumers "$nats_url" "$stream" "legion-go-$project-") ||
   fail "production NATS $stream could not list its consumers"
 [ -z "$stale_consumers" ] || fail "production NATS already holds durable consumers of $project, which another run left or owns: $(jq -r .name <<<"$stale_consumers" | tr '\n' ' ')"
 # The run owns the namespace label, the consumers and the project only from here: a run refused
@@ -1085,7 +1104,7 @@ done
 # half is the smoke repository's own.
 for subject in "notifications.dispatch.issue.>" "notifications.github.sjawhar.legion-smoke.>"; do
   seen=$(nats_stream last "$nats_url" "$stream" "$subject" 20) ||
-    blocked "production NATS $stream carries no message on $subject (bun scripts/e2e/lib/nats-stream.ts last $nats_url $stream '$subject'): the daemon's intake would miss that half of the workflow"
+    blocked "production NATS $stream carries no message on $subject (bun scripts/e2e/lib/nats-stream.ts last \$LEGION_E2E_NATS_URL $stream '$subject'): the daemon's intake would miss that half of the workflow"
   note "production NATS $stream carries $subject: newest $(jq -c . <<<"$seen")"
 done
 # From a throwaway pod on the Legion pool, with the restricted pod shape: every service a Sandbox
@@ -1113,15 +1132,18 @@ spec:
           # The image has no curl: bun answers the HTTP services, bash's /dev/tcp the NATS port. A
           # fresh node's first outbound connection can fail while the node settles, so each service
           # gets three tries, 5 s apart, and one that never answers is printed with every try's error.
-          for url in $dispatch_base/healthz $envoy_url/healthz $gateway_origin/health; do
-            printf '%s ' "\$url"
-            URL="\$url" bun -e 'const errors = []; for (let attempt = 1; attempt <= 3; attempt++) { const r = await fetch(process.env.URL, { signal: AbortSignal.timeout(10000) }).catch((e) => e); if (r instanceof Response) { console.log(r.status); process.exit(0); } errors.push("attempt " + attempt + ": " + String(r && r.name) + ": " + String(r && r.message).replace(/\s+/g, " ")); if (attempt < 3) await Bun.sleep(5000); } console.log("unreachable (" + errors.join("; ") + ")");'
+          # Each line names its service, never its address, and an error's host becomes the service.
+          for probe in dispatch=$dispatch_base/healthz listener=$envoy_url/healthz gateway=$gateway_origin/health; do
+            service=\${probe%%=*}
+            printf '%s ' "\$service"
+            SERVICE="\$service" URL="\${probe#*=}" bun -e 'const host = new URL(process.env.URL).hostname; const errors = []; for (let attempt = 1; attempt <= 3; attempt++) { const r = await fetch(process.env.URL, { signal: AbortSignal.timeout(10000) }).catch((e) => e); if (r instanceof Response) { console.log(r.status); process.exit(0); } errors.push("attempt " + attempt + ": " + String(r && r.name) + ": " + String(r && r.message).split(host).join("<" + process.env.SERVICE + ">").replace(/\s+/g, " ")); if (attempt < 3) await Bun.sleep(5000); } console.log("unreachable (" + errors.join("; ") + ")");'
           done
-          printf '%s ' $nats_url
+          printf 'nats '
+
           errors=
           for attempt in 1 2 3; do
             answer=\$(timeout 5 bash -c 'exec 3<>/dev/tcp/$nats_host/$nats_port && head -c 4 <&3' 2>&1) && break
-            errors="\$errors attempt \$attempt: \$(tr '\n' ' ' <<<"\${answer:-no answer}");"
+            errors="\$errors attempt \$attempt: \$(tr '\n' ' ' <<<"\${answer:-no answer}" | sed 's#$nats_host#<nats>#g');"
             answer=
             [ "\$attempt" = 3 ] || sleep 5
           done
@@ -1133,9 +1155,16 @@ op apply -f "$reach" >/dev/null || blocked "the operator could not create the re
 until_true 600 "the reachability pod to finish" sh -c "timeout 120 kubectl --context '$operator' -n '$namespace' get pod legion-e2e4b-reach-$$ -o jsonpath='{.status.phase}' | grep -qx 'Succeeded\|Failed'"
 op logs "legion-e2e4b-reach-$$" >"$evidence/reach.txt" 2>&1
 op delete pod "legion-e2e4b-reach-$$" --wait=false >/dev/null 2>&1
-while read -r url answer; do
-  case "$answer" in 000 | unreachable* | "") fail "a pod on the Legion pool cannot reach $url: $answer ($evidence/reach.txt)" ;; esac
-  note "[pod] $url → $answer"
+while read -r service answer; do
+  case "$service" in
+    dispatch) source=LEGION_E2E_DISPATCH_URL ;;
+    listener) source=LEGION_E2E_ENVOY_URL ;;
+    gateway) source=LEGION_E2E_MODEL_GATEWAY_URL ;;
+    nats) source=LEGION_E2E_NATS_URL ;;
+    *) fail "the reachability pod printed a line naming no service: $(scrub <<<"$service $answer")" ;;
+  esac
+  case "$answer" in 000 | unreachable* | "") fail "a pod on the Legion pool cannot reach $service ($source): $answer ($evidence/reach.txt)" ;; esac
+  note "[pod] $service ($source) → $answer"
 done <"$evidence/reach.txt"
 pass
 
