@@ -2383,6 +2383,10 @@ func TestApplyOperationReplaceKeepsACodeSpansLineIndent(t *testing.T) {
 		{"in a list item", "Intro.\n\n- Body.\n- two\n", "x `a\r b` y", "a\r b"},
 		{"in a blockquote", "Intro.\n\n> Body.\n\nAfter.\n", "x `a\r\tb` y", "a\r\tb"},
 		{"in a callout", callout, "x `a\r b` y", "a\r b"},
+		{"whitespace alone before the closer", "Intro.\n\nBody.\n\nAfter.\n", "x `a\r ` y", "a\r "},
+		{"whitespace alone before the closer, in a quote", "Intro.\n\n> Body.\n\nAfter.\n", "x `a\r  ` y", "a\r  "},
+		{"whitespace alone before the closer, in a list item", "Intro.\n\n- Body.\n- two\n", "x `a\r ` y", "a\r "},
+		{"whitespace alone before the closer, in a footnote definition", "x[^1]\n\n[^1]: Body.\n", "x `a\r ` y", "a\r "},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			tree, err := parseInput(test.markdown)

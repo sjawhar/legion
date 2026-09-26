@@ -32,6 +32,25 @@ x `a b` y
 x `a
 	b` y
 
+x `a ` y
+
+x ` a ` y
+
+> x `a>  ` y
+
+- x `a   ` y
+
+x `a
+  ` y
+
+x `a 	` y
+
+x `    ` y
+
+x ` ` y
+
+x ` b ` y
+
 Notes[^1].
 
-[^1]: x `a    b` y
+[^1]: x `a    b` y `c     ` z

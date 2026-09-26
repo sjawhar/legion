@@ -28,6 +28,8 @@ type renderer struct {
 	inFootnote bool
 	// asteriskRule makes the next rule written `***` rather than `---` (list).
 	asteriskRule bool
+	// runStart is where the textblock being written began its text in the markdown.
+	runStart int
 	// footnoteLabels is every footnote label the document defines, lowercased: text shaped like a
 	// reference to one would read as that reference.
 	footnoteLabels map[string]bool

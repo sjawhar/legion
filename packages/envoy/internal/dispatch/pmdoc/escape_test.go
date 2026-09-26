@@ -428,6 +428,15 @@ func TestRenderKeepsImageAltText(t *testing.T) {
 	img := func(alt string) *Node {
 		return &Node{Type: "image", Attrs: Attrs{"src": "u", "alt": alt, "title": nil}}
 	}
+	inTableCell := func(n *Node) *Node {
+		cell := func(content *Node, kind string) *Node {
+			return &Node{Type: kind, Attrs: Attrs{"colspan": 1, "rowspan": 1, "colwidth": nil, "alignment": "left"}, Children: []*Node{{Type: "paragraph", Children: []*Node{content}}}}
+		}
+		return &Node{Type: "table", Children: []*Node{
+			{Type: "table_header_row", Children: []*Node{cell(&Node{Type: "text", Text: "h"}, "table_header")}},
+			{Type: "table_row", Children: []*Node{cell(n, "table_cell")}},
+		}}
+	}
 	for _, test := range []struct {
 		name, alt string
 		block     func(*Node) *Node
@@ -437,15 +446,8 @@ func TestRenderKeepsImageAltText(t *testing.T) {
 		{"a line feed in a heading", "a\nb", func(n *Node) *Node {
 			return &Node{Type: "heading", Attrs: Attrs{"level": 2}, Children: []*Node{n}}
 		}},
-		{"a carriage return in a table cell", "a\rb", func(n *Node) *Node {
-			cell := func(content *Node, kind string) *Node {
-				return &Node{Type: kind, Attrs: Attrs{"colspan": 1, "rowspan": 1, "colwidth": nil, "alignment": "left"}, Children: []*Node{{Type: "paragraph", Children: []*Node{content}}}}
-			}
-			return &Node{Type: "table", Children: []*Node{
-				{Type: "table_header_row", Children: []*Node{cell(&Node{Type: "text", Text: "h"}, "table_header")}},
-				{Type: "table_row", Children: []*Node{cell(n, "table_cell")}},
-			}}
-		}},
+		{"a carriage return in a table cell", "a\rb", inTableCell},
+		{"a carriage return and pipes in a table cell", "a\r|-|", inTableCell},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			doc := &Node{Type: "doc", Children: []*Node{test.block(img(test.alt))}}

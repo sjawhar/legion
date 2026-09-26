@@ -634,9 +634,6 @@ func parseInlineWithTableCellLinks(parent ast.Node, source []byte, initial []Mar
 		switch current := child.(type) {
 		case *ast.Text:
 			value := parseTextValue(current.Value(source), active)
-			if span, ok := current.Parent().(*ast.CodeSpan); ok && span.FirstChild() != current {
-				value = codeLineIndent(current, source) + value
-			}
 			if current.HardLineBreak() {
 				value = strings.TrimSuffix(strings.TrimSuffix(value, "\n"), "  ")
 			}
@@ -675,6 +672,10 @@ func parseInlineWithTableCellLinks(parent ast.Node, source []byte, initial []Mar
 			}
 			appendInline(&children, content)
 		case *ast.CodeSpan:
+			if value, ok := multilineCodeSpanText(current, source); ok {
+				appendText(&children, value, append(append([]Mark(nil), active...), Mark{Type: "inlineCode"}))
+				continue
+			}
 			content, err := parseInlineWithTableCellLinks(current, source, append(active, Mark{Type: "inlineCode"}), footnotes, tableCell)
 			if err != nil {
 				return nil, err

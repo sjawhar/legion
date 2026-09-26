@@ -78,7 +78,7 @@ func (p footnoteDefinitionParser) Open(parent ast.Node, reader gmtext.Reader, pc
 // lineRecordingParagraph is goldmark's paragraph parser, recording each line it takes as the
 // containers left it, before the paragraph trims its leading whitespace, keyed by where the
 // trimmed line starts. The browser editor's parser keeps that whitespace in a code span, whether
-// a line feed or a lone carriage return ends the line before (codeLineIndent). Recording as the
+// a line feed or a lone carriage return ends the line before (multilineCodeSpanText). Recording as the
 // lines are taken keeps them whatever the paragraph becomes: a tight list item's text block, or a
 // setext heading, whose paragraph is trimmed before any paragraph transformer sees it.
 type lineRecordingParagraph struct{ parser.BlockParser }
@@ -127,22 +127,75 @@ func withLineStarts(p parser.Parser, lined []byte, context parser.Context) ast.N
 	return root
 }
 
-// codeLineIndent is the whitespace goldmark trimmed from the start of text, a code span's text on
-// one of its later lines: what lies between the containers' prefix and the text, which the browser
-// editor's parser reads as part of the code.
-func codeLineIndent(text *ast.Text, source []byte) string {
-	root := ast.Node(text)
+// multilineCodeSpanText is the text of a code span that runs over more than one line, as the
+// browser editor's parser reads it: each later line from just after the containers' prefix, where
+// goldmark's paragraph trimmed the whitespace before it - a line holding only whitespace before
+// the closer included, for which goldmark keeps no text at all - and then one space or line ending
+// taken from each end when both ends hold one, after the whole span is put together. ok is false
+// for a span on one line, whose goldmark reading stands.
+func multilineCodeSpanText(span *ast.CodeSpan, source []byte) (text string, ok bool) {
+	first, _ := span.FirstChild().(*ast.Text)
+	last, _ := span.LastChild().(*ast.Text)
+	if first == nil || last == nil {
+		return "", false
+	}
+	// Goldmark takes one character off each end when both are whitespace; put them back.
+	trimmed := first.Segment.Start > 0 && source[first.Segment.Start-1] != '`'
+	stop := last.Segment.Stop
+	if trimmed {
+		stop++
+	}
+	closerAlone := stop > last.Segment.Start && isLineEnding(source[stop-1])
+	if first == last && !closerAlone {
+		return "", false
+	}
+	var content strings.Builder
+	for child := span.FirstChild(); child != nil; child = child.NextSibling() {
+		line := child.(*ast.Text).Segment
+		from, to := line.Start, line.Stop
+		if child == span.FirstChild() && trimmed {
+			from--
+		} else if child != span.FirstChild() {
+			content.WriteString(untrimmedIndent(span, line.Start, source))
+		}
+		if child == span.LastChild() && trimmed {
+			to++
+		}
+		content.Write(source[from:to])
+	}
+	if closerAlone {
+		if next := bytes.IndexByte(source[stop:], '`'); next >= 0 {
+			content.WriteString(untrimmedIndent(span, stop+next, source))
+		}
+	}
+	text = content.String()
+	if len(text) >= 2 && isCodePadding(text[0]) && isCodePadding(text[len(text)-1]) && strings.Trim(text, " \r\n") != "" {
+		text = text[1 : len(text)-1]
+	}
+	return text, true
+}
+
+// untrimmedIndent is the whitespace goldmark's paragraph trimmed from the line whose text now
+// starts at start: what lies between the containers' prefix and it (lineRecordingParagraph).
+func untrimmedIndent(node ast.Node, start int, source []byte) string {
+	root := node
 	for root.Parent() != nil {
 		root = root.Parent()
 	}
 	attribute, _ := root.Attribute(untrimmedLinesAttr)
 	recorded, _ := attribute.(map[int]gmtext.Segment)
-	line, ok := recorded[text.Segment.Start]
+	line, ok := recorded[start]
 	if !ok {
 		return ""
 	}
-	return strings.Repeat(" ", line.Padding) + string(source[line.Start:text.Segment.Start])
+	return strings.Repeat(" ", line.Padding) + string(source[line.Start:start])
 }
+
+func isLineEnding(char byte) bool { return char == '\n' || char == '\r' }
+
+// isCodePadding reports whether char can be the space or line ending a code span sheds at each
+// end.
+func isCodePadding(char byte) bool { return char == ' ' || isLineEnding(char) }
 
 // afterLoneCarriageReturn reports whether the line the reader is on began at a lone carriage
 // return in the source as written.
