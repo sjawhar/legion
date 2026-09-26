@@ -660,7 +660,7 @@ func (r *liveRig) checkConcurrentProvision() error {
 		return fmt.Errorf("the two workspace-init runs overlapped: root2 %v–%v, child2 %v–%v", a.start, a.end, b.start, b.end)
 	}
 	note("runtime", "the two workspace-init runs did not overlap: the runtime serialized them")
-	owner, repo, _ := strings.Cut(r.env.repo, "/")
+	owner, repo := r.env.repo.Owner(), r.env.repo.Name()
 	clone := TreeRoot + "/repos/github.com/" + owner + "/" + repo
 	listing, err := r.exec(root2, "ls", "-A", filepath.Dir(clone))
 	if err != nil {
