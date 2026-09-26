@@ -2,7 +2,6 @@ package pmdoc
 
 import (
 	"fmt"
-	"regexp"
 	"slices"
 	"strings"
 
@@ -86,10 +85,68 @@ func needsInlineEscape(value string, offset int, char rune, context escapeContex
 	}
 }
 
+// escaped is how an escaped character is written: `&` as the `&amp;` reference; leading
+// whitespace, which takes no backslash, as the numeric reference the parser decodes back to it,
+// which keeps the line a paragraph instead of the indented code block four spaces or a tab would
+// open; and anything else behind a backslash.
+func escaped(char rune) string {
+	switch char {
+	case '&':
+		return "&amp;"
+	case ' ', '\t':
+		return numericEntity(char)
+	default:
+		return "\\" + string(char)
+	}
+}
+
+// lineStartVerdict is what the writer does with a character at the start of a line of its own.
+type lineStartVerdict int
+
+const (
+	// lineStartUndecided: the character is indentation the parser skips, and a later one decides.
+	lineStartUndecided lineStartVerdict = iota
+	// lineStartAsIs: the line's text begins with a character no line-wide block form begins with,
+	// or one the rules that read the text alone already escape.
+	lineStartAsIs
+	// lineStartEscaped: whitespace that would open indented code, on a textblock's first line with
+	// no mark's marker before it, where the parser strips it even when no block opens - after a
+	// list marker, say - so it is escaped at once.
+	lineStartEscaped
+	// lineStartHeld: a character only the whole line decides, held until the line is written.
+	lineStartHeld
+)
+
+// lineStartOf decides the character at offset, on a line of its own whose text begins at
+// lineStart; escape is what the rules that read the text alone decided for it.
+func lineStartOf(value string, lineStart, offset int, char rune, escape, afterLine, afterMarker bool) lineStartVerdict {
+	switch {
+	case offset == lineStart && (char == ' ' || char == '\t') && indentedCodeRun(value, offset):
+		if !afterLine && !afterMarker {
+			return lineStartEscaped
+		}
+		return lineStartHeld
+	case char != ' ' && char != '\t' && blockStart(value, lineStart, offset):
+		if !escape && lineStartMarker(char) {
+			return lineStartHeld
+		}
+		return lineStartAsIs
+	case !blockStart(value, lineStart, offset):
+		return lineStartAsIs
+	}
+	return lineStartUndecided
+}
+
 // lineStartMarker reports whether char, first in a line's text, can begin a block form that only
 // the whole line decides.
 func lineStartMarker(char rune) bool {
 	return strings.ContainsRune("-*_=~:<|", char)
+}
+
+// closesTypedBlock reports whether line, written at the prefix of the typed block around it, is
+// the lone `:::` that closes the block, which the line read on its own cannot show.
+func closesTypedBlock(line, prefix string) bool {
+	return strings.TrimSpace(strings.TrimPrefix(line, prefix)) == ":::"
 }
 
 // lineReadsAsText reports whether a written line reads the same with its text's first character
@@ -99,21 +156,18 @@ func lineStartMarker(char rune) bool {
 // make a block of its own - a previous list item's `---` or `<br>` - that is no reason to escape
 // anything here. The lines are read without the list indentation they share, up to the
 // indentation of their prefix, so a deeply nested item is not read as indented code while text
-// that is itself indented still is.
-func lineReadsAsText(before, line, escaped, prefix string) bool {
+// that is itself indented still is. footnote is the label, as written, of the footnote definition
+// the read begins with, or empty: the parser drops a definition nothing refers to, so the lines
+// are read after a reference to it.
+func lineReadsAsText(before, line, rewrittenLine, prefix, footnote string) bool {
 	indentation := len(prefix) - len(strings.TrimLeft(prefix, " "))
-	written, rewritten := dedent(before+line, indentation), dedent(before+escaped, indentation)
-	// The parser drops a footnote definition nothing refers to, so a definition's line is read
-	// after a reference to it.
-	if label := footnoteDefinitionLabel.FindString(written); label != "" {
-		reference := "x" + strings.TrimSuffix(label, ":") + "\n\n"
+	written, rewritten := dedent(before+line, indentation), dedent(before+rewrittenLine, indentation)
+	if footnote != "" {
+		reference := "x[^" + footnote + "]\n\n"
 		written, rewritten = reference+written, reference+rewritten
 	}
 	return slices.Equal(blockKinds(written), blockKinds(rewritten))
 }
-
-// footnoteDefinitionLabel matches the `[^label]:` that opens a footnote definition's first line.
-var footnoteDefinitionLabel = regexp.MustCompile(`^\[\^[^\]]+\]:`)
 
 // blockKinds is the kinds of the blocks the parser reads markdown as, in document order.
 func blockKinds(markdown string) []ast.NodeKind {

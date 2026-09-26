@@ -19,10 +19,14 @@ type renderer struct {
 	// one. A lone `:::` closes the block only as a line at that prefix, which only a paragraph
 	// written at the same prefix can produce.
 	typedPrefix *string
-	// lineStart is the current line's first text character, held until the line is written.
-	lineStart    *lineCandidate
-	err          error
-	blockOffsets []BlockOffset
+	// heldLineStart is the current line's first text character, held until the line is written.
+	heldLineStart *lineCandidate
+	// footnoteLineAt is where the last footnote definition's first line begins in the markdown,
+	// and footnoteLabel is its label as written, so that the line is read after a reference to it.
+	footnoteLineAt int
+	footnoteLabel  string
+	err            error
+	blockOffsets   []BlockOffset
 }
 
 // BlockOffset identifies one rendered block in byte offsets of the markdown.
@@ -155,6 +159,7 @@ func (r *renderer) block(n *Node, prefix string) {
 		r.table(n, prefix)
 	case "footnote_definition":
 		label, _ := n.Attrs["label"].(string)
+		r.footnoteLineAt, r.footnoteLabel = r.b.Len(), escapeFootnoteLabel(label)
 		r.writeSyntax("[^" + escapeFootnoteLabel(label) + "]: ")
 		r.blocksNoTrailing(n.Children, prefix+"    ")
 	default:
@@ -418,27 +423,28 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlin
 // it reads with the character escaped (lineReadsAsText). A lone `:::` at the prefix of the typed
 // block around it closes that block, which the line read on its own cannot show.
 func (r *renderer) endLine() {
-	candidate := r.lineStart
+	candidate := r.heldLineStart
 	if candidate == nil {
 		return
 	}
-	r.lineStart = nil
+	r.heldLineStart = nil
 	written := r.b.Bytes()
 	lineFrom := bytes.LastIndexByte(written[:candidate.at], '\n') + 1
 	line := string(written[lineFrom:])
 	width := utf8.RuneLen(candidate.char)
-	escape := "\\" + string(candidate.char)
-	if candidate.char == ' ' || candidate.char == '\t' {
-		escape = numericEntity(candidate.char)
-	}
-	closes := candidate.atTypedPrefix && strings.TrimSpace(strings.TrimPrefix(line, candidate.prefix)) == ":::"
-	if !closes {
-		var before string
+	escape := escaped(candidate.char)
+	if !candidate.atTypedPrefix || !closesTypedBlock(line, candidate.prefix) {
+		readFrom, before := lineFrom, ""
 		if candidate.afterLine && lineFrom > 0 {
-			before = string(written[bytes.LastIndexByte(written[:lineFrom-1], '\n')+1 : lineFrom])
+			readFrom = bytes.LastIndexByte(written[:lineFrom-1], '\n') + 1
+			before = string(written[readFrom:lineFrom])
+		}
+		var footnote string
+		if readFrom == r.footnoteLineAt && r.footnoteLabel != "" {
+			footnote = r.footnoteLabel
 		}
 		offset := candidate.at - lineFrom
-		if lineReadsAsText(before, line, line[:offset]+escape+line[offset+width:], candidate.prefix) {
+		if lineReadsAsText(before, line, line[:offset]+escape+line[offset+width:], candidate.prefix, footnote) {
 			return
 		}
 	}
@@ -603,45 +609,22 @@ func (r *renderer) writeInlineText(node *Node, position *inlinePosition, prefix 
 		width := utf8.RuneLen(char)
 		context.textLineStart = textLineStart
 		escape := needsInlineEscape(value, byteOffset, char, context)
-		if lineStart >= 0 && r.lineStart == nil {
-			// The first character of a line of its own that only the whole line decides - a
-			// marker within the indentation the parser skips, or the whitespace that makes
-			// indented code - is held until the line is written. Leading whitespace with no
-			// marker before it is escaped at once: the parser strips it from the start of a
-			// paragraph's line even where no block opens, as after a list marker.
-			switch {
-			case byteOffset == lineStart && (char == ' ' || char == '\t') && indentedCodeRun(value, byteOffset):
-				if !position.afterLine && !position.afterMarker {
-					escape = true
-				} else {
-					r.holdLineStart(value[segmentStart:byteOffset], char, position, prefix)
-					segmentStart = byteOffset
-				}
+		if lineStart >= 0 && r.heldLineStart == nil {
+			switch lineStartOf(value, lineStart, byteOffset, char, escape, position.afterLine, position.afterMarker) {
+			case lineStartEscaped:
+				escape = true
 				lineStart = -1
-			case char != ' ' && char != '\t' && blockStart(value, lineStart, byteOffset):
-				if !escape && lineStartMarker(char) {
-					r.holdLineStart(value[segmentStart:byteOffset], char, position, prefix)
-					segmentStart = byteOffset
-				}
+			case lineStartHeld:
+				r.holdLineStart(value[segmentStart:byteOffset], char, position, prefix)
+				segmentStart = byteOffset
 				lineStart = -1
-			case !blockStart(value, lineStart, byteOffset):
+			case lineStartAsIs:
 				lineStart = -1
 			}
 		}
 		if escape {
 			r.writeText(value[segmentStart:byteOffset])
-			if char == '&' {
-				r.writeText("&")
-				r.writeSyntax("amp;")
-			} else if char == ' ' || char == '\t' {
-				// Leading whitespace takes no backslash. The character is written as the numeric
-				// reference the parser decodes back to it, which keeps the line a paragraph
-				// instead of the indented code block four spaces or a tab would open.
-				r.writeSyntax(numericEntity(char))
-			} else {
-				r.writeSyntax("\\")
-				r.writeText(value[byteOffset : byteOffset+width])
-			}
+			r.writeSyntax(escaped(char))
 			segmentStart = byteOffset + width
 		}
 		if char == '\n' {
@@ -662,7 +645,7 @@ func (r *renderer) writeInlineText(node *Node, position *inlinePosition, prefix 
 // endLine to judge once the line is written.
 func (r *renderer) holdLineStart(before string, char rune, position *inlinePosition, prefix string) {
 	r.writeText(before)
-	r.lineStart = &lineCandidate{
+	r.heldLineStart = &lineCandidate{
 		at:            r.b.Len(),
 		char:          char,
 		afterLine:     position.afterLine,
