@@ -114,7 +114,7 @@ func TestCreateSucceedsForMatchingOperatorAndRejectsMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create(matching operator): %v", err)
 	}
-	if enr.ID.String() == "" || enr.Existing {
+	if enr.ID == uuid.Nil || enr.Existing {
 		t.Fatalf("Create(matching operator) = %+v, want a fresh enrollment", enr)
 	}
 
@@ -124,6 +124,32 @@ func TestCreateSucceedsForMatchingOperatorAndRejectsMismatch(t *testing.T) {
 	})
 	if !errors.Is(err, ErrOperatorMismatch) {
 		t.Fatalf("Create(operator mismatch) = %v, want ErrOperatorMismatch", err)
+	}
+}
+
+// TestOperatorCredentialRefusesPodEnrollment is the regression for review finding 2: an operator
+// credential enrols boxes and host sessions only, per Create's doc comment. Matching operator and
+// an otherwise-valid pod token must still be refused for kind: pod.
+func TestOperatorCredentialRefusesPodEnrollment(t *testing.T) {
+	svc := newService(t)
+	ctx := context.Background()
+	issuer, key := withPodVerifier(t, svc)
+	_, token, err := svc.MintLauncherCredential(ctx, str("sjawhar"), nil, "devbox", "ask-op-pod")
+	if err != nil {
+		t.Fatalf("MintLauncherCredential: %v", err)
+	}
+	cred, err := svc.AuthenticateLauncher(ctx, token)
+	if err != nil {
+		t.Fatalf("AuthenticateLauncher: %v", err)
+	}
+
+	_, err = svc.Create(ctx, cred, Enrollment{
+		Kind: "pod", RuntimeID: "pod-op-1", Operator: str("sjawhar"),
+		ApproverKind: "operator", Thumbprint: "tp-op-pod",
+		PodToken: mintPodToken(t, issuer, key, "system:serviceaccount:legion:worker", "pod-op-1"),
+	})
+	if !errors.Is(err, ErrOperatorMismatch) {
+		t.Fatalf("Create(operator credential, kind pod, matching operator and valid pod token) = %v, want ErrOperatorMismatch", err)
 	}
 }
 
@@ -245,6 +271,111 @@ func TestRevokeThenLookupReportsNotLive(t *testing.T) {
 	}
 }
 
+// TestRevokeNonexistentEnrollmentReturnsErrNotLive is the regression for review finding 1a:
+// revoking an id with no enrollment row must not proceed to write an audit row.
+func TestRevokeNonexistentEnrollmentReturnsErrNotLive(t *testing.T) {
+	svc := newService(t)
+	ctx := context.Background()
+	id := uuid.New().String()
+
+	if err := svc.Revoke(ctx, id, "sjawhar"); !errors.Is(err, ErrNotLive) {
+		t.Fatalf("Revoke(nonexistent) = %v, want ErrNotLive", err)
+	}
+
+	var n int
+	if err := svc.Store.Pool.QueryRow(ctx, `select count(*) from audit where kind='enrollment.revoked' and enrollment_id=$1`, id).Scan(&n); err != nil {
+		t.Fatalf("count audit rows: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("audit rows for nonexistent enrollment = %d, want 0", n)
+	}
+}
+
+// TestRevokeTwiceReturnsErrNotLive is the regression for review finding 1b: revoking an
+// already-revoked enrollment a second time must not write a second audit row.
+func TestRevokeTwiceReturnsErrNotLive(t *testing.T) {
+	svc := newService(t)
+	ctx := context.Background()
+	_, token, err := svc.MintLauncherCredential(ctx, str("sjawhar"), nil, "devbox", "ask-revoke-twice")
+	if err != nil {
+		t.Fatalf("MintLauncherCredential: %v", err)
+	}
+	cred, err := svc.AuthenticateLauncher(ctx, token)
+	if err != nil {
+		t.Fatalf("AuthenticateLauncher: %v", err)
+	}
+	enr, err := svc.Create(ctx, cred, Enrollment{
+		Kind: "box", RuntimeID: "box-revoke-twice", Operator: str("sjawhar"),
+		ApproverKind: "operator", Thumbprint: "tp-revoke-twice",
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := svc.Revoke(ctx, enr.ID.String(), "sjawhar"); err != nil {
+		t.Fatalf("Revoke(first): %v", err)
+	}
+	if err := svc.Revoke(ctx, enr.ID.String(), "sjawhar"); !errors.Is(err, ErrNotLive) {
+		t.Fatalf("Revoke(second) = %v, want ErrNotLive", err)
+	}
+
+	var n int
+	if err := svc.Store.Pool.QueryRow(ctx, `select count(*) from audit where kind='enrollment.revoked' and enrollment_id=$1`, enr.ID).Scan(&n); err != nil {
+		t.Fatalf("count audit rows: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("audit rows for enrollment = %d, want exactly 1", n)
+	}
+}
+
+// TestRevokeRevokesLiveGrantsUnderEnrollment is the regression for review finding 1c: Revoke's
+// "every live grant under it" behavior had zero test coverage. It inserts a request and a live
+// grant directly (grant issuance belongs to a later task's service, not this package) and checks
+// Revoke sets revoked_at/revoked_by on the grant in the same call.
+func TestRevokeRevokesLiveGrantsUnderEnrollment(t *testing.T) {
+	svc := newService(t)
+	ctx := context.Background()
+	_, token, err := svc.MintLauncherCredential(ctx, str("sjawhar"), nil, "devbox", "ask-revoke-grant")
+	if err != nil {
+		t.Fatalf("MintLauncherCredential: %v", err)
+	}
+	cred, err := svc.AuthenticateLauncher(ctx, token)
+	if err != nil {
+		t.Fatalf("AuthenticateLauncher: %v", err)
+	}
+	enr, err := svc.Create(ctx, cred, Enrollment{
+		Kind: "box", RuntimeID: "box-revoke-grant", Operator: str("sjawhar"),
+		ApproverKind: "operator", Thumbprint: "tp-revoke-grant",
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	requestID := uuid.New()
+	if _, err := svc.Store.Pool.Exec(ctx, `insert into requests (id, enrollment_id, issue_key, reason, state, rules_version, lifetime_seconds)
+		values ($1,$2,'AGENTC-1','test fixture','granted','v1',3600)`, requestID, enr.ID); err != nil {
+		t.Fatalf("insert request fixture: %v", err)
+	}
+	grantID := uuid.New()
+	if _, err := svc.Store.Pool.Exec(ctx, `insert into grants (id, request_id, enrollment_id, expires_at) values ($1,$2,$3, now() + interval '1 hour')`,
+		grantID, requestID, enr.ID); err != nil {
+		t.Fatalf("insert grant fixture: %v", err)
+	}
+
+	if err := svc.Revoke(ctx, enr.ID.String(), "sjawhar"); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+
+	var revokedAt *time.Time
+	var revokedBy *string
+	if err := svc.Store.Pool.QueryRow(ctx, `select revoked_at, revoked_by from grants where id=$1`, grantID).Scan(&revokedAt, &revokedBy); err != nil {
+		t.Fatalf("read grant: %v", err)
+	}
+	if revokedAt == nil || revokedBy == nil || *revokedBy != "sjawhar" {
+		t.Fatalf("grant revoked_at=%v revoked_by=%v, want both set with revoked_by=sjawhar", revokedAt, revokedBy)
+	}
+}
+
 func TestReplayReportsFreshOnceThenSeen(t *testing.T) {
 	svc := newService(t)
 	ctx := context.Background()
@@ -292,6 +423,68 @@ func TestPodEnrollmentRejectsBadOrMismatchedToken(t *testing.T) {
 	})
 	if !errors.Is(err, ErrPodIdentity) {
 		t.Fatalf("Create(mismatched pod token) = %v, want ErrPodIdentity", err)
+	}
+}
+
+// TestCreateRetriesWhenConflictingRowIsRevokedBeforeRecovery is the regression for review
+// finding 3: the conflicting live row can be revoked between createAttempt's failed insert and
+// its recovery lookup (a concurrent Revoke racing this Create), which otherwise makes that lookup
+// return pgx.ErrNoRows and propagate as a raw internal error instead of retrying.
+//
+// Building a genuine goroutine race that lands inside that narrow window deterministically isn't
+// practical — it depends on winning a real interleaving between a second connection's Revoke and
+// this connection's SELECT. Service.testConflictHook is an unexported test-only seam (documented
+// on the struct) that runs synchronously right where that race would land, so this test revokes
+// the conflicting enrollment from inside the hook and gets the same code path deterministically.
+func TestCreateRetriesWhenConflictingRowIsRevokedBeforeRecovery(t *testing.T) {
+	svc := newService(t)
+	ctx := context.Background()
+	_, token, err := svc.MintLauncherCredential(ctx, str("sjawhar"), nil, "devbox", "ask-race")
+	if err != nil {
+		t.Fatalf("MintLauncherCredential: %v", err)
+	}
+	cred, err := svc.AuthenticateLauncher(ctx, token)
+	if err != nil {
+		t.Fatalf("AuthenticateLauncher: %v", err)
+	}
+
+	first, err := svc.Create(ctx, cred, Enrollment{
+		Kind: "box", RuntimeID: "box-race-1", Operator: str("sjawhar"),
+		ApproverKind: "operator", Thumbprint: "tp-race-first",
+	})
+	if err != nil {
+		t.Fatalf("Create(first): %v", err)
+	}
+
+	var hookCalls int
+	svc.testConflictHook = func() {
+		hookCalls++
+		if hookCalls > 1 {
+			return // already revoked on the first call; nothing left to race against.
+		}
+		if err := svc.Revoke(ctx, first.ID.String(), "race-test"); err != nil {
+			t.Fatalf("Revoke inside hook: %v", err)
+		}
+	}
+
+	second, err := svc.Create(ctx, cred, Enrollment{
+		Kind: "box", RuntimeID: "box-race-1", Operator: str("sjawhar"),
+		ApproverKind: "operator", Thumbprint: "tp-race-second",
+	})
+	if err != nil {
+		t.Fatalf("Create(second, races a concurrent revoke): %v", err)
+	}
+	if hookCalls == 0 {
+		t.Fatal("testConflictHook never ran; the insert didn't conflict, so this test didn't exercise the race path")
+	}
+	if second.Existing {
+		t.Fatalf("Create(second) = %+v, want a fresh enrollment (the conflicting row was revoked, not idempotently matched)", second)
+	}
+	if second.ID == first.ID {
+		t.Fatalf("Create(second).ID = %s, want a new id distinct from the revoked enrollment %s", second.ID, first.ID)
+	}
+	if second.Thumbprint != "tp-race-second" {
+		t.Fatalf("Create(second).Thumbprint = %q, want tp-race-second", second.Thumbprint)
 	}
 }
 

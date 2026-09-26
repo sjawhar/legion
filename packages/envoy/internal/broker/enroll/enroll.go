@@ -63,6 +63,12 @@ type Service struct {
 	Store *store.Store
 	Lease time.Duration
 	Pod   PodVerifier
+
+	// testConflictHook, when set, runs once a 23505 insert conflict is detected in createAttempt,
+	// before the recovery lookup. It exists only so a test can deterministically reproduce the
+	// race where the conflicting row is revoked between the failed insert and that lookup; no
+	// production caller sets it.
+	testConflictHook func()
 }
 
 func hash(token string) []byte { s := sha256.Sum256([]byte(token)); return s[:] }
@@ -98,6 +104,8 @@ func (s *Service) Create(ctx context.Context, cred Credential, in Enrollment) (E
 	switch {
 	case cred.Operator != nil && (in.Operator == nil || *in.Operator != *cred.Operator):
 		return Enrollment{}, ErrOperatorMismatch
+	case cred.Operator != nil && in.Kind == "pod":
+		return Enrollment{}, ErrOperatorMismatch
 	case cred.Operator == nil && (in.Kind != "pod" || in.Operator != nil):
 		return Enrollment{}, ErrOperatorMismatch
 	}
@@ -112,9 +120,30 @@ func (s *Service) Create(ctx context.Context, cred Credential, in Enrollment) (E
 	}
 	in.ID = uuid.New()
 	in.LeaseExpires = time.Now().Add(s.Lease)
+
+	// A row that conflicts with our insert can be revoked between our failed insert and the
+	// recovery lookup below — a concurrent Revoke racing this Create. The recovery lookup then
+	// finds no live row at all (pgx.ErrNoRows), even though the partial unique index that rejected
+	// our insert a moment ago no longer blocks a fresh one. Retrying the whole attempt resolves
+	// that race instead of surfacing a spurious "not found" as an internal error.
+	const maxAttempts = 3
+	for range maxAttempts {
+		result, retry, err := s.createAttempt(ctx, cred, in)
+		if retry {
+			continue
+		}
+		return result, err
+	}
+	return Enrollment{}, fmt.Errorf("create enrollment: exhausted retries after a concurrent revoke race for runtime %s", in.RuntimeID)
+}
+
+// createAttempt makes one insert-then-recover attempt. retry is true only when the row that
+// conflicted with our insert was revoked before the recovery lookup ran, in which case Create
+// should try the whole attempt again rather than treat the result as final.
+func (s *Service) createAttempt(ctx context.Context, cred Credential, in Enrollment) (result Enrollment, retry bool, err error) {
 	tx, err := s.Store.Pool.Begin(ctx)
 	if err != nil {
-		return Enrollment{}, err
+		return Enrollment{}, false, err
 	}
 	defer tx.Rollback(ctx)
 	_, err = tx.Exec(ctx, `insert into enrollments (id, kind, runtime_id, operator, approver_kind, approver_issue, thumbprint, session_id, launcher_credential_id, lease_expires_at)
@@ -122,28 +151,34 @@ func (s *Service) Create(ctx context.Context, cred Credential, in Enrollment) (E
 		in.ID, in.Kind, in.RuntimeID, in.Operator, in.ApproverKind, in.ApproverIssue, in.Thumbprint, in.SessionID, cred.ID, in.LeaseExpires)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		if s.testConflictHook != nil {
+			s.testConflictHook()
+		}
 		// The launcher may be retrying after a crash between our 201 and its persist: the same key
 		// gets its live enrollment back; a different key for a live runtime is a refusal.
 		var live Enrollment
 		lookupErr := s.Store.Pool.QueryRow(ctx, `select id, thumbprint, lease_expires_at from enrollments where launcher_credential_id=$1 and runtime_id=$2 and revoked_at is null`, cred.ID, in.RuntimeID).
 			Scan(&live.ID, &live.Thumbprint, &live.LeaseExpires)
+		if errors.Is(lookupErr, pgx.ErrNoRows) {
+			return Enrollment{}, true, nil
+		}
 		if lookupErr != nil {
-			return Enrollment{}, lookupErr
+			return Enrollment{}, false, lookupErr
 		}
 		if live.Thumbprint != in.Thumbprint {
-			return Enrollment{}, ErrAlreadyEnrolled
+			return Enrollment{}, false, ErrAlreadyEnrolled
 		}
 		in.ID, in.LeaseExpires, in.Existing = live.ID, live.LeaseExpires, true
-		return in, nil
+		return in, false, nil
 	}
 	if err != nil {
-		return Enrollment{}, err
+		return Enrollment{}, false, err
 	}
 	if _, err := tx.Exec(ctx, `insert into audit (kind, enrollment_id, actor, detail) values ('enrollment.created',$1,$2, jsonb_build_object('kind',$3::text,'runtime_id',$4::text,'thumbprint',$5::text))`,
 		in.ID, "launcher:"+cred.ID.String(), in.Kind, in.RuntimeID, in.Thumbprint); err != nil {
-		return Enrollment{}, err
+		return Enrollment{}, false, err
 	}
-	return in, tx.Commit(ctx)
+	return in, false, tx.Commit(ctx)
 }
 
 func (s *Service) Renew(ctx context.Context, id string) (time.Time, error) {
@@ -158,15 +193,22 @@ func (s *Service) Renew(ctx context.Context, id string) (time.Time, error) {
 	return expires, nil
 }
 
-// Revoke ends the enrollment and every live grant under it in one transaction; idempotent.
+// Revoke ends the enrollment and every live grant under it in one transaction. It returns
+// ErrNotLive, changing nothing, when the enrollment does not exist or is already revoked — the
+// guard that keeps the audit trail honest: without it a no-op call would still revoke grants and
+// write an "enrollment.revoked" audit row for an enrollment that never transitioned.
 func (s *Service) Revoke(ctx context.Context, id, by string) error {
 	tx, err := s.Store.Pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `update enrollments set revoked_at=now() where id=$1 and revoked_at is null`, id); err != nil {
+	tag, err := tx.Exec(ctx, `update enrollments set revoked_at=now() where id=$1 and revoked_at is null`, id)
+	if err != nil {
 		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrNotLive
 	}
 	if _, err := tx.Exec(ctx, `update grants set revoked_at=now(), revoked_by=$2 where enrollment_id=$1 and revoked_at is null`, id, by); err != nil {
 		return err
