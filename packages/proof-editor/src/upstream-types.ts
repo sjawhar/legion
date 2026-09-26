@@ -7,19 +7,19 @@
  * AGENTS.md § The upstream boundary), so a type that arrived that way would reach a consumer as
  * `any` — `kind: "replaced"` and `heatMapMode: "hiden"` would both type-check. These
  * declarations are copied verbatim from proof-sdk at
- * 24a5fc94915cda5704897c497af6312c140db40d, each region naming the file it came from, so the
+ * c2697996af3ca82817e8ce8748a56b491717bd21, each region naming the file it came from, so the
  * consumer sees the real shape; `tests/upstream-pin.test.ts` reads those regions and fails when
  * the pinned files stop agreeing with them. This file is checked by tsc; it carries no
  * `@ts-nocheck`.
  */
 
-/* --- copied from proof-sdk src/editor/plugins/heatmap-decorations.ts @ 24a5fc94 --- */
+/* --- copied from proof-sdk src/editor/plugins/heatmap-decorations.ts @ c2697996 --- */
 
 export type HeatMapMode = 'hidden' | 'subtle' | 'background' | 'full';
 
 /* --- end copy --- */
 
-/* --- copied from proof-sdk src/formats/marks.ts @ 24a5fc94 --- */
+/* --- copied from proof-sdk src/formats/marks.ts @ c2697996 --- */
 
 export type MarkKind =
   | 'authored'    // Who created this content (replaces provenance)

@@ -27,6 +27,7 @@ import type { Node as ProseMirrorNode, NodeSpec, DOMOutputSpec, ParseRule } from
 import type { Transaction } from '@milkdown/kit/prose/state';
 import { Mapping } from '@milkdown/kit/prose/transform';
 import { $prose } from '@milkdown/kit/utils';
+import { withDomAttributes } from './dom-attributes';
 import {
   blockquoteSchema,
   bulletListSchema,
@@ -45,6 +46,7 @@ import {
   tableRowSchema,
   tableSchema,
 } from '@milkdown/preset-gfm';
+import { codeBlockSchemaExt, frontmatterSchema } from "./upstream-schemas.js";
 import { ySyncPluginKey } from 'y-prosemirror';
 
 export const BLOCK_ID_ATTR = 'blockId';
@@ -80,30 +82,9 @@ function readBlockId(dom: unknown): string | null {
   return value === null || value === '' ? null : value;
 }
 
-function isAttrsObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value) && !('nodeType' in value);
-}
 
-/** Adds `data-block-id` to a DOMOutputSpec without disturbing the rest of it. */
 function withDomBlockId(spec: DOMOutputSpec, blockId: string | null): DOMOutputSpec {
-  if (blockId === null) return spec;
-  if (Array.isArray(spec)) {
-    const [tag, second, ...rest] = spec as unknown[];
-    if (isAttrsObject(second)) {
-      return [tag, { ...second, [BLOCK_ID_DOM_ATTR]: blockId }, ...rest] as unknown as DOMOutputSpec;
-    }
-    return [tag, { [BLOCK_ID_DOM_ATTR]: blockId }, second, ...rest].filter(
-      (part) => part !== undefined,
-    ) as unknown as DOMOutputSpec;
-  }
-  if (typeof spec === 'object' && spec !== null && 'dom' in spec) {
-    (spec.dom as Element).setAttribute?.(BLOCK_ID_DOM_ATTR, blockId);
-    return spec;
-  }
-  if (typeof spec === 'object' && spec !== null && 'setAttribute' in spec) {
-    (spec as Element).setAttribute(BLOCK_ID_DOM_ATTR, blockId);
-  }
-  return spec;
+  return blockId === null ? spec : withDomAttributes(spec, { [BLOCK_ID_DOM_ATTR]: blockId });
 }
 
 function withParsedBlockId(rule: ParseRule): ParseRule {
@@ -140,10 +121,12 @@ function extend(schema: { extendSchema: (handler: (prev: SchemaFactory) => Schem
 }
 
 /**
- * The preset block schemas re-registered with `blockId`. `code_block` and
- * `frontmatter` are the fork's own schemas and extend themselves in their modules.
+ * Every block schema is re-registered with `blockId`, including the upstream
+ * code-block and frontmatter schemas the consumer imports.
  */
 export const blockIdSchemas = [
+  codeBlockSchemaExt,
+  frontmatterSchema,
   paragraphSchema,
   headingSchema,
   blockquoteSchema,

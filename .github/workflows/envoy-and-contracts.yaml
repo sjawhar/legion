@@ -105,8 +105,8 @@ jobs:
               - 'packages/contracts/**'
               - 'packages/envoy/internal/dispatch/**'
               - 'packages/envoy/cmd/dispatch/**'
-              # The Dark Reader patch and the pin it is keyed on: a key that stops matching
-              # applies nothing, silently, and the editor's decorations go back to inline styles.
+              # The editor's source pin and its remaining patches can change document rendering,
+              # including the Dark Reader inline-style guard.
               - 'patches/**'
               - 'package.json'
               - 'bun.lock'
