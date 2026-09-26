@@ -259,7 +259,7 @@ func TestExecFormGrantRunsChildWithValueInEnvironment(t *testing.T) {
 	want := hex.EncodeToString(sum[:])
 	fields := strings.Fields(stdout)
 	if len(fields) == 0 || fields[0] != want {
-		t.Fatalf("child sha256 = %q, want %q (stdout=%q)", fields, want, redactSecrets(stdout))
+		t.Fatalf("child sha256 = %q, want %q (stdout=%q)", redactSecrets(strings.Join(fields, " ")), want, redactSecrets(stdout))
 	}
 	if strings.Contains(stdout, "topsecretvalue123") {
 		t.Fatalf("raw secret value leaked into stdout: %q", redactSecrets(stdout))
@@ -360,7 +360,7 @@ func TestExecFormDoesNotLetInheritedEnvShadowAGrantedValue(t *testing.T) {
 	want := hex.EncodeToString(sum[:])
 	fields := strings.Fields(stdout)
 	if len(fields) == 0 || fields[0] != want {
-		t.Fatalf("child GRANT_ME sha256 = %q, want %q (granted value, not the shadowing inherited one): stdout=%q", fields, want, redactSecrets(stdout))
+		t.Fatalf("child GRANT_ME sha256 = %q, want %q (granted value, not the shadowing inherited one): stdout=%q", redactSecrets(strings.Join(fields, " ")), want, redactSecrets(stdout))
 	}
 }
 

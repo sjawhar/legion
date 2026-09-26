@@ -712,7 +712,7 @@ func TestSpikeContract(t *testing.T) {
 			t.Fatalf("after approval: want exit 0, got %d (stdout=%q stderr=%q)", exit, redactSecrets(stdout), redactSecrets(stderr))
 		}
 		if !strings.Contains(stdout, "ran") {
-			t.Fatalf("after approval: child did not run, stdout=%q", stdout)
+			t.Fatalf("after approval: child did not run, stdout=%q", redactSecrets(stdout))
 		}
 	})
 
