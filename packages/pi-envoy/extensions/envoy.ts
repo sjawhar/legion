@@ -50,6 +50,7 @@ import {
 import { logger } from "@oh-my-pi/pi-utils";
 import { encode } from "@toon-format/toon";
 import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
+import { recordEnvoySession, resolveEnvoySession } from "../src/envoy-session";
 import { LOCAL_ENVOY_NOTICE } from "../src/legion/phase-stall";
 import {
   type LegionNoticeSubscription,
@@ -59,7 +60,11 @@ import {
   type RoleRegainReason,
 } from "../src/legion/role-claim-bridge";
 import type { PiApi, SessionContext, SessionSwitchReason, ToolResult } from "../src/pi-types";
-import { isRegisteredSubagent, subagentSessionCheck } from "../src/subagent-session";
+import {
+  isRegisteredSubagent,
+  type SessionIdentityContext,
+  subagentSessionCheck,
+} from "../src/subagent-session";
 import { toolFailure, toolSuccess } from "../src/tool-result";
 import { registerEnvoyMessageRenderer } from "./envoy-message-renderer";
 import { registerEnvoyWhoamiCommand } from "./envoy-whoami-command";
@@ -268,6 +273,9 @@ export default function envoyExtension(pi: PiApi): void {
   let connection: NatsConnection | undefined;
   let sessionDirectory = "";
   let sessionID = "";
+  // The key this instance last published its session under, so a switch that changes the id or
+  // the transcript path leaves no entry behind for a subagent to resolve (`src/envoy-session.ts`).
+  let recordedSessionKey: string | undefined;
   let heartbeatRegistered = false;
   let claimedRoleTopic: string | undefined;
   let activeSessionContext: SessionContext | undefined;
@@ -393,6 +401,15 @@ export default function envoyExtension(pi: PiApi): void {
   const restoreLocalSessionState = (context: SessionContext): void => {
     sessionDirectory = context.cwd;
     sessionID = context.sessionManager.getSessionId();
+    // Only a top-level instance reaches here — a subagent's session_start and switch events
+    // return early — so this publishes the session this process registered, whatever moved the
+    // id: a start, a switch, or the heartbeat's drift heal. The subagent instances in this
+    // process resolve it from their own transcript path as their reply address.
+    recordedSessionKey = recordEnvoySession({
+      previousKey: recordedSessionKey,
+      sessionFile: context.sessionManager.getSessionFile(),
+      sessionID,
+    });
     activeSessionContext = context;
     const branch = context.sessionManager.getBranch?.() ?? [];
     // Only a genuine session change clears the armed period — a `/fork`, `/handoff`, resume or
@@ -997,8 +1014,29 @@ export default function envoyExtension(pi: PiApi): void {
   // tests, either enough: the transcript layout (file storage), and the host's own roster
   // (any storage, any transcript or none).
   const isSubagentTranscript = subagentSessionCheck();
-  const isSubagent = async (context: SessionContext): Promise<boolean> =>
+  const isSubagent = async (context: SessionIdentityContext): Promise<boolean> =>
     (await isSubagentTranscript(context)) || isRegisteredSubagent(context);
+
+  /**
+   * The Envoy address a reply to this instance reaches, and the source session its sends carry.
+   *
+   * An instance that took a session of its own answers with it — `liveSessionID` first, which
+   * the slash command passes because a session created lazily after `session_start` has moved
+   * past the module copy. A `task` subagent took none: it registers nothing, so its own host
+   * session id is an address no message can be delivered to, and the reachable session is the
+   * top-level one that spawned it, resolved from its transcript path
+   * (`resolveEnvoySession`). That resolves to `""` when this process cannot say which
+   * top-level session that is, and an empty address is what the caller reports and sends —
+   * naming an unrelated live session would send peers to a session that never spawned it.
+   */
+  const replyAddress = async (
+    context: SessionIdentityContext,
+    liveSessionID = ""
+  ): Promise<string> => {
+    if (sessionID !== "") return liveSessionID || sessionID;
+    if (!(await isSubagent(context))) return liveSessionID;
+    return resolveEnvoySession(context.sessionManager.getSessionFile());
+  };
 
   pi.on("session_start", async (_event, context) => {
     if (await isSubagent(context)) return;
@@ -1103,6 +1141,14 @@ export default function envoyExtension(pi: PiApi): void {
     shuttingDown = true;
     const bound = bridge.instances.indexOf(claimInstance);
     if (bound !== -1) bridge.instances.splice(bound, 1);
+    // This session is about to deregister with the listener, so it stops being an address a
+    // reply can reach: a subagent still running in this process must report none rather than
+    // name it, and a dead entry must not be what makes some other session ambiguous.
+    recordedSessionKey = recordEnvoySession({
+      previousKey: recordedSessionKey,
+      sessionFile: undefined,
+      sessionID: "",
+    });
     const deadline = Promise.withResolvers<void>();
     const timer = setTimeout(deadline.resolve, 1_000);
     try {
@@ -1134,7 +1180,8 @@ export default function envoyExtension(pi: PiApi): void {
       description: spec.description,
       parameters: schemaFor(pi, spec.operation),
       lenientArgValidation: true,
-      execute: async (_id, parameters) => execute(spec.operation, parameters),
+      execute: async (_id, parameters, _signal, _onUpdate, context) =>
+        execute(spec.operation, parameters, context),
     });
   }
 
@@ -1174,7 +1221,7 @@ export default function envoyExtension(pi: PiApi): void {
     }
   }
 
-  registerEnvoyWhoamiCommand(pi, () => sessionID);
+  registerEnvoyWhoamiCommand(pi, replyAddress);
 
   // Turn start injects nothing into the conversation; its open-asks query only arms the run-end
   // nudge below, the snapshot's `as_of` becoming the period's baseline. A session the stop can
@@ -1485,7 +1532,8 @@ export default function envoyExtension(pi: PiApi): void {
 
   async function execute(
     operation: EnvoyToolOperation,
-    rawParameters: Record<string, unknown>
+    rawParameters: Record<string, unknown>,
+    context: SessionContext
   ): Promise<ToolResult> {
     try {
       // The host hands raw arguments through (lenientArgValidation); this is the one
@@ -1558,7 +1606,7 @@ export default function envoyExtension(pi: PiApi): void {
         case EnvoyToolOperation.send: {
           const targetSessionID = stringFor(parameters, "session_id");
           const result = await client.send({
-            sourceSessionID: sessionID,
+            sourceSessionID: await replyAddress(context),
             targetSessionID,
             message: stringFor(parameters, "message"),
             ...toMessageMetadata(parameters as MessageMetadataArguments),
@@ -1571,20 +1619,35 @@ export default function envoyExtension(pi: PiApi): void {
         }
         case EnvoyToolOperation.publish: {
           const topic = stringFor(parameters, "topic");
+          const source = await replyAddress(context);
           const result = await client.publish({
-            sourceSessionID: sessionID,
+            sourceSessionID: source,
             topic,
             message: stringFor(parameters, "message"),
             ...toMessageMetadata(parameters as MessageMetadataArguments),
           });
-          return toolSuccess(
+          // The listener never delivers a message to the session it names as its source — the
+          // role lane skips the resolved holder and the fanout skips any interest whose session
+          // is the source — and a subagent's source is its parent, so a publish to a role its
+          // own parent holds is accepted, answers with that holder, and reaches nobody. Only
+          // the role case is visible here (a plain topic's subscribers are not in the answer);
+          // AGENTS.md and the envoy skill carry the general rule. A direct envoy_send is
+          // unaffected: the agent-subject lane has no such skip.
+          const undelivered =
+            source !== "" && result.holder === source && (await isSubagent(context));
+          const published =
             result.holder === undefined
               ? `published ${result.envelope.event_id}`
-              : `published ${result.envelope.event_id}; holder ${result.holder}`,
+              : `published ${result.envelope.event_id}; holder ${result.holder}`;
+          return toolSuccess(
+            undelivered
+              ? `${published}\nNot delivered: that holder is the session this subagent sends as, and the listener drops a message whose source session is its recipient, so the agent that spawned you did not receive it. Reach it over hub instead.`
+              : published,
             {
               event_id: result.envelope.event_id,
               topic,
               ...(result.holder === undefined ? {} : { holder: result.holder }),
+              ...(undelivered ? { undelivered_echo: true } : {}),
             }
           );
         }
@@ -1598,15 +1661,37 @@ export default function envoyExtension(pi: PiApi): void {
           return toolSuccess(JSON.stringify(role, null, 2), role);
         }
         case EnvoyToolOperation.whoami: {
+          const inSubagent = await isSubagent(context);
+          const address = await replyAddress(context);
+          // A `task` subagent registers no Envoy session of its own, so the address a reply
+          // reaches is the session that spawned it. Its own host id is reported beside that,
+          // never as the reply address: nothing is listening on it.
+          const subagent = inSubagent
+            ? {
+                session_id: context.sessionManager.getSessionId(),
+                note:
+                  address === ""
+                    ? "This session is a task subagent and registers no Envoy session of its own, and this process records no top-level session its transcript traces back to, so it has no reply address at all: say who you are in the message body, and reach the agent that spawned you over hub."
+                    : "This session is a task subagent and registers no Envoy session of its own; a reply to session_id reaches the agent that spawned it, which relays over hub. Your own envoy_publish never reaches that agent — use hub for that hop.",
+              }
+            : undefined;
           return toolSuccess(
             JSON.stringify(
-              { session_id: sessionID, machine_id: machineID(), dir: sessionDirectory },
+              {
+                session_id: address,
+                machine_id: machineID(),
+                // A subagent's instance stored no directory either (`restoreLocalSessionState`
+                // never ran for it), so the host's live one answers for it.
+                dir: sessionDirectory || context.cwd,
+                ...(subagent === undefined ? {} : { subagent }),
+              },
               null,
               2
             ),
             {
-              sessionID,
+              sessionID: address,
               topics: [...subscriptions.keys()],
+              ...(subagent === undefined ? {} : { subagent }),
             }
           );
         }
