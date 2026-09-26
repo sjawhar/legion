@@ -337,9 +337,10 @@ func (m *Machine) interrupted(ctx context.Context) error {
 	if p == nil || p.ConfirmedAt.IsZero() {
 		return nil
 	}
-	p.Interrupted = true
 	m.log.Warn("supervise: the process died in the task's turn; the task waits for the relaunch", "delivery", p.ID)
-	return m.takeBackPending(ctx, taskRead)
+	next := m.takenBack(taskRead)
+	next.Interrupted = true
+	return m.putTakenBack(ctx, next, taskRead)
 }
 
 // taskRead and taskUnread say whether the agent may have read a task being taken back: the task
@@ -380,12 +381,34 @@ func (m *Machine) markUnread(ctx context.Context) error {
 // record, and with the wait for its turn disarmed. A task taken back unread loses the mark, so
 // nothing the worker reports from whatever turn follows belongs to it.
 func (m *Machine) takeBackPending(ctx context.Context, read bool) error {
+	return m.putTakenBack(ctx, m.takenBack(read), read)
+}
+
+// takenBack is the pending delivery as taking it back leaves it, not yet the claim's: under a new
+// id, unconfirmed, and without its read mark when it is taken back unread.
+func (m *Machine) takenBack(read bool) Delivery {
+	next := *m.claim.Pending
+	next.ID, next.ConfirmedAt = rand.Text(), time.Time{}
+	if !read {
+		next.DeliveredAt = time.Time{}
+	}
+	return next
+}
+
+// putTakenBack writes next, the pending delivery taken back, and makes it the claim's only once the
+// write has landed: a write that fails leaves the pending task as it was — confirmed, if a turn had
+// confirmed it — so the next decision that meets the task takes it back again rather than finding
+// it already done in memory while the store still holds the confirmed delivery. The mark next was
+// taken back without goes through clearReadMark, with the prompt that set it.
+func (m *Machine) putTakenBack(ctx context.Context, next Delivery, read bool) error {
 	m.disarm(TimerTurn)
+	if err := m.deps.Store.PutDelivery(ctx, m.claim.Token, next); err != nil {
+		return err
+	}
 	p := m.claim.Pending
-	p.ID = rand.Text()
-	p.ConfirmedAt = time.Time{}
+	*p = next
 	if !read {
 		m.clearReadMark(p)
 	}
-	return m.deps.Store.PutDelivery(ctx, m.claim.Token, *p)
+	return nil
 }

@@ -972,6 +972,35 @@ func TestAPersistentLateRefusalIsChargedAndNotResentOnTheSpot(t *testing.T) {
 	h.wantBudgets(Budgets{PromptFailures: 1})
 }
 
+// Taking an interrupted task back is one delivery write, and a write that fails leaves the task as
+// it was, confirmed. Were it left taken back in memory only, the next death would find nothing to
+// take back and relaunch with the store still holding the confirmed delivery, and a restart before
+// the re-send's acknowledgement would retire it as served: the stranded phase this exists to stop.
+func TestAnInterruptedTaskWhoseWriteFailedIsTakenBackAtTheNextDeath(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateReady)
+	h.must(RequestDeliver{Claim: testToken, Task: "implement the plan", Generation: 5})
+	h.must(StreamTurnStart{Claim: testToken})
+
+	h.store.fail("PutDelivery", errBoom)
+	gone := RuntimeObservation{Observation: runtime.Observation{Locator: h.locator(), Kind: runtime.Gone, At: h.clock.Now()}}
+	if err := h.handle(gone); err == nil {
+		t.Fatal("the death reported success with the delivery write failing")
+	}
+	if p := h.pending(); p.ConfirmedAt.IsZero() || p.Interrupted {
+		t.Fatalf("pending after the failed write = %+v, want it as it was: confirmed, not taken back", p)
+	}
+	h.store.fail("PutDelivery", nil)
+	h.observe(runtime.Gone)
+	h.restart()
+
+	stored := h.store.load(testToken)
+	if p := stored.Pending; p == nil || !p.ConfirmedAt.IsZero() || !p.Interrupted || stored.ServingGeneration != 0 {
+		t.Fatalf("after the restart: pending %+v serving run %d, want the task kept, unconfirmed and interrupted, no run served",
+			stored.Pending, stored.ServingGeneration)
+	}
+}
+
 // Confirming a turn writes the claim and the delivery, and a daemon can die between them. The
 // delivery is what the turn's end retires and what a re-send is fenced on, so a claim recorded as
 // working with its delivery unwritten is a task the shim already answered and nothing will send

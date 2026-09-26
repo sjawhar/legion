@@ -18,9 +18,10 @@ import (
 //     relaunched for ever. The count is charged against the pending task and reset only when that
 //     task ends (retirePending): its turn ends, which a killed Oh My Pi never reports, or a
 //     suspension or a phase change retires it. A turn that never ran the task — a notice's —
-//     clears nothing. A death with nothing pending strands no work and is not counted: a parked
-//     agent the environment kills now and then is relaunched however often it happens. Bounded by
-//     the launch failure limit.
+//     clears nothing. A death with nothing pending is not counted: a parked agent — idle, holding
+//     no task — that the environment kills now and then is relaunched however often it happens, and
+//     so is one killed in a turn no delivery started, a notice's, whose work waits for whatever
+//     next wakes the relaunched agent. Bounded by the launch failure limit.
 //   - PromptFailures: prompts the agent refused, acknowledged prompts that started no turn, and
 //     prompts refused after their acknowledgement. A prompt lost to the transport, or not sent for
 //     want of a connection, is re-queued at no charge. Reset by a started turn.
