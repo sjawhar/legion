@@ -86,26 +86,37 @@ function isAttrsObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value) && !('nodeType' in value);
 }
 
-/** Adds `data-block-id` to a DOMOutputSpec without disturbing the rest of it. */
-function withDomBlockId(spec: DOMOutputSpec, blockId: string | null): DOMOutputSpec {
-  if (blockId === null) return spec;
+/** Adds attributes to a DOMOutputSpec without disturbing its content hole. */
+export function withDomAttributes(
+  spec: DOMOutputSpec,
+  attributes: Record<string, string>,
+): DOMOutputSpec {
   if (Array.isArray(spec)) {
     const [tag, second, ...rest] = spec as unknown[];
     if (isAttrsObject(second)) {
-      return [tag, { ...second, [BLOCK_ID_DOM_ATTR]: blockId }, ...rest] as unknown as DOMOutputSpec;
+      return [tag, { ...second, ...attributes }, ...rest] as unknown as DOMOutputSpec;
     }
-    return [tag, { [BLOCK_ID_DOM_ATTR]: blockId }, second, ...rest].filter(
+    return [tag, attributes, second, ...rest].filter(
       (part) => part !== undefined,
     ) as unknown as DOMOutputSpec;
   }
   if (typeof spec === 'object' && spec !== null && 'dom' in spec) {
-    (spec.dom as Element).setAttribute?.(BLOCK_ID_DOM_ATTR, blockId);
+    for (const [name, value] of Object.entries(attributes)) {
+      (spec.dom as Element).setAttribute?.(name, value);
+    }
     return spec;
   }
   if (typeof spec === 'object' && spec !== null && 'setAttribute' in spec) {
-    (spec as Element).setAttribute(BLOCK_ID_DOM_ATTR, blockId);
+    for (const [name, value] of Object.entries(attributes)) {
+      (spec as Element).setAttribute(name, value);
+    }
   }
   return spec;
+}
+
+/** Adds `data-block-id` to a DOMOutputSpec without disturbing the rest of it. */
+function withDomBlockId(spec: DOMOutputSpec, blockId: string | null): DOMOutputSpec {
+  return blockId === null ? spec : withDomAttributes(spec, { [BLOCK_ID_DOM_ATTR]: blockId });
 }
 
 function withParsedBlockId(rule: ParseRule): ParseRule {
