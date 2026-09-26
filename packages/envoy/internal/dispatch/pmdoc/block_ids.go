@@ -39,19 +39,22 @@ func EnsureBlockIDs(tree *Node) bool {
 	return EnsureBlockIDsCount(tree) > 0
 }
 
-// RepeatedBlockID reports the first block id, in next's document order, that next carries on two
-// or more blocks and on more blocks than live does, or nil. next is the document a write would
-// store over live; live is nil for a document with none before it. A repeat live already carries
-// is the document's own - a browser write can leave one until settlement repairs it - and not the
-// write's to answer for. Any other is refused rather than left to EnsureBlockIDs, which keeps the
-// id for the first holder in document order: the write would move the id, and the ask row or
-// anchor keyed on it, onto whichever of the blocks comes first. Only a typed block's markdown can
-// name its id, so what this finds is markdown naming one id twice, or naming an id live holds.
-func RepeatedBlockID(live, next *Node) error {
+// RepeatedBlockID reports the first block id named carries, in named's document order, that next
+// carries on two or more blocks and on more blocks than live does, or nil. next is the document a
+// write would store over live (live is nil for a document with none before it), and named is what
+// the write itself wrote: the markdown's tree, or the fragment it splices in. Only named's ids are
+// judged, because a splice that splits a block gives both halves the block's id, which is the
+// document's to repair, not the caller's. A repeat live already carries is the document's own too
+// - a browser write can leave one until settlement repairs it. Any other is refused rather than
+// left to EnsureBlockIDs, which keeps the id for the first holder in document order: the write
+// would move the id, and the ask row or anchor keyed on it, onto whichever of the blocks comes
+// first. Only a typed block's markdown can name its id, so what this finds is markdown naming one
+// id twice, or naming an id live holds outside the text the write replaces.
+func RepeatedBlockID(live, next, named *Node) error {
 	held := blockIDCounts(live)
 	written := blockIDCounts(next)
 	var repeated error
-	walkBlockIDs(next, func(id string) bool {
+	walkBlockIDs(named, func(id string) bool {
 		if written[id] > 1 && written[id] > held[id] {
 			repeated = fmt.Errorf("block id %q would name two blocks; give one of them another id, or omit {#%s} to have one minted", id, id)
 			return false

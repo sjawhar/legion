@@ -49,7 +49,7 @@ func ParseForWrite(markdown string, live *Node) (*Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := RepeatedBlockID(live, doc); err != nil {
+	if err := RepeatedBlockID(live, doc, doc); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrSchema, err)
 	}
 	EnsureBlockIDs(doc)

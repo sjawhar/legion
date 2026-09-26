@@ -210,9 +210,9 @@ func TestRepeatedBlockIDJudgesOnlyWhatTheWriteAdds(t *testing.T) {
 	const note = ":::callout{#note}\nA note.\n:::\n"
 	repeated := parse(two, "p1", "p1")
 	for _, test := range []struct {
-		name       string
-		live, next *Node
-		want       string
+		name              string
+		live, next, named *Node
+		want              string
 	}{
 		{name: "a fresh typed block beside a live repeat", live: repeated,
 			next: parse(two+"\n"+":::callout{#fresh}\nA note.\n:::\n", "p1", "p1")},
@@ -227,9 +227,18 @@ func TestRepeatedBlockIDJudgesOnlyWhatTheWriteAdds(t *testing.T) {
 			next: parse(":::callout{#note kind=\"warning\"}\nReworded.\n:::\n\n"+two, "", "p1", "p2")},
 		{name: "markdown naming one id twice, with no live document",
 			next: parse(note+"\n"+note, "note", "note"), want: "note"},
+		{name: "a split block's id on both halves, which the write never named", live: parse(two, "p1", "p2"),
+			next: parse("Fir\n\n"+note+"\nst.\n\nSecond.\n", "p1", "", "p1", "p2"), named: parse(note)},
+		{name: "a named id beside a split block's halves", live: parse(note+"\n"+two, "", "p1", "p2"),
+			next:  parse(note+"\n"+"Fir\n\n"+note+"\nst.\n\nSecond.\n", "note", "p1", "note", "p1", "p2"),
+			named: parse(note, "note"), want: "note"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			err := RepeatedBlockID(test.live, test.next)
+			named := test.named
+			if named == nil {
+				named = test.next
+			}
+			err := RepeatedBlockID(test.live, test.next, named)
 			if test.want == "" {
 				if err != nil {
 					t.Fatalf("RepeatedBlockID = %v, want nil", err)

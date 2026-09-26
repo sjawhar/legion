@@ -634,6 +634,40 @@ func TestAnAcceptRewritingATypedBlockUnderItsOwnIDIsTaken(t *testing.T) {
 	}
 }
 
+// A block replacement anchored inside a paragraph splits it, and the splice gives both halves the
+// paragraph's id until settlement's repair re-mints the second. That id is the document's, not
+// one the caller wrote, so the accept is taken and stores what main does.
+func TestABlockReplacementInsideAParagraphIsTaken(t *testing.T) {
+	for _, test := range []struct{ name, replaceWith, want string }{
+		{name: "two paragraphs", replaceWith: "one\n\ntwo\n", want: "Alpha \n\none\n\ntwo\n\n gamma.\n"},
+		{name: "a callout", replaceWith: ":::callout{kind=\"note\"}\nA note.\n:::\n",
+			want: "Alpha \n\n:::callout{#<minted> kind=\"note\" title=\"\"}\nA note.\n:::\n\n gamma.\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			handler, _ := blockAskHandler(t)
+			issue := createInteractionIssue(t, handler, "TEST", "Split paragraph", "Alpha beta gamma.\n")
+			created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+				"body": "split it", "anchor": map[string]any{"artifact": "spec", "quote": "beta"},
+				"suggestion": map[string]string{"replace_with": test.replaceWith}, "actor": sessionActor(),
+			})
+			if created.Code != http.StatusCreated {
+				t.Fatalf("create the suggestion: status=%d body=%s", created.Code, created.Body.String())
+			}
+			comment := decodeBody[model.Comment](t, created)
+
+			accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
+
+			if accepted.Code != http.StatusOK {
+				t.Fatalf("accept a block replacement inside a paragraph: status=%d body=%s", accepted.Code, accepted.Body.String())
+			}
+			minted := regexp.MustCompile(`#[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
+			if got := minted.ReplaceAllString(documentMarkdown(t, handler, issue.PrimaryArtifactID), "#<minted>"); got != test.want {
+				t.Fatalf("document after the accept = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 // A spec seeded at issue creation that names one block id twice is refused the same way: the
 // repair would hand the id to the first block and index the second as another ask.
 func TestASeededSpecRepeatingABlockIDIsRefused(t *testing.T) {

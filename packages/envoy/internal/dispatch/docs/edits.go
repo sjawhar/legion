@@ -759,7 +759,7 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err := pmdoc.RepeatedBlockID(tree, out); err != nil {
+		if err := pmdoc.RepeatedBlockID(tree, out, with); err != nil {
 			return nil, &ErrInvalidOp{Field: "markdown", Reason: err.Error()}
 		}
 		return out, nil
