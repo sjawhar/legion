@@ -324,6 +324,8 @@ func TestAcceptingASuggestionRefusesAReplacementTheDocumentCannotCarryBack(t *te
 		// paragraph where the rest of the item can stand without it, and nothing where it cannot.
 		{"nothing in a list item holding two paragraphs", longItem, "", "reject the suggestion, or delete the paragraph in the document"},
 		{"nothing in a list item holding a nested list", nestedItem, "", "reject the suggestion, since the rest of the list item cannot be written without this paragraph"},
+		// A footnote definition goes only with its reference, which would otherwise read as text.
+		{"nothing in a footnote definition", footnote, "", "reject the suggestion, or delete the footnote in the document, its reference along with this definition"},
 		{"a rule in a footnote definition", footnote, "***", "writes a horizontal rule in this footnote definition"},
 		{"a list in a footnote definition", footnote, "- a", "writes a bullet list in this footnote definition"},
 	} {
