@@ -1124,9 +1124,10 @@ production pairs `BROKER_RULES_S3_URI` with Secrets Manager instead.
 `internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's HTTP routes — a
 new route is a new row there, never a bare `mux.HandleFunc`. Its own comment says the contract for
 every row is the AGENTC-393 overview document; each row's own `Auth` field (`authNone`,
-`authLauncher`, `authProof`, or `authHumanOrProof`) is what `api/server.go` actually enforces for
-authentication (that document is the wire contract — request/response shapes, status codes — not
-the authentication rule). Read `routes()` for the current, authoritative route list.
+`authLauncher`, `authProof`, or `authHumanOrProof`) is how `api/server.go` enforces that
+document's per-route authentication rule (the document's broker API v1 section names each route's
+credential kind alongside its request/response shapes and status codes). Read `routes()` for the
+current, authoritative route list.
 
 `internal/broker/requests` is the state machine. A request's terminal states — `granted`,
 `denied`, `cancelled`, `expired` — are final: every transition is an `UPDATE` guarded by
