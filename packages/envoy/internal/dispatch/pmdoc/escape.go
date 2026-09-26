@@ -7,7 +7,6 @@ import (
 
 	"github.com/yuin/goldmark/ast"
 	extensionast "github.com/yuin/goldmark/extension/ast"
-	gmtext "github.com/yuin/goldmark/text"
 )
 
 // The renderer's escape rules. Paragraph text is written so the parser reads it back as the same
@@ -355,7 +354,8 @@ func unquote(lines, quote string) string {
 
 // blockKinds is the kinds of the blocks the parser reads markdown as, in document order.
 func blockKinds(markdown string) []ast.NodeKind {
-	root := unfrontmatteredParser.Parser().Parse(gmtext.NewReader(lineEnds([]byte(markdown))))
+	source := []byte(markdown)
+	root := parseLined(unfrontmatteredParser, lineEnds(source), source)
 	var kinds []ast.NodeKind
 	_ = ast.Walk(root, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
 		// A task checkbox is inline, but it is the list item's syntax, not its text.

@@ -25,7 +25,7 @@ var anchorAttribute = regexp.MustCompile(`([a-zA-Z0-9_-]+)="([^"]*)"`)
 // which the extension would consume to the end of the input with every block after it, and the
 // renderer asking how a line it is about to write would be read.
 func newMarkdownParser(readFrontmatter bool) goldmark.Markdown {
-	extensions := []goldmark.Extender{extension.GFM, extension.Footnote}
+	extensions := []goldmark.Extender{extension.Linkify, lazyAwareTable{}, extension.Strikethrough, extension.TaskList, extension.Footnote}
 	if readFrontmatter {
 		extensions = append(extensions, &frontmatter.Extender{Formats: []frontmatter.Format{frontmatter.YAML}})
 	}
@@ -54,7 +54,7 @@ func Parse(markdown string) (*Node, error) {
 	if front == nil {
 		md = unfrontmatteredParser
 	}
-	root := md.Parser().Parse(gmtext.NewReader(lined))
+	root := parseLined(md, lined, source)
 	doc, err := parseBlock(root, source, footnoteLabels(root))
 	if err != nil {
 		return nil, err
@@ -333,6 +333,35 @@ func segmentsText(segments *gmtext.Segments, source []byte) string {
 		}
 	}
 	return text.String()
+}
+
+// sourceKey holds the markdown as written, for a block parser to tell a line a lone carriage
+// return began (lineEnds) from one a line feed began.
+var sourceKey = parser.NewContextKey()
+
+// parseLined parses lined, the source with its lone carriage returns as line feeds, with source
+// at hand for the block parsers.
+func parseLined(md goldmark.Markdown, lined, source []byte) ast.Node {
+	context := parser.NewContext()
+	context.Set(sourceKey, source)
+	return md.Parser().Parse(gmtext.NewReader(lined), parser.WithContext(context))
+}
+
+// afterLoneCarriageReturn reports whether the line the reader is on began at a lone carriage
+// return in the source as written.
+func afterLoneCarriageReturn(reader gmtext.Reader, pc parser.Context) bool {
+	source, _ := pc.Get(sourceKey).([]byte)
+	_, segment := reader.Position()
+	start := lineStart(reader.Source(), segment.Start)
+	return start > 0 && start <= len(source) && source[start-1] == '\r'
+}
+
+// lineStart is where the line holding position begins in source.
+func lineStart(source []byte, position int) int {
+	for position > 0 && source[position-1] != '\n' {
+		position--
+	}
+	return position
 }
 
 // lineEnds is source with each carriage return that no line feed follows written as a line feed.

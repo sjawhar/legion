@@ -136,10 +136,13 @@ multiple of four from the column it stands at, and finding nothing closing in a 
 the typed block - so the renderer writes the typed block's fence longer than every such line
 (below). The engine's reading of each shape is `pmdoc/testdata/typed-fence-lines.json`, which the
 fixture generator writes for a callout at the top and inside a blockquote, list items, a footnote
-definition and another callout. A `replace` is refused where its text reads back as another block -
-`---` over a paragraph becomes a horizontal rule - naming the block it reads back as and the
-`insert` that adds it, except in a footnote definition, which the document reads at its end, so a
-block inserted beside one reads back ahead of it (`refuseReshapedReplacement`). An empty paragraph
+definition and another callout. Text a `replace` writes that would read as block syntax at a line
+start is written escaped, so it reads back as the characters: `---`, `***`, `~~~` or `::::` over a
+paragraph is stored `\---` and so on (the renderer's line-start escapes). Where no escape reaches it
+- a line a lone carriage return begins - a `replace` whose text reads back as another block is
+refused, naming the block it reads back as and the `insert` that adds it, except in a footnote
+definition, which the document reads at its end, so a block inserted beside one reads back ahead
+of it (`refuseReshapedReplacement`). An empty paragraph
 is not written, so the shape comparison (`pmdoc.BlockShapeError`) expects none back: an empty
 `with` that empties its paragraph changes no shape, a block holding an emptied paragraph is still
 judged for every later replace, and an empty `with` leaving text that reads back as another block
@@ -179,7 +182,9 @@ prose off them. `delete` takes `find` or
 (`pmdoc.DeleteTextblock`: it also drops a list, list item, or blockquote it empties, hoists a nested
 list into the place of a bullet whose text goes, and refuses a bullet with other content with
 `ErrListItemContent` naming `delete {block:"<item id>"}`; `pmdoc.DeleteBlock` serves `block` and
-reports any emptied container's content rule as `INVALID_OP`). `move` relocates the block with
+reports any emptied container's content rule as `INVALID_OP`; both leave an emptied footnote
+definition holding one empty paragraph, which both parsers read back as the definition, so its
+reference stays a reference). `move` relocates the block with
 `block` to the document-level boundary of an insert anchor (`pmdoc.MoveBlock`); insert and move
 anchors are a quote, `start`, `end`, `heading:<title>`, or `block:<id>`.
 
@@ -481,6 +486,11 @@ its carriage return; a soft break a lone carriage return ends stays `\r` in the 
 browser editor keeps it. The renderer writes a code line's prefix after a lone carriage return as
 after a line feed, and `closingColons` measures the line after one. A replace whose lone carriage
 return starts a line reading back as another block is refused by the shape check like any other.
+Two readings follow the browser editor rather than the line split: a line a lone carriage return
+begins is never refused as a malformed directive (`a\r::::` is text, since the browser editor refuses
+those line by line at line feeds), and a lazy continuation line - one that continues a paragraph in
+a list item, a quote or a footnote definition without the container's prefix, after a line feed or a
+lone carriage return - is never a table's header or delimiter row (`lazyTableRows`), as in GFM.
 
 A typed block renders its `blockId`, defaulted attributes, and every explicitly set optional
 attribute. Parsing mints an omitted id, while live document reads and writes validate each node
