@@ -189,8 +189,8 @@ dashboard's **Unclaimed** filter is how you find work nobody is on.
   that session (its id is in the message; `envoy_send` reaches it) or pick up something else,
   and tell the human if you believe the work should be yours. When a **human** holds it, the
   refusal names the person and says nothing about a session running, because there is none to
-  message: ask them on the issue (`dispatch_message`) instead, and never assume their claim has
-  lapsed — only a human releases or forces a human's claim.
+  message: ask them with `dispatch_ask` instead, so the open ask appears in their Inbox, and
+  never assume their claim has lapsed — only a human releases or forces a human's claim.
 - **`409 CLAIM_CONTENDED` means the issue changed hands twice while your call ran**, so nothing
   was applied and nobody's liveness was checked. Read the issue and decide again; it is not a
   refusal by a live holder.
@@ -421,17 +421,16 @@ Before saying you are waiting for human input, call `dispatch_open_asks`. With n
 
 **Unsettled product shape needs a decision before implementation.** When a page, navigation entry, table key, customer-scoping rule, or persisted sidecar would set product shape that Sami has not already settled, send a one-line ask before the first implementation commit. A lane's schema decision or a platform-PO contract ruling does not settle product shape. This does not turn a user-specified decision or routine implementation into an approval request; it is inferred from AGENTC-186's 2026-09-16 retro (platform PO, 2026-09-17). A control or behaviour the human asked for in words is settled by those words, together with every choice inside it that his words do not make (where it sits, its defaults, its options): build it without an ask, as gate 4 of [Before you ask](#before-you-ask) says. This rule covers only product shape outside what he asked for, and its ask comes before the commit that sets that shape.
 
-**Anything that needs the human is an ask, or it does not exist.** An approval, a credential,
-a setting only they can change, a review click, a conflict between two of their own rules - if
-your work waits on it, open a `dispatch_ask` the moment you know, the action as the question. The
-exception is a halt condition from [Before you ask](#before-you-ask) gate 1, which goes to the
-platform PO over Envoy instead.
-Never write it into a spec, a comment reply, a message, or a
-pull-request body: nothing in those paths reaches the human's Inbox, and a human who is not
-reading your document does not know they are the blocker. Before asking, try to remove the
-step: a value already on the machine, a permission you already hold, an API that replaces the
-click. One ask per item, `urgency: "high"` when work is stopped on it; while it is open, keep
-working on everything that is not.
+**Anything you are blocked on a human for is an open ask.** An agent waits on a human only through
+an open ask. An approval, a credential or grant to renew, a setting only they can change, a review
+click, a decision, or a conflict between two of their own rules: open a `dispatch_ask` the moment
+you know, the action as the question. The exception is a halt condition from [Before you
+ask](#before-you-ask) gate 1, which goes to the platform PO over Envoy instead. Never write it
+into a spec, a comment reply, a message, or a pull-request body: nothing in those paths reaches
+the human's Inbox, and a human who is not reading your document does not know they are the
+blocker. Before asking, try to remove the step: a value already on the machine, a permission you
+already hold, an API that replaces the click. One ask per item, `urgency: "high"` when work is
+stopped on it; while it is open, keep working on everything that is not.
 
 A to-do handed to a human is an ordinary question: phrase the to-do as the question and give it
 the options that name its outcomes, in the human's words - there is no fixed vocabulary and the
@@ -714,7 +713,7 @@ once.
 ## Messages
 
 Dispatch is a high-signal record for humans, not a log of what you are doing. A message is a reply to a human's message, or a
-change a human must know about now: a deliverable landed, a blocker only they can clear. Nothing else — no progress updates, no
+change a human must know about now: a deliverable landed. Nothing else — no progress updates, no
 "starting X", no "still working", no restating the spec, no status on a timer. Your transcript is where work is narrated; the
 pull request is where it is summarised. One message that a human reads beats ten that train them to skip you.
 

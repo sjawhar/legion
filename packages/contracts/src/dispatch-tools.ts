@@ -336,6 +336,7 @@ export const dispatchToolSpecs = [
     description:
       "Open a durable, answerable decision on an issue or project document. Do not use it for a status update or discussion; " +
       "use dispatch_message instead. A to-do a human must complete is a question phrased as that to-do, with the options you want (for example Done / Can't). " +
+      "Anything you are blocked on a human for, including a credential or grant to renew, an approval, or a decision, is an ask, never a message. " +
       "Anchor a document question, thread reply_to/reply_to_ask, or cite a dispatch:// " +
       `reference — it must be answerable from its own text and anchor alone, never "see above". A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} ` +
       `characters and has at most 8 options. ${OWNER_REFERENCE}`,
@@ -583,9 +584,9 @@ export const dispatchToolSpecs = [
     name: "dispatch_message",
     example: { issue: "DSP-1", body: "Implementation started." },
     description:
-      "Post a note humans must read now: a reply to a human's message, a deliverable that landed, or a blocker only " +
-      "they can clear. Never progress or status updates - Dispatch is a high-signal record, not a log. Not a decision " +
-      "(dispatch_ask) or document feedback (dispatch_comment). To answer a human's direct message to this session - " +
+      "Post a note humans must read now: a reply to a human's message or a deliverable that landed. A blocker only a human can " +
+      "clear is an ask (dispatch_ask), so it lands in their inbox. Never progress or status updates - Dispatch is a high-signal " +
+      "record, not a log. Not a decision (dispatch_ask) or document feedback (dispatch_comment). To answer a human's direct message to this session - " +
       "one sent from the Agents page, which names no issue - pass that message's bare id as in_reply_to and no issue; " +
       "the reply lands in that conversation, and a second call with the same in_reply_to posts nothing because " +
       "Dispatch keeps the one reply per message. Every other message names its issue. " +
