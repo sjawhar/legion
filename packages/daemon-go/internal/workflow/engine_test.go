@@ -490,13 +490,15 @@ func TestAPhaseFinishedNoticeCarriesTheWorkersSummaryAndItsVerdict(t *testing.T)
 
 // Linger suspends, and its expiry stops, every claim the tree holds — the root architect admission
 // started and a worker that never reported a handoff included, neither of which has a phase row.
+// Every expiry row names the root generation whose linger it expires, a child's too, which keeps
+// the earlier generation of the run that admitted it.
 func TestSignOffLingersOnceAndExpiryStopsTreeAndRemovesEveryWorkspace(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
 	now := time.Date(2026, 9, 23, 4, 0, 0, 0, time.UTC)
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.ProductionCheck, Generation: 7, Status: "retro", Rank: "U"})
 	parent := "LEGION-208"
-	seedIssue(t, pool, record.Issue{Key: "LEGION-209", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent, Phase: phase.Implementing, Generation: 7, Status: "in_progress", Rank: "V"})
+	seedIssue(t, pool, record.Issue{Key: "LEGION-209", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent, Phase: phase.Implementing, Generation: 3, Status: "in_progress", Rank: "V"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implementer", HandoffCommit: "production-check"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-209", Role: claim.RoleImplementer, Claim: "child-implementer"})
 	engine := New(record.NewStore(), Config{Project: "LEGION", Linger: time.Hour, Clock: func() time.Time { return now }}, nil)
@@ -539,6 +541,11 @@ func TestSignOffLingersOnceAndExpiryStopsTreeAndRemovesEveryWorkspace(t *testing
 		t.Fatalf("linger expiry stopped %v, want each tree claim once: %v", stopped, everyClaim)
 	}
 	assertOutboxCount(t, pool, "workspace_remove", 2)
+	var other int
+	if err := pool.QueryRow(ctx, `select count(*) from outbox where (kind = 'workspace_remove' or (kind = 'supervise' and payload->>'op' = 'tree_close'))
+		and payload->>'linger' is distinct from '7'`).Scan(&other); err != nil || other != 0 {
+		t.Fatalf("expiry rows naming another linger than the root's generation 7 = %d, %v; want none", other, err)
+	}
 }
 
 // superviseRequests counts the enqueued supervise requests of one operation by issue/role.

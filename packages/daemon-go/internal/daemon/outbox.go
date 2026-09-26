@@ -454,7 +454,7 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		// Whether the suspend still acts is workflow.StopActs's rule, which promotion reads too. The
 		// phase is read before the suspend acts, not in one transaction with it: a transition
 		// committing in between costs one suspend, which that transition's own start then resumes.
-		if last := machine.Claim().LastStartRow; !workflow.StopActs(row.ID, payload, issue.Phase, last) {
+		if last := machine.Claim().LastStartRow; !workflow.StopActs(row.ID, payload, issue.Phase, last, nil) {
 			r.log.Info("outbox suspend no longer acts: its role's phase is back, or a newer start superseded it; finished without acting",
 				"row", row.ID, "issue", issue.Key, "role", payload.Role, "leaves", payload.Leaves, "phase", issue.Phase, "start-row", last)
 			return nil
@@ -467,16 +467,17 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		if !found {
 			return nil
 		}
-		// The close belongs to the linger it expired. Once re-admission ends the linger, a close
-		// still backing off (a release the runtime refused) would retire the claim the tree's new
-		// run relaunched, and the task it holds with it; it finishes without acting instead.
-		lingers, err := r.treeLingers(ctx, issue)
+		// The close belongs to the linger it expired, the root generation it names. Once
+		// re-admission ends that linger, a close still backing off (a release the runtime refused)
+		// would retire the claim the tree's new run relaunched, and the task it holds with it, even
+		// in a later linger of the tree; it finishes without acting instead.
+		lingers, err := r.treeLingersAt(ctx, issue, payload.Linger)
 		if err != nil {
 			return err
 		}
 		if !lingers {
-			r.log.Info("outbox tree close of a tree that runs again; finished without acting", "row", row.ID, "issue", issue.Key,
-				"tree", issue.Tree, "role", payload.Role)
+			r.log.Info("outbox tree close of a linger that has ended; finished without acting", "row", row.ID, "issue", issue.Key,
+				"tree", issue.Tree, "role", payload.Role, "linger", payload.Linger)
 			return nil
 		}
 		if err := machine.Handle(ctx, supervise.RequestTreeClose{Claim: token}); err != nil {
@@ -491,10 +492,20 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 // treeLingers says whether issue's tree lingers after its close (record.TreeLingers), read in a
 // transaction of its own just before the executor acts on the row.
 func (r *outbox) treeLingers(ctx context.Context, issue record.Issue) (bool, error) {
+	return r.readTree(ctx, issue, func(tx pgx.Tx) (bool, error) { return record.TreeLingers(ctx, r.records, tx, issue.Tree) })
+}
+
+// treeLingersAt says whether issue's tree lingers after the close of root generation linger
+// (record.TreeLingersAt), the linger a close or a workspace removal row expires.
+func (r *outbox) treeLingersAt(ctx context.Context, issue record.Issue, linger uint64) (bool, error) {
+	return r.readTree(ctx, issue, func(tx pgx.Tx) (bool, error) { return record.TreeLingersAt(ctx, r.records, tx, issue.Tree, linger) })
+}
+
+func (r *outbox) readTree(ctx context.Context, issue record.Issue, read func(pgx.Tx) (bool, error)) (bool, error) {
 	var lingers bool
 	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
 		var err error
-		lingers, err = record.TreeLingers(ctx, r.records, tx, issue.Tree)
+		lingers, err = read(tx)
 		return err
 	}); err != nil {
 		return false, fmt.Errorf("read whether the tree of %s lingers: %w", issue.Key, err)
@@ -579,21 +590,29 @@ func (r *outbox) removeWorkspace(ctx context.Context, row record.OutboxRow, payl
 	if err != nil {
 		return err
 	}
-	if payload.Generation != issue.Generation {
-		r.log.Info("outbox workspace removal serves an earlier generation; finished without acting", "row", row.ID, "issue", issue.Key,
-			"generation", payload.Generation, "current", issue.Generation)
-		return nil
-	}
-	// The removal belongs to the linger it expired. Once re-admission ends the linger, the tree's
-	// new run may already work in the workspace again, so a removal still backing off finishes
-	// without acting.
-	lingers, err := r.treeLingers(ctx, issue)
+	// The removal belongs to the linger it expired, the root generation it names. Once
+	// re-admission ends that linger, the tree's new run may already work in the workspace again,
+	// even in a later linger of the tree, so a removal still backing off finishes without acting.
+	lingers, err := r.treeLingersAt(ctx, issue, payload.Linger)
 	if err != nil {
 		return err
 	}
 	if !lingers {
-		r.log.Info("outbox workspace removal of a tree that runs again; finished without acting", "row", row.ID, "issue", issue.Key, "tree", issue.Tree)
+		r.log.Info("outbox workspace removal of a linger that has ended; finished without acting", "row", row.ID, "issue", issue.Key,
+			"tree", issue.Tree, "linger", payload.Linger)
 		return nil
+	}
+	// The workspace goes only once the close has retired every claim of the issue: a claim whose
+	// release the runtime refused still runs there, and one that is re-admitted before its close
+	// lands goes on in it. A retired claim's relaunch provisions the workspace again.
+	for _, role := range claim.Roles {
+		token, err := claim.NewToken(r.project, row.Issue, role)
+		if err != nil {
+			return fmt.Errorf("derive claim for outbox row %d: %w", row.ID, err)
+		}
+		if machine, found := r.supervisor.Machine(token); found && machine.Claim().State != supervise.StateRetired {
+			return fmt.Errorf("workspace removal of %s waits for the tree's close to retire claim %s (%s)", row.Issue, token, machine.Claim().State)
+		}
 	}
 	working, err := workspace.Location(r.stateDir, r.repo, row.Issue)
 	if err != nil {

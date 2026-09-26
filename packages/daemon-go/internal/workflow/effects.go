@@ -48,18 +48,20 @@ func SuspendApplies(leaves, current phase.Phase) bool {
 }
 
 // StopActs is whether a queued stop, row id, still acts on its claim when the outbox runs it, with
-// the issue in phase current and lastStart the newest start the outbox ran against the claim (its
-// last_start_row). The outbox executor asks it of every suspend, and StartFor of every queued
-// stop, so both read one rule. A tree close always acts. A suspend acts unless the issue is back
-// in a phase its role works (SuspendApplies), or a newer start has already run: that start
-// replaced the run the stop was written for, so acting would suspend the run it began and retire
-// the task with it, whatever the retry timing was. A row with no id is not older than anything:
-// the store gives every row one, and an unknown id must not silently drop a stop. Any other
-// operation is not a stop.
-func StopActs(id int64, stop record.SuperviseRequest, current phase.Phase, lastStart int64) bool {
+// the issue in phase current, lastStart the newest start the outbox ran against the claim (its
+// last_start_row), and root the issue's tree root as recorded, read only for a tree close. The
+// outbox executor asks it of every suspend, and StartFor of every queued stop, so both read one
+// rule. A tree close acts while its tree lingers at the root generation it names
+// (record.Issue.LingersAt, which the executor reads through record.TreeLingersAt): never once
+// re-admission has moved the root on. A suspend acts unless the issue is back in a phase its role
+// works (SuspendApplies), or a newer start has already run: that start replaced the run the stop
+// was written for, so acting would suspend the run it began and retire the task with it, whatever
+// the retry timing was. A row with no id is not older than anything: the store gives every row
+// one, and an unknown id must not silently drop a stop. Any other operation is not a stop.
+func StopActs(id int64, stop record.SuperviseRequest, current phase.Phase, lastStart int64, root *record.Issue) bool {
 	switch stop.Op {
 	case "tree_close":
-		return true
+		return root != nil && root.LingersAt(stop.Linger)
 	case "suspend":
 		return SuspendApplies(stop.Leaves, current) && (id <= 0 || id >= lastStart)
 	default:
@@ -68,7 +70,8 @@ func StopActs(id int64, stop record.SuperviseRequest, current phase.Phase, lastS
 }
 
 // StartFor is whether a re-admitted tree's promotion starts the role of a mid-phase child, from
-// run, the role's queued rows and claim for generation, with the child in phase current. It does
+// run, the role's queued rows and claim for generation, with the child in phase current and root
+// its re-admitted tree root. It does
 // not when the role is already started for this run: the newest of its operations that will still
 // act is a start. A stop that still acts (StopActs) undoes any older start, which may run first,
 // so past one only a newer queued start for current counts. With none, a queued start for current
@@ -80,7 +83,7 @@ func StopActs(id int64, stop record.SuperviseRequest, current phase.Phase, lastS
 // resume task is delivered is the outbox executor's decision when the start runs: not to a claim
 // that holds a task for the same generation and phase by then (record.SuperviseRequest's
 // ResumeTask).
-func StartFor(run record.RoleRun, generation uint64, current phase.Phase) bool {
+func StartFor(run record.RoleRun, root record.Issue, generation uint64, current phase.Phase) bool {
 	held := run.Claim
 	var lastStart int64
 	if held != nil {
@@ -88,7 +91,7 @@ func StartFor(run record.RoleRun, generation uint64, current phase.Phase) bool {
 	}
 	var stop int64
 	for _, queued := range run.Queued {
-		if StopActs(queued.ID, queued.Request, current, lastStart) {
+		if StopActs(queued.ID, queued.Request, current, lastStart, &root) {
 			stop = max(stop, queued.ID)
 		}
 	}

@@ -318,10 +318,10 @@ func TestPromotionStartsAChildUnlessItsWorkerIsStartedForTheRun(t *testing.T) {
 			s.enqueue("suspend", 1)
 			s.enqueue("start", 1)
 		}, want: 0},
-		{name: "a live claim with the linger's tree close still queued", setup: func(s seed) {
+		{name: "a live claim with the ended linger's tree close still queued", setup: func(s seed) {
 			s.claim("working", 1, 0)
 			s.enqueue("tree_close", 1)
-		}, want: 1},
+		}, want: 0},
 		{name: "a live claim with only an earlier generation's suspend queued", setup: func(s seed) {
 			s.claim("working", 1, 0)
 			s.enqueue("suspend", 0)
@@ -427,8 +427,12 @@ func TestPromotionStartsAChildUnlessItsWorkerIsStartedForTheRun(t *testing.T) {
 			tc.setup(seed{
 				enqueue: func(op record.SuperviseOp, generation uint64) int64 {
 					payload := record.SuperviseRequest{Op: op, Tree: root.Key, Role: claim.RoleTester, Generation: generation}
-					if op == "start" {
+					switch op {
+					case "start":
 						payload.Phase, payload.Task = child.Phase, workflow.ResumePhaseTask(child)
+					case "tree_close":
+						// The close of the linger the re-admission ended: the root's generation 1.
+						payload.Linger = 1
 					}
 					return enqueueRequest(payload)
 				},

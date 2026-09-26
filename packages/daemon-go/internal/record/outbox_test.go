@@ -28,7 +28,7 @@ func TestOutboxPayloadsRoundTripThroughPostgres(t *testing.T) {
 		SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RoleArchitect, Task: "Write the spec."},
 		GateSeed{ArtifactID: "artifact-208", Version: 4},
 		LingerClose{Generation: 7},
-		WorkspaceRemove{Generation: 3},
+		WorkspaceRemove{Linger: 3},
 		MergeQueuePublish{Role: "merge-queue", Packet: "READY #42 at head (approved at head) for LEGION-208 (https://github.com/sjawhar/legion/pull/42)"},
 	}
 	for _, payload := range payloads {

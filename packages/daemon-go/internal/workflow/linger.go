@@ -75,11 +75,16 @@ func (e *Engine) lingerExpired(ctx context.Context, tx pgx.Tx, fact intake.Linge
 	if err != nil {
 		return intake.Result{}, err
 	}
+	// Each row names the root generation whose linger it expires: a member keeps its own generation
+	// across re-admission, so only that tells this linger's rows from a later one's.
 	for _, member := range members {
-		if err := e.everyClaim(ctx, tx, member, "tree_close"); err != nil {
-			return intake.Result{}, err
+		for _, role := range claim.Roles {
+			closeRow := record.SuperviseRequest{Op: "tree_close", Tree: member.Tree, Role: role, Generation: member.Generation, Linger: issue.Generation}
+			if err := e.enqueue(ctx, tx, member.Key, closeRow); err != nil {
+				return intake.Result{}, err
+			}
 		}
-		if err := e.enqueue(ctx, tx, member.Key, record.WorkspaceRemove{Generation: member.Generation}); err != nil {
+		if err := e.enqueue(ctx, tx, member.Key, record.WorkspaceRemove{Linger: issue.Generation}); err != nil {
 			return intake.Result{}, err
 		}
 	}

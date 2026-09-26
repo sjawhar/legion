@@ -115,6 +115,10 @@ type SuperviseRequest struct {
 	// re-admitted tree's promotion gives a mid-phase child: a claim that already holds a task for
 	// the same generation and phase is given it once it is ready, so the start delivers none.
 	ResumeTask bool `json:"resumeTask,omitempty"`
+	// Linger is the root generation whose linger a tree close expires. A member keeps its
+	// generation across re-admission, so the close acts only while its tree lingers at that root
+	// generation: never in the tree's next run, nor in a later linger of it.
+	Linger uint64 `json:"linger,omitempty"`
 }
 
 func (SuperviseRequest) OutboxKind() OutboxKind { return OutboxKindSupervise }
@@ -139,9 +143,10 @@ func (LingerClose) OutboxKind() OutboxKind { return OutboxKindLingerClose }
 
 // WorkspaceRemove removes the workspace named by the row's issue.
 type WorkspaceRemove struct {
-	// Generation is the issue generation whose tree closed. A removal of an earlier generation
-	// finishes without acting: the workspace there is the re-admitted tree's.
-	Generation uint64 `json:"generation"`
+	// Linger is the root generation whose linger the removal expires. Like a tree close, it acts
+	// only while the tree lingers at that root generation: once re-admission moves the root on, the
+	// workspace there is the tree's next run's, whatever generation the issue itself keeps.
+	Linger uint64 `json:"linger"`
 }
 
 func (WorkspaceRemove) OutboxKind() OutboxKind { return OutboxKindWorkspaceRemove }
@@ -262,7 +267,11 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		if value.Status == "" {
 			return fmt.Errorf("outbox status write has empty status")
 		}
-	case MessagePost, GateSeed, LingerClose, WorkspaceRemove:
+	case MessagePost, GateSeed, LingerClose:
+	case WorkspaceRemove:
+		if value.Linger == 0 {
+			return fmt.Errorf("workspace removal requires the root generation of its linger")
+		}
 	case Notice:
 		if !validNoticeKind(value.Kind) {
 			return fmt.Errorf("unknown notice kind %q", value.Kind)
@@ -276,6 +285,9 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		}
 		if value.Op == "start" && value.Role == "" {
 			return fmt.Errorf("supervise start requires role")
+		}
+		if (value.Op == "tree_close") != (value.Linger != 0) {
+			return fmt.Errorf("a tree close, and only a tree close, names the root generation of its linger")
 		}
 		if value.ResumeTask && (value.Op != "start" || value.Task == "" || value.Phase == "") {
 			return fmt.Errorf("a supervise resume task requires a start with a task and a phase")

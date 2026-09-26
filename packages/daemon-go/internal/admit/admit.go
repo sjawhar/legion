@@ -391,7 +391,7 @@ func (a *Admission) startMidPhaseChildren(ctx context.Context, tx pgx.Tx, root r
 		if err != nil {
 			return err
 		}
-		if !workflow.StartFor(run, child.Generation, child.Phase) {
+		if !workflow.StartFor(run, root, child.Generation, child.Phase) {
 			continue
 		}
 		payload := record.SuperviseRequest{Op: "start", Tree: child.Tree, Role: role, Generation: child.Generation, Phase: child.Phase,
