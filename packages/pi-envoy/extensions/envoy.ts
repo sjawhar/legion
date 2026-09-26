@@ -279,9 +279,9 @@ export default function envoyExtension(pi: PiApi): void {
     check_due: false,
     checks: 0,
   };
-  // Bumped by everything that invalidates a stop-time check already in flight: a new arming
-  // period, and a session change. The period alone cannot carry that — a rebound session's
-  // restored period may equal the one the pending check read.
+  // Bumped by everything that invalidates a stop-time check already in flight: a new user turn,
+  // and a session change. The period alone cannot carry that — a rebound session's restored
+  // period may equal the one the pending check read.
   let awarenessGeneration = 0;
   // One stop-time check at a time. `agent_end` handlers are not awaited by the host, so a second
   // stop can arrive while the first one's Dispatch round trip or self-check is open — it clears
@@ -291,6 +291,17 @@ export default function envoyExtension(pi: PiApi): void {
   // the structure rather than an ordering a re-check happens to win: held from before the query
   // until after `check_due` is spent.
   let askCheckInFlight = false;
+  // A settle that arrived while a check was open, and passed every guard but that one: its run
+  // started after the check's settle, so the open check will not steer, and it runs again for
+  // this settle once it is done. Dropped, the newer settle's check would be lost whenever that
+  // run finished inside the check's window — the usual case for an agent that acts on a reply
+  // and stops within seconds.
+  let settledDuringCheck: SessionContext | undefined;
+  const takeSettledDuringCheck = (): SessionContext | undefined => {
+    const settle = settledDuringCheck;
+    settledDuringCheck = undefined;
+    return settle;
+  };
   // The self-check in flight, so whatever invalidates it can stop it. Dropping the verdict is
   // not enough: the call is a whole-context request on the session's own model, and one the
   // user superseded by typing competes with the turn they are waiting on for the same provider.
@@ -299,6 +310,11 @@ export default function envoyExtension(pi: PiApi): void {
     askCheckAbort?.abort(new Error(reason));
     askCheckAbort = undefined;
   };
+  // Every run the session has started, which is what a stop-time check compares with the value
+  // it read at its settle. A run that starts while the check is open — an Envoy delivery woke
+  // the session, or another extension continued it — means the verdict no longer describes
+  // where the session is, and any work that run does owes the period a check of its own.
+  let runSeq = 0;
   // Whether this session's transcript records Legion driving it. Not matched against the id the
   // guard runs under: `/fork` and `/handoff` mint a new id and carry the transcript, and the
   // session stays Legion-driven across one — the role-claim reader beside it is id-agnostic for
@@ -1172,6 +1188,12 @@ export default function envoyExtension(pi: PiApi): void {
     }
     // Memoized per instance: one transcript stat for the life of the session.
     if (await isSubagent(context)) return undefined;
+    // The user typed, so a check still in flight is about to answer for a run they have moved
+    // past. This runs before the arming query rather than in `armAskAwareness`: a slow Dispatch
+    // would otherwise hold the old check live for up to `OPEN_ASKS_TIMEOUT_MS`, and one that
+    // fails would never arm at all, and either way its steer would land on the turn just typed.
+    awarenessGeneration++;
+    abortSelfCheck("a new user turn superseded the self-check");
     try {
       const open = await queryOpenAsks(id);
       if (open !== null) armAskAwareness(id, event.prompt, open.snapshot.as_of);
@@ -1179,6 +1201,13 @@ export default function envoyExtension(pi: PiApi): void {
       warnAskAvailability(context, error);
     }
     return undefined;
+  });
+
+  // Every run the host starts, typed or not: the user's prompt, an Envoy delivery waking the
+  // session, another extension's continuation. `agent_end` compares it with what it read at the
+  // settle, so a verdict that arrives after the session has moved on steers nothing.
+  pi.on("agent_start", async () => {
+    runSeq += 1;
   });
 
   // Arms one nudge period. A genuine user turn is the only thing that arms one: this handler
@@ -1189,9 +1218,6 @@ export default function envoyExtension(pi: PiApi): void {
   // nudge cannot re-arm itself, and one stop can produce at most one of them.
   function armAskAwareness(id: string, prompt: string, asOf: string): void {
     if (prompt.trim() === "") return;
-    awarenessGeneration++;
-    // The verdict of a check still in flight describes a run the user has already moved past.
-    abortSelfCheck("a new user turn superseded the self-check");
     askAwareness = {
       session_id: id,
       period: (askAwareness.session_id === id ? askAwareness.period : 0) + 1,
@@ -1229,9 +1255,38 @@ export default function envoyExtension(pi: PiApi): void {
     if (
       event.willContinue === true ||
       lastReply?.stopReason !== "stop" ||
-      shuttingDown ||
       !context.hasUI ||
       id === "" ||
+      !checkOwed(id)
+    ) {
+      return;
+    }
+    if (askCheckInFlight) {
+      settledDuringCheck = context;
+      return;
+    }
+    askCheckInFlight = true;
+    try {
+      let settle: SessionContext | undefined = context;
+      while (settle !== undefined) {
+        await checkAtSettle(id, settle);
+        // A settle that arrived while that check was open is checked now if a check is still
+        // owed: the one a newer user turn arms, or the one a superseded verdict left owing.
+        // Each pass needs another real settle during the last, and every check that reaches the
+        // model counts against the period's cap, so this ends.
+        settle = takeSettledDuringCheck();
+        if (settle?.sessionManager.getSessionId() !== id || !checkOwed(id)) settle = undefined;
+      }
+    } finally {
+      askCheckInFlight = false;
+      settledDuringCheck = undefined;
+    }
+  });
+
+  // Whether this session's current period still owes a stop-time check.
+  function checkOwed(id: string): boolean {
+    return !(
+      shuttingDown ||
       legionManaged(id) ||
       // The host's live id, never the module's `sessionID`: a fresh TUI mints its id after
       // `session_start`, so the two disagree until the registration heartbeat heals the drift
@@ -1245,121 +1300,133 @@ export default function envoyExtension(pi: PiApi): void {
       !askAwareness.check_due ||
       askAwareness.checks >= ASK_CHECKS_PER_PERIOD ||
       askAwareness.baseline_as_of === null ||
-      askCheckInFlight ||
       askEphemeral === undefined
-    ) {
-      return;
-    }
+    );
+  }
+
+  // One stop-time check for the settle `context` belongs to, run with `askCheckInFlight` held.
+  async function checkAtSettle(id: string, context: SessionContext): Promise<void> {
     const period = askAwareness.period;
     const generation = awarenessGeneration;
-    askCheckInFlight = true;
+    const seenRun = runSeq;
+    const baseline = askAwareness.baseline_as_of;
+    // `checkOwed` held both at the call; restated so the compiler sees them in this scope.
+    if (baseline === null || askEphemeral === undefined) return;
+    // Both awaits below are windows in which a new user turn can arm another period, a
+    // session change can move the session, or the agent's own next run can open the ask this
+    // check is about — which clears the check it owed. The re-checks read one list, so they
+    // cannot drift.
+    const stale = (): boolean =>
+      shuttingDown ||
+      generation !== awarenessGeneration ||
+      // Only the host's live id: see the guard above on the module's `sessionID`.
+      context.sessionManager.getSessionId() !== id ||
+      legionManaged(id) ||
+      askAwareness.session_id !== id ||
+      askAwareness.period !== period ||
+      !askAwareness.check_due;
+    let open: { readonly snapshot: OpenAsksResponse; readonly url: string } | null;
     try {
-      // Both awaits below are windows in which a new user turn can arm another period, a
-      // session change can move the session, or the agent's own next run can open the ask this
-      // check is about — which clears the check it owed. The re-checks read one list, so they
-      // cannot drift.
-      const stale = (): boolean =>
-        shuttingDown ||
-        generation !== awarenessGeneration ||
-        // Only the host's live id: see the guard above on the module's `sessionID`.
-        context.sessionManager.getSessionId() !== id ||
-        legionManaged(id) ||
-        askAwareness.session_id !== id ||
-        askAwareness.period !== period ||
-        !askAwareness.check_due;
-      let open: { readonly snapshot: OpenAsksResponse; readonly url: string } | null;
-      try {
-        open = await queryOpenAsks(id, askAwareness.baseline_as_of);
-      } catch (error) {
-        if (generation === awarenessGeneration) warnAskAvailability(context, error);
-        return;
-      }
-      if (open === null || stale()) return;
-      if (open.snapshot.count > 0 || open.snapshot.opened_since) {
-        // Dispatch knows this session is waiting, or knows it asked since the window opened, so
-        // there is nothing for the model to tell anyone: the settle is silent and no check is
-        // spent. The window moves to this snapshot, which is what stops one ask from silencing
-        // the rest of the period: `opened_since` counts every ask authored after `since`,
-        // answered or not, so a window pinned to the arming turn stays true forever.
-        askAwareness = {
-          ...askAwareness,
-          check_due: false,
-          baseline_as_of: open.snapshot.as_of,
-        };
-        return;
-      }
-      // The self-check: one hidden, tool-free model call over a snapshot of this conversation
-      // (`pi.askEphemeral`, the channel a targeted Dispatch BTW already uses), which adds nothing
-      // to the transcript and which the user never sees. Only a WAITING verdict — the agent
-      // saying it stopped on a human it has not asked — buys the visible turn. PROCEEDING, any
-      // other answer, a timeout, and a failure are all silent, so an ordinary settle costs one
-      // hidden call and shows nothing.
-      //
-      // The bound is this handler's own clock, not the host's: the signal is still passed, so a
-      // host that honours it stops paying for an answer nobody will read, but the await always
-      // settles at `selfCheckTimeoutMs` whatever the host does. A host that ignored the signal
-      // would otherwise hold `askCheckInFlight` — and with it every later check — for as long as
-      // its call hung. A late answer is dropped; its rejection is already handled, so it can
-      // never surface as an unhandled one.
-      const abort = new AbortController();
-      askCheckAbort = abort;
-      let answered: Promise<string | undefined>;
-      try {
-        answered = askEphemeral({ prompt: ASK_SELF_CHECK_PROMPT, signal: abort.signal }).then(
-          (reply): string | undefined => reply.replyText,
-          (error: unknown): string | undefined => {
-            logSelfCheckFailure(id, error);
-            return undefined;
-          }
-        );
-      } catch (error) {
-        // A host initialised without the capability installs a stub that throws synchronously
-        // rather than rejecting, so `.then(onRejected)` never sees it. Left to escape, the
-        // throw would leave the check unspent and every later settle would pay another Dispatch
-        // round trip and throw again, with the cap never engaging.
-        logSelfCheckFailure(id, error);
-        answered = Promise.resolve(undefined);
-      }
-      const expiry = Promise.withResolvers<undefined>();
-      const expire = setTimeout(() => {
-        const timedOut = new Error(`self-check timed out after ${selfCheckTimeoutMs} ms`);
-        abort.abort(timedOut);
-        logSelfCheckFailure(id, timedOut);
-        expiry.resolve(undefined);
-      }, selfCheckTimeoutMs);
-      let verdict: string | undefined;
-      try {
-        verdict = await Promise.race([answered, expiry.promise]);
-      } finally {
-        clearTimeout(expire);
-        if (askCheckAbort === abort) askCheckAbort = undefined;
-      }
-      if (stale()) {
-        // Whatever invalidated this check aborted it already if it could reach it; a host that
-        // is still working on an answer nobody will read stops paying here.
-        abort.abort(new Error("the self-check was superseded before its verdict arrived"));
-        return;
-      }
-      // The check ran: it spends the period's outstanding one, counts against the cap, and
-      // moves the window on, whatever came back. Only work re-arms it.
+      open = await queryOpenAsks(id, baseline);
+    } catch (error) {
+      if (generation === awarenessGeneration) warnAskAvailability(context, error);
+      return;
+    }
+    if (open === null || stale()) return;
+    // A run started while Dispatch answered: the conversation a self-check would read is past
+    // this settle. Nothing is spent, so the newer run's own settle is where the check happens.
+    if (runSeq !== seenRun) return;
+    if (open.snapshot.count > 0 || open.snapshot.opened_since) {
+      // Dispatch knows this session is waiting, or knows it asked since the window opened, so
+      // there is nothing for the model to tell anyone: the settle is silent and no check is
+      // spent. The window moves to this snapshot, which is what stops one ask from silencing
+      // the rest of the period: `opened_since` counts every ask authored after `since`,
+      // answered or not, so a window pinned to the arming turn stays true forever.
       askAwareness = {
         ...askAwareness,
         check_due: false,
-        checks: askAwareness.checks + 1,
         baseline_as_of: open.snapshot.as_of,
       };
-      if (verdict === undefined || !isWaitingVerdict(verdict.trim())) return;
-      // `deliverAs: "nextTurn"` with `triggerTurn` is the host's documented form for a message
-      // sent during prompt teardown; on the pin this steer produced exactly one continuation in
-      // every interactive and RPC run, so it stays the channel `deliver` already uses.
-      pi.sendMessage(
-        { customType: ASK_REMINDER_MESSAGE, content: UNASKED_WAIT_REMINDER, display: false },
-        { deliverAs: "steer", triggerTurn: true }
-      );
-    } finally {
-      askCheckInFlight = false;
+      return;
     }
-  });
+    // The self-check: one hidden, tool-free model call over a snapshot of this conversation
+    // (`pi.askEphemeral`, the channel a targeted Dispatch BTW already uses), which adds nothing
+    // to the transcript and which the user never sees. Only a WAITING verdict — the agent
+    // saying it stopped on a human it has not asked — buys the visible turn. PROCEEDING, any
+    // other answer, a timeout, and a failure are all silent, so an ordinary settle costs one
+    // hidden call and shows nothing.
+    //
+    // The bound is this handler's own clock, not the host's: the signal is still passed, so a
+    // host that honours it stops paying for an answer nobody will read, but the await always
+    // settles at `selfCheckTimeoutMs` whatever the host does. A host that ignored the signal
+    // would otherwise hold `askCheckInFlight` — and with it every later check — for as long as
+    // its call hung. A late answer is dropped; its rejection is already handled, so it can
+    // never surface as an unhandled one.
+    const abort = new AbortController();
+    askCheckAbort = abort;
+    let answered: Promise<string | undefined>;
+    try {
+      answered = askEphemeral({ prompt: ASK_SELF_CHECK_PROMPT, signal: abort.signal }).then(
+        (reply): string | undefined => reply.replyText,
+        (error: unknown): string | undefined => {
+          // An abort this extension made — a superseded check, or its own timeout, which logs
+          // itself — is not a failure. Logging it would spend the once-per-session warning on
+          // an ordinary event, such as the user typing, and silence the real failure after it.
+          if (!abort.signal.aborted) logSelfCheckFailure(id, error);
+          return undefined;
+        }
+      );
+    } catch (error) {
+      // A host initialised without the capability installs a stub that throws synchronously
+      // rather than rejecting, so `.then(onRejected)` never sees it. Left to escape, the
+      // throw would leave the check unspent and every later settle would pay another Dispatch
+      // round trip and throw again, with the cap never engaging.
+      logSelfCheckFailure(id, error);
+      answered = Promise.resolve(undefined);
+    }
+    const expiry = Promise.withResolvers<undefined>();
+    const expire = setTimeout(() => {
+      const timedOut = new Error(`self-check timed out after ${selfCheckTimeoutMs} ms`);
+      abort.abort(timedOut);
+      logSelfCheckFailure(id, timedOut);
+      expiry.resolve(undefined);
+    }, selfCheckTimeoutMs);
+    let verdict: string | undefined;
+    try {
+      verdict = await Promise.race([answered, expiry.promise]);
+    } finally {
+      clearTimeout(expire);
+      if (askCheckAbort === abort) askCheckAbort = undefined;
+    }
+    if (stale()) {
+      // Whatever invalidated this check aborted it already if it could reach it; a host that
+      // is still working on an answer nobody will read stops paying here.
+      abort.abort(new Error("the self-check was superseded before its verdict arrived"));
+      return;
+    }
+    // The check ran: it counts against the cap and moves the window on, whatever came back,
+    // and it spends the period's outstanding check unless the session started another run
+    // meanwhile — that run's own settle is where the check now belongs, and any work it did
+    // owes one anyway.
+    const superseded = runSeq !== seenRun;
+    askAwareness = {
+      ...askAwareness,
+      check_due: superseded,
+      checks: askAwareness.checks + 1,
+      baseline_as_of: open.snapshot.as_of,
+    };
+    // A verdict about a run the session has moved past is not steered into the one it is in:
+    // "you just said you are waiting on a human" would describe a reply it has left behind.
+    if (superseded) return;
+    if (verdict === undefined || !isWaitingVerdict(verdict.trim())) return;
+    // `deliverAs: "nextTurn"` with `triggerTurn` is the host's documented form for a message
+    // sent during prompt teardown; on the pin this steer produced exactly one continuation in
+    // every interactive and RPC run, so it stays the channel `deliver` already uses.
+    pi.sendMessage(
+      { customType: ASK_REMINDER_MESSAGE, content: UNASKED_WAIT_REMINDER, display: false },
+      { deliverAs: "steer", triggerTurn: true }
+    );
+  }
 
   // A write follows the ask it touched; nothing subscribes the session to the whole
   // issue (that is the agent's own envoy_subscribe). The host does not let a
@@ -1383,9 +1450,11 @@ export default function envoyExtension(pi: PiApi): void {
     ) {
       if (ASK_OPENING_TOOLS.includes(event.toolName)) {
         // The agent asked the humans itself, so this stop has nothing left for the nudge to
-        // say: it spends the check the period owed rather than ending the period. The ask is
-        // still what keeps later settles silent — Dispatch is re-read at every one of them.
+        // say: it spends the check the period owed rather than ending the period, and stops a
+        // check in flight, whose verdict can no longer be used. The ask is still what keeps
+        // later settles silent — Dispatch is re-read at every one of them.
         askAwareness = { ...askAwareness, check_due: false };
+        abortSelfCheck("the agent opened the ask itself");
       } else if (!event.toolName.startsWith(DISPATCH_TOOL_PREFIX)) {
         // Real work: it owes the period another check, the way finishing a step re-arms the
         // host's todo reminder. A Dispatch write is the agent talking to the humans this nudge

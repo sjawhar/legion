@@ -290,11 +290,15 @@ honours it stops paying for an answer nobody will read, but the handler races th
 `ASK_SELF_CHECK_TIMEOUT_MS` (60 s, moved by `ENVOY_SELF_CHECK_TIMEOUT_MS`) and always settles there, because a
 host that ignored the signal would otherwise hold the one-check-at-a-time latch — and every later check with it
 — for as long as its call hung. A late answer is dropped, and the controller is reachable while the call is
-open, so everything that invalidates a check — a new arming turn, a session change, a staleness the post-race
-re-read finds — aborts it rather than leaving a whole-context request running beside the turn the user is
-waiting on. A failure is logged once per session (`logger.warn`), never notified: a broken self-check must not
-put a warning in front of the user for a reminder they were not going to get. The cost of the common case is
-therefore one hidden model call per normally-settled turn that has no open ask, and nothing on screen.
+open, so everything that invalidates a check aborts it rather than leaving a whole-context request running
+beside the turn the user is waiting on: the user typing (at the start of `before_agent_start`, ahead of its
+arming query, so a Dispatch that is slow or unreachable cannot hold the old check live into the new turn), a
+session change, the agent opening the ask itself, and a staleness the post-race re-read finds. A failure is
+logged once per session (`logger.warn`), never notified: a broken self-check must not put a warning in front of
+the user for a reminder they were not going to get. An abort the extension made — a superseded check, or its
+own timeout, which logs itself — is not a failure and is not logged, so the one warning stays for the failure
+that matters. The cost of the common case is therefore one hidden model call per normally-settled turn that has
+no open ask, and nothing on screen.
 
 The check is owed and spent like the host's own todo reminder rather than once per period: the arming turn owes
 one, running it spends it whatever came back, the agent opening the ask itself (`dispatch_ask`,
@@ -316,8 +320,17 @@ keeps settles silent through the live `count > 0` read, which every stop re-read
 time: `agent_end` handlers are not awaited by the host, so a latch held across both the Dispatch round trip and
 the self-check is what keeps a second stop inside either from checking or nudging again, and the staleness list
 is re-read after each await — including the owed check itself, so an ask the agent opens while a check is in
-flight drops that verdict instead of steering "you have no open ask" at a session that has just opened one. The
-latch, the period and its budget are in memory only — a cold start or a session change begins at period 0, which
+flight drops that verdict instead of steering "you have no open ask" at a session that has just opened one.
+Every run the host starts bumps a counter (`agent_start`), and a check compares it with the value it read at its
+settle: a run that started meanwhile — an Envoy delivery waking the session, perhaps with the very reply the
+agent was waiting for — means the verdict describes a run the session has moved past. Such a verdict is never
+steered; the check still counts against the cap, but what the period owes stays owed, for the newer run's
+settle. A run that starts while the Dispatch query is open pays for no check at all. A stop that arrives while a
+check holds the latch is recorded, not dropped, and checked as soon as the open check ends if a check is still
+owed — otherwise a woken run that settled inside the check's window, the usual case, would go unchecked until
+some later run. Each such pass needs another real settle during the last, and every check that reaches the
+model counts against the cap, so the re-check cannot loop. The latch, the period and its budget are in memory
+only — a cold start or a session change begins at period 0, which
 nudges nothing until the next genuine user turn arms one. The guard, the staleness list and the `tool_result`
 edge compare only the host's **live** session id against the one the period was armed with, never the
 module-level `sessionID` the registration heartbeat maintains: a fresh TUI mints its id after `session_start`, so

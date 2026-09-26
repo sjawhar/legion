@@ -505,10 +505,11 @@ const ASK_REMINDER_TYPE = "dispatch-ask-reminder";
  * Boots one session against a Dispatch whose open-ask snapshot each call reads from
  * `snapshot(since)` — `since` being the window the extension queried with, so a test can answer
  * `opened_since` the way the server does — and hands back the lifecycle edges the run-end nudge
- * lives between: a user turn (`before_agent_start`, which arms a period), a stop (`agent_end`),
- * a tool result, and a tick of every interval the session registered. The host answers the
- * hidden self-check WAITING unless `selfCheck` says otherwise, since that is the only verdict
- * that reaches the visible steer.
+ * lives between: a user turn (`before_agent_start`, which arms a period, then `agent_start`),
+ * a run nobody typed (`agent_start` alone — an Envoy delivery waking the session), a stop
+ * (`agent_end`), a tool result, and a tick of every interval the session registered. The host
+ * answers the hidden self-check WAITING unless `selfCheck` says otherwise, since that is the
+ * only verdict that reaches the visible steer.
  */
 async function bootAskNudge(
   envoyExtension: (pi: TestPi) => void,
@@ -628,9 +629,15 @@ async function bootAskNudge(
   await fixture.handlers.get("session_start")?.({}, context);
   live = sessionID;
   const beforeAgentStart = fixture.handlers.get("before_agent_start");
+  const agentStart = fixture.handlers.get("agent_start");
   const agentEnd = fixture.handlers.get("agent_end");
   const toolResult = fixture.handlers.get("tool_result");
-  if (beforeAgentStart === undefined || agentEnd === undefined || toolResult === undefined) {
+  if (
+    beforeAgentStart === undefined ||
+    agentStart === undefined ||
+    agentEnd === undefined ||
+    toolResult === undefined
+  ) {
     throw new Error("the run-end nudge's lifecycle handlers were not registered");
   }
   return {
@@ -659,7 +666,14 @@ async function bootAskNudge(
       await Promise.resolve();
       if (awaiting !== undefined) await awaiting;
     },
-    userTurn: (prompt = "finish the task") => beforeAgentStart({ prompt }, context),
+    /** The host's order: `before_agent_start` is awaited, then the run starts. */
+    userTurn: async (prompt = "finish the task") => {
+      const injected = await beforeAgentStart({ prompt }, context);
+      await agentStart({}, context);
+      return injected;
+    },
+    /** A run the user did not type: an Envoy delivery, or another extension's continuation. */
+    runStart: () => agentStart({}, context),
     /** A stop defaults to a normal settle: the run's last reply ended `stopReason: "stop"`. */
     stop: (
       event: {
@@ -1101,6 +1115,9 @@ describe("envoy OMP extension", () => {
       { reason: "fork" },
       sessionContext("ses_nudge_forked")
     );
+    // The superseded call is told to stop now, not once it answers: the abort is what spares the
+    // host a whole-context request nobody will read.
+    expect(session.asked[0]?.signal?.aborted).toBe(true);
     release();
     await stopped;
 
@@ -1108,8 +1125,6 @@ describe("envoy OMP extension", () => {
     expect(
       session.fixture.deliveries.filter((delivery) => delivery.customType === ASK_REMINDER_TYPE)
     ).toEqual([]);
-    // And the superseded call was told to stop rather than left to bill a whole context.
-    expect(session.asked[0]?.signal?.aborted).toBe(true);
   });
 
   test("never self-checks in a task subagent's own instance", async () => {
@@ -1312,12 +1327,12 @@ describe("envoy OMP extension", () => {
     // The user typed again while the hidden call was open: the WAITING it is about to answer
     // describes a run the user has already moved past, and steering it would talk over them.
     await session.userTurn("actually, do this instead");
+    // And the call the user superseded is told to stop while it is still running: it is a
+    // whole-context request, competing with the turn they are waiting on for the same provider.
+    expect(session.asked[0]?.signal?.aborted).toBe(true);
     release();
     await stopped;
     expect(session.fixture.deliveries).toEqual([]);
-    // And the call the user superseded was told to stop: it is a whole-context request, and
-    // leaving it running competes with the turn they are waiting on for the same provider.
-    expect(session.asked[0]?.signal?.aborted).toBe(true);
   });
 
   test("drops the verdict when the agent opened the ask itself while the check was in flight", async () => {
@@ -1345,9 +1360,179 @@ describe("envoy OMP extension", () => {
       details: { ask: "ask-1" },
       isError: false,
     });
+    // A verdict it can no longer use is not left running either.
+    expect(session.asked[0]?.signal?.aborted).toBe(true);
     release();
     await stopped;
     expect(session.fixture.deliveries).toEqual([]);
+  });
+
+  test("a slow arming query does not let a superseded check steer the turn just typed", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-slow-arming");
+    const { promise: held, resolve: release } = Promise.withResolvers<void>();
+    const started = Promise.withResolvers<void>();
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_slow_arming", () => ({}), {
+      selfCheck: async () => {
+        started.resolve();
+        await held;
+        return { replyText: "WAITING" };
+      },
+    });
+
+    await session.userTurn();
+    const stopped = session.stop();
+    await started.promise;
+    // The user types again while the hidden call is open, and Dispatch is slow, so the arming
+    // query their turn makes has not answered when the verdict does.
+    const arming = Promise.withResolvers<void>();
+    const dispatch = globalThis.fetch;
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      if (url.pathname === "/api/v1/asks/open" && !url.search.includes("since=")) {
+        await arming.promise;
+      }
+      return dispatch(input, init);
+    };
+    try {
+      const typed = session.userTurn("actually, do this instead");
+      for (let tick = 0; tick < 20; tick += 1) await Promise.resolve();
+      release();
+      await stopped;
+      expect(
+        session.fixture.deliveries.filter((delivery) => delivery.customType === ASK_REMINDER_TYPE)
+      ).toEqual([]);
+      arming.resolve();
+      await typed;
+    } finally {
+      globalThis.fetch = dispatch;
+    }
+  });
+
+  test("a run that starts while the check is open is not steered, and its own settle is checked", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-run-midflight");
+    const { promise: held, resolve: release } = Promise.withResolvers<void>();
+    const started = Promise.withResolvers<void>();
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_run_midflight", () => ({}), {
+      selfCheck: async () => {
+        started.resolve();
+        await held;
+        return { replyText: "WAITING" };
+      },
+    });
+
+    await session.userTurn();
+    const stopped = session.stop();
+    await started.promise;
+    // An Envoy delivery wakes the session while the hidden call is open — perhaps the very reply
+    // the agent was waiting for. The WAITING about to arrive describes the run before it.
+    await session.runStart();
+    release();
+    await stopped;
+    expect(session.fixture.deliveries).toEqual([]);
+
+    // The check still counted, but it did not spend what the period owes: the newer run's own
+    // settle is checked, and that verdict is about where the session is now.
+    await session.stop();
+    expect(session.asked).toHaveLength(2);
+    expect(
+      session.fixture.deliveries.filter((delivery) => delivery.customType === ASK_REMINDER_TYPE)
+    ).toHaveLength(1);
+  });
+
+  test("a run that settles while the check is open is checked once the open check ends", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-settle-midflight");
+    const { promise: held, resolve: release } = Promise.withResolvers<void>();
+    const started = Promise.withResolvers<void>();
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_settle_midflight", () => ({}), {
+      selfCheck: async () => {
+        started.resolve();
+        await held;
+        return { replyText: "WAITING" };
+      },
+    });
+
+    await session.userTurn();
+    const first = session.stop();
+    await started.promise;
+    // The woken run is short: it starts and settles inside the check's window, so its stop
+    // arrives while the first check still holds the one-at-a-time slot.
+    await session.runStart();
+    const second = session.stop();
+    release();
+    await Promise.all([first, second]);
+
+    // Nothing else will settle, so the newer stop is checked as soon as the open check ends —
+    // once, with a verdict about the run the session actually finished.
+    expect(session.asked).toHaveLength(2);
+    expect(
+      session.fixture.deliveries.filter((delivery) => delivery.customType === ASK_REMINDER_TYPE)
+    ).toHaveLength(1);
+  });
+
+  test("a run that starts while Dispatch answers the stop pays for no check", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-run-during-query");
+    const query = Promise.withResolvers<void>();
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_run_during_query", () => ({}), {
+      holdStopQuery: () => query.promise,
+    });
+
+    await session.userTurn();
+    const stopped = session.stop();
+    await session.runStart();
+    query.resolve();
+    await stopped;
+    // The conversation a check would read is already past this settle: no model call, and the
+    // check the period owes waits for the newer run's settle.
+    expect(session.asked).toEqual([]);
+    expect(session.fixture.deliveries).toEqual([]);
+
+    await session.stop();
+    expect(session.asked).toHaveLength(1);
+  });
+
+  test("a check this extension aborts is not logged as a failure", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-abort-quiet");
+    const warnings: { readonly message: string; readonly context?: unknown }[] = [];
+    const stopSink = logger.registerLogSink((entry) => {
+      if (entry.level === "warn") warnings.push({ message: entry.message, context: entry.context });
+    });
+    try {
+      const started = Promise.withResolvers<void>();
+      let calls = 0;
+      const session = await bootAskNudge(envoyExtension, "ses_nudge_abort_quiet", () => ({}), {
+        selfCheck: ({ signal }) => {
+          calls += 1;
+          if (calls > 1) return Promise.reject(new Error("provider unavailable"));
+          // A host that honours the signal rejects with its reason, as the pin's does.
+          const pending = Promise.withResolvers<{ readonly replyText: string }>();
+          signal?.addEventListener("abort", () => pending.reject(signal.reason));
+          started.resolve();
+          return pending.promise;
+        },
+      });
+
+      await session.userTurn();
+      const stopped = session.stop();
+      await started.promise;
+      // The user typing supersedes the check: an ordinary event, not a failure to report.
+      await session.userTurn("actually, do this instead");
+      await stopped;
+      expect(warnings).toEqual([]);
+
+      // So the one warning a session gets is still there for the failure that matters.
+      await session.stop();
+      expect(warnings).toEqual([
+        {
+          message: expect.stringContaining("self-check failed"),
+          context: {
+            sessionID: "ses_nudge_abort_quiet",
+            error: expect.stringContaining("provider unavailable"),
+          },
+        },
+      ]);
+    } finally {
+      stopSink();
+    }
   });
 
   test("stays silent at a stop that leaves an ask open", async () => {
