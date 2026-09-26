@@ -3,6 +3,7 @@ package secrets
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -35,6 +36,25 @@ func TestAWSReadReturnsSecretStringOnSuccess(t *testing.T) {
 	}
 	if v != "shh" {
 		t.Fatalf("expected %q, got %q", "shh", v)
+	}
+}
+
+func TestAWSReadWrapsGenericErrorInsteadOfMappingToErrNotFound(t *testing.T) {
+	boom := errors.New("boom")
+	r := AWS{Client: stubSMAPI{err: boom}}
+	source := "arn:aws:secretsmanager:us-east-1:1:secret:present"
+	_, err := r.Read(context.Background(), source)
+	if errors.Is(err, ErrNotFound) {
+		t.Fatalf("a generic error must not be mapped to ErrNotFound, got %v", err)
+	}
+	if !errors.Is(err, boom) {
+		t.Fatalf("expected the generic error to be wrapped, got %v", err)
+	}
+	if !strings.Contains(err.Error(), source) {
+		t.Fatalf("expected the error to name the source %q, got %q", source, err.Error())
+	}
+	if strings.Contains(err.Error(), "shh") {
+		t.Fatalf("error message must not contain a secret value, got %q", err.Error())
 	}
 }
 
