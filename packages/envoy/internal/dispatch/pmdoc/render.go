@@ -79,11 +79,12 @@ func render(doc *Node) (*renderer, error) {
 	if r.err != nil {
 		return nil, r.err
 	}
-	// A rule opening the document is written `---`, which the front-matter reader takes as an
-	// opener when any later line is also `---` - a second rule, a code line - and reads everything
-	// up to that line as front matter. It is written `***` there, the same length, and `---`
-	// everywhere else, as it has always been written.
-	if doc.Children[0].Type == "hr" && parseFrontmatterBlock(lineEnds(r.b.Bytes()), r.b.Bytes()) != nil {
+	// A rule opening the document is written `***`, the same length as the `---` it takes
+	// everywhere else. A `---` there opens front matter: a later line that is just `---` - a
+	// second rule, a code line - closes it, and with no such line the browser editor's parser,
+	// having tried the front matter to the document's end, reads no list, quote or footnote
+	// definition in the rest.
+	if doc.Children[0].Type == "hr" {
 		copy(r.b.Bytes(), "***")
 	}
 	return r, nil

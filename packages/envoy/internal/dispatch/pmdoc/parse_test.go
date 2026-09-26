@@ -90,9 +90,12 @@ func TestParsePreservesInlineHTMLAtom(t *testing.T) {
 }
 
 // A document opening with `---` and no closing line is ordinary markdown, so its first line is
-// a thematic break. Goldmark's front-matter extension instead consumes an unclosed opener to the
-// end of the input, which lost every block after it: an `insert` of "---\n\nTwo." wrote nothing
-// and reported itself unchanged.
+// a thematic break and the text after it a paragraph, as the browser editor's parser reads it.
+// Goldmark's front-matter extension instead consumed an unclosed opener to the end of the input,
+// which lost every block after it: an `insert` of "---\n\nTwo." wrote nothing and reported
+// itself unchanged. (That parser, having tried the front matter to the end, then reads no list,
+// quote or footnote definition in the rest; the renderer never writes such a document, since a
+// rule opening one is written `***`.)
 func TestParseUnclosedFrontmatterOpenerIsAThematicBreak(t *testing.T) {
 	for _, test := range []struct {
 		markdown string
@@ -101,6 +104,8 @@ func TestParseUnclosedFrontmatterOpenerIsAThematicBreak(t *testing.T) {
 		{markdown: "---", kinds: []string{"hr"}},
 		{markdown: "---\n\nTwo.", kinds: []string{"hr", "paragraph"}},
 		{markdown: "---\ntitle: x\n\nBody.\n", kinds: []string{"hr", "paragraph", "paragraph"}},
+		{markdown: "---\ntext\n", kinds: []string{"hr", "paragraph"}},
+		{markdown: "---\ntext\n\nMore.\n", kinds: []string{"hr", "paragraph", "paragraph"}},
 	} {
 		t.Run(test.markdown, func(t *testing.T) {
 			tree, err := Parse(test.markdown)

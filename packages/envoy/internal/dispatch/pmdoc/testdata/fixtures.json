@@ -1798,6 +1798,119 @@
     "rendered_by_milkdown": "A footnote reference.[^fixture]\n\n[^fixture]: Footnote definition.\n"
   },
   {
+    "name": "frontmatter-empty",
+    "markdown": "---\n\n---\n\nBody.\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "frontmatter",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "---\n---"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Body."
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AQgBAAcBC3Byb3NlbWlycm9yAwtmcm9udG1hdHRlcgcAAQAGBAABAQctLS0KLS0tKAABAAdibG9ja0lkAXcIYi0wMDAwMDGHAQADCXBhcmFncmFwaAcAAQoGBAABCwVCb2R5LigAAQoHYmxvY2tJZAF3CGItMDAwMDAyAA==",
+    "rendered_by_milkdown": "---\n---\n\nBody.\n"
+  },
+  {
+    "name": "frontmatter-fence-whitespace",
+    "markdown": "--- \ntitle: x\n\nnote: y\n---  \n\nBody.\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "frontmatter",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "---\ntitle: x\n\nnote: y\n---"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Body."
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AQgBAAcBC3Byb3NlbWlycm9yAwtmcm9udG1hdHRlcgcAAQAGBAABARktLS0KdGl0bGU6IHgKCm5vdGU6IHkKLS0tKAABAAdibG9ja0lkAXcIYi0wMDAwMDGHAQADCXBhcmFncmFwaAcAARwGBAABHQVCb2R5LigAARwHYmxvY2tJZAF3CGItMDAwMDAyAA==",
+    "rendered_by_milkdown": "---\ntitle: x\n\nnote: y\n---\n\nBody.\n"
+  },
+  {
+    "name": "frontmatter-long-fence",
+    "markdown": "----\ntitle: x\n----\n\nBody.\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "hr",
+          "attrs": {
+            "blockId": "b-000001"
+          }
+        },
+        {
+          "type": "heading",
+          "attrs": {
+            "id": "",
+            "level": 2,
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "title: x"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000003"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Body."
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AQwBAAcBC3Byb3NlbWlycm9yAwJocigAAQAHYmxvY2tJZAF3CGItMDAwMDAxhwEAAwdoZWFkaW5nBwABAgYEAAEDCHRpdGxlOiB4KAABAgJpZAF3ACgAAQIFbGV2ZWwBfQIoAAECB2Jsb2NrSWQBdwhiLTAwMDAwMocBAgMJcGFyYWdyYXBoBwABDwYEAAEQBUJvZHkuKAABDwdibG9ja0lkAXcIYi0wMDAwMDMA",
+    "rendered_by_milkdown": "***\n\n## title: x\n\nBody.\n"
+  },
+  {
     "name": "frontmatter",
     "markdown": "---\ntitle: Fixture\ntags:\n  - pmdoc\n---\n\nFrontmatter paragraph.\n",
     "pm_json": {

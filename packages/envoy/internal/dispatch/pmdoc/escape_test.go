@@ -90,19 +90,23 @@ func TestRenderKeepsTheBlocksAfterALineThatWouldOpenAFenceOrCloseATypedBlock(t *
 	}
 }
 
-// A rule that opens the document is written `---`, which the front-matter reader takes as an
-// opener when any later line is also `---`: a second rule or a code line that is just `---`
-// closes it, and everything up to there - the rule, the text, a fence - is read as front matter.
-// A document with no such line keeps the `---` it has always been written with.
-func TestRenderKeepsALeadingRuleFromReadingAsFrontMatter(t *testing.T) {
+// A rule that opens the document is written `***`. Written `---`, it opens front matter: a later
+// line that is just `---` - a second rule, a code line - closes it and everything up to there is
+// read as front matter, and with no such line the browser editor's parser, having tried the
+// front matter to the document's end, reads no list, quote or footnote definition in the rest.
+func TestRenderWritesALeadingRuleAsAsterisks(t *testing.T) {
 	text := func(value string) *Node { return &Node{Type: "text", Text: value} }
 	paragraph := func(value string) *Node { return &Node{Type: "paragraph", Children: []*Node{text(value)}} }
 	rule := func() *Node { return &Node{Type: "hr"} }
 	code := &Node{Type: "code_block", Attrs: Attrs{"language": ""}, Children: []*Node{text("---")}}
+	list := &Node{Type: "bullet_list", Children: []*Node{{Type: "list_item", Children: []*Node{paragraph("a")}}}}
+	quote := &Node{Type: "blockquote", Children: []*Node{paragraph("q")}}
 	for name, doc := range map[string]*Node{
 		"a second rule":     {Type: "doc", Children: []*Node{rule(), paragraph("x"), rule(), paragraph("y")}},
 		"a code line ---":   {Type: "doc", Children: []*Node{rule(), paragraph("x"), code}},
 		"no later --- line": {Type: "doc", Children: []*Node{rule(), paragraph("x")}},
+		"a list":            {Type: "doc", Children: []*Node{rule(), list}},
+		"a quote":           {Type: "doc", Children: []*Node{rule(), quote}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			markdown := mustRender(t, doc)
@@ -121,10 +125,10 @@ func TestRenderKeepsALeadingRuleFromReadingAsFrontMatter(t *testing.T) {
 			if again := mustRender(t, back); again != markdown {
 				t.Fatalf("Render(Parse(%q)) = %q", markdown, again)
 			}
+			if !strings.HasPrefix(markdown, "***\n") {
+				t.Fatalf("Render() = %q, want the leading rule written ***", markdown)
+			}
 		})
-	}
-	if got := mustRender(t, &Node{Type: "doc", Children: []*Node{rule(), paragraph("x")}}); got != "---\n\nx\n" {
-		t.Fatalf("a leading rule with no later --- line = %q, want main's %q", got, "---\n\nx\n")
 	}
 }
 

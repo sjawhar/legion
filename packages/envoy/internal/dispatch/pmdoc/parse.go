@@ -14,56 +14,35 @@ import (
 	"github.com/yuin/goldmark/parser"
 	gmtext "github.com/yuin/goldmark/text"
 	"github.com/yuin/goldmark/util"
-	"go.abhg.dev/goldmark/frontmatter"
 )
 
 var anchorAttribute = regexp.MustCompile(`([a-zA-Z0-9_-]+)="([^"]*)"`)
 
 // markdownReader is the one goldmark configuration Dispatch reads markdown with. Its only way in
-// is parseLined, which hands the block parsers the source as written (sourceKey).
+// is parseLined, which hands the block parsers the source as written (sourceKey). Front matter is
+// read apart from it (parseFrontmatterBlock), so an unclosed opener is ordinary markdown.
 type markdownReader struct {
 	md goldmark.Markdown
 }
 
-// newMarkdownReader builds a markdownReader. Its two uses differ only in the front-matter
-// extension: a document with a closed front-matter block is read with it, and everything else
-// without it - a document whose leading `---` opens nothing, which the extension would consume to
-// the end of the input with every block after it, and the renderer asking how a line it is about
-// to write would be read.
-func newMarkdownReader(readFrontmatter bool) markdownReader {
-	extensions := []goldmark.Extender{extension.Linkify, lazyAwareTable{}, extension.Strikethrough, extension.TaskList, extension.Footnote}
-	if readFrontmatter {
-		extensions = append(extensions, &frontmatter.Extender{Formats: []frontmatter.Format{frontmatter.YAML}})
-	}
-	return markdownReader{md: goldmark.New(
-		goldmark.WithExtensions(extensions...),
-		goldmark.WithParserOptions(
-			parser.WithBlockParsers(
-				util.Prioritized(&typedDirectiveParser{}, 950),
-				util.Prioritized(&unsupportedDirectiveParser{}, 900),
-				util.Prioritized(lineRecordingParagraph{parser.NewParagraphParser()}, 999),
-			),
+var blockReader = markdownReader{md: goldmark.New(
+	goldmark.WithExtensions(extension.Linkify, lazyAwareTable{}, extension.Strikethrough, extension.TaskList, extension.Footnote),
+	goldmark.WithParserOptions(
+		parser.WithBlockParsers(
+			util.Prioritized(&typedDirectiveParser{}, 950),
+			util.Prioritized(&unsupportedDirectiveParser{}, 900),
+			util.Prioritized(lineRecordingParagraph{parser.NewParagraphParser()}, 999),
 		),
-	)}
-}
-
-var (
-	markdownParser        = newMarkdownReader(true)
-	unfrontmatteredParser = newMarkdownReader(false)
-)
+	),
+)}
 
 // Parse converts markdown into the closed Proof ProseMirror tree.
 func Parse(markdown string) (*Node, error) {
 	source := []byte(markdown)
 	lined := lineEnds(source)
-	front := parseFrontmatterBlock(lined, source)
-	// A document with no closed front-matter block is parsed without the extension: it has
-	// nothing for the extension to read, and an unclosed opener is text it would swallow.
-	md := markdownParser
-	if front == nil {
-		md = unfrontmatteredParser
-	}
-	root := md.parseLined(lined, source)
+	front, rest := parseFrontmatterBlock(lined)
+	source, lined = source[rest:], lined[rest:]
+	root := blockReader.parseLined(lined, source)
 	doc, err := parseBlock(root, source, footnoteLabels(root))
 	if err != nil {
 		return nil, err
@@ -498,41 +477,35 @@ func endsInLoneCarriageReturn(source []byte, stop int) bool {
 	return stop < len(source) && loneCarriageReturn(source, stop)
 }
 
-// parseFrontmatterBlock restores the delimited text the Goldmark extension
-// consumes before its completed AST reaches us. It finds the lines in lined (lineEnds) and takes
-// the text from source.
-func parseFrontmatterBlock(lined, source []byte) *Node {
-	openEnd := bytes.IndexByte(lined, '\n')
-	if openEnd < 0 || !frontmatterDelimiter(bytes.TrimSuffix(lined[:openEnd], []byte("\r"))) {
-		return nil
-	}
-	delimiter := bytes.TrimSuffix(lined[:openEnd], []byte("\r"))
-	for start := openEnd + 1; start < len(lined); {
+// parseFrontmatterBlock reads the front matter a document opens with in lined (lineEnds), as the
+// browser editor's parser does: a first line that is `---` and any spaces or tabs opens it, and
+// the first later line that is the same closes it. The node's text is the lines between, joined
+// with line feeds between plain `---` fences, as that parser stores it. rest is where the
+// document after the closing line begins; a document with no closed front matter has none, and
+// rest is 0.
+func parseFrontmatterBlock(lined []byte) (front *Node, rest int) {
+	var content []string
+	for start, index := 0, 0; start < len(lined); index++ {
 		end := len(lined)
 		if next := bytes.IndexByte(lined[start:], '\n'); next >= 0 {
-			end = start + next
+			end = start + next + 1
 		}
-		if bytes.Equal(bytes.TrimSuffix(lined[start:end], []byte("\r")), delimiter) {
-			return &Node{Type: "frontmatter", Children: []*Node{{Type: "text", Text: string(source[:end])}}}
+		line := strings.TrimRight(string(bytes.TrimSuffix(bytes.TrimSuffix(lined[start:end], []byte("\n")), []byte("\r"))), " \t")
+		switch {
+		case index == 0 && line != "---":
+			return nil, 0
+		case index > 0 && line == "---":
+			text := "---\n---"
+			if joined := strings.Join(content, "\n"); joined != "" {
+				text = "---\n" + joined + "\n---"
+			}
+			return &Node{Type: "frontmatter", Children: []*Node{{Type: "text", Text: text}}}, end
+		case index > 0:
+			content = append(content, string(bytes.TrimSuffix(bytes.TrimSuffix(lined[start:end], []byte("\n")), []byte("\r"))))
 		}
-		if end == len(lined) {
-			break
-		}
-		start = end + 1
+		start = end
 	}
-	return nil
-}
-
-func frontmatterDelimiter(line []byte) bool {
-	if len(line) < 3 {
-		return false
-	}
-	for _, char := range line {
-		if char != '-' {
-			return false
-		}
-	}
-	return true
+	return nil, 0
 }
 
 func footnoteLabels(root ast.Node) map[int]string {

@@ -496,6 +496,13 @@ those line by line at line feeds), and a lazy continuation line - one that conti
 a list item, a quote or a footnote definition without the container's prefix, after a line feed or a
 lone carriage return - is never a table's header or delimiter row (`lazyTableRows`), as in GFM.
 
+Front matter is read as the browser editor's parser reads it (`pmdoc.parseFrontmatterBlock`): a
+first line that is `---`, with any spaces or tabs after it, opens it, the first later line that is
+the same closes it, and its text is stored between plain `---` fences with line feeds between its
+lines. A `---` opener nothing closes is a thematic break. That parser, having tried such an opener
+as front matter to the document's end, reads no list, quote or footnote definition in the rest, so
+the renderer writes a rule that opens a document as `***`.
+
 A typed block renders its `blockId`, defaulted attributes, and every explicitly set optional
 attribute. Parsing mints an omitted id, while live document reads and writes validate each node
 against its schema content rule. Schema changes are additive: add a type, add a defaulted
