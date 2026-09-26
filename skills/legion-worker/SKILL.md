@@ -621,7 +621,10 @@ do:
   has left your phase; report to the architect rather than completing again.
 - `HANDOFF_NO_RUN` — names neither: it says this claim has taken no task, so the daemon cannot
   tell which run you are reporting. Your pane is completing outside any assignment. Say so to the
-  architect; do not re-run the phase.
+  architect; do not re-run the phase. The same answer comes when your turn started before your task
+  reached you: a notice or a message started it, and the task, refused while that turn ran, is sent
+  when the turn ends. Once it arrives in this session, call `handoff_complete` again for the work
+  you already committed. Do not redo that work or write a second handoff.
 - `HANDOFF_ALREADY_RECORDED` — names your role, the phase, the review round and the commit. This
   exact call was received before, and its first answer stands — accepted, or one of the refusals
   above. Sending it again changes nothing; if you did not see that first answer, tell the
