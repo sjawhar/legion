@@ -1037,6 +1037,10 @@ where an agent runs:
 | `claim_session_text ISSUE ROLE` | prints the claim's session file, and fails when there is none |
 | `workspace_jj ISSUE ARGS…` | runs `jj ARGS…` in the issue's workspace |
 
+`new_issue TITLE [PARENT]` creates each issue a proof drives. A root carries the Dispatch label
+`legion`, which hands it to the Go daemon: the daemon admits no root without it. A child carries
+none, since it runs under its root's tree.
+
 Every wait for an issue to reach one phase is `wait_for_phase ISSUE PHASE [SECONDS]`: 600 s, unless
 the phase's worker runs a whole loop (a correction round, the retro) and the caller passes its own
 bound. `round_correction_pushed ROUND` accepts the round's line only as an addition in
