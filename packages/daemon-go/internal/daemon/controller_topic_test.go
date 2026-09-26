@@ -19,6 +19,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 // A planner whose launches run out holds its issue: the architect's issue topic takes the held and
@@ -62,7 +63,7 @@ func TestAHeldNoticeReachesTheControllerTopicAndItsRetriesNeverResendTheArchitec
 		t.Fatalf("spawn the planner = %d %s, want its one launch refused", status, body)
 	}
 
-	eventually(t, "every notice row finished and the controller's held notice taken", func() bool {
+	testwait.Eventually(t, "every notice row finished and the controller's held notice taken", func() bool {
 		var rows int
 		if err := pool.QueryRow(context.Background(), "select count(*) from outbox where issue = $1", issue).Scan(&rows); err != nil {
 			t.Fatalf("count the issue's outbox rows: %v", err)

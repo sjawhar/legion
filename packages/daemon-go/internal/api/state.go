@@ -20,6 +20,12 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
+// Unrecorded is what this route reads for an issue the workflow does not record, where an
+// operator's claim exists and an issue does not (LEGION-272). It is not a workflow phase: no
+// issue record holds it, the transition table never reaches it, and no role works it — so it
+// lives with the wire shape that carries it rather than in the domain's phases.
+const Unrecorded phase.Phase = "unrecorded"
+
 // State is the daemon's own facts, and nothing another system owns (spec: State and store).
 type State struct {
 	Daemon              DaemonInfo           `json:"daemon"`

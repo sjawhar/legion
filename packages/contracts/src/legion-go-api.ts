@@ -231,13 +231,15 @@ export const LegionGoErrorResponse = z.union([
 ]);
 
 /** `api.DeliveryView` — the claim's pending task; `deliveredAt` is the latest send's
- * acknowledgement and `confirmedAt` the turn it started, each absent until it happens. `phase` is
- * the issue phase the task was queued for, which is what says whether it is still the work to do;
- * a task of no phase — an operator's own, an architect's — carries none. */
+ * acknowledgement, and with it whether the agent may have read this task (a refusal clears it,
+ * since an agent that refused a prompt never read it), and `confirmedAt` the turn it started,
+ * each absent until it happens. `phase` is the issue phase the task was queued for, which is what
+ * says whether it is still the work to do; a task of no phase — an operator's own, an
+ * architect's — carries none. */
 const legionGoDeliveryView = z.strictObject({
   id: nonEmptyString,
   task: nonEmptyString,
-  phase: z.enum(LEGION_GO_PHASES).optional(),
+  phase: z.enum(LEGION_GO_WORKFLOW_PHASES).optional(),
   queuedAt: timestamp,
   deliveredAt: timestamp.optional(),
   confirmedAt: timestamp.optional(),

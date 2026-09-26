@@ -78,26 +78,19 @@ const (
 	skipAgentModels         = "LEGION_SKIP_AGENT_MODELS"
 )
 
-// export is the shell command handing the load probe each kind's names and, for a pod, the plugin
-// root ("$1") as the one extension root its discovery reads; empty when the check asks for
-// nothing. Names are the references' alphabet, so single quotes hold them.
-func (c promptCheck) export(pod bool) string {
+// assignments are the shell variable assignments handing the load probe each kind's names; none
+// when the check asks for nothing. Names are the references' alphabet, so single quotes hold them.
+func (c promptCheck) assignments() []string {
 	var assignments []string
 	for _, kind := range promptrefs.Kinds {
 		if len(c.names[kind]) > 0 {
 			assignments = append(assignments, kind.Variable()+"='"+strings.Join(slices.Sorted(maps.Keys(c.names[kind])), ",")+"'")
 		}
 	}
-	if len(assignments) == 0 {
-		return ""
-	}
 	if len(c.names[promptrefs.TaskAgents]) > 0 && c.skipAgentModels {
 		assignments = append(assignments, skipAgentModels+"=1")
 	}
-	if pod {
-		assignments = append(assignments, `LEGION_PROMPT_ROOT="$1"`)
-	}
-	return "export " + strings.Join(assignments, " ")
+	return assignments
 }
 
 // refusal judges the load probe's answers: nil when Oh My Pi found every name, else, for each kind
