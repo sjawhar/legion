@@ -454,41 +454,80 @@ func TestOutboxStartRelaunchesAFailedClaim(t *testing.T) {
 	}
 }
 
-// A claim whose launches failed keeps the task its start gave it. A re-admitted tree's promotion
-// starts such a claim with no task of its own (workflow.StartFor): the relaunch keeps the held
-// task, which goes once the agent is ready, and no second delivery is queued.
-func TestATasklessStartRelaunchesAFailedClaimWithTheTaskItHolds(t *testing.T) {
-	pool := isolatedOutboxPool(t)
-	records := record.NewStore()
-	ctx := context.Background()
-	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Testing, Generation: 1, Status: "testing"}
-	putOutboxIssue(t, pool, records, issue)
-	sup, runtime := newOutboxSupervisor(t, "legion", t.TempDir())
-	token, err := claim.NewToken("legion", issue.Key, claim.RoleTester)
-	if err != nil {
-		t.Fatal(err)
-	}
-	machine, _, err := sup.Create(ctx, supervise.Claim{Token: token, Project: "legion", Tree: issue.Tree, Issue: issue.Key, Role: claim.RoleTester, State: supervise.StateQueued}, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := machine.Handle(ctx, supervise.RequestDeliver{Claim: token, Task: "Test it.", ID: "outbox:40", Phase: phase.Testing, Generation: 1}); err != nil {
-		t.Fatalf("queue the tester's task: %v", err)
-	}
-	runtime.ScriptSpawn(fake.SpawnResult{Err: errors.New("pane launch failed")}, fake.SpawnResult{Err: errors.New("pane launch failed")})
-	_ = machine.Handle(ctx, supervise.RequestSpawn{Claim: token})
-	if got := machine.Claim(); got.State != supervise.StateFailed || got.Pending == nil || got.Pending.ID != "outbox:40" {
-		t.Fatalf("tester after its launches failed = %+v, want failed holding its task", got)
-	}
-	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets"}
-	row := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RoleTester, Generation: 1, Phase: phase.Testing}, time.Now())
-	row.ID = 92
+// A claim that holds its phase's task when a re-admitted tree's promotion starts it (its launches
+// failed, the tree's close retired it, or it never got past queued) is given that task once it is
+// ready. The promotion's start carries the phase's resume task, which is not delivered as well,
+// whichever of the start and the close's queued suspend runs first: one prompt, not two.
+func TestAResumeStartGivesAClaimHoldingThePhasesTaskThatTaskOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		hold func(t *testing.T, machine *supervise.Machine, token claim.Token, rt *fake.Runtime)
+	}{
+		{name: "failed", hold: failTheClaim},
+		{name: "retired by the tree's close", hold: func(t *testing.T, machine *supervise.Machine, token claim.Token, rt *fake.Runtime) {
+			failTheClaim(t, machine, token, rt)
+			if err := machine.Handle(context.Background(), supervise.RequestTreeClose{Claim: token}); err != nil {
+				t.Fatalf("close the failed claim's tree: %v", err)
+			}
+		}},
+		{name: "booting", hold: func(*testing.T, *supervise.Machine, claim.Token, *fake.Runtime) {}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			records := record.NewStore()
+			ctx := context.Background()
+			issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Testing, Generation: 1, Status: "testing"}
+			putOutboxIssue(t, pool, records, issue)
+			sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
+			token, err := claim.NewToken("legion", issue.Key, claim.RoleTester)
+			if err != nil {
+				t.Fatal(err)
+			}
+			machine, _, err := sup.Create(ctx, supervise.Claim{Token: token, Project: "legion", Tree: issue.Tree, Issue: issue.Key, Role: claim.RoleTester, State: supervise.StateQueued}, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := machine.Handle(ctx, supervise.RequestDeliver{Claim: token, Task: "Test it.", ID: "outbox:40", Phase: phase.Testing, Generation: 1}); err != nil {
+				t.Fatalf("queue the tester's task: %v", err)
+			}
+			tc.hold(t, machine, token, rt)
+			if got := machine.Claim().Pending; got == nil || got.ID != "outbox:40" {
+				t.Fatalf("tester's pending task = %+v, want it holding outbox:40", got)
+			}
+			runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets",
+				provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
+					return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-208"}, nil
+				},
+			}
+			suspend := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "suspend", Tree: issue.Tree, Role: claim.RoleTester, Generation: 1}, time.Now())
+			suspend.ID = 60
+			start := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RoleTester, Generation: 1, Phase: phase.Testing,
+				Task: "Carry on testing.", ResumeTask: true}, time.Now())
+			start.ID = 92
 
-	if err := runner.execute(ctx, row); err != nil {
-		t.Fatalf("taskless start of the failed claim: %v", err)
+			// The close's suspend may run first: it finishes without acting on a claim that runs
+			// nothing, and a booting claim refuses it until its agent registers.
+			_ = runner.execute(ctx, suspend)
+			if err := runner.execute(ctx, start); err != nil {
+				t.Fatalf("resume start = %v, want it finished with the held task left to go", err)
+			}
+			if err := runner.execute(ctx, suspend); err != nil {
+				t.Fatalf("the close's suspend after the start = %v, want it finished as superseded", err)
+			}
+			if got := machine.Claim(); got.State != supervise.StateLaunching || got.Pending == nil || got.Pending.ID != "outbox:40" || got.Pending.Task != "Test it." {
+				t.Fatalf("tester after the resume start = %s holding %+v, want launching holding outbox:40 alone", got.State, got.Pending)
+			}
+		})
 	}
-	if got := machine.Claim(); got.State != supervise.StateLaunching || got.Pending == nil || got.Pending.ID != "outbox:40" || got.Pending.Task != "Test it." {
-		t.Fatalf("relaunched tester = %+v, want launching with the task it held pending", got)
+}
+
+// failTheClaim fails a queued claim's launches until it is failed.
+func failTheClaim(t *testing.T, machine *supervise.Machine, token claim.Token, rt *fake.Runtime) {
+	t.Helper()
+	rt.ScriptSpawn(fake.SpawnResult{Err: errors.New("pane launch failed")}, fake.SpawnResult{Err: errors.New("pane launch failed")})
+	_ = machine.Handle(context.Background(), supervise.RequestSpawn{Claim: token})
+	if got := machine.Claim().State; got != supervise.StateFailed {
+		t.Fatalf("tester after its launches failed = %s, want failed", got)
 	}
 }
 

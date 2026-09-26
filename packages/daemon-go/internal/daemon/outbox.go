@@ -424,6 +424,15 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 				return fmt.Errorf("relaunch retired claim %s: %w", token, err)
 			}
 		}
+		// A resume task is the phase's own task again. A claim that holds a task for the same
+		// generation and phase once relaunched is given that one when it is ready, so the resume
+		// task is not delivered: it would be the same task twice. Read here, after the relaunch,
+		// the pending delivery is the one that goes (a relaunch retires a task whose turn is over).
+		if pending := machine.Claim().Pending; payload.ResumeTask && pending != nil && pending.Generation == payload.Generation && pending.Phase == payload.Phase {
+			r.log.Info("outbox start's resume task is already held by the claim; not delivered again", "row", row.ID, "issue", issue.Key,
+				"role", payload.Role, "held", pending.ID)
+			return nil
+		}
 		if payload.Task != "" {
 			// The row's phase, already held to the issue's above, travels with the delivery: it is
 			// what says the task is still the work to do once the delivery has outlived its id.

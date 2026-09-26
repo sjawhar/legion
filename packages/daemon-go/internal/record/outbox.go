@@ -111,6 +111,10 @@ type SuperviseRequest struct {
 	// suspends a linger or a child's leave queues, which stop every claim whatever phase its issue
 	// holds, and for every other operation.
 	Leaves phase.Phase `json:"leaves,omitempty"`
+	// ResumeTask marks Task as the phase's resume task (workflow.ResumePhaseTask), the one a
+	// re-admitted tree's promotion gives a mid-phase child: a claim that already holds a task for
+	// the same generation and phase is given it once it is ready, so the start delivers none.
+	ResumeTask bool `json:"resumeTask,omitempty"`
 }
 
 func (SuperviseRequest) OutboxKind() OutboxKind { return OutboxKindSupervise }
@@ -272,6 +276,9 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		}
 		if value.Op == "start" && value.Role == "" {
 			return fmt.Errorf("supervise start requires role")
+		}
+		if value.ResumeTask && (value.Op != "start" || value.Task == "" || value.Phase == "") {
+			return fmt.Errorf("a supervise resume task requires a start with a task and a phase")
 		}
 	case MergeQueuePublish:
 		if value.Role == "" {

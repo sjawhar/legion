@@ -67,25 +67,24 @@ func StopActs(id int64, stop record.SuperviseRequest, current phase.Phase, lastS
 	}
 }
 
-// StartFor is how a re-admitted tree's promotion starts the role of a mid-phase child from run, the
-// role's queued rows and claim for generation, with the child in phase current. start is false
-// when the role is already started for this run: the newest of its operations that will still act
-// is a start. A stop that still acts (StopActs) undoes any older start, which may run first, so
-// past one only a newer queued start for current counts. With none, a queued start for current
+// StartFor is whether a re-admitted tree's promotion starts the role of a mid-phase child, from
+// run, the role's queued rows and claim for generation, with the child in phase current. It does
+// not when the role is already started for this run: the newest of its operations that will still
+// act is a start. A stop that still acts (StopActs) undoes any older start, which may run first,
+// so past one only a newer queued start for current counts. With none, a queued start for current
 // counts, and so does a claim that may have a process: a live one, or one whose launch is
-// uncertain holding current's task for generation (the task its start gave it). No start acts
-// while the tree lingers, and the tree's close queues a suspend of every claim, so such a claim was
-// started since the tree ran again.
-//
-// withTask is whether the start hands the role current's task. A claim that runs nothing (failed,
-// retired, suspended, queued) but still holds that task, undelivered or unconfirmed, delivers it
-// once its relaunch is ready, so its start carries none: a second task would be the same one
-// twice. With a stop still to act the start carries the task all the same, since a suspend that
-// runs first retires the one the claim holds.
-func StartFor(run record.RoleRun, generation uint64, current phase.Phase) (start, withTask bool) {
+// uncertain holding current's task for generation undelivered or unconfirmed (the task its start
+// gave it). No start acts while the tree lingers, and the tree's close queues a suspend of every
+// claim, so such a claim was started since the tree ran again. A failed, retired, suspended or
+// queued claim runs nothing, so promotion starts it whatever task it holds. Whether the start's
+// resume task is delivered is the outbox executor's decision when the start runs: not to a claim
+// that holds a task for the same generation and phase by then (record.SuperviseRequest's
+// ResumeTask).
+func StartFor(run record.RoleRun, generation uint64, current phase.Phase) bool {
+	held := run.Claim
 	var lastStart int64
-	if run.Claim != nil {
-		lastStart = run.Claim.LastStartRow
+	if held != nil {
+		lastStart = held.LastStartRow
 	}
 	var stop int64
 	for _, queued := range run.Queued {
@@ -95,22 +94,14 @@ func StartFor(run record.RoleRun, generation uint64, current phase.Phase) (start
 	}
 	for _, queued := range run.Queued {
 		if queued.Request.Op == "start" && queued.Request.Phase == current && queued.ID > stop {
-			return false, false
+			return false
 		}
 	}
-	if stop != 0 || run.Claim == nil {
-		return true, true
+	if stop != 0 || held == nil {
+		return true
 	}
-	held := run.Claim
 	holds := held.Pending && held.PendingGeneration == generation && held.PendingPhase == current
-	switch {
-	case slices.Contains(supervise.LiveStates(), held.State), holds && held.State == supervise.StateLaunchUncertain:
-		return false, false
-	case holds:
-		return true, false
-	default:
-		return true, true
-	}
+	return !slices.Contains(supervise.LiveStates(), held.State) && !(holds && held.State == supervise.StateLaunchUncertain)
 }
 
 func (e *Engine) enqueue(ctx context.Context, tx pgx.Tx, issue string, payload record.OutboxPayload) error {

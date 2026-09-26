@@ -227,7 +227,7 @@ func TestReadmissionStartsTheTreesMidPhaseChildren(t *testing.T) {
 		{kind: record.OutboxKindDispatchStatus, issue: root.Key, payload: record.StatusWrite{Status: "in_progress", ObservedStatus: "todo"}},
 		{kind: record.OutboxKindSupervise, issue: root.Key, payload: record.SuperviseRequest{Op: "start", Tree: root.Key, Role: claim.RoleArchitect, Generation: 2}},
 		{kind: record.OutboxKindSupervise, issue: "LEGION-209", payload: record.SuperviseRequest{Op: "start", Tree: root.Key, Role: claim.RoleTester, Generation: 1, Phase: phase.Testing,
-			Task: "Continue mid-phase child. Issue: LEGION-209. Phase: testing. Resume the existing phase work."}},
+			Task: "Continue mid-phase child. Issue: LEGION-209. Phase: testing. Resume the existing phase work.", ResumeTask: true}},
 	})
 }
 
@@ -285,6 +285,8 @@ func TestPromotionStartsAChildUnlessItsWorkerIsStartedForTheRun(t *testing.T) {
 		claim   func(state string, serving uint64, lastStart int64)
 		// pending gives the claim a task it holds undelivered or unconfirmed.
 		pending func(generation uint64, p phase.Phase)
+		// confirmedPending gives the claim a task whose turn already started.
+		confirmedPending func(generation uint64, p phase.Phase)
 		// otherClaim records a claim on the same issue and role under another daemon's project token.
 		otherClaim func(state string, lastStart int64)
 		// suspendLeaving queues a transition's suspend, which ends phase leaves.
@@ -294,8 +296,6 @@ func TestPromotionStartsAChildUnlessItsWorkerIsStartedForTheRun(t *testing.T) {
 		name  string
 		setup func(s seed)
 		want  int
-		// taskless is a start that hands no task: the claim delivers the one it holds once relaunched.
-		taskless bool
 	}{
 		{name: "no worker", setup: func(seed) {}, want: 1},
 		{name: "the window's start still queued", setup: func(s seed) { s.enqueue("start", 1) }, want: 0},
@@ -332,6 +332,10 @@ func TestPromotionStartsAChildUnlessItsWorkerIsStartedForTheRun(t *testing.T) {
 			s.claim("launch_uncertain", 1, 7)
 			s.pending(1, phase.Testing)
 		}, want: 0},
+		{name: "a launch-uncertain claim holding the phase's task confirmed", setup: func(s seed) {
+			s.claim("launch_uncertain", 1, 7)
+			s.confirmedPending(1, phase.Testing)
+		}, want: 1},
 		{name: "a launch-uncertain claim holding an earlier phase's task", setup: func(s seed) {
 			s.claim("launch_uncertain", 1, 7)
 			s.pending(1, phase.Implementing)
@@ -344,19 +348,19 @@ func TestPromotionStartsAChildUnlessItsWorkerIsStartedForTheRun(t *testing.T) {
 		{name: "a failed claim holding the phase's task", setup: func(s seed) {
 			s.claim("failed", 1, 7)
 			s.pending(1, phase.Testing)
-		}, want: 1, taskless: true},
+		}, want: 1},
 		{name: "a retired claim holding the phase's task", setup: func(s seed) {
 			s.claim("retired", 1, 7)
 			s.pending(1, phase.Testing)
-		}, want: 1, taskless: true},
+		}, want: 1},
 		{name: "a suspended claim holding the phase's task", setup: func(s seed) {
 			s.claim("suspended", 1, 7)
 			s.pending(1, phase.Testing)
-		}, want: 1, taskless: true},
+		}, want: 1},
 		{name: "a queued claim holding the phase's task", setup: func(s seed) {
 			s.claim("queued", 1, 7)
 			s.pending(1, phase.Testing)
-		}, want: 1, taskless: true},
+		}, want: 1},
 		{name: "another daemon's live claim on the same issue and role", setup: func(s seed) { s.otherClaim("working", 0) }, want: 1},
 		{name: "another daemon's claim beside this daemon's, with the close's suspend queued", setup: func(s seed) {
 			s.claim("working", 1, 0)
@@ -413,6 +417,13 @@ func TestPromotionStartsAChildUnlessItsWorkerIsStartedForTheRun(t *testing.T) {
 					t.Fatalf("record the %s claim %s: %v", state, token, err)
 				}
 			}
+			putPending := func(generation uint64, p phase.Phase, confirmedAt *time.Time) {
+				t.Helper()
+				if _, err := pool.Exec(context.Background(), `insert into pending_task_deliveries (claim_token, delivery_id, task, queued_at, generation, phase, confirmed_at)
+					values ($1, 'outbox:7', 'Carry on.', now(), $2, $3, $4)`, string(token), int64(generation), string(p), confirmedAt); err != nil {
+					t.Fatalf("record the pending task: %v", err)
+				}
+			}
 			tc.setup(seed{
 				enqueue: func(op record.SuperviseOp, generation uint64) int64 {
 					payload := record.SuperviseRequest{Op: op, Tree: root.Key, Role: claim.RoleTester, Generation: generation}
@@ -425,11 +436,11 @@ func TestPromotionStartsAChildUnlessItsWorkerIsStartedForTheRun(t *testing.T) {
 					putClaim(token, project, state, serving, lastStart)
 				},
 				pending: func(generation uint64, p phase.Phase) {
-					t.Helper()
-					if _, err := pool.Exec(context.Background(), `insert into pending_task_deliveries (claim_token, delivery_id, task, queued_at, generation, phase)
-						values ($1, 'outbox:7', 'Carry on.', now(), $2, $3)`, string(token), int64(generation), string(p)); err != nil {
-						t.Fatalf("record the pending task: %v", err)
-					}
+					putPending(generation, p, nil)
+				},
+				confirmedPending: func(generation uint64, p phase.Phase) {
+					confirmed := fixedNow
+					putPending(generation, p, &confirmed)
 				},
 				otherClaim: func(state string, lastStart int64) {
 					other, err := claim.NewToken("otherlegion", child.Key, claim.RoleTester)
@@ -442,28 +453,25 @@ func TestPromotionStartsAChildUnlessItsWorkerIsStartedForTheRun(t *testing.T) {
 					enqueueRequest(record.SuperviseRequest{Op: "suspend", Tree: root.Key, Role: claim.RoleTester, Generation: child.Generation, Leaves: leaves})
 				},
 			})
-			testerStarts := func() (starts, withTask int) {
+			// resumes counts the starts that carry the phase's task marked as its resume task.
+			testerStarts := func() (starts, resumes int) {
 				t.Helper()
-				if err := pool.QueryRow(context.Background(), `select count(*), count(*) filter (where coalesce(payload->>'task', '') <> '') from outbox
+				if err := pool.QueryRow(context.Background(), `select count(*), count(*) filter (where coalesce(payload->>'task', '') <> '' and payload->>'resumeTask' = 'true') from outbox
 					where issue = 'LEGION-209' and kind = 'supervise' and payload->>'op' = 'start' and payload->>'role' = 'tester' and payload->>'phase' = 'testing'`).
-					Scan(&starts, &withTask); err != nil {
+					Scan(&starts, &resumes); err != nil {
 					t.Fatalf("count the child's starts: %v", err)
 				}
-				return starts, withTask
+				return starts, resumes
 			}
-			before, beforeWithTask := testerStarts()
+			before, beforeResumes := testerStarts()
 
 			apply(t, pool, admission, "free-the-slot", intake.DispatchIssue{Key: "LEGION-100", Seq: 2, Type: "issue.closed", Status: "done", Title: "LEGION-100", Rank: "A"}, engine)
 			if slotted := issue(t, pool, root.Key); slotted.Status != "in_progress" {
 				t.Fatalf("the waiting root after the slot freed = %s, want it promoted", slotted.Status)
 			}
-			after, afterWithTask := testerStarts()
-			wantWithTask := tc.want
-			if tc.taskless {
-				wantWithTask = 0
-			}
-			if added, addedWithTask := after-before, afterWithTask-beforeWithTask; added != tc.want || addedWithTask != wantWithTask {
-				t.Fatalf("tester starts the promotion added = %d, %d of them with a task; want %d, %d with a task", added, addedWithTask, tc.want, wantWithTask)
+			after, afterResumes := testerStarts()
+			if added, addedResumes := after-before, afterResumes-beforeResumes; added != tc.want || addedResumes != tc.want {
+				t.Fatalf("tester starts the promotion added = %d, %d of them with the phase's resume task; want %d, each with it", added, addedResumes, tc.want)
 			}
 		})
 	}

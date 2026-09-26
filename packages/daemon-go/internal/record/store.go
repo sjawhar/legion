@@ -501,7 +501,8 @@ func (s *Postgres) RoleRun(ctx context.Context, tx pgx.Tx, token claim.Token, is
 	}
 	var held RoleClaim
 	err = tx.QueryRow(ctx, `select c.state, c.last_start_row, d.claim_token is not null, coalesce(d.generation, 0), coalesce(d.phase, '')
-		from claims c left join pending_task_deliveries d on d.claim_token = c.token where c.token = $1`, string(token)).
+		from claims c left join pending_task_deliveries d on d.claim_token = c.token and d.confirmed_at is null
+		where c.token = $1`, string(token)).
 		Scan(&held.State, &held.LastStartRow, &held.Pending, &held.PendingGeneration, &held.PendingPhase)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
