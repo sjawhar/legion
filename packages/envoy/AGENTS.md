@@ -175,7 +175,9 @@ ask's id. The first ask left unreadable whose id was readable before is `400 INV
 that reason, so a question given a code block, a paragraph after the options, a second list, an
 emptied question or an ask under a held id is refused. An id the document already held unreadable
 (an upload, a seeded spec or a browser edit can leave one) does not refuse an accept, whether the
-accept leaves that ask alone or writes into it, and a reject (`POST /api/v1/comments/{id}/reject`,
+accept leaves that ask alone or writes into it, unless the accept adds a second ask under it: an id
+that gains an ask is refused whatever it held, since the id repair would hand the held ask's row
+and answer to whichever comes first. A reject (`POST /api/v1/comments/{id}/reject`,
 the same `applySuggestion`) is never checked, since removing the text a browser insert added gives
 back the document the insert started from. A replacement no level of the document can hold where
 the suggestion sits, such as a code block over a table cell's whole text, is `400 INVALID_OP` on

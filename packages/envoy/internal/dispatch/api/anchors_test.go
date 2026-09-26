@@ -298,6 +298,9 @@ func TestSuggestionAcceptRefusals(t *testing.T) {
 		{name: "an ask under a held id", spec: "Intro typo.\n\n" + askSpec, quote: "Intro typo.",
 			replaceWith: ":::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nOther?\n:::\n",
 			code:        "INVALID_ASK_BLOCK", reason: `duplicate ask block id \"a1\"`},
+		{name: "an ask under an id held malformed", spec: "Intro typo.\n\n" + malformedAsk, quote: "Intro typo.",
+			replaceWith: ":::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nOther?\n:::\n",
+			code:        "INVALID_ASK_BLOCK", reason: `duplicate ask block id \"a1\"`},
 		{name: "a code block over a table cell's whole text", spec: "| head |\n| :--- |\n| a target c |\n", quote: "a target c",
 			replaceWith: "```\ncode\n```\n", code: "INVALID_OP", reason: `field \"replace_with\"`},
 	} {

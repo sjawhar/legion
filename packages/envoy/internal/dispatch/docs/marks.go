@@ -334,16 +334,20 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 // an ask cannot hold, such as a question given a code block, writes nothing. An id the document
 // already held unreadable, malformed or repeated, is not the write's to refuse: an upload, a seeded
 // spec or a browser edit can leave one, settlement flags it, and a write elsewhere must not fail
-// over it.
+// over it. An id that gains an ask is refused whatever it held, since settlement's id repair keeps
+// the id for the first ask in document order and would hand the held ask's row and answer to it.
 func refuseBrokenAsks(before, after *pmdoc.Node) error {
-	unreadable := map[string]bool{}
+	unreadable, held := map[string]bool{}, map[string]int{}
 	askReadability(before, func(id string, reason error) bool {
 		unreadable[id] = unreadable[id] || reason != nil
+		held[id]++
 		return true
 	})
 	var refusal error
+	written := map[string]int{}
 	askReadability(after, func(id string, reason error) bool {
-		if reason != nil && !unreadable[id] {
+		written[id]++
+		if reason != nil && (!unreadable[id] || written[id] > held[id]) {
 			refusal = reason
 		}
 		return refusal == nil
