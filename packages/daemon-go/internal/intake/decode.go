@@ -370,12 +370,11 @@ func githubIdentity(raw map[string]json.RawMessage) (string, int, string, bool) 
 	return repo, number, action, repoOK && numberOK && actionOK
 }
 
+// checksSubjectMatches is whether subject is the checks subject Envoy publishes for repo's pull
+// request number.
 func checksSubjectMatches(subject, repo string, number int) bool {
-	segments := strings.Split(subject, ".")
-	if len(segments) != 7 || segments[0] != "notifications" || segments[1] != "github" || segments[4] != "pr" || segments[6] != "checks" {
-		return false
-	}
-	return segments[2]+"/"+segments[3] == repo && segments[5] == strconv.Itoa(number)
+	owner, name, found := strings.Cut(repo, "/")
+	return found && subject == githubSubjectPrefix(owner, name)+"pr."+strconv.Itoa(number)+".checks"
 }
 
 func rawCheckRuns(value json.RawMessage) ([]record.AttemptRun, bool) {

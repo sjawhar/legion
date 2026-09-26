@@ -4,6 +4,7 @@ import {
   DISPATCH_KEY_PATTERN,
   dispatchIssueSubject,
   EnvelopeSchema,
+  githubSubject,
   type IssueKey,
   parseRoleToken,
   roleTopic,
@@ -28,7 +29,7 @@ import {
   writeCiFence,
 } from "./reducers";
 
-const CHECKS_TOPIC = /^notifications\.github\.([^.]+)\.([^.]+)\.pr\.(\d+)\.checks$/;
+const CHECKS_TOPIC = /^notifications\.github\.[^.]+\.[^.]+\.pr\.(\d+)\.checks$/;
 const EXCEPTION_TOPIC = "notifications.envoy.exceptions.notifications.role.";
 /** JetStream stream carrying durable notifications; mirrors `Stream` in packages/envoy/internal/bus/stream.go. */
 const NOTIFICATION_STREAM = "ENVOY_NOTIFICATIONS";
@@ -221,13 +222,18 @@ function statusGroup(
 function checksInput(subject: string, envelope: EnvelopeJson): ChecksInput | undefined {
   const match = CHECKS_TOPIC.exec(subject);
   if (!match) return undefined;
-  const number = Number(match[3]);
+  const number = Number(match[1]);
   if (!Number.isSafeInteger(number)) return undefined;
-  const repo = `${match[1]}/${match[2]}` as `${string}/${string}`;
   const payload = recordPayload(envelope);
+  // The payload names the repository; the subject writes its owner and name each as one segment,
+  // a dot as `_`, so it is compared as Envoy would publish it for that repository.
+  const [owner, name, ...rest] = typeof payload?.repo === "string" ? payload.repo.split("/") : [];
   if (
     payload?.kind !== "checks" ||
-    payload.repo !== repo ||
+    owner === undefined ||
+    name === undefined ||
+    rest.length > 0 ||
+    githubSubject(owner, name, `pr.${number}.checks`) !== subject ||
     payload.number !== String(number) ||
     (payload.is_head !== undefined && payload.is_head !== true)
   ) {
@@ -264,7 +270,7 @@ function checksInput(subject: string, envelope: EnvelopeJson): ChecksInput | und
     return undefined;
   }
   return {
-    repo,
+    repo: `${owner}/${name}`,
     number,
     sha,
     failed: failed.checks,
@@ -853,7 +859,7 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
   const githubDurable = `legion-${deps.config.project}-github`;
   const githubFilterSubjects = projectRepos(deps.config).map((repo) => {
     const [owner, name] = repo.split("/");
-    return `notifications.github.${owner}.${name}.>`;
+    return githubSubject(owner, name, ">");
   });
   console.log(
     `[legion] GitHub consumer ${githubDurable} filters ${githubFilterSubjects.join(",")}`

@@ -635,7 +635,8 @@ the synchronous listener call records the sent or failed attempt instead of blin
 
 ## Topic shapes
 
-- GitHub repository topics start with `notifications.github.<owner>.<repo>`.
+- GitHub repository topics start with `notifications.github.<owner>.<repo>`, each name one
+  segment with a dot written `_` (`sjawhar/.github` is `notifications.github.sjawhar._github`).
   Pull requests use `pr.<n>` for lifecycle (a closed event carries
   `merged`, `merge_commit_sha`, `merged_by`, and `head_sha`), plus
   `pr.<n>.comment`, `pr.<n>.review`, `pr.<n>.mention`, and

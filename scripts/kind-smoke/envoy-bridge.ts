@@ -1,11 +1,13 @@
 // scripts/kind-smoke/envoy-bridge.ts — SMOKE_GITHUB_INGRESS=envoy: relay the sandbox repository's
 // GitHub subjects from production NATS (read-only) into a kind smoke instance's own NATS. It
-// subscribes upstream to exactly `notifications.github.<owner>.<repo>.>` and republishes each
-// message unchanged downstream; it never publishes upstream, and it never touches Dispatch issue
-// subjects — the instance's scratch Dispatch server publishes its own, and two rigs on one issue
-// stream admitted each other's issues (docs/solutions/legion).
+// subscribes upstream to exactly `notifications.github.<owner>.<repo>.>`, a dot in either name
+// written `_` as Envoy publishes it, and republishes each message unchanged downstream; it never
+// publishes upstream, and it never touches Dispatch issue subjects — the instance's scratch
+// Dispatch server publishes its own, and two rigs on one issue stream admitted each other's issues
+// (docs/solutions/legion).
 import { connect, type NatsConnection, type Subscription } from "nats";
 import { EnvelopeSchema } from "../../packages/contracts/src/envelope";
+import { githubSubject } from "../../packages/contracts/src/subject";
 
 export const DEFAULT_UPSTREAM_NATS_URL = "nats://envoy-nats.tailb86685.ts.net:4222";
 
@@ -60,9 +62,10 @@ export function bridgeConfigFromEnvironment(
   }
   const downstreamUrl = environment.SMOKE_RIG_NATS?.trim() ?? "";
   if (!downstreamUrl) throw new Error("SMOKE_RIG_NATS is required");
+  const [owner, name] = repository.split("/");
   return {
     repository,
-    subjects: [`notifications.github.${repository.replace("/", ".")}.>`],
+    subjects: [githubSubject(owner, name, ">")],
     upstreamUrl: environment.SMOKE_UPSTREAM_NATS?.trim() || DEFAULT_UPSTREAM_NATS_URL,
     downstreamUrl,
   };
