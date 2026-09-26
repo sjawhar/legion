@@ -39,10 +39,13 @@ const Bucket = "envoy_ci_state"
 // settlement transitions and another listener task during a deploy. Each backs off with jitter
 // before retrying, so a bounded time budget lets them serialize rather than a fixed attempt count.
 // A caller that queues behind a write in progress waits for that write and then its own, so a
-// Record returns within two budgets, well under the listener's 10s HTTP WriteTimeout even when a
-// check_run fans out over several PRs sequentially. NOTE: this bounds only the retry loop; a
-// single hung KV call can still block up to the JetStream MaxWait (a systemic limit of the legacy
-// nats.go KV API, shared with internal/store).
+// Record returns within two budgets. The webhook handler records a check_run once for each PR it
+// lists, one after another, so a delivery listing k PRs can take up to 2k budgets, past the
+// listener's 10s HTTP WriteTimeout at three; that needs a write to lose its compare-and-swap for its
+// whole budget, and after combining only the summary loop's transitions and another listener
+// task's batches write the same record. NOTE: this bounds only the retry loop; a single hung KV
+// call can still block up to the JetStream MaxWait (a systemic limit of the legacy nats.go KV API,
+// shared with internal/store).
 const recordBudget = 2 * time.Second
 const recordBackoffCap = 50 * time.Millisecond
 

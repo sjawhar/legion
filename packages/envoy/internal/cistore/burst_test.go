@@ -521,15 +521,21 @@ func TestAFailedBatchWriteReachesEveryCallerAndTheNextBatchIsWritten(t *testing.
 		if err := s.Record(h.check("seed", 400, "completed", "success", "2026-09-24T01:00:00Z")); err != nil {
 			t.Fatalf("seed the record: %v", err)
 		}
+		// Write 1 is check-0's, held until check-1..3 queue behind it; write 2 is their batch's
+		// first attempt, and the other task writes the record between that attempt's read and its
+		// update, so the batch of three loses its compare-and-swap and must retry all three.
+		var calls int
 		entered, release := make(chan struct{}), make(chan struct{})
-		var once sync.Once
 		kv.setBeforeWrite(func() error {
-			first := false
-			once.Do(func() { first = true })
-			if first {
+			kv.mu.Lock()
+			calls++
+			call := calls
+			kv.mu.Unlock()
+			switch call {
+			case 1:
 				close(entered)
 				<-release
-				// The other task writes the record between this write's read and its update.
+			case 2:
 				entry, err := other.Get(h.key())
 				if err != nil {
 					return err
@@ -561,10 +567,16 @@ func TestAFailedBatchWriteReachesEveryCallerAndTheNextBatchIsWritten(t *testing.
 		close(release)
 		waitAll(t, &wg, "a lost compare-and-swap")
 		requireNoErrors(t, "a lost compare-and-swap", errs)
+		kv.mu.Lock()
+		attempts := calls
+		kv.mu.Unlock()
+		if attempts < 3 {
+			t.Fatalf("%d write attempts, want the batch's lost one and its retry after check-0's", attempts)
+		}
 		checks := getState(t, s, h.owner, h.repo, h.number, h.sha).Checks
 		for _, name := range []string{"seed", "from-the-other-task", "check-0", "check-1", "check-2", "check-3"} {
 			if _, ok := checks[name]; !ok {
-				t.Fatalf("record lacks %s after the retried write: %v", name, checks)
+				t.Fatalf("record lacks %s after the batch's retried write: %v", name, checks)
 			}
 		}
 	})
