@@ -147,7 +147,7 @@ func TestAWrappedRefusalIsStillIdentifiable(t *testing.T) {
 }
 
 // The project word every token and the private tmux server carry is the shipped daemon's
-// (config.ts:1429-1433): the operator's `project` lowercased, with everything outside [a-z0-9]
+// (config.ts legionProjectToken): the operator's `project` lowercased, with everything outside [a-z0-9]
 // dropped, so `sjawhar/legion` and `LEGION` name the same server either daemon would.
 func TestProjectTokenIsTheShippedSpelling(t *testing.T) {
 	for project, want := range map[string]string{

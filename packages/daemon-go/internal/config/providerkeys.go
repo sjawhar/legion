@@ -29,7 +29,7 @@ func ProviderEnvDir(stateDir string) string {
 // secret on the box.
 //
 // Each secretsd key is resolved the way the shipped daemon resolves an App key it holds in
-// secretsd (packages/daemon/src/daemon/config.ts:834-902): `secrets get <KEY> --no-request` first,
+// secretsd (packages/daemon/src/daemon/config.ts runSecretsGet and resolvePrivateKeySecret): `secrets get <KEY> --no-request` first,
 // which reports the key's tier without costing a tap, then `secrets get <KEY> --value`. A
 // human-tier key is announced before its value is requested, since a YubiKey tap may be needed.
 // The daemon runs `secrets` for itself — it is never a pane — under its own environment (environ)

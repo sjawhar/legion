@@ -60,7 +60,7 @@ func readStub(t *testing.T, stubDir, name string) string {
 }
 
 // Boot resolves each provider key the way the shipped daemon resolves an App key it holds in
-// secretsd (config.ts:834-902): the tier first, never costing a tap; then the value, under the
+// secretsd (config.ts runSecretsGet and resolvePrivateKeySecret): the tier first, never costing a tap; then the value, under the
 // daemon's own environment less its session token, with the daemon's stdin — secretsd scopes a
 // tokenless caller by its terminal. Each value lands in its own 0600 file in a 0700 directory,
 // named for the variable OMP reads — not for the secretsd key, which a deployment names per

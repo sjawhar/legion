@@ -94,7 +94,7 @@ func readProject(value *yaml.Node, key string) (Project, error) {
 	fields, err := members(value, key, "repo", "merge_queue_role", "mergeQueueRole")
 	var unknown unknownKeyError
 	if errors.As(err, &unknown) {
-		// The shipped loader's own words (config.ts:664-667).
+		// The shipped loader's own words (config.ts validateProjectEntry).
 		return Project{}, fmt.Errorf(`Unknown key %q`, key+"."+unknown.name)
 	}
 	if err != nil {
@@ -129,7 +129,7 @@ func readGates(value *yaml.Node, key string) (*Gates, error) {
 	}
 	for index := 0; index+1 < len(value.Content); index += 2 {
 		// A present merge is refused whatever its value, null included, as the shipped loader
-		// refuses it (config.ts:975-982).
+		// refuses it (config.ts parseGates).
 		if value.Content[index].Value == "merge" {
 			return nil, errors.New(gatesMergeMessage)
 		}

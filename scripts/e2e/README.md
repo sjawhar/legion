@@ -136,10 +136,10 @@ What it stands up, all of it the run's own:
 - **Postgres**: `LEGION_E2E_PG_DSN` when set; otherwise a `postgres:16` container on tmpfs
   (`legion-e2e2-pg-<pid>`) on an ephemeral loopback port — tmpfs rather than the image's anonymous
   volume, which a box whose docker volume subsystem stalls would hang on.
-- **NATS and the Envoy listener** on the host: a
-  `nats:2.10 -js` container (`legion-e2e2-nats-<pid>`), and `packages/envoy`'s `cmd/listener`
-  built into the work directory and started with a fresh API bearer, which reaches every pane as
-  the 0600 file `envoy_token_file` names.
+- **NATS and the Envoy listener** on the host: a `nats:2.10 -js` container
+  (`legion-e2e2-nats-<pid>`), and `packages/envoy`'s `cmd/listener` built into the work directory
+  and started with a fresh API bearer, which reaches every pane as the 0600 file `envoy_token_file`
+  names.
 - **The plugin**: this checkout's `pi-legion-envoy`, packed as the release packs it, installed into
   the OMP profile `legion-e2e2-<pid>-<epoch>` by `lib/install-plugin-profile.sh`. The daemons run
   with `OMP_PROFILE` naming it, so the gate and every pane load it.

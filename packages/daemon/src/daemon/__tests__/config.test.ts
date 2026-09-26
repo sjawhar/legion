@@ -1289,7 +1289,7 @@ describe("daemon config", () => {
       );
     });
 
-    it("rejects an invalid daemon_url from either source", () => {
+    it("rejects an invalid daemon_url from either source and normalizes a trailing slash", () => {
       expect(() => yaml("daemon_url: not a url")).toThrow("daemon_url must be a valid URL");
       expect(() =>
         resolveDaemonConfig({
@@ -1297,6 +1297,13 @@ describe("daemon config", () => {
           cliOverrides: overrides,
         })
       ).toThrow("LEGION_DAEMON_URL must be a valid URL");
+      expect(
+        resolveWithApps({
+          configFile: yaml("daemon_url: http://127.0.0.1:13370/"),
+          env: requiredEnv,
+          cliOverrides: overrides,
+        }).config.daemonUrl
+      ).toBe("http://127.0.0.1:13370");
     });
 
     it("rejects a non-loopback bind under the tmux runtime, from either source", () => {
@@ -1306,13 +1313,13 @@ describe("daemon config", () => {
           env: requiredEnv,
           cliOverrides: overrides,
         })
-      ).toThrow("bind must be 127.0.0.1 unless runtime is kubernetes");
+      ).toThrow("bind must be 127.0.0.1");
       expect(() =>
         resolveDaemonConfig({
           env: { ...requiredEnv, LEGION_BIND: "0.0.0.0" },
           cliOverrides: overrides,
         })
-      ).toThrow("bind must be 127.0.0.1 unless runtime is kubernetes");
+      ).toThrow("bind must be 127.0.0.1");
     });
 
     it("rejects an empty bind", () => {
@@ -1371,7 +1378,7 @@ describe("daemon config", () => {
 
     it("recognizes the three keys in the YAML loader shape", () => {
       expect(
-        yaml("runtime: tmux", "daemon_url: http://127.0.0.1:14100", "bind: 127.0.0.1").fields
+        yaml("runtime: tmux", "daemon_url: http://127.0.0.1:14100", "bind: 127.0.0.1")
       ).toMatchObject({
         runtime: "tmux",
         daemonUrl: "http://127.0.0.1:14100",
@@ -1507,7 +1514,7 @@ describe("daemon config", () => {
           cliOverrides: overrides,
         })
       ).toThrow(
-        "operator_token_file is only used when runtime is kubernetes: the tmux daemon launches its own controller; remove operator_token_file"
+        "operator_token_file is not used: the tmux daemon launches its own controller; remove operator_token_file"
       );
     });
   });

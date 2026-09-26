@@ -2,9 +2,9 @@
 # Stage 2's gate for the Go coordinator: supervision on tmux, proven against the real things. The
 # Go daemon launches a real Oh My Pi — the pinned build (packages/daemon/src/daemon/omp-pin.ts)
 # with this checkout's plugin in an isolated OMP profile — in panes of its private tmux server,
-# against a real Envoy listener and NATS on the host and a real
-# Postgres. Every gate behaviour is one named check that prints what it observed; the first check
-# that does not hold ends the run non-zero, naming it.
+# against a real Envoy listener and NATS on the host and a real Postgres. Every gate behaviour is
+# one named check that prints what it observed; the first check that does not hold ends the run
+# non-zero, naming it.
 #
 # Stage 1's discipline holds: the cleanup cannot fail, every wait is bounded, a process that
 # ignores its stop is SIGKILLed, and everything the run takes is its own — its mktemp work

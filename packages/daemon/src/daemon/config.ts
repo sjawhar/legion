@@ -19,7 +19,7 @@ export interface GitHubAppRoleConfig {
 
 export type GitHubAppsConfig = Partial<Record<GitHubAppRole, GitHubAppRoleConfig>>;
 
-export const RUNTIMES = ["tmux", "kubernetes"] as const;
+const RUNTIMES = ["tmux", "kubernetes"] as const;
 export type RuntimeName = (typeof RUNTIMES)[number];
 
 const RESOURCE_PROFILE_NAMES = ["small", "medium", "large"] as const;
@@ -110,12 +110,10 @@ export interface DaemonConfig {
    * refuses `runtime: kubernetes` naming the Go daemon. */
   runtime: RuntimeConfig;
   /** The daemon API URL every spawned process is told (`LEGION_DAEMON_URL`), normalized with no
-   * trailing slash. Under tmux it is always `http://127.0.0.1:<port>` — the default, and the only
-   * accepted value (anything else is an inherited outer pane's `LEGION_DAEMON_URL`); required
-   * under kubernetes, where a pod cannot reach the daemon's loopback. */
+   * trailing slash. The loader accepts only `http://127.0.0.1:<port>`, the default (anything else
+   * is an inherited outer pane's `LEGION_DAEMON_URL`). */
   daemonUrl: string;
-  /** The API listen address. `127.0.0.1` unless `runtime` is kubernetes, where the in-cluster
-   * daemon must be reachable by its pods. */
+  /** The API listen address: `127.0.0.1`, the only one the loader accepts. */
   bind: string;
   envoyUrl: string;
   /**
@@ -124,18 +122,14 @@ export interface DaemonConfig {
    * (`ENVOY_TOKEN_FILE`). Resolved at load from `envoy_token_file` (a relative path is resolved
    * against the config file's directory) or `ENVOY_TOKEN_FILE` — the file's trimmed contents; a
    * set-but-missing, unreadable, or blank file refuses startup naming the key and the path — or,
-   * lower in precedence, the `ENVOY_TOKEN` environment value. Required under `runtime:
-   * kubernetes`, where the listener is bound off loopback and refuses unauthenticated calls;
-   * optional under tmux, where an unset token changes nothing.
+   * lower in precedence, the `ENVOY_TOKEN` environment value. Optional: an unset token changes
+   * nothing.
    */
   envoyToken?: string;
   /**
-   * The bearer `legion controller start` presents to `POST /legion/v1/controller/secret`: the
-   * trimmed contents of `operator_token_file` (a relative path resolves against the config
-   * directory), read once at load with no mode check — in the pod it is a mounted Secret whose
-   * mode is the cluster's. Required under `runtime: kubernetes` (the daemon cannot launch the
-   * controller there); refused under tmux, whose daemon launches its own. Never an environment
-   * variable or flag (LEGION-25 Part B).
+   * The bearer `legion controller start` presents to `POST /legion/v1/controller/secret`. The
+   * loader refuses `operator_token_file` (the tmux daemon launches its own controller), so only a
+   * `DaemonConfig` built directly carries one (LEGION-25 Part B).
    */
   operatorToken?: string;
   /**
@@ -229,10 +223,6 @@ export interface DaemonConfig {
   instructionsPath?: string;
 }
 
-export interface LoadedConfigFile {
-  fields: Record<string, unknown>;
-}
-
 export interface LoadConfigFileOptions {
   /**
    * When false, github_apps.<role>.private_key_command is validated for presence but never
@@ -247,13 +237,13 @@ export interface LoadConfigFileOptions {
 
 export interface ResolveDaemonConfigOptions {
   env?: Record<string, string | undefined>;
-  configFile?: LoadedConfigFile;
+  configFile?: Record<string, unknown>;
   cliOverrides?: Partial<DaemonConfig>;
   /** When false, an `envoy_token_file` / `ENVOY_TOKEN_FILE` pointer is validated as a path but the
    * file is never read — `envoyToken` becomes the same "(not executed)" placeholder
    * `loadGitHubApps` uses for an unexecuted key command — so `legion start --check-config` can
-   * validate an in-cluster `legion.yaml` on a machine that has no `/var/run/legion/...` mount.
-   * Defaults to true (the daemon always reads the real token). */
+   * validate a `legion.yaml` whose token file is not on this machine. Defaults to true (the daemon
+   * always reads the real token). */
   resolveSecrets?: boolean;
 }
 
@@ -979,7 +969,7 @@ export function loadConfigFromFile(
   yamlText: string,
   configDir: string,
   options: LoadConfigFileOptions = {}
-): LoadedConfigFile {
+): Record<string, unknown> {
   let parsed: unknown;
   try {
     parsed = parse(yamlText);
@@ -988,7 +978,7 @@ export function loadConfigFromFile(
       `Invalid YAML config: ${error instanceof Error ? error.message : String(error)}`
     );
   }
-  if (parsed === undefined || parsed === null) return { fields: {} };
+  if (parsed === undefined || parsed === null) return {};
   const parsedRoot = UnknownRecordSchema.safeParse(parsed);
   if (!parsedRoot.success) throw new Error("Config file root must be a mapping");
   const config = parsedRoot.data;
@@ -1144,7 +1134,7 @@ export function loadConfigFromFile(
   const githubApps = loadGitHubApps(config.github_apps, options.resolveSecrets ?? true);
   if (githubApps !== undefined) fields.githubApps = githubApps;
 
-  return { fields };
+  return fields;
 }
 
 /** The one rule that turns the operator-written `project` (`legion.yaml`'s value, `LEGION_ID`,
@@ -1162,7 +1152,7 @@ export function resolveDaemonConfig(
   opts: ResolveDaemonConfigOptions = {}
 ): ResolveDaemonConfigResult {
   const env = opts.env ?? {};
-  const fields = opts.configFile?.fields ?? {};
+  const fields = opts.configFile ?? {};
 
   const legionId = resolveValue(
     opts.cliOverrides?.legionId,
@@ -1187,12 +1177,9 @@ export function resolveDaemonConfig(
   if (opts.cliOverrides?.runtime?.name === "kubernetes") {
     throw new Error(`runtime: kubernetes ${KUBERNETES_REFUSAL}`);
   }
-  const runtime = resolveValue<RuntimeName>(
-    opts.cliOverrides?.runtime?.name,
-    parseRuntime(fileString(fields, "runtime"), "runtime"),
-    parseRuntime(env.LEGION_RUNTIME, "LEGION_RUNTIME"),
-    "tmux"
-  );
+  // Each source of the runtime is read for its refusal alone: tmux is the one runtime left.
+  parseRuntime(fileString(fields, "runtime"), "runtime");
+  parseRuntime(env.LEGION_RUNTIME, "LEGION_RUNTIME");
   // `LEGION_DAEMON_URL` is both this env key and the variable every Legion pane carries, so a
   // daemon started from inside a pane inherits the OUTER daemon's URL from its environment and
   // would tell its own processes to register there. Under tmux the only correct value is the
@@ -1209,17 +1196,12 @@ export function resolveDaemonConfig(
   const loopbackDaemonUrl = `http://127.0.0.1:${port.value}`;
   let resolvedDaemonUrl: string;
   if (daemonUrl.value === undefined) {
-    if (runtime.value === "kubernetes") {
-      throw new Error(
-        "daemon_url is required when runtime is kubernetes (or set LEGION_DAEMON_URL)"
-      );
-    }
     resolvedDaemonUrl = loopbackDaemonUrl;
   } else {
     const field = daemonUrl.source === "env" ? "LEGION_DAEMON_URL" : "daemon_url";
     resolvedDaemonUrl = normalizeBaseUrl(validateUrl(daemonUrl.value, field), field);
   }
-  if (runtime.value === "tmux" && resolvedDaemonUrl !== loopbackDaemonUrl) {
+  if (resolvedDaemonUrl !== loopbackDaemonUrl) {
     throw new Error(
       `daemon_url must be ${loopbackDaemonUrl} when runtime is tmux (got ${resolvedDaemonUrl}; an inherited LEGION_DAEMON_URL from an outer Legion pane?)`
     );
@@ -1231,8 +1213,8 @@ export function resolveDaemonConfig(
     DEFAULT_BIND
   );
   requireNonEmpty(bind.value, bind.source === "env" ? "LEGION_BIND" : "bind");
-  if (runtime.value !== "kubernetes" && bind.value !== DEFAULT_BIND) {
-    throw new Error("bind must be 127.0.0.1 unless runtime is kubernetes");
+  if (bind.value !== DEFAULT_BIND) {
+    throw new Error("bind must be 127.0.0.1");
   }
   const envoyUrl = resolveValue(
     opts.cliOverrides?.envoyUrl,
@@ -1262,30 +1244,14 @@ export function resolveDaemonConfig(
       envoyToken = env.ENVOY_TOKEN.trim();
     }
   }
-  if (runtime.value === "kubernetes" && envoyToken === undefined) {
+  // The tmux daemon launches its own controller, so an operator token would only be a second way
+  // in: it is refused on sight, never read.
+  if (
+    fileString(fields, "operatorTokenFile") !== undefined ||
+    opts.cliOverrides?.operatorToken !== undefined
+  ) {
     throw new Error(
-      "envoy_token_file is required when runtime is kubernetes (or set ENVOY_TOKEN_FILE)"
-    );
-  }
-  // The operator token is file-only and runtime-bound: the kubernetes daemon needs it because
-  // nobody else can hand the operator's controller a secret; the tmux daemon must not have it,
-  // since its controller is its own pane and a stray token would be a second way in.
-  const operatorTokenFile = fileString(fields, "operatorTokenFile");
-  let operatorToken = opts.cliOverrides?.operatorToken;
-  if (operatorToken === undefined && operatorTokenFile !== undefined) {
-    operatorToken =
-      (opts.resolveSecrets ?? true)
-        ? readSecretPointer("operator_token_file", operatorTokenFile)
-        : "(not executed)";
-  }
-  if (runtime.value === "kubernetes" && operatorToken === undefined) {
-    throw new Error(
-      "operator_token_file is required when runtime is kubernetes: the daemon cannot launch the controller there; legion controller start presents this token"
-    );
-  }
-  if (runtime.value === "tmux" && operatorToken !== undefined) {
-    throw new Error(
-      "operator_token_file is only used when runtime is kubernetes: the tmux daemon launches its own controller; remove operator_token_file"
+      "operator_token_file is not used: the tmux daemon launches its own controller; remove operator_token_file"
     );
   }
   const dispatchUrl = resolveValue(
@@ -1357,15 +1323,6 @@ export function resolveDaemonConfig(
     parseShellWords(env.LEGION_OMP_LAUNCH_PREFIX, "LEGION_OMP_LAUNCH_PREFIX"),
     []
   );
-  if (
-    runtime.value === "kubernetes" &&
-    env.KUBERNETES_SERVICE_HOST !== undefined &&
-    ompLaunchPrefix.value.length > 0
-  ) {
-    throw new Error(
-      `omp_launch_prefix is not used when runtime is kubernetes inside a pod: provider keys come from the mounted Secret legion-${project}-providers; remove omp_launch_prefix (or LEGION_OMP_LAUNCH_PREFIX)`
-    );
-  }
 
   const projects = resolveValue(
     opts.cliOverrides?.projects,
@@ -1597,7 +1554,6 @@ export function resolveDaemonConfig(
       bind: bind.value,
       envoyUrl: validateUrl(envoyUrl.value, "ENVOY_URL"),
       envoyToken,
-      operatorToken,
       dispatchUrl: resolvedDispatchUrl,
       dispatchToken,
       projects: configuredProjects,

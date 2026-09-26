@@ -215,8 +215,7 @@ RUN set -eu; \
 # The Kubernetes runtime (packages/daemon/src/daemon/runtime-kubernetes.ts) sets every container's
 # command explicitly: the init container runs `legion workspace-init …` and the main container runs
 # `legion worker-shim --connect tcp://<daemon>:<worker_stream_port> --boot-token-file … --provider-env-dir
-# /var/run/legion/providers -- omp --mode rpc …` (k8s-manifests.ts); the daemon Deployment runs
-# `legion start <project> --config /etc/legion/legion.yaml` from this same image. This ENTRYPOINT
-# therefore only makes `docker run <image> probe-image` and `docker run <image> --help` work; the Go
+# /var/run/legion/providers -- omp --mode rpc …` (k8s-manifests.ts). This ENTRYPOINT therefore only
+# makes `docker run <image> probe-image` and `docker run <image> --help` work; the Go
 # `legion` runs with `--entrypoint /opt/legion/go/bin/legion`.
 ENTRYPOINT ["legion"]
