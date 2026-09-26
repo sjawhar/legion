@@ -793,7 +793,7 @@ stream_missing() {
     <({ awk '{print $2}' "$evidence/pods-checked.txt" 2>/dev/null
         awk '{print $2}' "$evidence/driver-actions.txt" 2>/dev/null
         jq -R -r 'fromjson? | select(.msg == "supervise: launched") | .incarnation // empty' "$daemon_log"
-      } | grep -E '^[0-9a-f]{8}-' | sort -u) \
+      } | { grep -E '^[0-9a-f]{8}-' || true; } | sort -u) \
     <(jq -r 'select(.object.kind == "Pod") | .object.metadata.uid' "$watch" | sort -u)
 }
 

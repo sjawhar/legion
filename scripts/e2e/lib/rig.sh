@@ -139,6 +139,6 @@ run_processes() {
     case "$cwd/" in
       "$work"/*) printf '%s\n' "${p#/proc/}"; continue ;;
     esac
-    grep -qsF "$work" "$p/cmdline" 2>/dev/null && printf '%s\n' "${p#/proc/}"
+    if grep -qsF "$work" "$p/cmdline" 2>/dev/null; then printf '%s\n' "${p#/proc/}"; fi
   done
 }
