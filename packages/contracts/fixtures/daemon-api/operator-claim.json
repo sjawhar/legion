@@ -28,6 +28,7 @@
     "task": "Implement the plan in .legion/plan.json.",
     "queuedAt": "2026-09-22T09:30:58Z",
     "deliveredAt": "2026-09-22T09:31:04Z",
-    "confirmedAt": "2026-09-22T09:31:04Z"
+    "confirmedAt": "2026-09-22T09:31:04Z",
+    "interrupted": true
   }
 }

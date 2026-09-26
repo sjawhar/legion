@@ -272,6 +272,7 @@ func operatorClaim() OperatorClaim {
 			QueuedAt:    time.Date(2026, 9, 22, 9, 30, 58, 0, time.UTC),
 			DeliveredAt: &delivered,
 			ConfirmedAt: &delivered,
+			Interrupted: true,
 		},
 	}
 }
