@@ -88,27 +88,36 @@ describe("cmdWorkspaceInit", () => {
       "clone",
       "https://github.com/acme/widgets",
       expect.stringContaining(`${cloneDir}.clone-`),
+      "--config=git.executable-path=git",
     ]);
-    // The clone and the fetch run with the one provisioning environment `@legion/workspace`
-    // builds, exactly: the askpass credential, and the five pairs that reset the clone's
-    // credential-helper chain and re-enable askpass for that command — without them the pane
-    // helper the clone's config names runs in an init container that has no grant, and git >= 2.44
-    // (the worker image's) then refuses the askpass fallback (LEGION-178).
+    // The clone and the fetch run with exactly the environment `createProvisioningCredential` in
+    // `@legion/workspace` builds; its doc comment says what each entry pins.
     const provisioningEnv = {
-      GIT_ASKPASS: expect.stringContaining(`${root}/`),
+      GIT_ASKPASS: "",
       GIT_TERMINAL_PROMPT: "0",
+      GIT_ALLOW_PROTOCOL: "https",
       LEGION_PROVISIONING_TOKEN: "ghs_x",
-      GIT_CONFIG_COUNT: "2",
+      GIT_CONFIG_COUNT: "3",
       GIT_CONFIG_KEY_0: "credential.helper",
       GIT_CONFIG_VALUE_0: "",
-      GIT_CONFIG_KEY_1: "credential.interactive",
-      GIT_CONFIG_VALUE_1: "true",
+      GIT_CONFIG_KEY_1: "credential.https://github.com.helper",
+      GIT_CONFIG_VALUE_1: expect.stringContaining(`${root}/`),
+      GIT_CONFIG_KEY_2: "core.hooksPath",
+      GIT_CONFIG_VALUE_2: "/dev/null",
     };
     expect(commands[0]?.opts?.env).toEqual(provisioningEnv);
     const fetchCommand = commands.find(
       (c) => c.cmd[0] === "jj" && c.cmd[1] === "git" && c.cmd[2] === "fetch"
     );
-    expect(fetchCommand?.cmd).toEqual(["jj", "git", "fetch", "-R", cloneDir]);
+    expect(fetchCommand?.cmd).toEqual([
+      "jj",
+      "git",
+      "fetch",
+      "--ignore-working-copy",
+      "-R",
+      cloneDir,
+      "--config=git.executable-path=git",
+    ]);
     expect(fetchCommand?.opts?.env).toEqual(provisioningEnv);
 
     expect(commands.map((c) => c.cmd)).toContainEqual([
@@ -538,16 +547,16 @@ describe("cmdWorkspaceInit", () => {
 describe("processEnvRunner", () => {
   it("spawns jj and git through the pod's own environment (PATH resolution) with the provisioning env layered on top", async () => {
     // The runner really spawns: a stub `jj` on a temp PATH records the environment it ran with.
-    // `provisionIssueWorkspace` hands the runner only its credential env (`GIT_ASKPASS`,
-    // `GIT_TERMINAL_PROMPT`, `LEGION_PROVISIONING_TOKEN`) -- no PATH -- so a runner that passes
-    // that env through unmerged cannot find `jj` at all inside the init container.
+    // `provisionIssueWorkspace` hands the runner only the credential's environment
+    // (`createProvisioningCredential` in `@legion/workspace`), which has no PATH, so a runner that
+    // passes that env through unmerged cannot find `jj` at all inside the init container.
     const root = await tempRoot();
     const binDir = path.join(root, "bin");
     await mkdir(binDir);
     const record = path.join(root, "jj-ran.env");
     await writeFile(
       path.join(binDir, "jj"),
-      `#!/bin/sh\nprintf 'argv=%s\\nASKPASS=%s\\nTOKEN=%s\\nMARKER=%s\\n' "$*" "$GIT_ASKPASS" "$LEGION_PROVISIONING_TOKEN" "$POD_MARKER" > ${JSON.stringify(record)}\necho stub-jj-ok\n`,
+      `#!/bin/sh\nprintf 'argv=%s\\nPROTOCOL=%s\\nTOKEN=%s\\nMARKER=%s\\n' "$*" "$GIT_ALLOW_PROTOCOL" "$LEGION_PROVISIONING_TOKEN" "$POD_MARKER" > ${JSON.stringify(record)}\necho stub-jj-ok\n`,
       { mode: 0o755 }
     );
     const podEnv: NodeJS.ProcessEnv = {
@@ -559,7 +568,7 @@ describe("processEnvRunner", () => {
 
     const result = await run(["jj", "git", "fetch", "-R", root], {
       env: {
-        GIT_ASKPASS: "/tmp/askpass",
+        GIT_ALLOW_PROTOCOL: "https",
         GIT_TERMINAL_PROMPT: "0",
         LEGION_PROVISIONING_TOKEN: "ghs_x",
       },
@@ -569,7 +578,7 @@ describe("processEnvRunner", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout.trim()).toBe("stub-jj-ok");
     expect(await readFile(record, "utf8")).toBe(
-      `argv=git fetch -R ${root}\nASKPASS=/tmp/askpass\nTOKEN=ghs_x\nMARKER=from-the-pod\n`
+      `argv=git fetch -R ${root}\nPROTOCOL=https\nTOKEN=ghs_x\nMARKER=from-the-pod\n`
     );
   });
 

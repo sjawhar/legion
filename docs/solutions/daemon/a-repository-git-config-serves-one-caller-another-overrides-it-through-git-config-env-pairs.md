@@ -53,30 +53,42 @@ pane's no-prompt guarantee) and a run-local `git config --unset` (mutates the sh
 run) — for exactly this reason: a config file has one owner, and a second consumer with different
 needs reaches git through the environment of the command it runs.
 
-The override is five environment pairs in `createProvisioningCredential`:
+The override is seven environment pairs in `createProvisioningCredential`:
 
 ```
-GIT_CONFIG_COUNT=2
-GIT_CONFIG_KEY_0=credential.helper      GIT_CONFIG_VALUE_0=            # empty: resets the list
-GIT_CONFIG_KEY_1=credential.interactive GIT_CONFIG_VALUE_1=true
+GIT_CONFIG_COUNT=3
+GIT_CONFIG_KEY_0=credential.helper                     GIT_CONFIG_VALUE_0=     # empty: resets the list
+GIT_CONFIG_KEY_1=credential.https://github.com.helper  GIT_CONFIG_VALUE_1=!'<the one-shot helper>'
+GIT_CONFIG_KEY_2=core.hooksPath                        GIT_CONFIG_VALUE_2=/dev/null  # no hook runs
 ```
 
-Three git facts make that the whole fix:
+beside an empty `GIT_ASKPASS` (git reads it as no askpass program at all, not `core.askPass`
+either), `GIT_TERMINAL_PROMPT=0` and `GIT_ALLOW_PROTOCOL=https`. The clone and the fetch also pass
+`--config=git.executable-path=git`, and the fetch `--ignore-working-copy`. What each of these pins,
+and what remains, is described once, in `createProvisioningCredential`'s doc comment
+(`packages/workspace/src/workspace.ts`). The one-shot helper answers `get` with the installation
+token, and git asks it for https://github.com alone. It is scoped because every agent of a tree
+writes the shared clone's config: the fix LEGION-178 first shipped kept an askpass that answered
+every prompt, re-enabled with `credential.interactive=true`, and so answered whichever host that
+config sent git to.
+
+Three git facts make the helper reset work:
 
 - `GIT_CONFIG_*` pairs are **command scope**, read after the system, global, and repository
   files, so they win.
 - An **empty `credential.helper` value clears every helper read so far** — including the
   URL-specific `credential.https://github.com.helper`, because git's urlmatch delivers both keys
   to the same callback in read order. The regression test proves this against a real clone that
-  carries both keys (`workspace.test.ts`, "gets the askpass credential without running the
-  helper").
-- `credential.interactive` is last-wins, so `true` here re-enables the askpass program for this
-  command only.
+  carries both keys (`workspace.test.ts`, "gets the one-shot credential for github.com alone,
+  without running the pane helper").
+- A credential helper is not a prompt, so the clone's persisted `credential.interactive=false`
+  does not stop it. Nothing needs re-enabling.
 
 Why **pairs, not `-c`**: jj, not our code, spawns the git that fetches. `jj git fetch -R <clone>`
 accepts no git flags, but jj's own config reader (gitoxide) honours `GIT_CONFIG_COUNT` and the
 subprocess inherits the environment — verified on jj 0.45.1 with an interposed `git` that
-recorded all eight names untouched. The same env reaches the pod through `legion
+recorded every variable of the provisioning environment untouched (eight names then; the set has
+grown since, by the same route). The same env reaches the pod through `legion
 workspace-init`'s `processEnvRunner` and the daemon host through `createDaemonRunner`; both lay it
 over the process environment with the caller's env winning.
 
@@ -89,17 +101,13 @@ it might inherit. Two callers, two environments, one config file.
 - Before writing a `credential.*` (or any behaviour-changing) key into a repository that more
   than one process uses, name every caller that will run git there and ask which of them the
   file is for. The others get an environment override on their own commands.
-- The token stays out of `GIT_CONFIG_VALUE_n` — it travels only through the askpass script's
+- The token stays out of `GIT_CONFIG_VALUE_n` — it travels only through the one-shot helper's
   `LEGION_PROVISIONING_TOKEN`. `isSecretLikeName` (`environment.ts`) matches `_KEY` only at the
   end of a name, so `GIT_CONFIG_KEY_0` is not scrubbed anywhere; a secret placed in a
   `GIT_CONFIG_VALUE_n` would ride any environment that copied these pairs.
 - A git behaviour that differs by version is invisible on a green local run: check
   `git --version` on every surface the code runs on — dev box, CI runner, worker image — before
-  trusting a local pass. The regression test prints its git version
-  (`[workspace.test] git version …; credential.interactive honoured by this git: yes|no`) so
-  a run's evidence says which half of the contract it proved; the test itself is never gated on
-  the version (the helper-consulted half fails on today's code on every git), only the
-  `unable to get password from user` assertion is.
+  trusting a local pass.
 - `jj workspace update-stale` and the settings read/write run without the credential env — only
   the clone and the fetch talk to the remote. Keep it that way; the env is a credential.
 

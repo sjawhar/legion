@@ -990,7 +990,15 @@ describe("ProcessManager", () => {
     expect(commands).toEqual([
       ["jj", "config", "get", "git.abandon-unreachable-commits", "-R", repo],
       ["jj", "config", "set", "--repo", "git.abandon-unreachable-commits", "false", "-R", repo],
-      ["jj", "git", "fetch", "-R", repo],
+      [
+        "jj",
+        "git",
+        "fetch",
+        "--ignore-working-copy",
+        "-R",
+        repo,
+        "--config=git.executable-path=git",
+      ],
       [
         "jj",
         "bookmark",
@@ -1138,17 +1146,30 @@ describe("ProcessManager", () => {
       opts: { cwd: workspace, timeoutMs: 300_000 },
     });
     expect(workspaceCalls).toContainEqual({
-      command: ["jj", "git", "fetch", "-R", repo],
+      command: [
+        "jj",
+        "git",
+        "fetch",
+        "--ignore-working-copy",
+        "-R",
+        repo,
+        "--config=git.executable-path=git",
+      ],
       opts: {
         env: {
-          GIT_ASKPASS: expect.stringMatching(/provisioning-credential-.+\/askpass$/),
+          GIT_ASKPASS: "",
           GIT_TERMINAL_PROMPT: "0",
+          GIT_ALLOW_PROTOCOL: "https",
           LEGION_PROVISIONING_TOKEN: "daemon-installation-token",
-          GIT_CONFIG_COUNT: "2",
+          GIT_CONFIG_COUNT: "3",
           GIT_CONFIG_KEY_0: "credential.helper",
           GIT_CONFIG_VALUE_0: "",
-          GIT_CONFIG_KEY_1: "credential.interactive",
-          GIT_CONFIG_VALUE_1: "true",
+          GIT_CONFIG_KEY_1: "credential.https://github.com.helper",
+          GIT_CONFIG_VALUE_1: expect.stringMatching(
+            /^!'.+\/provisioning-credential-[^/]+\/helper'$/
+          ),
+          GIT_CONFIG_KEY_2: "core.hooksPath",
+          GIT_CONFIG_VALUE_2: "/dev/null",
         },
         timeoutMs: 300_000,
       },
