@@ -135,13 +135,9 @@ func ContainingTextblock(doc *Node, position int) (TextblockAt, bool) {
 	return at, found
 }
 
-// OneLineTextblock reports whether the textblock containing position is written on one markdown
-// line - a heading, or a table cell's paragraph - where a hard break would end the block.
-func OneLineTextblock(doc *Node, position int) bool {
-	at, ok := ContainingTextblock(doc, position)
-	if !ok {
-		return false
-	}
+// OneLine reports whether the textblock is written on one markdown line - a heading, or a table
+// cell's paragraph - where a hard break would end the block.
+func (at TextblockAt) OneLine() bool {
 	parent := at.Ancestors[0]
 	return at.Node.Type == "heading" || parent.Type == "table_cell" || parent.Type == "table_header"
 }

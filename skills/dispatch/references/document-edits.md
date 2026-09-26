@@ -67,14 +67,16 @@ paragraph is rejected (`INVALID_OP` on `with`) — see the recipe for a multi-pa
 renders to no text, which a line indented four spaces or a tab does (markdown reads that as a code block), as does whitespace
 alone. An empty `with` deletes the matched text on purpose; where the block holding it cannot be written without that
 paragraph, the replace is `INVALID_OP`, and the refusal names the `delete` that removes it instead. Inside a code
-block none of this applies: `with` is the code's literal text, written exactly as sent, whitespace, markdown syntax and
-references included. Use zero-based
+block none of this applies: `with` is the code's literal text, written as sent, whitespace, markdown syntax and
+references included, except that line breaks at the end of the code's text, and a line holding only a tab in a list
+item's code, do not survive the next read; and a line that is `:::` in code directly inside a typed block is
+`INVALID_OP`, since it would end the typed block there - indent it, or move the code block out. Use zero-based
 `occurrence` for a
 repeated target; re-read a missing or ambiguous target before retrying. Pass `summary` to name the version when recording a decision.
 
 **Rewriting several paragraphs is one `replace` per paragraph, then a read-back.** `replace` is inline:
-each `with` is the new text of one paragraph, and a `with` that forms two paragraphs is refused whatever the
-text says. Give each paragraph you rewrite its own `replace`, which keeps that paragraph's block id and every
+each `with` is the new text of one paragraph, and outside a code block a `with` that forms two paragraphs is
+refused whatever the text says. Give each paragraph you rewrite its own `replace`, which keeps that paragraph's block id and every
 anchor outside the text you rewrite. A comment or ask anchored to the text you rewrite loses its quote but keeps
 its pin to the block, so the dashboard still shows it beside that paragraph; a delete (below) loses both. An
 anchor that straddles the boundary keeps its mark over the words you left alone, with its quote shortened to
@@ -91,11 +93,15 @@ as literal text, except a backtick fence, which becomes an inline code span whos
 info string and line breaks included (```` ```go\nx := 1``` ```` becomes the code span `go` + a line break +
 `x := 1`), and a tilde fence, which stays literal.
 
-HTML is not written as text at all, and a `replace` whose HTML would open a block where it lands is refused
+Outside a code block, HTML is not written as text at all, and a `replace` whose HTML would open a block where it lands is refused
 (`INVALID_OP` on `with`), because the schema carries no block HTML. `<div>x</div>` and `<!-- note -->` open one
 at the start of a paragraph or a list item and on the line after a hard break; a tag such as `<br>` opens one
 only when it stands alone as a paragraph or a list item. The same HTML inside a line, in a table cell or in a
 heading is inline HTML and is kept as written.
+
+A hard line break in `with` (two trailing spaces or a backslash before a newline) is refused in a heading or a
+table cell (`INVALID_OP` on `with`): both are written on one line, so the break would end the block there. Write
+the text without the break, or `insert` a new block after this one.
 
 When the new text adds a block that is not a paragraph beside paragraphs, `insert` it beside the
 paragraph you replaced, which keeps that paragraph's id; only when no paragraph of the new text is left to take

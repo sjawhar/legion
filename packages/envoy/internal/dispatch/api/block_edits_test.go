@@ -112,6 +112,7 @@ func TestDocumentEditsRefuseAnUnreadableReplaceWithAdviceForItsCause(t *testing.
 		{"emptied list item holding more", "- Body.\n\n  ```\n  code\n  ```\n", "", []string{"delete {block:"}, []string{"find", "HTML"}},
 		{"emptied list, a callout's only block", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n- Body.\n:::\n", "", []string{"delete {block:"}, []string{"HTML"}},
 		{"emptied blockquote, a callout's only block", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n> Body.\n:::\n", "", []string{"delete {block:"}, []string{"HTML"}},
+		{"emptied first paragraph of a list item", "- Body.\n\n  more\n- two\n", "", []string{"remove the paragraph with delete {block:"}, []string{"holding it", "HTML"}},
 		{"emptied only option of an ask", "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich?\n\n- Body.\n:::\n", "", []string{"delete"}, []string{"HTML"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -148,6 +149,74 @@ func TestDocumentEditsRefuseAnUnreadableReplaceWithAdviceForItsCause(t *testing.
 			}, "alice")
 			if followed.Code != http.StatusOK {
 				t.Fatalf("the advised %v: status=%d body=%s", advised, followed.Code, followed.Body.String())
+			}
+		})
+	}
+}
+
+// The directive parser ends a typed block at a line that is `:::` even inside a fenced code block
+// it holds, so a replace or a suggestion that writes such a line into code directly inside a callout
+// would store a document that reads back with the callout cut short. It is refused, and nothing is
+// written; the same line indented, or in code outside a typed block, is stored as sent.
+func TestDocumentEditsRefuseCodeThatWouldEndItsTypedBlock(t *testing.T) {
+	var documentService *docs.Service
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	const inCallout = "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n```\nBody.\n```\n:::\n\nAfter.\n"
+	text := func(artifactID string) string {
+		markdown, err := documentService.Text(context.Background(), artifactID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return markdown
+	}
+	for index, with := range []string{"a\n:::\nb", "a\n::: \nb", ":::\nb", "a\n:::"} {
+		t.Run(with, func(t *testing.T) {
+			issue := createInteractionIssue(t, handler, "E"+string(rune('A'+index)), "closer in code", inCallout)
+			before := text(issue.PrimaryArtifactID)
+			edited := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+				"ops": []map[string]any{{"op": "replace", "find": "Body.", "with": with}},
+			}, "alice")
+			if body := edited.Body.String(); edited.Code != http.StatusBadRequest || !strings.Contains(body, `"code":"INVALID_OP"`) || !strings.Contains(body, "indent") || !strings.Contains(body, "out of the callout") {
+				t.Fatalf("replace: status=%d body=%s", edited.Code, body)
+			}
+			if after := text(issue.PrimaryArtifactID); after != before {
+				t.Fatalf("after a refused replace = %q, want it unchanged, %q", after, before)
+			}
+			created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+				"body": "suggest", "anchor": map[string]any{"artifact": "spec", "quote": "Body."},
+				"suggestion": map[string]string{"replace_with": with}, "actor": sessionActor(),
+			})
+			if created.Code != http.StatusCreated {
+				t.Fatalf("create suggestion: status=%d body=%s", created.Code, created.Body.String())
+			}
+			comment := decodeBody[model.Comment](t, created)
+			accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
+			if body := accepted.Body.String(); accepted.Code != http.StatusBadRequest || !strings.Contains(body, `"code":"INVALID_OP"`) {
+				t.Fatalf("accept: status=%d body=%s", accepted.Code, body)
+			}
+			if after := text(issue.PrimaryArtifactID); after != before {
+				t.Fatalf("after a refused accept = %q, want it unchanged, %q", after, before)
+			}
+		})
+	}
+	for index, test := range []struct{ name, spec, with, want string }{
+		{"the line indented", inCallout, "a\n  :::\nb", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n```\na\n  :::\nb\n```\n:::\n\nAfter.\n"},
+		{"code outside a typed block", "Intro.\n\n```\nBody.\n```\n", "a\n:::\nb", "Intro.\n\n```\na\n:::\nb\n```\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			issue := createInteractionIssue(t, handler, "F"+string(rune('A'+index)), test.name, test.spec)
+			edited := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+				"ops": []map[string]any{{"op": "replace", "find": "Body.", "with": test.with}},
+			}, "alice")
+			if edited.Code != http.StatusOK {
+				t.Fatalf("replace: status=%d body=%s", edited.Code, edited.Body.String())
+			}
+			if after := text(issue.PrimaryArtifactID); after != test.want {
+				t.Fatalf("after replace = %q, want %q", after, test.want)
 			}
 		})
 	}

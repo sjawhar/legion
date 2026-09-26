@@ -124,8 +124,12 @@ fills legacy anchors only when their cached quote has one current match.
 
 Document edits (`POST /api/v1/artifacts/{id}/edits`, `docs/edits.go` `applyOperation`) are
 `replace`, `delete`, `insert`, `retype`, `move`, `delete_row`, and `delete_column`. Inside a code
-block a `replace` writes `with` as the code's literal text, exactly as sent (`codeReplacement`), and
-none of the rules below apply. Everywhere else `replace` is
+block a `replace`, like an accepted suggestion, writes `with` as the code's literal text
+(`codeReplacement`), and none of the rules below apply. Markdown cannot carry two things there: line
+breaks at the end of the code's text and a line holding only a tab in a list item's code read back
+without them; and a line that is `:::` in code directly inside a typed block is refused
+(`refuseCodeThatEndsItsBlock`), because the directive parser - the browser editor's as well as the
+server's - ends the typed block at it. Everywhere else `replace` is
 inline: `with` parses through `pmdoc.ParseInline` (paragraph-only block grammar), so a multi-paragraph
 `with` is `INVALID_OP`, so is any non-empty `with` that renders to no inline content (a line
 indented four spaces or a tab, which markdown reads as a code block, or whitespace alone — an

@@ -686,22 +686,22 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		if err != nil {
 			return nil, err
 		}
-		if code, ok := codeReplacement(tree, r, op.With); ok {
-			next, err := pmdoc.Splice(tree, r, code)
-			if err != nil {
+		at, _ := pmdoc.ContainingTextblock(tree, r.From)
+		code := at.Node.Type == "code_block"
+		var with *pmdoc.Node
+		level := 0
+		if code {
+			with = codeReplacement(op.With)
+		} else {
+			var replacement string
+			if replacement, level, err = replacementMarkdown(tree, r, op.Find, op.With); err != nil {
 				return nil, err
 			}
-			return next, refuseUnreadableReplacement(tree, next, r, op.With)
+			if with, err = inlineReplacement(replacement, edgesOf(at, r)); err != nil {
+				return nil, err
+			}
 		}
-		replacement, level, err := replacementMarkdown(tree, r, op.Find, op.With)
-		if err != nil {
-			return nil, err
-		}
-		with, err := inlineReplacement(replacement, edgesOf(tree, r))
-		if err != nil {
-			return nil, err
-		}
-		if hasHardBreak(with) && pmdoc.OneLineTextblock(tree, r.From) {
+		if hasHardBreak(with) && at.OneLine() {
 			return nil, &ErrInvalidOp{Field: "with", Reason: fmt.Sprintf(
 				"with %q carries a hard break, which a heading or a table cell cannot hold: it is written on one line, so the break would end the block there; write the text without the break, or insert a new block after this one",
 				op.With,
@@ -713,6 +713,9 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		}
 		if err != nil {
 			return nil, err
+		}
+		if code {
+			return next, refuseCodeThatEndsItsBlock(tree, next, r, at, "with", op.With)
 		}
 		return next, refuseUnreadableReplacement(tree, next, r, op.With)
 	case "delete":
@@ -1118,8 +1121,13 @@ func unreadableReason(before, after *pmdoc.Node, match pmdoc.Range, with string,
 				break
 			}
 		}
-		removal := "the whole " + holder
-		if target != at.Ancestors[0] {
+		var removal string
+		switch target {
+		case at.Node:
+			removal = "the paragraph"
+		case at.Ancestors[0]:
+			removal = "the whole " + holder
+		default:
 			removal = "the " + strings.ReplaceAll(target.Type, "_", " ") + " holding it"
 		}
 		return fmt.Sprintf(
@@ -1253,19 +1261,41 @@ func inlineAware(markdown string, edges textEdges) (*pmdoc.Node, error) {
 	return tree, nil
 }
 
-// codeReplacement is what a replacement landing in a code block splices in: a code block's text
-// is literal, whitespace, markdown syntax and references alike, so it is the replacement exactly as
-// sent. It reports false anywhere else.
-func codeReplacement(tree *pmdoc.Node, r pmdoc.Range, text string) (*pmdoc.Node, bool) {
-	at, ok := pmdoc.ContainingTextblock(tree, r.From)
-	if !ok || at.Node.Type != "code_block" {
-		return nil, false
+// refuseCodeThatEndsItsBlock refuses a replacement into a code block that leaves the
+// document-level block holding it reading back as blocks of another shape. The directive parser -
+// the browser editor's as well as this one - ends a typed block at a line that is `:::` even inside
+// a fenced code block it holds, so such a line in code directly inside a callout cuts the callout
+// short on the next read, and the rest of the code and everything after it leave the callout. Code
+// that only reads back with different whitespace keeps its shape and is not refused.
+func refuseCodeThatEndsItsBlock(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.TextblockAt, field, with string) error {
+	index, err := pmdoc.BlockIndex(before, match)
+	if err != nil {
+		return err
 	}
+	if pmdoc.BlockKeepsItsShape(after.Children[index]) || !pmdoc.BlockKeepsItsShape(before.Children[index]) {
+		return nil
+	}
+	holder := after.Children[index].Type
+	for _, ancestor := range at.Ancestors {
+		if pmdoc.IsTypedBlock(ancestor.Type) {
+			holder = ancestor.Type
+			break
+		}
+	}
+	return &ErrInvalidOp{Field: field, Reason: fmt.Sprintf(
+		"%s %q puts a line in this code block that the %s around it reads as its closing `:::`, so on the next read the %s would end there and the code after it would leave the %s; indent that line, or move the code block out of the %s",
+		field, with, holder, holder, holder, holder,
+	)}
+}
+
+// codeReplacement is what a replacement landing in a code block splices in: a code block's text
+// is literal, whitespace, markdown syntax and references alike, so it is the replacement as sent.
+func codeReplacement(text string) *pmdoc.Node {
 	paragraph := &pmdoc.Node{Type: "paragraph"}
 	if text != "" {
 		paragraph.Children = []*pmdoc.Node{{Type: "text", Text: text}}
 	}
-	return &pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{paragraph}}, true
+	return &pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{paragraph}}
 }
 
 // textEdges reports which of a replacement's edges meet the edges of the text it lands in, where
@@ -1273,11 +1303,7 @@ func codeReplacement(tree *pmdoc.Node, r pmdoc.Range, text string) (*pmdoc.Node,
 // footnote's marker, opens indented code.
 type textEdges struct{ start, end bool }
 
-func edgesOf(tree *pmdoc.Node, r pmdoc.Range) textEdges {
-	at, ok := pmdoc.ContainingTextblock(tree, r.From)
-	if !ok {
-		return textEdges{}
-	}
+func edgesOf(at pmdoc.TextblockAt, r pmdoc.Range) textEdges {
 	return textEdges{start: r.From == at.Content.From, end: r.To == at.Content.To}
 }
 

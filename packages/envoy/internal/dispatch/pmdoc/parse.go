@@ -86,20 +86,48 @@ func ParseInline(markdown string) ([]*Node, error) {
 }
 
 // BlockReadError is the parser's refusal of a document-level block's markdown, or nil when the
-// parser reads it back. The parser reads a footnote definition only when something refers to it,
-// so a definition is read after a reference to it.
+// parser reads it back.
 func BlockReadError(block *Node) error {
-	blocks := []*Node{block}
-	if block.Type == "footnote_definition" {
-		reference := &Node{Type: "footnote_reference", Attrs: Attrs{"label": block.Attrs["label"]}}
-		blocks = []*Node{{Type: "paragraph", Children: []*Node{reference}}, block}
-	}
-	markdown, err := Render(&Node{Type: "doc", Children: blocks})
+	markdown, err := Render(readAlone(block))
 	if err != nil {
 		return err
 	}
 	_, err = Parse(markdown)
 	return err
+}
+
+// BlockKeepsItsShape reports whether a document-level block's markdown reads back as blocks of
+// the same kinds, nested the same way. What a textblock holds is not compared.
+func BlockKeepsItsShape(block *Node) bool {
+	doc := readAlone(block)
+	markdown, err := Render(doc)
+	if err != nil {
+		return false
+	}
+	back, err := Parse(markdown)
+	return err == nil && blockShape(back) == blockShape(doc)
+}
+
+// blockShape names a node's kind and, for a node that is not a textblock, its children's shapes.
+func blockShape(node *Node) string {
+	if isTextblock(node.Type) {
+		return node.Type
+	}
+	shape := node.Type + "("
+	for _, child := range node.Children {
+		shape += blockShape(child) + ","
+	}
+	return shape + ")"
+}
+
+// readAlone is the document a block is read in on its own: a footnote definition after a
+// reference to it, since the parser reads a definition only when something refers to it.
+func readAlone(block *Node) *Node {
+	if block.Type != "footnote_definition" {
+		return &Node{Type: "doc", Children: []*Node{block}}
+	}
+	reference := &Node{Type: "footnote_reference", Attrs: Attrs{"label": block.Attrs["label"]}}
+	return &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{reference}}, block}}
 }
 
 // textOutside is the first line of text after the paragraph's last line. The inline parser knows
