@@ -99,14 +99,15 @@ arrives as a wake. At every start, before anything else:
    nothing from you: a failed architect ignores the park and reads `failed` until the tree closes.
 2. List the project's triage issues with `dispatch_issues({project, status: "triage", limit: 250})`.
    When its first line ends `(showing N of M)`, it is one page: say in your summary how many rows
-   it left unread. The rows show no parent, so open each row that `legion state --json` does not
-   record under `issues` with `dispatch_read`: one whose `Links:` name a `child_of` issue is a
-   child, which its parent's architect owns, so leave it (a `child_of` under `Referenced by:` is a
-   child of this issue, not its parent). Triage every other one as a new issue. A root recorded in
-   `legion state` and now in `triage` is work the daemon holds that a human pulled back:
-   never re-admit it yourself; name it in your summary to the human ("<KEY> was pulled back to
-   triage; what do you want?"). This listing is also the only way you learn of an unrecorded root
-   moved back into triage, since the daemon wakes you only on a root's creation.
+   it left unread. The rows show no parent, so open each row with `dispatch_read`: one whose
+   `Links:` name a `child_of` issue is a child, which its parent's architect owns, so leave it,
+   whether or not `legion state --json` records it (a `child_of` under `Referenced by:` is a child
+   of this issue, not its parent). Of the rest, triage each that `legion state --json` does not
+   record under `issues` as a new issue. A root recorded there and now in `triage` is work the
+   daemon holds that a human pulled back: never re-admit it yourself; name it in your summary to
+   the human ("<KEY> was pulled back to triage; what do you want?"). This listing is also the only
+   way you learn of an unrecorded root moved back into triage, or of a child detached to a root
+   while it is in triage, since the daemon wakes you only on a root's creation.
 
 The issue record and Dispatch are the truth; the topic is the wake.
 

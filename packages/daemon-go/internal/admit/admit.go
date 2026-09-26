@@ -62,7 +62,8 @@ func (a *Admission) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (int
 	if stored == nil {
 		// A root created in triage is the controller's to triage. Its creation is the one
 		// observation that comes once per issue, so it alone wakes the controller; the record stays
-		// empty, as for any root not yet todo, and the boot listing (Reconcile) never wakes it.
+		// empty, as for any root not yet todo. The boot listing (Reconcile) never sees it: it reads
+		// only the workflow's statuses, todo to retro.
 		if observation.Type == "issue.created" && observation.Status == "triage" && observation.Parent == "" {
 			if err := a.enqueue(ctx, tx, observation.Key, record.ControllerNotice{Kind: "triage"}, a.now()); err != nil {
 				return intake.Result{}, err

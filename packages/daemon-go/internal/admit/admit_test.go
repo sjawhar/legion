@@ -151,10 +151,9 @@ func TestARootCreatedInTriageWakesTheControllerOnce(t *testing.T) {
 	assertWaiting(t, pool, nil)
 }
 
-// A child created in triage is its parent's architect's, a recorded root set back to triage is a
-// human's move on work the daemon already holds, and the boot listing re-reads every issue at every
-// restart: none of them wakes the controller for triage.
-func TestNoTriageWakeForAChildARecordedRootOrTheBootListing(t *testing.T) {
+// A child created in triage is its parent's architect's, and a recorded root set back to triage is
+// a human's move on work the daemon already holds: neither wakes the controller for triage.
+func TestNoTriageWakeForAChildOrARecordedRoot(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		run  func(t *testing.T, pool *pgxpool.Pool, admission *Admission)
@@ -165,9 +164,6 @@ func TestNoTriageWakeForAChildARecordedRootOrTheBootListing(t *testing.T) {
 		{"a recorded root set back to triage", func(t *testing.T, pool *pgxpool.Pool, admission *Admission) {
 			seedWaiting(t, pool, "LEGION-302", "A")
 			apply(t, pool, admission, "back", intake.DispatchIssue{Key: "LEGION-302", Seq: 2, Type: "issue.updated", Status: "triage", Title: "waiting", Rank: "A"}, engineStub{})
-		}},
-		{"the boot listing", func(t *testing.T, pool *pgxpool.Pool, admission *Admission) {
-			reconcile(t, pool, admission, []dispatch.IssueSummary{{Key: "LEGION-303", Status: "triage", Title: "Listed", Rank: "A", LastSeq: 1}})
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
