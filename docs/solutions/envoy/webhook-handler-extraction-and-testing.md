@@ -106,7 +106,7 @@ Table-driven tests with `httptest.NewRequest` + `httptest.NewRecorder`. Every ha
 | 7 | Invalid signature | 401 |
 | 8 | No secret configured | Skip verification, 200 |
 | 9 | Event/payload type mismatch | 400 |
-| 10 | Publish failure | 503 (provider will retry) |
+| 10 | Publish failure | 503 (Slack retries the delivery; GitHub does not redeliver a failed one on its own) |
 
 ### Provider-specific additions
 
@@ -138,4 +138,6 @@ nowTS := strconv.FormatInt(time.Now().Unix(), 10)
 
 ## Webhook routes during startup
 
-Webhook handlers need NATS to publish, but NATS connects asynchronously after startup. main registers every enabled webhook path on one `startingGate` before the HTTP server starts, so a delivery during startup is answered `503 service starting` (GitHub retries it). Once NATS and every store are open, main builds each route's handler over the complete `listenerDeps` and opens the gate onto them, so a handler is only ever constructed with, and holds, dependencies that exist.
+Webhook handlers need NATS to publish, but NATS connects asynchronously after startup. main registers every enabled webhook path on one `startingGate` before the HTTP server starts, so a delivery during startup is answered `503 service starting`. GitHub records that delivery as failed and does not redeliver it on its own. Once NATS and every store are open, main builds each route's handler over the complete `listenerDeps` and opens the gate onto them, so a handler is only ever constructed with, and holds, dependencies that exist.
+
+Legion (the TypeScript daemon) recovers part of what a lost GitHub delivery carried. Its resync (`packages/daemon/src/daemon/resync.ts`, `reconcilePrs`) re-reads the head and check rollup of every open pull request it has registered, so a missed checks settlement or head change is repaired on the next resync. A worker's catch-up (`catchup.ts`, `workerCatchup`) re-reads the pull request's comments, review comments and reviews, but only when that worker is next woken. Nothing recovers the rest: a missed `opened` leaves the pull request unregistered until a later `synchronize` (its next push) registers it, and resync reads only registered ones; a missed close or merge is never applied, because resync skips a pull request GitHub reports closed (`resync.ts:102`); and no resync step re-reads a branch push.
