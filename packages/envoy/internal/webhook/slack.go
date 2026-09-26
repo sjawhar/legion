@@ -3,7 +3,6 @@ package webhook
 import (
 	"encoding/json"
 	"io"
-	"log"
 	"net/http"
 
 	"github.com/sjawhar/envoy/internal/contracts"
@@ -55,8 +54,7 @@ func SlackHandler(secret string, publisher Publisher) http.HandlerFunc {
 					continue
 				}
 				if err := publisher.Publish(item); err != nil {
-					log.Printf("slack publish failed: %v", err)
-					http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+					publishFailed(w, "slack", err)
 					return
 				}
 			}

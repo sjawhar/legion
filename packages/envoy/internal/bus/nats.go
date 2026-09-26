@@ -674,6 +674,34 @@ func usesCoreTransport(topic string) bool {
 		strings.HasPrefix(topic, "notifications.envoy.exceptions."+contracts.RoleTopicPrefix)
 }
 
+// ErrTooLarge is returned for an envelope NATS cannot take whole, which it refuses the same way
+// however often it is published: a message past the server's max payload, which nats.go refuses
+// before sending it, or a subject past maxSubjectBytes.
+var ErrTooLarge = errors.New("bus: too large for NATS to take whole")
+
+// maxSubjectBytes bounds a subject the bus publishes on. The server closes a connection whose
+// protocol line runs past its max control line (4 KiB by default) and nats.go does not check it,
+// so a longer subject would close the connection every subscription and watcher of the client runs
+// on, a core publish reporting success first. The line carries a reply inbox and two lengths
+// besides, which 128 bytes covers.
+const maxSubjectBytes = 4<<10 - 128
+
+// checkSubject refuses a subject the server would close the connection over.
+func checkSubject(subject string) error {
+	if len(subject) > maxSubjectBytes {
+		return fmt.Errorf("%w: a subject of %d bytes, past %d", ErrTooLarge, len(subject), maxSubjectBytes)
+	}
+	return nil
+}
+
+// tooLarge reports nats.go's refusal of a message past the server's max payload as ErrTooLarge.
+func tooLarge(err error) error {
+	if errors.Is(err, nats.ErrMaxPayload) {
+		return fmt.Errorf("%w: %w", ErrTooLarge, err)
+	}
+	return err
+}
+
 // Publish routes role lanes and their delivery-exception lanes through core
 // NATS; every other notification retains JetStream durability. Its signature is
 // an interface method in cistore, outbox and webhook, so a caller that wants
@@ -706,6 +734,9 @@ func (c *Client) PublishReportingDuplicate(item contracts.Envelope) (bool, error
 // several topics under one key - a GitHub comment that mentions the trigger is published on its
 // mention topic beside its comment topic - and each of those must be retained.
 func (c *Client) publishJetStream(item contracts.Envelope) (bool, error) {
+	if err := checkSubject(item.Topic); err != nil {
+		return false, err
+	}
 	data, err := json.Marshal(item)
 	if err != nil {
 		return false, err
@@ -727,7 +758,7 @@ func (c *Client) publishJetStream(item contracts.Envelope) (bool, error) {
 		ack, err = c.js.Publish(item.Topic, data, options...)
 	}
 	if err != nil {
-		return false, err
+		return false, tooLarge(err)
 	}
 	return ack.Duplicate, nil
 }
@@ -742,6 +773,9 @@ func (c *Client) PublishCore(item contracts.Envelope) error {
 // from item.Topic when an authoritative router forwards an envelope while
 // retaining its original topic for the recipient.
 func (c *Client) PublishCoreTo(subject string, item contracts.Envelope) error {
+	if err := checkSubject(subject); err != nil {
+		return err
+	}
 	data, err := json.Marshal(item)
 	if err != nil {
 		return err
@@ -751,7 +785,7 @@ func (c *Client) PublishCoreTo(subject string, item contracts.Envelope) error {
 	if err := c.ensureConnWithContext(ctx); err != nil {
 		return err
 	}
-	return c.Conn.Publish(subject, data)
+	return tooLarge(c.Conn.Publish(subject, data))
 }
 
 // ErrReceiptTimeout is returned by RequestCoreTo only when the publish and the
@@ -769,6 +803,9 @@ var ErrReceiptTimeout = errors.New("bus: no receipt inside the request window")
 // The flush is bounded by the same window as the receipt wait, so the call
 // never outlives timeout by the client's default 10 s flush.
 func (c *Client) RequestCoreTo(subject string, item contracts.Envelope, timeout time.Duration) error {
+	if err := checkSubject(subject); err != nil {
+		return err
+	}
 	data, err := json.Marshal(item)
 	if err != nil {
 		return err
@@ -786,7 +823,7 @@ func (c *Client) RequestCoreTo(subject string, item contracts.Envelope, timeout 
 	}
 	defer receipt.Unsubscribe()
 	if err := c.Conn.PublishRequest(subject, inbox, data); err != nil {
-		return err
+		return tooLarge(err)
 	}
 	remaining := time.Until(deadline)
 	if remaining <= 0 {

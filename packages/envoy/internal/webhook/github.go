@@ -223,8 +223,7 @@ func githubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 				return
 			}
 			if err := publisher.Publish(item); err != nil {
-				log.Printf("github publish failed: %v", err)
-				http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+				publishFailed(w, "github", err)
 				return
 			}
 		}
