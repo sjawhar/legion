@@ -1049,7 +1049,7 @@ begin model-turns-through-the-gateway
 route=$(bash "$root/scripts/e2e/lib/check-model-route.sh" --sessions "$HOME/.omp/profiles/$profile/agent/sessions" \
   --control "$evidence/model-route-control") || fail "an agent turn left the gateway route, or the check proved nothing (the reason is above)"
 note "$route"
-note "the key command ran $(grep -c ' invoked by pid ' "$evidence/model-gateway/hawk-token.log") times and minted $(grep -c ' minted a key for pid ' "$evidence/model-gateway/hawk-token.log") ($evidence/model-gateway/hawk-token.log)"
+note "the key command ran $(grep -c ' invoked by pid ' "$evidence/model-gateway/hawk-token.log" || true) times and minted $(grep -c ' minted a key for pid ' "$evidence/model-gateway/hawk-token.log" || true) ($evidence/model-gateway/hawk-token.log)"
 # The kept transcripts must hold exactly the turns, sessions and subagents the check read, so a turn
 # taken after the read, or a session the copy lost, fails here rather than passing unseen.
 collect_transcripts

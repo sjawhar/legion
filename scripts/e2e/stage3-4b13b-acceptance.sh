@@ -615,7 +615,7 @@ chmod 0600 "$work"/*token "$work/envoy-auth-header" "$work/postgres-password"
 vcs_rev=$(go version -m "$work/legion" | sed -n 's/^[[:space:]]*build[[:space:]]*vcs\.revision=//p')
 [ "$vcs_rev" = "$head_commit" ] || fail "the daemon binary's vcs.revision is '$vcs_rev', want $head_commit"
 "$work/legion" version | grep -qF "commit $head_commit" || fail "the daemon binary's main.revision is not $head_commit"
-note "daemon binary stamped vcs.revision=$vcs_rev, $(go version -m "$work/legion" | sed -n 's/^[[:space:]]*build[[:space:]]*//p' | grep vcs.modified); $evidence/binary-stamp.txt"
+note "daemon binary stamped vcs.revision=$vcs_rev, $(go version -m "$work/legion" | sed -n 's/^[[:space:]]*build[[:space:]]*//p' | { grep vcs.modified || true; }); $evidence/binary-stamp.txt"
 PGPASSWORD=ci psql -h 127.0.0.1 -p "$port_pg" -U "$pg_user" -d postgres -v ON_ERROR_STOP=1 -qc "create database $legion_db" -c "create database $dispatch_db" ||
   fail "could not create $legion_db and $dispatch_db in the shared Postgres $pg_container on port $port_pg"
 pick_port port_nats
@@ -671,7 +671,7 @@ stat -c '%n %.9Y' "$pdir"/*.md >"$evidence/prompts-mtime-before.txt"
 cp "$evidence/merger.base.md" "$pdir/merger.md"
 # negative control: the stale part is observably different before the restart
 cmp -s "$pdir/merger.md" "$root/packages/daemon-go/internal/prompts/go/merger.md" && fail "the planted stale merger.md equals the embedded one"
-note "planted the base ($base_rev) merger.md: $(grep -c 'publish READY yourself' "$pdir/merger.md") line(s) telling the merger it publishes nothing and to send ready:true, $(wc -c <"$pdir/merger.md") bytes"
+note "planted the base ($base_rev) merger.md: $(grep -c 'publish READY yourself' "$pdir/merger.md" || true) line(s) telling the merger it publishes nothing and to send ready:true, $(wc -c <"$pdir/merger.md") bytes"
 sleep 1.1
 stop_daemon
 start_daemon keep
@@ -782,7 +782,7 @@ subagent_watch() {
 }
 gate_finish "$root1"
 until_true 600 "the daemon's assignment to arm $root1's planner stall" assignment_delivered "$root1" planner
-note "root1 planner stall entries at its assignment: $(grep -F '"customType":"legion-phase-stall"' "$(root1_planner_file)" | jq -r .data.state | tr '\n' ' ')"
+note "root1 planner stall entries at its assignment: $({ grep -F '"customType":"legion-phase-stall"' "$(root1_planner_file)" || true; } | jq -r .data.state | tr '\n' ' ')"
 marker_plan="PANE-PROBE-PLANNER-$stamp"
 send_agent "$root1" planner "Acceptance planning operation with a pane-rule probe ($marker_plan). Step 1: write the required .legion/plan.json handoff for the one-file smoke change with the legion tool's handoff_write and commit it as your instructions require, but do NOT call handoff_complete yet. Step 2: this is a deliberate proof of the pane's shell rule, so the first three calls are expected to be refused by your pane and the refusal is what this proof records; run them anyway, exactly as written, each as its own tool call, one at a time: (a) your bash tool with the command: legion handoff complete --summary 'planner plain probe'  (b) your bash tool with the command: bash -lc \"legion handoff complete --summary 'planner bash -lc probe'\"  (c) your eval tool with code that runs the shell command legion handoff complete --summary 'planner eval probe' through a subprocess  (d) your bash tool with the command: legion handoff read --phase plan. Step 3: end your turn with one line per call giving its outcome. Do not call the legion tool's handoff_complete in this turn, and do not begin any line with WAITING."
 gate_finish "$root2"
@@ -1023,7 +1023,7 @@ begin retros
 # merging, held.
 merging_and_held() { issue_phase "$1" merging && instructed "$1" merger merging; }
 for issue in "$root1" "$root2" "$root3"; do until_true 1800 "$issue in merging with its merger held" merging_and_held "$issue"; done
-note "each merger held at its assignment: $(grep ' merger merging' "$evidence/instructor.log" | tr '\n' ';')"
+note "each merger held at its assignment: $({ grep ' merger merging' "$evidence/instructor.log" || true; } | tr '\n' ';')"
 pass
 
 # ---- 6. an early merge: pr-merged, and no READY for a merged PR ----------------------------------------
