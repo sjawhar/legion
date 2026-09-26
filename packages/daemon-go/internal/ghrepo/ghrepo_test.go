@@ -15,8 +15,13 @@ func TestParse(t *testing.T) {
 		t.Fatalf(`Parse("acme/widgets") = %#v (%s), %v, want acme, widgets`, repository, repository, err)
 	}
 	valid := []string{"sjawhar/.github", "sjawhar/legion-smoke", "my-org/a_b.c", "A1/-lead", "a/b..c", "o/...",
-		// Owners GitHub serves that its sign-up form would refuse today.
-		"ArtOfCode-/APiPy", "hello--world/a", "foo--bar/arthanaya", "mona-cat_octo/scratch",
+		// Public accounts GitHub serves that its sign-up form would refuse today.
+		"ArtOfCode-/APiPy", "hello--world/a", "foo--bar/arthanaya",
+		// A managed user's login, `<name>_<shortcode>`: GitHub's documented pattern for Enterprise
+		// Managed Users, not a public account.
+		"mona-cat_octo/scratch",
+		// Only a lowercase ".git" is stripped, so a suffix in another case is part of the name.
+		"acme/widgets.GIT",
 		// GitHub's limits exactly: a 39-character owner, a 100-character name.
 		strings.Repeat("o", 39) + "/b", "a/" + strings.Repeat("n", 100),
 	}
@@ -46,8 +51,9 @@ func TestParse(t *testing.T) {
 		// URL metacharacters, which end the path of the URL a clone names.
 		{"a/b#frag", `--repo "a/b#frag"` + name},
 		{"a/b?x", `--repo "a/b?x"` + name},
-		// A percent escape, which a URL decodes into another path.
+		// A percent escape, which a URL decodes into another path, in an owner or a name.
 		{"a%2F/b", `--repo "a%2F/b"` + owner},
+		{"a/b%2Fc", `--repo "a/b%2Fc"` + name},
 		// A hyphen or an underscore beginning an owner, which no login does.
 		{"-a/b", `--repo "-a/b"` + owner},
 		{"_a/b", `--repo "_a/b"` + owner},
