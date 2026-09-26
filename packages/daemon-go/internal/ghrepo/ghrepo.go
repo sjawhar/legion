@@ -14,12 +14,17 @@ import (
 )
 
 var (
-	// ownerName is GitHub's grammar for an account: letters, digits and single hyphens, beginning
-	// and ending with a letter or digit.
-	ownerName = regexp.MustCompile(`^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$`)
-	// repositoryName is GitHub's grammar for a repository's own name: letters, digits, `-`, `_`
-	// and `.` (`.` and `..` alone are refused as segments before it is asked).
-	repositoryName = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+	// ownerName is GitHub's grammar for an account as GitHub serves them: a letter or digit, then
+	// up to 38 letters, digits, hyphens and underscores. The sign-up form's stricter rule (single
+	// hyphens, none leading or trailing) is enforced only on new accounts: older logins still
+	// served end in a hyphen or double one (`ArtOfCode-`, `hello--world`, the organisation
+	// `foo--bar`), and a managed user's login ends in `_<shortcode>` (`mona-cat_octo`). Refusing
+	// them would make their repositories unconfigurable, and none of them can hold what this rule
+	// exists to keep out.
+	ownerName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,38}$`)
+	// repositoryName is GitHub's grammar for a repository's own name: at most 100 letters, digits,
+	// `-`, `_` and `.` (`.` and `..` alone are refused as segments before it is asked).
+	repositoryName = regexp.MustCompile(`^[A-Za-z0-9._-]{1,100}$`)
 )
 
 // Repository is a GitHub repository as Parse read it. Its names are unexported, so outside this
@@ -60,7 +65,7 @@ func MustParse(repository string) Repository {
 // may be `.` or `..`, which joined under a state directory would name another directory than the
 // repository's (and provisioning removes an incomplete clone at that path); and each must be one
 // GitHub allows. That last rule keeps out what a GitHub name never holds but a path, a URL, a NATS
-// subject or a terminal would act on: control bytes, `#` and `?`, a hyphen that begins an owner, and the NATS
+// subject or a terminal would act on: control bytes, `#` and `?`, a hyphen that begins an owner, a name longer than GitHub's limit, and the NATS
 // wildcards `*` and `>`, with which intake's `notifications.github.<owner>.<name>.>` filter would
 // match other repositories' events.
 func Parse(what, repository string) (Repository, error) {
@@ -77,10 +82,10 @@ func Parse(what, repository string) (Repository, error) {
 		}
 	}
 	if !ownerName.MatchString(owner) {
-		return Repository{}, fmt.Errorf(`%s %q has an owner GitHub does not allow: letters, digits and single hyphens, not beginning or ending with a hyphen`, what, repository)
+		return Repository{}, fmt.Errorf(`%s %q has an owner GitHub does not allow: at most 39 letters, digits, "-" and "_", beginning with a letter or digit`, what, repository)
 	}
 	if !repositoryName.MatchString(name) {
-		return Repository{}, fmt.Errorf(`%s %q has a name GitHub does not allow: letters, digits, "-", "_" and "."`, what, repository)
+		return Repository{}, fmt.Errorf(`%s %q has a name GitHub does not allow: at most 100 letters, digits, "-", "_" and "."`, what, repository)
 	}
 	return Repository{owner: owner, name: name}, nil
 }

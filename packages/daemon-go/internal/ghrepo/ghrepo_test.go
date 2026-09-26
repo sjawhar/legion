@@ -2,6 +2,7 @@ package ghrepo
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -13,13 +14,21 @@ func TestParse(t *testing.T) {
 	if err != nil || repository.Owner() != "acme" || repository.Name() != "widgets" || repository.String() != "acme/widgets" {
 		t.Fatalf(`Parse("acme/widgets") = %#v (%s), %v, want acme, widgets`, repository, repository, err)
 	}
-	for _, valid := range []string{"sjawhar/.github", "sjawhar/legion-smoke", "my-org/a_b.c", "A1/-lead", "a/b..c", "o/..."} {
+	valid := []string{"sjawhar/.github", "sjawhar/legion-smoke", "my-org/a_b.c", "A1/-lead", "a/b..c", "o/...",
+		// Owners GitHub serves that its sign-up form would refuse today.
+		"ArtOfCode-/APiPy", "hello--world/a", "foo--bar/arthanaya", "mona-cat_octo/scratch",
+		// GitHub's limits exactly: a 39-character owner, a 100-character name.
+		strings.Repeat("o", 39) + "/b", "a/" + strings.Repeat("n", 100),
+	}
+	for _, valid := range valid {
 		if parsed, err := Parse("--repo", valid); err != nil || parsed.String() != valid {
 			t.Errorf("Parse(%q) = %s, %v, want it read as written", valid, parsed, err)
 		}
 	}
-	const owner = ` has an owner GitHub does not allow: letters, digits and single hyphens, not beginning or ending with a hyphen`
-	const name = ` has a name GitHub does not allow: letters, digits, "-", "_" and "."`
+	const owner = ` has an owner GitHub does not allow: at most 39 letters, digits, "-" and "_", beginning with a letter or digit`
+	const name = ` has a name GitHub does not allow: at most 100 letters, digits, "-", "_" and "."`
+	long := strings.Repeat("o", 40) + "/b"
+	longer := "a/" + strings.Repeat("n", 101)
 	for _, tc := range []struct{ repository, want string }{
 		{"", `--repo must be "owner/name" (got "")`},
 		{"acme", `--repo must be "owner/name" (got "acme")`},
@@ -38,10 +47,12 @@ func TestParse(t *testing.T) {
 		{"a/b#frag", `--repo "a/b#frag"` + name},
 		{"a/b?x", `--repo "a/b?x"` + name},
 		{"a%2F/b", `--repo "a%2F/b"` + owner},
-		// A hyphen where GitHub allows none in an owner.
+		// A hyphen or an underscore beginning an owner, which no login does.
 		{"-a/b", `--repo "-a/b"` + owner},
-		{"a-/b", `--repo "a-/b"` + owner},
-		{"a--b/c", `--repo "a--b/c"` + owner},
+		{"_a/b", `--repo "_a/b"` + owner},
+		// Past GitHub's limits: a 40-character owner, a 101-character name.
+		{long, `--repo "` + long + `"` + owner},
+		{longer, `--repo "` + longer + `"` + name},
 		// NATS wildcards, which in intake's GitHub filter would match other repositories.
 		{"a/*", `--repo "a/*"` + name},
 		{"a/>", `--repo "a/>"` + name},
