@@ -92,12 +92,12 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 		if len(local.added) > 1 {
 			keep, commit = "one of its added commits", "<commit>"
 		}
-		fromMain := fmt.Sprintf("`jj bookmark delete %s --ignore-working-copy -R %s`", workspace.Bookmark, cloneDir)
+		startAtMain := fmt.Sprintf("`jj bookmark delete %s --ignore-working-copy -R %s`", workspace.Bookmark, cloneDir)
 		if origin.present {
-			fromMain = fmt.Sprintf("delete the branch on GitHub (the pull request's Delete branch button, or `gh api -X DELETE repos/%s/git/refs/heads/%s`) and run %s", workspace.Repo, workspace.Bookmark, fromMain)
+			startAtMain = fmt.Sprintf("delete the branch on GitHub (the pull request's Delete branch button, or `gh api -X DELETE repos/%s/git/refs/heads/%s`) and run %s", workspace.Repo, workspace.Bookmark, startAtMain)
 		}
 		return fmt.Errorf("Bookmark %s is conflicted %s; workspace %s was not created. Keep %s: `jj bookmark set %s -r %s --ignore-working-copy -R %s`. Start from main instead: %s, and the next provisioning starts at main",
-			workspace.Bookmark, local.sides(), workspace.Dir, keep, workspace.Bookmark, commit, cloneDir, fromMain)
+			workspace.Bookmark, local.sides(), workspace.Dir, keep, workspace.Bookmark, commit, cloneDir, startAtMain)
 	case local.present:
 		revision = local.added[0]
 	case origin.conflict:
