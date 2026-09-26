@@ -152,6 +152,8 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 		{name: "a code push, then a handoff push on top of it, neither head arrived", steps: []string{"approve head", "push code", "push handoff head-3", "complete"}, want: phase.Reviewing},
 		{name: "a code push that does not say which head it replaced", steps: []string{"approve head", "push code unplaced", "complete"}, want: phase.Reviewing},
 		{name: "a code push that did not say which head it replaced, then the branch moves on without it", steps: []string{"approve head", "sync", "push handoff", "push code unplaced head-x", "sync head-3", "push handoff head-3", "green head-3", "complete"}, want: phase.Retro},
+		{name: "a code head never synchronized, under a handoff head, pushes first", steps: []string{"push code", "push handoff head-3", "sync head-3", "green head-3", "approve head", "complete"}, want: phase.Reviewing},
+		{name: "a code head never synchronized, under a handoff head, the head first", steps: []string{"sync head-3", "push code", "push handoff head-3", "green head-3", "approve head", "complete"}, want: phase.Reviewing},
 		{name: "a late code push for a head already replaced", steps: []string{"approve head", "sync", "push handoff", "push code head-x", "green", "complete"}, want: phase.Retro},
 		{name: "two handoff pushes, each before its head", steps: []string{"approve head", "push handoff", "sync", "push handoff head-3", "sync head-3", "green head-3", "complete"}, want: phase.Retro},
 		{name: "two handoff pushes, each after its head", steps: []string{"approve head", "sync", "push handoff", "sync head-3", "push handoff head-3", "green head-3", "complete"}, want: phase.Retro},

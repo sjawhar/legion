@@ -8,8 +8,9 @@ import "github.com/sjawhar/legion/daemon/internal/record"
 // decides the planned mark (the review App's sets it, anyone else's clears it); a handoff-only
 // head, or one whose push has not arrived (ApplyPush settles it), carries it. All other
 // head-scoped state is reset regardless of its source. The code chain (CodeHeads) grows by a
-// head whose push changed only .legion/; any other head, or one whose push is still to come,
-// leaves it ending at the head replaced, which is then no longer the current one.
+// head whose push changed only .legion/ and replaced the head the chain ends at; any other head -
+// a code push's, one whose push is still to come, or one whose push replaced a head that never
+// arrived here - leaves it ending at the head replaced, which is then no longer the current one.
 func AdvancePullRequestHead(pr record.PullRequest, headSHA string) record.PullRequest {
 	var pending *record.PendingPush
 	for i, p := range pr.PendingPushes {
@@ -23,7 +24,7 @@ func AdvancePullRequestHead(pr record.PullRequest, headSHA string) record.PullRe
 	// the push this head's arrival consumed: it is dropped with the late ones.
 	pr.PendingPushes = pathFrom(pr.PendingPushes, headSHA, false)
 	pr.CodeHeads = chainAt(pr.CodeHeads, pr.HeadSHA)
-	if pending != nil && pending.HandoffOnly {
+	if pending != nil && pending.HandoffOnly && pending.Before == pr.HeadSHA {
 		pr.CodeHeads = append(pr.CodeHeads, headSHA)
 	}
 	if pr.Verdict == "red" && !pr.PlannedRed && (pending == nil || (!pending.HandoffOnly && !pending.ByReviewApp)) {
@@ -54,7 +55,7 @@ func ApplyPush(pr record.PullRequest, before, after string, classification PushC
 	if pr.HeadSHA == after {
 		if !classification.HandoffOnly {
 			pr.PlannedRed = byReviewApp
-		} else if !holds(pr.CodeHeads, after) {
+		} else if n := len(pr.CodeHeads); n > 0 && pr.CodeHeads[n-1] == before {
 			pr.CodeHeads = append(append([]string(nil), pr.CodeHeads...), after)
 		}
 		if (classification.HandoffOnly || byReviewApp) && pr.HeadCounted == after {
