@@ -150,8 +150,15 @@ func AgentSubject(session string) string {
 	return AgentTopicPrefix + session
 }
 
+// githubRepositoryPrefix begins every GitHub subject with its repository's owner and name, each one
+// segment: a name may hold a dot, which a NATS subject splits on. Mirrored on the TS side as
+// `githubRepositoryPrefix`.
+func githubRepositoryPrefix(owner, repo string) string {
+	return "notifications.github." + SanitizeSubjectSegment(owner) + "." + SanitizeSubjectSegment(repo)
+}
+
 func GithubSubject(owner string, repo string, kind string) string {
-	return "notifications.github." + owner + "." + repo + "." + kind
+	return githubRepositoryPrefix(owner, repo) + "." + kind
 }
 
 func SlackSubject(team string, channel string, kind string) string {
@@ -169,15 +176,15 @@ func SlackThreadSubject(team, channel, threadTs, kind string) string {
 }
 
 func GithubPushSubject(owner, repo, refType, refName string) string {
-	return "notifications.github." + owner + "." + repo + ".push." + refType + "." + SanitizeSubjectSegment(refName)
+	return githubRepositoryPrefix(owner, repo) + ".push." + refType + "." + SanitizeSubjectSegment(refName)
 }
 
 func GithubWorkflowSubject(owner, repo, workflowFilename, action string) string {
-	return "notifications.github." + owner + "." + repo + ".workflow." + SanitizeSubjectSegment(workflowFilename) + "." + action
+	return githubRepositoryPrefix(owner, repo) + ".workflow." + SanitizeSubjectSegment(workflowFilename) + "." + action
 }
 
 func GithubResourceSubject(owner string, repo string, resourceType string, resourceNumber string) string {
-	return "notifications.github." + owner + "." + repo + "." + resourceType + "." + resourceNumber
+	return githubRepositoryPrefix(owner, repo) + "." + resourceType + "." + resourceNumber
 }
 
 const GhostWisprTopicPrefix = "notifications.ghostwispr."

@@ -205,7 +205,7 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read captured envelope: %v", err)
 			}
-			got, err := decodeMessage(tc.subject, "CAPTURE", data)
+			got, err := decodeMessage(tc.subject, "CAPTURE", capturedRepositories, data)
 			if err != nil {
 				t.Fatalf("decode captured envelope: %v", err)
 			}
@@ -218,8 +218,75 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 
 func TestCapturedIssueUpdatedEnvelopeDecodes(t *testing.T) {
 	data := capturedIssueUpdatedEnvelope(t)
-	if _, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", data); err != nil {
+	if _, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, data); err != nil {
 		t.Fatalf("decode captured issue.updated envelope: %v", err)
+	}
+}
+
+// Envoy's goldens (packages/contracts/fixtures/github-envelopes, which its golden test writes from
+// its webhook fixtures) are the subjects its listener publishes. For each, the consumer configured
+// with the payload's repository filters on a prefix of the golden's topic and decodes the workflow
+// fact the golden carries: the two sides spell a repository's subject segments alike, a dotted name
+// included.
+func TestEnvoyGoldenSubjectsReachTheirRepositorysConsumer(t *testing.T) {
+	goldens, err := filepath.Glob(filepath.Join("..", "..", "..", "contracts", "fixtures", "github-envelopes", "*.json"))
+	if err != nil || len(goldens) == 0 {
+		t.Fatalf("Envoy golden envelopes: %v, %d found", err, len(goldens))
+	}
+	for _, path := range goldens {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var golden struct {
+				Topic          string         `json:"topic"`
+				PayloadSummary string         `json:"payload_summary"`
+				Payload        map[string]any `json:"payload"`
+			}
+			if err := json.Unmarshal(data, &golden); err != nil {
+				t.Fatalf("decode golden: %v", err)
+			}
+			repository := ghrepo.MustParse(golden.Payload["repo"].(string))
+			filter := githubFilters([]ghrepo.Repository{repository})[0]
+			if !strings.HasPrefix(golden.Topic, strings.TrimSuffix(filter, ">")) {
+				t.Fatalf("%s's consumer filters %s, which does not match Envoy's %s", repository, filter, golden.Topic)
+			}
+			payload, err := json.Marshal(golden.Payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			envelope, err := json.Marshal(map[string]any{
+				"event_id": "golden", "source": "github", "source_event_id": "golden", "topic": golden.Topic,
+				"dedupe_key": "golden", "issued_at": 1, "payload_summary": golden.PayloadSummary,
+				"payload": string(payload), "trace_id": "golden",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			decoded, err := decodeMessage(golden.Topic, "GOLDEN", []ghrepo.Repository{repository}, envelope)
+			if err != nil {
+				t.Fatalf("decode %s: %v", golden.Topic, err)
+			}
+			if kind := golden.Payload["kind"]; (kind == "pr" || kind == "review" || kind == "push") && decoded.Fact == nil {
+				t.Fatalf("%s's %s event decoded no fact", repository, kind)
+			}
+		})
+	}
+}
+
+// A checks settlement names its pull request in its subject, where a dotted repository name is one
+// segment, a dot as `_`: the settlement decodes for the repository its payload names.
+func TestDecodeChecksForADottedRepository(t *testing.T) {
+	data := capturedGitHubEnvelope(t, "checks.json")
+	data = bytes.ReplaceAll(data, []byte("sjawhar/legion"), []byte("sjawhar/legion.x"))
+	data = bytes.ReplaceAll(data, []byte("sjawhar.legion."), []byte("sjawhar.legion_x."))
+	decoded, err := decodeMessage("notifications.github.sjawhar.legion_x.pr.42.checks", "CAPTURE", []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion.x")}, data)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if checks, ok := decoded.Fact.(PullRequestChecks); !ok || checks.Repo != "sjawhar/legion.x" || checks.Number != 42 {
+		t.Fatalf("fact = %#v, want sjawhar/legion.x#42's checks", decoded.Fact)
 	}
 }
 
@@ -265,6 +332,35 @@ func TestConsumeAcknowledgesAnotherProjectsDispatchEventWithoutApplyingIt(t *tes
 	})
 	if got := writeCount(t, pool); got != 0 {
 		t.Fatalf("handler writes for another project's event = %d, want 0", got)
+	}
+}
+
+// A subject inside a repository's filter does not prove the event is that repository's: a
+// repository whose name holds a dot (`sjawhar/legion.x`) publishes under more segments than an owner
+// and a name, which `sjawhar/legion`'s filter matches. The payload's repository decides, as the
+// shipped daemon's does (reducers.ts registerPrFenced: a pull request whose repository is not its
+// issue's is not registered), so another repository's pull request on a `legion/<KEY>` branch is
+// acknowledged and never reaches a handler.
+func TestConsumeAcknowledgesAnotherRepositorysGitHubEventWithoutApplyingIt(t *testing.T) {
+	pool := migratedPool(t)
+	createWrites(t, pool)
+	js, stream := testJetStream(t)
+	spec := consumerSpec(&lockedBuffer{})
+	stop := startConsume(t, js, spec, pool, writeHandler("foreign", nil))
+	defer stop()
+
+	foreign := bytes.ReplaceAll(capturedGitHubEnvelope(t, "pr-opened.json"), []byte("sjawhar/legion"), []byte("sjawhar/legion.x"))
+	publish(t, js, "notifications.github.sjawhar.legion.x.pr.42", foreign)
+	testwait.Eventually(t, "the foreign pull request acknowledged", func() bool {
+		consumer, err := stream.Consumer(context.Background(), githubConsumerName(spec.Project))
+		if err != nil {
+			return false
+		}
+		info, err := consumer.Info(context.Background())
+		return err == nil && info.AckFloor.Consumer == 1 && info.NumAckPending == 0
+	})
+	if got := writeCount(t, pool); got != 0 {
+		t.Fatalf("handler writes for another repository's pull request = %d, want 0", got)
 	}
 }
 
@@ -448,10 +544,13 @@ func TestOpenConsumersRefusesAZeroRepository(t *testing.T) {
 	}
 }
 
+// capturedRepositories is the repository every captured GitHub envelope names.
+var capturedRepositories = []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion")}
+
 func consumerSpec(logs *lockedBuffer) ConsumerSpec {
 	return ConsumerSpec{
 		Project:      "CAPTURE",
-		Repositories: []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion")},
+		Repositories: capturedRepositories,
 		AckWait:      200 * time.Millisecond,
 		NakDelay:     25 * time.Millisecond,
 		Logger:       slog.New(slog.NewTextHandler(logs, nil)),
@@ -750,7 +849,7 @@ func TestDecodeReopenedPullRequestAsOpened(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := decodeMessage("notifications.github.sjawhar.legion.pr.42", "CAPTURE", reopened)
+	got, err := decodeMessage("notifications.github.sjawhar.legion.pr.42", "CAPTURE", capturedRepositories, reopened)
 	if err != nil {
 		t.Fatalf("decode reopened: %v", err)
 	}
@@ -779,14 +878,14 @@ func TestDecodeDispatchIssueNamesASessionActor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", byAgent)
+	got, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, byAgent)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	if issue, ok := got.Fact.(DispatchIssue); !ok || issue.ActorSession != "ses-impl" {
 		t.Fatalf("fact = %#v, want the session actor ses-impl", got.Fact)
 	}
-	human, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", data)
+	human, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, data)
 	if err != nil {
 		t.Fatalf("decode the captured event: %v", err)
 	}
@@ -824,7 +923,7 @@ func TestDecodingCarriesThePushForcedMarkerAndTheReviewOrder(t *testing.T) {
 		if err != nil {
 			t.Fatalf("encode %s: %v", name, err)
 		}
-		return decodeMessage(subject, "CAPTURE", data)
+		return decodeMessage(subject, "CAPTURE", capturedRepositories, data)
 	}
 	pushSubject := "notifications.github.sjawhar.legion.push.branch.legion/LEGION-208"
 	reviewSubject := "notifications.github.sjawhar.legion.pr.42.review"

@@ -264,7 +264,7 @@ func operatorClaim() OperatorClaim {
 			Incarnation: "40217:9551230",
 			Tmux:        &runtime.TmuxLocator{Window: "@7", Pane: "%23"},
 		},
-		Budgets:         BudgetsView{LaunchFailures: 1, PromptFailures: 0, PromptRetires: 0},
+		Budgets:         BudgetsView{LaunchFailures: 1, Deaths: 1, PromptFailures: 0, PromptRetires: 0},
 		UncertainStreak: 0,
 		Pending: &DeliveryView{
 			ID:          "OVXA3ZC6BPIKTOQHKXHRZ7TYVB",
@@ -272,6 +272,7 @@ func operatorClaim() OperatorClaim {
 			QueuedAt:    time.Date(2026, 9, 22, 9, 30, 58, 0, time.UTC),
 			DeliveredAt: &delivered,
 			ConfirmedAt: &delivered,
+			Interrupted: true,
 		},
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -632,6 +633,76 @@ func TestGithubResourceSubject(t *testing.T) {
 		got := GithubResourceSubject(item.owner, item.repo, item.resourceType, item.resourceNum)
 		if got != item.want {
 			t.Fatalf("GithubResourceSubject(%s, %s, %s, %s) = %s, want %s", item.owner, item.repo, item.resourceType, item.resourceNum, got, item.want)
+		}
+	}
+}
+
+// A GitHub repository's name may hold a dot, and a NATS subject splits on dots, so every GitHub
+// subject writes the owner and the name each as one segment, a dot as `_` (SanitizeSubjectSegment):
+// `sjawhar/.github` is otherwise an empty token no stream stores, and `acme/a.b` lands inside
+// `acme/a`'s `notifications.github.acme.a.>`. A name without a dot is written as it is.
+func TestGithubSubjectsWriteADottedOwnerOrNameAsOneSegment(t *testing.T) {
+	for _, tc := range []struct{ got, want string }{
+		{GithubSubject("sjawhar", ".github", "mention"), "notifications.github.sjawhar._github.mention"},
+		{GithubResourceSubject("acme", "a.b", "pr", "7"), "notifications.github.acme.a_b.pr.7"},
+		{GithubPushSubject("my-org", "a_b.c", "branch", "legion/X-1"), "notifications.github.my-org.a_b_c.push.branch.legion/X-1"},
+		{GithubWorkflowSubject("acme", "site.io", "ci.yml", "completed"), "notifications.github.acme.site_io.workflow.ci_yml.completed"},
+		{GithubSubject("acme", "widgets", "pr.7.checks"), "notifications.github.acme.widgets.pr.7.checks"},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("subject = %s, want %s", tc.got, tc.want)
+		}
+	}
+}
+
+// The listener reads GithubTopicKinds as where a repository name ends in a topic, so every token
+// Envoy publishes right after a repository's owner and name is one: the kind and parent kind of
+// every event the two tables name and of one they don't, the mention, push, workflow and checks
+// topics, and every golden envelope's topic.
+func TestGithubTopicKindsHoldEveryTokenAfterTheRepository(t *testing.T) {
+	const prefix = "notifications.github.example-org.example-repo."
+	topics := []string{
+		GithubSubject("example-org", "example-repo", "mention"),
+		GithubPushSubject("example-org", "example-repo", "branch", "main"),
+		GithubWorkflowSubject("example-org", "example-repo", "ci.yml", "completed"),
+		GithubSubject("example-org", "example-repo", "pr.7.checks"),
+	}
+	events := []string{"merge_group"}
+	for event := range githubEventKinds {
+		events = append(events, event)
+	}
+	for event := range githubEventParents {
+		events = append(events, event)
+	}
+	for _, event := range events {
+		topics = append(topics, prefix+githubKind(event))
+		for _, body := range []map[string]any{{}, {"issue": map[string]any{"pull_request": map[string]any{}}}} {
+			if parent := githubParentKind(event, body); parent != "" {
+				topics = append(topics, prefix+parent)
+			}
+		}
+	}
+	goldens, err := filepath.Glob(filepath.Join("..", "..", "..", "contracts", "fixtures", "github-envelopes", "*.json"))
+	if err != nil || len(goldens) == 0 {
+		t.Fatalf("golden envelopes: %v, %d found", err, len(goldens))
+	}
+	for _, path := range goldens {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var golden struct {
+			Topic string `json:"topic"`
+		}
+		if err := json.Unmarshal(raw, &golden); err != nil {
+			t.Fatal(err)
+		}
+		topics = append(topics, golden.Topic)
+	}
+	for _, topic := range topics {
+		parts := strings.Split(strings.TrimPrefix(topic, "notifications.github."), ".")
+		if len(parts) < 3 || !slices.Contains(GithubTopicKinds, parts[2]) {
+			t.Errorf("%s: token %q after the repository is not in GithubTopicKinds %v", topic, parts[min(2, len(parts)-1)], GithubTopicKinds)
 		}
 	}
 }
