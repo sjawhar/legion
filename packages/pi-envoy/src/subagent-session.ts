@@ -1,7 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
 import * as host from "@oh-my-pi/pi-coding-agent";
-import type { SessionContext } from "./pi-types";
+import type { CommandContext, SessionContext } from "./pi-types";
+
+/**
+ * What these checks read: the live session manager, which a `SessionContext` and the
+ * `CommandContext` a slash command is handed both carry (the same object).
+ */
+export type SessionIdentityContext = Pick<SessionContext | CommandContext, "sessionManager">;
 
 // The transcript path of the session this process bootstrapped as its Legion identity (root
 // architect, phase worker, or controller). A `task` subagent's extension instance is a separate
@@ -51,7 +57,7 @@ export function resetLegionBootstrappedSessionForTests(): void {
  * transcript-less or SQL-backed subagent is invisible here; `isRegisteredSubagent` is what
  * catches it.
  */
-export async function isSubagentSession(context: SessionContext): Promise<boolean> {
+export async function isSubagentSession(context: SessionIdentityContext): Promise<boolean> {
   await context.sessionManager.ensureOnDisk();
   const sessionFile = context.sessionManager.getSessionFile();
   if (sessionFile !== undefined && fs.existsSync(sessionFile)) {
@@ -72,7 +78,7 @@ export async function isSubagentSession(context: SessionContext): Promise<boolea
  * `omp-task-*` directory with no parent beside it) and a subagent under
  * `OMP_SESSION_STORAGE=sql`. A host that does not export the registry gives no opinion.
  */
-export function isRegisteredSubagent(context: SessionContext): boolean {
+export function isRegisteredSubagent(context: SessionIdentityContext): boolean {
   // The namespace member is undefined on a host build without the export; a named import
   // would make that a load failure for the whole extension.
   const registry = host.AgentRegistry?.global();
@@ -94,7 +100,7 @@ export function isRegisteredSubagent(context: SessionContext): boolean {
  * `isSubagentSession`, evaluated at most once per extension instance: a subagent session's
  * transcript path never changes over its lifetime, and the check gates several hooks.
  */
-export function subagentSessionCheck(): (context: SessionContext) => Promise<boolean> {
+export function subagentSessionCheck(): (context: SessionIdentityContext) => Promise<boolean> {
   let subagentSession: Promise<boolean> | undefined;
   return (context) => {
     subagentSession ??= isSubagentSession(context);

@@ -206,7 +206,7 @@ export const envoyToolSpecs = [
   {
     name: "envoy_whoami",
     description:
-      "Returns this session's Envoy identity: session ID, machine ID, port, and directory. session_id is always the address a reply reaches; inside a task subagent, which registers no Envoy session of its own, that is the parent session that spawned it, and the subagent field reports this subagent's own host session id.",
+      "Returns this session's Envoy identity: session ID, machine ID, port, and directory. session_id is the address a reply reaches. Where a host runs a task subagent inside its parent's process, such a subagent registers no Envoy session of its own, so its session_id is the parent session that spawned it and the result says so.",
     arguments: () => ({}),
     operation: EnvoyToolOperation.whoami,
     requiresSubscriptionCapability: false,

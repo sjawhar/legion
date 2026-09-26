@@ -11,7 +11,7 @@ import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
 import { logger } from "@oh-my-pi/pi-utils";
 import { decode } from "@toon-format/toon";
 import { z } from "zod";
-import { resetEnvoySessionForTests } from "../src/envoy-session";
+import { resetEnvoySessionsForTests } from "../src/envoy-session";
 import { LOCAL_ENVOY_NOTICE } from "../src/legion/phase-stall";
 import { claimEnvoyRole, onEnvoyRoleRegained } from "../src/legion/role-claim-bridge";
 import type { MessageRenderer, MessageRendererTheme, PiApi } from "../src/pi-types";
@@ -257,7 +257,7 @@ beforeEach(() => {
   // top-level session one test publishes would be the reply address the next test's subagent
   // instance reports.
   resetLegionBootstrappedSessionForTests();
-  resetEnvoySessionForTests();
+  resetEnvoySessionsForTests();
   testAgentRoster().splice(0);
   process.env.ENVOY_NATS_URL = "nats://nats-under-test:4222";
   // A test that never stubs fetch must not register its `ses_*` fixture on the real listener
@@ -4543,8 +4543,10 @@ describe("envoy OMP extension", () => {
   }
 
   /**
-   * A process whose top-level session is `parentID`, plus the subagent instance `transcript`
-   * nests under. Both instances come from one module import, as they do in a real process.
+   * A process whose first top-level session is `parentID`, and the instances that join it: more
+   * top-level sessions (an ACP host runs several in one process) and subagents, each nesting
+   * under the transcript it is given. Every instance comes from one module import, as they do
+   * in a real process.
    */
   async function subagentProcess(
     query: string,
@@ -4553,21 +4555,16 @@ describe("envoy OMP extension", () => {
   ) {
     const { default: envoyExtension } = await import(`./envoy.ts?${query}`);
     const heartbeats: (() => void)[] = [];
-    const parentFile = transcript(`2026-09-23T00-00-00-000Z_${parentID}.jsonl`);
-    const parent = createPi();
-    envoyExtension(parent.pi);
-    await parent.handlers.get("session_start")?.(
-      {},
-      sessionWithTranscript(parentID, parentFile, heartbeats)
-    );
-    const spawn = async (id: string, file: string) => {
+    const boot = async (id: string, file: string) => {
       const fixture = createPi();
       envoyExtension(fixture.pi);
       const context = sessionWithTranscript(id, file, heartbeats);
       await fixture.handlers.get("session_start")?.({}, context);
       return { ...fixture, context };
     };
-    return { heartbeats, parent, spawn };
+    const parentFile = transcript(`2026-09-23T00-00-00-000Z_${parentID}.jsonl`);
+    const parent = await boot(parentID, parentFile);
+    return { boot, heartbeats, parent, parentFile };
   }
 
   test("a task subagent's sends name the parent as their source session", async () => {
@@ -4575,17 +4572,29 @@ describe("envoy OMP extension", () => {
     try {
       const posted = recordingMessages();
       const host = await subagentProcess("subagent-source", "ses_parent", fixture.transcript);
-      const child = await host.spawn(
+      const child = await host.boot(
         "ses_child",
         fixture.transcript("2026-09-23T00-00-00-000Z_ses_parent/Scout.jsonl")
       );
 
       await child.tools
         .find((tool) => tool.name === "envoy_send")
-        ?.execute("call-send", { session_id: "ses_target", message: "from the subagent" });
+        ?.execute(
+          "call-send",
+          { session_id: "ses_target", message: "from the subagent" },
+          undefined,
+          undefined,
+          child.context
+        );
       await child.tools
         .find((tool) => tool.name === "envoy_publish")
-        ?.execute("call-publish", { topic: "notifications.role.controller", message: "broadcast" });
+        ?.execute(
+          "call-publish",
+          { topic: "notifications.role.controller", message: "broadcast" },
+          undefined,
+          undefined,
+          child.context
+        );
 
       expect(posted).toEqual([
         {
@@ -4619,12 +4628,12 @@ describe("envoy OMP extension", () => {
     try {
       recordingRegistrations();
       const host = await subagentProcess("nested-subagent", "ses_parent", fixture.transcript);
-      await host.spawn(
+      await host.boot(
         "ses_child",
         fixture.transcript("2026-09-23T00-00-00-000Z_ses_parent/Scout.jsonl")
       );
       // OMP nests a subagent's own subagent one directory deeper.
-      const nested = await host.spawn(
+      const nested = await host.boot(
         "ses_nested",
         fixture.transcript("2026-09-23T00-00-00-000Z_ses_parent/Scout/Oracle.jsonl")
       );
@@ -4645,7 +4654,7 @@ describe("envoy OMP extension", () => {
     try {
       const posted = recordingMessages();
       const host = await subagentProcess("switched-parent", "ses_parent", fixture.transcript);
-      const child = await host.spawn(
+      const child = await host.boot(
         "ses_child",
         fixture.transcript("2026-09-23T00-00-00-000Z_ses_parent/Scout.jsonl")
       );
@@ -4665,14 +4674,20 @@ describe("envoy OMP extension", () => {
       expect(result?.details).toMatchObject({ sessionID: "ses_parent_next" });
       await child.tools
         .find((tool) => tool.name === "envoy_send")
-        ?.execute("call-send", { session_id: "ses_target", message: "after the switch" });
+        ?.execute(
+          "call-send",
+          { session_id: "ses_target", message: "after the switch" },
+          undefined,
+          undefined,
+          child.context
+        );
       expect(posted.map((request) => request.body.source_session)).toEqual(["ses_parent_next"]);
     } finally {
       fixture.remove();
     }
   });
 
-  test("a subagent of a process with no Envoy identity reports none", async () => {
+  test("a subagent of a process with no Envoy identity reports no reply address", async () => {
     const fixture = transcriptFixture();
     try {
       const posted = recordingMessages();
@@ -4691,14 +4706,185 @@ describe("envoy OMP extension", () => {
 
       const whoami = child.tools.find((tool) => tool.name === "envoy_whoami");
       const result = await whoami?.execute("call-1", {}, undefined, undefined, context);
-      expect(result?.details).toMatchObject({ sessionID: "" });
-      expect(result?.details).not.toHaveProperty("subagent");
+      expect(result?.details).toMatchObject({
+        sessionID: "",
+        subagent: {
+          session_id: "ses_child",
+          note: expect.stringContaining("no reply address"),
+        },
+      });
       await child.tools
         .find((tool) => tool.name === "envoy_send")
-        ?.execute("call-send", { session_id: "ses_target", message: "orphaned" });
+        ?.execute(
+          "call-send",
+          { session_id: "ses_target", message: "orphaned" },
+          undefined,
+          undefined,
+          context
+        );
       // An empty source session is dropped by the listener's own JSON on the way out, which
       // leaves the recipient no sender and no reply hint: the field must be absent instead.
       expect(posted[0]?.body).not.toHaveProperty("source_session");
+    } finally {
+      fixture.remove();
+    }
+  });
+
+  test("a subagent of one of several top-level sessions names the one that spawned it", async () => {
+    const fixture = transcriptFixture();
+    try {
+      const posted = recordingMessages();
+      // An ACP host runs several top-level sessions in one process, each firing its own
+      // session_start. The subagent belongs to the first; the second must not answer for it.
+      const host = await subagentProcess("two-top-level", "ses_a", fixture.transcript);
+      const child = await host.boot(
+        "ses_child",
+        fixture.transcript("2026-09-23T00-00-00-000Z_ses_a/Scout.jsonl")
+      );
+      await host.boot("ses_b", fixture.transcript("2026-09-23T00-02-00-000Z_ses_b.jsonl"));
+
+      const whoami = child.tools.find((tool) => tool.name === "envoy_whoami");
+      const result = await whoami?.execute("call-1", {}, undefined, undefined, child.context);
+      expect(result?.details).toMatchObject({
+        sessionID: "ses_a",
+        subagent: { session_id: "ses_child" },
+      });
+      await child.tools
+        .find((tool) => tool.name === "envoy_send")
+        ?.execute(
+          "call-send",
+          { session_id: "ses_target", message: "from ses_a's subagent" },
+          undefined,
+          undefined,
+          child.context
+        );
+      expect(posted.map((request) => request.body.source_session)).toEqual(["ses_a"]);
+    } finally {
+      fixture.remove();
+    }
+  });
+
+  test("a nested subagent walks its own transcript up past a second top-level session", async () => {
+    const fixture = transcriptFixture();
+    try {
+      recordingRegistrations();
+      const host = await subagentProcess("nested-two-top-level", "ses_a", fixture.transcript);
+      await host.boot(
+        "ses_child",
+        fixture.transcript("2026-09-23T00-00-00-000Z_ses_a/Scout.jsonl")
+      );
+      await host.boot("ses_b", fixture.transcript("2026-09-23T00-02-00-000Z_ses_b.jsonl"));
+      await host.boot(
+        "ses_b_child",
+        fixture.transcript("2026-09-23T00-02-00-000Z_ses_b/Scout.jsonl")
+      );
+      const nested = await host.boot(
+        "ses_nested",
+        fixture.transcript("2026-09-23T00-00-00-000Z_ses_a/Scout/Oracle.jsonl")
+      );
+
+      const whoami = nested.tools.find((tool) => tool.name === "envoy_whoami");
+      const result = await whoami?.execute("call-1", {}, undefined, undefined, nested.context);
+      expect(result?.details).toMatchObject({
+        sessionID: "ses_a",
+        subagent: { session_id: "ses_nested" },
+      });
+    } finally {
+      fixture.remove();
+    }
+  });
+
+  test("a session that switches transcripts leaves no record for a subagent of the old one", async () => {
+    const fixture = transcriptFixture();
+    try {
+      const posted = recordingMessages();
+      const host = await subagentProcess("switched-away", "ses_a", fixture.transcript);
+      const child = await host.boot(
+        "ses_child",
+        fixture.transcript("2026-09-23T00-00-00-000Z_ses_a/Scout.jsonl")
+      );
+      // ses_a forks into a new id under a new transcript, and a second top-level session runs
+      // beside it, so nothing is unambiguous any more: the entry under ses_a's old transcript
+      // must be gone, or this subagent would be handed an id its session has retired.
+      await host.parent.handlers.get("session_switch")?.(
+        { reason: "fork" },
+        sessionWithTranscript(
+          "ses_a_next",
+          fixture.transcript("2026-09-23T00-01-00-000Z_ses_a_next.jsonl"),
+          host.heartbeats
+        )
+      );
+      await host.boot("ses_b", fixture.transcript("2026-09-23T00-02-00-000Z_ses_b.jsonl"));
+
+      const whoami = child.tools.find((tool) => tool.name === "envoy_whoami");
+      const result = await whoami?.execute("call-1", {}, undefined, undefined, child.context);
+      expect(result?.details).toMatchObject({ sessionID: "" });
+      await child.tools
+        .find((tool) => tool.name === "envoy_send")
+        ?.execute(
+          "call-send",
+          { session_id: "ses_target", message: "orphaned by the fork" },
+          undefined,
+          undefined,
+          child.context
+        );
+      expect(posted[0]?.body).not.toHaveProperty("source_session");
+    } finally {
+      fixture.remove();
+    }
+  });
+
+  test("a subagent's publish to a role its own parent holds says it was not delivered", async () => {
+    const fixture = transcriptFixture();
+    try {
+      // The listener never delivers a message to the session it names as its source, so a
+      // subagent publishing to a role its parent holds gets a 200 with that holder and nothing
+      // else. The tool result has to say so; only the role case is visible in the answer.
+      globalThis.fetch = async (input, init) => {
+        const url = new URL(input.toString());
+        if (url.pathname !== "/v1/messages/publish") {
+          return responseWithRegistration(input, init, {});
+        }
+        const topic = String(JSON.parse(init?.body?.toString() ?? "{}").topic);
+        return response({
+          event_id: "evt_echo",
+          source: "agent",
+          source_event_id: "evt_echo",
+          topic,
+          dedupe_key: "dedupe_echo",
+          issued_at: 1,
+          payload_summary: "broadcast",
+          trace_id: "trace_echo",
+          holder: topic.endsWith("controller") ? "ses_parent" : "ses_reviewer",
+        });
+      };
+      const host = await subagentProcess("publish-echo", "ses_parent", fixture.transcript);
+      const child = await host.boot(
+        "ses_child",
+        fixture.transcript("2026-09-23T00-00-00-000Z_ses_parent/Scout.jsonl")
+      );
+
+      const publish = child.tools.find((tool) => tool.name === "envoy_publish");
+      const echoed = await publish?.execute(
+        "call-echo",
+        { topic: "notifications.role.controller", message: "broadcast" },
+        undefined,
+        undefined,
+        child.context
+      );
+      expect(echoed?.details).toMatchObject({ holder: "ses_parent", undelivered_echo: true });
+      expect(echoed?.content[0]?.text).toContain("Not delivered");
+
+      // The same tool, the same source session, a role someone else holds: delivered as usual,
+      // and nothing of the sort said.
+      const other = await publish?.execute(
+        "call-other",
+        { topic: "notifications.role.reviewer", message: "broadcast" },
+        undefined,
+        undefined,
+        child.context
+      );
+      expect(other?.details).not.toHaveProperty("undelivered_echo");
     } finally {
       fixture.remove();
     }
@@ -4991,13 +5177,14 @@ describe("envoy OMP extension", () => {
   test("reports the active session directory through envoy_whoami", async () => {
     const { default: envoyExtension } = await import("./envoy.ts?whoami-directory");
     const fixture = createPi();
+    const context = sessionContext("ses_whoami");
 
     envoyExtension(fixture.pi);
-    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_whoami"));
+    await fixture.handlers.get("session_start")?.({}, context);
     const whoami = fixture.tools.find((tool) => tool.name === "envoy_whoami");
     if (whoami === undefined) throw new Error("envoy_whoami was not registered");
 
-    const result = await whoami.execute("", {});
+    const result = await whoami.execute("", {}, undefined, undefined, context);
 
     expect(JSON.parse(result.content[0]?.text ?? "")).toMatchObject({
       session_id: "ses_whoami",
