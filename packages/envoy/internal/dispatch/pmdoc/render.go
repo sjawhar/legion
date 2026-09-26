@@ -227,14 +227,23 @@ func (r *renderer) list(n *Node, prefix string) {
 		}
 		indent := prefix + strings.Repeat(" ", len(marker))
 		for childIndex, child := range item.Children {
+			// A tight item writes its blocks on consecutive lines, where a paragraph would run on
+			// into a paragraph after it and underline itself with a rule's `---`. The browser
+			// editor's writer puts a blank line between two paragraphs (the item then reads back
+			// spread) and writes a rule `***`, and so does this renderer.
+			afterParagraph := childIndex > 0 && item.Children[childIndex-1].Type == "paragraph"
 			if childIndex > 0 {
-				if item.Attrs["spread"] == true {
+				if item.Attrs["spread"] == true || afterParagraph && child.Type == "paragraph" {
 					r.writeSyntax("\n" + strings.TrimRight(prefix, " ") + "\n" + indent)
 				} else {
 					r.writeSyntax("\n" + indent)
 				}
 			}
+			start := r.b.Len()
 			r.block(child, indent)
+			if child.Type == "hr" && afterParagraph && item.Attrs["spread"] != true {
+				copy(r.b.Bytes()[start:], "***")
+			}
 		}
 	}
 }

@@ -769,3 +769,46 @@ func TestRenderIsTheSameWhereverAnAnchorMarkSplitsText(t *testing.T) {
 		})
 	}
 }
+
+// A tight list item writes its blocks on consecutive lines, but a paragraph followed by another
+// paragraph, or by a rule written `---`, would read back as one paragraph or a setext heading. The
+// browser editor's writer puts a blank line between two paragraphs, which the item then reads back
+// as spread, and writes a rule `***`; so does this renderer, and every block reads back.
+func TestRenderKeepsTheBlocksOfATightListItem(t *testing.T) {
+	paragraph := func(value string) *Node {
+		return &Node{Type: "paragraph", Children: []*Node{{Type: "text", Text: value}}}
+	}
+	item := func(children ...*Node) *Node {
+		return &Node{Type: "doc", Children: []*Node{{Type: "bullet_list", Attrs: Attrs{"spread": false}, Children: []*Node{
+			{Type: "list_item", Attrs: Attrs{"spread": false}, Children: children},
+			{Type: "list_item", Attrs: Attrs{"spread": false}, Children: []*Node{paragraph("next")}},
+		}}}}
+	}
+	for name, test := range map[string]struct {
+		doc  *Node
+		want []string
+	}{
+		"two paragraphs":      {item(paragraph("a"), paragraph("b")), []string{"paragraph", "paragraph"}},
+		"three paragraphs":    {item(paragraph("a"), paragraph("b"), paragraph("c")), []string{"paragraph", "paragraph", "paragraph"}},
+		"a paragraph, a rule": {item(paragraph("a"), &Node{Type: "hr"}), []string{"paragraph", "hr"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			markdown := mustRender(t, test.doc)
+			back, err := Parse(markdown)
+			if err != nil {
+				t.Fatalf("Parse(%q) = %v", markdown, err)
+			}
+			list := back.Children[0]
+			if len(back.Children) != 1 || list.Type != "bullet_list" || len(list.Children) != 2 {
+				t.Fatalf("Render() = %q, which reads back as %q", markdown, mustRender(t, back))
+			}
+			var got []string
+			for _, child := range list.Children[0].Children {
+				got = append(got, child.Type)
+			}
+			if strings.Join(got, ",") != strings.Join(test.want, ",") {
+				t.Fatalf("Render() = %q, whose first item reads back holding %v, want %v", markdown, got, test.want)
+			}
+		})
+	}
+}
