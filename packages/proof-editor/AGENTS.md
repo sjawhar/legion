@@ -56,7 +56,7 @@ needs telling, because proof-sdk's `package.json` `exports` publishes only its b
 | Consumer | Mechanism |
 | --- | --- |
 | Bun (`bun test`, the pmdoc generator) | `paths` in `tsconfig.json` |
-| Vite (the Dispatch SPA) | `resolve.alias` in `packages/dispatch/web/vite.config.ts` |
+| Vite (the Dispatch SPA) | `resolve.alias` for the raw sources and `dedupe: ["prosemirror-model"]` — source-only editor modules and Dispatch both pass ProseMirror nodes into `DOMSerializer`; two module identities make historical renders fail with “multiple versions of prosemirror-model were loaded” |
 | tsc | **nothing** — see below |
 
 **No TypeScript program may open those sources.** proof-sdk emits its declarations with

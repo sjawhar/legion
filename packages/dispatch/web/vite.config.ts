@@ -13,6 +13,10 @@ export default defineConfig({
     ),
   },
   resolve: {
+    // The source-only editor and Dispatch both reach this constructor. Historical-version
+    // rendering passes a Proof document to Dispatch's DOMSerializer, so Vite must emit one
+    // module identity rather than one per workspace import path.
+    dedupe: ["prosemirror-model"],
     alias: {
       "@legion/contracts/repo": fileURLToPath(
         new URL("../../contracts/src/repo.ts", import.meta.url)
