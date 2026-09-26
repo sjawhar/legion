@@ -4,13 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
@@ -53,13 +53,9 @@ func TestAHeldNoticeReachesTheControllerTopicAndItsRetriesNeverResendTheArchitec
 		t.Fatalf("open the daemon's database: %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
-		return record.NewStore().PutIssue(context.Background(), tx, record.Issue{
-			Key: issue, Tree: issue, Project: cfg.Project, Title: "held", Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "U",
-		})
-	}); err != nil {
-		t.Fatalf("record the issue in planning: %v", err)
-	}
+	putOutboxIssue(t, pool, record.NewStore(), record.Issue{
+		Key: issue, Tree: issue, Project: cfg.Project, Title: "held", Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "U",
+	})
 	// The one launch the limit allows fails, and the operator is answered with it; the claim is
 	// failed, and the workflow holds the issue.
 	if status, body := d.request(http.MethodPost, "/legion/v1/operator/claims", api.SpawnRequest{Tree: issue, Issue: issue, Role: claim.RolePlanner, Prompt: "Plan it."}, true); status != http.StatusInternalServerError || !strings.Contains(string(body), "pane launch failed") {
@@ -93,8 +89,7 @@ func TestAHeldNoticeReachesTheControllerTopicAndItsRetriesNeverResendTheArchitec
 	if err := json.Unmarshal([]byte(taken.Payload), &payload); err != nil {
 		t.Fatalf("decode the controller's payload %q: %v", taken.Payload, err)
 	}
-	if want := map[string]any{"kind": "held", "role": "planner", "phase": "planning"}; len(payload) != len(want) ||
-		payload["kind"] != want["kind"] || payload["role"] != want["role"] || payload["phase"] != want["phase"] {
+	if want := map[string]any{"kind": "held", "role": "planner", "phase": "planning"}; !maps.Equal(payload, want) {
 		t.Fatalf("the controller's payload = %v, want %v", payload, want)
 	}
 }
