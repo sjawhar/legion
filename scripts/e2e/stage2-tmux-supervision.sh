@@ -2,9 +2,9 @@
 # Stage 2's gate for the Go coordinator: supervision on tmux, proven against the real things. The
 # Go daemon launches a real Oh My Pi — the pinned build (packages/daemon/src/daemon/omp-pin.ts)
 # with this checkout's plugin in an isolated OMP profile — in panes of its private tmux server,
-# against a real Envoy listener and NATS (scripts/kind-smoke's host-side recipe) and a real
-# Postgres. Every gate behaviour is one named check that prints what it observed; the first check
-# that does not hold ends the run non-zero, naming it.
+# against a real Envoy listener and NATS on the host and a real Postgres. Every gate behaviour is
+# one named check that prints what it observed; the first check that does not hold ends the run
+# non-zero, naming it.
 #
 # Stage 1's discipline holds: the cleanup cannot fail, every wait is bounded, a process that
 # ignores its stop is SIGKILLed, and everything the run takes is its own — its mktemp work
@@ -12,13 +12,13 @@
 # (TMUX_TMPDIR under the work directory), and its legions registry (XDG_STATE_HOME). The work
 # directory survives a failure, because its logs are the evidence, and goes when the run passed.
 #
-# The one input: LEGION_E2E_PG_DSN, the Postgres to run against; unset, the run starts its own
-# postgres:16 on tmpfs. The agents' model is Anthropic through the Hawk model gateway on the
-# operator's own hawk login (lib/install-model-gateway.sh), so the operator's keyring must be
-# unlocked; no Anthropic key reaches a pane. The provider-key path is proven with
-# GEMINI_API_KEY_TESTS from the secret store (agent tier: no YubiKey touch), which the daemon
-# itself resolves at boot and hands every pane's shim as a daemon-held file (`provider_keys`); the
-# run never reads it.
+# Inputs: LEGION_E2E_PG_DSN, the Postgres to run against; unset, the run starts its own
+# postgres:16 on tmpfs. LEGION_E2E_MODEL_GATEWAY_URL (required): the agents' model is Anthropic
+# through the Hawk model gateway at that URL on the operator's own hawk login
+# (lib/install-model-gateway.sh), so the operator's keyring must be unlocked; no Anthropic key
+# reaches a pane. The provider-key path is proven with GEMINI_API_KEY_TESTS from the secret store
+# (agent tier: no YubiKey touch), which the daemon itself resolves at boot and hands every pane's
+# shim as a daemon-held file (`provider_keys`); the run never reads it.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -263,9 +263,8 @@ if [ -z "${LEGION_E2E_PG_DSN:-}" ]; then
   LEGION_E2E_PG_DSN="postgres://legion:legion@127.0.0.1:$(docker port "$pg_container" 5432/tcp | head -1 | sed 's/.*://')/legion"
 fi
 
-# NATS and the Envoy listener, as scripts/kind-smoke/up.sh runs them on the host (ensure_nats,
-# start_listener): nats:2.10 with JetStream, and the listener built from packages/envoy with its
-# API bearer, which reaches every pane as a 0600 file (envoy_token_file).
+# NATS and the Envoy listener on the host: nats:2.10 with JetStream, and the listener built from
+# packages/envoy with its API bearer, which reaches every pane as a 0600 file (envoy_token_file).
 docker run -d --name "$nats_container" -p 127.0.0.1::4222 nats:2.10 -js >/dev/null
 until_true 60 "NATS to be ready" sh -c "docker logs '$nats_container' 2>&1 | grep -q 'Server is ready'"
 nats_url="nats://127.0.0.1:$(docker port "$nats_container" 4222/tcp | head -1 | sed 's/.*://')"

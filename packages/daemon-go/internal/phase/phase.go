@@ -18,10 +18,6 @@ const (
 	ProductionCheck Phase = "production_check"
 	Done            Phase = "done"
 	Held            Phase = "held"
-	// Unrecorded is not a workflow phase and no issue record ever holds it: it is what the state
-	// route says for an issue the workflow does not record, where an operator's claim exists and
-	// an issue does not. The transition table never reaches it, and no role works it.
-	Unrecorded Phase = "unrecorded"
 )
 
 // HandoffFile is the handoff a phase ends with, .legion/<word>.json, and whether it ends with one

@@ -179,15 +179,16 @@ func newLiveClaim(t *testing.T, h *harness, issue string, role claim.Role) liveC
 	return c
 }
 
-// working hands the claim a task of the issue's current generation and starts its turn, which is
-// what a pane looks like when it calls handoff complete.
-func working(t *testing.T, h *harness, token claim.Token, _ string) {
+// working hands the claim a task of the run the issue is on and starts its turn, which is what a
+// pane looks like when it calls handoff complete. A test that wants a worker still holding an
+// older run's task delivers that one itself.
+func working(t *testing.T, h *harness, token claim.Token, issue string) {
 	t.Helper()
 	machine, ok := h.supervisor.Machine(token)
 	if !ok {
 		t.Fatalf("no machine for %s", token)
 	}
-	generation := uint64(1)
+	generation := issueGeneration(t, h, issue)
 	if err := machine.Handle(context.Background(), supervise.RequestReady{Claim: token, Generation: machine.Claim().Generation, Session: machine.Claim().Session}); err != nil {
 		t.Fatalf("ready %s: %v", token, err)
 	}
@@ -198,6 +199,23 @@ func working(t *testing.T, h *harness, token claim.Token, _ string) {
 	if err := machine.Handle(context.Background(), supervise.StreamTurnStart{Claim: token, DeliveryID: id}); err != nil {
 		t.Fatalf("start the turn on %s: %v", token, err)
 	}
+}
+
+// issueGeneration is the run the issue is recorded on, which is the run a task delivered now
+// belongs to. An issue no workflow records — an operator's own claim — has none, and its task
+// carries the first run, which is what the daemon's own first start would deliver.
+func issueGeneration(t *testing.T, h *harness, issue string) uint64 {
+	t.Helper()
+	var generation uint64
+	err := h.store.Pool().QueryRow(context.Background(),
+		"select generation from issues where key = $1", issue).Scan(&generation)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 1
+	}
+	if err != nil {
+		t.Fatalf("read the generation of %s: %v", issue, err)
+	}
+	return generation
 }
 
 // replaceRegistration registers the claim's session again, which issues a new secret and so revokes

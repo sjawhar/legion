@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
@@ -16,7 +17,7 @@ import (
 )
 
 // roleTopicPrefix is the Envoy subject a role token is reached on
-// (packages/contracts/src/subject.ts:2).
+// (ROLE_TOPIC_PREFIX, packages/contracts/src/subject.ts).
 const roleTopicPrefix = "notifications.role."
 
 var _ supervise.Specs = specs{}
@@ -30,7 +31,7 @@ type specs struct {
 	project      string
 	instructions string
 	secrets      map[string]string
-	repo         string
+	repo         ghrepo.Repository
 	prompts      *prompts.Composer
 	// identity is the role's App bot identity every pane commits as; nil for a daemon with no
 	// GitHub Apps.
@@ -100,10 +101,11 @@ func (s specs) rolePromptPaths(c supervise.Claim) ([]string, error) {
 
 // addressingFragment is the sentence that tells an agent where it and its peers are reached: its
 // own role topic, the tree architect's, and the project controller's, spelled from the tokens so
-// the model never hand-encodes one (packages/daemon/src/daemon/processes.ts:317-343). The shipped
-// sentence's merge-queue clause is left out: it tells the merger where to publish READY, and under
-// this daemon the merger publishes nothing — the daemon posts the READY packet and publishes it to
-// `projects.<KEY>.merge_queue_role` itself (workflow.Engine.ready, prompts/go/merger.md).
+// the model never hand-encodes one (addressingFragment, packages/daemon/src/daemon/processes.ts).
+// The shipped sentence's merge-queue clause is left out: it tells the merger where to publish
+// READY, and under this daemon the merger publishes nothing — the daemon posts the READY packet
+// and publishes it to `projects.<KEY>.merge_queue_role` itself (workflow.Engine.ready,
+// prompts/go/merger.md).
 func addressingFragment(project string, c supervise.Claim) (string, error) {
 	architect, err := claim.NewToken(project, c.Tree, claim.RoleArchitect)
 	if err != nil {

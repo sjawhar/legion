@@ -228,7 +228,7 @@ func (s *server) documentOfIssue(w http.ResponseWriter, r *http.Request, artifac
 	}
 	approval, err := s.dispatch.Approval(r.Context(), artifactID)
 	switch {
-	case dispatchMissing(err), err == nil && approval.IssueKey != issue:
+	case dispatch.Missing(err), err == nil && approval.IssueKey != issue:
 		writeFailure(w, http.StatusNotFound, "ARTIFACT_NOT_ON_ISSUE", fmt.Sprintf("%s is not a document of %s", artifactID, issue))
 		return false
 	case err != nil:
@@ -301,7 +301,7 @@ func (s *server) cachedIssueReader() issueReader {
 func (s *server) dispatchIssue(w http.ResponseWriter, r *http.Request, key string) (dispatch.Issue, bool) {
 	issue, err := s.dispatch.GetIssue(r.Context(), key)
 	switch {
-	case dispatchMissing(err):
+	case dispatch.Missing(err):
 		writeFailure(w, http.StatusNotFound, "ISSUE_NOT_FOUND", fmt.Sprintf("%s is not a Dispatch issue", key))
 		return dispatch.Issue{}, false
 	case err != nil:
@@ -532,11 +532,4 @@ func validUUID(value string) bool {
 		}
 	}
 	return true
-}
-
-// dispatchMissing says whether a Dispatch read failed because what it asked for is not there, as
-// against a read that failed: the one answer a handler turns into its own 404 rather than a 502.
-func dispatchMissing(err error) bool {
-	var dispatchError *dispatch.Error
-	return errors.As(err, &dispatchError) && dispatchError.Status == http.StatusNotFound
 }

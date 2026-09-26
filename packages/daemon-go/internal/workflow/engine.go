@@ -297,7 +297,9 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 	if err != nil || issue == nil {
 		return intake.Result{}, err
 	}
-	if fact.Generation != 0 && fact.Generation != issue.Generation {
+	// Every completion names a run: the route reads it from the claim and refuses a claim that
+	// has taken no task, so a fact reaching here always carries one.
+	if fact.Generation != issue.Generation {
 		return refused("HANDOFF_STALE_GENERATION", fmt.Sprintf("%s is on generation %d and this completion is generation %d's; the run it reports is over",
 			issue.Key, issue.Generation, fact.Generation)), nil
 	}
