@@ -22,46 +22,39 @@ symptoms:
 
 ## The quirk
 
-Provisioning hands its clone and its fetch **one shared env object** (`credential.env` in
-`createProvisioningCredential`). A test that asserts both commands received it, with an
-asymmetric matcher for the path that differs per run, fails on the second assertion:
+A test that asserts the same received object twice with `toMatchObject` and an asymmetric
+matcher fails the second time, with a diff that shows nothing changed. It bit LEGION-178 when two
+commands were handed one shared env object and the test checked each command received it. The
+whole quirk fits in one test, and this reproduces it on the repository's pinned Bun (1.3.14):
 
 ```ts
-const expected = () => ({ GIT_ASKPASS: expect.stringContaining(`${root}/`), GIT_CONFIG_COUNT: "2" });
-expect(clone.opts.env).toMatchObject(expected());   // passes
-expect(fetch.opts.env).toMatchObject(expected());   // fails: "- Expected - 0 / + Received + 0"
+const env = { HOME: "/home/legion/workspace", MODE: "fetch" };
+const expected = () => ({ HOME: expect.stringContaining("/home/legion/"), MODE: "fetch" });
+expect(env).toMatchObject(expected());   // passes
+expect(env).toMatchObject(expected());   // fails: "- Expected - 0 / + Received + 0"
 ```
 
-Minimal reproduction on Bun 1.3.14 (`bun test v1.3.14 (0d9b296a)`): the same object reference
-matched twice with `toMatchObject` and `expect.stringContaining` fails the second time; with
-plain values only it passes twice; a fresh `expected()` per call makes no difference — the
-**received** object's identity is what trips it. The reviewer reproduced the same on their run.
+With plain values only it passes twice, and a fresh `expected()` per call makes no difference:
+the **received** object's identity is what trips it. Once `toMatchObject` has matched an object,
+every later asymmetric match against that object fails, `toEqual` included. The reviewer
+reproduced the same on their run.
 
 ## The fix
 
-`toEqual` with the asymmetric matcher has no such quirk and asserts the exact shape, which is
-the contract anyway (an extra `GIT_CONFIG_KEY_2` without a bumped count is silently ignored by
-git, so an exact key set is a real assertion, not pedantry):
+Assert with `toEqual` from the first assertion on. Repeated `toEqual` matches against one object
+pass, and it asserts the exact shape:
 
 ```ts
-const provisioningEnv = {
-  GIT_ASKPASS: expect.stringContaining(`${root}/`),
-  GIT_TERMINAL_PROMPT: "0",
-  LEGION_PROVISIONING_TOKEN: "ghs_x",
-  GIT_CONFIG_COUNT: "2",
-  GIT_CONFIG_KEY_0: "credential.helper",
-  GIT_CONFIG_VALUE_0: "",
-  GIT_CONFIG_KEY_1: "credential.interactive",
-  GIT_CONFIG_VALUE_1: "true",
-};
-expect(commands[0]?.opts?.env).toEqual(provisioningEnv);
-expect(fetchCommand?.opts?.env).toEqual(provisioningEnv);
+const env = { HOME: "/home/legion/workspace", MODE: "fetch" };
+expect(env).toEqual(expected());   // passes
+expect(env).toEqual(expected());   // passes
 ```
 
-This is the shape `processes.test.ts` already used for the same env (`toContainEqual` with
-`expect.stringMatching` on `GIT_ASKPASS`). The round-1 workaround — `toMatchObject` on plain
-values plus a separate `toStartWith` on `GIT_ASKPASS` — worked but split one contract over two
-assertions and lost the exact-key-set check; the review folded it into the `toEqual` above.
+The exact shape is usually the contract anyway. For an environment handed to `git`, an extra
+`GIT_CONFIG_KEY_n` without a bumped `GIT_CONFIG_COUNT` is silently ignored, so an exact key set
+is a real assertion, not pedantry. LEGION-178's round-1 workaround — `toMatchObject` on plain
+values plus a separate `toStartWith` on the one varying path — worked, but split one contract
+over two assertions and lost the exact-key-set check; the review folded it into one `toEqual`.
 
 ## When you hit an empty-diff failure
 
