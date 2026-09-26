@@ -233,7 +233,9 @@ func validateOutboxPayload(payload OutboxPayload) error {
 			return fmt.Errorf("unknown notice kind %q", value.Kind)
 		}
 	case ControllerNotice:
-		if !validNoticeKind(value.Kind) {
+		// A triage notice is the controller's alone: its root is unrecorded, so no issue topic can
+		// take it.
+		if value.Kind != "triage" && !validNoticeKind(value.Kind) {
 			return fmt.Errorf("unknown controller notice kind %q", value.Kind)
 		}
 	case SuperviseRequest:
@@ -254,7 +256,7 @@ func validateOutboxPayload(payload OutboxPayload) error {
 
 func validNoticeKind(kind NoticeKind) bool {
 	switch kind {
-	case "phase-finished", "worker-died", "held", "pr-blocked", "design-approved", "design-changes-requested", "ready-refused", "child-closed", "child-status", "triage":
+	case "phase-finished", "worker-died", "held", "pr-blocked", "design-approved", "design-changes-requested", "ready-refused", "child-closed", "child-status":
 		return true
 	default:
 		return false

@@ -72,8 +72,8 @@ carries, so nothing changes in how you handle wakes. Under the TypeScript daemon
 claims the role and calls `/controller/ready` exactly as under tmux; under the Go daemon
 (`LEGION_DAEMON_API=go` in your environment) it registers on `/legion/v1/claims/register` with the
 secret, claims the role, then subscribes to `notifications.legion.<project>.controller`, where the
-Go daemon publishes the three Go rows of the wake routing table. The daemon records you as
-`controllerLocator: {runtime, external: true, sessionId, registeredAt}`, `runtime` being the
+Go daemon publishes the rows marked from the Go daemon in the wake routing table. The daemon records
+you as `controllerLocator: {runtime, external: true, sessionId, registeredAt}`, `runtime` being the
 daemon's own (`kubernetes`, or `tmux` under the Go daemon). The TypeScript daemon reads your
 liveness from the Envoy role registry (the holder of
 `legion-<project>-controller` and its `last_seen`), not from a pane: keep the session running.
