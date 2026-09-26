@@ -621,12 +621,9 @@ func fitReplacement(parent, with, openingListItem *Node, hasPrefixParagraph bool
 		}
 		return append([]*Node{{Type: "paragraph"}}, source...), true
 	default:
-		// A replacement fitted into a typed block stays inside it whenever fitContent's validation
-		// of the candidate passes, as ProseMirror fits one into a callout. For a callout that is its
-		// content rule; an ask passes any block children (Validate's browser-edit allowance), so a
-		// fit into an ask always lands inside it and the accept's ask check decides whether the ask
-		// still parses. Refusing here sent the fit on to the block's parent, where the only fit
-		// replaced the block and all it held.
+		// A typed block takes the replacement as it is, and fitContent's Validate applies the
+		// block's content rule, which for an ask admits any block (validateTypedBlock), so a fit
+		// never climbs out of a typed block to replace it, as ProseMirror fits one into a callout.
 		if _, typed := typedBlock(parent.Type); typed {
 			return source, true
 		}

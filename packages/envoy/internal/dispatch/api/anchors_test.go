@@ -189,76 +189,6 @@ func TestSuggestionAcceptSpansParagraphs(t *testing.T) {
 	}
 }
 
-// An ask block holds paragraphs and at most one bullet list. A suggestion on its question whose
-// replacement also carries a code block would leave an ask that does not parse; the splice once
-// fitted it by replacing the whole block, so the question someone may be waiting on vanished.
-// Accepting refuses it with the edit route's own ask-block refusal, and the document and the
-// suggestion stay as they were, also beside another ask that was already malformed: that one is
-// not the accept's, but the ask it breaks is. The same text as a replace is refused by the edit
-// route too.
-func TestSuggestionAcceptRefusesAReplacementItsAskCannotHold(t *testing.T) {
-	for _, test := range []struct{ name, spec string }{
-		{name: "alone", spec: "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich one?\n:::\n\nAfter.\n"},
-		{name: "beside a malformed ask", spec: "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich one?\n:::\n\n" +
-			strings.NewReplacer("#a1", "#a2", "Which one?", "Ship it?").Replace(malformedAsk)},
-	} {
-		t.Run(test.name, func(t *testing.T) { acceptBreakingAnAsk(t, test.spec) })
-	}
-}
-
-func acceptBreakingAnAsk(t *testing.T, spec string) {
-	t.Helper()
-	var documentService *docs.Service
-	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
-		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
-		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
-		return documentService
-	})
-	issue := createInteractionIssue(t, handler, "TEST", "Suggestion on an ask", spec)
-	before, err := documentService.Text(context.Background(), issue.PrimaryArtifactID)
-	if err != nil || !strings.Contains(before, ":::ask{#a1") {
-		t.Fatalf("seeded document = %q (%v), want the ask block", before, err)
-	}
-	replacement := "Which?\n\n```\ncode\n```\n"
-	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
-		"body": "reword it", "anchor": map[string]any{"artifact": "spec", "quote": "Which one?"},
-		"suggestion": map[string]string{"replace_with": replacement}, "actor": sessionActor(),
-	})
-	if created.Code != http.StatusCreated {
-		t.Fatalf("create the suggestion: status=%d body=%s", created.Code, created.Body.String())
-	}
-	comment := decodeBody[model.Comment](t, created)
-
-	accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
-
-	if accepted.Code != http.StatusBadRequest || !strings.Contains(accepted.Body.String(), `"code":"INVALID_ASK_BLOCK"`) ||
-		!strings.Contains(accepted.Body.String(), `ask block \"a1\"`) {
-		t.Fatalf("accept a replacement the ask cannot hold: status=%d body=%s", accepted.Code, accepted.Body.String())
-	}
-	if after, err := documentService.Text(context.Background(), issue.PrimaryArtifactID); err != nil || after != before {
-		t.Fatalf("document after the refused accept = %q (%v), want it unchanged: %q", after, err, before)
-	}
-	if _, err := documentService.VerifyMark(context.Background(), issue.PrimaryArtifactID, docs.MarkSuggestion, comment.Anchor.MarkID); err != nil {
-		t.Fatalf("suggestion mark after the refused accept: %v, want it still in place", err)
-	}
-	stored := decodeBody[struct {
-		Comment model.Comment `json:"comment"`
-	}](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/"+comment.ID, nil, "alice")).Comment
-	if stored.Resolved || stored.Suggestion == nil || stored.Suggestion.Accepted != nil {
-		t.Fatalf("suggestion after the refused accept = %#v, want it open and unactioned", stored)
-	}
-
-	edited := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
-		"ops": []map[string]any{{"op": "replace", "find": "Which one?", "with": replacement}},
-	}, "alice")
-	if edited.Code != http.StatusBadRequest || !strings.Contains(edited.Body.String(), `"code":"INVALID_OP"`) {
-		t.Fatalf("the same text through the edit route: status=%d body=%s", edited.Code, edited.Body.String())
-	}
-	if after, err := documentService.Text(context.Background(), issue.PrimaryArtifactID); err != nil || after != before {
-		t.Fatalf("document after the refused edit = %q (%v), want it unchanged", after, err)
-	}
-}
-
 // malformedAsk is an ask block whose body holds a code block. The server keeps one on purpose: a
 // seeded spec or an upload carrying it is accepted, and a browser edit that makes one is stamped
 // invalid, so a document can hold it for as long as nobody repairs it.
@@ -279,6 +209,8 @@ func TestSuggestionActionsAreRefusedOnlyForAnAskAnAcceptBroke(t *testing.T) {
 			quote: "Intro typo.", replaceWith: "Intro fixed.\n\nMore.\n", action: "accept", want: "Intro fixed.\n\nMore."},
 		{name: "a reject of a browser insert", seed: "The quick brown fox\n\n" + malformedAsk,
 			quote: "quick ", action: "reject", want: "The brown fox", browserInsert: true},
+		{name: "a typo fix inside an ask already malformed", seed: "Intro.\n\n" + malformedAsk,
+			quote: "one", replaceWith: "two", action: "accept", want: "Which two?"},
 		{name: "a reject that empties the question it inserted", seed: "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich one?\n:::\n",
 			quote: "Which one?", action: "reject", want: "Intro.", browserInsert: true},
 	} {
@@ -317,83 +249,110 @@ func TestSuggestionActionsAreRefusedOnlyForAnAskAnAcceptBroke(t *testing.T) {
 			if acted.Code != http.StatusOK {
 				t.Fatalf("%s: status=%d body=%s", test.action, acted.Code, acted.Body.String())
 			}
-			if text, err := documentService.Text(context.Background(), issue.PrimaryArtifactID); err != nil || !strings.HasPrefix(text, test.want+"\n") {
-				t.Fatalf("document after the %s = %q (%v), want it to begin %q", test.action, text, err, test.want)
+			if text, err := documentService.Text(context.Background(), issue.PrimaryArtifactID); err != nil || !strings.Contains(text, test.want) {
+				t.Fatalf("document after the %s = %q (%v), want it to hold %q", test.action, text, err, test.want)
 			}
 		})
 	}
 }
 
-// A replacement carrying an ask block under the id of an ask the document already holds would
-// write two asks with one id, and the document's id repair keeps the id for the first in document
-// order, so the new ask would take over the existing ask's row and its answer. The accept refuses
-// it, and the document and the existing ask stay as they were.
-func TestSuggestionAcceptRefusesAnAskUnderAnIdTheDocumentHolds(t *testing.T) {
-	var documentService *docs.Service
-	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
-		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
-		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
-		return documentService
-	})
-	issue := createInteractionIssue(t, handler, "TEST", "An ask under a held id",
-		"Intro typo.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich one?\n:::\n")
-	before, err := documentService.Text(context.Background(), issue.PrimaryArtifactID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
-		"body": "ask first", "anchor": map[string]any{"artifact": "spec", "quote": "Intro typo."},
-		"suggestion": map[string]string{"replace_with": ":::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nOther?\n:::\n"},
-		"actor":      sessionActor(),
-	})
-	if created.Code != http.StatusCreated {
-		t.Fatalf("create the suggestion: status=%d body=%s", created.Code, created.Body.String())
-	}
-	comment := decodeBody[model.Comment](t, created)
+// askSpec is a document holding one open ask, a1, between two paragraphs.
+const askSpec = "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich one?\n:::\n\nAfter.\n"
 
-	accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
+// Every accept refused for what it would write leaves the document byte-identical, the
+// suggestion's mark in place, and the comment open and unactioned.
+//   - An ask holds paragraphs and at most one bullet list. A question given a code block would leave
+//     an ask settlement cannot read; the splice once fitted it by replacing the whole block, so the
+//     question someone may be waiting on vanished. It is refused with settlement's reason, alone or
+//     beside another ask that was already malformed (that one is not the accept's, the ask it
+//     breaks is), and so is the same text through the edit route.
+//   - A replacement that leaves a paragraph after an ask's options, or a second bullet list in
+//     it, breaks the ask's content rule, paragraph+ bullet_list?; settlement's parse takes it, but
+//     the browser editor drops such an ask from the shared document when it renders it, and
+//     settlement then retracts it.
+//   - Deleting an ask's whole question leaves an ask with no question.
+//   - A replacement carrying an ask under a1's id would write two asks with one id, and the id
+//     repair keeps the id for the first in document order, handing a1's row and answer to the new
+//     ask.
+//   - A code block over a table cell's whole text fits nowhere; the splice's schema error once
+//     reached the handler as a 500.
+func TestSuggestionAcceptRefusals(t *testing.T) {
+	codeQuestion := "Which?\n\n```\ncode\n```\n"
+	for _, test := range []struct {
+		name, spec, quote, replaceWith, code, reason string
+		sameThroughEdits                             bool
+	}{
+		{name: "a question given a code block", spec: askSpec, quote: "Which one?", replaceWith: codeQuestion,
+			code: "INVALID_ASK_BLOCK", reason: `ask block \"a1\" has unsupported body node \"code_block\"`, sameThroughEdits: true},
+		{name: "a question given a code block beside a malformed ask", quote: "Which one?", replaceWith: codeQuestion,
+			spec: askSpec + "\n" + strings.NewReplacer("#a1", "#a2", "Which one?", "Ship it?").Replace(malformedAsk),
+			code: "INVALID_ASK_BLOCK", reason: `ask block \"a1\" has unsupported body node \"code_block\"`, sameThroughEdits: true},
+		{name: "a paragraph after a free-text ask's new options", spec: askSpec, quote: "Which one?",
+			replaceWith: "Which database?\n\n- Postgres\n- SQLite\n\nPick one by Friday.\n",
+			code:        "INVALID_ASK_BLOCK", reason: `ask block \"a1\" holds a paragraph after its options`},
+		{name: "a second bullet list in an ask with options", quote: "Which one?", replaceWith: "Which?\n\n- X\n",
+			spec: "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich one?\n\n- A\n- B\n:::\n",
+			code: "INVALID_ASK_BLOCK", reason: `ask block \"a1\" holds a second bullet list`},
+		{name: "an ask's whole question deleted", spec: askSpec, quote: "Which one?", replaceWith: "",
+			code: "INVALID_ASK_BLOCK", reason: `ask block \"a1\" has an empty question`},
+		{name: "an ask under a held id", spec: "Intro typo.\n\n" + askSpec, quote: "Intro typo.",
+			replaceWith: ":::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nOther?\n:::\n",
+			code:        "INVALID_ASK_BLOCK", reason: `duplicate ask block id \"a1\"`},
+		{name: "a code block over a table cell's whole text", spec: "| head |\n| :--- |\n| a target c |\n", quote: "a target c",
+			replaceWith: "```\ncode\n```\n", code: "INVALID_OP", reason: `field \"replace_with\"`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var documentService *docs.Service
+			handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+				documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
+				t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+				return documentService
+			})
+			issue := createInteractionIssue(t, handler, "TEST", "A refused accept", test.spec)
+			before, err := documentService.Text(context.Background(), issue.PrimaryArtifactID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+				"body": "suggested", "anchor": map[string]any{"artifact": "spec", "quote": test.quote},
+				"suggestion": map[string]string{"replace_with": test.replaceWith}, "actor": sessionActor(),
+			})
+			if created.Code != http.StatusCreated {
+				t.Fatalf("create the suggestion: status=%d body=%s", created.Code, created.Body.String())
+			}
+			comment := decodeBody[model.Comment](t, created)
 
-	if accepted.Code != http.StatusBadRequest || !strings.Contains(accepted.Body.String(), `"code":"INVALID_ASK_BLOCK"`) ||
-		!strings.Contains(accepted.Body.String(), `duplicate ask block id \"a1\"`) {
-		t.Fatalf("accept an ask under a held id: status=%d body=%s", accepted.Code, accepted.Body.String())
-	}
-	if after, err := documentService.Text(context.Background(), issue.PrimaryArtifactID); err != nil || after != before {
-		t.Fatalf("document after the refused accept = %q (%v), want it unchanged: %q", after, err, before)
-	}
-}
+			accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
 
-// A replacement no level of the document can hold where the suggestion sits, such as a code block
-// over a table cell's whole text, is the caller's to fix: the accept is refused naming replace_with, and
-// the document stays as it was, where the splice's schema error once reached the handler as a 500.
-func TestSuggestionAcceptRefusesAReplacementTheDocumentCannotFit(t *testing.T) {
-	var documentService *docs.Service
-	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
-		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
-		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
-		return documentService
-	})
-	issue := createInteractionIssue(t, handler, "TEST", "Code over a table cell", "| head |\n| :--- |\n| a target c |\n")
-	before, err := documentService.Text(context.Background(), issue.PrimaryArtifactID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
-		"body": "as code", "anchor": map[string]any{"artifact": "spec", "quote": "a target c"},
-		"suggestion": map[string]string{"replace_with": "```\ncode\n```\n"}, "actor": sessionActor(),
-	})
-	if created.Code != http.StatusCreated {
-		t.Fatalf("create the suggestion: status=%d body=%s", created.Code, created.Body.String())
-	}
-	comment := decodeBody[model.Comment](t, created)
-
-	accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
-
-	if accepted.Code != http.StatusBadRequest || !strings.Contains(accepted.Body.String(), `"code":"INVALID_OP"`) ||
-		!strings.Contains(accepted.Body.String(), `\"replace_with\"`) {
-		t.Fatalf("accept a code block over a table cell: status=%d body=%s", accepted.Code, accepted.Body.String())
-	}
-	if after, err := documentService.Text(context.Background(), issue.PrimaryArtifactID); err != nil || after != before {
-		t.Fatalf("document after the refused accept = %q (%v), want it unchanged: %q", after, err, before)
+			if accepted.Code != http.StatusBadRequest || !strings.Contains(accepted.Body.String(), `"code":"`+test.code+`"`) ||
+				!strings.Contains(accepted.Body.String(), test.reason) {
+				t.Fatalf("accept: status=%d body=%s, want 400 %s naming %s", accepted.Code, accepted.Body.String(), test.code, test.reason)
+			}
+			if after, err := documentService.Text(context.Background(), issue.PrimaryArtifactID); err != nil || after != before {
+				t.Fatalf("document after the refused accept = %q (%v), want it unchanged: %q", after, err, before)
+			}
+			if _, err := documentService.VerifyMark(context.Background(), issue.PrimaryArtifactID, docs.MarkSuggestion, comment.Anchor.MarkID); err != nil {
+				t.Fatalf("suggestion mark after the refused accept: %v, want it still in place", err)
+			}
+			stored := decodeBody[struct {
+				Comment model.Comment `json:"comment"`
+			}](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/"+comment.ID, nil, "alice")).Comment
+			if stored.Resolved || stored.Suggestion == nil || stored.Suggestion.Accepted != nil {
+				t.Fatalf("suggestion after the refused accept = %#v, want it open and unactioned", stored)
+			}
+			if !test.sameThroughEdits {
+				return
+			}
+			edited := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+				"ops": []map[string]any{{"op": "replace", "find": test.quote, "with": test.replaceWith}},
+			}, "alice")
+			if edited.Code != http.StatusBadRequest || !strings.Contains(edited.Body.String(), `"code":"INVALID_OP"`) {
+				t.Fatalf("the same text through the edit route: status=%d body=%s", edited.Code, edited.Body.String())
+			}
+			if after, err := documentService.Text(context.Background(), issue.PrimaryArtifactID); err != nil || after != before {
+				t.Fatalf("document after the refused edit = %q (%v), want it unchanged", after, err)
+			}
+		})
 	}
 }
 

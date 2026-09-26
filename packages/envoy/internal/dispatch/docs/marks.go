@@ -311,6 +311,8 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		if err != nil {
 			return err
 		}
+		// A reject is not checked: it removes the text a browser insert added, which gives back the
+		// document the insert started from.
 		if accept {
 			if err := refuseBrokenAsks(tree, next); err != nil {
 				return err
@@ -327,35 +329,27 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 	})
 }
 
-// refuseBrokenAsks refuses an accept whose splice leaves unparseable an ask block the document
-// could parse before it, with the parse error the edit route gives an edit that leaves one
-// (ApplyOps), so a replacement an ask cannot hold, such as a question given a code block, writes
-// nothing. An ask that was already malformed is not the accept's to refuse: an upload, a seeded
-// spec or a browser edit can leave one, and settlement keeps it with its parse error stamped, so an
-// accept that leaves it as it was must not fail over an ask it never touched. A reject is never
-// checked: it removes the text a browser insert added, which gives back the document the insert
-// started from.
+// refuseBrokenAsks refuses the first ask a write left unreadable whose id the document could read
+// before it, with settlement's reason (the one the edit route's ApplyOps gives), so a replacement
+// an ask cannot hold, such as a question given a code block, writes nothing. An id the document
+// already held unreadable, malformed or repeated, is not the write's to refuse: an upload, a seeded
+// spec or a browser edit can leave one, settlement flags it, and a write elsewhere must not fail
+// over it.
 func refuseBrokenAsks(before, after *pmdoc.Node) error {
-	_, broken, err := collectAskBlocksForSettlement(after)
-	if err == nil && len(broken) == 0 {
-		return nil
-	}
-	_, brokenBefore, errBefore := collectAskBlocksForSettlement(before)
-	if err != nil {
-		// A duplicate ask id: refused only when the document had none before the splice.
-		if errBefore == nil {
-			return &ErrInvalidAskBlock{Reason: err}
+	unreadable := map[string]bool{}
+	askReadability(before, func(id string, reason error) bool {
+		unreadable[id] = unreadable[id] || reason != nil
+		return true
+	})
+	var refusal error
+	askReadability(after, func(id string, reason error) bool {
+		if reason != nil && !unreadable[id] {
+			refusal = reason
 		}
-		return nil
-	}
-	malformedBefore := make(map[string]bool, len(brokenBefore))
-	for _, ask := range brokenBefore {
-		malformedBefore[ask.id] = true
-	}
-	for _, ask := range broken {
-		if !malformedBefore[ask.id] {
-			return &ErrInvalidAskBlock{Reason: ask.reason}
-		}
+		return refusal == nil
+	})
+	if refusal != nil {
+		return &ErrInvalidAskBlock{Reason: refusal}
 	}
 	return nil
 }

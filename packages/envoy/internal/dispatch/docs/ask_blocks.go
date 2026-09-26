@@ -261,6 +261,29 @@ func collectAskBlocksForSettlement(tree *pmdoc.Node) ([]askBlock, []invalidAskBl
 	return blocks, invalidBlocks, nil
 }
 
+// askReadability visits each ask block in document order with the reason it cannot be read, nil
+// when it can: settlement's parse, then the content rule the browser editor holds an ask to (an ask
+// breaking it is dropped from the shared document when an editor renders it, and settlement then
+// retracts it). An ask repeating an earlier ask's id is unreadable as a duplicate, so every ask
+// gets an answer where collectAskBlocksForSettlement stops at the first repeat.
+func askReadability(tree *pmdoc.Node, visit func(id string, reason error) bool) {
+	seen := map[string]struct{}{}
+	pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
+		if node.Type != "ask" {
+			return true
+		}
+		id, _ := node.Attrs[pmdoc.BlockIDAttr].(string)
+		var reason error
+		if _, duplicate := seen[id]; duplicate {
+			reason = fmt.Errorf("duplicate ask block id %q", id)
+		} else if _, reason = parseAskBlock(node); reason == nil {
+			reason = pmdoc.AskContentError(node)
+		}
+		seen[id] = struct{}{}
+		return visit(id, reason)
+	})
+}
+
 func parseAskBlock(node *pmdoc.Node) (askBlock, error) {
 	blockID, _ := node.Attrs[pmdoc.BlockIDAttr].(string)
 	urgency, _ := node.Attrs["urgency"].(string)

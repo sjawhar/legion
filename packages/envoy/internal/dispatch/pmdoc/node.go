@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strings"
 )
 
 type Attrs map[string]any
@@ -169,7 +170,8 @@ func validateTypedBlock(n *Node, typ BlockTypeSchema) error {
 	case BlockContentParagraphsOptionalBulletList:
 		// Browser edits can transiently put another block in an ask. Retain that
 		// structurally valid body so Dispatch can stamp its semantic parse error;
-		// agent mutations still reject it through validateAskBlocks.
+		// uploads and edits refuse an ask they write that breaks the rule
+		// (AskContentError).
 		if n.Type == "ask" {
 			if len(n.Children) == 0 || !childrenAreBlocks(n.Children) {
 				return fmt.Errorf("%w: typed block %q requires block children", ErrSchema, n.Type)
@@ -209,6 +211,56 @@ func validateTypedBlock(n *Node, typ BlockTypeSchema) error {
 		}
 	}
 	return nil
+}
+
+// AskContentError reports the first ask block in node that breaks its content rule, paragraph+
+// bullet_list? - one or more paragraphs, then at most one bullet list, last - or nil. Validate
+// lets an ask hold other blocks, since a browser edit can briefly leave one there and settlement
+// flags it; markdown written in whole is held to the rule, as the browser editor's parser holds it.
+func AskContentError(node *Node) error {
+	var found error
+	walk(node, func(ask *Node, _ []int, _, _ int) bool {
+		if found != nil {
+			return false
+		}
+		if ask.Type != "ask" || paragraphsThenOptionalBulletList(ask.Children) {
+			return true
+		}
+		id, _ := ask.Attrs[BlockIDAttr].(string)
+		found = fmt.Errorf("ask block %q holds %s where its content rule, %s, allows one or more paragraphs and then at most one bullet list, last", id, askContentBreak(ask.Children), BlockContentParagraphsOptionalBulletList)
+		return false
+	})
+	return found
+}
+
+// askContentBreak names the first child that breaks an ask's content rule.
+func askContentBreak(children []*Node) string {
+	for index, child := range children {
+		switch {
+		case index == 0 && child.Type != "paragraph":
+			return askBlockName(child.Type) + " before its question"
+		case child.Type == "paragraph" && index > 0 && children[index-1].Type == "bullet_list":
+			return "a paragraph after its options"
+		case child.Type == "bullet_list" && index > 0 && children[index-1].Type == "bullet_list":
+			return "a second bullet list"
+		case child.Type != "paragraph" && child.Type != "bullet_list":
+			return askBlockName(child.Type)
+		}
+	}
+	return "nothing"
+}
+
+// askBlockName is a block type as a reader names it, with its article: "a code block", "an
+// ordered list", "a horizontal rule".
+func askBlockName(nodeType string) string {
+	name := strings.ReplaceAll(nodeType, "_", " ")
+	if nodeType == "hr" {
+		name = "horizontal rule"
+	}
+	if strings.ContainsRune("aeiou", rune(name[0])) {
+		return "an " + name
+	}
+	return "a " + name
 }
 
 func paragraphsThenOptionalBulletList(children []*Node) bool {

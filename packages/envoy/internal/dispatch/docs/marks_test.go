@@ -615,3 +615,74 @@ func waitFor(t *testing.T, timeout time.Duration, description string, condition 
 	}
 	t.Fatalf("timed out waiting for %s", description)
 }
+
+// askTree parses markdown and gives its ask blocks the ids named, in document order, repeats
+// included: a browser write can leave two asks under one id until settlement's repair runs, and
+// parsing alone never produces that document.
+func askTree(t *testing.T, markdown string, ids ...string) *pmdoc.Node {
+	t.Helper()
+	tree, err := pmdoc.Parse(markdown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := 0
+	pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
+		if node.Type == "ask" {
+			node.Attrs[pmdoc.BlockIDAttr] = ids[next]
+			next++
+		}
+		return true
+	})
+	if next != len(ids) {
+		t.Fatalf("%d ask blocks, want %d", next, len(ids))
+	}
+	return tree
+}
+
+// refuseBrokenAsks judges each ask by its id, so an id the document already held unreadable,
+// repeated included, neither switches the check off for another ask nor refuses a write that
+// leaves it alone.
+func TestRefuseBrokenAsksJudgesEachAskByItsID(t *testing.T) {
+	const (
+		ask       = ":::ask{urgency=\"med\" multiple=\"false\"}\n%s\n:::\n\n"
+		malformed = "Which one?\n\n```\ncode\n```"
+	)
+	askDoc := func(questions ...string) string {
+		markdown := ""
+		for _, question := range questions {
+			markdown += fmt.Sprintf(ask, question)
+		}
+		return markdown
+	}
+	for _, test := range []struct {
+		name          string
+		before, after *pmdoc.Node
+		want          string
+	}{
+		{name: "an ask broken beside a repeated id elsewhere",
+			before: askTree(t, askDoc("Which one?", "Q2?", "Q3?"), "a1", "a2", "a2"),
+			after:  askTree(t, askDoc(malformed, "Q2?", "Q3?"), "a1", "a2", "a2"),
+			want:   `ask block "a1" has unsupported body node "code_block"`},
+		{name: "a repeat removed beside an ask already malformed",
+			before: askTree(t, askDoc(malformed, "Q2?", "Q3?"), "a1", "a2", "a2"),
+			after:  askTree(t, askDoc(malformed, "Q2?"), "a1", "a2")},
+		{name: "a repeat written under a readable ask's id",
+			before: askTree(t, askDoc("Which one?"), "a1"),
+			after:  askTree(t, askDoc("Other?", "Which one?"), "a1", "a1"),
+			want:   `duplicate ask block id "a1"`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := refuseBrokenAsks(test.before, test.after)
+			if test.want == "" {
+				if err != nil {
+					t.Fatalf("refuseBrokenAsks = %v, want nil", err)
+				}
+				return
+			}
+			var invalid *ErrInvalidAskBlock
+			if !errors.As(err, &invalid) || invalid.Reason.Error() != test.want {
+				t.Fatalf("refuseBrokenAsks = %v, want the ask refused with %q", err, test.want)
+			}
+		})
+	}
+}
