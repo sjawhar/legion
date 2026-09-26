@@ -143,11 +143,7 @@ var doubleQuoteEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`, `$`, `\$`, "`
 // double quotes (systemPromptArguments and shellDoubleQuoted, runtime-tmux.ts). The caller has
 // checked there is a role prompt.
 func SystemPromptArgument(parts runtime.PromptParts) string {
-	quoted := make([]string, len(parts.RolePromptPaths))
-	for i, path := range parts.RolePromptPaths {
-		quoted[i] = shellprefix.Word(path)
-	}
-	fragments := []string{"$(cat " + strings.Join(quoted, " ") + ")"}
+	fragments := []string{"$(cat " + shellprefix.Command(parts.RolePromptPaths) + ")"}
 	if parts.Addressing != "" {
 		fragments = append(fragments, doubleQuoteEscaper.Replace(parts.Addressing))
 	}

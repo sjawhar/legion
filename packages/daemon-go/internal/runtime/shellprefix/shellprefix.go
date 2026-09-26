@@ -41,8 +41,9 @@ func Word(value string) string {
 
 // Command renders argv as one shell command line, each element one Word, so a shell reads it back
 // as the same argv. Every element must be non-empty: Word renders "" as nothing, which a shell
-// drops (every caller's argv is a launch prefix the config loader holds to non-empty strings, or a
-// command whose every word is set).
+// drops. Every caller's argv is one: a launch prefix, which the config loader holds to non-empty
+// strings; role prompt paths, each a file the daemon resolved; or a printed way out, whose every
+// word is set.
 func Command(argv []string) string {
 	words := make([]string, len(argv))
 	for i, arg := range argv {
