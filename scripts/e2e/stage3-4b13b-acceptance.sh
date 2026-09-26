@@ -458,11 +458,12 @@ retarget_pr() {
   [ "$(gh -R "$repo" pr view "$n" --json baseRefName --jq .baseRefName)" = "$scratch_base" ] || fail "$repo#$n did not retarget to $scratch_base"
   note "$issue opened $repo#$n; its base read $base here, and is $scratch_base"
 }
-approved_head() {
-  local n=$1 head approved
-  head=$(gh api "repos/$repo/pulls/$n" --jq .head.sha) || return 1
-  approved=$(gh api --paginate "repos/$repo/pulls/$n/reviews" --jq '.[] | select(.user.login == "legion-reviewer[bot]" and .state == "APPROVED") | .commit_id') || return 1
-  grep -qx -- "$head" <<<"$approved"
+# reviewer_approved N prints each commit the review App approved on pull request N, and fails when
+# it approved none.
+reviewer_approved() {
+  local approved
+  approved=$(gh api --paginate "repos/$repo/pulls/$1/reviews" --jq '.[] | select(.user.login == "legion-reviewer[bot]" and .state == "APPROVED") | .commit_id') || return 1
+  [ -n "$approved" ] && printf '%s\n' "$approved"
 }
 
 # ---- the instructor: every routine phase worker is instructed the moment its assignment arrives -----
@@ -1015,9 +1016,19 @@ note "planner notice (control): verdict line absent: $(grep -c 'verdict:' <<<"$p
 pass
 
 begin reviewers
+# A review ends when its reviewer completes it: the reviewer approves the head it has, then commits
+# and pushes its handoff, so the pull request's head moves past the approved commit before the issue
+# leaves reviewing, and the retro's handoff moves it again. Whether that approval still stands for
+# the head the round ends on is the daemon's judgement (classify.ApprovalStands), recorded on the
+# round as its decision; the proof checks the review App approved and the daemon ended the round on
+# that approval.
+reviewed_through() {
+  reviewer_approved "${pr_of[$1]}" >/dev/null && phase_at_least "$1" retro &&
+    daemon_state | jq -e --arg i "$1" '.issues[$i].pullRequest.reviewDecision == "approved"' >/dev/null
+}
 for issue in "$root1" "$root2" "$root3"; do
-  reviewed_through() { approved_head "${pr_of[$1]}" && phase_at_least "$1" retro; }
-  until_true 900 "$repo#${pr_of[$issue]} approved by legion-reviewer[bot] at its head, and $issue past reviewing" reviewed_through "$issue"
+  until_true 900 "$repo#${pr_of[$issue]} approved by legion-reviewer[bot], and $issue past reviewing on that approval" reviewed_through "$issue"
+  note "$issue: legion-reviewer[bot] approved $({ reviewer_approved "${pr_of[$issue]}" || true; } | cut -c1-8 | tr '\n' ' '); the head is now $(gh api "repos/$repo/pulls/${pr_of[$issue]}" --jq .head.sha | cut -c1-8)"
 done
 pass
 
