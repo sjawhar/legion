@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"slices"
 	"strings"
 	"time"
 
@@ -148,6 +147,7 @@ func (e *Engine) agentStatusWrite(ctx context.Context, tx pgx.Tx, issue record.I
 	e.log.Info("workflow: a claim session wrote a lifecycle status; the daemon re-asserts its own", "issue", issue.Key,
 		"session", fact.ActorSession, "wrote", fact.Status, "status", issue.Status)
 	issue.Title, issue.Rank, issue.Parent, issue.LastDispatchSeq = fact.Title, fact.Rank, record.ParentOf(fact.Parent), fact.Seq
+	issue.HandedOver = record.CarriesLegionLabel(fact.Labels)
 	if err := e.store.PutIssue(ctx, tx, issue); err != nil {
 		return false, err
 	}
@@ -168,7 +168,7 @@ func (e *Engine) recordChildUnderLiveTree(ctx context.Context, tx pgx.Tx, fact i
 	if err != nil || root == nil {
 		return intake.Result{}, err
 	}
-	live, err := e.liveTree(ctx, tx, *root)
+	live, err := record.TreeLive(ctx, e.store, tx, *root)
 	if err != nil || !live {
 		return intake.Result{}, err
 	}
@@ -186,7 +186,7 @@ func (e *Engine) reenterChild(ctx context.Context, tx pgx.Tx, child record.Issue
 	if err != nil || root == nil {
 		return err
 	}
-	live, err := e.liveTree(ctx, tx, *root)
+	live, err := record.TreeLive(ctx, e.store, tx, *root)
 	if err != nil || !live {
 		return err
 	}
@@ -221,7 +221,7 @@ func (e *Engine) reenterChild(ctx context.Context, tx pgx.Tx, child record.Issue
 func (e *Engine) enterChild(ctx context.Context, tx pgx.Tx, root record.Issue, fact intake.DispatchIssue, generation uint64) error {
 	parentKey := fact.Parent
 	child := record.Issue{Key: fact.Key, Tree: root.Tree, Project: root.Project, Title: fact.Title, Parent: &parentKey, Phase: phase.Admitted,
-		Generation: generation, Status: fact.Status, Rank: fact.Rank, LastDispatchSeq: fact.Seq}
+		Generation: generation, Status: fact.Status, Rank: fact.Rank, HandedOver: record.CarriesLegionLabel(fact.Labels), LastDispatchSeq: fact.Seq}
 	if err := e.store.PutIssue(ctx, tx, child); err != nil {
 		return err
 	}
@@ -973,24 +973,6 @@ func (e *Engine) treeMembers(ctx context.Context, tx pgx.Tx, root record.Issue) 
 		}
 	}
 	return members, nil
-}
-
-func (e *Engine) liveTree(ctx context.Context, tx pgx.Tx, root record.Issue) (bool, error) {
-	if root.LingerUntil != nil {
-		return false, nil
-	}
-	slots, err := e.store.Slots(ctx, tx)
-	if err != nil {
-		return false, err
-	}
-	if slices.ContainsFunc(slots, func(slot record.Slot) bool { return slot.Issue == root.Key }) {
-		return true, nil
-	}
-	issues, err := e.store.Issues(ctx, tx)
-	if err != nil {
-		return false, err
-	}
-	return slices.ContainsFunc(record.Waiting(issues, slots), func(waiting record.Issue) bool { return waiting.Key == root.Key }), nil
 }
 
 func (e *Engine) gateForIssue(ctx context.Context, tx pgx.Tx, issue record.Issue) (*record.DesignGate, error) {

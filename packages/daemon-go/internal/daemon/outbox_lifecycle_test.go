@@ -69,7 +69,7 @@ func TestAnEarlierGenerationsSuperviseRowNeverActsOnTheNextGeneration(t *testing
 
 	for _, observed := range []intake.DispatchIssue{
 		{Key: root.Key, Seq: 6, Type: "issue.updated", Status: "backlog", Title: root.Title, Rank: "U"},
-		{Key: root.Key, Seq: 7, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: "U"},
+		{Key: root.Key, Seq: 7, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: "U", Labels: []string{record.LegionLabel}},
 	} {
 		if _, err := intake.ApplyFact(ctx, pool, "dispatch", "ev-"+observed.Status, observed, handlers...); err != nil {
 			t.Fatalf("%s: %v", observed.Status, err)
@@ -172,7 +172,7 @@ func TestAReadmittedTreeKeepsItsOpenPullRequest(t *testing.T) {
 		fact intake.Fact
 	}{
 		{"backlog", intake.DispatchIssue{Key: key, Seq: 6, Type: "issue.updated", Status: "backlog", Title: root.Title, Rank: "U"}},
-		{"todo", intake.DispatchIssue{Key: key, Seq: 7, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: "U"}},
+		{"todo", intake.DispatchIssue{Key: key, Seq: 7, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: "U", Labels: []string{record.LegionLabel}}},
 		{"gate", intake.GateRegistered{Issue: key, ArtifactID: artifact, Version: 2}},
 		{"approve", intake.DispatchArtifact{Key: key, ArtifactID: artifact, Kind: intake.DispatchArtifactApproved, Version: 2}},
 		{"plan", intake.HandoffComplete{Generation: 2, Issue: key, Role: claim.RolePlanner, Summary: "plan", Commit: "plan-1"}},

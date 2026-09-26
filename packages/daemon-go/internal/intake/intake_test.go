@@ -118,19 +118,19 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 			name:    "Dispatch issue created",
 			subject: "notifications.dispatch.issue.CAPTURE-4.issue.created",
 			file:    "dispatch/issue-created.json",
-			want:    DispatchIssue{Key: "CAPTURE-4", Seq: 1, Type: "issue.created", Status: "triage", Title: "Captured approval issue", Rank: "UUUU"},
+			want:    DispatchIssue{Key: "CAPTURE-4", Seq: 1, Type: "issue.created", Status: "triage", Title: "Captured approval issue", Rank: "UUUU", Labels: []string{}},
 		},
 		{
 			name:    "Dispatch issue updated",
 			subject: "notifications.dispatch.issue.CAPTURE-3.issue.updated",
 			file:    "dispatch/issue-updated.json",
-			want:    DispatchIssue{Key: "CAPTURE-3", Seq: 2, Type: "issue.updated", Status: "todo", Title: "Captured workflow issue", Rank: "UUU"},
+			want:    DispatchIssue{Key: "CAPTURE-3", Seq: 2, Type: "issue.updated", Status: "todo", Title: "Captured workflow issue", Rank: "UUU", Labels: []string{}},
 		},
 		{
 			name:    "Dispatch issue closed",
 			subject: "notifications.dispatch.issue.CAPTURE-4.issue.closed",
 			file:    "dispatch/issue-closed.json",
-			want:    DispatchIssue{Key: "CAPTURE-4", Seq: 6, Type: "issue.closed", Status: "done", Title: "Captured approval issue", Rank: "UUUU"},
+			want:    DispatchIssue{Key: "CAPTURE-4", Seq: 6, Type: "issue.closed", Status: "done", Title: "Captured approval issue", Rank: "UUUU", Labels: []string{}},
 		},
 		{
 			name:    "Dispatch artifact version",
@@ -220,6 +220,20 @@ func TestCapturedIssueUpdatedEnvelopeDecodes(t *testing.T) {
 	data := capturedIssueUpdatedEnvelope(t)
 	if _, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, data); err != nil {
 		t.Fatalf("decode captured issue.updated envelope: %v", err)
+	}
+}
+
+// An issue event carries the issue's labels, which say whether it is handed to Legion; they reach the
+// fact as Dispatch wrote them, case and order kept.
+func TestADispatchIssueEventCarriesItsLabels(t *testing.T) {
+	data := strings.Replace(string(capturedIssueUpdatedEnvelope(t)), `\"labels\":[]`, `\"labels\":[\"frontend\",\"Legion\"]`, 1)
+	got, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, []byte(data))
+	if err != nil {
+		t.Fatalf("decode labeled issue.updated envelope: %v", err)
+	}
+	issue, ok := got.Fact.(DispatchIssue)
+	if !ok || !slices.Equal(issue.Labels, []string{"frontend", "Legion"}) {
+		t.Fatalf("fact = %#v, want a Dispatch issue carrying labels [frontend Legion]", got.Fact)
 	}
 }
 

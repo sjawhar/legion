@@ -37,11 +37,11 @@ func New(store record.Store, cap int, project string, log *slog.Logger) *Admissi
 	return &Admission{store: store, cap: cap, project: project, log: log, now: time.Now}
 }
 
-// Apply records root and orphan todo observations and every newer observation of a recorded issue,
-// wakes the controller for a root created in triage (a controller notice, not a record), releases
-// slots that the workflow completed, and promotes waiting roots while capacity remains. The
-// workflow handler runs first: it records every live-tree child, leaving admission to record only
-// a still-unrecorded root or orphan.
+// Apply records root and orphan todo observations of issues handed to Legion and every newer
+// observation of a recorded issue, wakes the controller for an unrecorded root in triage handed to
+// Legion (a controller notice, not a record), releases slots that the workflow completed, and
+// promotes waiting roots while capacity remains. The workflow handler runs first: it records every
+// live-tree child, leaving admission to record only a still-unrecorded root or orphan.
 func (a *Admission) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake.Result, error) {
 	if err := a.releaseDoneSlots(ctx, tx); err != nil {
 		return intake.Result{}, err
@@ -60,16 +60,21 @@ func (a *Admission) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (int
 		return intake.Result{}, fmt.Errorf("read admission issue %s: %w", observation.Key, err)
 	}
 	if stored == nil {
-		// A root created in triage is the controller's to triage. Its creation is the one
-		// observation that comes once per issue, so it alone wakes the controller; the record stays
-		// empty, as for any root not yet todo. The boot listing (Reconcile) never sees it: it reads
-		// only the workflow's statuses, todo to retro.
-		if observation.Type == "issue.created" && observation.Status == "triage" && observation.Parent == "" {
+		handed := record.CarriesLegionLabel(observation.Labels)
+		// A root in triage handed to Legion is the controller's to triage, so each observation of it
+		// while it is unrecorded wakes the controller: its creation with the label, or the edit that
+		// adds it, since the dashboard creates an issue without labels. The controller triages from
+		// Dispatch and the daemon's state, never from the wake. A root without the label is not
+		// Legion's and wakes nobody. The record stays empty, as for any root not yet todo; the boot
+		// listing (Reconcile) never sees it, reading only the workflow's statuses, todo to retro.
+		if observation.Status == "triage" && observation.Parent == "" && handed {
 			if err := a.enqueue(ctx, tx, observation.Key, record.ControllerNotice{Kind: "triage"}, a.now()); err != nil {
 				return intake.Result{}, err
 			}
 		}
-		if observation.Status != "todo" {
+		// An unrecorded todo issue without the label is someone else's work in a project Legion may
+		// share with humans and other agents: Legion records nothing of it until it is handed over.
+		if observation.Status != "todo" || !handed {
 			return intake.Result{}, nil
 		}
 		if err := a.putNewRoot(ctx, tx, observation, true); err != nil {
@@ -112,11 +117,11 @@ func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []dispat
 			return fmt.Errorf("read reconciled issue %s: %w", summary.Key, err)
 		}
 		if stored == nil {
-			if summary.Status != "todo" {
+			if summary.Status != "todo" || !record.CarriesLegionLabel(summary.Labels) {
 				continue
 			}
 			if err := a.putNewRoot(ctx, tx, intake.DispatchIssue{
-				Key: summary.Key, Status: summary.Status, Title: summary.Title, Parent: deref(summary.Parent), Rank: summary.Rank,
+				Key: summary.Key, Status: summary.Status, Title: summary.Title, Parent: deref(summary.Parent), Rank: summary.Rank, Labels: summary.Labels,
 			}, false); err != nil {
 				return err
 			}
@@ -128,7 +133,8 @@ func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []dispat
 			continue
 		}
 
-		if summary.Status == "todo" && readmittable(*stored) {
+		handed := record.CarriesLegionLabel(summary.Labels)
+		if summary.Status == "todo" && handed && readmittable(*stored) {
 			if err := a.readmit(ctx, tx, *stored, summary.Title, deref(summary.Parent), summary.Rank, stored.LastDispatchSeq); err != nil {
 				return err
 			}
@@ -141,7 +147,7 @@ func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []dispat
 		}
 		if err := a.recordObservation(ctx, tx, *stored, observed{
 			Title: summary.Title, Parent: deref(summary.Parent), Rank: summary.Rank,
-			Status: summary.Status, Seq: stored.LastDispatchSeq,
+			Status: summary.Status, HandedOver: handed, Seq: stored.LastDispatchSeq,
 		}); err != nil {
 			return err
 		}
@@ -164,6 +170,7 @@ func (a *Admission) putNewRoot(ctx context.Context, tx pgx.Tx, observation intak
 		Generation:      1,
 		Status:          "todo",
 		Rank:            observation.Rank,
+		HandedOver:      record.CarriesLegionLabel(observation.Labels),
 		LastDispatchSeq: observation.Seq,
 	}
 	if err := a.store.PutIssue(ctx, tx, issue); err != nil {
@@ -176,41 +183,69 @@ func (a *Admission) putNewRoot(ctx context.Context, tx pgx.Tx, observation intak
 }
 
 // applyObservation records a newer Dispatch observation of a recorded issue: the one place a live
-// event's title, rank, parent, and status reach the record, so a re-rank or a rename at the same
-// status moves the waiting line at once. A todo on a lingering or closed root is a re-admission.
+// event's title, rank, parent, label, and status reach the record, so a re-rank, a rename, or the
+// label taken off or put back at the same status moves the waiting line at once. A todo on a
+// lingering or closed root handed to Legion is a re-admission.
 func (a *Admission) applyObservation(ctx context.Context, tx pgx.Tx, stored record.Issue, observation intake.DispatchIssue) error {
 	if observation.Seq != 0 && observation.Seq <= stored.LastDispatchSeq {
 		return nil
 	}
-	if observation.Status == "todo" && readmittable(stored) {
+	handed := record.CarriesLegionLabel(observation.Labels)
+	if observation.Status == "todo" && handed && readmittable(stored) {
 		return a.readmit(ctx, tx, stored, observation.Title, observation.Parent, observation.Rank, observation.Seq)
 	}
-	// The workflow handler runs first and re-enters a live tree's child reopened to todo, recording
-	// the observation; a child still newly todo here has no live tree. It is an orphan, admitted as
-	// a root of its own, as an unrecorded orphan is.
-	if observation.Status == "todo" && !claim.IsTreeRoot(stored.Key, stored.Tree) && stored.Status != "todo" {
+	orphan, err := a.orphan(ctx, tx, stored, observation.Status, handed)
+	if err != nil {
+		return err
+	}
+	if orphan {
 		a.log.Info("admission orphan", "issue", stored.Key, "parent", observation.Parent)
 		return a.readmit(ctx, tx, stored, observation.Title, observation.Parent, observation.Rank, observation.Seq)
 	}
 	return a.recordObservation(ctx, tx, stored, observed{
 		Title: observation.Title, Parent: observation.Parent, Rank: observation.Rank,
-		Status: observation.Status, Seq: observation.Seq,
+		Status: observation.Status, HandedOver: handed, Seq: observation.Seq,
 	})
+}
+
+// orphan says whether an observation makes a recorded child an orphan, admitted as a root of its
+// own: the child is todo and handed to Legion, and its tree is not live. Only a change hands it
+// over — its move into todo, or the label reaching it while it is todo — so a later edit of a child
+// that was both already is none. The tree is read either way: the workflow handler, which runs
+// first, re-enters a live tree's child moved into todo, but not one the label reaches while it
+// waits in its live tree, where the label changes nothing.
+func (a *Admission) orphan(ctx context.Context, tx pgx.Tx, stored record.Issue, status string, handed bool) (bool, error) {
+	if status != "todo" || !handed || claim.IsTreeRoot(stored.Key, stored.Tree) || (stored.Status == "todo" && stored.HandedOver) {
+		return false, nil
+	}
+	root, err := a.store.Issue(ctx, tx, stored.Tree)
+	if err != nil {
+		return false, fmt.Errorf("read the tree root of %s: %w", stored.Key, err)
+	}
+	if root == nil {
+		return true, nil
+	}
+	live, err := record.TreeLive(ctx, a.store, tx, *root)
+	if err != nil {
+		return false, fmt.Errorf("read whether %s's tree is live: %w", stored.Key, err)
+	}
+	return !live, nil
 }
 
 // observed is what one Dispatch observation of an issue says about it, from a live event or from
 // the boot read.
 type observed struct {
 	Title, Parent, Rank, Status string
+	HandedOver                  bool
 	Seq                         int64
 }
 
 // recordObservation is the one place a Dispatch observation reaches an issue record: a live
-// event's and the boot read's, so a rename, a re-rank, a re-parent or a status change is written
-// the same way whichever brought it. Each caller owns its own guards — the stream's sequence
-// fence, the boot read's — and this writes what they let through.
+// event's and the boot read's, so a rename, a re-rank, a re-parent, a label or a status change is
+// written the same way whichever brought it. Each caller owns its own guards — the stream's
+// sequence fence, the boot read's — and this writes what they let through.
 func (a *Admission) recordObservation(ctx context.Context, tx pgx.Tx, stored record.Issue, o observed) error {
-	if stored.Title == o.Title && stored.Rank == o.Rank && stored.Status == o.Status &&
+	if stored.Title == o.Title && stored.Rank == o.Rank && stored.Status == o.Status && stored.HandedOver == o.HandedOver &&
 		sameParent(stored.Parent, record.ParentOf(o.Parent)) && stored.LastDispatchSeq == o.Seq {
 		return nil
 	}
@@ -218,6 +253,7 @@ func (a *Admission) recordObservation(ctx context.Context, tx pgx.Tx, stored rec
 	stored.Parent = record.ParentOf(o.Parent)
 	stored.Rank = o.Rank
 	stored.Status = o.Status
+	stored.HandedOver = o.HandedOver
 	stored.LastDispatchSeq = o.Seq
 	if err := a.store.PutIssue(ctx, tx, stored); err != nil {
 		return fmt.Errorf("record observation of %s: %w", stored.Key, err)
@@ -231,16 +267,17 @@ func readmittable(stored record.Issue) bool {
 	return claim.IsTreeRoot(stored.Key, stored.Tree) && (stored.LingerUntil != nil || stored.Phase == phase.Done)
 }
 
-// readmit records a lingering or closed root's todo as a new generation waiting for a slot. The new
-// generation owns its facts: the old one's pull request, design gate, handoffs, review rounds, and
-// pending READY are cleared, so its architect registers the gate again and its implementer waits
-// for its own pull request.
+// readmit records a lingering or closed root's todo, or an orphan's, as a new generation waiting for
+// a slot. Each caller re-admits an issue handed to Legion. The new generation owns its facts: the old
+// one's pull request, design gate, handoffs, review rounds, and pending READY are cleared, so its
+// architect registers the gate again and its implementer waits for its own pull request.
 func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue, title, parentKey, rank string, seq int64) error {
 	if stored.Generation == ^uint64(0) {
 		return fmt.Errorf("re-admit %s: generation overflows", stored.Key)
 	}
 	stored.Project = a.project
 	stored.Title = title
+	stored.HandedOver = true
 	stored.Parent = record.ParentOf(parentKey)
 	stored.Tree = stored.Key
 	stored.Phase = phase.Admitted

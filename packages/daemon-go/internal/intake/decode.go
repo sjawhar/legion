@@ -137,11 +137,12 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 	switch event.Type {
 	case "issue.created", "issue.updated", "issue.closed":
 		var issue struct {
-			Key    string  `json:"key"`
-			Status string  `json:"status"`
-			Title  string  `json:"title"`
-			Parent *string `json:"parent"`
-			Rank   string  `json:"rank"`
+			Key    string   `json:"key"`
+			Status string   `json:"status"`
+			Title  string   `json:"title"`
+			Parent *string  `json:"parent"`
+			Rank   string   `json:"rank"`
+			Labels []string `json:"labels"`
 		}
 		if err := json.Unmarshal(event.Payload, &issue); err != nil {
 			return nil, fmt.Errorf("decode Dispatch issue payload: %w", err)
@@ -160,7 +161,7 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 		if event.Actor.Kind == "session" {
 			actorSession = event.Actor.ID
 		}
-		return DispatchIssue{Key: event.IssueKey, Seq: event.Seq, Type: event.Type, Status: issue.Status, Title: issue.Title, Parent: parent, Rank: issue.Rank, ActorSession: actorSession}, nil
+		return DispatchIssue{Key: event.IssueKey, Seq: event.Seq, Type: event.Type, Status: issue.Status, Title: issue.Title, Parent: parent, Rank: issue.Rank, Labels: issue.Labels, ActorSession: actorSession}, nil
 	case "artifact.approved", "artifact.changes_requested":
 		var artifact struct {
 			ArtifactID string `json:"artifact_id"`

@@ -1013,7 +1013,7 @@ func TestAClosedTreeSetBackToTodoRelaunchesItsArchitect(t *testing.T) {
 	}
 
 	// The human sets the closed root back to todo.
-	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "todo-again", intake.DispatchIssue{Key: root.Key, Seq: 6, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: root.Rank}, engine, admission); err != nil {
+	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "todo-again", intake.DispatchIssue{Key: root.Key, Seq: 6, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: root.Rank, Labels: []string{record.LegionLabel}}, engine, admission); err != nil {
 		t.Fatalf("apply the todo: %v", err)
 	}
 	if err := runner.RunOnce(ctx); err != nil {
@@ -1071,7 +1071,7 @@ func TestAnEarlierGenerationsWorkspaceRemovalLeavesTheReadmittedTreesWorkspace(t
 	}
 
 	busy = false
-	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "todo-again", intake.DispatchIssue{Key: root.Key, Seq: 6, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: root.Rank}, engine, admission); err != nil {
+	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "todo-again", intake.DispatchIssue{Key: root.Key, Seq: 6, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: root.Rank, Labels: []string{record.LegionLabel}}, engine, admission); err != nil {
 		t.Fatalf("apply the todo: %v", err)
 	}
 	clock = clock.Add(2 * time.Minute)

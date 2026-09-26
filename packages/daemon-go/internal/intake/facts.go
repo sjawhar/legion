@@ -28,6 +28,8 @@ type DispatchIssue struct {
 	Title  string
 	Parent string
 	Rank   string
+	// Labels are the issue's Dispatch labels as the event carried them.
+	Labels []string
 	// ActorSession is the id of the session that wrote the event, when a session did; empty for a
 	// user or any other actor kind.
 	ActorSession string

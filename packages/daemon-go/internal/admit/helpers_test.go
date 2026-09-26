@@ -55,6 +55,9 @@ func (e engineStub) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (int
 
 const testProject = "LEGION"
 
+// handed is the label set of an issue handed to Legion.
+var handed = []string{record.LegionLabel}
+
 var fixedNow = time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
 
 func newAdmission(t *testing.T, cap int, log *slog.Logger) *Admission {
@@ -158,6 +161,15 @@ func slots(t *testing.T, pool *pgxpool.Pool) []record.Slot {
 
 func issue(t *testing.T, pool *pgxpool.Pool, key string) record.Issue {
 	t.Helper()
+	got := maybeIssue(t, pool, key)
+	if got == nil {
+		t.Fatalf("issue %s is missing", key)
+	}
+	return *got
+}
+
+func maybeIssue(t *testing.T, pool *pgxpool.Pool, key string) *record.Issue {
+	t.Helper()
 	var got *record.Issue
 	inTx(t, pool, func(tx pgx.Tx) {
 		var err error
@@ -166,10 +178,7 @@ func issue(t *testing.T, pool *pgxpool.Pool, key string) record.Issue {
 			t.Fatalf("read issue: %v", err)
 		}
 	})
-	if got == nil {
-		t.Fatalf("issue %s is missing", key)
-	}
-	return *got
+	return got
 }
 
 func putIssue(t *testing.T, pool *pgxpool.Pool, issue record.Issue) {
@@ -185,7 +194,7 @@ func seedSlotted(t *testing.T, pool *pgxpool.Pool, key, rank string) {
 	t.Helper()
 	inTx(t, pool, func(tx pgx.Tx) {
 		records := record.NewStore()
-		if err := records.PutIssue(context.Background(), tx, record.Issue{Key: key, Project: testProject, Title: key, Tree: key, Phase: phase.Admitted, Generation: 1, Status: "in_progress", Rank: rank}); err != nil {
+		if err := records.PutIssue(context.Background(), tx, record.Issue{Key: key, Project: testProject, Title: key, Tree: key, Phase: phase.Admitted, Generation: 1, Status: "in_progress", Rank: rank, HandedOver: true}); err != nil {
 			t.Fatalf("put active issue: %v", err)
 		}
 		slots, err := records.Slots(context.Background(), tx)
@@ -200,7 +209,7 @@ func seedSlotted(t *testing.T, pool *pgxpool.Pool, key, rank string) {
 
 func seedWaiting(t *testing.T, pool *pgxpool.Pool, key, rank string) {
 	t.Helper()
-	putIssue(t, pool, record.Issue{Key: key, Project: testProject, Title: key, Tree: key, Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: rank})
+	putIssue(t, pool, record.Issue{Key: key, Project: testProject, Title: key, Tree: key, Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: rank, HandedOver: true})
 }
 
 func inTx(t *testing.T, pool *pgxpool.Pool, fn func(pgx.Tx)) {

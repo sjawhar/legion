@@ -61,6 +61,7 @@ func (c *HTTPClient) ListIssues(ctx context.Context, project string, statuses []
 			Status:  issue.Status,
 			Parent:  issue.Parent,
 			Rank:    issue.Rank,
+			Labels:  issue.Labels,
 			LastSeq: issue.LastSeq,
 		})
 	}
@@ -238,12 +239,13 @@ func dispatchError(status int, statusText string, payload []byte) *Error {
 }
 
 type issueSummaryResponse struct {
-	Key     string  `json:"key"`
-	Title   string  `json:"title"`
-	Status  string  `json:"status"`
-	Parent  *string `json:"parent"`
-	Rank    string  `json:"rank"`
-	LastSeq int64   `json:"last_seq"`
+	Key     string   `json:"key"`
+	Title   string   `json:"title"`
+	Status  string   `json:"status"`
+	Parent  *string  `json:"parent"`
+	Rank    string   `json:"rank"`
+	Labels  []string `json:"labels"`
+	LastSeq int64    `json:"last_seq"`
 }
 
 type issueResponse struct {

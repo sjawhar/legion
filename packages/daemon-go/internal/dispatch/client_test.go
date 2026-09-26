@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 	"time"
 )
@@ -27,8 +28,8 @@ func TestListIssuesFiltersStatusesWithoutChangingDispatchOrder(t *testing.T) {
 		assertBearer(t, r)
 		writeJSON(t, w, []map[string]any{
 			{"key": "LEGION-1", "title": "Triage", "status": "triage", "rank": "a"},
-			{"key": "LEGION-3", "title": "First todo", "status": "todo", "rank": "b"},
-			{"key": "LEGION-2", "title": "Second todo", "status": "todo", "rank": "c", "parent": "LEGION-1"},
+			{"key": "LEGION-3", "title": "First todo", "status": "todo", "rank": "b", "labels": []string{"frontend", "Legion"}},
+			{"key": "LEGION-2", "title": "Second todo", "status": "todo", "rank": "c", "parent": "LEGION-1", "labels": []string{}},
 		})
 	}))
 	defer server.Close()
@@ -40,11 +41,11 @@ func TestListIssuesFiltersStatusesWithoutChangingDispatchOrder(t *testing.T) {
 	if len(issues) != 2 {
 		t.Fatalf("listed issues = %#v, want two todo issues", issues)
 	}
-	if issues[0].Key != "LEGION-3" || fmt.Sprint(issues[0].Rank) != "b" {
-		t.Fatalf("first filtered issue = %#v, want LEGION-3 with Dispatch rank b", issues[0])
+	if issues[0].Key != "LEGION-3" || fmt.Sprint(issues[0].Rank) != "b" || !slices.Equal(issues[0].Labels, []string{"frontend", "Legion"}) {
+		t.Fatalf("first filtered issue = %#v, want LEGION-3 with Dispatch rank b and its labels as Dispatch wrote them", issues[0])
 	}
-	if issues[1].Key != "LEGION-2" || fmt.Sprint(issues[1].Rank) != "c" || issues[1].Parent == nil || *issues[1].Parent != "LEGION-1" {
-		t.Fatalf("second filtered issue = %#v, want LEGION-2 with Dispatch rank c under LEGION-1", issues[1])
+	if issues[1].Key != "LEGION-2" || fmt.Sprint(issues[1].Rank) != "c" || issues[1].Parent == nil || *issues[1].Parent != "LEGION-1" || len(issues[1].Labels) != 0 {
+		t.Fatalf("second filtered issue = %#v, want LEGION-2 with Dispatch rank c under LEGION-1 and no labels", issues[1])
 	}
 }
 

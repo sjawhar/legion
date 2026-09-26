@@ -118,6 +118,7 @@ func issueFixture(key string) Issue {
 		Generation:          3,
 		Status:              "in_progress",
 		Rank:                "00042U",
+		HandedOver:          true,
 		LastDispatchSeq:     41,
 		ReadyPendingVersion: &ready,
 	}
@@ -498,18 +499,41 @@ func TestPendingStatusWritesListsEveryUnfinishedStatusEffect(t *testing.T) {
 	}
 }
 
-func TestWaitingIncludesOnlySlotlessTodoRootsAndOrphansInRankOrder(t *testing.T) {
+// The waiting line is the slotless todo roots and orphans handed to Legion, in rank order: a root
+// in todo without the label waits for nothing, however high it ranks.
+func TestWaitingIncludesOnlySlotlessHandedOverTodoRootsAndOrphansInRankOrder(t *testing.T) {
 	issues := []Issue{
-		{Key: "LEGION-210", Tree: "LEGION-210", Status: "done", Rank: "00000"},
-		{Key: "LEGION-211", Tree: "LEGION-211", Status: "backlog", Rank: "00001"},
-		{Key: "LEGION-212", Tree: "LEGION-212", Status: "todo", Rank: "00004", LastDispatchSeq: 1},
-		{Key: "LEGION-213", Tree: "LEGION-213", Status: "todo", Rank: "00003", LastDispatchSeq: 10},
+		{Key: "LEGION-210", Tree: "LEGION-210", Status: "done", Rank: "00000", HandedOver: true},
+		{Key: "LEGION-211", Tree: "LEGION-211", Status: "backlog", Rank: "00001", HandedOver: true},
+		{Key: "LEGION-212", Tree: "LEGION-212", Status: "todo", Rank: "00004", LastDispatchSeq: 1, HandedOver: true},
+		{Key: "LEGION-213", Tree: "LEGION-213", Status: "todo", Rank: "00003", LastDispatchSeq: 10, HandedOver: true},
 		{Key: "LEGION-214", Tree: "LEGION-212", Status: "todo", Rank: "00002"},
+		{Key: "LEGION-215", Tree: "LEGION-215", Status: "todo", Rank: "00000"},
 	}
 	got := Waiting(issues, nil)
 	want := []Issue{issues[3], issues[2]}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Waiting = %#v, want %#v", got, want)
+	}
+}
+
+// Dispatch keeps a label's case as typed and treats labels differing only in case as one label, so
+// the label that hands an issue to Legion matches in any case, and nothing else stands in for it.
+func TestCarriesLegionLabelMatchesTheLabelInAnyCaseAndNothingElse(t *testing.T) {
+	for _, tc := range []struct {
+		labels []string
+		want   bool
+	}{
+		{labels: []string{"legion"}, want: true},
+		{labels: []string{"frontend", "Legion"}, want: true},
+		{labels: []string{"LEGION"}, want: true},
+		{labels: nil},
+		{labels: []string{"frontend"}},
+		{labels: []string{"legion-smoke", "not legion"}},
+	} {
+		if got := CarriesLegionLabel(tc.labels); got != tc.want {
+			t.Errorf("CarriesLegionLabel(%q) = %v, want %v", tc.labels, got, tc.want)
+		}
 	}
 }
 
@@ -559,7 +583,7 @@ func TestRecordMigrationCreatesTheRequiredColumns(t *testing.T) {
 	ctx := context.Background()
 	st := migratedStore(t)
 	want := map[string][]string{
-		"issues":           {"key", "tree", "project", "title", "parent", "phase", "generation", "status", "rank", "linger_until", "held_from", "last_dispatch_seq", "ready_pending_version", "hold_reason"},
+		"issues":           {"key", "tree", "project", "title", "parent", "phase", "generation", "status", "rank", "handed_over", "linger_until", "held_from", "last_dispatch_seq", "ready_pending_version", "hold_reason"},
 		"phases":           {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "last_handoff", "decision"},
 		"pull_requests":    {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "head_updated_at_source", "verdict", "failing", "failing_statuses", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "reconciled", "pushes", "head_counted", "planned_red", "review_seen", "review_seen_at", "state"},
 		"design_gates":     {"issue", "artifact_id", "latest_version", "approved_version"},
