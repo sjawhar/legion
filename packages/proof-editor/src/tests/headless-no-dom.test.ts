@@ -20,7 +20,7 @@ function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
 }
 
-console.log('\n=== Headless distribution without DOM ===');
+console.log('\n=== Headless entry without DOM ===');
 
 await test('imports the headless entry and creates typed blocks without a DOM', async () => {
   assert(!('document' in globalThis), 'this regression must run without a DOM global');

@@ -13,6 +13,9 @@ on:
       - "packages/pi-envoy/**"
       - "packages/dispatch/**"
       - "packages/proof-editor/**"
+      - "patches/**"
+      - "package.json"
+      - "bun.lock"
       - "packages/daemon-go/**"
       - "packages/daemon/docker/worker.Dockerfile"
       - ".github/actions/install-jj/**"
@@ -32,6 +35,9 @@ on:
       - "packages/pi-envoy/**"
       - "packages/dispatch/**"
       - "packages/proof-editor/**"
+      - "patches/**"
+      - "package.json"
+      - "bun.lock"
       - "packages/daemon-go/**"
       - "packages/daemon/docker/worker.Dockerfile"
       - ".github/actions/install-jj/**"
@@ -99,6 +105,11 @@ jobs:
               - 'packages/contracts/**'
               - 'packages/envoy/internal/dispatch/**'
               - 'packages/envoy/cmd/dispatch/**'
+              # The Dark Reader patch and the pin it is keyed on: a key that stops matching
+              # applies nothing, silently, and the editor's decorations go back to inline styles.
+              - 'patches/**'
+              - 'package.json'
+              - 'bun.lock'
             daemon_go:
               - 'packages/daemon-go/**'
               - 'packages/envoy/go.mod'
