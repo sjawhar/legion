@@ -57,9 +57,13 @@ type VersionResult struct {
 // precondition compares — before and after the whole batch, not against the newest version, whose
 // markdown differs while unsettled browser text is pending. A batch that leaves the document as
 // it was mints no version, named or not. Unchanged indexes, in order, each operation that left
-// the tree exactly as it found it.
+// the tree exactly as it found it. Token is that same whole-document identity after the batch,
+// taken from the tree this edit's own transaction wrote while it still held the room's writer
+// slot — never re-read after the commit, where a concurrent writer's change would fold into it —
+// so a caller passes it straight back as the next edit's document precondition.
 type EditOutcome struct {
 	Applied   int
 	Changed   bool
 	Unchanged []int
+	Token     string
 }

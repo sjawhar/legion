@@ -48,6 +48,11 @@ granularity they need using wildcard patterns.
 The `>` wildcard matches one or more following levels.
 The `*` wildcard matches exactly one level.
 
+`{owner}` and `{repo}` are each one level: a dot in either is written `_`, as
+`sanitizeSubjectSegment` writes one, so `sjawhar/.github` publishes under
+`notifications.github.sjawhar._github`. The spelling is lossy (`a.b` and `a_b`
+share one), so a consumer takes the repository from the payload's `repo`.
+
 ### CI check settlement
 
 `notifications.github.{owner}.{repo}.pr.{number}.checks` publishes once a current PR head's recorded checks and suites settle after the quiet period.

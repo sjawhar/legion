@@ -182,6 +182,8 @@ type streamStub struct {
 	daemon   *fakeDaemon
 	mu       sync.Mutex
 	conns    map[claim.Token]*stubConn
+	// registrations numbers the connections in the order they are admitted, as the listener does.
+	registrations uint64
 }
 
 var _ runtime.Conns = (*streamStub)(nil)
@@ -234,6 +236,8 @@ func (s *streamStub) admit(conn net.Conn) {
 		return
 	}
 	s.mu.Lock()
+	s.registrations++
+	stub.seq = s.registrations
 	s.conns[c.token] = stub
 	s.mu.Unlock()
 	stub.read(reader)
@@ -276,6 +280,7 @@ func (s *streamStub) await(t *testing.T, token claim.Token) *stubConn {
 
 // stubConn is one shim connection as a runtime.Conn.
 type stubConn struct {
+	seq     uint64
 	writer  *shimwire.Writer
 	mu      sync.Mutex
 	pending map[string]chan shimwire.Response
@@ -356,6 +361,8 @@ func (c *stubConn) GetState(ctx context.Context) (runtime.ConnState, error) {
 }
 
 func (c *stubConn) Shutdown(context.Context) error { return c.writer.WriteFrame(shimwire.Shutdown{}) }
+
+func (c *stubConn) Sequence() uint64 { return c.seq }
 
 func (c *stubConn) AdoptWorkingCopy(context.Context, runtime.GitIdentity, time.Duration) error {
 	return errors.New("the stream stub does not adopt working copies")

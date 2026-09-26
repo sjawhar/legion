@@ -26,6 +26,8 @@ related_issues:
 
 # Prove a daemon-only Kubernetes change before an image exists: the branch's daemon on the host against pods from the published image, a node-side kill -9, and the ledger that shows nobody intervened
 
+> `scripts/kind-smoke/` and the in-cluster manifests under `deploy/kubernetes/daemon/` were removed with the TypeScript daemon's Kubernetes mode (LEGION-286); the paths below are as they stood at `4fdd9646`.
+
 ## The gate
 
 Under `runtime: kubernetes` the in-cluster daemon **is** the worker image, and the Worker Image

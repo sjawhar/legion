@@ -792,6 +792,7 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		"version":       version,
 		"changed":       edit.Changed,
 		"unchanged_ops": unchanged,
+		"token":         edit.Token,
 	}, advice))
 }
 

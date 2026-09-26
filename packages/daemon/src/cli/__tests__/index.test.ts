@@ -557,7 +557,7 @@ describe("legion start --check-config", () => {
     expect(config.instructionsPath).toBe(path.join(dir, "ops", "deployment.md"));
   });
 
-  it("checks an in-cluster legion.yaml on a machine without its Secret mounts: envoy_token_file and operator_token_file are validated, never read", async () => {
+  it("refuses an in-cluster legion.yaml naming the Go daemon, the same refusal start-up gives", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "legion-check-config-"));
     const configPath = writeYaml(dir, [
       ...baseYaml,
@@ -568,16 +568,12 @@ describe("legion start --check-config", () => {
       `    image: ghcr.io/sjawhar/legion-worker@sha256:${"a".repeat(64)}`,
       "bind: 0.0.0.0",
       "daemon_url: http://legion-daemon-acme.legion.svc:13370",
-      `envoy_token_file: ${path.join(dir, "no-such-mount", "ENVOY_TOKEN")}`,
-      `operator_token_file: ${path.join(dir, "no-such-mount", "OPERATOR_TOKEN")}`,
     ]);
+    const refusal =
+      "runtime: kubernetes is refused: the TypeScript daemon no longer runs on Kubernetes; use the Go daemon (packages/daemon-go)";
 
-    await cmdCheckConfig(undefined, configPath, env);
-
-    // The daemon itself still reads them: the same file is a boot refusal naming the key and path.
-    expect(() => loadStartConfig(undefined, configPath, env)).toThrow(
-      `envoy_token_file names ${path.join(dir, "no-such-mount", "ENVOY_TOKEN")}, which could not be read: ENOENT`
-    );
+    await expect(cmdCheckConfig(undefined, configPath, env)).rejects.toThrow(refusal);
+    expect(() => loadStartConfig(undefined, configPath, env)).toThrow(refusal);
   });
 });
 
