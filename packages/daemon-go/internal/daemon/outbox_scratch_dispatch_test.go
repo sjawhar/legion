@@ -126,7 +126,7 @@ func startScratchDispatch(t *testing.T) (string, string) {
 	// a start that lost it to another process is started again on another.
 attempts:
 	for attempt := 1; ; attempt++ {
-		port := freePort(t)
+		port := boundPort(t)
 		baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
 		command := exec.Command(binary)
 		command.Dir = filepath.Join(repositoryRoot, "packages", "envoy")

@@ -181,39 +181,26 @@ func rebindHeldPorts(t *testing.T, cfg *config.Config) {
 }
 
 // heldListen is the daemon's listen under test: the listener holdPort holds for address, handed
-// over once, or a new one for an address nothing holds (a daemon restarted on its port).
+// over once. An address nothing holds is refused rather than bound, since a port found free and
+// bound later is the race holdPort closes: a test that starts a daemon again on one config calls
+// rebindHeldPorts first.
 func heldListen(network, address string) (net.Listener, error) {
 	heldPorts.Lock()
 	listener, held := heldPorts.byAddress[address]
 	delete(heldPorts.byAddress, address)
 	heldPorts.Unlock()
-	if held && network == "tcp" {
-		return listener, nil
+	if !held || network != "tcp" {
+		return nil, &net.AddrError{Err: "no held listener: call rebindHeldPorts before starting a daemon again on the same config", Addr: address}
 	}
-	return net.Listen(network, address)
+	return listener, nil
 }
 
 // pollClient bounds each poll of a daemon's port: holdPort's listener queues a connection until a
 // daemon takes the listener and serves it, and a daemon that exits before then never answers it.
 var pollClient = &http.Client{Timeout: time.Second}
 
-// freePort is a free loopback port for a process that binds it itself, such as a scratch server
+// boundPort is a free loopback port for a process that binds it itself, such as a scratch server
 // launched as a command: until it does, the port is any process's.
-func freePort(t *testing.T) int {
-	t.Helper()
-	for range 32 {
-		port := boundPort(t)
-		next, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(port+1))
-		if err != nil {
-			continue
-		}
-		next.Close()
-		return port
-	}
-	t.Fatal("no adjacent pair of free ports in 32 tries")
-	return 0
-}
-
 func boundPort(t *testing.T) int {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
