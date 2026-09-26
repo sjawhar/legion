@@ -15,9 +15,10 @@ import (
 // shutdown the listener leaves a KV watcher the last reconnect has not yet replaced for the drain
 // to end, and that watcher's ordered consumer can already be gone: a NATS restart loses it
 // outright, since nats.go creates it with memory storage, and a disconnect longer than its
-// inactive threshold lets the server delete it. Then the delete answers "consumer not found". The consumer is gone,
-// which is what the delete was for, so the report is a warning: TestListenerFollowsTheInterest-
-// RegistryAcrossNATSRestarts refuses any ERROR from a restart or the shutdown after it (LEGION-278).
+// inactive threshold lets the server delete it. Then the delete answers "consumer not found". The
+// consumer is gone, which is what the delete was for, so the report is a warning:
+// TestListenerFollowsTheInterestRegistryAcrossNATSRestarts refuses any ERROR from a restart or
+// the shutdown after it (LEGION-278).
 func TestADrainThatFindsItsConsumerGoneWarns(t *testing.T) {
 	_, uri := testnats.Start(t)
 	logs := captureBusLogs(t)

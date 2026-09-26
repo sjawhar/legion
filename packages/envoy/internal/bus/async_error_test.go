@@ -16,9 +16,9 @@ import (
 // with idle heartbeats is such a watcher. The report restates a disconnect the bus has already
 // logged, once per watcher: six ERROR lines in one NATS gap of the agent-c pin rehearsal. It is a
 // WARN; so is "consumer not found" as a drain's delete reports it, the bare sentinel, whatever the
-// connection's state (drain_async_error_test.go drives the real drain). Every other async error stays an ERROR
-// (LEGION-278), "consumer not found" included when it is wrapped, as an ordered consumer nats.go
-// failed to recreate reports it.
+// connection's state (drain_async_error_test.go drives the real drain). Every other async error
+// stays an ERROR (LEGION-278), "consumer not found" included when it is wrapped, as an ordered
+// consumer nats.go failed to recreate reports it.
 func TestAConsumerNotActiveReportIsAWarning(t *testing.T) {
 	var records bytes.Buffer
 	previous := slog.Default()
