@@ -384,7 +384,8 @@ driver_action() { printf '%s %s %s\n' "$1" "$2" "$(date -u +%FT%T.%3NZ)" >>"$evi
 # worker's PID 1, `delete` deletes the pod object - records the action, and returns only once that
 # death is observable: the pod's Sandbox reports Finished for its current generation, the claim moved
 # to another incarnation, or the issue is held. Sets `ended_pod_uid` and `ended_pod` for the
-# caller's later assertions.
+# caller's later assertions. A pod can be observably dead before the daemon has moved its claim, so
+# a caller that then reads the daemon's reaction waits for that reaction itself.
 # Finished is read as the daemon reads a condition (runtime/sandbox/types.go, condition): only when
 # the controller wrote it for the Sandbox's current generation, since every relaunch bumps the
 # generation and leaves the previous pod's Finished on the object. It is the one arm that says the
@@ -1370,6 +1371,10 @@ old_token=$(boot_token) || blocked "the merger's boot Secret $pod-boot has no LE
 (umask 077 && printf '%s' "$old_token" >"$work/old-boot-token")
 end_claim_pod "$tree1" merger delete
 uid=$ended_pod_uid
+# The deleted pod's Sandbox reports Finished before the daemon moves the claim, so the helper can
+# return with the claim still on it: the relaunch is waited for here.
+until_true 600 "the merger's claim to move off pod $uid" sh -c \
+  "inc=\$('$work/legion' state --json --config '$work/legion.yaml' | jq -r --arg i '$tree1' '.issues[\$i].workers.merger.claim.locator.incarnation // empty'); [ -n \"\$inc\" ] && [ \"\$inc\" != '$uid' ]"
 third=$(claim_pod_uid "$tree1" merger)
 [ "$third" != "$new_uid" ] && [ "$third" != "$uid" ] || fail "the merger's third incarnation $third repeats an earlier uid"
 grep -q '"msg":"supervise: dropped a stale event"' "$daemon_log" || note "no stale event was dropped in this run (the recreated pod's events arrived after the claim moved)"
