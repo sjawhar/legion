@@ -87,7 +87,7 @@ cleanup() {
     printf 'production audit after failure:\n' >&2
     production_audit >&2
   fi
-  stop_pid "$watcher_pid"
+  stop_tree "$watcher_pid"
   stop_pid "$daemon_pid"
   stop_pid "$dispatch_pid"
   stop_pid "$listener_pid"
@@ -328,7 +328,7 @@ pane_watcher() {
   local claims inc issue role omp mismatch
   trap - EXIT ERR
   set +e
-  while :; do
+  while kill -0 "$$" 2>/dev/null; do
     if claims=$("$work/legion" claims list --json --config "$work/legion.yaml" --operator-token-file "$work/operator-token" 2>/dev/null); then
       while IFS=$'\t' read -r inc issue role; do
         grep -qF "$inc " "$evidence/pane-endpoints-checked.txt" 2>/dev/null && continue

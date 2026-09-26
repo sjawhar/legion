@@ -461,16 +461,18 @@ pod_watch_verdict() {
 start_pod_watch() {
   # kubectl itself, not a subshell around a function, so the recorded pid is what cleanup stops; and
   # fd 9, the run lock, stays out of every background child, so none can outlive the run holding it.
-  kubectl --context "$operator" -n "$namespace" get pods -l "legion.dev/project=$run_label" -w -o json --output-watch-events \
+  # Each watch and loop also ends with the driver itself, however it ends: a killed driver runs no
+  # cleanup, so a watch dies with it (setpriv --pdeathsig) and a loop stops at its next pass.
+  setpriv --pdeathsig KILL kubectl --context "$operator" -n "$namespace" get pods -l "legion.dev/project=$run_label" -w -o json --output-watch-events \
     >"$evidence/pod-watch.json" 2>"$evidence/logs/pod-watch.err" 9>&- 7>&- &
   watch_pid=$!
-  kubectl --context "$operator" get events -A -w -o json --field-selector involvedObject.kind=Node \
+  setpriv --pdeathsig KILL kubectl --context "$operator" get events -A -w -o json --field-selector involvedObject.kind=Node \
     >"$evidence/node-events.json" 2>"$evidence/logs/node-events.err" 9>&- 7>&- &
   events_pid=$!
   ( # Node memory for the nodes the run's pods are on, every 30 s (metrics-server).
     trap - EXIT ERR
     set +e
-    while :; do
+    while kill -0 "$$" 2>/dev/null; do
       for node in $(op get pods -l "legion.dev/project=$run_label" -o jsonpath='{.items[*].spec.nodeName}' 2>/dev/null | tr ' ' '\n' | sort -u); do
         printf '%s %s %s\n' "$(date -u +%FT%TZ)" "$node" "$(kubectl --context "$operator" top node "$node" --no-headers 2>&1 | tr -s ' ')"
         kubectl --context "$operator" get node "$node" -o json 2>/dev/null |
@@ -586,7 +588,7 @@ pod_shape_watcher() {
   local pod uid problems
   trap - EXIT ERR
   set +e
-  while :; do
+  while kill -0 "$$" 2>/dev/null; do
     while IFS=$'\t' read -r pod uid; do
       [ -n "$pod" ] || continue
       grep -qF " $uid " "$evidence/pods-checked.txt" 2>/dev/null && continue
@@ -736,14 +738,14 @@ cleanup() {
   trap '' HUP INT TERM PIPE
   exec >&7 2>&7
   set +e
-  stop_pid "$shape_pid"
+  stop_tree "$shape_pid"
   [ -z "$tree1" ] || record_pair >/dev/null 2>&1
   stop_pid "$daemon_pid"
   collect_transcripts
   stop_pid "$watch_pid"
   stop_pid "$events_pid"
-  stop_pid "$sampler_pid"
-  stop_pid "$interests_pid"
+  stop_tree "$sampler_pid"
+  stop_tree "$interests_pid"
   # The namespace label, the durable consumers and the project are shared by every Stage 4b run,
   # so a run that never passed prerequisites' ownership checks (the lock, the ports, no leftover
   # objects or consumers) owns none of them and removes nothing.
@@ -936,7 +938,7 @@ start_interests_sampler() {
   (
     trap - EXIT ERR
     set +e
-    while :; do
+    while kill -0 "$$" 2>/dev/null; do
       interests_sample sampler
       sleep 5
     done

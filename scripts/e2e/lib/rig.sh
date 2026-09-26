@@ -95,6 +95,17 @@ stop_pid() {
   return 0
 }
 
+# stop_tree PID stops PID and every process under it. A watcher is a loop whose kubectl, jq or sleep
+# outlives the loop when only the loop is stopped; the loop is frozen first, so it starts nothing new
+# while its children go.
+stop_tree() {
+  local pid=${1:-} child
+  [ -n "$pid" ] || return 0
+  kill -STOP "$pid" 2>/dev/null || return 0
+  for child in $(pgrep -P "$pid"); do stop_tree "$child"; done
+  kill -KILL "$pid" 2>/dev/null || true
+}
+
 run_processes() {
   local p cwd
   for p in /proc/[0-9]*; do
