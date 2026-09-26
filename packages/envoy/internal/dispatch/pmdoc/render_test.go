@@ -848,3 +848,43 @@ func TestRenderKeepsTextAroundFootnoteReferences(t *testing.T) {
 		t.Fatalf("Render() = %q, want text naming an undefined label written as main writes it", got)
 	}
 }
+
+// Both parsers keep the whitespace of a blank line in code inside a footnote definition, whose
+// indentation a blank line does not take, so a blank code line there is written without the
+// definition's indentation; elsewhere it keeps the prefix it has always been written with.
+func TestRenderKeepsBlankCodeLinesInFootnoteDefinitions(t *testing.T) {
+	paragraph := func(value string) *Node {
+		return &Node{Type: "paragraph", Children: []*Node{{Type: "text", Text: value}}}
+	}
+	code := func(value string) *Node {
+		return &Node{Type: "code_block", Attrs: Attrs{"language": nil}, Children: []*Node{{Type: "text", Text: value}}}
+	}
+	for name, block := range map[string]*Node{
+		"code":             code("a\n\nb"),
+		"code, carriage":   code("a\r\rb"),
+		"a callout's code": {Type: "callout", Attrs: Attrs{BlockIDAttr: "c1", "kind": "note", "title": "T"}, Children: []*Node{code("a\r\rb")}},
+		"a list item's code": {Type: "bullet_list", Attrs: Attrs{"spread": false}, Children: []*Node{
+			{Type: "list_item", Attrs: Attrs{"checked": nil, "label": "•", "listType": "bullet", "spread": false}, Children: []*Node{paragraph("a"), code("a\r\rb")}},
+		}},
+		"a quote's code": {Type: "blockquote", Children: []*Node{code("a\n\nb")}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			doc := &Node{Type: "doc", Children: []*Node{
+				{Type: "paragraph", Children: []*Node{{Type: "text", Text: "Ref"}, {Type: "footnote_reference", Attrs: Attrs{"label": "1"}}}},
+				{Type: "footnote_definition", Attrs: Attrs{"label": "1"}, Children: []*Node{paragraph("x"), block}},
+			}}
+			markdown := mustRender(t, doc)
+			back, err := Parse(markdown)
+			if err != nil {
+				t.Fatalf("Parse(%q) = %v", markdown, err)
+			}
+			if !back.Equal(doc) {
+				t.Fatalf("Render() = %q, which reads back as %q", markdown, mustRender(t, back))
+			}
+		})
+	}
+	quoted := &Node{Type: "doc", Children: []*Node{{Type: "blockquote", Children: []*Node{code("a\n\nb")}}}}
+	if got, want := mustRender(t, quoted), "> ```\n> a\n> \n> b\n> ```\n"; got != want {
+		t.Fatalf("Render() = %q, want the bytes main writes, %q", got, want)
+	}
+}

@@ -24,6 +24,8 @@ type renderer struct {
 	// and footnoteLabel is its label as written, so that the line is read after a reference to it.
 	footnoteLineAt int
 	footnoteLabel  string
+	// inFootnote reports whether the blocks being written are inside a footnote definition.
+	inFootnote bool
 	// footnoteLabels is every footnote label the document defines, lowercased: text shaped like a
 	// reference to one would read as that reference.
 	footnoteLabels map[string]bool
@@ -185,7 +187,9 @@ func (r *renderer) block(n *Node, prefix string) {
 		label, _ := n.Attrs["label"].(string)
 		r.footnoteLineAt, r.footnoteLabel = r.b.Len(), escapeFootnoteLabel(label)
 		r.writeSyntax("[^" + escapeFootnoteLabel(label) + "]: ")
+		r.inFootnote = true
 		r.blocksNoTrailing(n.Children, prefix+"    ")
+		r.inFootnote = false
 	default:
 		typ, typed := typedBlock(n.Type)
 		if !typed {
@@ -328,9 +332,21 @@ func (r *renderer) writeCodeText(node *Node, prefix string) {
 		}
 		end := offset + newline + 1
 		r.writeText(value[offset:end])
-		r.writeSyntax(prefix)
+		// A blank line does not take a footnote definition's indentation, and both parsers keep
+		// what it holds as the code's, so a blank code line there, behind indentation alone, is
+		// written without it.
+		if !r.inFootnote || strings.TrimSpace(prefix) != "" || !blankLineAhead(lined[end:]) {
+			r.writeSyntax(prefix)
+		}
 		offset = end
 	}
+}
+
+// blankLineAhead reports whether text's first line, in lineEnds form, holds only spaces and tabs
+// before its line ending.
+func blankLineAhead(text string) bool {
+	end := strings.IndexByte(text, '\n')
+	return end >= 0 && strings.Trim(text[:end], " \t\r") == ""
 }
 
 func codeBlockFence(node *Node) string {
