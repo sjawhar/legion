@@ -3671,47 +3671,6 @@ func TestRunSelfHealthMonitor_RebuildsTerminalWatcher(t *testing.T) {
 	}
 }
 
-func TestRunSelfHealthMonitor_ExitsAfterRepeatedFailedRebuilds(t *testing.T) {
-	logger := logging.New("test")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	terminalWatcher := errors.New("ci store watcher stopped")
-	var rebuilds atomic.Int32
-	terminated := make(chan struct{}, 1)
-	done := make(chan struct{})
-	go func() {
-		runSelfHealthMonitor(
-			ctx,
-			logger,
-			func() error { return terminalWatcher },
-			func(err error) bool { return errors.Is(err, terminalWatcher) },
-			func() error {
-				rebuilds.Add(1)
-				return errors.New("rewatch failed")
-			},
-			func() { terminated <- struct{}{} },
-			time.Millisecond,
-			3,
-		)
-		close(done)
-	}()
-
-	select {
-	case <-terminated:
-	case <-time.After(2 * time.Second):
-		t.Fatal("monitor did not terminate after repeated watcher rebuild failures")
-	}
-	if got := rebuilds.Load(); got != 3 {
-		t.Fatalf("watcher rebuilds = %d, want 3", got)
-	}
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("monitor did not stop after terminal rebuild failures")
-	}
-}
-
 // TestRunSelfHealthMonitor_KeepsRunningThroughFaultsEachRebuildRepairs lands a different terminal
 // fault between every two probe intervals, the way three separate buckets or the durable can be
 // deleted one after another, and each rebuild repairs its fault. No fault outlives its recovery,
@@ -3779,24 +3738,135 @@ func TestRunSelfHealthMonitor_KeepsRunningThroughFaultsEachRebuildRepairs(t *tes
 	<-done
 }
 
-// TestRunSelfHealthMonitor_ExitsWhenRebuildsLeaveTheFault is the persistent failure the threshold
-// exists for: every rebuild reports success, but the next probe still reads the same terminal
-// fault, so the listener is terminated for its runtime to replace.
-func TestRunSelfHealthMonitor_ExitsWhenRebuildsLeaveTheFault(t *testing.T) {
+// TestRunSelfHealthMonitor_ExitsAfterThreeRebuildsThatLeaveAFault is the persistent failure the
+// threshold exists for: three consecutive ticks each read a terminal fault that its rebuild did not
+// repair, so the listener is terminated for its runtime to replace. The terminal line names the
+// error that survived the last rebuild.
+func TestRunSelfHealthMonitor_ExitsAfterThreeRebuildsThatLeaveAFault(t *testing.T) {
+	stuck := errors.New("ci KV watcher stopped")
+	deadline := errors.New("interest kv: context deadline exceeded")
+	for _, tc := range []struct {
+		name string
+		// rebuildErr is what every rebuild returns.
+		rebuildErr error
+		// afterRebuild is what the probe reads right after a rebuild that reports success.
+		afterRebuild error
+		wantError    error
+	}{
+		{name: "every rebuild fails", rebuildErr: errors.New("rewatch failed"), wantError: stuck},
+		{name: "every rebuild reports success and leaves the fault", afterRebuild: stuck, wantError: stuck},
+		// A transient failure right after a rebuild still counts: the tick's transient reset
+		// would let a fault that returns on every tick keep the listener up forever.
+		{name: "the probe after every rebuild fails transiently", afterRebuild: deadline, wantError: deadline},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var logs bytes.Buffer
+			var mu sync.Mutex
+			rebuilt := false
+			probe := func() error {
+				mu.Lock()
+				defer mu.Unlock()
+				if rebuilt {
+					rebuilt = false
+					return tc.afterRebuild
+				}
+				return stuck
+			}
+			var rebuilds atomic.Int32
+			rebuild := func() error {
+				rebuilds.Add(1)
+				mu.Lock()
+				defer mu.Unlock()
+				rebuilt = tc.rebuildErr == nil
+				return tc.rebuildErr
+			}
+			terminated := make(chan struct{}, 1)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				runSelfHealthMonitor(ctx, logging.NewWithWriter("test", &logs),
+					probe,
+					func(err error) bool { return errors.Is(err, stuck) },
+					rebuild,
+					func() { terminated <- struct{}{} },
+					time.Millisecond,
+					3,
+				)
+			}()
+			select {
+			case <-terminated:
+			case <-time.After(2 * time.Second):
+				t.Fatal("the monitor never terminated a fault three rebuilds left in place")
+			}
+			<-done
+			if got := rebuilds.Load(); got != 3 {
+				t.Fatalf("rebuilds = %d, want 3", got)
+			}
+			var terminal []string
+			logged := false
+			for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+				var record struct {
+					Level string `json:"level"`
+					Msg   string `json:"msg"`
+					Error string `json:"error"`
+				}
+				if err := json.Unmarshal([]byte(line), &record); err != nil {
+					t.Fatalf("log line %q is not JSON: %v", line, err)
+				}
+				if strings.HasPrefix(record.Msg, "self-health terminal failure threshold exceeded") {
+					terminal = append(terminal, record.Error)
+				}
+				logged = logged || record.Error == tc.wantError.Error()
+			}
+			if len(terminal) != 1 || terminal[0] != tc.wantError.Error() {
+				t.Fatalf("terminal lines name %q, want one naming %q", terminal, tc.wantError)
+			}
+			if !logged {
+				t.Fatalf("no log record carries the error %q", tc.wantError)
+			}
+		})
+	}
+}
+
+// TestRunSelfHealthMonitor_RestartsWithoutItsRoleBucket deletes envoy_roles, the one listener
+// bucket no watcher reads. A rebuild opens a bucket and never creates one, so every rebuild fails
+// and the listener terminates; the next start's store Open creates the bucket again. Without that,
+// the listener would stay up with role routing broken and nothing repairing it.
+func TestRunSelfHealthMonitor_RestartsWithoutItsRoleBucket(t *testing.T) {
+	client := setupTestNATS(t)
+	registry, err := store.Open(client.Conn, store.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("open interest registry: %v", err)
+	}
+	readyCtx, readyCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer readyCancel()
+	if err := registry.WaitForCacheReady(readyCtx); err != nil {
+		t.Fatalf("wait for interest cache: %v", err)
+	}
+	js, err := client.Conn.JetStream()
+	if err != nil {
+		t.Fatalf("open JetStream: %v", err)
+	}
+	if err := js.DeleteKeyValue(store.RoleBucket); err != nil {
+		t.Fatalf("delete the role bucket: %v", err)
+	}
+
+	caches := []listenerCache{{name: "interest", cache: registry}}
+	var rebuilds atomic.Int32
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	stuck := errors.New("ci KV watcher stopped")
-	var rebuilds atomic.Int32
 	terminated := make(chan struct{}, 1)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		runSelfHealthMonitor(ctx, logging.New("test"),
-			func() error { return stuck },
-			func(err error) bool { return errors.Is(err, stuck) },
+			func() error { return checkSelfHealth(caches, nil) },
+			func(err error) bool { return isUnrecoverableSelfHealthFailure(err, client, caches) },
 			func() error {
 				rebuilds.Add(1)
-				return nil
+				return rewatchListenerKVWatchers(client.Conn, caches)
 			},
 			func() { terminated <- struct{}{} },
 			time.Millisecond,
@@ -3805,13 +3875,13 @@ func TestRunSelfHealthMonitor_ExitsWhenRebuildsLeaveTheFault(t *testing.T) {
 	}()
 	select {
 	case <-terminated:
-	case <-time.After(2 * time.Second):
-		t.Fatal("the monitor never terminated a fault every rebuild left in place")
+	case <-time.After(5 * time.Second):
+		t.Fatalf("the listener stayed up without its role bucket: %d rebuilds, no termination", rebuilds.Load())
 	}
+	<-done
 	if got := rebuilds.Load(); got != 3 {
 		t.Fatalf("rebuilds = %d, want 3", got)
 	}
-	<-done
 }
 
 // monitorUntilRecovered runs the self-health monitor with the listener's threshold of three over
