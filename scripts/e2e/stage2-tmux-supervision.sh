@@ -22,7 +22,7 @@
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
-work=$(mktemp -d /tmp/legion-e2e2.XXXXXXXX)
+work=$(mktemp -d "/tmp/legion-e2e2.$$.XXXXXXXX")
 ok=
 daemon_pid=
 deadline_pid=
@@ -244,6 +244,10 @@ envoy_port=$(bash "$root/scripts/e2e/lib/free-port.sh" "$port" "$deadline_port")
 # working copy held (a negative control's), and its hash (lib/built-from.sh).
 built=$(bash "$root/scripts/e2e/lib/built-from.sh" "$root" "$work/legion") || fail "lib/built-from.sh could not say what the run built"
 while IFS= read -r line; do note "$line"; done <<<"$built"
+
+# shellcheck source-path=SCRIPTDIR source=lib/leftovers.sh
+. "$root/scripts/e2e/lib/leftovers.sh"
+refuse_leftovers legion-e2e2
 
 if [ -z "${LEGION_E2E_PG_DSN:-}" ]; then
   docker ps >/dev/null # a broken docker is a failure of this run, not of the daemon

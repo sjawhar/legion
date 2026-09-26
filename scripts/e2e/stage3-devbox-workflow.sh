@@ -15,7 +15,7 @@
 set -Eeuo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
-work=$(mktemp -d /tmp/legion-e2e3.XXXXXXXX)
+work=$(mktemp -d "/tmp/legion-e2e3.$$.XXXXXXXX")
 # Evidence survives every outcome: logs, captured state, negative controls, the production audit,
 # and every agent transcript. Cleanup stops processes; removes containers, sockets, and profiles; and
 # closes the run's own pull requests on the smoke repository, deleting their branches.
@@ -71,6 +71,8 @@ fail() { printf 'FAIL %s: %s\n' "$check" "$*" >&2; exit 1; }
 . "$root/scripts/e2e/lib/rig.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/workflow.sh
 . "$root/scripts/e2e/lib/workflow.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/leftovers.sh
+. "$root/scripts/e2e/lib/leftovers.sh"
 
 # collect_transcripts copies every OMP session the rig's profile wrote into the evidence directory
 # before the isolated profile is removed.
@@ -526,7 +528,8 @@ idle_read_diagnostics() {
 }
 
 begin prerequisites
-for tool in go docker jq curl ss tmux bun mise secrets gh shellcheck jj hawk-token; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+refuse_leftovers legion-e2e3
+for tool in go docker jq curl ss tmux bun mise secrets gh shellcheck jj hawk-token pgrep; do command -v "$tool" >/dev/null || fail "$tool is required"; done
 # STAGE3_FROM is a development aid for iterating on the later scenarios against a fresh rig; a run
 # with it set is never the proof and never prints PASS. `held` skips the first issue's workflow:
 # the proof human closes that root, freeing its admission slot as its sign-off would, and the
@@ -1004,7 +1007,7 @@ pass
 begin services-stopped
 # Stop the remaining services explicitly and prove every one is gone, so no agent can take another
 # turn: an idle agent takes one on the next event the daemon delivers, until the daemon stops.
-stop_pid "$watcher_pid"; watcher_pid=
+stop_tree "$watcher_pid"; watcher_pid=
 stop_pid "$daemon_pid"; daemon_pid=
 stop_dispatch
 stop_pid "$listener_pid"; listener_pid=
