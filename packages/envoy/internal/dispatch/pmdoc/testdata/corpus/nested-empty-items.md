@@ -6,11 +6,6 @@ Text.
 Text.
 
 - a
-  - - 
-
-Text.
-
-- a
   > -
 
 Text.
@@ -43,8 +38,3 @@ Text.
 
 - a
   1.
-
-Text.
-
-- a
-  - + x

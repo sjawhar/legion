@@ -2267,79 +2267,12 @@ func TestApplyOperationEmptyingACalloutInAFootnoteKeepsTheCallout(t *testing.T) 
 	}
 }
 
-// A lone carriage return ends a line, as in the browser editor. A replace carrying one is taken,
-// and the line it starts is written as any other line is: lazily continuing a paragraph, escaped
-// where its text would read as block syntax (a setext underline, a heading, list or quote marker),
-// or in code under the prefix and a fence written past it. In a heading or a table cell, which are
-// written on one line, it is written as a character reference.
-func TestApplyOperationReplaceWithALoneCarriageReturn(t *testing.T) {
-	const callout = "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n```\nBody.\n```\n:::\n\nAfter.\n"
-	for _, test := range []struct {
-		name, markdown, with string
-		taken                bool
-	}{
-		{"in a paragraph", "Intro.\n\nBody.\n\nAfter.\n", "a\rb", true},
-		{"in a list item", "Intro.\n\n- Body.\n- two\n", "a\rb", true},
-		{"in a blockquote", "Intro.\n\n> Body.\n\nAfter.\n", "a\rb", true},
-		{"in code", "Intro.\n\n```\nBody.\n```\n", "a\rb", true},
-		{"in a blockquote's code", "Intro.\n\n> ```\n> Body.\n> ```\n\nAfter.\n", "a\rb", true},
-		{"before a colon line in a callout's code", callout, "a\r:::", true},
-		{"before dashes", "Intro.\n\nBody.\n\nAfter.\n", "x\r---", true},
-		{"before a heading marker", "Intro.\n\nBody.\n\nAfter.\n", "x\r# y", true},
-		{"before a list marker", "Intro.\n\nBody.\n\nAfter.\n", "x\r- y", true},
-		{"before a quote marker in a quote", "Intro.\n\n> Body.\n\nAfter.\n", "x\r> y", true},
-		{"before dashes in a list item", "Intro.\n\n- Body.\n- two\n", "x\r---", true},
-		{"before a list marker in a quote", "Intro.\n\n> Body.\n\nAfter.\n", "x\r- y", true},
-		{"before an equals line", "Intro.\n\nBody.\n\nAfter.\n", "x\r===", true},
-		{"before a fence", "Intro.\n\nBody.\n\nAfter.\n", "x\r```", true},
-		{"before a colon line in a callout", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n", "x\r:::", true},
-		{"in a heading", "Intro.\n\n# Body.\n\nAfter.\n", "a\rb", true},
-		{"in a table cell", "Intro.\n\n| h |\n| :--- |\n| Body. |\n", "a\rb", true},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			tree, err := parseInput(test.markdown)
-			if err != nil {
-				t.Fatal(err)
-			}
-			pmdoc.EnsureBlockIDs(tree)
-			next, err := applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
-			if !test.taken {
-				var invalid *ErrInvalidOp
-				if !errors.As(err, &invalid) || invalid.Field != "with" {
-					t.Fatalf("replace with %q = %v, want INVALID_OP on with", test.with, err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("replace with %q = %v, want it taken", test.with, err)
-			}
-			markdown, err := renderTree(next)
-			if err != nil {
-				t.Fatal(err)
-			}
-			back, err := parseInput(markdown)
-			if err != nil || !back.Equal(next) {
-				t.Fatalf("replace with %q stored %q, which does not read back as written (%v)", test.with, markdown, err)
-			}
-		})
-	}
-}
-
-// A code span keeps the whitespace that starts its next line, after a line feed or a lone carriage
-// return, as the browser editor's parser reads it; only the prefix of the containers around it is
-// not the code's. A replace writing one stores that code and reads it back.
+// A code span keeps the whitespace that starts its next line, as the browser editor's parser reads
+// it; only the prefix of the containers around it is not the code's. A replace writing one stores
+// that code and reads it back.
 func TestApplyOperationReplaceKeepsACodeSpansLineIndent(t *testing.T) {
-	const callout = "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n"
 	for _, test := range []struct{ name, markdown, with, code string }{
-		{"in a paragraph", "Intro.\n\nBody.\n\nAfter.\n", "x `a\r b` y", "a\r b"},
 		{"after a line feed", "Intro.\n\nBody.\n\nAfter.\n", "x `a\n  b` y", "a\n  b"},
-		{"in a list item", "Intro.\n\n- Body.\n- two\n", "x `a\r b` y", "a\r b"},
-		{"in a blockquote", "Intro.\n\n> Body.\n\nAfter.\n", "x `a\r\tb` y", "a\r\tb"},
-		{"in a callout", callout, "x `a\r b` y", "a\r b"},
-		{"whitespace alone before the closer", "Intro.\n\nBody.\n\nAfter.\n", "x `a\r ` y", "a\r "},
-		{"whitespace alone before the closer, in a quote", "Intro.\n\n> Body.\n\nAfter.\n", "x `a\r  ` y", "a\r  "},
-		{"whitespace alone before the closer, in a list item", "Intro.\n\n- Body.\n- two\n", "x `a\r ` y", "a\r "},
-		{"whitespace alone before the closer, in a footnote definition", "x[^1]\n\n[^1]: Body.\n", "x `a\r ` y", "a\r "},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			tree, err := parseInput(test.markdown)

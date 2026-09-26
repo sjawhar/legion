@@ -48,33 +48,3 @@ Text.
 
 | h |
 | :- |
-
-Text.
-
-a|:-|
-
-Text.
-
-- b
-
-Text.
-
-1. b
-
-Text.
-
-> b
-
-Text.
-
-- a
-- a
-
-Text.
-
-a>
-
-Text.
-
-- a
-- a>

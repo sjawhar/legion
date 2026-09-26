@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"slices"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/yuin/goldmark/ast"
 	extensionast "github.com/yuin/goldmark/extension/ast"
@@ -23,14 +22,8 @@ import (
 
 // escapeContext is what one character's escape depends on beyond the text itself.
 type escapeContext struct {
-	// lineFeedNext reports whether the next node's text begins with a line feed, so that a
-	// carriage return ending this text is half of a line break rather than one of its own.
-	lineFeedNext bool
 	// footnoteLabels is every footnote label the document defines, lowercased.
 	footnoteLabels map[string]bool
-	// afterCarriageReturn reports whether a lone carriage return began the character's line, where
-	// the long-standing marker escapes give way to the line start judge (endLine).
-	afterCarriageReturn bool
 	// textLineStart is where the character's line of text begins inside this node, or -1 when it
 	// began in an earlier one: the writer's long-standing list, heading, quote and ordered-list
 	// escapes are judged here, in headings, cells and inside marks as well, so that the markdown
@@ -67,23 +60,17 @@ type escapeContext struct {
 // needsInlineEscape decides one character from the text alone.
 func needsInlineEscape(value string, offset int, char rune, context escapeContext) bool {
 	textLineStart := context.textLineStart
-	// markerLineStart is where the marker escapes judge a line start from; on a line a lone
-	// carriage return began, the line start judge decides instead.
-	markerLineStart := textLineStart
-	if context.afterCarriageReturn {
-		markerLineStart = -1
-	}
 	switch char {
 	case '\\':
 		// Before whitespace written as a reference, a backslash would escape its `&`; before a
 		// line ending it would be a hard break.
 		return offset+1 < len(value) && isASCIIPunctuation(value[offset+1]) ||
-			offset+1 < len(value) && (value[offset+1] == '\r' || value[offset+1] == '\n') ||
+			offset+1 < len(value) && value[offset+1] == '\n' ||
 			offset+1 == len(value) && context.followed ||
 			offset+1 < len(value) && (value[offset+1] == ' ' || value[offset+1] == '\t') &&
 				needsInlineEscape(value, offset+1, rune(value[offset+1]), context)
 	case '*':
-		return (blockStart(value, markerLineStart, offset) && markerTerminator(value, offset+1)) ||
+		return (blockStart(value, textLineStart, offset) && markerTerminator(value, offset+1)) ||
 			emphasisDelimiter(value, offset, '*') || besideDelimiter(value, offset, '*', context) ||
 			context.delimiters == delimitersAll
 	case '_':
@@ -106,12 +93,12 @@ func needsInlineEscape(value string, offset int, char rune, context escapeContex
 	case '&':
 		return entityReference(value, offset)
 	case '#':
-		return blockStart(value, markerLineStart, offset) && atxHeadingRun(value, offset) ||
+		return blockStart(value, textLineStart, offset) && atxHeadingRun(value, offset) ||
 			context.heading && !context.followed && closingSequence(value, offset)
 	case '>':
-		return blockStart(value, markerLineStart, offset)
+		return blockStart(value, textLineStart, offset)
 	case '-', '+':
-		return blockStart(value, markerLineStart, offset) && markerTerminator(value, offset+1)
+		return blockStart(value, textLineStart, offset) && markerTerminator(value, offset+1)
 	case '|':
 		return context.tableCell
 	case ':':
@@ -122,17 +109,13 @@ func needsInlineEscape(value string, offset int, char rune, context escapeContex
 		// beside whitespace opens or closes no mark, so the first of a leading run and the last of
 		// a trailing one are written as the references it keeps, which the delimiter rule does not
 		// read as whitespace.
-		return offset == textLineStart && !context.afterMarker && (!context.marked || context.afterCarriageReturn) ||
+		return offset == textLineStart && !context.afterMarker && !context.marked ||
 			offset+1 == len(value) && !context.followed ||
-			offset+1 < len(value) && (value[offset+1] == '\r' || value[offset+1] == '\n') ||
+			offset+1 < len(value) && value[offset+1] == '\n' ||
 			offset == 0 && context.opener != 0 ||
 			offset+1 == len(value) && context.closer != 0
 	case '.', ')':
-		return orderedListMarkerPunctuation(value, offset, markerLineStart)
-	case '\r', '\n':
-		// A heading or a table row ends at a line ending, so one in their text is written as the
-		// reference the parser decodes back to it.
-		return context.heading || context.tableCell
+		return orderedListMarkerPunctuation(value, offset, textLineStart)
 	default:
 		return false
 	}
@@ -146,7 +129,7 @@ func escaped(char rune) string {
 	switch char {
 	case '&':
 		return "&amp;"
-	case ' ', '\t', '\r', '\n':
+	case ' ', '\t':
 		return numericEntity(char)
 	default:
 		return "\\" + string(char)
@@ -281,25 +264,16 @@ const (
 )
 
 // lineStartOf decides the character at offset, on a line of its own whose text begins at
-// lineStart; escape is what the rules that read the text alone decided for it. judged holds every
-// character that could begin a block for the line start judge, as on a line a lone carriage
-// return began, where no marker escape applies: an ordered list's digits wait for their `.` or `)`.
-func lineStartOf(value string, lineStart, offset int, char rune, escape, judged bool) lineStartVerdict {
+// lineStart; escape is what the rules that read the text alone decided for it.
+func lineStartOf(value string, lineStart, offset int, char rune, escape bool) lineStartVerdict {
 	switch {
 	case offset == lineStart && (char == ' ' || char == '\t') && indentedCodeRun(value, offset):
 		if escape {
 			return lineStartEscaped
 		}
 		return lineStartHeld
-	case judged && char >= '0' && char <= '9' && digitsAtLineStart(value, lineStart, offset):
-		return lineStartUndecided
-	case judged && (char == '.' || char == ')') && orderedListMarkerPunctuation(value, offset, lineStart):
-		if !escape {
-			return lineStartHeld
-		}
-		return lineStartAsIs
 	case char != ' ' && char != '\t' && blockStart(value, lineStart, offset):
-		if !escape && (lineStartMarker(value, offset, char) || judged && char < utf8.RuneSelf && isASCIIPunctuation(byte(char))) {
+		if !escape && lineStartMarker(value, offset, char) {
 			return lineStartHeld
 		}
 		return lineStartAsIs
@@ -307,16 +281,6 @@ func lineStartOf(value string, lineStart, offset int, char rune, escape, judged 
 		return lineStartAsIs
 	}
 	return lineStartUndecided
-}
-
-// digitsAtLineStart reports whether the line whose text begins at lineStart holds only indentation
-// the parser skips and then digits up to and including offset.
-func digitsAtLineStart(value string, lineStart, offset int) bool {
-	start := offset
-	for start > lineStart && value[start-1] >= '0' && value[start-1] <= '9' {
-		start--
-	}
-	return blockStart(value, lineStart, start)
 }
 
 // lineStartMarker reports whether char, first in a line's text, can begin a form that only the
@@ -364,26 +328,6 @@ func lineReadsAsText(before, line, rewrittenLine, prefix, footnote string) bool 
 	return slices.Equal(blockKinds(written), blockKinds(rewritten))
 }
 
-// lazyLineReadsAsText reports whether a line a lone carriage return began inside a prefix reads
-// the same with its text's first character escaped as without it. The line carries no prefix, so
-// the parser reads it as a lazy continuation of the paragraph whose text the line before holds
-// (beforeText, without its prefix or its container's marker): it is read so, behind a quote. A
-// quote marker there continues that quote, taking the character as syntax without changing a
-// block, so the text is compared too.
-func lazyLineReadsAsText(beforeText, line, rewrittenLine string) bool {
-	return sameReading("> "+beforeText+line, "> "+beforeText+rewrittenLine)
-}
-
-// sameReading reports whether two markdown texts read as the same document, text included.
-func sameReading(left, right string) bool {
-	leftDoc, err := Parse(left)
-	if err != nil {
-		return false
-	}
-	rightDoc, err := Parse(right)
-	return err == nil && leftDoc.Equal(rightDoc)
-}
-
 // splitPrefix splits a textblock's line prefix into the blockquote markers it opens with - up to
 // its last `>` and the one space after it - and the indentation of the list items inside them.
 func splitPrefix(prefix string) (quote string, indentation int) {
@@ -417,7 +361,7 @@ func unquote(lines, quote string) string {
 // blockKinds is the kinds of the blocks the parser reads markdown as, in document order.
 func blockKinds(markdown string) []ast.NodeKind {
 	source := []byte(markdown)
-	root := blockReader.parseLined(lineEnds(source), source)
+	root := blockReader.parse(source)
 	var kinds []ast.NodeKind
 	_ = ast.Walk(root, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
 		// A task checkbox is inline, but it is the list item's syntax, not its text.
@@ -478,7 +422,7 @@ func blockStart(value string, lineStart, offset int) bool {
 // markerTerminator reports whether offset ends a list marker: the parser opens an item on a
 // marker followed by a space, a tab, or the end of the line.
 func markerTerminator(value string, offset int) bool {
-	return offset >= len(value) || value[offset] == ' ' || value[offset] == '\t' || value[offset] == '\n' || value[offset] == '\r'
+	return offset >= len(value) || value[offset] == ' ' || value[offset] == '\t' || value[offset] == '\n'
 }
 
 // atxHeadingRun reports whether value opens an ATX heading marker at offset: one to six hashes

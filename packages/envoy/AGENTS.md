@@ -153,8 +153,7 @@ the typed block - so the renderer writes the typed block's fence longer than eve
 fixture generator writes for a callout at the top and inside a blockquote, list items, a footnote
 definition and another callout. Text a `replace` writes that would read as block syntax at a line
 start is written escaped, so it reads back as the characters: `---`, `***`, `~~~` or `::::` over a
-paragraph is stored `\---` and so on (the renderer's line-start escapes), on a line a lone
-carriage return begins as on any other. Beside an emptied
+paragraph is stored `\---` and so on (the renderer's line-start escapes). Beside an emptied
 paragraph it is written the same way, since an empty paragraph is not written. Everywhere else `replace` is
 inline: `with` parses through `pmdoc.ParseInline` (paragraph-only block grammar), so a multi-paragraph
 `with` is `INVALID_OP`, so is any non-empty `with` that renders to no inline content (a line
@@ -487,28 +486,14 @@ no whitespace between `name` and `{`; Pandoc fenced divs, leaf directives, and t
 invalid outside code blocks. An unclosed typed block at document level is rejected, while one nested
 inside another block runs to that parent’s end.
 
-A carriage return that no line feed follows ends a line, as CommonMark and the browser editor's
-parser have it, though goldmark ends one only at a line feed. `pmdoc.Parse` and `ParseInline` hand
-goldmark the source with each such carriage return written as a line feed (`lineEnds`, the same
-length) and read every text from the source itself, so `x\r---` reads as a heading and code keeps
-its carriage return; a soft break a lone carriage return ends stays `\r` in the text, as the
-browser editor keeps it. A code span keeps the whitespace that starts each of its later lines past the
-prefix of the containers around it, after a line feed or a lone carriage return, as the browser
-editor's parser reads it, a line holding only whitespace before the closer included; goldmark's
-paragraph trims it (`lineRecordingParagraph`, `multilineCodeSpanText`). A code span whose text is
-only spaces and line endings keeps all of it, and the renderer pads a span with a space inside each
-fence only where the parser takes one character off each end (`inlineCodePadding`). The renderer writes a code line's prefix after a lone carriage return as
-after a line feed, and `closingColons` measures the line after one. The inline writer ends a line
-at a lone carriage return as at a line feed (`endsMarkdownLine`). The line it begins carries no
-prefix, so in a quote or a list item the parser reads it as a lazy continuation: it takes an escape
-only where it reads differently without one, as the parser reads it (`lazyLineReadsAsText`), and
-none of the writer's long-standing marker escapes. In a heading or a table cell, which are written
-on one line, a line ending is written as its character reference.
-Two readings follow the browser editor rather than the line split: a line a lone carriage return
-begins is never refused as a malformed directive (`a\r::::` is text, since the browser editor refuses
-those line by line at line feeds), and a lazy continuation line - one that continues a paragraph in
-a list item, a quote or a footnote definition without the container's prefix, after a line feed or a
-lone carriage return - is never a table's header or delimiter row (`lazyTableRows`), as in GFM.
+A carriage return that no line feed follows is text here, as goldmark reads it and as the writer
+writes it, though CommonMark and the browser editor's parser end a line at one. A code span keeps the whitespace that
+starts each of its later lines past the prefix of the containers around it, as the browser editor's
+parser reads it, a line holding only whitespace before the closer included; goldmark's paragraph
+trims it (`lineRecordingParagraph`, `multilineCodeSpanText`). A space, a line feed, or a carriage
+return and line feed together is the padding such a span sheds at each end. A lazy continuation line - one that
+continues a paragraph in a list item, a quote or a footnote definition without the container's
+prefix - is never a table's header or delimiter row (`lazyTableRows`), as in GFM.
 A task list item's marker (`[ ]`, `[x]` or `[X]` opening a list item's first paragraph) is read as
 the browser editor's parser reads it (`taskList`): followed by a space or a tab and then more text on
 the line, or by a line ending the paragraph continues past, and it takes only the one character
@@ -523,9 +508,7 @@ as front matter to the document's end, reads no list, quote or footnote definiti
 document's level in the rest. So the renderer writes a rule that opens a document as `***` where
 `---` would be misread - a later `---` line would close front matter, or the document holds a
 list, quote or footnote definition at its level (`holdsAContainerTheBrowserDrops`) - and `---`
-everywhere else. Under a `---` it writes, a line a lone carriage return begins at the document's
-level opens no container in either parser (`unclosedOpenerGuard`), as when this parser read a lone
-carriage return as text, so it takes no escape for one.
+everywhere else.
 
 A container that holds nothing is read as the browser editor's parser reads it, holding one empty
 paragraph (`emptyParagraphFirst`): an empty list item (`-`), quote (`>`), typed block or footnote
@@ -533,6 +516,8 @@ definition, and a list item that opens with another block (`- # h`) holds an emp
 of it. A table with no body row holds one empty row, which the renderer writes as nothing. The
 renderer writes a list item's empty first paragraph as nothing, with the next block on the
 marker's line.
+An empty list item that would interrupt a paragraph is not opened, as that parser reads it on the
+whole line (`emptyItemGuard`): after `- a`, the line `  - -` is an item holding the text `-`.
 
 A typed block renders its `blockId`, defaulted attributes, and every explicitly set optional
 attribute. Parsing mints an omitted id, while live document reads and writes validate each node

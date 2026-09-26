@@ -52,11 +52,6 @@ type inlinePosition struct {
 	afterLine bool
 	// afterMarker reports whether a mark's marker is written on this line before its text.
 	afterMarker bool
-	// afterCarriageReturn reports whether a lone carriage return began this line. The writer puts
-	// no prefix after one, so in a quote or a list item the parser reads the line as a lazy
-	// continuation; the writer's long-standing marker escapes do not apply to it, and every
-	// character that could begin a block is held for endLine, which reads the line as it lies.
-	afterCarriageReturn bool
 }
 
 // lineCandidate is a line's first text character, when it is one that can begin a block form
@@ -75,13 +70,6 @@ type lineCandidate struct {
 	atTypedPrefix bool
 	// prefix is the prefix the textblock's lines are written at.
 	prefix string
-	// lazy reports whether the line is one a lone carriage return began inside a prefix, which the
-	// parser reads as a lazy continuation of the paragraph.
-	lazy bool
-	// underUnclosedOpener reports whether the line is one a lone carriage return began at the
-	// document's level, under a document-opening `---` nothing closes, where it opens no list,
-	// quote or footnote definition (unclosedOpenerGuard).
-	underUnclosedOpener bool
 }
 
 // inlineWithEscapes writes one textblock's inline nodes. Delimiters in text the escape rules leave
@@ -93,7 +81,6 @@ type lineCandidate struct {
 // kept only if it reads back, so a run that fails for another reason keeps the bytes it had.
 func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlineContext) {
 	from := r.b.Len()
-	r.runStart = from
 	r.writeInlineRun(nodes, prefix, context, delimitersAsRuled)
 	held := delimitersInText(nodes)
 	if r.err != nil || held == delimitersAsRuled || r.runReadsBack(from, prefix, nodes) {
@@ -149,11 +136,6 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 			if position.atLineStart && (len(active) != common || len(next) != common) {
 				position.afterMarker = true
 			}
-			// Closing syntax (a link's `](url)`, a closing delimiter) written first on a line a lone
-			// carriage return began leaves the text after it no line start of its own.
-			if position.atLineStart && position.afterCarriageReturn && len(active) != common {
-				position.atLineStart = false
-			}
 			active = next
 			// The brackets rule follows the marks actually written, not hasLink: a bare URL's
 			// link mark is stripped above, and its text must keep its own brackets so linkify
@@ -163,7 +145,6 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 				label = r.labelBrackets
 			}
 			r.writeInlineText(n, &position, prefix, escapeContext{
-				lineFeedNext:   index+1 < len(nodes) && strings.HasPrefix(nodes[index+1].Text, "\n"),
 				footnoteLabels: r.footnoteLabels,
 				tableCell:      escapePipes,
 				urlSchemes:     !hasLink,
@@ -234,10 +215,7 @@ func (r *renderer) endLine(continues bool) {
 	line := string(written[lineFrom:])
 	width := utf8.RuneLen(candidate.char)
 	escape := escaped(candidate.char)
-	// A lazy line stands at the prefix of the typed block around it, where a lone `:::` closes it.
-	closes := candidate.atTypedPrefix && closesTypedBlock(line, candidate.prefix) ||
-		candidate.lazy && r.typedPrefix != nil && closesTypedBlock(line, *r.typedPrefix)
-	if !closes {
+	if !candidate.atTypedPrefix || !closesTypedBlock(line, candidate.prefix) {
 		readFrom, before := lineFrom, ""
 		if candidate.afterLine && lineFrom > 0 {
 			lineBreak := lineFrom - 1
@@ -252,27 +230,12 @@ func (r *renderer) endLine(continues bool) {
 		if continues {
 			judged, rewritten = judged+"\nx", rewritten+"\nx"
 		}
-		if candidate.lazy {
-			// The line before is the textblock's first, behind its container's marker, or a later
-			// one behind the prefix (or none, if a lone carriage return began it too).
-			beforeText := strings.TrimPrefix(before, candidate.prefix)
-			if readFrom < r.runStart {
-				beforeText = string(written[r.runStart:lineFrom])
-			}
-			if lazyLineReadsAsText(beforeText, judged, rewritten) {
-				return
-			}
-		} else {
-			var footnote string
-			if readFrom == r.footnoteLineAt && r.footnoteLabel != "" {
-				footnote = r.footnoteLabel
-			}
-			if candidate.underUnclosedOpener {
-				before = "---\n\n" + before
-			}
-			if lineReadsAsText(before, judged, rewritten, candidate.prefix, footnote) {
-				return
-			}
+		var footnote string
+		if readFrom == r.footnoteLineAt && r.footnoteLabel != "" {
+			footnote = r.footnoteLabel
+		}
+		if lineReadsAsText(before, judged, rewritten, candidate.prefix, footnote) {
+			return
 		}
 	}
 	tail := line[candidate.at-lineFrom+width:]
@@ -345,7 +308,7 @@ func inlineCodePadding(value string) bool {
 	if strings.HasPrefix(value, "`") || strings.HasSuffix(value, "`") {
 		return true
 	}
-	return value != "" && isCodePadding(value[0]) && isCodePadding(value[len(value)-1]) && strings.Trim(value, " \r\n") != ""
+	return strings.HasPrefix(value, " ") && strings.HasSuffix(value, " ") && strings.Trim(value, " ") != ""
 }
 
 func (r *renderer) writeSyntax(value string) {
@@ -364,19 +327,17 @@ func (r *renderer) writeText(value string) {
 
 func (r *renderer) writeInlineText(node *Node, position *inlinePosition, prefix string, context escapeContext) {
 	if nodeHasMark(node, "inlineCode") {
-		// A code span's text is written as it is; a line feed or a lone carriage return in it
-		// still ends a line.
+		// A code span's text is written as it is; a line feed in it still ends a line.
 		value := escapeTablePipes(node.Text, context.tableCell)
 		endsLine := false
 		for {
-			lineEnd := lineEndIn(value, context.lineFeedNext)
+			lineEnd := strings.IndexByte(value, '\n')
 			if lineEnd < 0 {
 				break
 			}
 			r.writeText(value[:lineEnd])
 			r.endLine(true)
 			r.writeText(value[lineEnd : lineEnd+1])
-			position.afterCarriageReturn = value[lineEnd] == '\r'
 			value = value[lineEnd+1:]
 			endsLine, position.afterLine = value == "", true
 		}
@@ -402,10 +363,9 @@ func (r *renderer) writeInlineText(node *Node, position *inlinePosition, prefix 
 		width := utf8.RuneLen(char)
 		context.textLineStart = textLineStart
 		context.afterMarker = position.afterMarker
-		context.afterCarriageReturn = position.afterCarriageReturn
 		escape := needsInlineEscape(value, byteOffset, char, context)
 		if lineStart >= 0 && r.heldLineStart == nil {
-			switch lineStartOf(value, lineStart, byteOffset, char, escape, position.afterCarriageReturn) {
+			switch lineStartOf(value, lineStart, byteOffset, char, escape) {
 			case lineStartEscaped:
 				escape = true
 				lineStart = -1
@@ -422,14 +382,13 @@ func (r *renderer) writeInlineText(node *Node, position *inlinePosition, prefix 
 			r.writeSyntax(textEscape(char))
 			segmentStart = byteOffset + width
 		}
-		lineEnd := !escape && endsMarkdownLine(value, byteOffset, context.lineFeedNext)
+		lineEnd := char == '\n'
 		if lineEnd {
 			r.writeText(value[segmentStart:byteOffset])
 			segmentStart = byteOffset
 			r.endLine(true)
 			lineStart, textLineStart = byteOffset+width, byteOffset+width
 			position.afterLine = true
-			position.afterCarriageReturn = value[byteOffset] == '\r'
 		}
 		position.atLineStart = lineEnd
 		position.atTextStart = lineEnd
@@ -438,38 +397,11 @@ func (r *renderer) writeInlineText(node *Node, position *inlinePosition, prefix 
 	r.writeText(value[segmentStart:])
 }
 
-// endsMarkdownLine reports whether the character at offset in value ends a markdown line: a line
-// feed, or a carriage return no line feed follows, in value or, at its end, at the start of the
-// next node (lineFeedNext).
-func endsMarkdownLine(value string, offset int, lineFeedNext bool) bool {
-	switch value[offset] {
-	case '\n':
-		return true
-	case '\r':
-		if offset+1 < len(value) {
-			return value[offset+1] != '\n'
-		}
-		return !lineFeedNext
-	}
-	return false
-}
-
-// lineEndIn is the offset of the first character in value that ends a markdown line
-// (endsMarkdownLine), or -1.
-func lineEndIn(value string, lineFeedNext bool) int {
-	for offset := 0; offset < len(value); offset++ {
-		if endsMarkdownLine(value, offset, lineFeedNext) {
-			return offset
-		}
-	}
-	return -1
-}
-
 // markdownLineStart is where the markdown line holding offset begins in written: after the last
-// line feed or lone carriage return before it.
+// line feed before it.
 func markdownLineStart(written []byte, offset int) int {
 	for index := offset - 1; index >= 0; index-- {
-		if written[index] == '\n' || loneCarriageReturn(written, index) {
+		if written[index] == '\n' {
 			return index + 1
 		}
 	}
@@ -486,8 +418,5 @@ func (r *renderer) holdLineStart(before string, char rune, position *inlinePosit
 		afterLine:     position.afterLine,
 		atTypedPrefix: r.typedPrefix != nil && *r.typedPrefix == prefix,
 		prefix:        prefix,
-		lazy:          position.afterCarriageReturn && prefix != "",
-		underUnclosedOpener: r.unclosedOpener && position.afterCarriageReturn && prefix == "" &&
-			r.typedPrefix == nil && !r.inFootnote,
 	}
 }

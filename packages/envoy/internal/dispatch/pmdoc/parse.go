@@ -19,8 +19,9 @@ import (
 var anchorAttribute = regexp.MustCompile(`([a-zA-Z0-9_-]+)="([^"]*)"`)
 
 // markdownReader is the one goldmark configuration Dispatch reads markdown with. Its only way in
-// is parseLined, which hands the block parsers the source as written (sourceKey). Front matter is
-// read apart from it (parseFrontmatterBlock), so an unclosed opener is ordinary markdown.
+// is parse. Front matter is read apart from it (parseFrontmatterBlock), so an unclosed opener is
+// ordinary markdown. Its list parser opens no empty item that would interrupt a paragraph
+// (emptyItemGuard).
 type markdownReader struct {
 	md goldmark.Markdown
 }
@@ -30,12 +31,12 @@ var blockReader = markdownReader{md: goldmark.New(
 		parser.WithBlockParsers(
 			util.Prioritized(parser.NewSetextHeadingParser(), 100),
 			util.Prioritized(parser.NewThematicBreakParser(), 200),
-			util.Prioritized(emptyItemGuard{unclosedOpenerGuard{parser.NewListParser()}}, 300),
+			util.Prioritized(emptyItemGuard{parser.NewListParser()}, 300),
 			util.Prioritized(parser.NewListItemParser(), 400),
 			util.Prioritized(parser.NewCodeBlockParser(), 500),
 			util.Prioritized(parser.NewATXHeadingParser(), 600),
 			util.Prioritized(parser.NewFencedCodeBlockParser(), 700),
-			util.Prioritized(unclosedOpenerGuard{parser.NewBlockquoteParser()}, 800),
+			util.Prioritized(parser.NewBlockquoteParser(), 800),
 			util.Prioritized(parser.NewHTMLBlockParser(), 900),
 		),
 		parser.WithInlineParsers(parser.DefaultInlineParsers()...),
@@ -82,10 +83,9 @@ func ParseForWrite(markdown string, live *Node) (*Node, error) {
 // block that names none has none yet.
 func parseUnstamped(markdown string) (*Node, error) {
 	source := []byte(markdown)
-	lined := lineEnds(source)
-	front, rest := parseFrontmatterBlock(lined)
-	source, lined = source[rest:], lined[rest:]
-	root := blockReader.parseLined(lined, source)
+	front, rest := parseFrontmatterBlock(source)
+	source = source[rest:]
+	root := blockReader.parse(source)
 	doc, err := parseBlock(root, source, footnoteLabels(root))
 	if err != nil {
 		return nil, err
@@ -136,7 +136,7 @@ func parseInlineWithDefinitions(markdown string, labels []string) ([]*Node, erro
 		full.WriteString("\n\n[^" + escapeFootnoteLabel(label) + "]: x")
 	}
 	source := []byte(full.String())
-	root := withLineStarts(footnoteRunParser, lineEnds(source), parser.NewContext())
+	root := withLineStarts(footnoteRunParser, source, parser.NewContext())
 	first, ok := root.FirstChild().(*ast.Paragraph)
 	if !ok {
 		return nil, fmt.Errorf("%w: inline markdown does not read as a paragraph", ErrSchema)
@@ -168,15 +168,14 @@ func referencedLabels(nodes []*Node) []string {
 // paragraph's last line, is ErrSchema.
 func ParseInline(markdown string) ([]*Node, error) {
 	source := []byte(markdown)
-	lined := lineEnds(source)
-	root := withLineStarts(inlineMarkdownParser, lined, parser.NewContext())
+	root := withLineStarts(inlineMarkdownParser, source, parser.NewContext())
 	if root.ChildCount() > 1 {
 		return nil, fmt.Errorf("%w: inline markdown forms %d paragraphs", ErrSchema, root.ChildCount())
 	}
 	if root.ChildCount() == 0 {
 		return nil, nil
 	}
-	if dropped := textOutside(root.FirstChild(), lined); dropped != "" {
+	if dropped := textOutside(root.FirstChild(), source); dropped != "" {
 		return nil, fmt.Errorf("%w: inline markdown holds text outside its paragraph, %q, which would be lost", ErrSchema, dropped)
 	}
 	paragraph, err := parseBlock(root.FirstChild(), source, nil)
@@ -297,7 +296,7 @@ func parseTableRows(markdown string, width int) ([]*Node, bool, error) {
 		return nil, false, nil
 	}
 
-	lines := markdownLines(fragment)
+	lines := strings.Split(fragment, "\n")
 	for _, line := range lines {
 		cells, ok := tableRowCells(line)
 		if !ok || tableDelimiterRow(cells) {
@@ -692,16 +691,11 @@ func parseInlineWithTableCellLinks(parent ast.Node, source []byte, initial []Mar
 			}
 			if current.SoftLineBreak() {
 				// A soft break is a space, as CommonMark renders it; the browser editor's
-				// white-space: break-spaces would show a literal newline as a line break. A line
-				// a lone carriage return ends keeps it, as the browser editor's parser does, and so
-				// does an image's alt text, which that parser reads with every line ending as
-				// written.
-				switch {
-				case insideImage(current):
+				// white-space: break-spaces would show a literal newline as a line break. An
+				// image's alt text keeps its line ending, which that parser reads as written.
+				if insideImage(current) {
 					appendText(&children, lineEndingAfter(source, current.Segment.Stop), active)
-				case lineEndingAfter(source, current.Segment.Stop) == "\r":
-					appendText(&children, "\r", active)
-				default:
+				} else {
 					appendText(&children, " ", active)
 				}
 			}
