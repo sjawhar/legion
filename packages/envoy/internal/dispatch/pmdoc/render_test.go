@@ -10,6 +10,7 @@ import (
 var orderedMarker = regexp.MustCompile(`(?m)^\d+\.\s*`)
 var spanTag = regexp.MustCompile(`</?span(?:\s[^>]*)?>`)
 var linkDestination = regexp.MustCompile(`\]\([^)]*\)`)
+var setextEquals = regexp.MustCompile(`(?m)^([ >]*)=+[ \t]*$`)
 var emptyAttribute = regexp.MustCompile(`(\s[A-Za-z][\w-]*)=""`)
 
 func TestRenderMatchesMilkdownForFixtures(t *testing.T) {
@@ -131,6 +132,8 @@ func plain(markdown string) string {
 	// An attribute holding the empty string reads the same written bare, as the engine writes
 	// it (`title`), or quoted, as the renderer does (`title=""`).
 	markdown = emptyAttribute.ReplaceAllString(markdown, "$1")
+	// A setext underline's length is syntax: the engine writes one `=`, the renderer three.
+	markdown = setextEquals.ReplaceAllString(markdown, "$1=")
 	markdown = html.UnescapeString(markdown)
 	markdown = orderedMarker.ReplaceAllString(markdown, "")
 	markdown = spanTag.ReplaceAllString(markdown, "")

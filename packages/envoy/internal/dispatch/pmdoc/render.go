@@ -211,8 +211,23 @@ func (r *renderer) block(n *Node, prefix string) {
 		r.inline(n.Children, prefix)
 	case "heading":
 		level := int(num(n.Attrs["level"], 1))
-		r.writeSyntax(strings.Repeat("#", level) + " ")
-		r.headingInline(n.Children, prefix)
+		if !holdsHardBreak(n.Children) {
+			r.writeSyntax(strings.Repeat("#", level) + " ")
+			r.headingInline(n.Children, prefix)
+			break
+		}
+		// An ATX heading is one line, so a heading holding a line break is written setext, its
+		// lines as a paragraph's and an underline after them, as the browser editor writes it.
+		// Only levels one and two have that form; past them the break is written as a space,
+		// as the browser editor also writes it.
+		switch level {
+		case 1, 2:
+			r.inline(n.Children, prefix)
+			r.writeSyntax("\n" + prefix + map[int]string{1: "===", 2: "---"}[level])
+		default:
+			r.writeSyntax(strings.Repeat("#", level) + " ")
+			r.headingInline(hardBreaksAsSpaces(n.Children), prefix)
+		}
 	case "blockquote":
 		r.writeSyntax("> ")
 		r.blocksNoTrailing(n.Children, prefix+"> ")
@@ -683,6 +698,27 @@ func escapeTableSyntaxPipes(value string) string {
 		escaped = char == '\\'
 	}
 	return rendered.String()
+}
+
+func holdsHardBreak(nodes []*Node) bool {
+	for _, n := range nodes {
+		if n.Type == "hardbreak" {
+			return true
+		}
+	}
+	return false
+}
+
+// hardBreaksAsSpaces is nodes with each hard break a space carrying no marks.
+func hardBreaksAsSpaces(nodes []*Node) []*Node {
+	out := make([]*Node, len(nodes))
+	for index, n := range nodes {
+		if n.Type == "hardbreak" {
+			n = &Node{Type: "text", Text: " "}
+		}
+		out[index] = n
+	}
+	return out
 }
 
 // tableAlignment is the delimiter row's cell for a column's alignment. A column with none - null,

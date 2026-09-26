@@ -4298,6 +4298,178 @@
     "rendered_by_milkdown": "---\ntitle: Fixture\ntags:\n  - pmdoc\n---\n\nFrontmatter paragraph.\n"
   },
   {
+    "name": "heading-line-breaks",
+    "markdown": "First line\\\nsecond line\n===\n\nText.\n\nAnother  \nbreak\n---\n\nText.\n\n- item\n\n  Heading\\\n  in an item\n  ---\n\n> Heading\\\n> in a quote\n> ===\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "heading",
+          "attrs": {
+            "id": "",
+            "level": 1,
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "First line"
+            },
+            {
+              "type": "hardbreak",
+              "attrs": {
+                "isInline": false
+              }
+            },
+            {
+              "type": "text",
+              "text": "second line"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Text."
+            }
+          ]
+        },
+        {
+          "type": "heading",
+          "attrs": {
+            "id": "",
+            "level": 2,
+            "blockId": "b-000003"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Another"
+            },
+            {
+              "type": "hardbreak",
+              "attrs": {
+                "isInline": false
+              }
+            },
+            {
+              "type": "text",
+              "text": "break"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000004"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Text."
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "spread": false,
+            "blockId": "b-000005"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": true,
+                "checked": null,
+                "blockId": "b-000006"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000007"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "item"
+                    }
+                  ]
+                },
+                {
+                  "type": "heading",
+                  "attrs": {
+                    "id": "",
+                    "level": 2,
+                    "blockId": "b-000008"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "Heading"
+                    },
+                    {
+                      "type": "hardbreak",
+                      "attrs": {
+                        "isInline": false
+                      }
+                    },
+                    {
+                      "type": "text",
+                      "text": "in an item"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000009"
+          },
+          "content": [
+            {
+              "type": "heading",
+              "attrs": {
+                "id": "",
+                "level": 1,
+                "blockId": "b-000010"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Heading"
+                },
+                {
+                  "type": "hardbreak",
+                  "attrs": {
+                    "isInline": false
+                  }
+                },
+                {
+                  "type": "text",
+                  "text": "in a quote"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AT4BAAcBC3Byb3NlbWlycm9yAwdoZWFkaW5nBwABAAYEAAEBCkZpcnN0IGxpbmWHAQEDCWhhcmRicmVhaygAAQwIaXNJbmxpbmUBeYcBDAYEAAEOC3NlY29uZCBsaW5lKAABAAJpZAF3ACgAAQAFbGV2ZWwBfQEoAAEAB2Jsb2NrSWQBdwhiLTAwMDAwMYcBAAMJcGFyYWdyYXBoBwABHQYEAAEeBVRleHQuKAABHQdibG9ja0lkAXcIYi0wMDAwMDKHAR0DB2hlYWRpbmcHAAElBgQAASYHQW5vdGhlcocBJgMJaGFyZGJyZWFrKAABLghpc0lubGluZQF5hwEuBgQAATAFYnJlYWsoAAElAmlkAXcAKAABJQVsZXZlbAF9AigAASUHYmxvY2tJZAF3CGItMDAwMDAzhwElAwlwYXJhZ3JhcGgHAAE5BgQAAToFVGV4dC4oAAE5B2Jsb2NrSWQBdwhiLTAwMDAwNIcBOQMLYnVsbGV0X2xpc3QHAAFBAwlsaXN0X2l0ZW0HAAFCAwlwYXJhZ3JhcGgHAAFDBgQAAUQEaXRlbSgAAUMHYmxvY2tJZAF3CGItMDAwMDA3hwFDAwdoZWFkaW5nBwABSgYEAAFLB0hlYWRpbmeHAUsDCWhhcmRicmVhaygAAVMIaXNJbmxpbmUBeYcBUwYEAAFVCmluIGFuIGl0ZW0oAAFKAmlkAXcAKAABSgVsZXZlbAF9AigAAUoHYmxvY2tJZAF3CGItMDAwMDA4KAABQgVsYWJlbAF3A+KAoigAAUIIbGlzdFR5cGUBdwZidWxsZXQoAAFCBnNwcmVhZAF4KAABQgdibG9ja0lkAXcIYi0wMDAwMDYoAAFBBnNwcmVhZAF5KAABQQdibG9ja0lkAXcIYi0wMDAwMDWHAUEDCmJsb2NrcXVvdGUHAAFpAwdoZWFkaW5nBwABagYEAAFrB0hlYWRpbmeHAWsDCWhhcmRicmVhaygAAXMIaXNJbmxpbmUBeYcBcwYEAAF1CmluIGEgcXVvdGUoAAFqAmlkAXcAKAABagVsZXZlbAF9ASgAAWoHYmxvY2tJZAF3CGItMDAwMDEwKAABaQdibG9ja0lkAXcIYi0wMDAwMDkA",
+    "rendered_by_milkdown": "First line\\\nsecond line\n===========\n\nText.\n\nAnother\\\nbreak\n-----\n\nText.\n\n* item\n\n  Heading\\\n  in an item\n  ----------\n\n> Heading\\\n> in a quote\n> ==========\n"
+  },
+  {
     "name": "headings",
     "markdown": "# One\n\n## Two\n\n### Three\n",
     "pm_json": {
