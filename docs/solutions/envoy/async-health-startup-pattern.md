@@ -38,11 +38,11 @@ orchestrators (Pulumi, Kubernetes) time out and kill the container.
 ```
 1. config.Load()           — synchronous, fast
 2. net.Listen("tcp", addr) — bind port in main goroutine (deterministic)
-3. Build HTTP mux           — /healthz always available, /v1/* and webhooks behind a gate
+3. Build HTTP mux           — /healthz always available, /v1/* and webhooks each behind a gate
 4. go server.Serve(ln)      — HTTP live immediately, /healthz returns {"status":"starting"}
-5. Slow init in main()      — NATS connect, CI store open, the gate opens for webhooks, then the
+5. Slow init in main()      — NATS connect, CI store open, the webhook gate opens, then the
                               other stores open and the consumer subscribes
-6. gate.open, deps.Store     — /v1 handlers built, the gate opens for /v1/* too, then the atomic publish
+6. v1Gate.open, deps.Store   — /v1 handlers built, the /v1 gate opens, then the atomic publish
 7. log.Fatal(<-fatal)        — block on HTTP server error channel
 ```
 
@@ -93,35 +93,35 @@ func (g *startingGate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 ```
 
-main registers one gate before `server.Serve`, bare on every enabled webhook path and inside
-`apiAuth` on `/v1`, so those paths answer 503 while the listener starts. Once NATS and the CI
-store are open, `openWebhooks` builds the webhook handlers and opens the gate onto a mux serving
-them while its catch-all still answers 503 for `/v1`. A webhook waits for nothing else, and in
-particular not for the durable consumer's bind, which during a rolling deploy waits out the task
-being replaced while the load balancer already sends the replacement webhooks: GitHub does not
-redeliver a refused delivery. In phase 6 `openListener` adds the `/v1` routes over the complete
-deps, opens the gate onto every route, and only then stores `deps`:
+main registers two gates before `server.Serve`, one bare on every enabled webhook path and one
+inside `apiAuth` on `/v1`, so those paths answer 503 while the listener starts. Once NATS and the
+CI store are open, `openWebhooks` builds the webhook handlers and opens the webhook gate onto them.
+A webhook waits for nothing else, and in particular not for the durable consumer's bind, which
+during a rolling deploy waits out the task being replaced while the load balancer already sends
+the replacement webhooks: GitHub does not redeliver a refused delivery. In phase 6
+`openListener` builds the `/v1` routes over the complete deps, opens the `/v1` gate onto them, and
+only then stores `deps`:
 
 ```go
-var gate startingGate
+var webhookGate, v1Gate startingGate
 for _, hook := range hooks {
-    mux.Handle(hook.path, &gate)
+    mux.Handle(hook.path, &webhookGate)
 }
-mux.Handle("/v1/", apiAuth(apiToken, apiVerifier, logger, &gate))
+mux.Handle("/v1/", apiAuth(apiToken, apiVerifier, logger, &v1Gate))
 // ... phase 5, once NATS and the CI store are open:
-routes := openWebhooks(&gate, hooks, client, ciStore)
+openWebhooks(&webhookGate, hooks, client, ciStore)
 // ... phase 6, once every store is open and the durable is bound:
-openListener(&gate, routes, ready, cfg.MachineID, logger, deps.Store)
+openListener(&v1Gate, ready, cfg.MachineID, logger, deps.Store)
 ```
 
 `TestAWebhookIsServedWhileAnotherTaskHoldsTheDurable` runs the listener binary against a durable
 another subscriber holds and requires a webhook to be served (and `/v1` to answer 503) until it
 lets go.
 
-**Open the gate before publishing `deps`.** Storing `deps` is what turns `/healthz` healthy, so
-the other order leaves a window in which `/healthz` says healthy while every route still answers
+**Open both gates before publishing `deps`.** Storing `deps` is what turns `/healthz` healthy, so
+the other order leaves a window in which `/healthz` says healthy while a route still answers
 503 -- and a caller that waits for healthy, as the shutdown test does, meets the 503.
-`TestOpenListener_PublishesOnlyOnceTheRoutesServe` holds the order.
+`TestOpenListener_PublishesOnlyOnceTheRoutesServe` holds the order for each gate.
 
 ## Health States
 

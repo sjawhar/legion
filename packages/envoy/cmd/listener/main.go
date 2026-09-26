@@ -460,9 +460,9 @@ func webhookRoutes(cfg *webhook.WebhookConfig) []webhookRoute {
 	return routes
 }
 
-// startingGate answers 503 "service starting" until open hands it a mux to serve, and serves the
-// last mux it was handed. main hands it a mux holding only routes whose dependencies are all open,
-// so a request never reaches a handler over a dependency that is not there.
+// startingGate answers 503 "service starting" until open hands it the mux to serve. main builds
+// each gate's mux only once every dependency of its handlers is open, so a request never reaches a
+// handler over a dependency that is not there.
 type startingGate struct {
 	mux atomic.Pointer[http.ServeMux]
 }
@@ -472,38 +472,28 @@ func (g *startingGate) open(mux *http.ServeMux) { g.mux.Store(mux) }
 func (g *startingGate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	mux := g.mux.Load()
 	if mux == nil {
-		serviceStarting(w, r)
+		writeJSONError(w, http.StatusServiceUnavailable, "service starting")
 		return
 	}
 	mux.ServeHTTP(w, r)
 }
 
-func serviceStarting(w http.ResponseWriter, _ *http.Request) {
-	writeJSONError(w, http.StatusServiceUnavailable, "service starting")
-}
-
-// openWebhooks builds the webhook routes over NATS and the CI store and opens the gate onto them,
-// while every other path the gate guards (/v1) still answers 503 "service starting". A webhook
-// waits on nothing else: the durable consumer's bind in particular waits out a rolling deploy's
-// old task, and GitHub does not redeliver a delivery refused in that window. It returns the
-// webhook routes for openListener to serve with /v1.
-func openWebhooks(gate *startingGate, hooks []webhookRoute, client *bus.Client, ciStore *cistore.Store) *http.ServeMux {
+// openWebhooks builds the webhook routes over NATS and the CI store and opens the webhook gate onto
+// them. A webhook waits on nothing else: the durable consumer's bind in particular waits out a
+// rolling deploy's old task, and GitHub does not redeliver a delivery refused in that window.
+func openWebhooks(gate *startingGate, hooks []webhookRoute, client *bus.Client, ciStore *cistore.Store) {
 	routes := http.NewServeMux()
-	starting := http.NewServeMux()
-	starting.HandleFunc("/", serviceStarting)
 	for _, hook := range hooks {
-		handler := hook.handler(client, ciStore)
-		routes.Handle(hook.path, handler)
-		starting.Handle(hook.path, handler)
+		routes.Handle(hook.path, hook.handler(client, ciStore))
 	}
-	gate.open(starting)
-	return routes
+	gate.open(routes)
 }
 
-// openListener adds the /v1 routes over the complete dependencies to the webhook routes, opens the
-// gate onto them, and only then publishes the dependencies. Publishing is what turns /healthz
-// healthy, so a probe that reads healthy always finds every route open.
-func openListener(gate *startingGate, routes *http.ServeMux, ready *listenerDeps, machineID string, logger *logging.Logger, publish func(*listenerDeps)) {
+// openListener builds the /v1 routes over the complete dependencies, opens the /v1 gate onto them,
+// and only then publishes the dependencies. Publishing is what turns /healthz healthy, and the
+// webhook gate opened earlier, so a probe that reads healthy always finds every route open.
+func openListener(gate *startingGate, ready *listenerDeps, machineID string, logger *logging.Logger, publish func(*listenerDeps)) {
+	routes := http.NewServeMux()
 	registerV1Routes(routes, ready, machineID, logger)
 	gate.open(routes)
 	publish(ready)
@@ -584,16 +574,17 @@ func main() {
 
 	// GaugeFunc for consumer pending — queries NATS at scrape time
 
-	// The webhook and /v1 routes answer 503 "service starting" until their dependencies are open:
-	// the webhooks once NATS and the CI store are (Phase 5), /v1 once every store and the durable
-	// consumer are (Phase 6). The webhook paths reach the gate bare, /v1 through apiAuth.
-	var gate startingGate
+	// The webhook and /v1 routes answer 503 "service starting" until their dependencies are open,
+	// each behind its own gate: the webhooks once NATS and the CI store are (Phase 5), /v1 once every
+	// store and the durable consumer are (Phase 6). The webhook paths reach their gate bare, /v1
+	// through apiAuth.
+	var webhookGate, v1Gate startingGate
 	hooks := webhookRoutes(webhookCfg)
 	for _, hook := range hooks {
-		mux.Handle(hook.path, &gate)
+		mux.Handle(hook.path, &webhookGate)
 	}
 	// Serve /v1/* on the listener port for local plugin registration.
-	v1Handler := apiAuth(apiToken, apiVerifier, logger, &gate)
+	v1Handler := apiAuth(apiToken, apiVerifier, logger, &v1Gate)
 	mux.Handle("/v1", v1Handler)
 	mux.Handle("/v1/", v1Handler)
 
@@ -641,7 +632,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	routes := openWebhooks(&gate, hooks, client, ciStore)
+	openWebhooks(&webhookGate, hooks, client, ciStore)
 	logger.Info("envoy-listener webhooks open (NATS connected)")
 
 	registry, err := store.Open(client.Conn, store.WithReplicas(cfg.NATSReplicas))
@@ -800,7 +791,7 @@ func main() {
 		consumer:   consumer,
 		streamName: bus.Stream,
 	}
-	openListener(&gate, routes, ready, cfg.MachineID, logger, deps.Store)
+	openListener(&v1Gate, ready, cfg.MachineID, logger, deps.Store)
 	logger.Info("envoy-listener ready (NATS connected)")
 
 	// Phase 6b: Start interest reaper for stale KV cleanup.

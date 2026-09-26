@@ -148,22 +148,26 @@ func TestStartingGate_Closed_Returns503(t *testing.T) {
 }
 
 // TestOpenListener_PublishesOnlyOnceTheRoutesServe holds the order /healthz depends on: the
-// dependencies are published, which turns /healthz healthy, only after the gate serves every route,
-// so a probe that reads healthy never meets a 503 "service starting" from a webhook or /v1.
+// dependencies are published, which turns /healthz healthy, only after both gates serve their
+// routes, so a probe that reads healthy never meets a 503 "service starting" from a webhook or /v1.
 func TestOpenListener_PublishesOnlyOnceTheRoutesServe(t *testing.T) {
-	var gate startingGate
+	var webhookGate, v1Gate startingGate
 	hooks := []webhookRoute{{"/webhook/github", func(*bus.Client, *cistore.Store) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	}}}
-	routes := openWebhooks(&gate, hooks, nil, nil)
+	openWebhooks(&webhookGate, hooks, nil, nil)
 	published := false
-	openListener(&gate, routes, &listenerDeps{}, "test-machine", logging.New("test"), func(*listenerDeps) {
+	openListener(&v1Gate, &listenerDeps{}, "test-machine", logging.New("test"), func(*listenerDeps) {
 		published = true
-		for path, want := range map[string]int{"/webhook/github": http.StatusOK, "/v1/not-a-route": http.StatusNotFound} {
+		for _, tc := range []struct {
+			gate *startingGate
+			path string
+			want int
+		}{{&webhookGate, "/webhook/github", http.StatusOK}, {&v1Gate, "/v1/not-a-route", http.StatusNotFound}} {
 			recorder := httptest.NewRecorder()
-			gate.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, path, nil))
-			if recorder.Code != want {
-				t.Errorf("%s when the dependencies were published: status = %d, want %d; body = %s", path, recorder.Code, want, recorder.Body.String())
+			tc.gate.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, tc.path, nil))
+			if recorder.Code != tc.want {
+				t.Errorf("%s when the dependencies were published: status = %d, want %d; body = %s", tc.path, recorder.Code, tc.want, recorder.Body.String())
 			}
 		}
 	})
