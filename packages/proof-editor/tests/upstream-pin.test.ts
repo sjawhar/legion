@@ -31,7 +31,7 @@ test("src/upstream-types.ts still describes the files it was copied from", () =>
   const copied = readFileSync(join(import.meta.dir, "..", "src", "upstream-types.ts"), "utf8");
   const regions = [
     ...copied.matchAll(
-      /\/\* --- copied from proof-sdk src\/(\S+) @ 9140b699 --- \*\/([\s\S]*?)\/\* --- end copy --- \*\//g
+      /\/\* --- copied from proof-sdk src\/(\S+) @ c2697996 --- \*\/([\s\S]*?)\/\* --- end copy --- \*\//g
     ),
   ];
   const named: Record<string, string[]> = {};

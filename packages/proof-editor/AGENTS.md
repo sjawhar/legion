@@ -7,7 +7,7 @@ release, an npm publish and a pin bump.
 
 ## Where the code came from
 
-`src/` is proof-sdk's source at **9140b699646b1a61190bb9a13f2bce087d04da17** (the cleaned
+`src/` is proof-sdk's source at **c2697996af3ca82817e8ce8748a56b491717bd21** (the cleaned
 `library` branch commit that Legion pins), copied byte for byte:
 
 | File | What it is |
@@ -36,7 +36,7 @@ name follow, since this package has no build and there is no distribution left t
 `// @ts-nocheck` banner on every one of them (below).
 
 To audit a copied file, diff it against `jj --ignore-working-copy -R <proof-sdk> file show -r
-9140b699 root:src/<file>`; every file in the table above has that counterpart, and the only
+c2697996 root:src/<file>`; every file in the table above has that counterpart, and the only
 lines that differ should be the four kinds. `src/upstream-types.ts` is checked the other way,
 by `tests/upstream-pin.test.ts`, which reads each of its copied regions out of the pinned file
 that region names.
