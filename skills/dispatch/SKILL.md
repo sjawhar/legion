@@ -298,10 +298,22 @@ production import). Every `dispatch_ask` passes four gates first:
    deletion or exposure of production data, anything that reaches a customer). The PO takes those
    to Sami as a Dispatch ask; you do not open one yourself, even as a permission ask under gate 2
    (Sami, 2026-09-25, AGENTC-34 §12).
-2. **Is there genuine uncertainty?** If not, it is a plan you execute. The one legitimate ask
-   without uncertainty is permission for an action only a human can authorise — a production
-   write, an external send, a console action — and then the question is that action in one
-   sentence, with options that name its outcomes (below).
+2. **Is there genuine uncertainty, and have you measured what you can?** If there is none, it is
+   a plan you execute. The one legitimate ask without uncertainty is permission for an action
+   only a human can authorise — a production write, an external send, a console action — and then
+   the question is that action in one sentence, with options that name its outcomes (below).
+   Measure before you write: how many are affected, whether anything reaches the path, what the
+   current state already is. The measurement decides whether a human is needed at all, and when
+   one is, it turns a research request he cannot answer into a decision he can — an ask whose
+   lead was "accept this or build a workaround", with nobody knowing whether anyone was affected,
+   was unanswerable until a measurement showed the usage could not be observed at all; the same
+   ask, carrying that and the size of the affected population, was answered at once, and another
+   lost an option outright when the measurement showed it could not repair most of the affected.
+   Report what the measurement could **not** establish, with its own control: "I found no
+   evidence" and "there is no evidence to find" read alike and mean opposite things, and a
+   control that shares the query's blind spot proves neither. Before you say you are waiting on
+   him, run `dispatch_open_asks` (below) — and the test for a new ask is not whether you asked on
+   this issue before, but whether it asks him to re-report something he has already answered.
 3. **Can someone who has not read the code answer it on a phone?** Write it as
    [Writing for the human](#writing-for-the-human) says — who can do what today and what changes
    for them, then two options with what each costs and your recommendation — and no slice or
@@ -315,10 +327,10 @@ production import). Every `dispatch_ask` passes four gates first:
    it nor build it — fixing the cause of the thing he named is delivering what he asked for, and
    is not what this forbids; changing something else is. An ask that turns his complaint about
    one control into a choice about another does not address what he asked, and changing that
-   other control is a change he never asked for. One thing is still an ask the moment you know
-   it, even before delivery: a
-   credential, an approval, a setting or a console action only he can take that the delivery
-   waits on — see "Anything that needs the human is an ask", further down.
+   other control is a change he never asked for. What is still an ask the moment you know it,
+   even before delivery, is anything "Anything that needs the human is an ask" (further down)
+   lists that the delivery waits on — including a conflict between what he asked for and another
+   of his rules, which this gate would otherwise bury as settled.
 
 The platform PO audits open asks. One that fails a gate — or that points at another message in
 prose instead of carrying its content (below) — is retracted, with the PO's answer as the record.
@@ -541,124 +553,11 @@ It returns live or versioned markdown with open marks. A live read ends with a d
 omitted `artifact` reads the issue specification; a project needs `artifact`; and a
 `dispatch://PROJECT/artifact/<document-ref>` ref supplies both, where `document-ref` is the id, slug, or filename.
 
-```ts
-dispatch_doc_edit({ issue?, project?, artifact, ops, precondition?, summary? })
-```
-It returns issue or project-document owner details plus `applied`, optional `version`, `changed`, and
-`unchanged_ops`. `ops` is an array of this exact `EditOp` shape:
+Editing one is [Editing a document](references/document-edits.md): the shape of `dispatch_doc_edit`,
+how to quote the text you mean, one `replace` per paragraph, preconditions against a stale edit, and
+what each operation costs a block's id and its anchors.
 
-```ts
-type EditOp = {
-  op: "replace" | "delete" | "insert" | "retype" | "move" | "delete_row" | "delete_column";
-  find?: string;
-  with?: string;
-  occurrence?: number;
-  markdown?: string;
-  after?: string;
-  before?: string;
-  block?: string;
-  index?: number;
-  type?: string;
-  attributes?: Record<string, unknown>;
-};
-```
-
-An operation takes only these keys. A key it does not declare is refused before the call leaves
-your process, naming the operation and its keys, because every key but `op` is optional: a
-misspelled `with` would otherwise be dropped and the `replace` would delete the text you meant to
-rewrite.
-
-Target `replace`, `delete`, and quote insert anchors by a block's text as rendered: write inline
-code without backticks, bold without asterisks, and link text without link syntax. A table-cell
-anchor is its cell text. Quote code-block contents without their Markdown fences. A quote must stay
-within one textblock; split changes that span separate blocks into separate operations.
-
-`replace` requires `find` and `with`; `delete` requires `find` or `block`; `insert` requires `markdown` and exactly one of `after` or
-`before`; `move` requires `block` and exactly one of `after` or `before`; and `delete_row` / `delete_column` each require a table
-`block` plus a zero-based `index`. An insert or move anchor is a quote, `"start"`, `"end"`, `"heading:Title"`, or `"block:<id>"`.
-Ordinary inserts create a sibling block before or after the quote, heading, or block's enclosing document block, and a move lands the
-block at that same boundary; `"start"` and `"end"` select the document edges. At a table-cell quote, a body-row fragment (no header or
-delimiter rows) extends that table before or after the matched row instead; short rows are padded, wider rows are rejected, and deleting
-a cell's quoted text removes only that text. `delete_row` / `delete_column` instead mutate their named table in place, keeping the
-table's block id. A row index includes the header: row `0` is the header and its deletion promotes the first body row. The last body
-row and any row's last column cannot be deleted. An index is required. A missing, non-integer, negative, or out-of-range index is
-`INVALID_OP` on `index`, naming the supplied value and the table's actual dimensions before making any change. Markdown parsing
-canonicalizes short ragged rows by padding missing cells, so column deletion preserves every non-selected cell in the canonical table.
-`GET /api/v1/artifacts/<artifact UUID>/blocks` reports a table's own references plus its descendant cell anchors. A row or column
-deletion that would remove an open ask or unresolved comment anchor is `INVALID_OP` on `index`, naming the axis and anchor ids;
-answered asks and resolved comments are history and do not block it. A `find` or quote anchor tolerates inline Markdown
-(`**bold**`, `` `code` ``) and a leading `# ` selects a heading by its text; a miss names the quote and the three nearest blocks so
-the next quote lands, and a `find` cut before a closing `**` or `` ` `` is refused as an unbalanced inline mark rather than reported
-as a miss. A `heading:` anchor matches the whole heading text exactly — a prefix of a longer heading is a miss, naming the anchor and
-the nearest headings. `replace` is inline: `with` is the new text of the matched span inside its block, so a marker of a *different*
-kind from the block's own (`4. Design` written into a heading, `# Title` into a paragraph) stays literal text and never turns the
-block into a list or heading. A `with` that opens with a marker of the *same* kind as the matched block's own would write it twice and
-is rejected (`INVALID_OP` on `with`) — including prose that merely looks like a marker (`1999. was a year` into an ordered item),
-which is written as text with a backslash escape (`1999\. was a year`) — omit the marker to replace the block's text, or use `insert`
-plus `delete` to change the block's kind, level or number. The one exception is a heading rename whose `find` carried a heading
-marker: `replace(find="## Old", with="## New")` gives `## New`. A different level in `with` applies only when `find` named the
-heading's actual level — `find="## Old"`, `with="### New"` retitles and makes it an h3 — because `# ` is the level-blind selector,
-so `find="# Old"` renames the text and keeps whatever level it selected. `with` that forms more than one
-paragraph is rejected (`INVALID_OP` on `with`) — see the recipe for a multi-paragraph rewrite below; so is any non-empty `with` that
-renders to no text, which a line indented four spaces or a tab does (markdown reads that as a code block), as does whitespace
-alone. An empty `with` is the one that deletes the matched text on purpose. Use zero-based `occurrence` for a
-repeated target; re-read a missing or ambiguous target before retrying. Pass `summary` to name the version when recording a decision.
-
-**Rewriting several paragraphs is one `replace` per paragraph, then a read-back.** `replace` is inline:
-each `with` is the new text of one paragraph, and a `with` that forms two paragraphs is refused whatever the
-text says. Give each paragraph you rewrite its own `replace`, which keeps that paragraph's block id and every
-anchor outside the text you rewrite. A comment or ask anchored to the text you rewrite loses its quote but keeps
-its pin to the block, so the dashboard still shows it beside that paragraph; a delete (below) loses both. When
-the new text has more paragraphs than the old, `insert` the extra ones
-with `after` quoting the last paragraph you rewrote exactly as it now reads (the operations in one batch
-apply in order); they land after the top-level block that holds the quote, so beside a paragraph inside a
-list item or a typed block they go after the whole list or block. When it has fewer, `delete` each leftover
-paragraph, with its whole text as `find` or its id as `block`. All of that holds while the new text is
-paragraphs: `replace` keeps a block's kind, so a heading, list, table or code fence cannot be replaced into place —
-a heading, list or table marker is written as literal text, and a code fence becomes an inline code span with the
-fence gone. When the new text adds one beside paragraphs, `insert` it beside the paragraph you replaced, which keeps
-that paragraph's id; only when no paragraph of the new text is left to take the old block's place is it an `insert`
-of the new block plus a `delete` of the old, and a delete is what costs a block its id. Then read the document back with
-`dispatch_doc_read` and read the passage and its neighbours, not a grep for the words you added: an empty
-`with` deletes the matched text on purpose, so a `replace` whose `with` you meant to fill empties that
-paragraph — the block and its id stay, holding nothing — and only a read shows what the document now says.
-
-A batch that leaves the document's semantic identity unchanged — including its inline anchor marks, so an edit that only orphans a
-comment or ask anchor still mints its version — mints no version, named or not: the response carries
-`changed: false` with `unchanged_ops` naming each operation that did nothing, and the tool result says nothing changed. A `summary`
-does not force a version for such a batch; `POST /api/v1/artifacts/<id>/versions`, which names the current state on purpose, still does.
-
-A `delete` whose `find` is a block's entire text removes the block itself — the bullet, paragraph, or heading, not just its words — and
-a list emptied of every item disappears with it; a partial match keeps the block with its remaining text. Deleting the text of a bullet
-that holds a nested list hoists that list's items into the bullet's place (as an outliner does); a bullet with any other content
-(paragraphs, code, tables) is refused with `INVALID_OP` naming `delete {block:"<item id>"}`, which removes the item with its content.
-`delete` with `block` removes any block by id (paragraph, heading, list, list item, table, or typed block; deleting an open `ask` block
-retracts its ask, while an answered one keeps its answer as the record), and `move` with `block` relocates one, keeping its id and
-attributes — a moved `ask` keeps its ask and answer. Block ids are the `#id` a typed block renders
-(`:::ask{#5467e5ce-…}`) and, for every block including untyped ones, the `id` rows from
-`GET /api/v1/artifacts/<artifact UUID>/blocks` (or `/api/v1/issues/{key}/artifacts/{slug}/blocks`), each with its `type` and byte range
-in canonical markdown; the UUID route does not accept a slug. A later operation in the same atomic batch that names a block removed by
-an earlier `delete {block}` fails as `INVALID_OP` naming the earlier operation and the parent block that cascaded the removal. A move
-whose anchor lies inside the moved block, or a delete that would leave a typed block without the body its content rule requires, is
-`INVALID_OP` naming the field and the rule.
-
-`GET /api/v1/artifacts/<artifact UUID>/blocks` includes a full-state `token` on every block, including
-inline marks. To reject a stale edit, pass `precondition` with exactly one of
-`{ document: "<token from dispatch_doc_read>" }` or
-`{ blocks: [{ id: "<block id>", token: "<block token>" }] }`. The server resolves the whole batch before
-mutation: a block guard must cover every content block it changes, or Dispatch returns
-`400 INVALID_PRECONDITION` without applying anything. Use a document token for insert and move because they
-depend on document order. A block token lets other sections change concurrently; a new anchored ask or comment
-changes the relevant token. A stale guard returns `409 PRECONDITION_FAILED` with each mismatch and current
-token; Dispatch applies no part of that batch. It is the hashline `#TAG` property applied to stable block ids,
-not line numbers: canonical Markdown lines shift under concurrent edits and rendering changes, while block ids
-survive moves and retyping.
-
-`retype` turns the paragraph or typed block with `block` into the named typed `type` in place. It keeps the
-block id, keeps a typed block's body, and uses `attributes` for client-owned typed attributes. Use it when
-an existing paragraph is the question that should become a decision.
-
-### A document that is reloading
+## A document that is reloading
 
 These calls can answer `DOC_SERVICE_UNAVAILABLE` (HTTP 503), because each writes a document inside its
 transaction: `dispatch_doc_edit`; `dispatch_ask` and `dispatch_comment` on a quote; a `dispatch_comment` reply
@@ -772,7 +671,7 @@ dispatch_artifact({ issue?, project?, name: "load-test-results.md", content: "# 
 Exactly one of `issue` and `project` is required. A project upload creates an unlinked project document; it must not include `artifact`.
 Exactly one of `path` and `content` is required. It returns issue or project-document owner details plus `artifact` and `version`.
 Uploading the same `name` creates its next version — so uploading `spec.md` **replaces the issue's own specification**
-with your text. Never do that: the spec is edited in place with `dispatch_doc_edit` (see [The Spec](#the-spec)). Address an existing
+with your text. Never do that: the spec is edited in place with `dispatch_doc_edit` (see [Editing a document](references/document-edits.md)). Address an existing
 artifact by the slug shown in the upload result or by its filename, and a project document by its artifact id, slug, or filename; the
 slug also arrives on `artifact.created` events.
 
