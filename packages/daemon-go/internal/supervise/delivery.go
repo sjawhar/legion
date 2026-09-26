@@ -237,7 +237,7 @@ func (m *Machine) streaming(ctx context.Context, conn runtime.Conn) bool {
 // startSend runs one prompt on its own goroutine and posts its outcome back to the machine.
 func (m *Machine) startSend(conn runtime.Conn, d Delivery) {
 	token, generation, role, loc := m.claim.Token, m.claim.Generation, m.claim.Role, m.claim.Locator
-	m.send, m.helloDuringSend = &sending{id: d.ID, generation: generation}, false
+	m.send, m.helloDuringSend, m.prompted = &sending{id: d.ID, generation: generation}, false, d.ID
 	m.goroutines++
 	go func() {
 		err := m.adopt(role, loc)

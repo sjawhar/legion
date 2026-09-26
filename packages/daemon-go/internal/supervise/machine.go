@@ -276,6 +276,10 @@ type Machine struct {
 	// a re-send, should that send fail.
 	send            *sending
 	helloDuringSend bool
+	// prompted is the delivery the shim's current connection was last prompted with: set when a
+	// send starts, and cleared when a hello passes the fence, since a replacement connection has
+	// prompted nothing yet.
+	prompted string
 	// askFirst is a restored claim whose agent an earlier daemon was talking to: a pending
 	// delivery it may already have sent, or a turn it saw start and may not have seen end. The
 	// machine asks the agent (get_state) before it acts on either.
@@ -349,10 +353,12 @@ func (m *Machine) Handle(ctx context.Context, ev Event) error {
 	if token := claimOf(ev); token != m.claim.Token {
 		return fmt.Errorf("supervise: %T for claim %s reached the machine of %s", ev, token, m.claim.Token)
 	}
-	if pass, err := m.fence(ctx, ev); !pass {
+	// Settle first, so the fence judges the task the row will find: a settle after the fence could
+	// retire the very task it let the event through for.
+	if err := m.settle(ctx); err != nil {
 		return err
 	}
-	if err := m.settle(ctx); err != nil {
+	if pass, err := m.fence(ctx, ev); !pass {
 		return err
 	}
 	k := key{m.claim.State, kindOf(ev)}
@@ -489,6 +495,7 @@ func (m *Machine) fence(ctx context.Context, ev Event) (bool, error) {
 			m.dropStale("StreamHello", "generation", fmt.Sprint(ev.Generation), fmt.Sprint(m.claim.Generation))
 			return false, nil
 		}
+		m.prompted = ""
 	case StreamTurnStart:
 		if ev.DeliveryID != "" && (pending == nil || pending.ID != ev.DeliveryID) {
 			m.dropStale("StreamTurnStart", "delivery", ev.DeliveryID, pendingID(pending))
@@ -496,13 +503,12 @@ func (m *Machine) fence(ctx context.Context, ev Event) (bool, error) {
 		}
 	case StreamLateRefusal:
 		// A refusal naming the prompt that set the mark always reaches the table. One naming the
-		// pending id does when this connection sent that prompt, or when a turn not its own confirmed
-		// the task and nothing is being sent: a replayed refusal answers an earlier send, and while a
-		// send is in flight the pending id may be the one being re-sent (refusedElsewhere).
+		// pending id does when this connection sent that prompt, or when it takes back a task a turn
+		// not its own confirmed (takesBackConfirmed): a replayed refusal answers an earlier send, and
+		// the pending id may be the one this connection re-sent.
 		named := pending != nil && pending.MarkedBy == ev.DeliveryID
-		pendingNamed := pending != nil && pending.ID == ev.DeliveryID &&
-			(!ev.Replayed || (!pending.ConfirmedAt.IsZero() && m.send == nil))
-		if pending == nil || !(named || pendingNamed) {
+		pendingNamed := pending != nil && pending.ID == ev.DeliveryID && !ev.Replayed
+		if pending == nil || !(named || pendingNamed || m.takesBackConfirmed(ev)) {
 			m.dropStale("StreamLateRefusal", "delivery", ev.DeliveryID, pendingID(pending))
 			return false, nil
 		}
@@ -804,7 +810,7 @@ func (m *Machine) disarmAll() {
 // forgetSend drops everything the machine knew about talking to the agent it had: a new process,
 // or none, has no memory of the old one's prompts.
 func (m *Machine) forgetSend() {
-	m.send, m.helloDuringSend, m.askFirst = nil, false, false
+	m.send, m.helloDuringSend, m.askFirst, m.prompted = nil, false, false, ""
 }
 
 // persist writes the claim alone. A capability belongs to a registered agent whose process runs,

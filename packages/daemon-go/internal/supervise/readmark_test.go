@@ -6,6 +6,7 @@ package supervise
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -604,6 +605,8 @@ func TestAReplayedRefusalTakesBackATaskAForeignTurnConfirmed(t *testing.T) {
 			h.must(RequestDeliver{Claim: testToken, Task: "the task", Generation: 7})
 			id := h.wantPrompts(1)[0].DeliveryID
 			h.must(StreamTurnStart{Claim: testToken})
+			// A replayed refusal comes from a replacement connection, whose hello comes first.
+			h.must(StreamHello{Claim: testToken, Generation: h.generation()})
 			return id, h.conn
 		}},
 		{name: "acknowledged, a foreign turn starts, and the daemon restarts in it", confirm: func(t *testing.T, h *harness) (string, *fake.Conn) {
@@ -633,6 +636,7 @@ func TestAReplayedRefusalTakesBackATaskAForeignTurnConfirmed(t *testing.T) {
 					gated.release <- struct{}{}
 				}
 			}()
+			h.must(StreamHello{Claim: testToken, Generation: h.generation()})
 			return id, gated.Conn
 		}},
 		{name: "a restart's ask finds a foreign turn running", confirm: func(t *testing.T, h *harness) (string, *fake.Conn) {
@@ -781,4 +785,127 @@ func TestAReplayedRefusalWhileTheSendIsInFlightLeavesTheConfirmedTask(t *testing
 			h.m.Wait()
 		})
 	}
+}
+
+// A send lost with its connection keeps its id, and the replacement connection's hello re-sends
+// it. The shim's backlog can then replay a turn of the agent's own that started while no daemon
+// was connected - which confirms the task, since the re-send is in flight - and Oh My Pi's busy
+// refusal of the lost send. The re-send's acknowledgement is posted by its own goroutine, not
+// through the stream, so it can be handled before, between or after the two replayed events. In
+// every order the re-send is this connection's own prompt of the task, so the refusal of the lost
+// one takes nothing back: the task is prompted once more, never again, and its own turn serves it.
+// So too when yet another connection's hello comes while the re-send is out: a send in flight may
+// be the prompt whose turn confirmed the task, whichever connection carried it.
+func TestAReplayedRefusalLeavesATaskThisConnectionReSent(t *testing.T) {
+	const busy = "Agent is already processing. Use steer() or followUp() to queue messages, or wait for completion."
+	for _, ack := range []string{
+		"before the turn starts", "between the start and the refusal", "after the refusal",
+		"after another connection's hello and the refusal",
+	} {
+		t.Run("the re-send acknowledged "+ack, func(t *testing.T) {
+			h := newHarness(t)
+			h.reach(StateReady)
+			h.conn.FailPrompt(errBoom)
+			h.must(RequestDeliver{Claim: testToken, Task: "the task", Generation: 7})
+			d := h.pending().ID
+			h.conn.FailPrompt(nil)
+			charged := h.claim().Budgets
+
+			gated := newGatedConn()
+			h.conns.Register(testToken, gated)
+			if err := h.m.Handle(h.ctx, StreamHello{Claim: testToken, Generation: h.generation()}); err != nil {
+				t.Fatal(err)
+			}
+			if got := waitFor(t, "the re-send", gated.entered); got != d {
+				t.Fatalf("re-sent %s, want %s", got, d)
+			}
+			acknowledge := func() {
+				gated.release <- struct{}{}
+				h.m.Wait()
+			}
+			// Handled without waiting, since the re-send's goroutine is held until it is acknowledged.
+			replay := func(ev Event) {
+				if err := h.m.Handle(h.ctx, ev); err != nil {
+					t.Fatalf("%T: %v", ev, err)
+				}
+			}
+			if ack == "before the turn starts" {
+				acknowledge()
+			}
+			replay(StreamTurnStart{Claim: testToken}) // the agent's own turn
+			if ack == "between the start and the refusal" {
+				acknowledge()
+			}
+			if ack == "after another connection's hello and the refusal" {
+				replay(StreamHello{Claim: testToken, Generation: h.generation()})
+			}
+			replay(StreamLateRefusal{Claim: testToken, DeliveryID: d, Error: busy, Replayed: true})
+			if strings.HasPrefix(ack, "after") {
+				acknowledge()
+			}
+
+			// From here on Oh My Pi is in the task's own turn, so any further prompt is refused busy.
+			gated.Conn.RefusePrompt(busy)
+			go func() {
+				for range gated.entered {
+					gated.release <- struct{}{}
+				}
+			}()
+			h.must(StreamTurnEnd{Claim: testToken})   // the agent's own turn ends
+			h.must(StreamTurnStart{Claim: testToken}) // the task's own turn, from the re-send
+			if run := h.claim().ServingRun(); run != 7 {
+				t.Fatalf("while the task's own turn runs, the claim serves run %d, want 7", run)
+			}
+			h.must(StreamTurnEnd{Claim: testToken})
+
+			if prompts := gated.Prompts(); len(prompts) != 1 || prompts[0].DeliveryID != d {
+				t.Fatalf("prompts after the reconnect = %+v, want only the re-send of %s", prompts, d)
+			}
+			if c := h.claim(); c.Pending != nil || c.ServingGeneration != 7 || c.Budgets != charged {
+				t.Fatalf("after the task's turn: pending %+v serving %d budgets %+v, want run 7 served and nothing charged",
+					c.Pending, c.ServingGeneration, c.Budgets)
+			}
+		})
+	}
+}
+
+// A send's outcome can arrive after settle retired its task: the turn end's retire failed and
+// left the task held, and the next event's settle retires it. The acknowledgement then has no
+// task to mark, and it must record nothing rather than end the daemon.
+func TestALateAcknowledgementOfARetiredTaskRecordsNothing(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateReady)
+	gated := newGatedConn()
+	h.conns.Register(testToken, gated)
+	if err := h.m.Handle(h.ctx, RequestDeliver{Claim: testToken, Task: "the task", Generation: 7}); err != nil {
+		t.Fatal(err)
+	}
+	id := waitFor(t, "the send", gated.entered)
+	if err := h.m.Handle(h.ctx, StreamTurnStart{Claim: testToken}); err != nil {
+		t.Fatal(err)
+	}
+	h.store.fail("RetireDelivery", errBoom)
+	if err := h.m.Handle(h.ctx, StreamTurnEnd{Claim: testToken}); err == nil {
+		t.Fatal("the turn end's retire succeeded, want it to fail and leave the task held")
+	}
+	h.store.fail("RetireDelivery", nil)
+	if h.claim().Pending == nil {
+		t.Fatal("the task was retired, want it held after the failed retire")
+	}
+
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("the late acknowledgement panicked: %v", r)
+			}
+		}()
+		if err := h.m.Handle(h.ctx, PromptAcked{Claim: testToken, Generation: h.generation(), DeliveryID: id}); err != nil {
+			t.Fatalf("the late acknowledgement: %v", err)
+		}
+	}()
+	if c := h.claim(); c.Pending != nil || c.ServingGeneration != 7 {
+		t.Fatalf("after the late acknowledgement: pending %+v serving %d, want run 7 served", c.Pending, c.ServingGeneration)
+	}
+	gated.release <- struct{}{}
+	h.m.Wait()
 }

@@ -49,8 +49,9 @@ type StreamLateRefusal struct {
 	Error      string
 	// Replayed is a refusal the connection did not send the prompt for: the shim's backlog
 	// replaying what Oh My Pi answered while no daemon was connected. It answers an earlier prompt,
-	// possibly of the very delivery this connection is re-sending, so it may only clear the mark
-	// that prompt set, never charge or take back the task.
+	// possibly of the very delivery this connection is re-sending, so it charges nothing, and it
+	// clears the mark that prompt set. It takes the task back only when a turn not its own confirmed
+	// it and this connection has not prompted it (takesBackConfirmed).
 	Replayed bool
 }
 
@@ -612,8 +613,7 @@ func refused(m *Machine, ctx context.Context, ev Event) error {
 }
 
 // refusedElsewhere is the part of a late refusal every state shares, and it reports whether that
-// was all of it. A refusal can find no task at all: the settle before the row retired the one it
-// named. Two kinds say only that a prompt this task was sent under never ran:
+// was all of it. Two kinds say only that a prompt this task was sent under never ran:
 //
 //   - A refusal naming a prompt other than the pending one. It is the prompt whose acknowledgement
 //     set the read mark (the fence lets no other through). The wait that gave up on it already
@@ -623,16 +623,13 @@ func refused(m *Machine, ctx context.Context, ev Event) error {
 //     The pending id may be the very delivery this connection is re-sending, whose own answer is
 //     still to come, so it clears only the mark it set.
 //
-// A replayed refusal of the pending prompt, when a turn not its own confirmed the task and no send
-// is in flight, is the exception. A confirmed delivery is never re-sent, so it cannot be the
-// re-send above. The confirmation was the other turn's, and the task goes back unread, charged
-// nothing, so that turn's end sends it again rather than retiring it as served.
+// A replayed refusal that takes back a task a turn not its own confirmed is the exception
+// (takesBackConfirmed): the task goes back unread, charged nothing, so that turn's end sends it
+// again rather than retiring it as served.
 func refusedElsewhere(m *Machine, ctx context.Context, r StreamLateRefusal) (bool, error) {
 	p := m.claim.Pending
 	switch {
-	case p == nil:
-		return true, nil
-	case r.Replayed && r.DeliveryID == p.ID && !p.ConfirmedAt.IsZero() && m.send == nil:
+	case m.takesBackConfirmed(r):
 		m.log.Warn("supervise: a replayed refusal names the prompt a foreign turn confirmed; the task goes back unread",
 			"delivery", r.DeliveryID, "error", r.Error)
 		return true, m.takeBackPending(ctx, taskUnread)
@@ -642,6 +639,20 @@ func refusedElsewhere(m *Machine, ctx context.Context, r StreamLateRefusal) (boo
 		return true, m.markUnread(ctx)
 	}
 	return false, nil
+}
+
+// takesBackConfirmed is whether a replayed refusal of the pending prompt says the turn that
+// confirmed the task was not the task's. It is when no send is in flight and this connection has
+// not prompted the task: then the confirmation came from a turn the agent was already in, and the
+// refused prompt was an earlier connection's. A send in flight, or one this connection made, may be
+// the prompt whose turn confirmed the task - the shim's backlog replays an earlier connection's
+// refusal after the hello that re-sent the task, and the re-send's acknowledgement is handled in
+// whatever order its goroutine reaches the machine - so the task stays confirmed and the refusal
+// clears only the mark.
+func (m *Machine) takesBackConfirmed(r StreamLateRefusal) bool {
+	p := m.claim.Pending
+	return r.Replayed && p != nil && r.DeliveryID == p.ID && !p.ConfirmedAt.IsZero() &&
+		m.send == nil && m.prompted != p.ID
 }
 
 // refusedUnprompted is a refusal landing while the claim cannot be prompted: relaunching after the
