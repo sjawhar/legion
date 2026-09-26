@@ -161,17 +161,17 @@ type headRecord struct {
 	Generation uint64 `json:"generation"`
 }
 
-// keyCleaner replaces characters that are invalid in a NATS KV key. GitHub
-// owner/repo/number/sha are already within the valid KV charset
-// ([-/_=.a-zA-Z0-9]); this only guards against stray wildcard/space/slash chars.
-// Crucially it does NOT collapse '.', so repos like `foo.bar` and `foo_bar` map
-// to distinct keys (collapsing them risked a cross-repo collision).
-var keyCleaner = strings.NewReplacer("*", "_", ">", "_", " ", "_", "/", "_")
+// keyCleaner writes one segment of a KV key: every key this store builds joins its segments with
+// '.', and a KV key's tokens must not be empty, so a '.' in a segment is written '='. A GitHub
+// repository name may begin with a dot, end with one or hold two in a row (`sjawhar/.github`), and
+// no GitHub owner, name, number or sha holds '=', so the spelling is lossless: `foo.bar` and
+// `foo_bar` keep distinct keys, and a segment without a dot is written as it is. The rest guards
+// against stray wildcard, space and slash characters.
+var keyCleaner = strings.NewReplacer(".", "=", "*", "_", ">", "_", " ", "_", "/", "_")
 
-// Key derives a KV-safe key from the commit identity. '.' is a legal KV key
-// character (unlike in a NATS subject), so segment dots are preserved; the key
-// is never parsed back (State carries the identity fields), so the dot
-// separators only need to yield a unique, valid key per commit.
+// Key derives a KV-safe key from the commit identity, each segment through keyCleaner. The key is
+// never parsed back (State carries the identity fields), so it only needs to be unique and valid
+// per commit.
 func Key(owner, repo, number, sha string) string {
 	return keyCleaner.Replace(owner) + "." +
 		keyCleaner.Replace(repo) + ".pr" +
@@ -179,6 +179,7 @@ func Key(owner, repo, number, sha string) string {
 		keyCleaner.Replace(sha)
 }
 
+// headKey derives the key of a pull request's head record, each segment through keyCleaner.
 func headKey(owner, repo, number string) string {
 	return "head." + keyCleaner.Replace(owner) + "." +
 		keyCleaner.Replace(repo) + "." + keyCleaner.Replace(number)
