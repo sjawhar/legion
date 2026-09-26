@@ -116,16 +116,17 @@ async function openAnsweredDecision(browser: Browser) {
   return { alice, blockAsk, issue, page };
 }
 
-/** Opens a spec holding "End." as alice, with the caret collapsed at the end of it: the selection
- * bar is gone once the selection collapses, and a paste before that replaces the selected text. */
-async function openAtEndOfEnd(browser: Browser, title: string) {
+/** Opens a spec holding "End." as alice, with the caret collapsed at its start or its end: the
+ * selection bar is gone once the selection collapses, and a paste before that replaces the
+ * selected text. */
+async function openEnd(browser: Browser, title: string, caret: "start" | "end") {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", spec: "End.\n", title });
   const alice = await asUser(browser, "alice");
   const page = await alice.newPage();
   await page.goto(`/issues/${issue.key}`);
   await selectEditorText(page, "End.");
-  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press(caret === "start" ? "ArrowLeft" : "ArrowRight");
   await expect(actionBar(page)).toBeHidden();
   return { alice, issue, page };
 }
@@ -709,7 +710,7 @@ test("a copy of an answered decision pasted above it leaves the answer on the or
 test("a paste from Google Docs keeps the editor's own cleanup of its wrapper", async ({
   browser,
 }) => {
-  const { alice, issue, page } = await openAtEndOfEnd(browser, "Pasted wrapper");
+  const { alice, issue, page } = await openEnd(browser, "Pasted wrapper", "end");
   try {
     await paste(page, {
       html: '<b id="docs-internal-guid-4a1b2c3d-7fff"><p>Wrapped words</p></b>',
@@ -731,7 +732,7 @@ test("a paste from Google Docs keeps the editor's own cleanup of its wrapper", a
 test("an ask and a callout pasted together as plain text arrive as written", async ({
   browser,
 }) => {
-  const { alice, issue, page } = await openAtEndOfEnd(browser, "Plain text paste");
+  const { alice, issue, page } = await openEnd(browser, "Plain text paste", "end");
   try {
     await paste(page, {
       html: "",
@@ -749,3 +750,73 @@ test("an ask and a callout pasted together as plain text arrive as written", asy
     await alice.close();
   }
 });
+
+// A lone typed block pasted as plain text beside a paragraph's text stays a block of its own, on
+// either side of that text: the pasted slice stops at the block, so its content never joins the
+// paragraph the caret is in. It once did: an ask pasted at the end of "End." stored "End.Which
+// one?" and a bare list, one pasted at its start stored "- BEnd." as the ask's last option, and a
+// callout stored "End.Careful." or "Careful.End." inside the callout.
+const loneAsk = ':::ask{#d2 urgency="med" multiple="false"}\nWhich one?\n\n- A\n- B\n:::\n';
+const loneAskStored = /:::ask\{#d2 [^}]*\}\nWhich one\?\n\n- A\n- B\n:::\n/.source;
+const loneCallout = ':::callout{#c2 kind="warning" title="Risk"}\nCareful.\n:::\n';
+const loneCalloutStored = /:::callout\{#c2 [^}]*\}\nCareful\.\n:::\n/.source;
+
+for (const [caret, where] of [
+  ["end", "after"],
+  ["start", "before"],
+] as const) {
+  const around = (block: string) =>
+    new RegExp(caret === "end" ? `^End\\.\\n\\n${block}$` : `^${block}\\nEnd\\.\\n$`);
+
+  test(`a lone ask pasted as plain text ${where} text stays an ask`, async ({ browser }) => {
+    const { alice, issue, page } = await openEnd(browser, "Lone ask paste", caret);
+    try {
+      await paste(page, { html: "", text: loneAsk });
+
+      await expect
+        .poll(async () => (await getIssue(issue.key)).open_asks.map((ask) => ask.question))
+        .toEqual(["Which one?"]);
+      await expect
+        .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
+        .toMatch(around(loneAskStored));
+    } finally {
+      await alice.close();
+    }
+  });
+
+  test(`a lone callout pasted as plain text ${where} text stays a callout`, async ({ browser }) => {
+    const { alice, issue, page } = await openEnd(browser, "Lone callout paste", caret);
+    try {
+      await paste(page, { html: "", text: loneCallout });
+
+      await expect
+        .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
+        .toMatch(around(loneCalloutStored));
+    } finally {
+      await alice.close();
+    }
+  });
+}
+
+// Plain text that holds no typed block pastes as it always has: its first paragraph or list item
+// joins the text before the caret and its last one the text after it.
+for (const [caret, text, stored] of [
+  ["end", "More words.", "End.More words.\n"],
+  ["end", "- x\n- y\n", "End.x\n\n- y\n"],
+  ["start", "Alpha\n\nBravo\n", "Alpha\n\nBravoEnd.\n"],
+] as const) {
+  test(`${JSON.stringify(text)} pasted as plain text at the ${caret} of text stores ${JSON.stringify(stored)}`, async ({
+    browser,
+  }) => {
+    const { alice, issue, page } = await openEnd(browser, "Plain paste", caret);
+    try {
+      await paste(page, { html: "", text });
+
+      await expect
+        .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
+        .toBe(stored);
+    } finally {
+      await alice.close();
+    }
+  });
+}
