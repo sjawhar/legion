@@ -126,8 +126,9 @@ func TestAnApprovalVoidsAREADYTheGateRefusedWithNoPacketAndTellsTheArchitect(t *
 }
 
 // A READY the gate refused belongs to that merging phase. When the merger sends the issue back
-// (its head must return to review), the refusal is void: the approval that arrives while the next
-// merger verifies does not move the issue on, and the old packet is never posted.
+// (its head must return to review), the refusal is void at once: the approval that arrives while
+// the next merger verifies does not move the issue on, posts nothing, and has no void READY to
+// report to the architect.
 func TestABackwardMoveOutOfMergingVoidsTheRefusedREADY(t *testing.T) {
 	pool := migratedPool(t)
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "U"})
@@ -141,12 +142,19 @@ func TestABackwardMoveOutOfMergingVoidsTheRefusedREADY(t *testing.T) {
 	}
 	apply("back-to-retro", intake.BackwardMove{Issue: "LEGION-208", Requester: claim.RoleMerger, To: phase.Retro, Reason: "a commit above the approved head changes product code"})
 	assertPhase(t, pool, phase.Retro)
+	var pending int
+	if err := pool.QueryRow(t.Context(), "select coalesce(ready_pending_version, 0) from issues where key = 'LEGION-208'").Scan(&pending); err != nil || pending != 0 {
+		t.Fatalf("ready_pending_version after the backward move = %d, %v; want the refused READY void (none)", pending, err)
+	}
 	apply("retro-done", intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implementer-claim", Generation: 1, Summary: "retro recorded", Commit: "retro"})
 	assertPhase(t, pool, phase.Merging)
 	apply("approval", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactApproved, Version: 4})
 	assertPhase(t, pool, phase.Merging)
 	if got := messageBodies(t, pool); len(got) != 0 {
 		t.Fatalf("Dispatch messages = %q, want the void READY never posted", got)
+	}
+	if got := architectNotices(t, pool); len(got) != 0 {
+		t.Fatalf("architect notices = %+v, want none: the READY was voided when the issue left merging", got)
 	}
 }
 
