@@ -1081,3 +1081,55 @@ the synchronous listener call records the sent or failed attempt instead of blin
   rather than subscribed to by role holders.
 - A failed control delivery publishes
   `notifications.envoy.exceptions.<original-topic>`.
+
+## Secrets broker
+
+AGENTC-833's secrets broker (`cmd/broker`, `internal/broker/`) issues short-lived secret grants to
+enrolled agent sessions and pods behind human or policy approval delivered as Dispatch asks;
+`cmd/agent-secrets` is its box/pod-side client, which enrolls a runtime, requests grants, polls a
+pending decision to completion, and either prints session/grant state (`self`, `status --json`) or
+`syscall.Exec`s a command with the granted values injected into its environment. `internal/broker/enroll`
+turns a launcher credential into a leased enrollment keyed by the caller's own signing key
+thumbprint (and, for a pod, a projected service-account token); `internal/broker/rules` evaluates
+`agent-secret-rules.yaml` policy per request (the AGENTC-393 overview document is its contract);
+`internal/broker/proof` authenticates a session's signed request against its live enrollment; and
+`internal/broker/secrets` reads the granted value from AWS Secrets Manager, or a fake local file
+for development.
+
+`config.Load` (`internal/broker/config/config.go`) reads the broker's complete `BROKER_*`
+environment: `BROKER_LISTEN_ADDR` (default `127.0.0.1:13380`), `BROKER_DATABASE_URL`,
+`BROKER_PUBLIC_URL`, `BROKER_DISPATCH_URL`, `BROKER_DISPATCH_PROJECT` (these four required),
+`BROKER_RULES_FILE` / `BROKER_RULES_S3_URI` (exactly one, the latter `s3://<bucket>/<key>`),
+`BROKER_K8S_OIDC_ISSUER` / `BROKER_K8S_OIDC_AUDIENCE` (set together or not at all),
+`BROKER_ENVOY_URL` (optional; setting it makes `BROKER_ENVOY_TOKEN` required),
+`BROKER_DISPATCH_TOKEN` (required), `BROKER_LEASE_SECONDS` (default 900, max 3600),
+`BROKER_ASK_POLL_SECONDS` (default 5, max 60), `BROKER_PROOF_SKEW_SECONDS` (default 60, max 300),
+`BROKER_MAX_GRANT_SECONDS` (default 43200, max 43200), and `BROKER_RULES_RELOAD_SECONDS` (default
+300, max 3600). `BROKER_DISPATCH_TOKEN` and `BROKER_ENVOY_TOKEN` follow the broker's `_FILE`
+secret-loading convention: `<NAME>_FILE`, when set, names a file whose trimmed contents win over a
+bare `<NAME>`, and a named-but-unreadable or empty file is a startup error naming the file, never a
+silent fallback to an unset value. A missing required variable, a malformed URL, or two disagreeing
+sources for one value refuses to start, naming the offending variable.
+
+`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's HTTP routes — a
+new route is a new row there, never a bare `mux.HandleFunc` — and its own comment says the wire
+contract for every row (request/response shapes, status codes, which of `authNone`,
+`authLauncher`, `authProof`, or `authHumanOrProof` it requires) is the AGENTC-393 overview
+document, not this file; read `routes()` for the current, authoritative route list.
+
+`internal/broker/requests` is the state machine. Terminal states — a request's `granted`,
+`denied`, `cancelled`, `expired`, and a grant's own `revoked` — are final: every transition is an
+`UPDATE` guarded by `state='pending'` inside one transaction that also writes its `audit` row, so a
+duplicate or late answer (a second poller tick, a re-delivered ask read) changes nothing. A grant
+belongs to exactly one enrollment; `Values()` and `reuseLiveGrant()` both treat a still-live grant
+(not revoked, not expired) as authoritative regardless of a later rules change, so a caller already
+holding one is never re-asked and never re-evaluated against updated policy. Audit rows never carry
+secret values — `audit()` takes only `kind`, `enrollment_id`, `request_id`, an optional
+`grant_id`, `actor`, and a non-secret JSON `detail` (the ask id, the approver, the refusal reason);
+the granted value itself is read fresh from `secrets.Reader` when a grant is released and is never
+persisted.
+
+Tests: `cd packages/envoy && go vet ./... && go test ./internal/broker/... ./cmd/broker/...
+./cmd/agent-secrets/...`. The Postgres-backed tests need
+`BROKER_TEST_DATABASE_URL=postgres://postgres:pw@127.0.0.1:15433/postgres?sslmode=disable` pointed
+at a live Postgres.
