@@ -82,7 +82,7 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 		if revision, err = mainCommit(ctx, run, workspace); err != nil {
 			return err
 		}
-		if _, err := RunChecked(ctx, run, []string{"jj", "bookmark", "delete", workspace.Bookmark, "--ignore-working-copy", "-R", cloneDir}, nil, ""); err != nil {
+		if _, err := RunChecked(ctx, run, onClone(cloneDir, "bookmark", "delete", workspace.Bookmark), nil, ""); err != nil {
 			return err
 		}
 		log(fmt.Sprintf("Bookmark %s was moved after its last push onto commits nobody described (%s), and GitHub deleted its branch: workspace %s starts at main. Those commits stay visible in the shared clone %s (git.abandon-unreachable-commits is false), recoverable by id",
@@ -110,7 +110,7 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 			"Start from main instead: delete the branch on GitHub (the pull request's Delete branch button, or `gh api -X DELETE repos/%[6]s/git/refs/heads/%[1]s`), and the next provisioning starts at main",
 			workspace.Bookmark, cloneDir, remote, origin.added[0], workspace.Dir, workspace.Repo)
 	case origin.present:
-		if _, err := RunChecked(ctx, run, []string{"jj", "bookmark", "track", remote, "--ignore-working-copy", "-R", cloneDir}, nil, ""); err != nil {
+		if _, err := RunChecked(ctx, run, onClone(cloneDir, "bookmark", "track", remote), nil, ""); err != nil {
 			return err
 		}
 		revision = origin.added[0]
@@ -135,10 +135,11 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 	prune := []string{"git", "--git-dir=" + filepath.Join(cloneDir, ".git"), "worktree", "prune"}
 	_, _ = runCommand(ctx, run, prune, nil, "")
 
-	// The one jj command on the shared clone without --ignore-working-copy: `jj workspace add`
-	// refuses it (on 0.44 and 0.45, after registering the workspace and creating its directory), so
-	// the add snapshots the clone's own working copy. Every other command provisioning and removal
-	// run on the clone, and every command a refusal prints, carries the flag.
+	// The one jj command on the shared clone not built by onClone: `jj workspace add` refuses
+	// --ignore-working-copy (on 0.44 and 0.45, after registering the workspace and creating its
+	// directory), so the add snapshots the clone's own working copy. Every other command
+	// provisioning and removal run on the clone is onClone's, and every command a refusal prints
+	// carries --ignore-working-copy.
 	add := []string{
 		"jj", "workspace", "add", workspace.Dir, "--name", workspaceName, "--revision", revision, "-R", cloneDir,
 	}
@@ -151,7 +152,7 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 		if !registeredWorkspace.MatchString(result.Stderr) {
 			return commandFailure(add, result)
 		}
-		if _, err := RunChecked(ctx, run, []string{"jj", "workspace", "forget", workspaceName, "--ignore-working-copy", "-R", cloneDir}, nil, ""); err != nil {
+		if _, err := RunChecked(ctx, run, onClone(cloneDir, "workspace", "forget", workspaceName), nil, ""); err != nil {
 			return err
 		}
 		_, _ = runCommand(ctx, run, prune, nil, "")
@@ -171,7 +172,7 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 // undescribed commit, so such a move was never meant to reach GitHub.
 func undescribedMove(ctx context.Context, run Runner, workspace Workspace, local bookmarkRow) ([]string, error) {
 	revset := "(" + strings.Join(local.removed, " | ") + ")..(" + strings.Join(local.added, " | ") + ")"
-	read := []string{"jj", "log", "-r", revset, "--no-graph", "-T", `commit_id ++ "|" ++ if(description, "1", "0") ++ "\n"`, "--ignore-working-copy", "--color=never", "-R", workspace.Clone}
+	read := onClone(workspace.Clone, "log", "-r", revset, "--no-graph", "-T", `commit_id ++ "|" ++ if(description, "1", "0") ++ "\n"`)
 	result, err := RunChecked(ctx, run, read, nil, "")
 	if err != nil {
 		return nil, err
@@ -252,7 +253,7 @@ const bookmarkRowTemplate = `if(remote, remote, "local") ++ "|" ++ if(present, "
 // conflicted and at least one on a conflicted row, and one row per place: a commit jj cannot load
 // prints an error value where its id goes, which a workspace add would take as a revision.
 func readBookmark(ctx context.Context, run Runner, workspace Workspace, name string) (bookmarkRows, error) {
-	list := []string{"jj", "bookmark", "list", "--all-remotes", "exact:" + name, "-T", bookmarkRowTemplate, "--ignore-working-copy", "--color=never", "-R", workspace.Clone}
+	list := onClone(workspace.Clone, "bookmark", "list", "--all-remotes", "exact:"+name, "-T", bookmarkRowTemplate)
 	result, err := runCommand(ctx, run, list, nil, "")
 	if err != nil {
 		return bookmarkRows{}, fmt.Errorf("run %s: %w", strings.Join(list, " "), err)
@@ -354,9 +355,8 @@ func Remove(ctx context.Context, run Runner, workspace Workspace) error {
 	}
 	registered := false
 	var commits []string
-	repoArgs := []string{"--ignore-working-copy", "-R", cloneDir}
 	if cloneExists {
-		listed, err := RunChecked(ctx, run, []string{"jj", "workspace", "list", "-T", `name ++ "\n"`, "--ignore-working-copy", "--color=never", "-R", cloneDir}, nil, "")
+		listed, err := RunChecked(ctx, run, onClone(cloneDir, "workspace", "list", "-T", `name ++ "\n"`), nil, "")
 		if err != nil {
 			return err
 		}
@@ -368,7 +368,7 @@ func Remove(ctx context.Context, run Runner, workspace Workspace) error {
 		}
 	}
 	if registered {
-		own, err := RunChecked(ctx, run, []string{"jj", "log", "-r", ownCommitsRevset(workspaceName), "--no-graph", "-T", `commit_id ++ "\n"`, "--ignore-working-copy", "--color=never", "-R", cloneDir}, nil, "")
+		own, err := RunChecked(ctx, run, onClone(cloneDir, "log", "-r", ownCommitsRevset(workspaceName), "--no-graph", "-T", `commit_id ++ "\n"`), nil, "")
 		if err != nil {
 			return err
 		}
@@ -386,11 +386,11 @@ func Remove(ctx context.Context, run Runner, workspace Workspace) error {
 	}
 	if registered {
 		if len(commits) > 0 {
-			if _, err := RunChecked(ctx, run, append([]string{"jj", "abandon", "-r", strings.Join(commits, " | ")}, repoArgs...), nil, ""); err != nil {
+			if _, err := RunChecked(ctx, run, onClone(cloneDir, "abandon", "-r", strings.Join(commits, " | ")), nil, ""); err != nil {
 				return err
 			}
 		}
-		if _, err := RunChecked(ctx, run, append([]string{"jj", "workspace", "forget", workspaceName}, repoArgs...), nil, ""); err != nil {
+		if _, err := RunChecked(ctx, run, onClone(cloneDir, "workspace", "forget", workspaceName), nil, ""); err != nil {
 			return err
 		}
 	}

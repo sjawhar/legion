@@ -245,28 +245,32 @@ func commandFailure(argv []string, result Result) error {
 	return fmt.Errorf("command failed (exit %d): %s\n%s", result.ExitCode, command, strings.TrimSpace(result.Stderr))
 }
 
+// onClone is a jj command against the shared clone: never a snapshot of its working copy, which
+// would run the working-copy filter, fsmonitor and signing programs a tree agent can configure,
+// and never colored, so every read parses. `jj workspace add` is the one command on the clone jj
+// refuses --ignore-working-copy on (createWorkspace).
+func onClone(cloneDir string, args ...string) []string {
+	return append(append([]string{"jj"}, args...), "--ignore-working-copy", "--color=never", "-R", cloneDir)
+}
+
 func ensureFetchConfiguration(ctx context.Context, run Runner, cloneDir string, source remote) error {
-	setting, err := RunChecked(ctx, run, []string{
-		"jj", "config", "get", "git.abandon-unreachable-commits", "--ignore-working-copy", "--color=never", "-R", cloneDir,
-	}, nil, "")
+	setting, err := RunChecked(ctx, run, onClone(cloneDir, "config", "get", "git.abandon-unreachable-commits"), nil, "")
 	if err != nil {
 		return err
 	}
 	if strings.TrimSpace(setting.Stdout) != "false" {
-		if _, err := RunChecked(ctx, run, []string{
-			"jj", "config", "set", "--repo", "git.abandon-unreachable-commits", "false", "--ignore-working-copy", "-R", cloneDir,
-		}, nil, ""); err != nil {
+		if _, err := RunChecked(ctx, run, onClone(cloneDir, "config", "set", "--repo", "git.abandon-unreachable-commits", "false"), nil, ""); err != nil {
 			return err
 		}
 	}
 	// The fetch takes no snapshot of the clone's working copy: a snapshot runs the working-copy
 	// filter, fsmonitor, and signing programs jj's configuration names, which a tree agent can set,
 	// and on the tmux runtime this fetch holds the one-shot credential.
-	fetch := []string{"jj", "git", "fetch", "--ignore-working-copy"}
+	fetch := []string{"git", "fetch"}
 	for _, branch := range source.branches {
 		fetch = append(fetch, "--branch", "exact:"+branch)
 	}
-	_, err = RunChecked(ctx, run, append(fetch, "-R", cloneDir), source.env, "")
+	_, err = RunChecked(ctx, run, onClone(cloneDir, fetch...), source.env, "")
 	return err
 }
 
@@ -292,7 +296,7 @@ func configureRepositoryCredential(ctx context.Context, run Runner, cloneDir, cr
 // by every issue workspace, while pane identity is deliberately provided through the pane's env.
 func removeRepositoryIdentity(ctx context.Context, run Runner, cloneDir string) error {
 	for _, key := range []string{"user.name", "user.email"} {
-		probe := []string{"jj", "config", "list", "--repo", "--include-overridden", "--ignore-working-copy", "--color=never", "-R", cloneDir, key}
+		probe := onClone(cloneDir, "config", "list", "--repo", "--include-overridden", key)
 		present, err := RunChecked(ctx, run, probe, nil, "")
 		if err != nil {
 			return err
@@ -300,7 +304,7 @@ func removeRepositoryIdentity(ctx context.Context, run Runner, cloneDir string) 
 		if strings.TrimSpace(present.Stdout) == "" {
 			continue
 		}
-		unset := []string{"jj", "config", "unset", "--repo", "--ignore-working-copy", "-R", cloneDir, key}
+		unset := onClone(cloneDir, "config", "unset", "--repo", key)
 		removed, err := runCommand(ctx, run, unset, nil, "")
 		if err != nil {
 			return fmt.Errorf("run %s: %w", strings.Join(unset, " "), err)
