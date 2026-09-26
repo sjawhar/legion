@@ -3,6 +3,7 @@ package sandbox
 import (
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -230,6 +231,58 @@ func TestTheOrphanSweepKeepsWhatThisRuntimeLaunchedSinceTheClaimsWereRead(t *tes
 	g.hold.Store(false)
 	if err := <-launching; err != nil {
 		t.Fatalf("the root's launch: %v", err)
+	}
+}
+
+// A launch of a claim that begins while the sweep deletes a leftover Sandbox under the claim's
+// name waits for that delete, then launches into a Sandbox of its own: it never takes up the
+// leftover the delete then takes from under it, which would cost the claim a launch.
+func TestALaunchBegunDuringAnOrphansDeleteWaitsForIt(t *testing.T) {
+	leftover := SandboxName(workerToken)
+	var armed atomic.Bool
+	got := make(chan struct{}, 1)
+	launching := make(chan error, 1)
+	var g *rig
+	hooks := &sandboxHooks{
+		beforeDelete: func(name string) {
+			if name != leftover || !armed.CompareAndSwap(true, false) {
+				return
+			}
+			go func() {
+				_, err := g.r.Spawn(g.ctx, workerSpec(t))
+				launching <- err
+			}()
+			// The launch reads the claim's Sandbox as soon as nothing holds it back; give it the
+			// chance before this delete goes ahead.
+			select {
+			case <-got:
+			case <-time.After(time.Second):
+			}
+		},
+		afterGet: func(name string) {
+			if name == leftover {
+				select {
+				case got <- struct{}{}:
+				default:
+				}
+			}
+		},
+	}
+	g = newRig(t, []k8sruntime.Object{
+		sandboxObject(t, leftover, "uid-sandbox-leftover", modeSuspended, claimLabels(claim.RoleTester)),
+	}, withSandboxHooks(hooks))
+	armed.Store(true)
+	if err := g.r.ReconcileOrphans(g.ctx, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	if armed.Load() {
+		t.Fatal("the sweep never deleted the leftover")
+	}
+	if err := <-launching; err != nil {
+		t.Fatalf("the launch begun during the leftover's delete: %v", err)
+	}
+	if s := g.sandbox(leftover); s == nil || s.UID == "uid-sandbox-leftover" {
+		t.Fatalf("the claim's sandbox after its launch is %+v, want one of its own", s)
 	}
 }
 
