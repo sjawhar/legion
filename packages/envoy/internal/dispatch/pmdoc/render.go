@@ -457,7 +457,7 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 			src, _ := n.Attrs["src"].(string)
 			alt, _ := n.Attrs["alt"].(string)
 			title, _ := n.Attrs["title"].(string)
-			r.writeSyntax("![" + escapeTablePipes(strings.ReplaceAll(alt, "]", "\\]"), escapePipes) + "](" + escapeLinkDestination(src, escapePipes) + titleSuffix(title, escapePipes) + ")")
+			r.writeSyntax("![" + imageAlt(alt, escapePipes) + "](" + escapeLinkDestination(src, escapePipes) + titleSuffix(title, escapePipes) + ")")
 			position.atLineStart, position.atTextStart = false, false
 		case "html":
 			r.closeMarks(active, escapePipes)
@@ -772,6 +772,50 @@ func nodeHasMark(node *Node, markType string) bool {
 // invisible mark could fall between.
 var renderedMarkTypes = map[string]bool{
 	"link": true, "strong": true, "emphasis": true, "strike_through": true, "inlineCode": true,
+}
+
+// imageAlt is how an image's alt text is written. The parser reads it as the plain text of the
+// label, so a bracket, a backslash, emphasis, a code span, a reference or a tag in it changes the
+// text or ends the image. The alt text is written with its `]` escaped, as it always was, where
+// that reads back, and otherwise with every ASCII punctuation character escaped as the text
+// writer escapes it.
+func imageAlt(alt string, escapePipes bool) string {
+	written := escapeTablePipes(strings.ReplaceAll(alt, "]", "\\]"), escapePipes)
+	if altReadsBack(written, alt, escapePipes) {
+		return written
+	}
+	var out strings.Builder
+	for index := 0; index < len(alt); index++ {
+		if isASCIIPunctuation(alt[index]) {
+			out.WriteString(escaped(rune(alt[index])))
+			continue
+		}
+		out.WriteByte(alt[index])
+	}
+	return escapeTablePipes(out.String(), escapePipes)
+}
+
+// altReadsBack reports whether an image label written as written reads back as the alt text alt,
+// read in a table cell when it is written in one, where the cell takes its escaped pipes first.
+func altReadsBack(written, alt string, inCell bool) bool {
+	var nodes []*Node
+	if inCell {
+		doc, err := Parse("| h |\n| - |\n| ![" + written + "](u) |\n")
+		if err != nil || len(doc.Children) != 1 || doc.Children[0].Type != "table" {
+			return false
+		}
+		nodes = doc.Children[0].Children[1].Children[0].Children[0].Children
+	} else {
+		var err error
+		if nodes, err = ParseInline("![" + written + "](u)"); err != nil {
+			return false
+		}
+	}
+	if len(nodes) != 1 || nodes[0].Type != "image" {
+		return false
+	}
+	got, _ := nodes[0].Attrs["alt"].(string)
+	return got == alt
 }
 
 // writtenMarks is the marks a node's text is written under: its visible marks, less a bare URL's

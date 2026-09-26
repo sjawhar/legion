@@ -392,6 +392,40 @@ func TestRenderKeepsAsterisksAndUnderscoresThatWouldPair(t *testing.T) {
 	}
 }
 
+// The parser reads an image's alt text as the plain text of its label, so a bracket, a backslash,
+// emphasis, a code span, a reference or a tag in the alt text changed it or ended the image. An alt
+// text that does not read back as written is written with its ASCII punctuation escaped.
+func TestRenderKeepsImageAltText(t *testing.T) {
+	image := func(alt string) *Node {
+		return &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{
+			{Type: "image", Attrs: Attrs{"src": "https://x.test/i.png", "alt": alt, "title": nil}},
+			{Type: "text", Text: " after"},
+		}}}}
+	}
+	for _, alt := range []string{"a[b", "[a]", "a\\", "a\\[b", "*a*", "`a`", "a&amp;b", "<b>", "a[b](u)"} {
+		t.Run(alt, func(t *testing.T) {
+			markdown := mustRender(t, image(alt))
+			back, err := Parse(markdown)
+			if err != nil {
+				t.Fatalf("Parse(%q) = %v", markdown, err)
+			}
+			first := back.Children[0].Children[0]
+			if got, _ := first.Attrs["alt"].(string); first.Type != "image" || got != alt {
+				t.Fatalf("Parse(%q) = %s with alt %q, want an image with alt %q", markdown, first.Type, got, alt)
+			}
+		})
+	}
+	for alt, want := range map[string]string{
+		"a]b":                       "![a\\]b](https://x.test/i.png) after\n",
+		"a*b":                       "![a*b](https://x.test/i.png) after\n",
+		"Screenshot 2024-01-01.png": "![Screenshot 2024-01-01.png](https://x.test/i.png) after\n",
+	} {
+		if got := mustRender(t, image(alt)); got != want {
+			t.Fatalf("Render(alt %q) = %q, want the bytes main writes, %q", alt, got, want)
+		}
+	}
+}
+
 // A paragraph's second line of dashes or equals signs underlines its first into a heading, so
 // the escape applies to a marker line anywhere in the paragraph, not only its first.
 func TestRenderEscapesSetextUnderlinesInsideParagraphs(t *testing.T) {
