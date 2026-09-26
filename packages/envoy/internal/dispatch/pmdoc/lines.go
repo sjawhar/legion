@@ -35,8 +35,8 @@ func (reader markdownReader) parse(source []byte) ast.Node {
 	return withLineStarts(reader.md.Parser(), source, parser.NewContext())
 }
 
-// bareMarkerLine is a line holding only a list or quote marker.
-var bareMarkerLine = regexp.MustCompile(`^ {0,3}(?:[-+*>]|[0-9]{1,9}[.)])[ \t]*$`)
+// bareMarkerLine is a line holding only a list marker.
+var bareMarkerLine = regexp.MustCompile(`^ {0,3}(?:[-+*]|[0-9]{1,9}[.)])[ \t]*$`)
 
 // emptyItemGuard is a list parser that opens no empty list item - a marker with nothing after it
 // on its line - that would interrupt a paragraph, as the browser editor's parser reads it. Goldmark
@@ -47,8 +47,8 @@ type emptyItemGuard struct{ parser.BlockParser }
 
 func (p emptyItemGuard) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
 	line, segment := reader.PeekLine()
-	if bareMarkerLine.Match(bytes.TrimRight(line, "\n")) && !bytes.HasPrefix(bytes.TrimLeft(line, " "), []byte(">")) &&
-		parent.ChildCount() == 0 && interruptsParagraph(parent, reader.Source(), lineStart(reader.Source(), segment.Start)) {
+	if bareMarkerLine.Match(bytes.TrimRight(line, "\n")) && parent.ChildCount() == 0 &&
+		interruptsParagraph(parent, reader.Source(), lineStart(reader.Source(), segment.Start)) {
 		return nil, parser.NoChildren
 	}
 	return p.BlockParser.Open(parent, reader, pc)

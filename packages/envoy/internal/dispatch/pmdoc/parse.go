@@ -3,6 +3,7 @@ package pmdoc
 import (
 	"fmt"
 	"html"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -28,17 +29,7 @@ type markdownReader struct {
 
 var blockReader = markdownReader{md: goldmark.New(
 	goldmark.WithParser(parser.NewParser(
-		parser.WithBlockParsers(
-			util.Prioritized(parser.NewSetextHeadingParser(), 100),
-			util.Prioritized(parser.NewThematicBreakParser(), 200),
-			util.Prioritized(emptyItemGuard{parser.NewListParser()}, 300),
-			util.Prioritized(parser.NewListItemParser(), 400),
-			util.Prioritized(parser.NewCodeBlockParser(), 500),
-			util.Prioritized(parser.NewATXHeadingParser(), 600),
-			util.Prioritized(parser.NewFencedCodeBlockParser(), 700),
-			util.Prioritized(parser.NewBlockquoteParser(), 800),
-			util.Prioritized(parser.NewHTMLBlockParser(), 900),
-		),
+		parser.WithBlockParsers(blockParsers()...),
 		parser.WithInlineParsers(parser.DefaultInlineParsers()...),
 		parser.WithParagraphTransformers(parser.DefaultParagraphTransformers()...),
 	)),
@@ -51,6 +42,19 @@ var blockReader = markdownReader{md: goldmark.New(
 		),
 	),
 )}
+
+// blockParsers is goldmark's default block parsers with its list parser held off an empty item
+// that would interrupt a paragraph (emptyItemGuard).
+func blockParsers() []util.PrioritizedValue {
+	parsers := parser.DefaultBlockParsers()
+	listParser := reflect.TypeOf(parser.NewListParser())
+	for index, prioritized := range parsers {
+		if reflect.TypeOf(prioritized.Value) == listParser {
+			parsers[index].Value = emptyItemGuard{prioritized.Value.(parser.BlockParser)}
+		}
+	}
+	return parsers
+}
 
 // Parse converts markdown into the closed Proof ProseMirror tree.
 func Parse(markdown string) (*Node, error) {
@@ -87,8 +91,11 @@ func LineFeeds(text string) string {
 	if !strings.Contains(text, "\r") {
 		return text
 	}
-	return strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n")
+	return lineEndings.Replace(text)
 }
+
+// lineEndings writes a CR LF, and then a lone carriage return, as a line feed.
+var lineEndings = strings.NewReplacer("\r\n", "\n", "\r", "\n")
 
 // LineFeedAttrs is attrs with LineFeeds applied to every string value, alone or in a list: the
 // attributes a caller writes onto a typed block reach the document with line feeds alone too.
