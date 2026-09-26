@@ -2,6 +2,7 @@ package pmdoc
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -44,6 +45,426 @@ func TestRenderEscapesBlockMarkerLinesInsideParagraphs(t *testing.T) {
 				t.Fatalf("Parse(Render()) of %q = %q, want the paragraph back", text, mustRender(t, back))
 			}
 		})
+	}
+}
+
+// A paragraph line of tildes, written as it is, opens a code fence that swallows every block after
+// it, and a `:::` line at a typed block's own prefix closes that block early, leaving its
+// remaining lines and its closer to the document around it. Each context renders a document with
+// a block after the line and requires every block back, in place.
+func TestRenderKeepsTheBlocksAfterALineThatWouldOpenAFenceOrCloseATypedBlock(t *testing.T) {
+	text := func(value string) *Node { return &Node{Type: "text", Text: value} }
+	hardBreak := &Node{Type: "hardbreak", Attrs: Attrs{"isInline": false}}
+	paragraph := func(children ...*Node) *Node { return &Node{Type: "paragraph", Children: children} }
+	callout := func(children ...*Node) *Node {
+		return &Node{Type: "callout", Attrs: Attrs{BlockIDAttr: "c1", "kind": "note", "title": "T"}, Children: children}
+	}
+	after := paragraph(text("After."))
+	for name, doc := range map[string]*Node{
+		"a paragraph of tildes":        {Type: "doc", Children: []*Node{paragraph(text("~~~")), after}},
+		"tildes with an info string":   {Type: "doc", Children: []*Node{paragraph(text("~~~ go")), after}},
+		"tildes after a hard break":    {Type: "doc", Children: []*Node{paragraph(text("a"), hardBreak, text("~~~")), after}},
+		"tildes in a list item":        {Type: "doc", Children: []*Node{{Type: "bullet_list", Children: []*Node{{Type: "list_item", Children: []*Node{paragraph(text("~~~"))}}}}, after}},
+		"tildes in a blockquote":       {Type: "doc", Children: []*Node{{Type: "blockquote", Children: []*Node{paragraph(text("~~~"))}}, after}},
+		"tildes in a typed block":      {Type: "doc", Children: []*Node{callout(paragraph(text("~~~"))), after}},
+		"::: after a hard break in it": {Type: "doc", Children: []*Node{callout(paragraph(text("a"), hardBreak, text(":::")), paragraph(text("Inside."))), after}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			markdown := mustRender(t, doc)
+			back, err := Parse(markdown)
+			if err != nil {
+				t.Fatalf("Parse(%q) = %v", markdown, err)
+			}
+			if len(back.Children) != len(doc.Children) || len(back.Children[0].Children) != len(doc.Children[0].Children) {
+				t.Fatalf("Parse(%q) = %q, want every block back", markdown, mustRender(t, back))
+			}
+			for index, block := range doc.Children {
+				if back.Children[index].Type != block.Type {
+					t.Fatalf("Parse(%q) block %d is a %s, want a %s", markdown, index, back.Children[index].Type, block.Type)
+				}
+			}
+			if again := mustRender(t, back); again != markdown {
+				t.Fatalf("Render(Parse(%q)) = %q", markdown, again)
+			}
+		})
+	}
+}
+
+// A rule that opens the document is written `---`, as it always was, except where that form is
+// misread. A `---` there opens front matter: a later line that is just `---` - a second rule, a
+// code line - closes it, and everything up to there reads as front matter; and with no such line
+// the browser editor's parser, having tried the front matter to the document's end, reads no
+// list, quote or footnote definition in the rest. Those documents write the rule `***`.
+func TestRenderWritesALeadingRuleAsAsterisksOnlyWhereDashesAreMisread(t *testing.T) {
+	for name, test := range map[string]struct{ after, opener string }{
+		"alone":                     {"", "---"},
+		"a paragraph":               {"a\n", "---"},
+		"two paragraphs":            {"a\n\nb\n", "---"},
+		"a heading":                 {"# a\n", "---"},
+		"code":                      {"```\nc\n```\n", "---"},
+		"an image":                  {"![a](https://x.test/i.png)\n", "---"},
+		"a callout":                 {":::callout{#c1 kind=\"note\" title=\"T\"}\nx\n:::\n", "---"},
+		"a heading, then text":      {"## title: x\n\nBody.\n", "---"},
+		"a second rule":             {"x\n\n***\n\ny\n", "***"},
+		"a code line ---":           {"x\n\n```\n---\n```\n", "***"},
+		"a code line --- and space": {"x\n\n```\n--- \n```\n", "***"},
+		"a list":                    {"- a\n", "***"},
+		"a quote":                   {"> q\n", "***"},
+		"a footnote definition":     {"x[^1]\n\n[^1]: n\n", "***"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			source := "***\n"
+			if test.after != "" {
+				source += "\n" + test.after
+			}
+			doc, err := Parse(source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			markdown := mustRender(t, doc)
+			if !strings.HasPrefix(markdown, test.opener+"\n") {
+				t.Fatalf("Render() = %q, want the leading rule written %s", markdown, test.opener)
+			}
+			back, err := Parse(markdown)
+			if err != nil {
+				t.Fatalf("Parse(%q) = %v", markdown, err)
+			}
+			if !back.Equal(doc) {
+				t.Fatalf("Parse(%q) = %q, want every block back", markdown, mustRender(t, back))
+			}
+		})
+	}
+}
+
+// A list nested inside a blockquote writes its lines behind the quote's `>` and the list's
+// indentation. Read without the list indentation they share, but with the quote marker left on,
+// a second-level item's `<div` or `~~~` would look like indented code, and be left to open an
+// HTML block or a fence in place.
+func TestRenderEscapesBlockFormsInAListNestedInABlockquote(t *testing.T) {
+	for _, marker := range []string{"<div", "~~~"} {
+		t.Run(marker, func(t *testing.T) {
+			tree, err := Parse("> - a\n>   - b\n>\n>     x\n\nAfter.\n")
+			if err != nil {
+				t.Fatal(err)
+			}
+			item := tree.Children[0].Children[0].Children[0].Children[1].Children[0]
+			item.Children[1].Children[0].Text = marker
+			markdown := mustRender(t, tree)
+			back, err := Parse(markdown)
+			if err != nil {
+				t.Fatalf("Parse(%q) = %v", markdown, err)
+			}
+			if len(back.Children) != 2 || back.Children[1].Type != "paragraph" {
+				t.Fatalf("Parse(%q) = %q, want the blockquote and the paragraph after it", markdown, mustRender(t, back))
+			}
+			if again := mustRender(t, back); again != markdown {
+				t.Fatalf("Render(Parse(%q)) = %q", markdown, again)
+			}
+		})
+	}
+}
+
+// GFM reads a single tilde as strikethrough too, and refuses a delimiter run of three: text
+// `~a~` came back struck, and struck text ending or starting with a tilde lost its strike. Such a
+// paragraph writes its tildes as references; a paragraph whose tildes pair with nothing - "about
+// ~200ms" - and an ordinary strikethrough keep the bytes they have always had.
+func TestRenderKeepsTildesAsTheyWereWritten(t *testing.T) {
+	text := func(value string, marks ...Mark) *Node { return &Node{Type: "text", Text: value, Marks: marks} }
+	struck := Mark{Type: "strike_through"}
+	paragraph := func(children ...*Node) *Node {
+		return &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: children}}}
+	}
+	for name, doc := range map[string]*Node{
+		"a single-tilde pair":       paragraph(text("~a~")),
+		"a pair across words":       paragraph(text("keep ~this~ as typed")),
+		"struck text ending in ~":   paragraph(text("x~", struck), text(" tail")),
+		"struck text starting in ~": paragraph(text("x "), text("~a", struck)),
+		"a struck tilde alone":      paragraph(text("a "), text("~", struck), text(" b")),
+	} {
+		t.Run(name, func(t *testing.T) {
+			markdown := mustRender(t, doc)
+			back, err := Parse(markdown)
+			if err != nil {
+				t.Fatalf("Parse(%q) = %v", markdown, err)
+			}
+			if !back.Equal(doc) {
+				t.Fatalf("Parse(%q) = %q, want the text and its marks back", markdown, mustRender(t, back))
+			}
+		})
+	}
+	for _, test := range []struct {
+		doc  *Node
+		want string
+	}{
+		{paragraph(text("about ~200ms")), "about ~200ms\n"},
+		{paragraph(text("done", struck), text(" tail")), "~~done~~ tail\n"},
+	} {
+		if got := mustRender(t, test.doc); got != test.want {
+			t.Fatalf("Render() = %q, want the bytes main writes, %q", got, test.want)
+		}
+	}
+}
+
+// A heading's text that ends in a run of `#` after a space reads back as the heading's closing
+// sequence, and the text loses it; a list item's text that begins `[ ]` or `[x]` reads back as a
+// task checkbox. Both are written so they come back as the text they are, while `C#`, a `#` in
+// the middle and `[ ]` outside a list item keep the bytes main writes.
+func TestRenderKeepsHeadingAndTaskTextThatReadsAsSyntax(t *testing.T) {
+	text := func(value string) *Node { return &Node{Type: "text", Text: value} }
+	heading := func(value string) *Node {
+		return &Node{Type: "doc", Children: []*Node{{Type: "heading", Attrs: Attrs{"level": 2}, Children: []*Node{text(value)}}}}
+	}
+	item := func(value string) *Node {
+		return &Node{Type: "doc", Children: []*Node{{Type: "bullet_list", Children: []*Node{{Type: "list_item", Children: []*Node{
+			{Type: "paragraph", Children: []*Node{text(value)}},
+		}}}}}}
+	}
+	for name, doc := range map[string]*Node{
+		"a heading ending in #":   heading("a #"),
+		"a heading ending in ###": heading("Step 3 ###"),
+		"a heading of # alone":    heading("# #"),
+		"an item beginning [ ]":   item("[ ]"),
+		"an item beginning [x]":   item("[x] done"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			markdown := mustRender(t, doc)
+			back, err := Parse(markdown)
+			if err != nil {
+				t.Fatalf("Parse(%q) = %v", markdown, err)
+			}
+			if got, want := mustRender(t, back), markdown; got != want || flatText(back) != flatText(doc) {
+				t.Fatalf("Parse(%q) = %q, want the text back", markdown, got)
+			}
+		})
+	}
+	for _, test := range []struct {
+		doc  *Node
+		want string
+	}{
+		{heading("C#"), "## C#\n"},
+		{heading("a # b"), "## a # b\n"},
+		{&Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{text("[ ] later")}}}}, "[ ] later\n"},
+	} {
+		if got := mustRender(t, test.doc); got != test.want {
+			t.Fatalf("Render() = %q, want the bytes main writes, %q", got, test.want)
+		}
+	}
+}
+
+// flatText is every text node's text in document order.
+func flatText(node *Node) string {
+	if node.Type == "text" {
+		return node.Text
+	}
+	var out strings.Builder
+	for _, child := range node.Children {
+		out.WriteString(flatText(child))
+	}
+	return out.String()
+}
+
+// The parser trims whitespace at the start of a textblock's line and at the end of the
+// textblock, so text that begins or ends with it lost it. The first leading and the last trailing
+// whitespace character are written as references; whitespace inside a mark or a link keeps the
+// bytes main writes, since the parser keeps it there.
+func TestRenderKeepsWhitespaceAtATextblocksEdges(t *testing.T) {
+	text := func(value string, marks ...Mark) *Node { return &Node{Type: "text", Text: value, Marks: marks} }
+	hardBreak := &Node{Type: "hardbreak", Attrs: Attrs{"isInline": false}}
+	doc := func(block *Node) *Node { return &Node{Type: "doc", Children: []*Node{block}} }
+	paragraph := func(children ...*Node) *Node { return &Node{Type: "paragraph", Children: children} }
+	cell := func(kind, value string) *Node { return &Node{Type: kind, Children: []*Node{paragraph(text(value))}} }
+	for name, tree := range map[string]*Node{
+		"a paragraph's leading space":   doc(paragraph(text(" x"))),
+		"three leading spaces":          doc(paragraph(text("   x"))),
+		"a paragraph's trailing spaces": doc(paragraph(text("x  "))),
+		"a leading tab":                 doc(paragraph(text("\tx"))),
+		"a backslash before the last":   doc(paragraph(text("a\\ "))),
+		"after a hard break":            doc(paragraph(text("a"), hardBreak, text(" b"))),
+		"a heading's edges":             doc(&Node{Type: "heading", Attrs: Attrs{"level": 2}, Children: []*Node{text(" x ")}}),
+		"a table cell's edges": doc(&Node{Type: "table", Children: []*Node{
+			{Type: "table_header_row", Children: []*Node{cell("table_header", "h")}},
+			{Type: "table_row", Children: []*Node{cell("table_cell", " x ")}},
+		}}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			markdown := mustRender(t, tree)
+			back, err := Parse(markdown)
+			if err != nil {
+				t.Fatalf("Parse(%q) = %v", markdown, err)
+			}
+			if flatText(back) != flatText(tree) {
+				t.Fatalf("Parse(%q) has text %q, want %q", markdown, flatText(back), flatText(tree))
+			}
+			if again := mustRender(t, back); again != markdown {
+				t.Fatalf("Render(Parse(%q)) = %q", markdown, again)
+			}
+		})
+	}
+	link := Mark{Type: "link", Attrs: Attrs{"href": "https://x.test"}}
+	for _, test := range []struct {
+		tree *Node
+		want string
+	}{
+		{doc(paragraph(text(" x", link))), "[ x](https://x.test)\n"},
+		{doc(paragraph(text("a  b"))), "a  b\n"},
+	} {
+		if got := mustRender(t, test.tree); got != test.want {
+			t.Fatalf("Render() = %q, want the bytes main writes, %q", got, test.want)
+		}
+	}
+}
+
+// A delimiter beside whitespace cannot open or close emphasis, so bold, italic or struck text
+// that began or ended with a space read back as literal asterisks or tildes. That whitespace is
+// written as a reference, which is not whitespace to the delimiter rule.
+func TestRenderKeepsWhitespaceAtAMarksEdges(t *testing.T) {
+	text := func(value string, marks ...Mark) *Node { return &Node{Type: "text", Text: value, Marks: marks} }
+	strong, emphasis, strike := Mark{Type: "strong"}, Mark{Type: "emphasis"}, Mark{Type: "strike_through"}
+	link := Mark{Type: "link", Attrs: Attrs{"href": "https://x.test"}}
+	paragraph := func(children ...*Node) *Node {
+		return &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: children}}}
+	}
+	for name, tree := range map[string]*Node{
+		"bold text opening with a space":    paragraph(text(" x", strong), text(" tail")),
+		"italic text closing with a space":  paragraph(text("a "), text("x ", emphasis), text(" b")),
+		"struck text with both":             paragraph(text(" x ", strike), text(" tail")),
+		"after a hard break":                paragraph(text("a"), &Node{Type: "hardbreak", Attrs: Attrs{"isInline": false}}, text(" x", strong)),
+		"nested marks":                      paragraph(text("a "), text(" x", strong, emphasis), text(" b")),
+		"asterisks beside bold's delimiter": paragraph(text("***", strong), text(" tail")),
+		"a backslash and an asterisk":       paragraph(text("a\\*", emphasis), text(" tail")),
+		"bold inside a link":                paragraph(text("a "), text(" x", strong, link), text(" b")),
+	} {
+		t.Run(name, func(t *testing.T) {
+			markdown := mustRender(t, tree)
+			back, err := Parse(markdown)
+			if err != nil {
+				t.Fatalf("Parse(%q) = %v", markdown, err)
+			}
+			if got, want := inlineSignature(back.Children[0].Children), inlineSignature(tree.Children[0].Children); !slices.Equal(got, want) {
+				t.Fatalf("Parse(%q) = %q, want %q", markdown, got, want)
+			}
+		})
+	}
+	for _, test := range []struct {
+		tree *Node
+		want string
+	}{
+		{paragraph(text("a "), text(" x ", link), text(" b")), "a [ x ](https://x.test) b\n"},
+		{paragraph(text("a "), text("x y", strong), text(" b")), "a **x y** b\n"},
+		{paragraph(text("*.", strike), text(" b")), "~~*.~~ b\n"},
+	} {
+		if got := mustRender(t, test.tree); got != test.want {
+			t.Fatalf("Render() = %q, want the bytes main writes, %q", got, test.want)
+		}
+	}
+}
+
+// Asterisks and underscores the writer's rules leave unescaped can still pair into emphasis the
+// text never had: across a hard break, around a reference, inside a link label, or with a mark's
+// own delimiter. A run that does not read back as written is written again with them escaped.
+func TestRenderKeepsAsterisksAndUnderscoresThatWouldPair(t *testing.T) {
+	text := func(value string, marks ...Mark) *Node { return &Node{Type: "text", Text: value, Marks: marks} }
+	hardBreak := &Node{Type: "hardbreak", Attrs: Attrs{"isInline": false}}
+	link := Mark{Type: "link", Attrs: Attrs{"href": "https://x.test"}}
+	paragraph := func(children ...*Node) *Node {
+		return &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: children}}}
+	}
+	for name, tree := range map[string]*Node{
+		"underscores across a hard break": paragraph(text(" _"), hardBreak, text(" _")),
+		"asterisks across a hard break":   paragraph(text("-*\\"), hardBreak, text("-*\\")),
+		"inside italic text":              paragraph(text(":*\\", Mark{Type: "emphasis"}), text(" after")),
+		"inside a link label":             paragraph(text("*[*", link), text(" after")),
+	} {
+		t.Run(name, func(t *testing.T) {
+			markdown := mustRender(t, tree)
+			back, err := Parse(markdown)
+			if err != nil {
+				t.Fatalf("Parse(%q) = %v", markdown, err)
+			}
+			if got, want := inlineSignature(back.Children[0].Children), inlineSignature(tree.Children[0].Children); !slices.Equal(got, want) {
+				t.Fatalf("Parse(%q) = %q, want %q", markdown, got, want)
+			}
+		})
+	}
+	// A run that reads back as written keeps main's bytes, snake_case and a lone asterisk included.
+	for _, test := range []struct {
+		tree *Node
+		want string
+	}{
+		{paragraph(text("user_id and 2 * 3")), "user_id and 2 * 3\n"},
+		{paragraph(text("a * b"), hardBreak, text("c * d")), "a * b\\\nc * d\n"},
+	} {
+		if got := mustRender(t, test.tree); got != test.want {
+			t.Fatalf("Render() = %q, want the bytes main writes, %q", got, test.want)
+		}
+	}
+}
+
+// The parser reads an image's alt text as the plain text of its label, so a bracket, a backslash,
+// emphasis, a code span, a reference or a tag in the alt text changed it or ended the image, and a
+// line ending ends a heading or a table row, or starts a line that opens a block. An alt text that
+// does not read back as written is written with its ASCII punctuation escaped and its line endings
+// as character references.
+func TestRenderKeepsImageAltText(t *testing.T) {
+	image := func(alt string) *Node {
+		return &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{
+			{Type: "image", Attrs: Attrs{"src": "https://x.test/i.png", "alt": alt, "title": nil}},
+			{Type: "text", Text: " after"},
+		}}}}
+	}
+	for _, alt := range []string{"a[b", "[a]", "a\\", "a\\[b", "*a*", "`a`", "a&amp;b", "<b>", "a[b](u)"} {
+		t.Run(alt, func(t *testing.T) {
+			markdown := mustRender(t, image(alt))
+			back, err := Parse(markdown)
+			if err != nil {
+				t.Fatalf("Parse(%q) = %v", markdown, err)
+			}
+			first := back.Children[0].Children[0]
+			if got, _ := first.Attrs["alt"].(string); first.Type != "image" || got != alt {
+				t.Fatalf("Parse(%q) = %s with alt %q, want an image with alt %q", markdown, first.Type, got, alt)
+			}
+		})
+	}
+	img := func(alt string) *Node {
+		return &Node{Type: "image", Attrs: Attrs{"src": "u", "alt": alt, "title": nil}}
+	}
+	for _, test := range []struct {
+		name, alt string
+		block     func(*Node) *Node
+	}{
+		{"a list line after a line feed", "a\n- b", func(n *Node) *Node { return &Node{Type: "paragraph", Children: []*Node{n}} }},
+		{"a line feed in a heading", "a\nb", func(n *Node) *Node {
+			return &Node{Type: "heading", Attrs: Attrs{"level": 2}, Children: []*Node{n}}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			doc := &Node{Type: "doc", Children: []*Node{test.block(img(test.alt))}}
+			markdown := mustRender(t, doc)
+			back, err := Parse(markdown)
+			if err != nil {
+				t.Fatalf("Parse(%q) = %v", markdown, err)
+			}
+			var alts []string
+			Walk(back, func(n *Node) bool {
+				if n.Type == "image" {
+					alt, _ := n.Attrs["alt"].(string)
+					alts = append(alts, alt)
+				}
+				return true
+			})
+			if len(back.Children) != 1 || len(alts) != 1 || alts[0] != test.alt {
+				t.Fatalf("Render() = %q, read back as %d blocks with alts %q, want one block with alt %q", markdown, len(back.Children), alts, test.alt)
+			}
+		})
+	}
+	for alt, want := range map[string]string{
+		"a]b":                       "![a\\]b](https://x.test/i.png) after\n",
+		"a*b":                       "![a*b](https://x.test/i.png) after\n",
+		"Screenshot 2024-01-01.png": "![Screenshot 2024-01-01.png](https://x.test/i.png) after\n",
+	} {
+		if got := mustRender(t, image(alt)); got != want {
+			t.Fatalf("Render(alt %q) = %q, want the bytes main writes, %q", alt, got, want)
+		}
 	}
 }
 

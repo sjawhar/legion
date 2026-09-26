@@ -22,6 +22,9 @@ type typedDirective struct {
 	Attrs  Attrs
 	Closed bool
 	indent int
+	// fence is the number of colons the directive opened with; only a line of exactly as many
+	// closes it, so a typed block written with a longer fence holds one written with a shorter.
+	fence int
 }
 
 func (n *typedDirective) Dump(source []byte, level int) {
@@ -62,7 +65,7 @@ func (p *typedDirectiveParser) Open(_ ast.Node, reader gmtext.Reader, pc parser.
 		return nil, parser.NoChildren
 	}
 	reader.AdvanceToEOL()
-	return &typedDirective{Name: name, Attrs: attrs, indent: indent}, parser.HasChildren
+	return &typedDirective{Name: name, Attrs: attrs, indent: indent, fence: colonRun(line[offset:])}, parser.HasChildren
 }
 
 func (p *typedDirectiveParser) Continue(node ast.Node, reader gmtext.Reader, _ parser.Context) parser.State {
@@ -72,7 +75,10 @@ func (p *typedDirectiveParser) Continue(node ast.Node, reader gmtext.Reader, _ p
 	}
 	line, _ := reader.PeekLine()
 	indent, offset := util.IndentWidth(line, reader.LineOffset())
-	if indent == directive.indent && offset < len(line) && strings.TrimSpace(string(line[offset:])) == ":::" {
+	// A fence closes the typed block when it is indented no further than the opener. The opener
+	// of a typed block that begins a footnote definition stands after the definition's `]: `, one
+	// column past where the definition's later lines start.
+	if indent <= directive.indent && offset < len(line) && fenceColons(string(line[offset:])) == directive.fence {
 		directive.Closed = true
 		reader.AdvanceToEOL()
 		return parser.Close
@@ -82,37 +88,37 @@ func (p *typedDirectiveParser) Continue(node ast.Node, reader gmtext.Reader, _ p
 
 func (p *typedDirectiveParser) Close(_ ast.Node, _ gmtext.Reader, _ parser.Context) {}
 
-// TypedFenceLineInCode returns a line of code inside a typed block that the browser editor's
-// parser reads as the typed block's closing fence, and false when block holds none. That parser
-// ends a typed block at a typed-fence line (typedFenceLine) whose text starts at most three columns
-// past the typed block's own content column, even inside a fenced code block it holds. Columns are the written line's: a blockquote's `> ` adds two, a list marker its
-// width, a footnote definition four, and a tab advances to the next multiple of four from the column
-// it stands at. A line inside a blockquote begins with its `>`, so it closes no typed block outside
-// that blockquote.
-func TypedFenceLineInCode(block *Node) (string, bool) {
-	// fence is the content column of the nearest typed block a line could close, or -1.
-	var find func(node *Node, column, fence int) (string, bool)
-	find = func(node *Node, column, fence int) (string, bool) {
-		if _, ok := typedBlock(node.Type); ok {
-			fence = column
+// closingColons is the longest line of colons written inside typed block n, whose own lines start
+// at column on the written line, that the browser editor's parser could read as a fence closing n:
+// a line of three or more colons (codeLineColons) whose text starts at most three columns past
+// column, even inside fenced code. Columns are the written line's: a list marker adds its width, and a tab
+// advances to the next multiple of four from the column it stands at, so in a typed block two
+// columns in, a tab reaches only two past it. A line in a blockquote begins with its `>` and closes
+// nothing outside it. Such a line is a line of code, or the fence of a typed block nested where its
+// fence is written so. That parser closes n at such a line of at least as many colons as n's fence,
+// and this one at a line of exactly as many indented no further than n's opener, so a fence longer
+// than every such line reads the same in both (typedFence).
+func closingColons(n *Node, column int) int {
+	longest := 0
+	var visit func(node *Node, at int)
+	visit = func(node *Node, at int) {
+		if at-column > 3 {
+			return
+		}
+		if _, typed := typedBlock(node.Type); typed {
+			longest = max(longest, typedFence(node, at))
+			return
 		}
 		switch node.Type {
 		case "code_block":
-			if fence < 0 {
-				return "", false
-			}
 			for _, text := range node.Children {
 				for _, line := range strings.Split(text.Text, "\n") {
-					if typedFenceLine(line) && textColumn(line, column)-fence <= 3 {
-						return line, true
+					if colons := codeLineColons(line); colons >= 3 && textColumn(line, at)-column <= 3 {
+						longest = max(longest, colons)
 					}
 				}
 			}
-			return "", false
-		case "blockquote":
-			column, fence = column+2, -1
-		case "footnote_definition":
-			column += 4
+		case "blockquote", "footnote_definition":
 		case "bullet_list", "ordered_list":
 			start := int(num(node.Attrs["order"], 1))
 			for index, item := range node.Children {
@@ -121,21 +127,19 @@ func TypedFenceLineInCode(block *Node) (string, bool) {
 					marker = len(strconv.Itoa(start+index)) + 2
 				}
 				for _, child := range item.Children {
-					if line, ok := find(child, column+marker, fence); ok {
-						return line, true
-					}
+					visit(child, at+marker)
 				}
 			}
-			return "", false
-		}
-		for _, child := range node.Children {
-			if line, ok := find(child, column, fence); ok {
-				return line, true
+		default:
+			for _, child := range node.Children {
+				visit(child, at)
 			}
 		}
-		return "", false
 	}
-	return find(block, 0, -1)
+	for _, child := range n.Children {
+		visit(child, column)
+	}
+	return longest
 }
 
 // textColumn is the column a line's text starts at when the line is written from column, a tab
@@ -154,12 +158,17 @@ func textColumn(line string, column int) int {
 	return column
 }
 
-// typedFenceLine reports whether the browser editor's parser reads line, where it stands, as a
-// typed block's fence: three or more colons with only spaces and tabs around them, and the carriage
-// return of a line that ends in one, since a carriage return before a line feed is part of the
-// line ending.
-func typedFenceLine(line string) bool {
-	return colonLine(strings.Trim(line, " \t\r")) >= 3
+// fenceColons is the number of colons in line when they are all it holds but spaces, tabs and a
+// line ending, and 0 otherwise.
+func fenceColons(line string) int {
+	return colonLine(strings.Trim(line, " \t\r\n"))
+}
+
+// codeLineColons is the number of colons in a line of code when they are all it holds but spaces,
+// tabs and a trailing carriage return, the half of a CR LF line ending the line feed split off,
+// and 0 otherwise. A line holding a carriage return anywhere else is written as main wrote it.
+func codeLineColons(line string) int {
+	return colonLine(strings.Trim(strings.TrimSuffix(line, "\r"), " \t"))
 }
 
 // colonLine is the length of line when it is colons alone, and 0 otherwise.
@@ -168,6 +177,15 @@ func colonLine(line string) int {
 		return 0
 	}
 	return len(line)
+}
+
+// colonRun is the number of colons line begins with.
+func colonRun(line []byte) int {
+	count := 0
+	for count < len(line) && line[count] == ':' {
+		count++
+	}
+	return count
 }
 
 func (p *typedDirectiveParser) CanInterruptParagraph() bool {
@@ -213,10 +231,11 @@ func (p *unsupportedDirectiveParser) CanAcceptIndentedLine() bool {
 }
 
 func parseTypedDirectiveOpen(line string) (string, Attrs, bool) {
-	if !strings.HasPrefix(line, ":::") {
+	colons := colonRun([]byte(line))
+	if colons < 3 {
 		return "", nil, false
 	}
-	rest := line[3:]
+	rest := line[colons:]
 	nameEnd := 0
 	for nameEnd < len(rest) && directiveNameByte(rest[nameEnd]) {
 		nameEnd++

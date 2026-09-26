@@ -1,10 +1,10 @@
 package pmdoc
 
 import (
-	"bytes"
 	"fmt"
 	"html"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/yuin/goldmark"
@@ -14,34 +14,27 @@ import (
 	"github.com/yuin/goldmark/parser"
 	gmtext "github.com/yuin/goldmark/text"
 	"github.com/yuin/goldmark/util"
-	"go.abhg.dev/goldmark/frontmatter"
 )
 
 var anchorAttribute = regexp.MustCompile(`([a-zA-Z0-9_-]+)="([^"]*)"`)
 
-// newMarkdownParser builds the one goldmark configuration Dispatch reads markdown with. Its two
-// uses differ only in the front-matter extension: a document with a closed front-matter block is
-// read with it, and everything else without it - a document whose leading `---` opens nothing,
-// which the extension would consume to the end of the input with every block after it, and the
-// renderer asking how a line it is about to write would be read.
-func newMarkdownParser(readFrontmatter bool) goldmark.Markdown {
-	extensions := []goldmark.Extender{extension.GFM, extension.Footnote}
-	if readFrontmatter {
-		extensions = append(extensions, &frontmatter.Extender{Formats: []frontmatter.Format{frontmatter.YAML}})
-	}
-	return goldmark.New(
-		goldmark.WithExtensions(extensions...),
-		goldmark.WithParserOptions(parser.WithBlockParsers(
-			util.Prioritized(&typedDirectiveParser{}, 950),
-			util.Prioritized(&unsupportedDirectiveParser{}, 900),
-		)),
-	)
+// markdownReader is the one goldmark configuration Dispatch reads markdown with. Its only way in
+// is parse. Front matter is
+// read apart from it (parseFrontmatterBlock), so an unclosed opener is ordinary markdown.
+type markdownReader struct {
+	md goldmark.Markdown
 }
 
-var (
-	markdownParser        = newMarkdownParser(true)
-	unfrontmatteredParser = newMarkdownParser(false)
-)
+var blockReader = markdownReader{md: goldmark.New(
+	goldmark.WithExtensions(extension.Linkify, lazyAwareTable{}, extension.Strikethrough, taskList{}, footnotes{}),
+	goldmark.WithParserOptions(
+		parser.WithBlockParsers(
+			util.Prioritized(&typedDirectiveParser{}, 950),
+			util.Prioritized(&unsupportedDirectiveParser{}, 900),
+			util.Prioritized(lineRecordingParagraph{parser.NewParagraphParser()}, 999),
+		),
+	),
+)}
 
 // Parse converts markdown into the closed Proof ProseMirror tree.
 func Parse(markdown string) (*Node, error) {
@@ -74,14 +67,9 @@ func ParseForWrite(markdown string, live *Node) (*Node, error) {
 // block that names none has none yet.
 func parseUnstamped(markdown string) (*Node, error) {
 	source := []byte(markdown)
-	front := parseFrontmatterBlock(source)
-	// A document with no closed front-matter block is parsed without the extension: it has
-	// nothing for the extension to read, and an unclosed opener is text it would swallow.
-	md := markdownParser
-	if front == nil {
-		md = unfrontmatteredParser
-	}
-	root := md.Parser().Parse(gmtext.NewReader(source))
+	front, rest := parseFrontmatterBlock(source)
+	source = source[rest:]
+	root := blockReader.parse(source)
 	doc, err := parseBlock(root, source, footnoteLabels(root))
 	if err != nil {
 		return nil, err
@@ -99,23 +87,72 @@ func parseUnstamped(markdown string) (*Node, error) {
 	return doc, nil
 }
 
-// inlineMarkdownParser knows only paragraphs, so a leading list marker, heading
-// marker, fence, or directive is text; the inline syntax is Parse's.
-var inlineMarkdownParser = parser.NewParser(
-	parser.WithBlockParsers(util.Prioritized(parser.NewParagraphParser(), 1000)),
-	parser.WithInlineParsers(parser.DefaultInlineParsers()...),
-	parser.WithInlineParsers(
-		util.Prioritized(extension.NewStrikethroughParser(), 500),
-		util.Prioritized(extension.NewLinkifyParser(), 999),
-	),
-)
+// inlineParserOptions is how inline markdown is read: a paragraph is the only block, so a leading
+// list marker, heading marker, fence, or directive is text, and the inline syntax is Parse's.
+func inlineParserOptions() []parser.Option {
+	return []parser.Option{
+		parser.WithBlockParsers(util.Prioritized(lineRecordingParagraph{parser.NewParagraphParser()}, 1000)),
+		parser.WithInlineParsers(parser.DefaultInlineParsers()...),
+		parser.WithInlineParsers(
+			util.Prioritized(extension.NewStrikethroughParser(), 500),
+			util.Prioritized(extension.NewLinkifyParser(), 999),
+		),
+	}
+}
+
+// inlineMarkdownParser reads inline markdown (inlineParserOptions).
+var inlineMarkdownParser = parser.NewParser(inlineParserOptions()...)
+
+// footnoteRunParser reads inline markdown as inlineMarkdownParser does, with footnote definitions
+// after it so that the references in it read as references (parseInlineWithDefinitions).
+var footnoteRunParser = parser.NewParser(append(inlineParserOptions(), footnoteParserOptions()...)...)
+
+// parseInlineWithDefinitions reads one textblock's inline markdown as ParseInline does, after a
+// definition for each of labels, the footnote labels it refers to. It is the renderer's read-back
+// of a run it wrote, where a reference is only a reference beside its definition.
+func parseInlineWithDefinitions(markdown string, labels []string) ([]*Node, error) {
+	if len(labels) == 0 {
+		return ParseInline(markdown)
+	}
+	var full strings.Builder
+	full.WriteString(markdown)
+	for _, label := range labels {
+		full.WriteString("\n\n[^" + escapeFootnoteLabel(label) + "]: x")
+	}
+	source := []byte(full.String())
+	root := withLineStarts(footnoteRunParser, source, parser.NewContext())
+	first, ok := root.FirstChild().(*ast.Paragraph)
+	if !ok {
+		return nil, fmt.Errorf("%w: inline markdown does not read as a paragraph", ErrSchema)
+	}
+	paragraph, err := parseBlock(first, source, footnoteLabels(root))
+	if err != nil {
+		return nil, err
+	}
+	sortNodeMarks(paragraph)
+	return paragraph.Children, nil
+}
+
+// referencedLabels is the footnote labels nodes refer to, each once, in order.
+func referencedLabels(nodes []*Node) []string {
+	var labels []string
+	for _, node := range nodes {
+		if node.Type != "footnote_reference" {
+			continue
+		}
+		if label, ok := node.Attrs["label"].(string); ok && !slices.Contains(labels, label) {
+			labels = append(labels, label)
+		}
+	}
+	return labels
+}
 
 // ParseInline converts one textblock's worth of inline markdown into inline
 // nodes. Markdown that forms more than one paragraph, or holds text after its
 // paragraph's last line, is ErrSchema.
 func ParseInline(markdown string) ([]*Node, error) {
 	source := []byte(markdown)
-	root := inlineMarkdownParser.Parse(gmtext.NewReader(source))
+	root := withLineStarts(inlineMarkdownParser, source, parser.NewContext())
 	if root.ChildCount() > 1 {
 		return nil, fmt.Errorf("%w: inline markdown forms %d paragraphs", ErrSchema, root.ChildCount())
 	}
@@ -166,8 +203,8 @@ func BlockShapeError(block *Node) error {
 
 // shapeDifference names the first block of want that got holds as another kind, or holds where
 // want has none, or lacks; both are empty when the two have the same shape. An empty paragraph is
-// not written, so it is not expected back - except in a table cell, which is written with its
-// paragraph however little it holds, and reads back holding one.
+// not written, so it is not expected back, except as its container's only child: a table cell or a
+// footnote definition holding only an empty paragraph reads back holding one.
 func shapeDifference(want, got *Node) (string, string) {
 	if want.Type != got.Type {
 		return blockName(want.Type), blockName(got.Type)
@@ -175,10 +212,10 @@ func shapeDifference(want, got *Node) (string, string) {
 	if isTextblock(want.Type) {
 		return "", ""
 	}
-	cell := want.Type == "table_cell" || want.Type == "table_header"
+	only := len(want.Children) == 1
 	written := make([]*Node, 0, len(want.Children))
 	for _, child := range want.Children {
-		if cell || child.Type != "paragraph" || len(child.Children) != 0 {
+		if only || child.Type != "paragraph" || len(child.Children) != 0 {
 			written = append(written, child)
 		}
 	}
@@ -334,42 +371,6 @@ func tableDelimiterRow(cells []string) bool {
 	return true
 }
 
-// parseFrontmatterBlock restores the delimited text the Goldmark extension
-// consumes before its completed AST reaches us.
-func parseFrontmatterBlock(source []byte) *Node {
-	openEnd := bytes.IndexByte(source, '\n')
-	if openEnd < 0 || !frontmatterDelimiter(bytes.TrimSuffix(source[:openEnd], []byte("\r"))) {
-		return nil
-	}
-	delimiter := bytes.TrimSuffix(source[:openEnd], []byte("\r"))
-	for start := openEnd + 1; start < len(source); {
-		end := len(source)
-		if next := bytes.IndexByte(source[start:], '\n'); next >= 0 {
-			end = start + next
-		}
-		if bytes.Equal(bytes.TrimSuffix(source[start:end], []byte("\r")), delimiter) {
-			return &Node{Type: "frontmatter", Children: []*Node{{Type: "text", Text: string(source[:end])}}}
-		}
-		if end == len(source) {
-			break
-		}
-		start = end + 1
-	}
-	return nil
-}
-
-func frontmatterDelimiter(line []byte) bool {
-	if len(line) < 3 {
-		return false
-	}
-	for _, char := range line {
-		if char != '-' {
-			return false
-		}
-	}
-	return true
-}
-
 func footnoteLabels(root ast.Node) map[int]string {
 	labels := make(map[int]string)
 	var walk func(ast.Node)
@@ -477,9 +478,9 @@ func parseBlocks(parent ast.Node, source []byte, footnotes map[int]string) ([]*N
 			continue
 		}
 		// Goldmark puts a footnote's backlink after a definition's last block when that block is
-		// not a paragraph, which this parser does not read.
-		if _, ok := child.(*extensionast.FootnoteBacklink); ok && len(children) > 0 {
-			return nil, fmt.Errorf("%w: a footnote definition that ends in %s rather than a paragraph", ErrSchema, blockName(children[len(children)-1].Type))
+		// not a paragraph; it is the HTML renderer's decoration, not content.
+		if _, ok := child.(*extensionast.FootnoteBacklink); ok {
+			continue
 		}
 		parsed, err := parseBlock(child, source, footnotes)
 		if err != nil {
@@ -562,7 +563,7 @@ func parseListItem(item *ast.ListItem, source []byte, footnotes map[int]string) 
 }
 
 func codeBlockText(lines *gmtext.Segments, source []byte) []*Node {
-	value := strings.TrimRight(string(lines.Value(source)), "\r\n")
+	value := strings.TrimRight(segmentsText(lines, source), "\r\n")
 	if value == "" {
 		return nil
 	}
@@ -663,8 +664,13 @@ func parseInlineWithTableCellLinks(parent ast.Node, source []byte, initial []Mar
 			}
 			if current.SoftLineBreak() {
 				// A soft break is a space, as CommonMark renders it; the browser editor's
-				// white-space: break-spaces would show a literal newline as a line break.
-				appendText(&children, " ", active)
+				// white-space: break-spaces would show a literal newline as a line break. An
+				// image's alt text keeps its line ending, which that parser reads as written.
+				if insideImage(current) {
+					appendText(&children, lineEndingAfter(source, current.Segment.Stop), active)
+				} else {
+					appendText(&children, " ", active)
+				}
 			}
 		case *ast.String:
 			appendText(&children, parseTextValue(current.Value, active), active)
@@ -682,6 +688,10 @@ func parseInlineWithTableCellLinks(parent ast.Node, source []byte, initial []Mar
 			}
 			appendInline(&children, content)
 		case *ast.CodeSpan:
+			if value, ok := multilineCodeSpanText(current, source); ok {
+				appendText(&children, value, append(append([]Mark(nil), active...), Mark{Type: "inlineCode"}))
+				continue
+			}
 			content, err := parseInlineWithTableCellLinks(current, source, append(active, Mark{Type: "inlineCode"}), footnotes, tableCell)
 			if err != nil {
 				return nil, err
@@ -722,7 +732,7 @@ func parseInlineWithTableCellLinks(parent ast.Node, source []byte, initial []Mar
 		case *extensionast.FootnoteBacklink:
 			continue
 		case *ast.RawHTML:
-			value := string(current.Segments.Value(source))
+			value := segmentsText(current.Segments, source)
 			if strings.EqualFold(strings.TrimSpace(value), "</span>") {
 				var removed bool
 				active, removed = closeAnchorMark(active)

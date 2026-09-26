@@ -109,7 +109,6 @@ func TestDocumentEditsRefuseAnUnreadableReplaceWithAdviceForItsCause(t *testing.
 		{"emptied list item", "- Body.\n- two\n", "", []string{"delete", "find"}, []string{"HTML"}},
 		{"emptied blockquote", "Intro.\n\n> Body.\n", "", []string{"delete", "find"}, []string{"HTML"}},
 		{"emptied typed block", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n", "", []string{"delete {block:"}, []string{"HTML"}},
-		{"emptied footnote", "x[^1]\n\n[^1]: Body.\n", "", []string{"delete {block:"}, []string{"HTML"}},
 		{"emptied list item holding more", "- Body.\n\n  ```\n  code\n  ```\n", "", []string{"delete {block:"}, []string{"find", "HTML"}},
 		{"emptied list, a callout's only block", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n- Body.\n:::\n", "", []string{"delete {block:"}, []string{"HTML"}},
 		{"emptied blockquote, a callout's only block", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n> Body.\n:::\n", "", []string{"delete {block:"}, []string{"HTML"}},
@@ -155,15 +154,16 @@ func TestDocumentEditsRefuseAnUnreadableReplaceWithAdviceForItsCause(t *testing.
 	}
 }
 
-// The browser editor's parser, like this one, ends a typed block at a line of three or more colons
-// indented less than four columns from the typed block's own prefix, even inside fenced code the
-// typed block holds; list markers add their width to a code line's indentation, a tab counts four,
-// and a line in a blockquote closes nothing. A replace or a suggestion that writes such a line into
-// code inside a callout would store a document that reads back with the callout cut short, so it
-// is refused and nothing is written. The shapes the engine keeps are stored as sent; the fixture
-// generator's typed-fence-lines.json holds the engine's reading of each shape
-// (pmdoc.TestTypedFenceLineInCodeAgreesWithTheEngine).
-func TestDocumentEditsRefuseCodeThatWouldEndItsTypedBlock(t *testing.T) {
+// The browser editor's parser ends a typed block at a line of at least its fence's colons starting
+// less than four columns past the typed block's own lines, even inside fenced code the typed block
+// holds; list markers add their width to a code line's indentation, a tab advances to the next
+// multiple of four from the column it stands at - two columns in a callout inside a blockquote or
+// a list item - and a line in a blockquote closes nothing. The renderer writes each typed block's fence longer than every
+// such line, so a replace or a suggestion that writes one into code inside a callout is stored with
+// the code as sent, under a longer fence, and the document reads back whole - here, and in the
+// engine (pmdoc.TestTypedFencesReadTheSameInTheEngineAndHere holds the engine's reading of each
+// shape).
+func TestDocumentEditsWriteAColonLineIntoCodeInsideATypedBlock(t *testing.T) {
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
@@ -187,35 +187,59 @@ func TestDocumentEditsRefuseCodeThatWouldEndItsTypedBlock(t *testing.T) {
 		}
 		return markdown
 	}
-	for index, test := range []struct{ name, spec, with string }{
-		{"a closing line", direct, "a\n:::\nb"},
-		{"with a trailing space", direct, "a\n::: \nb"},
-		{"opening the code", direct, ":::\nb"},
-		{"ending the code", direct, "a\n:::"},
-		{"indented two spaces", direct, "a\n  :::\nb"},
-		{"indented three spaces", direct, "a\n   :::\nb"},
-		{"four colons", direct, "a\n::::\nb"},
-		{"in a list item's code", listItem, "a\n:::\nb"},
-		{"indented one space in a list item's code", listItem, "a\n :::\nb"},
-		{"a tab in code in a callout in a blockquote", calloutInQuote, "a\n\t:::\nb"},
-		{"a tab in code in a callout in a list item", calloutInItem, "a\n\t:::\nb"},
-		{"a space and a tab in code in a callout in a list item", calloutInItem, "a\n \t:::\nb"},
-		{"a line of four colons ending in CR LF", direct, "a\r\n::::\r\nb"},
-		{"a line ending in CR LF in a callout in a list item", calloutInItem, "a\r\n :::\r\nb"},
+	readsBack := func(markdown, code, fence string) {
+		t.Helper()
+		back, err := pmdoc.Parse(markdown)
+		if err != nil || len(back.Children) != 3 {
+			t.Fatalf("%q does not read back as three blocks (%v)", markdown, err)
+		}
+		var got string
+		pmdoc.Walk(back, func(node *pmdoc.Node) bool {
+			if node.Type == "code_block" && got == "" {
+				got = node.Children[0].Text
+			}
+			return true
+		})
+		if got != code {
+			t.Fatalf("%q reads back holding the code %q, want %q", markdown, got, code)
+		}
+		if fence != "" && !strings.Contains(markdown, "\n"+fence+"callout{") && !strings.Contains(markdown, " "+fence+"callout{") {
+			t.Fatalf("%q does not open the callout with %s", markdown, fence)
+		}
+	}
+	for index, test := range []struct{ name, spec, with, fence string }{
+		{"a closing line", direct, "a\n:::\nb", "::::"},
+		{"with a trailing space", direct, "a\n::: \nb", "::::"},
+		{"opening the code", direct, ":::\nb", "::::"},
+		{"ending the code", direct, "a\n:::", "::::"},
+		{"indented two spaces", direct, "a\n  :::\nb", "::::"},
+		{"indented three spaces", direct, "a\n   :::\nb", "::::"},
+		{"four colons", direct, "a\n::::\nb", ":::::"},
+		{"in a list item's code", listItem, "a\n:::\nb", "::::"},
+		{"indented one space in a list item's code", listItem, "a\n :::\nb", "::::"},
+		{"a tab in code in a callout in a blockquote", calloutInQuote, "a\n\t:::\nb", "::::"},
+		{"a tab in code in a callout in a list item", calloutInItem, "a\n\t:::\nb", "::::"},
+		{"a space and a tab in code in a callout in a list item", calloutInItem, "a\n \t:::\nb", "::::"},
+		{"a line of four colons ending in CR LF", direct, "a\r\n::::\r\nb", ":::::"},
+		{"a line ending in CR LF in a callout in a list item", calloutInItem, "a\r\n :::\r\nb", "::::"},
+		{"indented four spaces", direct, "a\n    :::\nb", ":::"},
+		{"indented a tab", direct, "a\n\t:::\nb", ":::"},
+		{"a no-break space after the colons in a list item's code", listItem, "a\n:::\u00a0\nb", ":::"},
+		{"indented two spaces in a list item's code", listItem, "a\n  :::\nb", ":::"},
+		{"in a blockquote's code", quoted, "a\n:::\nb", ":::"},
+		{"in code outside a typed block", outside, "a\n:::\nb", ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			issue := createInteractionIssue(t, handler, "E"+string(rune('A'+index)), "closer in code", test.spec)
-			before := text(issue.PrimaryArtifactID)
+			issue := createInteractionIssue(t, handler, "E"+string(rune('A'+index)), "colons in code", test.spec)
 			edited := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
 				"ops": []map[string]any{{"op": "replace", "find": "Body.", "with": test.with}},
 			}, "alice")
-			if body := edited.Body.String(); edited.Code != http.StatusBadRequest || !strings.Contains(body, `"code":"INVALID_OP"`) || !strings.Contains(body, "indent that line four or more spaces, or move") || !strings.Contains(body, "out of the callout") {
-				t.Fatalf("replace: status=%d body=%s", edited.Code, body)
+			if edited.Code != http.StatusOK {
+				t.Fatalf("replace: status=%d body=%s", edited.Code, edited.Body.String())
 			}
-			if after := text(issue.PrimaryArtifactID); after != before {
-				t.Fatalf("after a refused replace = %q, want it unchanged, %q", after, before)
-			}
-			created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+			readsBack(text(issue.PrimaryArtifactID), test.with, test.fence)
+			suggested := createInteractionIssue(t, handler, "S"+string(rune('A'+index)), "colons in code", test.spec)
+			created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+suggested.Key+"/comments", map[string]any{
 				"body": "suggest", "anchor": map[string]any{"artifact": "spec", "quote": "Body."},
 				"suggestion": map[string]string{"replace_with": test.with}, "actor": sessionActor(),
 			})
@@ -223,46 +247,10 @@ func TestDocumentEditsRefuseCodeThatWouldEndItsTypedBlock(t *testing.T) {
 				t.Fatalf("create suggestion: status=%d body=%s", created.Code, created.Body.String())
 			}
 			comment := decodeBody[model.Comment](t, created)
-			accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
-			if body := accepted.Body.String(); accepted.Code != http.StatusBadRequest || !strings.Contains(body, `"code":"INVALID_OP"`) || !strings.Contains(body, "indent that line four or more spaces, or move") {
-				t.Fatalf("accept: status=%d body=%s", accepted.Code, body)
+			if accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice"); accepted.Code != http.StatusOK {
+				t.Fatalf("accept: status=%d body=%s", accepted.Code, accepted.Body.String())
 			}
-			if after := text(issue.PrimaryArtifactID); after != before {
-				t.Fatalf("after a refused accept = %q, want it unchanged, %q", after, before)
-			}
-		})
-	}
-	for index, test := range []struct{ name, spec, with string }{
-		{"indented four spaces", direct, "a\n    :::\nb"},
-		{"indented a tab", direct, "a\n\t:::\nb"},
-		{"a no-break space after the colons in a list item's code", listItem, "a\n:::\u00a0\nb"},
-		{"indented two spaces in a list item's code", listItem, "a\n  :::\nb"},
-		{"in a blockquote's code", quoted, "a\n:::\nb"},
-		{"in code outside a typed block", outside, "a\n:::\nb"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			issue := createInteractionIssue(t, handler, "F"+string(rune('A'+index)), test.name, test.spec)
-			edited := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
-				"ops": []map[string]any{{"op": "replace", "find": "Body.", "with": test.with}},
-			}, "alice")
-			if edited.Code != http.StatusOK {
-				t.Fatalf("replace: status=%d body=%s", edited.Code, edited.Body.String())
-			}
-			stored := text(issue.PrimaryArtifactID)
-			back, err := pmdoc.Parse(stored)
-			if err != nil || len(back.Children) != 3 {
-				t.Fatalf("%q does not read back as three blocks (%v)", stored, err)
-			}
-			var code string
-			pmdoc.Walk(back, func(node *pmdoc.Node) bool {
-				if node.Type == "code_block" && code == "" {
-					code = node.Children[0].Text
-				}
-				return true
-			})
-			if code != test.with {
-				t.Fatalf("%q reads back holding the code %q, want %q", stored, code, test.with)
-			}
+			readsBack(text(suggested.PrimaryArtifactID), test.with, test.fence)
 		})
 	}
 }
