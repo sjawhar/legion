@@ -760,13 +760,6 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		if plainText && pmdoc.TargetSpansBlocks(tree, target) {
 			return nil, &ErrQuoteSpansBlocks{Quote: anchor}
 		}
-		with, err := parseInput(op.Markdown)
-		if err != nil {
-			return nil, invalidMarkdownOp("markdown", err)
-		}
-		if out, inserted, err := pmdoc.InsertTableRows(tree, target, op.Markdown, after); err != nil || inserted {
-			return out, err
-		}
 		position := target.From
 		if after {
 			position = target.To
@@ -776,6 +769,14 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 			if err != nil {
 				return nil, err
 			}
+		}
+		// Front matter opens only the document's start, so only there does the insert read it.
+		with, err := parseFragmentInput(op.Markdown, opensDocument(tree, position))
+		if err != nil {
+			return nil, invalidMarkdownOp("markdown", err)
+		}
+		if out, inserted, err := pmdoc.InsertTableRows(tree, target, op.Markdown, after); err != nil || inserted {
+			return out, err
 		}
 		out, err := pmdoc.Splice(tree, pmdoc.Range{From: position, To: position}, with)
 		if err != nil {
@@ -1056,8 +1057,7 @@ func insertTarget(tree *pmdoc.Node, field, anchor string, occurrence *int) (pmdo
 // the replacement alone: `<div>x</div>` over a whole paragraph, at a list item's start or after a
 // hard break opens an HTML block the Proof schema does not carry, while the same HTML inside a
 // line, a table cell or a heading is inline HTML and is kept. A block that was already unreadable,
-// or another block that is, is no reason to refuse this replace. A replace stays inside its
-// textblock, so the block holds the same index before and after.
+// or another block that is, is no reason to refuse this replace.
 func refuseUnreadableReplacement(before, after *pmdoc.Node, match pmdoc.Range, with string) error {
 	unreadable, err := replacementBroke(before, after, match, pmdoc.BlockReadError)
 	if err != nil || unreadable == nil {
@@ -1085,15 +1085,97 @@ func refuseReshapedReplacement(before, after *pmdoc.Node, match pmdoc.Range, wit
 // replace, when it said nothing of that block before: a block that already failed the check, or
 // another block that does, is no reason to refuse this replace. A replace stays inside its
 // textblock, so the block holds the same index before and after.
+
+// refuseBrokenAccept refuses an accepted suggestion whose text leaves a document-level block the
+// document cannot read back, or reads back as blocks of another kind, where it lands, over every
+// block the accept writes: the check refuseUnreadableReplacement runs for a replace, and the shape
+// check, since an accept writes blocks - two paragraphs in a tight list item read back as one. The
+// person accepting cannot change the text, so acceptRefusal says what the text does there and what
+// they can do.
+func refuseBrokenAccept(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.TextblockAt, with string, replacement *pmdoc.Node) error {
+	broke, err := replacementBroke(before, after, match, pmdoc.BlockReadError)
+	if err == nil && broke == nil {
+		broke, err = replacementBroke(before, after, match, pmdoc.BlockShapeError)
+	}
+	if err != nil || broke == nil {
+		return err
+	}
+	return &ErrInvalidOp{Field: "replace_with", Reason: acceptRefusal(before, after, match, at, with, replacement, broke)}
+}
+
+// acceptRefusal says what an accepted suggestion's text does where it lands, why the document
+// cannot carry it (broke), and what the person accepting can do: reject the suggestion, or ask for
+// text the block can hold. It names no edit operation, since accepting takes none. The text
+// empties the paragraph it lands in only when it renders no content, and then the delete it names
+// removes only the paragraph where the rest of its block stands without it; blocks written at a
+// list item's start leave the item's own line empty ahead of them.
+func acceptRefusal(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.TextblockAt, with string, replacement *pmdoc.Node, broke error) string {
+	holder := "document"
+	if parent := at.Ancestors[0]; parent.Type != "doc" {
+		holder = strings.ReplaceAll(parent.Type, "_", " ")
+	}
+	landed, found := pmdoc.ContainingTextblock(after, match.From)
+	emptied := found && emptyTextblock(landed.Node)
+	if !isInlineDocument(replacement) {
+		where, ask := "in this "+holder, "text the "+holder+" can hold"
+		if holder == "list item" && emptied {
+			where, ask = "at the start of this list item", "the block to follow text on the item's line"
+		}
+		return fmt.Sprintf(
+			"replace_with %q writes %s %s, which the document cannot read back there (%v); reject the suggestion, or reply asking for %s",
+			with, pmdoc.BlockNames(replacement.Children), where, broke, ask,
+		)
+	}
+	if emptyTextblock(replacement.Children[0]) && (!found || emptied) {
+		advice := "reject the suggestion, or delete the " + holder + " in the document"
+		switch {
+		case at.Ancestors[0].Type == "footnote_definition" && len(at.Ancestors[0].Children) == 1:
+			// A definition goes only with its reference, which would otherwise read as text.
+			advice = "reject the suggestion, or delete the footnote in the document, its reference along with this definition"
+		case len(at.Ancestors[0].Children) > 1:
+			advice = "reject the suggestion, since the rest of the " + holder + " cannot be written without this paragraph"
+			if _, err := pmdoc.DeleteBlock(before, blockID(at.Node)); err == nil {
+				advice = "reject the suggestion, or delete the paragraph in the document, which leaves the rest of the " + holder
+			}
+		}
+		return fmt.Sprintf(
+			"replace_with %q empties the paragraph this %s holds, and the %s cannot be written with it empty; %s",
+			with, holder, holder, advice,
+		)
+	}
+	return fmt.Sprintf(
+		"replace_with %q leaves text the document reads back as another block where it lands (%v); reject the suggestion, or reply asking for the text inside a line",
+		with, broke,
+	)
+}
+
+// replacementBroke is what check says of a document-level block the write changed, when it said
+// nothing of the blocks the match lay in before: a block that already failed the check, or another
+// block that does, is no reason to refuse this write. The write changed the blocks from the one
+// holding the match's start to the one holding its end, and the blocks after them keep their
+// order, so it changed as many more as the document gained. A replace stays inside its textblock,
+// so its block holds the same index before and after; an accepted suggestion can write blocks,
+// and its match can span them.
 func replacementBroke(before, after *pmdoc.Node, match pmdoc.Range, check func(*pmdoc.Node) error) (broke, err error) {
-	index, err := pmdoc.BlockIndex(before, match)
+	first, err := pmdoc.BlockIndex(before, pmdoc.Range{From: match.From, To: match.From})
 	if err != nil {
 		return nil, err
 	}
-	if broke = check(after.Children[index]); broke == nil || check(before.Children[index]) != nil {
-		return nil, nil
+	last, err := pmdoc.BlockIndex(before, pmdoc.Range{From: match.To, To: match.To})
+	if err != nil {
+		return nil, err
 	}
-	return broke, nil
+	for index := first; index <= last; index++ {
+		if check(before.Children[index]) != nil {
+			return nil, nil
+		}
+	}
+	for index := first; index <= max(first, last+len(after.Children)-len(before.Children)); index++ {
+		if broke = check(after.Children[index]); broke != nil {
+			return broke, nil
+		}
+	}
+	return nil, nil
 }
 
 // unreadableReason says why a replace left its block unreadable and what to do instead, by cause.
@@ -1250,10 +1332,11 @@ func blockMarkerAfterHardBreak(inline []*pmdoc.Node) (marker, kind string) {
 	return "", ""
 }
 
-// inlineAware parses a suggestion's replacement as blocks, keeping the edge
-// whitespace of a replacement that stays inline.
-func inlineAware(markdown string, edges textEdges) (*pmdoc.Node, error) {
-	tree, err := parseInput(markdown)
+// inlineAware parses a suggestion's replacement as blocks written into the document, keeping the
+// edge whitespace of a replacement that stays inline. opensDocument says whether the replacement
+// lands where the document begins.
+func inlineAware(markdown string, edges textEdges, opensDocument bool) (*pmdoc.Node, error) {
+	tree, err := parseFragmentInput(markdown, opensDocument)
 	if err != nil {
 		return nil, err
 	}

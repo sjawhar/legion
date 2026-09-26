@@ -154,7 +154,26 @@ callout at the top and inside a blockquote, list items and a footnote definition
 four spaces, which no layout closes. Text a `replace` writes that would read as block syntax at a
 line start is written escaped, so it reads back as the characters: `---`, `***`, `~~~` or `::::`
 over a paragraph is stored `\---` and so on (the renderer's line-start escapes), beside an
-emptied paragraph as anywhere else, since an empty paragraph is not written. Everywhere else `replace` is
+emptied paragraph as anywhere else, since an empty paragraph is not written. Accepting a
+suggestion (`POST /api/v1/comments/{id}/accept`, `docs/marks.go` `applySuggestion`) runs
+`refuseUnreadableReplacement`'s check outside a code block, and the shape comparison
+(`pmdoc.BlockShapeError`, which expects no empty paragraph back), over every document-level block
+the accept writes (`refuseBrokenAccept`, naming `replace_with`), since an accept writes blocks:
+two paragraphs in a tight list item read back as one. An accept parses its text as blocks
+written into the document (`pmdoc.ParseFragment`: a leading `---` is a rule, as `***` is, except
+that a closed front-matter block is front matter where the text lands at the document's start,
+at the start of a top-level first block's text), so a rule or a list over a whole paragraph is
+written as that block and kept, while one that leaves a block the document cannot read back,
+such as a list at a list item's start or in a footnote definition, is refused: the document
+stays as it was and the suggestion stays open. The person accepting cannot change the text, so
+the refusal (`acceptRefusal`) says what the text writes where it lands and names what they can
+do (reject the suggestion, or reply asking for text the block can hold), never an edit-route
+operation; it says the text empties a paragraph only when the text renders no content, and then
+offers deleting the paragraph only where the rest of its block stands without it, and the whole
+block only where the paragraph is all it holds - a footnote definition together with its
+reference, which would otherwise read as text. A reject is not checked, since it gives back the
+text the insert started from. Neither route can see a lone carriage return, which this parser
+reads as text where CommonMark and the browser editor end the line. Everywhere else `replace` is
 inline: `with` parses through `pmdoc.ParseInline` (paragraph-only block grammar), so a multi-paragraph
 `with` is `INVALID_OP`, so is any non-empty `with` that renders to no inline content (a line
 indented four spaces or a tab, which markdown reads as a code block, or whitespace alone — an
@@ -194,7 +213,11 @@ list into the place of a bullet whose text goes, and refuses a bullet with other
 `ErrListItemContent` naming `delete {block:"<item id>"}`; `pmdoc.DeleteBlock` serves `block` and
 reports any emptied container's content rule as `INVALID_OP`). `move` relocates the block with
 `block` to the document-level boundary of an insert anchor (`pmdoc.MoveBlock`); insert and move
-anchors are a quote, `start`, `end`, `heading:<title>`, or `block:<id>`.
+anchors are a quote, `start`, `end`, `heading:<title>`, or `block:<id>`. An insert's `markdown` is
+read as text written into the document (`pmdoc.ParseFragment`), so a leading `---` line is a rule,
+as `***` is, except that a closed front-matter block is front matter where the insert lands at the
+document's start (`start`, or before the first block); the accept and the insert decide that with
+one rule (`docs.opensDocument`).
 
 `delete_row` and `delete_column` each take a table `block` id and a zero-based `index`, and mutate
 the table in place. Row `0` is the header; deleting it promotes the first body row into the header,

@@ -267,6 +267,142 @@ func TestDocumentEditsRefuseCodeThatWouldEndItsTypedBlock(t *testing.T) {
 	}
 }
 
+// Accepting a suggestion writes its replacement through the same shape checks a replace runs: one
+// that leaves a block the document cannot read back, or reads back as blocks of another kind, is
+// refused naming replace_with, and nothing is written - the document stays byte for byte as it was
+// and the suggestion stays open. The person accepting cannot change the text, so the refusal says
+// what the text writes and names what they can do - reject the suggestion - never an edit-route
+// operation, and it says the text empties a paragraph only when the text is empty. An accept
+// whose blocks read back as written is stored as before, including one that writes blocks, such
+// as a rule or a list over a whole paragraph, and a line of dashes is such a rule. Where the text
+// lands at the document's start, a closed front-matter block that opens it is front matter.
+func TestAcceptingASuggestionRefusesAReplacementTheDocumentCannotCarryBack(t *testing.T) {
+	var documentService *docs.Service
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	const (
+		paragraph  = "Intro.\n\nBody.\n\nAfter.\n"
+		listItem   = "Intro.\n\n- Body.\n- two\n"
+		longItem   = "Intro.\n\n- Body.\n\n  more\n- two\n"
+		ordered    = "Intro.\n\n1. Body.\n2. two\n"
+		nestedItem = "Intro.\n\n- Body.\n  - nested\n- two\n"
+		blockquote = "Intro.\n\n> Body.\n"
+		callout    = "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n"
+		footnote   = "x[^1]\n\n[^1]: Body.\n"
+	)
+	text := func(artifactID string) string {
+		markdown, err := documentService.Text(context.Background(), artifactID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return markdown
+	}
+	suggest := func(t *testing.T, key, spec, with string) (string, model.Comment) {
+		t.Helper()
+		issue := createInteractionIssue(t, handler, key, "accept "+with, spec)
+		created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+			"body": "suggest", "anchor": map[string]any{"artifact": "spec", "quote": "Body."},
+			"suggestion": map[string]string{"replace_with": with}, "actor": sessionActor(),
+		})
+		if created.Code != http.StatusCreated {
+			t.Fatalf("create suggestion: status=%d body=%s", created.Code, created.Body.String())
+		}
+		return issue.PrimaryArtifactID, decodeBody[model.Comment](t, created)
+	}
+	for index, test := range []struct{ name, spec, with, says string }{
+		{"a rule in a list item", listItem, "***", "writes a horizontal rule at the start of this list item"},
+		{"a list in a list item", listItem, "- a", "writes a bullet list at the start of this list item"},
+		{"two paragraphs in a list item", listItem, "a\n\nb", "writes two paragraphs in this list item"},
+		{"code in a list item", listItem, "```\nc\n```", "writes a code block at the start of this list item"},
+		{"a list in a list item holding two paragraphs", longItem, "- a", "writes a bullet list at the start of this list item"},
+		{"a list in an ordered item", ordered, "- a", "writes a bullet list at the start of this list item"},
+		{"nothing in a list item", listItem, "", "empties the paragraph this list item holds"},
+		// Emptying the first paragraph of an item that holds more names only what can go: the
+		// paragraph where the rest of the item can stand without it, and nothing where it cannot.
+		{"nothing in a list item holding two paragraphs", longItem, "", "reject the suggestion, or delete the paragraph in the document"},
+		{"nothing in a list item holding a nested list", nestedItem, "", "reject the suggestion, since the rest of the list item cannot be written without this paragraph"},
+		// A footnote definition goes only with its reference, which would otherwise read as text.
+		{"nothing in a footnote definition", footnote, "", "reject the suggestion, or delete the footnote in the document, its reference along with this definition"},
+		{"a rule in a footnote definition", footnote, "***", "writes a horizontal rule in this footnote definition"},
+		{"a list in a footnote definition", footnote, "- a", "writes a bullet list in this footnote definition"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			artifactID, comment := suggest(t, "R"+string(rune('A'+index)), test.spec, test.with)
+			before := text(artifactID)
+			accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
+			if body := accepted.Body.String(); accepted.Code != http.StatusBadRequest || !strings.Contains(body, `"code":"INVALID_OP"`) || !strings.Contains(body, "replace_with") {
+				t.Fatalf("accept: status=%d body=%s", accepted.Code, body)
+			}
+			var refusal struct{ Error string }
+			if err := json.Unmarshal(accepted.Body.Bytes(), &refusal); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(refusal.Error, test.says) || !strings.Contains(refusal.Error, "reject the suggestion") {
+				t.Fatalf("refusal %q does not say %q and name rejecting the suggestion", refusal.Error, test.says)
+			}
+			for _, edit := range []string{"delete and find", "delete {block", "insert with markdown", "insert it as", "give replace_with", "put other text"} {
+				if strings.Contains(refusal.Error, edit) {
+					t.Fatalf("refusal %q names %q, which the person accepting cannot do", refusal.Error, edit)
+				}
+			}
+			if test.with != "" && strings.Contains(refusal.Error, "empties") {
+				t.Fatalf("refusal %q says the text empties a paragraph, but it is %q", refusal.Error, test.with)
+			}
+			if after := text(artifactID); after != before {
+				t.Fatalf("after a refused accept = %q, want it unchanged, %q", after, before)
+			}
+			read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/"+comment.ID, nil, "alice")
+			if read.Code != http.StatusOK || decodeBody[model.Comment](t, read).Resolved {
+				t.Fatalf("after a refused accept the suggestion reads status=%d body=%s, want it open", read.Code, read.Body.String())
+			}
+		})
+	}
+	for index, test := range []struct{ name, spec, with, want string }{
+		{"text", paragraph, "Changed.", "Intro.\n\nChanged.\n\nAfter.\n"},
+		{"a rule over a paragraph", paragraph, "***", "Intro.\n\n---\n\nAfter.\n"},
+		// An accept's text goes inside the document, so a leading `---` is a rule, as `***` is,
+		// never the front matter that would open a document and swallow the line.
+		{"dashes over a paragraph", paragraph, "---", "Intro.\n\n---\n\nAfter.\n"},
+		{"dashes inside a paragraph", "Intro.\n\nSay Body. now.\n\nAfter.\n", "---", "Intro.\n\nSay \n\n---\n\n now.\n\nAfter.\n"},
+		{"a list over a paragraph", paragraph, "- a", "Intro.\n\n- a\n\nAfter.\n"},
+		{"two paragraphs over one", paragraph, "a\n\nb", "Intro.\n\na\n\nb\n\nAfter.\n"},
+		{"dashes inside a line", paragraph, "--- a note", "Intro.\n\n--- a note\n\nAfter.\n"},
+		{"text in a list item", listItem, "Changed.", "Intro.\n\n- Changed.\n- two\n"},
+		{"front matter over an opening heading", "# Body.\n\nText.\n", "---\nstatus: draft\n---\n\n# Body.", "---\nstatus: draft\n---\n\n# Body.\n\nText.\n"},
+		{"front matter over an opening paragraph", "Body.\n\nAfter.\n", "---\ntitle: x\n---\n\nBody.", "---\ntitle: x\n---\n\nBody.\n\nAfter.\n"},
+		// A line of colons in text is written escaped, so it reads back as the text it is and never
+		// as a typed block's fence.
+		{"colons in a paragraph", paragraph, ":::\nb", "Intro.\n\n\\::: b\n\nAfter.\n"},
+		{"colons in a blockquote", blockquote, ":::\nb", "Intro.\n\n> \\::: b\n"},
+		{"colons in a callout", callout, ":::", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n\\:::\n:::\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			artifactID, comment := suggest(t, "K"+string(rune('A'+index)), test.spec, test.with)
+			if accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice"); accepted.Code != http.StatusOK {
+				t.Fatalf("accept: status=%d body=%s", accepted.Code, accepted.Body.String())
+			}
+			if after := text(artifactID); after != test.want {
+				t.Fatalf("after accepting = %q, want %q", after, test.want)
+			}
+		})
+	}
+	// An unclosed `---` that opens the document is a rule there, as `***` is.
+	opening := map[string]string{}
+	for index, with := range []string{"---", "***"} {
+		artifactID, comment := suggest(t, "H"+string(rune('A'+index)), "# Body.\n\nText.\n", with)
+		if accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice"); accepted.Code != http.StatusOK {
+			t.Fatalf("accept %q: status=%d body=%s", with, accepted.Code, accepted.Body.String())
+		}
+		opening[with] = text(artifactID)
+	}
+	if opening["---"] != opening["***"] {
+		t.Fatalf("accepting `---` over an opening heading = %q, want what `***` writes, %q", opening["---"], opening["***"])
+	}
+}
+
 // A code block's text is literal, so a replace there writes with exactly as sent - whitespace at
 // its edges, markdown syntax, a reference, a tab - through the edits route and through an
 // accepted suggestion alike.

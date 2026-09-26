@@ -21,7 +21,8 @@ var anchorAttribute = regexp.MustCompile(`([a-zA-Z0-9_-]+)="([^"]*)"`)
 
 // newMarkdownParser builds the one goldmark configuration Dispatch reads markdown with. Its two
 // uses differ only in the front-matter extension: a document with a closed front-matter block is
-// read with it, and everything else without it - a document whose leading `---` opens nothing,
+// read with it, and everything else without it - text written into a document after its start
+// (ParseFragment), a document whose leading `---` opens nothing,
 // which the extension would consume to the end of the input with every block after it, and the
 // renderer asking how a line it is about to write would be read.
 func newMarkdownParser(readFrontmatter bool) goldmark.Markdown {
@@ -45,7 +46,7 @@ var (
 
 // Parse converts markdown into the closed Proof ProseMirror tree.
 func Parse(markdown string) (*Node, error) {
-	doc, err := parseUnstamped(markdown)
+	doc, err := parseUnstamped(markdown, true)
 	if err != nil {
 		return nil, err
 	}
@@ -59,7 +60,19 @@ func Parse(markdown string) (*Node, error) {
 // whole, or nil for a fragment or a new document: a repeat live already carries is not refused
 // (RepeatedBlockID), and the repair keeps it for its first block, as settlement would.
 func ParseForWrite(markdown string, live *Node) (*Node, error) {
-	doc, err := parseUnstamped(markdown)
+	return parseForWrite(markdown, live, true)
+}
+
+// ParseFragment parses markdown a caller writes into a document, rather than one that begins it,
+// as ParseForWrite parses a fragment: a leading `---` line is a horizontal rule, as it is anywhere
+// after a document's start. Written where the document begins (opensDocument), a closed
+// front-matter block opening the markdown is front matter, as Parse reads it.
+func ParseFragment(markdown string, opensDocument bool) (*Node, error) {
+	return parseForWrite(markdown, nil, opensDocument)
+}
+
+func parseForWrite(markdown string, live *Node, readFrontmatter bool) (*Node, error) {
+	doc, err := parseUnstamped(markdown, readFrontmatter)
 	if err != nil {
 		return nil, err
 	}
@@ -71,10 +84,14 @@ func ParseForWrite(markdown string, live *Node) (*Node, error) {
 }
 
 // parseUnstamped is Parse before EnsureBlockIDs: blocks keep the ids their markdown names, and a
-// block that names none has none yet.
-func parseUnstamped(markdown string) (*Node, error) {
+// block that names none has none yet. Without readFrontmatter a closed front-matter block is read
+// as the blocks its lines make.
+func parseUnstamped(markdown string, readFrontmatter bool) (*Node, error) {
 	source := []byte(markdown)
-	front := parseFrontmatterBlock(source)
+	var front *Node
+	if readFrontmatter {
+		front = parseFrontmatterBlock(source)
+	}
 	// A document with no closed front-matter block is parsed without the extension: it has
 	// nothing for the extension to read, and an unclosed opener is text it would swallow.
 	md := markdownParser

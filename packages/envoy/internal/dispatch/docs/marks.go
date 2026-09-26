@@ -304,7 +304,7 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		var replacement *pmdoc.Node
 		if code {
 			replacement = codeReplacement(with)
-		} else if replacement, err = inlineAware(with, edgesOf(at, range_)); err != nil {
+		} else if replacement, err = inlineAware(with, edgesOf(at, range_), opensDocument(tree, range_.From)); err != nil {
 			return err
 		}
 		next, err := pmdoc.Splice(tree, range_, replacement)
@@ -313,6 +313,13 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		}
 		if code {
 			if err := refuseCodeThatEndsItsBlock(tree, next, range_, at, "replace_with", with); err != nil {
+				return err
+			}
+		} else if accept {
+			// An accept writes the suggestion's text through the checks a replace runs, so it too
+			// writes nothing the document cannot read back as it wrote it. A reject gives back the
+			// document the insert started from.
+			if err := refuseBrokenAccept(tree, next, range_, at, with, replacement); err != nil {
 				return err
 			}
 		}
