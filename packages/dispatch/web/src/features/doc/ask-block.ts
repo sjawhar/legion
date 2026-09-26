@@ -6,6 +6,8 @@ import {
 import { type EditorState, Plugin, PluginKey } from "@milkdown/kit/prose/state";
 import type { EditorView, NodeView, ViewMutationRecord } from "@milkdown/kit/prose/view";
 
+import { BLOCK_ID_DOM_ATTR, blockIdOf } from "@sjawhar/proof-editor";
+
 import type { AskOption, AskUrgency, BlockSchema } from "../../api/types";
 import {
   askBlockTint,
@@ -19,7 +21,7 @@ import { URGENCY_LABELS } from "../inbox/ask-urgency";
 /**
  * Draws a document's host-owned typed blocks other than `ask`, which `AskBlockView` owns: the
  * block's name and attributes as a header the reader sees, above its content. It is the node
- * view's drawing (`TypedBlockView`), never the node's `toDOM`: HTML of the document - a copy, a
+ * view's drawing (`typedBlockView`), never the node's `toDOM`: HTML of the document - a copy, a
  * drag, or the editor's plain-text paste, which renders the markdown it parsed through `toDOM` -
  * carries only the block's section and content, which is all its parse rule reads.
  */
@@ -51,57 +53,36 @@ export function renderTypedBlock(node: ProseMirrorNode): DOMOutputSpec {
   ];
 }
 
-/** A host-owned typed block other than `ask`, drawn by `renderTypedBlock`. */
-class TypedBlockView implements NodeView {
-  readonly dom: HTMLElement;
-  readonly contentDOM: HTMLElement;
-
-  constructor(
-    private node: ProseMirrorNode,
-    document: Document
-  ) {
-    const { dom, contentDOM } = DOMSerializer.renderSpec(document, renderTypedBlock(node));
-    this.dom = dom as HTMLElement;
-    this.contentDOM = contentDOM as HTMLElement;
-    this.dom.dataset.blockId = String(node.attrs.blockId ?? "");
+/** The node view of a host-owned typed block other than `ask`: `renderTypedBlock`'s drawing,
+ * under the block's id. */
+function typedBlockView(node: ProseMirrorNode, document: Document): NodeView {
+  const { dom, contentDOM } = DOMSerializer.renderSpec(document, renderTypedBlock(node));
+  const blockId = blockIdOf(node);
+  if (blockId !== null) {
+    (dom as HTMLElement).setAttribute(BLOCK_ID_DOM_ATTR, blockId);
   }
-
-  /** Content changes stay in place; a change to the block's attributes redraws its header. */
-  update(node: ProseMirrorNode): boolean {
-    if (node.type !== this.node.type || !node.sameMarkup(this.node)) {
-      return false;
-    }
-    this.node = node;
-    return true;
-  }
+  return { contentDOM, dom };
 }
 
 /** The header `renderTypedBlock` draws inside a typed block's section. */
 const typedBlockHeader = "section[data-proof-block-type] > header[data-proof-block-summary]";
 
 /**
- * Removes the attribute header `renderTypedBlock` draws from pasted HTML that still carries it, as
- * a tab on an older build copies it: a typed block's parse rule reads every child of its section
- * as content, so a pasted header would come back as the block's first paragraphs. It runs after
- * the editor's own cleanup of pasted HTML (a Google Docs wrapper, for one).
+ * Pasted HTML without the attribute header `renderTypedBlock` draws, which a tab on an older build
+ * copies: a typed block's parse rule reads every child of its section as content, so a pasted
+ * header would come back as the block's first paragraphs.
  */
-export function installTypedBlockPaste(view: EditorView): void {
-  const previous = view.props.transformPastedHTML;
-  view.setProps({
-    transformPastedHTML: (pasted, pastedView) => {
-      const html = previous ? previous(pasted, pastedView) : pasted;
-      const template = view.dom.ownerDocument.createElement("template");
-      template.innerHTML = html;
-      const headers = template.content.querySelectorAll(typedBlockHeader);
-      if (headers.length === 0) {
-        return html;
-      }
-      for (const header of headers) {
-        header.remove();
-      }
-      return template.innerHTML;
-    },
-  });
+function withoutTypedBlockHeaders(html: string, document: Document): string {
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  const headers = template.content.querySelectorAll(typedBlockHeader);
+  if (headers.length === 0) {
+    return html;
+  }
+  for (const header of headers) {
+    header.remove();
+  }
+  return template.innerHTML;
 }
 
 /** What an `ask` node says about itself, read once per render from its attributes and content. */
@@ -322,14 +303,18 @@ export const askBlockEditingPlugin = new Plugin({
   },
 });
 
-/** Mounts `AskBlockView` for every `ask` node in the editor, keeping the library's other node
- * views, adds `askBlockEditingPlugin`, and reports the live set of hosts (in document order)
- * whenever it changes. Call once per editor, right after it is created. */
-export function installAskBlockView(
+/** Installs the document's typed blocks in the editor: `AskBlockView` for every `ask` node,
+ * reporting the live set of hosts (in document order) whenever it changes, and
+ * `renderTypedBlock`'s node view for every other type in the block schema, keeping the library's
+ * other node views; `askBlockEditingPlugin`; and the removal of `renderTypedBlock`'s header from
+ * pasted HTML, after the editor's own cleanup of it (a Google Docs wrapper, for one). Call once
+ * per editor, right after it is created. */
+export function installTypedBlocks(
   view: EditorView,
   blockSchema: BlockSchema,
   onHostsChange: (hosts: readonly AskBlockHost[]) => void
 ): void {
+  const previousTransform = view.props.transformPastedHTML;
   const registry = new Map<number, AskBlockHost>();
   const publish = () => {
     onHostsChange(
@@ -348,11 +333,16 @@ export function installAskBlockView(
           .filter((type) => type.name !== "ask")
           .map((type) => [
             type.name,
-            (node: ProseMirrorNode) => new TypedBlockView(node, view.dom.ownerDocument),
+            (node: ProseMirrorNode) => typedBlockView(node, view.dom.ownerDocument),
           ])
       ),
       ask: (node) => new AskBlockView(node, view.dom.ownerDocument, registry, publish),
     },
     plugins: [...(view.props.plugins ?? []), askBlockEditingPlugin],
+    transformPastedHTML: (pasted, pastedView) =>
+      withoutTypedBlockHeaders(
+        previousTransform ? previousTransform(pasted, pastedView) : pasted,
+        view.dom.ownerDocument
+      ),
   });
 }

@@ -32,7 +32,7 @@ import {
   parseDispatchReference,
 } from "../refs/routes";
 import { AskBlockCard } from "./AskBlockCard";
-import { type AskBlockHost, installAskBlockView, installTypedBlockPaste } from "./ask-block";
+import { type AskBlockHost, installTypedBlocks } from "./ask-block";
 import type { ConnectionState, DocumentConnection } from "./connection";
 import { colorForLogin } from "./connection";
 import { bindRemoteMarks, type EditorHandle } from "./editor";
@@ -399,8 +399,7 @@ export function ProofDocument({
                 }
                 editor = handle;
                 editorRef.current = handle;
-                installAskBlockView(handle.view, blockSchema, setAskBlockHosts);
-                installTypedBlockPaste(handle.view);
+                installTypedBlocks(handle.view, blockSchema, setAskBlockHosts);
                 const blockLink = window.location.hash;
                 if (blockLink.startsWith("#b-")) {
                   handle.focusBlock(decodeURIComponent(blockLink.slice(3)));

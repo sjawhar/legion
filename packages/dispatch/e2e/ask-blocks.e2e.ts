@@ -116,6 +116,20 @@ async function openAnsweredDecision(browser: Browser) {
   return { alice, blockAsk, issue, page };
 }
 
+/** Opens a spec holding "End." as alice, with the caret collapsed at the end of it: the selection
+ * bar is gone once the selection collapses, and a paste before that replaces the selected text. */
+async function openAtEndOfEnd(browser: Browser, title: string) {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", spec: "End.\n", title });
+  const alice = await asUser(browser, "alice");
+  const page = await alice.newPage();
+  await page.goto(`/issues/${issue.key}`);
+  await selectEditorText(page, "End.");
+  await page.keyboard.press("ArrowRight");
+  await expect(actionBar(page)).toBeHidden();
+  return { alice, issue, page };
+}
+
 async function alertsIn(page: Page): Promise<Locator> {
   return page.getByRole("article", { name: "Document" }).getByRole("alert");
 }
@@ -695,17 +709,8 @@ test("a copy of an answered decision pasted above it leaves the answer on the or
 test("a paste from Google Docs keeps the editor's own cleanup of its wrapper", async ({
   browser,
 }) => {
-  await createProject({ key: "CORE", name: "Core" });
-  const issue = await createIssue({ project: "CORE", spec: "End.\n", title: "Pasted wrapper" });
-  const alice = await asUser(browser, "alice");
+  const { alice, issue, page } = await openAtEndOfEnd(browser, "Pasted wrapper");
   try {
-    const page = await alice.newPage();
-    await page.goto(`/issues/${issue.key}`);
-    await selectEditorText(page, "End.");
-    await page.keyboard.press("ArrowRight");
-    // The selection has collapsed once the selection bar is gone; a paste before that replaces
-    // the selected text.
-    await expect(actionBar(page)).toBeHidden();
     await paste(page, {
       html: '<b id="docs-internal-guid-4a1b2c3d-7fff"><p>Wrapped words</p></b>',
       text: "Wrapped words",
@@ -723,16 +728,11 @@ test("a paste from Google Docs keeps the editor's own cleanup of its wrapper", a
 // to HTML before parsing that back: the rendering carries a typed block's section and content
 // only, so a pasted decision's question and a callout's text arrive as written, never with the
 // block's attribute list in front of them.
-test("typed blocks pasted as plain text arrive as written", async ({ browser }) => {
-  await createProject({ key: "CORE", name: "Core" });
-  const issue = await createIssue({ project: "CORE", spec: "End.\n", title: "Plain text paste" });
-  const alice = await asUser(browser, "alice");
+test("an ask and a callout pasted together as plain text arrive as written", async ({
+  browser,
+}) => {
+  const { alice, issue, page } = await openAtEndOfEnd(browser, "Plain text paste");
   try {
-    const page = await alice.newPage();
-    await page.goto(`/issues/${issue.key}`);
-    await selectEditorText(page, "End.");
-    await page.keyboard.press("ArrowRight");
-    await expect(actionBar(page)).toBeHidden();
     await paste(page, {
       html: "",
       text:
