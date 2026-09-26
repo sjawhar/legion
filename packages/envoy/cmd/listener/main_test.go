@@ -158,11 +158,19 @@ func TestOpenListener_PublishesOnlyOnceTheRoutesServe(t *testing.T) {
 	published := false
 	openListener(&gate, hooks, &listenerDeps{}, "test-machine", logging.New("test"), func(*listenerDeps) {
 		published = true
-		for path, want := range map[string]int{"/webhook/github": http.StatusOK, "/v1/not-a-route": http.StatusNotFound} {
+		// A real /v1 route answers a wrong method with 405 before it reads any dependency; a
+		// mux without the /v1 routes would answer 404, as would one the gate has not opened.
+		for _, probe := range []struct {
+			method, path string
+			want         int
+		}{
+			{http.MethodPost, "/webhook/github", http.StatusOK},
+			{http.MethodGet, "/v1/interests/unsubscribe", http.StatusMethodNotAllowed},
+		} {
 			recorder := httptest.NewRecorder()
-			gate.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, path, nil))
-			if recorder.Code != want {
-				t.Errorf("%s when the dependencies were published: status = %d, want %d; body = %s", path, recorder.Code, want, recorder.Body.String())
+			gate.ServeHTTP(recorder, httptest.NewRequest(probe.method, probe.path, nil))
+			if recorder.Code != probe.want {
+				t.Errorf("%s %s when the dependencies were published: status = %d, want %d; body = %s", probe.method, probe.path, recorder.Code, probe.want, recorder.Body.String())
 			}
 		}
 	})
