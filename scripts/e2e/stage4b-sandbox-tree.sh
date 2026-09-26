@@ -178,6 +178,12 @@ claim_view() {
     'if $role == "architect" then .issues[$issue].architect else .issues[$issue].workers[$role].claim end'
 }
 claim_sandbox() { claim_view "$1" "$2" | jq -er '.locator.sandbox.name'; }
+# claim_moved_or_held ISSUE ROLE UID: the daemon holds ISSUE, or ROLE's claim on it names a pod other
+# than UID - its reaction to the end of pod UID.
+claim_moved_or_held() {
+  daemon_state | jq -e --arg issue "$1" --arg role "$2" --arg uid "$3" '.issues[$issue] |
+    .phase == "held" or (((if $role == "architect" then .architect else .workers[$role].claim end).locator.incarnation // "") as $n | $n != "" and $n != $uid)' >/dev/null
+}
 claim_pod_uid() { claim_view "$1" "$2" | jq -er '.locator.incarnation'; }
 # claims_cli ARGS... is `legion claims` from the operator shell, over the operator bearer.
 claims_cli() { "$work/legion" claims "$@" --config "$work/legion.yaml" --operator-token-file "$work/operator-token"; }
@@ -483,8 +489,13 @@ end_claim_pod() {
       ;;
     *) fail "end_claim_pod: unknown method $method" ;;
   esac
-  until_true "$bound" "the $method of pod $ended_pod_uid to land" sh -c \
-    "timeout 120 kubectl --context '$operator' -n '$namespace' get sandbox '$ended_pod' -o json | jq -e '.metadata.generation as \$g | .status.conditions[]? | select(.type == \"Finished\" and .status == \"True\" and .observedGeneration == \$g)' >/dev/null || '$work/legion' state --json --config '$work/legion.yaml' | jq -e --arg i '$issue' --arg r '$role' --arg u '$ended_pod_uid' '.issues[\$i].phase == \"held\" or (((if \$r == \"architect\" then .issues[\$i].architect else .issues[\$i].workers[\$r].claim end).locator.incarnation // \"\") as \$n | \$n != \"\" and \$n != \$u)' >/dev/null"
+  until_true "$bound" "the $method of pod $ended_pod_uid to land" pod_end_observed "$issue" "$role" "$ended_pod_uid" "$ended_pod"
+}
+# pod_end_observed ISSUE ROLE UID SANDBOX: the end of pod UID is observable (end_claim_pod).
+pod_end_observed() {
+  timeout 120 kubectl --context "$operator" -n "$namespace" get sandbox "$4" -o json |
+    jq -e '.metadata.generation as $g | .status.conditions[]? | select(.type == "Finished" and .status == "True" and .observedGeneration == $g)' >/dev/null ||
+    claim_moved_or_held "$1" "$2" "$3"
 }
 # relaunch_ends CLAIM UID... prints one line for each UID, a relaunch of CLAIM the driver deleted:
 # when the driver's delete, the relaunch's registration (the first `api: claim registered` of CLAIM
@@ -1653,6 +1664,9 @@ after=$(claim_view "$tree1" merger | jq -c '{session, incarnation: .locator.inca
 note "the daemon restarted and re-adopted the merger as it was: $after"
 pass
 
+# launch_failure_limit is the daemon's default (3), which the run's legion.yaml leaves unset; it
+# bounds a claim's launch failures and its deaths with work outstanding alike.
+launch_failure_limit=3
 begin controller
 # `legion controller start` on the devbox registers with the Sandbox daemon; tree 3 supplies the
 # held phase whose notice reaches it; `legion status … backlog` from the operator shell takes
@@ -1713,8 +1727,7 @@ until issue_phase "$tree3" held >/dev/null 2>&1; do
   killed="$killed$uid "
   kills=$((kills + 1))
   note "ended planner launch $kills of $tree3 (uid $uid), its claim $state"
-  until_true 600 "$tree3 to be held or its planner relaunched" sh -c \
-    "'$work/legion' state --json --config '$work/legion.yaml' | jq -e --arg i '$tree3' --arg u '$uid' '.issues[\$i].phase == \"held\" or ((.issues[\$i].workers.planner.claim.locator.incarnation // \"\") as \$n | \$n != \"\" and \$n != \$u)' >/dev/null"
+  until_true 600 "$tree3 to be held or its planner relaunched" claim_moved_or_held "$tree3" planner "$uid"
 done
 note "$tree3 is held after $kills ended planner launches"
 # The hold is one of the planner claim's own supervise budgets, launches or deaths with work
@@ -1724,16 +1737,16 @@ planner_claim=$(claim_token "$tree3" planner)
 failed=$(log_lines "supervise: claim failed" | jq -c --arg c "$planner_claim" 'select(.claim == $c)' | tail -1)
 why=$(jq -r '.why // empty' <<<"${failed:-null}")
 # The daemon's own record judges the reason: its claim-failed line carries the claim's budget
-# counters, and the reason must name the one at launch_failure_limit (3, the daemon's default, which
-# bounds both), with the other below it, as died (supervise/machine.go) charges a death first.
+# counters, and the reason must name the one at launch_failure_limit, with the other below it, as
+# died (supervise/machine.go) charges a death first.
 case $why in
   "launch failures ran out") counter=launchFailures other=deaths ;;
   "deaths with work outstanding ran out") counter=deaths other=launchFailures ;;
   *) fail "$tree3's planner claim $planner_claim failed with '${why:-no logged failure}', not one of its launch or death budgets" ;;
 esac
 counts=$(jq -r '"launchFailures \(.launchFailures), deaths \(.deaths)"' <<<"$failed")
-jq -e --arg c "$counter" --arg o "$other" '.[$c] >= 3 and .[$o] < 3' <<<"$failed" >/dev/null ||
-  fail "$tree3's planner claim $planner_claim failed with '$why', but the daemon's counters ($counts, bound 3) do not name that budget"
+jq -e --arg c "$counter" --arg o "$other" --argjson n "$launch_failure_limit" '.[$c] >= $n and .[$o] < $n' <<<"$failed" >/dev/null ||
+  fail "$tree3's planner claim $planner_claim failed with '$why', but the daemon's counters ($counts, bound $launch_failure_limit) do not name that budget"
 # The first end takes the ready planner; every later one is a relaunch, whose ends set the hold
 # they lead to (relaunch_ends).
 read -r -a ended <<<"$killed"
@@ -1745,7 +1758,7 @@ case $last in
   *) fail "$tree3's planner relaunches: ${last#refused: }" ;;
 esac
 [ "$why" = "$expected" ] || fail "$tree3's planner claim $planner_claim failed with '$why', but its last relaunch's death leads to '$expected'"
-note "the daemon failed $planner_claim because $why ($counts, bound 3)"
+note "the daemon failed $planner_claim because $why ($counts, bound $launch_failure_limit)"
 # The held notice reaches the controller: its session, on this machine, holds the Envoy delivery.
 controller_notice() {
   local file
@@ -1813,13 +1826,12 @@ until issue_phase "$tree4" held >/dev/null 2>&1; do
   work_killed="$work_killed$ended_pod_uid "
   work_kills=$((work_kills + 1))
   note "killed $tree4's implementer with its task outstanding, $work_kills (uid $ended_pod_uid)"
-  until_true 600 "$tree4 to be held or its implementer relaunched" sh -c \
-    "'$work/legion' state --json --config '$work/legion.yaml' | jq -e --arg i '$tree4' --arg u '$ended_pod_uid' '.issues[\$i].phase == \"held\" or ((.issues[\$i].workers.implementer.claim.locator.incarnation // \"\") as \$n | \$n != \"\" and \$n != \$u)' >/dev/null"
+  until_true 600 "$tree4 to be held or its implementer relaunched" claim_moved_or_held "$tree4" implementer "$ended_pod_uid"
 done
-[ "$work_kills" = 3 ] || fail "$tree4 was held after $work_kills implementer deaths, want launch_failure_limit (3)"
+[ "$work_kills" = "$launch_failure_limit" ] || fail "$tree4 was held after $work_kills implementer deaths, want launch_failure_limit ($launch_failure_limit)"
 claim=$(claim_json "$tree4" implementer) || fail "legion claims shows no claim $implementer4"
-jq -e '.state == "failed" and .budgets.deaths == 3' <<<"$claim" >/dev/null ||
-  fail "$implementer4 reads $(jq -c '{state, budgets}' <<<"$claim"), want failed with budgets.deaths 3"
+jq -e --argjson n "$launch_failure_limit" '.state == "failed" and .budgets.deaths == $n' <<<"$claim" >/dev/null ||
+  fail "$implementer4 reads $(jq -c '{state, budgets}' <<<"$claim"), want failed with budgets.deaths $launch_failure_limit"
 why=$(log_lines "supervise: claim failed" | jq -r --arg c "$implementer4" 'select(.claim == $c) | .why' | tail -1)
 [ "$why" = "deaths with work outstanding ran out" ] ||
   fail "$implementer4 failed with '${why:-no logged failure}', not 'deaths with work outstanding ran out'"
@@ -1885,7 +1897,7 @@ note "the tree volume reported lost once, then a fresh session whose workspace h
 pass
 
 begin operator-close
-# The operator's `legion claims close` on the Sandbox runtime (#1337). A workflow issue's tree is the
+# The operator's `legion claims close` on the Sandbox runtime. A workflow issue's tree is the
 # workflow's to close: the close of re-admitted tree 1's live root is refused 409, and its claims,
 # Sandboxes and pods are untouched. A tree no workflow issue backs, which the operator spawns here,
 # closes with its worker live: the root and the worker are retired, and the tree's Sandboxes, pods

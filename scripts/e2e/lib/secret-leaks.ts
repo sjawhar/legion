@@ -7,12 +7,12 @@
 //
 //   bun scripts/e2e/lib/secret-leaks.ts <context> <namespace> <label-selector> <pod-watch> <verdict>
 //     watches the namespace's Secrets that carry the label selector until SIGTERM, then writes to
-//     <verdict> one JSON line, {"pods","secrets","values","leaks","unseen"}: leaks is each pod in
-//     <pod-watch> (one watch event a line) whose worker ever ran ready and one of whose containers
-//     carries a value <pod>-boot held, as {"uid","pod","secret"}; unseen is each such pod whose
-//     <pod>-boot the watch never saw, since its check would have judged nothing; unreadable counts
-//     the lines of <pod-watch> before its last that do not parse (the last may be one the watch is
-//     still writing, and is skipped). It exits 0, or 2 when it cannot start
+//     <verdict> one JSON line, {"pods","secrets","values","leaks","unseen","unreadable"}: leaks is
+//     each pod in <pod-watch> (one watch event a line) whose worker ever ran ready and one of whose
+//     containers carries a value <pod>-boot held, as {"uid","pod","secret"}; unseen is each such
+//     pod whose <pod>-boot the watch never saw, since its check would have judged nothing;
+//     unreadable counts the lines of <pod-watch> before its last that do not parse (the last may be
+//     one the watch is still writing, and is skipped). It exits 0, or 2 when it cannot start
 //
 // Each watch asks the server to end it within 300 s, and resumes from the last resourceVersion it
 // saw; a watch that delivered nothing is resumed after a pause, and a line that does not parse ends
@@ -62,10 +62,11 @@ function kubectl(path: string): Kubectl {
 
 async function list(): Promise<string> {
   const child = kubectl(collection);
-  let body = "";
-  for await (const chunk of child.stdout) body += chunk;
+  // Listened for before the output is read, so an exit that comes with its last chunk is not missed.
   const closed = Promise.withResolvers<number>();
   child.on("close", closed.resolve);
+  let body = "";
+  for await (const chunk of child.stdout) body += chunk;
   const code = await closed.promise;
   if (code !== 0) return "";
   const parsed = JSON.parse(body) as {
