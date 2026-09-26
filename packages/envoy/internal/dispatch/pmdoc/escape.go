@@ -78,7 +78,7 @@ func needsInlineEscape(value string, offset int, char rune, context escapeContex
 		// Before whitespace written as a reference, a backslash would escape its `&`; before a
 		// line ending it would be a hard break.
 		return offset+1 < len(value) && isASCIIPunctuation(value[offset+1]) ||
-			offset+1 < len(value) && (value[offset+1] == '\r' || value[offset+1] == '\n') ||
+			offset+1 < len(value) && value[offset+1] == '\n' ||
 			offset+1 == len(value) && context.followed ||
 			offset+1 < len(value) && (value[offset+1] == ' ' || value[offset+1] == '\t') &&
 				needsInlineEscape(value, offset+1, rune(value[offset+1]), context)
@@ -124,15 +124,11 @@ func needsInlineEscape(value string, offset int, char rune, context escapeContex
 		// read as whitespace.
 		return offset == textLineStart && !context.afterMarker && (!context.marked || context.afterCarriageReturn) ||
 			offset+1 == len(value) && !context.followed ||
-			offset+1 < len(value) && (value[offset+1] == '\r' || value[offset+1] == '\n') ||
+			offset+1 < len(value) && value[offset+1] == '\n' ||
 			offset == 0 && context.opener != 0 ||
 			offset+1 == len(value) && context.closer != 0
 	case '.', ')':
 		return orderedListMarkerPunctuation(value, offset, markerLineStart)
-	case '\r', '\n':
-		// A heading or a table row ends at a line ending, so one in their text is written as the
-		// reference the parser decodes back to it.
-		return context.heading || context.tableCell
 	default:
 		return false
 	}
@@ -146,7 +142,7 @@ func escaped(char rune) string {
 	switch char {
 	case '&':
 		return "&amp;"
-	case ' ', '\t', '\r', '\n':
+	case ' ', '\t':
 		return numericEntity(char)
 	default:
 		return "\\" + string(char)
@@ -478,7 +474,7 @@ func blockStart(value string, lineStart, offset int) bool {
 // markerTerminator reports whether offset ends a list marker: the parser opens an item on a
 // marker followed by a space, a tab, or the end of the line.
 func markerTerminator(value string, offset int) bool {
-	return offset >= len(value) || value[offset] == ' ' || value[offset] == '\t' || value[offset] == '\n' || value[offset] == '\r'
+	return offset >= len(value) || value[offset] == ' ' || value[offset] == '\t' || value[offset] == '\n'
 }
 
 // atxHeadingRun reports whether value opens an ATX heading marker at offset: one to six hashes

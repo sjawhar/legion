@@ -93,8 +93,13 @@ func (taskMarkerParser) Parse(parent ast.Node, block gmtext.Reader, _ parser.Con
 	}
 	rest := line[3:]
 	blank := len(rest) - len(bytes.TrimLeft(rest, " \t"))
+	run := len(rest) - len(bytes.TrimLeft(rest, " \t\r"))
 	width := 4
 	switch {
+	case bytes.IndexByte(rest[:run], '\r') >= 0 && run < len(rest) && rest[run] != '\n':
+		// A carriage return in the whitespace after the marker ends its line in the browser
+		// editor's parser, and goldmark's marker took it with the whitespace around it.
+		width = 3 + run
 	case blank > 0 && !util.IsBlank(rest):
 	case rest[blank] == '\n' || rest[blank] == '\r':
 		row, segment := block.Position()
@@ -269,22 +274,11 @@ func lineStart(source []byte, position int) int {
 	return position
 }
 
-// lineEnds is source with each carriage return that no line feed follows written as a line feed.
-// CommonMark ends a line at a line feed, a carriage return, or the two together, and so does the
-// browser editor's parser, while goldmark ends one only at a line feed. The two have the same
-// length, so goldmark reads the structure from this and each text is read from source, keeping
-// the carriage return as it was written.
+// lineEnds is the source goldmark reads its structure from, each text being read from source. A
+// carriage return that no line feed follows is read as text, as goldmark reads it, so the two are
+// the same source.
 func lineEnds(source []byte) []byte {
-	if bytes.IndexByte(source, '\r') < 0 {
-		return source
-	}
-	lined := bytes.Clone(source)
-	for index := range lined {
-		if loneCarriageReturn(source, index) {
-			lined[index] = '\n'
-		}
-	}
-	return lined
+	return source
 }
 
 // loneCarriageReturn reports whether source holds a carriage return that no line feed follows at

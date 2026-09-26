@@ -338,7 +338,7 @@ func inlineCodePadding(value string) bool {
 	if strings.HasPrefix(value, "`") || strings.HasSuffix(value, "`") {
 		return true
 	}
-	return value != "" && isCodePadding(value[0]) && isCodePadding(value[len(value)-1]) && strings.Trim(value, " \r\n") != ""
+	return strings.HasPrefix(value, " ") && strings.HasSuffix(value, " ") && strings.Trim(value, " ") != ""
 }
 
 func (r *renderer) writeSyntax(value string) {
@@ -415,7 +415,7 @@ func (r *renderer) writeInlineText(node *Node, position *inlinePosition, prefix 
 			r.writeSyntax(textEscape(char))
 			segmentStart = byteOffset + width
 		}
-		lineEnd := !escape && endsMarkdownLine(value, byteOffset, context.lineFeedNext)
+		lineEnd := endsMarkdownLine(value, byteOffset, context.lineFeedNext)
 		if lineEnd {
 			r.writeText(value[segmentStart:byteOffset])
 			segmentStart = byteOffset
@@ -432,19 +432,9 @@ func (r *renderer) writeInlineText(node *Node, position *inlinePosition, prefix 
 }
 
 // endsMarkdownLine reports whether the character at offset in value ends a markdown line: a line
-// feed, or a carriage return no line feed follows, in value or, at its end, at the start of the
-// next node (lineFeedNext).
-func endsMarkdownLine(value string, offset int, lineFeedNext bool) bool {
-	switch value[offset] {
-	case '\n':
-		return true
-	case '\r':
-		if offset+1 < len(value) {
-			return value[offset+1] != '\n'
-		}
-		return !lineFeedNext
-	}
-	return false
+// feed. A carriage return that no line feed follows is written as text, as the parser reads it.
+func endsMarkdownLine(value string, offset int, _ bool) bool {
+	return value[offset] == '\n'
 }
 
 // lineEndIn is the offset of the first character in value that ends a markdown line
@@ -459,10 +449,10 @@ func lineEndIn(value string, lineFeedNext bool) int {
 }
 
 // markdownLineStart is where the markdown line holding offset begins in written: after the last
-// line feed or lone carriage return before it.
+// line feed before it.
 func markdownLineStart(written []byte, offset int) int {
 	for index := offset - 1; index >= 0; index-- {
-		if written[index] == '\n' || loneCarriageReturn(written, index) {
+		if written[index] == '\n' {
 			return index + 1
 		}
 	}
