@@ -176,6 +176,12 @@ interface AskAwarenessState {
   readonly checks: number;
 }
 
+/** A settle the stop-time check is about: its context, and how many runs had started by then. */
+interface AskSettle {
+  readonly context: SessionContext;
+  readonly seenRun: number;
+}
+
 interface LegionManagedEntry {
   readonly type: "custom";
   readonly customType: typeof LEGION_MANAGED_ENTRY;
@@ -295,9 +301,11 @@ export default function envoyExtension(pi: PiApi): void {
   // started after the check's settle, so the open check will not steer, and it runs again for
   // this settle once it is done. Dropped, the newer settle's check would be lost whenever that
   // run finished inside the check's window — the usual case for an agent that acts on a reply
-  // and stops within seconds.
-  let settledDuringCheck: SessionContext | undefined;
-  const takeSettledDuringCheck = (): SessionContext | undefined => {
+  // and stops within seconds. It keeps the run count read at its own settle: read when the
+  // re-check starts instead, a run that began in between — the user's next turn among them —
+  // would be invisible, and the re-check would steer into it.
+  let settledDuringCheck: AskSettle | undefined;
+  const takeSettledDuringCheck = (): AskSettle | undefined => {
     const settle = settledDuringCheck;
     settledDuringCheck = undefined;
     return settle;
@@ -1262,20 +1270,27 @@ export default function envoyExtension(pi: PiApi): void {
       return;
     }
     if (askCheckInFlight) {
-      settledDuringCheck = context;
+      settledDuringCheck = { context, seenRun: runSeq };
       return;
     }
     askCheckInFlight = true;
     try {
-      let settle: SessionContext | undefined = context;
+      let settle: AskSettle | undefined = { context, seenRun: runSeq };
       while (settle !== undefined) {
         await checkAtSettle(id, settle);
         // A settle that arrived while that check was open is checked now if a check is still
-        // owed: the one a newer user turn arms, or the one a superseded verdict left owing.
+        // owed: the one a newer user turn arms, or the one a superseded verdict left owing —
+        // unless a run has started since that settle, whose own settle is where the check goes.
         // Each pass needs another real settle during the last, and every check that reaches the
         // model counts against the period's cap, so this ends.
         settle = takeSettledDuringCheck();
-        if (settle?.sessionManager.getSessionId() !== id || !checkOwed(id)) settle = undefined;
+        if (
+          settle?.context.sessionManager.getSessionId() !== id ||
+          settle.seenRun !== runSeq ||
+          !checkOwed(id)
+        ) {
+          settle = undefined;
+        }
       }
     } finally {
       askCheckInFlight = false;
@@ -1304,11 +1319,12 @@ export default function envoyExtension(pi: PiApi): void {
     );
   }
 
-  // One stop-time check for the settle `context` belongs to, run with `askCheckInFlight` held.
-  async function checkAtSettle(id: string, context: SessionContext): Promise<void> {
+  // One stop-time check for `settle`, run with `askCheckInFlight` held. Staleness is judged
+  // against the run count read at that settle, never at the start of this call.
+  async function checkAtSettle(id: string, settle: AskSettle): Promise<void> {
+    const { context, seenRun } = settle;
     const period = askAwareness.period;
     const generation = awarenessGeneration;
-    const seenRun = runSeq;
     const baseline = askAwareness.baseline_as_of;
     // `checkOwed` held both at the call; restated so the compiler sees them in this scope.
     if (baseline === null || askEphemeral === undefined) return;

@@ -10,6 +10,10 @@ import * as path from "node:path";
 // CI's pi-envoy job installs; on the devbox, `mise where <pin>`/bin/omp. A run without one skips,
 // except on GitHub Actions, where a skip would hide the only run of the check on the host that
 // ships it (GITHUB_ACTIONS, not CI: agent harnesses on the devbox export CI=true).
+// It is also the only check that the run-end nudge's hidden self-check starts no run: the nudge
+// treats any `agent_start` after a settle as a newer run and withholds its steer, so a host that
+// counted `pi.askEphemeral` as a run would silence the nudge with every unit test still green.
+// The WAITING self-check case below fails if that ever changes.
 const omp = process.env.LEGION_TEST_OMP;
 const onActions = process.env.GITHUB_ACTIONS === "true";
 const extensions = path.join(import.meta.dir);

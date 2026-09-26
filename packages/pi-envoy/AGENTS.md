@@ -326,9 +326,10 @@ settle: a run that started meanwhile — an Envoy delivery waking the session, p
 agent was waiting for — means the verdict describes a run the session has moved past. Such a verdict is never
 steered; the check still counts against the cap, but what the period owes stays owed, for the newer run's
 settle. A run that starts while the Dispatch query is open pays for no check at all. A stop that arrives while a
-check holds the latch is recorded, not dropped, and checked as soon as the open check ends if a check is still
-owed — otherwise a woken run that settled inside the check's window, the usual case, would go unchecked until
-some later run. Each such pass needs another real settle during the last, and every check that reaches the
+check holds the latch is recorded, not dropped, with the run count read at that settle, and checked as soon as
+the open check ends if a check is still owed and no run has started since it — otherwise a woken run that
+settled inside the check's window, the usual case, would go unchecked until some later run. Each such pass
+needs another real settle during the last, and every check that reaches the
 model counts against the cap, so the re-check cannot loop. The latch, the period and its budget are in memory
 only — a cold start or a session change begins at period 0, which
 nudges nothing until the next genuine user turn arms one. The guard, the staleness list and the `tool_result`

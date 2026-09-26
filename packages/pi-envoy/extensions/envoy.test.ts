@@ -1469,6 +1469,49 @@ describe("envoy OMP extension", () => {
     ).toHaveLength(1);
   });
 
+  test("a recorded settle that a newer turn has overtaken is not re-checked into that turn", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-settle-overtaken");
+    const { promise: held, resolve: release } = Promise.withResolvers<void>();
+    const started = Promise.withResolvers<void>();
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_settle_overtaken", () => ({}), {
+      selfCheck: async () => {
+        started.resolve();
+        await held;
+        return { replyText: "WAITING" };
+      },
+    });
+
+    await session.userTurn();
+    const first = session.stop();
+    await started.promise;
+    // A woken run works and settles inside the check's window, so its stop is recorded…
+    await session.runStart();
+    await session.toolResult({
+      toolName: "bash",
+      toolCallId: "call-1",
+      input: {},
+      details: {},
+      isError: false,
+    });
+    const woken = session.stop();
+    // …and then the user types, before the check comes back. The recorded stop is about a run
+    // the user has already moved past: re-checking it would steer into the turn they just typed.
+    await session.userTurn("actually, do this instead");
+    release();
+    await Promise.all([first, woken]);
+    expect(
+      session.fixture.deliveries.filter((delivery) => delivery.customType === ASK_REMINDER_TYPE)
+    ).toEqual([]);
+    // Nor does it pay for a Dispatch read: two arming queries and the first stop's, nothing more.
+    expect(session.queries).toHaveLength(3);
+
+    // The typed turn's own stop is where the check belongs.
+    await session.stop();
+    expect(
+      session.fixture.deliveries.filter((delivery) => delivery.customType === ASK_REMINDER_TYPE)
+    ).toHaveLength(1);
+  });
+
   test("a run that starts while Dispatch answers the stop pays for no check", async () => {
     const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-run-during-query");
     const query = Promise.withResolvers<void>();
