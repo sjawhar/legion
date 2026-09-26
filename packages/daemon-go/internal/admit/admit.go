@@ -218,7 +218,7 @@ func (a *Admission) recordObservation(ctx context.Context, tx pgx.Tx, stored rec
 // readmittable says whether a todo on this record starts a new generation of its tree: it is a
 // root, and its tree lingers after its sign-off or was closed. A child's done is only the child's.
 func readmittable(stored record.Issue) bool {
-	return claim.IsTreeRoot(stored.Key, stored.Tree) && (stored.LingerUntil != nil || stored.Phase == phase.Done)
+	return claim.IsTreeRoot(stored.Key, stored.Tree) && (stored.Lingers() || stored.Phase == phase.Done)
 }
 
 // readmit records a lingering or closed root's todo as a new generation waiting for a slot. The new

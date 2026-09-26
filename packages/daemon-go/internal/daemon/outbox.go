@@ -467,15 +467,15 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		if !found {
 			return nil
 		}
-		// The close belongs to the linger it expired, the root generation it names. Once
-		// re-admission ends that linger, a close still backing off (a release the runtime refused)
-		// would retire the claim the tree's new run relaunched, and the task it holds with it, even
-		// in a later linger of the tree; it finishes without acting instead.
-		lingers, err := r.treeLingersAt(ctx, issue, payload.Linger)
+		// The close belongs to the linger it expired, the root generation it names
+		// (workflow.StopActs). Once re-admission ends that linger, a close still backing off (a
+		// release the runtime refused) would retire the claim the tree's new run relaunched, and the
+		// task it holds with it, even in a later linger of the tree; it finishes without acting.
+		root, err := r.root(ctx, issue)
 		if err != nil {
 			return err
 		}
-		if !lingers {
+		if !workflow.StopActs(row.ID, payload, issue.Phase, machine.Claim().LastStartRow, root) {
 			r.log.Info("outbox tree close of a linger that has ended; finished without acting", "row", row.ID, "issue", issue.Key,
 				"tree", issue.Tree, "role", payload.Role, "linger", payload.Linger)
 			return nil
@@ -493,6 +493,20 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 // transaction of its own just before the executor acts on the row.
 func (r *outbox) treeLingers(ctx context.Context, issue record.Issue) (bool, error) {
 	return r.readTree(ctx, issue, func(tx pgx.Tx) (bool, error) { return record.TreeLingers(ctx, r.records, tx, issue.Tree) })
+}
+
+// root is issue's tree root as recorded, nil when it is not, read in a transaction of its own
+// just before the executor acts on a row.
+func (r *outbox) root(ctx context.Context, issue record.Issue) (*record.Issue, error) {
+	var root *record.Issue
+	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+		var err error
+		root, err = r.records.Issue(ctx, tx, issue.Tree)
+		return err
+	}); err != nil {
+		return nil, fmt.Errorf("read the tree root of %s: %w", issue.Key, err)
+	}
+	return root, nil
 }
 
 // treeLingersAt says whether issue's tree lingers after the close of root generation linger

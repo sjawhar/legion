@@ -207,16 +207,20 @@ func TreeLingersAt(ctx context.Context, store Store, tx pgx.Tx, tree string, gen
 	return root != nil && root.LingersAt(generation), err
 }
 
-// LingersAt says whether the root lingers after the close of its generation: its linger deadline is
-// set and re-admission has not moved it to a later generation.
+// Lingers says whether the root lingers after its close: its linger deadline is set, and
+// re-admission clears it.
+func (i Issue) Lingers() bool { return i.LingerUntil != nil }
+
+// LingersAt says whether the root lingers after the close of its generation: it lingers, and
+// re-admission has not moved it to a later generation.
 func (i Issue) LingersAt(generation uint64) bool {
-	return i.LingerUntil != nil && i.Generation == generation
+	return i.Lingers() && i.Generation == generation
 }
 
 // lingeringRoot is tree's root while it lingers, and nil when the tree runs or is not recorded.
 func lingeringRoot(ctx context.Context, store Store, tx pgx.Tx, tree string) (*Issue, error) {
 	root, err := store.Issue(ctx, tx, tree)
-	if err != nil || root == nil || root.LingerUntil == nil {
+	if err != nil || root == nil || !root.Lingers() {
 		return nil, err
 	}
 	return root, nil

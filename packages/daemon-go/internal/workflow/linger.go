@@ -41,7 +41,7 @@ func (e *Engine) leave(ctx context.Context, tx pgx.Tx, issue record.Issue, statu
 // beginLinger suspends the root's whole tree and arms its linger deadline; a second call while it
 // lingers changes nothing.
 func (e *Engine) beginLinger(ctx context.Context, tx pgx.Tx, root record.Issue) error {
-	if root.LingerUntil != nil {
+	if root.Lingers() {
 		return nil
 	}
 	until := e.lingerAt()
@@ -92,7 +92,7 @@ func (e *Engine) lingerExpired(ctx context.Context, tx pgx.Tx, fact intake.Linge
 }
 
 func (e *Engine) liveTree(ctx context.Context, tx pgx.Tx, root record.Issue) (bool, error) {
-	if root.LingerUntil != nil {
+	if root.Lingers() {
 		return false, nil
 	}
 	slots, err := e.store.Slots(ctx, tx)

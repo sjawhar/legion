@@ -455,7 +455,7 @@ func (s *server) rerunChild(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusInternalServerError, "RECORD_UNAVAILABLE", "could not read the tree root")
 		return
 	}
-	if root.LingerUntil != nil {
+	if root.Lingers() {
 		writeFailure(w, http.StatusConflict, "TREE_LINGERING", fmt.Sprintf("the tree %s is lingering after it left the workflow, so %s cannot run in it again", root.Key, child.Key))
 		return
 	}
