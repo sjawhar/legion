@@ -8,15 +8,19 @@ import (
 	"sync"
 )
 
-// bodyReadStep is the first buffer a body is read into; the buffer doubles each time it fills.
-const bodyReadStep = 16 << 10
+// bodyFirstRead is the most a body's first read takes into a buffer the budget does not charge.
+// Nothing is charged until that read delivers bytes, and the charged buffer then starts at what it
+// delivered, so a connection that has sent only headers holds no room at all. It is small because
+// every such connection holds one.
+const bodyFirstRead = 512
 
 // bodyBudget is a byte budget that concurrent requests read their bodies against. A request
-// charges its read buffer as the buffer grows, which is as its body arrives: a sender that sends
-// only headers, or trickles its body, holds a buffer for what it has actually sent and nothing for
-// what it declared. A request whose next piece does not fit waits for room, except the one that has
-// held its place longest, which always proceeds: it is either still reading, and nothing stops it,
-// or done and about to give everything back, so the requests in flight always drain and no set of
+// charges its read buffer as the buffer grows, which is as its body arrives, starting at the bytes
+// its first read delivered and doubling as it fills: a sender that sends only headers holds no
+// room, and one that trickles its body holds at most twice what it has sent, never what it
+// declared. A request whose next piece does not fit waits for room, except the one that has held
+// its place longest, which always proceeds: it is either still reading, and nothing stops it, or
+// done and about to give everything back, so the requests in flight always drain and no set of
 // half-read bodies waits on each other. That one request can take the total past the limit by at
 // most its own body (twice its buffer for the moment the buffer grows).
 type bodyBudget struct {
@@ -112,27 +116,39 @@ func (r *bodyRead) readAll(ctx context.Context, body io.Reader, declared, limit 
 	if declared > limit {
 		return nil, &http.MaxBytesError{Limit: limit}
 	}
+	if declared == 0 {
+		return nil, nil
+	}
 	target := declared
 	if target < 0 {
 		target = limit + 1
 	}
+	head := make([]byte, min(bodyFirstRead, target))
 	var buf []byte
 	for {
-		if declared >= 0 && int64(len(buf)) == declared {
-			return buf, nil
-		}
-		if len(buf) == cap(buf) {
-			size := min(2*int64(cap(buf)), target)
-			size = max(size, min(bodyReadStep, target))
-			grown, err := r.grow(ctx, buf, size)
-			if err != nil {
-				return nil, err
+		var n int
+		var err error
+		if buf == nil {
+			n, err = body.Read(head)
+			if n > 0 {
+				charged, growErr := r.grow(ctx, nil, int64(n))
+				if growErr != nil {
+					return nil, growErr
+				}
+				buf = append(charged, head[:n]...)
 			}
-			buf = grown
+		} else {
+			if len(buf) == cap(buf) {
+				grown, growErr := r.grow(ctx, buf, min(2*int64(cap(buf)), target))
+				if growErr != nil {
+					return nil, growErr
+				}
+				buf = grown
+			}
+			n, err = body.Read(buf[len(buf):cap(buf)])
+			buf = buf[:len(buf)+n]
 		}
-		n, err := body.Read(buf[len(buf):cap(buf)])
-		buf = buf[:len(buf)+n]
-		// Only an undeclared body can get here past limit: the buffer holds one byte more than
+		// Only an undeclared body can get here past limit: its buffer grows to one byte more than
 		// limit so that the byte that says so can arrive, with or without the end of the body.
 		if int64(len(buf)) > limit {
 			return nil, &http.MaxBytesError{Limit: limit}
@@ -145,6 +161,9 @@ func (r *bodyRead) readAll(ctx context.Context, body io.Reader, declared, limit 
 		}
 		if err != nil {
 			return nil, err
+		}
+		if declared >= 0 && int64(len(buf)) == declared {
+			return buf, nil
 		}
 	}
 }

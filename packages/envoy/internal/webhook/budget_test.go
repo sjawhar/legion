@@ -18,10 +18,11 @@ import (
 // A request that cannot get room holds nothing the budget has not charged: its next buffer is
 // allocated only once the charge succeeds, so requests waiting for room add nothing to memory.
 func TestABodyReadWaitingForRoomAllocatesNothing(t *testing.T) {
-	bodies := newBodyBudget(bodyReadStep)
+	const step = 16 << 10
+	bodies := newBodyBudget(step)
 	longest := bodies.begin()
 	defer longest.release()
-	if _, err := longest.grow(context.Background(), nil, bodyReadStep); err != nil {
+	if _, err := longest.grow(context.Background(), nil, step); err != nil {
 		t.Fatalf("the longest holder's first buffer: %v", err)
 	}
 	waiting := bodies.begin()
@@ -283,4 +284,77 @@ func TestGitHubHandlerServesADeliveryBehindSlowSenders(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body = %s", rr.Code, rr.Body.String())
 	}
 	t.Logf("served in %s", time.Since(began).Round(time.Millisecond))
+}
+
+// Connections that send only headers, or one byte of body, cost a sender almost nothing, so there
+// can be thousands of them, each held until the server's read timeout. They may hold room only for
+// what they have sent: here enough of them to spend a whole budget at 16 KiB each, half with no
+// body byte yet and half with one, are waiting when a signed 3.6 MB push arrives, and the push is
+// served at once.
+func TestGitHubHandlerServesADeliveryBehindManyHeaderOnlySenders(t *testing.T) {
+	const (
+		secret = "s"
+		budget = 8 << 20
+	)
+	holders := budget / (16 << 10)
+	handler := githubHandler(secret, "@legion", "", &mockPublisher{}, &mockRecorder{}, newBodyBudget(budget))
+	stall := make(chan struct{})
+	var mu sync.Mutex
+	entered := 0
+	var waiting sync.WaitGroup
+	for i := range holders {
+		body := &testBody{remaining: githubMaxBody, stallAfter: i % 2, stall: stall}
+		req := httptest.NewRequest(http.MethodPost, "/webhook/github", body)
+		req.ContentLength = githubMaxBody
+		req.Header.Set("X-GitHub-Delivery", fmt.Sprintf("delivery-headers-only-%d", i))
+		req.Header.Set("X-GitHub-Event", "push")
+		req.Header.Set("X-Hub-Signature-256", "sha256=0000")
+		waiting.Add(1)
+		go func() {
+			defer waiting.Done()
+			mu.Lock()
+			entered++
+			mu.Unlock()
+			handler.ServeHTTP(httptest.NewRecorder(), req)
+		}()
+	}
+	defer func() {
+		close(stall)
+		waiting.Wait()
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		mu.Lock()
+		ready := entered == holders
+		mu.Unlock()
+		if ready {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d of %d header-only senders entered the handler", entered, holders)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// Let every header-only sender reach its body.
+	time.Sleep(50 * time.Millisecond)
+
+	push := largePushPayload(t, 1000)
+	req := httptest.NewRequest(http.MethodPost, "/webhook/github", bytes.NewReader(push))
+	req.Header.Set("X-GitHub-Delivery", "delivery-behind-header-only-senders")
+	req.Header.Set("X-GitHub-Event", "push")
+	req.Header.Set("X-Hub-Signature-256", githubSign(secret, push))
+	rr := httptest.NewRecorder()
+	served := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(rr, req)
+		close(served)
+	}()
+	select {
+	case <-served:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("a signed push behind %d senders holding headers or one byte was not served within 5 s; GitHub gives up at 10 s", holders)
+	}
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rr.Code, rr.Body.String())
+	}
 }
