@@ -2317,8 +2317,8 @@ func TestApplyOperationEmptyingACalloutInAFootnoteAdvisesDeletingTheCallout(t *t
 // A lone carriage return ends a line, as in the browser editor. A replace carrying one is taken,
 // and the line it starts is written as any other line is: lazily continuing a paragraph, escaped
 // where its text would read as block syntax (a setext underline, a heading, list or quote marker),
-// or in code under the prefix and a fence written past it. It is refused only where it would end
-// its block: in a heading or a table cell, which are written on one line.
+// or in code under the prefix and a fence written past it. In a heading or a table cell, which are
+// written on one line, it is written as a character reference.
 func TestApplyOperationReplaceWithALoneCarriageReturn(t *testing.T) {
 	const callout = "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n```\nBody.\n```\n:::\n\nAfter.\n"
 	for _, test := range []struct {
@@ -2340,8 +2340,8 @@ func TestApplyOperationReplaceWithALoneCarriageReturn(t *testing.T) {
 		{"before an equals line", "Intro.\n\nBody.\n\nAfter.\n", "x\r===", true},
 		{"before a fence", "Intro.\n\nBody.\n\nAfter.\n", "x\r```", true},
 		{"before a colon line in a callout", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n", "x\r:::", true},
-		{"in a heading", "Intro.\n\n# Body.\n\nAfter.\n", "a\rb", false},
-		{"in a table cell", "Intro.\n\n| h |\n| --- |\n| Body. |\n", "a\rb", false},
+		{"in a heading", "Intro.\n\n# Body.\n\nAfter.\n", "a\rb", true},
+		{"in a table cell", "Intro.\n\n| h |\n| :--- |\n| Body. |\n", "a\rb", true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			tree, err := parseInput(test.markdown)

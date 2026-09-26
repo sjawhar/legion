@@ -129,6 +129,10 @@ func needsInlineEscape(value string, offset int, char rune, context escapeContex
 			offset+1 == len(value) && context.closer != 0
 	case '.', ')':
 		return orderedListMarkerPunctuation(value, offset, markerLineStart)
+	case '\r', '\n':
+		// A heading or a table row ends at a line ending, so one in their text is written as the
+		// reference the parser decodes back to it.
+		return context.heading || context.tableCell
 	default:
 		return false
 	}
@@ -142,7 +146,7 @@ func escaped(char rune) string {
 	switch char {
 	case '&':
 		return "&amp;"
-	case ' ', '\t':
+	case ' ', '\t', '\r', '\n':
 		return numericEntity(char)
 	default:
 		return "\\" + string(char)

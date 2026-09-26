@@ -410,7 +410,7 @@ func (r *renderer) writeInlineText(node *Node, position *inlinePosition, prefix 
 			r.writeSyntax(textEscape(char))
 			segmentStart = byteOffset + width
 		}
-		lineEnd := endsMarkdownLine(value, byteOffset, context.lineFeedNext)
+		lineEnd := !escape && endsMarkdownLine(value, byteOffset, context.lineFeedNext)
 		if lineEnd {
 			r.writeText(value[segmentStart:byteOffset])
 			segmentStart = byteOffset

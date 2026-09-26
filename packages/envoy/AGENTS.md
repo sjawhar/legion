@@ -493,8 +493,8 @@ after a line feed, and `closingColons` measures the line after one. The inline w
 at a lone carriage return as at a line feed (`endsMarkdownLine`). The line it begins carries no
 prefix, so in a quote or a list item the parser reads it as a lazy continuation: it takes an escape
 only where it reads differently without one, as the parser reads it (`lazyLineReadsAsText`), and
-none of the writer's long-standing marker escapes. A replace carrying one is refused in a heading or
-a table cell, which are written on one line.
+none of the writer's long-standing marker escapes. In a heading or a table cell, which are written
+on one line, a line ending is written as its character reference.
 Two readings follow the browser editor rather than the line split: a line a lone carriage return
 begins is never refused as a malformed directive (`a\r::::` is text, since the browser editor refuses
 those line by line at line feeds), and a lazy continuation line - one that continues a paragraph in
