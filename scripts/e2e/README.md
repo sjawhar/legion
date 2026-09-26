@@ -457,7 +457,8 @@ STAGE4B_UNTIL=<checkpoint> …                      # a development run: stops a
 `STAGE4B_UNTIL` must name a checkpoint below; any other value is refused. `STAGE4B_EVIDENCE_DIR`
 keeps the evidence (default: a fresh `/tmp` directory, printed at the end): the transcript, the
 daemon log, `run.json` (source revision, image and plugin), the pod watch, each checked pod's spec,
-every agent transcript, the interest samples, the audit files and the negative controls. What the
+every agent transcript (the tree pods' and, under `transcripts/controller/`, the operator's
+controller's), the interest samples, the audit files and the negative controls. What the
 run built is printed by [`lib/built-from.sh`](#libbuilt-fromsh).
 
 Three roots are set todo under `admission_cap: 2`:

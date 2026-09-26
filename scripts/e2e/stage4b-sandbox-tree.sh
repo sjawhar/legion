@@ -724,6 +724,9 @@ remove_run_branches() {
   done
   return 0
 }
+# collect_transcripts copies every Oh My Pi session the run held into $evidence/transcripts: each
+# tree pod's, from its tree volume, and the operator's controller's, which lives in the run's own
+# profile on this machine and goes with that profile at teardown (transcripts/controller).
 collect_transcripts() {
   local pod
   for tree in $tree1 $tree2 $tree3; do
@@ -731,6 +734,10 @@ collect_transcripts() {
     op exec "$pod" -c worker -- tar -C /home/legion/.omp/profiles/legion/agent/sessions -cf - . 2>/dev/null |
       tar -C "$evidence/transcripts" -xf - 2>/dev/null || true
   done
+  if [ -d "$HOME/.omp/profiles/$profile/agent/sessions" ]; then
+    mkdir -p "$evidence/transcripts/controller"
+    cp -R "$HOME/.omp/profiles/$profile/agent/sessions/." "$evidence/transcripts/controller/"
+  fi
 }
 cleanup() {
   local status=$? p
