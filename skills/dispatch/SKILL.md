@@ -679,10 +679,9 @@ container-directive form `:::name{#block-id key="value"}` on its own line, ordin
 and a closing `:::` at the same nesting. An unclosed typed block at document level is rejected. For
 a new typed block, omit `#block-id`; Dispatch mints it. When editing an existing typed block, retain
 its id and every rendered attribute. Never copy an existing block's id into new markdown: an id
-names one block, so an insert, upload or suggestion that would put it on a second block is refused
-naming the id: `INVALID_OP` for an insert, or for an accepted suggestion whose replacement names an
-id the document holds; `INVALID_MARKDOWN` for a seed, an upload, or a replacement that names one id
-twice within itself.
+names one block, so an insert, upload or suggestion whose markdown names an id the document holds
+outside the text it replaces is refused naming the id: `INVALID_OP` for an insert,
+`INVALID_MARKDOWN` for any other write.
 
 Use only the type names, content rule, attributes, and enum values returned by the schema. Values are
 quoted: `:::callout{kind="warning" title="Risk"}`. Do not write Pandoc-style `::: {.callout}`, leaf

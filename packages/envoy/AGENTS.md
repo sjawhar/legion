@@ -36,24 +36,24 @@ events to the right session.
 | Deploy/runtime         | `deploy/`                                 | compose, rollout scripts, NATS peer setup          |
 
 Every non-inline Proof node has a stable `blockId`. `pmdoc.Parse` mints IDs in document order,
-and `EnsureBlockIDs` repairs legacy or duplicate IDs before agent updates are written. That repair
-keeps a repeated id for the first holder in document order, and ask rows and anchors are keyed on
-block ids, so a write never repeats one itself: a block written ahead of an answered ask under
-its id would leave the ask's row and answer on that block, and the question would come back as a
-fresh open ask. Markdown a caller writes (a spec seeded at issue creation, an uploaded document or
-version, an edit's `insert`, an accepted suggestion) is parsed with `pmdoc.ParseForWrite`, which
-refuses an id it names on two blocks, and an `insert` or accept whose markdown names an id the
-document already holds is refused too (`pmdoc.RepeatedBlockID`). The codes follow the route: an
-`insert` is `400 INVALID_OP` on `markdown` either way; an accept is `400 INVALID_OP` on
-`replace_with` for an id the document holds and `400 INVALID_MARKDOWN` for a replacement naming one
-id twice within itself; a seed or an upload is `400 INVALID_MARKDOWN`. The accept judges held ids
-against the live tree after `EnsureBlockIDs`, as an edit does, so a repeat a browser write left for
-settlement to repair refuses nothing, and a reject is not checked. Only a typed block's markdown can
-name its id. Document
+and `EnsureBlockIDs` repairs legacy or duplicate IDs before agent updates are written. Document
 settlement is two-phase: it first applies `EnsureBlockIDs` in one Yjs transaction and persists that
 captured update in the same Postgres transaction as any resulting version and event, then renders
 and compares canonical markdown. `envoy-dispatch backfill-block-ids` runs that closure across every
 document. Every write path that changes a document queues that closer once its transaction commits: a live edit (`POST /api/v1/artifacts/{id}/edits`), an uploaded document version (`POST /api/v1/issues/{key}/artifacts`, `POST /api/v1/projects/{key}/artifacts`), and a spec seeded at issue creation - so ask blocks written by any of them become asks without waiting for a later live change. The closer attributes the asks it indexes to the room's most recent mutating actor (`roomState.lastActor`, set by every edit, replacement and seed) when no pending author remains - an edit's own version write has already consumed `pending` by the time settlement runs. A free-text ask block (no bullet list) carries `options: []` on the wire, never JSON null.
+
+A write never puts one block id on two blocks. `EnsureBlockIDs` keeps a repeated id for the first
+holder in document order, and ask rows and anchors are keyed on block ids, so a block written ahead
+of an answered ask under its id would take the ask's row and answer, and the question would come
+back as a fresh open ask. Markdown a caller writes (a spec seeded at issue creation, an uploaded
+document or version, an edit's `insert`, an accepted suggestion's `replace_with`) is refused, naming
+the id, when it names an id twice or names one the document holds outside the text it replaces:
+`pmdoc.RepeatedBlockID` compares the document the write would store with the live one and refuses
+an id the stored one carries on more blocks than the live one does (`pmdoc.ParseForWrite` applies
+it to a seed and an upload). An `insert` is `400 INVALID_OP` on `markdown`, every other write
+`400 INVALID_MARKDOWN`. A block rewritten in place under its own id is one block, and a repeat the
+live document already carries, which a browser write can leave until settlement repairs it,
+refuses nothing. Only a typed block's markdown can name its id.
 
 Each `doc_updates` row records `content_changed` - whether the update changed the document's
 rendered markdown, the only document content a version stores (`pmdoc.Render` of the tree before and

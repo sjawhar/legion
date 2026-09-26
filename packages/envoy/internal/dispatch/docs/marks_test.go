@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -639,38 +640,84 @@ func repeatLiveBlockID(t *testing.T, service *Service, artifactID string) {
 	}
 }
 
-// A repeat the live document already holds is settlement's to repair, not the suggestion's: an
-// accept whose replacement names no held id, and the reject of a browser insert, are taken beside
-// it as they were before the repeated-id check.
-func TestSuggestionActionsBesideALiveRepeatedBlockIDAreTaken(t *testing.T) {
-	for _, test := range []struct {
-		name, want string
-		act        func(*Service, string) error
-	}{
-		{name: "an accept", want: "The quick red fox", act: func(service *Service, artifactID string) error {
+// A repeat the live document already holds is settlement's to repair, not a write's to refuse or
+// to repair: beside one, an accept whose replacement names no held id (inline, or a typed block
+// with an id of its own), the reject of a browser insert, and an upload of the document's own text
+// are taken as they were before the repeated-id check, and the accept and the reject leave the
+// repeat as they found it. The upload stores what the base did: the id repair every upload runs
+// keeps the id for the first block in document order.
+func TestWritesBesideALiveRepeatedBlockIDAreTaken(t *testing.T) {
+	const seed = ":::callout{#note}\nOriginal.\n:::\n\n:::callout{kind=\"warning\"}\nCopy.\n:::\n\nThe quick brown fox\n"
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	accept := func(quote, replacement string) func(*testing.T, *Service, string) error {
+		return func(t *testing.T, service *Service, artifactID string) error {
 			if _, err := service.MarkQuote(context.Background(), artifactID, MarkSpec{
 				Kind: MarkSuggestion, ID: "rep", By: model.Actor{Kind: "session", ID: "s1"},
-			}, "brown", nil); err != nil {
+			}, quote, nil); err != nil {
 				return err
 			}
-			return service.AcceptSuggestion(context.Background(), artifactID, "rep", "red", model.Actor{Kind: "user", ID: "alice"})
-		}},
-		{name: "the reject of a browser insert", want: "The brown fox", act: func(service *Service, artifactID string) error {
+			return service.AcceptSuggestion(context.Background(), artifactID, "rep", replacement, alice)
+		}
+	}
+	for _, test := range []struct {
+		name string
+		act  func(*testing.T, *Service, string) error
+		want func(before string) string
+	}{
+		{name: "an inline accept", act: accept("brown", "red"),
+			want: func(before string) string { return strings.Replace(before, "quick brown", "quick red", 1) }},
+		{name: "an accept writing a typed block with an id of its own",
+			act: accept("The quick brown fox", ":::callout{#fresh}\nA note.\n:::\n"),
+			want: func(before string) string {
+				return strings.Replace(before, "The quick brown fox\n", ":::callout{#fresh kind=\"note\" title=\"\"}\nA note.\n:::\n", 1)
+			}},
+		{name: "the reject of a browser insert", act: func(t *testing.T, service *Service, artifactID string) error {
 			browserMarkWithAttrs(t, service, artifactID, "proofSuggestion", "quick ", pmdoc.Attrs{
 				"id": "ins", "by": "user:bob", "kind": "insert",
 			})
-			return service.RejectSuggestion(context.Background(), artifactID, "ins", model.Actor{Kind: "user", ID: "alice"})
+			return service.RejectSuggestion(context.Background(), artifactID, "ins", alice)
+		}, want: func(before string) string { return strings.Replace(before, "quick brown", "brown", 1) }},
+		{name: "an upload of the document's own text", act: func(t *testing.T, service *Service, artifactID string) error {
+			current, err := service.Text(context.Background(), artifactID)
+			if err != nil {
+				return err
+			}
+			installCounterIDs(t, "minted")
+			_, err = service.ReplaceText(context.Background(), artifactID, current+"\nAn added line.\n", alice)
+			return err
+		}, want: func(before string) string {
+			// Minted in preorder: the original's paragraph takes minted-1, the copy minted-2.
+			copied := strings.LastIndex(before, "{#note ")
+			return before[:copied] + "{#minted-2 " + before[copied+len("{#note "):] + "\nAn added line.\n"
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			service, artifactID := newTestService(t)
 			service.settle = time.Hour
-			seedServiceText(t, service, artifactID, "First.\n\nSecond.\n\nThe quick brown fox\n")
+			seedServiceText(t, service, artifactID, seed)
 			repeatLiveBlockID(t, service, artifactID)
-			if err := test.act(service, artifactID); err != nil {
+			before, err := service.Text(context.Background(), artifactID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Count(before, "{#note ") != 2 {
+				t.Fatalf("the live document does not repeat the id: %q", before)
+			}
+			if err := test.act(t, service, artifactID); err != nil {
 				t.Fatalf("%s beside a live repeated id: %v", test.name, err)
 			}
-			waitForDocumentText(t, service, artifactID, "First.\n\nSecond.\n\n"+test.want+"\n")
+			waitForDocumentText(t, service, artifactID, test.want(before))
 		})
 	}
+}
+
+// installCounterIDs mints prefix-1, prefix-2, ... for the rest of the test.
+func installCounterIDs(t *testing.T, prefix string) {
+	t.Helper()
+	n := 0
+	pmdoc.SetBlockIDGenerator(func() string {
+		n++
+		return fmt.Sprintf("%s-%d", prefix, n)
+	})
+	t.Cleanup(func() { pmdoc.SetBlockIDGenerator(nil) })
 }

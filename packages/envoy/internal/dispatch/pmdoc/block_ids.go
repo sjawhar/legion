@@ -39,41 +39,49 @@ func EnsureBlockIDs(tree *Node) bool {
 	return EnsureBlockIDsCount(tree) > 0
 }
 
-// RepeatedBlockIDError is a write that would put one block id on two blocks.
-type RepeatedBlockIDError struct{ ID string }
-
-func (e *RepeatedBlockIDError) Error() string {
-	return fmt.Sprintf("block id %q would name two blocks; give one of them another id, or omit {#%s} to have one minted", e.ID, e.ID)
+// RepeatedBlockID reports the first block id, in next's document order, that next carries on two
+// or more blocks and on more blocks than live does, or nil. next is the document a write would
+// store over live; live is nil for a document with none before it. A repeat live already carries
+// is the document's own - a browser write can leave one until settlement repairs it - and not the
+// write's to answer for. Any other is refused rather than left to EnsureBlockIDs, which keeps the
+// id for the first holder in document order: the write would move the id, and the ask row or
+// anchor keyed on it, onto whichever of the blocks comes first. Only a typed block's markdown can
+// name its id, so what this finds is markdown naming one id twice, or naming an id live holds.
+func RepeatedBlockID(live, next *Node) error {
+	held := blockIDCounts(live)
+	written := blockIDCounts(next)
+	var repeated error
+	walkBlockIDs(next, func(id string) bool {
+		if written[id] > 1 && written[id] > held[id] {
+			repeated = fmt.Errorf("block id %q would name two blocks; give one of them another id, or omit {#%s} to have one minted", id, id)
+			return false
+		}
+		return true
+	})
+	return repeated
 }
 
-// RepeatedBlockID reports the first block id that two blocks across trees carry, read in order,
-// or nil. Only a typed block's markdown can name its id, so this is how a write finds one it is
-// about to repeat: an inserted fragment against the document it goes into, or markdown against
-// itself (ParseForWrite). A repeated id is not a repair to leave to EnsureBlockIDs, which keeps
-// the id for the first holder in document order: the write would move the id, and the ask row or
-// anchor keyed on it, onto whichever of the two blocks comes first.
-func RepeatedBlockID(trees ...*Node) error {
-	seen := make(map[string]struct{})
-	var repeated error
-	for _, tree := range trees {
-		Walk(tree, func(node *Node) bool {
-			if node.Type == "doc" || isInlineNodeType(node.Type) {
-				return true
-			}
-			if id, _ := node.Attrs[BlockIDAttr].(string); id != "" {
-				if _, held := seen[id]; held {
-					repeated = &RepeatedBlockIDError{ID: id}
-					return false
-				}
-				seen[id] = struct{}{}
-			}
+func blockIDCounts(tree *Node) map[string]int {
+	counts := make(map[string]int)
+	walkBlockIDs(tree, func(id string) bool {
+		counts[id]++
+		return true
+	})
+	return counts
+}
+
+// walkBlockIDs visits the id of every block in tree that carries one, in document order, until
+// visit returns false.
+func walkBlockIDs(tree *Node, visit func(id string) bool) {
+	Walk(tree, func(node *Node) bool {
+		if node.Type == "doc" || isInlineNodeType(node.Type) {
 			return true
-		})
-		if repeated != nil {
-			return repeated
 		}
-	}
-	return nil
+		if id, _ := node.Attrs[BlockIDAttr].(string); id != "" {
+			return visit(id)
+		}
+		return true
+	})
 }
 
 // BlockIDRepairCount reports how many block IDs EnsureBlockIDs would mint.

@@ -742,9 +742,6 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		if err != nil {
 			return nil, invalidMarkdownOp("markdown", err)
 		}
-		if err := pmdoc.RepeatedBlockID(tree, with); err != nil {
-			return nil, &ErrInvalidOp{Field: "markdown", Reason: err.Error()}
-		}
 		if out, inserted, err := pmdoc.InsertTableRows(tree, target, op.Markdown, after); err != nil || inserted {
 			return out, err
 		}
@@ -758,7 +755,14 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 				return nil, err
 			}
 		}
-		return pmdoc.Splice(tree, pmdoc.Range{From: position, To: position}, with)
+		out, err := pmdoc.Splice(tree, pmdoc.Range{From: position, To: position}, with)
+		if err != nil {
+			return nil, err
+		}
+		if err := pmdoc.RepeatedBlockID(tree, out); err != nil {
+			return nil, &ErrInvalidOp{Field: "markdown", Reason: err.Error()}
+		}
+		return out, nil
 	case "delete_row":
 		if op.Block == "" {
 			return nil, invalidOp("block")

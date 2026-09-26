@@ -303,18 +303,16 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		if err != nil {
 			return err
 		}
-		// An accept writes the caller's replacement, which may name a block's id. The live tree is
-		// repaired first, as an edit's is (ApplyOps): a repeat a browser write left there is
-		// settlement's to fix, not a reason to refuse the accept, and a reject writes nothing new.
-		if accept {
-			pmdoc.EnsureBlockIDs(tree)
-			if err := pmdoc.RepeatedBlockID(tree, replacement); err != nil {
-				return &ErrInvalidOp{Field: "replace_with", Reason: err.Error()}
-			}
-		}
 		next, err := pmdoc.Splice(tree, range_, replacement)
 		if err != nil {
 			return err
+		}
+		// An accept writes the caller's replacement, which may name a block's id; a reject writes
+		// nothing new.
+		if accept {
+			if err := pmdoc.RepeatedBlockID(tree, next); err != nil {
+				return fmt.Errorf("%w: %v", ErrInvalidMarkdown, err)
+			}
 		}
 		var updateErr error
 		transact(func(txn *crdt.Transaction) {

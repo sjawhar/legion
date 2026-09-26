@@ -39,15 +39,17 @@ func Parse(markdown string) (*Node, error) {
 	return doc, nil
 }
 
-// ParseForWrite parses markdown a caller is writing into a document as Parse does, except that a
-// block id the markdown names on two blocks is refused (ErrSchema, RepeatedBlockIDError) instead
-// of repaired, since the repair would silently give the id to whichever block comes first.
-func ParseForWrite(markdown string) (*Node, error) {
+// ParseForWrite parses markdown a caller is writing as Parse does, except that a block id the
+// markdown names on two blocks is refused (ErrSchema) instead of repaired, since the repair would
+// silently give the id to whichever block comes first. live is the document the markdown replaces
+// whole, or nil for a fragment or a new document: a repeat live already carries is not refused
+// (RepeatedBlockID), and the repair keeps it for its first block, as settlement would.
+func ParseForWrite(markdown string, live *Node) (*Node, error) {
 	doc, err := parseUnstamped(markdown)
 	if err != nil {
 		return nil, err
 	}
-	if err := RepeatedBlockID(doc); err != nil {
+	if err := RepeatedBlockID(live, doc); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrSchema, err)
 	}
 	EnsureBlockIDs(doc)

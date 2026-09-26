@@ -230,7 +230,7 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 		if err != nil {
 			return err
 		}
-		target, err := parseInput(markdown)
+		target, err := parseUpload(current, markdown)
 		if err != nil {
 			return err
 		}

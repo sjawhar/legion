@@ -523,11 +523,26 @@ func TestAWriteRepeatingAHeldBlockIDIsRefused(t *testing.T) {
 		{name: "an inserted ask", code: "INVALID_OP",
 			write: insert(":::ask{#decision urgency=\"high\" multiple=\"false\"}\nWhich protocol?\n:::\n")},
 		{name: "an inserted callout", code: "INVALID_OP", write: insert(callout)},
-		{name: "an accepted suggestion", code: "INVALID_OP",
+		{name: "an accepted suggestion", code: "INVALID_MARKDOWN",
 			write: func(t *testing.T, handler http.Handler, issueKey, _ string) *httptest.ResponseRecorder {
 				created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issueKey+"/comments", map[string]any{
 					"body": "a note first", "anchor": map[string]any{"artifact": "spec", "quote": "Context"},
 					"suggestion": map[string]string{"replace_with": callout}, "actor": sessionActor(),
+				})
+				if created.Code != http.StatusCreated {
+					t.Fatalf("create the suggestion: status=%d body=%s", created.Code, created.Body.String())
+				}
+				comment := decodeBody[model.Comment](t, created)
+				return dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
+			}},
+		// The question alone is replaced, so the ask's options stay behind as the rest of the
+		// block under its id: the id is held outside the text the accept replaces.
+		{name: "an accepted rewording of the question alone", code: "INVALID_MARKDOWN",
+			write: func(t *testing.T, handler http.Handler, issueKey, _ string) *httptest.ResponseRecorder {
+				created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issueKey+"/comments", map[string]any{
+					"body": "reword it", "anchor": map[string]any{"artifact": "spec", "quote": "Which transport?"},
+					"suggestion": map[string]string{"replace_with": strings.Replace(transportAsk, "Which transport?", "Which transport, first?", 1)},
+					"actor":      sessionActor(),
 				})
 				if created.Code != http.StatusCreated {
 					t.Fatalf("create the suggestion: status=%d body=%s", created.Code, created.Body.String())
@@ -567,6 +582,54 @@ func TestAWriteRepeatingAHeldBlockIDIsRefused(t *testing.T) {
 				t.Fatalf("the answered ask after the refusal: question=%q state=%q", ask.Question, ask.State)
 			}
 			blockAskID(t, handler, issue.Key, "decision")
+		})
+	}
+}
+
+// An accepted suggestion that rewrites a typed block in place under its own id writes one block
+// under that id, so it is taken as on main: the answered free-text ask keeps its row, its answer
+// and its block, whether the suggestion quotes the ask's whole text or a span across it.
+func TestAnAcceptRewritingATypedBlockUnderItsOwnIDIsTaken(t *testing.T) {
+	const freeText = ":::ask{#decision urgency=\"high\" multiple=\"false\"}\nWhich transport?\n:::\n"
+	const reworded = ":::ask{#decision urgency=\"high\" multiple=\"false\"}\nWhich transport, first?\n:::\n"
+	for _, test := range []struct{ name, quote string }{
+		{name: "the ask's whole text", quote: "Which transport?"},
+		{name: "a span across the ask", quote: "Context Which transport?"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			handler, _ := blockAskHandler(t)
+			issue, askID := seedBlockAsk(t, handler, "Rewritten in place", "decision", freeText, "Which transport?")
+			read := readBlockAsk(t, handler, askID)
+			if answered := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+askID+"/answer", map[string]any{
+				"selected": []string{}, "text": "REST first.", "expected_edited_at": read.EditedAt,
+			}, "alice"); answered.Code != http.StatusOK {
+				t.Fatalf("answer the ask: status=%d body=%s", answered.Code, answered.Body.String())
+			}
+			created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+				"body": "reword it", "anchor": map[string]any{"artifact": "spec", "quote": test.quote},
+				"suggestion": map[string]string{"replace_with": reworded}, "actor": sessionActor(),
+			})
+			if created.Code != http.StatusCreated {
+				t.Fatalf("create the suggestion: status=%d body=%s", created.Code, created.Body.String())
+			}
+			comment := decodeBody[model.Comment](t, created)
+
+			accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
+
+			if accepted.Code != http.StatusOK {
+				t.Fatalf("accept rewriting the ask under its own id: status=%d body=%s", accepted.Code, accepted.Body.String())
+			}
+			settleDocument(t, handler, issue.PrimaryArtifactID, issue.Key, "after-accept")
+			if got := strings.Count(documentMarkdown(t, handler, issue.PrimaryArtifactID), "{#decision "); got != 1 {
+				t.Fatalf("the document holds %d blocks under decision, want 1", got)
+			}
+			if held := blockAskID(t, handler, issue.Key, "decision"); held != askID {
+				t.Fatalf("block decision holds ask %s, want %s", held, askID)
+			}
+			if ask := readBlockAsk(t, handler, askID); ask.Question != "Which transport, first?" || ask.State != "answered" ||
+				ask.Answer == nil || ask.Answer.Text == nil || *ask.Answer.Text != "REST first." {
+				t.Fatalf("the answered ask after the accept: question=%q state=%q answer=%+v", ask.Question, ask.State, ask.Answer)
+			}
 		})
 	}
 }
