@@ -17,14 +17,18 @@ const bodyFirstRead = 512
 // charges its read buffer as the buffer grows, which is as its body arrives, starting at the bytes
 // its first read delivered and doubling as it fills: a sender that sends only headers holds no
 // room, and one that trickles its body holds at most twice what it has sent, never what it
-// declared. A request whose next piece does not fit waits for room, except one request at a time:
-// the first whose piece did not fit while no other held that right proceeds past the limit, and
-// keeps the right until it gives everything back. Only a request whose body bytes have arrived
-// asks for room, so the right goes to one that is reading, never to a connection that has sent
-// nothing; it is either still reading, and nothing stops it, or done and about to give everything
-// back, so the requests in flight always drain and no set of half-read bodies waits on each other.
-// That one request can take the total past the limit by at most its own body (twice its buffer
-// for the moment the buffer grows).
+// declared. A request whose next piece does not fit waits for room, except one request at a time,
+// which may take the total past the limit. That right goes to a request whose piece does not fit
+// while no other holds it or while the total is within the limit, so another request can take it
+// whenever the total is back within the limit, and a request waits on the holder only while the
+// total is past it. The holder can take the total past the limit by at most its own body (twice
+// its buffer for the moment the buffer grows).
+//
+// The holder need not be reading. A connection that has sent nothing never asks for room, but a
+// request asks as soon as its buffer is full, before its next byte arrives, and any sender can
+// stop once its request holds the right. If that request's growth took the total past the limit,
+// no request can charge a byte, however small, until the others give back enough to bring the
+// total within it or the stalled request ends at the server's read timeout.
 type bodyBudget struct {
 	mu    sync.Mutex
 	limit int64
@@ -58,13 +62,14 @@ func (b *bodyBudget) begin() *bodyRead {
 }
 
 // charge waits until n more bytes fit the budget or this read may go past the limit, then holds
-// them. A read whose n does not fit takes the right to go past the limit when no other holds it.
+// them. A read whose n does not fit takes the right to go past the limit when no other read holds
+// it or the total is within the limit.
 func (r *bodyRead) charge(ctx context.Context, n int64) error {
 	b := r.budget
 	for {
 		b.mu.Lock()
 		fits := b.held+n <= b.limit
-		if !fits && (b.over == nil || b.over == r) {
+		if !fits && (b.over == nil || b.over == r || b.held <= b.limit) {
 			b.over = r
 			fits = true
 		}
