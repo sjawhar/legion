@@ -18,12 +18,13 @@ var ErrDocSchema = errors.New("document is outside the Proof schema")
 // parseInput parses markdown a caller writes that replaces no live document: a fragment an edit or
 // an accept places, or a new document's first text.
 func parseInput(markdown string) (*pmdoc.Node, error) {
-	return parseUpload(nil, markdown)
+	return parseReplacing(nil, markdown)
 }
 
-// parseUpload parses markdown that replaces live whole, refusing a repeated block id live does not
-// already carry (pmdoc.ParseForWrite).
-func parseUpload(live *pmdoc.Node, markdown string) (*pmdoc.Node, error) {
+// parseReplacing parses markdown a caller writes over live, the document it replaces whole (nil
+// for none), refusing a block id the markdown repeats that live does not already carry
+// (pmdoc.ParseForWrite).
+func parseReplacing(live *pmdoc.Node, markdown string) (*pmdoc.Node, error) {
 	tree, err := pmdoc.ParseForWrite(markdown, live)
 	if err != nil {
 		if errors.Is(err, pmdoc.ErrSchema) {

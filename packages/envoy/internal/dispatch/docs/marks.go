@@ -307,12 +307,8 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		if err != nil {
 			return err
 		}
-		// An accept writes the caller's replacement, which may name a block's id; a reject writes
-		// nothing new.
-		if accept {
-			if err := pmdoc.RepeatedBlockID(tree, next, replacement); err != nil {
-				return fmt.Errorf("%w: %v", ErrInvalidMarkdown, err)
-			}
+		if err := pmdoc.RepeatedBlockID(tree, next, replacement); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidMarkdown, err)
 		}
 		var updateErr error
 		transact(func(txn *crdt.Transaction) {

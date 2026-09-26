@@ -49,11 +49,13 @@ back as a fresh open ask. Markdown a caller writes (a spec seeded at issue creat
 document or version, an edit's `insert`, an accepted suggestion's `replace_with`) is refused, naming
 the id, when it names an id twice or names one the document holds outside the text it replaces:
 `pmdoc.RepeatedBlockID` compares the document the write would store with the live one and refuses
-an id the stored one carries on more blocks than the live one does (`pmdoc.ParseForWrite` applies
-it to a seed and an upload). An `insert` is `400 INVALID_OP` on `markdown`, every other write
-`400 INVALID_MARKDOWN`. A block rewritten in place under its own id is one block, and a repeat the
-live document already carries, which a browser write can leave until settlement repairs it,
-refuses nothing. Only a typed block's markdown can name its id.
+an id the write names that the stored one carries on more blocks than the live one does. It runs
+when the markdown is parsed (`pmdoc.ParseForWrite`, before the parse's own id repair, which is the
+only place a fragment naming one id twice shows), and again on the spliced tree for an insert or an
+accept. An `insert` is `400 INVALID_OP` on `markdown`, every other write `400 INVALID_MARKDOWN`.
+A block rewritten in place under its own id is one block, and neither the halves of a block a
+splice splits nor a repeat the live document already carries (a browser write can leave one until
+settlement repairs it) refuse anything. Only a typed block's markdown can name its id.
 
 Each `doc_updates` row records `content_changed` - whether the update changed the document's
 rendered markdown, the only document content a version stores (`pmdoc.Render` of the tree before and
