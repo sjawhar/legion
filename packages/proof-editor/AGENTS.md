@@ -8,11 +8,7 @@ release, an npm publish and a pin bump.
 ## Where the code came from
 
 `src/` is proof-sdk's source at **24a5fc94915cda5704897c497af6312c140db40d** (the `library`
-branch's v0.3.13; `main` pinned the npm package at 0.3.12, so the copy also brings 64dc42ed with
-it — a duplicated block id now stays with the block that held it, where 0.3.12 kept the first
-occurrence in document order, which is still what the server's `EnsureBlockIDs` does; legion
-#1434 moves `main` to 0.3.13 and this paragraph loses its middle clause when it lands), copied
-byte for byte:
+branch's v0.3.13, the release `main` now pins), copied byte for byte:
 
 | File | What it is |
 | --- | --- |
