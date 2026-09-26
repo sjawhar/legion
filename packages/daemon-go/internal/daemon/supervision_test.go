@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -771,16 +772,20 @@ func TestEveryStreamEventMapsToItsSuperviseEvent(t *testing.T) {
 		{stream.TurnEnd{Claim: token}, supervise.StreamTurnEnd{Claim: token}},
 		{stream.LateRefusal{Claim: token, DeliveryID: "d1", Error: "Agent is already processing. Use steer() or followUp() to queue messages, or wait for completion."},
 			supervise.StreamLateRefusal{Claim: token, DeliveryID: "d1", Error: "Agent is already processing. Use steer() or followUp() to queue messages, or wait for completion."}},
+		{stream.LateRefusal{Claim: token, DeliveryID: "d2", Error: "Agent is already processing.", Replayed: true, ConnSequence: 3},
+			supervise.StreamLateRefusal{Claim: token, DeliveryID: "d2", Error: "Agent is already processing.", Replayed: true, ConnSequence: 3}},
 		{stream.Closed{Claim: token}, supervise.StreamClosed{Claim: token}},
 	}
+	mapped := map[string]bool{}
 	for _, testCase := range cases {
+		mapped[fmt.Sprintf("%T", testCase.in)] = true
 		got, err := superviseEvent(testCase.in)
 		if err != nil || !reflect.DeepEqual(got, testCase.want) {
 			t.Errorf("superviseEvent(%#v) = %#v, %v; want %#v", testCase.in, got, err, testCase.want)
 		}
 	}
-	if sealed := streamEventTypes(t); len(sealed) != len(cases) {
-		t.Fatalf("internal/stream seals %d event types %v; this test maps %d — map the new one", len(sealed), sealed, len(cases))
+	if sealed := streamEventTypes(t); len(sealed) != len(mapped) {
+		t.Fatalf("internal/stream seals %d event types %v; this test maps %d — map the new one", len(sealed), sealed, len(mapped))
 	}
 }
 

@@ -324,9 +324,7 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
         JSON.parse(
           await post("/v1/messages/send", {
             source: input.source ?? "agent",
-            ...(input.sourceSessionID === undefined
-              ? {}
-              : { source_session: input.sourceSessionID }),
+            ...sourceSession(input.sourceSessionID),
             target_session: input.targetSessionID,
             message: input.message,
             idempotency_key: idempotencyKey,
@@ -346,9 +344,7 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
         JSON.parse(
           await post("/v1/messages/publish", {
             source: input.source ?? "agent",
-            ...(input.sourceSessionID === undefined
-              ? {}
-              : { source_session: input.sourceSessionID }),
+            ...sourceSession(input.sourceSessionID),
             topic: input.topic,
             message: input.message,
             ...(input.payload === undefined ? {} : { payload: input.payload }),
@@ -419,4 +415,13 @@ function messageMetadata(input: MessageMetadataInput) {
     ...(input.expectsReply === undefined ? {} : { expects_reply: input.expectsReply }),
     ...(input.expiresAt === undefined ? {} : { expires_at: input.expiresAt }),
   };
+}
+
+/**
+ * A blank source session is no source session. The listener's own JSON drops an empty
+ * `source_session` on the way back out (`omitempty`), so sending one costs the recipient both
+ * the sender label and the reply hint while looking, to the sender, like an attributed message.
+ */
+function sourceSession(sessionID: string | undefined) {
+  return sessionID === undefined || sessionID === "" ? {} : { source_session: sessionID };
 }

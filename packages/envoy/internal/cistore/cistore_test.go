@@ -1,6 +1,7 @@
 package cistore
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/kvwatch"
+	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/testnats"
 	"github.com/testcontainers/testcontainers-go"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
@@ -713,6 +715,92 @@ func TestRecordHeadRejectsInvalidSHA(t *testing.T) {
 
 	if err := s.RecordHead("example-org", "example-repo", "42", "abcdef1234567", "2026-09-07T03:00:00Z"); err == nil {
 		t.Fatal("RecordHead accepted an invalid SHA")
+	}
+}
+
+// A repository's name may begin with a dot, end with one, or hold two in a row (`sjawhar/.github`),
+// and a KV key's dots separate tokens that must not be empty, so the key writes a dot in the owner
+// or the name as `=`, which no GitHub name holds: the head and the checks of such a repository are
+// recorded, `a.b` and `a_b` keep distinct keys, and a name without a dot keys as it always has.
+func TestDottedRepositoriesRecordUnderTheirOwnKeys(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s := openStore(t, conn)
+	const (
+		owner  = "example-org"
+		number = "42"
+		sha    = "abcdef1234567890abcdef1234567890abcdef12"
+	)
+	for i, repo := range []string{".example", "a..b", "trailing.", "example.repo", "example_repo"} {
+		if err := s.RecordHead(owner, repo, number, sha, "2026-09-07T03:00:00Z"); err != nil {
+			t.Fatalf("record %s/%s's head: %v", owner, repo, err)
+		}
+		waitHead(t, s, owner, repo, number, sha)
+		if err := recordCheck(s, owner, repo, number, sha, "build", strconv.Itoa(700+i), "https://example-host/checks", "completed", "success", ""); err != nil {
+			t.Fatalf("record %s/%s's check: %v", owner, repo, err)
+		}
+		waitCacheChecks(t, s, owner, repo, number, sha, 1)
+	}
+	if Key(owner, "example.repo", number, sha) == Key(owner, "example_repo", number, sha) {
+		t.Fatalf("example.repo and example_repo share the key %s", Key(owner, "example.repo", number, sha))
+	}
+	if got, want := Key(owner, "example-repo", number, sha), "example-org.example-repo.pr42."+sha; got != want {
+		t.Fatalf("Key = %s, want %s", got, want)
+	}
+	if got, want := headKey(owner, "example-repo", number), "head.example-org.example-repo.42"; got != want {
+		t.Fatalf("headKey = %s, want %s", got, want)
+	}
+}
+
+// A record written before a dot in a key segment became `=` sits under its old key until the TTL,
+// and the summary loop addresses every cached record by the key its identity builds now: the cache
+// holds a record only under that key, so an old-key record is never cached, claimed or published,
+// where it would otherwise fail a claim on every tick until it expired.
+func TestARecordUnderAnOldKeySpellingIsNotCached(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s := openStore(t, conn)
+	pub := &recPub{}
+	const (
+		owner  = "example-org"
+		number = "42"
+		sha    = "abcdef1234567890abcdef1234567890abcdef12"
+	)
+	if err := recordCheck(s, owner, "example.repo", number, sha, "build", "900", "https://example-host/checks/900", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
+		t.Fatalf("record check: %v", err)
+	}
+	waitCacheChecks(t, s, owner, "example.repo", number, sha, 1)
+	kv := s.watcher.KV()
+	entry, err := kv.Get(Key(owner, "example.repo", number, sha))
+	if err != nil {
+		t.Fatalf("get the record: %v", err)
+	}
+	if _, err := kv.Put(owner+".example.repo.pr"+number+"."+sha, entry.Value()); err != nil {
+		t.Fatalf("write the record under its old key: %v", err)
+	}
+	if err := kv.Delete(Key(owner, "example.repo", number, sha)); err != nil {
+		t.Fatalf("delete the record's current key: %v", err)
+	}
+	// The watch delivers in order, so a later record reaching the cache means the two writes did.
+	if err := recordCheck(s, owner, "example-repo", number, sha, "build", "901", "https://example-host/checks/901", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
+		t.Fatalf("record the later check: %v", err)
+	}
+	waitCacheChecks(t, s, owner, "example-repo", number, sha, 1)
+
+	var logs bytes.Buffer
+	for range 3 {
+		runSummaryTick(s, pub, 0, logging.NewWithWriter("test", &logs))
+	}
+	if strings.Contains(logs.String(), "checks claim failed") {
+		t.Fatalf("a summary tick tried to claim the old-key record:\n%s", logs.String())
+	}
+	if pub.count() != 1 || pub.last().Topic != "notifications.github.example-org.example-repo.pr.42.checks" {
+		t.Fatalf("published %d envelopes, want example-repo's settlement alone", pub.count())
+	}
+	for _, cached := range s.List() {
+		if cached.Repo == "example.repo" {
+			t.Fatalf("cached a record under its old key: %+v", cached)
+		}
 	}
 }
 func TestRecordSameIDDoesNotRegressCompletedAtEqualOrMissingTimestamps(t *testing.T) {

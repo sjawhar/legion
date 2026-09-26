@@ -23,6 +23,8 @@ func TestGithubEnvelopeGoldens(t *testing.T) {
 		event string
 	}{
 		{name: "pull-request-opened", event: "pull_request"},
+		// A dot in a repository's name is one subject segment's `_`, so the name stays one segment.
+		{name: "pull-request-opened-dotted-repository", event: "pull_request"},
 		{name: "pull-request-synchronize", event: "pull_request"},
 		{name: "pull-request-closed-merged", event: "pull_request"},
 		{name: "issue-comment-created", event: "issue_comment"},

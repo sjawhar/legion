@@ -15,8 +15,17 @@ const marksMapName = "marks"
 var ErrInvalidMarkdown = errors.New("markdown is not a Proof document")
 var ErrDocSchema = errors.New("document is outside the Proof schema")
 
+// parseInput parses markdown a caller writes that replaces no live document: a fragment an edit or
+// an accept places, or a new document's first text.
 func parseInput(markdown string) (*pmdoc.Node, error) {
-	tree, err := pmdoc.Parse(markdown)
+	return parseReplacing(nil, markdown)
+}
+
+// parseReplacing parses markdown a caller writes over live, the document it replaces whole (nil
+// for none), refusing a block id the markdown repeats that live does not already carry
+// (pmdoc.ParseForWrite).
+func parseReplacing(live *pmdoc.Node, markdown string) (*pmdoc.Node, error) {
+	tree, err := pmdoc.ParseForWrite(markdown, live)
 	if err != nil {
 		if errors.Is(err, pmdoc.ErrSchema) {
 			return nil, fmt.Errorf("%w: %v", ErrInvalidMarkdown, err)

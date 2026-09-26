@@ -126,7 +126,7 @@ func consumeConsumer(ctx context.Context, consumer jetstream.Consumer, spec Cons
 }
 
 func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpec, pool *pgxpool.Pool, handlers []Handler) {
-	decoded, err := decodeMessage(message.Subject(), spec.Project, message.Data())
+	decoded, err := decodeMessage(message.Subject(), spec.Project, spec.Repositories, message.Data())
 	if err != nil {
 		logMessage(spec.Logger, slog.LevelError, "poison JetStream message", message, "error", err)
 		if termErr := message.Term(); termErr != nil {
@@ -203,9 +203,19 @@ func normalizedSpec(spec ConsumerSpec) (ConsumerSpec, error) {
 func githubFilters(repositories []ghrepo.Repository) []string {
 	filters := make([]string, 0, len(repositories))
 	for _, repo := range repositories {
-		filters = append(filters, "notifications.github."+repo.Owner()+"."+repo.Name()+".>")
+		filters = append(filters, githubRepositoryPrefix(repo)+".>")
 	}
 	return filters
+}
+
+// githubRepositoryPrefix is what every GitHub subject Envoy publishes for repo begins with: the
+// owner and the name each one segment, every dot written `_`, since a repository name may hold a
+// dot and a subject splits on dots. It is this module's copy of the contracts' githubRepositoryPrefix
+// (packages/contracts/src/subject.ts), which the Go coordinator cannot import from Envoy; the golden
+// tests hold the two to Envoy's published subjects. The spelling is lossy, `a.b` and `a_b` alike, so
+// the payload's repository, not the subject, says whose event it is.
+func githubRepositoryPrefix(repo ghrepo.Repository) string {
+	return "notifications.github." + strings.ReplaceAll(repo.Owner(), ".", "_") + "." + strings.ReplaceAll(repo.Name(), ".", "_")
 }
 
 func dispatchConsumerName(project string) string {

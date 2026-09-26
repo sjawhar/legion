@@ -110,6 +110,9 @@ func TestAClaimRoundTripsWithItsLocatorAndDelivery(t *testing.T) {
 		QueuedAt:    at(1),
 		DeliveredAt: at(2),
 		Interrupted: true,
+		// The prompt that set the mark, since re-queued under delivery-1: a restart judges a late
+		// refusal against it.
+		MarkedBy: "delivery-0",
 	}
 
 	if err := store.PutClaim(ctx, want); err != nil {
