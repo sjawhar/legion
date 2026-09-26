@@ -1735,6 +1735,10 @@ func TestGithubSummary(t *testing.T) {
 func TestGithubPayloadFields(t *testing.T) {
 	longBody := strings.Repeat("a", 3000)
 	longBodyWithFooter := strings.Repeat("a", 3000) + `<!-- legion:{"session":"worker-1"} -->`
+	// A real subject line from this repository, well past the 70-rune push summary, which
+	// head_subject must carry whole.
+	realLongSubject := "fix(daemon-go, envoy, contracts): a dotted repository name is one subject segment" +
+		" and one key segment, and intake applies only its configured repositories (LEGION-208 4b) (#1421)"
 	tests := []struct {
 		name        string
 		event       string
@@ -1760,6 +1764,28 @@ func TestGithubPayloadFields(t *testing.T) {
 				"after": "2222222222222222", "before": "1111111111111111", "pusher": "pusher",
 				"head_subject": "Add actionable payloads", "commit_count": "2", "compare_url": "https://example-host/compare",
 			},
+		},
+		{
+			// The envelope must fit NATS's payload limit, so a head commit's first line is capped
+			// like the envelope's other text fields, however long a single-line message is.
+			name:  "push caps a head commit's first line at the envelope's text cap",
+			event: "push",
+			body: map[string]any{
+				"repository":  map[string]any{"full_name": "example-org/example-repo"},
+				"ref":         "refs/heads/main",
+				"head_commit": map[string]any{"message": strings.Repeat("s", 3000) + "\n\nBody"},
+			},
+			want: map[string]string{"head_subject": strings.Repeat("s", 2048) + "…"},
+		},
+		{
+			name:  "push keeps a long real subject line whole",
+			event: "push",
+			body: map[string]any{
+				"repository":  map[string]any{"full_name": "example-org/example-repo"},
+				"ref":         "refs/heads/main",
+				"head_commit": map[string]any{"message": realLongSubject + "\n\nBody"},
+			},
+			want: map[string]string{"head_subject": realLongSubject},
 		},
 		{
 			name:  "push lists unique changed paths across commits in first-seen order",
