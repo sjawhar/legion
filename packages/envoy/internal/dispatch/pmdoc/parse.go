@@ -68,7 +68,7 @@ func Parse(markdown string) (*Node, error) {
 // whole, or nil for a fragment or a new document: a repeat live already carries is not refused
 // (RepeatedBlockID), and the repair keeps it for its first block, as settlement would.
 func ParseForWrite(markdown string, live *Node) (*Node, error) {
-	doc, err := parseUnstamped(markdown)
+	doc, err := parseUnstamped(LineFeeds(markdown))
 	if err != nil {
 		return nil, err
 	}
@@ -77,6 +77,17 @@ func ParseForWrite(markdown string, live *Node) (*Node, error) {
 	}
 	EnsureBlockIDs(doc)
 	return doc, nil
+}
+
+// LineFeeds is text with each CR LF and each lone carriage return written as a line feed. Both
+// end a line in CommonMark and in the browser editor, so text a caller writes into a document is
+// converted where it enters (ParseForWrite, ParseInline, and the server's other writes of caller
+// text), and the parser and the renderer see line feeds alone.
+func LineFeeds(text string) string {
+	if !strings.Contains(text, "\r") {
+		return text
+	}
+	return strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n")
 }
 
 // parseUnstamped is Parse before EnsureBlockIDs: blocks keep the ids their markdown names, and a
@@ -167,7 +178,7 @@ func referencedLabels(nodes []*Node) []string {
 // nodes. Markdown that forms more than one paragraph, or holds text after its
 // paragraph's last line, is ErrSchema.
 func ParseInline(markdown string) ([]*Node, error) {
-	source := []byte(markdown)
+	source := []byte(LineFeeds(markdown))
 	root := withLineStarts(inlineMarkdownParser, source, parser.NewContext())
 	if root.ChildCount() > 1 {
 		return nil, fmt.Errorf("%w: inline markdown forms %d paragraphs", ErrSchema, root.ChildCount())

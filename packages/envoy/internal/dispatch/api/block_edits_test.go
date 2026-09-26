@@ -167,7 +167,8 @@ func TestDocumentEditsEmptyingAContainersParagraphIsTaken(t *testing.T) {
 // multiple of four from the column it stands at - two columns in a callout inside a blockquote or
 // a list item - and a line in a blockquote closes nothing. The renderer writes each typed block's fence longer than every
 // such line, so a replace or a suggestion that writes one into code inside a callout is stored with
-// the code as sent, under a longer fence, and the document reads back whole - here, and in the
+// the code as sent (a CR LF written as a line feed), under a longer fence, and the document reads
+// back whole - here, and in the
 // engine (pmdoc.TestTypedFencesReadTheSameInTheEngineAndHere holds the engine's reading of each
 // shape).
 func TestDocumentEditsWriteAColonLineIntoCodeInsideATypedBlock(t *testing.T) {
@@ -244,7 +245,7 @@ func TestDocumentEditsWriteAColonLineIntoCodeInsideATypedBlock(t *testing.T) {
 			if edited.Code != http.StatusOK {
 				t.Fatalf("replace: status=%d body=%s", edited.Code, edited.Body.String())
 			}
-			readsBack(text(issue.PrimaryArtifactID), test.with, test.fence)
+			readsBack(text(issue.PrimaryArtifactID), pmdoc.LineFeeds(test.with), test.fence)
 			suggested := createInteractionIssue(t, handler, "S"+string(rune('A'+index)), "colons in code", test.spec)
 			created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+suggested.Key+"/comments", map[string]any{
 				"body": "suggest", "anchor": map[string]any{"artifact": "spec", "quote": "Body."},
@@ -257,7 +258,7 @@ func TestDocumentEditsWriteAColonLineIntoCodeInsideATypedBlock(t *testing.T) {
 			if accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice"); accepted.Code != http.StatusOK {
 				t.Fatalf("accept: status=%d body=%s", accepted.Code, accepted.Body.String())
 			}
-			readsBack(text(suggested.PrimaryArtifactID), test.with, test.fence)
+			readsBack(text(suggested.PrimaryArtifactID), pmdoc.LineFeeds(test.with), test.fence)
 		})
 	}
 }

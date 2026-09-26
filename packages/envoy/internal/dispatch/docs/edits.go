@@ -1222,6 +1222,7 @@ func refuseCodeThatReshapesItsBlock(before, after *pmdoc.Node, match pmdoc.Range
 // codeReplacement is what a replacement landing in a code block splices in: a code block's text
 // is literal, whitespace, markdown syntax and references alike, so it is the replacement as sent.
 func codeReplacement(text string) *pmdoc.Node {
+	text = pmdoc.LineFeeds(text)
 	paragraph := &pmdoc.Node{Type: "paragraph"}
 	if text != "" {
 		paragraph.Children = []*pmdoc.Node{{Type: "text", Text: text}}
