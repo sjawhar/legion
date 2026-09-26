@@ -362,9 +362,12 @@ func ownSlots(issues []record.Issue, slots []record.Slot) []record.Slot {
 // moves it, and the architect cannot release a child already in the workflow. Each start carries
 // the child's own generation and phase, which is what the outbox fences it against, and the task
 // that says to carry the phase on: a start with no task leaves the resumed agent holding its old
-// transcript with nothing asked of it, and only its own handoff moves the phase. A child whose start
-// is still queued, from a fact that moved it while the root waited for its slot, is not started a
-// second time: the task would be delivered twice.
+// transcript with nothing asked of it, and only its own handoff moves the phase. A child whose
+// worker a fact already started for this run, while the root waited for its slot, is not started
+// a second time, whether that start is still queued or has run (RoleStarted): the task would be
+// delivered twice. The check lives here, where the second start would be written, rather than in
+// the start's executor, which could tell a repeated task only if the claim also recorded the phase
+// of the task it serves: serving_generation alone does not tell one role's phases of a run apart.
 func (a *Admission) startMidPhaseChildren(ctx context.Context, tx pgx.Tx, root record.Issue, issues []record.Issue, now time.Time) error {
 	for _, child := range issues {
 		if child.Key == root.Key || child.Tree != root.Tree {
@@ -374,11 +377,11 @@ func (a *Admission) startMidPhaseChildren(ctx context.Context, tx pgx.Tx, root r
 		if role == "" || record.OutOfWorkflow(child.Status) {
 			continue
 		}
-		queued, err := a.store.PendingStart(ctx, tx, child.Key, role, child.Generation, child.Phase)
+		started, err := a.store.RoleStarted(ctx, tx, child.Key, role, child.Generation, child.Phase)
 		if err != nil {
 			return err
 		}
-		if queued {
+		if started {
 			continue
 		}
 		payload := record.SuperviseRequest{Op: "start", Tree: child.Tree, Role: role, Generation: child.Generation,

@@ -468,16 +468,21 @@ func (s *Postgres) RetryOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseTo
 	return nil
 }
 
-// PendingStart says whether the outbox holds an unfinished start of issue's role for the generation
-// and phase: finishing deletes the row, so one left is a start the outbox has not finished.
-func (s *Postgres) PendingStart(ctx context.Context, tx pgx.Tx, issue string, role claim.Role, generation uint64, p phase.Phase) (bool, error) {
-	var pending bool
+// RoleStarted says whether issue's role has already been started for the run of generation and
+// phase. Either a start of it is still queued (finishing deletes the row, so one left is a start
+// the outbox has not run), or one has run: its claim is live — past queued and not suspended,
+// failed, retired or launch_uncertain — and serving generation. A claim in any of those other
+// states has no process working the run, so it is not started.
+func (s *Postgres) RoleStarted(ctx context.Context, tx pgx.Tx, issue string, role claim.Role, generation uint64, p phase.Phase) (bool, error) {
+	var started bool
 	if err := tx.QueryRow(ctx, `select exists (select 1 from outbox where issue = $1 and kind = $2 and payload->>'op' = 'start'
-		and payload->>'role' = $3 and payload->>'generation' = $4 and coalesce(payload->>'phase', '') = $5)`,
-		issue, string(OutboxKindSupervise), string(role), strconv.FormatUint(generation, 10), string(p)).Scan(&pending); err != nil {
-		return false, fmt.Errorf("read the pending %s start of %s: %w", role, issue, err)
+			and payload->>'role' = $3 and payload->>'generation' = $4 and coalesce(payload->>'phase', '') = $5)
+		or exists (select 1 from claims where issue = $1 and role = $3 and serving_generation = $6
+			and state in ('launching', 'shim_connected', 'registered', 'ready', 'working', 'idle'))`,
+		issue, string(OutboxKindSupervise), string(role), strconv.FormatUint(generation, 10), string(p), int64(generation)).Scan(&started); err != nil {
+		return false, fmt.Errorf("read whether the %s of %s is started: %w", role, issue, err)
 	}
-	return pending, nil
+	return started, nil
 }
 
 // PendingStatusWrites lists every Dispatch status write of project's issues the outbox has not
