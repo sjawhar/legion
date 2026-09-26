@@ -472,13 +472,18 @@ func (s *Store) RecordSuite(observation contracts.CIObservation) error {
 }
 
 // write applies mutate to the current state of identity's record, a new one carrying only the
-// identity when there is none, and writes it with a compare-and-swap, retrying on a revision
-// conflict until recordBudget runs out.
+// identity when there is none, and writes it with a compare-and-swap. A lost compare-and-swap or a
+// transient KV error is retried from a fresh read until recordBudget runs out: the write carries
+// every observation of a batch, so one transient error must not fail them all, and GitHub does not
+// redeliver a delivery the listener refused. A lasting error (kvErrorLasts) fails it at once.
 func (s *Store) write(identity State, mutate func(*State) bool) error {
 	kv := s.watcher.KV()
 	key := Key(identity.Owner, identity.Repo, identity.Number, identity.SHA)
 	deadline := time.Now().Add(recordBudget)
 	for attempt := 0; ; attempt++ {
+		if attempt > 0 {
+			time.Sleep(casBackoff(attempt - 1))
+		}
 		entry, getErr := kv.Get(key)
 		var st State
 		var rev uint64
@@ -490,8 +495,10 @@ func (s *Store) write(identity State, mutate func(*State) bool) error {
 			rev = entry.Revision()
 		case errors.Is(getErr, nats.ErrKeyNotFound):
 			st = identity
-		default:
+		case kvErrorLasts(getErr) || time.Now().After(deadline):
 			return getErr
+		default:
+			continue
 		}
 		beforeHash := st.Hash()
 		generation := st.Generation
@@ -505,24 +512,43 @@ func (s *Store) write(identity State, mutate func(*State) bool) error {
 		if err != nil {
 			return err
 		}
+		var writeErr error
 		if rev == 0 {
-			if _, err := kv.Create(key, buf); err == nil {
-				return nil
-			} else if !errors.Is(err, nats.ErrKeyExists) {
-				return err
-			}
+			_, writeErr = kv.Create(key, buf)
 		} else {
-			if _, err := kv.Update(key, buf, rev); err == nil {
-				return nil
-			} else if !isCASConflict(err) {
-				return err
+			_, writeErr = kv.Update(key, buf, rev)
+		}
+		switch {
+		case writeErr == nil:
+			return nil
+		case isCASConflict(writeErr):
+			if time.Now().After(deadline) {
+				return errors.New("cistore: record exceeded CAS budget")
 			}
+		case kvErrorLasts(writeErr) || time.Now().After(deadline):
+			return writeErr
 		}
-		if time.Now().After(deadline) {
-			return errors.New("cistore: record exceeded CAS budget")
-		}
-		time.Sleep(casBackoff(attempt))
 	}
+}
+
+// kvErrorLasts reports whether a KV error will outlast a retry within a write's budget: the
+// connection is closed or draining, no stream answers for the record (a deleted bucket, like a key
+// no stream serves, answers no responders), or JetStream refuses the request itself (a 4xx, an
+// invalid key, a record over the payload limit). Anything else, a timeout or a server it could not
+// reach, is transient.
+func kvErrorLasts(err error) bool {
+	if errors.Is(err, nats.ErrConnectionClosed) || errors.Is(err, nats.ErrConnectionDraining) ||
+		errors.Is(err, nats.ErrBucketNotFound) || errors.Is(err, nats.ErrNoResponders) ||
+		errors.Is(err, nats.ErrInvalidKey) || errors.Is(err, nats.ErrMaxPayload) {
+		return true
+	}
+	var jsErr nats.JetStreamError
+	if errors.As(err, &jsErr) {
+		if api := jsErr.APIError(); api != nil && api.Code >= 400 && api.Code < 500 {
+			return true
+		}
+	}
+	return false
 }
 
 func rearm(st *State) {

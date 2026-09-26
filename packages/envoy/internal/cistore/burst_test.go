@@ -21,8 +21,9 @@ type writtenState struct {
 	state    State
 }
 
-// writeKV is the CI bucket seen through a store whose writes a test can slow, hold or fail, and
-// whose every successful write it records. Reads and watches pass straight through.
+// writeKV is the CI bucket seen through a store whose writes a test can slow, hold or fail, whose
+// next read it can fail once, and whose every successful write it records. Watches pass straight
+// through.
 type writeKV struct {
 	natsgo.KeyValue
 	delay time.Duration
@@ -30,7 +31,26 @@ type writeKV struct {
 	mu      sync.Mutex
 	act     func(call int) error
 	calls   int
+	getErr  error
 	written map[string][]writtenState
+}
+
+// failNextGet makes the next Get return err instead of reading.
+func (k *writeKV) failNextGet(err error) {
+	k.mu.Lock()
+	k.getErr = err
+	k.mu.Unlock()
+}
+
+func (k *writeKV) Get(key string) (natsgo.KeyValueEntry, error) {
+	k.mu.Lock()
+	err := k.getErr
+	k.getErr = nil
+	k.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return k.KeyValue.Get(key)
 }
 
 func (k *writeKV) Create(key string, value []byte) (uint64, error) {
@@ -459,17 +479,18 @@ func startCheck(s *Store, errs []error, wg *sync.WaitGroup, i int) {
 	}()
 }
 
-// A batch's write that fails reaches every caller in the batch as that failure, the writer's role
-// passes to the callers that queued meanwhile, and their write goes through: a failed write leaves
-// nobody waiting and the record accepting writes. A write that panics fails its batch instead of
-// stranding it.
+// A batch's write that fails for good reaches every caller in the batch as that failure, the
+// writer's role passes to the callers that queued meanwhile, and their write goes through: a failed
+// write leaves nobody waiting and the record accepting writes. A write that panics fails its batch
+// instead of stranding it.
 func TestAFailedBatchWriteReachesEveryCallerAndTheNextBatchIsWritten(t *testing.T) {
 	h := failureHead
 	t.Run("a KV failure", func(t *testing.T) {
 		conn, cleanup := connectNATS(t)
 		defer cleanup()
 		s, kv := wrapStore(t, conn, 0)
-		injected := errors.New("injected KV failure")
+		// A write JetStream refuses outright, so retrying cannot help and the batch fails.
+		injected := natsgo.ErrMaxPayload
 		enteredFirst, enteredSecond := make(chan struct{}), make(chan struct{})
 		releaseFirst, releaseSecond := make(chan struct{}), make(chan struct{})
 		kv.onWrite(func(call int) error {
@@ -661,6 +682,80 @@ func TestQueuedCallersReturnPromptlyWhenTheConnectionCloses(t *testing.T) {
 			t.Fatalf("caller %d returned success on a closed connection", i)
 		}
 	}
+}
+
+// A transient KV error during a burst, here the batch's read timing out once, is retried within
+// the write's budget as a lost compare-and-swap is, so it fails none of the batch's callers:
+// GitHub does not redeliver a delivery the listener refused, and one error must not lose a batch.
+func TestATransientKVErrorFailsNoCallerInABurst(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s, kv := wrapStore(t, conn, 0)
+	h := head{"example-org", "example-repo", "42", "5555555555555555555555555555555555555555"}
+	const n = 80
+	entered, release := kv.holdNextWrite()
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = s.Record(h.check(fmt.Sprintf("check-%d", i), uint64(700+i), "completed", "success", "2026-09-24T01:00:00Z"))
+		}()
+		if i == 0 {
+			recv(t, entered, "check-0's write")
+		} else {
+			waitQueued(t, s, h.key(), i)
+		}
+	}
+	kv.failNextGet(natsgo.ErrTimeout)
+	release()
+	waitAll(t, &wg, "a burst with one transient KV error")
+
+	failed := 0
+	var first error
+	for _, err := range errs {
+		if err != nil {
+			failed++
+			if first == nil {
+				first = err
+			}
+		}
+	}
+	if failed > 0 {
+		t.Fatalf("one transient KV error failed %d of %d callers (first: %v), want none", failed, n, first)
+	}
+	if checks := len(getState(t, s, h.owner, h.repo, h.number, h.sha).Checks); checks != n {
+		t.Fatalf("record holds %d checks, want all %d", checks, n)
+	}
+}
+
+// A KV error that retrying cannot fix fails the write at once rather than after the budget: here
+// the bucket has been deleted.
+func TestALastingKVErrorFailsAWriteAtOnce(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s, _ := wrapStore(t, conn, 0)
+	js, err := conn.JetStream()
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	if err := js.DeleteKeyValue(testBucket(t)); err != nil {
+		t.Fatalf("delete the bucket: %v", err)
+	}
+	h := head{"example-org", "example-repo", "42", "6666666666666666666666666666666666666666"}
+
+	began := time.Now()
+	err = record(s, h.check("check-0", 800, "completed", "success", "2026-09-24T01:00:00Z"))
+	elapsed := time.Since(began)
+
+	if err == nil {
+		t.Fatal("a write to a deleted bucket succeeded")
+	}
+	if elapsed >= recordBudget/2 {
+		t.Fatalf("a write to a deleted bucket took %s to fail (%v), want well under the %s budget", elapsed, err, recordBudget)
+	}
+	t.Logf("failed in %s: %v", elapsed.Round(time.Millisecond), err)
 }
 
 // BenchmarkRecordBurst records a burst of concurrent observations on one fresh head per
