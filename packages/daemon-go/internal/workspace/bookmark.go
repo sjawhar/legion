@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+
+	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 )
 
 var (
@@ -21,11 +23,13 @@ var (
 // One read of the issue's bookmark legion/<KEY>, its local row and origin's (readBookmark),
 // decides where the workspace starts:
 //   - A local bookmark conflicted with a deletion whose origin row is tracked with no commit (GitHub
-//     deleted the branch after the bookmark moved on without a push) is set aside when nothing the
-//     move added beyond what it removed is described (undescribedMove): jj pushes no undescribed
-//     commit, so the move was never meant to reach GitHub, and this is the unmoved merged bookmark
-//     in intent. The local bookmark is deleted, the commits' ids are logged (they stay visible, the
-//     clone never abandoning unreachable commits), and the workspace starts at main.
+//     deleted the branch after the bookmark moved on without a push) is set aside when the move
+//     added at least one commit beyond what it removed and none of them is described
+//     (undescribedMove): jj pushes no undescribed commit, so the move was never meant to reach
+//     GitHub, and this is the unmoved merged bookmark in intent. Once main resolves, the local
+//     bookmark is deleted, the commits' ids are logged oldest first (they stay visible, the clone
+//     never abandoning unreachable commits), and the workspace starts at main. A move backwards,
+//     which added nothing, keeps the conflict's refusal.
 //   - A conflicted local bookmark is refused by name, with its sides. That includes a conflict with
 //     a deleted side, which `bookmarks(exact:)` resolves to the other side alone: a local deletion
 //     never pushed and then origin's branch moving, or a local move never pushed and then the
@@ -66,38 +70,19 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 		return err
 	}
 	local, origin := rows.local, rows.origin
-	var setAside []string
-	if local.conflict && len(local.added) <= len(local.removed) && origin.tracked && !origin.present {
-		if setAside, err = undescribedMove(ctx, run, workspace, local); err != nil {
-			return err
-		}
-	}
 	var revision string
-	fromMain := false
+	var setAside []string
 	switch {
-	case setAside != nil:
-		// main first: a main that does not resolve refuses before anything is set aside, so the
-		// one line naming the set-aside commits is never a start that did not happen.
-		fromMain = true
-		if revision, err = mainCommit(ctx, run, workspace); err != nil {
-			return err
-		}
-		if _, err := RunChecked(ctx, run, []string{"jj", "bookmark", "delete", workspace.Bookmark, "--ignore-working-copy", "-R", cloneDir}, nil, ""); err != nil {
-			return err
-		}
-		log(fmt.Sprintf("Bookmark %s was moved after its last push onto commits nobody described (%s), and GitHub deleted its branch: workspace %s starts at main. Those commits stay visible in the shared clone %s (git.abandon-unreachable-commits is false), recoverable by id",
-			workspace.Bookmark, listed(setAside), workspace.Dir, cloneDir))
 	case local.conflict:
-		keep, commit := "its added commit", local.added[0]
-		if len(local.added) > 1 {
-			keep, commit = "one of its added commits", "<commit>"
+		if local.hasDeletedSide() && origin.tracked && !origin.present {
+			if setAside, err = undescribedMove(ctx, run, workspace, local); err != nil {
+				return err
+			}
 		}
-		startAtMain := fmt.Sprintf("`jj bookmark delete %s --ignore-working-copy -R %s`", workspace.Bookmark, cloneDir)
-		if origin.present {
-			startAtMain = fmt.Sprintf("delete the branch on GitHub (the pull request's Delete branch button, or `gh api -X DELETE repos/%s/git/refs/heads/%s`) and run %s", workspace.Repo, workspace.Bookmark, startAtMain)
+		if len(setAside) == 0 {
+			return conflictRefusal(workspace, local, origin)
 		}
-		return fmt.Errorf("Bookmark %s is conflicted %s; workspace %s was not created. Keep %s: `jj bookmark set %s -r %s --ignore-working-copy -R %s`. Start from main instead: %s, and the next provisioning starts at main",
-			workspace.Bookmark, local.sides(), workspace.Dir, keep, workspace.Bookmark, commit, cloneDir, startAtMain)
+		// Set aside once main resolves, below.
 	case local.present:
 		revision = local.added[0]
 	case origin.conflict:
@@ -105,12 +90,15 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 			remote, origin.sides(), workspace.Dir)
 	case origin.present && origin.tracked:
 		return fmt.Errorf("Bookmark %s was deleted in the shared clone %s and the deletion never pushed, while %s is tracked at %s; workspace %s was not created. "+
-			"Restore it: `jj bookmark set %[1]s -r %[3]s --ignore-working-copy -R %[2]s`. "+
-			"Cancel the deletion, and the next provisioning adopts origin's branch: `jj bookmark forget %[1]s --ignore-working-copy -R %[2]s`. "+
-			"Start from main instead: delete the branch on GitHub (the pull request's Delete branch button, or `gh api -X DELETE repos/%[6]s/git/refs/heads/%[1]s`), and the next provisioning starts at main",
-			workspace.Bookmark, cloneDir, remote, origin.added[0], workspace.Dir, workspace.Repo)
+			"Restore it: %s. "+
+			"Cancel the deletion, and the next provisioning adopts origin's branch: %s. "+
+			"Start from main instead: delete the branch on GitHub (the pull request's Delete branch button, or %s), and the next provisioning starts at main",
+			workspace.Bookmark, cloneDir, remote, origin.added[0], workspace.Dir,
+			wayOut(cloneDir, "bookmark", "set", workspace.Bookmark, "-r", remote),
+			wayOut(cloneDir, "bookmark", "forget", workspace.Bookmark),
+			deleteOnGitHub(workspace))
 	case origin.present:
-		if _, err := RunChecked(ctx, run, []string{"jj", "bookmark", "track", remote, "--ignore-working-copy", "-R", cloneDir}, nil, ""); err != nil {
+		if _, err := RunChecked(ctx, run, onClone(cloneDir, "bookmark", "track", remote), nil, ""); err != nil {
 			return err
 		}
 		revision = origin.added[0]
@@ -123,10 +111,19 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 				remote, revision, listed(now.added), workspace.Dir)
 		}
 	}
-	if revision == "" {
-		fromMain = true
+	fromMain := revision == ""
+	if fromMain {
 		if revision, err = mainCommit(ctx, run, workspace); err != nil {
 			return err
+		}
+		// After main resolves, so the one line naming the set-aside commits is never a start that
+		// did not happen.
+		if len(setAside) > 0 {
+			if _, err := RunChecked(ctx, run, onClone(cloneDir, "bookmark", "delete", workspace.Bookmark), nil, ""); err != nil {
+				return err
+			}
+			log(fmt.Sprintf("Bookmark %s was moved after its last push onto commits nobody described (%s), and GitHub deleted its branch: workspace %s starts at main. Those commits stay visible in the shared clone %s (git.abandon-unreachable-commits is false), recoverable by id",
+				workspace.Bookmark, listed(setAside), workspace.Dir, cloneDir))
 		}
 	}
 	if err := os.MkdirAll(filepath.Dir(workspace.Dir), 0o700); err != nil {
@@ -135,10 +132,11 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 	prune := []string{"git", "--git-dir=" + filepath.Join(cloneDir, ".git"), "worktree", "prune"}
 	_, _ = runCommand(ctx, run, prune, nil, "")
 
-	// The one jj command on the shared clone without --ignore-working-copy: `jj workspace add`
-	// refuses it (on 0.44 and 0.45, after registering the workspace and creating its directory), so
-	// the add snapshots the clone's own working copy. Every other command provisioning and removal
-	// run on the clone, and every command a refusal prints, carries the flag.
+	// The one jj command on the shared clone not built by onClone: `jj workspace add` refuses
+	// --ignore-working-copy (on 0.44 and 0.45, after registering the workspace and creating its
+	// directory), so the add snapshots the clone's own working copy. Every other command
+	// provisioning and removal run on the clone is onClone's, and so is every command a refusal
+	// prints (wayOut).
 	add := []string{
 		"jj", "workspace", "add", workspace.Dir, "--name", workspaceName, "--revision", revision, "-R", cloneDir,
 	}
@@ -151,7 +149,7 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 		if !registeredWorkspace.MatchString(result.Stderr) {
 			return commandFailure(add, result)
 		}
-		if _, err := RunChecked(ctx, run, []string{"jj", "workspace", "forget", workspaceName, "--ignore-working-copy", "-R", cloneDir}, nil, ""); err != nil {
+		if _, err := RunChecked(ctx, run, onClone(cloneDir, "workspace", "forget", workspaceName), nil, ""); err != nil {
 			return err
 		}
 		_, _ = runCommand(ctx, run, prune, nil, "")
@@ -167,16 +165,18 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 }
 
 // undescribedMove is what the local bookmark's move added beyond what it removed
-// (`<removed>..<added>`), when no commit of it is described; nil when one is. jj pushes no
-// undescribed commit, so such a move was never meant to reach GitHub.
+// (`<removed>..<added>`), oldest first, when none of it is described, and none when any is. jj
+// pushes no undescribed commit, so such a move was never meant to reach GitHub. A move that added
+// nothing (a bookmark moved backwards off its last push) returns none too, and keeps the conflict's
+// refusal.
 func undescribedMove(ctx context.Context, run Runner, workspace Workspace, local bookmarkRow) ([]string, error) {
 	revset := "(" + strings.Join(local.removed, " | ") + ")..(" + strings.Join(local.added, " | ") + ")"
-	read := []string{"jj", "log", "-r", revset, "--no-graph", "-T", `commit_id ++ "|" ++ if(description, "1", "0") ++ "\n"`, "--ignore-working-copy", "--color=never", "-R", workspace.Clone}
+	read := onClone(workspace.Clone, "log", "-r", revset, "--reversed", "--no-graph", "-T", `commit_id ++ "|" ++ if(description, "1", "0") ++ "\n"`)
 	result, err := RunChecked(ctx, run, read, nil, "")
 	if err != nil {
 		return nil, err
 	}
-	commits := []string{}
+	var commits []string
 	for _, line := range nonEmptyLines(result.Stdout) {
 		id, described, ok := strings.Cut(line, "|")
 		if !ok || !commitID.MatchString(id) || described != "0" && described != "1" {
@@ -190,13 +190,32 @@ func undescribedMove(ctx context.Context, run Runner, workspace Workspace, local
 	return commits, nil
 }
 
+// conflictRefusal refuses a conflicted local bookmark by name, with its sides and two ways out:
+// keep an added commit, or start from main, after deleting the branch on GitHub when origin has
+// it.
+func conflictRefusal(workspace Workspace, local, origin bookmarkRow) error {
+	keep, commit := "its added commit", local.added[0]
+	if len(local.added) > 1 {
+		keep, commit = "one of its added commits", "<commit>"
+	}
+	startAtMain := wayOut(workspace.Clone, "bookmark", "delete", workspace.Bookmark)
+	if origin.present {
+		startAtMain = "delete the branch on GitHub (the pull request's Delete branch button, or " + deleteOnGitHub(workspace) + ") and run " + startAtMain
+	}
+	return fmt.Errorf("Bookmark %s is conflicted %s; workspace %s was not created. Keep %s: %s. Start from main instead: %s, and the next provisioning starts at main",
+		workspace.Bookmark, local.sides(), workspace.Dir, keep, wayOut(workspace.Clone, "bookmark", "set", workspace.Bookmark, "-r", commit), startAtMain)
+}
+
 // mainCommit is the commit a workspace with no issue branch starts at: main's, resolved to one
 // commit id as the issue bookmark is, since a `jj workspace add --revision main` jj cannot resolve
 // still registers the workspace, parented on the root commit, before it reports the error. Each
 // main that does not resolve is refused by name before anything is added: a conflicted one, with
 // origin's to keep (`--allow-backwards`, since jj refuses to move a bookmark sideways off two
-// local moves); one deleted in the shared clone while origin's is tracked, with origin's to
-// restore; and an absent one, a repository whose default branch is another.
+// local moves). With no local main: a conflicted main@origin, which concurrent fetches leave and
+// the next provisioning's fetch settles; one deleted in the shared clone while origin's is
+// tracked, with origin's to restore; one forgotten (`jj bookmark forget main`), which leaves
+// main@origin untracked, with origin's to track; and an absent one, a repository whose default
+// branch is another.
 func mainCommit(ctx context.Context, run Runner, workspace Workspace) (string, error) {
 	rows, err := readBookmark(ctx, run, workspace, "main")
 	if err != nil {
@@ -204,17 +223,45 @@ func mainCommit(ctx context.Context, run Runner, workspace Workspace) (string, e
 	}
 	switch main, origin := rows.local, rows.origin; {
 	case main.conflict:
-		return "", fmt.Errorf("Bookmark main is conflicted %s; workspace %s was not created. Keep origin's: `jj bookmark set main -r main@origin --allow-backwards --ignore-working-copy -R %s`, and the next provisioning starts there",
-			main.sides(), workspace.Dir, workspace.Clone)
-	case !main.present && origin.present && origin.tracked && !origin.conflict:
-		return "", fmt.Errorf("Bookmark main was deleted in the shared clone %s while main@origin is tracked at %s; workspace %s was not created. Restore it: `jj bookmark set main -r main@origin --ignore-working-copy -R %[1]s`, and the next provisioning starts there",
-			workspace.Clone, origin.added[0], workspace.Dir)
-	case !main.present:
+		return "", fmt.Errorf("Bookmark main is conflicted %s; workspace %s was not created. Keep origin's: %s, and the next provisioning starts there",
+			main.sides(), workspace.Dir, wayOut(workspace.Clone, "bookmark", "set", "main", "-r", "main@origin", "--allow-backwards"))
+	case main.present:
+		return main.added[0], nil
+	case origin.conflict:
+		return "", fmt.Errorf("Remote bookmark main@origin is conflicted %s, which concurrent fetches leave, and main is not in the shared clone %s; workspace %s was not created. Provision again: the next provisioning's fetch sets the row to origin's main as it is then",
+			origin.sides(), workspace.Clone, workspace.Dir)
+	case origin.present && origin.tracked:
+		return "", fmt.Errorf("Bookmark main was deleted in the shared clone %s while main@origin is tracked at %s; workspace %s was not created. Restore it: %s, and the next provisioning starts there",
+			workspace.Clone, origin.added[0], workspace.Dir, wayOut(workspace.Clone, "bookmark", "set", "main", "-r", "main@origin"))
+	case origin.present:
+		return "", fmt.Errorf("Bookmark main is not tracked in the shared clone %s, where main@origin is at %s untracked; workspace %s was not created. Track it: %s, and the next provisioning starts there",
+			workspace.Clone, origin.added[0], workspace.Dir, wayOut(workspace.Clone, "bookmark", "track", "main@origin"))
+	default:
 		return "", fmt.Errorf("Bookmark main is not in the shared clone %s; workspace %s was not created. An issue with no branch starts at main, so the repository's default branch must be main",
 			workspace.Clone, workspace.Dir)
-	default:
-		return main.added[0], nil
 	}
+}
+
+// wayOut is a command a refusal prints for an operator to run from a shell: the jj command on the
+// shared clone that onClone builds, so it takes no snapshot of the clone's working copy, in
+// backticks.
+func wayOut(cloneDir string, args ...string) string {
+	return "`" + shellCommand(onClone(cloneDir, args...)) + "`"
+}
+
+// deleteOnGitHub is the printed command that deletes the issue's branch on GitHub.
+func deleteOnGitHub(workspace Workspace) string {
+	return "`" + shellCommand([]string{"gh", "api", "-X", "DELETE", "repos/" + workspace.Repo.String() + "/git/refs/heads/" + workspace.Bookmark}) + "`"
+}
+
+// shellCommand is argv as a shell reads it back: each element one word (shellprefix.Word), so a
+// printed command runs as printed whatever the state directory's path holds.
+func shellCommand(argv []string) string {
+	words := make([]string, len(argv))
+	for i, arg := range argv {
+		words[i] = shellprefix.Word(arg)
+	}
+	return strings.Join(words, " ")
 }
 
 // bookmarkRow is one row of `jj bookmark list --all-remotes`: whether the bookmark exists there,
@@ -229,10 +276,16 @@ type bookmarkRow struct {
 // side is a deletion, which jj leaves out of the added commits.
 func (r bookmarkRow) sides() string {
 	sides := fmt.Sprintf("(adds %s; removes %s)", listed(r.added), listed(r.removed))
-	if len(r.added) <= len(r.removed) {
+	if r.hasDeletedSide() {
 		sides += ", one side a deletion"
 	}
 	return sides
+}
+
+// hasDeletedSide is whether a conflicted row's sides include a deletion, which jj leaves out of
+// its added commits.
+func (r bookmarkRow) hasDeletedSide() bool {
+	return len(r.added) <= len(r.removed)
 }
 
 // bookmarkRows is a bookmark's local row and origin's. A row jj does not list is the zero row:
@@ -252,7 +305,7 @@ const bookmarkRowTemplate = `if(remote, remote, "local") ++ "|" ++ if(present, "
 // conflicted and at least one on a conflicted row, and one row per place: a commit jj cannot load
 // prints an error value where its id goes, which a workspace add would take as a revision.
 func readBookmark(ctx context.Context, run Runner, workspace Workspace, name string) (bookmarkRows, error) {
-	list := []string{"jj", "bookmark", "list", "--all-remotes", "exact:" + name, "-T", bookmarkRowTemplate, "--ignore-working-copy", "--color=never", "-R", workspace.Clone}
+	list := onClone(workspace.Clone, "bookmark", "list", "--all-remotes", "exact:"+name, "-T", bookmarkRowTemplate)
 	result, err := runCommand(ctx, run, list, nil, "")
 	if err != nil {
 		return bookmarkRows{}, fmt.Errorf("run %s: %w", strings.Join(list, " "), err)
@@ -334,15 +387,16 @@ func nonEmptyLines(value string) []string {
 	return lines
 }
 
-// ownCommitsRevset ports workspace.ts:533-541: only commits unique to a closing workspace are
-// abandoned; all commits reached by another working copy, a bookmark, a remote, or a tag survive.
+// ownCommitsRevset ports workspace.ts's ownCommitsRevset: only commits unique to a closing
+// workspace are abandoned; all commits reached by another working copy, a bookmark, a remote, or a
+// tag survive.
 func ownCommitsRevset(workspaceName string) string {
 	return "::" + workspaceName + "@ ~ ::(working_copies() ~ " + workspaceName + "@) ~ ::(bookmarks() | remote_bookmarks() | tags())"
 }
 
-// Remove ports workspace.ts:544-618. The workspace directory goes first so a crash leaves the
-// registered-but-missing state that Provision repairs with forget, prune, and add. workspace is
-// Location's, which names the clone; any other is refused before anything is removed.
+// Remove ports workspace.ts's removeIssueWorkspace. The workspace directory goes first so a crash
+// leaves the registered-but-missing state that Provision repairs with forget, prune, and add.
+// workspace is Location's, which names the clone; any other is refused before anything is removed.
 func Remove(ctx context.Context, run Runner, workspace Workspace) error {
 	if !located(workspace) {
 		return fmt.Errorf("workspace to remove (%#v) is not a workspace Location names", workspace)
@@ -354,9 +408,8 @@ func Remove(ctx context.Context, run Runner, workspace Workspace) error {
 	}
 	registered := false
 	var commits []string
-	repoArgs := []string{"--ignore-working-copy", "-R", cloneDir}
 	if cloneExists {
-		listed, err := RunChecked(ctx, run, []string{"jj", "workspace", "list", "-T", `name ++ "\n"`, "--ignore-working-copy", "--color=never", "-R", cloneDir}, nil, "")
+		listed, err := RunChecked(ctx, run, onClone(cloneDir, "workspace", "list", "-T", `name ++ "\n"`), nil, "")
 		if err != nil {
 			return err
 		}
@@ -368,7 +421,7 @@ func Remove(ctx context.Context, run Runner, workspace Workspace) error {
 		}
 	}
 	if registered {
-		own, err := RunChecked(ctx, run, []string{"jj", "log", "-r", ownCommitsRevset(workspaceName), "--no-graph", "-T", `commit_id ++ "\n"`, "--ignore-working-copy", "--color=never", "-R", cloneDir}, nil, "")
+		own, err := RunChecked(ctx, run, onClone(cloneDir, "log", "-r", ownCommitsRevset(workspaceName), "--no-graph", "-T", `commit_id ++ "\n"`), nil, "")
 		if err != nil {
 			return err
 		}
@@ -386,11 +439,11 @@ func Remove(ctx context.Context, run Runner, workspace Workspace) error {
 	}
 	if registered {
 		if len(commits) > 0 {
-			if _, err := RunChecked(ctx, run, append([]string{"jj", "abandon", "-r", strings.Join(commits, " | ")}, repoArgs...), nil, ""); err != nil {
+			if _, err := RunChecked(ctx, run, onClone(cloneDir, "abandon", "-r", strings.Join(commits, " | ")), nil, ""); err != nil {
 				return err
 			}
 		}
-		if _, err := RunChecked(ctx, run, append([]string{"jj", "workspace", "forget", workspaceName}, repoArgs...), nil, ""); err != nil {
+		if _, err := RunChecked(ctx, run, onClone(cloneDir, "workspace", "forget", workspaceName), nil, ""); err != nil {
 			return err
 		}
 	}

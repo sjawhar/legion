@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
 // The smallest file that loads: the three Stage 1 keys and the Stage 3 workflow keys with no
@@ -35,8 +37,9 @@ nats_urls: [nats://127.0.0.1:4222]
 `
 
 // The refusals the shipped loader words itself, quoted here from
-// packages/daemon/src/daemon/config.ts (loadConfigFromFile's migration refusals and parseGates) so
-// an operator moving from the TypeScript daemon reads the same sentence.
+// packages/daemon/src/daemon/config.ts (loadConfigFromFile's refusals of the replaced keys and of
+// app_logins, and parseGates's of gates.merge) so an operator moving from the TypeScript daemon
+// reads the same sentence.
 const (
 	wantDispatchMcpURLMessage  = "dispatch_mcp_url was replaced by dispatch_url (the service base URL, no /mcp)"
 	wantDispatchProjectMessage = "dispatch_project was replaced by projects"
@@ -63,9 +66,9 @@ func envMap(pairs map[string]string) func(string) string {
 }
 
 // `state_dir` is resolved against the file that set it, as the shipped loader resolves it
-// (config.ts loadConfigFromFile). Taking the string as read would make the daemon's state directory
-// depend on the cwd `legion start` was launched from, and a `legion stop` from elsewhere would look
-// somewhere else.
+// (loadConfigFromFile, config.ts). Taking the string as read would make the daemon's state
+// directory depend on the cwd `legion start` was launched from, and a `legion stop` from elsewhere
+// would look somewhere else.
 func TestRelativeStateDirResolvesAgainstTheConfigsDirectory(t *testing.T) {
 	path := writeConfigFile(t, strings.Replace(minimalFile, "state_dir: /var/lib/legion", "state_dir: state", 1))
 
@@ -107,13 +110,12 @@ func ignoredLine(key string, stage int) string {
 	return fmt.Sprintf(`"key":%s,"stage":%d`, quoted, stage)
 }
 
-// defaultsFor is the Config minimalFile resolves to on port: every key it leaves out at its
-// default, on the loopback bind and the tmux runtime. The Stage 2 defaults are the shipped loader's
-// (packages/daemon/src/daemon/config.ts: DEFAULT_PORT and the DEFAULT_* constants, and
-// resolveDaemonConfig's `port + 1` and loopback daemon URL) plus the four keys Stage 2 adds —
-// except omp_invocation, which has none here: the shipped default is the OMP fork pin, whose one
-// home is packages/daemon/src/daemon/ omp-pin.ts
-// (docs/solutions/daemon/omp-pin-bump-behavioral-proof.md:29-43).
+// defaultsFor is the Config minimalFile resolves to on port: every key it leaves out at its default,
+// on the loopback bind and the tmux runtime. The Stage 2 defaults are the shipped loader's (the
+// DEFAULT_ constants in packages/daemon/src/daemon/config.ts, and resolveDaemonConfig's `port + 1`
+// and loopback daemon URL) plus the four keys Stage 2 adds — except omp_invocation, which has none
+// here: the shipped default is the OMP fork pin, whose one home is packages/daemon/src/daemon/
+// omp-pin.ts (docs/solutions/daemon/omp-pin-bump-behavioral-proof.md:29-43).
 func defaultsFor(port int) Config {
 	return Config{
 		Project:                                 "DEMO",
@@ -140,7 +142,7 @@ func defaultsFor(port int) Config {
 		NatsURLs:                                []string{"nats://127.0.0.1:4222"},
 		DispatchURL:                             "http://127.0.0.1:8080",
 		DispatchTokenFile:                       "/var/run/legion/DISPATCH_TOKEN",
-		Projects:                                map[string]Project{"DEMO": {Repo: "acme/widgets"}},
+		Projects:                                map[string]Project{"DEMO": {Repo: ghrepo.MustParse("acme/widgets")}},
 		Gates:                                   Gates{Design: DesignGateRootIssues},
 		GitHubApps: GitHubApps{
 			Implement: GitHubApp{AppID: "1", PrivateKey: "implement-test-key", Installations: map[string]string{}},
@@ -174,7 +176,7 @@ func TestLoadAllowsStage2ConfigWithoutWorkflowKeys(t *testing.T) {
 
 // Every key Stage 2 models, set to a value other than its default, lands in Config as written —
 // a relative path resolved against the file's directory, as the shipped loader resolves
-// `instructions`, `envoy_token_file`, and `operator_token_file` (config.ts loadConfigFromFile).
+// `instructions`, `envoy_token_file`, and `operator_token_file` (loadConfigFromFile, config.ts).
 func TestLoadReadsEveryStage2Key(t *testing.T) {
 	path := writeConfigFile(t, minimalFile+`port: 14000
 daemon_url: http://127.0.0.1:14000/
@@ -228,9 +230,8 @@ envoy_token_file: /run/legion/ENVOY_TOKEN
 	want.PromptRetireLimit = 7
 	want.OperatorTokenFile = filepath.Join(dir, "tokens/OPERATOR_TOKEN")
 	want.EnvoyURL = "http://127.0.0.1:19020"
-	// A set, as the shipped `readStringArray` makes it (config.ts): the repeat is dropped,
-	// first occurrence kept. The launch prefix is argv and keeps its repeats (config.ts
-	// readArgv).
+	// A set, as the shipped `readStringArray` makes it (config.ts): the repeat is dropped, first
+	// occurrence kept. The launch prefix is argv and keeps its repeats (readArgv, config.ts).
 	want.NatsURLs = []string{"nats://127.0.0.1:4222", "nats://127.0.0.1:4223"}
 	want.EnvoyTokenFile = "/run/legion/ENVOY_TOKEN"
 	if !reflect.DeepEqual(cfg, want) {
@@ -277,8 +278,8 @@ max_fix_attempts: 4
 		t.Errorf("DispatchTokenFile = %q, want %q", cfg.DispatchTokenFile, want)
 	}
 	if !reflect.DeepEqual(cfg.Projects, map[string]Project{
-		"DEMO":  {Repo: "acme/widgets"},
-		"OTHER": {Repo: "acme/other", MergeQueueRole: "merge-queue"},
+		"DEMO":  {Repo: ghrepo.MustParse("acme/widgets")},
+		"OTHER": {Repo: ghrepo.MustParse("acme/other"), MergeQueueRole: "merge-queue"},
 	}) {
 		t.Errorf("Projects = %#v", cfg.Projects)
 	}
@@ -544,8 +545,8 @@ func TestResolveGitHubAppsRefusesAgentTierPrivateKey(t *testing.T) {
 	}
 }
 
-// `worker_stream_port` defaults to one past `port` (config.ts resolveDaemonConfig), which is why it
-// has to move with a file that moves `port`.
+// `worker_stream_port` defaults to one past `port` (resolveDaemonConfig, config.ts), which is why
+// it has to move with a file that moves `port`.
 func TestWorkerStreamPortDefaultsToOnePastPort(t *testing.T) {
 	cfg, err := Load(writeConfigFile(t, minimalFile+"port: 20000\n"), noEnv)
 	if err != nil {
@@ -970,9 +971,9 @@ func TestLoadReadsRuntimeAsItsDiscriminator(t *testing.T) {
 	}
 }
 
-// Every top-level key of the shipped schema (CONFIG_SCHEMA in packages/daemon/src/daemon/config.ts,
-// 37 keys) plus the new postgres_dsn, and the class it is in at Stage 2. No shipped key
-// may fall through to the typo refusal. Stage 2 moved fifteen keys from known-later to modelled.
+// Every top-level key of the shipped schema (CONFIG_SCHEMA, packages/daemon/src/daemon/config.ts,
+// 37 keys) plus the new postgres_dsn, and the class it is in at Stage 2. No shipped key may fall
+// through to the typo refusal. Stage 2 moved fifteen keys from known-later to modelled.
 func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 	const (
 		modelled   = "modelled"

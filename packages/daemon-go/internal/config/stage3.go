@@ -28,9 +28,10 @@ type Gates struct {
 	Design DesignGate
 }
 
-// Project maps a Dispatch project prefix to its repository and optional merge-queue role.
+// Project maps a Dispatch project prefix to its repository, parsed at load, and optional
+// merge-queue role.
 type Project struct {
-	Repo           string
+	Repo           ghrepo.Repository
 	MergeQueueRole string
 }
 
@@ -94,14 +95,15 @@ func readProject(value *yaml.Node, key string) (Project, error) {
 	fields, err := members(value, key, "repo", "merge_queue_role", "mergeQueueRole")
 	var unknown unknownKeyError
 	if errors.As(err, &unknown) {
-		// The shipped loader's own words (config.ts validateProjectEntry).
+		// The shipped loader's own words (validateProjectEntry, config.ts).
 		return Project{}, fmt.Errorf(`Unknown key %q`, key+"."+unknown.name)
 	}
 	if err != nil {
 		return Project{}, err
 	}
 	var project Project
-	if project.Repo, err = stringOf(fields["repo"], key+".repo"); err != nil {
+	repo, err := stringOf(fields["repo"], key+".repo")
+	if err != nil {
 		return Project{}, err
 	}
 	role := fields["merge_queue_role"]
@@ -111,10 +113,10 @@ func readProject(value *yaml.Node, key string) (Project, error) {
 	if project.MergeQueueRole, err = stringOf(role, key+".merge_queue_role"); err != nil {
 		return Project{}, err
 	}
-	if project.Repo == "" {
+	if repo == "" {
 		return Project{}, fmt.Errorf(`%s.repo must be "owner/name" (got "undefined")`, key)
 	}
-	if _, _, err := ghrepo.Split(key+".repo", project.Repo); err != nil {
+	if project.Repo, err = ghrepo.Parse(key+".repo", repo); err != nil {
 		return Project{}, err
 	}
 	if project.MergeQueueRole != "" && !roleNamePattern.MatchString(project.MergeQueueRole) {
@@ -128,8 +130,8 @@ func readGates(value *yaml.Node, key string) (*Gates, error) {
 		return nil, fmt.Errorf("%s must be a mapping", key)
 	}
 	for index := 0; index+1 < len(value.Content); index += 2 {
-		// A present merge is refused whatever its value, null included, as the shipped
-		// loader refuses it (config.ts parseGates).
+		// A present merge is refused whatever its value, null included, as the shipped loader
+		// refuses it (parseGates, config.ts).
 		if value.Content[index].Value == "merge" {
 			return nil, errors.New(gatesMergeMessage)
 		}

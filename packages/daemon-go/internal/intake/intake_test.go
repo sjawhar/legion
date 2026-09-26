@@ -23,8 +23,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	legionstore "github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 type handlerFunc func(context.Context, pgx.Tx, Fact) (Result, error)
@@ -232,7 +234,7 @@ func TestConsumeTermsPoisonMessagesOnce(t *testing.T) {
 
 	publish(t, js, "notifications.dispatch.issue.CAPTURE-208.issue.updated", []byte(`{`))
 	publish(t, js, "notifications.dispatch.issue.CAPTURE-208.issue.updated", envelopeJSON(t, "dispatch-poison", "dispatch", `{"id":1,"issue_key":"CAPTURE-208","seq":1,"notify":true,"type":"issue.updated","payload":{"key":"CAPTURE-999","status":"todo","title":"wrong key"}}`))
-	eventually(t, "two poison logs", func() bool { return strings.Count(logs.String(), "poison JetStream message") == 2 })
+	testwait.Eventually(t, "two poison logs", func() bool { return strings.Count(logs.String(), "poison JetStream message") == 2 })
 	time.Sleep(3 * spec.AckWait)
 	if got := strings.Count(logs.String(), "poison JetStream message"); got != 2 {
 		t.Fatalf("poison logs after ack wait = %d, want 2", got)
@@ -253,7 +255,7 @@ func TestConsumeAcknowledgesAnotherProjectsDispatchEventWithoutApplyingIt(t *tes
 	defer stop()
 
 	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", capturedIssueUpdatedEnvelope(t))
-	eventually(t, "the foreign event acknowledged", func() bool {
+	testwait.Eventually(t, "the foreign event acknowledged", func() bool {
 		consumer, err := stream.Consumer(context.Background(), dispatchConsumerName(spec.Project))
 		if err != nil {
 			return false
@@ -277,7 +279,7 @@ func TestConsumeDeduplicatesOneEventAcrossDeliveries(t *testing.T) {
 	message := capturedIssueUpdatedEnvelope(t)
 	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", message)
 	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", message)
-	eventually(t, "one deduplicated write", func() bool { return writeCount(t, pool) == 1 })
+	testwait.Eventually(t, "one deduplicated write", func() bool { return writeCount(t, pool) == 1 })
 	assertNoAckPending(t, stream, dispatchConsumerName(spec.Project))
 }
 
@@ -300,7 +302,7 @@ func TestConsumeNaksRollbackAndAppliesRedeliveryOnce(t *testing.T) {
 	defer stop()
 
 	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", capturedIssueUpdatedEnvelope(t))
-	eventually(t, "redelivery committed once", func() bool { return calls.Load() >= 2 && writeCount(t, pool) == 1 })
+	testwait.Eventually(t, "redelivery committed once", func() bool { return calls.Load() >= 2 && writeCount(t, pool) == 1 })
 	assertNoAckPending(t, stream, dispatchConsumerName(spec.Project))
 }
 
@@ -312,13 +314,13 @@ func TestConsumeRestartResumesAfterAcknowledgedMessage(t *testing.T) {
 	stop := startConsume(t, js, spec, pool, writeHandler("restart", nil))
 
 	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", capturedIssueUpdatedEnvelope(t))
-	eventually(t, "first committed message", func() bool { return writeCount(t, pool) == 1 })
+	testwait.Eventually(t, "first committed message", func() bool { return writeCount(t, pool) == 1 })
 	stop()
 
 	publish(t, js, "notifications.dispatch.issue.CAPTURE-4.issue.created", capturedIssueCreatedEnvelope(t))
 	stop = startConsume(t, js, spec, pool, writeHandler("restart", nil))
 	defer stop()
-	eventually(t, "durable consumer resumes after ack", func() bool { return writeCount(t, pool) == 2 })
+	testwait.Eventually(t, "durable consumer resumes after ack", func() bool { return writeCount(t, pool) == 2 })
 }
 
 // A daemon's first boot on a NATS server already holding history — production's stream keeps
@@ -345,7 +347,7 @@ func TestAFreshConsumerStartsAtTheNextMessage(t *testing.T) {
 	stop := runConsumers(t, consumers, pool, writeHandler("fresh", nil))
 	defer stop()
 	publish(t, js, "notifications.dispatch.issue.CAPTURE-4.issue.created", capturedIssueCreatedEnvelope(t))
-	eventually(t, "the next message committed", func() bool { return writeCount(t, pool) >= 1 })
+	testwait.Eventually(t, "the next message committed", func() bool { return writeCount(t, pool) >= 1 })
 	assertNoAckPending(t, stream, dispatchConsumerName(spec.Project))
 	if got := writeCount(t, pool); got != 1 {
 		t.Errorf("%d facts committed, want only the message published after the consumers were created", got)
@@ -371,7 +373,7 @@ func TestAnExistingConsumerKeepsItsPosition(t *testing.T) {
 		}
 	}
 
-	spec.Repositories = []string{"sjawhar/legion", "acme/widgets"}
+	spec.Repositories = []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion"), ghrepo.MustParse("acme/widgets")}
 	if _, err := OpenConsumers(context.Background(), js, spec); err != nil {
 		t.Fatalf("OpenConsumers over existing consumers: %v", err)
 	}
@@ -386,7 +388,7 @@ func TestAnExistingConsumerKeepsItsPosition(t *testing.T) {
 
 	stop := startConsume(t, js, spec, pool, writeHandler("existing", nil))
 	defer stop()
-	eventually(t, "both backlogs delivered and acknowledged", func() bool {
+	testwait.Eventually(t, "both backlogs delivered and acknowledged", func() bool {
 		for _, name := range []string{dispatchConsumerName(spec.Project), githubConsumerName(spec.Project)} {
 			if info := consumerInfo(t, stream, name); info.NumPending != 0 || info.NumAckPending != 0 || info.Delivered.Consumer == 0 {
 				return false
@@ -431,14 +433,25 @@ func TestConsumeCommitsRefusalAndAcknowledges(t *testing.T) {
 	defer stop()
 
 	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", capturedIssueUpdatedEnvelope(t))
-	eventually(t, "refusal committed", func() bool { return writeCount(t, pool) == 1 && strings.Count(logs.String(), "committed refusal") == 1 })
+	testwait.Eventually(t, "refusal committed", func() bool { return writeCount(t, pool) == 1 && strings.Count(logs.String(), "committed refusal") == 1 })
 	assertNoAckPending(t, stream, dispatchConsumerName(spec.Project))
+}
+
+// Every carrier of a ghrepo.Repository refuses the zero value, and intake is one: a zero
+// repository would subscribe to `notifications.github...>`, a subject no repository publishes on,
+// and intake would wait on it silently. The spec is refused by name before any consumer opens.
+func TestOpenConsumersRefusesAZeroRepository(t *testing.T) {
+	spec := consumerSpec(&lockedBuffer{})
+	spec.Repositories = append(spec.Repositories, ghrepo.Repository{})
+	if _, err := normalizedSpec(spec); err == nil || err.Error() != "intake consumer repository is required" {
+		t.Fatalf("normalizedSpec with a zero repository = %v, want \"intake consumer repository is required\"", err)
+	}
 }
 
 func consumerSpec(logs *lockedBuffer) ConsumerSpec {
 	return ConsumerSpec{
 		Project:      "CAPTURE",
-		Repositories: []string{"sjawhar/legion"},
+		Repositories: []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion")},
 		AckWait:      200 * time.Millisecond,
 		NakDelay:     25 * time.Millisecond,
 		Logger:       slog.New(slog.NewTextHandler(logs, nil)),
@@ -490,7 +503,7 @@ func publish(t *testing.T, js jetstream.JetStream, subject string, data []byte) 
 
 func assertNoAckPending(t *testing.T, stream jetstream.Stream, consumer string) {
 	t.Helper()
-	eventually(t, consumer+" has no acknowledgement pending", func() bool {
+	testwait.Eventually(t, consumer+" has no acknowledgement pending", func() bool {
 		item, err := stream.Consumer(context.Background(), consumer)
 		if err != nil {
 			return false
@@ -638,25 +651,6 @@ func randomSuffix(t *testing.T) string {
 	return hex.EncodeToString(b[:])
 }
 
-// eventually polls until the condition holds. What it waits for is something the daemon reaches on
-// its own — a delivery, the transaction that answers it — so the wait is bounded by this test
-// binary's own deadline rather than a fixed span: on a loaded machine a step that is merely slow
-// is not a failure, and a condition that never holds still fails here, naming what it waited for.
-func eventually(t *testing.T, what string, condition func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(time.Minute)
-	if testDeadline, ok := t.Deadline(); ok && testDeadline.Add(-time.Second).Before(deadline) {
-		deadline = testDeadline.Add(-time.Second)
-	}
-	for time.Now().Before(deadline) {
-		if condition() {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for %s", what)
-}
-
 type lockedBuffer struct {
 	mu sync.Mutex
 	b  bytes.Buffer
@@ -713,7 +707,7 @@ func TestApplyFactSerializesConcurrentFacts(t *testing.T) {
 		_, err := ApplyFact(ctx, pool, "test", "second", DispatchIssue{Key: "LEGION-209"}, increment(nil, nil))
 		second <- err
 	}()
-	eventually(t, "the second fact to wait for the first", func() bool {
+	testwait.Eventually(t, "the second fact to wait for the first", func() bool {
 		var waiting int
 		if err := pool.QueryRow(ctx, `select count(*) from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock' and wait_event = 'advisory'`).Scan(&waiting); err != nil {
 			return false

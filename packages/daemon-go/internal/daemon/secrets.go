@@ -30,14 +30,36 @@ type pruningStore struct {
 	log *slog.Logger
 }
 
+// Every method that writes a claim is wrapped, so a claim written without a locator loses its
+// files whichever write carried it.
 func (s pruningStore) PutClaim(ctx context.Context, c supervise.Claim) error {
 	if err := s.Store.PutClaim(ctx, c); err != nil {
 		return err
 	}
+	s.written(c)
+	return nil
+}
+
+func (s pruningStore) PutClaimAndDelivery(ctx context.Context, c supervise.Claim, d supervise.Delivery) error {
+	if err := s.Store.PutClaimAndDelivery(ctx, c, d); err != nil {
+		return err
+	}
+	s.written(c)
+	return nil
+}
+
+func (s pruningStore) RetireDelivery(ctx context.Context, c supervise.Claim, deliveryID string) error {
+	if err := s.Store.RetireDelivery(ctx, c, deliveryID); err != nil {
+		return err
+	}
+	s.written(c)
+	return nil
+}
+
+func (s pruningStore) written(c supervise.Claim) {
 	if c.Locator == nil {
 		removeSecretFiles(s.dir, s.log, func(name string) bool { return ownedBy(name, c.Token) })
 	}
-	return nil
 }
 
 // pruneAllBut is boot's half: every file in the secrets directory that no claim with a process

@@ -35,13 +35,27 @@ func TestWorkspaceInitFetchRefusesBeforeFetching(t *testing.T) {
 			name: "a --repo that is not owner/name",
 			args: func(v *treeVolume) []string { return []string{"fetch", "--repo", "acme", "--feed", v.feed} },
 			code: 1,
-			says: func(*treeVolume) string { return `workspace repository must be "owner/name" (got "acme")` },
+			says: func(*treeVolume) string { return `--repo must be "owner/name" (got "acme")` },
 		},
 		{
 			name: "a --repo with a .. segment",
 			args: func(v *treeVolume) []string { return []string{"fetch", "--repo", "../x", "--feed", v.feed} },
 			code: 1,
-			says: func(*treeVolume) string { return `workspace repository "../x" has a ".." segment` },
+			says: func(*treeVolume) string { return `--repo "../x" has a ".." segment` },
+		},
+		{
+			name: "a --repo holding whitespace",
+			args: func(v *treeVolume) []string { return []string{"fetch", "--repo", "acme/wid gets", "--feed", v.feed} },
+			code: 1,
+			says: func(*treeVolume) string { return `--repo "acme/wid gets" holds whitespace` },
+		},
+		{
+			// --repo is read first: the feed and the token are wrong too.
+			name: "a bad --repo, before every other input",
+			args: func(*treeVolume) []string { return []string{"fetch", "--repo", "acme/..", "--feed", "feed"} },
+			env:  func(t *testing.T, _ *treeVolume) { unsetenv(t, "LEGION_PROVISION_TOKEN_FILE") },
+			code: 1,
+			says: func(*treeVolume) string { return `--repo "acme/.." has a ".." segment` },
 		},
 		{
 			name: "a relative --feed",

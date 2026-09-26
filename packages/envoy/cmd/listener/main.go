@@ -225,9 +225,6 @@ func startListenerSubscription(client *bus.Client, consumer string, handler nats
 }
 
 func isSessionLive(sessions *session.SessionRegistry, sessionID string) bool {
-	if sessions == nil {
-		return false
-	}
 	_, err := sessions.Get(sessionID)
 	return err == nil
 }
@@ -367,11 +364,8 @@ func checkSelfHealth(caches []listenerCache, durable func() error) error {
 
 // sessionHealthFields returns observability fields about the session cache for
 // /healthz. Kept separate from the handler so it stays cheap (no Keys()/List(),
-// just in-memory reads) and unit-testable. Returns nil when sessions is nil.
+// just in-memory reads) and unit-testable.
 func sessionHealthFields(sessions *session.SessionRegistry) map[string]interface{} {
-	if sessions == nil {
-		return nil
-	}
 	watchError := ""
 	if err := sessions.WatchErr(); err != nil {
 		watchError = err.Error()
@@ -508,7 +502,7 @@ func main() {
 	deliveryDuration := met.NewHistogram("envoy_delivery_duration_seconds", "Duration of message delivery attempts", metrics.DefaultBuckets)
 	met.NewGaugeFunc("envoy_active_sessions", "Number of active sessions", func() int64 {
 		d := deps.Load()
-		if d == nil || d.sessions == nil {
+		if d == nil {
 			return 0
 		}
 		entries, err := d.sessions.List()
@@ -519,7 +513,7 @@ func main() {
 	})
 	met.NewGaugeFunc("envoy_active_interests", "Number of active interest subscriptions", func() int64 {
 		d := deps.Load()
-		if d == nil || d.registry == nil {
+		if d == nil {
 			return 0
 		}
 		return int64(len(d.registry.List()))
