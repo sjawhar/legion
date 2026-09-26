@@ -42,6 +42,21 @@ captured update in the same Postgres transaction as any resulting version and ev
 and compares canonical markdown. `envoy-dispatch backfill-block-ids` runs that closure across every
 document. Every write path that changes a document queues that closer once its transaction commits: a live edit (`POST /api/v1/artifacts/{id}/edits`), an uploaded document version (`POST /api/v1/issues/{key}/artifacts`, `POST /api/v1/projects/{key}/artifacts`), and a spec seeded at issue creation - so ask blocks written by any of them become asks without waiting for a later live change. The closer attributes the asks it indexes to the room's most recent mutating actor (`roomState.lastActor`, set by every edit, replacement and seed) when no pending author remains - an edit's own version write has already consumed `pending` by the time settlement runs. A free-text ask block (no bullet list) carries `options: []` on the wire, never JSON null.
 
+A write never puts one block id on two blocks. `EnsureBlockIDs` keeps a repeated id for the first
+holder in document order, and ask rows and anchors are keyed on block ids, so a block written ahead
+of an answered ask under its id would take the ask's row and answer, and the question would come
+back as a fresh open ask. Markdown a caller writes (a spec seeded at issue creation, an uploaded
+document or version, an edit's `insert`, an accepted suggestion's `replace_with`) is refused, naming
+the id, when it names an id twice or names one the document holds outside the text it replaces:
+`pmdoc.RepeatedBlockID` compares the document the write would store with the live one and refuses
+an id the write names that the stored one carries on more blocks than the live one does. It runs
+when the markdown is parsed (`pmdoc.ParseForWrite`, before the parse's own id repair, which is the
+only place a fragment naming one id twice shows), and again on the spliced tree for an insert or an
+accept. An `insert` is `400 INVALID_OP` on `markdown`, every other write `400 INVALID_MARKDOWN`.
+A block rewritten in place under its own id is one block, and neither the halves of a block a
+splice splits nor a repeat the live document already carries (a browser write can leave one until
+settlement repairs it) refuse anything. Only a typed block's markdown can name its id.
+
 Each `doc_updates` row records `content_changed` - whether the update changed the document's
 rendered markdown, the only document content a version stores (`pmdoc.Render` of the tree before and
 after; the one measure the room's update observer, `updateChangesMarkdown`, and a transactional live

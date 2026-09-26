@@ -678,7 +678,10 @@ The server declares typed document blocks at `GET /api/v1/schema/blocks`. Write 
 container-directive form `:::name{#block-id key="value"}` on its own line, ordinary block children,
 and a closing `:::` at the same nesting. An unclosed typed block at document level is rejected. For
 a new typed block, omit `#block-id`; Dispatch mints it. When editing an existing typed block, retain
-its id and every rendered attribute.
+its id and every rendered attribute. Never copy an existing block's id into new markdown: an id
+names one block, so an insert, upload or suggestion whose markdown names an id the document holds
+outside the text it replaces is refused naming the id: `INVALID_OP` for an insert,
+`INVALID_MARKDOWN` for any other write.
 
 Use only the type names, content rule, attributes, and enum values returned by the schema. Values are
 quoted: `:::callout{kind="warning" title="Risk"}`. Do not write Pandoc-style `::: {.callout}`, leaf
