@@ -90,6 +90,39 @@ func LineFeeds(text string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n")
 }
 
+// LineFeedAttrs is attrs with LineFeeds applied to every string value, alone or in a list: the
+// attributes a caller writes onto a typed block reach the document with line feeds alone too.
+func LineFeedAttrs(attrs map[string]any) map[string]any {
+	if attrs == nil {
+		return nil
+	}
+	out := make(map[string]any, len(attrs))
+	for name, value := range attrs {
+		switch value := value.(type) {
+		case string:
+			out[name] = LineFeeds(value)
+		case []string:
+			items := make([]string, len(value))
+			for index, item := range value {
+				items[index] = LineFeeds(item)
+			}
+			out[name] = items
+		case []any:
+			items := make([]any, len(value))
+			for index, item := range value {
+				if text, ok := item.(string); ok {
+					item = LineFeeds(text)
+				}
+				items[index] = item
+			}
+			out[name] = items
+		default:
+			out[name] = value
+		}
+	}
+	return out
+}
+
 // parseUnstamped is Parse before EnsureBlockIDs: blocks keep the ids their markdown names, and a
 // block that names none has none yet.
 func parseUnstamped(markdown string) (*Node, error) {

@@ -497,10 +497,14 @@ inside another block runs to that parent’s end.
 
 Text a caller writes reaches the parser with line feeds alone: `pmdoc.LineFeeds` writes each CR LF
 and each lone carriage return as a line feed, as CommonMark and the browser editor's parser read
-both, in `ParseForWrite` (a spec, an upload, an insert) and `ParseInline`, in a replace's `with`
-before any check reads it (`applyOperation`), in a suggestion's `replace_with` when it is created
-and when it is accepted, and in a block ask's edited question and options. No stored document
-holds a carriage return, and `pmdoc` handles line feeds alone. A code span keeps the whitespace that
+both, in `ParseForWrite` (a spec, an upload, an insert) and `ParseInline`; in every edit
+operation's text before any check reads it (`applyOperation`: a replace's `with`, an insert's
+markdown whether it becomes blocks or table rows, a retype's attributes); in a suggestion's
+`replace_with` when it is created and when it is accepted; in the attributes written onto a
+typed block (`SetBlockAttributes`, `pmdoc.LineFeedAttrs`), and in an answer's text, which its
+ask block carries; and in a block ask's edited question and options. The browser editor's own
+updates cannot carry a carriage return. No stored document holds one, and `pmdoc` handles line
+feeds alone. A code span keeps the whitespace that
 starts each of its later lines past the prefix of the containers around it, as the browser editor's
 parser reads it, a line holding only whitespace before the closer included; goldmark's paragraph
 trims it (`lineRecordingParagraph`, `multilineCodeSpanText`). A space or a line feed is the padding

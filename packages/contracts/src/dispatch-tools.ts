@@ -695,7 +695,12 @@ export const dispatchToolSpecs = [
                 .describe("Zero-based row or column index for delete_row or delete_column.")
                 .optional(),
               type: z.string().describe("Typed block name for retype.").optional(),
-              attributes: z.unknown().describe("Typed block attributes for retype.").optional(),
+              attributes: z
+                .unknown()
+                .describe(
+                  "Typed block attributes for retype; a CR LF or a lone carriage return in a string value is written as a line feed."
+                )
+                .optional(),
             },
             { strict: true }
           )
