@@ -696,6 +696,40 @@ func TestRecordHeadRejectsInvalidSHA(t *testing.T) {
 		t.Fatal("RecordHead accepted an invalid SHA")
 	}
 }
+
+// A repository's name may begin with a dot, end with one, or hold two in a row (`sjawhar/.github`),
+// and a KV key's dots separate tokens that must not be empty, so the key writes a dot in the owner
+// or the name as `=`, which no GitHub name holds: the head and the checks of such a repository are
+// recorded, `a.b` and `a_b` keep distinct keys, and a name without a dot keys as it always has.
+func TestDottedRepositoriesRecordUnderTheirOwnKeys(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s := openStore(t, conn)
+	const (
+		owner  = "example-org"
+		number = "42"
+		sha    = "abcdef1234567890abcdef1234567890abcdef12"
+	)
+	for i, repo := range []string{".example", "a..b", "trailing.", "example.repo", "example_repo"} {
+		if err := s.RecordHead(owner, repo, number, sha, "2026-09-07T03:00:00Z"); err != nil {
+			t.Fatalf("record %s/%s's head: %v", owner, repo, err)
+		}
+		waitHead(t, s, owner, repo, number, sha)
+		if err := recordCheck(s, owner, repo, number, sha, "build", strconv.Itoa(700+i), "https://example-host/checks", "completed", "success", ""); err != nil {
+			t.Fatalf("record %s/%s's check: %v", owner, repo, err)
+		}
+		waitCacheChecks(t, s, owner, repo, number, sha, 1)
+	}
+	if Key(owner, "example.repo", number, sha) == Key(owner, "example_repo", number, sha) {
+		t.Fatalf("example.repo and example_repo share the key %s", Key(owner, "example.repo", number, sha))
+	}
+	if got, want := Key(owner, "example-repo", number, sha), "example-org.example-repo.pr42."+sha; got != want {
+		t.Fatalf("Key = %s, want %s", got, want)
+	}
+	if got, want := headKey(owner, "example-repo", number), "head.example-org.example-repo.42"; got != want {
+		t.Fatalf("headKey = %s, want %s", got, want)
+	}
+}
 func TestRecordSameIDDoesNotRegressCompletedAtEqualOrMissingTimestamps(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
