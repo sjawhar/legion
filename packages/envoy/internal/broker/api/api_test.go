@@ -508,7 +508,7 @@ func TestGrantValuesAndRevoke(t *testing.T) {
 	decodeJSON(t, vresp, &vout)
 	values, _ := vout["values"].(map[string]any)
 	if values["AUTO_TOKEN"] != "auto-v1" {
-		t.Fatalf("values = %v, want AUTO_TOKEN=auto-v1", vout["values"])
+		t.Fatalf("AUTO_TOKEN did not match the fake secrets store's value")
 	}
 
 	revokeURL := srv.URL + "/v1/grants/" + grantID + "/revoke"

@@ -250,10 +250,10 @@ func (f *fakeDispatch) server(token string) *httptest.Server {
 		// A uuid, not a small sequential id: this suite's Postgres is shared with every other
 		// package's own tests, whose requests table rows also carry an "ask_id" column with no
 		// per-test scoping at all — requests.Poller.RunOnce processes every pending row in the
-		// whole table. A small "ask-1"/"ask-2" id (this package used to mint one) can collide
-		// with another concurrently running package's own fake ask ids, letting that package's
-		// Poller resolve and apply ITS OWN unrelated answer to one of this suite's rows. A uuid
-		// can never collide with anything another package mints.
+		// whole table. A small sequential id can collide with another concurrently running
+		// package's own fake ask ids, letting that package's Poller resolve and apply ITS OWN
+		// unrelated answer to one of this suite's rows. A uuid can never collide with anything
+		// another package mints.
 		id := uuid.NewString()
 		f.asks[id] = &fakeAsk{id: id, issue: r.PathValue("key"), question: body.Question, state: "open"}
 		f.order = append(f.order, id)
@@ -634,7 +634,7 @@ func TestSpikeContract(t *testing.T) {
 		}
 		status, out = grantValues(t, env1.srv, enrB, dealGrantID)
 		if status != http.StatusForbidden || out["code"] != "NOT_YOURS" {
-			t.Fatalf("B spending A's grant: want 403 NOT_YOURS, got %d %v", status, out)
+			t.Fatalf("B spending A's grant: want 403 NOT_YOURS, got %d code=%v", status, out["code"])
 		}
 
 		readURL := env1.srv.URL + "/v1/requests/" + dealReqID
@@ -742,7 +742,7 @@ func TestSpikeContract(t *testing.T) {
 		}
 		status, out = grantValues(t, env1.srv, enrA, dealGrantID)
 		if status != http.StatusForbidden || out["code"] != "GRANT_NOT_LIVE" {
-			t.Fatalf("values on a revoked grant: want 403 GRANT_NOT_LIVE, got %d %v", status, out)
+			t.Fatalf("values on a revoked grant: want 403 GRANT_NOT_LIVE, got %d code=%v", status, out["code"])
 		}
 
 		_, out, _ = createRequest(t, env1.srv, enrA, []string{"DEEL_API_KEY"}, "again, now that the old grant is gone")
