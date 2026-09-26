@@ -373,6 +373,51 @@ func TestOutboxSuperviseStartsResumesSuspendsStopsAndDeduplicatesDelivery(t *tes
 	}
 }
 
+// A start queued before its tree closed, backing off, reaches its claim after the close's suspend.
+// Linger holds the member where it stood, so the start finishes without resuming the worker, and
+// records no start, so the close's suspend still applies if it runs later. Once re-admission ends
+// the linger, the same start resumes the worker.
+func TestAStartOnALingeringTreeResumesNothing(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	ctx := context.Background()
+	until := time.Now().Add(time.Hour)
+	root := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "root", Phase: phase.Done, Generation: 1, Status: "done", Rank: "U", LingerUntil: &until}
+	putOutboxIssue(t, pool, records, root)
+	parent := root.Key
+	child := record.Issue{Key: "LEGION-209", Project: "LEGION", Tree: root.Key, Parent: &parent, Title: "child", Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "V"}
+	putOutboxIssue(t, pool, records, child)
+	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
+	token, err := claim.NewToken("legion", child.Key, claim.RoleTester)
+	if err != nil {
+		t.Fatal(err)
+	}
+	machine, _, err := sup.Create(ctx, supervise.Claim{Token: token, Project: "legion", Tree: root.Key, Issue: child.Key, Role: claim.RoleTester, Generation: 1,
+		State: supervise.StateSuspended, Session: "ses_tester", SessionFile: "/sessions/tester.jsonl"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), log: quietLogger(), now: time.Now}
+	start := mustOutboxRow(t, child.Key, record.SuperviseRequest{Op: "start", Tree: root.Key, Role: claim.RoleTester, Generation: 1, Phase: phase.Testing, Task: "Carry on testing."}, time.Now())
+	start.ID = 57
+
+	if err := runner.execute(ctx, start); err != nil {
+		t.Fatalf("start on the lingering tree = %v, want finished without acting", err)
+	}
+	if got := machine.Claim(); got.State != supervise.StateSuspended || got.LastStartRow != 0 || len(rt.CallsOf("Resume")) != 0 {
+		t.Fatalf("tester after a start on the lingering tree = %s with last start %d and %d resumes, want suspended, no start recorded, none",
+			got.State, got.LastStartRow, len(rt.CallsOf("Resume")))
+	}
+	root.LingerUntil = nil
+	putOutboxIssue(t, pool, records, root)
+	if err := runner.execute(ctx, start); err != nil {
+		t.Fatalf("start once the tree runs again: %v", err)
+	}
+	if got := machine.Claim(); got.LastStartRow != 57 || len(rt.CallsOf("Resume")) != 1 {
+		t.Fatalf("tester once the tree runs again = %s with last start %d and %d resumes, want resumed by row 57", got.State, got.LastStartRow, len(rt.CallsOf("Resume")))
+	}
+}
+
 // The architect's retry of a held phase enqueues a start for the claim that failed. The executor
 // relaunches it; before, it went straight to the delivery, which a failed claim refuses, and the row
 // retried forever while the issue sat in its phase with no worker.
@@ -971,8 +1016,7 @@ func TestAClosedTreeSetBackToTodoRelaunchesItsArchitect(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	ctx := context.Background()
-	until := time.Now().Add(-time.Minute)
-	root := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Done, Generation: 3, Status: "done", Rank: "U", LingerUntil: &until, LastDispatchSeq: 5}
+	root := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Done, Generation: 3, Status: "done", Rank: "U", LastDispatchSeq: 5}
 	putOutboxIssue(t, pool, records, root)
 	sup, runtime := newOutboxSupervisor(t, "legion", t.TempDir())
 	provisioned, removed := 0, 0
@@ -1003,7 +1047,10 @@ func TestAClosedTreeSetBackToTodoRelaunchesItsArchitect(t *testing.T) {
 		t.Fatalf("register the architect: %v", err)
 	}
 
-	// Linger expires: every claim stops and the workspace goes.
+	// The tree closes and lingers, then its linger expires: every claim stops and the workspace goes.
+	until := time.Now().Add(-time.Minute)
+	root.LingerUntil = &until
+	putOutboxIssue(t, pool, records, root)
 	if _, err := intake.ApplyFact(ctx, pool, "outbox", "linger:LEGION-208:3", intake.LingerExpired{Issue: root.Key, Generation: 3}, engine, admission); err != nil {
 		t.Fatalf("apply linger expiry: %v", err)
 	}

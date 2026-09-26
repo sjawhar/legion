@@ -273,18 +273,53 @@ func TestAMergeWhileTheTreeLingersIsTheChildsProductionCheckOnceTheTreeRunsAgain
 	}
 }
 
-// A re-admitted root that waits for a slot no longer lingers, so a fact in that window moves its
-// child and starts the child's worker. The root's promotion then starts its mid-phase children; a
-// child whose worker that window already started for this run is not started again, whether the
-// start is still queued or has already run (its row finished and gone, its claim live and serving
-// the child's generation): a second start would give the same task twice.
-func TestPromotionDoesNotStartAChildTheWaitingWindowStarted(t *testing.T) {
+// A re-admitted root that waits for a slot no longer lingers, so a fact in that window can move a
+// child and start its worker. The root's promotion then starts its mid-phase children: a child's
+// worker is started unless the newest of its role's operations that will still act is a start.
+// Each row is the child tester's outbox and claim when the root is promoted, and how many starts
+// the promotion adds: a second start would give the same task twice, and a missing one leaves the
+// child mid-phase with nobody working it once a queued stop suspends its worker.
+func TestPromotionStartsAChildUnlessItsWorkerIsStartedForTheRun(t *testing.T) {
+	type seed struct {
+		enqueue func(op record.SuperviseOp, generation uint64) int64
+		claim   func(state string, serving uint64, lastStart int64)
+	}
 	for _, tc := range []struct {
-		name   string
-		ranRow bool
+		name  string
+		setup func(s seed)
+		want  int
 	}{
-		{name: "its start still queued"},
-		{name: "its start already run", ranRow: true},
+		{name: "no worker", setup: func(seed) {}, want: 1},
+		{name: "the window's start still queued", setup: func(s seed) { s.enqueue("start", 1) }, want: 0},
+		{name: "a live claim the window's start resumed", setup: func(s seed) { s.claim("working", 1, 7) }, want: 0},
+		{name: "a claim new to the run, its first task not yet confirmed", setup: func(s seed) { s.claim("ready", 0, 7) }, want: 0},
+		{name: "a live claim the close's suspend will still stop", setup: func(s seed) {
+			s.claim("working", 1, 0)
+			s.enqueue("suspend", 1)
+		}, want: 1},
+		{name: "a live claim whose window start superseded the close's suspend", setup: func(s seed) {
+			s.claim("working", 1, s.enqueue("suspend", 1)+1)
+		}, want: 0},
+		{name: "a start queued before the close's suspend", setup: func(s seed) {
+			s.claim("working", 1, 0)
+			s.enqueue("start", 1)
+			s.enqueue("suspend", 1)
+		}, want: 1},
+		{name: "a start queued after the close's suspend", setup: func(s seed) {
+			s.claim("working", 1, 0)
+			s.enqueue("suspend", 1)
+			s.enqueue("start", 1)
+		}, want: 0},
+		{name: "a live claim with the linger's tree close still queued", setup: func(s seed) {
+			s.claim("working", 1, 0)
+			s.enqueue("tree_close", 1)
+		}, want: 1},
+		{name: "a live claim with only an earlier generation's suspend queued", setup: func(s seed) {
+			s.claim("working", 1, 0)
+			s.enqueue("suspend", 0)
+		}, want: 0},
+		{name: "a suspended claim serving the generation", setup: func(s seed) { s.claim("suspended", 1, 7) }, want: 1},
+		{name: "a failed claim serving the generation", setup: func(s seed) { s.claim("failed", 1, 7) }, want: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
@@ -294,58 +329,66 @@ func TestPromotionDoesNotStartAChildTheWaitingWindowStarted(t *testing.T) {
 			root := record.Issue{Key: "LEGION-208", Project: "LEGION", Title: "root", Tree: "LEGION-208", Phase: phase.Admitted, Generation: 2, Status: "todo", Rank: "B", LastDispatchSeq: 2}
 			putIssue(t, pool, root)
 			parentKey := root.Key
-			putIssue(t, pool, record.Issue{Key: "LEGION-209", Project: "LEGION", Title: "merged child", Tree: root.Key, Parent: &parentKey,
-				Phase: phase.AwaitingMerge, Generation: 1, Status: "in_progress", Rank: "C", LastDispatchSeq: 1})
-			inTx(t, pool, func(tx pgx.Tx) {
-				if err := record.NewStore().PutPullRequest(context.Background(), tx, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-209", Repo: "sjawhar/legion", Number: 42,
-					Branch: "legion/LEGION-209", HeadSHA: "head", Failing: []string{}, FailingStatuses: []string{}}); err != nil {
-					t.Fatalf("seed pull request: %v", err)
-				}
+			child := record.Issue{Key: "LEGION-209", Project: "LEGION", Title: "child", Tree: root.Key, Parent: &parentKey,
+				Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "C", LastDispatchSeq: 1}
+			putIssue(t, pool, child)
+			project, err := claim.ProjectToken(testProject)
+			if err != nil {
+				t.Fatal(err)
+			}
+			token, err := claim.NewToken(project, child.Key, claim.RoleTester)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.setup(seed{
+				enqueue: func(op record.SuperviseOp, generation uint64) int64 {
+					t.Helper()
+					payload := record.SuperviseRequest{Op: op, Tree: root.Key, Role: claim.RoleTester, Generation: generation}
+					if op == "start" {
+						payload.Phase, payload.Task = child.Phase, workflow.ResumePhaseTask(child)
+					}
+					row, err := record.NewOutboxRow(child.Key, payload, fixedNow)
+					if err != nil {
+						t.Fatal(err)
+					}
+					inTx(t, pool, func(tx pgx.Tx) {
+						if err := record.NewStore().Enqueue(context.Background(), tx, row); err != nil {
+							t.Fatalf("enqueue %s: %v", op, err)
+						}
+					})
+					var id int64
+					if err := pool.QueryRow(context.Background(), `select max(id) from outbox`).Scan(&id); err != nil {
+						t.Fatalf("read the %s row's id: %v", op, err)
+					}
+					return id
+				},
+				claim: func(state string, serving uint64, lastStart int64) {
+					t.Helper()
+					if _, err := pool.Exec(context.Background(), `insert into claims (token, project, tree, issue, role, generation, session, session_file, state,
+						launch_failures, prompt_failures, prompt_retires, uncertain_streak, serving_generation, last_start_row)
+						values ($1, $2, 'LEGION-208', 'LEGION-209', 'tester', 1, 'ses_tester', '', $3, 0, 0, 0, 0, $4, $5)`,
+						string(token), project, state, int64(serving), lastStart); err != nil {
+						t.Fatalf("record the %s claim: %v", state, err)
+					}
+				},
 			})
-			implementerStarts := func() int {
+			testerStarts := func() int {
 				t.Helper()
 				var starts int
 				if err := pool.QueryRow(context.Background(), `select count(*) from outbox where issue = 'LEGION-209' and kind = 'supervise'
-					and payload->>'op' = 'start' and payload->>'role' = 'implementer' and payload->>'phase' = 'production_check'`).Scan(&starts); err != nil {
+					and payload->>'op' = 'start' and payload->>'role' = 'tester' and payload->>'phase' = 'testing'`).Scan(&starts); err != nil {
 					t.Fatalf("count the child's starts: %v", err)
 				}
 				return starts
 			}
+			before := testerStarts()
 
-			if _, err := intake.ApplyFact(context.Background(), pool, "github", "merged", intake.PullRequestMerged{Repo: "sjawhar/legion", Number: 42, MergeSHA: "merge"}, engine, admission); err != nil {
-				t.Fatalf("ApplyFact merge: %v", err)
-			}
-			if starts := implementerStarts(); starts != 1 {
-				t.Fatalf("implementer starts after the merge while the root waits = %d, want 1", starts)
-			}
-			want := 1
-			if tc.ranRow {
-				// The outbox ran the start: its row is finished and gone, and the claim it resumed
-				// is live, serving the child's generation.
-				project, err := claim.ProjectToken(testProject)
-				if err != nil {
-					t.Fatal(err)
-				}
-				token, err := claim.NewToken(project, "LEGION-209", claim.RoleImplementer)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if _, err := pool.Exec(context.Background(), `delete from outbox where issue = 'LEGION-209' and kind = 'supervise' and payload->>'op' = 'start'`); err != nil {
-					t.Fatalf("finish the start: %v", err)
-				}
-				if _, err := pool.Exec(context.Background(), `insert into claims (token, project, tree, issue, role, generation, session, session_file, state,
-					launch_failures, prompt_failures, prompt_retires, uncertain_streak, serving_generation)
-					values ($1, $2, 'LEGION-208', 'LEGION-209', 'implementer', 1, 'ses_implementer', '', 'working', 0, 0, 0, 0, 1)`, string(token), project); err != nil {
-					t.Fatalf("record the live claim: %v", err)
-				}
-				want = 0
-			}
 			apply(t, pool, admission, "free-the-slot", intake.DispatchIssue{Key: "LEGION-100", Seq: 2, Type: "issue.closed", Status: "done", Title: "LEGION-100", Rank: "A"}, engine)
 			if slotted := issue(t, pool, root.Key); slotted.Status != "in_progress" {
 				t.Fatalf("the waiting root after the slot freed = %s, want it promoted", slotted.Status)
 			}
-			if starts := implementerStarts(); starts != want {
-				t.Fatalf("implementer starts after the promotion = %d, want %d: the window's start alone", starts, want)
+			if added := testerStarts() - before; added != tc.want {
+				t.Fatalf("tester starts the promotion added = %d, want %d", added, tc.want)
 			}
 		})
 	}

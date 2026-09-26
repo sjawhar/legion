@@ -14,6 +14,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
 const maxInt64 = uint64(^uint64(0) >> 1)
@@ -468,18 +469,34 @@ func (s *Postgres) RetryOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseTo
 	return nil
 }
 
-// RoleStarted says whether issue's role has already been started for the run of generation and
-// phase. Either a start of it is still queued (finishing deletes the row, so one left is a start
-// the outbox has not run), or one has run: its claim is live — past queued and not suspended,
-// failed, retired or launch_uncertain — and serving generation. A claim in any of those other
-// states has no process working the run, so it is not started.
+// RoleStarted says whether issue's role is already started for the run of generation and phase:
+// whether the newest of the role's supervise operations for generation that will still act is a
+// start. It reads them as the outbox executor orders them. A stop that will still act is a queued
+// tree close, or a queued suspend newer than the claim's last start (an older suspend is finished
+// as superseded). Past such a stop only a newer queued start is a start, since an older one may
+// run first and the stop then undo it. With no such stop, a queued start for the phase is one
+// (finishing deletes the row, so one left is a start the outbox has not run), and so is a live
+// claim: no start acts while the tree lingers, and the tree's close queues a suspend of every
+// claim, so a claim live with no stop left queued was started since the tree ran again. A
+// suspended, failed, retired or unlaunched claim runs nothing, so it is not started.
 func (s *Postgres) RoleStarted(ctx context.Context, tx pgx.Tx, issue string, role claim.Role, generation uint64, p phase.Phase) (bool, error) {
+	states := supervise.LiveStates()
+	live := make([]string, len(states))
+	for i, state := range states {
+		live[i] = string(state)
+	}
 	var started bool
-	if err := tx.QueryRow(ctx, `select exists (select 1 from outbox where issue = $1 and kind = $2 and payload->>'op' = 'start'
-			and payload->>'role' = $3 and payload->>'generation' = $4 and coalesce(payload->>'phase', '') = $5)
-		or exists (select 1 from claims where issue = $1 and role = $3 and serving_generation = $6
-			and state in ('launching', 'shim_connected', 'registered', 'ready', 'working', 'idle'))`,
-		issue, string(OutboxKindSupervise), string(role), strconv.FormatUint(generation, 10), string(p), int64(generation)).Scan(&started); err != nil {
+	if err := tx.QueryRow(ctx, `with stop as (
+			select max(o.id) as id from outbox o
+			where o.issue = $1 and o.kind = $2 and o.payload->>'role' = $3 and o.payload->>'generation' = $4
+			and (o.payload->>'op' = 'tree_close' or (o.payload->>'op' = 'suspend'
+				and o.id > coalesce((select c.last_start_row from claims c where c.issue = $1 and c.role = $3), 0))))
+		select exists (select 1 from outbox o where o.issue = $1 and o.kind = $2 and o.payload->>'op' = 'start'
+				and o.payload->>'role' = $3 and o.payload->>'generation' = $4 and coalesce(o.payload->>'phase', '') = $5
+				and o.id > coalesce(stop.id, 0))
+			or (stop.id is null and exists (select 1 from claims c where c.issue = $1 and c.role = $3 and c.state = any($6)))
+		from stop`,
+		issue, string(OutboxKindSupervise), string(role), strconv.FormatUint(generation, 10), string(p), live).Scan(&started); err != nil {
 		return false, fmt.Errorf("read whether the %s of %s is started: %w", role, issue, err)
 	}
 	return started, nil

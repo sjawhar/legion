@@ -328,6 +328,12 @@ var (
 	gone        = []ClaimState{StateSuspended, StateFailed, StateRetired}
 )
 
+// LiveStates are the states of a claim whose process is up or coming up: launched, and not
+// suspended, failed or retired. It is a copy, so no caller changes the table's own set.
+func LiveStates() []ClaimState {
+	return slices.Clone(live)
+}
+
 const (
 	noProcess     = "no process of this claim is running"
 	noSend        = "no prompt is sent in this state"

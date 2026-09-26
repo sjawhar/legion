@@ -363,6 +363,19 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 	machine, found := r.supervisor.Machine(token)
 	switch payload.Op {
 	case "start":
+		// A tree that lingers has left the workflow, and linger holds each member where it stood: a
+		// start that reaches its claim after the close (queued before it and backing off) finishes
+		// without acting and records no start, so the close's suspend still applies. Re-admission
+		// starts the member again (admit's startMidPhaseChildren).
+		lingers, err := r.treeLingers(ctx, issue)
+		if err != nil {
+			return err
+		}
+		if lingers {
+			r.log.Info("outbox start of a member of a lingering tree; finished without acting", "row", row.ID, "issue", issue.Key,
+				"tree", issue.Tree, "role", payload.Role)
+			return nil
+		}
 		// The claim remembers the newest start run against it, so a stop written before this one
 		// is finished rather than acted on however late it arrives (see "suspend" below).
 		if found {
@@ -460,6 +473,18 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 	default:
 		return fmt.Errorf("outbox row %d has unknown supervise operation %q", row.ID, payload.Op)
 	}
+}
+
+// treeLingers says whether issue's tree lingers after its close: its root's linger deadline is set.
+func (r *outbox) treeLingers(ctx context.Context, issue record.Issue) (bool, error) {
+	root := issue
+	if issue.Tree != issue.Key {
+		var err error
+		if root, err = r.issue(ctx, issue.Tree); err != nil {
+			return false, err
+		}
+	}
+	return root.LingerUntil != nil, nil
 }
 
 // podsProvision is whether the runtime provisions each claim's workspace in the claim's own pod

@@ -159,8 +159,8 @@ type Store interface {
 	FinishOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) error
 	RetryOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string, nextAt time.Time, lastErr string) error
 	PendingStatusWrites(ctx context.Context, tx pgx.Tx, project string) ([]OutboxRow, error)
-	// RoleStarted says whether issue's role has already been started for the run of generation and
-	// phase: a start of it is still queued, or its claim is live and serving generation.
+	// RoleStarted says whether issue's role is already started for the run of generation and
+	// phase: the newest of its supervise operations for generation that will still act is a start.
 	RoleStarted(ctx context.Context, tx pgx.Tx, issue string, role claim.Role, generation uint64, p phase.Phase) (bool, error)
 }
 
