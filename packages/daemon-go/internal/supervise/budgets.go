@@ -15,8 +15,10 @@ import (
 //     a pending task, whose turn was running or which was sent and not yet begun. The relaunch
 //     reaches ready again whatever killed the last process, so ready cannot bound these; an agent
 //     that dies before it completes a turn each time it is given the task would otherwise be
-//     relaunched for ever. Reset only by a turn that ends (turnEnded), which a killed Oh My Pi
-//     never reports. A death with nothing pending strands no work and is not counted: a parked
+//     relaunched for ever. The count is charged against the pending task and reset only when that
+//     task ends (retirePending): its turn ends, which a killed Oh My Pi never reports, or a
+//     suspension or a phase change retires it. A turn that never ran the task — a notice's —
+//     clears nothing. A death with nothing pending strands no work and is not counted: a parked
 //     agent the environment kills now and then is relaunched however often it happens. Bounded by
 //     the launch failure limit.
 //   - PromptFailures: prompts the agent refused, acknowledged prompts that started no turn, and

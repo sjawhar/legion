@@ -681,7 +681,6 @@ func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 func turnEnded(m *Machine, ctx context.Context, _ Event) error {
 	m.askFirst = false
 	m.claim.State = StateIdle
-	m.claim.Budgets.Deaths = 0
 	if err := m.persist(ctx); err != nil {
 		return err
 	}

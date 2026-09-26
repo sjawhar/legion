@@ -87,6 +87,52 @@ func TestADeathBeforeReadyIsALaunchFailureNotADeath(t *testing.T) {
 	h.wantBudgets(Budgets{LaunchFailures: 2, Deaths: 1})
 }
 
+// Deaths are charged against the task the claim holds, so they are cleared when that task ends and
+// not by a turn that never ran it: a notice's turn colliding with the re-send is refused busy and
+// its end leaves the interrupted task still waiting, and its deaths with it.
+func TestATurnOfTheAgentsOwnDoesNotClearTheDeathsOfATaskItNeverRan(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateReady)
+	h.must(RequestDeliver{Claim: testToken, Task: "the task"})
+	h.must(StreamTurnStart{Claim: testToken})
+	h.observe(runtime.Gone)
+	h.relaunched()
+	resent := h.wantPrompts(2)[1].DeliveryID
+
+	h.must(StreamTurnStart{Claim: testToken})
+	h.must(StreamLateRefusal{Claim: testToken, DeliveryID: resent, Error: "Agent is already processing a request"})
+	h.must(StreamTurnEnd{Claim: testToken})
+
+	if p := h.pending(); !p.ConfirmedAt.IsZero() {
+		t.Fatalf("pending %+v, want the task still waiting", p)
+	}
+	h.wantBudgets(Budgets{Deaths: 1})
+}
+
+// A task that ends some other way than its turn's end — the suspension a transition sends, which
+// can arrive before the worker's handoff turn has ended — takes its deaths with it: the claim's
+// next round starts its count afresh.
+func TestATaskThatEndsTakesItsDeathsWithIt(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateReady)
+	h.must(RequestDeliver{Claim: testToken, Task: "round one", Phase: "implementing", Generation: 5})
+	h.must(StreamTurnStart{Claim: testToken})
+	for range testLimits().LaunchFailures - 1 {
+		h.observe(runtime.Gone)
+		h.relaunched()
+		h.must(StreamTurnStart{Claim: testToken})
+	}
+	h.must(RequestSuspend{Claim: testToken})
+
+	h.must(RequestDeliver{Claim: testToken, Task: "round two", Phase: "implementing", Generation: 6})
+	h.relaunched()
+	h.must(StreamTurnStart{Claim: testToken})
+	h.observe(runtime.Gone)
+
+	h.wantState(StateLaunching)
+	h.wantBudgets(Budgets{LaunchFailures: 1, Deaths: 1})
+}
+
 // Deaths are counted until the agent next completes a turn, so an agent that finishes each
 // re-sent task after the death that interrupted it is relaunched every time: a pod lost now and
 // then to its node is not a broken agent.

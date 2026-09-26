@@ -190,6 +190,8 @@ func (m *Machine) retirePending(ctx context.Context) error {
 	if !p.ConfirmedAt.IsZero() && p.Generation != 0 {
 		retired.ServingGeneration = p.Generation
 	}
+	// The deaths were charged against this task, so they end with it, in the same write.
+	retired.Budgets.Deaths = 0
 	if err := m.deps.Store.RetireDelivery(ctx, retired, p.ID); err != nil {
 		return err
 	}
@@ -269,9 +271,11 @@ func (m *Machine) confirm(ctx context.Context) error {
 }
 
 // settle retires a delivery whose life is over, and runs around every decision, so that two things
-// hold however the claim got where it is — the turn ending, a suspension, a death — and hold again
-// at once for a claim restored from a store a crash left in between: a confirmed delivery lives
-// exactly as long as its turn, and a suspended claim holds no task the suspension finished.
+// hold however the claim got where it is — the turn ending, a suspension — and hold again at once
+// for a claim restored from a store a crash left in between: a confirmed delivery lives exactly as
+// long as its turn, and a suspended claim holds no task the suspension finished. A death is not
+// one of them: it takes the task whose turn it ended back first (interrupted), so settle finds
+// nothing of it to retire.
 //
 // A suspension ends the claim's phase, so a task queued for a phase is the finished phase's and
 // goes with it; the next resume is handed its new phase's task, never that one. A task of no
