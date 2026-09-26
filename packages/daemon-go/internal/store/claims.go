@@ -23,7 +23,7 @@ var _ supervise.Store = (*Store)(nil)
 const claimSelect = `select c.token, c.project, c.tree, c.issue, c.role, c.generation, c.session,
 	c.session_file, c.locator, c.state, c.launch_failures, c.deaths, c.prompt_failures, c.prompt_retires,
 	c.boot_token_hash, c.capability_hash, c.uncertain_streak, c.workspace_lost, c.last_start_row, c.serving_generation,
-	d.delivery_id, d.task, d.phase, d.generation, d.queued_at, d.delivered_at, d.confirmed_at, d.interrupted
+	d.delivery_id, d.task, d.phase, d.generation, d.queued_at, d.delivered_at, d.marked_by, d.confirmed_at, d.interrupted
 	from claims c left join pending_task_deliveries d on d.claim_token = c.token`
 
 // PutClaim writes a claim, replacing the row its token names. The pending delivery is not part of
@@ -122,15 +122,15 @@ func putDelivery(ctx context.Context, db execer, token claim.Token, d supervise.
 		return fmt.Errorf("put delivery %s on %s: generation %d does not fit a bigint", d.ID, token, d.Generation)
 	}
 	_, err := db.Exec(ctx, `insert into pending_task_deliveries (claim_token, delivery_id, task,
-		phase, generation, queued_at, delivered_at, confirmed_at, interrupted)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		phase, generation, queued_at, delivered_at, marked_by, confirmed_at, interrupted)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		on conflict (claim_token) do update set delivery_id = excluded.delivery_id,
 		task = excluded.task, phase = excluded.phase, generation = excluded.generation,
 		queued_at = excluded.queued_at,
-		delivered_at = excluded.delivered_at, confirmed_at = excluded.confirmed_at,
+		delivered_at = excluded.delivered_at, marked_by = excluded.marked_by, confirmed_at = excluded.confirmed_at,
 		interrupted = excluded.interrupted`,
-		string(token), d.ID, d.Task, string(d.Phase), int64(d.Generation), d.QueuedAt, instant(d.DeliveredAt), instant(d.ConfirmedAt),
-		d.Interrupted,
+		string(token), d.ID, d.Task, string(d.Phase), int64(d.Generation), d.QueuedAt, instant(d.DeliveredAt), d.MarkedBy,
+		instant(d.ConfirmedAt), d.Interrupted,
 	)
 	if err != nil {
 		return fmt.Errorf("put delivery %s on %s: %w", d.ID, token, err)
@@ -182,6 +182,7 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 		generation          int64
 		locator             []byte
 		deliveryID, task    *string
+		markedBy            *string
 		deliveryPhase       *string
 		deliveryGeneration  *int64
 		servingGeneration   int64
@@ -193,7 +194,7 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 		&c.SessionFile, &locator, &state, &c.Budgets.LaunchFailures, &c.Budgets.Deaths, &c.Budgets.PromptFailures,
 		&c.Budgets.PromptRetires, &c.BootTokenHash, &c.CapabilityHash, &c.UncertainStreak, &c.WorkspaceLost,
 		&c.LastStartRow, &servingGeneration,
-		&deliveryID, &task, &deliveryPhase, &deliveryGeneration, &queuedAt, &delivered, &confirmed, &interrupted)
+		&deliveryID, &task, &deliveryPhase, &deliveryGeneration, &queuedAt, &delivered, &markedBy, &confirmed, &interrupted)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return supervise.Claim{}, err
 	}
@@ -220,6 +221,7 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 			Generation:  uint64(orZeroInt(deliveryGeneration)),
 			QueuedAt:    *queuedAt,
 			DeliveredAt: orZero(delivered),
+			MarkedBy:    *markedBy,
 			ConfirmedAt: orZero(confirmed),
 			Interrupted: orFalse(interrupted),
 		}

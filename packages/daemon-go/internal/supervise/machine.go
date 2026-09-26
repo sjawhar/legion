@@ -280,16 +280,6 @@ type Machine struct {
 	// delivery it may already have sent, or a turn it saw start and may not have seen end. The
 	// machine asks the agent (get_state) before it acts on either.
 	askFirst bool
-	// markedBy is the id of the prompt whose acknowledgement set the pending task's read mark
-	// (DeliveredAt). A late refusal is judged against the prompt it names: one naming markedBy says
-	// the prompt that marked the task never ran, so the mark goes (markUnread); one naming any other
-	// prompt says nothing about the mark. Which prompt set the mark is a fact recorded when it is
-	// set, so no ordering of sends, acknowledgements and refusals has to be reasoned about: only
-	// markRead and clearReadMark write it, each together with DeliveredAt, and nothing else - no
-	// send, confirmation or relaunch - may. When the pending task was replaced it may still name
-	// the previous task's prompt, and a refusal naming it then has nothing to clear. Memory only:
-	// after a restart no refusal can come from the old connection.
-	markedBy string
 	// previous is the incarnation the claim last ran and no longer records — stopped by a
 	// suspension, retired, failed on, or found dead — which every launch of the same session hands
 	// the runtime to wait out until one starts. letGo is the one way a process gets here. It is
@@ -505,7 +495,7 @@ func (m *Machine) fence(ctx context.Context, ev Event) (bool, error) {
 			return false, nil
 		}
 	case StreamLateRefusal:
-		if pending == nil || (pending.ID != ev.DeliveryID && (m.markedBy == "" || m.markedBy != ev.DeliveryID)) {
+		if pending == nil || (pending.ID != ev.DeliveryID && (pending.MarkedBy == "" || pending.MarkedBy != ev.DeliveryID)) {
 			m.dropStale("StreamLateRefusal", "delivery", ev.DeliveryID, pendingID(pending))
 			return false, nil
 		}

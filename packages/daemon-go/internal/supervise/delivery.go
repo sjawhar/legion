@@ -16,15 +16,16 @@ import (
 // Delivery is a claim's pending task: at most one per claim, persisted, and sent only when the
 // claim is ready or idle and its connection is registered.
 //
-// QueuedAt is when the task was handed to the claim; DeliveredAt is the acknowledgement of the
-// latest send, and with it the daemon's answer to whether the agent may have read this task;
+// QueuedAt is when the task was handed to the claim; DeliveredAt is the latest acknowledgement of
+// its prompt (MarkedBy names that prompt), and with it the daemon's answer to whether the agent
+// may have read this task;
 // ConfirmedAt is the turn that send started. An acknowledgement is not a delivery — Oh My Pi
 // acknowledges before it starts a turn, and can accept a prompt that starts none — so only
 // ConfirmedAt says the task arrived. A confirmed delivery stays until the turn it confirmed ends,
 // because a refusal that arrives after the acknowledgement takes the confirmation back.
 //
-// DeliveredAt carries that second meaning because a refusal clears it: an agent that refused this
-// prompt, in a turn of its own or with no turn at all, never read the task, and the claim must
+// DeliveredAt carries that second meaning because a refusal of that prompt clears it: an agent
+// that refused it, in a turn of its own or with no turn at all, never read the task, and the claim must
 // not attribute a completion to a run whose task nobody has read (Claim.ServingRun). A task
 // acknowledged and waiting for a turn keeps the mark — the turn may be this task's, starting late
 // — and so does one the wait for its turn re-queued.
@@ -51,6 +52,15 @@ type Delivery struct {
 	Phase       phase.Phase
 	QueuedAt    time.Time
 	DeliveredAt time.Time
+	// MarkedBy is the id of the prompt whose acknowledgement set DeliveredAt, the read mark. A late
+	// refusal is judged against the prompt it names: one naming MarkedBy says the prompt that
+	// marked the task never ran, so the mark goes (markUnread), whatever the claim's state and
+	// whichever connection carried it; one naming any other prompt says nothing about the mark.
+	// Which prompt set the mark is a fact recorded when it is set and kept with the task, so no
+	// ordering of sends, acknowledgements, refusals, reconnects and restarts has to be reasoned
+	// about: only markRead and clearReadMark write it, each together with DeliveredAt. A task that
+	// was replaced may still be named by a refusal, which then has nothing to clear.
+	MarkedBy    string
 	ConfirmedAt time.Time
 	// Interrupted says a turn of the task was running when its process died (interrupted), so the
 	// task is sent behind interruptedTask from then on (message). The task text stays as the
@@ -362,15 +372,15 @@ const (
 )
 
 // markRead and clearReadMark are the only writers of the pending task's read mark: its
-// acknowledgement time (DeliveredAt) and the prompt that acknowledgement answered (markedBy) are
+// acknowledgement time (DeliveredAt) and the prompt that acknowledgement answered (MarkedBy) are
 // set together and cleared together, so the prompt a late refusal is judged against is always the
 // one whose acknowledgement set the mark standing now.
 func (m *Machine) markRead(p *Delivery) {
-	p.DeliveredAt, m.markedBy = m.deps.Clock.Now(), p.ID
+	p.DeliveredAt, p.MarkedBy = m.deps.Clock.Now(), p.ID
 }
 
 func (m *Machine) clearReadMark(p *Delivery) {
-	p.DeliveredAt, m.markedBy = time.Time{}, ""
+	p.DeliveredAt, p.MarkedBy = time.Time{}, ""
 }
 
 // markUnread drops the pending task's read mark without touching its id or its budget: an

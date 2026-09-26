@@ -11,6 +11,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 )
 
 // A task's delivered mark says a worker may have read it, which is what lets a completion from a
@@ -415,5 +416,83 @@ func TestAnIdleRefusalWhoseWriteFailsDropsTheReadMark(t *testing.T) {
 	}
 	if run := h.claim().ServingRun(); run != 0 {
 		t.Fatalf("ServingRun() = %d after the refusal, want 0", run)
+	}
+}
+
+// A refusal is judged against the prompt that set the mark in every claim state. The process can
+// die after the acknowledgement, so the given-up prompt's refusal lands while the claim is
+// relaunching - and the relaunch's first send can then be lost. If the refusal were ignored for
+// the state it landed in, the mark would stand with nothing left to clear it, and a claim serving
+// no run would be credited with a task nobody read. The third expiry of the turn's wait retires
+// and relaunches in one handler, and lands the refusal in the same state.
+func TestARefusalLandingWhileTheClaimRelaunchesClearsTheMark(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		expires int
+		end     func(h *harness)
+	}{
+		{name: "the process dies after the wait runs out", expires: 1, end: func(h *harness) { h.observe(runtime.Gone) }},
+		{name: "the third expiry retires and relaunches", expires: 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.reach(StateReady)
+			var marking fake.Prompt
+			for i := 0; i < tc.expires; i++ {
+				base := len(h.prompts())
+				if i == 0 {
+					h.must(RequestDeliver{Claim: testToken, Task: "the task", Generation: 7})
+				} else {
+					h.observe(runtime.Alive)
+				}
+				marking = h.wantPrompts(base + 1)[base]
+				h.advance(2 * testRPC)
+			}
+			if tc.end != nil {
+				tc.end(h)
+			}
+			if state := h.state(); state != StateLaunching {
+				t.Fatalf("after the process ended the claim is %s, want launching", state)
+			}
+			if p := h.pending(); p.DeliveredAt.IsZero() {
+				t.Fatalf("pending before the refusal = %+v, want the given-up prompt's mark standing", p)
+			}
+
+			h.must(StreamLateRefusal{Claim: testToken, DeliveryID: marking.DeliveryID, Error: "the model provider refused the request"})
+			h.conn.FailPrompt(errBoom)
+			h.reach(StateReady)
+
+			if p := h.pending(); !p.DeliveredAt.IsZero() {
+				t.Fatalf("pending after the relaunch's lost send = %+v, want the given-up prompt's mark gone", p)
+			}
+			if run := h.claim().ServingRun(); run != 0 {
+				t.Fatalf("the claim serves run %d, want none: nobody read the task", run)
+			}
+		})
+	}
+}
+
+// The prompt that set the mark is recorded with the task, not in the daemon's memory: a refusal
+// OMP gave while the daemon was down reaches the restarted daemon, and it must still be judged
+// against the prompt that set the mark.
+func TestAfterARestartTheMarkingPromptsRefusalStillClearsTheMark(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateReady)
+	base := len(h.prompts())
+	h.must(RequestDeliver{Claim: testToken, Task: "the task", Generation: 7})
+	first := h.wantPrompts(base + 1)[base]
+	h.advance(2 * testRPC)
+	if p := h.pending(); p.DeliveredAt.IsZero() || p.ID == first.DeliveryID {
+		t.Fatalf("pending after the wait ran out = %+v, want it marked under a new id", p)
+	}
+
+	h.restart()
+	h.must(StreamLateRefusal{Claim: testToken, DeliveryID: first.DeliveryID, Error: "the model provider refused the request"})
+
+	if p := h.pending(); !p.DeliveredAt.IsZero() {
+		t.Fatalf("pending after the refusal on the restarted daemon = %+v, want its read mark gone", p)
+	}
+	if run := h.claim().ServingRun(); run != 0 {
+		t.Fatalf("the claim serves run %d, want none: nobody read the task", run)
 	}
 }

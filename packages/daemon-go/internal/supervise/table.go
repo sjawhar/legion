@@ -379,8 +379,8 @@ func fillTable(t *builder) {
 
 	t.row(onLateRefusal, "the agent refused an acknowledged prompt", lateRefused,
 		[]ClaimState{StateLaunching, StateFailed}, StateReady, StateIdle, StateWorking)
-	t.ignore(onLateRefusal, noSend, unready...)
-	t.ignore(onLateRefusal, noSend, gone...)
+	t.row(onLateRefusal, "a prompt was refused while no process can be prompted: the mark it set goes",
+		refusedUnprompted, nil, append(append([]ClaimState{}, unready...), gone...)...)
 
 	// Turns.
 	t.row(onTurnStart, "a turn started", turnStarted, []ClaimState{StateWorking}, prompted...)
@@ -624,13 +624,28 @@ func refused(m *Machine, ctx context.Context, ev Event) error {
 // that becomes no turn, and the retry waits for the sweep that follows, so a refusal that never
 // stops walks the budget to its end — a relaunch, and then the retirement — instead of looping
 // on the spot for ever against an agent that cannot start a turn at all.
+// refusedUnprompted is a refusal landing while the claim cannot be prompted: relaunching after the
+// process that refused died, or stopped. Nothing is charged or re-sent here, since the process that
+// refused is not the one that will be prompted next. It still says the prompt never ran, so the
+// mark it set goes; a task still carrying that prompt's id also goes back under a new one, so the
+// next send is a new prompt that no refusal of the old one can name.
+func refusedUnprompted(m *Machine, ctx context.Context, ev Event) error {
+	r := ev.(StreamLateRefusal)
+	m.log.Warn("supervise: a prompt was refused while no process can be prompted; the mark it set is cleared",
+		"delivery", r.DeliveryID, "state", string(m.claim.State), "error", r.Error)
+	if r.DeliveryID == m.claim.Pending.ID {
+		return m.takeBackPending(ctx, taskUnread)
+	}
+	return m.markUnread(ctx)
+}
+
 func lateRefused(m *Machine, ctx context.Context, ev Event) error {
 	r := ev.(StreamLateRefusal)
 	// A refusal naming the prompt whose acknowledgement marked the task, where that is no longer the
 	// pending id, says that prompt never ran, so the task loses its read mark — and nothing else.
 	// The wait that gave up on it already re-queued the task under a new id and charged the prompt;
 	// rotating or charging again would spend the budget twice for one prompt. A turn of the task's
-	// own that is running meanwhile keeps its run: that is its confirmation, not this mark (markedBy).
+	// own that is running meanwhile keeps its run: that is its confirmation, not this mark (MarkedBy).
 	if r.DeliveryID != m.claim.Pending.ID {
 		m.log.Warn("supervise: the prompt that marked the task as read was refused; the mark is cleared",
 			"delivery", r.DeliveryID, "error", r.Error)

@@ -611,16 +611,21 @@ do:
   reported. The issue has moved to a newer run since your task was given, so the work you just
   reported belongs to a run that is over. Nothing you can repeat changes that: stop, push nothing
   further, and tell the architect what you completed and that its run has been superseded. A task
-  for the current run arrives in this same session if the phase still needs you.
+  for the current run arrives in this same session if the phase still needs you. The same answer
+  comes when your turn started before the daemon recorded the current run's task as yours, so it
+  still holds you to the earlier run: that task is sent again, and once it arrives in this session,
+  finish it and complete again.
 - `HANDOFF_NOT_CURRENT_PHASE` — names your role, the issue, and the phase it is in now. The issue
   has left your phase; report to the architect rather than completing again.
 - `HANDOFF_NO_RUN` — names neither: it says this claim has taken no task, so the daemon cannot
   tell which run you are reporting. Your pane is completing outside any assignment. Say so to the
   architect; do not re-run the phase.
 - `HANDOFF_ALREADY_RECORDED` — names your role, the phase, the review round and the commit. This
-  exact call was received before, and its first answer stands — accepted, or one of the refusals
-  above. Sending it again changes nothing; if you did not see that first answer, tell the
-  architect so and quote this one.
+  exact call was received before, and its first answer stands: accepted, or a refusal the daemon
+  records with the call — `HANDOFF_STALE_GENERATION`, `HANDOFF_NOT_CURRENT_PHASE`,
+  `READY_REQUIRED` or `HANDOFF_NOT_NEW`. `HANDOFF_NO_RUN` is never that first answer, since it is
+  given before anything is recorded. Sending it again changes nothing; if you did not see that
+  first answer, tell the architect so and quote this one.
 
 Quote the answer verbatim in what you tell the architect: with the run and phase it names, the
 difference between "my work is lost" and "my work belongs to the previous run" is visible.
