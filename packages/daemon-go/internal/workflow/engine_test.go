@@ -125,7 +125,7 @@ func TestRefusedReadyIsCommittedAndApprovalAdvancesWithoutSecondReady(t *testing
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim"})
 	engine := testEngine()
 
-	result, err := intake.ApplyFact(ctx, pool, "api", "ready", intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim", Ready: true}, engine, admissionStub{})
+	result, err := intake.ApplyFact(ctx, pool, "api", "ready", intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim", Ready: true, Summary: readyPacket}, engine, admissionStub{})
 	if err != nil {
 		t.Fatalf("ApplyFact READY: %v", err)
 	}
@@ -298,7 +298,7 @@ func TestRefusedReadyAdvancesWhenTheGateReopensAtALaterVersion(t *testing.T) {
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim"})
 	engine := testEngine()
 
-	if _, err := intake.ApplyFact(ctx, pool, "api", "ready", intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim", Ready: true}, engine, admissionStub{}); err != nil {
+	if _, err := intake.ApplyFact(ctx, pool, "api", "ready", intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim", Ready: true, Summary: readyPacket}, engine, admissionStub{}); err != nil {
 		t.Fatalf("ApplyFact READY: %v", err)
 	}
 	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "version-5", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactVersion, Version: 5}, engine, admissionStub{}); err != nil {

@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -77,6 +78,51 @@ func TestAREADYTheGateRefusedIsPostedWhenAHumanApproves(t *testing.T) {
 	}
 	if got := mergeQueuePublishes(t, pool); len(got) != 1 || got[0].Packet != readyPacket {
 		t.Fatalf("merge queue publishes = %v, want the kept packet once", got)
+	}
+}
+
+// A READY the gate refused before migration 0016 kept the merger's packet reaches the approval with
+// none. Posting it would leave a message of the outbox marker alone, and a merge queue publish
+// without a packet would fail the approval's whole transaction, so the gate would never record the
+// approval. Instead the approval is recorded, that READY is void, the issue stays in merging with
+// nothing posted or published, and the tree's architect is told by a named reason.
+func TestAnApprovalVoidsAREADYTheGateRefusedWithNoPacketAndTellsTheArchitect(t *testing.T) {
+	for _, tc := range []struct {
+		name, mergeQueue string
+	}{
+		{name: "no merge queue"},
+		{name: "a merge queue role", mergeQueue: "merge-queue"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			pending := 4
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "U", ReadyPendingVersion: &pending})
+			seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 4})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim"})
+
+			if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "approval", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactApproved, Version: 4}, readyEngine(tc.mergeQueue), admissionStub{}); err != nil {
+				t.Fatalf("ApplyFact approval: %v", err)
+			}
+			var approved *int
+			if err := pool.QueryRow(t.Context(), "select approved_version from design_gates where issue = 'LEGION-208'").Scan(&approved); err != nil || approved == nil || *approved != 4 {
+				t.Fatalf("approved version = %v, %v; want the approval of 4 recorded", approved, err)
+			}
+			assertPhase(t, pool, phase.Merging)
+			var stillPending *int
+			if err := pool.QueryRow(t.Context(), "select ready_pending_version from issues where key = 'LEGION-208'").Scan(&stillPending); err != nil || stillPending != nil {
+				t.Fatalf("ready_pending_version = %v, %v; want the packetless READY void", stillPending, err)
+			}
+			if got := messageBodies(t, pool); len(got) != 0 {
+				t.Fatalf("Dispatch messages = %q, want none for a READY with no packet", got)
+			}
+			if got := mergeQueuePublishes(t, pool); len(got) != 0 {
+				t.Fatalf("merge queue publishes = %v, want none for a READY with no packet", got)
+			}
+			var role, reason string
+			if err := pool.QueryRow(t.Context(), "select payload->>'role', payload->>'reason' from outbox where kind = 'notice' and payload->>'kind' = 'ready-refused'").Scan(&role, &reason); err != nil || role != string(claim.RoleArchitect) || !strings.HasPrefix(reason, "READY_PACKET_MISSING: design version 4 is approved") {
+				t.Fatalf("ready-refused notice = role %q, reason %q, %v; want the architect told READY_PACKET_MISSING", role, reason, err)
+			}
+		})
 	}
 }
 

@@ -239,13 +239,12 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 	stored.Rank = rank
 	stored.LingerUntil = nil
 	stored.HeldFrom = nil
-	stored.ReadyPendingVersion = nil
 	stored.LastDispatchSeq = seq
 	if err := a.store.PutIssue(ctx, tx, stored); err != nil {
 		return fmt.Errorf("record re-admission %s: %w", stored.Key, err)
 	}
 	// A root set back to todo is a new generation of the whole tree, so the old generation's pull
-	// request, gate and handoffs go for every issue of it, not only the root's.
+	// request, gate, handoffs and pending READY go for every issue of it, not only the root's.
 	return a.store.ClearTreeGeneration(ctx, tx, stored.Tree)
 }
 

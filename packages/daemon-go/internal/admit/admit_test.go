@@ -255,7 +255,9 @@ func TestApplyFactRecordsRankTitleAndParentChangesAtTheSameStatus(t *testing.T) 
 // two review rounds in, a READY pending, and an approved design gate; the re-admitted generation 2
 // starts with none of them. Its architect registers the spec again, the approval opens the gate,
 // and planning moves it to implementing, where the implementer's first handoff waits for its own
-// pull request instead of starting the tester on generation 1's.
+// pull request instead of starting the tester on generation 1's. A child's READY the old gate
+// refused goes with the rest: its packet is cleared with the handoffs, so the new gate's approval
+// neither posts a READY with no packet nor moves the child on.
 func TestReadmissionStartsTheNewGenerationWithoutTheOldGenerationsFacts(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -263,6 +265,9 @@ func TestReadmissionStartsTheNewGenerationWithoutTheOldGenerationsFacts(t *testi
 	const key, artifact = "LEGION-LINGER", "4f2a9c1e-8b3d-4e7f-9a60-2c5d8e1b7f34"
 	until, pending, approved := fixedNow.Add(time.Hour), 1, 1
 	putIssue(t, pool, record.Issue{Key: key, Project: "LEGION", Title: "lingering", Tree: key, Phase: phase.Done, Generation: 1, Status: "done", Rank: "A", LingerUntil: &until, LastDispatchSeq: 1, ReadyPendingVersion: &pending})
+	const child = "LEGION-CHILD"
+	parent := key
+	putIssue(t, pool, record.Issue{Key: child, Project: "LEGION", Title: "child", Tree: key, Parent: &parent, Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "B", LastDispatchSeq: 1, ReadyPendingVersion: &pending})
 	inTx(t, pool, func(tx pgx.Tx) {
 		records := record.NewStore()
 		ctx := context.Background()
@@ -275,12 +280,18 @@ func TestReadmissionStartsTheNewGenerationWithoutTheOldGenerationsFacts(t *testi
 		if err := records.PutPhase(ctx, tx, record.PhaseRow{Issue: key, Role: claim.RoleImplementer, Claim: "implementer", HandoffCommit: "gen1-handoff", LastHandoff: "gen1-handoff", Rounds: 2}); err != nil {
 			t.Fatalf("seed implementer: %v", err)
 		}
+		if err := records.PutPhase(ctx, tx, record.PhaseRow{Issue: child, Role: claim.RoleMerger, Claim: "merger", Summary: "READY #85 at gen1 (approved at gen1) for LEGION-CHILD"}); err != nil {
+			t.Fatalf("seed the child's merger: %v", err)
+		}
 	})
 
 	apply(t, pool, admission, "readmit", intake.DispatchIssue{Key: key, Seq: 2, Type: "issue.updated", Status: "todo", Title: "lingering", Rank: "A"}, engine)
 	readmitted := issue(t, pool, key)
 	if readmitted.Generation != 2 || readmitted.Phase != phase.Admitted || readmitted.ReadyPendingVersion != nil {
 		t.Fatalf("readmitted = %#v, want generation 2, admitted, no READY pending", readmitted)
+	}
+	if got := issue(t, pool, child); got.ReadyPendingVersion != nil {
+		t.Fatalf("the child's READY pending after re-admission = %d, want none", *got.ReadyPendingVersion)
 	}
 	inTx(t, pool, func(tx pgx.Tx) {
 		records := record.NewStore()
@@ -316,6 +327,13 @@ func TestReadmissionStartsTheNewGenerationWithoutTheOldGenerationsFacts(t *testi
 	}
 	if got := issue(t, pool, key); got.Phase != phase.Implementing {
 		t.Fatalf("generation 2 phase = %s, want implementing until its own pull request opens", got.Phase)
+	}
+	var messages int
+	if err := pool.QueryRow(context.Background(), "select count(*) from outbox where issue = $1 and kind = 'dispatch_message'", child).Scan(&messages); err != nil || messages != 0 {
+		t.Fatalf("the child's Dispatch messages = %d, %v; want no READY posted by generation 2's approval", messages, err)
+	}
+	if got := issue(t, pool, child); got.Phase != phase.Merging {
+		t.Fatalf("the child is in %s, want it left in merging", got.Phase)
 	}
 }
 

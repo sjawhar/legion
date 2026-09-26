@@ -250,20 +250,24 @@ func (s *Postgres) SessionClaimsTree(ctx context.Context, tx pgx.Tx, tree, sessi
 }
 
 // ClearGeneration empties one issue's generation-scoped facts: a merged or closed pull request,
-// the counters of one still open, its design gate and its recorded handoffs.
+// the counters of one still open, its design gate, its recorded handoffs and a READY the gate
+// refused.
 func (s *Postgres) ClearGeneration(ctx context.Context, tx pgx.Tx, issue string) error {
-	return clearGeneration(ctx, tx, "issue = $1", issue, fmt.Sprintf("clear the generation of %s", issue))
+	return clearGeneration(ctx, tx, "issue = $1", "key = $1", issue, fmt.Sprintf("clear the generation of %s", issue))
 }
 
 // ClearTreeGeneration empties them for every issue of the tree. A root set back to todo starts a
 // new generation of the whole tree, and its children carried the old one's pull request, gate and
-// handoffs into it — a child re-entered at the new generation read a handoff of the last.
+// handoffs into it — a child re-entered at the new generation read a handoff of the last — and a
+// child's READY the old gate refused would wait on a packet cleared with those handoffs.
 func (s *Postgres) ClearTreeGeneration(ctx context.Context, tx pgx.Tx, tree string) error {
-	return clearGeneration(ctx, tx, "issue in (select key from issues where tree = $1)", tree,
+	return clearGeneration(ctx, tx, "issue in (select key from issues where tree = $1)", "tree = $1", tree,
 		fmt.Sprintf("clear the generation of tree %s", tree))
 }
 
-func clearGeneration(ctx context.Context, tx pgx.Tx, where string, key string, describe string) error {
+// clearGeneration runs each statement with key as $1: where selects the cleared issues' rows by
+// their issue column, and issues selects the same issues in the issues table.
+func clearGeneration(ctx context.Context, tx pgx.Tx, where, issues, key, describe string) error {
 	for _, statement := range []string{
 		"delete from pull_requests where " + where + " and state <> 'open'",
 		// An open pull request is kept across a new generation, but the last one's reading of it is
@@ -274,6 +278,8 @@ func clearGeneration(ctx context.Context, tx pgx.Tx, where string, key string, d
 			"failing_statuses = '[]'::jsonb, check_runs = '[]'::jsonb, reconciled = false where " + where,
 		"delete from design_gates where " + where,
 		"update phases set handoff_commit = '', rounds = 0, verdict = '', summary = '' where " + where,
+		// A READY the gate refused waits on the merger's packet, which the statement above clears.
+		"update issues set ready_pending_version = null where " + issues,
 	} {
 		if _, err := tx.Exec(ctx, statement, key); err != nil {
 			return fmt.Errorf("%s: %w", describe, err)
