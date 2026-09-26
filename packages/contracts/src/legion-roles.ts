@@ -39,6 +39,19 @@ export function isLegionProjectToken(project: string): boolean {
   return PROJECT_TOKEN.test(project);
 }
 
+/** The one rule that turns the operator-written `project` (`legion.yaml`'s value, `LEGION_ID`,
+ * `sjawhar/legion`) into the Legion project token every role token, secret file, and
+ * `LEGION_PROJECT` carries (`sjawharlegion`): lowercased, every non-alphanumeric dropped — the Go
+ * daemon's `claim.ProjectToken` too. The TypeScript daemon, `legion controller start`'s
+ * operator-side loader and the Go controller's plugin all apply it, so an operator's copied value
+ * lands on the daemon's own controller token; a value that sanitizes to nothing is refused naming
+ * `field`. */
+export function legionProjectToken(value: string, field: string): string {
+  const project = value.toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (!project) throw new Error(`${field} must include at least one alphanumeric character`);
+  return project;
+}
+
 export function assertLegionProjectToken(project: string): void {
   if (!isLegionProjectToken(project)) {
     throw new Error(`Invalid Legion project token: ${project}`);

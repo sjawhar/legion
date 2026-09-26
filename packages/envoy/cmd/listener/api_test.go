@@ -1693,7 +1693,7 @@ func TestRegisterV1Routes_UnknownRouteReturnsJSONError(t *testing.T) {
 // cannot tell whether the message landed. Its retry under the same idempotency key is a
 // JetStream duplicate and reaches the agent no second time; the answer has to say so, or
 // Dispatch records the retry as an ordinary send and the attempt history claims a delivery that
-// never happened. Only a dispatch-sourced send carries a MsgId, so only it can ever be one.
+// never happened. An agent-sourced send carries no MsgId, so it can never be one.
 func TestSendHandler_ReportsAJetStreamDuplicate(t *testing.T) {
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, map[string]int{"ses_target": 1})

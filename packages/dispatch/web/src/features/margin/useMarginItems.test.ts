@@ -5,7 +5,7 @@ import { createElement } from "react";
 import { MemoryRouter } from "react-router-dom";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
-import { api } from "../../api/client";
+import { ApiError, api } from "../../api/client";
 import type { Artifact, Comment, Event } from "../../api/types";
 import {
   anchoredThreadComments,
@@ -333,7 +333,7 @@ test("a document owner loads asks and comments from the artifact routes, hides p
 });
 
 function ActionButtons() {
-  const { mutateItem, pendingActionIds, actionErrorId } = useMarginItems(
+  const { mutateItem, pendingActionIds, actionFailure } = useMarginItems(
     { key: "CORE-1", kind: "issue" },
     "comments",
     artifact,
@@ -347,7 +347,16 @@ function ActionButtons() {
     createElement(
       "output",
       { "aria-label": "Action state" },
-      JSON.stringify({ error: actionErrorId ?? null, pending: [...pendingActionIds] })
+      JSON.stringify({ error: actionFailure?.id ?? null, pending: [...pendingActionIds] })
+    ),
+    createElement(
+      "output",
+      { "aria-label": "Action failure" },
+      JSON.stringify(
+        actionFailure === undefined
+          ? null
+          : { message: actionFailure.message, retryable: actionFailure.retryable }
+      )
     ),
     ...["A", "B", "C"].map((id) =>
       createElement(
@@ -499,5 +508,66 @@ test("a chained action that fails refetches the comments its predecessor's succe
     unmount();
     invalidate.mockRestore();
     acceptComment.mockRestore();
+  }
+});
+
+function actionFailureShown(): { message: string; retryable: boolean } | null {
+  return JSON.parse(screen.getByLabelText("Action failure").textContent ?? "");
+}
+
+// A failed action says what failed. A refusal of what an accept would write carries the API's own
+// reason and offers no Retry, since the same request is refused every time; any other answer from
+// the API shows its reason and can be retried; a failure with no answer keeps the generic line.
+test("a failed action carries the API's reason, and a refusal of what it writes offers no retry", async () => {
+  for (const { error, want } of [
+    {
+      error: new ApiError(400, {
+        code: "INVALID_ASK_BLOCK",
+        error: 'ask block "a1" has unsupported body node "code_block"',
+      }),
+      want: { message: 'ask block "a1" has unsupported body node "code_block"', retryable: false },
+    },
+    {
+      error: new ApiError(400, {
+        code: "INVALID_OP",
+        error: 'invalid document operation field "replace_with"',
+      }),
+      want: { message: 'invalid document operation field "replace_with"', retryable: false },
+    },
+    {
+      error: new ApiError(400, {
+        code: "INVALID_MARKDOWN",
+        error: 'block id "a1" would name two blocks',
+      }),
+      want: { message: 'block id "a1" would name two blocks', retryable: false },
+    },
+    {
+      error: new ApiError(409, {
+        code: "ANCHOR_MISSING",
+        error: "the suggestion's text is still loading",
+      }),
+      want: { message: "the suggestion's text is still loading", retryable: true },
+    },
+    {
+      error: new ApiError(503, {
+        code: "DOC_SERVICE_UNAVAILABLE",
+        error: "document service unavailable",
+      }),
+      want: { message: "document service unavailable", retryable: true },
+    },
+    {
+      error: new Error("offline"),
+      want: { message: "Could not save this action.", retryable: true },
+    },
+  ]) {
+    const acceptComment = spyOn(api, "acceptComment").mockRejectedValue(error);
+    const { unmount } = renderActionButtons();
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "Accept A" }));
+      await waitFor(() => expect(actionFailureShown()).toEqual(want));
+    } finally {
+      unmount();
+      acceptComment.mockRestore();
+    }
   }
 });

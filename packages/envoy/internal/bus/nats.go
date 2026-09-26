@@ -685,7 +685,8 @@ func (c *Client) Publish(item contracts.Envelope) error {
 
 // PublishReportingDuplicate publishes as Publish does and reports whether
 // JetStream recognised the message as one the stream already holds. That is only
-// ever possible for a Dispatch-sourced envelope, the only one published under a
+// ever possible for an envelope whose dedupe key names the upstream event
+// (contracts.DedupeKeyNamesTheUpstreamEvent), the only one published under a
 // MsgId, and only within the stream's duplicate window; a core-transport topic
 // has no acknowledgement at all and always reports false.
 //
@@ -700,6 +701,10 @@ func (c *Client) PublishReportingDuplicate(item contracts.Envelope) (bool, error
 	return c.publishJetStream(item)
 }
 
+// publishJetStream publishes item to the notification stream. The MsgId, where the envelope earns
+// one, is the dedupe key and the topic together, because one upstream event can be published on
+// several topics under one key - a GitHub comment that mentions the trigger is published on its
+// mention topic beside its comment topic - and each of those must be retained.
 func (c *Client) publishJetStream(item contracts.Envelope) (bool, error) {
 	data, err := json.Marshal(item)
 	if err != nil {
@@ -711,7 +716,7 @@ func (c *Client) publishJetStream(item contracts.Envelope) (bool, error) {
 		return false, err
 	}
 	options := []nats.PubOpt{nats.Context(ctx)}
-	if item.Source == "dispatch" {
+	if contracts.DedupeKeyNamesTheUpstreamEvent(item) {
 		options = append(options, nats.MsgId(item.DedupeKey+":"+item.Topic))
 	}
 	ack, err := c.js.Publish(item.Topic, data, options...)

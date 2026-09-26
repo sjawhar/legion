@@ -36,6 +36,7 @@ import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildIssuePath, buildProjectPath, itemRoute } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { isBareReferenceBody, Unfurl } from "../refs/Unfurl";
+import type { CommentActionFailure } from "./useCommentActionQueue";
 import type { MarginItemAction, MarginOwner, Thread, ThreadComment } from "./useMarginItems";
 
 /** 44 px tall through tablet widths (the compact sheet's `min-height: 44px` rule in `styles.css`
@@ -72,7 +73,7 @@ function SuggestionDiff({
 }
 
 export interface ThreadCardProps {
-  actionError: boolean;
+  actionFailure: CommentActionFailure | undefined;
   artifactSlug: string | undefined;
   className?: string;
   composerClassName?: string;
@@ -187,7 +188,7 @@ function CommentBody({
 }
 
 export function ThreadCard({
-  actionError,
+  actionFailure,
   artifactSlug,
   className,
   composerClassName,
@@ -489,15 +490,15 @@ export function ThreadCard({
           </button>
         )}
         {expanded ? null : renderDeliveries?.(root)}
-        {actionError ? (
+        {actionFailure === undefined ? null : (
           <div className="mt-2">
             <QueryError
-              message="Could not save this action."
-              onRetry={onRetryAction}
+              message={actionFailure.message}
+              onRetry={actionFailure.retryable ? onRetryAction : undefined}
               retrying={pendingAction}
             />
           </div>
-        ) : null}
+        )}
       </article>
     </>
   );
