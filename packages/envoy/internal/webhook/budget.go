@@ -116,9 +116,6 @@ func (r *bodyRead) readAll(ctx context.Context, body io.Reader, declared, limit 
 	if declared > limit {
 		return nil, &http.MaxBytesError{Limit: limit}
 	}
-	if declared == 0 {
-		return nil, nil
-	}
 	target := declared
 	if target < 0 {
 		target = limit + 1
@@ -126,6 +123,9 @@ func (r *bodyRead) readAll(ctx context.Context, body io.Reader, declared, limit 
 	head := make([]byte, min(bodyFirstRead, target))
 	var buf []byte
 	for {
+		if declared >= 0 && int64(len(buf)) == declared {
+			return buf, nil
+		}
 		var n int
 		var err error
 		if buf == nil {
@@ -161,9 +161,6 @@ func (r *bodyRead) readAll(ctx context.Context, body io.Reader, declared, limit 
 		}
 		if err != nil {
 			return nil, err
-		}
-		if declared >= 0 && int64(len(buf)) == declared {
-			return buf, nil
 		}
 	}
 }

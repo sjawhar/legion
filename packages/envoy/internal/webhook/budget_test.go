@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/iotest"
 	"time"
@@ -153,50 +154,14 @@ func TestGitHubHandlerBoundsTheBodyBytesItHoldsInABurst(t *testing.T) {
 	bound := int64(githubBodyBudget + 2*githubMaxBody)
 	bodies := newBodyBudget(githubBodyBudget)
 	handler := githubHandler("s", "@legion", "", &mockPublisher{}, &mockRecorder{}, bodies)
-	var mu sync.Mutex
-	entered := 0
 	start := make(chan struct{})
-	codes := make([]int, requests)
-	var wg sync.WaitGroup
-	for i := range requests {
-		body := &testBody{remaining: githubMaxBody, stallAfter: -1, wait: start}
-		req := httptest.NewRequest(http.MethodPost, "/webhook/github", body)
-		req.ContentLength = githubMaxBody
-		req.Header.Set("X-GitHub-Delivery", fmt.Sprintf("delivery-budget-%d", i))
-		req.Header.Set("X-GitHub-Event", "push")
-		req.Header.Set("X-Hub-Signature-256", "sha256=0000")
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			mu.Lock()
-			entered++
-			mu.Unlock()
-			rr := httptest.NewRecorder()
-			handler.ServeHTTP(rr, req)
-			codes[i] = rr.Code
-		}()
-	}
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		mu.Lock()
-		ready := entered == requests
-		mu.Unlock()
-		if ready {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("only %d of %d requests entered the handler", entered, requests)
-		}
-		time.Sleep(time.Millisecond)
+	senders := make([]*testBody, requests)
+	for i := range senders {
+		senders[i] = &testBody{remaining: githubMaxBody, stallAfter: -1, wait: start}
 	}
 	// Let every request reach its body before any byte is sent.
-	time.Sleep(20 * time.Millisecond)
+	codes, done := serveUnsigned(t, handler, senders, 20*time.Millisecond)
 	close(start)
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
 	select {
 	case <-done:
 	case <-time.After(30 * time.Second):
@@ -224,66 +189,18 @@ func TestGitHubHandlerServesADeliveryBehindSlowSenders(t *testing.T) {
 	const secret = "s"
 	handler := GitHubHandler(secret, "@legion", "", &mockPublisher{}, &mockRecorder{})
 	stall := make(chan struct{})
-	var mu sync.Mutex
-	entered := 0
-	var slow sync.WaitGroup
-	for i, sent := range []int{4096, 4096, 4096, 0} {
-		body := &testBody{remaining: githubMaxBody, stallAfter: sent, stall: stall}
-		req := httptest.NewRequest(http.MethodPost, "/webhook/github", body)
-		req.ContentLength = githubMaxBody
-		req.Header.Set("X-GitHub-Delivery", fmt.Sprintf("delivery-slow-%d", i))
-		req.Header.Set("X-GitHub-Event", "push")
-		req.Header.Set("X-Hub-Signature-256", "sha256=0000")
-		slow.Add(1)
-		go func() {
-			defer slow.Done()
-			mu.Lock()
-			entered++
-			mu.Unlock()
-			handler.ServeHTTP(httptest.NewRecorder(), req)
-		}()
-	}
-	defer func() {
-		close(stall)
-		slow.Wait()
-	}()
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		mu.Lock()
-		ready := entered == 4
-		mu.Unlock()
-		if ready {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the slow senders never entered the handler")
-		}
-		time.Sleep(time.Millisecond)
+	var senders []*testBody
+	for _, sent := range []int{4096, 4096, 4096, 0} {
+		senders = append(senders, &testBody{remaining: githubMaxBody, stallAfter: sent, stall: stall})
 	}
 	// Let every slow sender reach its body, or the wait for room ahead of it.
-	time.Sleep(20 * time.Millisecond)
-
-	push := largePushPayload(t, 1000)
-	req := httptest.NewRequest(http.MethodPost, "/webhook/github", bytes.NewReader(push))
-	req.Header.Set("X-GitHub-Delivery", "delivery-behind-slow-senders")
-	req.Header.Set("X-GitHub-Event", "push")
-	req.Header.Set("X-Hub-Signature-256", githubSign(secret, push))
-	rr := httptest.NewRecorder()
-	served := make(chan struct{})
-	began := time.Now()
-	go func() {
-		handler.ServeHTTP(rr, req)
-		close(served)
+	_, done := serveUnsigned(t, handler, senders, 20*time.Millisecond)
+	defer func() {
+		close(stall)
+		<-done
 	}()
-	select {
-	case <-served:
-	case <-time.After(5 * time.Second):
-		t.Fatal("a signed push behind three trickling senders and one that sent only headers was not served within 5 s; GitHub gives up at 10 s")
-	}
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body = %s", rr.Code, rr.Body.String())
-	}
-	t.Logf("served in %s", time.Since(began).Round(time.Millisecond))
+	took := requireServedPush(t, handler, secret, "three trickling senders and one that sent only headers")
+	t.Logf("served in %s", took.Round(time.Millisecond))
 }
 
 // Connections that send only headers, or one byte of body, cost a sender almost nothing, so there
@@ -296,55 +213,71 @@ func TestGitHubHandlerServesADeliveryBehindManyHeaderOnlySenders(t *testing.T) {
 		secret = "s"
 		budget = 8 << 20
 	)
-	holders := budget / (16 << 10)
 	handler := githubHandler(secret, "@legion", "", &mockPublisher{}, &mockRecorder{}, newBodyBudget(budget))
 	stall := make(chan struct{})
-	var mu sync.Mutex
-	entered := 0
-	var waiting sync.WaitGroup
-	for i := range holders {
-		body := &testBody{remaining: githubMaxBody, stallAfter: i % 2, stall: stall}
-		req := httptest.NewRequest(http.MethodPost, "/webhook/github", body)
-		req.ContentLength = githubMaxBody
-		req.Header.Set("X-GitHub-Delivery", fmt.Sprintf("delivery-headers-only-%d", i))
-		req.Header.Set("X-GitHub-Event", "push")
-		req.Header.Set("X-Hub-Signature-256", "sha256=0000")
-		waiting.Add(1)
-		go func() {
-			defer waiting.Done()
-			mu.Lock()
-			entered++
-			mu.Unlock()
-			handler.ServeHTTP(httptest.NewRecorder(), req)
-		}()
+	senders := make([]*testBody, budget/(16<<10))
+	for i := range senders {
+		senders[i] = &testBody{remaining: githubMaxBody, stallAfter: i % 2, stall: stall}
 	}
+	// Let every sender reach its body.
+	_, done := serveUnsigned(t, handler, senders, 50*time.Millisecond)
 	defer func() {
 		close(stall)
-		waiting.Wait()
+		<-done
 	}()
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		mu.Lock()
-		ready := entered == holders
-		mu.Unlock()
-		if ready {
-			break
-		}
+	requireServedPush(t, handler, secret, fmt.Sprintf("%d senders holding headers or one byte", len(senders)))
+}
+
+// serveUnsigned starts handler on one push delivery with a wrong signature per body, each declaring
+// githubMaxBody, waits until every one has entered the handler, and then gives them settle to reach
+// their bodies. done is closed once every one has been answered, and codes then holds each status.
+func serveUnsigned(t *testing.T, handler http.Handler, bodies []*testBody, settle time.Duration) (codes []int, done <-chan struct{}) {
+	t.Helper()
+	codes = make([]int, len(bodies))
+	var entered atomic.Int64
+	var wg sync.WaitGroup
+	for i, body := range bodies {
+		req := httptest.NewRequest(http.MethodPost, "/webhook/github", body)
+		req.ContentLength = githubMaxBody
+		req.Header.Set("X-GitHub-Delivery", fmt.Sprintf("delivery-unsigned-%d", i))
+		req.Header.Set("X-GitHub-Event", "push")
+		req.Header.Set("X-Hub-Signature-256", "sha256=0000")
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			entered.Add(1)
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+			codes[i] = rr.Code
+		}()
+	}
+	for deadline := time.Now().Add(10 * time.Second); entered.Load() != int64(len(bodies)); {
 		if time.Now().After(deadline) {
-			t.Fatalf("only %d of %d header-only senders entered the handler", entered, holders)
+			t.Fatalf("only %d of %d requests entered the handler", entered.Load(), len(bodies))
 		}
 		time.Sleep(time.Millisecond)
 	}
-	// Let every header-only sender reach its body.
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(settle)
+	finished := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(finished)
+	}()
+	return codes, finished
+}
 
+// requireServedPush sends handler a signed 3.6 MB push and fails the test unless it is answered 200
+// within 5 s, well inside the 10 s GitHub gives a delivery. It returns how long the push took.
+func requireServedPush(t *testing.T, handler http.Handler, secret, behind string) time.Duration {
+	t.Helper()
 	push := largePushPayload(t, 1000)
 	req := httptest.NewRequest(http.MethodPost, "/webhook/github", bytes.NewReader(push))
-	req.Header.Set("X-GitHub-Delivery", "delivery-behind-header-only-senders")
+	req.Header.Set("X-GitHub-Delivery", "delivery-behind-held-bodies")
 	req.Header.Set("X-GitHub-Event", "push")
 	req.Header.Set("X-Hub-Signature-256", githubSign(secret, push))
 	rr := httptest.NewRecorder()
 	served := make(chan struct{})
+	began := time.Now()
 	go func() {
 		handler.ServeHTTP(rr, req)
 		close(served)
@@ -352,9 +285,10 @@ func TestGitHubHandlerServesADeliveryBehindManyHeaderOnlySenders(t *testing.T) {
 	select {
 	case <-served:
 	case <-time.After(5 * time.Second):
-		t.Fatalf("a signed push behind %d senders holding headers or one byte was not served within 5 s; GitHub gives up at 10 s", holders)
+		t.Fatalf("a signed push behind %s was not served within 5 s; GitHub gives up at 10 s", behind)
 	}
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body = %s", rr.Code, rr.Body.String())
 	}
+	return time.Since(began)
 }
