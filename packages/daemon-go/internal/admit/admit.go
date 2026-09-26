@@ -38,9 +38,10 @@ func New(store record.Store, cap int, project string, log *slog.Logger) *Admissi
 }
 
 // Apply records root and orphan todo observations and every newer observation of a recorded issue,
-// releases slots that the workflow completed, and promotes waiting roots while capacity remains.
-// The workflow handler runs first: it records every live-tree child, leaving admission to record
-// only a still-unrecorded root or orphan.
+// wakes the controller for a root created in triage (a controller notice, not a record), releases
+// slots that the workflow completed, and promotes waiting roots while capacity remains. The
+// workflow handler runs first: it records every live-tree child, leaving admission to record only
+// a still-unrecorded root or orphan.
 func (a *Admission) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake.Result, error) {
 	if err := a.releaseDoneSlots(ctx, tx); err != nil {
 		return intake.Result{}, err

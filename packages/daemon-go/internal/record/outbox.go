@@ -59,8 +59,8 @@ type Notice struct {
 func (Notice) OutboxKind() OutboxKind { return OutboxKindNotice }
 
 // ControllerNotice is a Notice for the project's controller topic (notify.ControllerTopic) alone,
-// in an outbox row of its own, so its publish retries apart from the issue's. It is published as
-// the Notice it is, the payload the issue's topic carries.
+// in an outbox row of its own, so its publish retries apart from any issue-topic row. It is
+// published as the Notice it is.
 type ControllerNotice Notice
 
 func (ControllerNotice) OutboxKind() OutboxKind { return OutboxKindControllerNotice }
