@@ -351,3 +351,44 @@ func TestStandingSerializesConcurrentCreateForNewOperator(t *testing.T) {
 		t.Fatalf("CreateIssue calls = %d, want exactly 1 despite %d concurrent callers", n, len(keys))
 	}
 }
+
+// TestLauncherRequestEmptyServiceStringNormalizedToOperatorCredential is the regression for the
+// second-round finding: a non-nil pointer to an empty string ({"service": ""}, exactly what
+// decoding a JSON body with a present-but-empty "service" field produces) must behave identically
+// to a nil service — an ordinary operator credential, an ask that never mentions "service", and
+// no distinct service-scoped question wording that would let a differently-scoped credential get
+// approved behind text a human never saw naming it.
+func TestLauncherRequestEmptyServiceStringNormalizedToOperatorCredential(t *testing.T) {
+	ctx := context.Background()
+	svc, fake := newTestService(t)
+
+	emptyService := new(string)
+	pendingID, err := svc.Request(ctx, "sjawhar", "empty-service-host", emptyService)
+	if err != nil {
+		t.Fatalf("Request: %v", err)
+	}
+	call := fake.createCalls[0]
+	wantQuestion := "Issue a launcher credential for host empty-service-host?"
+	if call.question != wantQuestion {
+		t.Fatalf("question = %q, want %q (empty service must read exactly like no service)", call.question, wantQuestion)
+	}
+
+	fake.answer(call.askID, "sjawhar", "Approve")
+	if err := svc.Reconcile(ctx); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	_, token, err := svc.Read(ctx, pendingID)
+	if err != nil || token == "" {
+		t.Fatalf("Read (issued): token=%q err=%v", token, err)
+	}
+	cred, err := svc.Enroll.AuthenticateLauncher(ctx, token)
+	if err != nil {
+		t.Fatalf("AuthenticateLauncher: %v", err)
+	}
+	if cred.Operator == nil || *cred.Operator != "sjawhar" {
+		t.Fatalf("credential operator = %v, want sjawhar (an empty service string must mint an ordinary operator credential)", cred.Operator)
+	}
+	if cred.Service != nil {
+		t.Fatalf("credential service = %v, want nil for an empty service string", *cred.Service)
+	}
+}

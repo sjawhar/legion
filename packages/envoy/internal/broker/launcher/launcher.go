@@ -65,13 +65,20 @@ type Service struct {
 // it identifies the eventual credential, so leaking a pending id before it is issued reveals
 // nothing but "someone can watch whether this specific request gets approved".
 //
-// service, when non-nil, requests a service credential (like the Legion daemon's shared
-// enrollment authority) rather than a personal one: the ask still opens on operator's own standing
-// issue (operator is who approves it), but the credential minted on approval (applyAsk) carries
-// service with a nil operator instead of the reverse. It is stored verbatim in this row's own
-// service column so it survives from Request through to Reconcile without depending on any other
-// column's incidental behavior.
+// service, when non-nil and non-empty, requests a service credential (like the Legion daemon's
+// shared enrollment authority) rather than a personal one: the ask still opens on operator's own
+// standing issue (operator is who approves it), but the credential minted on approval (applyAsk)
+// carries service with a nil operator instead of the reverse. A non-nil pointer to an empty
+// string is normalized to nil right here — the one place service enters this package — so a
+// caller (e.g. the HTTP handler, which decodes `{"service": ""}` into a non-nil *string) can never
+// silently turn an ordinary operator request into a differently-scoped service credential behind
+// ask text that only ever mentions the host; every other use of service in this file
+// (launcherQuestion, the service column, and applyAsk's own defensive re-check) sees this same
+// normalized value.
 func (s *Service) Request(ctx context.Context, operator, host string, service *string) (string, error) {
+	if service != nil && *service == "" {
+		service = nil
+	}
 	issueKey, err := s.Standing(ctx, operator)
 	if err != nil {
 		return "", fmt.Errorf("find standing issue: %w", err)
@@ -207,6 +214,12 @@ func (s *Service) applyAsk(ctx context.Context, pendingHash []byte, ask dispatch
 	if err != nil {
 		return err
 	}
+	if service != nil && *service == "" {
+		// Defense in depth: Request is the only writer of this column and already normalizes an
+		// empty string to nil before it ever reaches storage, but a read-back guard costs nothing
+		// and keeps this decision from silently depending on that alone.
+		service = nil
+	}
 	if ask.State == "open" {
 		return nil
 	}
@@ -262,6 +275,9 @@ func (s *Service) applyAsk(ctx context.Context, pendingHash []byte, ask dispatch
 
 // expirePending expires every pending row past its expires_at and writes one audit row per
 // expired request, all in one transaction (the same shape as requests.Machine.ExpirePending).
+// The expired detail carries ask_id and service alongside operator/host — the same level of
+// detail created/issued/denied rows carry — so two pending requests for the same operator+host
+// expiring together produce distinguishable audit rows.
 func (s *Service) expirePending(ctx context.Context, now time.Time) error {
 	tx, err := s.Store.Pool.Begin(ctx)
 	if err != nil {
@@ -269,15 +285,18 @@ func (s *Service) expirePending(ctx context.Context, now time.Time) error {
 	}
 	defer tx.Rollback(ctx)
 	rows, err := tx.Query(ctx, `update launcher_credential_requests set state='expired'
-		where state='pending' and expires_at < $1 returning operator, host`, now)
+		where state='pending' and expires_at < $1 returning operator, host, ask_id, service`, now)
 	if err != nil {
 		return err
 	}
-	type expiredRow struct{ operator, host string }
+	type expiredRow struct {
+		operator, host, askID string
+		service               *string
+	}
 	var expired []expiredRow
 	for rows.Next() {
 		var r expiredRow
-		if err := rows.Scan(&r.operator, &r.host); err != nil {
+		if err := rows.Scan(&r.operator, &r.host, &r.askID, &r.service); err != nil {
 			rows.Close()
 			return err
 		}
@@ -289,8 +308,11 @@ func (s *Service) expirePending(ctx context.Context, now time.Time) error {
 	}
 	rows.Close()
 	for _, r := range expired {
+		if r.service != nil && *r.service == "" {
+			r.service = nil
+		}
 		if err := auditLauncher(ctx, tx, "launcher_request.expired", "launcher:"+r.host, auditDetail(map[string]any{
-			"operator": r.operator, "host": r.host,
+			"operator": r.operator, "host": r.host, "ask_id": r.askID, "service": r.service,
 		})); err != nil {
 			return err
 		}
