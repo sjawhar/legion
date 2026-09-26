@@ -292,6 +292,8 @@ func TestAcceptingASuggestionRefusesAReplacementTheDocumentCannotCarryBack(t *te
 		blockquote = "Intro.\n\n> Body.\n"
 		callout    = "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n"
 		footnote   = "x[^1]\n\n[^1]: Body.\n"
+		listAfter  = "Intro.\n\nBody.\n\n- y\n"
+		listBefore = "Intro.\n\n- y\n\nBody.\n"
 	)
 	text := func(artifactID string) string {
 		markdown, err := documentService.Text(context.Background(), artifactID)
@@ -328,6 +330,13 @@ func TestAcceptingASuggestionRefusesAReplacementTheDocumentCannotCarryBack(t *te
 		{"nothing in a footnote definition", footnote, "", "reject the suggestion, or delete the footnote in the document, its reference along with this definition"},
 		{"a rule in a footnote definition", footnote, "***", "writes a horizontal rule in this footnote definition"},
 		{"a list in a footnote definition", footnote, "- a", "writes a bullet list in this footnote definition"},
+		// Two lists of one kind side by side read back as one list, so a list written beside
+		// another is refused wherever the two stand, the document's own level included.
+		{"a list before a list", listAfter, "- x", "writes a bullet list in this document, which the document cannot read back there (the bullet list's end reads back as a list item)"},
+		{"a list after a list", listBefore, "- x", "writes a bullet list in this document, which the document cannot read back there (the bullet list's end reads back as a list item)"},
+		{"an ordered list before an ordered list", "Intro.\n\nBody.\n\n1. y\n", "1. x", "writes an ordered list in this document, which the document cannot read back there (the ordered list's end reads back as a list item)"},
+		{"two bullet lists", paragraph, "- a\n\n* b", "writes two bullet lists in this document, which the document cannot read back there (the bullet list's end reads back as a list item)"},
+		{"a list beside a callout's rewrite, before a list", "- y\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n", "- x\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::", "writes a bullet list and a callout in this document, which the document cannot read back there (the bullet list's end reads back as a list item)"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			artifactID, comment := suggest(t, "R"+string(rune('A'+index)), test.spec, test.with)
@@ -451,27 +460,34 @@ func TestAcceptingAnEmptySuggestionRefusesAnUnreadableTypedBlock(t *testing.T) {
 	}
 }
 
-// A non-empty typed replacement must still round-trip through rendered Markdown before it is
-// accepted: adjacent typed fences can parse back as another tree. Each placement puts the same
-// nested callout inside an outer callout, directly, in a list item, and in a blockquote.
-func TestAcceptingANestedCalloutRefusesAReplacementThatCannotRoundTrip(t *testing.T) {
+// An accept in or around a typed block is refused when the document it stores reads back as
+// another tree: two typed fences of one length close at the first, and two lists of one kind side
+// by side read back as one, inside a callout or beside one the accept rewrites or consumes.
+func TestAcceptingASuggestionAroundATypedBlockRefusesWhatCannotRoundTrip(t *testing.T) {
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
 		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 		return documentService
 	})
-	const replacement = ":::callout{#new kind=\"note\" title=\"T\"}\nNested.\n:::\n"
-	for index, test := range []struct{ name, spec string }{
-		{"directly in a callout", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n"},
-		{"in a list item inside a callout", ":::callout{#outer kind=\"note\" title=\"T\"}\n- Lead.\n\n  :::callout{#c1 kind=\"note\" title=\"T\"}\n  Body.\n  :::\n:::\n"},
-		{"in a blockquote inside a callout", ":::callout{#outer kind=\"note\" title=\"T\"}\n> :::callout{#c1 kind=\"note\" title=\"T\"}\n> Body.\n> :::\n:::\n"},
+	const (
+		nested = ":::callout{#new kind=\"note\" title=\"T\"}\nNested.\n:::\n"
+		ask    = ":::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nBody.\n:::\n"
+	)
+	for index, test := range []struct{ name, spec, quote, with string }{
+		{"a callout directly in a callout", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n", "Body.", nested},
+		{"a callout in a list item inside a callout", ":::callout{#outer kind=\"note\" title=\"T\"}\n- Lead.\n\n  :::callout{#c1 kind=\"note\" title=\"T\"}\n  Body.\n  :::\n:::\n", "Body.", nested},
+		{"a callout in a blockquote inside a callout", ":::callout{#outer kind=\"note\" title=\"T\"}\n> :::callout{#c1 kind=\"note\" title=\"T\"}\n> Body.\n> :::\n:::\n", "Body.", nested},
+		{"an ask rewritten into a new callout", "Intro.\n\n" + ask, "Body.", ":::callout{#c9 kind=\"note\" title=\"\"}\n" + strings.Replace(ask, "Body.", "Reworded?", 1)},
+		{"a list beside a list in a callout", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n\n- y\n:::\n", "Body.", "- x"},
+		{"a list beside a list in a blockquote inside a callout", ":::callout{#c1 kind=\"note\" title=\"T\"}\n> Body.\n>\n> - y\n:::\n", "Body.", "- x"},
+		{"a list consuming a callout beside a list", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n\n- After here.\n", "Body. After", "- a"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			issue := createInteractionIssue(t, handler, "N"+string(rune('A'+index)), "nested callout", test.spec)
+			issue := createInteractionIssue(t, handler, "N"+string(rune('A'+index)), test.name, test.spec)
 			created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
-				"body": "suggest", "anchor": map[string]any{"artifact": "spec", "quote": "Body."},
-				"suggestion": map[string]string{"replace_with": replacement}, "actor": sessionActor(),
+				"body": "suggest", "anchor": map[string]any{"artifact": "spec", "quote": test.quote},
+				"suggestion": map[string]string{"replace_with": test.with}, "actor": sessionActor(),
 			})
 			if created.Code != http.StatusCreated {
 				t.Fatalf("create suggestion: status=%d body=%s", created.Code, created.Body.String())

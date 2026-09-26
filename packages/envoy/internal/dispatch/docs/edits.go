@@ -1081,11 +1081,6 @@ func refuseReshapedReplacement(before, after *pmdoc.Node, match pmdoc.Range, wit
 	)}
 }
 
-// replacementBroke is what check says of the document-level block holding the match after the
-// replace, when it said nothing of that block before: a block that already failed the check, or
-// another block that does, is no reason to refuse this replace. A replace stays inside its
-// textblock, so the block holds the same index before and after.
-
 // refuseUnreadableAccept refuses a suggestion whose changed document-level block cannot be read
 // from its rendered markdown. It runs for every non-ask accept; refuseBrokenAsks gives an ask
 // its semantic refusal first.
@@ -1115,13 +1110,16 @@ func refuseAcceptBy(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.Textb
 // removes only the paragraph where the rest of its block stands without it; blocks written at a
 // list item's start leave the item's own line empty ahead of them.
 func acceptRefusal(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.TextblockAt, with string, replacement *pmdoc.Node, broke error) string {
-	holder := "document"
-	if parent := at.Ancestors[0]; parent.Type != "doc" {
-		holder = strings.ReplaceAll(parent.Type, "_", " ")
-	}
+	holder := holderName(at.Ancestors[0])
 	landed, found := pmdoc.ContainingTextblock(after, match.From)
 	emptied := found && emptyTextblock(landed.Node)
 	if !isInlineDocument(replacement) {
+		// Blocks that rewrite a typed block around the match in place land where it stood.
+		parent := at.Ancestors[0]
+		for index := 1; index < len(at.Ancestors) && pmdoc.IsTypedBlock(parent.Type) && pmdoc.RewritesBlock(replacement.Children, parent); index++ {
+			parent = at.Ancestors[index]
+		}
+		holder = holderName(parent)
 		where, ask := "in this "+holder, "text the "+holder+" can hold"
 		if holder == "list item" && emptied {
 			where, ask = "at the start of this list item", "the block to follow text on the item's line"
@@ -1152,6 +1150,14 @@ func acceptRefusal(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.Textbl
 		"replace_with %q leaves text the document reads back as another block where it lands (%v); reject the suggestion, or reply asking for the text inside a line",
 		with, broke,
 	)
+}
+
+// holderName names a block holding a match as a reader names it.
+func holderName(parent *pmdoc.Node) string {
+	if parent.Type == "doc" {
+		return "document"
+	}
+	return strings.ReplaceAll(parent.Type, "_", " ")
 }
 
 // replacementBroke is what check says of a document-level block the write changed, when it said

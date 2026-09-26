@@ -467,8 +467,6 @@ func TestSuggestionAcceptRewritesATypedBlockInPlaceBesideOtherBlocks(t *testing.
 			replaceWith: "> " + strings.ReplaceAll(strings.TrimSuffix(newNote, "\n"), "\n", "\n> ") + "\n", want: "Intro.\n\n> :::callout{#c1 kind=\"warning\" title=\"\"}\n> Reworded?\n> :::\n\n:::ask{#after-accept urgency=\"low\" multiple=\"false\" state=\"open\"}\nMarker after-accept?\n:::\n"},
 		{name: "an ask rewritten inside a list item", spec: "Intro.\n\n" + ask,
 			replaceWith: "- item\n\n  " + strings.ReplaceAll(strings.TrimSuffix(newAsk, "\n"), "\n", "\n  ") + "\n", want: "Intro.\n\n- item\n\n  :::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\n  Reworded?\n  :::\n\n:::ask{#after-accept urgency=\"low\" multiple=\"false\" state=\"open\"}\nMarker after-accept?\n:::\n"},
-		{name: "an ask rewritten inside a callout under another id", spec: "Intro.\n\n" + ask,
-			replaceWith: ":::callout{#c9 kind=\"note\" title=\"\"}\n" + newAsk, want: "Intro.\n\n:::callout{#c9 kind=\"note\" title=\"\"}\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nReworded?\n:::\n:::\n\n:::ask{#after-accept urgency=\"low\" multiple=\"false\" state=\"open\"}\nMarker after-accept?\n:::\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			handler, _ := blockAskHandler(t)
