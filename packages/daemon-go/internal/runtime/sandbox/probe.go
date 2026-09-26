@@ -69,9 +69,10 @@ type ImageProbe struct {
 	Retry bootprobe.Retry
 	// RoleReferences are the task agents and skills the daemon's own role prompts name, required:
 	// the prompts every worker pod is handed, so the probe resolves those and their agents' models,
-	// not the image's copy. probeManifest encodes them for `legion probe-image --role-references`.
-	// The zero Names holds no kind at all, and its encoding is one the image's Decode refuses, so
-	// ProbeImage refuses it before any pod runs rather than letting the pod fail on the image.
+	// not the image's copy. probeManifest encodes them for `legion probe-image --role-references`,
+	// and ProbeImage refuses, before any pod runs, a value whose encoding the image's Decode would
+	// refuse (the zero Names, a kind left nil, a name no prompt can write): a probe pod handed one
+	// would fail, and the failure would be blamed on the image.
 	RoleReferences promptrefs.Names
 	// Resources are the probe container's requests and limits (the TypeScript probe used the
 	// `small` profile): it runs Oh My Pi three times (pi.agents, the plugin's load, the
@@ -95,6 +96,9 @@ func (r *Runtime) ProbeImage(ctx context.Context, p ImageProbe) error {
 	}
 	if p.RoleReferences.Zero() {
 		return errors.New("image probe: ImageProbe.RoleReferences is required: the references of the role prompts a pod is handed")
+	}
+	if _, err := promptrefs.Decode(p.RoleReferences.Encode()); err != nil {
+		return fmt.Errorf("image probe: ImageProbe.RoleReferences: %w", err)
 	}
 	_, hex, _ := strings.Cut(r.image, "@sha256:")
 	if !digestHex.MatchString(hex) {

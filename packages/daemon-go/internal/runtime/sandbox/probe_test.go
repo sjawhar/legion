@@ -205,18 +205,33 @@ func okLine(contract int) string {
 	return bootprobe.OKLine("/opt/omp/bin/omp", contract, bootprobe.AgentModelsResolved)
 }
 
-// The zero promptrefs.Names holds no kind, and Encode writes it as `null` for each, which the
-// image's Decode refuses: a probe handed one would fail its pod and blame the image. ProbeImage
-// refuses it by name before it creates anything.
-func TestProbeImageRefusesZeroRoleReferencesBeforeAnyPod(t *testing.T) {
-	g := newProbeRig(t, nil)
-	g.succeeds(okLine(3) + "\n")
-	p := probeOptions(t)
-	p.RoleReferences = promptrefs.Names{}
+// Role references whose encoding the image's Decode refuses would fail the probe pod, and the
+// failure would be blamed on the image, so ProbeImage refuses them before it creates anything: the
+// zero Names (every kind nil, written as `null`), one kind left nil, and a name no prompt can
+// write, which no check of the kinds alone would catch. The rig's pod would pass each one.
+func TestProbeImageRefusesRoleReferencesTheImageWouldRefuseBeforeAnyPod(t *testing.T) {
+	for _, testCase := range []struct {
+		name       string
+		references promptrefs.Names
+		want       string
+	}{
+		{"zero", promptrefs.Names{}, "ImageProbe.RoleReferences is required"},
+		{"a kind left nil", promptrefs.Names{promptrefs.TaskAgents: {"oracle": {"roles/core/planner.md"}}}, "LEGION_PROMPT_SKILLS"},
+		{"a name no prompt can write", promptrefs.Names{
+			promptrefs.TaskAgents: {"not a name": {"roles/core/planner.md"}}, promptrefs.Skills: {},
+		}, `"not a name"`},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			g := newProbeRig(t, nil)
+			g.succeeds(okLine(3) + "\n")
+			p := probeOptions(t)
+			p.RoleReferences = testCase.references
 
-	wantContains(t, g.probe(p), "ImageProbe.RoleReferences is required")
-	if n := g.creates.Load(); n != 0 {
-		t.Errorf("created the probe Sandbox %d times, want none: the zero references are refused first", n)
+			wantContains(t, g.probe(p), "ImageProbe.RoleReferences", testCase.want)
+			if n := g.creates.Load(); n != 0 {
+				t.Errorf("created the probe Sandbox %d times, want none: the references are refused first", n)
+			}
+		})
 	}
 }
 
