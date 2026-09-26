@@ -124,13 +124,9 @@ func githubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		if r.ContentLength > githubMaxBody {
-			http.Error(w, "body too large", http.StatusRequestEntityTooLarge)
-			return
-		}
 		read := bodies.begin()
 		defer read.release()
-		body, err := read.readAll(r.Context(), http.MaxBytesReader(w, r.Body, githubMaxBody), r.ContentLength, githubMaxBody)
+		body, err := read.readAll(r.Context(), r.Body, r.ContentLength, githubMaxBody)
 		if err != nil {
 			var maxBytesErr *http.MaxBytesError
 			if errors.As(err, &maxBytesErr) {

@@ -104,10 +104,14 @@ func (b *bodyBudget) signalLocked() {
 	b.room = make(chan struct{})
 }
 
-// readAll reads body, charging the budget for its buffer before each time it grows. With a
-// declared length (declared >= 0) the buffer never grows past it and a shorter body is
-// io.ErrUnexpectedEOF; otherwise a body longer than limit is an *http.MaxBytesError.
+// readAll reads body, charging the budget for its buffer before each time it grows. A body longer
+// than limit is an *http.MaxBytesError: at once, before a byte is read, when its declared length
+// says so, and otherwise once limit+1 bytes have arrived. With a declared length (declared >= 0)
+// the buffer never grows past it and a shorter body is io.ErrUnexpectedEOF.
 func (r *bodyRead) readAll(ctx context.Context, body io.Reader, declared, limit int64) ([]byte, error) {
+	if declared > limit {
+		return nil, &http.MaxBytesError{Limit: limit}
+	}
 	target := declared
 	if target < 0 {
 		target = limit + 1
@@ -118,9 +122,6 @@ func (r *bodyRead) readAll(ctx context.Context, body io.Reader, declared, limit 
 			return buf, nil
 		}
 		if len(buf) == cap(buf) {
-			if int64(cap(buf)) == target {
-				return nil, &http.MaxBytesError{Limit: limit}
-			}
 			size := min(2*int64(cap(buf)), target)
 			size = max(size, min(bodyReadStep, target))
 			grown, err := r.grow(ctx, buf, size)
@@ -131,6 +132,11 @@ func (r *bodyRead) readAll(ctx context.Context, body io.Reader, declared, limit 
 		}
 		n, err := body.Read(buf[len(buf):cap(buf)])
 		buf = buf[:len(buf)+n]
+		// Only an undeclared body can get here past limit: the buffer holds one byte more than
+		// limit so that the byte that says so can arrive, with or without the end of the body.
+		if int64(len(buf)) > limit {
+			return nil, &http.MaxBytesError{Limit: limit}
+		}
 		if err == io.EOF {
 			if declared >= 0 && int64(len(buf)) != declared {
 				return nil, io.ErrUnexpectedEOF
