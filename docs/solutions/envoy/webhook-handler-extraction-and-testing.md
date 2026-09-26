@@ -45,20 +45,13 @@ func GhostWisprHandler(secret string, publisher Publisher) http.HandlerFunc {
 type Publisher interface {
     Publish(contracts.Envelope) error
 }
-
-type PublisherFunc func(contracts.Envelope) error
-
-func (f PublisherFunc) Publish(item contracts.Envelope) error {
-    return f(item)
-}
 ```
 
-This is the `http.HandlerFunc` pattern applied to publishing. In production, wrap the NATS client:
+In production the handler takes the listener's `*bus.Client`, which satisfies it directly, and
+the CI store (`*cistore.Store`) as its `CIRecorder`:
 
 ```go
-webhookPublisher := webhook.PublisherFunc(func(item contracts.Envelope) error {
-    return deps.Load().client.Publish(item)
-})
+webhook.GitHubHandler(github.Secret, github.MentionTrigger, github.ReviewerAppID, d.client, d.ciStore)
 ```
 
 In tests, use a mock that records calls:
@@ -78,15 +71,14 @@ func (m *mockPublisher) Publish(item contracts.Envelope) error {
 ## Config-gated route registration
 
 ```go
-if webhookCfg.GitHub != nil {
-    mux.Handle("/webhook/github", readinessGate(
-        func() bool { return deps.Load() != nil },
-        webhook.GitHubHandler(webhookCfg.GitHub.Secret, ...),
-    ))
+if github := cfg.GitHub; github != nil {
+    routes = append(routes, webhookRoute{"/webhook/github", func(d *listenerDeps) http.Handler {
+        return webhook.GitHubHandler(github.Secret, github.MentionTrigger, github.ReviewerAppID, d.client, d.ciStore)
+    }})
 }
 ```
 
-`nil` pointer = provider disabled. No boolean flags, no separate "enabled" field. The config parser validates required secrets at startup — missing secret when provider is enabled = fail-fast.
+`webhookRoutes` (`cmd/listener/main.go`) lists the enabled routes. `nil` pointer = provider disabled. No boolean flags, no separate "enabled" field. The config parser validates required secrets at startup — missing secret when provider is enabled = fail-fast.
 
 ## Always `TrimSpace` env var reads
 
@@ -144,6 +136,6 @@ ts := "1234567890"
 nowTS := strconv.FormatInt(time.Now().Unix(), 10)
 ```
 
-## readinessGate + deps.Load() interaction
+## Webhook routes during startup
 
-Webhook handlers need NATS to publish, but NATS connects asynchronously after startup. The `readinessGate` middleware returns 503 until `deps.Load() != nil`. The `PublisherFunc` closure evaluates `deps.Load()` at request time (not registration time), so it's always current. This is safe because `readinessGate` prevents requests from reaching the handler before deps is initialized.
+Webhook handlers need NATS to publish, but NATS connects asynchronously after startup. main registers every enabled webhook path on one `startingGate` before the HTTP server starts, so a delivery during startup is answered `503 service starting` (GitHub retries it). Once NATS and every store are open, main builds each route's handler over the complete `listenerDeps` and opens the gate onto them, so a handler is only ever constructed with, and holds, dependencies that exist.

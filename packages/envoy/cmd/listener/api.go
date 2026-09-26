@@ -10,7 +10,6 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -402,7 +401,7 @@ func resolveLiveRoleHolder(registry roleClaimResolver, sessions *session.Session
 
 // sendHandler publishes a direct message only while the target session has a
 // live registry entry.
-func sendHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
+func sendHandler(d *listenerDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -441,7 +440,6 @@ func sendHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		d := state.Load()
 		target, err := d.sessions.Get(targetSession)
 		if err != nil {
 			writeJSONError(w, http.StatusNotFound, fmt.Sprintf("no live session %s", targetSession))
@@ -501,7 +499,7 @@ func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 // verbatim (a re-send a receiver's own dedupe recognises); it is mutually
 // exclusive with idempotency_key and may not begin with roleForwardDedupePrefix,
 // the mark the role arbiter drops on sight.
-func publishHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
+func publishHandler(d *listenerDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -551,7 +549,6 @@ func publishHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		d := state.Load()
 		result := roleHolderResult{state: roleHolderLive}
 		if role, ok := strings.CutPrefix(request.Topic, contracts.RoleTopicPrefix); ok {
 			var err error
@@ -665,7 +662,7 @@ func adminInterestsHandler(registry *store.Registry) http.HandlerFunc {
 	}
 }
 
-func roleSetHandler(state *atomic.Pointer[listenerDeps], machineID string) http.HandlerFunc {
+func roleSetHandler(d *listenerDeps, machineID string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -705,7 +702,6 @@ func roleSetHandler(state *atomic.Pointer[listenerDeps], machineID string) http.
 			writeJSONError(w, http.StatusBadRequest, "role must match "+rolePatternString, "role")
 			return
 		}
-		d := state.Load()
 		entry, err := d.sessions.Get(body.SessionID)
 		if errors.Is(err, nats.ErrKeyNotFound) {
 			writeJSONError(w, http.StatusNotFound, "session is not registered")
@@ -763,7 +759,7 @@ func roleSetHandler(state *atomic.Pointer[listenerDeps], machineID string) http.
 	}
 }
 
-func roleGetHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
+func roleGetHandler(d *listenerDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -774,7 +770,6 @@ func roleGetHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			writeJSONError(w, http.StatusBadRequest, "role is required", "role")
 			return
 		}
-		d := state.Load()
 		result, err := resolveLiveRoleHolder(d.registry, d.sessions, role)
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, err.Error())
@@ -867,7 +862,7 @@ func unwiredRepositoryWarning(ctx context.Context, d *listenerDeps, topic string
 	return ""
 }
 
-func subscribeHandler(state *atomic.Pointer[listenerDeps], machineID string, logger *logging.Logger) http.HandlerFunc {
+func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -884,7 +879,6 @@ func subscribeHandler(state *atomic.Pointer[listenerDeps], machineID string, log
 			return
 		}
 		logger.Info("listener subscribe", slog.String("session_id", body.SessionID), slog.Any("topics", body.Topics), slog.Int("port", body.Port), slog.Bool("self_subscribed", body.SelfSubscribed), slog.String("dir", body.Dir))
-		d := state.Load()
 		item, err := d.registry.Upsert(store.Interest{
 			SessionID: body.SessionID,
 			MachineID: machineID,
@@ -927,8 +921,10 @@ func subscribeHandler(state *atomic.Pointer[listenerDeps], machineID string, log
 	}
 }
 
-func registerV1Routes(v1 *http.ServeMux, deps *atomic.Pointer[listenerDeps], machineID string, logger *logging.Logger) {
-	v1.HandleFunc("/v1/interests/subscribe", subscribeHandler(deps, machineID, logger))
+// registerV1Routes builds the /v1 routes over the listener's dependencies, which main hands over
+// only once every store is open, so no handler can see a store that is not.
+func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logger *logging.Logger) {
+	v1.HandleFunc("/v1/interests/subscribe", subscribeHandler(d, machineID, logger))
 	v1.HandleFunc("/v1/interests/unsubscribe", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -948,7 +944,6 @@ func registerV1Routes(v1 *http.ServeMux, deps *atomic.Pointer[listenerDeps], mac
 			return
 		}
 		logger.Info("listener unsubscribe", slog.String("session_id", body.SessionID), slog.Any("topics", body.Topics))
-		d := deps.Load()
 		if err := d.registry.Remove(body.SessionID, body.Topics); err != nil {
 			writeJSONError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -959,15 +954,14 @@ func registerV1Routes(v1 *http.ServeMux, deps *atomic.Pointer[listenerDeps], mac
 		}
 		writeJSON(w, http.StatusOK, map[string][]string{"removed": removed})
 	})
-	v1.HandleFunc("/v1/roles/set", roleSetHandler(deps, machineID))
-	v1.HandleFunc("/v1/roles/", roleGetHandler(deps))
+	v1.HandleFunc("/v1/roles/set", roleSetHandler(d, machineID))
+	v1.HandleFunc("/v1/roles/", roleGetHandler(d))
 	v1.HandleFunc("/v1/registry/", func(w http.ResponseWriter, r *http.Request) {
 		sessionID := strings.TrimPrefix(r.URL.Path, "/v1/registry/")
 		if sessionID == "" {
 			writeJSONError(w, http.StatusBadRequest, "session_id is required", "session_id")
 			return
 		}
-		d := deps.Load()
 		entry, err := d.sessions.Get(sessionID)
 		if err != nil {
 			writeJSONError(w, http.StatusNotFound, "not found")
@@ -976,20 +970,11 @@ func registerV1Routes(v1 *http.ServeMux, deps *atomic.Pointer[listenerDeps], mac
 		writeJSON(w, http.StatusOK, entry)
 	})
 
-	v1.HandleFunc("/v1/interests/", func(w http.ResponseWriter, r *http.Request) {
-		d := deps.Load()
-		adminInterestsHandler(d.registry).ServeHTTP(w, r)
-	})
-	v1.HandleFunc("/v1/sessions", func(w http.ResponseWriter, r *http.Request) {
-		d := deps.Load()
-		sessionsHandler(d.registry, d.sessions).ServeHTTP(w, r)
-	})
-	v1.HandleFunc("/v1/sessions/", func(w http.ResponseWriter, r *http.Request) {
-		d := deps.Load()
-		deleteSessionHandler(d.sessions).ServeHTTP(w, r)
-	})
-	v1.HandleFunc("/v1/messages/send", sendHandler(deps))
-	v1.HandleFunc("/v1/messages/publish", publishHandler(deps))
+	v1.Handle("/v1/interests/", adminInterestsHandler(d.registry))
+	v1.Handle("/v1/sessions", sessionsHandler(d.registry, d.sessions))
+	v1.Handle("/v1/sessions/", deleteSessionHandler(d.sessions))
+	v1.HandleFunc("/v1/messages/send", sendHandler(d))
+	v1.HandleFunc("/v1/messages/publish", publishHandler(d))
 	v1.HandleFunc("/v1", func(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusNotFound, "not found")
 	})
