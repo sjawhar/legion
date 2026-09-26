@@ -393,8 +393,10 @@ func TestRenderKeepsAsterisksAndUnderscoresThatWouldPair(t *testing.T) {
 }
 
 // The parser reads an image's alt text as the plain text of its label, so a bracket, a backslash,
-// emphasis, a code span, a reference or a tag in the alt text changed it or ended the image. An alt
-// text that does not read back as written is written with its ASCII punctuation escaped.
+// emphasis, a code span, a reference or a tag in the alt text changed it or ended the image, and a
+// line ending ends a heading or a table row, or starts a line that opens a block. An alt text that
+// does not read back as written is written with its ASCII punctuation escaped and its line endings
+// as character references.
 func TestRenderKeepsImageAltText(t *testing.T) {
 	image := func(alt string) *Node {
 		return &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{
@@ -412,6 +414,48 @@ func TestRenderKeepsImageAltText(t *testing.T) {
 			first := back.Children[0].Children[0]
 			if got, _ := first.Attrs["alt"].(string); first.Type != "image" || got != alt {
 				t.Fatalf("Parse(%q) = %s with alt %q, want an image with alt %q", markdown, first.Type, got, alt)
+			}
+		})
+	}
+	img := func(alt string) *Node {
+		return &Node{Type: "image", Attrs: Attrs{"src": "u", "alt": alt, "title": nil}}
+	}
+	for _, test := range []struct {
+		name, alt string
+		block     func(*Node) *Node
+	}{
+		{"a heading line after a carriage return", "a\r# b", func(n *Node) *Node { return &Node{Type: "paragraph", Children: []*Node{n}} }},
+		{"a list line after a line feed", "a\n- b", func(n *Node) *Node { return &Node{Type: "paragraph", Children: []*Node{n}} }},
+		{"a line feed in a heading", "a\nb", func(n *Node) *Node {
+			return &Node{Type: "heading", Attrs: Attrs{"level": 2}, Children: []*Node{n}}
+		}},
+		{"a carriage return in a table cell", "a\rb", func(n *Node) *Node {
+			cell := func(content *Node, kind string) *Node {
+				return &Node{Type: kind, Attrs: Attrs{"colspan": 1, "rowspan": 1, "colwidth": nil, "alignment": "left"}, Children: []*Node{{Type: "paragraph", Children: []*Node{content}}}}
+			}
+			return &Node{Type: "table", Children: []*Node{
+				{Type: "table_header_row", Children: []*Node{cell(&Node{Type: "text", Text: "h"}, "table_header")}},
+				{Type: "table_row", Children: []*Node{cell(n, "table_cell")}},
+			}}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			doc := &Node{Type: "doc", Children: []*Node{test.block(img(test.alt))}}
+			markdown := mustRender(t, doc)
+			back, err := Parse(markdown)
+			if err != nil {
+				t.Fatalf("Parse(%q) = %v", markdown, err)
+			}
+			var alts []string
+			Walk(back, func(n *Node) bool {
+				if n.Type == "image" {
+					alt, _ := n.Attrs["alt"].(string)
+					alts = append(alts, alt)
+				}
+				return true
+			})
+			if len(back.Children) != 1 || len(alts) != 1 || alts[0] != test.alt {
+				t.Fatalf("Render() = %q, read back as %d blocks with alts %q, want one block with alt %q", markdown, len(back.Children), alts, test.alt)
 			}
 		})
 	}

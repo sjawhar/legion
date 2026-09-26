@@ -466,6 +466,31 @@ func markdownLines(text string) []string {
 
 // endsInLoneCarriageReturn reports whether the line a text run ends at stop ends in a carriage
 // return that no line feed follows, past the spaces and tabs before it.
+// insideImage reports whether node is part of an image's alt text.
+func insideImage(node ast.Node) bool {
+	for parent := node.Parent(); parent != nil; parent = parent.Parent() {
+		if _, ok := parent.(*ast.Image); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// lineEndingAfter is the line ending that ends the line at stop, past the spaces and tabs before
+// it: a carriage return and line feed, a lone carriage return, or a line feed.
+func lineEndingAfter(source []byte, stop int) string {
+	for stop < len(source) && (source[stop] == ' ' || source[stop] == '\t') {
+		stop++
+	}
+	switch {
+	case stop+1 < len(source) && source[stop] == '\r' && source[stop+1] == '\n':
+		return "\r\n"
+	case stop < len(source) && source[stop] == '\r':
+		return "\r"
+	}
+	return "\n"
+}
+
 func endsInLoneCarriageReturn(source []byte, stop int) bool {
 	for stop < len(source) && (source[stop] == ' ' || source[stop] == '\t') {
 		stop++
@@ -807,10 +832,15 @@ func parseInlineWithTableCellLinks(parent ast.Node, source []byte, initial []Mar
 			if current.SoftLineBreak() {
 				// A soft break is a space, as CommonMark renders it; the browser editor's
 				// white-space: break-spaces would show a literal newline as a line break. A line
-				// a lone carriage return ends keeps it, as the browser editor's parser does.
-				if endsInLoneCarriageReturn(source, current.Segment.Stop) {
+				// a lone carriage return ends keeps it, as the browser editor's parser does, and so
+				// does an image's alt text, which that parser reads with every line ending as
+				// written.
+				switch {
+				case insideImage(current):
+					appendText(&children, lineEndingAfter(source, current.Segment.Stop), active)
+				case endsInLoneCarriageReturn(source, current.Segment.Stop):
 					appendText(&children, "\r", active)
-				} else {
+				default:
 					appendText(&children, " ", active)
 				}
 			}

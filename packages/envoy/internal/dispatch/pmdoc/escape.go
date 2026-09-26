@@ -651,41 +651,63 @@ func orderedListMarkerPunctuation(value string, offset int, lineStart int) bool 
 
 // imageAlt is how an image's alt text is written. The parser reads it as the plain text of the
 // label, so a bracket, a backslash, emphasis, a code span, a reference or a tag in it changes the
-// text or ends the image. The alt text is written with its `]` escaped, as it always was, where
-// that reads back, and otherwise with every ASCII punctuation character escaped as the text
-// writer escapes it.
-func imageAlt(alt string, escapePipes bool) string {
-	written := escapeTablePipes(strings.ReplaceAll(alt, "]", "\\]"), escapePipes)
-	if altReadsBack(written, alt, escapePipes) {
+// text or ends the image, and a line ending ends a table row or starts a line that can open a
+// block. The alt text is written with its `]` escaped, as it always was, where that reads back,
+// and otherwise with every ASCII punctuation character escaped as the text writer escapes it and
+// each line feed and carriage return written as a character reference, which both parsers read
+// back as the character. That is kept only if it reads back, so an alt that fails for another
+// reason keeps the bytes it had, as inlineWithEscapes does.
+func imageAlt(alt string, context inlineContext) string {
+	written := escapeTablePipes(strings.ReplaceAll(alt, "]", "\\]"), context.tableCell)
+	if altReadsBack(written, alt, context) {
 		return written
 	}
 	var out strings.Builder
 	for index := 0; index < len(alt); index++ {
-		if isASCIIPunctuation(alt[index]) {
+		switch {
+		case alt[index] == '\n':
+			out.WriteString("&#10;")
+		case alt[index] == '\r':
+			out.WriteString("&#13;")
+		case isASCIIPunctuation(alt[index]):
 			out.WriteString(escaped(rune(alt[index])))
-			continue
+		default:
+			out.WriteByte(alt[index])
 		}
-		out.WriteByte(alt[index])
 	}
-	return escapeTablePipes(out.String(), escapePipes)
+	if fallback := escapeTablePipes(out.String(), context.tableCell); altReadsBack(fallback, alt, context) {
+		return fallback
+	}
+	return written
 }
 
 // altReadsBack reports whether an image label written as written reads back as the alt text alt,
-// read in a table cell when it is written in one, where the cell takes its escaped pipes first.
-func altReadsBack(written, alt string, inCell bool) bool {
-	var nodes []*Node
-	if inCell {
-		doc, err := Parse("| h |\n| - |\n| ![" + written + "](u) |\n")
-		if err != nil || len(doc.Children) != 1 || doc.Children[0].Type != "table" {
-			return false
-		}
-		nodes = doc.Children[0].Children[1].Children[0].Children[0].Children
-	} else {
-		var err error
-		if nodes, err = ParseInline("![" + written + "](u)"); err != nil {
-			return false
-		}
+// read in the block it is written in: a table cell, where the cell takes its escaped pipes first
+// and a line ending ends the row; a heading, which a line ending ends; or a paragraph, where a
+// line of the label can open a block.
+func altReadsBack(written, alt string, context inlineContext) bool {
+	image := "![" + written + "](u)"
+	var markdown string
+	switch {
+	case context.tableCell:
+		markdown = "| h |\n| - |\n| " + image + " |\n"
+	case context.heading:
+		markdown = "# " + image + "\n"
+	default:
+		markdown = image + "\n"
 	}
+	doc, err := Parse(markdown)
+	if err != nil || len(doc.Children) != 1 {
+		return false
+	}
+	block := doc.Children[0]
+	if context.tableCell {
+		if block.Type != "table" || len(block.Children) != 2 {
+			return false
+		}
+		block = block.Children[1].Children[0].Children[0]
+	}
+	nodes := block.Children
 	if len(nodes) != 1 || nodes[0].Type != "image" {
 		return false
 	}
