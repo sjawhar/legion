@@ -147,8 +147,9 @@ still judged for every later replace, and an empty `with` leaving text that read
 block is refused, naming the text. Accepting a suggestion (`POST /api/v1/comments/{id}/accept`,
 `docs/marks.go` `applySuggestion`) runs the same two checks outside a code block
 (`refuseUnreadableReplacement` and `refuseReshapedReplacement`, naming `replace_with`) over every
-document-level block the accept writes. An accept parses its text as blocks, so a rule or a list
-over a whole paragraph is written as that block and kept, while one that leaves a block the
+document-level block the accept writes. An accept parses its text as blocks written into the
+document (`pmdoc.ParseFragment`, which reads no front matter, so a leading `---` is a rule as `***`
+is), so a rule or a list over a whole paragraph is written as that block and kept, while one that leaves a block the
 document cannot read back, such as a list in a list item's only paragraph or `:::` in a callout,
 is refused: the document stays as it was and the suggestion stays open. A reject is not checked,
 since it gives back the text the insert started from. Neither route can see a lone carriage

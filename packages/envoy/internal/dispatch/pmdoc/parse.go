@@ -19,26 +19,44 @@ import (
 
 var anchorAttribute = regexp.MustCompile(`([a-zA-Z0-9_-]+)="([^"]*)"`)
 
+var blockParsers = goldmark.WithParserOptions(parser.WithBlockParsers(
+	util.Prioritized(&typedDirectiveParser{}, 950),
+	util.Prioritized(&unsupportedDirectiveParser{}, 900),
+))
+
 var markdownParser = goldmark.New(
 	goldmark.WithExtensions(extension.GFM, extension.Footnote, &frontmatter.Extender{
 		Formats: []frontmatter.Format{frontmatter.YAML},
 	}),
-	goldmark.WithParserOptions(parser.WithBlockParsers(
-		util.Prioritized(&typedDirectiveParser{}, 950),
-		util.Prioritized(&unsupportedDirectiveParser{}, 900),
-	)),
+	blockParsers,
 )
+
+// fragmentParser is markdownParser without front matter, for text written into a document.
+var fragmentParser = goldmark.New(goldmark.WithExtensions(extension.GFM, extension.Footnote), blockParsers)
 
 // Parse converts markdown into the closed Proof ProseMirror tree.
 func Parse(markdown string) (*Node, error) {
+	return parse(markdownParser, markdown, true)
+}
+
+// ParseFragment converts markdown written into a document, rather than one that begins it, into
+// the closed Proof ProseMirror tree: only a document's start holds front matter, so a leading `---`
+// line is a horizontal rule, as it is anywhere after the start.
+func ParseFragment(markdown string) (*Node, error) {
+	return parse(fragmentParser, markdown, false)
+}
+
+func parse(with goldmark.Markdown, markdown string, frontmatterFirst bool) (*Node, error) {
 	source := []byte(markdown)
-	root := markdownParser.Parser().Parse(gmtext.NewReader(source))
+	root := with.Parser().Parse(gmtext.NewReader(source))
 	doc, err := parseBlock(root, source, footnoteLabels(root))
 	if err != nil {
 		return nil, err
 	}
-	if frontmatter := parseFrontmatterBlock(source); frontmatter != nil {
-		doc.Children = append([]*Node{frontmatter}, doc.Children...)
+	if frontmatterFirst {
+		if block := parseFrontmatterBlock(source); block != nil {
+			doc.Children = append([]*Node{block}, doc.Children...)
+		}
 	}
 	if len(doc.Children) == 0 {
 		doc.Children = []*Node{{Type: "paragraph"}}

@@ -1346,10 +1346,10 @@ func blockMarkerAfterHardBreak(inline []*pmdoc.Node) (marker, kind string) {
 	return "", ""
 }
 
-// inlineAware parses a suggestion's replacement as blocks, keeping the edge
-// whitespace of a replacement that stays inline.
+// inlineAware parses a suggestion's replacement as blocks written into the document, keeping the
+// edge whitespace of a replacement that stays inline.
 func inlineAware(markdown string, edges textEdges) (*pmdoc.Node, error) {
-	tree, err := parseInput(markdown)
+	tree, err := parseFragmentInput(markdown)
 	if err != nil {
 		return nil, err
 	}

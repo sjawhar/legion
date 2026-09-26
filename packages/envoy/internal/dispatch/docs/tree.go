@@ -16,7 +16,16 @@ var ErrInvalidMarkdown = errors.New("markdown is not a Proof document")
 var ErrDocSchema = errors.New("document is outside the Proof schema")
 
 func parseInput(markdown string) (*pmdoc.Node, error) {
-	tree, err := pmdoc.Parse(markdown)
+	return parsedInput(pmdoc.Parse(markdown))
+}
+
+// parseFragmentInput parses text written into a document rather than one that begins it, such as
+// an accepted suggestion's, where a leading `---` is a rule rather than front matter.
+func parseFragmentInput(markdown string) (*pmdoc.Node, error) {
+	return parsedInput(pmdoc.ParseFragment(markdown))
+}
+
+func parsedInput(tree *pmdoc.Node, err error) (*pmdoc.Node, error) {
 	if err != nil {
 		if errors.Is(err, pmdoc.ErrSchema) {
 			return nil, fmt.Errorf("%w: %v", ErrInvalidMarkdown, err)
