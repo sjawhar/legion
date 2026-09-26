@@ -106,15 +106,6 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 			s.writeHandlerError(w, err)
 			return
 		}
-		existingKey, err := s.resolveIssueRef(r.Context(), input.External)
-		if err == nil {
-			s.respondWithExistingExternalIssue(w, r, existingKey, actor)
-			return
-		}
-		if !errors.Is(err, pgx.ErrNoRows) {
-			s.writeHandlerError(w, err)
-			return
-		}
 		project, err := s.repoProject(r.Context(), externalRepo)
 		if err != nil {
 			s.writeHandlerError(w, err)
@@ -130,10 +121,48 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 			usingDefaultProject = true
 		}
 		if input.Project != "" && input.Project != project {
-			writeError(w, "EXTERNAL_PROJECT_MISMATCH", http.StatusBadRequest, "external issue project must match repository settings")
+			writeError(
+				w,
+				"EXTERNAL_PROJECT_MISMATCH",
+				http.StatusBadRequest,
+				fmt.Sprintf(
+					"external issue project %s must match repository settings project %s",
+					input.Project,
+					project,
+				),
+			)
 			return
 		}
 		input.Project = project
+		existingKey, err := s.resolveIssueRef(r.Context(), input.External)
+		if err == nil {
+			var existingProject string
+			if err := s.deps.Store.Pool.QueryRow(r.Context(), `
+				select project_key from issues where key = $1
+			`, existingKey).Scan(&existingProject); err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+			if existingProject != project {
+				writeError(
+					w,
+					"EXTERNAL_PROJECT_MISMATCH",
+					http.StatusBadRequest,
+					fmt.Sprintf(
+						"external issue project %s must match repository settings project %s",
+						existingProject,
+						project,
+					),
+				)
+				return
+			}
+			s.respondWithExistingExternalIssue(w, r, existingKey, actor)
+			return
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			s.writeHandlerError(w, err)
+			return
+		}
 		if input.Title == "" {
 			input.Title = input.External
 		}

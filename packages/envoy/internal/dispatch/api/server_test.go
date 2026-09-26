@@ -641,6 +641,11 @@ func TestExternalIssueCreationReusesPullRequestLink(t *testing.T) {
 	}, "alice"); response.Code != http.StatusCreated {
 		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
 	}
+	if response := dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/repo-projects/owner/repo", map[string]string{
+		"project": "TEST",
+	}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("map repository: status=%d body=%s", response.Code, response.Body.String())
+	}
 	existing := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
 		"project": "TEST", "title": "Linked pull request",
 	}, "alice")
