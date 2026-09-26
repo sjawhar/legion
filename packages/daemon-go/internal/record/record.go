@@ -18,11 +18,12 @@ type AttemptRun struct {
 	ID   int64  `json:"id"`
 }
 
-// PendingPush is the branch push still waiting to be classified.
+// PendingPush is a branch push classified before the head it left arrived.
 type PendingPush struct {
 	SHA string `json:"sha"`
-	// Before is the head the push replaced: a pending push replacing the current head is on its
-	// way, where one replacing any other head arrived late for a head already gone.
+	// Before is the head the push replaced, empty when the push did not say. A pending push on the
+	// path from the current head - replacing it, or replacing a pending push's head that does - is
+	// on its way; one replacing any other head arrived late for a head already gone.
 	Before      string `json:"before,omitempty"`
 	HandoffOnly bool   `json:"handoffOnly"`
 	Unknown     string `json:"unknown,omitempty"`
@@ -86,8 +87,9 @@ type PullRequest struct {
 	Generation          int64
 	Snapshot            string
 	Reconciled          bool
-	PendingPush         *PendingPush
-	HeadCounted         string
+	// PendingPushes are the pushes classified before the heads they left arrived, one per head.
+	PendingPushes []PendingPush
+	HeadCounted   string
 	// PlannedRed is whether the newest head that changed a path outside .legion/ was the review
 	// App's (the tester's red tests): a red on it is planned, so the next head is not a fix attempt.
 	PlannedRed bool

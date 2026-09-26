@@ -163,7 +163,7 @@ func scanPhase(row scanner) (PhaseRow, error) {
 
 const pullRequestColumns = `issue, repo, number, branch, head_sha, head_updated_at, head_updated_at_source,
 	verdict, failing, failing_statuses, review_decision, fix_attempts, blocked_attempts, check_runs,
-	generation, snapshot, reconciled, pending_push, head_counted, planned_red, state, code_heads`
+	generation, snapshot, reconciled, pending_pushes, head_counted, planned_red, state, code_heads`
 
 func (s *Postgres) PullRequest(ctx context.Context, tx pgx.Tx, issue string) (*PullRequest, error) {
 	pr, err := scanPullRequest(tx.QueryRow(ctx, "select "+pullRequestColumns+" from pull_requests where issue = $1", issue))
@@ -218,16 +218,13 @@ func (s *Postgres) PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest
 	if err != nil {
 		return fmt.Errorf("put pull request for %s: encode code heads: %w", pr.Issue, err)
 	}
-	var pendingPush []byte
-	if pr.PendingPush != nil {
-		pendingPush, err = json.Marshal(pr.PendingPush)
-		if err != nil {
-			return fmt.Errorf("put pull request for %s: encode pending push: %w", pr.Issue, err)
-		}
+	pendingPushes, err := json.Marshal(append([]PendingPush{}, pr.PendingPushes...))
+	if err != nil {
+		return fmt.Errorf("put pull request for %s: encode pending pushes: %w", pr.Issue, err)
 	}
 	_, err = tx.Exec(ctx, `insert into pull_requests (issue, repo, number, branch, head_sha, head_updated_at,
 		head_updated_at_source, verdict, failing, failing_statuses, review_decision, fix_attempts,
-		blocked_attempts, check_runs, generation, snapshot, reconciled, pending_push, head_counted, planned_red, state,
+		blocked_attempts, check_runs, generation, snapshot, reconciled, pending_pushes, head_counted, planned_red, state,
 		code_heads)
 		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
 		on conflict (issue) do update set repo = excluded.repo, number = excluded.number, branch = excluded.branch,
@@ -237,11 +234,11 @@ func (s *Postgres) PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest
 		review_decision = excluded.review_decision, fix_attempts = excluded.fix_attempts,
 		blocked_attempts = excluded.blocked_attempts, check_runs = excluded.check_runs,
 		generation = excluded.generation, snapshot = excluded.snapshot, reconciled = excluded.reconciled,
-		pending_push = excluded.pending_push, head_counted = excluded.head_counted,
+		pending_pushes = excluded.pending_pushes, head_counted = excluded.head_counted,
 		planned_red = excluded.planned_red, state = excluded.state, code_heads = excluded.code_heads`,
 		pr.Issue, pr.Repo, pr.Number, pr.Branch, pr.HeadSHA, pr.HeadUpdatedAt, pr.HeadUpdatedAtSource,
 		pr.Verdict, failing, failingStatuses, pr.ReviewDecision, pr.FixAttempts, pr.BlockedAttempts, checkRuns,
-		pr.Generation, pr.Snapshot, pr.Reconciled, pendingPush, pr.HeadCounted, pr.PlannedRed, pr.State,
+		pr.Generation, pr.Snapshot, pr.Reconciled, pendingPushes, pr.HeadCounted, pr.PlannedRed, pr.State,
 		codeHeads,
 	)
 	if err != nil {
@@ -293,11 +290,11 @@ func clearGeneration(ctx context.Context, tx pgx.Tx, where string, key string, d
 
 func scanPullRequest(row scanner) (*PullRequest, error) {
 	var pr PullRequest
-	var failing, failingStatuses, checkRuns, pendingPush, codeHeads []byte
+	var failing, failingStatuses, checkRuns, pendingPushes, codeHeads []byte
 	if err := row.Scan(&pr.Issue, &pr.Repo, &pr.Number, &pr.Branch, &pr.HeadSHA, &pr.HeadUpdatedAt,
 		&pr.HeadUpdatedAtSource, &pr.Verdict, &failing, &failingStatuses, &pr.ReviewDecision,
 		&pr.FixAttempts, &pr.BlockedAttempts, &checkRuns, &pr.Generation, &pr.Snapshot, &pr.Reconciled,
-		&pendingPush, &pr.HeadCounted, &pr.PlannedRed, &pr.State, &codeHeads); err != nil {
+		&pendingPushes, &pr.HeadCounted, &pr.PlannedRed, &pr.State, &codeHeads); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal(failing, &pr.Failing); err != nil {
@@ -312,11 +309,8 @@ func scanPullRequest(row scanner) (*PullRequest, error) {
 	if err := json.Unmarshal(codeHeads, &pr.CodeHeads); err != nil {
 		return nil, fmt.Errorf("decode code heads: %w", err)
 	}
-	if pendingPush != nil {
-		pr.PendingPush = &PendingPush{}
-		if err := json.Unmarshal(pendingPush, pr.PendingPush); err != nil {
-			return nil, fmt.Errorf("decode pending push: %w", err)
-		}
+	if err := json.Unmarshal(pendingPushes, &pr.PendingPushes); err != nil {
+		return nil, fmt.Errorf("decode pending pushes: %w", err)
 	}
 	return &pr, nil
 }

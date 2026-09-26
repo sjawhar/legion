@@ -376,11 +376,16 @@ func (fixture fixturePullRequest) record() record.PullRequest {
 	if fixture.HeadCounted != nil && *fixture.HeadCounted {
 		headCounted = fixture.HeadSHA
 	}
+	// The shipped state holds one pending push; the Go record keeps every one.
+	var pendingPushes []record.PendingPush
+	if fixture.PendingPush != nil {
+		pendingPushes = []record.PendingPush{*fixture.PendingPush}
+	}
 	return record.PullRequest{Issue: fixture.Key, Repo: fixture.Repo, Number: fixture.Number, Branch: fixture.Branch, HeadSHA: fixture.HeadSHA,
 		HeadUpdatedAt: timestampJSON(fixture.HeadUpdatedAt), HeadUpdatedAtSource: fixture.HeadUpdatedAtSource, Verdict: fixture.Verdict,
 		Failing: append([]string{}, fixture.Failing...), FailingStatuses: append([]string{}, fixture.FailingStatuses...), ReviewDecision: fixture.ReviewDecision,
 		FixAttempts: fixture.FixAttempts, BlockedAttempts: blocked, CheckRuns: checkRuns, Generation: generation, Snapshot: snapshot,
-		Reconciled: fixture.Reconciled, PendingPush: fixture.PendingPush, HeadCounted: headCounted, PlannedRed: fixture.PlannedRed}
+		Reconciled: fixture.Reconciled, PendingPushes: pendingPushes, HeadCounted: headCounted, PlannedRed: fixture.PlannedRed}
 }
 
 type fixtureHeadClock struct {

@@ -12,9 +12,16 @@ import "github.com/sjawhar/legion/daemon/internal/record"
 // leaves it ending at the head replaced, which is then no longer the current one.
 func AdvancePullRequestHead(pr record.PullRequest, headSHA string) record.PullRequest {
 	var pending *record.PendingPush
-	if pr.PendingPush != nil && pr.PendingPush.SHA == headSHA {
-		pending, pr.PendingPush = pr.PendingPush, nil
+	for i, p := range pr.PendingPushes {
+		if p.SHA == headSHA {
+			pending = &p
+			pr.PendingPushes = append(append([]record.PendingPush(nil), pr.PendingPushes[:i]...), pr.PendingPushes[i+1:]...)
+			break
+		}
 	}
+	// A push that did not say which head it replaced claimed the one just replaced, unless it is
+	// the push this head's arrival consumed: it is dropped with the late ones.
+	pr.PendingPushes = pathFrom(pr.PendingPushes, headSHA, false)
 	pr.CodeHeads = chainAt(pr.CodeHeads, pr.HeadSHA)
 	if pending != nil && pending.HandoffOnly {
 		pr.CodeHeads = append(pr.CodeHeads, headSHA)
@@ -59,7 +66,14 @@ func ApplyPush(pr record.PullRequest, before, after string, classification PushC
 		}
 		return pr
 	}
-	pr.PendingPush = &record.PendingPush{SHA: after, Before: before, HandoffOnly: classification.HandoffOnly, Unknown: classification.Unknown, ByReviewApp: byReviewApp}
+	pushes := make([]record.PendingPush, 0, len(pr.PendingPushes)+1)
+	for _, p := range pr.PendingPushes {
+		if p.SHA != after {
+			pushes = append(pushes, p)
+		}
+	}
+	pr.PendingPushes = append(pushes, record.PendingPush{SHA: after, Before: before, HandoffOnly: classification.HandoffOnly,
+		Unknown: classification.Unknown, ByReviewApp: byReviewApp})
 	return pr
 }
 
@@ -94,19 +108,42 @@ func chainAt(heads []string, head string) []string {
 	return []string{head}
 }
 
+// pathFrom is the pending pushes that lie on the path from head: each replaced head or the head a
+// push already on the path left. With unplaced, a push that did not say which head it replaced is
+// on the path too, the reading that never lets it pass unseen. Any other pending push arrived late
+// for a head already gone.
+func pathFrom(pushes []record.PendingPush, head string, unplaced bool) []record.PendingPush {
+	var path []record.PendingPush
+	reached := map[string]bool{head: true}
+	for grew := true; grew; {
+		grew = false
+		for _, p := range pushes {
+			if !reached[p.SHA] && ((unplaced && p.Before == "") || reached[p.Before]) {
+				path = append(path, p)
+				reached[p.SHA] = true
+				grew = true
+			}
+		}
+	}
+	return path
+}
+
 // ApprovalStands says whether an approval of reviewed approves the pull request's current head:
 // it names that head, or the code chain ends at the current head and holds reviewed, so every
 // push since reviewed changed only .legion/. A chain ending anywhere else says nothing: the pushes
 // after its end changed code, or have not been classified yet. Nothing stands while a push that
-// may change code is replacing the current head and its new head has not arrived: the push event
-// can come first, and the approval is then of a head already on its way out. A pending push that
-// replaced some other head arrived late for a head already gone, and changes nothing.
+// may change code lies on the path from the current head (pathFrom) and its new head has not
+// arrived: the push event can come first, and the approval is then of a head already on its way
+// out. A pending push that replaced some other head arrived late for a head already gone, and
+// changes nothing.
 func ApprovalStands(pr record.PullRequest, reviewed string) bool {
 	if reviewed == "" {
 		return false
 	}
-	if p := pr.PendingPush; p != nil && !p.HandoffOnly && p.Before == pr.HeadSHA {
-		return false
+	for _, p := range pathFrom(pr.PendingPushes, pr.HeadSHA, true) {
+		if !p.HandoffOnly {
+			return false
+		}
 	}
 	if reviewed == pr.HeadSHA {
 		return true

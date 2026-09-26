@@ -9,10 +9,10 @@ import (
 func TestAdvancePullRequestHeadCountsRedFixAndConsumesHandoffClassification(t *testing.T) {
 	prior := record.PullRequest{
 		HeadSHA: "old", Verdict: "red", FixAttempts: 2,
-		PendingPush: &record.PendingPush{SHA: "next", HandoffOnly: true},
+		PendingPushes: []record.PendingPush{{SHA: "next", Before: "old", HandoffOnly: true}},
 	}
 	got := AdvancePullRequestHead(prior, "next")
-	if got.FixAttempts != 2 || got.HeadCounted != "" || got.PendingPush != nil {
+	if got.FixAttempts != 2 || got.HeadCounted != "" || len(got.PendingPushes) != 0 {
 		t.Fatalf("handoff-only head = %#v, want unchanged count and consumed classification", got)
 	}
 
@@ -113,9 +113,9 @@ func TestPlannedRedIsSetCarriedAndClearedAcrossATesterRound(t *testing.T) {
 			pr := record.PullRequest{HeadSHA: "impl", Verdict: "green"}
 			check := func(step, head string, plannedRed bool, fixAttempts int, headCounted string) {
 				t.Helper()
-				if pr.HeadSHA != head || pr.PlannedRed != plannedRed || pr.FixAttempts != fixAttempts || pr.HeadCounted != headCounted || pr.PendingPush != nil {
+				if pr.HeadSHA != head || pr.PlannedRed != plannedRed || pr.FixAttempts != fixAttempts || pr.HeadCounted != headCounted || len(pr.PendingPushes) != 0 {
 					t.Errorf("after %s: head %q plannedRed=%v fixAttempts=%d headCounted=%q pendingPush=%v, want head %q plannedRed=%v fixAttempts=%d headCounted=%q and no pending push",
-						step, pr.HeadSHA, pr.PlannedRed, pr.FixAttempts, pr.HeadCounted, pr.PendingPush, head, plannedRed, fixAttempts, headCounted)
+						step, pr.HeadSHA, pr.PlannedRed, pr.FixAttempts, pr.HeadCounted, pr.PendingPushes, head, plannedRed, fixAttempts, headCounted)
 				}
 			}
 

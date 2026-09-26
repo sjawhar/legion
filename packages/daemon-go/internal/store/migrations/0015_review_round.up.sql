@@ -10,3 +10,15 @@ alter table phases add column reviewed_head text not null default '';
 -- any head in it approve the current one. A pull request recorded before this column starts with
 -- none, so only an approval of its current head stands until its next push.
 alter table pull_requests add column code_heads jsonb not null default '[]';
+
+-- A pull request keeps every push classified before the head it left arrived, not only the
+-- newest: a code push followed by a handoff push, both before their heads, must not leave the
+-- handoff push alone to speak for the path from the current head. The one pending push a row
+-- held becomes a list of one.
+alter table pull_requests rename column pending_push to pending_pushes;
+update pull_requests set pending_pushes = case
+  when pending_pushes is null then '[]'::jsonb
+  else jsonb_build_array(pending_pushes)
+end;
+alter table pull_requests alter column pending_pushes set default '[]';
+alter table pull_requests alter column pending_pushes set not null;
