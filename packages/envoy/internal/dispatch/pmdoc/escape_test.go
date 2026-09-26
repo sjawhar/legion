@@ -196,6 +196,64 @@ func TestRenderKeepsTildesAsTheyWereWritten(t *testing.T) {
 	}
 }
 
+// A heading's text that ends in a run of `#` after a space reads back as the heading's closing
+// sequence, and the text loses it; a list item's text that begins `[ ]` or `[x]` reads back as a
+// task checkbox. Both are written so they come back as the text they are, while `C#`, a `#` in
+// the middle and `[ ]` outside a list item keep the bytes main writes.
+func TestRenderKeepsHeadingAndTaskTextThatReadsAsSyntax(t *testing.T) {
+	text := func(value string) *Node { return &Node{Type: "text", Text: value} }
+	heading := func(value string) *Node {
+		return &Node{Type: "doc", Children: []*Node{{Type: "heading", Attrs: Attrs{"level": 2}, Children: []*Node{text(value)}}}}
+	}
+	item := func(value string) *Node {
+		return &Node{Type: "doc", Children: []*Node{{Type: "bullet_list", Children: []*Node{{Type: "list_item", Children: []*Node{
+			{Type: "paragraph", Children: []*Node{text(value)}},
+		}}}}}}
+	}
+	for name, doc := range map[string]*Node{
+		"a heading ending in #":   heading("a #"),
+		"a heading ending in ###": heading("Step 3 ###"),
+		"a heading of # alone":    heading("# #"),
+		"an item beginning [ ]":   item("[ ]"),
+		"an item beginning [x]":   item("[x] done"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			markdown := mustRender(t, doc)
+			back, err := Parse(markdown)
+			if err != nil {
+				t.Fatalf("Parse(%q) = %v", markdown, err)
+			}
+			if got, want := mustRender(t, back), markdown; got != want || flatText(back) != flatText(doc) {
+				t.Fatalf("Parse(%q) = %q, want the text back", markdown, got)
+			}
+		})
+	}
+	for _, test := range []struct {
+		doc  *Node
+		want string
+	}{
+		{heading("C#"), "## C#\n"},
+		{heading("a # b"), "## a # b\n"},
+		{&Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{text("[ ] later")}}}}, "[ ] later\n"},
+	} {
+		if got := mustRender(t, test.doc); got != test.want {
+			t.Fatalf("Render() = %q, want the bytes main writes, %q", got, test.want)
+		}
+	}
+}
+
+// flatText is every text node's text in document order.
+func flatText(node *Node) string {
+	if node.Type == "text" {
+		return node.Text
+	}
+	var out strings.Builder
+	for _, child := range node.Children {
+		out.WriteString(flatText(child))
+	}
+	return out.String()
+}
+
 // A paragraph's second line of dashes or equals signs underlines its first into a heading, so
 // the escape applies to a marker line anywhere in the paragraph, not only its first.
 func TestRenderEscapesSetextUnderlinesInsideParagraphs(t *testing.T) {

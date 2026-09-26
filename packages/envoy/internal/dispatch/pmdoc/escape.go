@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/yuin/goldmark/ast"
+	extensionast "github.com/yuin/goldmark/extension/ast"
 	gmtext "github.com/yuin/goldmark/text"
 )
 
@@ -42,6 +43,8 @@ type escapeContext struct {
 	// tildes reports whether the text's tildes are escaped, because the run they are in does not
 	// read back with them as written (inlineWithEscapes).
 	tildes bool
+	// heading reports whether the text is a heading's.
+	heading bool
 }
 
 // needsInlineEscape decides one character from the text alone.
@@ -74,7 +77,8 @@ func needsInlineEscape(value string, offset int, char rune, context escapeContex
 	case '&':
 		return entityReference(value, offset)
 	case '#':
-		return blockStart(value, textLineStart, offset) && atxHeadingRun(value, offset)
+		return blockStart(value, textLineStart, offset) && atxHeadingRun(value, offset) ||
+			context.heading && !context.followed && closingSequence(value, offset)
 	case '>':
 		return blockStart(value, textLineStart, offset)
 	case '-', '+':
@@ -184,7 +188,7 @@ func lineStartOf(value string, lineStart, offset int, char rune, escape, afterLi
 		}
 		return lineStartHeld
 	case char != ' ' && char != '\t' && blockStart(value, lineStart, offset):
-		if !escape && lineStartMarker(char) {
+		if !escape && lineStartMarker(value, offset, char) {
 			return lineStartHeld
 		}
 		return lineStartAsIs
@@ -194,10 +198,22 @@ func lineStartOf(value string, lineStart, offset int, char rune, escape, afterLi
 	return lineStartUndecided
 }
 
-// lineStartMarker reports whether char, first in a line's text, can begin a block form that only
-// the whole line decides.
-func lineStartMarker(char rune) bool {
+// lineStartMarker reports whether char, first in a line's text, can begin a form that only the
+// whole line decides: a block form, or, for `[`, the task checkbox a list item's text would open
+// with `[ ]` or `[x]`.
+func lineStartMarker(value string, offset int, char rune) bool {
+	if char == '[' {
+		return taskCheckboxText(value, offset)
+	}
 	return strings.ContainsRune("-*_=~:<|", char)
+}
+
+// taskCheckboxText reports whether the text at offset is `[ ]`, `[x]` or `[X]` followed by a
+// space, a tab or its end.
+func taskCheckboxText(value string, offset int) bool {
+	rest := value[offset:]
+	return len(rest) >= 3 && rest[0] == '[' && strings.ContainsRune(" xX", rune(rest[1])) && rest[2] == ']' &&
+		(len(rest) == 3 || rest[3] == ' ' || rest[3] == '\t')
 }
 
 // closesTypedBlock reports whether line, written at the prefix of the typed block around it, is
@@ -262,7 +278,8 @@ func blockKinds(markdown string) []ast.NodeKind {
 	root := unfrontmatteredParser.Parser().Parse(gmtext.NewReader([]byte(markdown)))
 	var kinds []ast.NodeKind
 	_ = ast.Walk(root, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
-		if entering && node.Type() == ast.TypeBlock {
+		// A task checkbox is inline, but it is the list item's syntax, not its text.
+		if entering && (node.Type() == ast.TypeBlock || node.Kind() == extensionast.KindTaskCheckBox) {
 			kinds = append(kinds, node.Kind())
 		}
 		return ast.WalkContinue, nil
@@ -329,6 +346,16 @@ func markerTerminator(value string, offset int) bool {
 func atxHeadingRun(value string, offset int) bool {
 	hashes := markerRun(value, offset)
 	return hashes <= 6 && markerTerminator(value, offset+hashes)
+}
+
+// closingSequence reports whether offset starts a heading's closing sequence: a run of `#` at the
+// start of the heading's text or after a space or a tab, with nothing after it but spaces and
+// tabs. The parser drops it from the heading's text; escaping its first `#` keeps it as text.
+func closingSequence(value string, offset int) bool {
+	if offset > 0 && value[offset-1] != ' ' && value[offset-1] != '\t' {
+		return false
+	}
+	return strings.Trim(value[offset+markerRun(value, offset):], " \t") == ""
 }
 
 // markerRun is how many times the character at offset repeats from there.

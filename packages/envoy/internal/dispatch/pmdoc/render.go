@@ -289,6 +289,9 @@ type inlineContext struct {
 	// startsLine reports whether the run begins a markdown line of its own, so that a marker at
 	// the start of its text would open a block.
 	startsLine bool
+	// heading reports whether the run is a heading's text, whose trailing run of `#` would read
+	// as the heading's closing sequence.
+	heading bool
 }
 
 // inline writes a paragraph's children, which begin their own markdown line.
@@ -299,7 +302,7 @@ func (r *renderer) inline(nodes []*Node, prefix string) {
 // headingInline writes a heading's children. The `## ` is already on the line, so nothing in the
 // text can open a block of its own.
 func (r *renderer) headingInline(nodes []*Node, prefix string) {
-	r.inlineWithEscapes(nodes, prefix, inlineContext{})
+	r.inlineWithEscapes(nodes, prefix, inlineContext{heading: true})
 }
 
 // tableCellInline writes one cell, which sits after a `|` on a line the table owns.
@@ -416,6 +419,7 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 				label:      label,
 				followed:   index+1 < len(nodes) || len(next) > 0,
 				tildes:     tildes,
+				heading:    context.heading,
 			})
 		case "hardbreak":
 			r.closeMarks(active, escapePipes)
