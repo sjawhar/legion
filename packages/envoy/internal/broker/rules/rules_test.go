@@ -60,3 +60,58 @@ func TestUnknownKeyRefused(t *testing.T) {
 		t.Fatalf("expected unknown-key refusal naming colour, got %v", err)
 	}
 }
+
+func TestEmptyRequestersDeniesEveryone(t *testing.T) {
+	data := []byte(`version: 1
+secrets:
+  DEEL_API_KEY:
+    source: production/agent-secrets/deel-api-key
+    owner: sjawhar
+    delivery: inject
+    max_lifetime_seconds: 43200
+    requesters: []
+`)
+	set, err := Parse(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d, err := set.Evaluate("DEEL_API_KEY", Requester{Kind: "box", Operator: "sjawhar"}); err != nil || d.Outcome != "deny" {
+		t.Fatalf("box: %+v %v", d, err)
+	}
+	if d, err := set.Evaluate("DEEL_API_KEY", Requester{Kind: "host", Operator: "sjawhar"}); err != nil || d.Outcome != "deny" {
+		t.Fatalf("host: %+v %v", d, err)
+	}
+	if d, err := set.Evaluate("DEEL_API_KEY", Requester{Kind: "pod"}); err != nil || d.Outcome != "deny" {
+		t.Fatalf("pod: %+v %v", d, err)
+	}
+}
+
+func TestApprovalWithNoApproverDenies(t *testing.T) {
+	data := []byte(`version: 1
+secrets:
+  DEEL_API_KEY:
+    source: production/agent-secrets/deel-api-key
+    owner: sjawhar
+    delivery: inject
+    max_lifetime_seconds: 43200
+    requesters:
+      - kind: pod
+        decision: approval
+        approver: issue_assignee
+`)
+	set, err := Parse(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := set.Evaluate("DEEL_API_KEY", Requester{Kind: "pod"})
+	if err != nil || d.Outcome != "deny" {
+		t.Fatalf("expected deny when no issue assignee is known, got %+v %v", d, err)
+	}
+}
+
+func TestMultiDocumentRefused(t *testing.T) {
+	data := []byte("version: 1\nsecrets:\n  X:\n    source: s\n    owner: o\n    delivery: inject\n    max_lifetime_seconds: 60\n    requesters: []\n---\nanything: goes\n")
+	if _, err := Parse(data); err == nil {
+		t.Fatal("expected multi-document rules file to be refused")
+	}
+}

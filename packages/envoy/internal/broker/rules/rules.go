@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -81,6 +82,12 @@ func Parse(data []byte) (*Set, error) {
 	dec := yaml.NewDecoder(strings.NewReader(string(data)))
 	dec.KnownFields(true)
 	if err := dec.Decode(&f); err != nil {
+		return nil, fmt.Errorf("rules: %w", err)
+	}
+	if err := dec.Decode(new(yaml.Node)); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("rules: file has more than one YAML document")
+		}
 		return nil, fmt.Errorf("rules: %w", err)
 	}
 	if f.Version != 1 {
