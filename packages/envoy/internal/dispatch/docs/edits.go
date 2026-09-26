@@ -1102,15 +1102,16 @@ func refuseBrokenAccept(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.T
 	if err != nil || broke == nil {
 		return err
 	}
-	return &ErrInvalidOp{Field: "replace_with", Reason: acceptRefusal(after, match, at, with, replacement, broke)}
+	return &ErrInvalidOp{Field: "replace_with", Reason: acceptRefusal(before, after, match, at, with, replacement, broke)}
 }
 
 // acceptRefusal says what an accepted suggestion's text does where it lands, why the document
 // cannot carry it (broke), and what the person accepting can do: reject the suggestion, or ask for
 // text the block can hold. It names no edit operation, since accepting takes none. The text
-// empties the paragraph it lands in only when it renders no content; blocks written at a list
-// item's start leave the item's own line empty ahead of them.
-func acceptRefusal(after *pmdoc.Node, match pmdoc.Range, at pmdoc.TextblockAt, with string, replacement *pmdoc.Node, broke error) string {
+// empties the paragraph it lands in only when it renders no content, and then the delete it names
+// removes only the paragraph where the rest of its block stands without it; blocks written at a
+// list item's start leave the item's own line empty ahead of them.
+func acceptRefusal(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.TextblockAt, with string, replacement *pmdoc.Node, broke error) string {
 	holder := "document"
 	if parent := at.Ancestors[0]; parent.Type != "doc" {
 		holder = strings.ReplaceAll(parent.Type, "_", " ")
@@ -1130,9 +1131,16 @@ func acceptRefusal(after *pmdoc.Node, match pmdoc.Range, at pmdoc.TextblockAt, w
 	text := with
 	if emptyTextblock(replacement.Children[0]) {
 		if !found || emptied {
+			advice := "reject the suggestion, or delete the " + holder + " in the document"
+			if len(at.Ancestors[0].Children) > 1 {
+				advice = "reject the suggestion, since the rest of the " + holder + " cannot be written without this paragraph"
+				if _, err := pmdoc.DeleteBlock(before, blockID(at.Node)); err == nil {
+					advice = "reject the suggestion, or delete the paragraph in the document, which leaves the rest of the " + holder
+				}
+			}
 			return fmt.Sprintf(
-				"replace_with %q empties the paragraph this %s holds, and the %s cannot be written without it; reject the suggestion, or delete the %s in the document",
-				with, holder, holder, holder,
+				"replace_with %q empties the paragraph this %s holds, and the %s cannot be written with it empty; %s",
+				with, holder, holder, advice,
 			)
 		}
 		text = nodeText(landed.Node)
