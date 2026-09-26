@@ -9,12 +9,14 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/store"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 // syncBuffer is a log sink a daemon writes while the test reads it.
@@ -55,6 +57,7 @@ func TestTheDaemonSaysWhenNoControllerIsRegistered(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := testConfig(t)
 			const session = "ses_controller"
+			var lookups atomic.Int64
 			envoy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				code, body := http.StatusNotFound, any(map[string]any{})
 				if tc.holder != nil {
@@ -62,6 +65,7 @@ func TestTheDaemonSaysWhenNoControllerIsRegistered(t *testing.T) {
 				}
 				w.WriteHeader(code)
 				_ = json.NewEncoder(w).Encode(body)
+				lookups.Add(1)
 			}))
 			defer envoy.Close()
 			cfg.EnvoyURL = envoy.URL
@@ -93,7 +97,19 @@ func TestTheDaemonSaysWhenNoControllerIsRegistered(t *testing.T) {
 			done := make(chan error, 1)
 			go func() { done <- run(ctx, cfg, slog.New(slog.NewJSONHandler(logs, nil)), o) }()
 			awaitHealthz(t, cfg, done)
-			time.Sleep(300 * time.Millisecond)
+			// The first sweep runs as the daemon starts serving, and a due line comes from it. The
+			// count then waits out further sweeps, where a second line would show: a registered
+			// controller is looked up in the role registry on every sweep, so three more lookups are
+			// three more sweeps; with none registered nothing is looked up, and ten intervals pass.
+			if tc.want > 0 {
+				testwait.Eventually(t, "the not-registered line", func() bool { return strings.Contains(logs.String(), notRegistered) })
+			}
+			if tc.register {
+				seen := lookups.Load()
+				testwait.Eventually(t, "three more sweeps", func() bool { return lookups.Load() >= seen+3 })
+			} else {
+				time.Sleep(10 * o.orphanSweep)
+			}
 			cancel()
 			if err := <-done; err != nil {
 				t.Fatalf("run: %v", err)

@@ -25,6 +25,7 @@ func TestOutboxPayloadsRoundTripThroughPostgres(t *testing.T) {
 		StatusWrite{Status: "testing", ObservedStatus: "in_progress"},
 		MessagePost{Body: "Pull request checks are blocked."},
 		Notice{Kind: "phase-finished", Role: claim.RoleTester, Phase: phase.Testing, Summary: "Tests passed", Version: 4, Reason: ""},
+		ControllerNotice{Kind: "held", Role: claim.RolePlanner, Phase: phase.Planning, Reason: "escalated"},
 		SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RoleArchitect, Task: "Write the spec."},
 		GateSeed{ArtifactID: "artifact-208", Version: 4},
 		LingerClose{Generation: 7},
@@ -71,6 +72,7 @@ func TestNewOutboxRowRefusesInvalidPayloads(t *testing.T) {
 	}{
 		{name: "empty status", payload: StatusWrite{}, reason: "empty status"},
 		{name: "unknown notice", payload: Notice{Kind: "unknown"}, reason: "unknown notice kind"},
+		{name: "a triage notice for the issue topic", payload: Notice{Kind: "triage"}, reason: "unknown notice kind"},
 		{name: "unknown supervise operation", payload: SuperviseRequest{Op: "unknown"}, reason: "unknown supervise operation"},
 		{name: "a stop that is not a tree close", payload: SuperviseRequest{Op: "stop", Tree: "LEGION-208", Role: claim.RoleArchitect}, reason: "unknown supervise operation"},
 		{name: "start without tree", payload: SuperviseRequest{Op: "start", Role: claim.RoleArchitect}, reason: "start requires tree"},

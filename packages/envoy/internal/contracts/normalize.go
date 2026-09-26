@@ -650,7 +650,7 @@ func githubPayload(event string, body map[string]any) string {
 			"action":      action,
 			"repo":        repo,
 			"number":      number,
-			"title":       nestedString(body, "issue", "title"),
+			"title":       truncateWithEllipsis(nestedString(body, "issue", "title"), maxEnvelopeTextRunes),
 			"parent_kind": githubParentKind(event, body),
 			"author":      nestedString(body, "comment", "user", "login"),
 			"url":         nestedString(body, "comment", "html_url"),
@@ -668,7 +668,7 @@ func githubPayload(event string, body map[string]any) string {
 			"action":      action,
 			"repo":        repo,
 			"number":      number,
-			"title":       nestedString(body, "pull_request", "title"),
+			"title":       truncateWithEllipsis(nestedString(body, "pull_request", "title"), maxEnvelopeTextRunes),
 			"parent_kind": githubParentKind(event, body),
 			"author":      nestedString(body, "comment", "user", "login"),
 			"url":         nestedString(body, "comment", "html_url"),
@@ -693,7 +693,7 @@ func githubPayload(event string, body map[string]any) string {
 			"action":      action,
 			"repo":        repo,
 			"number":      number,
-			"title":       nestedString(body, "pull_request", "title"),
+			"title":       truncateWithEllipsis(nestedString(body, "pull_request", "title"), maxEnvelopeTextRunes),
 			"parent_kind": "pr",
 			"author":      nestedString(body, "review", "user", "login"),
 			"url":         nestedString(body, "review", "html_url"),
@@ -714,7 +714,7 @@ func githubPayload(event string, body map[string]any) string {
 			"action":           action,
 			"repo":             repo,
 			"number":           number,
-			"title":            nestedString(body, "pull_request", "title"),
+			"title":            truncateWithEllipsis(nestedString(body, "pull_request", "title"), maxEnvelopeTextRunes),
 			"author":           nestedString(body, "pull_request", "user", "login"),
 			"url":              nestedString(body, "pull_request", "html_url"),
 			"head_sha":         nestedString(body, "pull_request", "head", "sha"),
@@ -733,7 +733,7 @@ func githubPayload(event string, body map[string]any) string {
 			"action": action,
 			"repo":   repo,
 			"number": number,
-			"title":  nestedString(body, "issue", "title"),
+			"title":  truncateWithEllipsis(nestedString(body, "issue", "title"), maxEnvelopeTextRunes),
 			"author": nestedString(body, "issue", "user", "login"),
 			"url":    nestedString(body, "issue", "html_url"),
 		}
@@ -747,7 +747,7 @@ func githubPayload(event string, body map[string]any) string {
 			"after":                   stringValue(body["after"]),
 			"before":                  stringValue(body["before"]),
 			"pusher":                  nestedString(body, "pusher", "name"),
-			"head_subject":            firstNonEmptyLine(nestedString(body, "head_commit", "message")),
+			"head_subject":            first(nestedString(body, "head_commit", "message"), maxEnvelopeTextRunes),
 			"commit_count":            strconv.Itoa(len(sliceValue(body["commits"]))),
 			"compare_url":             stringValue(body["compare"]),
 			"changed_paths":           strings.Join(changedPaths, "\n"),
@@ -1140,12 +1140,21 @@ func truncateWithEllipsis(s string, maxRunes int) string {
 	return string(runes[:maxRunes]) + "…"
 }
 
+// maxEnvelopeTextRunes caps the free-text fields an envelope copies from its webhook body: a
+// comment or review body (GitHub allows up to 65,536 characters), a push's head_subject (a commit
+// message has no limit), an issue or pull request title, and a Ghost Wispr title. GitHub's own
+// interface stops a title at 256 characters, but the listener checks a delivery's signature, not
+// its fields' lengths, so a title is capped here too. The listener publishes an envelope to NATS
+// whole, and a publish larger than the server's max payload (1 MiB by default) fails, so no field
+// may grow with the webhook it came from.
+const maxEnvelopeTextRunes = 2048
+
 func capBody(s string) (string, bool) {
 	runes := []rune(s)
-	if len(runes) <= 2048 {
+	if len(runes) <= maxEnvelopeTextRunes {
 		return s, false
 	}
-	return string(runes[:2048]), true
+	return string(runes[:maxEnvelopeTextRunes]), true
 }
 
 func shortSHA(sha string) string {
@@ -1228,7 +1237,7 @@ func ghostWisprPayload(eventType string, body map[string]any) string {
 	normalizedEventType := normalizeGhostWisprEventType(eventType)
 	data := map[string]string{"event_type": normalizedEventType}
 	data["session_id"] = ghostWisprSummarySessionID(body)
-	data["title"] = nestedString(body, "payload", "title")
+	data["title"] = truncateWithEllipsis(nestedString(body, "payload", "title"), maxEnvelopeTextRunes)
 	data["duration"] = nestedNumberString(body, "payload", "duration")
 	data["created_at"] = stringValue(body["created_at"])
 	if normalizedEventType == "summary_ready" {
