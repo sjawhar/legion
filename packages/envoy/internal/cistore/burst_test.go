@@ -69,9 +69,9 @@ func (k *writeKV) setBeforeWrite(hook func() error) {
 	k.mu.Unlock()
 }
 
-// holdNextWrite makes the next write report on entered and wait until release is called; it then
-// returns result instead of writing when result is not nil. Later writes pass.
-func (k *writeKV) holdNextWrite(result error) (entered <-chan struct{}, release func()) {
+// holdNextWrite makes the next write report on entered and wait until release is called. Later
+// writes pass.
+func (k *writeKV) holdNextWrite() (entered <-chan struct{}, release func()) {
 	reached := make(chan struct{})
 	gate := make(chan struct{})
 	var once sync.Once
@@ -83,7 +83,7 @@ func (k *writeKV) holdNextWrite(result error) (entered <-chan struct{}, release 
 		}
 		close(reached)
 		<-gate
-		return result
+		return nil
 	})
 	return reached, func() { close(gate) }
 }
@@ -180,7 +180,7 @@ func waitAll(t *testing.T, wg *sync.WaitGroup, what string) {
 func recordAsOneBatch(t *testing.T, s *Store, kv *writeKV, observations []contracts.CIObservation) []error {
 	t.Helper()
 	key := Key(observations[0].Owner, observations[0].Repo, observations[0].Number, observations[0].SHA)
-	entered, release := kv.holdNextWrite(nil)
+	entered, release := kv.holdNextWrite()
 	errs := make([]error, len(observations))
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -372,21 +372,9 @@ func TestBatchedObservationsSettleAsSerialWritesInArrivalOrder(t *testing.T) {
 		serialSettlements[0].Generation, serialSettlements[1].Generation, batchedSettlements[0].Generation, batchedSettlements[1].Generation)
 }
 
-// burstObservation is check i of a head, as one check_run webhook reports it.
-func burstObservation(sha string, i int) contracts.CIObservation {
-	return contracts.CIObservation{
-		Owner: "example-org", Repo: "example-repo", Number: "42", SHA: sha,
-		CheckName:  fmt.Sprintf("unit-tests (shard %d, ubuntu-latest)", i),
-		CheckRunID: uint64(50_000_000_000 + i),
-		URL:        fmt.Sprintf("https://example-host/example-org/example-repo/actions/runs/1/job/%d", 50_000_000_000+i),
-		Status:     "completed", Conclusion: "success",
-		ObservedAt: "2026-09-24T01:29:00Z",
-	}
-}
-
-// recordBurst records burstObservation 0..n-1 of sha concurrently, released together, and
-// returns each call's error.
-func recordBurst(s *Store, sha string, n int) []error {
+// recordBurst records n distinct completed checks of h concurrently, released together, as a
+// check_run burst delivers them, and returns each call's error.
+func recordBurst(s *Store, h head, n int) []error {
 	errs := make([]error, n)
 	start := make(chan struct{})
 	var wg sync.WaitGroup
@@ -395,7 +383,7 @@ func recordBurst(s *Store, sha string, n int) []error {
 		go func() {
 			defer wg.Done()
 			<-start
-			errs[i] = s.Record(burstObservation(sha, i))
+			errs[i] = s.Record(h.check(fmt.Sprintf("unit-tests (shard %d, ubuntu-latest)", i), uint64(50_000_000_000+i), "completed", "success", "2026-09-24T01:29:00Z"))
 		}()
 	}
 	close(start)
@@ -412,11 +400,11 @@ func TestABurstOfObservationsOnOneHeadIsRecordedUnderSlowWrites(t *testing.T) {
 	defer cleanup()
 	s, kv := wrapStore(t, conn, 25*time.Millisecond)
 	const n = 200
-	sha := "0123456789abcdef0123456789abcdef01234567"
+	h := head{"example-org", "example-repo", "42", "0123456789abcdef0123456789abcdef01234567"}
 
-	errs := recordBurst(s, sha, n)
+	errs := recordBurst(s, h, n)
 
-	writes := len(kv.states(Key("example-org", "example-repo", "42", sha)))
+	writes := len(kv.states(h.key()))
 	failed := 0
 	var first error
 	for _, err := range errs {
@@ -430,7 +418,7 @@ func TestABurstOfObservationsOnOneHeadIsRecordedUnderSlowWrites(t *testing.T) {
 	if failed > 0 {
 		t.Fatalf("%d of %d observations refused (first: %v) after %d writes", failed, n, first, writes)
 	}
-	if checks := len(getState(t, s, "example-org", "example-repo", "42", sha).Checks); checks != n {
+	if checks := len(getState(t, s, h.owner, h.repo, h.number, h.sha).Checks); checks != n {
 		t.Fatalf("record holds %d checks after %d writes, want all %d", checks, writes, n)
 	}
 	t.Logf("%d observations recorded in %d writes", n, writes)
@@ -493,8 +481,11 @@ func TestAFailedBatchWriteReachesEveryCallerAndTheNextBatchIsWritten(t *testing.
 		waitAll(t, &wg, "a KV failure")
 
 		for i, err := range errs {
-			failedBatch := i >= 1 && i <= 4
-			if failedBatch != errors.Is(err, injected) || (!failedBatch && err != nil) {
+			want := error(nil)
+			if i >= 1 && i <= 4 {
+				want = injected
+			}
+			if !errors.Is(err, want) {
 				t.Fatalf("caller %d returned %v; want the injected failure for callers 1-4 and success for the rest", i, err)
 			}
 		}
@@ -631,7 +622,7 @@ func TestQueuedCallersReturnPromptlyWhenTheConnectionCloses(t *testing.T) {
 	defer cleanup()
 	s, kv := wrapStore(t, conn, 0)
 	h := head{"example-org", "example-repo", "42", "4444444444444444444444444444444444444444"}
-	entered, release := kv.holdNextWrite(nil)
+	entered, release := kv.holdNextWrite()
 	errs := make([]error, 10)
 	var wg sync.WaitGroup
 	for i := range errs {
@@ -674,13 +665,13 @@ func BenchmarkRecordBurst(b *testing.B) {
 			writes := 0
 			b.ResetTimer()
 			for i := range b.N {
-				sha := fmt.Sprintf("%040x", i+1)
-				for _, err := range recordBurst(s, sha, bc.n) {
+				h := head{"example-org", "example-repo", "42", fmt.Sprintf("%040x", i+1)}
+				for _, err := range recordBurst(s, h, bc.n) {
 					if err != nil {
 						b.Fatalf("record: %v", err)
 					}
 				}
-				writes += len(kv.states(Key("example-org", "example-repo", "42", sha)))
+				writes += len(kv.states(h.key()))
 			}
 			b.ReportMetric(float64(writes)/float64(b.N), "writes/burst")
 		})
