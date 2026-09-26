@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"slices"
 	"strings"
 	"time"
 
@@ -672,26 +671,6 @@ func (e *Engine) signOff(ctx context.Context, tx pgx.Tx, fact intake.SignOff) (i
 	return intake.Result{}, e.transition(ctx, tx, *issue, TriggerSignOff, "", record.PhaseRow{}, nil, "")
 }
 
-func (e *Engine) lingerExpired(ctx context.Context, tx pgx.Tx, fact intake.LingerExpired) (intake.Result, error) {
-	issue, err := e.store.Issue(ctx, tx, fact.Issue)
-	if err != nil || issue == nil || issue.Generation != fact.Generation || issue.LingerUntil == nil {
-		return intake.Result{}, err
-	}
-	members, err := e.treeMembers(ctx, tx, *issue)
-	if err != nil {
-		return intake.Result{}, err
-	}
-	for _, member := range members {
-		if err := e.everyClaim(ctx, tx, member, "tree_close"); err != nil {
-			return intake.Result{}, err
-		}
-		if err := e.enqueue(ctx, tx, member.Key, record.WorkspaceRemove{Generation: member.Generation}); err != nil {
-			return intake.Result{}, err
-		}
-	}
-	return intake.Result{}, nil
-}
-
 func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, trigger TriggerKind, target phase.Phase, handoff record.PhaseRow, pr *record.PullRequest, reason string) error {
 	row, ok := e.row(issue.Phase, trigger, target, Snapshot{Phase: issue.Phase, HasPR: pr != nil})
 	if !ok {
@@ -750,22 +729,6 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	return nil
 }
 
-// ready tells the human the pull request is ready to merge. The packet is the merger's READY
-// completion's summary — its first line `READY #<n> at <sha> (approved at <sha>) for <KEY>
-// (<url>)`, then the diff summary and the gate facts (the shared merger prompt's step 4) — posted
-// verbatim on the Dispatch issue and, when the project names a merge queue role, published to it.
-// The daemon posts it, not the merger, so the READY is told exactly when the issue reaches
-// awaiting_merge: on the completion itself, or on the approval that opens a gate that refused it.
-func (e *Engine) ready(ctx context.Context, tx pgx.Tx, issue record.Issue, packet string) error {
-	if err := e.enqueue(ctx, tx, issue.Key, record.MessagePost{Body: packet}); err != nil {
-		return err
-	}
-	if e.cfg.MergeQueueRole == "" {
-		return nil
-	}
-	return e.enqueue(ctx, tx, issue.Key, record.MergeQueuePublish{Role: e.cfg.MergeQueueRole, Packet: packet})
-}
-
 func (e *Engine) row(from phase.Phase, trigger TriggerKind, target phase.Phase, snapshot Snapshot) (Row, bool) {
 	for _, row := range Table {
 		if row.From == from && row.Trigger == trigger && (target == "" || row.To == target) && (row.Guard == nil || row.Guard(snapshot)) {
@@ -791,109 +754,6 @@ func (e *Engine) advanceAdmittedTree(ctx context.Context, tx pgx.Tx, root record
 		}
 	}
 	return nil
-}
-
-// advancePendingReady advances every merger in the tree whose READY was refused while the gate was
-// closed, now that a human approved the gate's current version. That version may be later than
-// the one the refusal named: the READY stands until the gate reopens, whatever the human revised
-// in between.
-func (e *Engine) advancePendingReady(ctx context.Context, tx pgx.Tx, rootKey string, gate record.DesignGate) error {
-	if !classify.DesignGateOpen(gate) {
-		return nil
-	}
-	if lingers, err := e.treeLingers(ctx, tx, rootKey); err != nil || lingers {
-		return err
-	}
-	issues, err := e.store.Issues(ctx, tx)
-	if err != nil {
-		return err
-	}
-	for _, issue := range issues {
-		if issue.Tree != rootKey || issue.Phase != phase.Merging || issue.ReadyPendingVersion == nil || *issue.ReadyPendingVersion > gate.LatestVersion {
-			continue
-		}
-		row, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleMerger)
-		if err != nil {
-			return err
-		}
-		// A READY the gate refused before migration 0016 kept the merger's packet has none: it
-		// would post a message of the outbox marker alone, and a merge queue publish without a
-		// packet fails the whole approval. That READY cannot tell anyone to merge, so it is void,
-		// the issue stays in merging, and the tree's architect is told why.
-		if row.Summary == "" {
-			issue.ReadyPendingVersion = nil
-			if err := e.store.PutIssue(ctx, tx, issue); err != nil {
-				return err
-			}
-			if err := e.notice(ctx, tx, issue.Key, record.Notice{Kind: "ready-refused", Role: claim.RoleArchitect, Version: gate.LatestVersion,
-				Reason: fmt.Sprintf("READY_PACKET_MISSING: design version %d is approved, but %s's READY was refused before the daemon kept READY packets, so it has no packet to post; that READY is void and %s stays in merging, and whether it is started over (park_child then rerun_child, for a child) or ended is your decision",
-					gate.LatestVersion, issue.Key, issue.Key)}); err != nil {
-				return err
-			}
-			continue
-		}
-		pr, err := e.store.PullRequest(ctx, tx, issue.Key)
-		if err != nil {
-			return err
-		}
-		if err := e.transition(ctx, tx, issue, TriggerReady, "", row, pr, "approved design gate"); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// leave is an issue leaving the workflow for status (done, backlog, icebox, or triage). A root
-// takes its tree with it into linger. A child ends only itself: it leaves the table, its phase
-// parked in done and every one of its claims suspended, so no transition or status write follows
-// the human's move; the tree's architect is told, and decides what the rest of its tree does, as
-// the shipped daemon routes a child's close to the architect. A later todo re-enters the child.
-func (e *Engine) leave(ctx context.Context, tx pgx.Tx, issue record.Issue, status string) error {
-	if claim.IsTreeRoot(issue.Key, issue.Tree) {
-		return e.beginLinger(ctx, tx, issue)
-	}
-	if issue.Phase != phase.Done {
-		issue.Phase, issue.HeldFrom, issue.ReadyPendingVersion = phase.Done, nil, nil
-		if err := e.store.PutIssue(ctx, tx, issue); err != nil {
-			return err
-		}
-	}
-	if err := e.everyClaim(ctx, tx, issue, "suspend"); err != nil {
-		return err
-	}
-	kind := record.NoticeKind("child-status")
-	if status == "done" {
-		kind = "child-closed"
-	}
-	return e.notice(ctx, tx, issue.Key, record.Notice{Kind: kind, Role: claim.RoleArchitect, Reason: fmt.Sprintf("%s is %s", issue.Key, status)})
-}
-
-// beginLinger suspends the root's whole tree and arms its linger deadline; a second call while it
-// lingers changes nothing.
-func (e *Engine) beginLinger(ctx context.Context, tx pgx.Tx, root record.Issue) error {
-	if root.LingerUntil != nil {
-		return nil
-	}
-	until := e.lingerAt()
-	root.LingerUntil = &until
-	root.Phase = phase.Done
-	if err := e.store.PutIssue(ctx, tx, root); err != nil {
-		return err
-	}
-	members, err := e.treeMembers(ctx, tx, root)
-	if err != nil {
-		return err
-	}
-	for _, member := range members {
-		if err := e.everyClaim(ctx, tx, member, "suspend"); err != nil {
-			return err
-		}
-	}
-	row, err := record.NewOutboxRow(root.Key, record.LingerClose{Generation: root.Generation}, until)
-	if err != nil {
-		return err
-	}
-	return e.store.Enqueue(ctx, tx, row)
 }
 
 // everyClaim enqueues op for every claim an issue can hold: its architect, which admission or the
@@ -966,37 +826,8 @@ func (e *Engine) treeMembers(ctx context.Context, tx pgx.Tx, root record.Issue) 
 	return members, nil
 }
 
-func (e *Engine) liveTree(ctx context.Context, tx pgx.Tx, root record.Issue) (bool, error) {
-	if root.LingerUntil != nil {
-		return false, nil
-	}
-	slots, err := e.store.Slots(ctx, tx)
-	if err != nil {
-		return false, err
-	}
-	if slices.ContainsFunc(slots, func(slot record.Slot) bool { return slot.Issue == root.Key }) {
-		return true, nil
-	}
-	issues, err := e.store.Issues(ctx, tx)
-	if err != nil {
-		return false, err
-	}
-	return slices.ContainsFunc(record.Waiting(issues, slots), func(waiting record.Issue) bool { return waiting.Key == root.Key }), nil
-}
-
 func (e *Engine) gateForIssue(ctx context.Context, tx pgx.Tx, issue record.Issue) (*record.DesignGate, error) {
 	return e.store.Gate(ctx, tx, issue.Tree)
-}
-
-// treeLingers says whether a tree has left the workflow: its root lingers after its close or
-// sign-off. Linger holds every member where it stood, so nothing in such a tree transitions,
-// starts a worker, or records a completion.
-func (e *Engine) treeLingers(ctx context.Context, tx pgx.Tx, tree string) (bool, error) {
-	root, err := e.store.Issue(ctx, tx, tree)
-	if err != nil || root == nil {
-		return false, err
-	}
-	return root.LingerUntil != nil, nil
 }
 
 func phaseIndex(value phase.Phase) int {
