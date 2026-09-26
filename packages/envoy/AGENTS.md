@@ -160,6 +160,15 @@ reports any emptied container's content rule as `INVALID_OP`). `move` relocates 
 `block` to the document-level boundary of an insert anchor (`pmdoc.MoveBlock`); insert and move
 anchors are a quote, `start`, `end`, `heading:<title>`, or `block:<id>`.
 
+Accepting a suggestion (`POST /api/v1/comments/{id}/accept`, `docs/marks.go` `applySuggestion`)
+splices its `replace_with`, which unlike an edit's `with` may be blocks, with ProseMirror's range
+fitting (`pmdoc.Splice`). A typed block holds whatever its content rule allows, so a callout takes a
+code block inside it (the engine oracle's `callout-paragraph-and-code` case) and a fit never
+replaces the typed block it lands in. The accept then runs the edit route's ask-block check on the
+tree it would write (`validateAskBlocks`, as `ApplyOps` does), so a replacement that leaves an ask
+unparseable, such as a question given a code block, is `400 INVALID_ASK_BLOCK` with the edit
+route's message. Nothing is written, and the suggestion stays open.
+
 `delete_row` and `delete_column` each take a table `block` id and a zero-based `index`, and mutate
 the table in place. Row `0` is the header; deleting it promotes the first body row into the header,
 including its cells' alignment. An index is required. A missing, non-integer, negative, or out-of-range

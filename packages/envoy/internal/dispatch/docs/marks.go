@@ -307,6 +307,12 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		if err != nil {
 			return err
 		}
+		// The edit route's own check on what a write leaves (ApplyOps): an ask block the
+		// replacement left unparseable, a question holding a code block among them, is refused
+		// with nothing written, never carried into the document for settlement to flag.
+		if err := validateAskBlocks(next); err != nil {
+			return &ErrInvalidAskBlock{Reason: err}
+		}
 		var updateErr error
 		transact(func(txn *crdt.Transaction) {
 			updateErr = pmdoc.Update(txn, fragment, next)

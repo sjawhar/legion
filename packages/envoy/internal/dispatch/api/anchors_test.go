@@ -189,6 +189,63 @@ func TestSuggestionAcceptSpansParagraphs(t *testing.T) {
 	}
 }
 
+// An ask block holds paragraphs and at most one bullet list. A suggestion on its question whose
+// replacement also carries a code block would leave an ask that does not parse; the splice once
+// fitted it by replacing the whole block, so the question someone may be waiting on vanished.
+// Accepting refuses it with the edit route's own ask-block refusal, and the document and the
+// suggestion stay as they were. The same text as a replace is refused by the edit route too.
+func TestSuggestionAcceptRefusesAReplacementItsAskCannotHold(t *testing.T) {
+	var documentService *docs.Service
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Suggestion on an ask", "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich one?\n:::\n\nAfter.\n")
+	before, err := documentService.Text(context.Background(), issue.PrimaryArtifactID)
+	if err != nil || !strings.Contains(before, ":::ask{#a1") {
+		t.Fatalf("seeded document = %q (%v), want the ask block", before, err)
+	}
+	replacement := "Which?\n\n```\ncode\n```\n"
+	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "reword it", "anchor": map[string]any{"artifact": "spec", "quote": "Which one?"},
+		"suggestion": map[string]string{"replace_with": replacement}, "actor": sessionActor(),
+	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create the suggestion: status=%d body=%s", created.Code, created.Body.String())
+	}
+	comment := decodeBody[model.Comment](t, created)
+
+	accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
+
+	if accepted.Code != http.StatusBadRequest || !strings.Contains(accepted.Body.String(), `"code":"INVALID_ASK_BLOCK"`) ||
+		!strings.Contains(accepted.Body.String(), `ask block \"a1\"`) {
+		t.Fatalf("accept a replacement the ask cannot hold: status=%d body=%s", accepted.Code, accepted.Body.String())
+	}
+	if after, err := documentService.Text(context.Background(), issue.PrimaryArtifactID); err != nil || after != before {
+		t.Fatalf("document after the refused accept = %q (%v), want it unchanged: %q", after, err, before)
+	}
+	if _, err := documentService.VerifyMark(context.Background(), issue.PrimaryArtifactID, docs.MarkSuggestion, comment.Anchor.MarkID); err != nil {
+		t.Fatalf("suggestion mark after the refused accept: %v, want it still in place", err)
+	}
+	stored := decodeBody[struct {
+		Comment model.Comment `json:"comment"`
+	}](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/"+comment.ID, nil, "alice")).Comment
+	if stored.Resolved || stored.Suggestion == nil || stored.Suggestion.Accepted != nil {
+		t.Fatalf("suggestion after the refused accept = %#v, want it open and unactioned", stored)
+	}
+
+	edited := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops": []map[string]any{{"op": "replace", "find": "Which one?", "with": replacement}},
+	}, "alice")
+	if edited.Code != http.StatusBadRequest || !strings.Contains(edited.Body.String(), `"code":"INVALID_OP"`) {
+		t.Fatalf("the same text through the edit route: status=%d body=%s", edited.Code, edited.Body.String())
+	}
+	if after, err := documentService.Text(context.Background(), issue.PrimaryArtifactID); err != nil || after != before {
+		t.Fatalf("document after the refused edit = %q (%v), want it unchanged", after, err)
+	}
+}
+
 func TestMarkAnchorMissingAfterWaitIs409(t *testing.T) {
 	var documentService *docs.Service
 	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {

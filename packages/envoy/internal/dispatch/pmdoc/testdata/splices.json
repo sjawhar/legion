@@ -2348,6 +2348,65 @@
           }
         ]
       }
+    },
+    {
+      "name": "callout-paragraph-and-code",
+      "markdown": "Intro.\n\n:::callout{#c1}\nWhich one?\n:::\n",
+      "from": "Which",
+      "to": "one?",
+      "replacement": "Which?\n\n```\ncode\n```\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "attrs": {
+              "blockId": "b-000214"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Intro."
+              }
+            ]
+          },
+          {
+            "type": "callout",
+            "attrs": {
+              "kind": "note",
+              "title": "",
+              "blockId": "c1"
+            },
+            "content": [
+              {
+                "type": "paragraph",
+                "attrs": {
+                  "blockId": "b-000216"
+                },
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Which?"
+                  }
+                ]
+              },
+              {
+                "type": "code_block",
+                "attrs": {
+                  "language": null,
+                  "blockId": "b-000217"
+                },
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "code"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
     }
   ]
 }

@@ -617,6 +617,12 @@ func fitReplacement(parent, with, openingListItem *Node, hasPrefixParagraph bool
 		}
 		return append([]*Node{{Type: "paragraph"}}, source...), true
 	default:
+		// A typed block holds what its content rule allows, which fitContent's validation of the
+		// candidate decides, as ProseMirror fits a replacement into a callout. Refusing here sent the
+		// fit on to the block's parent, where the only fit replaced the block and all it held.
+		if _, typed := typedBlock(parent.Type); typed {
+			return source, true
+		}
 		return nil, false
 	}
 }
