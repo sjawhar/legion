@@ -69,6 +69,7 @@ type Webhook struct {
 	nextID    int64
 	redeliver func(Attempt) int
 	refusals  map[int64]int
+	limits    map[string]limit // by method: the listing is GET, a redelivery request POST
 	requests  []int64
 	listings  int
 	now       func() time.Time
@@ -87,6 +88,7 @@ func NewWebhook(t testing.TB, publicKey *rsa.PublicKey, clientID string, redeliv
 		nextID:    3_844_000_000_000_000_000,
 		redeliver: redeliver,
 		refusals:  map[int64]int{},
+		limits:    map[string]limit{},
 		now:       time.Now,
 	}
 	mux := http.NewServeMux()
@@ -132,9 +134,15 @@ func (w *Webhook) recordLocked(attempt Attempt, action string, repositoryID int6
 	return delivery
 }
 
+// statusText is the attempt's status: OK for a 2xx answer, and for any other the failure GitHub
+// names. A status code of 0 is an attempt that got no HTTP answer (GitHub's own listing filter,
+// status=failure, covers only 400-599, so it leaves such an attempt out).
 func statusText(code int) string {
-	if code >= 200 && code < 300 {
+	switch {
+	case code >= 200 && code < 300:
 		return "OK"
+	case code == 0:
+		return "timed out"
 	}
 	return fmt.Sprintf("Invalid HTTP Response: %d", code)
 }
@@ -149,6 +157,38 @@ func (w *Webhook) Refuse(id int64, status int) {
 		return
 	}
 	w.refusals[id] = status
+}
+
+type limit struct {
+	status int
+	header http.Header
+}
+
+// Limit makes GitHub answer every request of method (GET, the listing; POST, a redelivery
+// request) with status and header, as it answers a request over a rate limit; status 0 lifts it.
+func (w *Webhook) Limit(method string, status int, header http.Header) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if status == 0 {
+		delete(w.limits, method)
+		return
+	}
+	w.limits[method] = limit{status: status, header: header}
+}
+
+// limited answers r with its method's limit and reports whether it did.
+func (w *Webhook) limited(rw http.ResponseWriter, r *http.Request) bool {
+	w.mu.Lock()
+	current, found := w.limits[r.Method]
+	w.mu.Unlock()
+	if !found {
+		return false
+	}
+	for name, values := range current.header {
+		rw.Header()[name] = values
+	}
+	http.Error(rw, `{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}`, current.status)
+	return true
 }
 
 // SetClock sets the time GitHub stamps on the attempts a redelivery makes.
@@ -191,6 +231,12 @@ func (w *Webhook) Listings() int {
 // (success is 200-399, failure 400-599).
 func (w *Webhook) list(rw http.ResponseWriter, r *http.Request) {
 	w.verifyAppJWT(r)
+	w.mu.Lock()
+	w.listings++
+	w.mu.Unlock()
+	if w.limited(rw, r) {
+		return
+	}
 	query := r.URL.Query()
 	perPage := 30
 	if raw := query.Get("per_page"); raw != "" {
@@ -207,7 +253,6 @@ func (w *Webhook) list(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.mu.Lock()
-	w.listings++
 	rows := make([]Delivery, 0, len(w.log))
 	for i := len(w.log) - 1; i >= 0; i-- {
 		row := w.log[i]
@@ -262,6 +307,11 @@ func (w *Webhook) attempt(rw http.ResponseWriter, r *http.Request) {
 	}
 	w.mu.Lock()
 	w.requests = append(w.requests, id)
+	w.mu.Unlock()
+	if w.limited(rw, r) {
+		return
+	}
+	w.mu.Lock()
 	if status, refused := w.refusals[id]; refused {
 		w.mu.Unlock()
 		http.Error(rw, `{"message":"refused"}`, status)

@@ -54,7 +54,7 @@ redelivery sweep (`internal/dispatch/redeliver`, wired in `cmd/dispatch/redelive
 GitHub's App API. Its cursor and per-delivery claims live in the `envoy_webhook_redelivery` KV
 bucket. `envoy-dispatch redeliver-webhooks --since <d> [--dry-run]` runs the same sweep once
 over a chosen window without moving the cursor. The README's "Webhook redelivery" section has
-the rules: 4xx is never redelivered, bounded attempts, the log lines.
+the rules: 4xx is never redelivered, bounded attempts, GitHub's rate limits, the log lines.
 
 Each document room has two shared Yjs types: the authoritative
 `Y.XmlFragment("prosemirror")` tree and `Y.Map("marks")`, the server-maintained

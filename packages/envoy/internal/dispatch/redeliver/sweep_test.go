@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -261,6 +262,163 @@ func TestARefusedRequestIsRetriedNotMistakenForDelivered(t *testing.T) {
 	}
 	if got, want := h.requests(), []int64{failed.ID, failed.ID}; !slices.Equal(got, want) {
 		t.Fatalf("requests %v, want %v", got, want)
+	}
+}
+
+// An attempt that got no HTTP answer (a listener slower than GitHub's ten seconds, or down) has
+// no status code from 400 to 599, which is all GitHub's status=failure filter returns. The sweep
+// takes every attempt whose status is not OK, as GitHub's own redelivery script does: such a
+// delivery is redelivered, and a redelivery that got no answer is asked again rather than read as
+// delivered.
+func TestADeliveryThatGotNoAnswerIsRedelivered(t *testing.T) {
+	h := newHarness(t)
+	h.fail("guid-no-answer", 0, time.Minute)
+	h.webhook.SetRedeliver(func(githubapptest.Attempt) int { return 0 })
+
+	if got := outcome(h.sweep(redeliver.Options{}), "guid-no-answer"); got != redeliver.Redelivered {
+		t.Fatalf("first sweep: outcome %q, want %q", got, redeliver.Redelivered)
+	}
+	h.clock.advance(2*time.Minute + time.Second)
+	if got := outcome(h.sweep(redeliver.Options{}), "guid-no-answer"); got != redeliver.Redelivered {
+		t.Fatalf("after the redelivery got no answer either: outcome %q, want %q", got, redeliver.Redelivered)
+	}
+	if got := len(h.requests()); got != 2 {
+		t.Fatalf("redelivery requests %d, want 2", got)
+	}
+}
+
+// A refused request adds no attempt to GitHub's log, so a delivery the sweep acted on from a
+// window wider than its hour (a gap resume, or an operator's --since) is not listed again. It is
+// still asked again after the backoff, and a delivery GitHub keeps refusing ends exhausted with
+// its ERROR line, like one listed every time.
+func TestARefusedDeliveryOutsideTheWindowIsAskedAgain(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		first func(h *harness) redeliver.Options
+	}{
+		{"a gap resume", func(h *harness) redeliver.Options {
+			h.sweep(redeliver.Options{}) // the cursor, then Dispatch is down for three hours
+			h.clock.advance(3 * time.Hour)
+			return redeliver.Options{}
+		}},
+		{"an operator's --since", func(h *harness) redeliver.Options {
+			h.sweep(redeliver.Options{})
+			return redeliver.Options{Since: h.clock.Now().Add(-72 * time.Hour)}
+		}},
+	} {
+		t.Run(tc.name+" then accepted", func(t *testing.T) {
+			h := newHarness(t)
+			opts := tc.first(h)
+			old := h.fail("guid-old", http.StatusServiceUnavailable, 2*time.Hour)
+			h.webhook.Refuse(old.ID, http.StatusUnprocessableEntity)
+			if got := outcome(h.sweep(opts), "guid-old"); got != redeliver.RequestRefused {
+				t.Fatalf("first sweep: outcome %q, want %q", got, redeliver.RequestRefused)
+			}
+
+			h.webhook.Refuse(old.ID, 0)
+			h.clock.advance(2*time.Minute + time.Second)
+			if got := outcome(h.sweep(redeliver.Options{}), "guid-old"); got != redeliver.Redelivered {
+				t.Fatalf("the next sweep after the backoff: outcome %q, want %q", got, redeliver.Redelivered)
+			}
+			if got, want := h.requests(), []int64{old.ID, old.ID}; !slices.Equal(got, want) {
+				t.Fatalf("requests %v, want %v", got, want)
+			}
+		})
+		t.Run(tc.name+" then refused to the end", func(t *testing.T) {
+			h := newHarness(t)
+			opts := tc.first(h)
+			old := h.fail("guid-old", http.StatusServiceUnavailable, 2*time.Hour)
+			h.webhook.Refuse(old.ID, http.StatusUnprocessableEntity)
+			h.sweep(opts)
+			for range 8 {
+				h.clock.advance(17 * time.Minute) // past every backoff
+				h.sweep(redeliver.Options{})
+			}
+			if got := len(h.requests()); got != redeliver.MaxAttempts {
+				t.Fatalf("requests %d, want MaxAttempts (%d)", got, redeliver.MaxAttempts)
+			}
+			if got := h.logs.count("webhook redelivery exhausted", "guid=guid-old", "level=ERROR"); got != 1 {
+				t.Fatalf("exhaustion logged %d times, want once:\n%s", got, h.logs)
+			}
+		})
+	}
+}
+
+// GitHub answers a request over a rate limit with 403 or 429 and says when to try again
+// (Retry-After, or x-ratelimit-remaining 0 and x-ratelimit-reset). The sweep stops there, counts
+// nothing against the delivery it was asking for, and sends GitHub nothing more, listing
+// included, until that time has passed.
+func TestARateLimitStopsTheSweepUntilGitHubsRetryTime(t *testing.T) {
+	retryAfter := func(*harness) http.Header { return http.Header{"Retry-After": {"60"}} }
+	for _, tc := range []struct {
+		name   string
+		method string
+		status int
+		header func(*harness) http.Header
+	}{
+		{"a redelivery answered 429 with Retry-After", http.MethodPost, http.StatusTooManyRequests, retryAfter},
+		{"a redelivery answered 403 with Retry-After", http.MethodPost, http.StatusForbidden, retryAfter},
+		{"a redelivery answered 403 with no requests remaining", http.MethodPost, http.StatusForbidden, func(h *harness) http.Header {
+			return http.Header{"X-Ratelimit-Remaining": {"0"}, "X-Ratelimit-Reset": {strconv.FormatInt(h.clock.Now().Add(time.Minute).Unix(), 10)}}
+		}},
+		// With neither header GitHub asks for a wait of at least one minute.
+		{"a redelivery answered 403 naming a secondary rate limit", http.MethodPost, http.StatusForbidden, func(*harness) http.Header { return nil }},
+		{"the listing answered 429 with Retry-After", http.MethodGet, http.StatusTooManyRequests, retryAfter},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			for i := range 3 {
+				h.fail(fmt.Sprintf("guid-%d", i), http.StatusServiceUnavailable, time.Minute)
+			}
+			h.webhook.Limit(tc.method, tc.status, tc.header(h))
+			if report := h.sweep(redeliver.Options{}); report.Complete {
+				t.Fatalf("a rate-limited sweep reported itself complete: %+v", report)
+			}
+			wantSent := 0
+			if tc.method == http.MethodPost {
+				wantSent = 1
+			}
+			if got := len(h.requests()); got != wantSent {
+				t.Fatalf("redelivery requests after the limit = %d, want %d", got, wantSent)
+			}
+			if got := h.logs.count("webhook redelivery rate-limited by GitHub", "level=WARN"); got != 1 {
+				t.Fatalf("rate limit logged %d times, want once:\n%s", got, h.logs)
+			}
+
+			// GitHub would answer now, but the sweep does not ask before the time GitHub gave.
+			h.webhook.Limit(tc.method, 0, nil)
+			listings := h.webhook.Listings()
+			h.clock.advance(30 * time.Second)
+			h.sweep(redeliver.Options{})
+			if got := len(h.requests()); got != wantSent || h.webhook.Listings() != listings {
+				t.Fatalf("a sweep before the retry time called GitHub: %d requests (want %d), %d listings (want %d)", got, wantSent, h.webhook.Listings(), listings)
+			}
+
+			h.clock.advance(31 * time.Second)
+			report := h.sweep(redeliver.Options{})
+			for i := range 3 {
+				if got := outcome(report, fmt.Sprintf("guid-%d", i)); got != redeliver.Redelivered {
+					t.Fatalf("after the retry time: guid-%d outcome %q, want %q", i, got, redeliver.Redelivered)
+				}
+			}
+			if got := h.logs.count("webhook redelivered", "attempt=1"); got != 3 {
+				t.Fatalf("%d deliveries redelivered as their first attempt, want 3:\n%s", got, h.logs)
+			}
+		})
+	}
+}
+
+// A 403 that carries no rate limit (the App lacks a permission) is GitHub refusing that one
+// request: the sweep records the refusal and goes on to the next delivery.
+func TestAForbiddenAnswerWithoutARateLimitIsARefusal(t *testing.T) {
+	h := newHarness(t)
+	for i := range 3 {
+		failed := h.fail(fmt.Sprintf("guid-%d", i), http.StatusServiceUnavailable, time.Minute)
+		h.webhook.Refuse(failed.ID, http.StatusForbidden)
+	}
+	report := h.sweep(redeliver.Options{})
+	if got := report.Count(redeliver.RequestRefused); got != 3 || !report.Complete {
+		t.Fatalf("refused %d of 3, complete=%t; want every delivery asked and refused", got, report.Complete)
 	}
 }
 

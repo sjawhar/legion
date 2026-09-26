@@ -68,10 +68,10 @@ architecture source answers `409 SOURCE_ACCESS` naming the missing key.
 
 GitHub does not redeliver a webhook delivery that failed. When NATS is configured and the App's
 private key (`DISPATCH_APP_PEM_B64`) is present, Dispatch redelivers them itself, following GitHub's
-documented approach. Every two minutes it lists the App webhook's failed attempts
-(`GET /app/hook/deliveries?status=failure`) and asks GitHub to redeliver each failed delivery
-(`POST /app/hook/deliveries/{id}/attempts`). Both endpoints accept only an App JWT, which is
-why Dispatch runs this. The webhook the App delivers to is the Envoy listener's
+documented approach. Every two minutes it lists the App webhook's attempts
+(`GET /app/hook/deliveries`), takes each whose status is not `OK`, and asks GitHub to redeliver
+each failed delivery (`POST /app/hook/deliveries/{id}/attempts`). Both endpoints accept only an
+App JWT, which is why Dispatch runs this. The webhook the App delivers to is the Envoy listener's
 `/webhook/github`. A redelivery carries the original `X-GitHub-Delivery`, and the listener
 publishes GitHub envelopes under a JetStream MsgId of it. So redelivering a delivery that did
 reach the stream adds nothing to the stream.
@@ -80,7 +80,14 @@ reach the stream adds nothing to the stream.
   on the next sweep. If that redelivery fails too, it is retried after 2, 4, 8 and 16 minutes, at most
   five times.
 - A redelivery request GitHub refuses (for example 422) delivers nothing. It is asked again on
-  the same backoff, at most five times.
+  the same backoff, at most five times, even after its failed attempt is older than the sweep's
+  hour: a refused request adds no attempt to GitHub's log, so the sweep's record brings it back.
+- A rate-limited answer (403 or 429, as GitHub's REST rate-limit documentation describes one)
+  stops the sweep and counts nothing against the delivery. No sweep sends GitHub anything until
+  the time GitHub gave (`Retry-After`, or `x-ratelimit-reset` when no requests remain), and at
+  least one minute, doubling while limits follow one another. It logs
+  `level=WARN msg="webhook redelivery rate-limited by GitHub"`. Redelivery requests go a second
+  apart, as GitHub asks of a large number of POSTs.
 - A delivery the listener answered with 4xx is never redelivered: the listener refused the
   request itself, and the same bytes would fail the same way.
 - Giving up logs `level=ERROR msg="webhook redelivery exhausted"`. A 4xx logs
@@ -89,9 +96,10 @@ reach the stream adds nothing to the stream.
 - A sweep looks back one hour. After a gap in sweeping (Dispatch down), it resumes from its
   cursor, back to GitHub's three days. The first sweep ever made looks back one hour only.
 
-The cursor and one record per delivery acted on live in the JetStream KV bucket
-`envoy_webhook_redelivery`. Its 72-hour TTL matches GitHub's horizon. A compare-and-swap
-claim keeps two Dispatch processes from requesting the same attempt twice.
+The cursor, the last rate limit, and one record per delivery acted on live in the JetStream KV
+bucket `envoy_webhook_redelivery`. Its 72-hour TTL matches GitHub's horizon. A compare-and-swap
+claim keeps two Dispatch processes from requesting the same attempt twice, and the operator
+command honours the same rate limit.
 
 The operator command runs the same sweep over a chosen window. It does not move the running
 sweep's cursor. `--dry-run` lists every failed delivery and what the sweep would do with it,

@@ -18,9 +18,10 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/redeliver"
 )
 
-// redeliveryPace spaces redelivery requests so a burst of failures does not trip GitHub's abuse
-// limits.
-const redeliveryPace = 200 * time.Millisecond
+// redeliveryPace spaces redelivery requests a second apart, as GitHub's REST best practices ask of
+// a large number of POSTs: 60 a minute, 300 of the 900 points a minute GitHub's secondary limit
+// allows an endpoint.
+const redeliveryPace = time.Second
 
 // webhookSweeper builds the redelivery sweep for the App whose key Dispatch holds. It returns nil
 // when there is no key to sign with (the endpoints take only an App JWT) or no NATS for its
@@ -92,6 +93,10 @@ func redeliverWebhooks(ctx context.Context, args []string, out io.Writer) int {
 		fmt.Fprintf(out, "redeliver-webhooks: %v\n", err)
 		return 1
 	}
+	if !report.RateLimitedUntil.IsZero() {
+		fmt.Fprintf(out, "redeliver-webhooks: GitHub rate-limited the App; no sweep asks it anything before %s\n", report.RateLimitedUntil.Format(time.RFC3339))
+		return 1
+	}
 	return 0
 }
 
@@ -110,8 +115,9 @@ func writeRedeliveryReport(out io.Writer, report redeliver.Report) {
 	_ = table.Flush()
 	fmt.Fprintf(out, "redeliver-webhooks: since=%s failed_attempts=%d deliveries=%d", report.Since.Format(time.RFC3339), report.Listed, len(report.Decisions))
 	for _, outcome := range []redeliver.Outcome{
-		redeliver.Redelivered, redeliver.WouldRedeliver, redeliver.RequestRefused, redeliver.Waiting,
-		redeliver.Pending, redeliver.Terminal, redeliver.Exhausted, redeliver.Closed, redeliver.ClaimedElsewhere,
+		redeliver.Redelivered, redeliver.WouldRedeliver, redeliver.RequestRefused, redeliver.RateLimited,
+		redeliver.Waiting, redeliver.Pending, redeliver.Terminal, redeliver.Exhausted, redeliver.Closed,
+		redeliver.ClaimedElsewhere,
 	} {
 		if n := report.Count(outcome); n > 0 {
 			fmt.Fprintf(out, " %s=%d", outcome, n)
@@ -119,6 +125,9 @@ func writeRedeliveryReport(out io.Writer, report redeliver.Report) {
 	}
 	if !report.Complete {
 		fmt.Fprint(out, " complete=false")
+	}
+	if !report.RateLimitedUntil.IsZero() {
+		fmt.Fprintf(out, " rate_limited_until=%s", report.RateLimitedUntil.Format(time.RFC3339))
 	}
 	fmt.Fprintln(out)
 }

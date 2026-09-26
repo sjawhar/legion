@@ -10,9 +10,14 @@
 // of that GUID's dedupe key, so asking again for a delivery that did reach the stream adds
 // nothing to it.
 //
-// The listing asks GitHub for status=failure, a status code from 400 to 599. GitHub records a
-// delivery it could not complete in that range too: a refused connection as 502, a reset one as
-// 500.
+// The listing takes every attempt whose status is not OK, as GitHub's own redelivery script does.
+// GitHub's status=failure filter takes only status codes from 400 to 599, and nothing shows that
+// GitHub gives an attempt that got no HTTP answer (a timeout, a refused or reset connection) a
+// code in that range.
+//
+// GitHub rate-limits the App: redelivery requests are paced (Sweeper.Pace), and a rate-limited
+// answer to any request stops the sweep, which then sends GitHub nothing until the time GitHub
+// gave.
 //
 // Dispatch runs the sweep because it holds the App's private key, which the list and redeliver
 // endpoints require (they take only an App JWT).
@@ -54,6 +59,7 @@ const (
 	maxBackoff      = 16 * time.Minute
 	defaultRequests = 300
 	cursorKey       = "cursor"
+	limitKey        = "rate_limit"
 	recordPrefix    = "guid."
 )
 
@@ -99,6 +105,9 @@ const (
 	Closed Outcome = "closed"
 	// ClaimedElsewhere: another sweeper claimed this attempt first.
 	ClaimedElsewhere Outcome = "claimed-elsewhere"
+	// RateLimited: GitHub answered the redelivery request over a rate limit. Nothing is counted
+	// against the delivery; it is asked again once the limit has passed.
+	RateLimited Outcome = "rate-limited"
 )
 
 // Decision is one delivery the sweep listed and what became of it.
@@ -114,13 +123,18 @@ type Decision struct {
 	Outcome      Outcome
 }
 
-// Report is one sweep's listing and decisions, newest delivery first.
+// Report is one sweep's listing and decisions: the listed deliveries newest first, then the
+// refused deliveries it asked again for that the listing no longer returned.
 type Report struct {
 	Since     time.Time
 	Listed    int
 	Decisions []Decision
-	// Complete is false when the sweep stopped at its request cap before deciding every delivery.
+	// Complete is false when the sweep stopped before deciding every delivery: at its request
+	// cap, or at a rate limit.
 	Complete bool
+	// RateLimitedUntil is set when GitHub rate-limited the App: the sweep stopped, and no sweep
+	// sends GitHub anything before it.
+	RateLimitedUntil time.Time
 }
 
 // Count returns how many decisions had outcome.
@@ -151,8 +165,9 @@ type Sweeper struct {
 	Logger *slog.Logger
 	// Now is the clock; nil is time.Now.
 	Now func() time.Time
-	// Pace is the pause between redelivery requests, so a large backlog does not trip GitHub's
-	// abuse limits.
+	// Pace is the pause between redelivery requests. GitHub asks for a second between POSTs
+	// ("Best practices for using the REST API"), under a secondary limit of 900 points a minute
+	// per endpoint at 5 points a POST.
 	Pace time.Duration
 	// MaxRequests caps redelivery requests per sweep; zero is 300.
 	MaxRequests int
@@ -171,10 +186,21 @@ type record struct {
 	Answered  []int64 `json:"answered,omitempty"`
 	Terminal  bool    `json:"terminal,omitempty"`
 	Exhausted bool    `json:"exhausted,omitempty"`
+	// Delivery is the attempt the last request named. A refused request adds no attempt to
+	// GitHub's log, so this is how a sweep asks again for a delivery its listing no longer returns.
+	Delivery githubapp.Delivery `json:"delivery"`
 }
 
 type cursorRecord struct {
 	At time.Time `json:"at"`
+}
+
+// limitRecord is the rate limit GitHub last answered with, shared by every sweeper on the bucket.
+type limitRecord struct {
+	// Until is when a sweep may send GitHub a request again.
+	Until time.Time `json:"until"`
+	// Strikes counts rate limits with no sweep clear of one in between; each doubles the wait.
+	Strikes int `json:"strikes"`
 }
 
 // Run sweeps now and then every interval until ctx ends, logging each sweep.
@@ -186,7 +212,7 @@ func (s *Sweeper) Run(ctx context.Context, interval time.Duration) {
 		if err != nil {
 			s.Logger.Warn("webhook redelivery sweep failed", "error", err)
 		} else {
-			s.Logger.Info("webhook redelivery sweep",
+			attrs := []any{
 				"since", report.Since.Format(time.RFC3339),
 				"failed_attempts", report.Listed,
 				"deliveries", len(report.Decisions),
@@ -196,7 +222,11 @@ func (s *Sweeper) Run(ctx context.Context, interval time.Duration) {
 				"terminal", report.Count(Terminal),
 				"exhausted", report.Count(Exhausted),
 				"complete", report.Complete,
-			)
+			}
+			if !report.RateLimitedUntil.IsZero() {
+				attrs = append(attrs, "rate_limited_until", report.RateLimitedUntil.Format(time.RFC3339))
+			}
+			s.Logger.Info("webhook redelivery sweep", attrs...)
 		}
 		select {
 		case <-ctx.Done():
@@ -206,8 +236,9 @@ func (s *Sweeper) Run(ctx context.Context, interval time.Duration) {
 	}
 }
 
-// Sweep lists the failed deliveries in its window and decides each: redeliver it, wait out its
-// backoff, leave a pending redelivery alone, or give up on it.
+// Sweep lists the failed deliveries in its window, adds the refused deliveries the listing no
+// longer returns, and decides each: redeliver it, wait out its backoff, leave a pending
+// redelivery alone, or give up on it. A rate-limited answer from GitHub ends the sweep there.
 func (s *Sweeper) Sweep(ctx context.Context, opts Options) (Report, error) {
 	now := s.now()
 	continuous := opts.Since.IsZero()
@@ -228,11 +259,26 @@ func (s *Sweeper) Sweep(ctx context.Context, opts Options) (Report, error) {
 			since = resume
 		}
 	}
+	report := Report{Since: since, Complete: true}
+	limit, err := s.readLimit()
+	if err != nil {
+		return Report{}, err
+	}
+	if now.Before(limit.Until) {
+		report.Complete, report.RateLimitedUntil = false, limit.Until
+		return report, nil
+	}
+
+	var limited *githubapp.RateLimitError
 	failed, err := s.GitHub.FailedDeliveries(ctx, since)
+	if errors.As(err, &limited) {
+		s.rateLimited(&report, limited, limit, now, opts.DryRun)
+		return report, nil
+	}
 	if err != nil {
 		return Report{}, fmt.Errorf("list failed webhook deliveries since %s: %w", since.Format(time.RFC3339), err)
 	}
-
+	report.Listed = len(failed)
 	byGUID := map[string][]githubapp.Delivery{}
 	var order []string
 	for _, delivery := range failed {
@@ -241,19 +287,31 @@ func (s *Sweeper) Sweep(ctx context.Context, opts Options) (Report, error) {
 		}
 		byGUID[delivery.GUID] = append(byGUID[delivery.GUID], delivery)
 	}
+	refused, err := s.refusedUnlisted(byGUID)
+	if err != nil {
+		return Report{}, err
+	}
+	for _, delivery := range refused {
+		order = append(order, delivery.GUID)
+		byGUID[delivery.GUID] = []githubapp.Delivery{delivery}
+	}
 
-	report := Report{Since: since, Listed: len(failed), Complete: true}
-	limit := s.MaxRequests
-	if limit <= 0 {
-		limit = defaultRequests
+	maxRequests := s.MaxRequests
+	if maxRequests <= 0 {
+		maxRequests = defaultRequests
 	}
 	requests := 0
 	for _, guid := range order {
-		if requests >= limit {
+		if requests >= maxRequests {
 			report.Complete = false
 			break
 		}
 		decision, requested, err := s.decide(ctx, guid, byGUID[guid], now, opts.DryRun)
+		if errors.As(err, &limited) {
+			report.Decisions = append(report.Decisions, decision)
+			s.rateLimited(&report, limited, limit, now, opts.DryRun)
+			return report, nil
+		}
 		if err != nil {
 			return report, err
 		}
@@ -269,10 +327,60 @@ func (s *Sweeper) Sweep(ctx context.Context, opts Options) (Report, error) {
 			}
 		}
 	}
+	if limit.Strikes > 0 && !opts.DryRun {
+		s.clearLimit()
+	}
 	if continuous && report.Complete && !opts.DryRun {
 		s.writeCursor(now, cursorRevision)
 	}
 	return report, nil
+}
+
+// rateLimited ends a sweep at a rate-limited answer. The wait is GitHub's, and at least a minute
+// doubled for each limit since a sweep last finished clear of one (up to 64 minutes), as GitHub
+// asks of a request that keeps failing on a secondary limit. A dry run records nothing.
+func (s *Sweeper) rateLimited(report *Report, limited *githubapp.RateLimitError, previous limitRecord, now time.Time, dryRun bool) {
+	next := limitRecord{Strikes: previous.Strikes + 1}
+	next.Until = now.Add(max(limited.Wait, time.Minute<<min(next.Strikes-1, 6)))
+	report.Complete, report.RateLimitedUntil = false, next.Until
+	s.Logger.Warn("webhook redelivery rate-limited by GitHub", "status", limited.Status, "until", next.Until.Format(time.RFC3339), "strikes", next.Strikes, "error", limited.Error())
+	if !dryRun {
+		s.writeLimit(next)
+	}
+}
+
+// refusedUnlisted returns the deliveries, newest first, whose last request GitHub refused and
+// that the listing did not return. A refused request adds no attempt to GitHub's log, so once a
+// delivery's failed attempts are older than the window, its record is all that brings it back.
+func (s *Sweeper) refusedUnlisted(listed map[string][]githubapp.Delivery) ([]githubapp.Delivery, error) {
+	watcher, err := s.State.Watch(recordPrefix+"*", nats.IgnoreDeletes())
+	if err != nil {
+		return nil, fmt.Errorf("list the redelivery records: %w", err)
+	}
+	defer watcher.Stop()
+	var refused []githubapp.Delivery
+	for entry := range watcher.Updates() {
+		if entry == nil {
+			break
+		}
+		guid := strings.TrimPrefix(entry.Key(), recordPrefix)
+		if _, seen := listed[guid]; seen {
+			continue
+		}
+		var current record
+		if err := json.Unmarshal(entry.Value(), &current); err != nil {
+			return nil, fmt.Errorf("decode the redelivery record of %s: %w", guid, err)
+		}
+		if current.Refusals == 0 || current.Terminal || current.Exhausted {
+			continue
+		}
+		if current.Delivery.GUID != guid {
+			return nil, fmt.Errorf("the redelivery record of %s counts %d refused requests and names delivery %q", guid, current.Refusals, current.Delivery.GUID)
+		}
+		refused = append(refused, current.Delivery)
+	}
+	slices.SortFunc(refused, func(a, b githubapp.Delivery) int { return b.DeliveredAt.Compare(a.DeliveredAt) })
+	return refused, nil
 }
 
 // decide settles one delivery from its failed attempts (newest first) and its record. requested
@@ -343,6 +451,7 @@ func (s *Sweeper) decide(ctx context.Context, guid string, attempts []githubapp.
 	claim.Attempts++
 	claim.Refusals = 0
 	claim.LastAttemptAt = now
+	claim.Delivery = newest
 	for _, attempt := range attempts {
 		if !slices.Contains(claim.Answered, attempt.ID) {
 			claim.Answered = append(claim.Answered, attempt.ID)
@@ -353,7 +462,17 @@ func (s *Sweeper) decide(ctx context.Context, guid string, attempts []githubapp.
 		decision.Outcome = ClaimedElsewhere
 		return decision, false, nil
 	}
-	if err := s.GitHub.Redeliver(ctx, newest.ID); err != nil {
+	err = s.GitHub.Redeliver(ctx, newest.ID)
+	var limited *githubapp.RateLimitError
+	if errors.As(err, &limited) {
+		// GitHub refused to take the request at all: the delivery stands as it was before the claim.
+		if !s.writeRecord(guid, current, claimRevision) {
+			s.Logger.Error("webhook redelivery claim not undone after a rate limit; the delivery reads as pending", s.attrs(decision)...)
+		}
+		decision.Outcome = RateLimited
+		return decision, true, err
+	}
+	if err != nil {
 		refused := claim
 		refused.Attempts = current.Attempts
 		refused.Refusals = current.Refusals + 1
@@ -428,6 +547,40 @@ func (s *Sweeper) writeCursor(at time.Time, revision uint64) {
 	}
 	if err != nil && !isConflict(err) {
 		s.Logger.Warn("webhook redelivery cursor not written", "error", err)
+	}
+}
+
+func (s *Sweeper) readLimit() (limitRecord, error) {
+	entry, err := s.State.Get(limitKey)
+	if errors.Is(err, nats.ErrKeyNotFound) {
+		return limitRecord{}, nil
+	}
+	if err != nil {
+		return limitRecord{}, fmt.Errorf("read the redelivery rate limit: %w", err)
+	}
+	var limit limitRecord
+	if err := json.Unmarshal(entry.Value(), &limit); err != nil {
+		return limitRecord{}, fmt.Errorf("decode the redelivery rate limit: %w", err)
+	}
+	return limit, nil
+}
+
+// writeLimit records a rate limit for every sweeper on the bucket. Last writer wins: each value is
+// GitHub's own answer at that moment.
+func (s *Sweeper) writeLimit(limit limitRecord) {
+	value, err := json.Marshal(limit)
+	if err == nil {
+		_, err = s.State.Put(limitKey, value)
+	}
+	if err != nil {
+		s.Logger.Error("webhook redelivery rate limit not recorded; the next sweep may ask GitHub before it passes", "until", limit.Until.Format(time.RFC3339), "error", err)
+	}
+}
+
+// clearLimit forgets the rate limits once a sweep has finished clear of one.
+func (s *Sweeper) clearLimit() {
+	if err := s.State.Delete(limitKey); err != nil {
+		s.Logger.Warn("webhook redelivery rate limit not cleared", "error", err)
 	}
 }
 
