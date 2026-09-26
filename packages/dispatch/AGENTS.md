@@ -111,13 +111,13 @@ pre-hydration `:root` fallback and Proof editor variables, both outside the `dar
 mechanism) equal the exact OKLCH-computed value of the palette swatch their trailing
 `/* swatch-name */` comment names. Adding a new color pairing means adding a registered
 composite to `classes.ts`, not inventing a shade inline. The document editor
-(`@sjawhar/proof-editor`) themes itself through CSS variables scoped to `.proof-editor`;
+(`@legion/proof-editor`) themes itself through CSS variables scoped to `.proof-editor`;
 `styles.css` maps them to palette swatches under `.dispatch-doc .proof-editor` for both schemes,
 and those literals are what `styles-css-pin.test.ts` pins.
 
 ## Document editor
 
-`features/doc/` adapts `@sjawhar/proof-editor` to Dispatch: it owns the Hocuspocus/Yjs
+`features/doc/` adapts `@legion/proof-editor` to Dispatch: it owns the Hocuspocus/Yjs
 connection, accessible editor attributes, selected-version presentation, CSS Custom Highlight API
 search highlights, and the bridge between Proof marks and margin cards. `@hocuspocus/provider`,
 `yjs`, and the editor library all sit behind `import()` — `loadDocumentTransport` and `createDoc`
@@ -138,7 +138,10 @@ to `failed` — a rose dot — and renders the error under the toolbar rather th
 "connecting". `DocumentRuntime` supplies the transport and editor creation seams
 (`loadTransport`, `createEditor`); happy-dom tests use its doubles from
 `web/src/__tests__/document-runtime.ts`, while `e2e/editor.ts` drives the real editor in
-Playwright. Library capability gaps belong in `sjawhar/proof-sdk`, not host-side workarounds.
+Playwright. The editor entry, typed blocks and block ids are legion's own, in
+`packages/proof-editor` (its AGENTS.md has the boundary); a gap there is fixed there. Only the
+editor modules that package imports — marks, the mark popover, the schema plugins — still belong
+to `sjawhar/proof-sdk`, and a gap in one of those is fixed there, not worked around here.
 Live document block links use `#b-<blockId>`: once Proof is ready, Dispatch focuses and pulses that stable block. Copying a document block link uses the selected block's `blockId`; historical versions stay read-only markdown views.
 
 Before constructing Proof, Dispatch fetches `/api/v1/schema/blocks` once and keeps the schema by
