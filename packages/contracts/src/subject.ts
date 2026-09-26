@@ -16,6 +16,15 @@ export function legionNoticeSubject(project: string, issue: string) {
   return `${LEGION_NOTICE_TOPIC_PREFIX}${project}.${issue}`;
 }
 
+/** The Go daemon's controller topic for `project` (the project token): the notice family's one
+ * member that names no issue, since no issue key can be `controller`. What the Go daemon publishes
+ * here is listed at `notify.ControllerTopic` (packages/daemon-go/internal/notify). */
+export function legionControllerNoticeSubject<Project extends string>(
+  project: Project
+): LegionNoticeSubject<Project, "controller"> {
+  return legionNoticeSubject(project, "controller");
+}
+
 export const DISPATCH_TOPIC_PREFIX = "notifications.dispatch." as const;
 export const DISPATCH_ISSUE_TOPIC_PREFIX = `${DISPATCH_TOPIC_PREFIX}issue.` as const;
 export const DISPATCH_DOCUMENT_TOPIC_PREFIX = `${DISPATCH_TOPIC_PREFIX}document.` as const;

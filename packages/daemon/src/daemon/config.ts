@@ -1,7 +1,12 @@
 import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
-import { DISPATCH_KEY_PATTERN, type IssueKey, type LegionRole } from "@legion/contracts";
+import {
+  DISPATCH_KEY_PATTERN,
+  type IssueKey,
+  type LegionRole,
+  legionProjectToken,
+} from "@legion/contracts";
 import { parse } from "yaml";
 import { z } from "zod";
 import type { ImageDigestRef } from "./image-ref";
@@ -1135,17 +1140,6 @@ export function loadConfigFromFile(
   if (githubApps !== undefined) fields.githubApps = githubApps;
 
   return fields;
-}
-
-/** The one rule that turns the operator-written `project` (`legion.yaml`'s value, `LEGION_ID`,
- * `sjawhar/legion`) into the Legion project token every role token, secret file, and
- * `LEGION_PROJECT` carries (`sjawharlegion`): lowercased, every non-alphanumeric dropped. Shared
- * with `legion controller start`'s operator-side loader so an operator's copied value lands on the
- * daemon's own controller token; a value that sanitizes to nothing is refused naming `field`. */
-export function legionProjectToken(value: string, field: string): string {
-  const project = value.toLowerCase().replace(/[^a-z0-9]/g, "");
-  if (!project) throw new Error(`${field} must include at least one alphanumeric character`);
-  return project;
 }
 
 export function resolveDaemonConfig(

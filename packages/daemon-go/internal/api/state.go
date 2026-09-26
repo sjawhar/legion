@@ -108,8 +108,12 @@ type Issue struct {
 	Generation uint64      `json:"generation"`
 	Phase      phase.Phase `json:"phase"`
 	// Status is the last Dispatch status the daemon observed for the issue.
-	Status    string     `json:"status"`
-	Architect *ClaimView `json:"architect,omitempty"`
+	Status string `json:"status"`
+	// HoldReason is why a held issue is held, when its hold has one: `escalated` once its architect
+	// sent it to the controller. Absent otherwise, and absent while the issue's tree lingers or is
+	// closed: the record keeps the reason, and the view shows it again once the tree is re-admitted.
+	HoldReason string     `json:"holdReason,omitempty"`
+	Architect  *ClaimView `json:"architect,omitempty"`
 	// Workers is keyed by the role that holds the claim; the vocabulary of a claim belongs to
 	// `internal/claim`, which the runtime, the worker stream, and the supervisor all speak
 	// without importing this package.
