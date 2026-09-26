@@ -176,7 +176,7 @@ func (g pluginGate) verify(ctx context.Context) error {
 		}
 	}
 	check := promptCheck{names: names, skipAgentModels: g.skipAgentModels}
-	loadedFrom, err := g.loadedFrom(ctx, lane, lane.notLoaded(plugin.version), check)
+	loadedFrom, err := g.loadedFrom(ctx, lane, plugin.version, check)
 	if err != nil {
 		return err
 	}
@@ -451,10 +451,11 @@ func readPluginManifest(manifest, installInto string, contract int) (pluginManif
 // first as a spawn creates them — lists its models with the probe extension added in lane's way,
 // and passes only when the probe saw the plugin's load marker, found every task agent and skill
 // check names (none for the controller probe), and answered that each of those agents runs on its
-// own model (unless the gate skips that). notLoaded is the refusal for an Oh My Pi that answered
-// without loading it. The classification is the shipped one (killedOutcome, and
-// verifyLegionPluginLoaded's own transient and definitive rule).
-func (g pluginGate) loadedFrom(ctx context.Context, lane pluginLane, notLoaded error, check promptCheck) (string, error) {
+// own model (unless the gate skips that). An Oh My Pi that answered without loading it gets the
+// lane's notLoaded, naming version, the plugin the contract probe read ("" when it read none). The
+// classification is the shipped one (killedOutcome, and verifyLegionPluginLoaded's own transient
+// and definitive rule).
+func (g pluginGate) loadedFrom(ctx context.Context, lane pluginLane, version string, check promptCheck) (string, error) {
 	for _, name := range []string{"XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"} {
 		if dir := g.env[name]; dir != "" {
 			if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -470,7 +471,7 @@ func (g pluginGate) loadedFrom(ctx context.Context, lane pluginLane, notLoaded e
 	launch := omplaunch.WithPrefix(g.prefix, g.invocation)
 	location := ""
 	err = bootprobe.Run(ctx, "pi-legion-envoy load", g.retry, g.log, func(ctx context.Context) bootprobe.Outcome {
-		outcome, from := g.probeLoad(ctx, launch, probe, lane, notLoaded, check)
+		outcome, from := g.probeLoad(ctx, launch, probe, lane, version, check)
 		location = from
 		return outcome
 	})
@@ -533,9 +534,9 @@ func owningManifest(file string) (string, error) {
 	}
 }
 
-// probeLoad is one load-probe attempt, and, on a pass, where the plugin loaded from. notLoaded is
-// the refusal for an Oh My Pi that answered without loading the plugin.
-func (g pluginGate) probeLoad(ctx context.Context, launch, probe string, lane pluginLane, notLoaded error, check promptCheck) (bootprobe.Outcome, string) {
+// probeLoad is one load-probe attempt, and, on a pass, where the plugin loaded from. An Oh My Pi
+// that answered without loading the plugin gets the lane's notLoaded for version.
+func (g pluginGate) probeLoad(ctx context.Context, launch, probe string, lane pluginLane, version string, check promptCheck) (bootprobe.Outcome, string) {
 	script := `exec ` + launch + ` models ` + lane.flags + ` --json >/dev/null`
 	if exports := append(check.assignments(), lane.exports...); len(exports) > 0 {
 		script = "export " + strings.Join(exports, " ") + "; " + script
@@ -573,7 +574,7 @@ func (g pluginGate) probeLoad(ctx context.Context, launch, probe string, lane pl
 	if r.exit != 0 && !strings.Contains(r.output, notLoadedMarker) {
 		return bootprobe.Outcome{Refusal: errors.New(r.quoting(fmt.Sprintf("OMP launch probe failed (exit %d) for launch command %q", r.exit, launch)))}, ""
 	}
-	return bootprobe.Outcome{Refusal: notLoaded}, ""
+	return bootprobe.Outcome{Refusal: lane.notLoaded(version)}, ""
 }
 
 // verifyAgentsCapability is the pi.agents probe (verifyOmpAgentsCapability, boot-probes.ts):
@@ -847,10 +848,16 @@ func ProbeController(ctx context.Context, p ControllerProbe) error {
 	// Neither refusal names a profile: which one Oh My Pi reads is its own resolution, which this
 	// does not port, so the words say only what Oh My Pi did, where it ran, and how.
 	launch := omplaunch.WithPrefix(p.Prefix, p.Omp)
-	// The controller's lane is discovery's, with its own refusal: it reads no manifest, and a check
-	// that names nothing needs no words for how the plugin loaded.
-	location, err := g.loadedFrom(ctx, pluginLane{flags: discoveryFlags}, fmt.Errorf("Oh My Pi, launched as the controller launches it (%q, in %s), did not load pi-legion-envoy (not installed, disabled, or unregistered). Install the @sjawhar/pi-legion-envoy release built from this daemon's commit into the Oh My Pi the controller runs, and check it with `cd %s && %s plugin list` under the controller's environment: a .env or a project plugin root there applies",
-		launch, p.WorkDir, shellprefix.Word(p.WorkDir), launch), promptCheck{})
+	// The controller's lane is discovery's, with its own refusal: it reads no manifest, so it names
+	// no version, and a check that names nothing needs no words for how the plugin loaded.
+	lane := pluginLane{
+		flags: discoveryFlags,
+		notLoaded: func(string) error {
+			return fmt.Errorf("Oh My Pi, launched as the controller launches it (%q, in %s), did not load pi-legion-envoy (not installed, disabled, or unregistered). Install the @sjawhar/pi-legion-envoy release built from this daemon's commit into the Oh My Pi the controller runs, and check it with `cd %s && %s plugin list` under the controller's environment: a .env or a project plugin root there applies",
+				launch, p.WorkDir, shellprefix.Word(p.WorkDir), launch)
+		},
+	}
+	location, err := g.loadedFrom(ctx, lane, "", promptCheck{})
 	if err != nil {
 		return err
 	}
