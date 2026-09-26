@@ -171,7 +171,10 @@ subscription lasts while the session holds the controller role (`subscribeLegion
 `whileHolding`): once another live session holds it, the heartbeat's refused re-assertion closes
 it, so a replaced controller stops taking wakes within one heartbeat, and a dropped connection's
 retries, each compared with the role's state when the connection dropped, do not reopen it once
-the role has ended. It is never registered with
+the role has ended. A `/new` or `/resume` keeps it open whichever extension handles the switch
+first: Oh My Pi runs the manifest's order but moves on from a handler that outlasts its 30-second
+budget, and the switch's drop of the outgoing role (`endOutgoingRole`) leaves a role already
+claimed under the new session id alone. It is never registered with
 the listener, so a replaced controller resumed later gets it back only by claiming the role, which
 the daemon refuses its replaced capability. It is a live wake that changes no
 request, response or pane variable, and a daemon publishes to the topic whether anyone listens. A

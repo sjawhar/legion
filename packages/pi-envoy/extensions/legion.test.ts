@@ -5544,6 +5544,9 @@ async function goController(options: {
   /** The project the daemon's `GET /legion/v1/state` names, as its operator wrote it: `OMP`,
    * whose token is `omp`, unless a test says otherwise. */
   readonly daemonProject?: string;
+  /** Which extension handles a session event first: the manifest's `envoy.ts` unless a test
+   * binds `legion.ts` first. */
+  readonly order?: "envoy.ts" | "legion.ts";
 }): Promise<{
   readonly token: string;
   readonly registration: Record<string, unknown>;
@@ -5649,8 +5652,9 @@ async function goController(options: {
     exits.push(code);
     throw new Error("process would exit");
   });
-  const fixture = createPi();
+  const fixture = createPi({ bindEnvoy: options.order !== "legion.ts" });
   legionExtension(fixture.pi);
+  if (options.order === "legion.ts") envoyExtension(fixture.pi as never);
   return {
     token,
     registration,
@@ -6115,6 +6119,46 @@ describe("the Go daemon's operator-launched controller (LEGION_DAEMON_API=go, LE
       "/legion/v1/claims/register",
     ]);
   });
+
+  // Oh My Pi runs one event's handlers extension by extension in manifest order (envoy.ts, then
+  // legion.ts), awaiting each, but moves on to the next extension when a handler outlasts its
+  // 30-second budget (`ExtensionRunner.emit` and `EXTENSION_HANDLER_TIMEOUT_MS`,
+  // packages/coding-agent/src/extensibility/extensions/runner.ts at the pinned fork release), so a
+  // slow rebind can still be running when legion.ts reclaims. Nothing may depend on the order.
+  for (const order of ["envoy.ts", "legion.ts"] as const) {
+    test(`keeps its controller topic open across /new and /resume when ${order} handles the switch first`, async () => {
+      const topic = "notifications.legion.omp.controller";
+      const controller = await goController({ sessionId: "ses_go_controller_before", order });
+      await controller.handlers.get("session_start")?.(
+        {},
+        controller.context("ses_go_controller_before")
+      );
+      // A subject is open while it was subscribed more often than unsubscribed on a live connection.
+      const openSubjects = () =>
+        natsConnections
+          .filter((connection) => !connection.closed)
+          .flatMap((connection) =>
+            [...new Set(connection.subjects)].filter(
+              (subject) =>
+                connection.subjects.filter((candidate) => candidate === subject).length >
+                connection.unsubscribed.filter((candidate) => candidate === subject).length
+            )
+          );
+      expect(openSubjects()).toContain(topic);
+
+      for (const [reason, sessionId] of [
+        ["new", "ses_go_controller_new"],
+        ["resume", "ses_go_controller_resumed"],
+      ] as const) {
+        await controller.handlers.get("session_switch")?.(
+          { reason },
+          controller.context(sessionId, `/tmp/${sessionId}.jsonl`)
+        );
+        expect(openSubjects()).toContain(`notifications.agent.${sessionId}`);
+        expect(openSubjects()).toContain(topic);
+      }
+    });
+  }
 
   test("refuses before it registers when LEGION_PROJECT is not the daemon's project", async () => {
     // Registering replaces the running controller's session and secret, so a claim for another

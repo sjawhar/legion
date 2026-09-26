@@ -276,6 +276,8 @@ export default function envoyExtension(pi: PiApi): void {
   let sessionID = "";
   let heartbeatRegistered = false;
   let claimedRoleTopic: string | undefined;
+  // The session id `claimedRoleTopic` was claimed under (endOutgoingRole).
+  let claimedRoleSessionID: string | undefined;
   // Notice subjects this session takes only while it holds `claimedRoleTopic` (the Go controller's
   // topic, go-bootstrap.ts). They are never registered with the listener, so a resumed process
   // cannot recover them: the role's claim is their only source, and `endRole` closes them.
@@ -644,9 +646,19 @@ export default function envoyExtension(pi: PiApi): void {
   // another session replaced stops taking the role's wakes.
   const endRole = (): void => {
     claimedRoleTopic = undefined;
+    claimedRoleSessionID = undefined;
     roleEnds += 1;
     for (const subject of roleNoticeSubjects) closeIntentionally(subject);
     roleNoticeSubjects.clear();
+  };
+
+  // A `new` or `resume` switch installs an unrelated transcript, so the outgoing session's role is
+  // not carried into it. A role claimed under the current session id is not the outgoing one's:
+  // Oh My Pi moves on to legion.ts's handler when envoy.ts's outlasts its budget, so the Legion
+  // reclaim can claim for the new session before this rebind runs, and that claim, with the notice
+  // subjects it opened, stays.
+  const endOutgoingRole = (): void => {
+    if (claimedRoleSessionID !== sessionID) endRole();
   };
 
   // Whether `topic` serves the role this session holds, and how many roles had ended, at one
@@ -873,6 +885,7 @@ export default function envoyExtension(pi: PiApi): void {
     // Moving to another role ends the one this session held.
     if (previousTopic !== undefined && previousTopic !== topic) endRole();
     claimedRoleTopic = topic;
+    claimedRoleSessionID = sessionID;
     // The transcript is the one thing `omp --resume` guarantees, so it is
     // the durable record of the claim: the listener reaps a dead session's
     // interest row (role claim included) after its ten-minute stale-interest
@@ -926,7 +939,7 @@ export default function envoyExtension(pi: PiApi): void {
     // re-assert and a rebind is a clean move. Must run after registerSession:
     // the listener rejects a claim from an unregistered session. Quiet on
     // failure: session start must not depend on it.
-    if (!carryPreviousSessionRole) endRole();
+    if (!carryPreviousSessionRole) endOutgoingRole();
     const remembered = transcriptClaimedRole(branch);
     if (remembered === null) {
       endRole();
@@ -967,7 +980,7 @@ export default function envoyExtension(pi: PiApi): void {
     previousSessionID = sessionID
   ): Promise<void> => {
     const previousTopic = previousSessionID === "" ? undefined : agentSubject(previousSessionID);
-    if (options.carryPreviousSessionRole === false) endRole();
+    if (options.carryPreviousSessionRole === false) endOutgoingRole();
     restoreLocalSessionState(context);
     const branch = context.sessionManager.getBranch?.() ?? [];
     const resumed = branch.length > 0;
