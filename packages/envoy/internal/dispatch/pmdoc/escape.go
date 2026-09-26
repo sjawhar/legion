@@ -51,6 +51,9 @@ type escapeContext struct {
 	// afterMarker reports whether a mark's marker is written on the character's line before it,
 	// so that the character does not begin the line's text as the parser trims it.
 	afterMarker bool
+	// opener and closer are the delimiter character (`*` or `~`) of the mark written right
+	// before the text and of the one written right after it, or 0 when that is no delimiter.
+	opener, closer byte
 }
 
 // needsInlineEscape decides one character from the text alone.
@@ -65,7 +68,7 @@ func needsInlineEscape(value string, offset int, char rune, context escapeContex
 				needsInlineEscape(value, offset+1, rune(value[offset+1]), context)
 	case '*':
 		return (blockStart(value, textLineStart, offset) && markerTerminator(value, offset+1)) ||
-			emphasisDelimiter(value, offset, '*')
+			emphasisDelimiter(value, offset, '*') || besideDelimiter(value, offset, '*', context)
 	case '_':
 		return emphasisDelimiter(value, offset, '_')
 	case '`':
@@ -98,10 +101,13 @@ func needsInlineEscape(value string, offset int, char rune, context escapeContex
 		return context.urlSchemes && urlSchemeColon(value, offset)
 	case ' ', '\t':
 		// The parser trims whitespace that begins a line of a textblock's text or ends the
-		// textblock, so the first of a leading run and the last of a trailing one are written
-		// as the references it keeps.
+		// textblock, and a delimiter beside whitespace opens or closes no mark, so the first of
+		// a leading run and the last of a trailing one are written as the references it keeps,
+		// which the delimiter rule does not read as whitespace.
 		return offset == textLineStart && !context.marked && !context.afterMarker ||
-			offset+1 == len(value) && !context.followed
+			offset+1 == len(value) && !context.followed ||
+			offset == 0 && context.opener != 0 ||
+			offset+1 == len(value) && context.closer != 0
 	case '.', ')':
 		return orderedListMarkerPunctuation(value, offset, textLineStart)
 	default:
@@ -408,6 +414,19 @@ func indentedCodeRun(value string, offset int) bool {
 // it, for the one case where a backslash escape is not available.
 func numericEntity(char rune) string {
 	return fmt.Sprintf("&#%d;", char)
+}
+
+// besideDelimiter reports whether the run of delimiter holding offset touches a mark's run of the
+// same character, which it would join.
+func besideDelimiter(value string, offset int, delimiter byte, context escapeContext) bool {
+	start, end := offset, offset+1
+	for start > 0 && value[start-1] == delimiter {
+		start--
+	}
+	for end < len(value) && value[end] == delimiter {
+		end++
+	}
+	return start == 0 && context.opener == delimiter || end == len(value) && context.closer == delimiter
 }
 
 func emphasisDelimiter(value string, offset int, delimiter byte) bool {

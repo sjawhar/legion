@@ -2,6 +2,7 @@ package pmdoc
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -298,6 +299,51 @@ func TestRenderKeepsWhitespaceAtATextblocksEdges(t *testing.T) {
 	}{
 		{doc(paragraph(text(" x", link))), "[ x](https://x.test)\n"},
 		{doc(paragraph(text("a  b"))), "a  b\n"},
+	} {
+		if got := mustRender(t, test.tree); got != test.want {
+			t.Fatalf("Render() = %q, want the bytes main writes, %q", got, test.want)
+		}
+	}
+}
+
+// A delimiter beside whitespace cannot open or close emphasis, so bold, italic or struck text
+// that began or ended with a space read back as literal asterisks or tildes. That whitespace is
+// written as a reference, which is not whitespace to the delimiter rule.
+func TestRenderKeepsWhitespaceAtAMarksEdges(t *testing.T) {
+	text := func(value string, marks ...Mark) *Node { return &Node{Type: "text", Text: value, Marks: marks} }
+	strong, emphasis, strike := Mark{Type: "strong"}, Mark{Type: "emphasis"}, Mark{Type: "strike_through"}
+	link := Mark{Type: "link", Attrs: Attrs{"href": "https://x.test"}}
+	paragraph := func(children ...*Node) *Node {
+		return &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: children}}}
+	}
+	for name, tree := range map[string]*Node{
+		"bold text opening with a space":    paragraph(text(" x", strong), text(" tail")),
+		"italic text closing with a space":  paragraph(text("a "), text("x ", emphasis), text(" b")),
+		"struck text with both":             paragraph(text(" x ", strike), text(" tail")),
+		"after a hard break":                paragraph(text("a"), &Node{Type: "hardbreak", Attrs: Attrs{"isInline": false}}, text(" x", strong)),
+		"nested marks":                      paragraph(text("a "), text(" x", strong, emphasis), text(" b")),
+		"asterisks beside bold's delimiter": paragraph(text("***", strong), text(" tail")),
+		"a backslash and an asterisk":       paragraph(text("a\\*", emphasis), text(" tail")),
+		"bold inside a link":                paragraph(text("a "), text(" x", strong, link), text(" b")),
+	} {
+		t.Run(name, func(t *testing.T) {
+			markdown := mustRender(t, tree)
+			back, err := Parse(markdown)
+			if err != nil {
+				t.Fatalf("Parse(%q) = %v", markdown, err)
+			}
+			if got, want := inlineSignature(back.Children[0].Children), inlineSignature(tree.Children[0].Children); !slices.Equal(got, want) {
+				t.Fatalf("Parse(%q) = %q, want %q", markdown, got, want)
+			}
+		})
+	}
+	for _, test := range []struct {
+		tree *Node
+		want string
+	}{
+		{paragraph(text("a "), text(" x ", link), text(" b")), "a [ x ](https://x.test) b\n"},
+		{paragraph(text("a "), text("x y", strong), text(" b")), "a **x y** b\n"},
+		{paragraph(text("*.", strike), text(" b")), "~~*.~~ b\n"},
 	} {
 		if got := mustRender(t, test.tree); got != test.want {
 			t.Fatalf("Render() = %q, want the bytes main writes, %q", got, test.want)

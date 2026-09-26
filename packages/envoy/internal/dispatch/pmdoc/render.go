@@ -389,11 +389,11 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 		}
 		switch n.Type {
 		case "text":
-			next := visibleMarks(n.Marks)
-			hasLink := containsMark(next, "link")
-			bareURL := isBareURLLink(n, next, escapePipes)
-			if bareURL {
-				next = withoutMark(next, "link")
+			next := writtenMarks(n, escapePipes)
+			hasLink := containsMark(visibleMarks(n.Marks), "link")
+			var following []Mark
+			if index+1 < len(nodes) {
+				following = writtenMarks(nodes[index+1], escapePipes)
 			}
 			common := sharedMarks(active, next)
 			for i := len(active) - 1; i >= common; i-- {
@@ -421,6 +421,8 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 				tildes:     tildes,
 				heading:    context.heading,
 				marked:     len(next) > 0,
+				opener:     adjacentDelimiter(next[common:]),
+				closer:     adjacentDelimiter(next[sharedMarks(next, following):]),
 			})
 		case "hardbreak":
 			r.closeMarks(active, escapePipes)
@@ -757,6 +759,34 @@ func nodeHasMark(node *Node, markType string) bool {
 // invisible mark could fall between.
 var renderedMarkTypes = map[string]bool{
 	"link": true, "strong": true, "emphasis": true, "strike_through": true, "inlineCode": true,
+}
+
+// writtenMarks is the marks a node's text is written under: its visible marks, less a bare URL's
+// link, which the parser links again on its own. A node that is not text is written under none.
+func writtenMarks(node *Node, escapePipes bool) []Mark {
+	if node.Type != "text" {
+		return nil
+	}
+	marks := visibleMarks(node.Marks)
+	if isBareURLLink(node, marks, escapePipes) {
+		marks = withoutMark(marks, "link")
+	}
+	return marks
+}
+
+// adjacentDelimiter is the delimiter character of the innermost of marks opened or closed beside a
+// text, the one written next to it, or 0 when that mark is not written with a delimiter run.
+func adjacentDelimiter(marks []Mark) byte {
+	if len(marks) == 0 {
+		return 0
+	}
+	switch marks[len(marks)-1].Type {
+	case "strong", "emphasis":
+		return '*'
+	case "strike_through":
+		return '~'
+	}
+	return 0
 }
 
 func visibleMarks(marks []Mark) []Mark {
