@@ -1584,6 +1584,10 @@ export interface EditArtifactResponse {
   readonly changed?: boolean;
   /** Zero-based index of each operation that left the document as it found it. */
   readonly unchanged_ops?: number[];
+  /** Opaque SHA-256 token for the full Proof document state this edit produced, including inline
+   *  marks: the document precondition for the caller's next edit, with no read in between. Absent
+   *  from a Dispatch server predating it. */
+  readonly token?: string;
   readonly advice?: WriteAdvice;
 }
 

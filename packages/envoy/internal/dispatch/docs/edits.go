@@ -374,13 +374,14 @@ type editBatch struct {
 // so such a batch writes a version whose markdown equals the previous one's and stales an
 // approval pinned to it; without a summary SnapshotVersion compares renderings and writes
 // nothing. LEGION-260's follow-up makes the route version on the rendered markdown and keep
-// this verdict as its report to the agent.
+// this verdict as its report to the agent. That same post-batch token is the verdict's Token,
+// the document precondition the caller's next edit passes.
 func (b editBatch) outcome(applied int) (EditOutcome, error) {
 	after, err := nodeToken(b.tree)
 	if err != nil {
 		return EditOutcome{}, err
 	}
-	return EditOutcome{Applied: applied, Changed: after != b.before, Unchanged: b.unchanged}, nil
+	return EditOutcome{Applied: applied, Changed: after != b.before, Unchanged: b.unchanged, Token: after}, nil
 }
 
 // applyOperations applies each operation to its predecessor's tree so a
