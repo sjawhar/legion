@@ -66,12 +66,23 @@ heading's actual level — `find="## Old"`, `with="### New"` retitles and makes 
 so `find="# Old"` renames the text and keeps whatever level it selected. `with` that forms more than one
 paragraph is rejected (`INVALID_OP` on `with`) — see the recipe for a multi-paragraph rewrite below; so is any non-empty `with` that
 renders to no text, which a line indented four spaces or a tab does (markdown reads that as a code block), as does whitespace
-alone. An empty `with` is the one that deletes the matched text on purpose. Use zero-based `occurrence` for a
+alone. An empty `with` deletes the matched text on purpose; where the block holding it cannot be written without that
+paragraph, the replace is `INVALID_OP`, and the refusal names the `delete` that removes it instead. Inside a code
+block none of this applies: `with` is the code's literal text, written as sent, whitespace, markdown syntax and
+references included, except that line breaks at the end of the code's text, and a line holding only whitespace in a
+list item's code, do not survive the next read; and a line of three or more colons in code inside a typed block,
+indented less than four columns from where the typed block's lines start, is `INVALID_OP`, since the browser editor
+ends the typed block there - indent it four or more spaces (a tab reaches only the next tab stop, which inside a list
+item or a blockquote can be two columns away), or move the code block out of the typed block. Text a `replace` writes
+that would read as block syntax at a line start is stored escaped and reads back as the characters you sent: `---` over
+a paragraph is stored `\---`, not a rule, so to add a rule, `insert` it beside the paragraph (`insert` with markdown
+`***`). Use zero-based
+`occurrence` for a
 repeated target; re-read a missing or ambiguous target before retrying. Pass `summary` to name the version when recording a decision.
 
 **Rewriting several paragraphs is one `replace` per paragraph, then a read-back.** `replace` is inline:
-each `with` is the new text of one paragraph, and a `with` that forms two paragraphs is refused whatever the
-text says. Give each paragraph you rewrite its own `replace`, which keeps that paragraph's block id and every
+each `with` is the new text of one paragraph, and outside a code block a `with` that forms two paragraphs is
+refused whatever the text says. Give each paragraph you rewrite its own `replace`, which keeps that paragraph's block id and every
 anchor outside the text you rewrite. A comment or ask anchored to the text you rewrite loses its quote but keeps
 its pin to the block, so the dashboard still shows it beside that paragraph; a delete (below) loses both. An
 anchor that straddles the boundary keeps its mark over the words you left alone, with its quote shortened to
@@ -88,18 +99,26 @@ as literal text, except a backtick fence, which becomes an inline code span whos
 info string and line breaks included (```` ```go\nx := 1``` ```` becomes the code span `go` + a line break +
 `x := 1`), and a tilde fence, which stays literal.
 
-HTML is not written as text at all. A `with` whose HTML markdown reads as a block (`<div>x</div>`,
-`<!-- note -->`) is stored as inline HTML, and `dispatch_doc_read` then returns it raw, in markdown Dispatch
-will not take back: the schema carries no block HTML, so an `insert` or an upload of that markdown is refused.
-Keep HTML inside a line.
+Outside a code block, HTML is not written as text at all, and a `replace` whose HTML would open a block where it lands is refused
+(`INVALID_OP` on `with`), because the schema carries no block HTML. `<div>x</div>` and `<!-- note -->` open one
+at the start of a paragraph or a list item and on the line after a hard break; a tag such as `<br>` opens one
+only when it stands alone as a paragraph or a list item. The same HTML inside a line, in a table cell or in a
+heading is inline HTML and is kept as written.
+
+A hard line break in `with` (two trailing spaces or a backslash before a newline) is refused in a heading or a
+table cell (`INVALID_OP` on `with`): both are written on one line, so the break would end the block there. A line
+break inside a code span or inline HTML there is refused the same way. Write the text without the break, or
+`insert` a new block after this one.
 
 When the new text adds a block that is not a paragraph beside paragraphs, `insert` it beside the
 paragraph you replaced, which keeps that paragraph's id; only when no paragraph of the new text is left to take
-the old block's place is it an `insert` of the new block plus a `delete` of the old, and the delete is what
-costs the id (below). Then read the document back with
+the old block's place is it a `delete` of the old block and then an `insert` of the new one, anchored on the
+block before or after it. The delete is what costs the id (below); a typed block keeps its id when the insert
+carries it, which works only in that order, because an insert carrying an id the document still holds is refused.
+Then read the document back with
 `dispatch_doc_read` and read the passage and its neighbours, not a grep for the words you added: an empty
-`with` deletes the matched text on purpose, so a `replace` whose `with` you meant to fill empties that
-paragraph — the block and its id stay, holding nothing — and only a read shows what the document now says.
+`with` deletes the matched text on purpose where the block allows it, so a `replace` whose `with` you meant to fill
+empties that paragraph — the block and its id stay, holding nothing — and only a read shows what the document now says.
 
 A batch that leaves the document's semantic identity unchanged — including its inline anchor marks, so an edit that only orphans a
 comment or ask anchor still mints its version — mints no version, named or not: the response carries
@@ -117,8 +136,8 @@ attributes — a moved `ask` keeps its ask and answer. **A block loses its id on
 which is why they are refused while an open ask or unresolved comment sits on them; and a `move` that takes the last block out of a
 blockquote or list item removes that emptied container, the list too when no item remains, and each enclosing container that
 held nothing else (`> - Only.` loses the blockquote as well as the item and the list). The moved block itself keeps its id,
-as do `replace` (an empty `with` and a heading-level change included), `insert` and `retype`; `retype` carries the paragraph's id
-onto the typed block it becomes. Block ids are the `#id` a typed block renders
+as do `replace` (an accepted empty `with` and a heading-level change included), `insert` and `retype`; `retype` carries the
+paragraph's id onto the typed block it becomes. Block ids are the `#id` a typed block renders
 (`:::ask{#5467e5ce-…}`) and, for every block including untyped ones, the `id` rows from
 `GET /api/v1/artifacts/<artifact UUID>/blocks` (or `/api/v1/issues/{key}/artifacts/{slug}/blocks`), each with its `type` and byte range
 in canonical markdown; the UUID route does not accept a slug. A later operation in the same atomic batch that names a block removed by

@@ -42,24 +42,35 @@ var ErrTableWidth = errors.New("table row exceeds table width")
 // BlockBoundary returns the document-level boundary before or after the block
 // containing target.
 func BlockBoundary(doc *Node, target Range, after bool) (int, error) {
-	if doc == nil || doc.Type != "doc" {
-		return 0, fmt.Errorf("%w: BlockBoundary wants a document", ErrSchema)
-	}
-	if err := doc.Validate(); err != nil {
+	_, start, end, err := documentBlock(doc, target, "BlockBoundary")
+	if err != nil {
 		return 0, err
 	}
+	if after {
+		return end, nil
+	}
+	return start, nil
+}
+
+// BlockIndex returns the index, among the document's children, of the block containing target.
+func BlockIndex(doc *Node, target Range) (int, error) {
+	index, _, _, err := documentBlock(doc, target, "BlockIndex")
+	return index, err
+}
+
+func documentBlock(doc *Node, target Range, caller string) (index, start, end int, err error) {
+	if err := wantDocument(doc, caller); err != nil {
+		return 0, 0, 0, err
+	}
 	position := 0
-	for _, block := range doc.Children {
+	for index, block := range doc.Children {
 		end := position + nodeSize(block)
 		if target.From >= position && target.To <= end {
-			if after {
-				return end, nil
-			}
-			return position, nil
+			return index, position, end, nil
 		}
 		position = end
 	}
-	return 0, ErrTargetNotFound
+	return 0, 0, 0, ErrTargetNotFound
 }
 
 // InsertTableRows inserts a pipe-table row fragment beside the row containing

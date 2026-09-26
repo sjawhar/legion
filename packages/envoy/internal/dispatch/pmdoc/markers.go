@@ -107,6 +107,41 @@ func textblockMarker(doc, node *Node, path []int) BlockMarker {
 	return BlockMarker{}
 }
 
+// TextblockAt is the textblock whose content holds a position.
+type TextblockAt struct {
+	Node *Node
+	// Ancestors are the nodes around it, the nearest first and the document last.
+	Ancestors []*Node
+	// Content is the range its content covers.
+	Content Range
+}
+
+// ContainingTextblock returns the textblock whose content holds position, and reports false when
+// position is in none.
+func ContainingTextblock(doc *Node, position int) (TextblockAt, bool) {
+	var at TextblockAt
+	found := false
+	walk(doc, func(node *Node, path []int, pos, end int) bool {
+		if !isTextblock(node.Type) || position < pos+1 || position > end-1 {
+			return true
+		}
+		at = TextblockAt{Node: node, Content: Range{From: pos + 1, To: end - 1}}
+		for depth := len(path) - 1; depth >= 0; depth-- {
+			at.Ancestors = append(at.Ancestors, nodeAtPath(doc, path[:depth]))
+		}
+		found = true
+		return false
+	})
+	return at, found
+}
+
+// OneLine reports whether the textblock is written on one markdown line - a heading, or a table
+// cell's paragraph - where a hard break would end the block.
+func (at TextblockAt) OneLine() bool {
+	parent := at.Ancestors[0]
+	return at.Node.Type == "heading" || parent.Type == "table_cell" || parent.Type == "table_header"
+}
+
 // SetHeadingLevel returns a copy of doc with the level of the heading whose own text begins at
 // position set to level. A `replace` that carried a heading marker through `find` is renaming the
 // heading, so a different level in its replacement is how the caller says "and make it that one".

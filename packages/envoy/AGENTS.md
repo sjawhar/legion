@@ -138,11 +138,28 @@ the block when it creates a quote or browser-mark anchor; `envoy-dispatch backfi
 fills legacy anchors only when their cached quote has one current match.
 
 Document edits (`POST /api/v1/artifacts/{id}/edits`, `docs/edits.go` `applyOperation`) are
-`replace`, `delete`, `insert`, `retype`, `move`, `delete_row`, and `delete_column`. `replace` is
+`replace`, `delete`, `insert`, `retype`, `move`, `delete_row`, and `delete_column`. Inside a code
+block a `replace`, like an accepted suggestion, writes `with` as the code's literal text
+(`codeReplacement`), and none of the rules below apply. Markdown cannot carry two things there: line
+breaks at the end of the code's text and a line holding only whitespace in a list item's code read
+back without them; and a line of three or more colons in code inside a typed block, starting less
+than four columns past the column the typed block's own lines start at on the written line, is
+refused (`refuseCodeThatEndsItsBlock`), because the browser editor's parser ends the typed block at
+it even inside fenced code. That measure counts the width of the list markers and `> ` around the
+code, advances a tab to the next multiple of four from the column it stands at, so a tab in a
+callout two columns in advances two, trims only spaces, tabs and a line-ending carriage return around
+the colons, and finds nothing closing in a blockquote inside the typed block (`pmdoc.TypedFenceLineInCode`, held to the engine's
+own verdicts in `pmdoc/testdata/typed-fence-lines.json`, which the fixture generator writes for a
+callout at the top and inside a blockquote, list items and a footnote definition); the advice is
+four spaces, which no layout closes. Text a `replace` writes that would read as block syntax at a
+line start is written escaped, so it reads back as the characters: `---`, `***`, `~~~` or `::::`
+over a paragraph is stored `\---` and so on (the renderer's line-start escapes), beside an
+emptied paragraph as anywhere else, since an empty paragraph is not written. Everywhere else `replace` is
 inline: `with` parses through `pmdoc.ParseInline` (paragraph-only block grammar), so a multi-paragraph
 `with` is `INVALID_OP`, so is any non-empty `with` that renders to no inline content (a line
 indented four spaces or a tab, which markdown reads as a code block, or whitespace alone — an
-empty `with` is the one that deletes the match on purpose; refusing the rest is LEGION-280, since
+empty `with` deletes the match on purpose, except where the block holding it cannot be written
+without that paragraph, which is refused naming the `delete` that removes it instead; refusing the rest is LEGION-280, since
 splicing nothing over the match silently deleted the caller's text), and a leading marker of a
 *different* kind from the matched block's own is
 literal escaped text. A `with` opening with a marker of the *same* kind as that block's own would
@@ -155,7 +172,11 @@ selector, so a generic `find` renames the text and keeps the level. A hard line 
 — two trailing spaces or a backslash before the newline — puts what follows it at a true line
 start, where a heading, bullet, `1.`/`1)` ordered or `>` blockquote marker is `INVALID_OP` on
 `with` as well (`blockMarkerAfterHardBreak`), since replace is inline and that marker can only be
-written as escaped literal text continuing the matched block, never as the block it names. A bare
+written as escaped literal text continuing the matched block, never as the block it names. A hard
+break is itself `INVALID_OP` when the matched textblock is a heading or a table cell
+(`pmdoc.TextblockAt.OneLine`), which are written on one line, so the break would end the block; a
+line break inside a code span or inline HTML there ends it too, and the replace is refused because
+the block would read back as blocks of another shape (`refuseReshapedReplacement`). A bare
 newline is a soft break, which renders as a space and reaches no line start; an ordered marker
 whose start number is not 1 cannot interrupt a paragraph, and leading zeros do not change that
 number, so `01.` and `001)` are refused with `1.`, while `02.`, `10.` and a run of zeros past the

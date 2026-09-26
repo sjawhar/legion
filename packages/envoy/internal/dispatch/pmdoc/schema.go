@@ -73,6 +73,12 @@ func SchemaVersion() int {
 	return schema.Version
 }
 
+// IsTypedBlock reports whether name is a typed block the schema declares.
+func IsTypedBlock(name string) bool {
+	_, ok := typedBlock(name)
+	return ok
+}
+
 func typedBlock(name string) (BlockTypeSchema, bool) {
 	typ, ok := schemaTypes[name]
 	return typ, ok

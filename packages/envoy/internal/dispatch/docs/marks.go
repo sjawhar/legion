@@ -299,13 +299,22 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		if !accept {
 			with = ""
 		}
-		replacement, err := inlineAware(with)
-		if err != nil {
+		at, _ := pmdoc.ContainingTextblock(tree, range_.From)
+		code := at.Node.Type == "code_block"
+		var replacement *pmdoc.Node
+		if code {
+			replacement = codeReplacement(with)
+		} else if replacement, err = inlineAware(with, edgesOf(at, range_)); err != nil {
 			return err
 		}
 		next, err := pmdoc.Splice(tree, range_, replacement)
 		if err != nil {
 			return err
+		}
+		if code {
+			if err := refuseCodeThatEndsItsBlock(tree, next, range_, at, "replace_with", with); err != nil {
+				return err
+			}
 		}
 		if err := pmdoc.RepeatedBlockID(tree, next, replacement); err != nil {
 			return fmt.Errorf("%w: %v", ErrInvalidMarkdown, err)

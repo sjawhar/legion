@@ -766,6 +766,239 @@
     "rendered_by_milkdown": ""
   },
   {
+    "name": "escaped-block-markers",
+    "markdown": "\\---\n\n> \\---\n\n- \\***\n- two\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n\\---\n:::\n\n:::callout{#c2 kind=\"note\" title=\"T\"}\n\\:::\n:::\n\n\\::: b\n\nx\\\n\\***\n\n\\~~~\n\nNotes[^1].\n\n[^1]: \\---\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "---"
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000003"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "---"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "spread": false,
+            "blockId": "b-000004"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000005"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000006"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "***"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000007"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000008"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "two"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "kind": "note",
+            "title": "T",
+            "blockId": "c1"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000009"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "---"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "kind": "note",
+            "title": "T",
+            "blockId": "c2"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000010"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": ":::"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000011"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "::: b"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000012"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "x"
+            },
+            {
+              "type": "hardbreak",
+              "attrs": {
+                "isInline": false
+              }
+            },
+            {
+              "type": "text",
+              "text": "***"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000013"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "~~~"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000014"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Notes"
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "1"
+              }
+            },
+            {
+              "type": "text",
+              "text": "."
+            }
+          ]
+        },
+        {
+          "type": "footnote_definition",
+          "attrs": {
+            "label": "1",
+            "blockId": "b-000015"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000016"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "---"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AU4BAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQEDLS0tKAABAAdibG9ja0lkAXcIYi0wMDAwMDGHAQADCmJsb2NrcXVvdGUHAAEGAwlwYXJhZ3JhcGgHAAEHBgQAAQgDLS0tKAABBwdibG9ja0lkAXcIYi0wMDAwMDMoAAEGB2Jsb2NrSWQBdwhiLTAwMDAwMocBBgMLYnVsbGV0X2xpc3QHAAEOAwlsaXN0X2l0ZW0HAAEPAwlwYXJhZ3JhcGgHAAEQBgQAAREDKioqKAABEAdibG9ja0lkAXcIYi0wMDAwMDYoAAEPBWxhYmVsAXcD4oCiKAABDwhsaXN0VHlwZQF3BmJ1bGxldCgAAQ8Gc3ByZWFkAXkoAAEPB2Jsb2NrSWQBdwhiLTAwMDAwNYcBDwMJbGlzdF9pdGVtBwABGgMJcGFyYWdyYXBoBwABGwYEAAEcA3R3bygAARsHYmxvY2tJZAF3CGItMDAwMDA4KAABGgVsYWJlbAF3A+KAoigAARoIbGlzdFR5cGUBdwZidWxsZXQoAAEaBnNwcmVhZAF5KAABGgdibG9ja0lkAXcIYi0wMDAwMDcoAAEOBnNwcmVhZAF5KAABDgdibG9ja0lkAXcIYi0wMDAwMDSHAQ4DB2NhbGxvdXQHAAEnAwlwYXJhZ3JhcGgHAAEoBgQAASkDLS0tKAABKAdibG9ja0lkAXcIYi0wMDAwMDkoAAEnBGtpbmQBdwRub3RlKAABJwV0aXRsZQF3AVQoAAEnB2Jsb2NrSWQBdwJjMYcBJwMHY2FsbG91dAcAATEDCXBhcmFncmFwaAcAATIGBAABMwM6OjooAAEyB2Jsb2NrSWQBdwhiLTAwMDAxMCgAATEEa2luZAF3BG5vdGUoAAExBXRpdGxlAXcBVCgAATEHYmxvY2tJZAF3AmMyhwExAwlwYXJhZ3JhcGgHAAE7BgQAATwFOjo6IGIoAAE7B2Jsb2NrSWQBdwhiLTAwMDAxMYcBOwMJcGFyYWdyYXBoBwABQwYEAAFEAXiHAUQDCWhhcmRicmVhaygAAUYIaXNJbmxpbmUBeYcBRgYEAAFIAyoqKigAAUMHYmxvY2tJZAF3CGItMDAwMDEyhwFDAwlwYXJhZ3JhcGgHAAFNBgQAAU4Dfn5+KAABTQdibG9ja0lkAXcIYi0wMDAwMTOHAU0DCXBhcmFncmFwaAcAAVMGBAABVAVOb3Rlc4cBVAMSZm9vdG5vdGVfcmVmZXJlbmNlKAABWgVsYWJlbAF3ATGHAVoGBAABXAEuKAABUwdibG9ja0lkAXcIYi0wMDAwMTSHAVMDE2Zvb3Rub3RlX2RlZmluaXRpb24HAAFfAwlwYXJhZ3JhcGgHAAFgBgQAAWEDLS0tKAABYAdibG9ja0lkAXcIYi0wMDAwMTYoAAFfBWxhYmVsAXcBMSgAAV8HYmxvY2tJZAF3CGItMDAwMDE1AA==",
+    "rendered_by_milkdown": "\\---\n\n> \\---\n\n* \\*\\*\\*\n* two\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n\\---\n:::\n\n:::callout{#c2 kind=\"note\" title=\"T\"}\n\\:::\n:::\n\n\\::: b\n\nx\\\n\\*\\*\\*\n\n\\~\\~\\~\n\nNotes[^1].\n\n[^1]: \\---\n"
+  },
+  {
     "name": "escapes",
     "markdown": "literal \\*\\*not bold\\*\\* and \\`not code\\` and \\[not link\\](x)\nTom &amp; Jerry and \\*not emphasis\\* and \\<tag\\> and \\| pipe\n",
     "pm_json": {
