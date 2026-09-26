@@ -159,7 +159,7 @@ func TestOpenListener_PublishesOnlyOnceTheRoutesServe(t *testing.T) {
 	openListener(&gate, hooks, &listenerDeps{}, "test-machine", logging.New("test"), func(*listenerDeps) {
 		published = true
 		// A real /v1 route answers a wrong method with 405 before it reads any dependency; a
-		// mux without the /v1 routes would answer 404, as would one the gate has not opened.
+		// mux without the /v1 routes would answer 404, and a gate that has not opened answers 503.
 		for _, probe := range []struct {
 			method, path string
 			want         int
