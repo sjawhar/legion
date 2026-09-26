@@ -125,9 +125,9 @@ func TestProjectShowsLaunchUncertainClaimsWithoutALocator(t *testing.T) {
 	}
 }
 
-// The pull request's review decision on the state route is the open review round's, the one the
+// The pull request's review decision on the state route is the latest review round's, the one the
 // workflow ends the round on when the reviewer completes - whether or not the reviewer's pane is
-// running - and no decision shows before a review in the round decides.
+// running - and no decision shows before a review in a round decides.
 func TestProjectShowsTheReviewRoundsDecisionOnThePullRequest(t *testing.T) {
 	store := projectionStore{
 		issues: []record.Issue{
@@ -135,9 +135,9 @@ func TestProjectShowsTheReviewRoundsDecisionOnThePullRequest(t *testing.T) {
 			{Key: "LEGION-209", Tree: "LEGION-209", Status: "needs_review", Phase: phase.Reviewing},
 		},
 		phases: map[string][]record.PhaseRow{
-			"LEGION-208": {{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "gone-reviewer", ReviewSeen: 12,
-				Decision: &record.ReviewDecision{State: "changes_requested", Body: "rename it", Head: "head", ID: 12}}},
-			"LEGION-209": {{Issue: "LEGION-209", Role: claim.RoleReviewer, Claim: "gone-reviewer", ReviewSeen: 9}},
+			"LEGION-208": {{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "gone-reviewer",
+				Decision: &record.ReviewDecision{State: "changes_requested", Body: "rename it", Head: "head"}}},
+			"LEGION-209": {{Issue: "LEGION-209", Role: claim.RoleReviewer, Claim: "gone-reviewer"}},
 		},
 		pullRequests: map[string]*record.PullRequest{
 			"LEGION-208": {Issue: "LEGION-208", Number: 42, HeadSHA: "head-2"},
