@@ -116,18 +116,20 @@ workflow's `changes` filter (`daemon_go`: `packages/daemon-go/**`, `go.work`, `s
 ## stage2-tmux-supervision.sh
 
 ```sh
-bash scripts/e2e/stage2-tmux-supervision.sh     # → "stage 2 e2e: PASS", exit 0, in about four minutes
+LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic bash scripts/e2e/stage2-tmux-supervision.sh     # → "stage 2 e2e: PASS", exit 0, in about four minutes
 ```
 
 **Devbox only.** It runs a real Oh My Pi that calls a real model, so it needs `go`, `docker`,
 `jq`, `curl`, `ss`, `tmux`, `socat`, `bun`, `mise` (with the pinned OMP build it installs if
 missing), the `secrets` CLI holding `GEMINI_API_KEY_TESTS` (agent tier: no YubiKey touch), and
-the operator's model gateway access: `hawk-token` on `PATH`, their `hawk login`, and the GNOME
-keyring holding it unlocked (every reboot locks it; the `unlock-keyring` skill). CI runs the unit
-and integration tests, not this script; what only this run proves is OMP's real RPC frames,
-`--resume`'s same-agent behaviour, the one-word `--append-system-prompt`, the plugin's strict
-parse of the Go daemon's answers, the plugin gate against an installed manifest, the provider-key
-path, a pane's model turn through the gateway, and the Envoy role claim.
+the operator's model gateway access: `LEGION_E2E_MODEL_GATEWAY_URL` naming the gateway's Anthropic
+endpoint (required; [`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh)), `hawk-token` on
+`PATH`, their `hawk login`, and the GNOME keyring holding it unlocked (every reboot locks it; the
+`unlock-keyring` skill). CI runs the unit and integration tests, not this script; what only this
+run proves is OMP's real RPC frames, `--resume`'s same-agent behaviour, the one-word
+`--append-system-prompt`, the plugin's strict parse of the Go daemon's answers, the plugin gate
+against an installed manifest, the provider-key path, a pane's model turn through the gateway, and
+the Envoy role claim.
 
 What it stands up, all of it the run's own:
 
@@ -213,15 +215,22 @@ Three things the run had to learn about its surface:
 ## stage3-devbox-workflow.sh
 
 ```sh
-bash scripts/e2e/stage3-devbox-workflow.sh     # → "stage 3 e2e: PASS", exit 0
+LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic SMOKE_UPSTREAM_NATS=nats://envoy-nats.<tailnet>.ts.net:4222 \
+  bash scripts/e2e/stage3-devbox-workflow.sh     # → "stage 3 e2e: PASS", exit 0
 ```
 
 **Devbox only; CI does not run this script.** It runs real Oh My Pi agents and real GitHub Apps,
 then squash-merges one disposable pull request as the proof human into `sjawhar/legion-smoke`.
 The run needs `go`, `docker`, `jq`, `curl`, `ss`, `tmux`, `bun`, `mise`, `gh`, `shellcheck`, the
-`secrets` CLI, and the operator's model gateway access: `hawk-token` on `PATH`, their `hawk login`,
-and the GNOME keyring holding it unlocked (every reboot locks it; the `unlock-keyring` skill). The
-proof human is the devbox's ordinary `gh` — the dotfiles shim, acting as the
+`secrets` CLI, and the operator's model gateway access: `LEGION_E2E_MODEL_GATEWAY_URL` naming the
+gateway's Anthropic endpoint (required; [`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh)),
+`hawk-token` on `PATH`, their `hawk login`, and the GNOME keyring holding it unlocked (every reboot
+locks it; the `unlock-keyring` skill). `SMOKE_UPSTREAM_NATS` (required) names the production Envoy
+NATS the GitHub bridge subscribes on by its fully-qualified name on the operator's tailnet
+(`nats://envoy-nats.<tailnet>.ts.net:4222`), as for the kind smoke's bridge
+([`scripts/kind-smoke/README.md`](../kind-smoke/README.md)); `prerequisites` refuses a run without
+either, and refuses an upstream that is not one NATS URL naming a host with a dot. The script prints
+neither value. The proof human is the devbox's ordinary `gh` — the dotfiles shim, acting as the
 `sjawhar-agent` App — for its reviews, its reads, and its merge; it is never a Legion App, and the
 run needs no personal access token (`GH_PUBLIC_REPO_PAT` cannot read the private smoke repository
 anyway). The daemon resolves `LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64` and
@@ -332,6 +341,7 @@ pull request open and prints gh's reason, with a line saying some may still be o
 ```sh
 LEGION_E2E_RUNTIME_CONTEXT=legion-daemon@production \
 LEGION_E2E_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest> \
+LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic \
   bash scripts/e2e/stage4a-sandbox-runtime.sh     # → "stage 4a e2e: PASS", exit 0
 ```
 
@@ -350,12 +360,14 @@ Every pod carries the operator fixture's pod,
 [`fixtures/operator-route/pod.yml`](fixtures/operator-route/pod.yml), read through the daemon's
 own loader (`config.ReadPodFile`): ServiceAccount `legion-worker`, one projected token for
 audience `middleman-legion`, and a ConfigMap holding the fixture's `models.yml` (anthropic through
-production's middleman, keyed by that token) and `overlay.yml` (every role Legion's prompts
-reach, `enabledModels` holding each session to the gateway's aliases, and each provider a pod could
-reach without the gateway disabled). Legion holds none of it. Before the harness runs, the script creates the
-run's own copy of that ConfigMap as the operator, `legion-operator-route-<project>`, labelled
-with the run's project; the harness points the pods at it, so another run in the namespace can
-neither see nor delete this one's route. It also creates the run's providers Secret,
+the operator's model gateway, `LEGION_E2E_MODEL_GATEWAY_URL`, keyed by that token) and
+`overlay.yml` (every role Legion's prompts reach, `enabledModels` holding each session to the
+gateway's aliases, and each provider a pod could reach without the gateway disabled). Legion holds
+none of it. Before the harness runs, the script creates the run's own copy of that ConfigMap as the
+operator, `legion-operator-route-<project>`, labelled with the run's project, its `models.yml` with
+`LEGION_E2E_MODEL_GATEWAY_URL` put in place of the fixture's `${LEGION_E2E_MODEL_GATEWAY_URL}`
+placeholder; the harness points the pods at it, so another run in the namespace can neither see nor
+delete this one's route. It also creates the run's providers Secret,
 `legion-<project>-providers`, with one key (`stage4a`, a random value no model route reads) that the
 harness's `provider_keys` hands every agent as `STAGE4A_PROVIDER_KEY`, so every pod and the probe run
 with the providers Secret mounted, as a deployment with `provider_keys` does.
@@ -366,6 +378,7 @@ with the providers Secret mounted, as a deployment with `provider_keys` does.
 | `LEGION_E2E_RUNTIME_KUBECONFIG` | `~/.kube/legion-daemon-production` | the kubeconfig file holding that context, kept apart from the devbox's own |
 | `LEGION_E2E_OPERATOR_CONTEXT` | `production` | the devbox's admin context, for operator steps only |
 | `LEGION_E2E_IMAGE` | required | the worker image under test, by digest: a `worker-image.yaml` run on the branch under test |
+| `LEGION_E2E_MODEL_GATEWAY_URL` | required | the model gateway's Anthropic endpoint, the `baseUrl` the run's copy of the fixture's `models.yml` names; checked by [`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh) |
 | `STAGE4A_FROM` | unset | a development entry point: any check after `identity` except `stale-incarnation`, which rides `kill-pod`'s relaunch; the harness refuses any other name at `identity`, before it creates anything. `identity` always runs; the checks before the entry point are skipped, and each later check first puts the claims it needs where the full run would have left them, through the same runtime calls. The run ends `stage 4a e2e: every check from <check> passed — a development run, never the proof`, and is never cited as the proof |
 | `STAGE4A_EVIDENCE_DIR` | a fresh `/tmp/legion-e2e4a-evidence.XXXXXXXX` | kept on every outcome and printed at exit: `transcript.log` (the whole run), `runtime.log` (the runtime's and the listener's JSON log lines), and the two namespace snapshots |
 
@@ -648,6 +661,24 @@ once; on a box where the pinned OMP has already run, a fresh profile pays nothin
 devbox with OMP 18.2.2: build, pack, install and verify took 2 s into a new profile, the profile got
 no `natives/` directory, and `~/.omp/natives/18.2.2/` was untouched.
 
+## lib/model-gateway-url.sh
+
+Prints `LEGION_E2E_MODEL_GATEWAY_URL`, the model gateway's Anthropic endpoint, once it is one a
+stage proof can use. [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) (Stage 2 and
+Stage 3) and Stage 4a read the variable through it. The repository carries no default: the operator
+sets it to the `baseUrl` of the `anthropic` provider in their own gateway route
+(`~/.omp/agent/models.yml`).
+
+```sh
+gateway=$(bash scripts/e2e/lib/model-gateway-url.sh)
+```
+
+The URL is written into an Oh My Pi `models.yml` as one plain YAML scalar, so the helper exits 1
+when the variable is unset, holds a character other than letters, digits and `:/._~-`, ends in a
+colon (which YAML reads as a mapping key), or is not an `https://` URL. Its refusal names the
+variable on stderr and never prints the value, which names production infrastructure; the scripts
+that use it print that the route comes from the variable, not the URL.
+
 ## lib/install-model-gateway.sh
 
 Routes a named OMP profile's model turns to the Hawk model gateway (middleman) on the operator's
@@ -656,9 +687,14 @@ own hawk login, the route every devbox agent session uses (`~/.omp/agent/models.
 Stage 2 and Stage 3 run it before they move any XDG directory of their own.
 
 ```sh
+export LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic
 key_command=$(bash scripts/e2e/lib/install-model-gateway.sh --profile legion-e2e-$$ --dest "$work/model-gateway" --cache-dir "$work/model-gateway-cache")
 # → $work/model-gateway/hawk-token
 ```
+
+`LEGION_E2E_MODEL_GATEWAY_URL` is required: the gateway's Anthropic endpoint, the one
+`hawk-token`'s default `HAWK_API_URL` mints keys for, read through
+[`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh).
 
 | flag | meaning |
 | :--- | :--- |
@@ -669,12 +705,13 @@ key_command=$(bash scripts/e2e/lib/install-model-gateway.sh --profile legion-e2e
 It writes `<dir>/hawk-token`, the key command: `hawk-token` (resolved on `PATH`) run under the
 caller's `DBUS_SESSION_BUS_ADDRESS` and XDG base directories (a variable the caller has unset is
 unset for it), for that one command. It appends one line per invocation, one per mint, and
-`hawk-token`'s own stderr to `<dir>/hawk-token.log`; stdout carries the key alone. The profile's `agent/models.yml`
-points the `anthropic` provider at `https://middleman.hawk.internal.trajectorylabs.com/anthropic`
-with `apiKey` and `X-Api-Key` both `!<dir>/hawk-token`, and its `agent/config.yml` pins every
-model role (`default`, `smol`, `slow`, `vision`, `plan`, `commit`, `tiny`, `task`, `advisor`) to
-`anthropic/claude-opus-4-8`, sets `enabledModels: [anthropic/*]`, and disables `amazon-bedrock`,
-`bedrock-mantle`, `google`, `ollama`, `llama.cpp` and `lm-studio`. Stdout is the key command's path.
+`hawk-token`'s own stderr to `<dir>/hawk-token.log`; stdout carries the key alone. The profile's
+`agent/models.yml` points the `anthropic` provider at `LEGION_E2E_MODEL_GATEWAY_URL` with `apiKey`
+and `X-Api-Key` both `!<dir>/hawk-token`, and its `agent/config.yml` pins every model role
+(`default`, `smol`, `slow`, `vision`, `plan`, `commit`, `tiny`, `task`, `advisor`, and `review` and
+`oracle`, the roles Legion's task agents name) to `anthropic/claude-opus-4-8`, sets
+`enabledModels: [anthropic/*]`, and disables `amazon-bedrock`, `bedrock-mantle`, `google`,
+`ollama`, `llama.cpp` and `lm-studio`. Stdout is the key command's path.
 
 A pane cannot run `hawk-token` itself, which is why the command, and only it, gets the operator's
 environment. Measured in a Go pane at `f1749048` whose profile named `!hawk-token` directly, by
@@ -701,7 +738,8 @@ with no key. Every role is the one model because the gateway answers `claude-hai
 model OMP gave that Stage 3 scout once Bedrock failed it, with `404 model not found`.
 
 Its first mint is the preflight, before any pane exists. It exits 1 naming the cause when
-`hawk-token` is not on `PATH`, when `DBUS_SESSION_BUS_ADDRESS` is unset, when the keyring is locked
+`hawk-token` is not on `PATH`, when `DBUS_SESSION_BUS_ADDRESS` is unset, when
+`lib/model-gateway-url.sh` refuses `LEGION_E2E_MODEL_GATEWAY_URL`, when the keyring is locked
 (`the operator's keyring is locked, so hawk-token cannot read the hawk login: unlock it (the
 unlock-keyring skill) and rerun`), and when `hawk-token` prints anything but one JWT (quoting the
 last line of its stderr); an argument refusal exits 2. The mint also runs `hawk-token`'s own periodic

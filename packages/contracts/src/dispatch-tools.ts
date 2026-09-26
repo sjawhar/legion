@@ -190,6 +190,7 @@ export const dispatchToolSpecs = [
     example: { project: "DSP", title: "Native workspace" },
     description:
       "Create a native Dispatch issue for newly tracked work. Search first with dispatch_search; if potentially duplicate issues exist, this returns 409 POSSIBLE_DUPLICATE unless force is true after reading them. " +
+      "A spec holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK. " +
       `Do not use it when an existing issue already covers the work; read or update that issue instead. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
       project: z.string().describe("Project key for the new issue."),
@@ -772,7 +773,9 @@ export const dispatchToolSpecs = [
     example: { issue: "DSP-1", name: "design.md", content: "# Design\n" },
     description:
       "Attach a local file or inline text as an issue artifact or project document. Do not use it to edit a live document; use " +
-      `dispatch_doc_edit instead. Exactly one of path or content is required; artifacts are limited to 25 MiB. ${OWNER_REFERENCE}`,
+      "dispatch_doc_edit instead. Exactly one of path or content is required; artifacts are limited to 25 MiB. " +
+      "Markdown holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK; a new version of a document is held to it only for the asks it writes or changes. " +
+      `${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key for an unlinked document.").optional(),

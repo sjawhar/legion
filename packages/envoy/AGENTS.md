@@ -476,6 +476,18 @@ person's or a session's retract stands however the document moves, which is why 
 refuses a caller reason beginning `removed from the document in version`.
 An invalid browser-edited ask retains its indexed ask, carries the server-owned `invalid` parse-error
 attribute, and emits `block.invalid`; repairing its body clears `invalid` before updating the ask row.
+Markdown that becomes a whole document - a spec at issue creation, an uploaded document or version -
+is refused with `400 INVALID_ASK_BLOCK` when an ask's body breaks its content rule,
+`paragraph+ bullet_list?` - one or more paragraphs, then at most one bullet list, last
+(`pmdoc.AskContentError`) - as the browser editor's parser refuses to build such a block. A new
+document is held to it for every ask, a new version only for each ask it writes or changes
+(`refuseChangedAsks`), comparing the ask's rendering with the current one (`askMarkdown`), since a
+version is markdown and cannot carry a comment's anchor mark or the id a reader's browser derives
+for a heading; what the rule allows is taken, and an option without a label or a question
+that is only an image is left to settlement's `invalid` flag. A document edit is refused for an ask
+it writes or changes that breaks the rule or that settlement cannot read (`validateEditedAskBlocks`).
+Neither refuses an ask a browser edit left unreadable that it carries through unchanged, so such an
+ask does not refuse edits or versions elsewhere in the document.
 An answered block carries `state`, `answered_by`, `answered_at`, `selected`, and `answer` in
 canonical markdown.
 
@@ -648,12 +660,19 @@ the synchronous listener call records the sent or failed attempt instead of blin
   `removed`, and `modified` lists, in first-seen order, newline-separated, at most 100; omitted
   when no commit is listed, since the payload drops empty strings), and `changed_paths_truncated`
   (`"true"` when more than 100 unique paths were seen, else `"false"` — present on every push, so
-  its absence alone tells a consumer the listener predates the field). Envoy forwards what GitHub
-  sent; what counts as a handoff-only push is the Legion daemon's rule, not the listener's.
+  its absence alone tells a consumer the listener predates the field), and `forced` (`"true"` or
+  `"false"`, GitHub's own flag, present on every push the same way). A forced push's commits are
+  listed from the merge base, so its `changed_paths` do not describe what it did to the head it
+  replaced. Envoy forwards what GitHub sent; what counts as a handoff-only push is the Legion
+  daemon's rule, not the listener's.
 - A `pull_request_review` payload carries the review's own `commit_id` and the PR's current
-  `head_sha` so consumers can tell whether the review is at head; `pull_request_review_comment`
-  carries `head_sha` too, and all three comment/review events set `legion_footer: "true"` when the
-  uncapped body contains a `<!-- legion:` worker footer.
+  `head_sha` so consumers can tell whether the review is at head, and `submitted_at` (GitHub's
+  RFC 3339 time) and `review_id` (GitHub's review id as a decimal string), so consumers can order
+  reviews by when they were submitted, then by id, rather than by delivery. The id alone is not
+  enough: GitHub assigns it when a review is created, and a pending review keeps it when it is
+  submitted later. `pull_request_review_comment` carries `head_sha` too, and all three
+  comment/review events set `legion_footer: "true"` when the uncapped body contains a
+  `<!-- legion:` worker footer.
 - NATS `>` matches one or more trailing tokens, not its base subject. A subscription to a concrete
   `<subject>.>` is registered as the pair `<subject>` and `<subject>.>`, so the recommended
   per-PR default receives lifecycle plus child events.
