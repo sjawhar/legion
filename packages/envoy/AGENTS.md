@@ -175,6 +175,42 @@ reports any emptied container's content rule as `INVALID_OP`). `move` relocates 
 `block` to the document-level boundary of an insert anchor (`pmdoc.MoveBlock`); insert and move
 anchors are a quote, `start`, `end`, `heading:<title>`, or `block:<id>`.
 
+Accepting a suggestion (`POST /api/v1/comments/{id}/accept`, `docs/marks.go` `applySuggestion`)
+splices its `replace_with`, which unlike an edit's `with` may be blocks, with ProseMirror's range
+fitting (`pmdoc.Splice`). A replacement fitted into a typed block stays inside it, and a fit never
+replaces the typed block it lands in: a callout takes what its content rule allows, a code block
+included (the engine oracle's `callout-paragraph-and-code` case), and an ask takes any block at this
+step, since `Validate` lets an ask hold other blocks while a browser edit passes through. The one
+exception is a replacement holding exactly one block of the typed block's own type under its id,
+at any depth, which is that block rewritten: it replaces the block in place rather than nesting
+inside it, and the replacement's other blocks, and any it sits inside (a blockquote, a list item,
+a typed block under another id), go in the same parent, where they stand in the replacement.
+The same type under another id, or under none, is a new block and lands inside like
+any other. The accept
+then reads each ask by its id before and after the splice (`docs/ask_blocks.go` `askReadability`,
+`docs/marks.go` `refuseBrokenAsks`): an ask is unreadable when settlement's parse fails, when its
+children break the content rule `paragraph+ bullet_list?` (`pmdoc.AskContentError`: a paragraph
+after its options or a second bullet list parses, but the browser editor drops such an ask from the
+shared document when it renders it, and settlement then retracts it), or when it repeats an earlier
+ask's id. The first ask left unreadable whose id was readable before is `400 INVALID_ASK_BLOCK` with
+that reason, so a question given a code block, a paragraph after the options, a second list or an
+emptied question is refused. An ask under a held id is refused one step earlier, by the write's
+block-id check (`400 INVALID_MARKDOWN`, the block-id paragraph above). An id the document already held unreadable
+(a browser edit can leave one, and an upload can carry it on) does not refuse an accept, whether the
+accept leaves that ask alone or writes into it, unless the accept adds a second ask under it: an id
+that gains an ask is refused whatever it held, since the id repair would hand the held ask's row
+and answer to whichever comes first. A reject's asks (`POST /api/v1/comments/{id}/reject`,
+the same `applySuggestion`) are never checked, since removing the text a browser insert added gives
+back the document the insert started from. A replacement no level of the document can hold where
+the suggestion sits, such as a code block over a table cell's whole text, is `400 INVALID_OP` on
+`replace_with` (`pmdoc.ErrReplacementDoesNotFit`), and inline text over a range that runs into an
+ask or callout from the text before it, at any depth (inside a blockquote, a list item or another
+callout too), is `400 INVALID_OP` on `anchor` (`pmdoc.ErrJoinEmptiesTypedBlock`): ProseMirror's
+join would leave that block empty, and the browser editor drops it, which for an ask retracts it. A refused accept writes nothing, and the
+suggestion stays open; the dashboard's margin shows the refusal's message and offers no Retry for
+`INVALID_ASK_BLOCK`, `INVALID_MARKDOWN` or `INVALID_OP` (`useCommentActionQueue` `actionFailure`),
+since the same accept is refused every time.
+
 `delete_row` and `delete_column` each take a table `block` id and a zero-based `index`, and mutate
 the table in place. Row `0` is the header; deleting it promotes the first body row into the header,
 including its cells' alignment. An index is required. A missing, non-integer, negative, or out-of-range

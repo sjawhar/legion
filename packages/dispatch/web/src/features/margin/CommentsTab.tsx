@@ -12,6 +12,7 @@ import {
 import { AskCard } from "../inbox/AskCard";
 import { isBareReferenceBody, Unfurl } from "../refs/Unfurl";
 import { ThreadList } from "./ThreadList";
+import type { CommentActionFailure } from "./useCommentActionQueue";
 import type { MarginItemAction, MarginOwner, MarkPlacement, Thread } from "./useMarginItems";
 
 export interface MarginComposer {
@@ -21,7 +22,7 @@ export interface MarginComposer {
 }
 
 interface CommentsTabProps {
-  actionErrorId: string | undefined;
+  actionFailure: CommentActionFailure | undefined;
   answeredAsksPending: boolean;
   artifactSlug: string;
   asksPending: boolean;
@@ -88,7 +89,7 @@ export function MarginAskCard({
 }
 
 export function CommentsTab({
-  actionErrorId,
+  actionFailure,
   answeredAsksPending,
   artifactSlug,
   asksPending,
@@ -191,7 +192,7 @@ export function CommentsTab({
               />
             ))}
             <ThreadList
-              actionErrorId={actionErrorId}
+              actionFailure={actionFailure}
               artifactSlug={artifactSlug}
               expandedThreadKey={expandedThreadKey}
               editingCommentId={editingCommentId}

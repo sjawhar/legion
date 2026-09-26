@@ -108,7 +108,7 @@ function renderCard(
     <MemoryRouter>
       <QueryClientProvider client={queryClient}>
         <EditableCard
-          actionError={false}
+          actionFailure={undefined}
           artifactSlug="spec"
           expanded
           hovered={false}
@@ -215,7 +215,7 @@ test("the author can edit a comment and an edited comment carries its marker", a
     view.rerender(
       <QueryClientProvider client={new QueryClient()}>
         <EditableCard
-          actionError={false}
+          actionFailure={undefined}
           artifactSlug="spec"
           expanded
           hovered={false}
@@ -468,5 +468,27 @@ test("a collapsed card's delivery controls sit outside the toggle button and don
     expect(toggled).toBe(false);
   } finally {
     view.unmount();
+  }
+});
+
+// A failed action shows the reason the card was given; Retry is offered only when retrying can
+// succeed.
+test("a failed action shows its reason, with Retry only when a retry can succeed", () => {
+  for (const retryable of [false, true]) {
+    const view = renderCard(thread(), {
+      actionFailure: {
+        id: "comment-1",
+        message: 'ask block "a1" holds a second bullet list',
+        retryable,
+      },
+    });
+    try {
+      expect(screen.getByRole("alert").textContent).toContain(
+        'ask block "a1" holds a second bullet list'
+      );
+      expect(screen.queryByRole("button", { name: "Retry" }) !== null).toBe(retryable);
+    } finally {
+      view.unmount();
+    }
   }
 });

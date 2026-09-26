@@ -39,6 +39,17 @@ func validateSplice(doc *Node, r Range, with *Node) error {
 
 var ErrTableWidth = errors.New("table row exceeds table width")
 
+// ErrReplacementDoesNotFit is a range replacement that no level of the document can hold where the
+// range sits: a code block over the whole text of a table cell, whose only content is inline text.
+var ErrReplacementDoesNotFit = errors.New("replacement does not fit document")
+
+// ErrJoinEmptiesTypedBlock is an inline replacement over a range that runs into a typed block's
+// text from the text before it, at any depth: ProseMirror's join would pull the rest of that
+// block's first textblock out to the open side and leave the typed block with nothing, which its
+// content rule refuses. The browser editor drops that block, so the join is refused rather than
+// repaired.
+var ErrJoinEmptiesTypedBlock = errors.New("the range runs into a typed block from the text before it, and joining them would leave that block empty")
+
 // BlockBoundary returns the document-level boundary before or after the block
 // containing target.
 func BlockBoundary(doc *Node, target Range, after bool) (int, error) {
@@ -204,7 +215,7 @@ func insertAt(doc *Node, pos int, with *Node) (*Node, error) {
 		}
 		return replaceFittedContent(doc, boundary.path, candidate)
 	}
-	return nil, fmt.Errorf("%w: replacement does not fit document", ErrSchema)
+	return nil, fmt.Errorf("%w: %w", ErrSchema, ErrReplacementDoesNotFit)
 }
 
 func childBoundary(node *Node, nodeStart, pos int) (int, bool) {
@@ -286,7 +297,7 @@ func ascend(doc *Node, selection spliceSelection, r Range, with *Node) (*Node, e
 			return replaceFittedContent(doc, path, candidate)
 		}
 		if len(path) == 0 {
-			return nil, fmt.Errorf("%w: replacement does not fit document", ErrSchema)
+			return nil, fmt.Errorf("%w: %w", ErrSchema, ErrReplacementDoesNotFit)
 		}
 	}
 }
@@ -466,6 +477,9 @@ func joinSiblingsAtBoundary(doc *Node, parentPath, leftPath, rightPath []int, me
 		return nil, false, nil
 	}
 	closeRemainder := closeSideRemainder(parent.Children[rightIndex], rightPath[1:])
+	if holdsEmptyTypedBlock(closeRemainder) {
+		return nil, false, fmt.Errorf("%w: %w", ErrSchema, ErrJoinEmptiesTypedBlock)
+	}
 	out := cloneNode(doc)
 	outParent := nodeAtPath(out, parentPath)
 	children := append([]*Node{}, outParent.Children[:leftIndex]...)
@@ -479,6 +493,17 @@ func joinSiblingsAtBoundary(doc *Node, parentPath, leftPath, rightPath []int, me
 		return nil, false, err
 	}
 	return out, true, nil
+}
+
+// holdsEmptyTypedBlock reports whether node is, or contains, a typed block with no children.
+func holdsEmptyTypedBlock(node *Node) bool {
+	found := false
+	Walk(node, func(child *Node) bool {
+		_, typed := typedBlock(child.Type)
+		found = typed && len(child.Children) == 0
+		return !found
+	})
+	return found
 }
 
 func closeOpenSide(node *Node, path []int, replacement *Node) (*Node, bool) {
@@ -617,8 +642,39 @@ func fitReplacement(parent, with, openingListItem *Node, hasPrefixParagraph bool
 		}
 		return append([]*Node{{Type: "paragraph"}}, source...), true
 	default:
+		// A typed block takes the replacement as it is, and fitContent's Validate applies the
+		// block's content rule, which for an ask admits any block (validateTypedBlock), so a fit
+		// never climbs out of a typed block to replace it, as ProseMirror fits one into a callout.
+		// The one exception is a replacement holding exactly one block of the typed block's own
+		// type under its id, at any depth: that is the block rewritten (the same id, new text), so
+		// the fit climbs and the rewrite replaces the block, with the replacement's other blocks,
+		// and any it sits inside, where they stand, instead of nesting inside it under the same id.
+		// A block of the type under another id, or a minted one, is a different block and stays
+		// inside.
+		if _, typed := typedBlock(parent.Type); typed {
+			if rewritesBlock(source, parent) {
+				return nil, false
+			}
+			return source, true
+		}
 		return nil, false
 	}
+}
+
+// rewritesBlock reports whether exactly one block of source, at any depth, is block itself
+// rewritten: its type under its id. A rewrite may sit inside another block of the replacement (a
+// blockquote, a list item, a typed block under another id), which the climb then places.
+func rewritesBlock(source []*Node, block *Node) bool {
+	rewrites := 0
+	for _, node := range source {
+		Walk(node, func(child *Node) bool {
+			if child.Type == block.Type && child.Attrs[BlockIDAttr] == block.Attrs[BlockIDAttr] {
+				rewrites++
+			}
+			return rewrites < 2
+		})
+	}
+	return rewrites == 1
 }
 
 func listItemAttrs(item *Node) Attrs {

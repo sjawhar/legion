@@ -653,6 +653,14 @@ dispatch_suggest({ issue?, project?, artifact, ref?, quote, replace_with, body?,
 It returns issue or project-document owner details plus `comment`. A human accepts or rejects a suggestion.
 Errors: `TARGET_AMBIGUOUS` (add `occurrence`), `TARGET_NOT_FOUND` (re-read first), `INVALID_ANCHOR`/`ANCHOR_MISSING`/`ANCHOR_ORPHANED`
 (bad, unwritten, or stale quote), `INVALID_MARKDOWN`/`DOC_SCHEMA` (malformed content), `CAP_EXCEEDED`, `ISSUE_CLOSED`.
+Suggest only what the quoted block can hold. The accept, not the suggestion, checks that: an
+accept whose `replace_with` would break an ask block that was readable before it is refused with
+`INVALID_ASK_BLOCK` - a question given a code block, text after an ask's options, a second option
+list, or an emptied question; one that names an id the document holds outside the text it
+replaces, an ask under a held id included, with `INVALID_MARKDOWN`; and one no part of the
+document can hold where it sits (a code block over a table cell's whole text), or whose quote runs
+into an ask or callout from the text before it, with `INVALID_OP`. Either changes nothing: the human sees the reason with no Retry, and the suggestion
+stays open until someone rejects or replaces it.
 
 ## Artifacts
 

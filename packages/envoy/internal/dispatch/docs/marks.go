@@ -304,11 +304,26 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 			return err
 		}
 		next, err := pmdoc.Splice(tree, range_, replacement)
+		if errors.Is(err, pmdoc.ErrJoinEmptiesTypedBlock) {
+			return &ErrInvalidOp{Field: "anchor", Reason: "the suggestion runs into an ask or callout from the text before it, " +
+				"and replacing it would join the two and leave the ask or callout empty; suggest a change inside one of them"}
+		}
+		if errors.Is(err, pmdoc.ErrReplacementDoesNotFit) {
+			return &ErrInvalidOp{Field: "replace_with", Reason: "no part of the document can hold it where the suggestion sits " +
+				"(a table cell's whole text, for one, can only be replaced by inline text)"}
+		}
 		if err != nil {
 			return err
 		}
 		if err := pmdoc.RepeatedBlockID(tree, next, replacement); err != nil {
 			return fmt.Errorf("%w: %v", ErrInvalidMarkdown, err)
+		}
+		// A reject's ask is not checked: it removes the text a browser insert added, which gives
+		// back the document the insert started from.
+		if accept {
+			if err := refuseBrokenAsks(tree, next); err != nil {
+				return err
+			}
 		}
 		var updateErr error
 		transact(func(txn *crdt.Transaction) {
@@ -319,6 +334,35 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		}
 		return nil
 	})
+}
+
+// refuseBrokenAsks refuses the first ask a write left unreadable whose id the document could read
+// before it, with settlement's reason (the one the edit route's ApplyOps gives), so a replacement
+// an ask cannot hold, such as a question given a code block, writes nothing. An id the document
+// already held unreadable, malformed or repeated, is not the write's to refuse: a browser edit can
+// leave one and an upload can carry it on, settlement flags it, and a write elsewhere must not fail
+// over it. An id that gains an ask is refused whatever it held, since settlement's id repair keeps
+// the id for the first ask in document order and would hand the held ask's row and answer to it.
+func refuseBrokenAsks(before, after *pmdoc.Node) error {
+	unreadable, held := map[string]bool{}, map[string]int{}
+	askReadability(before, func(id string, reason error) bool {
+		unreadable[id] = unreadable[id] || reason != nil
+		held[id]++
+		return true
+	})
+	var refusal error
+	written := map[string]int{}
+	askReadability(after, func(id string, reason error) bool {
+		written[id]++
+		if reason != nil && (!unreadable[id] || written[id] > held[id]) {
+			refusal = reason
+		}
+		return refusal == nil
+	})
+	if refusal != nil {
+		return &ErrInvalidAskBlock{Reason: refusal}
+	}
+	return nil
 }
 
 func suggestionKind(attrs pmdoc.Attrs, id string) (string, error) {
