@@ -175,13 +175,13 @@ func feedRepository(feed string, repository ghrepo.Repository) (string, error) {
 	return filepath.Join(feed, repository.Owner(), repository.Name()+".git"), nil
 }
 
-// gitHubURL is the repository's GitHub remote: the URL the shared clone is cloned from and Fetch
+// GitHubURL is the repository's GitHub remote: the URL the shared clone is cloned from and Fetch
 // clones into the feed, and so the URL feedRemote rewrites to the feed.
-func gitHubURL(repository ghrepo.Repository) string {
+func GitHubURL(repository ghrepo.Repository) string {
 	return "https://github.com/" + repository.String()
 }
 
-// feedRemote reaches gitHubURL, the remote the shared clone's origin names, at the feed repository
+// feedRemote reaches GitHubURL, the remote the shared clone's origin names, at the feed repository
 // instead, over git's file transport alone: no credential, and no network. The feed is GitHub as
 // it stood when the pod's workspace-fetch ran, and a tree agent may have pushed since, so a fetch
 // from it brings main and the issue's own bookmark alone: every other bookmark keeps its target
@@ -192,7 +192,7 @@ func feedRemote(feed string, repo ghrepo.Repository, bookmark string) remote {
 			"GIT_ALLOW_PROTOCOL=file",
 			"GIT_CONFIG_COUNT=1",
 			"GIT_CONFIG_KEY_0=url." + feed + ".insteadOf",
-			"GIT_CONFIG_VALUE_0=" + gitHubURL(repo),
+			"GIT_CONFIG_VALUE_0=" + GitHubURL(repo),
 		},
 		branches: []string{"main", bookmark},
 	}
@@ -223,7 +223,7 @@ func Fetch(ctx context.Context, run Runner, request FetchRequest) (string, error
 	if err := os.MkdirAll(filepath.Dir(feed), 0o700); err != nil {
 		return "", fmt.Errorf("create feed parent: %w", err)
 	}
-	clone := []string{"git", "clone", "--bare", "--quiet", gitHubURL(request.Repo), feed}
+	clone := []string{"git", "clone", "--bare", "--quiet", GitHubURL(request.Repo), feed}
 	if _, err := RunChecked(ctx, run, clone, merge(credential.env, isolatedGitConfig), ""); err != nil {
 		return "", err
 	}

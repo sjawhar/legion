@@ -315,8 +315,11 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		if err != nil {
 			return err
 		}
-		// A reject is not checked: it removes the text a browser insert added, which gives back the
-		// document the insert started from.
+		if err := pmdoc.RepeatedBlockID(tree, next, replacement); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidMarkdown, err)
+		}
+		// A reject's ask is not checked: it removes the text a browser insert added, which gives
+		// back the document the insert started from.
 		if accept {
 			if err := refuseBrokenAsks(tree, next); err != nil {
 				return err

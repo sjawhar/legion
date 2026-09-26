@@ -1,17 +1,28 @@
 package pmdoc
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 	"unicode/utf8"
 )
 
 type renderer struct {
-	b                strings.Builder
+	b                bytes.Buffer
 	inlineCodeFence  string
 	inlineCodePadded bool
-	err              error
-	blockOffsets     []BlockOffset
+	// labelBrackets is decided when a link opens, over the whole label it opens, and read by every
+	// text node of that label. One node cannot judge it: what pairs with a bracket may sit in a
+	// sibling node of the same link.
+	labelBrackets labelBrackets
+	// typedPrefix is the prefix the innermost typed block's lines are written at, or nil outside
+	// one. A lone `:::` closes the block only as a line at that prefix, which only a paragraph
+	// written at the same prefix can produce.
+	typedPrefix *string
+	// lineStart is the current line's first text character, held until the line is written.
+	lineStart    *lineCandidate
+	err          error
+	blockOffsets []BlockOffset
 }
 
 // BlockOffset identifies one rendered block in byte offsets of the markdown.
@@ -112,7 +123,7 @@ func (r *renderer) block(n *Node, prefix string) {
 	case "heading":
 		level := int(num(n.Attrs["level"], 1))
 		r.writeSyntax(strings.Repeat("#", level) + " ")
-		r.inline(n.Children, prefix)
+		r.headingInline(n.Children, prefix)
 	case "blockquote":
 		r.writeSyntax("> ")
 		r.blocksNoTrailing(n.Children, prefix+"> ")
@@ -158,7 +169,10 @@ func (r *renderer) block(n *Node, prefix string) {
 			return
 		}
 		r.writeSyntax(":::" + n.Type + "{" + attrs + "}\n" + prefix)
+		outer := r.typedPrefix
+		r.typedPrefix = &prefix
 		r.blocksNoTrailing(n.Children, prefix)
+		r.typedPrefix = outer
 		r.writeSyntax("\n" + prefix + ":::")
 	}
 }
@@ -255,17 +269,72 @@ func (r *renderer) tableRow(row *Node, header bool, prefix string) {
 	r.writeSyntax(" |")
 }
 
+// inlineContext is where one run of inline nodes is written.
+type inlineContext struct {
+	// tableCell reports whether the run is a table cell, whose pipes are syntax.
+	tableCell bool
+	// startsLine reports whether the run begins a markdown line of its own, so that a marker at
+	// the start of its text would open a block.
+	startsLine bool
+}
+
+// inline writes a paragraph's children, which begin their own markdown line.
 func (r *renderer) inline(nodes []*Node, prefix string) {
-	r.inlineWithEscapes(nodes, prefix, false)
+	r.inlineWithEscapes(nodes, prefix, inlineContext{startsLine: true})
 }
 
+// headingInline writes a heading's children. The `## ` is already on the line, so nothing in the
+// text can open a block of its own.
+func (r *renderer) headingInline(nodes []*Node, prefix string) {
+	r.inlineWithEscapes(nodes, prefix, inlineContext{})
+}
+
+// tableCellInline writes one cell, which sits after a `|` on a line the table owns.
 func (r *renderer) tableCellInline(nodes []*Node, prefix string) {
-	r.inlineWithEscapes(nodes, prefix, true)
+	r.inlineWithEscapes(nodes, prefix, inlineContext{tableCell: true})
 }
 
-func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, escapePipes bool) {
+// inlinePosition is where the inline writer stands inside one textblock.
+type inlinePosition struct {
+	// atLineStart reports whether the next text character is the first on a markdown line of its
+	// own, after any mark's marker, so that the line may read as a block. A heading's or a table
+	// cell's text does not begin one.
+	atLineStart bool
+	// atTextStart reports whether the next character starts an inline run's text or a new line in
+	// it, where the writer has always escaped a list, heading, quote or ordered-list marker - in a
+	// heading, a cell and inside a mark too. Those escapes read back, and dropping them would
+	// rewrite every stored document that carries one, so they stay exactly where they were.
+	atTextStart bool
+	// afterLine reports whether any line precedes this one in the textblock. A setext underline
+	// needs a line to underline, and it may have ended at a newline in an earlier text node or at
+	// a hard break, neither of which the current node's own offsets can show.
+	afterLine bool
+	// afterMarker reports whether a mark's marker is written on this line before its text.
+	afterMarker bool
+}
+
+// lineCandidate is a line's first text character, when it is one that can begin a block form
+// only the whole line decides: the writer writes it unescaped, finishes the line, and then asks
+// the parser (endLine).
+type lineCandidate struct {
+	// at is where the character is written in the markdown.
+	at int
+	// char is the character.
+	char rune
+	// afterLine reports whether the line continues its textblock, so the line before is read
+	// with it.
+	afterLine bool
+	// atTypedPrefix reports whether the textblock is written at the prefix of the typed block
+	// around it, where a lone `:::` line closes that block.
+	atTypedPrefix bool
+	// prefix is the prefix the textblock's lines are written at.
+	prefix string
+}
+
+func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlineContext) {
+	escapePipes := context.tableCell
 	var active []Mark
-	atLineStart := true
+	position := inlinePosition{atLineStart: context.startsLine, atTextStart: true}
 	for index, n := range nodes {
 		if r.err != nil {
 			return
@@ -285,13 +354,37 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, escapePipes b
 			for _, mark := range next[common:] {
 				r.openInlineMark(mark, nodes, index)
 			}
+			if position.atLineStart && (len(active) != common || len(next) != common) {
+				position.afterMarker = true
+			}
 			active = next
-			r.writeInlineText(n, &atLineStart, escapePipes, !hasLink)
+			// The brackets rule follows the marks actually written, not hasLink: a bare URL's
+			// link mark is stripped above, and its text must keep its own brackets so linkify
+			// reads the whole href. The verdict itself was taken when the link opened.
+			label := labelBracketsNone
+			if containsMark(next, "link") {
+				label = r.labelBrackets
+			}
+			r.writeInlineText(n, &position, prefix, escapeContext{
+				tableCell:  escapePipes,
+				urlSchemes: !hasLink,
+				label:      label,
+				followed:   index+1 < len(nodes) || len(next) > 0,
+			})
 		case "hardbreak":
 			r.closeMarks(active, escapePipes)
 			active = nil
-			r.writeSyntax("\\\n" + prefix)
-			atLineStart = true
+			// A hard break is a backslash or two spaces before the newline. After text that
+			// already ends in a backslash the first form reads as one escaped backslash and a
+			// soft break, losing the line break, so the break is written as two spaces there.
+			if r.endsWith('\\') {
+				r.writeSyntax("  ")
+			} else {
+				r.writeSyntax("\\")
+			}
+			r.endLine()
+			r.writeSyntax("\n" + prefix)
+			position = inlinePosition{atLineStart: true, atTextStart: true, afterLine: true}
 		case "image":
 			r.closeMarks(active, escapePipes)
 			active = nil
@@ -299,24 +392,60 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, escapePipes b
 			alt, _ := n.Attrs["alt"].(string)
 			title, _ := n.Attrs["title"].(string)
 			r.writeSyntax("![" + escapeTablePipes(strings.ReplaceAll(alt, "]", "\\]"), escapePipes) + "](" + escapeLinkDestination(src, escapePipes) + titleSuffix(title, escapePipes) + ")")
-			atLineStart = false
+			position.atLineStart, position.atTextStart = false, false
 		case "html":
 			r.closeMarks(active, escapePipes)
 			active = nil
 			value, _ := n.Attrs["value"].(string)
 			r.writeSyntax(escapeTableHTMLPipes(value, escapePipes))
-			atLineStart = false
+			position.atLineStart, position.atTextStart = false, false
 		case "footnote_reference":
 			r.closeMarks(active, escapePipes)
 			active = nil
 			label, _ := n.Attrs["label"].(string)
 			r.writeSyntax("[^" + escapeFootnoteLabel(label) + "]")
-			atLineStart = false
+			position.atLineStart, position.atTextStart = false, false
 		default:
 			r.err = fmt.Errorf("%w: cannot render inline %q", ErrSchema, n.Type)
 		}
 	}
 	r.closeMarks(active, escapePipes)
+	r.endLine()
+}
+
+// endLine judges the line just written when its text began with a lineCandidate: the character is
+// escaped when the parser reads the line, markers and hard break included, as something other than
+// it reads with the character escaped (lineReadsAsText). A lone `:::` at the prefix of the typed
+// block around it closes that block, which the line read on its own cannot show.
+func (r *renderer) endLine() {
+	candidate := r.lineStart
+	if candidate == nil {
+		return
+	}
+	r.lineStart = nil
+	written := r.b.Bytes()
+	lineFrom := bytes.LastIndexByte(written[:candidate.at], '\n') + 1
+	line := string(written[lineFrom:])
+	width := utf8.RuneLen(candidate.char)
+	escape := "\\" + string(candidate.char)
+	if candidate.char == ' ' || candidate.char == '\t' {
+		escape = numericEntity(candidate.char)
+	}
+	closes := candidate.atTypedPrefix && strings.TrimSpace(strings.TrimPrefix(line, candidate.prefix)) == ":::"
+	if !closes {
+		var before string
+		if candidate.afterLine && lineFrom > 0 {
+			before = string(written[bytes.LastIndexByte(written[:lineFrom-1], '\n')+1 : lineFrom])
+		}
+		offset := candidate.at - lineFrom
+		if lineReadsAsText(before, line, line[:offset]+escape+line[offset+width:], candidate.prefix) {
+			return
+		}
+	}
+	tail := line[candidate.at-lineFrom+width:]
+	r.b.Truncate(candidate.at)
+	r.b.WriteString(escape)
+	r.b.WriteString(tail)
 }
 
 func (r *renderer) writeCodeText(node *Node, prefix string) {
@@ -366,6 +495,9 @@ func (r *renderer) closeMarks(marks []Mark, escapePipes bool) {
 }
 
 func (r *renderer) openInlineMark(mark Mark, nodes []*Node, index int) {
+	if mark.Type == "link" {
+		r.labelBrackets = linkLabelBrackets(linkLabel(nodes, index, mark))
+	}
 	if mark.Type != "inlineCode" {
 		r.writeSyntax(openMark(mark))
 		return
@@ -424,32 +556,88 @@ func (r *renderer) writeSyntax(value string) {
 	r.b.WriteString(value)
 }
 
+// endsWith reports whether the markdown written so far ends with char.
+func (r *renderer) endsWith(char byte) bool {
+	rendered := r.b.Bytes()
+	return len(rendered) > 0 && rendered[len(rendered)-1] == char
+}
+
 func (r *renderer) writeText(value string) {
 	r.b.WriteString(value)
 }
 
-func (r *renderer) writeInlineText(node *Node, atLineStart *bool, escapePipes, escapeURLs bool) {
+func (r *renderer) writeInlineText(node *Node, position *inlinePosition, prefix string, context escapeContext) {
 	if nodeHasMark(node, "inlineCode") {
-		r.writeText(escapeTablePipes(node.Text, escapePipes))
-		*atLineStart = strings.HasSuffix(node.Text, "\n")
+		// A code span's text is written as it is; a newline in it still ends a line.
+		value := escapeTablePipes(node.Text, context.tableCell)
+		for {
+			newline := strings.IndexByte(value, '\n')
+			if newline < 0 {
+				break
+			}
+			r.writeText(value[:newline])
+			r.endLine()
+			r.writeText("\n")
+			value = value[newline+1:]
+		}
+		r.writeText(value)
+		position.atLineStart = strings.HasSuffix(node.Text, "\n")
+		position.atTextStart = position.atLineStart
+		position.afterLine = position.afterLine || strings.Contains(node.Text, "\n")
 		return
 	}
 
 	value := node.Text
 	segmentStart := 0
-	// Where the current line begins inside this node, or -1 when the line began in an earlier
-	// one: a block marker is only a marker at the start of its own line.
-	lineStart := -1
-	if *atLineStart {
+	// Where the current line's text begins inside this node, or -1 when it began in an earlier
+	// one: lineStart for a line of its own whose first character is yet to be judged, and
+	// textLineStart for the writer's long-standing escapes.
+	lineStart, textLineStart := -1, -1
+	if position.atLineStart {
 		lineStart = 0
+	}
+	if position.atTextStart {
+		textLineStart = 0
 	}
 	for byteOffset, char := range value {
 		width := utf8.RuneLen(char)
-		if needsInlineEscape(value, byteOffset, char, lineStart, escapePipes, escapeURLs) {
+		context.textLineStart = textLineStart
+		escape := needsInlineEscape(value, byteOffset, char, context)
+		if lineStart >= 0 && r.lineStart == nil {
+			// The first character of a line of its own that only the whole line decides - a
+			// marker within the indentation the parser skips, or the whitespace that makes
+			// indented code - is held until the line is written. Leading whitespace with no
+			// marker before it is escaped at once: the parser strips it from the start of a
+			// paragraph's line even where no block opens, as after a list marker.
+			switch {
+			case byteOffset == lineStart && (char == ' ' || char == '\t') && indentedCodeRun(value, byteOffset):
+				if !position.afterLine && !position.afterMarker {
+					escape = true
+				} else {
+					r.holdLineStart(value[segmentStart:byteOffset], char, position, prefix)
+					segmentStart = byteOffset
+				}
+				lineStart = -1
+			case char != ' ' && char != '\t' && blockStart(value, lineStart, byteOffset):
+				if !escape && lineStartMarker(char) {
+					r.holdLineStart(value[segmentStart:byteOffset], char, position, prefix)
+					segmentStart = byteOffset
+				}
+				lineStart = -1
+			case !blockStart(value, lineStart, byteOffset):
+				lineStart = -1
+			}
+		}
+		if escape {
 			r.writeText(value[segmentStart:byteOffset])
 			if char == '&' {
 				r.writeText("&")
 				r.writeSyntax("amp;")
+			} else if char == ' ' || char == '\t' {
+				// Leading whitespace takes no backslash. The character is written as the numeric
+				// reference the parser decodes back to it, which keeps the line a paragraph
+				// instead of the indented code block four spaces or a tab would open.
+				r.writeSyntax(numericEntity(char))
 			} else {
 				r.writeSyntax("\\")
 				r.writeText(value[byteOffset : byteOffset+width])
@@ -457,114 +645,30 @@ func (r *renderer) writeInlineText(node *Node, atLineStart *bool, escapePipes, e
 			segmentStart = byteOffset + width
 		}
 		if char == '\n' {
-			lineStart = byteOffset + width
+			r.writeText(value[segmentStart:byteOffset])
+			segmentStart = byteOffset
+			r.endLine()
+			lineStart, textLineStart = byteOffset+width, byteOffset+width
+			position.afterLine = true
 		}
-		*atLineStart = char == '\n'
+		position.atLineStart = char == '\n'
+		position.atTextStart = char == '\n'
+		position.afterMarker = false
 	}
 	r.writeText(value[segmentStart:])
 }
 
-func needsInlineEscape(value string, offset int, char rune, lineStart int, escapePipes, escapeURLs bool) bool {
-	switch char {
-	case '\\':
-		return offset+1 < len(value) && isASCIIPunctuation(value[offset+1])
-	case '*':
-		return (blockStart(value, lineStart, offset) && markerTerminator(value, offset+1)) ||
-			emphasisDelimiter(value, offset, '*')
-	case '_':
-		return emphasisDelimiter(value, offset, '_')
-	case '`':
-		return true
-	case '[':
-		return linkOpener(value, offset)
-	case '(':
-		return offset > 0 && value[offset-1] == ']'
-	case ']':
-		return false
-	case '<':
-		return angleConstruct(value, offset)
-	case '&':
-		return entityReference(value, offset)
-	case ':':
-		return escapeURLs && urlSchemeColon(value, offset)
-	case '|':
-		return escapePipes
-	case '#':
-		return blockStart(value, lineStart, offset) && atxHeadingRun(value, offset)
-	case '>':
-		return blockStart(value, lineStart, offset)
-	case '-', '+':
-		return blockStart(value, lineStart, offset) && markerTerminator(value, offset+1)
-	case '.', ')':
-		return orderedListMarkerPunctuation(value, offset, lineStart)
-	default:
-		return false
+// holdLineStart writes the text before a line's first character and holds that character for
+// endLine to judge once the line is written.
+func (r *renderer) holdLineStart(before string, char rune, position *inlinePosition, prefix string) {
+	r.writeText(before)
+	r.lineStart = &lineCandidate{
+		at:            r.b.Len(),
+		char:          char,
+		afterLine:     position.afterLine,
+		atTypedPrefix: r.typedPrefix != nil && *r.typedPrefix == prefix,
+		prefix:        prefix,
 	}
-}
-
-// blockStart reports whether offset opens its own line: everything back to lineStart is
-// indentation the parser skips, up to three spaces or a run of tabs. A marker one space in is
-// still the marker — AGENTC-193's own payload was indented — and a line that began in an earlier
-// text node (lineStart < 0) is never a block start here.
-func blockStart(value string, lineStart, offset int) bool {
-	if lineStart < 0 || lineStart > offset {
-		return false
-	}
-	spaces := 0
-	for index := lineStart; index < offset; index++ {
-		switch value[index] {
-		case ' ':
-			spaces++
-		case '\t':
-		default:
-			return false
-		}
-	}
-	return spaces <= 3
-}
-
-// markerTerminator reports whether offset ends a list marker: the parser opens an item on a
-// marker followed by a space, a tab, or the end of the line.
-func markerTerminator(value string, offset int) bool {
-	return offset >= len(value) || value[offset] == ' ' || value[offset] == '\t' || value[offset] == '\n'
-}
-
-// atxHeadingRun reports whether value opens an ATX heading marker at offset: one to six hashes
-// ending the line or followed by a space or a tab. Escaping the first hash is enough to keep the
-// whole run text, and without it a `## ` a replacement wrote into a paragraph reads back as a
-// heading — or, inside a list item, as markdown the Proof schema refuses to import at all.
-func atxHeadingRun(value string, offset int) bool {
-	end := offset
-	for end < len(value) && value[end] == '#' {
-		end++
-	}
-	return end-offset <= 6 && markerTerminator(value, end)
-}
-
-func emphasisDelimiter(value string, offset int, delimiter byte) bool {
-	start, end := offset, offset+1
-	for start > 0 && value[start-1] == delimiter {
-		start--
-	}
-	for end < len(value) && value[end] == delimiter {
-		end++
-	}
-	before := start > 0 && isASCIIAlphaNumeric(value[start-1])
-	after := end < len(value) && isASCIIAlphaNumeric(value[end])
-	return (delimiter != '_' || !before || !after) && (before || after)
-}
-
-func linkOpener(value string, offset int) bool {
-	closing := strings.IndexByte(value[offset+1:], ']')
-	if closing < 0 {
-		return false
-	}
-	closing += offset + 1
-	return linkCloser(value, closing)
-}
-
-func linkCloser(value string, offset int) bool {
-	return offset+1 < len(value) && (value[offset+1] == '(' || value[offset+1] == ':')
 }
 
 func isBareURLLink(node *Node, marks []Mark, escapePipes bool) bool {
@@ -606,51 +710,6 @@ func withoutMark(marks []Mark, markType string) []Mark {
 		}
 	}
 	return out
-}
-
-func angleConstruct(value string, offset int) bool {
-	if offset+1 >= len(value) || !isASCIIAlphaNumeric(value[offset+1]) && value[offset+1] != '/' && value[offset+1] != '!' && value[offset+1] != '?' {
-		return false
-	}
-	return strings.IndexByte(value[offset+1:], '>') >= 0
-}
-
-func entityReference(value string, offset int) bool {
-	end := strings.IndexByte(value[offset+1:], ';')
-	if end < 0 {
-		return false
-	}
-	for _, char := range value[offset+1 : offset+end+1] {
-		if !isASCIIAlphaNumeric(byte(char)) && char != '#' {
-			return false
-		}
-	}
-	return true
-}
-
-func urlSchemeColon(value string, offset int) bool {
-	return strings.HasSuffix(value[:offset], "http") || strings.HasSuffix(value[:offset], "https")
-}
-
-func isASCIIAlphaNumeric(value byte) bool {
-	return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value >= '0' && value <= '9'
-}
-
-func isASCIIPunctuation(value byte) bool {
-	return value >= '!' && value <= '/' || value >= ':' && value <= '@' || value >= '[' && value <= '`' || value >= '{' && value <= '~'
-}
-
-// orderedListMarkerPunctuation reports whether the `.` or `)` at offset closes an ordered-list
-// marker: digits back to the start of an indented line, and a marker terminator after it.
-func orderedListMarkerPunctuation(value string, offset int, lineStart int) bool {
-	if !markerTerminator(value, offset+1) {
-		return false
-	}
-	start := offset
-	for start > 0 && value[start-1] >= '0' && value[start-1] <= '9' {
-		start--
-	}
-	return start < offset && blockStart(value, lineStart, start)
 }
 
 func nodeHasMark(node *Node, markType string) bool {

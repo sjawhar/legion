@@ -93,14 +93,8 @@ jobs:
       - name: Test the Bun pin check
         run: .github/scripts/check-bun-version.test.sh
 
-      - name: Test kind smoke harnesses
-        run: |
-          bash scripts/kind-smoke/up.test.sh
-          bash scripts/kind-smoke/down.test.sh
-          bash scripts/kind-smoke/checkpoints.test.sh
-
-      - name: Test kind smoke bridge
-        run: bun test scripts/kind-smoke
+      - name: Test the live proofs' GitHub ingress bridge
+        run: bun test scripts/e2e/lib
 
       - name: Pre-pull daemon E2E NATS image
         run: docker pull nats:2.10
