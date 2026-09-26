@@ -205,8 +205,9 @@ func (w *workflowRuntime) phaseHolds(ctx context.Context, key string, queuedFor 
 
 // treeClosable answers supervise's Deps.TreeClosable: a tree a workflow issue backs closes when
 // its linger expires, never on an operator's close of its root claim. The machine asks it where
-// the close is decided rather than a round trip before it, and only for the operator's own close:
-// the workflow's linger close holds that same issue record, so asking would refuse exactly the
+// the close is decided rather than a round trip before it, for the operator's own close and for a
+// refused stop of the tree's root, whose refusal then names that close. The workflow's linger
+// close is never asked: it holds that same issue record, so asking would refuse exactly the
 // closes the workflow is entitled to make. It is not a lock on what it reads: admission and the
 // engine commit issue records in their own transactions and take no machine lock, so one can
 // still land between this answer and the retire.

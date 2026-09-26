@@ -258,6 +258,24 @@ func TestAStopThatIsNotTheTreesCloseNeverRetiresItsRoot(t *testing.T) {
 		h.reach(StateReady)
 		wantRefused(t, h, StateReady, refused+"suspend it to stop its process")
 	})
+	// The read that picks the refusal's last clause can fail. That failure is the stop's, the
+	// request the operator made, and it changes nothing; no close was asked for.
+	t.Run("an unreadable tree", func(t *testing.T) {
+		h := newBareHarness(t)
+		h.deps.TreeClosable = func(context.Context, Claim) (bool, error) { return false, errors.New("store down") }
+		root := rootClaim()
+		h.token = root.Token
+		if err := h.store.PutClaim(h.ctx, root); err != nil {
+			t.Fatal(err)
+		}
+		h.start(root)
+		h.reach(StateReady)
+		if err := h.handle(RequestStop{Claim: rootToken}); err == nil || err.Error() != "stop "+string(rootToken)+": store down" {
+			t.Fatalf("stop with the tree unreadable returned %v, want the stop's own failure", err)
+		}
+		h.wantCalls("Release", 0)
+		h.wantState(StateReady)
+	})
 }
 
 // Suspend is what stops the root's process short of its tree's close, so it is accepted as soon as

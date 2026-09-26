@@ -800,7 +800,7 @@ func stop(m *Machine, ctx context.Context, _ Event) error {
 	}
 	closable, err := m.treeClosable(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("stop %s: %w", m.claim.Token, err)
 	}
 	return &RefusedError{State: m.claim.State, Request: "stop", Err: rootStopRefusal(m.claim.State, closable)}
 }
@@ -841,7 +841,7 @@ func (m *Machine) closeRefusal(ctx context.Context) error {
 	}
 	closable, err := m.treeClosable(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("close %s: %w", m.claim.Token, err)
 	}
 	if !closable {
 		return &RefusedError{State: m.claim.State, Request: "close",
@@ -851,15 +851,12 @@ func (m *Machine) closeRefusal(ctx context.Context) error {
 }
 
 // treeClosable is Deps.TreeClosable's answer for this claim's tree; with none, every tree closes.
+// Each caller names the request it answers when the read fails.
 func (m *Machine) treeClosable(ctx context.Context) (bool, error) {
 	if m.deps.TreeClosable == nil {
 		return true, nil
 	}
-	closable, err := m.deps.TreeClosable(ctx, m.claim)
-	if err != nil {
-		return false, fmt.Errorf("close %s: %w", m.claim.Token, err)
-	}
-	return closable, nil
+	return m.deps.TreeClosable(ctx, m.claim)
 }
 
 // end releases the claim's process and retires the claim, which is what every stop and close does
