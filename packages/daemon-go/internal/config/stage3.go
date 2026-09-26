@@ -28,9 +28,10 @@ type Gates struct {
 	Design DesignGate
 }
 
-// Project maps a Dispatch project prefix to its repository and optional merge-queue role.
+// Project maps a Dispatch project prefix to its repository, parsed at load, and optional
+// merge-queue role.
 type Project struct {
-	Repo           string
+	Repo           ghrepo.Repository
 	MergeQueueRole string
 }
 
@@ -44,8 +45,9 @@ type GitHubApp struct {
 	Installations     map[string]string
 }
 
-// GitHubApps holds the two App identities Legion needs. Review and implement are distinct because
-// the implement App's roles are the ones the workflow lets push and resolve review threads.
+// GitHubApps holds the two App identities Legion needs: the implement App acts for the implementer
+// and the merger, the review App for every other role, so a review never comes from the account
+// that wrote the change.
 type GitHubApps struct {
 	Implement GitHubApp
 	Review    GitHubApp
@@ -93,14 +95,15 @@ func readProject(value *yaml.Node, key string) (Project, error) {
 	fields, err := members(value, key, "repo", "merge_queue_role", "mergeQueueRole")
 	var unknown unknownKeyError
 	if errors.As(err, &unknown) {
-		// The shipped loader's own words (config.ts:664-667).
+		// The shipped loader's own words (validateProjectEntry, config.ts).
 		return Project{}, fmt.Errorf(`Unknown key %q`, key+"."+unknown.name)
 	}
 	if err != nil {
 		return Project{}, err
 	}
 	var project Project
-	if project.Repo, err = stringOf(fields["repo"], key+".repo"); err != nil {
+	repo, err := stringOf(fields["repo"], key+".repo")
+	if err != nil {
 		return Project{}, err
 	}
 	role := fields["merge_queue_role"]
@@ -110,10 +113,10 @@ func readProject(value *yaml.Node, key string) (Project, error) {
 	if project.MergeQueueRole, err = stringOf(role, key+".merge_queue_role"); err != nil {
 		return Project{}, err
 	}
-	if project.Repo == "" {
+	if repo == "" {
 		return Project{}, fmt.Errorf(`%s.repo must be "owner/name" (got "undefined")`, key)
 	}
-	if _, _, err := ghrepo.Split(key+".repo", project.Repo); err != nil {
+	if project.Repo, err = ghrepo.Parse(key+".repo", repo); err != nil {
 		return Project{}, err
 	}
 	if project.MergeQueueRole != "" && !roleNamePattern.MatchString(project.MergeQueueRole) {
@@ -128,7 +131,7 @@ func readGates(value *yaml.Node, key string) (*Gates, error) {
 	}
 	for index := 0; index+1 < len(value.Content); index += 2 {
 		// A present merge is refused whatever its value, null included, as the shipped loader
-		// refuses it (config.ts:975-982).
+		// refuses it (parseGates, config.ts).
 		if value.Content[index].Value == "merge" {
 			return nil, errors.New(gatesMergeMessage)
 		}

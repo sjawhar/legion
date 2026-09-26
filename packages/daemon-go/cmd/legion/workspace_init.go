@@ -19,6 +19,7 @@ import (
 	"time"
 
 	legionclaim "github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
@@ -28,7 +29,7 @@ const workspaceProvisionUsage = "legion workspace-init provision --issue <KEY> -
 const (
 	// workspaceLostExitCode is the status that tells the runtime the tree volume itself was lost —
 	// neither the shared clone nor the recorded OMP session is on it — rather than that one launch
-	// failed (packages/daemon/src/daemon/runtime.ts:87).
+	// failed (WORKSPACE_LOST_EXIT_CODE, packages/daemon/src/daemon/runtime.ts).
 	workspaceLostExitCode = 3
 	// lockWaitEnv bounds how long this init container waits for another pod's provisioning of the
 	// same repository. The daemon sets it on every pod from its own registration deadline, so the
@@ -37,7 +38,8 @@ const (
 	// provisionTokenFileEnv points `workspace-init fetch` at the mounted provisioning token.
 	provisionTokenFileEnv = "LEGION_PROVISION_TOKEN_FILE"
 	// defaultLockWaitSeconds is for an invocation no daemon sized: three slow-command budgets, a
-	// live holder's clone and fetch at full budget plus its local commands (workspace-init.ts:61).
+	// live holder's clone and fetch at full budget plus its local commands
+	// (DEFAULT_WORKSPACE_INIT_LOCK_WAIT_SECONDS, workspace-init.ts).
 	defaultLockWaitSeconds = 3 * int64(workspace.CommandTimeout/time.Second)
 )
 
@@ -110,12 +112,16 @@ func parseWorkspaceInitFlags(flags *flag.FlagSet, args []string, usage string, s
 	return 0, true
 }
 
-// workspaceInit validates everything before it touches the volume, and refuses to run where the
-// provisioning token is pointed at: this is the process that runs git and jj against what every
+// workspaceInit validates everything before it touches the volume, --repo first, and refuses to
+// run where the provisioning token is pointed at: this is the process that runs git and jj against what every
 // agent of the tree can write. Then it installs the gh shim, creates the directories the main
 // container mounts, holds a resume to the same agent, and provisions from the feed under the
 // repository lock, which it holds until it returns.
 func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, feed string, stdout io.Writer) error {
+	repository, err := ghrepo.Parse("--repo", repo)
+	if err != nil {
+		return err
+	}
 	if !legionclaim.IsIssueKey(issue) {
 		return fmt.Errorf("--issue must be a Dispatch issue key like LEGION-1 (got %q)", issue)
 	}
@@ -139,7 +145,7 @@ func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, fee
 	if err != nil {
 		return err
 	}
-	located, err := workspace.Location(root, repo, issue)
+	located, err := workspace.Location(root, repository, issue)
 	if err != nil {
 		return err
 	}
@@ -173,14 +179,15 @@ func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, fee
 		}
 	}
 
-	release, err := lockRepository(ctx, cloneDir+".lock", repo, lockWait, stdout)
+	release, err := lockRepository(ctx, cloneDir+".lock", repository, lockWait, stdout)
 	if err != nil {
 		return err
 	}
 	defer release()
 	run := workspace.NewRunner(workspace.CommandTimeout, tools)
 	provisioned, err := workspace.Provision(ctx, run, workspace.Request{
-		StateDir: root, Repo: repo, Issue: issue, CredentialHelper: credentialHelper, Source: workspace.FromFeed(feed),
+		StateDir: root, Repo: repository, Issue: issue, CredentialHelper: credentialHelper, Source: workspace.FromFeed(feed),
+		Log: func(line string) { fmt.Fprintln(stdout, "workspace-init: "+line) },
 	})
 	if err != nil {
 		return err
@@ -208,7 +215,7 @@ func workspaceInitLockWait() (int64, error) {
 
 // provisioningTools resolves the named tools a provisioning step runs from PATH — in an init
 // container the image's, with no worker-bin shim or operator rc ahead of them — where the
-// TypeScript runner found them (workspace-init.ts:36-45).
+// TypeScript runner found them (processEnvRunner, workspace-init.ts).
 func provisioningTools(names ...string) (map[string]string, error) {
 	tools := map[string]string{}
 	for _, tool := range names {
@@ -234,8 +241,8 @@ const lockPollInterval = 250 * time.Millisecond
 // nothing. Every attempt is non-blocking (flock(2) promises waiters no order, so polling gives up
 // nothing); the first refused one logs one line, so a pod stuck behind another's provisioning says
 // so in its init log, and the attempts continue every lockPollInterval, bounded by waitSeconds and
-// by ctx (workspace-init.ts:74-139).
-func lockRepository(ctx context.Context, lockPath, repo string, waitSeconds int64, log io.Writer) (release func(), err error) {
+// by ctx (withWorkspaceInitLock and holdFlock, workspace-init.ts).
+func lockRepository(ctx context.Context, lockPath string, repo ghrepo.Repository, waitSeconds int64, log io.Writer) (release func(), err error) {
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
 		return nil, fmt.Errorf("create %s: %w", filepath.Dir(lockPath), err)
 	}
@@ -283,10 +290,11 @@ func flock(fd, how int) error {
 
 // writeRecoveryMarker is the command side of workspace recovery: a relaunch after a lost volume
 // names the ref it recovers from, and the recreated workspace records it with the commit it was
-// recreated at in .legion/workspace-recovered.json (workspace-init.ts:196-215). recoveredAt is an
-// ISO instant in milliseconds, UTC, as JavaScript's toISOString writes it.
+// recreated at in .legion/workspace-recovered.json (cmdWorkspaceInit's
+// LEGION_WORKSPACE_RECOVERED_FROM branch, workspace-init.ts). recoveredAt is an ISO instant in
+// milliseconds, UTC, as JavaScript's toISOString writes it.
 func writeRecoveryMarker(ctx context.Context, run workspace.Runner, dir, fromRef string) error {
-	result, err := workspace.RunChecked(ctx, run, []string{"jj", "log", "-r", "@", "--no-graph", "-T", "commit_id"}, nil, dir)
+	result, err := workspace.RunChecked(ctx, run, []string{"jj", "log", "-r", "@", "--no-graph", "-T", "commit_id", "--color=never"}, nil, dir)
 	if err != nil {
 		return err
 	}

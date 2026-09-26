@@ -23,6 +23,8 @@ type PendingPush struct {
 	SHA         string `json:"sha"`
 	HandoffOnly bool   `json:"handoffOnly"`
 	Unknown     string `json:"unknown,omitempty"`
+	// ByReviewApp is whether the push was the review App's (its pusher is the review App's bot login).
+	ByReviewApp bool `json:"byReviewApp,omitempty"`
 }
 
 // Issue is one durable workflow record. Status is the last Dispatch status the daemon observed.
@@ -77,7 +79,10 @@ type PullRequest struct {
 	Reconciled          bool
 	PendingPush         *PendingPush
 	HeadCounted         string
-	State               PullRequestState
+	// PlannedRed is whether the newest head that changed a path outside .legion/ was the review
+	// App's (the tester's red tests): a red on it is planned, so the next head is not a fix attempt.
+	PlannedRed bool
+	State      PullRequestState
 }
 
 // PullRequestState is whether a pull request is open, merged, or closed unmerged.
@@ -135,7 +140,7 @@ type Store interface {
 	// SessionClaimsTree says whether the agent session holds a claim in the tree.
 	SessionClaimsTree(ctx context.Context, tx pgx.Tx, tree, session string) (bool, error)
 	// ClearGeneration drops the facts one generation of an issue owns: a merged or closed pull
-	// request, the fix-attempt counts of a still-open one (the next generation runs on the same
+	// request, the fix-attempt counts and planned mark of a still-open one (the next generation runs on the same
 	// branch and pull request), its design gate, and each role's handoff, review rounds, and
 	// verdict. Each role keeps its claim and its last handoff, so a commit an earlier generation
 	// reported is never new again.

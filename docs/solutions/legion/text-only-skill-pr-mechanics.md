@@ -33,7 +33,7 @@ symptoms:
 Learned on LEGION-18 (sjawhar/legion#953), nine text fixes to `skills/*/SKILL.md`,
 `packages/pi-envoy/roles/*.md`, and two `AGENTS.md` files. Nothing here is about the fixes
 themselves; it is about how a Legion worker lands and verifies a documentation-only change.
-Pane mechanics (stacked grants, bookmark placement, a reviewer's unpushed commit) are in
+Pane mechanics (stacked grants, bookmark placement, pushing your own commits) are in
 [worker-pane-shell-gotchas.md](worker-pane-shell-gotchas.md).
 
 ## 1. Two path-scoped commits that touch the same file: sequence the edits

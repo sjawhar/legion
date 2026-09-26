@@ -131,14 +131,14 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 	issue.Tree = "LEGION-200"
 	updatedAt := time.Date(2026, 9, 22, 14, 12, 13, 456000000, time.UTC)
 	approved := 7
-	pending := &PendingPush{SHA: "b1c2d3", HandoffOnly: true, Unknown: "paths_truncated"}
+	pending := &PendingPush{SHA: "b1c2d3", HandoffOnly: true, Unknown: "paths_truncated", ByReviewApp: true}
 	pr := PullRequest{
 		Issue: issue.Key, Repo: "sjawhar/legion", Number: 1243, Branch: "legion/LEGION-208",
 		HeadSHA: "b1c2d3", HeadUpdatedAt: updatedAt, HeadUpdatedAtSource: "pull_request.synchronize",
 		Verdict: "failing", Failing: []string{"unit"}, FailingStatuses: []string{"unit / test"},
 		ReviewDecision: "changes_requested", FixAttempts: 2, BlockedAttempts: 1,
 		CheckRuns: []AttemptRun{{Name: "unit", ID: 91}, {Name: "lint", ID: 92}}, Generation: 4,
-		Snapshot: "snapshot-4", Reconciled: true, PendingPush: pending, HeadCounted: "b1c2d3", State: PullRequestMerged,
+		Snapshot: "snapshot-4", Reconciled: true, PendingPush: pending, HeadCounted: "b1c2d3", PlannedRed: true, State: PullRequestMerged,
 	}
 	phase := PhaseRow{Issue: issue.Key, Role: claim.RoleImplementer, Claim: "legion-208-implementer", HandoffCommit: "aabbcc", Rounds: 2, Verdict: "pass"}
 	gate := DesignGate{Issue: issue.Key, ArtifactID: "artifact-208", LatestVersion: 7, ApprovedVersion: &approved}
@@ -250,7 +250,40 @@ func samePullRequest(got, want PullRequest) bool {
 		got.ReviewDecision == want.ReviewDecision && got.FixAttempts == want.FixAttempts &&
 		got.BlockedAttempts == want.BlockedAttempts && reflect.DeepEqual(got.CheckRuns, want.CheckRuns) &&
 		got.Generation == want.Generation && got.Snapshot == want.Snapshot && got.Reconciled == want.Reconciled &&
-		reflect.DeepEqual(got.PendingPush, want.PendingPush) && got.HeadCounted == want.HeadCounted
+		reflect.DeepEqual(got.PendingPush, want.PendingPush) && got.HeadCounted == want.HeadCounted &&
+		got.PlannedRed == want.PlannedRed
+}
+
+// A new generation keeps an open pull request but none of the old generation's fix-attempt
+// accounting: its counts, its counted head, and its planned mark, which would otherwise exempt the
+// new generation's first red from counting.
+func TestClearGenerationResetsAnOpenPullRequestsFixAttemptAccounting(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	issue := issueFixture("LEGION-285")
+	pr := PullRequest{
+		Issue: issue.Key, Repo: "sjawhar/legion", Number: 1359, Branch: "legion/LEGION-285",
+		HeadSHA: "red-tests", HeadUpdatedAt: time.Date(2026, 9, 25, 21, 0, 0, 0, time.UTC), HeadUpdatedAtSource: "webhook",
+		Verdict: "red", Failing: []string{"test"}, FailingStatuses: []string{}, CheckRuns: []AttemptRun{},
+		FixAttempts: 2, BlockedAttempts: 2, HeadCounted: "red-tests", PlannedRed: true, State: PullRequestOpen,
+	}
+	inTx(t, st, func(tx pgx.Tx) {
+		must(t, records.PutIssue(ctx, tx, issue))
+		must(t, records.PutPullRequest(ctx, tx, pr))
+		must(t, records.ClearGeneration(ctx, tx, issue.Key))
+	})
+	inTx(t, st, func(tx pgx.Tx) {
+		got, err := records.PullRequest(ctx, tx, issue.Key)
+		must(t, err)
+		if got == nil {
+			t.Fatal("the open pull request is gone, want it kept")
+		}
+		if got.FixAttempts != 0 || got.BlockedAttempts != 0 || got.HeadCounted != "" || got.PlannedRed {
+			t.Fatalf("after ClearGeneration: fixAttempts=%d blockedAttempts=%d headCounted=%q plannedRed=%v, want 0, 0, \"\" and false",
+				got.FixAttempts, got.BlockedAttempts, got.HeadCounted, got.PlannedRed)
+		}
+	})
 }
 
 func TestMarkProcessedIsIdempotent(t *testing.T) {
@@ -499,7 +532,7 @@ func TestRecordMigrationCreatesTheRequiredColumns(t *testing.T) {
 	want := map[string][]string{
 		"issues":           {"key", "tree", "project", "title", "parent", "phase", "generation", "status", "rank", "linger_until", "held_from", "last_dispatch_seq", "ready_pending_version"},
 		"phases":           {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "last_handoff"},
-		"pull_requests":    {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "head_updated_at_source", "verdict", "failing", "failing_statuses", "review_decision", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "reconciled", "pending_push", "head_counted", "state"},
+		"pull_requests":    {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "head_updated_at_source", "verdict", "failing", "failing_statuses", "review_decision", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "reconciled", "pending_push", "head_counted", "planned_red", "state"},
 		"design_gates":     {"issue", "artifact_id", "latest_version", "approved_version"},
 		"slots":            {"issue", "index", "admitted_at"},
 		"processed_events": {"source", "event_id", "processed_at"},

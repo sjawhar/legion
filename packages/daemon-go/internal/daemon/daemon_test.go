@@ -28,12 +28,14 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 const testOperatorToken = "operator-bearer-for-daemon-tests"
@@ -529,26 +531,6 @@ func (d *daemon) spawn(req api.SpawnRequest) claim.Token {
 	return spawned.Token
 }
 
-// eventually waits, boundedly, for what the daemon does on its own goroutines.
-// eventually polls until the condition holds. What it waits for is something the daemon reaches on
-// its own — a delivery, the transaction that answers it — so the wait is bounded by this test
-// binary's own deadline rather than a fixed span: on a loaded machine a step that is merely slow
-// is not a failure, and a condition that never holds still fails here, naming what it waited for.
-func eventually(t *testing.T, what string, done func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(time.Minute)
-	if testDeadline, ok := t.Deadline(); ok && testDeadline.Add(-time.Second).Before(deadline) {
-		deadline = testDeadline.Add(-time.Second)
-	}
-	for time.Now().Before(deadline) {
-		if done() {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for %s", what)
-}
-
 // lastLaunch is the spec of the claim's latest launch — the boot token its pane carries.
 func lastLaunch(t *testing.T, rt *fake.Runtime, token claim.Token) runtime.SpawnSpec {
 	t.Helper()
@@ -834,7 +816,7 @@ func TestRunStopsWithTheErrorWhenItsIntakeEnds(t *testing.T) {
 		t.Fatalf("open the notification stream: %v", err)
 	}
 	consumer := "legion-go-" + cfg.Project + "-dispatch"
-	eventually(t, "intake pulling from the durable Dispatch consumer", func() bool {
+	testwait.Eventually(t, "intake pulling from the durable Dispatch consumer", func() bool {
 		durable, err := stream.Consumer(context.Background(), consumer)
 		if err != nil {
 			return false
@@ -876,7 +858,7 @@ func workflowConfig(t *testing.T, natsURL string) config.Config {
 	if err := os.WriteFile(cfg.DispatchTokenFile, []byte("dispatch-test-token\n"), 0o600); err != nil {
 		t.Fatalf("write Dispatch token: %v", err)
 	}
-	cfg.Projects = map[string]config.Project{cfg.Project: {Repo: "acme/widgets"}}
+	cfg.Projects = map[string]config.Project{cfg.Project: {Repo: ghrepo.MustParse("acme/widgets")}}
 	cfg.NatsURLs = []string{natsURL}
 	return cfg
 }
@@ -921,7 +903,8 @@ func (r *workflowTokenRecorder) Token(_ context.Context, role appauth.AppRole, _
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.roles = append(r.roles, role)
-	return appauth.Lease{Token: "workflow-test-token", ExpiresAt: time.Now().Add(time.Hour)}, nil
+	// Each App has its own bot login, as a real token manager's leases do.
+	return appauth.Lease{Token: "workflow-test-token", ExpiresAt: time.Now().Add(time.Hour), Identity: appauth.GitIdentity{Name: "legion-" + string(role) + "[bot]"}}, nil
 }
 
 func (r *workflowTokenRecorder) Roles() []appauth.AppRole {
