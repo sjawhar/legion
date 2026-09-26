@@ -288,6 +288,7 @@ func TestAcceptingASuggestionRefusesAReplacementTheDocumentCannotCarryBack(t *te
 		listItem   = "Intro.\n\n- Body.\n- two\n"
 		longItem   = "Intro.\n\n- Body.\n\n  more\n- two\n"
 		ordered    = "Intro.\n\n1. Body.\n2. two\n"
+		nestedItem = "Intro.\n\n- Body.\n  - nested\n- two\n"
 		blockquote = "Intro.\n\n> Body.\n"
 		callout    = "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n"
 		footnote   = "x[^1]\n\n[^1]: Body.\n"
@@ -319,6 +320,10 @@ func TestAcceptingASuggestionRefusesAReplacementTheDocumentCannotCarryBack(t *te
 		{"a list in a list item holding two paragraphs", longItem, "- a", "writes a bullet list at the start of this list item"},
 		{"a list in an ordered item", ordered, "- a", "writes a bullet list at the start of this list item"},
 		{"nothing in a list item", listItem, "", "empties the paragraph this list item holds"},
+		// Emptying the first paragraph of an item that holds more names only what can go: the
+		// paragraph where the rest of the item can stand without it, and nothing where it cannot.
+		{"nothing in a list item holding two paragraphs", longItem, "", "reject the suggestion, or delete the paragraph in the document"},
+		{"nothing in a list item holding a nested list", nestedItem, "", "reject the suggestion, since the rest of the list item cannot be written without this paragraph"},
 		{"a rule in a footnote definition", footnote, "***", "writes a horizontal rule in this footnote definition"},
 		{"a list in a footnote definition", footnote, "- a", "writes a bullet list in this footnote definition"},
 	} {
