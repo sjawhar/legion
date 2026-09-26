@@ -43,6 +43,12 @@ var ErrTableWidth = errors.New("table row exceeds table width")
 // range sits: a code block over the whole text of a table cell, whose only content is inline text.
 var ErrReplacementDoesNotFit = errors.New("replacement does not fit document")
 
+// ErrJoinEmptiesTypedBlock is an inline replacement over a range that runs from one typed block's
+// text into the next typed block's: ProseMirror's join would pull the rest of the second into the
+// first and leave the second with nothing, which its content rule refuses. The browser editor
+// drops that block, so the join is refused rather than repaired.
+var ErrJoinEmptiesTypedBlock = errors.New("the range runs from one typed block into the next, and joining them would leave the second empty")
+
 // BlockBoundary returns the document-level boundary before or after the block
 // containing target.
 func BlockBoundary(doc *Node, target Range, after bool) (int, error) {
@@ -470,6 +476,11 @@ func joinSiblingsAtBoundary(doc *Node, parentPath, leftPath, rightPath []int, me
 		return nil, false, nil
 	}
 	closeRemainder := closeSideRemainder(parent.Children[rightIndex], rightPath[1:])
+	if closeRemainder != nil && len(closeRemainder.Children) == 0 {
+		if _, typed := typedBlock(closeRemainder.Type); typed {
+			return nil, false, fmt.Errorf("%w: %w", ErrSchema, ErrJoinEmptiesTypedBlock)
+		}
+	}
 	out := cloneNode(doc)
 	outParent := nodeAtPath(out, parentPath)
 	children := append([]*Node{}, outParent.Children[:leftIndex]...)

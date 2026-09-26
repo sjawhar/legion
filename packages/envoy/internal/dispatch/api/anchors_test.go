@@ -276,6 +276,9 @@ const askSpec = "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\
 //     ask.
 //   - A code block over a table cell's whole text fits nowhere; the splice's schema error once
 //     reached the handler as a 500.
+//   - Inline text over a range that runs from one ask or callout into the next would join the two
+//     and leave the second empty (the engine drops it, which for an ask retracts it); the
+//     splice's schema error once reached the handler as a 500.
 func TestSuggestionAcceptRefusals(t *testing.T) {
 	codeQuestion := "Which?\n\n```\ncode\n```\n"
 	for _, test := range []struct {
@@ -301,6 +304,14 @@ func TestSuggestionAcceptRefusals(t *testing.T) {
 		{name: "an ask under an id held malformed", spec: "Intro typo.\n\n" + malformedAsk, quote: "Intro typo.",
 			replaceWith: ":::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nOther?\n:::\n",
 			code:        "INVALID_ASK_BLOCK", reason: `duplicate ask block id \"a1\"`},
+		{name: "text from one ask's question into the next's", spec: "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich one?\n:::\n\n" +
+			":::ask{#a2 urgency=\"med\" multiple=\"false\" state=\"open\"}\nShip it?\n:::\n",
+			quote: "one? Ship", replaceWith: "x", code: "INVALID_OP", reason: `field \"anchor\"`},
+		{name: "text from one ask's question into the next's, deleted", spec: "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich one?\n:::\n\n" +
+			":::ask{#a2 urgency=\"med\" multiple=\"false\" state=\"open\"}\nShip it?\n:::\n",
+			quote: "one? Ship", replaceWith: "", code: "INVALID_OP", reason: `field \"anchor\"`},
+		{name: "text from one callout into the next", spec: ":::callout{#c1}\nWhich one?\n:::\n\n:::callout{#c2}\nShip it?\n:::\n",
+			quote: "one? Ship", replaceWith: "x", code: "INVALID_OP", reason: `field \"anchor\"`},
 		{name: "a code block over a table cell's whole text", spec: "| head |\n| :--- |\n| a target c |\n", quote: "a target c",
 			replaceWith: "```\ncode\n```\n", code: "INVALID_OP", reason: `field \"replace_with\"`},
 	} {
