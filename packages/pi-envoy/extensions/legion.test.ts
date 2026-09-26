@@ -5,6 +5,7 @@ import {
   beforeEach,
   describe,
   expect,
+  jest,
   mock,
   spyOn,
   test,
@@ -5540,6 +5541,9 @@ async function goController(options: {
   readonly register?: (
     body: Record<string, unknown>
   ) => Response | undefined | Promise<Response | undefined>;
+  /** The project the daemon's `GET /legion/v1/state` names, as its operator wrote it: `OMP`,
+   * whose token is `omp`, unless a test says otherwise. */
+  readonly daemonProject?: string;
 }): Promise<{
   readonly token: string;
   readonly registration: Record<string, unknown>;
@@ -5575,6 +5579,16 @@ async function goController(options: {
   process.env.LEGION_GRANT_FILE = grantFile;
 
   const requests: { readonly path: string; readonly body: unknown }[] = [];
+  const goldenState = JSON.parse(
+    await readFile(
+      path.join(import.meta.dir, "../../contracts/fixtures/daemon-api/state.json"),
+      "utf8"
+    )
+  );
+  const daemonState = {
+    ...goldenState,
+    daemon: { ...goldenState.daemon, project: options.daemonProject ?? "OMP" },
+  };
   let grants = 0;
   let holder = options.sessionId;
   const interests = new Map<string, Set<string>>();
@@ -5592,6 +5606,7 @@ async function goController(options: {
         expiresAt: "2099-01-01T00:00:00Z",
       });
     }
+    if (url.pathname === "/legion/v1/state") return Response.json(daemonState);
     if (url.pathname.startsWith("/legion/")) {
       return Response.json({ error: "no route" }, { status: 404 });
     }
@@ -5650,11 +5665,12 @@ async function goController(options: {
 }
 
 describe("the Go daemon's operator-launched controller (LEGION_DAEMON_API=go, LEGION_CONTROLLER=1)", () => {
-  test("registers on the claim route with its capability, then claims the controller role, and asks nothing else", async () => {
+  test("reads the daemon's project, registers on the claim route with its capability, then claims the controller role, and asks nothing else", async () => {
     const controller = await goController({ sessionId: "ses_go_controller" });
     await controller.handlers.get("session_start")?.({}, controller.context("ses_go_controller"));
 
     expect(daemonRequests(controller.requests)).toEqual([
+      { path: "/legion/v1/state", body: undefined },
       {
         path: "/legion/v1/claims/register",
         body: {
@@ -5922,6 +5938,126 @@ describe("the Go daemon's operator-launched controller (LEGION_DAEMON_API=go, LE
     }
   });
 
+  test("a controller whose role ends during a failing reconnect keeps the topic closed through every later retry, and a resume does not get it back", async () => {
+    const topic = "notifications.legion.omp.controller";
+    process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "1";
+    try {
+      let replaced = false;
+      // The daemon refuses the first session's capability once a later start replaced it.
+      const first = await goController({
+        sessionId: "ses_go_controller_first",
+        register: (body) =>
+          replaced && body.sessionId === "ses_go_controller_first"
+            ? Response.json({ error: "Invalid boot token" }, { status: 403 })
+            : undefined,
+      });
+      const ticks: (() => void)[] = [];
+      const refused = Promise.withResolvers<void>();
+      await first.handlers.get("session_start")?.(
+        {},
+        {
+          ...first.context("ses_go_controller_first"),
+          setInterval: (callback) => ticks.push(callback),
+          ui: {
+            notify: (message) => {
+              if (message.includes("this session no longer holds it")) refused.resolve();
+            },
+          },
+        }
+      );
+      // The connection dies, and both pumps' retries wait on a reconnect that will fail.
+      const failingConnect = Promise.withResolvers<void>();
+      const reconnecting = Promise.withResolvers<void>();
+      let reconnects = 0;
+      natsConnectGates.set("omp-ses_go_controller_first", () => {
+        reconnects += 1;
+        if (reconnects === 2) reconnecting.resolve();
+        return failingConnect.promise;
+      });
+      natsConnections.find((candidate) => candidate.name === "omp-ses_go_controller_first")?.drop();
+      await reconnecting.promise;
+      // A later `legion controller start` takes the role, and the heartbeat is refused while the
+      // reconnect is in flight.
+      resetLegionBootstrappedSessionForTests();
+      const second = createPi();
+      legionExtension(second.pi);
+      await second.handlers.get("session_start")?.({}, first.context("ses_go_controller_second"));
+      replaced = true;
+      for (const tick of ticks) tick();
+      await refused.promise;
+
+      // The reconnect fails, each retry schedules the next on the long interval, and the next
+      // reconnect succeeds.
+      jest.useFakeTimers();
+      const reconnected = Promise.withResolvers<void>();
+      natsConnectGates.set("omp-ses_go_controller_first", async () => reconnected.resolve());
+      failingConnect.reject(new Error("nats: connection refused"));
+      for (let turn = 0; turn < 50; turn++) await Promise.resolve();
+      jest.advanceTimersByTime(60_000);
+      jest.useRealTimers();
+      await reconnected.promise;
+      const settled = Promise.withResolvers<void>();
+      setImmediate(settled.resolve);
+      await settled.promise;
+      for (const tick of ticks) tick();
+      const registered = Promise.withResolvers<void>();
+      setImmediate(registered.resolve);
+      await registered.promise;
+
+      const openSubjects = natsConnections
+        .filter(
+          (candidate) => candidate.name === "omp-ses_go_controller_first" && !candidate.closed
+        )
+        .flatMap((connection) =>
+          connection.subjects.filter((subject) => !connection.unsubscribed.includes(subject))
+        );
+      expect(openSubjects).toContain("notifications.agent.ses_go_controller_first");
+      expect(openSubjects).not.toContain(topic);
+      expect(
+        first.requests.filter(
+          (request) =>
+            request.path === "/v1/interests/subscribe" &&
+            JSON.stringify(request.body).includes(topic)
+        )
+      ).toEqual([]);
+
+      // The replaced session is resumed in a new process: nothing in the registry brings the
+      // topic back.
+      resetLegionBootstrappedSessionForTests();
+      const connectionsBeforeResume = natsConnections.length;
+      const resumed = createPi();
+      legionExtension(resumed.pi);
+      const context = first.context("ses_go_controller_first");
+      const errorLog = spyOn(console, "error").mockImplementation(() => undefined);
+      try {
+        await expect(
+          resumed.handlers.get("session_start")?.(
+            {},
+            {
+              ...context,
+              sessionManager: {
+                ...context.sessionManager,
+                getBranch: () => [
+                  { type: "custom", customType: "envoy-role-claim", data: { role: first.token } },
+                ],
+              },
+            }
+          )
+        ).rejects.toThrow("Invalid boot token");
+      } finally {
+        errorLog.mockRestore();
+      }
+      const resumedSubjects = natsConnections
+        .slice(connectionsBeforeResume)
+        .flatMap((connection) => connection.subjects);
+      expect(resumedSubjects).toContain("notifications.agent.ses_go_controller_first");
+      expect(resumedSubjects).not.toContain(topic);
+    } finally {
+      jest.useRealTimers();
+      delete process.env.ENVOY_RESUBSCRIBE_DELAY_MS;
+    }
+  });
+
   test("mints a controller grant with its registration secret for every bash command", async () => {
     const controller = await goController({ sessionId: "ses_go_controller_grant" });
     const context = controller.context("ses_go_controller_grant");
@@ -5965,18 +6101,24 @@ describe("the Go daemon's operator-launched controller (LEGION_DAEMON_API=go, LE
       controller.context("ses_go_controller_after", "/tmp/ses_go_controller_after.jsonl")
     );
 
-    expect(
-      daemonRequests(controller.requests).map(
-        (request) => (request.body as { sessionId?: string }).sessionId
-      )
-    ).toEqual(["ses_go_controller_before", "ses_go_controller_after"]);
+    const registrations = controller.requests.filter(
+      (request) => request.path === "/legion/v1/claims/register"
+    );
+    expect(registrations.map((request) => JSON.stringify(request.body))).toEqual([
+      expect.stringContaining('"sessionId":"ses_go_controller_before"'),
+      expect.stringContaining('"sessionId":"ses_go_controller_after"'),
+    ]);
     expect(daemonRequests(controller.requests).map((request) => request.path)).toEqual([
+      "/legion/v1/state",
       "/legion/v1/claims/register",
+      "/legion/v1/state",
       "/legion/v1/claims/register",
     ]);
   });
 
-  test("refuses before claiming the role when LEGION_PROJECT is not the project the daemon registered", async () => {
+  test("refuses before it registers when LEGION_PROJECT is not the daemon's project", async () => {
+    // Registering replaces the running controller's session and secret, so a claim for another
+    // project must stop before it.
     const controller = await goController({ sessionId: "ses_go_controller_other_project" });
     process.env.LEGION_PROJECT = "demo";
 
@@ -5984,6 +6126,30 @@ describe("the Go daemon's operator-launched controller (LEGION_DAEMON_API=go, LE
       controller.handlers.get("session_start")?.(
         {},
         controller.context("ses_go_controller_other_project")
+      )
+    ).rejects.toThrow(
+      "LEGION_PROJECT demo names controller role legion-demo-controller, but the daemon at http://daemon.test serves project OMP, whose controller role is legion-omp-controller"
+    );
+    expect(controller.requests.map((request) => request.path)).not.toContain(
+      "/legion/v1/claims/register"
+    );
+    expect(controller.requests.map((request) => request.path)).not.toContain("/v1/roles/set");
+    expect(natsConnections.flatMap((connection) => connection.subjects)).not.toContain(
+      "notifications.legion.demo.controller"
+    );
+  });
+
+  test("refuses before claiming the role when the registration names another controller role", async () => {
+    const controller = await goController({
+      sessionId: "ses_go_controller_other_role",
+      daemonProject: "demo",
+    });
+    process.env.LEGION_PROJECT = "demo";
+
+    await expect(
+      controller.handlers.get("session_start")?.(
+        {},
+        controller.context("ses_go_controller_other_role")
       )
     ).rejects.toThrow(
       "LEGION_PROJECT demo names controller role legion-demo-controller, but the daemon registered this controller as legion-omp-controller"

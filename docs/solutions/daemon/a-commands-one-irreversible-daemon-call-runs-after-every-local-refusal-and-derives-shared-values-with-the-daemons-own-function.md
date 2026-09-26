@@ -69,7 +69,8 @@ it can refuse on local grounds.
 **2. A value the daemon computes is computed on the client by the daemon's function.** The fix
 was not a CLI-side validator that accepts `sjawhar/legion`; it was extracting the daemon's own
 rule — lowercase, drop every non-alphanumeric, refuse an empty result — out of
-`resolveDaemonConfig` as `legionProjectToken(value, field)` (`config.ts`) and calling it from
+`resolveDaemonConfig` as `legionProjectToken(value, field)` (now in `@legion/contracts`,
+`legion-roles.ts`) and calling it from
 `loadControllerStartConfig`, so `sjawhar/legion` yields `sjawharlegion` on both sides: the same
 controller token, the same `secrets/legion-sjawharlegion-controller` file, the same
 `LEGION_PROJECT`, the same refusal text (`project must include at least one alphanumeric

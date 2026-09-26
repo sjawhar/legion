@@ -157,6 +157,9 @@ a symlinked state directory) moves the check with it. And the daemon refuses a c
 registration whose `pluginContract` is not its `GoDaemonAPIVersion` with 409, naming both. That
 session goes through the controller session (`src/legion/controller-session.ts`) with the Go adapter
 (`goControllerDaemon`, `go-bootstrap.ts`), not `bootstrapGoClaim`, and gets no Go `legion` tool:
+`GET /legion/v1/state` first, since a registration replaces the running controller: an unset
+`LEGION_PROJECT`, or one whose controller role is not that of the project the state names
+(`legionProjectToken` in `@legion/contracts`, the daemon's own rule), stops the claim there; then
 `claims/register` with the capability in place of a boot token, answered with
 `api.ControllerRegisterResponse` (`LegionGoControllerRegisterResponse`), then the Envoy role
 `legion-<project>-controller`, then a subscription to the project's controller topic
@@ -166,7 +169,9 @@ controller-session form with the secret the registration was issued. What the Go
 on that topic is listed at `notify.ControllerTopic` (`packages/daemon-go/internal/notify`). The
 subscription lasts while the session holds the controller role (`subscribeLegionNotice`'s
 `whileHolding`): once another live session holds it, the heartbeat's refused re-assertion closes
-it, so a replaced controller stops taking wakes within one heartbeat. It is never registered with
+it, so a replaced controller stops taking wakes within one heartbeat, and a dropped connection's
+retries, each compared with the role's state when the connection dropped, do not reopen it once
+the role has ended. It is never registered with
 the listener, so a replaced controller resumed later gets it back only by claiming the role, which
 the daemon refuses its replaced capability. It is a live wake that changes no
 request, response or pane variable, and a daemon publishes to the topic whether anyone listens. A

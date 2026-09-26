@@ -1,9 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
-import { controllerToken, LegionDaemonApi } from "@legion/contracts";
+import { controllerToken, LegionDaemonApi, legionProjectToken } from "@legion/contracts";
 import { parse } from "yaml";
 import {
-  legionProjectToken,
   normalizeBaseUrl,
   readArgv,
   readString,

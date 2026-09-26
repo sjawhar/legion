@@ -206,6 +206,12 @@ interface EstablishSessionOptions {
   readonly carryPreviousSessionRole?: boolean;
 }
 
+/** Whether a topic served the session's role, and how many roles had ended, at one moment. */
+interface RoleSnapshot {
+  readonly roleBound: boolean;
+  readonly endsBefore: number;
+}
+
 function isRoleClaimEntry(entry: unknown): entry is RoleClaimEntry {
   if (typeof entry !== "object" || entry === null) return false;
   if (!("type" in entry) || entry.type !== "custom") return false;
@@ -598,7 +604,10 @@ export default function envoyExtension(pi: PiApi): void {
     // Otherwise the iterator only ended because the connection was closed or
     // errored out from under nats.js's own reconnect handling. Re-establish
     // rather than staying silently deaf while the HTTP registration heartbeat
-    // keeps the session looking healthy in the registry.
+    // keeps the session looking healthy in the registry. Whether the topic served a role, and how
+    // many roles had ended, are taken once, here: every retry of the chain, a failed reconnect's
+    // included, compares against them, so a role that ends mid-chain keeps the topic closed.
+    const snapshot = roleSnapshot(topic);
     const retry = (delayMs: number): void => {
       awaitingRetry.add(topic);
       setTimeout(() => {
@@ -609,7 +618,7 @@ export default function envoyExtension(pi: PiApi): void {
         // A close that landed during the delay leaves the marker for us instead
         // of the pump end-path. Consume it here so it cannot outlive the timer.
         if (intentionallyClosed.delete(topic)) return;
-        void subscribeUnlessRoleEnds(topic).catch(() => retry(NATS_RETRY_INTERVAL_MS));
+        void subscribeUnlessRoleEnds(topic, snapshot).catch(() => retry(NATS_RETRY_INTERVAL_MS));
       }, delayMs);
     };
     retry(RESUBSCRIBE_DELAY_MS);
@@ -640,16 +649,26 @@ export default function envoyExtension(pi: PiApi): void {
     roleNoticeSubjects.clear();
   };
 
-  // Opens `topic`. A role-bound subject whose role ends while the connection is being made (a
-  // first subscribe, or the pump's retry after a dropped connection) is closed again as soon as
-  // it opens, before any registration can carry it. Answers whether the topic is still wanted.
-  const subscribeUnlessRoleEnds = async (topic: string): Promise<boolean> => {
-    const subjects = expandSubscriptionTopics([topic]);
-    const roleBound = subjects.some((subject) => roleNoticeSubjects.has(subject));
-    const endsBefore = roleEnds;
+  // Whether `topic` serves the role this session holds, and how many roles had ended, at one
+  // moment: what a role-bound subscribe compares against once its connection is made.
+  const roleSnapshot = (topic: string): RoleSnapshot => ({
+    roleBound: expandSubscriptionTopics([topic]).some((subject) => roleNoticeSubjects.has(subject)),
+    endsBefore: roleEnds,
+  });
+
+  // Opens `topic` unless it served a role that has ended since `snapshot` was taken (a first
+  // subscribe, or any retry of a dropped topic's chain): a role-bound subject is not reopened, and
+  // one whose role ends while its connection is made is closed as soon as it opens, before any
+  // registration can carry it. Answers whether the topic is still wanted.
+  const subscribeUnlessRoleEnds = async (
+    topic: string,
+    snapshot: RoleSnapshot
+  ): Promise<boolean> => {
+    const roleEnded = () => snapshot.roleBound && roleEnds !== snapshot.endsBefore;
+    if (roleEnded()) return false;
     await subscribe(topic);
-    if (!roleBound || roleEnds === endsBefore) return true;
-    for (const subject of subjects) closeIntentionally(subject);
+    if (!roleEnded()) return true;
+    for (const subject of expandSubscriptionTopics([topic])) closeIntentionally(subject);
     return false;
   };
 
@@ -1027,7 +1046,7 @@ export default function envoyExtension(pi: PiApi): void {
       // Marked before the subscription opens, so no registration ever carries it.
       for (const subject of expandSubscriptionTopics([topic])) roleNoticeSubjects.add(subject);
     }
-    if (!(await subscribeUnlessRoleEnds(topic))) return;
+    if (!(await subscribeUnlessRoleEnds(topic, roleSnapshot(topic)))) return;
     await registerSession();
   };
 
