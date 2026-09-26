@@ -219,17 +219,62 @@ type invalidAskBlock struct {
 	reason error
 }
 
-// validateAskBlocks reports the first reason a document's ask blocks cannot be settled: a
-// duplicate block id, then the first invalid block's reason.
-func validateAskBlocks(tree *pmdoc.Node) error {
-	_, invalidBlocks, err := collectAskBlocksForSettlement(tree)
-	if err != nil {
+// validateEditedAskBlocks refuses an edit that leaves an ask unreadable - breaking its content
+// rule, or holding what settlement cannot read - when the edit wrote or changed it.
+func validateEditedAskBlocks(before, after *pmdoc.Node) error {
+	if _, _, err := collectAskBlocksForSettlement(after); err != nil {
 		return err
 	}
-	if len(invalidBlocks) > 0 {
-		return invalidBlocks[0].reason
+	return refuseChangedAsks(before, after, func(ask *pmdoc.Node) error {
+		if err := pmdoc.AskContentError(ask); err != nil {
+			return err
+		}
+		_, err := parseAskBlock(ask)
+		return err
+	})
+}
+
+// refuseChangedAsks is the first reason check gives against an ask in after that before does not
+// hold as it is - an ask after wrote or changed - or nil; a nil before holds none. An ask a browser
+// edit already left unreadable, which the write carries through unchanged, is not the write's to
+// refuse: refusing it would refuse every write to the document until someone repairs that ask in
+// the browser, and settlement flags it `invalid` meanwhile.
+func refuseChangedAsks(before, after *pmdoc.Node, check func(*pmdoc.Node) error) error {
+	var tokens map[string]string
+	var refusal, walkErr error
+	pmdoc.Walk(after, func(node *pmdoc.Node) bool {
+		if refusal != nil || walkErr != nil {
+			return false
+		}
+		if node.Type != "ask" {
+			return true
+		}
+		reason := check(node)
+		if reason == nil {
+			return true
+		}
+		if before != nil {
+			if tokens == nil {
+				if tokens, walkErr = blockTokens(before); walkErr != nil {
+					return false
+				}
+			}
+			token, err := nodeToken(node)
+			if err != nil {
+				walkErr = err
+				return false
+			}
+			if id, _ := node.Attrs[pmdoc.BlockIDAttr].(string); tokens[id] == token {
+				return true
+			}
+		}
+		refusal = reason
+		return false
+	})
+	if walkErr != nil {
+		return walkErr
 	}
-	return nil
+	return refusal
 }
 
 func collectAskBlocksForSettlement(tree *pmdoc.Node) ([]askBlock, []invalidAskBlock, error) {

@@ -475,6 +475,16 @@ person's or a session's retract stands however the document moves, which is why 
 refuses a caller reason beginning `removed from the document in version`.
 An invalid browser-edited ask retains its indexed ask, carries the server-owned `invalid` parse-error
 attribute, and emits `block.invalid`; repairing its body clears `invalid` before updating the ask row.
+Markdown that becomes a whole document - a spec at issue creation, an uploaded document or version -
+is refused with `400 INVALID_ASK_BLOCK` when an ask's body breaks its content rule,
+`paragraph+ bullet_list?` - one or more paragraphs, then at most one bullet list, last
+(`pmdoc.AskContentError`) - as the browser editor's parser refuses to build such a block. A new
+document is held to it for every ask, a new version only for each ask it writes or changes
+(`refuseChangedAsks`); what the rule allows is taken, and an option without a label or a question
+that is only an image is left to settlement's `invalid` flag. A document edit is refused for an ask
+it writes or changes that breaks the rule or that settlement cannot read (`validateEditedAskBlocks`).
+Neither refuses an ask a browser edit left unreadable that it carries through unchanged, so such an
+ask does not refuse edits or versions elsewhere in the document.
 An answered block carries `state`, `answered_by`, `answered_at`, `selected`, and `answer` in
 canonical markdown.
 

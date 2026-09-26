@@ -192,6 +192,9 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 	if err != nil {
 		return "", err
 	}
+	if err := refuseChangedAsks(nil, tree, pmdoc.AskContentError); err != nil {
+		return "", &ErrInvalidAskBlock{Reason: err}
+	}
 	canonical, err := renderTree(tree)
 	if err != nil {
 		return "", err
@@ -228,6 +231,9 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 		target, err := parseInput(markdown)
 		if err != nil {
 			return err
+		}
+		if err := refuseChangedAsks(current, target, pmdoc.AskContentError); err != nil {
+			return &ErrInvalidAskBlock{Reason: err}
 		}
 		currentMarkdown, err := renderTree(current)
 		if err != nil {
@@ -724,7 +730,7 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 			}
 			next := batch.tree
 			pmdoc.EnsureBlockIDs(next)
-			if err := validateAskBlocks(next); err != nil {
+			if err := validateEditedAskBlocks(tree, next); err != nil {
 				mutationErr = &ErrInvalidAskBlock{Reason: err}
 				return
 			}
@@ -772,7 +778,7 @@ func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, 
 		}
 		next := batch.tree
 		pmdoc.EnsureBlockIDs(next)
-		if err := validateAskBlocks(next); err != nil {
+		if err := validateEditedAskBlocks(tree, next); err != nil {
 			return &ErrInvalidAskBlock{Reason: err}
 		}
 		if outcome, err = batch.outcome(len(ops)); err != nil {
