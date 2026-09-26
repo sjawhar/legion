@@ -236,10 +236,11 @@ func writeBrowserDocument(t *testing.T, documentService *docs.Service, artifactI
 		tree.Children = written.Children
 		return nil
 	})
-	peer.barrier(t)
-	if text, err := documentService.Text(context.Background(), artifactID); err != nil || !strings.Contains(text, "```") {
-		t.Fatalf("live document after the browser write = %q (%v)", text, err)
+	rendered, err := pmdoc.Render(written)
+	if err != nil {
+		t.Fatalf("render the browser's document: %v", err)
 	}
+	waitForLiveText(t, documentService, artifactID, rendered)
 }
 
 // Only an ask an accept breaks is refused. A document already holding a malformed ask still takes
