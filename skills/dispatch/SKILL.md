@@ -579,9 +579,12 @@ and a closing line of as many colons at the same nesting. A typed block directly
 one's fence a colon longer (`::::callout{…}` around a `:::callout{…}`), and so does one whose code holds a `:::` line;
 Dispatch writes its fences that way. An unclosed typed block at document level is rejected. For
 a new typed block, omit `#block-id`; Dispatch mints it. When editing an existing typed block, retain
-its id and every rendered attribute. To rewrite such a block whole, `delete` it and then `insert` the
-new one carrying its id, anchored on the block before or after it, in that order and in one batch: an
-insert carrying an id the document still holds is refused.
+its id and every rendered attribute. Never copy an existing block's id into new markdown: an id
+names one block, so an insert, upload or suggestion whose markdown names an id the document holds
+outside the text it replaces is refused naming the id: `INVALID_OP` for an insert,
+`INVALID_MARKDOWN` for any other write. To rewrite such a block whole, `delete` it and then
+`insert` the new one carrying its id, anchored on the block before or after it, in that order and
+in one batch: an insert carrying an id the document still holds is refused.
 
 Use only the type names, content rule, attributes, and enum values returned by the schema. Values are
 quoted: `:::callout{kind="warning" title="Risk"}`. Do not write Pandoc-style `::: {.callout}`, leaf

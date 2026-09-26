@@ -7,11 +7,13 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
+	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 )
 
 // imageOmp is an `omp` that answers each of the image's probes by its own plan, one step per
@@ -154,7 +156,7 @@ func TestProbeImageLoadsThePluginTheWayAPodDoes(t *testing.T) {
 
 	err := ProbeImage(context.Background(), ImageProbe{
 		Omp: f.path, Contract: 3, Env: imageEnv(home), WorkDir: t.TempDir(), PluginRoot: root,
-		Log: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		RoleReferences: promptrefs.New(), Log: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
 	})
 
 	if err != nil {
@@ -164,18 +166,42 @@ func TestProbeImageLoadsThePluginTheWayAPodDoes(t *testing.T) {
 	if !strings.Contains(argv, "--no-extensions ") || !strings.Contains(argv, "--extension "+root+" ") {
 		t.Errorf("the load probe ran `omp %s`, want it to run as a pod does: --no-extensions with %s as an explicit extension", strings.TrimSpace(argv), root)
 	}
+	// The plugin root is also the one extension root the probe's own discovery of task agents and
+	// skills reads: exported as the root, never as the probe's own path.
+	if env := f.read(t, "load.env.1"); !slices.Contains(strings.Split(env, "\n"), "LEGION_PROMPT_ROOT="+root) {
+		t.Errorf("the load probe's environment has no LEGION_PROMPT_ROOT=%s, the plugin root:\n%s", root, env)
+	}
 	// Without a plugin root the image probe has no lane a pod uses, and is refused before any probe
 	// runs.
 	f = newImageOmp(t, []string{"available"}, []string{"yes"}, []string{"refuses"})
 	err = ProbeImage(context.Background(), ImageProbe{
 		Omp: f.path, Contract: 3, Env: imageEnv(imageHome(t, contractCurrent)), WorkDir: t.TempDir(),
-		Log: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		RoleReferences: promptrefs.New(), Log: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
 	})
 	if err == nil || !strings.Contains(err.Error(), "ImageProbe.PluginRoot is required") {
 		t.Fatalf("ProbeImage without a plugin root = %v, want it refused naming PluginRoot", err)
 	}
 	if calls := f.calls(t); len(calls) != 0 {
 		t.Errorf("ProbeImage without a plugin root ran %v, want no probe", calls)
+	}
+}
+
+// Without the references of the role prompts a pod is handed, the image probe would resolve the
+// plugin's names alone, so it is refused before any probe runs.
+func TestTheImageProbeRequiresTheRolePromptsReferences(t *testing.T) {
+	f := newImageOmp(t, []string{"available"}, []string{"yes"}, []string{"refuses"})
+	home := imageHome(t, contractCurrent)
+
+	err := ProbeImage(context.Background(), ImageProbe{
+		Omp: f.path, Contract: 3, Env: imageEnv(home), WorkDir: t.TempDir(), PluginRoot: filepath.Join(home, "opt-legion", "pi-legion-envoy"),
+		Log: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+	})
+
+	if err == nil || !strings.Contains(err.Error(), "ImageProbe.RoleReferences is required") {
+		t.Fatalf("ProbeImage without role references = %v, want it refused naming RoleReferences", err)
+	}
+	if calls := f.calls(t); len(calls) != 0 {
+		t.Errorf("ProbeImage without role references ran %v, want no probe", calls)
 	}
 }
 
@@ -188,7 +214,7 @@ func TestTheImageProbeResolvesARelativePluginRoot(t *testing.T) {
 
 	err := ProbeImage(context.Background(), ImageProbe{
 		Omp: f.path, Contract: 3, Env: imageEnv(home), WorkDir: home, PluginRoot: filepath.Join("opt-legion", "pi-legion-envoy"),
-		Log: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		RoleReferences: promptrefs.New(), Log: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
 	})
 
 	if err != nil {
@@ -250,7 +276,7 @@ func TestProbeImageRunsTheThreeProbesUnderTheImagesEnvironment(t *testing.T) {
 
 	err := ProbeImage(context.Background(), ImageProbe{
 		Omp: f.path, Contract: 3, Env: env, WorkDir: t.TempDir(), PluginRoot: filepath.Join(home, "opt-legion", "pi-legion-envoy"),
-		Log: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		RoleReferences: promptrefs.New(), Log: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
 	})
 
 	if err != nil {

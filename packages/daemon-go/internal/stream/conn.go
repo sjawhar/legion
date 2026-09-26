@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -63,6 +64,8 @@ const protocolVersion = 2
 // holder of a runtime.Conn never has to know the protocol has versions. Requests are bounded by
 // the caller's context and by the RPC timeout, whichever ends first.
 type Conn struct {
+	// seq is the order the listener registered the connection in (Sequence).
+	seq        uint64
 	claim      claim.Token
 	writer     *shimwire.Writer
 	rpcTimeout time.Duration
@@ -75,7 +78,11 @@ type Conn struct {
 	// ends or another prompt supersedes it: the only prompt a later `{success:false}` can take
 	// back (worker-rpc.ts:359-368). It is set by the reader when the answer is read, so it
 	// follows wire order rather than the order the waiting goroutine wakes in.
-	acked  *ackedPrompt
+	acked *ackedPrompt
+	// sent holds the request ids of the prompts this connection wrote. A prompt refusal naming one
+	// it did not write was replayed from the shim's backlog, answering a prompt an earlier
+	// connection sent (promptDelivery).
+	sent   map[string]struct{}
 	closed bool
 	done   chan struct{}
 
@@ -104,6 +111,7 @@ func newConn(nc net.Conn, token claim.Token, rpcTimeout time.Duration, log *slog
 		log:         log,
 		events:      events,
 		pending:     map[string]pendingRequest{},
+		sent:        map[string]struct{}{},
 		done:        make(chan struct{}),
 		negotiation: make(chan struct{}, 1),
 	}
@@ -140,9 +148,29 @@ func (c *Conn) Prompt(ctx context.Context, deliveryID, message string) error {
 	if err := c.Negotiate(ctx); err != nil {
 		return err
 	}
-	id := rand.Text()
+	id := deliveryID + promptIDSeparator + rand.Text()
 	_, err := c.call(ctx, shimwire.Prompt{ID: id, DeliveryID: deliveryID, Message: message}, id, deliveryID)
 	return err
+}
+
+// Sequence is the order the listener registered this connection in (Listener.register).
+func (c *Conn) Sequence() uint64 { return c.seq }
+
+// promptIDSeparator ends the delivery id a prompt's request id begins with. OMP's answer carries
+// only the request id, and a refusal it gave while no daemon was connected reaches a later
+// connection, which never sent that request; the id is how that refusal still names its delivery.
+// The random suffix Prompt appends never holds the separator, and neither does either kind of
+// delivery id the daemon makes: random text, or an outbox row's `outbox:<row>`.
+const promptIDSeparator = "."
+
+// promptDelivery is the delivery a prompt's request id names, or "" for an id no prompt carried.
+// It splits at the last separator, the one Prompt put before its own suffix.
+func promptDelivery(requestID string) string {
+	at := strings.LastIndex(requestID, promptIDSeparator)
+	if at < 0 {
+		return ""
+	}
+	return requestID[:at]
 }
 
 // GetState asks OMP whether a turn is running. An answer that does not say is an error, never
@@ -243,6 +271,7 @@ func (c *Conn) request(ctx context.Context, frame shimwire.Frame, id, deliveryID
 	}
 	c.pending[id] = pendingRequest{answer: answer, deliveryID: deliveryID}
 	if deliveryID != "" {
+		c.sent[id] = struct{}{}
 		// A new prompt supersedes the last one's claim to a late refusal (worker-rpc.ts:450).
 		c.acked = nil
 	}
@@ -370,19 +399,26 @@ func (c *Conn) dispatch(frame shimwire.Frame) {
 // answer routes a response to the request waiting on its id. One nobody is waiting on is either
 // a success for a request that gave up — the shim fans OMP's one answer out to every request id
 // of a retried delivery (worker-shim.ts:254-270), and a retry's earlier ids are long abandoned —
-// or a refusal, which reverses the acknowledged prompt it names or, naming none, is logged.
+// or a refusal. A refusal reverses the acknowledged prompt it names; one of a prompt this
+// connection never sent, replayed from the shim's backlog, is a replayed LateRefusal for the
+// delivery its request id names; any other is logged.
 func (c *Conn) answer(response shimwire.Response) {
 	c.mu.Lock()
 	request, waiting := c.pending[response.ID]
+	_, sentHere := c.sent[response.ID]
 	var late *ackedPrompt
+	var earlier string
+	refusal := response.Command == shimwire.TypePrompt && !response.Success
 	switch {
 	case waiting:
 		delete(c.pending, response.ID)
 		if request.deliveryID != "" && response.Command == shimwire.TypePrompt && response.Success {
 			c.acked = &ackedPrompt{requestID: response.ID, deliveryID: request.deliveryID}
 		}
-	case response.Command == shimwire.TypePrompt && !response.Success && c.acked != nil && c.acked.requestID == response.ID:
+	case refusal && c.acked != nil && c.acked.requestID == response.ID:
 		late, c.acked = c.acked, nil
+	case refusal && !sentHere:
+		earlier = promptDelivery(response.ID)
 	}
 	c.mu.Unlock()
 
@@ -392,8 +428,12 @@ func (c *Conn) answer(response shimwire.Response) {
 	case late != nil:
 		c.log.Warn("worker-stream: prompt refused after its acknowledgement",
 			"claim", c.claim, "deliveryId", late.deliveryID, "error", response.Error)
-		c.events.push(LateRefusal{Claim: c.claim, DeliveryID: late.deliveryID, Error: response.Error})
-	case response.Command == shimwire.TypePrompt && !response.Success:
+		c.events.push(LateRefusal{Claim: c.claim, DeliveryID: late.deliveryID, Error: response.Error, ConnSequence: c.seq})
+	case earlier != "":
+		c.log.Warn("worker-stream: a refusal replayed from an earlier connection names its delivery",
+			"claim", c.claim, "deliveryId", earlier, "error", response.Error)
+		c.events.push(LateRefusal{Claim: c.claim, DeliveryID: earlier, Error: response.Error, Replayed: true, ConnSequence: c.seq})
+	case refusal:
 		c.log.Warn("worker-stream: refusal for a prompt request this connection is not waiting on",
 			"claim", c.claim, "request", response.ID, "error", response.Error)
 	}

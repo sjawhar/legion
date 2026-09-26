@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
@@ -36,7 +38,9 @@ type envoyEnvelope struct {
 
 // decodeMessage decodes the Envoy envelope first, then the subject's source-specific payload.
 // project is the daemon's Dispatch project: another project's issue event is a nil Fact.
-func decodeMessage(subject, project string, data []byte) (decodedMessage, error) {
+// repositories are its configured repositories: a GitHub event whose payload names another
+// repository is a nil Fact, whatever subject carried it.
+func decodeMessage(subject, project string, repositories []ghrepo.Repository, data []byte) (decodedMessage, error) {
 	var envelope envoyEnvelope
 	if err := json.Unmarshal(data, &envelope); err != nil {
 		return decodedMessage{}, fmt.Errorf("decode Envoy envelope: %w", err)
@@ -57,7 +61,7 @@ func decodeMessage(subject, project string, data []byte) (decodedMessage, error)
 		if envelope.Source != "github" {
 			return decodedMessage{}, fmt.Errorf("GitHub subject has envelope source %q", envelope.Source)
 		}
-		fact, err = decodeGitHubFact(subject, envelope.Payload, envelope.IssuedAt)
+		fact, err = decodeGitHubFact(subject, repositories, envelope.Payload, envelope.IssuedAt)
 	default:
 		return decodedMessage{}, fmt.Errorf("unsupported durable subject %q", subject)
 	}
@@ -210,24 +214,33 @@ func isJSONObject(raw json.RawMessage) bool {
 	return json.Unmarshal(raw, &item) == nil && item != nil
 }
 
-func decodeGitHubFact(subject, payload string, issuedAt int64) (Fact, error) {
+func decodeGitHubFact(subject string, repositories []ghrepo.Repository, payload string, issuedAt int64) (Fact, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(payload), &raw); err != nil || raw == nil {
 		return nil, nil
 	}
+	// The payload names the event's repository; the subject's segments cannot, since a name may hold
+	// a dot. Only a configured repository's event is this daemon's, as in the shipped daemon, which
+	// registers a pull request only for its issue's repository (reducers.ts registerPrFenced).
+	repo, _ := rawString(raw, "repo")
+	at := slices.IndexFunc(repositories, func(configured ghrepo.Repository) bool { return configured.String() == repo })
+	if at < 0 {
+		return nil, nil
+	}
+	repository := repositories[at]
 	kind, ok := rawString(raw, "kind")
 	if !ok {
 		return nil, nil
 	}
 	switch kind {
 	case "pr":
-		return decodePullRequest(raw)
+		return decodePullRequest(repository, raw)
 	case "review":
-		return decodeReview(raw)
+		return decodeReview(repository, raw)
 	case "push":
-		return decodePush(raw)
+		return decodePush(repository, raw)
 	case "checks":
-		return decodeChecks(subject, raw, issuedAt)
+		return decodeChecks(subject, repository, raw, issuedAt)
 	case "comment":
 		// Comments route to the current role but do not change the durable workflow record.
 		return nil, nil
@@ -236,11 +249,12 @@ func decodeGitHubFact(subject, payload string, issuedAt int64) (Fact, error) {
 	}
 }
 
-func decodePullRequest(raw map[string]json.RawMessage) (Fact, error) {
-	repo, number, action, ok := githubIdentity(raw)
+func decodePullRequest(repository ghrepo.Repository, raw map[string]json.RawMessage) (Fact, error) {
+	number, action, ok := githubIdentity(raw)
 	if !ok {
 		return nil, nil
 	}
+	repo := repository.String()
 	branch, _ := rawString(raw, "head_ref")
 	sha, _ := rawString(raw, "head_sha")
 	body, _ := rawString(raw, "body")
@@ -270,8 +284,8 @@ func decodePullRequest(raw map[string]json.RawMessage) (Fact, error) {
 	}
 }
 
-func decodeReview(raw map[string]json.RawMessage) (Fact, error) {
-	repo, number, action, ok := githubIdentity(raw)
+func decodeReview(repository ghrepo.Repository, raw map[string]json.RawMessage) (Fact, error) {
+	number, action, ok := githubIdentity(raw)
 	if !ok || action != "submitted" {
 		return nil, nil
 	}
@@ -280,14 +294,10 @@ func decodeReview(raw map[string]json.RawMessage) (Fact, error) {
 	headSHA, _ := rawString(raw, "head_sha")
 	author, _ := rawString(raw, "author")
 	body, _ := rawString(raw, "body")
-	return PullRequestReview{Repo: repo, Number: number, State: strings.ToLower(state), CommitID: commitID, HeadSHA: headSHA, Author: author, Body: body}, nil
+	return PullRequestReview{Repo: repository.String(), Number: number, State: strings.ToLower(state), CommitID: commitID, HeadSHA: headSHA, Author: author, Body: body}, nil
 }
 
-func decodePush(raw map[string]json.RawMessage) (Fact, error) {
-	repo, ok := rawString(raw, "repo")
-	if !ok {
-		return nil, nil
-	}
+func decodePush(repository ghrepo.Repository, raw map[string]json.RawMessage) (Fact, error) {
 	ref, ok := rawString(raw, "ref")
 	if !ok || !strings.HasPrefix(ref, "refs/heads/") {
 		return nil, nil
@@ -299,16 +309,12 @@ func decodePush(raw map[string]json.RawMessage) (Fact, error) {
 	changedPaths := rawStringPointer(raw, "changed_paths")
 	truncated := rawStringPointer(raw, "changed_paths_truncated")
 	pusher, _ := rawString(raw, "pusher")
-	return Push{Repo: repo, Branch: strings.TrimPrefix(ref, "refs/heads/"), After: after, ChangedPaths: changedPaths, Truncated: truncated, Pusher: pusher}, nil
+	return Push{Repo: repository.String(), Branch: strings.TrimPrefix(ref, "refs/heads/"), After: after, ChangedPaths: changedPaths, Truncated: truncated, Pusher: pusher}, nil
 }
 
-func decodeChecks(subject string, raw map[string]json.RawMessage, issuedAt int64) (Fact, error) {
-	repo, repoOK := rawString(raw, "repo")
-	number, numberOK := rawNumber(raw, "number")
-	if !repoOK || !numberOK {
-		return nil, nil
-	}
-	if !checksSubjectMatches(subject, repo, number) {
+func decodeChecks(subject string, repository ghrepo.Repository, raw map[string]json.RawMessage, issuedAt int64) (Fact, error) {
+	number, ok := rawNumber(raw, "number")
+	if !ok || subject != githubRepositoryPrefix(repository)+".pr."+strconv.Itoa(number)+".checks" {
 		return nil, nil
 	}
 	headSHA, ok := rawString(raw, "sha")
@@ -349,22 +355,13 @@ func decodeChecks(subject string, raw map[string]json.RawMessage, issuedAt int64
 	} else if len(cancelled) == 0 {
 		verdict = "green"
 	}
-	return PullRequestChecks{Repo: repo, Number: number, HeadSHA: headSHA, CheckRuns: runs, Generation: generation, Snapshot: snapshot, Verdict: verdict, Failing: failed, SettledAt: settledAt}, nil
+	return PullRequestChecks{Repo: repository.String(), Number: number, HeadSHA: headSHA, CheckRuns: runs, Generation: generation, Snapshot: snapshot, Verdict: verdict, Failing: failed, SettledAt: settledAt}, nil
 }
 
-func githubIdentity(raw map[string]json.RawMessage) (string, int, string, bool) {
-	repo, repoOK := rawString(raw, "repo")
+func githubIdentity(raw map[string]json.RawMessage) (int, string, bool) {
 	number, numberOK := rawNumber(raw, "number")
 	action, actionOK := rawString(raw, "action")
-	return repo, number, action, repoOK && numberOK && actionOK
-}
-
-func checksSubjectMatches(subject, repo string, number int) bool {
-	segments := strings.Split(subject, ".")
-	if len(segments) != 7 || segments[0] != "notifications" || segments[1] != "github" || segments[4] != "pr" || segments[6] != "checks" {
-		return false
-	}
-	return segments[2]+"/"+segments[3] == repo && segments[5] == strconv.Itoa(number)
+	return number, action, numberOK && actionOK
 }
 
 func rawCheckRuns(value json.RawMessage) ([]record.AttemptRun, bool) {

@@ -9,7 +9,6 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
@@ -131,8 +130,8 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 			// strict client, over a row that is a legitimate state.
 			view = api.Issue{
 				Key:     current.Issue,
-				Phase:   phase.Unrecorded,
-				Status:  string(phase.Unrecorded),
+				Phase:   api.Unrecorded,
+				Status:  string(api.Unrecorded),
 				Workers: map[claim.Role]api.PhaseView{},
 			}
 		}

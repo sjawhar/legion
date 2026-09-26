@@ -90,7 +90,7 @@ func (p *typedDirectiveParser) Close(_ ast.Node, _ gmtext.Reader, _ parser.Conte
 
 // closingColons is the longest line of colons written inside typed block n, whose own lines start
 // at column on the written line, that the browser editor's parser could read as a fence closing n:
-// a typed-fence line (TypedFenceLine) whose text starts at most three columns past column, even
+// a line of three or more colons (fenceColons) whose text starts at most three columns past column, even
 // inside fenced code. Columns are the written line's: a list marker adds its width, and a tab
 // advances to the next multiple of four from the column it stands at, so in a typed block two
 // columns in, a tab reaches only two past it. A line in a blockquote begins with its `>` and closes
@@ -156,14 +156,6 @@ func textColumn(line string, column int) int {
 		}
 	}
 	return column
-}
-
-// TypedFenceLine reports whether the browser editor's parser reads line, where it stands, as a
-// typed block's fence: three or more colons with only spaces and tabs around them, and the carriage
-// return of a line that ends in one, since a carriage return before a line feed is part of the
-// line ending.
-func TypedFenceLine(line string) bool {
-	return fenceColons(line) >= 3
 }
 
 // fenceColons is the number of colons in line when they are all it holds but spaces, tabs and a

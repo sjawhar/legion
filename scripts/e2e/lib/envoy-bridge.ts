@@ -1,11 +1,13 @@
-// scripts/kind-smoke/envoy-bridge.ts — SMOKE_GITHUB_INGRESS=envoy: relay the sandbox repository's
-// GitHub subjects from production NATS (read-only) into a kind smoke instance's own NATS. It
-// subscribes upstream to exactly `notifications.github.<owner>.<repo>.>` and republishes each
-// message unchanged downstream; it never publishes upstream, and it never touches Dispatch issue
-// subjects — the instance's scratch Dispatch server publishes its own, and two rigs on one issue
-// stream admitted each other's issues (docs/solutions/legion).
+// scripts/e2e/lib/envoy-bridge.ts: relay the sandbox repository's GitHub subjects from production
+// NATS (read-only) into a live proof's own NATS (stage3-devbox-workflow.sh starts it). It
+// subscribes upstream to exactly `notifications.github.<owner>.<repo>.>`, a dot in either name
+// written `_` as Envoy publishes it, and republishes each message unchanged downstream; it never
+// publishes upstream, and it never touches Dispatch issue subjects — the instance's scratch
+// Dispatch server publishes its own, and two rigs on one issue stream admitted each other's issues
+// (docs/solutions/legion).
 import { connect, type NatsConnection, type Subscription } from "nats";
-import { EnvelopeSchema } from "../../packages/contracts/src/envelope";
+import { EnvelopeSchema } from "../../../packages/contracts/src/envelope";
+import { githubSubject } from "../../../packages/contracts/src/subject";
 
 const requiredEnvelopeFields = [
   "event_id",
@@ -65,9 +67,10 @@ export function bridgeConfigFromEnvironment(
       "SMOKE_UPSTREAM_NATS is not one NATS URL naming a fully-qualified host: a bare alias resolves through whatever search domain the box has; name the production Envoy NATS as nats://envoy-nats.<tailnet>.ts.net:4222"
     );
   }
+  const [owner, name] = repository.split("/");
   return {
     repository,
-    subjects: [`notifications.github.${repository.replace("/", ".")}.>`],
+    subjects: [githubSubject(owner, name, ">")],
     upstreamUrl,
     downstreamUrl,
   };
@@ -75,7 +78,7 @@ export function bridgeConfigFromEnvironment(
 
 // One NATS server URL: an optional scheme and user info, a host with a dot, an optional port, and
 // nothing after it. The client dials whatever follows the last "://", so a path or a query could
-// name a host other than the one checked here. up.sh and Stage 3 hold the same pattern.
+// name a host other than the one checked here. Stage 3 holds the same pattern.
 const upstreamNatsUrl =
   /^(?:[A-Za-z][A-Za-z0-9+.-]*:\/\/)?(?:([^@/?#,\s]+)@)?([A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+)(?::\d+)?\/?$/;
 
@@ -164,7 +167,7 @@ async function forwardMessages(
 export async function runBridge(config: BridgeConfig): Promise<void> {
   const upstream = await connect({
     servers: config.upstreamUrl,
-    name: `legion-kind-smoke-bridge-upstream-${config.repository}`,
+    name: `legion-e2e-bridge-upstream-${config.repository}`,
     reconnect: true,
     maxReconnectAttempts: -1,
     reconnectTimeWait: 2_000,
@@ -173,7 +176,7 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
   try {
     downstream = await connect({
       servers: config.downstreamUrl,
-      name: `legion-kind-smoke-bridge-downstream-${config.repository}`,
+      name: `legion-e2e-bridge-downstream-${config.repository}`,
       reconnect: true,
       maxReconnectAttempts: -1,
       reconnectTimeWait: 2_000,

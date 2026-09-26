@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
+	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 	"github.com/sjawhar/legion/daemon/internal/testomp"
 	"log/slog"
 	"os"
@@ -79,7 +80,7 @@ func TestThePromptReferenceProbeOnTheRealOhMyPi(t *testing.T) {
 			log := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 			var err error
 			if testCase.onPod {
-				err = ProbeImage(context.Background(), ImageProbe{Omp: omp, Contract: 3, Env: env, WorkDir: dir, PluginRoot: root, Log: log})
+				err = ProbeImage(context.Background(), ImageProbe{Omp: omp, Contract: 3, Env: env, WorkDir: dir, PluginRoot: root, RoleReferences: promptrefs.New(), Log: log})
 			} else {
 				install := exec.Command(omp, "plugin", "install", root)
 				install.Env = environ
