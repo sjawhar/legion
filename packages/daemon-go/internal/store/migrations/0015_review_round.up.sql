@@ -1,8 +1,8 @@
 -- 0015_review_round.up.sql - a review ends when its reviewer completes it, which can come after
 -- the review itself, so the reviewer's round keeps the review that decided it until the round
 -- ends: its state, its body (handed to the next round's implementer), the head it was written on
--- and its GitHub id. review_seen, kept across rounds, is the newest review id the issue has had: a
--- review no newer than it was written before one already processed.
+-- and its GitHub id. review_seen, kept across rounds, is the id of the newest deciding review the
+-- issue has had: a deciding review no newer than it was written before one already processed.
 alter table phases add column decision jsonb;
 alter table phases add column review_seen bigint not null default 0;
 

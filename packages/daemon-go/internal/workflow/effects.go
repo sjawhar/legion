@@ -80,8 +80,8 @@ func (e *Engine) clearHandoff(ctx context.Context, tx pgx.Tx, issue string, role
 	if err != nil || row.HandoffCommit == "" && row.Verdict == "" && row.Decision == nil {
 		return err
 	}
-	// The review round's decision ends with the round; the newest review id seen (ReviewSeen) does
-	// not, since it orders every review the issue will have.
+	// The review round's decision ends with the round; the newest deciding review's id (ReviewSeen)
+	// does not, since it orders every deciding review the issue will have.
 	row.HandoffCommit, row.Verdict, row.Decision = "", "", nil
 	return e.store.PutPhase(ctx, tx, row)
 }

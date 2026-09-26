@@ -73,9 +73,10 @@ type PhaseRow struct {
 	// reported for the round that carried one, kept until the round ends, since the reviewer's
 	// completion can come after the review it posted. Nil until a review decides.
 	Decision *ReviewDecision
-	// ReviewSeen is the id of the newest review GitHub reported for the issue, on the reviewer's
-	// row and kept across rounds: a review no newer than it was written before one already
-	// processed, and records nothing.
+	// ReviewSeen is the id of the newest deciding review (changes requested or approved) GitHub
+	// reported for the issue, on the reviewer's row and kept across rounds: a deciding review no
+	// newer than it was written before one already processed, and records nothing. A comment
+	// decides nothing and leaves it as it is.
 	ReviewSeen int64
 }
 
