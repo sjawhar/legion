@@ -96,8 +96,8 @@ func TestProjectShowsOperatorSpawnedClaimsWithoutRecordIssue(t *testing.T) {
 	// The row is listed for the claim's sake and says the workflow does not record its issue.
 	// Empty strings here refused the whole state document at every strict client — the contract's
 	// own parse of that document is packages/contracts' state-operator-claim fixture.
-	if view.Phase != phase.Unrecorded || view.Status != string(phase.Unrecorded) {
-		t.Fatalf("operator-spawned issue = phase %q status %q, want both %q", view.Phase, view.Status, phase.Unrecorded)
+	if view.Phase != api.Unrecorded || view.Status != string(api.Unrecorded) {
+		t.Fatalf("operator-spawned issue = phase %q status %q, want both %q", view.Phase, view.Status, api.Unrecorded)
 	}
 }
 

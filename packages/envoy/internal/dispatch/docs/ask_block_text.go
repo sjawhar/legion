@@ -230,7 +230,7 @@ func parsedBlockBody(nodes []*pmdoc.Node) ([]*pmdoc.Node, error) {
 	}
 	parsed, err := pmdoc.Parse(markdown)
 	if err != nil {
-		return nil, errors.New("the text would leave the document's markdown unreadable; a line may not begin with \":::\"")
+		return nil, errors.New("the text would leave the document's markdown unreadable")
 	}
 	return parsed.Children, nil
 }
@@ -257,7 +257,7 @@ func verifyAskBlockRoundTrip(next *pmdoc.Node, blockID string, want AskBlockText
 	if err != nil {
 		return &ErrAskBlockUnrepresentable{
 			Field:  "block",
-			Reason: "the text would leave the document's markdown unreadable; a line may not begin with \":::\"",
+			Reason: "the text would leave the document's markdown unreadable",
 		}
 	}
 	reparsed, err := askBlockOf(rendered, blockID)

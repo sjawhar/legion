@@ -3,7 +3,9 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -160,6 +162,71 @@ func TestDocumentRetypeRejectsUnknownTypeAndInvalidAttributes(t *testing.T) {
 				t.Fatalf("retype response: status=%d body=%s", response.Code, response.Body.String())
 			}
 		})
+	}
+}
+
+// Markdown that becomes a document is held to an ask block's content rule, paragraph+
+// bullet_list? - one or more paragraphs, then at most one bullet list, last - wherever it enters: a
+// spec at issue creation, a new document, a new version of one. The browser editor's parser
+// refuses to build such a block, and stored, it would refuse every later edit to the document. What
+// the rule allows is taken, including an option without a label or a question that is only an
+// image, which settlement flags `invalid` and the dashboard shows as a malformed decision.
+func TestUploadsHoldAskBlocksToTheirContentRule(t *testing.T) {
+	handler := newTestHandler(t)
+	ask := func(body string) string {
+		return "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\n" + body + "\n:::\n\nAfter.\n"
+	}
+	issue := createInteractionIssue(t, handler, "UP", "Uploads", "Intro.\n")
+	uploaded := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]any{
+		"name": "notes.md", "content": "Notes.\n",
+	}, "alice")
+	if uploaded.Code != http.StatusCreated {
+		t.Fatalf("upload notes: status=%d body=%s", uploaded.Code, uploaded.Body.String())
+	}
+	notes := decodeBody[struct {
+		Artifact model.Artifact `json:"artifact"`
+	}](t, uploaded).Artifact
+	routes := func(index int, content string) map[string]func() *httptest.ResponseRecorder {
+		return map[string]func() *httptest.ResponseRecorder{
+			"create an issue": func() *httptest.ResponseRecorder {
+				return dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{"project": "UP", "title": fmt.Sprintf("Decision %d: %s", index, strings.Repeat("x", index+1)), "spec": content, "force": true}, "alice")
+			},
+			"upload a document": func() *httptest.ResponseRecorder {
+				return dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]any{"name": fmt.Sprintf("doc-%d.md", index), "content": content}, "alice")
+			},
+		}
+	}
+	for index, body := range []string{
+		"Which?\n\n```\ncode\n```",
+		"Which?\n\n- A\n- B\n\nAn afterthought.",
+		"Which?\n\n- A\n\n1. B",
+		"- A\n- B",
+	} {
+		for route, send := range routes(index, ask(body)) {
+			if response := send(); response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"INVALID_ASK_BLOCK"`) || !strings.Contains(response.Body.String(), "paragraph+ bullet_list?") {
+				t.Fatalf("%s with %q: status=%d body=%s", route, body, response.Code, response.Body.String())
+			}
+		}
+		version := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]any{"name": "notes.md", "content": ask(body)}, "alice")
+		if version.Code != http.StatusBadRequest || !strings.Contains(version.Body.String(), `"code":"INVALID_ASK_BLOCK"`) {
+			t.Fatalf("upload a version with %q: status=%d body=%s", body, version.Code, version.Body.String())
+		}
+	}
+	text := decodeBody[struct {
+		Markdown string `json:"markdown"`
+	}](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+notes.ID+"/text", nil, "alice"))
+	if text.Markdown != "Notes.\n" {
+		t.Fatalf("notes after refused versions = %q, want them unchanged", text.Markdown)
+	}
+	for index, body := range []string{
+		"Which path?\n\n- Ship: Release it\n- : No label",
+		"![a diagram](https://x.test/d.png)\n\n- A\n- B",
+	} {
+		for route, send := range routes(10+index, ask(body)) {
+			if response := send(); response.Code != http.StatusCreated {
+				t.Fatalf("%s with %q: status=%d body=%s", route, body, response.Code, response.Body.String())
+			}
+		}
 	}
 }
 

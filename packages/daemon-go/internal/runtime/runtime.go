@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
 // Runtime is what the supervisor has instead of a process table. Every method is about one
@@ -65,11 +66,13 @@ type Runtime interface {
 	Observe(ctx context.Context) (<-chan Observation, error)
 	// ReconcileOrphans ends what this runtime owns that belongs to no known claim — what a crash
 	// between spawning a process and persisting its locator leaves behind. known is every claim the
-	// daemon has not retired; the located ones also join the watch. What an earlier sweep adopted
-	// protects nothing: a process no sweep's known set names any more is the orphan sweep's. An
-	// entry that fails Validate is an error, and nothing of its claim is ended: tmux, which knows a
-	// claim's processes only by the locators it is given, then ends nothing at all; the sandbox,
-	// which finds a claim's Sandbox by the claim's own name, keeps that one and sweeps the rest.
+	// daemon has not retired; the located ones also join the watch. The daemon reads known before
+	// it calls this, while claims may launch, so what the runtime itself launched and has not
+	// released is never an orphan, known or not. What an earlier sweep adopted protects nothing: a
+	// process no sweep's known set names any more is the orphan sweep's. An entry that fails
+	// Validate is an error, and nothing of its claim is ended: tmux, which knows a claim's
+	// processes only by the locators it is given, then ends nothing at all; the sandbox, which
+	// finds a claim's Sandbox by the claim's own name, keeps that one and sweeps the rest.
 	ReconcileOrphans(ctx context.Context, known []Known, grace time.Duration) error
 	// AdoptWorkingCopy hands the agent's working copy the git identity its commits are authored
 	// with, in the place the working copy actually lives (which under a sandbox is not a
@@ -114,8 +117,8 @@ func (k Known) Validate() error {
 // `Release` send a shutdown frame over `Conns.Conn(loc.Claim)` — and because a locator without it
 // could not be matched to the claim it belongs to.
 //
-// Nothing in it is a place on one runtime's disk. Repository is the issue's repository
-// (`owner/repo`), "" for a configuration with none, and each runtime locates the issue's
+// Nothing in it is a place on one runtime's disk. Repository is the issue's repository, the zero
+// Repository for a configuration with none, and each runtime locates the issue's
 // workspace under its own root. Env is the agent's plain variables; Secrets never travel as
 // values — each is written to a 0600 file and reaches the process as a `<NAME>_FILE` pointer — and
 // carries only what is the claim's to carry: a credential every agent of the deployment shares,
@@ -133,7 +136,7 @@ type SpawnSpec struct {
 	Env                    map[string]string
 	Secrets                map[string]string
 	Prompt                 PromptParts
-	Repository             string
+	Repository             ghrepo.Repository
 	ResumeSessionFile      string
 	WorkspaceRecoveredFrom string
 }
@@ -189,7 +192,7 @@ type GitIdentity struct {
 
 // Env is the six variables that make a process commit as id: JJ_USER/JJ_EMAIL, which jj reads
 // over every config scope, and the Git author and committer pairs for plain git
-// (packages/daemon/src/daemon/github-app-env.ts:46-58).
+// (gitIdentityEnv, packages/daemon/src/daemon/github-app-env.ts).
 func (id GitIdentity) Env() map[string]string {
 	return map[string]string{
 		"JJ_USER": id.Name, "JJ_EMAIL": id.Email,

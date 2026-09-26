@@ -59,3 +59,56 @@ func TestProvisioningParsesUncoloredReadsUnderColorAlways(t *testing.T) {
 		}
 	}
 }
+
+// pendingRunner changes a file in the shared clone's own working copy before every command once
+// the clone exists, so any command that snapshots that working copy records an operation.
+type pendingRunner struct {
+	*recordingRunner
+	clone string
+	n     int
+}
+
+func (r *pendingRunner) Run(ctx context.Context, command Command) (Result, error) {
+	if _, err := os.Stat(filepath.Join(r.clone, ".jj")); err == nil {
+		r.n++
+		if err := os.WriteFile(filepath.Join(r.clone, "pending.txt"), []byte(strings.Repeat("x", r.n)), 0o644); err != nil {
+			return Result{}, err
+		}
+	}
+	return r.recordingRunner.Run(ctx, command)
+}
+
+// Nothing provisioning or removal runs on the shared clone snapshots its working copy but `jj
+// workspace add`, which jj refuses --ignore-working-copy on: over a provision, remove and
+// provision again, with a change pending in the clone before every command, the clone's log holds
+// exactly one snapshot per add.
+func TestProvisioningSnapshotsTheSharedCloneOnlyInWorkspaceAdd(t *testing.T) {
+	req := provisionRequest(t)
+	location, err := Location(req.StateDir, req.Repo, req.Issue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := &pendingRunner{recordingRunner: newLocalRunner(t), clone: location.Clone}
+	working, err := Provision(context.Background(), run, req)
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if err := Remove(context.Background(), run, working); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if _, err := Provision(context.Background(), run, req); err != nil {
+		t.Fatalf("provision again: %v", err)
+	}
+	adds := 0
+	for _, call := range run.Calls() {
+		if commandWith(call.Argv, "jj", "workspace", "add") {
+			adds++
+		}
+	}
+	if adds < 2 {
+		t.Fatalf("the cycle ran %d workspace adds, want at least 2", adds)
+	}
+	if snapshots := cloneSnapshots(t, location.Clone); snapshots != adds {
+		t.Errorf("the shared clone's log holds %d working-copy snapshots over %d workspace adds, want one each", snapshots, adds)
+	}
+}
