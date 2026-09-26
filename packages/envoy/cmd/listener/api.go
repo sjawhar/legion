@@ -873,50 +873,72 @@ func streamInfoWithin(ctx context.Context, inspector streamInfoLookup, streamNam
 	}
 }
 
-func githubRepositoryTopic(topic string) (owner, repo string, ok bool) {
+// githubRepositoryTopic is a GitHub topic read as Envoy publishes it. Its repository name runs from
+// the token after the owner to the first token that is one of contracts.GithubTopicKinds or a
+// wildcard, and Envoy writes each dot in a name as `_`, so a name the topic spreads over several
+// tokens receives nothing.
+type githubRepositoryTopic struct {
+	owner string
+	// name holds the name's tokens as the topic wrote them; repo is them joined with `_`.
+	name []string
+	repo string
+	// spelled is the topic with repo in place of name.
+	spelled string
+	// kindFollows is whether a kind, rather than a wildcard or the topic's end, ended the name.
+	kindFollows bool
+}
+
+func parseGithubRepositoryTopic(topic string) (githubRepositoryTopic, bool) {
 	const githubTopicPrefix = "notifications.github."
 	remainder, ok := strings.CutPrefix(topic, githubTopicPrefix)
 	if !ok {
-		return "", "", false
+		return githubRepositoryTopic{}, false
 	}
 	parts := strings.Split(remainder, ".")
-	if len(parts) < 3 || parts[0] == "" || parts[1] == "" {
-		return "", "", false
+	if len(parts) < 3 || parts[0] == "" {
+		return githubRepositoryTopic{}, false
 	}
-	return parts[0], parts[1], true
-}
-
-// dottedRepositoryWarning is the warning for a GitHub topic that spells a repository name with its
-// dot, which receives nothing: Envoy writes each dot in a name as `_`, and the token after the name
-// is one of contracts.GithubTopicKinds. A topic whose token there is neither a kind nor a wildcard
-// carries the rest of a dotted name, which runs to the first token that is one, and the warning
-// names the spelling Envoy publishes.
-func dottedRepositoryWarning(topic string) string {
-	remainder, ok := strings.CutPrefix(topic, "notifications.github.")
-	if !ok {
-		return ""
-	}
-	parts := strings.Split(remainder, ".")
-	endsName := func(token string) bool {
-		return token == "*" || token == ">" || slices.Contains(contracts.GithubTopicKinds, token)
-	}
-	if len(parts) < 3 || endsName(parts[2]) {
-		return ""
-	}
-	end := 3
-	for end < len(parts) && !endsName(parts[end]) {
+	end := 2
+	for end < len(parts) && parts[end] != "*" && parts[end] != ">" && !slices.Contains(contracts.GithubTopicKinds, parts[end]) {
 		end++
 	}
-	spelled := append([]string{parts[0], strings.Join(parts[1:end], "_")}, parts[end:]...)
-	return fmt.Sprintf(`%s spells a repository name with a dot, and GitHub topics write each dot in a name as "_": subscribe to notifications.github.%s`,
-		topic, strings.Join(spelled, "."))
+	repo := strings.Join(parts[1:end], "_")
+	if repo == "" {
+		return githubRepositoryTopic{}, false
+	}
+	return githubRepositoryTopic{
+		owner:       parts[0],
+		name:        parts[1:end],
+		repo:        repo,
+		spelled:     githubTopicPrefix + strings.Join(append([]string{parts[0], repo}, parts[end:]...), "."),
+		kindFollows: end < len(parts) && slices.Contains(contracts.GithubTopicKinds, parts[end]),
+	}, true
+}
+
+// warning is what a subscription to the topic is told when its name spans several tokens. A kind
+// after them, or an empty token among them (a leading, trailing or doubled dot), means the name
+// was spelled with its dot, and the warning names Envoy's spelling. Otherwise the token after the
+// name's first is a mistyped kind, and the warning names the kinds instead of a spelling that
+// would receive nothing either. A repository whose name is itself a kind (`acme.pr.pr.7.>`) is
+// read as that name, and `acme.site.pr.pr.7.>` reads as `acme/site`: the two can't be told apart.
+func (g githubRepositoryTopic) warning(topic string) string {
+	switch {
+	case len(g.name) == 1:
+		return ""
+	case g.kindFollows || slices.Contains(g.name, ""):
+		return fmt.Sprintf(`%s spells a repository name with a dot, and GitHub topics write each dot in a name as "_": subscribe to %s`, topic, g.spelled)
+	default:
+		return fmt.Sprintf(`%s: %q after %s/%s is not a GitHub topic kind (%s), and a dot in a repository name is written "_"`,
+			topic, g.name[1], g.owner, g.name[0], strings.Join(contracts.GithubTopicKinds, ", "))
+	}
 }
 
 func unwiredRepositoryWarning(ctx context.Context, d *listenerDeps, topic string, logger *logging.Logger) string {
-	owner, repo, ok := githubRepositoryTopic(topic)
+	parsed, ok := parseGithubRepositoryTopic(topic)
 	if !ok {
 		return ""
 	}
+	owner, repo := parsed.owner, parsed.repo
 	if strings.ContainsAny(owner, "*>") || strings.ContainsAny(repo, "*>") {
 		logger.Warn("listener ignored GitHub repository topic with wildcard segment", slog.String("topic", topic))
 		return ""
@@ -995,15 +1017,15 @@ func subscribeHandler(state *atomic.Pointer[listenerDeps], machineID string, log
 		warnings := make([]string, 0)
 		warnedRepositories := make(map[string]struct{})
 		for _, topic := range body.Topics {
-			if warning := dottedRepositoryWarning(topic); warning != "" {
-				warnings = append(warnings, warning)
-				continue
-			}
-			owner, repo, ok := githubRepositoryTopic(topic)
+			parsed, ok := parseGithubRepositoryTopic(topic)
 			if !ok {
 				continue
 			}
-			key := owner + "\x00" + repo
+			if warning := parsed.warning(topic); warning != "" {
+				warnings = append(warnings, warning)
+				continue
+			}
+			key := parsed.owner + "\x00" + parsed.repo
 			if _, seen := warnedRepositories[key]; seen {
 				continue
 			}
