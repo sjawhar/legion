@@ -307,18 +307,45 @@ this proof.
   reviewer answers each thread it opened with exactly one of `Accepted: fixed in <commit> — <one line>`,
   `Accepted: not a defect — <reason>`, or `Still open: <what remains>`; nothing else is an
   acceptance, and nobody replies after an `Accepted:` (any later reply that is not itself an
-  `Accepted:` — the opener's own follow-up included — leaves the thread open, since the command
-  reads only the newest comment). The review App can reply on a thread but cannot resolve it:
+  `Accepted:` — the opener's own follow-up included — leaves the thread open, because resolution
+  considers only the newest comment). The review App can reply on a thread but cannot resolve it:
   GitHub grants resolving a review thread to the pull request's author, and the implementer opens
-  every Legion pull request (`packages/daemon/src/daemon/AGENTS.md`, GitHub Apps). So the
-  **implementer** runs `legion threads resolve --pr <number> --repo <owner>/<repo>` before every
-  push that answers a review (the corrective push and the final `.legion/` deletion push) and
-  pastes its output into the `Threads` section. The command resolves each unresolved thread
-  whose newest comment is the opener's own `Accepted:` reply, one `resolveReviewThread` per
-  thread, prints `resolved <url>` or `left open <url> — newest reply by <login> is not an acceptance`,
-  and exits 1 naming the thread's URL and GitHub's message when GitHub refuses one; report that
-  exit to the architect, which opens an ask for a human to resolve the thread by hand —
-  never skip it silently. The merger runs the same command once more before publishing READY
+  every Legion pull request (`packages/daemon/src/daemon/AGENTS.md`, GitHub Apps).
+  When `LEGION_GRANT_FILE` or `LEGION_GRANT` is set, use `legion threads resolve --pr <number> --repo <owner>/<repo>`; when neither is set, use `gh api graphql`
+  with the session's GitHub credential and the fallback below.
+  In a Legion pane, the **implementer** runs the command before every push that answers a review
+  (the corrective push and the final `.legion/` deletion push) and pastes its output into the
+  `Threads` section. The command resolves each unresolved thread whose newest submitted comment is
+  the opener's own `Accepted:` reply, one `resolveReviewThread` per thread, prints `resolved <url>`
+  or `left open <url> — newest reply by <login> is not an acceptance`, and exits 1 naming the
+  thread's URL and GitHub's message when GitHub refuses one.
+
+  Without a grant, page through `reviewThreads`, skip `isResolved: true`, and compare the opener
+  with the newest comment. Query shape, inside `repository { pullRequest { … } }`:
+
+  ```graphql
+  reviewThreads(first: 100, after: $after) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      id isResolved
+      opener: comments(first: 1) { nodes { author { login } } }
+      newest: comments(last: 1) { nodes { author { login } body state } }
+    }
+  }
+  ```
+
+  Resolve only when the newest comment is submitted, its `author { login }` equals the opener's,
+  and its `body` begins `Accepted:`. For each such thread:
+
+  ```graphql
+  mutation($threadId: ID!) {
+    resolveReviewThread(input: { threadId: $threadId }) { thread { isResolved } }
+  }
+  ```
+
+  Re-read `reviewThreads` and confirm that thread's `isResolved` is true. In either route, report
+  a refused resolution to the architect, which opens an ask for a human to resolve the thread by
+  hand — never skip it silently. The merger runs the command once more before publishing READY
   and does not publish while any `left open` line remains.
 - **Correctness fixes land in this PR; cleanup is one named fast-follow.** A finding that
   changes behavior, hides an error, or breaks a gate is fixed here — never deferred.
