@@ -691,15 +691,18 @@ primary_issue() {
   wait_for_worker "$root_issue" reviewer
   pass
 
-  # Three real GitHub changes-requested reviews exercise the round counter, the return to
-  # implementing, and the third `pr-blocked` publication. Every recovery repeats the real workers.
+  # Three real GitHub changes-requested reviews, each posted by the reviewer pane and ended by its
+  # completion, exercise the round counter, the return to implementing, and the third `pr-blocked`
+  # publication. Every recovery repeats the real workers.
   for round in 1 2 3; do
     begin "review-round-$round-changes-requested"
     # A review that names no correction leaves the implementer nothing it may change under a spec
     # that pins the smoke line: it deliberated past the wait or escalated to a human. Each round
     # names one concrete correction the spec permits.
-    request_changes "Stage 3 proof review, round $round: append the line \`$(round_line "$round")\` to the end of the same file this pull request changes, below the lines already there, and change nothing else. The spec permits one more line in that file for a review round, so this correction is in scope."
-    wait_for_phase "$root_issue" implementing
+    request_changes_as_reviewer "$root_issue" "$round" "Stage 3 proof review, round $round: append the line \`$(round_line "$round")\` to the end of the same file this pull request changes, below the lines already there, and change nothing else. The spec permits one more line in that file for a review round, so this correction is in scope."
+    # The round ends when the reviewer completes it: its review, its handoff commit, its completion.
+    wait_for_phase "$root_issue" implementing 1200
+    assert_handoff_committer "$root_issue" reviewer reviewing "$round"
     until_true 180 "round $round to write in_progress on the Dispatch board" dispatch_status_is "$root_issue" in_progress
     wait_for_worker "$root_issue" implementer
     if [ "$round" = 3 ]; then
@@ -741,6 +744,7 @@ primary_issue() {
   # may finish it before the proof's instruction reaches it, so the wait is for the issue to leave
   # reviewing, not to sit in retro.
   until_true 600 "$root_issue to leave reviewing for retro" issue_phase_in "$root_issue" retro merging
+  assert_handoff_committer "$root_issue" reviewer reviewing 3
   pass
   [ "$until" != rework ] || return 0
 

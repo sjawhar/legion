@@ -56,6 +56,9 @@ type PhaseRow struct {
 	// HandoffCommit it survives the next phase's start, so a completion reporting it again is known
 	// to carry no handoff written since.
 	LastHandoff string
+	// Reason is what the decision in Verdict said - a review's body - kept until the round ends,
+	// since the reviewer's completion can come after the review it posted.
+	Reason string
 }
 
 // PullRequest is the daemon's latest GitHub observation for one issue's pull request.

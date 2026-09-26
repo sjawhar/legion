@@ -114,7 +114,7 @@ func scanIssue(row scanner) (*Issue, error) {
 }
 
 func (s *Postgres) Phases(ctx context.Context, tx pgx.Tx, issue string) ([]PhaseRow, error) {
-	rows, err := tx.Query(ctx, `select issue, role, claim, handoff_commit, rounds, verdict, last_handoff from phases
+	rows, err := tx.Query(ctx, `select issue, role, claim, handoff_commit, rounds, verdict, last_handoff, reason from phases
 		where issue = $1 order by role`, issue)
 	if err != nil {
 		return nil, fmt.Errorf("list phases for %s: %w", issue, err)
@@ -135,12 +135,13 @@ func (s *Postgres) Phases(ctx context.Context, tx pgx.Tx, issue string) ([]Phase
 }
 
 func (s *Postgres) PutPhase(ctx context.Context, tx pgx.Tx, phase PhaseRow) error {
-	_, err := tx.Exec(ctx, `insert into phases (issue, role, claim, handoff_commit, rounds, verdict, last_handoff)
-		values ($1, $2, $3, $4, $5, $6, $7)
+	_, err := tx.Exec(ctx, `insert into phases (issue, role, claim, handoff_commit, rounds, verdict, last_handoff, reason)
+		values ($1, $2, $3, $4, $5, $6, $7, $8)
 		on conflict (issue, role) do update set claim = excluded.claim,
 		handoff_commit = excluded.handoff_commit, rounds = excluded.rounds, verdict = excluded.verdict,
-		last_handoff = excluded.last_handoff`,
+		last_handoff = excluded.last_handoff, reason = excluded.reason`,
 		phase.Issue, string(phase.Role), string(phase.Claim), phase.HandoffCommit, phase.Rounds, phase.Verdict, phase.LastHandoff,
+		phase.Reason,
 	)
 	if err != nil {
 		return fmt.Errorf("put %s phase on %s: %w", phase.Role, phase.Issue, err)
@@ -151,7 +152,7 @@ func (s *Postgres) PutPhase(ctx context.Context, tx pgx.Tx, phase PhaseRow) erro
 func scanPhase(row scanner) (PhaseRow, error) {
 	var phase PhaseRow
 	var role, token string
-	if err := row.Scan(&phase.Issue, &role, &token, &phase.HandoffCommit, &phase.Rounds, &phase.Verdict, &phase.LastHandoff); err != nil {
+	if err := row.Scan(&phase.Issue, &role, &token, &phase.HandoffCommit, &phase.Rounds, &phase.Verdict, &phase.LastHandoff, &phase.Reason); err != nil {
 		return PhaseRow{}, err
 	}
 	phase.Role, phase.Claim = claim.Role(role), claim.Token(token)

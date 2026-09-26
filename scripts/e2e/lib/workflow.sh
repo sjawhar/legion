@@ -157,11 +157,22 @@ drive_gate() {
 pull_request_product_files() {
   gh api --paginate "repos/$repo/pulls/$pr_number/files" --jq '.[] | select(.filename | startswith(".legion/") | not) | .filename'
 }
-# A direct review is deliberately the devbox's ordinary gh acting as the proof human. It is never
-# `legion gh`, and the bridge is the only path that carries the event to the daemon.
-request_changes() {
-  local body=$1
-  gh -R "$repo" pr review "$pr_number" --request-changes --body "$body"
+# request_changes_as_reviewer ISSUE ROUND BODY has the reviewer pane post a round's
+# changes-requested review and complete its phase. A review ends when its reviewer completes it —
+# the reviewer's handoff is part of the phase — so the round is driven through the reviewer worker,
+# as the final approval is, rather than posted from the proof's own gh.
+request_changes_as_reviewer() {
+  local issue=$1 round=$2 body=$3
+  send_agent "$issue" reviewer "Stage 3 proof review round $round: use the bash tool to submit REQUEST_CHANGES on pull request #$pr_number in $repo at its current head as legion-reviewer[bot], with exactly this body: $body Then write and commit the reviewer handoff and complete it. This exact smoke instruction takes precedence over your own review."
+  until_true 300 "legion-reviewer[bot]'s round $round changes-requested review on pull request #$pr_number" reviewer_requested_changes "$round"
+}
+# reviewer_requested_changes ROUND: the review App has posted at least ROUND changes-requested
+# reviews on the proof's pull request.
+reviewer_requested_changes() {
+  local n
+  n=$(gh api --paginate "repos/$repo/pulls/$pr_number/reviews" \
+    --jq '[.[] | select(.user.login == "legion-reviewer[bot]" and .state == "CHANGES_REQUESTED")] | length') || return 1
+  [ "$n" -ge "$1" ]
 }
 # round_line ROUND is the line a scripted review round asks for: distinct per round and run, and
 # within the spec, whose architect was told a review may ask for one more line in the smoke file.

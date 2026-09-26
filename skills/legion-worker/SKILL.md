@@ -603,6 +603,11 @@ This publishes your phase's completion to the architect's role and clears the da
 record of this issue's active phase. Do not add pipeline labels, run a controller loop, or
 invent a different completion protocol — this is the whole contract.
 
+A reviewer's phase ends with its completion, not with its review: submit the review on GitHub
+first, then commit the handoff and complete. The daemon moves the issue once both are in — the
+decision GitHub reports and your completion, in either order — so a review posted without a
+completion leaves the issue in reviewing until you finish.
+
 **A refused completion is information, not a retry loop.** The daemon attributes your report to
 the run whose task you took, and answers with what it found. What each answer carries, and what to
 do:

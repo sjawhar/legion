@@ -318,7 +318,12 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 		}
 		row.LastHandoff = fact.Commit
 	}
-	row.Claim, row.HandoffCommit, row.Verdict = fact.Claim, fact.Commit, fact.Verdict
+	row.Claim, row.HandoffCommit = fact.Claim, fact.Commit
+	// A reviewer reports no verdict: its decision is the review it posted, recorded on the round
+	// when GitHub reports it, and its completion must not erase it.
+	if fact.Role != claim.RoleReviewer {
+		row.Verdict = fact.Verdict
+	}
 	if err := e.store.PutPhase(ctx, tx, row); err != nil {
 		return intake.Result{}, err
 	}
@@ -344,6 +349,8 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 		if fact.Verdict == "pass" {
 			return intake.Result{}, e.transition(ctx, tx, *issue, TriggerTesterPassed, "", row, pr, "")
 		}
+	case phase.Reviewing:
+		return intake.Result{}, e.advanceReview(ctx, tx, *issue, pr)
 	case phase.Retro:
 		return intake.Result{}, e.transition(ctx, tx, *issue, TriggerRetroCompleted, "", row, pr, "")
 	case phase.ProductionCheck:
@@ -439,8 +446,28 @@ func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.
 		return intake.Result{}, err
 	}
 	byReviewApp := e.cfg.ReviewAppLogin != "" && fact.Pusher == e.cfg.ReviewAppLogin
-	*pr = classify.ApplyPush(*pr, fact.After, classify.ClassifyPush(classify.PushPayload{ChangedPaths: fact.ChangedPaths, ChangedPathsTruncated: fact.Truncated}), byReviewApp)
-	return intake.Result{}, e.store.PutPullRequest(ctx, tx, *pr)
+	classification := classify.ClassifyPush(classify.PushPayload{ChangedPaths: fact.ChangedPaths, ChangedPathsTruncated: fact.Truncated})
+	*pr = classify.ApplyPush(*pr, fact.After, classification, byReviewApp)
+	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil || classification.HandoffOnly {
+		return intake.Result{}, err
+	}
+	return intake.Result{}, e.voidApproval(ctx, tx, pr.Issue)
+}
+
+// voidApproval drops an open review's recorded approval once a head that may change more than
+// .legion/ replaces the one it approved: the reviewer never saw that code, so its completion must
+// not end the review on it. A request for changes stands whatever is pushed after it.
+func (e *Engine) voidApproval(ctx context.Context, tx pgx.Tx, key string) error {
+	issue, err := e.store.Issue(ctx, tx, key)
+	if err != nil || issue == nil || issue.Phase != phase.Reviewing {
+		return err
+	}
+	row, err := e.phaseRow(ctx, tx, key, claim.RoleReviewer)
+	if err != nil || row.Verdict != "approved" {
+		return err
+	}
+	row.Verdict, row.Reason = "", ""
+	return e.store.PutPhase(ctx, tx, row)
 }
 
 func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestChecks) (intake.Result, error) {
@@ -462,7 +489,11 @@ func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 		return intake.Result{}, err
 	}
 	if !blocked {
-		return intake.Result{}, e.advanceApproved(ctx, tx, *pr)
+		issue, err := e.store.Issue(ctx, tx, pr.Issue)
+		if err != nil || issue == nil || issue.Phase != phase.Reviewing {
+			return intake.Result{}, err
+		}
+		return intake.Result{}, e.advanceReview(ctx, tx, *issue, pr)
 	}
 	message := fmt.Sprintf("Pull request #%d reached max_fix_attempts=%d.", pr.Number, e.cfg.MaxFixAttempts)
 	if err := e.enqueue(ctx, tx, pr.Issue, record.MessagePost{Body: message}); err != nil {
@@ -484,35 +515,50 @@ func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestR
 	if err != nil || issue == nil || issue.Phase != phase.Reviewing {
 		return intake.Result{}, err
 	}
+	// The decision belongs to this review round, not to the pull request's head: the reviewer's
+	// own handoff push is a new head, which resets every head-scoped reading, and the round must
+	// still know what its reviewer decided, and what the review said for the next round's
+	// implementer, when the reviewer completes. Entering reviewing clears both with the rest of
+	// the reviewer's round.
+	if pr.ReviewDecision != "changes_requested" && pr.ReviewDecision != "approved" {
+		return intake.Result{}, nil
+	}
 	row, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
 	if err != nil {
 		return intake.Result{}, err
 	}
-	if pr.ReviewDecision == "changes_requested" {
-		if err := e.recordRound(ctx, tx, issue.Key); err != nil {
-			return intake.Result{}, err
-		}
-		return intake.Result{}, e.transition(ctx, tx, *issue, TriggerReviewRejected, "", row, pr, fact.Body)
+	row.Verdict, row.Reason = pr.ReviewDecision, fact.Body
+	if err := e.store.PutPhase(ctx, tx, row); err != nil {
+		return intake.Result{}, err
 	}
-	return intake.Result{}, e.advanceApproved(ctx, tx, *pr)
+	return intake.Result{}, e.advanceReview(ctx, tx, *issue, pr)
 }
 
-// advanceApproved moves a reviewing issue to retro once its pull request is both approved at the
-// current head and green there. Either may come second: the reviewer usually approves the head it
-// was just shown, before CI settles on it, so the checks' settlement asks again.
-func (e *Engine) advanceApproved(ctx context.Context, tx pgx.Tx, pr record.PullRequest) error {
-	if pr.ReviewDecision != "approved" || pr.Verdict != "green" {
-		return nil
-	}
-	issue, err := e.store.Issue(ctx, tx, pr.Issue)
-	if err != nil || issue == nil || issue.Phase != phase.Reviewing {
-		return err
-	}
+// advanceReview ends a review once both of its halves are in: the reviewer's completion, which is
+// its handoff landing — part of its phase's contract, as every role's is — and the decision it
+// posted on GitHub, recorded on the round. Either may arrive second, and an approval also waits
+// for the head's checks to settle green, which the settlement asks about in turn. A review whose
+// reviewer never completes is not ended by the decision alone: the reviewer's pane gets one
+// follow-up turn when a turn ends with its phase open (pi-envoy's phase-stall check), and past
+// that the issue stays in reviewing, as a tester's that never completes stays in testing.
+func (e *Engine) advanceReview(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest) error {
 	row, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
-	if err != nil {
+	if err != nil || row.HandoffCommit == "" {
 		return err
 	}
-	return e.transition(ctx, tx, *issue, TriggerReviewApproved, "", row, &pr, "")
+	switch row.Verdict {
+	case "changes_requested":
+		if err := e.recordRound(ctx, tx, issue.Key); err != nil {
+			return err
+		}
+		return e.transition(ctx, tx, issue, TriggerReviewRejected, "", row, pr, row.Reason)
+	case "approved":
+		if pr == nil || pr.Verdict != "green" {
+			return nil
+		}
+		return e.transition(ctx, tx, issue, TriggerReviewApproved, "", row, pr, "")
+	}
+	return nil
 }
 
 // merged records the pull request merged, whatever the issue's phase, and advances an issue that

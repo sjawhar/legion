@@ -315,7 +315,7 @@ func TestCapturedApprovedReviewFlowsThroughConsumeToRetro(t *testing.T) {
 	ctx := context.Background()
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "captured review", Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-captured", Verdict: "green", Failing: []string{}, FailingStatuses: []string{}})
-	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffCommit: "review-1"})
 	js := testJetStream(t)
 	stop := startConsume(t, js, pool, testEngine())
 	defer stop()
@@ -335,7 +335,7 @@ func TestReviewRoundCapPostsOneMessageAndNoticeForTheThirdRound(t *testing.T) {
 	ctx := context.Background()
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Verdict: "green", Failing: []string{}, FailingStatuses: []string{}})
-	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffCommit: "review-1"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Rounds: 2})
 	engine := testEngine()
 
@@ -521,6 +521,9 @@ func TestRemainingForwardRowsApplyThroughIntake(t *testing.T) {
 		{
 			name: "approved review", current: phase.Reviewing, role: claim.RoleReviewer,
 			setup: func(t *testing.T, pool *pgxpool.Pool) {
+				// The reviewer has completed its round, so GitHub's approval on a green head is the
+				// review's second half and ends it.
+				seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "claim", HandoffCommit: "review-1"})
 				seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Verdict: "green", Failing: []string{}, FailingStatuses: []string{}})
 			},
 			fact: func() intake.Fact {
