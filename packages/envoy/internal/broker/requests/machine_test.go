@@ -111,6 +111,7 @@ func newFixture(t *testing.T) (m *Machine, opener *fakeOpener, svc *enroll.Servi
 	if err != nil {
 		t.Fatalf("Create(enrB): %v", err)
 	}
+	registerFixtureEnrollment(enrA.ID.String(), enrB.ID.String())
 
 	cctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -442,6 +443,7 @@ func TestPodRequestIssueComesFromEnrollment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create(pod enrollment b): %v", err)
 	}
+	registerFixtureEnrollment(podA.ID.String(), podB.ID.String())
 
 	req, err := m.Create(ctx, podA.ID.String(), []string{"DEEL_API_KEY"}, "need it", "LEGION-9", "")
 	if err != nil {
