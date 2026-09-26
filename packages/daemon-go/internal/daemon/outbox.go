@@ -297,8 +297,8 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 }
 
 // controllerNotice publishes a controller notice row to the controller topic of the daemon's own
-// project, the one its controller subscribes to, and to nothing else: the notice the issue's topic
-// carries, under the row's own key.
+// project, the one its controller subscribes to, and to nothing else: the Notice it is, under the
+// row's own key.
 func (r *outbox) controllerNotice(ctx context.Context, row record.OutboxRow, payload record.ControllerNotice) error {
 	if r.notices == nil {
 		return errors.New("controller notice executor has no Envoy publisher")
