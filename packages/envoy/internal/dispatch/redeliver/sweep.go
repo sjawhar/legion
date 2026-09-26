@@ -273,20 +273,10 @@ func (s *Sweeper) Sweep(ctx context.Context, opts Options) (Report, error) {
 	if err != nil {
 		return Report{}, err
 	}
-	if now.Before(limit.Until) {
-		report.Complete, report.RateLimitedUntil = false, limit.Until
-		return report, nil
-	}
-
-	var limited *githubapp.RateLimitError
-	var inForce *limitInForce
+	// checkLimit runs ahead of every request, the listing's first page included, so a limit in
+	// force now stops the sweep before it asks GitHub anything.
 	listed, err := s.GitHub.Deliveries(ctx, since, s.checkLimit)
-	if errors.As(err, &limited) {
-		s.rateLimited(&report, limited, limit, now, opts.DryRun)
-		return report, nil
-	}
-	if errors.As(err, &inForce) {
-		report.Complete, report.RateLimitedUntil = false, inForce.until
+	if s.stoppedAtLimit(&report, err, limit, now, opts.DryRun) {
 		return report, nil
 	}
 	if err != nil {
@@ -326,14 +316,8 @@ func (s *Sweeper) Sweep(ctx context.Context, opts Options) (Report, error) {
 			break
 		}
 		decision, requested, err := s.decide(ctx, guid, byGUID[guid], delivered[guid], now, opts.DryRun)
-		if errors.As(err, &limited) {
+		if s.stoppedAtLimit(&report, err, limit, now, opts.DryRun) {
 			report.Decisions = append(report.Decisions, decision)
-			s.rateLimited(&report, limited, limit, now, opts.DryRun)
-			return report, nil
-		}
-		if errors.As(err, &inForce) {
-			report.Decisions = append(report.Decisions, decision)
-			report.Complete, report.RateLimitedUntil = false, inForce.until
 			return report, nil
 		}
 		if err != nil {
@@ -358,6 +342,23 @@ func (s *Sweeper) Sweep(ctx context.Context, opts Options) (Report, error) {
 		s.writeCursor(now, cursorRevision)
 	}
 	return report, nil
+}
+
+// stoppedAtLimit reports whether err ends the sweep at a rate limit, and marks the report so:
+// GitHub's own rate-limited answer, which it records (rateLimited), or a limit another sweeper
+// recorded, found right before a request.
+func (s *Sweeper) stoppedAtLimit(report *Report, err error, read limitRecord, now time.Time, dryRun bool) bool {
+	var limited *githubapp.RateLimitError
+	var inForce *limitInForce
+	switch {
+	case errors.As(err, &limited):
+		s.rateLimited(report, limited, read, now, dryRun)
+	case errors.As(err, &inForce):
+		report.Complete, report.RateLimitedUntil = false, inForce.until
+	default:
+		return false
+	}
+	return true
 }
 
 // rateLimited ends a sweep at a rate-limited answer. The wait is GitHub's, and at least a minute
@@ -598,53 +599,52 @@ func (s *Sweeper) now() time.Time {
 	return time.Now().UTC()
 }
 
-func (s *Sweeper) readCursor() (time.Time, uint64, error) {
-	entry, err := s.State.Get(cursorKey)
+// readState reads key's JSON value and its revision; an absent key is the zero value at revision
+// zero. what names the value in an error.
+func readState[T any](kv nats.KeyValue, key, what string) (T, uint64, error) {
+	var value T
+	entry, err := kv.Get(key)
 	if errors.Is(err, nats.ErrKeyNotFound) {
-		return time.Time{}, 0, nil
+		return value, 0, nil
 	}
 	if err != nil {
-		return time.Time{}, 0, fmt.Errorf("read the redelivery cursor: %w", err)
+		return value, 0, fmt.Errorf("read the redelivery %s: %w", what, err)
 	}
-	var cursor cursorRecord
-	if err := json.Unmarshal(entry.Value(), &cursor); err != nil {
-		return time.Time{}, 0, fmt.Errorf("decode the redelivery cursor: %w", err)
+	if err := json.Unmarshal(entry.Value(), &value); err != nil {
+		return value, 0, fmt.Errorf("decode the redelivery %s: %w", what, err)
 	}
-	return cursor.At, entry.Revision(), nil
+	return value, entry.Revision(), nil
+}
+
+// writeState writes value's JSON at key only over revision (absent when zero), so a lost race is
+// a conflict (isConflict), and returns the new revision.
+func writeState(kv nats.KeyValue, key string, value any, revision uint64) (uint64, error) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return 0, err
+	}
+	if revision == 0 {
+		return kv.Create(key, data)
+	}
+	return kv.Update(key, data, revision)
+}
+
+func (s *Sweeper) readCursor() (time.Time, uint64, error) {
+	cursor, revision, err := readState[cursorRecord](s.State, cursorKey, "cursor")
+	return cursor.At, revision, err
 }
 
 // writeCursor records the sweep's start. A lost race means another sweeper wrote a cursor at
 // the same moment; either value serves.
 func (s *Sweeper) writeCursor(at time.Time, revision uint64) {
-	value, err := json.Marshal(cursorRecord{At: at})
-	if err != nil {
-		s.Logger.Warn("webhook redelivery cursor not encoded", "error", err)
-		return
-	}
-	if revision == 0 {
-		_, err = s.State.Create(cursorKey, value)
-	} else {
-		_, err = s.State.Update(cursorKey, value, revision)
-	}
-	if err != nil && !isConflict(err) {
+	if _, err := writeState(s.State, cursorKey, cursorRecord{At: at}, revision); err != nil && !isConflict(err) {
 		s.Logger.Warn("webhook redelivery cursor not written", "error", err)
 	}
 }
 
 // readLimit returns the recorded rate limit and its revision, zero when none is recorded.
 func (s *Sweeper) readLimit() (limitRecord, uint64, error) {
-	entry, err := s.State.Get(limitKey)
-	if errors.Is(err, nats.ErrKeyNotFound) {
-		return limitRecord{}, 0, nil
-	}
-	if err != nil {
-		return limitRecord{}, 0, fmt.Errorf("read the redelivery rate limit: %w", err)
-	}
-	var limit limitRecord
-	if err := json.Unmarshal(entry.Value(), &limit); err != nil {
-		return limitRecord{}, 0, fmt.Errorf("decode the redelivery rate limit: %w", err)
-	}
-	return limit, entry.Revision(), nil
+	return readState[limitRecord](s.State, limitKey, "rate limit")
 }
 
 // recordLimit records GitHub's latest rate limit for every sweeper on the bucket. It counts from
@@ -659,14 +659,7 @@ func (s *Sweeper) recordLimit(limited *githubapp.RateLimitError, now time.Time) 
 			return next
 		}
 		next = nextLimit(current, limited, now)
-		value, err := json.Marshal(next)
-		if err == nil {
-			if revision == 0 {
-				_, err = s.State.Create(limitKey, value)
-			} else {
-				_, err = s.State.Update(limitKey, value, revision)
-			}
-		}
+		_, err = writeState(s.State, limitKey, next, revision)
 		if err == nil {
 			return next
 		}
@@ -688,34 +681,13 @@ func (s *Sweeper) clearLimit(revision uint64) {
 }
 
 func (s *Sweeper) readRecord(guid string) (record, uint64, error) {
-	entry, err := s.State.Get(recordPrefix + guid)
-	if errors.Is(err, nats.ErrKeyNotFound) {
-		return record{}, 0, nil
-	}
-	if err != nil {
-		return record{}, 0, fmt.Errorf("read the redelivery record of %s: %w", guid, err)
-	}
-	var current record
-	if err := json.Unmarshal(entry.Value(), &current); err != nil {
-		return record{}, 0, fmt.Errorf("decode the redelivery record of %s: %w", guid, err)
-	}
-	return current, entry.Revision(), nil
+	return readState[record](s.State, recordPrefix+guid, "record of "+guid)
 }
 
 // claimRecord writes next only if the record is still at revision (absent when zero), so two
 // sweepers never both request one attempt. It returns the new revision.
 func (s *Sweeper) claimRecord(guid string, next record, revision uint64) (uint64, bool) {
-	value, err := json.Marshal(next)
-	if err != nil {
-		s.Logger.Warn("webhook redelivery record not encoded", "guid", guid, "error", err)
-		return 0, false
-	}
-	var written uint64
-	if revision == 0 {
-		written, err = s.State.Create(recordPrefix+guid, value)
-	} else {
-		written, err = s.State.Update(recordPrefix+guid, value, revision)
-	}
+	written, err := writeState(s.State, recordPrefix+guid, next, revision)
 	if err != nil {
 		if !isConflict(err) {
 			s.Logger.Warn("webhook redelivery record not written", "guid", guid, "error", err)
