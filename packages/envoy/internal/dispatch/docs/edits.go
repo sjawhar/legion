@@ -1086,17 +1086,22 @@ func refuseReshapedReplacement(before, after *pmdoc.Node, match pmdoc.Range, wit
 // another block that does, is no reason to refuse this replace. A replace stays inside its
 // textblock, so the block holds the same index before and after.
 
-// refuseBrokenAccept refuses an accepted suggestion whose text leaves a document-level block the
-// document cannot read back, or reads back as blocks of another kind, where it lands, over every
-// block the accept writes: the check refuseUnreadableReplacement runs for a replace, and the shape
-// check, since an accept writes blocks - two paragraphs in a tight list item read back as one. The
-// person accepting cannot change the text, so acceptRefusal says what the text does there and what
-// they can do.
-func refuseBrokenAccept(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.TextblockAt, with string, replacement *pmdoc.Node) error {
-	broke, err := replacementBroke(before, after, match, pmdoc.BlockReadError)
-	if err == nil && broke == nil {
-		broke, err = replacementBroke(before, after, match, pmdoc.BlockShapeError)
-	}
+// refuseUnreadableAccept refuses a suggestion whose changed document-level block cannot be read
+// from its rendered markdown. It runs for every non-ask accept; refuseBrokenAsks gives an ask
+// its semantic refusal first.
+func refuseUnreadableAccept(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.TextblockAt, with string, replacement *pmdoc.Node) error {
+	return refuseAcceptBy(before, after, match, at, with, replacement, pmdoc.BlockReadError)
+}
+
+// refuseReshapedAccept refuses a suggestion whose changed document-level block reads back with a
+// different shape. Typed blocks use refuseTypedAcceptRoundTrip instead: their own content rule
+// decides whether the replacement fits, and that round trip checks the block that fit changed.
+func refuseReshapedAccept(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.TextblockAt, with string, replacement *pmdoc.Node) error {
+	return refuseAcceptBy(before, after, match, at, with, replacement, pmdoc.BlockShapeError)
+}
+
+func refuseAcceptBy(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.TextblockAt, with string, replacement *pmdoc.Node, check func(*pmdoc.Node) error) error {
+	broke, err := replacementBroke(before, after, match, check)
 	if err != nil || broke == nil {
 		return err
 	}

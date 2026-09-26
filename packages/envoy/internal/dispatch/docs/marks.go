@@ -323,9 +323,17 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 			if err := refuseCodeThatEndsItsBlock(tree, next, range_, at, "replace_with", with); err != nil {
 				return err
 			}
-		} else if accept && checkAcceptedShape(at, replacement) {
-			if err := refuseBrokenAccept(tree, next, range_, at, with, replacement); err != nil {
-				return err
+		}
+		if accept {
+			if !insideAsk(at) {
+				if err := refuseUnreadableAccept(tree, next, range_, at, with, replacement); err != nil {
+					return err
+				}
+			}
+			if checkAcceptedShape(at) {
+				if err := refuseReshapedAccept(tree, next, range_, at, with, replacement); err != nil {
+					return err
+				}
 			}
 		}
 		if err := pmdoc.RepeatedBlockID(tree, next, replacement); err != nil {
@@ -335,6 +343,9 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		// back the document the insert started from.
 		if accept {
 			if err := refuseBrokenAsks(tree, next); err != nil {
+				return err
+			}
+			if err := refuseTypedAcceptRoundTrip(tree, next, range_, at, with, replacement); err != nil {
 				return err
 			}
 		}
@@ -350,21 +361,55 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 }
 
 // checkAcceptedShape reports whether the document-level shape guard decides an accepted
-// suggestion. A non-empty typed-block replacement is decided by its own content rule (Splice)
-// and, for an ask, by refuseBrokenAsks. An empty callout is valid while it is in the tree (an
-// empty paragraph is a block) but it renders with no content, so the document-level guard must
-// refuse it. An ask's semantic content rule names its empty question itself.
-func checkAcceptedShape(at pmdoc.TextblockAt, replacement *pmdoc.Node) bool {
+// suggestion. A typed block has its own content rule, so its round trip is checked by
+// refuseTypedAcceptRoundTrip instead. An ask's semantic round trip is refuseBrokenAsks.
+func checkAcceptedShape(at pmdoc.TextblockAt) bool {
 	for _, ancestor := range at.Ancestors {
-		if !pmdoc.IsTypedBlock(ancestor.Type) {
-			continue
-		}
-		if ancestor.Type == "ask" {
+		if pmdoc.IsTypedBlock(ancestor.Type) {
 			return false
 		}
-		return isInlineDocument(replacement) && emptyTextblock(replacement.Children[0])
 	}
 	return true
+}
+
+// insideAsk reports whether an accepted suggestion lands in an ask. refuseBrokenAsks is the ask
+// round-trip and semantic rule, so it names an empty question or another invalid ask before a
+// document-level parser failure can.
+func insideAsk(at pmdoc.TextblockAt) bool {
+	for _, ancestor := range at.Ancestors {
+		if ancestor.Type == "ask" {
+			return true
+		}
+	}
+	return false
+}
+
+// refuseTypedAcceptRoundTrip checks every non-ask typed block an accept changed, from the
+// innermost one out. A typed block's content rule decides whether a replacement fits, but it
+// cannot see its rendered directive fence meeting a child's. A shape that was already broken is
+// not this accept's refusal; a changed readable block that renders back differently is.
+func refuseTypedAcceptRoundTrip(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.TextblockAt, with string, replacement *pmdoc.Node) error {
+	for _, beforeBlock := range at.Ancestors {
+		if beforeBlock.Type == "ask" || !pmdoc.IsTypedBlock(beforeBlock.Type) || pmdoc.BlockShapeError(beforeBlock) != nil {
+			continue
+		}
+		id := blockID(beforeBlock)
+		var afterBlock *pmdoc.Node
+		pmdoc.Walk(after, func(node *pmdoc.Node) bool {
+			if node.Type == beforeBlock.Type && blockID(node) == id {
+				afterBlock = node
+				return false
+			}
+			return true
+		})
+		if afterBlock == nil {
+			continue
+		}
+		if broke := pmdoc.BlockShapeError(afterBlock); broke != nil {
+			return &ErrInvalidOp{Field: "replace_with", Reason: acceptRefusal(before, after, match, at, with, replacement, broke)}
+		}
+	}
+	return nil
 }
 
 // refuseBrokenAsks refuses the first ask a write left unreadable whose id the document could read

@@ -451,6 +451,52 @@ func TestAcceptingAnEmptySuggestionRefusesAnUnreadableTypedBlock(t *testing.T) {
 	}
 }
 
+// A non-empty typed replacement must still round-trip through rendered Markdown before it is
+// accepted: adjacent typed fences can parse back as another tree. Each placement puts the same
+// nested callout inside an outer callout, directly, in a list item, and in a blockquote.
+func TestAcceptingANestedCalloutRefusesAReplacementThatCannotRoundTrip(t *testing.T) {
+	var documentService *docs.Service
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	const replacement = ":::callout{#new kind=\"note\" title=\"T\"}\nNested.\n:::\n"
+	for index, test := range []struct{ name, spec string }{
+		{"directly in a callout", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n"},
+		{"in a list item inside a callout", ":::callout{#outer kind=\"note\" title=\"T\"}\n- Lead.\n\n  :::callout{#c1 kind=\"note\" title=\"T\"}\n  Body.\n  :::\n:::\n"},
+		{"in a blockquote inside a callout", ":::callout{#outer kind=\"note\" title=\"T\"}\n> :::callout{#c1 kind=\"note\" title=\"T\"}\n> Body.\n> :::\n:::\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			issue := createInteractionIssue(t, handler, "N"+string(rune('A'+index)), "nested callout", test.spec)
+			created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+				"body": "suggest", "anchor": map[string]any{"artifact": "spec", "quote": "Body."},
+				"suggestion": map[string]string{"replace_with": replacement}, "actor": sessionActor(),
+			})
+			if created.Code != http.StatusCreated {
+				t.Fatalf("create suggestion: status=%d body=%s", created.Code, created.Body.String())
+			}
+			comment := decodeBody[model.Comment](t, created)
+			before, err := documentService.Text(context.Background(), issue.PrimaryArtifactID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
+			if accepted.Code != http.StatusBadRequest || !strings.Contains(accepted.Body.String(), `"code":"INVALID_OP"`) {
+				t.Fatalf("accept: status=%d body=%s, want 400 INVALID_OP", accepted.Code, accepted.Body.String())
+			}
+			after, err := documentService.Text(context.Background(), issue.PrimaryArtifactID)
+			if err != nil || after != before {
+				t.Fatalf("after refused accept = %q (%v), want unchanged %q", after, err, before)
+			}
+			read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/"+comment.ID, nil, "alice")
+			if read.Code != http.StatusOK || decodeBody[model.Comment](t, read).Resolved {
+				t.Fatalf("suggestion after refusal: status=%d body=%s, want it open", read.Code, read.Body.String())
+			}
+		})
+	}
+}
+
 // A code block's text is literal, so a replace there writes with exactly as sent - whitespace at
 // its edges, markdown syntax, a reference, a tab - through the edits route and through an
 // accepted suggestion alike.

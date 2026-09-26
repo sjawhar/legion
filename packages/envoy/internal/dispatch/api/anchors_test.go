@@ -388,9 +388,6 @@ func TestSuggestionAcceptKeepsTheAskItLandsIn(t *testing.T) {
 func TestSuggestionAcceptRewritesOnlyTheTypedBlockUnderItsOwnID(t *testing.T) {
 	minted := regexp.MustCompile(`#[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
 	for _, test := range []struct{ name, spec, quote, replaceWith, want string }{
-		{name: "a callout under no id", spec: "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\nA note.\n:::\n",
-			quote: "A note.", replaceWith: ":::callout{kind=\"note\"}\nReworded.\n:::\n",
-			want: "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n:::callout{#<minted> kind=\"note\" title=\"\"}\nReworded.\n:::\n:::\n"},
 		{name: "the inner of two callouts under its own id",
 			spec:  ":::callout{#outer kind=\"note\" title=\"\"}\nOuter.\n\n:::callout{#inner kind=\"note\" title=\"\"}\nWhich one?\n:::\n",
 			quote: "Which one?", replaceWith: ":::callout{#inner kind=\"warning\" title=\"\"}\nReworded.\n:::\n",

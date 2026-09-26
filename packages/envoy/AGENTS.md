@@ -161,10 +161,12 @@ suggestion (`POST /api/v1/comments/{id}/accept`, `docs/marks.go` `applySuggestio
 (`pmdoc.BlockShapeError`, which expects no empty paragraph back), over every document-level block
 the accept writes (`refuseBrokenAccept`, naming `replace_with`), since an accept writes blocks:
 two paragraphs in a tight list item read back as one. A non-empty replacement inside a typed
-block is instead checked by that block's own `Splice` content rule; `refuseBrokenAsks` checks an
-ask's `paragraph+ bullet_list?` rule. An empty callout still reaches the document-level check,
-because its empty paragraph renders to no content and its `block+` rule cannot carry that. An
-accept parses its text as blocks
+block is checked first by that block's own `Splice` content rule; `refuseBrokenAsks` checks an
+ask's `paragraph+ bullet_list?` rule. Every non-ask typed block the accept changes then
+round-trips through its rendered markdown: a nested typed directive whose adjacent fences read
+back as another tree is refused. An empty callout reaches the document-level check too, because
+its empty paragraph renders to no content and its `block+` rule cannot carry that. An accept
+parses its text as blocks
 written into the document (`pmdoc.ParseFragment`: a leading `---` is a rule, as `***` is, except
 that a closed front-matter block is front matter where the text lands at the document's start,
 at the start of a top-level first block's text), so a rule or a list over a whole paragraph is
@@ -235,9 +237,10 @@ block in the live tree but renders to no content, which the callout's `block+` r
 back. The one exception is a replacement holding exactly one block of the typed block's own type under its id,
 at any depth, which is that block rewritten: it replaces the block in place rather than nesting
 inside it, and the replacement's other blocks, and any it sits inside (a blockquote, a list item,
-a typed block under another id), go in the same parent, where they stand in the replacement.
-The same type under another id, or under none, is a new block and lands inside like
-any other. The accept
+a typed block under another id), go in the same parent, where they stand in the replacement. The
+same type under another id, or under none, is a new block that fits inside only when that parent
+and each typed ancestor round-trip through rendered markdown; adjacent directive fences that parse
+as another tree are refused. The accept
 then reads each ask by its id before and after the splice (`docs/ask_blocks.go` `askReadability`,
 `docs/marks.go` `refuseBrokenAsks`): an ask is unreadable when settlement's parse fails, when its
 children break the content rule `paragraph+ bullet_list?` (`pmdoc.AskContentError`: a paragraph
