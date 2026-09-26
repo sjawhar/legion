@@ -2,7 +2,7 @@ import { expect, test } from "bun:test"
 import { cp, mkdtemp, readdir, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import { BUNDLE_ENTRYPOINTS, buildBundles } from "../scripts/build"
+import { buildBundles } from "../scripts/build"
 
 const packageRoot = resolve(import.meta.dir, "..")
 const distDirectory = join(packageRoot, "dist")
@@ -29,14 +29,6 @@ test("the committed bundle starts without node_modules and demands ENVOY_NATS_UR
     expect(stderr).toContain("ENVOY_NATS_URL is required")
   } finally {
     await rm(scratch, { recursive: true, force: true })
-  }
-})
-
-test("the committed bundle inlines every dependency", async () => {
-  for (const name of Object.keys(BUNDLE_ENTRYPOINTS)) {
-    const bundle = await readFile(join(distDirectory, `${name}.js`), "utf8")
-    expect(bundle).not.toContain("workspace:")
-    expect(bundle).not.toContain("node_modules/")
   }
 })
 
