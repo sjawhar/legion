@@ -67,7 +67,16 @@ func TestParse(t *testing.T) {
 		// A name ending in ".git", which GitHub strips at creation: its API answers 404 for the
 		// suffixed name, and its events name the repository without it.
 		{"acme/widgets.git", `--repo "acme/widgets.git" ends in ".git", which GitHub strips from a repository's name: name it "acme/widgets"`},
-		{"a/.git", `--repo "a/.git" ends in ".git", which GitHub strips from a repository's name: name it "a/"`},
+		{"a/b..git", `--repo "a/b..git" ends in ".git", which GitHub strips from a repository's name: name it "a/b."`},
+		// Stripped, these leave no name GitHub serves, so the refusal suggests none.
+		{"a/.git", `--repo "a/.git" ends in ".git", which GitHub strips from a repository's name, leaving none it serves`},
+		{"a/..git", `--repo "a/..git" ends in ".git", which GitHub strips from a repository's name, leaving none it serves`},
+		{"a/...git", `--repo "a/...git" ends in ".git", which GitHub strips from a repository's name, leaving none it serves`},
+		{"a/b.git.git", `--repo "a/b.git.git" ends in ".git", which GitHub strips from a repository's name, leaving none it serves`},
+		// Every refusal prints the value with non-ASCII escaped, the earlier ones included.
+		{"\u0430cme", `--repo must be "owner/name" (got "\u0430cme")`},
+		{"\u0430cme/wid gets", `--repo "\u0430cme/wid gets" holds whitespace, which no GitHub owner or repository name does`},
+		{"\u0430cme/..", `--repo "\u0430cme/.." has a ".." segment, which names no GitHub owner or repository`},
 	} {
 		if _, err := Parse("--repo", tc.repository); err == nil || err.Error() != tc.want {
 			t.Errorf("Parse(%q) = %v, want %q", tc.repository, err, tc.want)

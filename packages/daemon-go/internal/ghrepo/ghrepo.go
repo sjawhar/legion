@@ -75,14 +75,14 @@ func MustParse(repository string) Repository {
 func Parse(what, repository string) (Repository, error) {
 	owner, name, found := strings.Cut(repository, "/")
 	if !found || owner == "" || name == "" || strings.Contains(name, "/") {
-		return Repository{}, fmt.Errorf(`%s must be "owner/name" (got %q)`, what, repository)
+		return Repository{}, fmt.Errorf(`%s must be "owner/name" (got %+q)`, what, repository)
 	}
 	if strings.ContainsFunc(repository, unicode.IsSpace) {
-		return Repository{}, fmt.Errorf(`%s %q holds whitespace, which no GitHub owner or repository name does`, what, repository)
+		return Repository{}, fmt.Errorf(`%s %+q holds whitespace, which no GitHub owner or repository name does`, what, repository)
 	}
 	for _, segment := range []string{owner, name} {
 		if segment == "." || segment == ".." {
-			return Repository{}, fmt.Errorf(`%s %q has a %q segment, which names no GitHub owner or repository`, what, repository, segment)
+			return Repository{}, fmt.Errorf(`%s %+q has a %q segment, which names no GitHub owner or repository`, what, repository, segment)
 		}
 	}
 	if !ownerName.MatchString(owner) {
@@ -91,8 +91,12 @@ func Parse(what, repository string) (Repository, error) {
 	if !repositoryName.MatchString(name) {
 		return Repository{}, fmt.Errorf(`%s %+q has a name GitHub does not allow: at most 100 ASCII letters, digits, "-", "_" and "."`, what, repository)
 	}
-	if strings.HasSuffix(name, ".git") {
-		return Repository{}, fmt.Errorf(`%s %+q ends in ".git", which GitHub strips from a repository's name: name it %+q`, what, repository, strings.TrimSuffix(repository, ".git"))
+	if rest, found := strings.CutSuffix(name, ".git"); found {
+		// The refusal suggests the stripped name only when Parse would take it.
+		if stripped, err := Parse(what, owner+"/"+rest); err == nil {
+			return Repository{}, fmt.Errorf(`%s %+q ends in ".git", which GitHub strips from a repository's name: name it %+q`, what, repository, stripped.String())
+		}
+		return Repository{}, fmt.Errorf(`%s %+q ends in ".git", which GitHub strips from a repository's name, leaving none it serves`, what, repository)
 	}
 	return Repository{owner: owner, name: name}, nil
 }
