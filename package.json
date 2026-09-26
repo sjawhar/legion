@@ -28,7 +28,7 @@
     "@biomejs/biome": "^2.3.14"
   },
   "patchedDependencies": {
-    "@sjawhar/proof-editor@0.3.12": "patches/@sjawhar%2Fproof-editor@0.3.12.patch",
+    "@sjawhar/proof-editor@0.3.13": "patches/@sjawhar%2Fproof-editor@0.3.13.patch",
     "@milkdown/preset-gfm@7.22.1": "patches/@milkdown%2Fpreset-gfm@7.22.1.patch"
   }
 }

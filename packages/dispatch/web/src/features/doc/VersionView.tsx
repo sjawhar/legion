@@ -7,7 +7,7 @@ import { whoAmIQuery } from "../../api/queries";
 import type { Ask, BlockSchema } from "../../api/types";
 import { Timestamp } from "../refs/Timestamp";
 import { AskBlockCard } from "./AskBlockCard";
-import { type AskBlockHost, installAskBlockView, renderTypedBlock } from "./ask-block";
+import { type AskBlockHost, installTypedBlocks } from "./ask-block";
 import { colorForLogin } from "./connection";
 import { createDoc, type EditorHandle } from "./editor";
 import type { Highlight } from "./highlight";
@@ -78,7 +78,6 @@ export function VersionView({
         blockSchema,
         heatMapMode: "hidden",
         readOnly: true,
-        renderBlock: renderTypedBlock,
         user: { color: colorForLogin(user.login), name: user.login },
         ydoc: doc,
       });
@@ -87,7 +86,7 @@ export function VersionView({
         editor.destroy();
         return;
       }
-      installAskBlockView(editor.view, setAskBlockHosts);
+      installTypedBlocks(editor.view, blockSchema, setAskBlockHosts);
       const embedded = highlight === undefined ? undefined : embedHighlight(markdown, highlight);
       editor.setMarkdown(embedded ?? markdown);
       setHighlightMissing(highlight !== undefined && embedded === undefined);
