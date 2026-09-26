@@ -17,10 +17,17 @@ import (
 // claim is ready or idle and its connection is registered.
 //
 // QueuedAt is when the task was handed to the claim; DeliveredAt is the acknowledgement of the
-// latest send; ConfirmedAt is the turn that send started. An acknowledgement is not a delivery —
-// Oh My Pi acknowledges before it starts a turn, and can accept a prompt that starts none — so
-// only ConfirmedAt says the task arrived. A confirmed delivery stays until the turn it confirmed
-// ends, because a refusal that arrives after the acknowledgement takes the confirmation back.
+// latest send, and with it the daemon's answer to whether the agent may have read this task;
+// ConfirmedAt is the turn that send started. An acknowledgement is not a delivery — Oh My Pi
+// acknowledges before it starts a turn, and can accept a prompt that starts none — so only
+// ConfirmedAt says the task arrived. A confirmed delivery stays until the turn it confirmed ends,
+// because a refusal that arrives after the acknowledgement takes the confirmation back.
+//
+// DeliveredAt carries that second meaning because a refusal clears it: an agent that refused this
+// prompt, in a turn of its own or with no turn at all, never read the task, and the claim must
+// not attribute a completion to a run whose task nobody has read (Claim.ServingRun). A task
+// acknowledged and waiting for a turn keeps the mark — the turn may be this task's, starting late
+// — and so does one the wait for its turn re-queued.
 //
 // The id is the daemon's and travels on the prompt frame; a shim that sees the same id twice
 // answers it without a second turn. The id is kept across a send that failed in transit, so a
@@ -116,30 +123,28 @@ func (m *Machine) sendPending(ctx context.Context) error {
 		if err := m.retirePending(ctx); err != nil {
 			return err
 		}
-		// The question a restart left — whether the turn the agent may be in is the pending
-		// delivery's — is answered here rather than dropped with the delivery it was about.
-		// Left armed with nothing pending, it would make the next task the running turn's:
-		// confirmed, never prompted. Discarded, it leaves the claim ready while its agent works,
-		// and the next task is prompted into a busy agent and charged for it. So the agent is
-		// asked, and a turn of its own moves the claim to working, confirming nothing: the next
-		// task waits for that turn to end.
-		if m.askFirst {
-			m.askFirst = false
-			if m.streaming(ctx, conn) {
-				m.log.Info("supervise: the agent is in a turn of its own after its task was dropped", "claim", m.claim.Token)
-				m.claim.State = StateWorking
-				return m.persist(ctx)
-			}
-		}
-		return nil
 	}
+	// The question a restart left — whether the turn the agent may be in is the pending
+	// delivery's — is asked once, here, whether or not that delivery survived the phase check.
+	// Left armed with nothing pending, it would make the next task the running turn's: confirmed,
+	// never prompted. Discarded, it leaves the claim ready while its agent works, and the next
+	// task is prompted into a busy agent and charged for it. A turn of the agent's own moves the
+	// claim to working either way; it confirms the delivery only when there is still one to
+	// confirm, and a dropped task's successor waits for that turn to end.
 	if m.askFirst {
 		m.askFirst = false
 		if m.streaming(ctx, conn) {
-			m.log.Info("supervise: the agent is in a turn; confirming the delivery an earlier daemon sent", "delivery", p.ID)
 			m.claim.State = StateWorking
+			if !holds {
+				m.log.Info("supervise: the agent is in a turn of its own after its task was dropped", "claim", m.claim.Token)
+				return m.persist(ctx)
+			}
+			m.log.Info("supervise: the agent is in a turn; confirming the delivery an earlier daemon sent", "delivery", p.ID)
 			return m.confirm(ctx)
 		}
+	}
+	if !holds {
+		return nil
 	}
 	m.startSend(conn, *p)
 	return nil
@@ -209,6 +214,11 @@ func (m *Machine) streaming(ctx context.Context, conn runtime.Conn) bool {
 // startSend runs one prompt on its own goroutine and posts its outcome back to the machine.
 func (m *Machine) startSend(conn runtime.Conn, d Delivery) {
 	token, generation, role, loc := m.claim.Token, m.claim.Generation, m.claim.Role, m.claim.Locator
+	// This send is the newest word on the task. A refusal of the prompt given up on can still be
+	// emitted while this send verifies and adopts the workspace, and it reaches the machine by a
+	// longer road than this send's acknowledgement does — so it can be handled after that
+	// acknowledgement, and must not then clear the mark the acknowledgement set (takenBack).
+	m.takenBack = ""
 	m.send, m.helloDuringSend = &sending{id: d.ID, generation: generation}, false
 	m.goroutines++
 	go func() {
@@ -249,20 +259,23 @@ func (m *Machine) adopt(role claim.Role, loc *runtime.Locator) error {
 	return m.deps.Runtime.AdoptWorkingCopy(m.ctx, *loc, id)
 }
 
-// confirm records that the pending delivery's turn started: the claim first, so that a crash
-// between the two writes leaves a working claim with an unconfirmed delivery — which is sent again
-// under the same id when the turn ends, and answered by the shim without a second turn — rather
-// than an idle claim holding a confirmed one that nothing would retire.
+// confirm records that the pending delivery's turn started: the claim and the delivery together,
+// because either half alone is a claim a restart reads wrongly — a working claim whose delivery
+// is unconfirmed is re-sent under the same id and answered by the shim without a second turn, so
+// its worker is never prompted again, and an idle claim holding a confirmed delivery holds one
+// nothing retires.
 func (m *Machine) confirm(ctx context.Context) error {
 	p := m.claim.Pending
 	p.ConfirmedAt = m.deps.Clock.Now()
 	m.disarm(TimerTurn)
 	m.askFirst = false
 	m.claim.Budgets.PromptFailures, m.claim.Budgets.PromptRetires = 0, 0
-	if err := m.persist(ctx); err != nil {
-		return err
+	stored := m.claim
+	stored.Pending = nil
+	if !holdsCapability(stored.State) {
+		stored.CapabilityHash = nil
 	}
-	return m.deps.Store.PutDelivery(ctx, m.claim.Token, *p)
+	return m.deps.Store.PutClaimAndDelivery(ctx, stored, *p)
 }
 
 // settle retires a delivery whose life is over, and runs around every decision, so that two things
@@ -308,6 +321,18 @@ const (
 	taskUnread = false
 )
 
+// markUnread drops the pending task's read mark without touching its id or its budget: an
+// outcome that arrived for a send this machine had already given up on says only that the agent
+// never read the task.
+func (m *Machine) markUnread(ctx context.Context) error {
+	p := m.claim.Pending
+	if p.DeliveredAt.IsZero() {
+		return nil
+	}
+	p.DeliveredAt = time.Time{}
+	return m.deps.Store.PutDelivery(ctx, m.claim.Token, *p)
+}
+
 // takeBackPending returns the pending delivery to waiting: unconfirmed if a turn had confirmed
 // it, under a new id so the retry is a new prompt rather than an echo the shim answers from its
 // record, and with the wait for its turn disarmed. A task taken back unread loses the mark, so
@@ -315,6 +340,7 @@ const (
 func (m *Machine) takeBackPending(ctx context.Context, read bool) error {
 	m.disarm(TimerTurn)
 	p := m.claim.Pending
+	m.takenBack = p.ID
 	p.ID = rand.Text()
 	p.ConfirmedAt = time.Time{}
 	if !read {

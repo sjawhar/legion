@@ -626,6 +626,15 @@ func refused(m *Machine, ctx context.Context, ev Event) error {
 // on the spot for ever against an agent that cannot start a turn at all.
 func lateRefused(m *Machine, ctx context.Context, ev Event) error {
 	r := ev.(StreamLateRefusal)
+	// A refusal of the send this machine gave up on says that prompt never ran, so the task loses
+	// its read mark — but there is nothing to take back: the task is already waiting, under an id
+	// that send never carried, and its prompt was charged when the wait for its turn ran out.
+	// Rotating or charging again here would spend the budget twice for one prompt (takenBack).
+	if r.DeliveryID != m.claim.Pending.ID {
+		m.log.Warn("supervise: the prompt this machine gave up on was refused; the task waits unread",
+			"delivery", r.DeliveryID, "error", r.Error)
+		return m.markUnread(ctx)
+	}
 	conn, connected := m.deps.Conns.Conn(m.claim.Token)
 	if m.claim.State == StateWorking || agentBusy(r.Error) || (connected && m.streaming(ctx, conn)) {
 		m.log.Warn("supervise: the agent refused an acknowledged prompt; it is in a turn of its own",

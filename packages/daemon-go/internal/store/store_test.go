@@ -514,3 +514,52 @@ func TestTheServingRunBackfillsForClaimsBetweenTurns(t *testing.T) {
 		}
 	}
 }
+
+// A worker whose process died mid-task leaves a claim launching or shim_connected: the relaunch
+// resumes that session and is given no task, because the claim already holds one. 0012 read those
+// states as processes that are replaced and skipped them, so an upgrade landing during a relaunch
+// left the worker serving no run and its next completion refused.
+func TestTheServingRunBackfillsForARelaunchingClaim(t *testing.T) {
+	ctx := context.Background()
+	store := emptyStore(t)
+	migrateThrough(t, store, 10)
+
+	for _, row := range []struct{ token, state string }{
+		{token: "tok-launching", state: "launching"},
+		{token: "tok-shim", state: "shim_connected"},
+		{token: "tok-retired", state: "retired"},
+	} {
+		if _, err := store.pool.Exec(ctx, `insert into claims (token, project, tree, issue, role, generation, session,
+			session_file, state, launch_failures, prompt_failures, prompt_retires, uncertain_streak)
+			values ($1, 'LEGION', 'LEGION-208', 'LEGION-208', 'tester', 1, '', '', $2, 0, 0, 0, 0)`,
+			row.token, row.state); err != nil {
+			t.Fatalf("seed the %s claim: %v", row.token, err)
+		}
+	}
+	if _, err := store.pool.Exec(ctx, `insert into issues (key, tree, project, title, phase, generation, status, rank, last_dispatch_seq)
+		values ('LEGION-208', 'LEGION-208', 'LEGION', 'LEGION-208', 'testing', 5, 'in_progress', 'V', 0)`); err != nil {
+		t.Fatalf("seed the issue: %v", err)
+	}
+
+	if _, err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate the rest: %v", err)
+	}
+
+	for _, want := range []struct {
+		token   string
+		serving int64
+	}{
+		{token: "tok-launching", serving: 5},
+		{token: "tok-shim", serving: 5},
+		{token: "tok-retired", serving: 0},
+	} {
+		var serving int64
+		if err := store.pool.QueryRow(ctx, "select serving_generation from claims where token = $1",
+			want.token).Scan(&serving); err != nil {
+			t.Fatalf("read %s: %v", want.token, err)
+		}
+		if serving != want.serving {
+			t.Fatalf("%s serves run %d, want %d", want.token, serving, want.serving)
+		}
+	}
+}

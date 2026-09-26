@@ -119,6 +119,9 @@ type Event interface{ isEvent() }
 type Store interface {
 	PutClaim(ctx context.Context, c Claim) error
 	PutDelivery(ctx context.Context, token claim.Token, d Delivery) error
+	// PutClaimAndDelivery writes both in one transaction: a confirmation records the claim and
+	// the delivery its turn started, and half of that is a task nothing sends again.
+	PutClaimAndDelivery(ctx context.Context, c Claim, d Delivery) error
 	// RetireDelivery ends the claim's delivery and writes the claim it is given in the same
 	// transaction: the run a claim serves is set by the retiring of the task that ran.
 	RetireDelivery(ctx context.Context, c Claim, deliveryID string) error
@@ -277,6 +280,23 @@ type Machine struct {
 	// delivery it may already have sent, or a turn it saw start and may not have seen end. The
 	// machine asks the agent (get_state) before it acts on either.
 	askFirst bool
+	// takenBack is the id of the last send this machine gave up on, which the agent still knows its
+	// task by. It exists for one answer: a refusal naming that id says the prompt never ran, so the
+	// task loses its read mark (markUnread) — and nothing else: no rotation, no charge, since the
+	// wait that gave up on the send already did both.
+	//
+	// The connection's own rule bounds when such a refusal is emitted: it can only name the prompt
+	// the connection last registered, and registering the next prompt ends the last one's claim
+	// (stream/conn.go, request). But emission order is not handling order. The refusal reaches the
+	// machine through the listener, the daemon's pump and the claim's inbox, while the next send's
+	// acknowledgement is posted to the machine straight from the send's own goroutine — so a
+	// refusal emitted while the next send was still adopting the workspace can be handled after
+	// that send is acknowledged. Starting a send therefore ends this memory: after it, the newest
+	// word on the task is that send's, and an old refusal handled late must not clear the mark its
+	// acknowledgement set. A relaunch needs nothing of its own — every prompt a new process is sent
+	// starts here too, and a refusal from the old process handled before that send is still the
+	// newest word. Memory only: after a restart there is no connection a refusal could come from.
+	takenBack string
 	// previous is the incarnation the claim last ran and no longer records — stopped by a
 	// suspension, retired, failed on, or found dead — which every launch of the same session hands
 	// the runtime to wait out until one starts. letGo is the one way a process gets here. It is
@@ -401,6 +421,39 @@ func (m *Machine) StartedBy(ctx context.Context, row int64) error {
 	return m.persist(ctx)
 }
 
+// ServingRun is the issue generation of the run whose task this claim's worker took, and 0 for a
+// claim that has taken none. It is the daemon's whole answer to which run a completion belongs to:
+// a completion names no run, the pane cannot say it (LEGION_GENERATION is the claim's launch
+// counter, and a live worker is handed the next run's task without being relaunched), and the
+// three sources are read in this order.
+//
+//  1. The task whose turn is running. A completion is a tool call inside a turn, and one process
+//     runs one turn at a time.
+//  2. Otherwise the run this claim is left serving: the turn's end retires its delivery, and the
+//     worker goes on working that run — a tester waiting on CI, a merger waiting on a person —
+//     until another delivery of a run replaces it. A notice's turn has no delivery behind it.
+//  3. Otherwise, for a claim that has served no run at all, a task it holds that the agent may
+//     have read. Oh My Pi's own agent_start names no prompt, so a turn that starts after the
+//     daemon's wait for it is indistinguishable from a turn of the agent's own and confirms
+//     nothing; a worker on its first task would otherwise have its completion refused. This
+//     cannot be mistaken for an older run's work, because there is no older run this claim
+//     served. A task the agent refused is not one it read, and carries no such mark.
+//
+// An operator's task belongs to no run and answers for none of them: it carries generation 0.
+func (c Claim) ServingRun() uint64 {
+	p := c.Pending
+	if p == nil || p.Generation == 0 {
+		return c.ServingGeneration
+	}
+	if !p.ConfirmedAt.IsZero() {
+		return p.Generation
+	}
+	if c.ServingGeneration == 0 && !p.DeliveredAt.IsZero() {
+		return p.Generation
+	}
+	return c.ServingGeneration
+}
+
 // Claim is a copy of the claim as the machine holds it now.
 func (m *Machine) Claim() Claim {
 	m.mu.Lock()
@@ -459,7 +512,7 @@ func (m *Machine) fence(ctx context.Context, ev Event) (bool, error) {
 			return false, nil
 		}
 	case StreamLateRefusal:
-		if pending == nil || pending.ID != ev.DeliveryID {
+		if pending == nil || (pending.ID != ev.DeliveryID && (m.takenBack == "" || m.takenBack != ev.DeliveryID)) {
 			m.dropStale("StreamLateRefusal", "delivery", ev.DeliveryID, pendingID(pending))
 			return false, nil
 		}

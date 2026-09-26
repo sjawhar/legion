@@ -243,7 +243,9 @@ func (c *Conn) request(ctx context.Context, frame shimwire.Frame, id, deliveryID
 	}
 	c.pending[id] = pendingRequest{answer: answer, deliveryID: deliveryID}
 	if deliveryID != "" {
-		// A new prompt supersedes the last one's claim to a late refusal (worker-rpc.ts:450).
+		// A new prompt supersedes the last one's claim to a late refusal (worker-rpc.ts:450). The
+		// supervisor's take-back memory relies on this: it is what bounds when a refusal can
+		// name a prompt the supervisor gave up on (supervise.Machine.takenBack).
 		c.acked = nil
 	}
 	c.mu.Unlock()
