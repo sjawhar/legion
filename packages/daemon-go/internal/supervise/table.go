@@ -572,6 +572,7 @@ func acked(m *Machine, ctx context.Context, _ Event) error {
 	m.helloDuringSend = false
 	p := m.claim.Pending
 	p.DeliveredAt = m.deps.Clock.Now()
+	m.markedBy = p.ID
 	m.arm(TimerTurn, m.deps.Timeouts.RPC, p.ID)
 	return m.deps.Store.PutDelivery(ctx, m.claim.Token, *p)
 }
@@ -626,12 +627,13 @@ func refused(m *Machine, ctx context.Context, ev Event) error {
 // on the spot for ever against an agent that cannot start a turn at all.
 func lateRefused(m *Machine, ctx context.Context, ev Event) error {
 	r := ev.(StreamLateRefusal)
-	// A refusal of the send this machine gave up on says that prompt never ran, so the task loses
-	// its read mark — but there is nothing to take back: the task is already waiting, under an id
-	// that send never carried, and its prompt was charged when the wait for its turn ran out.
-	// Rotating or charging again here would spend the budget twice for one prompt (takenBack).
+	// A refusal naming the prompt whose acknowledgement marked the task, where that is no longer the
+	// pending id, says that prompt never ran, so the task loses its read mark — and nothing else.
+	// The wait that gave up on it already re-queued the task under a new id and charged the prompt;
+	// rotating or charging again would spend the budget twice for one prompt. A turn of the task's
+	// own that is running meanwhile keeps its run: that is its confirmation, not this mark (markedBy).
 	if r.DeliveryID != m.claim.Pending.ID {
-		m.log.Warn("supervise: the prompt this machine gave up on was refused; the task waits unread",
+		m.log.Warn("supervise: the prompt that marked the task as read was refused; the mark is cleared",
 			"delivery", r.DeliveryID, "error", r.Error)
 		return m.markUnread(ctx)
 	}

@@ -280,23 +280,15 @@ type Machine struct {
 	// delivery it may already have sent, or a turn it saw start and may not have seen end. The
 	// machine asks the agent (get_state) before it acts on either.
 	askFirst bool
-	// takenBack is the id of the last send this machine gave up on, which the agent still knows its
-	// task by. It exists for one answer: a refusal naming that id says the prompt never ran, so the
-	// task loses its read mark (markUnread) — and nothing else: no rotation, no charge, since the
-	// wait that gave up on the send already did both.
-	//
-	// The connection's own rule bounds when such a refusal is emitted: it can only name the prompt
-	// the connection last registered, and registering the next prompt ends the last one's claim
-	// (stream/conn.go, request). But emission order is not handling order. The refusal reaches the
-	// machine through the listener, the daemon's pump and the claim's inbox, while the next send's
-	// acknowledgement is posted to the machine straight from the send's own goroutine — so a
-	// refusal emitted while the next send was still adopting the workspace can be handled after
-	// that send is acknowledged. Starting a send therefore ends this memory: after it, the newest
-	// word on the task is that send's, and an old refusal handled late must not clear the mark its
-	// acknowledgement set. A relaunch needs nothing of its own — every prompt a new process is sent
-	// starts here too, and a refusal from the old process handled before that send is still the
-	// newest word. Memory only: after a restart there is no connection a refusal could come from.
-	takenBack string
+	// markedBy is the id of the prompt whose acknowledgement set the pending task's read mark
+	// (DeliveredAt). A late refusal is judged against the prompt it names: one naming markedBy says
+	// the prompt that marked the task never ran, so the mark goes (markUnread); one naming any other
+	// prompt says nothing about the mark. Which prompt set the mark is a fact recorded when it is
+	// set, so no ordering of sends, acknowledgements and refusals has to be reasoned about. When the
+	// pending task carries no mark it may still name an earlier prompt, and a refusal naming it
+	// then has nothing to clear. Memory only: after a restart no refusal can come from the old
+	// connection.
+	markedBy string
 	// previous is the incarnation the claim last ran and no longer records — stopped by a
 	// suspension, retired, failed on, or found dead — which every launch of the same session hands
 	// the runtime to wait out until one starts. letGo is the one way a process gets here. It is
@@ -512,7 +504,7 @@ func (m *Machine) fence(ctx context.Context, ev Event) (bool, error) {
 			return false, nil
 		}
 	case StreamLateRefusal:
-		if pending == nil || (pending.ID != ev.DeliveryID && (m.takenBack == "" || m.takenBack != ev.DeliveryID)) {
+		if pending == nil || (pending.ID != ev.DeliveryID && (m.markedBy == "" || m.markedBy != ev.DeliveryID)) {
 			m.dropStale("StreamLateRefusal", "delivery", ev.DeliveryID, pendingID(pending))
 			return false, nil
 		}
@@ -808,16 +800,30 @@ func (m *Machine) forgetSend() {
 	m.send, m.helloDuringSend, m.askFirst = nil, false, false
 }
 
-// persist writes the claim, the one place every transition passes. A capability belongs to a
-// registered agent whose process runs, so a claim in any other state — relaunching after a death,
-// suspended, failed, or retired — is written without one: the old secret authenticates nothing and
-// every grant it minted fails its fence, as the shipped daemon revokes a session's capability and
-// its grants on death, retirement, and teardown.
+// persist writes the claim alone. A capability belongs to a registered agent whose process runs,
+// so a claim in any other state — relaunching after a death, suspended, failed, or retired — gives
+// its capability up here, on the machine's own claim, which is what the capability check reads
+// (api/claims.go): the old secret authenticates nothing and every grant it minted fails its fence,
+// as the shipped daemon revokes a session's capability and its grants on death, retirement, and
+// teardown. A confirmation and a retire write the claim together with the delivery they change,
+// each in one transaction, and every write hands the store the same shape (stored).
 func (m *Machine) persist(ctx context.Context) error {
 	if !holdsCapability(m.claim.State) {
 		m.claim.CapabilityHash = nil
 	}
-	return m.deps.Store.PutClaim(ctx, m.claim)
+	return m.deps.Store.PutClaim(ctx, m.stored())
+}
+
+// stored is the claim as a write hands it to the store: without its pending delivery, which has a
+// table of its own, and without a capability once the claim no longer holds one. It is a copy and
+// changes nothing; revoking the live capability is persist's.
+func (m *Machine) stored() Claim {
+	c := m.claim
+	c.Pending = nil
+	if !holdsCapability(c.State) {
+		c.CapabilityHash = nil
+	}
+	return c
 }
 
 // holdsCapability says whether a claim in state has a registered agent with a running process.

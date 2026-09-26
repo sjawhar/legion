@@ -185,8 +185,7 @@ func (m *Machine) phaseHolds(ctx context.Context, d Delivery) (bool, error) {
 // completion the worker's next turn reports.
 func (m *Machine) retirePending(ctx context.Context) error {
 	p := m.claim.Pending
-	retired := m.claim
-	retired.Pending = nil
+	retired := m.stored()
 	if !p.ConfirmedAt.IsZero() && p.Generation != 0 {
 		retired.ServingGeneration = p.Generation
 	}
@@ -214,11 +213,6 @@ func (m *Machine) streaming(ctx context.Context, conn runtime.Conn) bool {
 // startSend runs one prompt on its own goroutine and posts its outcome back to the machine.
 func (m *Machine) startSend(conn runtime.Conn, d Delivery) {
 	token, generation, role, loc := m.claim.Token, m.claim.Generation, m.claim.Role, m.claim.Locator
-	// This send is the newest word on the task. A refusal of the prompt given up on can still be
-	// emitted while this send verifies and adopts the workspace, and it reaches the machine by a
-	// longer road than this send's acknowledgement does — so it can be handled after that
-	// acknowledgement, and must not then clear the mark the acknowledgement set (takenBack).
-	m.takenBack = ""
 	m.send, m.helloDuringSend = &sending{id: d.ID, generation: generation}, false
 	m.goroutines++
 	go func() {
@@ -270,12 +264,7 @@ func (m *Machine) confirm(ctx context.Context) error {
 	m.disarm(TimerTurn)
 	m.askFirst = false
 	m.claim.Budgets.PromptFailures, m.claim.Budgets.PromptRetires = 0, 0
-	stored := m.claim
-	stored.Pending = nil
-	if !holdsCapability(stored.State) {
-		stored.CapabilityHash = nil
-	}
-	return m.deps.Store.PutClaimAndDelivery(ctx, stored, *p)
+	return m.deps.Store.PutClaimAndDelivery(ctx, m.stored(), *p)
 }
 
 // settle retires a delivery whose life is over, and runs around every decision, so that two things
@@ -325,6 +314,7 @@ const (
 // outcome that arrived for a send this machine had already given up on says only that the agent
 // never read the task.
 func (m *Machine) markUnread(ctx context.Context) error {
+	m.markedBy = ""
 	p := m.claim.Pending
 	if p.DeliveredAt.IsZero() {
 		return nil
@@ -340,11 +330,11 @@ func (m *Machine) markUnread(ctx context.Context) error {
 func (m *Machine) takeBackPending(ctx context.Context, read bool) error {
 	m.disarm(TimerTurn)
 	p := m.claim.Pending
-	m.takenBack = p.ID
 	p.ID = rand.Text()
 	p.ConfirmedAt = time.Time{}
 	if !read {
 		p.DeliveredAt = time.Time{}
+		m.markedBy = ""
 	}
 	return m.deps.Store.PutDelivery(ctx, m.claim.Token, *p)
 }

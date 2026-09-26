@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"slices"
@@ -515,51 +516,68 @@ func TestTheServingRunBackfillsForClaimsBetweenTurns(t *testing.T) {
 	}
 }
 
-// A worker whose process died mid-task leaves a claim launching or shim_connected: the relaunch
-// resumes that session and is given no task, because the claim already holds one. 0012 read those
-// states as processes that are replaced and skipped them, so an upgrade landing during a relaunch
-// left the worker serving no run and its next completion refused.
+// A worker whose process died mid-task leaves a claim launching, shim_connected or
+// launch_uncertain: the relaunch resumes that session and is given no task, because the claim
+// already holds one. 0014 gives such a claim the issue's run. A first launch has no session and
+// keeps zero — the task it is given attributes it. Started from 0010 the two backfills run in one
+// boot and together cover every live claim; started from 0013, a claim already past relaunching
+// with a zero run is out of 0014's reach, which is the limit its header states.
 func TestTheServingRunBackfillsForARelaunchingClaim(t *testing.T) {
-	ctx := context.Background()
-	store := emptyStore(t)
-	migrateThrough(t, store, 10)
-
-	for _, row := range []struct{ token, state string }{
-		{token: "tok-launching", state: "launching"},
-		{token: "tok-shim", state: "shim_connected"},
-		{token: "tok-retired", state: "retired"},
-	} {
-		if _, err := store.pool.Exec(ctx, `insert into claims (token, project, tree, issue, role, generation, session,
-			session_file, state, launch_failures, prompt_failures, prompt_retires, uncertain_streak)
-			values ($1, 'LEGION', 'LEGION-208', 'LEGION-208', 'tester', 1, '', '', $2, 0, 0, 0, 0)`,
-			row.token, row.state); err != nil {
-			t.Fatalf("seed the %s claim: %v", row.token, err)
-		}
-	}
-	if _, err := store.pool.Exec(ctx, `insert into issues (key, tree, project, title, phase, generation, status, rank, last_dispatch_seq)
-		values ('LEGION-208', 'LEGION-208', 'LEGION', 'LEGION-208', 'testing', 5, 'in_progress', 'V', 0)`); err != nil {
-		t.Fatalf("seed the issue: %v", err)
-	}
-
-	if _, err := store.Migrate(ctx); err != nil {
-		t.Fatalf("migrate the rest: %v", err)
-	}
-
-	for _, want := range []struct {
-		token   string
-		serving int64
+	for _, tc := range []struct {
+		from      int
+		wantReady int64
 	}{
-		{token: "tok-launching", serving: 5},
-		{token: "tok-shim", serving: 5},
-		{token: "tok-retired", serving: 0},
+		{from: 10, wantReady: 5},
+		{from: 13, wantReady: 0},
 	} {
-		var serving int64
-		if err := store.pool.QueryRow(ctx, "select serving_generation from claims where token = $1",
-			want.token).Scan(&serving); err != nil {
-			t.Fatalf("read %s: %v", want.token, err)
-		}
-		if serving != want.serving {
-			t.Fatalf("%s serves run %d, want %d", want.token, serving, want.serving)
-		}
+		t.Run(fmt.Sprintf("from %04d", tc.from), func(t *testing.T) {
+			ctx := context.Background()
+			store := emptyStore(t)
+			migrateThrough(t, store, tc.from)
+			for _, row := range []struct{ token, state, session string }{
+				{token: "tok-launching", state: "launching", session: "ses-resumed"},
+				{token: "tok-shim", state: "shim_connected", session: "ses-resumed"},
+				{token: "tok-uncertain", state: "launch_uncertain", session: "ses-resumed"},
+				{token: "tok-first", state: "launching", session: ""},
+				{token: "tok-retired", state: "retired", session: "ses-resumed"},
+				{token: "tok-ready", state: "ready", session: "ses-resumed"},
+			} {
+				if _, err := store.pool.Exec(ctx, `insert into claims (token, project, tree, issue, role, generation, session,
+					session_file, state, launch_failures, prompt_failures, prompt_retires, uncertain_streak)
+					values ($1, 'LEGION', 'LEGION-208', 'LEGION-208', 'tester', 1, $3, '', $2, 0, 0, 0, 0)`,
+					row.token, row.state, row.session); err != nil {
+					t.Fatalf("seed the %s claim: %v", row.token, err)
+				}
+			}
+			if _, err := store.pool.Exec(ctx, `insert into issues (key, tree, project, title, phase, generation, status, rank, last_dispatch_seq)
+				values ('LEGION-208', 'LEGION-208', 'LEGION', 'LEGION-208', 'testing', 5, 'in_progress', 'V', 0)`); err != nil {
+				t.Fatalf("seed the issue: %v", err)
+			}
+
+			if _, err := store.Migrate(ctx); err != nil {
+				t.Fatalf("migrate the rest: %v", err)
+			}
+
+			for _, want := range []struct {
+				token   string
+				serving int64
+			}{
+				{token: "tok-launching", serving: 5},
+				{token: "tok-shim", serving: 5},
+				{token: "tok-uncertain", serving: 5},
+				{token: "tok-first", serving: 0},
+				{token: "tok-retired", serving: 0},
+				{token: "tok-ready", serving: tc.wantReady},
+			} {
+				var serving int64
+				if err := store.pool.QueryRow(ctx, "select serving_generation from claims where token = $1",
+					want.token).Scan(&serving); err != nil {
+					t.Fatalf("read %s: %v", want.token, err)
+				}
+				if serving != want.serving {
+					t.Fatalf("%s serves run %d, want %d", want.token, serving, want.serving)
+				}
+			}
+		})
 	}
 }
