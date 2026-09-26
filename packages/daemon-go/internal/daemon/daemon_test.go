@@ -74,13 +74,12 @@ func testConfig(t *testing.T) config.Config {
 	if err := os.WriteFile(tokenFile, []byte(testOperatorToken+"\n"), 0o600); err != nil {
 		t.Fatalf("write the operator token: %v", err)
 	}
-	port := freePort(t)
-	// Under kubernetes the worker stream is a TCP listener, so its port is one found free too: the
-	// API port's neighbour may be any process's.
-	stream := freePort(t)
-	for stream == port {
-		stream = freePort(t)
-	}
+	// Both ports are held from here until the daemon binds them (heldListen): a port found free
+	// and closed again is any process's to take first. Under kubernetes the worker stream is a TCP
+	// listener too, so its port is held beside the API's rather than taken as its neighbour, which
+	// may be any process's.
+	port := holdPort(t)
+	stream := holdPort(t)
 	return config.Config{
 		Project:                                 "TEST" + randomSuffix(t),
 		Port:                                    port,
@@ -115,25 +114,93 @@ func randomSuffix(t *testing.T) string {
 	return strings.ToUpper(hex.EncodeToString(b[:]))
 }
 
-// freePort answers a port free a moment ago, with its successor free too: a daemon binds its API
-// on the port and its worker stream on the one above it, and the second was never checked. Both
-// are released before the daemon binds them — nothing can reserve a port for another process —
-// so startDaemon takes another pair when one is taken in between.
-func freePort(t *testing.T) int {
-	t.Helper()
-	for range 32 {
-		port := boundPort(t)
-		next, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(port+1))
-		if err != nil {
-			continue
+// The ports testConfig hands a daemon are held until the daemon binds them: another process asking
+// for either in between is refused, and the daemon still boots on both.
+func TestThePortsHandedToADaemonCannotBeTakenBeforeItBinds(t *testing.T) {
+	cfg := workflowConfig(t, workflowNATS(t))
+	cfg.Runtime = kubernetesConfig(t, "https://127.0.0.1:1").Runtime
+	for _, port := range []int{cfg.Port, cfg.WorkerStreamPort} {
+		address := net.JoinHostPort(cfg.Bind, strconv.Itoa(port))
+		if thief, err := net.Listen("tcp", address); err == nil {
+			_ = thief.Close()
+			t.Fatalf("another listener took %s between the pick and the daemon's bind", address)
 		}
-		next.Close()
-		return port
 	}
-	t.Fatal("no adjacent pair of free ports in 32 tries")
-	return 0
+	record := &built{}
+	o := fakeRuntime(fake.NewRuntime(), record)
+	o.workflowTokens = &workflowTokenRecorder{}
+	d := startDaemon(t, cfg, o)
+	record.mu.Lock()
+	address := record.address
+	record.mu.Unlock()
+	if want := "tcp://" + net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.WorkerStreamPort)); address != want {
+		t.Errorf("the worker stream listens on %q, want %q", address, want)
+	}
+	if response, err := d.client.Get(d.base + "/healthz"); err != nil {
+		t.Errorf("the daemon does not answer on its port: %v", err)
+	} else {
+		response.Body.Close()
+	}
 }
 
+// heldPorts are the listeners holdPort holds, by address, until a daemon takes one (heldListen).
+var heldPorts = struct {
+	sync.Mutex
+	byAddress map[string]net.Listener
+}{byAddress: map[string]net.Listener{}}
+
+// holdPort listens on a free loopback port for t and returns it. The listener is held until a
+// daemon of t's takes it through heldListen, or t ends.
+func holdPort(t *testing.T) int {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("hold a free port: %v", err)
+	}
+	address := listener.Addr().String()
+	heldPorts.Lock()
+	heldPorts.byAddress[address] = listener
+	heldPorts.Unlock()
+	t.Cleanup(func() {
+		heldPorts.Lock()
+		delete(heldPorts.byAddress, address)
+		heldPorts.Unlock()
+		_ = listener.Close()
+	})
+	return listener.Addr().(*net.TCPAddr).Port
+}
+
+// rebindHeldPorts hands cfg a freshly held API and worker-stream port. A daemon that has stopped
+// closed the listeners it was handed, and from then on the ports it used are any process's, so a
+// test that starts a second daemon on the same config holds a pair again first.
+func rebindHeldPorts(t *testing.T, cfg *config.Config) {
+	t.Helper()
+	cfg.Port = holdPort(t)
+	cfg.DaemonURL = "http://127.0.0.1:" + strconv.Itoa(cfg.Port)
+	cfg.WorkerStreamPort = holdPort(t)
+}
+
+// heldListen is the daemon's listen under test: the listener holdPort holds for address, handed
+// over once. An address nothing holds is refused rather than bound, since a port found free and
+// bound later is the race holdPort closes: a test that starts a daemon again on one config calls
+// rebindHeldPorts first.
+func heldListen(network, address string) (net.Listener, error) {
+	heldPorts.Lock()
+	listener, held := heldPorts.byAddress[address]
+	delete(heldPorts.byAddress, address)
+	heldPorts.Unlock()
+	if !held || network != "tcp" {
+		return nil, &net.AddrError{Err: "no held listener: call rebindHeldPorts before starting a daemon again on the same config", Addr: address}
+	}
+	return listener, nil
+}
+
+// pollClient bounds each poll of a daemon's port: holdPort's listener queues a connection until a
+// daemon takes the listener and serves it, and a daemon that exits before then never answers it.
+var pollClient = &http.Client{Timeout: time.Second}
+
+// boundPort is a free loopback port for a process that binds it itself, such as a scratch server
+// launched as a command: until it does, the port is any process's.
 func boundPort(t *testing.T) int {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -179,7 +246,8 @@ func fakeRuntime(rt *fake.Runtime, record *built) overrides {
 			record.conns, record.address, record.apps = conns, address, apps
 			return rt, nil
 		},
-		clock: stillClock{},
+		clock:  stillClock{},
+		listen: heldListen,
 	}
 }
 
@@ -222,6 +290,7 @@ func TestRunRecordsEveryBootAndKeepsTheFirstBootTime(t *testing.T) {
 		t.Fatal("the first boot has no recorded time")
 	}
 
+	rebindHeldPorts(t, &cfg)
 	if err := run(ctx, cfg, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{})); err != nil {
 		t.Fatalf("second run: %v", err)
 	}
@@ -267,13 +336,12 @@ func TestRunRefusesAnUnreachablePostgresByHostAndNotByPassword(t *testing.T) {
 func TestRunRecordsNoBootWhenItCannotTakeItsPort(t *testing.T) {
 	cfg := testConfig(t)
 	address := net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.Port))
-	occupied, err := net.Listen("tcp", address)
-	if err != nil {
-		t.Fatalf("occupy %s: %v", address, err)
-	}
-	defer occupied.Close()
+	// The listener testConfig holds for the port is the other listener: the daemon binds the port
+	// itself here, rather than take the held one.
+	o := fakeRuntime(fake.NewRuntime(), &built{})
+	o.listen = nil
 
-	err = run(context.Background(), cfg, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{}))
+	err := run(context.Background(), cfg, quietLogger(), o)
 	if err == nil {
 		t.Fatal("run returned no error although another listener held its port")
 	}
@@ -360,6 +428,7 @@ func TestAControllerRegistrationIsInTheStateAndSurvivesARestart(t *testing.T) {
 	want(d.state())
 
 	d.stop()
+	rebindHeldPorts(t, &cfg)
 	d = startDaemon(t, cfg, fakeRuntime(fake.NewRuntime(), &built{}))
 	want(d.state())
 	status, body = d.request(http.MethodPost, "/legion/v1/grants",
@@ -383,11 +452,6 @@ type daemon struct {
 
 // startDaemon runs the daemon until the test stops it, and returns once it answers /healthz.
 func startDaemon(t *testing.T, cfg config.Config, o overrides) *daemon {
-	t.Helper()
-	return startDaemonWithin(t, cfg, o, 4)
-}
-
-func startDaemonWithin(t *testing.T, cfg config.Config, o overrides, attempts int) *daemon {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	// One transport for every request, so the test can close its own connections before it asks
@@ -413,16 +477,6 @@ func startDaemonWithin(t *testing.T, cfg config.Config, o overrides, attempts in
 		select {
 		case err := <-d.done:
 			d.stopped = true
-			// A port free when the config was made can be taken before the daemon binds it, by
-			// another test binary of this package's own run. That is the port's race, not the
-			// daemon's: take another pair and start again.
-			if err != nil && strings.Contains(err.Error(), "address already in use") && attempts > 0 {
-				cancel()
-				cfg.Port = freePort(t)
-				cfg.WorkerStreamPort = cfg.Port + 1
-				cfg.DaemonURL = "http://127.0.0.1:" + strconv.Itoa(cfg.Port)
-				return startDaemonWithin(t, cfg, o, attempts-1)
-			}
 			t.Fatalf("the daemon exited before it answered /healthz: %v", err)
 		default:
 		}
@@ -650,6 +704,7 @@ func TestWorkflowBootLogsItsDependencyOrder(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- run(ctx, cfg, logger, overrides{
+			listen:         heldListen,
 			runtime:        fakeRuntime(fake.NewRuntime(), &built{}).runtime,
 			clock:          stillClock{},
 			workflowTokens: tokens,
@@ -669,7 +724,7 @@ func TestWorkflowBootLogsItsDependencyOrder(t *testing.T) {
 
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		response, err := http.Get("http://127.0.0.1:" + strconv.Itoa(cfg.Port) + "/healthz")
+		response, err := pollClient.Get("http://127.0.0.1:" + strconv.Itoa(cfg.Port) + "/healthz")
 		if err == nil {
 			response.Body.Close()
 			if response.StatusCode == http.StatusOK {
@@ -747,6 +802,7 @@ func TestAnIssueMovedWhileBootListsIsStillAdmitted(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- run(ctx, cfg, quietLogger(), overrides{
+			listen:  heldListen,
 			runtime: fakeRuntime(fake.NewRuntime(), &built{}).runtime, clock: stillClock{}, workflowTokens: &workflowTokenRecorder{},
 		})
 	}()
@@ -773,7 +829,7 @@ func TestAnIssueMovedWhileBootListsIsStillAdmitted(t *testing.T) {
 				Active []string `json:"active"`
 			} `json:"admission"`
 		}
-		if response, err := http.Get("http://127.0.0.1:" + strconv.Itoa(cfg.Port) + "/legion/v1/state"); err == nil {
+		if response, err := pollClient.Get("http://127.0.0.1:" + strconv.Itoa(cfg.Port) + "/legion/v1/state"); err == nil {
 			err = json.NewDecoder(response.Body).Decode(&state)
 			response.Body.Close()
 			if err == nil && response.StatusCode == http.StatusOK {
@@ -803,6 +859,7 @@ func TestRunRefusesToBootWithoutTheNotificationStream(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- run(ctx, cfg, quietLogger(), overrides{
+			listen:  heldListen,
 			runtime: fakeRuntime(fake.NewRuntime(), &built{}).runtime, clock: stillClock{}, workflowTokens: &workflowTokenRecorder{},
 		})
 	}()
@@ -826,6 +883,7 @@ func TestRunStopsWithTheErrorWhenItsIntakeEnds(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- run(ctx, cfg, quietLogger(), overrides{
+			listen:  heldListen,
 			runtime: fakeRuntime(fake.NewRuntime(), &built{}).runtime, clock: stillClock{}, workflowTokens: &workflowTokenRecorder{},
 		})
 	}()

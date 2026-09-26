@@ -161,9 +161,13 @@ func drained(t testing.TB) {
 	}
 }
 
+// monitorClient bounds each monitoring request, so one the server never answers cannot outlast the
+// drain's own bound.
+var monitorClient = &http.Client{Timeout: 5 * time.Second}
+
 // clientConnections lists the shared server's open client connections, each by id and name.
 func clientConnections() ([]string, error) {
-	response, err := http.Get(sharedMonitor + "/connz")
+	response, err := monitorClient.Get(sharedMonitor + "/connz")
 	if err != nil {
 		return nil, err
 	}

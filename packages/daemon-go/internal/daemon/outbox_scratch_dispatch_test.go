@@ -100,7 +100,6 @@ func startScratchDispatch(t *testing.T) (string, string) {
 	})
 	serverURL := *base
 	serverURL.Path = "/" + database
-	port := freePort(t)
 	repositoryRoot, err := filepath.Abs(filepath.Join("..", "..", "..", ".."))
 	if err != nil {
 		t.Fatalf("resolve repository root: %v", err)
@@ -116,45 +115,6 @@ func startScratchDispatch(t *testing.T) (string, string) {
 		t.Fatalf("create scratch Dispatch home: %v", err)
 	}
 	token := "scratch-dispatch-agent-token"
-	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
-	command := exec.Command(binary)
-	command.Dir = filepath.Join(repositoryRoot, "packages", "envoy")
-	command.Env = append(os.Environ(),
-		"DATABASE_URL="+serverURL.String(),
-		"DISPATCH_AGENT_TOKEN="+token,
-		"DISPATCH_IDENTITY=header:X-Dispatch-User",
-		"DISPATCH_ALLOWED_LOGINS=smoke",
-		"DISPATCH_NATS_DISABLED=1",
-		"DISPATCH_LISTEN_HOST=127.0.0.1",
-		fmt.Sprintf("DISPATCH_PORT=%d", port),
-		"DISPATCH_SERVER_URL="+baseURL,
-		"DISPATCH_WEB_DIST="+filepath.Join(repositoryRoot, "packages", "dispatch", "web", "dist"),
-		"HOME="+home,
-	)
-	var output bytes.Buffer
-	command.Stdout = &output
-	command.Stderr = &output
-	if err := command.Start(); err != nil {
-		t.Fatalf("start scratch Dispatch: %v", err)
-	}
-	t.Cleanup(func() {
-		if command.Process == nil {
-			return
-		}
-		_ = command.Process.Signal(os.Interrupt)
-		done := make(chan error, 1)
-		go func() { done <- command.Wait() }()
-		select {
-		case err := <-done:
-			if err != nil {
-				t.Errorf("scratch Dispatch stopped: %v\n%s", err, output.String())
-			}
-		case <-time.After(10 * time.Second):
-			_ = command.Process.Kill()
-			<-done
-			t.Error("scratch Dispatch did not stop after SIGINT")
-		}
-	})
 	// Readiness is a server process starting and migrating a fresh database, whose time is the
 	// machine's load: bounded by the test binary's own deadline rather than a fixed span, so a
 	// slow start is not read as a server that will never answer.
@@ -162,18 +122,72 @@ func startScratchDispatch(t *testing.T) (string, string) {
 	if testDeadline, ok := t.Deadline(); ok && testDeadline.Add(-10*time.Second).Before(deadline) {
 		deadline = testDeadline.Add(-10 * time.Second)
 	}
-	for time.Now().Before(deadline) {
-		response, err := http.Get(baseURL + "/api/v1")
-		if err == nil {
-			response.Body.Close()
-			if response.StatusCode == http.StatusOK {
-				return baseURL, token
-			}
+	// Dispatch binds the port it is given, and a free port found here is any process's until then:
+	// a start that lost it to another process is started again on another.
+attempts:
+	for attempt := 1; ; attempt++ {
+		port := boundPort(t)
+		baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+		command := exec.Command(binary)
+		command.Dir = filepath.Join(repositoryRoot, "packages", "envoy")
+		command.Env = append(os.Environ(),
+			"DATABASE_URL="+serverURL.String(),
+			"DISPATCH_AGENT_TOKEN="+token,
+			"DISPATCH_IDENTITY=header:X-Dispatch-User",
+			"DISPATCH_ALLOWED_LOGINS=smoke",
+			"DISPATCH_NATS_DISABLED=1",
+			"DISPATCH_LISTEN_HOST=127.0.0.1",
+			fmt.Sprintf("DISPATCH_PORT=%d", port),
+			"DISPATCH_SERVER_URL="+baseURL,
+			"DISPATCH_WEB_DIST="+filepath.Join(repositoryRoot, "packages", "dispatch", "web", "dist"),
+			"HOME="+home,
+		)
+		output := &syncBuffer{}
+		command.Stdout = output
+		command.Stderr = output
+		if err := command.Start(); err != nil {
+			t.Fatalf("start scratch Dispatch: %v", err)
 		}
-		time.Sleep(50 * time.Millisecond)
+		exited := make(chan error, 1)
+		go func() { exited <- command.Wait() }()
+		stopped := false
+		t.Cleanup(func() {
+			if stopped {
+				return
+			}
+			_ = command.Process.Signal(os.Interrupt)
+			select {
+			case err := <-exited:
+				if err != nil {
+					t.Errorf("scratch Dispatch stopped: %v\n%s", err, output.String())
+				}
+			case <-time.After(10 * time.Second):
+				_ = command.Process.Kill()
+				<-exited
+				t.Error("scratch Dispatch did not stop after SIGINT")
+			}
+		})
+		for time.Now().Before(deadline) {
+			select {
+			case err := <-exited:
+				stopped = true
+				if attempt < 3 && strings.Contains(output.String(), "address already in use") {
+					t.Logf("scratch Dispatch lost port %d to another process before binding it; starting it on another", port)
+					continue attempts
+				}
+				t.Fatalf("scratch Dispatch exited before it was ready (%v):\n%s", err, output.String())
+			default:
+			}
+			if response, err := http.Get(baseURL + "/api/v1"); err == nil {
+				response.Body.Close()
+				if response.StatusCode == http.StatusOK {
+					return baseURL, token
+				}
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		t.Fatalf("scratch Dispatch did not become ready:\n%s", output.String())
 	}
-	t.Fatalf("scratch Dispatch did not become ready:\n%s", output.String())
-	return "", ""
 }
 
 func createScratchDispatchIssue(t *testing.T, baseURL string) string {

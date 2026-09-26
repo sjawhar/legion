@@ -317,6 +317,7 @@ func TestRunReadoptsEveryClaimWithALiveLocatorOnRestart(t *testing.T) {
 	}
 	before := d.claim(token)
 	d.stop()
+	rebindHeldPorts(t, &cfg)
 	sh.closed()
 
 	second := fake.NewRuntime()
@@ -436,6 +437,7 @@ func TestRunWaitsToRelaunchAnUnfinishedClaimUntilOrphanReconciliationSucceeds(t 
 	}
 
 	d.stop()
+	rebindHeldPorts(t, &cfg)
 	second := fake.NewRuntime()
 	second.FailReconcileOrphans(errors.New("tmux list-panes timed out again"))
 	secondOverrides := fakeRuntime(second, &built{})
@@ -456,6 +458,7 @@ func TestRunWaitsToRelaunchAnUnfinishedClaimUntilOrphanReconciliationSucceeds(t 
 	}
 
 	restarted.stop()
+	rebindHeldPorts(t, &cfg)
 	third := fake.NewRuntime()
 	thirdOverrides := fakeRuntime(third, &built{})
 	thirdOverrides.orphanSweep = 20 * time.Millisecond
