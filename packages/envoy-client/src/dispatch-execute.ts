@@ -1594,7 +1594,7 @@ export async function executeDispatchTool(
     ownerArguments.owner?.kind === "issue"
       ? {
           kind: "issue" as const,
-          issue: await ensureIssue(client, ownerArguments.owner.issue, actor),
+          issue: await resolveExistingIssue(client, ownerArguments.owner.issue),
         }
       : ownerArguments.owner;
   const issue = () => {
@@ -2444,18 +2444,17 @@ export async function executeDispatchTool(
   }
 }
 
-async function ensureIssue(
+async function resolveExistingIssue(
   client: DispatchClient,
-  issueReference: string,
-  actor: Actor
+  issueReference: string
 ): Promise<string> {
   try {
-    return await client.ensureIssue(issueReference, actor);
+    return await client.resolveIssue(issueReference);
   } catch (error) {
-    if (error instanceof DispatchServiceError && error.code === "PROJECT_UNMAPPED") {
-      const repository = issueReference.slice(0, issueReference.lastIndexOf("#"));
+    if (error instanceof DispatchServiceError && error.status === 404) {
       throw new Error(
-        `repository ${repository} is not mapped in repository settings and no DISPATCH_DEFAULT_PROJECT is configured`
+        `no Dispatch issue is linked to ${issueReference}; create it first with ` +
+          `dispatch_issue({ external: "${issueReference}", ... })`
       );
     }
     throw error;
