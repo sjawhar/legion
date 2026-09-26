@@ -96,9 +96,6 @@ func (w *Watcher) Start() {
 // conn is the new one and the cache moves to it. A failure leaves the watcher and the handle as
 // they were. After Stop it arms nothing and still moves the handle.
 func (w *Watcher) Rewatch(conn *nats.Conn) error {
-	if conn == nil {
-		return errors.New(w.name + ": no connection")
-	}
 	js, err := conn.JetStream(nats.MaxWait(10 * time.Second))
 	if err != nil {
 		return fmt.Errorf("open %s JetStream: %w", w.name, err)

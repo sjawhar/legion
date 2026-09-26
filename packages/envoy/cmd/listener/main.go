@@ -246,7 +246,7 @@ func rewatchListenerKVWatchers(conn *nats.Conn, caches []listenerCache) error {
 // from transient JetStream deadlines. Rebuild only while the NATS client is
 // connected; a disconnected client owns its own infinite reconnect loop.
 func isUnrecoverableSelfHealthFailure(err error, client *bus.Client, caches []listenerCache) bool {
-	if err == nil || client == nil || !client.Connected() {
+	if err == nil || !client.Connected() {
 		return false
 	}
 	if errors.Is(err, nats.ErrConsumerNotFound) || errors.Is(err, nats.ErrConnectionClosed) {
@@ -267,7 +267,7 @@ func rebuildListenerDependencies(
 	consumer string,
 	handler nats.MsgHandler,
 ) error {
-	if client == nil || !client.Connected() {
+	if !client.Connected() {
 		return nats.ErrConnectionClosed
 	}
 	err := rewatchListenerKVWatchers(client.Conn, caches)
