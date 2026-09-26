@@ -147,8 +147,9 @@ See [Typed blocks](#typed-blocks) for the syntax and [Before you ask](#before-yo
 Every session works on an issue or project document. Legion pre-fills `issue` from `LEGION_ISSUE`: use a native issue key such as
 `LEGION-3`, an external `owner/repo#n` reference, or a bare positive number (resolved against the cwd repository). Otherwise pass
 exactly one owner to every owner-scoped tool: `issue` for an issue, or `project` and `artifact` for an unlinked project document (see
-[References](#references) for the resulting ref shape). On first use, an external issue reference creates its native issue in the
-project configured for that repository in Dispatch Settings, then falls back to `DISPATCH_DEFAULT_PROJECT`.
+[References](#references) for the resulting ref shape). An external issue reference addresses the existing Dispatch issue linked to
+that GitHub issue or pull request. Only `dispatch_issue` with `external` creates a native issue; if no issue is linked, call
+`dispatch_issue({ external: "owner/repo#n", project: "<project>", title: "<title>" })` before addressing it.
 
 Issue reads include `rank`, the server-owned ordering key used by project boards; reorder through `PATCH /api/v1/issues/{key}` with neighboring issue keys. They also include nullable coarse priority (`P0` highest through `P3` lowest) and `assignee`: the lowercase GitHub login of the human who answers the issue's asks, or `null` when nobody holds it. `dispatch_read` of an issue prints it as `Assignee: <login>` or `Assignee: unassigned`.
 
