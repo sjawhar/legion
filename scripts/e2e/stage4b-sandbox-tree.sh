@@ -521,9 +521,12 @@ pod_watch_verdict() {
 # this lists the collection, watches from the list's resourceVersion, and resumes from the last
 # version it saw each time a watch ends; a version the server no longer holds (410 Gone) is listed
 # again. Each list, end and resume is noted in the transcript. A list's items are recorded as ADDED
-# events of KIND, as the watch reports them.
+# events of KIND, as the watch reports them. Each watch asks the server to end it within 300 s, so a
+# loop a killed driver left behind stops at its next pass rather than an hour later; a watch that
+# delivered nothing is resumed after a pause, and a line that does not parse (a watch cut mid-line)
+# ends that watch without being recorded, so FILE holds whole events only.
 watch_raw() {
-  local file=$1 kind=$2 path=$3 version='' list line type next
+  local file=$1 kind=$2 path=$3 version='' list line type next events
   trap - EXIT ERR
   set +e
   while kill -0 "$$" 2>/dev/null; do
@@ -536,11 +539,17 @@ watch_raw() {
       jq -c --arg kind "$kind" '.items[] | {type: "ADDED", object: (. + {kind: $kind})}' <<<"$list" >>"$file"
       echo "   [watch] $(basename "$file"): listed at resourceVersion $version"
     fi
+    events=0
     while IFS= read -r line; do
       [ -n "$line" ] || continue
-      # An ERROR carries the status code in place of a version.
-      IFS=$'\t' read -r type next < <(jq -r 'if .type == "ERROR" then "ERROR\t\(.object.code // "")" else "\(.type)\t\(.object.metadata.resourceVersion // "")" end' <<<"$line")
+      # An ERROR carries the status code in place of a version; a line jq cannot read ends the watch.
+      IFS=$'\t' read -r type next < <(jq -r 'if .type == "ERROR" then "ERROR\t\(.object.code // "")" else "\(.type)\t\(.object.metadata.resourceVersion // "")" end' <<<"$line" 2>/dev/null || echo TORN)
+      events=$((events + 1))
       case "$type" in
+        TORN)
+          echo "   [watch] $(basename "$file"): a watch line did not parse; resuming at resourceVersion $version"
+          break
+          ;;
         ERROR)
           echo "   [watch] $(basename "$file"): the server ended the watch at resourceVersion $version with code $next$([ "$next" = 410 ] && echo '; listing again')"
           [ "$next" != 410 ] || version=
@@ -552,8 +561,9 @@ watch_raw() {
           [ -z "$next" ] || version=$next
           ;;
       esac
-    done < <(setpriv --pdeathsig KILL kubectl --context "$operator" get --raw "$path&watch=1&allowWatchBookmarks=true&resourceVersion=$version" 2>>"$evidence/logs/$(basename "$file" .json).err")
+    done < <(setpriv --pdeathsig KILL kubectl --context "$operator" get --raw "$path&watch=1&allowWatchBookmarks=true&timeoutSeconds=300&resourceVersion=$version" 2>>"$evidence/logs/$(basename "$file" .json).err")
     [ -z "$version" ] || echo "   [watch] $(basename "$file"): the watch ended; resuming at resourceVersion $version"
+    [ "$events" -gt 0 ] || sleep 2
   done
 }
 start_pod_watch() {
@@ -1854,8 +1864,8 @@ judged=$(jq -r 'select(.object.kind == "Pod") | .object | select(.metadata.label
 stop_pid "$leaks_pid"
 leaks_pid=
 [ -s "$work/secret-leaks.json" ] || fail "lib/secret-leaks.ts wrote no verdict ($evidence/logs/secret-leaks.err)"
-jq -e '.leaks == [] and .unseen == []' "$work/secret-leaks.json" >/dev/null ||
-  fail "Sandbox pods carry a value of their Sandbox's Secret, or name a Secret the check never saw: $(jq -c '{leaks, unseen}' "$work/secret-leaks.json")"
+jq -e '.leaks == [] and .unseen == [] and .unreadable == 0' "$work/secret-leaks.json" >/dev/null ||
+  fail "Sandbox pods carry a value of their Sandbox's Secret, name a Secret the check never saw, or the pod watch holds unreadable lines: $(jq -c '{leaks, unseen, unreadable}' "$work/secret-leaks.json")"
 note "$judged Sandbox pods judged from the pod watch's record, deleted ones included; every pod another source names is in it"
 note "no pod's command, args or environment carries a value of its Sandbox's Secret: $(jq -r '"\(.pods) pods, \(.secrets) Secrets, \(.values) values held in memory, none printed"' "$work/secret-leaks.json")"
 # Negative controls: a recorded pod with another runtime class, and a pod the watch never recorded.

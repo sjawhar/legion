@@ -10,11 +10,15 @@
 //     <verdict> one JSON line, {"pods","secrets","values","leaks","unseen"}: leaks is each pod in
 //     <pod-watch> (one watch event a line) whose worker ever ran ready and one of whose containers
 //     carries a value <pod>-boot held, as {"uid","pod","secret"}; unseen is each such pod whose
-//     <pod>-boot the watch never saw, since its check would have judged nothing. It exits 0, or 2
-//     when it cannot start
+//     <pod>-boot the watch never saw, since its check would have judged nothing; unreadable counts
+//     the lines of <pod-watch> before its last that do not parse (the last may be one the watch is
+//     still writing, and is skipped). It exits 0, or 2 when it cannot start
 //
-// The watch resumes from the last resourceVersion it saw when the API server ends it, and lists the
-// Secrets again when the server no longer holds that version, so no value a Secret held is missed.
+// Each watch asks the server to end it within 300 s, and resumes from the last resourceVersion it
+// saw; a watch that delivered nothing is resumed after a pause, and a line that does not parse ends
+// that watch. When the server no longer holds that version (410 Gone) it lists the Secrets again, so
+// a value a Secret held only between the last version seen and that list is not seen; every value a
+// list or a watch event shows is.
 import { type ChildProcessByStdio, spawn } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
@@ -85,10 +89,20 @@ async function watch(): Promise<void> {
         continue;
       }
     }
-    current = kubectl(`${collection}&watch=1&allowWatchBookmarks=true&resourceVersion=${version}`);
+    current = kubectl(
+      `${collection}&watch=1&allowWatchBookmarks=true&timeoutSeconds=300&resourceVersion=${version}`
+    );
+    let events = 0;
     for await (const line of createInterface({ input: current.stdout })) {
       if (line.trim() === "") continue;
-      const event = JSON.parse(line) as { type: string; object: SecretObject & { code?: number } };
+      events++;
+      let event: { type: string; object: SecretObject & { code?: number } };
+      try {
+        event = JSON.parse(line);
+      } catch {
+        // A watch cut mid-line: this watch is over, and the next resumes from the last version.
+        break;
+      }
       if (event.type === "ERROR") {
         // 410 Gone: the server no longer holds that version, so the Secrets are listed again.
         if (event.object.code === 410) version = "";
@@ -97,7 +111,9 @@ async function watch(): Promise<void> {
       if (event.object.metadata?.resourceVersion) version = event.object.metadata.resourceVersion;
       if (event.type !== "BOOKMARK") remember(event.object);
     }
+    current?.kill("SIGKILL");
     current = undefined;
+    if (events === 0) await Bun.sleep(2000);
   }
 }
 
@@ -117,9 +133,19 @@ interface PodEvent {
 
 function judge(): void {
   const pods = new Map<string, { name: string; words: Set<string> }>();
-  for (const line of readFileSync(podWatch, "utf8").split("\n")) {
+  const lines = readFileSync(podWatch, "utf8").split("\n");
+  let unreadable = 0;
+  for (const [index, line] of lines.entries()) {
     if (line.trim() === "") continue;
-    const pod = (JSON.parse(line) as PodEvent).object;
+    let parsed: PodEvent;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      // The last line may be one the watch is still writing; any other that does not parse is named.
+      if (lines.slice(index + 1).some((rest) => rest.trim() !== "")) unreadable++;
+      continue;
+    }
+    const pod = parsed.object;
     const uid = pod?.metadata?.uid;
     const name = pod?.metadata?.name;
     if (pod?.kind !== "Pod" || !uid || !name) continue;
@@ -152,7 +178,7 @@ function judge(): void {
   }
   writeFileSync(
     verdict,
-    `${JSON.stringify({ pods: pods.size, secrets: seen.size, values, leaks, unseen })}\n`
+    `${JSON.stringify({ pods: pods.size, secrets: seen.size, values, leaks, unseen, unreadable })}\n`
   );
 }
 

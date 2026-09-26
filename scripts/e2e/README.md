@@ -561,7 +561,7 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 | :--- | :--- |
 | `prerequisites` | the tools, the restricted context and the image by digest; the lock and the two ports; nothing left in the namespace (Sandboxes, pods, PVCs, ConfigMaps) or on NATS from another run; only then does the run own the shared objects |
 | `preflight` | the runtime identity is `production-legion-daemon` and cannot list Secrets; the Sandbox CRD and the `legion` NodePool's instance-cpu floor; LEGSMOKE has no todo root; the stream carries both halves of intake; a throwaway pod on the Legion pool reaches Dispatch, the listener, the gateway and NATS, each within three tries 5 s apart (a fresh node's first outbound connection can fail while it settles), and a service that never answers fails the check with every try's error |
-| `pod-watch` | the namespace snapshot; the pod, node-event and node-memory watches start, and the Secret-value check (`lib/secret-leaks.ts`). The pod and node-event watches last the whole run: kubectl's own watch ends when the API server closes it at its watch timeout, so each lists, watches from that resourceVersion, resumes from the last version it saw when a watch ends, and lists again on 410 Gone, noting each in the transcript |
+| `pod-watch` | the namespace snapshot; the pod, node-event and node-memory watches start, and the Secret-value check (`lib/secret-leaks.ts`). The pod and node-event watches last the whole run: kubectl's own watch ends when the API server closes it at its watch timeout, so each lists, watches from that resourceVersion, resumes from the last version it saw when a watch ends, and lists again on 410 Gone, noting each in the transcript. Each watch asks the server to end it within 300 s, so a loop a killed driver left stops within five minutes; a watch that delivered nothing is resumed after a pause, and a line that does not parse ends that watch unrecorded |
 | `boot` | the build's source is the one prerequisites recorded; `legion start --check-config` passes the `runtime: kubernetes` config, whose `pod` is the operator fixture's ([`fixtures/operator-route`](fixtures/operator-route/pod.yml)) with its ConfigMap renamed to the run's copy; the operator creates that ConfigMap from the fixture's `models.yml` and `overlay.yml`; the audit window opens and the interest sampler starts; the daemon boots, and the image probe passes (its first attempt's timeline is kept) |
 | `admitted-issue-cap` | the three roots: two admitted and one waiting, in rank order |
 | `spec-posted` | each admitted architect posts its spec and registers the gate; with `gates.design: off` the daemon moves the tree to planning |
@@ -1065,6 +1065,10 @@ kill -TERM $!    # judges the recorded pods and writes <verdict>, then exits 0
 On SIGTERM it reads `<pod-watch>` (one watch event a line) and writes one JSON line to `<verdict>`:
 `pods`, `secrets` and `values` are counts, `leaks` names each pod whose worker ran ready and one of
 whose containers carries a value `<pod>-boot` held, and `unseen` names each such pod whose `-boot`
-Secret the watch never saw. Each entry is `{uid, pod, secret}`. Its watch resumes from the last
-resourceVersion when the API server ends it, and lists again on 410 Gone. It exits 2 when it
-cannot start.
+Secret the watch never saw. Each entry is `{uid, pod, secret}`. `unreadable` counts the lines of
+`<pod-watch>` before its last that do not parse; the last may be one the watch is still writing, and
+is skipped. Each watch asks the server to end it within 300 s and resumes from the last
+resourceVersion; a watch that delivered nothing is resumed after a pause, and a line that does not
+parse ends that watch. On 410 Gone it lists the Secrets again, so a value a Secret held only between
+the last version seen and that list is not seen; every value a list or a watch event shows is. It
+exits 2 when it cannot start.
