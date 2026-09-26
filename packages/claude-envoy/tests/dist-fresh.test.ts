@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test"
 import { cp, mkdtemp, readdir, readFile, rm } from "node:fs/promises"
+import { builtinModules } from "node:module"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import ts from "typescript"
@@ -7,6 +8,14 @@ import { BUNDLE_ENTRYPOINTS, buildBundles } from "../scripts/build"
 
 const packageRoot = resolve(import.meta.dir, "..")
 const distDirectory = join(packageRoot, "dist")
+
+function isRuntimeBuiltin(specifier: string): boolean {
+  return (
+    specifier.startsWith("node:") ||
+    specifier.startsWith("bun:") ||
+    builtinModules.includes(specifier)
+  )
+}
 
 function findExternalDependencySpecifiers(source: string): string[] {
   const parsed = ts.createSourceFile(
@@ -37,7 +46,7 @@ function findExternalDependencySpecifiers(source: string): string[] {
         const argument = node.arguments[0]
         if (!argument || !ts.isStringLiteral(argument)) {
           specifiers.push(`<non-literal ${kind}>`)
-        } else if (argument.text.includes("node_modules/")) {
+        } else if (!isRuntimeBuiltin(argument.text)) {
           specifiers.push(argument.text)
         }
       }
@@ -45,7 +54,7 @@ function findExternalDependencySpecifiers(source: string): string[] {
       (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
       node.moduleSpecifier &&
       ts.isStringLiteral(node.moduleSpecifier) &&
-      node.moduleSpecifier.text.includes("node_modules/")
+      !isRuntimeBuiltin(node.moduleSpecifier.text)
     ) {
       specifiers.push(node.moduleSpecifier.text)
     }
@@ -80,7 +89,7 @@ test("the committed bundle starts without node_modules and demands ENVOY_NATS_UR
   }
 })
 
-test("the dependency guard ignores comments and detects runtime node_modules specifiers", () => {
+test("the dependency guard ignores comments and detects external module specifiers", () => {
   const comments = [
     '// require("/tmp/node_modules/comment.js")',
     '/* import.meta.require("/tmp/node_modules/comment.js") */',
@@ -142,7 +151,27 @@ test("the dependency guard rejects nonliteral module specifiers", () => {
   ])
 })
 
-test("the committed bundles contain no external dependency call specifiers", async () => {
+test("the dependency guard permits runtime builtin module specifiers", () => {
+  const source = 'require("fs"); import("node:fs"); import("bun:ffi")'
+  expect(findExternalDependencySpecifiers(source)).toEqual([])
+})
+
+test("the dependency guard rejects nonbuiltin literal module specifiers", () => {
+  const specifiers = [
+    {
+      source: 'import.meta.require("workspace:@legion/contracts")',
+      path: "workspace:@legion/contracts",
+    },
+    { source: 'require("zod")', path: "zod" },
+    { source: 'import("./local.js")', path: "./local.js" },
+    { source: 'export { value } from "/tmp/node_modules/entry.js"', path: "/tmp/node_modules/entry.js" },
+    { source: 'import("https://example.test/module.js")', path: "https://example.test/module.js" },
+  ]
+  const matches = findExternalDependencySpecifiers(specifiers.map(({ source }) => source).join("\n"))
+  for (const { path } of specifiers) expect(matches).toContain(path)
+})
+
+test("the committed bundles contain only runtime builtin module specifiers", async () => {
   for (const name of Object.keys(BUNDLE_ENTRYPOINTS)) {
     const bundle = await readFile(join(distDirectory, `${name}.js`), "utf8")
     expect(findExternalDependencySpecifiers(bundle)).toEqual([])
