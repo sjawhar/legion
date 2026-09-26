@@ -31,9 +31,9 @@ import (
 	"github.com/sjawhar/envoy/internal/webhook"
 )
 
-// listenerDeps holds NATS-dependent resources published atomically after
-// initialization completes. HTTP handlers read these via atomic.Pointer to
-// avoid data races during the startup window.
+// listenerDeps holds the NATS-dependent resources, all open. main builds the webhook and /v1
+// handlers over it once initialization completes; /healthz and the metrics gauges, which answer
+// during startup too, read it through an atomic.Pointer that stays nil until then.
 type listenerDeps struct {
 	client   *bus.Client
 	registry *store.Registry
@@ -64,30 +64,10 @@ type listenerCache struct {
 // listenerCaches lists the caches the listener keeps. It is the one place that names them, so
 // rewatch, self-health, /healthz and shutdown each reach every cache.
 func listenerCaches(registry *store.Registry, sessions *session.SessionRegistry, ciStore *cistore.Store) []listenerCache {
-	var caches []listenerCache
-	if registry != nil {
-		caches = append(caches, listenerCache{name: "interest", cache: registry})
-	}
-	if sessions != nil {
-		caches = append(caches, listenerCache{name: "session", cache: sessions})
-	}
-	if ciStore != nil {
-		caches = append(caches, listenerCache{name: "CI", cache: ciStore})
-	}
-	return caches
-}
-
-func newCIRecorder(deps *atomic.Pointer[listenerDeps]) webhook.CIRecorderFuncs {
-	return webhook.CIRecorderFuncs{
-		RecordFunc: func(observation contracts.CIObservation) error {
-			return deps.Load().ciStore.Record(observation)
-		},
-		RecordSuiteFunc: func(observation contracts.CIObservation) error {
-			return deps.Load().ciStore.RecordSuite(observation)
-		},
-		RecordHeadFunc: func(owner, repo, number, sha, updatedAt string) error {
-			return deps.Load().ciStore.RecordHead(owner, repo, number, sha, updatedAt)
-		},
+	return []listenerCache{
+		{name: "interest", cache: registry},
+		{name: "session", cache: sessions},
+		{name: "CI", cache: ciStore},
 	}
 }
 
@@ -165,17 +145,21 @@ func listenerDurableRefusal(consumer string, config nats.ConsumerConfig) error {
 		errListenerDurableRefused, consumer, strings.Join(settings, " and "), without)
 }
 
-// checkListenerDurable returns listenerDurableRefusal's answer for the machine's existing durable,
-// nil when it has none, and the lookup's error when NATS cannot say.
-func checkListenerDurable(client *bus.Client, consumer string) error {
+// listenerDurable reads the machine's durable. It returns a nil info when there is none,
+// listenerDurableRefusal's error when the listener's policy cannot use the one there is, and the
+// lookup's error when NATS cannot say.
+func listenerDurable(client *bus.Client, consumer string) (*nats.ConsumerInfo, error) {
 	info, err := client.JS().ConsumerInfo(bus.Stream, consumer)
 	if errors.Is(err, nats.ErrConsumerNotFound) {
-		return nil
+		return nil, nil
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return listenerDurableRefusal(consumer, info.Config)
+	if err := listenerDurableRefusal(consumer, info.Config); err != nil {
+		return nil, err
+	}
+	return info, nil
 }
 
 // startListenerSubscription preserves the durable consumer so restarts resume
@@ -189,9 +173,11 @@ func checkListenerDurable(client *bus.Client, consumer string) error {
 // consumers created before the threshold existed.
 func startListenerSubscription(client *bus.Client, consumer string, handler nats.MsgHandler) (*nats.Subscription, error) {
 	subjects := bus.StreamSubjects()
-	info, err := client.JS().ConsumerInfo(bus.Stream, consumer)
+	info, err := listenerDurable(client, consumer)
 	switch {
-	case errors.Is(err, nats.ErrConsumerNotFound):
+	case err != nil:
+		return nil, err
+	case info == nil:
 		// The deliver subject is a random inbox, not a derivable name: on a
 		// shared NATS account a predictable subject would let any client
 		// hold interest on it — shadow-reading deliveries and making the
@@ -204,14 +190,10 @@ func startListenerSubscription(client *bus.Client, consumer string, handler nats
 		if _, err := client.JS().AddConsumer(bus.Stream, &config); err != nil {
 			return nil, err
 		}
-	case err != nil:
-		return nil, err
 	default:
-		if err := listenerDurableRefusal(consumer, info.Config); err != nil {
-			return nil, err
-		}
 		// Only a field the policy writes can differ: the copy shares every other one, the
-		// server-set metadata included, and the refusal above has already fixed the ack policy.
+		// server-set metadata included, and listenerDurable has already refused any ack policy
+		// but explicit.
 		corrected := info.Config
 		applyListenerConsumerPolicy(&corrected, subjects)
 		if !reflect.DeepEqual(corrected, info.Config) {
@@ -229,9 +211,6 @@ func startListenerSubscription(client *bus.Client, consumer string, handler nats
 }
 
 func isSessionLive(sessions *session.SessionRegistry, sessionID string) bool {
-	if sessions == nil {
-		return false
-	}
 	_, err := sessions.Get(sessionID)
 	return err == nil
 }
@@ -253,7 +232,7 @@ func rewatchListenerKVWatchers(conn *nats.Conn, caches []listenerCache) error {
 // from transient JetStream deadlines. Rebuild only while the NATS client is
 // connected; a disconnected client owns its own infinite reconnect loop.
 func isUnrecoverableSelfHealthFailure(err error, client *bus.Client, caches []listenerCache) bool {
-	if err == nil || client == nil || !client.Connected() {
+	if err == nil || !client.Connected() {
 		return false
 	}
 	if errors.Is(err, nats.ErrConsumerNotFound) || errors.Is(err, nats.ErrConnectionClosed) {
@@ -274,7 +253,7 @@ func rebuildListenerDependencies(
 	consumer string,
 	handler nats.MsgHandler,
 ) error {
-	if client == nil || !client.Connected() {
+	if !client.Connected() {
 		return nats.ErrConnectionClosed
 	}
 	err := rewatchListenerKVWatchers(client.Conn, caches)
@@ -358,7 +337,7 @@ func runSelfHealthMonitor(
 func checkSelfHealth(caches []listenerCache, durable func() error) error {
 	for _, c := range caches {
 		if err := c.cache.Ping(); err != nil {
-			return fmt.Errorf("%s kv: %w", strings.ToLower(c.name), err)
+			return fmt.Errorf("%s kv: %w", c.name, err)
 		}
 	}
 	if durable != nil {
@@ -371,11 +350,8 @@ func checkSelfHealth(caches []listenerCache, durable func() error) error {
 
 // sessionHealthFields returns observability fields about the session cache for
 // /healthz. Kept separate from the handler so it stays cheap (no Keys()/List(),
-// just in-memory reads) and unit-testable. Returns nil when sessions is nil.
+// just in-memory reads) and unit-testable.
 func sessionHealthFields(sessions *session.SessionRegistry) map[string]interface{} {
-	if sessions == nil {
-		return nil
-	}
 	watchError := ""
 	if err := sessions.WatchErr(); err != nil {
 		watchError = err.Error()
@@ -453,16 +429,64 @@ func writeDependencyHealth(w http.ResponseWriter, dependency string, err error, 
 	})
 }
 
-// readinessGate returns 503 until ready returns true, providing a single
-// gate for all /v1/* endpoints during NATS initialization.
-func readinessGate(ready func() bool, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !ready() {
-			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
+// webhookRoute is one configured webhook path and the handler it serves over the listener's
+// dependencies.
+type webhookRoute struct {
+	path    string
+	handler func(*listenerDeps) http.Handler
+}
+
+// webhookRoutes lists the webhook routes the configuration enables. main registers the paths
+// before NATS is up, so they answer 503 while it starts, and builds the handlers once it is.
+func webhookRoutes(cfg *webhook.WebhookConfig) []webhookRoute {
+	var routes []webhookRoute
+	if github := cfg.GitHub; github != nil {
+		routes = append(routes, webhookRoute{"/webhook/github", func(d *listenerDeps) http.Handler {
+			return webhook.GitHubHandler(github.Secret, github.MentionTrigger, github.ReviewerAppID, d.client, d.ciStore)
+		}})
+	}
+	if slack := cfg.Slack; slack != nil {
+		routes = append(routes, webhookRoute{"/webhook/slack", func(d *listenerDeps) http.Handler {
+			return webhook.SlackHandler(slack.Secret, d.client)
+		}})
+	}
+	if ghostWispr := cfg.GhostWispr; ghostWispr != nil {
+		routes = append(routes, webhookRoute{"/webhook/ghostwispr", func(d *listenerDeps) http.Handler {
+			return webhook.GhostWisprHandler(ghostWispr.Secret, d.client)
+		}})
+	}
+	return routes
+}
+
+// startingGate answers 503 "service starting" until open hands it the mux to serve. main
+// builds that mux only once every store is open, so a request never reaches a handler over a
+// dependency that is not there.
+type startingGate struct {
+	mux atomic.Pointer[http.ServeMux]
+}
+
+func (g *startingGate) open(mux *http.ServeMux) { g.mux.Store(mux) }
+
+func (g *startingGate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	mux := g.mux.Load()
+	if mux == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "service starting")
+		return
+	}
+	mux.ServeHTTP(w, r)
+}
+
+// openListener builds the webhook and /v1 routes over the complete dependencies, opens the gate
+// onto them, and only then publishes the dependencies. Publishing is what turns /healthz healthy,
+// so a probe that reads healthy always finds every route open.
+func openListener(gate *startingGate, hooks []webhookRoute, ready *listenerDeps, machineID string, logger *logging.Logger, publish func(*listenerDeps)) {
+	routes := http.NewServeMux()
+	for _, hook := range hooks {
+		routes.Handle(hook.path, hook.handler(ready))
+	}
+	registerV1Routes(routes, ready, machineID, logger)
+	gate.open(routes)
+	publish(ready)
 }
 
 func main() {
@@ -512,7 +536,7 @@ func main() {
 	deliveryDuration := met.NewHistogram("envoy_delivery_duration_seconds", "Duration of message delivery attempts", metrics.DefaultBuckets)
 	met.NewGaugeFunc("envoy_active_sessions", "Number of active sessions", func() int64 {
 		d := deps.Load()
-		if d == nil || d.sessions == nil {
+		if d == nil {
 			return 0
 		}
 		entries, err := d.sessions.List()
@@ -523,7 +547,7 @@ func main() {
 	})
 	met.NewGaugeFunc("envoy_active_interests", "Number of active interest subscriptions", func() int64 {
 		d := deps.Load()
-		if d == nil || d.registry == nil {
+		if d == nil {
 			return 0
 		}
 		return int64(len(d.registry.List()))
@@ -540,39 +564,16 @@ func main() {
 
 	// GaugeFunc for consumer pending — queries NATS at scrape time
 
-	// Webhook routes — on public mux, gated by readiness.
-	// Publisher delegates to deps.client behind readinessGate.
-	webhookPublisher := webhook.PublisherFunc(func(item contracts.Envelope) error {
-		return deps.Load().client.Publish(item)
-	})
-	// CI recorder folds check_run events into cistore behind the same readiness
-	// gate (deps is non-nil once init completes, so ciStore is set).
-	ciRecorder := newCIRecorder(&deps)
-	if webhookCfg.GitHub != nil {
-		mux.Handle("/webhook/github", readinessGate(
-			func() bool { return deps.Load() != nil },
-			webhook.GitHubHandler(webhookCfg.GitHub.Secret, webhookCfg.GitHub.MentionTrigger, webhookCfg.GitHub.ReviewerAppID, webhookPublisher, ciRecorder),
-		))
+	// The webhook and /v1 routes answer 503 "service starting" until NATS and every store are open;
+	// then the gate opens onto handlers built over the complete dependencies (Phase 6). The webhook
+	// paths reach it bare, /v1 through apiAuth.
+	var gate startingGate
+	hooks := webhookRoutes(webhookCfg)
+	for _, hook := range hooks {
+		mux.Handle(hook.path, &gate)
 	}
-	if webhookCfg.Slack != nil {
-		mux.Handle("/webhook/slack", readinessGate(
-			func() bool { return deps.Load() != nil },
-			webhook.SlackHandler(webhookCfg.Slack.Secret, webhookPublisher),
-		))
-	}
-	if webhookCfg.GhostWispr != nil {
-		mux.Handle("/webhook/ghostwispr", readinessGate(
-			func() bool { return deps.Load() != nil },
-			webhook.GhostWisprHandler(webhookCfg.GhostWispr.Secret, webhookPublisher),
-		))
-	}
-
-	// /v1/* routes on a sub-mux, gated by a single readiness middleware.
-	v1 := http.NewServeMux()
-	registerV1Routes(v1, &deps, cfg.MachineID, logger)
-
 	// Serve /v1/* on the listener port for local plugin registration.
-	v1Handler := apiAuth(apiToken, apiVerifier, logger, readinessGate(func() bool { return deps.Load() != nil }, v1))
+	v1Handler := apiAuth(apiToken, apiVerifier, logger, &gate)
 	mux.Handle("/v1", v1Handler)
 	mux.Handle("/v1/", v1Handler)
 
@@ -608,7 +609,7 @@ func main() {
 	// The durable is checked here, before the cache warm-ups below (up to 30 s each), so a refused
 	// one ends the start within the NATS connect. A lookup that fails is left to the subscribe
 	// loop, which retries it.
-	if err := checkListenerDurable(client, consumer); errors.Is(err, errListenerDurableRefused) {
+	if _, err := listenerDurable(client, consumer); errors.Is(err, errListenerDurableRefused) {
 		exitRefused(err)
 	} else if err != nil {
 		logger.Warn("durable consumer check failed; the subscribe retries it", slog.String("consumer", consumer), slog.String("error", err.Error()))
@@ -766,8 +767,8 @@ func main() {
 	}
 	_ = roleSub
 
-	// Phase 6: Publish initialized state — readiness gate opens for /v1/*.
-	deps.Store(&listenerDeps{
+	// Phase 6: Open the webhook and /v1 routes onto the initialized state, then publish it.
+	ready := &listenerDeps{
 		client:     client,
 		registry:   registry,
 		sessions:   sessions,
@@ -775,7 +776,8 @@ func main() {
 		caches:     caches,
 		consumer:   consumer,
 		streamName: bus.Stream,
-	})
+	}
+	openListener(&gate, hooks, ready, cfg.MachineID, logger, deps.Store)
 	logger.Info("envoy-listener ready (NATS connected)")
 
 	// Phase 6b: Start interest reaper for stale KV cleanup.

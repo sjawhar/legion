@@ -94,6 +94,11 @@ type Runtime struct {
 	observer *observer
 	// trees serializes the launches of one tree's pods (relaunch.go, awaitTreeInitialized).
 	trees map[string]chan struct{}
+	// launchedMu guards launched: the Sandbox names of the claims this runtime has launched and not
+	// released, which the orphan sweep keeps whether or not its known set names them. The sweep
+	// holds launchedMu from its check through its delete (deleteOrphan).
+	launchedMu sync.Mutex
+	launched   map[string]bool
 }
 
 // New builds the runtime from opts, starts its Sandbox and pod informers for ctx's lifetime, and
@@ -177,6 +182,7 @@ func configure(opts Options) (*Runtime, error) {
 		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent,
 		tokens: opts.Tokens, conns: opts.Conns, now: opts.Now, log: opts.Log,
 		changed: make(chan struct{}), watch: map[claim.Token]runtime.Locator{}, trees: map[string]chan struct{}{},
+		launched: map[string]bool{},
 	}
 	if len(r.agent) == 0 {
 		r.agent = []string{defaultAgent}
@@ -206,21 +212,11 @@ func (r *Runtime) start(ctx context.Context, dyn dynamic.Interface, kube kuberne
 	r.pods = r.informer(&r.podFeed, kube, &corev1.Pod{},
 		func(ctx context.Context, o metav1.ListOptions) (k8sruntime.Object, error) { return pods.List(ctx, o) },
 		func(ctx context.Context, o metav1.ListOptions) (watch.Interface, error) { return pods.Watch(ctx, o) })
-	failed := make(chan error, 1)
 	for _, informer := range []cache.SharedIndexInformer{r.sandboxes, r.pods} {
 		if _, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 			AddFunc:    func(obj any) { r.notify(obj) },
 			UpdateFunc: func(_, obj any) { r.notify(obj) },
 			DeleteFunc: func(obj any) { r.notify(obj) },
-		}); err != nil {
-			return fmt.Errorf("sandbox runtime: %w", err)
-		}
-		if err := informer.SetWatchErrorHandler(func(_ *cache.Reflector, err error) {
-			r.log.Warn("sandbox runtime: list or watch failed", "err", err)
-			select {
-			case failed <- err:
-			default:
-			}
 		}); err != nil {
 			return fmt.Errorf("sandbox runtime: %w", err)
 		}
@@ -230,16 +226,22 @@ func (r *Runtime) start(ctx context.Context, dyn dynamic.Interface, kube kuberne
 	go r.pods.RunWithContext(running)
 	tick := time.NewTicker(50 * time.Millisecond)
 	defer tick.Stop()
+	// Whether the stores are being fed is the feeds' answer, not client-go's watch-error handler:
+	// the reflector retries a refused list or watch itself and never calls that handler, so a boot
+	// that waited on it sat until its own deadline with two stores nothing was filling. Each list
+	// and watch records its outcome in its feed, and a feed that is failing here refuses the boot
+	// naming the request that failed.
 	for !r.synced() {
 		select {
 		case <-ctx.Done():
 			stop()
 			return fmt.Errorf("sandbox runtime: the informers did not sync: %w", ctx.Err())
-		case err := <-failed:
-			stop()
-			return fmt.Errorf("sandbox runtime: listing the namespace %s's Sandboxes and pods failed before the stores synced: %w",
-				r.namespace, err)
 		case <-tick.C:
+			if err := errors.Join(r.sandboxFeed.check(), r.podFeed.check()); err != nil {
+				stop()
+				return fmt.Errorf("sandbox runtime: listing the namespace %s's Sandboxes and pods failed before the stores synced: %w",
+					r.namespace, err)
+			}
 		}
 	}
 	context.AfterFunc(ctx, stop)
@@ -551,6 +553,9 @@ func (r *Runtime) Release(ctx context.Context, k runtime.Known) error {
 		}
 		r.shutdown(ctx, *k.Locator)
 	}
+	// From here the claim is no longer this runtime's to keep: a Sandbox a failed delete leaves is
+	// the orphan sweep's once the daemon has retired the claim.
+	r.disown(k.Claim)
 	name := SandboxName(k.Claim)
 	deleting, cancel := call(ctx)
 	defer cancel()
@@ -591,10 +596,13 @@ func (r *Runtime) AdoptWorkingCopy(ctx context.Context, loc runtime.Locator, id 
 // grace — what a crash between creating a Sandbox and persisting its claim leaves behind, or what
 // a claim retired without its release leaves. known is every claim the daemon has not retired, a
 // suspended one included, since its Sandbox holds its session and, for a root, the tree volume.
-// The image probe's Sandbox (labelled legion.dev/probe) is no claim's and never an orphan: the
-// probe deletes it, and its shutdown time has the controller delete it otherwise (probe.go).
-// The located ones join the watch, unless it already holds a newer incarnation of the claim, and
-// are evaluated at once. Nothing here lists Secrets: each goes with its Sandbox.
+// The daemon reads known before it calls this, and a retry after boot sweeps at a grace of 0
+// while claims launch, so a Sandbox this runtime launched and has not released is never an
+// orphan either, known or not: a claim launched after that read is missing from known. The image
+// probe's Sandbox (labelled legion.dev/probe) is no claim's and never an orphan: the probe deletes
+// it, and its shutdown time has the controller delete it otherwise (probe.go). The located ones
+// join the watch, unless it already holds a newer incarnation of the claim, and are evaluated at
+// once. Nothing here lists Secrets: each goes with its Sandbox.
 func (r *Runtime) ReconcileOrphans(ctx context.Context, known []runtime.Known, grace time.Duration) error {
 	var errs []error
 	names := map[string]bool{}
@@ -621,17 +629,48 @@ func (r *Runtime) ReconcileOrphans(ctx context.Context, known []runtime.Known, g
 		if age := r.now().Sub(u.GetCreationTimestamp().Time); age < grace {
 			continue
 		}
-		deleting, cancel := call(ctx)
-		uid := u.GetUID()
-		err := r.sandboxClient().Delete(deleting, u.GetName(), metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}})
-		cancel()
-		switch {
-		case err == nil:
-			r.log.Info("sandbox runtime: deleted an orphaned sandbox", "sandbox", u.GetName(), "uid", uid)
-		case apierrors.IsNotFound(err) || apierrors.IsConflict(err):
-		default:
-			errs = append(errs, fmt.Errorf("reconcile orphans: delete sandbox %s: %w", u.GetName(), err))
+		if err := r.deleteOrphan(ctx, u); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// own records that this runtime is launching the claim's Sandbox, before the Sandbox can exist,
+// so the orphan sweep keeps it until the claim is released.
+func (r *Runtime) own(token claim.Token) {
+	r.launchedMu.Lock()
+	defer r.launchedMu.Unlock()
+	r.launched[SandboxName(token)] = true
+}
+
+// disown hands the claim's Sandbox back to the orphan sweep's known-claims rule.
+func (r *Runtime) disown(token claim.Token) {
+	r.launchedMu.Lock()
+	defer r.launchedMu.Unlock()
+	delete(r.launched, SandboxName(token))
+}
+
+// deleteOrphan deletes u, the Sandbox as the store held it, unless this runtime launched its
+// claim and has not released it. launchedMu is held from the check through the delete, so a
+// launch that begins meanwhile waits for the delete and then finds the Sandbox deleted, never
+// losing the one it took up.
+func (r *Runtime) deleteOrphan(ctx context.Context, u *unstructured.Unstructured) error {
+	r.launchedMu.Lock()
+	defer r.launchedMu.Unlock()
+	if r.launched[u.GetName()] {
+		return nil
+	}
+	deleting, cancel := call(ctx)
+	defer cancel()
+	uid := u.GetUID()
+	err := r.sandboxClient().Delete(deleting, u.GetName(), metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}})
+	switch {
+	case err == nil:
+		r.log.Info("sandbox runtime: deleted an orphaned sandbox", "sandbox", u.GetName(), "uid", uid)
+	case apierrors.IsNotFound(err) || apierrors.IsConflict(err):
+	default:
+		return fmt.Errorf("reconcile orphans: delete sandbox %s: %w", u.GetName(), err)
+	}
+	return nil
 }

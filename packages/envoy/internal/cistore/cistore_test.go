@@ -14,6 +14,7 @@ import (
 
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/kvwatch"
 	"github.com/sjawhar/envoy/internal/testnats"
 	"github.com/testcontainers/testcontainers-go"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
@@ -27,7 +28,7 @@ var (
 	sharedNATSContainer *tcnats.NATSContainer
 )
 
-func sharedTestNATSURI(t *testing.T) string {
+func sharedTestNATSURI(t testing.TB) string {
 	t.Helper()
 	sharedNATSOnce.Do(func() {
 		ctr, err := tcnats.Run(context.Background(), testnats.Image)
@@ -76,13 +77,13 @@ func testBucket(t testing.TB) string {
 }
 
 // connectNATS creates an isolated connection to the package's shared NATS server.
-func connectNATS(t *testing.T) (*natsgo.Conn, func()) {
+func connectNATS(t testing.TB) (*natsgo.Conn, func()) {
 	t.Helper()
 	conn := testnats.Connect(t, sharedTestNATSURI(t))
 	return conn, conn.Close
 }
 
-func openStore(t *testing.T, conn *natsgo.Conn) *Store {
+func openStore(t testing.TB, conn *natsgo.Conn) *Store {
 	t.Helper()
 	name := testBucket(t)
 	st, err := Open(conn, WithReplicas(1), WithTTL(time.Hour), func(o *openOpts) { o.bucket = name })
@@ -96,22 +97,39 @@ func openStore(t *testing.T, conn *natsgo.Conn) *Store {
 	}
 	return st
 }
+
+// within returns f's error, or an error when f has not returned within 10 s: a record that a
+// broken hand-over leaves waiting on its record's writer fails its test instead of hanging the
+// package until go test's timeout.
+func within(f func() error) error {
+	done := make(chan error, 1)
+	go func() { done <- f() }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(10 * time.Second):
+		return errors.New("did not return within 10 s")
+	}
+}
+
 func recordCheck(s *Store, owner, repo, number, sha, checkName, checkRunID, url, status, conclusion, observedAt string) error {
 	id, err := strconv.ParseUint(checkRunID, 10, 64)
 	if err != nil {
 		return err
 	}
-	return s.Record(contracts.CIObservation{
-		Owner:      owner,
-		Repo:       repo,
-		Number:     number,
-		SHA:        sha,
-		CheckName:  checkName,
-		CheckRunID: id,
-		URL:        url,
-		Status:     status,
-		Conclusion: conclusion,
-		ObservedAt: observedAt,
+	return within(func() error {
+		return s.Record(contracts.CIObservation{
+			Owner:      owner,
+			Repo:       repo,
+			Number:     number,
+			SHA:        sha,
+			CheckName:  checkName,
+			CheckRunID: id,
+			URL:        url,
+			Status:     status,
+			Conclusion: conclusion,
+			ObservedAt: observedAt,
+		})
 	})
 }
 
@@ -148,16 +166,18 @@ func maxCheckRunID(runs []CheckRunRef) uint64 {
 }
 
 func recordSuite(s *Store, owner, repo, number, sha, suiteID, status, conclusion, appID, observedAt string) error {
-	return s.RecordSuite(contracts.CIObservation{
-		Owner:      owner,
-		Repo:       repo,
-		Number:     number,
-		SHA:        sha,
-		SuiteID:    suiteID,
-		AppID:      appID,
-		Status:     status,
-		Conclusion: conclusion,
-		ObservedAt: observedAt,
+	return within(func() error {
+		return s.RecordSuite(contracts.CIObservation{
+			Owner:      owner,
+			Repo:       repo,
+			Number:     number,
+			SHA:        sha,
+			SuiteID:    suiteID,
+			AppID:      appID,
+			Status:     status,
+			Conclusion: conclusion,
+			ObservedAt: observedAt,
+		})
 	})
 }
 
@@ -165,7 +185,7 @@ func recordSuite(s *Store, owner, repo, number, sha, suiteID, status, conclusion
 // cache) so assertions are deterministic right after a write.
 func getState(t *testing.T, s *Store, owner, repo, number, sha string) State {
 	t.Helper()
-	entry, err := s.kv.Get(Key(owner, repo, number, sha))
+	entry, err := s.watcher.KV().Get(Key(owner, repo, number, sha))
 	if err != nil {
 		t.Fatalf("kv get: %v", err)
 	}
@@ -174,6 +194,20 @@ func getState(t *testing.T, s *Store, owner, repo, number, sha string) State {
 		t.Fatalf("decode state: %v", err)
 	}
 	return st
+}
+
+// useKV rebuilds the store's watcher over kv, a wrapper of its bucket handle, so the store writes
+// through kv from here on. The replaced watcher is stopped first.
+func useKV(t testing.TB, s *Store, kv natsgo.KeyValue) {
+	t.Helper()
+	s.watcher.Stop()
+	s.watcher = kvwatch.New("cistore", kv, s.applyWatched, s.resetCache)
+	s.watcher.Start()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.WaitForCacheReady(ctx); err != nil {
+		t.Fatalf("wait for the rebuilt watcher: %v", err)
+	}
 }
 
 type interleavingKV struct {
@@ -520,7 +554,7 @@ func TestRecordHeadOrdersTimestampedUpdatesAndAcceptsMissingTimestamp(t *testing
 	)
 	readHead := func(t *testing.T) headRecord {
 		t.Helper()
-		entry, err := s.kv.Get(headKey(owner, repo, pr))
+		entry, err := s.watcher.KV().Get(headKey(owner, repo, pr))
 		if err != nil {
 			t.Fatalf("get durable head: %v", err)
 		}
@@ -628,7 +662,7 @@ func TestWatchEvictsMalformedState(t *testing.T) {
 		t.Fatalf("record valid state: %v", err)
 	}
 	waitCacheChecks(t, s, owner, repo, number, sha, 1)
-	if _, err := s.kv.Put(Key(owner, repo, number, sha), []byte("{")); err != nil {
+	if _, err := s.watcher.KV().Put(Key(owner, repo, number, sha), []byte("{")); err != nil {
 		t.Fatalf("put malformed state: %v", err)
 	}
 
@@ -754,7 +788,7 @@ func TestRecordHeadEqualTimestampUsesLatestObservation(t *testing.T) {
 	if err := s.RecordHead(owner, repo, pr, headB, when); err != nil {
 		t.Fatalf("record later same-time head: %v", err)
 	}
-	entry, err := s.kv.Get(headKey(owner, repo, pr))
+	entry, err := s.watcher.KV().Get(headKey(owner, repo, pr))
 	if err != nil {
 		t.Fatalf("get durable head: %v", err)
 	}
@@ -904,7 +938,7 @@ func TestClaimSettlementStampsClaimAtCASTime(t *testing.T) {
 		t.Fatalf("record terminal check: %v", err)
 	}
 	key := Key(owner, repo, pr, sha)
-	entry, err := s.kv.Get(key)
+	entry, err := s.watcher.KV().Get(key)
 	if err != nil {
 		t.Fatalf("get state: %v", err)
 	}
@@ -917,7 +951,7 @@ func TestClaimSettlementStampsClaimAtCASTime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encode old state: %v", err)
 	}
-	if _, err := s.kv.Update(key, raw, entry.Revision()); err != nil {
+	if _, err := s.watcher.KV().Update(key, raw, entry.Revision()); err != nil {
 		t.Fatalf("write old state: %v", err)
 	}
 
@@ -1011,9 +1045,9 @@ func TestMarkSettledCacheWriteDoesNotOverwriteNewerWatcherRevision(t *testing.T)
 		t.Fatalf("claim settlement = (%+v, %t, %v), want claimed state", claimedState, claimed, err)
 	}
 
-	originalKV := s.kv
+	originalKV := s.watcher.KV()
 	var watcherRevision uint64
-	s.kv = &interleavingKV{
+	useKV(t, s, &interleavingKV{
 		KeyValue: originalKV,
 		afterUpdate: func(key string, _ []byte, _ uint64) {
 			entry, err := originalKV.Get(key)
@@ -1038,8 +1072,7 @@ func TestMarkSettledCacheWriteDoesNotOverwriteNewerWatcherRevision(t *testing.T)
 			s.cacheStateLocked(key, newer, watcherRevision)
 			s.mu.Unlock()
 		},
-	}
-	t.Cleanup(func() { s.kv = originalKV })
+	})
 
 	marked, err := s.MarkSettled(Key(owner, repo, pr, sha), claimedState.Generation)
 	if err != nil {
@@ -1075,7 +1108,7 @@ func TestWatchEvictsMalformedHead(t *testing.T) {
 		t.Fatalf("record head: %v", err)
 	}
 	waitHead(t, s, owner, repo, pr, sha)
-	if _, err := s.kv.Put(headKey(owner, repo, pr), []byte("{")); err != nil {
+	if _, err := s.watcher.KV().Put(headKey(owner, repo, pr), []byte("{")); err != nil {
 		t.Fatalf("put malformed head: %v", err)
 	}
 	deadline := time.After(5 * time.Second)

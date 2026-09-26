@@ -52,7 +52,7 @@ COPY packages/envoy-client/package.json packages/envoy-client/package.json
 COPY packages/pi-envoy/package.json packages/pi-envoy/package.json
 COPY packages/daemon/package.json packages/daemon/package.json
 COPY packages/envoy-plugin/package.json packages/envoy-plugin/package.json
-COPY packages/claude-envoy-bridge/package.json packages/claude-envoy-bridge/package.json
+COPY packages/claude-envoy/package.json packages/claude-envoy/package.json
 COPY packages/dispatch/package.json packages/dispatch/package.json
 COPY packages/workspace/package.json packages/workspace/package.json
 RUN bun install --frozen-lockfile
@@ -178,10 +178,7 @@ WORKDIR /home/legion
 #    deployment's sessions on files. The order is load-bearing: `defaultRunner` (state/fetch.ts) kills any
 #    single omp invocation after 30 s, so a natives download inside the first probe would read as a
 #    definitive "does not expose pi.agents" failure. Step 3 must have already fetched them.
-# Any failure fails the build: a broken image never publishes. The in-cluster TypeScript daemon
-# (deploy/kubernetes/daemon, runtime: kubernetes) re-runs the same command with
-# `--daemon-api-version <N>` in a one-shot pod of this image before it serves — the image's own CLI is
-# the only thing that can read the image plugin's daemon API contract (worker-image-probe.ts).
+# Any failure fails the build: a broken image never publishes.
 RUN set -eu; \
     bun --version; omp --version; jj --version; gh --version; git --version; \
     scratch="$(mktemp -d)"; \
@@ -218,8 +215,7 @@ RUN set -eu; \
 # The Kubernetes runtime (packages/daemon/src/daemon/runtime-kubernetes.ts) sets every container's
 # command explicitly: the init container runs `legion workspace-init …` and the main container runs
 # `legion worker-shim --connect tcp://<daemon>:<worker_stream_port> --boot-token-file … --provider-env-dir
-# /var/run/legion/providers -- omp --mode rpc …` (k8s-manifests.ts); the daemon Deployment runs
-# `legion start <project> --config /etc/legion/legion.yaml` from this same image. This ENTRYPOINT
-# therefore only makes `docker run <image> probe-image` and `docker run <image> --help` work; the Go
+# /var/run/legion/providers -- omp --mode rpc …` (k8s-manifests.ts). This ENTRYPOINT therefore only
+# makes `docker run <image> probe-image` and `docker run <image> --help` work; the Go
 # `legion` runs with `--entrypoint /opt/legion/go/bin/legion`.
 ENTRYPOINT ["legion"]

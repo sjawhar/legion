@@ -124,8 +124,14 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 		claimView := claimViews[current.Token]
 		view, known := projected.Issues[current.Issue]
 		if !known {
+			// A claim on an issue the workflow does not record — an operator's spawn, which is
+			// what Stage 2 makes and what the merge-queue holder is — is listed for the claim's
+			// sake, and says so: an empty phase and status refused the whole document at every
+			// strict client, over a row that is a legitimate state.
 			view = api.Issue{
 				Key:     current.Issue,
+				Phase:   api.Unrecorded,
+				Status:  string(api.Unrecorded),
 				Workers: map[claim.Role]api.PhaseView{},
 			}
 		}

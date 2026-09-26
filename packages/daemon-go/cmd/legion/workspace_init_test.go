@@ -44,19 +44,6 @@ fi
 exec "$WINIT_REAL_JJ" ${pin:+"$pin"} "$@"
 `
 
-// fakeGit is the git first on PATH. Its bare clone of github.com/acme/widgets — the fetch's —
-// clones the local bare remote instead, whose file transport joins the https the runner allows,
-// after appending the one-shot credential it was handed, the token file's path and what it held,
-// to WINIT_CREDENTIAL_LOG. Every other invocation is the real git's.
-const fakeGit = `#!/bin/sh
-if [ "$1 $2 $3 $4" = "clone --bare --quiet https://github.com/acme/widgets" ]; then
-	printf '%s %s\n' "$LEGION_PROVISIONING_TOKEN_FILE" "$(cat "$LEGION_PROVISIONING_TOKEN_FILE")" >> "$WINIT_CREDENTIAL_LOG"
-	shift 4
-	GIT_ALLOW_PROTOCOL="$GIT_ALLOW_PROTOCOL:file" exec "$WINIT_REAL_GIT" clone --bare --quiet "$WINIT_REMOTE" "$@"
-fi
-exec "$WINIT_REAL_GIT" "$@"
-`
-
 // treeVolume is one tree volume and what a pod's two init containers run against it: a PATH whose
 // git clones a local bare remote in place of github.com/acme/widgets, the provisioning token file
 // `fetch` is pointed at and `provision` never is, the pod's feed, a TMPDIR standing in for the
@@ -259,9 +246,10 @@ func (v *treeVolume) lockIsFree(t *testing.T) bool {
 }
 
 // Every refusal `provision` makes happens before anything touches the volume or runs a tool
-// (workspace-init.ts:148-163): an init container refused on its input leaves the tree volume as it
-// found it, and holds no lock another pod would wait on. It refuses to run pointed at the
-// provisioning token, which `fetch` alone holds; and the command refuses no subcommand, or another.
+// (cmdWorkspaceInit's flag and token checks, workspace-init.ts): an init container refused on its
+// input leaves the tree volume as it found it, and holds no lock another pod would wait on. It
+// refuses to run pointed at the provisioning token, which `fetch` alone holds; and the command
+// refuses no subcommand, or another.
 func TestWorkspaceInitRefusesBeforeTouchingTheVolume(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -306,7 +294,7 @@ func TestWorkspaceInitRefusesBeforeTouchingTheVolume(t *testing.T) {
 				return []string{"provision", "--issue", "LEGION-42", "--repo", "acme", "--root", v.root, "--credential-helper", "x", "--feed", v.feed}
 			},
 			code: 1,
-			says: func(*treeVolume) string { return `--repo must be <owner>/<name> (got "acme")` },
+			says: func(*treeVolume) string { return `--repo must be "owner/name" (got "acme")` },
 		},
 		{
 			name: "a --repo with a .. segment",
@@ -314,7 +302,25 @@ func TestWorkspaceInitRefusesBeforeTouchingTheVolume(t *testing.T) {
 				return []string{"provision", "--issue", "LEGION-42", "--repo", "../x", "--root", v.root, "--credential-helper", "x", "--feed", v.feed}
 			},
 			code: 1,
-			says: func(*treeVolume) string { return `workspace repository "../x" has a ".." segment` },
+			says: func(*treeVolume) string { return `--repo "../x" has a ".." segment` },
+		},
+		{
+			name: "a --repo holding whitespace",
+			args: func(v *treeVolume) []string {
+				return []string{"provision", "--issue", "LEGION-42", "--repo", "acme/wid gets", "--root", v.root, "--credential-helper", "x", "--feed", v.feed}
+			},
+			code: 1,
+			says: func(*treeVolume) string { return `--repo "acme/wid gets" holds whitespace` },
+		},
+		{
+			// --repo is read first: every other input here is wrong too.
+			name: "a bad --repo, before every other input",
+			args: func(*treeVolume) []string {
+				return []string{"provision", "--issue", "nope", "--repo", "../..", "--root", "legion-root", "--feed", "feed"}
+			},
+			env:  func(t *testing.T, v *treeVolume) { t.Setenv("LEGION_PROVISION_TOKEN_FILE", v.token) },
+			code: 1,
+			says: func(*treeVolume) string { return `--repo "../.." has a ".." segment` },
 		},
 		{
 			name: "no --credential-helper",
@@ -419,143 +425,6 @@ func TestWorkspaceInitRefusesBeforeTouchingTheVolume(t *testing.T) {
 	}
 }
 
-// Every refusal `fetch` makes happens before it runs git or writes anything: the feed is not
-// created, and no one-shot credential is left in its TMPDIR.
-func TestWorkspaceInitFetchRefusesBeforeFetching(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		args func(v *treeVolume) []string
-		env  func(t *testing.T, v *treeVolume)
-		code int
-		says func(v *treeVolume) string
-	}{
-		{
-			name: "a --repo that is not owner/name",
-			args: func(v *treeVolume) []string { return []string{"fetch", "--repo", "acme", "--feed", v.feed} },
-			code: 1,
-			says: func(*treeVolume) string { return `--repo must be <owner>/<name> (got "acme")` },
-		},
-		{
-			name: "a --repo with a .. segment",
-			args: func(v *treeVolume) []string { return []string{"fetch", "--repo", "../x", "--feed", v.feed} },
-			code: 1,
-			says: func(*treeVolume) string { return `workspace repository "../x" has a ".." segment` },
-		},
-		{
-			name: "a relative --feed",
-			args: func(*treeVolume) []string { return []string{"fetch", "--repo", winitRepo, "--feed", "feed"} },
-			code: 1,
-			says: func(*treeVolume) string { return `--feed must be an absolute path (got "feed")` },
-		},
-		{
-			name: "LEGION_PROVISION_TOKEN_FILE unset",
-			env:  func(t *testing.T, _ *treeVolume) { unsetenv(t, "LEGION_PROVISION_TOKEN_FILE") },
-			code: 1,
-			says: func(*treeVolume) string { return "LEGION_PROVISION_TOKEN_FILE is not set" },
-		},
-		{
-			name: "a provisioning token file that is absent",
-			env: func(t *testing.T, v *treeVolume) {
-				t.Setenv("LEGION_PROVISION_TOKEN_FILE", v.token+".absent")
-			},
-			code: 1,
-			says: func(v *treeVolume) string {
-				return "LEGION_PROVISION_TOKEN_FILE names " + v.token + ".absent, which could not be read"
-			},
-		},
-		{
-			name: "a provisioning token file that is blank",
-			env: func(t *testing.T, v *treeVolume) {
-				if err := os.WriteFile(v.token, []byte(" \n"), 0o600); err != nil {
-					t.Fatal(err)
-				}
-			},
-			code: 1,
-			says: func(v *treeVolume) string { return "LEGION_PROVISION_TOKEN_FILE names " + v.token + ", which is empty" },
-		},
-		{
-			name: "no git on PATH",
-			env:  func(t *testing.T, _ *treeVolume) { t.Setenv("PATH", t.TempDir()) },
-			code: 1,
-			says: func(*treeVolume) string { return "git is not on PATH" },
-		},
-		{
-			name: "an unknown flag",
-			args: func(v *treeVolume) []string { return append(v.fetchArgs(), "--root", v.root) },
-			code: 2,
-			says: func(*treeVolume) string { return "-root" },
-		},
-		{
-			name: "a positional argument",
-			args: func(v *treeVolume) []string { return append(v.fetchArgs(), "extra") },
-			code: 2,
-			says: func(*treeVolume) string { return `unexpected argument "extra"` },
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			v := newTreeVolume(t)
-			v.setenv(t)
-			t.Setenv("LEGION_PROVISION_TOKEN_FILE", v.token)
-			if tc.env != nil {
-				tc.env(t, v)
-			}
-			args := v.fetchArgs()
-			if tc.args != nil {
-				args = tc.args(v)
-			}
-			code, stdout, stderr := runWorkspaceInitHere(args)
-			if code != tc.code || !strings.Contains(stderr, tc.says(v)) {
-				t.Fatalf("exit %d, stderr %q; want %d naming %q", code, stderr, tc.code, tc.says(v))
-			}
-			if stdout != "" {
-				t.Fatalf("stdout %q, want nothing", stdout)
-			}
-			if _, err := os.Stat(v.feed); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("the feed was created (%v)", err)
-			}
-			if entries, err := os.ReadDir(v.tmp); err != nil || len(entries) != 0 {
-				t.Fatalf("TMPDIR holds %v (%v), want no credential left behind", entries, err)
-			}
-			if _, err := os.Stat(v.credentialLog); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("git ran a clone before the refusal (%v)", err)
-			}
-		})
-	}
-}
-
-// `fetch` clones the repository bare into the feed with the provisioning token, which its git is
-// handed as a one-shot credential on the container's own filesystem (its TMPDIR) and which is gone
-// once it returns; the feed never holds it.
-func TestWorkspaceInitFetchFillsTheFeed(t *testing.T) {
-	v := newTreeVolume(t).withRemote(t)
-	v.setenv(t)
-	t.Setenv("LEGION_PROVISION_TOKEN_FILE", v.token)
-
-	code, stdout, stderr := runWorkspaceInitHere(v.fetchArgs())
-	if code != 0 {
-		t.Fatalf("exit %d, stderr %q", code, stderr)
-	}
-	feed := filepath.Join(v.feed, "acme", "widgets.git")
-	if want := "workspace-init fetch: https://github.com/acme/widgets into " + feed + "\n"; stdout != want {
-		t.Fatalf("stdout %q, want %q", stdout, want)
-	}
-	if main := v.git(t, "--git-dir="+feed, "log", "-1", "--format=%s", "refs/heads/main"); main != "seed" {
-		t.Fatalf("the feed's main is %q, want the remote's", main)
-	}
-	credential, err := os.ReadFile(v.credentialLog)
-	if err != nil {
-		t.Fatalf("the clone recorded no credential: %v", err)
-	}
-	tokenFile, held, _ := strings.Cut(strings.TrimSpace(string(credential)), " ")
-	if held != "ghs_test" || !strings.HasPrefix(tokenFile, v.tmp+string(filepath.Separator)) {
-		t.Fatalf("the clone was handed %s holding %q, want the provisioning token under TMPDIR %s", tokenFile, held, v.tmp)
-	}
-	if entries, err := os.ReadDir(v.tmp); err != nil || len(entries) != 0 {
-		t.Fatalf("TMPDIR holds %v (%v) after fetch returned, want its credential gone", entries, err)
-	}
-	holdsNoToken(t, v.feed, "after fetch")
-}
-
 // A fresh tree volume, provisioned from the feed `fetch` filled: the shared clone, its origin still
 // GitHub's, and the issue's jj workspace on its bookmark, the clone's credential helper the one
 // named, the gh shim first on a pod's PATH and no tmux pane's `legion` launcher (a pod's PATH names
@@ -614,11 +483,12 @@ func TestWorkspaceInitProvisionsTheIssueWorkspace(t *testing.T) {
 	holdsNoToken(t, v.root, "after provisioning")
 }
 
-// The same-agent invariant, checked before the repository lock (workspace-init.ts:167-185): a
-// recorded OMP session missing from the volume is a launch failure, never a fresh agent. With the
-// clone gone too the volume itself was lost, which the runtime reads from exit code 3; with the
-// clone present only the session is gone, exit 1. Neither provisions or takes the lock, and a
-// session that is present lets the same invocation through.
+// The same-agent invariant, checked before the repository lock (cmdWorkspaceInit's
+// LEGION_RESUME_SESSION_FILE check, workspace-init.ts): a recorded OMP session missing from the
+// volume is a launch failure, never a fresh agent. With the clone gone too the volume itself was
+// lost, which the runtime reads from exit code 3; with the clone present only the session is gone,
+// exit 1. Neither provisions or takes the lock, and a session that is present lets the same
+// invocation through.
 func TestWorkspaceInitRefusesAResumeWhoseSessionIsGone(t *testing.T) {
 	v := newTreeVolume(t).withRemote(t)
 	v.fetch(t)
@@ -665,11 +535,18 @@ func TestWorkspaceInitRefusesAResumeWhoseSessionIsGone(t *testing.T) {
 
 // The command side of workspace recovery (decision 11): a relaunch after a lost volume names the
 // ref it recovers from, and the recreated workspace records it, with the commit it was recreated
-// at, in .legion/workspace-recovered.json (workspace-init.ts:196-215).
+// at, in .legion/workspace-recovered.json (cmdWorkspaceInit's LEGION_WORKSPACE_RECOVERED_FROM
+// branch, workspace-init.ts). The commit is read uncolored, so an operator's `ui.color = "always"`
+// never wraps it in escape codes.
 func TestWorkspaceInitRecordsTheRecoveryMarker(t *testing.T) {
 	v := newTreeVolume(t).withRemote(t)
 	v.fetch(t)
 	t.Setenv("LEGION_WORKSPACE_RECOVERED_FROM", "legion/LEGION-42")
+	colored := filepath.Join(t.TempDir(), "color-always.toml")
+	if err := os.WriteFile(colored, []byte("[ui]\ncolor = \"always\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("JJ_CONFIG", colored)
 
 	before := time.Now().UTC().Truncate(time.Millisecond)
 	code, _, stderr := runWorkspaceInitHere(v.args("LEGION-42"))
@@ -689,7 +566,7 @@ func TestWorkspaceInitRecordsTheRecoveryMarker(t *testing.T) {
 	if marker["fromRef"] != "legion/LEGION-42" || marker["reason"] != "volume-missing" {
 		t.Fatalf("the recovery marker is %s", body)
 	}
-	if sha := v.jj(t, "log", "-r", "@", "--no-graph", "-T", "commit_id", "--ignore-working-copy", "-R", workspace); marker["sha"] != sha {
+	if sha := v.jj(t, "log", "-r", "@", "--no-graph", "-T", "commit_id", "--ignore-working-copy", "--color=never", "-R", workspace); marker["sha"] != sha {
 		t.Fatalf("the recovery marker names commit %q, want the recreated working copy's %q", marker["sha"], sha)
 	}
 	at, err := time.Parse("2006-01-02T15:04:05.000Z", marker["recoveredAt"])
@@ -903,7 +780,7 @@ func (v *treeVolume) waitingLine() string {
 // Two pods of one tree admitted together provision against one shared clone. The second waits —
 // saying so in its init log and running nothing — while the first provisions, then provisions
 // its own workspace on the clone the first landed: every command of the first before any of the
-// second's, and no second clone (workspace-init.ts:74-109).
+// second's, and no second clone (withWorkspaceInitLock, workspace-init.ts).
 func TestWorkspaceInitSerializesTwoProcessesOnOneVolume(t *testing.T) {
 	v := newTreeVolume(t).withRemote(t)
 	first, release := v.holder(t)
@@ -944,7 +821,7 @@ func TestWorkspaceInitSerializesTwoProcessesOnOneVolume(t *testing.T) {
 			t.Fatalf("the second cloned again: %q", call)
 		}
 	}
-	if want := "second config get git.abandon-unreachable-commits -R " + v.clone(); calls[firstOfSecond] != want {
+	if want := "second config get git.abandon-unreachable-commits --ignore-working-copy --color=never -R " + v.clone(); calls[firstOfSecond] != want {
 		t.Fatalf("the second opened with %q, want %q on the clone the first landed", calls[firstOfSecond], want)
 	}
 }

@@ -16,9 +16,12 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
+	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
@@ -57,7 +60,7 @@ type outbox struct {
 	// is shared, and another project's rows are another daemon's.
 	dispatchProject string
 	stateDir        string
-	repo            string
+	repo            ghrepo.Repository
 	log             *slog.Logger
 	now             func() time.Time
 	provision       func(context.Context, workspace.Request) (workspace.Workspace, error)
@@ -136,6 +139,17 @@ func (r *outbox) RunOnce(ctx context.Context) error {
 			} else {
 				r.log.Error("outbox row failed", "row", row.ID, "kind", row.Kind, "error", err)
 			}
+			if refusal, permanent := permanentStatusRefusal(row, err); permanent {
+				// An issue's status writes run one at a time, so a row Dispatch will refuse
+				// identically forever would hold every later status of that issue behind it. It is
+				// finished instead, and the board follows the workflow again from the next one.
+				r.log.Error("outbox status write refused by Dispatch and dropped; the issue's later writes go on",
+					"row", row.ID, "issue", row.Issue, "status", refusal.Status, "code", refusal.Code, "error", err)
+				if err := r.finish(ctx, row); err != nil {
+					r.log.Error("outbox row finish not recorded; it runs again when its lease expires", "row", row.ID, "error", err)
+				}
+				continue
+			}
 			if retryErr := r.retry(ctx, row, err); retryErr != nil {
 				r.log.Error("outbox row retry not recorded; it runs again when its lease expires", "row", row.ID, "error", retryErr)
 			}
@@ -175,6 +189,16 @@ func retryBackoff(attempts int) time.Duration {
 		attempts = 6
 	}
 	return time.Second << attempts
+}
+
+// permanentStatusRefusal is a Dispatch status write whose refusal will not change however many
+// times the write is made. Only a status row is judged — it is the kind that fences an issue's
+// later writes — and what makes a refusal permanent is the Dispatch client's own rule.
+func permanentStatusRefusal(row record.OutboxRow, err error) (*dispatch.Error, bool) {
+	if row.Kind != record.OutboxKindDispatchStatus {
+		return nil, false
+	}
+	return dispatch.PermanentRefusal(err)
 }
 
 func (r *outbox) execute(ctx context.Context, row record.OutboxRow) error {
@@ -309,6 +333,13 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 				return fmt.Errorf("create claim %s: %w", token, err)
 			}
 		}
+		// The claim remembers the newest start run against it, so a stop written before this one
+		// is finished rather than acted on however late it arrives (see "suspend" below). A claim
+		// this row created has no older stop to fence, and recording it here rather than only for
+		// a claim that already existed keeps one rule instead of a special case.
+		if err := machine.StartedBy(ctx, row.ID); err != nil {
+			return fmt.Errorf("record the start of claim %s: %w", token, err)
+		}
 		state := machine.Claim().State
 		switch state {
 		case supervise.StateQueued:
@@ -322,8 +353,18 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		case supervise.StateFailed:
 			// Only the workflow starts a role whose claim failed: the architect retrying the
 			// held phase, or a later transition that needs the role again.
+			kept := machine.Claim().Pending
 			if err := machine.Handle(ctx, supervise.RequestRetry{Claim: token}); err != nil {
 				return fmt.Errorf("retry claim %s: %w", token, err)
+			}
+			// A failed claim keeps the task it held, and its relaunch sends it: held after its agent
+			// kept dying in a turn of it, that task goes behind the sentence saying so. When it is
+			// this row's phase and run, the row's own task would follow it as a second prompt for
+			// work already under way, so the row is done once the claim is relaunched.
+			if kept != nil && payload.Phase != "" && kept.Phase == payload.Phase && kept.Generation == payload.Generation {
+				r.log.Info("outbox retry of a claim that kept its phase's task; relaunched without a second delivery", "row", row.ID,
+					"issue", issue.Key, "role", payload.Role, "phase", payload.Phase, "delivery", kept.ID)
+				return nil
 			}
 		case supervise.StateRetired:
 			// A retired claim's tree closed, and its linger removed the workspace; the tree was
@@ -338,7 +379,7 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		if payload.Task != "" {
 			// The row's phase, already held to the issue's above, travels with the delivery: it is
 			// what says the task is still the work to do once the delivery has outlived its id.
-			if err := machine.Handle(ctx, supervise.RequestDeliver{Claim: token, Task: payload.Task, Phase: payload.Phase,
+			if err := machine.Handle(ctx, supervise.RequestDeliver{Claim: token, Task: payload.Task, Phase: payload.Phase, Generation: payload.Generation,
 				ID: fmt.Sprintf("%s%d", outboxDeliveryPrefix, row.ID)}); err != nil {
 				return fmt.Errorf("deliver to claim %s: %w", token, err)
 			}
@@ -360,6 +401,17 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		switch machine.Claim().State {
 		case supervise.StateFailed, supervise.StateRetired:
 			// The claim runs nothing, so there is nothing to suspend.
+			return nil
+		}
+		// A stop ends the run it was written for. A newer start has already replaced that run, so
+		// this stop is superseded: acting on it would suspend the run that start began and retire
+		// the task with it, leaving the phase with nobody in it. It is finished instead, whatever
+		// the retry timing was — the runtime may have refused it for minutes. A row with no id of
+		// its own is not older than anything: the store gives every row one, and an unknown id
+		// must not silently drop a stop.
+		if last := machine.Claim().LastStartRow; row.ID > 0 && row.ID < last {
+			r.log.Info("outbox stop superseded by a newer start; finished without acting",
+				"row", row.ID, "issue", issue.Key, "role", payload.Role, "start-row", last)
 			return nil
 		}
 		if err := machine.Handle(ctx, supervise.RequestSuspend{Claim: token}); err != nil {
@@ -390,17 +442,17 @@ func (r *outbox) provisionWorkspace(ctx context.Context, issue record.Issue) err
 	if r.tokens == nil {
 		return errors.New("supervise executor has no GitHub App token manager")
 	}
-	owner, _, ok := strings.Cut(r.repo, "/")
-	if !ok || owner == "" {
-		return fmt.Errorf("supervise executor has invalid repository %q", r.repo)
+	if r.repo.IsZero() {
+		return errors.New("workspace provisioning has no configured repository")
 	}
-	lease, err := r.tokens.Token(ctx, appauth.Implement, owner)
+	lease, err := r.tokens.Token(ctx, appauth.Implement, r.repo.Owner())
 	if err != nil {
 		return fmt.Errorf("mint implement App token to provision %s: %w", issue.Key, err)
 	}
 	if _, err := r.provision(ctx, workspace.Request{
-		StateDir: r.stateDir, Repo: r.repo, Issue: issue.Key, Token: lease.Token, CredentialHelper: credentialHelper(r.stateDir),
-		CredentialDir: r.stateDir,
+		StateDir: r.stateDir, Repo: r.repo, Issue: issue.Key, CredentialHelper: credentialHelper(r.stateDir),
+		Source: workspace.FromGitHub(lease.Token, r.stateDir),
+		Log:    func(line string) { r.log.Warn("provisioning: "+line, "issue", issue.Key) },
 	}); err != nil {
 		return fmt.Errorf("provision workspace for %s: %w", issue.Key, err)
 	}
@@ -448,7 +500,7 @@ func (r *outbox) removeWorkspace(ctx context.Context, row record.OutboxRow, payl
 	if r.podsProvision() {
 		return nil
 	}
-	if r.repo == "" {
+	if r.repo.IsZero() {
 		return errors.New("workspace removal has no configured repository")
 	}
 	issue, err := r.issue(ctx, row.Issue)
@@ -488,5 +540,5 @@ func (r *outbox) issue(ctx context.Context, key string) (record.Issue, error) {
 // credentialHelper is the git credential helper every issue workspace names: this daemon's pane
 // launcher by its absolute path, so a push from any directory reaches `legion credential`.
 func credentialHelper(stateDir string) string {
-	return "!'" + strings.ReplaceAll(filepath.Join(stateDir, "bin", "legion"), "'", `'\''`) + "' credential"
+	return "!" + shellprefix.Literal(filepath.Join(workerbin.LauncherDir(stateDir), "legion")) + " credential"
 }

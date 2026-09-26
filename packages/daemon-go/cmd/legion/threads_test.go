@@ -165,6 +165,8 @@ func TestThreadsResolveRejectsInvalidArgumentsBeforeGrantRedemption(t *testing.T
 	for _, args := range [][]string{
 		nil,
 		{"resolve", "--repo", "not-a-repo", "--pr", "7"},
+		// A dot segment names no repository: the configured repo and workspace-init refuse it too.
+		{"resolve", "--repo", "owner/..", "--pr", "7"},
 		{"resolve", "--repo", "owner/repo", "--pr", "zero"},
 		{"other"},
 	} {

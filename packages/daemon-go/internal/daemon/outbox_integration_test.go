@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/url"
 	"strings"
@@ -18,11 +19,13 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	legionstore "github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
@@ -311,6 +314,119 @@ func TestOutboxWritesOneIssuesStatusesInOrderWhenTheOlderFailsFirst(t *testing.T
 	}
 }
 
+// A status Dispatch refuses outright — the issue is gone, or the status is one it will not take —
+// can never be written, and an issue's status writes run one at a time: retried forever, it held
+// every later status of that issue behind it, so nothing the workflow decided afterwards ever
+// reached the board. The refused row is finished and said so, and the issue's later writes run.
+// What each of them then does is the ordinary rule: this one finds the board at a status neither
+// its own nor the one it was made from, takes that for someone else's move, and leaves it.
+func TestAPermanentlyRefusedStatusWriteDoesNotHoldBackTheIssuesLaterWrites(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	now := time.Now().UTC()
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "in_progress", Status: "testing"}, now))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "testing", Status: "needs_review"}, now))
+	board := &refusingDispatch{status: "in_progress", refuse: map[string]*dispatch.Error{
+		"testing": {Status: 422, Code: "INVALID_STATUS", Message: "testing is not a status of this issue"},
+	}}
+	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, dispatch: board, now: func() time.Time { return now }, log: quietLogger()}
+
+	for range 3 {
+		if err := runner.RunOnce(context.Background()); err != nil {
+			t.Fatalf("run: %v", err)
+		}
+		now = now.Add(time.Minute)
+		runner.now = func() time.Time { return now }
+	}
+
+	var rows int
+	if err := pool.QueryRow(context.Background(), "select count(*) from outbox where issue = 'LEGION-208'").Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 0 {
+		t.Fatalf("outbox holds %d rows for LEGION-208, want none: the refused row is finished and the one behind it runs", rows)
+	}
+	if board.reads < 2 {
+		t.Fatalf("Dispatch was read %d times, want the later write to have run too", board.reads)
+	}
+}
+
+// Only Dispatch's own refusal of the write is permanent. A revoked or expired token is answered
+// 401 or 403 and says nothing about the write — an operator restores it and the same body is
+// taken — and a 4xx carrying no Dispatch error code came from whatever sits in front of Dispatch,
+// not from Dispatch judging the write. Reading either as permanent dropped every later status of
+// that issue for good, which is the one outcome this outbox exists to prevent. Each case names
+// the arm that saves it, so deleting one fails here.
+func TestACredentialOrUncodedRefusalIsRiddenOutRatherThanDroppingTheWrite(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		refusal *dispatch.Error
+	}{
+		{"a revoked token", &dispatch.Error{Status: 401, Code: "UNAUTHORIZED", Message: "token revoked"}},
+		{"a token without the scope", &dispatch.Error{Status: 403, Code: "FORBIDDEN", Message: "forbidden"}},
+		{"a refusal Dispatch did not make", &dispatch.Error{Status: 422, Message: "<html>gateway</html>"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			records := record.NewStore()
+			now := time.Now().UTC()
+			enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "in_progress", Status: "testing"}, now))
+			board := &refusingDispatch{status: "in_progress", refuse: map[string]*dispatch.Error{"testing": tc.refusal}}
+			runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, dispatch: board, now: func() time.Time { return now }, log: quietLogger()}
+
+			if err := runner.RunOnce(context.Background()); err != nil {
+				t.Fatalf("run: %v", err)
+			}
+
+			if rows := outboxRows(t, pool); rows != 1 {
+				t.Fatalf("outbox holds %d rows, want the write still pending", rows)
+			}
+
+			// The operator restores the token, or whatever answered instead of Dispatch is gone,
+			// and the write is taken.
+			delete(board.refuse, "testing")
+			now = now.Add(time.Minute)
+			runner.now = func() time.Time { return now }
+			if err := runner.RunOnce(context.Background()); err != nil {
+				t.Fatalf("run after the refusal stops: %v", err)
+			}
+			if board.status != "testing" || outboxRows(t, pool) != 0 {
+				t.Fatalf("board = %q with %d rows left, want testing and none", board.status, outboxRows(t, pool))
+			}
+		})
+	}
+}
+
+// refusingDispatch answers SetStatus for a named status with a Dispatch refusal that will never
+// change, and takes every other status.
+type refusingDispatch struct {
+	status string
+	reads  int
+	refuse map[string]*dispatch.Error
+}
+
+func (d *refusingDispatch) ListIssues(context.Context, string, []string) ([]dispatch.IssueSummary, error) {
+	return nil, nil
+}
+func (d *refusingDispatch) GetIssue(_ context.Context, key string) (dispatch.Issue, error) {
+	d.reads++
+	return dispatch.Issue{Key: key, Status: d.status}, nil
+}
+func (d *refusingDispatch) SetStatus(_ context.Context, _ string, status string) error {
+	if refusal, refused := d.refuse[status]; refused {
+		return fmt.Errorf("set Dispatch status %s: %w", status, refusal)
+	}
+	d.status = status
+	return nil
+}
+func (d *refusingDispatch) PostMessage(context.Context, string, string) error { return nil }
+func (d *refusingDispatch) MessageBodiesSince(context.Context, string, time.Time) ([]string, error) {
+	return nil, nil
+}
+func (d *refusingDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
+	return dispatch.Approval{}, nil
+}
+
 // boardDispatch is one issue's Dispatch board: it fails the first failures writes, then applies.
 type boardDispatch struct {
 	status   string
@@ -363,11 +479,11 @@ func TestOutboxRunSurvivesAFailedClaimAndAFailedFinish(t *testing.T) {
 		close(done)
 	}()
 
-	eventually(t, "the row executed and its finish failed", func() bool { return client.count() == 1 && records.failedFinishes() == 1 })
+	testwait.Eventually(t, "the row executed and its finish failed", func() bool { return client.count() == 1 && records.failedFinishes() == 1 })
 	mu.Lock()
 	now = now.Add(outboxLease + time.Second)
 	mu.Unlock()
-	eventually(t, "the row finished after its lease expired", func() bool { return outboxRows(t, pool) == 0 })
+	testwait.Eventually(t, "the row finished after its lease expired", func() bool { return outboxRows(t, pool) == 0 })
 	cancel()
 	<-done
 	if got := client.count(); got != 2 {
@@ -436,7 +552,7 @@ func TestOutboxTreeCloseRowEndsTheTreesRootClaim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create root claim: %v", err)
 	}
-	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets"}
+	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets")}
 
 	if err := runner.execute(context.Background(), mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "tree_close", Tree: issue.Tree, Role: claim.RoleArchitect, Generation: issue.Generation}, time.Now())); err != nil {
 		t.Fatalf("stop the root at its tree's close: %v", err)
@@ -461,7 +577,7 @@ func TestTheWorkflowsTreeCloseIsNotPutToTheOperatorsPredicate(t *testing.T) {
 	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Done, Generation: 1, Status: "done"}
 	putOutboxIssue(t, pool, records, issue)
 	sup, runtime := newOutboxSupervisor(t, "legion", t.TempDir())
-	sup.deps.TreeClosable = treeClosable(pool, records) // exactly what daemon.go wires in production
+	sup.deps.TreeClosable = (&workflowRuntime{pool: pool, records: records}).treeClosable // exactly what daemon.go wires in production
 	token, err := claim.NewToken("legion", issue.Key, claim.RoleArchitect)
 	if err != nil {
 		t.Fatalf("claim token: %v", err)
@@ -484,7 +600,7 @@ func TestTheWorkflowsTreeCloseIsNotPutToTheOperatorsPredicate(t *testing.T) {
 	}
 
 	// The workflow's own close of that same tree goes through and releases the root.
-	runner := &outbox{pool: pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets"}
+	runner := &outbox{pool: pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets")}
 	if err := runner.execute(context.Background(), mustOutboxRow(t, issue.Key, record.SuperviseRequest{
 		Op: "tree_close", Tree: issue.Tree, Role: claim.RoleArchitect, Generation: issue.Generation,
 	}, time.Now())); err != nil {
@@ -511,7 +627,7 @@ func TestAWorkflowTaskIsDroppedAfterItsRetryRewritesTheDelivery(t *testing.T) {
 	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Implementing, Generation: 1, Status: "in_progress"}
 	putOutboxIssue(t, pool, records, issue)
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
-	sup.deps.PhaseHolds = phaseHolds(pool, records) // exactly what daemon.go wires in production
+	sup.deps.PhaseHolds = (&workflowRuntime{pool: pool, records: records}).phaseHolds // exactly what daemon.go wires in production
 	token, err := claim.NewToken("legion", issue.Key, claim.RoleImplementer)
 	if err != nil {
 		t.Fatalf("claim token: %v", err)
@@ -525,7 +641,7 @@ func TestAWorkflowTaskIsDroppedAfterItsRetryRewritesTheDelivery(t *testing.T) {
 	conn := fake.NewConn()
 	sup.deps.Conns.(*fake.Conns).Register(token, conn)
 	runner := &outbox{
-		pool: pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets",
+		pool: pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
 		log: quietLogger(),
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
 			return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-208"}, nil
@@ -550,7 +666,7 @@ func TestAWorkflowTaskIsDroppedAfterItsRetryRewritesTheDelivery(t *testing.T) {
 			t.Fatalf("handle %T: %v", ev, err)
 		}
 	}
-	eventually(t, "the phase's task to be acknowledged", func() bool {
+	testwait.Eventually(t, "the phase's task to be acknowledged", func() bool {
 		p := machine.Claim().Pending
 		return p != nil && !p.DeliveredAt.IsZero()
 	})
@@ -583,12 +699,10 @@ func TestAWorkflowTaskIsDroppedAfterItsRetryRewritesTheDelivery(t *testing.T) {
 		t.Fatalf("the finished phase's task is still pending as %+v, want it dropped", got)
 	}
 	// A send runs on its own goroutine, so counting the prompts as Handle returns can only ever
-	// see none: the count is watched over a window a send would land inside instead.
-	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
-		if got := len(conn.Prompts()) - prompts; got != 0 {
-			t.Fatalf("the finished worker was handed its own finished task %d more times, want none", got)
-		}
-		time.Sleep(20 * time.Millisecond)
+	// see none. The machine's own wait is what says every goroutine this event started is done.
+	machine.Wait()
+	if got := len(conn.Prompts()) - prompts; got != 0 {
+		t.Fatalf("the finished worker was handed its own finished task %d more times, want none", got)
 	}
 }
 
@@ -620,7 +734,7 @@ func TestOutboxStartWaitingOnThePendingDeliveryIsNotAFailure(t *testing.T) {
 	now := time.Now().UTC()
 	runner := &outbox{
 		dispatchProject: "LEGION",
-		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets",
+		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
 		now: func() time.Time { return now }, log: slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 	}
 	enqueueOutbox(t, pool, records, mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RoleImplementer, Task: "the retry's task", Generation: issue.Generation}, now))

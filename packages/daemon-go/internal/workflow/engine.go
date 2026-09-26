@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -25,8 +26,11 @@ type Config struct {
 	DesignGate     config.DesignGate
 	ReviewRoundCap int
 	MaxFixAttempts int
-	LingerHours    time.Duration
+	Linger         time.Duration
 	Clock          func() time.Time
+	// ReviewAppLogin is the review App's bot login (<slug>[bot]) from its boot token lease. A push
+	// by it is never a fix attempt, and a red on its red tests is planned. Empty matches no push.
+	ReviewAppLogin string
 }
 
 // Engine interprets Table and writes only records and outbox rows through the supplied Store.
@@ -48,9 +52,6 @@ func New(store record.Store, cfg Config, log *slog.Logger) *Engine {
 	}
 	if cfg.MaxFixAttempts <= 0 {
 		cfg.MaxFixAttempts = 3
-	}
-	if cfg.LingerHours <= 0 {
-		cfg.LingerHours = 72 * time.Hour
 	}
 	if cfg.Clock == nil {
 		cfg.Clock = time.Now
@@ -146,7 +147,7 @@ func (e *Engine) agentStatusWrite(ctx context.Context, tx pgx.Tx, issue record.I
 	}
 	e.log.Info("workflow: a claim session wrote a lifecycle status; the daemon re-asserts its own", "issue", issue.Key,
 		"session", fact.ActorSession, "wrote", fact.Status, "status", issue.Status)
-	issue.Title, issue.Rank, issue.Parent, issue.LastDispatchSeq = fact.Title, fact.Rank, parentOf(fact.Parent), fact.Seq
+	issue.Title, issue.Rank, issue.Parent, issue.LastDispatchSeq = fact.Title, fact.Rank, record.ParentOf(fact.Parent), fact.Seq
 	if err := e.store.PutIssue(ctx, tx, issue); err != nil {
 		return false, err
 	}
@@ -176,9 +177,10 @@ func (e *Engine) recordChildUnderLiveTree(ctx context.Context, tx pgx.Tx, fact i
 
 // reenterChild takes a recorded child set back to todo into a new run under its live tree, the way
 // recordChildUnderLiveTree enters an unrecorded one: the run is the child's next generation, so no
-// row its previous run queued (its leaving's suspends) acts on it; the previous run's facts are
-// cleared, and the tree's architect is told. A child whose tree is not live is an orphan, which
-// admission, running after this handler, admits as a root of its own.
+// row its previous run queued (its leaving's suspends) acts on it; the run it interrupted is
+// stopped, the previous run's facts are cleared, and the tree's architect is told. A child whose
+// tree is not live is an orphan, which admission, running after this handler, admits as a root of
+// its own.
 func (e *Engine) reenterChild(ctx context.Context, tx pgx.Tx, child record.Issue, fact intake.DispatchIssue) error {
 	root, err := e.store.Issue(ctx, tx, child.Tree)
 	if err != nil || root == nil {
@@ -188,10 +190,27 @@ func (e *Engine) reenterChild(ctx context.Context, tx pgx.Tx, child record.Issue
 	if err != nil || !live {
 		return err
 	}
+	next := child.Generation + 1
+	// The worker of the phase the child was taken out of still holds its pane and workspace, and
+	// would report the interrupted run's handoff into the new one. Its claim carries no
+	// generation, so the stop is stamped with the generation the child is about to hold: that
+	// stamp is only the outbox's fence, and a row stamped with the run being left is dropped.
+	//
+	// It leaves no phase. A transition's suspend names the phase it ends so the row is dropped
+	// once the issue is back in a phase its role works; this one stops a worker because its whole
+	// run is over, and a child re-entered at the phase it was taken from — planning, with the gate
+	// open — would otherwise name the phase it is about to hold and never stop anything.
+	if role := RoleFor(child.Phase); role != "" && role != claim.RoleArchitect {
+		interrupted := child
+		interrupted.Generation = next
+		if err := e.suspend(ctx, tx, interrupted, role, ""); err != nil {
+			return err
+		}
+	}
 	if err := e.store.ClearGeneration(ctx, tx, child.Key); err != nil {
 		return err
 	}
-	if err := e.enterChild(ctx, tx, *root, fact, child.Generation+1); err != nil {
+	if err := e.enterChild(ctx, tx, *root, fact, next); err != nil {
 		return err
 	}
 	return e.notice(ctx, tx, child.Key, record.Notice{Kind: "child-status", Role: claim.RoleArchitect, Reason: fmt.Sprintf("%s is todo; it runs again under %s", child.Key, root.Key)})
@@ -277,6 +296,12 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 	if err != nil || issue == nil {
 		return intake.Result{}, err
 	}
+	// Every completion names a run: the route reads it from the claim and refuses a claim that
+	// has taken no task, so a fact reaching here always carries one.
+	if fact.Generation != issue.Generation {
+		return refused("HANDOFF_STALE_GENERATION", fmt.Sprintf("%s is on generation %d and this completion is generation %d's; the run it reports is over",
+			issue.Key, issue.Generation, fact.Generation)), nil
+	}
 	if RoleFor(issue.Phase) != fact.Role {
 		return refused("HANDOFF_NOT_CURRENT_PHASE", fmt.Sprintf("the %s does not run phase %s of %s; this completion changed nothing", fact.Role, issue.Phase, issue.Key)), nil
 	}
@@ -331,15 +356,20 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 			return intake.Result{}, err
 		}
 		if gate == nil || !classify.DesignGateOpen(*gate) {
+			// With a gate, the refusal records the version a human must approve, and the approval
+			// of that version advances the merge without a second READY. With no gate there is no
+			// version to wait for: the issues table takes only a positive one, and writing zero
+			// failed the whole fact on its check constraint instead of committing this refusal.
+			message := "READY refused: no design version is approved; register and approve the tree's spec before requesting READY."
 			version := 0
 			if gate != nil {
 				version = gate.LatestVersion
+				issue.ReadyPendingVersion = &version
+				message = fmt.Sprintf("READY refused: approve design version %d before requesting READY.", version)
 			}
-			issue.ReadyPendingVersion = &version
 			if err := e.store.PutIssue(ctx, tx, *issue); err != nil {
 				return intake.Result{}, err
 			}
-			message := fmt.Sprintf("READY refused: approve design version %d before requesting READY.", version)
 			if err := e.notice(ctx, tx, issue.Key, record.Notice{Kind: "ready-refused", Version: version, Reason: message}); err != nil {
 				return intake.Result{}, err
 			}
@@ -350,6 +380,9 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 	return intake.Result{}, nil
 }
 
+// pullRequestOpened records the pull request a branch opened, and a reopen is the same pull
+// request: its fix and blocked attempts are what bound the review rounds, so they are carried
+// over rather than rebuilt at zero, which made closing and reopening a way to buy a fresh cap.
 func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.PullRequestOpened) (intake.Result, error) {
 	issue, err := e.issueForBranch(ctx, tx, fact.Branch)
 	if err != nil || issue == nil {
@@ -357,6 +390,13 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 	}
 	pr := record.PullRequest{Issue: issue.Key, Repo: fact.Repo, Number: fact.Number, Branch: fact.Branch, HeadSHA: fact.HeadSHA,
 		HeadUpdatedAt: fact.UpdatedAt, HeadUpdatedAtSource: "webhook", Failing: []string{}, FailingStatuses: []string{}, State: record.PullRequestOpen}
+	recorded, err := e.store.PullRequest(ctx, tx, issue.Key)
+	if err != nil {
+		return intake.Result{}, err
+	}
+	if recorded != nil && recorded.Repo == fact.Repo && recorded.Number == fact.Number {
+		pr.FixAttempts, pr.BlockedAttempts = recorded.FixAttempts, recorded.BlockedAttempts
+	}
 	if err := e.store.PutPullRequest(ctx, tx, pr); err != nil {
 		return intake.Result{}, err
 	}
@@ -398,7 +438,8 @@ func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.
 	if err != nil || pr == nil {
 		return intake.Result{}, err
 	}
-	*pr = classify.ApplyPush(*pr, fact.After, classify.ClassifyPush(classify.PushPayload{ChangedPaths: fact.ChangedPaths, ChangedPathsTruncated: fact.Truncated}))
+	byReviewApp := e.cfg.ReviewAppLogin != "" && fact.Pusher == e.cfg.ReviewAppLogin
+	*pr = classify.ApplyPush(*pr, fact.After, classify.ClassifyPush(classify.PushPayload{ChangedPaths: fact.ChangedPaths, ChangedPathsTruncated: fact.Truncated}), byReviewApp)
 	return intake.Result{}, e.store.PutPullRequest(ctx, tx, *pr)
 }
 
@@ -805,20 +846,7 @@ func (e *Engine) issueForBranch(ctx context.Context, tx pgx.Tx, branch string) (
 }
 
 func (e *Engine) pullRequest(ctx context.Context, tx pgx.Tx, repo string, number int) (*record.PullRequest, error) {
-	issues, err := e.store.Issues(ctx, tx)
-	if err != nil {
-		return nil, err
-	}
-	for _, issue := range issues {
-		pr, err := e.store.PullRequest(ctx, tx, issue.Key)
-		if err != nil {
-			return nil, err
-		}
-		if pr != nil && pr.Repo == repo && pr.Number == number {
-			return pr, nil
-		}
-	}
-	return nil, nil
+	return e.store.PullRequestByNumber(ctx, tx, repo, number)
 }
 
 func (e *Engine) treeMembers(ctx context.Context, tx pgx.Tx, root record.Issue) ([]record.Issue, error) {
@@ -843,21 +871,14 @@ func (e *Engine) liveTree(ctx context.Context, tx pgx.Tx, root record.Issue) (bo
 	if err != nil {
 		return false, err
 	}
-	for _, slot := range slots {
-		if slot.Issue == root.Key {
-			return true, nil
-		}
+	if slices.ContainsFunc(slots, func(slot record.Slot) bool { return slot.Issue == root.Key }) {
+		return true, nil
 	}
 	issues, err := e.store.Issues(ctx, tx)
 	if err != nil {
 		return false, err
 	}
-	for _, waiting := range record.Waiting(issues, slots) {
-		if waiting.Key == root.Key {
-			return true, nil
-		}
-	}
-	return false, nil
+	return slices.ContainsFunc(record.Waiting(issues, slots), func(waiting record.Issue) bool { return waiting.Key == root.Key }), nil
 }
 
 func (e *Engine) gateForIssue(ctx context.Context, tx pgx.Tx, issue record.Issue) (*record.DesignGate, error) {

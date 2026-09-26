@@ -5,6 +5,9 @@
 #
 #   scripts/e2e/lib/install-model-gateway.sh --profile <name> --dest <dir> --cache-dir <dir>
 #
+# LEGION_E2E_MODEL_GATEWAY_URL is required: the gateway's Anthropic endpoint, the one hawk-token's
+# default HAWK_API_URL mints for, checked by lib/model-gateway-url.sh.
+#
 # Stdout is one line, the key command's path; every refusal goes to stderr. It writes:
 #   <dir>/hawk-token      the key command the profile names: hawk-token, run with the caller's
 #                         session bus address and XDG base directories for that one command
@@ -28,8 +31,6 @@
 set -euo pipefail
 
 me=install-model-gateway
-# The production gateway, the one hawk-token's default HAWK_API_URL mints for.
-gateway=https://middleman.hawk.internal.trajectorylabs.com/anthropic
 model=anthropic/claude-opus-4-8
 
 # refuse is for arguments (exit 2); fail is for the box the run is on (exit 1).
@@ -89,6 +90,8 @@ hawk_token=$(command -v hawk-token) ||
 hawk_token=$(realpath -- "$hawk_token")
 [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ] ||
   fail "DBUS_SESSION_BUS_ADDRESS is unset: hawk-token reads the hawk login from the keyring over the session bus"
+# The helper names the variable in its own refusal.
+gateway=$(bash "$(dirname -- "${BASH_SOURCE[0]}")/model-gateway-url.sh") || exit 1
 
 dest=$(realpath -m -- "$dest")
 # The path is written into YAML as an OMP `!command`, so it stays one plain word.
@@ -218,5 +221,5 @@ modelRoles:
   review: $model
   oracle: $model
 EOF
-echo "$me: OMP profile $profile routes $model through $gateway, keyed by $key_command" >&2
+echo "$me: OMP profile $profile routes $model through LEGION_E2E_MODEL_GATEWAY_URL, keyed by $key_command" >&2
 printf '%s\n' "$key_command"

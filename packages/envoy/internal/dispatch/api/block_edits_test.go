@@ -312,7 +312,6 @@ func TestAcceptingASuggestionRefusesAReplacementTheDocumentCannotCarryBack(t *te
 		return issue.PrimaryArtifactID, decodeBody[model.Comment](t, created)
 	}
 	for index, test := range []struct{ name, spec, with, says string }{
-		{"colons that read as a fence, in a paragraph", paragraph, ":::\nb", "a typed block's fence"},
 		{"a rule in a list item", listItem, "***", "writes a horizontal rule at the start of this list item"},
 		{"a list in a list item", listItem, "- a", "writes a bullet list at the start of this list item"},
 		{"two paragraphs in a list item", listItem, "a\n\nb", "writes two paragraphs in this list item"},
@@ -320,8 +319,6 @@ func TestAcceptingASuggestionRefusesAReplacementTheDocumentCannotCarryBack(t *te
 		{"a list in a list item holding two paragraphs", longItem, "- a", "writes a bullet list at the start of this list item"},
 		{"a list in an ordered item", ordered, "- a", "writes a bullet list at the start of this list item"},
 		{"nothing in a list item", listItem, "", "empties the paragraph this list item holds"},
-		{"colons that read as a fence, in a blockquote", blockquote, ":::\nb", "a typed block's fence"},
-		{"a fence in a callout", callout, ":::", "a typed block's fence"},
 		{"a rule in a footnote definition", footnote, "***", "writes a horizontal rule in this footnote definition"},
 		{"a list in a footnote definition", footnote, "- a", "writes a bullet list in this footnote definition"},
 	} {
@@ -369,6 +366,11 @@ func TestAcceptingASuggestionRefusesAReplacementTheDocumentCannotCarryBack(t *te
 		{"text in a list item", listItem, "Changed.", "Intro.\n\n- Changed.\n- two\n"},
 		{"front matter over an opening heading", "# Body.\n\nText.\n", "---\nstatus: draft\n---\n\n# Body.", "---\nstatus: draft\n---\n\n# Body.\n\nText.\n"},
 		{"front matter over an opening paragraph", "Body.\n\nAfter.\n", "---\ntitle: x\n---\n\nBody.", "---\ntitle: x\n---\n\nBody.\n\nAfter.\n"},
+		// A line of colons in text is written escaped, so it reads back as the text it is and never
+		// as a typed block's fence.
+		{"colons in a paragraph", paragraph, ":::\nb", "Intro.\n\n\\::: b\n\nAfter.\n"},
+		{"colons in a blockquote", blockquote, ":::\nb", "Intro.\n\n> \\::: b\n"},
+		{"colons in a callout", callout, ":::", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n\\:::\n:::\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			artifactID, comment := suggest(t, "K"+string(rune('A'+index)), test.spec, test.with)

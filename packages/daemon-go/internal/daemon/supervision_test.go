@@ -21,6 +21,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
 	recordpkg "github.com/sjawhar/legion/daemon/internal/record"
@@ -30,6 +31,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/stream"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 func architect() api.SpawnRequest {
@@ -147,7 +149,7 @@ func TestRunLaunchesWithThePromptInstructionsAndSecretsItWasGiven(t *testing.T) 
 	if !reflect.DeepEqual(spec.Secrets, map[string]string{"ENVOY_TOKEN": "envoy-bearer"}) {
 		t.Errorf("the launch's secrets = %v, want the Envoy bearer", spec.Secrets)
 	}
-	if spec.Repository != "" {
+	if spec.Repository != (ghrepo.Repository{}) {
 		t.Errorf("the launch names repository %q, want none: the configuration names no project repository", spec.Repository)
 	}
 	if spec.Project != project || spec.Tree != "LEGION-1" || spec.Issue != "LEGION-1" || spec.Role != claim.RoleArchitect {
@@ -215,7 +217,7 @@ func TestRunFeedsTheStreamAndTheSweepIntoTheClaimsMachine(t *testing.T) {
 	}
 
 	sh := dialShim(t, record.address, launch.BootToken)
-	eventually(t, "the hello to reach the machine", func() bool {
+	testwait.Eventually(t, "the hello to reach the machine", func() bool {
 		return d.claim(token).State == string(supervise.StateShimConnected)
 	})
 
@@ -243,9 +245,9 @@ func TestRunFeedsTheStreamAndTheSweepIntoTheClaimsMachine(t *testing.T) {
 	}
 	sh.send(shimwire.Response{ID: prompt.ID, Command: shimwire.TypePrompt, Success: true})
 	sh.send(shimwire.AgentStart{})
-	eventually(t, "the turn to start", func() bool { return d.claim(token).State == string(supervise.StateWorking) })
+	testwait.Eventually(t, "the turn to start", func() bool { return d.claim(token).State == string(supervise.StateWorking) })
 	sh.send(shimwire.AgentEnd{})
-	eventually(t, "the turn to end", func() bool {
+	testwait.Eventually(t, "the turn to end", func() bool {
 		c := d.claim(token)
 		return c.State == string(supervise.StateIdle) && c.Pending == nil
 	})
@@ -256,25 +258,29 @@ func TestRunFeedsTheStreamAndTheSweepIntoTheClaimsMachine(t *testing.T) {
 		t.Fatalf("the state shows the architect as %+v, want the idle claim with its nested locator", architectView)
 	}
 
-	// OMP taking back a prompt it acknowledged is a stream event of its own, and it costs the
-	// claim a prompt failure.
+	// OMP taking back a prompt it acknowledged is a stream event of its own: the task returns to
+	// waiting under a new id, and nothing is charged — the agent is in a turn of its own.
 	if status, body := d.request(http.MethodPost, "/legion/v1/operator/claims/"+string(token)+"/deliver",
 		api.DeliverRequest{Task: "Say it again."}, true); status != http.StatusOK {
 		t.Fatalf("deliver = %d; body %s", status, body)
 	}
 	second := sh.prompt()
 	sh.send(shimwire.Response{ID: second.ID, Command: shimwire.TypePrompt, Success: true})
-	eventually(t, "the acknowledgement to be recorded", func() bool {
+	testwait.Eventually(t, "the acknowledgement to be recorded", func() bool {
 		c := d.claim(token)
 		return c.Pending != nil && c.Pending.DeliveredAt != nil
 	})
-	sh.send(shimwire.Response{ID: second.ID, Command: shimwire.TypePrompt, Success: false, Error: "Agent is busy"})
-	eventually(t, "the late refusal to be charged", func() bool { return d.claim(token).Budgets.PromptFailures == 1 })
+	acknowledged := d.claim(token).Pending.ID
+	sh.send(shimwire.Response{ID: second.ID, Command: shimwire.TypePrompt, Success: false, Error: "Agent is already processing. Use steer() or followUp() to queue messages, or wait for completion."})
+	testwait.Eventually(t, "the refused task to return to waiting", func() bool {
+		c := d.claim(token)
+		return c.Pending != nil && c.Pending.ID != acknowledged && c.Budgets.PromptFailures == 0
+	})
 
 	// The sweep finding the process gone relaunches the recorded session.
 	loc := d.claim(token).Locator
 	rt.Emit(runtime.Observation{Locator: *loc, Kind: runtime.Gone, Detail: "pane gone"})
-	eventually(t, "the relaunch", func() bool {
+	testwait.Eventually(t, "the relaunch", func() bool {
 		c := d.claim(token)
 		return c.Generation == 2 && c.State == string(supervise.StateLaunching) && len(rt.CallsOf("Resume")) == 1
 	})
@@ -361,7 +367,7 @@ func TestRunLaunchesAgainALaunchThePreviousDaemonDidNotFinish(t *testing.T) {
 
 	d := startDaemon(t, cfg, fakeRuntime(rt, &built{}))
 
-	eventually(t, "the unfinished launch to be launched again", func() bool {
+	testwait.Eventually(t, "the unfinished launch to be launched again", func() bool {
 		c := d.claim(token)
 		return c.State == string(supervise.StateLaunching) && c.Locator != nil
 	})
@@ -393,7 +399,7 @@ func TestRunWaitsToRelaunchAnUnfinishedClaimUntilOrphanReconciliationSucceeds(t 
 	o.orphanSweep = 20 * time.Millisecond
 	d := startDaemon(t, cfg, o)
 
-	eventually(t, "the failed boot reconciliation", func() bool { return len(rt.CallsOf("ReconcileOrphans")) >= 1 })
+	testwait.Eventually(t, "the failed boot reconciliation", func() bool { return len(rt.CallsOf("ReconcileOrphans")) >= 1 })
 	if spawns := rt.CallsOf("Spawn"); len(spawns) != 0 {
 		t.Fatalf("spawns after a failed boot reconciliation = %+v, want none while the old pane is unknown", spawns)
 	}
@@ -417,7 +423,7 @@ func TestRunWaitsToRelaunchAnUnfinishedClaimUntilOrphanReconciliationSucceeds(t 
 		t.Fatalf("old shim hello, register, and ready produced %+v, want no live state without a locator", c)
 	}
 	_ = oldShim.conn.Close()
-	eventually(t, "the old shim's disconnect to leave the claim locator-less", func() bool {
+	testwait.Eventually(t, "the old shim's disconnect to leave the claim locator-less", func() bool {
 		c := d.claim(token)
 		return c.State == "launch_uncertain" && c.Locator == nil
 	})
@@ -437,7 +443,7 @@ func TestRunWaitsToRelaunchAnUnfinishedClaimUntilOrphanReconciliationSucceeds(t 
 	secondOverrides := fakeRuntime(second, &built{})
 	secondOverrides.orphanSweep = 20 * time.Millisecond
 	restarted := startDaemon(t, cfg, secondOverrides)
-	eventually(t, "the second boot's failed reconciliation", func() bool { return len(second.CallsOf("ReconcileOrphans")) >= 1 })
+	testwait.Eventually(t, "the second boot's failed reconciliation", func() bool { return len(second.CallsOf("ReconcileOrphans")) >= 1 })
 	if c := restarted.claim(token); c.State != "launch_uncertain" || c.Locator != nil {
 		t.Fatalf("claim after a second failed boot reconciliation = %+v, want persisted launch_uncertain with no locator", c)
 	}
@@ -456,7 +462,7 @@ func TestRunWaitsToRelaunchAnUnfinishedClaimUntilOrphanReconciliationSucceeds(t 
 	thirdOverrides := fakeRuntime(third, &built{})
 	thirdOverrides.orphanSweep = 20 * time.Millisecond
 	final := startDaemon(t, cfg, thirdOverrides)
-	eventually(t, "the third boot to launch after reconciliation succeeds", func() bool { return len(third.CallsOf("Spawn")) == 1 })
+	testwait.Eventually(t, "the third boot to launch after reconciliation succeeds", func() bool { return len(third.CallsOf("Spawn")) == 1 })
 	if spawned := third.CallsOf("Spawn")[0]; spawned.Spec.Generation != 2 {
 		t.Fatalf("the third boot spawned generation %d, want 2", spawned.Spec.Generation)
 	}
@@ -483,7 +489,7 @@ func TestRunRetriesTheBootReconciliationWithTheClaimsAsTheyAreNow(t *testing.T) 
 	o := fakeRuntime(rt, &built{})
 	o.orphanSweep = 20 * time.Millisecond
 	d := startDaemon(t, cfg, o)
-	eventually(t, "the failed boot reconciliation", func() bool { return len(rt.CallsOf("ReconcileOrphans")) >= 1 })
+	testwait.Eventually(t, "the failed boot reconciliation", func() bool { return len(rt.CallsOf("ReconcileOrphans")) >= 1 })
 
 	worker := architect()
 	worker.Issue, worker.Role = "LEGION-2", claim.RoleImplementer
@@ -498,7 +504,7 @@ func TestRunRetriesTheBootReconciliationWithTheClaimsAsTheyAreNow(t *testing.T) 
 	cleared := len(rt.CallsOf("ReconcileOrphans"))
 	rt.FailReconcileOrphans(nil)
 
-	eventually(t, "the unfinished launch to be released by a successful retry", func() bool { return len(rt.CallsOf("Spawn")) == 2 })
+	testwait.Eventually(t, "the unfinished launch to be released by a successful retry", func() bool { return len(rt.CallsOf("Spawn")) == 2 })
 	var retry *fake.Call
 	for _, call := range rt.CallsOf("ReconcileOrphans")[cleared:] {
 		if call.Grace == 0 {
@@ -622,7 +628,7 @@ func TestRunReconcilesOrphansWhileItRuns(t *testing.T) {
 	token := d.spawn(architect())
 	loc := d.claim(token).Locator
 
-	eventually(t, "a reconciliation that knows the claim's process", func() bool {
+	testwait.Eventually(t, "a reconciliation that knows the claim's process", func() bool {
 		for _, call := range rt.CallsOf("ReconcileOrphans") {
 			if call.Grace == orphanGrace && slices.ContainsFunc(call.Known, func(known runtime.Known) bool {
 				return known.Claim == token && known.Locator != nil && reflect.DeepEqual(*known.Locator, *loc)
@@ -687,7 +693,7 @@ func TestRunKnowsEverySuspendedClaimToTheOrphanSweep(t *testing.T) {
 	}
 	sweeps := len(rt.CallsOf("ReconcileOrphans"))
 
-	eventually(t, "a sweep that knows the suspended and failed claims and not the retired one", func() bool {
+	testwait.Eventually(t, "a sweep that knows the suspended and failed claims and not the retired one", func() bool {
 		for _, call := range rt.CallsOf("ReconcileOrphans")[sweeps:] {
 			locators := map[claim.Token]*runtime.Locator{}
 			for _, known := range call.Known {
@@ -763,8 +769,8 @@ func TestEveryStreamEventMapsToItsSuperviseEvent(t *testing.T) {
 		{stream.Hello{Claim: token, Generation: 3}, supervise.StreamHello{Claim: token, Generation: 3}},
 		{stream.TurnStart{Claim: token, DeliveryID: "d1"}, supervise.StreamTurnStart{Claim: token, DeliveryID: "d1"}},
 		{stream.TurnEnd{Claim: token}, supervise.StreamTurnEnd{Claim: token}},
-		{stream.LateRefusal{Claim: token, DeliveryID: "d1", Error: "Agent is busy"},
-			supervise.StreamLateRefusal{Claim: token, DeliveryID: "d1", Error: "Agent is busy"}},
+		{stream.LateRefusal{Claim: token, DeliveryID: "d1", Error: "Agent is already processing. Use steer() or followUp() to queue messages, or wait for completion."},
+			supervise.StreamLateRefusal{Claim: token, DeliveryID: "d1", Error: "Agent is already processing. Use steer() or followUp() to queue messages, or wait for completion."}},
 		{stream.Closed{Claim: token}, supervise.StreamClosed{Claim: token}},
 	}
 	for _, testCase := range cases {
@@ -885,7 +891,7 @@ func TestRunRelaunchesAFreshSessionWhenTheTreeVolumeIsLostAndTellsTheTree(t *tes
 		WorkspaceLost: true,
 		Detail:        "the tree volume was lost: pod legion-legion-1-architect Failed: init container workspace-init terminated (Error, exit code 3)"})
 
-	eventually(t, "the root's fresh relaunch and the worker's dropped session", func() bool {
+	testwait.Eventually(t, "the root's fresh relaunch and the worker's dropped session", func() bool {
 		r, w := d.claim(root), d.claim(worker)
 		return r.Generation == 3 && r.State == string(supervise.StateLaunching) && r.Session == "" && w.Session == ""
 	})

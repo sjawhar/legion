@@ -175,17 +175,43 @@ func (s *memStore) PutDelivery(_ context.Context, token claim.Token, d Delivery)
 	return nil
 }
 
-func (s *memStore) RetireDelivery(_ context.Context, token claim.Token, deliveryID string) error {
+// PutClaimAndDelivery is the store's one transaction: a failure injected on either write leaves
+// both unwritten, which is what the machine relies on.
+func (s *memStore) PutClaimAndDelivery(ctx context.Context, c Claim, d Delivery) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.failures["RetireDelivery"]; err != nil {
+	for _, method := range []string{"PutClaim", "PutDelivery"} {
+		if err := s.failures[method]; err != nil {
+			s.mu.Unlock()
+			return err
+		}
+	}
+	s.mu.Unlock()
+	if err := s.PutClaim(ctx, c); err != nil {
 		return err
 	}
-	held, ok := s.deliveries[token]
-	if !ok || held.ID != deliveryID {
-		return fmt.Errorf("retire delivery %s on %s: the claim holds no such delivery", deliveryID, token)
+	return s.PutDelivery(ctx, c.Token, d)
+}
+
+func (s *memStore) RetireDelivery(ctx context.Context, c Claim, deliveryID string) error {
+	s.mu.Lock()
+	if err := s.failures["RetireDelivery"]; err != nil {
+		s.mu.Unlock()
+		return err
 	}
-	delete(s.deliveries, token)
+	held, ok := s.deliveries[c.Token]
+	if !ok || held.ID != deliveryID {
+		s.mu.Unlock()
+		return fmt.Errorf("retire delivery %s on %s: the claim holds no such delivery", deliveryID, c.Token)
+	}
+	s.mu.Unlock()
+	// The store writes the claim and the delete together; a failure injected on either leaves
+	// both unwritten, as one transaction does.
+	if err := s.PutClaim(ctx, c); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.deliveries, c.Token)
 	return nil
 }
 

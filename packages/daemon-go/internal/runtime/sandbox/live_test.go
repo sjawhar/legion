@@ -46,6 +46,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/stream"
 )
@@ -69,6 +70,7 @@ var liveChecks = []liveCheck{
 	{"gvisor", (*liveRig).checkGVisor},
 	{"operator-token", (*liveRig).checkOperatorToken},
 	{"pod-baseline", (*liveRig).checkPodBaseline},
+	{"provider-key", (*liveRig).checkProviderKey},
 	{"adopt-working-copy", (*liveRig).checkAdoptWorkingCopy},
 	{"worker-colocated", (*liveRig).checkWorkerColocated},
 	{"suspend", (*liveRig).checkSuspend},
@@ -107,6 +109,13 @@ const (
 // node a 4-vCPU one with room for the tree while no pod requests anything (Stage 4b decision 2).
 var liveTreeVolume = resource.MustParse("20Gi")
 
+// The run's one provider key: the variable its agents' Oh My Pi gets, and the key of the providers
+// Secret (ProvidersSecretName) the script creates for the run, holding a value no model route reads.
+const (
+	liveProviderKey        = "STAGE4A_PROVIDER_KEY"
+	liveProvidersSecretKey = "stage4a"
+)
+
 // fixtureConfigMap is the ConfigMap the operator fixture's pod.yml names; each run creates its own
 // copy, named for its project (LEGION_E2E_OPERATOR_CONFIGMAP), since Stage 4b's driver shares the
 // namespace and a common name would let one run delete another's route.
@@ -119,7 +128,8 @@ var stubAgent = []string{"/bin/sh", "-c", `printf '%s\n' "$POD_UID" >>"$LEGION_E
 // liveEnv is what the script hands the harness.
 type liveEnv struct {
 	runtimeKubeconfig, runtimeContext, operatorContext string
-	namespace, project, claimProject, image, repo      string
+	namespace, project, claimProject, image            string
+	repo                                               ghrepo.Repository
 	streamHost, streamPort                             string
 	appID, appKeyName                                  string
 	record, work, from                                 string
@@ -145,7 +155,6 @@ func readLiveEnv(t *testing.T) liveEnv {
 		namespace:         get("LEGION_E2E_NAMESPACE"),
 		project:           get("LEGION_E2E_PROJECT"),
 		image:             get("LEGION_E2E_IMAGE"),
-		repo:              get("LEGION_E2E_REPO"),
 		streamHost:        get("LEGION_E2E_STREAM_HOST"),
 		streamPort:        get("LEGION_E2E_STREAM_PORT"),
 		appID:             get("LEGION_E2E_IMPLEMENT_APP_ID"),
@@ -156,6 +165,12 @@ func readLiveEnv(t *testing.T) liveEnv {
 		operatorPodFile:   get("LEGION_E2E_OPERATOR_POD"),
 		operatorConfigMap: get("LEGION_E2E_OPERATOR_CONFIGMAP"),
 	}
+	repo, err := ghrepo.Parse("LEGION_E2E_REPO", get("LEGION_E2E_REPO"))
+	if err != nil {
+		fmt.Printf("CHECK identity: FAIL: %v\n", err)
+		t.FailNow()
+	}
+	env.repo = repo
 	if !strings.HasPrefix(env.project, "s4a-") {
 		fmt.Printf("CHECK identity: FAIL: the run project %q lacks the reserved prefix s4a-\n", env.project)
 		t.FailNow()
@@ -610,10 +625,11 @@ func (r *liveRig) startRuntime() error {
 	}
 	rt, err := New(ctx, r.rc, Options{
 		Namespace: r.env.namespace, Project: r.env.project, Image: r.env.image, StorageClass: "gp2", TreeVolume: liveTreeVolume,
-		StreamURL: address,
-		Tools:     Tools{GH: "/usr/local/bin/gh", Git: "/usr/bin/git", JJ: "/usr/local/bin/jj", Legion: "/opt/legion/go/bin/legion"},
-		Pod:       r.pod,
-		Agent:     stubAgent, BootTimeout: liveBootTimeout, BootIntervals: liveBootIntervals,
+		StreamURL:    address,
+		Tools:        Tools{GH: "/usr/local/bin/gh", Git: "/usr/bin/git", JJ: "/usr/local/bin/jj", Legion: "/opt/legion/go/bin/legion"},
+		Pod:          r.pod,
+		ProviderKeys: map[string]string{liveProviderKey: liveProvidersSecretKey},
+		Agent:        stubAgent, BootTimeout: liveBootTimeout, BootIntervals: liveBootIntervals,
 		TerminationGrace: liveGrace, ProbeInterval: liveProbeInterval, AdoptTimeout: liveAdoptTimeout,
 		Tokens: r.tokens, Conns: ln, Log: r.log,
 	})
@@ -826,6 +842,16 @@ func (r *liveRig) awaitRunning(c *liveClaim, since time.Time) (registration, err
 	reg, ok := r.reg.await(c.token, c.gen, since, liveBootTimeout)
 	if !ok {
 		return registration{}, r.networkPathFailure(pod)
+	}
+	return reg, nil
+}
+
+// awaitHelloAgain is c's shim saying hello, since the runtime and listener were replaced at since,
+// with its current generation's boot token: a live claim reconnecting to a new runtime.
+func (r *liveRig) awaitHelloAgain(c *liveClaim, since time.Time) (registration, error) {
+	reg, ok := r.reg.await(c.token, c.gen, since, 2*time.Minute)
+	if !ok || reg.hash != tokenHash(c.bootToken) {
+		return reg, fmt.Errorf("%s's shim did not say hello again with its generation-%d token", c.name, c.gen)
 	}
 	return reg, nil
 }

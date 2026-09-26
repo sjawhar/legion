@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -281,6 +282,13 @@ func TestTheOperatorClosesATreeNoWorkflowIssueBacks(t *testing.T) {
 		reach func(h *harness)
 	}{
 		{"launching", func(*harness) {}},
+		{"already retired", func(h *harness) {
+			// The operator asked for an outcome that holds; a retry after a timeout is not a
+			// failure, and nothing is released twice.
+			if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/close", nil); recorder.Code != http.StatusOK {
+				t.Fatalf("first close = %d; body %s", recorder.Code, recorder.Body)
+			}
+		}},
 		{"suspended", func(h *harness) {
 			h.registered(h.bootToken(architectToken), "ses_architect")
 			if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/suspend", nil); recorder.Code != http.StatusOK {
@@ -458,6 +466,52 @@ func TestTheOperatorsCloseRefusesAWorkflowTreeAndAWorker(t *testing.T) {
 	}
 }
 
+// A close names a claim, and only a tree's root claim closes its tree. A worker's claim that has
+// already retired is still not one: answering it as the close that succeeded ran the tree's
+// fan-out from a claim that never held the tree, stopping the tree's live workers and leaving the
+// root alone. The refusal a live worker gets is the one a retired worker gets.
+func TestAClosedWorkersRetiredClaimStillRefusesAndStopsNothing(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	worker := spawnBody()
+	worker.Issue, worker.Role = "LEGION-209", claim.RoleImplementer
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", worker)
+	tester := spawnBody()
+	tester.Issue, tester.Role = "LEGION-210", claim.RoleTester
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", tester)
+	const implementer = claim.Token("legion-legion-legion-209-implementer")
+	if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(implementer)+"/stop", nil); recorder.Code != http.StatusOK {
+		t.Fatalf("stop = %d; body %s", recorder.Code, recorder.Body)
+	}
+	if state := h.stored(implementer).State; state != supervise.StateRetired {
+		t.Fatalf("the stopped implementer is %s, want retired", state)
+	}
+
+	wantRefusal(t, h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(implementer)+"/close", nil),
+		http.StatusConflict, "close refused: legion-legion-legion-209-implementer is not its tree's root claim; stop it instead")
+
+	if state := h.stored("legion-legion-legion-210-tester").State; state == supervise.StateRetired {
+		t.Error("the tree's tester was retired by a close of a retired worker's claim")
+	}
+	if state := h.stored(architectToken).State; state != supervise.StateLaunching {
+		t.Errorf("the root is %s after the refused close, want it left launching", state)
+	}
+}
+
+// A workflow issue's tree closes when its linger expires, whatever state its root claim is in: a
+// root that has already retired is not a way past TreeClosable.
+func TestACloseOfARetiredRootStillAsksWhetherAWorkflowIssueBacksTheTree(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/close", nil); recorder.Code != http.StatusOK {
+		t.Fatalf("first close = %d; body %s", recorder.Code, recorder.Body)
+	}
+	h.recordIssue(record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "U"})
+
+	wantRefusal(t, h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/close", nil),
+		http.StatusConflict, "close refused: LEGION-208 is a workflow issue's tree, which closes when its linger expires")
+}
+
 func TestListAnswersEveryClaim(t *testing.T) {
 	h := newHarness(t)
 	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
@@ -475,6 +529,30 @@ func TestListAnswersEveryClaim(t *testing.T) {
 	want := []string{string(architectToken), "legion-legion-legion-209-implementer"}
 	if tokens := sortedTokens(got.Claims); !slices.Equal(tokens, want) {
 		t.Fatalf("list answered %v, want %v", tokens, want)
+	}
+}
+
+// The list shows what supervision has counted against a claim and how its task will be sent: the
+// deaths its agent has had with work outstanding, and that a death interrupted its task, which is
+// sent behind the sentence saying so.
+func TestListShowsAClaimsDeathsAndItsInterruptedTask(t *testing.T) {
+	h := newHarness(t)
+	token := claim.Token("legion-legion-legion-209-implementer")
+	if err := h.store.PutClaim(h.ctx, supervise.Claim{Token: token, Project: testProject, Tree: "LEGION-208", Issue: "LEGION-209",
+		Role: claim.RoleImplementer, State: supervise.StateLaunching, Budgets: supervise.Budgets{Deaths: 2}}); err != nil {
+		t.Fatalf("put the claim: %v", err)
+	}
+	if err := h.store.PutDelivery(h.ctx, token, supervise.Delivery{ID: "delivery-1", Task: "implement the plan",
+		QueuedAt: time.Date(2026, 9, 26, 7, 0, 0, 0, time.UTC), Interrupted: true}); err != nil {
+		t.Fatalf("put the delivery: %v", err)
+	}
+
+	recorder := h.operator(http.MethodGet, "/legion/v1/operator/claims", nil)
+
+	var got OperatorClaims
+	decodeInto(t, recorder, &got)
+	if len(got.Claims) != 1 || got.Claims[0].Budgets.Deaths != 2 || got.Claims[0].Pending == nil || !got.Claims[0].Pending.Interrupted {
+		t.Fatalf("list answered %+v, want the claim with 2 deaths and its task interrupted", got.Claims)
 	}
 }
 

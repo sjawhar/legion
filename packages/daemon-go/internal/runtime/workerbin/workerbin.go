@@ -15,8 +15,12 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 )
 
+// DirName is the name of the gh interception directory under any root: `legion gh` and `legion
+// credential` drop every PATH entry of that name before they look for the real gh.
+const DirName = "worker-bin"
+
 // Dir is root's worker-bin, the gh interception point.
-func Dir(root string) string { return filepath.Join(root, "worker-bin") }
+func Dir(root string) string { return filepath.Join(root, DirName) }
 
 // LauncherDir is root's bin, the directory of the legion launcher.
 func LauncherDir(root string) string { return filepath.Join(root, "bin") }

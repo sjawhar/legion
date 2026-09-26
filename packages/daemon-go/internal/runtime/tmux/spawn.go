@@ -24,11 +24,12 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
-// maxWindowNameLength bounds a window name well inside tmux's own limit (runtime-tmux.ts:41).
+// maxWindowNameLength bounds a window name well inside tmux's own limit
+// (MAX_TMUX_WINDOW_NAME_LENGTH, runtime-tmux.ts).
 const maxWindowNameLength = 160
 
 // treeName is the window an issue's panes share: the key lowercased, or when too long, a prefix
-// and a hash of the whole (runtime-tmux.ts:43-49).
+// and a hash of the whole (treeName, runtime-tmux.ts).
 func treeName(issue string) string {
 	full := strings.ToLower(issue)
 	if len(full) <= maxWindowNameLength {
@@ -66,10 +67,9 @@ func validateSpawnSpec(spec runtime.SpawnSpec, providerKeys []string) error {
 	if err := runtime.ValidateSpawnSpec(spec, runtimeOwned); err != nil {
 		return err
 	}
+	// The token names the pane's secret files, and it is one file name: the shared validation
+	// above holds it to the one claim.NewToken derives, which has no separator in it.
 	token := string(spec.Claim)
-	if token == "." || token == ".." || strings.ContainsAny(token, "/\x00") {
-		return fmt.Errorf("spawn %q: the claim token names the pane's secret files and must be one file name", token)
-	}
 	refuse := func(format string, args ...any) error {
 		return fmt.Errorf("spawn %s: "+format, append([]any{token}, args...)...)
 	}
@@ -96,7 +96,7 @@ func validateSpawnSpec(spec runtime.SpawnSpec, providerKeys []string) error {
 // (workspace.Location), which must exist, or, for a configuration with no repository,
 // `<state_dir>/workspaces/<issue>`, made here.
 func (r *Runtime) workspaceDir(spec runtime.SpawnSpec) (string, error) {
-	if spec.Repository == "" {
+	if spec.Repository.IsZero() {
 		dir := filepath.Join(r.stateDir, "workspaces", spec.Issue)
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return "", fmt.Errorf("the workspace: %w", err)
@@ -128,70 +128,22 @@ func sortedKeys(m map[string]string) []string {
 	return keys
 }
 
-// secretFile is one secret's file: the variable its pointer is named after, and the path.
-type secretFile struct {
-	name, path, value string
-}
-
 // secretFiles are the files a spec's secrets are written to, under `<state_dir>/secrets`: the
 // boot token as `<claim>`, each other secret as `<claim>-<lowercased name>`, so one claim token
-// names every file its pane holds (runtime-tmux.ts:619-635, secrets.ts:63-69). The boot token's
-// pointer is LEGION_BOOT_TOKEN_FILE and comes first; the rest follow sorted by name.
-func secretFiles(stateDir string, spec runtime.SpawnSpec) []secretFile {
+// names every file its pane holds (TmuxRuntime.paneEnvPairs, runtime-tmux.ts; extraSecretName,
+// secrets.ts). The boot token's pointer is LEGION_BOOT_TOKEN_FILE and comes first; the rest follow
+// sorted by name.
+func secretFiles(stateDir string, spec runtime.SpawnSpec) []runtime.SecretFile {
 	dir := runtime.SecretsDir(stateDir)
-	files := []secretFile{{name: "LEGION_BOOT_TOKEN", path: filepath.Join(dir, string(spec.Claim)), value: spec.BootToken}}
+	files := []runtime.SecretFile{{Variable: "LEGION_BOOT_TOKEN", Path: filepath.Join(dir, string(spec.Claim)), Value: spec.BootToken}}
 	for _, name := range sortedKeys(spec.Secrets) {
-		files = append(files, secretFile{
-			name:  name,
-			path:  filepath.Join(dir, string(spec.Claim)+"-"+strings.ToLower(name)),
-			value: spec.Secrets[name],
+		files = append(files, runtime.SecretFile{
+			Variable: name,
+			Path:     filepath.Join(dir, string(spec.Claim)+"-"+strings.ToLower(name)),
+			Value:    spec.Secrets[name],
 		})
 	}
 	return files
-}
-
-// writeSecretFiles writes each secret to its 0600 file in a 0700 directory, re-applying both modes
-// on every write — a directory's mkdir mode is masked and ignored when it exists, and a file's is
-// applied only on create (secrets.ts:83-98). The caller owns the files' lifetimes.
-func writeSecretFiles(stateDir string, files []secretFile) error {
-	dir := runtime.SecretsDir(stateDir)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return err
-	}
-	for _, file := range files {
-		if err := os.WriteFile(file.path, []byte(file.value), 0o600); err != nil {
-			return fmt.Errorf("write the %s file: %w", file.name, err)
-		}
-		if err := os.Chmod(file.path, 0o600); err != nil {
-			return fmt.Errorf("write the %s file: %w", file.name, err)
-		}
-	}
-	return nil
-}
-
-// DispatchTokenFileName is the daemon-held Dispatch bearer every pane reads through
-// DISPATCH_TOKEN_FILE, as the shipped daemon names it under `<state_dir>/secrets`.
-const DispatchTokenFileName = "dispatch-token"
-
-// WriteDispatchTokenFile writes the Dispatch bearer as a 0600 file in the 0700 secrets directory,
-// returning the path every pane receives. The value never enters tmux's argv or a pane's
-// environment.
-func WriteDispatchTokenFile(stateDir, token string) (string, error) {
-	return WriteSecretFile(stateDir, DispatchTokenFileName, token)
-}
-
-// WriteSecretFile writes value as runtime.SecretFilePath, a 0600 file in the 0700 secrets
-// directory, and returns its path: what a process outside a pane (`legion controller start`'s
-// controller secret) is handed as a `<NAME>_FILE` pointer, never the value.
-func WriteSecretFile(stateDir, name, value string) (string, error) {
-	path := runtime.SecretFilePath(stateDir, name)
-	if err := writeSecretFiles(stateDir, []secretFile{{name: name, path: path, value: value}}); err != nil {
-		return "", err
-	}
-	return path, nil
 }
 
 // paneInputs are the runtime's own values a pane's -e pairs carry.
@@ -203,12 +155,13 @@ type paneInputs struct {
 }
 
 // panePairs are a pane's -e pairs, in one order: the variables every Legion pane is told (the
-// shipped set, processes.ts:4562-4579, LEGION_DAEMON_API=go, which picks the plugin's Go client,
-// PI_SHELL_PREFIX, which keeps this daemon's gh and legion first in the agent's bash tool, and
-// LEGION_GRANT_FILE, runtime.GrantFile), the four XDG base directories under `<state_dir>/home`,
-// the spec's own variables sorted, then a `<NAME>_FILE` pointer per secret file. PATH is never
-// among them — tmux would replace it (LEGION-91) — and neither is any secret's value.
-func panePairs(spec runtime.SpawnSpec, in paneInputs, files []secretFile) []string {
+// shipped set, ProcessManager.launchWorker's env, processes.ts, LEGION_DAEMON_API=go, which picks
+// the plugin's Go client, PI_SHELL_PREFIX, which keeps this daemon's gh and legion first in the
+// agent's bash tool, and LEGION_GRANT_FILE, runtime.GrantFile), the four XDG base directories
+// under `<state_dir>/home`, the spec's own variables sorted, then a `<NAME>_FILE` pointer per
+// secret file. PATH is never among them — tmux would replace it (LEGION-91) — and neither is any
+// secret's value.
+func panePairs(spec runtime.SpawnSpec, in paneInputs, files []runtime.SecretFile) []string {
 	var pairs []string
 	add := func(name, value string) { pairs = append(pairs, "-e", name+"="+value) }
 	add("LEGION_DAEMON_API", "go")
@@ -243,7 +196,7 @@ func panePairs(spec runtime.SpawnSpec, in paneInputs, files []secretFile) []stri
 		}
 	}
 	for _, file := range files {
-		add(file.name+"_FILE", file.path)
+		add(file.Variable+"_FILE", file.Path)
 	}
 	return pairs
 }
@@ -261,7 +214,7 @@ var (
 
 // readPaneReport reads new-window's `"#{window_id} #{pane_id} #{pane_pid}"` or split-window's
 // `"#{pane_id} #{pane_pid}"`. A malformed report is a launch failure naming the command and
-// tmux's stderr, never the report itself (tmux.ts:234-260).
+// tmux's stderr, never the report itself (parsePaneReport, tmux.ts).
 func readPaneReport(command string, res result, expectWindow bool) (paneReport, error) {
 	tokens := strings.Fields(res.stdout)
 	var report paneReport
@@ -300,7 +253,7 @@ func (r *Runtime) Spawn(ctx context.Context, spec runtime.SpawnSpec) (runtime.Lo
 // waiting, up to the stop grace, for prev's incarnation to be gone: one claim, one process. A nil
 // prev means no previous incarnation is known (a claim suspended across a daemon restart) and
 // there is nothing to wait for. A session file that is missing is a refusal, never a fresh agent:
-// the claim resumes the agent it recorded or none (runtime.ts:331-356).
+// the claim resumes the agent it recorded or none (assertResumeSessionFile, runtime.ts).
 func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtime.SpawnSpec) (runtime.Locator, error) {
 	if spec.ResumeSessionFile == "" {
 		return runtime.Locator{}, fmt.Errorf("resume %s: no session file to resume from", spec.Claim)
@@ -380,7 +333,7 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 		}
 	}
 	files := secretFiles(r.stateDir, spec)
-	if err := writeSecretFiles(r.stateDir, files); err != nil {
+	if err := runtime.WriteSecretFiles(r.stateDir, files); err != nil {
 		return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
 	}
 	path := r.paneEnv["PATH"]
@@ -389,7 +342,7 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 	}
 	path = workerbin.Path(path, r.stateDir)
 	inner := innerCommand(r.ompPrefix, r.ompInvocation, spec.ResumeSessionFile, spec.Prompt)
-	command := shimShellCommand(r.socket, path, workDir, r.legion, r.streamAddress, files[0].path, r.providerEnvDir, inner)
+	command := shimShellCommand(r.socket, path, workDir, r.legion, r.streamAddress, files[0].Path, r.providerEnvDir, inner)
 	pairs := panePairs(spec, paneInputs{
 		stateDir: r.stateDir, workspace: workDir, daemonURL: r.daemonURL, envoyURL: r.envoyURL, natsURLs: r.natsURLs,
 		dispatchURL: r.dispatchURL, dispatchTokenFile: r.dispatchToken, tools: r.tools,
@@ -498,10 +451,10 @@ func (r *Runtime) refuseLiveIncarnation(ctx context.Context, token claim.Token) 
 }
 
 // issueWindow is the window a new pane for issue splits into: the window of the first watched pane
-// on the issue that still verifies as its recorded process (runtime-tmux.ts:664-691). A live
-// window alone proves nothing — after a server is recreated the same @N names another issue's
-// window — and a pane that cannot be verified is simply not shared; a fresh window costs nothing
-// but a window. "" is a new window.
+// on the issue that still verifies as its recorded process (TmuxRuntime.probedWindowId,
+// runtime-tmux.ts). A live window alone proves nothing — after a server is recreated the same @N
+// names another issue's window — and a pane that cannot be verified is simply not shared; a fresh
+// window costs nothing but a window. "" is a new window.
 func (r *Runtime) issueWindow(ctx context.Context, issue string) (string, error) {
 	for _, entry := range r.trackedProcesses() {
 		if entry.issue != issue {
@@ -523,9 +476,10 @@ func (r *Runtime) issueWindow(ctx context.Context, issue string) (string, error)
 }
 
 // ensureSession makes the private session exist, returning true only when this call created it —
-// its caller then owns killing the bootstrap window once its own window is open (tmux.ts:262-300).
-// The bootstrap pane is deliberately unmarked: reconciliation reaps marked daemon windows, not
-// the private server's own placeholder or a human pane. The launch lock serializes callers.
+// its caller then owns killing the bootstrap window once its own window is open (ensureSession,
+// tmux.ts). The bootstrap pane is deliberately unmarked: reconciliation reaps marked daemon
+// windows, not the private server's own placeholder or a human pane. The launch lock serializes
+// callers.
 //
 // Unlike the shipped ensureSession, the session is not marked with the owner option. tmux reads
 // `#{@legion_owner}` for a window or pane by falling back from the window's options to its
@@ -553,7 +507,7 @@ func (r *Runtime) ensureSession(ctx context.Context) (bool, error) {
 // openWindow opens a window named name running pane, in the private session, which it makes
 // exist first. If the window fails and the session turns out to have vanished in between — its
 // last pane exiting as this one opened — the session is recreated and the window tried once more;
-// any other failure is the launch's (runtime-tmux.ts:313-359).
+// any other failure is the launch's (TmuxRuntime.openWindow, runtime-tmux.ts).
 func (r *Runtime) openWindow(ctx context.Context, name string, pane []string) (paneReport, error) {
 	created, err := r.ensureSession(ctx)
 	if err != nil {
@@ -585,7 +539,7 @@ func (r *Runtime) openWindow(ctx context.Context, name string, pane []string) (p
 // openWindowIn is one new-window: the creator of the session kills its bootstrap window right
 // after, before the result is read. The pane marks its own window before it starts the shim, so a
 // crash that loses the report still leaves a reapable owner marker; after the report this method
-// repeats the marker and treats a failure as a launch failure (tmux.ts:197-226, 302-357).
+// repeats the marker and treats a failure as a launch failure (markOwner and openWindow, tmux.ts).
 func (r *Runtime) openWindowIn(ctx context.Context, name string, pane []string, createdSession bool) (paneReport, error) {
 	res, err := r.run(ctx, newWindowArgv(r.socket, r.socket, name, pane))
 	if err != nil {
@@ -620,7 +574,7 @@ func (r *Runtime) openWindowIn(ctx context.Context, name string, pane []string, 
 	return report, nil
 }
 
-// splitWindow splits pane into window and tiles the layout (tmux.ts:359-384).
+// splitWindow splits pane into window and tiles the layout (splitWindow, tmux.ts).
 func (r *Runtime) splitWindow(ctx context.Context, window string, pane []string) (paneReport, error) {
 	res, err := r.run(ctx, splitWindowArgv(r.socket, window, pane))
 	if err != nil {

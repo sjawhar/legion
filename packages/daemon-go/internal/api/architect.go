@@ -220,9 +220,8 @@ func (s *server) documentOfIssue(w http.ResponseWriter, r *http.Request, artifac
 		return false
 	}
 	approval, err := s.dispatch.Approval(r.Context(), artifactID)
-	var dispatchError *dispatch.Error
 	switch {
-	case errors.As(err, &dispatchError) && dispatchError.Status == http.StatusNotFound, err == nil && approval.IssueKey != issue:
+	case dispatch.Missing(err), err == nil && approval.IssueKey != issue:
 		writeFailure(w, http.StatusNotFound, "ARTIFACT_NOT_ON_ISSUE", fmt.Sprintf("%s is not a document of %s", artifactID, issue))
 		return false
 	case err != nil:
@@ -237,39 +236,65 @@ func (s *server) documentOfIssue(w http.ResponseWriter, r *http.Request, artifac
 // answer, since it holds a child only once the child is todo; the shipped daemon checks the same
 // membership over its mirrored issue graph. An issue already in the workflow is refused, since
 // writing todo would move an in-progress child back.
-func (s *server) releasableChild(w http.ResponseWriter, r *http.Request, tree, key string) bool {
-	child, ok := s.dispatchIssue(w, r, key)
-	if !ok {
-		return false
+//
+// A child already todo is neither: todo is what this call writes, so it is one an earlier attempt
+// of this same wave released before Dispatch failed it part way through. It is accepted and needs
+// no write, which is what makes the architect's retry of the whole wave finish it.
+func (s *server) releasableChild(w http.ResponseWriter, r *http.Request, tree, key string, read issueReader) (write bool, ok bool) {
+	child, found := read(w, r, key)
+	if !found {
+		return false, false
 	}
+	write = true
 	switch child.Status {
 	case "triage", "backlog", "icebox":
+	case "todo":
+		write = false
 	default:
 		writeFailure(w, http.StatusConflict, "ISSUE_ALREADY_RELEASED", fmt.Sprintf("%s is %s; release_children releases only a triage, backlog, or icebox child", key, child.Status))
-		return false
+		return false, false
 	}
 	seen := map[string]bool{key: true}
 	for parent := child.Parent; parent != nil && !seen[*parent]; {
 		if *parent == tree {
-			return true
+			return write, true
 		}
 		seen[*parent] = true
-		ancestor, ok := s.dispatchIssue(w, r, *parent)
-		if !ok {
-			return false
+		ancestor, found := read(w, r, *parent)
+		if !found {
+			return false, false
 		}
 		parent = ancestor.Parent
 	}
 	writeFailure(w, http.StatusForbidden, "ISSUE_OUTSIDE_TREE", fmt.Sprintf("%s is outside the architect tree %s", key, tree))
-	return false
+	return false, false
+}
+
+// issueReader reads one issue for a request, answering its own failures.
+type issueReader func(w http.ResponseWriter, r *http.Request, key string) (dispatch.Issue, bool)
+
+// cachedIssueReader reads each issue from Dispatch once per request. A wave's children share the
+// ancestors between them and the tree root, and the membership walk read every one of them again
+// for every child.
+func (s *server) cachedIssueReader() issueReader {
+	seen := map[string]dispatch.Issue{}
+	return func(w http.ResponseWriter, r *http.Request, key string) (dispatch.Issue, bool) {
+		if issue, read := seen[key]; read {
+			return issue, true
+		}
+		issue, ok := s.dispatchIssue(w, r, key)
+		if ok {
+			seen[key] = issue
+		}
+		return issue, ok
+	}
 }
 
 // dispatchIssue reads one issue from Dispatch, answering a missing issue 404 and a failed read 502.
 func (s *server) dispatchIssue(w http.ResponseWriter, r *http.Request, key string) (dispatch.Issue, bool) {
 	issue, err := s.dispatch.GetIssue(r.Context(), key)
-	var dispatchError *dispatch.Error
 	switch {
-	case errors.As(err, &dispatchError) && dispatchError.Status == http.StatusNotFound:
+	case dispatch.Missing(err):
 		writeFailure(w, http.StatusNotFound, "ISSUE_NOT_FOUND", fmt.Sprintf("%s is not a Dispatch issue", key))
 		return dispatch.Issue{}, false
 	case err != nil:
@@ -295,16 +320,24 @@ func (s *server) waveRelease(w http.ResponseWriter, r *http.Request) {
 	if req.Issues == nil {
 		req.Issues = []string{}
 	}
+	// One wave's children share ancestors, and the walk to the tree root re-read each of them
+	// per child: the reads are cached for the life of this request.
+	read := s.cachedIssueReader()
+	unreleased := make([]string, 0, len(req.Issues))
 	for _, issue := range req.Issues {
 		if !claim.IsIssueKey(issue) {
 			writeFailure(w, http.StatusBadRequest, "INVALID_ISSUE", "issues must contain issue keys")
 			return
 		}
-		if !s.releasableChild(w, r, grant.Tree, issue) {
+		write, ok := s.releasableChild(w, r, grant.Tree, issue, read)
+		if !ok {
 			return
 		}
+		if write {
+			unreleased = append(unreleased, issue)
+		}
 	}
-	for _, issue := range req.Issues {
+	for _, issue := range unreleased {
 		if err := s.dispatch.SetStatus(r.Context(), issue, "todo"); err != nil {
 			var dispatchError *dispatch.Error
 			if errors.As(err, &dispatchError) {

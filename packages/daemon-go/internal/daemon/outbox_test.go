@@ -18,12 +18,14 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
@@ -35,7 +37,7 @@ func TestOutboxDropsSupersededStatusWrite(t *testing.T) {
 	}
 	row.ID = 42
 	client := &outboxDispatch{issue: dispatch.Issue{Key: "LEGION-208", Status: "backlog"}}
-	runner := &outbox{dispatch: client}
+	runner := &outbox{log: quietLogger(), dispatch: client}
 
 	if err := runner.execute(context.Background(), row); err != nil {
 		t.Fatalf("execute: %v", err)
@@ -52,7 +54,7 @@ func TestOutboxFinishesMessageAlreadyPostedBeforeCrash(t *testing.T) {
 	}
 	row.ID = 44
 	client := &outboxDispatch{bodies: []string{"Pull request checks are blocked.\n\n<!-- legion-outbox:44 -->"}}
-	runner := &outbox{dispatch: client}
+	runner := &outbox{log: quietLogger(), dispatch: client}
 
 	if err := runner.execute(context.Background(), row); err != nil {
 		t.Fatalf("execute: %v", err)
@@ -172,7 +174,7 @@ func TestOutboxGateSeedAppliesApprovedFactAndReturnsApprovalFailure(t *testing.T
 	version := new(int)
 	*version = 3
 	client := &outboxDispatch{approval: dispatch.Approval{State: "approved", LatestVersion: 3, Version: version}}
-	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, dispatch: client, handlers: []intake.Handler{handler}}
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, dispatch: client, handlers: []intake.Handler{handler}}
 
 	if err := runner.execute(context.Background(), row); err != nil {
 		t.Fatalf("execute gate seed: %v", err)
@@ -207,7 +209,7 @@ func TestOutboxGateSeedRaisesTheGateToTheVersionDispatchHolds(t *testing.T) {
 			pool := isolatedOutboxPool(t)
 			handler := &outboxFactHandler{}
 			row := mustOutboxRow(t, "LEGION-208", record.GateSeed{ArtifactID: "artifact-208", Version: 1}, time.Now())
-			runner := &outbox{pool: pool, dispatchProject: "LEGION", records: record.NewStore(), dispatch: &outboxDispatch{approval: tc.approval}, handlers: []intake.Handler{handler}}
+			runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: record.NewStore(), dispatch: &outboxDispatch{approval: tc.approval}, handlers: []intake.Handler{handler}}
 			if err := runner.execute(context.Background(), row); err != nil {
 				t.Fatalf("execute gate seed: %v", err)
 			}
@@ -222,7 +224,7 @@ func TestOutboxLingerAppliesExpirationAndReturnsHandlerFailure(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	handler := &outboxFactHandler{}
 	row := mustOutboxRow(t, "LEGION-208", record.LingerClose{Generation: 7}, time.Now())
-	runner := &outbox{pool: pool, dispatchProject: "LEGION", handlers: []intake.Handler{handler}}
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", handlers: []intake.Handler{handler}}
 
 	if err := runner.execute(context.Background(), row); err != nil {
 		t.Fatalf("execute linger close: %v", err)
@@ -250,7 +252,7 @@ func TestOutboxWorkspaceRemovalUsesDeterministicLocationAndReturnsFailure(t *tes
 		dispatchProject: "LEGION",
 		pool:            pool, records: records, supervisor: sup, log: quietLogger(),
 		stateDir: t.TempDir(),
-		repo:     "acme/widgets",
+		repo:     ghrepo.MustParse("acme/widgets"),
 		remove: func(_ context.Context, got workspace.Workspace) error {
 			removed = got
 			return nil
@@ -277,9 +279,9 @@ func TestOutboxSuperviseStartsResumesSuspendsStopsAndDeduplicatesDelivery(t *tes
 	putOutboxIssue(t, pool, records, issue)
 	sup, runtime := newOutboxSupervisor(t, "legion", t.TempDir())
 	provisioned := 0
-	runner := &outbox{
+	runner := &outbox{log: quietLogger(),
 		dispatchProject: "LEGION",
-		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets",
+		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
 			provisioned++
 			return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-208"}, nil
@@ -355,7 +357,7 @@ func TestOutboxStartRelaunchesAFailedClaim(t *testing.T) {
 	if got := machine.Claim().State; got != supervise.StateFailed {
 		t.Fatalf("claim state = %s, want failed", got)
 	}
-	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets"}
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets")}
 	row := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RoleImplementer, Task: "Continue. Reason: retry held phase.", Generation: issue.Generation}, time.Now())
 	row.ID = 91
 
@@ -406,7 +408,7 @@ func TestOutboxRetryStartForAPhaseTheIssueLeftRelaunchesNothing(t *testing.T) {
 	clock := time.Now().Add(time.Minute)
 	runner := &outbox{
 		dispatchProject: "LEGION",
-		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets",
+		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
 		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: issue.Key, Status: "in_progress"}}, notices: &outboxPublisher{},
 		handlers: []intake.Handler{engine}, now: func() time.Time { return clock }, log: quietLogger(),
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
@@ -437,14 +439,14 @@ func TestOutboxRetryStartForAPhaseTheIssueLeftRelaunchesNothing(t *testing.T) {
 			t.Fatalf("handle %T: %v", ev, err)
 		}
 	}
-	eventually(t, "the relaunched implementer's task to be acknowledged", func() bool {
+	testwait.Eventually(t, "the relaunched implementer's task to be acknowledged", func() bool {
 		p := machine.Claim().Pending
 		return p != nil && !p.DeliveredAt.IsZero()
 	})
 	if err := machine.Handle(ctx, supervise.StreamTurnStart{Claim: token}); err != nil {
 		t.Fatalf("start the turn: %v", err)
 	}
-	result, err := intake.ApplyFact(ctx, pool, "api", "handoff:LEGION-208:implementer:implementing", intake.HandoffComplete{Issue: issue.Key, Role: claim.RoleImplementer, Claim: token, Commit: "952c3514"}, engine)
+	result, err := intake.ApplyFact(ctx, pool, "api", "handoff:LEGION-208:implementer:implementing", intake.HandoffComplete{Generation: 1, Issue: issue.Key, Role: claim.RoleImplementer, Claim: token, Commit: "952c3514"}, engine)
 	if err != nil || result.Refusal != nil {
 		t.Fatalf("complete implementing = %+v, %v", result.Refusal, err)
 	}
@@ -522,7 +524,7 @@ func TestAResumedWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *test
 			clock := time.Now()
 			runner := &outbox{
 				dispatchProject: "LEGION",
-				pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets",
+				pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
 				dispatch: &outboxDispatch{issue: dispatch.Issue{Key: issue.Key, Status: "needs_review"}}, notices: &outboxPublisher{},
 				handlers: []intake.Handler{engine}, now: func() time.Time { return clock }, log: quietLogger(),
 				provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
@@ -575,7 +577,7 @@ func TestAResumedWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *test
 				}
 			}
 			ready()
-			eventually(t, "the round-2 task to be acknowledged", func() bool {
+			testwait.Eventually(t, "the round-2 task to be acknowledged", func() bool {
 				p := machine.Claim().Pending
 				return p != nil && !p.DeliveredAt.IsZero()
 			})
@@ -591,14 +593,14 @@ func TestAResumedWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *test
 			}
 
 			// Inside that turn the implementer finishes round 2, and the transition suspends it.
-			apply("handoff:implementer:implementing:2", intake.HandoffComplete{Issue: issue.Key, Role: claim.RoleImplementer, Claim: implementer, Commit: "impl-round-2"})
+			apply("handoff:implementer:implementing:2", intake.HandoffComplete{Generation: 1, Issue: issue.Key, Role: claim.RoleImplementer, Claim: implementer, Commit: "impl-round-2"})
 			due("the move to testing")
 			if got := machine.Claim().State; got != supervise.StateSuspended {
 				t.Fatalf("after round 2 the implementer is %s, want suspended", got)
 			}
 
 			// The tester passes, and the reviewer decides.
-			apply("handoff:tester:testing:2", intake.HandoffComplete{Issue: issue.Key, Role: claim.RoleTester, Claim: tester, Commit: "test-round-2", Verdict: "pass"})
+			apply("handoff:tester:testing:2", intake.HandoffComplete{Generation: 1, Issue: issue.Key, Role: claim.RoleTester, Claim: tester, Commit: "test-round-2", Verdict: "pass"})
 			due("the move to reviewing")
 			review := tc.review
 			review.Repo, review.Number, review.CommitID, review.HeadSHA = "acme/widgets", 118, head, head
@@ -611,7 +613,7 @@ func TestAResumedWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *test
 			}
 			ready()
 			due("the rows still waiting")
-			eventually(t, "the resumed implementer to be handed a task", func() bool { return len(conn.Prompts()) > prompted })
+			testwait.Eventually(t, "the resumed implementer to be handed a task", func() bool { return len(conn.Prompts()) > prompted })
 
 			handed := conn.Prompts()[prompted:]
 			if !strings.Contains(handed[0].Message, tc.want) {
@@ -635,7 +637,7 @@ func TestOutboxSuperviseReturnsProvisioningFailure(t *testing.T) {
 	row := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RolePlanner, Generation: issue.Generation}, time.Now())
 	runner := &outbox{
 		dispatchProject: "LEGION",
-		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets",
+		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
 			return workspace.Workspace{}, errors.New("provision failed")
 		},
@@ -738,9 +740,9 @@ func TestTerminalReplayAppliesPersistedReadyFactOnce(t *testing.T) {
 	}
 }
 
-// The predicate supervise asks before it sends a queued task: the task names the phase it was
-// queued for, and a task whose phase the issue has left is finished work. The role is not what is
-// compared — one role runs several phases — and a delivery of no phase is nobody's to drop.
+// The answer supervise asks for before it sends a queued task: is the issue still in the phase
+// the task was queued for. The role is not what is compared — one role runs several phases — and
+// a task of no phase never reaches this answer at all, which is supervise's own rule.
 func TestPhaseHoldsAnswersFromTheIssuesCurrentPhase(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
@@ -748,41 +750,30 @@ func TestPhaseHoldsAnswersFromTheIssuesCurrentPhase(t *testing.T) {
 		Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "phase holds",
 		Phase: phase.Implementing, Status: "in_progress", Rank: "00000",
 	})
-	holds := phaseHolds(pool, records)
-	claimOf := func(role claim.Role, issue string) supervise.Claim {
-		return supervise.Claim{Token: claim.Token("legion-omp-" + issue + "-" + string(role)), Issue: issue, Role: role}
-	}
-	queuedFor := func(p phase.Phase) supervise.Delivery {
-		return supervise.Delivery{ID: outboxDeliveryPrefix + "42", Task: "the task", Phase: p}
-	}
-	byHand := supervise.Delivery{ID: "MKVV7QJ2", Task: "the task"}
+	holds := (&workflowRuntime{pool: pool, records: records}).phaseHolds
 
 	for _, tc := range []struct {
-		name     string
-		claim    supervise.Claim
-		delivery supervise.Delivery
-		want     bool
+		name      string
+		issue     string
+		queuedFor phase.Phase
+		want      bool
 	}{
-		{name: "the issue's own phase", claim: claimOf(claim.RoleImplementer, "LEGION-208"), delivery: queuedFor(phase.Implementing), want: true},
-		{name: "a phase the issue has not reached", claim: claimOf(claim.RoleTester, "LEGION-208"), delivery: queuedFor(phase.Testing), want: false},
+		{name: "the issue's own phase", issue: "LEGION-208", queuedFor: phase.Implementing, want: true},
+		{name: "a phase the issue has not reached", issue: "LEGION-208", queuedFor: phase.Testing, want: false},
 		// The implementer works implementing, retro and the production check: a task written for
 		// one of them is not the work of another, which the role alone cannot tell.
-		{name: "another phase of this claim's own role", claim: claimOf(claim.RoleImplementer, "LEGION-208"), delivery: queuedFor(phase.Retro), want: false},
-		// The operator asked for this one and was answered 200; dropping it would make the work
-		// silently not happen after a relaunch.
-		{name: "an operator's own delivery, of no phase", claim: claimOf(claim.RoleTester, "LEGION-208"), delivery: byHand, want: true},
-		{name: "the architect, whose task is of no phase", claim: claimOf(claim.RoleArchitect, "LEGION-208"), delivery: byHand, want: true},
+		{name: "another phase of the same role", issue: "LEGION-208", queuedFor: phase.Retro, want: false},
 		// The workflow never deletes an issue, so no record means the claim is not the workflow's:
 		// an operator spawn, whose task the workflow has no standing to drop.
-		{name: "a claim the workflow never made", claim: claimOf(claim.RoleImplementer, "LEGION-999"), delivery: queuedFor(phase.Implementing), want: true},
+		{name: "an issue the workflow never recorded", issue: "LEGION-999", queuedFor: phase.Implementing, want: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := holds(context.Background(), tc.claim, tc.delivery)
+			got, err := holds(context.Background(), tc.issue, tc.queuedFor)
 			if err != nil {
 				t.Fatalf("phaseHolds: %v", err)
 			}
 			if got != tc.want {
-				t.Fatalf("phaseHolds(%s) = %v, want %v", tc.claim.Token, got, tc.want)
+				t.Fatalf("phaseHolds(%s, %s) = %v, want %v", tc.issue, tc.queuedFor, got, tc.want)
 			}
 		})
 	}
@@ -791,12 +782,12 @@ func TestPhaseHoldsAnswersFromTheIssuesCurrentPhase(t *testing.T) {
 		Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "phase holds",
 		Phase: phase.Testing, Status: "testing", Rank: "00000",
 	})
-	implementer, err := holds(context.Background(), claimOf(claim.RoleImplementer, "LEGION-208"), queuedFor(phase.Implementing))
+	implementing, err := holds(context.Background(), "LEGION-208", phase.Implementing)
 	if err != nil {
 		t.Fatalf("phaseHolds after the phase moved: %v", err)
 	}
-	if implementer {
-		t.Fatal("the implementer's queued task still holds after the issue reached testing")
+	if implementing {
+		t.Fatal("the implementing task still holds after the issue reached testing")
 	}
 }
 
@@ -903,10 +894,20 @@ func (s *outboxClaimStore) PutDelivery(_ context.Context, token claim.Token, del
 	return nil
 }
 
-func (s *outboxClaimStore) RetireDelivery(_ context.Context, token claim.Token, _ string) error {
+func (s *outboxClaimStore) PutClaimAndDelivery(ctx context.Context, c supervise.Claim, d supervise.Delivery) error {
+	if err := s.PutClaim(ctx, c); err != nil {
+		return err
+	}
+	return s.PutDelivery(ctx, c.Token, d)
+}
+
+func (s *outboxClaimStore) RetireDelivery(ctx context.Context, c supervise.Claim, _ string) error {
+	if err := s.PutClaim(ctx, c); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.deliveries, token)
+	delete(s.deliveries, c.Token)
 	return nil
 }
 
@@ -940,7 +941,7 @@ func TestAClosedTreeSetBackToTodoRelaunchesItsArchitect(t *testing.T) {
 	admission := admit.New(records, 2, "legion", quietLogger())
 	runner := &outbox{
 		dispatchProject: "LEGION",
-		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets",
+		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
 		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: root.Key, Status: "todo"}}, handlers: []intake.Handler{engine, admission},
 		now: func() time.Time { return time.Now().Add(time.Hour) }, log: quietLogger(),
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
@@ -1008,7 +1009,7 @@ func TestAnEarlierGenerationsWorkspaceRemovalLeavesTheReadmittedTreesWorkspace(t
 	removals, busy := 0, true
 	runner := &outbox{
 		dispatchProject: "LEGION",
-		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets",
+		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
 		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: root.Key, Status: "todo"}}, handlers: []intake.Handler{engine, admission},
 		now: func() time.Time { return clock }, log: quietLogger(),
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
@@ -1059,7 +1060,7 @@ func TestARuntimeThatProvisionsInItsPodsLeavesTheHostWithoutWorkspaces(t *testin
 	provisions, removals := 0, 0
 	runner := &outbox{
 		dispatchProject: "LEGION",
-		pool:            pool, records: records, supervisor: sup, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets", log: quietLogger(),
+		pool:            pool, records: records, supervisor: sup, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"), log: quietLogger(),
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
 			provisions++
 			return workspace.Workspace{}, nil

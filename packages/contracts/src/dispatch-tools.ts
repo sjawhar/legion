@@ -190,6 +190,7 @@ export const dispatchToolSpecs = [
     example: { project: "DSP", title: "Native workspace" },
     description:
       "Create a native Dispatch issue for newly tracked work. Search first with dispatch_search; if potentially duplicate issues exist, this returns 409 POSSIBLE_DUPLICATE unless force is true after reading them. " +
+      "A spec holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK. " +
       `Do not use it when an existing issue already covers the work; read or update that issue instead. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
       project: z.string().describe("Project key for the new issue."),
@@ -391,8 +392,9 @@ export const dispatchToolSpecs = [
       "only the fields you name - pass urgency alone and the question's wording, formatting, links " +
       "and comment anchors are untouched - so the edit writes a document version and closes a " +
       "spec's design gate until that version is " +
-      'approved; an option label containing ": " and a question with a line beginning ":::" are ' +
-      "refused, naming the field, because the block cannot carry them unchanged.",
+      "approved; text the block cannot carry back unchanged is refused, naming the field - an " +
+      'option label containing ": ", the separator between a label and its description, is one ' +
+      "example.",
     arguments: (z) => ({
       ask: z
         .string()
@@ -652,7 +654,7 @@ export const dispatchToolSpecs = [
               with: z
                 .string()
                 .describe(
-                  "Replacement text for replace: inside a code block, the code's literal text as sent (line breaks at its end do not survive a read, and a line of three or more colons in code inside a typed block, indented less than four columns from where the typed block's lines start, is refused, since the browser editor ends the typed block there: indent it four or more spaces, or move the code block out); text that reads back as another block, such as '---' over a paragraph, is refused, and a rule is added with insert beside it (not in a footnote definition, which reads back at the document's end); elsewhere parsed as inline markdown within the matched block; a marker of a different kind from the block's own is literal text, one of the same kind is refused unless it is a heading rename (where a level named by find is what lets with change it), a backslash escape keeps prose that merely looks like a marker, a block marker after a hard line break is refused because replace cannot open a new block, and any non-empty value that renders to no text is refused - only an empty value deletes the match."
+                  "Replacement text for replace: inside a code block, the code's literal text as sent (line breaks at its end do not survive a read, and a line of three or more colons in code inside a typed block, indented less than four columns from where the typed block's lines start, is refused, since the browser editor ends the typed block there: indent it four or more spaces, or move the code block out); text that would read as block syntax at a line start, such as '---' over a paragraph, is stored escaped and reads back as those characters, so a rule is added with insert beside the paragraph; elsewhere parsed as inline markdown within the matched block; a marker of a different kind from the block's own is literal text, one of the same kind is refused unless it is a heading rename (where a level named by find is what lets with change it), a backslash escape keeps prose that merely looks like a marker, a block marker after a hard line break is refused because replace cannot open a new block, and any non-empty value that renders to no text is refused - only an empty value deletes the match."
                 )
                 .optional(),
               occurrence: z
@@ -771,7 +773,9 @@ export const dispatchToolSpecs = [
     example: { issue: "DSP-1", name: "design.md", content: "# Design\n" },
     description:
       "Attach a local file or inline text as an issue artifact or project document. Do not use it to edit a live document; use " +
-      `dispatch_doc_edit instead. Exactly one of path or content is required; artifacts are limited to 25 MiB. ${OWNER_REFERENCE}`,
+      "dispatch_doc_edit instead. Exactly one of path or content is required; artifacts are limited to 25 MiB. " +
+      "Markdown holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK; a new version of a document is held to it only for the asks it writes or changes. " +
+      `${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key for an unlinked document.").optional(),

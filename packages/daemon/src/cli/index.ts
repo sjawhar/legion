@@ -22,7 +22,6 @@ import {
 import {
   type DaemonConfig,
   type LoadConfigFileOptions,
-  type LoadedConfigFile,
   loadConfigFromFile,
   resolveDaemonConfig,
 } from "../daemon/config";
@@ -297,10 +296,11 @@ export async function cmdGh(args: string[], deps: GhCommandDeps): Promise<void> 
 /** `legion threads resolve --pr <n> --repo <owner>/<name>`: as the App of the role running it
  * (with `gh`, as whoever the caller's own `gh` authenticates as), resolves every unresolved review
  * thread whose newest comment is its opener's own submitted `Accepted:` reply and names every
- * other unresolved thread as left open (`resolveAcceptedThreads`). GitHub refuses the review App
- * `resolveReviewThread` (its token reads `viewerCanResolve: false`, though its installation holds
- * `contents: write`), so the threads it opens are resolved here by the implementer — before
- * every push that answers a review — and by the merger once more before READY. Both flags are
+ * other unresolved thread as left open (`resolveAcceptedThreads`). GitHub grants resolving to the
+ * pull request's author's App, and the implementer opens every Legion pull request
+ * (`daemon/AGENTS.md`, GitHub Apps), so the threads the reviewer opens are resolved here by the
+ * implementer — before every push that answers a review — and by the merger once more before
+ * READY. Both flags are
  * validated before any grant is redeemed. With `gh`, a session outside a Legion pane, which has
  * no grant, applies the same rule through its own `gh` (`ghGraphql`), from any directory: GH_REPO
  * names the repository a routed `gh` would otherwise read from a checkout, and gh's stderr is
@@ -468,7 +468,7 @@ export function loadStartConfig(
   env: NodeJS.ProcessEnv,
   options: LoadConfigFileOptions = {}
 ): DaemonConfig {
-  let configFile: LoadedConfigFile | undefined;
+  let configFile: Record<string, unknown> | undefined;
   if (configPath) {
     // Relative `state_dir`/`instructions` values resolve against the config file's own directory
     // (`loadConfigFromFile`'s `configDir`), never the cwd the daemon happened to start from.

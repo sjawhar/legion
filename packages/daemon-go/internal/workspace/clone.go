@@ -10,6 +10,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 )
 
@@ -21,9 +22,10 @@ const provisioningTokenFileEnv = "LEGION_PROVISIONING_TOKEN_FILE"
 // so a remote rewritten to another scheme, host, or port gets nothing, and no askpass is asked in
 // its place. In a pod the one process holding it, Fetch, reads no configuration a tree agent can
 // write, so the only remote it asks for is the one its own argv names. On the tmux runtime the
-// credentialed clone and fetch read the shared clone's configuration, where an http.proxy the tree
-// wrote with http.sslVerify off still sees the token on its way to github.com: there the scope is
-// defence, not a boundary (config.go).
+// credentialed clone and fetch read the shared clone's configuration, so there the scope is
+// defence, not a boundary (config.go). One example of what it leaves open: an http.proxy the tree
+// wrote with http.sslVerify off still sees the token on its way to github.com. It is an example,
+// not the whole list.
 const provisioningHelper = `#!/bin/sh
 [ "$1" = get ] || exit 0
 printf 'username=x-access-token\npassword=%s\n' "$(cat "$LEGION_PROVISIONING_TOKEN_FILE")"
@@ -38,10 +40,11 @@ type remote struct {
 	branches []string
 }
 
-// newProvisioningCredential ports the one-shot credential in workspace.ts:91-142. The Go daemon
-// keeps the token in a 0600 file under parent, so the processes it is handed to receive only a file
-// pointer and never a secret environment value. GIT_ASKPASS is set empty, which git reads as no
-// askpass at all — neither core.askPass nor SSH_ASKPASS — and terminal prompts are off.
+// newProvisioningCredential ports workspace.ts's createProvisioningCredential, the one-shot
+// credential. The Go daemon keeps the token in a 0600 file under parent, so the processes it is
+// handed to receive only a file pointer and never a secret environment value. GIT_ASKPASS is set
+// empty, which git reads as no askpass at all — neither core.askPass nor SSH_ASKPASS — and terminal
+// prompts are off.
 func newProvisioningCredential(parent, token string) (remote, error) {
 	if token == "" {
 		return remote{}, errors.New("workspace provisioning token is required")
@@ -103,37 +106,93 @@ var isolatedGitConfig = []string{"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSY
 // FetchRequest is a pod's first init container's: the repository, the provisioning token, the
 // directory its one-shot credential goes under, and the feed directory.
 type FetchRequest struct {
-	Repo          string
+	Repo          ghrepo.Repository
 	Token         string
 	CredentialDir string
 	Feed          string
 }
 
-// FeedRepository is where Fetch clones repository under a feed directory, and where Provision
-// clones and fetches it from.
-func FeedRepository(feed, repository string) (string, error) {
-	owner, repo, err := splitRepository(repository)
+// Source is how provisioning reaches the repository for the shared clone's clone and fetch: from a
+// pod's feed with no credential (FromFeed), or from GitHub with the one-shot credential
+// (FromGitHub). Only this package's two constructors make one.
+type Source interface {
+	// check refuses a Source that cannot reach repository, before provisioning runs anything.
+	check(repository ghrepo.Repository) error
+	// open is the remote the clone and the fetch of repository use, with bookmark the issue's own;
+	// the caller removes it.
+	open(repository ghrepo.Repository, bookmark string) (remote, error)
+}
+
+// FromFeed is a pod's feed directory, where Fetch cloned the repository in the pod's first init
+// container: the shared clone clones and fetches from it with no credential, in the second, which
+// the provisioning Secret is not mounted in.
+func FromFeed(dir string) Source { return feedSource(dir) }
+
+type feedSource string
+
+func (dir feedSource) check(repository ghrepo.Repository) error {
+	_, err := feedRepository(string(dir), repository)
+	return err
+}
+
+func (dir feedSource) open(repository ghrepo.Repository, bookmark string) (remote, error) {
+	feed, err := feedRepository(string(dir), repository)
 	if err != nil {
-		return "", err
+		return remote{}, err
+	}
+	return feedRemote(feed, repository, bookmark), nil
+}
+
+// FromGitHub is GitHub itself, reached with the one-shot credential holding token, created under
+// credentialDir and removed again: the tmux runtime, which names its state directory.
+func FromGitHub(token, credentialDir string) Source {
+	return gitHubSource{token: token, credentialDir: credentialDir}
+}
+
+type gitHubSource struct{ token, credentialDir string }
+
+func (s gitHubSource) check(ghrepo.Repository) error {
+	if s.credentialDir == "" {
+		return errors.New("workspace credential directory is required")
+	}
+	return nil
+}
+
+func (s gitHubSource) open(ghrepo.Repository, string) (remote, error) {
+	return newProvisioningCredential(s.credentialDir, s.token)
+}
+
+// feedRepository is where Fetch clones repository under a feed directory, and where a feed
+// Source clones and fetches it from. The zero repository is refused, as Location refuses it: it
+// names the feed's own `.git`.
+func feedRepository(feed string, repository ghrepo.Repository) (string, error) {
+	if repository.IsZero() {
+		return "", errors.New("workspace repository is required")
 	}
 	if feed == "" {
 		return "", errors.New("workspace feed directory is required")
 	}
-	return filepath.Join(feed, owner, repo+".git"), nil
+	return filepath.Join(feed, repository.Owner(), repository.Name()+".git"), nil
 }
 
-// feedRemote reaches https://github.com/<repo>, the remote the shared clone's origin names, at the
-// feed repository instead, over git's file transport alone: no credential, and no network. The
-// feed is GitHub as it stood when the pod's workspace-fetch ran, and a tree agent may have pushed
-// since, so a fetch from it brings main and the issue's own bookmark alone: every other bookmark
-// keeps its target and its tracking.
-func feedRemote(feed, repo, bookmark string) remote {
+// GitHubURL is the repository's GitHub remote: the URL the shared clone is cloned from and Fetch
+// clones into the feed, and so the URL feedRemote rewrites to the feed.
+func GitHubURL(repository ghrepo.Repository) string {
+	return "https://github.com/" + repository.String()
+}
+
+// feedRemote reaches GitHubURL, the remote the shared clone's origin names, at the feed repository
+// instead, over git's file transport alone: no credential, and no network. The feed is GitHub as
+// it stood when the pod's workspace-fetch ran, and a tree agent may have pushed since, so a fetch
+// from it brings main and the issue's own bookmark alone: every other bookmark keeps its target
+// and its tracking.
+func feedRemote(feed string, repo ghrepo.Repository, bookmark string) remote {
 	return remote{
 		env: []string{
 			"GIT_ALLOW_PROTOCOL=file",
 			"GIT_CONFIG_COUNT=1",
 			"GIT_CONFIG_KEY_0=url." + feed + ".insteadOf",
-			"GIT_CONFIG_VALUE_0=https://github.com/" + repo,
+			"GIT_CONFIG_VALUE_0=" + GitHubURL(repo),
 		},
 		branches: []string{"main", bookmark},
 	}
@@ -142,17 +201,19 @@ func feedRemote(feed, repo, bookmark string) remote {
 // Fetch clones the repository from GitHub, bare, into the feed, with the provisioning token and
 // no configuration but the one-shot credential's and the pins: the process of a pod's first init
 // container, the only one that holds the token, whose feed is its own and which mounts nothing a
-// tree agent can write. Provision then clones and fetches the shared clone from the feed with no
-// credential. It returns the feed repository.
+// tree agent can write. It reaches GitHub as the tmux runtime's Source does, so the token's two
+// holders share one credential rule. Provision then clones and fetches the shared clone from the
+// feed with no credential. It returns the feed repository.
 func Fetch(ctx context.Context, run Runner, request FetchRequest) (string, error) {
-	feed, err := FeedRepository(request.Feed, request.Repo)
+	feed, err := feedRepository(request.Feed, request.Repo)
 	if err != nil {
 		return "", err
 	}
-	if request.CredentialDir == "" {
-		return "", errors.New("workspace credential directory is required")
+	github := gitHubSource{token: request.Token, credentialDir: request.CredentialDir}
+	if err := github.check(request.Repo); err != nil {
+		return "", err
 	}
-	credential, err := newProvisioningCredential(request.CredentialDir, request.Token)
+	credential, err := github.open(request.Repo, "")
 	if err != nil {
 		return "", err
 	}
@@ -162,15 +223,16 @@ func Fetch(ctx context.Context, run Runner, request FetchRequest) (string, error
 	if err := os.MkdirAll(filepath.Dir(feed), 0o700); err != nil {
 		return "", fmt.Errorf("create feed parent: %w", err)
 	}
-	clone := []string{"git", "clone", "--bare", "--quiet", "https://github.com/" + request.Repo, feed}
+	clone := []string{"git", "clone", "--bare", "--quiet", GitHubURL(request.Repo), feed}
 	if _, err := RunChecked(ctx, run, clone, merge(credential.env, isolatedGitConfig), ""); err != nil {
 		return "", err
 	}
 	return feed, credential.remove()
 }
 
-// ensureRepoClone ports workspace.ts:144-196: clone into a temporary sibling, verify it contains
-// .jj, then rename it into place. A killed clone can therefore never appear to be a final clone.
+// ensureRepoClone ports workspace.ts's ensureRepoClone: clone into a temporary sibling, verify it
+// contains .jj, then rename it into place. A killed clone can therefore never appear to be a final
+// clone.
 func ensureRepoClone(ctx context.Context, run Runner, cloneDir, remote string, remoteEnv []string) error {
 	jjDir := filepath.Join(cloneDir, ".jj")
 	if exists, err := pathExists(cloneDir); err != nil {

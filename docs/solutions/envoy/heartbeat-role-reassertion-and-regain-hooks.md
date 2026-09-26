@@ -43,7 +43,7 @@ avoided (`docs/plans/2026-09-12-heartbeat-role-reassertion.md`, Parts A–B):
 | mechanism | owner | what it does | what it does not do |
 | :--- | :--- | :--- | :--- |
 | durable role ownership (`envoy_roles` KV) | listener | remembers who holds a role across listener restarts | nothing restores a claim once it is deleted |
-| live session registration (`envoy_sessions`, 5-min TTL, refreshed by the 120 s heartbeat) | session (pi-envoy) | makes the holder resolvable; a lapsed entry makes `liveRoleHolder` answer "no holder" | does not re-assert the role; the old plugin never re-claimed after boot |
+| live session registration (`envoy_sessions`, 5-min TTL, refreshed by the 120 s heartbeat) | session (pi-envoy) | makes the holder resolvable; a lapsed entry makes `resolveLiveRoleHolder` answer "no holder" | does not re-assert the role; the old plugin never re-claimed after boot |
 | catch-up of work published while the role was unresolvable | daemon | queues controller notices; recovers phase workers on a no-holder 404 | does not recover a controller or a root architect (see below) |
 
 `sjawhar/legion#958` fixed the listener side: the old image's interest reaper

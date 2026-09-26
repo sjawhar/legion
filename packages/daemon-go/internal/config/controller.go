@@ -13,8 +13,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 )
 
-// ControllerConfigExample is the example every refusal of the operator-side file points at,
-// shipped beside the manifests.
+// ControllerConfigExample is the example every refusal of the operator-side file points at.
 const ControllerConfigExample = "deploy/kubernetes/daemon/controller.yaml.example"
 
 // controllerKeys is every key the operator-side file may carry: the same names as legion.yaml, only
@@ -41,7 +40,7 @@ type ControllerConfig struct {
 	DispatchTokenFile string
 	InstructionsPath  string
 	// OmpInvocation is the invocation as configured, "" when the file sets none; the command
-	// resolves it as the daemon resolves its own (tmux.ResolveOmpInvocation), with no pinned
+	// resolves it as the daemon resolves its own (omplaunch.ResolveInvocation), with no pinned
 	// default in Go.
 	OmpInvocation   string
 	OmpLaunchPrefix []string

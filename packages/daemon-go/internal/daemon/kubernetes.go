@@ -64,17 +64,14 @@ func prepareSandbox(cfg config.Config, log *slog.Logger, o overrides, dispatchTo
 	if err != nil {
 		return err
 	}
-	// The role prompts every pod is handed are this daemon's, inlined at each launch, so the probe
-	// resolves what they name rather than the image's copy.
-	roleReferences, err := RolePromptReferences(p.rolesDir)
-	if err != nil {
-		return err
-	}
 	if o.runtime != nil {
 		p.newRuntime, p.probe = o.runtime, o.probe
 		return nil
 	}
 	p.newRuntime = sandboxRuntime(rc, opts, cfg.SlowCommandTimeout)
+	// The role prompts every pod is handed are this daemon's, inlined at each launch, so the probe
+	// resolves what they name rather than the image's copy.
+	roleReferences := p.roleReferences.Encode()
 	p.probe = func(ctx context.Context, rt runtime.Runtime) error {
 		sandboxed, ok := rt.(*sandbox.Runtime)
 		if !ok {

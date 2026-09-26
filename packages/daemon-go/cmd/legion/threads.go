@@ -10,6 +10,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
 const reviewThreadsQuery = `query($owner: String!, $name: String!, $number: Int!, $after: String) {
@@ -36,9 +38,9 @@ func runThreads(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 {
 		return 2
 	}
-	owner, name, ok := splitRepoFlag(*repo)
-	if !ok {
-		fmt.Fprintln(stderr, "legion threads resolve: --repo must be <owner>/<repo>")
+	repository, err := ghrepo.Parse("--repo", *repo)
+	if err != nil {
+		fmt.Fprintf(stderr, "legion threads resolve: %v\n", err)
 		return 2
 	}
 	number, err := strconv.Atoi(*pr)
@@ -57,7 +59,7 @@ func runThreads(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		fmt.Fprintln(stderr, "legion threads resolve: daemon returned an invalid GitHub credential response")
 		return 1
 	}
-	threads, err := unresolvedReviewThreads(ctx, credential.Token, owner, name, number)
+	threads, err := unresolvedReviewThreads(ctx, credential.Token, repository, number)
 	if err != nil {
 		fmt.Fprintf(stderr, "legion threads resolve: %v\n", err)
 		return 1
@@ -93,13 +95,6 @@ func runThreads(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	return 0
 }
 
-// splitRepoFlag is a --repo value's owner and name: <owner>/<name>, neither part empty nor holding
-// a slash or whitespace (review-threads.ts:149-153).
-func splitRepoFlag(value string) (owner, name string, ok bool) {
-	owner, name, ok = strings.Cut(value, "/")
-	return owner, name, ok && owner != "" && name != "" && !strings.ContainsAny(owner+name, " \t\r\n/")
-}
-
 func threadFailure(stderr io.Writer, url string, err error) int {
 	fmt.Fprintf(stderr, "legion threads resolve: resolveReviewThread failed for %s: %v\n", url, err)
 	return 1
@@ -111,16 +106,16 @@ type reviewThread struct {
 	newestPending bool
 }
 
-func unresolvedReviewThreads(ctx context.Context, token, owner, name string, number int) ([]reviewThread, error) {
+func unresolvedReviewThreads(ctx context.Context, token string, repository ghrepo.Repository, number int) ([]reviewThread, error) {
 	var all []reviewThread
 	var after any
 	for {
 		var page reviewThreadsPage
-		if err := graphql(ctx, token, reviewThreadsQuery, map[string]any{"owner": owner, "name": name, "number": number, "after": after}, &page); err != nil {
+		if err := graphql(ctx, token, reviewThreadsQuery, map[string]any{"owner": repository.Owner(), "name": repository.Name(), "number": number, "after": after}, &page); err != nil {
 			return nil, err
 		}
 		if page.Data.Repository.PullRequest == nil {
-			return nil, fmt.Errorf("%s/%s#%d was not found by GitHub", owner, name, number)
+			return nil, fmt.Errorf("%s#%d was not found by GitHub", repository, number)
 		}
 		for _, node := range page.Data.Repository.PullRequest.ReviewThreads.Nodes {
 			if node.IsResolved {

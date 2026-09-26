@@ -155,7 +155,13 @@ func startScratchDispatch(t *testing.T) (string, string) {
 			t.Error("scratch Dispatch did not stop after SIGINT")
 		}
 	})
-	deadline := time.Now().Add(20 * time.Second)
+	// Readiness is a server process starting and migrating a fresh database, whose time is the
+	// machine's load: bounded by the test binary's own deadline rather than a fixed span, so a
+	// slow start is not read as a server that will never answer.
+	deadline := time.Now().Add(2 * time.Minute)
+	if testDeadline, ok := t.Deadline(); ok && testDeadline.Add(-10*time.Second).Before(deadline) {
+		deadline = testDeadline.Add(-10 * time.Second)
+	}
 	for time.Now().Before(deadline) {
 		response, err := http.Get(baseURL + "/api/v1")
 		if err == nil {

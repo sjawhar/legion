@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -35,10 +36,15 @@ func tmuxClaim(token claim.Token) supervise.Claim {
 			Tmux:        &runtime.TmuxLocator{Window: "@3", Pane: "%41"},
 		},
 		State:           supervise.StateIdle,
-		Budgets:         supervise.Budgets{LaunchFailures: 1, PromptFailures: 2, PromptRetires: 1},
+		Budgets:         supervise.Budgets{LaunchFailures: 1, Deaths: 2, PromptFailures: 2, PromptRetires: 1},
 		BootTokenHash:   supervise.HashBootToken("boot-" + string(token)),
 		CapabilityHash:  []byte{0xca, 0xfe, 0x01},
 		UncertainStreak: 3,
+		// The two columns a restart reads to fence a stop and to attribute a completion: a daemon
+		// that rebuilt this claim without them would suspend a run that had already replaced the
+		// one its stop names, and refuse the completion of the worker it is waiting on.
+		LastStartRow:      7,
+		ServingGeneration: 4,
 	}
 }
 
@@ -57,7 +63,13 @@ func sameClaim(t *testing.T, got, want supervise.Claim) {
 	if gotPending == nil {
 		return
 	}
-	if gotPending.ID != wantPending.ID || gotPending.Task != wantPending.Task || gotPending.Phase != wantPending.Phase {
+	// Every field but the times is compared whole, so a field added to the delivery is read back
+	// or this fails; the times are compared below as instants.
+	untimed := func(d supervise.Delivery) supervise.Delivery {
+		d.QueuedAt, d.DeliveredAt, d.ConfirmedAt = time.Time{}, time.Time{}, time.Time{}
+		return d
+	}
+	if !reflect.DeepEqual(untimed(*gotPending), untimed(*wantPending)) {
 		t.Errorf("pending delivery read back = %+v, want %+v", *gotPending, *wantPending)
 	}
 	for _, field := range []struct {
@@ -94,8 +106,10 @@ func TestAClaimRoundTripsWithItsLocatorAndDelivery(t *testing.T) {
 		ID:          "delivery-1",
 		Task:        "implement the plan",
 		Phase:       phase.Implementing,
+		Generation:  4,
 		QueuedAt:    at(1),
 		DeliveredAt: at(2),
+		Interrupted: true,
 	}
 
 	if err := store.PutClaim(ctx, want); err != nil {
@@ -106,6 +120,31 @@ func TestAClaimRoundTripsWithItsLocatorAndDelivery(t *testing.T) {
 	}
 
 	sameClaim(t, onlyClaim(t, store), want)
+}
+
+// A task is queued uninterrupted, and a death marks it interrupted by writing the same delivery
+// again: the mark only ever reaches the store through the upsert's update. It has to survive that
+// write, or a restart re-sends the task without the sentence saying its turn was interrupted.
+func TestARePutDeliveryCarriesItsInterruption(t *testing.T) {
+	ctx := context.Background()
+	store := migratedStore(t)
+	c := tmuxClaim("legion-LEGION-209-implementer")
+	if err := store.PutClaim(ctx, c); err != nil {
+		t.Fatalf("put claim: %v", err)
+	}
+	queued := supervise.Delivery{ID: "delivery-1", Task: "implement the plan", Phase: phase.Implementing, Generation: 4, QueuedAt: at(1)}
+	if err := store.PutDelivery(ctx, c.Token, queued); err != nil {
+		t.Fatalf("queue the delivery: %v", err)
+	}
+	interrupted := queued
+	interrupted.ID, interrupted.Interrupted = "delivery-2", true
+	if err := store.PutDelivery(ctx, c.Token, interrupted); err != nil {
+		t.Fatalf("mark it interrupted: %v", err)
+	}
+
+	if got := onlyClaim(t, store).Pending; got == nil || got.ID != "delivery-2" || !got.Interrupted {
+		t.Fatalf("delivery read back = %+v, want the re-put delivery, interrupted", got)
+	}
 }
 
 // The phase a task was queued for is what says the task is still the work to do, and it has to
@@ -259,10 +298,10 @@ func TestADeliveryIsPutConfirmedAndRetired(t *testing.T) {
 	c.Pending = &delivery
 	sameClaim(t, onlyClaim(t, store), c)
 
-	if err := store.RetireDelivery(ctx, c.Token, delivery.ID); err != nil {
+	c.Pending = nil
+	if err := store.RetireDelivery(ctx, c, delivery.ID); err != nil {
 		t.Fatalf("retire delivery: %v", err)
 	}
-	c.Pending = nil
 	sameClaim(t, onlyClaim(t, store), c)
 }
 
@@ -280,7 +319,11 @@ func TestRetireDeliveryRefusesADeliveryTheClaimDoesNotHold(t *testing.T) {
 		t.Fatalf("put delivery: %v", err)
 	}
 
-	err := store.RetireDelivery(ctx, c.Token, "delivery-old")
+	// The claim the refused retire carries is rolled back with it: the delivery and the run the
+	// claim serves move together or not at all.
+	stale := c
+	stale.ServingGeneration = 99
+	err := store.RetireDelivery(ctx, stale, "delivery-old")
 	if err == nil {
 		t.Fatal("retired a delivery the claim does not hold")
 	}
@@ -297,5 +340,34 @@ func TestPutDeliveryRefusesAClaimTheStoreDoesNotHold(t *testing.T) {
 		supervise.Delivery{ID: "delivery-1", Task: "t", QueuedAt: at(7)})
 	if err == nil {
 		t.Fatal("put a delivery for a claim the store does not hold")
+	}
+}
+
+// A confirmation writes the claim and its delivery together. The delivery write failing must take
+// the claim's with it: a stored claim recorded as working whose delivery never landed is a task
+// the shim has already answered and nothing sends again.
+func TestPutClaimAndDeliveryWritesBothOrNeither(t *testing.T) {
+	ctx := context.Background()
+	store := migratedStore(t)
+	c := tmuxClaim("legion-LEGION-212-tester")
+	c.State = supervise.StateIdle
+	if err := store.PutClaim(ctx, c); err != nil {
+		t.Fatalf("put claim: %v", err)
+	}
+
+	working := c
+	working.State = supervise.StateWorking
+	// A generation no bigint holds: the delivery's write is refused, inside the transaction that
+	// carries the claim's.
+	confirmed := supervise.Delivery{ID: "delivery-1", Task: "test it", QueuedAt: at(1),
+		DeliveredAt: at(2), ConfirmedAt: at(3), Generation: math.MaxUint64}
+	if err := store.PutClaimAndDelivery(ctx, working, confirmed); err == nil {
+		t.Fatal("wrote a delivery whose generation no bigint holds")
+	}
+
+	stored := onlyClaim(t, store)
+	if stored.State != supervise.StateIdle || stored.Pending != nil {
+		t.Fatalf("claim read back = %s with pending %+v, want the idle row it was, unchanged",
+			stored.State, stored.Pending)
 	}
 }

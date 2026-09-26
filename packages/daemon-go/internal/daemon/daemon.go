@@ -14,7 +14,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -30,13 +29,15 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/omplaunch"
+	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/projection"
+	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/tmux"
 	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
-	workershim "github.com/sjawhar/legion/daemon/internal/shim"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/stream"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
@@ -56,8 +57,9 @@ const (
 	// every pane's shim dials under tmux (decision 2 — no configuration key).
 	streamSocket = "worker-stream.sock"
 	// orphanSweepInterval and orphanGrace are the shipped periodic reconciliation
-	// (packages/daemon/src/daemon/index.ts:79 and processes.ts:309): every minute, a Legion
-	// process nothing records is ended once it has idled for two.
+	// (LINGER_SWEEP_INTERVAL_MS, the tick that runs reconcileOrphans in
+	// packages/daemon/src/daemon/index.ts, and ORPHAN_RECONCILIATION_GRACE_MS in processes.ts):
+	// every minute, a Legion process nothing records is ended once it has idled for two.
 	orphanSweepInterval = time.Minute
 	orphanGrace         = 2 * time.Minute
 	// bootOrphanReconcileAttempts bounds the immediate retry before a previously unrecorded
@@ -162,6 +164,10 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 		boot, cancelAfterMint = context.WithTimeout(context.WithoutCancel(ctx), bootTimeout)
 		defer cancelAfterMint()
 		plan.identity = workflow.identity
+		// Only a daemon with the workflow configured has issue records to read a phase or a tree
+		// from; Stage 2's supervision runs on claims alone, where every delivery holds and every
+		// tree closes.
+		plan.phaseHolds, plan.treeClosable = workflow.phaseHolds, workflow.treeClosable
 	}
 	plan.prompts, err = prompts.New(plan.rolesDir, cfg.StateDir)
 	if err != nil {
@@ -301,6 +307,10 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 type plan struct {
 	// identity is the role's App bot identity, from the workflow's token source; nil without one.
 	identity func(ctx context.Context, role claim.Role) (runtime.GitIdentity, error)
+	// phaseHolds and treeClosable are the workflow's answers to the supervisor's two predicates;
+	// nil without a workflow, where every delivery holds and every tree closes.
+	phaseHolds   func(ctx context.Context, issue string, p phase.Phase) (bool, error)
+	treeClosable func(ctx context.Context, c supervise.Claim) (bool, error)
 	// tools are the gh, git, and jj boot resolved on the host, by name; nil without a repository,
 	// and under a runtime whose agents run the worker image's own.
 	tools         map[string]string
@@ -312,8 +322,10 @@ type plan struct {
 	dispatchToken string
 	prompts       *prompts.Composer
 	// rolesDir is the role prompts directory (prompts.ResolveRolePromptsDir), resolved before the
-	// gate, which resolves every task agent and skill its prompts name.
-	rolesDir string
+	// gate, and roleReferences the task agents and skills its prompts name (promptrefs.Roles), which
+	// the gate on either runtime resolves beside the plugin's own.
+	rolesDir       string
+	roleReferences promptrefs.Names
 	// stream is the worker stream's address: the listener binds it, and every agent's shim dials it.
 	stream     string
 	newRuntime runtimeFactory
@@ -384,9 +396,13 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 	if err != nil {
 		return plan{}, fmt.Errorf("resolve role prompts: %w", err)
 	}
+	roleReferences, err := promptrefs.Roles(rolesDir)
+	if err != nil {
+		return plan{}, err
+	}
 	p := plan{
 		project: project, operatorToken: operatorToken, secrets: secrets, instructions: instructions,
-		dispatchToken: dispatchToken, rolesDir: rolesDir, clock: clock, orphanSweep: orphanSweep,
+		dispatchToken: dispatchToken, rolesDir: rolesDir, roleReferences: roleReferences, clock: clock, orphanSweep: orphanSweep,
 	}
 	switch cfg.Runtime.Name {
 	case "tmux":
@@ -428,7 +444,7 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 			getenv = os.Getenv
 		}
 		var err error
-		if invocation, err = tmux.ResolveOmpInvocation(cfg.OmpInvocation, getenv); err != nil {
+		if invocation, err = omplaunch.ResolveInvocation(cfg.OmpInvocation, getenv); err != nil {
 			return err
 		}
 		log.Info("legion daemon resolved OMP invocation for boot probes and panes", "invocation", invocation)
@@ -436,7 +452,7 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 	dispatchTokenFile := ""
 	if dispatchToken != "" {
 		var err error
-		if dispatchTokenFile, err = tmux.WriteDispatchTokenFile(cfg.StateDir, dispatchToken); err != nil {
+		if dispatchTokenFile, err = runtime.WriteDispatchTokenFile(cfg.StateDir, dispatchToken); err != nil {
 			return fmt.Errorf("write the pane Dispatch token file: %w", err)
 		}
 	}
@@ -450,23 +466,6 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 	if err != nil {
 		return err
 	}
-	if p.newRuntime == nil {
-		env, err := gateEnvironment(os.Environ(), cfg.StateDir, providerEnvDir)
-		if err != nil {
-			return err
-		}
-		p.gate = pluginGate{
-			env:        env,
-			workDir:    cfg.StateDir,
-			invocation: invocation,
-			prefix:     cfg.OmpLaunchPrefix,
-			timeout:    cfg.SlowCommandTimeout,
-			retry:      bootprobe.Daemon,
-			contract:   api.GoDaemonAPIVersion,
-			rolesDir:   p.rolesDir,
-			log:        log,
-		}.verify
-	}
 	// Only a configuration with a repository runs Legion's own gh, git, and jj.
 	if _, ok := cfg.Projects[cfg.Project]; ok {
 		if p.tools, err = resolveTools(func(name string) (string, bool) { return envValue(environ, name) }); err != nil {
@@ -474,32 +473,24 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 		}
 	}
 	if p.newRuntime == nil {
+		env, err := gateEnvironment(os.Environ(), cfg.StateDir, providerEnvDir)
+		if err != nil {
+			return err
+		}
+		p.gate = pluginGate{
+			env:            env,
+			workDir:        cfg.StateDir,
+			invocation:     invocation,
+			prefix:         cfg.OmpLaunchPrefix,
+			timeout:        cfg.SlowCommandTimeout,
+			retry:          bootprobe.Daemon,
+			contract:       api.GoDaemonAPIVersion,
+			roleReferences: p.roleReferences,
+			log:            log,
+		}.verify
 		p.newRuntime = tmuxRuntime(cfg, p.project, invocation, providerEnvDir, dispatchTokenFile, p.tools, log)
 	}
 	return nil
-}
-
-// gateEnvironment is the environment a pane's Oh My Pi runs with, which the boot gate probes under:
-// the pane environment, and each provider key the pane's shim exports from providerEnvDir as the
-// shim exports it (shim.ReadProviderEnv), so a task agent whose model's key comes only through a
-// provider key resolves as it will in a pane.
-func gateEnvironment(environ []string, stateDir, providerEnvDir string) (map[string]string, error) {
-	env := tmux.PaneEnvironment(environ, stateDir)
-	if providerEnvDir == "" {
-		return env, nil
-	}
-	pairs, err := workershim.ReadProviderEnv(providerEnvDir, func(name string) (string, bool) {
-		value, ok := env[name]
-		return value, ok
-	})
-	if err != nil {
-		return nil, fmt.Errorf("boot gate: %w", err)
-	}
-	for _, pair := range pairs {
-		name, value, _ := strings.Cut(pair, "=")
-		env[name] = value
-	}
-	return env, nil
 }
 
 // tmuxRuntime builds the tmux runtime over the worker stream: the listener is its connection
@@ -593,10 +584,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		cancelStream()
 		return nil, fmt.Errorf("build the %s runtime: %w", cfg.Runtime.Name, err)
 	}
-	repo := ""
-	if configured, ok := cfg.Projects[cfg.Project]; ok {
-		repo = configured.Repo
-	}
+	repo := cfg.Projects[cfg.Project].Repo
 
 	sup.deps = supervise.Deps{
 		Runtime: rt,
@@ -606,10 +594,12 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 			stateDir: cfg.StateDir, project: p.project, instructions: p.instructions, secrets: p.secrets, repo: repo, prompts: p.prompts,
 			identity: p.identity,
 		},
-		Identity:   p.identity,
-		VolumeLost: sup.volumeLost,
-		Clock:      p.clock,
-		Log:        log,
+		Identity:     p.identity,
+		PhaseHolds:   p.phaseHolds,
+		TreeClosable: p.treeClosable,
+		VolumeLost:   sup.volumeLost,
+		Clock:        p.clock,
+		Log:          log,
 		Limits: supervise.Limits{
 			LaunchFailures: cfg.LaunchFailureLimit,
 			PromptFailures: cfg.PromptFailureLimit,
@@ -621,12 +611,6 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 			RPC:                   cfg.WorkerRPCTimeout,
 			Probe:                 cfg.ProbeInterval,
 		},
-	}
-	// Only a daemon with the workflow configured has issue records to read a phase or a tree from;
-	// Stage 2's supervision runs on claims alone, where every delivery holds and every tree closes.
-	if cfg.DispatchURL != "" {
-		sup.deps.PhaseHolds = phaseHolds(st.Pool(), record.NewStore())
-		sup.deps.TreeClosable = treeClosable(st.Pool(), record.NewStore())
 	}
 	return &supervision{
 		cfg: cfg, log: log, plan: p, stream: listener, runtime: rt, supervisor: sup, tokens: tokens, claims: claims,
@@ -869,11 +853,11 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 }
 
 // watchController is the daemon's one line about the controller it never launches, under either
-// runtime (the shipped logControllerNotRegistered, packages/daemon/src/daemon/processes.ts:
-// 2891-2904): every sweep interval it reads the project's controller record, and when no session
-// holds it, or the Envoy role registry says the session is gone, it says so and how to start one,
-// at most once per worker boot timeout. The Prober logs why each Gone or Unknown verdict was
-// reached; Unknown is never a death verdict, so it says nothing more.
+// runtime (the shipped ProcessManager.logControllerNotRegistered,
+// packages/daemon/src/daemon/processes.ts): every sweep interval it reads the project's controller
+// record, and when no session holds it, or the Envoy role registry says the session is gone, it
+// says so and how to start one, at most once per worker boot timeout. The Prober logs why each
+// Gone or Unknown verdict was reached; Unknown is never a death verdict, so it says nothing more.
 func watchController(ctx context.Context, st *store.Store, cfg config.Config, p plan, log *slog.Logger) {
 	prober := controller.NewProber(controller.ProberOptions{
 		EnvoyURL: cfg.EnvoyURL, EnvoyToken: p.secrets["ENVOY_TOKEN"], Project: p.project, BootTimeout: cfg.WorkerBootTimeout, Log: log,
@@ -985,10 +969,5 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 // githubOwner is the owner of the configured project's repository: the account both GitHub Apps
 // are installed on. A Stage 2 configuration has no repository and so no owner.
 func githubOwner(cfg config.Config) string {
-	project, ok := cfg.Projects[cfg.Project]
-	if !ok {
-		return ""
-	}
-	owner, _, _ := strings.Cut(project.Repo, "/")
-	return owner
+	return cfg.Projects[cfg.Project].Repo.Owner()
 }

@@ -348,29 +348,127 @@ func TestEditBlockAskRefusesAnOptionLabelTheBlockCannotCarry(t *testing.T) {
 	}
 }
 
-// The other half of acceptance 7's refusal: a question whose paragraph the block cannot
-// reproduce. A line beginning `:::` closes the directive when the document is rendered, so the
-// canonical markdown a version records and an upload re-parses would no longer read back.
-func TestEditBlockAskRefusesAQuestionTheDocumentCannotCarry(t *testing.T) {
+// A spec whose text a renderer might rewrite keeps the caller's bytes, and anchoring a comment in
+// it, the route that snapshots a version, records none. Each paragraph is one the escape rules
+// could misjudge: a block-final backslash, citation-style links with paired brackets - alone,
+// split by formatting or a code span, and beside another link - a label beginning `::`, a heading
+// and table cells holding what would open a block at a line's start. Rewriting any of them would
+// change the document's canonical markdown, minting a version on the next anchor or edit and
+// staling the approval of a spec whose words nobody touched.
+func TestAnchoringInASpecWhoseTextARendererMightRewriteWritesNoVersion(t *testing.T) {
+	handler, database := blockAskHandler(t)
+	const spec = "Intro.\n\nThe path is C:\\\n\nSee [Issue [#42]](https://x.test) for details.\n\n" +
+		"See [`pmdoc.Parse` [source]](https://x.test) for details.\n\n" +
+		"See [**RFC** [7231]](https://x.test) for details.\n\n" +
+		"As shown [[1]](https://a.test)[[2]](https://b.test).\n\n" +
+		"[::1](https://x.test) is the loopback.\n\n" +
+		"## ~~~ tildes\n\n" +
+		"---\\\nafter a line of dashes.\n\n" +
+		"- Step one\n\n  ---\n- --dry-run skips the push\n\n" +
+		":::callout{#c1 kind=\"note\" title=\"T\"}\n- :::\n:::\n\n" +
+		"- [x] ---\n\n" +
+		"| Host | Address |\n| :--- | :--- |\n| localhost | ::1 |\n| spare | --- |\n"
+	issue := createInteractionIssue(t, handler, "TEST", "Backslash spec", spec)
+
+	if markdown := documentMarkdown(t, handler, issue.PrimaryArtifactID); markdown != spec {
+		t.Fatalf("the spec reads back as %q, where it was written as %q", markdown, spec)
+	}
+	// The version a server stored before this rule existed holds the caller's own bytes. A
+	// renderer that wrote them differently would settle a new version over it on the next
+	// anchor, staling an approval for text nobody touched, so the stored markdown is set to
+	// those bytes before the anchor rather than left to this renderer.
+	storeLatestVersionMarkdown(t, database, issue.PrimaryArtifactID, spec)
+	before := len(documentVersions(t, handler, issue.PrimaryArtifactID))
+
+	comment := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"anchor": map[string]string{"artifact": "spec", "quote": "The path"},
+		"body":   "Which drive?",
+	}, "alice")
+	if comment.Code != http.StatusCreated {
+		t.Fatalf("anchor a comment: status=%d body=%s", comment.Code, comment.Body.String())
+	}
+	if after := len(documentVersions(t, handler, issue.PrimaryArtifactID)); after != before {
+		t.Fatalf("the anchored comment wrote %d versions", after-before)
+	}
+}
+
+// storeLatestVersionMarkdown rewrites the markdown of the document's newest version, standing in
+// for a version an earlier server recorded with its own rendering.
+func storeLatestVersionMarkdown(t *testing.T, database *store.Store, artifactID, markdown string) {
+	t.Helper()
+	if _, err := database.Pool.Exec(context.Background(), `
+		update artifact_versions set markdown = $2
+		where id = (
+			select id from artifact_versions where artifact_id = $1 order by number desc limit 1
+		)
+	`, artifactID, markdown); err != nil {
+		t.Fatalf("store version markdown: %v", err)
+	}
+}
+
+// A question line beginning `:::` was refused while the renderer wrote it unescaped, which left
+// the canonical markdown unparseable. The renderer escapes a directive opener now, so the block
+// carries the line and the document still reads back.
+func TestEditBlockAskCarriesAQuestionWithADirectiveLine(t *testing.T) {
 	handler, _ := blockAskHandler(t)
 	issue, askID := seedBlockAsk(t, handler, "Block ask directive", "decision", transportAsk, "Which transport?")
-	beforeMarkdown := documentMarkdown(t, handler, issue.PrimaryArtifactID)
 
-	refused := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+askID, map[string]any{
+	edited := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+askID, map[string]any{
 		"question": "Which transport?\n\n::: not a block",
 		"actor":    sessionActor(),
 	})
-	if refused.Code != http.StatusBadRequest {
-		t.Fatalf("edit with a directive line: status=%d body=%s", refused.Code, refused.Body.String())
+	if edited.Code != http.StatusOK {
+		t.Fatalf("edit with a directive line: status=%d body=%s", edited.Code, edited.Body.String())
 	}
-	if body := refused.Body.String(); !strings.Contains(body, "question") {
-		t.Fatalf("the refusal must name the field: %s", body)
+	settleDocument(t, handler, issue.PrimaryArtifactID, issue.Key, "after-directive-line")
+
+	if ask := readBlockAsk(t, handler, askID); ask.Question != "Which transport?\n\n::: not a block" {
+		t.Fatalf("question = %q", ask.Question)
 	}
-	if ask := readBlockAsk(t, handler, askID); ask.Question != "Which transport?" || ask.EditedAt != nil {
-		t.Fatalf("the refused edit wrote the row: %#v", ask)
+	markdown := documentMarkdown(t, handler, issue.PrimaryArtifactID)
+	if !strings.Contains(markdown, "\\::: not a block") {
+		t.Fatalf("the document must escape the directive opener:\n%s", markdown)
 	}
-	if got := documentMarkdown(t, handler, issue.PrimaryArtifactID); got != beforeMarkdown {
-		t.Fatalf("the refused edit wrote the document:\n%s", got)
+	if _, err := pmdoc.Parse(markdown); err != nil {
+		t.Fatalf("the document no longer parses: %v\n%s", err, markdown)
+	}
+}
+
+// A question's single newline is carried as a hard break, and the line after one read as a block
+// marker - a setext underline, a tilde fence, an HTML block opener, a table delimiter row - so
+// the block refused it. The renderer escapes each now and the route carries the question written.
+func TestEditBlockAskCarriesAQuestionWhoseLineLooksLikeABlock(t *testing.T) {
+	for _, question := range []string{
+		"Which transport?\n==",
+		"Which transport?\n--",
+		"Which transport?\n~~~",
+		"Which transport?\n<div",
+		"a | b\n--- | ---",
+		"Which transport?\n:--",
+		"Which transport?\n-:",
+		"Which transport?\\\nnext",
+	} {
+		t.Run(question, func(t *testing.T) {
+			handler, _ := blockAskHandler(t)
+			issue, askID := seedBlockAsk(t, handler, "Block ask block-marker line", "decision", transportAsk, "Which transport?")
+
+			edited := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+askID, map[string]any{
+				"question": question,
+				"actor":    sessionActor(),
+			})
+			if edited.Code != http.StatusOK {
+				t.Fatalf("edit with %q: status=%d body=%s", question, edited.Code, edited.Body.String())
+			}
+			settleDocument(t, handler, issue.PrimaryArtifactID, issue.Key, "after-block-marker-line")
+
+			if ask := readBlockAsk(t, handler, askID); ask.Question != question {
+				t.Fatalf("question = %q, want %q", ask.Question, question)
+			}
+			markdown := documentMarkdown(t, handler, issue.PrimaryArtifactID)
+			if _, err := pmdoc.Parse(markdown); err != nil {
+				t.Fatalf("the document no longer parses: %v\n%s", err, markdown)
+			}
+		})
 	}
 }
 

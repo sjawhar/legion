@@ -130,10 +130,8 @@ func TestResetListenerTestStateRecreatesSessionBucket(t *testing.T) {
 	}
 }
 
-func TestReadinessGate_NotReady_Returns503(t *testing.T) {
-	handler := readinessGate(func() bool { return false }, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Fatal("handler should not be called when not ready")
-	}))
+func TestStartingGate_Closed_Returns503(t *testing.T) {
+	var handler startingGate
 
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, httptest.NewRequest("GET", "/v1/interests/subscribe", nil))
@@ -149,12 +147,39 @@ func TestReadinessGate_NotReady_Returns503(t *testing.T) {
 	}
 }
 
-func TestReadinessGate_Ready_PassesThrough(t *testing.T) {
+// TestOpenListener_PublishesOnlyOnceTheRoutesServe holds the order /healthz depends on: the
+// dependencies are published, which turns /healthz healthy, only after the gate serves every route,
+// so a probe that reads healthy never meets a 503 "service starting" from a webhook or /v1.
+func TestOpenListener_PublishesOnlyOnceTheRoutesServe(t *testing.T) {
+	var gate startingGate
+	hooks := []webhookRoute{{"/webhook/github", func(*listenerDeps) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	}}}
+	published := false
+	openListener(&gate, hooks, &listenerDeps{}, "test-machine", logging.New("test"), func(*listenerDeps) {
+		published = true
+		for path, want := range map[string]int{"/webhook/github": http.StatusOK, "/v1/not-a-route": http.StatusNotFound} {
+			recorder := httptest.NewRecorder()
+			gate.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, path, nil))
+			if recorder.Code != want {
+				t.Errorf("%s when the dependencies were published: status = %d, want %d; body = %s", path, recorder.Code, want, recorder.Body.String())
+			}
+		}
+	})
+	if !published {
+		t.Fatal("openListener never published the dependencies")
+	}
+}
+
+func TestStartingGate_Open_PassesThrough(t *testing.T) {
 	var called bool
-	handler := readinessGate(func() bool { return true }, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var handler startingGate
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/interests/subscribe", func(w http.ResponseWriter, r *http.Request) {
 		called = true
 		w.WriteHeader(http.StatusOK)
-	}))
+	})
+	handler.open(mux)
 
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, httptest.NewRequest("GET", "/v1/interests/subscribe", nil))
@@ -224,11 +249,8 @@ func TestFullMux_StartingState(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", healthzHandler(&state))
 
-	v1 := http.NewServeMux()
-	v1.HandleFunc("/v1/interests/subscribe", func(w http.ResponseWriter, r *http.Request) {
-		t.Fatal("v1 handler should not be called during starting state")
-	})
-	mux.Handle("/v1/", readinessGate(func() bool { return state.Load() != nil }, v1))
+	var v1 startingGate
+	mux.Handle("/v1/", &v1)
 
 	t.Run("healthz returns 200 starting", func(t *testing.T) {
 		rr := httptest.NewRecorder()
@@ -275,9 +297,8 @@ func TestPublishHandler_RejectsAgentTopics(t *testing.T) {
 	// publishHandler validation runs before deps.client is used, so a
 	// minimal non-nil deps (with nil inner fields) is enough to test the
 	// rejection path without NATS.
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{})
-	handler := publishHandler(&state)
+	state := &listenerDeps{}
+	handler := publishHandler(state)
 
 	cases := []struct {
 		name       string
@@ -318,9 +339,8 @@ func TestPublishHandler_RejectsAgentTopics(t *testing.T) {
 }
 
 func TestPublishHandler_MethodNotAllowed(t *testing.T) {
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{})
-	handler := publishHandler(&state)
+	state := &listenerDeps{}
+	handler := publishHandler(state)
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/messages/publish", nil)
@@ -334,9 +354,8 @@ func TestPublishHandler_MethodNotAllowed(t *testing.T) {
 func TestPublishHandler_RejectsInvalidSource(t *testing.T) {
 	// Validation runs before deps.client is used, so nil inner fields
 	// are enough for rejection-path tests.
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{})
-	handler := publishHandler(&state)
+	state := &listenerDeps{}
+	handler := publishHandler(state)
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(
@@ -462,15 +481,14 @@ func TestPublishHandlerReturnsWithinDeadline(t *testing.T) {
 		t.Fatalf("flush no-ack subscription: %v", err)
 	}
 
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: client})
+	state := &listenerDeps{client: client}
 	response := make(chan *httptest.ResponseRecorder, 1)
 	t.Cleanup(clock.CancelAll)
 	go func() {
 		recorder := httptest.NewRecorder()
 		request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"notifications.unbound","message":"ping","source":"agent"}`))
 		request.Header.Set("Content-Type", "application/json")
-		publishHandler(&state).ServeHTTP(recorder, request)
+		publishHandler(state).ServeHTTP(recorder, request)
 		response <- recorder
 	}()
 
@@ -503,8 +521,7 @@ func TestPublishHandler_RoleLanesUseCoreNATSWithoutDurableTransit(t *testing.T) 
 	// Set B as the KV value that the core handler must resolve. This models a
 	// publish that races the handover: the single listener chooses one current
 	// owner, rather than relying on two holders to observe the change first.
-	claimState := atomic.Pointer[listenerDeps]{}
-	claimState.Store(&listenerDeps{registry: harness.registry, sessions: harness.sessions})
+	claimDeps := &listenerDeps{registry: harness.registry, sessions: harness.sessions}
 	if err := harness.sessions.Put("ses_role_b", session.SessionEntry{
 		MachineID:      "test-machine",
 		SelfSubscribed: true,
@@ -514,7 +531,7 @@ func TestPublishHandler_RoleLanesUseCoreNATSWithoutDurableTransit(t *testing.T) 
 
 	claimRecorder := httptest.NewRecorder()
 	claimRequest := httptest.NewRequest(http.MethodPost, "/v1/roles/set", strings.NewReader(`{"session_id":"ses_role_b","role":"legion-delivery"}`))
-	roleSetHandler(&claimState, "test-machine").ServeHTTP(claimRecorder, claimRequest)
+	roleSetHandler(claimDeps, "test-machine").ServeHTTP(claimRecorder, claimRequest)
 	if claimRecorder.Code != http.StatusOK {
 		t.Fatalf("claim registered role B: status = %d, body = %s", claimRecorder.Code, claimRecorder.Body.String())
 	}
@@ -550,9 +567,8 @@ func TestPublishHandler_RoleLanesUseCoreNATSWithoutDurableTransit(t *testing.T) 
 		t.Fatal("role lane should not create a JetStream consumer")
 	}
 
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: harness.client, registry: harness.registry, sessions: harness.sessions})
-	handler := publishHandler(&state)
+	state := &listenerDeps{client: harness.client, registry: harness.registry, sessions: harness.sessions}
+	handler := publishHandler(state)
 	publishRole := func(topic, source string) contracts.Envelope {
 		t.Helper()
 		recorder := httptest.NewRecorder()
@@ -639,8 +655,7 @@ func TestPublishHandler_RoleFreshDeafHolderEmitsReceiptTimeout(t *testing.T) {
 	harness := newListenerDeliveryHarness(t, nil)
 	role := "fresh-deaf-holder"
 	roleTopic := contracts.RoleTopicPrefix + role
-	var claimState atomic.Pointer[listenerDeps]
-	claimState.Store(&listenerDeps{registry: harness.registry, sessions: harness.sessions})
+	claimState := &listenerDeps{registry: harness.registry, sessions: harness.sessions}
 	if err := harness.sessions.Put("ses_deaf", session.SessionEntry{
 		MachineID:      "test-machine",
 		SelfSubscribed: true,
@@ -650,7 +665,7 @@ func TestPublishHandler_RoleFreshDeafHolderEmitsReceiptTimeout(t *testing.T) {
 
 	claimRecorder := httptest.NewRecorder()
 	claimRequest := httptest.NewRequest(http.MethodPost, "/v1/roles/set", strings.NewReader(`{"session_id":"ses_deaf","role":"`+role+`"}`))
-	roleSetHandler(&claimState, "test-machine").ServeHTTP(claimRecorder, claimRequest)
+	roleSetHandler(claimState, "test-machine").ServeHTTP(claimRecorder, claimRequest)
 	if claimRecorder.Code != http.StatusOK {
 		t.Fatalf("claim deaf holder: status = %d, body = %s", claimRecorder.Code, claimRecorder.Body.String())
 	}
@@ -669,11 +684,10 @@ func TestPublishHandler_RoleFreshDeafHolderEmitsReceiptTimeout(t *testing.T) {
 		t.Fatalf("flush role subscriptions: %v", err)
 	}
 
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: harness.client, registry: harness.registry, sessions: harness.sessions})
+	state := &listenerDeps{client: harness.client, registry: harness.registry, sessions: harness.sessions}
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+roleTopic+`","message":"deaf role event","payload":"{\"type\":\"worker-queued\"}","source":"agent"}`))
-	publishHandler(&state).ServeHTTP(recorder, request)
+	publishHandler(state).ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("publish role event: status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
@@ -738,12 +752,11 @@ func TestPublishHandler_ExplicitDedupeKeyForwardsAgainAfterReceiptTimeoutOnly(t 
 	if err := harness.client.Conn.Flush(); err != nil {
 		t.Fatalf("flush subscriptions: %v", err)
 	}
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: harness.client, registry: harness.registry, sessions: harness.sessions})
+	state := &listenerDeps{client: harness.client, registry: harness.registry, sessions: harness.sessions}
 	publish := func(what string) contracts.Envelope {
 		t.Helper()
 		recorder := httptest.NewRecorder()
-		publishHandler(&state).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+roleTopic+`","message":"re-sent role event","payload":"{\"type\":\"worker-queued\"}","source":"agent","dedupe_key":"publish.resend-1"}`)))
+		publishHandler(state).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+roleTopic+`","message":"re-sent role event","payload":"{\"type\":\"worker-queued\"}","source":"agent","dedupe_key":"publish.resend-1"}`)))
 		if recorder.Code != http.StatusOK {
 			t.Fatalf("%s: status = %d, body = %s", what, recorder.Code, recorder.Body.String())
 		}
@@ -800,9 +813,8 @@ func TestPublishHandler_ExplicitDedupeKeyForwardsAgainAfterReceiptTimeoutOnly(t 
 
 func TestPublishHandler_SourceFieldWithNATS(t *testing.T) {
 	client := setupPublishTestClient(t)
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: client})
-	handler := publishHandler(&state)
+	state := &listenerDeps{client: client}
+	handler := publishHandler(state)
 
 	cases := []struct {
 		name       string
@@ -873,9 +885,8 @@ func TestPublishHandler_SourceFieldWithNATS(t *testing.T) {
 }
 
 func TestSendHandler_RejectsUnknownTarget(t *testing.T) {
-	_, sessions := setupSessionsTest(t, nil, nil)
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{sessions: sessions})
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	state := &listenerDeps{registry: registry, sessions: sessions}
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(
@@ -883,7 +894,7 @@ func TestSendHandler_RejectsUnknownTarget(t *testing.T) {
 		"/v1/messages/send",
 		strings.NewReader(`{"target_session":"ses_missing","message":"hello"}`),
 	)
-	sendHandler(&state).ServeHTTP(rr, req)
+	sendHandler(state).ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d (body: %s)", rr.Code, rr.Body.String())
@@ -900,8 +911,7 @@ func TestSendHandler_RejectsUnknownTarget(t *testing.T) {
 }
 
 func TestSendHandler_RejectsEmptyTargetSession(t *testing.T) {
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{})
+	state := &listenerDeps{}
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(
@@ -909,7 +919,7 @@ func TestSendHandler_RejectsEmptyTargetSession(t *testing.T) {
 		"/v1/messages/send",
 		strings.NewReader(`{"target_session":"","message":"hello"}`),
 	)
-	sendHandler(&state).ServeHTTP(rr, req)
+	sendHandler(state).ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d (body: %s)", rr.Code, rr.Body.String())
@@ -929,8 +939,7 @@ func TestSendHandler_RejectsEmptyTargetSession(t *testing.T) {
 }
 
 func TestSendHandler_RejectsInvalidSource(t *testing.T) {
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{})
+	state := &listenerDeps{}
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(
@@ -938,7 +947,7 @@ func TestSendHandler_RejectsInvalidSource(t *testing.T) {
 		"/v1/messages/send",
 		strings.NewReader(`{"source":"invalid","target_session":"ses_target","message":"hello"}`),
 	)
-	sendHandler(&state).ServeHTTP(rr, req)
+	sendHandler(state).ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d (body: %s)", rr.Code, rr.Body.String())
@@ -960,9 +969,8 @@ func TestSendHandler_RejectsInvalidSource(t *testing.T) {
 
 func TestSendHandler_AcceptsHumanSource(t *testing.T) {
 	client := setupPublishTestClient(t)
-	_, sessions := setupSessionsTest(t, nil, map[string]int{"ses_target": 1})
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: client, sessions: sessions})
+	registry, sessions := setupSessionsTest(t, nil, map[string]int{"ses_target": 1})
+	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(
@@ -970,7 +978,7 @@ func TestSendHandler_AcceptsHumanSource(t *testing.T) {
 		"/v1/messages/send",
 		strings.NewReader(`{"source":"human","target_session":"ses_target","message":"hello"}`),
 	)
-	sendHandler(&state).ServeHTTP(rr, req)
+	sendHandler(state).ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d (body: %s)", rr.Code, rr.Body.String())
@@ -1030,12 +1038,6 @@ func TestIsValidRole(t *testing.T) {
 	}
 }
 
-func TestSessionHealthFields_NilReturnsNil(t *testing.T) {
-	if sessionHealthFields(nil) != nil {
-		t.Fatal("expected nil fields for nil session registry")
-	}
-}
-
 func TestSessionHealthFields_PopulatedAfterReady(t *testing.T) {
 	client := setupPublishTestClient(t)
 	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1), session.WithSessionTTL(time.Minute))
@@ -1065,9 +1067,8 @@ func TestSessionHealthFields_PopulatedAfterReady(t *testing.T) {
 
 func TestRoleSetHandler_Validation(t *testing.T) {
 	registry := setupAdminTestRegistry(t, nil)
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{registry: registry})
-	handler := roleSetHandler(&state, "test-machine")
+	state := &listenerDeps{registry: registry}
+	handler := roleSetHandler(state, "test-machine")
 
 	cases := []struct {
 		name       string
@@ -1114,9 +1115,8 @@ func TestRoleSetHandler_Validation(t *testing.T) {
 
 func TestRoleSetHandler_SetsRole(t *testing.T) {
 	registry, sessions := setupSessionsTest(t, nil, nil)
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{registry: registry, sessions: sessions})
-	handler := roleSetHandler(&state, "test-machine")
+	state := &listenerDeps{registry: registry, sessions: sessions}
+	handler := roleSetHandler(state, "test-machine")
 	if err := sessions.Put("ses_role", session.SessionEntry{MachineID: "test-machine"}); err != nil {
 		t.Fatalf("register role session: %v", err)
 	}
@@ -1441,8 +1441,7 @@ func TestSessionsHandler_IncludesTitle(t *testing.T) {
 
 func TestSubscribeHandler_RejectsEmptySessionID(t *testing.T) {
 	registry, sessions := setupSessionsTest(t, nil, nil)
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{registry: registry, sessions: sessions})
+	state := &listenerDeps{registry: registry, sessions: sessions}
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(
@@ -1450,7 +1449,7 @@ func TestSubscribeHandler_RejectsEmptySessionID(t *testing.T) {
 		"/v1/interests/subscribe",
 		strings.NewReader(`{"session_id":"","topics":["notifications.test.>"],"self_subscribed":true}`),
 	)
-	subscribeHandler(&state, "test-machine", logging.New("test")).ServeHTTP(recorder, request)
+	subscribeHandler(state, "test-machine", logging.New("test")).ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("expected status 400, got %d: %s", recorder.Code, recorder.Body.String())
@@ -1472,9 +1471,8 @@ func TestSubscribeHandler_RejectsEmptySessionID(t *testing.T) {
 func TestSubscribeHandler_StoresSelfSubscribedSessionWithoutPort(t *testing.T) {
 	// Given
 	registry, sessions := setupSessionsTest(t, nil, nil)
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{registry: registry, sessions: sessions})
-	handler := subscribeHandler(&state, "test-machine", logging.New("test"))
+	state := &listenerDeps{registry: registry, sessions: sessions}
+	handler := subscribeHandler(state, "test-machine", logging.New("test"))
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(
 		http.MethodPost,
@@ -1527,19 +1525,6 @@ func TestSessionsHandler_ReportsSelfSubscribedSession(t *testing.T) {
 	selfSubscribed, ok := payload[0]["self_subscribed"].(bool)
 	if !ok || !selfSubscribed {
 		t.Fatalf("expected self_subscribed session, got %#v", payload[0])
-	}
-}
-
-func TestSessionsHandler_NilSessionRegistry(t *testing.T) {
-	// When session registry is nil, endpoint returns 503
-	handler := sessionsHandler(nil, nil)
-
-	req := httptest.NewRequest(http.MethodGet, "/v1/sessions", nil)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("expected 503, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -1648,10 +1633,9 @@ func TestSessionsHandler_NoInterestsData(t *testing.T) {
 
 func TestIdempotencyKey_Send(t *testing.T) {
 	client := setupPublishTestClient(t)
-	_, sessions := setupSessionsTest(t, nil, map[string]int{"tgt1": 1})
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: client, sessions: sessions})
-	handler := sendHandler(&state)
+	registry, sessions := setupSessionsTest(t, nil, map[string]int{"tgt1": 1})
+	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
+	handler := sendHandler(state)
 
 	request := `{"source_session":"src1","target_session":"tgt1","message":"hello","idempotency_key":"retry-abc"}`
 	send := func() contracts.Envelope {
@@ -1682,9 +1666,8 @@ func TestIdempotencyKey_Send(t *testing.T) {
 
 func TestIdempotencyKey_Publish(t *testing.T) {
 	client := setupPublishTestClient(t)
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: client})
-	handler := publishHandler(&state)
+	state := &listenerDeps{client: client}
+	handler := publishHandler(state)
 
 	// Test: same idempotency_key produces same DedupeKey
 	rr1 := httptest.NewRecorder()
@@ -1723,9 +1706,8 @@ func TestIdempotencyKey_Publish(t *testing.T) {
 
 func TestIdempotencyKey_BackwardsCompat(t *testing.T) {
 	client := setupPublishTestClient(t)
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: client})
-	handler := publishHandler(&state)
+	state := &listenerDeps{client: client}
+	handler := publishHandler(state)
 
 	// Test: no idempotency_key produces different DedupeKeys (existing behavior)
 	rr1 := httptest.NewRecorder()
@@ -2034,13 +2016,9 @@ func TestARefusedDurableStopsTheListenerAtOnce(t *testing.T) {
 	}
 
 	listener := startListenerProcess(t, buildListener(t), client.Conn.ConnectedUrl(), "refused-durable-startup")
-	cmd, output := listener.cmd, listener.output
-	select {
-	case <-listener.exited:
-	case <-time.After(30 * time.Second):
-		t.Fatalf("the listener was still running 30s after meeting a refused durable:\n%s", output.String())
-	}
-	if code := cmd.ProcessState.ExitCode(); code != 1 {
+	listener.waitExit(t, "meeting a refused durable")
+	output := listener.output
+	if code := listener.cmd.ProcessState.ExitCode(); code != 1 {
 		t.Fatalf("exit code = %d, want 1:\n%s", code, output.String())
 	}
 	if strings.Contains(output.String(), "subscribe failed, retrying") {
@@ -3459,13 +3437,13 @@ func TestMetrics(t *testing.T) {
 }
 
 func TestMetrics_NotGatedByReadiness(t *testing.T) {
-	var state atomic.Pointer[listenerDeps]
 	met := metrics.New()
 	met.NewGauge("envoy_active_sessions", "Number of active sessions")
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", met.Handler())
-	mux.Handle("/v1/", readinessGate(func() bool { return state.Load() != nil }, http.NewServeMux()))
+	var v1 startingGate
+	mux.Handle("/v1/", &v1)
 
 	// /metrics must return 200 before deps are set (startup).
 	rr := httptest.NewRecorder()
@@ -3508,7 +3486,7 @@ func TestCheckSelfHealth_HealthyReturnsNil(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open session registry: %v", err)
 	}
-	if err := checkSelfHealth(listenerCaches(registry, sessions, nil), nil); err != nil {
+	if err := checkSelfHealth([]listenerCache{{name: "interest", cache: registry}, {name: "session", cache: sessions}}, nil); err != nil {
 		t.Fatalf("healthy probe should not error: %v", err)
 	}
 }
@@ -3528,7 +3506,7 @@ func TestCheckSelfHealth_ClosedConnReturnsError(t *testing.T) {
 
 	client.Close()
 
-	if err := checkSelfHealth(listenerCaches(registry, sessions, nil), nil); err == nil {
+	if err := checkSelfHealth([]listenerCache{{name: "interest", cache: registry}, {name: "session", cache: sessions}}, nil); err == nil {
 		t.Fatal("probe after conn close should return error")
 	}
 }
@@ -3611,7 +3589,9 @@ func TestRunSelfHealthMonitor_MovesADeadInterestRegistryToTheLiveConnection(t *t
 	monitorUntilRecovered(t, "the registry on the live connection", 5*time.Second, time.Millisecond,
 		registry.Ping,
 		func(err error) bool { return errors.Is(err, natsgo.ErrConnectionClosed) },
-		func() error { return rewatchListenerKVWatchers(client.Conn, listenerCaches(registry, nil, nil)) },
+		func() error {
+			return rewatchListenerKVWatchers(client.Conn, []listenerCache{{name: "interest", cache: registry}})
+		},
 	)
 
 	writer := testnats.Connect(t, client.Conn.ConnectedUrl())
@@ -3671,11 +3651,11 @@ func TestRunSelfHealthMonitor_RebuildsTerminalWatcher(t *testing.T) {
 	monitorUntilRecovered(t, "the session watcher", 5*time.Second, time.Millisecond,
 		sessions.Ping,
 		func(err error) bool {
-			return isUnrecoverableSelfHealthFailure(err, client, listenerCaches(nil, sessions, nil))
+			return isUnrecoverableSelfHealthFailure(err, client, []listenerCache{{name: "session", cache: sessions}})
 		},
 		func() error {
 			rebuilds.Add(1)
-			return rewatchListenerKVWatchers(client.Conn, listenerCaches(nil, sessions, nil))
+			return rewatchListenerKVWatchers(client.Conn, []listenerCache{{name: "session", cache: sessions}})
 		},
 	)
 	if got := rebuilds.Load(); got != 1 {
@@ -3836,12 +3816,12 @@ func TestSelfHealthRebuildsAnInterestWatcherThatEndedWhileConnected(t *testing.T
 	}
 
 	monitorUntilRecovered(t, "the interest watcher", 10*time.Second, 10*time.Millisecond,
-		func() error { return checkSelfHealth(listenerCaches(registry, nil, nil), nil) },
+		func() error { return checkSelfHealth([]listenerCache{{name: "interest", cache: registry}}, nil) },
 		func(err error) bool {
-			return isUnrecoverableSelfHealthFailure(err, client, listenerCaches(registry, nil, nil))
+			return isUnrecoverableSelfHealthFailure(err, client, []listenerCache{{name: "interest", cache: registry}})
 		},
 		func() error {
-			return rebuildListenerDependencies(client, listenerCaches(registry, nil, nil), nil, "", nil)
+			return rebuildListenerDependencies(client, []listenerCache{{name: "interest", cache: registry}}, nil, "", nil)
 		},
 	)
 
@@ -3884,8 +3864,16 @@ func TestHealthzAnswersUnhealthyWhileTheInterestWatcherIsDead(t *testing.T) {
 	if err := registry.WaitForCacheReady(readyCtx); err != nil {
 		t.Fatalf("wait for interest cache: %v", err)
 	}
+	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1))
+	if err != nil {
+		t.Fatalf("open session registry: %v", err)
+	}
+	t.Cleanup(sessions.StopWatch)
+	if err := sessions.WaitForCacheReady(readyCtx); err != nil {
+		t.Fatalf("wait for session cache: %v", err)
+	}
 	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: client, registry: registry, caches: listenerCaches(registry, nil, nil), consumer: "listener-healthz-interest"})
+	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions, caches: []listenerCache{{name: "interest", cache: registry}, {name: "session", cache: sessions}}, consumer: "listener-healthz-interest"})
 	get := func() (int, map[string]any) {
 		recorder := httptest.NewRecorder()
 		healthzHandler(&state).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/healthz", nil))
@@ -3902,4 +3890,96 @@ func TestHealthzAnswersUnhealthyWhileTheInterestWatcherIsDead(t *testing.T) {
 	if code != http.StatusServiceUnavailable || body["status"] != "unhealthy" || !strings.Contains(fmt.Sprint(body["error"]), "interest KV watcher") {
 		t.Fatalf("with the interest watcher dead: /healthz = %d %v, want 503 unhealthy naming the interest KV watcher", code, body)
 	}
+}
+
+// consumerCreates counts the JetStream consumer create and update requests for one durable on the
+// stream; UpdateConsumer rides the same subject as AddConsumer.
+func consumerCreates(t *testing.T, conn *natsgo.Conn, consumer string) *atomic.Int32 {
+	t.Helper()
+	var creates atomic.Int32
+	for _, subject := range []string{
+		"$JS.API.CONSUMER.CREATE." + bus.Stream + "." + consumer,
+		"$JS.API.CONSUMER.CREATE." + bus.Stream + "." + consumer + ".>",
+		"$JS.API.CONSUMER.DURABLE.CREATE." + bus.Stream + "." + consumer,
+	} {
+		sub, err := conn.Subscribe(subject, func(*natsgo.Msg) { creates.Add(1) })
+		if err != nil {
+			t.Fatalf("subscribe %s: %v", subject, err)
+		}
+		t.Cleanup(func() { _ = sub.Unsubscribe() })
+	}
+	if err := conn.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	return &creates
+}
+
+// The drift correction writes a durable only when the policy would change it: a new durable is
+// created once and a healthy one is left alone on every later start, and a durable drifted in a
+// setting NATS can update is corrected once and then left alone. A correction that updated on
+// every start would pass every other test, while every listener start rewrote its durable.
+func TestTheDriftCorrectionWritesADurableOnlyWhenThePolicyChangesIt(t *testing.T) {
+	uri := sharedListenerTestNATSURI(t)
+	client, err := bus.Connect([]string{uri}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("connect bus: %v", err)
+	}
+	t.Cleanup(client.Close)
+	observer := testnats.Connect(t, uri)
+	t.Cleanup(observer.Close)
+
+	bind := func(consumer string) {
+		t.Helper()
+		sub, err := startListenerSubscription(client, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
+		if err != nil {
+			t.Fatalf("startListenerSubscription(%s): %v", consumer, err)
+		}
+		if err := sub.Unsubscribe(); err != nil {
+			t.Fatalf("unsubscribe %s: %v", consumer, err)
+		}
+	}
+	settle := func(creates *atomic.Int32, want int32, what string) {
+		t.Helper()
+		if err := observer.Flush(); err != nil {
+			t.Fatalf("flush: %v", err)
+		}
+		time.Sleep(200 * time.Millisecond)
+		if got := creates.Swap(0); got != want {
+			t.Fatalf("%s: %d consumer create requests, want %d", what, got, want)
+		}
+	}
+
+	fresh := "listener-drift-fresh"
+	_ = client.JS().DeleteConsumer(bus.Stream, fresh)
+	t.Cleanup(func() { _ = client.JS().DeleteConsumer(bus.Stream, fresh) })
+	creates := consumerCreates(t, observer, fresh)
+	bind(fresh)
+	settle(creates, 1, "first start on a new durable")
+	bind(fresh)
+	settle(creates, 0, "second start on a healthy durable")
+	bind(fresh)
+	settle(creates, 0, "third start on a healthy durable")
+
+	drifted := "listener-drift-corrected"
+	_ = client.JS().DeleteConsumer(bus.Stream, drifted)
+	t.Cleanup(func() { _ = client.JS().DeleteConsumer(bus.Stream, drifted) })
+	config := natsgo.ConsumerConfig{Durable: drifted, DeliverSubject: natsgo.NewInbox()}
+	applyListenerConsumerPolicy(&config, bus.StreamSubjects())
+	config.AckWait = 30 * time.Second
+	config.MaxDeliver = 5
+	if _, err := client.JS().AddConsumer(bus.Stream, &config); err != nil {
+		t.Fatalf("add a drifted durable: %v", err)
+	}
+	creates = consumerCreates(t, observer, drifted)
+	bind(drifted)
+	settle(creates, 1, "first start on a drifted durable")
+	info, err := client.JS().ConsumerInfo(bus.Stream, drifted)
+	if err != nil {
+		t.Fatalf("consumer info: %v", err)
+	}
+	if info.Config.AckWait != consumerAckWait || info.Config.MaxDeliver != consumerMaxDeliver {
+		t.Fatalf("corrected durable: ack wait %s, max deliver %d, want %s and %d", info.Config.AckWait, info.Config.MaxDeliver, consumerAckWait, consumerMaxDeliver)
+	}
+	bind(drifted)
+	settle(creates, 0, "second start on the corrected durable")
 }

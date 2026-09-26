@@ -3,12 +3,16 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"github.com/sjawhar/legion/daemon/internal/bootprobe"
+	"github.com/sjawhar/legion/daemon/internal/testomp"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 )
 
 // agentModelPlugin lays out a pi-legion-envoy under dir whose one skill dispatches three task agents
@@ -16,25 +20,13 @@ import (
 // plain declaring none.
 func agentModelPlugin(t *testing.T, dir string) string {
 	t.Helper()
-	root := filepath.Join(dir, "pi-legion-envoy")
-	for name, content := range map[string]string{
-		"package.json": `{"name":"@sjawhar/pi-legion-envoy","version":"0.0.0-test","legion":{"goDaemonApiVersion":3},` +
-			`"omp":{"extensions":["dist/legion.js"],"skills":["dist/skills"]}}`,
-		filepath.Join("dist", "legion.js"): "globalThis[Symbol.for(\"legion.pi-envoy.legion-loaded\")] = import.meta.url;\n" +
-			"export default function () {}\n",
+	return testPlugin(t, dir, map[string]string{
 		filepath.Join("dist", "skills", "legion-worker", "SKILL.md"): "---\nname: legion-worker\ndescription: test\n---\n" +
 			"Run `task(agent=\"oracle\")`, then `task(agent=\"reviewer\")`, then `task(agent=\"plain\")`.\n",
 		filepath.Join("agents", "oracle.md"):   "---\nname: oracle\ndescription: test\nmodel: \"@oracle\"\n---\nConsult.\n",
 		filepath.Join("agents", "reviewer.md"): "---\nname: reviewer\ndescription: test\nmodel: [\"@review\"]\n---\nReview.\n",
 		filepath.Join("agents", "plain.md"):    "---\nname: plain\ndescription: test\n---\nHelp.\n",
-	} {
-		path := filepath.Join(root, name)
-		mkdir(t, filepath.Dir(path))
-		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return root
+	})
 }
 
 // The load probe resolves the model of every task agent Legion's prompts dispatch as the task tool
@@ -43,23 +35,20 @@ func agentModelPlugin(t *testing.T, dir string) string {
 // model no available provider serves, a model whose key does not work while the parent's does (the
 // tool's silent fallback to the parent's model), and a model whose key does not work at all. A key
 // the environment supplies, as a worker's shim exports one from the providers Secret, counts. A
-// build-time probe skips the check. The operator's override counts only when it expands to a model,
+// build-time probe skips the check, and a key command slower than the 2 s Oh My Pi gives the
+// probe's shutdown handler still answers. The operator's override counts only when it expands to a model,
 // as the task tool takes it, and an agent that declares no model runs on the session's own and is
 // not judged. The profile's providers listen nowhere, so no model is called and no credential the
 // machine carries decides the run.
 func TestTheAgentModelCheckOnTheRealOhMyPi(t *testing.T) {
-	omp := os.Getenv("LEGION_TEST_OMP")
-	switch {
-	case omp == "" && os.Getenv("GITHUB_ACTIONS") == "true":
-		t.Fatal("LEGION_TEST_OMP is unset on GitHub Actions: name the pinned Oh My Pi binary (the daemon-go job installs it)")
-	case omp == "":
-		t.Skip("LEGION_TEST_OMP names no Oh My Pi binary")
-	}
+	omp := testomp.Binary(t)
 	const models = "providers:\n" +
 		"  fake:\n    baseUrl: http://127.0.0.1:9\n    auth: apiKey\n    api: anthropic-messages\n    apiKey: static-key\n" +
 		"    models:\n      - id: m1\n        name: M1\n" +
 		"  badkey:\n    baseUrl: http://127.0.0.1:9\n    auth: apiKey\n    api: anthropic-messages\n    apiKey: \"!exit 1\"\n" +
-		"    models:\n      - id: m3\n        name: M3\n"
+		"    models:\n      - id: m3\n        name: M3\n" +
+		"  slowkey:\n    baseUrl: http://127.0.0.1:9\n    auth: apiKey\n    api: anthropic-messages\n    apiKey: \"!sleep 3; echo k\"\n" +
+		"    models:\n      - id: m4\n        name: M4\n"
 	const dispatched = "(dispatched by dist/skills/legion-worker/SKILL.md)"
 	for _, testCase := range []struct {
 		name  string
@@ -90,6 +79,10 @@ func TestTheAgentModelCheckOnTheRealOhMyPi(t *testing.T) {
 		{name: "an override that expands to a model", roles: "  default: fake/m1\n  review: fake/m1\n",
 			config: "task:\n  agentModelOverrides:\n    oracle: fake/m1\n"},
 		{name: "an agent that declares no model, with no default role", roles: "  review: fake/m1\n  oracle: fake/m1\n"},
+		// The answer comes from a session_shutdown handler Oh My Pi abandons after 2 s; at the pin the
+		// process outlives it, so a key slower than that still answers. A pin that ends the process
+		// with the handler would refuse this boot.
+		{name: "a key command slower than the shutdown handler's 2 s", roles: "  default: fake/m1\n  review: fake/m1\n  oracle: slowkey/m4\n"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -106,8 +99,8 @@ func TestTheAgentModelCheckOnTheRealOhMyPi(t *testing.T) {
 			for name, value := range testCase.env {
 				env[name] = value
 			}
-			probe := ImageProbe{Omp: omp, Contract: 3, Env: env, WorkDir: dir, SkipAgentModels: testCase.skip,
-				Log: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))}
+			log := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+			var err error
 			if testCase.pane {
 				install := exec.Command(omp, "plugin", "install", root)
 				for name, value := range env {
@@ -116,11 +109,14 @@ func TestTheAgentModelCheckOnTheRealOhMyPi(t *testing.T) {
 				if out, err := install.CombinedOutput(); err != nil {
 					t.Fatalf("omp plugin install: %v\n%s", err, out)
 				}
+				// A pane loads the plugin through discovery, as the daemon's boot gate on tmux
+				// probes it.
+				err = pluginGate{env: env, workDir: dir, invocation: omp, timeout: defaultProbeTimeout, retry: bootprobe.Image,
+					contract: 3, skipAgentModels: testCase.skip, log: log}.verify(context.Background())
 			} else {
-				probe.PluginRoot = root
+				err = ProbeImage(context.Background(), ImageProbe{Omp: omp, Contract: 3, Env: env, WorkDir: dir, PluginRoot: root,
+					SkipAgentModels: testCase.skip, RoleReferences: promptrefs.New(), Log: log})
 			}
-
-			err := ProbeImage(context.Background(), probe)
 
 			if len(testCase.want) == 0 {
 				if err != nil {
@@ -141,17 +137,11 @@ func TestTheAgentModelCheckOnTheRealOhMyPi(t *testing.T) {
 }
 
 // A Sandbox pod runs on the role prompts the daemon inlines from its own directory, not the image's
-// copy, so the image's probe resolves what the daemon's prompts name (RolePromptReferences): an
+// copy, so the image's probe resolves what the daemon's prompts name (promptrefs.Roles): an
 // agent only the daemon's copy dispatches, which the image's plugin lacks, is refused naming the
 // daemon's prompt file, though the image's own roles never name it.
 func TestTheImageProbeResolvesTheAgentsTheDaemonsPromptsName(t *testing.T) {
-	omp := os.Getenv("LEGION_TEST_OMP")
-	switch {
-	case omp == "" && os.Getenv("GITHUB_ACTIONS") == "true":
-		t.Fatal("LEGION_TEST_OMP is unset on GitHub Actions: name the pinned Oh My Pi binary (the daemon-go job installs it)")
-	case omp == "":
-		t.Skip("LEGION_TEST_OMP names no Oh My Pi binary")
-	}
+	omp := testomp.Binary(t)
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")
 	agent := filepath.Join(home, ".omp", "profiles", "legion", "agent")
@@ -176,16 +166,20 @@ func TestTheImageProbeResolvesTheAgentsTheDaemonsPromptsName(t *testing.T) {
 	}
 	image := roles("image-roles", "Consult `task(agent=\"oracle\")`.\n")
 	daemonCopy := roles("daemon-roles", "Consult `task(agent=\"oracle\")`, then `task(agent=\"daemon-only\")`.\n")
-	references, err := RolePromptReferences(daemonCopy)
+	imageReferences, err := promptrefs.Roles(image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	references, err := promptrefs.Roles(daemonCopy)
 	if err != nil {
 		t.Fatal(err)
 	}
 	env := map[string]string{"HOME": home, "OMP_PROFILE": "legion", "PATH": "/usr/local/bin:/usr/bin:/bin", "AWS_EC2_METADATA_DISABLED": "true"}
-	probe := func(references string) error {
+	probe := func(references promptrefs.Names) error {
 		return ProbeImage(context.Background(), ImageProbe{Omp: omp, Contract: 3, Env: env, WorkDir: dir, PluginRoot: root,
-			RolesDir: image, RoleReferences: references, Log: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))})
+			RoleReferences: references, Log: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))})
 	}
-	if err := probe(""); err != nil {
+	if err := probe(imageReferences); err != nil {
 		t.Fatalf("ProbeImage on the image's own roles = %v, want a pass: they name only agents the plugin ships", err)
 	}
 	err = probe(references)

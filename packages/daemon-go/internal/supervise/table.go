@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -150,13 +151,17 @@ type RequestRetry struct{ Claim claim.Token }
 // drives the request; an empty ID asks the machine to mint an ordinary operator delivery id.
 //
 // Phase is the issue phase the task is for, and says when the task stops being the work to do: a
-// task of a phase the issue has left is dropped rather than sent. The workflow names it; an
-// operator's own delivery names none and is held whatever phase its issue is in.
+// task of a phase the issue has left is dropped rather than sent, and a suspension, which ends
+// that phase, retires it. The workflow names it; an operator's own delivery names none, is never
+// dropped for its issue's phase, and waits out a suspension to be sent on the resume.
 type RequestDeliver struct {
 	Claim claim.Token
 	Task  string
 	ID    string
 	Phase phase.Phase
+	// Generation is the issue generation the task belongs to, and is what a completion reported
+	// for it is attributed to. An operator's own task names none.
+	Generation uint64
 }
 
 // RequestExit is the agent reporting its own end.
@@ -462,7 +467,11 @@ func fillTable(t *builder) {
 	t.row(onTreeClose, "already retired", nothingToDo, nil, StateRetired)
 
 	t.row(onOperatorClose, "the operator's close of the tree, if no workflow issue backs it", operatorClose, []ClaimState{StateRetired}, stoppable...)
-	t.row(onOperatorClose, "already retired", nothingToDo, nil, StateRetired)
+	// A close of a tree already retired is the outcome the operator asked for, so it answers as
+	// the close that did it: an operator retrying after a timeout is not told their close failed.
+	// It is still refused for a claim that is not its tree's root, and for a tree a workflow issue
+	// backs: retiring is not a way past either.
+	t.row(onOperatorClose, "the tree is already closed", operatorCloseRetired, nil, StateRetired)
 
 	t.row(onRetry, "retry: fresh budgets, and the same session relaunched", retry, []ClaimState{StateLaunching, StateFailed}, StateFailed, StateRetired)
 	t.ignore(onRetry, "a queued claim is spawned, not retried", StateQueued)
@@ -562,7 +571,7 @@ func reprobe(m *Machine, ctx context.Context, _ Event) error {
 func acked(m *Machine, ctx context.Context, _ Event) error {
 	m.helloDuringSend = false
 	p := m.claim.Pending
-	p.DeliveredAt = m.deps.Clock.Now()
+	m.markRead(p)
 	m.arm(TimerTurn, m.deps.Timeouts.RPC, p.ID)
 	return m.deps.Store.PutDelivery(ctx, m.claim.Token, *p)
 }
@@ -597,12 +606,58 @@ func refused(m *Machine, ctx context.Context, ev Event) error {
 	return nil
 }
 
-// lateRefused is the agent refusing a prompt it had acknowledged. The claim's state stays what the
-// stream observed — a turn that confirmed the delivery may be a foreign one that really is running.
+// lateRefused is the agent refusing a prompt it had acknowledged. OMP answers that way when it
+// finds a turn it did not start — a notice delivered to the pane, a human's steer — and by the
+// same route when the prompt fails before any turn begins, a provider answering "No API key
+// found for …" among them. The claim's state stays what the stream observed, since a foreign
+// turn may really be running.
+//
+// Which of the two it is, is the turn: one the stream already saw start, one Oh My Pi names in
+// its own busy answer, or one the agent says it is in when asked. The busy answer is read
+// because it is the authority — Oh My Pi refuses that way exactly when a turn is running — and
+// because the ask can time out, where charging a working agent is the worse mistake. A turn of its own really running
+// is the collision: the agent is working, not refusing to work, and the daemon delivers those
+// notices itself, so a tree publishing them while a worker boots must not spend that worker's
+// prompt budget. The task is taken back and the turn's end sends it, charged nothing.
+//
+// No turn running is the agent refusing the work. It is charged like any acknowledged prompt
+// that becomes no turn, and the retry waits for the sweep that follows, so a refusal that never
+// stops walks the budget to its end — a relaunch, and then the retirement — instead of looping
+// on the spot for ever against an agent that cannot start a turn at all.
 func lateRefused(m *Machine, ctx context.Context, ev Event) error {
 	r := ev.(StreamLateRefusal)
-	m.log.Warn("supervise: the agent refused an acknowledged prompt", "delivery", r.DeliveryID, "error", r.Error)
-	return m.promptFailed(ctx, "refused after its acknowledgement: "+r.Error)
+	// A refusal naming the prompt whose acknowledgement marked the task, where that is no longer the
+	// pending id, says that prompt never ran, so the task loses its read mark — and nothing else.
+	// The wait that gave up on it already re-queued the task under a new id and charged the prompt;
+	// rotating or charging again would spend the budget twice for one prompt. A turn of the task's
+	// own that is running meanwhile keeps its run: that is its confirmation, not this mark (markedBy).
+	if r.DeliveryID != m.claim.Pending.ID {
+		m.log.Warn("supervise: the prompt that marked the task as read was refused; the mark is cleared",
+			"delivery", r.DeliveryID, "error", r.Error)
+		return m.markUnread(ctx)
+	}
+	conn, connected := m.deps.Conns.Conn(m.claim.Token)
+	if m.claim.State == StateWorking || agentBusy(r.Error) || (connected && m.streaming(ctx, conn)) {
+		m.log.Warn("supervise: the agent refused an acknowledged prompt; it is in a turn of its own",
+			"delivery", r.DeliveryID, "error", r.Error)
+		// The agent is in a turn it started itself, so it never read this task: the delivery goes
+		// back to waiting unread, and nothing the worker reports from that turn belongs to it.
+		return m.takeBackPending(ctx, taskUnread)
+	}
+	m.log.Warn("supervise: the agent refused an acknowledged prompt and is in no turn; the prompt is charged",
+		"delivery", r.DeliveryID, "error", r.Error)
+	// The prompt did not run: the agent answered it a failure with no turn of its own to explain
+	// it — a provider that rejected before any turn began, an agent that will not take the work.
+	// The task goes back unread, so nothing reported from whatever turn follows belongs to it.
+	return m.promptFailed(ctx, "refused an acknowledged prompt with no turn running: "+r.Error, taskUnread)
+}
+
+// agentBusy is Oh My Pi's own refusal of a prompt for a turn already running, which it words
+// exactly this way. Every other rejection — a provider that answered before any turn began among
+// them — is the agent failing to take the work. Reading the message is the daemon's only handle
+// on which it is: the wire carries a string, not a kind.
+func agentBusy(reason string) bool {
+	return strings.HasPrefix(reason, "Agent is already processing")
 }
 
 // turnStarted is a turn starting in a ready or idle claim. It confirms the pending delivery when
@@ -659,7 +714,9 @@ func registrationDeadline(m *Machine, ctx context.Context, _ Event) error {
 }
 
 func noTurn(m *Machine, ctx context.Context, _ Event) error {
-	return m.promptFailed(ctx, fmt.Sprintf("acknowledged, and no turn started within %s", m.deps.Timeouts.RPC))
+	// The bound alone keeps the mark: a turn that has not started within it may still be this
+	// task's, starting late, and the agent read the prompt when the turn began.
+	return m.promptFailed(ctx, fmt.Sprintf("acknowledged, and no turn started within %s", m.deps.Timeouts.RPC), taskRead)
 }
 
 func spawn(m *Machine, ctx context.Context, _ Event) error { return m.launch(ctx) }
@@ -710,9 +767,10 @@ func ready(m *Machine, ctx context.Context, _ Event) error {
 func reready(m *Machine, ctx context.Context, _ Event) error { return m.sendPending(ctx) }
 
 // suspend stops the process and keeps the session. A suspension ends the claim's phase, so a task
-// still pending unconfirmed (acknowledged and then refused, or lost to the transport) is retired
-// with it (settle): the next resume is started with its new phase's task, never handed the
-// finished one's.
+// queued for a phase and still pending unconfirmed (acknowledged and then refused, or lost to the
+// transport) is retired with it (settle): the next resume is started with its new phase's task,
+// never handed the finished one's. A task of no phase — an operator's own, an architect's — is
+// not the workflow's to end, and goes on that resume.
 func suspend(m *Machine, ctx context.Context, _ Event) error {
 	if err := m.suspendProcess(ctx); err != nil {
 		return fmt.Errorf("suspend %s: %w", m.claim.Token, err)
@@ -761,17 +819,43 @@ func treeClose(m *Machine, ctx context.Context, _ Event) error { return m.end(ct
 // asked here rather than by the caller, so the answer and the stop it decides sit together rather
 // than a round trip apart; it does not lock the record it reads.
 func operatorClose(m *Machine, ctx context.Context, _ Event) error {
-	if m.deps.TreeClosable != nil {
-		closable, err := m.deps.TreeClosable(ctx, m.claim)
-		if err != nil {
-			return fmt.Errorf("close %s: %w", m.claim.Token, err)
-		}
-		if !closable {
-			return &RefusedError{State: m.claim.State, Request: "close",
-				Err: fmt.Errorf("%s is a workflow issue's tree, which closes when its linger expires", m.claim.Tree)}
-		}
+	if err := m.closeRefusal(ctx); err != nil {
+		return err
 	}
 	return m.end(ctx)
+}
+
+// operatorCloseRetired answers a close of a claim that has already retired. The outcome the
+// operator asked for holds, so an operator retrying after a timeout is not told their close
+// failed — but only for a close that would have been allowed: a claim that is not its tree's
+// root, and a tree a workflow issue backs, are refused whatever state the claim is in. The caller
+// reads a nil here as the close that did it and goes on to stop the rest of the tree, which is
+// the whole tree's fate to hand to a claim that never held it.
+func operatorCloseRetired(m *Machine, ctx context.Context, _ Event) error {
+	return m.closeRefusal(ctx)
+}
+
+// closeRefusal is the refusal an operator's close earns, or nil. It is the two questions the
+// close turns on, asked where the close is decided rather than a round trip before it: whether
+// this claim is its tree's root, and whether a workflow issue backs the tree. Neither reads the
+// claim's state, so a retired claim answers them the same way a live one does.
+func (m *Machine) closeRefusal(ctx context.Context) error {
+	if !m.claim.treeRoot() {
+		return &RefusedError{State: m.claim.State, Request: "close",
+			Err: fmt.Errorf("%s is not its tree's root claim; stop it instead", m.claim.Token)}
+	}
+	if m.deps.TreeClosable == nil {
+		return nil
+	}
+	closable, err := m.deps.TreeClosable(ctx, m.claim)
+	if err != nil {
+		return fmt.Errorf("close %s: %w", m.claim.Token, err)
+	}
+	if !closable {
+		return &RefusedError{State: m.claim.State, Request: "close",
+			Err: fmt.Errorf("%s is a workflow issue's tree, which closes when its linger expires", m.claim.Tree)}
+	}
+	return nil
 }
 
 // end releases the claim's process and retires the claim, which is what every stop and close does

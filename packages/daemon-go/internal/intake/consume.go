@@ -5,12 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go/jetstream"
 	"golang.org/x/sync/errgroup"
+
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
 const notificationStream = "ENVOY_NOTIFICATIONS"
@@ -24,7 +27,7 @@ const (
 // and configured repositories; intake owns only the fixed stream and consumer identities.
 type ConsumerSpec struct {
 	Project      string
-	Repositories []string
+	Repositories []ghrepo.Repository
 	AckWait      time.Duration
 	NakDelay     time.Duration
 	Logger       *slog.Logger
@@ -182,11 +185,8 @@ func normalizedSpec(spec ConsumerSpec) (ConsumerSpec, error) {
 	if len(spec.Repositories) == 0 {
 		return ConsumerSpec{}, fmt.Errorf("intake consumer repositories are required")
 	}
-	for _, repo := range spec.Repositories {
-		owner, name, ok := strings.Cut(repo, "/")
-		if !ok || owner == "" || name == "" || strings.Contains(name, "/") {
-			return ConsumerSpec{}, fmt.Errorf("intake consumer repository %q must be owner/repository", repo)
-		}
+	if slices.ContainsFunc(spec.Repositories, ghrepo.Repository.IsZero) {
+		return ConsumerSpec{}, fmt.Errorf("intake consumer repository is required")
 	}
 	if spec.AckWait <= 0 {
 		spec.AckWait = defaultAckWait
@@ -200,11 +200,10 @@ func normalizedSpec(spec ConsumerSpec) (ConsumerSpec, error) {
 	return spec, nil
 }
 
-func githubFilters(repositories []string) []string {
+func githubFilters(repositories []ghrepo.Repository) []string {
 	filters := make([]string, 0, len(repositories))
 	for _, repo := range repositories {
-		owner, name, _ := strings.Cut(repo, "/")
-		filters = append(filters, "notifications.github."+owner+"."+name+".>")
+		filters = append(filters, "notifications.github."+repo.Owner()+"."+repo.Name()+".>")
 	}
 	return filters
 }

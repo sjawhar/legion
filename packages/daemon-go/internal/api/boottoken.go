@@ -77,14 +77,36 @@ type recordingStore struct {
 	tokens *BootTokens
 }
 
+// Every method that writes a claim is wrapped, so a launch is remembered whichever write carried
+// its boot token hash.
 func (s recordingStore) PutClaim(ctx context.Context, c supervise.Claim) error {
 	if err := s.Store.PutClaim(ctx, c); err != nil {
 		return err
 	}
+	s.written(c)
+	return nil
+}
+
+func (s recordingStore) PutClaimAndDelivery(ctx context.Context, c supervise.Claim, d supervise.Delivery) error {
+	if err := s.Store.PutClaimAndDelivery(ctx, c, d); err != nil {
+		return err
+	}
+	s.written(c)
+	return nil
+}
+
+func (s recordingStore) RetireDelivery(ctx context.Context, c supervise.Claim, deliveryID string) error {
+	if err := s.Store.RetireDelivery(ctx, c, deliveryID); err != nil {
+		return err
+	}
+	s.written(c)
+	return nil
+}
+
+func (s recordingStore) written(c supervise.Claim) {
 	if len(c.BootTokenHash) > 0 {
 		s.tokens.mu.Lock()
 		s.tokens.minted[hex.EncodeToString(c.BootTokenHash)] = BootToken{Claim: c.Token, Generation: c.Generation}
 		s.tokens.mu.Unlock()
 	}
-	return nil
 }

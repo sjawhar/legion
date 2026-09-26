@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 )
@@ -318,6 +319,16 @@ func TestRegistrationEndsTheBootWatch(t *testing.T) {
 	h.wantState(StateRegistered)
 }
 
+// deathCharged is what one death charges a claim reach walked to state: a launch failure, and a
+// death as well when its agent had work outstanding, which of those states only working has (idle
+// has finished its task).
+func deathCharged(state ClaimState) Budgets {
+	if state == StateWorking {
+		return Budgets{LaunchFailures: 1, Deaths: 1}
+	}
+	return Budgets{LaunchFailures: 1}
+}
+
 func TestAProcessFoundGoneIsRelaunchedAsTheSameSession(t *testing.T) {
 	for _, kind := range []runtime.ObservationKind{runtime.Gone, runtime.NotRecordedProcess} {
 		for _, state := range liveStates {
@@ -329,7 +340,7 @@ func TestAProcessFoundGoneIsRelaunchedAsTheSameSession(t *testing.T) {
 				h.observe(kind)
 
 				h.wantState(StateLaunching)
-				h.wantBudgets(Budgets{LaunchFailures: 1})
+				h.wantBudgets(deathCharged(state))
 				registered := state != StateLaunching && state != StateShimConnected
 				if !registered {
 					h.wantCalls("Spawn", 2)
@@ -339,14 +350,6 @@ func TestAProcessFoundGoneIsRelaunchedAsTheSameSession(t *testing.T) {
 				resume := h.wantCalls("Resume", 1)[0]
 				if resume.Previous == nil || *resume.Previous != dead || resume.Spec.ResumeSessionFile != sessionFile || resume.Spec.Generation != 2 {
 					t.Errorf("resumed %+v from %+v, want the same session after the dead incarnation, at generation 2", resume.Spec, resume.Previous)
-				}
-				if state == StateWorking {
-					if p := h.claim().Pending; p != nil {
-						t.Errorf("pending %+v, want the delivery the dead turn had confirmed retired", p)
-					}
-					if _, ok := h.store.delivery(testToken); ok {
-						t.Error("the store still holds the confirmed delivery")
-					}
 				}
 			})
 		}
@@ -367,7 +370,7 @@ func TestAClosedStreamIsJudgedByAProbe(t *testing.T) {
 				t.Errorf("probed %+v, want the claim's process", probe.Locator)
 			}
 			h.wantState(StateLaunching)
-			h.wantBudgets(Budgets{LaunchFailures: 1})
+			h.wantBudgets(deathCharged(state))
 		})
 		t.Run(string(state)+"/alive", func(t *testing.T) {
 			h := newHarness(t)
@@ -657,7 +660,7 @@ func TestASuspensionWhoseTaskCannotBeRetiredStillRevokesTheCapability(t *testing
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarnessOf(t, tc.c)
 			h.reach(StateReady)
-			h.must(RequestDeliver{Claim: h.token, Task: "the finished phase's task"})
+			h.must(RequestDeliver{Claim: h.token, Task: "the finished phase's task", Phase: phase.Implementing})
 			h.wantPrompts(1)
 			h.store.fail("RetireDelivery", errBoom)
 

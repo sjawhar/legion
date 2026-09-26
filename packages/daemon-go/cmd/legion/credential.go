@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
 )
 
 type grantCredentialRequest struct {
@@ -120,7 +121,7 @@ func runCredential(ctx context.Context, args []string, stdout, stderr io.Writer)
 func workerBinFreePath(value string) string {
 	entries := make([]string, 0, len(filepath.SplitList(value)))
 	for _, entry := range filepath.SplitList(value) {
-		if entry != "" && filepath.Base(entry) != "worker-bin" {
+		if entry != "" && filepath.Base(entry) != workerbin.DirName {
 			entries = append(entries, entry)
 		}
 	}

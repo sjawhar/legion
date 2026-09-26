@@ -146,6 +146,42 @@ func TestStateStage3Golden(t *testing.T) {
 	})
 }
 
+// An operator's claim on an issue the workflow does not record is listed for the claim's sake,
+// and says so rather than leaving its phase and status empty: an empty phase refused the whole
+// document at every strict client, over a row that is a legitimate state. internal/projection's
+// own test holds the producer to these values.
+func TestStateOperatorClaimGolden(t *testing.T) {
+	golden(t, "state-operator-claim.json", State{
+		Daemon: DaemonInfo{
+			Project:       "AC91849371",
+			SchemaVersion: 3,
+			Boots:         1,
+			FirstBootAt:   time.Date(2026, 9, 25, 5, 50, 0, 0, time.UTC),
+			StartedAt:     time.Date(2026, 9, 25, 5, 50, 0, 0, time.UTC),
+		},
+		Admission: Admission{Cap: 2, Active: []string{}, Waiting: []string{}},
+		Issues: map[string]Issue{
+			"AC91849371-900": {
+				Key:     "AC91849371-900",
+				Phase:   Unrecorded,
+				Status:  string(Unrecorded),
+				Workers: map[claim.Role]PhaseView{},
+				Architect: &ClaimView{
+					Session: "01a0d71d-aace-7448-a0d4-e401d736438f",
+					State:   "idle",
+					Locator: &runtime.Locator{
+						Runtime:     "tmux",
+						Claim:       "legion-ac91849371-ac91849371-900-architect",
+						Incarnation: "1618075:268131172",
+						Tmux:        &runtime.TmuxLocator{Window: "@1", Pane: "%1"},
+					},
+				},
+			},
+		},
+		PendingStatusWrites: []PendingStatusWrite{},
+	})
+}
+
 // golden pins one response's wire shape: Go writes it (`-update`), and
 // `packages/contracts/src/legion-go-api.test.ts` parses it through the strict schema of the
 // response it is. A fixture that differs from what Go now writes is stale.
@@ -228,7 +264,7 @@ func operatorClaim() OperatorClaim {
 			Incarnation: "40217:9551230",
 			Tmux:        &runtime.TmuxLocator{Window: "@7", Pane: "%23"},
 		},
-		Budgets:         BudgetsView{LaunchFailures: 1, PromptFailures: 0, PromptRetires: 0},
+		Budgets:         BudgetsView{LaunchFailures: 1, Deaths: 1, PromptFailures: 0, PromptRetires: 0},
 		UncertainStreak: 0,
 		Pending: &DeliveryView{
 			ID:          "OVXA3ZC6BPIKTOQHKXHRZ7TYVB",
@@ -236,6 +272,7 @@ func operatorClaim() OperatorClaim {
 			QueuedAt:    time.Date(2026, 9, 22, 9, 30, 58, 0, time.UTC),
 			DeliveredAt: &delivered,
 			ConfirmedAt: &delivered,
+			Interrupted: true,
 		},
 	}
 }

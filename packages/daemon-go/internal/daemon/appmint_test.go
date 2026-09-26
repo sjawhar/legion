@@ -25,7 +25,8 @@ import (
 )
 
 // gitHubStandIn serves the GitHub App endpoints a boot's token mint calls, for the owner acme:
-// installation discovery answers through discover, and the exchange and identity lookups succeed.
+// installation discovery answers through discover, the exchange and identity lookups succeed, and
+// each App's slug is legion-test-<its id>, so the two bot logins differ as two real Apps' do.
 // It counts each App's installation discoveries by the App id its JWT names.
 type gitHubStandIn struct {
 	mu          sync.Mutex
@@ -82,7 +83,7 @@ func appTokens(t *testing.T, discover func(w http.ResponseWriter, r *http.Reques
 		case strings.HasSuffix(r.URL.Path, "/access_tokens"):
 			fmt.Fprintf(w, `{"token":"installation-token","expires_at":%q}`, time.Now().Add(time.Hour).Format(time.RFC3339))
 		case r.URL.Path == "/app":
-			fmt.Fprint(w, `{"slug":"legion-test"}`)
+			fmt.Fprintf(w, `{"slug":"legion-test-%s"}`, jwtIssuer(t, r))
 		case strings.HasPrefix(r.URL.Path, "/users/"):
 			fmt.Fprint(w, `{"id":42}`)
 		default:

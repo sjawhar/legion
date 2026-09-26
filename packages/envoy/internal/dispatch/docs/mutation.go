@@ -184,13 +184,12 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 	if !joined {
 		return "", errUnjoined
 	}
-	// The seeding actor is the caller's own first version author (written directly by the
-	// caller, never through writeVersionTx), so it must not join `pending` - only the
-	// settlement that indexes the seeded ask blocks needs to know who wrote them.
-	s.recordLastActor(artifactID, actor)
 	tree, err := parseInput(markdown)
 	if err != nil {
 		return "", err
+	}
+	if err := pmdoc.AskContentError(tree); err != nil {
+		return "", &ErrInvalidAskBlock{Reason: err}
 	}
 	canonical, err := renderTree(tree)
 	if err != nil {
@@ -207,6 +206,12 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 	if _, err := s.persistence.AppendUpdateTx(ctx, tx, artifactID, crdt.EncodeStateAsUpdateV1(doc, nil), true); err != nil {
 		return "", fmt.Errorf("seed live document: %w", err)
 	}
+	// The seeding actor is the caller's own first version author (written directly by the
+	// caller, never through writeVersionTx), so it must not join `pending` - only the
+	// settlement that indexes the seeded ask blocks needs to know who wrote them. Recording it
+	// makes the document's room, so it waits for the seed to be written: a room leaves only when
+	// it is evicted, and a refused seed would hold one of the live-room slots for good.
+	s.recordLastActor(artifactID, actor)
 	return canonical, nil
 }
 
@@ -225,9 +230,12 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 		if err != nil {
 			return err
 		}
-		target, err := parseInput(markdown)
+		target, err := parseReplacing(current, markdown)
 		if err != nil {
 			return err
+		}
+		if err := refuseChangedAsks(current, target, pmdoc.AskContentError, askMarkdown); err != nil {
+			return &ErrInvalidAskBlock{Reason: err}
 		}
 		currentMarkdown, err := renderTree(current)
 		if err != nil {
@@ -724,7 +732,7 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 			}
 			next := batch.tree
 			pmdoc.EnsureBlockIDs(next)
-			if err := validateAskBlocks(next); err != nil {
+			if err := validateEditedAskBlocks(tree, next); err != nil {
 				mutationErr = &ErrInvalidAskBlock{Reason: err}
 				return
 			}
@@ -772,7 +780,7 @@ func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, 
 		}
 		next := batch.tree
 		pmdoc.EnsureBlockIDs(next)
-		if err := validateAskBlocks(next); err != nil {
+		if err := validateEditedAskBlocks(tree, next); err != nil {
 			return &ErrInvalidAskBlock{Reason: err}
 		}
 		if outcome, err = batch.outcome(len(ops)); err != nil {

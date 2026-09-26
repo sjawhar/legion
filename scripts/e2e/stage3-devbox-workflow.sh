@@ -2,14 +2,17 @@
 # Stage 3's devbox gate for the Go coordinator. It drives the durable workflow through the real
 # surfaces: a scratch Dispatch, real Envoy/NATS, the Go daemon, real OMP panes, and GitHub's
 # sjawhar/legion-smoke sandbox. Its host-side rig helpers and the workflow's vocabulary are the
-# shared lib/rig.sh and lib/workflow.sh; it deliberately does not source the kind smoke scripts:
-# the small scratch-service rig below is copied and adapted so its lifecycle belongs to this run.
+# shared lib/rig.sh and lib/workflow.sh; the small scratch-service rig below is this run's own, so
+# its lifecycle belongs to this run.
 #
-# Run it as `bash scripts/e2e/stage3-devbox-workflow.sh`. It needs agent-tier secrets and the
-# operator's own hawk login, with the keyring holding it unlocked: the agents' model is Anthropic
-# through the Hawk model gateway (lib/install-model-gateway.sh), the route every devbox agent
-# session uses, and no Anthropic key reaches a pane. The proof human's reviews and merge are the
-# devbox's ordinary gh (the dotfiles shim, acting as the sjawhar-agent App), never a Legion App.
+# Run it as `bash scripts/e2e/stage3-devbox-workflow.sh` with two required inputs:
+# LEGION_E2E_MODEL_GATEWAY_URL, the model gateway's Anthropic endpoint, and SMOKE_UPSTREAM_NATS,
+# the production Envoy NATS the GitHub bridge subscribes on, by its fully-qualified name. It needs
+# agent-tier secrets and the operator's own hawk login, with the keyring holding it unlocked: the
+# agents' model is Anthropic through the Hawk model gateway (lib/install-model-gateway.sh), the
+# route every devbox agent session uses, and no Anthropic key reaches a pane. The proof human's
+# reviews and merge are the devbox's ordinary gh (the dotfiles shim, acting as the sjawhar-agent
+# App), never a Legion App.
 # The App private keys are resolved by the daemon through private_key_command; they never enter
 # this shell, a pane, an argv, or this transcript.
 set -Eeuo pipefail
@@ -69,6 +72,8 @@ fail() { printf 'FAIL %s: %s\n' "$check" "$*" >&2; exit 1; }
 . "$root/scripts/e2e/lib/rig.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/workflow.sh
 . "$root/scripts/e2e/lib/workflow.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/built-revision.sh
+. "$root/scripts/e2e/lib/built-revision.sh"
 
 # collect_transcripts copies every OMP session the rig's profile wrote into the evidence directory
 # before the isolated profile is removed.
@@ -110,7 +115,7 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-# The copies of kind-smoke's host helpers below own only this run's isolated resources. Each service
+# The host helpers below own only this run's isolated resources. Each service
 # binds a port the rig picked. A first start that loses its port to another process picks again; a
 # restart keeps its port, which the rest of the rig already names.
 start_listener() {
@@ -542,6 +547,19 @@ case "$until" in
   *) fail "STAGE3_UNTIL must be rework, not $until" ;;
 esac
 [ -z "$from" ] || [ -z "$until" ] || fail "set STAGE3_FROM or STAGE3_UNTIL, not both"
+# The bridge dials the production Envoy NATS by the operator's fully-qualified name for it, never
+# a bare alias a resolver's search domain would complete. The value is never printed.
+upstream_nats=${SMOKE_UPSTREAM_NATS:-}
+upstream_nats=${upstream_nats#"${upstream_nats%%[![:space:]]*}"}
+upstream_nats=${upstream_nats%"${upstream_nats##*[![:space:]]}"}
+[ -n "$upstream_nats" ] ||
+  fail "SMOKE_UPSTREAM_NATS is unset: the production Envoy NATS the GitHub bridge subscribes on, by its fully-qualified name (nats://envoy-nats.<tailnet>.ts.net:4222)"
+# One URL: optional scheme and user info, a host with a dot, optional port, nothing after it (the
+# client dials what follows the last "://"); scripts/e2e/lib/envoy-bridge.ts holds the same
+# pattern.
+nats_url='^([A-Za-z][A-Za-z0-9+.-]*://)?([^@/?#,[:space:]]+@)?[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)+(:[0-9]+)?/?$'
+[[ "$upstream_nats" =~ $nats_url ]] ||
+  fail "SMOKE_UPSTREAM_NATS is not one NATS URL naming a fully-qualified host: a bare alias resolves through whatever search domain the box has; name the production Envoy NATS as nats://envoy-nats.<tailnet>.ts.net:4222"
 development=${from:+from $from}${until:+until $until}
 # The daemon runs gh by the path it resolves at boot. This box's PATH heads with a gh wrapper
 # (the dotfiles shim, which hands an agent's explicit GH_TOKEN on to `knives gh`), so the proof
@@ -571,6 +589,9 @@ begin rig
 chmod 0600 "$work"/*token "$work/envoy-auth-header" "$work/postgres-password"
 (cd "$root/packages/daemon-go" && go build -o "$work/legion" ./cmd/legion)
 (cd "$root/packages/envoy" && go build -o "$work/envoy-listener" ./cmd/listener && go build -o "$work/envoy-dispatch" ./cmd/dispatch)
+# The head under proof, on the run's own log: a run reports for whatever the workspace held when it
+# built, and a comment naming the head is written by hand.
+built_from "$root" "$work/legion" "$work/envoy-listener" "$work/envoy-dispatch"
 docker ps >/dev/null
 # Docker assigns the containers' host ports when it binds them, so neither can lose a race.
 docker run -d --name "$pg_container" --mount type=tmpfs,destination=/var/lib/postgresql/data \
@@ -591,10 +612,10 @@ dispatch_human PUT "settings/repo-projects/$repo" "$(jq -cn --arg project "$proj
 # This is the production Envoy ingress bridge, subscribe-only from its perspective. GitHub events
 # are observed, never manufactured, and only the smoke repository is forwarded to this run's NATS.
 SMOKE_REPO="$repo" SMOKE_RIG_NATS="nats://127.0.0.1:$port_nats" \
-  SMOKE_UPSTREAM_NATS="${SMOKE_UPSTREAM_NATS:-nats://envoy-nats.tailb86685.ts.net:4222}" \
+  SMOKE_UPSTREAM_NATS="$upstream_nats" \
   start_process bridge env -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
     -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 \
-    bun run "$root/scripts/kind-smoke/envoy-bridge.ts"
+    bun run "$root/scripts/e2e/lib/envoy-bridge.ts"
 until_true 90 "the GitHub ingress bridge to report ready" grep -q 'BRIDGE READY' "$evidence/logs/bridge.log"
 (cd "$root" && bun install --frozen-lockfile >/dev/null)
 manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --profile "$profile" --dest "$work/plugin")

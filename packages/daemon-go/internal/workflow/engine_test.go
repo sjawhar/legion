@@ -18,11 +18,13 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	legionstore "github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 type admissionStub struct{}
@@ -45,7 +47,7 @@ func TestGateRegistrationWithDesignGateOffStartsPlanningAndSeedsApprovalRead(t *
 		DesignGate:     config.DesignGateOff,
 		ReviewRoundCap: 3,
 		MaxFixAttempts: 3,
-		LingerHours:    time.Hour,
+		Linger:         time.Hour,
 		Clock:          func() time.Time { return time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC) },
 	}, nil)
 	if _, err := intake.ApplyFact(ctx, pool, "api", "gate-registration", intake.GateRegistered{
@@ -125,7 +127,7 @@ func TestRefusedReadyIsCommittedAndApprovalAdvancesWithoutSecondReady(t *testing
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim"})
 	engine := testEngine()
 
-	result, err := intake.ApplyFact(ctx, pool, "api", "ready", intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim", Ready: true}, engine, admissionStub{})
+	result, err := intake.ApplyFact(ctx, pool, "api", "ready", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim", Ready: true}, engine, admissionStub{})
 	if err != nil {
 		t.Fatalf("ApplyFact READY: %v", err)
 	}
@@ -153,9 +155,67 @@ func TestRefusedReadyIsCommittedAndApprovalAdvancesWithoutSecondReady(t *testing
 	}
 }
 
-// A READY refused at one version stands: the human may revise the spec again before approving,
-// and the approval that reopens the gate at the later version advances the merge. A retried READY
-// from the same merger phase is one fact, so nothing else could.
+// The same READY on an issue with no design gate at all — a tree whose architect never registered
+// one, or a project whose gate is off. The refusal recorded a pending version of 0, which the
+// issues table refuses (ready_pending_version > 0), so the whole fact failed on a constraint
+// instead of committing the refusal the merger was supposed to read.
+func TestReadyRefusedWithNoDesignGateCommitsAndRecordsNoPendingVersion(t *testing.T) {
+	pool := migratedPool(t)
+	ctx := context.Background()
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "U"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim"})
+	engine := testEngine()
+
+	result, err := intake.ApplyFact(ctx, pool, "api", "ready", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim", Ready: true}, engine, admissionStub{})
+	if err != nil {
+		t.Fatalf("ApplyFact READY with no gate: %v", err)
+	}
+	if result.Refusal == nil || result.Refusal.Status != 409 {
+		t.Fatalf("READY refusal = %#v, want a committed refusal", result.Refusal)
+	}
+	var pending *int
+	if err := pool.QueryRow(ctx, "select ready_pending_version from issues where key = $1", "LEGION-208").Scan(&pending); err != nil {
+		t.Fatalf("read committed ready pending version: %v", err)
+	}
+	if pending != nil {
+		t.Fatalf("ReadyPendingVersion = %d, want none: there is no version to approve", *pending)
+	}
+}
+
+// A pull request GitHub reopens is the same pull request. Its fix attempts and blocked attempts
+// are what bound the review rounds, and rebuilding the record from the reopen zeroed them: closing
+// and reopening a pull request bought a fresh set of attempts, which is the cap the workflow has.
+func TestAReopenedPullRequestKeepsItsAttemptCounters(t *testing.T) {
+	pool := migratedPool(t)
+	ctx := context.Background()
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"})
+	seedPR(t, pool, record.PullRequest{
+		Issue: "LEGION-208", Repo: "acme/widgets", Number: 7, Branch: "legion/LEGION-208", HeadSHA: "old",
+		HeadUpdatedAt: time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC), HeadUpdatedAtSource: "webhook",
+		Failing: []string{}, FailingStatuses: []string{}, FixAttempts: 2, BlockedAttempts: 1, State: record.PullRequestOpen,
+	})
+	engine := testEngine()
+
+	if _, err := intake.ApplyFact(ctx, pool, "github", "reopened", intake.PullRequestOpened{
+		Repo: "acme/widgets", Number: 7, Branch: "legion/LEGION-208", HeadSHA: "new",
+		UpdatedAt: time.Date(2026, 9, 25, 0, 0, 0, 0, time.UTC),
+	}, engine, admissionStub{}); err != nil {
+		t.Fatalf("ApplyFact reopened: %v", err)
+	}
+
+	var fix, blocked int
+	var head string
+	if err := pool.QueryRow(ctx, "select fix_attempts, blocked_attempts, head_sha from pull_requests where issue = $1", "LEGION-208").Scan(&fix, &blocked, &head); err != nil {
+		t.Fatalf("read the reopened pull request: %v", err)
+	}
+	if fix != 2 || blocked != 1 {
+		t.Fatalf("reopened pull request counters = %d/%d, want the 2/1 it carried", fix, blocked)
+	}
+	if head != "new" {
+		t.Fatalf("reopened pull request head = %q, want the head the reopen named", head)
+	}
+}
+
 func TestRefusedReadyAdvancesWhenTheGateReopensAtALaterVersion(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
@@ -164,7 +224,7 @@ func TestRefusedReadyAdvancesWhenTheGateReopensAtALaterVersion(t *testing.T) {
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim"})
 	engine := testEngine()
 
-	if _, err := intake.ApplyFact(ctx, pool, "api", "ready", intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim", Ready: true}, engine, admissionStub{}); err != nil {
+	if _, err := intake.ApplyFact(ctx, pool, "api", "ready", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim", Ready: true}, engine, admissionStub{}); err != nil {
 		t.Fatalf("ApplyFact READY: %v", err)
 	}
 	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "version-5", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactVersion, Version: 5}, engine, admissionStub{}); err != nil {
@@ -196,7 +256,7 @@ func TestImplementationReachesTestingWhenHandoffAndPullRequestArriveInEitherOrde
 			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
 			engine := testEngine()
 			handoff := func() {
-				if _, err := intake.ApplyFact(ctx, pool, "api", "handoff", intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "abc123", Verdict: "pass"}, engine, admissionStub{}); err != nil {
+				if _, err := intake.ApplyFact(ctx, pool, "api", "handoff", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "abc123", Verdict: "pass"}, engine, admissionStub{}); err != nil {
 					t.Fatalf("ApplyFact handoff: %v", err)
 				}
 			}
@@ -228,7 +288,7 @@ func TestCapturedArtifactVersionAndApprovalFlowThroughConsume(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
 	seedIssue(t, pool, record.Issue{Key: "CAPTURE-4", Tree: "CAPTURE-4", Project: "CAPTURE", Title: "captured gate", Phase: phase.Admitted, Generation: 1, Status: "in_progress", Rank: "U"})
-	engine := New(record.NewStore(), Config{Project: "CAPTURE", ReviewRoundCap: 3, MaxFixAttempts: 3, LingerHours: time.Hour, Clock: func() time.Time { return time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC) }}, nil)
+	engine := New(record.NewStore(), Config{Project: "CAPTURE", ReviewRoundCap: 3, MaxFixAttempts: 3, Linger: time.Hour, Clock: func() time.Time { return time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC) }}, nil)
 	if _, err := intake.ApplyFact(ctx, pool, "api", "register-captured-gate", intake.GateRegistered{Issue: "CAPTURE-4", ArtifactID: "0544d460-0931-4374-b20b-790408519edd", Version: 1}, engine, admissionStub{}); err != nil {
 		t.Fatalf("register gate: %v", err)
 	}
@@ -240,12 +300,12 @@ func TestCapturedArtifactVersionAndApprovalFlowThroughConsume(t *testing.T) {
 	stop := startConsume(t, js, pool, engine)
 	defer stop()
 	publishCaptured(t, js, "notifications.dispatch.issue.CAPTURE-4.artifact.version", "../intake/testdata/dispatch/artifact-version.json")
-	eventually(t, "captured version closes gate", func() bool {
+	testwait.Eventually(t, "captured version closes gate", func() bool {
 		gate := gateState(t, pool, "CAPTURE-4")
 		return gate.LatestVersion == 2 && gate.ApprovedVersion != nil && *gate.ApprovedVersion == 1
 	})
 	publishCaptured(t, js, "notifications.dispatch.issue.CAPTURE-4.artifact.approved", "../intake/testdata/dispatch/artifact-approved.json")
-	eventually(t, "captured approval opens gate", func() bool {
+	testwait.Eventually(t, "captured approval opens gate", func() bool {
 		gate := gateState(t, pool, "CAPTURE-4")
 		return gate.LatestVersion == 2 && gate.ApprovedVersion != nil && *gate.ApprovedVersion == 2
 	})
@@ -261,7 +321,7 @@ func TestCapturedApprovedReviewFlowsThroughConsumeToRetro(t *testing.T) {
 	stop := startConsume(t, js, pool, testEngine())
 	defer stop()
 	publishCaptured(t, js, "notifications.github.sjawhar.legion.pr.42.review", "../intake/testdata/github/review.json")
-	eventually(t, "captured approval reaches retro", func() bool {
+	testwait.Eventually(t, "captured approval reaches retro", func() bool {
 		var gotPhase, status string
 		if err := pool.QueryRow(ctx, "select phase, status from issues where key = $1", "LEGION-208").Scan(&gotPhase, &status); err != nil {
 			return false
@@ -301,7 +361,7 @@ func TestProductionCheckCompletionTellsTheArchitectAndAwaitsSignOff(t *testing.T
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.ProductionCheck, Generation: 1, Status: "retro", Rank: "U"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", HandoffCommit: "retro"})
 
-	if _, err := intake.ApplyFact(ctx, pool, "api", "production-check", intake.HandoffComplete{
+	if _, err := intake.ApplyFact(ctx, pool, "api", "production-check", intake.HandoffComplete{Generation: 1,
 		Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Summary: "the merged change serves", Commit: "retro",
 	}, testEngine(), admissionStub{}); err != nil {
 		t.Fatalf("ApplyFact production check: %v", err)
@@ -338,7 +398,7 @@ func TestSignOffLingersOnceAndExpiryStopsTreeAndRemovesEveryWorkspace(t *testing
 	seedIssue(t, pool, record.Issue{Key: "LEGION-209", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent, Phase: phase.Implementing, Generation: 7, Status: "in_progress", Rank: "V"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implementer", HandoffCommit: "production-check"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-209", Role: claim.RoleImplementer, Claim: "child-implementer"})
-	engine := New(record.NewStore(), Config{Project: "LEGION", LingerHours: time.Hour, Clock: func() time.Time { return now }}, nil)
+	engine := New(record.NewStore(), Config{Project: "LEGION", Linger: time.Hour, Clock: func() time.Time { return now }}, nil)
 
 	if _, err := intake.ApplyFact(ctx, pool, "api", "signoff", intake.SignOff{Issue: "LEGION-208"}, engine, admissionStub{}); err != nil {
 		t.Fatalf("ApplyFact signoff: %v", err)
@@ -441,21 +501,21 @@ func TestRemainingForwardRowsApplyThroughIntake(t *testing.T) {
 		{
 			name: "planner completion", current: phase.Planning, role: claim.RolePlanner,
 			fact: func() intake.Fact {
-				return intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RolePlanner, Claim: "claim", Commit: "plan"}
+				return intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RolePlanner, Claim: "claim", Commit: "plan"}
 			},
 			wantPhase: phase.Implementing, wantStatus: "in_progress", wantOutbox: []string{"supervise", "supervise", "notice"},
 		},
 		{
 			name: "tester pass", current: phase.Testing, role: claim.RoleTester,
 			fact: func() intake.Fact {
-				return intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleTester, Claim: "claim", Verdict: "pass", Commit: "test"}
+				return intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleTester, Claim: "claim", Verdict: "pass", Commit: "test"}
 			},
 			wantPhase: phase.Reviewing, wantStatus: "needs_review", wantOutbox: []string{"dispatch_status", "supervise", "supervise", "notice"},
 		},
 		{
 			name: "tester fail", current: phase.Testing, role: claim.RoleTester,
 			fact: func() intake.Fact {
-				return intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleTester, Claim: "claim", Verdict: "fail", Commit: "test"}
+				return intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleTester, Claim: "claim", Verdict: "fail", Commit: "test"}
 			},
 			wantPhase: phase.Implementing, wantStatus: "in_progress", wantOutbox: []string{"dispatch_status", "supervise", "supervise", "notice"},
 		},
@@ -472,7 +532,7 @@ func TestRemainingForwardRowsApplyThroughIntake(t *testing.T) {
 		{
 			name: "retro completion", current: phase.Retro, role: claim.RoleImplementer,
 			fact: func() intake.Fact {
-				return intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "claim", Commit: "retro"}
+				return intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "claim", Commit: "retro"}
 			},
 			wantPhase: phase.Merging, wantStatus: "retro", wantOutbox: []string{"supervise", "supervise", "notice"},
 		},
@@ -482,7 +542,7 @@ func TestRemainingForwardRowsApplyThroughIntake(t *testing.T) {
 				seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact", LatestVersion: 1, ApprovedVersion: new(1)})
 			},
 			fact: func() intake.Fact {
-				return intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "claim", Ready: true}
+				return intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "claim", Ready: true}
 			},
 			wantPhase: phase.AwaitingMerge, wantStatus: "retro", wantOutbox: []string{"supervise", "notice"},
 		},
@@ -635,7 +695,7 @@ func seedRecord(t *testing.T, pool *pgxpool.Pool, put func(pgx.Tx) error) {
 
 func testEngine() *Engine {
 	return New(record.NewStore(), Config{
-		Project: "LEGION", DesignGate: config.DesignGateRootIssues, ReviewRoundCap: 3, MaxFixAttempts: 3, LingerHours: time.Hour,
+		Project: "LEGION", DesignGate: config.DesignGateRootIssues, ReviewRoundCap: 3, MaxFixAttempts: 3, Linger: time.Hour,
 		Clock: func() time.Time { return time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC) },
 	}, nil)
 }
@@ -689,7 +749,7 @@ func testJetStream(t *testing.T) jetstream.JetStream {
 func startConsume(t *testing.T, js jetstream.JetStream, pool *pgxpool.Pool, engine *Engine) func() {
 	t.Helper()
 	consumers, err := intake.OpenConsumers(t.Context(), js, intake.ConsumerSpec{
-		Project: "CAPTURE", Repositories: []string{"sjawhar/legion"}, AckWait: time.Second, NakDelay: time.Millisecond,
+		Project: "CAPTURE", Repositories: []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion")}, AckWait: time.Second, NakDelay: time.Millisecond,
 		Logger: slog.Default(),
 	})
 	if err != nil {
@@ -715,18 +775,6 @@ func publishCaptured(t *testing.T, js jetstream.JetStream, subject, path string)
 	if _, err := js.Publish(t.Context(), subject, captured); err != nil {
 		t.Fatalf("publish captured event %s: %v", path, err)
 	}
-}
-
-func eventually(t *testing.T, description string, condition func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if condition() {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for %s", description)
 }
 
 func sameStrings(got, want []string) bool {

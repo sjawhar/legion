@@ -19,49 +19,92 @@ import (
 
 var anchorAttribute = regexp.MustCompile(`([a-zA-Z0-9_-]+)="([^"]*)"`)
 
-var blockParsers = goldmark.WithParserOptions(parser.WithBlockParsers(
-	util.Prioritized(&typedDirectiveParser{}, 950),
-	util.Prioritized(&unsupportedDirectiveParser{}, 900),
-))
+// newMarkdownParser builds the one goldmark configuration Dispatch reads markdown with. Its two
+// uses differ only in the front-matter extension: a document with a closed front-matter block is
+// read with it, and everything else without it - text written into a document after its start
+// (ParseFragment), a document whose leading `---` opens nothing,
+// which the extension would consume to the end of the input with every block after it, and the
+// renderer asking how a line it is about to write would be read.
+func newMarkdownParser(readFrontmatter bool) goldmark.Markdown {
+	extensions := []goldmark.Extender{extension.GFM, extension.Footnote}
+	if readFrontmatter {
+		extensions = append(extensions, &frontmatter.Extender{Formats: []frontmatter.Format{frontmatter.YAML}})
+	}
+	return goldmark.New(
+		goldmark.WithExtensions(extensions...),
+		goldmark.WithParserOptions(parser.WithBlockParsers(
+			util.Prioritized(&typedDirectiveParser{}, 950),
+			util.Prioritized(&unsupportedDirectiveParser{}, 900),
+		)),
+	)
+}
 
-var markdownParser = goldmark.New(
-	goldmark.WithExtensions(extension.GFM, extension.Footnote, &frontmatter.Extender{
-		Formats: []frontmatter.Format{frontmatter.YAML},
-	}),
-	blockParsers,
+var (
+	markdownParser        = newMarkdownParser(true)
+	unfrontmatteredParser = newMarkdownParser(false)
 )
-
-// fragmentParser is markdownParser without front matter, for text written into a document.
-var fragmentParser = goldmark.New(goldmark.WithExtensions(extension.GFM, extension.Footnote), blockParsers)
 
 // Parse converts markdown into the closed Proof ProseMirror tree.
 func Parse(markdown string) (*Node, error) {
-	return parse(markdownParser, markdown, true)
-}
-
-// ParseFragment converts markdown written into a document, rather than one that begins it, into
-// the closed Proof ProseMirror tree: a leading `---` line is a horizontal rule, as it is anywhere
-// after a document's start. Written where the document begins (opensDocument), a closed
-// front-matter block opening the markdown is front matter, as Parse reads it; an unclosed `---`
-// line is still a rule.
-func ParseFragment(markdown string, opensDocument bool) (*Node, error) {
-	if opensDocument && parseFrontmatterBlock([]byte(markdown)) != nil {
-		return Parse(markdown)
+	doc, err := parseUnstamped(markdown, true)
+	if err != nil {
+		return nil, err
 	}
-	return parse(fragmentParser, markdown, false)
+	EnsureBlockIDs(doc)
+	return doc, nil
 }
 
-func parse(with goldmark.Markdown, markdown string, frontmatterFirst bool) (*Node, error) {
+// ParseForWrite parses markdown a caller is writing as Parse does, except that a block id the
+// markdown names on two blocks is refused (ErrSchema) instead of repaired, since the repair would
+// silently give the id to whichever block comes first. live is the document the markdown replaces
+// whole, or nil for a fragment or a new document: a repeat live already carries is not refused
+// (RepeatedBlockID), and the repair keeps it for its first block, as settlement would.
+func ParseForWrite(markdown string, live *Node) (*Node, error) {
+	return parseForWrite(markdown, live, true)
+}
+
+// ParseFragment parses markdown a caller writes into a document, rather than one that begins it,
+// as ParseForWrite parses a fragment: a leading `---` line is a horizontal rule, as it is anywhere
+// after a document's start. Written where the document begins (opensDocument), a closed
+// front-matter block opening the markdown is front matter, as Parse reads it.
+func ParseFragment(markdown string, opensDocument bool) (*Node, error) {
+	return parseForWrite(markdown, nil, opensDocument)
+}
+
+func parseForWrite(markdown string, live *Node, readFrontmatter bool) (*Node, error) {
+	doc, err := parseUnstamped(markdown, readFrontmatter)
+	if err != nil {
+		return nil, err
+	}
+	if err := RepeatedBlockID(live, doc, doc); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrSchema, err)
+	}
+	EnsureBlockIDs(doc)
+	return doc, nil
+}
+
+// parseUnstamped is Parse before EnsureBlockIDs: blocks keep the ids their markdown names, and a
+// block that names none has none yet. Without readFrontmatter a closed front-matter block is read
+// as the blocks its lines make.
+func parseUnstamped(markdown string, readFrontmatter bool) (*Node, error) {
 	source := []byte(markdown)
-	root := with.Parser().Parse(gmtext.NewReader(source))
+	var front *Node
+	if readFrontmatter {
+		front = parseFrontmatterBlock(source)
+	}
+	// A document with no closed front-matter block is parsed without the extension: it has
+	// nothing for the extension to read, and an unclosed opener is text it would swallow.
+	md := markdownParser
+	if front == nil {
+		md = unfrontmatteredParser
+	}
+	root := md.Parser().Parse(gmtext.NewReader(source))
 	doc, err := parseBlock(root, source, footnoteLabels(root))
 	if err != nil {
 		return nil, err
 	}
-	if frontmatterFirst {
-		if block := parseFrontmatterBlock(source); block != nil {
-			doc.Children = append([]*Node{block}, doc.Children...)
-		}
+	if front != nil {
+		doc.Children = append([]*Node{front}, doc.Children...)
 	}
 	if len(doc.Children) == 0 {
 		doc.Children = []*Node{{Type: "paragraph"}}
@@ -70,7 +113,6 @@ func parse(with goldmark.Markdown, markdown string, frontmatterFirst bool) (*Nod
 	if err := doc.Validate(); err != nil {
 		return nil, err
 	}
-	EnsureBlockIDs(doc)
 	return doc, nil
 }
 
@@ -177,51 +219,6 @@ func endOf(nodeType string) string {
 		return "the document's end"
 	}
 	return "the " + strings.ReplaceAll(nodeType, "_", " ") + "'s end"
-}
-
-// blockName is a block type as a reader names it.
-func blockName(nodeType string) string {
-	noun := blockNoun(nodeType)
-	if strings.ContainsRune("aeiou", rune(noun[0])) {
-		return "an " + noun
-	}
-	return "a " + noun
-}
-
-func blockNoun(nodeType string) string {
-	if nodeType == "hr" {
-		return "horizontal rule"
-	}
-	return strings.ReplaceAll(nodeType, "_", " ")
-}
-
-// BlockNames names blocks in order as a reader names them, a run of one type counted: "a bullet
-// list", "two paragraphs", "a horizontal rule and a heading".
-func BlockNames(blocks []*Node) string {
-	var names []string
-	for start := 0; start < len(blocks); {
-		end := start + 1
-		for end < len(blocks) && blocks[end].Type == blocks[start].Type {
-			end++
-		}
-		if count := end - start; count > 1 {
-			names = append(names, fmt.Sprintf("%s %ss", countWord(count), blockNoun(blocks[start].Type)))
-		} else {
-			names = append(names, blockName(blocks[start].Type))
-		}
-		start = end
-	}
-	if len(names) < 2 {
-		return strings.Join(names, "")
-	}
-	return strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1]
-}
-
-func countWord(count int) string {
-	if words := []string{"two", "three", "four", "five", "six", "seven", "eight", "nine"}; count-2 < len(words) {
-		return words[count-2]
-	}
-	return fmt.Sprint(count)
 }
 
 // readAlone is the document a block is read in on its own. It follows a paragraph, as a block

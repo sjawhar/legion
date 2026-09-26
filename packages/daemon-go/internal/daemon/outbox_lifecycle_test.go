@@ -12,6 +12,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -59,7 +60,7 @@ func TestAnEarlierGenerationsSuperviseRowNeverActsOnTheNextGeneration(t *testing
 	client := &outboxDispatch{issue: dispatch.Issue{Key: root.Key, Status: "todo"}}
 	runner := &outbox{
 		dispatchProject: "LEGION",
-		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets",
+		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
 		dispatch: client, notices: &outboxPublisher{}, handlers: handlers, log: quietLogger(), now: time.Now,
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
 			return workspace.Workspace{}, nil
@@ -175,8 +176,8 @@ func TestAReadmittedTreeKeepsItsOpenPullRequest(t *testing.T) {
 		{"todo", intake.DispatchIssue{Key: key, Seq: 7, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: "U"}},
 		{"gate", intake.GateRegistered{Issue: key, ArtifactID: artifact, Version: 2}},
 		{"approve", intake.DispatchArtifact{Key: key, ArtifactID: artifact, Kind: intake.DispatchArtifactApproved, Version: 2}},
-		{"plan", intake.HandoffComplete{Issue: key, Role: claim.RolePlanner, Summary: "plan", Commit: "plan-1"}},
-		{"implement", intake.HandoffComplete{Issue: key, Role: claim.RoleImplementer, Summary: "impl", Commit: "impl-1"}},
+		{"plan", intake.HandoffComplete{Generation: 2, Issue: key, Role: claim.RolePlanner, Summary: "plan", Commit: "plan-1"}},
+		{"implement", intake.HandoffComplete{Generation: 2, Issue: key, Role: claim.RoleImplementer, Summary: "impl", Commit: "impl-1"}},
 	} {
 		if _, err := intake.ApplyFact(ctx, pool, "test", step.id, step.fact, engine, admission); err != nil {
 			t.Fatalf("apply %s: %v", step.id, err)
@@ -234,7 +235,7 @@ func TestAChildAHumanMovesOutOfTheWorkflowStopsAndKeepsTheHumansStatus(t *testin
 	if _, err := pool.Exec(ctx, "delete from outbox"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := intake.ApplyFact(ctx, pool, "api", "tester-pass", intake.HandoffComplete{Issue: "LEGION-209", Role: claim.RoleTester, Summary: "pass", Verdict: "pass", Commit: "test-1"}, engine, admission); err != nil {
+	if _, err := intake.ApplyFact(ctx, pool, "api", "tester-pass", intake.HandoffComplete{Generation: 1, Issue: "LEGION-209", Role: claim.RoleTester, Summary: "pass", Verdict: "pass", Commit: "test-1"}, engine, admission); err != nil {
 		t.Fatal(err)
 	}
 	var childPhase phase.Phase
@@ -288,12 +289,12 @@ func TestASameRoleBackwardMoveNeverStopsTheWorkerInItsNewPhase(t *testing.T) {
 		t.Fatal(err)
 	}
 	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
-	sup.deps.PhaseHolds = phaseHolds(pool, records)
+	sup.deps.PhaseHolds = (&workflowRuntime{pool: pool, records: records}).phaseHolds // exactly what the daemon wires
 	clock := time.Now()
 	engine := workflow.New(records, workflow.Config{Project: "legion"}, quietLogger())
 	runner := &outbox{
 		dispatchProject: "LEGION",
-		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets",
+		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
 		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: issue.Key, Status: "retro"}}, notices: &outboxPublisher{}, handlers: []intake.Handler{engine},
 		log: quietLogger(), now: func() time.Time { return clock },
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
@@ -427,6 +428,91 @@ func TestASuspendFromBeforeItsRoleWasHandedWorkAgainNeverActs(t *testing.T) {
 	}
 }
 
+// A stop ends the run it was written for. It is retried until the runtime takes it — a pane that
+// will not stop can refuse for minutes — so a retry can land long after the start that replaced
+// that run has delivered its task. Acting then suspends the run the start began and retires its
+// task, leaving the phase with nobody in it. The claim records the newest start run against it,
+// so the stop knows it is superseded whatever the timing was: no ordering, no window.
+func TestAStopSupersededByANewerStartNeverActs(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	ctx := context.Background()
+	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Planning, Generation: 2, Status: "in_progress", Rank: "U"}
+	putOutboxIssue(t, pool, records, issue)
+	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
+	token, err := claim.NewToken("legion", issue.Key, claim.RolePlanner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	machine, _, err := sup.Create(ctx, supervise.Claim{Token: token, Project: "legion", Tree: issue.Tree, Issue: issue.Key, Role: claim.RolePlanner, State: supervise.StateQueued}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := machine.Handle(ctx, supervise.RequestSpawn{Claim: token}); err != nil {
+		t.Fatal(err)
+	}
+	generation := machine.Claim().Generation
+	for _, ev := range []supervise.Event{
+		supervise.RequestRegister{Claim: token, Generation: generation, Session: "ses-plan", SessionFile: "/tmp/plan.jsonl"},
+		supervise.RequestReady{Claim: token, Generation: generation, Session: "ses-plan"},
+	} {
+		if err := machine.Handle(ctx, ev); err != nil {
+			t.Fatalf("handle %T: %v", ev, err)
+		}
+	}
+	conn := fake.NewConn()
+	sup.deps.Conns.(*fake.Conns).Register(token, conn)
+	now := time.Now().UTC()
+	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, project: "legion", log: quietLogger(), now: func() time.Time { return now }}
+
+	// The re-entry's stop, refused by the runtime for as long as it likes, and then the start of
+	// the run that replaces it.
+	rt.FailSuspend(errors.New("the pane will not stop"))
+	stop := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "suspend", Tree: issue.Tree, Role: claim.RolePlanner, Generation: 2}, now)
+	stop.ID = 41
+	if err := runner.execute(ctx, stop); err == nil {
+		t.Fatal("the stop's first attempt succeeded, want the runtime's refusal")
+	}
+	start := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RolePlanner, Generation: 2, Phase: phase.Planning, Task: "plan it again"}, now)
+	start.ID = stop.ID + 1
+	if err := runner.execute(ctx, start); err != nil {
+		t.Fatalf("the new run's start: %v", err)
+	}
+
+	// The runtime recovers and the stop is retried. It is the old run's, and the old run is over.
+	rt.FailSuspend(nil)
+	if err := runner.execute(ctx, stop); err != nil {
+		t.Fatalf("the retried stop = %v, want it finished as superseded", err)
+	}
+
+	if got := machine.Claim().State; got == supervise.StateSuspended {
+		t.Error("the superseded stop suspended the run that replaced it")
+	}
+	if p := machine.Claim().Pending; p == nil || p.Task != "plan it again" {
+		t.Fatalf("pending after the retried stop = %+v, want the new run's task kept", p)
+	}
+	if suspends := len(rt.CallsOf("Suspend")); suspends != 1 {
+		t.Errorf("Suspend calls = %d, want the one refused attempt", suspends)
+	}
+
+	// The process that survived is the one launched before the re-entry, and it is now serving the
+	// new run's task: Spawn once, Resume never. So the completion it reports for that task belongs
+	// to the new run, and the one it would have reported for the task it held before does not —
+	// which is what the delivery's generation says, and the pane's own environment cannot.
+	if spawns, resumes := len(rt.CallsOf("Spawn")), len(rt.CallsOf("Resume")); spawns != 1 || resumes != 0 {
+		t.Fatalf("spawns=%d resumes=%d, want the pane launched before the re-entry still serving", spawns, resumes)
+	}
+	if pending := machine.Claim().Pending; pending.Generation != 2 {
+		t.Fatalf("the task being served names generation %d, want the new run's 2", pending.Generation)
+	}
+	if err := machine.Handle(ctx, supervise.StreamTurnStart{Claim: token, DeliveryID: machine.Claim().Pending.ID}); err != nil {
+		t.Fatalf("start the new task's turn: %v", err)
+	}
+	if pending := machine.Claim().Pending; pending == nil || pending.ConfirmedAt.IsZero() || pending.Generation != 2 {
+		t.Fatalf("the confirmed delivery is %+v, want the new run's task: a completion now is generation 2's", pending)
+	}
+}
+
 // A root a human moves out of the workflow lingers: only the root is parked in done, and every
 // claim of every tree member is suspended, the root's own worker and its children's. A child keeps
 // its phase, so its running worker is one whose role works the child's phase, and its suspend must
@@ -490,5 +576,87 @@ func TestARootLeavingTheWorkflowSuspendsEveryWorkerOfItsTree(t *testing.T) {
 	}
 	if got := rootWorker.Claim().State; got != supervise.StateSuspended {
 		t.Errorf("root implementer = %s after its root moved to backlog, want suspended", got)
+	}
+}
+
+// heldImplementer is a claim held after its agent kept dying in a turn of its task: failed, its
+// session kept, and the task it was given still pending, marked interrupted.
+func heldImplementer(t *testing.T, sup *supervisor, issue record.Issue, kept supervise.Delivery) *supervise.Machine {
+	t.Helper()
+	token, err := claim.NewToken("legion", issue.Key, claim.RoleImplementer)
+	if err != nil {
+		t.Fatalf("claim token: %v", err)
+	}
+	machine, _, err := sup.Create(context.Background(), supervise.Claim{
+		Token: token, Project: "legion", Tree: issue.Tree, Issue: issue.Key, Role: claim.RoleImplementer, State: supervise.StateFailed,
+		Generation: 3, Session: "ses-impl", SessionFile: "/tmp/impl.jsonl", Budgets: supervise.Budgets{Deaths: 3}, Pending: &kept,
+	}, "")
+	if err != nil {
+		t.Fatalf("create the held implementer: %v", err)
+	}
+	return machine
+}
+
+// retryHeldPhase is the start the architect's retry of the held phase writes for the implementer.
+func retryHeldPhase(t *testing.T, issue record.Issue) record.OutboxRow {
+	t.Helper()
+	row := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RoleImplementer,
+		Task: "Continue Workflow. Reason: retry held phase.", Phase: phase.Implementing, Generation: issue.Generation}, time.Now())
+	row.ID = 92
+	return row
+}
+
+// A claim held after its agent kept dying in a turn of its task keeps that task, and the retry's
+// relaunch sends it, behind the sentence saying its turn was interrupted. The architect's retry
+// writes a start of its own for the same phase and run: its task would come behind the kept one as
+// a second prompt for work already under way, so the row relaunches the claim and delivers nothing.
+func TestARetryOfAClaimThatKeptItsPhasesTaskDeliversNothingMore(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Implementing, Generation: 1, Status: "in_progress"}
+	putOutboxIssue(t, pool, records, issue)
+	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
+	kept := supervise.Delivery{ID: "kept-task", Task: "Continue Workflow. Issue: LEGION-208. Phase: implementing.",
+		Phase: phase.Implementing, Generation: issue.Generation, QueuedAt: time.Now(), Interrupted: true}
+	machine := heldImplementer(t, sup, issue, kept)
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets")}
+
+	if err := runner.execute(context.Background(), retryHeldPhase(t, issue)); err != nil {
+		t.Fatalf("start the held claim: %v", err)
+	}
+	got := machine.Claim()
+	if got.State != supervise.StateLaunching || got.Budgets != (supervise.Budgets{}) || len(rt.CallsOf("Resume")) != 1 {
+		t.Fatalf("retried claim = %+v after %d resumes, want its session relaunched once with fresh budgets", got, len(rt.CallsOf("Resume")))
+	}
+	if got.Pending == nil || got.Pending.ID != kept.ID || got.Pending.Task != kept.Task {
+		t.Fatalf("retried claim pending %+v, want the kept task alone", got.Pending)
+	}
+}
+
+// A kept task of another phase or another run is not the retry's work, so the start still hands
+// the claim its own task: the delivery waits behind the kept task (the claim refuses a second
+// pending one), and the row is retried until it goes.
+func TestARetryOfAClaimThatKeptOtherWorkStillDeliversItsTask(t *testing.T) {
+	for name, edit := range map[string]func(*supervise.Delivery){
+		"another phase": func(d *supervise.Delivery) { d.Phase = phase.Planning },
+		"another run":   func(d *supervise.Delivery) { d.Generation = 1 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			records := record.NewStore()
+			issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Implementing, Generation: 2, Status: "in_progress"}
+			putOutboxIssue(t, pool, records, issue)
+			sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+			kept := supervise.Delivery{ID: "kept-task", Task: "an earlier task", Phase: phase.Implementing, Generation: issue.Generation, QueuedAt: time.Now()}
+			edit(&kept)
+			heldImplementer(t, sup, issue, kept)
+			runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets")}
+
+			err := runner.execute(context.Background(), retryHeldPhase(t, issue))
+
+			if !errors.Is(err, supervise.ErrDeliveryPending) {
+				t.Fatalf("start the held claim = %v, want its own task waiting behind the kept one (%v)", err, supervise.ErrDeliveryPending)
+			}
+		})
 	}
 }
