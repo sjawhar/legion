@@ -297,7 +297,6 @@ func TestSettlementMarksUnsupportedAskBodyInvalid(t *testing.T) {
 	}
 }
 
-// appendToAsk is a browser edit that appends block to the document's first ask.
 // firstAsk is the document's first top-level ask.
 func firstAsk(tree *pmdoc.Node) *pmdoc.Node {
 	for _, child := range tree.Children {

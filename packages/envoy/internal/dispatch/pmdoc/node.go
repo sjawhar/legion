@@ -244,18 +244,7 @@ func askQuestionOpening(ask *Node) string {
 	if len(ask.Children) == 0 || ask.Children[0] == nil || ask.Children[0].Type != "paragraph" {
 		return ""
 	}
-	var text strings.Builder
-	var collect func(*Node)
-	collect = func(node *Node) {
-		if node.Type == "text" {
-			text.WriteString(node.Text)
-		}
-		for _, child := range node.Children {
-			collect(child)
-		}
-	}
-	collect(ask.Children[0])
-	question := []rune(strings.Join(strings.Fields(text.String()), " "))
+	question := []rune(strings.Join(strings.Fields(textContent(ask.Children[0])), " "))
 	if len(question) == 0 {
 		return ""
 	}

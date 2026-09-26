@@ -470,6 +470,13 @@ func TestAskContentErrorNamesTheAskByItsQuestion(t *testing.T) {
 	if err := AskContentError(doc); err == nil || !strings.Contains(err.Error(), `"Which transport should we expose to the…"`) {
 		t.Fatalf("AskContentError = %v, want it to name the question's opening words", err)
 	}
+	broken, err := Parse("Intro.\n\n:::ask{urgency=\"med\" multiple=\"false\" state=\"open\"}\nShould we\\\nship this?\n\n```\ncode\n```\n:::\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := AskContentError(broken); err == nil || !strings.Contains(err.Error(), `"Should we ship this?"`) {
+		t.Fatalf("AskContentError = %v, want a hard break in the question read as a space", err)
+	}
 }
 
 // An ask holding a block its content rule does not allow is refused naming that block as a
