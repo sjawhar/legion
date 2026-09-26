@@ -860,7 +860,12 @@ func TestRenderKeepsBlankCodeLinesInFootnoteDefinitions(t *testing.T) {
 		return &Node{Type: "code_block", Attrs: Attrs{"language": nil}, Children: []*Node{{Type: "text", Text: value}}}
 	}
 	for name, block := range map[string]*Node{
-		"code":           code("a\n\nb"),
+		"code":             code("a\n\nb"),
+		"code, carriage":   code("a\r\rb"),
+		"a callout's code": {Type: "callout", Attrs: Attrs{BlockIDAttr: "c1", "kind": "note", "title": "T"}, Children: []*Node{code("a\r\rb")}},
+		"a list item's code": {Type: "bullet_list", Attrs: Attrs{"spread": false}, Children: []*Node{
+			{Type: "list_item", Attrs: Attrs{"checked": nil, "label": "•", "listType": "bullet", "spread": false}, Children: []*Node{paragraph("a"), code("a\r\rb")}},
+		}},
 		"a quote's code": {Type: "blockquote", Children: []*Node{code("a\n\nb")}},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -881,5 +886,70 @@ func TestRenderKeepsBlankCodeLinesInFootnoteDefinitions(t *testing.T) {
 	quoted := &Node{Type: "doc", Children: []*Node{{Type: "blockquote", Children: []*Node{code("a\n\nb")}}}}
 	if got, want := mustRender(t, quoted), "> ```\n> a\n> \n> b\n> ```\n"; got != want {
 		t.Fatalf("Render() = %q, want the bytes main writes, %q", got, want)
+	}
+}
+
+// A line a lone carriage return begins is escaped only where it reads differently without the
+// escape, judged as the document reads it: a line in a quote or a list item that a carriage return
+// begins carries no prefix, so the parser reads it as a lazy continuation, where no setext
+// underline or table row opens, after the text the line before holds past its container's
+// marker. Markdown main stored that both parsers read as text is written again byte for byte, and
+// text whose line would read as a block is escaped: in marked text as well, and a lazy line that
+// would close the typed block around it.
+func TestRenderJudgesALineALoneCarriageReturnBeginsByHowItReads(t *testing.T) {
+	for _, markdown := range []string{
+		"a\r2. b\n", "a\r10) b\n", "a\r0. b\n", "a\r2.\n", "a\r1.\n", "a\r*\n", "a\r+\n",
+		"a\r-\\\nb\n", "a\r#\\\nb\n",
+		"- a\n\n  > a\r===\n", "- a\n\n  > a\r=\n", "- a\n\n  > a\r|-|\n", "> j\r|-|\n",
+		"x[a\r](https://u.test)* y\n",
+		"x[^1]\n\n[^1]: a\r:::\n", "x[^1]\n\n[^1]: a\r-\\\n", "x[^1]\n\n[^1]: a\r[ ] b\n",
+	} {
+		t.Run("kept "+markdown, func(t *testing.T) {
+			doc, err := Parse(markdown)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := mustRender(t, doc); got != markdown {
+				t.Fatalf("Render(Parse(%q)) = %q, want the bytes main stored", markdown, got)
+			}
+		})
+	}
+	paragraph := func(children ...*Node) *Node { return &Node{Type: "paragraph", Children: children} }
+	text := func(value string) *Node { return &Node{Type: "text", Text: value} }
+	quote := func(children ...*Node) *Node { return &Node{Type: "blockquote", Children: children} }
+	strong := func(value string) *Node {
+		return &Node{Type: "text", Text: value, Marks: []Mark{{Type: "strong", Attrs: Attrs{"marker": "*"}}}}
+	}
+	calloutItem := func(child *Node) *Node {
+		item := &Node{Type: "list_item", Attrs: Attrs{"label": "•", "listType": "bullet", "spread": false, "checked": nil}, Children: []*Node{child}}
+		list := &Node{Type: "bullet_list", Attrs: Attrs{"spread": false}, Children: []*Node{item}}
+		return &Node{Type: "callout", Attrs: Attrs{BlockIDAttr: "c1", "kind": "note", "title": "T"}, Children: []*Node{list}}
+	}
+	for _, test := range []struct {
+		block *Node
+		want  string
+	}{
+		{paragraph(text("x\r---")), "x\r\\---\n"},
+		{paragraph(text("x\r# y")), "x\r\\# y\n"},
+		{paragraph(text("x\r- y")), "x\r\\- y\n"},
+		{paragraph(text("a\r1. b")), "a\r1\\. b\n"},
+		{quote(paragraph(text("x\r> y"))), "> x\r\\> y\n"},
+		{quote(paragraph(text("x\r- y"))), "> x\r\\- y\n"},
+		{paragraph(text("+\r x")), "\\+\r&#32;x\n"},
+		{paragraph(text("a\\\r b")), "a\\\\\r&#32;b\n"},
+		{paragraph(strong("a\r b")), "**a\r&#32;b**\n"},
+		{calloutItem(paragraph(text("a\r:::"))), ":::callout{#c1 kind=\"note\" title=\"T\"}\n- a\r\\:::\n:::\n"},
+	} {
+		doc := &Node{Type: "doc", Children: []*Node{test.block}}
+		t.Run("escaped "+test.want, func(t *testing.T) {
+			markdown := mustRender(t, doc)
+			if markdown != test.want {
+				t.Fatalf("Render() = %q, want %q", markdown, test.want)
+			}
+			back, err := Parse(markdown)
+			if err != nil || !back.Equal(doc) {
+				t.Fatalf("Parse(%q) does not read back as written (%v)", markdown, err)
+			}
+		})
 	}
 }

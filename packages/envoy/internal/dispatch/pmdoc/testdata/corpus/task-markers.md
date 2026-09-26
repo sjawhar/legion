@@ -57,6 +57,10 @@ Para.
 
 Para.
 
+- \[x]b
+
+Para.
+
 - [ ] 
   a
 

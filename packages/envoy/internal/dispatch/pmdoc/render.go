@@ -28,6 +28,8 @@ type renderer struct {
 	inFootnote bool
 	// asteriskRule makes the next rule written `***` rather than `---` (list).
 	asteriskRule bool
+	// runStart is where the textblock being written began its text in the markdown.
+	runStart int
 	// footnoteLabels is every footnote label the document defines, lowercased: text shaped like a
 	// reference to one would read as that reference.
 	footnoteLabels map[string]bool
@@ -92,7 +94,7 @@ func render(doc *Node) (*renderer, error) {
 	// front matter, and with no such line the browser editor's parser, having tried the front
 	// matter to the document's end, reads no list, quote or footnote definition in the rest.
 	if doc.Children[0].Type == "hr" {
-		if front, _ := parseFrontmatterBlock(r.b.Bytes()); front != nil || holdsAContainerTheBrowserDrops(doc) {
+		if front, _ := parseFrontmatterBlock(lineEnds(r.b.Bytes())); front != nil || holdsAContainerTheBrowserDrops(doc) {
 			copy(r.b.Bytes(), "***")
 		}
 	}
@@ -340,8 +342,11 @@ func (r *renderer) tableRow(row *Node, header bool, prefix string) {
 
 func (r *renderer) writeCodeText(node *Node, prefix string) {
 	value := node.Text
+	// A lone carriage return ends a line as a line feed does (lineEnds), so the line after it is
+	// written with the prefix too.
+	lined := string(lineEnds([]byte(value)))
 	for offset := 0; offset < len(value); {
-		newline := strings.IndexByte(value[offset:], '\n')
+		newline := strings.IndexByte(lined[offset:], '\n')
 		if newline < 0 {
 			r.writeText(value[offset:])
 			return
@@ -351,15 +356,15 @@ func (r *renderer) writeCodeText(node *Node, prefix string) {
 		// A blank line does not take a footnote definition's indentation, and both parsers keep
 		// what it holds as the code's, so a blank code line there, behind indentation alone, is
 		// written without it.
-		if !r.inFootnote || strings.TrimSpace(prefix) != "" || !blankLineAhead(value[end:]) {
+		if !r.inFootnote || strings.TrimSpace(prefix) != "" || !blankLineAhead(lined[end:]) {
 			r.writeSyntax(prefix)
 		}
 		offset = end
 	}
 }
 
-// blankLineAhead reports whether text's first line holds only spaces and tabs before its line
-// ending.
+// blankLineAhead reports whether text's first line, in lineEnds form, holds only spaces and tabs
+// before its line ending.
 func blankLineAhead(text string) bool {
 	end := strings.IndexByte(text, '\n')
 	return end >= 0 && strings.Trim(text[:end], " \t\r") == ""

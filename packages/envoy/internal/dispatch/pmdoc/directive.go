@@ -112,7 +112,7 @@ func closingColons(n *Node, column int) int {
 		switch node.Type {
 		case "code_block":
 			for _, text := range node.Children {
-				for _, line := range strings.Split(text.Text, "\n") {
+				for _, line := range markdownLines(text.Text) {
 					if colons := fenceColons(line); colons >= 3 && textColumn(line, at)-column <= 3 {
 						longest = max(longest, colons)
 					}
@@ -195,7 +195,12 @@ func (p *unsupportedDirectiveParser) Trigger() []byte {
 	return []byte{':'}
 }
 
-func (p *unsupportedDirectiveParser) Open(_ ast.Node, reader gmtext.Reader, _ parser.Context) (ast.Node, parser.State) {
+func (p *unsupportedDirectiveParser) Open(_ ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
+	// The browser editor refuses these line by line, and a line a lone carriage return begins is
+	// no line of its own to that check: it reads on as text.
+	if afterLoneCarriageReturn(reader, pc) {
+		return nil, parser.NoChildren
+	}
 	line, _ := reader.PeekLine()
 	indent, offset := util.IndentWidth(line, reader.LineOffset())
 	if indent >= 4 || offset >= len(line) {
