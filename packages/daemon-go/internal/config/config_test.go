@@ -35,8 +35,8 @@ nats_urls: [nats://127.0.0.1:4222]
 `
 
 // The refusals the shipped loader words itself, quoted here from
-// packages/daemon/src/daemon/config.ts (loadConfigFromFile's migration refusals and parseGates) so an
-// operator moving from the TypeScript daemon reads the same sentence.
+// packages/daemon/src/daemon/config.ts (loadConfigFromFile's migration refusals and parseGates) so
+// an operator moving from the TypeScript daemon reads the same sentence.
 const (
 	wantDispatchMcpURLMessage  = "dispatch_mcp_url was replaced by dispatch_url (the service base URL, no /mcp)"
 	wantDispatchProjectMessage = "dispatch_project was replaced by projects"
@@ -63,8 +63,8 @@ func envMap(pairs map[string]string) func(string) string {
 }
 
 // `state_dir` is resolved against the file that set it, as the shipped loader resolves it
-// (config.ts loadConfigFromFile). Taking the string as read would make the daemon's state directory depend on
-// the cwd `legion start` was launched from, and a `legion stop` from elsewhere would look
+// (config.ts loadConfigFromFile). Taking the string as read would make the daemon's state directory
+// depend on the cwd `legion start` was launched from, and a `legion stop` from elsewhere would look
 // somewhere else.
 func TestRelativeStateDirResolvesAgainstTheConfigsDirectory(t *testing.T) {
 	path := writeConfigFile(t, strings.Replace(minimalFile, "state_dir: /var/lib/legion", "state_dir: state", 1))
@@ -107,12 +107,13 @@ func ignoredLine(key string, stage int) string {
 	return fmt.Sprintf(`"key":%s,"stage":%d`, quoted, stage)
 }
 
-// defaultsFor is the Config minimalFile resolves to on port: every key it leaves out at its default,
-// on the loopback bind and the tmux runtime. The Stage 2 defaults are the shipped
-// loader's (packages/daemon/src/daemon/config.ts: DEFAULT_PORT and the DEFAULT_* constants, and
-// resolveDaemonConfig's `port + 1` and loopback daemon URL) plus the four keys Stage 2 adds — except omp_invocation, which has none
-// here: the shipped default is the OMP fork pin, whose one home is packages/daemon/src/daemon/
-// omp-pin.ts (docs/solutions/daemon/omp-pin-bump-behavioral-proof.md:29-43).
+// defaultsFor is the Config minimalFile resolves to on port: every key it leaves out at its
+// default, on the loopback bind and the tmux runtime. The Stage 2 defaults are the shipped loader's
+// (packages/daemon/src/daemon/config.ts: DEFAULT_PORT and the DEFAULT_* constants, and
+// resolveDaemonConfig's `port + 1` and loopback daemon URL) plus the four keys Stage 2 adds —
+// except omp_invocation, which has none here: the shipped default is the OMP fork pin, whose one
+// home is packages/daemon/src/daemon/ omp-pin.ts
+// (docs/solutions/daemon/omp-pin-bump-behavioral-proof.md:29-43).
 func defaultsFor(port int) Config {
 	return Config{
 		Project:                                 "DEMO",
@@ -228,7 +229,8 @@ envoy_token_file: /run/legion/ENVOY_TOKEN
 	want.OperatorTokenFile = filepath.Join(dir, "tokens/OPERATOR_TOKEN")
 	want.EnvoyURL = "http://127.0.0.1:19020"
 	// A set, as the shipped `readStringArray` makes it (config.ts): the repeat is dropped,
-	// first occurrence kept. The launch prefix is argv and keeps its repeats (config.ts readArgv).
+	// first occurrence kept. The launch prefix is argv and keeps its repeats (config.ts
+	// readArgv).
 	want.NatsURLs = []string{"nats://127.0.0.1:4222", "nats://127.0.0.1:4223"}
 	want.EnvoyTokenFile = "/run/legion/ENVOY_TOKEN"
 	if !reflect.DeepEqual(cfg, want) {
@@ -542,8 +544,8 @@ func TestResolveGitHubAppsRefusesAgentTierPrivateKey(t *testing.T) {
 	}
 }
 
-// `worker_stream_port` defaults to one past `port` (config.ts resolveDaemonConfig), which is why it has to
-// move with a file that moves `port`.
+// `worker_stream_port` defaults to one past `port` (config.ts resolveDaemonConfig), which is why it
+// has to move with a file that moves `port`.
 func TestWorkerStreamPortDefaultsToOnePastPort(t *testing.T) {
 	cfg, err := Load(writeConfigFile(t, minimalFile+"port: 20000\n"), noEnv)
 	if err != nil {

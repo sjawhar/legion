@@ -126,14 +126,15 @@ const (
 	defaultRuntimeName  = "tmux"
 	defaultEnvoyURL     = "http://127.0.0.1:9020"
 
-	// maxTimerSeconds is the shipped bound on every duration key (config.ts MAX_TIMER_SECONDS): the
-	// largest whole number of seconds whose milliseconds fit a signed 32-bit timer. Go's timers
-	// are not so bounded; the bound is kept so a file one daemon accepts, the other accepts too.
+	// maxTimerSeconds is the shipped bound on every duration key (config.ts MAX_TIMER_SECONDS):
+	// the largest whole number of seconds whose milliseconds fit a signed 32-bit timer. Go's
+	// timers are not so bounded; the bound is kept so a file one daemon accepts, the other
+	// accepts too.
 	maxTimerSeconds = 2_147_483
 )
 
-// durationKeys are the positive-second keys and their defaults (config.ts's DEFAULT_* constants, and the new
-// probe interval). Every one of them is held to the timer bound.
+// durationKeys are the positive-second keys and their defaults (config.ts's DEFAULT_* constants,
+// and the new probe interval). Every one of them is held to the timer bound.
 var durationKeys = []struct {
 	key          string
 	defaultValue int
@@ -148,7 +149,8 @@ var durationKeys = []struct {
 }
 
 // countKeys are the positive-integer keys with no unit, and their defaults: the registration
-// deadline's interval count (config.ts DEFAULT_WORKER_BOOT_REGISTRATION_DEADLINE_INTERVALS) and the supervision budgets.
+// deadline's interval count (config.ts DEFAULT_WORKER_BOOT_REGISTRATION_DEADLINE_INTERVALS) and the
+// supervision budgets.
 var countKeys = []struct {
 	key          string
 	defaultValue int
@@ -176,11 +178,11 @@ var tossedKeys = map[string]string{
 	"resync_interval_seconds":    `the mirror of Dispatch and GitHub as truth, and resync's drift healing, no longer exist (LEGION-208 Design, "Ported, and tossed")`,
 }
 
-// migrationKeys are the keys the TypeScript loader already refuses with a migration message,
-// mapped to that message verbatim (packages/daemon/src/daemon/config.ts,
-// loadConfigFromFile's migration refusals). The text is kept exactly, including `worker_budget`'s pointer at `worker_cap`,
-// which this loader tosses in turn: an operator who hits the message searches for the same words
-// in either daemon, and the second refusal names the cap's own fate.
+// migrationKeys are the keys the TypeScript loader already refuses with a migration message, mapped
+// to that message verbatim (packages/daemon/src/daemon/config.ts, loadConfigFromFile's migration
+// refusals). The text is kept exactly, including `worker_budget`'s pointer at `worker_cap`, which
+// this loader tosses in turn: an operator who hits the message searches for the same words in
+// either daemon, and the second refusal names the cap's own fate.
 var migrationKeys = map[string]string{
 	"dispatch_mcp_url":  "dispatch_mcp_url was replaced by dispatch_url (the service base URL, no /mcp)",
 	"dispatch_project":  "dispatch_project was replaced by projects",
@@ -377,7 +379,8 @@ func isCountKey(key string) bool {
 }
 
 // readPositive reads a duration or count key into the file's map: a positive integer and, for a
-// duration, at most the timer bound (config.ts readPositiveInteger, and loadConfigFromFile's lifecycle keys).
+// duration, at most the timer bound (config.ts readPositiveInteger, and loadConfigFromFile's
+// lifecycle keys).
 func readPositive(value *yaml.Node, key string, file fileConfig) error {
 	read, err := readInt(value, key)
 	if err != nil || read == nil {
@@ -821,8 +824,9 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 
 // resolveStage2 settles the keys Stage 2 models. Each is read from the file alone: the shipped
 // loader's environment twins (`LEGION_DAEMON_URL`, `ENVOY_NATS_URL`, `LEGION_WORKER_*_SECONDS`, …)
-// are not read, because a daemon started from inside a Legion pane inherits that pane's values
-// for exactly those names (resolveDaemonConfig's daemon_url rule in config.ts is the shipped loader working around it).
+// are not read, because a daemon started from inside a Legion pane inherits that pane's values for
+// exactly those names (resolveDaemonConfig's daemon_url rule in config.ts is the shipped loader
+// working around it).
 func resolveStage2(file fileConfig, configDir string, cfg *Config) error {
 	cfg.DaemonURL = fmt.Sprintf("http://127.0.0.1:%d", cfg.Port)
 	if file.DaemonURL != nil {

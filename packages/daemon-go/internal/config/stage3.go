@@ -128,8 +128,8 @@ func readGates(value *yaml.Node, key string) (*Gates, error) {
 		return nil, fmt.Errorf("%s must be a mapping", key)
 	}
 	for index := 0; index+1 < len(value.Content); index += 2 {
-		// A present merge is refused whatever its value, null included, as the shipped loader
-		// refuses it (config.ts parseGates).
+		// A present merge is refused whatever its value, null included, as the shipped
+		// loader refuses it (config.ts parseGates).
 		if value.Content[index].Value == "merge" {
 			return nil, errors.New(gatesMergeMessage)
 		}
