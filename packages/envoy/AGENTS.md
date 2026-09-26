@@ -774,14 +774,25 @@ the synchronous listener call records the sent or failed attempt instead of blin
   first non-empty message line, capped at 2,048 runes with a trailing `…` so the envelope stays
   under NATS's max payload), `commit_count`, `compare_url`, `changed_paths` (the unique paths
   across every pushed commit's `added`, `removed`, and `modified` lists, in first-seen order,
-  newline-separated, at most 100; omitted
-  when no commit is listed, since the payload drops empty strings), and `changed_paths_truncated`
-  (`"true"` when more than 100 unique paths were seen, else `"false"` — present on every push, so
+  newline-separated, at most 100 of them and 32,768 runes of text, each path listed whole or not
+  at all; omitted when no commit is listed, since the payload drops empty strings), and
+  `changed_paths_truncated` (`"true"` when the list stopped at either cap with a unique path left,
+  else `"false"` — present on every push, so
   its absence alone tells a consumer the listener predates the field), and `forced` (`"true"` or
   `"false"`, GitHub's own flag, present on every push the same way). A forced push's commits are
   listed from the merge base, so its `changed_paths` do not describe what it did to the head it
   replaced. Envoy forwards what GitHub sent; what counts as a handoff-only push is the Legion
   daemon's rule, not the listener's.
+- Every other text a webhook payload copies from its body (a title, a ref, a path, a workflow
+  name, a URL) is capped at 2,048 runes with a trailing `…` too (`maxEnvelopeTextRunes`; a
+  comment's or review's body is cut there without one and says so in `body_truncated`), and so is
+  a check run's name in the CI store, so no envelope grows with the body it came from. An envelope
+  NATS still cannot take whole is refused (`bus.ErrTooLarge`): a message past the server's max
+  payload, or a subject past the server's 4 KiB protocol line, which a push's ref or a workflow's
+  file name can make and over which the server would close the listener's connection. The webhook
+  is answered 422, which Dispatch's redelivery sweep takes as terminal, and logged
+  `<source> publish refused`; any other publish failure stays a 503 logged
+  `<source> publish failed`.
 - A `pull_request_review` payload carries the review's own `commit_id` and the PR's current
   `head_sha` so consumers can tell whether the review is at head, and `submitted_at` (GitHub's
   RFC 3339 time) and `review_id` (GitHub's review id as a decimal string), so consumers can order
