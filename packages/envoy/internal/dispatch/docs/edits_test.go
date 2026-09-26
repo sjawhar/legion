@@ -1184,6 +1184,245 @@ func TestApplyOperationsUnresolvedQuoteErrorsNameTheQuoteNotThePackage(t *testin
 	}
 }
 
+// Whether HTML opens a block depends on where the replacement lands, so the refusal is decided on
+// the document the replace produces: a replacement whose markdown the parser then refuses is
+// refused. These land where HTML starts a block - the whole of a paragraph, a list item's start,
+// the line after a hard break.
+func TestApplyOperationReplaceRefusesHTMLThatOpensABlockWhereItLands(t *testing.T) {
+	for _, test := range []struct{ document, find, with string }{
+		{document: "Intro.\n\nBody.\n", find: "Body.", with: "<div>x</div>"},
+		{document: "Intro.\n\nBody.\n", find: "Body.", with: "<!-- note -->"},
+		{document: "Intro.\n\nBody.\n", find: "Body.", with: "<br>"},
+		{document: "- Body.\n", find: "Body.", with: "<div>x</div>"},
+		{document: "Intro.\n\nfoo Body. bar\n", find: "Body.", with: "x  \n<div>y</div>"},
+	} {
+		t.Run(test.document+test.with, func(t *testing.T) {
+			tree, err := parseInput(test.document)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = applyOperation(tree, model.EditOp{Op: "replace", Find: test.find, With: test.with})
+			var invalid *ErrInvalidOp
+			if !errors.As(err, &invalid) || invalid.Field != "with" {
+				t.Fatalf("replace = %v, want invalid with", err)
+			}
+			if !strings.Contains(invalid.Reason, "block HTML") {
+				t.Fatalf("refusal = %q, want it to name the parser's reason", invalid.Reason)
+			}
+		})
+	}
+}
+
+// The positive control for that refusal: the same HTML where it opens no block - inside a line, in
+// a table cell, in a heading - is kept, and the document reads back as written.
+func TestApplyOperationReplaceKeepsHTMLThatOpensNoBlockWhereItLands(t *testing.T) {
+	const paragraph, cell, heading = "Intro.\n\nfoo Body. bar\n", "| h |\n| --- |\n| Body. |\n", "# Body.\n"
+	for _, test := range []struct{ document, with string }{
+		{document: "Intro.\n\nBody.\n", with: "before <b>x</b> after"},
+		{document: "Intro.\n\nBody.\n", with: `<span class="x">text</span>`},
+		{document: "Intro.\n\nBody.\n", with: "<br>after"},
+		{document: paragraph, with: "<div>x</div>"},
+		{document: paragraph, with: "<br>"},
+		{document: paragraph, with: "<br/>"},
+		{document: paragraph, with: "<img src=x>"},
+		{document: paragraph, with: `<img src="i.png" width="16">`},
+		{document: paragraph, with: "<!-- c --> tail"},
+		{document: paragraph, with: "<b>x</b>\n<div>y</div>"},
+		{document: cell, with: "<ul><li>a</li><li>b</li></ul>"},
+		{document: cell, with: "<br>"},
+		{document: cell, with: "<img src=x>"},
+		{document: cell, with: "<div>x</div>"},
+		{document: cell, with: "<!-- c --> tail"},
+		{document: heading, with: "<br>"},
+		{document: heading, with: "<img src=x>"},
+		{document: heading, with: "<div>x</div>"},
+		{document: heading, with: "<!-- c --> tail"},
+	} {
+		t.Run(test.document+test.with, func(t *testing.T) {
+			tree, err := parseInput(test.document)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tree, err = applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
+			if err != nil {
+				t.Fatalf("replace: %v", err)
+			}
+			markdown, err := renderTree(tree)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(test.with, "\n") && !strings.Contains(markdown, test.with) {
+				t.Fatalf("%q does not hold the HTML as written, %q", markdown, test.with)
+			}
+			back, err := parseInput(markdown)
+			if err != nil {
+				t.Fatalf("%q no longer parses: %v", markdown, err)
+			}
+			if again, err := renderTree(back); err != nil || again != markdown {
+				t.Fatalf("%q reads back as %q (%v)", markdown, again, err)
+			}
+		})
+	}
+}
+
+// The id stays the caller's to keep when the block that had it goes first: a delete earlier in
+// the batch frees it, so a typed block can be put back in its own place under its own id.
+func TestApplyOperationsInsertKeepsAnIDADeleteEarlierInTheBatchFreed(t *testing.T) {
+	const id = "11111111-1111-4111-8111-111111111111"
+	tree, err := parseInput("Before.\n\n:::ask{#" + id + "}\nQuestion?\n:::\n\nAfter.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch, err := applyOperations(tree, []model.EditOp{
+		{Op: "delete", Block: id},
+		{Op: "insert", Markdown: ":::ask{#" + id + "}\nReworded?\n:::", After: "Before."},
+	})
+	if err != nil {
+		t.Fatalf("delete then insert: %v", err)
+	}
+	carriers := 0
+	for _, child := range batch.tree.Children {
+		if blockID, _ := child.Attrs[pmdoc.BlockIDAttr].(string); blockID == id {
+			carriers++
+		}
+	}
+	if carriers != 1 {
+		t.Fatalf("%d blocks carry %q, want the reinserted one", carriers, id)
+	}
+}
+
+// A `with` whose text the inline parser cannot hold must be refused, not cut short: an indented
+// code block after the first paragraph used to vanish - and every paragraph after it with it -
+// while the batch reported itself changed.
+func TestApplyOperationReplaceRefusesAWithItWouldCutShort(t *testing.T) {
+	for _, test := range []struct {
+		with    string
+		dropped string
+	}{
+		{with: "Keep this.\n\n    dropped code", dropped: "dropped code"},
+		{with: "one\n\n    code line\n\ntwo", dropped: "code line"},
+		// A skipped line of whitespace the parser keeps is not the end of what is dropped.
+		{with: "one\n\n    \u00a0\n\ntwo", dropped: "two"},
+		{with: "one\n\n    \f\n\ntwo", dropped: "two"},
+	} {
+		t.Run(test.with, func(t *testing.T) {
+			tree, err := parseInput("Intro.\n\nBody.\n")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
+			var invalid *ErrInvalidOp
+			if !errors.As(err, &invalid) || invalid.Field != "with" {
+				t.Fatalf("replace = %v, want invalid with", err)
+			}
+			if !strings.Contains(invalid.Reason, test.dropped) {
+				t.Fatalf("refusal = %q, want it to name the text it would have dropped", invalid.Reason)
+			}
+		})
+	}
+}
+
+// A replace continues the text around it with the spaces and tabs at the edges of its `with`,
+// which parsing strips: once, outside any mark, and without the line breaks, which an inline
+// replacement cannot carry. Each of these once wrote something else - a bold that no longer reads
+// as bold, a code span or link whose text gained the space, a no-break space written twice, a
+// blank line that split the paragraph.
+func TestApplyOperationReplaceKeepsItsEdgeWhitespaceOnceOutsideTheMarks(t *testing.T) {
+	for _, test := range []struct{ with, want string }{
+		{with: " **x**", want: "foo  **x** bar"},
+		{with: "**x** ", want: "foo **x**  bar"},
+		{with: " `c` ", want: "foo  `c`  bar"},
+		{with: " [l](https://x.test) ", want: "foo  [l](https://x.test)  bar"},
+		{with: " <b>x</b>", want: "foo  <b>x</b> bar"},
+		{with: " ![a](u)", want: "foo  ![a](u) bar"},
+		{with: "\u00a0x", want: "foo \u00a0x bar"},
+		{with: "x\u3000", want: "foo x\u3000 bar"},
+		{with: "x\n\n", want: "foo x bar"},
+		{with: "\n x", want: "foo  x bar"},
+	} {
+		t.Run(test.with, func(t *testing.T) {
+			tree, err := parseInput("Intro.\n\nfoo Body. bar\n")
+			if err != nil {
+				t.Fatal(err)
+			}
+			out, err := applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
+			if err != nil {
+				t.Fatal(err)
+			}
+			markdown, err := pmdoc.Render(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := "Intro.\n\n" + test.want + "\n"; markdown != want {
+				t.Fatalf("replace with %q wrote %q, want %q", test.with, markdown, want)
+			}
+		})
+	}
+}
+
+// A heading and a table cell are each written on one line, so a hard break replaced into one, or a
+// line break inside a code span or inline HTML, ends the block there: the heading reads back as a
+// heading and a paragraph, the cell's row as two rows. In a paragraph or a list item they are kept.
+func TestApplyOperationReplaceRefusesAHardBreakInAHeadingOrTableCell(t *testing.T) {
+	for _, test := range []struct {
+		document string
+		refused  bool
+	}{
+		{document: "# Body.\n", refused: true},
+		{document: "| h |\n| --- |\n| Body. |\n", refused: true},
+		{document: "| Body. |\n| --- |\n| v |\n", refused: true},
+		{document: "Intro.\n\nBody.\n", refused: false},
+		{document: "- Body.\n", refused: false},
+		{document: "> Body.\n", refused: false},
+	} {
+		for _, with := range []string{"x  \ny", "x\\\ny", "`x\ny`", "<span\nclass=\"x\">y</span>"} {
+			t.Run(test.document+with, func(t *testing.T) {
+				tree, err := parseInput(test.document)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, err = applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: with})
+				var invalid *ErrInvalidOp
+				refused := errors.As(err, &invalid) && invalid.Field == "with"
+				if refused != test.refused || (!refused && err != nil) {
+					t.Fatalf("replace = %v, want refused %v", err, test.refused)
+				}
+			})
+		}
+	}
+}
+
+// Whitespace at the edges of a replacement continues the text around it; at the start or the end
+// of the textblock it lands in there is no text to continue, and whitespace kept there would be
+// stripped on the next read - or, after a footnote's marker, open indented code.
+func TestApplyOperationReplaceDropsWhitespaceAtATextblocksEdges(t *testing.T) {
+	for _, test := range []struct{ document, with, want string }{
+		{document: "Intro.\n\nBody.\n", with: "   x", want: "Intro.\n\nx\n"},
+		{document: "Intro.\n\nBody.\n", with: "x   ", want: "Intro.\n\nx\n"},
+		{document: "x[^1]\n\n[^1]: Body.\n", with: "   x", want: "x[^1]\n\n[^1]: x\n"},
+		{document: "Intro.\n\nBody. tail\n", with: "  x ", want: "Intro.\n\nx  tail\n"},
+		{document: "Intro.\n\nhead Body.\n", with: " x  ", want: "Intro.\n\nhead  x\n"},
+	} {
+		t.Run(test.document+test.with, func(t *testing.T) {
+			tree, err := parseInput(test.document)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out, err := applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
+			if err != nil {
+				t.Fatal(err)
+			}
+			markdown, err := pmdoc.Render(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if markdown != test.want {
+				t.Fatalf("replace with %q wrote %q, want %q", test.with, markdown, test.want)
+			}
+		})
+	}
+}
+
 // A hard break ends a line as surely as a newline does, so the line after one can underline it
 // into a heading. This is the shape `replace` actually produces: ParseInline turns a soft newline
 // into a space, and a caller who wants two lines writes a hard break.
@@ -1466,7 +1705,9 @@ func TestApplyOperationReplaceRefusesAWithThatRepeatsTheBlocksOwnMarker(t *testi
 		{name: "ordered marker on an ordered item", markdown: "1. Launcher contract\n", find: "Launcher contract", with: "1. Launcher contract, ruled", escaped: "1. 1\\. Launcher contract, ruled\n"},
 		{name: "prose that merely looks like an ordered marker", markdown: "1. Launcher contract\n", find: "Launcher contract", with: "1999. was a year", escaped: "1. 1999\\. was a year\n"},
 		{name: "bullet marker on a bullet item", markdown: "- Retracted\n", find: "Retracted", with: "- Retracted later", escaped: "- \\- Retracted later\n"},
-		{name: "an indented bullet marker on a bullet item", markdown: "- Retracted\n", find: "Retracted", with: "   - Retracted later", escaped: "-    \\- Retracted later\n"},
+		// The leading spaces land at the item's text start, where there is no text for them to
+		// continue, so they are dropped: kept, `-    \- …` reads back as `- \- …` anyway.
+		{name: "an indented bullet marker on a bullet item", markdown: "- Retracted\n", find: "Retracted", with: "   - Retracted later", escaped: "- \\- Retracted later\n"},
 		{name: "a tab inside the marker", markdown: "- Retracted\n", find: "Retracted", with: "+\t3 degrees", escaped: "- \\+\t3 degrees\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -1917,5 +2158,171 @@ func TestApplyOpsDeletingAnOpenAskBlockByIDRetractsItsAsk(t *testing.T) {
 	}
 	if got := askEvents(); got != 2 {
 		t.Fatalf("ask events after delete = %d, want opened and resolved", got)
+	}
+}
+
+// An empty with deletes the matched text on purpose. Where it empties a whole paragraph the block
+// and its id stay, holding nothing, whatever blocks are around it; where the text it leaves would
+// read as block syntax at a line start, it is stored escaped and reads back as the characters.
+func TestApplyOperationReplaceWithNothingEmptiesTheParagraph(t *testing.T) {
+	for _, test := range []struct{ name, markdown string }{
+		{"before a list", "Intro.\n\nBody.\n\n- a\n"},
+		{"after a list", "- a\n\nBody.\n\nAfter.\n"},
+		{"before a fence", "Intro.\n\nBody.\n\n```\ncode\n```\n"},
+		{"after a fence", "```\ncode\n```\n\nBody.\n"},
+		{"before a heading", "Intro.\n\nBody.\n\n# Title\n"},
+		{"after a heading", "# Title\n\nBody.\n"},
+		{"before a table", "Intro.\n\nBody.\n\n| h |\n| --- |\n| c |\n"},
+		{"before indented code", "Intro.\n\nBody.\n\n    code\n"},
+		{"before a rule", "Intro.\n\nBody.\n\n***\n"},
+		{"between paragraphs", "Intro.\n\nBody.\n\nAfter.\n"},
+		{"a blockquote's paragraph before its list", "Intro.\n\n> Body.\n>\n> - a\n"},
+		{"an ask's question", "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nBody.\n\n- A\n- B\n:::\n"},
+		{"a footnote definition's first paragraph of two", "x[^1]\n\n[^1]: Body.\n\n    More.\n"},
+		{"a table body cell", "Intro.\n\n| h |\n| --- |\n| Body. |\n"},
+		{"a table header cell", "Intro.\n\n| Body. |\n| --- |\n| c |\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tree, err := parseInput(test.markdown)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pmdoc.EnsureBlockIDs(tree)
+			var id string
+			pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
+				if node.Type == "paragraph" && nodeText(node) == "Body." {
+					id = blockID(node)
+				}
+				return true
+			})
+			next, err := applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: ""})
+			if err != nil {
+				t.Fatalf("replace with nothing = %v, want the paragraph emptied", err)
+			}
+			var emptied *pmdoc.Node
+			pmdoc.Walk(next, func(node *pmdoc.Node) bool {
+				if blockID(node) == id {
+					emptied = node
+				}
+				return true
+			})
+			if emptied == nil || emptied.Type != "paragraph" || nodeText(emptied) != "" {
+				t.Fatalf("after replacing with nothing, block %q = %+v, want an empty paragraph", id, emptied)
+			}
+		})
+	}
+	tree, err := parseInput("Intro.\n\n--- x\n\nAfter.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := applyOperation(tree, model.EditOp{Op: "replace", Find: " x", With: ""})
+	if err != nil {
+		t.Fatalf("replace leaving \"---\" = %v, want the text stored escaped", err)
+	}
+	markdown, err := renderTree(next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "Intro.\n\n\\---\n\nAfter.\n"; markdown != want {
+		t.Fatalf("replace leaving \"---\" stored %q, want %q", markdown, want)
+	}
+	if back, err := parseInput(markdown); err != nil || !back.Equal(next) {
+		t.Fatalf("replace leaving \"---\" stored %q, which does not read back as written (%v)", markdown, err)
+	}
+}
+
+// An emptied paragraph is not written, so a block holding one writes only its other blocks: a
+// later replace in that block writing block syntax stores it escaped, as it does in a block that
+// never held one, and the block reads back holding it as text.
+func TestApplyOperationReplaceEscapesBlockSyntaxBesideAnEmptiedParagraph(t *testing.T) {
+	for _, test := range []struct{ name, markdown, with, escaped string }{
+		{"a quote, dashes", "Intro.\n\n> Body.\n>\n> More.\n", "---", "\n> \\---\n"},
+		{"a quote, tildes", "Intro.\n\n> Body.\n>\n> More.\n\nAfter.\n", "~~~", "\n> \\~~~\n"},
+		{"a callout", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n\nMore.\n:::\n", "---", "\n\\---\n:::\n"},
+		{"a list item", "Intro.\n\n- item\n\n  Body.\n\n  More.\n", "---", "\n  \\---\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tree, err := parseInput(test.markdown)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pmdoc.EnsureBlockIDs(tree)
+			emptied, err := applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: ""})
+			if err != nil {
+				t.Fatalf("emptying the first paragraph = %v", err)
+			}
+			next, err := applyOperation(emptied, model.EditOp{Op: "replace", Find: "More.", With: test.with})
+			if err != nil {
+				t.Fatalf("replace with %q beside an emptied paragraph = %v, want it stored escaped", test.with, err)
+			}
+			markdown, err := renderTree(next)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(markdown, test.escaped) {
+				t.Fatalf("replace with %q beside an emptied paragraph stored %q, want it to hold %q", test.with, markdown, test.escaped)
+			}
+			if err := pmdoc.BlockShapeError(next.Children[1]); err != nil {
+				t.Fatalf("replace with %q beside an emptied paragraph stored %q, which reads back as another block: %v", test.with, markdown, err)
+			}
+			back, err := parseInput(markdown)
+			if err != nil {
+				t.Fatal(err)
+			}
+			kept := false
+			pmdoc.Walk(back.Children[1], func(node *pmdoc.Node) bool {
+				kept = kept || node.Type == "paragraph" && nodeText(node) == test.with
+				return true
+			})
+			if !kept {
+				t.Fatalf("replace with %q beside an emptied paragraph stored %q, which does not read back holding %q as text", test.with, markdown, test.with)
+			}
+		})
+	}
+}
+
+// A replace writes text. Text that would read as block syntax at a line start - a line of dashes
+// as a horizontal rule, a line of colons as a typed block's fence - is stored escaped, so it reads
+// back as the characters, in a paragraph, a quote, a list item, a callout and a footnote
+// definition alike. The browser editor's parser reads those escaped lines as text too (the
+// escaped-block-markers fixture).
+func TestApplyOperationReplaceStoresBlockSyntaxEscaped(t *testing.T) {
+	const footnote = "x[^1]\n\n[^1]: Body.\n"
+	const callout = "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n"
+	for _, test := range []struct{ name, markdown, with, stored string }{
+		{"a paragraph", "Intro.\n\nBody.\n\nAfter.\n", "---", "Intro.\n\n\\---\n\nAfter.\n"},
+		{"a blockquote", "Intro.\n\n> Body.\n", "---", "Intro.\n\n> \\---\n"},
+		{"a callout", callout, "---", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n\\---\n:::\n"},
+		{"a list item", "Intro.\n\n- Body.\n- two\n", "***", "Intro.\n\n- \\***\n- two\n"},
+		{"a callout, with colons", callout, ":::", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n\\:::\n:::\n"},
+		{"a paragraph, a colon line then text", "Intro.\n\nBody.\n\nAfter.\n", ":::\nb", "Intro.\n\n\\::: b\n\nAfter.\n"},
+		{"a paragraph, after a hard break", "Intro.\n\nBody.\n\nAfter.\n", "x\\\n***", "Intro.\n\nx\\\n\\***\n\nAfter.\n"},
+		{"a footnote definition", footnote, "---", "x[^1]\n\n[^1]: \\---\n"},
+		{"a footnote definition, with asterisks", footnote, "***", "x[^1]\n\n[^1]: \\***\n"},
+		{"a footnote definition, a colon line then text", footnote, ":::\nb", "x[^1]\n\n[^1]: \\::: b\n"},
+		{"a footnote definition's first paragraph of two", "x[^1]\n\n[^1]: Body.\n\n    More.\n", "---", "x[^1]\n\n[^1]: \\---\n\n    More.\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tree, err := parseInput(test.markdown)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pmdoc.EnsureBlockIDs(tree)
+			next, err := applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
+			if err != nil {
+				t.Fatalf("replace with %q = %v, want it stored escaped", test.with, err)
+			}
+			markdown, err := renderTree(next)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if markdown != test.stored {
+				t.Fatalf("replace with %q stored %q, want %q", test.with, markdown, test.stored)
+			}
+			back, err := parseInput(markdown)
+			if err != nil || !back.Equal(next) {
+				t.Fatalf("replace with %q stored %q, which does not read back as written (%v)", test.with, markdown, err)
+			}
+		})
 	}
 }
