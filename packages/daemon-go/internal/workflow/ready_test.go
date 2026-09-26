@@ -226,8 +226,8 @@ func TestAMergersREADYOnALingeringTreeIsRefused(t *testing.T) {
 }
 
 // Linger holds every member of a closed tree where it stood, whichever path a fact takes: no
-// approval, green checks, changes requested, backward move, retry of a held phase or failed claim
-// moves a member, counts a review round, posts or notifies, or starts a worker, whose start would
+// approval, green checks, red checks that exhaust max_fix_attempts, changes requested, backward
+// move, retry of a held phase or failed claim moves a member, counts a review round, posts or notifies, or starts a worker, whose start would
 // resume a suspended claim inside a tree that has left the workflow. A worker's own request is
 // refused, so it is told nothing moved. A merge is the one fact GitHub never sends again: it moves
 // the child on to its production check, and still starts nobody.
@@ -247,6 +247,8 @@ func TestNoFactMovesAMemberOfALingeringTree(t *testing.T) {
 			fact: intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head", HeadSHA: "head"}},
 		{name: "green checks on an approved head", at: phase.Reviewing, pr: record.PullRequest{ReviewDecision: "approved"},
 			fact: intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, Snapshot: "green-1", Verdict: "green", Failing: []string{}}},
+		{name: "red checks at max_fix_attempts", at: phase.Testing, pr: record.PullRequest{FixAttempts: 3},
+			fact: intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 2}}, Generation: 1, Snapshot: "red-1", Verdict: "red", Failing: []string{"ci"}}},
 		{name: "changes requested at the round cap", at: phase.Reviewing,
 			fact: intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "changes_requested", CommitID: "head", HeadSHA: "head", Body: "fix it"}},
 		{name: "the worker's backward move", at: phase.Testing, refusal: "TREE_LINGERING",

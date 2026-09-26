@@ -472,6 +472,18 @@ func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 	if !blocked {
 		return intake.Result{}, e.advanceApproved(ctx, tx, *pr)
 	}
+	// Linger holds a member of a closed tree where it stood (record.TreeLingers): the exhausted
+	// count is recorded on the pull request, and nothing is posted on the issue or told to its
+	// architect.
+	issue, err := e.store.Issue(ctx, tx, pr.Issue)
+	if err != nil {
+		return intake.Result{}, err
+	}
+	if issue != nil {
+		if lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree); err != nil || lingers {
+			return intake.Result{}, err
+		}
+	}
 	message := fmt.Sprintf("Pull request #%d reached max_fix_attempts=%d.", pr.Number, e.cfg.MaxFixAttempts)
 	if err := e.enqueue(ctx, tx, pr.Issue, record.MessagePost{Body: message}); err != nil {
 		return intake.Result{}, err
