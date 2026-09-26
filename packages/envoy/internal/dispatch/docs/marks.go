@@ -323,10 +323,7 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 			if err := refuseCodeThatEndsItsBlock(tree, next, range_, at, "replace_with", with); err != nil {
 				return err
 			}
-		} else if accept && !insideTypedBlock(at) {
-			// A typed block takes a replacement as it is (pmdoc.Splice). Its content rule and,
-			// for an ask, refuseBrokenAsks below decide it; the document-level shape check would
-			// instead reject a valid typed-block rewrite in place.
+		} else if accept && checkAcceptedShape(at, replacement) {
 			if err := refuseBrokenAccept(tree, next, range_, at, with, replacement); err != nil {
 				return err
 			}
@@ -352,15 +349,22 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 	})
 }
 
-// insideTypedBlock reports whether a textblock is inside an ask or another typed block. A
-// suggestion there is checked by that block's own content rule, never by a document-level shape.
-func insideTypedBlock(at pmdoc.TextblockAt) bool {
+// checkAcceptedShape reports whether the document-level shape guard decides an accepted
+// suggestion. A non-empty typed-block replacement is decided by its own content rule (Splice)
+// and, for an ask, by refuseBrokenAsks. An empty callout is valid while it is in the tree (an
+// empty paragraph is a block) but it renders with no content, so the document-level guard must
+// refuse it. An ask's semantic content rule names its empty question itself.
+func checkAcceptedShape(at pmdoc.TextblockAt, replacement *pmdoc.Node) bool {
 	for _, ancestor := range at.Ancestors {
-		if pmdoc.IsTypedBlock(ancestor.Type) {
-			return true
+		if !pmdoc.IsTypedBlock(ancestor.Type) {
+			continue
 		}
+		if ancestor.Type == "ask" {
+			return false
+		}
+		return isInlineDocument(replacement) && emptyTextblock(replacement.Children[0])
 	}
-	return false
+	return true
 }
 
 // refuseBrokenAsks refuses the first ask a write left unreadable whose id the document could read

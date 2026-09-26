@@ -160,7 +160,11 @@ suggestion (`POST /api/v1/comments/{id}/accept`, `docs/marks.go` `applySuggestio
 `refuseUnreadableReplacement`'s check outside a code block, and the shape comparison
 (`pmdoc.BlockShapeError`, which expects no empty paragraph back), over every document-level block
 the accept writes (`refuseBrokenAccept`, naming `replace_with`), since an accept writes blocks:
-two paragraphs in a tight list item read back as one. An accept parses its text as blocks
+two paragraphs in a tight list item read back as one. A non-empty replacement inside a typed
+block is instead checked by that block's own `Splice` content rule; `refuseBrokenAsks` checks an
+ask's `paragraph+ bullet_list?` rule. An empty callout still reaches the document-level check,
+because its empty paragraph renders to no content and its `block+` rule cannot carry that. An
+accept parses its text as blocks
 written into the document (`pmdoc.ParseFragment`: a leading `---` is a rule, as `***` is, except
 that a closed front-matter block is front matter where the text lands at the document's start,
 at the start of a top-level first block's text), so a rule or a list over a whole paragraph is

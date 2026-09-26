@@ -406,6 +406,54 @@ func TestAcceptingASuggestionRefusesAReplacementTheDocumentCannotCarryBack(t *te
 // A code block's text is literal, so a replace there writes with exactly as sent - whitespace at
 // its edges, markdown syntax, a reference, a tab - through the edits route and through an
 // accepted suggestion alike.
+// An empty accept inside a typed block must never store a block its own schema cannot carry.
+// Callout uses block+ in every placement; ask is its other schema type (paragraph+ bullet_list?).
+func TestAcceptingAnEmptySuggestionRefusesAnUnreadableTypedBlock(t *testing.T) {
+	var documentService *docs.Service
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	for index, test := range []struct {
+		name, spec, code string
+	}{
+		{"a top-level callout", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n", "INVALID_OP"},
+		{"a nested callout", ":::callout{#outer kind=\"note\" title=\"T\"}\n:::callout{#inner kind=\"note\" title=\"T\"}\nBody.\n:::\n:::\n", "INVALID_OP"},
+		{"a callout in a list item", "- Lead.\n\n  :::callout{#c1 kind=\"note\" title=\"T\"}\n  Body.\n  :::\n", "INVALID_OP"},
+		{"a callout in a blockquote", "> :::callout{#c1 kind=\"note\" title=\"T\"}\n> Body.\n> :::\n", "INVALID_OP"},
+		{"an ask", ":::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nBody.\n:::\n", "INVALID_ASK_BLOCK"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			issue := createInteractionIssue(t, handler, "T"+string(rune('A'+index)), "empty typed block", test.spec)
+			created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+				"body": "suggest", "anchor": map[string]any{"artifact": "spec", "quote": "Body."},
+				"suggestion": map[string]string{"replace_with": ""}, "actor": sessionActor(),
+			})
+			if created.Code != http.StatusCreated {
+				t.Fatalf("create suggestion: status=%d body=%s", created.Code, created.Body.String())
+			}
+			comment := decodeBody[model.Comment](t, created)
+			before, err := documentService.Text(context.Background(), issue.PrimaryArtifactID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
+			if accepted.Code != http.StatusBadRequest || !strings.Contains(accepted.Body.String(), `"code":"`+test.code+`"`) {
+				t.Fatalf("accept: status=%d body=%s, want 400 %s", accepted.Code, accepted.Body.String(), test.code)
+			}
+			after, err := documentService.Text(context.Background(), issue.PrimaryArtifactID)
+			if err != nil || after != before {
+				t.Fatalf("after refused accept = %q (%v), want unchanged %q", after, err, before)
+			}
+			read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/"+comment.ID, nil, "alice")
+			if read.Code != http.StatusOK || decodeBody[model.Comment](t, read).Resolved {
+				t.Fatalf("suggestion after refusal: status=%d body=%s, want it open", read.Code, read.Body.String())
+			}
+		})
+	}
+}
+
 func TestDocumentEditsReplaceInACodeBlockWritesWithAsSent(t *testing.T) {
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
