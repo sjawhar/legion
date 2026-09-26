@@ -23,12 +23,20 @@ type bodyBudget struct {
 	mu      sync.Mutex
 	limit   int64
 	held    int64
+	most    int64         // the most held at once, which the bound above caps
 	holders *list.List    // the requests holding a place, longest first
 	room    chan struct{} // closed and replaced whenever held falls or the longest holder leaves
 }
 
 func newBodyBudget(limit int64) *bodyBudget {
 	return &bodyBudget{limit: limit, holders: list.New(), room: make(chan struct{})}
+}
+
+// mostHeld is the most the budget has held at once.
+func (b *bodyBudget) mostHeld() int64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.most
 }
 
 // bodyRead is one request's place in a budget. release must be called once the request no longer
@@ -55,6 +63,7 @@ func (r *bodyRead) charge(ctx context.Context, n int64) error {
 		b.mu.Lock()
 		if b.held+n <= b.limit || b.holders.Front() == r.place {
 			b.held += n
+			b.most = max(b.most, b.held)
 			r.charged += n
 			b.mu.Unlock()
 			return nil
@@ -114,12 +123,10 @@ func (r *bodyRead) readAll(ctx context.Context, body io.Reader, declared, limit 
 			}
 			size := min(2*int64(cap(buf)), target)
 			size = max(size, min(bodyReadStep, target))
-			if err := r.charge(ctx, size); err != nil {
+			grown, err := r.grow(ctx, buf, size)
+			if err != nil {
 				return nil, err
 			}
-			grown := make([]byte, len(buf), size)
-			copy(grown, buf)
-			r.refund(int64(cap(buf)))
 			buf = grown
 		}
 		n, err := body.Read(buf[len(buf):cap(buf)])
@@ -134,4 +141,16 @@ func (r *bodyRead) readAll(ctx context.Context, body io.Reader, declared, limit 
 			return nil, err
 		}
 	}
+}
+
+// grow charges size bytes and only then allocates a buffer of that size holding buf, and gives
+// back buf's capacity: a request waiting for room holds no buffer the budget has not charged.
+func (r *bodyRead) grow(ctx context.Context, buf []byte, size int64) ([]byte, error) {
+	if err := r.charge(ctx, size); err != nil {
+		return nil, err
+	}
+	grown := make([]byte, len(buf), size)
+	copy(grown, buf)
+	r.refund(int64(cap(buf)))
+	return grown, nil
 }

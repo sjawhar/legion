@@ -934,13 +934,12 @@ func TestGitHubHandlerReadsABodyUpToGitHubsPayloadCap(t *testing.T) {
 // testBody is a request body of remaining bytes. It yields the first stallAfter bytes as fast as
 // they are read and then waits for stall to close before failing, as a sender that stops sending
 // does; a negative stallAfter never stalls. wait, when set, is closed before the first byte is
-// yielded. onRead sees every read's size.
+// yielded.
 type testBody struct {
 	remaining  int
 	stallAfter int
 	stall      <-chan struct{}
 	wait       <-chan struct{}
-	onRead     func(int)
 	read       int
 }
 
@@ -961,9 +960,6 @@ func (b *testBody) Read(p []byte) (int, error) {
 	}
 	b.remaining -= n
 	b.read += n
-	if b.onRead != nil {
-		b.onRead(n)
-	}
 	return n, nil
 }
 
@@ -987,26 +983,23 @@ func TestGitHubHandlerRefusesADeclaredOversizeBodyUnread(t *testing.T) {
 }
 
 // The handler buffers a body whole before it can check the signature, so anyone who can reach the
-// route can make it hold a body. Across every request it holds at most githubBodyBudget of body,
-// plus the body of the one request that has been reading longest, which never waits; the rest
-// wait for room and are then served. Here six cap-sized bodies with a wrong signature arrive
-// together, sent as fast as they are read, and each is answered 401.
+// route can make it hold a body. The budget it reads bodies against holds at most githubBodyBudget
+// plus what the one request that has held its place longest charges past it, at most twice one
+// cap-sized buffer (bodyBudget); the rest wait for room and are then served. Here sixteen cap-sized
+// bodies with a wrong signature arrive together, sent as fast as they are read, and each is
+// answered 401.
 func TestGitHubHandlerBoundsTheBodyBytesItHoldsInABurst(t *testing.T) {
-	const requests = 6
-	bound := githubBodyBudget + githubMaxBody
-	handler := GitHubHandler("s", "@legion", "", &mockPublisher{}, &mockRecorder{})
+	const requests = 16
+	bound := int64(githubBodyBudget + 2*githubMaxBody)
+	bodies := newBodyBudget(githubBodyBudget)
+	handler := githubHandler("s", "@legion", "", &mockPublisher{}, &mockRecorder{}, bodies)
 	var mu sync.Mutex
-	entered, inFlight, most := 0, 0, 0
+	entered := 0
 	start := make(chan struct{})
 	codes := make([]int, requests)
 	var wg sync.WaitGroup
 	for i := range requests {
-		body := &testBody{remaining: githubMaxBody, stallAfter: -1, wait: start, onRead: func(n int) {
-			mu.Lock()
-			inFlight += n
-			most = max(most, inFlight)
-			mu.Unlock()
-		}}
+		body := &testBody{remaining: githubMaxBody, stallAfter: -1, wait: start}
 		req := httptest.NewRequest(http.MethodPost, "/webhook/github", body)
 		req.ContentLength = githubMaxBody
 		req.Header.Set("X-GitHub-Delivery", fmt.Sprintf("delivery-budget-%d", i))
@@ -1020,9 +1013,6 @@ func TestGitHubHandlerBoundsTheBodyBytesItHoldsInABurst(t *testing.T) {
 			mu.Unlock()
 			rr := httptest.NewRecorder()
 			handler.ServeHTTP(rr, req)
-			mu.Lock()
-			inFlight -= body.read
-			mu.Unlock()
 			codes[i] = rr.Code
 		}()
 	}
@@ -1053,9 +1043,11 @@ func TestGitHubHandlerBoundsTheBodyBytesItHoldsInABurst(t *testing.T) {
 		t.Fatal("the burst never drained: requests waited on each other's half-read bodies")
 	}
 
+	most := bodies.mostHeld()
 	if most > bound {
-		t.Fatalf("the handler held %d MiB of bodies at once, want at most %d MiB (a %d MiB budget plus one cap-sized body)", most>>20, bound>>20, githubBodyBudget>>20)
+		t.Fatalf("the budget held %d MiB at once, want at most %d MiB (a %d MiB budget plus twice one cap-sized buffer)", most>>20, bound>>20, githubBodyBudget>>20)
 	}
+	t.Logf("the budget held at most %d MiB", most>>20)
 	for i, code := range codes {
 		if code != http.StatusUnauthorized {
 			t.Fatalf("request %d: status = %d, want 401 once its turn came", i, code)

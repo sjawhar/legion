@@ -114,7 +114,11 @@ const githubBodyBudget = 64 << 20
 
 // GitHubHandler returns the HTTP handler for GitHub webhook events.
 func GitHubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publisher, ci CIRecorder) http.HandlerFunc {
-	bodies := newBodyBudget(githubBodyBudget)
+	return githubHandler(secret, mentionTrigger, reviewerAppID, publisher, ci, newBodyBudget(githubBodyBudget))
+}
+
+// githubHandler is GitHubHandler reading bodies against the given budget.
+func githubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publisher, ci CIRecorder, bodies *bodyBudget) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusOK)
