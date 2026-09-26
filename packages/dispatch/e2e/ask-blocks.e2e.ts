@@ -76,11 +76,8 @@ async function copyWholeDocument(page: Page): Promise<Clipboard> {
   });
 }
 
-/** Pastes clipboard contents at the start of the text `quote`, through the editor's own paste
- * handler. */
-async function pasteBefore(page: Page, quote: string, clipboard: Clipboard): Promise<void> {
-  await selectEditorText(page, quote);
-  await page.keyboard.press("ArrowLeft");
+/** Pastes clipboard contents at the caret, through the editor's own paste handler. */
+async function paste(page: Page, clipboard: Clipboard): Promise<void> {
   await documentEditor(page).evaluate((root, { html, text }) => {
     const data = new DataTransfer();
     data.setData("text/html", html);
@@ -89,6 +86,13 @@ async function pasteBefore(page: Page, quote: string, clipboard: Clipboard): Pro
       new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: data })
     );
   }, clipboard);
+}
+
+/** Pastes clipboard contents at the start of the text `quote`. */
+async function pasteBefore(page: Page, quote: string, clipboard: Clipboard): Promise<void> {
+  await selectEditorText(page, quote);
+  await page.keyboard.press("ArrowLeft");
+  await paste(page, clipboard);
 }
 
 const answeredDecisionSpec =
@@ -702,16 +706,9 @@ test("a paste from Google Docs keeps the editor's own cleanup of its wrapper", a
     // The selection has collapsed once the selection bar is gone; a paste before that replaces
     // the selected text.
     await expect(actionBar(page)).toBeHidden();
-    await documentEditor(page).evaluate((root) => {
-      const data = new DataTransfer();
-      data.setData(
-        "text/html",
-        '<b id="docs-internal-guid-4a1b2c3d-7fff"><p>Wrapped words</p></b>'
-      );
-      data.setData("text/plain", "Wrapped words");
-      root.dispatchEvent(
-        new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: data })
-      );
+    await paste(page, {
+      html: '<b id="docs-internal-guid-4a1b2c3d-7fff"><p>Wrapped words</p></b>',
+      text: "Wrapped words",
     });
 
     await expect
