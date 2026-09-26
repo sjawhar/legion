@@ -1474,18 +1474,53 @@ describe("core-NATS event pump", () => {
         published.push({ topic, payloadJson });
       })
     );
-    const payloadJson = JSON.stringify({ text: "@legion please investigate" });
+    const payloadJson = JSON.stringify({
+      text: "@legion please investigate",
+      repo: "acme/widgets",
+    });
 
     const acks: string[] = [];
     nats.emit(
       "notifications.github.acme.widgets.mention",
-      envelope({ text: "@legion please investigate" }, "github-mention-1"),
+      envelope({ text: "@legion please investigate", repo: "acme/widgets" }, "github-mention-1"),
       () => acks.push("ack-1")
     );
     await flush();
 
     expect(published).toEqual([{ topic: roleTopic(controllerToken("omp")), payloadJson }]);
     expect(acks).toEqual(["ack-1"]);
+    pump.stop();
+  });
+
+  // A subject spells a repository lossily, a dot as `_`, so `acme/a.b` mentions on `acme/a_b`'s
+  // subject: the payload's repository says whose mention it is, and another repository's is
+  // acknowledged without reaching the controller.
+  it("forwards only its configured repository's GitHub mentions", async () => {
+    const { state } = stateForIssue();
+    const nats = new FakeNats();
+    const published: string[] = [];
+    const pump = startEventPump({
+      ...deps(state, nats, async (_topic, payloadJson) => {
+        published.push(payloadJson);
+      }),
+      config: { ...config(), projects: { LEGSMOKE: { repo: "acme/a_b" } } },
+    });
+
+    const acks: string[] = [];
+    nats.emit(
+      "notifications.github.acme.a_b.mention",
+      envelope({ text: "@legion elsewhere", repo: "acme/a.b" }, "github-mention-foreign"),
+      () => acks.push("foreign")
+    );
+    nats.emit(
+      "notifications.github.acme.a_b.mention",
+      envelope({ text: "@legion here", repo: "acme/a_b" }, "github-mention-own"),
+      () => acks.push("own")
+    );
+    await pump.drain();
+
+    expect(published).toEqual([JSON.stringify({ text: "@legion here", repo: "acme/a_b" })]);
+    expect(acks).toEqual(["foreign", "own"]);
     pump.stop();
   });
 
@@ -1503,7 +1538,7 @@ describe("core-NATS event pump", () => {
       const acks: string[] = [];
       nats.emit(
         "notifications.github.acme.widgets.mention",
-        envelope({ text: "@legion please investigate" }, "github-mention-2"),
+        envelope({ text: "@legion please investigate", repo: "acme/widgets" }, "github-mention-2"),
         () => acks.push("ack-1")
       );
 
