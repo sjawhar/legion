@@ -134,6 +134,9 @@ func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpe
 		}
 		return
 	}
+	for _, field := range decoded.Unread {
+		logMessage(spec.Logger, slog.LevelWarn, "unreadable field taken as absent", message, "event_id", decoded.EventID, "field", field)
+	}
 	if decoded.Fact == nil {
 		ackMessage(spec.Logger, message)
 		return

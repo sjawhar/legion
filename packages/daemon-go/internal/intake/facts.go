@@ -85,14 +85,19 @@ func (PullRequestSynchronized) isFact() {}
 type PullRequestReview struct {
 	Repo   string
 	Number int
-	// ID is GitHub's review id, which rises with every review submitted: the order reviews were
-	// written in, whatever order they are delivered in. Zero when the listener did not carry it.
-	ID       int64
-	State    string
-	CommitID string
-	HeadSHA  string
-	Author   string
-	Body     string
+	// ID is GitHub's review id, assigned when the review is created: a pending review (a draft)
+	// keeps the id it was created with when it is submitted later. Zero when the listener did not
+	// carry it.
+	ID int64
+	// SubmittedAt is when the review was submitted, zero when the listener did not carry it or
+	// carried one that could not be read. Reviews are ordered by it, then by ID
+	// (record.ReviewOrder).
+	SubmittedAt time.Time
+	State       string
+	CommitID    string
+	HeadSHA     string
+	Author      string
+	Body        string
 }
 
 func (PullRequestReview) isFact() {}
