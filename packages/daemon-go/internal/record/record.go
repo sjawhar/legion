@@ -86,7 +86,10 @@ type ReviewDecision struct {
 // ReviewOrder is where a review falls among the pull request's reviews: when it was submitted, then
 // GitHub's review id. The id alone is not enough, since GitHub assigns it when a review is created
 // and a draft keeps it when it is submitted later. SubmittedAt is zero for a review a listener that
-// predates submitted_at carried, and for every mark recorded before the field.
+// predates submitted_at carried, one whose time could not be read, and every mark recorded before
+// the field. Among reviews that all carry a time the order does not depend on delivery; with an
+// untimed review in play it is not transitive, so the outcome can depend on the order reviews are
+// delivered in. No stored mark can recover a time it never had.
 type ReviewOrder struct {
 	SubmittedAt time.Time
 	ID          int64
@@ -129,9 +132,10 @@ type PullRequest struct {
 	// App's (the tester's red tests): a red on it is planned, so the next head is not a fix attempt.
 	PlannedRed bool
 	// ReviewSeen is the newest deciding review (changes requested or approved) GitHub reported for
-	// the pull request, kept across rounds and generations: a deciding review not after it was
-	// submitted before one already processed, and records nothing. A comment decides nothing and
-	// leaves it as it is.
+	// the pull request: a deciding review not after it was submitted before one already processed,
+	// and records nothing. A comment decides nothing and leaves it as it is. It lasts as long as the
+	// pull request's record: across rounds, a reopen, and a new generation while the pull request
+	// is open; a new generation deletes one that is not.
 	ReviewSeen ReviewOrder
 	State      PullRequestState
 }

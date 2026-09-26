@@ -130,8 +130,8 @@ func issuePhase(t *testing.T, pool *pgxpool.Pool) phase.Phase {
 // push that changes code, whose changed paths are not known, or that rewrote history - or did not
 // say whether it did - carries no approval across. Deciding reviews are ordered by when they were
 // submitted, then by GitHub's review id, so the newest one submitted decides; a review without a
-// submission time is ordered by id against any other. A pull request recorded before the daemon kept its pushes has
-// none, so only an approval of its current head stands.
+// submission time is ordered by id against any other. A pull request recorded before the daemon
+// kept its pushes has none, so only an approval of its current head stands.
 func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -195,11 +195,10 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 			// never the current one.
 			before := map[string]string{"head-2": "head", "head-3": "head-2", "head-x": "older", "head-l": "head"}
 			for i, step := range tc.steps {
-				// A step is its name, then optional words: a head it names (head, head-2, ...), a review
-				// id (id=N), a review's submission time (at=N, minutes past noon), the head a push
-				// replaced when the map below does not say (from=H), "forced" for a push that
-				// rewrote history, "unmarked" for a push whose
-				// listener did not say.
+				// A step is its name, then optional words: a head it names (head, head-2, ...), a
+				// review id (id=N), a review's submission time (at=N, minutes past noon), the head a
+				// push replaced when the map below does not say (from=H), "forced" for a push that
+				// rewrote history, and "unmarked" for a push whose listener did not say.
 				head, id, forced, from := "head-2", int64(0), "false", ""
 				var submitted time.Time
 				var name []string
@@ -446,5 +445,56 @@ func TestAReopenedPullRequestKeepsItsNewestReview(t *testing.T) {
 	}
 	if got := issuePhase(t, pool); got != phase.Retro {
 		t.Fatalf("the issue is in %s, want retro: the redelivered request for changes is older than the approval", got)
+	}
+}
+
+// The reviewer can complete before its review arrives and before the issue is held from reviewing:
+// the review then lands while held, and the retry that restores reviewing finds both halves of the
+// round already in. It ends the round there rather than starting the reviewer again, whose second
+// completion of the same commit would be refused as not new and leave the issue in reviewing.
+func TestARetryEndsARoundWhoseReviewerCompletedBeforeTheHold(t *testing.T) {
+	for _, tc := range []struct {
+		state  string
+		want   phase.Phase
+		rounds int
+	}{
+		{state: "approved", want: phase.Retro},
+		{state: "changes_requested", want: phase.Implementing, rounds: 1},
+	} {
+		t.Run(tc.state, func(t *testing.T) {
+			pool := migratedPool(t)
+			ctx := context.Background()
+			seedReview(t, pool, "green")
+			engine := testEngine()
+			for i, fact := range []intake.Fact{
+				intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-1"},
+				intake.ClaimFailed{Issue: "LEGION-208", Role: claim.RoleReviewer},
+				intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: 11, State: tc.state, CommitID: "head", Body: "the review"},
+				intake.RetryOrEscalate{Issue: "LEGION-208", Decision: intake.RetryDecision},
+			} {
+				result, err := intake.ApplyFact(ctx, pool, "test", fmt.Sprintf("early-%d", i), fact, engine)
+				if err != nil || result.Refusal != nil {
+					t.Fatalf("fact %d (%T) = %+v, %v", i, fact, result.Refusal, err)
+				}
+			}
+			if got := issuePhase(t, pool); got != tc.want {
+				t.Fatalf("the issue is in %s, want %s", got, tc.want)
+			}
+			var starts int
+			if err := pool.QueryRow(ctx, `select count(*) from outbox where kind = 'supervise' and payload->>'op' = 'start'
+				and payload->>'role' = 'reviewer' and payload->>'phase' = 'reviewing'`).Scan(&starts); err != nil {
+				t.Fatal(err)
+			}
+			if starts != 0 {
+				t.Fatalf("the retry started the reviewer %d times, want none: its round had already ended", starts)
+			}
+			var rounds int
+			if err := pool.QueryRow(ctx, "select rounds from phases where issue = $1 and role = $2", "LEGION-208", "implementer").Scan(&rounds); err != nil {
+				t.Fatal(err)
+			}
+			if rounds != tc.rounds {
+				t.Fatalf("the implementer's rounds = %d, want %d: the round ended once", rounds, tc.rounds)
+			}
+		})
 	}
 }

@@ -789,7 +789,7 @@ func TestDecodeDispatchIssueNamesASessionActor(t *testing.T) {
 // is refused rather than read as none. A time that cannot be read is taken as none and reported,
 // since a review without one is still ordered, by its id.
 func TestDecodingCarriesThePushForcedMarkerAndTheReviewOrder(t *testing.T) {
-	withPayload := func(t *testing.T, name, subject string, set map[string]string) (decodedMessage, error) {
+	withPayload := func(t *testing.T, name, subject string, set map[string]any) (decodedMessage, error) {
 		t.Helper()
 		var envelope map[string]any
 		if err := json.Unmarshal(capturedGitHubEnvelope(t, name), &envelope); err != nil {
@@ -818,24 +818,32 @@ func TestDecodingCarriesThePushForcedMarkerAndTheReviewOrder(t *testing.T) {
 	reviewSubject := "notifications.github.sjawhar.legion.pr.42.review"
 
 	for _, forced := range []string{"true", "false"} {
-		decoded, err := withPayload(t, "push.json", pushSubject, map[string]string{"forced": forced})
+		decoded, err := withPayload(t, "push.json", pushSubject, map[string]any{"forced": forced})
 		if push, ok := decoded.Fact.(Push); err != nil || !ok || push.Forced == nil || *push.Forced != forced {
 			t.Fatalf("push with forced %q = %#v, %v", forced, decoded.Fact, err)
 		}
 	}
-	decoded, err := withPayload(t, "review.json", reviewSubject, map[string]string{"review_id": "5325101010",
+	decoded, err := withPayload(t, "review.json", reviewSubject, map[string]any{"review_id": "5325101010",
 		"submitted_at": "2026-09-26T12:03:00+02:00"})
 	submitted := time.Date(2026, 9, 26, 10, 3, 0, 0, time.UTC)
 	if review, ok := decoded.Fact.(PullRequestReview); err != nil || !ok || review.ID != 5325101010 ||
 		!review.SubmittedAt.Equal(submitted) || len(decoded.Unread) != 0 {
 		t.Fatalf("review with an id and a submission time = %#v, unread %q, %v", decoded.Fact, decoded.Unread, err)
 	}
-	if _, err := withPayload(t, "review.json", reviewSubject, map[string]string{"review_id": "not-a-number"}); err == nil {
+	if _, err := withPayload(t, "review.json", reviewSubject, map[string]any{"review_id": "not-a-number"}); err == nil {
 		t.Fatal("a review id that is not a number decoded")
 	}
-	decoded, err = withPayload(t, "review.json", reviewSubject, map[string]string{"review_id": "5325101010", "submitted_at": "yesterday"})
-	if review, ok := decoded.Fact.(PullRequestReview); err != nil || !ok || review.ID != 5325101010 || !review.SubmittedAt.IsZero() ||
-		len(decoded.Unread) != 1 || !strings.Contains(decoded.Unread[0], "submitted_at") {
-		t.Fatalf("review with an unreadable time = %#v, unread %q, %v; want it untimed and the field reported", decoded.Fact, decoded.Unread, err)
+	for _, unreadable := range []any{"yesterday", 1.72735218e+09, true, map[string]any{"t": "2026-09-26T12:03:00Z"}} {
+		decoded, err = withPayload(t, "review.json", reviewSubject, map[string]any{"review_id": "5325101010", "submitted_at": unreadable})
+		if review, ok := decoded.Fact.(PullRequestReview); err != nil || !ok || review.ID != 5325101010 || !review.SubmittedAt.IsZero() ||
+			len(decoded.Unread) != 1 || !strings.Contains(decoded.Unread[0], "submitted_at") {
+			t.Fatalf("review with the time %#v = %#v, unread %q, %v; want it untimed and the field reported", unreadable, decoded.Fact, decoded.Unread, err)
+		}
+	}
+	for _, absent := range []any{nil, ""} {
+		decoded, err = withPayload(t, "review.json", reviewSubject, map[string]any{"review_id": "5325101010", "submitted_at": absent})
+		if review, ok := decoded.Fact.(PullRequestReview); err != nil || !ok || !review.SubmittedAt.IsZero() || len(decoded.Unread) != 0 {
+			t.Fatalf("review with the time %#v = %#v, unread %q, %v; want it untimed and nothing reported", absent, decoded.Fact, decoded.Unread, err)
+		}
 	}
 }

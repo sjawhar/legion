@@ -100,8 +100,9 @@ const legionGoPhaseView = z.strictObject({
 /** `api.PullRequestView` — the pull request as the daemon observes it from GitHub.
  * `reviewDecision` is the latest review round's decision, the one the workflow ends the round on
  * when the reviewer completes. It shows from the review that decided it until the next round
- * opens, so a request for changes stays through implementing and testing, and an approval through
- * retro; absent until a review in a round decides. */
+ * opens or a new generation clears it, so a request for changes stays through implementing and
+ * testing, and an approval through retro and every phase after it; absent until a review in a
+ * round decides. */
 const legionGoPullRequestView = z.strictObject({
   number: z.number().int().positive(),
   head: nonEmptyString,

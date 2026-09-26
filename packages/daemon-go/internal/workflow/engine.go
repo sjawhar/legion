@@ -384,7 +384,9 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 
 // pullRequestOpened records the pull request a branch opened, and a reopen is the same pull
 // request: its fix and blocked attempts are what bound the review rounds, so they are carried
-// over rather than rebuilt at zero, which made closing and reopening a way to buy a fresh cap.
+// over rather than rebuilt at zero, which made closing and reopening a way to buy a fresh cap, and
+// so is its newest review, which orders every review it will have. A new generation deletes a
+// pull request that is not open, and all three with it.
 func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.PullRequestOpened) (intake.Result, error) {
 	issue, err := e.issueForBranch(ctx, tx, fact.Branch)
 	if err != nil || issue == nil {
@@ -459,7 +461,7 @@ func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.
 // reviewing, whether both of its halves are now in (advanceReview).
 func (e *Engine) advanceOpenReview(ctx context.Context, tx pgx.Tx, pr *record.PullRequest) error {
 	issue, err := e.store.Issue(ctx, tx, pr.Issue)
-	if err != nil || issue == nil || issue.Phase != phase.Reviewing {
+	if err != nil || issue == nil {
 		return err
 	}
 	return e.advanceReview(ctx, tx, *issue, pr)
@@ -508,11 +510,12 @@ func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestR
 	if state != "changes_requested" && state != "approved" {
 		return intake.Result{}, nil
 	}
-	// Deciding reviews are ordered by when they were submitted, then by GitHub's review id,
-	// whatever order they are delivered in (record.ReviewOrder). The pull request keeps the newest
-	// it has had across rounds, so a review submitted before one already processed - redelivered,
-	// or from an earlier round - records nothing. A review without an id is ordered by when it
-	// arrives.
+	// Deciding reviews are ordered by when they were submitted, then by GitHub's review id
+	// (record.ReviewOrder): among reviews that all carry a time, whatever order they are delivered
+	// in; with a review without a time in play, the outcome can depend on delivery order. The pull
+	// request keeps the newest it has had across rounds, so a review submitted before one already
+	// processed - redelivered, or from an earlier round - records nothing. A review without an id is
+	// ordered by when it arrives.
 	if fact.ID != 0 {
 		order := record.ReviewOrder{SubmittedAt: fact.SubmittedAt, ID: fact.ID}
 		if !order.After(pr.ReviewSeen) {
@@ -542,10 +545,6 @@ func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestR
 	if err := e.store.PutPhase(ctx, tx, row); err != nil {
 		return intake.Result{}, err
 	}
-	if held {
-		// The retry puts the issue back in reviewing, and the reviewer's completion ends the round.
-		return intake.Result{}, nil
-	}
 	return intake.Result{}, e.advanceReview(ctx, tx, *issue, pr)
 }
 
@@ -557,6 +556,10 @@ func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestR
 // follow-up turn when a turn ends with its phase open (pi-envoy's phase-stall check), and past
 // that the issue stays in reviewing, as a tester's that never completes stays in testing.
 func (e *Engine) advanceReview(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest) error {
+	// Only a round in reviewing ends: one held from reviewing ends after the retry restores it.
+	if issue.Phase != phase.Reviewing {
+		return nil
+	}
 	row, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
 	if err != nil || row.HandoffCommit == "" || row.Decision == nil {
 		return err
@@ -635,6 +638,22 @@ func (e *Engine) retryOrEscalate(ctx context.Context, tx pgx.Tx, fact intake.Ret
 	issue.Phase, issue.HeldFrom = from, nil
 	if err := e.store.PutIssue(ctx, tx, *issue); err != nil {
 		return intake.Result{}, err
+	}
+	// A review round held open may already have both of its halves: the reviewer completed before
+	// the hold, and its review was recorded while held. The round ends here, and the reviewer is
+	// started only if it is still open - a second completion of the same commit would be refused as
+	// not new.
+	if from == phase.Reviewing {
+		pr, err := e.store.PullRequest(ctx, tx, issue.Key)
+		if err != nil {
+			return intake.Result{}, err
+		}
+		if err := e.advanceReview(ctx, tx, *issue, pr); err != nil {
+			return intake.Result{}, err
+		}
+		if issue, err = e.store.Issue(ctx, tx, issue.Key); err != nil || issue == nil || issue.Phase != phase.Reviewing {
+			return intake.Result{}, err
+		}
 	}
 	return intake.Result{}, e.start(ctx, tx, *issue, RoleFor(from), task(*issue, record.PhaseRow{}, nil, "retry held phase"))
 }

@@ -248,7 +248,7 @@ func decodePullRequest(raw map[string]json.RawMessage) (Fact, error) {
 	branch, _ := rawString(raw, "head_ref")
 	sha, _ := rawString(raw, "head_sha")
 	body, _ := rawString(raw, "body")
-	updatedAt := rawTimestamp(raw, "updated_at")
+	updatedAt, _ := rawTimestamp(raw, "updated_at")
 	switch action {
 	case "opened", "reopened":
 		// A reopened pull request is open again, recorded as when it opened.
@@ -297,14 +297,10 @@ func decodeReview(raw map[string]json.RawMessage) (Fact, []string, error) {
 	// submitted_at is GitHub's RFC 3339 time; a listener that predates it carries none. One that
 	// cannot be read is taken as none, and reported: a review without a time is ordered by its id,
 	// so it is recorded rather than lost as poison.
-	var submittedAt time.Time
+	submittedAt, ok := rawTimestamp(raw, "submitted_at")
 	var unread []string
-	if text, ok := rawString(raw, "submitted_at"); ok && text != "" {
-		if parsed, err := time.Parse(time.RFC3339, text); err == nil {
-			submittedAt = parsed.UTC()
-		} else {
-			unread = append(unread, fmt.Sprintf("submitted_at %q is not an RFC 3339 time", text))
-		}
+	if !ok {
+		unread = append(unread, fmt.Sprintf("submitted_at %s is not an RFC 3339 time", raw["submitted_at"]))
 	}
 	return PullRequestReview{Repo: repo, Number: number, ID: id, SubmittedAt: submittedAt, State: strings.ToLower(state),
 		CommitID: commitID, HeadSHA: headSHA, Author: author, Body: body}, unread, nil
@@ -498,14 +494,23 @@ func rawInt64Value(value json.RawMessage) (int64, bool) {
 	return integer, true
 }
 
-func rawTimestamp(raw map[string]json.RawMessage, key string) time.Time {
-	value, ok := rawString(raw, key)
-	if !ok || value == "" {
-		return time.Time{}
+// rawTimestamp reads an optional RFC 3339 time: an absent, null or empty field is the zero time,
+// and ok is false only when the field holds anything else, which is taken as the zero time too.
+func rawTimestamp(raw map[string]json.RawMessage, key string) (time.Time, bool) {
+	value, present := raw[key]
+	if !present || string(value) == "null" {
+		return time.Time{}, true
 	}
-	parsed, err := time.Parse(time.RFC3339, value)
+	var text string
+	if err := json.Unmarshal(value, &text); err != nil {
+		return time.Time{}, false
+	}
+	if text == "" {
+		return time.Time{}, true
+	}
+	parsed, err := time.Parse(time.RFC3339, text)
 	if err != nil {
-		return time.Time{}
+		return time.Time{}, false
 	}
-	return parsed.UTC()
+	return parsed.UTC(), true
 }
