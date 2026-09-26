@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -41,17 +40,24 @@ type Conn struct {
 	failures  map[string]error
 }
 
-// sequence numbers the fake connections in the order they were made, as the listener numbers the
-// connections it registers.
-var sequence atomic.Uint64
-
-// NewConn is a connection that accepts everything and reports no turn in flight. Each is newer
-// than every one made before it (Sequence).
+// NewConn is a connection that accepts everything and reports no turn in flight.
 func NewConn() *Conn {
-	return &Conn{seq: sequence.Add(1), failures: map[string]error{}}
+	return &Conn{failures: map[string]error{}}
 }
 
-func (c *Conn) Sequence() uint64 { return c.seq }
+// Sequence is the order the connection was registered in (Conns.Register), zero before it is.
+func (c *Conn) Sequence() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.seq
+}
+
+// registered stamps the connection with its registration order.
+func (c *Conn) registered(seq uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.seq = seq
+}
 
 func (c *Conn) Prompt(_ context.Context, deliveryID, message string) error {
 	c.mu.Lock()
@@ -140,6 +146,9 @@ func (c *Conn) fail(method string, err error) {
 type Conns struct {
 	mu    sync.Mutex
 	conns map[claim.Token]runtime.Conn
+	// registrations numbers the connections in the order they are registered, as the listener
+	// does, so a connection registered later is newer (runtime.Conn.Sequence).
+	registrations uint64
 }
 
 // NewConns is an empty directory: no claim has connected yet.
@@ -155,9 +164,15 @@ func (c *Conns) Conn(token claim.Token) (runtime.Conn, bool) {
 }
 
 // Register is a claim's agent connecting.
+// Register is conn connecting for the claim. A fake connection, or one that embeds it, is
+// numbered newer than every connection registered before it.
 func (c *Conns) Register(token claim.Token, conn runtime.Conn) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.registrations++
+	if numbered, ok := conn.(interface{ registered(uint64) }); ok {
+		numbered.registered(c.registrations)
+	}
 	c.conns[token] = conn
 }
 

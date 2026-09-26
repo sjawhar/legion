@@ -281,7 +281,7 @@ type Machine struct {
 	unsaved bool
 	// sentThrough is the registration sequence of the newest connection a prompt was sent through
 	// (takesBackConfirmed). A send always goes through the connection registered last, so it only
-	// rises.
+	// rises, and a relaunch leaves it: the new process's connections are registered later still.
 	sentThrough uint64
 	// askFirst is a restored claim whose agent an earlier daemon was talking to: a pending
 	// delivery it may already have sent, or a turn it saw start and may not have seen end. The
@@ -813,7 +813,6 @@ func (m *Machine) disarmAll() {
 // or none, has no memory of the old one's prompts.
 func (m *Machine) forgetSend() {
 	m.send, m.helloDuringSend, m.askFirst = nil, false, false
-	m.sentThrough = 0
 }
 
 // persist writes the claim alone. A capability belongs to a registered agent whose process runs,

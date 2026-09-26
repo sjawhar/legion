@@ -82,8 +82,10 @@ func TestAfterARestartTheMarkingPromptsRefusalStillClearsTheMark(t *testing.T) {
 	}
 
 	h.restart()
+	replacement := fake.NewConn()
+	h.conns.Register(testToken, replacement)
 	h.must(StreamLateRefusal{Claim: testToken, DeliveryID: first.DeliveryID, Error: "the model provider refused the request", Replayed: true,
-		ConnSequence: fake.NewConn().Sequence()})
+		ConnSequence: replacement.Sequence()})
 
 	if p := h.pending(); !p.DeliveredAt.IsZero() {
 		t.Fatalf("pending after the refusal on the restarted daemon = %+v, want its read mark gone", p)
@@ -175,8 +177,10 @@ func TestAReplayedRefusalOfTheReSentDeliveryLeavesTheEarlierMark(t *testing.T) {
 		t.Fatalf("pending after the lost re-send = %+v, want %s pending under %s's mark", p, resent.DeliveryID, first.DeliveryID)
 	}
 
+	next := fake.NewConn()
+	h.conns.Register(testToken, next)
 	h.must(StreamLateRefusal{Claim: testToken, DeliveryID: resent.DeliveryID, Error: "Agent is busy", Replayed: true,
-		ConnSequence: fake.NewConn().Sequence()})
+		ConnSequence: next.Sequence()})
 
 	if p := h.pending(); p.DeliveredAt.IsZero() || p.MarkedBy != first.DeliveryID {
 		t.Fatalf("pending after the replayed refusal = %+v, want the first prompt's mark standing", p)
@@ -693,7 +697,8 @@ func TestAReplayedRefusalLeavesATaskANewerConnectionReSent(t *testing.T) {
 			charged := h.claim().Budgets
 
 			backlog := fake.NewConn() // C2, whose events the machine is about to handle
-			newest := newGatedConn()  // C3, registered before C2's hello is handled
+			h.conns.Register(testToken, backlog)
+			newest := newGatedConn() // C3, registered before C2's hello is handled
 			h.conns.Register(testToken, newest)
 			handle := func(ev Event) {
 				if err := h.m.Handle(h.ctx, ev); err != nil {
