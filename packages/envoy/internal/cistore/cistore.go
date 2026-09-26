@@ -343,6 +343,11 @@ func (s *Store) applyWatched(entry nats.KeyValueEntry) {
 			if err := json.Unmarshal(entry.Value(), &st); err != nil {
 				s.evictCachedLocked(key, entry.Revision())
 				malformed = err
+			} else if key != Key(st.Owner, st.Repo, st.Number, st.SHA) {
+				// A record under another spelling of its key (one written before a dot in a key
+				// segment became `=`) waits out its TTL uncached: the summary loop addresses a
+				// record by the key its identity builds, so it could never claim this one.
+				s.evictCachedLocked(key, entry.Revision())
 			} else {
 				s.cacheStateLocked(key, st, entry.Revision())
 			}
