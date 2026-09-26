@@ -170,9 +170,81 @@ func TestDocumentEditPreconditionChecksEmptyBatch(t *testing.T) {
 	if accepted.Code != http.StatusOK || !strings.Contains(accepted.Body.String(), `"applied":0`) {
 		t.Fatalf("fresh empty precondition: status=%d body=%s", accepted.Code, accepted.Body.String())
 	}
+	// The check applied no operation, so the document it read is the one the caller's next
+	// guarded edit meets: the response carries that token, not an empty one.
+	if token := decodeBody[documentEditResult](t, accepted).Token; token != fresh.Token {
+		t.Fatalf("checked empty batch token = %q, want the document's current token %q", token, fresh.Token)
+	}
+	// Under a block guard there is no document token in the request to echo back, and the answer
+	// is still the whole-document token the next guarded edit needs.
+	blocks := readDocumentPreconditionBlocks(t, handler, issue.PrimaryArtifactID)
+	guarded := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops":          []any{},
+		"precondition": map[string]any{"blocks": []map[string]string{{"id": blocks[0].ID, "token": blocks[0].Token}}},
+	}, "alice")
+	if guarded.Code != http.StatusOK {
+		t.Fatalf("block-guarded empty precondition: status=%d body=%s", guarded.Code, guarded.Body.String())
+	}
+	if token := decodeBody[documentEditResult](t, guarded).Token; token != fresh.Token {
+		t.Fatalf("block-guarded empty batch token = %q, want the document's current token %q", token, fresh.Token)
+	}
 	updatesFinal, versionsFinal, eventsFinal := documentMutationCounts(t, database, issue.PrimaryArtifactID)
 	if updatesFinal != updatesBefore || versionsFinal != versionsBefore || eventsFinal != eventsBefore {
 		t.Fatalf("fresh empty precondition mutated updates/versions/events: got %d/%d/%d, want %d/%d/%d", updatesFinal, versionsFinal, eventsFinal, updatesBefore, versionsBefore, eventsBefore)
+	}
+}
+
+type documentEditResult struct {
+	Changed bool   `json:"changed"`
+	Token   string `json:"token"`
+}
+
+func guardedDocumentEdit(t *testing.T, handler http.Handler, artifactID, find, with, token string) documentEditResult {
+	t.Helper()
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+artifactID+"/edits", map[string]any{
+		"ops":          []map[string]string{{"op": "replace", "find": find, "with": with}},
+		"precondition": map[string]string{"document": token},
+	}, "alice")
+	if response.Code != http.StatusOK {
+		t.Fatalf("guarded edit %q -> %q: status=%d body=%s", find, with, response.Code, response.Body.String())
+	}
+	return decodeBody[documentEditResult](t, response)
+}
+
+// A chain of guarded edits reads the document once: each edit returns the token of the tree its
+// own transaction wrote, which is the next edit's precondition. AGENTC-393 paid for eleven spec
+// edits with six full re-reads of a 30 KB document to learn tokens the edits had just minted.
+func TestDocumentEditReturnsTheTokenItProduced(t *testing.T) {
+	handler, _, _ := preconditionTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Chained document edits", "before")
+
+	start := readDocumentPrecondition(t, handler, issue.PrimaryArtifactID)
+	first := guardedDocumentEdit(t, handler, issue.PrimaryArtifactID, "before", "first", start.Token)
+	if first.Token == "" || first.Token == start.Token {
+		t.Fatalf("first edit token = %q, want the token it produced, not the one it was given (%q)", first.Token, start.Token)
+	}
+	// No read between the two edits: the second guards on what the first returned.
+	second := guardedDocumentEdit(t, handler, issue.PrimaryArtifactID, "first", "second", first.Token)
+	current := readDocumentPrecondition(t, handler, issue.PrimaryArtifactID)
+	if current.Markdown != "second\n" {
+		t.Fatalf("document after chained guarded edits = %q, want second", current.Markdown)
+	}
+	if second.Token != current.Token {
+		t.Fatalf("second edit token = %q, want the document's own token %q", second.Token, current.Token)
+	}
+
+	// A batch that changes nothing returns the token the document still carries, so the chain
+	// continues through it.
+	unchanged := guardedDocumentEdit(t, handler, issue.PrimaryArtifactID, "second", "second", second.Token)
+	if unchanged.Changed || unchanged.Token != current.Token {
+		t.Fatalf("unchanged batch = %#v, want changed=false and the current token %q", unchanged, current.Token)
+	}
+	third := guardedDocumentEdit(t, handler, issue.PrimaryArtifactID, "second", "third", unchanged.Token)
+	if third.Token == unchanged.Token {
+		t.Fatalf("third edit token = %q, want a token of its own", third.Token)
+	}
+	if got := readDocumentPrecondition(t, handler, issue.PrimaryArtifactID); got.Markdown != "third\n" || got.Token != third.Token {
+		t.Fatalf("document after the chain = %#v, want third and token %q", got, third.Token)
 	}
 }
 

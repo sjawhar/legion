@@ -373,13 +373,14 @@ type editBatch struct {
 // so such a batch writes a version whose markdown equals the previous one's and stales an
 // approval pinned to it; without a summary SnapshotVersion compares renderings and writes
 // nothing. LEGION-260's follow-up makes the route version on the rendered markdown and keep
-// this verdict as its report to the agent.
+// this verdict as its report to the agent. That same post-batch token is the verdict's Token,
+// the document precondition the caller's next edit passes.
 func (b editBatch) outcome(applied int) (EditOutcome, error) {
 	after, err := nodeToken(b.tree)
 	if err != nil {
 		return EditOutcome{}, err
 	}
-	return EditOutcome{Applied: applied, Changed: after != b.before, Unchanged: b.unchanged}, nil
+	return EditOutcome{Applied: applied, Changed: after != b.before, Unchanged: b.unchanged, Token: after}, nil
 }
 
 // applyOperations applies each operation to its predecessor's tree so a
@@ -717,7 +718,10 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		if code {
 			return next, refuseCodeThatEndsItsBlock(tree, next, r, at, "with", op.With)
 		}
-		return next, refuseUnreadableReplacement(tree, next, r, op.With)
+		if err := refuseUnreadableReplacement(tree, next, r, op.With); err != nil {
+			return nil, err
+		}
+		return next, refuseReshapedReplacement(tree, next, r, op.With)
 	case "delete":
 		if op.Block != "" {
 			if op.Find != "" {
@@ -1061,6 +1065,26 @@ func refuseUnreadableReplacement(before, after *pmdoc.Node, match pmdoc.Range, w
 	}
 	return &ErrInvalidOp{Field: "with", Reason: unreadableReason(before, after, match, with, unreadable)}
 }
+
+// refuseReshapedReplacement refuses a replace whose text the document reads back as blocks of
+// another shape where it lands: a heading and a table cell are written on one line, so a line
+// break inside a code span or inline HTML there ends the block, as a hard break would
+// (hasHardBreak), and the document reads back a heading and a paragraph, or a row as two rows.
+func refuseReshapedReplacement(before, after *pmdoc.Node, match pmdoc.Range, with string) error {
+	reshaped, err := replacementBroke(before, after, match, pmdoc.BlockShapeError)
+	if err != nil || reshaped == nil {
+		return err
+	}
+	return &ErrInvalidOp{Field: "with", Reason: fmt.Sprintf(
+		"with %q is text the document reads back as another block where it lands (%v); write it inside a line of text",
+		with, reshaped,
+	)}
+}
+
+// replacementBroke is what check says of the document-level block holding the match after the
+// replace, when it said nothing of that block before: a block that already failed the check, or
+// another block that does, is no reason to refuse this replace. A replace stays inside its
+// textblock, so the block holds the same index before and after.
 
 // refuseBrokenAccept refuses an accepted suggestion whose text leaves a document-level block the
 // document cannot read back, or reads back as blocks of another kind, where it lands, over every

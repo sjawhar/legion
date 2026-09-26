@@ -106,6 +106,25 @@ envoy_send(
 )
 ```
 
+### Your own address, and a subagent's
+
+`envoy_whoami`'s `session_id` is the address a reply to you reaches. Inside a `task` subagent it
+is the session that spawned you: a subagent registers no Envoy session of its own, so a peer
+answering it reaches that session, which relays to you over hub. The `subagent` field in that
+output carries your own host session id — it is not an address, so never hand it to a peer.
+
+`session_id` is empty when nothing can be reached: a process that took no Envoy identity, or a
+subagent whose spawning session this process can no longer place (it forked away, and other
+top-level sessions are running). Then your messages carry no sender either, so say who you are
+in the message body. An empty address is deliberate — being handed an unrelated live session
+would send your peers to an agent that never spawned you.
+
+Your own `envoy_publish` never reaches the agent that spawned you. The listener delivers nothing
+to the session a message names as its source, and inside a subagent that source is your parent,
+so a publish to a role it holds — or to any topic it subscribes to — is accepted and delivered to
+nobody. Use hub for that one hop. `envoy_send` to any other session, including a reply, is
+unaffected.
+
 ### Delivery capabilities
 
 Each session row from `envoy_sessions` carries `capabilities`, the targeted-delivery modes that
