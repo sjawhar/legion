@@ -72,7 +72,7 @@ carries, so nothing changes in how you handle wakes. Under the TypeScript daemon
 claims the role and calls `/controller/ready` exactly as under tmux; under the Go daemon
 (`LEGION_DAEMON_API=go` in your environment) it registers on `/legion/v1/claims/register` with the
 secret, claims the role, then subscribes to `notifications.legion.<project>.controller`, where the
-Go daemon publishes the two Go rows of the wake routing table. The daemon records you as
+Go daemon publishes the three Go rows of the wake routing table. The daemon records you as
 `controllerLocator: {runtime, external: true, sessionId, registeredAt}`, `runtime` being the
 daemon's own (`kubernetes`, or `tmux` under the Go daemon). The TypeScript daemon reads your
 liveness from the Envoy role registry (the holder of
@@ -87,15 +87,24 @@ mints a new secret, so your grants stop working and the role moves to the new se
 
 The Go daemon's controller topic is a wake for a session that is running when it is published.
 Envoy hands an Oh My Pi session no retained copy of a notice published before it subscribed, so a
-hold or a tree architect's failed claim from while no controller ran never arrives as a wake. At
-every start, before anything else, read `legion state --json` and handle each issue whose
-`issues.<KEY>.phase` is `held` (its `issues.<KEY>.holdReason` is `escalated` when its architect
-sent it to you, and absent while the architect is still deciding or while its tree lingers or is
-closed, where the hold waits for the tree's re-admission and needs nothing from you), and each
-tree root whose `issues.<KEY>.architect.state` is `failed` and whose `issues.<KEY>.phase` is not
-`done`, exactly as the matching wake below. A parked tree (root phase `done`: it lingers or is
-closed) needs nothing from you: a failed architect ignores the park and reads `failed` until the
-tree closes. The issue record is the truth; the topic is the wake.
+hold, a tree architect's failed claim, or a new triage root from while no controller ran never
+arrives as a wake. At every start, before anything else:
+
+1. Read `legion state --json` and handle each issue whose `issues.<KEY>.phase` is `held` (its
+   `issues.<KEY>.holdReason` is `escalated` when its architect sent it to you, and absent while the
+   architect is still deciding or while its tree lingers or is closed, where the hold waits for the
+   tree's re-admission and needs nothing from you), and each tree root whose
+   `issues.<KEY>.architect.state` is `failed` and whose `issues.<KEY>.phase` is not `done`, exactly
+   as the matching wake below. A parked tree (root phase `done`: it lingers or is closed) needs
+   nothing from you: a failed architect ignores the park and reads `failed` until the tree closes.
+2. List the project's triage issues with `dispatch_issues({project, status: "triage"})`. Triage each
+   row without a parent that `legion state --json` does not record under `issues`, as a new issue.
+   A root recorded there and now in `triage` is work the daemon holds that a human pulled back:
+   never re-admit it yourself; name it in your summary to the human ("<KEY> was pulled back to
+   triage; what do you want?"). This listing is also the only way you learn of an unrecorded root
+   moved back into triage, since the daemon wakes you only on a root's creation.
+
+The issue record and Dispatch are the truth; the topic is the wake.
 
 ## Deployment instructions
 
@@ -123,7 +132,7 @@ quoted here.
 
 | Wake | Content | Controller action |
 |---|---|---|
-| New issue created in the Dispatch project (`issue.created`, status `triage`; resync heals misses) | issue key + triage context (incl. pre-existing children) | Triage: `legion status <KEY> todo` to admit, or set `backlog`/`icebox` to park |
+| New issue created in the Dispatch project (`issue.created`, status `triage`; under the TypeScript daemon resync heals misses, under the Go daemon the boot step above does). From the Go daemon: `triage on <KEY>` (payload `{kind: "triage"}`) on the controller topic, for a root only | issue key + triage context (incl. pre-existing children) | Triage: `legion status <KEY> todo` to admit, or set `backlog`/`icebox` to park |
 | Backlog eligibility | slot freed / priority change | Reconsider parked items and move the eligible root to `todo` |
 | Architect escalation (controller-actionable only: re-file a child as a root issue, capacity, cross-tree conflicts) | request + context | Judge and act; issue-scoped human Q&A goes through `dispatch_ask` from the owning architect, not here |
 | Resync report | artifact-driven anomaly list (zero-owner trees, untriaged-open, launch-failed, admission-drift) | Verify against fresh state, then heal |

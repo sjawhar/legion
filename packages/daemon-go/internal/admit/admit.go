@@ -59,6 +59,14 @@ func (a *Admission) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (int
 		return intake.Result{}, fmt.Errorf("read admission issue %s: %w", observation.Key, err)
 	}
 	if stored == nil {
+		// A root created in triage is the controller's to triage. Its creation is the one
+		// observation that comes once per issue, so it alone wakes the controller; the record stays
+		// empty, as for any root not yet todo, and the boot listing (Reconcile) never wakes it.
+		if observation.Type == "issue.created" && observation.Status == "triage" && observation.Parent == "" {
+			if err := a.enqueue(ctx, tx, observation.Key, record.ControllerNotice{Kind: "triage"}, a.now()); err != nil {
+				return intake.Result{}, err
+			}
+		}
 		if observation.Status != "todo" {
 			return intake.Result{}, nil
 		}

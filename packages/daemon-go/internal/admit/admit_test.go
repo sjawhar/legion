@@ -140,6 +140,50 @@ func TestApplyFactDropsWaitingIssueWhenHumanMovesItOutOfTodo(t *testing.T) {
 	}
 }
 
+// A root created in triage is the controller's to triage, so its creation, and nothing after it,
+// wakes the controller: the stream's redelivery of that event and a later edit made while it is
+// still in triage add nothing, and the root is not recorded.
+func TestARootCreatedInTriageWakesTheControllerOnce(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	created := intake.DispatchIssue{Key: "LEGION-300", Seq: 1, Type: "issue.created", Status: "triage", Title: "New", Rank: "A"}
+
+	apply(t, pool, admission, "created", created, engineStub{})
+	apply(t, pool, admission, "created", created, engineStub{})
+	apply(t, pool, admission, "renamed", intake.DispatchIssue{Key: "LEGION-300", Seq: 2, Type: "issue.updated", Status: "triage", Title: "Renamed", Rank: "A"}, engineStub{})
+	assertEffects(t, pool, []effect{
+		{kind: record.OutboxKindControllerNotice, issue: "LEGION-300", payload: record.ControllerNotice{Kind: "triage"}},
+	})
+	assertWaiting(t, pool, nil)
+}
+
+// A child created in triage is its parent's architect's, a recorded root set back to triage is a
+// human's move on work the daemon already holds, and the boot listing re-reads every issue at every
+// restart: none of them wakes the controller for triage.
+func TestNoTriageWakeForAChildARecordedRootOrTheBootListing(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(t *testing.T, pool *pgxpool.Pool, admission *Admission)
+	}{
+		{"a child created in triage", func(t *testing.T, pool *pgxpool.Pool, admission *Admission) {
+			apply(t, pool, admission, "child", intake.DispatchIssue{Key: "LEGION-301", Seq: 1, Type: "issue.created", Status: "triage", Title: "Child", Parent: "LEGION-300", Rank: "A"}, engineStub{})
+		}},
+		{"a recorded root set back to triage", func(t *testing.T, pool *pgxpool.Pool, admission *Admission) {
+			seedWaiting(t, pool, "LEGION-302", "A")
+			apply(t, pool, admission, "back", intake.DispatchIssue{Key: "LEGION-302", Seq: 2, Type: "issue.updated", Status: "triage", Title: "waiting", Rank: "A"}, engineStub{})
+		}},
+		{"the boot listing", func(t *testing.T, pool *pgxpool.Pool, admission *Admission) {
+			reconcile(t, pool, admission, []dispatch.IssueSummary{{Key: "LEGION-303", Status: "triage", Title: "Listed", Rank: "A", LastSeq: 1}})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			tc.run(t, pool, newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil))))
+			assertEffects(t, pool, nil)
+		})
+	}
+}
+
 func TestApplyFactReleasesSlotWhenEngineCompletesPhaseAndPromotesHead(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))

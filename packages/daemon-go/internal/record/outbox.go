@@ -254,7 +254,7 @@ func validateOutboxPayload(payload OutboxPayload) error {
 
 func validNoticeKind(kind NoticeKind) bool {
 	switch kind {
-	case "phase-finished", "worker-died", "held", "pr-blocked", "design-approved", "design-changes-requested", "ready-refused", "child-closed", "child-status":
+	case "phase-finished", "worker-died", "held", "pr-blocked", "design-approved", "design-changes-requested", "ready-refused", "child-closed", "child-status", "triage":
 		return true
 	default:
 		return false
