@@ -111,16 +111,22 @@ func TestWebhookRedelivery_AGhostWisprRedeliveryLandsOnceAndAnotherDeliveryLands
 // pull_request or CI event, so a call means the fixture is not the event it claims to be.
 func unusedCIRecorder(t *testing.T) webhook.CIRecorder {
 	t.Helper()
-	fail := func(string) error {
-		t.Errorf("unexpected CI record: the fixture is not the event it claims to be")
-		return nil
-	}
-	return webhook.CIRecorderFuncs{
-		RecordFunc:      func(contracts.CIObservation) error { return fail("check") },
-		RecordSuiteFunc: func(contracts.CIObservation) error { return fail("suite") },
-		RecordHeadFunc:  func(string, string, string, string, string) error { return fail("head") },
-	}
+	return refusingRecorder{t: t}
 }
+
+// refusingRecorder fails the test on any CI record: none of these fixtures is a pull_request or a
+// CI event, so a call means the fixture is not the event it claims to be.
+type refusingRecorder struct{ t *testing.T }
+
+func (r refusingRecorder) refuse(kind string) error {
+	r.t.Helper()
+	r.t.Errorf("unexpected CI record (%s): the fixture is not the event it claims to be", kind)
+	return nil
+}
+
+func (r refusingRecorder) Record(contracts.CIObservation) error      { return r.refuse("check") }
+func (r refusingRecorder) RecordSuite(contracts.CIObservation) error { return r.refuse("suite") }
+func (r refusingRecorder) RecordHead(_, _, _, _, _ string) error     { return r.refuse("head") }
 
 func postGitHub(t *testing.T, handler http.Handler, event, delivery, body string) {
 	t.Helper()

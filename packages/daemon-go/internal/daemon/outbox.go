@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"path/filepath"
 	"strings"
 	"time"
@@ -17,6 +16,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -60,7 +60,7 @@ type outbox struct {
 	// is shared, and another project's rows are another daemon's.
 	dispatchProject string
 	stateDir        string
-	repo            string
+	repo            ghrepo.Repository
 	log             *slog.Logger
 	now             func() time.Time
 	provision       func(context.Context, workspace.Request) (workspace.Workspace, error)
@@ -191,34 +191,14 @@ func retryBackoff(attempts int) time.Duration {
 	return time.Second << attempts
 }
 
-// permanentStatusRefusal is a Dispatch status write that will be refused the same way however many
-// times it is made: the issue is gone, or the status is one Dispatch will not take. Only a status
-// row is judged — it is the kind that fences an issue's later writes — and only a refusal Dispatch
-// itself made, which is a 4xx carrying one of its error codes.
-//
-// Everything else is the outage this outbox exists to ride out: every 5xx, every transport
-// failure, "come back later" (408, 429), a codeless 4xx from whatever sits in front of Dispatch,
-// and a credential answer (401, 403). A revoked or expired token says nothing about the write —
-// an operator restores it and the same body is taken — so reading one as permanent would drop
-// every later status of that issue for good.
+// permanentStatusRefusal is a Dispatch status write whose refusal will not change however many
+// times the write is made. Only a status row is judged — it is the kind that fences an issue's
+// later writes — and what makes a refusal permanent is the Dispatch client's own rule.
 func permanentStatusRefusal(row record.OutboxRow, err error) (*dispatch.Error, bool) {
 	if row.Kind != record.OutboxKindDispatchStatus {
 		return nil, false
 	}
-	var refusal *dispatch.Error
-	if !errors.As(err, &refusal) {
-		return nil, false
-	}
-	switch {
-	case refusal.Code == "",
-		refusal.Status < 400 || refusal.Status >= 500,
-		refusal.Status == http.StatusRequestTimeout,
-		refusal.Status == http.StatusTooManyRequests,
-		refusal.Status == http.StatusUnauthorized,
-		refusal.Status == http.StatusForbidden:
-		return nil, false
-	}
-	return refusal, true
+	return dispatch.PermanentRefusal(err)
 }
 
 func (r *outbox) execute(ctx context.Context, row record.OutboxRow) error {
@@ -342,13 +322,6 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 	machine, found := r.supervisor.Machine(token)
 	switch payload.Op {
 	case "start":
-		// The claim remembers the newest start run against it, so a stop written before this one
-		// is finished rather than acted on however late it arrives (see "suspend" below).
-		if found {
-			if err := machine.StartedBy(ctx, row.ID); err != nil {
-				return fmt.Errorf("record the start of claim %s: %w", token, err)
-			}
-		}
 		if !found {
 			if err := r.provisionWorkspace(ctx, issue); err != nil {
 				return err
@@ -359,6 +332,13 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 			if err != nil {
 				return fmt.Errorf("create claim %s: %w", token, err)
 			}
+		}
+		// The claim remembers the newest start run against it, so a stop written before this one
+		// is finished rather than acted on however late it arrives (see "suspend" below). A claim
+		// this row created has no older stop to fence, and recording it here rather than only for
+		// a claim that already existed keeps one rule instead of a special case.
+		if err := machine.StartedBy(ctx, row.ID); err != nil {
+			return fmt.Errorf("record the start of claim %s: %w", token, err)
 		}
 		state := machine.Claim().State
 		switch state {
@@ -452,11 +432,10 @@ func (r *outbox) provisionWorkspace(ctx context.Context, issue record.Issue) err
 	if r.tokens == nil {
 		return errors.New("supervise executor has no GitHub App token manager")
 	}
-	owner, _, ok := strings.Cut(r.repo, "/")
-	if !ok || owner == "" {
-		return fmt.Errorf("supervise executor has invalid repository %q", r.repo)
+	if r.repo.IsZero() {
+		return errors.New("workspace provisioning has no configured repository")
 	}
-	lease, err := r.tokens.Token(ctx, appauth.Implement, owner)
+	lease, err := r.tokens.Token(ctx, appauth.Implement, r.repo.Owner())
 	if err != nil {
 		return fmt.Errorf("mint implement App token to provision %s: %w", issue.Key, err)
 	}
@@ -511,7 +490,7 @@ func (r *outbox) removeWorkspace(ctx context.Context, row record.OutboxRow, payl
 	if r.podsProvision() {
 		return nil
 	}
-	if r.repo == "" {
+	if r.repo.IsZero() {
 		return errors.New("workspace removal has no configured repository")
 	}
 	issue, err := r.issue(ctx, row.Issue)

@@ -571,7 +571,7 @@ func reprobe(m *Machine, ctx context.Context, _ Event) error {
 func acked(m *Machine, ctx context.Context, _ Event) error {
 	m.helloDuringSend = false
 	p := m.claim.Pending
-	p.DeliveredAt = m.deps.Clock.Now()
+	m.markRead(p)
 	m.arm(TimerTurn, m.deps.Timeouts.RPC, p.ID)
 	return m.deps.Store.PutDelivery(ctx, m.claim.Token, *p)
 }
@@ -626,6 +626,16 @@ func refused(m *Machine, ctx context.Context, ev Event) error {
 // on the spot for ever against an agent that cannot start a turn at all.
 func lateRefused(m *Machine, ctx context.Context, ev Event) error {
 	r := ev.(StreamLateRefusal)
+	// A refusal naming the prompt whose acknowledgement marked the task, where that is no longer the
+	// pending id, says that prompt never ran, so the task loses its read mark — and nothing else.
+	// The wait that gave up on it already re-queued the task under a new id and charged the prompt;
+	// rotating or charging again would spend the budget twice for one prompt. A turn of the task's
+	// own that is running meanwhile keeps its run: that is its confirmation, not this mark (markedBy).
+	if r.DeliveryID != m.claim.Pending.ID {
+		m.log.Warn("supervise: the prompt that marked the task as read was refused; the mark is cleared",
+			"delivery", r.DeliveryID, "error", r.Error)
+		return m.markUnread(ctx)
+	}
 	conn, connected := m.deps.Conns.Conn(m.claim.Token)
 	if m.claim.State == StateWorking || agentBusy(r.Error) || (connected && m.streaming(ctx, conn)) {
 		m.log.Warn("supervise: the agent refused an acknowledged prompt; it is in a turn of its own",
