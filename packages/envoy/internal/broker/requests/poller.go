@@ -13,14 +13,25 @@ type askReader interface {
 	GetAsk(ctx context.Context, id string) (dispatch.Ask, error)
 }
 
+// launcherReconciler is launcher.Service's own Reconcile method, following the same
+// small-seam-not-concrete-type precedent as askReader above: the requests package must not import
+// launcher (it would cycle back through dispatch/enroll), so it names just the one method it
+// calls.
+type launcherReconciler interface {
+	Reconcile(ctx context.Context) error
+}
+
 // Poller is the one thing that moves pending requests: every interval it reads each pending row
 // from Postgres (never from memory, so a restart resumes exactly where the rows are), asks
 // Dispatch for the ask's authoritative state, and applies it. Envoy is only told afterwards.
+// Launcher, when set, is also reconciled each tick (see RunOnce) — a nil Launcher is a no-op so
+// that existing Poller literals with no Launcher field keep working unmodified.
 type Poller struct {
 	Machine  *Machine
 	Dispatch askReader
 	Interval time.Duration
 	Wake     func(ctx context.Context, enrollmentID, requestID, state string)
+	Launcher launcherReconciler
 }
 
 func (p *Poller) Run(ctx context.Context) {
@@ -41,6 +52,15 @@ func (p *Poller) Run(ctx context.Context) {
 func (p *Poller) RunOnce(ctx context.Context) error {
 	if _, err := p.Machine.ExpirePending(ctx, time.Now()); err != nil {
 		return err
+	}
+	if p.Launcher != nil {
+		// Reconcile owns its own errors per pending row (it logs and skips a row it can't read
+		// from Dispatch); a failure here means something broader went wrong (e.g. Postgres is
+		// unreachable), which is worth a warning but shouldn't stop this tick's own pending-request
+		// reconciliation below — the two flows share nothing but the ticker.
+		if err := p.Launcher.Reconcile(ctx); err != nil {
+			slog.Warn("broker poller: launcher reconcile", "error", err)
+		}
 	}
 	rows, err := p.Machine.Store.Pool.Query(ctx, `select id, enrollment_id, ask_id from requests where state='pending' and ask_id is not null`)
 	if err != nil {

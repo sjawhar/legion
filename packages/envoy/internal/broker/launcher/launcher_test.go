@@ -1,0 +1,289 @@
+package launcher
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/sjawhar/envoy/internal/broker/dispatch"
+	"github.com/sjawhar/envoy/internal/broker/enroll"
+	"github.com/sjawhar/envoy/internal/broker/store"
+)
+
+func testDatabaseURL(t *testing.T) string {
+	url := os.Getenv("BROKER_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("BROKER_TEST_DATABASE_URL must be set to run Postgres launcher tests")
+	}
+	return url
+}
+
+// createCall records one CreateAsk invocation for a test to assert against.
+type createCall struct {
+	issue, question, urgency string
+	options                  []dispatch.Option
+	askID                    string
+}
+
+// fakeDispatch is launcher.Service's dispatchClient: it opens and answers asks entirely
+// in-memory (askID -> *dispatch.Ask, mutated by answer between Request and Reconcile) and keeps a
+// project's issues in a slice, following the same fake-over-httptest-server precedent as
+// requests.fakeOpener and requests.fakeAskReader.
+type fakeDispatch struct {
+	nextAsk      int
+	asks         map[string]*dispatch.Ask
+	createCalls  []createCall
+	getAskCalls  []string
+	issues       []dispatch.IssueSummary
+	createIssueN int
+}
+
+func (f *fakeDispatch) CreateAsk(_ context.Context, issue, question string, options []dispatch.Option, urgency string) (dispatch.Ask, error) {
+	f.nextAsk++
+	id := fmt.Sprintf("ask-%d", f.nextAsk)
+	ask := dispatch.Ask{ID: id, State: "open"}
+	if f.asks == nil {
+		f.asks = map[string]*dispatch.Ask{}
+	}
+	f.asks[id] = &ask
+	f.createCalls = append(f.createCalls, createCall{issue: issue, question: question, urgency: urgency, options: options, askID: id})
+	return ask, nil
+}
+
+func (f *fakeDispatch) GetAsk(_ context.Context, id string) (dispatch.Ask, error) {
+	f.getAskCalls = append(f.getAskCalls, id)
+	a, ok := f.asks[id]
+	if !ok {
+		return dispatch.Ask{}, fmt.Errorf("fakeDispatch: no such ask %q", id)
+	}
+	return *a, nil
+}
+
+func (f *fakeDispatch) ListIssues(_ context.Context, _, _ string) ([]dispatch.IssueSummary, error) {
+	out := make([]dispatch.IssueSummary, len(f.issues))
+	copy(out, f.issues)
+	return out, nil
+}
+
+func (f *fakeDispatch) CreateIssue(_ context.Context, _, title string, assignee *string, labels []string) (string, error) {
+	f.createIssueN++
+	key := fmt.Sprintf("PROJ-%d", f.createIssueN)
+	f.issues = append(f.issues, dispatch.IssueSummary{Key: key, Title: title, Assignee: assignee, Labels: labels})
+	return key, nil
+}
+
+// answer sets an ask's state to answered with the given approver and selection so the next
+// Reconcile sees it as resolved.
+func (f *fakeDispatch) answer(askID, user string, selected ...string) {
+	a := f.asks[askID]
+	a.State = "answered"
+	a.Answer = &dispatch.Answer{User: user, Selected: selected, At: time.Now()}
+}
+
+// newTestService opens a migrated store and returns a Service wired to a fresh fakeDispatch and a
+// real enroll.Service against the same store, so AuthenticateLauncher exercises the genuine
+// credential Reconcile minted rather than a stub.
+func newTestService(t *testing.T) (*Service, *fakeDispatch) {
+	t.Helper()
+	ctx := context.Background()
+	st, err := store.Open(ctx, testDatabaseURL(t))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { st.Pool.Close() })
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	fake := &fakeDispatch{}
+	svc := &Service{
+		Store:    st,
+		Dispatch: fake,
+		Enroll:   &enroll.Service{Store: st, Lease: time.Hour},
+		Project:  "PROJ",
+	}
+	return svc, fake
+}
+
+// TestLauncherRequestApprovalAndDenial pins Task 12's Step 1 scenario end to end: Request opens
+// one ask on the operator's standing issue naming the host; Read reports pending; once the fake
+// answers Approve as the operator, Reconcile mints a real launcher credential and Read reports it
+// issued with the raw token exactly once, then issued with no token on the next read; that token
+// authenticates as the requesting operator; and a second, independent request answered by someone
+// other than the operator is denied rather than issued.
+func TestLauncherRequestApprovalAndDenial(t *testing.T) {
+	ctx := context.Background()
+	svc, fake := newTestService(t)
+
+	pendingID, err := svc.Request(ctx, "sjawhar", "sami-agents", nil)
+	if err != nil {
+		t.Fatalf("Request: %v", err)
+	}
+	if len(fake.createCalls) != 1 {
+		t.Fatalf("CreateAsk calls = %d, want 1", len(fake.createCalls))
+	}
+	call := fake.createCalls[0]
+	if !strings.Contains(call.question, "sami-agents") {
+		t.Fatalf("question = %q, want it to name the host", call.question)
+	}
+	if len(fake.issues) != 1 || fake.issues[0].Title != "Secret requests: sjawhar" {
+		t.Fatalf("standing issue = %+v, want one titled %q", fake.issues, "Secret requests: sjawhar")
+	}
+	if call.issue != fake.issues[0].Key {
+		t.Fatalf("ask opened on issue %q, want the standing issue %q", call.issue, fake.issues[0].Key)
+	}
+
+	state, token, err := svc.Read(ctx, pendingID)
+	if err != nil || state != "pending" || token != "" {
+		t.Fatalf("Read (pending) = %q %q %v, want pending/empty/nil", state, token, err)
+	}
+
+	fake.answer(call.askID, "sjawhar", "Approve")
+	if err := svc.Reconcile(ctx); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	state, token, err = svc.Read(ctx, pendingID)
+	if err != nil || state != "issued" || token == "" {
+		t.Fatalf("Read (issued, first) = %q %q %v, want issued with a token", state, token, err)
+	}
+	firstToken := token
+
+	state, token, err = svc.Read(ctx, pendingID)
+	if err != nil || state != "issued" || token != "" {
+		t.Fatalf("Read (issued, second) = %q %q %v, want issued with no token", state, token, err)
+	}
+
+	cred, err := svc.Enroll.AuthenticateLauncher(ctx, firstToken)
+	if err != nil {
+		t.Fatalf("AuthenticateLauncher: %v", err)
+	}
+	if cred.Operator == nil || *cred.Operator != "sjawhar" {
+		t.Fatalf("credential operator = %v, want sjawhar", cred.Operator)
+	}
+
+	// A second, independent request on the same standing issue, answered by someone other than
+	// the operator, must be denied rather than issued.
+	pendingID2, err := svc.Request(ctx, "sjawhar", "another-host", nil)
+	if err != nil {
+		t.Fatalf("Request (2nd): %v", err)
+	}
+	call2 := fake.createCalls[1]
+	fake.answer(call2.askID, "mallory", "Approve")
+	if err := svc.Reconcile(ctx); err != nil {
+		t.Fatalf("Reconcile (2nd): %v", err)
+	}
+	state, token, err = svc.Read(ctx, pendingID2)
+	if err != nil || state != "denied" || token != "" {
+		t.Fatalf("Read (2nd, denied) = %q %q %v, want denied/empty", state, token, err)
+	}
+}
+
+// TestLauncherRequestServiceCredentialHasNilOperator pins the service-credential branch: when
+// Request is called with a non-nil service, the ask still opens on the named operator's own
+// standing issue (they are who approves it), but the credential Reconcile mints on approval
+// carries that service with a nil operator rather than the reverse.
+func TestLauncherRequestServiceCredentialHasNilOperator(t *testing.T) {
+	ctx := context.Background()
+	svc, fake := newTestService(t)
+
+	pendingID, err := svc.Request(ctx, "sjawhar", "cluster", new("legion-daemon"))
+	if err != nil {
+		t.Fatalf("Request: %v", err)
+	}
+	call := fake.createCalls[0]
+	if !strings.Contains(call.question, "legion-daemon") {
+		t.Fatalf("question = %q, want it to name the service", call.question)
+	}
+	if call.issue != fake.issues[0].Key {
+		t.Fatalf("ask opened on issue %q, want the standing issue %q", call.issue, fake.issues[0].Key)
+	}
+
+	fake.answer(call.askID, "sjawhar", "Approve")
+	if err := svc.Reconcile(ctx); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	_, token, err := svc.Read(ctx, pendingID)
+	if err != nil || token == "" {
+		t.Fatalf("Read (issued): token=%q err=%v", token, err)
+	}
+	cred, err := svc.Enroll.AuthenticateLauncher(ctx, token)
+	if err != nil {
+		t.Fatalf("AuthenticateLauncher: %v", err)
+	}
+	if cred.Operator != nil {
+		t.Fatalf("credential operator = %v, want nil for a service credential", *cred.Operator)
+	}
+	if cred.Service == nil || *cred.Service != "legion-daemon" {
+		t.Fatalf("credential service = %v, want legion-daemon", cred.Service)
+	}
+}
+
+// TestStandingReusesExistingIssue pins Standing's find-or-create rule: two lookups for the same
+// operator return the same issue key and only the first one creates it.
+func TestStandingReusesExistingIssue(t *testing.T) {
+	ctx := context.Background()
+	svc, fake := newTestService(t)
+
+	first, err := svc.Standing(ctx, "sjawhar")
+	if err != nil {
+		t.Fatalf("Standing (1st): %v", err)
+	}
+	second, err := svc.Standing(ctx, "sjawhar")
+	if err != nil {
+		t.Fatalf("Standing (2nd): %v", err)
+	}
+	if first != second {
+		t.Fatalf("Standing = %q then %q, want the same issue reused", first, second)
+	}
+	if fake.createIssueN != 1 {
+		t.Fatalf("CreateIssue calls = %d, want 1", fake.createIssueN)
+	}
+
+	other, err := svc.Standing(ctx, "bob")
+	if err != nil {
+		t.Fatalf("Standing (bob): %v", err)
+	}
+	if other == first {
+		t.Fatalf("Standing(bob) = %q, want a different issue than sjawhar's", other)
+	}
+}
+
+// TestLauncherRequestExpiresAfterTTL pins Reconcile's expiry pass: a request whose expires_at is
+// backdated is expired before Reconcile ever reads its pending rows, so it never reaches
+// Dispatch.GetAsk (the fake would otherwise fail the test on being asked about the already-decided
+// ask) and Read reports it expired.
+func TestLauncherRequestExpiresAfterTTL(t *testing.T) {
+	ctx := context.Background()
+	svc, fake := newTestService(t)
+
+	pendingID, err := svc.Request(ctx, "sjawhar", "stale-host", nil)
+	if err != nil {
+		t.Fatalf("Request: %v", err)
+	}
+	if _, err := svc.Store.Pool.Exec(ctx, `update launcher_credential_requests set expires_at = now() - interval '1 minute' where pending_id_hash=$1`, hashPendingID(pendingID)); err != nil {
+		t.Fatalf("backdate expires_at: %v", err)
+	}
+
+	if err := svc.Reconcile(ctx); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if len(fake.getAskCalls) != 0 {
+		t.Fatalf("GetAsk calls = %v, want none for an already-expired row", fake.getAskCalls)
+	}
+	state, token, err := svc.Read(ctx, pendingID)
+	if err != nil || state != "expired" || token != "" {
+		t.Fatalf("Read (expired) = %q %q %v, want expired/empty", state, token, err)
+	}
+}
+
+// TestReadUnknownPendingID pins Read's ErrNotFound for a pending id no request ever minted.
+func TestReadUnknownPendingID(t *testing.T) {
+	ctx := context.Background()
+	svc, _ := newTestService(t)
+	if _, _, err := svc.Read(ctx, "not-a-real-pending-id"); err != ErrNotFound {
+		t.Fatalf("Read(unknown) error = %v, want ErrNotFound", err)
+	}
+}

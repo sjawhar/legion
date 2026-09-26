@@ -1,28 +1,66 @@
 // packages/envoy/internal/broker/api/handlers_launcher.go
 //
 // POST /v1/launcher-credentials and GET /v1/launcher-credentials/{pending} are authNone per the
-// routes table (a launcher has no credential yet when it asks for one), but the service that
-// actually issues them through a Dispatch standing-issue ask, launcher.Service, is Task 12's
-// deliverable and does not exist yet — api.Deps.Launcher is always nil in this task's wiring.
-// Registering the routes now (rather than omitting them from routes()) keeps routes_table.go
-// exactly as given and gives Task 12 a real handler body to fill in instead of a routing gap to
-// notice and fix; until then both answer a clear 501 rather than panicking on a nil Launcher.
+// routes table: a launcher has no credential yet when it asks for one. Both go straight to
+// launcher.Service, which opens (or reuses) a Dispatch ask on the operator's standing
+// "agent-secrets" issue and hands the raw token back exactly once, on whichever read first
+// observes state "issued" (launcher.Service.Read).
 package api
 
-import "net/http"
+import (
+	"encoding/json"
+	"errors"
+	"net/http"
+
+	"github.com/sjawhar/envoy/internal/broker/launcher"
+)
+
+type requestLauncherCredentialBody struct {
+	Operator string  `json:"operator"`
+	Host     string  `json:"host"`
+	Service  *string `json:"service"`
+}
 
 func (s *server) requestLauncherCredential(w http.ResponseWriter, r *http.Request) {
-	if s.deps.Launcher == nil {
-		writeError(w, http.StatusNotImplemented, "NOT_IMPLEMENTED", "launcher credential issuance is not yet available")
+	var body requestLauncherCredentialBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "body must be valid JSON")
 		return
 	}
-	writeError(w, http.StatusNotImplemented, "NOT_IMPLEMENTED", "launcher credential issuance is not yet available")
+	if body.Operator == "" || body.Host == "" {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "operator and host are required")
+		return
+	}
+	pendingID, err := s.deps.Launcher.Request(r.Context(), body.Operator, body.Host, body.Service)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "open launcher credential request failed")
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"pending_id": pendingID})
+}
+
+// readLauncherCredentialResponse omits token entirely, rather than sending it as JSON null, once
+// launcher.Service.Read has cleared it: a caller polling this route after the one "issued"
+// response that carried a token sees state "issued" with no token field at all, which is what
+// makes the token single-use on the wire as well as in Postgres.
+type readLauncherCredentialResponse struct {
+	State string  `json:"state"`
+	Token *string `json:"token,omitempty"`
 }
 
 func (s *server) readLauncherCredential(w http.ResponseWriter, r *http.Request) {
-	if s.deps.Launcher == nil {
-		writeError(w, http.StatusNotImplemented, "NOT_IMPLEMENTED", "launcher credential issuance is not yet available")
+	state, token, err := s.deps.Launcher.Read(r.Context(), r.PathValue("pending"))
+	switch {
+	case errors.Is(err, launcher.ErrNotFound):
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "no such launcher credential request")
+		return
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "read launcher credential request failed")
 		return
 	}
-	writeError(w, http.StatusNotImplemented, "NOT_IMPLEMENTED", "launcher credential issuance is not yet available")
+	resp := readLauncherCredentialResponse{State: state}
+	if token != "" {
+		resp.Token = &token
+	}
+	writeJSON(w, http.StatusOK, resp)
 }

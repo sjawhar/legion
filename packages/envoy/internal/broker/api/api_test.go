@@ -604,26 +604,3 @@ func TestReadSelfListsGrantsAndRenewEnforcesOwnID(t *testing.T) {
 		t.Fatalf("renew response %+v missing lease_expires_at", oout)
 	}
 }
-
-// TestLauncherCredentialRoutesAnswerNotImplemented pins handlers_launcher.go's stub choice: both
-// authNone routes are registered (routes_table.go names them) and answer a clear 501 rather than
-// panicking, since launcher.Service (Task 12) is not wired into Deps by anything in this task.
-func TestLauncherCredentialRoutesAnswerNotImplemented(t *testing.T) {
-	srv, _, _, _, _, _ := fixture(t)
-
-	presp, err := srv.Client().Post(srv.URL+"/v1/launcher-credentials", "application/json", bytes.NewReader([]byte(`{}`)))
-	if err != nil {
-		t.Fatalf("POST launcher-credentials: %v", err)
-	}
-	if presp.StatusCode != http.StatusNotImplemented {
-		t.Fatalf("POST status = %d, want 501", presp.StatusCode)
-	}
-
-	gresp, err := srv.Client().Get(srv.URL + "/v1/launcher-credentials/pending-1")
-	if err != nil {
-		t.Fatalf("GET launcher-credentials: %v", err)
-	}
-	if gresp.StatusCode != http.StatusNotImplemented {
-		t.Fatalf("GET status = %d, want 501", gresp.StatusCode)
-	}
-}

@@ -1,5 +1,6 @@
-// Package dispatch is the broker's thin client for the three Dispatch routes it needs: open an
-// ask on an issue, read an ask, and resolve a human's bearer. It never answers, edits or resolves.
+// Package dispatch is the broker's thin client for the Dispatch routes the broker needs: open an
+// ask on an issue, read an ask, resolve a human's bearer, and find or create an operator's
+// standing secrets issue. It never answers, edits or resolves.
 package dispatch
 
 import (
@@ -9,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -42,6 +44,13 @@ type Identity struct {
 	Owner *string `json:"owner"`
 }
 
+type IssueSummary struct {
+	Key      string   `json:"key"`
+	Title    string   `json:"title"`
+	Assignee *string  `json:"assignee"`
+	Labels   []string `json:"labels"`
+}
+
 func New(baseURL, token string, client *http.Client) *Client {
 	return &Client{base: baseURL, token: token, http: client}
 }
@@ -63,6 +72,37 @@ func (c *Client) GetAsk(ctx context.Context, id string) (Ask, error) {
 	var ask Ask
 	err := c.do(ctx, http.MethodGet, "/api/v1/asks/"+id, c.token, nil, &ask)
 	return ask, err
+}
+
+// ListIssues finds issues in project carrying label, repeating the label query parameter (a
+// single value is fine) the way Dispatch's GET /api/v1/issues?label= expects.
+func (c *Client) ListIssues(ctx context.Context, project, label string) ([]IssueSummary, error) {
+	var issues []IssueSummary
+	path := "/api/v1/issues?project=" + url.QueryEscape(project) + "&label=" + url.QueryEscape(label)
+	err := c.do(ctx, http.MethodGet, path, c.token, nil, &issues)
+	return issues, err
+}
+
+type createIssueBody struct {
+	Project  string   `json:"project"`
+	Title    string   `json:"title"`
+	Assignee *string  `json:"assignee"`
+	Labels   []string `json:"labels"`
+}
+
+type createIssueResult struct {
+	Key string `json:"key"`
+}
+
+// CreateIssue opens an issue and returns its key.
+func (c *Client) CreateIssue(ctx context.Context, project, title string, assignee *string, labels []string) (string, error) {
+	body, err := json.Marshal(createIssueBody{Project: project, Title: title, Assignee: assignee, Labels: labels})
+	if err != nil {
+		return "", err
+	}
+	var result createIssueResult
+	err = c.do(ctx, http.MethodPost, "/api/v1/issues", c.token, bytes.NewReader(body), &result)
+	return result.Key, err
 }
 
 func (c *Client) Whoami(ctx context.Context, bearer string) (Identity, error) {
