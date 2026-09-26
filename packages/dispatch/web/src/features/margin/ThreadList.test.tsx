@@ -60,7 +60,7 @@ function list(overrides: Partial<ComponentProps<typeof ThreadList>> = {}) {
           editingCommentId={undefined}
           savingCommentEditId={undefined}
           onEditingChange={() => {}}
-          actionErrorId={undefined}
+          actionFailure={undefined}
           artifactSlug="spec"
           expandedThreadKey={open.key}
           hoveredMarkId="open-mark"
@@ -149,7 +149,7 @@ test("an anchored card keeps its identity when its mark placement arrives after 
             editingCommentId={undefined}
             savingCommentEditId={undefined}
             onEditingChange={() => {}}
-            actionErrorId={undefined}
+            actionFailure={undefined}
             artifactSlug="spec"
             expandedThreadKey="open"
             hoveredMarkId={undefined}

@@ -4,7 +4,8 @@ import { dangerText } from "../theme/classes";
 
 export interface QueryErrorProps {
   message: string;
-  onRetry: () => void;
+  /** Omitted for a failure a retry cannot get past; no Retry is offered then. */
+  onRetry?: () => void;
   /** Disables Retry while the retried request is in flight. */
   retrying?: boolean;
 }
@@ -17,14 +18,16 @@ export function QueryError({ message, onRetry, retrying = false }: QueryErrorPro
   return (
     <div className={`flex flex-wrap items-center gap-3 text-sm ${dangerText}`} role="alert">
       <p>{message}</p>
-      <button
-        className="font-medium underline disabled:cursor-not-allowed disabled:opacity-50"
-        disabled={retrying}
-        onClick={onRetry}
-        type="button"
-      >
-        Retry
-      </button>
+      {onRetry === undefined ? null : (
+        <button
+          className="font-medium underline disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={retrying}
+          onClick={onRetry}
+          type="button"
+        >
+          Retry
+        </button>
+      )}
     </div>
   );
 }

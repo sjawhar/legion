@@ -51,7 +51,7 @@ import {
   sharedIssueStateWrites,
 } from "../issue/state-write-queue";
 import { ThreadCard } from "../margin/ThreadCard";
-import { useCommentActionQueue } from "../margin/useCommentActionQueue";
+import { type CommentActionFailure, useCommentActionQueue } from "../margin/useCommentActionQueue";
 import type { Thread as CommentThread } from "../margin/useMarginItems";
 import { CopyRefButton } from "../refs/CopyRefButton";
 import { buildIssuePath, documentItemPath } from "../refs/routes";
@@ -513,7 +513,7 @@ function CommentDeliveryList({
   );
 }
 function CommentTurn({
-  actionError,
+  actionFailure,
   agents,
   issueArtifacts,
   composerClassName,
@@ -535,7 +535,7 @@ function CommentTurn({
   register,
   viewerLogin,
 }: {
-  actionError: boolean;
+  actionFailure: CommentActionFailure | undefined;
   agents: readonly Agent[];
   issueArtifacts: ConversationTabProps["issueArtifacts"];
   composerClassName?: string;
@@ -617,7 +617,7 @@ function CommentTurn({
       ref={register}
     >
       <ThreadCard
-        actionError={actionError}
+        actionFailure={actionFailure}
         artifactSlug={artifactSlug}
         composerClassName={composerClassName}
         expanded={currentExpanded}
@@ -1306,7 +1306,11 @@ export function ConversationTab({
           if (item.kind === "comment") {
             return (
               <CommentTurn
-                actionError={commentActions.actionErrorId === item.event.payload.id}
+                actionFailure={
+                  commentActions.actionFailure?.id === item.event.payload.id
+                    ? commentActions.actionFailure
+                    : undefined
+                }
                 hideReplyComposer={
                   replyTo?.parentKind === "comment" && replyTo.id === item.event.payload.id
                 }
@@ -1384,7 +1388,11 @@ export function ConversationTab({
           </header>
           <ol className="min-h-0 flex-1 overflow-y-auto px-4 pb-32">
             <CommentTurn
-              actionError={commentActions.actionErrorId === phoneThread.event.payload.id}
+              actionFailure={
+                commentActions.actionFailure?.id === phoneThread.event.payload.id
+                  ? commentActions.actionFailure
+                  : undefined
+              }
               agents={agents}
               issueArtifacts={issueArtifacts}
               composerClassName={`fixed inset-x-0 bottom-0 z-20 border-t px-4 pt-4 pb-2 ${card} ${borderDefault}`}

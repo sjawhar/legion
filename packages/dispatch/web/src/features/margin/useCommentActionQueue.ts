@@ -1,7 +1,7 @@
 import { useMutation } from "@tanstack/react-query";
 import { useRef, useState } from "react";
 
-import { api } from "../../api/client";
+import { ApiError, api } from "../../api/client";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 
 export type CommentAction = "accept" | "reject" | "resolve" | "reopen";
@@ -9,6 +9,28 @@ export type CommentAction = "accept" | "reject" | "resolve" | "reopen";
 export interface CommentActionInput {
   id: string;
   kind: CommentAction;
+}
+
+/** The comment action that last failed, as the card that offered it shows it. */
+export interface CommentActionFailure {
+  id: string;
+  message: string;
+  /** False for a refusal of what the action would write, which the same request never gets past. */
+  retryable: boolean;
+}
+
+/** Refusals of the document an accept would write: the suggestion itself has to change. */
+const permanentRefusals = new Set(["INVALID_ASK_BLOCK", "INVALID_OP"]);
+
+function actionFailure(id: string, error: Error): CommentActionFailure {
+  if (error instanceof ApiError && error.status >= 400 && error.status < 500) {
+    return {
+      id,
+      message: error.message,
+      retryable: error.code === undefined || !permanentRefusals.has(error.code),
+    };
+  }
+  return { id, message: "Could not save this action.", retryable: true };
 }
 
 interface CommentActionQueueOptions<TContext> {
@@ -72,7 +94,10 @@ export function useCommentActionQueue<TContext = undefined>({
     activeId === undefined ? queuedIds : new Set<string>([activeId, ...queuedIds]);
 
   return {
-    actionErrorId: action.isError ? action.variables?.id : undefined,
+    actionFailure:
+      action.isError && action.variables !== undefined
+        ? actionFailure(action.variables.id, action.error)
+        : undefined,
     mutateItem: (input: CommentActionInput) => {
       if (start(input)) return;
       const current = inFlight.current;
