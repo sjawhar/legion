@@ -380,7 +380,7 @@ func TestExecFormSecondInvocationReusesGrantTransparently(t *testing.T) {
 		stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir, nil,
 			"GRANT_ME", "--", "sh", "-c", `echo -n "$GRANT_ME" | sha256sum`)
 		if exit != 0 {
-			t.Fatalf("invocation %d: exit = %d, want 0: stdout=%q stderr=%q", i, exit, stdout, stderr)
+			t.Fatalf("invocation %d: exit = %d, want 0: stdout=%q stderr=%q", i, exit, redactSecrets(stdout), redactSecrets(stderr))
 		}
 	}
 	if got := atomic.LoadInt32(&counters.createRequest); got != 2 {

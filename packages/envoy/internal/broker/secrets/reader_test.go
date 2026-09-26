@@ -37,7 +37,7 @@ func TestAWSReadReturnsSecretStringOnSuccess(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if v != "shh" {
-		t.Fatalf("Read returned an unexpected value (match = %v)", v == "shh")
+		t.Fatalf("Read returned an unexpected value: got %q", strings.ReplaceAll(v, "shh", "[REDACTED]"))
 	}
 }
 
@@ -75,7 +75,7 @@ func TestFakeReadReturnsValueForPresentName(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if v != "shh" {
-		t.Fatalf("Read returned an unexpected value (match = %v)", v == "shh")
+		t.Fatalf("Read returned an unexpected value: got %q", strings.ReplaceAll(v, "shh", "[REDACTED]"))
 	}
 }
 
@@ -117,9 +117,9 @@ func TestFakeFromFileRejectsLineWithNoEquals(t *testing.T) {
 		t.Fatal("expected an error for a malformed line")
 	}
 	if !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "1") {
-		t.Fatalf("error %q should name the path and line number", err.Error())
+		t.Fatalf("error %q should name the path and line number", strings.ReplaceAll(err.Error(), sensitive, "[REDACTED]"))
 	}
 	if strings.Contains(err.Error(), sensitive) {
-		t.Fatalf("error %q must never quote the malformed line's own content", err.Error())
+		t.Fatalf("error %q must never quote the malformed line's own content", strings.ReplaceAll(err.Error(), sensitive, "[REDACTED]"))
 	}
 }

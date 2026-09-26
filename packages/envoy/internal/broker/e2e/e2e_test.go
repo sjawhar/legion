@@ -187,6 +187,17 @@ func redactSecrets(s string) string {
 	return strings.NewReplacer("deel-v1", "[REDACTED]", "auto-v1", "[REDACTED]").Replace(s)
 }
 
+// mapKeys lists a decoded JSON response's top-level keys without its values, so a failure
+// message can describe an unexpected response's shape without risking a raw secret value if a
+// route ever regressed to include one in an error body.
+func mapKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
 // mintPodToken mints a projected service-account token bound to podUID, the shape
 // enroll.K8sPodVerifier.Verify reads — the same pattern as enroll/enroll_test.go's helper of the
 // same name, copied here because Go test helpers are not exported across packages.
@@ -614,7 +625,7 @@ func TestSpikeContract(t *testing.T) {
 		for i := 0; i < 2; i++ {
 			status, values := grantValues(t, env1.srv, enrA, dealGrantID)
 			if status != http.StatusOK {
-				t.Fatalf("grant values read %d: want 200, got %d %v", i, status, values)
+				t.Fatalf("grant values read %d: want 200, got %d (response keys = %v)", i, status, mapKeys(values))
 			}
 			got, _ := values["values"].(map[string]any)
 			if got["DEEL_API_KEY"] != "deel-v1" {
@@ -698,7 +709,7 @@ func TestSpikeContract(t *testing.T) {
 		stdout, stderr, exit := runAgentSecrets(t, agentSecretsBin, env1.srv.URL, keyDir,
 			"AUTO_TOKEN", "DEEL_API_KEY", "--", "sh", "-c", "echo ran")
 		if exit != 0 {
-			t.Fatalf("after approval: want exit 0, got %d (stdout=%q stderr=%q)", exit, stdout, stderr)
+			t.Fatalf("after approval: want exit 0, got %d (stdout=%q stderr=%q)", exit, redactSecrets(stdout), redactSecrets(stderr))
 		}
 		if !strings.Contains(stdout, "ran") {
 			t.Fatalf("after approval: child did not run, stdout=%q", stdout)

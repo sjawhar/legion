@@ -219,7 +219,8 @@ func TestApprovalFlow(t *testing.T) {
 		t.Fatalf("Values: %v", err)
 	}
 	if values["DEEL_API_KEY"] != "deel-v1" {
-		t.Fatalf("values[%q] did not match the expected granted value", "DEEL_API_KEY")
+		_, present := values["DEEL_API_KEY"]
+		t.Fatalf("values has %d entries; DEEL_API_KEY present=%v but did not match the expected granted value", len(values), present)
 	}
 
 	changed, err = m.ApplyAnswer(ctx, req.ID, approve)

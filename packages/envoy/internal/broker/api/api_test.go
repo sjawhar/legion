@@ -154,6 +154,17 @@ func decodeJSON(t *testing.T, resp *http.Response, out any) {
 	}
 }
 
+// mapKeys lists a decoded JSON response's top-level keys without its values, so a failure
+// message can describe a response's shape without risking a raw secret value (e.g. a launcher
+// credential's one-time bearer token) if that shape ever regresses to carry one.
+func mapKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
 func createPendingRequest(t *testing.T, srv *httptest.Server, enr enrolledAgent) string {
 	t.Helper()
 	url := srv.URL + "/v1/requests"
@@ -712,7 +723,7 @@ func TestLauncherCredentialRoutesIssueAndReadTokenOnce(t *testing.T) {
 	decodeJSON(t, postResp, &postOut)
 	pendingID, _ := postOut["pending_id"].(string)
 	if pendingID == "" {
-		t.Fatalf("POST response missing pending_id: %v", postOut)
+		t.Fatalf("POST response missing pending_id; response keys = %v", mapKeys(postOut))
 	}
 
 	unknownResp, err := srv.Client().Get(srv.URL + "/v1/launcher-credentials/does-not-exist")
@@ -731,7 +742,7 @@ func TestLauncherCredentialRoutesIssueAndReadTokenOnce(t *testing.T) {
 	var pendOut map[string]any
 	decodeJSON(t, pendResp, &pendOut)
 	if pendOut["state"] != "pending" {
-		t.Fatalf("GET pending = %v, want state pending", pendOut)
+		t.Fatalf("GET pending state = %v, want pending", pendOut["state"])
 	}
 
 	fakeLD.approve("sjawhar")
@@ -750,7 +761,9 @@ func TestLauncherCredentialRoutesIssueAndReadTokenOnce(t *testing.T) {
 	}
 	token, _ := firstOut["token"].(string)
 	if token == "" {
-		t.Fatalf("GET issued (1st) = %v, want a non-empty token", firstOut)
+		_, present := firstOut["token"]
+		t.Fatalf("GET issued (1st) state=%v, token present=%v (type %T), keys=%v",
+			firstOut["state"], present, firstOut["token"], mapKeys(firstOut))
 	}
 
 	secondResp, err := srv.Client().Get(srv.URL + "/v1/launcher-credentials/" + pendingID)
@@ -763,10 +776,6 @@ func TestLauncherCredentialRoutesIssueAndReadTokenOnce(t *testing.T) {
 		t.Fatalf("GET issued (2nd) state = %v, want issued", secondOut["state"])
 	}
 	if _, ok := secondOut["token"]; ok {
-		keys := make([]string, 0, len(secondOut))
-		for k := range secondOut {
-			keys = append(keys, k)
-		}
-		t.Fatalf("GET issued (2nd) unexpectedly carries a %q key; response keys = %v", "token", keys)
+		t.Fatalf("GET issued (2nd) unexpectedly carries a %q key; response keys = %v", "token", mapKeys(secondOut))
 	}
 }

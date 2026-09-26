@@ -162,7 +162,7 @@ func TestLauncherRequestApprovalAndDenial(t *testing.T) {
 
 	state, token, err := svc.Read(ctx, pendingID)
 	if err != nil || state != "pending" || token != "" {
-		t.Fatalf("Read (pending) = %q %q %v, want pending/empty/nil", state, token, err)
+		t.Fatalf("Read (pending) = state=%q token_present=%v err=%v, want pending/empty/nil", state, token != "", err)
 	}
 
 	fake.answer(call.askID, "sjawhar", "Approve")
@@ -172,13 +172,13 @@ func TestLauncherRequestApprovalAndDenial(t *testing.T) {
 
 	state, token, err = svc.Read(ctx, pendingID)
 	if err != nil || state != "issued" || token == "" {
-		t.Fatalf("Read (issued, first) = %q %q %v, want issued with a token", state, token, err)
+		t.Fatalf("Read (issued, first) = state=%q token_present=%v err=%v, want issued with a token", state, token != "", err)
 	}
 	firstToken := token
 
 	state, token, err = svc.Read(ctx, pendingID)
 	if err != nil || state != "issued" || token != "" {
-		t.Fatalf("Read (issued, second) = %q %q %v, want issued with no token", state, token, err)
+		t.Fatalf("Read (issued, second) = state=%q token_present=%v err=%v, want issued with no token", state, token != "", err)
 	}
 
 	cred, err := svc.Enroll.AuthenticateLauncher(ctx, firstToken)
@@ -202,7 +202,7 @@ func TestLauncherRequestApprovalAndDenial(t *testing.T) {
 	}
 	state, token, err = svc.Read(ctx, pendingID2)
 	if err != nil || state != "denied" || token != "" {
-		t.Fatalf("Read (2nd, denied) = %q %q %v, want denied/empty", state, token, err)
+		t.Fatalf("Read (2nd, denied) = state=%q token_present=%v err=%v, want denied/empty", state, token != "", err)
 	}
 }
 
@@ -232,7 +232,7 @@ func TestLauncherRequestServiceCredentialHasNilOperator(t *testing.T) {
 	}
 	_, token, err := svc.Read(ctx, pendingID)
 	if err != nil || token == "" {
-		t.Fatalf("Read (issued): token=%q err=%v", token, err)
+		t.Fatalf("Read (issued): token_present=%v err=%v", token != "", err)
 	}
 	cred, err := svc.Enroll.AuthenticateLauncher(ctx, token)
 	if err != nil {
@@ -300,7 +300,7 @@ func TestLauncherRequestExpiresAfterTTL(t *testing.T) {
 	}
 	state, token, err := svc.Read(ctx, pendingID)
 	if err != nil || state != "expired" || token != "" {
-		t.Fatalf("Read (expired) = %q %q %v, want expired/empty", state, token, err)
+		t.Fatalf("Read (expired) = state=%q token_present=%v err=%v, want expired/empty", state, token != "", err)
 	}
 }
 
@@ -379,7 +379,7 @@ func TestLauncherRequestEmptyServiceStringNormalizedToOperatorCredential(t *test
 	}
 	_, token, err := svc.Read(ctx, pendingID)
 	if err != nil || token == "" {
-		t.Fatalf("Read (issued): token=%q err=%v", token, err)
+		t.Fatalf("Read (issued): token_present=%v err=%v", token != "", err)
 	}
 	cred, err := svc.Enroll.AuthenticateLauncher(ctx, token)
 	if err != nil {

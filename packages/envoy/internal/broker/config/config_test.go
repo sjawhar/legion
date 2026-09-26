@@ -37,10 +37,11 @@ func TestLoadReadsTokenFileAheadOfValue(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cfg.DispatchToken != "tok-from-file" {
-		t.Fatalf("token file must win: %q", cfg.DispatchToken)
+		t.Fatalf("token file must win: got %d-byte token, want the %d-byte file value", len(cfg.DispatchToken), len("tok-from-file"))
 	}
 	if cfg.LeaseSeconds != 900 || cfg.AskPollSeconds != 5 || cfg.ProofSkewSeconds != 60 || cfg.MaxGrantSeconds != 43200 {
-		t.Fatalf("defaults wrong: %+v", cfg)
+		t.Fatalf("defaults wrong: LeaseSeconds=%d AskPollSeconds=%d ProofSkewSeconds=%d MaxGrantSeconds=%d",
+			cfg.LeaseSeconds, cfg.AskPollSeconds, cfg.ProofSkewSeconds, cfg.MaxGrantSeconds)
 	}
 }
 
