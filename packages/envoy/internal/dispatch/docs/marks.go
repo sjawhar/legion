@@ -315,6 +315,16 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 			if err := refuseCodeThatEndsItsBlock(tree, next, range_, at, "replace_with", with); err != nil {
 				return err
 			}
+		} else if accept {
+			// An accept writes the suggestion's text through the checks a replace runs, so it too
+			// writes nothing the document cannot read back as it wrote it. A reject gives back the
+			// document the insert started from.
+			if err := refuseUnreadableReplacement(tree, next, range_, "replace_with", with); err != nil {
+				return err
+			}
+			if err := refuseReshapedReplacement(tree, next, range_, "replace_with", with); err != nil {
+				return err
+			}
 		}
 		var updateErr error
 		transact(func(txn *crdt.Transaction) {

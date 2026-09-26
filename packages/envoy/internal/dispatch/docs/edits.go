@@ -717,10 +717,10 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		if code {
 			return next, refuseCodeThatEndsItsBlock(tree, next, r, at, "with", op.With)
 		}
-		if err := refuseUnreadableReplacement(tree, next, r, op.With); err != nil {
+		if err := refuseUnreadableReplacement(tree, next, r, "with", op.With); err != nil {
 			return nil, err
 		}
-		return next, refuseReshapedReplacement(tree, next, r, op.With)
+		return next, refuseReshapedReplacement(tree, next, r, "with", op.With)
 	case "delete":
 		if op.Block != "" {
 			if op.Find != "" {
@@ -1078,28 +1078,29 @@ func collectBlockIDs(node *pmdoc.Node, into map[string]bool) {
 	}
 }
 
-// refuseUnreadableReplacement refuses a replace that makes the document-level block it lands in
+// refuseUnreadableReplacement refuses a replace that makes a document-level block it lands in
 // unreadable: one the parser read back before the replace and refuses after it. What markdown
 // reads as a block depends on where the text lands, so the rendered block decides it rather than
 // the replacement alone: `<div>x</div>` over a whole paragraph, at a list item's start or after a
 // hard break opens an HTML block the Proof schema does not carry, while the same HTML inside a
 // line, a table cell or a heading is inline HTML and is kept. A block that was already unreadable,
-// or another block that is, is no reason to refuse this replace. A replace stays inside its
-// textblock, so the block holds the same index before and after.
-func refuseUnreadableReplacement(before, after *pmdoc.Node, match pmdoc.Range, with string) error {
+// or another block that is, is no reason to refuse this replace. field names the caller's text,
+// `with` for an edit and `replace_with` for an accepted suggestion.
+func refuseUnreadableReplacement(before, after *pmdoc.Node, match pmdoc.Range, field, with string) error {
 	unreadable, err := replacementBroke(before, after, match, pmdoc.BlockReadError)
 	if err != nil || unreadable == nil {
 		return err
 	}
-	return &ErrInvalidOp{Field: "with", Reason: unreadableReason(before, after, match, with, unreadable)}
+	return &ErrInvalidOp{Field: field, Reason: unreadableReason(before, after, match, field, with, unreadable)}
 }
 
 // refuseReshapedReplacement refuses a replace whose text the document reads back as blocks of
 // another kind where it lands - a paragraph whose new text is `---` reads back as a horizontal
 // rule - since a replace writes text and the document could not carry it back as text. An empty
-// with that leaves such text behind is refused naming that text; one that empties its paragraph
-// changes no shape, since an empty paragraph is not written (pmdoc.BlockShapeError).
-func refuseReshapedReplacement(before, after *pmdoc.Node, match pmdoc.Range, with string) error {
+// text that leaves such text behind is refused naming that text; one that empties its paragraph
+// changes no shape, since an empty paragraph is not written (pmdoc.BlockShapeError). field names
+// the caller's text, as for refuseUnreadableReplacement.
+func refuseReshapedReplacement(before, after *pmdoc.Node, match pmdoc.Range, field, with string) error {
 	reshaped, err := replacementBroke(before, after, match, pmdoc.BlockShapeError)
 	if err != nil || reshaped == nil {
 		return err
@@ -1107,30 +1108,44 @@ func refuseReshapedReplacement(before, after *pmdoc.Node, match pmdoc.Range, wit
 	at, _ := pmdoc.ContainingTextblock(after, match.From)
 	if with == "" {
 		left := nodeText(at.Node)
-		return &ErrInvalidOp{Field: "with", Reason: fmt.Sprintf(
-			"with \"\" leaves %q, text the document reads back as another block where it lands (%v); %s",
-			left, reshaped, blockSyntaxAdvice(left, at),
+		return &ErrInvalidOp{Field: field, Reason: fmt.Sprintf(
+			"%s \"\" leaves %q, text the document reads back as another block where it lands (%v); %s",
+			field, left, reshaped, blockSyntaxAdvice(left, at),
 		)}
 	}
-	return &ErrInvalidOp{Field: "with", Reason: fmt.Sprintf(
-		"with %q is text the document reads back as another block where it lands (%v); %s",
-		with, reshaped, blockSyntaxAdvice(with, at),
+	return &ErrInvalidOp{Field: field, Reason: fmt.Sprintf(
+		"%s %q is text the document reads back as another block where it lands (%v); %s",
+		field, with, reshaped, blockSyntaxAdvice(with, at),
 	)}
 }
 
-// replacementBroke is what check says of the document-level block holding the match after the
-// replace, when it said nothing of that block before: a block that already failed the check, or
-// another block that does, is no reason to refuse this replace. A replace stays inside its
-// textblock, so the block holds the same index before and after.
+// replacementBroke is what check says of a document-level block the write changed, when it said
+// nothing of the blocks the match lay in before: a block that already failed the check, or another
+// block that does, is no reason to refuse this write. The write changed the blocks from the one
+// holding the match's start to the one holding its end, and the blocks after them keep their
+// order, so it changed as many more as the document gained. A replace stays inside its textblock,
+// so its block holds the same index before and after; an accepted suggestion can write blocks,
+// and its match can span them.
 func replacementBroke(before, after *pmdoc.Node, match pmdoc.Range, check func(*pmdoc.Node) error) (broke, err error) {
-	index, err := pmdoc.BlockIndex(before, match)
+	first, err := pmdoc.BlockIndex(before, pmdoc.Range{From: match.From, To: match.From})
 	if err != nil {
 		return nil, err
 	}
-	if broke = check(after.Children[index]); broke == nil || check(before.Children[index]) != nil {
-		return nil, nil
+	last, err := pmdoc.BlockIndex(before, pmdoc.Range{From: match.To, To: match.To})
+	if err != nil {
+		return nil, err
 	}
-	return broke, nil
+	for index := first; index <= last; index++ {
+		if check(before.Children[index]) != nil {
+			return nil, nil
+		}
+	}
+	for index := first; index <= max(first, last+len(after.Children)-len(before.Children)); index++ {
+		if broke = check(after.Children[index]); broke != nil {
+			return broke, nil
+		}
+	}
+	return nil, nil
 }
 
 // blockSyntaxAdvice says what to do with text that reads as block syntax where it lands, in the
@@ -1184,14 +1199,14 @@ var thematicBreakLine = regexp.MustCompile(`^(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}
 // pmdoc.DeleteBlock removes from the document as it was - the holder itself for a footnote
 // definition or a list item holding more than the paragraph, and a block further out when
 // removing the holder would empty one that needs a block, such as a callout holding only it.
-func unreadableReason(before, after *pmdoc.Node, match pmdoc.Range, with string, unreadable error) string {
+func unreadableReason(before, after *pmdoc.Node, match pmdoc.Range, field, with string, unreadable error) string {
 	at, ok := pmdoc.ContainingTextblock(after, match.From)
 	if ok && emptyTextblock(at.Node) {
 		holder := strings.ReplaceAll(at.Ancestors[0].Type, "_", " ")
 		if _, removed, err := pmdoc.DeleteTextblock(before, match); err == nil && removed {
 			return fmt.Sprintf(
-				"with %q empties the paragraph this %s holds, and the %s cannot be written without it; to remove the text, delete it with delete and find, which removes the emptied %s too",
-				with, holder, holder, holder,
+				"%s %q empties the paragraph this %s holds, and the %s cannot be written without it; to remove the text, delete it with delete and find, which removes the emptied %s too",
+				field, with, holder, holder, holder,
 			)
 		}
 		// A top-level block is always removable, since an emptied document keeps one empty
@@ -1214,17 +1229,17 @@ func unreadableReason(before, after *pmdoc.Node, match pmdoc.Range, with string,
 			removal = "the " + strings.ReplaceAll(target.Type, "_", " ") + " holding it"
 		}
 		return fmt.Sprintf(
-			"with %q empties the paragraph this %s holds, and the %s cannot be written without it; remove %s with delete {block:%q}, or give with some text",
-			with, holder, holder, removal, blockID(target),
+			"%s %q empties the paragraph this %s holds, and the %s cannot be written without it; remove %s with delete {block:%q}, or give %s some text",
+			field, with, holder, holder, removal, blockID(target), field,
 		)
 	}
 	if errors.Is(unreadable, pmdoc.ErrBlockHTML) {
 		return fmt.Sprintf(
-			"with %q is HTML that opens a block where it lands, and the Proof schema carries no block HTML; keep the HTML inside a line, where it opens no block",
-			with,
+			"%s %q is HTML that opens a block where it lands, and the Proof schema carries no block HTML; keep the HTML inside a line, where it opens no block",
+			field, with,
 		)
 	}
-	return fmt.Sprintf("with %q leaves markdown the document cannot read back where it lands (%v); %s", with, unreadable, blockSyntaxAdvice(with, at))
+	return fmt.Sprintf("%s %q leaves markdown the document cannot read back where it lands (%v); %s", field, with, unreadable, blockSyntaxAdvice(with, at))
 }
 
 // emptyTextblock reports whether a textblock holds no text but whitespace.
