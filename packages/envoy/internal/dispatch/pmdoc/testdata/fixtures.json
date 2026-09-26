@@ -1856,6 +1856,170 @@
     "rendered_by_milkdown": "* one\n  * nested\n* two\n\n3. three\n4. four\n\n* loose one\n\n* loose two\n"
   },
   {
+    "name": "lone-carriage-returns",
+    "markdown": "A line\rthat a carriage return ends.\n\nA title\r---\n\nText\r- then a list item\n\n# A heading\rthen a paragraph\n\n> ```\n> quoted\r> code\n> ```\n\nBroken  \rhard.\n\n```\ncode\rwith a carriage return\n```\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "A line\rthat a carriage return ends."
+            }
+          ]
+        },
+        {
+          "type": "heading",
+          "attrs": {
+            "id": "",
+            "level": 2,
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "A title"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000003"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Text"
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "spread": false,
+            "blockId": "b-000004"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000005"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000006"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "then a list item"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "heading",
+          "attrs": {
+            "id": "",
+            "level": 1,
+            "blockId": "b-000007"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "A heading"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000008"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "then a paragraph"
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000009"
+          },
+          "content": [
+            {
+              "type": "code_block",
+              "attrs": {
+                "language": null,
+                "blockId": "b-000010"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "quoted\rcode"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000011"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Broken"
+            },
+            {
+              "type": "hardbreak",
+              "attrs": {
+                "isInline": false
+              }
+            },
+            {
+              "type": "text",
+              "text": "hard."
+            }
+          ]
+        },
+        {
+          "type": "code_block",
+          "attrs": {
+            "language": null,
+            "blockId": "b-000012"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "code\rwith a carriage return"
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "ATYBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQEjQSBsaW5lDXRoYXQgYSBjYXJyaWFnZSByZXR1cm4gZW5kcy4oAAEAB2Jsb2NrSWQBdwhiLTAwMDAwMYcBAAMHaGVhZGluZwcAASYGBAABJwdBIHRpdGxlKAABJgJpZAF3ACgAASYFbGV2ZWwBfQIoAAEmB2Jsb2NrSWQBdwhiLTAwMDAwMocBJgMJcGFyYWdyYXBoBwABMgYEAAEzBFRleHQoAAEyB2Jsb2NrSWQBdwhiLTAwMDAwM4cBMgMLYnVsbGV0X2xpc3QHAAE5AwlsaXN0X2l0ZW0HAAE6AwlwYXJhZ3JhcGgHAAE7BgQAATwQdGhlbiBhIGxpc3QgaXRlbSgAATsHYmxvY2tJZAF3CGItMDAwMDA2KAABOgVsYWJlbAF3A+KAoigAAToIbGlzdFR5cGUBdwZidWxsZXQoAAE6BnNwcmVhZAF5KAABOgdibG9ja0lkAXcIYi0wMDAwMDUoAAE5BnNwcmVhZAF5KAABOQdibG9ja0lkAXcIYi0wMDAwMDSHATkDB2hlYWRpbmcHAAFUBgQAAVUJQSBoZWFkaW5nKAABVAJpZAF3ACgAAVQFbGV2ZWwBfQEoAAFUB2Jsb2NrSWQBdwhiLTAwMDAwN4cBVAMJcGFyYWdyYXBoBwABYgYEAAFjEHRoZW4gYSBwYXJhZ3JhcGgoAAFiB2Jsb2NrSWQBdwhiLTAwMDAwOIcBYgMKYmxvY2txdW90ZQcAAXUDCmNvZGVfYmxvY2sHAAF2BgQAAXcLcXVvdGVkDWNvZGUoAAF2B2Jsb2NrSWQBdwhiLTAwMDAxMCgAAXUHYmxvY2tJZAF3CGItMDAwMDA5hwF1AwlwYXJhZ3JhcGgHAAGFAQYEAAGGAQZCcm9rZW6HAYYBAwloYXJkYnJlYWsoAAGNAQhpc0lubGluZQF5hwGNAQYEAAGPAQVoYXJkLigAAYUBB2Jsb2NrSWQBdwhiLTAwMDAxMYcBhQEDCmNvZGVfYmxvY2sHAAGWAQYEAAGXARtjb2RlDXdpdGggYSBjYXJyaWFnZSByZXR1cm4oAAGWAQdibG9ja0lkAXcIYi0wMDAwMTIA",
+    "rendered_by_milkdown": "A line\rthat a carriage return ends.\n\n## A title\n\nText\n\n* then a list item\n\n# A heading\n\nthen a paragraph\n\n> ```\n> quoted\r> code\n> ```\n\nBroken\\\nhard.\n\n```\ncode\rwith a carriage return\n```\n"
+  },
+  {
     "name": "long",
     "markdown": "# Long heading 1\n\nLong paragraph 2.\n\n- Long item 3\n\n> Long quote 4.\n\n```text\nlong code 5\n```\n\n## Long heading 6\n\nLong paragraph 7 with **bold**.\n\n- Long item 8\n\n> Long quote 9.\n\n```text\nlong code 10\n```\n\n### Long heading 11\n\nLong paragraph 12 with *emphasis*.\n\n- Long item 13\n\n> Long quote 14.\n\n```text\nlong code 15\n```\n\n# Long heading 16\n\nLong paragraph 17 with `code`.\n\n- Long item 18\n\n> Long quote 19.\n\n```text\nlong code 20\n```\n\n## Long heading 21\n\nLong paragraph 22 with ~~strike~~.\n\n- Long item 23\n\n> Long quote 24.\n\n```text\nlong code 25\n```\n\n### Long heading 26\n\nLong paragraph 27 with [link](https://example.com).\n\n- Long item 28\n\n> Long quote 29.\n\n```text\nlong code 30\n```\n\n# Long heading 31\n\nLong paragraph 32 with 😀.\n\n- Long item 33\n\n> Long quote 34.\n\n```text\nlong code 35\n```\n\n## Long heading 36\n\nLong paragraph 37.\n\n- Long item 38\n\n> Long quote 39.\n\n```text\nlong code 40\n```\n",
     "pm_json": {

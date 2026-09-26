@@ -473,6 +473,15 @@ no whitespace between `name` and `{`; Pandoc fenced divs, leaf directives, and t
 invalid outside code blocks. An unclosed typed block at document level is rejected, while one nested
 inside another block runs to that parent’s end.
 
+A carriage return that no line feed follows ends a line, as CommonMark and the browser editor's
+parser have it, though goldmark ends one only at a line feed. `pmdoc.Parse` and `ParseInline` hand
+goldmark the source with each such carriage return written as a line feed (`lineEnds`, the same
+length) and read every text from the source itself, so `x\r---` reads as a heading and code keeps
+its carriage return; a soft break a lone carriage return ends stays `\r` in the text, as the
+browser editor keeps it. The renderer writes a code line's prefix after a lone carriage return as
+after a line feed, and `closingColons` measures the line after one. A replace whose lone carriage
+return starts a line reading back as another block is refused by the shape check like any other.
+
 A typed block renders its `blockId`, defaulted attributes, and every explicitly set optional
 attribute. Parsing mints an omitted id, while live document reads and writes validate each node
 against its schema content rule. Schema changes are additive: add a type, add a defaulted

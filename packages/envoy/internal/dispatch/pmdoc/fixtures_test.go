@@ -104,7 +104,7 @@ func TestFixturesAreWithinSchema(t *testing.T) {
 		"code", "directive-like-text", "emphasis", "empty", "escapes", "explicit-url-space",
 		"explicit-url-title",
 		"footnote-ending-in-a-block", "footnote", "frontmatter", "headings", "hr", "html", "image-delimiters", "image",
-		"inline-code-backticks", "inline-code-spaces", "link-delimiters", "links", "lists", "long",
+		"inline-code-backticks", "inline-code-spaces", "link-delimiters", "links", "lists", "lone-carriage-returns", "long",
 		"marks", "nested-code", "ordered-list-prefixes", "paragraphs", "softbreak", "table", "tasks",
 		"unicode",
 	}

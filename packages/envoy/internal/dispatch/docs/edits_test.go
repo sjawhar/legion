@@ -2276,6 +2276,57 @@ func TestApplyOperationReplaceWithNothingEmptiesTheParagraph(t *testing.T) {
 	}
 }
 
+// A lone carriage return ends a line, as in the browser editor. A replace carrying one is taken
+// where the text after it reads back where it was written - lazily continuing a paragraph, or in
+// code, under the prefix and a fence written past it - and refused where the line it starts would
+// read back as another block: a heading, a list, or the end of a heading or a table row.
+func TestApplyOperationReplaceWithALoneCarriageReturn(t *testing.T) {
+	const callout = "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n```\nBody.\n```\n:::\n\nAfter.\n"
+	for _, test := range []struct {
+		name, markdown, with string
+		taken                bool
+	}{
+		{"in a paragraph", "Intro.\n\nBody.\n\nAfter.\n", "a\rb", true},
+		{"in a list item", "Intro.\n\n- Body.\n- two\n", "a\rb", true},
+		{"in a blockquote", "Intro.\n\n> Body.\n\nAfter.\n", "a\rb", true},
+		{"in code", "Intro.\n\n```\nBody.\n```\n", "a\rb", true},
+		{"in a blockquote's code", "Intro.\n\n> ```\n> Body.\n> ```\n\nAfter.\n", "a\rb", true},
+		{"before a colon line in a callout's code", callout, "a\r:::", true},
+		{"before dashes", "Intro.\n\nBody.\n\nAfter.\n", "x\r---", false},
+		{"before a heading marker", "Intro.\n\nBody.\n\nAfter.\n", "x\r# y", false},
+		{"before a list marker", "Intro.\n\nBody.\n\nAfter.\n", "x\r- y", false},
+		{"in a heading", "Intro.\n\n# Body.\n\nAfter.\n", "a\rb", false},
+		{"in a table cell", "Intro.\n\n| h |\n| --- |\n| Body. |\n", "a\rb", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tree, err := parseInput(test.markdown)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pmdoc.EnsureBlockIDs(tree)
+			next, err := applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
+			if !test.taken {
+				var invalid *ErrInvalidOp
+				if !errors.As(err, &invalid) || invalid.Field != "with" {
+					t.Fatalf("replace with %q = %v, want INVALID_OP on with", test.with, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("replace with %q = %v, want it taken", test.with, err)
+			}
+			markdown, err := renderTree(next)
+			if err != nil {
+				t.Fatal(err)
+			}
+			back, err := parseInput(markdown)
+			if err != nil || !back.Equal(next) {
+				t.Fatalf("replace with %q stored %q, which does not read back as written (%v)", test.with, markdown, err)
+			}
+		})
+	}
+}
+
 // An emptied paragraph is not written, so a block holding one is judged for shape as the blocks
 // it writes: a later replace in that block never stores text that reads back as another block,
 // which the renderer escapes, or which is refused as it is in a block that never held one.

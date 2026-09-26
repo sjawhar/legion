@@ -85,7 +85,7 @@ func render(doc *Node) (*renderer, error) {
 	// opener when any later line is also `---` - a second rule, a code line - and reads everything
 	// up to that line as front matter. It is written `***` there, the same length, and `---`
 	// everywhere else, as it has always been written.
-	if doc.Children[0].Type == "hr" && parseFrontmatterBlock(r.b.Bytes()) != nil {
+	if doc.Children[0].Type == "hr" && parseFrontmatterBlock(lineEnds(r.b.Bytes()), r.b.Bytes()) != nil {
 		copy(r.b.Bytes(), "***")
 	}
 	return r, nil
@@ -517,8 +517,11 @@ func (r *renderer) endLine() {
 
 func (r *renderer) writeCodeText(node *Node, prefix string) {
 	value := node.Text
+	// A lone carriage return ends a line as a line feed does (lineEnds), so the line after it is
+	// written with the prefix too.
+	lined := string(lineEnds([]byte(value)))
 	for offset := 0; offset < len(value); {
-		newline := strings.IndexByte(value[offset:], '\n')
+		newline := strings.IndexByte(lined[offset:], '\n')
 		if newline < 0 {
 			r.writeText(value[offset:])
 			return

@@ -46,14 +46,15 @@ var (
 // Parse converts markdown into the closed Proof ProseMirror tree.
 func Parse(markdown string) (*Node, error) {
 	source := []byte(markdown)
-	front := parseFrontmatterBlock(source)
+	lined := lineEnds(source)
+	front := parseFrontmatterBlock(lined, source)
 	// A document with no closed front-matter block is parsed without the extension: it has
 	// nothing for the extension to read, and an unclosed opener is text it would swallow.
 	md := markdownParser
 	if front == nil {
 		md = unfrontmatteredParser
 	}
-	root := md.Parser().Parse(gmtext.NewReader(source))
+	root := md.Parser().Parse(gmtext.NewReader(lined))
 	doc, err := parseBlock(root, source, footnoteLabels(root))
 	if err != nil {
 		return nil, err
@@ -88,14 +89,15 @@ var inlineMarkdownParser = parser.NewParser(
 // paragraph's last line, is ErrSchema.
 func ParseInline(markdown string) ([]*Node, error) {
 	source := []byte(markdown)
-	root := inlineMarkdownParser.Parse(gmtext.NewReader(source))
+	lined := lineEnds(source)
+	root := inlineMarkdownParser.Parse(gmtext.NewReader(lined))
 	if root.ChildCount() > 1 {
 		return nil, fmt.Errorf("%w: inline markdown forms %d paragraphs", ErrSchema, root.ChildCount())
 	}
 	if root.ChildCount() == 0 {
 		return nil, nil
 	}
-	if dropped := textOutside(root.FirstChild(), source); dropped != "" {
+	if dropped := textOutside(root.FirstChild(), lined); dropped != "" {
 		return nil, fmt.Errorf("%w: inline markdown holds text outside its paragraph, %q, which would be lost", ErrSchema, dropped)
 	}
 	paragraph, err := parseBlock(root.FirstChild(), source, nil)
@@ -224,7 +226,7 @@ func parseTableRows(markdown string, width int) ([]*Node, bool, error) {
 		return nil, false, nil
 	}
 
-	lines := strings.Split(fragment, "\n")
+	lines := strings.Split(string(lineEnds([]byte(fragment))), "\n")
 	for _, line := range lines {
 		cells, ok := tableRowCells(line)
 		if !ok || tableDelimiterRow(cells) {
@@ -315,23 +317,69 @@ func tableDelimiterRow(cells []string) bool {
 	return true
 }
 
+// segmentsText is the text segments cover in source. Goldmark's own Segments.Value appends a
+// forced line feed into the buffer it reads, past the segment's end, which overwrites source
+// where a lone carriage return ends the line (lineEnds); this copies instead, and a line a lone
+// carriage return ends already has its line ending.
+func segmentsText(segments *gmtext.Segments, source []byte) string {
+	var text strings.Builder
+	for index := 0; index < segments.Len(); index++ {
+		segment := segments.At(index)
+		text.WriteString(strings.Repeat(" ", segment.Padding))
+		value := source[segment.Start:segment.Stop]
+		text.Write(value)
+		if segment.ForceNewline && (len(value) == 0 || (value[len(value)-1] != '\n' && value[len(value)-1] != '\r')) {
+			text.WriteByte('\n')
+		}
+	}
+	return text.String()
+}
+
+// lineEnds is source with each carriage return that no line feed follows written as a line feed.
+// CommonMark ends a line at a line feed, a carriage return, or the two together, and so does the
+// browser editor's parser, while goldmark ends one only at a line feed. The two have the same
+// length, so goldmark reads the structure from this and each text is read from source, keeping
+// the carriage return as it was written.
+func lineEnds(source []byte) []byte {
+	if bytes.IndexByte(source, '\r') < 0 {
+		return source
+	}
+	lined := bytes.Clone(source)
+	for index, char := range lined {
+		if char == '\r' && (index+1 == len(lined) || lined[index+1] != '\n') {
+			lined[index] = '\n'
+		}
+	}
+	return lined
+}
+
+// endsInLoneCarriageReturn reports whether the line a text run ends at stop ends in a carriage
+// return that no line feed follows, past the spaces and tabs before it.
+func endsInLoneCarriageReturn(source []byte, stop int) bool {
+	for stop < len(source) && (source[stop] == ' ' || source[stop] == '\t') {
+		stop++
+	}
+	return stop < len(source) && source[stop] == '\r' && (stop+1 == len(source) || source[stop+1] != '\n')
+}
+
 // parseFrontmatterBlock restores the delimited text the Goldmark extension
-// consumes before its completed AST reaches us.
-func parseFrontmatterBlock(source []byte) *Node {
-	openEnd := bytes.IndexByte(source, '\n')
-	if openEnd < 0 || !frontmatterDelimiter(bytes.TrimSuffix(source[:openEnd], []byte("\r"))) {
+// consumes before its completed AST reaches us. It finds the lines in lined (lineEnds) and takes
+// the text from source.
+func parseFrontmatterBlock(lined, source []byte) *Node {
+	openEnd := bytes.IndexByte(lined, '\n')
+	if openEnd < 0 || !frontmatterDelimiter(bytes.TrimSuffix(lined[:openEnd], []byte("\r"))) {
 		return nil
 	}
-	delimiter := bytes.TrimSuffix(source[:openEnd], []byte("\r"))
-	for start := openEnd + 1; start < len(source); {
-		end := len(source)
-		if next := bytes.IndexByte(source[start:], '\n'); next >= 0 {
+	delimiter := bytes.TrimSuffix(lined[:openEnd], []byte("\r"))
+	for start := openEnd + 1; start < len(lined); {
+		end := len(lined)
+		if next := bytes.IndexByte(lined[start:], '\n'); next >= 0 {
 			end = start + next
 		}
-		if bytes.Equal(bytes.TrimSuffix(source[start:end], []byte("\r")), delimiter) {
+		if bytes.Equal(bytes.TrimSuffix(lined[start:end], []byte("\r")), delimiter) {
 			return &Node{Type: "frontmatter", Children: []*Node{{Type: "text", Text: string(source[:end])}}}
 		}
-		if end == len(source) {
+		if end == len(lined) {
 			break
 		}
 		start = end + 1
@@ -543,7 +591,7 @@ func parseListItem(item *ast.ListItem, source []byte, footnotes map[int]string) 
 }
 
 func codeBlockText(lines *gmtext.Segments, source []byte) []*Node {
-	value := strings.TrimRight(string(lines.Value(source)), "\r\n")
+	value := strings.TrimRight(segmentsText(lines, source), "\r\n")
 	if value == "" {
 		return nil
 	}
@@ -644,8 +692,13 @@ func parseInlineWithTableCellLinks(parent ast.Node, source []byte, initial []Mar
 			}
 			if current.SoftLineBreak() {
 				// A soft break is a space, as CommonMark renders it; the browser editor's
-				// white-space: break-spaces would show a literal newline as a line break.
-				appendText(&children, " ", active)
+				// white-space: break-spaces would show a literal newline as a line break. A line
+				// a lone carriage return ends keeps it, as the browser editor's parser does.
+				if endsInLoneCarriageReturn(source, current.Segment.Stop) {
+					appendText(&children, "\r", active)
+				} else {
+					appendText(&children, " ", active)
+				}
 			}
 		case *ast.String:
 			appendText(&children, parseTextValue(current.Value, active), active)
@@ -703,7 +756,7 @@ func parseInlineWithTableCellLinks(parent ast.Node, source []byte, initial []Mar
 		case *extensionast.FootnoteBacklink:
 			continue
 		case *ast.RawHTML:
-			value := string(current.Segments.Value(source))
+			value := segmentsText(current.Segments, source)
 			if strings.EqualFold(strings.TrimSpace(value), "</span>") {
 				var removed bool
 				active, removed = closeAnchorMark(active)
