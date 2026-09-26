@@ -59,7 +59,7 @@ func runController(ctx context.Context, args []string, stdout, stderr io.Writer)
 
 // controllerStart is `legion controller start`, the operator's side of a controller the daemon
 // cannot launch itself (LEGION-206 Requirement 11; the shipped cmdControllerStart,
-// packages/daemon/src/cli/controller-start.ts:262-384). In order, and nothing is kept, and nothing
+// packages/daemon/src/cli/controller-start.ts). In order, and nothing is kept, and nothing
 // but the probe is launched, until the daemon has answered: read the strict operator-side file;
 // refuse an operator token file others can read, and a blank or unreadable Envoy or Dispatch token
 // file, a role-prompt bundle missing a file, an instructions file that is missing or blank, and an
@@ -266,7 +266,8 @@ func removeDirs(created []string) {
 
 // fetchControllerSecret is `POST /legion/v1/controller/secret` with the operator token as a
 // bearer. A failed request names the daemon URL and never tries another address; a refusal
-// quotes the daemon's `error` (packages/daemon/src/cli/controller-start.ts:214-260).
+// quotes the daemon's `error` (the shipped fetchControllerSecret,
+// packages/daemon/src/cli/controller-start.ts).
 func fetchControllerSecret(ctx context.Context, daemonURL, operatorToken string) (string, error) {
 	const route = "/legion/v1/controller/secret"
 	status, body, err := operator{base: daemonURL, bearer: operatorToken}.do(ctx, http.MethodPost, route, struct{}{})

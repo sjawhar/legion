@@ -39,10 +39,11 @@ type remote struct {
 	branches []string
 }
 
-// newProvisioningCredential ports the one-shot credential in workspace.ts:91-142. The Go daemon
-// keeps the token in a 0600 file under parent, so the processes it is handed to receive only a file
-// pointer and never a secret environment value. GIT_ASKPASS is set empty, which git reads as no
-// askpass at all — neither core.askPass nor SSH_ASKPASS — and terminal prompts are off.
+// newProvisioningCredential ports workspace.ts's createProvisioningCredential, the one-shot
+// credential. The Go daemon keeps the token in a 0600 file under parent, so the processes it is
+// handed to receive only a file pointer and never a secret environment value. GIT_ASKPASS is set
+// empty, which git reads as no askpass at all — neither core.askPass nor SSH_ASKPASS — and terminal
+// prompts are off.
 func newProvisioningCredential(parent, token string) (remote, error) {
 	if token == "" {
 		return remote{}, errors.New("workspace provisioning token is required")
@@ -222,8 +223,9 @@ func Fetch(ctx context.Context, run Runner, request FetchRequest) (string, error
 	return feed, credential.remove()
 }
 
-// ensureRepoClone ports workspace.ts:144-196: clone into a temporary sibling, verify it contains
-// .jj, then rename it into place. A killed clone can therefore never appear to be a final clone.
+// ensureRepoClone ports workspace.ts's ensureRepoClone: clone into a temporary sibling, verify it
+// contains .jj, then rename it into place. A killed clone can therefore never appear to be a final
+// clone.
 func ensureRepoClone(ctx context.Context, run Runner, cloneDir, remote string, remoteEnv []string) error {
 	jjDir := filepath.Join(cloneDir, ".jj")
 	if exists, err := pathExists(cloneDir); err != nil {

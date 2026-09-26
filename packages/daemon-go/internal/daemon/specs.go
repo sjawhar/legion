@@ -17,7 +17,7 @@ import (
 )
 
 // roleTopicPrefix is the Envoy subject a role token is reached on
-// (packages/contracts/src/subject.ts:2).
+// (ROLE_TOPIC_PREFIX, packages/contracts/src/subject.ts).
 const roleTopicPrefix = "notifications.role."
 
 var _ supervise.Specs = specs{}
@@ -101,10 +101,10 @@ func (s specs) rolePromptPaths(c supervise.Claim) ([]string, error) {
 
 // addressingFragment is the sentence that tells an agent where it and its peers are reached: its
 // own role topic, the tree architect's, and the project controller's, spelled from the tokens so
-// the model never hand-encodes one (packages/daemon/src/daemon/processes.ts:317-343). The shipped
-// sentence's merge-queue clause is left out: the merge queue is `projects.<KEY>.merge_queue_role`,
-// which this daemon does not read until Stage 3, and a clause saying there is none would be a claim
-// about a setting the daemon never looked at.
+// the model never hand-encodes one (addressingFragment, packages/daemon/src/daemon/processes.ts).
+// The shipped sentence's merge-queue clause is left out: the merge queue is
+// `projects.<KEY>.merge_queue_role`, which this daemon does not read until Stage 3, and a clause
+// saying there is none would be a claim about a setting the daemon never looked at.
 func addressingFragment(project string, c supervise.Claim) (string, error) {
 	architect, err := claim.NewToken(project, c.Tree, claim.RoleArchitect)
 	if err != nil {

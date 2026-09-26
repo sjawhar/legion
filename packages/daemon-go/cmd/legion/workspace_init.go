@@ -29,7 +29,7 @@ const workspaceProvisionUsage = "legion workspace-init provision --issue <KEY> -
 const (
 	// workspaceLostExitCode is the status that tells the runtime the tree volume itself was lost —
 	// neither the shared clone nor the recorded OMP session is on it — rather than that one launch
-	// failed (packages/daemon/src/daemon/runtime.ts:87).
+	// failed (WORKSPACE_LOST_EXIT_CODE, packages/daemon/src/daemon/runtime.ts).
 	workspaceLostExitCode = 3
 	// lockWaitEnv bounds how long this init container waits for another pod's provisioning of the
 	// same repository. The daemon sets it on every pod from its own registration deadline, so the
@@ -38,7 +38,8 @@ const (
 	// provisionTokenFileEnv points `workspace-init fetch` at the mounted provisioning token.
 	provisionTokenFileEnv = "LEGION_PROVISION_TOKEN_FILE"
 	// defaultLockWaitSeconds is for an invocation no daemon sized: three slow-command budgets, a
-	// live holder's clone and fetch at full budget plus its local commands (workspace-init.ts:61).
+	// live holder's clone and fetch at full budget plus its local commands
+	// (DEFAULT_WORKSPACE_INIT_LOCK_WAIT_SECONDS, workspace-init.ts).
 	defaultLockWaitSeconds = 3 * int64(workspace.CommandTimeout/time.Second)
 )
 
@@ -214,7 +215,7 @@ func workspaceInitLockWait() (int64, error) {
 
 // provisioningTools resolves the named tools a provisioning step runs from PATH — in an init
 // container the image's, with no worker-bin shim or operator rc ahead of them — where the
-// TypeScript runner found them (workspace-init.ts:36-45).
+// TypeScript runner found them (processEnvRunner, workspace-init.ts).
 func provisioningTools(names ...string) (map[string]string, error) {
 	tools := map[string]string{}
 	for _, tool := range names {
@@ -240,7 +241,7 @@ const lockPollInterval = 250 * time.Millisecond
 // nothing. Every attempt is non-blocking (flock(2) promises waiters no order, so polling gives up
 // nothing); the first refused one logs one line, so a pod stuck behind another's provisioning says
 // so in its init log, and the attempts continue every lockPollInterval, bounded by waitSeconds and
-// by ctx (workspace-init.ts:74-139).
+// by ctx (withWorkspaceInitLock and holdFlock, workspace-init.ts).
 func lockRepository(ctx context.Context, lockPath string, repo ghrepo.Repository, waitSeconds int64, log io.Writer) (release func(), err error) {
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
 		return nil, fmt.Errorf("create %s: %w", filepath.Dir(lockPath), err)
@@ -289,8 +290,9 @@ func flock(fd, how int) error {
 
 // writeRecoveryMarker is the command side of workspace recovery: a relaunch after a lost volume
 // names the ref it recovers from, and the recreated workspace records it with the commit it was
-// recreated at in .legion/workspace-recovered.json (workspace-init.ts:196-215). recoveredAt is an
-// ISO instant in milliseconds, UTC, as JavaScript's toISOString writes it.
+// recreated at in .legion/workspace-recovered.json (cmdWorkspaceInit's
+// LEGION_WORKSPACE_RECOVERED_FROM branch, workspace-init.ts). recoveredAt is an ISO instant in
+// milliseconds, UTC, as JavaScript's toISOString writes it.
 func writeRecoveryMarker(ctx context.Context, run workspace.Runner, dir, fromRef string) error {
 	result, err := workspace.RunChecked(ctx, run, []string{"jj", "log", "-r", "@", "--no-graph", "-T", "commit_id", "--color=never"}, nil, dir)
 	if err != nil {

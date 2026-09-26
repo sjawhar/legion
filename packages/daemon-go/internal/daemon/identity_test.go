@@ -15,8 +15,8 @@ import (
 )
 
 // A pane commits as its role's App: the launch carries the six variables the shipped daemon sets
-// on every worker pane (packages/daemon/src/daemon/github-app-env.ts:46-58), and a launch whose
-// identity cannot be resolved does not happen.
+// on every worker pane (gitIdentityEnv, packages/daemon/src/daemon/github-app-env.ts), and a
+// launch whose identity cannot be resolved does not happen.
 func TestSpawnSpecCarriesTheRoleAppIdentity(t *testing.T) {
 	stateDir := t.TempDir()
 	token, err := claim.NewToken("s1", "S1-1", claim.RoleImplementer)

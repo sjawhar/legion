@@ -275,7 +275,8 @@ func ensureFetchConfiguration(ctx context.Context, run Runner, cloneDir string, 
 }
 
 // configureRepositoryCredential keeps the clone's persisted helper for worker panes after the
-// one-shot clone/fetch environment has been removed. This ports workspace.ts:474-512.
+// one-shot clone/fetch environment has been removed. This ports the helper writes in workspace.ts's
+// provisionIssueWorkspace.
 func configureRepositoryCredential(ctx context.Context, run Runner, cloneDir, credentialHelper string) error {
 	gitDir := cloneDir + "/.git"
 	for _, argv := range [][]string{
@@ -292,8 +293,9 @@ func configureRepositoryCredential(ctx context.Context, run Runner, cloneDir, cr
 	return nil
 }
 
-// removeRepositoryIdentity ports workspace.ts:298-338. A per-repository identity would be shared
-// by every issue workspace, while pane identity is deliberately provided through the pane's env.
+// removeRepositoryIdentity ports workspace.ts's removeRepoScopedIdentity. A per-repository
+// identity would be shared by every issue workspace, while pane identity is deliberately provided
+// through the pane's env.
 func removeRepositoryIdentity(ctx context.Context, run Runner, cloneDir string) error {
 	for _, key := range []string{"user.name", "user.email"} {
 		probe := onClone(cloneDir, "config", "list", "--repo", "--include-overridden", key)

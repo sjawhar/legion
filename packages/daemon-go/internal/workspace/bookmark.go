@@ -353,15 +353,16 @@ func nonEmptyLines(value string) []string {
 	return lines
 }
 
-// ownCommitsRevset ports workspace.ts:533-541: only commits unique to a closing workspace are
-// abandoned; all commits reached by another working copy, a bookmark, a remote, or a tag survive.
+// ownCommitsRevset ports workspace.ts's ownCommitsRevset: only commits unique to a closing
+// workspace are abandoned; all commits reached by another working copy, a bookmark, a remote, or a
+// tag survive.
 func ownCommitsRevset(workspaceName string) string {
 	return "::" + workspaceName + "@ ~ ::(working_copies() ~ " + workspaceName + "@) ~ ::(bookmarks() | remote_bookmarks() | tags())"
 }
 
-// Remove ports workspace.ts:544-618. The workspace directory goes first so a crash leaves the
-// registered-but-missing state that Provision repairs with forget, prune, and add. workspace is
-// Location's, which names the clone; any other is refused before anything is removed.
+// Remove ports workspace.ts's removeIssueWorkspace. The workspace directory goes first so a crash
+// leaves the registered-but-missing state that Provision repairs with forget, prune, and add.
+// workspace is Location's, which names the clone; any other is refused before anything is removed.
 func Remove(ctx context.Context, run Runner, workspace Workspace) error {
 	if !located(workspace) {
 		return fmt.Errorf("workspace to remove (%#v) is not a workspace Location names", workspace)

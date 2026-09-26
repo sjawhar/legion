@@ -10,9 +10,10 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
-// Provision ports packages/workspace/src/workspace.ts:402-515. It updates an existing working
-// copy, obtains the shared clone through a temporary sibling, protects unreachable worker commits
-// before every fetch, resolves a bookmark before adding, and leaves pane credentials on the clone.
+// Provision ports provisionIssueWorkspace (packages/workspace/src/workspace.ts). It updates an
+// existing working copy, obtains the shared clone through a temporary sibling, protects unreachable
+// worker commits before every fetch, resolves a bookmark before adding, and leaves pane credentials
+// on the clone.
 // The clone and the fetch reach the repository through request.Source: a pod's feed with no
 // credential, or GitHub with the one-shot credential.
 func Provision(ctx context.Context, run Runner, request Request) (Workspace, error) {

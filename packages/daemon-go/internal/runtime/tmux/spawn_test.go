@@ -19,7 +19,7 @@ import (
 )
 
 // One window per issue, named for it; a key too long for a window name keeps a prefix and a hash
-// of the whole (runtime-tmux.ts:41-49).
+// of the whole (MAX_TMUX_WINDOW_NAME_LENGTH and treeName, runtime-tmux.ts).
 func TestTreeName(t *testing.T) {
 	if got := treeName("LEGION-42"); got != "legion-42" {
 		t.Errorf("treeName = %q", got)
@@ -33,8 +33,8 @@ func TestTreeName(t *testing.T) {
 }
 
 // A `-P -F` report is three tokens from new-window and two from split-window; anything else is a
-// launch failure naming the command and tmux's stderr, never the report (tmux.ts:234-260,
-// tmux.test.ts:458-494).
+// launch failure naming the command and tmux's stderr, never the report (parsePaneReport, tmux.ts,
+// and tmux.test.ts's openWindow cases for a malformed report).
 func TestReadPaneReport(t *testing.T) {
 	report, err := readPaneReport("new-window", result{stdout: "@42 %1 4242\n"}, true)
 	if err != nil || report != (paneReport{window: "@42", pane: "%1", pid: 4242}) {
@@ -77,11 +77,12 @@ func testSpec() runtime.SpawnSpec {
 }
 
 // The pane's -e pairs, in the one order: the pairs every Legion pane carries (the shipped set,
-// processes.ts:4562-4579, less what Stage 3 adds, plus LEGION_DAEMON_API=go), the grant file the
-// pi-envoy extension writes before each command that redeems a grant, the XDG base directories
-// under `<state_dir>/home` explicitly, the caller's own variables sorted, then one `<NAME>_FILE`
-// pointer per secret — the boot token's first. PATH is never a pair: tmux would discard it
-// (LEGION-91); the shell command exports it. No secret value is in any pair.
+// ProcessManager.launchWorker's env in processes.ts, less what Stage 3 adds, plus
+// LEGION_DAEMON_API=go), the grant file the pi-envoy extension writes before each command that
+// redeems a grant, the XDG base directories under `<state_dir>/home` explicitly, the caller's own
+// variables sorted, then one `<NAME>_FILE` pointer per secret — the boot token's first. PATH is
+// never a pair: tmux would discard it (LEGION-91); the shell command exports it. No secret value is
+// in any pair.
 func TestPanePairs(t *testing.T) {
 	spec := testSpec()
 	in := paneInputs{
