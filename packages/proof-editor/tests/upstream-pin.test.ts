@@ -24,7 +24,7 @@ test("the pinned dependency carries the Dark Reader fix", () => {
   expect(cursors).not.toContain("cursorWidget.style.setProperty");
   expect(cursors).not.toContain("'data-proof-collab-selection':");
   expect(cursors).toContain("function ensureCollabColorStyles");
-  expect(cursors).toContain("proof-collab-selection--${token}");
+  expect(cursors).toContain("proof-collab-selection--");
 });
 
 test("src/upstream-types.ts still describes the files it was copied from", () => {

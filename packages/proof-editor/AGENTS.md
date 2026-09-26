@@ -57,13 +57,13 @@ needs telling, because proof-sdk's `package.json` `exports` publishes only its b
 | --- | --- |
 | Bun (`bun test`, the pmdoc generator) | `paths` in `tsconfig.json` |
 | Vite (the Dispatch SPA) | `resolve.alias` for the raw sources and `dedupe: ["prosemirror-model"]` — source-only editor modules and Dispatch both pass ProseMirror nodes into `DOMSerializer`; two module identities make historical renders fail with “multiple versions of prosemirror-model were loaded” |
-| tsc | **nothing** — see below |
+| tsc | An opaque `paths` declaration in `tsconfig.check.json` |
 
 **No TypeScript program may open those sources.** proof-sdk emits its declarations with
 `noCheck` (its `tsconfig.lib.json`), so neither its tree nor this copy of it type-checks; a
 consumer that resolved them would inherit ~55 errors it cannot fix. `tsconfig.check.json` — what
-`bun run typecheck` reads — drops the `paths` so the specifiers stay unresolved, and every file
-copied from the fork carries `// @ts-nocheck` so no consumer reports them either.
+`bun run typecheck` reads — maps the runtime source specifiers to `src/upstream-runtime.d.ts`, and
+every copied file carries `// @ts-nocheck` so no consumer reports the upstream implementation.
 
 An upstream type reached through that boundary is therefore `any`, so no type on the public
 surface reaches a consumer that way. `StoredMark`, which `src/lib.ts` re-exports, and
