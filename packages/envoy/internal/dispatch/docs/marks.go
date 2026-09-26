@@ -295,7 +295,9 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 			return nil
 		}
 
-		with := replaceWith
+		// A suggestion's text reaches the document with line feeds alone (pmdoc.LineFeeds), as
+		// it is stored when the suggestion is created.
+		with := pmdoc.LineFeeds(replaceWith)
 		if !accept {
 			with = ""
 		}

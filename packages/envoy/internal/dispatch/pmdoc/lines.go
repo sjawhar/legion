@@ -122,15 +122,10 @@ func (taskMarkerParser) Parse(parent ast.Node, block gmtext.Reader, _ parser.Con
 	}
 	rest := line[3:]
 	blank := len(rest) - len(bytes.TrimLeft(rest, " \t"))
-	run := len(rest) - len(bytes.TrimLeft(rest, " \t\r"))
 	width := 4
 	switch {
-	case bytes.IndexByte(rest[:run], '\r') >= 0 && run < len(rest) && rest[run] != '\n':
-		// A carriage return in the whitespace after the marker ends its line in the browser
-		// editor's parser, and goldmark's marker took it with the whitespace around it.
-		width = 3 + run
 	case blank > 0 && !util.IsBlank(rest):
-	case rest[blank] == '\n' || rest[blank] == '\r':
+	case rest[blank] == '\n':
 		row, segment := block.Position()
 		block.AdvanceLine()
 		next, _ := block.PeekLine()
@@ -307,19 +302,6 @@ func insideImage(node ast.Node) bool {
 	return false
 }
 
-// lineEndingAfter is the line ending that ends the line at stop, past the spaces and tabs before
-// it: a carriage return and line feed, or a line feed.
-func lineEndingAfter(source []byte, stop int) string {
-	for stop < len(source) && (source[stop] == ' ' || source[stop] == '\t') {
-		stop++
-	}
-	switch {
-	case stop+1 < len(source) && source[stop] == '\r' && source[stop+1] == '\n':
-		return "\r\n"
-	}
-	return "\n"
-}
-
 // parseFrontmatterBlock reads the front matter a document opens with in source, as the
 // browser editor's parser does: a first line that is `---` and any spaces or tabs opens it, and
 // the first later line that is the same closes it. The node's text is the lines between, joined
@@ -333,7 +315,7 @@ func parseFrontmatterBlock(source []byte) (front *Node, rest int) {
 		if next := bytes.IndexByte(source[start:], '\n'); next >= 0 {
 			end = start + next + 1
 		}
-		line := strings.TrimRight(string(bytes.TrimSuffix(bytes.TrimSuffix(source[start:end], []byte("\n")), []byte("\r"))), " \t")
+		line := strings.TrimRight(string(bytes.TrimSuffix(source[start:end], []byte("\n"))), " \t")
 		switch {
 		case index == 0 && line != "---":
 			return nil, 0
@@ -344,7 +326,7 @@ func parseFrontmatterBlock(source []byte) (front *Node, rest int) {
 			}
 			return &Node{Type: "frontmatter", Children: []*Node{{Type: "text", Text: text}}}, end
 		case index > 0:
-			content = append(content, string(bytes.TrimSuffix(bytes.TrimSuffix(source[start:end], []byte("\n")), []byte("\r"))))
+			content = append(content, string(bytes.TrimSuffix(source[start:end], []byte("\n"))))
 		}
 		start = end
 	}

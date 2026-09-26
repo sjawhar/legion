@@ -382,7 +382,7 @@ func (r *renderer) writeCodeText(node *Node, prefix string) {
 // ending.
 func blankLineAhead(text string) bool {
 	end := strings.IndexByte(text, '\n')
-	return end >= 0 && strings.Trim(text[:end], " \t\r") == ""
+	return end >= 0 && strings.Trim(text[:end], " \t") == ""
 }
 
 func codeBlockFence(node *Node) string {
@@ -426,7 +426,7 @@ func isBareAutolink(value string) bool {
 	if !strings.HasPrefix(value, "http://") && !strings.HasPrefix(value, "https://") {
 		return false
 	}
-	if strings.ContainsAny(value, " \t\r\n()<>") {
+	if strings.ContainsAny(value, " \t\n()<>") {
 		return false
 	}
 	return !strings.ContainsAny(value[len(value)-1:], ".,!?;:")

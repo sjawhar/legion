@@ -143,8 +143,8 @@ block a `replace`, like an accepted suggestion, writes `with` as the code's lite
 (`codeReplacement`), and none of the rules below apply. Markdown cannot carry two things there: line
 breaks at the end of the code's text and a line holding only whitespace in a list item's code read
 back without them. A line of colons in code inside a typed block is kept: the browser editor's
-parser ends a typed block at a line of at least its fence's colons, with spaces, tabs and a
-line-ending carriage return around them, starting less than four columns
+parser ends a typed block at a line of at least its fence's colons, with spaces and tabs around
+them, starting less than four columns
 past where the typed block's own lines start on the written line, even inside fenced code -
 counting the width of the list markers and `> ` around the code, advancing a tab to the next
 multiple of four from the column it stands at, and finding nothing closing in a blockquote inside
@@ -488,10 +488,10 @@ inside another block runs to that parent’s end.
 
 Text a caller writes reaches the parser with line feeds alone: `pmdoc.LineFeeds` writes each CR LF
 and each lone carriage return as a line feed, as CommonMark and the browser editor's parser read
-both, in `ParseForWrite` (a spec, an upload, an insert), in `ParseInline` (a replace or an accepted
-suggestion in text), in a replace's `with` in code (`codeReplacement`), in a suggestion's
-`replace_with` when it is created, and in a block ask's edited question and options. No stored
-document holds a carriage return. A code span keeps the whitespace that
+both, in `ParseForWrite` (a spec, an upload, an insert) and `ParseInline`, in a replace's `with`
+before any check reads it (`applyOperation`), in a suggestion's `replace_with` when it is created
+and when it is accepted, and in a block ask's edited question and options. No stored document
+holds a carriage return, and `pmdoc` handles line feeds alone. A code span keeps the whitespace that
 starts each of its later lines past the prefix of the containers around it, as the browser editor's
 parser reads it, a line holding only whitespace before the closer included; goldmark's paragraph
 trims it (`lineRecordingParagraph`, `multilineCodeSpanText`). A space or a line feed is the padding

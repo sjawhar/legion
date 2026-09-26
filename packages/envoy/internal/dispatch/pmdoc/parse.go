@@ -597,7 +597,7 @@ func emptyParagraphFirst(children []*Node, firstParagraph bool) []*Node {
 }
 
 func codeBlockText(lines *gmtext.Segments, source []byte) []*Node {
-	value := strings.TrimRight(segmentsText(lines, source), "\r\n")
+	value := strings.TrimRight(segmentsText(lines, source), "\n")
 	if value == "" {
 		return nil
 	}
@@ -703,9 +703,9 @@ func parseInlineWithTableCellLinks(parent ast.Node, source []byte, initial []Mar
 			if current.SoftLineBreak() {
 				// A soft break is a space, as CommonMark renders it; the browser editor's
 				// white-space: break-spaces would show a literal newline as a line break. An
-				// image's alt text keeps its line ending, which that parser reads as written.
+				// image's alt text keeps its line feed, which that parser reads as written.
 				if insideImage(current) {
-					appendText(&children, lineEndingAfter(source, current.Segment.Stop), active)
+					appendText(&children, "\n", active)
 				} else {
 					appendText(&children, " ", active)
 				}

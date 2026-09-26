@@ -60,7 +60,7 @@ func (p *typedDirectiveParser) Open(_ ast.Node, reader gmtext.Reader, pc parser.
 	if indent >= 4 || offset >= len(line) {
 		return nil, parser.NoChildren
 	}
-	name, attrs, ok := parseTypedDirectiveOpen(strings.TrimRight(string(line[offset:]), "\r\n"))
+	name, attrs, ok := parseTypedDirectiveOpen(strings.TrimRight(string(line[offset:]), "\n"))
 	if !ok {
 		return nil, parser.NoChildren
 	}
@@ -90,7 +90,7 @@ func (p *typedDirectiveParser) Close(_ ast.Node, _ gmtext.Reader, _ parser.Conte
 
 // closingColons is the longest line of colons written inside typed block n, whose own lines start
 // at column on the written line, that the browser editor's parser could read as a fence closing n:
-// a line of three or more colons (codeLineColons) whose text starts at most three columns past
+// a line of three or more colons (fenceColons) whose text starts at most three columns past
 // column, even inside fenced code. Columns are the written line's: a list marker adds its width, and a tab
 // advances to the next multiple of four from the column it stands at, so in a typed block two
 // columns in, a tab reaches only two past it. A line in a blockquote begins with its `>` and closes
@@ -113,7 +113,7 @@ func closingColons(n *Node, column int) int {
 		case "code_block":
 			for _, text := range node.Children {
 				for _, line := range strings.Split(text.Text, "\n") {
-					if colons := codeLineColons(line); colons >= 3 && textColumn(line, at)-column <= 3 {
+					if colons := fenceColons(line); colons >= 3 && textColumn(line, at)-column <= 3 {
 						longest = max(longest, colons)
 					}
 				}
@@ -159,16 +159,9 @@ func textColumn(line string, column int) int {
 }
 
 // fenceColons is the number of colons in line when they are all it holds but spaces, tabs and a
-// line ending, and 0 otherwise.
+// line feed, and 0 otherwise.
 func fenceColons(line string) int {
-	return colonLine(strings.Trim(line, " \t\r\n"))
-}
-
-// codeLineColons is the number of colons in a line of code when they are all it holds but spaces,
-// tabs and a trailing carriage return, the half of a CR LF line ending the line feed split off,
-// and 0 otherwise. A line holding a carriage return anywhere else is written as main wrote it.
-func codeLineColons(line string) int {
-	return colonLine(strings.Trim(strings.TrimSuffix(line, "\r"), " \t"))
+	return colonLine(strings.Trim(line, " \t\n"))
 }
 
 // colonLine is the length of line when it is colons alone, and 0 otherwise.
@@ -208,7 +201,7 @@ func (p *unsupportedDirectiveParser) Open(_ ast.Node, reader gmtext.Reader, _ pa
 	if indent >= 4 || offset >= len(line) {
 		return nil, parser.NoChildren
 	}
-	reason, ok := unsupportedDirectiveReason(strings.TrimRight(string(line[offset:]), "\r\n"))
+	reason, ok := unsupportedDirectiveReason(strings.TrimRight(string(line[offset:]), "\n"))
 	if !ok {
 		return nil, parser.NoChildren
 	}

@@ -679,6 +679,8 @@ func (s *Service) rejectLiveTableAnchors(ctx context.Context, artifactID, axis s
 func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 	switch op.Op {
 	case "replace":
+		// with reaches every check below with line feeds alone (pmdoc.LineFeeds).
+		op.With = pmdoc.LineFeeds(op.With)
 		if op.Find == "" {
 			return nil, invalidOp("find")
 		}
@@ -1222,7 +1224,6 @@ func refuseCodeThatReshapesItsBlock(before, after *pmdoc.Node, match pmdoc.Range
 // codeReplacement is what a replacement landing in a code block splices in: a code block's text
 // is literal, whitespace, markdown syntax and references alike, so it is the replacement as sent.
 func codeReplacement(text string) *pmdoc.Node {
-	text = pmdoc.LineFeeds(text)
 	paragraph := &pmdoc.Node{Type: "paragraph"}
 	if text != "" {
 		paragraph.Children = []*pmdoc.Node{{Type: "text", Text: text}}
@@ -1266,14 +1267,12 @@ func continueText(paragraph *pmdoc.Node, markdown string, edges textEdges) {
 }
 
 // markdownSpace is the whitespace a paragraph's parse strips from its edges.
-const markdownSpace = " \t\r\n"
+const markdownSpace = " \t\n"
 
-// edgeSpace is an edge's whitespace without its line breaks.
+// edgeSpace is an edge's whitespace without its line feeds.
 func edgeSpace(run string) string {
-	return lineBreaks.Replace(run)
+	return strings.ReplaceAll(run, "\n", "")
 }
-
-var lineBreaks = strings.NewReplacer("\r", "", "\n", "")
 
 func isInlineLeaf(node *pmdoc.Node) bool {
 	switch node.Type {
