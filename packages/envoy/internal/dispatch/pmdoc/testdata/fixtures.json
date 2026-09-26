@@ -4100,6 +4100,93 @@
     "rendered_by_milkdown": "Code[^1], a list[^2], a quote[^3] and a callout[^4].\n\n[^1]: Note.\n\n    ```\n    code\n    ```\n\n[^2]: Note.\n\n    * item\n\n[^3]: Note.\n\n    > quoted\n\n[^4]: :::callout{#footnote-callout kind=\"note\" title=\"In a footnote\"}\n    Body.\n    :::\n"
   },
   {
+    "name": "footnote-unreferenced",
+    "markdown": "Text[^1].\n\n[^1]: Referenced.\n\n[^q]: Nothing refers to this.\n\n    It has two paragraphs.\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Text"
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "1"
+              }
+            },
+            {
+              "type": "text",
+              "text": "."
+            }
+          ]
+        },
+        {
+          "type": "footnote_definition",
+          "attrs": {
+            "label": "1",
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000003"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Referenced."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "footnote_definition",
+          "attrs": {
+            "label": "q",
+            "blockId": "b-000004"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000005"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Nothing refers to this."
+                }
+              ]
+            },
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000006"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "It has two paragraphs."
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "ARoBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQEEVGV4dIcBAQMSZm9vdG5vdGVfcmVmZXJlbmNlKAABBgVsYWJlbAF3ATGHAQYGBAABCAEuKAABAAdibG9ja0lkAXcIYi0wMDAwMDGHAQADE2Zvb3Rub3RlX2RlZmluaXRpb24HAAELAwlwYXJhZ3JhcGgHAAEMBgQAAQ0LUmVmZXJlbmNlZC4oAAEMB2Jsb2NrSWQBdwhiLTAwMDAwMygAAQsFbGFiZWwBdwExKAABCwdibG9ja0lkAXcIYi0wMDAwMDKHAQsDE2Zvb3Rub3RlX2RlZmluaXRpb24HAAEcAwlwYXJhZ3JhcGgHAAEdBgQAAR4XTm90aGluZyByZWZlcnMgdG8gdGhpcy4oAAEdB2Jsb2NrSWQBdwhiLTAwMDAwNYcBHQMJcGFyYWdyYXBoBwABNwYEAAE4Fkl0IGhhcyB0d28gcGFyYWdyYXBocy4oAAE3B2Jsb2NrSWQBdwhiLTAwMDAwNigAARwFbGFiZWwBdwFxKAABHAdibG9ja0lkAXcIYi0wMDAwMDQA",
+    "rendered_by_milkdown": "Text[^1].\n\n[^1]: Referenced.\n\n[^q]: Nothing refers to this.\n\n    It has two paragraphs.\n"
+  },
+  {
     "name": "footnote",
     "markdown": "A footnote reference.[^fixture]\n\n[^fixture]: Footnote definition.\n",
     "pm_json": {

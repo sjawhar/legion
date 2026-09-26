@@ -316,7 +316,11 @@ func (r *renderer) list(n *Node, prefix string) {
 		}
 		marker := listItemMarker(n.Type == "ordered_list", start+index, other)
 		r.writeSyntax(marker)
-		if checked, ok := item.Attrs["checked"].(bool); ok {
+		// A task item holding only an empty paragraph is written as an empty item, as the browser
+		// editor writes it: no form of the marker alone reads back as a task, and `- [ ]` reads back
+		// as an item holding the text `[ ]`.
+		emptyTask := len(item.Children) == 1 && item.Children[0].Type == "paragraph" && len(item.Children[0].Children) == 0
+		if checked, ok := item.Attrs["checked"].(bool); ok && !emptyTask {
 			if checked {
 				r.writeSyntax("[x] ")
 			} else {

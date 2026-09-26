@@ -60,9 +60,9 @@ func TestBrowserListSpacingRefusesWhatItCannotRead(t *testing.T) {
 			readable: "x[^1]\n\n[^1]: t\n\nAfter.\n",
 		},
 		{
-			name:     "a footnote definition nothing refers to",
-			refused:  "-\n\n[^q]: t\n",
-			readable: "Text.\n\n[^q]: t\n",
+			name:     "a footnote definition nothing refers to, ahead of another block",
+			refused:  "-\n\n[^q]: t\n\nAfter.\n",
+			readable: "Text.\n\n[^q]: t\n\nAfter.\n",
 		},
 		{
 			name:     "footnote definitions out of the order of their references",

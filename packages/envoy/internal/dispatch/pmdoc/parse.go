@@ -140,9 +140,17 @@ func parseUnstamped(markdown string) (*Node, error) {
 	if err := browserListSpacing(root, source); err != nil {
 		return nil, err
 	}
-	doc, err := parseBlock(root, source, footnoteLabels(root))
+	footnotes := footnoteLabels(root)
+	doc, err := parseBlock(root, source, footnotes)
 	if err != nil {
 		return nil, err
+	}
+	for _, definition := range droppedDefinitions(root) {
+		parsed, err := parseBlock(definition, source, footnotes)
+		if err != nil {
+			return nil, err
+		}
+		doc.Children = append(doc.Children, parsed)
 	}
 	if front != nil {
 		doc.Children = append([]*Node{front}, doc.Children...)
@@ -441,6 +449,21 @@ func tableDelimiterRow(cells []string) bool {
 		}
 	}
 	return true
+}
+
+// droppedDefinitions is each footnote definition nothing refers to, in the order written.
+// Goldmark's transformer drops one; the browser editor's parser keeps it, so this parser keeps it
+// after the definitions goldmark gathers at the document's end.
+func droppedDefinitions(root ast.Node) []ast.Node {
+	value, _ := root.Attribute(openedDefinitionsAttr)
+	opened, _ := value.([]openedDefinition)
+	var dropped []ast.Node
+	for _, definition := range opened {
+		if definition.node.Parent() == nil {
+			dropped = append(dropped, definition.node)
+		}
+	}
+	return dropped
 }
 
 func footnoteLabels(root ast.Node) map[int]string {

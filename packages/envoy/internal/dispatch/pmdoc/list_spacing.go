@@ -130,30 +130,34 @@ func browserOnlyShape(root ast.Node) string {
 }
 
 // movedFootnote names how goldmark moves a footnote definition the browser editor's parser keeps
-// where it stands, or returns "" when it moves none: goldmark gathers every definition at the
-// document's end, in the order of their first references, and drops one nothing refers to.
+// where it stands, or returns "" when it moves none: goldmark gathers every definition it keeps
+// at the document's end, in the order of their first references, and this parser writes the ones
+// nothing refers to after them (droppedDefinitions).
 func movedFootnote(root ast.Node) string {
 	value, _ := root.Attribute(openedDefinitionsAttr)
 	opened, _ := value.([]openedDefinition)
 	for _, definition := range opened {
-		switch {
-		case definition.nested:
+		if definition.nested {
 			return "a footnote definition inside another block, which goldmark moves to the document's end"
-		case definition.node.Parent() == nil:
-			return "a footnote definition nothing refers to, which goldmark drops"
 		}
 	}
-	list, ok := root.LastChild().(*extensionast.FootnoteList)
-	if !ok {
+	var written []ast.Node
+	if list, ok := root.LastChild().(*extensionast.FootnoteList); ok {
+		for definition := list.FirstChild(); definition != nil; definition = definition.NextSibling() {
+			written = append(written, definition)
+		}
+	}
+	written = append(written, droppedDefinitions(root)...)
+	if len(written) == 0 {
 		return ""
 	}
-	for definition := list.FirstChild(); definition.NextSibling() != nil; definition = definition.NextSibling() {
-		if definition.NextSibling().Pos() < definition.Pos() {
-			return "footnote definitions out of the order of their first references, which goldmark sorts them into"
+	for index := 1; index < len(written); index++ {
+		if written[index].Pos() < written[index-1].Pos() {
+			return "footnote definitions out of the order of their first references, with those nothing refers to last, which goldmark writes them in"
 		}
 	}
-	for child := root.FirstChild(); child != list; child = child.NextSibling() {
-		if startOf(child) > list.FirstChild().Pos() {
+	for child := root.FirstChild(); child != nil; child = child.NextSibling() {
+		if _, gathered := child.(*extensionast.FootnoteList); !gathered && startOf(child) > written[0].Pos() {
 			return "a block after a footnote definition, which goldmark moves the definition past"
 		}
 	}

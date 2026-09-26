@@ -890,3 +890,26 @@ func TestRenderKeepsBlankCodeLinesInFootnoteDefinitions(t *testing.T) {
 		t.Fatalf("Render() = %q, want the bytes main writes, %q", got, want)
 	}
 }
+
+// An empty task item is written as an empty item, as the browser editor writes it: no form of
+// its marker alone reads back as a task, and `- [ ]` reads back as an item holding the text `[ ]`.
+func TestRenderWritesAnEmptyTaskItemAsAnEmptyItem(t *testing.T) {
+	doc := &Node{Type: "doc", Children: []*Node{{Type: "bullet_list", Attrs: Attrs{"spread": false}, Children: []*Node{
+		{Type: "list_item", Attrs: Attrs{"label": "•", "listType": "bullet", "checked": false, "spread": false}, Children: []*Node{{Type: "paragraph"}}},
+		{Type: "list_item", Attrs: Attrs{"label": "•", "listType": "bullet", "checked": true, "spread": false}, Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: "b"}}}}},
+	}}}}
+	markdown, err := Render(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if markdown != "- \n- [x] b\n" {
+		t.Fatalf("Render() = %q, want %q", markdown, "- \n- [x] b\n")
+	}
+	back, err := Parse(markdown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first := back.Children[0].Children[0]; len(first.Children[0].Children) != 0 {
+		t.Fatalf("%q reads back with the first item holding %q", markdown, first.Children[0].Children[0].Text)
+	}
+}

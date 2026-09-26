@@ -596,8 +596,9 @@ that parser's spread depends on more - a blank line after an item in a footnote 
 other blank line in a quote, a typed block holding one in a list item - the document is refused,
 and so it is where goldmark reads its blocks otherwise: an empty list item and a blank line before
 a block its outer item holds, and a footnote definition inside another block, ahead of another
-block, out of the order of its first references, or referred to by nothing, which goldmark moves
-or drops. Every other document keeps goldmark's looseness - a loose list's items holding more
+block, or out of the order goldmark writes definitions in (by first reference, then those nothing
+refers to, which this parser keeps after the rest where goldmark drops them), since goldmark
+moves them. Every other document keeps goldmark's looseness - a loose list's items holding more
 than one block are spread, the list when none is - which is how the documents Dispatch stores were
 read.
 
