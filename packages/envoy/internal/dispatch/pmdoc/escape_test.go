@@ -47,6 +47,48 @@ func TestRenderEscapesBlockMarkerLinesInsideParagraphs(t *testing.T) {
 	}
 }
 
+// A paragraph line of tildes, written as it is, opens a code fence that swallows every block after
+// it, and a `:::` line at a typed block's own prefix closes that block early, leaving its
+// remaining lines and its closer to the document around it. Each context renders a document with
+// a block after the line and requires every block back, in place.
+func TestRenderKeepsTheBlocksAfterALineThatWouldOpenAFenceOrCloseATypedBlock(t *testing.T) {
+	text := func(value string) *Node { return &Node{Type: "text", Text: value} }
+	hardBreak := &Node{Type: "hardbreak", Attrs: Attrs{"isInline": false}}
+	paragraph := func(children ...*Node) *Node { return &Node{Type: "paragraph", Children: children} }
+	callout := func(children ...*Node) *Node {
+		return &Node{Type: "callout", Attrs: Attrs{BlockIDAttr: "c1", "kind": "note", "title": "T"}, Children: children}
+	}
+	after := paragraph(text("After."))
+	for name, doc := range map[string]*Node{
+		"a paragraph of tildes":        {Type: "doc", Children: []*Node{paragraph(text("~~~")), after}},
+		"tildes with an info string":   {Type: "doc", Children: []*Node{paragraph(text("~~~ go")), after}},
+		"tildes after a hard break":    {Type: "doc", Children: []*Node{paragraph(text("a"), hardBreak, text("~~~")), after}},
+		"tildes in a list item":        {Type: "doc", Children: []*Node{{Type: "bullet_list", Children: []*Node{{Type: "list_item", Children: []*Node{paragraph(text("~~~"))}}}}, after}},
+		"tildes in a blockquote":       {Type: "doc", Children: []*Node{{Type: "blockquote", Children: []*Node{paragraph(text("~~~"))}}, after}},
+		"tildes in a typed block":      {Type: "doc", Children: []*Node{callout(paragraph(text("~~~"))), after}},
+		"::: after a hard break in it": {Type: "doc", Children: []*Node{callout(paragraph(text("a"), hardBreak, text(":::")), paragraph(text("Inside."))), after}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			markdown := mustRender(t, doc)
+			back, err := Parse(markdown)
+			if err != nil {
+				t.Fatalf("Parse(%q) = %v", markdown, err)
+			}
+			if len(back.Children) != len(doc.Children) || len(back.Children[0].Children) != len(doc.Children[0].Children) {
+				t.Fatalf("Parse(%q) = %q, want every block back", markdown, mustRender(t, back))
+			}
+			for index, block := range doc.Children {
+				if back.Children[index].Type != block.Type {
+					t.Fatalf("Parse(%q) block %d is a %s, want a %s", markdown, index, back.Children[index].Type, block.Type)
+				}
+			}
+			if again := mustRender(t, back); again != markdown {
+				t.Fatalf("Render(Parse(%q)) = %q", markdown, again)
+			}
+		})
+	}
+}
+
 // A paragraph's second line of dashes or equals signs underlines its first into a heading, so
 // the escape applies to a marker line anywhere in the paragraph, not only its first.
 func TestRenderEscapesSetextUnderlinesInsideParagraphs(t *testing.T) {
