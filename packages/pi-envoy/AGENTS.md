@@ -328,20 +328,19 @@ steered; the check still counts against the cap, but what the period owes stays 
 settle. A run that starts while the Dispatch query is open pays for no check at all. A stop that arrives while a
 check holds the latch is recorded, not dropped, with the run count read at that settle, and checked as soon as
 the open check ends if a check is still owed and no run has started since it — otherwise a woken run that
-settled inside the check's window, the usual case, would go unchecked until some later run. Each such pass
-needs another real settle during the last, and every check that reaches the
-model counts against the cap, so the re-check cannot loop. The latch, the period and its budget are in memory
-only — a cold start or a session change begins at period 0, which
-nudges nothing until the next genuine user turn arms one. The guard, the staleness list and the `tool_result`
-edge compare only the host's **live** session id against the one the period was armed with, never the
-module-level `sessionID` the registration heartbeat maintains: a fresh TUI mints its id after `session_start`, so
-those two disagree for up to `ENVOY_HEARTBEAT_MS` and a brand-new terminal went unchecked, and unable to re-arm,
-for that whole window. Only a change of session id resets the period and bumps the generation — a `/fork`,
-`/handoff`, resume or switch. Re-establishing the *same* session does not: the heartbeat's drift heal runs for
-every fresh TUI once the host mints its id, and the `session_start` NATS retry runs every
-`NATS_RETRY_INTERVAL_MS` for the length of an Envoy outage, and clearing the period on those disabled the nudge
-exactly where it was meant to work. A `task` subagent's instance arms no period at all, so nothing rests on the
-module id.
+settled inside the check's window, the usual case, would go unchecked until some later run. Each such pass needs
+another real settle during the last, and every check that reaches the model counts against the cap, so the
+re-check cannot loop. The latch, the period and its budget are in memory only — a cold start or a session change
+begins at period 0, which nudges nothing until the next genuine user turn arms one. The guard, the staleness
+list and the `tool_result` edge compare only the host's **live** session id against the one the period was armed
+with, never the module-level `sessionID` the registration heartbeat maintains: a fresh TUI mints its id after
+`session_start`, so those two disagree for up to `ENVOY_HEARTBEAT_MS` and a brand-new terminal went unchecked,
+and unable to re-arm, for that whole window. Only a change of session id resets the period and bumps the
+generation — a `/fork`, `/handoff`, resume or switch. Re-establishing the *same* session does not: the
+heartbeat's drift heal runs for every fresh TUI once the host mints its id, and the `session_start` NATS retry
+runs every `NATS_RETRY_INTERVAL_MS` for the length of an Envoy outage, and clearing the period on those disabled
+the nudge exactly where it was meant to work. A `task` subagent's instance arms no period at all, so nothing
+rests on the module id.
 
 What the arming rule excludes is as load-bearing as what it covers. An Envoy delivery wakes a session through the
 same agent-initiated path the nudge itself uses, which emits no `before_agent_start`, so an event-woken turn arms

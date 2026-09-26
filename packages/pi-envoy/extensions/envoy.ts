@@ -301,9 +301,10 @@ export default function envoyExtension(pi: PiApi): void {
   // started after the check's settle, so the open check will not steer, and it runs again for
   // this settle once it is done. Dropped, the newer settle's check would be lost whenever that
   // run finished inside the check's window — the usual case for an agent that acts on a reply
-  // and stops within seconds. It keeps the run count read at its own settle: read when the
-  // re-check starts instead, a run that began in between — the user's next turn among them —
-  // would be invisible, and the re-check would steer into it.
+  // and stops within seconds. It carries the run count read at its own settle: the loop drops
+  // it when a run has started since, so the re-check pays no Dispatch read for a settle the
+  // session has moved past, and `checkAtSettle` judges staleness against that settle rather
+  // than trusting its caller to have done so.
   let settledDuringCheck: AskSettle | undefined;
   const takeSettledDuringCheck = (): AskSettle | undefined => {
     const settle = settledDuringCheck;
@@ -1204,7 +1205,7 @@ export default function envoyExtension(pi: PiApi): void {
     abortSelfCheck("a new user turn superseded the self-check");
     try {
       const open = await queryOpenAsks(id);
-      if (open !== null) armAskAwareness(id, event.prompt, open.snapshot.as_of);
+      if (open !== null) armAskAwareness(id, open.snapshot.as_of);
     } catch (error) {
       warnAskAvailability(context, error);
     }
@@ -1218,14 +1219,14 @@ export default function envoyExtension(pi: PiApi): void {
     runSeq += 1;
   });
 
-  // Arms one nudge period. A genuine user turn is the only thing that arms one: this handler
-  // runs for an ordinary prompt and for a steering batch carrying the user's own text, and
-  // `prompt` is that text. A `triggerTurn` continuation of an agent-attributed custom message —
-  // which is what the nudge below is — never reaches this handler at all (measured on OMP
-  // 18.2.9: one before_agent_start for the user's prompt, none for the continuation), so the
-  // nudge cannot re-arm itself, and one stop can produce at most one of them.
-  function armAskAwareness(id: string, prompt: string, asOf: string): void {
-    if (prompt.trim() === "") return;
+  // Arms one nudge period. A genuine user turn is the only thing that arms one: its caller,
+  // `before_agent_start`, runs for an ordinary prompt and for a steering batch carrying the
+  // user's own text, and returns before this for an empty one. A `triggerTurn` continuation of
+  // an agent-attributed custom message — which is what the nudge below is — never reaches that
+  // handler at all (measured on OMP 18.2.9: one before_agent_start for the user's prompt, none
+  // for the continuation), so the nudge cannot re-arm itself, and one stop can produce at most
+  // one of them.
+  function armAskAwareness(id: string, asOf: string): void {
     askAwareness = {
       session_id: id,
       period: (askAwareness.session_id === id ? askAwareness.period : 0) + 1,
