@@ -205,8 +205,8 @@ ask or callout from the text before it, at any depth (inside a blockquote, a lis
 callout too), is `400 INVALID_OP` on `anchor` (`pmdoc.ErrJoinEmptiesTypedBlock`): ProseMirror's
 join would leave that block empty, and the browser editor drops it, which for an ask retracts it. A refused accept writes nothing, and the
 suggestion stays open; the dashboard's margin shows the refusal's message and offers no Retry for
-`INVALID_ASK_BLOCK` or `INVALID_OP` (`useCommentActionQueue` `actionFailure`), since the same accept
-is refused every time.
+`INVALID_ASK_BLOCK`, `INVALID_MARKDOWN` or `INVALID_OP` (`useCommentActionQueue` `actionFailure`),
+since the same accept is refused every time.
 
 `delete_row` and `delete_column` each take a table `block` id and a zero-based `index`, and mutate
 the table in place. Row `0` is the header; deleting it promotes the first body row into the header,
