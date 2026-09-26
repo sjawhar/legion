@@ -481,6 +481,19 @@ func TestAReplacedWatchersBufferedEntryIsDropped(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("Rewatch never returned")
 	}
+	// The premise the lock wait sets up: the switch came while the first watcher still held most of
+	// its queue. Read at the switch, since the new watcher's scan takes 40 x 10 ms to apply every key
+	// again; if the wait released late1 before the Rewatch was parked on applyMu, the first watcher
+	// applied the whole queue first and nothing below would test the dropped entries.
+	appliedBeforeSwitch := 0
+	for _, key := range keys {
+		if count(key) > 0 {
+			appliedBeforeSwitch++
+		}
+	}
+	if appliedBeforeSwitch == queued {
+		t.Fatalf("all %d queued keys were applied before the Rewatch switched: the lock wait did not hold late1 until the Rewatch was parked on applyMu", queued)
+	}
 
 	last := keys[len(keys)-1]
 	eventually(t, "the new watcher's scan to apply "+last, func() bool { return count(last) > 0 })
@@ -776,6 +789,21 @@ func TestAReplacedWatchersSentinelDoesNotReleaseReadiness(t *testing.T) {
 	releaseOnce.Do(func() { close(release) })
 	if err := <-done; err != nil {
 		t.Fatalf("rewatch: %v", err)
+	}
+	// The premise the lock wait sets up: the switch came while the first watcher still held the rest
+	// of its scan. Read at the switch, before the current watcher's scan (10 ms a key) re-applies
+	// them. If the wait released k000 before the Rewatch was parked on applyMu, the first watcher
+	// applied k001..k009 and read its own sentinel while it was still current, and the assertion
+	// below would pass without testing the sentinel at all.
+	premise := false
+	for i := 1; i < 10; i++ {
+		if !into.has(fmt.Sprintf("k%03d", i)) {
+			premise = true
+			break
+		}
+	}
+	if !premise {
+		t.Fatal("the first watcher applied all of k001..k009 before the Rewatch switched: the lock wait did not hold k000 until the Rewatch was parked on applyMu")
 	}
 	eventually(t, "readiness", w.Ready)
 	if !into.has("k199") {
