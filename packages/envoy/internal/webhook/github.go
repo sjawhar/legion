@@ -107,7 +107,7 @@ const githubMaxBody = 25 << 20
 // (bodyBudget). The body is buffered whole before its signature can be checked, so without it
 // anyone who can reach the route could make the listener hold 25 MiB per connection. A request
 // charges its buffer as its body arrives and holds it until the handler returns; one whose next
-// piece does not fit waits, except the request that has been reading longest. A signed body
+// piece does not fit waits, except the request that has held its place longest. A signed body
 // decodes to about two and a half times its size again. It is at least githubMaxBody, so any body
 // GitHub sends fits.
 const githubBodyBudget = 64 << 20

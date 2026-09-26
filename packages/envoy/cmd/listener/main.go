@@ -485,7 +485,7 @@ func serviceStarting(w http.ResponseWriter, _ *http.Request) {
 // openWebhooks builds the webhook routes over NATS and the CI store and opens the gate onto them,
 // while every other path the gate guards (/v1) still answers 503 "service starting". A webhook
 // waits on nothing else: the durable consumer's bind in particular waits out a rolling deploy's
-// old task, and a delivery GitHub is refused in that window is not redelivered. It returns the
+// old task, and GitHub does not redeliver a delivery refused in that window. It returns the
 // webhook routes for openListener to serve with /v1.
 func openWebhooks(gate *startingGate, hooks []webhookRoute, client *bus.Client, ciStore *cistore.Store) *http.ServeMux {
 	routes := http.NewServeMux()
