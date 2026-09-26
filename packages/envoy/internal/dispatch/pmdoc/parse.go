@@ -117,7 +117,8 @@ func BlockShapeError(block *Node) error {
 }
 
 // shapeDifference names the first block of want that got holds as another kind, or holds where
-// want has none, or lacks; both are empty when the two have the same shape.
+// want has none, or lacks; both are empty when the two have the same shape. An empty paragraph is
+// not written, so it is not expected back.
 func shapeDifference(want, got *Node) (string, string) {
 	if want.Type != got.Type {
 		return blockName(want.Type), blockName(got.Type)
@@ -125,14 +126,20 @@ func shapeDifference(want, got *Node) (string, string) {
 	if isTextblock(want.Type) {
 		return "", ""
 	}
-	for index := 0; index < max(len(want.Children), len(got.Children)); index++ {
+	written := make([]*Node, 0, len(want.Children))
+	for _, child := range want.Children {
+		if child.Type != "paragraph" || len(child.Children) != 0 {
+			written = append(written, child)
+		}
+	}
+	for index := 0; index < max(len(written), len(got.Children)); index++ {
 		switch {
-		case index >= len(want.Children):
+		case index >= len(written):
 			return endOf(want.Type), blockName(got.Children[index].Type)
 		case index >= len(got.Children):
-			return blockName(want.Children[index].Type), "nothing"
+			return blockName(written[index].Type), "nothing"
 		}
-		if w, g := shapeDifference(want.Children[index], got.Children[index]); w != "" {
+		if w, g := shapeDifference(written[index], got.Children[index]); w != "" {
 			return w, g
 		}
 	}
@@ -426,6 +433,11 @@ func parseBlocks(parent ast.Node, source []byte, footnotes map[int]string) ([]*N
 				children = append(children, parsed)
 			}
 			continue
+		}
+		// Goldmark puts a footnote's backlink after a definition's last block when that block is
+		// not a paragraph, which this parser does not read.
+		if _, ok := child.(*extensionast.FootnoteBacklink); ok && len(children) > 0 {
+			return nil, fmt.Errorf("%w: a footnote definition that ends in %s rather than a paragraph", ErrSchema, blockName(children[len(children)-1].Type))
 		}
 		parsed, err := parseBlock(child, source, footnotes)
 		if err != nil {

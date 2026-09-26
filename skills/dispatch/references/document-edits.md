@@ -76,7 +76,9 @@ item or a blockquote can be two columns away), or move the code block out of the
 that reads back as another block is `INVALID_OP` too: a line of only `-`, `*` or `_` is a horizontal rule, and a line
 of only colons a typed block's fence; to add that block, `insert` it beside the paragraph (`insert` with markdown
 `***` adds a rule), except in a footnote definition, which the document reads at its end, so a block inserted beside
-it reads back ahead of it - there, keep the characters as text with other text on that line. Use zero-based
+it reads back ahead of it - there, keep the characters as text with other text on that line. End lines in `with` with
+`\n` or `\r\n`: a carriage return that no line feed follows is `INVALID_OP`, since the browser editor ends a line
+there and Dispatch's parser does not. Use zero-based
 `occurrence` for a
 repeated target; re-read a missing or ambiguous target before retrying. Pass `summary` to name the version when recording a decision.
 

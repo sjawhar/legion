@@ -2124,6 +2124,35 @@ func TestApplyOperationReplaceWithNothingEmptiesTheParagraph(t *testing.T) {
 	}
 }
 
+// An emptied paragraph is not written, so a block holding one is judged for shape as the blocks
+// it writes: a later replace in that block that would read back as another block is refused as it
+// is in a block that never held one.
+func TestApplyOperationReplaceJudgesABlockHoldingAnEmptiedParagraph(t *testing.T) {
+	for _, test := range []struct{ name, markdown, with string }{
+		{"a quote, dashes", "Intro.\n\n> Body.\n>\n> More.\n", "---"},
+		{"a quote, tildes", "Intro.\n\n> Body.\n>\n> More.\n\nAfter.\n", "~~~"},
+		{"a callout", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n\nMore.\n:::\n", "---"},
+		{"a list item", "Intro.\n\n- item\n\n  Body.\n\n  More.\n", "---"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tree, err := parseInput(test.markdown)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pmdoc.EnsureBlockIDs(tree)
+			emptied, err := applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: ""})
+			if err != nil {
+				t.Fatalf("emptying the first paragraph = %v", err)
+			}
+			_, err = applyOperation(emptied, model.EditOp{Op: "replace", Find: "More.", With: test.with})
+			var invalid *ErrInvalidOp
+			if !errors.As(err, &invalid) || invalid.Field != "with" {
+				t.Fatalf("replace with %q beside an emptied paragraph = %v, want INVALID_OP on with", test.with, err)
+			}
+		})
+	}
+}
+
 // A replace writes text. Text that reads back as another block where it lands - a line of dashes
 // becomes a horizontal rule, a line of colons a typed block's fence - is refused with that cause,
 // whatever the block around it, and the advice is the insert that adds the block the caller
@@ -2174,6 +2203,9 @@ func TestApplyOperationReplaceRefusesTextThatReadsBackAsAnotherBlock(t *testing.
 			}
 			if strings.Contains(invalid.Reason, "the a ") {
 				t.Fatalf("reason %q names a block twice over", invalid.Reason)
+			}
+			if strings.Contains(invalid.Reason, "Backlink") {
+				t.Fatalf("reason %q names the parser's node rather than the caller's footnote", invalid.Reason)
 			}
 		})
 	}

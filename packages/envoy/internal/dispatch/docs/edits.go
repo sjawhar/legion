@@ -686,6 +686,9 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		if err != nil {
 			return nil, err
 		}
+		if err := refuseLoneCarriageReturn("with", op.With); err != nil {
+			return nil, err
+		}
 		at, _ := pmdoc.ContainingTextblock(tree, r.From)
 		code := at.Node.Type == "code_block"
 		var with *pmdoc.Node
@@ -1097,31 +1100,39 @@ func refuseUnreadableReplacement(before, after *pmdoc.Node, match pmdoc.Range, w
 // refuseReshapedReplacement refuses a replace whose text the document reads back as blocks of
 // another kind where it lands - a paragraph whose new text is `---` reads back as a horizontal
 // rule - since a replace writes text and the document could not carry it back as text. An empty
-// with that empties its paragraph deletes the text on purpose, so the block and its id stay,
-// holding nothing, though an empty paragraph is not written; one that leaves text reading back as
-// another block is refused naming that text.
+// with that leaves such text behind is refused naming that text; one that empties its paragraph
+// changes no shape, since an empty paragraph is not written (pmdoc.BlockShapeError).
 func refuseReshapedReplacement(before, after *pmdoc.Node, match pmdoc.Range, with string) error {
-	at, ok := pmdoc.ContainingTextblock(after, match.From)
-	if !ok {
-		return fmt.Errorf("no textblock holds the replaced range at %d", match.From)
-	}
-	if with == "" && emptyTextblock(at.Node) {
-		return nil
-	}
 	reshaped, err := replacementBroke(before, after, match, pmdoc.BlockShapeError)
 	if err != nil || reshaped == nil {
 		return err
 	}
+	at, _ := pmdoc.ContainingTextblock(after, match.From)
 	if with == "" {
 		left := nodeText(at.Node)
 		return &ErrInvalidOp{Field: "with", Reason: fmt.Sprintf(
 			"with \"\" leaves %q, text the document reads back as another block where it lands (%v); %s",
-			left, reshaped, blockSyntaxAdvice(left, inFootnoteDefinition(at)),
+			left, reshaped, blockSyntaxAdvice(left, at),
 		)}
 	}
 	return &ErrInvalidOp{Field: "with", Reason: fmt.Sprintf(
 		"with %q is text the document reads back as another block where it lands (%v); %s",
-		with, reshaped, blockSyntaxAdvice(with, inFootnoteDefinition(at)),
+		with, reshaped, blockSyntaxAdvice(with, at),
+	)}
+}
+
+// refuseLoneCarriageReturn refuses replacement text holding a carriage return that no line feed
+// follows. Markdown ends a line there, and so does the browser editor's parser, while this
+// server's reads it as text, so the document would read back as other lines in the browser -
+// `x\r---` as a heading, and code after it outside the block holding it. A carriage return before
+// a line feed is a line ending both read the same way.
+func refuseLoneCarriageReturn(field, with string) error {
+	if !strings.Contains(strings.ReplaceAll(with, "\r\n", ""), "\r") {
+		return nil
+	}
+	return &ErrInvalidOp{Field: field, Reason: fmt.Sprintf(
+		"%s %q holds a carriage return that no line feed follows, which the browser editor reads as a line ending and this server reads as text, so the document would read back as other lines there; end each line with \\n or \\r\\n",
+		field, with,
 	)}
 }
 
@@ -1140,24 +1151,25 @@ func replacementBroke(before, after *pmdoc.Node, match pmdoc.Range, check func(*
 	return broke, nil
 }
 
-// blockSyntaxAdvice says what to do with text that reads as block syntax where it lands: a line
-// of only `-`, `*` or `_` is a horizontal rule and a line of only colons a typed block's fence,
-// and anything else is left to the reader of the reason before it. The block the caller probably
-// meant is inserted beside the one holding the text, except in a footnote definition: the document
-// reads a definition at its end, so a block added beside one reads back ahead of it, and the text
-// stays the only way to keep what the caller wrote there.
-func blockSyntaxAdvice(with string, footnote bool) string {
+// blockSyntaxAdvice says what to do with text that reads as block syntax where it lands, in the
+// textblock at: a line of only `-`, `*` or `_` is a horizontal rule and a line of only colons a
+// typed block's fence, and anything else is left to the reader of the reason before it. The block
+// the caller probably meant is inserted beside the one holding the text, except in a footnote
+// definition: the document reads a definition at its end, so a block added beside one reads back
+// ahead of it, and the text stays the only way to keep what the caller wrote there.
+func blockSyntaxAdvice(with string, at pmdoc.TextblockAt) string {
+	footnote := inFootnoteDefinition(at)
 	for _, line := range strings.Split(strings.ReplaceAll(with, "\\\n", "\n"), "\n") {
-		line = strings.TrimSpace(strings.TrimSuffix(line, "  "))
 		var reads, insert string
 		switch {
-		case thematicBreakLine.MatchString(line):
+		case thematicBreakLine.MatchString(strings.Trim(line, " \t\r")):
 			reads, insert = "a horizontal rule", fmt.Sprintf("to add a rule, insert it as its own block beside this one (insert with markdown %q)", "***")
-		case line != "" && strings.Trim(line, ":") == "" && len(line) >= 3:
+		case pmdoc.TypedFenceLine(line):
 			reads, insert = "a typed block's fence", "to add a typed block, insert it as its own block beside this one"
 		default:
 			continue
 		}
+		line = strings.Trim(line, " \t\r")
 		if footnote {
 			return fmt.Sprintf("the line %q reads as %s; to keep the characters as text, put other text on that line (a footnote definition is read at the document's end, so a block added beside it reads back ahead of it)", line, reads)
 		}
@@ -1230,7 +1242,7 @@ func unreadableReason(before, after *pmdoc.Node, match pmdoc.Range, with string,
 			with,
 		)
 	}
-	return fmt.Sprintf("with %q leaves markdown the document cannot read back where it lands (%v); %s", with, unreadable, blockSyntaxAdvice(with, ok && inFootnoteDefinition(at)))
+	return fmt.Sprintf("with %q leaves markdown the document cannot read back where it lands (%v); %s", with, unreadable, blockSyntaxAdvice(with, at))
 }
 
 // emptyTextblock reports whether a textblock holds no text but whitespace.

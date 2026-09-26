@@ -299,6 +299,9 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		if !accept {
 			with = ""
 		}
+		if err := refuseLoneCarriageReturn("replace_with", with); err != nil {
+			return err
+		}
 		at, _ := pmdoc.ContainingTextblock(tree, range_.From)
 		code := at.Node.Type == "code_block"
 		var replacement *pmdoc.Node

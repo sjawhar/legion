@@ -132,7 +132,8 @@ than four columns past the column the typed block's own lines start at on the wr
 refused (`refuseCodeThatEndsItsBlock`), because the browser editor's parser ends the typed block at
 it even inside fenced code. That measure counts the width of the list markers and `> ` around the
 code, advances a tab to the next multiple of four from the column it stands at, so a tab in a
-callout two columns in advances two, trims only spaces and tabs after the colons, and finds nothing
+callout two columns in advances two, trims only spaces, tabs and a line-ending carriage return around
+the colons (`pmdoc.TypedFenceLine`), and finds nothing
 closing in a blockquote inside the typed block (`pmdoc.TypedFenceLineInCode`, held to the engine's
 own verdicts in `pmdoc/testdata/typed-fence-lines.json`, which the fixture generator writes for a
 callout at the top and inside a blockquote, list items and a footnote definition); the advice is
@@ -140,8 +141,13 @@ four spaces, which no layout closes. A `replace` is also refused where its text 
 another block - `---` over a paragraph becomes a horizontal rule - naming the block it reads back
 as and the `insert` that adds it, except in a footnote definition, which the document reads at its
 end, so a block inserted beside one reads back ahead of it (`refuseReshapedReplacement`). An empty
-`with` that empties its paragraph is not refused by that rule, and one leaving text that reads back
-as another block is, naming the text. Everywhere else `replace` is
+paragraph is not written, so the shape comparison (`pmdoc.BlockShapeError`) expects none back: an
+empty `with` that empties its paragraph changes no shape, a block holding an emptied paragraph is
+still judged for every later replace, and an empty `with` leaving text that reads back as another
+block is refused, naming the text. A `with` or an accepted suggestion's text holding a carriage
+return that no line feed follows is `INVALID_OP` (`refuseLoneCarriageReturn`): markdown and the
+browser editor end a line there, while this server's parser reads it as text, so `x\r---` would
+read back in the browser as a heading. Everywhere else `replace` is
 inline: `with` parses through `pmdoc.ParseInline` (paragraph-only block grammar), so a multi-paragraph
 `with` is `INVALID_OP`, so is any non-empty `with` that renders to no inline content (a line
 indented four spaces or a tab, which markdown reads as a code block, or whitespace alone — an
@@ -161,7 +167,7 @@ start, where a heading, bullet, `1.`/`1)` ordered or `>` blockquote marker is `I
 `with` as well (`blockMarkerAfterHardBreak`), since replace is inline and that marker can only be
 written as escaped literal text continuing the matched block, never as the block it names. A hard
 break is itself `INVALID_OP` when the matched textblock is a heading or a table cell
-(`pmdoc.OneLineTextblock`), which are written on one line, so the break would end the block. A bare
+(`pmdoc.TextblockAt.OneLine`), which are written on one line, so the break would end the block. A bare
 newline is a soft break, which renders as a space and reaches no line start; an ordered marker
 whose start number is not 1 cannot interrupt a paragraph, and leading zeros do not change that
 number, so `01.` and `001)` are refused with `1.`, while `02.`, `10.` and a run of zeros past the
