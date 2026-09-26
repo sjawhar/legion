@@ -270,9 +270,12 @@ func TestDocumentEditsRefuseCodeThatWouldEndItsTypedBlock(t *testing.T) {
 // Accepting a suggestion writes its replacement through the same shape checks a replace runs: one
 // that leaves a block the document cannot read back, or reads back as blocks of another kind, is
 // refused naming replace_with, and nothing is written - the document stays byte for byte as it was
-// and the suggestion stays open. An accept whose blocks read back as written is stored as before,
-// including one that writes blocks, such as a rule or a list over a whole paragraph, and a line
-// of dashes is such a rule.
+// and the suggestion stays open. The person accepting cannot change the text, so the refusal says
+// what the text writes and names what they can do - reject the suggestion - never an edit-route
+// operation, and it says the text empties a paragraph only when the text is empty. An accept
+// whose blocks read back as written is stored as before, including one that writes blocks, such
+// as a rule or a list over a whole paragraph, and a line of dashes is such a rule. Where the text
+// lands at the document's start, a closed front-matter block that opens it is front matter.
 func TestAcceptingASuggestionRefusesAReplacementTheDocumentCannotCarryBack(t *testing.T) {
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
@@ -283,6 +286,8 @@ func TestAcceptingASuggestionRefusesAReplacementTheDocumentCannotCarryBack(t *te
 	const (
 		paragraph  = "Intro.\n\nBody.\n\nAfter.\n"
 		listItem   = "Intro.\n\n- Body.\n- two\n"
+		longItem   = "Intro.\n\n- Body.\n\n  more\n- two\n"
+		ordered    = "Intro.\n\n1. Body.\n2. two\n"
 		blockquote = "Intro.\n\n> Body.\n"
 		callout    = "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n"
 		footnote   = "x[^1]\n\n[^1]: Body.\n"
@@ -306,16 +311,19 @@ func TestAcceptingASuggestionRefusesAReplacementTheDocumentCannotCarryBack(t *te
 		}
 		return issue.PrimaryArtifactID, decodeBody[model.Comment](t, created)
 	}
-	for index, test := range []struct{ name, spec, with string }{
-		{"colons that read as a fence, in a paragraph", paragraph, ":::\nb"},
-		{"a rule in a list item", listItem, "***"},
-		{"a list in a list item", listItem, "- a"},
-		{"two paragraphs in a list item", listItem, "a\n\nb"},
-		{"code in a list item", listItem, "```\nc\n```"},
-		{"colons that read as a fence, in a blockquote", blockquote, ":::\nb"},
-		{"a fence in a callout", callout, ":::"},
-		{"a rule in a footnote definition", footnote, "***"},
-		{"a list in a footnote definition", footnote, "- a"},
+	for index, test := range []struct{ name, spec, with, says string }{
+		{"colons that read as a fence, in a paragraph", paragraph, ":::\nb", "a typed block's fence"},
+		{"a rule in a list item", listItem, "***", "writes a horizontal rule at the start of this list item"},
+		{"a list in a list item", listItem, "- a", "writes a bullet list at the start of this list item"},
+		{"two paragraphs in a list item", listItem, "a\n\nb", "writes two paragraphs in this list item"},
+		{"code in a list item", listItem, "```\nc\n```", "writes a code block at the start of this list item"},
+		{"a list in a list item holding two paragraphs", longItem, "- a", "writes a bullet list at the start of this list item"},
+		{"a list in an ordered item", ordered, "- a", "writes a bullet list at the start of this list item"},
+		{"nothing in a list item", listItem, "", "empties the paragraph this list item holds"},
+		{"colons that read as a fence, in a blockquote", blockquote, ":::\nb", "a typed block's fence"},
+		{"a fence in a callout", callout, ":::", "a typed block's fence"},
+		{"a rule in a footnote definition", footnote, "***", "writes a horizontal rule in this footnote definition"},
+		{"a list in a footnote definition", footnote, "- a", "writes a bullet list in this footnote definition"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			artifactID, comment := suggest(t, "R"+string(rune('A'+index)), test.spec, test.with)
@@ -323,6 +331,21 @@ func TestAcceptingASuggestionRefusesAReplacementTheDocumentCannotCarryBack(t *te
 			accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
 			if body := accepted.Body.String(); accepted.Code != http.StatusBadRequest || !strings.Contains(body, `"code":"INVALID_OP"`) || !strings.Contains(body, "replace_with") {
 				t.Fatalf("accept: status=%d body=%s", accepted.Code, body)
+			}
+			var refusal struct{ Error string }
+			if err := json.Unmarshal(accepted.Body.Bytes(), &refusal); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(refusal.Error, test.says) || !strings.Contains(refusal.Error, "reject the suggestion") {
+				t.Fatalf("refusal %q does not say %q and name rejecting the suggestion", refusal.Error, test.says)
+			}
+			for _, edit := range []string{"delete and find", "delete {block", "insert with markdown", "insert it as", "give replace_with", "put other text"} {
+				if strings.Contains(refusal.Error, edit) {
+					t.Fatalf("refusal %q names %q, which the person accepting cannot do", refusal.Error, edit)
+				}
+			}
+			if test.with != "" && strings.Contains(refusal.Error, "empties") {
+				t.Fatalf("refusal %q says the text empties a paragraph, but it is %q", refusal.Error, test.with)
 			}
 			if after := text(artifactID); after != before {
 				t.Fatalf("after a refused accept = %q, want it unchanged, %q", after, before)
@@ -344,6 +367,8 @@ func TestAcceptingASuggestionRefusesAReplacementTheDocumentCannotCarryBack(t *te
 		{"two paragraphs over one", paragraph, "a\n\nb", "Intro.\n\na\n\nb\n\nAfter.\n"},
 		{"dashes inside a line", paragraph, "--- a note", "Intro.\n\n--- a note\n\nAfter.\n"},
 		{"text in a list item", listItem, "Changed.", "Intro.\n\n- Changed.\n- two\n"},
+		{"front matter over an opening heading", "# Body.\n\nText.\n", "---\nstatus: draft\n---\n\n# Body.", "---\nstatus: draft\n---\n\n# Body.\n\nText.\n"},
+		{"front matter over an opening paragraph", "Body.\n\nAfter.\n", "---\ntitle: x\n---\n\nBody.", "---\ntitle: x\n---\n\nBody.\n\nAfter.\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			artifactID, comment := suggest(t, "K"+string(rune('A'+index)), test.spec, test.with)
@@ -354,6 +379,18 @@ func TestAcceptingASuggestionRefusesAReplacementTheDocumentCannotCarryBack(t *te
 				t.Fatalf("after accepting = %q, want %q", after, test.want)
 			}
 		})
+	}
+	// An unclosed `---` that opens the document is a rule there, as `***` is.
+	opening := map[string]string{}
+	for index, with := range []string{"---", "***"} {
+		artifactID, comment := suggest(t, "H"+string(rune('A'+index)), "# Body.\n\nText.\n", with)
+		if accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice"); accepted.Code != http.StatusOK {
+			t.Fatalf("accept %q: status=%d body=%s", with, accepted.Code, accepted.Body.String())
+		}
+		opening[with] = text(artifactID)
+	}
+	if opening["---"] != opening["***"] {
+		t.Fatalf("accepting `---` over an opening heading = %q, want what `***` writes, %q", opening["---"], opening["***"])
 	}
 }
 

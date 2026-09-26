@@ -2239,7 +2239,7 @@ func TestApplyOperationReplaceRefusesTextThatReadsBackAsAnotherBlock(t *testing.
 // An insert's markdown is written into the document, so a leading `---` line is a rule, as `***`
 // is, and never the front matter that would swallow it. Only the document's start can hold front
 // matter, so an insert landing there, at `start` or before the first block, still opens the
-// document with it.
+// document with a closed front-matter block.
 func TestApplyOperationInsertReadsFrontMatterOnlyAtTheStart(t *testing.T) {
 	for _, test := range []struct {
 		name string
@@ -2266,5 +2266,24 @@ func TestApplyOperationInsertReadsFrontMatterOnlyAtTheStart(t *testing.T) {
 				t.Fatalf("after inserting %q = %q (%v), want %q", test.op.Markdown, markdown, err, test.want)
 			}
 		})
+	}
+	// Only a closed block is front matter: an unclosed `---` at the start is a rule, as `***` is.
+	opening := map[string]string{}
+	for _, markdown := range []string{"---", "***"} {
+		tree, err := parseInput("Intro.\n\nBody.\n\nAfter.\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		pmdoc.EnsureBlockIDs(tree)
+		next, err := applyOperation(tree, model.EditOp{Op: "insert", Before: "start", Markdown: markdown})
+		if err != nil {
+			t.Fatalf("insert %q at the start = %v", markdown, err)
+		}
+		if opening[markdown], err = renderTree(next); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if opening["---"] != opening["***"] {
+		t.Fatalf("inserting `---` at the start = %q, want what `***` writes, %q", opening["---"], opening["***"])
 	}
 }
