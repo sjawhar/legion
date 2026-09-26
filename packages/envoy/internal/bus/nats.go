@@ -127,12 +127,12 @@ func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB 
 			// A drain ends each subscription whose consumer nats.go created, then deletes that
 			// consumer. At shutdown the listener leaves a KV watcher the last reconnect has not yet
 			// replaced for the drain to end, and that watcher's ordered consumer can already be gone:
-			// a NATS restart loses it outright (nats.go keeps it in memory), and a disconnect longer
-			// than its inactive threshold lets the server delete it. So the delete finds it gone:
-			// the state the delete was for. At the pinned nats.go (v1.50.0) that delete, in
-			// checkDrained, is the only report of the bare sentinel, which DeleteConsumer returns;
-			// re-check that on a nats.go bump. The one other report of this error, an ordered
-			// consumer nats.go failed to recreate, wraps it and stays an ERROR.
+			// a NATS restart loses it outright (nats.go creates it with memory storage), and a
+			// disconnect longer than its inactive threshold lets the server delete it. So the delete
+			// finds it gone: the state the delete was for. At the pinned nats.go (v1.50.0) that
+			// delete, in checkDrained, is the only report of the bare sentinel, which
+			// DeleteConsumer returns; re-check that on a nats.go bump. The one other report of this
+			// error, an ordered consumer nats.go failed to recreate, wraps it and stays an ERROR.
 			level = slog.LevelWarn
 		case errors.Is(err, nats.ErrConsumerNotActive):
 			// Every consumer Envoy runs with idle heartbeats is a KV watcher's ordered consumer,
