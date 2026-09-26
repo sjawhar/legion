@@ -480,7 +480,9 @@ is refused with `400 INVALID_ASK_BLOCK` when an ask's body breaks its content ru
 `paragraph+ bullet_list?` - one or more paragraphs, then at most one bullet list, last
 (`pmdoc.AskContentError`) - as the browser editor's parser refuses to build such a block. A new
 document is held to it for every ask, a new version only for each ask it writes or changes
-(`refuseChangedAsks`); what the rule allows is taken, and an option without a label or a question
+(`refuseChangedAsks`), comparing the ask's rendering with the current one (`askMarkdown`), since a
+version is markdown and cannot carry a comment's anchor mark or the id a reader's browser derives
+for a heading; what the rule allows is taken, and an option without a label or a question
 that is only an image is left to settlement's `invalid` flag. A document edit is refused for an ask
 it writes or changes that breaks the rule or that settlement cannot read (`validateEditedAskBlocks`).
 Neither refuses an ask a browser edit left unreadable that it carries through unchanged, so such an

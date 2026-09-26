@@ -310,6 +310,42 @@ func appendToAsk(block *pmdoc.Node) func(*pmdoc.Node) *pmdoc.Node {
 	}
 }
 
+// A version's markdown carries what a rendering writes, so an unreadable ask it carries through
+// unchanged is taken whatever the live ask holds that no rendering writes: a comment's anchor mark
+// in its text, or the id a reader's browser derives for a heading in it.
+func TestReplaceCarriesAnUnreadableAskWithWhatNoRenderingWrites(t *testing.T) {
+	const ask = "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nShould we ship this week?\n:::\n"
+	actor := model.Actor{Kind: "user", ID: "alice"}
+	for _, test := range []struct {
+		name  string
+		setup func(t *testing.T, service *Service, artifactID string)
+	}{
+		{"a comment anchored in its question", func(t *testing.T, service *Service, artifactID string) {
+			if _, err := service.MarkQuote(context.Background(), artifactID, MarkSpec{Kind: MarkComment, ID: "c1", By: actor}, "this week", nil); err != nil {
+				t.Fatal(err)
+			}
+			editLiveTree(t, service, artifactID, appendToAsk(&pmdoc.Node{Type: "code_block", Attrs: pmdoc.Attrs{"language": nil}, Children: []*pmdoc.Node{{Type: "text", Text: "code"}}}))
+		}},
+		{"a heading with the id a browser derived", func(t *testing.T, service *Service, artifactID string) {
+			editLiveTree(t, service, artifactID, appendToAsk(&pmdoc.Node{Type: "heading", Attrs: pmdoc.Attrs{"level": float64(2), "id": "decision"}, Children: []*pmdoc.Node{{Type: "text", Text: "Decision"}}}))
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			service.settle = time.Hour
+			seedServiceText(t, service, artifactID, ask)
+			test.setup(t, service, artifactID)
+			current, err := service.Text(context.Background(), artifactID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := service.ReplaceText(context.Background(), artifactID, strings.Replace(current, "Intro.", "Introduction.", 1), actor); err != nil {
+				t.Fatalf("ReplaceText carrying the unreadable ask = %v, want it taken", err)
+			}
+		})
+	}
+}
+
 // An ask body the schema does not allow - `paragraph+ bullet_list?` - is refused where markdown
 // enters a document, as the browser editor's parser refuses to build the block; a replace of the
 // document refuses it the same way and leaves the document as it was.

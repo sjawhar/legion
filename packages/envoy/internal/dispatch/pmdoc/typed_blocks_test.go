@@ -459,3 +459,24 @@ func TestParseMintsAnOmittedTypedBlockID(t *testing.T) {
 		t.Fatalf("generated typed block id = %#v, want generated-id", got)
 	}
 }
+
+// An ask holding a block its content rule does not allow is refused naming that block as a
+// reader would, with its article.
+func TestAskContentErrorNamesTheBlockThatBreaksTheRule(t *testing.T) {
+	paragraph := func(text string) *Node {
+		return &Node{Type: "paragraph", Children: []*Node{{Type: "text", Text: text}}}
+	}
+	for _, test := range []struct {
+		child *Node
+		want  string
+	}{
+		{&Node{Type: "ordered_list", Attrs: Attrs{"order": float64(1), "spread": false}, Children: []*Node{{Type: "list_item", Children: []*Node{paragraph("one")}}}}, "holds an ordered list"},
+		{&Node{Type: "hr"}, "holds a horizontal rule"},
+		{&Node{Type: "code_block", Attrs: Attrs{"language": nil}, Children: []*Node{{Type: "text", Text: "x"}}}, "holds a code block"},
+	} {
+		ask := &Node{Type: "ask", Attrs: Attrs{BlockIDAttr: "a1"}, Children: []*Node{paragraph("Which?"), test.child}}
+		if err := AskContentError(&Node{Type: "doc", Children: []*Node{ask}}); err == nil || !strings.Contains(err.Error(), test.want) {
+			t.Fatalf("AskContentError = %v, want it to say %q", err, test.want)
+		}
+	}
+}

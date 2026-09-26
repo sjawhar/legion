@@ -231,16 +231,17 @@ func validateEditedAskBlocks(before, after *pmdoc.Node) error {
 		}
 		_, err := parseAskBlock(ask)
 		return err
-	})
+	}, nodeToken)
 }
 
 // refuseChangedAsks is the first reason check gives against an ask in after that before does not
-// hold as it is - an ask after wrote or changed - or nil; a nil before holds none. An ask a browser
-// edit already left unreadable, which the write carries through unchanged, is not the write's to
-// refuse: refusing it would refuse every write to the document until someone repairs that ask in
-// the browser, and settlement flags it `invalid` meanwhile.
-func refuseChangedAsks(before, after *pmdoc.Node, check func(*pmdoc.Node) error) error {
-	var tokens map[string]string
+// hold as it is - an ask after wrote or changed - or nil; a nil before holds none. Two asks are the
+// same when fingerprint gives both the same value. An ask a browser edit already left unreadable,
+// which the write carries through unchanged, is not the write's to refuse: refusing it would refuse
+// every write to the document until someone repairs that ask in the browser, and settlement flags
+// it `invalid` meanwhile.
+func refuseChangedAsks(before, after *pmdoc.Node, check func(*pmdoc.Node) error, fingerprint func(*pmdoc.Node) (string, error)) error {
+	var held map[string]string
 	var refusal, walkErr error
 	pmdoc.Walk(after, func(node *pmdoc.Node) bool {
 		if refusal != nil || walkErr != nil {
@@ -254,17 +255,17 @@ func refuseChangedAsks(before, after *pmdoc.Node, check func(*pmdoc.Node) error)
 			return true
 		}
 		if before != nil {
-			if tokens == nil {
-				if tokens, walkErr = blockTokens(before); walkErr != nil {
+			if held == nil {
+				if held, walkErr = askFingerprints(before, fingerprint); walkErr != nil {
 					return false
 				}
 			}
-			token, err := nodeToken(node)
+			value, err := fingerprint(node)
 			if err != nil {
 				walkErr = err
 				return false
 			}
-			if id, _ := node.Attrs[pmdoc.BlockIDAttr].(string); tokens[id] == token {
+			if id, _ := node.Attrs[pmdoc.BlockIDAttr].(string); held[id] == value {
 				return true
 			}
 		}
@@ -275,6 +276,31 @@ func refuseChangedAsks(before, after *pmdoc.Node, check func(*pmdoc.Node) error)
 		return walkErr
 	}
 	return refusal
+}
+
+// askFingerprints is each ask in tree by its block id, as fingerprint gives it.
+func askFingerprints(tree *pmdoc.Node, fingerprint func(*pmdoc.Node) (string, error)) (map[string]string, error) {
+	held := make(map[string]string)
+	var err error
+	pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
+		if err != nil {
+			return false
+		}
+		if node.Type != "ask" {
+			return true
+		}
+		id, _ := node.Attrs[pmdoc.BlockIDAttr].(string)
+		held[id], err = fingerprint(node)
+		return true
+	})
+	return held, err
+}
+
+// askMarkdown is what a document's markdown carries of an ask: its rendering alone, without the
+// anchor marks and the attributes a reader's browser derives, which no rendering writes. A new
+// version is markdown, so this is how a version says it carries an ask unchanged.
+func askMarkdown(ask *pmdoc.Node) (string, error) {
+	return pmdoc.Render(&pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{ask}})
 }
 
 func collectAskBlocksForSettlement(tree *pmdoc.Node) ([]askBlock, []invalidAskBlock, error) {

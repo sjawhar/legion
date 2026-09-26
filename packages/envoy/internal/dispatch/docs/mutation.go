@@ -192,7 +192,7 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 	if err != nil {
 		return "", err
 	}
-	if err := refuseChangedAsks(nil, tree, pmdoc.AskContentError); err != nil {
+	if err := refuseChangedAsks(nil, tree, pmdoc.AskContentError, askMarkdown); err != nil {
 		return "", &ErrInvalidAskBlock{Reason: err}
 	}
 	canonical, err := renderTree(tree)
@@ -232,7 +232,7 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 		if err != nil {
 			return err
 		}
-		if err := refuseChangedAsks(current, target, pmdoc.AskContentError); err != nil {
+		if err := refuseChangedAsks(current, target, pmdoc.AskContentError, askMarkdown); err != nil {
 			return &ErrInvalidAskBlock{Reason: err}
 		}
 		currentMarkdown, err := renderTree(current)

@@ -238,16 +238,29 @@ func askContentBreak(children []*Node) string {
 	for index, child := range children {
 		switch {
 		case index == 0 && child.Type != "paragraph":
-			return "a " + strings.ReplaceAll(child.Type, "_", " ") + " before its question"
+			return askBlockName(child.Type) + " before its question"
 		case child.Type == "paragraph" && index > 0 && children[index-1].Type == "bullet_list":
 			return "a paragraph after its options"
 		case child.Type == "bullet_list" && index > 0 && children[index-1].Type == "bullet_list":
 			return "a second bullet list"
 		case child.Type != "paragraph" && child.Type != "bullet_list":
-			return "a " + strings.ReplaceAll(child.Type, "_", " ")
+			return askBlockName(child.Type)
 		}
 	}
 	return "nothing"
+}
+
+// askBlockName is a block type as a reader names it, with its article: "a code block", "an
+// ordered list", "a horizontal rule".
+func askBlockName(nodeType string) string {
+	name := strings.ReplaceAll(nodeType, "_", " ")
+	if nodeType == "hr" {
+		name = "horizontal rule"
+	}
+	if strings.ContainsRune("aeiou", rune(name[0])) {
+		return "an " + name
+	}
+	return "a " + name
 }
 
 func paragraphsThenOptionalBulletList(children []*Node) bool {
