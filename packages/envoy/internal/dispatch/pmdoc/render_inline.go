@@ -303,12 +303,13 @@ func inlineCodeFence(nodes []*Node, index int) (string, bool) {
 
 // inlineCodePadding reports whether a code span's text is written with a space inside each
 // backtick fence: text that begins or ends with a backtick, and text the parser would take a
-// character off each end of - both ends a space or a line ending, and something else between.
+// space or a line ending off each end of (codeSpanPadded).
 func inlineCodePadding(value string) bool {
 	if strings.HasPrefix(value, "`") || strings.HasSuffix(value, "`") {
 		return true
 	}
-	return strings.HasPrefix(value, " ") && strings.HasSuffix(value, " ") && strings.Trim(value, " ") != ""
+	_, _, padded := codeSpanPadded(value)
+	return padded
 }
 
 func (r *renderer) writeSyntax(value string) {
