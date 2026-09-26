@@ -308,8 +308,7 @@ func inlineCodePadding(value string) bool {
 	if strings.HasPrefix(value, "`") || strings.HasSuffix(value, "`") {
 		return true
 	}
-	_, _, padded := codeSpanPadded(value)
-	return padded
+	return codeSpanPadded(value)
 }
 
 func (r *renderer) writeSyntax(value string) {
