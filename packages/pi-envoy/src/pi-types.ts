@@ -154,6 +154,8 @@ export interface PiEventContract {
     readonly event: BeforeAgentStartEvent;
     readonly result: BeforeAgentStartResult;
   };
+  /** Every run the host starts, the user's prompt or not; it carries nothing an extension reads. */
+  readonly agent_start: { readonly event: unknown; readonly result: undefined };
   readonly agent_end: { readonly event: AgentEndEvent; readonly result: undefined };
   readonly message_start: { readonly event: MessageStartEvent; readonly result: undefined };
   readonly session_stop: {

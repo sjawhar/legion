@@ -698,8 +698,13 @@ func githubPayload(event string, body map[string]any) string {
 			"author":      nestedString(body, "review", "user", "login"),
 			"url":         nestedString(body, "review", "html_url"),
 			"state":       nestedString(body, "review", "state"),
-			"commit_id":   nestedString(body, "review", "commit_id"),
-			"head_sha":    nestedString(body, "pull_request", "head", "sha"),
+			// Consumers order reviews by submitted_at, then review_id, rather than by delivery. The id
+			// alone is not enough: GitHub assigns it when a review is created, and a pending review
+			// keeps it when it is submitted later.
+			"review_id":    GithubPRNumber(nested(body, "review", "id")),
+			"submitted_at": nestedString(body, "review", "submitted_at"),
+			"commit_id":    nestedString(body, "review", "commit_id"),
+			"head_sha":     nestedString(body, "pull_request", "head", "sha"),
 		}
 		markLegionFooter(data, reviewBody)
 		addCappedBody(data, reviewBody)
@@ -747,6 +752,10 @@ func githubPayload(event string, body map[string]any) string {
 			"compare_url":             stringValue(body["compare"]),
 			"changed_paths":           strings.Join(changedPaths, "\n"),
 			"changed_paths_truncated": strconv.FormatBool(truncated),
+			// forced is always "true" or "false": a force push's commits are listed from the merge
+			// base, so its changed paths do not describe what it did to the head it replaced, and a
+			// consumer tells an older listener, which sends no forced, from a push that was not forced.
+			"forced": strconv.FormatBool(boolValue(body["forced"])),
 		}
 	case "workflow_run":
 		headBranch := nestedString(body, "workflow_run", "head_branch")

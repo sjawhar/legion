@@ -176,8 +176,8 @@ func TestAReadmittedTreeKeepsItsOpenPullRequest(t *testing.T) {
 		{"todo", intake.DispatchIssue{Key: key, Seq: 7, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: "U"}},
 		{"gate", intake.GateRegistered{Issue: key, ArtifactID: artifact, Version: 2}},
 		{"approve", intake.DispatchArtifact{Key: key, ArtifactID: artifact, Kind: intake.DispatchArtifactApproved, Version: 2}},
-		{"plan", intake.HandoffComplete{Issue: key, Role: claim.RolePlanner, Summary: "plan", Commit: "plan-1"}},
-		{"implement", intake.HandoffComplete{Issue: key, Role: claim.RoleImplementer, Summary: "impl", Commit: "impl-1"}},
+		{"plan", intake.HandoffComplete{Generation: 2, Issue: key, Role: claim.RolePlanner, Summary: "plan", Commit: "plan-1"}},
+		{"implement", intake.HandoffComplete{Generation: 2, Issue: key, Role: claim.RoleImplementer, Summary: "impl", Commit: "impl-1"}},
 	} {
 		if _, err := intake.ApplyFact(ctx, pool, "test", step.id, step.fact, engine, admission); err != nil {
 			t.Fatalf("apply %s: %v", step.id, err)
@@ -235,7 +235,7 @@ func TestAChildAHumanMovesOutOfTheWorkflowStopsAndKeepsTheHumansStatus(t *testin
 	if _, err := pool.Exec(ctx, "delete from outbox"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := intake.ApplyFact(ctx, pool, "api", "tester-pass", intake.HandoffComplete{Issue: "LEGION-209", Role: claim.RoleTester, Summary: "pass", Verdict: "pass", Commit: "test-1"}, engine, admission); err != nil {
+	if _, err := intake.ApplyFact(ctx, pool, "api", "tester-pass", intake.HandoffComplete{Generation: 1, Issue: "LEGION-209", Role: claim.RoleTester, Summary: "pass", Verdict: "pass", Commit: "test-1"}, engine, admission); err != nil {
 		t.Fatal(err)
 	}
 	var childPhase phase.Phase

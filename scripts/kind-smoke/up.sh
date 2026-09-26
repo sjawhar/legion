@@ -56,6 +56,20 @@ validate_inputs() {
     none | envoy) ;;
     *) fail "SMOKE_GITHUB_INGRESS must be none or envoy; got $github_ingress" ;;
   esac
+  # the operator names the production Envoy NATS by its fully-qualified name, never a bare alias a
+  # resolver's search domain would complete (README.md, Inputs); the value is never printed
+  upstream_nats="${SMOKE_UPSTREAM_NATS:-}"
+  upstream_nats="${upstream_nats#"${upstream_nats%%[![:space:]]*}"}"
+  upstream_nats="${upstream_nats%"${upstream_nats##*[![:space:]]}"}"
+  if [ "$github_ingress" = envoy ]; then
+    [ -n "$upstream_nats" ] ||
+      fail "SMOKE_UPSTREAM_NATS is unset: SMOKE_GITHUB_INGRESS=envoy bridges from the production Envoy NATS, named by its fully-qualified name (nats://envoy-nats.<tailnet>.ts.net:4222; README.md)"
+    # one URL: optional scheme and user info, a host with a dot, optional port, nothing after it
+    # (the client dials what follows the last "://"); envoy-bridge.ts holds the same pattern
+    local nats_url='^([A-Za-z][A-Za-z0-9+.-]*://)?([^@/?#,[:space:]]+@)?[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)+(:[0-9]+)?/?$'
+    [[ "$upstream_nats" =~ $nats_url ]] ||
+      fail "SMOKE_UPSTREAM_NATS is not one NATS URL naming a fully-qualified host: a bare alias resolves through whatever search domain the box has (README.md, Inputs); name the production Envoy NATS as nats://envoy-nats.<tailnet>.ts.net:4222"
+  fi
   implement_app_id="${LEGION_IMPLEMENT_APP_ID:-3202636}"
   review_app_id="${LEGION_REVIEW_APP_ID:-3202653}"
   [[ "$implement_app_id$review_app_id" =~ ^[0-9]+$ ]] || fail "LEGION_IMPLEMENT_APP_ID and LEGION_REVIEW_APP_ID must be numeric"
@@ -669,17 +683,19 @@ keeper_summary() {
 # ---- SMOKE_GITHUB_INGRESS=envoy: the read-only bridge from production NATS, before the daemon ---
 # An unreachable upstream stops the run before anything in the cluster starts.
 
-upstream_nats() { printf '%s' "${SMOKE_UPSTREAM_NATS:-nats://envoy-nats.tailb86685.ts.net:4222}"; }
 start_bridge() {
   scrub_argv
-  start_process envoy-bridge "${scrub[@]}" SMOKE_REPO="$repo" SMOKE_RIG_NATS="nats://$gateway:$port_nats" SMOKE_UPSTREAM_NATS="$(upstream_nats)" \
+  # readiness is read from the log, so a fresh bridge starts on an empty one: an earlier run's lines
+  # would otherwise decide this run, and an older bridge printed the upstream there
+  pid_is_live envoy-bridge || : >"$state/logs/envoy-bridge.log"
+  start_process envoy-bridge "${scrub[@]}" SMOKE_REPO="$repo" SMOKE_RIG_NATS="nats://$gateway:$port_nats" SMOKE_UPSTREAM_NATS="$upstream_nats" \
     bun run "$repo_root/scripts/kind-smoke/envoy-bridge.ts"
   poll 60 "the GitHub bridge to report BRIDGE READY" bridge_ready ||
-    fail "the GitHub bridge could not subscribe upstream ($(upstream_nats)); see $state/logs/envoy-bridge.log"
+    fail "the GitHub bridge could not subscribe upstream (SMOKE_UPSTREAM_NATS); see $state/logs/envoy-bridge.log"
 }
 bridge_ready() {
   if grep -q 'BRIDGE UNHEALTHY' "$state/logs/envoy-bridge.log" 2>/dev/null || ! pid_is_live envoy-bridge; then
-    fail "the GitHub bridge could not subscribe upstream ($(upstream_nats)); see $state/logs/envoy-bridge.log"
+    fail "the GitHub bridge could not subscribe upstream (SMOKE_UPSTREAM_NATS); see $state/logs/envoy-bridge.log"
   fi
   grep -q 'BRIDGE READY' "$state/logs/envoy-bridge.log" 2>/dev/null
 }
@@ -852,7 +868,7 @@ daemon_summary() {
 }
 ingress_summary() {
   case "$github_ingress" in
-    envoy) printf 'envoy (bridge pid %s, upstream %s)' "$(<"$state/pids/envoy-bridge.pid")" "$(upstream_nats)" ;;
+    envoy) printf 'envoy (bridge pid %s, upstream SMOKE_UPSTREAM_NATS)' "$(<"$state/pids/envoy-bridge.pid")" ;;
     *) printf 'none (checkpoint done will report SKIPPED-BLOCKED)' ;;
   esac
 }

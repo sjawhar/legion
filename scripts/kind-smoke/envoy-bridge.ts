@@ -9,8 +9,6 @@ import { connect, type NatsConnection, type Subscription } from "nats";
 import { EnvelopeSchema } from "../../packages/contracts/src/envelope";
 import { githubSubject } from "../../packages/contracts/src/subject";
 
-export const DEFAULT_UPSTREAM_NATS_URL = "nats://envoy-nats.tailb86685.ts.net:4222";
-
 const requiredEnvelopeFields = [
   "event_id",
   "source",
@@ -62,13 +60,39 @@ export function bridgeConfigFromEnvironment(
   }
   const downstreamUrl = environment.SMOKE_RIG_NATS?.trim() ?? "";
   if (!downstreamUrl) throw new Error("SMOKE_RIG_NATS is required");
+  const upstreamUrl = environment.SMOKE_UPSTREAM_NATS?.trim() ?? "";
+  if (!upstreamUrl) throw new Error("SMOKE_UPSTREAM_NATS is required");
+  if (!upstreamNatsUrl.test(upstreamUrl)) {
+    throw new Error(
+      "SMOKE_UPSTREAM_NATS is not one NATS URL naming a fully-qualified host: a bare alias resolves through whatever search domain the box has; name the production Envoy NATS as nats://envoy-nats.<tailnet>.ts.net:4222"
+    );
+  }
   const [owner, name] = repository.split("/");
   return {
     repository,
     subjects: [githubSubject(owner, name, ">")],
-    upstreamUrl: environment.SMOKE_UPSTREAM_NATS?.trim() || DEFAULT_UPSTREAM_NATS_URL,
+    upstreamUrl,
     downstreamUrl,
   };
+}
+
+// One NATS server URL: an optional scheme and user info, a host with a dot, an optional port, and
+// nothing after it. The client dials whatever follows the last "://", so a path or a query could
+// name a host other than the one checked here. up.sh and Stage 3 hold the same pattern.
+const upstreamNatsUrl =
+  /^(?:[A-Za-z][A-Za-z0-9+.-]*:\/\/)?(?:([^@/?#,\s]+)@)?([A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+)(?::\d+)?\/?$/;
+
+// The operator's upstream names production infrastructure, so a client error that quotes the
+// value, its user info or its host is printed with the variable's name in their place.
+export function redactUpstream(text: string, upstreamUrl: string): string {
+  const [, userInfo, host] = upstreamNatsUrl.exec(upstreamUrl) ?? [];
+  let redacted = text;
+  for (const value of [upstreamUrl, userInfo, host]) {
+    if (!value) continue;
+    const pattern = new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+    redacted = redacted.replace(pattern, "SMOKE_UPSTREAM_NATS");
+  }
+  return redacted;
 }
 
 export function envelopeValidation(data: string | Uint8Array): EnvelopeValidation {
@@ -168,7 +192,7 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
       await upstream.flush();
       await downstream.flush();
       console.log(
-        `BRIDGE READY subjects=${config.subjects.join(",")} upstream=${config.upstreamUrl} downstream=${config.downstreamUrl}`
+        `BRIDGE READY subjects=${config.subjects.join(",")} upstream=SMOKE_UPSTREAM_NATS downstream=${config.downstreamUrl}`
       );
       await Promise.all(
         subscriptions.map((subscription, index) =>
@@ -185,8 +209,10 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
 }
 
 if (import.meta.main) {
-  await runBridge(bridgeConfigFromEnvironment(process.env)).catch((error) => {
-    console.error(`BRIDGE UNHEALTHY ${error instanceof Error ? error.message : String(error)}`);
+  const config = bridgeConfigFromEnvironment(process.env);
+  await runBridge(config).catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`BRIDGE UNHEALTHY ${redactUpstream(message, config.upstreamUrl)}`);
     process.exitCode = 1;
   });
 }
