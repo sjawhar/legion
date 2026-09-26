@@ -56,10 +56,7 @@ func RepeatedBlockID(trees ...*Node) error {
 	seen := make(map[string]struct{})
 	var repeated error
 	for _, tree := range trees {
-		walk(tree, func(node *Node, _ []int, _, _ int) bool {
-			if repeated != nil {
-				return false
-			}
+		Walk(tree, func(node *Node) bool {
 			if node.Type == "doc" || isInlineNodeType(node.Type) {
 				return true
 			}
