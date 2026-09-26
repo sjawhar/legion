@@ -174,7 +174,7 @@ shared document when it renders it, and settlement then retracts it), or when it
 ask's id. The first ask left unreadable whose id was readable before is `400 INVALID_ASK_BLOCK` with
 that reason, so a question given a code block, a paragraph after the options, a second list, an
 emptied question or an ask under a held id is refused. An id the document already held unreadable
-(an upload, a seeded spec or a browser edit can leave one) does not refuse an accept, whether the
+(a browser edit can leave one, and an upload can carry it on) does not refuse an accept, whether the
 accept leaves that ask alone or writes into it, unless the accept adds a second ask under it: an id
 that gains an ask is refused whatever it held, since the id repair would hand the held ask's row
 and answer to whichever comes first. A reject (`POST /api/v1/comments/{id}/reject`,

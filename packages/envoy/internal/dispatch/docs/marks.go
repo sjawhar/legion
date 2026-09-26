@@ -336,8 +336,8 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 // refuseBrokenAsks refuses the first ask a write left unreadable whose id the document could read
 // before it, with settlement's reason (the one the edit route's ApplyOps gives), so a replacement
 // an ask cannot hold, such as a question given a code block, writes nothing. An id the document
-// already held unreadable, malformed or repeated, is not the write's to refuse: an upload, a seeded
-// spec or a browser edit can leave one, settlement flags it, and a write elsewhere must not fail
+// already held unreadable, malformed or repeated, is not the write's to refuse: a browser edit can
+// leave one and an upload can carry it on, settlement flags it, and a write elsewhere must not fail
 // over it. An id that gains an ask is refused whatever it held, since settlement's id repair keeps
 // the id for the first ask in document order and would hand the held ask's row and answer to it.
 func refuseBrokenAsks(before, after *pmdoc.Node) error {

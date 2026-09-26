@@ -5,11 +5,15 @@ import (
 	"errors"
 
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/reearth/ygo/crdt"
+
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -189,10 +193,54 @@ func TestSuggestionAcceptSpansParagraphs(t *testing.T) {
 	}
 }
 
-// malformedAsk is an ask block whose body holds a code block. The server keeps one on purpose: a
-// seeded spec or an upload carrying it is accepted, and a browser edit that makes one is stamped
-// invalid, so a document can hold it for as long as nobody repairs it.
+// malformedAsk is an ask block whose body holds a code block. No route writes one, but a browser
+// edit that makes one is kept and stamped invalid, and an upload can carry it on unchanged, so a
+// document can hold it for as long as nobody repairs it.
 const malformedAsk = ":::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich one?\n\n```\ncode\n```\n:::\n"
+
+// browserDocumentService is a document service a browser peer can connect to (writeBrowserDocument).
+func browserDocumentService(t *testing.T) (*docs.Service, http.Handler, *store.Store) {
+	t.Helper()
+	var documentService *docs.Service
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{
+			Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond,
+			Identity: identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"alice": {}}},
+		})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	return documentService, handler, database
+}
+
+// writeBrowserDocument stands in for a browser editor that turns the live document into
+// markdown's tree. A browser's update is not held to the checks the server's own writes run, which
+// is how a document comes to hold what no route writes, such as a malformed ask. The peer stays
+// connected for the rest of the test, as an open editor does, so the room stays resident.
+func writeBrowserDocument(t *testing.T, documentService *docs.Service, artifactID, markdown string) {
+	t.Helper()
+	written, err := pmdoc.Parse(markdown)
+	if err != nil {
+		t.Fatalf("parse the browser's document: %v", err)
+	}
+	sockets := &servedSockets{finished: make(map[string]chan struct{})}
+	server := httptest.NewServer(sockets.serve(documentService.ServeHTTP))
+	t.Cleanup(server.Close)
+	peer := &syncedPeer{
+		wsURL: "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/doc/" + artifactID, sockets: sockets,
+		headers: http.Header{"X-Dispatch-User": []string{"alice"}}, artifactID: artifactID, doc: crdt.New(),
+	}
+	peer.connect(t)
+	t.Cleanup(peer.close)
+	peer.edit(t, func(tree *pmdoc.Node) error {
+		tree.Children = written.Children
+		return nil
+	})
+	peer.barrier(t)
+	if text, err := documentService.Text(context.Background(), artifactID); err != nil || !strings.Contains(text, "```") {
+		t.Fatalf("live document after the browser write = %q (%v)", text, err)
+	}
+}
 
 // Only an ask an accept breaks is refused. A document already holding a malformed ask still takes
 // a typo fix elsewhere, a whole-paragraph replacement, and the reject of a browser insert
@@ -200,34 +248,25 @@ const malformedAsk = ":::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open
 // document the insert started from, even when the insert was an ask's whole question.
 func TestSuggestionActionsAreRefusedOnlyForAnAskAnAcceptBroke(t *testing.T) {
 	for _, test := range []struct {
-		name, seed, upload, quote, replaceWith, action, want string
-		browserInsert                                        bool
+		name, seed, browser, quote, replaceWith, action, want string
+		browserInsert                                         bool
 	}{
-		{name: "an accept after an upload wrote the ask", seed: "Intro typo.\n", upload: "Intro typo.\n\n" + malformedAsk,
+		{name: "a typo fix beside the ask", seed: "Intro typo.\n", browser: "Intro typo.\n\n" + malformedAsk,
 			quote: "typo", replaceWith: "fixed", action: "accept", want: "Intro fixed."},
-		{name: "a block accept in a seeded document", seed: "Intro typo.\n\n" + malformedAsk,
+		{name: "a block accept beside the ask", seed: "Intro typo.\n", browser: "Intro typo.\n\n" + malformedAsk,
 			quote: "Intro typo.", replaceWith: "Intro fixed.\n\nMore.\n", action: "accept", want: "Intro fixed.\n\nMore."},
-		{name: "a reject of a browser insert", seed: "The quick brown fox\n\n" + malformedAsk,
+		{name: "a reject of a browser insert", seed: "The quick brown fox\n", browser: "The quick brown fox\n\n" + malformedAsk,
 			quote: "quick ", action: "reject", want: "The brown fox", browserInsert: true},
-		{name: "a typo fix inside an ask already malformed", seed: "Intro.\n\n" + malformedAsk,
+		{name: "a typo fix inside an ask already malformed", seed: "Intro.\n", browser: "Intro.\n\n" + malformedAsk,
 			quote: "one", replaceWith: "two", action: "accept", want: "Which two?"},
 		{name: "a reject that empties the question it inserted", seed: "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich one?\n:::\n",
 			quote: "Which one?", action: "reject", want: "Intro.", browserInsert: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			var documentService *docs.Service
-			handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
-				documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
-				t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
-				return documentService
-			})
+			documentService, handler, database := browserDocumentService(t)
 			issue := createInteractionIssue(t, handler, "TEST", "Beside a malformed ask", test.seed)
-			if test.upload != "" {
-				if uploaded := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]any{
-					"name": "spec.md", "content": test.upload,
-				}, "alice"); uploaded.Code != http.StatusCreated {
-					t.Fatalf("upload the malformed ask: status=%d body=%s", uploaded.Code, uploaded.Body.String())
-				}
+			if test.browser != "" {
+				writeBrowserDocument(t, documentService, issue.PrimaryArtifactID, test.browser)
 			}
 			anchor := map[string]any{"artifact": "spec", "quote": test.quote}
 			if test.browserInsert {
@@ -327,14 +366,14 @@ const askSpec = "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\
 func TestSuggestionAcceptRefusals(t *testing.T) {
 	codeQuestion := "Which?\n\n```\ncode\n```\n"
 	for _, test := range []struct {
-		name, spec, quote, replaceWith, code, reason string
-		sameThroughEdits                             bool
+		name, spec, browser, quote, replaceWith, code, reason string
+		sameThroughEdits                                      bool
 	}{
 		{name: "a question given a code block", spec: askSpec, quote: "Which one?", replaceWith: codeQuestion,
 			code: "INVALID_ASK_BLOCK", reason: `ask block \"a1\" has unsupported body node \"code_block\"`, sameThroughEdits: true},
-		{name: "a question given a code block beside a malformed ask", quote: "Which one?", replaceWith: codeQuestion,
-			spec: askSpec + "\n" + strings.NewReplacer("#a1", "#a2", "Which one?", "Ship it?").Replace(malformedAsk),
-			code: "INVALID_ASK_BLOCK", reason: `ask block \"a1\" has unsupported body node \"code_block\"`, sameThroughEdits: true},
+		{name: "a question given a code block beside a malformed ask", quote: "Which one?", replaceWith: codeQuestion, spec: askSpec,
+			browser: askSpec + "\n" + strings.NewReplacer("#a1", "#a2", "Which one?", "Ship it?").Replace(malformedAsk),
+			code:    "INVALID_ASK_BLOCK", reason: `ask block \"a1\" has unsupported body node \"code_block\"`, sameThroughEdits: true},
 		{name: "a paragraph after a free-text ask's new options", spec: askSpec, quote: "Which one?",
 			replaceWith: "Which database?\n\n- Postgres\n- SQLite\n\nPick one by Friday.\n",
 			code:        "INVALID_ASK_BLOCK", reason: `holds a paragraph after its options`},
@@ -348,7 +387,7 @@ func TestSuggestionAcceptRefusals(t *testing.T) {
 		{name: "an ask under a held id", spec: "Intro typo.\n\n" + askSpec, quote: "Intro typo.",
 			replaceWith: ":::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nOther?\n:::\n",
 			code:        "INVALID_ASK_BLOCK", reason: `duplicate ask block id \"a1\"`},
-		{name: "an ask under an id held malformed", spec: "Intro typo.\n\n" + malformedAsk, quote: "Intro typo.",
+		{name: "an ask under an id held malformed", spec: "Intro typo.\n", browser: "Intro typo.\n\n" + malformedAsk, quote: "Intro typo.",
 			replaceWith: ":::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nOther?\n:::\n",
 			code:        "INVALID_ASK_BLOCK", reason: `duplicate ask block id \"a1\"`},
 		{name: "text from one ask's question into the next's", spec: "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich one?\n:::\n\n" +
@@ -374,13 +413,11 @@ func TestSuggestionAcceptRefusals(t *testing.T) {
 			replaceWith: "```\ncode\n```\n", code: "INVALID_OP", reason: `field \"replace_with\"`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			var documentService *docs.Service
-			handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
-				documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
-				t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
-				return documentService
-			})
+			documentService, handler, _ := browserDocumentService(t)
 			issue := createInteractionIssue(t, handler, "TEST", "A refused accept", test.spec)
+			if test.browser != "" {
+				writeBrowserDocument(t, documentService, issue.PrimaryArtifactID, test.browser)
+			}
 			before, err := documentService.Text(context.Background(), issue.PrimaryArtifactID)
 			if err != nil {
 				t.Fatal(err)
