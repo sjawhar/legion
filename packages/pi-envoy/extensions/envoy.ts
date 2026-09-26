@@ -274,6 +274,8 @@ export default function envoyExtension(pi: PiApi): void {
   // topic, go-bootstrap.ts). They are never registered with the listener, so a resumed process
   // cannot recover them: the role's claim is their only source, and `endRole` closes them.
   const roleNoticeSubjects = new Set<string>();
+  // Counts role ends, so a role-bound subscription still opening when its role ended can tell.
+  let roleEnds = 0;
   let activeSessionContext: SessionContext | undefined;
   const inbox: {
     event_id: string;
@@ -632,6 +634,7 @@ export default function envoyExtension(pi: PiApi): void {
   // another session replaced stops taking the role's wakes.
   const endRole = (): void => {
     claimedRoleTopic = undefined;
+    roleEnds += 1;
     for (const subject of roleNoticeSubjects) closeIntentionally(subject);
     roleNoticeSubjects.clear();
   };
@@ -1001,6 +1004,8 @@ export default function envoyExtension(pi: PiApi): void {
       );
     }
     if (sessionID !== targetSessionID) await establishSession(context);
+    const subjects = expandSubscriptionTopics([topic]);
+    const endsBefore = roleEnds;
     if (whileHolding !== undefined) {
       if (claimedRoleTopic !== ROLE_TOPIC_PREFIX + whileHolding) {
         throw new Error(
@@ -1008,9 +1013,14 @@ export default function envoyExtension(pi: PiApi): void {
         );
       }
       // Marked before the subscription opens, so no registration ever carries it.
-      for (const subject of expandSubscriptionTopics([topic])) roleNoticeSubjects.add(subject);
+      for (const subject of subjects) roleNoticeSubjects.add(subject);
     }
     await subscribe(topic);
+    // The role ended while the subscription waited for its connection: close what just opened.
+    if (whileHolding !== undefined && roleEnds !== endsBefore) {
+      for (const subject of subjects) closeIntentionally(subject);
+      return;
+    }
     await registerSession();
   };
 

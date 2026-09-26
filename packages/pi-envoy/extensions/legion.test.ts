@@ -67,19 +67,24 @@ const natsConnections: {
   readonly name: string;
   readonly subjects: string[];
   readonly unsubscribed: string[];
+  closed: boolean;
 }[] = [];
+/** A connect for a connection name waits on its gate, when a test sets one. */
+const natsConnectGates = new Map<string, Promise<void>>();
 mock.module("nats", () => ({
   connect: async (options: { readonly name: string }) => {
+    await natsConnectGates.get(options.name);
     const connection = {
       name: options.name,
       subjects: [] as string[],
       unsubscribed: [] as string[],
+      closed: false,
     };
     natsConnections.push(connection);
     return {
       close: async () => undefined,
       drain: async () => undefined,
-      isClosed: () => false,
+      isClosed: () => connection.closed,
       publish: () => undefined,
       subscribe: (subject: string) => {
         connection.subjects.push(subject);
@@ -216,6 +221,7 @@ afterEach(async () => {
   // bound to a previous test's fetch stub) would capture a later test's claim.
   resetLegionRoleClaimBridgeForTests();
   natsConnections.splice(0);
+  natsConnectGates.clear();
   setLegionBootstrapExitForTests((code) => process.exit(code) as never);
   resetLegionBootstrappedSessionForTests();
   for (const key of environmentKeys) {
@@ -5734,6 +5740,9 @@ describe("the Go daemon's operator-launched controller (LEGION_DAEMON_API=go, LE
     // The first session's process died, and the session is resumed within the listener's reap
     // window: its transcript records the role claim, which the listener now refuses it.
     resetLegionBootstrappedSessionForTests();
+    // Only the resumed instance connects from here on; the first instance's connections came
+    // before this point.
+    const connectionsBeforeResume = natsConnections.length;
     const resumed = createPi();
     legionExtension(resumed.pi);
     const context = first.context("ses_go_controller_first");
@@ -5765,10 +5774,72 @@ describe("the Go daemon's operator-launched controller (LEGION_DAEMON_API=go, LE
             JSON.stringify({ session_id: "ses_go_controller_first", role: first.token, soft: true })
       )
     ).toHaveLength(1);
-    const resumedConnection = natsConnections.findLast(
-      (candidate) => candidate.name === "omp-ses_go_controller_first"
+    const resumedConnections = natsConnections.slice(connectionsBeforeResume);
+    expect(resumedConnections.flatMap((connection) => connection.subjects)).toContain(
+      "notifications.agent.ses_go_controller_first"
     );
-    expect(resumedConnection?.subjects).not.toContain(topic);
+    expect(resumedConnections.flatMap((connection) => connection.subjects)).not.toContain(topic);
+  });
+
+  test("a controller whose role ends while its topic subscription is opening does not keep it", async () => {
+    const topic = "notifications.legion.omp.controller";
+    const ticks: (() => void)[] = [];
+    const refused = Promise.withResolvers<void>();
+    const connectGate = Promise.withResolvers<void>();
+    const reconnecting = Promise.withResolvers<void>();
+    // Registration is where the claim stands when its connection drops: the role claim and the
+    // topic's subscription follow, and the subscription waits for the reconnect.
+    const first = await goController({
+      sessionId: "ses_go_controller_first",
+      register: () => {
+        const live = natsConnections.find(
+          (candidate) => candidate.name === "omp-ses_go_controller_first"
+        );
+        if (live !== undefined) live.closed = true;
+        natsConnectGates.set(
+          "omp-ses_go_controller_first",
+          connectGate.promise.finally(() => undefined)
+        );
+        reconnecting.resolve();
+        return undefined;
+      },
+    });
+    const starting = first.handlers.get("session_start")?.(
+      {},
+      {
+        ...first.context("ses_go_controller_first"),
+        setInterval: (callback) => ticks.push(callback),
+        ui: {
+          notify: (message) => {
+            if (message.includes("this session no longer holds it")) refused.resolve();
+          },
+        },
+      }
+    );
+    await reconnecting.promise;
+    // While the subscription waits, a later `legion controller start` takes the role, and the
+    // first session's heartbeat is refused.
+    resetLegionBootstrappedSessionForTests();
+    const second = createPi();
+    legionExtension(second.pi);
+    await second.handlers.get("session_start")?.({}, first.context("ses_go_controller_second"));
+    for (const tick of ticks) tick();
+    await refused.promise;
+    connectGate.resolve();
+    await starting;
+
+    const firstSubjects = natsConnections
+      .filter((candidate) => candidate.name === "omp-ses_go_controller_first")
+      .flatMap((connection) =>
+        connection.subjects.filter((subject) => !connection.unsubscribed.includes(subject))
+      );
+    expect(firstSubjects).not.toContain(topic);
+    expect(
+      first.requests.filter(
+        (request) =>
+          request.path === "/v1/interests/subscribe" && JSON.stringify(request.body).includes(topic)
+      )
+    ).toEqual([]);
   });
 
   test("mints a controller grant with its registration secret for every bash command", async () => {
@@ -5840,6 +5911,23 @@ describe("the Go daemon's operator-launched controller (LEGION_DAEMON_API=go, LE
     expect(controller.requests.map((request) => request.path)).not.toContain("/v1/roles/set");
     expect(natsConnections.flatMap((connection) => connection.subjects)).not.toContain(
       "notifications.legion.demo.controller"
+    );
+  });
+
+  test("a controller without LEGION_PROJECT refuses before it registers", async () => {
+    // Registering replaces the running controller's session and secret, so a claim that cannot
+    // name its topic must stop before it.
+    const controller = await goController({ sessionId: "ses_go_controller_no_project" });
+    delete process.env.LEGION_PROJECT;
+
+    await expect(
+      controller.handlers.get("session_start")?.(
+        {},
+        controller.context("ses_go_controller_no_project")
+      )
+    ).rejects.toThrow("LEGION_PROJECT is required for Legion");
+    expect(controller.requests.map((request) => request.path)).not.toContain(
+      "/legion/v1/claims/register"
     );
   });
 

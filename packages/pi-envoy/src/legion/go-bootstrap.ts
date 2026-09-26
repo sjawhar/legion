@@ -104,9 +104,13 @@ async function callGoReadyWithRetry(label: string, call: () => Promise<void>): P
  * names (`legion-<project>-controller`), then subscribes to that project's controller topic
  * (`notifications.legion.<project>.controller`, `notify.ControllerTopic` in the Go daemon, which
  * lists what it carries) for as long as it holds the role: a later `legion controller start` takes
- * the role, and Envoy closes the subscription at this session's next heartbeat. The project must
- * be the one the daemon registered (`controllerToken(project)` is the registration's claim token),
- * or the topic would be one nobody publishes on.
+ * the role, and Envoy closes the subscription at this session's next heartbeat. The project is
+ * `LEGION_PROJECT`, read before registering, since a registration replaces the running
+ * controller's session and secret and one that cannot name its topic must stop first. It must be
+ * the project the daemon registered (`controllerToken(project)` is the registration's claim token),
+ * or the topic would be one nobody publishes on; that comparison can only follow the registration,
+ * which is what returns the claim token, so a hand-started claim whose `LEGION_PROJECT` names
+ * another project has already replaced the running controller when it is refused.
  * The subscription is a live wake only: an Oh My Pi session subscribes over core NATS, so a notice
  * published while no controller runs never reaches one, and the controller skill reads `legion
  * state` at boot for what it missed. Its grants are minted with the registration's own secret,
@@ -124,6 +128,7 @@ export function goControllerDaemon(
 ): ControllerDaemon {
   return {
     claim: async ({ sessionID, capability, context }) => {
+      const project = requiredEnvironment(process.env, "LEGION_PROJECT");
       const { sessionFile, agentId } = await transcript(context);
       const client = daemon();
       const registration = await client
@@ -144,7 +149,6 @@ export function goControllerDaemon(
         });
       // The topic comes from LEGION_PROJECT, and the daemon publishes on its own project's: a
       // project other than the one it registered would subscribe where nothing is published.
-      const project = requiredEnvironment(process.env, "LEGION_PROJECT");
       if (controllerToken(project) !== registration.claimToken) {
         throw new Error(
           `LEGION_PROJECT ${project} names controller role ${controllerToken(project)}, but the daemon registered this controller as ${registration.claimToken}`
