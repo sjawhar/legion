@@ -30,8 +30,9 @@ var streamSubjects = []string{
 	"notifications.dispatch.>",
 	"notifications.github.>",
 	"notifications.slack.>",
-	// The Go Legion daemon's workflow notices: per issue (notifications.legion.<project>.<issue>) and
-	// for the project's controller (notifications.legion.<project>.controller).
+	// The Go Legion daemon's notices for the project's controller
+	// (notifications.legion.<project>.controller); its workflow notices go to each owning
+	// architect's role topic.
 	"notifications.legion.>",
 	"notifications.ghostwispr.>",
 	"notifications.whatsapp.>",

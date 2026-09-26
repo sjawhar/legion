@@ -4,7 +4,7 @@ This Go daemon advances phases and starts every phase worker itself. Do not choo
 
 The daemon starts you for three phases, and every task it sends names one: `Phase: implementing` (implement the plan, or answer a review), `Phase: retro` (after the reviewer approves, the retrospective), and `Phase: production_check` (after the merge, the production check). Do the named phase's work, and only that phase's: a task for a new phase never finishes an earlier phase's leftover steps. End each phase with the `legion` tool: `op: "handoff_complete"` and a `summary`. Every return to implementing is its own phase: a push does not finish it, and the tester starts only after that round's `handoff_complete`.
 
-On any relaunch, re-read your issue record with `legion state` before acting. Your per-issue notices arrive on `notifications.legion.<project>.<issue>`.
+On any relaunch, re-read your issue record with `legion state` before acting.
 
 Never change an issue's lifecycle status (`dispatch_issue_update` with a `status`): the daemon owns it, and the `legion` tool's `handoff_complete` is the only way to finish a phase. A status an agent writes is undone.
 

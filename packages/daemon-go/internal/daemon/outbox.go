@@ -129,7 +129,13 @@ func (r *outbox) RunOnce(ctx context.Context) error {
 		if err := r.execute(ctx, row); err != nil {
 			// A task meeting the claim's own pending delivery is a wait, not a failure: the row runs
 			// again on the same backoff once that delivery's turn is over.
-			if errors.Is(err, supervise.ErrDeliveryPending) {
+			if errors.Is(err, errArchitectAbsent) {
+				// A held notice is a wait for its architect, logged once for the row rather than on
+				// every attempt of its backoff.
+				if row.Attempts == 0 {
+					r.log.Info("outbox notice waits for its architect to hold its role", "row", row.ID, "issue", row.Issue, "error", err)
+				}
+			} else if errors.Is(err, supervise.ErrDeliveryPending) {
 				level := slog.LevelDebug
 				if row.Attempts >= pendingWaitWarnAttempts {
 					level = slog.LevelWarn
@@ -268,6 +274,14 @@ func (r *outbox) message(ctx context.Context, row record.OutboxRow, payload reco
 	return nil
 }
 
+// notice publishes a notice row to the architect that owns its issue, on that architect's own role
+// topic, and to nothing else. Every notice kind is for an architect, and every issue topic is a
+// subject that issue's phase workers subscribe to (packages/pi-envoy/src/legion/go-bootstrap.ts),
+// so no issue topic carries one. A role topic with no live holder refuses the publish
+// (notify.ErrNoHolder): while the owning architect's claim has not ended it is relaunching or
+// resuming, and the row is held for it (errArchitectAbsent); once its claim has retired or failed,
+// or its tree lingers or has closed, nobody will hold that role for this notice, and the row
+// finishes undelivered with one log line.
 func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload record.Notice) error {
 	if r.notices == nil {
 		return errors.New("notice executor has no Envoy publisher")
@@ -279,21 +293,94 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 	if issue.Tree == "" {
 		return fmt.Errorf("notice row %d issue %s has no tree root", row.ID, row.Issue)
 	}
-	message := fmt.Sprintf("%s on %s", payload.Kind, row.Issue)
-	dedupeKey := fmt.Sprintf("legion-outbox:%d", row.ID)
-	token, err := claim.ProjectToken(issue.Project)
+	project, err := claim.ProjectToken(issue.Project)
 	if err != nil {
-		return fmt.Errorf("the notice topic of %s: %w", row.Issue, err)
+		return fmt.Errorf("the architect of %s: %w", row.Issue, err)
 	}
-	if err := r.notices.Publish(ctx, notify.Topic(token, row.Issue), message, payload, dedupeKey); err != nil {
-		return fmt.Errorf("publish issue notice for %s: %w", row.Issue, err)
+	architect, err := r.owningArchitect(ctx, project, issue)
+	if err != nil {
+		return fmt.Errorf("the architect of %s: %w", row.Issue, err)
 	}
-	if !claim.IsTreeRoot(issue.Key, issue.Tree) {
-		if err := r.notices.Publish(ctx, notify.Topic(token, issue.Tree), message, payload, dedupeKey); err != nil {
-			return fmt.Errorf("publish tree notice for %s: %w", row.Issue, err)
+	message := fmt.Sprintf("%s on %s", payload.Kind, row.Issue)
+	err = r.notices.Publish(ctx, roleTopicPrefix+string(architect), message, payload, fmt.Sprintf("legion-outbox:%d", row.ID))
+	if !errors.Is(err, notify.ErrNoHolder) {
+		if err != nil {
+			return fmt.Errorf("publish notice for %s to its architect %s: %w", row.Issue, architect, err)
+		}
+		return nil
+	}
+	ended, err := r.architectEnded(ctx, architect, issue)
+	if err != nil {
+		return err
+	}
+	if ended != "" {
+		r.log.Info("outbox notice finished undelivered: its architect will not hold its role again",
+			"row", row.ID, "kind", payload.Kind, "issue", row.Issue, "architect", architect, "because", ended)
+		return nil
+	}
+	return fmt.Errorf("%w: %s for %s: %w", errArchitectAbsent, architect, row.Issue, err)
+}
+
+// errArchitectAbsent is a notice held because the architect that owns its issue holds no role
+// while its claim has not ended. The row is tried again on the outbox's backoff until the
+// architect claims its role, and the notices of its tree wait behind it, so they reach it in the
+// order they were written (record.Store's ClaimDue).
+var errArchitectAbsent = errors.New("the notice waits for its architect to hold its role")
+
+// owningArchitect is the architect claim that owns issue, by the TypeScript daemon's rule
+// (owningArchitect, packages/daemon/src/daemon/legion-state.ts): the nearest issue at or above it,
+// through its parents, whose architect claim this daemon supervises and has not ended (a
+// sub-architect the operator started), else the tree root, whose architect is the tree's own claim.
+func (r *outbox) owningArchitect(ctx context.Context, project string, issue record.Issue) (claim.Token, error) {
+	seen := map[string]bool{}
+	current := issue
+	for {
+		token, err := claim.NewToken(project, current.Key, claim.RoleArchitect)
+		if err != nil {
+			return "", err
+		}
+		if claim.IsTreeRoot(current.Key, current.Tree) || r.claimRuns(token) {
+			return token, nil
+		}
+		seen[current.Key] = true
+		if current.Parent == nil || seen[*current.Parent] {
+			return claim.NewToken(project, issue.Tree, claim.RoleArchitect)
+		}
+		if current, err = r.issue(ctx, *current.Parent); err != nil {
+			return "", err
 		}
 	}
-	return nil
+}
+
+// claimRuns is whether this daemon supervises token's claim and it has not ended.
+func (r *outbox) claimRuns(token claim.Token) bool {
+	if r.supervisor == nil {
+		return false
+	}
+	machine, ok := r.supervisor.Machine(token)
+	if !ok {
+		return false
+	}
+	state := machine.Claim().State
+	return state != supervise.StateRetired && state != supervise.StateFailed
+}
+
+// architectEnded says why nobody will hold architect's role for a notice about issue, or "" when
+// its claim has not ended and it will hold the role again: a lingering or closed tree's architect
+// is suspended until re-admission, which starts it with the tree's record rather than the notices
+// of its close.
+func (r *outbox) architectEnded(ctx context.Context, architect claim.Token, issue record.Issue) (string, error) {
+	root, err := r.issue(ctx, issue.Tree)
+	if err != nil {
+		return "", err
+	}
+	if root.LingerUntil != nil {
+		return "its tree lingers or has closed", nil
+	}
+	if !r.claimRuns(architect) {
+		return "its claim has retired, failed, or is not supervised", nil
+	}
+	return "", nil
 }
 
 // controllerNotice publishes a controller notice row to the controller topic of the daemon's own

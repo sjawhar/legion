@@ -625,8 +625,10 @@ func (e *Engine) closed(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 // claimFailed holds the issue whose phase worker's claim failed — a budget ran out — and tells the
 // architect and the controller of the hold; the worker-died that comes with it is the architect's
 // alone. The tree's architect failing holds nothing, since a phase is its worker's; it is told as a
-// worker-died of the architect, to the issue's topic and the controller, because every other notice
-// of the tree reaches the architect and nobody inside the tree is left to act on its own.
+// worker-died of the architect, and the controller hears it from a row of its own, because every
+// other notice of the tree reaches that architect and nobody inside the tree is left to act on its
+// own. The row sent to the architect's own role finishes undelivered once its claim has failed
+// (the daemon's notice executor).
 func (e *Engine) claimFailed(ctx context.Context, tx pgx.Tx, fact intake.ClaimFailed) (intake.Result, error) {
 	issue, err := e.store.Issue(ctx, tx, fact.Issue)
 	if err != nil || issue == nil {
