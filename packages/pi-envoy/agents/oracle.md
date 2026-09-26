@@ -3,7 +3,8 @@ name: oracle
 description: |
   Strategic technical advisor. Read-only. Use for architecture decisions, hard tradeoffs,
   and complex debugging where correctness matters more than speed.
-# @oracle is the deployment's modelRoles.oracle; the Go daemon's boot gate refuses to start without it (docs/kubernetes.md, Operator configuration).
+# @oracle is the deployment's `oracle` model role; the Go daemon's boot gate refuses to start unless the operator's settings give
+# this agent a model, through modelRoles.oracle or a task.agentModelOverrides entry for it (docs/kubernetes.md, Operator configuration).
 model: ["@oracle"]
 tools: read, glob, grep, todo
 color: cyan

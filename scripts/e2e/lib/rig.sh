@@ -13,17 +13,28 @@
 # and defines note and fail (which exits). A production guard that finds a violation writes it to
 # $evidence/pane-endpoint-violation.txt, and the next bounded wait aborts naming it.
 
-# until_true SECONDS DESCRIPTION COMMAND... — all synchronization has a bounded named wait.
+# until_true SECONDS DESCRIPTION COMMAND... — all synchronization has a bounded named wait. It
+# polls COMMAND every half second until SECONDS of wall time have passed, each poll's own run
+# included, and says what it waits for on entry and every 60 s while it does (polls and seconds),
+# so a healthy wait and a stall read differently to anyone watching a run's output. A poll that
+# never returns would hold the wait past its bound, so a caller's remote calls carry their own
+# timeouts.
 until_true() {
-  local limit=$1 what=$2 i
+  local limit=$1 what=$2 polls=0 started=$SECONDS beat=$SECONDS
   shift 2
-  for ((i = 0; i < limit * 2; i++)); do
+  note "waiting up to ${limit}s for $what"
+  while ((SECONDS - started < limit)); do
     [ ! -s "$evidence/pane-endpoint-violation.txt" ] || fail "ABORT: $(cat "$evidence/pane-endpoint-violation.txt")"
+    polls=$((polls + 1))
     if "$@" >/dev/null 2>&1; then return 0; fi
+    if ((SECONDS - beat >= 60)); then
+      beat=$SECONDS
+      note "still waiting for $what: poll $polls, $((SECONDS - started))s of ${limit}s"
+    fi
     sleep 0.5
   done
   if [ -n "$timeout_hook" ]; then "$timeout_hook" || true; fi
-  fail "timed out after ${limit}s waiting for $what"
+  fail "timed out after ${limit}s ($polls polls) waiting for $what"
 }
 
 # pick_port VAR assigns VAR a port from lib/free-port.sh that is distinct from every earlier pick of
@@ -71,10 +82,29 @@ start_process() {
   printf -v "${name}_pid" '%s' "$!"
 }
 
+# signalable PID is whether PID can name one process the run started: a number without a leading
+# zero other than 1, this shell, and this shell's process group leader. 0, however many digits spell
+# it, and a negative number name a whole process group, so `kill -STOP 0` would stop the caller with
+# everything else in its group and a later `kill -KILL 0` end them all; no pid is written with a
+# leading zero. A refusal is printed, since a caller that hands one over has a bug.
+signalable() {
+  local pid=$1
+  case "$pid" in
+    '' | *[!0-9]* | 0* | 1) ;;
+    *)
+      [ "$pid" != "$$" ] && [ "$pid" != "$BASHPID" ] &&
+        [ "$pid" != "$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ')" ] && return 0
+      ;;
+  esac
+  echo "refused to signal pid '$pid': it is not one process this run started" >&2
+  return 1
+}
+
 # stop_pid is intentionally best effort: a failed cleanup must never obscure the check that failed.
 stop_pid() {
   local pid=${1:-} i
   [ -n "$pid" ] || return 0
+  signalable "$pid" || return 0
   kill -TERM "$pid" 2>/dev/null || return 0
   for i in $(seq 1 50); do
     kill -0 "$pid" 2>/dev/null || return 0
@@ -82,6 +112,24 @@ stop_pid() {
   done
   kill -KILL "$pid" 2>/dev/null || true
   return 0
+}
+
+# stop_tree PID stops PID and every process under it. A watcher is a loop whose kubectl, jq or sleep
+# outlives the loop when only the loop is stopped; the loop is frozen first, so it starts nothing new
+# while its children go. PID is signalled only while its parent is PARENT (default this shell), so a
+# pid the watcher left and another process reused is never hit. An empty PID is a watcher that
+# never started: nothing to stop.
+# pgrep exits 1 for a process with no children, which is no error: under a driver's `set -E` it would
+# run the ERR trap inside the substitution, and a trap that prints there would hand its words over
+# as child pids (the `0` of an `exit 0` among them).
+stop_tree() {
+  local pid=${1:-} parent=${2:-$$} child
+  [ -n "$pid" ] || return 0
+  signalable "$pid" || return 0
+  [ "$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')" = "$parent" ] || return 0
+  kill -STOP "$pid" 2>/dev/null || return 0
+  for child in $(pgrep -P "$pid" || true); do stop_tree "$child" "$pid"; done
+  kill -KILL "$pid" 2>/dev/null || true
 }
 
 run_processes() {

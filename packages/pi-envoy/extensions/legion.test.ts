@@ -63,10 +63,18 @@ function redactedLegionState(project: string) {
 /** RFC 4122 text form, the shape `node:crypto`'s `randomUUID()` mints for a spawn request id. */
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const PLUGIN_VERSION = pkg.version;
-const natsConnections: { readonly name: string; readonly subjects: string[] }[] = [];
+const natsConnections: {
+  readonly name: string;
+  readonly subjects: string[];
+  readonly unsubscribed: string[];
+}[] = [];
 mock.module("nats", () => ({
   connect: async (options: { readonly name: string }) => {
-    const connection = { name: options.name, subjects: [] as string[] };
+    const connection = {
+      name: options.name,
+      subjects: [] as string[],
+      unsubscribed: [] as string[],
+    };
     natsConnections.push(connection);
     return {
       close: async () => undefined,
@@ -76,7 +84,9 @@ mock.module("nats", () => ({
       subscribe: (subject: string) => {
         connection.subjects.push(subject);
         return {
-          unsubscribe: () => undefined,
+          unsubscribe: () => {
+            connection.unsubscribed.push(subject);
+          },
           [Symbol.asyncIterator]: async function* () {
             await new Promise<never>(() => undefined);
           },
@@ -5504,11 +5514,14 @@ describe("the Go daemon's pane (LEGION_DAEMON_API=go)", () => {
 /** The session `legion controller start` launches against the Go daemon: `LEGION_DAEMON_API=go`,
  * the `LEGION_CONTROLLER` marker, and the controller capability as a 0600 file behind
  * `LEGION_CONTROLLER_SECRET_FILE` (`packages/daemon-go/cmd/legion/controller.go`). The stub answers
- * the claim registration with the controller's registration (or `register`), mints grants, and
- * 404s every other daemon path as the Go daemon's catch-all does. */
+ * the claim registration with the controller's registration (or `register`'s answer, when it gives
+ * one), mints grants, and 404s every other daemon path as the Go daemon's catch-all does; its
+ * Envoy side keeps a role holder and an interest registry, as the listener does. */
 async function goController(options: {
   readonly sessionId: string;
-  readonly register?: () => Response | Promise<Response>;
+  readonly register?: (
+    body: Record<string, unknown>
+  ) => Response | undefined | Promise<Response | undefined>;
 }): Promise<{
   readonly token: string;
   readonly registration: Record<string, unknown>;
@@ -5545,12 +5558,14 @@ async function goController(options: {
 
   const requests: { readonly path: string; readonly body: unknown }[] = [];
   let grants = 0;
+  let holder = options.sessionId;
+  const interests = new Map<string, Set<string>>();
   globalThis.fetch = (async (input, init) => {
     const url = new URL(input.toString());
     const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
     requests.push({ path: url.pathname, body });
     if (url.pathname === "/legion/v1/claims/register") {
-      return (await options.register?.()) ?? Response.json(registration);
+      return (await options.register?.(body)) ?? Response.json(registration);
     }
     if (url.pathname === "/legion/v1/grants") {
       grants += 1;
@@ -5562,14 +5577,37 @@ async function goController(options: {
     if (url.pathname.startsWith("/legion/")) {
       return Response.json({ error: "no route" }, { status: 404 });
     }
-    if (url.pathname === `/v1/roles/${token}`) {
-      return Response.json({ role: token, holder: options.sessionId, last_seen: 1 });
+    // The listener's role registry: a hard claim is last-claim-wins, and a soft claim from any
+    // session but the live holder is refused with that holder.
+    if (url.pathname === "/v1/roles/set") {
+      if (body?.soft === true && body.session_id !== holder) {
+        return Response.json(
+          { error: `role ${token} is held by ${holder}`, role: token, holder },
+          { status: 409 }
+        );
+      }
+      holder = body?.session_id ?? holder;
     }
+    if (url.pathname === `/v1/roles/${token}`) {
+      return Response.json({ role: token, holder, last_seen: 1 });
+    }
+    // The listener's interest registry: a registration adds its topics, an unsubscribe removes
+    // them, and a read returns what the session holds.
+    if (url.pathname === "/v1/interests/subscribe") {
+      const topics = interests.get(body.session_id) ?? new Set<string>();
+      for (const topic of body.topics ?? []) topics.add(topic);
+      interests.set(body.session_id, topics);
+    }
+    if (url.pathname === "/v1/interests/unsubscribe") {
+      for (const topic of body.topics ?? []) interests.get(body.session_id)?.delete(topic);
+    }
+    const read = /^\/v1\/interests\/(?!subscribe$|unsubscribe$)([^/]+)$/.exec(url.pathname);
+    const session = read?.[1] ?? body?.session_id ?? options.sessionId;
     return Response.json({
-      session_id: body?.session_id ?? options.sessionId,
+      session_id: session,
       machine_id: "machine",
       dir: "/tmp/legion-workspace",
-      topics: [token],
+      topics: read === null ? [token] : [...(interests.get(session) ?? [])],
     });
   }) as typeof fetch;
 
@@ -5621,6 +5659,116 @@ describe("the Go daemon's operator-launched controller (LEGION_DAEMON_API=go, LE
     expect(controller.exits).toEqual([]);
     // The Go `legion` tool is an architect's and a worker's; the controller does not get it.
     expect(controller.tools.map((tool) => tool.name)).not.toContain("legion");
+  });
+
+  test("subscribes to its project's controller topic", async () => {
+    const controller = await goController({ sessionId: "ses_go_controller_notices" });
+    await controller.handlers.get("session_start")?.(
+      {},
+      controller.context("ses_go_controller_notices")
+    );
+
+    expect(natsConnections.flatMap((connection) => connection.subjects)).toContain(
+      "notifications.legion.omp.controller"
+    );
+  });
+
+  test("closes its controller-topic subscription once a later controller takes the role", async () => {
+    const topic = "notifications.legion.omp.controller";
+    const first = await goController({ sessionId: "ses_go_controller_first" });
+    const ticks: (() => void)[] = [];
+    const refused = Promise.withResolvers<void>();
+    await first.handlers.get("session_start")?.(
+      {},
+      {
+        ...first.context("ses_go_controller_first"),
+        setInterval: (callback) => ticks.push(callback),
+        ui: {
+          notify: (message) => {
+            if (message.includes("this session no longer holds it")) refused.resolve();
+          },
+        },
+      }
+    );
+    // A later `legion controller start`: a second session registers and takes the role. It is
+    // another process, so this one's record of the session it bootstrapped does not apply to it.
+    resetLegionBootstrappedSessionForTests();
+    const second = createPi();
+    legionExtension(second.pi);
+    await second.handlers.get("session_start")?.({}, first.context("ses_go_controller_second"));
+
+    // The first session's next heartbeat finds the role held by the second and is refused.
+    for (const tick of ticks) tick();
+    await refused.promise;
+
+    const firstConnection = natsConnections.find(
+      (candidate) => candidate.name === "omp-ses_go_controller_first"
+    );
+    const secondConnection = natsConnections.find(
+      (candidate) => candidate.name === "omp-ses_go_controller_second"
+    );
+    expect(firstConnection?.unsubscribed).toEqual([topic]);
+    expect(secondConnection?.subjects).toContain(topic);
+    expect(secondConnection?.unsubscribed).toEqual([]);
+  });
+
+  test("a replaced controller that is resumed takes no controller wakes", async () => {
+    const topic = "notifications.legion.omp.controller";
+    let replaced = false;
+    // The daemon refuses the first session's capability once a later start replaced it.
+    const first = await goController({
+      sessionId: "ses_go_controller_first",
+      register: (body) =>
+        replaced && body.sessionId === "ses_go_controller_first"
+          ? Response.json({ error: "Invalid boot token" }, { status: 403 })
+          : undefined,
+    });
+    await first.handlers.get("session_start")?.({}, first.context("ses_go_controller_first"));
+    // A later `legion controller start` takes the role, in another process.
+    resetLegionBootstrappedSessionForTests();
+    const second = createPi();
+    legionExtension(second.pi);
+    await second.handlers.get("session_start")?.({}, first.context("ses_go_controller_second"));
+    replaced = true;
+
+    // The first session's process died, and the session is resumed within the listener's reap
+    // window: its transcript records the role claim, which the listener now refuses it.
+    resetLegionBootstrappedSessionForTests();
+    const resumed = createPi();
+    legionExtension(resumed.pi);
+    const context = first.context("ses_go_controller_first");
+    const errorLog = spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      await expect(
+        resumed.handlers.get("session_start")?.(
+          {},
+          {
+            ...context,
+            sessionManager: {
+              ...context.sessionManager,
+              getBranch: () => [
+                { type: "custom", customType: "envoy-role-claim", data: { role: first.token } },
+              ],
+            },
+          }
+        )
+      ).rejects.toThrow("Invalid boot token");
+    } finally {
+      errorLog.mockRestore();
+    }
+
+    expect(
+      first.requests.filter(
+        (request) =>
+          request.path === "/v1/roles/set" &&
+          JSON.stringify(request.body) ===
+            JSON.stringify({ session_id: "ses_go_controller_first", role: first.token, soft: true })
+      )
+    ).toHaveLength(1);
+    const resumedConnection = natsConnections.findLast(
+      (candidate) => candidate.name === "omp-ses_go_controller_first"
+    );
+    expect(resumedConnection?.subjects).not.toContain(topic);
   });
 
   test("mints a controller grant with its registration secret for every bash command", async () => {
@@ -5675,6 +5823,24 @@ describe("the Go daemon's operator-launched controller (LEGION_DAEMON_API=go, LE
       "/legion/v1/claims/register",
       "/legion/v1/claims/register",
     ]);
+  });
+
+  test("refuses before claiming the role when LEGION_PROJECT is not the project the daemon registered", async () => {
+    const controller = await goController({ sessionId: "ses_go_controller_other_project" });
+    process.env.LEGION_PROJECT = "demo";
+
+    await expect(
+      controller.handlers.get("session_start")?.(
+        {},
+        controller.context("ses_go_controller_other_project")
+      )
+    ).rejects.toThrow(
+      "LEGION_PROJECT demo names controller role legion-demo-controller, but the daemon registered this controller as legion-omp-controller"
+    );
+    expect(controller.requests.map((request) => request.path)).not.toContain("/v1/roles/set");
+    expect(natsConnections.flatMap((connection) => connection.subjects)).not.toContain(
+      "notifications.legion.demo.controller"
+    );
   });
 
   test("a refused capability is logged and propagates, and the operator's session is not ended", async () => {

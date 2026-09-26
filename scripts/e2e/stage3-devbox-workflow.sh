@@ -5,17 +5,20 @@
 # shared lib/rig.sh and lib/workflow.sh; it deliberately does not source the kind smoke scripts:
 # the small scratch-service rig below is copied and adapted so its lifecycle belongs to this run.
 #
-# Run it as `bash scripts/e2e/stage3-devbox-workflow.sh`. It needs agent-tier secrets and the
-# operator's own hawk login, with the keyring holding it unlocked: the agents' model is Anthropic
-# through the Hawk model gateway (lib/install-model-gateway.sh), the route every devbox agent
-# session uses, and no Anthropic key reaches a pane. The proof human's reviews and merge are the
-# devbox's ordinary gh (the dotfiles shim, acting as the sjawhar-agent App), never a Legion App.
+# Run it as `bash scripts/e2e/stage3-devbox-workflow.sh` with two required inputs:
+# LEGION_E2E_MODEL_GATEWAY_URL, the model gateway's Anthropic endpoint, and SMOKE_UPSTREAM_NATS,
+# the production Envoy NATS the GitHub bridge subscribes on, by its fully-qualified name. It needs
+# agent-tier secrets and the operator's own hawk login, with the keyring holding it unlocked: the
+# agents' model is Anthropic through the Hawk model gateway (lib/install-model-gateway.sh), the
+# route every devbox agent session uses, and no Anthropic key reaches a pane. The proof human's
+# reviews and merge are the devbox's ordinary gh (the dotfiles shim, acting as the sjawhar-agent
+# App), never a Legion App.
 # The App private keys are resolved by the daemon through private_key_command; they never enter
 # this shell, a pane, an argv, or this transcript.
 set -Eeuo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
-work=$(mktemp -d /tmp/legion-e2e3.XXXXXXXX)
+work=$(mktemp -d "/tmp/legion-e2e3.$$.XXXXXXXX")
 # Evidence survives every outcome: logs, captured state, negative controls, the production audit,
 # and every agent transcript. Cleanup stops processes; removes containers, sockets, and profiles; and
 # closes the run's own pull requests on the smoke repository, deleting their branches.
@@ -41,6 +44,8 @@ watcher_pid=
 port_daemon=
 port_listener=
 port_dispatch=
+dispatch_base=
+dispatch_actor=
 port_worker_stream=
 port_pg=
 port_nats=
@@ -69,8 +74,8 @@ fail() { printf 'FAIL %s: %s\n' "$check" "$*" >&2; exit 1; }
 . "$root/scripts/e2e/lib/rig.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/workflow.sh
 . "$root/scripts/e2e/lib/workflow.sh"
-# shellcheck source-path=SCRIPTDIR source=lib/built-revision.sh
-. "$root/scripts/e2e/lib/built-revision.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/leftovers.sh
+. "$root/scripts/e2e/lib/leftovers.sh"
 
 # collect_transcripts copies every OMP session the rig's profile wrote into the evidence directory
 # before the isolated profile is removed.
@@ -87,7 +92,7 @@ cleanup() {
     printf 'production audit after failure:\n' >&2
     production_audit >&2
   fi
-  stop_pid "$watcher_pid"
+  stop_tree "$watcher_pid"
   stop_pid "$daemon_pid"
   stop_pid "$dispatch_pid"
   stop_pid "$listener_pid"
@@ -156,6 +161,7 @@ start_dispatch() {
     result=0
     await_start dispatch "$dispatch_pid" "$offset" 60 "the scratch Dispatch server" \
       curl -fsS "http://127.0.0.1:$port_dispatch/api/v1" || result=$?
+    dispatch_base="http://127.0.0.1:$port_dispatch"
     [ "$result" != 0 ] || return 0
     [ -z "$keep" ] || fail "the restarted scratch Dispatch lost port $port_dispatch to another process"
     note "the scratch Dispatch lost port $port_dispatch to another process (attempt $attempt); picking another"
@@ -327,7 +333,7 @@ pane_watcher() {
   local claims inc issue role omp mismatch
   trap - EXIT ERR
   set +e
-  while :; do
+  while kill -0 "$$" 2>/dev/null; do
     if claims=$("$work/legion" claims list --json --config "$work/legion.yaml" --operator-token-file "$work/operator-token" 2>/dev/null); then
       while IFS=$'\t' read -r inc issue role; do
         grep -qF "$inc " "$evidence/pane-endpoints-checked.txt" 2>/dev/null && continue
@@ -525,7 +531,8 @@ idle_read_diagnostics() {
 }
 
 begin prerequisites
-for tool in go docker jq curl ss tmux bun mise secrets gh shellcheck jj hawk-token; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+refuse_leftovers legion-e2e3
+for tool in go docker jq curl ss tmux bun mise secrets gh shellcheck jj hawk-token pgrep; do command -v "$tool" >/dev/null || fail "$tool is required"; done
 # STAGE3_FROM is a development aid for iterating on the later scenarios against a fresh rig; a run
 # with it set is never the proof and never prints PASS. `held` skips the first issue's workflow:
 # the proof human closes that root, freeing its admission slot as its sign-off would, and the
@@ -544,6 +551,19 @@ case "$until" in
   *) fail "STAGE3_UNTIL must be rework, not $until" ;;
 esac
 [ -z "$from" ] || [ -z "$until" ] || fail "set STAGE3_FROM or STAGE3_UNTIL, not both"
+# The bridge dials the production Envoy NATS by the operator's fully-qualified name for it, never
+# a bare alias a resolver's search domain would complete. The value is never printed.
+upstream_nats=${SMOKE_UPSTREAM_NATS:-}
+upstream_nats=${upstream_nats#"${upstream_nats%%[![:space:]]*}"}
+upstream_nats=${upstream_nats%"${upstream_nats##*[![:space:]]}"}
+[ -n "$upstream_nats" ] ||
+  fail "SMOKE_UPSTREAM_NATS is unset: the production Envoy NATS the GitHub bridge subscribes on, by its fully-qualified name (nats://envoy-nats.<tailnet>.ts.net:4222)"
+# One URL: optional scheme and user info, a host with a dot, optional port, nothing after it (the
+# client dials what follows the last "://"); scripts/kind-smoke/envoy-bridge.ts holds the same
+# pattern.
+nats_url='^([A-Za-z][A-Za-z0-9+.-]*://)?([^@/?#,[:space:]]+@)?[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)+(:[0-9]+)?/?$'
+[[ "$upstream_nats" =~ $nats_url ]] ||
+  fail "SMOKE_UPSTREAM_NATS is not one NATS URL naming a fully-qualified host: a bare alias resolves through whatever search domain the box has; name the production Envoy NATS as nats://envoy-nats.<tailnet>.ts.net:4222"
 development=${from:+from $from}${until:+until $until}
 # The daemon runs gh by the path it resolves at boot. This box's PATH heads with a gh wrapper
 # (the dotfiles shim, which hands an agent's explicit GH_TOKEN on to `knives gh`), so the proof
@@ -568,14 +588,15 @@ begin rig
 (umask 077 && head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/envoy-token" &&
   printf 'Authorization: Bearer %s\n' "$(cat "$work/envoy-token")" >"$work/envoy-auth-header" &&
   head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/dispatch-token" &&
+  printf 'Authorization: Bearer %s\n' "$(cat "$work/dispatch-token")" >"$work/dispatch-auth-header" &&
+  printf 'X-Dispatch-User: smoke\n' >"$work/dispatch-human-header" &&
   head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/operator-token" &&
   head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/postgres-password")
-chmod 0600 "$work"/*token "$work/envoy-auth-header" "$work/postgres-password"
+chmod 0600 "$work"/*token "$work"/*-header "$work/postgres-password"
 (cd "$root/packages/daemon-go" && go build -o "$work/legion" ./cmd/legion)
 (cd "$root/packages/envoy" && go build -o "$work/envoy-listener" ./cmd/listener && go build -o "$work/envoy-dispatch" ./cmd/dispatch)
-# The head under proof, on the run's own log: a run reports for whatever the workspace held when it
-# built, and a comment naming the head is written by hand.
-built_from "$root" "$work/legion" "$work/envoy-listener" "$work/envoy-dispatch"
+built=$(bash "$root/scripts/e2e/lib/built-from.sh" "$root" "$work/legion" "$work/envoy-listener" "$work/envoy-dispatch") || fail "lib/built-from.sh could not say what the run built"
+while IFS= read -r line; do note "$line"; done <<<"$built"
 docker ps >/dev/null
 # Docker assigns the containers' host ports when it binds them, so neither can lose a race.
 docker run -d --name "$pg_container" --mount type=tmpfs,destination=/var/lib/postgresql/data \
@@ -596,7 +617,7 @@ dispatch_human PUT "settings/repo-projects/$repo" "$(jq -cn --arg project "$proj
 # This is the production Envoy ingress bridge, subscribe-only from its perspective. GitHub events
 # are observed, never manufactured, and only the smoke repository is forwarded to this run's NATS.
 SMOKE_REPO="$repo" SMOKE_RIG_NATS="nats://127.0.0.1:$port_nats" \
-  SMOKE_UPSTREAM_NATS="${SMOKE_UPSTREAM_NATS:-nats://envoy-nats.tailb86685.ts.net:4222}" \
+  SMOKE_UPSTREAM_NATS="$upstream_nats" \
   start_process bridge env -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
     -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 \
     bun run "$root/scripts/kind-smoke/envoy-bridge.ts"
@@ -1002,7 +1023,7 @@ pass
 begin services-stopped
 # Stop the remaining services explicitly and prove every one is gone, so no agent can take another
 # turn: an idle agent takes one on the next event the daemon delivers, until the daemon stops.
-stop_pid "$watcher_pid"; watcher_pid=
+stop_tree "$watcher_pid"; watcher_pid=
 stop_pid "$daemon_pid"; daemon_pid=
 stop_dispatch
 stop_pid "$listener_pid"; listener_pid=

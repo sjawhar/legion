@@ -1,6 +1,6 @@
 {
   "name": "@sjawhar/pi-legion-envoy",
-  "version": "5.1.1",
+  "version": "5.2.0",
   "type": "module",
   "omp": {
     "extensions": [
@@ -13,7 +13,7 @@
   },
   "legion": {
     "daemonApiVersion": 8,
-    "goDaemonApiVersion": 6
+    "goDaemonApiVersion": 7
   },
   "repository": {
     "type": "git",
