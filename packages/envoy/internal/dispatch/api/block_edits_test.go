@@ -271,7 +271,8 @@ func TestDocumentEditsRefuseCodeThatWouldEndItsTypedBlock(t *testing.T) {
 // that leaves a block the document cannot read back, or reads back as blocks of another kind, is
 // refused naming replace_with, and nothing is written - the document stays byte for byte as it was
 // and the suggestion stays open. An accept whose blocks read back as written is stored as before,
-// including one that writes blocks, such as a rule or a list over a whole paragraph.
+// including one that writes blocks, such as a rule or a list over a whole paragraph, and a line
+// of dashes is such a rule.
 func TestAcceptingASuggestionRefusesAReplacementTheDocumentCannotCarryBack(t *testing.T) {
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
@@ -335,6 +336,10 @@ func TestAcceptingASuggestionRefusesAReplacementTheDocumentCannotCarryBack(t *te
 	for index, test := range []struct{ name, spec, with, want string }{
 		{"text", paragraph, "Changed.", "Intro.\n\nChanged.\n\nAfter.\n"},
 		{"a rule over a paragraph", paragraph, "***", "Intro.\n\n---\n\nAfter.\n"},
+		// An accept's text goes inside the document, so a leading `---` is a rule, as `***` is,
+		// never the front matter that would open a document and swallow the line.
+		{"dashes over a paragraph", paragraph, "---", "Intro.\n\n---\n\nAfter.\n"},
+		{"dashes inside a paragraph", "Intro.\n\nSay Body. now.\n\nAfter.\n", "---", "Intro.\n\nSay \n\n---\n\n now.\n\nAfter.\n"},
 		{"a list over a paragraph", paragraph, "- a", "Intro.\n\n- a\n\nAfter.\n"},
 		{"two paragraphs over one", paragraph, "a\n\nb", "Intro.\n\na\n\nb\n\nAfter.\n"},
 		{"dashes inside a line", paragraph, "--- a note", "Intro.\n\n--- a note\n\nAfter.\n"},
