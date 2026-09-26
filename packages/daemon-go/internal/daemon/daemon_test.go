@@ -114,10 +114,6 @@ func randomSuffix(t *testing.T) string {
 	return strings.ToUpper(hex.EncodeToString(b[:]))
 }
 
-// freePort answers a port free a moment ago, with its successor free too: a daemon binds its API
-// on the port and its worker stream on the one above it, and the second was never checked. Both
-// are released before the daemon binds them — nothing can reserve a port for another process —
-// so startDaemon takes another pair when one is taken in between.
 // The ports testConfig hands a daemon are held until the daemon binds them: another process asking
 // for either in between is refused, and the daemon still boots on both.
 func TestThePortsHandedToADaemonCannotBeTakenBeforeItBinds(t *testing.T) {
@@ -172,6 +168,16 @@ func holdPort(t *testing.T) int {
 		_ = listener.Close()
 	})
 	return listener.Addr().(*net.TCPAddr).Port
+}
+
+// rebindHeldPorts hands cfg a freshly held API and worker-stream port. A daemon that has stopped
+// closed the listeners it was handed, and from then on the ports it used are any process's, so a
+// test that starts a second daemon on the same config holds a pair again first.
+func rebindHeldPorts(t *testing.T, cfg *config.Config) {
+	t.Helper()
+	cfg.Port = holdPort(t)
+	cfg.DaemonURL = "http://127.0.0.1:" + strconv.Itoa(cfg.Port)
+	cfg.WorkerStreamPort = holdPort(t)
 }
 
 // heldListen is the daemon's listen under test: the listener holdPort holds for address, handed
@@ -297,6 +303,7 @@ func TestRunRecordsEveryBootAndKeepsTheFirstBootTime(t *testing.T) {
 		t.Fatal("the first boot has no recorded time")
 	}
 
+	rebindHeldPorts(t, &cfg)
 	if err := run(ctx, cfg, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{})); err != nil {
 		t.Fatalf("second run: %v", err)
 	}
@@ -434,6 +441,7 @@ func TestAControllerRegistrationIsInTheStateAndSurvivesARestart(t *testing.T) {
 	want(d.state())
 
 	d.stop()
+	rebindHeldPorts(t, &cfg)
 	d = startDaemon(t, cfg, fakeRuntime(fake.NewRuntime(), &built{}))
 	want(d.state())
 	status, body = d.request(http.MethodPost, "/legion/v1/grants",
