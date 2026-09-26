@@ -143,56 +143,51 @@ Document edits (`POST /api/v1/artifacts/{id}/edits`, `docs/edits.go` `applyOpera
 block a `replace`, like an accepted suggestion, writes `with` as the code's literal text
 (`codeReplacement`), and none of the rules below apply. Markdown cannot carry two things there: line
 breaks at the end of the code's text and a line holding only whitespace in a list item's code read
-back without them; and a line of three or more colons in code inside a typed block, starting less
-than four columns past the column the typed block's own lines start at on the written line, is
-refused (`refuseCodeThatEndsItsBlock`), because the browser editor's parser ends the typed block at
-it even inside fenced code. That measure counts the width of the list markers and `> ` around the
-code, advances a tab to the next multiple of four from the column it stands at, so a tab in a
-callout two columns in advances two, trims only spaces, tabs and a line-ending carriage return around
-the colons, and finds nothing closing in a blockquote inside the typed block (`pmdoc.TypedFenceLineInCode`, held to the engine's
-own verdicts in `pmdoc/testdata/typed-fence-lines.json`, which the fixture generator writes for a
-callout at the top and inside a blockquote, list items and a footnote definition); the advice is
-four spaces, which no layout closes. Text a `replace` writes that would read as block syntax at a
-line start is written escaped, so it reads back as the characters: `---`, `***`, `~~~` or `::::`
-over a paragraph is stored `\---` and so on (the renderer's line-start escapes), beside an
-emptied paragraph as anywhere else, since an empty paragraph is not written. Accepting a
+back without them. A line of colons in code inside a typed block is kept: the browser editor's
+parser ends a typed block at a line of at least its fence's colons, with spaces and tabs around
+them, starting less than four columns
+past where the typed block's own lines start on the written line, even inside fenced code -
+counting the width of the list markers and `> ` around the code, advancing a tab to the next
+multiple of four from the column it stands at, and finding nothing closing in a blockquote inside
+the typed block - so the renderer writes the typed block's fence longer than every such line
+(below). The engine's reading of each shape is `pmdoc/testdata/typed-fence-lines.json`, which the
+fixture generator writes for a callout at the top and inside a blockquote, list items, a footnote
+definition and another callout. Text a `replace` writes that would read as block syntax at a line
+start is written escaped, so it reads back as the characters: `---`, `***`, `~~~` or `::::` over a
+paragraph is stored `\---` and so on (the renderer's line-start escapes). Beside an emptied
+paragraph it is written the same way, since an empty paragraph is not written. Accepting a
 suggestion (`POST /api/v1/comments/{id}/accept`, `docs/marks.go` `applySuggestion`) writes blocks,
 so it reads back what it writes and refuses what reads back otherwise, naming `replace_with`. Over
 every document-level block the accept writes it runs `refuseUnreadableReplacement`'s check
 (`refuseUnreadableAccept`, outside an ask) and, outside a typed block, the shape comparison
-(`refuseReshapedAccept`: `pmdoc.BlockShapeError`, which expects no empty paragraph back): two
-paragraphs in a tight list item read back as one. A non-empty replacement inside a typed block is
+(`refuseReshapedAccept`: `pmdoc.BlockShapeError`). A non-empty replacement inside a typed block is
 checked by that block's own `Splice` content rule, and `refuseBrokenAsks` checks an ask's
 `paragraph+ bullet_list?` rule; each non-ask typed block around the match then round-trips through
-its rendered markdown (`refuseTypedAcceptRoundTrip`), so a nested typed directive whose adjacent
-fences read back as another tree is refused. Last, the whole document round-trips
+its rendered markdown (`refuseTypedAcceptRoundTrip`), so a list written beside a list of its kind
+in a callout, which reads back as one list, is refused. Last, the whole document round-trips
 (`refuseAcceptedDocumentShape`: `pmdoc.DocumentShapeError`), which reads each block beside the
-ones around it: a list written beside a list of its kind reads back as one list, whether at the
-document's level or beside a typed block the accept rewrites or consumes, and its refusal names
-that and advises rejecting, since where the join removes what stood between two lists no text
-keeps them apart. A document that writes nothing reads back as its one empty paragraph. Each check
-passes over a block, or for the last a document, that already read back otherwise. An empty callout reaches
-the read check, because its empty paragraph renders to no content and its `block+` rule cannot
-carry that. An accept parses its text as blocks
+ones around it: two such lists meet at the document's level too, or beside a typed block the
+accept rewrites or consumes, and this refusal names that and advises rejecting, since where the
+join removes what stood between two lists no text keeps them apart. Each check passes over a
+block, or for the last a document, that already read back otherwise. An accept parses its text
+as blocks
 written into the document (`pmdoc.ParseFragment`: a leading `---` is a rule, as `***` is, except
 that a closed front-matter block is front matter where the text lands at the document's start,
 at the start of a top-level first block's text), so a rule or a list over a whole paragraph is
 written as that block and kept, while one that leaves a block the document cannot read back,
-such as a list at a list item's start or in a footnote definition, is refused: the document
+such as a list beside a list of its kind, is refused: the document
 stays as it was and the suggestion stays open. The person accepting cannot change the text, so
 the refusal (`acceptRefusal`) says what the text writes where it lands and names what they can
 do (reject the suggestion, or reply asking for text the block can hold), never an edit-route
 operation; it says the text empties a paragraph only when the text renders no content, and then
 offers deleting the paragraph only where the rest of its block stands without it, and the whole
-block only where the paragraph is all it holds - a footnote definition together with its
-reference, which would otherwise read as text. A reject is not checked, since it gives back the
-text the insert started from. Neither route can see a lone carriage return, which this parser
-reads as text where CommonMark and the browser editor end the line. Everywhere else `replace` is
+block only where the paragraph is all it holds. A reject is not checked, since it gives back the
+text the insert started from. Everywhere else `replace` is
 inline: `with` parses through `pmdoc.ParseInline` (paragraph-only block grammar), so a multi-paragraph
 `with` is `INVALID_OP`, so is any non-empty `with` that renders to no inline content (a line
 indented four spaces or a tab, which markdown reads as a code block, or whitespace alone — an
-empty `with` deletes the match on purpose, except where the block holding it cannot be written
-without that paragraph, which is refused naming the `delete` that removes it instead; refusing the rest is LEGION-280, since
+empty `with` deletes the match on purpose, and a container left holding only the emptied paragraph
+reads back holding it; refusing the rest is LEGION-280, since
 splicing nothing over the match silently deleted the caller's text), and a leading marker of a
 *different* kind from the matched block's own is
 literal escaped text. A `with` opening with a marker of the *same* kind as that block's own would
@@ -225,7 +220,9 @@ prose off them. `delete` takes `find` or
 (`pmdoc.DeleteTextblock`: it also drops a list, list item, or blockquote it empties, hoists a nested
 list into the place of a bullet whose text goes, and refuses a bullet with other content with
 `ErrListItemContent` naming `delete {block:"<item id>"}`; `pmdoc.DeleteBlock` serves `block` and
-reports any emptied container's content rule as `INVALID_OP`). `move` relocates the block with
+reports any emptied container's content rule as `INVALID_OP`; both leave an emptied footnote
+definition holding one empty paragraph, which both parsers read back as the definition, so its
+reference stays a reference). `move` relocates the block with
 `block` to the document-level boundary of an insert anchor (`pmdoc.MoveBlock`); insert and move
 anchors are a quote, `start`, `end`, `heading:<title>`, or `block:<id>`. An insert's `markdown` is
 read as text written into the document (`pmdoc.ParseFragment`), so a leading `---` line is a rule,
@@ -244,10 +241,7 @@ type under its id, at any depth, which is that block rewritten: it replaces the 
 rather than nesting inside it, and the replacement's other blocks, and any it sits inside (a
 blockquote, a list item, a typed block under another id), go in the same parent, where they stand
 in the replacement. The same type under another id, or under none, is a new block and lands inside
-like any other. Either way the accept keeps only what reads back as it wrote it (above): an empty
-callout is refused, since its empty paragraph is a block in the live tree but renders to no
-content, which the callout's `block+` rule cannot carry back, and so is a typed block nested in
-another whose fences read back as another tree. The accept
+like any other. Either way the accept keeps only what reads back as it wrote it (above). The accept
 then reads each ask by its id before and after the splice (`docs/ask_blocks.go` `askReadability`,
 `docs/marks.go` `refuseBrokenAsks`): an ask is unreadable when settlement's parse fails, when its
 children break the content rule `paragraph+ bullet_list?` (`pmdoc.AskContentError`: a paragraph
@@ -557,10 +551,77 @@ exists, and refuses to run without `dispatch.server_url`.
 Typed document blocks are declared only in `internal/dispatch/pmdoc/schema/blocks.json`. The
 embedded file is the server-owned schema, `GET /api/v1/schema/blocks` returns its exact JSON, and
 the fixture generator reads that checked-in file. A typed block is CommonMark generic-directive
-syntax: `:::name{#block-id key="value"}` followed by block children and a matching `:::`. There is
+syntax: `:::name{#block-id key="value"}` followed by block children and a closing line of exactly as
+many colons as the opener. The browser editor's parser closes it at a line of at least as many
+colons indented less than four columns, even inside a fenced code block it holds, so the renderer
+writes three colons, or one more than the longest such line inside the typed block
+(`closingColons`): a nested typed block's fence, or a line of code, measured in the written line's
+columns - the width of the list markers and `> ` around it, and a tab advancing to the next
+multiple of four from the column it stands at. A callout nested directly in a callout is written `::::callout{…}` …
+`::::`, as the browser editor writes it. There is
 no whitespace between `name` and `{`; Pandoc fenced divs, leaf directives, and text directives are
 invalid outside code blocks. An unclosed typed block at document level is rejected, while one nested
 inside another block runs to that parent’s end.
+
+Text a caller writes reaches the parser with line feeds alone: `pmdoc.LineFeeds` writes each CR LF
+and each lone carriage return as a line feed, as CommonMark and the browser editor's parser read
+both, in `ParseForWrite` (a spec, an upload, an insert) and `ParseInline`; in every edit
+operation's text before any check reads it (`applyOperation`: a replace's `with`, an insert's
+markdown whether it becomes blocks or table rows, a retype's attributes); in a suggestion's
+`replace_with` when it is created and when it is accepted; in the attributes written onto a
+typed block (`SetBlockAttributes`, `pmdoc.LineFeedAttrs`), and in an answer's text, which its
+ask block carries; and in a block ask's edited question and options. The browser editor's own
+updates cannot carry a carriage return. No stored document holds one, and `pmdoc` handles line
+feeds alone. A code span keeps the whitespace that
+starts each of its later lines past the prefix of the containers around it, as the browser editor's
+parser reads it, a line holding only whitespace before the closer included; goldmark's paragraph
+trims it (`lineRecordingParagraph`, `multilineCodeSpanText`). A space or a line feed is the padding
+such a span sheds at each end (`codeSpanPadded`), and the writer pads a span whose text starts and
+ends with one. A lazy continuation line - one that
+continues a paragraph in a list item, a quote or a footnote definition without the container's
+prefix - is never a table's header or delimiter row (`lazyTableRows`), as in GFM.
+A task list item's marker (`[ ]`, `[x]` or `[X]` opening a list item's first paragraph) is read as
+the browser editor's parser reads it (`taskList`): followed by a space or a tab and then more text on
+the line, or by a line ending the paragraph continues past, and it takes only the one character
+after it. Goldmark's took the marker with anything after it, so it read a link opening a list item
+(`- [x](https://…)`) as a checked task.
+
+Front matter is read as the browser editor's parser reads it (`pmdoc.parseFrontmatterBlock`): a
+first line that is `---`, with any spaces or tabs after it, opens it, the first later line that is
+the same closes it, and its text is stored between plain `---` fences with line feeds between its
+lines. A `---` opener nothing closes is a thematic break. That parser, having tried such an opener
+as front matter to the document's end, reads no list, quote or footnote definition at the
+document's level in the rest. So the renderer writes a rule that opens a document as `***` where
+`---` would be misread - a later `---` line would close front matter, or the document holds a
+list, quote or footnote definition at its level (`holdsAContainerTheBrowserDrops`) - and `---`
+everywhere else.
+
+A container that holds nothing is read as the browser editor's parser reads it, holding one empty
+paragraph (`emptyParagraphFirst`): an empty list item (`-`), quote (`>`), typed block or footnote
+definition, and a list item that opens with another block (`- # h`) holds an empty paragraph ahead
+of it. A table with no body row holds one empty row, which the renderer writes as nothing. The
+renderer writes a list item's empty first paragraph as nothing, with the next block on the
+marker's line, a rule there as `***` (`- ---` is a thematic break at the list's level). A task
+item cannot be written so, since its marker's line would carry the next block as the task's text
+and the browser reads no other form of it as a task: a task item whose emptied first paragraph has
+another block after it does not render, and an edit that would leave one is refused.
+An empty list item that would interrupt a paragraph is not opened, as that parser reads it on the
+whole line (`emptyItemGuard`): after `- a`, the line `  - -` is an item holding the text `-`.
+
+A document holding one of those shapes, or a footnote definition that ends in a block other than
+a paragraph, has its lists' spacing read as that parser reads it (`browserListSpacing`): outside
+quotes and footnote definitions a blank line between two items spreads the list, and one between
+an item's blocks spreads the item; in a footnote definition a list is never spread and only an
+item's own blank lines spread it; in a quote a list is read only when no blank line lies at or
+after it but the one before flow content the quote goes on with, and then nothing is spread. Where
+that parser's spread depends on more - a blank line after an item in a footnote definition, any
+other blank line in a quote, a typed block holding one in a list item - the document is refused,
+and so it is where goldmark reads its blocks otherwise: an empty list item and a blank line before
+a block its outer item holds, and a footnote definition inside another block, ahead of another
+block, out of the order of its first references, or referred to by nothing, which goldmark moves
+or drops. Every other document keeps goldmark's looseness - a loose list's items holding more
+than one block are spread, the list when none is - which is how the documents Dispatch stores were
+read.
 
 A typed block renders its `blockId`, defaulted attributes, and every explicitly set optional
 attribute. Parsing mints an omitted id, while live document reads and writes validate each node

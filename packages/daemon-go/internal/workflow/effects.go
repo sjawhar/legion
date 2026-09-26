@@ -89,10 +89,11 @@ func (e *Engine) clearHandoff(ctx context.Context, tx pgx.Tx, issue string, role
 		return nil
 	}
 	row, err := e.phaseRow(ctx, tx, issue, role)
-	if err != nil || row.HandoffCommit == "" && row.Verdict == "" {
+	if err != nil || row.HandoffCommit == "" && row.Verdict == "" && row.Decision == nil {
 		return err
 	}
-	row.HandoffCommit, row.Verdict = "", ""
+	// The review round's decision ends with the round.
+	row.HandoffCommit, row.Verdict, row.Decision = "", "", nil
 	return e.store.PutPhase(ctx, tx, row)
 }
 

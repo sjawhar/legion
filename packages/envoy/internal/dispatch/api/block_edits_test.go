@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -95,75 +94,123 @@ func TestDocumentEditsReplaceBesideAnUnreadableBlockIsAccepted(t *testing.T) {
 }
 
 // A replace that leaves its block unreadable is refused with advice for its cause: HTML that
-// opens a block keeps to a line; an emptied paragraph is removed by deleting its text where that
-// delete removes it, and by deleting the block that holds it where the delete would be refused -
-// a typed block, a footnote definition, a list item holding more than the paragraph. No refusal
-// names a Go type.
-func TestDocumentEditsRefuseAnUnreadableReplaceWithAdviceForItsCause(t *testing.T) {
+// opens a block keeps to a line. The refusal names no Go type.
+func TestDocumentEditsRefuseBlockHTMLWithAdviceToKeepItInsideALine(t *testing.T) {
 	handler := newTestHandler(t)
-	for index, test := range []struct {
-		name, spec, with string
-		advice, absent   []string
-	}{
-		{"block HTML", "Intro.\n\nBody.\n", "<div>x</div>", []string{"HTML", "inside a line"}, nil},
-		{"emptied list item", "- Body.\n- two\n", "", []string{"delete", "find"}, []string{"HTML"}},
-		{"emptied blockquote", "Intro.\n\n> Body.\n", "", []string{"delete", "find"}, []string{"HTML"}},
-		{"emptied typed block", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n", "", []string{"delete {block:"}, []string{"HTML"}},
-		{"emptied footnote", "x[^1]\n\n[^1]: Body.\n", "", []string{"delete {block:"}, []string{"HTML"}},
-		{"emptied list item holding more", "- Body.\n\n  ```\n  code\n  ```\n", "", []string{"delete {block:"}, []string{"find", "HTML"}},
-		{"emptied list, a callout's only block", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n- Body.\n:::\n", "", []string{"delete {block:"}, []string{"HTML"}},
-		{"emptied blockquote, a callout's only block", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n> Body.\n:::\n", "", []string{"delete {block:"}, []string{"HTML"}},
-		{"emptied first paragraph of a list item", "- Body.\n\n  more\n- two\n", "", []string{"remove the paragraph with delete {block:"}, []string{"holding it", "HTML"}},
-		{"emptied only option of an ask", "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich?\n\n- Body.\n:::\n", "", []string{"delete"}, []string{"HTML"}},
+	issue := createInteractionIssue(t, handler, "TA", "block HTML", "Intro.\n\nBody.\n")
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops": []map[string]any{{"op": "replace", "find": "Body.", "with": "<div>x</div>"}},
+	}, "alice")
+	body := response.Body.String()
+	if response.Code != http.StatusBadRequest || !strings.Contains(body, `"code":"INVALID_OP"`) {
+		t.Fatalf("replace: status=%d body=%s", response.Code, body)
+	}
+	for _, want := range []string{"HTML", "inside a line"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("refusal %s lacks %q", body, want)
+		}
+	}
+	if strings.Contains(body, "*ast.") {
+		t.Fatalf("refusal %s names a Go type", body)
+	}
+}
+
+// An empty with that empties a container's paragraph is taken: a list item, a blockquote or a
+// typed block holding only an empty paragraph reads back holding it, as the browser editor's
+// parser reads it, and so does a list item whose first block is an emptied paragraph. An ask's
+// only option emptied is refused, since an option needs a label.
+func TestDocumentEditsEmptyingAContainersParagraphIsTaken(t *testing.T) {
+	handler := newTestHandler(t)
+	for index, test := range []struct{ name, spec string }{
+		{"a list item", "- Body.\n- two\n"},
+		{"a blockquote", "Intro.\n\n> Body.\n"},
+		{"a typed block", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n"},
+		{"a list item holding more", "- Body.\n\n  ```\n  code\n  ```\n"},
+		{"a list, a callout's only block", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n- Body.\n:::\n"},
+		{"a blockquote, a callout's only block", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n> Body.\n:::\n"},
+		{"a list item's first paragraph of two", "- Body.\n\n  more\n- two\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			issue := createInteractionIssue(t, handler, "T"+string(rune('A'+index)), test.name, test.spec)
 			response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
-				"ops": []map[string]any{{"op": "replace", "find": "Body.", "with": test.with}},
+				"ops": []map[string]any{{"op": "replace", "find": "Body.", "with": ""}},
 			}, "alice")
-			body := response.Body.String()
-			if response.Code != http.StatusBadRequest || !strings.Contains(body, `"code":"INVALID_OP"`) {
-				t.Fatalf("replace: status=%d body=%s", response.Code, body)
+			if response.Code != http.StatusOK {
+				t.Fatalf("replace: status=%d body=%s", response.Code, response.Body.String())
 			}
-			for _, want := range test.advice {
-				if !strings.Contains(body, want) {
-					t.Fatalf("refusal %s lacks %q", body, want)
-				}
+			markdown := documentMarkdown(t, handler, issue.PrimaryArtifactID)
+			back, err := pmdoc.Parse(markdown)
+			if err != nil {
+				t.Fatalf("stored %q does not read back: %v", markdown, err)
 			}
-			for _, unwanted := range append(test.absent, "*ast.") {
-				if strings.Contains(body, unwanted) {
-					t.Fatalf("refusal %s says %q", body, unwanted)
-				}
+			if strings.Contains(markdown, "Body.") {
+				t.Fatalf("stored %q still holds the emptied text", markdown)
 			}
-			// The advice is the caller's next call, so it has to be one the route accepts.
-			var advised map[string]any
-			if match := regexp.MustCompile(`delete \{block:\\"([^\\"]+)\\"\}`).FindStringSubmatch(body); match != nil {
-				advised = map[string]any{"op": "delete", "block": match[1]}
-			} else if strings.Contains(body, "delete and find") {
-				advised = map[string]any{"op": "delete", "find": "Body."}
-			}
-			if advised == nil {
-				return
-			}
-			followed := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
-				"ops": []map[string]any{advised},
-			}, "alice")
-			if followed.Code != http.StatusOK {
-				t.Fatalf("the advised %v: status=%d body=%s", advised, followed.Code, followed.Body.String())
+			again, err := pmdoc.Render(back)
+			if err != nil || again != markdown {
+				t.Fatalf("stored %q reads back as %q (%v)", markdown, again, err)
 			}
 		})
 	}
+	issue := createInteractionIssue(t, handler, "TZ", "an ask's only option", "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich?\n\n- Body.\n:::\n")
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops": []map[string]any{{"op": "replace", "find": "Body.", "with": ""}},
+	}, "alice")
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"INVALID_ASK_BLOCK"`) {
+		t.Fatalf("emptying an ask's only option: status=%d body=%s", response.Code, response.Body.String())
+	}
 }
 
-// The browser editor's parser, like this one, ends a typed block at a line of three or more colons
-// indented less than four columns from the typed block's own prefix, even inside fenced code the
-// typed block holds; list markers add their width to a code line's indentation, a tab counts four,
-// and a line in a blockquote closes nothing. A replace or a suggestion that writes such a line into
-// code inside a callout would store a document that reads back with the callout cut short, so it
-// is refused and nothing is written. The shapes the engine keeps are stored as sent; the fixture
-// generator's typed-fence-lines.json holds the engine's reading of each shape
-// (pmdoc.TestTypedFenceLineInCodeAgreesWithTheEngine).
-func TestDocumentEditsRefuseCodeThatWouldEndItsTypedBlock(t *testing.T) {
+// A list item whose first paragraph is empty is written with its next block on the marker's line,
+// so a rule there is written `***`: `- ---` would be a thematic break at the list's level, and the
+// item and the list around it would be lost, here and in the browser editor. A task item's emptied
+// first paragraph beside another block is refused, since the browser editor reads no form of that
+// item as a task: the marker's line would carry the next block as the task's text.
+func TestDocumentEditsEmptyingAListItemsFirstParagraphKeepsTheItem(t *testing.T) {
+	handler := newTestHandler(t)
+	for index, test := range []struct{ name, spec, with, want string }{
+		{"a rule after it", "- Body.\n\n  ***\n- two\n", "", "- ***\n- two\n"},
+		{"a rule an edit does not touch", "- ***\n\nBody.\n", "x", "- ***\n\nx\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			issue := createInteractionIssue(t, handler, "L"+string(rune('A'+index)), test.name, test.spec)
+			response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+				"ops": []map[string]any{{"op": "replace", "find": "Body.", "with": test.with}},
+			}, "alice")
+			if response.Code != http.StatusOK {
+				t.Fatalf("replace: status=%d body=%s", response.Code, response.Body.String())
+			}
+			if markdown := documentMarkdown(t, handler, issue.PrimaryArtifactID); markdown != test.want {
+				t.Fatalf("stored %q, want %q", markdown, test.want)
+			}
+		})
+	}
+	for index, spec := range []string{"- [ ] Body.\n  - sub\n", "- [ ] Body.\n\n  ```\n  code\n  ```\n"} {
+		issue := createInteractionIssue(t, handler, "LT"+string(rune('A'+index)), "a task item", spec)
+		before := documentMarkdown(t, handler, issue.PrimaryArtifactID)
+		response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+			"ops": []map[string]any{{"op": "replace", "find": "Body.", "with": ""}},
+		}, "alice")
+		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"INVALID_OP"`) || !strings.Contains(response.Body.String(), "task") {
+			t.Fatalf("emptying a task item's first paragraph in %q: status=%d body=%s", spec, response.Code, response.Body.String())
+		}
+		if after := documentMarkdown(t, handler, issue.PrimaryArtifactID); after != before {
+			t.Fatalf("a refused replace changed the document: %q, was %q", after, before)
+		}
+	}
+}
+
+// The browser editor's parser ends a typed block at a line of at least its fence's colons starting
+// less than four columns past the typed block's own lines, even inside fenced code the typed block
+// holds; list markers add their width to a code line's indentation, a tab advances to the next
+// multiple of four from the column it stands at - two columns in a callout inside a blockquote or
+// a list item - and a line in a blockquote closes nothing. The renderer writes each typed block's fence longer than every
+// such line, so a replace or a suggestion that writes one into code inside a callout is stored with
+// the code as sent (a CR LF written as a line feed), under a longer fence, and the document reads
+// back whole - here, and in the
+// engine (pmdoc.TestTypedFencesReadTheSameInTheEngineAndHere holds the engine's reading of each
+// shape).
+func TestDocumentEditsWriteAColonLineIntoCodeInsideATypedBlock(t *testing.T) {
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
@@ -187,35 +234,59 @@ func TestDocumentEditsRefuseCodeThatWouldEndItsTypedBlock(t *testing.T) {
 		}
 		return markdown
 	}
-	for index, test := range []struct{ name, spec, with string }{
-		{"a closing line", direct, "a\n:::\nb"},
-		{"with a trailing space", direct, "a\n::: \nb"},
-		{"opening the code", direct, ":::\nb"},
-		{"ending the code", direct, "a\n:::"},
-		{"indented two spaces", direct, "a\n  :::\nb"},
-		{"indented three spaces", direct, "a\n   :::\nb"},
-		{"four colons", direct, "a\n::::\nb"},
-		{"in a list item's code", listItem, "a\n:::\nb"},
-		{"indented one space in a list item's code", listItem, "a\n :::\nb"},
-		{"a tab in code in a callout in a blockquote", calloutInQuote, "a\n\t:::\nb"},
-		{"a tab in code in a callout in a list item", calloutInItem, "a\n\t:::\nb"},
-		{"a space and a tab in code in a callout in a list item", calloutInItem, "a\n \t:::\nb"},
-		{"a line of four colons ending in CR LF", direct, "a\r\n::::\r\nb"},
-		{"a line ending in CR LF in a callout in a list item", calloutInItem, "a\r\n :::\r\nb"},
+	readsBack := func(markdown, code, fence string) {
+		t.Helper()
+		back, err := pmdoc.Parse(markdown)
+		if err != nil || len(back.Children) != 3 {
+			t.Fatalf("%q does not read back as three blocks (%v)", markdown, err)
+		}
+		var got string
+		pmdoc.Walk(back, func(node *pmdoc.Node) bool {
+			if node.Type == "code_block" && got == "" {
+				got = node.Children[0].Text
+			}
+			return true
+		})
+		if got != code {
+			t.Fatalf("%q reads back holding the code %q, want %q", markdown, got, code)
+		}
+		if fence != "" && !strings.Contains(markdown, "\n"+fence+"callout{") && !strings.Contains(markdown, " "+fence+"callout{") {
+			t.Fatalf("%q does not open the callout with %s", markdown, fence)
+		}
+	}
+	for index, test := range []struct{ name, spec, with, fence string }{
+		{"a closing line", direct, "a\n:::\nb", "::::"},
+		{"with a trailing space", direct, "a\n::: \nb", "::::"},
+		{"opening the code", direct, ":::\nb", "::::"},
+		{"ending the code", direct, "a\n:::", "::::"},
+		{"indented two spaces", direct, "a\n  :::\nb", "::::"},
+		{"indented three spaces", direct, "a\n   :::\nb", "::::"},
+		{"four colons", direct, "a\n::::\nb", ":::::"},
+		{"in a list item's code", listItem, "a\n:::\nb", "::::"},
+		{"indented one space in a list item's code", listItem, "a\n :::\nb", "::::"},
+		{"a tab in code in a callout in a blockquote", calloutInQuote, "a\n\t:::\nb", "::::"},
+		{"a tab in code in a callout in a list item", calloutInItem, "a\n\t:::\nb", "::::"},
+		{"a space and a tab in code in a callout in a list item", calloutInItem, "a\n \t:::\nb", "::::"},
+		{"a line of four colons ending in CR LF", direct, "a\r\n::::\r\nb", ":::::"},
+		{"a line ending in CR LF in a callout in a list item", calloutInItem, "a\r\n :::\r\nb", "::::"},
+		{"indented four spaces", direct, "a\n    :::\nb", ":::"},
+		{"indented a tab", direct, "a\n\t:::\nb", ":::"},
+		{"a no-break space after the colons in a list item's code", listItem, "a\n:::\u00a0\nb", ":::"},
+		{"indented two spaces in a list item's code", listItem, "a\n  :::\nb", ":::"},
+		{"in a blockquote's code", quoted, "a\n:::\nb", ":::"},
+		{"in code outside a typed block", outside, "a\n:::\nb", ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			issue := createInteractionIssue(t, handler, "E"+string(rune('A'+index)), "closer in code", test.spec)
-			before := text(issue.PrimaryArtifactID)
+			issue := createInteractionIssue(t, handler, "E"+string(rune('A'+index)), "colons in code", test.spec)
 			edited := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
 				"ops": []map[string]any{{"op": "replace", "find": "Body.", "with": test.with}},
 			}, "alice")
-			if body := edited.Body.String(); edited.Code != http.StatusBadRequest || !strings.Contains(body, `"code":"INVALID_OP"`) || !strings.Contains(body, "indent that line four or more spaces, or move") || !strings.Contains(body, "out of the callout") {
-				t.Fatalf("replace: status=%d body=%s", edited.Code, body)
+			if edited.Code != http.StatusOK {
+				t.Fatalf("replace: status=%d body=%s", edited.Code, edited.Body.String())
 			}
-			if after := text(issue.PrimaryArtifactID); after != before {
-				t.Fatalf("after a refused replace = %q, want it unchanged, %q", after, before)
-			}
-			created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+			readsBack(text(issue.PrimaryArtifactID), pmdoc.LineFeeds(test.with), test.fence)
+			suggested := createInteractionIssue(t, handler, "S"+string(rune('A'+index)), "colons in code", test.spec)
+			created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+suggested.Key+"/comments", map[string]any{
 				"body": "suggest", "anchor": map[string]any{"artifact": "spec", "quote": "Body."},
 				"suggestion": map[string]string{"replace_with": test.with}, "actor": sessionActor(),
 			})
@@ -223,60 +294,20 @@ func TestDocumentEditsRefuseCodeThatWouldEndItsTypedBlock(t *testing.T) {
 				t.Fatalf("create suggestion: status=%d body=%s", created.Code, created.Body.String())
 			}
 			comment := decodeBody[model.Comment](t, created)
-			accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
-			if body := accepted.Body.String(); accepted.Code != http.StatusBadRequest || !strings.Contains(body, `"code":"INVALID_OP"`) || !strings.Contains(body, "indent that line four or more spaces, or move") {
-				t.Fatalf("accept: status=%d body=%s", accepted.Code, body)
+			if accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice"); accepted.Code != http.StatusOK {
+				t.Fatalf("accept: status=%d body=%s", accepted.Code, accepted.Body.String())
 			}
-			if after := text(issue.PrimaryArtifactID); after != before {
-				t.Fatalf("after a refused accept = %q, want it unchanged, %q", after, before)
-			}
-		})
-	}
-	for index, test := range []struct{ name, spec, with string }{
-		{"indented four spaces", direct, "a\n    :::\nb"},
-		{"indented a tab", direct, "a\n\t:::\nb"},
-		{"a no-break space after the colons in a list item's code", listItem, "a\n:::\u00a0\nb"},
-		{"indented two spaces in a list item's code", listItem, "a\n  :::\nb"},
-		{"in a blockquote's code", quoted, "a\n:::\nb"},
-		{"in code outside a typed block", outside, "a\n:::\nb"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			issue := createInteractionIssue(t, handler, "F"+string(rune('A'+index)), test.name, test.spec)
-			edited := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
-				"ops": []map[string]any{{"op": "replace", "find": "Body.", "with": test.with}},
-			}, "alice")
-			if edited.Code != http.StatusOK {
-				t.Fatalf("replace: status=%d body=%s", edited.Code, edited.Body.String())
-			}
-			stored := text(issue.PrimaryArtifactID)
-			back, err := pmdoc.Parse(stored)
-			if err != nil || len(back.Children) != 3 {
-				t.Fatalf("%q does not read back as three blocks (%v)", stored, err)
-			}
-			var code string
-			pmdoc.Walk(back, func(node *pmdoc.Node) bool {
-				if node.Type == "code_block" && code == "" {
-					code = node.Children[0].Text
-				}
-				return true
-			})
-			if code != test.with {
-				t.Fatalf("%q reads back holding the code %q, want %q", stored, code, test.with)
-			}
+			readsBack(text(suggested.PrimaryArtifactID), pmdoc.LineFeeds(test.with), test.fence)
 		})
 	}
 }
 
-// Accepting a suggestion writes its replacement through the same shape checks a replace runs: one
-// that leaves a block the document cannot read back, or reads back as blocks of another kind, is
-// refused naming replace_with, and nothing is written - the document stays byte for byte as it was
-// and the suggestion stays open. The person accepting cannot change the text, so the refusal says
-// what the text writes and names what they can do - reject the suggestion - never an edit-route
-// operation, and it says the text empties a paragraph only when the text is empty. An accept
-// whose blocks read back as written is stored as before, including one that writes blocks, such
-// as a rule or a list over a whole paragraph, and a line of dashes is such a rule. Where the text
-// lands at the document's start, a closed front-matter block that opens it is front matter.
-func TestAcceptingASuggestionRefusesAReplacementTheDocumentCannotCarryBack(t *testing.T) {
+// An accept whose blocks read back as written is stored, including one that writes blocks, such
+// as a rule or a list over a whole paragraph, and a line of dashes is such a rule. Blocks at a
+// list item's start follow its empty first paragraph, and an emptied paragraph is not written
+// where the rest of its block stands without it. Where the text lands at the document's start, a
+// closed front-matter block that opens it is front matter.
+func TestAcceptingASuggestionStoresBlocksTheDocumentReadsBack(t *testing.T) {
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
@@ -312,65 +343,31 @@ func TestAcceptingASuggestionRefusesAReplacementTheDocumentCannotCarryBack(t *te
 		}
 		return issue.PrimaryArtifactID, decodeBody[model.Comment](t, created)
 	}
-	for index, test := range []struct{ name, spec, with, says string }{
-		{"a rule in a list item", listItem, "***", "writes a horizontal rule at the start of this list item"},
-		{"a list in a list item", listItem, "- a", "writes a bullet list at the start of this list item"},
-		{"two paragraphs in a list item", listItem, "a\n\nb", "writes two paragraphs in this list item"},
-		{"code in a list item", listItem, "```\nc\n```", "writes a code block at the start of this list item"},
-		{"a list in a list item holding two paragraphs", longItem, "- a", "writes a bullet list at the start of this list item"},
-		{"a list in an ordered item", ordered, "- a", "writes a bullet list at the start of this list item"},
-		{"nothing in a list item", listItem, "", "empties the paragraph this list item holds"},
-		// Emptying the first paragraph of an item that holds more names only what can go: the
-		// paragraph where the rest of the item can stand without it, and nothing where it cannot.
-		{"nothing in a list item holding two paragraphs", longItem, "", "reject the suggestion, or delete the paragraph in the document"},
-		{"nothing in a list item holding a nested list", nestedItem, "", "reject the suggestion, since the rest of the list item cannot be written without this paragraph"},
-		// A footnote definition goes only with its reference, which would otherwise read as text.
-		{"nothing in a footnote definition", footnote, "", "reject the suggestion, or delete the footnote in the document, its reference along with this definition"},
-		{"a rule in a footnote definition", footnote, "***", "writes a horizontal rule in this footnote definition"},
-		{"a list in a footnote definition", footnote, "- a", "writes a bullet list in this footnote definition"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			artifactID, comment := suggest(t, "R"+string(rune('A'+index)), test.spec, test.with)
-			before := text(artifactID)
-			accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
-			if body := accepted.Body.String(); accepted.Code != http.StatusBadRequest || !strings.Contains(body, `"code":"INVALID_OP"`) || !strings.Contains(body, "replace_with") {
-				t.Fatalf("accept: status=%d body=%s", accepted.Code, body)
-			}
-			var refusal struct{ Error string }
-			if err := json.Unmarshal(accepted.Body.Bytes(), &refusal); err != nil {
-				t.Fatal(err)
-			}
-			if !strings.Contains(refusal.Error, test.says) || !strings.Contains(refusal.Error, "reject the suggestion") {
-				t.Fatalf("refusal %q does not say %q and name rejecting the suggestion", refusal.Error, test.says)
-			}
-			for _, edit := range []string{"delete and find", "delete {block", "insert with markdown", "insert it as", "give replace_with", "put other text"} {
-				if strings.Contains(refusal.Error, edit) {
-					t.Fatalf("refusal %q names %q, which the person accepting cannot do", refusal.Error, edit)
-				}
-			}
-			if test.with != "" && strings.Contains(refusal.Error, "empties") {
-				t.Fatalf("refusal %q says the text empties a paragraph, but it is %q", refusal.Error, test.with)
-			}
-			if after := text(artifactID); after != before {
-				t.Fatalf("after a refused accept = %q, want it unchanged, %q", after, before)
-			}
-			read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/"+comment.ID, nil, "alice")
-			if read.Code != http.StatusOK || decodeBody[model.Comment](t, read).Resolved {
-				t.Fatalf("after a refused accept the suggestion reads status=%d body=%s, want it open", read.Code, read.Body.String())
-			}
-		})
-	}
 	for index, test := range []struct{ name, spec, with, want string }{
 		{"text", paragraph, "Changed.", "Intro.\n\nChanged.\n\nAfter.\n"},
 		{"a rule over a paragraph", paragraph, "***", "Intro.\n\n---\n\nAfter.\n"},
 		// An accept's text goes inside the document, so a leading `---` is a rule, as `***` is,
 		// never the front matter that would open a document and swallow the line.
 		{"dashes over a paragraph", paragraph, "---", "Intro.\n\n---\n\nAfter.\n"},
-		{"dashes inside a paragraph", "Intro.\n\nSay Body. now.\n\nAfter.\n", "---", "Intro.\n\nSay \n\n---\n\n now.\n\nAfter.\n"},
+		{"dashes inside a paragraph", "Intro.\n\nSay Body. now.\n\nAfter.\n", "---", "Intro.\n\nSay&#32;\n\n---\n\n&#32;now.\n\nAfter.\n"},
 		{"a list over a paragraph", paragraph, "- a", "Intro.\n\n- a\n\nAfter.\n"},
 		{"two paragraphs over one", paragraph, "a\n\nb", "Intro.\n\na\n\nb\n\nAfter.\n"},
 		{"dashes inside a line", paragraph, "--- a note", "Intro.\n\n--- a note\n\nAfter.\n"},
 		{"text in a list item", listItem, "Changed.", "Intro.\n\n- Changed.\n- two\n"},
+		{"two paragraphs in a list item", listItem, "a\n\nb", "Intro.\n\n- a\n\n  b\n- two\n"},
+		{"a rule in a list item", listItem, "***", "Intro.\n\n- ***\n- two\n"},
+		{"a list in a list item", listItem, "- a", "Intro.\n\n- - a\n- two\n"},
+		{"code in a list item", listItem, "```\nc\n```", "Intro.\n\n- ```\n  c\n  ```\n- two\n"},
+		{"a list in a list item holding two paragraphs", longItem, "- a", "Intro.\n\n- - a\n\n  more\n- two\n"},
+		{"a list in an ordered item", ordered, "- a", "Intro.\n\n1. - a\n2. two\n"},
+		{"nothing in a list item", listItem, "", "Intro.\n\n- \n- two\n"},
+		{"nothing in a list item holding two paragraphs", longItem, "", "Intro.\n\n- more\n- two\n"},
+		{"nothing in a list item holding a nested list", nestedItem, "", "Intro.\n\n- - nested\n- two\n"},
+		// An emptied footnote definition holds one empty paragraph, which reads back as the
+		// definition, so its reference stays a reference.
+		{"nothing in a footnote definition", footnote, "", "x[^1]\n\n[^1]: \n"},
+		{"a rule in a footnote definition", footnote, "***", "x[^1]\n\n[^1]: ---\n"},
+		{"a list in a footnote definition", footnote, "- a", "x[^1]\n\n[^1]: - a\n"},
 		{"front matter over an opening heading", "# Body.\n\nText.\n", "---\nstatus: draft\n---\n\n# Body.", "---\nstatus: draft\n---\n\n# Body.\n\nText.\n"},
 		{"front matter over an opening paragraph", "Body.\n\nAfter.\n", "---\ntitle: x\n---\n\nBody.", "---\ntitle: x\n---\n\nBody.\n\nAfter.\n"},
 		// A line of colons in text is written escaped, so it reads back as the text it is and never
@@ -464,9 +461,10 @@ func TestAcceptingASuggestionRefusesListsThatReadBackAsOne(t *testing.T) {
 	}
 }
 
-// An empty accept inside a typed block must never store a block its own schema cannot carry.
-// Callout uses block+ in every placement; ask is its other schema type (paragraph+ bullet_list?).
-func TestAcceptingAnEmptySuggestionRefusesAnUnreadableTypedBlock(t *testing.T) {
+// An empty accept inside a typed block stores the block holding the one empty paragraph it reads
+// back holding, and is refused where that does not read back, as in a list item, and for an ask,
+// whose question paragraph+ bullet_list? cannot be empty.
+func TestAcceptingAnEmptySuggestionInATypedBlock(t *testing.T) {
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
@@ -474,13 +472,13 @@ func TestAcceptingAnEmptySuggestionRefusesAnUnreadableTypedBlock(t *testing.T) {
 		return documentService
 	})
 	for index, test := range []struct {
-		name, spec, code string
+		name, spec, code, want string
 	}{
-		{"a top-level callout", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n", "INVALID_OP"},
-		{"a nested callout", ":::callout{#outer kind=\"note\" title=\"T\"}\n:::callout{#inner kind=\"note\" title=\"T\"}\nBody.\n:::\n:::\n", "INVALID_OP"},
-		{"a callout in a list item", "- Lead.\n\n  :::callout{#c1 kind=\"note\" title=\"T\"}\n  Body.\n  :::\n", "INVALID_OP"},
-		{"a callout in a blockquote", "> :::callout{#c1 kind=\"note\" title=\"T\"}\n> Body.\n> :::\n", "INVALID_OP"},
-		{"an ask", ":::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nBody.\n:::\n", "INVALID_ASK_BLOCK"},
+		{"a top-level callout", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n", "", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n\n:::\n"},
+		{"a nested callout", "::::callout{#outer kind=\"note\" title=\"T\"}\n:::callout{#inner kind=\"note\" title=\"T\"}\nBody.\n:::\n::::\n", "", "::::callout{#outer kind=\"note\" title=\"T\"}\n:::callout{#inner kind=\"note\" title=\"T\"}\n\n:::\n::::\n"},
+		{"a callout in a blockquote", "> :::callout{#c1 kind=\"note\" title=\"T\"}\n> Body.\n> :::\n", "", "> :::callout{#c1 kind=\"note\" title=\"T\"}\n> \n> :::\n"},
+		{"a callout in a list item", "- Lead.\n\n  :::callout{#c1 kind=\"note\" title=\"T\"}\n  Body.\n  :::\n", "INVALID_OP", ""},
+		{"an ask", ":::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nBody.\n:::\n", "INVALID_ASK_BLOCK", ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			issue := createInteractionIssue(t, handler, "T"+string(rune('A'+index)), "empty typed block", test.spec)
@@ -497,6 +495,15 @@ func TestAcceptingAnEmptySuggestionRefusesAnUnreadableTypedBlock(t *testing.T) {
 				t.Fatal(err)
 			}
 			accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
+			if test.code == "" {
+				if accepted.Code != http.StatusOK {
+					t.Fatalf("accept: status=%d body=%s", accepted.Code, accepted.Body.String())
+				}
+				if after, err := documentService.Text(context.Background(), issue.PrimaryArtifactID); err != nil || after != test.want {
+					t.Fatalf("after accepting = %q (%v), want %q", after, err, test.want)
+				}
+				return
+			}
 			if accepted.Code != http.StatusBadRequest || !strings.Contains(accepted.Body.String(), `"code":"`+test.code+`"`) {
 				t.Fatalf("accept: status=%d body=%s, want 400 %s", accepted.Code, accepted.Body.String(), test.code)
 			}
@@ -512,9 +519,8 @@ func TestAcceptingAnEmptySuggestionRefusesAnUnreadableTypedBlock(t *testing.T) {
 	}
 }
 
-// An accept in or around a typed block is refused when the document it stores reads back as
-// another tree: two typed fences of one length close at the first, and two lists of one kind side
-// by side read back as one inside a callout.
+// An accept in a typed block is refused when the typed block it stores reads back as another
+// tree: two lists of one kind side by side read back as one inside a callout.
 func TestAcceptingASuggestionAroundATypedBlockRefusesWhatCannotRoundTrip(t *testing.T) {
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
@@ -522,15 +528,7 @@ func TestAcceptingASuggestionAroundATypedBlockRefusesWhatCannotRoundTrip(t *test
 		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 		return documentService
 	})
-	const (
-		nested = ":::callout{#new kind=\"note\" title=\"T\"}\nNested.\n:::\n"
-		ask    = ":::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nBody.\n:::\n"
-	)
 	for index, test := range []struct{ name, spec, quote, with string }{
-		{"a callout directly in a callout", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n", "Body.", nested},
-		{"a callout in a list item inside a callout", ":::callout{#outer kind=\"note\" title=\"T\"}\n- Lead.\n\n  :::callout{#c1 kind=\"note\" title=\"T\"}\n  Body.\n  :::\n:::\n", "Body.", nested},
-		{"a callout in a blockquote inside a callout", ":::callout{#outer kind=\"note\" title=\"T\"}\n> :::callout{#c1 kind=\"note\" title=\"T\"}\n> Body.\n> :::\n:::\n", "Body.", nested},
-		{"an ask rewritten into a new callout", "Intro.\n\n" + ask, "Body.", ":::callout{#c9 kind=\"note\" title=\"\"}\n" + strings.Replace(ask, "Body.", "Reworded?", 1)},
 		{"a list beside a list in a callout", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n\n- y\n:::\n", "Body.", "- x"},
 		{"a list beside a list in a blockquote inside a callout", ":::callout{#c1 kind=\"note\" title=\"T\"}\n> Body.\n>\n> - y\n:::\n", "Body.", "- x"},
 	} {

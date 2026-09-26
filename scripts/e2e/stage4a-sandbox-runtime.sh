@@ -42,8 +42,9 @@ image=${LEGION_E2E_IMAGE:-}
 from=${STAGE4A_FROM:-}
 evidence=${STAGE4A_EVIDENCE_DIR:-$(mktemp -d /tmp/legion-e2e4a-evidence.XXXXXXXX)}
 work=$(mktemp -d /tmp/legion-e2e4a.XXXXXXXX)
-project_prefix=s4a-
-project="${project_prefix}$(date -u +%Y%m%d%H%M%S)-$(od -An -N2 -tx1 /dev/urandom | tr -d ' \n')"
+label_prefix=s4a-
+project="${label_prefix}$(date -u +%Y%m%d%H%M%S)-$(od -An -N2 -tx1 /dev/urandom | tr -d ' \n')"
+run_label=$project
 fixture=$root/scripts/e2e/fixtures/operator-route
 route_configmap=legion-operator-route-$project
 providers_secret=legion-$project-providers
@@ -55,7 +56,13 @@ compared=
 ok=
 
 mkdir -p "$evidence"
-exec > >(tee -a "$evidence/transcript.log") 2>&1
+# tee shares the driver's process group, so a signal to the group (Ctrl-C, a closed pane, timeout's
+# TERM) would end it before cleanup writes, and cleanup's first write would die of SIGPIPE: tee
+# ignores the signals the driver traps, and outlives the driver's last line.
+exec > >(trap '' HUP INT TERM && exec tee -a "$evidence/transcript.log") 2>&1
+# fd 7 keeps the transcript for cleanup: a signal runs the EXIT trap under the redirections of the
+# command it interrupted, whose output may be /dev/null or an evidence file.
+exec 7>&1
 
 begin() {
   check=$1
@@ -72,6 +79,9 @@ fail() {
 
 cleanup() {
   local status=$?
+  # A second signal must not cut the teardown short, and a closed output must not end it.
+  trap '' HUP INT TERM PIPE
+  exec >&7 2>&7
   set +e
   teardown
   if [ -z "$compared" ] && [ -n "$snapshotted" ]; then (namespace_clean) || status=1; fi
@@ -105,11 +115,8 @@ note "run project $project (every object's legion.dev/project label)"
 note "image $image"
 note "worker stream tcp://$host:$port (the devbox's private address)"
 note "runtime identity: context $runtime_context in $runtime_kubeconfig; operator: context $operator"
-if command -v jj >/dev/null && jj -R "$root" root >/dev/null 2>&1; then
-  note "source: $(jj -R "$root" log -r @ --no-graph -T 'commit_id ++ if(empty, " (working copy: no changes)", " (working copy has changes)")') on $(jj -R "$root" log -r @- --no-graph -T 'commit_id')"
-else
-  note "source: $(git -C "$root" rev-parse HEAD)"
-fi
+built=$(bash "$root/scripts/e2e/lib/built-from.sh" "$root") || fail "lib/built-from.sh could not read the source revision"
+while IFS= read -r line; do note "$line"; done <<<"$built"
 [ -z "$from" ] || note "STAGE4A_FROM=$from: a development run, never the proof"
 
 begin snapshot
@@ -124,16 +131,16 @@ models=$(<"$fixture/models.yml")
 printf '%s\n' "${models//"$placeholder"/"$gateway"}" >"$work/models.yml"
 grep -qFx "    baseUrl: $gateway" "$work/models.yml" || fail "the fixture's models.yml has no baseUrl $placeholder to point at the gateway"
 op create configmap "$route_configmap" --from-file=models.yml="$work/models.yml" --from-file=overlay.yml="$fixture/overlay.yml" \
-  --dry-run=client -o yaml | kubectl label --local -f - "legion.dev/project=$project" -o yaml | op create -f - >/dev/null ||
+  --dry-run=client -o yaml | kubectl label --local -f - "legion.dev/project=$run_label" -o yaml | op create -f - >/dev/null ||
   fail "the operator could not create ConfigMap $route_configmap"
-note "[operator] ConfigMap $route_configmap: models.yml (baseUrl from LEGION_E2E_MODEL_GATEWAY_URL) and overlay.yml from $fixture, label legion.dev/project=$project"
+note "[operator] ConfigMap $route_configmap: models.yml (baseUrl from LEGION_E2E_MODEL_GATEWAY_URL) and overlay.yml from $fixture, label legion.dev/project=$run_label"
 # The run's providers Secret, named as the runtime names it (ProvidersSecretName), holding one key no
 # model route reads: provider_keys hands it to every agent's Oh My Pi, and provider-key checks where
 # it arrives.
 op create secret generic "$providers_secret" --from-literal=stage4a="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')" \
-  --dry-run=client -o yaml | kubectl label --local -f - "legion.dev/project=$project" -o yaml | op create -f - >/dev/null ||
+  --dry-run=client -o yaml | kubectl label --local -f - "legion.dev/project=$run_label" -o yaml | op create -f - >/dev/null ||
   fail "the operator could not create Secret $providers_secret"
-note "[operator] Secret $providers_secret: one key, stage4a (a random value no route reads), label legion.dev/project=$project"
+note "[operator] Secret $providers_secret: one key, stage4a (a random value no route reads), label legion.dev/project=$run_label"
 pass
 
 begin build

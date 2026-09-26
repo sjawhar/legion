@@ -131,14 +131,17 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 	issue.Tree = "LEGION-200"
 	updatedAt := time.Date(2026, 9, 22, 14, 12, 13, 456000000, time.UTC)
 	approved := 7
-	pending := &PendingPush{SHA: "b1c2d3", HandoffOnly: true, Unknown: "paths_truncated", ByReviewApp: true}
+	pushes := []ClassifiedPush{
+		{SHA: "b1c2d3", Before: "a0b1c2", HandoffOnly: true, Unknown: "paths_truncated", ByReviewApp: true},
+		{SHA: "c2d3e4", Before: "b1c2d3", Forced: true},
+	}
 	pr := PullRequest{
 		Issue: issue.Key, Repo: "sjawhar/legion", Number: 1243, Branch: "legion/LEGION-208",
 		HeadSHA: "b1c2d3", HeadUpdatedAt: updatedAt, HeadUpdatedAtSource: "pull_request.synchronize",
 		Verdict: "failing", Failing: []string{"unit"}, FailingStatuses: []string{"unit / test"},
-		ReviewDecision: "changes_requested", FixAttempts: 2, BlockedAttempts: 1,
+		FixAttempts: 2, BlockedAttempts: 1,
 		CheckRuns: []AttemptRun{{Name: "unit", ID: 91}, {Name: "lint", ID: 92}}, Generation: 4,
-		Snapshot: "snapshot-4", Reconciled: true, PendingPush: pending, HeadCounted: "b1c2d3", PlannedRed: true, State: PullRequestMerged,
+		Snapshot: "snapshot-4", Reconciled: true, Pushes: pushes, HeadCounted: "b1c2d3", PlannedRed: true, State: PullRequestMerged,
 	}
 	phase := PhaseRow{Issue: issue.Key, Role: claim.RoleImplementer, Claim: "legion-208-implementer", HandoffCommit: "aabbcc", Rounds: 2, Verdict: "pass"}
 	gate := DesignGate{Issue: issue.Key, ArtifactID: "artifact-208", LatestVersion: 7, ApprovedVersion: &approved}
@@ -273,10 +276,10 @@ func samePullRequest(got, want PullRequest) bool {
 		got.Branch == want.Branch && got.HeadSHA == want.HeadSHA && got.HeadUpdatedAt.Equal(want.HeadUpdatedAt) &&
 		got.HeadUpdatedAtSource == want.HeadUpdatedAtSource && got.Verdict == want.Verdict &&
 		reflect.DeepEqual(got.Failing, want.Failing) && reflect.DeepEqual(got.FailingStatuses, want.FailingStatuses) &&
-		got.ReviewDecision == want.ReviewDecision && got.FixAttempts == want.FixAttempts &&
+		got.FixAttempts == want.FixAttempts &&
 		got.BlockedAttempts == want.BlockedAttempts && reflect.DeepEqual(got.CheckRuns, want.CheckRuns) &&
 		got.Generation == want.Generation && got.Snapshot == want.Snapshot && got.Reconciled == want.Reconciled &&
-		reflect.DeepEqual(got.PendingPush, want.PendingPush) && got.HeadCounted == want.HeadCounted &&
+		reflect.DeepEqual(got.Pushes, want.Pushes) && got.HeadCounted == want.HeadCounted &&
 		got.PlannedRed == want.PlannedRed
 }
 
@@ -557,8 +560,8 @@ func TestRecordMigrationCreatesTheRequiredColumns(t *testing.T) {
 	st := migratedStore(t)
 	want := map[string][]string{
 		"issues":           {"key", "tree", "project", "title", "parent", "phase", "generation", "status", "rank", "linger_until", "held_from", "last_dispatch_seq", "ready_pending_version", "hold_reason"},
-		"phases":           {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "last_handoff"},
-		"pull_requests":    {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "head_updated_at_source", "verdict", "failing", "failing_statuses", "review_decision", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "reconciled", "pending_push", "head_counted", "planned_red", "state"},
+		"phases":           {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "last_handoff", "decision"},
+		"pull_requests":    {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "head_updated_at_source", "verdict", "failing", "failing_statuses", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "reconciled", "pushes", "head_counted", "planned_red", "review_seen", "review_seen_at", "state"},
 		"design_gates":     {"issue", "artifact_id", "latest_version", "approved_version"},
 		"slots":            {"issue", "index", "admitted_at"},
 		"processed_events": {"source", "event_id", "processed_at"},
@@ -581,6 +584,69 @@ func TestRecordMigrationCreatesTheRequiredColumns(t *testing.T) {
 			if !reflect.DeepEqual(got, expected) {
 				t.Fatalf("%s columns = %v, want %v", table, got, expected)
 			}
+		}
+	})
+}
+
+// Migration 0019 moves the newest deciding review off the reviewer's phase row onto the pull
+// request, so a database the daemon ran on before it keeps ordering the reviews it has seen, and
+// the round's decision keeps what it decided without the id it no longer carries.
+func TestReviewOrderMigrationCarriesTheReviewersMarkToThePullRequest(t *testing.T) {
+	ctx := context.Background()
+	st := emptyStore(t)
+	all, err := migrations.All()
+	must(t, err)
+	for _, migration := range all {
+		if migration.Version >= 19 {
+			break
+		}
+		inTx(t, st, func(tx pgx.Tx) {
+			must(t, func() error {
+				if _, err := tx.Exec(ctx, migration.SQL); err != nil {
+					return err
+				}
+				_, err := tx.Exec(ctx, "insert into schema_version (version) values ($1)", migration.Version)
+				return err
+			}())
+		})
+	}
+	inTx(t, st, func(tx pgx.Tx) {
+		for _, statement := range []string{
+			`insert into issues (key, tree, project, title, phase, generation, status, rank, last_dispatch_seq)
+				values ('LEGION-208', 'LEGION-208', 'LEGION', 'the issue', 'reviewing', 1, 'needs_review', 'U', 0)`,
+			`insert into pull_requests (issue, repo, number, branch, head_sha, head_updated_at, head_updated_at_source,
+				verdict, failing, failing_statuses, fix_attempts, blocked_attempts, check_runs, generation, snapshot,
+				reconciled, pushes, head_counted, planned_red, state)
+				values ('LEGION-208', 'sjawhar/legion', 42, 'legion/LEGION-208', 'head', now(), 'webhook', '', '[]', '[]',
+				0, 0, '[]', 0, '', false, '[]', '', false, 'open')`,
+			`insert into phases (issue, role, claim, handoff_commit, rounds, verdict, last_handoff, decision, review_seen)
+				values ('LEGION-208', 'reviewer', 'review-claim', '', 0, '', '',
+				'{"state": "approved", "body": "ship it", "head": "head", "id": 12}', 12)`,
+		} {
+			_, err := tx.Exec(ctx, statement)
+			must(t, err)
+		}
+	})
+
+	_, err = st.Migrate(ctx)
+	must(t, err)
+	records := NewStore()
+	inTx(t, st, func(tx pgx.Tx) {
+		pr, err := records.PullRequest(ctx, tx, "LEGION-208")
+		must(t, err)
+		if pr == nil || pr.ReviewSeen.ID != 12 || !pr.ReviewSeen.SubmittedAt.IsZero() {
+			t.Fatalf("pull request after 0019 = %+v, want the reviewer's mark 12 with no submission time", pr)
+		}
+		phases, err := records.Phases(ctx, tx, "LEGION-208")
+		must(t, err)
+		want := &ReviewDecision{State: "approved", Body: "ship it", Head: "head"}
+		if len(phases) != 1 || !reflect.DeepEqual(phases[0].Decision, want) {
+			t.Fatalf("reviewer phase after 0019 = %+v, want the decision %+v", phases, want)
+		}
+		var keepsID bool
+		must(t, tx.QueryRow(ctx, `select decision ? 'id' from phases where issue = 'LEGION-208'`).Scan(&keepsID))
+		if keepsID {
+			t.Fatal("the stored decision still carries its review id")
 		}
 	})
 }

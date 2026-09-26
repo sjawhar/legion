@@ -295,7 +295,10 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 			return nil
 		}
 
-		with := replaceWith
+		// A suggestion's text reaches the document with line feeds alone (pmdoc.LineFeeds). It is
+		// stored so when the suggestion is created, but one created before that holds its text as
+		// sent.
+		with := pmdoc.LineFeeds(replaceWith)
 		if !accept {
 			with = ""
 		}
@@ -320,7 +323,7 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 			return err
 		}
 		if code {
-			if err := refuseCodeThatEndsItsBlock(tree, next, range_, at, "replace_with", with); err != nil {
+			if err := refuseCodeThatReshapesItsBlock(tree, next, range_, at, "replace_with", with); err != nil {
 				return err
 			}
 		}
@@ -389,8 +392,9 @@ func insideAsk(at pmdoc.TextblockAt) bool {
 
 // refuseTypedAcceptRoundTrip checks every non-ask typed block an accept changed, from the
 // innermost one out. A typed block's content rule decides whether a replacement fits, but it
-// cannot see its rendered directive fence meeting a child's. A shape that was already broken is
-// not this accept's refusal; a changed readable block that renders back differently is.
+// cannot see how the block's markdown reads back: two lists of one kind side by side in it read
+// back as one. A shape that was already broken is not this accept's refusal; a changed readable
+// block that renders back differently is.
 func refuseTypedAcceptRoundTrip(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.TextblockAt, with string, replacement *pmdoc.Node) error {
 	for _, beforeBlock := range at.Ancestors {
 		if beforeBlock.Type == "ask" || !pmdoc.IsTypedBlock(beforeBlock.Type) || pmdoc.BlockShapeError(beforeBlock) != nil {

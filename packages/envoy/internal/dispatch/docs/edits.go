@@ -678,6 +678,12 @@ func (s *Service) rejectLiveTableAnchors(ctx context.Context, artifactID, axis s
 }
 
 func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
+	// Every text an operation writes - a replace's with, an insert's markdown, whether it becomes
+	// blocks or table rows, and a retype's attributes - reaches the document with line feeds
+	// alone (pmdoc.LineFeeds), before any check below reads it.
+	op.With = pmdoc.LineFeeds(op.With)
+	op.Markdown = pmdoc.LineFeeds(op.Markdown)
+	op.Attributes = pmdoc.LineFeedAttrs(op.Attributes)
 	switch op.Op {
 	case "replace":
 		if op.Find == "" {
@@ -716,7 +722,7 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 			return nil, err
 		}
 		if code {
-			return next, refuseCodeThatEndsItsBlock(tree, next, r, at, "with", op.With)
+			return next, refuseCodeThatReshapesItsBlock(tree, next, r, at, "with", op.With)
 		}
 		if err := refuseUnreadableReplacement(tree, next, r, op.With); err != nil {
 			return nil, err
@@ -1063,7 +1069,7 @@ func refuseUnreadableReplacement(before, after *pmdoc.Node, match pmdoc.Range, w
 	if err != nil || unreadable == nil {
 		return err
 	}
-	return &ErrInvalidOp{Field: "with", Reason: unreadableReason(before, after, match, with, unreadable)}
+	return &ErrInvalidOp{Field: "with", Reason: unreadableReason(with, unreadable)}
 }
 
 // refuseReshapedReplacement refuses a replace whose text the document reads back as blocks of
@@ -1128,11 +1134,7 @@ func acceptRefusal(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.Textbl
 	}
 	if emptyTextblock(replacement.Children[0]) && (!found || emptied) {
 		advice := "reject the suggestion, or delete the " + holder + " in the document"
-		switch {
-		case at.Ancestors[0].Type == "footnote_definition" && len(at.Ancestors[0].Children) == 1:
-			// A definition goes only with its reference, which would otherwise read as text.
-			advice = "reject the suggestion, or delete the footnote in the document, its reference along with this definition"
-		case len(at.Ancestors[0].Children) > 1:
+		if len(at.Ancestors[0].Children) > 1 {
 			advice = "reject the suggestion, since the rest of the " + holder + " cannot be written without this paragraph"
 			if _, err := pmdoc.DeleteBlock(before, blockID(at.Node)); err == nil {
 				advice = "reject the suggestion, or delete the paragraph in the document, which leaves the rest of the " + holder
@@ -1179,46 +1181,7 @@ func replacementBroke(before, after *pmdoc.Node, match pmdoc.Range, check func(*
 }
 
 // unreadableReason says why a replace left its block unreadable and what to do instead, by cause.
-// An emptied paragraph is one the block holding it cannot be written without. The advice is the
-// delete that removes it: by find where deleting the text removes the emptied block
-// (pmdoc.DeleteTextblock), and otherwise by the id of the nearest block around the text that
-// pmdoc.DeleteBlock removes from the document as it was - the holder itself for a footnote
-// definition or a list item holding more than the paragraph, and a block further out when
-// removing the holder would empty one that needs a block, such as a callout holding only it.
-func unreadableReason(before, after *pmdoc.Node, match pmdoc.Range, with string, unreadable error) string {
-	at, ok := pmdoc.ContainingTextblock(after, match.From)
-	if ok && emptyTextblock(at.Node) {
-		holder := strings.ReplaceAll(at.Ancestors[0].Type, "_", " ")
-		if _, removed, err := pmdoc.DeleteTextblock(before, match); err == nil && removed {
-			return fmt.Sprintf(
-				"with %q empties the paragraph this %s holds, and the %s cannot be written without it; to remove the text, delete it with delete and find, which removes the emptied %s too",
-				with, holder, holder, holder,
-			)
-		}
-		// A top-level block is always removable, since an emptied document keeps one empty
-		// paragraph, so the walk ends at the latest there.
-		blocks := append([]*pmdoc.Node{at.Node}, at.Ancestors[:len(at.Ancestors)-1]...)
-		target := blocks[len(blocks)-1]
-		for _, block := range blocks[:len(blocks)-1] {
-			if _, err := pmdoc.DeleteBlock(before, blockID(block)); err == nil {
-				target = block
-				break
-			}
-		}
-		var removal string
-		switch target {
-		case at.Node:
-			removal = "the paragraph"
-		case at.Ancestors[0]:
-			removal = "the whole " + holder
-		default:
-			removal = "the " + strings.ReplaceAll(target.Type, "_", " ") + " holding it"
-		}
-		return fmt.Sprintf(
-			"with %q empties the paragraph this %s holds, and the %s cannot be written without it; remove %s with delete {block:%q}, or give with some text",
-			with, holder, holder, removal, blockID(target),
-		)
-	}
+func unreadableReason(with string, unreadable error) string {
 	if errors.Is(unreadable, pmdoc.ErrBlockHTML) {
 		return fmt.Sprintf(
 			"with %q is HTML that opens a block where it lands, and the Proof schema carries no block HTML; keep the HTML inside a line, where it opens no block",
@@ -1226,16 +1189,6 @@ func unreadableReason(before, after *pmdoc.Node, match pmdoc.Range, with string,
 		)
 	}
 	return fmt.Sprintf("with %q leaves markdown the document cannot read back where it lands (%v); write it inside a line of text, or insert the block you mean as its own block", with, unreadable)
-}
-
-// emptyTextblock reports whether a textblock holds no text but whitespace.
-func emptyTextblock(textblock *pmdoc.Node) bool {
-	for _, child := range textblock.Children {
-		if child.Type != "text" || strings.TrimSpace(child.Text) != "" {
-			return false
-		}
-	}
-	return true
 }
 
 func blockID(block *pmdoc.Node) string {
@@ -1346,15 +1299,15 @@ func inlineAware(markdown string, edges textEdges, opensDocument bool) (*pmdoc.N
 	return tree, nil
 }
 
-// refuseCodeThatEndsItsBlock refuses a replacement into a code block that leaves the
-// document-level block holding it reading back as blocks of another shape. The directive parser -
-// the browser editor's as well as this one - ends a typed block at a line that is `:::` even inside
-// a fenced code block it holds, so such a line in code directly inside a callout cuts the callout
-// short on the next read, and the rest of the code and everything after it leave the callout. Code
-// that only reads back with different whitespace keeps its shape and is not refused.
-func refuseCodeThatEndsItsBlock(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.TextblockAt, field, with string) error {
-	broke, err := replacementBroke(before, after, match, codeFenceOrShape)
-	if err != nil || broke == nil {
+// refuseCodeThatReshapesItsBlock refuses a replacement into a code block that leaves the
+// document-level block holding it reading back as blocks of another shape. A code block's text is
+// literal, so only the lines around it could read it differently, and the renderer writes a typed
+// block's fence longer than any line of colons in its code that the browser editor's parser, or
+// this one, could read as that fence (pmdoc's typedFence). Code that only reads back with
+// different whitespace keeps its shape and is not refused.
+func refuseCodeThatReshapesItsBlock(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.TextblockAt, field, with string) error {
+	reshaped, err := replacementBroke(before, after, match, pmdoc.BlockShapeError)
+	if err != nil || reshaped == nil {
 		return err
 	}
 	holder := "block"
@@ -1364,33 +1317,10 @@ func refuseCodeThatEndsItsBlock(before, after *pmdoc.Node, match pmdoc.Range, at
 			break
 		}
 	}
-	var fence fenceLineInCode
-	if errors.As(broke, &fence) {
-		return &ErrInvalidOp{Field: field, Reason: fmt.Sprintf(
-			"%s %q puts the line %q in code the %s around it reads as its closing fence: the browser editor ends a typed block at a line of three or more colons indented less than four columns from where the typed block's own lines start, even inside fenced code, so the %s would end there and the code after it would leave it; indent that line four or more spaces, or move the code block out of the %s",
-			field, with, fence.line, holder, holder, holder,
-		)}
-	}
 	return &ErrInvalidOp{Field: field, Reason: fmt.Sprintf(
 		"%s %q changes how the %s holding this code block reads back (%v); move the code block out of the %s",
-		field, with, holder, broke, holder,
+		field, with, holder, reshaped, holder,
 	)}
-}
-
-// fenceLineInCode is a line of code the browser editor's parser reads as a typed block's fence.
-type fenceLineInCode struct{ line string }
-
-func (f fenceLineInCode) Error() string {
-	return fmt.Sprintf("the code line %q reads as a typed block's closing fence", f.line)
-}
-
-// codeFenceOrShape is what keeps a block holding edited code from reading back as it was written:
-// a code line the browser editor ends a typed block at, or, failing that, another shape on read.
-func codeFenceOrShape(block *pmdoc.Node) error {
-	if line, ok := pmdoc.TypedFenceLineInCode(block); ok {
-		return fenceLineInCode{line: line}
-	}
-	return pmdoc.BlockShapeError(block)
 }
 
 // codeReplacement is what a replacement landing in a code block splices in: a code block's text
@@ -1439,14 +1369,12 @@ func continueText(paragraph *pmdoc.Node, markdown string, edges textEdges) {
 }
 
 // markdownSpace is the whitespace a paragraph's parse strips from its edges.
-const markdownSpace = " \t\r\n"
+const markdownSpace = " \t\n"
 
-// edgeSpace is an edge's whitespace without its line breaks.
+// edgeSpace is an edge's whitespace without its line feeds.
 func edgeSpace(run string) string {
-	return lineBreaks.Replace(run)
+	return strings.ReplaceAll(run, "\n", "")
 }
-
-var lineBreaks = strings.NewReplacer("\r", "", "\n", "")
 
 func isInlineLeaf(node *pmdoc.Node) bool {
 	switch node.Type {
@@ -1463,6 +1391,16 @@ func isInlineDocument(tree *pmdoc.Node) bool {
 	}
 	for _, child := range tree.Children[0].Children {
 		if child.Type != "text" && !isInlineLeaf(child) {
+			return false
+		}
+	}
+	return true
+}
+
+// emptyTextblock reports whether a textblock holds no text but whitespace.
+func emptyTextblock(textblock *pmdoc.Node) bool {
+	for _, child := range textblock.Children {
+		if child.Type != "text" || strings.TrimSpace(child.Text) != "" {
 			return false
 		}
 	}
