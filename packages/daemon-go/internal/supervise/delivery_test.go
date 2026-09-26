@@ -112,6 +112,27 @@ func TestATaskInterruptedByADeathIsResentToTheRelaunchedAgent(t *testing.T) {
 	}
 }
 
+// The interrupted turn ran, so the agent read its task, and the task keeps that read mark while it
+// waits for the relaunch: for a claim that has served no run, it is what attributes a completion
+// reported before the re-send's acknowledgement to the task's run (ServingRun), where a task that
+// lost it would have that completion refused.
+func TestAnInterruptedTaskKeepsItsReadMarkUntilTheResend(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateReady)
+	h.must(RequestDeliver{Claim: testToken, Task: "implement the plan", Generation: 5})
+	h.must(StreamTurnStart{Claim: testToken})
+
+	h.observe(runtime.Gone)
+
+	h.wantState(StateLaunching)
+	if p := h.pending(); p.DeliveredAt.IsZero() || !p.ConfirmedAt.IsZero() {
+		t.Fatalf("pending after the death = %+v, want it unconfirmed with its read mark kept", p)
+	}
+	if run := h.claim().ServingRun(); run != 5 {
+		t.Fatalf("ServingRun() = %d after the death, want 5", run)
+	}
+}
+
 // A task acknowledged and not yet begun when the process died was never run, so the relaunched
 // agent is sent it as it was: nothing was interrupted.
 func TestATaskNotYetBegunWhenTheProcessDiedIsResentAsItWas(t *testing.T) {

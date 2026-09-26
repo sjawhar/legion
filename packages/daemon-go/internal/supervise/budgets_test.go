@@ -71,6 +71,22 @@ func TestAnAgentThatDiesWithWorkOutstandingIsFailedAtTheLimit(t *testing.T) {
 	}
 }
 
+// A process that dies before its agent is ready is a launch failure, however much work the claim
+// holds: Deaths counts only deaths after ready, so a boot death after earlier deaths with work is
+// charged once, to LaunchFailures, and does not bring the claim nearer the deaths limit.
+func TestADeathBeforeReadyIsALaunchFailureNotADeath(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateReady)
+	h.must(RequestDeliver{Claim: testToken, Task: "the task"})
+	h.must(StreamTurnStart{Claim: testToken})
+	h.observe(runtime.Gone)
+	h.wantState(StateLaunching)
+
+	h.observe(runtime.Gone)
+
+	h.wantBudgets(Budgets{LaunchFailures: 2, Deaths: 1})
+}
+
 // Deaths are counted until the agent next completes a turn, so an agent that finishes each
 // re-sent task after the death that interrupted it is relaunched every time: a pod lost now and
 // then to its node is not a broken agent.
