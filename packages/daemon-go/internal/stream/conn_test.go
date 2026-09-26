@@ -326,6 +326,7 @@ func TestALateRefusalIsOneEventCarryingTheDeliveryID(t *testing.T) {
 	if err := awaitResult(t, result); err != nil {
 		t.Fatalf("Prompt: %v", err)
 	}
+	conn := h.conn()
 	p.send(shimwire.AgentStart{})
 	p.send(shimwire.Response{ID: frame.ID, Command: shimwire.TypePrompt, Success: false, Error: "Agent is busy"})
 	// The same refusal again is no longer late for anything.
@@ -333,7 +334,7 @@ func TestALateRefusalIsOneEventCarryingTheDeliveryID(t *testing.T) {
 	p.conn.Close()
 	want := []Event{
 		TurnStart{Claim: testClaim},
-		LateRefusal{Claim: testClaim, DeliveryID: "delivery-1", Error: "Agent is busy"},
+		LateRefusal{Claim: testClaim, DeliveryID: "delivery-1", Error: "Agent is busy", Conn: conn},
 		Closed{Claim: testClaim},
 	}
 	var got []Event
@@ -421,15 +422,17 @@ func TestARefusalReplayedOnAReplacementConnectionNamesItsDelivery(t *testing.T) 
 	if err := awaitResult(t, result); err != nil {
 		t.Fatalf("Prompt: %v", err)
 	}
+	first := h.conn()
 	p.conn.Close()
 	if event := h.next(); event != (Closed{Claim: testClaim}) {
 		t.Fatalf("event = %#v, want Closed", event)
 	}
 	replacement := h.connect(testToken)
+	replaced := h.conn()
 	replacement.send(shimwire.Response{ID: frame.ID, Command: shimwire.TypePrompt, Success: false, Error: "Agent is busy"})
 	replacement.conn.Close()
 	want := []Event{
-		LateRefusal{Claim: testClaim, DeliveryID: "delivery-1", Error: "Agent is busy", Replayed: true},
+		LateRefusal{Claim: testClaim, DeliveryID: "delivery-1", Error: "Agent is busy", Replayed: true, Conn: replaced},
 		Closed{Claim: testClaim},
 	}
 	var got []Event
@@ -438,6 +441,12 @@ func TestARefusalReplayedOnAReplacementConnectionNamesItsDelivery(t *testing.T) 
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("events = %#v, want %#v", got, want)
+	}
+	// Each connection answers for the prompts it wrote itself, which is what the supervisor asks
+	// the connection a refusal arrived on.
+	if !first.Prompted("delivery-1") || first.Prompted("delivery-2") || replaced.Prompted("delivery-1") {
+		t.Fatalf("prompted: first %v/%v, replacement %v; want only the first connection's own delivery-1",
+			first.Prompted("delivery-1"), first.Prompted("delivery-2"), replaced.Prompted("delivery-1"))
 	}
 }
 

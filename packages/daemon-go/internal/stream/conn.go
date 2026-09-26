@@ -151,6 +151,19 @@ func (c *Conn) Prompt(ctx context.Context, deliveryID, message string) error {
 	return err
 }
 
+// Prompted is whether this connection has written a prompt of the delivery: a request id it sent
+// that names it (promptDelivery).
+func (c *Conn) Prompted(deliveryID string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for id := range c.sent {
+		if promptDelivery(id) == deliveryID {
+			return true
+		}
+	}
+	return false
+}
+
 // promptIDSeparator ends the delivery id a prompt's request id begins with. OMP's answer carries
 // only the request id, and a refusal it gave while no daemon was connected reaches a later
 // connection, which never sent that request; the id is how that refusal still names its delivery.
@@ -423,11 +436,11 @@ func (c *Conn) answer(response shimwire.Response) {
 	case late != nil:
 		c.log.Warn("worker-stream: prompt refused after its acknowledgement",
 			"claim", c.claim, "deliveryId", late.deliveryID, "error", response.Error)
-		c.events.push(LateRefusal{Claim: c.claim, DeliveryID: late.deliveryID, Error: response.Error})
+		c.events.push(LateRefusal{Claim: c.claim, DeliveryID: late.deliveryID, Error: response.Error, Conn: c})
 	case earlier != "":
 		c.log.Warn("worker-stream: a refusal replayed from an earlier connection names its delivery",
 			"claim", c.claim, "deliveryId", earlier, "error", response.Error)
-		c.events.push(LateRefusal{Claim: c.claim, DeliveryID: earlier, Error: response.Error, Replayed: true})
+		c.events.push(LateRefusal{Claim: c.claim, DeliveryID: earlier, Error: response.Error, Replayed: true, Conn: c})
 	case refusal:
 		c.log.Warn("worker-stream: refusal for a prompt request this connection is not waiting on",
 			"claim", c.claim, "request", response.ID, "error", response.Error)

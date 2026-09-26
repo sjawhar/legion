@@ -75,6 +75,17 @@ func (c *Conn) AdoptWorkingCopy(_ context.Context, id runtime.GitIdentity, timeo
 }
 
 // Prompts is every prompt frame sent over this connection, in order.
+func (c *Conn) Prompted(deliveryID string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, p := range c.prompts {
+		if p.DeliveryID == deliveryID {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *Conn) Prompts() []Prompt {
 	c.mu.Lock()
 	defer c.mu.Unlock()

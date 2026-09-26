@@ -4,6 +4,7 @@ import (
 	"sync"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
 // Event is one agent fact the stream observed. The set is sealed: a connection arriving
@@ -49,6 +50,9 @@ type LateRefusal struct {
 	// Replayed is a refusal for a prompt this connection did not send, read from the shim's
 	// backlog: it answers a prompt an earlier connection sent.
 	Replayed bool
+	// Conn is the connection the refusal arrived on, which the supervisor asks whether it has
+	// prompted the delivery itself.
+	Conn runtime.Conn
 }
 
 // Closed is a registered connection gone, whichever side ended it. It is emitted exactly once
