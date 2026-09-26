@@ -6,8 +6,6 @@ import {
 import { type EditorState, Plugin, PluginKey } from "@milkdown/kit/prose/state";
 import type { EditorView, NodeView, ViewMutationRecord } from "@milkdown/kit/prose/view";
 
-import { BLOCK_ID_DOM_ATTR, blockIdOf } from "@sjawhar/proof-editor";
-
 import type { AskOption, AskUrgency, BlockSchema } from "../../api/types";
 import {
   askBlockTint,
@@ -54,12 +52,14 @@ export function renderTypedBlock(node: ProseMirrorNode): DOMOutputSpec {
 }
 
 /** The node view of a host-owned typed block other than `ask`: `renderTypedBlock`'s drawing,
- * under the block's id. */
+ * under the block's id. It stamps `data-block-id` the way `AskBlockView` does, from the node's
+ * attribute, since a value import from the editor library would pull the library out of
+ * `editor.ts`'s lazy chunk into every page that loads this module. */
 function typedBlockView(node: ProseMirrorNode, document: Document): NodeView {
   const { dom, contentDOM } = DOMSerializer.renderSpec(document, renderTypedBlock(node));
-  const blockId = blockIdOf(node);
-  if (blockId !== null) {
-    (dom as HTMLElement).setAttribute(BLOCK_ID_DOM_ATTR, blockId);
+  const blockId = node.attrs.blockId;
+  if (typeof blockId === "string" && blockId !== "") {
+    (dom as HTMLElement).dataset.blockId = blockId;
   }
   return { contentDOM, dom };
 }
