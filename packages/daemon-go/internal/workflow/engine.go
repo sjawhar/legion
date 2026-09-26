@@ -282,20 +282,11 @@ func (e *Engine) dispatchArtifact(ctx context.Context, tx pgx.Tx, fact intake.Di
 		if err := e.notice(ctx, tx, fact.Key, record.Notice{Kind: "design-approved", Version: fact.Version}); err != nil {
 			return intake.Result{}, err
 		}
-	}
-	root, err := e.store.Issue(ctx, tx, fact.Key)
-	if err != nil || root == nil {
-		return intake.Result{}, err
-	}
-	// A lingering tree has left the workflow, and linger holds each member where it stood: the gate
-	// still records what Dispatch says, but nothing in the tree advances on an approval — no planner
-	// starts for an admitted child, and no READY a merger sent before the tree closed is posted or
-	// published.
-	if root.LingerUntil != nil {
-		return intake.Result{}, nil
-	}
-	if !wasOpen && isOpen {
-		if err := e.advanceAdmittedTree(ctx, tx, *root, updated); err != nil {
+		issue, err := e.store.Issue(ctx, tx, fact.Key)
+		if err != nil || issue == nil {
+			return intake.Result{}, err
+		}
+		if err := e.advanceAdmittedTree(ctx, tx, *issue, updated); err != nil {
 			return intake.Result{}, err
 		}
 	}
@@ -314,19 +305,15 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 	if RoleFor(issue.Phase) != fact.Role {
 		return refused("HANDOFF_NOT_CURRENT_PHASE", fmt.Sprintf("the %s does not run phase %s of %s; this completion changed nothing", fact.Role, issue.Phase, issue.Key)), nil
 	}
-	// A tree that lingers has left the workflow, and linger holds each member where it stood. A
-	// worker still in its turn when the root closed can yet complete, and that completion moves
-	// nothing: a child's merger would otherwise have its READY posted and published for a closed
-	// tree, the same READY an approval reaching the lingering root's gate does not advance.
-	root := issue
-	if !claim.IsTreeRoot(issue.Key, issue.Tree) {
-		if root, err = e.store.Issue(ctx, tx, issue.Tree); err != nil {
-			return intake.Result{}, err
-		}
+	// A worker still in its turn when its tree's root closed can yet complete; linger holds the
+	// member where it stood (treeLingers), so the completion records nothing.
+	lingers, err := e.treeLingers(ctx, tx, issue.Tree)
+	if err != nil {
+		return intake.Result{}, err
 	}
-	if root != nil && root.LingerUntil != nil {
+	if lingers {
 		return refused("TREE_LINGERING", fmt.Sprintf("the tree %s is lingering after it left the workflow, so the %s's completion of phase %s of %s changed nothing",
-			root.Key, fact.Role, issue.Phase, issue.Key)), nil
+			issue.Tree, fact.Role, issue.Phase, issue.Key)), nil
 	}
 	if issue.Phase == phase.Merging && !fact.Ready {
 		return refused("READY_REQUIRED", "the merger's completion is READY: call the legion tool's handoff_complete with ready: true; this completion changed nothing"), nil
@@ -609,6 +596,9 @@ func (e *Engine) retryOrEscalate(ctx context.Context, tx pgx.Tx, fact intake.Ret
 	if fact.Decision != intake.RetryDecision {
 		return intake.Result{}, nil
 	}
+	if lingers, err := e.treeLingers(ctx, tx, issue.Tree); err != nil || lingers {
+		return intake.Result{}, err
+	}
 	from := *issue.HeldFrom
 	issue.Phase, issue.HeldFrom = from, nil
 	if err := e.store.PutIssue(ctx, tx, *issue); err != nil {
@@ -680,6 +670,9 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	row, ok := e.row(issue.Phase, trigger, target, Snapshot{Phase: issue.Phase, HasPR: pr != nil})
 	if !ok {
 		return nil
+	}
+	if lingers, err := e.treeLingers(ctx, tx, issue.Tree); err != nil || lingers {
+		return err
 	}
 	if err := e.status(ctx, tx, issue, row.Status); err != nil {
 		return err
@@ -781,6 +774,9 @@ func (e *Engine) advanceAdmittedTree(ctx context.Context, tx pgx.Tx, root record
 func (e *Engine) advancePendingReady(ctx context.Context, tx pgx.Tx, rootKey string, gate record.DesignGate) error {
 	if !classify.DesignGateOpen(gate) {
 		return nil
+	}
+	if lingers, err := e.treeLingers(ctx, tx, rootKey); err != nil || lingers {
+		return err
 	}
 	issues, err := e.store.Issues(ctx, tx)
 	if err != nil {
@@ -964,6 +960,17 @@ func (e *Engine) liveTree(ctx context.Context, tx pgx.Tx, root record.Issue) (bo
 
 func (e *Engine) gateForIssue(ctx context.Context, tx pgx.Tx, issue record.Issue) (*record.DesignGate, error) {
 	return e.store.Gate(ctx, tx, issue.Tree)
+}
+
+// treeLingers says whether a tree has left the workflow: its root lingers after its close or
+// sign-off. Linger holds every member where it stood, so nothing in such a tree transitions,
+// starts a worker, or records a completion.
+func (e *Engine) treeLingers(ctx context.Context, tx pgx.Tx, tree string) (bool, error) {
+	root, err := e.store.Issue(ctx, tx, tree)
+	if err != nil || root == nil {
+		return false, err
+	}
+	return root.LingerUntil != nil, nil
 }
 
 func phaseIndex(value phase.Phase) int {
