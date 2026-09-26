@@ -177,13 +177,13 @@ func readListSpacing(list *ast.List, lines sourceLines) string {
 		if len(blanks) > 0 && !spacedBeforeFlow {
 			return "a blank line in a quote at or after a list, which the browser editor reads as spacing the list by what follows it"
 		}
-		setSpread(list, false, func(ast.Node) bool { return false })
+		setSpread(list, false, spreadsNothing)
 		return ""
 	case footnoted && typed:
 		if len(lines.blankLines(list, nextBlock(list), whitespaceLine)) > 0 {
 			return "a blank line at or after a list in a typed block in a footnote definition, which the browser editor reads as spacing the list by what follows it"
 		}
-		setSpread(list, false, func(ast.Node) bool { return false })
+		setSpread(list, false, spreadsNothing)
 		return ""
 	}
 	spread := false
@@ -213,6 +213,8 @@ func setSpread(list *ast.List, spread bool, itemSpread func(ast.Node) bool) {
 		item.SetAttribute(browserSpreadAttr, itemSpread(item))
 	}
 }
+
+func spreadsNothing(ast.Node) bool { return false }
 
 // blankBetweenBlocks reports whether a blank line separates two of item's blocks.
 func blankBetweenBlocks(item ast.Node) bool {
@@ -358,8 +360,13 @@ func (l sourceLines) blankLines(from, until ast.Node, blank func([]byte) bool) [
 	if until != nil {
 		last = l.lineOf(startOf(until))
 	}
+	return l.blanks(l.lineOf(startOf(from)), last, blank)
+}
+
+// blanks is the lines from first up to last that are blank.
+func (l sourceLines) blanks(first, last int, blank func([]byte) bool) []int {
 	var blanks []int
-	for line := l.lineOf(startOf(from)); line < last; line++ {
+	for line := first; line < last; line++ {
 		if blank(l.text(line)) {
 			blanks = append(blanks, line)
 		}
@@ -373,12 +380,7 @@ func (l sourceLines) blankInside(directive *typedDirective) bool {
 	if !directive.Closed {
 		return len(l.blankLines(directive, nextBlock(directive), whitespaceLine)) > 0
 	}
-	for line := l.lineOf(directive.Pos()) + 1; line < l.lineOf(directive.closer); line++ {
-		if whitespaceLine(l.text(line)) {
-			return true
-		}
-	}
-	return false
+	return len(l.blanks(l.lineOf(directive.Pos())+1, l.lineOf(directive.closer), whitespaceLine)) > 0
 }
 
 func whitespaceLine(line []byte) bool {
