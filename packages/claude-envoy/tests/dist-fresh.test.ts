@@ -1,67 +1,74 @@
 import { expect, test } from "bun:test"
 import { cp, mkdtemp, readdir, readFile, rm } from "node:fs/promises"
-import { builtinModules } from "node:module"
 import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
+import { isAbsolute, join, resolve } from "node:path"
 import ts from "typescript"
 import { BUNDLE_ENTRYPOINTS, buildBundles } from "../scripts/build"
 
 const packageRoot = resolve(import.meta.dir, "..")
 const distDirectory = join(packageRoot, "dist")
 
-function isRuntimeBuiltin(specifier: string): boolean {
-  return (
-    specifier.startsWith("node:") ||
-    specifier.startsWith("bun:") ||
-    builtinModules.includes(specifier)
-  )
-}
-
-function findExternalDependencySpecifiers(source: string): string[] {
-  const parsed = ts.createSourceFile(
-    "bundle.js",
-    source,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.JS,
-  )
-  const specifiers: string[] = []
-  const visit = (node: ts.Node): void => {
-    if (ts.isCallExpression(node)) {
-      let kind: string | undefined
-      if (ts.isIdentifier(node.expression) && node.expression.text === "require") {
-        kind = "require()"
-      } else if (
-        ts.isPropertyAccessExpression(node.expression) &&
-        node.expression.name.text === "require" &&
-        ts.isMetaProperty(node.expression.expression) &&
-        node.expression.expression.keywordToken === ts.SyntaxKind.ImportKeyword &&
-        node.expression.expression.name.text === "meta"
-      ) {
-        kind = "import.meta.require()"
-      } else if (node.expression.kind === ts.SyntaxKind.ImportKeyword) {
-        kind = "import()"
+async function findExternalDependencySpecifiers(source: string): Promise<string[]> {
+  const resolverRoot = await mkdtemp(join(tmpdir(), "claude-envoy-module-resolution-"))
+  try {
+    const parsed = ts.createSourceFile(
+      "bundle.js",
+      source,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.JS,
+    )
+    const specifiers: string[] = []
+    const inspectSpecifier = (specifier: string): void => {
+      try {
+        const resolved = Bun.resolveSync(specifier, resolverRoot)
+        const resolvesToBuiltin =
+          resolved.startsWith("node:") ||
+          resolved.startsWith("bun:") ||
+          (resolved === specifier && !specifier.includes(":"))
+        if (!resolvesToBuiltin || isAbsolute(resolved)) specifiers.push(specifier)
+      } catch {
+        specifiers.push(specifier)
       }
-      if (kind) {
-        const argument = node.arguments[0]
-        if (!argument || !ts.isStringLiteral(argument)) {
-          specifiers.push(`<non-literal ${kind}>`)
-        } else if (!isRuntimeBuiltin(argument.text)) {
-          specifiers.push(argument.text)
-        }
-      }
-    } else if (
-      (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
-      node.moduleSpecifier &&
-      ts.isStringLiteral(node.moduleSpecifier) &&
-      !isRuntimeBuiltin(node.moduleSpecifier.text)
-    ) {
-      specifiers.push(node.moduleSpecifier.text)
     }
-    ts.forEachChild(node, visit)
+    const visit = (node: ts.Node): void => {
+      if (ts.isCallExpression(node)) {
+        let kind: string | undefined
+        if (ts.isIdentifier(node.expression) && node.expression.text === "require") {
+          kind = "require()"
+        } else if (
+          ts.isPropertyAccessExpression(node.expression) &&
+          node.expression.name.text === "require" &&
+          ts.isMetaProperty(node.expression.expression) &&
+          node.expression.expression.keywordToken === ts.SyntaxKind.ImportKeyword &&
+          node.expression.expression.name.text === "meta"
+        ) {
+          kind = "import.meta.require()"
+        } else if (node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+          kind = "import()"
+        }
+        if (kind) {
+          const argument = node.arguments[0]
+          if (!argument || !ts.isStringLiteral(argument)) {
+            specifiers.push(`<non-literal ${kind}>`)
+          } else {
+            inspectSpecifier(argument.text)
+          }
+        }
+      } else if (
+        (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
+        node.moduleSpecifier &&
+        ts.isStringLiteral(node.moduleSpecifier)
+      ) {
+        inspectSpecifier(node.moduleSpecifier.text)
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(parsed)
+    return specifiers
+  } finally {
+    await rm(resolverRoot, { recursive: true, force: true })
   }
-  visit(parsed)
-  return specifiers
 }
 
 test("the committed bundle starts without node_modules and demands ENVOY_NATS_URL", async () => {
@@ -89,13 +96,13 @@ test("the committed bundle starts without node_modules and demands ENVOY_NATS_UR
   }
 })
 
-test("the dependency guard ignores comments and detects external module specifiers", () => {
+test("the dependency guard ignores comments and detects external module specifiers", async () => {
   const comments = [
     '// require("/tmp/node_modules/comment.js")',
     '/* import.meta.require("/tmp/node_modules/comment.js") */',
     'const mention = "require(\\"/tmp/node_modules/escaped.js\\")"',
   ].join("\n")
-  expect(findExternalDependencySpecifiers(comments)).toEqual([])
+  expect(await findExternalDependencySpecifiers(comments)).toEqual([])
 
   const specifiers = [
     { source: 'require("/tmp/node_modules/require.js")', path: "/tmp/node_modules/require.js" },
@@ -113,11 +120,11 @@ test("the dependency guard ignores comments and detects external module specifie
       path: "/tmp/node_modules/static-export.js",
     },
   ]
-  const matches = findExternalDependencySpecifiers(specifiers.map(({ source }) => source).join("\n"))
+  const matches = await findExternalDependencySpecifiers(specifiers.map(({ source }) => source).join("\n"))
   for (const { path } of specifiers) expect(matches).toContain(path)
 })
 
-test("the dependency guard detects calls after comment-like strings", () => {
+test("the dependency guard detects calls after comment-like strings", async () => {
   const cases = [
     {
       source: 'const url = "https://not-a-comment"; require("/tmp/node_modules/https.js")',
@@ -138,26 +145,27 @@ test("the dependency guard detects calls after comment-like strings", () => {
     },
   ]
   for (const { source, path } of cases) {
-    expect(findExternalDependencySpecifiers(source)).toContain(path)
+    expect(await findExternalDependencySpecifiers(source)).toContain(path)
   }
 })
 
-test("the dependency guard rejects nonliteral module specifiers", () => {
+test("the dependency guard rejects nonliteral module specifiers", async () => {
   const source = 'require(path); import.meta.require(path); import(path)'
-  expect(findExternalDependencySpecifiers(source)).toEqual([
+  expect(await findExternalDependencySpecifiers(source)).toEqual([
     "<non-literal require()>",
     "<non-literal import.meta.require()>",
     "<non-literal import()>",
   ])
 })
 
-test("the dependency guard permits runtime builtin module specifiers", () => {
-  const source = 'require("fs"); import("node:fs"); import("bun:ffi")'
-  expect(findExternalDependencySpecifiers(source)).toEqual([])
+test("the dependency guard permits runtime builtin module specifiers", async () => {
+  const source = 'require("fs"); import("fs/promises"); import("node:fs"); import("bun:ffi"); require("bun")'
+  expect(await findExternalDependencySpecifiers(source)).toEqual([])
 })
 
-test("the dependency guard rejects nonbuiltin literal module specifiers", () => {
+test("the dependency guard rejects nonbuiltin literal module specifiers", async () => {
   const specifiers = [
+    { source: 'import.meta.require("node:sqlite")', path: "node:sqlite" },
     {
       source: 'import.meta.require("workspace:@legion/contracts")',
       path: "workspace:@legion/contracts",
@@ -167,14 +175,14 @@ test("the dependency guard rejects nonbuiltin literal module specifiers", () => 
     { source: 'export { value } from "/tmp/node_modules/entry.js"', path: "/tmp/node_modules/entry.js" },
     { source: 'import("https://example.test/module.js")', path: "https://example.test/module.js" },
   ]
-  const matches = findExternalDependencySpecifiers(specifiers.map(({ source }) => source).join("\n"))
+  const matches = await findExternalDependencySpecifiers(specifiers.map(({ source }) => source).join("\n"))
   for (const { path } of specifiers) expect(matches).toContain(path)
 })
 
 test("the committed bundles contain only runtime builtin module specifiers", async () => {
   for (const name of Object.keys(BUNDLE_ENTRYPOINTS)) {
     const bundle = await readFile(join(distDirectory, `${name}.js`), "utf8")
-    expect(findExternalDependencySpecifiers(bundle)).toEqual([])
+    expect(await findExternalDependencySpecifiers(bundle)).toEqual([])
   }
 })
 
