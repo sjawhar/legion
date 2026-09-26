@@ -3800,12 +3800,16 @@ func TestRunSelfHealthMonitor_ExitsAfterThreeRebuildsThatLeaveAFault(t *testing.
 			case <-time.After(2 * time.Second):
 				t.Fatal("the monitor never terminated a fault three rebuilds left in place")
 			}
-			<-done
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("the monitor did not return after terminating")
+			}
 			if got := rebuilds.Load(); got != 3 {
 				t.Fatalf("rebuilds = %d, want 3", got)
 			}
 			var terminal []string
-			logged := false
+			warned := false
 			for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
 				var record struct {
 					Level string `json:"level"`
@@ -3818,13 +3822,15 @@ func TestRunSelfHealthMonitor_ExitsAfterThreeRebuildsThatLeaveAFault(t *testing.
 				if strings.HasPrefix(record.Msg, "self-health terminal failure threshold exceeded") {
 					terminal = append(terminal, record.Error)
 				}
-				logged = logged || record.Error == tc.wantError.Error()
+				warned = warned || (tc.afterRebuild != nil && record.Level == "WARN" && record.Error == tc.afterRebuild.Error())
 			}
 			if len(terminal) != 1 || terminal[0] != tc.wantError.Error() {
 				t.Fatalf("terminal lines name %q, want one naming %q", terminal, tc.wantError)
 			}
-			if !logged {
-				t.Fatalf("no log record carries the error %q", tc.wantError)
+			// A probe that fails right after a rebuild is logged when it fails, not only in the
+			// terminal line.
+			if tc.afterRebuild != nil && !warned {
+				t.Fatalf("no WARN record carries the failed probe after a rebuild, %q", tc.afterRebuild)
 			}
 		})
 	}
@@ -3878,7 +3884,11 @@ func TestRunSelfHealthMonitor_RestartsWithoutItsRoleBucket(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatalf("the listener stayed up without its role bucket: %d rebuilds, no termination", rebuilds.Load())
 	}
-	<-done
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("the monitor did not return after terminating")
+	}
 	if got := rebuilds.Load(); got != 3 {
 		t.Fatalf("rebuilds = %d, want 3", got)
 	}
