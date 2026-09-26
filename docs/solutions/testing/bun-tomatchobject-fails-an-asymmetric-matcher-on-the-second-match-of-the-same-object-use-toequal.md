@@ -34,10 +34,12 @@ expect(env).toMatchObject(expected());   // passes
 expect(env).toMatchObject(expected());   // fails: "- Expected - 0 / + Received + 0"
 ```
 
-With plain values only it passes twice, and a fresh `expected()` per call makes no difference:
-the **received** object's identity is what trips it. Once `toMatchObject` has matched an object,
-every later asymmetric match against that object fails, `toEqual` included. The reviewer
-reproduced the same on their run.
+With plain values only it passes twice, and a fresh `expected()` per call makes no difference.
+The cause is that Bun's `toMatchObject` **writes the matcher into the received object**: after
+the first assertion `env.HOME` is the `stringContaining` matcher, not the string
+(`JSON.stringify(env)` gives `{"HOME":{},"MODE":"fetch"}`), so every later match against it fails,
+`toEqual` included, and anything else that reads the object afterwards sees matchers, not values.
+`toEqual` leaves the received object as it was.
 
 ## The fix
 

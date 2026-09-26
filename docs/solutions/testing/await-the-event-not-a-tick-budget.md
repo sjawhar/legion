@@ -64,7 +64,8 @@ through the observer:
 `EventCounter` is `{count, increment(), reached(n), next()}`. `CallObserver` is
 `{issued, completed}` — two `EventCounter`s, `issued` incremented before the injected fn runs and
 `completed` after it resolves. `registrationDeadlineMs(config)` names the root/controller deadline
-sleep; `waitFor(cond)` is a real 5 ms poll for the one effect with no seam (below).
+sleep; `waitFor(cond)` polls a condition every 2 ms up to a named real-time deadline, for any
+effect no injected dependency signals (below).
 
 **Which end.** Await `issued` when the fake is going to *block* on a gate the test releases later
 (`await runs("list-panes").issued.reached(1); … probeGate.resolve()`) — awaiting `completed`
