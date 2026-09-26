@@ -76,8 +76,11 @@ gateway_url=https://middleman.hawk.internal.trajectorylabs.com
 # deletes with the rest.
 fixture=$root/scripts/e2e/fixtures/operator-route
 route_configmap=legion-operator-route-$run_label
-# operator-close's tree, which no workflow issue backs: the run's own, named for the run.
+# operator-close's tree, which no workflow issue backs: the run's own, named for the run, and its
+# worker's issue, a child in the same project. Both are issue keys (PROJECT-NUMBER), which the
+# daemon's spawn requires; the trailing digit keeps the child apart from the root.
 optree="S4BOP-$$"
+opchild="S4BOP-${$}1"
 port_daemon=13370
 port_worker_stream=13371
 stream=ENVOY_NOTIFICATIONS
@@ -1697,7 +1700,7 @@ printf '%s\n' "You are a Stage 4b operator-close fixture, the root of a tree no 
 printf '%s\n' "You are a Stage 4b operator-close fixture, a worker of that tree. Do nothing and wait." >"$work/op-worker.md"
 op_root=$(claims_cli spawn --json --tree "$optree" --issue "$optree" --role architect --prompt-file "$work/op-architect.md" | jq -er .token) ||
   fail "the operator could not spawn the root of $optree"
-op_worker=$(claims_cli spawn --json --tree "$optree" --issue "$optree-1" --role implementer --prompt-file "$work/op-worker.md" | jq -er .token) ||
+op_worker=$(claims_cli spawn --json --tree "$optree" --issue "$opchild" --role implementer --prompt-file "$work/op-worker.md" | jq -er .token) ||
   fail "the operator could not spawn a worker of $optree"
 claim_live() { claims_cli list --json | jq -e --arg t "$1" '.claims[] | select(.token == $t) | .state | IN("ready", "idle", "working")' >/dev/null; }
 until_true 900 "$optree's root $op_root to be live" claim_live "$op_root"
