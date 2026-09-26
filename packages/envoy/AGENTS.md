@@ -145,13 +145,18 @@ paragraph is not written, so the shape comparison (`pmdoc.BlockShapeError`) expe
 empty `with` that empties its paragraph changes no shape, a block holding an emptied paragraph is
 still judged for every later replace, and an empty `with` leaving text that reads back as another
 block is refused, naming the text. Accepting a suggestion (`POST /api/v1/comments/{id}/accept`,
-`docs/marks.go` `applySuggestion`) runs the same two checks outside a code block
-(`refuseUnreadableReplacement` and `refuseReshapedReplacement`, naming `replace_with`) over every
-document-level block the accept writes. An accept parses its text as blocks written into the
-document (`pmdoc.ParseFragment`, which reads no front matter, so a leading `---` is a rule as `***`
-is), so a rule or a list over a whole paragraph is written as that block and kept, while one that leaves a block the
-document cannot read back, such as a list in a list item's only paragraph or `:::` in a callout,
-is refused: the document stays as it was and the suggestion stays open. A reject is not checked,
+`docs/marks.go` `applySuggestion`) runs the same two checks outside a code block over every
+document-level block the accept writes (`refuseBrokenAccept`, naming `replace_with`). An accept
+parses its text as blocks written into the document (`pmdoc.ParseFragment`: a leading `---` is a
+rule, as `***` is, except that a closed front-matter block is front matter where the text lands
+at the document's start, at the start of a top-level first block's text), so a rule or a list
+over a whole paragraph is written as that block and kept, while one that leaves a block the
+document cannot read back, such as a list at a list item's start or `:::` in a callout, is
+refused: the document stays as it was and the suggestion stays open. The person accepting cannot
+change the text, so the refusal (`acceptRefusal`) says what the text writes where it lands and
+names what they can do - reject the suggestion, or reply asking for text the block can hold -
+and never an edit-route operation; it says the text empties a paragraph only when the text
+renders no content. A reject is not checked,
 since it gives back the text the insert started from. Neither route can see a lone carriage
 return, which this parser reads as text where CommonMark and the browser editor end the line.
 Everywhere else `replace` is
@@ -194,8 +199,9 @@ reports any emptied container's content rule as `INVALID_OP`). `move` relocates 
 `block` to the document-level boundary of an insert anchor (`pmdoc.MoveBlock`); insert and move
 anchors are a quote, `start`, `end`, `heading:<title>`, or `block:<id>`. An insert's `markdown` is
 read as text written into the document (`pmdoc.ParseFragment`), so a leading `---` line is a rule,
-as `***` is, except where the insert lands at the document's start (`start`, or before the first
-block), where front matter opens a document and the insert reads it.
+as `***` is, except that a closed front-matter block is front matter where the insert lands at the
+document's start (`start`, or before the first block); the accept and the insert decide that with
+one rule (`docs.opensDocument`).
 
 `delete_row` and `delete_column` each take a table `block` id and a zero-based `index`, and mutate
 the table in place. Row `0` is the header; deleting it promotes the first body row into the header,

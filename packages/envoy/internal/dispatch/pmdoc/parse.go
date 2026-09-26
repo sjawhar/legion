@@ -40,9 +40,14 @@ func Parse(markdown string) (*Node, error) {
 }
 
 // ParseFragment converts markdown written into a document, rather than one that begins it, into
-// the closed Proof ProseMirror tree: only a document's start holds front matter, so a leading `---`
-// line is a horizontal rule, as it is anywhere after the start.
-func ParseFragment(markdown string) (*Node, error) {
+// the closed Proof ProseMirror tree: a leading `---` line is a horizontal rule, as it is anywhere
+// after a document's start. Written where the document begins (opensDocument), a closed
+// front-matter block opening the markdown is front matter, as Parse reads it; an unclosed `---`
+// line is still a rule.
+func ParseFragment(markdown string, opensDocument bool) (*Node, error) {
+	if opensDocument && parseFrontmatterBlock([]byte(markdown)) != nil {
+		return Parse(markdown)
+	}
 	return parse(fragmentParser, markdown, false)
 }
 
@@ -176,10 +181,47 @@ func endOf(nodeType string) string {
 
 // blockName is a block type as a reader names it.
 func blockName(nodeType string) string {
-	if nodeType == "hr" {
-		return "a horizontal rule"
+	noun := blockNoun(nodeType)
+	if strings.ContainsRune("aeiou", rune(noun[0])) {
+		return "an " + noun
 	}
-	return "a " + strings.ReplaceAll(nodeType, "_", " ")
+	return "a " + noun
+}
+
+func blockNoun(nodeType string) string {
+	if nodeType == "hr" {
+		return "horizontal rule"
+	}
+	return strings.ReplaceAll(nodeType, "_", " ")
+}
+
+// BlockNames names blocks in order as a reader names them, a run of one type counted: "a bullet
+// list", "two paragraphs", "a horizontal rule and a heading".
+func BlockNames(blocks []*Node) string {
+	var names []string
+	for start := 0; start < len(blocks); {
+		end := start + 1
+		for end < len(blocks) && blocks[end].Type == blocks[start].Type {
+			end++
+		}
+		if count := end - start; count > 1 {
+			names = append(names, fmt.Sprintf("%s %ss", countWord(count), blockNoun(blocks[start].Type)))
+		} else {
+			names = append(names, blockName(blocks[start].Type))
+		}
+		start = end
+	}
+	if len(names) < 2 {
+		return strings.Join(names, "")
+	}
+	return strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1]
+}
+
+func countWord(count int) string {
+	if words := []string{"two", "three", "four", "five", "six", "seven", "eight", "nine"}; count-2 < len(words) {
+		return words[count-2]
+	}
+	return fmt.Sprint(count)
 }
 
 // readAlone is the document a block is read in on its own. It follows a paragraph, as a block
