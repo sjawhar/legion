@@ -2,6 +2,7 @@ package pmdoc
 
 import (
 	"bytes"
+	"regexp"
 	"strings"
 
 	"github.com/yuin/goldmark"
@@ -58,10 +59,58 @@ func (reader markdownReader) parseLined(lined, source []byte) ast.Node {
 type unclosedOpenerGuard struct{ parser.BlockParser }
 
 func (p unclosedOpenerGuard) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
-	if parent.Kind() == ast.KindDocument && pc.Get(unclosedOpenerKey) == true && afterLoneCarriageReturn(reader, pc) {
+	if parent.Kind() == ast.KindDocument && pc.Get(unclosedOpenerKey) == true &&
+		(afterLoneCarriageReturn(reader, pc) || markerEndsAtLoneCarriageReturn(reader, pc)) {
 		return nil, parser.NoChildren
 	}
 	return p.BlockParser.Open(parent, reader, pc)
+}
+
+// markerEndsAtLoneCarriageReturn reports whether the line the reader is on holds only a list or
+// quote marker, ended by a lone carriage return: main read that carriage return as text after the
+// marker, so it read no marker there either.
+func markerEndsAtLoneCarriageReturn(reader gmtext.Reader, pc parser.Context) bool {
+	line, segment := reader.PeekLine()
+	source := pc.Get(sourceKey).([]byte)
+	end := segment.Start + len(bytes.TrimRight(line, "\n"))
+	return end < len(source) && source[end] == '\r' && bareMarkerLine.Match(bytes.TrimRight(line, "\n"))
+}
+
+// bareMarkerLine is a line holding only a list or quote marker.
+var bareMarkerLine = regexp.MustCompile(`^ {0,3}(?:[-+*>]|[0-9]{1,9}[.)])[ \t]*$`)
+
+// emptyItemGuard is a list parser that opens no empty list item - a marker with nothing after it
+// on its line - that would interrupt a paragraph, as the browser editor's parser reads it. Goldmark
+// refuses one only while the paragraph is the block last opened; that parser also refuses one
+// opening a container on a line that already interrupted the paragraph, so `- a\n  - -` is an item
+// holding the text `-`, and `- a\n  > -` a quote holding it.
+type emptyItemGuard struct{ parser.BlockParser }
+
+func (p emptyItemGuard) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
+	line, segment := reader.PeekLine()
+	if bareMarkerLine.Match(bytes.TrimRight(line, "\n")) && !bytes.HasPrefix(bytes.TrimLeft(line, " "), []byte(">")) &&
+		parent.ChildCount() == 0 && interruptsParagraph(parent, reader.Source(), lineStart(reader.Source(), segment.Start)) {
+		return nil, parser.NoChildren
+	}
+	return p.BlockParser.Open(parent, reader, pc)
+}
+
+// interruptsParagraph reports whether container, opened on the line starting at start with the
+// containers above it that it opens first, follows a paragraph whose last line is the one before.
+func interruptsParagraph(container ast.Node, source []byte, start int) bool {
+	for node := container; node != nil && node.Kind() != ast.KindDocument; node = node.Parent() {
+		previous := node.PreviousSibling()
+		if previous == nil {
+			continue
+		}
+		paragraph, ok := previous.(*ast.Paragraph)
+		if !ok || paragraph.Lines().Len() == 0 {
+			return false
+		}
+		last := paragraph.Lines().At(paragraph.Lines().Len() - 1)
+		return bytes.Count(source[last.Start:start], []byte("\n")) <= 1
+	}
+	return false
 }
 
 // opensWithUnclosedRule reports whether lined (lineEnds) opens with a `---` line, with any spaces
