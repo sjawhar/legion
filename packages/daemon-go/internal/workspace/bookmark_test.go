@@ -86,6 +86,64 @@ func TestCreateWorkspaceRefusesAnOriginRowConcurrentFetchesConflicted(t *testing
 	}
 }
 
+// Two fetches that race on an untracked main@origin (main forgotten in the shared clone, so no
+// local main follows it), one seeing main move and one seeing it move elsewhere, leave the row
+// conflicted. A workspace with no issue branch starts at main, so it is refused by name before
+// anything is added, and the way out holds: the next provisioning's fetch sets the row to origin's
+// main as it is then, and that provisioning refuses the untracked row with its own way out, which,
+// run as printed, lets the next one start at origin's main. Provision's own fetch settles the row
+// first, so createWorkspace is called directly.
+func TestCreateWorkspaceRefusesAMainAtOriginConcurrentFetchesConflicted(t *testing.T) {
+	run := newLocalRunner(t)
+	req := provisionRequest(t)
+	first, err := Provision(context.Background(), run, req)
+	if err != nil {
+		t.Fatalf("provision the shared clone: %v", err)
+	}
+	clone := first.Clone
+	base := commitOf(t, clone, "main@origin")
+	runSetup(t, clone, "jj", "bookmark", "forget", "main", "--ignore-working-copy", "-R", clone)
+	operation := strings.TrimSpace(runSetup(t, clone, "jj", "op", "log", "--no-graph", "-T", "id.short()", "--limit", "1", "--ignore-working-copy", "-R", clone))
+	moved := pushRemoteBranch(t, run.remote, "main", "moved.txt")
+	fromOrigin(t, run, clone, "jj", "--at-op", operation, "git", "fetch", "-R", clone)
+	runSetup(t, req.StateDir, "git", "--git-dir="+run.remote, "update-ref", "refs/heads/main", base)
+	elsewhere := pushRemoteBranch(t, run.remote, "main", "elsewhere.txt")
+	fromOrigin(t, run, clone, "jj", "--at-op", operation, "git", "fetch", "-R", clone)
+
+	req.Issue = "WIDGETS-43"
+	workspace, err := Location(req.StateDir, req.Repo, req.Issue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := len(run.Calls())
+	err = createWorkspace(context.Background(), run, workspace, req.Log)
+	var refusals []string
+	for _, adds := range [][]string{{moved, elsewhere}, {elsewhere, moved}} {
+		refusals = append(refusals, "Remote bookmark main@origin is conflicted (adds "+strings.Join(adds, ", ")+"; removes "+base+"), which concurrent fetches leave, and main is not in the shared clone "+clone+"; workspace "+workspace.Dir+" was not created. Provision again: the next provisioning's fetch sets the row to origin's main as it is then")
+	}
+	if err == nil || !slices.Contains(refusals, err.Error()) {
+		t.Fatalf("createWorkspace on a conflicted main@origin: %v\nwant one of %q", err, refusals)
+	}
+	nothingProvisioned(t, run, before, workspace, "the refusal", "jj", "bookmark", "track")
+
+	before = len(run.Calls())
+	_, err = Provision(context.Background(), run, req)
+	untracked := "Bookmark main is not tracked in the shared clone " + clone + ", where main@origin is at " + elsewhere + " untracked; workspace " + workspace.Dir + " was not created. Track it: `jj bookmark track main@origin --ignore-working-copy -R " + clone + "`, and the next provisioning starts there"
+	if err == nil || err.Error() != untracked {
+		t.Fatalf("provision again: %v\nwant %q", err, untracked)
+	}
+	nothingProvisioned(t, run, before, workspace, "provisioning again", "jj", "bookmark", "track")
+	l := lostWorkspace{run: run, req: req, first: first, clone: clone}
+	command := l.runWayOut(t, err.Error(), "jj bookmark track main@origin", "")
+	working, err := Provision(context.Background(), run, req)
+	if err != nil {
+		t.Fatalf("provision after %q: %v", command, err)
+	}
+	if parent := commitOf(t, working.Dir, "@-"); parent != elsewhere {
+		t.Errorf("after %q the workspace's @- is %s, want origin's main %s", command, parent, elsewhere)
+	}
+}
+
 // trackRace runs a function once, just before the first `jj bookmark track` it is asked to run.
 type trackRace struct {
 	*recordingRunner
@@ -583,9 +641,10 @@ func TestProvisionRefusesALocalConflictAndItsWaysOutHold(t *testing.T) {
 // `jj workspace add --revision main` jj cannot resolve registers the workspace on the root commit
 // and creates its directory before it fails, and the next provisioning would adopt that empty
 // workspace. A clone with no main (a repository whose default branch is another), a main deleted
-// in the shared clone while origin's is tracked, and a conflicted main are refused by name, every
-// time, with nothing added; the last two print a way out, which, run as printed, lets the next
-// provisioning start at origin's main.
+// in the shared clone while origin's is tracked, a main forgotten there (`jj bookmark forget`,
+// which leaves main@origin untracked), and a conflicted main are refused by name, every time, with
+// nothing added; the last three print a way out, which, run as printed, lets the next provisioning
+// start at origin's main.
 func TestProvisionRefusesAWorkspaceWithNoBranchWhenMainDoesNotResolve(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -604,6 +663,11 @@ func TestProvisionRefusesAWorkspaceWithNoBranchWhenMainDoesNotResolve(t *testing
 			runSetup(t, clone, "jj", "bookmark", "delete", "main", "--ignore-working-copy", "-R", clone)
 			return []string{"Bookmark main was deleted in the shared clone " + clone + " while main@origin is tracked at " + origin + "; workspace {dir} was not created. Restore it: `jj bookmark set main -r main@origin --ignore-working-copy -R " + clone + "`, and the next provisioning starts there"}
 		}, "jj bookmark set main"},
+		{"main forgotten in the shared clone", func(t *testing.T, run *recordingRunner, clone string) []string {
+			origin := commitOf(t, clone, "main@origin")
+			runSetup(t, clone, "jj", "bookmark", "forget", "main", "--ignore-working-copy", "-R", clone)
+			return []string{"Bookmark main is not tracked in the shared clone " + clone + ", where main@origin is at " + origin + " untracked; workspace {dir} was not created. Track it: `jj bookmark track main@origin --ignore-working-copy -R " + clone + "`, and the next provisioning starts there"}
+		}, "jj bookmark track main@origin"},
 		{"main conflicted by two local moves", func(t *testing.T, run *recordingRunner, clone string) []string {
 			base := commitOf(t, clone, "main")
 			var sides []string

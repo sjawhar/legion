@@ -199,8 +199,11 @@ func undescribedMove(ctx context.Context, run Runner, workspace Workspace, local
 // still registers the workspace, parented on the root commit, before it reports the error. Each
 // main that does not resolve is refused by name before anything is added: a conflicted one, with
 // origin's to keep (`--allow-backwards`, since jj refuses to move a bookmark sideways off two
-// local moves); one deleted in the shared clone while origin's is tracked, with origin's to
-// restore; and an absent one, a repository whose default branch is another.
+// local moves). With no local main: a conflicted main@origin, which concurrent fetches leave and
+// the next provisioning's fetch settles; one deleted in the shared clone while origin's is
+// tracked, with origin's to restore; one forgotten (`jj bookmark forget main`), which leaves
+// main@origin untracked, with origin's to track; and an absent one, a repository whose default
+// branch is another.
 func mainCommit(ctx context.Context, run Runner, workspace Workspace) (string, error) {
 	rows, err := readBookmark(ctx, run, workspace, "main")
 	if err != nil {
@@ -210,14 +213,20 @@ func mainCommit(ctx context.Context, run Runner, workspace Workspace) (string, e
 	case main.conflict:
 		return "", fmt.Errorf("Bookmark main is conflicted %s; workspace %s was not created. Keep origin's: `jj bookmark set main -r main@origin --allow-backwards --ignore-working-copy -R %s`, and the next provisioning starts there",
 			main.sides(), workspace.Dir, workspace.Clone)
-	case !main.present && origin.present && origin.tracked && !origin.conflict:
+	case main.present:
+		return main.added[0], nil
+	case origin.conflict:
+		return "", fmt.Errorf("Remote bookmark main@origin is conflicted %s, which concurrent fetches leave, and main is not in the shared clone %s; workspace %s was not created. Provision again: the next provisioning's fetch sets the row to origin's main as it is then",
+			origin.sides(), workspace.Clone, workspace.Dir)
+	case origin.present && origin.tracked:
 		return "", fmt.Errorf("Bookmark main was deleted in the shared clone %s while main@origin is tracked at %s; workspace %s was not created. Restore it: `jj bookmark set main -r main@origin --ignore-working-copy -R %[1]s`, and the next provisioning starts there",
 			workspace.Clone, origin.added[0], workspace.Dir)
-	case !main.present:
+	case origin.present:
+		return "", fmt.Errorf("Bookmark main is not tracked in the shared clone %s, where main@origin is at %s untracked; workspace %s was not created. Track it: `jj bookmark track main@origin --ignore-working-copy -R %[1]s`, and the next provisioning starts there",
+			workspace.Clone, origin.added[0], workspace.Dir)
+	default:
 		return "", fmt.Errorf("Bookmark main is not in the shared clone %s; workspace %s was not created. An issue with no branch starts at main, so the repository's default branch must be main",
 			workspace.Clone, workspace.Dir)
-	default:
-		return main.added[0], nil
 	}
 }
 
