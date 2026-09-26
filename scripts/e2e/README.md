@@ -454,7 +454,9 @@ LEGION_E2E_RUNTIME_CONTEXT=legion-daemon@production LEGION_E2E_IMAGE=ghcr.io/sja
 STAGE4B_UNTIL=<checkpoint> …                      # a development run: stops after that checkpoint, never PASS
 ```
 
-`STAGE4B_UNTIL` must name a checkpoint below; any other value is refused. `STAGE4B_EVIDENCE_DIR`
+`STAGE4B_UNTIL` must name a checkpoint below; any other value is refused. `STAGE4B_SKIP_CONTROLLER=1`,
+refused without `STAGE4B_UNTIL`, runs none of `controller`'s checks and only takes tree 3 out, printing `CHECK controller: SKIPPED (…)`,
+so a development run can reach a later checkpoint while a defect of the controller's own is unfixed. `STAGE4B_EVIDENCE_DIR`
 keeps the evidence (default: a fresh `/tmp` directory, printed at the end): the transcript, the
 daemon log, `run.json` (source revision, image and plugin), the pod watch, each checked pod's spec,
 every agent transcript (the tree pods' and, under `transcripts/controller/`, the operator's
@@ -467,6 +469,8 @@ Three roots are set todo under `admission_cap: 2`:
   repository-configuration fixture, and is then moved to backlog.
 - Tree 3 is admitted when tree 2 leaves the line. It supplies the held phase the controller
   checkpoint needs, and is taken out from an operator shell.
+- Tree 4 is admitted when tree 3 has been taken out. It supplies the deaths of a worker whose task
+  is outstanding, and is taken out the same way.
 
 **One run at a time.** The project, the durable consumer names, ports 13370 and 13371 and the
 namespace label `legion.dev/project=legsmoke` are shared.
@@ -551,6 +555,7 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 | `daemon-relaunch-count` | the daemon relaunched the merger, `resumed`, once for each pod the driver ended |
 | `restart-mid-tree` | a daemon restart re-adopts the merger's pod and session |
 | `controller` | `legion controller start` registers with the Sandbox daemon; tree 3's held notice reaches it; `legion status … backlog` from the operator shell moves tree 3, and Dispatch shows it |
+| `deaths-with-work` | tree 4, admitted once tree 3 has left: its planner, killed once mid-turn, is sent its task again, told the turn was interrupted, and finishes planning; its implementer, killed after each ready with its task outstanding, is failed after 3 deaths (`budgets.deaths` 3, `supervise: claim failed` because "deaths with work outstanding ran out"), tree 4 is held and nothing relaunches it; `legion status … backlog` then takes tree 4 out |
 | `done` | the merger's READY, the proof human's merge, the production check and sign-off take tree 1 to `done` |
 | `node-release` | after the pool's consolidation, tree 1's node is gone while its Sandboxes stay Suspended and its volume Bound |
 | `close` | at linger expiry tree 1's Sandboxes and tree volume are deleted |

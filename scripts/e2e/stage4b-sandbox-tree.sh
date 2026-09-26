@@ -12,11 +12,12 @@
 # `done`, lingers, and closes. Tree 2 runs through its planner beside tree 1's implementer, on its own
 # node, carrying the repository-configuration fixture, and is then moved to backlog. Tree 3 is
 # admitted when tree 2 leaves the line, supplies the held phase the controller checkpoint needs, and
-# is taken out from an operator shell. Each checkpoint prints `== <name>`, what it observed with the
-# source revision, the image digest and the plugin version recorded once in `run.json`, and
-# `CHECK <name>: PASS`. The first that fails ends the run non-zero with `CHECK <name>: FAIL`, naming
-# it; a checkpoint that cannot run prints `CHECK <name>: BLOCKED`, naming the command that failed and
-# the record it checked.
+# is taken out from an operator shell. Tree 4 is admitted once tree 3 has left, supplies a planner
+# killed mid-turn and an implementer killed until it is held, and is taken out the same way. Each
+# checkpoint prints `== <name>`, what it observed with the source revision, the image digest and the
+# plugin version recorded once in `run.json`, and `CHECK <name>: PASS`. The first that fails ends the
+# run non-zero with `CHECK <name>: FAIL`, naming it; a checkpoint that cannot run prints
+# `CHECK <name>: BLOCKED`, naming the command that failed and the record it checked.
 #
 # Inputs:
 # - LEGION_E2E_RUNTIME_CONTEXT (required) and LEGION_E2E_RUNTIME_KUBECONFIG (default
@@ -25,6 +26,8 @@
 # - LEGION_E2E_IMAGE (required) is the worker image, by digest.
 # - STAGE4B_UNTIL=<checkpoint> stops after that checkpoint. A run with it set is a development run,
 #   never the proof, and never prints PASS.
+# - STAGE4B_SKIP_CONTROLLER=1, in a development run only, runs none of `controller`'s checks and only
+#   takes tree 3 out, so a checkpoint after it runs while the controller's own defect is unfixed.
 # - STAGE4B_EVIDENCE_DIR (default a fresh /tmp directory, kept and printed) holds the transcript, the
 #   daemon log, the pod watch, every agent transcript, and the negative controls.
 #
@@ -54,6 +57,7 @@ runtime_kubeconfig=${LEGION_E2E_RUNTIME_KUBECONFIG:-$HOME/.kube/legion-daemon-pr
 runtime_context=${LEGION_E2E_RUNTIME_CONTEXT:-}
 image=${LEGION_E2E_IMAGE:-}
 until=${STAGE4B_UNTIL:-}
+skip_controller=${STAGE4B_SKIP_CONTROLLER:-}
 # The Dispatch project key (the workflow's) and its token (the pods' label, the claims' prefix).
 project=LEGSMOKE
 run_label=legsmoke
@@ -103,6 +107,7 @@ pin=
 tree1=
 tree2=
 tree3=
+tree4=
 pr_number=
 smoke_file=
 prod_baseline=
@@ -120,6 +125,14 @@ note() { echo "   $*"; }
 pass() {
   echo "CHECK $check: PASS"
   [ -z "$daemon_pid" ] || interests_sample "$check"
+  until_reached
+}
+# skipped names a checkpoint a development run skipped, so no transcript reads it as passed.
+skipped() {
+  echo "CHECK $check: SKIPPED ($*)"
+  until_reached
+}
+until_reached() {
   [ "$until" != "$check" ] || {
     ok=1
     echo "stage 4b e2e: development run until $until finished (not the proof)"
@@ -153,6 +166,18 @@ claim_view() {
 }
 claim_sandbox() { claim_view "$1" "$2" | jq -er '.locator.sandbox.name'; }
 claim_pod_uid() { claim_view "$1" "$2" | jq -er '.locator.incarnation'; }
+# claims_cli ARGS... is `legion claims` from the operator shell, over the operator bearer.
+claims_cli() { "$work/legion" claims "$@" --config "$work/legion.yaml" --operator-token-file "$work/operator-token"; }
+# take_out ISSUE moves the tree ISSUE roots to backlog from the operator shell, over the operator
+# bearer, and waits for Dispatch to show it and for the tree's pods to be gone.
+take_out() {
+  local issue=$1 out
+  out=$("$work/legion" status "$issue" backlog --operator-token-file "$work/operator-token" --config "$work/legion.yaml" 2>&1) ||
+    fail "legion status $issue backlog from the operator shell: $out"
+  until_true 120 "Dispatch to show $issue in backlog" dispatch_status_is "$issue" backlog
+  until_true 600 "$issue's pods to be gone" sh -c \
+    "out=\$(timeout 120 kubectl --context '$operator' -n '$namespace' get pods -l 'legion.dev/project=$run_label,legion.dev/tree=$issue' -o name) && [ -z \"\$out\" ]"
+}
 # tree_pod TREE prints a Running pod of the tree, whose worker container mounts the tree volume.
 tree_pod() {
   op get pods -l "legion.dev/project=$run_label,legion.dev/tree=$1" --field-selector=status.phase=Running \
@@ -714,7 +739,7 @@ delete_consumers() {
 # stops before the proof human's merge would otherwise leave behind.
 remove_run_branches() {
   local issue number
-  for issue in $tree1 $tree2 $tree3; do
+  for issue in $tree1 $tree2 $tree3 $tree4; do
     number=$(timeout 60 gh -R "$repo" pr list --head "legion/$issue" --state open --json number --jq '.[0].number // empty' 2>/dev/null)
     if [ -n "$number" ]; then
       timeout 60 gh -R "$repo" pr close "$number" --comment "Closed by the Stage 4b run that opened it, at its teardown." >/dev/null 2>&1 &&
@@ -729,7 +754,7 @@ remove_run_branches() {
 # profile on this machine and goes with that profile at teardown (transcripts/controller).
 collect_transcripts() {
   local pod
-  for tree in $tree1 $tree2 $tree3; do
+  for tree in $tree1 $tree2 $tree3 $tree4; do
     pod=$(tree_pod "$tree") || continue
     op exec "$pod" -c worker -- tar -C /home/legion/.omp/profiles/legion/agent/sessions -cf - . 2>/dev/null |
       tar -C "$evidence/transcripts" -xf - 2>/dev/null || true
@@ -999,6 +1024,10 @@ if [ -n "$until" ]; then
   grep -qxF -e "begin $until" -e "begin \"$until\"" "$root/scripts/e2e/stage4b-sandbox-tree.sh" ||
     fail "STAGE4B_UNTIL=$until names no checkpoint of this driver"
   note "STAGE4B_UNTIL=$until: a development run, never the proof"
+fi
+if [ -n "$skip_controller" ]; then
+  [ -n "$until" ] || fail "STAGE4B_SKIP_CONTROLLER is for a development run: set STAGE4B_UNTIL too"
+  note "STAGE4B_SKIP_CONTROLLER=$skip_controller: controller's checks are skipped; it only takes tree 3 out"
 fi
 read_bearers
 pass
@@ -1429,6 +1458,10 @@ begin controller
 # `legion controller start` on the devbox registers with the Sandbox daemon; tree 3 supplies the
 # held phase whose notice reaches it; `legion status … backlog` from the operator shell takes
 # tree 3 out, and Dispatch shows it.
+if [ -n "$skip_controller" ]; then
+take_out "$tree3"
+skipped "STAGE4B_SKIP_CONTROLLER: a development run; tree 3 was only taken out"
+else
 (cd "$root" && bun install --frozen-lockfile >/dev/null)
 bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --profile "$profile" --dest "$work/plugin" >/dev/null
 bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache" >/dev/null ||
@@ -1507,6 +1540,71 @@ note "legion status $tree3 backlog from the operator shell, with the operator be
 until_true 600 "$tree3's pods to be gone" sh -c \
   "out=\$(timeout 120 kubectl --context '$operator' -n '$namespace' get pods -l 'legion.dev/project=$run_label,legion.dev/tree=$tree3' -o name) && [ -z \"\$out\" ]"
 pass
+fi # the controller checks
+
+begin deaths-with-work
+# A worker whose process dies after its agent is ready, while it has its task outstanding, gets the
+# task back, and one that keeps dying before it completes a turn is held (supervise/budgets.go,
+# Deaths). Tree 4 is admitted once tree 3 has left: its planner is killed once mid-turn and finishes
+# the phase on the task sent again, and its implementer is killed after each ready, its task
+# outstanding, until the daemon fails the claim.
+tree4=$(new_issue "Stage 4b proof tree 4: deaths with work outstanding ($work)")
+set_status "$tree4" todo
+drive_spec "$tree4"
+wait_for_worker "$tree4" planner
+# claim_json ISSUE ROLE is the claim as `legion claims` shows it, its budgets and pending task included.
+claim_json() { claims_cli list --json | jq -ce --arg t "$(claim_token "$1" "$2")" '.claims[] | select(.token == $t)'; }
+# in_turn ISSUE ROLE: the claim's agent is running the turn of its task.
+in_turn() { claim_json "$1" "$2" | jq -e '.state == "working" and .pending != null' >/dev/null; }
+# (a) One kill mid-turn: the relaunch is sent its task again, told the turn was interrupted.
+until_true 600 "$tree4's planner to be in the turn of its task" in_turn "$tree4" planner
+end_claim_pod "$tree4" planner kill
+planner_killed=$ended_pod_uid
+note "killed $tree4's planner mid-turn (uid $planner_killed)"
+interrupted_needle="Your previous turn on this task was interrupted when your process died."
+planner_resent() { claim_session_text "$tree4" planner | grep -qF "$interrupted_needle"; }
+until_true 600 "$tree4's planner to be sent its task again, told its turn was interrupted" planner_resent
+send_agent "$tree4" planner "Stage 4b proof planning operation: write the required .legion/plan.json handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
+wait_for_phase "$tree4" implementing 900
+note "$tree4's planner was sent its task again after the kill, told the turn was interrupted, and finished planning"
+# (b) Kills after each ready, the task outstanding, until the claim fails.
+wait_for_worker "$tree4" implementer
+implementer4=$(claim_token "$tree4" implementer)
+# ready_with_work: the implementer's claim names a pod no kill took, its agent is ready or in a
+# turn, and its task is outstanding.
+ready_with_work() {
+  local claim inc
+  claim=$(claim_json "$tree4" implementer) || return 1
+  inc=$(jq -r '.locator.incarnation // empty' <<<"$claim")
+  [ -n "$inc" ] && ! grep -qF " $inc " <<<"$work_killed" &&
+    jq -e '(.state | IN("ready", "working", "idle")) and .pending != null' <<<"$claim" >/dev/null
+}
+work_killed=" "
+work_kills=0
+until issue_phase "$tree4" held >/dev/null 2>&1; do
+  [ "$work_kills" -lt 5 ] || fail "$tree4 was not held after $work_kills implementer deaths with its task outstanding"
+  until_true 600 "$tree4's implementer ready with its task outstanding" ready_with_work
+  end_claim_pod "$tree4" implementer kill
+  work_killed="$work_killed$ended_pod_uid "
+  work_kills=$((work_kills + 1))
+  note "killed $tree4's implementer with its task outstanding, $work_kills (uid $ended_pod_uid)"
+  until_true 600 "$tree4 to be held or its implementer relaunched" sh -c \
+    "'$work/legion' state --json --config '$work/legion.yaml' | jq -e --arg i '$tree4' --arg u '$ended_pod_uid' '.issues[\$i].phase == \"held\" or ((.issues[\$i].workers.implementer.claim.locator.incarnation // \"\") as \$n | \$n != \"\" and \$n != \$u)' >/dev/null"
+done
+[ "$work_kills" = 3 ] || fail "$tree4 was held after $work_kills implementer deaths, want launch_failure_limit (3)"
+claim=$(claim_json "$tree4" implementer) || fail "legion claims shows no claim $implementer4"
+jq -e '.state == "failed" and .budgets.deaths == 3' <<<"$claim" >/dev/null ||
+  fail "$implementer4 reads $(jq -c '{state, budgets}' <<<"$claim"), want failed with budgets.deaths 3"
+why=$(log_lines "supervise: claim failed" | jq -r --arg c "$implementer4" 'select(.claim == $c) | .why' | tail -1)
+[ "$why" = "deaths with work outstanding ran out" ] ||
+  fail "$implementer4 failed with '${why:-no logged failure}', not 'deaths with work outstanding ran out'"
+failed_at=$(log_lines "supervise: claim failed" | jq -r --arg c "$implementer4" 'select(.claim == $c) | .time' | tail -1)
+sleep 30
+relaunched=$(log_lines "supervise: launched" | jq -s --arg c "$implementer4" --arg at "$failed_at" '[.[] | select(.claim == $c and .time > $at)] | length')
+[ "$relaunched" = 0 ] || fail "the daemon launched $implementer4 $relaunched times after failing it"
+note "$tree4 is held after $work_kills implementer deaths with its task outstanding: $implementer4 failed because $why, budgets $(jq -c .budgets <<<"$claim"), and nothing relaunched it"
+take_out "$tree4"
+pass
 
 begin "done"
 wait_for_worker "$tree1" merger
@@ -1567,7 +1665,6 @@ begin operator-close
 # Sandboxes and pods are untouched. A tree no workflow issue backs, which the operator spawns here,
 # closes with its worker live: the root and the worker are retired, and the tree's Sandboxes, pods
 # and volume are gone.
-claims_cli() { "$work/legion" claims "$@" --config "$work/legion.yaml" --operator-token-file "$work/operator-token"; }
 tree_objects() {
   op get sandboxes,pods,pvc -l "legion.dev/project=$run_label,legion.dev/tree=$1" -o json |
     jq -c '[.items[] | {kind, name: .metadata.name, uid: .metadata.uid}] | sort_by(.kind, .name)'
