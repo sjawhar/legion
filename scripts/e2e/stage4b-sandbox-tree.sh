@@ -1083,13 +1083,22 @@ spec:
       command: [bash, -c]
       args:
         - |
-          # The image has no curl: bun answers the HTTP services, bash's /dev/tcp the NATS port.
+          # The image has no curl: bun answers the HTTP services, bash's /dev/tcp the NATS port. A
+          # fresh node's first outbound connection can fail while the node settles, so each service
+          # gets three tries, 5 s apart, and one that never answers is printed with every try's error.
           for url in $dispatch_base/healthz $envoy_url/healthz $gateway_url/health; do
             printf '%s ' "\$url"
-            URL="\$url" bun -e 'const r = await fetch(process.env.URL, { signal: AbortSignal.timeout(10000) }).catch(() => null); console.log(r ? r.status : "unreachable")'
+            URL="\$url" bun -e 'const errors = []; for (let attempt = 1; attempt <= 3; attempt++) { const r = await fetch(process.env.URL, { signal: AbortSignal.timeout(10000) }).catch((e) => e); if (r instanceof Response) { console.log(r.status); process.exit(0); } errors.push("attempt " + attempt + ": " + String(r && r.name) + ": " + String(r && r.message).replace(/\s+/g, " ")); if (attempt < 3) await Bun.sleep(5000); } console.log("unreachable (" + errors.join("; ") + ")");'
           done
           printf '%s ' $nats_url
-          timeout 5 bash -c 'exec 3<>/dev/tcp/nats.internal.trajectorylabs.com/4222 && head -c 4 <&3' || printf unreachable
+          errors=
+          for attempt in 1 2 3; do
+            answer=\$(timeout 5 bash -c 'exec 3<>/dev/tcp/nats.internal.trajectorylabs.com/4222 && head -c 4 <&3' 2>&1) && break
+            errors="\$errors attempt \$attempt: \$(tr '\n' ' ' <<<"\${answer:-no answer}");"
+            answer=
+            [ "\$attempt" = 3 ] || sleep 5
+          done
+          if [ -n "\$answer" ]; then printf '%s' "\$answer"; else printf 'unreachable (%s)' "\${errors# }"; fi
           echo
       securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
 EOF
@@ -1098,7 +1107,7 @@ until_true 600 "the reachability pod to finish" sh -c "timeout 120 kubectl --con
 op logs "legion-e2e4b-reach-$$" >"$evidence/reach.txt" 2>&1
 op delete pod "legion-e2e4b-reach-$$" --wait=false >/dev/null 2>&1
 while read -r url answer; do
-  case "$answer" in 000 | unreachable | "") fail "a pod on the Legion pool cannot reach $url ($evidence/reach.txt)" ;; esac
+  case "$answer" in 000 | unreachable* | "") fail "a pod on the Legion pool cannot reach $url: $answer ($evidence/reach.txt)" ;; esac
   note "[pod] $url → $answer"
 done <"$evidence/reach.txt"
 pass
