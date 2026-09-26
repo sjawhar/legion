@@ -65,7 +65,7 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 		return 2
 	}
 	// The role prompts a pod is handed: the daemon's, when it passes their references, else the
-	// image's own (below).
+	// image's own.
 	var references promptrefs.Names
 	if *roleReferences != "" {
 		decoded, err := promptrefs.Decode(*roleReferences)
@@ -74,6 +74,15 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 			return 1
 		}
 		references = decoded
+	} else {
+		rolesDir, err := prompts.ResolveRolePromptsDir(os.LookupEnv)
+		if err == nil {
+			references, err = promptrefs.Roles(rolesDir)
+		}
+		if err != nil {
+			fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
+			return 1
+		}
 	}
 	invocation := *omp
 	if invocation == "" {
@@ -92,16 +101,6 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 	if err != nil {
 		fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
 		return 1
-	}
-	if references.Zero() {
-		rolesDir, err := prompts.ResolveRolePromptsDir(os.LookupEnv)
-		if err == nil {
-			references, err = promptrefs.Roles(rolesDir)
-		}
-		if err != nil {
-			fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
-			return 1
-		}
 	}
 	environ := os.Environ()
 	if *podSafety {
