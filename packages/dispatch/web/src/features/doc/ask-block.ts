@@ -1,7 +1,7 @@
+import type { HostBlockRenderer } from "@legion/proof-editor";
 import type { Node as ProseMirrorNode } from "@milkdown/kit/prose/model";
 import { type EditorState, Plugin, PluginKey } from "@milkdown/kit/prose/state";
 import type { EditorView, NodeView, ViewMutationRecord } from "@milkdown/kit/prose/view";
-import type { HostBlockRenderer } from "@sjawhar/proof-editor";
 
 import type { AskOption, AskUrgency } from "../../api/types";
 import {

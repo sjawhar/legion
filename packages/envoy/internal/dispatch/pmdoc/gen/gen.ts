@@ -5,8 +5,8 @@ import * as Y from "yjs";
 import type { Node as ProseMirrorNode } from "prosemirror-model";
 import { prosemirrorToYXmlFragment } from "y-prosemirror";
 import { Transform } from "prosemirror-transform";
-import { setBlockIdGenerator } from "@sjawhar/proof-editor";
-import { createHeadlessProof, type HeadlessProofEditor } from "@sjawhar/proof-editor/headless";
+import { setBlockIdGenerator } from "@legion/proof-editor";
+import { createHeadlessProof, type HeadlessProofEditor } from "@legion/proof-editor/headless";
 
 const here = import.meta.dir;
 const corpus = join(here, "..", "testdata", "corpus");

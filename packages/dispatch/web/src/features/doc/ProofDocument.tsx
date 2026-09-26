@@ -126,7 +126,7 @@ function setSearchHighlights(root: HTMLElement, query: string): void {
   CSS.highlights.set("dispatch-search", new Highlight(...ranges));
 }
 
-/** A rendered link mark's `dispatch://` target, if any. `@sjawhar/proof-editor`'s Markdown
+/** A rendered link mark's `dispatch://` target, if any. `@legion/proof-editor`'s Markdown
  * serializer sanitizes a `dispatch://` href to `""` (Milkdown's link sanitizer only allows
  * http/https/mailto/tel/ftp — a document strangers can edit should never render an
  * attacker-chosen non-http scheme as a clickable href) and tags the anchor with

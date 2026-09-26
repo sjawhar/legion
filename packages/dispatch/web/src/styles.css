@@ -199,7 +199,7 @@ a {
 }
 
 /* The block's header and footer slots hold the app's own ask card (`features/doc/AskBlockCard.tsx`
-   hosts `AskCard` there), which sets its type with utilities. `@sjawhar/proof-editor`'s stylesheet
+   hosts `AskCard` there), which sets its type with utilities. `@legion/proof-editor`'s stylesheet
    is unlayered, so its element typography (`.milkdown h1-h3 / p / ul, ol / li / code / pre /
    blockquote / a / hr`, written for the document's content) reaches the slots and outranks every
    layered utility there — Tailwind's `space-y-*` is a `margin-block-end` on each child, which

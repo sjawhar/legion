@@ -230,7 +230,7 @@ test("a hand-authored Markdown link to a dispatch:// target resolves through dat
   };
   const getAsk = spyOn(api, "getAsk").mockResolvedValue(askRead);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  // @sjawhar/proof-editor's Markdown link serializer sanitizes a dispatch:// href to "" (Milkdown
+  // @legion/proof-editor's Markdown link serializer sanitizes a dispatch:// href to "" (Milkdown
   // only allows http/https/mailto/tel/ftp) and carries the real target in data-dispatch-href
   // instead; this goes through the real parseMarkdown + DOMSerializer pipeline, not an injected
   // anchor, to prove that attribute is what MarkdownBody actually resolves against.

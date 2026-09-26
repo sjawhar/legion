@@ -16,8 +16,10 @@
     "packages/daemon",
     "packages/envoy-plugin",
     "packages/claude-envoy",
+    "packages/proof-editor",
     "packages/dispatch",
-    "packages/workspace"
+    "packages/workspace",
+    "packages/envoy/internal/dispatch/pmdoc/gen"
   ],
   "dependencies": {
     "@toon-format/toon": "^4.1.1",
@@ -28,7 +30,7 @@
     "@biomejs/biome": "^2.3.14"
   },
   "patchedDependencies": {
-    "@sjawhar/proof-editor@0.3.12": "patches/@sjawhar%2Fproof-editor@0.3.12.patch",
-    "@milkdown/preset-gfm@7.22.1": "patches/@milkdown%2Fpreset-gfm@7.22.1.patch"
+    "@milkdown/preset-gfm@7.22.1": "patches/@milkdown%2Fpreset-gfm@7.22.1.patch",
+    "@sjawhar/proof-editor@github:sjawhar/proof-sdk#24a5fc9": "patches/proof-sdk-upstream@24a5fc94.patch"
   }
 }

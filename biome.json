@@ -46,5 +46,13 @@
     "parser": {
       "tailwindDirectives": true
     }
-  }
+  },
+  "overrides": [
+    {
+      "includes": ["packages/proof-editor/src/**", "!packages/proof-editor/src/tests/harness.ts"],
+      "assist": { "enabled": false },
+      "formatter": { "enabled": false },
+      "linter": { "enabled": false }
+    }
+  ]
 }

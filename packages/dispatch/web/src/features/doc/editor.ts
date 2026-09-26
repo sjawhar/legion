@@ -1,14 +1,10 @@
-import type {
-  CreateProofEditorOptions,
-  ProofEditorHandle,
-  StoredMark,
-} from "@sjawhar/proof-editor";
+import type { CreateProofEditorOptions, ProofEditorHandle, StoredMark } from "@legion/proof-editor";
 import type { Doc } from "yjs";
 
 import type { BlockSchema } from "../../api/types";
 import { importWhenOnline } from "../shell/DeploymentResilience";
 
-export type { MarkAction, StoredMark } from "@sjawhar/proof-editor";
+export type { MarkAction, StoredMark } from "@legion/proof-editor";
 
 export type EditorHandle = ProofEditorHandle;
 export type EditorOptions = CreateProofEditorOptions & { blockSchema: BlockSchema };
@@ -24,7 +20,7 @@ export const editorAttributes = {
 // document mounts; `importWhenOnline` holds the retry policy for a chunk that fails offline.
 export const createEditor: CreateEditor = async (root, options) => {
   const [{ createProofEditor }] = await importWhenOnline(() =>
-    Promise.all([import("@sjawhar/proof-editor"), import("@sjawhar/proof-editor/style.css")])
+    Promise.all([import("@legion/proof-editor"), import("@legion/proof-editor/style.css")])
   );
   const handle = await createProofEditor(root, options);
   for (const [name, value] of Object.entries(editorAttributes)) {

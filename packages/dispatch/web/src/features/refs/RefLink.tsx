@@ -167,7 +167,7 @@ export function referenceRouteFromHref(
  * portal a `RefLink` in to render the resolved title. An external link, or an href that fails to
  * parse as a reference, is left untouched.
  *
- * `@sjawhar/proof-editor`'s Markdown link serializer sanitizes a `dispatch://` href to `""`
+ * `@legion/proof-editor`'s Markdown link serializer sanitizes a `dispatch://` href to `""`
  * (Milkdown's link sanitizer only allows http/https/mailto/tel/ftp — a document strangers can
  * edit should never render an attacker-chosen non-http scheme as a clickable href), but tags the
  * anchor with `data-dispatch-href` carrying the original target. `linkifyDispatchRefs`'s own

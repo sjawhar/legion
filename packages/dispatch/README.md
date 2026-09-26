@@ -15,7 +15,7 @@ the issue, Inbox, documents, and sidebar current.
 
 The desktop shell has a sidebar, issue content, and review margin. Issue content has Spec,
 Conversation, Children, and Artifacts tabs; the Spec document renders and edits through
-`@sjawhar/proof-editor`, with Yjs presence and margin-linked marks. The margin holds Comments and
+`@legion/proof-editor`, with Yjs presence and margin-linked marks. The margin holds Comments and
 Pinned. Each issue-owned anchored comment thread is one card with flat replies, inline reply and
 author-edit controls, mark-aligned cross-hover, and resolved history behind `Resolved (N)`.
 Project-document thread replies are handled by the margin-by-owner surface. Below the `xl`

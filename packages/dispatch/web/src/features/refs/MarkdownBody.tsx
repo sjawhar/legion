@@ -1,4 +1,4 @@
-import type { HeadlessProofEditor } from "@sjawhar/proof-editor/headless";
+import type { HeadlessProofEditor } from "@legion/proof-editor/headless";
 import { DOMSerializer, type Node as ProseMirrorNode } from "prosemirror-model";
 import { type ReactNode, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -21,7 +21,7 @@ function loadHeadlessProof(blockSchema: BlockSchema): Promise<HeadlessProofEdito
   if (cached !== undefined) {
     return cached;
   }
-  const created = import("@sjawhar/proof-editor/headless")
+  const created = import("@legion/proof-editor/headless")
     .then(({ createHeadlessProof }) => createHeadlessProof({ blockSchema }))
     .then((proof) => {
       readyHeadlessProof = proof;
