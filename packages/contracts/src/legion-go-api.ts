@@ -240,6 +240,7 @@ const legionGoDeliveryView = z.strictObject({
   queuedAt: timestamp,
   deliveredAt: timestamp.optional(),
   confirmedAt: timestamp.optional(),
+  interrupted: z.literal(true).optional(),
 });
 
 /** `api.OperatorClaim`, the body of the operator routes that act on one claim (`POST
@@ -257,6 +258,7 @@ export const LegionGoOperatorClaimResponse = z.strictObject({
   locator: legionGoLocator.optional(),
   budgets: z.strictObject({
     launchFailures: z.number().int().nonnegative(),
+    deaths: z.number().int().nonnegative(),
     promptFailures: z.number().int().nonnegative(),
     promptRetires: z.number().int().nonnegative(),
   }),
