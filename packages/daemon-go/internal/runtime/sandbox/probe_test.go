@@ -25,6 +25,7 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
+	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 )
 
 // The probe Sandbox testImage gets in testProject: the project, then the digest's first 12 hex.
@@ -157,9 +158,17 @@ func (g *probeRig) containerAndCollector() {
 	}
 }
 
-// testRoleReferences are role prompts' references as promptrefs.Roles encodes them: the daemon
-// always hands the probe some.
-const testRoleReferences = `{"LEGION_PROMPT_AGENTS":{"oracle":["roles/core/planner.md"]},"LEGION_PROMPT_SKILLS":{}}`
+// testRoleReferencesJSON is role prompts' references as Names.Encode writes them, and
+// testRoleReferences the Names it decodes to: the daemon always hands the probe some.
+const testRoleReferencesJSON = `{"LEGION_PROMPT_AGENTS":{"oracle":["roles/core/planner.md"]},"LEGION_PROMPT_SKILLS":{}}`
+
+var testRoleReferences = func() promptrefs.Names {
+	names, err := promptrefs.Decode(testRoleReferencesJSON)
+	if err != nil {
+		panic(err)
+	}
+	return names
+}()
 
 // probeOptions allow two attempts, so a definitive verdict shows as one attempt and a transient one
 // as two. Each attempt's budget is long enough that a pod the stand-ins answer at once is judged
@@ -194,6 +203,21 @@ func wantContains(t *testing.T, err error, wants ...string) {
 // prompt-named agents' models resolved.
 func okLine(contract int) string {
 	return bootprobe.OKLine("/opt/omp/bin/omp", contract, bootprobe.AgentModelsResolved)
+}
+
+// The zero promptrefs.Names holds no kind, and Encode writes it as `null` for each, which the
+// image's Decode refuses: a probe handed one would fail its pod and blame the image. ProbeImage
+// refuses it by name before it creates anything.
+func TestProbeImageRefusesZeroRoleReferencesBeforeAnyPod(t *testing.T) {
+	g := newProbeRig(t, nil)
+	g.succeeds(okLine(3) + "\n")
+	p := probeOptions(t)
+	p.RoleReferences = promptrefs.Names{}
+
+	wantContains(t, g.probe(p), "ImageProbe.RoleReferences is required")
+	if n := g.creates.Load(); n != 0 {
+		t.Errorf("created the probe Sandbox %d times, want none: the zero references are refused first", n)
+	}
 }
 
 // The probe is a Sandbox named for the project and the image, running the image's Go `legion
@@ -549,8 +573,8 @@ func TestTheProbeRunsAsAWorkerRuns(t *testing.T) {
 		keys map[string]string
 		want []string
 	}{
-		{"no provider keys", nil, []string{"--role-references", testRoleReferences}},
-		{"provider keys", map[string]string{"ANTHROPIC_API_KEY": "anthropic"}, []string{"--provider-env-dir", ProvidersDir, "--role-references", testRoleReferences}},
+		{"no provider keys", nil, []string{"--role-references", testRoleReferencesJSON}},
+		{"provider keys", map[string]string{"ANTHROPIC_API_KEY": "anthropic"}, []string{"--provider-env-dir", ProvidersDir, "--role-references", testRoleReferencesJSON}},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			opts := goldenOptions()

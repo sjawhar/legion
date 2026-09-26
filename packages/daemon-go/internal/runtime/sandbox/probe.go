@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
+	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 )
 
 // The image probe (the in-cluster boot probe, packages/daemon/src/daemon/worker-image-probe.ts,
@@ -66,10 +67,12 @@ type ImageProbe struct {
 	Budget time.Duration
 	// Retry waits out the attempts that say nothing about the image: bootprobe.Daemon at boot.
 	Retry bootprobe.Retry
-	// RoleReferences are the task agents and skills the daemon's own role prompts name
-	// (promptrefs.Roles), required: the prompts every worker pod is handed, so the probe resolves
-	// those and their agents' models, not the image's copy (`legion probe-image --role-references`).
-	RoleReferences string
+	// RoleReferences are the task agents and skills the daemon's own role prompts name, required:
+	// the prompts every worker pod is handed, so the probe resolves those and their agents' models,
+	// not the image's copy. probeManifest encodes them for `legion probe-image --role-references`.
+	// The zero Names holds no kind at all, and its encoding is one the image's Decode refuses, so
+	// ProbeImage refuses it before any pod runs rather than letting the pod fail on the image.
+	RoleReferences promptrefs.Names
 	// Resources are the probe container's requests and limits (the TypeScript probe used the
 	// `small` profile): it runs Oh My Pi three times (pi.agents, the plugin's load, the
 	// session-storage setting) and exits. None when zero.
@@ -87,8 +90,11 @@ type ImageProbe struct {
 // transient: anything else, a pod the kubelet itself failed included, retried under p.Retry
 // (worker-image-probe.ts:318-338, 470-508).
 func (r *Runtime) ProbeImage(ctx context.Context, p ImageProbe) error {
-	if p.Contract < 1 || p.Budget <= 0 || p.Retry.Initial <= 0 || p.Retry.Max < p.Retry.Initial || p.RoleReferences == "" {
-		return errors.New("image probe: a contract, a positive budget, a positive retry wait, and the role prompts' references are required")
+	if p.Contract < 1 || p.Budget <= 0 || p.Retry.Initial <= 0 || p.Retry.Max < p.Retry.Initial {
+		return errors.New("image probe: a contract, a positive budget, and a positive retry wait are required")
+	}
+	if p.RoleReferences.Zero() {
+		return errors.New("image probe: ImageProbe.RoleReferences is required: the references of the role prompts a pod is handed")
 	}
 	_, hex, _ := strings.Cut(r.image, "@sha256:")
 	if !digestHex.MatchString(hex) {
@@ -504,7 +510,7 @@ func (r *Runtime) probeManifest(name string, p ImageProbe, shutdown time.Time) p
 	if len(providersMounts) > 0 {
 		command = append(command, "--provider-env-dir", ProvidersDir)
 	}
-	command = append(command, "--role-references", p.RoleReferences)
+	command = append(command, "--role-references", p.RoleReferences.Encode())
 	container := corev1.Container{
 		Name:            probeContainer,
 		Image:           r.image,

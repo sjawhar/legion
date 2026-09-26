@@ -372,7 +372,7 @@ func (r *liveRig) imageProbe() (ImageProbe, error) {
 		return ImageProbe{}, err
 	}
 	p := ImageProbe{
-		Contract: api.GoDaemonAPIVersion, Budget: 10 * time.Minute, RoleReferences: references.Encode(),
+		Contract: api.GoDaemonAPIVersion, Budget: 10 * time.Minute, RoleReferences: references,
 		Retry: bootprobe.Retry{Initial: 15 * time.Second, Max: time.Minute, Attempts: 3},
 	}
 	command := r.rt.probeManifest("probe", p, time.Now()).Spec.PodTemplate.Spec.Containers[0].Command
