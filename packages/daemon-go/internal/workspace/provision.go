@@ -94,9 +94,9 @@ func Location(stateDir string, repository ghrepo.Repository, issue string) (Work
 		return Workspace{}, fmt.Errorf("workspace issue must be a single path component")
 	}
 	return Workspace{
-		Dir:      filepath.Join(stateDir, "workspaces", repository.Owner, repository.Name, strings.ToLower(issue)),
+		Dir:      filepath.Join(stateDir, "workspaces", repository.Owner(), repository.Name(), strings.ToLower(issue)),
 		Bookmark: Bookmark(issue),
-		Clone:    filepath.Join(stateDir, "repos", "github.com", repository.Owner, repository.Name),
+		Clone:    filepath.Join(stateDir, "repos", "github.com", repository.Owner(), repository.Name()),
 		Repo:     repository,
 	}, nil
 }

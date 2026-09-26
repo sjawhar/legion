@@ -12,14 +12,33 @@ import (
 	"unicode"
 )
 
-// Repository is a GitHub repository as Parse read it.
+// Repository is a GitHub repository as Parse read it. Its names are unexported, so outside this
+// package a Repository is one Parse returned or the zero value, no repository: no caller can build
+// one Parse would refuse, whose names, joined under a state directory, would name another
+// directory than the repository's.
 type Repository struct {
-	Owner, Name string
+	owner, name string
 }
+
+// Owner is the repository's owner, the name before the slash.
+func (r Repository) Owner() string { return r.owner }
+
+// Name is the repository's own name, the one after the slash.
+func (r Repository) Name() string { return r.name }
 
 // String is the repository as GitHub names it, `<owner>/<name>`.
 func (r Repository) String() string {
-	return r.Owner + "/" + r.Name
+	return r.owner + "/" + r.name
+}
+
+// MustParse is Parse of a repository the caller wrote as a literal, a test's fixture: it panics on
+// one Parse refuses.
+func MustParse(repository string) Repository {
+	parsed, err := Parse("repository", repository)
+	if err != nil {
+		panic(err)
+	}
+	return parsed
 }
 
 // Parse is repository's owner and name, or a refusal that begins with what, the input's name: it
@@ -39,5 +58,5 @@ func Parse(what, repository string) (Repository, error) {
 			return Repository{}, fmt.Errorf(`%s %q has a %q segment, which names no GitHub owner or repository`, what, repository, segment)
 		}
 	}
-	return Repository{Owner: owner, Name: name}, nil
+	return Repository{owner: owner, name: name}, nil
 }

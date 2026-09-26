@@ -6,7 +6,7 @@ import "testing"
 // and no `.` or `..` segment, and each refusal names the input and the value.
 func TestParse(t *testing.T) {
 	repository, err := Parse("--repo", "acme/widgets")
-	if err != nil || repository != (Repository{Owner: "acme", Name: "widgets"}) || repository.String() != "acme/widgets" {
+	if err != nil || repository.Owner() != "acme" || repository.Name() != "widgets" || repository.String() != "acme/widgets" {
 		t.Fatalf(`Parse("acme/widgets") = %#v (%s), %v, want acme, widgets`, repository, repository, err)
 	}
 	for _, tc := range []struct{ repository, want string }{

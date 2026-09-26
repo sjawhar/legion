@@ -161,12 +161,16 @@ func (s gitHubSource) open(ghrepo.Repository, string) (remote, error) {
 }
 
 // feedRepository is where Fetch clones repository under a feed directory, and where a feed
-// Source clones and fetches it from.
+// Source clones and fetches it from. The zero repository is refused, as Location refuses it: it
+// names the feed's own `.git`.
 func feedRepository(feed string, repository ghrepo.Repository) (string, error) {
+	if repository == (ghrepo.Repository{}) {
+		return "", errors.New("workspace repository is required")
+	}
 	if feed == "" {
 		return "", errors.New("workspace feed directory is required")
 	}
-	return filepath.Join(feed, repository.Owner, repository.Name+".git"), nil
+	return filepath.Join(feed, repository.Owner(), repository.Name()+".git"), nil
 }
 
 // feedRemote reaches https://github.com/<repo>, the remote the shared clone's origin names, at the

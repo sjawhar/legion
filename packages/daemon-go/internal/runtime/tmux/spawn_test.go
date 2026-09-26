@@ -301,7 +301,7 @@ func TestAWorkspaceThatCannotBeReadIsNotReportedAsNeverProvisioned(t *testing.T)
 	stateDir := t.TempDir()
 	r := &Runtime{stateDir: stateDir}
 	spec := testSpec()
-	spec.Repository = ghrepo.Repository{Owner: "sjawhar", Name: "legion"}
+	spec.Repository = ghrepo.MustParse("sjawhar/legion")
 	repositories := filepath.Join(stateDir, "workspaces", "sjawhar", "legion")
 	if err := os.MkdirAll(filepath.Join(repositories, "legion-43"), 0o700); err != nil {
 		t.Fatal(err)
@@ -337,7 +337,7 @@ func TestAPaneWorksInTheWorkspaceItsRuntimeLocates(t *testing.T) {
 	r := &Runtime{stateDir: stateDir}
 	spec := testSpec()
 
-	spec.Repository = ghrepo.Repository{Owner: "sjawhar", Name: "legion"}
+	spec.Repository = ghrepo.MustParse("sjawhar/legion")
 	provisioned := filepath.Join(stateDir, "workspaces", "sjawhar", "legion", "legion-43")
 	if _, err := r.workspaceDir(spec); err == nil || !strings.Contains(err.Error(), "never provisioned") {
 		t.Fatalf("workspaceDir before the outbox provisioned it = %v, want a refusal", err)

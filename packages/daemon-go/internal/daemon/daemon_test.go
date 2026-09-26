@@ -877,7 +877,7 @@ func workflowConfig(t *testing.T, natsURL string) config.Config {
 	if err := os.WriteFile(cfg.DispatchTokenFile, []byte("dispatch-test-token\n"), 0o600); err != nil {
 		t.Fatalf("write Dispatch token: %v", err)
 	}
-	cfg.Projects = map[string]config.Project{cfg.Project: {Repo: ghrepo.Repository{Owner: "acme", Name: "widgets"}}}
+	cfg.Projects = map[string]config.Project{cfg.Project: {Repo: ghrepo.MustParse("acme/widgets")}}
 	cfg.NatsURLs = []string{natsURL}
 	return cfg
 }

@@ -199,7 +199,7 @@ func normalizedSpec(spec ConsumerSpec) (ConsumerSpec, error) {
 func githubFilters(repositories []ghrepo.Repository) []string {
 	filters := make([]string, 0, len(repositories))
 	for _, repo := range repositories {
-		filters = append(filters, "notifications.github."+repo.Owner+"."+repo.Name+".>")
+		filters = append(filters, "notifications.github."+repo.Owner()+"."+repo.Name()+".>")
 	}
 	return filters
 }

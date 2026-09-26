@@ -372,7 +372,7 @@ func TestAnExistingConsumerKeepsItsPosition(t *testing.T) {
 		}
 	}
 
-	spec.Repositories = []ghrepo.Repository{{Owner: "sjawhar", Name: "legion"}, {Owner: "acme", Name: "widgets"}}
+	spec.Repositories = []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion"), ghrepo.MustParse("acme/widgets")}
 	if _, err := OpenConsumers(context.Background(), js, spec); err != nil {
 		t.Fatalf("OpenConsumers over existing consumers: %v", err)
 	}
@@ -439,7 +439,7 @@ func TestConsumeCommitsRefusalAndAcknowledges(t *testing.T) {
 func consumerSpec(logs *lockedBuffer) ConsumerSpec {
 	return ConsumerSpec{
 		Project:      "CAPTURE",
-		Repositories: []ghrepo.Repository{{Owner: "sjawhar", Name: "legion"}},
+		Repositories: []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion")},
 		AckWait:      200 * time.Millisecond,
 		NakDelay:     25 * time.Millisecond,
 		Logger:       slog.New(slog.NewTextHandler(logs, nil)),

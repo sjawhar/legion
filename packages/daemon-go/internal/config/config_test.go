@@ -141,7 +141,7 @@ func defaultsFor(port int) Config {
 		NatsURLs:                                []string{"nats://127.0.0.1:4222"},
 		DispatchURL:                             "http://127.0.0.1:8080",
 		DispatchTokenFile:                       "/var/run/legion/DISPATCH_TOKEN",
-		Projects:                                map[string]Project{"DEMO": {Repo: ghrepo.Repository{Owner: "acme", Name: "widgets"}}},
+		Projects:                                map[string]Project{"DEMO": {Repo: ghrepo.MustParse("acme/widgets")}},
 		Gates:                                   Gates{Design: DesignGateRootIssues},
 		GitHubApps: GitHubApps{
 			Implement: GitHubApp{AppID: "1", PrivateKey: "implement-test-key", Installations: map[string]string{}},
@@ -277,8 +277,8 @@ max_fix_attempts: 4
 		t.Errorf("DispatchTokenFile = %q, want %q", cfg.DispatchTokenFile, want)
 	}
 	if !reflect.DeepEqual(cfg.Projects, map[string]Project{
-		"DEMO":  {Repo: ghrepo.Repository{Owner: "acme", Name: "widgets"}},
-		"OTHER": {Repo: ghrepo.Repository{Owner: "acme", Name: "other"}, MergeQueueRole: "merge-queue"},
+		"DEMO":  {Repo: ghrepo.MustParse("acme/widgets")},
+		"OTHER": {Repo: ghrepo.MustParse("acme/other"), MergeQueueRole: "merge-queue"},
 	}) {
 		t.Errorf("Projects = %#v", cfg.Projects)
 	}

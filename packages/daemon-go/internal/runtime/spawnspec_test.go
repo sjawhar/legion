@@ -19,7 +19,7 @@ func spawnSpec() SpawnSpec {
 		Env:        map[string]string{"JJ_USER": "legion-tester", "GH_CONFIG_DIR": "/state/gh"},
 		Secrets:    map[string]string{"ENVOY_TOKEN": "envoy-secret"},
 		Prompt:     PromptParts{RolePromptPaths: []string{"/roles/tester.md"}},
-		Repository: ghrepo.Repository{Owner: "sjawhar", Name: "legion"},
+		Repository: ghrepo.MustParse("sjawhar/legion"),
 	}
 }
 

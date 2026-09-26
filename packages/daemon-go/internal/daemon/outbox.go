@@ -456,7 +456,7 @@ func (r *outbox) provisionWorkspace(ctx context.Context, issue record.Issue) err
 	if r.repo == (ghrepo.Repository{}) {
 		return errors.New("workspace provisioning has no configured repository")
 	}
-	lease, err := r.tokens.Token(ctx, appauth.Implement, r.repo.Owner)
+	lease, err := r.tokens.Token(ctx, appauth.Implement, r.repo.Owner())
 	if err != nil {
 		return fmt.Errorf("mint implement App token to provision %s: %w", issue.Key, err)
 	}

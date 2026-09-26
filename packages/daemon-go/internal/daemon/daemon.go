@@ -976,5 +976,5 @@ func githubOwner(cfg config.Config) string {
 	if !ok {
 		return ""
 	}
-	return project.Repo.Owner
+	return project.Repo.Owner()
 }

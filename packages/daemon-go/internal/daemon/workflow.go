@@ -114,7 +114,7 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	// The loader refuses a workflow whose projects do not configure the daemon's own, and a repo that
 	// is not owner/name.
 	project := cfg.Projects[cfg.Project]
-	owner := project.Repo.Owner
+	owner := project.Repo.Owner()
 	log.Info("legion workflow boot stage", "stage", "config")
 	tokens := suppliedTokens
 	if tokens == nil {

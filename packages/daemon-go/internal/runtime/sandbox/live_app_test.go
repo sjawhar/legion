@@ -39,7 +39,7 @@ func (r *liveRig) resolveApp() error {
 		return fmt.Errorf("%s: %w", r.env.appKeyName, err)
 	}
 	apps := appauth.New(config.GitHubApps{Implement: config.GitHubApp{AppID: r.env.appID, PrivateKey: pem}}, appauth.Options{})
-	owner := r.env.repo.Owner
+	owner := r.env.repo.Owner()
 	lease, err := apps.Token(r.ctx, appauth.Implement, owner)
 	if err != nil {
 		return fmt.Errorf("minting the implement App's installation token for %s: %w", owner, err)

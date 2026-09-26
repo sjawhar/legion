@@ -111,7 +111,7 @@ func unresolvedReviewThreads(ctx context.Context, token string, repository ghrep
 	var after any
 	for {
 		var page reviewThreadsPage
-		if err := graphql(ctx, token, reviewThreadsQuery, map[string]any{"owner": repository.Owner, "name": repository.Name, "number": number, "after": after}, &page); err != nil {
+		if err := graphql(ctx, token, reviewThreadsQuery, map[string]any{"owner": repository.Owner(), "name": repository.Name(), "number": number, "after": after}, &page); err != nil {
 			return nil, err
 		}
 		if page.Data.Repository.PullRequest == nil {

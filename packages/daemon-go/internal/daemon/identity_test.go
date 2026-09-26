@@ -44,8 +44,8 @@ func TestSpawnSpecCarriesTheRoleAppIdentity(t *testing.T) {
 	if spec.Repository != (ghrepo.Repository{}) {
 		t.Errorf("the launch names repository %q with none configured", spec.Repository)
 	}
-	s.repo = ghrepo.Repository{Owner: "acme", Name: "widgets"}
-	if spec, err := s.SpawnSpec(context.Background(), c); err != nil || spec.Repository != (ghrepo.Repository{Owner: "acme", Name: "widgets"}) {
+	s.repo = ghrepo.MustParse("acme/widgets")
+	if spec, err := s.SpawnSpec(context.Background(), c); err != nil || spec.Repository != (ghrepo.MustParse("acme/widgets")) {
 		t.Errorf("SpawnSpec with a configured repository = %q, %v; want acme/widgets, the runtime's to locate the workspace from", spec.Repository, err)
 	}
 	s.repo = ghrepo.Repository{}
