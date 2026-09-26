@@ -577,3 +577,85 @@ func TestARootLeavingTheWorkflowSuspendsEveryWorkerOfItsTree(t *testing.T) {
 		t.Errorf("root implementer = %s after its root moved to backlog, want suspended", got)
 	}
 }
+
+// heldImplementer is a claim held after its agent kept dying in a turn of its task: failed, its
+// session kept, and the task it was given still pending, marked interrupted.
+func heldImplementer(t *testing.T, sup *supervisor, issue record.Issue, kept supervise.Delivery) *supervise.Machine {
+	t.Helper()
+	token, err := claim.NewToken("legion", issue.Key, claim.RoleImplementer)
+	if err != nil {
+		t.Fatalf("claim token: %v", err)
+	}
+	machine, _, err := sup.Create(context.Background(), supervise.Claim{
+		Token: token, Project: "legion", Tree: issue.Tree, Issue: issue.Key, Role: claim.RoleImplementer, State: supervise.StateFailed,
+		Generation: 3, Session: "ses-impl", SessionFile: "/tmp/impl.jsonl", Budgets: supervise.Budgets{Deaths: 3}, Pending: &kept,
+	}, "")
+	if err != nil {
+		t.Fatalf("create the held implementer: %v", err)
+	}
+	return machine
+}
+
+// retryHeldPhase is the start the architect's retry of the held phase writes for the implementer.
+func retryHeldPhase(t *testing.T, issue record.Issue) record.OutboxRow {
+	t.Helper()
+	row := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RoleImplementer,
+		Task: "Continue Workflow. Reason: retry held phase.", Phase: phase.Implementing, Generation: issue.Generation}, time.Now())
+	row.ID = 92
+	return row
+}
+
+// A claim held after its agent kept dying in a turn of its task keeps that task, and the retry's
+// relaunch sends it, behind the sentence saying its turn was interrupted. The architect's retry
+// writes a start of its own for the same phase and run: its task would come behind the kept one as
+// a second prompt for work already under way, so the row relaunches the claim and delivers nothing.
+func TestARetryOfAClaimThatKeptItsPhasesTaskDeliversNothingMore(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Implementing, Generation: 1, Status: "in_progress"}
+	putOutboxIssue(t, pool, records, issue)
+	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
+	kept := supervise.Delivery{ID: "kept-task", Task: "Continue Workflow. Issue: LEGION-208. Phase: implementing.",
+		Phase: phase.Implementing, Generation: issue.Generation, QueuedAt: time.Now(), Interrupted: true}
+	machine := heldImplementer(t, sup, issue, kept)
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets"}
+
+	if err := runner.execute(context.Background(), retryHeldPhase(t, issue)); err != nil {
+		t.Fatalf("start the held claim: %v", err)
+	}
+	got := machine.Claim()
+	if got.State != supervise.StateLaunching || got.Budgets != (supervise.Budgets{}) || len(rt.CallsOf("Resume")) != 1 {
+		t.Fatalf("retried claim = %+v after %d resumes, want its session relaunched once with fresh budgets", got, len(rt.CallsOf("Resume")))
+	}
+	if got.Pending == nil || got.Pending.ID != kept.ID || got.Pending.Task != kept.Task {
+		t.Fatalf("retried claim pending %+v, want the kept task alone", got.Pending)
+	}
+}
+
+// A kept task of another phase or another run is not the retry's work, so the start still hands
+// the claim its own task: the delivery waits behind the kept task (the claim refuses a second
+// pending one), and the row is retried until it goes.
+func TestARetryOfAClaimThatKeptOtherWorkStillDeliversItsTask(t *testing.T) {
+	for name, edit := range map[string]func(*supervise.Delivery){
+		"another phase": func(d *supervise.Delivery) { d.Phase = phase.Planning },
+		"another run":   func(d *supervise.Delivery) { d.Generation = 0 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			records := record.NewStore()
+			issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Implementing, Generation: 1, Status: "in_progress"}
+			putOutboxIssue(t, pool, records, issue)
+			sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+			kept := supervise.Delivery{ID: "kept-task", Task: "an earlier task", Phase: phase.Implementing, Generation: issue.Generation, QueuedAt: time.Now()}
+			edit(&kept)
+			heldImplementer(t, sup, issue, kept)
+			runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets"}
+
+			err := runner.execute(context.Background(), retryHeldPhase(t, issue))
+
+			if !errors.Is(err, supervise.ErrDeliveryPending) {
+				t.Fatalf("start the held claim = %v, want its own task waiting behind the kept one (%v)", err, supervise.ErrDeliveryPending)
+			}
+		})
+	}
+}
