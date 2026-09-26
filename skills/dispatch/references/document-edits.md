@@ -66,7 +66,9 @@ so `find="# Old"` renames the text and keeps whatever level it selected. `with` 
 paragraph is rejected (`INVALID_OP` on `with`) — see the recipe for a multi-paragraph rewrite below; so is any non-empty `with` that
 renders to no text, which a line indented four spaces or a tab does (markdown reads that as a code block), as does whitespace
 alone. An empty `with` deletes the matched text on purpose; where the block holding it cannot be written without that
-paragraph, the replace is `INVALID_OP`, and the refusal names the `delete` that removes it instead. Use zero-based
+paragraph, the replace is `INVALID_OP`, and the refusal names the `delete` that removes it instead. Inside a code
+block none of this applies: `with` is the code's literal text, written exactly as sent, whitespace, markdown syntax and
+references included. Use zero-based
 `occurrence` for a
 repeated target; re-read a missing or ambiguous target before retrying. Pass `summary` to name the version when recording a decision.
 

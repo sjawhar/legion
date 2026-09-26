@@ -123,7 +123,9 @@ the block when it creates a quote or browser-mark anchor; `envoy-dispatch backfi
 fills legacy anchors only when their cached quote has one current match.
 
 Document edits (`POST /api/v1/artifacts/{id}/edits`, `docs/edits.go` `applyOperation`) are
-`replace`, `delete`, `insert`, `retype`, `move`, `delete_row`, and `delete_column`. `replace` is
+`replace`, `delete`, `insert`, `retype`, `move`, `delete_row`, and `delete_column`. Inside a code
+block a `replace` writes `with` as the code's literal text, exactly as sent (`codeReplacement`), and
+none of the rules below apply. Everywhere else `replace` is
 inline: `with` parses through `pmdoc.ParseInline` (paragraph-only block grammar), so a multi-paragraph
 `with` is `INVALID_OP`, so is any non-empty `with` that renders to no inline content (a line
 indented four spaces or a tab, which markdown reads as a code block, or whitespace alone — an

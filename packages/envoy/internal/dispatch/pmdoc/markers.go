@@ -107,40 +107,43 @@ func textblockMarker(doc, node *Node, path []int) BlockMarker {
 	return BlockMarker{}
 }
 
-// ContainingTextblock returns the textblock whose content holds position and the node that
-// holds it, or nils when position is in no textblock.
-func ContainingTextblock(doc *Node, position int) (textblock, parent *Node) {
+// TextblockAt is the textblock whose content holds a position.
+type TextblockAt struct {
+	Node *Node
+	// Ancestors are the nodes around it, the nearest first and the document last.
+	Ancestors []*Node
+	// Content is the range its content covers.
+	Content Range
+}
+
+// ContainingTextblock returns the textblock whose content holds position, and reports false when
+// position is in none.
+func ContainingTextblock(doc *Node, position int) (TextblockAt, bool) {
+	var at TextblockAt
+	found := false
 	walk(doc, func(node *Node, path []int, pos, end int) bool {
 		if !isTextblock(node.Type) || position < pos+1 || position > end-1 {
 			return true
 		}
-		textblock, parent = node, nodeAtPath(doc, path[:len(path)-1])
-		return false
-	})
-	return textblock, parent
-}
-
-// TextblockEdges reports whether r starts where the content of the textblock containing it starts,
-// and whether it ends where that content ends.
-func TextblockEdges(doc *Node, r Range) (atStart, atEnd bool) {
-	walk(doc, func(node *Node, _ []int, pos, end int) bool {
-		if !isTextblock(node.Type) || r.From < pos+1 || r.From > end-1 {
-			return true
+		at = TextblockAt{Node: node, Content: Range{From: pos + 1, To: end - 1}}
+		for depth := len(path) - 1; depth >= 0; depth-- {
+			at.Ancestors = append(at.Ancestors, nodeAtPath(doc, path[:depth]))
 		}
-		atStart, atEnd = r.From == pos+1, r.To == end-1
+		found = true
 		return false
 	})
-	return atStart, atEnd
+	return at, found
 }
 
 // OneLineTextblock reports whether the textblock containing position is written on one markdown
 // line - a heading, or a table cell's paragraph - where a hard break would end the block.
 func OneLineTextblock(doc *Node, position int) bool {
-	textblock, parent := ContainingTextblock(doc, position)
-	if textblock == nil {
+	at, ok := ContainingTextblock(doc, position)
+	if !ok {
 		return false
 	}
-	return textblock.Type == "heading" || parent.Type == "table_cell" || parent.Type == "table_header"
+	parent := at.Ancestors[0]
+	return at.Node.Type == "heading" || parent.Type == "table_cell" || parent.Type == "table_header"
 }
 
 // SetHeadingLevel returns a copy of doc with the level of the heading whose own text begins at
