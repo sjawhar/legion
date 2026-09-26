@@ -284,10 +284,11 @@ type Machine struct {
 	// (DeliveredAt). A late refusal is judged against the prompt it names: one naming markedBy says
 	// the prompt that marked the task never ran, so the mark goes (markUnread); one naming any other
 	// prompt says nothing about the mark. Which prompt set the mark is a fact recorded when it is
-	// set, so no ordering of sends, acknowledgements and refusals has to be reasoned about. When the
-	// pending task carries no mark it may still name an earlier prompt, and a refusal naming it
-	// then has nothing to clear. Memory only: after a restart no refusal can come from the old
-	// connection.
+	// set, so no ordering of sends, acknowledgements and refusals has to be reasoned about: only
+	// markRead and clearReadMark write it, each together with DeliveredAt, and nothing else - no
+	// send, confirmation or relaunch - may. When the pending task was replaced it may still name
+	// the previous task's prompt, and a refusal naming it then has nothing to clear. Memory only:
+	// after a restart no refusal can come from the old connection.
 	markedBy string
 	// previous is the incarnation the claim last ran and no longer records — stopped by a
 	// suspension, retired, failed on, or found dead — which every launch of the same session hands

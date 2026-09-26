@@ -571,8 +571,7 @@ func reprobe(m *Machine, ctx context.Context, _ Event) error {
 func acked(m *Machine, ctx context.Context, _ Event) error {
 	m.helloDuringSend = false
 	p := m.claim.Pending
-	p.DeliveredAt = m.deps.Clock.Now()
-	m.markedBy = p.ID
+	m.markRead(p)
 	m.arm(TimerTurn, m.deps.Timeouts.RPC, p.ID)
 	return m.deps.Store.PutDelivery(ctx, m.claim.Token, *p)
 }

@@ -310,16 +310,28 @@ const (
 	taskUnread = false
 )
 
+// markRead and clearReadMark are the only writers of the pending task's read mark: its
+// acknowledgement time (DeliveredAt) and the prompt that acknowledgement answered (markedBy) are
+// set together and cleared together, so the prompt a late refusal is judged against is always the
+// one whose acknowledgement set the mark standing now.
+func (m *Machine) markRead(p *Delivery) {
+	p.DeliveredAt, m.markedBy = m.deps.Clock.Now(), p.ID
+}
+
+func (m *Machine) clearReadMark(p *Delivery) {
+	p.DeliveredAt, m.markedBy = time.Time{}, ""
+}
+
 // markUnread drops the pending task's read mark without touching its id or its budget: an
 // outcome that arrived for a send this machine had already given up on says only that the agent
 // never read the task.
 func (m *Machine) markUnread(ctx context.Context) error {
-	m.markedBy = ""
 	p := m.claim.Pending
-	if p.DeliveredAt.IsZero() {
+	marked := !p.DeliveredAt.IsZero()
+	m.clearReadMark(p)
+	if !marked {
 		return nil
 	}
-	p.DeliveredAt = time.Time{}
 	return m.deps.Store.PutDelivery(ctx, m.claim.Token, *p)
 }
 
@@ -333,8 +345,7 @@ func (m *Machine) takeBackPending(ctx context.Context, read bool) error {
 	p.ID = rand.Text()
 	p.ConfirmedAt = time.Time{}
 	if !read {
-		p.DeliveredAt = time.Time{}
-		m.markedBy = ""
+		m.clearReadMark(p)
 	}
 	return m.deps.Store.PutDelivery(ctx, m.claim.Token, *p)
 }

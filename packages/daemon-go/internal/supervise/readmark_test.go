@@ -182,14 +182,26 @@ func TestAStaleRefusalLeavesARunningTurnsRun(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if p := h.pending(); p.ConfirmedAt.IsZero() {
-		t.Fatalf("pending after the stale refusal = %+v, want the running turn's confirmation kept", p)
+	if p := h.pending(); p.ConfirmedAt.IsZero() || !p.DeliveredAt.IsZero() {
+		t.Fatalf("pending after the stale refusal = %+v, want the running turn's confirmation kept and the given-up prompt's mark gone", p)
 	}
 	if run := h.claim().ServingRun(); run != 7 {
 		t.Fatalf("the claim serves run %d, want the running turn's 7", run)
 	}
+
+	// The re-send is then refused: the turn was not its, and the refusal takes the confirmation
+	// back. Nothing read the task, since the given-up prompt's mark went with that prompt's refusal,
+	// so no run is attributed to it. A memory cleared at confirm would have dropped that refusal and
+	// left the mark standing.
+	gated.RefusePrompt("Agent is already processing")
 	gated.release <- struct{}{}
 	h.m.Wait()
+	if p := h.pending(); !p.ConfirmedAt.IsZero() || !p.DeliveredAt.IsZero() {
+		t.Fatalf("pending after the re-send was refused = %+v, want it neither confirmed nor marked", p)
+	}
+	if run := h.claim().ServingRun(); run != 0 {
+		t.Fatalf("the claim serves run %d after the re-send was refused, want none", run)
+	}
 }
 
 // The answer to a prompt this machine gave up on can arrive after the task has been sent again: a
@@ -254,8 +266,9 @@ func TestAnOldRefusalHandledAfterTheNextSendsAcknowledgementLeavesItsMark(t *tes
 }
 
 // The same holds across a relaunch: a refusal the old process emitted can still be in the claim's
-// inbox when the new process is sent the task and acknowledges it. The new process's send ends the
-// memory like any other, which is why a relaunch carries no clear of its own.
+// inbox when the new process is sent the task and acknowledges it. The new process's
+// acknowledgement takes the mark over, so the old prompt's refusal names a prompt that no longer
+// holds it; a relaunch itself leaves the mark alone.
 func TestAnOldProcessesRefusalLeavesTheNewSendsMark(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateReady)
@@ -280,19 +293,50 @@ func TestAnOldProcessesRefusalLeavesTheNewSendsMark(t *testing.T) {
 }
 
 // A re-send can start and never be acknowledged: its adopt step fails, the transport loses it, or
-// the agent refuses it on arrival. None of those marks the task, so the mark still standing is the
-// one the given-up prompt's acknowledgement set — and that prompt's refusal, whenever it lands,
-// says the prompt never ran. It must clear the mark, or a completion from the next turn of a claim
-// serving no run is credited to a task nobody read.
+// the agent refuses it on arrival — also after its turn confirmed it while it was in flight, and
+// also as the first send of a relaunched process. None of those marks the task, so the mark still
+// standing is the one the given-up prompt's acknowledgement set — and that prompt's refusal,
+// whenever it lands, says the prompt never ran. It must clear the mark, or a completion from the
+// next turn of a claim serving no run is credited to a task nobody read. Nothing on the way —
+// a confirmation, a relaunch — may drop the record of which prompt set the mark.
 func TestAnUnacknowledgedResendLeavesTheGivenUpPromptsRefusalToClearTheMark(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		identity bool
 		resend   func(h *harness)
 	}{
-		{name: "the re-send's adopt step fails", identity: true, resend: func(h *harness) { h.rt.FailAdoptWorkingCopy(errBoom) }},
-		{name: "the transport loses the re-send", resend: func(h *harness) { h.conn.FailPrompt(errBoom) }},
-		{name: "the agent refuses the re-send on arrival", resend: func(h *harness) { h.conn.RefusePrompt("agent busy") }},
+		{name: "the re-send's adopt step fails", identity: true, resend: func(h *harness) {
+			h.rt.FailAdoptWorkingCopy(errBoom)
+			h.observe(runtime.Alive)
+		}},
+		{name: "the transport loses the re-send", resend: func(h *harness) {
+			h.conn.FailPrompt(errBoom)
+			h.observe(runtime.Alive)
+		}},
+		{name: "the agent refuses the re-send on arrival", resend: func(h *harness) {
+			h.conn.RefusePrompt("agent busy")
+			h.observe(runtime.Alive)
+		}},
+		{name: "the re-send's turn confirms it in flight, then the send is lost", resend: func(h *harness) {
+			gated := newGatedConn()
+			gated.Conn.FailPrompt(errBoom)
+			h.conns.Register(testToken, gated)
+			if err := h.m.Handle(h.ctx, RuntimeObservation{Observation: runtime.Observation{Locator: h.locator(), Kind: runtime.Alive, At: h.clock.Now()}}); err != nil {
+				h.t.Fatal(err)
+			}
+			waitFor(h.t, "the re-send", gated.entered)
+			if err := h.m.Handle(h.ctx, StreamTurnStart{Claim: testToken}); err != nil {
+				h.t.Fatal(err)
+			}
+			gated.release <- struct{}{}
+			h.m.Wait()
+		}},
+		{name: "a relaunch, then the new process's send is lost", resend: func(h *harness) {
+			h.conn.FailPrompt(errBoom)
+			h.must(RequestSuspend{Claim: testToken})
+			h.must(RequestResume{Claim: testToken})
+			h.reach(StateReady)
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t)
@@ -311,7 +355,9 @@ func TestAnUnacknowledgedResendLeavesTheGivenUpPromptsRefusalToClearTheMark(t *t
 			h.advance(2 * testRPC)
 
 			tc.resend(h)
-			h.observe(runtime.Alive)
+			if p := h.pending(); p.DeliveredAt.IsZero() || !p.ConfirmedAt.IsZero() {
+				t.Fatalf("pending after the lost re-send = %+v, want it unconfirmed under the given-up prompt's mark", p)
+			}
 
 			h.must(StreamLateRefusal{Claim: testToken, DeliveryID: first.DeliveryID, Error: "the model provider refused the request"})
 
