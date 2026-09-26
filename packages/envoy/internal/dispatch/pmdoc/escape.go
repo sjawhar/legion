@@ -39,6 +39,9 @@ type escapeContext struct {
 	// link's `]`, a hard break's backslash, the next node's first character. A block-final
 	// backslash reads back as itself and is left as written.
 	followed bool
+	// tildes reports whether the text's tildes are escaped, because the run they are in does not
+	// read back with them as written (inlineWithEscapes).
+	tildes bool
 }
 
 // needsInlineEscape decides one character from the text alone.
@@ -55,6 +58,8 @@ func needsInlineEscape(value string, offset int, char rune, context escapeContex
 		return emphasisDelimiter(value, offset, '_')
 	case '`':
 		return true
+	case '~':
+		return context.tildes
 	case '[':
 		// A label whose brackets cannot pair as written escapes them all: a stray `]` closes it
 		// early, and a `[` left raw would then pair with its own closer.
@@ -98,6 +103,58 @@ func escaped(char rune) string {
 	default:
 		return "\\" + string(char)
 	}
+}
+
+// textEscape is how the text writer spells an escaped character: a tilde as its numeric
+// reference, since the strikethrough parser refuses a delimiter run right after a tilde even when
+// a backslash escapes it, and anything else as escaped spells it.
+func textEscape(char rune) string {
+	if char == '~' {
+		return numericEntity(char)
+	}
+	return escaped(char)
+}
+
+// tildeInText reports whether any text node among nodes, outside a code span, holds a tilde.
+func tildeInText(nodes []*Node) bool {
+	for _, node := range nodes {
+		if node.Type == "text" && !nodeHasMark(node, "inlineCode") && strings.ContainsRune(node.Text, '~') {
+			return true
+		}
+	}
+	return false
+}
+
+// inlineSignature describes inline nodes as the reader sees them: each run of text with the marks
+// it renders, merged across nodes that carry the same marks, and every other node by its type and
+// what it writes.
+func inlineSignature(nodes []*Node) []string {
+	var signature []string
+	lastMarks := ""
+	for _, node := range nodes {
+		if node.Type != "text" {
+			value, _ := node.Attrs["value"].(string)
+			src, _ := node.Attrs["src"].(string)
+			label, _ := node.Attrs["label"].(string)
+			signature = append(signature, node.Type+"|"+value+"|"+src+"|"+label)
+			lastMarks = "\x00"
+			continue
+		}
+		var marks []string
+		for _, mark := range visibleMarks(node.Marks) {
+			href, _ := mark.Attrs["href"].(string)
+			title, _ := mark.Attrs["title"].(string)
+			marks = append(marks, mark.Type+"|"+href+"|"+title)
+		}
+		key := strings.Join(marks, ",")
+		if len(signature) > 0 && key == lastMarks {
+			signature[len(signature)-1] += node.Text
+			continue
+		}
+		signature = append(signature, key+"\x00"+node.Text)
+		lastMarks = key
+	}
+	return signature
 }
 
 // lineStartVerdict is what the writer does with a character at the start of a line of its own.

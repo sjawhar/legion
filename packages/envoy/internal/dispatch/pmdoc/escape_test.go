@@ -155,6 +155,47 @@ func TestRenderEscapesBlockFormsInAListNestedInABlockquote(t *testing.T) {
 	}
 }
 
+// GFM reads a single tilde as strikethrough too, and refuses a delimiter run of three: text
+// `~a~` came back struck, and struck text ending or starting with a tilde lost its strike. Such a
+// paragraph writes its tildes as references; a paragraph whose tildes pair with nothing - "about
+// ~200ms" - and an ordinary strikethrough keep the bytes they have always had.
+func TestRenderKeepsTildesAsTheyWereWritten(t *testing.T) {
+	text := func(value string, marks ...Mark) *Node { return &Node{Type: "text", Text: value, Marks: marks} }
+	struck := Mark{Type: "strike_through"}
+	paragraph := func(children ...*Node) *Node {
+		return &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: children}}}
+	}
+	for name, doc := range map[string]*Node{
+		"a single-tilde pair":       paragraph(text("~a~")),
+		"a pair across words":       paragraph(text("keep ~this~ as typed")),
+		"struck text ending in ~":   paragraph(text("x~", struck), text(" tail")),
+		"struck text starting in ~": paragraph(text("x "), text("~a", struck)),
+		"a struck tilde alone":      paragraph(text("a "), text("~", struck), text(" b")),
+	} {
+		t.Run(name, func(t *testing.T) {
+			markdown := mustRender(t, doc)
+			back, err := Parse(markdown)
+			if err != nil {
+				t.Fatalf("Parse(%q) = %v", markdown, err)
+			}
+			if !back.Equal(doc) {
+				t.Fatalf("Parse(%q) = %q, want the text and its marks back", markdown, mustRender(t, back))
+			}
+		})
+	}
+	for _, test := range []struct {
+		doc  *Node
+		want string
+	}{
+		{paragraph(text("about ~200ms")), "about ~200ms\n"},
+		{paragraph(text("done", struck), text(" tail")), "~~done~~ tail\n"},
+	} {
+		if got := mustRender(t, test.doc); got != test.want {
+			t.Fatalf("Render() = %q, want the bytes main writes, %q", got, test.want)
+		}
+	}
+}
+
 // A paragraph's second line of dashes or equals signs underlines its first into a heading, so
 // the escape applies to a marker line anywhere in the paragraph, not only its first.
 func TestRenderEscapesSetextUnderlinesInsideParagraphs(t *testing.T) {

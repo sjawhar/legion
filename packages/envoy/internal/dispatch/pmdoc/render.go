@@ -3,6 +3,7 @@ package pmdoc
 import (
 	"bytes"
 	"fmt"
+	"slices"
 	"strings"
 	"unicode/utf8"
 )
@@ -343,7 +344,39 @@ type lineCandidate struct {
 	prefix string
 }
 
+// inlineWithEscapes writes one textblock's inline nodes. GFM reads a single tilde as a
+// strikethrough delimiter and refuses a run of three, so tildes in text can pair into a strike the
+// text never had, or break one it has. A run whose text holds a tilde is read back after it is
+// written, and when it does not come back as written it is written again with its text's tildes
+// as references - kept only if that reads back, so a run that fails for another reason keeps the
+// bytes it had.
 func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlineContext) {
+	from := r.b.Len()
+	r.writeInlineRun(nodes, prefix, context, false)
+	if r.err != nil || !tildeInText(nodes) || r.runReadsBack(from, prefix, nodes) {
+		return
+	}
+	written := string(r.b.Bytes()[from:])
+	r.b.Truncate(from)
+	r.writeInlineRun(nodes, prefix, context, true)
+	if r.err == nil && !r.runReadsBack(from, prefix, nodes) {
+		r.b.Truncate(from)
+		r.b.WriteString(written)
+	}
+}
+
+// runReadsBack reports whether the inline markdown written since from reads back as nodes: the
+// run's own lines, with the prefix its later lines are written behind taken off.
+func (r *renderer) runReadsBack(from int, prefix string, nodes []*Node) bool {
+	source := string(r.b.Bytes()[from:])
+	if prefix != "" {
+		source = strings.ReplaceAll(source, "\n"+prefix, "\n")
+	}
+	parsed, err := ParseInline(source)
+	return err == nil && slices.Equal(inlineSignature(parsed), inlineSignature(nodes))
+}
+
+func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineContext, tildes bool) {
 	escapePipes := context.tableCell
 	var active []Mark
 	position := inlinePosition{atLineStart: context.startsLine, atTextStart: true}
@@ -382,6 +415,7 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlin
 				urlSchemes: !hasLink,
 				label:      label,
 				followed:   index+1 < len(nodes) || len(next) > 0,
+				tildes:     tildes,
 			})
 		case "hardbreak":
 			r.closeMarks(active, escapePipes)
@@ -631,7 +665,7 @@ func (r *renderer) writeInlineText(node *Node, position *inlinePosition, prefix 
 		}
 		if escape {
 			r.writeText(value[segmentStart:byteOffset])
-			r.writeSyntax(escaped(char))
+			r.writeSyntax(textEscape(char))
 			segmentStart = byteOffset + width
 		}
 		if char == '\n' {
