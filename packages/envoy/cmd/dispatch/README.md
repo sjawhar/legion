@@ -64,6 +64,46 @@ When no GitHub App credentials are configured, the server still starts, but
 OAuth and GitHub proxy routes respond with `503`, and saving a project's
 architecture source answers `409 SOURCE_ACCESS` naming the missing key.
 
+## Webhook redelivery
+
+GitHub does not redeliver a webhook delivery that failed. When NATS is configured and the App's
+private key (`DISPATCH_APP_PEM_B64`) is present, Dispatch redelivers them itself, following GitHub's
+documented approach. Every two minutes it lists the App webhook's failed attempts
+(`GET /app/hook/deliveries?status=failure`) and asks GitHub to redeliver each failed delivery
+(`POST /app/hook/deliveries/{id}/attempts`). Both endpoints accept only an App JWT, which is
+why Dispatch runs this. The webhook the App delivers to is the Envoy listener's
+`/webhook/github`. A redelivery carries the original `X-GitHub-Delivery`, and the listener
+publishes GitHub envelopes under a JetStream MsgId of it. So redelivering a delivery that did
+reach the stream adds nothing to the stream.
+
+- A delivery the listener answered with 5xx, or that GitHub could not complete, is redelivered
+  on the next sweep. If that redelivery fails too, it is retried after 2, 4, 8 and 16 minutes, at most
+  five times.
+- A redelivery request GitHub refuses (for example 422) delivers nothing. It is asked again on
+  the same backoff, at most five times.
+- A delivery the listener answered with 4xx is never redelivered: the listener refused the
+  request itself, and the same bytes would fail the same way.
+- Giving up logs `level=ERROR msg="webhook redelivery exhausted"`. A 4xx logs
+  `level=ERROR msg="webhook delivery refused terminally"`. Each is logged once per delivery.
+  Every sweep logs an INFO `msg="webhook redelivery sweep"` line with its counts.
+- A sweep looks back one hour. After a gap in sweeping (Dispatch down), it resumes from its
+  cursor, back to GitHub's three days. The first sweep ever made looks back one hour only.
+
+The cursor and one record per delivery acted on live in the JetStream KV bucket
+`envoy_webhook_redelivery`. Its 72-hour TTL matches GitHub's horizon. A compare-and-swap
+claim keeps two Dispatch processes from requesting the same attempt twice.
+
+The operator command runs the same sweep over a chosen window. It does not move the running
+sweep's cursor. `--dry-run` lists every failed delivery and what the sweep would do with it,
+and requests and writes nothing:
+
+```bash
+envoy-dispatch redeliver-webhooks --since 72h --dry-run   # list what would be redelivered
+envoy-dispatch redeliver-webhooks --since 72h             # redeliver under the sweep's rules
+```
+
+It reads the same App credentials and NATS configuration as the server.
+
 ## Identity
 
 `DISPATCH_IDENTITY` controls how browser requests identify a human:
