@@ -205,23 +205,23 @@ func TestStoreRoundTripsLingerStateAndRefusesHeldFromHeld(t *testing.T) {
 	st := migratedStore(t)
 	records := NewStore()
 	until := time.Date(2026, 9, 24, 10, 0, 0, 0, time.UTC)
-	heldFrom := phase.Implementing
+	hold := Hold{From: phase.Implementing, Reason: HoldEscalated}
 	lingering := issueFixture("LEGION-210")
 	lingering.LingerUntil = &until
-	lingering.HeldFrom = &heldFrom
+	lingering.Hold = &hold
 
 	inTx(t, st, func(tx pgx.Tx) {
 		must(t, records.PutIssue(ctx, tx, lingering))
 		got, err := records.Issue(ctx, tx, lingering.Key)
 		must(t, err)
-		if got == nil || got.LingerUntil == nil || !got.LingerUntil.Equal(until) || got.HeldFrom == nil || *got.HeldFrom != heldFrom {
-			t.Fatalf("lingering issue state = %#v, want linger until %s from %s", got, until, heldFrom)
+		if got == nil || got.LingerUntil == nil || !got.LingerUntil.Equal(until) || got.Hold == nil || *got.Hold != hold {
+			t.Fatalf("lingering issue state = %#v, want linger until %s and hold %+v", got, until, hold)
 		}
 	})
 
 	cleared := lingering
 	cleared.LingerUntil = nil
-	cleared.HeldFrom = nil
+	cleared.Hold = nil
 	inTx(t, st, func(tx pgx.Tx) {
 		must(t, records.PutIssue(ctx, tx, cleared))
 		got, err := records.Issue(ctx, tx, cleared.Key)
@@ -232,14 +232,40 @@ func TestStoreRoundTripsLingerStateAndRefusesHeldFromHeld(t *testing.T) {
 	})
 
 	invalid := issueFixture("LEGION-211")
-	held := phase.Held
-	invalid.HeldFrom = &held
+	invalid.Hold = &Hold{From: phase.Held}
 	err := st.Tx(ctx, func(tx pgx.Tx) error {
 		return records.PutIssue(ctx, tx, invalid)
 	})
 	if err == nil {
 		t.Fatal("PutIssue accepted held_from=held")
 	}
+}
+
+// A hold's reason ends with the hold whichever build writes the row: an earlier build's upsert
+// names no hold_reason, so ending a hold and holding the issue again there would otherwise leave
+// the old escalation on a hold nobody escalated.
+func TestAWriteThatEndsAHoldEndsItsReasonWhateverWritesIt(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	issue := issueFixture("LEGION-212")
+	issue.Phase, issue.Hold = phase.Held, &Hold{From: phase.Implementing, Reason: HoldEscalated}
+	inTx(t, st, func(tx pgx.Tx) {
+		must(t, records.PutIssue(ctx, tx, issue))
+		for _, write := range []string{
+			"update issues set phase = 'implementing', held_from = null where key = $1",
+			"update issues set phase = 'held', held_from = 'implementing' where key = $1",
+		} {
+			if _, err := tx.Exec(ctx, write, issue.Key); err != nil {
+				t.Fatalf("%s: %v", write, err)
+			}
+		}
+		got, err := records.Issue(ctx, tx, issue.Key)
+		must(t, err)
+		if want := (Hold{From: phase.Implementing}); got == nil || got.Hold == nil || *got.Hold != want {
+			t.Fatalf("hold after it ended and began again without a reason = %+v, want %+v", got.Hold, want)
+		}
+	})
 }
 
 func samePullRequest(got, want PullRequest) bool {

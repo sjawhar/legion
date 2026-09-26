@@ -542,27 +542,27 @@ func (e *Engine) closed(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 }
 
 // claimFailed holds the issue whose phase worker's claim failed — a budget ran out — and tells the
-// architect. The tree's architect failing holds nothing, since a phase is its worker's; it is told
-// as a worker-died of the architect, which goes to the controller (record.Notice.ForController),
-// because every other notice of the tree reaches the architect and nobody inside the tree is left
-// to act on its own.
+// architect and the controller of the hold; the worker-died that comes with it is the architect's
+// alone. The tree's architect failing holds nothing, since a phase is its worker's; it is told as a
+// worker-died of the architect, to the issue's topic and the controller, because every other notice
+// of the tree reaches the architect and nobody inside the tree is left to act on its own.
 func (e *Engine) claimFailed(ctx context.Context, tx pgx.Tx, fact intake.ClaimFailed) (intake.Result, error) {
 	issue, err := e.store.Issue(ctx, tx, fact.Issue)
 	if err != nil || issue == nil {
 		return intake.Result{}, err
 	}
 	if claim.IsTreeArchitect(fact.Role, issue.Key, issue.Tree) {
-		return intake.Result{}, e.notice(ctx, tx, issue.Key, record.Notice{Kind: "worker-died", Role: fact.Role, Phase: issue.Phase})
+		return intake.Result{}, e.noticeWithController(ctx, tx, issue.Key, record.Notice{Kind: "worker-died", Role: fact.Role, Phase: issue.Phase})
 	}
 	if issue.Phase == phase.Held || RoleFor(issue.Phase) != fact.Role {
 		return intake.Result{}, nil
 	}
 	from := issue.Phase
-	issue.Phase, issue.HeldFrom = phase.Held, &from
+	issue.Phase, issue.Hold = phase.Held, &record.Hold{From: from}
 	if err := e.store.PutIssue(ctx, tx, *issue); err != nil {
 		return intake.Result{}, err
 	}
-	if err := e.notice(ctx, tx, issue.Key, record.Notice{Kind: "held", Role: fact.Role, Phase: from}); err != nil {
+	if err := e.noticeWithController(ctx, tx, issue.Key, record.Notice{Kind: "held", Role: fact.Role, Phase: from}); err != nil {
 		return intake.Result{}, err
 	}
 	return intake.Result{}, e.notice(ctx, tx, issue.Key, record.Notice{Kind: "worker-died", Role: fact.Role, Phase: from})
@@ -570,23 +570,23 @@ func (e *Engine) claimFailed(ctx context.Context, tx pgx.Tx, fact intake.ClaimFa
 
 func (e *Engine) retryOrEscalate(ctx context.Context, tx pgx.Tx, fact intake.RetryOrEscalate) (intake.Result, error) {
 	issue, err := e.store.Issue(ctx, tx, fact.Issue)
-	if err != nil || issue == nil || issue.Phase != phase.Held || issue.HeldFrom == nil {
+	if err != nil || issue == nil || issue.Phase != phase.Held || issue.Hold == nil {
 		return intake.Result{}, err
 	}
 	if fact.Decision == intake.EscalateDecision {
 		// Recorded on the issue as well as sent: the controller reads holds from the record at every
 		// start, so an escalation made while none ran still reaches it.
-		issue.HoldReason = "escalated"
+		issue.Hold.Reason = record.HoldEscalated
 		if err := e.store.PutIssue(ctx, tx, *issue); err != nil {
 			return intake.Result{}, err
 		}
-		return intake.Result{}, e.notice(ctx, tx, issue.Key, record.Notice{Kind: "held", Phase: *issue.HeldFrom, Reason: "escalated"})
+		return intake.Result{}, e.noticeWithController(ctx, tx, issue.Key, record.Notice{Kind: "held", Phase: issue.Hold.From, Reason: string(record.HoldEscalated)})
 	}
 	if fact.Decision != intake.RetryDecision {
 		return intake.Result{}, nil
 	}
-	from := *issue.HeldFrom
-	issue.Phase, issue.HeldFrom = from, nil
+	from := issue.Hold.From
+	issue.Phase, issue.Hold = from, nil
 	if err := e.store.PutIssue(ctx, tx, *issue); err != nil {
 		return intake.Result{}, err
 	}
@@ -661,7 +661,7 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 		return err
 	}
 	from := issue.Phase
-	issue.Phase, issue.HeldFrom = row.To, nil
+	issue.Phase, issue.Hold = row.To, nil
 	if row.Status != "" {
 		issue.Status = row.Status
 	}
@@ -765,7 +765,7 @@ func (e *Engine) leave(ctx context.Context, tx pgx.Tx, issue record.Issue, statu
 		return e.beginLinger(ctx, tx, issue)
 	}
 	if issue.Phase != phase.Done {
-		issue.Phase, issue.HeldFrom, issue.ReadyPendingVersion = phase.Done, nil, nil
+		issue.Phase, issue.Hold, issue.ReadyPendingVersion = phase.Done, nil, nil
 		if err := e.store.PutIssue(ctx, tx, issue); err != nil {
 			return err
 		}
@@ -788,7 +788,7 @@ func (e *Engine) beginLinger(ctx context.Context, tx pgx.Tx, root record.Issue) 
 	}
 	until := e.lingerAt()
 	root.LingerUntil = &until
-	root.Phase, root.HeldFrom = phase.Done, nil
+	root.Phase, root.Hold = phase.Done, nil
 	if err := e.store.PutIssue(ctx, tx, root); err != nil {
 		return err
 	}

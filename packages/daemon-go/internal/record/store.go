@@ -35,7 +35,7 @@ func (s *Postgres) MarkProcessed(ctx context.Context, tx pgx.Tx, source, eventID
 	return tag.RowsAffected() == 1, nil
 }
 
-const issueColumns = `key, tree, project, title, parent, phase, generation, status, rank, linger_until, held_from, last_dispatch_seq, ready_pending_version, hold_reason`
+const issueColumns = `key, tree, project, title, parent, phase, generation, status, rank, linger_until, held_from, last_dispatch_seq, ready_pending_version, coalesce(hold_reason, '')`
 
 func (s *Postgres) Issue(ctx context.Context, tx pgx.Tx, key string) (*Issue, error) {
 	issue, err := scanIssue(tx.QueryRow(ctx, "select "+issueColumns+" from issues where key = $1", key))
@@ -72,22 +72,20 @@ func (s *Postgres) PutIssue(ctx context.Context, tx pgx.Tx, issue Issue) error {
 	if issue.Generation > maxInt64 {
 		return fmt.Errorf("put issue %s: generation %d does not fit a bigint", issue.Key, issue.Generation)
 	}
-	var heldFrom, holdReason any
-	if issue.HeldFrom != nil {
-		heldFrom = string(*issue.HeldFrom)
-		if issue.HoldReason != "" {
-			holdReason = issue.HoldReason
-		}
+	var heldFrom any
+	var holdReason HoldReason
+	if issue.Hold != nil {
+		heldFrom, holdReason = string(issue.Hold.From), issue.Hold.Reason
 	}
 	_, err := tx.Exec(ctx, `insert into issues (key, tree, project, title, parent, phase, generation, status, rank, linger_until, held_from, last_dispatch_seq, ready_pending_version, hold_reason)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, nullif($14::text, ''))
 		on conflict (key) do update set tree = excluded.tree, project = excluded.project, title = excluded.title,
 		parent = excluded.parent, phase = excluded.phase, generation = excluded.generation,
 		status = excluded.status, rank = excluded.rank, linger_until = excluded.linger_until,
 		held_from = excluded.held_from, last_dispatch_seq = excluded.last_dispatch_seq,
 		ready_pending_version = excluded.ready_pending_version, hold_reason = excluded.hold_reason`,
 		issue.Key, issue.Tree, issue.Project, issue.Title, issue.Parent, string(issue.Phase), int64(issue.Generation), issue.Status,
-		issue.Rank, issue.LingerUntil, heldFrom, issue.LastDispatchSeq, issue.ReadyPendingVersion, holdReason,
+		issue.Rank, issue.LingerUntil, heldFrom, issue.LastDispatchSeq, issue.ReadyPendingVersion, string(holdReason),
 	)
 	if err != nil {
 		return fmt.Errorf("put issue %s: %w", issue.Key, err)
@@ -99,7 +97,8 @@ func scanIssue(row scanner) (*Issue, error) {
 	var issue Issue
 	var phaseValue string
 	var generation int64
-	var heldFrom, holdReason *string
+	var heldFrom *string
+	var holdReason string
 	if err := row.Scan(&issue.Key, &issue.Tree, &issue.Project, &issue.Title, &issue.Parent, &phaseValue, &generation, &issue.Status,
 		&issue.Rank, &issue.LingerUntil, &heldFrom, &issue.LastDispatchSeq, &issue.ReadyPendingVersion, &holdReason); err != nil {
 		return nil, err
@@ -109,11 +108,7 @@ func scanIssue(row scanner) (*Issue, error) {
 	}
 	issue.Phase = phase.Phase(phaseValue)
 	if heldFrom != nil {
-		value := phase.Phase(*heldFrom)
-		issue.HeldFrom = &value
-		if holdReason != nil {
-			issue.HoldReason = *holdReason
-		}
+		issue.Hold = &Hold{From: phase.Phase(*heldFrom), Reason: HoldReason(holdReason)}
 	}
 	issue.Generation = uint64(generation)
 	return &issue, nil

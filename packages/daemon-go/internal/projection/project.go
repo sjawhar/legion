@@ -78,8 +78,8 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 		// An escalation waits on the controller only while its tree runs. A held issue of a tree
 		// that lingers or closed keeps the reason on its record, and shows it again once the tree is
 		// re-admitted, which leaves the issue held.
-		if !lingering[issue.Tree] {
-			view.HoldReason = issue.HoldReason
+		if issue.Hold != nil && !lingering[issue.Tree] {
+			view.HoldReason = string(issue.Hold.Reason)
 		}
 		if slot, ok := slotViews[issue.Key]; ok {
 			view.Slot = &slot

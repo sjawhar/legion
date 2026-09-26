@@ -25,12 +25,14 @@ func Topic(project, issue string) string {
 	return "notifications.legion." + project + "." + issue
 }
 
-// ControllerTopic is the topic of project's controller, which carries the controller-kind notices
-// (record.Notice.ForController). It sits among the issue topics, where no issue key
-// (`[A-Z][A-Z0-9]*-[0-9]+`) can be `controller`, and the plugin's controller subscribes to it at
-// boot (legionControllerNoticeSubject, packages/contracts/src/subject.ts). It is a live wake only:
-// the stream retains it, but an Oh My Pi session subscribes over core NATS and is never handed a
-// retained copy, so a controller learns what happened before it started from `legion state`.
+// ControllerTopic is the topic of project's controller. It carries the controller notices
+// (record.ControllerNotice), each an outbox row of its own: every hold, and a tree architect's own
+// failed claim (workflow's noticeWithController). It sits among the issue topics, where no issue
+// key (`[A-Z][A-Z0-9]*-[0-9]+`) can be `controller`, and the plugin's controller subscribes to it
+// while it holds the controller role (legionControllerNoticeSubject,
+// packages/contracts/src/subject.ts). It is a live wake only: the stream retains it, but an Oh My
+// Pi session subscribes over core NATS and is never handed a retained copy, so a controller learns
+// what happened before it started from `legion state`.
 func ControllerTopic(project string) string {
 	return Topic(project, "controller")
 }

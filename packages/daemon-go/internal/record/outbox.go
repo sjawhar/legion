@@ -15,13 +15,14 @@ import (
 type OutboxKind string
 
 const (
-	OutboxKindDispatchStatus  OutboxKind = "dispatch_status"
-	OutboxKindDispatchMessage OutboxKind = "dispatch_message"
-	OutboxKindNotice          OutboxKind = "notice"
-	OutboxKindSupervise       OutboxKind = "supervise"
-	OutboxKindGateSeed        OutboxKind = "gate_seed"
-	OutboxKindLingerClose     OutboxKind = "linger_close"
-	OutboxKindWorkspaceRemove OutboxKind = "workspace_remove"
+	OutboxKindDispatchStatus   OutboxKind = "dispatch_status"
+	OutboxKindDispatchMessage  OutboxKind = "dispatch_message"
+	OutboxKindNotice           OutboxKind = "notice"
+	OutboxKindControllerNotice OutboxKind = "controller_notice"
+	OutboxKindSupervise        OutboxKind = "supervise"
+	OutboxKindGateSeed         OutboxKind = "gate_seed"
+	OutboxKindLingerClose      OutboxKind = "linger_close"
+	OutboxKindWorkspaceRemove  OutboxKind = "workspace_remove"
 )
 
 // OutboxPayload is the sealed vocabulary of payloads a workflow may enqueue.
@@ -53,24 +54,16 @@ type Notice struct {
 	Summary string      `json:"summary,omitempty"`
 	Version int         `json:"version,omitempty"`
 	Reason  string      `json:"reason,omitempty"`
-	// Controller sends the row to the project's controller topic (notify.ControllerTopic) in place
-	// of the issue's. It routes the row and is never published: the controller reads the notice
-	// without it, as the issue's topic carries it.
-	Controller bool `json:"controller,omitempty"`
 }
 
 func (Notice) OutboxKind() OutboxKind { return OutboxKindNotice }
 
-// ForController is whether the notice goes to the project's controller as well as to the issue's
-// topic, in an outbox row of its own (Controller), so a controller publish that fails retries
-// alone. Every hold does: the architect answers one with a retry or an escalation to the
-// controller, and the controller sees the hold either way. So does the tree architect's own failed
-// claim, since the architect is who every other notice of its tree reaches; with it gone, nobody
-// inside the tree can act. A phase worker's worker-died comes with its hold, and stays the
-// architect's.
-func (n Notice) ForController() bool {
-	return n.Kind == "held" || (n.Kind == "worker-died" && n.Role == claim.RoleArchitect)
-}
+// ControllerNotice is a Notice for the project's controller topic (notify.ControllerTopic) alone,
+// in an outbox row of its own, so its publish retries apart from the issue's. It is published as
+// the Notice it is, the payload the issue's topic carries.
+type ControllerNotice Notice
+
+func (ControllerNotice) OutboxKind() OutboxKind { return OutboxKindControllerNotice }
 
 // SuperviseOp identifies a worker-session operation: "start" starts, resumes, or retries the role's
 // claim; "suspend" stops its process and keeps its session; "tree_close" is the tree's close —
@@ -177,6 +170,12 @@ func decodeOutboxJSON(row OutboxRow) (OutboxPayload, error) {
 			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
 		}
 		payload = value
+	case OutboxKindControllerNotice:
+		value := ControllerNotice{}
+		if err := decoder.Decode(&value); err != nil {
+			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
+		}
+		payload = value
 	case OutboxKindSupervise:
 		value := SuperviseRequest{}
 		if err := decoder.Decode(&value); err != nil {
@@ -232,6 +231,10 @@ func validateOutboxPayload(payload OutboxPayload) error {
 	case Notice:
 		if !validNoticeKind(value.Kind) {
 			return fmt.Errorf("unknown notice kind %q", value.Kind)
+		}
+	case ControllerNotice:
+		if !validNoticeKind(value.Kind) {
+			return fmt.Errorf("unknown controller notice kind %q", value.Kind)
 		}
 	case SuperviseRequest:
 		if !validSuperviseOp(value.Op) {

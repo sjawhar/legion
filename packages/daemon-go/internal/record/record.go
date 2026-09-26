@@ -29,23 +29,33 @@ type PendingPush struct {
 
 // Issue is one durable workflow record. Status is the last Dispatch status the daemon observed.
 type Issue struct {
-	Key         string
-	Tree        string
-	Project     string
-	Title       string
-	Parent      *string
-	Phase       phase.Phase
-	Generation  uint64
-	Status      string
-	Rank        string
-	LingerUntil *time.Time
-	HeldFrom    *phase.Phase
-	// HoldReason is why a held issue is held, when its hold has one: `escalated` once its architect
-	// sent it to the controller. It is kept only while HeldFrom is set; the store drops it otherwise.
-	HoldReason          string
+	Key                 string
+	Tree                string
+	Project             string
+	Title               string
+	Parent              *string
+	Phase               phase.Phase
+	Generation          uint64
+	Status              string
+	Rank                string
+	LingerUntil         *time.Time
+	Hold                *Hold
 	LastDispatchSeq     int64
 	ReadyPendingVersion *int
 }
+
+// Hold is a held issue's hold: the phase it left, and why it is held when the hold has a reason.
+// An issue whose phase is not held has none, so ending a hold (Issue.Hold = nil) ends its reason.
+type Hold struct {
+	From   phase.Phase
+	Reason HoldReason
+}
+
+// HoldReason is why a held issue is held.
+type HoldReason string
+
+// HoldEscalated is a hold its architect sent to the controller.
+const HoldEscalated HoldReason = "escalated"
 
 // PhaseRow is the durable part of a role's work on an issue; live claim facts are joined for state.
 type PhaseRow struct {

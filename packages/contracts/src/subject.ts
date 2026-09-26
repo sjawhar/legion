@@ -17,8 +17,8 @@ export function legionNoticeSubject(project: string, issue: string) {
 }
 
 /** The Go daemon's controller topic for `project` (the project token): the notice family's one
- * member that names no issue, since no issue key can be `controller`. The Go daemon publishes its
- * controller-kind notices here (`notify.ControllerTopic`, packages/daemon-go/internal/notify). */
+ * member that names no issue, since no issue key can be `controller`. What the Go daemon publishes
+ * here is listed at `notify.ControllerTopic` (packages/daemon-go/internal/notify). */
 export function legionControllerNoticeSubject<Project extends string>(
   project: Project
 ): LegionNoticeSubject<Project, "controller"> {

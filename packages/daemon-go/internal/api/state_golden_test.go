@@ -103,6 +103,14 @@ func populatedState() State {
 					AdmittedAt: time.Date(2026, 9, 21, 18, 42, 11, 0, time.UTC),
 				},
 			},
+			"LEGION-210": {
+				Key:        "LEGION-210",
+				Generation: 1,
+				Phase:      phase.Held,
+				Status:     "in_progress",
+				HoldReason: "escalated",
+				Workers:    map[claim.Role]PhaseView{},
+			},
 		},
 		ControllerLocator: &ControllerLocator{
 			Runtime:      "kubernetes",

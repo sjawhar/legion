@@ -270,6 +270,9 @@ export default function envoyExtension(pi: PiApi): void {
   let sessionID = "";
   let heartbeatRegistered = false;
   let claimedRoleTopic: string | undefined;
+  // Notice subjects this session takes only while it holds a role, keyed by that role's topic
+  // (the Go controller's topic is its role's, go-bootstrap.ts). Losing the role closes them.
+  const roleNoticeSubjects = new Map<string, Set<string>>();
   let activeSessionContext: SessionContext | undefined;
   const inbox: {
     event_id: string;
@@ -624,6 +627,17 @@ export default function envoyExtension(pi: PiApi): void {
     return true;
   };
 
+  // This session stopped holding `roleTopic`: close the notice subjects it took for that role and
+  // drop them from its registry entry, so a resumed process does not recover them either. A holder
+  // another session replaced then stops taking the role's wakes.
+  const releaseRoleNotices = async (roleTopic: string, id: string): Promise<void> => {
+    const subjects = roleNoticeSubjects.get(roleTopic);
+    if (subjects === undefined) return;
+    roleNoticeSubjects.delete(roleTopic);
+    const closed = [...subjects].filter(closeIntentionally);
+    if (closed.length > 0) await client.unsubscribe({ sessionID: id, topics: closed });
+  };
+
   const registerSession = () =>
     client.subscribe({
       sessionID,
@@ -687,10 +701,14 @@ export default function envoyExtension(pi: PiApi): void {
           sessionID: id,
           holder: result.holder,
         });
-        context.ui.notify(
-          `envoy: role ${role} is now held by session ${result.holder}; this session no longer holds it`,
-          "warning"
-        );
+        try {
+          await releaseRoleNotices(topic, id);
+        } finally {
+          context.ui.notify(
+            `envoy: role ${role} is now held by session ${result.holder}; this session no longer holds it`,
+            "warning"
+          );
+        }
         return;
       }
       logger.warn("envoy: role re-asserted after the listener lost the claim", {
@@ -812,6 +830,10 @@ export default function envoyExtension(pi: PiApi): void {
         holder: result.holder,
       });
       claimedRoleTopic = undefined;
+      await releaseRoleNotices(topic, sessionID);
+      if (previousTopic !== undefined && previousTopic !== topic) {
+        await releaseRoleNotices(previousTopic, sessionID);
+      }
       return false;
     }
     claimedRoleTopic = topic;
@@ -823,6 +845,7 @@ export default function envoyExtension(pi: PiApi): void {
     if (activeSessionContext !== undefined) ensureHeartbeat(activeSessionContext);
     if (previousTopic !== undefined && previousTopic !== topic) {
       await client.unsubscribe({ sessionID, topics: [previousTopic] });
+      await releaseRoleNotices(previousTopic, sessionID);
     }
     return true;
   };
@@ -969,7 +992,8 @@ export default function envoyExtension(pi: PiApi): void {
   const subscribeNotice: LegionNoticeSubscription = async (
     targetSessionID,
     topic,
-    callerContext
+    callerContext,
+    whileHolding
   ) => {
     const context = callerContext ?? activeSessionContext;
     if (context === undefined || context.sessionManager.getSessionId() !== targetSessionID) {
@@ -979,6 +1003,12 @@ export default function envoyExtension(pi: PiApi): void {
     }
     if (sessionID !== targetSessionID) await establishSession(context);
     await subscribe(topic);
+    if (whileHolding !== undefined) {
+      const roleTopic = ROLE_TOPIC_PREFIX + whileHolding;
+      const subjects = roleNoticeSubjects.get(roleTopic) ?? new Set<string>();
+      for (const subject of expandSubscriptionTopics([topic])) subjects.add(subject);
+      roleNoticeSubjects.set(roleTopic, subjects);
+    }
     await registerSession();
   };
 

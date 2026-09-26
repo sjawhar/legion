@@ -59,18 +59,20 @@ func (e *Engine) status(ctx context.Context, tx pgx.Tx, issue record.Issue, stat
 	return e.enqueue(ctx, tx, issue.Key, record.StatusWrite{Status: status, ObservedStatus: issue.Status})
 }
 
-// notice tells the issue's topic, and a controller-kind notice is told to the controller in a row
-// of its own: the two publishes retry apart, so a controller topic that keeps failing never sends
-// the architect the same notice again.
 func (e *Engine) notice(ctx context.Context, tx pgx.Tx, issue string, notice record.Notice) error {
-	if err := e.enqueue(ctx, tx, issue, notice); err != nil {
+	return e.enqueue(ctx, tx, issue, notice)
+}
+
+// noticeWithController tells the issue's topic and, in an outbox row of its own, the project's
+// controller: the two publishes retry apart, so a controller topic that keeps failing never sends
+// the architect the same notice again. Every hold is told this way, since the architect answers one
+// with a retry or an escalation to the controller, and so is the tree architect's own failed
+// claim, since every other notice of the tree reaches that architect.
+func (e *Engine) noticeWithController(ctx context.Context, tx pgx.Tx, issue string, notice record.Notice) error {
+	if err := e.notice(ctx, tx, issue, notice); err != nil {
 		return err
 	}
-	if !notice.ForController() {
-		return nil
-	}
-	notice.Controller = true
-	return e.enqueue(ctx, tx, issue, notice)
+	return e.enqueue(ctx, tx, issue, record.ControllerNotice(notice))
 }
 
 // refused is a committed 409: the fact changed nothing, and the caller is told why.

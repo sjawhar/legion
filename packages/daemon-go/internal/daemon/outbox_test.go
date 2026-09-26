@@ -152,11 +152,11 @@ func TestOutboxNoticePublishesIssueAndTreeTopics(t *testing.T) {
 	}
 }
 
-// A controller row goes to the controller topic of the daemon's own project, the one its controller
-// subscribes to, and to no issue topic, under the row's own key. The controller reads the notice as
-// the issue topic carries it: the row's routing is not published.
+// A controller notice row goes to the controller topic of the daemon's own project, the one its
+// controller subscribes to, and to no issue topic, under the row's own key, with the notice the
+// issue topic carries.
 func TestOutboxControllerNoticeGoesToTheControllerTopicAlone(t *testing.T) {
-	row := mustOutboxRow(t, "LEGION-2", record.Notice{Kind: "held", Role: claim.RolePlanner, Phase: phase.Planning, Controller: true}, time.Now())
+	row := mustOutboxRow(t, "LEGION-2", record.ControllerNotice{Kind: "held", Role: claim.RolePlanner, Phase: phase.Planning}, time.Now())
 	row.ID = 57
 	publisher := &outboxPublisher{}
 
@@ -170,7 +170,7 @@ func TestOutboxControllerNoticeGoesToTheControllerTopicAlone(t *testing.T) {
 		t.Fatalf("controller notice keys = %v, want the row's own key", got)
 	}
 	if got, want := publisher.payloads()[0], (record.Notice{Kind: "held", Role: claim.RolePlanner, Phase: phase.Planning}); got != want {
-		t.Fatalf("controller notice payload = %+v, want the notice without its routing %+v", got, want)
+		t.Fatalf("controller notice payload = %+v, want the notice %+v", got, want)
 	}
 }
 
@@ -399,8 +399,7 @@ func TestOutboxRetryStartForAPhaseTheIssueLeftRelaunchesNothing(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	ctx := context.Background()
-	heldFrom := phase.Implementing
-	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Held, HeldFrom: &heldFrom, Generation: 1, Status: "in_progress"}
+	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Held, Hold: &record.Hold{From: phase.Implementing}, Generation: 1, Status: "in_progress"}
 	putOutboxIssue(t, pool, records, issue)
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		return records.PutPullRequest(ctx, tx, record.PullRequest{Issue: issue.Key, Repo: "acme/widgets", Number: 114, Branch: "legion/LEGION-208", HeadSHA: "f8f30933", Failing: []string{}, FailingStatuses: []string{}, State: record.PullRequestOpen})
@@ -720,8 +719,8 @@ func TestTerminalReplayAfterPersistedFailureHoldsOnceAndEmitsOneWorkerDiedNotice
 	if held != string(phase.Held) {
 		t.Fatalf("workflow phase after replay = %s, want held", held)
 	}
-	rows, err := pool.Query(context.Background(), `select payload->>'kind' || case when (payload->>'controller')::boolean then ' (controller)' else '' end
-		from outbox where kind = $1 order by id`, string(record.OutboxKindNotice))
+	rows, err := pool.Query(context.Background(), `select payload->>'kind' || case when kind = $2 then ' (controller)' else '' end
+		from outbox where kind in ($1, $2) order by id`, string(record.OutboxKindNotice), string(record.OutboxKindControllerNotice))
 	if err != nil {
 		t.Fatalf("read failure notices: %v", err)
 	}

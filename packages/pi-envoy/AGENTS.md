@@ -160,14 +160,17 @@ session goes through the controller session (`src/legion/controller-session.ts`)
 `claims/register` with the capability in place of a boot token, answered with
 `api.ControllerRegisterResponse` (`LegionGoControllerRegisterResponse`), then the Envoy role
 `legion-<project>-controller`, then a subscription to the project's controller topic
-`notifications.legion.<project>.controller` (`legionControllerNoticeSubject`, the project read back
-from the registration's claim token with `controllerProject`), then a controller grant per
-credentialed tool call from the `/grants` controller-session form with the secret the registration
-was issued. The Go daemon publishes every hold and a tree architect's failed claim on that topic.
-The subscription is a live wake and no part of either contract: no request, response or pane
-variable changes, a daemon publishes to the topic whether anyone listens, and a controller on an
-earlier release, which subscribes to nothing, still finds the same issues through `legion state`,
-which the controller skill reads at every start. A later
+`notifications.legion.<project>.controller` (`legionControllerNoticeSubject`, the project from
+`LEGION_PROJECT`), then a controller grant per credentialed tool call from the `/grants`
+controller-session form with the secret the registration was issued. What the Go daemon publishes
+on that topic is listed at `notify.ControllerTopic` (`packages/daemon-go/internal/notify`). The
+subscription lasts while the session holds the controller role (`subscribeLegionNotice`'s
+`whileHolding`): once another live session holds it, the heartbeat's refused re-assertion closes
+the subscription and drops it from the session's registry entry. It is a live wake that changes no
+request, response or pane variable, and a daemon publishes to the topic whether anyone listens. A
+controller on an earlier plugin release never runs against this daemon: contract 7 ships with the
+subscription, `legion controller start` refuses to launch an Oh My Pi whose plugin speaks another
+contract, and the daemon refuses its registration with 409. A later
 `legion controller start` mints a new capability, so the earlier session's grants stop working.
 `legion status <issue> <status>` in that session reads the grant file; from an operator shell it
 takes `--operator-token-file`, which buys a controller grant over the operator's bearer and, like
