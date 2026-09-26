@@ -14,7 +14,9 @@ export type LegionRoleClaim = (
 
 /**
  * `whileHolding` names a role this session holds: the subscription then lasts as long as the
- * session holds that role, and closes when another live session takes it.
+ * session holds that role, closes when the session stops holding it (another live session takes
+ * it, or the session moves on), and is never registered with the listener, so a resumed process
+ * gets it back only by claiming the role again.
  */
 export type LegionNoticeSubscription = (
   sessionID: string,

@@ -166,7 +166,9 @@ controller-session form with the secret the registration was issued. What the Go
 on that topic is listed at `notify.ControllerTopic` (`packages/daemon-go/internal/notify`). The
 subscription lasts while the session holds the controller role (`subscribeLegionNotice`'s
 `whileHolding`): once another live session holds it, the heartbeat's refused re-assertion closes
-the subscription and drops it from the session's registry entry. It is a live wake that changes no
+it, so a replaced controller stops taking wakes within one heartbeat. It is never registered with
+the listener, so a replaced controller resumed later gets it back only by claiming the role, which
+the daemon refuses its replaced capability. It is a live wake that changes no
 request, response or pane variable, and a daemon publishes to the topic whether anyone listens. A
 controller on an earlier plugin release never runs against this daemon: contract 7 ships with the
 subscription, `legion controller start` refuses to launch an Oh My Pi whose plugin speaks another
