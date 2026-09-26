@@ -884,6 +884,11 @@ cleanup() {
   trap '' HUP INT TERM PIPE
   exec >&7 2>&7
   set +e
+  # Teardown is best effort, and errexit off does not turn the ERR trap off: a cleanup command that
+  # fails is a warning about the teardown, never a check's FAIL line, and the exit status stays the
+  # one the checks set. Inside this EXIT trap BASH_COMMAND is still the command the trap interrupted,
+  # so the warning names the line alone.
+  trap 'printf "cleanup warning: line %s exited %s\n" "$LINENO" "$?" >&2' ERR
   stop_tree "$shape_pid"
   [ -z "$tree1" ] || record_pair >/dev/null 2>&1
   stop_pid "$daemon_pid"

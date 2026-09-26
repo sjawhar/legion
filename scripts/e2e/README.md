@@ -508,7 +508,9 @@ the run that owns it. A signal to the whole process group does not stop the remo
 - the transcript's `tee` ignores those signals;
 - the teardown ignores a second signal and SIGPIPE;
 - the teardown writes to the transcript even when the signal interrupted a command whose output
-  went to `/dev/null`.
+  went to `/dev/null`;
+- a teardown command that fails prints `cleanup warning: line N exited S`, never a check's `FAIL`
+  line, and leaves the exit status the checks set.
 - **Production NATS, stream `ENVOY_NOTIFICATIONS`**: the daemon's two durable consumers. They are
   named by the Dispatch key: `legion-go-LEGSMOKE-dispatch` (`notifications.dispatch.issue.>`) and
   `legion-go-LEGSMOKE-github` (`notifications.github.sjawhar.legion-smoke.>`).
