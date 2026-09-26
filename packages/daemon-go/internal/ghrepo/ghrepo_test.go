@@ -25,8 +25,8 @@ func TestParse(t *testing.T) {
 			t.Errorf("Parse(%q) = %s, %v, want it read as written", valid, parsed, err)
 		}
 	}
-	const owner = ` has an owner GitHub does not allow: at most 39 letters, digits, "-" and "_", beginning with a letter or digit`
-	const name = ` has a name GitHub does not allow: at most 100 letters, digits, "-", "_" and "."`
+	const owner = ` has an owner GitHub does not allow: at most 39 ASCII letters, digits, "-" and "_", beginning with a letter or digit`
+	const name = ` has a name GitHub does not allow: at most 100 ASCII letters, digits, "-", "_" and "."`
 	long := strings.Repeat("o", 40) + "/b"
 	longer := "a/" + strings.Repeat("n", 101)
 	for _, tc := range []struct{ repository, want string }{
@@ -46,6 +46,7 @@ func TestParse(t *testing.T) {
 		// URL metacharacters, which end the path of the URL a clone names.
 		{"a/b#frag", `--repo "a/b#frag"` + name},
 		{"a/b?x", `--repo "a/b?x"` + name},
+		// A percent escape, which a URL decodes into another path.
 		{"a%2F/b", `--repo "a%2F/b"` + owner},
 		// A hyphen or an underscore beginning an owner, which no login does.
 		{"-a/b", `--repo "-a/b"` + owner},
@@ -60,6 +61,13 @@ func TestParse(t *testing.T) {
 		{">/b", `--repo ">/b"` + owner},
 		// Dots in an owner, which GitHub allows only in a repository's name.
 		{".acme/b", `--repo ".acme/b"` + owner},
+		// A lookalike letter, printed escaped beside the rule it breaks.
+		{"\u0430cme/widgets", `--repo "\u0430cme/widgets"` + owner},
+		{"acme/wid\u0433ets", `--repo "acme/wid\u0433ets"` + name},
+		// A name ending in ".git", which GitHub strips at creation: its API answers 404 for the
+		// suffixed name, and its events name the repository without it.
+		{"acme/widgets.git", `--repo "acme/widgets.git" ends in ".git", which GitHub strips from a repository's name: name it "acme/widgets"`},
+		{"a/.git", `--repo "a/.git" ends in ".git", which GitHub strips from a repository's name: name it "a/"`},
 	} {
 		if _, err := Parse("--repo", tc.repository); err == nil || err.Error() != tc.want {
 			t.Errorf("Parse(%q) = %v, want %q", tc.repository, err, tc.want)

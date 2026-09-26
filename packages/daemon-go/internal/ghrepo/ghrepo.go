@@ -64,10 +64,14 @@ func MustParse(repository string) Repository {
 // must be exactly `<owner>/<name>`, both names non-empty and neither holding whitespace; neither
 // may be `.` or `..`, which joined under a state directory would name another directory than the
 // repository's (and provisioning removes an incomplete clone at that path); and each must be one
-// GitHub serves. That last rule keeps out what a GitHub name never holds but a path, a URL, a NATS
-// subject or a terminal would act on: control bytes, `#` and `?`, a hyphen or underscore beginning
-// an owner, a name past GitHub's length limit, and the NATS wildcards `*` and `>`, with which
-// intake's `notifications.github.<owner>.<name>.>` filter would match other repositories' events.
+// GitHub serves. That last rule keeps out what a GitHub name never holds but a terminal, a URL or a
+// NATS subject would act on: control bytes; `#`, `?` and `%`, which end or rewrite a URL's path;
+// and the NATS wildcards `*` and `>`, with which intake's `notifications.github.<owner>.<name>.>`
+// filter would match other repositories' events. It also refuses what GitHub serves no repository
+// under, at no cost: an owner beginning with `-` or `_`, a non-ASCII lookalike letter, a name past
+// GitHub's length limits, and a name ending in `.git`, which GitHub strips at creation, so the API
+// answers 404 for the suffixed name and events name the repository without it. The value is printed
+// with every non-ASCII rune escaped, so a lookalike shows as what it is.
 func Parse(what, repository string) (Repository, error) {
 	owner, name, found := strings.Cut(repository, "/")
 	if !found || owner == "" || name == "" || strings.Contains(name, "/") {
@@ -82,10 +86,13 @@ func Parse(what, repository string) (Repository, error) {
 		}
 	}
 	if !ownerName.MatchString(owner) {
-		return Repository{}, fmt.Errorf(`%s %q has an owner GitHub does not allow: at most 39 letters, digits, "-" and "_", beginning with a letter or digit`, what, repository)
+		return Repository{}, fmt.Errorf(`%s %+q has an owner GitHub does not allow: at most 39 ASCII letters, digits, "-" and "_", beginning with a letter or digit`, what, repository)
 	}
 	if !repositoryName.MatchString(name) {
-		return Repository{}, fmt.Errorf(`%s %q has a name GitHub does not allow: at most 100 letters, digits, "-", "_" and "."`, what, repository)
+		return Repository{}, fmt.Errorf(`%s %+q has a name GitHub does not allow: at most 100 ASCII letters, digits, "-", "_" and "."`, what, repository)
+	}
+	if strings.HasSuffix(name, ".git") {
+		return Repository{}, fmt.Errorf(`%s %+q ends in ".git", which GitHub strips from a repository's name: name it %+q`, what, repository, strings.TrimSuffix(repository, ".git"))
 	}
 	return Repository{owner: owner, name: name}, nil
 }
