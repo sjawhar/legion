@@ -18,6 +18,10 @@ envoy_subscribe([
 ])
 ```
 
+The owner and the repository are one token each, with every dot in the name written `_`:
+`acme/site.io`'s PR family is `notifications.github.acme.site_io.pr.42.>`, and a topic spelled
+`acme.site.io` receives nothing.
+
 NATS `>` matches **one or more** trailing tokens, so it does not match the lifecycle base
 `pr.42` itself. Envoy registers that concrete base automatically when you subscribe to
 `<subject>.>`, making `pr.<n>.>` the recommended default: one call receives both the lifecycle
@@ -137,7 +141,10 @@ envoy_subscribe([
 
 A warning says no GitHub event for that repository occurred within the stream's 72-hour retention
 window; it does not mean the repository was never seen. Verify the GitHub App is installed before
-relying on a wakeup.
+relying on a wakeup. A topic that spells a repository name with its dot, followed by a kind, draws
+a warning naming the spelling Envoy publishes (`acme.site_io` for `acme/site.io`); subscribe to
+that one instead. A token after the repository that is not a GitHub topic kind (`checks` in
+`acme.widgets.checks.>`) draws a warning naming the kinds.
 
 ## Roles
 

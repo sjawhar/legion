@@ -229,10 +229,10 @@ export const LegionGoErrorResponse = z.union([
   z.strictObject({ code: nonEmptyString, error: nonEmptyString }),
 ]);
 
-/** `api.DeliveryView` — the claim's pending task; `deliveredAt` is the latest send's
- * acknowledgement, and with it whether the agent may have read this task (a refusal clears it,
- * since an agent that refused a prompt never read it), and `confirmedAt` the turn it started,
- * each absent until it happens. `phase` is the issue phase the task was queued for, which is what
+/** `api.DeliveryView` — the claim's pending task; `deliveredAt` is the latest acknowledgement of
+ * this task's prompt, and with it whether the agent may have read the task (a refusal of that
+ * prompt clears it, since an agent that refused it never read it), and `confirmedAt` the turn a
+ * send started, each absent until it happens. `phase` is the issue phase the task was queued for, which is what
  * says whether it is still the work to do; a task of no phase — an operator's own, an
  * architect's — carries none. */
 const legionGoDeliveryView = z.strictObject({
@@ -242,6 +242,7 @@ const legionGoDeliveryView = z.strictObject({
   queuedAt: timestamp,
   deliveredAt: timestamp.optional(),
   confirmedAt: timestamp.optional(),
+  interrupted: z.literal(true).optional(),
 });
 
 /** `api.OperatorClaim`, the body of the operator routes that act on one claim (`POST
@@ -259,6 +260,7 @@ export const LegionGoOperatorClaimResponse = z.strictObject({
   locator: legionGoLocator.optional(),
   budgets: z.strictObject({
     launchFailures: z.number().int().nonnegative(),
+    deaths: z.number().int().nonnegative(),
     promptFailures: z.number().int().nonnegative(),
     promptRetires: z.number().int().nonnegative(),
   }),

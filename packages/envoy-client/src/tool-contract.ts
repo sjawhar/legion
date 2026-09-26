@@ -16,7 +16,10 @@ const TOPIC_GUIDE =
   "Topic guide (all are under notifications.): agent.<session_id> (subscribe: own inbox); role.<role> " +
   "(publish-to; holders claim via envoy_role_set). > matches one or more trailing tokens and does not " +
   "match the base subject. Envoy registers the concrete base when you subscribe to <subject>.>, so " +
-  "the recommended default remains github.<owner>.<repo>.pr.<n>.>. Default PR subscription: " +
+  "the recommended default remains github.<owner>.<repo>.pr.<n>.>. <owner> and <repo> are one token " +
+  "each, with every dot in the name written _ (sjawhar/.github is github.sjawhar._github; " +
+  "acme/site.io is github.acme.site_io), and a topic spelled with the dot receives nothing. " +
+  "Default PR subscription: " +
   "github.<owner>.<repo>.pr.<n>.> (it receives the quiet PR family): pr.<n> (lifecycle: " +
   "opened/synchronize/closed; closed carries merged, merge_commit_sha, merged_by, head_sha), " +
   "pr.<n>.comment, pr.<n>.review, pr.<n>.mention, pr.<n>.checks (one head-checks settlement event: " +

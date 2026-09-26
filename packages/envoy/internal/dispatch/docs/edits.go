@@ -755,7 +755,14 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 				return nil, err
 			}
 		}
-		return pmdoc.Splice(tree, pmdoc.Range{From: position, To: position}, with)
+		out, err := pmdoc.Splice(tree, pmdoc.Range{From: position, To: position}, with)
+		if err != nil {
+			return nil, err
+		}
+		if err := pmdoc.RepeatedBlockID(tree, out, with); err != nil {
+			return nil, &ErrInvalidOp{Field: "markdown", Reason: err.Error()}
+		}
+		return out, nil
 	case "delete_row":
 		if op.Block == "" {
 			return nil, invalidOp("block")
@@ -1028,7 +1035,7 @@ func inlineReplacement(markdown string) (*pmdoc.Node, error) {
 	inline, err := pmdoc.ParseInline(markdown)
 	if err != nil {
 		if errors.Is(err, pmdoc.ErrSchema) {
-			return nil, &ErrInvalidOp{Field: "with", Reason: fmt.Sprintf("replace is inline; %v (paragraphs: give each one its own replace, then insert any extra paragraphs after the last one you rewrote; a heading, list, table or code fence: replace keeps a block's kind, so insert it beside a paragraph you replace, and delete the old block only when no paragraph of the new text is left to take its place)", err)}
+			return nil, &ErrInvalidOp{Field: "with", Reason: fmt.Sprintf("replace is inline; %v (paragraphs: give each one its own replace, then add every extra paragraph in one insert anchored on the last paragraph you rewrote; an insert lands after the top-level block holding the quote, so beside a paragraph in a list it goes after the whole list; any block that is not a paragraph: replace keeps a block's kind, so insert it beside a paragraph you replace, and delete the old block only when no paragraph of the new text is left to take its place)", err)}
 		}
 		return nil, err
 	}

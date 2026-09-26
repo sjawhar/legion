@@ -21,9 +21,9 @@ var _ supervise.Store = (*Store)(nil)
 // claimSelect reads a claim with the delivery pending on it, if any: the two tables are written
 // separately (a delivery changes far more often than the claim it rides on) and read together.
 const claimSelect = `select c.token, c.project, c.tree, c.issue, c.role, c.generation, c.session,
-	c.session_file, c.locator, c.state, c.launch_failures, c.prompt_failures, c.prompt_retires,
+	c.session_file, c.locator, c.state, c.launch_failures, c.deaths, c.prompt_failures, c.prompt_retires,
 	c.boot_token_hash, c.capability_hash, c.uncertain_streak, c.workspace_lost, c.last_start_row, c.serving_generation,
-	d.delivery_id, d.task, d.phase, d.generation, d.queued_at, d.delivered_at, d.confirmed_at
+	d.delivery_id, d.task, d.phase, d.generation, d.queued_at, d.delivered_at, d.marked_by, d.confirmed_at, d.interrupted
 	from claims c left join pending_task_deliveries d on d.claim_token = c.token`
 
 // PutClaim writes a claim, replacing the row its token names. The pending delivery is not part of
@@ -47,15 +47,16 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 		locator = encoded
 	}
 	_, err := db.Exec(ctx, `insert into claims (token, project, tree, issue, role, generation,
-		session, session_file, locator, state, launch_failures, prompt_failures, prompt_retires,
+		session, session_file, locator, state, launch_failures, deaths, prompt_failures, prompt_retires,
 		boot_token_hash, capability_hash, uncertain_streak, workspace_lost, last_start_row,
 		serving_generation)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
 		on conflict (token) do update set project = excluded.project, tree = excluded.tree,
 		issue = excluded.issue, role = excluded.role, generation = excluded.generation,
 		session = excluded.session, session_file = excluded.session_file,
 		locator = excluded.locator, state = excluded.state,
-		launch_failures = excluded.launch_failures, prompt_failures = excluded.prompt_failures,
+		launch_failures = excluded.launch_failures, deaths = excluded.deaths,
+		prompt_failures = excluded.prompt_failures,
 		prompt_retires = excluded.prompt_retires, boot_token_hash = excluded.boot_token_hash,
 		capability_hash = excluded.capability_hash, uncertain_streak = excluded.uncertain_streak,
 		workspace_lost = excluded.workspace_lost, last_start_row = excluded.last_start_row,
@@ -63,7 +64,7 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 		updated_at = now()`,
 		string(c.Token), c.Project, c.Tree, c.Issue, string(c.Role), int64(c.Generation),
 		c.Session, c.SessionFile, locator, string(c.State),
-		c.Budgets.LaunchFailures, c.Budgets.PromptFailures, c.Budgets.PromptRetires,
+		c.Budgets.LaunchFailures, c.Budgets.Deaths, c.Budgets.PromptFailures, c.Budgets.PromptRetires,
 		c.BootTokenHash, c.CapabilityHash, c.UncertainStreak, c.WorkspaceLost, c.LastStartRow, int64(c.ServingGeneration),
 	)
 	if err != nil {
@@ -121,12 +122,15 @@ func putDelivery(ctx context.Context, db execer, token claim.Token, d supervise.
 		return fmt.Errorf("put delivery %s on %s: generation %d does not fit a bigint", d.ID, token, d.Generation)
 	}
 	_, err := db.Exec(ctx, `insert into pending_task_deliveries (claim_token, delivery_id, task,
-		phase, generation, queued_at, delivered_at, confirmed_at) values ($1, $2, $3, $4, $5, $6, $7, $8)
+		phase, generation, queued_at, delivered_at, marked_by, confirmed_at, interrupted)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		on conflict (claim_token) do update set delivery_id = excluded.delivery_id,
 		task = excluded.task, phase = excluded.phase, generation = excluded.generation,
 		queued_at = excluded.queued_at,
-		delivered_at = excluded.delivered_at, confirmed_at = excluded.confirmed_at`,
-		string(token), d.ID, d.Task, string(d.Phase), int64(d.Generation), d.QueuedAt, instant(d.DeliveredAt), instant(d.ConfirmedAt),
+		delivered_at = excluded.delivered_at, marked_by = excluded.marked_by, confirmed_at = excluded.confirmed_at,
+		interrupted = excluded.interrupted`,
+		string(token), d.ID, d.Task, string(d.Phase), int64(d.Generation), d.QueuedAt, instant(d.DeliveredAt), d.MarkedBy,
+		instant(d.ConfirmedAt), d.Interrupted,
 	)
 	if err != nil {
 		return fmt.Errorf("put delivery %s on %s: %w", d.ID, token, err)
@@ -178,17 +182,19 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 		generation          int64
 		locator             []byte
 		deliveryID, task    *string
+		markedBy            *string
 		deliveryPhase       *string
 		deliveryGeneration  *int64
 		servingGeneration   int64
 		queuedAt, delivered *time.Time
 		confirmed           *time.Time
+		interrupted         *bool
 	)
 	err := row.Scan(&token, &c.Project, &c.Tree, &c.Issue, &role, &generation, &c.Session,
-		&c.SessionFile, &locator, &state, &c.Budgets.LaunchFailures, &c.Budgets.PromptFailures,
+		&c.SessionFile, &locator, &state, &c.Budgets.LaunchFailures, &c.Budgets.Deaths, &c.Budgets.PromptFailures,
 		&c.Budgets.PromptRetires, &c.BootTokenHash, &c.CapabilityHash, &c.UncertainStreak, &c.WorkspaceLost,
 		&c.LastStartRow, &servingGeneration,
-		&deliveryID, &task, &deliveryPhase, &deliveryGeneration, &queuedAt, &delivered, &confirmed)
+		&deliveryID, &task, &deliveryPhase, &deliveryGeneration, &queuedAt, &delivered, &markedBy, &confirmed, &interrupted)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return supervise.Claim{}, err
 	}
@@ -215,7 +221,9 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 			Generation:  uint64(orZeroInt(deliveryGeneration)),
 			QueuedAt:    *queuedAt,
 			DeliveredAt: orZero(delivered),
+			MarkedBy:    *markedBy,
 			ConfirmedAt: orZero(confirmed),
+			Interrupted: orFalse(interrupted),
 		}
 	}
 	return c, nil
@@ -227,6 +235,12 @@ func instant(t time.Time) *time.Time {
 		return nil
 	}
 	return &t
+}
+
+// orFalse is a nullable boolean column read as false when null: the left join's delivery columns
+// are all null for a claim with no pending delivery.
+func orFalse(value *bool) bool {
+	return value != nil && *value
 }
 
 func orZeroInt(value *int64) int64 {

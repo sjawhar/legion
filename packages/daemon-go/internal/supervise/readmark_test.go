@@ -370,3 +370,50 @@ func TestAnUnacknowledgedResendLeavesTheGivenUpPromptsRefusalToClearTheMark(t *t
 		})
 	}
 }
+
+// A refusal arrives once, so what it establishes about the task holds in memory even when the
+// write recording it fails: settle and ServingRun read the claim as memory holds it, and nothing
+// will take the task back a second time. A busy refusal leaves the task unconfirmed, so the end of
+// the notice's turn that confirmed it does not retire it as served; it is sent again instead.
+func TestABusyRefusalWhoseWriteFailsLeavesTheTaskToBeSentAgain(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateReady)
+	h.must(RequestDeliver{Claim: testToken, Task: "implement the plan", Generation: 5})
+	sent := h.wantPrompts(1)[0].DeliveryID
+	h.must(StreamTurnStart{Claim: testToken})
+
+	h.store.fail("PutDelivery", errBoom)
+	if err := h.handle(StreamLateRefusal{Claim: testToken, DeliveryID: sent, Error: "Agent is already processing a request"}); err == nil {
+		t.Fatal("the refusal reported success with the delivery write failing")
+	}
+	h.store.fail("PutDelivery", nil)
+	h.must(StreamTurnEnd{Claim: testToken})
+
+	if p := h.claim().Pending; p == nil || h.claim().ServingGeneration != 0 {
+		t.Fatalf("after the notice's turn: pending %+v serving run %d, want the task kept and no run served",
+			p, h.claim().ServingGeneration)
+	}
+	h.wantPrompts(2)
+}
+
+// An idle refusal says the agent never read the task, so the task loses its read mark in memory
+// even when the write recording that fails: a claim serving no run must not have a completion
+// credited to a task it refused (ServingRun).
+func TestAnIdleRefusalWhoseWriteFailsDropsTheReadMark(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateReady)
+	h.must(RequestDeliver{Claim: testToken, Task: "implement the plan", Generation: 5})
+	sent := h.wantPrompts(1)[0].DeliveryID
+
+	h.store.fail("PutDelivery", errBoom)
+	if err := h.handle(StreamLateRefusal{Claim: testToken, DeliveryID: sent, Error: "the model provider refused the request"}); err == nil {
+		t.Fatal("the refusal reported success with the delivery write failing")
+	}
+
+	if p := h.pending(); !p.DeliveredAt.IsZero() {
+		t.Fatalf("pending after the refusal = %+v, want the read mark gone", p)
+	}
+	if run := h.claim().ServingRun(); run != 0 {
+		t.Fatalf("ServingRun() = %d after the refusal, want 0", run)
+	}
+}

@@ -24,6 +24,8 @@ related_issues:
 
 # A run-local workaround is flagged, printed, recorded, and a close criterion
 
+> `scripts/kind-smoke/` and the in-cluster manifests under `deploy/kubernetes/daemon/` were removed with the TypeScript daemon's Kubernetes mode (LEGION-286); the paths below are as they stood at `4fdd9646`.
+
 The kind smoke's first real run could not get past its resume checkpoint: on the worker image's
 git 2.47, the `credential.interactive=false` that provisioning writes into the tree's shared clone
 makes the *next* pod's init container fail its `jj git fetch` with `unable to get password from
