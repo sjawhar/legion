@@ -14,7 +14,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -58,8 +57,9 @@ const (
 	// every pane's shim dials under tmux (decision 2 — no configuration key).
 	streamSocket = "worker-stream.sock"
 	// orphanSweepInterval and orphanGrace are the shipped periodic reconciliation
-	// (packages/daemon/src/daemon/index.ts:79 and processes.ts:309): every minute, a Legion
-	// process nothing records is ended once it has idled for two.
+	// (LINGER_SWEEP_INTERVAL_MS, the tick that runs reconcileOrphans in
+	// packages/daemon/src/daemon/index.ts, and ORPHAN_RECONCILIATION_GRACE_MS in processes.ts):
+	// every minute, a Legion process nothing records is ended once it has idled for two.
 	orphanSweepInterval = time.Minute
 	orphanGrace         = 2 * time.Minute
 	// bootOrphanReconcileAttempts bounds the immediate retry before a previously unrecorded
@@ -325,7 +325,7 @@ type plan struct {
 	// gate, and roleReferences the task agents and skills its prompts name (promptrefs.Roles), which
 	// the gate on either runtime resolves beside the plugin's own.
 	rolesDir       string
-	roleReferences string
+	roleReferences promptrefs.Names
 	// stream is the worker stream's address: the listener binds it, and every agent's shim dials it.
 	stream     string
 	newRuntime runtimeFactory
@@ -584,10 +584,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		cancelStream()
 		return nil, fmt.Errorf("build the %s runtime: %w", cfg.Runtime.Name, err)
 	}
-	repo := ""
-	if configured, ok := cfg.Projects[cfg.Project]; ok {
-		repo = configured.Repo
-	}
+	repo := cfg.Projects[cfg.Project].Repo
 
 	sup.deps = supervise.Deps{
 		Runtime: rt,
@@ -856,11 +853,11 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 }
 
 // watchController is the daemon's one line about the controller it never launches, under either
-// runtime (the shipped logControllerNotRegistered, packages/daemon/src/daemon/processes.ts:
-// 2891-2904): every sweep interval it reads the project's controller record, and when no session
-// holds it, or the Envoy role registry says the session is gone, it says so and how to start one,
-// at most once per worker boot timeout. The Prober logs why each Gone or Unknown verdict was
-// reached; Unknown is never a death verdict, so it says nothing more.
+// runtime (the shipped ProcessManager.logControllerNotRegistered,
+// packages/daemon/src/daemon/processes.ts): every sweep interval it reads the project's controller
+// record, and when no session holds it, or the Envoy role registry says the session is gone, it
+// says so and how to start one, at most once per worker boot timeout. The Prober logs why each
+// Gone or Unknown verdict was reached; Unknown is never a death verdict, so it says nothing more.
 func watchController(ctx context.Context, st *store.Store, cfg config.Config, p plan, log *slog.Logger) {
 	prober := controller.NewProber(controller.ProberOptions{
 		EnvoyURL: cfg.EnvoyURL, EnvoyToken: p.secrets["ENVOY_TOKEN"], Project: p.project, BootTimeout: cfg.WorkerBootTimeout, Log: log,
@@ -972,10 +969,5 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 // githubOwner is the owner of the configured project's repository: the account both GitHub Apps
 // are installed on. A Stage 2 configuration has no repository and so no owner.
 func githubOwner(cfg config.Config) string {
-	project, ok := cfg.Projects[cfg.Project]
-	if !ok {
-		return ""
-	}
-	owner, _, _ := strings.Cut(project.Repo, "/")
-	return owner
+	return cfg.Projects[cfg.Project].Repo.Owner()
 }

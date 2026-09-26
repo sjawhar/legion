@@ -190,6 +190,7 @@ export const dispatchToolSpecs = [
     example: { project: "DSP", title: "Native workspace" },
     description:
       "Create a native Dispatch issue for newly tracked work. Search first with dispatch_search; if potentially duplicate issues exist, this returns 409 POSSIBLE_DUPLICATE unless force is true after reading them. " +
+      "A spec holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK. " +
       `Do not use it when an existing issue already covers the work; read or update that issue instead. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
       project: z.string().describe("Project key for the new issue."),
@@ -391,8 +392,9 @@ export const dispatchToolSpecs = [
       "only the fields you name - pass urgency alone and the question's wording, formatting, links " +
       "and comment anchors are untouched - so the edit writes a document version and closes a " +
       "spec's design gate until that version is " +
-      'approved; an option label containing ": " and a question with a line beginning ":::" are ' +
-      "refused, naming the field, because the block cannot carry them unchanged.",
+      "approved; text the block cannot carry back unchanged is refused, naming the field - an " +
+      'option label containing ": ", the separator between a label and its description, is one ' +
+      "example.",
     arguments: (z) => ({
       ask: z
         .string()
@@ -625,6 +627,7 @@ export const dispatchToolSpecs = [
       "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " +
       'Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; block ids and their tokens come from GET /api/v1/artifacts/{artifact UUID}/blocks (the route takes the artifact UUID, not its slug). ' +
       "Optionally require the state just read: precondition selects exactly one of a document token from dispatch_doc_read, or block {id, token} values from /blocks. A block guard must include every block the batch changes; Dispatch resolves quote targets and rejects an uncovered batch rather than applying it. Use a document token for insert or move, which depend on document order. Prefer block tokens when the covered content blocks are independent sections. Tokens include inline marks, so a fresh human comment also makes a stale edit fail. PRECONDITION_FAILED means re-read; EDIT_QUEUE_FULL means back off before retrying. " +
+      "The result carries the document token this edit produced, so a chain of guarded edits passes each result's token as the next edit's precondition with no dispatch_doc_read between them. " +
       "A batch that leaves the document exactly as it was mints no version, named or not, and the result says nothing changed and names each operation that did nothing. " +
       `The spec (or any document) holds requirements, design, and decisions - never progress, status, or timestamps. ${OWNER_REFERENCE} ${SPEC_WRITING_GUIDANCE}`,
     arguments: (z) => ({
@@ -771,7 +774,9 @@ export const dispatchToolSpecs = [
     example: { issue: "DSP-1", name: "design.md", content: "# Design\n" },
     description:
       "Attach a local file or inline text as an issue artifact or project document. Do not use it to edit a live document; use " +
-      `dispatch_doc_edit instead. Exactly one of path or content is required; artifacts are limited to 25 MiB. ${OWNER_REFERENCE}`,
+      "dispatch_doc_edit instead. Exactly one of path or content is required; artifacts are limited to 25 MiB. " +
+      "Markdown holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK; a new version of a document is held to it only for the asks it writes or changes. " +
+      `${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key for an unlinked document.").optional(),

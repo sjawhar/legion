@@ -21,11 +21,13 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/client-go/dynamic"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 )
@@ -98,7 +100,7 @@ func testSpec(t *testing.T, token claim.Token, role claim.Role, issue string) ru
 			RolePromptPaths: []string{rolePrompt}, Addressing: "Legion addressing: your role topic is `notifications.role." + string(token) + "`.",
 			DeploymentInstructionsPath: instructions,
 		},
-		Repository: "sjawhar/legion-smoke",
+		Repository: ghrepo.MustParse("sjawhar/legion-smoke"),
 	}
 }
 
@@ -152,6 +154,8 @@ type rig struct {
 	suspendDelay time.Duration
 	// noController leaves every object as the test wrote it.
 	noController bool
+	// hooks, when set, sees the runtime's Sandbox gets and deletes (withSandboxHooks).
+	hooks *sandboxHooks
 }
 
 type rigOption func(*rig, *Options)
@@ -160,6 +164,54 @@ func withOptions(edit func(*Options)) rigOption { return func(_ *rig, o *Options
 
 // withoutController runs no controller stand-in: the objects stay as the test wrote them.
 func withoutController() rigOption { return func(g *rig, _ *Options) { g.noController = true } }
+
+// sandboxHooks runs beforeDelete as the runtime asks to delete a Sandbox and afterGet once a get
+// of one returns, outside the fake client's lock, which the fake holds across a whole call.
+type sandboxHooks struct {
+	beforeDelete, afterGet func(name string)
+}
+
+// withSandboxHooks hands the runtime a dynamic client that runs h around its Sandbox calls.
+func withSandboxHooks(h *sandboxHooks) rigOption { return func(g *rig, _ *Options) { g.hooks = h } }
+
+// hookedDynamic embeds the fake itself, not dynamic.Interface, so the informers still see the
+// fake's IsWatchListSemanticsUnSupported and list and watch rather than stream a watch-list.
+type hookedDynamic struct {
+	*dynamicfake.FakeDynamicClient
+	hooks *sandboxHooks
+}
+
+func (d hookedDynamic) Resource(gvr schema.GroupVersionResource) dynamic.NamespaceableResourceInterface {
+	if gvr != sandboxGVR {
+		return d.FakeDynamicClient.Resource(gvr)
+	}
+	return hookedResource{d.FakeDynamicClient.Resource(gvr), d.hooks}
+}
+
+type hookedResource struct {
+	dynamic.NamespaceableResourceInterface
+	hooks *sandboxHooks
+}
+
+func (h hookedResource) Namespace(ns string) dynamic.ResourceInterface {
+	return hookedSandboxes{h.NamespaceableResourceInterface.Namespace(ns), h.hooks}
+}
+
+type hookedSandboxes struct {
+	dynamic.ResourceInterface
+	hooks *sandboxHooks
+}
+
+func (h hookedSandboxes) Delete(ctx context.Context, name string, opts metav1.DeleteOptions, subresources ...string) error {
+	h.hooks.beforeDelete(name)
+	return h.ResourceInterface.Delete(ctx, name, opts, subresources...)
+}
+
+func (h hookedSandboxes) Get(ctx context.Context, name string, opts metav1.GetOptions, subresources ...string) (*unstructured.Unstructured, error) {
+	u, err := h.ResourceInterface.Get(ctx, name, opts, subresources...)
+	h.hooks.afterGet(name)
+	return u, err
+}
 
 func newRig(t *testing.T, objects []k8sruntime.Object, options ...rigOption) *rig {
 	t.Helper()
@@ -195,7 +247,11 @@ func newRig(t *testing.T, objects []k8sruntime.Object, options ...rigOption) *ri
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := r.start(ctx, g.dyn, g.kube); err != nil {
+	var dyn dynamic.Interface = g.dyn
+	if g.hooks != nil {
+		dyn = hookedDynamic{g.dyn, g.hooks}
+	}
+	if err := r.start(ctx, dyn, g.kube); err != nil {
 		t.Fatal(err)
 	}
 	g.r = r

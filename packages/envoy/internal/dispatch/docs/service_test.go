@@ -274,11 +274,12 @@ func TestSettlementRecordsMalformedAskAndRepairsIt(t *testing.T) {
 	}
 }
 
+// A browser edit can put a block an ask's body does not allow into it; settlement keeps the block
+// and flags it instead of indexing it.
 func TestSettlementMarksUnsupportedAskBodyInvalid(t *testing.T) {
 	service, artifactID := newTestService(t)
-	service.settle = time.Hour
-	seedServiceText(t, service, artifactID, ":::ask{#ask-heading urgency=\"med\" multiple=\"false\" state=\"open\"}\nShould we ship?\n\n## Not an option\n:::\n")
-	service.settleRoom(artifactID, 0)
+	seedServiceText(t, service, artifactID, ":::ask{#ask-heading urgency=\"med\" multiple=\"false\" state=\"open\"}\nShould we ship?\n:::\n")
+	editLiveTree(t, service, artifactID, appendToAsk(&pmdoc.Node{Type: "heading", Attrs: pmdoc.Attrs{"level": float64(2)}, Children: []*pmdoc.Node{{Type: "text", Text: "Not an option"}}}))
 
 	waitForDocumentVersion(t, service.store, artifactID, 2)
 	const reason = `ask block "ask-heading" has unsupported body node "heading"`
@@ -293,6 +294,190 @@ func TestSettlementMarksUnsupportedAskBodyInvalid(t *testing.T) {
 	}
 	if asks != 0 {
 		t.Fatalf("unsupported ask rows = %d, want none", asks)
+	}
+}
+
+// firstAsk is the document's first top-level ask.
+func firstAsk(tree *pmdoc.Node) *pmdoc.Node {
+	for _, child := range tree.Children {
+		if child.Type == "ask" {
+			return child
+		}
+	}
+	panic("the document holds no ask")
+}
+
+// setAskAttrs sets attributes on the document's first ask, as settlement or an answer does.
+func setAskAttrs(attrs pmdoc.Attrs) func(*pmdoc.Node) *pmdoc.Node {
+	return func(tree *pmdoc.Node) *pmdoc.Node {
+		for name, value := range attrs {
+			firstAsk(tree).Attrs[name] = value
+		}
+		return tree
+	}
+}
+
+// appendToAsk adds a block to the end of the document's first ask, as a browser edit can.
+func appendToAsk(block *pmdoc.Node) func(*pmdoc.Node) *pmdoc.Node {
+	return func(tree *pmdoc.Node) *pmdoc.Node {
+		ask := firstAsk(tree)
+		ask.Children = append(ask.Children, block)
+		return tree
+	}
+}
+
+func codeBlockNode(text string) *pmdoc.Node {
+	return &pmdoc.Node{Type: "code_block", Attrs: pmdoc.Attrs{"language": nil}, Children: []*pmdoc.Node{{Type: "text", Text: text}}}
+}
+
+// A version's markdown carries what a rendering writes, and an upload's server-owned ask
+// attributes are discarded for the ask row's, so an unreadable ask it carries through unchanged is
+// taken whatever the live ask holds besides: a comment's anchor mark in its text, the id a
+// reader's browser derives for a heading in it, or the answer or resolution the ask was given.
+func TestReplaceCarriesAnUnreadableAskWithWhatNoRenderingWrites(t *testing.T) {
+	const ask = "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nShould we ship this week?\n:::\n"
+	actor := model.Actor{Kind: "user", ID: "alice"}
+	for _, test := range []struct {
+		name  string
+		setup func(t *testing.T, service *Service, artifactID string)
+	}{
+		{"a comment anchored in its question", func(t *testing.T, service *Service, artifactID string) {
+			if _, err := service.MarkQuote(context.Background(), artifactID, MarkSpec{Kind: MarkComment, ID: "c1", By: actor}, "this week", nil); err != nil {
+				t.Fatal(err)
+			}
+			editLiveTree(t, service, artifactID, appendToAsk(codeBlockNode("code")))
+		}},
+		{"a heading with the id a browser derived", func(t *testing.T, service *Service, artifactID string) {
+			editLiveTree(t, service, artifactID, appendToAsk(&pmdoc.Node{Type: "heading", Attrs: pmdoc.Attrs{"level": float64(2), "id": "decision"}, Children: []*pmdoc.Node{{Type: "text", Text: "Decision"}}}))
+		}},
+		{"an answered ask", func(t *testing.T, service *Service, artifactID string) {
+			editLiveTree(t, service, artifactID, setAskAttrs(pmdoc.Attrs{"state": "answered", "answered_by": "alice", "answered_at": "2026-09-12T13:20:00Z", "selected": []string{"Ship"}, "answer": "Ship it."}))
+			editLiveTree(t, service, artifactID, appendToAsk(codeBlockNode("code")))
+		}},
+		{"a resolved ask", func(t *testing.T, service *Service, artifactID string) {
+			editLiveTree(t, service, artifactID, setAskAttrs(pmdoc.Attrs{"state": "resolved"}))
+			editLiveTree(t, service, artifactID, appendToAsk(codeBlockNode("code")))
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			service.settle = time.Hour
+			seedServiceText(t, service, artifactID, ask)
+			test.setup(t, service, artifactID)
+			current, err := service.Text(context.Background(), artifactID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := service.ReplaceText(context.Background(), artifactID, strings.Replace(current, "Intro.", "Introduction.", 1), actor); err != nil {
+				t.Fatalf("ReplaceText carrying the unreadable ask = %v, want it taken", err)
+			}
+		})
+	}
+}
+
+// A refused seed leaves no room behind. A room leaves the service only when it is evicted, and every
+// room counts toward the live-room limit, so a room made for a document that was never written
+// would hold a slot for good.
+func TestARefusedSeedLeavesNoRoom(t *testing.T) {
+	for _, test := range []struct{ name, markdown string }{
+		{"an ask breaking its content rule", "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich?\n\n```\ncode\n```\n:::\n"},
+		{"markdown outside the schema", "<div>\nblock html\n</div>\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			tx, err := service.store.Pool.Begin(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback(context.Background())
+			seedCtx, ledger := service.Join(context.Background(), tx)
+			defer ledger.Discard()
+			if _, err := service.SeedText(seedCtx, artifactID, test.markdown, model.Actor{Kind: "user", ID: "alice"}); err == nil {
+				t.Fatal("SeedText took the markdown, want it refused")
+			}
+			if _, ok := service.rooms.Load(artifactID); ok {
+				t.Fatal("the refused seed left a room for the document")
+			}
+		})
+	}
+}
+
+// An ask body the schema does not allow - `paragraph+ bullet_list?` - is refused where markdown
+// enters a document, as the browser editor's parser refuses to build the block; a replace of the
+// document refuses it the same way and leaves the document as it was.
+func TestSeedAndReplaceRefuseAnAskBodyTheSchemaDoesNotAllow(t *testing.T) {
+	const withCode = "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich?\n\n```\ncode\n```\n:::\n"
+	service, artifactID := newTestService(t)
+	tx, err := service.store.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedCtx, ledger := service.Join(context.Background(), tx)
+	_, err = service.SeedText(seedCtx, artifactID, withCode, model.Actor{Kind: "user", ID: "seed"})
+	ledger.Discard()
+	_ = tx.Rollback(context.Background())
+	var invalid *ErrInvalidAskBlock
+	if !errors.As(err, &invalid) || !strings.Contains(err.Error(), "a code block") || !strings.Contains(err.Error(), "paragraph+ bullet_list?") {
+		t.Fatalf("SeedText(ask holding code) = %v, want ErrInvalidAskBlock naming the code block and the rule", err)
+	}
+
+	seedServiceText(t, service, artifactID, "Intro.\n")
+	if _, err := service.ReplaceText(context.Background(), artifactID, withCode, model.Actor{Kind: "user", ID: "alice"}); !errors.As(err, &invalid) {
+		t.Fatalf("ReplaceText(ask holding code) = %v, want ErrInvalidAskBlock", err)
+	}
+	if markdown, err := service.Text(context.Background(), artifactID); err != nil || markdown != "Intro.\n" {
+		t.Fatalf("after a refused replace = %q (%v), want it unchanged", markdown, err)
+	}
+}
+
+// A new version that carries an ask a browser edit left unreadable through unchanged is taken, as
+// an edit beside it is; one that writes into it, or writes another ask breaking the rule, is not.
+func TestReplaceCarriesAnAskTheBrowserLeftUnreadable(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nShould we ship?\n:::\n")
+	editLiveTree(t, service, artifactID, appendToAsk(codeBlockNode("code")))
+	current, err := service.Text(context.Background(), artifactID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor := model.Actor{Kind: "user", ID: "alice"}
+	if _, err := service.ReplaceText(context.Background(), artifactID, current+"\nMore.\n", actor); err != nil {
+		t.Fatalf("ReplaceText carrying the unreadable ask = %v, want it taken", err)
+	}
+	var invalid *ErrInvalidAskBlock
+	changed := strings.Replace(current, "Should we ship?", "Ship now?", 1)
+	if _, err := service.ReplaceText(context.Background(), artifactID, changed, actor); !errors.As(err, &invalid) {
+		t.Fatalf("ReplaceText changing the unreadable ask = %v, want ErrInvalidAskBlock", err)
+	}
+}
+
+// An ask a browser edit left unreadable is the browser's to repair; an edit elsewhere in the
+// document is accepted beside it, while an edit that writes into it, or writes another unreadable
+// ask, is refused.
+func TestEditsBesideAnAskTheBrowserLeftUnreadableAreAccepted(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nShould we ship?\n:::\n\nAfter.\n")
+	editLiveTree(t, service, artifactID, appendToAsk(codeBlockNode("code")))
+	actor := model.Actor{Kind: "user", ID: "alice"}
+
+	if _, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{Op: "replace", Find: "After.", With: "Later."}}, actor, nil); err != nil {
+		t.Fatalf("replace beside the unreadable ask = %v, want it accepted", err)
+	}
+	var invalid *ErrInvalidAskBlock
+	for name, op := range map[string]model.EditOp{
+		"into the unreadable ask":                   {Op: "replace", Find: "Should we ship?", With: "Ship now?"},
+		"another unreadable ask":                    {Op: "insert", After: "end", Markdown: ":::ask{#a2 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich?\n\n> quoted\n:::\n"},
+		"an ask with a paragraph after its options": {Op: "insert", After: "end", Markdown: ":::ask{#a3 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich?\n\n- A\n- B\n\nAn afterthought.\n:::\n"},
+	} {
+		if _, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{op}, actor, nil); !errors.As(err, &invalid) {
+			t.Fatalf("%s = %v, want ErrInvalidAskBlock", name, err)
+		}
+	}
+	markdown, err := service.Text(context.Background(), artifactID)
+	if err != nil || !strings.Contains(markdown, "Should we ship?") || !strings.Contains(markdown, "Later.") || strings.Contains(markdown, "a2") {
+		t.Fatalf("document = %q (%v), want only the accepted replace applied", markdown, err)
 	}
 }
 

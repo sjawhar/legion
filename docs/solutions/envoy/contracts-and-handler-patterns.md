@@ -51,22 +51,21 @@ When adding a new subject helper or topic prefix, always extract the prefix as a
 
 Handlers in `cmd/listener/main.go` that are defined as inline closures inside `main()` cannot be unit-tested. The established pattern is:
 
-1. **Extract** the handler as a named function taking `*atomic.Pointer[listenerDeps]`
+1. **Extract** the handler as a named function taking the `*listenerDeps` it serves over
 2. **Return** `http.HandlerFunc`
-3. **Wire** in `main()` via `v1.HandleFunc("/path", myHandler(&deps))`
+3. **Wire** it in `registerV1Routes`, which main calls once every store is open, via `v1.HandleFunc("/path", myHandler(d))`
 
-Examples: `healthzHandler`, `publishHandler`.
+Examples: `publishHandler`, `sendHandler`. `healthzHandler` is the exception: it answers during
+startup, so it takes the `*atomic.Pointer[listenerDeps]` that stays nil until then.
 
 ### Validation Before Deps Access
 
-Place all input validation (JSON decode, required fields, topic checks) before calling `state.Load()`. This means tests can use `&listenerDeps{}` with nil inner fields and still exercise the validation/rejection path without NATS.
+Place all input validation (JSON decode, required fields, topic checks) before the handler touches a store. This means tests can pass `&listenerDeps{}` with nil inner fields and still exercise the validation/rejection path without NATS.
 
 ```go
 // Tests use minimal deps — no NATS needed for validation path
-var state atomic.Pointer[listenerDeps]
-state.Store(&listenerDeps{}) // nil client/registry/sessions
-handler := publishHandler(&state)
-// POST with bad topic → 400, never reaches state.Load()
+handler := publishHandler(&listenerDeps{}) // nil client/registry/sessions
+// POST with bad topic → 400, never reaches a store
 ```
 
 ### Table-Driven Tests

@@ -515,9 +515,12 @@ func TestALateRefusalIsTheAgentsTurn(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		working bool
+		refusal string
 	}{
-		{name: "Oh My Pi's own answer says so"},
-		{name: "the stream saw the turn start", working: true},
+		{name: "Oh My Pi's own answer says so", refusal: "Agent is already processing. Use steer() or followUp() to queue messages"},
+		// This row's witness is the stream alone, so its refusal says nothing about a turn: with
+		// Oh My Pi's busy wording here too, deleting the stream arm would leave the row passing.
+		{name: "the stream saw the turn start", working: true, refusal: "the model provider refused the request"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t)
@@ -530,7 +533,7 @@ func TestALateRefusalIsTheAgentsTurn(t *testing.T) {
 				h.must(StreamTurnStart{Claim: testToken})
 			}
 
-			h.must(StreamLateRefusal{Claim: testToken, DeliveryID: refused, Error: "Agent is already processing. Use steer() or followUp() to queue messages"})
+			h.must(StreamLateRefusal{Claim: testToken, DeliveryID: refused, Error: tc.refusal})
 
 			h.wantBudgets(Budgets{})
 			rotated := h.pending()
@@ -863,51 +866,26 @@ func TestAPersistentLateRefusalIsChargedAndNotResentOnTheSpot(t *testing.T) {
 	h.wantBudgets(Budgets{PromptFailures: 1})
 }
 
-// A task's delivered mark says a worker may have read it, which is what lets a completion from a
-// turn the daemon did not deliver be attributed to that task. The bound keeps it: a turn that has
-// not started within the wait may still be this task's, starting late. Both refusals drop it: the
-// agent refusing in a turn of its own never saw this prompt, and one refused with no turn running
-// did not run at all.
-func TestOnlyTheTurnBoundLeavesTheTaskMarkedAsRead(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		refuse func(h *harness, delivery string)
-		read   bool
-	}{
-		{
-			name:   "no turn within the bound",
-			refuse: func(h *harness, _ string) { h.advance(2 * testRPC) },
-			read:   true,
-		},
-		{
-			name: "refused in a turn of the agent's own",
-			refuse: func(h *harness, delivery string) {
-				h.must(StreamLateRefusal{Claim: testToken, DeliveryID: delivery, Error: "Agent is already processing"})
-			},
-		},
-		{
-			name: "refused with no turn running",
-			refuse: func(h *harness, delivery string) {
-				h.must(StreamLateRefusal{Claim: testToken, DeliveryID: delivery, Error: "No API key found for provider anthropic"})
-			},
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			h := newHarness(t)
-			h.reach(StateReady)
-			base := len(h.prompts())
+// Confirming a turn writes the claim and the delivery, and a daemon can die between them. The
+// delivery is what the turn's end retires and what a re-send is fenced on, so a claim recorded as
+// working with its delivery unwritten is a task the shim already answered and nothing will send
+// again: the worker is never prompted and the phase waits. The two writes go together.
+func TestAConfirmationDoesNotSurviveHalfWritten(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateReady)
+	base := len(h.prompts())
+	h.must(RequestDeliver{Claim: testToken, Task: "the task"})
+	sent := h.wantPrompts(base + 1)[base]
 
-			h.must(RequestDeliver{Claim: testToken, Task: "the task"})
-			sent := h.wantPrompts(base + 1)[base]
-			if p := h.pending(); p.DeliveredAt.IsZero() {
-				t.Fatalf("pending after the acknowledgement = %+v, want it marked delivered", p)
-			}
+	h.store.fail("PutDelivery", errBoom)
+	err := h.m.Handle(context.Background(), StreamTurnStart{Claim: testToken, DeliveryID: sent.DeliveryID})
+	if err == nil {
+		t.Fatal("the turn start reported success with the delivery write failing")
+	}
 
-			tc.refuse(h, sent.DeliveryID)
-
-			if p := h.pending(); p.DeliveredAt.IsZero() == tc.read {
-				t.Fatalf("pending after %s = %+v, want DeliveredAt set = %t", tc.name, p, tc.read)
-			}
-		})
+	stored := h.store.load(testToken)
+	if stored.State == StateWorking && (stored.Pending == nil || stored.Pending.ConfirmedAt.IsZero()) {
+		t.Fatalf("the store holds a working claim whose delivery is unconfirmed: %+v, pending %+v",
+			stored.State, stored.Pending)
 	}
 }

@@ -2,8 +2,8 @@
 # Stage 3's devbox gate for the Go coordinator. It drives the durable workflow through the real
 # surfaces: a scratch Dispatch, real Envoy/NATS, the Go daemon, real OMP panes, and GitHub's
 # sjawhar/legion-smoke sandbox. Its host-side rig helpers and the workflow's vocabulary are the
-# shared lib/rig.sh and lib/workflow.sh; it deliberately does not source the kind smoke scripts:
-# the small scratch-service rig below is copied and adapted so its lifecycle belongs to this run.
+# shared lib/rig.sh and lib/workflow.sh; the small scratch-service rig below is this run's own, so
+# its lifecycle belongs to this run.
 #
 # Run it as `bash scripts/e2e/stage3-devbox-workflow.sh` with two required inputs:
 # LEGION_E2E_MODEL_GATEWAY_URL, the model gateway's Anthropic endpoint, and SMOKE_UPSTREAM_NATS,
@@ -117,7 +117,7 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-# The copies of kind-smoke's host helpers below own only this run's isolated resources. Each service
+# The host helpers below own only this run's isolated resources. Each service
 # binds a port the rig picked. A first start that loses its port to another process picks again; a
 # restart keeps its port, which the rest of the rig already names.
 start_listener() {
@@ -559,7 +559,7 @@ upstream_nats=${upstream_nats%"${upstream_nats##*[![:space:]]}"}
 [ -n "$upstream_nats" ] ||
   fail "SMOKE_UPSTREAM_NATS is unset: the production Envoy NATS the GitHub bridge subscribes on, by its fully-qualified name (nats://envoy-nats.<tailnet>.ts.net:4222)"
 # One URL: optional scheme and user info, a host with a dot, optional port, nothing after it (the
-# client dials what follows the last "://"); scripts/kind-smoke/envoy-bridge.ts holds the same
+# client dials what follows the last "://"); scripts/e2e/lib/envoy-bridge.ts holds the same
 # pattern.
 nats_url='^([A-Za-z][A-Za-z0-9+.-]*://)?([^@/?#,[:space:]]+@)?[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)+(:[0-9]+)?/?$'
 [[ "$upstream_nats" =~ $nats_url ]] ||
@@ -620,7 +620,7 @@ SMOKE_REPO="$repo" SMOKE_RIG_NATS="nats://127.0.0.1:$port_nats" \
   SMOKE_UPSTREAM_NATS="$upstream_nats" \
   start_process bridge env -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
     -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 \
-    bun run "$root/scripts/kind-smoke/envoy-bridge.ts"
+    bun run "$root/scripts/e2e/lib/envoy-bridge.ts"
 until_true 90 "the GitHub ingress bridge to report ready" grep -q 'BRIDGE READY' "$evidence/logs/bridge.log"
 (cd "$root" && bun install --frozen-lockfile >/dev/null)
 manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --profile "$profile" --dest "$work/plugin")

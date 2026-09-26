@@ -29,7 +29,7 @@ It is the user-facing bridge between OpenCode sessions and Envoy transport.
 ## Topic reminders
 
 - Agent: `notifications.agent.<session_id>`
-- GitHub: `notifications.github.<owner>.<repo>.<kind>`
+- GitHub: `notifications.github.<owner>.<repo>.<kind>`, a dot in the owner or name written `_`
 - Slack: `notifications.slack.<team_id>.<channel_id>.<message|mention>`
 
 If you are unsure what a session is subscribed to, use `envoy_list()`.

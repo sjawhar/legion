@@ -1,4 +1,4 @@
-import { describe, expect, it, spyOn } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -45,12 +45,6 @@ function resolveWithApps(options: ResolveDaemonConfigOptions) {
 const overrides = {
   githubApps: BOTH_APPS,
 };
-
-/** A kubernetes daemon must present an Envoy bearer (`envoy_token_file` or the `ENVOY_TOKEN`
- * alternative) and an operator token (`operator_token_file`, here as the programmatic override
- * `operatorToken`); the runtime tests below that are not about either token supply them this way. */
-const kubernetesEnv = { ...requiredEnv, ENVOY_TOKEN: "envoy-test-token" };
-const kubernetesOverrides = { githubApps: BOTH_APPS, operatorToken: "operator-test-token" };
 
 const KUBERNETES_BLOCK = [
   "runtime:",
@@ -1224,140 +1218,75 @@ describe("daemon config", () => {
       expect(config.bind).toBe("127.0.0.1");
     });
 
-    it("resolves all three from YAML for a kubernetes deployment", () => {
-      const { config } = resolveWithApps({
-        configFile: yaml(
-          KUBERNETES_BLOCK,
-          "daemon_url: http://legion-daemon.legion.svc:13370",
-          "bind: 0.0.0.0"
-        ),
-        env: kubernetesEnv,
-        cliOverrides: kubernetesOverrides,
-      });
-      expect(config.runtime.name).toBe("kubernetes");
-      expect(config.daemonUrl).toBe("http://legion-daemon.legion.svc:13370");
-      expect(config.bind).toBe("0.0.0.0");
-    });
-
-    it("reads Kubernetes scheduling settings from the runtime block", () => {
-      const { config } = resolveWithApps({
-        configFile: yaml(
-          KUBERNETES_BLOCK,
-          [
-            "    scheduling:",
-            "      node_selector: { legion.dev/pool: legion }",
-            "      tolerations:",
-            "        - key: legion.dev/pool",
-            "          operator: Equal",
-            "          value: legion",
-            "          effect: NoSchedule",
-            "      priority_class: legion",
-          ].join("\n"),
-          "daemon_url: http://legion-daemon.legion.svc:13370",
-          "bind: 0.0.0.0"
-        ),
-        env: kubernetesEnv,
-        cliOverrides: kubernetesOverrides,
-      });
-
-      if (config.runtime.name !== "kubernetes") throw new Error("expected Kubernetes runtime");
-      expect(config.runtime.scheduling).toEqual({
-        nodeSelector: { "legion.dev/pool": "legion" },
-        tolerations: [
-          {
-            key: "legion.dev/pool",
-            operator: "Equal",
-            value: "legion",
-            effect: "NoSchedule",
-          },
-        ],
-        priorityClassName: "legion",
-      });
-    });
-
-    it("rejects invalid or unknown Kubernetes scheduling settings", () => {
-      expect(() =>
-        yaml(
-          KUBERNETES_BLOCK,
-          [
-            "    scheduling:",
-            "      tolerations:",
-            "        - key: legion.dev/pool",
-            "          operator: Maybe",
-          ].join("\n"),
-          "daemon_url: http://legion-daemon.legion.svc:13370",
-          "bind: 0.0.0.0"
-        )
-      ).toThrow("runtime.kubernetes.scheduling.tolerations[0].operator must be Equal or Exists");
-      expect(() =>
-        yaml(
-          KUBERNETES_BLOCK,
-          [
-            "    scheduling:",
-            "      tolerations:",
-            "        - key: legion.dev/pool",
-            "          operator: Exists",
-            "          value: legion",
-            "          effect: NoSchedule",
-          ].join("\n"),
-          "daemon_url: http://legion-daemon.legion.svc:13370",
-          "bind: 0.0.0.0"
-        )
-      ).toThrow(
-        "runtime.kubernetes.scheduling.tolerations[0].value must be omitted with operator Exists"
+    it("refuses runtime: kubernetes from the file, the environment, or the command line, naming the Go daemon, before anything in the block is read", () => {
+      const refusal =
+        "is refused: the TypeScript daemon no longer runs on Kubernetes; use the Go daemon (packages/daemon-go)";
+      expect(() => yaml("runtime: kubernetes")).toThrow(`runtime: kubernetes ${refusal}`);
+      expect(() => yaml(KUBERNETES_BLOCK)).toThrow(`runtime: kubernetes ${refusal}`);
+      expect(() => yaml(KUBERNETES_BLOCK, "    image_pull_policy: sometimes")).toThrow(
+        `runtime: kubernetes ${refusal}`
       );
       expect(() =>
-        yaml(
-          KUBERNETES_BLOCK,
-          ["    scheduling:", "      unexpected: value"].join("\n"),
-          "daemon_url: http://legion-daemon.legion.svc:13370",
-          "bind: 0.0.0.0"
-        )
-      ).toThrow('Unknown config key "runtime.kubernetes.scheduling.unexpected"');
+        resolveDaemonConfig({
+          env: { ...requiredEnv, LEGION_RUNTIME: "kubernetes" },
+          cliOverrides: overrides,
+        })
+      ).toThrow(`LEGION_RUNTIME=kubernetes ${refusal}`);
       expect(() =>
-        yaml(
-          KUBERNETES_BLOCK,
-          [
-            "    scheduling:",
-            "      tolerations:",
-            "        - key: legion.dev/pool",
-            "          operator: Equal",
-            "          effect: NoSchedule",
-            "          typo: legion",
-          ].join("\n"),
-          "daemon_url: http://legion-daemon.legion.svc:13370",
-          "bind: 0.0.0.0"
-        )
-      ).toThrow("runtime.kubernetes.scheduling.tolerations[0].typo is unknown");
+        resolveDaemonConfig({
+          env: requiredEnv,
+          cliOverrides: {
+            ...overrides,
+            runtime: {
+              name: "kubernetes",
+              namespace: "legion",
+              image: {
+                reference: `ghcr.io/sjawhar/legion-worker@sha256:${"a".repeat(64)}`,
+                name: "ghcr.io/sjawhar/legion-worker",
+                digest: `sha256:${"a".repeat(64)}`,
+              },
+              treeVolume: "20Gi",
+              sessionStore: { kind: "pvc" },
+              resources: DEFAULT_KUBERNETES_RESOURCES,
+              roleProfiles: DEFAULT_ROLE_PROFILES,
+              scheduling: { nodeSelector: {}, tolerations: [] },
+            },
+          },
+        })
+      ).toThrow(`runtime: kubernetes ${refusal}`);
+      expect(
+        resolveWithApps({
+          configFile: yaml("runtime: tmux"),
+          env: requiredEnv,
+          cliOverrides: overrides,
+        }).config.runtime
+      ).toEqual({ name: "tmux" });
+      expect(
+        resolveDaemonConfig({
+          env: { ...requiredEnv, LEGION_RUNTIME: "tmux" },
+          cliOverrides: overrides,
+        }).config.runtime
+      ).toEqual({ name: "tmux" });
     });
 
-    it("rejects a runtime other than tmux or kubernetes, naming the source", () => {
-      expect(() => yaml("runtime: docker")).toThrow("runtime must be 'tmux' or 'kubernetes'");
+    it("rejects a runtime other than tmux, naming the source", () => {
+      expect(() => yaml("runtime: docker")).toThrow("runtime must be 'tmux'");
+      expect(() => yaml("runtime: {}")).toThrow("runtime must be 'tmux'");
       expect(() =>
         resolveDaemonConfig({
           env: { ...requiredEnv, LEGION_RUNTIME: "docker" },
           cliOverrides: overrides,
         })
-      ).toThrow("LEGION_RUNTIME must be 'tmux' or 'kubernetes'");
+      ).toThrow("LEGION_RUNTIME must be 'tmux'");
     });
 
-    it("refuses session_store under the tmux runtime naming the field: the key exists only inside runtime.kubernetes", () => {
+    it("refuses session_store under the tmux runtime naming the field", () => {
       expect(() => yaml("runtime: tmux", "session_store: postgres")).toThrow(
         'Unknown config key "session_store"'
       );
       expect(() => yaml("runtime:", "  tmux:", "    session_store: postgres")).toThrow(
-        "runtime accepts tmux, kubernetes, or a mapping with the single key kubernetes"
+        "runtime must be 'tmux'"
       );
-    });
-
-    it("requires daemon_url under the kubernetes runtime", () => {
-      expect(() =>
-        resolveWithApps({
-          configFile: yaml(KUBERNETES_BLOCK, "bind: 0.0.0.0"),
-          env: requiredEnv,
-          cliOverrides: overrides,
-        })
-      ).toThrow("daemon_url is required when runtime is kubernetes (or set LEGION_DAEMON_URL)");
     });
 
     it("rejects an invalid daemon_url from either source and normalizes a trailing slash", () => {
@@ -1368,12 +1297,13 @@ describe("daemon config", () => {
           cliOverrides: overrides,
         })
       ).toThrow("LEGION_DAEMON_URL must be a valid URL");
-      const { config } = resolveWithApps({
-        configFile: yaml(KUBERNETES_BLOCK, "bind: 0.0.0.0", "daemon_url: http://h:1/"),
-        env: kubernetesEnv,
-        cliOverrides: kubernetesOverrides,
-      });
-      expect(config.daemonUrl).toBe("http://h:1");
+      expect(
+        resolveWithApps({
+          configFile: yaml("daemon_url: http://127.0.0.1:13370/"),
+          env: requiredEnv,
+          cliOverrides: overrides,
+        }).config.daemonUrl
+      ).toBe("http://127.0.0.1:13370");
     });
 
     it("rejects a non-loopback bind under the tmux runtime, from either source", () => {
@@ -1383,13 +1313,13 @@ describe("daemon config", () => {
           env: requiredEnv,
           cliOverrides: overrides,
         })
-      ).toThrow("bind must be 127.0.0.1 unless runtime is kubernetes");
+      ).toThrow("bind must be 127.0.0.1");
       expect(() =>
         resolveDaemonConfig({
           env: { ...requiredEnv, LEGION_BIND: "0.0.0.0" },
           cliOverrides: overrides,
         })
-      ).toThrow("bind must be 127.0.0.1 unless runtime is kubernetes");
+      ).toThrow("bind must be 127.0.0.1");
     });
 
     it("rejects an empty bind", () => {
@@ -1446,22 +1376,9 @@ describe("daemon config", () => {
       ).toBe("http://127.0.0.1:13370");
     });
 
-    it("lets a YAML daemon_url beat LEGION_DAEMON_URL (kubernetes, where the value is free), so a daemon started from inside a Legion pane never inherits the outer daemon's URL", () => {
-      const { config } = resolveWithApps({
-        configFile: yaml(
-          KUBERNETES_BLOCK,
-          "bind: 0.0.0.0",
-          "daemon_url: http://legion-daemon.legion.svc:13370"
-        ),
-        env: { ...kubernetesEnv, LEGION_DAEMON_URL: "http://127.0.0.1:13370" },
-        cliOverrides: kubernetesOverrides,
-      });
-      expect(config.daemonUrl).toBe("http://legion-daemon.legion.svc:13370");
-    });
-
     it("recognizes the three keys in the YAML loader shape", () => {
       expect(
-        yaml("runtime: tmux", "daemon_url: http://127.0.0.1:14100", "bind: 127.0.0.1").fields
+        yaml("runtime: tmux", "daemon_url: http://127.0.0.1:14100", "bind: 127.0.0.1")
       ).toMatchObject({
         runtime: "tmux",
         daemonUrl: "http://127.0.0.1:14100",
@@ -1477,16 +1394,9 @@ describe("daemon config", () => {
     const otherFile = path.join(configDir, "other-token");
     fs.writeFileSync(otherFile, "env-file-token\n", { mode: 0o600 });
     fs.writeFileSync(path.join(configDir, "blank"), " \n", { mode: 0o600 });
-    const kubernetesYaml = (...lines: string[]) =>
+    const tmuxYaml = (...lines: string[]) =>
       loadConfigFromFile(
-        [
-          "project: acme/7",
-          "projects: { ACME: { repo: acme/widgets } }",
-          KUBERNETES_BLOCK,
-          "daemon_url: http://legion-daemon.legion.svc:13370",
-          "bind: 0.0.0.0",
-          ...lines,
-        ].join("\n"),
+        ["project: acme/7", "projects: { ACME: { repo: acme/widgets } }", ...lines].join("\n"),
         configDir
       );
 
@@ -1496,31 +1406,19 @@ describe("daemon config", () => {
       ).toBeUndefined();
     });
 
-    it("refuses a kubernetes daemon with no token, naming the key and its environment form", () => {
-      expect(() =>
-        resolveDaemonConfig({
-          configFile: kubernetesYaml(),
-          env: requiredEnv,
-          cliOverrides: overrides,
-        })
-      ).toThrow(
-        "envoy_token_file is required when runtime is kubernetes (or set ENVOY_TOKEN_FILE)"
-      );
-    });
-
     it("reads the trimmed file named by envoy_token_file, resolving a relative path against the config directory", () => {
       expect(
         resolveDaemonConfig({
-          configFile: kubernetesYaml("envoy_token_file: ./envoy-token"),
+          configFile: tmuxYaml("envoy_token_file: ./envoy-token"),
           env: requiredEnv,
-          cliOverrides: kubernetesOverrides,
+          cliOverrides: overrides,
         }).config.envoyToken
       ).toBe("file-token");
       expect(
         resolveDaemonConfig({
-          configFile: kubernetesYaml(`envoy_token_file: ${tokenFile}`),
+          configFile: tmuxYaml(`envoy_token_file: ${tokenFile}`),
           env: requiredEnv,
-          cliOverrides: kubernetesOverrides,
+          cliOverrides: overrides,
         }).config.envoyToken
       ).toBe("file-token");
     });
@@ -1528,23 +1426,23 @@ describe("daemon config", () => {
     it("lets the file key beat ENVOY_TOKEN_FILE, and ENVOY_TOKEN_FILE beat ENVOY_TOKEN", () => {
       expect(
         resolveDaemonConfig({
-          configFile: kubernetesYaml("envoy_token_file: ./envoy-token"),
+          configFile: tmuxYaml("envoy_token_file: ./envoy-token"),
           env: { ...requiredEnv, ENVOY_TOKEN_FILE: otherFile, ENVOY_TOKEN: "plain" },
-          cliOverrides: kubernetesOverrides,
+          cliOverrides: overrides,
         }).config.envoyToken
       ).toBe("file-token");
       expect(
         resolveDaemonConfig({
-          configFile: kubernetesYaml(),
+          configFile: tmuxYaml(),
           env: { ...requiredEnv, ENVOY_TOKEN_FILE: otherFile, ENVOY_TOKEN: "plain" },
-          cliOverrides: kubernetesOverrides,
+          cliOverrides: overrides,
         }).config.envoyToken
       ).toBe("env-file-token");
       expect(
         resolveDaemonConfig({
-          configFile: kubernetesYaml(),
+          configFile: tmuxYaml(),
           env: { ...requiredEnv, ENVOY_TOKEN: " plain \n" },
-          cliOverrides: kubernetesOverrides,
+          cliOverrides: overrides,
         }).config.envoyToken
       ).toBe("plain");
     });
@@ -1553,21 +1451,21 @@ describe("daemon config", () => {
       const missing = path.join(configDir, "nope");
       expect(() =>
         resolveDaemonConfig({
-          configFile: kubernetesYaml("envoy_token_file: ./nope"),
+          configFile: tmuxYaml("envoy_token_file: ./nope"),
           env: { ...requiredEnv, ENVOY_TOKEN: "plain" },
           cliOverrides: overrides,
         })
       ).toThrow(`envoy_token_file names ${missing}, which could not be read: ENOENT`);
       expect(() =>
         resolveDaemonConfig({
-          configFile: kubernetesYaml(),
+          configFile: tmuxYaml(),
           env: { ...requiredEnv, ENVOY_TOKEN_FILE: missing, ENVOY_TOKEN: "plain" },
           cliOverrides: overrides,
         })
       ).toThrow(`ENVOY_TOKEN_FILE names ${missing}, which could not be read: ENOENT`);
       expect(() =>
         resolveDaemonConfig({
-          configFile: kubernetesYaml("envoy_token_file: ./blank"),
+          configFile: tmuxYaml("envoy_token_file: ./blank"),
           env: { ...requiredEnv, ENVOY_TOKEN: "plain" },
           cliOverrides: overrides,
         })
@@ -1582,32 +1480,19 @@ describe("daemon config", () => {
     });
 
     it("rejects an empty envoy_token_file key", () => {
-      expect(() => kubernetesYaml("envoy_token_file: ''")).toThrow(
-        "envoy_token_file must not be empty"
-      );
+      expect(() => tmuxYaml("envoy_token_file: ''")).toThrow("envoy_token_file must not be empty");
     });
 
-    it("under --check-config (resolveSecrets: false) validates the pointer but never reads the file: an in-cluster legion.yaml checks out on a machine without the mount", () => {
+    it("under --check-config (resolveSecrets: false) validates the pointer but never reads the file", () => {
       const missing = path.join(configDir, "nope");
       const { config } = resolveDaemonConfig({
-        configFile: kubernetesYaml("envoy_token_file: ./nope"),
+        configFile: tmuxYaml("envoy_token_file: ./nope"),
         env: requiredEnv,
-        cliOverrides: kubernetesOverrides,
+        cliOverrides: overrides,
         resolveSecrets: false,
       });
       expect(config.envoyToken).toBe("(not executed)");
       expect(fs.existsSync(missing)).toBe(false);
-      // The pointer is still what the kubernetes rule requires: no pointer, no placeholder.
-      expect(() =>
-        resolveDaemonConfig({
-          configFile: kubernetesYaml(),
-          env: requiredEnv,
-          cliOverrides: overrides,
-          resolveSecrets: false,
-        })
-      ).toThrow(
-        "envoy_token_file is required when runtime is kubernetes (or set ENVOY_TOKEN_FILE)"
-      );
     });
   });
 
@@ -1615,35 +1500,11 @@ describe("daemon config", () => {
     const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "legion-config-operator-"));
     fs.writeFileSync(path.join(configDir, "operator-token"), "tok\n", { mode: 0o600 });
     fs.writeFileSync(path.join(configDir, "blank"), " \n", { mode: 0o600 });
-    const kubernetesYaml = (...lines: string[]) =>
-      loadConfigFromFile(
-        [
-          "project: acme/7",
-          "projects: { ACME: { repo: acme/widgets } }",
-          KUBERNETES_BLOCK,
-          "daemon_url: http://legion-daemon.legion.svc:13370",
-          "bind: 0.0.0.0",
-          ...lines,
-        ].join("\n"),
-        configDir
-      );
     const tmuxYaml = (...lines: string[]) =>
       loadConfigFromFile(
         ["project: acme/7", "projects: { ACME: { repo: acme/widgets } }", ...lines].join("\n"),
         configDir
       );
-
-    it("is required under runtime: kubernetes", () => {
-      expect(() =>
-        resolveDaemonConfig({
-          configFile: kubernetesYaml(),
-          env: kubernetesEnv,
-          cliOverrides: overrides,
-        })
-      ).toThrow(
-        "operator_token_file is required when runtime is kubernetes: the daemon cannot launch the controller there; legion controller start presents this token"
-      );
-    });
 
     it("is refused under tmux, whose daemon launches its own controller", () => {
       expect(() =>
@@ -1653,280 +1514,8 @@ describe("daemon config", () => {
           cliOverrides: overrides,
         })
       ).toThrow(
-        "operator_token_file is only used when runtime is kubernetes: the tmux daemon launches its own controller; remove operator_token_file"
+        "operator_token_file is not used: the tmux daemon launches its own controller; remove operator_token_file"
       );
-    });
-
-    it("resolves a relative path against the config directory and reads the trimmed contents", () => {
-      expect(
-        resolveDaemonConfig({
-          configFile: kubernetesYaml("operator_token_file: operator-token"),
-          env: kubernetesEnv,
-          cliOverrides: overrides,
-        }).config.operatorToken
-      ).toBe("tok");
-    });
-
-    it("refuses a blank file naming the key and the path", () => {
-      expect(() =>
-        resolveDaemonConfig({
-          configFile: kubernetesYaml("operator_token_file: ./blank"),
-          env: kubernetesEnv,
-          cliOverrides: overrides,
-        })
-      ).toThrow(`operator_token_file names ${path.join(configDir, "blank")}, which is empty`);
-    });
-
-    it("under --check-config never reads the file", () => {
-      const missing = path.join(configDir, "nope");
-      const { config } = resolveDaemonConfig({
-        configFile: kubernetesYaml("operator_token_file: ./nope"),
-        env: kubernetesEnv,
-        cliOverrides: overrides,
-        resolveSecrets: false,
-      });
-      expect(config.operatorToken).toBe("(not executed)");
-      expect(fs.existsSync(missing)).toBe(false);
-    });
-  });
-
-  describe("the shipped in-cluster legion.yaml files (deploy/kubernetes/daemon)", () => {
-    // The kind overlay replaces the base's ConfigMap key wholesale, so a key the loader starts
-    // requiring must be in both files; loading each one the way `legion start --check-config`
-    // does (the pointers validated as paths, never read) is what keeps them from drifting apart.
-    const manifests = path.resolve(import.meta.dir, "../../../../../deploy/kubernetes/daemon");
-    it.each([
-      ["the base", path.join(manifests, "base", "legion.yaml")],
-      ["the kind overlay", path.join(manifests, "overlays", "kind", "legion.yaml")],
-    ])("%s resolves under --check-config", (_name, file) => {
-      const dir = path.dirname(file);
-      const { config } = resolveDaemonConfig({
-        configFile: loadConfigFromFile(fs.readFileSync(file, "utf8"), dir, {
-          resolveSecrets: false,
-        }),
-        env: { DISPATCH_TOKEN: "dispatch-test-token" },
-        resolveSecrets: false,
-      });
-      expect(config.runtime.name).toBe("kubernetes");
-      expect(config.envoyToken).toBe("(not executed)");
-      expect(config.operatorToken).toBe("(not executed)");
-    });
-  });
-
-  describe("runtime.kubernetes", () => {
-    const digest = `ghcr.io/sjawhar/legion-worker@sha256:${"a".repeat(64)}`;
-    const block = (...lines: string[]) =>
-      [
-        "runtime:",
-        "  kubernetes:",
-        "    namespace: legion",
-        `    image: ${digest}`,
-        ...lines.map((l) => `    ${l}`),
-      ].join("\n");
-    const yaml = (...lines: string[]) =>
-      loadConfigFromFile(
-        ["project: acme/7", "projects: { ACME: { repo: acme/widgets } }", ...lines].join("\n"),
-        "/tmp/legion-config"
-      );
-    const resolve = (...lines: string[]) =>
-      resolveDaemonConfig({
-        configFile: yaml(
-          "daemon_url: http://legion-daemon.legion.svc:13370",
-          "bind: 0.0.0.0",
-          ...lines
-        ),
-        env: kubernetesEnv,
-        cliOverrides: kubernetesOverrides,
-      }).config;
-
-    it("selects kubernetes from the mapping form and applies the §3 defaults", () => {
-      const config = resolve(block());
-      expect(config.runtime.name).toBe("kubernetes");
-      expect(config.runtime).toEqual({
-        name: "kubernetes",
-        namespace: "legion",
-        image: {
-          reference: digest,
-          name: "ghcr.io/sjawhar/legion-worker",
-          digest: `sha256:${"a".repeat(64)}`,
-        },
-        treeVolume: "20Gi",
-        sessionStore: { kind: "pvc" },
-        resources: DEFAULT_KUBERNETES_RESOURCES,
-        roleProfiles: DEFAULT_ROLE_PROFILES,
-        scheduling: { nodeSelector: {}, tolerations: [] },
-      });
-    });
-
-    it("reads every optional field, resolving a relative kubeconfig against the config directory, and lets a profile override one quantity", () => {
-      const config = resolve(
-        block(
-          "storage_class: gp3",
-          "tree_volume: 50Gi",
-          "kubeconfig: ./kind.kubeconfig",
-          "resources:",
-          "  large:",
-          "    limits:",
-          "      memory: 24Gi",
-          "role_profiles:",
-          "  planner: medium"
-        )
-      );
-      if (config.runtime.name !== "kubernetes") throw new Error("expected the kubernetes runtime");
-      expect(config.runtime.storageClass).toBe("gp3");
-      expect(config.runtime.treeVolume).toBe("50Gi");
-      expect(config.runtime.kubeconfig).toBe("/tmp/legion-config/kind.kubeconfig");
-      expect(config.runtime.resources.large).toEqual({
-        ...DEFAULT_KUBERNETES_RESOURCES.large,
-        limits: { ...DEFAULT_KUBERNETES_RESOURCES.large.limits, memory: "24Gi" },
-      });
-      expect(config.runtime.roleProfiles).toEqual({
-        ...DEFAULT_ROLE_PROFILES,
-        planner: "medium",
-      });
-    });
-
-    it("selects the postgres session store with its providers-Secret key, and pvc when named explicitly", () => {
-      expect(
-        resolve(block("session_store: postgres", "session_dsn_secret: SESSION_DSN")).runtime
-      ).toMatchObject({ sessionStore: { kind: "postgres", dsnSecretKey: "SESSION_DSN" } });
-      expect(resolve(block("session_store: pvc")).runtime).toMatchObject({
-        sessionStore: { kind: "pvc" },
-      });
-    });
-
-    it.each([
-      [
-        "runtime: kubernetes",
-        "runtime.kubernetes is required when runtime is kubernetes: set runtime.kubernetes.namespace and runtime.kubernetes.image in legion.yaml",
-      ],
-      [
-        ["runtime:", "  kubernetes:", `    image: ${digest}`].join("\n"),
-        "runtime.kubernetes.namespace is required",
-      ],
-      [
-        ["runtime:", "  kubernetes:", "    namespace: legion"].join("\n"),
-        "runtime.kubernetes.image is required",
-      ],
-      [
-        [
-          "runtime:",
-          "  kubernetes:",
-          "    namespace: legion",
-          "    image: ghcr.io/sjawhar/legion-worker:latest",
-        ].join("\n"),
-        "runtime.kubernetes.image must be pinned by digest (@sha256:…)",
-      ],
-      [
-        block("tree_volume: twenty"),
-        "runtime.kubernetes.tree_volume must be a Kubernetes quantity (e.g. 20Gi)",
-      ],
-      [block("resources:", "  huge: {}"), 'Unknown config key "runtime.kubernetes.resources.huge"'],
-      [
-        block("role_profiles:", "  tester: enormous"),
-        "runtime.kubernetes.role_profiles.tester must be one of small, medium, large",
-      ],
-      [
-        block("role_profiles:", "  janitor: small"),
-        'Unknown config key "runtime.kubernetes.role_profiles.janitor"',
-      ],
-      [
-        "runtime: {}",
-        "runtime accepts tmux, kubernetes, or a mapping with the single key kubernetes",
-      ],
-      [
-        ["runtime:", "  tmux: {}"].join("\n"),
-        "runtime accepts tmux, kubernetes, or a mapping with the single key kubernetes",
-      ],
-      [
-        ["runtime:", "  kubernetes: {}", "  tmux: {}"].join("\n"),
-        "runtime accepts tmux, kubernetes, or a mapping with the single key kubernetes",
-      ],
-      [["runtime:", "  kubernetes: kubernetes"].join("\n"), "runtime.kubernetes must be a mapping"],
-      [
-        block("session_store: sqlite"),
-        "runtime.kubernetes.session_store must be 'pvc' or 'postgres'",
-      ],
-      [block("session_store: 1"), "runtime.kubernetes.session_store must be a string"],
-      [
-        block("session_store: postgres"),
-        "runtime.kubernetes.session_dsn_secret is required when runtime.kubernetes.session_store is postgres",
-      ],
-      [
-        block("session_store: postgres", "session_dsn_secret: ''"),
-        "runtime.kubernetes.session_dsn_secret must not be empty",
-      ],
-      [
-        block("session_store: postgres", "session_dsn_secret: sub/dir"),
-        "runtime.kubernetes.session_dsn_secret must be a Secret data key ([-._a-zA-Z0-9]+)",
-      ],
-      [
-        block("session_store: postgres", "session_dsn_secret: OMP_SESSION_SQL_DSN_FILE"),
-        "runtime.kubernetes.session_dsn_secret must not be OMP_SESSION_STORAGE or OMP_SESSION_SQL_DSN_FILE: the worker shim exports every providers key into Oh My Pi's environment, and that name would shadow the daemon's value",
-      ],
-      [
-        block("session_store: postgres", "session_dsn_secret: OMP_SESSION_STORAGE"),
-        "runtime.kubernetes.session_dsn_secret must not be OMP_SESSION_STORAGE or OMP_SESSION_SQL_DSN_FILE: the worker shim exports every providers key into Oh My Pi's environment, and that name would shadow the daemon's value",
-      ],
-      [
-        block("session_dsn_secret: SESSION_DSN"),
-        "runtime.kubernetes.session_dsn_secret is not used when runtime.kubernetes.session_store is pvc; remove it",
-      ],
-      [
-        block("session_store: pvc", "session_dsn_secret: SESSION_DSN"),
-        "runtime.kubernetes.session_dsn_secret is not used when runtime.kubernetes.session_store is pvc; remove it",
-      ],
-    ])("refuses %s naming the field", (lines, message) => {
-      expect(() => resolve(lines)).toThrow(message);
-    });
-
-    it("allows omp_launch_prefix for the host-side controller but refuses it in a Kubernetes pod", () => {
-      const message =
-        "omp_launch_prefix is not used when runtime is kubernetes inside a pod: provider keys come from the mounted Secret legion-acme7-providers; remove omp_launch_prefix (or LEGION_OMP_LAUNCH_PREFIX)";
-      expect(resolve(block(), "omp_launch_prefix: [legion-pane-env]")).toMatchObject({
-        ompLaunchPrefix: ["legion-pane-env"],
-      });
-      expect(() =>
-        resolveDaemonConfig({
-          configFile: yaml("daemon_url: http://h:1", "bind: 0.0.0.0", block()),
-          env: {
-            ...kubernetesEnv,
-            KUBERNETES_SERVICE_HOST: "10.0.0.1",
-            LEGION_OMP_LAUNCH_PREFIX: "legion-pane-env",
-          },
-          cliOverrides: {
-            githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
-            operatorToken: "operator-test-token",
-          },
-        })
-      ).toThrow(message);
-    });
-
-    it("keeps daemon_url required under the mapping form too", () => {
-      expect(() =>
-        resolveDaemonConfig({
-          configFile: yaml("bind: 0.0.0.0", block()),
-          env: requiredEnv,
-          cliOverrides: overrides,
-        })
-      ).toThrow("daemon_url is required when runtime is kubernetes (or set LEGION_DAEMON_URL)");
-    });
-
-    it("the file's runtime outranks LEGION_RUNTIME (existing precedence) and the disagreement is logged once", () => {
-      const warn = spyOn(console, "warn").mockImplementation(() => {});
-      try {
-        const config = resolveDaemonConfig({
-          configFile: yaml("daemon_url: http://h:1", "bind: 0.0.0.0", block()),
-          env: { ...kubernetesEnv, LEGION_RUNTIME: "tmux" },
-          cliOverrides: kubernetesOverrides,
-        }).config;
-        expect(config.runtime.name).toBe("kubernetes");
-        expect(warn.mock.calls.map((c) => c[0])).toEqual([
-          "[legion] LEGION_RUNTIME=tmux ignored: legion.yaml's runtime.kubernetes block selects kubernetes (the file outranks the environment)",
-        ]);
-      } finally {
-        warn.mockRestore();
-      }
     });
   });
 

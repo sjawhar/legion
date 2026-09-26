@@ -205,6 +205,26 @@ describe("githubResourceSubject", () => {
   });
 });
 
+// A GitHub repository's name may hold a dot, and a NATS subject splits on dots, so every GitHub
+// subject writes the owner and the name each as one segment, a dot as `_` (sanitizeSubjectSegment):
+// `sjawhar/.github` is otherwise an empty token no stream stores, and `acme/a.b` lands inside
+// `acme/a`'s `notifications.github.acme.a.>`. A name without a dot is written as it is.
+test("GitHub subjects write a dotted owner or name as one segment", () => {
+  expect(githubSubject("sjawhar", ".github", "mention")).toBe(
+    "notifications.github.sjawhar._github.mention"
+  );
+  expect(githubResourceSubject("acme", "a.b", "pr", 7)).toBe("notifications.github.acme.a_b.pr.7");
+  expect(githubPushSubject("my-org", "a_b.c", "branch", "legion/X-1")).toBe(
+    "notifications.github.my-org.a_b_c.push.branch.legion/X-1"
+  );
+  expect(githubWorkflowSubject("acme", "site.io", "ci.yml", "completed")).toBe(
+    "notifications.github.acme.site_io.workflow.ci_yml.completed"
+  );
+  expect(githubSubject("acme", "widgets", "pr.7.checks")).toBe(
+    "notifications.github.acme.widgets.pr.7.checks"
+  );
+});
+
 describe("ghostWisprSubject", () => {
   test("returns session.ended topic", () => {
     expect(ghostWisprSubject("20260326041405", "session.ended")).toBe(

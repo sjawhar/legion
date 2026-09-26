@@ -38,12 +38,21 @@ type TurnEnd struct {
 // `{success:true}` — "Agent is already processing…" once it finds a turn it did not start, and
 // whatever a prompt that failed before any turn began says
 // (worker-rpc.ts:359-368). DeliveryID is the delivery that prompt carried, so a delivery the
-// supervisor counted as started by a turn that was never its own can be taken back. Error is
-// OMP's reason, verbatim.
+// supervisor counted as started by a turn that was never its own can be taken back. A refusal OMP
+// gave while no daemon was connected reaches the next connection from the shim's backlog; the
+// prompt's request id names its delivery, so it is a LateRefusal there too. Error is OMP's reason,
+// verbatim.
 type LateRefusal struct {
 	Claim      claim.Token
 	DeliveryID string
 	Error      string
+	// Replayed is a refusal for a prompt this connection did not send, read from the shim's
+	// backlog: it answers a prompt an earlier connection sent.
+	Replayed bool
+	// ConnSequence is the registration sequence of the connection the refusal arrived on
+	// (Conn.Sequence): the supervisor compares it with the newest connection it sent the delivery
+	// through.
+	ConnSequence uint64
 }
 
 // Closed is a registered connection gone, whichever side ended it. It is emitted exactly once

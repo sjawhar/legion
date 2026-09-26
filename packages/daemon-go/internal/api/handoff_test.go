@@ -210,9 +210,12 @@ func TestAStaleCompletionDoesNotTakeTheNewRunsKey(t *testing.T) {
 		Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: records,
 		Handlers: []intake.Handler{engine, facts}, Dispatch: &statusRecorder{},
 	}).Handler
+	// The tester takes run 1's task, and the child is then re-entered at run 2 while it works.
+	h.recordIssue(record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
+		Phase: phase.Testing, Generation: 1, Status: "in_progress"})
+	tester := newLiveClaim(t, h, "LEGION-208", claim.RoleTester)
 	h.recordIssue(record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
 		Phase: phase.Testing, Generation: 2, Status: "in_progress"})
-	tester := newLiveClaim(t, h, "LEGION-208", claim.RoleTester)
 	machine, ok := h.supervisor.Machine(tester.token)
 	if !ok {
 		t.Fatal("no machine for the tester")
@@ -463,8 +466,9 @@ func TestAnOperatorsTaskLeavesTheRunTheClaimIsServing(t *testing.T) {
 // task nobody has read.
 func TestATakenBackConfirmationDoesNotMoveTheRunTheClaimIsServing(t *testing.T) {
 	h, facts, _ := newArchitectHarness(t, nil, nil)
+	// The tester served run 1, and the child is re-entered at run 2 once that turn ends.
 	h.recordIssue(record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
-		Phase: phase.Testing, Generation: 2, Status: "in_progress"})
+		Phase: phase.Testing, Generation: 1, Status: "in_progress"})
 	tester := newLiveClaim(t, h, "LEGION-208", claim.RoleTester)
 	machine, ok := h.supervisor.Machine(tester.token)
 	if !ok {
@@ -474,6 +478,8 @@ func TestATakenBackConfirmationDoesNotMoveTheRunTheClaimIsServing(t *testing.T) 
 	if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: tester.token}); err != nil {
 		t.Fatalf("end the first run's turn: %v", err)
 	}
+	h.recordIssue(record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
+		Phase: phase.Testing, Generation: 2, Status: "in_progress"})
 	// The next run's task is sent, a foreign turn confirms it, and the agent refuses it as busy.
 	id := "outbox:99"
 	if err := machine.Handle(ctx, supervise.RequestDeliver{Claim: tester.token, Task: "the next run's task", ID: id, Generation: 2}); err != nil {

@@ -136,17 +136,24 @@ to a different child) is not moved back to its remote's commit by `jj bookmark s
 <name>` and the hint to add `--allow-backwards`, which takes it (`Moved 1 bookmarks to …`). A way
 out that restores a bookmark to its remote from such a conflict carries the flag.
 
-The same holds for `main`: a clone of a repository whose default branch is another has no `main`
-bookmark, and `--revision main` registers the workspace before it fails. The Go `createWorkspace`
-resolves `main` with the rows template too and adds its id.
+## With no local `main`, `jj workspace add --revision main` registers before it errors
 
-`jj workspace add` also refuses `--ignore-working-copy`, on both binaries, after the same
-registration: `Created workspace in "…"`, then `Error: This command must be able to update the
-working copy.` / `Hint: Don't use --ignore-working-copy.`, exit 1, the workspace registered and
-its directory created. So the add is the one jj command on a shared clone that snapshots the
-clone's own working copy. Every other command run against it (`-R <clone>`) takes the flag: the
-fetch, `jj workspace forget`, `jj bookmark set|delete|forget|track`, `jj config
-get|set|list|unset`, and the reads.
+A clone has no local `main` when the repository's default branch is another, when `main` was
+deleted in the clone while `main@origin` stays tracked, or when `jj bookmark forget main` left
+`main@origin` untracked. Bare `main` names none of the remote rows, so in each case `--revision
+main` registers the workspace, parented on the root commit, and then fails with `Error: Revision
+\`main\` doesn't exist` (followed by `Hint: Did you mean \`main@origin\`?` when that row exists),
+the same shape as a missing issue bookmark above. The Go `createWorkspace` resolves `main` with
+the rows template too and adds its id (`mainCommit`), refusing each of these states by name first.
+
+## `jj workspace add` refuses `--ignore-working-copy`, after registering
+
+`jj workspace add` refuses `--ignore-working-copy` on both binaries, after the same registration:
+`Created workspace in "…"`, then `Error: This command must be able to update the working copy.` /
+`Hint: Don't use --ignore-working-copy.`, exit 1, the workspace registered and its directory
+created. So the add is the one jj command on a shared clone that snapshots the clone's own working
+copy. Every other command run against it (`-R <clone>`) takes the flag: the fetch, `jj workspace
+forget`, `jj bookmark set|delete|forget|track`, `jj config get|set|list|unset`, and the reads.
 
 ## `jj workspace forget` takes only workspace names
 

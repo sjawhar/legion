@@ -64,6 +64,60 @@ When no GitHub App credentials are configured, the server still starts, but
 OAuth and GitHub proxy routes respond with `503`, and saving a project's
 architecture source answers `409 SOURCE_ACCESS` naming the missing key.
 
+## Webhook redelivery
+
+GitHub does not redeliver a webhook delivery that failed. When NATS is configured and the App's
+private key (`DISPATCH_APP_PEM_B64`) is present, Dispatch redelivers them itself, following GitHub's
+documented approach. Every two minutes it lists the App webhook's attempts
+(`GET /app/hook/deliveries`) and judges each delivery by its GUID, as GitHub's own redelivery
+script does: a GUID with an `OK` attempt is delivered, whatever its failures, and it asks GitHub to
+redeliver each other GUID with an attempt whose status is not `OK`
+(`POST /app/hook/deliveries/{id}/attempts`). Both endpoints accept only an
+App JWT, which is why Dispatch runs this. The webhook the App delivers to is the Envoy listener's
+`/webhook/github`. A redelivery carries the original `X-GitHub-Delivery`, and the listener
+publishes GitHub envelopes under a JetStream MsgId of it. So redelivering a delivery that did
+reach the stream adds nothing to the stream.
+
+- A delivery the listener answered with 5xx, or that GitHub could not complete, is redelivered
+  on the next sweep. If that redelivery fails too, it is retried after 2, 4, 8 and 16 minutes, at most
+  five times.
+- A redelivery request GitHub refuses (for example 422) delivers nothing. It is asked again on
+  the same backoff, at most five times, even after its failed attempt is older than the sweep's
+  hour: a refused request adds no attempt to GitHub's log, so the sweep's record brings it back.
+- A rate-limited answer (403 or 429, as GitHub's REST rate-limit documentation describes one)
+  stops the sweep and counts nothing against the delivery. No sweep sends GitHub anything until
+  the time GitHub gave (`Retry-After`, or `x-ratelimit-reset` when no requests remain), and at
+  least one minute, doubling while limits follow one another. Each sweep reads the recorded limit
+  again right before every request it sends, so one limit stops every sweeper at its next request;
+  a request already sent when another sweeper records a limit is not recalled. It logs
+  `level=WARN msg="webhook redelivery rate-limited by GitHub"`. Redelivery requests go a second
+  apart, as GitHub asks of a large number of POSTs.
+- A delivery the listener answered with 4xx is never redelivered: the listener refused the
+  request itself, and the same bytes would fail the same way.
+- A delivery GitHub has recorded an `OK` attempt for is never asked for again, even when a request
+  for it was recorded as refused (an accepted request whose answer was lost).
+- Giving up logs `level=ERROR msg="webhook redelivery exhausted"`. A 4xx logs
+  `level=ERROR msg="webhook delivery refused terminally"`. Each is logged once per delivery.
+  Every sweep logs an INFO `msg="webhook redelivery sweep"` line with its counts.
+- A sweep looks back one hour. After a gap in sweeping (Dispatch down), it resumes from its
+  cursor, back to GitHub's three days. The first sweep ever made looks back one hour only.
+
+The cursor, the last rate limit, and one record per delivery acted on live in the JetStream KV
+bucket `envoy_webhook_redelivery`. Its 72-hour TTL matches GitHub's horizon. A compare-and-swap
+claim keeps two Dispatch processes from requesting the same attempt twice, and the operator
+command honours the same rate limit.
+
+The operator command runs the same sweep over a chosen window. It does not move the running
+sweep's cursor. `--dry-run` lists every failed delivery and what the sweep would do with it,
+and requests and writes nothing:
+
+```bash
+envoy-dispatch redeliver-webhooks --since 72h --dry-run   # list what would be redelivered
+envoy-dispatch redeliver-webhooks --since 72h             # redeliver under the sweep's rules
+```
+
+It reads the same App credentials and NATS configuration as the server.
+
 ## Identity
 
 `DISPATCH_IDENTITY` controls how browser requests identify a human:
@@ -212,11 +266,11 @@ under `/assets` stays `404 {"error":"not found"}`.
 | `/api/v1/search?q=&project=&limit=` | GET | cookie, trusted header, or bearer | Full-text search over issue titles, latest document text, comments, asks, and messages; ranked results with `<mark>` snippets and SPA `href`s; `limit` 1–50 (default 20). `400 INVALID_QUERY` under 2 characters or stop words only; `400 INVALID_LIMIT`. |
 | `/api/v1/issues/{key}/references` | GET | cookie, trusted header, or bearer | Read the issue's eight-hop artifact reference closure. An `If-None-Match` value equal to the response ETag returns `304`. |
 | `/api/v1/references?to=\|from=&kind=&since=` | GET | cookie, trusted header, or bearer | Edges of one node in the reference graph, newest first and cross-project: exactly one of `to` (backlinks) or `from` (links), each a `dispatch://` reference; `kind` filters a csv of edge kinds; `since=<events.id>` keeps mentions introduced after it (structural edges excluded). Each edge carries the other `node`, an `excerpt` (the containing block for a document mention), `created_at`, and `source_seq`. `400 INVALID_REFERENCE` / `INVALID_KIND` / `INVALID_SINCE`; `404` for a node that does not exist. |
-| `/api/v1/issues` | POST | cookie, trusted header, or bearer | Create an issue and its primary document. Omitting or leaving `spec` blank seeds the writing-a-spec skeleton. Refuses a title that near-duplicates an issue in the project with `409 POSSIBLE_DUPLICATE` and candidates unless `force` is true; external references skip the check. |
+| `/api/v1/issues` | POST | cookie, trusted header, or bearer | Create an issue and its primary document. Omitting or leaving `spec` blank seeds the writing-a-spec skeleton. Refuses a title that near-duplicates an issue in the project with `409 POSSIBLE_DUPLICATE` and candidates unless `force` is true; external references skip the check. A spec whose ask block breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`. |
 | `/api/v1/issues/{key}/asks` | POST | cookie, trusted header, or bearer | Create an optionally anchored ask. An anchor is exactly `{artifact, quote, occurrence?}` for a server-written quote mark or `{artifact, mark_id}` for a mark already written by a browser. |
 | `/api/v1/issues/{key}/asks?state=` | GET | cookie, trusted header, or bearer | List an issue's asks, open and/or answered (`state`: `all` default, `open`, or `answered`). |
 | `/api/v1/asks/{id}` | GET | cookie, trusted header, or bearer | Read an ask and its reply thread. |
-| `/api/v1/asks/{id}` | PATCH | cookie, trusted header, or bearer | Edit one or more of `question`, `options`, `multiple`, or `urgency` on an open ask. A bearer caller must be the asking session; a human may edit any open ask. The response records `edited_at` and emits `ask.edited` with the current ask, prior mutable fields, and `edited_by`. Anchors are selected when the ask is created and cannot be changed by this route. On a block ask the `:::ask` block is written in the same transaction and the row takes the block's parsed values, so the edit versions the document once and no settlement reverts it. Only the named fields are written: `urgency`/`multiple` alone go through the attribute path and leave the body's nodes, marks and inner block ids untouched, so an untouched question keeps its formatting, links and comment anchors; naming `question` or `options` replaces that part with the markdown pipeline's own parse, and anchors inside the replaced text move as for any document edit. A field named but unchanged is not rewritten, so an idempotent retry of the whole ask writes nothing, versions nothing, keeps every anchor and returns 200. Text the block cannot carry unchanged — an option label containing `": "`, or a question with a line beginning `:::` — is `400 ASK_BLOCK_TEXT` naming the field, with nothing written. |
+| `/api/v1/asks/{id}` | PATCH | cookie, trusted header, or bearer | Edit one or more of `question`, `options`, `multiple`, or `urgency` on an open ask. A bearer caller must be the asking session; a human may edit any open ask. The response records `edited_at` and emits `ask.edited` with the current ask, prior mutable fields, and `edited_by`. Anchors are selected when the ask is created and cannot be changed by this route. On a block ask the `:::ask` block is written in the same transaction and the row takes the block's parsed values, so the edit versions the document once and no settlement reverts it. Only the named fields are written: `urgency`/`multiple` alone go through the attribute path and leave the body's nodes, marks and inner block ids untouched, so an untouched question keeps its formatting, links and comment anchors; naming `question` or `options` replaces that part with the markdown pipeline's own parse, and anchors inside the replaced text move as for any document edit. A field named but unchanged is not rewritten, so an idempotent retry of the whole ask writes nothing, versions nothing, keeps every anchor and returns 200. Text the block cannot carry back unchanged — an option label containing `": "`, the separator between a label and its description, is one example — is `400 ASK_BLOCK_TEXT` naming the field, with nothing written. |
 | `/api/v1/asks/{id}/answer` | POST | cookie or trusted header | Answer an open ask. |
 | `/api/v1/asks/{id}/resolve` | POST | cookie, trusted header, or bearer | Retract or self-resolve an open ask with a recorded reason. On a block ask the block's `state` is written with it. A reason beginning `removed from the document in version`, which marks a retraction settlement wrote and would have the retract undone when the block returns, is `400 INVALID_RESOLUTION`. |
 | `/api/v1/issues/{key}/comments?artifact=` | GET | cookie, trusted header, or bearer | List comments, optionally limited to an artifact ID. |
@@ -228,13 +282,13 @@ under `/assets` stays `404 {"error":"not found"}`.
 | `/api/v1/comments/{id}/accept` | POST | cookie or trusted header | Apply and accept an anchored suggestion. |
 | `/api/v1/comments/{id}/reject` | POST | cookie or trusted header | Reject a suggestion. |
 | `/api/v1/issues/{key}/messages` | POST | cookie, trusted header, or bearer | Post an issue message. |
-| `/api/v1/issues/{key}/artifacts` | GET, POST | cookie, trusted header, or bearer | List issue artifacts or create a version from a multipart `file` or JSON `{name, content, summary?, actor?}`. The JSON form requires `Content-Type: application/json`. |
-| `/api/v1/projects/{key}/artifacts` | GET, POST | cookie, trusted header, or bearer | List non-primary project artifacts (or only unlinked documents with `?unlinked=true`), or create an unlinked project artifact. |
+| `/api/v1/issues/{key}/artifacts` | GET, POST | cookie, trusted header, or bearer | List issue artifacts or create a version from a multipart `file` or JSON `{name, content, summary?, actor?}`. The JSON form requires `Content-Type: application/json`. An ask block whose body breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`; a new version is held to it only for the asks it writes or changes. |
+| `/api/v1/projects/{key}/artifacts` | GET, POST | cookie, trusted header, or bearer | List non-primary project artifacts (or only unlinked documents with `?unlinked=true`), or create an unlinked project artifact. An ask block whose body breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`; a new version is held to it only for the asks it writes or changes. |
 | `/api/v1/artifacts/{id}` | GET | cookie, trusted header, or bearer | Read an artifact, its versions, and incoming references. `{id}` must be a UUID. |
 | `/api/v1/artifacts/{id}/text` | GET | cookie, trusted header, or bearer | Read a live document's markdown. `{id}` must be a UUID. |
 | `/api/v1/artifacts/{id}/versions/{n}` | GET | cookie, trusted header, or bearer | Read a document version or download a blob. `{id}` must be a UUID. |
 | `/api/v1/artifacts/{id}/versions` | POST | cookie, trusted header, or bearer | Create a named live-document version. `{id}` must be a UUID. |
-| `/api/v1/artifacts/{id}/edits` | POST | cookie, trusted header, or bearer | Apply document edit operations. `{id}` must be a UUID. |
+| `/api/v1/artifacts/{id}/edits` | POST | cookie, trusted header, or bearer | Apply document edit operations. `{id}` must be a UUID. An edit is `400 INVALID_ASK_BLOCK` when an ask it writes or changes breaks its content rule (`paragraph+ bullet_list?`) or holds what settlement cannot read; an ask it carries through unchanged is not its to refuse. |
 | `/api/v1/artifacts/{id}/asks?state=` | GET, POST | cookie, trusted header, or bearer | List or create asks on an unlinked document. |
 | `/api/v1/artifacts/{id}/comments` | GET, POST | cookie, trusted header, or bearer | List or create comments and suggestions on an unlinked document. |
 | `/api/v1/artifacts/{id}/events` | GET | cookie, trusted header, or bearer | Read an unlinked document's events. |

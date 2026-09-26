@@ -89,6 +89,54 @@ func TestParsePreservesInlineHTMLAtom(t *testing.T) {
 	}
 }
 
+// A document opening with `---` and no closing line is ordinary markdown, so its first line is
+// a thematic break. Goldmark's front-matter extension instead consumes an unclosed opener to the
+// end of the input, which lost every block after it: an `insert` of "---\n\nTwo." wrote nothing
+// and reported itself unchanged.
+func TestParseUnclosedFrontmatterOpenerIsAThematicBreak(t *testing.T) {
+	for _, test := range []struct {
+		markdown string
+		kinds    []string
+	}{
+		{markdown: "---", kinds: []string{"hr"}},
+		{markdown: "---\n\nTwo.", kinds: []string{"hr", "paragraph"}},
+		{markdown: "---\ntitle: x\n\nBody.\n", kinds: []string{"hr", "paragraph", "paragraph"}},
+	} {
+		t.Run(test.markdown, func(t *testing.T) {
+			tree, err := Parse(test.markdown)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var kinds []string
+			for _, child := range tree.Children {
+				kinds = append(kinds, child.Type)
+			}
+			if strings.Join(kinds, ",") != strings.Join(test.kinds, ",") {
+				t.Fatalf("Parse(%q) = %v, want %v", test.markdown, kinds, test.kinds)
+			}
+		})
+	}
+}
+
+// The fix must not cost a closed front-matter block, which stays the document's own first node.
+func TestParseKeepsClosedFrontmatter(t *testing.T) {
+	const markdown = "---\ntitle: x\n---\n\nBody.\n"
+	tree, err := Parse(markdown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tree.Children) != 2 || tree.Children[0].Type != "frontmatter" {
+		t.Fatalf("Parse(%q) children = %#v", markdown, tree.Children)
+	}
+	back, err := Render(tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back != markdown {
+		t.Fatalf("Render(Parse()) = %q, want %q", back, markdown)
+	}
+}
+
 func TestParsePreservesLiteralEscapesInsideCodeSpan(t *testing.T) {
 	got, err := Parse("`\\*literal\\* &amp;`\n")
 	if err != nil {
