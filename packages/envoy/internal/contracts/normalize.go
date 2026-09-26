@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -68,12 +69,12 @@ func GithubEnvelopes(input GithubEnvelopeInput, trigger string) []Envelope {
 	if num != "" {
 		// notifications.github.owner.repo.pr.7706.mention
 		mention := item
-		mention.Topic = GithubSubject(owner, repo, base+"."+num+".mention")
+		mention.Topic = GithubSubject(owner, repo, base+"."+num+"."+githubMentionKind)
 		mentions = append(mentions, mention)
 	}
 	// Also publish repo-wide mention: notifications.github.owner.repo.mention
 	mention := item
-	mention.Topic = GithubSubject(owner, repo, "mention")
+	mention.Topic = GithubSubject(owner, repo, githubMentionKind)
 	mentions = append(mentions, mention)
 	return append(mentions, item)
 }
@@ -335,45 +336,66 @@ func nestedNumberString(body map[string]any, keys ...string) string {
 // githubParentKind returns the entity type that owns the number.
 // For issue_comment, checks body["issue"]["pull_request"] to distinguish PR vs issue.
 func githubParentKind(event string, body map[string]any) string {
-	switch event {
-	case "pull_request", "pull_request_review", "pull_request_review_comment":
+	if event == "issue_comment" && nested(body, "issue", "pull_request") != nil {
 		return "pr"
-	case "issues":
-		return "issue"
-	case "sub_issues":
-		return "issue"
-	case "issue_comment":
-		if nested(body, "issue", "pull_request") != nil {
-			return "pr"
-		}
-		return "issue"
 	}
-	return ""
+	return githubEventParents[event]
+}
+
+// githubEventParents names the resource an event's number belongs to; an issue_comment on a pull
+// request belongs to the pull request instead (githubParentKind).
+var githubEventParents = map[string]string{
+	"pull_request":                "pr",
+	"pull_request_review":         "pr",
+	"pull_request_review_comment": "pr",
+	"issues":                      "issue",
+	"sub_issues":                  "issue",
+	"issue_comment":               "issue",
 }
 
 func githubKind(event string) string {
-	switch event {
-	case "pull_request":
-		return "pr"
-	case "issues":
-		return "issue"
-	case "sub_issues":
-		return "sub_issue"
-	case "push":
-		return "push"
-	case "check_run", "check_suite":
-		return "ci"
-	case "workflow_run":
-		return "workflow"
-	case "issue_comment":
-		return "comment"
-	case "pull_request_review":
-		return "review"
-	case "pull_request_review_comment":
-		return "comment"
-	default:
-		return "comment"
+	if kind, ok := githubEventKinds[event]; ok {
+		return kind
 	}
+	return githubDefaultKind
+}
+
+// githubEventKinds names each GitHub event's topic kind; any other event is githubDefaultKind.
+var githubEventKinds = map[string]string{
+	"pull_request":                "pr",
+	"issues":                      "issue",
+	"sub_issues":                  "sub_issue",
+	"push":                        "push",
+	"check_run":                   "ci",
+	"check_suite":                 "ci",
+	"workflow_run":                "workflow",
+	"issue_comment":               "comment",
+	"pull_request_review":         "review",
+	"pull_request_review_comment": "comment",
+}
+
+const githubDefaultKind = "comment"
+
+// githubMentionKind is the kind a mention copy is published under, after the repository or after
+// the mentioning resource.
+const githubMentionKind = "mention"
+
+// GithubTopicKinds are the tokens that follow a GitHub topic's owner and name, sorted: every kind
+// and parent kind the two tables name, githubDefaultKind, and githubMentionKind (the push, workflow
+// and checks topics begin `push`, `workflow` and `pr`). A token there that is none of these is not
+// a GitHub topic kind.
+var GithubTopicKinds = githubTopicKinds()
+
+func githubTopicKinds() []string {
+	kinds := []string{githubDefaultKind, githubMentionKind}
+	for _, kind := range githubEventKinds {
+		kinds = append(kinds, kind)
+	}
+	for _, parent := range githubEventParents {
+		kinds = append(kinds, parent)
+	}
+	slices.Sort(kinds)
+	return slices.Compact(kinds)
 }
 
 // GithubPRNumber returns a non-negative integer encoded as a JSON number or decimal-digit string.
@@ -628,7 +650,7 @@ func githubPayload(event string, body map[string]any) string {
 			"action":      action,
 			"repo":        repo,
 			"number":      number,
-			"title":       nestedString(body, "issue", "title"),
+			"title":       truncateWithEllipsis(nestedString(body, "issue", "title"), maxEnvelopeTextRunes),
 			"parent_kind": githubParentKind(event, body),
 			"author":      nestedString(body, "comment", "user", "login"),
 			"url":         nestedString(body, "comment", "html_url"),
@@ -646,7 +668,7 @@ func githubPayload(event string, body map[string]any) string {
 			"action":      action,
 			"repo":        repo,
 			"number":      number,
-			"title":       nestedString(body, "pull_request", "title"),
+			"title":       truncateWithEllipsis(nestedString(body, "pull_request", "title"), maxEnvelopeTextRunes),
 			"parent_kind": githubParentKind(event, body),
 			"author":      nestedString(body, "comment", "user", "login"),
 			"url":         nestedString(body, "comment", "html_url"),
@@ -671,7 +693,7 @@ func githubPayload(event string, body map[string]any) string {
 			"action":      action,
 			"repo":        repo,
 			"number":      number,
-			"title":       nestedString(body, "pull_request", "title"),
+			"title":       truncateWithEllipsis(nestedString(body, "pull_request", "title"), maxEnvelopeTextRunes),
 			"parent_kind": "pr",
 			"author":      nestedString(body, "review", "user", "login"),
 			"url":         nestedString(body, "review", "html_url"),
@@ -692,7 +714,7 @@ func githubPayload(event string, body map[string]any) string {
 			"action":           action,
 			"repo":             repo,
 			"number":           number,
-			"title":            nestedString(body, "pull_request", "title"),
+			"title":            truncateWithEllipsis(nestedString(body, "pull_request", "title"), maxEnvelopeTextRunes),
 			"author":           nestedString(body, "pull_request", "user", "login"),
 			"url":              nestedString(body, "pull_request", "html_url"),
 			"head_sha":         nestedString(body, "pull_request", "head", "sha"),
@@ -711,7 +733,7 @@ func githubPayload(event string, body map[string]any) string {
 			"action": action,
 			"repo":   repo,
 			"number": number,
-			"title":  nestedString(body, "issue", "title"),
+			"title":  truncateWithEllipsis(nestedString(body, "issue", "title"), maxEnvelopeTextRunes),
 			"author": nestedString(body, "issue", "user", "login"),
 			"url":    nestedString(body, "issue", "html_url"),
 		}
@@ -725,7 +747,7 @@ func githubPayload(event string, body map[string]any) string {
 			"after":                   stringValue(body["after"]),
 			"before":                  stringValue(body["before"]),
 			"pusher":                  nestedString(body, "pusher", "name"),
-			"head_subject":            firstNonEmptyLine(nestedString(body, "head_commit", "message")),
+			"head_subject":            first(nestedString(body, "head_commit", "message"), maxEnvelopeTextRunes),
 			"commit_count":            strconv.Itoa(len(sliceValue(body["commits"]))),
 			"compare_url":             stringValue(body["compare"]),
 			"changed_paths":           strings.Join(changedPaths, "\n"),
@@ -1118,12 +1140,21 @@ func truncateWithEllipsis(s string, maxRunes int) string {
 	return string(runes[:maxRunes]) + "…"
 }
 
+// maxEnvelopeTextRunes caps the free-text fields an envelope copies from its webhook body: a
+// comment or review body (GitHub allows up to 65,536 characters), a push's head_subject (a commit
+// message has no limit), an issue or pull request title, and a Ghost Wispr title. GitHub's own
+// interface stops a title at 256 characters, but the listener checks a delivery's signature, not
+// its fields' lengths, so a title is capped here too. The listener publishes an envelope to NATS
+// whole, and a publish larger than the server's max payload (1 MiB by default) fails, so no field
+// may grow with the webhook it came from.
+const maxEnvelopeTextRunes = 2048
+
 func capBody(s string) (string, bool) {
 	runes := []rune(s)
-	if len(runes) <= 2048 {
+	if len(runes) <= maxEnvelopeTextRunes {
 		return s, false
 	}
-	return string(runes[:2048]), true
+	return string(runes[:maxEnvelopeTextRunes]), true
 }
 
 func shortSHA(sha string) string {
@@ -1206,7 +1237,7 @@ func ghostWisprPayload(eventType string, body map[string]any) string {
 	normalizedEventType := normalizeGhostWisprEventType(eventType)
 	data := map[string]string{"event_type": normalizedEventType}
 	data["session_id"] = ghostWisprSummarySessionID(body)
-	data["title"] = nestedString(body, "payload", "title")
+	data["title"] = truncateWithEllipsis(nestedString(body, "payload", "title"), maxEnvelopeTextRunes)
 	data["duration"] = nestedNumberString(body, "payload", "duration")
 	data["created_at"] = stringValue(body["created_at"])
 	if normalizedEventType == "summary_ready" {

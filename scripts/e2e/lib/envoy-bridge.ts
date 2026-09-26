@@ -1,11 +1,13 @@
 // scripts/e2e/lib/envoy-bridge.ts: relay the sandbox repository's GitHub subjects from production
 // NATS (read-only) into a live proof's own NATS (stage3-devbox-workflow.sh starts it). It
-// subscribes upstream to exactly `notifications.github.<owner>.<repo>.>` and republishes each
-// message unchanged downstream; it never publishes upstream, and it never touches Dispatch issue
-// subjects — the instance's scratch Dispatch server publishes its own, and two rigs on one issue
-// stream admitted each other's issues (docs/solutions/legion).
+// subscribes upstream to exactly `notifications.github.<owner>.<repo>.>`, a dot in either name
+// written `_` as Envoy publishes it, and republishes each message unchanged downstream; it never
+// publishes upstream, and it never touches Dispatch issue subjects — the instance's scratch
+// Dispatch server publishes its own, and two rigs on one issue stream admitted each other's issues
+// (docs/solutions/legion).
 import { connect, type NatsConnection, type Subscription } from "nats";
 import { EnvelopeSchema } from "../../../packages/contracts/src/envelope";
+import { githubSubject } from "../../../packages/contracts/src/subject";
 
 const requiredEnvelopeFields = [
   "event_id",
@@ -65,9 +67,10 @@ export function bridgeConfigFromEnvironment(
       "SMOKE_UPSTREAM_NATS is not one NATS URL naming a fully-qualified host: a bare alias resolves through whatever search domain the box has; name the production Envoy NATS as nats://envoy-nats.<tailnet>.ts.net:4222"
     );
   }
+  const [owner, name] = repository.split("/");
   return {
     repository,
-    subjects: [`notifications.github.${repository.replace("/", ".")}.>`],
+    subjects: [githubSubject(owner, name, ">")],
     upstreamUrl,
     downstreamUrl,
   };

@@ -38,10 +38,11 @@ orchestrators (Pulumi, Kubernetes) time out and kill the container.
 ```
 1. config.Load()           — synchronous, fast
 2. net.Listen("tcp", addr) — bind port in main goroutine (deterministic)
-3. Build HTTP mux           — /healthz always available, /v1/* and webhooks behind a gate
+3. Build HTTP mux           — /healthz always available, /v1/* and webhooks each behind a gate
 4. go server.Serve(ln)      — HTTP live immediately, /healthz returns {"status":"starting"}
-5. Slow init in main()      — NATS connect, store open, consumer subscribe
-6. gate.open, deps.Store     — handlers built, the gate opens for /v1/* and webhooks, then the atomic publish
+5. Slow init in main()      — NATS connect, CI store open, the webhook gate opens, then the
+                              other stores open and the consumer subscribes
+6. v1Gate.open, deps.Store   — /v1 handlers built, the /v1 gate opens, then the atomic publish
 7. log.Fatal(<-fatal)        — block on HTTP server error channel
 ```
 
@@ -63,8 +64,9 @@ type listenerDeps struct {
 ```
 
 The listener exits when the interest registry, the session registry or the CI store cannot
-open, so a `listenerDeps` exists only with every store open. The webhook and `/v1` handlers take
-it as a plain `*listenerDeps` and are built once, after it is complete: no handler loads a
+open, so a `listenerDeps` exists only with every store open. The `/v1` handlers take it as a
+plain `*listenerDeps`, and the webhook handlers take the only two things they use, the NATS
+client and the CI store; each is built once, after what it takes is open: no handler loads a
 pointer on each request, and none can be constructed over a dependency that is not there.
 
 **Only what answers during startup reads an atomic pointer.** `/healthz` and the metrics
@@ -91,32 +93,42 @@ func (g *startingGate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 ```
 
-main registers one gate before `server.Serve`, bare on every enabled webhook path and inside
-`apiAuth` on `/v1`, so those paths answer 503 while the listener starts. In phase 6
-`openListener` builds one mux of every route over the complete deps, opens the gate onto it, and
+main registers two gates before `server.Serve`, one bare on every enabled webhook path and one
+inside `apiAuth` on `/v1`, so those paths answer 503 while the listener starts. Once NATS and the
+CI store are open, `openWebhooks` builds the webhook handlers and opens the webhook gate onto them.
+A webhook waits for nothing else, and in particular not for the durable consumer's bind, which
+during a rolling deploy waits out the task being replaced while the load balancer already sends
+the replacement webhooks: GitHub does not redeliver a refused delivery. In phase 6
+`openListener` builds the `/v1` routes over the complete deps, opens the `/v1` gate onto them, and
 only then stores `deps`:
 
 ```go
-var gate startingGate
+var webhookGate, v1Gate startingGate
 for _, hook := range hooks {
-    mux.Handle(hook.path, &gate)
+    mux.Handle(hook.path, &webhookGate)
 }
-mux.Handle("/v1/", apiAuth(apiToken, apiVerifier, logger, &gate))
-// ... phase 6, once every store is open:
-openListener(&gate, hooks, ready, cfg.MachineID, logger, deps.Store)
+mux.Handle("/v1/", apiAuth(apiToken, apiVerifier, logger, &v1Gate))
+// ... phase 5, once NATS and the CI store are open:
+openWebhooks(&webhookGate, hooks, client, ciStore)
+// ... phase 6, once every store is open and the durable is bound:
+openListener(&v1Gate, ready, cfg.MachineID, logger, deps.Store)
 ```
 
-**Open the gate before publishing `deps`.** Storing `deps` is what turns `/healthz` healthy, so
-the other order leaves a window in which `/healthz` says healthy while every route still answers
+`TestAWebhookIsServedWhileAnotherTaskHoldsTheDurable` runs the listener binary against a durable
+another subscriber holds and requires a webhook to be served (and `/v1` to answer 503) until it
+lets go.
+
+**Open both gates before publishing `deps`.** Storing `deps` is what turns `/healthz` healthy, so
+the other order leaves a window in which `/healthz` says healthy while a route still answers
 503 -- and a caller that waits for healthy, as the shutdown test does, meets the 503.
-`TestOpenListener_PublishesOnlyOnceTheRoutesServe` holds the order.
+`TestOpenListener_PublishesOnlyOnceTheRoutesServe` holds the order for each gate.
 
 ## Health States
 
 | Phase | `/healthz` | Body | Meaning |
 |-------|-----------|------|---------|
-| Starting | 200 | `{"status":"starting"}` | Alive, init in progress — don't restart; `/v1/*` answers 503 |
-| Healthy | 200 | `{"status":"healthy"}` | NATS connected, fully operational; `/v1/*` is open |
+| Starting | 200 | `{"status":"starting"}` | Alive, init in progress — don't restart; `/v1/*` answers 503, webhooks answer 503 until NATS and the CI store are open and are served after |
+| Healthy | 200 | `{"status":"healthy"}` | NATS connected, fully operational; `/v1/*` and webhooks are open |
 | Degraded | 200 | `{"status":"degraded","error":"..."}` | A KV dependency or the durable-consumer lookup failed transiently; NATS reconnect and the monitor retry |
 | Unhealthy | 503 | `{"status":"unhealthy","error":"..."}` | NATS, the subscription, a KV watcher or the durable consumer is gone |
 

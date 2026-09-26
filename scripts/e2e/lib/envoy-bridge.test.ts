@@ -29,6 +29,16 @@ describe("bridgeConfigFromEnvironment", () => {
     });
   });
 
+  // Envoy writes a dot in a repository's name as `_`, so the name stays one subject segment.
+  test("relays a dotted repository's subjects as Envoy spells them", () => {
+    const config = bridgeConfigFromEnvironment({
+      SMOKE_REPO: "acme/wid.gets",
+      SMOKE_RIG_NATS: "nats://x:1",
+      SMOKE_UPSTREAM_NATS: "nats://y.example:1",
+    });
+    expect(config.subjects).toEqual(["notifications.github.acme.wid_gets.>"]);
+  });
+
   test("never subscribes to Dispatch issue subjects (two rigs on one project cross-admit)", () => {
     const config = bridgeConfigFromEnvironment({
       SMOKE_REPO: "a/b",

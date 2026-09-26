@@ -48,6 +48,14 @@ deployment; e2e's `run-server.sh` sets it so the web client's
 reconnect-from-lastId path can be exercised without seeding thousands of
 events to trip the SSE replay cap.
 
+With NATS configured and the GitHub App private key loaded, startup also runs the webhook
+redelivery sweep (`internal/dispatch/redeliver`, wired in `cmd/dispatch/redeliver.go`). Every
+`redeliver.Interval` it lists the App webhook's failed deliveries and redelivers them through
+GitHub's App API. Its cursor and per-delivery claims live in the `envoy_webhook_redelivery` KV
+bucket. `envoy-dispatch redeliver-webhooks --since <d> [--dry-run]` runs the same sweep once
+over a chosen window without moving the cursor. The README's "Webhook redelivery" section has
+the rules: 4xx is never redelivered, bounded attempts, GitHub's rate limits, the log lines.
+
 Each document room has two shared Yjs types: the authoritative
 `Y.XmlFragment("prosemirror")` tree and `Y.Map("marks")`, the server-maintained
 projection of Postgres comment, ask, and suggestion records. Go renders canonical

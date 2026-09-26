@@ -276,20 +276,17 @@ type Machine struct {
 	// a re-send, should that send fail.
 	send            *sending
 	helloDuringSend bool
+	// unsaved is a pending delivery that memory changed and the store did not take: settle writes
+	// it again, with the claim, before the next decision (saved).
+	unsaved bool
+	// sentThrough is the registration sequence of the newest connection a prompt was sent through
+	// (takesBackConfirmed). A send always goes through the connection registered last, so it only
+	// rises, and a relaunch leaves it: the new process's connections are registered later still.
+	sentThrough uint64
 	// askFirst is a restored claim whose agent an earlier daemon was talking to: a pending
 	// delivery it may already have sent, or a turn it saw start and may not have seen end. The
 	// machine asks the agent (get_state) before it acts on either.
 	askFirst bool
-	// markedBy is the id of the prompt whose acknowledgement set the pending task's read mark
-	// (DeliveredAt). A late refusal is judged against the prompt it names: one naming markedBy says
-	// the prompt that marked the task never ran, so the mark goes (markUnread); one naming any other
-	// prompt says nothing about the mark. Which prompt set the mark is a fact recorded when it is
-	// set, so no ordering of sends, acknowledgements and refusals has to be reasoned about: only
-	// markRead and clearReadMark write it, each together with DeliveredAt, and nothing else - no
-	// send, confirmation or relaunch - may. When the pending task was replaced it may still name
-	// the previous task's prompt, and a refusal naming it then has nothing to clear. Memory only:
-	// after a restart no refusal can come from the old connection.
-	markedBy string
 	// previous is the incarnation the claim last ran and no longer records — stopped by a
 	// suspension, retired, failed on, or found dead — which every launch of the same session hands
 	// the runtime to wait out until one starts. letGo is the one way a process gets here. It is
@@ -359,10 +356,12 @@ func (m *Machine) Handle(ctx context.Context, ev Event) error {
 	if token := claimOf(ev); token != m.claim.Token {
 		return fmt.Errorf("supervise: %T for claim %s reached the machine of %s", ev, token, m.claim.Token)
 	}
-	if pass, err := m.fence(ctx, ev); !pass {
+	// Settle first, so the fence judges the task the row will find: a settle after the fence could
+	// retire the very task it let the event through for.
+	if err := m.settle(ctx); err != nil {
 		return err
 	}
-	if err := m.settle(ctx); err != nil {
+	if pass, err := m.fence(ctx, ev); !pass {
 		return err
 	}
 	k := key{m.claim.State, kindOf(ev)}
@@ -505,7 +504,13 @@ func (m *Machine) fence(ctx context.Context, ev Event) (bool, error) {
 			return false, nil
 		}
 	case StreamLateRefusal:
-		if pending == nil || (pending.ID != ev.DeliveryID && (m.markedBy == "" || m.markedBy != ev.DeliveryID)) {
+		// A refusal naming the prompt that set the mark always reaches the table. One naming the
+		// pending id does when its connection sent that prompt, or when it takes back a task a turn
+		// not its own confirmed (takesBackConfirmed): a replayed refusal answers an earlier send, and
+		// the pending id may be the one its connection re-sent.
+		named := pending != nil && pending.MarkedBy == ev.DeliveryID
+		pendingNamed := pending != nil && pending.ID == ev.DeliveryID && !ev.Replayed
+		if pending == nil || !(named || pendingNamed || m.takesBackConfirmed(ev)) {
 			m.dropStale("StreamLateRefusal", "delivery", ev.DeliveryID, pendingID(pending))
 			return false, nil
 		}

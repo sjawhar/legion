@@ -35,6 +35,9 @@ func TestDecodeReadsEncodeAndRefusesAnyOther(t *testing.T) {
 	for _, testCase := range []struct{ name, raw, want string }{
 		{"not JSON", `LEGION_PROMPT_AGENTS=oracle`, "not promptrefs.Encode's encoding"},
 		{"null", `null`, "the encoding is null, not an object"},
+		{"a number", `42`, "the encoding is a number, not an object"},
+		{"a string", `"oracle"`, "the encoding is a string, not an object"},
+		{"an array", `[]`, "the encoding is an array, not an object"},
 		{"an empty object", `{}`, "no LEGION_PROMPT_AGENTS"},
 		{"a kind missing", `{"LEGION_PROMPT_AGENTS":{}}`, "no LEGION_PROMPT_SKILLS"},
 		{"a kind that is null", `{"LEGION_PROMPT_AGENTS":null,"LEGION_PROMPT_SKILLS":{}}`, "LEGION_PROMPT_AGENTS is null, not an object"},
@@ -45,6 +48,8 @@ func TestDecodeReadsEncodeAndRefusesAnyOther(t *testing.T) {
 		{"an agent name outside the reference alphabet", `{"LEGION_PROMPT_AGENTS":{"o'racle":["roles/architect.md"]},"LEGION_PROMPT_SKILLS":{}}`, "LEGION_PROMPT_AGENTS name \"o'racle\" is not one a prompt can write"},
 		{"a skill name ending on a period", `{"LEGION_PROMPT_AGENTS":{},"LEGION_PROMPT_SKILLS":{"dispatch.":["roles/architect.md"]}}`, "LEGION_PROMPT_SKILLS name \"dispatch.\" is not one a prompt can write"},
 		{"trailing data", `{"LEGION_PROMPT_AGENTS":{},"LEGION_PROMPT_SKILLS":{}}{}`, "more than one JSON value"},
+		{"trailing data that is not JSON", `{"LEGION_PROMPT_AGENTS":{},"LEGION_PROMPT_SKILLS":{}}x`, "trailing data after the object"},
+		{"trailing data that is a stray close bracket", `{"LEGION_PROMPT_AGENTS":{},"LEGION_PROMPT_SKILLS":{}}]`, "trailing data after the object"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			_, err := Decode(testCase.raw)
