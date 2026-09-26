@@ -685,7 +685,9 @@ test("a failed queued Conversation comment action clears later clicks and retrie
     await firstThread.getByRole("button", { name: "Resolve" }).click();
     await secondThread.getByRole("button", { name: "Resolve" }).click();
     resolveFirst?.();
-    await expect(firstThread.getByText("Could not save this action.")).toBeVisible();
+    // A 500 with no body is still an answer from the API, so the card shows what the client made
+    // of it, as the header, settings and composer do.
+    await expect(firstThread.getByText("Dispatch request failed (500)")).toBeVisible();
     await expect.poll(() => requests).toBe(1);
     await firstThread.getByRole("button", { name: "Retry" }).click();
     await expect.poll(() => requests).toBe(2);
