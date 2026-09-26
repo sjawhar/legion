@@ -432,6 +432,7 @@ function sessionContext(
       ensureOnDisk,
     },
     setInterval: () => undefined,
+    setTimeout: () => undefined,
     ui: { notify: () => undefined },
   };
 }

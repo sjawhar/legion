@@ -41,10 +41,28 @@ export interface SessionContext {
     readonly getBranch?: () => readonly unknown[];
   };
   readonly setInterval: (callback: () => void, intervalMs: number) => void;
+  /** The host's managed one-shot timer: a throw or rejection is contained, cleared on shutdown. */
+  readonly setTimeout: (callback: () => void | Promise<void>, delayMs: number) => void;
+  /**
+   * Oh My Pi 18.3 on: one side turn on the session's model over a snapshot of its conversation,
+   * never added to the transcript. The host sends `promptText` as given. A context kept from
+   * `session_start` may call it from later callbacks (upstream `docs/extensions.md`, "Ephemeral
+   * side turns").
+   */
+  readonly runEphemeralTurn?: (options: {
+    readonly promptText: string;
+    readonly signal?: AbortSignal;
+  }) => Promise<{ readonly replyText: string }>;
   readonly ui: {
     readonly notify: (message: string, level: "info" | "warning") => void;
   };
 }
+
+/** A side turn: one question to the session's model, answered without touching the transcript. */
+export type SideTurn = (input: {
+  readonly prompt: string;
+  readonly signal?: AbortSignal;
+}) => Promise<{ readonly replyText: string }>;
 
 /**
  * Why OMP swapped the session under a running extension. `/new` and `/resume`
@@ -286,10 +304,11 @@ export interface PiApi {
       | { readonly type: string },
     options?: { readonly deliverAs: "steer" | "aside"; readonly triggerTurn: boolean }
   ) => void;
-  readonly askEphemeral?: (input: {
-    readonly prompt: string;
-    readonly signal?: AbortSignal;
-  }) => Promise<{ readonly replyText: string }>;
+  /**
+   * The fork's side turn before Oh My Pi 18.3: the same call as `SessionContext.runEphemeralTurn`,
+   * with the question wrapped in the /btw prompt by the host.
+   */
+  readonly askEphemeral?: SideTurn;
   /** Persist extension state in the session transcript; never sent to the model. */
   readonly appendEntry: <T = unknown>(customType: string, data?: T) => void;
   readonly getActiveTools: () => readonly string[];

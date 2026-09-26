@@ -12,7 +12,7 @@ import * as path from "node:path";
 // ships it (GITHUB_ACTIONS, not CI: agent harnesses on the devbox export CI=true).
 // It is also the only check that the run-end nudge's hidden self-check starts no run: the nudge
 // treats any `agent_start` after a settle as a newer run and withholds its steer, so a host that
-// counted `pi.askEphemeral` as a run would silence the nudge with every unit test still green.
+// counted the side turn as a run would silence the nudge with every unit test still green.
 // The WAITING self-check case below fails if that ever changes.
 const omp = process.env.LEGION_TEST_OMP;
 const onActions = process.env.GITHUB_ACTIONS === "true";
@@ -32,7 +32,7 @@ interface Pane {
   readonly requests: Request[];
   /** The Messages requests that were turns of the conversation, in order. */
   readonly turns: () => Request[];
-  /** The Messages requests that were `pi.askEphemeral` calls, in order. */
+  /** The Messages requests that were side turns (the self-check), in order. */
   readonly selfChecks: () => Request[];
   /** One line per invocation of the stand-in `legion`: its arguments, then the grant it read. */
   readonly legionLog: () => Promise<string[]>;
@@ -41,10 +41,11 @@ interface Pane {
 }
 
 /**
- * Whether a Messages request is a `pi.askEphemeral` call rather than a turn. The host sends one
- * as an ordinary Messages request over a snapshot of the conversation whose last message is the
- * `<btw>` block it wraps the question in — measured on the pin, which is the only thing that can
- * say — so the stand-in answers it distinctly and nothing about it reaches the transcript.
+ * Whether a Messages request is a side turn rather than a turn. The host sends one as an
+ * ordinary Messages request over a snapshot of the conversation whose last message is the `<btw>`
+ * block around the question — the host adds it for `pi.askEphemeral` on the pin (measured there,
+ * which is the only thing that can say), and pi-envoy adds it for `ctx.runEphemeralTurn` on 18.3 —
+ * so the stand-in answers it distinctly and nothing about it reaches the transcript.
  */
 function isSelfCheck(request: Request): boolean {
   const messages = Array.isArray(request.body.messages) ? request.body.messages : [];
@@ -536,7 +537,7 @@ test.skipIf(omp === undefined && !onActions)(
   120_000
 );
 
-// The run-end ask nudge (extensions/envoy.ts) is a hidden `pi.askEphemeral` self-check whose
+// The run-end ask nudge (extensions/envoy.ts) is a hidden side-turn self-check whose
 // WAITING verdict — and nothing else — buys one steered turn. Two host behaviours carry it, and
 // only the real binary can say either: an ephemeral call is served as a Messages request over a
 // snapshot of the conversation that the transcript never keeps, and a `triggerTurn` continuation
