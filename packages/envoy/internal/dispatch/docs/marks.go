@@ -304,14 +304,17 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 			return err
 		}
 		next, err := pmdoc.Splice(tree, range_, replacement)
+		if errors.Is(err, pmdoc.ErrReplacementDoesNotFit) {
+			return &ErrInvalidOp{Field: "replace_with", Reason: "no part of the document can hold it where the suggestion sits " +
+				"(a table cell's whole text, for one, can only be replaced by inline text)"}
+		}
 		if err != nil {
 			return err
 		}
-		// The edit route's own check on what a write leaves (ApplyOps): an ask block the
-		// replacement left unparseable, a question holding a code block among them, is refused
-		// with nothing written, never carried into the document for settlement to flag.
-		if err := validateAskBlocks(next); err != nil {
-			return &ErrInvalidAskBlock{Reason: err}
+		if accept {
+			if err := refuseBrokenAsks(tree, next); err != nil {
+				return err
+			}
 		}
 		var updateErr error
 		transact(func(txn *crdt.Transaction) {
@@ -322,6 +325,38 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		}
 		return nil
 	})
+}
+
+// refuseBrokenAsks refuses an accept whose splice leaves unparseable an ask block the document
+// could parse before it, with the parse error the edit route gives an edit that leaves one
+// (ApplyOps), so a replacement an ask cannot hold, such as a question given a code block, writes
+// nothing. An ask that was already malformed is not the accept's to refuse: an upload, a seeded
+// spec or a browser edit can leave one, and settlement keeps it with its parse error stamped, so an
+// accept that leaves it as it was must not fail over an ask it never touched. A reject is never
+// checked: it removes the text a browser insert added, which gives back the document the insert
+// started from.
+func refuseBrokenAsks(before, after *pmdoc.Node) error {
+	_, broken, err := collectAskBlocksForSettlement(after)
+	if err != nil {
+		if _, _, already := collectAskBlocksForSettlement(before); already == nil {
+			return &ErrInvalidAskBlock{Reason: err}
+		}
+		return nil
+	}
+	if len(broken) == 0 {
+		return nil
+	}
+	_, alreadyBroken, _ := collectAskBlocksForSettlement(before)
+	was := make(map[string]bool, len(alreadyBroken))
+	for _, ask := range alreadyBroken {
+		was[ask.id] = true
+	}
+	for _, ask := range broken {
+		if !was[ask.id] {
+			return &ErrInvalidAskBlock{Reason: ask.reason}
+		}
+	}
+	return nil
 }
 
 func suggestionKind(attrs pmdoc.Attrs, id string) (string, error) {

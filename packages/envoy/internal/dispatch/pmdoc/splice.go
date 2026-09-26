@@ -39,6 +39,10 @@ func validateSplice(doc *Node, r Range, with *Node) error {
 
 var ErrTableWidth = errors.New("table row exceeds table width")
 
+// ErrReplacementDoesNotFit is a range replacement that no level of the document can hold where the
+// range sits: a code block over the whole text of a table cell, whose only content is inline text.
+var ErrReplacementDoesNotFit = errors.New("replacement does not fit document")
+
 // BlockBoundary returns the document-level boundary before or after the block
 // containing target.
 func BlockBoundary(doc *Node, target Range, after bool) (int, error) {
@@ -204,7 +208,7 @@ func insertAt(doc *Node, pos int, with *Node) (*Node, error) {
 		}
 		return replaceFittedContent(doc, boundary.path, candidate)
 	}
-	return nil, fmt.Errorf("%w: replacement does not fit document", ErrSchema)
+	return nil, fmt.Errorf("%w: %w", ErrSchema, ErrReplacementDoesNotFit)
 }
 
 func childBoundary(node *Node, nodeStart, pos int) (int, bool) {
@@ -286,7 +290,7 @@ func ascend(doc *Node, selection spliceSelection, r Range, with *Node) (*Node, e
 			return replaceFittedContent(doc, path, candidate)
 		}
 		if len(path) == 0 {
-			return nil, fmt.Errorf("%w: replacement does not fit document", ErrSchema)
+			return nil, fmt.Errorf("%w: %w", ErrSchema, ErrReplacementDoesNotFit)
 		}
 	}
 }
@@ -617,9 +621,12 @@ func fitReplacement(parent, with, openingListItem *Node, hasPrefixParagraph bool
 		}
 		return append([]*Node{{Type: "paragraph"}}, source...), true
 	default:
-		// A typed block holds what its content rule allows, which fitContent's validation of the
-		// candidate decides, as ProseMirror fits a replacement into a callout. Refusing here sent the
-		// fit on to the block's parent, where the only fit replaced the block and all it held.
+		// A replacement fitted into a typed block stays inside it whenever fitContent's validation
+		// of the candidate passes, as ProseMirror fits one into a callout. For a callout that is its
+		// content rule; an ask passes any block children (Validate's browser-edit allowance), so a
+		// fit into an ask always lands inside it and the accept's ask check decides whether the ask
+		// still parses. Refusing here sent the fit on to the block's parent, where the only fit
+		// replaced the block and all it held.
 		if _, typed := typedBlock(parent.Type); typed {
 			return source, true
 		}
