@@ -638,12 +638,12 @@ func TestARetryOfAClaimThatKeptItsPhasesTaskDeliversNothingMore(t *testing.T) {
 func TestARetryOfAClaimThatKeptOtherWorkStillDeliversItsTask(t *testing.T) {
 	for name, edit := range map[string]func(*supervise.Delivery){
 		"another phase": func(d *supervise.Delivery) { d.Phase = phase.Planning },
-		"another run":   func(d *supervise.Delivery) { d.Generation = 0 },
+		"another run":   func(d *supervise.Delivery) { d.Generation = 1 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			pool := isolatedOutboxPool(t)
 			records := record.NewStore()
-			issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Implementing, Generation: 1, Status: "in_progress"}
+			issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Implementing, Generation: 2, Status: "in_progress"}
 			putOutboxIssue(t, pool, records, issue)
 			sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 			kept := supervise.Delivery{ID: "kept-task", Task: "an earlier task", Phase: phase.Implementing, Generation: issue.Generation, QueuedAt: time.Now()}
