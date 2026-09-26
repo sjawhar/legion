@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestCreateAndGetAsk(t *testing.T) {
@@ -32,11 +33,27 @@ func TestCreateAndGetAsk(t *testing.T) {
 	if err != nil || ask.ID != "ask-1" {
 		t.Fatalf("create: %+v %v", ask, err)
 	}
-	if gotBody["question"] != "Release DEEL_API_KEY?" || gotBody["urgency"] != "med" {
+	if gotBody["question"] != "Release DEEL_API_KEY?" || gotBody["urgency"] != "med" || gotBody["multiple"] != false {
 		t.Fatalf("body: %v", gotBody)
+	}
+	actor, _ := gotBody["actor"].(map[string]any)
+	if actor["kind"] != "session" || actor["id"] != "agent-secrets-broker" {
+		t.Fatalf("actor: %v", gotBody["actor"])
+	}
+	opts, _ := gotBody["options"].([]any)
+	if len(opts) != 2 {
+		t.Fatalf("options: %v", gotBody["options"])
+	}
+	first, _ := opts[0].(map[string]any)
+	second, _ := opts[1].(map[string]any)
+	if first["label"] != "Approve" || second["label"] != "Deny" {
+		t.Fatalf("options: %v", gotBody["options"])
 	}
 	ask, err = c.GetAsk(context.Background(), "ask-1")
 	if err != nil || ask.State != "answered" || ask.Answer == nil || ask.Answer.User != "sjawhar" || ask.Answer.Selected[0] != "Approve" {
 		t.Fatalf("get: %+v %v", ask, err)
+	}
+	if !ask.Answer.At.Equal(time.Date(2026, 9, 26, 5, 0, 0, 0, time.UTC)) {
+		t.Fatalf("answer at: %v", ask.Answer.At)
 	}
 }

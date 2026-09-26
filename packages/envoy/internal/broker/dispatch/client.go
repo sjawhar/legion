@@ -47,7 +47,13 @@ func New(baseURL, token string, client *http.Client) *Client {
 }
 
 func (c *Client) CreateAsk(ctx context.Context, issue, question string, options []Option, urgency string) (Ask, error) {
-	body, _ := json.Marshal(map[string]any{"question": question, "options": options, "urgency": urgency, "multiple": false})
+	body, _ := json.Marshal(map[string]any{
+		"question": question,
+		"options":  options,
+		"urgency":  urgency,
+		"multiple": false,
+		"actor":    map[string]string{"kind": "session", "id": "agent-secrets-broker"},
+	})
 	var ask Ask
 	err := c.do(ctx, http.MethodPost, "/api/v1/issues/"+issue+"/asks", c.token, bytes.NewReader(body), &ask)
 	return ask, err
