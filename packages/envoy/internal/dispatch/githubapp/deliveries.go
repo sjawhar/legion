@@ -27,17 +27,18 @@ type Delivery struct {
 	RepositoryID int64  `json:"repository_id"`
 }
 
-// FailedDeliveries lists the App webhook's attempts whose status is not OK, delivered at or after
-// since, newest first. That is the test GitHub's own redelivery script applies; GitHub's
-// status=failure filter takes only status codes from 400 to 599, which leaves out an attempt that
-// got no HTTP answer. It follows the Link header's cursor from page to page and stops at the first
-// attempt older than since. GitHub keeps three days of attempts; nothing older is listed whatever
-// since says. A rate-limited answer is a *RateLimitError.
-func (c *Client) FailedDeliveries(ctx context.Context, since time.Time) ([]Delivery, error) {
+// Deliveries lists every attempt the App webhook made at or after since, newest first, whatever
+// its status: GitHub's own redelivery script needs them all, since a GUID with an OK attempt is
+// delivered whatever its failures, and GitHub's status=failure filter takes only status codes from
+// 400 to 599, which leaves out an attempt that got no HTTP answer. It follows the Link header's
+// cursor from page to page and stops at the first attempt older than since. GitHub keeps three
+// days of attempts; nothing older is listed whatever since says. A rate-limited answer is a
+// *RateLimitError.
+func (c *Client) Deliveries(ctx context.Context, since time.Time) ([]Delivery, error) {
 	if c == nil {
 		return nil, ErrNoAppKey
 	}
-	var failed []Delivery
+	var listed []Delivery
 	target := c.base + "/app/hook/deliveries?per_page=100"
 	for target != "" {
 		jwt, err := c.appJWT()
@@ -64,15 +65,13 @@ func (c *Client) FailedDeliveries(ctx context.Context, since time.Time) ([]Deliv
 		}
 		for _, delivery := range page {
 			if delivery.DeliveredAt.Before(since) {
-				return failed, nil
+				return listed, nil
 			}
-			if delivery.Status != "OK" {
-				failed = append(failed, delivery)
-			}
+			listed = append(listed, delivery)
 		}
 		target = next
 	}
-	return failed, nil
+	return listed, nil
 }
 
 // Redeliver asks GitHub to attempt a recorded delivery again

@@ -28,9 +28,9 @@ func newDeliveriesClient(t *testing.T) (*githubapp.Client, *githubapptest.Webhoo
 	return client, webhook
 }
 
-// The failed-delivery listing asks GitHub only for failures, follows its Link cursor across
+// The listing returns every attempt whatever its status, follows GitHub's Link cursor across
 // pages, and stops at the first attempt older than since; it returns them newest first.
-func TestFailedDeliveriesPagesNewestFirstAndStopsAtSince(t *testing.T) {
+func TestDeliveriesPagesNewestFirstAndStopsAtSince(t *testing.T) {
 	client, webhook := newDeliveriesClient(t)
 	base := time.Date(2026, 9, 26, 4, 0, 0, 0, time.UTC)
 	for i := range 500 {
@@ -42,27 +42,31 @@ func TestFailedDeliveriesPagesNewestFirstAndStopsAtSince(t *testing.T) {
 	}
 	since := base.Add(100 * time.Second)
 
-	got, err := client.FailedDeliveries(context.Background(), since)
+	got, err := client.Deliveries(context.Background(), since)
 	if err != nil {
-		t.Fatalf("failed deliveries: %v", err)
+		t.Fatalf("deliveries: %v", err)
 	}
 
 	var want []int64
 	log := webhook.Log()
 	for i := len(log) - 1; i >= 0; i-- {
-		if log[i].StatusCode >= 400 && !log[i].DeliveredAt.Before(since) {
+		if !log[i].DeliveredAt.Before(since) {
 			want = append(want, log[i].ID)
 		}
 	}
 	ids := make([]int64, len(got))
 	for i, delivery := range got {
 		ids[i] = delivery.ID
-		if delivery.StatusCode != http.StatusServiceUnavailable || delivery.Event != "check_run" || delivery.Action != "created" || delivery.RepositoryID != 42 {
+		wantStatus := "OK"
+		if delivery.StatusCode != http.StatusOK {
+			wantStatus = "Invalid HTTP Response: 503"
+		}
+		if delivery.Status != wantStatus || delivery.Event != "check_run" || delivery.Action != "created" || delivery.RepositoryID != 42 {
 			t.Fatalf("delivery %d decoded as %+v", i, delivery)
 		}
 	}
-	if len(want) != 200 || !slices.Equal(ids, want) {
-		t.Fatalf("listed %d failures, want the %d at or after since, newest first", len(ids), len(want))
+	if len(want) != 400 || !slices.Equal(ids, want) {
+		t.Fatalf("listed %d attempts, want the %d at or after since, newest first", len(ids), len(want))
 	}
 	if webhook.Listings() < 2 {
 		t.Fatalf("listing served %d page(s), want the Link cursor followed past the first", webhook.Listings())
@@ -92,7 +96,7 @@ func TestRedeliverRequestsTheAttemptAndReportsARefusal(t *testing.T) {
 // A client with no App key cannot sign the JWT these endpoints require.
 func TestDeliveriesWithoutAnAppKeyAreErrNoAppKey(t *testing.T) {
 	var client *githubapp.Client
-	if _, err := client.FailedDeliveries(context.Background(), time.Now()); !errors.Is(err, githubapp.ErrNoAppKey) {
+	if _, err := client.Deliveries(context.Background(), time.Now()); !errors.Is(err, githubapp.ErrNoAppKey) {
 		t.Fatalf("list without a key: got %v, want ErrNoAppKey", err)
 	}
 	if err := client.Redeliver(context.Background(), 1); !errors.Is(err, githubapp.ErrNoAppKey) {

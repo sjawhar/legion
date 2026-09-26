@@ -69,8 +69,10 @@ architecture source answers `409 SOURCE_ACCESS` naming the missing key.
 GitHub does not redeliver a webhook delivery that failed. When NATS is configured and the App's
 private key (`DISPATCH_APP_PEM_B64`) is present, Dispatch redelivers them itself, following GitHub's
 documented approach. Every two minutes it lists the App webhook's attempts
-(`GET /app/hook/deliveries`), takes each whose status is not `OK`, and asks GitHub to redeliver
-each failed delivery (`POST /app/hook/deliveries/{id}/attempts`). Both endpoints accept only an
+(`GET /app/hook/deliveries`) and judges each delivery by its GUID, as GitHub's own redelivery
+script does: a GUID with an `OK` attempt is delivered, whatever its failures, and it asks GitHub to
+redeliver each other GUID with an attempt whose status is not `OK`
+(`POST /app/hook/deliveries/{id}/attempts`). Both endpoints accept only an
 App JWT, which is why Dispatch runs this. The webhook the App delivers to is the Envoy listener's
 `/webhook/github`. A redelivery carries the original `X-GitHub-Delivery`, and the listener
 publishes GitHub envelopes under a JetStream MsgId of it. So redelivering a delivery that did
@@ -90,6 +92,8 @@ reach the stream adds nothing to the stream.
   apart, as GitHub asks of a large number of POSTs.
 - A delivery the listener answered with 4xx is never redelivered: the listener refused the
   request itself, and the same bytes would fail the same way.
+- A delivery GitHub has recorded an `OK` attempt for is never asked for again, even when a request
+  for it was recorded as refused (an accepted request whose answer was lost).
 - Giving up logs `level=ERROR msg="webhook redelivery exhausted"`. A 4xx logs
   `level=ERROR msg="webhook delivery refused terminally"`. Each is logged once per delivery.
   Every sweep logs an INFO `msg="webhook redelivery sweep"` line with its counts.

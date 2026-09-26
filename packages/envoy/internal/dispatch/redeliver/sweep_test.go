@@ -161,11 +161,11 @@ func TestSweepRedeliversAServerFailureOnce(t *testing.T) {
 		t.Fatalf("no redelivery log line for guid-a:\n%s", h.logs)
 	}
 
-	// The redelivery succeeded, so GitHub recorded no further failure: nothing more to do.
+	// The redelivery succeeded, so GitHub recorded it OK: nothing more to do.
 	h.clock.advance(10 * time.Minute)
 	report = h.sweep(redeliver.Options{})
-	if got := outcome(report, "guid-a"); got != redeliver.Pending {
-		t.Fatalf("second sweep outcome %q, want %q", got, redeliver.Pending)
+	if got := outcome(report, "guid-a"); got != redeliver.Delivered {
+		t.Fatalf("second sweep outcome %q, want %q", got, redeliver.Delivered)
 	}
 	if got := len(h.requests()); got != 1 {
 		t.Fatalf("redelivery requests after a delivered redelivery = %d, want 1", got)
@@ -405,6 +405,82 @@ func TestARateLimitStopsTheSweepUntilGitHubsRetryTime(t *testing.T) {
 				t.Fatalf("%d deliveries redelivered as their first attempt, want 3:\n%s", got, h.logs)
 			}
 		})
+	}
+}
+
+// pausedListing is a GitHub whose listing waits to be released and then lists nothing: a sweeper
+// that has read the shared state and is still talking to GitHub while another sweeper acts.
+type pausedListing struct {
+	redeliver.GitHub
+	entered, release chan struct{}
+}
+
+func (p pausedListing) Deliveries(context.Context, time.Time) ([]githubapp.Delivery, error) {
+	close(p.entered)
+	<-p.release
+	return nil, nil
+}
+
+// The rate limit is one record every sweeper on the bucket shares. A sweeper that read a limit
+// already past and finished clear of it clears that record and no other: a limit another sweeper
+// recorded while it ran stands, and a third sweeper sends GitHub nothing before it.
+func TestASweepClearsOnlyTheRateLimitItRead(t *testing.T) {
+	h := newHarness(t)
+	h.fail("guid-limited", http.StatusServiceUnavailable, time.Minute)
+	h.webhook.Limit(http.MethodPost, http.StatusTooManyRequests, http.Header{"Retry-After": {"60"}})
+	h.sweep(redeliver.Options{})
+	h.clock.advance(61 * time.Second) // the limit has passed, and its record is still there
+
+	paused := pausedListing{GitHub: h.client, entered: make(chan struct{}), release: make(chan struct{})}
+	first := h.sweeper()
+	first.GitHub = paused
+	done := make(chan error, 1)
+	go func() {
+		_, err := first.Sweep(context.Background(), redeliver.Options{})
+		done <- err
+	}()
+	<-paused.entered
+	limited := h.sweep(redeliver.Options{})
+	if limited.RateLimitedUntil.IsZero() {
+		t.Fatalf("the second sweeper was not rate-limited: %+v", limited)
+	}
+	close(paused.release)
+	if err := <-done; err != nil {
+		t.Fatalf("the first sweeper: %v", err)
+	}
+
+	h.webhook.Limit(http.MethodPost, 0, nil)
+	listings, requests := h.webhook.Listings(), len(h.requests())
+	third := h.sweep(redeliver.Options{})
+	if h.webhook.Listings() != listings || len(h.requests()) != requests {
+		t.Fatalf("a third sweeper called GitHub inside the second's limit: %d listings (was %d), %d requests (was %d)",
+			h.webhook.Listings(), listings, len(h.requests()), requests)
+	}
+	if !third.RateLimitedUntil.Equal(limited.RateLimitedUntil) {
+		t.Fatalf("the third sweeper saw a limit until %s, want the second's %s", third.RateLimitedUntil, limited.RateLimitedUntil)
+	}
+}
+
+// A GUID GitHub recorded an OK attempt for is done, whatever its failures: its record is closed
+// and it is never asked for again, even once its attempts are older than the window. Here GitHub
+// carried out a redelivery request but its answer was lost (a 500), so the sweep first recorded a
+// refusal.
+func TestADeliveryGitHubRecordsAsDeliveredIsNotAskedAgain(t *testing.T) {
+	h := newHarness(t)
+	failed := h.fail("guid-answer-lost", http.StatusBadGateway, time.Minute)
+	h.webhook.AnswerAfterRedelivering(failed.ID, http.StatusInternalServerError)
+	if got := outcome(h.sweep(redeliver.Options{}), "guid-answer-lost"); got != redeliver.RequestRefused {
+		t.Fatalf("first sweep: outcome %q, want %q", got, redeliver.RequestRefused)
+	}
+
+	h.clock.advance(2*time.Minute + time.Second)
+	if got := outcome(h.sweep(redeliver.Options{}), "guid-answer-lost"); got != redeliver.Delivered {
+		t.Fatalf("after GitHub recorded the redelivery OK: outcome %q, want %q", got, redeliver.Delivered)
+	}
+	h.clock.advance(2 * time.Hour)
+	h.sweep(redeliver.Options{})
+	if got := len(h.requests()); got != 1 {
+		t.Fatalf("redelivery requests %d, want 1: a delivered GUID was asked for again", got)
 	}
 }
 

@@ -69,6 +69,7 @@ type Webhook struct {
 	nextID    int64
 	redeliver func(Attempt) int
 	refusals  map[int64]int
+	answers   map[int64]int    // a redelivery request carried out, then answered with this status
 	limits    map[string]limit // by method: the listing is GET, a redelivery request POST
 	requests  []int64
 	listings  int
@@ -88,6 +89,7 @@ func NewWebhook(t testing.TB, publicKey *rsa.PublicKey, clientID string, redeliv
 		nextID:    3_844_000_000_000_000_000,
 		redeliver: redeliver,
 		refusals:  map[int64]int{},
+		answers:   map[int64]int{},
 		limits:    map[string]limit{},
 		now:       time.Now,
 	}
@@ -157,6 +159,15 @@ func (w *Webhook) Refuse(id int64, status int) {
 		return
 	}
 	w.refusals[id] = status
+}
+
+// AnswerAfterRedelivering makes GitHub carry out a redelivery request for id, recording the
+// redelivery as usual, and then answer the request with status instead of 202: the request did
+// its work, and its answer says otherwise.
+func (w *Webhook) AnswerAfterRedelivering(id int64, status int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.answers[id] = status
 }
 
 type limit struct {
@@ -342,7 +353,12 @@ func (w *Webhook) attempt(rw http.ResponseWriter, r *http.Request) {
 	}
 	w.mu.Lock()
 	w.recordLocked(original, action, repo, code, w.now(), true)
+	answer, lost := w.answers[id]
 	w.mu.Unlock()
+	if lost {
+		http.Error(rw, `{"message":"Server Error"}`, answer)
+		return
+	}
 	rw.WriteHeader(http.StatusAccepted)
 	_, _ = rw.Write([]byte("{}"))
 }
