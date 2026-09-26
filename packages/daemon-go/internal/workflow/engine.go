@@ -506,9 +506,15 @@ func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestR
 	if err != nil {
 		return intake.Result{}, err
 	}
-	// Reviews are ordered by GitHub's review id, which rises with every review written, whatever
-	// order they are delivered in; the newest id the issue has had is kept across rounds, so a
-	// review written before one already processed - redelivered, or from an earlier round -
+	// Only changes_requested and approved decide anything; a comment orders nothing either, so a
+	// comment written after a decision but delivered before it cannot make the decision look old.
+	state := strings.ToLower(fact.State)
+	if state != "changes_requested" && state != "approved" {
+		return intake.Result{}, nil
+	}
+	// Deciding reviews are ordered by GitHub's review id, which rises with every review written,
+	// whatever order they are delivered in; the newest id the issue has had is kept across rounds,
+	// so a review written before one already processed - redelivered, or from an earlier round -
 	// records nothing. A review without an id is ordered by when it arrives.
 	if fact.ID != 0 {
 		if fact.ID <= row.ReviewSeen {
@@ -518,18 +524,18 @@ func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestR
 	}
 	// The decision belongs to the review round, not to the pull request's head: the reviewer's own
 	// handoff push is a new head, and the round must still know, when the reviewer completes, what
-	// the review decided, on which head, and what it said for the next round's implementer. Only a
-	// review in the round decides it, and only changes_requested and approved decide anything; an
-	// approval is judged against the head it names when the review ends (classify.ApprovalStands).
-	state := strings.ToLower(fact.State)
-	decides := issue.Phase == phase.Reviewing && (state == "changes_requested" || state == "approved")
-	if decides {
-		row.Decision = &record.ReviewDecision{State: state, Body: fact.Body, Head: fact.CommitID, ID: fact.ID}
+	// the review decided, on which head, and what it said for the next round's implementer. A
+	// review outside the round decides nothing and counts no round, though it still raises the
+	// newest id. An approval is judged against the head it names when the review ends
+	// (classify.ApprovalStands).
+	if issue.Phase != phase.Reviewing {
+		if fact.ID == 0 {
+			return intake.Result{}, nil
+		}
+		return intake.Result{}, e.store.PutPhase(ctx, tx, row)
 	}
-	if fact.ID == 0 && !decides {
-		return intake.Result{}, nil
-	}
-	if err := e.store.PutPhase(ctx, tx, row); err != nil || !decides {
+	row.Decision = &record.ReviewDecision{State: state, Body: fact.Body, Head: fact.CommitID, ID: fact.ID}
+	if err := e.store.PutPhase(ctx, tx, row); err != nil {
 		return intake.Result{}, err
 	}
 	return intake.Result{}, e.advanceReview(ctx, tx, *issue, pr)

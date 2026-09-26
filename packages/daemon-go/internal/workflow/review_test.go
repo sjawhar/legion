@@ -167,6 +167,8 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 		{name: "a handoff push that does not say whether it was forced", steps: []string{"approve head", "sync", "push handoff unmarked", "green", "complete"}, want: phase.Reviewing},
 		{name: "a request for changes written after the approval, delivered first", steps: []string{"cr head id=12", "approve head id=11", "complete"}, want: phase.Implementing},
 		{name: "a request for changes written after the approval, delivered after", steps: []string{"approve head id=11", "cr head id=12", "complete"}, want: phase.Implementing},
+		{name: "a comment written after a request for changes, delivered first", steps: []string{"comment id=12", "cr head id=11", "complete"}, want: phase.Implementing},
+		{name: "a comment written after an approval, delivered first", steps: []string{"comment id=12", "approve head id=11", "complete"}, want: phase.Retro},
 		{name: "an approval written after the request for changes", steps: []string{"cr head id=11", "approve head id=12", "complete"}, want: phase.Retro},
 		{name: "recorded before the chain: an approval of the current head", steps: []string{"approve head", "complete"}, want: phase.Retro},
 		{name: "recorded before the chain: an approval of an earlier head", steps: []string{"approve older", "complete"}, want: phase.Reviewing},
@@ -218,7 +220,7 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 				case "sync":
 					fact = intake.PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: head}
 				case "comment":
-					fact = intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "commented", CommitID: "head-2", Body: "a comment"}
+					fact = intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: id, State: "commented", CommitID: "head-2", Body: "a comment"}
 				case "push handoff", "push code", "push code unplaced", "push truncated", "push paths unmarked":
 					paths, truncated := ".legion/review.json", "false"
 					marker := &truncated
@@ -319,5 +321,45 @@ func TestAReviewFromAnEarlierRoundDeliveredAgainRecordsNothing(t *testing.T) {
 	}
 	if got := issuePhase(t, pool); got != phase.Retro {
 		t.Fatalf("the issue is in %s, want retro: round 2's approval is the newest review", got)
+	}
+}
+
+// A review that arrives once the round has ended - in retro, after the approval moved the issue on
+// - decides nothing and counts no round: the rounds and the pull request's blocked notice belong
+// to the round that was open.
+func TestAReviewOutsideReviewingRecordsNoRound(t *testing.T) {
+	pool := migratedPool(t)
+	ctx := context.Background()
+	seedReview(t, pool, "green")
+	engine := testEngine()
+	rounds := func() int {
+		t.Helper()
+		var n int
+		if err := pool.QueryRow(ctx, "select rounds from phases where issue = $1 and role = $2", "LEGION-208", "implementer").Scan(&n); err != nil {
+			t.Fatalf("read the implementer's rounds: %v", err)
+		}
+		return n
+	}
+	for i, fact := range []intake.Fact{
+		intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: 11, State: "approved", CommitID: "head"},
+		intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-1"},
+	} {
+		if result, err := intake.ApplyFact(ctx, pool, "test", fmt.Sprintf("step-%d", i), fact, engine); err != nil || result.Refusal != nil {
+			t.Fatalf("step %d = %+v, %v", i, result.Refusal, err)
+		}
+	}
+	if got := issuePhase(t, pool); got != phase.Retro {
+		t.Fatalf("the issue is in %s, want retro", got)
+	}
+	before := rounds()
+	if _, err := intake.ApplyFact(ctx, pool, "test", "late", intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: 12,
+		State: "changes_requested", CommitID: "head", Body: "too late"}, engine); err != nil {
+		t.Fatalf("apply the late review: %v", err)
+	}
+	if got := issuePhase(t, pool); got != phase.Retro {
+		t.Fatalf("after the late review the issue is in %s, want retro", got)
+	}
+	if got := rounds(); got != before {
+		t.Fatalf("the implementer's rounds went from %d to %d on a review outside reviewing", before, got)
 	}
 }
