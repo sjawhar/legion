@@ -10,8 +10,10 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 // A task's delivered mark says a worker may have read it, which is what lets a completion from a
@@ -581,5 +583,202 @@ func TestAReplayedRefusalOfTheReSentDeliveryLeavesTheEarlierMark(t *testing.T) {
 
 	if p := h.pending(); p.DeliveredAt.IsZero() || p.MarkedBy != first.DeliveryID {
 		t.Fatalf("pending after the replayed refusal = %+v, want the first prompt's mark standing", p)
+	}
+}
+
+// A turn that is not the task's can confirm it: an agent_start the stream reports before the
+// prompt's acknowledgement, a turn already running when the prompt lands, or a restart whose ask
+// finds a turn running. When the replayed refusal of that prompt then arrives, it says the prompt
+// never ran, so the confirmation was the other turn's: the task goes back unread, charged nothing,
+// and is sent again when that turn ends - never retired as served by it. A confirmed delivery is
+// never being re-sent, so this is not the re-send the replayed-refusal fence protects.
+func TestAReplayedRefusalTakesBackATaskAForeignTurnConfirmed(t *testing.T) {
+	const busy = "Agent is already processing. Use steer() or followUp() to queue messages, or wait for completion."
+	for _, tc := range []struct {
+		name string
+		// confirm delivers the task, confirms it by a turn that is not its own, and returns the
+		// delivery id the refused prompt carried and the connection prompts go to.
+		confirm func(t *testing.T, h *harness) (string, *fake.Conn)
+	}{
+		{name: "acknowledged, then a foreign turn starts", confirm: func(t *testing.T, h *harness) (string, *fake.Conn) {
+			h.must(RequestDeliver{Claim: testToken, Task: "the task", Generation: 7})
+			id := h.wantPrompts(1)[0].DeliveryID
+			h.must(StreamTurnStart{Claim: testToken})
+			return id, h.conn
+		}},
+		{name: "acknowledged, a foreign turn starts, and the daemon restarts in it", confirm: func(t *testing.T, h *harness) (string, *fake.Conn) {
+			h.must(RequestDeliver{Claim: testToken, Task: "the task", Generation: 7})
+			id := h.wantPrompts(1)[0].DeliveryID
+			h.must(StreamTurnStart{Claim: testToken})
+			h.restart()
+			h.conn.SetStreaming(true)
+			h.must(StreamHello{Claim: testToken, Generation: h.generation()})
+			return id, h.conn
+		}},
+		{name: "a foreign turn starts before the acknowledgement", confirm: func(t *testing.T, h *harness) (string, *fake.Conn) {
+			gated := newGatedConn()
+			h.conns.Register(testToken, gated)
+			if err := h.m.Handle(h.ctx, RequestDeliver{Claim: testToken, Task: "the task", Generation: 7}); err != nil {
+				t.Fatal(err)
+			}
+			id := waitFor(t, "the send", gated.entered)
+			if err := h.m.Handle(h.ctx, StreamTurnStart{Claim: testToken}); err != nil {
+				t.Fatal(err)
+			}
+			gated.release <- struct{}{}
+			h.m.Wait()
+			// Every later prompt goes straight through.
+			go func() {
+				for range gated.entered {
+					gated.release <- struct{}{}
+				}
+			}()
+			return id, gated.Conn
+		}},
+		{name: "a restart's ask finds a foreign turn running", confirm: func(t *testing.T, h *harness) (string, *fake.Conn) {
+			h.must(RequestDeliver{Claim: testToken, Task: "the task", Generation: 7})
+			id := h.wantPrompts(1)[0].DeliveryID
+			h.restart()
+			h.conn.SetStreaming(true)
+			h.must(StreamHello{Claim: testToken, Generation: h.generation()})
+			return id, h.conn
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.reach(StateReady)
+			id, conn := tc.confirm(t, h)
+			if p := h.pending(); p.ConfirmedAt.IsZero() {
+				t.Fatalf("pending before the refusal = %+v, want it confirmed by the foreign turn", p)
+			}
+			charged := h.claim().Budgets
+			sent := len(conn.Prompts())
+
+			h.must(StreamLateRefusal{Claim: testToken, DeliveryID: id, Error: busy, Replayed: true})
+			if p := h.pending(); !p.ConfirmedAt.IsZero() || !p.DeliveredAt.IsZero() {
+				t.Fatalf("pending after the replayed refusal = %+v, want it taken back unread", p)
+			}
+			h.conn.SetStreaming(false)
+			h.must(StreamTurnEnd{Claim: testToken})
+
+			if c := h.claim(); c.Pending == nil || c.ServingGeneration != 0 || c.Budgets != charged {
+				t.Fatalf("after the foreign turn: pending %+v serving %d budgets %+v, want the task kept, no run served, nothing charged",
+					c.Pending, c.ServingGeneration, c.Budgets)
+			}
+			testwait.Eventually(t, "the task to be sent again", func() bool { return len(conn.Prompts()) > sent })
+		})
+	}
+}
+
+// A refusal can land after settle retired the task it names: the suspension's retire, or the
+// turn end's, failed and left the task held, so the fence let the refusal through, and the settle
+// before the row retired it. The row then finds no pending task, and it must have nothing to do
+// rather than end the daemon.
+func TestARefusalOfATaskRetiredUnderItHasNothingToDo(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		replayed bool
+		hold     func(h *harness) string
+	}{
+		{name: "suspended", hold: func(h *harness) string {
+			h.must(RequestDeliver{Claim: testToken, Task: "the task", Phase: phase.Implementing, Generation: 7})
+			id := h.pending().ID
+			h.store.fail("RetireDelivery", errBoom)
+			_ = h.handle(RequestSuspend{Claim: testToken})
+			return id
+		}},
+		{name: "suspended, replayed", replayed: true, hold: func(h *harness) string {
+			h.must(RequestDeliver{Claim: testToken, Task: "the task", Phase: phase.Implementing, Generation: 7})
+			id := h.pending().ID
+			h.store.fail("RetireDelivery", errBoom)
+			_ = h.handle(RequestSuspend{Claim: testToken})
+			return id
+		}},
+		{name: "idle", hold: func(h *harness) string {
+			h.must(RequestDeliver{Claim: testToken, Task: "the task", Generation: 7})
+			id := h.pending().ID
+			h.must(StreamTurnStart{Claim: testToken})
+			h.store.fail("RetireDelivery", errBoom)
+			_ = h.handle(StreamTurnEnd{Claim: testToken})
+			return id
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.reach(StateReady)
+			id := tc.hold(h)
+			if h.claim().Pending == nil {
+				t.Fatal("the failed retire left no task held")
+			}
+			h.store.fail("RetireDelivery", nil)
+
+			h.must(StreamLateRefusal{Claim: testToken, DeliveryID: id, Error: "the model provider refused the request", Replayed: tc.replayed})
+
+			if p := h.claim().Pending; p != nil {
+				t.Fatalf("pending after the refusal = %+v, want the task retired", p)
+			}
+		})
+	}
+}
+
+// While a send is in flight, a turn that starts may be that send's own, and a replayed refusal
+// naming the same delivery answers an earlier connection's prompt of it. It must not take the task
+// from under the turn working it, and it clears only a mark its own prompt set.
+func TestAReplayedRefusalWhileTheSendIsInFlightLeavesTheConfirmedTask(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// start delivers the task and returns the gated connection the next send is held on and the
+		// prompt whose acknowledgement will stand as the mark when the refusal lands.
+		start func(t *testing.T, h *harness) (*gatedConn, string)
+	}{
+		{name: "the restart's re-send of the prompt that set the mark", start: func(t *testing.T, h *harness) (*gatedConn, string) {
+			h.must(RequestDeliver{Claim: testToken, Task: "the task", Generation: 7})
+			first := h.wantPrompts(1)[0].DeliveryID
+			h.restart()
+			gated := newGatedConn()
+			h.conns.Register(testToken, gated)
+			if err := h.m.Handle(h.ctx, StreamHello{Claim: testToken, Generation: h.generation()}); err != nil {
+				t.Fatal(err)
+			}
+			return gated, first
+		}},
+		{name: "a re-send under a new id, the first prompt's mark kept", start: func(t *testing.T, h *harness) (*gatedConn, string) {
+			h.must(RequestDeliver{Claim: testToken, Task: "the task", Generation: 7})
+			first := h.wantPrompts(1)[0].DeliveryID
+			h.advance(2 * testRPC)
+			gated := newGatedConn()
+			h.conns.Register(testToken, gated)
+			if err := h.m.Handle(h.ctx, RuntimeObservation{Observation: runtime.Observation{Locator: h.locator(), Kind: runtime.Alive, At: h.clock.Now()}}); err != nil {
+				t.Fatal(err)
+			}
+			return gated, first
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.reach(StateReady)
+			gated, marking := tc.start(t, h)
+			resent := waitFor(t, "the re-send", gated.entered)
+			if err := h.m.Handle(h.ctx, StreamTurnStart{Claim: testToken}); err != nil {
+				t.Fatal(err)
+			}
+			if p := h.pending(); p.ID != resent || p.ConfirmedAt.IsZero() || p.MarkedBy != marking {
+				t.Fatalf("pending once the turn started = %+v, want %s confirmed under %s's mark", p, resent, marking)
+			}
+
+			if err := h.m.Handle(h.ctx, StreamLateRefusal{Claim: testToken, DeliveryID: resent, Error: "Agent is busy", Replayed: true}); err != nil {
+				t.Fatal(err)
+			}
+
+			p := h.pending()
+			if p.ID != resent || p.ConfirmedAt.IsZero() {
+				t.Fatalf("pending after the replayed refusal = %+v, want %s still confirmed by the turn working it", p, resent)
+			}
+			if named := resent == marking; !named && p.MarkedBy != marking {
+				t.Fatalf("pending after the replayed refusal = %+v, want %s's mark kept: the refusal names another prompt", p, marking)
+			}
+			gated.release <- struct{}{}
+			h.m.Wait()
+		})
 	}
 }

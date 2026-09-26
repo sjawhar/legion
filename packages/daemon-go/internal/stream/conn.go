@@ -154,16 +154,18 @@ func (c *Conn) Prompt(ctx context.Context, deliveryID, message string) error {
 // promptIDSeparator ends the delivery id a prompt's request id begins with. OMP's answer carries
 // only the request id, and a refusal it gave while no daemon was connected reaches a later
 // connection, which never sent that request; the id is how that refusal still names its delivery.
-// Delivery ids are the daemon's own random text, which never holds the separator.
+// The random suffix Prompt appends never holds the separator, and neither does either kind of
+// delivery id the daemon makes: random text, or an outbox row's `outbox:<row>`.
 const promptIDSeparator = "."
 
 // promptDelivery is the delivery a prompt's request id names, or "" for an id no prompt carried.
+// It splits at the last separator, the one Prompt put before its own suffix.
 func promptDelivery(requestID string) string {
-	deliveryID, _, found := strings.Cut(requestID, promptIDSeparator)
-	if !found {
+	at := strings.LastIndex(requestID, promptIDSeparator)
+	if at < 0 {
 		return ""
 	}
-	return deliveryID
+	return requestID[:at]
 }
 
 // GetState asks OMP whether a turn is running. An answer that does not say is an error, never
@@ -392,7 +394,9 @@ func (c *Conn) dispatch(frame shimwire.Frame) {
 // answer routes a response to the request waiting on its id. One nobody is waiting on is either
 // a success for a request that gave up — the shim fans OMP's one answer out to every request id
 // of a retried delivery (worker-shim.ts:254-270), and a retry's earlier ids are long abandoned —
-// or a refusal, which reverses the acknowledged prompt it names or, naming none, is logged.
+// or a refusal. A refusal reverses the acknowledged prompt it names; one of a prompt this
+// connection never sent, replayed from the shim's backlog, is a replayed LateRefusal for the
+// delivery its request id names; any other is logged.
 func (c *Conn) answer(response shimwire.Response) {
 	c.mu.Lock()
 	request, waiting := c.pending[response.ID]
@@ -424,7 +428,7 @@ func (c *Conn) answer(response shimwire.Response) {
 		c.log.Warn("worker-stream: a refusal replayed from an earlier connection names its delivery",
 			"claim", c.claim, "deliveryId", earlier, "error", response.Error)
 		c.events.push(LateRefusal{Claim: c.claim, DeliveryID: earlier, Error: response.Error, Replayed: true})
-	case response.Command == shimwire.TypePrompt && !response.Success:
+	case refusal:
 		c.log.Warn("worker-stream: refusal for a prompt request this connection is not waiting on",
 			"claim", c.claim, "request", response.ID, "error", response.Error)
 	}

@@ -496,10 +496,13 @@ func (m *Machine) fence(ctx context.Context, ev Event) (bool, error) {
 		}
 	case StreamLateRefusal:
 		// A refusal naming the prompt that set the mark always reaches the table. One naming the
-		// pending id does only when this connection sent that prompt: a replayed refusal answers an
-		// earlier send, and the pending id may be the one being re-sent.
-		named := pending != nil && pending.MarkedBy != "" && pending.MarkedBy == ev.DeliveryID
-		if pending == nil || !(named || (!ev.Replayed && pending.ID == ev.DeliveryID)) {
+		// pending id does when this connection sent that prompt, or when a turn not its own confirmed
+		// the task and nothing is being sent: a replayed refusal answers an earlier send, and while a
+		// send is in flight the pending id may be the one being re-sent (refusedElsewhere).
+		named := pending != nil && pending.MarkedBy == ev.DeliveryID
+		pendingNamed := pending != nil && pending.ID == ev.DeliveryID &&
+			(!ev.Replayed || (!pending.ConfirmedAt.IsZero() && m.send == nil))
+		if pending == nil || !(named || pendingNamed) {
 			m.dropStale("StreamLateRefusal", "delivery", ev.DeliveryID, pendingID(pending))
 			return false, nil
 		}

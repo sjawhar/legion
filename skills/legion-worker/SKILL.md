@@ -613,9 +613,9 @@ do:
   further, and tell the architect what you completed and that its run has been superseded. A task
   for the current run arrives in this same session if the phase still needs you. The same answer
   comes when your turn started before the daemon recorded the current run's task as yours, so it
-  still holds you to the earlier run: that task is sent again. Once it arrives in this session,
-  call `handoff_complete` again for the work you already committed. Do not redo that work or write
-  a second handoff.
+  still holds you to the earlier run: that task is sent again. When a task arrives, do what it
+  asks; if the work it asks for is already committed, call `handoff_complete` again, and never redo
+  the work or write a second handoff.
 - `HANDOFF_NOT_CURRENT_PHASE` — names your role, the issue, and the phase it is in now. The issue
   has left your phase; report to the architect rather than completing again.
 - `HANDOFF_NO_RUN` — names neither: it says this claim has taken no task, so the daemon cannot
