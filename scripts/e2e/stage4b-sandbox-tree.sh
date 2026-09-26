@@ -12,19 +12,28 @@
 # `done`, lingers, and closes. Tree 2 runs through its planner beside tree 1's implementer, on its own
 # node, carrying the repository-configuration fixture, and is then moved to backlog. Tree 3 is
 # admitted when tree 2 leaves the line, supplies the held phase the controller checkpoint needs, and
-# is taken out from an operator shell. Each checkpoint prints `== <name>`, what it observed with the
-# source revision, the image digest and the plugin version recorded once in `run.json`, and
-# `CHECK <name>: PASS`. The first that fails ends the run non-zero with `CHECK <name>: FAIL`, naming
-# it; a checkpoint that cannot run prints `CHECK <name>: BLOCKED`, naming the command that failed and
-# the record it checked.
+# is taken out from an operator shell. Tree 4 is admitted once tree 3 has left, supplies a planner
+# killed mid-turn and an implementer killed until it is held, and is taken out the same way. Each
+# checkpoint prints `== <name>`, what it observed with the source revision, the image digest and the
+# plugin version recorded once in `run.json`, and `CHECK <name>: PASS`. The first that fails ends the
+# run non-zero with `CHECK <name>: FAIL`, naming it; a checkpoint that cannot run prints
+# `CHECK <name>: BLOCKED`, naming the command that failed and the record it checked.
 #
 # Inputs:
 # - LEGION_E2E_RUNTIME_CONTEXT (required) and LEGION_E2E_RUNTIME_KUBECONFIG (default
 #   ~/.kube/legion-daemon-production) name the restricted identity the daemon runs as.
 # - LEGION_E2E_OPERATOR_CONTEXT (default production) names the admin context.
 # - LEGION_E2E_IMAGE (required) is the worker image, by digest.
+# - LEGION_E2E_MODEL_GATEWAY_URL (required) is the model gateway's Anthropic endpoint, the route the
+#   operator fixture's models.yml and the controller's profile name (lib/model-gateway-url.sh).
+# - LEGION_E2E_DISPATCH_URL, LEGION_E2E_ENVOY_URL and LEGION_E2E_NATS_URL (required) are production
+#   Dispatch, the production Envoy listener and production NATS, by the operator's fully-qualified
+#   names for them: an https:// URL, an http(s):// URL and a nats://host:port, none with a path. The
+#   repository carries none of them, and the run never prints them.
 # - STAGE4B_UNTIL=<checkpoint> stops after that checkpoint. A run with it set is a development run,
 #   never the proof, and never prints PASS.
+# - STAGE4B_SKIP_CONTROLLER=1, in a development run only, runs none of `controller`'s checks and only
+#   takes tree 3 out, so a checkpoint after it runs while the controller's own defect is unfixed.
 # - STAGE4B_EVIDENCE_DIR (default a fresh /tmp directory, kept and printed) holds the transcript, the
 #   daemon log, the pod watch, every agent transcript, and the negative controls.
 #
@@ -54,26 +63,29 @@ runtime_kubeconfig=${LEGION_E2E_RUNTIME_KUBECONFIG:-$HOME/.kube/legion-daemon-pr
 runtime_context=${LEGION_E2E_RUNTIME_CONTEXT:-}
 image=${LEGION_E2E_IMAGE:-}
 until=${STAGE4B_UNTIL:-}
+skip_controller=${STAGE4B_SKIP_CONTROLLER:-}
 # The Dispatch project key (the workflow's) and its token (the pods' label, the claims' prefix).
 project=LEGSMOKE
 run_label=legsmoke
 label_exact=legsmoke
 repo=sjawhar/legion-smoke
-dispatch_base=https://dispatch.internal.trajectorylabs.com
+dispatch_base=${LEGION_E2E_DISPATCH_URL:-}
 # The proof human writes with the agents' bearer, so it names a session of its own: one that holds
 # no claim, whose status writes the workflow therefore reads as a human's.
 dispatch_actor=legion-e2e4b-proof-human-$$
-envoy_url=http://envoy-listener.internal.trajectorylabs.com:9020
-nats_url=nats://nats.internal.trajectorylabs.com:4222
-gateway_url=https://middleman.hawk.internal.trajectorylabs.com
+envoy_url=${LEGION_E2E_ENVOY_URL:-}
+nats_url=${LEGION_E2E_NATS_URL:-}
 # The operator's pod configuration (scripts/e2e/fixtures/operator-route): the model route, overlay,
 # ServiceAccount and projected token every pod carries. Legion holds none of it. The run creates its
 # own copy of the ConfigMap the fixture mounts, labelled with the run's label, which the teardown
 # deletes with the rest.
 fixture=$root/scripts/e2e/fixtures/operator-route
 route_configmap=legion-operator-route-$run_label
-# operator-close's tree, which no workflow issue backs: the run's own, named for the run.
+# operator-close's tree, which no workflow issue backs: the run's own, named for the run, and its
+# worker's issue, a child in the same project. Both are issue keys (PROJECT-NUMBER), which the
+# daemon's spawn requires; the trailing digit keeps the child apart from the root.
 optree="S4BOP-$$"
+opchild="S4BOP-${$}1"
 port_daemon=13370
 port_worker_stream=13371
 stream=ENVOY_NOTIFICATIONS
@@ -99,10 +111,13 @@ interests_pid=
 shape_pid=
 controller_session=
 host=
+# The production services' hosts, which scrub keeps out of what the run prints (set in prerequisites).
+service_hosts=()
 pin=
 tree1=
 tree2=
 tree3=
+tree4=
 pr_number=
 smoke_file=
 prod_baseline=
@@ -120,6 +135,14 @@ note() { echo "   $*"; }
 pass() {
   echo "CHECK $check: PASS"
   [ -z "$daemon_pid" ] || interests_sample "$check"
+  until_reached
+}
+# skipped names a checkpoint a development run skipped, so no transcript reads it as passed.
+skipped() {
+  echo "CHECK $check: SKIPPED ($*)"
+  until_reached
+}
+until_reached() {
   [ "$until" != "$check" ] || {
     ok=1
     echo "stage 4b e2e: development run until $until finished (not the proof)"
@@ -155,6 +178,18 @@ claim_view() {
 }
 claim_sandbox() { claim_view "$1" "$2" | jq -er '.locator.sandbox.name'; }
 claim_pod_uid() { claim_view "$1" "$2" | jq -er '.locator.incarnation'; }
+# claims_cli ARGS... is `legion claims` from the operator shell, over the operator bearer.
+claims_cli() { "$work/legion" claims "$@" --config "$work/legion.yaml" --operator-token-file "$work/operator-token"; }
+# take_out ISSUE moves the tree ISSUE roots to backlog from the operator shell, over the operator
+# bearer, and waits for Dispatch to show it and for the tree's pods to be gone.
+take_out() {
+  local issue=$1 out
+  out=$("$work/legion" status "$issue" backlog --operator-token-file "$work/operator-token" --config "$work/legion.yaml" 2>&1) ||
+    fail "legion status $issue backlog from the operator shell: $out"
+  until_true 120 "Dispatch to show $issue in backlog" dispatch_status_is "$issue" backlog
+  until_true 600 "$issue's pods to be gone" sh -c \
+    "out=\$(timeout 120 kubectl --context '$operator' -n '$namespace' get pods -l 'legion.dev/project=$run_label,legion.dev/tree=$issue' -o name) && [ -z \"\$out\" ]"
+}
 # tree_pod TREE prints a Running pod of the tree, whose worker container mounts the tree volume.
 tree_pod() {
   op get pods -l "legion.dev/project=$run_label,legion.dev/tree=$1" --field-selector=status.phase=Running \
@@ -276,16 +311,22 @@ pod_endpoint_mismatch() {
     printf 'no readable spec\n'
     return 0
   }
+  local source
   for name in DISPATCH_URL ENVOY_URL ENVOY_NATS_URL LEGION_DAEMON_URL; do
     case "$name" in
-      DISPATCH_URL) want=$dispatch_base ;;
-      ENVOY_URL) want=$envoy_url ;;
-      ENVOY_NATS_URL) want=$nats_url ;;
-      LEGION_DAEMON_URL) want="http://$host:$port_daemon" ;;
+      DISPATCH_URL) want=$dispatch_base source=LEGION_E2E_DISPATCH_URL ;;
+      ENVOY_URL) want=$envoy_url source=LEGION_E2E_ENVOY_URL ;;
+      ENVOY_NATS_URL) want=$nats_url source=LEGION_E2E_NATS_URL ;;
+      LEGION_DAEMON_URL) want="http://$host:$port_daemon" source= ;;
     esac
     got=$(sed -n "s/^$name=//p" <<<"$env")
     if [ "$got" != "$want" ]; then
-      printf '%s=%s, want %s\n' "$name" "${got:-<unset>}" "$want"
+      # A production service's address is never printed: the mismatch names the run's input.
+      if [ -n "$source" ]; then
+        printf '%s %s\n' "$name" "$([ -n "$got" ] && echo "differs from $source" || echo "unset, want $source")"
+      else
+        printf '%s=%s, want %s\n' "$name" "${got:-<unset>}" "$want"
+      fi
       return 0
     fi
   done
@@ -309,7 +350,17 @@ read_bearers() {
     head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/postgres-password")
   [ -s "$work/dispatch-token" ] && [ -s "$work/envoy-token" ] || fail "Secrets Manager returned an empty bearer"
 }
-nats_stream() { bun "$root/scripts/e2e/lib/nats-stream.ts" "$@"; }
+# scrub replaces each production service's host with the variable that names it: the run prints
+# none of them, and a tool's error (a refused connection, an unresolved name) may carry one.
+scrub() {
+  local args=() i names=(LEGION_E2E_DISPATCH_URL LEGION_E2E_ENVOY_URL LEGION_E2E_NATS_URL LEGION_E2E_MODEL_GATEWAY_URL) h
+  for i in "${!service_hosts[@]}"; do
+    h=${service_hosts[$i]%%:*}
+    [ -n "$h" ] && args+=(-e "s#${h//./\\.}#<${names[$i]}>#g")
+  done
+  if [ "${#args[@]}" -eq 0 ]; then cat; else sed "${args[@]}"; fi
+}
+nats_stream() { bun "$root/scripts/e2e/lib/nats-stream.ts" "$@" 2> >(scrub >&2); }
 
 # ---- the daemon ----------------------------------------------------------------------------------
 
@@ -359,10 +410,15 @@ EOF
 # create_route_configmap is the operator's step before any pod runs: the fixture's models.yml and
 # overlay.yml in the ConfigMap the run's pods mount.
 create_route_configmap() {
-  op create configmap "$route_configmap" --from-file=models.yml="$fixture/models.yml" --from-file=overlay.yml="$fixture/overlay.yml" \
+  # shellcheck disable=SC2016  # the fixture's literal placeholder, not an expansion
+  local placeholder='${LEGION_E2E_MODEL_GATEWAY_URL}' models
+  models=$(<"$fixture/models.yml")
+  printf '%s\n' "${models//"$placeholder"/"$gateway"}" >"$work/models.yml"
+  grep -qFx "    baseUrl: $gateway" "$work/models.yml" || fail "the fixture's models.yml has no baseUrl $placeholder to point at the gateway"
+  op create configmap "$route_configmap" --from-file=models.yml="$work/models.yml" --from-file=overlay.yml="$fixture/overlay.yml" \
     --dry-run=client -o yaml | kubectl label --local -f - "legion.dev/project=$run_label" -o yaml | op create -f - >/dev/null ||
     fail "the operator could not create ConfigMap $route_configmap"
-  note "[operator] ConfigMap $route_configmap: models.yml and overlay.yml from $fixture, label legion.dev/project=$run_label"
+  note "[operator] ConfigMap $route_configmap: models.yml (baseUrl from LEGION_E2E_MODEL_GATEWAY_URL) and overlay.yml from $fixture, label legion.dev/project=$run_label"
 }
 start_daemon() {
   env -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -u GH_AGENT_APP_PRIVATE_KEY_B64 \
@@ -716,7 +772,7 @@ delete_consumers() {
 # stops before the proof human's merge would otherwise leave behind.
 remove_run_branches() {
   local issue number
-  for issue in $tree1 $tree2 $tree3; do
+  for issue in $tree1 $tree2 $tree3 $tree4; do
     number=$(timeout 60 gh -R "$repo" pr list --head "legion/$issue" --state open --json number --jq '.[0].number // empty' 2>/dev/null)
     if [ -n "$number" ]; then
       timeout 60 gh -R "$repo" pr close "$number" --comment "Closed by the Stage 4b run that opened it, at its teardown." >/dev/null 2>&1 &&
@@ -731,7 +787,7 @@ remove_run_branches() {
 # profile on this machine and goes with that profile at teardown (transcripts/controller).
 collect_transcripts() {
   local pod
-  for tree in $tree1 $tree2 $tree3; do
+  for tree in $tree1 $tree2 $tree3 $tree4; do
     pod=$(tree_pod "$tree") || continue
     op exec "$pod" -c worker -- tar -C /home/legion/.omp/profiles/legion/agent/sessions -cf - . 2>/dev/null |
       tar -C "$evidence/transcripts" -xf - 2>/dev/null || true
@@ -879,7 +935,7 @@ interests_sample() {
   for session in $(jq -R -r 'fromjson? | select(.msg | IN("api: claim registered", "api: controller registered")) | .session' "$daemon_log" | sort -u); do
     now=$(date -u +%FT%T.%3NZ)
     if ! code=$(curl -sS --max-time 20 -o "$tmp" -w '%{http_code}' -H "@$work/envoy-auth-header" "$envoy_url/v1/interests/$session" 2>&1); then
-      printf '%s %s error unreachable: %s\n' "$now" "$session" "$(tr '\n' ' ' <<<"$code")" >>"$evidence/interests-outcomes.txt"
+      printf '%s %s error unreachable: %s\n' "$now" "$session" "$(tr '\n' ' ' <<<"$code" | scrub)" >>"$evidence/interests-outcomes.txt"
       continue
     fi
     case "$code" in
@@ -972,6 +1028,21 @@ for tool in go docker jq curl ss kubectl aws gh bun jj mise shellcheck secrets s
 [ -n "$runtime_context" ] || fail "LEGION_E2E_RUNTIME_CONTEXT is unset: the daemon runs as the Legion daemon's restricted identity, never the operator's"
 [ -r "$runtime_kubeconfig" ] || fail "the runtime kubeconfig $runtime_kubeconfig is not readable"
 case "$image" in *@sha256:*) ;; *) fail "LEGION_E2E_IMAGE must be the worker image by digest (…@sha256:…), not '$image'" ;; esac
+# The production services, each a fully-qualified host (a bare alias resolves through whatever
+# search domain the box or the pod has) and no path. A refusal names the variable, never its value.
+fqdn='[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+'
+[[ $dispatch_base =~ ^https://$fqdn(:[0-9]+)?$ ]] ||
+  fail "LEGION_E2E_DISPATCH_URL is unset or not production Dispatch's https:// URL: a fully-qualified host, an optional port, no path"
+[[ $envoy_url =~ ^https?://$fqdn(:[0-9]+)?$ ]] ||
+  fail "LEGION_E2E_ENVOY_URL is unset or not the production Envoy listener's http(s):// URL: a fully-qualified host, an optional port, no path"
+[[ $nats_url =~ ^nats://$fqdn:[0-9]+$ ]] ||
+  fail "LEGION_E2E_NATS_URL is unset or not production NATS as nats://host:port with a fully-qualified host"
+nats_host=${nats_url#nats://} && nats_port=${nats_host##*:} && nats_host=${nats_host%:*}
+gateway=$(bash "$root/scripts/e2e/lib/model-gateway-url.sh") ||
+  fail "LEGION_E2E_MODEL_GATEWAY_URL is not a model gateway URL the fixture's models.yml can name (the reason is above)"
+# The gateway's health endpoint is at its origin.
+gateway_origin=$(sed -E 's#^(https://[^/]+).*#\1#' <<<"$gateway")
+service_hosts=("${dispatch_base#https://}" "${envoy_url#*://}" "$nats_host" "${gateway_origin#https://}")
 mkdir -p "$(dirname "$lock")"
 exec 9>"$lock"
 flock -n 9 || fail "another Stage 4b run holds $lock: one run at a time"
@@ -985,7 +1056,7 @@ host=$(curl -sf -m 5 -H "X-aws-ec2-metadata-token: $imds" http://169.254.169.254
 unset imds
 leftover=$(op get sandboxes,pods,pvc,configmaps -l "legion.dev/project=$run_label" -o name 2>&1) || fail "the operator context cannot list namespace $namespace: $leftover"
 [ -z "$leftover" ] || fail "namespace $namespace already holds objects labelled legion.dev/project=$run_label, which another run left or owns: $(tr '\n' ' ' <<<"$leftover")"
-stale_consumers=$(bun "$root/scripts/e2e/lib/nats-stream.ts" consumers "$nats_url" "$stream" "legion-go-$project-") ||
+stale_consumers=$(nats_stream consumers "$nats_url" "$stream" "legion-go-$project-") ||
   fail "production NATS $stream could not list its consumers"
 [ -z "$stale_consumers" ] || fail "production NATS already holds durable consumers of $project, which another run left or owns: $(jq -r .name <<<"$stale_consumers" | tr '\n' ' ')"
 # The run owns the namespace label, the consumers and the project only from here: a run refused
@@ -1002,6 +1073,10 @@ if [ -n "$until" ]; then
   grep -qxF -e "begin $until" -e "begin \"$until\"" "$root/scripts/e2e/stage4b-sandbox-tree.sh" ||
     fail "STAGE4B_UNTIL=$until names no checkpoint of this driver"
   note "STAGE4B_UNTIL=$until: a development run, never the proof"
+fi
+if [ -n "$skip_controller" ]; then
+  [ -n "$until" ] || fail "STAGE4B_SKIP_CONTROLLER is for a development run: set STAGE4B_UNTIL too"
+  note "STAGE4B_SKIP_CONTROLLER=$skip_controller: controller's checks are skipped; it only takes tree 3 out"
 fi
 read_bearers
 pass
@@ -1032,7 +1107,7 @@ done
 # half is the smoke repository's own.
 for subject in "notifications.dispatch.issue.>" "notifications.github.sjawhar.legion-smoke.>"; do
   seen=$(nats_stream last "$nats_url" "$stream" "$subject" 20) ||
-    blocked "production NATS $stream carries no message on $subject (bun scripts/e2e/lib/nats-stream.ts last $nats_url $stream '$subject'): the daemon's intake would miss that half of the workflow"
+    blocked "production NATS $stream carries no message on $subject (bun scripts/e2e/lib/nats-stream.ts last \$LEGION_E2E_NATS_URL $stream '$subject'): the daemon's intake would miss that half of the workflow"
   note "production NATS $stream carries $subject: newest $(jq -c . <<<"$seen")"
 done
 # From a throwaway pod on the Legion pool, with the restricted pod shape: every service a Sandbox
@@ -1057,13 +1132,25 @@ spec:
       command: [bash, -c]
       args:
         - |
-          # The image has no curl: bun answers the HTTP services, bash's /dev/tcp the NATS port.
-          for url in $dispatch_base/healthz $envoy_url/healthz $gateway_url/health; do
-            printf '%s ' "\$url"
-            URL="\$url" bun -e 'const r = await fetch(process.env.URL, { signal: AbortSignal.timeout(10000) }).catch(() => null); console.log(r ? r.status : "unreachable")'
+          # The image has no curl: bun answers the HTTP services, bash's /dev/tcp the NATS port. A
+          # fresh node's first outbound connection can fail while the node settles, so each service
+          # gets three tries, 5 s apart, and one that never answers is printed with every try's error.
+          # Each line names its service, never its address, and an error's host becomes the service.
+          for probe in dispatch=$dispatch_base/healthz listener=$envoy_url/healthz gateway=$gateway_origin/health; do
+            service=\${probe%%=*}
+            printf '%s ' "\$service"
+            SERVICE="\$service" URL="\${probe#*=}" bun -e 'const host = new URL(process.env.URL).hostname; const errors = []; for (let attempt = 1; attempt <= 3; attempt++) { const r = await fetch(process.env.URL, { signal: AbortSignal.timeout(10000) }).catch((e) => e); if (r instanceof Response) { console.log(r.status); process.exit(0); } errors.push("attempt " + attempt + ": " + String(r && r.name) + ": " + String(r && r.message).split(host).join("<" + process.env.SERVICE + ">").replace(/\s+/g, " ")); if (attempt < 3) await Bun.sleep(5000); } console.log("unreachable (" + errors.join("; ") + ")");'
           done
-          printf '%s ' $nats_url
-          timeout 5 bash -c 'exec 3<>/dev/tcp/nats.internal.trajectorylabs.com/4222 && head -c 4 <&3' || printf unreachable
+          printf 'nats '
+
+          errors=
+          for attempt in 1 2 3; do
+            answer=\$(timeout 5 bash -c 'exec 3<>/dev/tcp/$nats_host/$nats_port && head -c 4 <&3' 2>&1) && break
+            errors="\$errors attempt \$attempt: \$(tr '\n' ' ' <<<"\${answer:-no answer}" | sed 's#$nats_host#<nats>#g');"
+            answer=
+            [ "\$attempt" = 3 ] || sleep 5
+          done
+          if [ -n "\$answer" ]; then printf '%s' "\$answer"; else printf 'unreachable (%s)' "\${errors# }"; fi
           echo
       securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
 EOF
@@ -1071,9 +1158,16 @@ op apply -f "$reach" >/dev/null || blocked "the operator could not create the re
 until_true 600 "the reachability pod to finish" sh -c "timeout 120 kubectl --context '$operator' -n '$namespace' get pod legion-e2e4b-reach-$$ -o jsonpath='{.status.phase}' | grep -qx 'Succeeded\|Failed'"
 op logs "legion-e2e4b-reach-$$" >"$evidence/reach.txt" 2>&1
 op delete pod "legion-e2e4b-reach-$$" --wait=false >/dev/null 2>&1
-while read -r url answer; do
-  case "$answer" in 000 | unreachable | "") fail "a pod on the Legion pool cannot reach $url ($evidence/reach.txt)" ;; esac
-  note "[pod] $url → $answer"
+while read -r service answer; do
+  case "$service" in
+    dispatch) source=LEGION_E2E_DISPATCH_URL ;;
+    listener) source=LEGION_E2E_ENVOY_URL ;;
+    gateway) source=LEGION_E2E_MODEL_GATEWAY_URL ;;
+    nats) source=LEGION_E2E_NATS_URL ;;
+    *) fail "the reachability pod printed a line naming no service: $(scrub <<<"$service $answer")" ;;
+  esac
+  case "$answer" in 000 | unreachable* | "") fail "a pod on the Legion pool cannot reach $service ($source): $answer ($evidence/reach.txt)" ;; esac
+  note "[pod] $service ($source) → $answer"
 done <"$evidence/reach.txt"
 pass
 
@@ -1432,6 +1526,10 @@ begin controller
 # `legion controller start` on the devbox registers with the Sandbox daemon; tree 3 supplies the
 # held phase whose notice reaches it; `legion status … backlog` from the operator shell takes
 # tree 3 out, and Dispatch shows it.
+if [ -n "$skip_controller" ]; then
+take_out "$tree3"
+skipped "STAGE4B_SKIP_CONTROLLER: a development run; tree 3 was only taken out"
+else
 (cd "$root" && bun install --frozen-lockfile >/dev/null)
 bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --profile "$profile" --dest "$work/plugin" >/dev/null
 bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache" >/dev/null ||
@@ -1510,6 +1608,71 @@ note "legion status $tree3 backlog from the operator shell, with the operator be
 until_true 600 "$tree3's pods to be gone" sh -c \
   "out=\$(timeout 120 kubectl --context '$operator' -n '$namespace' get pods -l 'legion.dev/project=$run_label,legion.dev/tree=$tree3' -o name) && [ -z \"\$out\" ]"
 pass
+fi # the controller checks
+
+begin deaths-with-work
+# A worker whose process dies after its agent is ready, while it has its task outstanding, gets the
+# task back, and one that keeps dying before it completes a turn is held (supervise/budgets.go,
+# Deaths). Tree 4 is admitted once tree 3 has left: its planner is killed once mid-turn and finishes
+# the phase on the task sent again, and its implementer is killed after each ready, its task
+# outstanding, until the daemon fails the claim.
+tree4=$(new_issue "Stage 4b proof tree 4: deaths with work outstanding ($work)")
+set_status "$tree4" todo
+drive_spec "$tree4"
+wait_for_worker "$tree4" planner
+# claim_json ISSUE ROLE is the claim as `legion claims` shows it, its budgets and pending task included.
+claim_json() { claims_cli list --json | jq -ce --arg t "$(claim_token "$1" "$2")" '.claims[] | select(.token == $t)'; }
+# in_turn ISSUE ROLE: the claim's agent is running the turn of its task.
+in_turn() { claim_json "$1" "$2" | jq -e '.state == "working" and .pending != null' >/dev/null; }
+# (a) One kill mid-turn: the relaunch is sent its task again, told the turn was interrupted.
+until_true 600 "$tree4's planner to be in the turn of its task" in_turn "$tree4" planner
+end_claim_pod "$tree4" planner kill
+planner_killed=$ended_pod_uid
+note "killed $tree4's planner mid-turn (uid $planner_killed)"
+interrupted_needle="Your previous turn on this task was interrupted when your process died."
+planner_resent() { claim_session_text "$tree4" planner | grep -qF "$interrupted_needle"; }
+until_true 600 "$tree4's planner to be sent its task again, told its turn was interrupted" planner_resent
+send_agent "$tree4" planner "Stage 4b proof planning operation: write the required .legion/plan.json handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
+wait_for_phase "$tree4" implementing 900
+note "$tree4's planner was sent its task again after the kill, told the turn was interrupted, and finished planning"
+# (b) Kills after each ready, the task outstanding, until the claim fails.
+wait_for_worker "$tree4" implementer
+implementer4=$(claim_token "$tree4" implementer)
+# ready_with_work: the implementer's claim names a pod no kill took, its agent is ready or in a
+# turn, and its task is outstanding.
+ready_with_work() {
+  local claim inc
+  claim=$(claim_json "$tree4" implementer) || return 1
+  inc=$(jq -r '.locator.incarnation // empty' <<<"$claim")
+  [ -n "$inc" ] && ! grep -qF " $inc " <<<"$work_killed" &&
+    jq -e '(.state | IN("ready", "working", "idle")) and .pending != null' <<<"$claim" >/dev/null
+}
+work_killed=" "
+work_kills=0
+until issue_phase "$tree4" held >/dev/null 2>&1; do
+  [ "$work_kills" -lt 5 ] || fail "$tree4 was not held after $work_kills implementer deaths with its task outstanding"
+  until_true 600 "$tree4's implementer ready with its task outstanding" ready_with_work
+  end_claim_pod "$tree4" implementer kill
+  work_killed="$work_killed$ended_pod_uid "
+  work_kills=$((work_kills + 1))
+  note "killed $tree4's implementer with its task outstanding, $work_kills (uid $ended_pod_uid)"
+  until_true 600 "$tree4 to be held or its implementer relaunched" sh -c \
+    "'$work/legion' state --json --config '$work/legion.yaml' | jq -e --arg i '$tree4' --arg u '$ended_pod_uid' '.issues[\$i].phase == \"held\" or ((.issues[\$i].workers.implementer.claim.locator.incarnation // \"\") as \$n | \$n != \"\" and \$n != \$u)' >/dev/null"
+done
+[ "$work_kills" = 3 ] || fail "$tree4 was held after $work_kills implementer deaths, want launch_failure_limit (3)"
+claim=$(claim_json "$tree4" implementer) || fail "legion claims shows no claim $implementer4"
+jq -e '.state == "failed" and .budgets.deaths == 3' <<<"$claim" >/dev/null ||
+  fail "$implementer4 reads $(jq -c '{state, budgets}' <<<"$claim"), want failed with budgets.deaths 3"
+why=$(log_lines "supervise: claim failed" | jq -r --arg c "$implementer4" 'select(.claim == $c) | .why' | tail -1)
+[ "$why" = "deaths with work outstanding ran out" ] ||
+  fail "$implementer4 failed with '${why:-no logged failure}', not 'deaths with work outstanding ran out'"
+failed_at=$(log_lines "supervise: claim failed" | jq -r --arg c "$implementer4" 'select(.claim == $c) | .time' | tail -1)
+sleep 30
+relaunched=$(log_lines "supervise: launched" | jq -s --arg c "$implementer4" --arg at "$failed_at" '[.[] | select(.claim == $c and .time > $at)] | length')
+[ "$relaunched" = 0 ] || fail "the daemon launched $implementer4 $relaunched times after failing it"
+note "$tree4 is held after $work_kills implementer deaths with its task outstanding: $implementer4 failed because $why, budgets $(jq -c .budgets <<<"$claim"), and nothing relaunched it"
+take_out "$tree4"
+pass
 
 begin "done"
 wait_for_worker "$tree1" merger
@@ -1570,7 +1733,6 @@ begin operator-close
 # Sandboxes and pods are untouched. A tree no workflow issue backs, which the operator spawns here,
 # closes with its worker live: the root and the worker are retired, and the tree's Sandboxes, pods
 # and volume are gone.
-claims_cli() { "$work/legion" claims "$@" --config "$work/legion.yaml" --operator-token-file "$work/operator-token"; }
 tree_objects() {
   op get sandboxes,pods,pvc -l "legion.dev/project=$run_label,legion.dev/tree=$1" -o json |
     jq -c '[.items[] | {kind, name: .metadata.name, uid: .metadata.uid}] | sort_by(.kind, .name)'
@@ -1594,7 +1756,7 @@ printf '%s\n' "You are a Stage 4b operator-close fixture, the root of a tree no 
 printf '%s\n' "You are a Stage 4b operator-close fixture, a worker of that tree. Do nothing and wait." >"$work/op-worker.md"
 op_root=$(claims_cli spawn --json --tree "$optree" --issue "$optree" --role architect --prompt-file "$work/op-architect.md" | jq -er .token) ||
   fail "the operator could not spawn the root of $optree"
-op_worker=$(claims_cli spawn --json --tree "$optree" --issue "$optree-1" --role implementer --prompt-file "$work/op-worker.md" | jq -er .token) ||
+op_worker=$(claims_cli spawn --json --tree "$optree" --issue "$opchild" --role implementer --prompt-file "$work/op-worker.md" | jq -er .token) ||
   fail "the operator could not spawn a worker of $optree"
 claim_live() { claims_cli list --json | jq -e --arg t "$1" '.claims[] | select(.token == $t) | .state | IN("ready", "idle", "working")' >/dev/null; }
 until_true 900 "$optree's root $op_root to be live" claim_live "$op_root"
