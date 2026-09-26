@@ -1276,3 +1276,40 @@ test("two handoffs before a registration succeeds move the role from the first i
     await rm(stateDirectory, { recursive: true, force: true })
   }
 })
+
+test("a Dispatch subscription removal that names no topics removes nothing", async () => {
+  const stateDirectory = await scratchState()
+  const calls: string[] = []
+  const nats = new FakeNats(calls)
+  const session = await startChannelSession(
+    sessionOptions(new SessionIdentity("ses_claude", "/tmp"), stateDirectory, {
+      connection: nats,
+      client: recordingClient(calls),
+    }),
+  )
+  const topic = "notifications.dispatch.issue.DSP-3"
+
+  try {
+    await session.follow([topic])
+    calls.length = 0
+    nats.emit(
+      directSubject,
+      JSON.stringify({
+        event_id: "remove-empty",
+        source: "dispatch",
+        payload: JSON.stringify({
+          issue_key: "DSP-3",
+          type: "subscription.removed",
+          actor: { kind: "user", id: "alice" },
+          payload: { session_id: "ses_claude", by: { kind: "user", id: "alice" }, topics: [] },
+        }),
+      }),
+    )
+    await settled()
+    expect(calls.filter((call) => call.includes("unsubscribe"))).toEqual([])
+    expect(session.topics()).toEqual([directSubject, topic])
+  } finally {
+    await session.shutdown()
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})

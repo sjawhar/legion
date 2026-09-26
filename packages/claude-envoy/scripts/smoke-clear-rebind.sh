@@ -110,7 +110,8 @@ answer_startup_dialogs || fail "Claude did not reach its prompt within ${startup
 before="$(await_entries "$registration_timeout" 'if length == 1 then .[0].session_id else empty end')" \
   || fail "no single registry entry for ${workdir} within ${registration_timeout}s: $(entries)"
 session_ids+=("$before")
-server_pid="$(pgrep -P "$claude_pid" -f 'dist/envoy-channel.js' | head -1 || true)"
+server_pid="$(pgrep -P "$claude_pid" -f 'dist/envoy-channel.js' | head -1)" || true
+[[ -n "$server_pid" ]] || fail "no channel server process (dist/envoy-channel.js) under Claude pid ${claude_pid}"
 printf 'registered %s\n' "$before"
 
 tmux send-keys -t "$tmux_session" "/clear" Enter
