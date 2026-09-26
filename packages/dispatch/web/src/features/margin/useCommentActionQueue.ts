@@ -1,7 +1,7 @@
 import { useMutation } from "@tanstack/react-query";
 import { useRef, useState } from "react";
 
-import { ApiError, api } from "../../api/client";
+import { ApiError, api, apiErrorMessage } from "../../api/client";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 
 export type CommentAction = "accept" | "reject" | "resolve" | "reopen";
@@ -23,14 +23,13 @@ export interface CommentActionFailure {
 const permanentRefusals = new Set(["INVALID_ASK_BLOCK", "INVALID_OP"]);
 
 function actionFailure(id: string, error: Error): CommentActionFailure {
-  if (error instanceof ApiError && error.status >= 400 && error.status < 500) {
-    return {
-      id,
-      message: error.message,
-      retryable: error.code === undefined || !permanentRefusals.has(error.code),
-    };
-  }
-  return { id, message: "Could not save this action.", retryable: true };
+  const refused =
+    error instanceof ApiError && error.code !== undefined && permanentRefusals.has(error.code);
+  return {
+    id,
+    message: apiErrorMessage(error, "Could not save this action."),
+    retryable: !refused,
+  };
 }
 
 interface CommentActionQueueOptions<TContext> {

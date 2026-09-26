@@ -516,8 +516,8 @@ function actionFailureShown(): { message: string; retryable: boolean } | null {
 }
 
 // A failed action says what failed. A refusal of what an accept would write carries the API's own
-// reason and offers no Retry, since the same request is refused every time; any other 4xx shows
-// its reason and can be retried; a failure with no answer keeps the generic line.
+// reason and offers no Retry, since the same request is refused every time; any other answer from
+// the API shows its reason and can be retried; a failure with no answer keeps the generic line.
 test("a failed action carries the API's reason, and a refusal of what it writes offers no retry", async () => {
   for (const { error, want } of [
     {
@@ -540,6 +540,13 @@ test("a failed action carries the API's reason, and a refusal of what it writes 
         error: "the suggestion's text is still loading",
       }),
       want: { message: "the suggestion's text is still loading", retryable: true },
+    },
+    {
+      error: new ApiError(503, {
+        code: "DOC_SERVICE_UNAVAILABLE",
+        error: "document service unavailable",
+      }),
+      want: { message: "document service unavailable", retryable: true },
     },
     {
       error: new Error("offline"),
