@@ -330,29 +330,18 @@ func senderStamp(registry *store.Registry, sessions *session.SessionRegistry, so
 		return nil
 	}
 	sender := &contracts.EnvelopeSender{SessionID: sourceSession}
-	if registry != nil {
-		if interest, err := registry.Get(sourceSession); err == nil {
-			sender.Machine = interest.MachineID
-			sender.Cwd = interest.Dir
-			sender.Roles = roleNames(interest.Topics)
-		}
+	if interest, err := registry.Get(sourceSession); err == nil {
+		sender.Machine = interest.MachineID
+		sender.Cwd = interest.Dir
+		sender.Roles = roleNames(interest.Topics)
 	}
-	if sessions != nil {
-		if entry, err := sessions.Get(sourceSession); err == nil {
-			sender.Title = entry.Title
-		}
+	if entry, err := sessions.Get(sourceSession); err == nil {
+		sender.Title = entry.Title
 	}
 	return sender
 }
 
 const roleHolderResolutionAttempts = 2
-
-func liveRoleHolder(registry *store.Registry, sessions *session.SessionRegistry, role string) (roleHolderResult, error) {
-	if registry == nil || sessions == nil {
-		return roleHolderResult{}, fmt.Errorf("service starting")
-	}
-	return resolveLiveRoleHolder(registry, sessions, role)
-}
 
 // releaseExpiredRoleClaim is the single point in the listener that
 // interprets store.ExpiredRoleClaimRelease's ExpiredRoleClaimSuperseded
@@ -373,9 +362,6 @@ func releaseExpiredRoleClaim(registry roleClaimResolver, role, sessionID string,
 }
 
 func resolveLiveRoleHolder(registry roleClaimResolver, sessions *session.SessionRegistry, role string) (roleHolderResult, error) {
-	if registry == nil || sessions == nil {
-		return roleHolderResult{}, fmt.Errorf("service starting")
-	}
 	for range roleHolderResolutionAttempts {
 		claim, err := registry.RoleClaim(role)
 		if err != nil {
@@ -456,10 +442,6 @@ func sendHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			return
 		}
 		d := state.Load()
-		if d.sessions == nil {
-			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
-			return
-		}
 		target, err := d.sessions.Get(targetSession)
 		if err != nil {
 			writeJSONError(w, http.StatusNotFound, fmt.Sprintf("no live session %s", targetSession))
@@ -483,10 +465,6 @@ func sendHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			return
 		}
 		item.Sender = senderStamp(d.registry, d.sessions, item.SourceSession)
-		if d.client == nil {
-			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
-			return
-		}
 		duplicate, err := d.client.PublishReportingDuplicate(item)
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, err.Error())
@@ -508,10 +486,6 @@ func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 		sessionID := strings.TrimPrefix(r.URL.Path, "/v1/sessions/")
 		if sessionID == "" {
 			writeJSONError(w, http.StatusBadRequest, "session_id is required", "session_id")
-			return
-		}
-		if sessions == nil {
-			writeJSONError(w, http.StatusServiceUnavailable, "session registry unavailable")
 			return
 		}
 		if err := sessions.Delete(sessionID); err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
@@ -578,14 +552,10 @@ func publishHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			return
 		}
 		d := state.Load()
-		if d.client == nil {
-			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
-			return
-		}
 		result := roleHolderResult{state: roleHolderLive}
 		if role, ok := strings.CutPrefix(request.Topic, contracts.RoleTopicPrefix); ok {
 			var err error
-			result, err = liveRoleHolder(d.registry, d.sessions, role)
+			result, err = resolveLiveRoleHolder(d.registry, d.sessions, role)
 			if err != nil {
 				writeJSONError(w, http.StatusInternalServerError, err.Error())
 				return
@@ -629,10 +599,6 @@ func sessionsHandler(registry *store.Registry, sessions *session.SessionRegistry
 			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		if sessions == nil {
-			writeJSONError(w, http.StatusServiceUnavailable, "session registry unavailable")
-			return
-		}
 		entries, err := sessions.List()
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, err.Error())
@@ -656,11 +622,9 @@ func sessionsHandler(registry *store.Registry, sessions *session.SessionRegistry
 				UpdatedAt:      entry.UpdatedAt,
 				LastSeen:       entry.UpdatedAt,
 			}
-			if registry != nil {
-				if interest, err := registry.Get(entry.SessionID); err == nil {
-					info.Topics = interest.Topics
-					info.Roles = roleNames(interest.Topics)
-				}
+			if interest, err := registry.Get(entry.SessionID); err == nil {
+				info.Topics = interest.Topics
+				info.Roles = roleNames(interest.Topics)
 			}
 			result = append(result, info)
 		}
@@ -670,10 +634,6 @@ func sessionsHandler(registry *store.Registry, sessions *session.SessionRegistry
 
 func adminInterestsHandler(registry *store.Registry) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if registry == nil {
-			writeJSONError(w, http.StatusServiceUnavailable, "interest registry unavailable")
-			return
-		}
 		sessionID := strings.TrimPrefix(r.URL.Path, "/v1/interests/")
 
 		if sessionID == "" {
@@ -746,10 +706,6 @@ func roleSetHandler(state *atomic.Pointer[listenerDeps], machineID string) http.
 			return
 		}
 		d := state.Load()
-		if d.registry == nil || d.sessions == nil {
-			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
-			return
-		}
 		entry, err := d.sessions.Get(body.SessionID)
 		if errors.Is(err, nats.ErrKeyNotFound) {
 			writeJSONError(w, http.StatusNotFound, "session is not registered")
@@ -819,7 +775,7 @@ func roleGetHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			return
 		}
 		d := state.Load()
-		result, err := liveRoleHolder(d.registry, d.sessions, role)
+		result, err := resolveLiveRoleHolder(d.registry, d.sessions, role)
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -844,10 +800,7 @@ func (d *listenerDeps) streamInspector() streamInfoLookup {
 	if d.streamInfo != nil {
 		return d.streamInfo
 	}
-	if d.client != nil {
-		return d.client.JS()
-	}
-	return nil
+	return d.client.JS()
 }
 
 func streamInfoWithin(ctx context.Context, inspector streamInfoLookup, streamName, subjectsFilter string) (*nats.StreamInfo, error) {
@@ -895,9 +848,6 @@ func unwiredRepositoryWarning(ctx context.Context, d *listenerDeps, topic string
 		return ""
 	}
 	inspector := d.streamInspector()
-	if inspector == nil {
-		return ""
-	}
 	streamName := d.streamName
 	if streamName == "" {
 		streamName = bus.Stream
@@ -935,10 +885,6 @@ func subscribeHandler(state *atomic.Pointer[listenerDeps], machineID string, log
 		}
 		logger.Info("listener subscribe", slog.String("session_id", body.SessionID), slog.Any("topics", body.Topics), slog.Int("port", body.Port), slog.Bool("self_subscribed", body.SelfSubscribed), slog.String("dir", body.Dir))
 		d := state.Load()
-		if d.registry == nil {
-			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
-			return
-		}
 		item, err := d.registry.Upsert(store.Interest{
 			SessionID: body.SessionID,
 			MachineID: machineID,
@@ -953,10 +899,6 @@ func subscribeHandler(state *atomic.Pointer[listenerDeps], machineID string, log
 			return
 		}
 		if body.Port > 0 || body.SelfSubscribed {
-			if d.sessions == nil {
-				writeJSONError(w, http.StatusServiceUnavailable, "session registry unavailable")
-				return
-			}
 			if err := d.sessions.Put(body.SessionID, sessionEntryFromSubscribe(body, machineID)); err != nil {
 				logger.Error("listener session registry put failed", slog.String("session_id", body.SessionID), slog.String("error", err.Error()))
 				writeJSONError(w, http.StatusServiceUnavailable, "session registry unavailable")
@@ -1007,10 +949,6 @@ func registerV1Routes(v1 *http.ServeMux, deps *atomic.Pointer[listenerDeps], mac
 		}
 		logger.Info("listener unsubscribe", slog.String("session_id", body.SessionID), slog.Any("topics", body.Topics))
 		d := deps.Load()
-		if d.registry == nil {
-			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
-			return
-		}
 		if err := d.registry.Remove(body.SessionID, body.Topics); err != nil {
 			writeJSONError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -1030,10 +968,6 @@ func registerV1Routes(v1 *http.ServeMux, deps *atomic.Pointer[listenerDeps], mac
 			return
 		}
 		d := deps.Load()
-		if d.sessions == nil {
-			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
-			return
-		}
 		entry, err := d.sessions.Get(sessionID)
 		if err != nil {
 			writeJSONError(w, http.StatusNotFound, "not found")
