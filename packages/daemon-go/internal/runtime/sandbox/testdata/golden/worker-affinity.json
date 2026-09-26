@@ -70,7 +70,7 @@
               "/opt/legion/go/bin/legion",
               "worker-shim",
               "--connect",
-              "tcp://10.1.20.250:13371",
+              "tcp://192.0.2.250:13371",
               "--boot-token-file",
               "/var/run/legion/boot/LEGION_BOOT_TOKEN",
               "--pod-safety",
@@ -111,7 +111,7 @@
               },
               {
                 "name": "LEGION_DAEMON_URL",
-                "value": "http://10.1.20.250:13370"
+                "value": "http://192.0.2.250:13370"
               },
               {
                 "name": "LEGION_STATE_DIR",
@@ -123,11 +123,11 @@
               },
               {
                 "name": "ENVOY_NATS_URL",
-                "value": "nats://10.1.20.250:4222"
+                "value": "nats://192.0.2.250:4222"
               },
               {
                 "name": "ENVOY_URL",
-                "value": "http://10.1.20.250:9020"
+                "value": "http://192.0.2.250:9020"
               },
               {
                 "name": "LEGION_GH_PATH",
