@@ -1,5 +1,5 @@
 diff --git a/lib/index.js b/lib/index.js
-index a1094153e619ca57d9a444896d85d0a840a0ec24..a82274507b906df120ffd601d436eee816bbb1e6 100644
+index a1094153e619ca57d9a444896d85d0a840a0ec24..2678db061f9d9ace08b7b0d1e0a6b09e1e47d4ff 100644
 --- a/lib/index.js
 +++ b/lib/index.js
 @@ -1,6 +1,6 @@
@@ -10,7 +10,7 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..a82274507b906df120ffd601d436eee8
  import { Plugin, PluginKey, TextSelection } from "@milkdown/prose/state";
  import { $prose } from "@milkdown/utils";
  //#region src/__internal__/is-pure-text.ts
-@@ -24,6 +24,65 @@ function withMeta(plugin, meta) {
+@@ -24,6 +24,66 @@ function withMeta(plugin, meta) {
  	return plugin;
  }
  //#endregion
@@ -46,6 +46,7 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..a82274507b906df120ffd601d436eee8
 +	return [start.firstChild, end.lastChild].every((node) => !node?.type.spec.isolating || fitsBeforeIsolating($pos, node.type));
 +}
 +function inTableCell($pos) {
++	if (!$pos.parent.isTextblock) return false;
 +	for (let depth = $pos.depth; depth > 0; depth--) {
 +		const role = $pos.node(depth).type.spec.tableRole;
 +		if (role === "cell" || role === "header_cell") return true;
@@ -76,7 +77,7 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..a82274507b906df120ffd601d436eee8
  //#region src/index.ts
  function dispatchPasteSlice(view, slice) {
  	const node = isTextOnlySlice(slice);
-@@ -53,12 +112,21 @@ var clipboard = $prose((ctx) => {
+@@ -53,12 +113,21 @@ var clipboard = $prose((ctx) => {
  			return html;
  		}
  	}));
@@ -99,7 +100,7 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..a82274507b906df120ffd601d436eee8
  				const editable = view.props.editable?.(view.state);
  				const { clipboardData } = event;
  				if (!editable || !clipboardData) return false;
-@@ -81,9 +149,9 @@ var clipboard = $prose((ctx) => {
+@@ -81,9 +150,9 @@ var clipboard = $prose((ctx) => {
  				const domParser = DOMParser.fromSchema(schema);
  				let dom;
  				if (html.length === 0) {
