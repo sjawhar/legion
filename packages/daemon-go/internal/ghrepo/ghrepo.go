@@ -8,8 +8,18 @@ package ghrepo
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"unicode"
+)
+
+var (
+	// ownerName is GitHub's grammar for an account: letters, digits and single hyphens, beginning
+	// and ending with a letter or digit.
+	ownerName = regexp.MustCompile(`^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$`)
+	// repositoryName is GitHub's grammar for a repository's own name: letters, digits, `-`, `_`
+	// and `.` (`.` and `..` alone are refused as segments before it is asked).
+	repositoryName = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 )
 
 // Repository is a GitHub repository as Parse read it. Its names are unexported, so outside this
@@ -46,9 +56,13 @@ func MustParse(repository string) Repository {
 }
 
 // Parse is repository's owner and name, or a refusal that begins with what, the input's name: it
-// must be exactly `<owner>/<name>`, both names non-empty and neither holding whitespace, and
-// neither may be `.` or `..`, which joined under a state directory would name another directory
-// than the repository's (and provisioning removes an incomplete clone at that path).
+// must be exactly `<owner>/<name>`, both names non-empty and neither holding whitespace; neither
+// may be `.` or `..`, which joined under a state directory would name another directory than the
+// repository's (and provisioning removes an incomplete clone at that path); and each must be one
+// GitHub allows. That last rule keeps out what a GitHub name never holds but a path, a URL, a NATS
+// subject or a terminal would act on: control bytes, `#` and `?`, a hyphen that begins an owner, and the NATS
+// wildcards `*` and `>`, with which intake's `notifications.github.<owner>.<name>.>` filter would
+// match other repositories' events.
 func Parse(what, repository string) (Repository, error) {
 	owner, name, found := strings.Cut(repository, "/")
 	if !found || owner == "" || name == "" || strings.Contains(name, "/") {
@@ -61,6 +75,12 @@ func Parse(what, repository string) (Repository, error) {
 		if segment == "." || segment == ".." {
 			return Repository{}, fmt.Errorf(`%s %q has a %q segment, which names no GitHub owner or repository`, what, repository, segment)
 		}
+	}
+	if !ownerName.MatchString(owner) {
+		return Repository{}, fmt.Errorf(`%s %q has an owner GitHub does not allow: letters, digits and single hyphens, not beginning or ending with a hyphen`, what, repository)
+	}
+	if !repositoryName.MatchString(name) {
+		return Repository{}, fmt.Errorf(`%s %q has a name GitHub does not allow: letters, digits, "-", "_" and "."`, what, repository)
 	}
 	return Repository{owner: owner, name: name}, nil
 }

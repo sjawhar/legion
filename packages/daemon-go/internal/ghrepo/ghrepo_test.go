@@ -18,8 +18,8 @@ func TestParse(t *testing.T) {
 			t.Errorf("Parse(%q) = %s, %v, want it read as written", valid, parsed, err)
 		}
 	}
-	const owner = `, whose owner GitHub does not allow: letters, digits and single hyphens, not beginning or ending with a hyphen`
-	const name = `, whose name GitHub does not allow: letters, digits, "-", "_" and "."`
+	const owner = ` has an owner GitHub does not allow: letters, digits and single hyphens, not beginning or ending with a hyphen`
+	const name = ` has a name GitHub does not allow: letters, digits, "-", "_" and "."`
 	for _, tc := range []struct{ repository, want string }{
 		{"", `--repo must be "owner/name" (got "")`},
 		{"acme", `--repo must be "owner/name" (got "acme")`},
