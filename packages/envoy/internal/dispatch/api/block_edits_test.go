@@ -267,6 +267,91 @@ func TestDocumentEditsRefuseCodeThatWouldEndItsTypedBlock(t *testing.T) {
 	}
 }
 
+// Accepting a suggestion writes its replacement through the same shape checks a replace runs: one
+// that leaves a block the document cannot read back, or reads back as blocks of another kind, is
+// refused naming replace_with, and nothing is written - the document stays byte for byte as it was
+// and the suggestion stays open. An accept whose blocks read back as written is stored as before,
+// including one that writes blocks, such as a rule or a list over a whole paragraph.
+func TestAcceptingASuggestionRefusesAReplacementTheDocumentCannotCarryBack(t *testing.T) {
+	var documentService *docs.Service
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	const (
+		paragraph  = "Intro.\n\nBody.\n\nAfter.\n"
+		listItem   = "Intro.\n\n- Body.\n- two\n"
+		blockquote = "Intro.\n\n> Body.\n"
+		callout    = "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n"
+		footnote   = "x[^1]\n\n[^1]: Body.\n"
+	)
+	text := func(artifactID string) string {
+		markdown, err := documentService.Text(context.Background(), artifactID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return markdown
+	}
+	suggest := func(t *testing.T, key, spec, with string) (string, model.Comment) {
+		t.Helper()
+		issue := createInteractionIssue(t, handler, key, "accept "+with, spec)
+		created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+			"body": "suggest", "anchor": map[string]any{"artifact": "spec", "quote": "Body."},
+			"suggestion": map[string]string{"replace_with": with}, "actor": sessionActor(),
+		})
+		if created.Code != http.StatusCreated {
+			t.Fatalf("create suggestion: status=%d body=%s", created.Code, created.Body.String())
+		}
+		return issue.PrimaryArtifactID, decodeBody[model.Comment](t, created)
+	}
+	for index, test := range []struct{ name, spec, with string }{
+		{"colons that read as a fence, in a paragraph", paragraph, ":::\nb"},
+		{"a rule in a list item", listItem, "***"},
+		{"a list in a list item", listItem, "- a"},
+		{"two paragraphs in a list item", listItem, "a\n\nb"},
+		{"code in a list item", listItem, "```\nc\n```"},
+		{"colons that read as a fence, in a blockquote", blockquote, ":::\nb"},
+		{"a fence in a callout", callout, ":::"},
+		{"a rule in a footnote definition", footnote, "***"},
+		{"a list in a footnote definition", footnote, "- a"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			artifactID, comment := suggest(t, "R"+string(rune('A'+index)), test.spec, test.with)
+			before := text(artifactID)
+			accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
+			if body := accepted.Body.String(); accepted.Code != http.StatusBadRequest || !strings.Contains(body, `"code":"INVALID_OP"`) || !strings.Contains(body, "replace_with") {
+				t.Fatalf("accept: status=%d body=%s", accepted.Code, body)
+			}
+			if after := text(artifactID); after != before {
+				t.Fatalf("after a refused accept = %q, want it unchanged, %q", after, before)
+			}
+			read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/"+comment.ID, nil, "alice")
+			if read.Code != http.StatusOK || decodeBody[model.Comment](t, read).Resolved {
+				t.Fatalf("after a refused accept the suggestion reads status=%d body=%s, want it open", read.Code, read.Body.String())
+			}
+		})
+	}
+	for index, test := range []struct{ name, spec, with, want string }{
+		{"text", paragraph, "Changed.", "Intro.\n\nChanged.\n\nAfter.\n"},
+		{"a rule over a paragraph", paragraph, "***", "Intro.\n\n---\n\nAfter.\n"},
+		{"a list over a paragraph", paragraph, "- a", "Intro.\n\n- a\n\nAfter.\n"},
+		{"two paragraphs over one", paragraph, "a\n\nb", "Intro.\n\na\n\nb\n\nAfter.\n"},
+		{"dashes inside a line", paragraph, "--- a note", "Intro.\n\n--- a note\n\nAfter.\n"},
+		{"text in a list item", listItem, "Changed.", "Intro.\n\n- Changed.\n- two\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			artifactID, comment := suggest(t, "K"+string(rune('A'+index)), test.spec, test.with)
+			if accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice"); accepted.Code != http.StatusOK {
+				t.Fatalf("accept: status=%d body=%s", accepted.Code, accepted.Body.String())
+			}
+			if after := text(artifactID); after != test.want {
+				t.Fatalf("after accepting = %q, want %q", after, test.want)
+			}
+		})
+	}
+}
+
 // A code block's text is literal, so a replace there writes with exactly as sent - whitespace at
 // its edges, markdown syntax, a reference, a tab - through the edits route and through an
 // accepted suggestion alike.
