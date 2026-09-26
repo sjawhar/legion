@@ -1,6 +1,8 @@
 // Package store owns the broker's Postgres pool and schema migrations. It mirrors
-// internal/dispatch/store: embedded, numbered *.up.sql files applied in order, each recorded in
-// broker_schema_migrations inside its own transaction.
+// internal/dispatch/store: embedded, numbered *.up.sql files applied in order. Migrate holds a
+// broker-specific pg_advisory_xact_lock for the whole run, so concurrent callers serialize
+// instead of racing on `create table if not exists`, and applies every pending migration inside
+// one shared transaction, recording each in broker_schema_migrations.
 package store
 
 import (
@@ -49,6 +51,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock($1)`, int64(8330001)); err != nil {
+		return fmt.Errorf("lock migrations: %w", err)
+	}
 	if _, err := tx.Exec(ctx, `create table if not exists broker_schema_migrations (version integer primary key, applied_at timestamptz not null default now())`); err != nil {
 		return err
 	}
