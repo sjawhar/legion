@@ -639,6 +639,9 @@ func (m *Machine) died(ctx context.Context, observation runtime.Observation) err
 	if err := m.interrupted(ctx); err != nil {
 		return err
 	}
+	if failed, err := m.chargeDeath(ctx); failed || err != nil {
+		return err
+	}
 	if observation.Kind == runtime.Gone && observation.WorkspaceLost && m.claim.SessionFile != "" {
 		return m.relaunchFresh(ctx)
 	}
@@ -680,7 +683,8 @@ func (m *Machine) fail(ctx context.Context, why string) error {
 	m.letGo()
 	m.claim.State = StateFailed
 	m.log.Error("supervise: claim failed", "why", why, "launchFailures", m.claim.Budgets.LaunchFailures,
-		"promptFailures", m.claim.Budgets.PromptFailures, "promptRetires", m.claim.Budgets.PromptRetires)
+		"deaths", m.claim.Budgets.Deaths, "promptFailures", m.claim.Budgets.PromptFailures,
+		"promptRetires", m.claim.Budgets.PromptRetires)
 	if err := m.persist(ctx); err != nil {
 		return err
 	}

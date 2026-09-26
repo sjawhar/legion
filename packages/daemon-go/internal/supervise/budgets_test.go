@@ -30,6 +30,79 @@ func TestLaunchFailuresRunOutIntoFailed(t *testing.T) {
 	}
 }
 
+// A worker that dies with work outstanding — its task's turn running, or the task pending, re-sent
+// after an earlier death — is relaunched with that task, and the relaunch reaches ready again
+// whatever killed it, so ready cannot bound those deaths. An agent that dies each time before it
+// completes a turn — in the task's turn, or ready with the re-sent task not yet begun — is failed at
+// the launch failure limit, where the workflow holds its issue, instead of relaunched for ever. Its
+// task stays pending, for the retry to send.
+func TestAnAgentThatDiesWithWorkOutstandingIsFailedAtTheLimit(t *testing.T) {
+	for name, beforeDeath := range map[string]func(*harness){
+		"dies in each turn of its task": func(h *harness) {
+			h.must(StreamTurnStart{Claim: testToken})
+			h.wantState(StateWorking)
+		},
+		"dies ready, before the re-sent task's turn": func(h *harness) { h.wantState(StateReady) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+			h.reach(StateReady)
+			h.must(RequestDeliver{Claim: testToken, Task: "the task"})
+			h.must(StreamTurnStart{Claim: testToken})
+			limit := testLimits().LaunchFailures
+			for death := 1; death < limit; death++ {
+				h.observe(runtime.Gone)
+				h.relaunched()
+				beforeDeath(h)
+			}
+			launches := len(h.calls("Resume"))
+
+			h.observe(runtime.Gone)
+
+			h.wantState(StateFailed)
+			h.wantCalls("Resume", launches)
+			h.wantBudgets(Budgets{Deaths: limit})
+			stored := h.store.load(testToken)
+			if stored.State != StateFailed || stored.Budgets.Deaths != limit || stored.Pending == nil {
+				t.Errorf("stored claim %s with budgets %+v and pending %+v, want it failed at %d deaths with its task kept",
+					stored.State, stored.Budgets, stored.Pending, limit)
+			}
+		})
+	}
+}
+
+// Deaths are counted until the agent next completes a turn, so an agent that finishes each
+// re-sent task after the death that interrupted it is relaunched every time: a pod lost now and
+// then to its node is not a broken agent.
+func TestACompletedTurnAfterEachDeathKeepsTheClaimRelaunching(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateReady)
+	for range 2 * testLimits().LaunchFailures {
+		h.must(RequestDeliver{Claim: testToken, Task: "the task"})
+		h.must(StreamTurnStart{Claim: testToken})
+		h.observe(runtime.Gone)
+		h.relaunched()
+		h.must(StreamTurnStart{Claim: testToken})
+		h.must(StreamTurnEnd{Claim: testToken})
+		h.wantState(StateIdle)
+	}
+	h.wantBudgets(Budgets{})
+}
+
+// A parked agent — idle, with nothing pending — that the environment kills now and then (a node
+// drained, a pod evicted) is relaunched each time: with no work outstanding its deaths strand
+// nothing, so they are not counted against it.
+func TestAParkedAgentWithNothingPendingIsRelaunchedHoweverOftenItDies(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateIdle)
+	for range 2 * testLimits().LaunchFailures {
+		h.observe(runtime.Gone)
+		h.relaunched()
+	}
+	h.wantState(StateReady)
+	h.wantBudgets(Budgets{})
+}
+
 // A claim that fails on a process it still records — found dead, the budget spent — has that
 // process suspended, so nothing of it keeps holding a node until its tree closes.
 func TestAFailedClaimSuspendsTheProcessItStillRecords(t *testing.T) {

@@ -60,6 +60,7 @@ type OperatorClaim struct {
 // BudgetsView is the claim's retry counters (`supervise.Budgets`).
 type BudgetsView struct {
 	LaunchFailures int `json:"launchFailures"`
+	Deaths         int `json:"deaths"`
 	PromptFailures int `json:"promptFailures"`
 	PromptRetires  int `json:"promptRetires"`
 }
@@ -106,6 +107,7 @@ func operatorView(c supervise.Claim) OperatorClaim {
 		Locator:     c.Locator,
 		Budgets: BudgetsView{
 			LaunchFailures: c.Budgets.LaunchFailures,
+			Deaths:         c.Budgets.Deaths,
 			PromptFailures: c.Budgets.PromptFailures,
 			PromptRetires:  c.Budgets.PromptRetires,
 		},

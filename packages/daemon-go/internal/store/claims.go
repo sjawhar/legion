@@ -21,7 +21,7 @@ var _ supervise.Store = (*Store)(nil)
 // claimSelect reads a claim with the delivery pending on it, if any: the two tables are written
 // separately (a delivery changes far more often than the claim it rides on) and read together.
 const claimSelect = `select c.token, c.project, c.tree, c.issue, c.role, c.generation, c.session,
-	c.session_file, c.locator, c.state, c.launch_failures, c.prompt_failures, c.prompt_retires,
+	c.session_file, c.locator, c.state, c.launch_failures, c.deaths, c.prompt_failures, c.prompt_retires,
 	c.boot_token_hash, c.capability_hash, c.uncertain_streak, c.workspace_lost, c.last_start_row, c.serving_generation,
 	d.delivery_id, d.task, d.phase, d.generation, d.queued_at, d.delivered_at, d.confirmed_at
 	from claims c left join pending_task_deliveries d on d.claim_token = c.token`
@@ -47,15 +47,16 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 		locator = encoded
 	}
 	_, err := db.Exec(ctx, `insert into claims (token, project, tree, issue, role, generation,
-		session, session_file, locator, state, launch_failures, prompt_failures, prompt_retires,
+		session, session_file, locator, state, launch_failures, deaths, prompt_failures, prompt_retires,
 		boot_token_hash, capability_hash, uncertain_streak, workspace_lost, last_start_row,
 		serving_generation)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
 		on conflict (token) do update set project = excluded.project, tree = excluded.tree,
 		issue = excluded.issue, role = excluded.role, generation = excluded.generation,
 		session = excluded.session, session_file = excluded.session_file,
 		locator = excluded.locator, state = excluded.state,
-		launch_failures = excluded.launch_failures, prompt_failures = excluded.prompt_failures,
+		launch_failures = excluded.launch_failures, deaths = excluded.deaths,
+		prompt_failures = excluded.prompt_failures,
 		prompt_retires = excluded.prompt_retires, boot_token_hash = excluded.boot_token_hash,
 		capability_hash = excluded.capability_hash, uncertain_streak = excluded.uncertain_streak,
 		workspace_lost = excluded.workspace_lost, last_start_row = excluded.last_start_row,
@@ -63,7 +64,7 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 		updated_at = now()`,
 		string(c.Token), c.Project, c.Tree, c.Issue, string(c.Role), int64(c.Generation),
 		c.Session, c.SessionFile, locator, string(c.State),
-		c.Budgets.LaunchFailures, c.Budgets.PromptFailures, c.Budgets.PromptRetires,
+		c.Budgets.LaunchFailures, c.Budgets.Deaths, c.Budgets.PromptFailures, c.Budgets.PromptRetires,
 		c.BootTokenHash, c.CapabilityHash, c.UncertainStreak, c.WorkspaceLost, c.LastStartRow, int64(c.ServingGeneration),
 	)
 	if err != nil {
@@ -185,7 +186,7 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 		confirmed           *time.Time
 	)
 	err := row.Scan(&token, &c.Project, &c.Tree, &c.Issue, &role, &generation, &c.Session,
-		&c.SessionFile, &locator, &state, &c.Budgets.LaunchFailures, &c.Budgets.PromptFailures,
+		&c.SessionFile, &locator, &state, &c.Budgets.LaunchFailures, &c.Budgets.Deaths, &c.Budgets.PromptFailures,
 		&c.Budgets.PromptRetires, &c.BootTokenHash, &c.CapabilityHash, &c.UncertainStreak, &c.WorkspaceLost,
 		&c.LastStartRow, &servingGeneration,
 		&deliveryID, &task, &deliveryPhase, &deliveryGeneration, &queuedAt, &delivered, &confirmed)

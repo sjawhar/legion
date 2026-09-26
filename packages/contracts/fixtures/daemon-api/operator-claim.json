@@ -18,6 +18,7 @@
   },
   "budgets": {
     "launchFailures": 1,
+    "deaths": 1,
     "promptFailures": 0,
     "promptRetires": 0
   },

@@ -319,6 +319,16 @@ func TestRegistrationEndsTheBootWatch(t *testing.T) {
 	h.wantState(StateRegistered)
 }
 
+// deathCharged is what one death charges a claim reach walked to state: a launch failure, and a
+// death as well when its agent had work outstanding, which of those states only working has (idle
+// has finished its task).
+func deathCharged(state ClaimState) Budgets {
+	if state == StateWorking {
+		return Budgets{LaunchFailures: 1, Deaths: 1}
+	}
+	return Budgets{LaunchFailures: 1}
+}
+
 func TestAProcessFoundGoneIsRelaunchedAsTheSameSession(t *testing.T) {
 	for _, kind := range []runtime.ObservationKind{runtime.Gone, runtime.NotRecordedProcess} {
 		for _, state := range liveStates {
@@ -330,7 +340,7 @@ func TestAProcessFoundGoneIsRelaunchedAsTheSameSession(t *testing.T) {
 				h.observe(kind)
 
 				h.wantState(StateLaunching)
-				h.wantBudgets(Budgets{LaunchFailures: 1})
+				h.wantBudgets(deathCharged(state))
 				registered := state != StateLaunching && state != StateShimConnected
 				if !registered {
 					h.wantCalls("Spawn", 2)
@@ -360,7 +370,7 @@ func TestAClosedStreamIsJudgedByAProbe(t *testing.T) {
 				t.Errorf("probed %+v, want the claim's process", probe.Locator)
 			}
 			h.wantState(StateLaunching)
-			h.wantBudgets(Budgets{LaunchFailures: 1})
+			h.wantBudgets(deathCharged(state))
 		})
 		t.Run(string(state)+"/alive", func(t *testing.T) {
 			h := newHarness(t)

@@ -36,7 +36,7 @@ func tmuxClaim(token claim.Token) supervise.Claim {
 			Tmux:        &runtime.TmuxLocator{Window: "@3", Pane: "%41"},
 		},
 		State:           supervise.StateIdle,
-		Budgets:         supervise.Budgets{LaunchFailures: 1, PromptFailures: 2, PromptRetires: 1},
+		Budgets:         supervise.Budgets{LaunchFailures: 1, Deaths: 2, PromptFailures: 2, PromptRetires: 1},
 		BootTokenHash:   supervise.HashBootToken("boot-" + string(token)),
 		CapabilityHash:  []byte{0xca, 0xfe, 0x01},
 		UncertainStreak: 3,

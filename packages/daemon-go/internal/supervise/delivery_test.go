@@ -142,7 +142,7 @@ func TestARefusalOfTheResentTaskIsJudgedAgainstItsOwnAcknowledgement(t *testing.
 
 	h.must(StreamLateRefusal{Claim: testToken, DeliveryID: resent, Error: "the model provider refused the request"})
 
-	h.wantBudgets(Budgets{PromptFailures: 1})
+	h.wantBudgets(Budgets{Deaths: 1, PromptFailures: 1})
 	if p := h.pending(); p.ID == resent || !p.DeliveredAt.IsZero() || !p.ConfirmedAt.IsZero() {
 		t.Fatalf("pending after the refusal = %+v, want the task kept unread and unconfirmed under a new id", p)
 	}

@@ -3,6 +3,7 @@ package supervise
 import (
 	"context"
 	"fmt"
+	"slices"
 )
 
 // Budgets are a claim's retry counters, each a separate policy with its own reset point.
@@ -10,6 +11,14 @@ import (
 //   - LaunchFailures: launches that never became a working agent — a spawn or resume the runtime
 //     refused, a process that died, one that never registered. Reset only by the agent's ready:
 //     a registration alone proves nothing about the next launch.
+//   - Deaths: processes that died after their agent was ready and while it had work outstanding —
+//     a pending task, whose turn was running or which was sent and not yet begun. The relaunch
+//     reaches ready again whatever killed the last process, so ready cannot bound these; an agent
+//     that dies before it completes a turn each time it is given the task would otherwise be
+//     relaunched for ever. Reset only by a turn that ends (turnEnded), which a killed Oh My Pi
+//     never reports. A death with nothing pending strands no work and is not counted: a parked
+//     agent the environment kills now and then is relaunched however often it happens. Bounded by
+//     the launch failure limit.
 //   - PromptFailures: prompts the agent refused, acknowledged prompts that started no turn, and
 //     prompts refused after their acknowledgement. A prompt lost to the transport, or not sent for
 //     want of a connection, is re-queued at no charge. Reset by a started turn.
@@ -17,12 +26,14 @@ import (
 //     never by the relaunch itself — a claim that keeps acknowledging and never turning runs out.
 type Budgets struct {
 	LaunchFailures int
+	Deaths         int
 	PromptFailures int
 	PromptRetires  int
 }
 
 // Limits are where each budget runs out: three launch failures, three prompt failures, and two
 // prompt retirements in the shipped daemon. The caller reads them from its configuration.
+// LaunchFailures bounds Deaths as well: both count processes that did not survive.
 type Limits struct {
 	LaunchFailures int
 	PromptFailures int
@@ -37,6 +48,21 @@ func (m *Machine) relaunchAfterFailure(ctx context.Context) error {
 		return m.fail(ctx, "launch failures ran out")
 	}
 	return m.launch(ctx)
+}
+
+// chargeDeath counts a process that died after its agent was ready while it had work
+// outstanding, and fails the claim when those deaths reach the limit: it reports whether it did.
+func (m *Machine) chargeDeath(ctx context.Context) (bool, error) {
+	if m.claim.Pending == nil || slices.Contains(unready, m.claim.State) {
+		return false, nil
+	}
+	m.claim.Budgets.Deaths++
+	m.log.Warn("supervise: the agent died with work outstanding", "deaths", m.claim.Budgets.Deaths,
+		"limit", m.deps.Limits.LaunchFailures)
+	if m.claim.Budgets.Deaths < m.deps.Limits.LaunchFailures {
+		return false, nil
+	}
+	return true, m.fail(ctx, "deaths with work outstanding ran out")
 }
 
 // chargePrompt counts one prompt failure. At the limit the process is retired — suspended, the
