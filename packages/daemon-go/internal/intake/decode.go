@@ -22,6 +22,9 @@ type decodedMessage struct {
 	Source  string
 	EventID string
 	Fact    Fact
+	// Unread names each optional field the decoder could not read and took as absent. The consumer
+	// logs it; the message is not poison.
+	Unread []string
 }
 
 type envoyEnvelope struct {
@@ -50,6 +53,7 @@ func decodeMessage(subject, project string, repositories []ghrepo.Repository, da
 	}
 
 	var fact Fact
+	var unread []string
 	var err error
 	switch {
 	case strings.HasPrefix(subject, "notifications.dispatch.issue."):
@@ -61,14 +65,14 @@ func decodeMessage(subject, project string, repositories []ghrepo.Repository, da
 		if envelope.Source != "github" {
 			return decodedMessage{}, fmt.Errorf("GitHub subject has envelope source %q", envelope.Source)
 		}
-		fact, err = decodeGitHubFact(subject, repositories, envelope.Payload, envelope.IssuedAt)
+		fact, unread, err = decodeGitHubFact(subject, repositories, envelope.Payload, envelope.IssuedAt)
 	default:
 		return decodedMessage{}, fmt.Errorf("unsupported durable subject %q", subject)
 	}
 	if err != nil {
 		return decodedMessage{}, err
 	}
-	return decodedMessage{Source: envelope.Source, EventID: envelope.EventID, Fact: fact}, nil
+	return decodedMessage{Source: envelope.Source, EventID: envelope.EventID, Fact: fact, Unread: unread}, nil
 }
 
 func (e envoyEnvelope) valid() error {
@@ -214,10 +218,10 @@ func isJSONObject(raw json.RawMessage) bool {
 	return json.Unmarshal(raw, &item) == nil && item != nil
 }
 
-func decodeGitHubFact(subject string, repositories []ghrepo.Repository, payload string, issuedAt int64) (Fact, error) {
+func decodeGitHubFact(subject string, repositories []ghrepo.Repository, payload string, issuedAt int64) (Fact, []string, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(payload), &raw); err != nil || raw == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 	// The payload names the event's repository; the subject's segments cannot, since a name may hold
 	// a dot. Only a configured repository's event is this daemon's, as in the shipped daemon, which
@@ -225,28 +229,28 @@ func decodeGitHubFact(subject string, repositories []ghrepo.Repository, payload 
 	repo, _ := rawString(raw, "repo")
 	at := slices.IndexFunc(repositories, func(configured ghrepo.Repository) bool { return configured.String() == repo })
 	if at < 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	repository := repositories[at]
 	kind, ok := rawString(raw, "kind")
 	if !ok {
-		return nil, nil
+		return nil, nil, nil
 	}
+	var fact Fact
+	var err error
 	switch kind {
 	case "pr":
-		return decodePullRequest(repository, raw)
+		fact, err = decodePullRequest(repository, raw)
 	case "review":
 		return decodeReview(repository, raw)
 	case "push":
-		return decodePush(repository, raw)
+		fact, err = decodePush(repository, raw)
 	case "checks":
-		return decodeChecks(subject, repository, raw, issuedAt)
-	case "comment":
-		// Comments route to the current role but do not change the durable workflow record.
-		return nil, nil
-	default:
-		return nil, nil
+		fact, err = decodeChecks(subject, repository, raw, issuedAt)
 	}
+	// Comments, and every other kind, route to the current role but do not change the durable
+	// workflow record.
+	return fact, nil, err
 }
 
 func decodePullRequest(repository ghrepo.Repository, raw map[string]json.RawMessage) (Fact, error) {
@@ -258,7 +262,7 @@ func decodePullRequest(repository ghrepo.Repository, raw map[string]json.RawMess
 	branch, _ := rawString(raw, "head_ref")
 	sha, _ := rawString(raw, "head_sha")
 	body, _ := rawString(raw, "body")
-	updatedAt := rawTimestamp(raw, "updated_at")
+	updatedAt, _ := rawTimestamp(raw, "updated_at")
 	switch action {
 	case "opened", "reopened":
 		// A reopened pull request is open again, recorded as when it opened.
@@ -284,10 +288,10 @@ func decodePullRequest(repository ghrepo.Repository, raw map[string]json.RawMess
 	}
 }
 
-func decodeReview(repository ghrepo.Repository, raw map[string]json.RawMessage) (Fact, error) {
+func decodeReview(repository ghrepo.Repository, raw map[string]json.RawMessage) (Fact, []string, error) {
 	number, action, ok := githubIdentity(raw)
 	if !ok || action != "submitted" {
-		return nil, nil
+		return nil, nil, nil
 	}
 	state, _ := rawString(raw, "state")
 	commitID, _ := rawString(raw, "commit_id")
@@ -300,12 +304,20 @@ func decodeReview(repository ghrepo.Repository, raw map[string]json.RawMessage) 
 	if text, ok := rawString(raw, "review_id"); ok && text != "" {
 		parsed, err := strconv.ParseInt(text, 10, 64)
 		if err != nil || parsed <= 0 {
-			return nil, fmt.Errorf("review_id %q is not a positive integer", text)
+			return nil, nil, fmt.Errorf("review_id %q is not a positive integer", text)
 		}
 		id = parsed
 	}
-	return PullRequestReview{Repo: repository.String(), Number: number, ID: id, State: strings.ToLower(state), CommitID: commitID,
-		HeadSHA: headSHA, Author: author, Body: body}, nil
+	// submitted_at is GitHub's RFC 3339 time; a listener that predates it carries none. One that
+	// cannot be read is taken as none, and reported: a review without a time is ordered by its id,
+	// so it is recorded rather than lost as poison.
+	submittedAt, ok := rawTimestamp(raw, "submitted_at")
+	var unread []string
+	if !ok {
+		unread = append(unread, fmt.Sprintf("submitted_at %s is not an RFC 3339 time", raw["submitted_at"]))
+	}
+	return PullRequestReview{Repo: repository.String(), Number: number, ID: id, SubmittedAt: submittedAt, State: strings.ToLower(state),
+		CommitID: commitID, HeadSHA: headSHA, Author: author, Body: body}, unread, nil
 }
 
 func decodePush(repository ghrepo.Repository, raw map[string]json.RawMessage) (Fact, error) {
@@ -479,14 +491,23 @@ func rawInt64Value(value json.RawMessage) (int64, bool) {
 	return integer, true
 }
 
-func rawTimestamp(raw map[string]json.RawMessage, key string) time.Time {
-	value, ok := rawString(raw, key)
-	if !ok || value == "" {
-		return time.Time{}
+// rawTimestamp reads an optional RFC 3339 time: an absent, null or empty field is the zero time,
+// and ok is false only when the field holds anything else, which is taken as the zero time too.
+func rawTimestamp(raw map[string]json.RawMessage, key string) (time.Time, bool) {
+	value, present := raw[key]
+	if !present || string(value) == "null" {
+		return time.Time{}, true
 	}
-	parsed, err := time.Parse(time.RFC3339, value)
+	var text string
+	if err := json.Unmarshal(value, &text); err != nil {
+		return time.Time{}, false
+	}
+	if text == "" {
+		return time.Time{}, true
+	}
+	parsed, err := time.Parse(time.RFC3339, text)
 	if err != nil {
-		return time.Time{}
+		return time.Time{}, false
 	}
-	return parsed.UTC()
+	return parsed.UTC(), true
 }
