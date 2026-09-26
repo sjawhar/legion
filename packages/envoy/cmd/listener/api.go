@@ -80,9 +80,10 @@ type messageBody struct {
 }
 
 // sendResponse is the answer to a targeted send. Duplicate reports that JetStream already held
-// this message, so nothing new reached the agent's subject; it is only ever true for a
-// dispatch-sourced send, the only one published under a MsgId. Absent means false, which is
-// what an older listener's answer reads as.
+// this message, so nothing new reached the agent's subject; it can only be true for a send whose
+// source publishes under a MsgId (bus's dedupedSources: dispatch, github, slack, ghostwispr), and
+// Dispatch is the one sender that uses it. Absent means false, which is what an older listener's
+// answer reads as.
 type sendResponse struct {
 	contracts.Envelope
 	Recipient string `json:"recipient"`

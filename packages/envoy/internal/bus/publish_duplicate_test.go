@@ -59,8 +59,8 @@ func TestPublishReportingDuplicateReportsTheStreamsVerdict(t *testing.T) {
 		t.Fatalf("a different dedupe key must not report a duplicate")
 	}
 
-	// A source other than dispatch carries no MsgId at all (nats.go's publish path), so the
-	// stream cannot recognise a repeat and never reports one.
+	// An agent-sourced envelope carries no MsgId at all (dedupedSources in nats.go), so the stream
+	// cannot recognise a repeat and never reports one.
 	agent := envelope("fourth")
 	agent.Source = "agent"
 	agent.Topic = "notifications.agent.ses_dup"

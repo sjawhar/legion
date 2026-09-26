@@ -11,3 +11,4 @@
 
 - A role claim that overtook another session no longer risks deleting a newer claim made in the same instant; old-holder cleanup now touches only the previous holder's topics, never the role row.
 - Document version mutations now emit one retained, non-notifying `comment.anchor_refreshed` or `ask.anchor_refreshed` event for each changed open anchor, so stream consumers immediately observe orphaned quotes.
+- A webhook redelivery of an event the notification stream already holds no longer publishes a second copy. This covers GitHub and Ghost Wispr resending under the original delivery id, and Slack retrying under the original `event_id`. GitHub, Slack and Ghost Wispr envelopes now publish under a JetStream MsgId of their dedupe key and topic, the rule Dispatch's already used.
