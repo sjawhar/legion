@@ -686,9 +686,6 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err := refuseLoneCarriageReturn("with", op.With); err != nil {
-			return nil, err
-		}
 		at, _ := pmdoc.ContainingTextblock(tree, r.From)
 		code := at.Node.Type == "code_block"
 		var with *pmdoc.Node
@@ -1118,21 +1115,6 @@ func refuseReshapedReplacement(before, after *pmdoc.Node, match pmdoc.Range, wit
 	return &ErrInvalidOp{Field: "with", Reason: fmt.Sprintf(
 		"with %q is text the document reads back as another block where it lands (%v); %s",
 		with, reshaped, blockSyntaxAdvice(with, at),
-	)}
-}
-
-// refuseLoneCarriageReturn refuses replacement text holding a carriage return that no line feed
-// follows. Markdown ends a line there, and so does the browser editor's parser, while this
-// server's reads it as text, so the document would read back as other lines in the browser -
-// `x\r---` as a heading, and code after it outside the block holding it. A carriage return before
-// a line feed is a line ending both read the same way.
-func refuseLoneCarriageReturn(field, with string) error {
-	if !strings.Contains(strings.ReplaceAll(with, "\r\n", ""), "\r") {
-		return nil
-	}
-	return &ErrInvalidOp{Field: field, Reason: fmt.Sprintf(
-		"%s %q holds a carriage return that no line feed follows, which the browser editor reads as a line ending and this server reads as text, so the document would read back as other lines there; end each line with \\n or \\r\\n",
-		field, with,
 	)}
 }
 

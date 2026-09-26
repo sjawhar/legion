@@ -2083,6 +2083,8 @@ func TestApplyOperationReplaceWithNothingEmptiesTheParagraph(t *testing.T) {
 		{"a blockquote's paragraph before its list", "Intro.\n\n> Body.\n>\n> - a\n"},
 		{"an ask's question", "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nBody.\n\n- A\n- B\n:::\n"},
 		{"a footnote definition's first paragraph of two", "x[^1]\n\n[^1]: Body.\n\n    More.\n"},
+		{"a table body cell", "Intro.\n\n| h |\n| --- |\n| Body. |\n"},
+		{"a table header cell", "Intro.\n\n| Body. |\n| --- |\n| c |\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			tree, err := parseInput(test.markdown)

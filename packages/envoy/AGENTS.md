@@ -144,10 +144,7 @@ end, so a block inserted beside one reads back ahead of it (`refuseReshapedRepla
 paragraph is not written, so the shape comparison (`pmdoc.BlockShapeError`) expects none back: an
 empty `with` that empties its paragraph changes no shape, a block holding an emptied paragraph is
 still judged for every later replace, and an empty `with` leaving text that reads back as another
-block is refused, naming the text. A `with` or an accepted suggestion's text holding a carriage
-return that no line feed follows is `INVALID_OP` (`refuseLoneCarriageReturn`): markdown and the
-browser editor end a line there, while this server's parser reads it as text, so `x\r---` would
-read back in the browser as a heading. Everywhere else `replace` is
+block is refused, naming the text. Everywhere else `replace` is
 inline: `with` parses through `pmdoc.ParseInline` (paragraph-only block grammar), so a multi-paragraph
 `with` is `INVALID_OP`, so is any non-empty `with` that renders to no inline content (a line
 indented four spaces or a tab, which markdown reads as a code block, or whitespace alone — an
