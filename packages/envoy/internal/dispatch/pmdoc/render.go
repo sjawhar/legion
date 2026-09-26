@@ -181,13 +181,21 @@ func (r *renderer) block(n *Node, prefix string) {
 			r.err = err
 			return
 		}
-		r.writeSyntax(":::" + n.Type + "{" + attrs + "}\n" + prefix)
+		fence := strings.Repeat(":", typedFence(n, len(prefix)))
+		r.writeSyntax(fence + n.Type + "{" + attrs + "}\n" + prefix)
 		outer := r.typedPrefix
 		r.typedPrefix = &prefix
 		r.blocksNoTrailing(n.Children, prefix)
 		r.typedPrefix = outer
-		r.writeSyntax("\n" + prefix + ":::")
+		r.writeSyntax("\n" + prefix + fence)
 	}
+}
+
+// typedFence is the number of colons a typed block whose lines start at column is written with:
+// three, or one more than the longest line of colons inside it that could close it
+// (closingColons). A renderer prefix is spaces and `> `, so its length is that column.
+func typedFence(n *Node, column int) int {
+	return max(3, closingColons(n, column)+1)
 }
 
 func (r *renderer) list(n *Node, prefix string) {

@@ -42,6 +42,61 @@ func TestTypedBlockDirectiveRoundTrips(t *testing.T) {
 	}
 }
 
+// A typed block is closed by a line of exactly its fence's colons here and, in the browser editor,
+// by a line of at least as many indented at most three columns, even inside fenced code, so its
+// fence outgrows every such line: a nested typed block's fence, or a line of code, measured with the
+// width of the list markers around it; a line in a blockquote closes nothing.
+func TestTypedBlockFenceOutgrowsTheColonLinesItHolds(t *testing.T) {
+	callout := func(id string, children ...*Node) *Node {
+		return &Node{Type: "callout", Attrs: Attrs{BlockIDAttr: id, "kind": "note", "title": ""}, Children: children}
+	}
+	paragraph := func(text string) *Node {
+		return &Node{Type: "paragraph", Children: []*Node{{Type: "text", Text: text}}}
+	}
+	code := func(text string) *Node {
+		return &Node{Type: "code_block", Attrs: Attrs{"language": nil}, Children: []*Node{{Type: "text", Text: text}}}
+	}
+	listItem := func(children ...*Node) *Node {
+		return &Node{Type: "bullet_list", Attrs: Attrs{"spread": false}, Children: []*Node{
+			{Type: "list_item", Attrs: Attrs{"checked": nil, "label": "•", "listType": "bullet", "spread": false}, Children: children},
+		}}
+	}
+	for _, test := range []struct {
+		name  string
+		tree  *Node
+		fence string
+	}{
+		{"a callout in a callout", callout("c1", callout("c2", paragraph("x"))), "::::callout"},
+		{"three deep", callout("c1", callout("c2", callout("c3", paragraph("x")))), ":::::callout"},
+		{"code holding a closing line", callout("c1", code("a\n:::\nb")), "::::callout"},
+		{"code holding a longer line", callout("c1", paragraph("Intro."), code(":::::  ")), "::::::callout"},
+		{"code holding a line indented three spaces", callout("c1", code("   :::")), "::::callout"},
+		{"code holding a line indented four spaces", callout("c1", code("    :::")), ":::callout"},
+		{"a list item's code, two columns in", callout("c1", listItem(paragraph("item"), code(":::"))), "::::callout"},
+		{"a list item's code, four columns in", callout("c1", listItem(paragraph("item"), code("  :::"))), ":::callout"},
+		{"a blockquote's code", callout("c1", &Node{Type: "blockquote", Children: []*Node{code(":::")}}), ":::callout"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			doc := &Node{Type: "doc", Children: []*Node{test.tree, paragraph("After.")}}
+			markdown, err := Render(doc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.HasPrefix(markdown, test.fence+"{") {
+				t.Fatalf("Render() = %q, want it to open with %s", markdown, test.fence)
+			}
+			back, err := Parse(markdown)
+			if err != nil {
+				t.Fatalf("Parse(%q) = %v", markdown, err)
+			}
+			if !back.Equal(doc) {
+				got, _ := back.JSON()
+				t.Fatalf("Parse(%q) = %s", markdown, got)
+			}
+		})
+	}
+}
+
 func TestAskDirectiveRoundTripsOpenAndAnsweredState(t *testing.T) {
 	next := 0
 	SetBlockIDGenerator(func() string {

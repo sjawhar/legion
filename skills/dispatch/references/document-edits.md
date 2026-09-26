@@ -69,14 +69,12 @@ alone. An empty `with` deletes the matched text on purpose; where the block hold
 paragraph, the replace is `INVALID_OP`, and the refusal names the `delete` that removes it instead. Inside a code
 block none of this applies: `with` is the code's literal text, written as sent, whitespace, markdown syntax and
 references included, except that line breaks at the end of the code's text, and a line holding only whitespace in a
-list item's code, do not survive the next read; and a line of three or more colons in code inside a typed block,
-indented less than four columns from where the typed block's lines start, is `INVALID_OP`, since the browser editor
-ends the typed block there - indent it four or more spaces (a tab reaches only the next tab stop, which inside a list
-item or a blockquote can be two columns away), or move the code block out of the typed block. Text a `replace` writes
-that reads back as another block is `INVALID_OP` too: a line of only `-`, `*` or `_` is a horizontal rule, and a line
-of only colons a typed block's fence; to add that block, `insert` it beside the paragraph (`insert` with markdown
-`***` adds a rule), except in a footnote definition, which the document reads at its end, so a block inserted beside
-it reads back ahead of it - there, keep the characters as text with other text on that line. Use zero-based
+list item's code, do not survive the next read. A line of colons in code inside a typed block is kept: Dispatch writes
+that typed block's fence longer than any such line the browser editor would end it at. Text a `replace` writes that
+reads back as another block is `INVALID_OP`: a line of only `-`, `*` or `_` is a horizontal rule, and a line of only
+colons a typed block's fence; to add that block, `insert` it beside the paragraph (`insert` with markdown `***` adds a
+rule), except in a footnote definition, which the document reads at its end, so a block inserted beside it reads back
+ahead of it - there, keep the characters as text with other text on that line. Use zero-based
 `occurrence` for a
 repeated target; re-read a missing or ambiguous target before retrying. Pass `summary` to name the version when recording a decision.
 

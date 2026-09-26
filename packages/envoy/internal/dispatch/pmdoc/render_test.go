@@ -120,7 +120,13 @@ func TestRenderTableCellParagraph(t *testing.T) {
 	}
 }
 
+// typedFenceRun is a typed block's fence, whose length is syntax: the engine writes three colons
+// around a callout whose code holds a `:::` line, which its own parser then reads as the callout's
+// end, where the renderer writes the longer fence both parsers read.
+var typedFenceRun = regexp.MustCompile(`(?m)^(\s*):{3,}`)
+
 func plain(markdown string) string {
+	markdown = typedFenceRun.ReplaceAllString(markdown, "$1:::")
 	markdown = html.UnescapeString(markdown)
 	markdown = orderedMarker.ReplaceAllString(markdown, "")
 	markdown = spanTag.ReplaceAllString(markdown, "")

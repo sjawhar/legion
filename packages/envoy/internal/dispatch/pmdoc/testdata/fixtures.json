@@ -439,6 +439,96 @@
     "rendered_by_milkdown": ":::callout{#callout-blocks-1 kind=\"note\" title=\"Body blocks\"}\nIntroduction.\n\n* Choice one\n* Choice two\n\n```text\nexample\n```\n\n> Quoted context.\n:::\n"
   },
   {
+    "name": "callout-nested",
+    "markdown": "::::callout{#callout-nested-1 kind=\"note\" title=\"Outer\"}\nOuter text.\n\n:::callout{#callout-nested-2 kind=\"warning\" title=\"Inner\"}\nInner text.\n:::\n::::\n\n::::callout{#callout-nested-3 kind=\"note\" title=\"Code\"}\n```text\na\n:::\nb\n```\n::::\n\nAfter.\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "callout",
+          "attrs": {
+            "kind": "note",
+            "title": "Outer",
+            "blockId": "callout-nested-1"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000001"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Outer text."
+                }
+              ]
+            },
+            {
+              "type": "callout",
+              "attrs": {
+                "kind": "warning",
+                "title": "Inner",
+                "blockId": "callout-nested-2"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000002"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "Inner text."
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "kind": "note",
+            "title": "Code",
+            "blockId": "callout-nested-3"
+          },
+          "content": [
+            {
+              "type": "code_block",
+              "attrs": {
+                "language": "text",
+                "blockId": "b-000003"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "a\n:::\nb"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000004"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AR0BAAcBC3Byb3NlbWlycm9yAwdjYWxsb3V0BwABAAMJcGFyYWdyYXBoBwABAQYEAAECC091dGVyIHRleHQuKAABAQdibG9ja0lkAXcIYi0wMDAwMDGHAQEDB2NhbGxvdXQHAAEPAwlwYXJhZ3JhcGgHAAEQBgQAARELSW5uZXIgdGV4dC4oAAEQB2Jsb2NrSWQBdwhiLTAwMDAwMigAAQ8Ea2luZAF3B3dhcm5pbmcoAAEPBXRpdGxlAXcFSW5uZXIoAAEPB2Jsb2NrSWQBdxBjYWxsb3V0LW5lc3RlZC0yKAABAARraW5kAXcEbm90ZSgAAQAFdGl0bGUBdwVPdXRlcigAAQAHYmxvY2tJZAF3EGNhbGxvdXQtbmVzdGVkLTGHAQADB2NhbGxvdXQHAAEkAwpjb2RlX2Jsb2NrBwABJQYEAAEmB2EKOjo6CmIoAAElCGxhbmd1YWdlAXcEdGV4dCgAASUHYmxvY2tJZAF3CGItMDAwMDAzKAABJARraW5kAXcEbm90ZSgAASQFdGl0bGUBdwRDb2RlKAABJAdibG9ja0lkAXcQY2FsbG91dC1uZXN0ZWQtM4cBJAMJcGFyYWdyYXBoBwABMwYEAAE0BkFmdGVyLigAATMHYmxvY2tJZAF3CGItMDAwMDA0AA==",
+    "rendered_by_milkdown": "::::callout{#callout-nested-1 kind=\"note\" title=\"Outer\"}\nOuter text.\n\n:::callout{#callout-nested-2 kind=\"warning\" title=\"Inner\"}\nInner text.\n:::\n::::\n\n:::callout{#callout-nested-3 kind=\"note\" title=\"Code\"}\n```text\na\n:::\nb\n```\n:::\n\nAfter.\n"
+  },
+  {
     "name": "callout",
     "markdown": ":::callout{#callout-1 kind=\"warning\" title=\"Read this\"}\nBody text.\n:::\n",
     "pm_json": {
