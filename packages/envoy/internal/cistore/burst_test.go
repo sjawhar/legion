@@ -27,9 +27,10 @@ type writeKV struct {
 	natsgo.KeyValue
 	delay time.Duration
 
-	mu          sync.Mutex
-	beforeWrite func() error
-	written     map[string][]writtenState
+	mu      sync.Mutex
+	act     func(call int) error
+	calls   int
+	written map[string][]writtenState
 }
 
 func (k *writeKV) Create(key string, value []byte) (uint64, error) {
@@ -43,10 +44,12 @@ func (k *writeKV) Update(key string, value []byte, last uint64) (uint64, error) 
 func (k *writeKV) write(key string, value []byte, do func() (uint64, error)) (uint64, error) {
 	time.Sleep(k.delay)
 	k.mu.Lock()
-	hook := k.beforeWrite
+	act := k.act
+	k.calls++
+	call := k.calls
 	k.mu.Unlock()
-	if hook != nil {
-		if err := hook(); err != nil {
+	if act != nil {
+		if err := act(call); err != nil {
 			return 0, err
 		}
 	}
@@ -62,11 +65,20 @@ func (k *writeKV) write(key string, value []byte, do func() (uint64, error)) (ui
 	return revision, err
 }
 
-// setBeforeWrite makes every write call hook first; a non-nil error is returned instead of writing.
-func (k *writeKV) setBeforeWrite(hook func() error) {
+// onWrite makes every write attempt from here on first call act with its number, counting from 1;
+// an error act returns is returned instead of writing. A nil act clears it.
+func (k *writeKV) onWrite(act func(call int) error) {
 	k.mu.Lock()
-	k.beforeWrite = hook
+	k.act = act
+	k.calls = 0
 	k.mu.Unlock()
+}
+
+// writeCalls is how many write attempts there have been since the last onWrite.
+func (k *writeKV) writeCalls() int {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.calls
 }
 
 // holdNextWrite makes the next write report on entered and wait until release is called. Later
@@ -74,18 +86,25 @@ func (k *writeKV) setBeforeWrite(hook func() error) {
 func (k *writeKV) holdNextWrite() (entered <-chan struct{}, release func()) {
 	reached := make(chan struct{})
 	gate := make(chan struct{})
-	var once sync.Once
-	k.setBeforeWrite(func() error {
-		held := false
-		once.Do(func() { held = true })
-		if !held {
-			return nil
+	k.onWrite(func(call int) error {
+		if call == 1 {
+			close(reached)
+			<-gate
 		}
-		close(reached)
-		<-gate
 		return nil
 	})
 	return reached, func() { close(gate) }
+}
+
+// recv waits up to 10 s for ch, failing the test when it never comes, so a regression in the
+// hand-over fails the test instead of hanging it.
+func recv(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("%s never happened", what)
+	}
 }
 
 // states returns every state written to key, in revision order.
@@ -188,7 +207,7 @@ func recordAsOneBatch(t *testing.T, s *Store, kv *writeKV, observations []contra
 		defer wg.Done()
 		errs[0] = record(s, observations[0])
 	}()
-	<-entered
+	recv(t, entered, "the held write of the first observation")
 	for i := 1; i < len(observations); i++ {
 		wg.Add(1)
 		go func() {
@@ -199,7 +218,7 @@ func recordAsOneBatch(t *testing.T, s *Store, kv *writeKV, observations []contra
 	}
 	release()
 	waitAll(t, &wg, "recordAsOneBatch")
-	kv.setBeforeWrite(nil)
+	kv.onWrite(nil)
 	return errs
 }
 
@@ -424,34 +443,32 @@ func TestABurstOfObservationsOnOneHeadIsRecordedUnderSlowWrites(t *testing.T) {
 	t.Logf("%d observations recorded in %d writes", n, writes)
 }
 
+// failureHead is the head the failure-path tests write.
+var failureHead = head{"example-org", "example-repo", "42", "3333333333333333333333333333333333333333"}
+
+// startCheck records check-i of failureHead in its own goroutine, storing its error in errs[i].
+func startCheck(s *Store, errs []error, wg *sync.WaitGroup, i int) {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		errs[i] = s.Record(failureHead.check(fmt.Sprintf("check-%d", i), uint64(500+i), "completed", "success", "2026-09-24T01:00:00Z"))
+	}()
+}
+
 // A batch's write that fails reaches every caller in the batch as that failure, the writer's role
 // passes to the callers that queued meanwhile, and their write goes through: a failed write leaves
-// nobody waiting and the record accepting writes. A write that loses its compare-and-swap to
-// another listener task retries over that task's write with every queued observation. A write
-// that panics fails its batch instead of stranding it.
+// nobody waiting and the record accepting writes. A write that panics fails its batch instead of
+// stranding it.
 func TestAFailedBatchWriteReachesEveryCallerAndTheNextBatchIsWritten(t *testing.T) {
-	h := head{"example-org", "example-repo", "42", "3333333333333333333333333333333333333333"}
-	start := func(s *Store, errs []error, wg *sync.WaitGroup, i int) {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			errs[i] = s.Record(h.check(fmt.Sprintf("check-%d", i), uint64(500+i), "completed", "success", "2026-09-24T01:00:00Z"))
-		}()
-	}
-
+	h := failureHead
 	t.Run("a KV failure", func(t *testing.T) {
 		conn, cleanup := connectNATS(t)
 		defer cleanup()
 		s, kv := wrapStore(t, conn, 0)
 		injected := errors.New("injected KV failure")
-		var calls int
 		enteredFirst, enteredSecond := make(chan struct{}), make(chan struct{})
 		releaseFirst, releaseSecond := make(chan struct{}), make(chan struct{})
-		kv.setBeforeWrite(func() error {
-			kv.mu.Lock()
-			calls++
-			call := calls
-			kv.mu.Unlock()
+		kv.onWrite(func(call int) error {
 			switch call {
 			case 1:
 				close(enteredFirst)
@@ -465,16 +482,16 @@ func TestAFailedBatchWriteReachesEveryCallerAndTheNextBatchIsWritten(t *testing.
 		})
 		errs := make([]error, 7)
 		var wg sync.WaitGroup
-		start(s, errs, &wg, 0)
-		<-enteredFirst
+		startCheck(s, errs, &wg, 0)
+		recv(t, enteredFirst, "check-0's write")
 		for i := 1; i <= 4; i++ {
-			start(s, errs, &wg, i)
+			startCheck(s, errs, &wg, i)
 			waitQueued(t, s, h.key(), i)
 		}
 		close(releaseFirst)
-		<-enteredSecond
+		recv(t, enteredSecond, "the write of check-1..4's batch")
 		for i := 5; i <= 6; i++ {
-			start(s, errs, &wg, i)
+			startCheck(s, errs, &wg, i)
 			waitQueued(t, s, h.key(), i-4)
 		}
 		close(releaseSecond)
@@ -503,85 +520,13 @@ func TestAFailedBatchWriteReachesEveryCallerAndTheNextBatchIsWritten(t *testing.
 		}
 	})
 
-	t.Run("a compare-and-swap lost to another listener task", func(t *testing.T) {
-		conn, cleanup := connectNATS(t)
-		defer cleanup()
-		s, kv := wrapStore(t, conn, 0)
-		// The other task writes the bucket directly, outside this store.
-		other := kv.KeyValue
-		if err := s.Record(h.check("seed", 400, "completed", "success", "2026-09-24T01:00:00Z")); err != nil {
-			t.Fatalf("seed the record: %v", err)
-		}
-		// Write 1 is check-0's, held until check-1..3 queue behind it; write 2 is their batch's
-		// first attempt, and the other task writes the record between that attempt's read and its
-		// update, so the batch of three loses its compare-and-swap and must retry all three.
-		var calls int
-		entered, release := make(chan struct{}), make(chan struct{})
-		kv.setBeforeWrite(func() error {
-			kv.mu.Lock()
-			calls++
-			call := calls
-			kv.mu.Unlock()
-			switch call {
-			case 1:
-				close(entered)
-				<-release
-			case 2:
-				entry, err := other.Get(h.key())
-				if err != nil {
-					return err
-				}
-				var state State
-				if err := json.Unmarshal(entry.Value(), &state); err != nil {
-					return err
-				}
-				state.Checks["from-the-other-task"] = Check{Name: "from-the-other-task", CheckRunID: 450, Status: "completed", Conclusion: "success"}
-				state.Generation++
-				raw, err := json.Marshal(state)
-				if err != nil {
-					return err
-				}
-				if _, err := other.Update(h.key(), raw, entry.Revision()); err != nil {
-					return err
-				}
-			}
-			return nil
-		})
-		errs := make([]error, 4)
-		var wg sync.WaitGroup
-		start(s, errs, &wg, 0)
-		<-entered
-		for i := 1; i <= 3; i++ {
-			start(s, errs, &wg, i)
-			waitQueued(t, s, h.key(), i)
-		}
-		close(release)
-		waitAll(t, &wg, "a lost compare-and-swap")
-		requireNoErrors(t, "a lost compare-and-swap", errs)
-		kv.mu.Lock()
-		attempts := calls
-		kv.mu.Unlock()
-		if attempts < 3 {
-			t.Fatalf("%d write attempts, want the batch's lost one and its retry after check-0's", attempts)
-		}
-		checks := getState(t, s, h.owner, h.repo, h.number, h.sha).Checks
-		for _, name := range []string{"seed", "from-the-other-task", "check-0", "check-1", "check-2", "check-3"} {
-			if _, ok := checks[name]; !ok {
-				t.Fatalf("record lacks %s after the batch's retried write: %v", name, checks)
-			}
-		}
-	})
-
 	t.Run("a write that panics", func(t *testing.T) {
 		conn, cleanup := connectNATS(t)
 		defer cleanup()
 		s, kv := wrapStore(t, conn, 0)
 		entered, release := make(chan struct{}), make(chan struct{})
-		var once sync.Once
-		kv.setBeforeWrite(func() error {
-			first := false
-			once.Do(func() { first = true })
-			if first {
+		kv.onWrite(func(call int) error {
+			if call == 1 {
 				close(entered)
 				<-release
 				panic("injected panic")
@@ -597,9 +542,9 @@ func TestAFailedBatchWriteReachesEveryCallerAndTheNextBatchIsWritten(t *testing.
 			defer func() { recovered = recover() }()
 			errs[0] = s.Record(h.check("check-0", 500, "completed", "success", "2026-09-24T01:00:00Z"))
 		}()
-		<-entered
+		recv(t, entered, "check-0's write")
 		for i := 1; i <= 3; i++ {
-			start(s, errs, &wg, i)
+			startCheck(s, errs, &wg, i)
 			waitQueued(t, s, h.key(), i)
 		}
 		close(release)
@@ -612,6 +557,69 @@ func TestAFailedBatchWriteReachesEveryCallerAndTheNextBatchIsWritten(t *testing.
 			t.Fatalf("record holds %d checks, want the 3 queued behind the panicked write", len(checks))
 		}
 	})
+}
+
+// A batch whose write loses its compare-and-swap to another listener task retries over that
+// task's write with every observation in the batch, not only the first. Here check-0's write is
+// held until check-1..3 queue behind it, and the other task writes the record between the read and
+// the update of the three-observation batch's first attempt.
+func TestALostCompareAndSwapRetriesTheWholeBatch(t *testing.T) {
+	h := failureHead
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s, kv := wrapStore(t, conn, 0)
+	// The other task writes the bucket directly, outside this store.
+	other := kv.KeyValue
+	if err := s.Record(h.check("seed", 400, "completed", "success", "2026-09-24T01:00:00Z")); err != nil {
+		t.Fatalf("seed the record: %v", err)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	kv.onWrite(func(call int) error {
+		switch call {
+		case 1:
+			close(entered)
+			<-release
+		case 2:
+			entry, err := other.Get(h.key())
+			if err != nil {
+				return err
+			}
+			var state State
+			if err := json.Unmarshal(entry.Value(), &state); err != nil {
+				return err
+			}
+			state.Checks["from-the-other-task"] = Check{Name: "from-the-other-task", CheckRunID: 450, Status: "completed", Conclusion: "success"}
+			state.Generation++
+			raw, err := json.Marshal(state)
+			if err != nil {
+				return err
+			}
+			if _, err := other.Update(h.key(), raw, entry.Revision()); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	errs := make([]error, 4)
+	var wg sync.WaitGroup
+	startCheck(s, errs, &wg, 0)
+	recv(t, entered, "check-0's write")
+	for i := 1; i <= 3; i++ {
+		startCheck(s, errs, &wg, i)
+		waitQueued(t, s, h.key(), i)
+	}
+	close(release)
+	waitAll(t, &wg, "a lost compare-and-swap")
+	requireNoErrors(t, "a lost compare-and-swap", errs)
+	if attempts := kv.writeCalls(); attempts < 3 {
+		t.Fatalf("%d write attempts, want the batch's lost one and its retry after check-0's", attempts)
+	}
+	checks := getState(t, s, h.owner, h.repo, h.number, h.sha).Checks
+	for _, name := range []string{"seed", "from-the-other-task", "check-0", "check-1", "check-2", "check-3"} {
+		if _, ok := checks[name]; !ok {
+			t.Fatalf("record lacks %s after the batch's retried write: %v", name, checks)
+		}
+	}
 }
 
 // A listener shutting down closes its NATS connection with callers still queued behind a write.
@@ -632,7 +640,7 @@ func TestQueuedCallersReturnPromptlyWhenTheConnectionCloses(t *testing.T) {
 			errs[i] = s.Record(h.check(fmt.Sprintf("check-%d", i), uint64(600+i), "completed", "success", "2026-09-24T01:00:00Z"))
 		}()
 		if i == 0 {
-			<-entered
+			recv(t, entered, "check-0's write")
 		} else {
 			waitQueued(t, s, h.key(), i)
 		}
