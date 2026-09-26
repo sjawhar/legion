@@ -127,6 +127,34 @@ func TestRenderKeepsALeadingRuleFromReadingAsFrontMatter(t *testing.T) {
 	}
 }
 
+// A list nested inside a blockquote writes its lines behind the quote's `>` and the list's
+// indentation. Read without the list indentation they share, but with the quote marker left on,
+// a second-level item's `<div` or `~~~` would look like indented code, and be left to open an
+// HTML block or a fence in place.
+func TestRenderEscapesBlockFormsInAListNestedInABlockquote(t *testing.T) {
+	for _, marker := range []string{"<div", "~~~"} {
+		t.Run(marker, func(t *testing.T) {
+			tree, err := Parse("> - a\n>   - b\n>\n>     x\n\nAfter.\n")
+			if err != nil {
+				t.Fatal(err)
+			}
+			item := tree.Children[0].Children[0].Children[0].Children[1].Children[0]
+			item.Children[1].Children[0].Text = marker
+			markdown := mustRender(t, tree)
+			back, err := Parse(markdown)
+			if err != nil {
+				t.Fatalf("Parse(%q) = %v", markdown, err)
+			}
+			if len(back.Children) != 2 || back.Children[1].Type != "paragraph" {
+				t.Fatalf("Parse(%q) = %q, want the blockquote and the paragraph after it", markdown, mustRender(t, back))
+			}
+			if again := mustRender(t, back); again != markdown {
+				t.Fatalf("Render(Parse(%q)) = %q", markdown, again)
+			}
+		})
+	}
+}
+
 // A paragraph's second line of dashes or equals signs underlines its first into a heading, so
 // the escape applies to a marker line anywhere in the paragraph, not only its first.
 func TestRenderEscapesSetextUnderlinesInsideParagraphs(t *testing.T) {

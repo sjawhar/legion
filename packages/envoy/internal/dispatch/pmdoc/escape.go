@@ -154,19 +154,50 @@ func closesTypedBlock(line, prefix string) bool {
 // the line continues the same textblock, where a setext underline or a table delimiter row reads
 // differently, and empty otherwise: a line of another block, read without the lines above it, can
 // make a block of its own - a previous list item's `---` or `<br>` - that is no reason to escape
-// anything here. The lines are read without the list indentation they share, up to the
-// indentation of their prefix, so a deeply nested item is not read as indented code while text
-// that is itself indented still is. footnote is the label, as written, of the footnote definition
-// the read begins with, or empty: the parser drops a definition nothing refers to, so the lines
-// are read after a reference to it.
+// anything here. The lines are read as the content of the blockquotes their prefix opens, without
+// the list indentation they share up to the indentation of that prefix, so a deeply nested item
+// is not read as indented code while text that is itself indented still is. footnote is the
+// label, as written, of the footnote definition the read begins with, or empty: the parser drops a
+// definition nothing refers to, so the lines are read after a reference to it.
 func lineReadsAsText(before, line, rewrittenLine, prefix, footnote string) bool {
-	indentation := len(prefix) - len(strings.TrimLeft(prefix, " "))
-	written, rewritten := dedent(before+line, indentation), dedent(before+rewrittenLine, indentation)
+	quote, indentation := splitPrefix(prefix)
+	written := dedent(unquote(before+line, quote), indentation)
+	rewritten := dedent(unquote(before+rewrittenLine, quote), indentation)
 	if footnote != "" {
 		reference := "x[^" + footnote + "]\n\n"
 		written, rewritten = reference+written, reference+rewritten
 	}
 	return slices.Equal(blockKinds(written), blockKinds(rewritten))
+}
+
+// splitPrefix splits a textblock's line prefix into the blockquote markers it opens with - up to
+// its last `>` and the one space after it - and the indentation of the list items inside them.
+func splitPrefix(prefix string) (quote string, indentation int) {
+	if last := strings.LastIndexByte(prefix, '>'); last >= 0 {
+		quote, prefix = prefix[:last+1], prefix[last+1:]
+		if strings.HasPrefix(prefix, " ") {
+			quote, prefix = quote+" ", prefix[1:]
+		}
+	}
+	return quote, len(prefix) - len(strings.TrimLeft(prefix, " "))
+}
+
+// unquote drops quote from the start of each line that carries it, or its trimmed form from a
+// blank quoted line.
+func unquote(lines, quote string) string {
+	if quote == "" {
+		return lines
+	}
+	blank := strings.TrimRight(quote, " ")
+	parts := strings.Split(lines, "\n")
+	for index, line := range parts {
+		if strings.HasPrefix(line, quote) {
+			parts[index] = line[len(quote):]
+		} else if strings.HasPrefix(line, blank) {
+			parts[index] = line[len(blank):]
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
 // blockKinds is the kinds of the blocks the parser reads markdown as, in document order.
