@@ -22,6 +22,7 @@ an Envoy input to decide Claude Code permissions. Dispatch asks stay on Dispatch
 | Task | Location | Notes |
 | --- | --- | --- |
 | Claude plugin manifest | `.claude-plugin/plugin.json` | Declares the MCP configuration only; it must not declare a Monitor. `hooks/hooks.json` is auto-discovered. Its `version` equals `package.json`'s (tested). |
+| Skills | `skills/envoy`, `skills/dispatch` | Relative symlinks into the root `skills/`; the plugin ships only these two, the ones a standalone Claude Code session uses (the rest belong to Legion roles on Oh My Pi; README "Skills"). Claude Code copies the targets into its cache at install. |
 | Committed bundle | `dist/`, `scripts/build.ts` | `bun run build` / `bun run check-dist`. The plugin cache has no `node_modules`, so both executables ship bundled; CI compares a fresh build on the pinned Bun (`.bun-version`). |
 | Channel configuration | `.mcp.json`, `bin/envoy-channel.ts` | Launch is `bun ${CLAUDE_PLUGIN_ROOT}/dist/envoy-channel.js`; stdout remains pure MCP protocol. The `env` block passes through `CLAUDE_PROJECT_DIR` only — an unset `${VAR}` is substituted literally, so optional inputs are inherited, never listed. |
 | SessionStart hook | `hooks/hooks.json`, `hooks/open-asks-hook.ts` | Records the current session id per Claude process and injects the open-asks summary; always exits 0. |
@@ -39,7 +40,7 @@ an Envoy input to decide Claude Code permissions. Dispatch asks stay on Dispatch
 - Each channel meta key must contain only letters, digits, and underscores and every value must be
   a string. `producer`, `topic`, `event_id`, `dedupe_key`, `urgency`, `from_session`,
   `expects_reply`, and `in_reply_to` are the current contract. Never emit a `source` key: Claude
-  Code stamps its own `source="plugin:claude-envoy-bridge:envoy"` attribute on the `<channel>` tag.
+  Code stamps its own `source="plugin:claude-envoy:envoy"` attribute on the `<channel>` tag.
 - Subscribe NATS before registering the self-subscribed session route — on startup, on a session-id
   handoff (new direct subject first, then deregister the old id, register, drop the old subject,
   move the role by soft claim), and when rebuilding the interests a resumed id already registered.
@@ -74,7 +75,7 @@ an Envoy input to decide Claude Code permissions. Dispatch asks stay on Dispatch
   dropped — never shown to the model.
 - `envoy_inbox` is bounded to 50 metadata-only entries. Keep full payloads in neither the tool
   output nor plugin data.
-- Deployment is `--channels plugin:claude-envoy-bridge@legion-plugins` under managed settings
+- Deployment is `--channels plugin:claude-envoy@legion-plugins` under managed settings
   (`channelsEnabled`, `allowedChannelPlugins`); `--dangerously-load-development-channels` is for
   entries outside the allowlist and cannot be combined with a `--channels` entry naming the same
   plugin from another marketplace. `claude -p` has no interactive plan approval, multiple-choice,
