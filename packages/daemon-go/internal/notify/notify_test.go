@@ -74,24 +74,38 @@ func TestHTTPPublisherRefusalNamesTheListenerError(t *testing.T) {
 	}
 }
 
-// The listener answers a publish to a role topic whose role has no live holder with 404, and only
-// then (packages/envoy/cmd/listener/api.go publishHandler, writeRoleHolderError). That refusal is
-// ErrNoHolder, so a caller can tell it from a failure worth retrying; any other refusal is not.
-func TestHTTPPublisherNamesARoleWithNoLiveHolder(t *testing.T) {
-	status := http.StatusNotFound
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(status)
-		_, _ = w.Write([]byte(`{"error":"no holder for role merge-queue","reason":"unclaimed"}`))
-	}))
-	defer server.Close()
+// A role publish no session can take is refused 404 with the listener's reason
+// (packages/envoy/cmd/listener/api.go writeRoleHolderError): nobody claimed the role, or its
+// holder's registration lapsed. That is the one refusal a caller holds a notice for, so it is told
+// apart from every other failure; a 404 with no such reason (a route an older listener lacks) is
+// not a missing holder, and stays an ordinary failure.
+func TestHTTPPublisherTellsANoHolderRefusalFromAnyOther(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		status   int
+		body     string
+		noHolder bool
+	}{
+		{"nobody claimed the role", http.StatusNotFound, `{"error":"no holder for role legion-demo-controller","reason":"unclaimed"}`, true},
+		{"the holder lapsed", http.StatusNotFound, `{"error":"role legion-demo-controller holder ses_a lapsed; claim retained (last seen 1)","reason":"holder_lapsed","holder":"ses_a","last_seen":1,"claim_released":false}`, true},
+		{"a route the listener lacks", http.StatusNotFound, `{"error":"not found"}`, false},
+		{"the stream is down", http.StatusInternalServerError, `{"error":"nats: no response from stream"}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
 
-	err := New(server.URL, "").Publish(context.Background(), "notifications.role.merge-queue", "READY #42", map[string]string{"kind": "ready"}, "legion-outbox:9")
-	if !errors.Is(err, ErrNoHolder) || !strings.Contains(err.Error(), "no holder for role merge-queue") {
-		t.Fatalf("publish error = %v, want ErrNoHolder carrying the listener's error", err)
-	}
-	status = http.StatusInternalServerError
-	if err := New(server.URL, "").Publish(context.Background(), "notifications.role.merge-queue", "READY #42", map[string]string{"kind": "ready"}, "legion-outbox:9"); err == nil || errors.Is(err, ErrNoHolder) {
-		t.Fatalf("publish error on a 500 = %v, want a failure that is not ErrNoHolder", err)
+			err := New(server.URL, "").Publish(context.Background(), "notifications.role.legion-demo-controller", "held on DEMO-1", map[string]string{"kind": "held"}, "legion-outbox:9")
+			if err == nil || !strings.Contains(err.Error(), tc.body) {
+				t.Fatalf("publish error = %v, want the listener's refusal %s", err, tc.body)
+			}
+			if got := errors.Is(err, ErrNoHolder); got != tc.noHolder {
+				t.Fatalf("errors.Is(%v, ErrNoHolder) = %t, want %t", err, got, tc.noHolder)
+			}
+		})
 	}
 }

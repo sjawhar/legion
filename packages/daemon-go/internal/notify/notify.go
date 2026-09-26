@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 )
@@ -19,10 +20,16 @@ const requestTimeout = 10 * time.Second
 // answers `{"error": ...}` (packages/envoy/cmd/listener/api.go writeJSONError).
 const refusalBodyLimit = 4096
 
-// ErrNoHolder is the listener's refusal of a publish to a role topic whose role has no live holder,
-// its only 404 on the publish route (packages/envoy/cmd/listener/api.go publishHandler,
-// writeRoleHolderError). Nothing a retry changes until the role is claimed again.
-var ErrNoHolder = errors.New("the role has no live holder")
+// ErrNoHolder is a role publish the listener refused because no live session holds the role: nobody
+// claimed it, or its holder's registration lapsed (writeRoleHolderError,
+// packages/envoy/cmd/listener/api.go). It is the ordinary state before a role's session claims it,
+// not a broken publish path, so a caller can hold what it published until one does.
+var ErrNoHolder = errors.New("no live session holds the role")
+
+// roleHolderReasons are the reasons the listener's 404 names for a role with no live holder
+// (roleHolderUnclaimed, roleHolderLapsed). A 404 without one of them is some other refusal — a route
+// an older listener lacks — and never ErrNoHolder.
+var roleHolderReasons = []string{"unclaimed", "holder_lapsed"}
 
 // Topic is the persisted issue topic workers and architects subscribe to. project is the project
 // token panes are told as LEGION_PROJECT (packages/pi-envoy/src/legion/go-bootstrap.ts:154-159),
@@ -81,11 +88,14 @@ func (p *HTTPPublisher) Publish(ctx context.Context, topic, message string, payl
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(response.Body, refusalBodyLimit))
-		refusal := fmt.Errorf("listener returned %s: %s", response.Status, strings.TrimSpace(string(body)))
-		if response.StatusCode == http.StatusNotFound {
-			return fmt.Errorf("publish notice to %s: %w: %w", topic, ErrNoHolder, refusal)
+		refusal := fmt.Errorf("publish notice to %s: listener returned %s: %s", topic, response.Status, strings.TrimSpace(string(body)))
+		var reason struct {
+			Reason string `json:"reason"`
 		}
-		return fmt.Errorf("publish notice to %s: %w", topic, refusal)
+		if response.StatusCode == http.StatusNotFound && json.Unmarshal(body, &reason) == nil && slices.Contains(roleHolderReasons, reason.Reason) {
+			return fmt.Errorf("%w: %w", refusal, ErrNoHolder)
+		}
+		return refusal
 	}
 	return nil
 }
