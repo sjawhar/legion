@@ -72,6 +72,17 @@ func ValidateSpawnSpec(spec SpawnSpec, runtimeOwned map[string]bool) error {
 	if !claim.IsRole(spec.Role) {
 		return refuse("%q is not a role", spec.Role)
 	}
+	// The token is what every runtime names the claim's workspace, Secret and pod after, and it is
+	// derived from the project, issue and role rather than carried beside them. A spec whose token
+	// is another claim's would run this claim's work under that claim's name, on its workspace and
+	// beside its credentials.
+	token, err := claim.NewToken(spec.Project, spec.Issue, spec.Role)
+	if err != nil {
+		return refuse("%w", err)
+	}
+	if token != spec.Claim {
+		return refuse("the claim token of %s/%s/%s is %s", spec.Project, spec.Issue, spec.Role, token)
+	}
 	if len(spec.Prompt.RolePromptPaths) == 0 {
 		return refuse("no role prompt")
 	}

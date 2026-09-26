@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 )
@@ -101,7 +102,9 @@ func TestARootsExitRetiresItsPhasesUnconfirmedTask(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			h := newHarnessOf(t, rootClaim())
 			h.reach(StateReady)
-			h.must(RequestDeliver{Claim: rootToken, Task: "the task"})
+			// A phase's task, which is what the exit retires: a task of no phase is nobody's to
+			// end here (TestAnOperatorsTaskSurvivesASuspensionAndGoesOnResume).
+			h.must(RequestDeliver{Claim: rootToken, Task: "the task", Phase: phase.Implementing})
 			h.wantPrompts(1)
 			if stored, ok := h.store.delivery(rootToken); !ok || stored.DeliveredAt.IsZero() || !stored.ConfirmedAt.IsZero() {
 				t.Fatalf("stored delivery %+v (ok=%v), want it acknowledged and unconfirmed", stored, ok)

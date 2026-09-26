@@ -62,7 +62,7 @@ func TestReadPaneReport(t *testing.T) {
 
 func testSpec() runtime.SpawnSpec {
 	return runtime.SpawnSpec{
-		Claim:      claim.Token("legion-omp-LEGION-43-tester"),
+		Claim:      claim.Token("legion-omp-legion-43-tester"),
 		Project:    "omp",
 		Tree:       "LEGION-42",
 		Issue:      "LEGION-43",
@@ -106,15 +106,15 @@ func TestPanePairs(t *testing.T) {
 		"-e", "ENVOY_URL=http://127.0.0.1:9020",
 		"-e", "PI_SHELL_PREFIX=PATH='/state/worker-bin:/state/bin:'${PATH#'/state/worker-bin:/state/bin:'} &&",
 		"-e", "GIT_TERMINAL_PROMPT=0",
-		"-e", "LEGION_GRANT_FILE=/state/secrets/legion-omp-LEGION-43-tester-grant",
+		"-e", "LEGION_GRANT_FILE=/state/secrets/legion-omp-legion-43-tester-grant",
 		"-e", "XDG_CONFIG_HOME=/state/home/.config",
 		"-e", "XDG_CACHE_HOME=/state/home/.cache",
 		"-e", "XDG_DATA_HOME=/state/home/.local/share",
 		"-e", "XDG_STATE_HOME=/state/home/.local/state",
 		"-e", "GH_CONFIG_DIR=/state/gh",
 		"-e", "JJ_USER=legion-tester",
-		"-e", "LEGION_BOOT_TOKEN_FILE=/state/secrets/legion-omp-LEGION-43-tester",
-		"-e", "ENVOY_TOKEN_FILE=/state/secrets/legion-omp-LEGION-43-tester-envoy_token",
+		"-e", "LEGION_BOOT_TOKEN_FILE=/state/secrets/legion-omp-legion-43-tester",
+		"-e", "ENVOY_TOKEN_FILE=/state/secrets/legion-omp-legion-43-tester-envoy_token",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("panePairs =\n%q\nwant\n%q", got, want)
@@ -131,8 +131,8 @@ func TestPanePairs(t *testing.T) {
 
 // A spec the runtime cannot honour exactly is refused before anything touches the disk or tmux:
 // the shared refusal against tmux's own runtime-owned variables (runtime.ValidateSpawnSpec, tested
-// with its own table), then what is tmux's alone — a claim token names the pane's secret files, and
-// a pane's workspace is never lost and recovered.
+// with its own table, which also holds the claim token to the one its coordinates derive), then
+// what is tmux's alone: a pane's workspace is never lost and recovered.
 func TestValidateSpawnSpecRefuses(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -140,10 +140,9 @@ func TestValidateSpawnSpecRefuses(t *testing.T) {
 		want   string
 	}{
 		{"no claim", func(s *runtime.SpawnSpec) { s.Claim = "" }, "spawn: no claim token"},
-		{"a claim that is not one file name", func(s *runtime.SpawnSpec) { s.Claim = "../x" }, `spawn "../x": the claim token names the pane's secret files and must be one file name`},
-		{"an XDG directory", func(s *runtime.SpawnSpec) { s.Env["XDG_CONFIG_HOME"] = "/home/me/.config" }, "spawn legion-omp-LEGION-43-tester: Env sets XDG_CONFIG_HOME, which the runtime sets itself"},
+		{"an XDG directory", func(s *runtime.SpawnSpec) { s.Env["XDG_CONFIG_HOME"] = "/home/me/.config" }, "spawn legion-omp-legion-43-tester: Env sets XDG_CONFIG_HOME, which the runtime sets itself"},
 		{"a recovered workspace", func(s *runtime.SpawnSpec) { s.WorkspaceRecoveredFrom = "legion/LEGION-43" },
-			"spawn legion-omp-LEGION-43-tester: the spec recovers a lost workspace from legion/LEGION-43, and a tmux pane's workspace is on the daemon's own disk, never lost"},
+			"spawn legion-omp-legion-43-tester: the spec recovers a lost workspace from legion/LEGION-43, and a tmux pane's workspace is on the daemon's own disk, never lost"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			spec := testSpec()
@@ -171,11 +170,11 @@ func TestValidateSpawnSpecRefusesACollisionWithAProviderKey(t *testing.T) {
 		want   string
 	}{
 		{"a secret of the same name", "ENVOY_TOKEN", func(*runtime.SpawnSpec) {},
-			"spawn legion-omp-LEGION-43-tester: provider key ENVOY_TOKEN would not reach OMP: the pane carries ENVOY_TOKEN_FILE"},
+			"spawn legion-omp-legion-43-tester: provider key ENVOY_TOKEN would not reach OMP: the pane carries ENVOY_TOKEN_FILE"},
 		{"its pointer in Env", "ANTHROPIC_API_KEY", func(s *runtime.SpawnSpec) { s.Env["ANTHROPIC_API_KEY_FILE"] = "/state/anthropic" },
-			"spawn legion-omp-LEGION-43-tester: provider key ANTHROPIC_API_KEY would not reach OMP: the pane carries ANTHROPIC_API_KEY_FILE"},
+			"spawn legion-omp-legion-43-tester: provider key ANTHROPIC_API_KEY would not reach OMP: the pane carries ANTHROPIC_API_KEY_FILE"},
 		{"a variable of the same name in Env", "JJ_USER", func(*runtime.SpawnSpec) {},
-			"spawn legion-omp-LEGION-43-tester: provider key JJ_USER is also set in Env"},
+			"spawn legion-omp-legion-43-tester: provider key JJ_USER is also set in Env"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			spec := testSpec()
@@ -253,7 +252,7 @@ func TestNewRefusesAProviderDispatchTokenOnlyWhenDispatchIsConfigured(t *testing
 			}
 			if tc.dispatch {
 				opts.DispatchURL = "http://127.0.0.1:18766"
-				opts.DispatchTokenFile = filepath.Join(stateDir, "secrets", DispatchTokenFileName)
+				opts.DispatchTokenFile = filepath.Join(stateDir, "secrets", runtime.DispatchTokenFileName)
 			}
 			_, err := New(opts)
 			want := "tmux runtime: provider key DISPATCH_TOKEN would not reach OMP: every pane carries DISPATCH_TOKEN_FILE"
@@ -277,7 +276,7 @@ func TestRuntimeOwnedIsWhatEveryPaneIsToldByTheRuntime(t *testing.T) {
 	in := paneInputs{
 		stateDir: "/state", workspace: "/state/workspaces/LEGION-43", daemonURL: "http://127.0.0.1:13370",
 		envoyURL: "http://127.0.0.1:9020", natsURLs: []string{"nats://a:4222"},
-		dispatchURL: "http://127.0.0.1:18766", dispatchTokenFile: "/state/secrets/" + DispatchTokenFileName,
+		dispatchURL: "http://127.0.0.1:18766", dispatchTokenFile: "/state/secrets/" + runtime.DispatchTokenFileName,
 		tools: map[string]string{"LEGION_GH_PATH": "/usr/bin/gh", "LEGION_GIT_PATH": "/usr/bin/git", "LEGION_JJ_PATH": "/usr/bin/jj"},
 	}
 	told := map[string]bool{}

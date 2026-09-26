@@ -683,8 +683,9 @@ func readInt(value *yaml.Node, key string) (*int, error) {
 
 // readLingerHours is `linger_hours`: a positive number of hours, a decimal among them (0.3 is 18
 // minutes), bounded as the shipped key is, by the timer bound in whole hours (config.ts
-// MAX_TIMER_HOURS). A value too small to be a nanosecond is refused, never read as zero, which the
-// engine would take for its 72-hour default.
+// MAX_TIMER_HOURS). A value too small to be a nanosecond is refused, never read as zero: the
+// engine arms the deadline it is given, so a zero would close a finished tree at once and take
+// its workspace with it.
 func readLingerHours(value *yaml.Node, key string) (*time.Duration, error) {
 	if value.Tag == "!!null" {
 		return nil, nil

@@ -19,11 +19,11 @@ import (
 	legionclaim "github.com/sjawhar/legion/daemon/internal/claim" // main_test.go's `claim` helper holds the bare name
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/daemon"
+	"github.com/sjawhar/legion/daemon/internal/omplaunch"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
 	"github.com/sjawhar/legion/daemon/internal/registry"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
-	"github.com/sjawhar/legion/daemon/internal/runtime/tmux"
 	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
 )
 
@@ -110,7 +110,7 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 			return 0, err
 		}
 	}
-	invocation, err := tmux.ResolveOmpInvocation(cfg.OmpInvocation, os.Getenv)
+	invocation, err := omplaunch.ResolveInvocation(cfg.OmpInvocation, os.Getenv)
 	if err != nil {
 		return 0, err
 	}
@@ -135,7 +135,7 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 		return 0, err
 	}
 	fmt.Fprintf(stderr, "[legion] checking the controller's Oh My Pi (%s) in %s before the daemon mints a capability\n",
-		tmux.WithOmpLaunchPrefix(cfg.OmpLaunchPrefix, invocation), controllerDir)
+		omplaunch.WithPrefix(cfg.OmpLaunchPrefix, invocation), controllerDir)
 	secret, err := probeAndMint(ctx, cfg.DaemonURL, daemon.ControllerProbe{
 		Omp: invocation, Prefix: cfg.OmpLaunchPrefix, Env: env, WorkDir: controllerDir, Stdin: os.Stdin, Stderr: stderr,
 		Contract: api.GoDaemonAPIVersion, Log: slog.New(slog.NewTextHandler(stderr, nil)),
@@ -145,7 +145,7 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 		return 0, err
 	}
 
-	if _, err := tmux.WriteSecretFile(stateDir, token, secret); err != nil {
+	if _, err := runtime.WriteSecretFile(stateDir, token, "LEGION_CONTROLLER_SECRET", secret); err != nil {
 		return 0, fmt.Errorf("write the controller secret: %w", err)
 	}
 	executable, err := os.Executable()
@@ -161,7 +161,7 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 			return 0, err
 		}
 	}
-	command := tmux.WithOmpLaunchPrefix(cfg.OmpLaunchPrefix, invocation) + " " + tmux.SystemPromptArgument(runtime.PromptParts{
+	command := omplaunch.WithPrefix(cfg.OmpLaunchPrefix, invocation) + " " + omplaunch.SystemPromptArgument(runtime.PromptParts{
 		RolePromptPaths:            []string{filepath.Join(rolesDir, "controller-root.md")},
 		DeploymentInstructionsPath: instructionsFile,
 	})

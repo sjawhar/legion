@@ -22,7 +22,7 @@ const timestamp = z.iso.datetime({ offset: true });
 
 /** `api.Phase` — the state an admitted issue sits in, in the transition table's own order. Not
  * the role working it: `workers` is keyed by role (`LEGION_ROLES`). */
-export const LEGION_GO_PHASES = [
+export const LEGION_GO_WORKFLOW_PHASES = [
   "admitted",
   "planning",
   "implementing",
@@ -35,6 +35,11 @@ export const LEGION_GO_PHASES = [
   "done",
   "held",
 ] as const;
+
+/** `api.Phase` as the state route reads it: the workflow's phases plus `unrecorded`, which is not
+ * one of them — it is what an issue the workflow does not record reads as, where an operator's
+ * claim exists and an issue does not. Its status reads the same. No request names it. */
+export const LEGION_GO_PHASES = [...LEGION_GO_WORKFLOW_PHASES, "unrecorded"] as const;
 
 export type LegionGoPhase = (typeof LEGION_GO_PHASES)[number];
 
@@ -223,10 +228,13 @@ export const LegionGoErrorResponse = z.union([
 ]);
 
 /** `api.DeliveryView` — the claim's pending task; `deliveredAt` is the latest send's
- * acknowledgement and `confirmedAt` the turn it started, each absent until it happens. */
+ * acknowledgement and `confirmedAt` the turn it started, each absent until it happens. `phase` is
+ * the issue phase the task was queued for, which is what says whether it is still the work to do;
+ * a task of no phase — an operator's own, an architect's — carries none. */
 const legionGoDeliveryView = z.strictObject({
   id: nonEmptyString,
   task: nonEmptyString,
+  phase: z.enum(LEGION_GO_PHASES).optional(),
   queuedAt: timestamp,
   deliveredAt: timestamp.optional(),
   confirmedAt: timestamp.optional(),
@@ -335,7 +343,7 @@ export const LegionGoWaveReleaseRequest = z.strictObject({
 /** `api.PhaseBackwardRequest`, the active worker's request to return to an earlier phase. */
 export const LegionGoPhaseBackwardRequest = z.strictObject({
   grantId: nonEmptyString,
-  to: z.enum(LEGION_GO_PHASES),
+  to: z.enum(LEGION_GO_WORKFLOW_PHASES),
   reason: nonEmptyString,
 });
 

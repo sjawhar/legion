@@ -72,7 +72,7 @@ type Options struct {
 	// Tools names the gh, git, and jj the daemon resolved at boot by the variable every pane
 	// carries them in (LEGION_GH_PATH, LEGION_GIT_PATH, LEGION_JJ_PATH).
 	Tools map[string]string
-	// OmpInvocation is the resolved launch fragment (ResolveOmpInvocation); OmpLaunchPrefix the
+	// OmpInvocation is the resolved launch fragment (omplaunch.ResolveInvocation); OmpLaunchPrefix the
 	// configured argv prepended to it.
 	OmpInvocation   string
 	OmpLaunchPrefix []string

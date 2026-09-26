@@ -6,14 +6,15 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
 // Provision ports packages/workspace/src/workspace.ts:402-515. It updates an existing working
 // copy, obtains the shared clone through a temporary sibling, protects unreachable worker commits
 // before every fetch, resolves a bookmark before adding, and leaves pane credentials on the clone.
-// The clone and the fetch reach the repository through request.Feed with no credential — a pod's
-// second init container, which the provisioning Secret is not mounted in — or, with no feed, from
-// GitHub with the one-shot credential.
+// The clone and the fetch reach the repository through request.Source: a pod's feed with no
+// credential, or GitHub with the one-shot credential.
 func Provision(ctx context.Context, run Runner, request Request) (Workspace, error) {
 	workspace, err := Location(request.StateDir, request.Repo, request.Issue)
 	if err != nil {
@@ -22,16 +23,14 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 	if request.CredentialHelper == "" {
 		return Workspace{}, fmt.Errorf("workspace credential helper is required")
 	}
-	var feed string
-	switch {
-	case request.Feed != "" && (request.Token != "" || request.CredentialDir != ""):
-		return Workspace{}, errors.New("workspace request names a feed and a provisioning token; provisioning from a feed holds no credential")
-	case request.Feed != "":
-		if feed, err = FeedRepository(request.Feed, request.Repo); err != nil {
-			return Workspace{}, err
-		}
-	case request.CredentialDir == "":
-		return Workspace{}, fmt.Errorf("workspace credential directory is required")
+	if request.Log == nil {
+		return Workspace{}, errors.New("workspace request names no log")
+	}
+	if request.Source == nil {
+		return Workspace{}, errors.New("workspace request names no way to the repository: FromFeed or FromGitHub")
+	}
+	if err := request.Source.check(request.Repo); err != nil {
+		return Workspace{}, err
 	}
 
 	exists, err := pathExists(workspace.Dir)
@@ -43,11 +42,8 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 			return Workspace{}, err
 		}
 	}
-
-	var source remote
-	if feed != "" {
-		source = feedRemote(feed, request.Repo, workspace.Bookmark)
-	} else if source, err = newProvisioningCredential(request.CredentialDir, request.Token); err != nil {
+	source, err := request.Source.open(request.Repo, workspace.Bookmark)
+	if err != nil {
 		return Workspace{}, err
 	}
 	defer func() {
@@ -64,7 +60,7 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 	}
 
 	if !exists {
-		if err := createWorkspace(ctx, run, workspace); err != nil {
+		if err := createWorkspace(ctx, run, workspace, request.Log); err != nil {
 			return Workspace{}, err
 		}
 	}
@@ -77,22 +73,6 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 	return workspace, nil
 }
 
-// splitRepository is owner/repository's two names. A `.` or `..` segment is refused: joined under
-// the state directory it names another directory than the repository's, and provisioning removes
-// an incomplete clone at that path.
-func splitRepository(repository string) (owner, repo string, err error) {
-	parts := strings.Split(repository, "/")
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" || parts[0] != filepath.Base(parts[0]) || parts[1] != filepath.Base(parts[1]) {
-		return "", "", fmt.Errorf("workspace repository must be owner/repository, got %q", repository)
-	}
-	for _, part := range parts {
-		if part == "." || part == ".." {
-			return "", "", fmt.Errorf("workspace repository %q has a %q segment; want owner/repository", repository, part)
-		}
-	}
-	return parts[0], parts[1], nil
-}
-
 // Bookmark is the jj bookmark an issue's workspace is on: its branch.
 func Bookmark(issue string) string { return "legion/" + issue }
 
@@ -101,7 +81,7 @@ func Bookmark(issue string) string { return "legion/" + issue }
 // workspaces directory it names that directory, or its owner's, and Remove deletes a workspace
 // directory whole.
 func Location(stateDir, repository, issue string) (Workspace, error) {
-	owner, repo, err := splitRepository(repository)
+	owner, repo, err := ghrepo.Split("workspace repository", repository)
 	if err != nil {
 		return Workspace{}, err
 	}

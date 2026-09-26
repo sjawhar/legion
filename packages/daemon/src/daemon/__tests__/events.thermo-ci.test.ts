@@ -95,6 +95,9 @@ async function resyncWith(
     dispatchClient: fakeDispatchClient(),
     saveState: async () => {},
     fetchCiStatusBatch: async () => status,
+    compareChangedPaths: async () => {
+      throw new Error("no compare expected in this test");
+    },
     applyEffects: async (effects) => {
       applied.push(effects);
     },
@@ -685,6 +688,9 @@ it("does not apply a fetched green rollup after a live red settlement advances C
         fetchStarted.resolve();
         return fetchedStatuses.promise;
       },
+      compareChangedPaths: async () => {
+        throw new Error("no compare expected in this test");
+      },
       applyEffects: async (effects) => {
         resyncEffects.push(effects);
       },
@@ -751,6 +757,9 @@ it("does not uncertify a live green settlement with a stale pending rollup", asy
     fetchCiStatusBatch: async () => {
       fetchStarted.resolve();
       return fetchedStatuses.promise;
+    },
+    compareChangedPaths: async () => {
+      throw new Error("no compare expected in this test");
     },
     applyEffects: async (effects) => {
       resyncEffects.push(effects);

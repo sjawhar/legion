@@ -22,13 +22,19 @@ var _ supervise.Store = (*Store)(nil)
 // separately (a delivery changes far more often than the claim it rides on) and read together.
 const claimSelect = `select c.token, c.project, c.tree, c.issue, c.role, c.generation, c.session,
 	c.session_file, c.locator, c.state, c.launch_failures, c.prompt_failures, c.prompt_retires,
-	c.boot_token_hash, c.capability_hash, c.uncertain_streak, c.workspace_lost,
-	d.delivery_id, d.task, d.phase, d.queued_at, d.delivered_at, d.confirmed_at
+	c.boot_token_hash, c.capability_hash, c.uncertain_streak, c.workspace_lost, c.last_start_row, c.serving_generation,
+	d.delivery_id, d.task, d.phase, d.generation, d.queued_at, d.delivered_at, d.confirmed_at
 	from claims c left join pending_task_deliveries d on d.claim_token = c.token`
 
 // PutClaim writes a claim, replacing the row its token names. The pending delivery is not part of
 // the write: it has its own, PutDelivery and RetireDelivery.
 func (s *Store) PutClaim(ctx context.Context, c supervise.Claim) error {
+	return putClaim(ctx, s.pool, c)
+}
+
+// putClaim writes a claim through whichever executor the caller has: the pool, or a transaction
+// that carries the delivery write that goes with it.
+func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 	if c.Generation > math.MaxInt64 {
 		return fmt.Errorf("put claim %s: generation %d does not fit a bigint", c.Token, c.Generation)
 	}
@@ -40,10 +46,11 @@ func (s *Store) PutClaim(ctx context.Context, c supervise.Claim) error {
 		}
 		locator = encoded
 	}
-	_, err := s.pool.Exec(ctx, `insert into claims (token, project, tree, issue, role, generation,
+	_, err := db.Exec(ctx, `insert into claims (token, project, tree, issue, role, generation,
 		session, session_file, locator, state, launch_failures, prompt_failures, prompt_retires,
-		boot_token_hash, capability_hash, uncertain_streak, workspace_lost)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+		boot_token_hash, capability_hash, uncertain_streak, workspace_lost, last_start_row,
+		serving_generation)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
 		on conflict (token) do update set project = excluded.project, tree = excluded.tree,
 		issue = excluded.issue, role = excluded.role, generation = excluded.generation,
 		session = excluded.session, session_file = excluded.session_file,
@@ -51,12 +58,13 @@ func (s *Store) PutClaim(ctx context.Context, c supervise.Claim) error {
 		launch_failures = excluded.launch_failures, prompt_failures = excluded.prompt_failures,
 		prompt_retires = excluded.prompt_retires, boot_token_hash = excluded.boot_token_hash,
 		capability_hash = excluded.capability_hash, uncertain_streak = excluded.uncertain_streak,
-		workspace_lost = excluded.workspace_lost,
+		workspace_lost = excluded.workspace_lost, last_start_row = excluded.last_start_row,
+		serving_generation = excluded.serving_generation,
 		updated_at = now()`,
 		string(c.Token), c.Project, c.Tree, c.Issue, string(c.Role), int64(c.Generation),
 		c.Session, c.SessionFile, locator, string(c.State),
 		c.Budgets.LaunchFailures, c.Budgets.PromptFailures, c.Budgets.PromptRetires,
-		c.BootTokenHash, c.CapabilityHash, c.UncertainStreak, c.WorkspaceLost,
+		c.BootTokenHash, c.CapabilityHash, c.UncertainStreak, c.WorkspaceLost, c.LastStartRow, int64(c.ServingGeneration),
 	)
 	if err != nil {
 		return fmt.Errorf("put claim %s: %w", c.Token, err)
@@ -104,11 +112,12 @@ func (s *Store) ClaimByBootTokenHash(ctx context.Context, hash []byte) (supervis
 // one. A token no claim carries is refused.
 func (s *Store) PutDelivery(ctx context.Context, token claim.Token, d supervise.Delivery) error {
 	_, err := s.pool.Exec(ctx, `insert into pending_task_deliveries (claim_token, delivery_id, task,
-		phase, queued_at, delivered_at, confirmed_at) values ($1, $2, $3, $4, $5, $6, $7)
+		phase, generation, queued_at, delivered_at, confirmed_at) values ($1, $2, $3, $4, $5, $6, $7, $8)
 		on conflict (claim_token) do update set delivery_id = excluded.delivery_id,
-		task = excluded.task, phase = excluded.phase, queued_at = excluded.queued_at,
+		task = excluded.task, phase = excluded.phase, generation = excluded.generation,
+		queued_at = excluded.queued_at,
 		delivered_at = excluded.delivered_at, confirmed_at = excluded.confirmed_at`,
-		string(token), d.ID, d.Task, string(d.Phase), d.QueuedAt, instant(d.DeliveredAt), instant(d.ConfirmedAt),
+		string(token), d.ID, d.Task, string(d.Phase), int64(d.Generation), d.QueuedAt, instant(d.DeliveredAt), instant(d.ConfirmedAt),
 	)
 	if err != nil {
 		return fmt.Errorf("put delivery %s on %s: %w", d.ID, token, err)
@@ -117,19 +126,27 @@ func (s *Store) PutDelivery(ctx context.Context, token claim.Token, d supervise.
 }
 
 // RetireDelivery removes the claim's pending delivery, fenced on its id: retiring a delivery the
-// claim does not hold is refused, and the one it does hold stays.
-func (s *Store) RetireDelivery(ctx context.Context, token claim.Token, deliveryID string) error {
-	tag, err := s.pool.Exec(ctx,
-		"delete from pending_task_deliveries where claim_token = $1 and delivery_id = $2",
-		string(token), deliveryID,
-	)
-	if err != nil {
-		return fmt.Errorf("retire delivery %s on %s: %w", deliveryID, token, err)
-	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("retire delivery %s on %s: the claim holds no such delivery", deliveryID, token)
-	}
-	return nil
+// claim does not hold is refused, and the one it does hold stays. The claim it is given is written
+// in the same transaction, because the run a claim serves is set by the retiring of the task that
+// ran: a delete that committed without it would leave a daemon crashed in between with a claim
+// that has forgotten the run its worker is still working.
+func (s *Store) RetireDelivery(ctx context.Context, c supervise.Claim, deliveryID string) error {
+	return s.Tx(ctx, func(tx pgx.Tx) error {
+		if err := putClaim(ctx, tx, c); err != nil {
+			return err
+		}
+		tag, err := tx.Exec(ctx,
+			"delete from pending_task_deliveries where claim_token = $1 and delivery_id = $2",
+			string(c.Token), deliveryID,
+		)
+		if err != nil {
+			return fmt.Errorf("retire delivery %s on %s: %w", deliveryID, c.Token, err)
+		}
+		if tag.RowsAffected() == 0 {
+			return fmt.Errorf("retire delivery %s on %s: the claim holds no such delivery", deliveryID, c.Token)
+		}
+		return nil
+	})
 }
 
 func scanClaim(row pgx.Row) (supervise.Claim, error) {
@@ -140,13 +157,16 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 		locator             []byte
 		deliveryID, task    *string
 		deliveryPhase       *string
+		deliveryGeneration  *int64
+		servingGeneration   int64
 		queuedAt, delivered *time.Time
 		confirmed           *time.Time
 	)
 	err := row.Scan(&token, &c.Project, &c.Tree, &c.Issue, &role, &generation, &c.Session,
 		&c.SessionFile, &locator, &state, &c.Budgets.LaunchFailures, &c.Budgets.PromptFailures,
 		&c.Budgets.PromptRetires, &c.BootTokenHash, &c.CapabilityHash, &c.UncertainStreak, &c.WorkspaceLost,
-		&deliveryID, &task, &deliveryPhase, &queuedAt, &delivered, &confirmed)
+		&c.LastStartRow, &servingGeneration,
+		&deliveryID, &task, &deliveryPhase, &deliveryGeneration, &queuedAt, &delivered, &confirmed)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return supervise.Claim{}, err
 	}
@@ -154,7 +174,7 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 		return supervise.Claim{}, fmt.Errorf("read claim: %w", err)
 	}
 	c.Token, c.Role, c.State = claim.Token(token), claim.Role(role), supervise.ClaimState(state)
-	c.Generation = uint64(generation)
+	c.Generation, c.ServingGeneration = uint64(generation), uint64(servingGeneration)
 	if locator != nil {
 		var loc runtime.Locator
 		if err := json.Unmarshal(locator, &loc); err != nil {
@@ -170,6 +190,7 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 			ID:          *deliveryID,
 			Task:        *task,
 			Phase:       phase.Phase(*deliveryPhase),
+			Generation:  uint64(orZeroInt(deliveryGeneration)),
 			QueuedAt:    *queuedAt,
 			DeliveredAt: orZero(delivered),
 			ConfirmedAt: orZero(confirmed),
@@ -184,6 +205,13 @@ func instant(t time.Time) *time.Time {
 		return nil
 	}
 	return &t
+}
+
+func orZeroInt(value *int64) int64 {
+	if value == nil {
+		return 0
+	}
+	return *value
 }
 
 func orZero(t *time.Time) time.Time {

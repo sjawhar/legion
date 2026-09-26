@@ -158,8 +158,8 @@ out
 .nuxt
 dist
 packages/*/dist/
-# The Claude Code plugin cache runs the bridge from its committed bundle.
-!packages/claude-envoy-bridge/dist/
+# The Claude Code plugin cache runs the plugin from its committed bundle.
+!packages/claude-envoy/dist/
 
 # Gatsby files
 .cache/

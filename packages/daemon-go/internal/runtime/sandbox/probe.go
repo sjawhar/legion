@@ -66,9 +66,9 @@ type ImageProbe struct {
 	Budget time.Duration
 	// Retry waits out the attempts that say nothing about the image: bootprobe.Daemon at boot.
 	Retry bootprobe.Retry
-	// RoleReferences are the task agents and skills the daemon's own role prompts name (daemon.
-	// RolePromptReferences): the prompts every worker pod is handed, so the probe resolves those
-	// and their agents' models, not the image's copy (`legion probe-image --role-references`).
+	// RoleReferences are the task agents and skills the daemon's own role prompts name
+	// (promptrefs.Roles), required: the prompts every worker pod is handed, so the probe resolves
+	// those and their agents' models, not the image's copy (`legion probe-image --role-references`).
 	RoleReferences string
 	// Resources are the probe container's requests and limits (the TypeScript probe used the
 	// `small` profile): it runs Oh My Pi three times (pi.agents, the plugin's load, the
@@ -87,8 +87,8 @@ type ImageProbe struct {
 // transient: anything else, a pod the kubelet itself failed included, retried under p.Retry
 // (worker-image-probe.ts:318-338, 470-508).
 func (r *Runtime) ProbeImage(ctx context.Context, p ImageProbe) error {
-	if p.Contract < 1 || p.Budget <= 0 || p.Retry.Initial <= 0 || p.Retry.Max < p.Retry.Initial {
-		return errors.New("image probe: a contract, a positive budget, and a positive retry wait are required")
+	if p.Contract < 1 || p.Budget <= 0 || p.Retry.Initial <= 0 || p.Retry.Max < p.Retry.Initial || p.RoleReferences == "" {
+		return errors.New("image probe: a contract, a positive budget, a positive retry wait, and the role prompts' references are required")
 	}
 	_, hex, _ := strings.Cut(r.image, "@sha256:")
 	if !digestHex.MatchString(hex) {
@@ -177,21 +177,9 @@ func (r *Runtime) probeAttempt(ctx context.Context, p ImageProbe, name, digest s
 			finished = pod
 			return true, nil
 		}
-		if reason := probeWaiting(pod); definitiveWaiting[reason] {
-			unusable := imageRefusal(digest, "pod %s %s, container %s waiting: %s", name, phaseOf(pod), probeContainer, reason)
-			verdict = &unusable
+		if stuck := r.stuck(ctx, pod, name, digest, &mountRead); stuck != nil {
+			verdict = stuck
 			return true, nil
-		}
-		// A providers Secret the kubelet cannot mount leaves the pod Pending, never Failed, and no
-		// wait changes it; its events say so, read at most every providersMountRecheck.
-		if len(r.providerKeys) > 0 && pod.Status.Phase == corev1.PodPending && r.now().Sub(mountRead) >= providersMountRecheck {
-			mountRead = r.now()
-			if failure := r.providersMountFailure(ctx, pod); failure != "" {
-				refused := bootprobe.Outcome{Refusal: fmt.Errorf("the probe pod %s cannot mount the providers Secret %s, which provider_keys names (%s): %s",
-					name, ProvidersSecretName(r.project), strings.Join(slices.Sorted(maps.Values(r.providerKeys)), ", "), failure)}
-				verdict = &refused
-				return true, nil
-			}
 		}
 		return false, nil
 	})
@@ -205,15 +193,8 @@ func (r *Runtime) probeAttempt(ctx context.Context, p ImageProbe, name, digest s
 	case verdict != nil:
 		return *verdict
 	}
-	logTail, err := r.probeLog(ctx, name)
-	if why := kubeletFailure(finished); why != "" {
-		// Whatever the container wrote before the kubelet ended it is quoted when it could be read.
-		return bootprobe.Outcome{Detail: fmt.Sprintf("pod %s Failed: %s; the kubelet ended it, not the image — log tail: %s", name, why, logTail)}
-	}
-	if err != nil {
-		return apiOutcome(digest, err, fmt.Sprintf("read probe pod %s's log", name), false)
-	}
-	return r.judge(name, digest, finished, logTail, p.Contract)
+	logTail, logErr := r.probeLog(ctx, name)
+	return r.judge(name, digest, finished, logTail, logErr, p.Contract)
 }
 
 // kubeletFailure is why the kubelet failed pod for reasons of its own, or "" when the pod is the
@@ -335,11 +316,35 @@ func (r *Runtime) createProbe(ctx context.Context, name, digest string, manifest
 // the kubelet cannot mount.
 const providersMountRecheck = 15 * time.Second
 
+// stuck is the verdict on a probe pod that has not finished and never will, or nil while waiting
+// can still change it: an image the kubelet cannot use, or a providers Secret it cannot mount,
+// which leaves the pod Pending, never Failed, and which its events say. They are read at most every
+// providersMountRecheck; mountRead holds when they last were.
+func (r *Runtime) stuck(ctx context.Context, pod *corev1.Pod, name, digest string, mountRead *time.Time) *bootprobe.Outcome {
+	if reason := probeWaiting(pod); definitiveWaiting[reason] {
+		unusable := imageRefusal(digest, "pod %s %s, container %s waiting: %s", name, phaseOf(pod), probeContainer, reason)
+		return &unusable
+	}
+	if len(r.providerKeys) == 0 || pod.Status.Phase != corev1.PodPending || r.now().Sub(*mountRead) < providersMountRecheck {
+		return nil
+	}
+	*mountRead = r.now()
+	failure := r.providersMountFailure(ctx, pod)
+	if failure == "" {
+		return nil
+	}
+	refused := bootprobe.Outcome{Refusal: fmt.Errorf("the probe pod %s cannot mount the providers Secret %s, which provider_keys names (%s): %s",
+		name, ProvidersSecretName(r.project), strings.Join(slices.Sorted(maps.Values(r.providerKeys)), ", "), failure)}
+	return &refused
+}
+
 // providersMountFailure is the kubelet's FailedMount message for the providers volume when the
-// Secret, or one of the keys it is asked for, is missing (`secret "<name>" not found`, `references
-// non-existent secret key: <key>`, pkg/volume/secret), or "" when the pod's events hold none. Every
-// other FailedMount, such as `failed to sync secret cache: timed out waiting for the condition`
-// while the kubelet's watch catches up, is one the kubelet retries, and is left to the budget.
+// Secret, or one of the keys it is asked for, is missing (`secret "<name>" not found` from the
+// kubelet's watching secret manager, `secrets "<name>" not found` from the API server that one on
+// the Get or Cache strategy asks, `references non-existent secret key: <key>`, pkg/volume/secret),
+// or "" when the pod's events hold none. Every other FailedMount, such as `failed to sync secret
+// cache: timed out waiting for the condition` while the kubelet's watch catches up, is one the
+// kubelet retries, and is left to the budget.
 func (r *Runtime) providersMountFailure(ctx context.Context, pod *corev1.Pod) string {
 	events, err := r.podEvents(ctx, pod)
 	if err != nil {
@@ -349,7 +354,8 @@ func (r *Runtime) providersMountFailure(ctx context.Context, pod *corev1.Pod) st
 		if event.Reason != "FailedMount" || !strings.Contains(event.Message, `volume "`+providersVolume+`"`) {
 			continue
 		}
-		if strings.Contains(event.Message, `secret "`+ProvidersSecretName(r.project)+`" not found`) ||
+		secret := ProvidersSecretName(r.project)
+		if strings.Contains(event.Message, `secret "`+secret+`" not found`) || strings.Contains(event.Message, `secrets "`+secret+`" not found`) ||
 			strings.Contains(event.Message, "references non-existent secret key: ") {
 			return event.Message
 		}
@@ -413,17 +419,24 @@ func (r *Runtime) probeLog(ctx context.Context, name string) (string, error) {
 // undefinedFlag is Go's flag package refusing a flag the probed CLI does not define.
 var undefinedFlag = regexp.MustCompile(`flag provided but not defined: (-\S+)`)
 
-// judge is the verdict a finished probe pod's log gives (judgeProbeLog, worker-image-probe.ts:
-// 470-508). A Failed pod here is one whose probe container exited on its own (kubeletFailure has
-// ruled out the rest): the image's refusal. The OK line must confirm this daemon's contract: an
+// judge is the verdict on a finished probe pod and its log, logErr when the log could not be read
+// (judgeProbeLog, worker-image-probe.ts:470-508), in this order. A pod the kubelet failed for
+// reasons of its own (kubeletFailure) is transient, whatever of its log could be read, and an
+// unread log is judged by the read's error. A Failed pod past those is one whose probe container
+// exited on its own: the image's refusal. The OK line must confirm this daemon's contract: an
 // image whose CLI predates the Go contract check prints none, having checked no contract, and is
 // refused, not waved through; one that confirmed another contract is refused naming both. And it
-// must say the prompt-named agents' models resolved: an image whose CLI predates that check says
-// nothing, and one that skipped it is a build-time probe's result, neither of which proves the
-// workers run their agents on their models. Given the daemon's role references, an image whose CLI
-// predates the check never gets that far: it stops at the probe command's flags, and its Failed pod
-// is refused naming the flag its CLI lacks.
-func (r *Runtime) judge(name, digest string, pod *corev1.Pod, logTail string, contract int) bootprobe.Outcome {
+// must say the prompt-named agents' models resolved: any other mark, or none, does not prove the
+// workers run their agents on their models. An image whose CLI predates a flag the probe command
+// passes stops at the flags, and its Failed pod is refused naming the flag its CLI lacks.
+func (r *Runtime) judge(name, digest string, pod *corev1.Pod, logTail string, logErr error, contract int) bootprobe.Outcome {
+	if why := kubeletFailure(pod); why != "" {
+		// Whatever the container wrote before the kubelet ended it is quoted when it could be read.
+		return bootprobe.Outcome{Detail: fmt.Sprintf("pod %s Failed: %s; the kubelet ended it, not the image — log tail: %s", name, why, logTail)}
+	}
+	if logErr != nil {
+		return apiOutcome(digest, logErr, fmt.Sprintf("read probe pod %s's log", name), false)
+	}
 	if pod.Status.Phase == corev1.PodFailed {
 		ended := ""
 		for _, status := range pod.Status.ContainerStatuses {
@@ -432,7 +445,7 @@ func (r *Runtime) judge(name, digest string, pod *corev1.Pod, logTail string, co
 			}
 		}
 		if flag := undefinedFlag.FindStringSubmatch(logTail); flag != nil {
-			return imageRefusal(digest, "pod %s Failed%s: its legion CLI has no %s, a flag this daemon's probe passes, so the worker image predates this daemon (the agent-model check, LEGION-270, added --role-references and --provider-env-dir); build it from this daemon's commit — log tail: %s",
+			return imageRefusal(digest, "pod %s Failed%s: its legion CLI has no %s, a flag this daemon's probe passes: build the image from this daemon's commit — log tail: %s",
 				name, ended, flag[1], logTail)
 		}
 		return imageRefusal(digest, "pod %s Failed%s — log tail: %s", name, ended, logTail)
@@ -447,12 +460,12 @@ func (r *Runtime) judge(name, digest string, pod *corev1.Pod, logTail string, co
 	if confirmed != contract {
 		return imageRefusal(digest, "pod %s Succeeded but confirmed Go daemon API contract %d, this daemon requires %d — log tail: %s", name, confirmed, contract, logTail)
 	}
-	switch bootprobe.AgentModels(logTail) {
-	case bootprobe.AgentModelsResolved:
-	case bootprobe.AgentModelsSkipped:
-		return imageRefusal(digest, "pod %s Succeeded with the agents' models skipped: a build-time probe's result reached boot (its command carried --skip-agent-models) — log tail: %s", name, logTail)
-	default:
-		return imageRefusal(digest, "pod %s Succeeded without resolving the prompt-named agents' models: the worker image predates the agent-model check (LEGION-270) — log tail: %s", name, logTail)
+	if mark := bootprobe.AgentModels(logTail); mark != bootprobe.AgentModelsResolved {
+		if mark == "" {
+			mark = "none"
+		}
+		return imageRefusal(digest, "pod %s Succeeded without resolving the prompt-named agents' models (its OK line's agent-models mark: %s, where the daemon's probe requires %s) — log tail: %s",
+			name, mark, bootprobe.AgentModelsResolved, logTail)
 	}
 	r.log.Info("sandbox runtime: the worker image passed its probe", "image", r.image, "sandbox", name, "log", logTail)
 	return bootprobe.Outcome{Passed: true}
@@ -481,8 +494,9 @@ type probeSpec struct {
 // against p's contract as a worker runs: on the pod's baseline (--pod-safety), loading the plugin
 // from the root a pod loads it from (--plugin-root), with the providers Secret's keys exported as
 // the worker's shim exports them (--provider-env-dir) when any are configured, and resolving the
-// daemon's own role prompts' references (--role-references) when given. Its command and env are
-// escaped against the kubelet's expansion as every worker container's are (kubeletLiteral).
+// daemon's own role prompts' references (--role-references), which ProbeImage requires. Its
+// command and env are escaped against the kubelet's expansion as every worker container's are
+// (kubeletLiteral).
 func (r *Runtime) probeManifest(name string, p ImageProbe, shutdown time.Time) probeSandbox {
 	labels := map[string]string{labelProject: r.project, labelProbe: "image"}
 	providers, providersMounts := r.providers()
@@ -490,9 +504,7 @@ func (r *Runtime) probeManifest(name string, p ImageProbe, shutdown time.Time) p
 	if len(providersMounts) > 0 {
 		command = append(command, "--provider-env-dir", ProvidersDir)
 	}
-	if p.RoleReferences != "" {
-		command = append(command, "--role-references", p.RoleReferences)
-	}
+	command = append(command, "--role-references", p.RoleReferences)
 	container := corev1.Container{
 		Name:            probeContainer,
 		Image:           r.image,

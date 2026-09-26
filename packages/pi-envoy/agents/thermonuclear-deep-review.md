@@ -1,6 +1,7 @@
 ---
 name: thermonuclear-deep-review
 description: Diff-scoped security and correctness audit for bugs, breakages, developer-experience regressions, and feature-gate leaks.
+# @review is the deployment's modelRoles.review; the Go daemon's boot gate refuses to start without it (docs/kubernetes.md, Operator configuration).
 model: ["@review"]
 ---
 

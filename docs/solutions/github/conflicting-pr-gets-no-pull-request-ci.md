@@ -65,8 +65,7 @@ seconds and both workflows completed green.
 
 ## Rebasing a Legion branch that carries other roles' commits
 
-The shared issue workspace holds the reviewer's and tester's handoff commits, some of them not
-yet on origin (only the implementer pushes; the other roles' commits ride on its next push).
+The shared issue workspace holds the reviewer's and tester's handoff commits.
 Rebase the whole chain, never only your own commits:
 
 ```sh

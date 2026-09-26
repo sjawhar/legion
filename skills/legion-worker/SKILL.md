@@ -232,15 +232,9 @@ commit is `plan: record handoff`.
 
 ## Implementer push and pull request
 
-Only the implementer creates the issue bookmark, pushes it, and opens the pull request.
-After its implementation commit and verification, it uses this exact branch name and push
-procedure:
-
-```bash
-cd -- "$LEGION_WORKSPACE" && \
-  jj -R "$LEGION_WORKSPACE" bookmark set legion/<KEY> && \
-  jj -R "$LEGION_WORKSPACE" git push --bookmark legion/<KEY>
-```
+The implementer opens the pull request. After its implementation commit and verification, it
+pushes the issue branch under this exact name with the one push procedure every role uses
+(*Every role pushes its own commits*, below).
 
 The provisioned issue workspace configures `credential.helper` with the daemon's absolute
 credential command, so `jj -R "$LEGION_WORKSPACE" git push` authenticates transparently
@@ -286,7 +280,7 @@ Verified the implementer's proof by <re-running its command | driving the same s
 **Fast-follow:** <one named cleanup item and where it will land>, or "none".
 
 **Chain:** stacked on <base bookmark> frozen at <sha> / not stacked.
-**Retarget:** Retargeting a pull request to a new base does not re-run Tests; after a retarget, rebase onto the new base and push — the new head runs Tests against the new merge result — and cite that run in the PR body.
+**Retarget:** Retargeting a pull request to a new base does not re-run Tests; after a retarget, record the pushed tip, rebase onto the new base, and push with `legion-worker`'s procedure for rewritten commits — the new head runs Tests against the new merge result — and cite that run in the PR body.
 ```
 
 **A proof** is the changed behaviour exercised on the surface a user reaches it through, recorded
@@ -314,9 +308,9 @@ this proof.
   `Accepted: not a defect — <reason>`, or `Still open: <what remains>`; nothing else is an
   acceptance, and nobody replies after an `Accepted:` (any later reply that is not itself an
   `Accepted:` — the opener's own follow-up included — leaves the thread open, since the command
-  reads only the newest comment). The review App can reply on a thread, but GitHub refuses it
-  `resolveReviewThread` (its token reads `viewerCanResolve: false`), and the workflow gives
-  pushing to the implementer alone (`packages/daemon/src/daemon/AGENTS.md`, GitHub Apps) — so the
+  reads only the newest comment). The review App can reply on a thread but cannot resolve it:
+  GitHub grants resolving a review thread to the pull request's author, and the implementer opens
+  every Legion pull request (`packages/daemon/src/daemon/AGENTS.md`, GitHub Apps). So the
   **implementer** runs `legion threads resolve --pr <number> --repo <owner>/<repo>` before every
   push that answers a review (the corrective push and the final `.legion/` deletion push) and
   pastes its output into the `Threads` section. The command resolves each unresolved thread
@@ -341,7 +335,8 @@ this proof.
   tip; post one PR comment (Legion footer):
   `rebase <old-tip-sha> → <new-tip-sha>; fingerprint <before> → <after>; unchanged|changed`.
   Rebase the whole chain — `jj -R "$LEGION_WORKSPACE" rebase -s 'roots(main@origin..@)' -d main@origin` —
-  so the tester's and reviewer's commits move with yours.
+  so the tester's and reviewer's commits move with yours. Record the pushed tip before it and
+  push the rebased chain with the push procedure (*Rewriting pushed commits*, below).
 - **No deferrals.** Sami, 2026-09-11, verbatim: "My rule is no deferrals." The `Fast-follow:`
   field names naming, duplication, or wording cleanup only; anything that changes behaviour,
   hides an error, or breaks a gate lands in this PR.
@@ -399,8 +394,7 @@ this proof.
   Legion footer), and a `comments[]` array of `{path, line, side, body}`, one entry per
   finding — never one `pr review` call per finding (each submission fires a `pr-review` wake).
   Then return the issue to the architect; when clean, have the architect send the implementer
-  back to push the `.legion/` deletion (only the implementer pushes the issue branch), then review **that** head
-  and approve it by name. After a conflict-forced rebase, compute the fingerprint at the
+  back to push the `.legion/` deletion, then review **that** head and approve it by name. After a conflict-forced rebase, compute the fingerprint at the
   `commit_id` of your last submitted review and at the new head. Equal and that review was
   `APPROVE`: submit one more `APPROVE` naming the new head by SHA, its body naming both SHAs
   and the fingerprint — a confirmation, not a round; no thermo pass, no thread pass. Equal and
@@ -535,29 +529,61 @@ cd -- "$LEGION_WORKSPACE" && \
   jj -R "$LEGION_WORKSPACE" split -m "<phase>: record handoff" .legion/<phase>.json
 ```
 
-**Only the implementer pushes the issue branch.** It acts as the code-writing App
-(`legion-implementer[bot]`, `appRoleForLegionRole` in `packages/daemon/src/daemon/github-apps.ts`),
-the one role the workflow lets push (the review App's installation holds `contents: write` too, but
-no role acting as it pushes; the merger acts as the implement App but pushes nothing: it
-verifies and publishes READY). If you are the implementer, advance the issue bookmark and push it
-with the provisioned credential helper. `--bookmark` also publishes the locally provisioned
-bookmark on its first push — a bookmark not yet tracking a remote one is tracked automatically:
+**Every role pushes its own commits.** After the handoff commit — and, for the tester, the red
+tests it wrote — advance the issue bookmark and push it with the provisioned credential helper,
+which authenticates as your role's App (`appRoleForLegionRole` in
+`packages/daemon/src/daemon/github-apps.ts`). `-r @-` puts the bookmark on the commit you just
+split off: the working copy left above it has no description, and `jj git push` refuses a
+commit without one. `--allow-backwards` is for that local step alone: after a split the bookmark
+can sit on the undescribed working copy above `@-`. `--bookmark` also publishes the locally
+provisioned bookmark on its first push — a bookmark not yet tracking a remote one is tracked
+automatically. This is the one push procedure; every push of the issue branch uses it:
 
 ```bash
 cd -- "$LEGION_WORKSPACE" && \
-  jj -R "$LEGION_WORKSPACE" bookmark set legion/<KEY> && \
-  jj -R "$LEGION_WORKSPACE" git push --bookmark legion/<KEY>
+  tip_file="${TMPDIR:-/tmp}/legion-<KEY>-$LEGION_ROLE-rewritten-tip" && \
+  old=$(cat -- "$tip_file" 2>/dev/null || true) && \
+  behind=$(jj -R "$LEGION_WORKSPACE" log --no-graph -T 'commit_id.short() ++ "\n"' \
+    -r "remote_bookmarks(exact:\"legion/<KEY>\", exact:\"origin\") ~ (::@-${old:+ | $old})") && \
+  { [ -z "$behind" ] || { echo "legion/<KEY>@origin is at $behind, which @- does not descend from" >&2; false; }; } && \
+  jj -R "$LEGION_WORKSPACE" bookmark set legion/<KEY> -r @- --allow-backwards && \
+  jj -R "$LEGION_WORKSPACE" git push --bookmark legion/<KEY> && \
+  rm -f -- "$tip_file"
 ```
 
-Every other role — planner, tester, reviewer, architects — acts as the review App
-(`legion-reviewer[bot]`) and never pushes: the `split` above is your last step, and the commit
-rides the implementer's next push (the corrective push after a review, or the final `.legion/`
-deletion). GitHub does not stop a push from one of those roles: the review App's installation
-holds `contents: write`, so the push would succeed. The rule is the workflow's, and nothing but
-the rule enforces it.
+The `behind` check refuses unless `@-` descends from `legion/<KEY>@origin` (or the branch is not
+on GitHub yet). Every issue workspace shares one clone, so another role's push moves
+`legion/<KEY>@origin` here at once. With the flag and no check, `jj git push` then moves the
+remote branch sideways onto your commit and drops theirs (jj 0.45.1:
+`bookmark: legion/K [move sideways from <theirs> to <yours>]`). A clone that has not seen the other
+push is refused by jj itself (`unexpectedly moved on the remote`).
 
-Do not report phase completion until the write, existence check, and handoff commit succeed —
-and, for the implementer, until the push has too. This is the committed copy the next phase
+**Rewriting pushed commits** — the conflict-forced rebase, the rebase after a retarget, or a
+`jj squash --into` a commit already on GitHub — leaves the pushed tip outside `::@-`, so record
+that tip first, after a fetch and while your chain still descends from it:
+
+```bash
+cd -- "$LEGION_WORKSPACE" && \
+  jj -R "$LEGION_WORKSPACE" git fetch && \
+  behind=$(jj -R "$LEGION_WORKSPACE" log --no-graph -T 'commit_id.short() ++ "\n"' \
+    -r 'remote_bookmarks(exact:"legion/<KEY>", exact:"origin") ~ ::@-') && \
+  { [ -z "$behind" ] || { echo "legion/<KEY>@origin is at $behind, which @- does not descend from" >&2; false; }; } && \
+  jj -R "$LEGION_WORKSPACE" log --no-graph -T 'commit_id' \
+    -r 'remote_bookmarks(exact:"legion/<KEY>", exact:"origin")' \
+    >"${TMPDIR:-/tmp}/legion-<KEY>-$LEGION_ROLE-rewritten-tip"
+```
+
+Then rewrite, resolve, and push with the procedure above. It lets the remote branch sit on the
+tip you recorded, which the rewrite replaced, and on nothing else: when another role pushed after
+you recorded it, the push is refused. The push deletes the file.
+
+Before the push, check ancestry and identity as above: the chain carries every earlier phase's
+commits, and pushing them with yours is expected. A refusal, and a push the remote rejects, is a
+report to the architect with the output, never a force-push. The merger makes no commit and
+pushes nothing.
+
+Do not report phase completion until the write, existence check, handoff commit, and push
+succeed. This is the committed copy the next phase
 reads after revival. It is removed once, at the end of a clean review: the implementer pushes
 that deletion at the reviewer's direction. No other phase removes it — and once it is gone
 (`jj -R "$LEGION_WORKSPACE" file list -r @- .legion` prints nothing on stdout; jj warns on
@@ -590,3 +616,9 @@ When blocked on lifecycle, scope, or cross-phase matters, `envoy_publish` the ow
 architect a concise message: issue, phase, verified observation, what you tried, and the
 decision required. Reach for `dispatch_ask` yourself only for a standalone human question
 outside that coordination.
+
+Never yield while blocked on a decision someone else owns. Before you stop, make the block
+visible where its owner will see it: a lifecycle, scope, or cross-phase decision goes to the
+owning architect as above, and a standalone human question goes in `dispatch_ask`. Otherwise
+proceed: proceeding is the default, and a phase that stops silently holds its issue until
+someone notices.

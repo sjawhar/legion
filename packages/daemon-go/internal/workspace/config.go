@@ -51,15 +51,11 @@ type Request struct {
 	Repo             string
 	Issue            string
 	CredentialHelper string
-	// Feed is a pod's feed directory, where Fetch cloned the repository in the pod's first init
-	// container: the shared clone clones and fetches from it with no credential, and Token and
-	// CredentialDir stay empty. With no Feed — the tmux runtime — the shared clone clones and
-	// fetches from GitHub itself with Token.
-	Feed  string
-	Token string
-	// CredentialDir is where the one-shot clone and fetch credential, token file included, is
-	// created and removed again; required with Token. The tmux daemon names its state directory.
-	CredentialDir string
+	// Source is how the shared clone reaches the repository: FromFeed or FromGitHub.
+	Source Source
+	// Log takes the one line provisioning logs: the commits it set aside when it started a merged
+	// issue's workspace at main (createWorkspace).
+	Log func(line string)
 }
 
 // Workspace is the durable location and branch bookmark for one issue. Dir has the shape
@@ -249,14 +245,14 @@ func commandFailure(argv []string, result Result) error {
 
 func ensureFetchConfiguration(ctx context.Context, run Runner, cloneDir string, source remote) error {
 	setting, err := RunChecked(ctx, run, []string{
-		"jj", "config", "get", "git.abandon-unreachable-commits", "-R", cloneDir,
+		"jj", "config", "get", "git.abandon-unreachable-commits", "--ignore-working-copy", "--color=never", "-R", cloneDir,
 	}, nil, "")
 	if err != nil {
 		return err
 	}
 	if strings.TrimSpace(setting.Stdout) != "false" {
 		if _, err := RunChecked(ctx, run, []string{
-			"jj", "config", "set", "--repo", "git.abandon-unreachable-commits", "false", "-R", cloneDir,
+			"jj", "config", "set", "--repo", "git.abandon-unreachable-commits", "false", "--ignore-working-copy", "-R", cloneDir,
 		}, nil, ""); err != nil {
 			return err
 		}
@@ -294,7 +290,7 @@ func configureRepositoryCredential(ctx context.Context, run Runner, cloneDir, cr
 // by every issue workspace, while pane identity is deliberately provided through the pane's env.
 func removeRepositoryIdentity(ctx context.Context, run Runner, cloneDir string) error {
 	for _, key := range []string{"user.name", "user.email"} {
-		probe := []string{"jj", "config", "list", "--repo", "--include-overridden", "-R", cloneDir, key}
+		probe := []string{"jj", "config", "list", "--repo", "--include-overridden", "--ignore-working-copy", "--color=never", "-R", cloneDir, key}
 		present, err := RunChecked(ctx, run, probe, nil, "")
 		if err != nil {
 			return err
@@ -302,7 +298,7 @@ func removeRepositoryIdentity(ctx context.Context, run Runner, cloneDir string) 
 		if strings.TrimSpace(present.Stdout) == "" {
 			continue
 		}
-		unset := []string{"jj", "config", "unset", "--repo", "-R", cloneDir, key}
+		unset := []string{"jj", "config", "unset", "--repo", "--ignore-working-copy", "-R", cloneDir, key}
 		removed, err := runCommand(ctx, run, unset, nil, "")
 		if err != nil {
 			return fmt.Errorf("run %s: %w", strings.Join(unset, " "), err)

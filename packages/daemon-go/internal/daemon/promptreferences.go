@@ -6,39 +6,33 @@ import (
 	"fmt"
 	"io/fs"
 	"maps"
-	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
+
+	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 )
 
-// promptKind is one form in which a Legion prompt names something Oh My Pi resolves only when a
-// worker uses it: reference, the form a prompt writes; variable, the load probe's input and the
-// prefix of its answers (probe.mjs); and a refusal's words for a name Oh My Pi cannot find.
+// promptKind is a refusal's words for a name, of one promptrefs.Kind, that Oh My Pi cannot find.
 type promptKind struct {
-	reference                                         *regexp.Regexp
-	variable                                          string
+	kind                                              promptrefs.Kind
 	noun, namedBy, consequence, remedy, discoveryName string
 }
 
-// promptKinds are the two forms: a task agent dispatched as `task(agent="<name>")` and a skill
-// loaded as `skill://<name>`, whose name ends on a letter or digit, so a sentence's closing period
-// is not read as part of it. A worker whose call or read names one Oh My Pi cannot find gets an
-// error listing what it has, and carries on without it, so the load probe resolves every name.
+// promptKinds are the words for each promptrefs.Kind. A worker whose call or read names one Oh My
+// Pi cannot find gets an error listing what it has, and carries on without it, so the load probe
+// resolves every name.
 var promptKinds = [...]promptKind{
-	{
-		reference:     regexp.MustCompile(`agent="([a-z0-9][a-z0-9._-]*)"`),
-		variable:      "LEGION_PROMPT_AGENTS",
+	promptrefs.TaskAgents: {
+		kind:          promptrefs.TaskAgents,
 		noun:          "task agent",
 		namedBy:       "dispatched by",
 		consequence:   "a worker that calls one gets a tool result listing the agents it has, and carries on without it",
 		remedy:        "pi-legion-envoy ships every agent its prompts dispatch; install the release built from this daemon's commit",
 		discoveryName: "agent discovery",
 	},
-	{
-		reference:   regexp.MustCompile(`skill://([a-z0-9](?:[a-z0-9._-]*[a-z0-9])?)`),
-		variable:    "LEGION_PROMPT_SKILLS",
+	promptrefs.Skills: {
+		kind:        promptrefs.Skills,
 		noun:        "skill",
 		namedBy:     "loaded by",
 		consequence: "a worker told to load one reads `Unknown skill` and carries on without it",
@@ -48,135 +42,32 @@ var promptKinds = [...]promptKind{
 	},
 }
 
-// promptNames holds, for each of promptKinds, every name Legion's prompts write in that form, each
-// with the prompt files that write it.
-type promptNames [len(promptKinds)]map[string][]string
-
-// promptReferences are the task agents and skills Legion's prompts name: every reference in a
-// Markdown file under the plugin's skills directories (the manifest's `omp.skills`, read with its
+// promptReferences are the task agents and skills the plugin's own files name: every reference in
+// a Markdown file under the plugin's skills directories (the manifest's `omp.skills`, read with its
 // contract, readPluginManifest) and its `agents/` directory, the agent definitions Oh My Pi
-// discovers there (both named relative to the plugin), and under rolesDir, when set (named
-// `roles/<file>`).
-func promptReferences(manifest string, skills []string, rolesDir string) (promptNames, error) {
-	names := newPromptNames()
+// discovers there, each named relative to the plugin. The role prompts' references are added to
+// them from their encoding (promptrefs.Roles, AddEncoded).
+func promptReferences(manifest string, skills []string) (promptrefs.Names, error) {
+	names := promptrefs.New()
 	root := filepath.Dir(manifest)
 	for _, dir := range skills {
-		if err := names.collect(root, filepath.Join(root, dir), ""); err != nil {
+		if err := names.Collect(root, filepath.Join(root, dir), ""); err != nil {
 			return names, fmt.Errorf("pi-legion-envoy at %s ships skills in %s, which the gate cannot read: %w", manifest, dir, err)
 		}
 	}
 	// A plugin without agents/ ships no agent definition, so none names anything.
-	if err := names.collect(root, filepath.Join(root, "agents"), ""); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := names.Collect(root, filepath.Join(root, "agents"), ""); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return names, fmt.Errorf("pi-legion-envoy at %s ships agents in agents/, which the gate cannot read: %w", manifest, err)
-	}
-	if rolesDir != "" {
-		if err := names.collectRoles(rolesDir); err != nil {
-			return names, err
-		}
 	}
 	return names, nil
 }
 
-// RolePromptReferences are the task agents and skills the role prompts under rolesDir name, each
-// with the `roles/<file>` that names it, encoded for `legion probe-image --role-references`: the
-// daemon inlines its own role prompts into every Sandbox pod, so the image's probe must resolve
-// what those name, not the image's copy.
-func RolePromptReferences(rolesDir string) (string, error) {
-	names := newPromptNames()
-	if err := names.collectRoles(rolesDir); err != nil {
-		return "", err
-	}
-	encoded := map[string]map[string][]string{}
-	for i, kind := range promptKinds {
-		encoded[kind.variable] = names[i]
-	}
-	raw, err := json.Marshal(encoded)
-	return string(raw), err
-}
-
-// addEncoded adds references RolePromptReferences encoded, refusing an encoding it cannot read.
-func (names promptNames) addEncoded(raw string) error {
-	var encoded map[string]map[string][]string
-	if err := json.Unmarshal([]byte(raw), &encoded); err != nil {
-		return fmt.Errorf("the role prompt references %q are not RolePromptReferences' encoding: %w", raw, err)
-	}
-	for i, kind := range promptKinds {
-		for name, files := range encoded[kind.variable] {
-			for _, file := range files {
-				names.add(i, name, file)
-			}
-		}
-	}
-	return nil
-}
-
-// newPromptNames holds no name of any kind.
-func newPromptNames() promptNames {
-	var names promptNames
-	for i := range names {
-		names[i] = map[string][]string{}
-	}
-	return names
-}
-
-// add records that file names name in the form promptKinds[kind], once.
-func (names promptNames) add(kind int, name, file string) {
-	if !slices.Contains(names[kind][name], file) {
-		names[kind][name] = append(names[kind][name], file)
-	}
-}
-
-// collectRoles adds every reference in the role prompts under rolesDir, each named
-// `roles/<file>`.
-func (names promptNames) collectRoles(rolesDir string) error {
-	if err := names.collect(rolesDir, rolesDir, "roles"); err != nil {
-		return fmt.Errorf("the role prompts directory %s cannot be read: %w", rolesDir, err)
-	}
-	return nil
-}
-
-// collect adds every reference in a Markdown file under dir, each file named by its path relative
-// to base under prefix. dir may be a link to a directory (LEGION_ROLE_PROMPTS_DIR can name one),
-// which the walk follows; filepath.WalkDir alone would report the link and read nothing under it.
-func (names promptNames) collect(base, dir, prefix string) error {
-	under, err := filepath.Rel(base, dir)
-	if err != nil {
-		return err
-	}
-	resolved, err := filepath.EvalSymlinks(dir)
-	if err != nil {
-		return err
-	}
-	return filepath.WalkDir(resolved, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil || entry.IsDir() || filepath.Ext(path) != ".md" {
-			return err
-		}
-		body, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(resolved, path)
-		if err != nil {
-			return err
-		}
-		file := filepath.Join(prefix, under, rel)
-		for i, kind := range promptKinds {
-			for _, match := range kind.reference.FindAllSubmatch(body, -1) {
-				names.add(i, string(match[1]), file)
-			}
-		}
-		return nil
-	})
-}
-
 // promptCheck is what the load probe must also find: names, the task agents and skills Legion's
-// prompts name; with agentModels, that each of those agents runs on its own model (the probe's
-// agentModels); and profile, the words for the OMP profile a pane loads the plugin from, which a
-// refusal on the pane lane names (probeLoad decides the lane). The zero value asks for nothing.
+// prompts name; and, unless skipAgentModels, that each of those agents runs on its own model (the
+// probe's agentModels). The zero value asks for nothing.
 type promptCheck struct {
-	names       promptNames
-	agentModels bool
-	profile     string
+	names           promptrefs.Names
+	skipAgentModels bool
 }
 
 // The load probe's answers on the task agents' models (probe.mjs agentModels).
@@ -192,15 +83,15 @@ const (
 // nothing. Names are the references' alphabet, so single quotes hold them.
 func (c promptCheck) export(pod bool) string {
 	var assignments []string
-	for i, kind := range promptKinds {
-		if len(c.names[i]) > 0 {
-			assignments = append(assignments, kind.variable+"='"+strings.Join(slices.Sorted(maps.Keys(c.names[i])), ",")+"'")
+	for _, kind := range promptrefs.Kinds {
+		if len(c.names[kind]) > 0 {
+			assignments = append(assignments, kind.Variable()+"='"+strings.Join(slices.Sorted(maps.Keys(c.names[kind])), ",")+"'")
 		}
 	}
 	if len(assignments) == 0 {
 		return ""
 	}
-	if len(c.names[0]) > 0 && !c.agentModels {
+	if len(c.names[promptrefs.TaskAgents]) > 0 && c.skipAgentModels {
 		assignments = append(assignments, skipAgentModels+"=1")
 	}
 	if pod {
@@ -214,11 +105,11 @@ func (c promptCheck) export(pod bool) string {
 // lane, how the probed Oh My Pi loaded the plugin.
 func (c promptCheck) refusal(output, lane string) error {
 	var refusals []error
-	for i, kind := range promptKinds {
-		refusals = append(refusals, kind.refusal(output, c.names[i], lane))
+	for _, words := range promptKinds {
+		refusals = append(refusals, words.refusal(output, c.names[words.kind], lane))
 	}
-	if c.agentModels {
-		refusals = append(refusals, agentModelRefusal(output, c.names[0], lane))
+	if !c.skipAgentModels {
+		refusals = append(refusals, agentModelRefusal(output, c.names[promptrefs.TaskAgents], lane))
 	}
 	return errors.Join(refusals...)
 }
@@ -226,32 +117,39 @@ func (c promptCheck) refusal(output, lane string) error {
 // agentModelRefusal judges the load probe's answer on the models of agents, the task agents
 // Legion's prompts name: nil when there are none or each runs on its own model, else the refusal
 // naming each that does not, the files that dispatch it, its model, and why. An agent the probe did
-// not find is refused by name already (the task agents' kind), and has no model to judge.
+// not find is refused by name already (the task agents' kind), and has no model to judge; and a
+// probe that could not discover the task agents at all is refused by that kind too, and never asked
+// about their models, so it gives no answer here to judge.
 func agentModelRefusal(output string, agents map[string][]string, lane string) error {
 	if len(agents) == 0 {
 		return nil
 	}
+	discoveryFailed := promptrefs.TaskAgents.Variable() + "_UNRESOLVABLE="
 	var unresolved []string
 	for line := range strings.Lines(output) {
 		line = strings.TrimSpace(line)
 		switch {
-		case line == agentModelsResolved:
+		case line == agentModelsResolved, strings.HasPrefix(line, discoveryFailed):
 			return nil
 		case strings.HasPrefix(line, agentModelsUnresolvable):
 			return fmt.Errorf("Oh My Pi, %s, could not resolve task agents' models for the load probe (%s): pin a fork release whose model resolver the probe can import",
 				lane, strings.TrimPrefix(line, agentModelsUnresolvable))
 		case strings.HasPrefix(line, agentModelUnresolved):
-			// <agent> <model> <why>
-			fields := strings.SplitN(strings.TrimPrefix(line, agentModelUnresolved), " ", 3)
-			if len(fields) < 3 {
+			var answer struct{ Agent, Model, Why string }
+			if err := json.Unmarshal([]byte(strings.TrimPrefix(line, agentModelUnresolved)), &answer); err != nil || answer.Agent == "" {
 				return fmt.Errorf("the load probe answered %q on the task agents' models, which the gate cannot read", line)
 			}
 			unresolved = append(unresolved, fmt.Sprintf("task agent %s (dispatched by %s) on its model %s: %s",
-				fields[0], strings.Join(agents[fields[0]], ", "), fields[1], fields[2]))
+				answer.Agent, strings.Join(agents[answer.Agent], ", "), answer.Model, answer.Why))
 		}
 	}
 	if len(unresolved) == 0 {
-		return fmt.Errorf("the load probe gave no answer on the models of the task agents Legion's prompts name (%s)",
+		// The probe answers from Oh My Pi's session_shutdown handler, which Oh My Pi gives 2 s at
+		// the pinned release (SESSION_SHUTDOWN_HANDLER_TIMEOUT_MS, extensibility/extensions/runner.ts); at
+		// that pin the process outlives the handler, so the answer still arrives.
+		return fmt.Errorf("the load probe gave no answer on the models of the task agents Legion's prompts name (%s): "+
+			"it answers from Oh My Pi's session_shutdown handler, which Oh My Pi abandons after 2 s, so a key command or token refresh slower than that, "+
+			"under an Oh My Pi that ends when it abandons the handler, is the likely cause",
 			strings.Join(slices.Sorted(maps.Keys(agents)), ", "))
 	}
 	return fmt.Errorf("Oh My Pi, %s, cannot run %s. A worker that dispatches one runs it on another model, or not at all: configure each role the agents name in the settings this Oh My Pi reads (modelRoles, or task.agentModelOverrides), on a model whose key works",
@@ -264,19 +162,20 @@ func (k promptKind) refusal(output string, named map[string][]string, lane strin
 	if len(named) == 0 {
 		return nil
 	}
+	variable := k.kind.Variable()
 	for line := range strings.Lines(output) {
 		line = strings.TrimSpace(line)
-		if line == k.variable+"=resolved" {
+		if line == variable+"=resolved" {
 			return nil
 		}
-		if rest, ok := strings.CutPrefix(line, k.variable+"_MISSING="); ok {
+		if rest, ok := strings.CutPrefix(line, variable+"_MISSING="); ok {
 			var missing []string
 			for _, name := range strings.Split(rest, ",") {
 				missing = append(missing, name+" ("+k.namedBy+" "+strings.Join(named[name], ", ")+")")
 			}
 			return fmt.Errorf("Oh My Pi, %s, finds no %s %s: %s. %s", lane, k.noun, strings.Join(missing, "; "), k.consequence, k.remedy)
 		}
-		if rest, ok := strings.CutPrefix(line, k.variable+"_UNRESOLVABLE="); ok {
+		if rest, ok := strings.CutPrefix(line, variable+"_UNRESOLVABLE="); ok {
 			return fmt.Errorf("Oh My Pi, %s, could not resolve %ss for the load probe (%s): pin a fork release whose %s the probe can import", lane, k.noun, rest, k.discoveryName)
 		}
 	}

@@ -373,6 +373,13 @@ func TestLoadRefusesEveryStage3Key(t *testing.T) {
 			want: `projects.DEMO.repo "./widgets" has a "." segment, which names no GitHub owner or repository`,
 		},
 		{
+			// The repository's names are joined into paths and GitHub API routes; a name holding
+			// whitespace is no GitHub owner's or repository's, as `legion threads --repo` refused.
+			name: "a repo that holds whitespace",
+			body: strings.Replace(minimalFile, "{ repo: acme/widgets }", "{ repo: acme/wid gets }", 1),
+			want: `projects.DEMO.repo "acme/wid gets" holds whitespace, which no GitHub owner or repository name does`,
+		},
+		{
 			name: "a repo whose name is a dot-dot segment",
 			body: strings.Replace(minimalFile, "{ repo: acme/widgets }", "{ repo: acme/.. }", 1),
 			want: `projects.DEMO.repo "acme/.." has a ".." segment, which names no GitHub owner or repository`,
