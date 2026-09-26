@@ -1782,19 +1782,6 @@ func TestGithubPayloadFields(t *testing.T) {
 			want: map[string]string{"forced": "false"},
 		},
 		{
-			name:  "a review carries GitHub's review id and its submission time",
-			event: "pull_request_review",
-			body: map[string]any{
-				"action":       "submitted",
-				"repository":   map[string]any{"full_name": "example-org/example-repo"},
-				"pull_request": map[string]any{"number": 19, "head": map[string]any{"sha": "head-sha"}},
-				"review": map[string]any{"id": float64(5325101010), "state": "approved", "commit_id": "head-sha",
-					"submitted_at": "2026-09-26T12:03:00Z", "user": map[string]any{"login": "reviewer"}},
-			},
-			want: map[string]string{"review_id": "5325101010", "submitted_at": "2026-09-26T12:03:00Z", "state": "approved",
-				"commit_id": "head-sha"},
-		},
-		{
 			name:  "push removing the .legion handoffs lists the removed paths",
 			event: "push",
 			body: map[string]any{
@@ -1893,12 +1880,25 @@ func TestGithubPayloadFields(t *testing.T) {
 				"pull_request": map[string]any{"number": 27, "head": map[string]any{"sha": "review-head-sha"}},
 				"review": map[string]any{
 					"body": "Ship it", "state": "approved", "commit_id": "review-commit-sha",
-					"user": map[string]any{"login": "reviewer"},
+					"submitted_at": nil, "user": map[string]any{"login": "reviewer"},
 				},
 			},
 			want: map[string]string{
 				"commit_id": "review-commit-sha", "head_sha": "review-head-sha", "state": "approved",
 			},
+			omitted: []string{"review_id", "submitted_at"},
+		},
+		{
+			name:  "a review carries GitHub's review id and its submission time",
+			event: "pull_request_review",
+			body: map[string]any{
+				"action":       "submitted",
+				"repository":   map[string]any{"full_name": "example-org/example-repo"},
+				"pull_request": map[string]any{"number": 19, "head": map[string]any{"sha": "head-sha"}},
+				"review": map[string]any{"id": float64(5325101010), "state": "approved", "commit_id": "head-sha",
+					"submitted_at": "2026-09-26T12:03:00Z", "user": map[string]any{"login": "reviewer"}},
+			},
+			want: map[string]string{"review_id": "5325101010", "submitted_at": "2026-09-26T12:03:00Z"},
 		},
 		{
 			name:  "long comment body is capped and marked",

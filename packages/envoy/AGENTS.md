@@ -657,9 +657,9 @@ the synchronous listener call records the sent or failed attempt instead of blin
   RFC 3339 time) and `review_id` (GitHub's review id as a decimal string), so consumers can order
   reviews by when they were submitted, then by id, rather than by delivery. The id alone is not
   enough: GitHub assigns it when a review is created, and a pending review keeps it when it is
-  submitted later; `pull_request_review_comment`
-  carries `head_sha` too, and all three comment/review events set `legion_footer: "true"` when the
-  uncapped body contains a `<!-- legion:` worker footer.
+  submitted later. `pull_request_review_comment` carries `head_sha` too, and all three
+  comment/review events set `legion_footer: "true"` when the uncapped body contains a
+  `<!-- legion:` worker footer.
 - NATS `>` matches one or more trailing tokens, not its base subject. A subscription to a concrete
   `<subject>.>` is registered as the pair `<subject>` and `<subject>.>`, so the recommended
   per-PR default receives lifecycle plus child events.
