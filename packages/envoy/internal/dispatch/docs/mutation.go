@@ -192,7 +192,7 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 	if err != nil {
 		return "", err
 	}
-	if err := refuseChangedAsks(nil, tree, pmdoc.AskContentError, askMarkdown); err != nil {
+	if err := pmdoc.AskContentError(tree); err != nil {
 		return "", &ErrInvalidAskBlock{Reason: err}
 	}
 	canonical, err := renderTree(tree)

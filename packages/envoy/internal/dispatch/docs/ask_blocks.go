@@ -235,8 +235,8 @@ func validateEditedAskBlocks(before, after *pmdoc.Node) error {
 }
 
 // refuseChangedAsks is the first reason check gives against an ask in after that before does not
-// hold as it is - an ask after wrote or changed - or nil; a nil before holds none. Two asks are the
-// same when fingerprint gives both the same value. An ask a browser edit already left unreadable,
+// hold as it is - an ask after wrote or changed - or nil. Two asks are the same when fingerprint
+// gives both the same value. An ask a browser edit already left unreadable,
 // which the write carries through unchanged, is not the write's to refuse: refusing it would refuse
 // every write to the document until someone repairs that ask in the browser, and settlement flags
 // it `invalid` meanwhile.
@@ -254,20 +254,18 @@ func refuseChangedAsks(before, after *pmdoc.Node, check func(*pmdoc.Node) error,
 		if reason == nil {
 			return true
 		}
-		if before != nil {
-			if held == nil {
-				if held, walkErr = askFingerprints(before, fingerprint); walkErr != nil {
-					return false
-				}
-			}
-			value, err := fingerprint(node)
-			if err != nil {
-				walkErr = err
+		if held == nil {
+			if held, walkErr = askFingerprints(before, fingerprint); walkErr != nil {
 				return false
 			}
-			if id, _ := node.Attrs[pmdoc.BlockIDAttr].(string); held[id] == value {
-				return true
-			}
+		}
+		value, err := fingerprint(node)
+		if err != nil {
+			walkErr = err
+			return false
+		}
+		if id, _ := node.Attrs[pmdoc.BlockIDAttr].(string); held[id] == value {
+			return true
 		}
 		refusal = reason
 		return false
@@ -296,15 +294,13 @@ func askFingerprints(tree *pmdoc.Node, fingerprint func(*pmdoc.Node) (string, er
 	return held, err
 }
 
-// askMarkdown is what an uploaded version can say of an ask: its rendering alone, normalized as
-// parseInput normalizes an upload - without anchor marks, and with its server-owned attributes
-// (`state`, the answer, `invalid`) at their defaults, since an upload's are discarded for the ask
-// row's. The attributes a reader's browser derives are never rendered. A new version is markdown,
-// so this is how a version says it carries an ask unchanged.
+// askMarkdown is what an uploaded version can say of an ask: its rendering alone, taken as an
+// upload is (asUploaded) - without anchor marks, and with its server-owned attributes (`state`,
+// the answer, `invalid`) at their defaults, since an upload's are discarded for the ask row's. The
+// attributes a reader's browser derives are never rendered. A new version is markdown, so this is
+// how a version says it carries an ask unchanged.
 func askMarkdown(ask *pmdoc.Node) (string, error) {
-	doc := pmdoc.StripAnchorMarks(&pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{ask}})
-	pmdoc.StripServerOwnedAttrs(doc)
-	return pmdoc.Render(doc)
+	return pmdoc.Render(asUploaded(&pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{ask}}))
 }
 
 func collectAskBlocksForSettlement(tree *pmdoc.Node) ([]askBlock, []invalidAskBlock, error) {
