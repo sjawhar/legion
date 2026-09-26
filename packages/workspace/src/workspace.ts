@@ -143,8 +143,8 @@ function runCredentialedJj(
  * - the fetch takes no snapshot of the clone's working copy (`--ignore-working-copy`).
  *
  * That is defence, not a boundary. Both commands still read the rest of the configuration the tree
- * wrote, so two classes remain: a program that tree-written jj configuration names, running inside
- * one of them, and tree-written http or TLS configuration that changes where the session to
+ * wrote, so two classes remain: a program that tree-written jj or git configuration names, running
+ * inside one of them, and tree-written http or TLS configuration that changes where the session to
  * github.com ends or what it trusts. On the tmux runtime a pane shares the daemon's uid and can
  * read provisioning's environment anyway, and this daemon refuses the pod runtime (LEGION-286).
  * The Go daemon keeps the token from a pod's tree with a container boundary (docs/kubernetes.md,
