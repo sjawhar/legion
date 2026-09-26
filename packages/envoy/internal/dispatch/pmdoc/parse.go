@@ -19,28 +19,34 @@ import (
 
 var anchorAttribute = regexp.MustCompile(`([a-zA-Z0-9_-]+)="([^"]*)"`)
 
-// newMarkdownParser builds the one goldmark configuration Dispatch reads markdown with. Its two
-// uses differ only in the front-matter extension: a document with a closed front-matter block is
-// read with it, and everything else without it - a document whose leading `---` opens nothing,
-// which the extension would consume to the end of the input with every block after it, and the
-// renderer asking how a line it is about to write would be read.
-func newMarkdownParser(readFrontmatter bool) goldmark.Markdown {
+// markdownReader is the one goldmark configuration Dispatch reads markdown with. Its only way in
+// is parseLined, which hands the block parsers the source as written (sourceKey).
+type markdownReader struct {
+	md goldmark.Markdown
+}
+
+// newMarkdownReader builds a markdownReader. Its two uses differ only in the front-matter
+// extension: a document with a closed front-matter block is read with it, and everything else
+// without it - a document whose leading `---` opens nothing, which the extension would consume to
+// the end of the input with every block after it, and the renderer asking how a line it is about
+// to write would be read.
+func newMarkdownReader(readFrontmatter bool) markdownReader {
 	extensions := []goldmark.Extender{extension.Linkify, lazyAwareTable{}, extension.Strikethrough, extension.TaskList, extension.Footnote}
 	if readFrontmatter {
 		extensions = append(extensions, &frontmatter.Extender{Formats: []frontmatter.Format{frontmatter.YAML}})
 	}
-	return goldmark.New(
+	return markdownReader{md: goldmark.New(
 		goldmark.WithExtensions(extensions...),
 		goldmark.WithParserOptions(parser.WithBlockParsers(
 			util.Prioritized(&typedDirectiveParser{}, 950),
 			util.Prioritized(&unsupportedDirectiveParser{}, 900),
 		)),
-	)
+	)}
 }
 
 var (
-	markdownParser        = newMarkdownParser(true)
-	unfrontmatteredParser = newMarkdownParser(false)
+	markdownParser        = newMarkdownReader(true)
+	unfrontmatteredParser = newMarkdownReader(false)
 )
 
 // Parse converts markdown into the closed Proof ProseMirror tree.
@@ -54,7 +60,7 @@ func Parse(markdown string) (*Node, error) {
 	if front == nil {
 		md = unfrontmatteredParser
 	}
-	root := parseLined(md, lined, source)
+	root := md.parseLined(lined, source)
 	doc, err := parseBlock(root, source, footnoteLabels(root))
 	if err != nil {
 		return nil, err
@@ -333,10 +339,10 @@ var sourceKey = parser.NewContextKey()
 
 // parseLined parses lined, the source with its lone carriage returns as line feeds, with source
 // at hand for the block parsers.
-func parseLined(md goldmark.Markdown, lined, source []byte) ast.Node {
+func (reader markdownReader) parseLined(lined, source []byte) ast.Node {
 	context := parser.NewContext()
 	context.Set(sourceKey, source)
-	return md.Parser().Parse(gmtext.NewReader(lined), parser.WithContext(context))
+	return reader.md.Parser().Parse(gmtext.NewReader(lined), parser.WithContext(context))
 }
 
 // afterLoneCarriageReturn reports whether the line the reader is on began at a lone carriage

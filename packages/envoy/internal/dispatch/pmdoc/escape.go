@@ -355,7 +355,7 @@ func unquote(lines, quote string) string {
 // blockKinds is the kinds of the blocks the parser reads markdown as, in document order.
 func blockKinds(markdown string) []ast.NodeKind {
 	source := []byte(markdown)
-	root := parseLined(unfrontmatteredParser, lineEnds(source), source)
+	root := unfrontmatteredParser.parseLined(lineEnds(source), source)
 	var kinds []ast.NodeKind
 	_ = ast.Walk(root, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
 		// A task checkbox is inline, but it is the list item's syntax, not its text.
