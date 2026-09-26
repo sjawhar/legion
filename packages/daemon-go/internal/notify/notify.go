@@ -5,9 +5,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 )
@@ -17,6 +19,17 @@ const requestTimeout = 10 * time.Second
 // refusalBodyLimit bounds how much of a refused publish's body the error carries: the listener
 // answers `{"error": ...}` (packages/envoy/cmd/listener/api.go writeJSONError).
 const refusalBodyLimit = 4096
+
+// ErrNoHolder is a role publish the listener refused because no live session holds the role: nobody
+// claimed it, or its holder's registration lapsed (writeRoleHolderError,
+// packages/envoy/cmd/listener/api.go). It is the ordinary state before a role's session claims it,
+// not a broken publish path, so a caller can hold what it published until one does.
+var ErrNoHolder = errors.New("no live session holds the role")
+
+// roleHolderReasons are the reasons the listener's 404 names for a role with no live holder
+// (roleHolderUnclaimed, roleHolderLapsed). A 404 without one of them is some other refusal — a route
+// an older listener lacks — and never ErrNoHolder.
+var roleHolderReasons = []string{"unclaimed", "holder_lapsed"}
 
 // Topic is the persisted issue topic workers and architects subscribe to. project is the project
 // token panes are told as LEGION_PROJECT (packages/pi-envoy/src/legion/go-bootstrap.ts:154-159),
@@ -75,7 +88,14 @@ func (p *HTTPPublisher) Publish(ctx context.Context, topic, message string, payl
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(response.Body, refusalBodyLimit))
-		return fmt.Errorf("publish notice to %s: listener returned %s: %s", topic, response.Status, strings.TrimSpace(string(body)))
+		refusal := fmt.Errorf("publish notice to %s: listener returned %s: %s", topic, response.Status, strings.TrimSpace(string(body)))
+		var reason struct {
+			Reason string `json:"reason"`
+		}
+		if response.StatusCode == http.StatusNotFound && json.Unmarshal(body, &reason) == nil && slices.Contains(roleHolderReasons, reason.Reason) {
+			return fmt.Errorf("%w: %w", refusal, ErrNoHolder)
+		}
+		return refusal
 	}
 	return nil
 }

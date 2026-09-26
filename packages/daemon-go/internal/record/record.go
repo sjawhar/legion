@@ -156,6 +156,9 @@ type Store interface {
 	FinishOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) error
 	RetryOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string, nextAt time.Time, lastErr string) error
 	PendingStatusWrites(ctx context.Context, tx pgx.Tx, project string) ([]OutboxRow, error)
+	HoldControllerNotice(ctx context.Context, tx pgx.Tx, held ControllerNotice) error
+	ControllerNotices(ctx context.Context, tx pgx.Tx, project string) ([]ControllerNotice, error)
+	DeliveredControllerNotice(ctx context.Context, tx pgx.Tx, id int64) error
 }
 
 // ParentOf is an observed parent key as a record holds it: nil for none. Dispatch says "no parent"

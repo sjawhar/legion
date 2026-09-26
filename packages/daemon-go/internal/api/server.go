@@ -42,6 +42,10 @@ type Options struct {
 	// the claim registration route registers a session on, and the grants route authenticates
 	// the registered session against.
 	Controller ControllerStore
+	// ControllerReady is told each registration the controller route records: the session claims
+	// the controller role next, and what was held for want of a holder is due to it. Nil tells
+	// nobody.
+	ControllerReady func()
 	// Log receives what the routes decide; nil is slog.Default().
 	Log *slog.Logger
 	// Tokens mints the GitHub App leases credential routes return after redeeming a grant.
@@ -66,6 +70,7 @@ type server struct {
 	operatorSet       bool
 	operatorHash      [sha256.Size]byte
 	controller        ControllerStore
+	controllerReady   func()
 	// controllerMu orders a capability mint against a registration and a controller grant, so a
 	// grant the replaced registration authorised is never recorded after the mint revoked them.
 	controllerMu sync.Mutex
@@ -94,6 +99,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		bootTokens:        opts.BootTokens,
 		project:           opts.Project,
 		controller:        opts.Controller,
+		controllerReady:   opts.ControllerReady,
 		tokens:            opts.Tokens,
 		githubOwner:       opts.GitHubOwner,
 		grants:            opts.Grants,

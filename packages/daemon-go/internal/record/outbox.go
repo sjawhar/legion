@@ -57,6 +57,27 @@ type Notice struct {
 
 func (Notice) OutboxKind() OutboxKind { return OutboxKindNotice }
 
+// ForController is whether the notice also goes to the project's controller, on its role topic,
+// beside the issue's own topic. Every hold does: the architect answers one with a retry or an
+// escalation to the controller, and the controller sees the hold either way. So does the tree
+// architect's own failed claim, since the architect is who every other notice of its tree reaches;
+// with it gone, nobody inside the tree can act. A phase worker's worker-died comes with its hold,
+// and stays the architect's.
+func (n Notice) ForController() bool {
+	return n.Kind == "held" || (n.Kind == "worker-died" && n.Role == claim.RoleArchitect)
+}
+
+// ControllerNotice is a notice for the controller that the listener refused because no session held
+// the controller role, kept until one does (0019_controller_notices). DedupeKey is the one its
+// outbox row published under, so a delivery repeated after an unrecorded one is the listener's to
+// drop.
+type ControllerNotice struct {
+	ID        int64
+	Issue     string
+	DedupeKey string
+	Notice    Notice
+}
+
 // SuperviseOp identifies a worker-session operation: "start" starts, resumes, or retries the role's
 // claim; "suspend" stops its process and keeps its session; "tree_close" is the tree's close —
 // the one request that ends the claim, the tree's root claim included. There is no plain stop:
