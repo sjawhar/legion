@@ -16,16 +16,16 @@ import (
 // Delivery is a claim's pending task: at most one per claim, persisted, and sent only when the
 // claim is ready or idle and its connection is registered.
 //
-// QueuedAt is when the task was handed to the claim; DeliveredAt is the acknowledgement of the
-// latest send, and with it the daemon's answer to whether the agent may have read this task;
-// ConfirmedAt is the turn that send started. An acknowledgement is not a delivery — Oh My Pi
-// acknowledges before it starts a turn, and can accept a prompt that starts none — so only
-// ConfirmedAt says the task arrived. A confirmed delivery stays until the turn it confirmed ends,
+// QueuedAt is when the task was handed to the claim; DeliveredAt is the latest acknowledgement of
+// its prompt (MarkedBy is the delivery id that prompt carried), and with it the daemon's answer to
+// whether the agent may have read this task; ConfirmedAt is the turn that send started. An
+// acknowledgement is not a delivery — Oh My Pi acknowledges before it starts a turn, and can
+// accept a prompt that starts none — so only ConfirmedAt says the task arrived. A confirmed delivery stays until the turn it confirmed ends,
 // because a refusal that arrives after the acknowledgement takes the confirmation back.
 //
-// DeliveredAt carries that second meaning because a refusal clears it: an agent that refused this
-// prompt, in a turn of its own or with no turn at all, never read the task, and the claim must
-// not attribute a completion to a run whose task nobody has read (Claim.ServingRun). A task
+// DeliveredAt carries that second meaning because a refusal of that prompt clears it: an agent
+// that refused it, in a turn of its own or with no turn at all, never read the task, and the claim
+// must not attribute a completion to a run whose task nobody has read (Claim.ServingRun). A task
 // acknowledged and waiting for a turn keeps the mark — the turn may be this task's, starting late
 // — and so does one the wait for its turn re-queued.
 //
@@ -51,7 +51,29 @@ type Delivery struct {
 	Phase       phase.Phase
 	QueuedAt    time.Time
 	DeliveredAt time.Time
+	// MarkedBy is the delivery id the marking prompt carried: the prompt whose acknowledgement set
+	// DeliveredAt, the read mark. A late refusal is judged against the prompt it names: one naming
+	// MarkedBy says the prompt that marked the task never ran, so the mark goes (markUnread), whatever
+	// the claim's state and whichever connection carried it; one naming any other prompt says nothing
+	// about the mark. Which prompt set the mark is a fact recorded when it is set and kept with the
+	// task, so no ordering of sends, acknowledgements, refusals, reconnects and restarts has to be
+	// reasoned about: only markRead and clearReadMark write it, each together with DeliveredAt. A task
+	// that was replaced may still be named by a refusal, which then has nothing to clear.
+	MarkedBy    string
 	ConfirmedAt time.Time
+	// Interrupted says a turn of the task was running when its process died (interrupted), so the
+	// task is sent behind interruptedTask from then on (message). The task text stays as the
+	// workflow wrote it.
+	Interrupted bool
+}
+
+// message is the prompt a delivery is sent as: its task, behind interruptedTask once a process
+// died in a turn of it.
+func (d Delivery) message() string {
+	if d.Interrupted {
+		return interruptedTask + d.Task
+	}
+	return d.Task
 }
 
 // HashBootToken is the one hash a boot token is stored and looked up by. A launch mints the token
@@ -87,7 +109,7 @@ func (m *Machine) queue(ctx context.Context, request RequestDeliver) error {
 	if err := m.deps.Store.PutDelivery(ctx, m.claim.Token, d); err != nil {
 		return err
 	}
-	m.claim.Pending = &d
+	m.claim.Pending, m.unsaved = &d, false
 	return nil
 }
 
@@ -189,11 +211,30 @@ func (m *Machine) retirePending(ctx context.Context) error {
 	if !p.ConfirmedAt.IsZero() && p.Generation != 0 {
 		retired.ServingGeneration = p.Generation
 	}
+	// The deaths were charged against this task, so they end with it, in the same write.
+	retired.Budgets.Deaths = 0
 	if err := m.deps.Store.RetireDelivery(ctx, retired, p.ID); err != nil {
 		return err
 	}
-	m.claim = retired
+	m.claim, m.unsaved = retired, false
 	return nil
+}
+
+// saved records the outcome of a write of the pending delivery that memory changed first, since
+// the decision it records has been made whether or not the store takes it. A write that failed
+// leaves the delivery unsaved, and settle writes it again, with the claim, before the next decision
+// - confirm's write covers both, and a delivery written confirmed beside a claim still ready is a
+// turn a restart would find over. So once the store takes writes again, a restart reads what the
+// machine decided rather than what it replaced; one before that reads the older rows, as a restart
+// after a crash between a decision and its write does.
+func (m *Machine) saved(err error) error {
+	m.unsaved = err != nil
+	return err
+}
+
+// putPending writes the pending delivery as memory holds it (saved).
+func (m *Machine) putPending(ctx context.Context) error {
+	return m.saved(m.deps.Store.PutDelivery(ctx, m.claim.Token, *m.claim.Pending))
 }
 
 // streaming asks the agent whether a turn is in flight. An agent that cannot say is taken as not
@@ -214,12 +255,15 @@ func (m *Machine) streaming(ctx context.Context, conn runtime.Conn) bool {
 func (m *Machine) startSend(conn runtime.Conn, d Delivery) {
 	token, generation, role, loc := m.claim.Token, m.claim.Generation, m.claim.Role, m.claim.Locator
 	m.send, m.helloDuringSend = &sending{id: d.ID, generation: generation}, false
+	if seq := conn.Sequence(); seq > m.sentThrough {
+		m.sentThrough = seq
+	}
 	m.goroutines++
 	go func() {
 		err := m.adopt(role, loc)
 		if err == nil {
 			sending, cancel := context.WithTimeout(m.ctx, m.deps.Timeouts.RPC)
-			err = conn.Prompt(sending, d.ID, d.Task)
+			err = conn.Prompt(sending, d.ID, d.message())
 			cancel()
 		}
 		var ev Event = PromptAcked{Claim: token, Generation: generation, DeliveryID: d.ID}
@@ -264,13 +308,15 @@ func (m *Machine) confirm(ctx context.Context) error {
 	m.disarm(TimerTurn)
 	m.askFirst = false
 	m.claim.Budgets.PromptFailures, m.claim.Budgets.PromptRetires = 0, 0
-	return m.deps.Store.PutClaimAndDelivery(ctx, m.stored(), *p)
+	return m.saved(m.deps.Store.PutClaimAndDelivery(ctx, m.stored(), *p))
 }
 
 // settle retires a delivery whose life is over, and runs around every decision, so that two things
-// hold however the claim got where it is — the turn ending, a suspension, a death — and hold again
-// at once for a claim restored from a store a crash left in between: a confirmed delivery lives
-// exactly as long as its turn, and a suspended claim holds no task the suspension finished.
+// hold however the claim got where it is — the turn ending, a suspension — and hold again at once
+// for a claim restored from a store a crash left in between: a confirmed delivery lives exactly as
+// long as its turn, and a suspended claim holds no task the suspension finished. A death is not
+// one of them: it takes the task whose turn it ended back first (interrupted), so settle finds
+// nothing of it to retire.
 //
 // A suspension ends the claim's phase, so a task queued for a phase is the finished phase's and
 // goes with it; the next resume is handed its new phase's task, never that one. A task of no
@@ -280,6 +326,11 @@ func (m *Machine) settle(ctx context.Context) error {
 	p := m.claim.Pending
 	if p == nil {
 		return nil
+	}
+	if m.unsaved {
+		if err := m.saved(m.deps.Store.PutClaimAndDelivery(ctx, m.stored(), *p)); err != nil {
+			m.log.Warn("supervise: the pending delivery is still not written", "delivery", p.ID, "error", err)
+		}
 	}
 	turnOver := !p.ConfirmedAt.IsZero() && m.claim.State != StateWorking
 	suspended := m.claim.State == StateSuspended && p.Phase != ""
@@ -302,6 +353,40 @@ func (m *Machine) promptFailed(ctx context.Context, why string, read bool) error
 	return m.chargePrompt(ctx, why)
 }
 
+// interruptedTask begins a task re-sent because the process running its turn died. Oh My Pi does
+// not continue an interrupted turn when its session is resumed, and the resumed session already
+// holds the task, so the agent is told to carry on from where the turn stopped, not start over.
+const interruptedTask = "Your previous turn on this task was interrupted when your process died. " +
+	"Before repeating anything, check what that turn already did in your workspace and on the " +
+	"issue's branch, then continue the task.\n\n"
+
+// interrupted takes back the pending task whose turn the claim's dead process was running, so the
+// relaunched agent's ready sends it again: Oh My Pi does not resume the turn itself. The turn ran,
+// so the agent read the task and it keeps its read mark; it goes back unconfirmed under a new id
+// the new process's shim has no record of, marked Interrupted, so it is sent behind
+// interruptedTask. It is neither retired nor its run marked served, since the turn never
+// finished. A task with no turn running is left as it is: the relaunch sends it as it was.
+//
+// The taken-back task becomes the claim's only once its write has landed. A write that fails
+// leaves the task confirmed in memory as in the store, and the process is still recorded, so the
+// sweep finds it gone again and this takes the task back then — where a task taken back in memory
+// alone would be skipped by that death, relaunched from a store still holding it confirmed, and
+// retired as served by a restart.
+func (m *Machine) interrupted(ctx context.Context) error {
+	p := m.claim.Pending
+	if p == nil || p.ConfirmedAt.IsZero() {
+		return nil
+	}
+	m.log.Warn("supervise: the process died in the task's turn; the task waits for the relaunch", "delivery", p.ID)
+	next := *p
+	next.ID, next.ConfirmedAt, next.Interrupted = rand.Text(), time.Time{}, true
+	if err := m.deps.Store.PutDelivery(ctx, m.claim.Token, next); err != nil {
+		return err
+	}
+	*p = next
+	return nil
+}
+
 // taskRead and taskUnread say whether the agent may have read a task being taken back: the task
 // keeps its delivered mark when it may have been read, which is what lets a completion reported
 // from a turn the daemon did not deliver be attributed to it.
@@ -311,15 +396,15 @@ const (
 )
 
 // markRead and clearReadMark are the only writers of the pending task's read mark: its
-// acknowledgement time (DeliveredAt) and the prompt that acknowledgement answered (markedBy) are
-// set together and cleared together, so the prompt a late refusal is judged against is always the
-// one whose acknowledgement set the mark standing now.
+// acknowledgement time (DeliveredAt) and the delivery id the acknowledged prompt carried
+// (MarkedBy) are set together and cleared together, so the prompt a late refusal is judged against
+// is always the one whose acknowledgement set the mark standing now.
 func (m *Machine) markRead(p *Delivery) {
-	p.DeliveredAt, m.markedBy = m.deps.Clock.Now(), p.ID
+	p.DeliveredAt, p.MarkedBy = m.deps.Clock.Now(), p.ID
 }
 
 func (m *Machine) clearReadMark(p *Delivery) {
-	p.DeliveredAt, m.markedBy = time.Time{}, ""
+	p.DeliveredAt, p.MarkedBy = time.Time{}, ""
 }
 
 // markUnread drops the pending task's read mark without touching its id or its budget: an
@@ -332,20 +417,32 @@ func (m *Machine) markUnread(ctx context.Context) error {
 	if !marked {
 		return nil
 	}
-	return m.deps.Store.PutDelivery(ctx, m.claim.Token, *p)
+	return m.putPending(ctx)
 }
 
-// takeBackPending returns the pending delivery to waiting: unconfirmed if a turn had confirmed
-// it, under a new id so the retry is a new prompt rather than an echo the shim answers from its
-// record, and with the wait for its turn disarmed. A task taken back unread loses the mark, so
-// nothing the worker reports from whatever turn follows belongs to it.
+// takeBackPending returns the pending delivery to waiting after a prompt came to nothing:
+// unconfirmed if a turn had confirmed it, under a new id so the retry is a new prompt rather than
+// an echo the shim answers from its record, and with the wait for its turn disarmed. A task taken
+// back unread loses the mark, so nothing the worker reports from whatever turn follows belongs to
+// it.
+//
+// The refusal or timeout behind it arrives once, and settle and ServingRun read the claim as memory
+// holds it, so what it established — not confirmed, and not read when taken back unread — holds at
+// once, whether or not the write recording it lands. Only the new id waits for the write, so the
+// claim's id is always one the store holds; a write that fails leaves the delivery unsaved, and
+// settle writes it again under the id it kept (saved).
 func (m *Machine) takeBackPending(ctx context.Context, read bool) error {
 	m.disarm(TimerTurn)
 	p := m.claim.Pending
-	p.ID = rand.Text()
 	p.ConfirmedAt = time.Time{}
 	if !read {
 		m.clearReadMark(p)
 	}
-	return m.deps.Store.PutDelivery(ctx, m.claim.Token, *p)
+	next := *p
+	next.ID = rand.Text()
+	if err := m.saved(m.deps.Store.PutDelivery(ctx, m.claim.Token, next)); err != nil {
+		return err
+	}
+	p.ID = next.ID
+	return nil
 }

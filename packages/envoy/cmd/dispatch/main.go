@@ -27,6 +27,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/outbox"
+	"github.com/sjawhar/envoy/internal/dispatch/redeliver"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/routes"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -67,6 +68,8 @@ func main() {
 			os.Exit(backfillAnchorBlocks(context.Background(), os.Getenv("DATABASE_URL"), os.Stdout))
 		case "rebuild-refs":
 			os.Exit(rebuildRefs(context.Background(), os.Getenv("DATABASE_URL"), loadServerURL(), os.Stdout))
+		case "redeliver-webhooks":
+			os.Exit(redeliverWebhooks(context.Background(), os.Args[2:], os.Stdout))
 		}
 	}
 	boot, err := resolveBootConfig(os.Getenv)
@@ -220,6 +223,18 @@ func main() {
 			Broker:    broker,
 			Docs:      documentService,
 		})
+	}
+
+	sweeper, err := webhookSweeper(natsClient, appCfg, boot.GitHubAPIBase)
+	if err != nil {
+		slog.Error("dispatch: open webhook redelivery", "error", err)
+		os.Exit(1)
+	}
+	if sweeper != nil {
+		slog.Info("dispatch: redelivering the GitHub App webhook's failed deliveries", "client_id", appCfg.ClientID, "interval", redeliver.Interval)
+		go sweeper.Run(ctx, redeliver.Interval)
+	} else {
+		slog.Info("dispatch: webhook redelivery off: it needs NATS and the GitHub App private key")
 	}
 
 	go architecture.Run(ctx, appCtx.Architecture())

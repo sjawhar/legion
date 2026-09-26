@@ -147,6 +147,8 @@ interface PaneOptions {
   readonly legion?: boolean;
   /** Configures Dispatch against the stand-in, whose open-ask snapshot answers with this count. */
   readonly openAsks?: number;
+  /** The held ask questions the stand-in returns in the session's open-ask snapshot. */
+  readonly openAskQuestions?: readonly string[];
   /**
    * Settle when the gateway has answered nothing for this long, instead of at the host's
    * terminal `agent_end`. A `triggerTurn` steer sent from `agent_end` starts its continuation
@@ -227,14 +229,28 @@ async function runPane(
       }
       if (url.pathname.startsWith("/anthropic/")) return Response.json({ data: [] });
       if (url.pathname === "/api/v1/asks/open") {
+        const questions = options.openAskQuestions ?? [];
         return Response.json({
           session_id: "",
           as_of: new Date().toISOString(),
           opened_since: false,
-          count: options.openAsks ?? 0,
+          count: options.openAsks ?? questions.length,
           waiting_on_human: 0,
           waiting_on_agent: 0,
-          asks: [],
+          asks: questions.map((question, index) => ({
+            id: `ask-${index}`,
+            ref: `/issues/LEGION-${index}#ask-${index}`,
+            question,
+            kind: "question",
+            urgency: "normal",
+            created_at: "2026-09-13T00:00:00Z",
+            age_seconds: 0,
+            priority: null,
+            owner: { issue: { key: `LEGION-${index}`, title: "Test" } },
+            human_replied: false,
+            last_reply: null,
+            waiting_on: "human",
+          })),
         });
       }
       if (url.pathname === "/legion/v1/worker/started") {
@@ -343,7 +359,7 @@ async function runPane(
         HOME: home,
         PATH: `${bin}:/usr/local/bin:/usr/bin:/bin`,
         ENVOY_URL: base,
-        ...(options.openAsks === undefined
+        ...(options.openAsks === undefined && options.openAskQuestions === undefined
           ? {}
           : { DISPATCH_URL: base, DISPATCH_TOKEN: "stall-dispatch-token" }),
         ...(legionPane
@@ -571,24 +587,34 @@ test.skipIf(omp === undefined && !onActions)(
 );
 
 test.skipIf(omp === undefined && !onActions)(
-  "a WAITING self-check runs exactly one extra turn, whose own stop asks nothing more",
+  "a WAITING self-check with a held ask runs exactly one nudge and lists the ask",
   async () => {
     if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
+    const heldQuestion = "Which deployment window should I use?";
     const pane = await runPane(
       omp,
       [[{ type: "text", text: "Done." }], [{ type: "text", text: "Understood." }]],
-      { legion: false, openAsks: 0, selfCheck: "WAITING", quietMs: 8_000 }
+      {
+        legion: false,
+        openAskQuestions: [heldQuestion],
+        selfCheck: "WAITING",
+        quietMs: 8_000,
+      }
     );
 
     const turns = pane.turns();
-    // Two, and the wait proves no third: the user's turn, and the nudge's continuation.
+    // Two, and the wait proves no third: the user's turn, and the one nudge continuation.
     expect(turns).toHaveLength(2);
     expect(userText(turns[0] as Request)).not.toContain("no open ask in Dispatch");
-    expect(userText(turns[1] as Request)).toContain("no open ask in Dispatch");
+    expect(userText(turns[1] as Request)).toContain(
+      "You just said you are waiting on a human for something no open ask in Dispatch covers."
+    );
     expect(userText(turns[1] as Request)).toContain("dispatch_ask");
+    const selfChecks = pane.selfChecks();
+    expect(selfChecks).toHaveLength(1);
+    expect(userText(selfChecks[0] as Request)).toContain(heldQuestion);
     // The continuation's own stop found the period already fired, so it ran no second
     // self-check and read no third open-ask snapshot: one nudge per period, and no loop.
-    expect(pane.selfChecks()).toHaveLength(1);
     const asks = pane.requests.filter((request) => request.path === "/api/v1/asks/open");
     expect(asks).toHaveLength(2);
   },

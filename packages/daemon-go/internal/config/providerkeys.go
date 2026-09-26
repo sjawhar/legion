@@ -28,14 +28,15 @@ func ProviderEnvDir(stateDir string) string {
 // (LEGION-208 spec, Identity), because the store's age identity would decrypt every agent-tier
 // secret on the box.
 //
-// Each secretsd key is resolved the way the shipped daemon resolves an App key it holds in
-// secretsd (packages/daemon/src/daemon/config.ts:834-902): `secrets get <KEY> --no-request` first,
-// which reports the key's tier without costing a tap, then `secrets get <KEY> --value`. A
-// human-tier key is announced before its value is requested, since a YubiKey tap may be needed.
-// The daemon runs `secrets` for itself — it is never a pane — under its own environment (environ)
-// less SECRETSD_SESSION_TOKEN_FILE, with its own stdin: secretsd scopes a tokenless caller by its
-// terminal, so the request is the launcher's and never lands on an agent session the daemon was
-// started from. There is no daemon-imposed timeout; secretsd's own approval window is the failure.
+// Each secretsd key is resolved the way the shipped daemon resolves an App key it holds in secretsd
+// (packages/daemon/src/daemon/config.ts runSecretsGet and resolvePrivateKeySecret): `secrets get
+// <KEY> --no-request` first, which reports the key's tier without costing a tap, then `secrets get
+// <KEY> --value`. A human-tier key is announced before its value is requested, since a YubiKey tap
+// may be needed. The daemon runs `secrets` for itself — it is never a pane — under its own
+// environment (environ) less SECRETSD_SESSION_TOKEN_FILE, with its own stdin: secretsd scopes a
+// tokenless caller by its terminal, so the request is the launcher's and never lands on an agent
+// session the daemon was started from. There is no daemon-imposed timeout; secretsd's own approval
+// window is the failure.
 //
 // Every key is resolved before any file is written, so a boot that refuses writes nothing. Each
 // file is written atomically (a temporary file renamed into place), the directory is 0700 and

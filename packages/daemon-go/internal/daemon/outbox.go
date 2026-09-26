@@ -213,6 +213,8 @@ func (r *outbox) execute(ctx context.Context, row record.OutboxRow) error {
 		return r.message(ctx, row, value)
 	case record.Notice:
 		return r.notice(ctx, row, value)
+	case record.ControllerNotice:
+		return r.controllerNotice(ctx, row, value)
 	case record.SuperviseRequest:
 		return r.supervise(ctx, row, value)
 	case record.GateSeed:
@@ -294,6 +296,20 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 	return nil
 }
 
+// controllerNotice publishes a controller notice row to the controller topic of the daemon's own
+// project, the one its controller subscribes to, and to nothing else: the notice the issue's topic
+// carries, under the row's own key.
+func (r *outbox) controllerNotice(ctx context.Context, row record.OutboxRow, payload record.ControllerNotice) error {
+	if r.notices == nil {
+		return errors.New("controller notice executor has no Envoy publisher")
+	}
+	message := fmt.Sprintf("%s on %s", payload.Kind, row.Issue)
+	if err := r.notices.Publish(ctx, notify.ControllerTopic(r.project), message, record.Notice(payload), fmt.Sprintf("legion-outbox:%d", row.ID)); err != nil {
+		return fmt.Errorf("publish controller notice for %s: %w", row.Issue, err)
+	}
+	return nil
+}
+
 func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload record.SuperviseRequest) error {
 	if r.supervisor == nil {
 		return errors.New("supervise executor has no claim supervisor")
@@ -353,8 +369,18 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		case supervise.StateFailed:
 			// Only the workflow starts a role whose claim failed: the architect retrying the
 			// held phase, or a later transition that needs the role again.
+			kept := machine.Claim().Pending
 			if err := machine.Handle(ctx, supervise.RequestRetry{Claim: token}); err != nil {
 				return fmt.Errorf("retry claim %s: %w", token, err)
+			}
+			// A failed claim keeps the task it held, and its relaunch sends it: held after its agent
+			// kept dying in a turn of it, that task goes behind the sentence saying so. When it is
+			// this row's phase and run, the row's own task would follow it as a second prompt for
+			// work already under way, so the row is done once the claim is relaunched.
+			if kept != nil && payload.Phase != "" && kept.Phase == payload.Phase && kept.Generation == payload.Generation {
+				r.log.Info("outbox retry of a claim that kept its phase's task; relaunched without a second delivery", "row", row.ID,
+					"issue", issue.Key, "role", payload.Role, "phase", payload.Phase, "delivery", kept.ID)
+				return nil
 			}
 		case supervise.StateRetired:
 			// A retired claim's tree closed, and its linger removed the workspace; the tree was

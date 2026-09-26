@@ -278,9 +278,6 @@ func (r *Registry) deleteInterest(sessionID string) error {
 func (r *Registry) Rewatch(conn *nats.Conn) error {
 	// The role bucket opens first, so a failure leaves both handles on the previous connection
 	// rather than the interests on conn and the roles behind.
-	if conn == nil {
-		return errors.New("interest registry: no connection")
-	}
 	js, err := conn.JetStream(nats.MaxWait(10 * time.Second))
 	if err != nil {
 		return fmt.Errorf("open role registry JetStream: %w", err)

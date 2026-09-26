@@ -325,7 +325,7 @@ type plan struct {
 	// gate, and roleReferences the task agents and skills its prompts name (promptrefs.Roles), which
 	// the gate on either runtime resolves beside the plugin's own.
 	rolesDir       string
-	roleReferences string
+	roleReferences promptrefs.Names
 	// stream is the worker stream's address: the listener binds it, and every agent's shim dials it.
 	stream     string
 	newRuntime runtimeFactory

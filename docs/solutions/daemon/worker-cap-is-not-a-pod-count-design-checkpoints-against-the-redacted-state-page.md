@@ -23,6 +23,8 @@ related_issues:
 
 # worker_cap is not a pod count
 
+> `scripts/kind-smoke/` and the in-cluster manifests under `deploy/kubernetes/daemon/` were removed with the TypeScript daemon's Kubernetes mode (LEGION-286); the paths below are as they stood at `4fdd9646`.
+
 An outside check sees two things: the redacted state page and the cluster. Neither shows the
 daemon's own running-worker count, and two of the kind smoke's checkpoints were first written
 against facts that are not there.
