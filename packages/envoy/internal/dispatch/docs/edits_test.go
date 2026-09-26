@@ -2235,3 +2235,36 @@ func TestApplyOperationReplaceRefusesTextThatReadsBackAsAnotherBlock(t *testing.
 		}
 	}
 }
+
+// An insert's markdown is written into the document, so a leading `---` line is a rule, as `***`
+// is, and never the front matter that would swallow it. Only the document's start can hold front
+// matter, so an insert landing there, at `start` or before the first block, still opens the
+// document with it.
+func TestApplyOperationInsertReadsFrontMatterOnlyAtTheStart(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		op   model.EditOp
+		want string
+	}{
+		{"dashes after a paragraph", model.EditOp{Op: "insert", After: "Body.", Markdown: "---"}, "Intro.\n\nBody.\n\n---\n\nAfter.\n"},
+		{"dashes at the end", model.EditOp{Op: "insert", After: "end", Markdown: "---"}, "Intro.\n\nBody.\n\nAfter.\n\n---\n"},
+		{"a delimited block after a paragraph", model.EditOp{Op: "insert", After: "Body.", Markdown: "---\nx\n---"}, "Intro.\n\nBody.\n\n---\n\n## x\n\nAfter.\n"},
+		{"front matter at the start", model.EditOp{Op: "insert", Before: "start", Markdown: "---\ntitle: T\n---"}, "---\ntitle: T\n---\n\nIntro.\n\nBody.\n\nAfter.\n"},
+		{"front matter before the first block", model.EditOp{Op: "insert", Before: "Intro.", Markdown: "---\ntitle: T\n---"}, "---\ntitle: T\n---\n\nIntro.\n\nBody.\n\nAfter.\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tree, err := parseInput("Intro.\n\nBody.\n\nAfter.\n")
+			if err != nil {
+				t.Fatal(err)
+			}
+			pmdoc.EnsureBlockIDs(tree)
+			next, err := applyOperation(tree, test.op)
+			if err != nil {
+				t.Fatalf("insert %q = %v", test.op.Markdown, err)
+			}
+			if markdown, err := renderTree(next); err != nil || markdown != test.want {
+				t.Fatalf("after inserting %q = %q (%v), want %q", test.op.Markdown, markdown, err, test.want)
+			}
+		})
+	}
+}
