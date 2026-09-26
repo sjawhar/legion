@@ -169,10 +169,11 @@ request_changes_as_reviewer() {
 # reviewer_requested_changes ROUND: the review App has posted at least ROUND changes-requested
 # reviews on the proof's pull request.
 reviewer_requested_changes() {
-  local n
-  n=$(gh api --paginate "repos/$repo/pulls/$pr_number/reviews" \
-    --jq '[.[] | select(.user.login == "legion-reviewer[bot]" and .state == "CHANGES_REQUESTED")] | length') || return 1
-  [ "$n" -ge "$1" ]
+  local reviews
+  # --paginate applies --jq to each page, so one line per matching review, counted after.
+  reviews=$(gh api --paginate "repos/$repo/pulls/$pr_number/reviews" \
+    --jq '.[] | select(.user.login == "legion-reviewer[bot]" and .state == "CHANGES_REQUESTED") | .id') || return 1
+  [ "$(grep -c . <<<"$reviews")" -ge "$1" ]
 }
 # round_line ROUND is the line a scripted review round asks for: distinct per round and run, and
 # within the spec, whose architect was told a review may ask for one more line in the smoke file.

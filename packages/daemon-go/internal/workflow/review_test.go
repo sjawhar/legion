@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -140,7 +141,10 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 		{name: "a new head whose push never arrives", steps: []string{"sync", "approve head", "green", "complete"}, want: phase.Reviewing},
 		{name: "a code push, then the approval of the head before it", steps: []string{"sync", "push code", "green", "approve head", "complete"}, want: phase.Reviewing},
 		{name: "the approval, then a code push", steps: []string{"approve head", "sync", "push code", "green", "complete"}, want: phase.Reviewing},
-		{name: "a push of unknown paths, then the approval of the head before it", steps: []string{"sync", "push unknown", "green", "approve head", "complete"}, want: phase.Reviewing},
+		{name: "a push of truncated paths, then the approval of the head before it", steps: []string{"sync", "push truncated", "green", "approve head", "complete"}, want: phase.Reviewing},
+		{name: "a push with no paths marker, then the approval of the head before it", steps: []string{"sync", "push unmarked", "green", "approve head", "complete"}, want: phase.Reviewing},
+		{name: "a comment between a code push and its new head", steps: []string{"approve head", "push code", "comment", "sync", "green", "complete"}, want: phase.Reviewing},
+		{name: "a comment on the handoff head after the approval", steps: []string{"approve head", "sync", "push handoff", "comment", "green", "complete"}, want: phase.Retro},
 		{name: "recorded before the chain: an approval of the current head", steps: []string{"approve head", "complete"}, want: phase.Retro},
 		{name: "recorded before the chain: an approval of an earlier head", steps: []string{"approve older", "complete"}, want: phase.Reviewing},
 	} {
@@ -160,16 +164,21 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 					fact = intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: commit}
 				case "sync":
 					fact = intake.PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-2"}
-				case "push handoff", "push code", "push unknown":
+				case "comment":
+					fact = intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "commented", CommitID: "head-2", Body: "a comment"}
+				case "push handoff", "push code", "push truncated", "push unmarked":
 					paths, truncated := ".legion/review.json", "false"
+					marker := &truncated
 					switch step {
 					case "push code":
 						paths = ".legion/review.json\nsrc/widget.go"
-					case "push unknown":
+					case "push truncated":
 						truncated = "true"
+					case "push unmarked":
+						marker = nil
 					}
 					fact = intake.Push{Repo: "sjawhar/legion", Branch: "legion/LEGION-208", After: "head-2",
-						ChangedPaths: &paths, Truncated: &truncated, Pusher: "legion-reviewer[bot]"}
+						ChangedPaths: &paths, Truncated: marker, Pusher: "legion-reviewer[bot]"}
 				case "green":
 					fact = intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head-2",
 						CheckRuns: []record.AttemptRun{{Name: "ci", ID: 2}}, Generation: 2, Snapshot: "green-2", Verdict: "green", Failing: []string{}}
@@ -186,5 +195,34 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 				t.Fatalf("the issue is in %s, want %s", got, tc.want)
 			}
 		})
+	}
+}
+
+// A review that carries no decision - a comment - leaves the round's decision and its reason as
+// they are: the next implementer is told what the request for changes said, not the comment
+// posted after it.
+func TestACommentLeavesTheRoundsRequestForChanges(t *testing.T) {
+	pool := migratedPool(t)
+	ctx := context.Background()
+	seedReview(t, pool, "")
+	engine := testEngine()
+	for i, fact := range []intake.Fact{
+		intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "changes_requested", CommitID: "head", Body: "rename the widget"},
+		intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "commented", CommitID: "head", Body: "one more thought"},
+		intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-1"},
+	} {
+		if result, err := intake.ApplyFact(ctx, pool, "test", fmt.Sprintf("step-%d", i), fact, engine); err != nil || result.Refusal != nil {
+			t.Fatalf("step %d = %+v, %v", i, result.Refusal, err)
+		}
+	}
+	if got := issuePhase(t, pool); got != phase.Implementing {
+		t.Fatalf("the issue is in %s, want implementing", got)
+	}
+	var task string
+	if err := pool.QueryRow(ctx, "select payload->>'task' from outbox where kind = 'supervise' and payload->>'op' = 'start' order by id desc limit 1").Scan(&task); err != nil {
+		t.Fatalf("read the implementer's start task: %v", err)
+	}
+	if !strings.Contains(task, "rename the widget") || strings.Contains(task, "one more thought") {
+		t.Fatalf("the implementer's task = %q, want the request for changes' body and not the comment's", task)
 	}
 }
