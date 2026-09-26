@@ -330,11 +330,11 @@ func lineStartMarker(value string, offset int, char rune) bool {
 }
 
 // taskCheckboxText reports whether the text at offset is `[ ]`, `[x]` or `[X]` followed by a
-// space, a tab or its end.
+// space, a tab, a line ending or its end.
 func taskCheckboxText(value string, offset int) bool {
 	rest := value[offset:]
 	return len(rest) >= 3 && rest[0] == '[' && strings.ContainsRune(" xX", rune(rest[1])) && rest[2] == ']' &&
-		(len(rest) == 3 || rest[3] == ' ' || rest[3] == '\t')
+		(len(rest) == 3 || strings.IndexByte(" \t\r\n", rest[3]) >= 0)
 }
 
 // closesTypedBlock reports whether line, written at the prefix of the typed block around it, is

@@ -26,7 +26,7 @@ type markdownReader struct {
 }
 
 var blockReader = markdownReader{md: goldmark.New(
-	goldmark.WithExtensions(extension.Linkify, lazyAwareTable{}, extension.Strikethrough, extension.TaskList, footnotes{}),
+	goldmark.WithExtensions(extension.Linkify, lazyAwareTable{}, extension.Strikethrough, taskList{}, footnotes{}),
 	goldmark.WithParserOptions(
 		parser.WithBlockParsers(
 			util.Prioritized(&typedDirectiveParser{}, 950),

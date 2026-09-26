@@ -500,6 +500,11 @@ begins is never refused as a malformed directive (`a\r::::` is text, since the b
 those line by line at line feeds), and a lazy continuation line - one that continues a paragraph in
 a list item, a quote or a footnote definition without the container's prefix, after a line feed or a
 lone carriage return - is never a table's header or delimiter row (`lazyTableRows`), as in GFM.
+A task list item's marker (`[ ]`, `[x]` or `[X]` opening a list item's first paragraph) is read as
+the browser editor's parser reads it (`taskList`): followed by a space or a tab and then more text on
+the line, or by a line ending the paragraph continues past, and it takes only the one character
+after it. Goldmark's took the marker with anything after it, so it read a link opening a list item
+(`- [x](https://…)`) as a checked task.
 
 Front matter is read as the browser editor's parser reads it (`pmdoc.parseFrontmatterBlock`): a
 first line that is `---`, with any spaces or tabs after it, opens it, the first later line that is

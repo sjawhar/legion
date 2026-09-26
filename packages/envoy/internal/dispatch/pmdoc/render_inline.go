@@ -182,7 +182,7 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 			} else {
 				r.writeSyntax("\\")
 			}
-			r.endLine()
+			r.endLine(true)
 			r.writeSyntax("\n" + prefix)
 			position = inlinePosition{atLineStart: true, atTextStart: true, afterLine: true}
 		case "image":
@@ -210,14 +210,16 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 		}
 	}
 	r.closeMarks(active, escapePipes)
-	r.endLine()
+	r.endLine(false)
 }
 
 // endLine judges the line just written when its text began with a lineCandidate: the character is
 // escaped when the parser reads the line, markers and hard break included, as something other than
 // it reads with the character escaped (lineReadsAsText). A lone `:::` at the prefix of the typed
-// block around it closes that block, which the line read on its own cannot show.
-func (r *renderer) endLine() {
+// block around it closes that block, which the line read on its own cannot show. A line the
+// textblock goes on past, at a line ending in its text or a hard break (continues), is judged with
+// a line of text after it: a task marker opens a list item only where the paragraph goes on.
+func (r *renderer) endLine(continues bool) {
 	candidate := r.heldLineStart
 	if candidate == nil {
 		return
@@ -242,7 +244,10 @@ func (r *renderer) endLine() {
 			before = string(written[readFrom:lineFrom])
 		}
 		offset := candidate.at - lineFrom
-		rewritten := line[:offset] + escape + line[offset+width:]
+		judged, rewritten := line, line[:offset]+escape+line[offset+width:]
+		if continues {
+			judged, rewritten = judged+"\nx", rewritten+"\nx"
+		}
 		if candidate.lazy {
 			// The line before is the textblock's first, behind its container's marker, or a later
 			// one behind the prefix (or none, if a lone carriage return began it too).
@@ -250,7 +255,7 @@ func (r *renderer) endLine() {
 			if readFrom < r.runStart {
 				beforeText = string(written[r.runStart:lineFrom])
 			}
-			if lazyLineReadsAsText(beforeText, line, rewritten) {
+			if lazyLineReadsAsText(beforeText, judged, rewritten) {
 				return
 			}
 		} else {
@@ -258,7 +263,7 @@ func (r *renderer) endLine() {
 			if readFrom == r.footnoteLineAt && r.footnoteLabel != "" {
 				footnote = r.footnoteLabel
 			}
-			if lineReadsAsText(before, line, rewritten, candidate.prefix, footnote) {
+			if lineReadsAsText(before, judged, rewritten, candidate.prefix, footnote) {
 				return
 			}
 		}
@@ -362,7 +367,7 @@ func (r *renderer) writeInlineText(node *Node, position *inlinePosition, prefix 
 				break
 			}
 			r.writeText(value[:lineEnd])
-			r.endLine()
+			r.endLine(true)
 			r.writeText(value[lineEnd : lineEnd+1])
 			position.afterCarriageReturn = value[lineEnd] == '\r'
 			value = value[lineEnd+1:]
@@ -414,7 +419,7 @@ func (r *renderer) writeInlineText(node *Node, position *inlinePosition, prefix 
 		if lineEnd {
 			r.writeText(value[segmentStart:byteOffset])
 			segmentStart = byteOffset
-			r.endLine()
+			r.endLine(true)
 			lineStart, textLineStart = byteOffset+width, byteOffset+width
 			position.afterLine = true
 			position.afterCarriageReturn = value[byteOffset] == '\r'

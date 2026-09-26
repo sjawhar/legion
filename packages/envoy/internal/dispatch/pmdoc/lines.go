@@ -7,6 +7,7 @@ import (
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/extension"
+	extensionast "github.com/yuin/goldmark/extension/ast"
 	"github.com/yuin/goldmark/parser"
 	gmtext "github.com/yuin/goldmark/text"
 	"github.com/yuin/goldmark/util"
@@ -59,6 +60,53 @@ func (footnotes) Extend(m goldmark.Markdown) {
 }
 
 type footnoteDefinitionParser struct{ parser.BlockParser }
+
+// taskList reads a task list item's marker as the browser editor's parser does: `[ ]`, `[x]` or
+// `[X]` opening a list item's first paragraph, followed by a space or a tab and then more text on
+// the line, or by a line ending the paragraph continues past. The marker takes the one space, tab
+// or line ending after it. Goldmark's reads a marker with anything after it, and takes every space
+// after it, so it read a link opening a list item (`- [x](https://…)`) as a checked task.
+type taskList struct{}
+
+func (taskList) Extend(m goldmark.Markdown) {
+	m.Parser().AddOptions(parser.WithInlineParsers(util.Prioritized(taskMarkerParser{}, 0)))
+}
+
+type taskMarkerParser struct{}
+
+func (taskMarkerParser) Trigger() []byte { return []byte{'['} }
+
+func (taskMarkerParser) Parse(parent ast.Node, block gmtext.Reader, _ parser.Context) ast.Node {
+	if _, ok := parent.Parent().(*ast.ListItem); !ok || parent.Parent().FirstChild() != parent || parent.HasChildren() {
+		return nil
+	}
+	line, _ := block.PeekLine()
+	if len(line) < 4 || !strings.ContainsRune(" \txX", rune(line[1])) || line[2] != ']' {
+		return nil
+	}
+	width := 4
+	switch after := line[3]; {
+	case after == ' ' || after == '\t':
+		if util.IsBlank(line[4:]) {
+			return nil
+		}
+	case after == '\r' && len(line) > 4 && line[4] == '\n':
+		width = 5
+		fallthrough
+	case after == '\n':
+		row, segment := block.Position()
+		block.AdvanceLine()
+		next, _ := block.PeekLine()
+		block.SetPosition(row, segment)
+		if next == nil {
+			return nil
+		}
+	default:
+		return nil
+	}
+	block.Advance(width)
+	return extensionast.NewTaskCheckBox(line[1] == 'x' || line[1] == 'X')
+}
 
 func (p footnoteDefinitionParser) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
 	node, state := p.BlockParser.Open(parent, reader, pc)
