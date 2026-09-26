@@ -1193,7 +1193,6 @@ export function resolveDaemonConfig(
     parseRuntime(env.LEGION_RUNTIME, "LEGION_RUNTIME"),
     "tmux"
   );
-  const runtimeConfig: RuntimeConfig = { name: "tmux" };
   // `LEGION_DAEMON_URL` is both this env key and the variable every Legion pane carries, so a
   // daemon started from inside a pane inherits the OUTER daemon's URL from its environment and
   // would tell its own processes to register there. Under tmux the only correct value is the
@@ -1593,7 +1592,7 @@ export function resolveDaemonConfig(
       project,
       legionId: legionId.value,
       port: port.value,
-      runtime: runtimeConfig,
+      runtime: { name: "tmux" },
       daemonUrl: resolvedDaemonUrl,
       bind: bind.value,
       envoyUrl: validateUrl(envoyUrl.value, "ENVOY_URL"),
