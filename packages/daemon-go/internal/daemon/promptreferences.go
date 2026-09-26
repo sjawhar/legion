@@ -15,16 +15,14 @@ import (
 
 // promptKind is a refusal's words for a name, of one promptrefs.Kind, that Oh My Pi cannot find.
 type promptKind struct {
-	kind                                              promptrefs.Kind
 	noun, namedBy, consequence, remedy, discoveryName string
 }
 
 // promptKinds are the words for each promptrefs.Kind. A worker whose call or read names one Oh My
 // Pi cannot find gets an error listing what it has, and carries on without it, so the load probe
 // resolves every name.
-var promptKinds = [...]promptKind{
+var promptKinds = [len(promptrefs.Kinds)]promptKind{
 	promptrefs.TaskAgents: {
-		kind:          promptrefs.TaskAgents,
 		noun:          "task agent",
 		namedBy:       "dispatched by",
 		consequence:   "a worker that calls one gets a tool result listing the agents it has, and carries on without it",
@@ -32,7 +30,6 @@ var promptKinds = [...]promptKind{
 		discoveryName: "agent discovery",
 	},
 	promptrefs.Skills: {
-		kind:        promptrefs.Skills,
 		noun:        "skill",
 		namedBy:     "loaded by",
 		consequence: "a worker told to load one reads `Unknown skill` and carries on without it",
@@ -46,7 +43,7 @@ var promptKinds = [...]promptKind{
 // a Markdown file under the plugin's skills directories (the manifest's `omp.skills`, read with its
 // contract, readPluginManifest) and its `agents/` directory, the agent definitions Oh My Pi
 // discovers there, each named relative to the plugin. The role prompts' references are added to
-// them from their encoding (promptrefs.Roles, AddEncoded).
+// them (promptrefs.Roles, Merge).
 func promptReferences(manifest string, skills []string) (promptrefs.Names, error) {
 	names := promptrefs.New()
 	root := filepath.Dir(manifest)
@@ -98,8 +95,8 @@ func (c promptCheck) assignments() []string {
 // lane, how the probed Oh My Pi loaded the plugin.
 func (c promptCheck) refusal(output, lane string) error {
 	var refusals []error
-	for _, words := range promptKinds {
-		refusals = append(refusals, words.refusal(output, c.names[words.kind], lane))
+	for _, kind := range promptrefs.Kinds {
+		refusals = append(refusals, promptKinds[kind].refusal(kind, output, c.names[kind], lane))
 	}
 	if !c.skipAgentModels {
 		refusals = append(refusals, agentModelRefusal(output, c.names[promptrefs.TaskAgents], lane))
@@ -117,7 +114,7 @@ func agentModelRefusal(output string, agents map[string][]string, lane string) e
 	if len(agents) == 0 {
 		return nil
 	}
-	discoveryFailed := promptrefs.TaskAgents.Variable() + "_UNRESOLVABLE="
+	discoveryFailed := unresolvable(promptrefs.TaskAgents)
 	var unresolved []string
 	for line := range strings.Lines(output) {
 		line = strings.TrimSpace(line)
@@ -149,13 +146,16 @@ func agentModelRefusal(output string, agents map[string][]string, lane string) e
 		lane, strings.Join(unresolved, "; "))
 }
 
-// refusal judges the load probe's answer on named, this kind's names: nil when there are none or
-// Oh My Pi found every one.
-func (k promptKind) refusal(output string, named map[string][]string, lane string) error {
+// unresolvable begins the load probe's answer that it could not discover a kind's names at all.
+func unresolvable(kind promptrefs.Kind) string { return kind.Variable() + "_UNRESOLVABLE=" }
+
+// refusal judges the load probe's answer on named, kind's names, in k's words: nil when there are
+// none or Oh My Pi found every one.
+func (k promptKind) refusal(kind promptrefs.Kind, output string, named map[string][]string, lane string) error {
 	if len(named) == 0 {
 		return nil
 	}
-	variable := k.kind.Variable()
+	variable := kind.Variable()
 	for line := range strings.Lines(output) {
 		line = strings.TrimSpace(line)
 		if line == variable+"=resolved" {
@@ -168,7 +168,7 @@ func (k promptKind) refusal(output string, named map[string][]string, lane strin
 			}
 			return fmt.Errorf("Oh My Pi, %s, finds no %s %s: %s. %s", lane, k.noun, strings.Join(missing, "; "), k.consequence, k.remedy)
 		}
-		if rest, ok := strings.CutPrefix(line, variable+"_UNRESOLVABLE="); ok {
+		if rest, ok := strings.CutPrefix(line, unresolvable(kind)); ok {
 			return fmt.Errorf("Oh My Pi, %s, could not resolve %ss for the load probe (%s): pin a fork release whose %s the probe can import", lane, k.noun, rest, k.discoveryName)
 		}
 	}

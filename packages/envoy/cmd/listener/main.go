@@ -31,9 +31,9 @@ import (
 	"github.com/sjawhar/envoy/internal/webhook"
 )
 
-// listenerDeps holds NATS-dependent resources published atomically after
-// initialization completes. HTTP handlers read these via atomic.Pointer to
-// avoid data races during the startup window.
+// listenerDeps holds the NATS-dependent resources, all open. main builds the webhook and /v1
+// handlers over it once initialization completes; /healthz and the metrics gauges, which answer
+// during startup too, read it through an atomic.Pointer that stays nil until then.
 type listenerDeps struct {
 	client   *bus.Client
 	registry *store.Registry
@@ -68,20 +68,6 @@ func listenerCaches(registry *store.Registry, sessions *session.SessionRegistry,
 		{name: "interest", cache: registry},
 		{name: "session", cache: sessions},
 		{name: "CI", cache: ciStore},
-	}
-}
-
-func newCIRecorder(deps *atomic.Pointer[listenerDeps]) webhook.CIRecorderFuncs {
-	return webhook.CIRecorderFuncs{
-		RecordFunc: func(observation contracts.CIObservation) error {
-			return deps.Load().ciStore.Record(observation)
-		},
-		RecordSuiteFunc: func(observation contracts.CIObservation) error {
-			return deps.Load().ciStore.RecordSuite(observation)
-		},
-		RecordHeadFunc: func(owner, repo, number, sha, updatedAt string) error {
-			return deps.Load().ciStore.RecordHead(owner, repo, number, sha, updatedAt)
-		},
 	}
 }
 
@@ -244,12 +230,16 @@ func rewatchListenerKVWatchers(conn *nats.Conn, caches []listenerCache) error {
 
 // isUnrecoverableSelfHealthFailure distinguishes state that must be rebuilt
 // from transient JetStream deadlines. Rebuild only while the NATS client is
-// connected; a disconnected client owns its own infinite reconnect loop.
+// connected; a disconnected client owns its own infinite reconnect loop. A
+// missing bucket is terminal too: no watcher notices envoy_roles going, and a
+// rebuild cannot create a bucket, so its failed rebuilds end in a restart,
+// whose store Open creates it again.
 func isUnrecoverableSelfHealthFailure(err error, client *bus.Client, caches []listenerCache) bool {
-	if err == nil || client == nil || !client.Connected() {
+	if err == nil || !client.Connected() {
 		return false
 	}
-	if errors.Is(err, nats.ErrConsumerNotFound) || errors.Is(err, nats.ErrConnectionClosed) {
+	if errors.Is(err, nats.ErrConsumerNotFound) || errors.Is(err, nats.ErrConnectionClosed) ||
+		errors.Is(err, nats.ErrStreamNotFound) {
 		return true
 	}
 	for _, c := range caches {
@@ -267,7 +257,7 @@ func rebuildListenerDependencies(
 	consumer string,
 	handler nats.MsgHandler,
 ) error {
-	if client == nil || !client.Connected() {
+	if !client.Connected() {
 		return nats.ErrConnectionClosed
 	}
 	err := rewatchListenerKVWatchers(client.Conn, caches)
@@ -282,8 +272,13 @@ func rebuildListenerDependencies(
 
 // runSelfHealthMonitor leaves transient dependency timeouts degraded while
 // NATS reconnects. A terminal watcher, closed KV handle, or missing durable
-// consumer is rebuilt immediately; repeated terminal observations enter the
-// bounded shutdown path so Docker can replace an unrecoverable listener.
+// consumer is rebuilt immediately, and a rebuild that reports success is
+// probed at once: a healthy probe is a recovery and resets the count, so
+// separate faults that each rebuild repairs never add up. A failed probe
+// there, transient or terminal, keeps the count and becomes the error the
+// terminal line names. Only a terminal failure still there after threshold
+// consecutive rebuilds enters the bounded shutdown path so Docker can replace
+// an unrecoverable listener.
 // A probe that lands in a reconnect gap is that transient case: it fails at
 // once with "outbound buffer limit exceeded" while the bus is disconnected (its
 // reconnect buffer is off), or at its deadline when the reconnect lands during
@@ -309,6 +304,27 @@ func runSelfHealthMonitor(
 		case <-ticker.C:
 		}
 		err := probe()
+		if err != nil {
+			failures++
+			logger.Warn("self-health probe failed", slog.Int("consecutive", failures), slog.Int("threshold", threshold), slog.String("error", err.Error()))
+			if isUnrecoverable == nil || !isUnrecoverable(err) {
+				terminalFailures = 0
+				continue
+			}
+			terminalFailures++
+			if rebuild != nil {
+				if rebuildErr := rebuild(); rebuildErr != nil {
+					logger.Error("self-health rebuild failed", slog.Int("consecutive", terminalFailures), slog.String("error", rebuildErr.Error()))
+				} else {
+					logger.Info("self-health rebuild started", slog.Int("consecutive", terminalFailures))
+					// Whatever this probe reads, transient or terminal, the count keeps its
+					// increment: only a healthy read is a recovery.
+					if err = probe(); err != nil {
+						logger.Warn("self-health probe after rebuild failed", slog.Int("consecutive", terminalFailures), slog.String("error", err.Error()))
+					}
+				}
+			}
+		}
 		if err == nil {
 			if failures > 0 {
 				logger.Info("self-health recovered", slog.Int("prior_consecutive_failures", failures))
@@ -316,21 +332,6 @@ func runSelfHealthMonitor(
 			failures = 0
 			terminalFailures = 0
 			continue
-		}
-		failures++
-		logger.Warn("self-health probe failed", slog.Int("consecutive", failures), slog.Int("threshold", threshold), slog.String("error", err.Error()))
-		if isUnrecoverable == nil || !isUnrecoverable(err) {
-			terminalFailures = 0
-			continue
-		}
-
-		terminalFailures++
-		if rebuild != nil {
-			if rebuildErr := rebuild(); rebuildErr != nil {
-				logger.Error("self-health rebuild failed", slog.Int("consecutive", terminalFailures), slog.String("error", rebuildErr.Error()))
-			} else {
-				logger.Info("self-health rebuild started", slog.Int("consecutive", terminalFailures))
-			}
 		}
 		if terminalFailures < threshold {
 			continue
@@ -443,16 +444,64 @@ func writeDependencyHealth(w http.ResponseWriter, dependency string, err error, 
 	})
 }
 
-// readinessGate returns 503 until ready returns true, providing a single
-// gate for all /v1/* endpoints during NATS initialization.
-func readinessGate(ready func() bool, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !ready() {
-			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
+// webhookRoute is one configured webhook path and the handler it serves over the listener's
+// dependencies.
+type webhookRoute struct {
+	path    string
+	handler func(*listenerDeps) http.Handler
+}
+
+// webhookRoutes lists the webhook routes the configuration enables. main registers the paths
+// before NATS is up, so they answer 503 while it starts, and builds the handlers once it is.
+func webhookRoutes(cfg *webhook.WebhookConfig) []webhookRoute {
+	var routes []webhookRoute
+	if github := cfg.GitHub; github != nil {
+		routes = append(routes, webhookRoute{"/webhook/github", func(d *listenerDeps) http.Handler {
+			return webhook.GitHubHandler(github.Secret, github.MentionTrigger, github.ReviewerAppID, d.client, d.ciStore)
+		}})
+	}
+	if slack := cfg.Slack; slack != nil {
+		routes = append(routes, webhookRoute{"/webhook/slack", func(d *listenerDeps) http.Handler {
+			return webhook.SlackHandler(slack.Secret, d.client)
+		}})
+	}
+	if ghostWispr := cfg.GhostWispr; ghostWispr != nil {
+		routes = append(routes, webhookRoute{"/webhook/ghostwispr", func(d *listenerDeps) http.Handler {
+			return webhook.GhostWisprHandler(ghostWispr.Secret, d.client)
+		}})
+	}
+	return routes
+}
+
+// startingGate answers 503 "service starting" until open hands it the mux to serve. main
+// builds that mux only once every store is open, so a request never reaches a handler over a
+// dependency that is not there.
+type startingGate struct {
+	mux atomic.Pointer[http.ServeMux]
+}
+
+func (g *startingGate) open(mux *http.ServeMux) { g.mux.Store(mux) }
+
+func (g *startingGate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	mux := g.mux.Load()
+	if mux == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "service starting")
+		return
+	}
+	mux.ServeHTTP(w, r)
+}
+
+// openListener builds the webhook and /v1 routes over the complete dependencies, opens the gate
+// onto them, and only then publishes the dependencies. Publishing is what turns /healthz healthy,
+// so a probe that reads healthy always finds every route open.
+func openListener(gate *startingGate, hooks []webhookRoute, ready *listenerDeps, machineID string, logger *logging.Logger, publish func(*listenerDeps)) {
+	routes := http.NewServeMux()
+	for _, hook := range hooks {
+		routes.Handle(hook.path, hook.handler(ready))
+	}
+	registerV1Routes(routes, ready, machineID, logger)
+	gate.open(routes)
+	publish(ready)
 }
 
 func main() {
@@ -530,39 +579,16 @@ func main() {
 
 	// GaugeFunc for consumer pending — queries NATS at scrape time
 
-	// Webhook routes — on public mux, gated by readiness.
-	// Publisher delegates to deps.client behind readinessGate.
-	webhookPublisher := webhook.PublisherFunc(func(item contracts.Envelope) error {
-		return deps.Load().client.Publish(item)
-	})
-	// CI recorder folds check_run events into cistore behind the same readiness
-	// gate (deps is non-nil once init completes, so ciStore is set).
-	ciRecorder := newCIRecorder(&deps)
-	if webhookCfg.GitHub != nil {
-		mux.Handle("/webhook/github", readinessGate(
-			func() bool { return deps.Load() != nil },
-			webhook.GitHubHandler(webhookCfg.GitHub.Secret, webhookCfg.GitHub.MentionTrigger, webhookCfg.GitHub.ReviewerAppID, webhookPublisher, ciRecorder),
-		))
+	// The webhook and /v1 routes answer 503 "service starting" until NATS and every store are open;
+	// then the gate opens onto handlers built over the complete dependencies (Phase 6). The webhook
+	// paths reach it bare, /v1 through apiAuth.
+	var gate startingGate
+	hooks := webhookRoutes(webhookCfg)
+	for _, hook := range hooks {
+		mux.Handle(hook.path, &gate)
 	}
-	if webhookCfg.Slack != nil {
-		mux.Handle("/webhook/slack", readinessGate(
-			func() bool { return deps.Load() != nil },
-			webhook.SlackHandler(webhookCfg.Slack.Secret, webhookPublisher),
-		))
-	}
-	if webhookCfg.GhostWispr != nil {
-		mux.Handle("/webhook/ghostwispr", readinessGate(
-			func() bool { return deps.Load() != nil },
-			webhook.GhostWisprHandler(webhookCfg.GhostWispr.Secret, webhookPublisher),
-		))
-	}
-
-	// /v1/* routes on a sub-mux, gated by a single readiness middleware.
-	v1 := http.NewServeMux()
-	registerV1Routes(v1, &deps, cfg.MachineID, logger)
-
 	// Serve /v1/* on the listener port for local plugin registration.
-	v1Handler := apiAuth(apiToken, apiVerifier, logger, readinessGate(func() bool { return deps.Load() != nil }, v1))
+	v1Handler := apiAuth(apiToken, apiVerifier, logger, &gate)
 	mux.Handle("/v1", v1Handler)
 	mux.Handle("/v1/", v1Handler)
 
@@ -756,8 +782,8 @@ func main() {
 	}
 	_ = roleSub
 
-	// Phase 6: Publish initialized state — readiness gate opens for /v1/*.
-	deps.Store(&listenerDeps{
+	// Phase 6: Open the webhook and /v1 routes onto the initialized state, then publish it.
+	ready := &listenerDeps{
 		client:     client,
 		registry:   registry,
 		sessions:   sessions,
@@ -765,7 +791,8 @@ func main() {
 		caches:     caches,
 		consumer:   consumer,
 		streamName: bus.Stream,
-	})
+	}
+	openListener(&gate, hooks, ready, cfg.MachineID, logger, deps.Store)
 	logger.Info("envoy-listener ready (NATS connected)")
 
 	// Phase 6b: Start interest reaper for stale KV cleanup.

@@ -36,7 +36,7 @@ func tmuxClaim(token claim.Token) supervise.Claim {
 			Tmux:        &runtime.TmuxLocator{Window: "@3", Pane: "%41"},
 		},
 		State:           supervise.StateIdle,
-		Budgets:         supervise.Budgets{LaunchFailures: 1, PromptFailures: 2, PromptRetires: 1},
+		Budgets:         supervise.Budgets{LaunchFailures: 1, Deaths: 2, PromptFailures: 2, PromptRetires: 1},
 		BootTokenHash:   supervise.HashBootToken("boot-" + string(token)),
 		CapabilityHash:  []byte{0xca, 0xfe, 0x01},
 		UncertainStreak: 3,
@@ -63,8 +63,13 @@ func sameClaim(t *testing.T, got, want supervise.Claim) {
 	if gotPending == nil {
 		return
 	}
-	if gotPending.ID != wantPending.ID || gotPending.Task != wantPending.Task ||
-		gotPending.Phase != wantPending.Phase || gotPending.Generation != wantPending.Generation {
+	// Every field but the times is compared whole, so a field added to the delivery is read back
+	// or this fails; the times are compared below as instants.
+	untimed := func(d supervise.Delivery) supervise.Delivery {
+		d.QueuedAt, d.DeliveredAt, d.ConfirmedAt = time.Time{}, time.Time{}, time.Time{}
+		return d
+	}
+	if !reflect.DeepEqual(untimed(*gotPending), untimed(*wantPending)) {
 		t.Errorf("pending delivery read back = %+v, want %+v", *gotPending, *wantPending)
 	}
 	for _, field := range []struct {
@@ -104,6 +109,7 @@ func TestAClaimRoundTripsWithItsLocatorAndDelivery(t *testing.T) {
 		Generation:  4,
 		QueuedAt:    at(1),
 		DeliveredAt: at(2),
+		Interrupted: true,
 	}
 
 	if err := store.PutClaim(ctx, want); err != nil {
@@ -114,6 +120,31 @@ func TestAClaimRoundTripsWithItsLocatorAndDelivery(t *testing.T) {
 	}
 
 	sameClaim(t, onlyClaim(t, store), want)
+}
+
+// A task is queued uninterrupted, and a death marks it interrupted by writing the same delivery
+// again: the mark only ever reaches the store through the upsert's update. It has to survive that
+// write, or a restart re-sends the task without the sentence saying its turn was interrupted.
+func TestARePutDeliveryCarriesItsInterruption(t *testing.T) {
+	ctx := context.Background()
+	store := migratedStore(t)
+	c := tmuxClaim("legion-LEGION-209-implementer")
+	if err := store.PutClaim(ctx, c); err != nil {
+		t.Fatalf("put claim: %v", err)
+	}
+	queued := supervise.Delivery{ID: "delivery-1", Task: "implement the plan", Phase: phase.Implementing, Generation: 4, QueuedAt: at(1)}
+	if err := store.PutDelivery(ctx, c.Token, queued); err != nil {
+		t.Fatalf("queue the delivery: %v", err)
+	}
+	interrupted := queued
+	interrupted.ID, interrupted.Interrupted = "delivery-2", true
+	if err := store.PutDelivery(ctx, c.Token, interrupted); err != nil {
+		t.Fatalf("mark it interrupted: %v", err)
+	}
+
+	if got := onlyClaim(t, store).Pending; got == nil || got.ID != "delivery-2" || !got.Interrupted {
+		t.Fatalf("delivery read back = %+v, want the re-put delivery, interrupted", got)
+	}
 }
 
 // The phase a task was queued for is what says the task is still the work to do, and it has to

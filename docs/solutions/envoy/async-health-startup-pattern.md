@@ -38,10 +38,10 @@ orchestrators (Pulumi, Kubernetes) time out and kill the container.
 ```
 1. config.Load()           — synchronous, fast
 2. net.Listen("tcp", addr) — bind port in main goroutine (deterministic)
-3. Build HTTP mux           — /healthz always available, /v1/* behind readiness gate
+3. Build HTTP mux           — /healthz always available, /v1/* and webhooks behind a gate
 4. go server.Serve(ln)      — HTTP live immediately, /healthz returns {"status":"starting"}
 5. Slow init in main()      — NATS connect, store open, consumer subscribe
-6. deps.Store(...)           — atomic publish, readiness gate opens for /v1/*
+6. gate.open, deps.Store     — handlers built, the gate opens for /v1/* and webhooks, then the atomic publish
 7. log.Fatal(<-fatal)        — block on HTTP server error channel
 ```
 
@@ -50,53 +50,66 @@ binds and accepts atomically — you cannot separate them. `net.Listen` in the m
 guarantees the port is bound before any slow I/O begins. `server.Serve(ln)` in a goroutine
 starts accepting connections on the already-bound listener.
 
-## `atomic.Pointer[T]` for Dependency Publication
+## Build Handlers Once, From Complete Dependencies
 
 ```go
 type listenerDeps struct {
     client   *bus.Client
     registry *store.Registry
-    sessions *session.SessionRegistry  // may be nil (graceful degradation)
-}
-
-var deps atomic.Pointer[listenerDeps]
-```
-
-**Why not a mutex**: Single writer (main goroutine stores after init), many concurrent readers
-(HTTP handlers load on each request). Lock-free reads, no contention. Nil pointer is a natural
-"not ready" sentinel.
-
-**Key subtlety — two access patterns for the same dependencies:**
-- **HTTP handlers**: access via `deps.Load()` — created before deps exist, gated by readiness
-  middleware. Must use atomic pointer.
-- **NATS consumer callback**: captures local variables directly from the init scope — created
-  after all deps are initialized. Does NOT use the atomic pointer. This is correct and
-  intentional; adding an atomic read on every NATS message would be unnecessary overhead.
-
-**A non-nil `deps` carries non-nil stores.** The listener exits when the interest registry, the
-session registry or the CI store cannot open, and stores `deps` only after all three are open, so
-a handler that loaded a non-nil pointer never meets a nil store.
-
-## Readiness Gate Middleware
-
-```go
-func readinessGate(ready func() bool, next http.Handler) http.Handler {
-    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        if !ready() {
-            http.Error(w, "service starting", http.StatusServiceUnavailable)
-            return
-        }
-        next.ServeHTTP(w, r)
-    })
+    sessions *session.SessionRegistry
+    ciStore  *cistore.Store
+    // ...
 }
 ```
 
-Applied to a **sub-mux** wrapping all `/v1/*` routes — one gate, no per-handler nil checks:
+The listener exits when the interest registry, the session registry or the CI store cannot
+open, so a `listenerDeps` exists only with every store open. The webhook and `/v1` handlers take
+it as a plain `*listenerDeps` and are built once, after it is complete: no handler loads a
+pointer on each request, and none can be constructed over a dependency that is not there.
+
+**Only what answers during startup reads an atomic pointer.** `/healthz` and the metrics
+gauges run before NATS is up, so they read `deps atomic.Pointer[listenerDeps]`, nil until
+phase 6, which is their "starting" sentinel. The NATS consumer callback captures the
+initialized locals directly.
+
+## The Starting Gate
+
 ```go
-v1 := http.NewServeMux()
-v1.HandleFunc("/v1/interests/subscribe", ...)
-mux.Handle("/v1/", readinessGate(func() bool { return deps.Load() != nil }, v1))
+type startingGate struct {
+    mux atomic.Pointer[http.ServeMux]
+}
+
+func (g *startingGate) open(mux *http.ServeMux) { g.mux.Store(mux) }
+
+func (g *startingGate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+    mux := g.mux.Load()
+    if mux == nil {
+        writeJSONError(w, http.StatusServiceUnavailable, "service starting")
+        return
+    }
+    mux.ServeHTTP(w, r)
+}
 ```
+
+main registers one gate before `server.Serve`, bare on every enabled webhook path and inside
+`apiAuth` on `/v1`, so those paths answer 503 while the listener starts. In phase 6
+`openListener` builds one mux of every route over the complete deps, opens the gate onto it, and
+only then stores `deps`:
+
+```go
+var gate startingGate
+for _, hook := range hooks {
+    mux.Handle(hook.path, &gate)
+}
+mux.Handle("/v1/", apiAuth(apiToken, apiVerifier, logger, &gate))
+// ... phase 6, once every store is open:
+openListener(&gate, hooks, ready, cfg.MachineID, logger, deps.Store)
+```
+
+**Open the gate before publishing `deps`.** Storing `deps` is what turns `/healthz` healthy, so
+the other order leaves a window in which `/healthz` says healthy while every route still answers
+503 -- and a caller that waits for healthy, as the shutdown test does, meets the 503.
+`TestOpenListener_PublishesOnlyOnceTheRoutesServe` holds the order.
 
 ## Health States
 
@@ -171,9 +184,3 @@ were silently invisible to `git`/`jj`.
 **Fix**: Root-anchor binary names with `/listener`. For Go projects, always anchor compiled
 binary ignores: `/github`, `/listener`, `/slack` — never bare names.
 
-## Applicability to Other Receivers
-
-The `github` and `slack` receivers (`cmd/github/main.go`, `cmd/slack/main.go`) have the same
-NATS-before-HTTP pattern but are simpler (publish-only, no JetStream consumer). The same
-7-phase startup, `atomic.Pointer`, and readiness gate apply directly. The `readinessGate`
-function is generic (`func() bool` + `http.Handler`) and can be copied verbatim.
