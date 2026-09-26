@@ -54,11 +54,13 @@ function provisioningEnv(call: RunCall): Readonly<Record<string, string>> {
     GIT_ASKPASS: "",
     GIT_TERMINAL_PROMPT: "0",
     LEGION_PROVISIONING_TOKEN: "installation-token",
-    GIT_CONFIG_COUNT: "2",
+    GIT_CONFIG_COUNT: "3",
     GIT_CONFIG_KEY_0: "credential.helper",
     GIT_CONFIG_VALUE_0: "",
     GIT_CONFIG_KEY_1: "credential.https://github.com.helper",
     GIT_CONFIG_VALUE_1: expect.stringMatching(/^!'.+\/provisioning-credential-[^/]+\/helper'$/),
+    GIT_CONFIG_KEY_2: "core.hooksPath",
+    GIT_CONFIG_VALUE_2: "/dev/null",
   });
   return env;
 }
@@ -876,7 +878,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
           const fills: Fill[] = [];
           for (const useHttpPath of [false, true]) {
             for (const { url } of urls) {
-              // The fetch env's own GIT_CONFIG_COUNT=2 wins over the isolation's 0.
+              // The fetch env's own GIT_CONFIG_COUNT=3 wins over the isolation's 0.
               const result = await fillCredential(
                 gitDir,
                 { ...isolation(useHttpPath), ...env },
@@ -1462,6 +1464,47 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       (error: Error) => error.message
     );
   }
+
+  test("the credentialed fetch runs no hook the shared clone carries, in .git/hooks or under a configured core.hooksPath", async () => {
+    for (const { name, command } of JJ_BINARIES) {
+      for (const placement of ["hooks directory", "core.hooksPath"] as const) {
+        const label = `${name}, ${placement}`;
+        const rig = await realJjRig(command, path.join(await temporaryDirectory(), "state"));
+        const { repoCloneDir, remoteDir, jj, deps } = rig;
+        // A hook git runs on the fetch's ref update, recording whether the provisioning token was
+        // in its environment: what a tree could plant in the shared clone it writes.
+        const sink = path.join(await temporaryDirectory(), "hook.log");
+        const hooks =
+          placement === "hooks directory"
+            ? path.join(repoCloneDir, ".git", "hooks")
+            : path.join(await temporaryDirectory(), "planted-hooks");
+        await mkdir(hooks, { recursive: true });
+        const hook = path.join(hooks, "reference-transaction");
+        await writeFile(
+          hook,
+          `#!/bin/sh\nprintf 'hook token=%s\\n' "\${LEGION_PROVISIONING_TOKEN:+set}" >> ${JSON.stringify(sink)}\ncat >/dev/null\n`,
+          { mode: 0o700 }
+        );
+        if (placement === "core.hooksPath") {
+          const set = await runCommand([
+            SYSTEM_GIT,
+            `--git-dir=${path.join(repoCloneDir, ".git")}`,
+            "config",
+            "core.hooksPath",
+            hooks,
+          ]);
+          expect(set.exitCode, `${label}: ${set.stderr}`).toBe(0);
+        }
+        // origin's main moves, so the fetch updates a ref and git runs the hook if it may.
+        await jj(["commit", "-m", "upstream"], { cwd: remoteDir });
+        await jj(["bookmark", "set", "main", "-r", "@-"], { cwd: remoteDir });
+
+        await provisionIssueWorkspace("WIDGETS-42", deps);
+        const recorded = existsSync(sink) ? await readFile(sink, "utf8") : "";
+        expect(recorded, label).not.toContain("token=set");
+      }
+    }
+  }, 120_000);
 
   test("adopts an issue branch only origin has: tracks it and adds the workspace at its commit", async () => {
     for (const { name, command } of JJ_BINARIES) {

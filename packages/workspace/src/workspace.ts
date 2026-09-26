@@ -121,8 +121,10 @@ interface ProvisioningCredential {
  * before it — the general entry and the URL-specific one alike, the operator's and the tree's.
  * `GIT_ASKPASS` is set empty, which git reads as no askpass at all, neither `core.askPass` nor
  * `SSH_ASKPASS`, and terminal prompts are off, so a host the helper does not answer gets nothing.
- * With `isolate`, git also reads no system or global configuration. The persisted config is
- * untouched. */
+ * `core.hooksPath=/dev/null` runs no hook the shared clone, or any config git reads, names: a
+ * tree writes the clone, and a hook would run with the token in its environment (the Go twin's
+ * pinnedGitConfig). With `isolate`, git also reads no system or global configuration. The
+ * persisted config is untouched. */
 async function createProvisioningCredential(
   stateDir: string,
   token: string,
@@ -139,11 +141,13 @@ async function createProvisioningCredential(
       GIT_ASKPASS: "",
       GIT_TERMINAL_PROMPT: "0",
       [PROVISIONING_TOKEN_ENV]: token,
-      GIT_CONFIG_COUNT: "2",
+      GIT_CONFIG_COUNT: "3",
       GIT_CONFIG_KEY_0: "credential.helper",
       GIT_CONFIG_VALUE_0: "",
       GIT_CONFIG_KEY_1: "credential.https://github.com.helper",
       GIT_CONFIG_VALUE_1: `!'${helper.replaceAll("'", "'\\''")}'`,
+      GIT_CONFIG_KEY_2: "core.hooksPath",
+      GIT_CONFIG_VALUE_2: "/dev/null",
       ...(isolate ? { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } : {}),
     },
   };

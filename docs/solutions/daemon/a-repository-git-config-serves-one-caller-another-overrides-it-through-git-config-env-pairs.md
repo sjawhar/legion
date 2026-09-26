@@ -53,12 +53,13 @@ pane's no-prompt guarantee) and a run-local `git config --unset` (mutates the sh
 run) — for exactly this reason: a config file has one owner, and a second consumer with different
 needs reaches git through the environment of the command it runs.
 
-The override is five environment pairs in `createProvisioningCredential`:
+The override is seven environment pairs in `createProvisioningCredential`:
 
 ```
-GIT_CONFIG_COUNT=2
+GIT_CONFIG_COUNT=3
 GIT_CONFIG_KEY_0=credential.helper                     GIT_CONFIG_VALUE_0=     # empty: resets the list
 GIT_CONFIG_KEY_1=credential.https://github.com.helper  GIT_CONFIG_VALUE_1=!'<the one-shot helper>'
+GIT_CONFIG_KEY_2=core.hooksPath                        GIT_CONFIG_VALUE_2=/dev/null  # no hook the clone carries runs with the token
 ```
 
 beside an empty `GIT_ASKPASS` (git reads it as no askpass program at all, not `core.askPass`

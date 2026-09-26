@@ -1144,13 +1144,15 @@ describe("ProcessManager", () => {
           GIT_ASKPASS: "",
           GIT_TERMINAL_PROMPT: "0",
           LEGION_PROVISIONING_TOKEN: "daemon-installation-token",
-          GIT_CONFIG_COUNT: "2",
+          GIT_CONFIG_COUNT: "3",
           GIT_CONFIG_KEY_0: "credential.helper",
           GIT_CONFIG_VALUE_0: "",
           GIT_CONFIG_KEY_1: "credential.https://github.com.helper",
           GIT_CONFIG_VALUE_1: expect.stringMatching(
             /^!'.+\/provisioning-credential-[^/]+\/helper'$/
           ),
+          GIT_CONFIG_KEY_2: "core.hooksPath",
+          GIT_CONFIG_VALUE_2: "/dev/null",
         },
         timeoutMs: 300_000,
       },
