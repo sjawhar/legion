@@ -685,6 +685,11 @@ func TestProvisionStartsAtMainWhenAMergedBranchWasMovedOntoNothingDescribed(t *t
 		{"a described child", []bool{true}, false, false},
 		{"an undescribed child on a described one", []bool{true, false}, false, false},
 		{"an undescribed child, with main deleted in the shared clone", []bool{false}, true, true},
+		// Logged in the order the move made them, oldest first.
+		{"two undescribed children", []bool{false, false}, true, false},
+		// A move backwards off the last push adds nothing: an empty move is not set aside, and
+		// the ordinary conflict refusal holds.
+		{"a move backwards, adding no commit", nil, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			l := pushedThenLost(t, "pushed.txt")
@@ -709,13 +714,18 @@ func TestProvisionStartsAtMainWhenAMergedBranchWasMovedOntoNothingDescribed(t *t
 				// Read with a snapshot, which records the file: commitOf reads without one.
 				moved = append(moved, strings.TrimSpace(runSetup(t, l.clone, "jj", "log", "-r", "@", "--no-graph", "-T", "commit_id", "--color=never", "-R", l.clone)))
 			}
-			runSetup(t, l.clone, "jj", "bookmark", "set", l.first.Bookmark, "-r", "@", "--allow-backwards", "-R", l.clone)
+			target := "@"
+			if len(tc.described) == 0 {
+				target = l.pushed + "-"
+			}
+			runSetup(t, l.clone, "jj", "bookmark", "set", l.first.Bookmark, "-r", target, "--allow-backwards", "-R", l.clone)
+			added := commitOf(t, l.clone, l.first.Bookmark)
 			runSetup(t, l.clone, "jj", "new", "main", "-R", l.clone)
 			runSetup(t, l.req.StateDir, "git", "--git-dir="+l.run.remote, "update-ref", "-d", "refs/heads/"+l.first.Bookmark)
 
 			if !tc.setAside {
 				refusal := l.refusedBeforeAnything(t, 1)
-				if !strings.HasPrefix(refusal, "Bookmark "+l.first.Bookmark+" is conflicted (adds "+moved[len(moved)-1]+"; removes "+l.pushed+"), one side a deletion") {
+				if !strings.HasPrefix(refusal, "Bookmark "+l.first.Bookmark+" is conflicted (adds "+added+"; removes "+l.pushed+"), one side a deletion") {
 					t.Fatalf("refusal: %s", refusal)
 				}
 				if len(logged) != 0 {

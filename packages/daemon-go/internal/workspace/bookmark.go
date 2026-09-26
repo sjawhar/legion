@@ -21,11 +21,13 @@ var (
 // One read of the issue's bookmark legion/<KEY>, its local row and origin's (readBookmark),
 // decides where the workspace starts:
 //   - A local bookmark conflicted with a deletion whose origin row is tracked with no commit (GitHub
-//     deleted the branch after the bookmark moved on without a push) is set aside when nothing the
-//     move added beyond what it removed is described (undescribedMove): jj pushes no undescribed
-//     commit, so the move was never meant to reach GitHub, and this is the unmoved merged bookmark
-//     in intent. The local bookmark is deleted, the commits' ids are logged (they stay visible, the
-//     clone never abandoning unreachable commits), and the workspace starts at main.
+//     deleted the branch after the bookmark moved on without a push) is set aside when the move
+//     added at least one commit beyond what it removed and none of them is described
+//     (undescribedMove): jj pushes no undescribed commit, so the move was never meant to reach
+//     GitHub, and this is the unmoved merged bookmark in intent. Once main resolves, the local
+//     bookmark is deleted, the commits' ids are logged oldest first (they stay visible, the clone
+//     never abandoning unreachable commits), and the workspace starts at main. A move backwards,
+//     which added nothing, keeps the conflict's refusal.
 //   - A conflicted local bookmark is refused by name, with its sides. That includes a conflict with
 //     a deleted side, which `bookmarks(exact:)` resolves to the other side alone: a local deletion
 //     never pushed and then origin's branch moving, or a local move never pushed and then the
@@ -67,26 +69,16 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 	}
 	local, origin := rows.local, rows.origin
 	var setAside []string
-	if local.conflict && len(local.added) <= len(local.removed) && origin.tracked && !origin.present {
-		if setAside, err = undescribedMove(ctx, run, workspace, local); err != nil {
+	undescribed := false
+	if local.conflict && local.hasDeletedSide() && origin.tracked && !origin.present {
+		if setAside, undescribed, err = undescribedMove(ctx, run, workspace, local); err != nil {
 			return err
 		}
 	}
 	var revision string
-	fromMain := false
 	switch {
-	case setAside != nil:
-		// main first: a main that does not resolve refuses before anything is set aside, so the
-		// one line naming the set-aside commits is never a start that did not happen.
-		fromMain = true
-		if revision, err = mainCommit(ctx, run, workspace); err != nil {
-			return err
-		}
-		if _, err := RunChecked(ctx, run, onClone(cloneDir, "bookmark", "delete", workspace.Bookmark), nil, ""); err != nil {
-			return err
-		}
-		log(fmt.Sprintf("Bookmark %s was moved after its last push onto commits nobody described (%s), and GitHub deleted its branch: workspace %s starts at main. Those commits stay visible in the shared clone %s (git.abandon-unreachable-commits is false), recoverable by id",
-			workspace.Bookmark, listed(setAside), workspace.Dir, cloneDir))
+	case undescribed:
+		// Set aside once main resolves, below.
 	case local.conflict:
 		keep, commit := "its added commit", local.added[0]
 		if len(local.added) > 1 {
@@ -123,10 +115,19 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 				remote, revision, listed(now.added), workspace.Dir)
 		}
 	}
-	if revision == "" {
-		fromMain = true
+	fromMain := revision == ""
+	if fromMain {
 		if revision, err = mainCommit(ctx, run, workspace); err != nil {
 			return err
+		}
+		// After main resolves, so the one line naming the set-aside commits is never a start that
+		// did not happen.
+		if undescribed {
+			if _, err := RunChecked(ctx, run, onClone(cloneDir, "bookmark", "delete", workspace.Bookmark), nil, ""); err != nil {
+				return err
+			}
+			log(fmt.Sprintf("Bookmark %s was moved after its last push onto commits nobody described (%s), and GitHub deleted its branch: workspace %s starts at main. Those commits stay visible in the shared clone %s (git.abandon-unreachable-commits is false), recoverable by id",
+				workspace.Bookmark, listed(setAside), workspace.Dir, cloneDir))
 		}
 	}
 	if err := os.MkdirAll(filepath.Dir(workspace.Dir), 0o700); err != nil {
@@ -168,27 +169,29 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 }
 
 // undescribedMove is what the local bookmark's move added beyond what it removed
-// (`<removed>..<added>`), when no commit of it is described; nil when one is. jj pushes no
-// undescribed commit, so such a move was never meant to reach GitHub.
-func undescribedMove(ctx context.Context, run Runner, workspace Workspace, local bookmarkRow) ([]string, error) {
+// (`<removed>..<added>`), oldest first, and whether that is at least one commit and none of them
+// described. jj pushes no undescribed commit, so such a move was never meant to reach GitHub; a
+// move that added nothing (a bookmark moved backwards off its last push) is not one, and keeps the
+// conflict's refusal.
+func undescribedMove(ctx context.Context, run Runner, workspace Workspace, local bookmarkRow) ([]string, bool, error) {
 	revset := "(" + strings.Join(local.removed, " | ") + ")..(" + strings.Join(local.added, " | ") + ")"
-	read := onClone(workspace.Clone, "log", "-r", revset, "--no-graph", "-T", `commit_id ++ "|" ++ if(description, "1", "0") ++ "\n"`)
+	read := onClone(workspace.Clone, "log", "-r", revset, "--reversed", "--no-graph", "-T", `commit_id ++ "|" ++ if(description, "1", "0") ++ "\n"`)
 	result, err := RunChecked(ctx, run, read, nil, "")
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	commits := []string{}
+	var commits []string
 	for _, line := range nonEmptyLines(result.Stdout) {
 		id, described, ok := strings.Cut(line, "|")
 		if !ok || !commitID.MatchString(id) || described != "0" && described != "1" {
-			return nil, fmt.Errorf("Bookmark %s's move %s printed %q, not a commit id and 0 or 1; workspace %s was not created", workspace.Bookmark, revset, line, workspace.Dir)
+			return nil, false, fmt.Errorf("Bookmark %s's move %s printed %q, not a commit id and 0 or 1; workspace %s was not created", workspace.Bookmark, revset, line, workspace.Dir)
 		}
 		if described == "1" {
-			return nil, nil
+			return nil, false, nil
 		}
 		commits = append(commits, id)
 	}
-	return commits, nil
+	return commits, len(commits) > 0, nil
 }
 
 // mainCommit is the commit a workspace with no issue branch starts at: main's, resolved to one
@@ -230,10 +233,16 @@ type bookmarkRow struct {
 // side is a deletion, which jj leaves out of the added commits.
 func (r bookmarkRow) sides() string {
 	sides := fmt.Sprintf("(adds %s; removes %s)", listed(r.added), listed(r.removed))
-	if len(r.added) <= len(r.removed) {
+	if r.hasDeletedSide() {
 		sides += ", one side a deletion"
 	}
 	return sides
+}
+
+// hasDeletedSide is whether a conflicted row's sides include a deletion, which jj leaves out of
+// its added commits.
+func (r bookmarkRow) hasDeletedSide() bool {
+	return len(r.added) <= len(r.removed)
 }
 
 // bookmarkRows is a bookmark's local row and origin's. A row jj does not list is the zero row:
