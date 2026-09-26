@@ -5191,7 +5191,7 @@ describe("the Go daemon's pane (LEGION_DAEMON_API=go)", () => {
     });
   });
 
-  test("subscribes each Go role to the notice topic it owns", async () => {
+  test("subscribes no Go role to an issue's notice topic", async () => {
     const architect = await goPane({
       role: "architect",
       tree: "REPO-42",
@@ -5209,12 +5209,13 @@ describe("the Go daemon's pane (LEGION_DAEMON_API=go)", () => {
     });
     await worker.start();
 
-    expect(natsConnections.flatMap((connection) => connection.subjects)).toEqual(
-      expect.arrayContaining([
-        "notifications.legion.omp.REPO-42",
-        "notifications.legion.omp.REPO-43",
-      ])
-    );
+    // The Go daemon sends every notice to the owning architect's role topic, which the architect
+    // claims as its Envoy role; a phase worker subscribed to its issue's topic would be woken by
+    // notices meant for the architect.
+    const subjects = natsConnections.flatMap((connection) => connection.subjects);
+    expect(
+      subjects.filter((subject) => subject.startsWith("notifications.legion.omp.REPO-"))
+    ).toEqual([]);
   });
 
   test("mints and atomically replaces a Go claim grant for every bash command", async () => {
