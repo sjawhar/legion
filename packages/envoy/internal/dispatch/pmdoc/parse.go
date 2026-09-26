@@ -73,12 +73,48 @@ func ParseInline(markdown string) ([]*Node, error) {
 	if root.ChildCount() == 0 {
 		return nil, nil
 	}
+	if dropped := textOutside(root.FirstChild(), source); dropped != "" {
+		return nil, fmt.Errorf("%w: inline markdown holds text outside its paragraph, %q, which would be lost", ErrSchema, dropped)
+	}
 	paragraph, err := parseBlock(root.FirstChild(), source, nil)
 	if err != nil {
 		return nil, err
 	}
 	sortNodeMarks(paragraph)
 	return paragraph.Children, nil
+}
+
+// textOutside is the first run of source text the paragraph's lines do not hold. The inline
+// parser knows only paragraphs, so a line it cannot open one on - an indented code block after the
+// first paragraph - is skipped rather than refused, and everything after it with it; a caller who
+// is told nothing loses that text.
+func textOutside(paragraph ast.Node, source []byte) string {
+	covered := make([]bool, len(source))
+	lines := paragraph.Lines()
+	for index := 0; index < lines.Len(); index++ {
+		segment := lines.At(index)
+		for offset := segment.Start; offset < segment.Stop && offset < len(source); offset++ {
+			covered[offset] = true
+		}
+	}
+	for offset := 0; offset < len(source); offset++ {
+		if covered[offset] || isMarkdownSpace(source[offset]) {
+			continue
+		}
+		end := offset
+		for end < len(source) && source[end] != '\n' {
+			end++
+		}
+		if dropped := strings.TrimSpace(string(source[offset:end])); dropped != "" {
+			return dropped
+		}
+		offset = end
+	}
+	return ""
+}
+
+func isMarkdownSpace(char byte) bool {
+	return char == ' ' || char == '\t' || char == '\n' || char == '\r'
 }
 
 func parseTableRows(markdown string, width int) ([]*Node, bool, error) {

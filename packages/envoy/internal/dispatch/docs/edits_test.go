@@ -1184,6 +1184,190 @@ func TestApplyOperationsUnresolvedQuoteErrorsNameTheQuoteNotThePackage(t *testin
 	}
 }
 
+// Whether HTML opens a block depends on where the replacement lands, so the refusal is decided on
+// the document the replace produces: a replacement whose markdown the parser then refuses is
+// refused. These land where HTML starts a block - the whole of a paragraph, a list item's start,
+// the line after a hard break.
+func TestApplyOperationReplaceRefusesHTMLThatOpensABlockWhereItLands(t *testing.T) {
+	for _, test := range []struct{ document, find, with string }{
+		{document: "Intro.\n\nBody.\n", find: "Body.", with: "<div>x</div>"},
+		{document: "Intro.\n\nBody.\n", find: "Body.", with: "<!-- note -->"},
+		{document: "Intro.\n\nBody.\n", find: "Body.", with: "<br>"},
+		{document: "- Body.\n", find: "Body.", with: "<div>x</div>"},
+		{document: "Intro.\n\nfoo Body. bar\n", find: "Body.", with: "x  \n<div>y</div>"},
+	} {
+		t.Run(test.document+test.with, func(t *testing.T) {
+			tree, err := parseInput(test.document)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = applyOperation(tree, model.EditOp{Op: "replace", Find: test.find, With: test.with})
+			var invalid *ErrInvalidOp
+			if !errors.As(err, &invalid) || invalid.Field != "with" {
+				t.Fatalf("replace = %v, want invalid with", err)
+			}
+			if !strings.Contains(invalid.Reason, "block HTML") {
+				t.Fatalf("refusal = %q, want it to name the parser's reason", invalid.Reason)
+			}
+		})
+	}
+}
+
+// The positive control for that refusal: the same HTML where it opens no block - inside a line, in
+// a table cell, in a heading - is kept, and the document reads back as written.
+func TestApplyOperationReplaceKeepsHTMLThatOpensNoBlockWhereItLands(t *testing.T) {
+	const paragraph, cell, heading = "Intro.\n\nfoo Body. bar\n", "| h |\n| --- |\n| Body. |\n", "# Body.\n"
+	for _, test := range []struct{ document, with string }{
+		{document: "Intro.\n\nBody.\n", with: "before <b>x</b> after"},
+		{document: "Intro.\n\nBody.\n", with: `<span class="x">text</span>`},
+		{document: "Intro.\n\nBody.\n", with: "<br>after"},
+		{document: paragraph, with: "<div>x</div>"},
+		{document: paragraph, with: "<br>"},
+		{document: paragraph, with: "<br/>"},
+		{document: paragraph, with: "<img src=x>"},
+		{document: paragraph, with: `<img src="i.png" width="16">`},
+		{document: paragraph, with: "<!-- c --> tail"},
+		{document: paragraph, with: "<b>x</b>\n<div>y</div>"},
+		{document: cell, with: "<ul><li>a</li><li>b</li></ul>"},
+		{document: cell, with: "<br>"},
+		{document: cell, with: "<img src=x>"},
+		{document: cell, with: "<div>x</div>"},
+		{document: cell, with: "<!-- c --> tail"},
+		{document: heading, with: "<br>"},
+		{document: heading, with: "<img src=x>"},
+		{document: heading, with: "<div>x</div>"},
+		{document: heading, with: "<!-- c --> tail"},
+	} {
+		t.Run(test.document+test.with, func(t *testing.T) {
+			tree, err := parseInput(test.document)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tree, err = applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
+			if err != nil {
+				t.Fatalf("replace: %v", err)
+			}
+			markdown, err := renderTree(tree)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(test.with, "\n") && !strings.Contains(markdown, test.with) {
+				t.Fatalf("%q does not hold the HTML as written, %q", markdown, test.with)
+			}
+			back, err := parseInput(markdown)
+			if err != nil {
+				t.Fatalf("%q no longer parses: %v", markdown, err)
+			}
+			if again, err := renderTree(back); err != nil || again != markdown {
+				t.Fatalf("%q reads back as %q (%v)", markdown, again, err)
+			}
+		})
+	}
+}
+
+// An insert carrying a block id the document already holds leaves two blocks with one id, and the
+// repair that follows awards it to whichever comes first: a copy inserted before the original
+// takes the id, and the original - with every comment and ask anchored to it - is renumbered.
+func TestApplyOperationsInsertRefusesABlockIDTheDocumentHolds(t *testing.T) {
+	const id = "11111111-1111-4111-8111-111111111111"
+	tree, err := parseInput(":::ask{#" + id + "}\nQuestion?\n:::\n\nAfter.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = applyOperations(tree, []model.EditOp{{
+		Op: "insert", Markdown: ":::ask{#" + id + "}\nCopy?\n:::", Before: "Question?",
+	}})
+	var invalid *ErrInvalidOp
+	if !errors.As(err, &invalid) || invalid.Field != "markdown" {
+		t.Fatalf("insert with a duplicate id = %v, want invalid markdown", err)
+	}
+	if !strings.Contains(invalid.Reason, id) {
+		t.Fatalf("refusal = %q, want it to name the id", invalid.Reason)
+	}
+}
+
+// The id stays the caller's to keep when the block that had it goes first: a delete earlier in
+// the batch frees it, so a typed block can be put back in its own place under its own id.
+func TestApplyOperationsInsertKeepsAnIDADeleteEarlierInTheBatchFreed(t *testing.T) {
+	const id = "11111111-1111-4111-8111-111111111111"
+	tree, err := parseInput("Before.\n\n:::ask{#" + id + "}\nQuestion?\n:::\n\nAfter.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch, err := applyOperations(tree, []model.EditOp{
+		{Op: "delete", Block: id},
+		{Op: "insert", Markdown: ":::ask{#" + id + "}\nReworded?\n:::", After: "Before."},
+	})
+	if err != nil {
+		t.Fatalf("delete then insert: %v", err)
+	}
+	carriers := 0
+	for _, child := range batch.tree.Children {
+		if blockID, _ := child.Attrs[pmdoc.BlockIDAttr].(string); blockID == id {
+			carriers++
+		}
+	}
+	if carriers != 1 {
+		t.Fatalf("%d blocks carry %q, want the reinserted one", carriers, id)
+	}
+}
+
+func TestApplyOperationsInsertMintsAnIDForANewTypedBlock(t *testing.T) {
+	const id = "11111111-1111-4111-8111-111111111111"
+	tree, err := parseInput(":::ask{#" + id + "}\nQuestion?\n:::\n\nAfter.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch, err := applyOperations(tree, []model.EditOp{{
+		Op: "insert", Markdown: ":::ask{urgency=\"med\"}\nSecond?\n:::", After: "After.",
+	}})
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	seen := map[string]bool{}
+	for _, child := range batch.tree.Children {
+		blockID, _ := child.Attrs[pmdoc.BlockIDAttr].(string)
+		if blockID == "" {
+			t.Fatalf("block %s has no id", child.Type)
+		}
+		if seen[blockID] {
+			t.Fatalf("two blocks carry id %q", blockID)
+		}
+		seen[blockID] = true
+	}
+}
+
+// A `with` whose text the inline parser cannot hold must be refused, not cut short: an indented
+// code block after the first paragraph used to vanish - and every paragraph after it with it -
+// while the batch reported itself changed.
+func TestApplyOperationReplaceRefusesAWithItWouldCutShort(t *testing.T) {
+	for _, test := range []struct {
+		with    string
+		dropped string
+	}{
+		{with: "Keep this.\n\n    dropped code", dropped: "dropped code"},
+		{with: "one\n\n    code line\n\ntwo", dropped: "code line"},
+		// A skipped line of whitespace the parser keeps is not the end of what is dropped.
+		{with: "one\n\n    \u00a0\n\ntwo", dropped: "two"},
+		{with: "one\n\n    \f\n\ntwo", dropped: "two"},
+	} {
+		t.Run(test.with, func(t *testing.T) {
+			tree, err := parseInput("Intro.\n\nBody.\n")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
+			var invalid *ErrInvalidOp
+			if !errors.As(err, &invalid) || invalid.Field != "with" {
+				t.Fatalf("replace = %v, want invalid with", err)
+			}
+			if !strings.Contains(invalid.Reason, test.dropped) {
+				t.Fatalf("refusal = %q, want it to name the text it would have dropped", invalid.Reason)
+			}
+		})
+	}
+}
+
 func TestApplyOperationReplaceRejectsBlockReplacements(t *testing.T) {
 	// The refusal is where an agent learns what to do instead, and each half of it is for a
 	// different `with`: paragraphs are rewritten one replace each, keeping their block ids - so a

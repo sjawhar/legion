@@ -87,15 +87,18 @@ as literal text, except a backtick fence, which becomes an inline code span whos
 info string and line breaks included (```` ```go\nx := 1``` ```` becomes the code span `go` + a line break +
 `x := 1`), and a tilde fence, which stays literal.
 
-HTML is not written as text at all. A `with` whose HTML markdown reads as a block (`<div>x</div>`,
-`<!-- note -->`) is stored as inline HTML, and `dispatch_doc_read` then returns it raw, in markdown Dispatch
-will not take back: the schema carries no block HTML, so an `insert` or an upload of that markdown is refused.
-Keep HTML inside a line.
+HTML is not written as text at all, and a `replace` whose HTML would open a block where it lands is refused
+(`INVALID_OP` on `with`), because the schema carries no block HTML. `<div>x</div>` and `<!-- note -->` open one
+at the start of a paragraph or a list item and on the line after a hard break; a tag such as `<br>` opens one
+only when it stands alone as a paragraph or a list item. The same HTML inside a line, in a table cell or in a
+heading is inline HTML and is kept as written.
 
 When the new text adds a block that is not a paragraph beside paragraphs, `insert` it beside the
 paragraph you replaced, which keeps that paragraph's id; only when no paragraph of the new text is left to take
-the old block's place is it an `insert` of the new block plus a `delete` of the old, and the delete is what
-costs the id (below). Then read the document back with
+the old block's place is it a `delete` of the old block and then an `insert` of the new one, anchored on the
+block before or after it. The delete is what costs the id (below); a typed block keeps its id when the insert
+carries it, which works only in that order, because an insert carrying an id the document still holds is refused.
+Then read the document back with
 `dispatch_doc_read` and read the passage and its neighbours, not a grep for the words you added: an empty
 `with` deletes the matched text on purpose, so a `replace` whose `with` you meant to fill empties that
 paragraph — the block and its id stay, holding nothing — and only a read shows what the document now says.

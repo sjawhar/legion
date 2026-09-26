@@ -696,10 +696,13 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 			return nil, err
 		}
 		next, err := pmdoc.Splice(tree, r, with)
-		if err != nil || level == 0 {
-			return next, err
+		if err == nil && level != 0 {
+			next, err = pmdoc.SetHeadingLevel(next, r.From, level)
 		}
-		return pmdoc.SetHeadingLevel(next, r.From, level)
+		if err != nil {
+			return nil, err
+		}
+		return next, refuseUnreadableReplacement(tree, next, r, op.With)
 	case "delete":
 		if op.Block != "" {
 			if op.Find != "" {
@@ -741,6 +744,9 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		with, err := parseInput(op.Markdown)
 		if err != nil {
 			return nil, invalidMarkdownOp("markdown", err)
+		}
+		if err := refuseDuplicateBlockIDs(tree, with); err != nil {
+			return nil, err
 		}
 		if out, inserted, err := pmdoc.InsertTableRows(tree, target, op.Markdown, after); err != nil || inserted {
 			return out, err
@@ -1019,6 +1025,81 @@ func insertTarget(tree *pmdoc.Node, field, anchor string, occurrence *int) (pmdo
 		return pmdoc.Range{}, true, err
 	}
 	return r, true, nil
+}
+
+// refuseDuplicateBlockIDs refuses inserted markdown that carries a block id the document already
+// holds. Keeping the caller's id is how an edit of an existing typed block retains it, but a
+// second block with that id leaves the document with two, and the repair that follows awards it
+// to whichever comes first - so an inserted copy placed before the original takes the id, and the
+// original, with the comments and asks anchored to it, is the one renumbered.
+func refuseDuplicateBlockIDs(tree, inserted *pmdoc.Node) error {
+	held := map[string]bool{}
+	collectBlockIDs(tree, held)
+	carried := map[string]bool{}
+	collectBlockIDs(inserted, carried)
+	for id := range carried {
+		if held[id] {
+			return &ErrInvalidOp{Field: "markdown", Reason: fmt.Sprintf(
+				"block id %q is already in this document; omit the id or choose another to insert a new block, or, to put this block in that one's place, delete it earlier in the same batch and anchor the insert on the block before or after it",
+				id,
+			)}
+		}
+	}
+	return nil
+}
+
+func collectBlockIDs(node *pmdoc.Node, into map[string]bool) {
+	if node == nil {
+		return
+	}
+	if id, _ := node.Attrs[pmdoc.BlockIDAttr].(string); id != "" {
+		into[id] = true
+	}
+	for _, child := range node.Children {
+		collectBlockIDs(child, into)
+	}
+}
+
+// refuseUnreadableReplacement refuses a replace that makes the document-level block it lands in
+// unreadable: one the parser read back before the replace and refuses after it. What markdown
+// reads as a block depends on where the text lands, so the rendered block decides it rather than
+// the replacement alone: `<div>x</div>` over a whole paragraph, at a list item's start or after a
+// hard break opens an HTML block the Proof schema does not carry, while the same HTML inside a
+// line, a table cell or a heading is inline HTML and is kept. A block that was already unreadable,
+// or another block that is, is no reason to refuse this replace. A replace stays inside its
+// textblock, so the block holds the same index before and after.
+func refuseUnreadableReplacement(before, after *pmdoc.Node, match pmdoc.Range, with string) error {
+	index, err := pmdoc.BlockIndex(before, match)
+	if err != nil {
+		return err
+	}
+	unreadable := blockReadError(after.Children[index])
+	if unreadable == nil || blockReadError(before.Children[index]) != nil {
+		return nil
+	}
+	return &ErrInvalidOp{Field: "with", Reason: fmt.Sprintf(
+		"with %q leaves markdown the document cannot read back where it lands (%v); keep HTML inside a line, where it opens no block",
+		with, unreadable,
+	)}
+}
+
+// blockReadError is the parser's refusal of a document-level block's markdown, or nil when the
+// parser reads it back. The parser drops a footnote definition nothing refers to without reading
+// it, so a definition is read after a reference to it.
+func blockReadError(block *pmdoc.Node) error {
+	blocks := []*pmdoc.Node{block}
+	if block.Type == "footnote_definition" {
+		reference := &pmdoc.Node{Type: "footnote_reference", Attrs: pmdoc.Attrs{"label": block.Attrs["label"]}}
+		blocks = []*pmdoc.Node{{Type: "paragraph", Children: []*pmdoc.Node{reference}}, block}
+	}
+	markdown, err := pmdoc.Render(&pmdoc.Node{Type: "doc", Children: blocks})
+	if err != nil {
+		return err
+	}
+	if _, err := pmdoc.Parse(markdown); errors.Is(err, pmdoc.ErrSchema) {
+		return err
+	}
+	return nil
 }
 
 // inlineReplacement parses replace's `with` as one textblock's inline content:

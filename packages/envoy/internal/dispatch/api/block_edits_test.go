@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -65,6 +66,30 @@ func TestDocumentEditsAddressBlocksByID(t *testing.T) {
 
 // A table is one addressable block. Deleting its header promotes the first body
 // row so the table keeps its identity and remains valid Markdown.
+// A replace is refused only when it makes the block it lands in unreadable. A document already
+// holding a block the parser refuses - left by a delete, or stored before the refusal existed -
+// still takes replaces elsewhere and inside that block, as main takes them.
+func TestDocumentEditsReplaceBesideAnUnreadableBlockIsAccepted(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Unreadable block", "Intro.\n\nfoo <div>x</div> bar\n\nOther text.\n")
+	edit := func(op map[string]any) *httptest.ResponseRecorder {
+		return dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+			"ops": []map[string]any{op},
+		}, "alice")
+	}
+	if deleted := edit(map[string]any{"op": "delete", "find": "foo "}); deleted.Code != http.StatusOK {
+		t.Fatalf("delete: status=%d body=%s", deleted.Code, deleted.Body.String())
+	}
+	for _, op := range []map[string]any{
+		{"op": "replace", "find": "Other text.", "with": "Changed."},
+		{"op": "replace", "find": "bar", "with": "baz"},
+	} {
+		if replaced := edit(op); replaced.Code != http.StatusOK {
+			t.Fatalf("replace %v: status=%d body=%s", op, replaced.Code, replaced.Body.String())
+		}
+	}
+}
+
 func TestDocumentEditsDeleteTableHeaderRowInPlace(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Table row edit", "| Key | Value |\n| --- | --- |\n| A10 | old |\n| A11 | new |\n")
