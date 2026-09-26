@@ -1808,6 +1808,7 @@ func TestEditArtifactCreatesNamedVersion(t *testing.T) {
 	var result struct {
 		Applied int           `json:"applied"`
 		Version model.Version `json:"version"`
+		Token   string        `json:"token"`
 	}
 	if edited.Code != http.StatusOK {
 		t.Fatalf("edit document: status=%d body=%s", edited.Code, edited.Body.String())
@@ -1815,15 +1816,26 @@ func TestEditArtifactCreatesNamedVersion(t *testing.T) {
 	result = decodeBody[struct {
 		Applied int           `json:"applied"`
 		Version model.Version `json:"version"`
+		Token   string        `json:"token"`
 	}](t, edited)
 	if result.Applied != 1 || !result.Version.Named || result.Version.Summary == nil || *result.Version.Summary != "Change opening" {
 		t.Fatalf("edit result = %#v, want named version with summary", result)
+	}
+	if current := readDocumentPrecondition(t, handler, issue.PrimaryArtifactID); result.Token != current.Token {
+		t.Fatalf("edit token = %q, want the document's own token %q", result.Token, current.Token)
 	}
 	unchanged := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
 		"ops": []map[string]string{}, "actor": sessionActor(),
 	})
 	if unchanged.Code != http.StatusOK || !strings.Contains(unchanged.Body.String(), `"applied":0`) || !strings.Contains(unchanged.Body.String(), `"version":null`) {
 		t.Fatalf("empty edit result: status=%d body=%s", unchanged.Code, unchanged.Body.String())
+	}
+	// A batch with no operation still reports the document as it stands, so the caller's next
+	// guarded edit has its precondition.
+	if empty := decodeBody[struct {
+		Token string `json:"token"`
+	}](t, unchanged); empty.Token != result.Token {
+		t.Fatalf("empty edit token = %q, want the unchanged document's token %q", empty.Token, result.Token)
 	}
 }
 

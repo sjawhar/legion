@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -223,6 +225,26 @@ func TestProbeImageWithPodSafetyProbesOnThePodsBaseline(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A --role-references value that is not promptrefs.Encode's encoding is refused as the flags are
+// read, before any probe runs: resolving the image's own role prompts in its place would pass a
+// probe the daemon asked about its own.
+func TestProbeImageRefusesRoleReferencesItCannotDecode(t *testing.T) {
+	omp := imageOmp(t)
+	root := inImage(t, thisBinarysContract, omp)
+	seen := filepath.Join(t.TempDir(), "seen")
+	t.Setenv("LEGION_TEST_SEEN", seen)
+
+	code, stdout, stderr := probeImage("--plugin-root", root, "--role-references",
+		`{"LEGION_PROMPT_AGENTS":{},"LEGION_PROMPT_SKILLS":{},"LEGION_PROMPT_AGENTS":{}}`)
+
+	if code != 1 || stdout != "" || !strings.Contains(stderr, "--role-references") || !strings.Contains(stderr, "appears twice") {
+		t.Fatalf("probe-image with a repeated kind in --role-references = %d %q %q, want exit 1 naming the flag and the repeated key, and no OK line", code, stdout, stderr)
+	}
+	if _, err := os.Stat(seen); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Oh My Pi ran (%s: %v), want no probe", seen, err)
 	}
 }
 

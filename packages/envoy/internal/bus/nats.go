@@ -122,7 +122,19 @@ func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB 
 	}
 	opts.AsyncErrorCB = func(_ *nats.Conn, sub *nats.Subscription, err error) {
 		level := slog.LevelError
-		if errors.Is(err, nats.ErrConsumerNotActive) {
+		switch {
+		case err == nats.ErrConsumerNotFound:
+			// A drain ends each subscription whose consumer nats.go created, then deletes that
+			// consumer. At shutdown the listener leaves a KV watcher the last reconnect has not yet
+			// replaced for the drain to end, and that watcher's ordered consumer can already be gone:
+			// a NATS restart loses it outright (nats.go creates it with memory storage), and a
+			// disconnect longer than its inactive threshold lets the server delete it. So the delete
+			// finds it gone: the state the delete was for. At the pinned nats.go (v1.50.0) that
+			// delete, in checkDrained, is the only report of the bare sentinel, which
+			// DeleteConsumer returns; re-check that on a nats.go bump. The one other report of this
+			// error, an ordered consumer nats.go failed to recreate, wraps it and stays an ERROR.
+			level = slog.LevelWarn
+		case errors.Is(err, nats.ErrConsumerNotActive):
 			// Every consumer Envoy runs with idle heartbeats is a KV watcher's ordered consumer,
 			// which reports missed heartbeats only while the connection is not connected; once it
 			// is connected again, nats.go resets the consumer instead. The report restates the
@@ -673,9 +685,10 @@ func (c *Client) Publish(item contracts.Envelope) error {
 
 // PublishReportingDuplicate publishes as Publish does and reports whether
 // JetStream recognised the message as one the stream already holds. That is only
-// ever possible for an envelope published under a MsgId (see dedupedSources), and
-// only within the stream's duplicate window; a core-transport topic has no
-// acknowledgement at all and always reports false.
+// ever possible for an envelope whose dedupe key names the upstream event
+// (contracts.DedupeKeyNamesTheUpstreamEvent), the only one published under a
+// MsgId, and only within the stream's duplicate window; a core-transport topic
+// has no acknowledgement at all and always reports false.
 //
 // True means "the stream already held this MsgId", not "this call published
 // nothing new": the reconnect retry below republishes after a failure that may
@@ -688,15 +701,10 @@ func (c *Client) PublishReportingDuplicate(item contracts.Envelope) (bool, error
 	return c.publishJetStream(item)
 }
 
-// dedupedSources are the sources whose dedupe key names one event, so a repeat of the key is a
-// repeat of that event: a Dispatch outbox retry; a webhook sender's redelivery (GitHub and Ghost
-// Wispr resend under the delivery id they first carried, Slack retries under its event_id); and a
-// re-publish of one CI settlement generation, which carries source github. Their envelopes publish
-// under a JetStream MsgId of the dedupe key and topic, so a repeat within the stream's duplicate
-// window adds nothing to the stream, while each topic of one event's fan-out still lands once. Every
-// other source publishes on each call: an agent send's dedupe key names no upstream event.
-var dedupedSources = []string{"dispatch", "github", "slack", "ghostwispr"}
-
+// publishJetStream publishes item to the notification stream. The MsgId, where the envelope earns
+// one, is the dedupe key and the topic together, because one upstream event can be published on
+// several topics under one key - a GitHub comment that mentions the trigger is published on its
+// mention topic beside its comment topic - and each of those must be retained.
 func (c *Client) publishJetStream(item contracts.Envelope) (bool, error) {
 	data, err := json.Marshal(item)
 	if err != nil {
@@ -708,7 +716,7 @@ func (c *Client) publishJetStream(item contracts.Envelope) (bool, error) {
 		return false, err
 	}
 	options := []nats.PubOpt{nats.Context(ctx)}
-	if slices.Contains(dedupedSources, item.Source) {
+	if contracts.DedupeKeyNamesTheUpstreamEvent(item) {
 		options = append(options, nats.MsgId(item.DedupeKey+":"+item.Topic))
 	}
 	ack, err := c.js.Publish(item.Topic, data, options...)

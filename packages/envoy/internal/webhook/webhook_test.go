@@ -1,18 +1,22 @@
 package webhook
 
 import (
-	"testing"
+	"sync"
 
 	"github.com/sjawhar/envoy/internal/contracts"
 )
 
-// mockPublisher records published envelopes for test assertions.
+// mockPublisher records published envelopes for test assertions. Requests the handler serves at
+// once can publish at once, as they may with the real publisher.
 type mockPublisher struct {
+	mu        sync.Mutex
 	published []contracts.Envelope
 	err       error
 }
 
 func (m *mockPublisher) Publish(item contracts.Envelope) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.published = append(m.published, item)
 	return m.err
 }
@@ -45,65 +49,4 @@ func (m *mockRecorder) RecordSuite(observation contracts.CIObservation) error {
 func (m *mockRecorder) RecordHead(owner, repo, number, sha, updatedAt string) error {
 	m.headCalls = append(m.headCalls, headCall{owner, repo, number, sha, updatedAt})
 	return m.headErr
-}
-
-func TestCIRecorderFuncs(t *testing.T) {
-	check := contracts.CIObservation{
-		Owner:      "example-org",
-		Repo:       "example-repo",
-		Number:     "42",
-		SHA:        "abcdef1234567",
-		CheckName:  "unit-tests",
-		SuiteID:    "900",
-		CheckRunID: 987654321,
-		URL:        "https://example-host/checks/987654321",
-		Status:     "completed",
-		Conclusion: "success",
-		ObservedAt: "2026-09-07T03:00:00Z",
-	}
-	suiteObservation := contracts.CIObservation{
-		Owner:      "example-org",
-		Repo:       "example-repo",
-		Number:     "42",
-		SHA:        "abcdef1234567",
-		SuiteID:    "900",
-		AppID:      "77",
-		Status:     "completed",
-		Conclusion: "success",
-		ObservedAt: "2026-09-07T03:00:00Z",
-	}
-	var record, suite contracts.CIObservation
-	var head headCall
-	recorder := CIRecorderFuncs{
-		RecordFunc: func(observation contracts.CIObservation) error {
-			record = observation
-			return nil
-		},
-		RecordSuiteFunc: func(observation contracts.CIObservation) error {
-			suite = observation
-			return nil
-		},
-		RecordHeadFunc: func(owner, repo, number, sha, updatedAt string) error {
-			head = headCall{owner, repo, number, sha, updatedAt}
-			return nil
-		},
-	}
-	if err := recorder.Record(check); err != nil {
-		t.Fatalf("record: %v", err)
-	}
-	if err := recorder.RecordSuite(suiteObservation); err != nil {
-		t.Fatalf("record suite: %v", err)
-	}
-	if err := recorder.RecordHead("example-org", "example-repo", "42", "abcdef1234567", "2026-09-07T03:00:00Z"); err != nil {
-		t.Fatalf("record head: %v", err)
-	}
-	if record != check {
-		t.Fatalf("record adapter observation = %+v, want %+v", record, check)
-	}
-	if suite != suiteObservation {
-		t.Fatalf("suite adapter observation = %+v, want %+v", suite, suiteObservation)
-	}
-	if head != (headCall{owner: "example-org", repo: "example-repo", number: "42", sha: "abcdef1234567", updatedAt: "2026-09-07T03:00:00Z"}) {
-		t.Fatalf("head adapter call = %+v", head)
-	}
 }

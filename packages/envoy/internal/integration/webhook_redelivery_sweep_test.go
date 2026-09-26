@@ -24,11 +24,11 @@ import (
 //   - A delivery the listener refused while starting (503) is recovered: the stream then holds it.
 //   - A delivery that reached the stream but that GitHub recorded as failed (the reply came too
 //     late) is redelivered, and the stream still holds it once.
-//   - A delivery the listener refused as malformed (400: a body over its cap) is never asked for
-//     again, and the sweep says so.
+//   - A delivery the listener refused as malformed (400: a signed body that is not JSON) is never
+//     asked for again, and the sweep says so.
 func TestWebhookRedelivery_TheSweepRecoversFailedDeliveriesThroughTheListener(t *testing.T) {
 	env := setupTestEnv(t)
-	handler := webhook.GitHubHandler(redeliverySecret, "@legion", "", env.client, unusedCIRecorder(t))
+	handler := webhook.GitHubHandler(redeliverySecret, "@legion", "", env.client, refusingRecorder{t})
 	var started atomic.Bool
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !started.Load() {
@@ -76,11 +76,11 @@ func TestWebhookRedelivery_TheSweepRecoversFailedDeliveriesThroughTheListener(t 
 	}
 	late := github.Record(tooLate, "submitted", 7, http.StatusGatewayTimeout, time.Now().Add(-2*time.Minute))
 
-	oversized := githubapptest.Attempt{GUID: "delivery-oversized", Event: "push", Payload: []byte(`{"ref":"refs/heads/main","padding":"` + strings.Repeat("x", 1<<20) + `","repository":{"name":"widgets","owner":{"login":"acme"}}}`)}
-	if code := send(oversized); code != http.StatusBadRequest {
-		t.Fatalf("oversized delivery answered %d, want 400", code)
+	malformed := githubapptest.Attempt{GUID: "delivery-malformed", Event: "push", Payload: []byte(`{"ref":"refs/heads/main",`)}
+	if code := send(malformed); code != http.StatusBadRequest {
+		t.Fatalf("malformed delivery answered %d, want 400", code)
 	}
-	github.Record(oversized, "", 7, http.StatusBadRequest, time.Now().Add(-time.Minute))
+	github.Record(malformed, "", 7, http.StatusBadRequest, time.Now().Add(-time.Minute))
 
 	state, err := redeliver.OpenState(env.client.JS())
 	if err != nil {
@@ -108,7 +108,7 @@ func TestWebhookRedelivery_TheSweepRecoversFailedDeliveriesThroughTheListener(t 
 			t.Fatalf("GitHub recorded redelivery %d of %s as %d, want 200", row.ID, row.GUID, row.StatusCode)
 		}
 	}
-	if !strings.Contains(logs.String(), `msg="webhook delivery refused terminally"`) || !strings.Contains(logs.String(), "guid=delivery-oversized") {
-		t.Fatalf("no terminal refusal line for the oversized delivery:\n%s", logs.String())
+	if !strings.Contains(logs.String(), `msg="webhook delivery refused terminally"`) || !strings.Contains(logs.String(), "guid=delivery-malformed") {
+		t.Fatalf("no terminal refusal line for the malformed delivery:\n%s", logs.String())
 	}
 }

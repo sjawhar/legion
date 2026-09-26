@@ -97,8 +97,7 @@ func TestSendHandler_StampsSenderAndReturnsRecipient(t *testing.T) {
 		t.Fatalf("register source session: %v", err)
 	}
 
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions})
+	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
 	message := strings.Repeat("a", 161) + "\n\nsecond paragraph\n\nthird paragraph"
 	requestBody, err := json.Marshal(map[string]interface{}{
 		"source_session": "ses_source",
@@ -116,7 +115,7 @@ func TestSendHandler_StampsSenderAndReturnsRecipient(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/messages/send", strings.NewReader(string(requestBody)))
 
-	sendHandler(&state).ServeHTTP(recorder, request)
+	sendHandler(state).ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("send status = %d, body = %s", recorder.Code, recorder.Body.String())
@@ -171,11 +170,10 @@ func TestDispatchClientSendUsesListenerWireContract(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("register target session: %v", err)
 	}
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: publisher, registry: registry, sessions: sessions})
+	state := &listenerDeps{client: publisher, registry: registry, sessions: sessions}
 
 	var wire string
-	handler := sendHandler(&state)
+	handler := sendHandler(state)
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -239,9 +237,8 @@ func TestSendHandlerRefusesTargetThatDoesNotAdvertiseFrameMode(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("register target session: %v", err)
 	}
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions})
-	handler := sendHandler(&state)
+	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
+	handler := sendHandler(state)
 	steerFrame := `{"event":{"id":0,"issue_key":"CORE-1"},"delivery":{"attempt":1,"mode":"steer"}}`
 
 	for name, requestJSON := range map[string]string{
@@ -292,9 +289,8 @@ func TestSendHandlerAllowsAdvertisedFrameModeAndUntaggedSends(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("register target session: %v", err)
 	}
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions})
-	handler := sendHandler(&state)
+	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
+	handler := sendHandler(state)
 	btwFrame := `{"event":{"id":0,"issue_key":"CORE-1"},"delivery":{"attempt":1,"mode":"btw"}}`
 
 	for name, requestJSON := range map[string]string{
@@ -345,9 +341,8 @@ func TestSendHandlerRefusesUnreadableOrAmbiguousDeliveryFrames(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("register target session: %v", err)
 	}
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions})
-	handler := sendHandler(&state)
+	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
+	handler := sendHandler(state)
 
 	for name, payload := range map[string]string{
 		"delivery present with no mode key at all":  `{"delivery":{}}`,
@@ -391,8 +386,7 @@ func TestSendHandlerRefusesUnadvertisedModeFromDerivedPayload(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("register target session: %v", err)
 	}
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions})
+	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
 	frame, err := os.ReadFile("../../../contracts/fixtures/dispatch-targeted-delivery.json")
 	if err != nil {
 		t.Fatalf("read targeted delivery fixture: %v", err)
@@ -406,7 +400,7 @@ func TestSendHandlerRefusesUnadvertisedModeFromDerivedPayload(t *testing.T) {
 		`{"target_session":"ses_target","source":"dispatch","message":%s}`,
 		mustJSONString(t, string(frame)),
 	)
-	sendHandler(&state).ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/messages/send", strings.NewReader(request)))
+	sendHandler(state).ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/messages/send", strings.NewReader(request)))
 
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 (body: %s)", rr.Code, rr.Body.String())
@@ -435,9 +429,8 @@ func TestDispatchClientSendFrameModeIsGuardedEndToEnd(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("register target session: %v", err)
 	}
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: publisher, registry: registry, sessions: sessions})
-	handler := sendHandler(&state)
+	state := &listenerDeps{client: publisher, registry: registry, sessions: sessions}
+	handler := sendHandler(state)
 	payloadBytes, err := os.ReadFile("../../../contracts/fixtures/dispatch-targeted-delivery.json")
 	if err != nil {
 		t.Fatalf("read targeted delivery fixture: %v", err)
@@ -470,8 +463,7 @@ func mustJSONString(t *testing.T, value string) string {
 func TestMessageHandlersRejectInvalidEnums(t *testing.T) {
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, map[string]int{"ses_target": 1})
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions})
+	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
 
 	cases := []struct {
 		name  string
@@ -500,9 +492,9 @@ func TestMessageHandlersRejectInvalidEnums(t *testing.T) {
 			recorder := httptest.NewRecorder()
 			request := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
 			if tc.path == "/v1/messages/send" {
-				sendHandler(&state).ServeHTTP(recorder, request)
+				sendHandler(state).ServeHTTP(recorder, request)
 			} else {
-				publishHandler(&state).ServeHTTP(recorder, request)
+				publishHandler(state).ServeHTTP(recorder, request)
 			}
 			if recorder.Code != http.StatusBadRequest {
 				t.Fatalf("status = %d, want 400; body = %s", recorder.Code, recorder.Body.String())
@@ -524,8 +516,7 @@ func TestMessageHandlersRejectInvalidEnums(t *testing.T) {
 func TestMessageHandlersRejectBlankMessage(t *testing.T) {
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, map[string]int{"ses_target": 1})
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions})
+	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
 
 	cases := []struct {
 		name string
@@ -548,9 +539,9 @@ func TestMessageHandlersRejectBlankMessage(t *testing.T) {
 			recorder := httptest.NewRecorder()
 			request := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
 			if tc.path == "/v1/messages/send" {
-				sendHandler(&state).ServeHTTP(recorder, request)
+				sendHandler(state).ServeHTTP(recorder, request)
 			} else {
-				publishHandler(&state).ServeHTTP(recorder, request)
+				publishHandler(state).ServeHTTP(recorder, request)
 			}
 
 			if recorder.Code != http.StatusBadRequest {
@@ -575,7 +566,7 @@ func TestRoleHolderNotFoundResponsesIdentifyState(t *testing.T) {
 	tests := []struct {
 		name    string
 		request func() *http.Request
-		handler func(*atomic.Pointer[listenerDeps]) http.Handler
+		handler func(*listenerDeps) http.Handler
 	}{
 		{
 			name: "publish",
@@ -586,8 +577,8 @@ func TestRoleHolderNotFoundResponsesIdentifyState(t *testing.T) {
 					strings.NewReader(`{"topic":"notifications.role.reviewer","message":"please review"}`),
 				)
 			},
-			handler: func(state *atomic.Pointer[listenerDeps]) http.Handler {
-				return publishHandler(state)
+			handler: func(d *listenerDeps) http.Handler {
+				return publishHandler(d)
 			},
 		},
 		{
@@ -595,8 +586,8 @@ func TestRoleHolderNotFoundResponsesIdentifyState(t *testing.T) {
 			request: func() *http.Request {
 				return httptest.NewRequest(http.MethodGet, "/v1/roles/reviewer", nil)
 			},
-			handler: func(state *atomic.Pointer[listenerDeps]) http.Handler {
-				return roleGetHandler(state)
+			handler: func(d *listenerDeps) http.Handler {
+				return roleGetHandler(d)
 			},
 		},
 	}
@@ -605,9 +596,7 @@ func TestRoleHolderNotFoundResponsesIdentifyState(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			client := setupPublishTestClient(t)
 			registry, sessions := setupSessionsTest(t, nil, nil)
-			var state atomic.Pointer[listenerDeps]
-			state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions})
-			handler := tc.handler(&state)
+			handler := tc.handler(&listenerDeps{client: client, registry: registry, sessions: sessions})
 
 			unclaimedRecorder := httptest.NewRecorder()
 			handler.ServeHTTP(unclaimedRecorder, tc.request())
@@ -743,11 +732,10 @@ func TestRoleHolderLapsedResponseDoesNotInventLastSeen(t *testing.T) {
 	if _, err := registry.SetRole("ses_lapsed", "test-machine", "reviewer", false); err != nil {
 		t.Fatalf("set lapsed holder: %v", err)
 	}
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions})
+	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
 
 	recorder := httptest.NewRecorder()
-	roleGetHandler(&state).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/roles/reviewer", nil))
+	roleGetHandler(state).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/roles/reviewer", nil))
 	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404; body = %s", recorder.Code, recorder.Body.String())
 	}
@@ -771,9 +759,8 @@ func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {
 	if _, err := registry.SetRole("ses_holder", "test-machine", "reviewer", false); err != nil {
 		t.Fatalf("set holder: %v", err)
 	}
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions})
-	handler := publishHandler(&state)
+	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
+	handler := publishHandler(state)
 
 	t.Run("unheld role returns 404 without publishing", func(t *testing.T) {
 		roleProbe, err := client.Conn.SubscribeSync("notifications.role.unheld")
@@ -847,7 +834,7 @@ func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {
 			t.Fatalf("publish status = %d, want 404; body = %s", publishRecorder.Code, publishRecorder.Body.String())
 		}
 		roleRecorder := httptest.NewRecorder()
-		roleGetHandler(&state).ServeHTTP(roleRecorder, httptest.NewRequest(http.MethodGet, "/v1/roles/reviewer", nil))
+		roleGetHandler(state).ServeHTTP(roleRecorder, httptest.NewRequest(http.MethodGet, "/v1/roles/reviewer", nil))
 		if roleRecorder.Code != http.StatusNotFound {
 			t.Fatalf("role lookup status = %d, want 404; body = %s", roleRecorder.Code, roleRecorder.Body.String())
 		}
@@ -863,10 +850,9 @@ func TestRoleGetHandlerReturnsLiveHolder(t *testing.T) {
 	if _, err := registry.SetRole("ses_holder", "test-machine", "reviewer", false); err != nil {
 		t.Fatalf("set holder: %v", err)
 	}
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions})
+	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
 	mux := http.NewServeMux()
-	registerV1Routes(mux, &state, "test-machine", logging.New("test"))
+	registerV1Routes(mux, state, "test-machine", logging.New("test"))
 
 	t.Run("live", func(t *testing.T) {
 		recorder := httptest.NewRecorder()
@@ -925,10 +911,9 @@ func TestRoleClaimRestoresWhileHolderIsLiveAndDropsAfterTTL(t *testing.T) {
 	if err := firstSessions.Put(sessionID, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
 		t.Fatalf("register role holder: %v", err)
 	}
-	var firstState atomic.Pointer[listenerDeps]
-	firstState.Store(&listenerDeps{client: client, registry: firstRegistry, sessions: firstSessions})
+	firstState := &listenerDeps{client: client, registry: firstRegistry, sessions: firstSessions}
 	claim := httptest.NewRecorder()
-	roleSetHandler(&firstState, "test-machine").ServeHTTP(
+	roleSetHandler(firstState, "test-machine").ServeHTTP(
 		claim,
 		httptest.NewRequest(
 			http.MethodPost,
@@ -964,11 +949,10 @@ func TestRoleClaimRestoresWhileHolderIsLiveAndDropsAfterTTL(t *testing.T) {
 	if err := restoredSessions.WaitForCacheReady(readyCtx); err != nil {
 		t.Fatalf("restore session cache: %v", err)
 	}
-	var restoredState atomic.Pointer[listenerDeps]
-	restoredState.Store(&listenerDeps{client: client, registry: restoredRegistry, sessions: restoredSessions})
+	restoredState := &listenerDeps{client: client, registry: restoredRegistry, sessions: restoredSessions}
 	get := func() *httptest.ResponseRecorder {
 		recorder := httptest.NewRecorder()
-		roleGetHandler(&restoredState).ServeHTTP(
+		roleGetHandler(restoredState).ServeHTTP(
 			recorder,
 			httptest.NewRequest(http.MethodGet, "/v1/roles/"+role, nil),
 		)
@@ -1009,10 +993,9 @@ func TestRoleSetHandlerSoftClaim(t *testing.T) {
 			t.Fatalf("register %s: %v", id, err)
 		}
 	}
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions})
+	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
 	mux := http.NewServeMux()
-	registerV1Routes(mux, &state, "test-machine", logging.New("test"))
+	registerV1Routes(mux, state, "test-machine", logging.New("test"))
 	post := func(body string) *httptest.ResponseRecorder {
 		recorder := httptest.NewRecorder()
 		mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/roles/set", strings.NewReader(body)))
@@ -1105,14 +1088,13 @@ func TestSubscribeHandlerWarnsWhenGitHubRepositoryIsUnwired(t *testing.T) {
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, nil)
 	inspector := &fakeStreamInfo{info: &nats.StreamInfo{}}
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{
+	state := &listenerDeps{
 		client:     client,
 		registry:   registry,
 		sessions:   sessions,
 		streamName: "notifications",
 		streamInfo: inspector,
-	})
+	}
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(`{
@@ -1120,7 +1102,7 @@ func TestSubscribeHandlerWarnsWhenGitHubRepositoryIsUnwired(t *testing.T) {
 		"self_subscribed":true,
 		"topics":["notifications.github.example-org.example-repo.pr","notifications.github.example-org.example-repo.pr.>"]
 	}`))
-	subscribeHandler(&state, "test-machine", logging.New("test")).ServeHTTP(recorder, request)
+	subscribeHandler(state, "test-machine", logging.New("test")).ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
@@ -1148,14 +1130,13 @@ func TestSubscribeHandlerWarnsWhenGitHubWiringLookupFails(t *testing.T) {
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, nil)
 	inspector := &fakeStreamInfo{err: errors.New("nats unavailable")}
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{
+	state := &listenerDeps{
 		client:     client,
 		registry:   registry,
 		sessions:   sessions,
 		streamName: "notifications",
 		streamInfo: inspector,
-	})
+	}
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(`{
@@ -1163,7 +1144,7 @@ func TestSubscribeHandlerWarnsWhenGitHubWiringLookupFails(t *testing.T) {
 		"self_subscribed":true,
 		"topics":["notifications.github.example-org.example-repo.pr.>"]
 	}`))
-	subscribeHandler(&state, "test-machine", logging.New("test")).ServeHTTP(recorder, request)
+	subscribeHandler(state, "test-machine", logging.New("test")).ServeHTTP(recorder, request)
 
 	var response struct {
 		Warnings []string `json:"warnings"`
@@ -1188,19 +1169,82 @@ func TestUnwiredRepositoryWarningSkipsWildcardRepositorySegment(t *testing.T) {
 	}
 }
 
+// A GitHub topic writes each dot in a repository's name as `_`, and the token after the name is
+// one of contracts.GithubTopicKinds, so a subscription whose token there is not a kind or a
+// wildcard would receive nothing, and the listener warns. When a kind follows the extra tokens,
+// or the name holds an empty token, the topic spells a dotted name with its dot, and the warning
+// names the spelling Envoy publishes. Otherwise the token is a mistyped kind, and the warning names
+// the kinds rather than suggesting a name that receives nothing either. A row per kind and
+// wildcard holds that no published kind is mistaken for either.
+func TestSubscribeHandlerWarnsWhenAGitHubTopicSpellsARepositoryWithADot(t *testing.T) {
+	client := setupPublishTestClient(t)
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	inspector := &fakeStreamInfo{info: &nats.StreamInfo{State: nats.StreamState{Subjects: map[string]uint64{"notifications.github.example-org.example-repo.pr.1": 1}}}}
+	state := &listenerDeps{client: client, registry: registry, sessions: sessions, streamName: "notifications", streamInfo: inspector}
+	warnings := func(t *testing.T, topic string) []string {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{"session_id": "ses_subscriber", "self_subscribed": true, "topics": []string{topic}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		recorder := httptest.NewRecorder()
+		subscribeHandler(state, "test-machine", logging.New("test")).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(string(body))))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("subscribe %s: status %d, body %s", topic, recorder.Code, recorder.Body.String())
+		}
+		var response struct {
+			Warnings []string `json:"warnings"`
+		}
+		if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+			t.Fatal(err)
+		}
+		return response.Warnings
+	}
+	for _, kind := range append(append([]string{}, contracts.GithubTopicKinds...), "*", ">") {
+		topic := "notifications.github.example-org.example-repo." + kind
+		if kind != ">" {
+			topic += ".>"
+		}
+		if got := warnings(t, topic); len(got) != 0 {
+			t.Errorf("subscribe %s: warnings %q, want none", topic, got)
+		}
+	}
+	for _, tc := range []struct{ topic, spelled string }{
+		{"notifications.github.acme.site.io.pr.7.>", "notifications.github.acme.site_io.pr.7.>"},
+		{"notifications.github.acme.a.b.c.pr.>", "notifications.github.acme.a_b_c.pr.>"},
+		{"notifications.github.sjawhar..github.>", "notifications.github.sjawhar._github.>"},
+	} {
+		want := tc.topic + ` spells a repository name with a dot, and GitHub topics write each dot in a name as "_": subscribe to ` + tc.spelled
+		if got := warnings(t, tc.topic); len(got) != 1 || got[0] != want {
+			t.Errorf("subscribe %s: warnings %q, want [%q]", tc.topic, got, want)
+		}
+	}
+	kinds := strings.Join(contracts.GithubTopicKinds, ", ")
+	for _, tc := range []struct{ topic, token, repository string }{
+		{"notifications.github.acme.widgets.checks.>", "checks", "acme/widgets"},
+		{"notifications.github.acme.widgets.pull_request.>", "pull_request", "acme/widgets"},
+		{"notifications.github.acme.widgets.release.>", "release", "acme/widgets"},
+		{"notifications.github.acme.a.b.c.>", "b", "acme/a"},
+	} {
+		want := tc.topic + `: "` + tc.token + `" after ` + tc.repository + ` is not a GitHub topic kind (` + kinds + `), and a dot in a repository name is written "_"`
+		if got := warnings(t, tc.topic); len(got) != 1 || got[0] != want {
+			t.Errorf("subscribe %s: warnings %q, want [%q]", tc.topic, got, want)
+		}
+	}
+}
+
 func TestSubscribeHandlerDoesNotBlockOnUnwiredRepositoryCheck(t *testing.T) {
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, nil)
 	lookup := stalledStreamInfo{deadlines: make(chan time.Duration, 1), release: make(chan struct{})}
 	t.Cleanup(func() { close(lookup.release) })
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{
+	state := &listenerDeps{
 		client:     client,
 		registry:   registry,
 		sessions:   sessions,
 		streamName: "notifications",
 		streamInfo: lookup,
-	})
+	}
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(`{
@@ -1211,7 +1255,7 @@ func TestSubscribeHandlerDoesNotBlockOnUnwiredRepositoryCheck(t *testing.T) {
 	responded := make(chan struct{})
 	go func() {
 		defer close(responded)
-		subscribeHandler(&state, "test-machine", logging.New("test")).ServeHTTP(recorder, request)
+		subscribeHandler(state, "test-machine", logging.New("test")).ServeHTTP(recorder, request)
 	}()
 	// The lookup never answers, so the handler can only respond by abandoning it at the check's
 	// own deadline. The wait below only turns a blocked handler into a failure instead of a hang.
@@ -1261,8 +1305,7 @@ func TestSubscribeHandlerFailsWhenSessionRegistryPutFails(t *testing.T) {
 	}
 	routeClient.Close()
 
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions})
+	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(`{
@@ -1270,7 +1313,7 @@ func TestSubscribeHandlerFailsWhenSessionRegistryPutFails(t *testing.T) {
 		"port":34751,
 		"topics":["notifications.github.example-org.example-repo.pr.>"]
 	}`))
-	subscribeHandler(&state, "test-machine", logging.New("test")).ServeHTTP(recorder, request)
+	subscribeHandler(state, "test-machine", logging.New("test")).ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503; body = %s", recorder.Code, recorder.Body.String())
@@ -1285,10 +1328,9 @@ func TestUnsubscribeRequiresSessionIDAndReturnsRemovedTopics(t *testing.T) {
 	registry, sessions := setupSessionsTest(t, map[string][]string{
 		"ses_subscriber": {"notifications.github.example-org.example-repo.pr.>"},
 	}, nil)
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions})
+	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
 	mux := http.NewServeMux()
-	registerV1Routes(mux, &state, "test-machine", logging.New("test"))
+	registerV1Routes(mux, state, "test-machine", logging.New("test"))
 
 	t.Run("missing session id", func(t *testing.T) {
 		recorder := httptest.NewRecorder()
@@ -1324,10 +1366,8 @@ func TestUnsubscribeAllReleasesRoleClaims(t *testing.T) {
 		t.Fatalf("SetRole: %v", err)
 	}
 
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions})
 	mux := http.NewServeMux()
-	registerV1Routes(mux, &state, "test-machine", logging.New("test"))
+	registerV1Routes(mux, &listenerDeps{client: client, registry: registry, sessions: sessions}, "test-machine", logging.New("test"))
 
 	recorder := httptest.NewRecorder()
 	mux.ServeHTTP(recorder, httptest.NewRequest(
@@ -1397,8 +1437,7 @@ func TestSendHandler_StampsInterestSenderWithoutSessionEntry(t *testing.T) {
 			"notifications.role.maintainer",
 		},
 	}, map[string]int{"ses_target": 1})
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions})
+	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/messages/send", strings.NewReader(`{
@@ -1406,7 +1445,7 @@ func TestSendHandler_StampsInterestSenderWithoutSessionEntry(t *testing.T) {
 		"target_session":"ses_target",
 		"message":"review this"
 	}`))
-	sendHandler(&state).ServeHTTP(recorder, request)
+	sendHandler(state).ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
@@ -1428,8 +1467,7 @@ func TestSendHandler_StampsInterestSenderWithoutSessionEntry(t *testing.T) {
 
 func TestPublishHandler_SuppliedPayloadWins(t *testing.T) {
 	client := setupPublishTestClient(t)
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: client})
+	state := &listenerDeps{client: client}
 	payload := `{"kind":"structured"}`
 	requestBody, err := json.Marshal(map[string]string{
 		"topic":   "notifications.github.example-org.example-repo.pr.1",
@@ -1441,7 +1479,7 @@ func TestPublishHandler_SuppliedPayloadWins(t *testing.T) {
 	}
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(string(requestBody)))
-	publishHandler(&state).ServeHTTP(recorder, request)
+	publishHandler(state).ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
@@ -1457,10 +1495,9 @@ func TestPublishHandler_SuppliedPayloadWins(t *testing.T) {
 
 func TestPublishHandlerPreservesAllOptionalMessageFields(t *testing.T) {
 	client := setupPublishTestClient(t)
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: client})
+	state := &listenerDeps{client: client}
 	recorder := httptest.NewRecorder()
-	publishHandler(&state).ServeHTTP(recorder, httptest.NewRequest(
+	publishHandler(state).ServeHTTP(recorder, httptest.NewRequest(
 		http.MethodPost,
 		"/v1/messages/publish",
 		strings.NewReader(`{
@@ -1489,8 +1526,7 @@ func TestPublishHandlerPreservesAllOptionalMessageFields(t *testing.T) {
 
 func TestPublishHandler_DedupeKeySelection(t *testing.T) {
 	client := setupPublishTestClient(t)
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: client})
+	state := &listenerDeps{client: client}
 	const topic = "notifications.github.example-org.example-repo.dedupe-key"
 	probe, err := client.Conn.SubscribeSync(topic)
 	if err != nil {
@@ -1514,7 +1550,7 @@ func TestPublishHandler_DedupeKeySelection(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			recorder := httptest.NewRecorder()
-			publishHandler(&state).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(tc.body)))
+			publishHandler(state).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(tc.body)))
 			if recorder.Code != http.StatusOK {
 				t.Fatalf("status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
 			}
@@ -1542,8 +1578,7 @@ func TestPublishHandler_DedupeKeySelection(t *testing.T) {
 
 func TestPublishHandler_RejectsDedupeKeyWithIdempotencyKey(t *testing.T) {
 	client := setupPublishTestClient(t)
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: client})
+	state := &listenerDeps{client: client}
 	const topic = "notifications.github.example-org.example-repo.dedupe-key-conflict"
 	probe, err := client.Conn.SubscribeSync(topic)
 	if err != nil {
@@ -1554,7 +1589,7 @@ func TestPublishHandler_RejectsDedupeKeyWithIdempotencyKey(t *testing.T) {
 		t.Fatalf("flush: %v", err)
 	}
 	recorder := httptest.NewRecorder()
-	publishHandler(&state).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+topic+`","message":"hello","dedupe_key":"publish.abc","idempotency_key":"k1"}`)))
+	publishHandler(state).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+topic+`","message":"hello","dedupe_key":"publish.abc","idempotency_key":"k1"}`)))
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body = %s", recorder.Code, recorder.Body.String())
 	}
@@ -1577,8 +1612,7 @@ func TestPublishHandler_RejectsDedupeKeyWithIdempotencyKey(t *testing.T) {
 func TestPublishHandler_RejectsReservedDedupeKeyPrefix(t *testing.T) {
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, nil)
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions})
+	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
 	for _, topic := range []string{
 		"notifications.github.example-org.example-repo.reserved-prefix",
 		contracts.RoleTopicPrefix + "reserved-prefix-unheld",
@@ -1593,7 +1627,7 @@ func TestPublishHandler_RejectsReservedDedupeKeyPrefix(t *testing.T) {
 				t.Fatalf("flush: %v", err)
 			}
 			recorder := httptest.NewRecorder()
-			publishHandler(&state).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+topic+`","message":"hello","dedupe_key":"`+roleForwardDedupePrefix+`publish.abc"}`)))
+			publishHandler(state).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+topic+`","message":"hello","dedupe_key":"`+roleForwardDedupePrefix+`publish.abc"}`)))
 			if recorder.Code != http.StatusBadRequest {
 				t.Fatalf("status = %d, want 400; body = %s", recorder.Code, recorder.Body.String())
 			}
@@ -1617,10 +1651,9 @@ func TestPublishHandler_RejectsReservedDedupeKeyPrefix(t *testing.T) {
 func TestSendHandler_IgnoresDedupeKeyBesideIdempotencyKey(t *testing.T) {
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, map[string]int{"ses_target": 1})
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions})
+	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
 	recorder := httptest.NewRecorder()
-	sendHandler(&state).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/send", strings.NewReader(`{"target_session":"ses_target","message":"hello","dedupe_key":"publish.abc","idempotency_key":"k1"}`)))
+	sendHandler(state).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/send", strings.NewReader(`{"target_session":"ses_target","message":"hello","dedupe_key":"publish.abc","idempotency_key":"k1"}`)))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
 	}
@@ -1634,9 +1667,9 @@ func TestSendHandler_IgnoresDedupeKeyBesideIdempotencyKey(t *testing.T) {
 }
 
 func TestRegisterV1Routes_UnknownRouteReturnsJSONError(t *testing.T) {
-	var state atomic.Pointer[listenerDeps]
 	mux := http.NewServeMux()
-	registerV1Routes(mux, &state, "test-machine", logging.New("test"))
+	// No known route is requested, so no store is read.
+	registerV1Routes(mux, &listenerDeps{}, "test-machine", logging.New("test"))
 
 	for _, path := range []string{"/v1", "/v1/not-a-route"} {
 		t.Run(path, func(t *testing.T) {
@@ -1664,13 +1697,12 @@ func TestRegisterV1Routes_UnknownRouteReturnsJSONError(t *testing.T) {
 func TestSendHandler_ReportsAJetStreamDuplicate(t *testing.T) {
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, map[string]int{"ses_target": 1})
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions})
+	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
 
 	send := func(t *testing.T, body string) sendResponse {
 		t.Helper()
 		recorder := httptest.NewRecorder()
-		sendHandler(&state).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/send", strings.NewReader(body)))
+		sendHandler(state).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/send", strings.NewReader(body)))
 		if recorder.Code != http.StatusOK {
 			t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 		}
@@ -1710,8 +1742,7 @@ func TestSendHandler_ReportsAJetStreamDuplicate(t *testing.T) {
 func TestMessageHandlersRejectPresentEmptyOptionalFields(t *testing.T) {
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, map[string]int{"ses_target": 1})
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions})
+	deps := &listenerDeps{client: client, registry: registry, sessions: sessions}
 	for _, tc := range []struct {
 		path, body, field string
 	}{
@@ -1724,9 +1755,9 @@ func TestMessageHandlersRejectPresentEmptyOptionalFields(t *testing.T) {
 			rr := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
 			if tc.path == "/v1/messages/send" {
-				sendHandler(&state).ServeHTTP(rr, req)
+				sendHandler(deps).ServeHTTP(rr, req)
 			} else {
-				publishHandler(&state).ServeHTTP(rr, req)
+				publishHandler(deps).ServeHTTP(rr, req)
 			}
 			var response apiError
 			_ = json.NewDecoder(rr.Body).Decode(&response)
@@ -1740,8 +1771,7 @@ func TestMessageHandlersRejectPresentEmptyOptionalFields(t *testing.T) {
 func TestMessageHandlersUseFirstNonEmptyLine(t *testing.T) {
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, map[string]int{"ses_target": 1})
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions})
+	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
 	for _, tc := range []struct{ path, body string }{
 		{"/v1/messages/send", `{"target_session":"ses_target","message":"\n  \nFirst paragraph.\n\nSecond paragraph."}`},
 		{"/v1/messages/publish", `{"topic":"notifications.github.example-org.example-repo.pr.1","message":"\n  \nFirst paragraph.\n\nSecond paragraph."}`},
@@ -1749,9 +1779,9 @@ func TestMessageHandlersUseFirstNonEmptyLine(t *testing.T) {
 		rr := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
 		if tc.path == "/v1/messages/send" {
-			sendHandler(&state).ServeHTTP(rr, req)
+			sendHandler(state).ServeHTTP(rr, req)
 		} else {
-			publishHandler(&state).ServeHTTP(rr, req)
+			publishHandler(state).ServeHTTP(rr, req)
 		}
 		var envelope contracts.Envelope
 		_ = json.NewDecoder(rr.Body).Decode(&envelope)
@@ -1762,9 +1792,7 @@ func TestMessageHandlersUseFirstNonEmptyLine(t *testing.T) {
 }
 func TestSubscribeHandlerStoresAndListsCapabilities(t *testing.T) {
 	registry, sessions := setupSessionsTest(t, nil, nil)
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{registry: registry, sessions: sessions})
-	handler := subscribeHandler(&state, "test-machine", logging.New("test"))
+	handler := subscribeHandler(&listenerDeps{registry: registry, sessions: sessions}, "test-machine", logging.New("test"))
 
 	for _, body := range []string{
 		`{"session_id":"ses_capable","topics":[],"self_subscribed":true,"capabilities":["aside","btw"]}`,

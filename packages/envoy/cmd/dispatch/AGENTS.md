@@ -141,7 +141,7 @@ the table says human only.
 | `/api/github/graphql` | POST | identity | Proxy GitHub GraphQL with the user's token. |
 | `/healthz` | GET | public | Report that the process serves, Postgres answers within two seconds on the health pool, and NATS is connected where configured. |
 | `/api/v1/projects` | GET, POST | POST human only | List projects (including `open_asks`) or create one. |
-| `/api/v1/projects/{key}/artifacts` | GET, POST | user or bearer | List non-primary artifacts in a project (`?unlinked=true` selects unlinked ones) or create an unlinked project artifact. |
+| `/api/v1/projects/{key}/artifacts` | GET, POST | user or bearer | List non-primary artifacts in a project (`?unlinked=true` selects unlinked ones) or create an unlinked project artifact. An ask block whose body breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`; a new version is held to it only for the asks it writes or changes. |
 | `/api/v1/settings/repo-projects` | GET | human only | List repository-to-project mappings. |
 | `/api/v1/settings/repo-projects/{owner}/{repo}` | PUT, DELETE | human only | Create or replace, or remove, a repository mapping. |
 | `/api/v1/settings/architecture-sources` | GET | human only | List every project's architecture source with its sync bookkeeping. |
@@ -152,7 +152,7 @@ the table says human only.
 | `/api/v1/me/agent-tokens/{id}` | DELETE | human only | Revoke a personal agent token. |
 | `/api/v1/users` | GET | human only | The sign-in allowlist as `{users: [{login}]}`, sorted lowercase: the assignee picker's options (pure config, no DB). |
 | `/api/v1/whoami` | GET | user or bearer | Who the server takes the caller for: `{kind: "user", login}` for a human, `{kind: "agent", owner, service}` for a bearer (`owner` is the personal token's lowercase login, null under the shared token; `service` is a verified service-account token's Kubernetes subject, null for every other bearer). |
-| `/api/v1/issues` | GET, POST | POST human or bearer | List or create native issues. Creation refuses a title that near-duplicates an issue in the project with `409 POSSIBLE_DUPLICATE` and candidates unless `force` is true; external references skip the check. |
+| `/api/v1/issues` | GET, POST | POST human or bearer | List or create native issues. Creation refuses a title that near-duplicates an issue in the project with `409 POSSIBLE_DUPLICATE` and candidates unless `force` is true; external references skip the check. A spec whose ask block breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`. |
 | `/api/v1/search?q=&project=&limit=` | GET | user or bearer | Full-text search over issue titles, latest document text, comments, asks, and messages; ranked results contain `<mark>` snippets and SPA `href`s. `limit` is 1–50 (default 20); an under-two-character or stop-word-only query returns `400 INVALID_QUERY`, and an invalid limit returns `400 INVALID_LIMIT`. |
 | `/api/v1/issues/{key}` | GET, PATCH | PATCH human or bearer | Read or update an issue. `assignee` (an allowlisted login, lowercased; `null` clears; absent leaves it) may be set by any caller; an unlisted login is `400 ASSIGNEE_NOT_ALLOWED`. `components` is the issue's own architecture attachment: `null` or `{mode: "inherit"}` deletes it (the issue takes its nearest ancestor's again), `{mode: "explicit", ids}` names bare component ids of the issue's project (`400 COMPONENTS_INPUT` for an unknown, retired, external, or other-project id), `{mode: "none", reason}` declares the issue not architectural; it is the one field besides `rank` a closed issue accepts without reopening. Every issue read carries the effective `components` (`mode`, `ids`, `unknown` for retired ids, `reason`, `inherited_from`), resolved up the parent chain in the same query. |
 | `/api/v1/issues/resolve` | GET | user or bearer | Resolve an external issue reference to its native key. |
@@ -173,12 +173,12 @@ the table says human only.
 | `/api/v1/comments/{id}/accept` | POST | human only | Apply and accept a suggestion. |
 | `/api/v1/comments/{id}/reject` | POST | human only | Reject a suggestion. |
 | `/api/v1/issues/{key}/messages` | POST | user or bearer | Post a short issue message. |
-| `/api/v1/issues/{key}/artifacts` | GET, POST | user or bearer | List issue artifacts or create a version from a multipart file or JSON inline content. The JSON form requires `Content-Type: application/json`. |
+| `/api/v1/issues/{key}/artifacts` | GET, POST | user or bearer | List issue artifacts or create a version from a multipart file or JSON inline content. The JSON form requires `Content-Type: application/json`. An ask block whose body breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`; a new version is held to it only for the asks it writes or changes. |
 | `/api/v1/artifacts/{id}` | GET | user or bearer | Read an artifact, versions, and incoming references. `{id}` must be a UUID. |
 | `/api/v1/artifacts/{id}/text` | GET | user or bearer | Read a live document's markdown. `{id}` must be a UUID. |
 | `/api/v1/artifacts/{id}/versions/{n}` | GET | user or bearer | Read a document version or download a blob. `{id}` must be a UUID. |
 | `/api/v1/artifacts/{id}/versions` | POST | user or bearer | Create a named live-document version. `{id}` must be a UUID. |
-| `/api/v1/artifacts/{id}/edits` | POST | user or bearer | Apply document edit operations. `{id}` must be a UUID. |
+| `/api/v1/artifacts/{id}/edits` | POST | user or bearer | Apply document edit operations. `{id}` must be a UUID. An edit is `400 INVALID_ASK_BLOCK` when an ask it writes or changes breaks its content rule (`paragraph+ bullet_list?`) or holds what settlement cannot read; an ask it carries through unchanged is not its to refuse. |
 | `/api/v1/artifacts/{id}/asks?state=` | GET, POST | user or bearer | List or create asks on an unlinked document. |
 | `/api/v1/artifacts/{id}/comments` | GET, POST | user or bearer | List or create comments and suggestions on an unlinked document. |
 | `/api/v1/artifacts/{id}/events` | GET | user or bearer | Read an unlinked document's events. |

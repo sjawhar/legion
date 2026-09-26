@@ -21,6 +21,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -113,7 +114,7 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	// The loader refuses a workflow whose projects do not configure the daemon's own, and a repo that
 	// is not owner/name.
 	project := cfg.Projects[cfg.Project]
-	owner, _, _ := strings.Cut(project.Repo, "/")
+	owner := project.Repo.Owner()
 	log.Info("legion workflow boot stage", "stage", "config")
 	tokens := suppliedTokens
 	if tokens == nil {
@@ -165,7 +166,7 @@ func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config) error 
 	}
 	w.log.Info("legion workflow boot stage", "stage", "intake")
 	w.consumers, err = intake.OpenConsumers(ctx, js, intake.ConsumerSpec{
-		Project: cfg.Project, Repositories: []string{w.project.Repo}, AckWait: cfg.WorkerRPCTimeout, NakDelay: time.Second, Logger: w.log,
+		Project: cfg.Project, Repositories: []ghrepo.Repository{w.project.Repo}, AckWait: cfg.WorkerRPCTimeout, NakDelay: time.Second, Logger: w.log,
 	})
 	return err
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -632,6 +633,76 @@ func TestGithubResourceSubject(t *testing.T) {
 		got := GithubResourceSubject(item.owner, item.repo, item.resourceType, item.resourceNum)
 		if got != item.want {
 			t.Fatalf("GithubResourceSubject(%s, %s, %s, %s) = %s, want %s", item.owner, item.repo, item.resourceType, item.resourceNum, got, item.want)
+		}
+	}
+}
+
+// A GitHub repository's name may hold a dot, and a NATS subject splits on dots, so every GitHub
+// subject writes the owner and the name each as one segment, a dot as `_` (SanitizeSubjectSegment):
+// `sjawhar/.github` is otherwise an empty token no stream stores, and `acme/a.b` lands inside
+// `acme/a`'s `notifications.github.acme.a.>`. A name without a dot is written as it is.
+func TestGithubSubjectsWriteADottedOwnerOrNameAsOneSegment(t *testing.T) {
+	for _, tc := range []struct{ got, want string }{
+		{GithubSubject("sjawhar", ".github", "mention"), "notifications.github.sjawhar._github.mention"},
+		{GithubResourceSubject("acme", "a.b", "pr", "7"), "notifications.github.acme.a_b.pr.7"},
+		{GithubPushSubject("my-org", "a_b.c", "branch", "legion/X-1"), "notifications.github.my-org.a_b_c.push.branch.legion/X-1"},
+		{GithubWorkflowSubject("acme", "site.io", "ci.yml", "completed"), "notifications.github.acme.site_io.workflow.ci_yml.completed"},
+		{GithubSubject("acme", "widgets", "pr.7.checks"), "notifications.github.acme.widgets.pr.7.checks"},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("subject = %s, want %s", tc.got, tc.want)
+		}
+	}
+}
+
+// The listener reads GithubTopicKinds as where a repository name ends in a topic, so every token
+// Envoy publishes right after a repository's owner and name is one: the kind and parent kind of
+// every event the two tables name and of one they don't, the mention, push, workflow and checks
+// topics, and every golden envelope's topic.
+func TestGithubTopicKindsHoldEveryTokenAfterTheRepository(t *testing.T) {
+	const prefix = "notifications.github.example-org.example-repo."
+	topics := []string{
+		GithubSubject("example-org", "example-repo", "mention"),
+		GithubPushSubject("example-org", "example-repo", "branch", "main"),
+		GithubWorkflowSubject("example-org", "example-repo", "ci.yml", "completed"),
+		GithubSubject("example-org", "example-repo", "pr.7.checks"),
+	}
+	events := []string{"merge_group"}
+	for event := range githubEventKinds {
+		events = append(events, event)
+	}
+	for event := range githubEventParents {
+		events = append(events, event)
+	}
+	for _, event := range events {
+		topics = append(topics, prefix+githubKind(event))
+		for _, body := range []map[string]any{{}, {"issue": map[string]any{"pull_request": map[string]any{}}}} {
+			if parent := githubParentKind(event, body); parent != "" {
+				topics = append(topics, prefix+parent)
+			}
+		}
+	}
+	goldens, err := filepath.Glob(filepath.Join("..", "..", "..", "contracts", "fixtures", "github-envelopes", "*.json"))
+	if err != nil || len(goldens) == 0 {
+		t.Fatalf("golden envelopes: %v, %d found", err, len(goldens))
+	}
+	for _, path := range goldens {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var golden struct {
+			Topic string `json:"topic"`
+		}
+		if err := json.Unmarshal(raw, &golden); err != nil {
+			t.Fatal(err)
+		}
+		topics = append(topics, golden.Topic)
+	}
+	for _, topic := range topics {
+		parts := strings.Split(strings.TrimPrefix(topic, "notifications.github."), ".")
+		if len(parts) < 3 || !slices.Contains(GithubTopicKinds, parts[2]) {
+			t.Errorf("%s: token %q after the repository is not in GithubTopicKinds %v", topic, parts[min(2, len(parts)-1)], GithubTopicKinds)
 		}
 	}
 }
@@ -1748,6 +1819,40 @@ func TestGithubPayloadFields(t *testing.T) {
 			omitted: []string{"changed_paths"},
 		},
 		{
+			name:  "a forced push says so",
+			event: "push",
+			body: map[string]any{
+				"repository": map[string]any{"full_name": "example-org/example-repo"},
+				"ref":        "refs/heads/legion/X",
+				"forced":     true,
+				"commits": []any{
+					map[string]any{"id": "1", "added": []any{}, "removed": []any{}, "modified": []any{".legion/review.json"}},
+				},
+			},
+			want: map[string]string{"forced": "true", "changed_paths": ".legion/review.json"},
+		},
+		{
+			name:  "a push GitHub says was not forced says so",
+			event: "push",
+			body: map[string]any{
+				"repository": map[string]any{"full_name": "example-org/example-repo"},
+				"ref":        "refs/heads/legion/X",
+				"forced":     false,
+				"commits":    []any{},
+			},
+			want: map[string]string{"forced": "false"},
+		},
+		{
+			name:  "a push whose body leaves forced out says it was not forced",
+			event: "push",
+			body: map[string]any{
+				"repository": map[string]any{"full_name": "example-org/example-repo"},
+				"ref":        "refs/heads/legion/X",
+				"commits":    []any{},
+			},
+			want: map[string]string{"forced": "false"},
+		},
+		{
 			name:  "push removing the .legion handoffs lists the removed paths",
 			event: "push",
 			body: map[string]any{
@@ -1846,12 +1951,25 @@ func TestGithubPayloadFields(t *testing.T) {
 				"pull_request": map[string]any{"number": 27, "head": map[string]any{"sha": "review-head-sha"}},
 				"review": map[string]any{
 					"body": "Ship it", "state": "approved", "commit_id": "review-commit-sha",
-					"user": map[string]any{"login": "reviewer"},
+					"submitted_at": nil, "user": map[string]any{"login": "reviewer"},
 				},
 			},
 			want: map[string]string{
 				"commit_id": "review-commit-sha", "head_sha": "review-head-sha", "state": "approved",
 			},
+			omitted: []string{"review_id", "submitted_at"},
+		},
+		{
+			name:  "a review carries GitHub's review id and its submission time",
+			event: "pull_request_review",
+			body: map[string]any{
+				"action":       "submitted",
+				"repository":   map[string]any{"full_name": "example-org/example-repo"},
+				"pull_request": map[string]any{"number": 19, "head": map[string]any{"sha": "head-sha"}},
+				"review": map[string]any{"id": float64(5325101010), "state": "approved", "commit_id": "head-sha",
+					"submitted_at": "2026-09-26T12:03:00Z", "user": map[string]any{"login": "reviewer"}},
+			},
+			want: map[string]string{"review_id": "5325101010", "submitted_at": "2026-09-26T12:03:00Z"},
 		},
 		{
 			name:  "long comment body is capped and marked",
@@ -1944,6 +2062,8 @@ func TestGithubPayloadPushChangedPathsFixture(t *testing.T) {
 		"commit_count":            "1",
 		"after":                   "538bbf1ab6b933e2b0aaf1cbe83106c387a70035",
 		"ref":                     "refs/heads/legion/LEGION-23",
+		// GitHub's own push carries "forced": false.
+		"forced": "false",
 	}
 	for key, value := range want {
 		if got := payload[key]; got != value {

@@ -1,13 +1,13 @@
-// scripts/kind-smoke/envoy-bridge.ts — SMOKE_GITHUB_INGRESS=envoy: relay the sandbox repository's
-// GitHub subjects from production NATS (read-only) into a kind smoke instance's own NATS. It
-// subscribes upstream to exactly `notifications.github.<owner>.<repo>.>` and republishes each
-// message unchanged downstream; it never publishes upstream, and it never touches Dispatch issue
-// subjects — the instance's scratch Dispatch server publishes its own, and two rigs on one issue
-// stream admitted each other's issues (docs/solutions/legion).
+// scripts/e2e/lib/envoy-bridge.ts: relay the sandbox repository's GitHub subjects from production
+// NATS (read-only) into a live proof's own NATS (stage3-devbox-workflow.sh starts it). It
+// subscribes upstream to exactly `notifications.github.<owner>.<repo>.>`, a dot in either name
+// written `_` as Envoy publishes it, and republishes each message unchanged downstream; it never
+// publishes upstream, and it never touches Dispatch issue subjects — the instance's scratch
+// Dispatch server publishes its own, and two rigs on one issue stream admitted each other's issues
+// (docs/solutions/legion).
 import { connect, type NatsConnection, type Subscription } from "nats";
-import { EnvelopeSchema } from "../../packages/contracts/src/envelope";
-
-export const DEFAULT_UPSTREAM_NATS_URL = "nats://envoy-nats.tailb86685.ts.net:4222";
+import { EnvelopeSchema } from "../../../packages/contracts/src/envelope";
+import { githubSubject } from "../../../packages/contracts/src/subject";
 
 const requiredEnvelopeFields = [
   "event_id",
@@ -60,12 +60,39 @@ export function bridgeConfigFromEnvironment(
   }
   const downstreamUrl = environment.SMOKE_RIG_NATS?.trim() ?? "";
   if (!downstreamUrl) throw new Error("SMOKE_RIG_NATS is required");
+  const upstreamUrl = environment.SMOKE_UPSTREAM_NATS?.trim() ?? "";
+  if (!upstreamUrl) throw new Error("SMOKE_UPSTREAM_NATS is required");
+  if (!upstreamNatsUrl.test(upstreamUrl)) {
+    throw new Error(
+      "SMOKE_UPSTREAM_NATS is not one NATS URL naming a fully-qualified host: a bare alias resolves through whatever search domain the box has; name the production Envoy NATS as nats://envoy-nats.<tailnet>.ts.net:4222"
+    );
+  }
+  const [owner, name] = repository.split("/");
   return {
     repository,
-    subjects: [`notifications.github.${repository.replace("/", ".")}.>`],
-    upstreamUrl: environment.SMOKE_UPSTREAM_NATS?.trim() || DEFAULT_UPSTREAM_NATS_URL,
+    subjects: [githubSubject(owner, name, ">")],
+    upstreamUrl,
     downstreamUrl,
   };
+}
+
+// One NATS server URL: an optional scheme and user info, a host with a dot, an optional port, and
+// nothing after it. The client dials whatever follows the last "://", so a path or a query could
+// name a host other than the one checked here. Stage 3 holds the same pattern.
+const upstreamNatsUrl =
+  /^(?:[A-Za-z][A-Za-z0-9+.-]*:\/\/)?(?:([^@/?#,\s]+)@)?([A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+)(?::\d+)?\/?$/;
+
+// The operator's upstream names production infrastructure, so a client error that quotes the
+// value, its user info or its host is printed with the variable's name in their place.
+export function redactUpstream(text: string, upstreamUrl: string): string {
+  const [, userInfo, host] = upstreamNatsUrl.exec(upstreamUrl) ?? [];
+  let redacted = text;
+  for (const value of [upstreamUrl, userInfo, host]) {
+    if (!value) continue;
+    const pattern = new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+    redacted = redacted.replace(pattern, "SMOKE_UPSTREAM_NATS");
+  }
+  return redacted;
 }
 
 export function envelopeValidation(data: string | Uint8Array): EnvelopeValidation {
@@ -140,7 +167,7 @@ async function forwardMessages(
 export async function runBridge(config: BridgeConfig): Promise<void> {
   const upstream = await connect({
     servers: config.upstreamUrl,
-    name: `legion-kind-smoke-bridge-upstream-${config.repository}`,
+    name: `legion-e2e-bridge-upstream-${config.repository}`,
     reconnect: true,
     maxReconnectAttempts: -1,
     reconnectTimeWait: 2_000,
@@ -149,7 +176,7 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
   try {
     downstream = await connect({
       servers: config.downstreamUrl,
-      name: `legion-kind-smoke-bridge-downstream-${config.repository}`,
+      name: `legion-e2e-bridge-downstream-${config.repository}`,
       reconnect: true,
       maxReconnectAttempts: -1,
       reconnectTimeWait: 2_000,
@@ -165,7 +192,7 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
       await upstream.flush();
       await downstream.flush();
       console.log(
-        `BRIDGE READY subjects=${config.subjects.join(",")} upstream=${config.upstreamUrl} downstream=${config.downstreamUrl}`
+        `BRIDGE READY subjects=${config.subjects.join(",")} upstream=SMOKE_UPSTREAM_NATS downstream=${config.downstreamUrl}`
       );
       await Promise.all(
         subscriptions.map((subscription, index) =>
@@ -182,8 +209,10 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
 }
 
 if (import.meta.main) {
-  await runBridge(bridgeConfigFromEnvironment(process.env)).catch((error) => {
-    console.error(`BRIDGE UNHEALTHY ${error instanceof Error ? error.message : String(error)}`);
+  const config = bridgeConfigFromEnvironment(process.env);
+  await runBridge(config).catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`BRIDGE UNHEALTHY ${redactUpstream(message, config.upstreamUrl)}`);
     process.exitCode = 1;
   });
 }
