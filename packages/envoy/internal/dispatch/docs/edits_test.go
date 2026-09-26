@@ -1360,9 +1360,9 @@ func TestApplyOperationReplaceKeepsItsEdgeWhitespaceOnceOutsideTheMarks(t *testi
 	}
 }
 
-// A heading and a table cell are each written on one line, so a hard break replaced into one
-// ends the block there: the heading reads back as a heading and a paragraph, the cell's row as two
-// rows. A hard break in a paragraph or a list item is kept.
+// A heading and a table cell are each written on one line, so a hard break replaced into one, or a
+// line break inside a code span or inline HTML, ends the block there: the heading reads back as a
+// heading and a paragraph, the cell's row as two rows. In a paragraph or a list item they are kept.
 func TestApplyOperationReplaceRefusesAHardBreakInAHeadingOrTableCell(t *testing.T) {
 	for _, test := range []struct {
 		document string
@@ -1375,7 +1375,7 @@ func TestApplyOperationReplaceRefusesAHardBreakInAHeadingOrTableCell(t *testing.
 		{document: "- Body.\n", refused: false},
 		{document: "> Body.\n", refused: false},
 	} {
-		for _, with := range []string{"x  \ny", "x\\\ny"} {
+		for _, with := range []string{"x  \ny", "x\\\ny", "`x\ny`", "<span\nclass=\"x\">y</span>"} {
 			t.Run(test.document+with, func(t *testing.T) {
 				tree, err := parseInput(test.document)
 				if err != nil {
