@@ -1112,19 +1112,21 @@ set, names a file whose trimmed contents win over a bare `<NAME>` — with both 
 silently, nothing is refused — and a named-but-unreadable or empty file is a startup error naming
 the file, never a silent fallback to an unset value. `config.Load` refuses to start on: a missing
 required variable; a `BROKER_PUBLIC_URL` or `BROKER_DISPATCH_URL` that isn't an absolute URL with
-no path; both or neither of `BROKER_RULES_FILE`/`BROKER_RULES_S3_URI` set; and an out-of-range
-integer among the `_SECONDS` variables. `cmd/broker/main.go` reads one more variable directly,
+no path; both or neither of `BROKER_RULES_FILE`/`BROKER_RULES_S3_URI` set; a `BROKER_RULES_S3_URI`
+without an `s3://` prefix; exactly one of `BROKER_K8S_OIDC_ISSUER`/`BROKER_K8S_OIDC_AUDIENCE` set;
+and a `_SECONDS` variable that isn't a whole number between 1 and its max (a non-numeric value
+fails the same check as one out of range). `cmd/broker/main.go` reads one more variable directly,
 outside `config.Load`: when `BROKER_RULES_FILE` selects local rules (rather than
 `BROKER_RULES_S3_URI`, which is what selects AWS Secrets Manager for secret values), `main.go`
 requires `BROKER_FAKE_SECRETS_FILE` and refuses to start without it — a local-dev-only path, since
 production pairs `BROKER_RULES_S3_URI` with Secrets Manager instead.
 
 `internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's HTTP routes — a
-new route is a new row there, never a bare `mux.HandleFunc`. Its own comment says the wire
-contract for every row — request/response shapes, status codes — is the AGENTC-393 overview
-document; each row's own `Auth` field (`authNone`, `authLauncher`, `authProof`, or
-`authHumanOrProof`) is what `api/server.go` actually enforces for authentication, not something
-deferred to that document. Read `routes()` for the current, authoritative route list.
+new route is a new row there, never a bare `mux.HandleFunc`. Its own comment says the contract for
+every row is the AGENTC-393 overview document; each row's own `Auth` field (`authNone`,
+`authLauncher`, `authProof`, or `authHumanOrProof`) is what `api/server.go` actually enforces for
+authentication (that document is the wire contract — request/response shapes, status codes — not
+the authentication rule). Read `routes()` for the current, authoritative route list.
 
 `internal/broker/requests` is the state machine. A request's terminal states — `granted`,
 `denied`, `cancelled`, `expired` — are final: every transition is an `UPDATE` guarded by
@@ -1150,6 +1152,6 @@ Tests: `cd packages/envoy && go vet ./... && go test ./internal/broker/... ./cmd
 ./cmd/agent-secrets/...`. The Postgres-backed tests skip, rather than fail, when
 `BROKER_TEST_DATABASE_URL` is unset (`t.Skip`, e.g. `internal/broker/store`,
 `internal/broker/requests`); `packages/envoy/scripts/dev-postgres.sh` starts a local Postgres for
-them, the same script `cmd/dispatch/AGENTS.md` documents for its own Postgres-backed tests, and
+them, the same script `cmd/dispatch/README.md` documents for its own Postgres-backed tests, and
 CI's `envoy-go` job (`.github/workflows/envoy-and-contracts.yaml`) points
 `BROKER_TEST_DATABASE_URL` at the same server as `DISPATCH_TEST_DATABASE_URL`.
