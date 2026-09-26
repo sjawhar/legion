@@ -1632,9 +1632,9 @@ describe("envoy OMP extension", () => {
     const longQuestion = `A held question that exceeds the prompt limit: ${"x".repeat(130)}`;
     const heldQuestions = [
       "First held question",
-      "Second held question\nwith details that do not belong in the prompt",
-      "Third held question",
-      "Fourth held question",
+      "Second held question\u2028with details that do not belong in the prompt",
+      "Third held question\rwith details that do not belong in the prompt",
+      "Fourth held question with\ta bell\u0007character",
       longQuestion,
       "Sixth held question",
     ];
@@ -1645,12 +1645,19 @@ describe("envoy OMP extension", () => {
     await held.stop();
 
     const heldPrompt = held.asked[0]?.prompt ?? "";
-    for (const question of heldQuestions.slice(0, 4)) {
-      expect(heldPrompt).toContain(question.split("\n")[0] ?? "");
-    }
-    expect(heldPrompt).toContain(`${longQuestion.slice(0, 119)}…`);
-    expect(heldPrompt).not.toContain(longQuestion);
+    const askListStart = heldPrompt.indexOf("Your open asks in Dispatch:");
+    const askListEnd = heldPrompt.indexOf("\n\nAre you right now waiting");
+    expect(heldPrompt.slice(askListStart, askListEnd).split("\n")).toEqual([
+      "Your open asks in Dispatch:",
+      "- First held question",
+      "- Second held question",
+      "- Third held question",
+      "- Fourth held question with a bell character",
+      `- ${longQuestion.slice(0, 119)}…`,
+      "+1 more",
+    ]);
     expect(heldPrompt).not.toContain("with details that do not belong in the prompt");
+    expect(heldPrompt).not.toContain(longQuestion);
     expect(heldPrompt).not.toContain("Sixth held question");
     expect(heldPrompt).toContain("+1 more");
 

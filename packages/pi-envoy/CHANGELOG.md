@@ -6,11 +6,12 @@
 
 - The run-end silent self-check now runs on every normal settle of an eligible session, including
   sessions that already hold open asks. Its one prompt names the first line of up to five open ask
-  questions (or says there are none), then asks whether the agent is waiting on a human for
-  something those asks do not cover. A WAITING verdict produces the same one
-  `dispatch-ask-reminder` steer for every session; PROCEEDING remains silent. The existing
-  normal-settle, UI-host, Legion-managed/task-subagent, period, budget, stale-generation,
-  open-mid-check abort, and one-check-at-a-time guards are unchanged.
+  questions (or says there are none), truncates each at about 120 characters, and normalizes
+  Unicode line separators and C0/C1 controls so a question cannot add prompt lines. It asks
+  whether the agent is waiting on a human for something those asks do not cover. A WAITING verdict
+  produces the same one `dispatch-ask-reminder` steer for every session; PROCEEDING remains silent.
+  The existing normal-settle, UI-host, Legion-managed/task-subagent, period, budget,
+  stale-generation, open-mid-check abort, and one-check-at-a-time guards are unchanged.
 - The package ships the task agents Legion's skills dispatch, in `agents/`: `oracle` (`legion-oracle`) and `thermonuclear-deep-review` and `thermonuclear-code-quality` (the reviewer's pair in `legion-worker`), copied from the operator's definitions. Oh My Pi finds an installed plugin's `agents/` in a pane and an explicit extension root's in a pod, so a worker's `task(agent="…")` no longer depends on agent files in the operator's profile. Before, a worker without them got `Unknown agent … Available: scout, reviewer, …` and carried on, usually by substituting `reviewer` (LEGION-200). Each declares an Oh My Pi model role the operator's `modelRoles` maps: `@review` for the pair, `@oracle` for `oracle`.
 - The skills those prompts load ship with the others under `dist/skills`: the pair's rubrics (`thermonuclear-deep-review`, `thermonuclear-code-quality`) and the implementer's simplify pass (`ce-simplify-code`, Legion's copy of the MIT-licensed Compound Engineering skill, dispatching its personas to the bundled `reviewer`). Before, the pair loaded a rubric only an operator profile carrying the dotfiles had, and reviewed from a five-step outline without it (LEGION-200).
 - Under the Go daemon (`LEGION_DAEMON_API=go`), the operator-launched controller (`legion controller start`) runs as a controller session instead of being refused: it registers on `/legion/v1/claims/register` with its controller capability, claims `legion-<project>-controller`, and mints each bash command's grant from the `/grants` controller-session form with the secret its registration was issued.

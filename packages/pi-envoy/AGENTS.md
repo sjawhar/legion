@@ -275,9 +275,11 @@ period runs one **silent self-check**: one `pi.askEphemeral` call — the host's
 model call over a snapshot of the conversation, the same channel a targeted Dispatch BTW uses.
 The handler uses the open-asks snapshot it already reads to name the session's own open asks in
 the prompt: the first line of at most five questions, each truncated to about 120 characters,
-followed by `+N more`; with no asks it says so. The one prompt asks whether the agent is waiting on
-a human for anything those asks do not cover, answered with exactly WAITING or PROCEEDING. An open
-ask or `opened_since` never suppresses this check.
+followed by `+N more`; with no asks it says so. Every Unicode line separator ends that displayed
+first line, and other C0/C1 controls become spaces, so a listed ask cannot add prompt lines. The
+one prompt asks whether the agent is waiting on a human for anything those asks do not cover,
+answered with exactly WAITING or PROCEEDING. An open ask or `opened_since` never suppresses this
+check.
 
 Only a reply whose first word is WAITING, and which does not also name PROCEEDING (a model echoing
 the choice rather than making it), produces the one hidden `dispatch-ask-reminder` steer with

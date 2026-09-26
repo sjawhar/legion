@@ -98,7 +98,30 @@ const LEGION_MANAGED_ENTRY = "legion-managed-session";
 
 /** Custom-message type of the run-end nudge itself; never displayed. */
 const ASK_REMINDER_MESSAGE = "dispatch-ask-reminder";
+/** Unicode line separators that terminate a displayed ask question. */
+const ASK_PROMPT_LINE_SEPARATOR = /\r\n|[\r\n\u0085\u2028\u2029]/;
 
+/**
+ * Return the first display line while keeping all other C0/C1 controls visibly inert. The
+ * separator search handles CRLF, bare CR/LF, NEL, and Unicode line separators; every other
+ * control becomes one space before the bounded prompt line is formed.
+ */
+function askPromptQuestionHead(question: string): string {
+  const firstLineEnd = question.search(ASK_PROMPT_LINE_SEPARATOR);
+  const firstLine = firstLineEnd === -1 ? question : question.slice(0, firstLineEnd);
+  let normalized: string[] | undefined;
+  let segmentStart = 0;
+  for (let index = 0; index < firstLine.length; index += 1) {
+    const codePoint = firstLine.charCodeAt(index);
+    if (codePoint > 0x1f && (codePoint < 0x7f || codePoint > 0x9f)) continue;
+    normalized ??= [];
+    normalized.push(firstLine.slice(segmentStart, index), " ");
+    segmentStart = index + 1;
+  }
+  return (normalized === undefined
+    ? firstLine
+    : `${normalized.join("")}${firstLine.slice(segmentStart)}`).trim();
+}
 /**
  * What the hidden self-check asks the agent, over a snapshot of its own conversation. It names
  * the asks Dispatch already knows about, then asks whether the agent is waiting on a human for
@@ -113,10 +136,7 @@ const ASK_SELF_CHECK_PROMPT = (asks: readonly Pick<OpenAsk, "question">[]): stri
       : [
           "Your open asks in Dispatch:",
           ...asks.slice(0, askLimit).map((ask) => {
-            const firstLineEnd = ask.question.indexOf("\n");
-            const firstLine = (
-              firstLineEnd === -1 ? ask.question : ask.question.slice(0, firstLineEnd)
-            ).trim();
+            const firstLine = askPromptQuestionHead(ask.question);
             const question =
               firstLine.length <= questionLimit
                 ? firstLine
