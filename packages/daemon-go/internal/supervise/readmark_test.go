@@ -909,3 +909,50 @@ func TestALateAcknowledgementOfARetiredTaskRecordsNothing(t *testing.T) {
 	gated.release <- struct{}{}
 	h.m.Wait()
 }
+
+// A replayed refusal of a prompt no turn confirmed takes nothing back, even from a connection that
+// has not prompted the task: the prompt was acknowledged, so its turn wait is armed and keeps the
+// hello from re-sending, and the refusal clears the mark it set. The task keeps its id and its
+// wait, and the prompt is charged when that wait runs out, as any acknowledged prompt that started
+// no turn is.
+func TestAReplayedRefusalOfAnUnconfirmedTaskKeepsItsWait(t *testing.T) {
+	const busy = "Agent is already processing. Use steer() or followUp() to queue messages, or wait for completion."
+	h := newHarness(t)
+	h.reach(StateReady)
+	h.must(RequestDeliver{Claim: testToken, Task: "the task", Generation: 7})
+	d := h.wantPrompts(1)[0].DeliveryID
+	charged := h.claim().Budgets
+	h.must(StreamHello{Claim: testToken, Generation: h.generation()})
+	h.wantPrompts(1)
+
+	h.must(StreamLateRefusal{Claim: testToken, DeliveryID: d, Error: busy, Replayed: true})
+	if p := h.pending(); p.ID != d || !p.DeliveredAt.IsZero() || h.claim().Budgets != charged {
+		t.Fatalf("after the replayed refusal: pending %+v budgets %+v, want %s kept, its mark cleared, nothing charged",
+			p, h.claim().Budgets, d)
+	}
+	h.advance(2 * testRPC)
+	if got := h.claim().Budgets.PromptFailures; got != charged.PromptFailures+1 {
+		t.Fatalf("after the turn wait: %d prompt failures, want %d", got, charged.PromptFailures+1)
+	}
+}
+
+// A replayed refusal takes back a task a turn not its own confirmed only when it names that task's
+// prompt: one naming any other delivery says nothing about the prompt that confirmed it.
+func TestAReplayedRefusalOfAnotherDeliveryLeavesAConfirmedTask(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateReady)
+	h.must(RequestDeliver{Claim: testToken, Task: "the task", Generation: 7})
+	h.wantPrompts(1)
+	h.restart()
+	h.conn.SetStreaming(true)
+	h.must(StreamHello{Claim: testToken, Generation: h.generation()})
+	before := h.pending()
+	if before.ConfirmedAt.IsZero() {
+		t.Fatalf("pending before the refusal = %+v, want it confirmed by the running turn", before)
+	}
+
+	h.must(StreamLateRefusal{Claim: testToken, DeliveryID: "delivery-elsewhere", Error: "refused", Replayed: true})
+	if p := h.pending(); p.ID != before.ID || !p.ConfirmedAt.Equal(before.ConfirmedAt) || !p.DeliveredAt.Equal(before.DeliveredAt) {
+		t.Fatalf("pending after the refusal = %+v, want it untouched: %+v", p, before)
+	}
+}
