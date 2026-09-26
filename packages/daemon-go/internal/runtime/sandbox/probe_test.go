@@ -203,27 +203,37 @@ func okLine(contract int) string {
 
 // Role references whose encoding the image's Decode refuses would fail the probe pod, and the
 // failure would be blamed on the image, so ProbeImage refuses them before it creates anything: the
-// zero Names (every kind nil, written as `null`), one kind left nil, and a name no prompt can
-// write, which no check of the kinds alone would catch. The rig's pod would pass each one.
+// zero Names (every kind nil, written as `null`) by name, and with the decoder's own reason one
+// kind left nil and a name no prompt can write, which no check of the kinds alone would catch. The
+// rig's pod would pass each one.
 func TestProbeImageRefusesRoleReferencesTheImageWouldRefuseBeforeAnyPod(t *testing.T) {
 	for _, testCase := range []struct {
 		name       string
 		references promptrefs.Names
-		want       string
+		// want is the refusal's own words; empty, the image's decoder's refusal of the encoding.
+		want string
 	}{
 		{"zero", promptrefs.Names{}, "ImageProbe.RoleReferences is required"},
-		{"a kind left nil", promptrefs.Names{promptrefs.TaskAgents: {"oracle": {"roles/core/planner.md"}}}, "LEGION_PROMPT_SKILLS"},
+		{"a kind left nil", promptrefs.Names{promptrefs.TaskAgents: {"oracle": {"roles/core/planner.md"}}}, ""},
 		{"a name no prompt can write", promptrefs.Names{
 			promptrefs.TaskAgents: {"not a name": {"roles/core/planner.md"}}, promptrefs.Skills: {},
-		}, `"not a name"`},
+		}, ""},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
+			want := testCase.want
+			if want == "" {
+				_, decoded := promptrefs.Decode(testCase.references.Encode())
+				if decoded == nil {
+					t.Fatal("the image's decoder accepts these references, so the case proves nothing")
+				}
+				want = decoded.Error()
+			}
 			g := newProbeRig(t, nil)
 			g.succeeds(okLine(3) + "\n")
 			p := probeOptions(t)
 			p.RoleReferences = testCase.references
 
-			wantContains(t, g.probe(p), "ImageProbe.RoleReferences", testCase.want)
+			wantContains(t, g.probe(p), "ImageProbe.RoleReferences", want)
 			if n := g.creates.Load(); n != 0 {
 				t.Errorf("created the probe Sandbox %d times, want none: the references are refused first", n)
 			}
