@@ -37,10 +37,13 @@ func newMarkdownReader(readFrontmatter bool) markdownReader {
 	}
 	return markdownReader{md: goldmark.New(
 		goldmark.WithExtensions(extensions...),
-		goldmark.WithParserOptions(parser.WithBlockParsers(
-			util.Prioritized(&typedDirectiveParser{}, 950),
-			util.Prioritized(&unsupportedDirectiveParser{}, 900),
-		)),
+		goldmark.WithParserOptions(
+			parser.WithBlockParsers(
+				util.Prioritized(&typedDirectiveParser{}, 950),
+				util.Prioritized(&unsupportedDirectiveParser{}, 900),
+				util.Prioritized(lineRecordingParagraph{parser.NewParagraphParser()}, 999),
+			),
+		),
 	)}
 }
 
@@ -82,7 +85,7 @@ func Parse(markdown string) (*Node, error) {
 // inlineMarkdownParser knows only paragraphs, so a leading list marker, heading
 // marker, fence, or directive is text; the inline syntax is Parse's.
 var inlineMarkdownParser = parser.NewParser(
-	parser.WithBlockParsers(util.Prioritized(parser.NewParagraphParser(), 1000)),
+	parser.WithBlockParsers(util.Prioritized(lineRecordingParagraph{parser.NewParagraphParser()}, 1000)),
 	parser.WithInlineParsers(parser.DefaultInlineParsers()...),
 	parser.WithInlineParsers(
 		util.Prioritized(extension.NewStrikethroughParser(), 500),
@@ -96,7 +99,7 @@ var inlineMarkdownParser = parser.NewParser(
 func ParseInline(markdown string) ([]*Node, error) {
 	source := []byte(markdown)
 	lined := lineEnds(source)
-	root := inlineMarkdownParser.Parse(gmtext.NewReader(lined))
+	root := withLineStarts(inlineMarkdownParser, lined, parser.NewContext())
 	if root.ChildCount() > 1 {
 		return nil, fmt.Errorf("%w: inline markdown forms %d paragraphs", ErrSchema, root.ChildCount())
 	}
@@ -342,7 +345,76 @@ var sourceKey = parser.NewContextKey()
 func (reader markdownReader) parseLined(lined, source []byte) ast.Node {
 	context := parser.NewContext()
 	context.Set(sourceKey, source)
-	return reader.md.Parser().Parse(gmtext.NewReader(lined), parser.WithContext(context))
+	return withLineStarts(reader.md.Parser(), lined, context)
+}
+
+// lineRecordingParagraph is goldmark's paragraph parser, recording each line it takes as the
+// containers left it, before the paragraph trims its leading whitespace, keyed by where the
+// trimmed line starts. The browser editor's parser keeps that whitespace in a code span, whether
+// a line feed or a lone carriage return ends the line before (codeLineIndent). Recording as the
+// lines are taken keeps them whatever the paragraph becomes: a tight list item's text block, or a
+// setext heading, whose paragraph is trimmed before any paragraph transformer sees it.
+type lineRecordingParagraph struct{ parser.BlockParser }
+
+// untrimmedLinesKey holds the recorded lines while a document parses, and untrimmedLinesAttr on
+// the parsed document root afterwards (withLineStarts).
+var (
+	untrimmedLinesKey  = parser.NewContextKey()
+	untrimmedLinesAttr = []byte("pmdoc-untrimmed-lines")
+)
+
+func (p lineRecordingParagraph) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
+	_, segment := reader.PeekLine()
+	node, state := p.BlockParser.Open(parent, reader, pc)
+	if node != nil {
+		recordLine(segment, reader.Source(), pc)
+	}
+	return node, state
+}
+
+func (p lineRecordingParagraph) Continue(node ast.Node, reader gmtext.Reader, pc parser.Context) parser.State {
+	_, segment := reader.PeekLine()
+	state := p.BlockParser.Continue(node, reader, pc)
+	if state != parser.Close {
+		recordLine(segment, reader.Source(), pc)
+	}
+	return state
+}
+
+func recordLine(line gmtext.Segment, source []byte, pc parser.Context) {
+	recorded, _ := pc.Get(untrimmedLinesKey).(map[int]gmtext.Segment)
+	if recorded == nil {
+		recorded = make(map[int]gmtext.Segment)
+		pc.Set(untrimmedLinesKey, recorded)
+	}
+	recorded[line.TrimLeftSpace(source).Start] = line
+}
+
+// withLineStarts parses lined with context and leaves the lines lineRecordingParagraph recorded on
+// the document root.
+func withLineStarts(p parser.Parser, lined []byte, context parser.Context) ast.Node {
+	root := p.Parse(gmtext.NewReader(lined), parser.WithContext(context))
+	if recorded := context.Get(untrimmedLinesKey); recorded != nil {
+		root.SetAttribute(untrimmedLinesAttr, recorded)
+	}
+	return root
+}
+
+// codeLineIndent is the whitespace goldmark trimmed from the start of text, a code span's text on
+// one of its later lines: what lies between the containers' prefix and the text, which the browser
+// editor's parser reads as part of the code.
+func codeLineIndent(text *ast.Text, source []byte) string {
+	root := ast.Node(text)
+	for root.Parent() != nil {
+		root = root.Parent()
+	}
+	attribute, _ := root.Attribute(untrimmedLinesAttr)
+	recorded, _ := attribute.(map[int]gmtext.Segment)
+	line, ok := recorded[text.Segment.Start]
+	if !ok {
+		return ""
+	}
+	return strings.Repeat(" ", line.Padding) + string(source[line.Start:text.Segment.Start])
 }
 
 // afterLoneCarriageReturn reports whether the line the reader is on began at a lone carriage
@@ -722,6 +794,9 @@ func parseInlineWithTableCellLinks(parent ast.Node, source []byte, initial []Mar
 		switch current := child.(type) {
 		case *ast.Text:
 			value := parseTextValue(current.Value(source), active)
+			if span, ok := current.Parent().(*ast.CodeSpan); ok && span.FirstChild() != current {
+				value = codeLineIndent(current, source) + value
+			}
 			if current.HardLineBreak() {
 				value = strings.TrimSuffix(strings.TrimSuffix(value, "\n"), "  ")
 			}

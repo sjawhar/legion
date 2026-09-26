@@ -2365,6 +2365,52 @@ func TestApplyOperationReplaceWithALoneCarriageReturn(t *testing.T) {
 	}
 }
 
+// A code span keeps the whitespace that starts its next line, after a line feed or a lone carriage
+// return, as the browser editor's parser reads it; only the prefix of the containers around it is
+// not the code's. A replace writing one stores that code and reads it back.
+func TestApplyOperationReplaceKeepsACodeSpansLineIndent(t *testing.T) {
+	const callout = "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n"
+	for _, test := range []struct{ name, markdown, with, code string }{
+		{"in a paragraph", "Intro.\n\nBody.\n\nAfter.\n", "x `a\r b` y", "a\r b"},
+		{"after a line feed", "Intro.\n\nBody.\n\nAfter.\n", "x `a\n  b` y", "a\n  b"},
+		{"in a list item", "Intro.\n\n- Body.\n- two\n", "x `a\r b` y", "a\r b"},
+		{"in a blockquote", "Intro.\n\n> Body.\n\nAfter.\n", "x `a\r\tb` y", "a\r\tb"},
+		{"in a callout", callout, "x `a\r b` y", "a\r b"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tree, err := parseInput(test.markdown)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pmdoc.EnsureBlockIDs(tree)
+			next, err := applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
+			if err != nil {
+				t.Fatalf("replace with %q = %v, want it taken", test.with, err)
+			}
+			markdown, err := renderTree(next)
+			if err != nil {
+				t.Fatal(err)
+			}
+			back, err := parseInput(markdown)
+			if err != nil || !back.Equal(next) {
+				t.Fatalf("replace with %q stored %q, which does not read back as written (%v)", test.with, markdown, err)
+			}
+			var code []string
+			pmdoc.Walk(back, func(node *pmdoc.Node) bool {
+				for _, mark := range node.Marks {
+					if node.Type == "text" && mark.Type == "inlineCode" {
+						code = append(code, node.Text)
+					}
+				}
+				return true
+			})
+			if len(code) != 1 || code[0] != test.code {
+				t.Fatalf("replace with %q stored %q, whose code reads back %q, want %q", test.with, markdown, code, test.code)
+			}
+		})
+	}
+}
+
 // An emptied paragraph is not written, so a block holding one is judged for shape as the blocks
 // it writes: a later replace in that block never stores text that reads back as another block,
 // which the renderer escapes, or which is refused as it is in a block that never held one.

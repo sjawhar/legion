@@ -483,7 +483,9 @@ parser have it, though goldmark ends one only at a line feed. `pmdoc.Parse` and 
 goldmark the source with each such carriage return written as a line feed (`lineEnds`, the same
 length) and read every text from the source itself, so `x\r---` reads as a heading and code keeps
 its carriage return; a soft break a lone carriage return ends stays `\r` in the text, as the
-browser editor keeps it. The renderer writes a code line's prefix after a lone carriage return as
+browser editor keeps it. A code span keeps the whitespace that starts each of its later lines past the
+prefix of the containers around it, after a line feed or a lone carriage return, as the browser
+editor's parser reads it; goldmark's paragraph trims it (`lineRecordingParagraph`, `codeLineIndent`). The renderer writes a code line's prefix after a lone carriage return as
 after a line feed, and `closingColons` measures the line after one. A replace whose lone carriage
 return starts a line reading back as another block is refused by the shape check like any other.
 Two readings follow the browser editor rather than the line split: a line a lone carriage return
