@@ -1,3 +1,4 @@
+
 `park_child` takes a running child of your tree out of the workflow: the daemon moves it to `backlog` and suspends its workers. `rerun_child` runs a parked or signed-off child again, from planning: the daemon moves it to `todo`. Neither takes the tree's root issue. To start a running child over, park it, then rerun it.
 
 Your per-issue notices arrive on `notifications.legion.<project>.<issue>`.

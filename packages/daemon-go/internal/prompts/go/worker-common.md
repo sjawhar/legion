@@ -1,3 +1,4 @@
+
 On any relaunch, re-read your issue record with `legion state` before acting. Your per-issue notices arrive on `notifications.legion.<project>.<issue>`.
 
 Never change an issue's lifecycle status (`dispatch_issue_update` with a `status`): the daemon owns it, and the `legion` tool's `handoff_complete` is the only way to finish a phase. A status written by a session holding a claim in the issue's own tree is undone; on an issue of any other tree it is taken for a human's move.

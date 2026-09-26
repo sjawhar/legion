@@ -61,11 +61,19 @@ func TestComposeOrdersSharedRolePartsBeforeTheGoDaemonParts(t *testing.T) {
 			if !reflect.DeepEqual(parts.RolePromptPaths, want) {
 				t.Fatalf("RolePromptPaths = %q, want %q", parts.RolePromptPaths, want)
 			}
+			// The runtimes join the parts byte for byte ($(cat …)), so the role's part and the shared
+			// one must meet at one blank line, as the paragraphs within a part do.
 			var text strings.Builder
-			for _, path := range parts.RolePromptPaths[len(tc.shared):] {
+			for i, path := range parts.RolePromptPaths[len(tc.shared):] {
 				body, err := os.ReadFile(path)
 				if err != nil {
 					t.Fatalf("read Go daemon part: %v", err)
+				}
+				if joined := text.String(); i > 0 {
+					gap := len(joined) - len(strings.TrimRight(joined, "\n")) + len(body) - len(strings.TrimLeft(string(body), "\n"))
+					if gap != 2 {
+						t.Errorf("Go daemon parts %q join %s with %d newlines, want one blank line", tc.goParts, path, gap)
+					}
 				}
 				text.Write(body)
 			}
