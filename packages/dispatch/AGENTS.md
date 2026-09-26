@@ -159,15 +159,18 @@ A paste whose clipboard holds only `text/plain` goes through Milkdown's clipboar
 parses the text as markdown and pastes the result as an open slice.
 `patches/@milkdown%2Fplugin-clipboard@7.22.1.patch` opens that slice only as far as the first
 isolating node (`Slice.maxOpen(content, false)` in place of `parseSlice`'s default), and a typed
-block is isolating. It does so only when each block left closed fits between the caret and its
-innermost isolating ancestor: some container on that path has content that allows the block's
-type. A doc, a blockquote, a list item and a callout (`block+`) can hold one. An ask's question
-(`paragraph+ bullet_list?`) can't, and a closed block there would have to leave the ask and split
-it, so the paste is flattened instead: the textblocks' inline content in order, joined by a
-space, with each line break a space too. A lone ask pasted into a question adds its question and
-options to that question as text. So a lone typed block pasted beside a paragraph's text stays a
-block, while the first and last paragraphs or list items of other pasted text still join the text
-on either side of the caret. Tables are handled before any plugin sees the paste, by a
+block is isolating. It keeps that closed slice unless pasting it would split the caret's
+innermost isolating ancestor (`splitsIsolatingAncestor`). The patch pastes the slice into a copy
+of the document first, and the paste splits the ancestor when the ancestor's type then occurs
+more often than before plus the pasted ones. That happens when the ancestor can't hold what is
+pasted, because ProseMirror closes the ancestor and opens a copy after the pasted block: a
+callout, a table or a second options list pasted into an ask's question (`paragraph+
+bullet_list?`). There the paste is flattened instead: the textblocks' inline content in order,
+joined by a space, with each line break a space too. A lone ask or a list pasted into a question
+adds its text to that question. HTML pasted outside a table follows the same rule. So a lone
+typed block pasted beside a paragraph's text stays a block, while the first and last paragraphs
+or list items of other pasted text still join the text on either side of the caret. Tables are
+handled before any plugin sees the paste, by a
 `handlePaste` the patch adds to the editor's own view props (`pasteIntoTable`), since
 prosemirror-tables' plugin handler would otherwise overwrite the caret's cell and spread the pasted
 lines into new cells of the row. A paste with the caret in a cell's text, plain text or HTML, is

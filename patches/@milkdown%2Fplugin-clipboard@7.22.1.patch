@@ -1,5 +1,5 @@
 diff --git a/lib/index.js b/lib/index.js
-index a1094153e619ca57d9a444896d85d0a840a0ec24..0ab2bf1c689d8e6f70357891b8b8a2609dbe991a 100644
+index a1094153e619ca57d9a444896d85d0a840a0ec24..1d24e8fbeae7502c731d4f5e3748f5b5ef3da4e9 100644
 --- a/lib/index.js
 +++ b/lib/index.js
 @@ -1,7 +1,9 @@
@@ -13,40 +13,35 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..0ab2bf1c689d8e6f70357891b8b8a260
  import { $prose } from "@milkdown/utils";
  //#region src/__internal__/is-pure-text.ts
  function isPureText(content) {
-@@ -24,6 +26,103 @@ function withMeta(plugin, meta) {
+@@ -24,6 +26,98 @@ function withMeta(plugin, meta) {
  	return plugin;
  }
  //#endregion
 +//#region legion: a pasted plain-text slice keeps its isolating blocks closed where they fit
-+function allowsType(parent, type) {
-+	const seen = new Set();
-+	const pending = [parent.contentMatch];
-+	while (pending.length > 0) {
-+		const match = pending.pop();
-+		if (seen.has(match)) continue;
-+		seen.add(match);
-+		for (let i = 0; i < match.edgeCount; i++) {
-+			const edge = match.edge(i);
-+			if (edge.type === type) return true;
-+			pending.push(edge.next);
-+		}
++function isolatingAncestorType($pos) {
++	for (let depth = $pos.depth; depth > 0; depth--) {
++		const type = $pos.node(depth).type;
++		if (type.spec.isolating) return type;
 +	}
-+	return false;
++	return null;
 +}
-+function fitsBeforeIsolating($pos, type) {
-+	for (let depth = $pos.parent.isTextblock ? $pos.depth - 1 : $pos.depth; depth >= 0; depth--) {
-+		const parent = $pos.node(depth).type;
-+		if (allowsType(parent, type)) return true;
-+		if (parent.spec.isolating) return false;
++function countType(fragment, type) {
++	let count = 0;
++	fragment.descendants((node) => {
++		if (node.type === type) count++;
++	});
++	return count;
++}
++function splitsIsolatingAncestor(state, slice) {
++	const type = isolatingAncestorType(state.selection.$from);
++	if (!type) return false;
++	let pasted;
++	try {
++		pasted = state.tr.replaceSelection(slice).doc;
++	} catch {
++		return true;
 +	}
-+	return false;
-+}
-+function closedEdgesFit($pos, slice) {
-+	let start = slice.content;
-+	for (let i = 0; i < slice.openStart; i++) start = start.firstChild.content;
-+	let end = slice.content;
-+	for (let i = 0; i < slice.openEnd; i++) end = end.lastChild.content;
-+	return [start.firstChild, end.lastChild].every((node) => !node?.type.spec.isolating || fitsBeforeIsolating($pos, node.type));
++	return countType(pasted.content, type) > countType(state.doc.content, type) + countType(slice.content, type);
 +}
 +function inTableCell($pos) {
 +	return cellAround($pos) !== null;
@@ -66,9 +61,9 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..0ab2bf1c689d8e6f70357891b8b8a260
 +	});
 +	return new Slice(Fragment.from(inline), 0, 0);
 +}
-+function plainTextSlice($pos, opened, schema) {
++function plainTextSlice(state, opened, schema) {
 +	const closed = Slice.maxOpen(opened.content, false);
-+	return closedEdgesFit($pos, closed) ? closed : inlineSlice(opened.content, schema);
++	return splitsIsolatingAncestor(state, closed) ? inlineSlice(opened.content, schema) : closed;
 +}
 +function tsvCells(text, schema) {
 +	const { cell, row } = tableNodeTypes(schema);
@@ -117,7 +112,7 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..0ab2bf1c689d8e6f70357891b8b8a260
  //#region src/index.ts
  function dispatchPasteSlice(view, slice) {
  	const node = isTextOnlySlice(slice);
-@@ -40,9 +139,15 @@ function dispatchPasteSlice(view, slice) {
+@@ -40,9 +134,15 @@ function dispatchPasteSlice(view, slice) {
  }
  var clipboard = $prose((ctx) => {
  	const schema = ctx.get(schemaCtx);
@@ -133,7 +128,7 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..0ab2bf1c689d8e6f70357891b8b8a260
  		transformPastedHTML: (html, view) => {
  			const prevTransform = prev.transformPastedHTML;
  			if (prevTransform) html = prevTransform(html, view);
-@@ -58,7 +163,6 @@ var clipboard = $prose((ctx) => {
+@@ -58,7 +158,6 @@ var clipboard = $prose((ctx) => {
  		key,
  		props: {
  			handlePaste: (view, event, preProcessedSlice) => {
@@ -141,7 +136,12 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..0ab2bf1c689d8e6f70357891b8b8a260
  				const editable = view.props.editable?.(view.state);
  				const { clipboardData } = event;
  				if (!editable || !clipboardData) return false;
-@@ -81,9 +185,9 @@ var clipboard = $prose((ctx) => {
+@@ -77,13 +176,13 @@ var clipboard = $prose((ctx) => {
+ 				}
+ 				const html = clipboardData.getData("text/html");
+ 				if (html.length === 0 && text.length === 0) return false;
+-				if (html.length > 0 && preProcessedSlice) return dispatchPasteSlice(view, preProcessedSlice);
++				if (html.length > 0 && preProcessedSlice) return dispatchPasteSlice(view, splitsIsolatingAncestor(view.state, preProcessedSlice) ? inlineSlice(preProcessedSlice.content, schema) : preProcessedSlice);
  				const domParser = DOMParser.fromSchema(schema);
  				let dom;
  				if (html.length === 0) {
@@ -150,7 +150,7 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..0ab2bf1c689d8e6f70357891b8b8a260
 -					dom = DOMSerializer.fromSchema(schema).serializeFragment(slice.content);
 +					const opened = parsePlainText(text);
 +					if (!opened) return false;
-+					return dispatchPasteSlice(view, plainTextSlice(view.state.selection.$from, opened, schema));
++					return dispatchPasteSlice(view, plainTextSlice(view.state, opened, schema));
  				} else {
  					const template = document.createElement("template");
  					template.innerHTML = html;
