@@ -37,7 +37,7 @@ func TestAWSReadReturnsSecretStringOnSuccess(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if v != "shh" {
-		t.Fatalf("expected %q, got %q", "shh", v)
+		t.Fatalf("Read returned an unexpected value (match = %v)", v == "shh")
 	}
 }
 
@@ -56,7 +56,7 @@ func TestAWSReadWrapsGenericErrorInsteadOfMappingToErrNotFound(t *testing.T) {
 		t.Fatalf("expected the error to name the source %q, got %q", source, err.Error())
 	}
 	if strings.Contains(err.Error(), "shh") {
-		t.Fatalf("error message must not contain a secret value, got %q", err.Error())
+		t.Fatalf("error message must not contain a secret value, got %q", strings.ReplaceAll(err.Error(), "shh", "[REDACTED]"))
 	}
 }
 
@@ -75,7 +75,7 @@ func TestFakeReadReturnsValueForPresentName(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if v != "shh" {
-		t.Fatalf("expected %q, got %q", "shh", v)
+		t.Fatalf("Read returned an unexpected value (match = %v)", v == "shh")
 	}
 }
 
@@ -91,7 +91,7 @@ func TestFakeFromFileParsesNameValueLinesSkippingCommentsAndBlanks(t *testing.T)
 		t.Fatalf("FakeFromFile: %v", err)
 	}
 	if len(fake) != 2 || fake["DEEL_API_KEY"] != "deel-v1" || fake["AUTO_TOKEN"] != "auto-v1" {
-		t.Fatalf("fake = %v, want 2 entries", fake)
+		t.Fatalf("fake has %d entries (want 2); DEEL_API_KEY matches = %v, AUTO_TOKEN matches = %v", len(fake), fake["DEEL_API_KEY"] == "deel-v1", fake["AUTO_TOKEN"] == "auto-v1")
 	}
 }
 

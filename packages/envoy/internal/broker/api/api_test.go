@@ -746,7 +746,7 @@ func TestLauncherCredentialRoutesIssueAndReadTokenOnce(t *testing.T) {
 	var firstOut map[string]any
 	decodeJSON(t, firstResp, &firstOut)
 	if firstOut["state"] != "issued" {
-		t.Fatalf("GET issued (1st) = %v, want state issued", firstOut)
+		t.Fatalf("GET issued (1st) state = %v, want issued", firstOut["state"])
 	}
 	token, _ := firstOut["token"].(string)
 	if token == "" {
@@ -760,9 +760,13 @@ func TestLauncherCredentialRoutesIssueAndReadTokenOnce(t *testing.T) {
 	var secondOut map[string]any
 	decodeJSON(t, secondResp, &secondOut)
 	if secondOut["state"] != "issued" {
-		t.Fatalf("GET issued (2nd) = %v, want state issued", secondOut)
+		t.Fatalf("GET issued (2nd) state = %v, want issued", secondOut["state"])
 	}
 	if _, ok := secondOut["token"]; ok {
-		t.Fatalf("GET issued (2nd) = %v, want no \"token\" key at all", secondOut)
+		keys := make([]string, 0, len(secondOut))
+		for k := range secondOut {
+			keys = append(keys, k)
+		}
+		t.Fatalf("GET issued (2nd) unexpectedly carries a %q key; response keys = %v", "token", keys)
 	}
 }

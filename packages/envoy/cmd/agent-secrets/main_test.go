@@ -235,6 +235,15 @@ func mapsEqual(a, b map[string]bool) bool {
 	return true
 }
 
+// redactSecrets replaces the granted value these tests' fake broker hands out with a placeholder
+// before it is used in a t.Fatalf diagnostic. Comparisons and control flow always use the real
+// value; this project's rule against a secret ever reaching logs, audit, or error messages
+// carries no test-only carve-out, so nothing this suite prints on failure may contain one either,
+// even a fake, fixture-only value.
+func redactSecrets(s string) string {
+	return strings.ReplaceAll(s, "topsecretvalue123", "[REDACTED]")
+}
+
 func TestExecFormGrantRunsChildWithValueInEnvironment(t *testing.T) {
 	binary := buildAgentSecrets(t)
 	broker, _ := fakeBroker(t)
@@ -244,16 +253,16 @@ func TestExecFormGrantRunsChildWithValueInEnvironment(t *testing.T) {
 	stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir, nil,
 		"GRANT_ME", "--", "sh", "-c", `echo -n "$GRANT_ME" | sha256sum`)
 	if exit != 0 {
-		t.Fatalf("exit = %d, want 0: stdout=%q stderr=%q", exit, stdout, stderr)
+		t.Fatalf("exit = %d, want 0: stdout=%q stderr=%q", exit, redactSecrets(stdout), redactSecrets(stderr))
 	}
 	sum := sha256.Sum256([]byte("topsecretvalue123"))
 	want := hex.EncodeToString(sum[:])
 	fields := strings.Fields(stdout)
 	if len(fields) == 0 || fields[0] != want {
-		t.Fatalf("child sha256 = %q, want %q (stdout=%q)", fields, want, stdout)
+		t.Fatalf("child sha256 = %q, want %q (stdout=%q)", fields, want, redactSecrets(stdout))
 	}
 	if strings.Contains(stdout, "topsecretvalue123") {
-		t.Fatalf("raw secret value leaked into stdout: %q", stdout)
+		t.Fatalf("raw secret value leaked into stdout: %q", redactSecrets(stdout))
 	}
 }
 
@@ -345,13 +354,13 @@ func TestExecFormDoesNotLetInheritedEnvShadowAGrantedValue(t *testing.T) {
 		[]string{"GRANT_ME=attacker-controlled-stale-value"},
 		"GRANT_ME", "--", "sh", "-c", `echo -n "$GRANT_ME" | sha256sum`)
 	if exit != 0 {
-		t.Fatalf("exit = %d, want 0: stdout=%q stderr=%q", exit, stdout, stderr)
+		t.Fatalf("exit = %d, want 0: stdout=%q stderr=%q", exit, redactSecrets(stdout), redactSecrets(stderr))
 	}
 	sum := sha256.Sum256([]byte("topsecretvalue123"))
 	want := hex.EncodeToString(sum[:])
 	fields := strings.Fields(stdout)
 	if len(fields) == 0 || fields[0] != want {
-		t.Fatalf("child GRANT_ME sha256 = %q, want %q (granted value, not the shadowing inherited one): stdout=%q", fields, want, stdout)
+		t.Fatalf("child GRANT_ME sha256 = %q, want %q (granted value, not the shadowing inherited one): stdout=%q", fields, want, redactSecrets(stdout))
 	}
 }
 

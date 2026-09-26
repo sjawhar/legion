@@ -160,7 +160,7 @@ func TestAutomaticGrantsAtOnce(t *testing.T) {
 		t.Fatalf("proxyOnly = %v, want none", proxyOnly)
 	}
 	if want := map[string]string{"AUTO_TOKEN": "auto-v1"}; values["AUTO_TOKEN"] != want["AUTO_TOKEN"] || len(values) != 1 {
-		t.Fatalf("values = %v, want %v", values, want)
+		t.Fatalf("values has %d entries (want 1) and AUTO_TOKEN matches the expected granted value = %v (want true)", len(values), values["AUTO_TOKEN"] == want["AUTO_TOKEN"])
 	}
 }
 
@@ -219,7 +219,7 @@ func TestApprovalFlow(t *testing.T) {
 		t.Fatalf("Values: %v", err)
 	}
 	if values["DEEL_API_KEY"] != "deel-v1" {
-		t.Fatalf("values = %v, want DEEL_API_KEY=deel-v1", values)
+		t.Fatalf("values[%q] did not match the expected granted value", "DEEL_API_KEY")
 	}
 
 	changed, err = m.ApplyAnswer(ctx, req.ID, approve)
