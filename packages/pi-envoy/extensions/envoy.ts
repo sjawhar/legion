@@ -211,6 +211,12 @@ interface EstablishSessionOptions {
   readonly carryPreviousSessionRole?: boolean;
 }
 
+/** Whether a topic served the session's role, and how many roles had ended, at one moment. */
+interface RoleSnapshot {
+  readonly roleBound: boolean;
+  readonly endsBefore: number;
+}
+
 function isRoleClaimEntry(entry: unknown): entry is RoleClaimEntry {
   if (typeof entry !== "object" || entry === null) return false;
   if (!("type" in entry) || entry.type !== "custom") return false;
@@ -278,6 +284,15 @@ export default function envoyExtension(pi: PiApi): void {
   let recordedSessionKey: string | undefined;
   let heartbeatRegistered = false;
   let claimedRoleTopic: string | undefined;
+  // The session id `claimedRoleTopic` was claimed under (endOutgoingRole).
+  let claimedRoleSessionID: string | undefined;
+  // Notice subjects this session takes only while it holds `claimedRoleTopic` (the Go controller's
+  // topic, go-bootstrap.ts). They are never registered with the listener, so a resumed process
+  // cannot recover them: the role's claim is their only source, and `endRole` closes them.
+  const roleNoticeSubjects = new Set<string>();
+  // Counts role ends, so a role-bound subscription still opening when its role ended can tell
+  // (subscribeUnlessRoleEnds).
+  let roleEnds = 0;
   let activeSessionContext: SessionContext | undefined;
   const inbox: {
     event_id: string;
@@ -608,7 +623,10 @@ export default function envoyExtension(pi: PiApi): void {
     // Otherwise the iterator only ended because the connection was closed or
     // errored out from under nats.js's own reconnect handling. Re-establish
     // rather than staying silently deaf while the HTTP registration heartbeat
-    // keeps the session looking healthy in the registry.
+    // keeps the session looking healthy in the registry. Whether the topic served a role, and how
+    // many roles had ended, are taken once, here: every retry of the chain, a failed reconnect's
+    // included, compares against them, so a role that ends mid-chain keeps the topic closed.
+    const snapshot = roleSnapshot(topic);
     const retry = (delayMs: number): void => {
       awaitingRetry.add(topic);
       setTimeout(() => {
@@ -619,7 +637,7 @@ export default function envoyExtension(pi: PiApi): void {
         // A close that landed during the delay leaves the marker for us instead
         // of the pump end-path. Consume it here so it cannot outlive the timer.
         if (intentionallyClosed.delete(topic)) return;
-        void subscribe(topic).catch(() => retry(NATS_RETRY_INTERVAL_MS));
+        void subscribeUnlessRoleEnds(topic, snapshot).catch(() => retry(NATS_RETRY_INTERVAL_MS));
       }, delayMs);
     };
     retry(RESUBSCRIBE_DELAY_MS);
@@ -641,11 +659,61 @@ export default function envoyExtension(pi: PiApi): void {
     return true;
   };
 
+  // The session stops holding its role: close the notice subjects it took for it, so a holder
+  // another session replaced stops taking the role's wakes.
+  const endRole = (): void => {
+    claimedRoleTopic = undefined;
+    claimedRoleSessionID = undefined;
+    roleEnds += 1;
+    for (const subject of roleNoticeSubjects) closeIntentionally(subject);
+    roleNoticeSubjects.clear();
+  };
+
+  // A `new` or `resume` switch installs an unrelated transcript, so the outgoing session's role is
+  // not carried into it. A role claimed under the current session id is not the outgoing one's:
+  // Oh My Pi moves on to legion.ts's handler when envoy.ts's outlasts its budget, so the Legion
+  // reclaim can claim for the new session before this rebind runs, and that claim, with the notice
+  // subjects it opened, stays.
+  const endOutgoingRole = (): void => {
+    if (claimedRoleSessionID !== sessionID) endRole();
+  };
+
+  // Whether `topic` serves the role this session holds, and how many roles had ended, at one
+  // moment: what a role-bound subscribe compares against once its connection is made.
+  const roleSnapshot = (topic: string): RoleSnapshot => ({
+    roleBound: expandSubscriptionTopics([topic]).some((subject) => roleNoticeSubjects.has(subject)),
+    endsBefore: roleEnds,
+  });
+
+  // Opens `topic` unless it served a role that has ended since `snapshot` was taken (a first
+  // subscribe, or any retry of a dropped topic's chain): a role-bound subject is not reopened, and
+  // one whose role ends while its connection is made is closed as soon as it opens, before any
+  // registration can carry it. Answers whether the topic is still wanted.
+  const subscribeUnlessRoleEnds = async (
+    topic: string,
+    snapshot: RoleSnapshot
+  ): Promise<boolean> => {
+    const roleEnded = () => snapshot.roleBound && roleEnds !== snapshot.endsBefore;
+    if (roleEnded()) return false;
+    await subscribe(topic);
+    if (!roleEnded()) return true;
+    for (const subject of expandSubscriptionTopics([topic])) closeIntentionally(subject);
+    return false;
+  };
+
+  // The listener delivers nothing to a self-subscribed session (it takes its topics over its own
+  // NATS subscriptions), so the registered topics serve recovery on resume; a role-bound subject
+  // stays out of them.
   const registerSession = () =>
     client.subscribe({
       sessionID,
       directory: sessionDirectory,
-      topics: [...new Set([agentSubject(sessionID), ...subscriptions.keys()])],
+      topics: [
+        ...new Set([
+          agentSubject(sessionID),
+          ...[...subscriptions.keys()].filter((subject) => !roleNoticeSubjects.has(subject)),
+        ]),
+      ],
       port: 0,
       // Read at every registration: the heartbeat re-registers, which picks up
       // titles assigned after session_start and later renames.
@@ -698,7 +766,7 @@ export default function envoyExtension(pi: PiApi): void {
         return;
       }
       if (!result.claimed) {
-        claimedRoleTopic = undefined;
+        endRole();
         logger.warn("envoy: role re-assertion refused; held by another live session", {
           role,
           sessionID: id,
@@ -828,10 +896,13 @@ export default function envoyExtension(pi: PiApi): void {
         sessionID,
         holder: result.holder,
       });
-      claimedRoleTopic = undefined;
+      endRole();
       return false;
     }
+    // Moving to another role ends the one this session held.
+    if (previousTopic !== undefined && previousTopic !== topic) endRole();
     claimedRoleTopic = topic;
+    claimedRoleSessionID = sessionID;
     // The transcript is the one thing `omp --resume` guarantees, so it is
     // the durable record of the claim: the listener reaps a dead session's
     // interest row (role claim included) after its ten-minute stale-interest
@@ -885,10 +956,10 @@ export default function envoyExtension(pi: PiApi): void {
     // re-assert and a rebind is a clean move. Must run after registerSession:
     // the listener rejects a claim from an unregistered session. Quiet on
     // failure: session start must not depend on it.
-    if (!carryPreviousSessionRole) claimedRoleTopic = undefined;
+    if (!carryPreviousSessionRole) endOutgoingRole();
     const remembered = transcriptClaimedRole(branch);
     if (remembered === null) {
-      claimedRoleTopic = undefined;
+      endRole();
       return;
     }
     let role = remembered ?? claimedRoleTopic?.slice(ROLE_TOPIC_PREFIX.length);
@@ -926,7 +997,7 @@ export default function envoyExtension(pi: PiApi): void {
     previousSessionID = sessionID
   ): Promise<void> => {
     const previousTopic = previousSessionID === "" ? undefined : agentSubject(previousSessionID);
-    if (options.carryPreviousSessionRole === false) claimedRoleTopic = undefined;
+    if (options.carryPreviousSessionRole === false) endOutgoingRole();
     restoreLocalSessionState(context);
     const branch = context.sessionManager.getBranch?.() ?? [];
     const resumed = branch.length > 0;
@@ -986,7 +1057,8 @@ export default function envoyExtension(pi: PiApi): void {
   const subscribeNotice: LegionNoticeSubscription = async (
     targetSessionID,
     topic,
-    callerContext
+    callerContext,
+    whileHolding
   ) => {
     const context = callerContext ?? activeSessionContext;
     if (context === undefined || context.sessionManager.getSessionId() !== targetSessionID) {
@@ -995,7 +1067,16 @@ export default function envoyExtension(pi: PiApi): void {
       );
     }
     if (sessionID !== targetSessionID) await establishSession(context);
-    await subscribe(topic);
+    if (whileHolding !== undefined) {
+      if (claimedRoleTopic !== ROLE_TOPIC_PREFIX + whileHolding) {
+        throw new Error(
+          `Envoy session ${targetSessionID} does not hold role ${whileHolding} for a notice subscription`
+        );
+      }
+      // Marked before the subscription opens, so no registration ever carries it.
+      for (const subject of expandSubscriptionTopics([topic])) roleNoticeSubjects.add(subject);
+    }
+    if (!(await subscribeUnlessRoleEnds(topic, roleSnapshot(topic)))) return;
     await registerSession();
   };
 

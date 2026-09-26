@@ -77,7 +77,7 @@ renumbers above the first.
 
 ### The Go daemon: `legion.goDaemonApiVersion`
 
-`legion.goDaemonApiVersion` (currently 6) is the contract with `packages/daemon-go`: the claim,
+`legion.goDaemonApiVersion` (currently 7) is the contract with `packages/daemon-go`: the claim,
 credential, workflow, controller, and state shapes `src/legion/go-daemon-client.ts` parses strictly
 through `@legion/contracts/legion-go-api` (its first consumer), and the Go pane's environment —
 `LEGION_DAEMON_API=go`, the identity variables above, `LEGION_BOOT_TOKEN_FILE`,
@@ -109,6 +109,10 @@ not one it read, so it answers for none of them. `POST /legion/v1/handoff/comple
 `HANDOFF_NO_RUN` to a claim that has taken no task at all, and the workflow refuses
 `HANDOFF_STALE_GENERATION` for a run the issue has left. The pane's `LEGION_GENERATION` is the
 claim's launch counter and says nothing about the run; nothing reads it for this.
+Contract 7 adds `holdReason` to an issue on `/legion/v1/state`: `escalated` while an issue its
+architect escalated stays held in a tree that runs, absent otherwise (a tree that lingers or is
+closed shows none until it is re-admitted). The controller skill reads it at every start,
+since the escalation's wake reaches only a controller running when it is published (#1420).
 The Go daemon's boot gate (`internal/daemon/bootgate.go`) refuses to start unless the installed
 manifest's field equals its `GoDaemonAPIVersion` (`internal/api/version.go`) — the manifest at the
 plugin root Oh My Pi resolves under the environment a pane will get, and the plugin a pane's Oh My
@@ -153,10 +157,30 @@ a symlinked state directory) moves the check with it. And the daemon refuses a c
 registration whose `pluginContract` is not its `GoDaemonAPIVersion` with 409, naming both. That
 session goes through the controller session (`src/legion/controller-session.ts`) with the Go adapter
 (`goControllerDaemon`, `go-bootstrap.ts`), not `bootstrapGoClaim`, and gets no Go `legion` tool:
+`GET /legion/v1/state` first, since a registration replaces the running controller: an unset
+`LEGION_PROJECT`, or one whose controller role is not that of the project the state names
+(`legionProjectToken` in `@legion/contracts`, the daemon's own rule), stops the claim there; then
 `claims/register` with the capability in place of a boot token, answered with
 `api.ControllerRegisterResponse` (`LegionGoControllerRegisterResponse`), then the Envoy role
-`legion-<project>-controller`, then a controller grant per credentialed tool call from the `/grants`
-controller-session form with the secret the registration was issued. A later
+`legion-<project>-controller`, then a subscription to the project's controller topic
+`notifications.legion.<project>.controller` (`legionControllerNoticeSubject`, the project from
+`LEGION_PROJECT`), then a controller grant per credentialed tool call from the `/grants`
+controller-session form with the secret the registration was issued. What the Go daemon publishes
+on that topic is listed at `notify.ControllerTopic` (`packages/daemon-go/internal/notify`). The
+subscription lasts while the session holds the controller role (`subscribeLegionNotice`'s
+`whileHolding`): once another live session holds it, the heartbeat's refused re-assertion closes
+it, so a replaced controller stops taking wakes within one heartbeat, and a dropped connection's
+retries, each compared with the role's state when the connection dropped, do not reopen it once
+the role has ended. A `/new` or `/resume` keeps it open whichever extension handles the switch
+first: Oh My Pi runs the manifest's order but moves on from a handler that outlasts its 30-second
+budget, and the switch's drop of the outgoing role (`endOutgoingRole`) leaves a role already
+claimed under the new session id alone. It is never registered with
+the listener, so a replaced controller resumed later gets it back only by claiming the role, which
+the daemon refuses its replaced capability. It is a live wake that changes no
+request, response or pane variable, and a daemon publishes to the topic whether anyone listens. A
+controller on an earlier plugin release never runs against this daemon: contract 7 ships with the
+subscription, `legion controller start` refuses to launch an Oh My Pi whose plugin speaks another
+contract, and the daemon refuses its registration with 409. A later
 `legion controller start` mints a new capability, so the earlier session's grants stop working.
 `legion status <issue> <status>` in that session reads the grant file; from an operator shell it
 takes `--operator-token-file`, which buys a controller grant over the operator's bearer and, like
