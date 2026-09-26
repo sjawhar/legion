@@ -8,7 +8,7 @@ The plan lives in `.legion/plan.json` and the Dispatch issue document; never com
 
 ## Workspace restrictions
 
-Do not move a bookmark you do not own. Put only your logical paths in `jj -R "$LEGION_WORKSPACE" split -m "<message>" <paths…>`. You never push.
+Do not move a bookmark you do not own. Put only your logical paths in `jj -R "$LEGION_WORKSPACE" split -m "<message>" <paths…>`. Push your plan handoff commit as `skill://legion-worker` shows.
 
 ## Plan handoff
 

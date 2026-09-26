@@ -14,6 +14,7 @@ import {
   type CommandRunner,
   defaultRunner,
   getCiStatusBatch,
+  getComparedPaths,
 } from "../state/fetch";
 import type { GitHubPRRef } from "../state/types";
 import { type LegionApi, type LegionApiDeps, startLegionApi } from "./api";
@@ -66,7 +67,7 @@ import {
   type ProcessManagerDeps,
 } from "./processes";
 import { childAdopted } from "./reducers";
-import { runResync } from "./resync";
+import { type RunResyncDeps, runResync } from "./resync";
 import type { Runtime } from "./runtime";
 import { KubernetesRuntime } from "./runtime-kubernetes";
 import { TmuxRuntime, type TmuxRuntimeDeps } from "./runtime-tmux";
@@ -139,6 +140,21 @@ export function createCiStatusFetcher(
         env: buildRoleEnv(lease.token, lease.gitIdentity, baseEnv),
       };
     });
+}
+
+/** Resync's compare reader (`RunResyncDeps.compareChangedPaths`): GitHub's compare of two commits,
+ * read as the implement App of the repository's owner, like the CI reads above. */
+export function createCompareReader(
+  tokenManager: Pick<TokenManager, "getToken">,
+  runner: CommandRunner,
+  baseEnv: NodeJS.ProcessEnv
+): RunResyncDeps["compareChangedPaths"] {
+  return async (repo, base, head) => {
+    const lease = await tokenManager.getToken("implement", repo.split("/")[0]);
+    return getComparedPaths(repo, base, head, runner, {
+      env: buildRoleEnv(lease.token, lease.gitIdentity, baseEnv),
+    });
+  };
 }
 
 /** The listener publish body (`POST /v1/messages/publish`) for one daemon notice. `dedupe_key`
@@ -407,12 +423,24 @@ async function startDaemonLocked(
   }
   probes.catch(() => {});
   const owners = new Set(projectRepos(config).map((repo) => repo.split("/")[0] as string));
-  await Promise.all(
+  const leases = await Promise.all(
     [...owners].flatMap((owner) => [
       deps.tokenManager.getToken("implement", owner),
       deps.tokenManager.getToken("review", owner),
     ])
   );
+  // Each App has one bot login (the token manager caches one identity per App), so any lease of a
+  // role names it. The reducers judge a push by its pusher against the review App's
+  // (`ReducerConfig.reviewAppLogin`): one App configured for both roles would make every
+  // implementer push the review App's and count no fix attempt.
+  const implementLogin = leases[0]?.gitIdentity.name;
+  const reviewAppLogin = leases[1]?.gitIdentity.name;
+  if (!reviewAppLogin || reviewAppLogin === implementLogin) {
+    throw new Error(
+      `the review App's token lease names bot login ${JSON.stringify(reviewAppLogin ?? "")} and the implement App's ${JSON.stringify(implementLogin ?? "")}; the reducers need two different Apps`
+    );
+  }
+  const reducerConfig = { ...config, reviewAppLogin };
   const stateFile = path.join(config.stateDir, "state.json");
   const state = await deps.loadState(stateFile, {
     project: config.project,
@@ -622,10 +650,15 @@ async function startDaemonLocked(
     },
     onDequeue: (issue) => processManager.dequeue(issue),
     onUndeliverable,
-    config,
+    config: reducerConfig,
   };
   const eventPump: EventPump = startEventPump(eventDeps);
   const fetchCiStatusBatch = createCiStatusFetcher(
+    deps.tokenManager,
+    deps.runner,
+    environment.paneEnv
+  );
+  const compareChangedPaths = createCompareReader(
     deps.tokenManager,
     deps.runner,
     environment.paneEnv
@@ -639,10 +672,11 @@ async function startDaemonLocked(
       runResync(
         {
           state,
-          config,
+          config: reducerConfig,
           dispatchClient: deps.dispatchClient,
           saveState: save,
           fetchCiStatusBatch,
+          compareChangedPaths,
           applyEffects: eventPump.applyEffects,
           reconcileAdmissionDrift: () => processManager.reconcileAdmissionDrift(),
           isResurrecting: (issue) => processManager.isResurrecting(issue),

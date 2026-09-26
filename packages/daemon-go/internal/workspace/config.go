@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
 // CommandTimeout is the slow-command budget both runtimes' provisioning gives every command it
@@ -48,23 +50,26 @@ type Runner interface {
 // configured GitHub owner/repository name, for example "sjawhar/legion-smoke".
 type Request struct {
 	StateDir         string
-	Repo             string
+	Repo             ghrepo.Repository
 	Issue            string
 	CredentialHelper string
 	// Source is how the shared clone reaches the repository: FromFeed or FromGitHub.
 	Source Source
+	// Log takes the one line provisioning logs: the commits it set aside when it started a merged
+	// issue's workspace at main (createWorkspace).
+	Log func(line string)
 }
 
 // Workspace is the durable location and branch bookmark for one issue. Dir has the shape
 // <state>/workspaces/<owner>/<repo>/<lowercase issue>; Clone, the shared clone every issue
 // workspace of the repository is a jj workspace of, <state>/repos/github.com/<owner>/<repo>. A
 // tree volume's init containers serialize on the file beside the clone, Clone + ".lock". Repo is
-// the repository, <owner>/<repo>.
+// the repository.
 type Workspace struct {
 	Dir      string
 	Bookmark string
 	Clone    string
-	Repo     string
+	Repo     ghrepo.Repository
 }
 
 // In a pod, the one process that holds the provisioning token, Fetch, runs in a container that
@@ -72,8 +77,8 @@ type Workspace struct {
 // container the provisioning Secret is not mounted in: that boundary, not what the runner adds
 // below, is what keeps the token from a tree agent. On the tmux runtime the credentialed clone and
 // fetch run in the shared clone, and panes share the daemon's uid and can read the daemon's files
-// anyway, so there what the runner adds is defence, not a boundary: it keeps provisioning from
-// running anything a tree agent configured in the shared clone.
+// anyway, so there what the runner adds is defence, not a boundary: it holds the settings it names
+// below, and does not claim that nothing else the shared clone's configuration names can run.
 
 // pinnedGitConfig is git configuration every process provisioning starts reads last, after the
 // shared clone's and after the command's own: no hook runs, wherever the clone's hooks directory
@@ -240,33 +245,38 @@ func commandFailure(argv []string, result Result) error {
 	return fmt.Errorf("command failed (exit %d): %s\n%s", result.ExitCode, command, strings.TrimSpace(result.Stderr))
 }
 
+// onClone is a jj command against the shared clone: never a snapshot of its working copy, which
+// would run the working-copy filter, fsmonitor and signing programs a tree agent can configure,
+// and never colored, so every read parses. `jj workspace add` is the one command on the clone jj
+// refuses --ignore-working-copy on (createWorkspace).
+func onClone(cloneDir string, args ...string) []string {
+	return append(append([]string{"jj"}, args...), "--ignore-working-copy", "--color=never", "-R", cloneDir)
+}
+
 func ensureFetchConfiguration(ctx context.Context, run Runner, cloneDir string, source remote) error {
-	setting, err := RunChecked(ctx, run, []string{
-		"jj", "config", "get", "git.abandon-unreachable-commits", "-R", cloneDir,
-	}, nil, "")
+	setting, err := RunChecked(ctx, run, onClone(cloneDir, "config", "get", "git.abandon-unreachable-commits"), nil, "")
 	if err != nil {
 		return err
 	}
 	if strings.TrimSpace(setting.Stdout) != "false" {
-		if _, err := RunChecked(ctx, run, []string{
-			"jj", "config", "set", "--repo", "git.abandon-unreachable-commits", "false", "-R", cloneDir,
-		}, nil, ""); err != nil {
+		if _, err := RunChecked(ctx, run, onClone(cloneDir, "config", "set", "--repo", "git.abandon-unreachable-commits", "false"), nil, ""); err != nil {
 			return err
 		}
 	}
 	// The fetch takes no snapshot of the clone's working copy: a snapshot runs the working-copy
 	// filter, fsmonitor, and signing programs jj's configuration names, which a tree agent can set,
 	// and on the tmux runtime this fetch holds the one-shot credential.
-	fetch := []string{"jj", "git", "fetch", "--ignore-working-copy"}
+	fetch := []string{"git", "fetch"}
 	for _, branch := range source.branches {
 		fetch = append(fetch, "--branch", "exact:"+branch)
 	}
-	_, err = RunChecked(ctx, run, append(fetch, "-R", cloneDir), source.env, "")
+	_, err = RunChecked(ctx, run, onClone(cloneDir, fetch...), source.env, "")
 	return err
 }
 
 // configureRepositoryCredential keeps the clone's persisted helper for worker panes after the
-// one-shot clone/fetch environment has been removed. This ports workspace.ts:474-512.
+// one-shot clone/fetch environment has been removed. This ports the helper writes in workspace.ts's
+// provisionIssueWorkspace.
 func configureRepositoryCredential(ctx context.Context, run Runner, cloneDir, credentialHelper string) error {
 	gitDir := cloneDir + "/.git"
 	for _, argv := range [][]string{
@@ -283,11 +293,12 @@ func configureRepositoryCredential(ctx context.Context, run Runner, cloneDir, cr
 	return nil
 }
 
-// removeRepositoryIdentity ports workspace.ts:298-338. A per-repository identity would be shared
-// by every issue workspace, while pane identity is deliberately provided through the pane's env.
+// removeRepositoryIdentity ports workspace.ts's removeRepoScopedIdentity. A per-repository
+// identity would be shared by every issue workspace, while pane identity is deliberately provided
+// through the pane's env.
 func removeRepositoryIdentity(ctx context.Context, run Runner, cloneDir string) error {
 	for _, key := range []string{"user.name", "user.email"} {
-		probe := []string{"jj", "config", "list", "--repo", "--include-overridden", "-R", cloneDir, key}
+		probe := onClone(cloneDir, "config", "list", "--repo", "--include-overridden", key)
 		present, err := RunChecked(ctx, run, probe, nil, "")
 		if err != nil {
 			return err
@@ -295,7 +306,7 @@ func removeRepositoryIdentity(ctx context.Context, run Runner, cloneDir string) 
 		if strings.TrimSpace(present.Stdout) == "" {
 			continue
 		}
-		unset := []string{"jj", "config", "unset", "--repo", "-R", cloneDir, key}
+		unset := onClone(cloneDir, "config", "unset", "--repo", key)
 		removed, err := runCommand(ctx, run, unset, nil, "")
 		if err != nil {
 			return fmt.Errorf("run %s: %w", strings.Join(unset, " "), err)

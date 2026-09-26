@@ -175,6 +175,23 @@ func (s *memStore) PutDelivery(_ context.Context, token claim.Token, d Delivery)
 	return nil
 }
 
+// PutClaimAndDelivery is the store's one transaction: a failure injected on either write leaves
+// both unwritten, which is what the machine relies on.
+func (s *memStore) PutClaimAndDelivery(ctx context.Context, c Claim, d Delivery) error {
+	s.mu.Lock()
+	for _, method := range []string{"PutClaim", "PutDelivery"} {
+		if err := s.failures[method]; err != nil {
+			s.mu.Unlock()
+			return err
+		}
+	}
+	s.mu.Unlock()
+	if err := s.PutClaim(ctx, c); err != nil {
+		return err
+	}
+	return s.PutDelivery(ctx, c.Token, d)
+}
+
 func (s *memStore) RetireDelivery(ctx context.Context, c Claim, deliveryID string) error {
 	s.mu.Lock()
 	if err := s.failures["RetireDelivery"]; err != nil {

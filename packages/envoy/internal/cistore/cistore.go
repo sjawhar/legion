@@ -2,11 +2,12 @@
 
 // Each check_run and check_suite webhook folds into a per-commit State record
 // in a JetStream KV bucket via compare-and-swap rather than being published
-// raw. A reconcile ticker (see loop.go) emits one checks envelope when the
-// current head is quiet and its recorded CI work is complete. All coordination
-// state lives in KV, so aggregation is durable, restart-safe, and correct
-// across listener replicas; the only in-memory state is a rebuildable WatchAll
-// read-cache.
+// raw; concurrent observations of one commit share one write (see update). A
+// reconcile ticker (see loop.go) emits one checks envelope when the current head
+// is quiet and its recorded CI work is complete. All coordination state lives in
+// KV, so aggregation is durable, restart-safe, and correct across listener
+// replicas; the in-memory state is a rebuildable WatchAll read-cache and the
+// queue of observations waiting for their commit's write.
 package cistore
 
 import (
@@ -32,16 +33,26 @@ import (
 // Bucket is the JetStream KV bucket name for per-commit CI state.
 const Bucket = "envoy_ci_state"
 
-// recordBudget bounds how long Record retries its compare-and-swap loop under
-// contention. Concurrent writers (parallel webhook handlers, multiple replicas)
-// racing on the same commit conflict on the KV revision; each backs off with
-// jitter before retrying, so a bounded time budget lets them serialize rather
-// than a fixed attempt count that can starve when many checks for one SHA land
-// at once. Kept well under the listener's 10s HTTP WriteTimeout because Record
-// runs synchronously in the webhook handler and a check_run can fan out over
-// several PRs sequentially. NOTE: this bounds only the retry loop; a single
-// hung KV call can still block up to the JetStream MaxWait (a systemic limit of
-// the legacy nats.go KV API, shared with internal/store).
+// recordBudget bounds how long one write of a commit's record retries. It retries a lost
+// compare-and-swap, and a transient KV error (kvErrorLasts), from a fresh read. Concurrent
+// observations of one commit within this process are combined into one write (update), so the
+// writers that conflict on the KV revision are the few that remain: the summary loop's settlement
+// transitions and another listener task during a deploy. Each backs off with jitter before
+// retrying, so a bounded time budget lets them serialize rather than a fixed attempt count. The
+// transient errors it outlasts are a NATS reconnect (a request refused while the connection
+// reconnects, since the reconnect buffer is off, and a request that was in flight when the
+// connection went away, given up on at the rewatch that follows the reconnect: kvCall) and a
+// JetStream 503 while a server restarts. It cannot outlast a timeout between rewatches, because
+// every KV call waits up to the JetStream MaxWait (10 s, Open) first, five times this budget, so a
+// call that times out returns after the budget has run out.
+// A caller that queues behind a write in progress waits for that write and then its own, so a
+// Record returns within two budgets. The webhook handler records a check_run once for each PR it
+// lists, one after another, so a delivery listing k PRs can take up to 2k budgets, past the
+// listener's 10s HTTP WriteTimeout at three; that needs a write to lose its compare-and-swap for its
+// whole budget, and after combining only the summary loop's transitions and another listener
+// task's batches write the same record. NOTE: this bounds only the retry loop; a KV call can still
+// wait up to the JetStream MaxWait between rewatches (a systemic limit of the legacy nats.go KV
+// API, shared with internal/store).
 const recordBudget = 2 * time.Second
 const recordBackoffCap = 50 * time.Millisecond
 
@@ -228,6 +239,17 @@ type Store struct {
 	// exposes its terminal error to the listener, which re-establishes the watcher or exits for
 	// Docker to restart.
 	watcher *kvwatch.Watcher
+
+	// rewatchMu guards rewatched, which Rewatch closes and replaces. Rewatch runs on every NATS
+	// reconnect and when the listener's self-health rebuilds a watcher, so a write's KV call still
+	// waiting when it closes may have been sent on a connection that went away (kvCall).
+	rewatchMu sync.Mutex
+	rewatched chan struct{}
+
+	// combineMu guards combiners, which holds, for each commit's record, the mutations waiting to
+	// be written to it (update).
+	combineMu sync.Mutex
+	combiners map[string]*keyCombiner
 }
 
 type openOpts struct {
@@ -285,6 +307,8 @@ func Open(nc *nats.Conn, opts ...Option) (*Store, error) {
 		cache:          map[string]State{},
 		heads:          map[string]string{},
 		cacheRevisions: map[string]uint64{},
+		combiners:      map[string]*keyCombiner{},
+		rewatched:      make(chan struct{}),
 	}
 	s.watcher = kvwatch.New("cistore", kv, s.applyWatched, s.resetCache)
 	s.watcher.Start()
@@ -300,9 +324,17 @@ func (s *Store) Ping() error {
 }
 
 // Rewatch moves the cache's watcher and the handle the store writes through to conn
-// (kvwatch.Watcher.Rewatch).
+// (kvwatch.Watcher.Rewatch), and then gives up on every write's KV call still waiting for an
+// answer (kvCall), since it runs on every reconnect: their retries take the handle it installed.
+// It gives them up even when the move fails, since after a reconnect the connection they were sent
+// on went away either way.
 func (s *Store) Rewatch(conn *nats.Conn) error {
-	return s.watcher.Rewatch(conn)
+	err := s.watcher.Rewatch(conn)
+	s.rewatchMu.Lock()
+	close(s.rewatched)
+	s.rewatched = make(chan struct{})
+	s.rewatchMu.Unlock()
+	return err
 }
 
 // resetCache empties the cache and its revision fence, for a recreated CI bucket.
@@ -459,57 +491,6 @@ func (s *Store) RecordSuite(observation contracts.CIObservation) error {
 		st.LastEventAt = time.Now().UnixMilli()
 		return true
 	})
-}
-
-func (s *Store) update(owner, repo, number, sha string, mutate func(*State) bool) error {
-	kv := s.watcher.KV()
-	key := Key(owner, repo, number, sha)
-	deadline := time.Now().Add(recordBudget)
-	for attempt := 0; ; attempt++ {
-		entry, getErr := kv.Get(key)
-		var st State
-		var rev uint64
-		switch {
-		case getErr == nil:
-			if err := json.Unmarshal(entry.Value(), &st); err != nil {
-				return err
-			}
-			rev = entry.Revision()
-		case errors.Is(getErr, nats.ErrKeyNotFound):
-			st = State{Owner: owner, Repo: repo, Number: number, SHA: sha}
-		default:
-			return getErr
-		}
-		beforeHash := st.Hash()
-		generation := st.Generation
-		if !mutate(&st) {
-			return nil
-		}
-		if rev != 0 && st.Hash() != beforeHash && st.Generation == generation {
-			bumpGeneration(&st)
-		}
-		buf, err := json.Marshal(st)
-		if err != nil {
-			return err
-		}
-		if rev == 0 {
-			if _, err := kv.Create(key, buf); err == nil {
-				return nil
-			} else if !errors.Is(err, nats.ErrKeyExists) {
-				return err
-			}
-		} else {
-			if _, err := kv.Update(key, buf, rev); err == nil {
-				return nil
-			} else if !isCASConflict(err) {
-				return err
-			}
-		}
-		if time.Now().After(deadline) {
-			return errors.New("cistore: record exceeded CAS budget")
-		}
-		time.Sleep(casBackoff(attempt))
-	}
 }
 
 func rearm(st *State) {

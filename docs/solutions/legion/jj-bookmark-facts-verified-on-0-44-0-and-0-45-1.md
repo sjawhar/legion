@@ -128,6 +128,33 @@ leaving the workspace **registered** (`jj workspace list` shows it) with its **d
 and its working copy parented on the root commit `000000000000`. Resolve to a commit id first and
 add by id; never let `add` be the thing that discovers the name is bad.
 
+## `jj bookmark set` refuses a sideways move off two local moves
+
+A bookmark conflicted by two local moves from one base (two divergent operations each setting it
+to a different child) is not moved back to its remote's commit by `jj bookmark set <name> -r
+<name>@origin`: both binaries exit 1 with `Error: Refusing to move bookmark backwards or sideways:
+<name>` and the hint to add `--allow-backwards`, which takes it (`Moved 1 bookmarks to …`). A way
+out that restores a bookmark to its remote from such a conflict carries the flag.
+
+## With no local `main`, `jj workspace add --revision main` registers before it errors
+
+A clone has no local `main` when the repository's default branch is another, when `main` was
+deleted in the clone while `main@origin` stays tracked, or when `jj bookmark forget main` left
+`main@origin` untracked. Bare `main` names none of the remote rows, so in each case `--revision
+main` registers the workspace, parented on the root commit, and then fails with `Error: Revision
+\`main\` doesn't exist` (followed by `Hint: Did you mean \`main@origin\`?` when that row exists),
+the same shape as a missing issue bookmark above. The Go `createWorkspace` resolves `main` with
+the rows template too and adds its id (`mainCommit`), refusing each of these states by name first.
+
+## `jj workspace add` refuses `--ignore-working-copy`, after registering
+
+`jj workspace add` refuses `--ignore-working-copy` on both binaries, after the same registration:
+`Created workspace in "…"`, then `Error: This command must be able to update the working copy.` /
+`Hint: Don't use --ignore-working-copy.`, exit 1, the workspace registered and its directory
+created. So the add is the one jj command on a shared clone that snapshots the clone's own working
+copy. Every other command run against it (`-R <clone>`) takes the flag: the fetch, `jj workspace
+forget`, `jj bookmark set|delete|forget|track`, `jj config get|set|list|unset`, and the reads.
+
 ## `jj workspace forget` takes only workspace names
 
 `jj workspace forget [WORKSPACES]...` — no `--cleanup`, no `--force`, on 0.44.0 and 0.45.1 alike

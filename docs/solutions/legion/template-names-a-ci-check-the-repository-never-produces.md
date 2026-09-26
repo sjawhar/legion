@@ -106,20 +106,21 @@ and the correct response to a missing predecessor is to stop and ask the archite
 who skips a phase owns telling each worker it spawns (implementer, tester, reviewer) that the
 phase was skipped and what stands in for its output — here, the spec's Design table.
 
-## 3. The reviewer's `review.json` commit stays local until the implementer's cleanup push carries it
+## 3. The reviewer's `review.json` commit stayed local until the implementer's cleanup push carried it
 
-No role acting as the review App pushes (`packages/daemon/src/daemon/AGENTS.md`, GitHub Apps; App
-3202653 holds `contents: write` as of 2026-09-25, so the rule is the workflow's, not GitHub's), so
-the reviewer's `jj split -m "review: record handoff" .legion/review.json` produces a commit that
-stays local. On
+**Superseded 2026-09-25 (LEGION-285):** every role now pushes its own commits (`skills/legion-worker/SKILL.md`; the Apps' permissions are in `packages/daemon/src/daemon/AGENTS.md`, GitHub Apps). What follows records the earlier workflow.
+
+Then, the reviewer's `jj split -m "review: record handoff" .legion/review.json` produced a
+commit that stayed local. On
 #1008 that commit was `62196d55`. When the implementer was sent back for the `.legion/` deletion,
 `jj status` showed it as the parent of the working copy and `jj bookmark list --all-remotes` showed
 `legion/LEGION-38@origin (behind by 2 commits)`. That is the expected state, not drift: do not
 abandon or rewrite it.
 
 The cleanup commit is made on top of it in the ordinary way — `rm -r .legion`, then
-`jj split -m "chore(legion): remove phase handoffs before merge" .legion`, bookmark set with
-`-r @- --allow-backwards`, push. The push advances the remote two commits
+`jj split -m "chore(legion): remove phase handoffs before merge" .legion`, then the push
+procedure in `skills/legion-worker/SKILL.md` (bookmark set with `-r @- --allow-backwards` after its
+ancestry check, then push). The push advances the remote two commits
 (`move forward from 614eefeef587 to d4970b559f9c`), and the deletion commit's own diff still lists
 only `.legion/implement.json`, `.legion/test.json`, `.legion/review.json` — the reviewer's commit
 is a parent of the deletion, not part of it. The reviewer then confirms the approved head against

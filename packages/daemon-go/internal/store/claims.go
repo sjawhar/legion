@@ -111,7 +111,16 @@ func (s *Store) ClaimByBootTokenHash(ctx context.Context, hash []byte) (supervis
 // PutDelivery writes the claim's pending delivery, replacing the one it had: a claim has at most
 // one. A token no claim carries is refused.
 func (s *Store) PutDelivery(ctx context.Context, token claim.Token, d supervise.Delivery) error {
-	_, err := s.pool.Exec(ctx, `insert into pending_task_deliveries (claim_token, delivery_id, task,
+	return putDelivery(ctx, s.pool, token, d)
+}
+
+// putDelivery writes a delivery through whichever executor the caller has: the pool, or the
+// transaction that carries the claim the delivery is confirmed against.
+func putDelivery(ctx context.Context, db execer, token claim.Token, d supervise.Delivery) error {
+	if d.Generation > math.MaxInt64 {
+		return fmt.Errorf("put delivery %s on %s: generation %d does not fit a bigint", d.ID, token, d.Generation)
+	}
+	_, err := db.Exec(ctx, `insert into pending_task_deliveries (claim_token, delivery_id, task,
 		phase, generation, queued_at, delivered_at, confirmed_at) values ($1, $2, $3, $4, $5, $6, $7, $8)
 		on conflict (claim_token) do update set delivery_id = excluded.delivery_id,
 		task = excluded.task, phase = excluded.phase, generation = excluded.generation,
@@ -123,6 +132,19 @@ func (s *Store) PutDelivery(ctx context.Context, token claim.Token, d supervise.
 		return fmt.Errorf("put delivery %s on %s: %w", d.ID, token, err)
 	}
 	return nil
+}
+
+// PutClaimAndDelivery writes a claim and its pending delivery in one transaction: a confirmation
+// records both, and a daemon that died between them would leave a claim recorded as working whose
+// delivery nothing retires or re-sends — a task the shim has already answered, so its worker is
+// never prompted again and the phase waits.
+func (s *Store) PutClaimAndDelivery(ctx context.Context, c supervise.Claim, d supervise.Delivery) error {
+	return s.Tx(ctx, func(tx pgx.Tx) error {
+		if err := putClaim(ctx, tx, c); err != nil {
+			return err
+		}
+		return putDelivery(ctx, tx, c.Token, d)
+	})
 }
 
 // RetireDelivery removes the claim's pending delivery, fenced on its id: retiring a delivery the

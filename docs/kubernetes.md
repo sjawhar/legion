@@ -654,8 +654,10 @@ On the **tmux** runtime there is no such boundary: panes run under the daemon's 
 Provisioning's pins there — no git hook (`core.hooksPath=/dev/null`), the git the daemon resolved at
 boot as jj's `git.executable-path`, `GIT_ALLOW_PROTOCOL=https`, no working-copy snapshot in the
 credentialed fetch, the one-shot credential scoped to `https://github.com` with no askpass, and
-`GIT_CONFIG_PARAMETERS` unset — are defence, not a boundary: a tree-written `http.proxy` with
-`http.sslVerify=false` still sees the token on its way to github.com.
+`GIT_CONFIG_PARAMETERS` unset — are defence, not a boundary. They hold the settings they name; they
+do not stop every program the shared clone's own git or jj configuration can name. One example of
+what they leave open: a tree-written `http.proxy` with `http.sslVerify=false` still sees the token
+on its way to github.com.
 
 ### The providers Secret
 

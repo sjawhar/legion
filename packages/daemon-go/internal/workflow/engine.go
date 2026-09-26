@@ -28,6 +28,9 @@ type Config struct {
 	MaxFixAttempts int
 	Linger         time.Duration
 	Clock          func() time.Time
+	// ReviewAppLogin is the review App's bot login (<slug>[bot]) from its boot token lease. A push
+	// by it is never a fix attempt, and a red on its red tests is planned. Empty matches no push.
+	ReviewAppLogin string
 }
 
 // Engine interprets Table and writes only records and outbox rows through the supplied Store.
@@ -293,7 +296,9 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 	if err != nil || issue == nil {
 		return intake.Result{}, err
 	}
-	if fact.Generation != 0 && fact.Generation != issue.Generation {
+	// Every completion names a run: the route reads it from the claim and refuses a claim that
+	// has taken no task, so a fact reaching here always carries one.
+	if fact.Generation != issue.Generation {
 		return refused("HANDOFF_STALE_GENERATION", fmt.Sprintf("%s is on generation %d and this completion is generation %d's; the run it reports is over",
 			issue.Key, issue.Generation, fact.Generation)), nil
 	}
@@ -433,7 +438,8 @@ func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.
 	if err != nil || pr == nil {
 		return intake.Result{}, err
 	}
-	*pr = classify.ApplyPush(*pr, fact.After, classify.ClassifyPush(classify.PushPayload{ChangedPaths: fact.ChangedPaths, ChangedPathsTruncated: fact.Truncated}))
+	byReviewApp := e.cfg.ReviewAppLogin != "" && fact.Pusher == e.cfg.ReviewAppLogin
+	*pr = classify.ApplyPush(*pr, fact.After, classify.ClassifyPush(classify.PushPayload{ChangedPaths: fact.ChangedPaths, ChangedPathsTruncated: fact.Truncated}), byReviewApp)
 	return intake.Result{}, e.store.PutPullRequest(ctx, tx, *pr)
 }
 

@@ -46,7 +46,7 @@ func TestReworkRoundAdvancesOnlyOnThatRoundsHandoff(t *testing.T) {
 	if _, err := pool.Exec(ctx, "delete from outbox"); err != nil {
 		t.Fatalf("clear outbox: %v", err)
 	}
-	apply("round-1-handoff", intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "round-1"})
+	apply("round-1-handoff", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "round-1"})
 	assertPhase(t, pool, phase.Testing)
 	var task string
 	if err := pool.QueryRow(ctx, "select payload->>'task' from outbox where kind = 'supervise' and payload->>'op' = 'start'").Scan(&task); err != nil {
@@ -68,12 +68,12 @@ func TestIgnoredCompletionsAreRefused(t *testing.T) {
 	}{
 		{
 			name: "role no longer owns the phase", current: phase.Testing,
-			fact: intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "late"},
+			fact: intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "late"},
 			code: "HANDOFF_NOT_CURRENT_PHASE",
 		},
 		{
 			name: "merger without READY", current: phase.Merging,
-			fact: intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", Commit: "merge"},
+			fact: intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", Commit: "merge"},
 			code: "READY_REQUIRED",
 		},
 	} {
@@ -150,7 +150,7 @@ func TestSignOffWaitsForTheRecordedProductionCheck(t *testing.T) {
 	}
 	assertPhase(t, pool, phase.ProductionCheck)
 
-	if _, err := intake.ApplyFact(ctx, pool, "api", "production-check", intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Summary: "serves", Commit: "retro"}, engine, admissionStub{}); err != nil {
+	if _, err := intake.ApplyFact(ctx, pool, "api", "production-check", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Summary: "serves", Commit: "retro"}, engine, admissionStub{}); err != nil {
 		t.Fatalf("ApplyFact production check: %v", err)
 	}
 	if refusal := signOff("signoff-after-check"); refusal != nil {
@@ -180,6 +180,33 @@ func TestApprovalBeforeGreenChecksAdvancesWhenTheChecksSettle(t *testing.T) {
 	assertPhase(t, pool, phase.Retro)
 }
 
+// The fix that exhausted the count can pass: a green settlement on it is no blocked pull request,
+// and only a red one publishes pr-blocked, once for the count.
+func TestAnExhaustedCountPublishesPRBlockedOnlyOnARedSettlement(t *testing.T) {
+	pool := migratedPool(t)
+	ctx := context.Background()
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U"})
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Failing: []string{}, FailingStatuses: []string{}, FixAttempts: 3, HeadCounted: "head"})
+	engine := testEngine()
+	settle := func(eventID string, generation int64, verdict string, failing []string) {
+		t.Helper()
+		if _, err := intake.ApplyFact(ctx, pool, "github", eventID, intake.PullRequestChecks{
+			Repo: "sjawhar/legion", Number: 42, HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: "ci", ID: generation}}, Generation: generation, Snapshot: eventID, Verdict: verdict, Failing: failing,
+		}, engine, admissionStub{}); err != nil {
+			t.Fatalf("ApplyFact %s: %v", eventID, err)
+		}
+	}
+
+	settle("checks-green", 1, "green", []string{})
+	if kinds := noticeKinds(t, pool, "LEGION-208"); len(kinds) != 0 {
+		t.Fatalf("notices after a green settlement at an exhausted count = %v, want none", kinds)
+	}
+	settle("checks-red", 2, "red", []string{"ci"})
+	if kinds := noticeKinds(t, pool, "LEGION-208"); len(kinds) != 1 || kinds[0] != "pr-blocked" {
+		t.Fatalf("notices after a red settlement at the exhausted count = %v, want one pr-blocked", kinds)
+	}
+}
+
 // A file-backed phase's completion carries the commit that last changed the role's handoff. When a
 // role reports, in a later phase, the same carrying commit it reported before, it wrote and
 // committed no handoff since its previous phase ended: the completion is refused.
@@ -197,20 +224,20 @@ func TestAHandoffMustBeNewSinceTheRolesPreviousPhase(t *testing.T) {
 		}
 		return result.Refusal
 	}
-	if refusal := complete("implement-0", intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "handoff-0"}); refusal != nil {
+	if refusal := complete("implement-0", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "handoff-0"}); refusal != nil {
 		t.Fatalf("round 0 refused: %+v", *refusal)
 	}
 	assertPhase(t, pool, phase.Testing)
-	if refusal := complete("test-0", intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim", Verdict: "fail", Commit: "test-0"}); refusal != nil {
+	if refusal := complete("test-0", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim", Verdict: "fail", Commit: "test-0"}); refusal != nil {
 		t.Fatalf("tester refused: %+v", *refusal)
 	}
 	assertPhase(t, pool, phase.Implementing)
 
-	if refusal := complete("implement-1-stale", intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "handoff-0"}); refusal == nil || refusal.Status != 409 || refusal.Code != "HANDOFF_NOT_NEW" {
+	if refusal := complete("implement-1-stale", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "handoff-0"}); refusal == nil || refusal.Status != 409 || refusal.Code != "HANDOFF_NOT_NEW" {
 		t.Fatalf("round 1 reporting round 0's handoff = %+v, want 409 HANDOFF_NOT_NEW", refusal)
 	}
 	assertPhase(t, pool, phase.Implementing)
-	if refusal := complete("implement-1", intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "handoff-1"}); refusal != nil {
+	if refusal := complete("implement-1", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "handoff-1"}); refusal != nil {
 		t.Fatalf("round 1 with its own handoff refused: %+v", *refusal)
 	}
 	assertPhase(t, pool, phase.Testing)

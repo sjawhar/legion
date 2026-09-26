@@ -160,7 +160,7 @@ func scanPhase(row scanner) (PhaseRow, error) {
 
 const pullRequestColumns = `issue, repo, number, branch, head_sha, head_updated_at, head_updated_at_source,
 	verdict, failing, failing_statuses, review_decision, fix_attempts, blocked_attempts, check_runs,
-	generation, snapshot, reconciled, pending_push, head_counted, state`
+	generation, snapshot, reconciled, pending_push, head_counted, planned_red, state`
 
 func (s *Postgres) PullRequest(ctx context.Context, tx pgx.Tx, issue string) (*PullRequest, error) {
 	pr, err := scanPullRequest(tx.QueryRow(ctx, "select "+pullRequestColumns+" from pull_requests where issue = $1", issue))
@@ -220,8 +220,8 @@ func (s *Postgres) PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest
 	}
 	_, err = tx.Exec(ctx, `insert into pull_requests (issue, repo, number, branch, head_sha, head_updated_at,
 		head_updated_at_source, verdict, failing, failing_statuses, review_decision, fix_attempts,
-		blocked_attempts, check_runs, generation, snapshot, reconciled, pending_push, head_counted, state)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+		blocked_attempts, check_runs, generation, snapshot, reconciled, pending_push, head_counted, planned_red, state)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
 		on conflict (issue) do update set repo = excluded.repo, number = excluded.number, branch = excluded.branch,
 		head_sha = excluded.head_sha, head_updated_at = excluded.head_updated_at,
 		head_updated_at_source = excluded.head_updated_at_source, verdict = excluded.verdict,
@@ -229,10 +229,11 @@ func (s *Postgres) PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest
 		review_decision = excluded.review_decision, fix_attempts = excluded.fix_attempts,
 		blocked_attempts = excluded.blocked_attempts, check_runs = excluded.check_runs,
 		generation = excluded.generation, snapshot = excluded.snapshot, reconciled = excluded.reconciled,
-		pending_push = excluded.pending_push, head_counted = excluded.head_counted, state = excluded.state`,
+		pending_push = excluded.pending_push, head_counted = excluded.head_counted,
+		planned_red = excluded.planned_red, state = excluded.state`,
 		pr.Issue, pr.Repo, pr.Number, pr.Branch, pr.HeadSHA, pr.HeadUpdatedAt, pr.HeadUpdatedAtSource,
 		pr.Verdict, failing, failingStatuses, pr.ReviewDecision, pr.FixAttempts, pr.BlockedAttempts, checkRuns,
-		pr.Generation, pr.Snapshot, pr.Reconciled, pendingPush, pr.HeadCounted, pr.State,
+		pr.Generation, pr.Snapshot, pr.Reconciled, pendingPush, pr.HeadCounted, pr.PlannedRed, pr.State,
 	)
 	if err != nil {
 		return fmt.Errorf("put pull request for %s: %w", pr.Issue, err)
@@ -269,8 +270,8 @@ func clearGeneration(ctx context.Context, tx pgx.Tx, where string, key string, d
 		// not: its counters, its checks verdict and the review decision are all of a head nobody
 		// has judged since.
 		"update pull_requests set fix_attempts = 0, blocked_attempts = 0, head_counted = '', " +
-			"verdict = '', review_decision = '', failing = '[]'::jsonb, failing_statuses = '[]'::jsonb, " +
-			"check_runs = '[]'::jsonb, reconciled = false where " + where,
+			"planned_red = false, verdict = '', review_decision = '', failing = '[]'::jsonb, " +
+			"failing_statuses = '[]'::jsonb, check_runs = '[]'::jsonb, reconciled = false where " + where,
 		"delete from design_gates where " + where,
 		"update phases set handoff_commit = '', rounds = 0, verdict = '' where " + where,
 	} {
@@ -287,7 +288,7 @@ func scanPullRequest(row scanner) (*PullRequest, error) {
 	if err := row.Scan(&pr.Issue, &pr.Repo, &pr.Number, &pr.Branch, &pr.HeadSHA, &pr.HeadUpdatedAt,
 		&pr.HeadUpdatedAtSource, &pr.Verdict, &failing, &failingStatuses, &pr.ReviewDecision,
 		&pr.FixAttempts, &pr.BlockedAttempts, &checkRuns, &pr.Generation, &pr.Snapshot, &pr.Reconciled,
-		&pendingPush, &pr.HeadCounted, &pr.State); err != nil {
+		&pendingPush, &pr.HeadCounted, &pr.PlannedRed, &pr.State); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal(failing, &pr.Failing); err != nil {
