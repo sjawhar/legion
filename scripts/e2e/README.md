@@ -136,10 +136,10 @@ What it stands up, all of it the run's own:
 - **Postgres**: `LEGION_E2E_PG_DSN` when set; otherwise a `postgres:16` container on tmpfs
   (`legion-e2e2-pg-<pid>`) on an ephemeral loopback port — tmpfs rather than the image's anonymous
   volume, which a box whose docker volume subsystem stalls would hang on.
-- **NATS and the Envoy listener**, as `scripts/kind-smoke/up.sh` runs them on the host: a
-  `nats:2.10 -js` container (`legion-e2e2-nats-<pid>`), and `packages/envoy`'s `cmd/listener`
-  built into the work directory and started with a fresh API bearer, which reaches every pane as
-  the 0600 file `envoy_token_file` names.
+- **NATS and the Envoy listener** on the host: a `nats:2.10 -js` container
+  (`legion-e2e2-nats-<pid>`), and `packages/envoy`'s `cmd/listener` built into the work directory
+  and started with a fresh API bearer, which reaches every pane as the 0600 file `envoy_token_file`
+  names.
 - **The plugin**: this checkout's `pi-legion-envoy`, packed as the release packs it, installed into
   the OMP profile `legion-e2e2-<pid>-<epoch>` by `lib/install-plugin-profile.sh`. The daemons run
   with `OMP_PROFILE` naming it, so the gate and every pane load it.
@@ -227,8 +227,9 @@ gateway's Anthropic endpoint (required; [`lib/model-gateway-url.sh`](#libmodel-g
 `hawk-token` on `PATH`, their `hawk login`, and the GNOME keyring holding it unlocked (every reboot
 locks it; the `unlock-keyring` skill). `SMOKE_UPSTREAM_NATS` (required) names the production Envoy
 NATS the GitHub bridge subscribes on by its fully-qualified name on the operator's tailnet
-(`nats://envoy-nats.<tailnet>.ts.net:4222`), as for the kind smoke's bridge
-([`scripts/kind-smoke/README.md`](../kind-smoke/README.md)); `prerequisites` refuses a run without
+(`nats://envoy-nats.<tailnet>.ts.net:4222`), never a bare alias, which only a resolver's search
+domain completes ([the rig-alias learning](../../docs/solutions/testing/a-rig-container-alias-that-is-momentarily-unheld-resolves-through-the-tailnet-to-production.md));
+`prerequisites` refuses a run without
 either, and refuses an upstream that is not one NATS URL naming a host with a dot. The script prints
 neither value. The proof human is the devbox's ordinary `gh` — the dotfiles shim, acting as the
 `sjawhar-agent` App — for its reviews, its reads, and its merge; it is never a Legion App, and the
@@ -425,7 +426,7 @@ The checks, in order, each printing what it observed and then `CHECK <name>: PAS
 | `respawn-before-register` | a claim spawned on a token the resolver withholds, suspended before any hello, spawns again over its Sandbox: a new uid, the Secret's boot token rotated to generation 2's, and generation 2 registered |
 | `concurrent-provision` | a new tree's root and a child worker spawned at once: both provision their workspace, the two `workspace-init` runs do not overlap (the runtime serializes them; `flock` does not reach across gVisor pods), and the volume holds one clone, with both jj workspaces, that passes `git fsck --connectivity-only` |
 | `re-adopt` | the listener and runtime closed, one worker killed while none runs, then a fresh listener and `sandbox.New` with `ReconcileOrphans(known)`: the living claims are alive with their recorded incarnations and unchanged pods and Sandbox generations, the killed one is gone with its recorded uid, and every living shim says hello again with its current token |
-| `orphan-sweep` | a running claim left out of `known` survives a sweep with a 1-hour grace and is deleted by one with a 1-second grace; the suspended claim's Sandbox and every known one survive both |
+| `orphan-sweep` | a running claim left out of `known` survives a sweep with a 1-hour grace, and one with a 1-second grace while it is the sweeping runtime's own unreleased launch (a claim launched after the daemon read its claims); once the runtime and listener are replaced, as a crash before the claim was persisted would leave them, a 1-second sweep deletes it. The suspended claim's Sandbox and every known one survive each sweep, and every running claim says hello again to the replaced runtime |
 | `release-tree` | Release of every claim, the suspended one with a nil locator: no Sandbox, `-boot` Secret, pod, or tree PVC of the run is left (the operator's providers Secret stays for the teardown: Release never deletes an operator's object) |
 | `namespace-clean` | the script's last step, after the teardown and outside the harness: the namespace's Sandboxes, Secrets, PVCs, pods and ConfigMaps that carry the run's project label or none are exactly the snapshot taken before the run |
 

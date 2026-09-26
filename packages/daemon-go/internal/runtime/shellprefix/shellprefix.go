@@ -2,7 +2,8 @@
 // each of the agent's commands (`<prefix> <command>`, in its persistent shell). Every runtime
 // hands its agents one, over the directories that process's own `gh` and `legion` live in: a tmux
 // pane's under the daemon's state directory, a pod's in the worker image. Its quoting, Literal, is
-// also what the scripts the workerbin package installs quote with.
+// also what the scripts the workerbin package installs quote with, and Word and Command are the
+// daemon's one rendering of an argument, and of an argv, as shell text.
 package shellprefix
 
 import (
@@ -31,10 +32,20 @@ func Literal(value string) string { return "'" + strings.ReplaceAll(value, "'", 
 var shellUnsafe = regexp.MustCompile(`[^A-Za-z0-9_./:-]`)
 
 // Word renders value as one shell word: bare when every character is literal, else Literal
-// (runtime.ts:327-329).
+// (shellPath, runtime.ts). Word("") returns "", zero words, so an empty argument does not survive
+// it.
 func Word(value string) string {
 	if !shellUnsafe.MatchString(value) {
 		return value
 	}
 	return Literal(value)
+}
+
+// Command renders argv as one shell command line: each element one Word, joined by spaces.
+func Command(argv []string) string {
+	words := make([]string, len(argv))
+	for i, arg := range argv {
+		words[i] = Word(arg)
+	}
+	return strings.Join(words, " ")
 }

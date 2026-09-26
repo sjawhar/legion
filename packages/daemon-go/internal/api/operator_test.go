@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -528,6 +529,30 @@ func TestListAnswersEveryClaim(t *testing.T) {
 	want := []string{string(architectToken), "legion-legion-legion-209-implementer"}
 	if tokens := sortedTokens(got.Claims); !slices.Equal(tokens, want) {
 		t.Fatalf("list answered %v, want %v", tokens, want)
+	}
+}
+
+// The list shows what supervision has counted against a claim and how its task will be sent: the
+// deaths its agent has had with work outstanding, and that a death interrupted its task, which is
+// sent behind the sentence saying so.
+func TestListShowsAClaimsDeathsAndItsInterruptedTask(t *testing.T) {
+	h := newHarness(t)
+	token := claim.Token("legion-legion-legion-209-implementer")
+	if err := h.store.PutClaim(h.ctx, supervise.Claim{Token: token, Project: testProject, Tree: "LEGION-208", Issue: "LEGION-209",
+		Role: claim.RoleImplementer, State: supervise.StateLaunching, Budgets: supervise.Budgets{Deaths: 2}}); err != nil {
+		t.Fatalf("put the claim: %v", err)
+	}
+	if err := h.store.PutDelivery(h.ctx, token, supervise.Delivery{ID: "delivery-1", Task: "implement the plan",
+		QueuedAt: time.Date(2026, 9, 26, 7, 0, 0, 0, time.UTC), Interrupted: true}); err != nil {
+		t.Fatalf("put the delivery: %v", err)
+	}
+
+	recorder := h.operator(http.MethodGet, "/legion/v1/operator/claims", nil)
+
+	var got OperatorClaims
+	decodeInto(t, recorder, &got)
+	if len(got.Claims) != 1 || got.Claims[0].Budgets.Deaths != 2 || got.Claims[0].Pending == nil || !got.Claims[0].Pending.Interrupted {
+		t.Fatalf("list answered %+v, want the claim with 2 deaths and its task interrupted", got.Claims)
 	}
 }
 

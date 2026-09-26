@@ -60,6 +60,7 @@ type OperatorClaim struct {
 // BudgetsView is the claim's retry counters (`supervise.Budgets`).
 type BudgetsView struct {
 	LaunchFailures int `json:"launchFailures"`
+	Deaths         int `json:"deaths"`
 	PromptFailures int `json:"promptFailures"`
 	PromptRetires  int `json:"promptRetires"`
 }
@@ -76,6 +77,9 @@ type DeliveryView struct {
 	QueuedAt    time.Time   `json:"queuedAt"`
 	DeliveredAt *time.Time  `json:"deliveredAt,omitempty"`
 	ConfirmedAt *time.Time  `json:"confirmedAt,omitempty"`
+	// Interrupted is a task a process died in a turn of: it is sent behind the sentence saying so
+	// (`supervise.Delivery.Interrupted`). Absent for every other task.
+	Interrupted bool `json:"interrupted,omitempty"`
 }
 
 // OperatorClaims is the list route's answer, in token order.
@@ -106,6 +110,7 @@ func operatorView(c supervise.Claim) OperatorClaim {
 		Locator:     c.Locator,
 		Budgets: BudgetsView{
 			LaunchFailures: c.Budgets.LaunchFailures,
+			Deaths:         c.Budgets.Deaths,
 			PromptFailures: c.Budgets.PromptFailures,
 			PromptRetires:  c.Budgets.PromptRetires,
 		},
@@ -114,7 +119,7 @@ func operatorView(c supervise.Claim) OperatorClaim {
 	if p := c.Pending; p != nil {
 		view.Pending = &DeliveryView{
 			ID: p.ID, Task: p.Task, Phase: p.Phase, QueuedAt: p.QueuedAt,
-			DeliveredAt: instant(p.DeliveredAt), ConfirmedAt: instant(p.ConfirmedAt),
+			DeliveredAt: instant(p.DeliveredAt), ConfirmedAt: instant(p.ConfirmedAt), Interrupted: p.Interrupted,
 		}
 	}
 	return view

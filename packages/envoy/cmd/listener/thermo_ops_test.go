@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync/atomic"
 	"testing"
 
 	"github.com/nats-io/nats.go"
@@ -57,8 +56,7 @@ func TestThermoOpsListenerConfigAllowsExplicitWidening(t *testing.T) {
 
 func TestThermoOpsRoleSetRejectsUnregisteredSession(t *testing.T) {
 	registry, sessions := setupSessionsTest(t, nil, nil)
-	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{registry: registry, sessions: sessions})
+	state := &listenerDeps{registry: registry, sessions: sessions}
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(
@@ -66,7 +64,7 @@ func TestThermoOpsRoleSetRejectsUnregisteredSession(t *testing.T) {
 		"/v1/roles/set",
 		strings.NewReader(`{"session_id":"ses_unregistered","role":"legion-controller"}`),
 	)
-	roleSetHandler(&state, "test-machine").ServeHTTP(recorder, request)
+	roleSetHandler(state, "test-machine").ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("unregistered role claimant status = %d, want 404: %s", recorder.Code, recorder.Body.String())

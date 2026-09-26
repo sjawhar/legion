@@ -18,10 +18,6 @@ const (
 	ProductionCheck Phase = "production_check"
 	Done            Phase = "done"
 	Held            Phase = "held"
-	// Unrecorded is not a workflow phase and no issue record ever holds it: it is what the state
-	// route says for an issue the workflow does not record, where an operator's claim exists and
-	// an issue does not. The transition table never reaches it, and no role works it.
-	Unrecorded Phase = "unrecorded"
 )
 
 // FileBacked says whether a phase ends with a handoff file its role writes and commits: the

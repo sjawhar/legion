@@ -13,8 +13,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 )
 
-// ControllerConfigExample is the example every refusal of the operator-side file points at,
-// shipped beside the manifests.
+// ControllerConfigExample is the example every refusal of the operator-side file points at.
 const ControllerConfigExample = "deploy/kubernetes/daemon/controller.yaml.example"
 
 // controllerKeys is every key the operator-side file may carry: the same names as legion.yaml, only

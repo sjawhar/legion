@@ -464,8 +464,8 @@ is rewritten, so anchors inside the text you replaced move as they would for any
 writes a new version, which on a spec awaiting approval closes the design gate until the new version is approved. Editing the block
 with `dispatch_doc_edit` works too and is the way to change anything else about it, including adding formatting to a question.
 Re-sending a field unchanged rewrites nothing, so retrying the whole ask is safe.
-Two shapes the block cannot carry are refused outright, naming the field and writing nothing: an option label containing `": "`,
-which is what separates a label from its description, and a question with a line beginning `:::`. Blank lines separate paragraphs;
+Text the block cannot carry back unchanged is refused outright, naming the field and writing nothing - an option label containing
+`": "`, the separator between a label and its description, is one example of text that cannot survive the round trip. Blank lines separate paragraphs;
 a single newline is kept as a line break.
 
 An ask stays open until a human answers, unless its question no longer needs that answer. Retract a moot or superseded question, or
@@ -577,9 +577,12 @@ The server declares typed document blocks at `GET /api/v1/schema/blocks`. Write 
 container-directive form `:::name{#block-id key="value"}` on its own line, ordinary block children,
 and a closing `:::` at the same nesting. An unclosed typed block at document level is rejected. For
 a new typed block, omit `#block-id`; Dispatch mints it. When editing an existing typed block, retain
-its id and every rendered attribute. To rewrite such a block whole, `delete` it and then `insert` the
-new one carrying its id, anchored on the block before or after it, in that order and in one batch: an
-insert carrying an id the document still holds is refused.
+its id and every rendered attribute. Never copy an existing block's id into new markdown: an id
+names one block, so an insert, upload or suggestion whose markdown names an id the document holds
+outside the text it replaces is refused naming the id: `INVALID_OP` for an insert,
+`INVALID_MARKDOWN` for any other write. To rewrite such a block whole, `delete` it and then
+`insert` the new one carrying its id, anchored on the block before or after it, in that order and
+in one batch: an insert carrying an id the document still holds is refused.
 
 Use only the type names, content rule, attributes, and enum values returned by the schema. Values are
 quoted: `:::callout{kind="warning" title="Risk"}`. Do not write Pandoc-style `::: {.callout}`, leaf

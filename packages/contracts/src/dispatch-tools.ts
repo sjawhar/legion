@@ -392,8 +392,9 @@ export const dispatchToolSpecs = [
       "only the fields you name - pass urgency alone and the question's wording, formatting, links " +
       "and comment anchors are untouched - so the edit writes a document version and closes a " +
       "spec's design gate until that version is " +
-      'approved; an option label containing ": " and a question with a line beginning ":::" are ' +
-      "refused, naming the field, because the block cannot carry them unchanged.",
+      "approved; text the block cannot carry back unchanged is refused, naming the field - an " +
+      'option label containing ": ", the separator between a label and its description, is one ' +
+      "example.",
     arguments: (z) => ({
       ask: z
         .string()
