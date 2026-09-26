@@ -230,12 +230,16 @@ func rewatchListenerKVWatchers(conn *nats.Conn, caches []listenerCache) error {
 
 // isUnrecoverableSelfHealthFailure distinguishes state that must be rebuilt
 // from transient JetStream deadlines. Rebuild only while the NATS client is
-// connected; a disconnected client owns its own infinite reconnect loop.
+// connected; a disconnected client owns its own infinite reconnect loop. A
+// missing bucket is terminal too: no watcher notices envoy_roles going, and a
+// rebuild cannot create a bucket, so its failed rebuilds end in a restart,
+// whose store Open creates it again.
 func isUnrecoverableSelfHealthFailure(err error, client *bus.Client, caches []listenerCache) bool {
 	if err == nil || !client.Connected() {
 		return false
 	}
-	if errors.Is(err, nats.ErrConsumerNotFound) || errors.Is(err, nats.ErrConnectionClosed) {
+	if errors.Is(err, nats.ErrConsumerNotFound) || errors.Is(err, nats.ErrConnectionClosed) ||
+		errors.Is(err, nats.ErrStreamNotFound) {
 		return true
 	}
 	for _, c := range caches {
@@ -268,8 +272,13 @@ func rebuildListenerDependencies(
 
 // runSelfHealthMonitor leaves transient dependency timeouts degraded while
 // NATS reconnects. A terminal watcher, closed KV handle, or missing durable
-// consumer is rebuilt immediately; repeated terminal observations enter the
-// bounded shutdown path so Docker can replace an unrecoverable listener.
+// consumer is rebuilt immediately, and a rebuild that reports success is
+// probed at once: a healthy probe is a recovery and resets the count, so
+// separate faults that each rebuild repairs never add up. A failed probe
+// there, transient or terminal, keeps the count and becomes the error the
+// terminal line names. Only a terminal failure still there after threshold
+// consecutive rebuilds enters the bounded shutdown path so Docker can replace
+// an unrecoverable listener.
 // A probe that lands in a reconnect gap is that transient case: it fails at
 // once with "outbound buffer limit exceeded" while the bus is disconnected (its
 // reconnect buffer is off), or at its deadline when the reconnect lands during
@@ -295,6 +304,27 @@ func runSelfHealthMonitor(
 		case <-ticker.C:
 		}
 		err := probe()
+		if err != nil {
+			failures++
+			logger.Warn("self-health probe failed", slog.Int("consecutive", failures), slog.Int("threshold", threshold), slog.String("error", err.Error()))
+			if isUnrecoverable == nil || !isUnrecoverable(err) {
+				terminalFailures = 0
+				continue
+			}
+			terminalFailures++
+			if rebuild != nil {
+				if rebuildErr := rebuild(); rebuildErr != nil {
+					logger.Error("self-health rebuild failed", slog.Int("consecutive", terminalFailures), slog.String("error", rebuildErr.Error()))
+				} else {
+					logger.Info("self-health rebuild started", slog.Int("consecutive", terminalFailures))
+					// Whatever this probe reads, transient or terminal, the count keeps its
+					// increment: only a healthy read is a recovery.
+					if err = probe(); err != nil {
+						logger.Warn("self-health probe after rebuild failed", slog.Int("consecutive", terminalFailures), slog.String("error", err.Error()))
+					}
+				}
+			}
+		}
 		if err == nil {
 			if failures > 0 {
 				logger.Info("self-health recovered", slog.Int("prior_consecutive_failures", failures))
@@ -302,21 +332,6 @@ func runSelfHealthMonitor(
 			failures = 0
 			terminalFailures = 0
 			continue
-		}
-		failures++
-		logger.Warn("self-health probe failed", slog.Int("consecutive", failures), slog.Int("threshold", threshold), slog.String("error", err.Error()))
-		if isUnrecoverable == nil || !isUnrecoverable(err) {
-			terminalFailures = 0
-			continue
-		}
-
-		terminalFailures++
-		if rebuild != nil {
-			if rebuildErr := rebuild(); rebuildErr != nil {
-				logger.Error("self-health rebuild failed", slog.Int("consecutive", terminalFailures), slog.String("error", rebuildErr.Error()))
-			} else {
-				logger.Info("self-health rebuild started", slog.Int("consecutive", terminalFailures))
-			}
 		}
 		if terminalFailures < threshold {
 			continue
