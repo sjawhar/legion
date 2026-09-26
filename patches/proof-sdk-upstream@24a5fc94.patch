@@ -1,0 +1,87 @@
+diff --git a/src/editor/plugins/collab-cursors.ts b/src/editor/plugins/collab-cursors.ts
+index 86f066a..a691a10 100644
+--- a/src/editor/plugins/collab-cursors.ts
++++ b/src/editor/plugins/collab-cursors.ts
+@@ -73,7 +73,7 @@ export function collabCursorBuilder(user: unknown): HTMLElement {
+   const color = normalizeColor('color' in source ? source.color : undefined, '#60a5fa');
+   const cursorWidget = document.createElement('span');
+   cursorWidget.className = 'ProseMirror-yjs-cursor proof-collab-cursor';
+-  cursorWidget.style.setProperty('--proof-collab-cursor-color', color);
++  cursorWidget.setAttribute('data-proof-collab-cursor', proofSelectionStyleFor(color));
+ 
+   // The cursor is a widget in the contenteditable. Its label must stay inline so browsers
+   // do not move a post-update text selection into a block descendant of the decoration.
+@@ -87,17 +87,38 @@ export function collabCursorBuilder(user: unknown): HTMLElement {
+   return cursorWidget;
+ }
+ 
++// Dark Reader rewrites inline colours inside the contenteditable, and ProseMirror observes those
++// attribute writes as content mutations — an endless redraw that wedges the tab. Peer colours are
++// therefore served from a head stylesheet keyed by a data attribute instead.
++const proofSelectionStyleKeys = new Set<string>();
++
++function proofSelectionStyleFor(color: string): string {
++  const key = `proof-collab-selection-${color.slice(1)}`;
++  if (proofSelectionStyleKeys.has(key)) return key;
++  proofSelectionStyleKeys.add(key);
++  let sheet = document.getElementById('proof-collab-selection-styles');
++  if (!sheet) {
++    sheet = document.createElement('style');
++    sheet.id = 'proof-collab-selection-styles';
++    document.head.appendChild(sheet);
++  }
++  const selector = `[data-proof-collab-selection="${key}"]`;
++  sheet.appendChild(
++    document.createTextNode(
++      `${selector}{background-image:linear-gradient(180deg,${color}14 0%,${color}0d 100%);` +
++        `outline:1px solid ${color}2e;outline-offset:-1px;border-bottom:2px solid ${color}66;` +
++        `border-radius:2px}` +
++        `.proof-collab-cursor[data-proof-collab-cursor="${key}"]{--proof-collab-cursor-color:${color}}`
++    )
++  );
++  return key;
++}
++
+ export function collabSelectionBuilder(user: unknown): DecorationAttrs {
+   const source = typeof user === 'object' && user !== null ? user : {};
+   const color = normalizeColor('color' in source ? source.color : undefined, '#60a5fa');
+   return {
+     class: 'ProseMirror-yjs-selection proof-collab-selection',
+-    style: [
+-      `background-image: linear-gradient(180deg, ${color}14 0%, ${color}0d 100%)`,
+-      `outline: 1px solid ${color}2e`,
+-      'outline-offset: -1px',
+-      `border-bottom: 2px solid ${color}66`,
+-      'border-radius: 2px',
+-    ].join(';'),
++    'data-proof-collab-selection': proofSelectionStyleFor(color),
+   };
+ }
+diff --git a/src/editor/plugins/marks.ts b/src/editor/plugins/marks.ts
+index 4f52f7e..e4a0ed1 100644
+--- a/src/editor/plugins/marks.ts
++++ b/src/editor/plugins/marks.ts
+@@ -3070,7 +3070,6 @@ function createDecorations(
+     decorations.push(
+       Decoration.inline(safeComposeRange.from, safeComposeRange.to, {
+         class: 'mark-compose-anchor',
+-        style: STYLES.compose_anchor,
+       })
+     );
+   }
+@@ -3163,7 +3162,6 @@ function createDecorations(
+         decorations.push(
+           Decoration.inline(from, to, {
+             class: [cssClass, glowClass].filter(Boolean).join(' '),
+-            style,
+             'data-mark-id': mark.id,
+             'data-mark-kind': mark.kind,
+           })
+@@ -3178,7 +3176,6 @@ function createDecorations(
+             () => {
+               const span = document.createElement('span');
+               span.className = ['mark-replace-insert', 'mark-insert', glowClass].filter(Boolean).join(' ');
+-              span.style.cssText = STYLES.insert;
+               span.setAttribute('data-mark-id', mark.id);
+               span.setAttribute('data-mark-kind', 'replace');
+               span.textContent = replacementContent ?? '';
