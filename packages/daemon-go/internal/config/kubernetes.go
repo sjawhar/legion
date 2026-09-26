@@ -591,8 +591,8 @@ func readNodeSelector(value *yaml.Node, key string) (map[string]string, error) {
 	return selector, nil
 }
 
-// readTolerations is the shipped `parseScheduling` tolerations rule (config.ts): key, operator
-// Equal or Exists, an effect, and a value only under Equal.
+// readTolerations reads the scheduling tolerations: each a key, operator Equal or Exists, an
+// effect, and a value only under Equal.
 func readTolerations(value *yaml.Node, key string) ([]Toleration, error) {
 	if value == nil {
 		return nil, nil

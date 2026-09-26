@@ -23,6 +23,8 @@ related_issues:
 
 # set -e exempts a `!`-inverted command and every non-final `&&`/`||` operand
 
+> `scripts/kind-smoke/` and the in-cluster manifests under `deploy/kubernetes/daemon/` were removed with the TypeScript daemon's Kubernetes mode (LEGION-286); the paths below are as they stood at `4fdd9646`.
+
 The kind smoke's three harnesses (`up.test.sh`, `down.test.sh`, `checkpoints.test.sh`) were green
 for three rounds while most of their negative assertions could not fail. Each round the tester
 found one more shape bash exempts from `errexit`; the third one had disarmed every secret-leak

@@ -61,8 +61,8 @@ into a state holder: daemon state and the Dispatch project remain authoritative.
 
 ### Started by the operator
 
-When the daemon cannot open a terminal for you — the TypeScript daemon under `runtime: kubernetes`,
-and the Go daemon under either runtime, since it launches no controller — nobody launched your
+When the daemon cannot open a terminal for you — the Go daemon, under either runtime, since it
+launches no controller — nobody launched your
 pane: the operator ran `legion controller start --config controller.yaml [--daemon-url <url>]` on
 their own machine, and you are that foreground OMP session. The command fetched a fresh controller
 secret from the daemon with the operator's token, wrote it to a 0600 file under `LEGION_STATE_DIR`

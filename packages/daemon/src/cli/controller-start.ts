@@ -25,7 +25,7 @@ import { installWorkerGhShim, pathWithoutWorkerBin } from "../daemon/worker-bin"
 import { CliError } from "./errors";
 import { readSecretPointer } from "./secret-pointer";
 
-/** The example the refusal messages point at; shipped beside the manifests. */
+/** The example the refusal messages point at. */
 export const CONTROLLER_CONFIG_EXAMPLE = "deploy/kubernetes/daemon/controller.yaml.example";
 
 /** Every key the operator-side file may carry — the same names as `legion.yaml`, only the ones the
