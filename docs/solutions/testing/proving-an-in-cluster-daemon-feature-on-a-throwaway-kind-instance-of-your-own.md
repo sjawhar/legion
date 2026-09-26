@@ -36,6 +36,8 @@ applies_when:
 
 # Proving an in-cluster daemon feature on a throwaway kind instance of your own
 
+> `scripts/kind-smoke/` and the in-cluster manifests under `deploy/kubernetes/daemon/` were removed with the TypeScript daemon's Kubernetes mode (LEGION-286); the paths below are as they stood at `4fdd9646`.
+
 ## The order and its correction
 
 Sami's standing order of 2026-09-13 (19:00Z, via the operator) withdrew every pre-merge rig:
