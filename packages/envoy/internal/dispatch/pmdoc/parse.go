@@ -226,7 +226,7 @@ func parseTableRows(markdown string, width int) ([]*Node, bool, error) {
 		return nil, false, nil
 	}
 
-	lines := strings.Split(string(lineEnds([]byte(fragment))), "\n")
+	lines := markdownLines(fragment)
 	for _, line := range lines {
 		cells, ok := tableRowCells(line)
 		if !ok || tableDelimiterRow(cells) {
@@ -350,10 +350,10 @@ func parseLined(md goldmark.Markdown, lined, source []byte) ast.Node {
 // afterLoneCarriageReturn reports whether the line the reader is on began at a lone carriage
 // return in the source as written.
 func afterLoneCarriageReturn(reader gmtext.Reader, pc parser.Context) bool {
-	source, _ := pc.Get(sourceKey).([]byte)
+	source := pc.Get(sourceKey).([]byte)
 	_, segment := reader.Position()
 	start := lineStart(reader.Source(), segment.Start)
-	return start > 0 && start <= len(source) && source[start-1] == '\r'
+	return start > 0 && source[start-1] == '\r'
 }
 
 // lineStart is where the line holding position begins in source.
@@ -374,12 +374,24 @@ func lineEnds(source []byte) []byte {
 		return source
 	}
 	lined := bytes.Clone(source)
-	for index, char := range lined {
-		if char == '\r' && (index+1 == len(lined) || lined[index+1] != '\n') {
+	for index := range lined {
+		if loneCarriageReturn(source, index) {
 			lined[index] = '\n'
 		}
 	}
 	return lined
+}
+
+// loneCarriageReturn reports whether source holds a carriage return that no line feed follows at
+// index.
+func loneCarriageReturn(source []byte, index int) bool {
+	return source[index] == '\r' && (index+1 == len(source) || source[index+1] != '\n')
+}
+
+// markdownLines is text split at every line ending markdown reads: a line feed, a lone carriage
+// return, and the two together, whose carriage return stays at the end of its line.
+func markdownLines(text string) []string {
+	return strings.Split(string(lineEnds([]byte(text))), "\n")
 }
 
 // endsInLoneCarriageReturn reports whether the line a text run ends at stop ends in a carriage
@@ -388,7 +400,7 @@ func endsInLoneCarriageReturn(source []byte, stop int) bool {
 	for stop < len(source) && (source[stop] == ' ' || source[stop] == '\t') {
 		stop++
 	}
-	return stop < len(source) && source[stop] == '\r' && (stop+1 == len(source) || source[stop+1] != '\n')
+	return stop < len(source) && loneCarriageReturn(source, stop)
 }
 
 // parseFrontmatterBlock restores the delimited text the Goldmark extension

@@ -112,7 +112,7 @@ func closingColons(n *Node, column int) int {
 		switch node.Type {
 		case "code_block":
 			for _, text := range node.Children {
-				for _, line := range strings.Split(string(lineEnds([]byte(text.Text))), "\n") {
+				for _, line := range markdownLines(text.Text) {
 					if colons := fenceColons(line); colons >= 3 && textColumn(line, at)-column <= 3 {
 						longest = max(longest, colons)
 					}
