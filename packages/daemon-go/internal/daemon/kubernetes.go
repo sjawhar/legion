@@ -69,6 +69,9 @@ func prepareSandbox(cfg config.Config, log *slog.Logger, o overrides, dispatchTo
 		return nil
 	}
 	p.newRuntime = sandboxRuntime(rc, opts, cfg.SlowCommandTimeout)
+	// The role prompts every pod is handed are this daemon's, inlined at each launch, so the probe
+	// resolves what they name rather than the image's copy.
+	roleReferences := p.roleReferences.Encode()
 	p.probe = func(ctx context.Context, rt runtime.Runtime) error {
 		sandboxed, ok := rt.(*sandbox.Runtime)
 		if !ok {
@@ -76,9 +79,7 @@ func prepareSandbox(cfg config.Config, log *slog.Logger, o overrides, dispatchTo
 		}
 		return sandboxed.ProbeImage(ctx, sandbox.ImageProbe{
 			Contract: api.GoDaemonAPIVersion, Budget: cfg.SlowCommandTimeout, Retry: imageProbeRetry,
-			// The role prompts every pod is handed are this daemon's, inlined at each launch, so the
-			// probe resolves what they name rather than the image's copy.
-			RoleReferences: p.roleReferences,
+			RoleReferences: roleReferences,
 		})
 	}
 	return nil
