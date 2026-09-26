@@ -158,17 +158,13 @@ func (g *probeRig) containerAndCollector() {
 	}
 }
 
-// testRoleReferencesJSON is role prompts' references as Names.Encode writes them, and
-// testRoleReferences the Names it decodes to: the daemon always hands the probe some.
-const testRoleReferencesJSON = `{"LEGION_PROMPT_AGENTS":{"oracle":["roles/core/planner.md"]},"LEGION_PROMPT_SKILLS":{}}`
+// testRoleReferences are role prompts' references, and testRoleReferencesJSON the encoding
+// Names.Encode writes for them: the daemon always hands the probe some.
+var testRoleReferences = promptrefs.Names{
+	promptrefs.TaskAgents: {"oracle": {"roles/core/planner.md"}}, promptrefs.Skills: {},
+}
 
-var testRoleReferences = func() promptrefs.Names {
-	names, err := promptrefs.Decode(testRoleReferencesJSON)
-	if err != nil {
-		panic(err)
-	}
-	return names
-}()
+const testRoleReferencesJSON = `{"LEGION_PROMPT_AGENTS":{"oracle":["roles/core/planner.md"]},"LEGION_PROMPT_SKILLS":{}}`
 
 // probeOptions allow two attempts, so a definitive verdict shows as one attempt and a transient one
 // as two. Each attempt's budget is long enough that a pod the stand-ins answer at once is judged
