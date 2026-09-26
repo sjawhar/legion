@@ -12,6 +12,7 @@ on:
       - "packages/claude-envoy/**"
       - "packages/pi-envoy/**"
       - "packages/dispatch/**"
+      - "packages/proof-editor/**"
       - "packages/daemon-go/**"
       - "packages/daemon/docker/worker.Dockerfile"
       - ".github/actions/install-jj/**"
@@ -30,6 +31,7 @@ on:
       - "packages/claude-envoy/**"
       - "packages/pi-envoy/**"
       - "packages/dispatch/**"
+      - "packages/proof-editor/**"
       - "packages/daemon-go/**"
       - "packages/daemon/docker/worker.Dockerfile"
       - ".github/actions/install-jj/**"
@@ -68,6 +70,7 @@ jobs:
               - 'packages/contracts/**'
             envoy:
               - 'packages/envoy/**'
+              - 'packages/proof-editor/**'
               - 'packages/contracts/**'
               - 'skills/dispatch/**'
               - 'go.work'
@@ -92,6 +95,7 @@ jobs:
               - '.github/actions/install-jj/**'
             dispatch:
               - 'packages/dispatch/**'
+              - 'packages/proof-editor/**'
               - 'packages/contracts/**'
               - 'packages/envoy/internal/dispatch/**'
               - 'packages/envoy/cmd/dispatch/**'
@@ -241,6 +245,15 @@ jobs:
           go-version-file: packages/envoy/go.mod
       - uses: ./.github/actions/setup-bun
       - run: bun install --frozen-lockfile
+      - name: Lint proof editor
+        run: bun run lint
+        working-directory: packages/proof-editor
+      - name: Typecheck proof editor
+        run: bun run typecheck
+        working-directory: packages/proof-editor
+      - name: Test proof editor
+        run: bun run test
+        working-directory: packages/proof-editor
       - name: Lint dispatch dashboard
         run: bun run lint
         working-directory: packages/dispatch
@@ -346,9 +359,6 @@ jobs:
       - name: Generate Go contracts from shared schema
         run: bun run gen:go
         working-directory: packages/contracts
-      - name: Install pmdoc fixture generator dependencies
-        run: bun install --frozen-lockfile
-        working-directory: packages/envoy/internal/dispatch/pmdoc/gen
       - name: Check pmdoc fixtures are up to date
         run: bun run check
         working-directory: packages/envoy/internal/dispatch/pmdoc/gen
