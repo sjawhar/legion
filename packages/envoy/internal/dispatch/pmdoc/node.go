@@ -270,21 +270,21 @@ func askContentBreak(children []*Node) string {
 		case child == nil:
 			return "a missing block"
 		case index == 0 && child.Type != "paragraph":
-			return askBlockName(child.Type) + " before its question"
+			return blockName(child.Type) + " before its question"
 		case child.Type == "paragraph" && index > 0 && children[index-1].Type == "bullet_list":
 			return "a paragraph after its options"
 		case child.Type == "bullet_list" && index > 0 && children[index-1].Type == "bullet_list":
 			return "a second bullet list"
 		case child.Type != "paragraph" && child.Type != "bullet_list":
-			return askBlockName(child.Type)
+			return blockName(child.Type)
 		}
 	}
 	return ""
 }
 
-// askBlockName is a block type as a reader names it, with its article: "a code block", "an
+// blockName is a block type as a reader names it, with its article: "a code block", "an
 // ordered list", "a horizontal rule".
-func askBlockName(nodeType string) string {
+func blockName(nodeType string) string {
 	name := strings.ReplaceAll(nodeType, "_", " ")
 	if nodeType == "hr" {
 		name = "horizontal rule"
