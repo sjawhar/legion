@@ -53,9 +53,13 @@ func (l S3Loader) Load(ctx context.Context) ([]byte, error) {
 		return nil, fmt.Errorf("rules object s3://%s/%s: %w", l.Bucket, l.Key, err)
 	}
 	defer out.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(out.Body, 4<<20))
+	const maxSize = 4 << 20
+	data, err := io.ReadAll(io.LimitReader(out.Body, maxSize+1))
 	if err != nil {
 		return nil, fmt.Errorf("rules object s3://%s/%s: %w", l.Bucket, l.Key, err)
+	}
+	if len(data) > maxSize {
+		return nil, fmt.Errorf("rules object s3://%s/%s: exceeds %d byte limit", l.Bucket, l.Key, maxSize)
 	}
 	if len(data) == 0 {
 		return nil, fmt.Errorf("rules object s3://%s/%s: empty", l.Bucket, l.Key)
