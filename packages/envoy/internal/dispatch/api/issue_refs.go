@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/jackc/pgx/v5"
 )
 
 func (s *server) resolveIssue(w http.ResponseWriter, r *http.Request) {
@@ -35,14 +37,39 @@ func (s *server) resolveIssueRef(ctx context.Context, ref string) (string, error
 	if err != nil {
 		return "", err
 	}
-	var key string
-	err = s.deps.Store.Pool.QueryRow(ctx, `
-		select issue_key from issue_external_links where url = $1
-	`, externalURL(repo, number)).Scan(&key)
+	rows, err := s.deps.Store.Pool.Query(ctx, `
+		select distinct issue_key from issue_external_links where url = any($1) order by issue_key
+	`, externalURLs(repo, number))
 	if err != nil {
 		return "", err
 	}
-	return key, nil
+	defer rows.Close()
+
+	var keys []string
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return "", err
+		}
+		keys = append(keys, key)
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	switch len(keys) {
+	case 0:
+		return "", pgx.ErrNoRows
+	case 1:
+		return keys[0], nil
+	default:
+		return "", errorf(
+			http.StatusBadRequest,
+			"AMBIGUOUS_ISSUE_REF",
+			"external issue reference %q is linked to multiple Dispatch issues: %s",
+			ref,
+			strings.Join(keys, ", "),
+		)
+	}
 }
 
 func validateExternalURL(raw string) error {
