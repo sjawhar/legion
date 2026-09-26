@@ -12,9 +12,9 @@ events and sends them to the current Claude Code session as supported
   native Dispatch tools through that same MCP server.
 - `hooks/hooks.json` runs `dist/open-asks-hook.js` on every `SessionStart` (startup, resume, clear,
   compact, fork). It records the current session id for the channel server and puts the session's
-  open Dispatch asks into the model's context (`Dispatch authored-ask summary:` — the same summary
-  pi-envoy injects before an OMP agent's first turn; `unavailable: <reason>` when Dispatch cannot be
-  reached; nothing when Dispatch is not configured).
+  open Dispatch asks into the model's context (`Dispatch authored-ask summary:`;
+  `unavailable: <reason>` when Dispatch cannot be reached; nothing when Dispatch is not
+  configured).
 - The channel server subscribes directly to `notifications.agent.<session_id>` and to every topic
   followed by `envoy_subscribe` or a successful Dispatch mutation. It renders every envelope with
   the shared `@legion/envoy-client/delivery` renderer and never exposes raw envelope bytes.

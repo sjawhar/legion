@@ -1,8 +1,7 @@
 // Claude Code SessionStart hook (startup, resume, clear, compact, fork). Two jobs:
 // 1. Record the CURRENT session id for this Claude process so the channel
 //    server, which keeps the id it was spawned with, can follow a `/clear`.
-// 2. Put the session's open Dispatch asks into the model's context, the same
-//    summary pi-envoy injects before an OMP agent's first turn.
+// 2. Put the session's open Dispatch asks into the model's context.
 // Plain stdout becomes context; the hook always exits 0 so a Dispatch outage
 // never blocks a session from starting.
 

@@ -264,10 +264,37 @@ comment anchor. A question about a document is written as an `ask` block through
 directive, not as an issue-level `dispatch_ask`. The extension passes the host tool AbortSignal to every
 Dispatch execution; the shared client also imposes a 60-second HTTP deadline.
 
-`before_agent_start` injects the complete `dispatch_open_asks` summary as agent-attributed context; this before-run
-summary is the only automatic ask awareness. The stop-time reminder was removed 2026-09-14 pending a redesign of the
-`waiting on a human` trigger. An unavailable open-asks query warns once per session until that session's subsequent
-query succeeds.
+`before_agent_start` injects nothing into the conversation; its open-asks query only arms the run-end nudge for a
+turn carrying the user's own text, the snapshot's `as_of` becoming the baseline. It runs that query only for a
+session the stop could actually nudge — the host awaits this handler, so a session that is excluded below would
+otherwise pay up to `OPEN_ASKS_TIMEOUT_MS` at the head of every turn for an answer nothing reads. `agent_end` is
+the nudge's stop signal, and the trigger is how the run ended plus Dispatch state, never the text of what the
+agent last said: a session whose run settles normally (`willContinue` unset and the last assistant reply ended
+`stopReason: "stop"` — an interrupt, a provider error, a truncation, or a run with no reply of its own is never
+nudged, and asks Dispatch nothing) with nothing open, nothing opened since the turn's baseline, and no ask of its
+own opened during the turn gets one hidden `dispatch-ask-reminder` steer with `triggerTurn`, telling it to open an
+ask if it is waiting on a human and otherwise carry on. One per
+stop: firing latches the arming period, and only a turn carrying the user's own text arms the next one, so the
+nudge's own continuation — which re-enters no `before_agent_start` at all — cannot arm anything
+(`extensions/legion-phase-stall-omp.test.ts` holds the host to that on the pinned binary, since without it a
+session would nudge itself without bound). One stop-time check runs at a time: `agent_end` handlers are not
+awaited by the host, so a latch held across the Dispatch round trip is what keeps a second stop inside it from
+checking or nudging again. The latch and the period are in memory only — a cold start or a session switch begins
+at period 0, which nudges nothing until the next genuine user turn arms one.
+
+What the arming rule excludes is as load-bearing as what it covers. An Envoy delivery wakes a session through the
+same agent-initiated path the nudge itself uses, which emits no `before_agent_start`, so an event-woken turn arms
+no period: a standing role-holder that works only when Envoy wakes it is never nudged, and is covered by the
+skill norm alone. A run the host gave no UI context (`omp -p`, and any other headless launch) is never nudged
+either: the host disposes the session when that one run ends, so the nudge only buys a provider turn nobody
+reads. An RPC pane and an ACP session both have a UI context; on an ACP client that defers agent-initiated turns
+the steer is queued as hidden next-turn context and consumed when the user next prompts, rather than running a
+turn of its own. A `task` subagent is skipped outright. A Legion-driven session is never nudged, having the
+design gate and its architect instead: `claimEnvoyRole` records it on the role-claim bridge and in the transcript
+(`legion-managed-session`), which is what a fresh process reads — and neither record is matched against the
+session id, so the exclusion survives a `/fork` or `/handoff` that mints a new one. An unavailable open-asks
+query warns once per session until that session's subsequent query succeeds, and arms nothing — an unknown ask
+state never nudges.
 
 ## Where to look
 

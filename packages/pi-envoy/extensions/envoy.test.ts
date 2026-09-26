@@ -11,7 +11,7 @@ import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
 import { decode } from "@toon-format/toon";
 import { z } from "zod";
 import { LOCAL_ENVOY_NOTICE } from "../src/legion/phase-stall";
-import { onEnvoyRoleRegained } from "../src/legion/role-claim-bridge";
+import { claimEnvoyRole, onEnvoyRoleRegained } from "../src/legion/role-claim-bridge";
 import type { MessageRenderer, MessageRendererTheme, PiApi } from "../src/pi-types";
 import { hostAgentRegistryMock, testAgentRoster } from "./test-host-registry";
 
@@ -77,13 +77,17 @@ type TestPi = {
       | "session_tree"
       | "session_shutdown"
       | "before_agent_start"
+      | "agent_end"
       | "message_start"
       | "session_stop"
       | "input"
       | "tool_result",
     handler: (event: unknown, context: SessionContext) => Promise<unknown>
   ) => void;
-  readonly sendMessage: (message: { readonly content: string }, options: unknown) => void;
+  readonly sendMessage: (
+    message: { readonly content: string; readonly customType?: string; readonly display?: boolean },
+    options: unknown
+  ) => void;
   readonly askEphemeral?: (input: {
     readonly prompt: string;
     readonly signal?: AbortSignal;
@@ -305,7 +309,9 @@ function createPi(options: { readonly clipboardError?: Error; readonly zod?: typ
   const messages: string[] = [];
   const deliveries: {
     readonly content: string;
+    readonly customType?: string;
     readonly details?: unknown;
+    readonly display?: boolean;
     readonly options: unknown;
   }[] = [];
   // Persisted custom entries, in the shape a later `getBranch()` returns them.
@@ -324,7 +330,9 @@ function createPi(options: { readonly clipboardError?: Error; readonly zod?: typ
       messages.push(message.content);
       deliveries.push({
         content: message.content,
+        customType: message.customType,
         details: "details" in message ? message.details : undefined,
+        display: message.display,
         options,
       });
     },
@@ -353,9 +361,10 @@ const topLevelSession = {
   ensureOnDisk: async (): Promise<void> => undefined,
 };
 
-function sessionContext(sessionID = "ses_omp"): SessionContext {
+function sessionContext(sessionID = "ses_omp", hasUI = true): SessionContext {
   return {
     cwd: "/tmp/envoy-omp-test",
+    hasUI,
     sessionManager: { ...topLevelSession, getSessionId: () => sessionID },
     setInterval: () => undefined,
     ui: {
@@ -485,6 +494,102 @@ function responseWithRegistration(
 
 const dispatchToolNames = dispatchToolSpecs.map((spec) => spec.name);
 
+const ASK_NUDGE =
+  "You have no unanswered asks in Dispatch. If you are waiting for human input, open an ask. Otherwise ignore this reminder and continue with any remaining work. Do not reply just to acknowledge this reminder.";
+
+/**
+ * Boots one session against a Dispatch whose open-ask snapshot each call reads from
+ * `snapshot()`, and hands back the two lifecycle edges the run-end nudge lives between: a user
+ * turn (`before_agent_start`, which arms a period) and a stop (`agent_end`).
+ */
+async function bootAskNudge(
+  envoyExtension: (pi: TestPi) => void,
+  sessionID: string,
+  snapshot: () => {
+    readonly as_of?: string;
+    readonly count?: number;
+    readonly opened_since?: boolean;
+  },
+  options: {
+    /** Transcript this session resumes from, as `getBranch()` returns it. */
+    readonly branch?: readonly unknown[];
+    /** False is a headless run (`omp -p`), where the host supplies no UI context. */
+    readonly hasUI?: boolean;
+    /** Awaited before the stop-time query answers, to hold its round trip open. */
+    readonly holdStopQuery?: () => Promise<void>;
+  } = {}
+) {
+  const branch = options.branch ?? [];
+  // A distinct server clock per query, so a period's baseline can only be the `as_of` of the
+  // turn that armed it: a regression that carried the first period's baseline forward shows up
+  // in the `since=` of the second period's stop.
+  let asOfCalls = 0;
+  process.env.DISPATCH_URL = "http://dispatch.test";
+  process.env.DISPATCH_TOKEN = "token";
+  const queries: string[] = [];
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(input.toString());
+    if (url.pathname === "/v1/roles/set") {
+      const body = JSON.parse(init?.body?.toString() ?? "{}") as { readonly role?: string };
+      return response({
+        session_id: sessionID,
+        machine_id: "test",
+        dir: "/tmp/envoy-omp-test",
+        topics: [`notifications.role.${body.role ?? ""}`],
+      });
+    }
+    if (url.pathname !== "/api/v1/asks/open") return responseWithRegistration(input, init, {});
+    queries.push(url.search);
+    if (url.search.includes("since=")) await options.holdStopQuery?.();
+    const open = snapshot();
+    asOfCalls += 1;
+    // DispatchClient parses a body only when the response says it is JSON.
+    return new Response(
+      JSON.stringify({
+        session_id: sessionID,
+        as_of: open.as_of ?? `2026-09-13T00:00:0${asOfCalls}Z`,
+        opened_since: open.opened_since ?? false,
+        count: open.count ?? 0,
+        waiting_on_human: 0,
+        waiting_on_agent: 0,
+        asks: [],
+      }),
+      { headers: { "Content-Type": "application/json" } }
+    );
+  };
+  const fixture = createPi();
+  envoyExtension(fixture.pi);
+  const context: SessionContext = {
+    ...sessionContext(sessionID, options.hasUI ?? true),
+    sessionManager: {
+      ...topLevelSession,
+      getSessionId: () => sessionID,
+      getBranch: () => branch,
+    },
+  };
+  await fixture.handlers.get("session_start")?.({}, context);
+  const beforeAgentStart = fixture.handlers.get("before_agent_start");
+  const agentEnd = fixture.handlers.get("agent_end");
+  const toolResult = fixture.handlers.get("tool_result");
+  if (beforeAgentStart === undefined || agentEnd === undefined || toolResult === undefined) {
+    throw new Error("the run-end nudge's lifecycle handlers were not registered");
+  }
+  return {
+    context,
+    fixture,
+    queries,
+    userTurn: (prompt = "finish the task") => beforeAgentStart({ prompt }, context),
+    /** A stop defaults to a normal settle: the run's last reply ended `stopReason: "stop"`. */
+    stop: (
+      event: {
+        readonly willContinue?: boolean;
+        readonly messages?: readonly { readonly role?: string; readonly stopReason?: string }[];
+      } = {}
+    ) => agentEnd({ messages: [{ role: "assistant", stopReason: "stop" }], ...event }, context),
+    toolResult: (event: Record<string, unknown>) => toolResult(event, context),
+  };
+}
+
 describe("envoy OMP extension", () => {
   test("discovers the bundled envoy skill from the repository root", async () => {
     const { default: envoyExtension } = await import("./envoy.ts?resources-discover");
@@ -508,7 +613,7 @@ describe("envoy OMP extension", () => {
     expect(existsSync(join(result.skillPaths[0], "envoy", "SKILL.md"))).toBe(true);
   });
 
-  test("injects an authored-ask summary", async () => {
+  test("injects nothing at turn start and reads open asks only to arm the run-end nudge", async () => {
     process.env.DISPATCH_URL = "http://dispatch.test";
     process.env.DISPATCH_TOKEN = "token";
     const requests: string[] = [];
@@ -539,18 +644,12 @@ describe("envoy OMP extension", () => {
     const beforeAgentStart = fixture.handlers.get("before_agent_start");
     if (beforeAgentStart === undefined) throw new Error("before_agent_start was not registered");
 
-    const summary = await beforeAgentStart({ prompt: "finish the task" }, context);
-    expect(summary).toMatchObject({
-      message: {
-        customType: "dispatch-open-asks",
-        attribution: "agent",
-        content: expect.stringContaining("There are no unanswered asks for this session."),
-      },
-    });
+    const injected = await beforeAgentStart({ prompt: "finish the task" }, context);
+    expect(injected).toBeUndefined();
     expect(requests).toEqual(["/api/v1/asks/open?author_session=ses_reminder"]);
   });
 
-  test("renders an unavailable authored-ask summary and warns once", async () => {
+  test("injects nothing and warns once when the open-ask check is unavailable", async () => {
     process.env.DISPATCH_URL = "http://dispatch.test";
     process.env.DISPATCH_TOKEN = "token";
     const notifications: string[] = [];
@@ -574,10 +673,8 @@ describe("envoy OMP extension", () => {
     const beforeAgentStart = fixture.handlers.get("before_agent_start");
     if (beforeAgentStart === undefined) throw new Error("before_agent_start was not registered");
 
-    const summary = await beforeAgentStart({ prompt: "wait" }, context);
-    expect(summary).toMatchObject({
-      message: { content: expect.stringContaining("unavailable"), attribution: "agent" },
-    });
+    const injected = await beforeAgentStart({ prompt: "wait" }, context);
+    expect(injected).toBeUndefined();
     expect(notifications).toEqual([expect.stringContaining("Dispatch open-ask check unavailable")]);
   });
 
@@ -637,6 +734,260 @@ describe("envoy OMP extension", () => {
     available = false;
     await beforeAgentStart({ prompt: "first session failed again" }, context);
     expect(notifications).toHaveLength(3);
+  });
+
+  test("nudges an ask-free stop once, and again only after a new user turn", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-fires");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_fires", () => ({}));
+
+    await session.userTurn();
+    await session.stop();
+    expect(session.fixture.deliveries).toEqual([
+      {
+        content: ASK_NUDGE,
+        customType: "dispatch-ask-reminder",
+        details: undefined,
+        display: false,
+        options: { deliverAs: "steer", triggerTurn: true },
+      },
+    ]);
+
+    // The nudged turn ends in the same period; one nudge per stop means silence here.
+    await session.stop();
+    expect(session.fixture.deliveries).toHaveLength(1);
+
+    await session.userTurn("now the next thing");
+    await session.stop();
+    expect(session.fixture.deliveries).toHaveLength(2);
+    // One query per user turn, one per stop, and each stop carries the baseline of the turn
+    // that armed its own period — the second stop queries from the second turn's `as_of`, not
+    // the first's.
+    expect(session.queries).toEqual([
+      "?author_session=ses_nudge_fires",
+      "?author_session=ses_nudge_fires&since=2026-09-13T00%3A00%3A01Z",
+      "?author_session=ses_nudge_fires",
+      "?author_session=ses_nudge_fires&since=2026-09-13T00%3A00%3A03Z",
+    ]);
+    // The arming period lives in memory only: nothing about it reaches the transcript.
+    expect(session.fixture.entries).toEqual([]);
+  });
+
+  test("stays silent at a stop that leaves an ask open", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-open");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_open", () => ({ count: 1 }));
+
+    await session.userTurn();
+    await session.stop();
+    expect(session.fixture.deliveries).toEqual([]);
+  });
+
+  test("stays silent when an ask was opened after the turn began", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-opened-since");
+    // Answered and closed within the turn: nothing is open at the stop, but the session did
+    // put a question to a human, so it is not silently waiting.
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_since", () => ({
+      opened_since: true,
+    }));
+
+    await session.userTurn();
+    await session.stop();
+    expect(session.fixture.deliveries).toEqual([]);
+  });
+
+  test("stays silent for the period in which the agent opened an ask itself", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-saw-ask");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_saw", () => ({}));
+
+    await session.userTurn();
+    await session.toolResult({
+      toolName: "dispatch_ask",
+      toolCallId: "call-1",
+      input: {},
+      details: { ask: "ask-1" },
+      isError: false,
+    });
+    await session.stop();
+    expect(session.fixture.deliveries).toEqual([]);
+
+    // The next user turn arms a fresh period, and an approval request settles it the same way.
+    await session.userTurn("write the spec");
+    await session.toolResult({
+      toolName: "dispatch_request_approval",
+      toolCallId: "call-2",
+      input: {},
+      details: { ask: "ask-2" },
+      isError: false,
+    });
+    await session.stop();
+    expect(session.fixture.deliveries).toEqual([]);
+  });
+
+  test("waits for the real stop when OMP has already scheduled a continuation", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-will-continue");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_continue", () => ({}));
+
+    await session.userTurn();
+    await session.stop({ willContinue: true });
+    expect(session.fixture.deliveries).toEqual([]);
+
+    await session.stop();
+    expect(session.fixture.deliveries).toHaveLength(1);
+  });
+
+  test("never nudges a Legion-managed session", async () => {
+    const extension = await import("./envoy.ts?ask-nudge-legion");
+    const session = await bootAskNudge(extension.default, "ses_nudge_legion", () => ({}));
+    await claimEnvoyRole("ses_nudge_legion", "legion-project-issue-worker", session.context);
+
+    await session.userTurn("complete the handoff");
+    await session.stop();
+    expect(session.fixture.deliveries).toEqual([]);
+    // Neither edge asks Dispatch anything: a session that cannot be nudged does not pay the
+    // arming round trip either.
+    expect(session.queries).toEqual([]);
+    // The claim is recorded in the transcript, which is the only thing a fresh process can read.
+    expect(session.fixture.entries).toContainEqual({
+      type: "custom",
+      customType: "legion-managed-session",
+      data: { session_id: "ses_nudge_legion" },
+    });
+  });
+
+  test("a transcript that records Legion driving the session excludes it under any id", async () => {
+    // A fresh process has only the transcript; a `/fork` or `/handoff` then carries that
+    // transcript into a newly minted id while the session stays Legion-driven, so the entry is
+    // never matched against the id the guard runs under.
+    for (const recordedID of ["ses_nudge_restored", "ses_nudge_before_the_fork"]) {
+      const extension = await import(`./envoy.ts?ask-nudge-legion-resume-${recordedID}`);
+      const session = await bootAskNudge(extension.default, "ses_nudge_restored", () => ({}), {
+        branch: [
+          {
+            type: "custom",
+            customType: "legion-managed-session",
+            data: { session_id: recordedID },
+          },
+        ],
+      });
+
+      await session.userTurn("carry on with the issue");
+      await session.stop();
+      expect(session.fixture.deliveries).toEqual([]);
+      expect(session.queries).toEqual([]);
+    }
+  });
+
+  test("stays silent when Dispatch could not be reached this turn", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-unreachable");
+    let reachable = false;
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_offline", () => {
+      if (!reachable) throw new Error("network offline");
+      return {};
+    });
+
+    await session.userTurn();
+    reachable = true;
+    await session.stop();
+    expect(session.fixture.deliveries).toEqual([]);
+  });
+
+  test("does not arm a period for a turn that carries no user text", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-synthetic");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_synthetic", () => ({}));
+
+    await session.userTurn();
+    await session.stop();
+    expect(session.fixture.deliveries).toHaveLength(1);
+
+    // Whatever the host prepares without the user in it cannot re-arm the nudge — least of
+    // all the nudge's own steered turn, or the session would talk to itself forever.
+    await session.userTurn("");
+    await session.stop();
+    expect(session.fixture.deliveries).toHaveLength(1);
+  });
+
+  test("a session that starts cold cannot nudge until a user turn arms a period", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-resume");
+    // The arming period never reaches the transcript, so a resumed session restores none: it
+    // begins at period 0, which the stop guard refuses outright — it does not even ask
+    // Dispatch. A prior process's own nudge in the branch changes nothing.
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_resume", () => ({}), {
+      branch: [{ type: "custom_message", customType: "dispatch-ask-reminder", content: ASK_NUDGE }],
+    });
+
+    await session.stop();
+    expect(session.fixture.deliveries).toEqual([]);
+    expect(session.queries).toEqual([]);
+
+    // The user's first turn after the resume arms the next period, which nudges as usual.
+    await session.userTurn();
+    await session.stop();
+    expect(session.fixture.deliveries).toHaveLength(1);
+  });
+
+  test("a second stop inside one Dispatch round trip is one nudge and one query", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-race");
+    const { promise: held, resolve: release } = Promise.withResolvers<void>();
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_race", () => ({}), {
+      holdStopQuery: () => held,
+    });
+
+    await session.userTurn();
+    // The host does not await `agent_end`, so a second stop can arrive while the first one's
+    // query is still in flight — an inbound steer or a host continuation starts a turn that
+    // ends on a bare reply well inside the three-second window. Both nudging is what "one per
+    // stop" forbids; both querying is a Dispatch round trip whose answer can change nothing.
+    const first = session.stop();
+    const second = session.stop();
+    release();
+    await Promise.all([first, second]);
+
+    expect(session.fixture.deliveries).toHaveLength(1);
+    // The second stop returned on the latch without asking Dispatch anything.
+    expect(session.queries).toEqual([
+      "?author_session=ses_nudge_race",
+      "?author_session=ses_nudge_race&since=2026-09-13T00%3A00%3A01Z",
+    ]);
+  });
+
+  test("never nudges a headless run the host gave no UI context", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-headless");
+    // `omp -p`: the host disposes the session when its one run ends and has already printed its
+    // output, so a steered continuation is either aborted or billed for text nobody reads.
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_headless", () => ({}), {
+      hasUI: false,
+    });
+
+    await session.userTurn();
+    await session.stop();
+    expect(session.fixture.deliveries).toEqual([]);
+    // Neither edge asks Dispatch anything: a headless run does not pay the arming round trip.
+    expect(session.queries).toEqual([]);
+  });
+
+  test("never nudges a stop the run did not settle normally", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-unsettled");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_unsettled", () => ({}));
+
+    await session.userTurn();
+    // An interrupt, a provider failure, a truncation, and a run with no reply of its own:
+    // steering any of them answers the user's cancel, or a failure, with a turn nobody asked for.
+    for (const messages of [
+      [{ role: "assistant", stopReason: "aborted" }],
+      [
+        { role: "assistant", stopReason: "stop" },
+        { role: "assistant", stopReason: "error" },
+      ],
+      [{ role: "assistant", stopReason: "length" }],
+      [{ role: "user" }],
+    ]) {
+      await session.stop({ messages });
+    }
+    expect(session.fixture.deliveries).toEqual([]);
+    // Only the arming query ran: an unsettled stop asks Dispatch nothing and latches nothing.
+    expect(session.queries).toHaveLength(1);
+
+    await session.stop();
+    expect(session.fixture.deliveries).toHaveLength(1);
   });
 
   test("registers the shared eight-tool contract and delegates HTTP operations to EnvoyClient", async () => {
