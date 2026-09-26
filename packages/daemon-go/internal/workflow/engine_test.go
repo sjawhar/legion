@@ -461,6 +461,41 @@ func TestProductionCheckCompletionTellsTheArchitectAndAwaitsSignOff(t *testing.T
 	assertOutboxKinds(t, pool, []string{"notice"})
 }
 
+// A tree's architect is who every notice of its tree reaches, so its own claim failing — its
+// launches or prompts ran out — would reach nobody unless the daemon says so: the failure is a
+// worker-died notice naming the architect and the phase the root is in, which the outbox also
+// sends the controller. Nothing is held: a phase is its worker's, and the root's planner here
+// keeps its phase.
+func TestATreeArchitectsFailedClaimIsNoticedAndHoldsNoPhase(t *testing.T) {
+	pool := migratedPool(t)
+	ctx := context.Background()
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "U"})
+
+	if _, err := intake.ApplyFact(ctx, pool, "supervise", "architect-failed", intake.ClaimFailed{Issue: "LEGION-208", Role: claim.RoleArchitect}, testEngine(), admissionStub{}); err != nil {
+		t.Fatalf("ApplyFact the architect's failed claim: %v", err)
+	}
+	var gotPhase phase.Phase
+	var heldFrom *string
+	if err := pool.QueryRow(ctx, "select phase, held_from from issues where key = $1", "LEGION-208").Scan(&gotPhase, &heldFrom); err != nil {
+		t.Fatalf("read the root: %v", err)
+	}
+	if gotPhase != phase.Planning || heldFrom != nil {
+		t.Fatalf("root phase = %s held from %v, want planning and not held", gotPhase, heldFrom)
+	}
+	assertOutboxKinds(t, pool, []string{"notice"})
+	var payload []byte
+	if err := pool.QueryRow(ctx, "select payload from outbox where kind = 'notice'").Scan(&payload); err != nil {
+		t.Fatalf("read the notice: %v", err)
+	}
+	var notice record.Notice
+	if err := json.Unmarshal(payload, &notice); err != nil {
+		t.Fatalf("decode notice %s: %v", payload, err)
+	}
+	if want := (record.Notice{Kind: "worker-died", Role: claim.RoleArchitect, Phase: phase.Planning}); notice != want {
+		t.Fatalf("notice = %+v, want %+v", notice, want)
+	}
+}
+
 // Linger suspends, and its expiry stops, every claim the tree holds — the root architect admission
 // started and a worker that never reported a handoff included, neither of which has a phase row.
 func TestSignOffLingersOnceAndExpiryStopsTreeAndRemovesEveryWorkspace(t *testing.T) {

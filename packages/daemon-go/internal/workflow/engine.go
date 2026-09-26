@@ -541,10 +541,21 @@ func (e *Engine) closed(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 	return intake.Result{}, e.store.PutPullRequest(ctx, tx, *pr)
 }
 
+// claimFailed holds the issue whose phase worker's claim failed — a budget ran out — and tells the
+// architect. The tree's architect failing holds nothing, since a phase is its worker's; it is told
+// as a worker-died of the architect, which goes to the controller (record.Notice.ForController),
+// because every other notice of the tree reaches the architect and nobody inside the tree is left
+// to act on its own.
 func (e *Engine) claimFailed(ctx context.Context, tx pgx.Tx, fact intake.ClaimFailed) (intake.Result, error) {
 	issue, err := e.store.Issue(ctx, tx, fact.Issue)
-	if err != nil || issue == nil || issue.Phase == phase.Held || RoleFor(issue.Phase) != fact.Role {
+	if err != nil || issue == nil {
 		return intake.Result{}, err
+	}
+	if claim.IsTreeArchitect(fact.Role, issue.Key, issue.Tree) {
+		return intake.Result{}, e.notice(ctx, tx, issue.Key, record.Notice{Kind: "worker-died", Role: fact.Role, Phase: issue.Phase})
+	}
+	if issue.Phase == phase.Held || RoleFor(issue.Phase) != fact.Role {
+		return intake.Result{}, nil
 	}
 	from := issue.Phase
 	issue.Phase, issue.HeldFrom = phase.Held, &from
