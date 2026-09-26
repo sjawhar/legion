@@ -13,6 +13,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
@@ -301,6 +302,19 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 	if input.Question == nil && input.Options == nil && input.Multiple == nil && input.Urgency == nil {
 		writeError(w, "INVALID_ASK", http.StatusBadRequest, "ask edit requires at least one field")
 		return
+	}
+	// A block ask's text is written into its document, where text reaches the parser with line
+	// feeds alone (pmdoc.LineFeeds); the ask's row takes the same text.
+	if input.Question != nil {
+		question := pmdoc.LineFeeds(*input.Question)
+		input.Question = &question
+	}
+	if input.Options != nil {
+		options := make([]model.AskOption, len(*input.Options))
+		for index, option := range *input.Options {
+			options[index] = model.AskOption{Label: pmdoc.LineFeeds(option.Label), Description: pmdoc.LineFeeds(option.Description)}
+		}
+		input.Options = &options
 	}
 	actor, ok := s.requireActor(w, r, input.Actor)
 	if !ok {

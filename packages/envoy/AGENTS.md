@@ -144,8 +144,8 @@ block a `replace`, like an accepted suggestion, writes `with` as the code's lite
 (`codeReplacement`), and none of the rules below apply. Markdown cannot carry two things there: line
 breaks at the end of the code's text and a line holding only whitespace in a list item's code read
 back without them. A line of colons in code inside a typed block is kept: the browser editor's
-parser ends a typed block at a line of at least its fence's colons, with spaces, tabs and a
-line-ending carriage return around them, starting less than four columns
+parser ends a typed block at a line of at least its fence's colons, with spaces and tabs around
+them, starting less than four columns
 past where the typed block's own lines start on the written line, even inside fenced code -
 counting the width of the list markers and `> ` around the code, advancing a tab to the next
 multiple of four from the column it stands at, and finding nothing closing in a blockquote inside
@@ -159,8 +159,8 @@ paragraph it is written the same way, since an empty paragraph is not written. E
 inline: `with` parses through `pmdoc.ParseInline` (paragraph-only block grammar), so a multi-paragraph
 `with` is `INVALID_OP`, so is any non-empty `with` that renders to no inline content (a line
 indented four spaces or a tab, which markdown reads as a code block, or whitespace alone — an
-empty `with` deletes the match on purpose, except where the block holding it cannot be written
-without that paragraph, which is refused naming the `delete` that removes it instead; refusing the rest is LEGION-280, since
+empty `with` deletes the match on purpose, and a container left holding only the emptied paragraph
+reads back holding it; refusing the rest is LEGION-280, since
 splicing nothing over the match silently deleted the caller's text), and a leading marker of a
 *different* kind from the matched block's own is
 literal escaped text. A `with` opening with a marker of the *same* kind as that block's own would
@@ -532,12 +532,21 @@ no whitespace between `name` and `{`; Pandoc fenced divs, leaf directives, and t
 invalid outside code blocks. An unclosed typed block at document level is rejected, while one nested
 inside another block runs to that parent’s end.
 
-A carriage return that no line feed follows is text here, as goldmark reads it and as the writer
-writes it, though CommonMark and the browser editor's parser end a line at one. A code span keeps the whitespace that
+Text a caller writes reaches the parser with line feeds alone: `pmdoc.LineFeeds` writes each CR LF
+and each lone carriage return as a line feed, as CommonMark and the browser editor's parser read
+both, in `ParseForWrite` (a spec, an upload, an insert) and `ParseInline`; in every edit
+operation's text before any check reads it (`applyOperation`: a replace's `with`, an insert's
+markdown whether it becomes blocks or table rows, a retype's attributes); in a suggestion's
+`replace_with` when it is created and when it is accepted; in the attributes written onto a
+typed block (`SetBlockAttributes`, `pmdoc.LineFeedAttrs`), and in an answer's text, which its
+ask block carries; and in a block ask's edited question and options. The browser editor's own
+updates cannot carry a carriage return. No stored document holds one, and `pmdoc` handles line
+feeds alone. A code span keeps the whitespace that
 starts each of its later lines past the prefix of the containers around it, as the browser editor's
 parser reads it, a line holding only whitespace before the closer included; goldmark's paragraph
-trims it (`lineRecordingParagraph`, `multilineCodeSpanText`). A space, a line feed, or a carriage
-return and line feed together is the padding such a span sheds at each end. A lazy continuation line - one that
+trims it (`lineRecordingParagraph`, `multilineCodeSpanText`). A space or a line feed is the padding
+such a span sheds at each end (`codeSpanPadded`), and the writer pads a span whose text starts and
+ends with one. A lazy continuation line - one that
 continues a paragraph in a list item, a quote or a footnote definition without the container's
 prefix - is never a table's header or delimiter row (`lazyTableRows`), as in GFM.
 A task list item's marker (`[ ]`, `[x]` or `[X]` opening a list item's first paragraph) is read as
@@ -555,6 +564,33 @@ document's level in the rest. So the renderer writes a rule that opens a documen
 `---` would be misread - a later `---` line would close front matter, or the document holds a
 list, quote or footnote definition at its level (`holdsAContainerTheBrowserDrops`) - and `---`
 everywhere else.
+
+A container that holds nothing is read as the browser editor's parser reads it, holding one empty
+paragraph (`emptyParagraphFirst`): an empty list item (`-`), quote (`>`), typed block or footnote
+definition, and a list item that opens with another block (`- # h`) holds an empty paragraph ahead
+of it. A table with no body row holds one empty row, which the renderer writes as nothing. The
+renderer writes a list item's empty first paragraph as nothing, with the next block on the
+marker's line, a rule there as `***` (`- ---` is a thematic break at the list's level). A task
+item cannot be written so, since its marker's line would carry the next block as the task's text
+and the browser reads no other form of it as a task: a task item whose emptied first paragraph has
+another block after it does not render, and an edit that would leave one is refused.
+An empty list item that would interrupt a paragraph is not opened, as that parser reads it on the
+whole line (`emptyItemGuard`): after `- a`, the line `  - -` is an item holding the text `-`.
+
+A document holding one of those shapes, or a footnote definition that ends in a block other than
+a paragraph, has its lists' spacing read as that parser reads it (`browserListSpacing`): outside
+quotes and footnote definitions a blank line between two items spreads the list, and one between
+an item's blocks spreads the item; in a footnote definition a list is never spread and only an
+item's own blank lines spread it; in a quote a list is read only when no blank line lies at or
+after it but the one before flow content the quote goes on with, and then nothing is spread. Where
+that parser's spread depends on more - a blank line after an item in a footnote definition, any
+other blank line in a quote, a typed block holding one in a list item - the document is refused,
+and so it is where goldmark reads its blocks otherwise: an empty list item and a blank line before
+a block its outer item holds, and a footnote definition inside another block, ahead of another
+block, out of the order of its first references, or referred to by nothing, which goldmark moves
+or drops. Every other document keeps goldmark's looseness - a loose list's items holding more
+than one block are spread, the list when none is - which is how the documents Dispatch stores were
+read.
 
 A typed block renders its `blockId`, defaulted attributes, and every explicitly set optional
 attribute. Parsing mints an omitted id, while live document reads and writes validate each node

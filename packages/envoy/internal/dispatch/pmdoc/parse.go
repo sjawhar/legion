@@ -3,6 +3,7 @@ package pmdoc
 import (
 	"fmt"
 	"html"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -19,13 +20,19 @@ import (
 var anchorAttribute = regexp.MustCompile(`([a-zA-Z0-9_-]+)="([^"]*)"`)
 
 // markdownReader is the one goldmark configuration Dispatch reads markdown with. Its only way in
-// is parse. Front matter is
-// read apart from it (parseFrontmatterBlock), so an unclosed opener is ordinary markdown.
+// is parse. Front matter is read apart from it (parseFrontmatterBlock), so an unclosed opener is
+// ordinary markdown. Its list parser opens no empty item that would interrupt a paragraph
+// (emptyItemGuard).
 type markdownReader struct {
 	md goldmark.Markdown
 }
 
 var blockReader = markdownReader{md: goldmark.New(
+	goldmark.WithParser(parser.NewParser(
+		parser.WithBlockParsers(blockParsers()...),
+		parser.WithInlineParsers(parser.DefaultInlineParsers()...),
+		parser.WithParagraphTransformers(parser.DefaultParagraphTransformers()...),
+	)),
 	goldmark.WithExtensions(extension.Linkify, lazyAwareTable{}, extension.Strikethrough, taskList{}, footnotes{}),
 	goldmark.WithParserOptions(
 		parser.WithBlockParsers(
@@ -35,6 +42,19 @@ var blockReader = markdownReader{md: goldmark.New(
 		),
 	),
 )}
+
+// blockParsers is goldmark's default block parsers with its list parser held off an empty item
+// that would interrupt a paragraph (emptyItemGuard).
+func blockParsers() []util.PrioritizedValue {
+	parsers := parser.DefaultBlockParsers()
+	listParser := reflect.TypeOf(parser.NewListParser())
+	for index, prioritized := range parsers {
+		if reflect.TypeOf(prioritized.Value) == listParser {
+			parsers[index].Value = emptyItemGuard{prioritized.Value.(parser.BlockParser)}
+		}
+	}
+	return parsers
+}
 
 // Parse converts markdown into the closed Proof ProseMirror tree.
 func Parse(markdown string) (*Node, error) {
@@ -52,7 +72,7 @@ func Parse(markdown string) (*Node, error) {
 // whole, or nil for a fragment or a new document: a repeat live already carries is not refused
 // (RepeatedBlockID), and the repair keeps it for its first block, as settlement would.
 func ParseForWrite(markdown string, live *Node) (*Node, error) {
-	doc, err := parseUnstamped(markdown)
+	doc, err := parseUnstamped(LineFeeds(markdown))
 	if err != nil {
 		return nil, err
 	}
@@ -63,6 +83,53 @@ func ParseForWrite(markdown string, live *Node) (*Node, error) {
 	return doc, nil
 }
 
+// LineFeeds is text with each CR LF and each lone carriage return written as a line feed. Both
+// end a line in CommonMark and in the browser editor, so text a caller writes into a document is
+// converted where it enters (ParseForWrite, ParseInline, and the server's other writes of caller
+// text), and the parser and the renderer see line feeds alone.
+func LineFeeds(text string) string {
+	if !strings.Contains(text, "\r") {
+		return text
+	}
+	return lineEndings.Replace(text)
+}
+
+// lineEndings writes a CR LF, and then a lone carriage return, as a line feed.
+var lineEndings = strings.NewReplacer("\r\n", "\n", "\r", "\n")
+
+// LineFeedAttrs is attrs with LineFeeds applied to every string value, alone or in a list: the
+// attributes a caller writes onto a typed block reach the document with line feeds alone too.
+func LineFeedAttrs(attrs map[string]any) map[string]any {
+	if attrs == nil {
+		return nil
+	}
+	out := make(map[string]any, len(attrs))
+	for name, value := range attrs {
+		switch value := value.(type) {
+		case string:
+			out[name] = LineFeeds(value)
+		case []string:
+			items := make([]string, len(value))
+			for index, item := range value {
+				items[index] = LineFeeds(item)
+			}
+			out[name] = items
+		case []any:
+			items := make([]any, len(value))
+			for index, item := range value {
+				if text, ok := item.(string); ok {
+					item = LineFeeds(text)
+				}
+				items[index] = item
+			}
+			out[name] = items
+		default:
+			out[name] = value
+		}
+	}
+	return out
+}
+
 // parseUnstamped is Parse before EnsureBlockIDs: blocks keep the ids their markdown names, and a
 // block that names none has none yet.
 func parseUnstamped(markdown string) (*Node, error) {
@@ -70,6 +137,9 @@ func parseUnstamped(markdown string) (*Node, error) {
 	front, rest := parseFrontmatterBlock(source)
 	source = source[rest:]
 	root := blockReader.parse(source)
+	if err := browserListSpacing(root, source); err != nil {
+		return nil, err
+	}
 	doc, err := parseBlock(root, source, footnoteLabels(root))
 	if err != nil {
 		return nil, err
@@ -151,7 +221,7 @@ func referencedLabels(nodes []*Node) []string {
 // nodes. Markdown that forms more than one paragraph, or holds text after its
 // paragraph's last line, is ErrSchema.
 func ParseInline(markdown string) ([]*Node, error) {
-	source := []byte(markdown)
+	source := []byte(LineFeeds(markdown))
 	root := withLineStarts(inlineMarkdownParser, source, parser.NewContext())
 	if root.ChildCount() > 1 {
 		return nil, fmt.Errorf("%w: inline markdown forms %d paragraphs", ErrSchema, root.ChildCount())
@@ -203,8 +273,9 @@ func BlockShapeError(block *Node) error {
 
 // shapeDifference names the first block of want that got holds as another kind, or holds where
 // want has none, or lacks; both are empty when the two have the same shape. An empty paragraph is
-// not written, so it is not expected back, except as its container's only child: a table cell or a
-// footnote definition holding only an empty paragraph reads back holding one.
+// not written, so it is not expected back, except where the parser reads one as the browser editor
+// does (emptyParagraphFirst): as its container's only child, and ahead of a list item's first
+// block when that block is not a paragraph.
 func shapeDifference(want, got *Node) (string, string) {
 	if want.Type != got.Type {
 		return blockName(want.Type), blockName(got.Type)
@@ -214,8 +285,9 @@ func shapeDifference(want, got *Node) (string, string) {
 	}
 	only := len(want.Children) == 1
 	written := make([]*Node, 0, len(want.Children))
-	for _, child := range want.Children {
-		if only || child.Type != "paragraph" || len(child.Children) != 0 {
+	for index, child := range want.Children {
+		readFirst := want.Type == "list_item" && index == 0 && len(want.Children) > 1 && want.Children[1].Type != "paragraph"
+		if only || readFirst || child.Type != "paragraph" || len(child.Children) != 0 {
 			written = append(written, child)
 		}
 	}
@@ -417,7 +489,7 @@ func parseBlock(node ast.Node, source []byte, footnotes map[int]string) (*Node, 
 		if err != nil {
 			return nil, err
 		}
-		return &Node{Type: "blockquote", Children: children}, nil
+		return &Node{Type: "blockquote", Children: emptyParagraphFirst(children, false)}, nil
 	case *ast.List:
 		return parseList(current, source, footnotes)
 	case *ast.ListItem:
@@ -449,10 +521,7 @@ func parseBlock(node ast.Node, source []byte, footnotes map[int]string) (*Node, 
 		if err != nil {
 			return nil, err
 		}
-		if len(children) == 0 {
-			children = []*Node{{Type: "paragraph"}}
-		}
-		return &Node{Type: "footnote_definition", Attrs: Attrs{"label": string(current.Ref)}, Children: children}, nil
+		return &Node{Type: "footnote_definition", Attrs: Attrs{"label": string(current.Ref)}, Children: emptyParagraphFirst(children, false)}, nil
 	case *typedDirective:
 		return parseTypedDirective(current, source, footnotes)
 	case *unsupportedDirective:
@@ -519,12 +588,19 @@ func parseTypedDirective(directive *typedDirective, source []byte, footnotes map
 	if err != nil {
 		return nil, err
 	}
-	return &Node{Type: directive.Name, Attrs: attrs, Children: children}, nil
+	return &Node{Type: directive.Name, Attrs: attrs, Children: emptyParagraphFirst(children, false)}, nil
 }
 
+// parseList reads a list's and its items' spread as browserListSpacing recorded them, or, where it
+// recorded none, from goldmark's looseness: a loose list's items holding more than one block are
+// spread, and the list is spread when none of them is.
 func parseList(list *ast.List, source []byte, footnotes map[int]string) (*Node, error) {
 	nodeType := "bullet_list"
+	browserSpread, browser := list.Attribute(browserSpreadAttr)
 	attrs := Attrs{"spread": !list.IsTight}
+	if browser {
+		attrs["spread"] = browserSpread
+	}
 	if list.IsOrdered() {
 		nodeType = "ordered_list"
 		attrs["order"] = list.Start
@@ -539,9 +615,13 @@ func parseList(list *ast.List, source []byte, footnotes map[int]string) (*Node, 
 		if err != nil {
 			return nil, err
 		}
-		parsed.Attrs["spread"] = !list.IsTight && item.ChildCount() > 1
-		if parsed.Attrs["spread"] == true {
-			attrs["spread"] = false
+		if browser {
+			parsed.Attrs["spread"], _ = item.Attribute(browserSpreadAttr)
+		} else {
+			parsed.Attrs["spread"] = !list.IsTight && item.ChildCount() > 1
+			if parsed.Attrs["spread"] == true {
+				attrs["spread"] = false
+			}
 		}
 		children = append(children, parsed)
 	}
@@ -559,11 +639,21 @@ func parseListItem(item *ast.ListItem, source []byte, footnotes map[int]string) 
 	if err != nil {
 		return nil, err
 	}
-	return &Node{Type: "list_item", Attrs: attrs, Children: children}, nil
+	return &Node{Type: "list_item", Attrs: attrs, Children: emptyParagraphFirst(children, true)}, nil
+}
+
+// emptyParagraphFirst is a container's blocks as the browser editor's parser reads them: a
+// container that holds nothing holds one empty paragraph, as does a list item that opens with
+// another block (firstParagraph), ahead of it (`- # h`). The Proof schema needs both.
+func emptyParagraphFirst(children []*Node, firstParagraph bool) []*Node {
+	if len(children) == 0 || firstParagraph && children[0].Type != "paragraph" {
+		return append([]*Node{{Type: "paragraph"}}, children...)
+	}
+	return children
 }
 
 func codeBlockText(lines *gmtext.Segments, source []byte) []*Node {
-	value := strings.TrimRight(segmentsText(lines, source), "\r\n")
+	value := strings.TrimRight(segmentsText(lines, source), "\n")
 	if value == "" {
 		return nil
 	}
@@ -589,6 +679,10 @@ func parseTable(table *extensionast.Table, source []byte, footnotes map[int]stri
 		default:
 			return nil, fmt.Errorf("%w: unsupported table child %s", ErrSchema, child.Kind())
 		}
+	}
+	// A table with no body row holds one empty row, as the browser editor's parser reads it.
+	if len(children) == 1 {
+		children = append(children, &Node{Type: "table_row"})
 	}
 	return &Node{Type: "table", Children: children}, nil
 }
@@ -665,9 +759,9 @@ func parseInlineWithTableCellLinks(parent ast.Node, source []byte, initial []Mar
 			if current.SoftLineBreak() {
 				// A soft break is a space, as CommonMark renders it; the browser editor's
 				// white-space: break-spaces would show a literal newline as a line break. An
-				// image's alt text keeps its line ending, which that parser reads as written.
+				// image's alt text keeps its line feed, which that parser reads as written.
 				if insideImage(current) {
-					appendText(&children, lineEndingAfter(source, current.Segment.Stop), active)
+					appendText(&children, "\n", active)
 				} else {
 					appendText(&children, " ", active)
 				}

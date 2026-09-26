@@ -855,7 +855,7 @@ func (s *Service) SetBlockAttributes(
 		if err != nil {
 			return err
 		}
-		next, err := pmdoc.SetBlockAttributes(tree, blockID, pmdoc.Attrs(attributes))
+		next, err := pmdoc.SetBlockAttributes(tree, blockID, pmdoc.Attrs(pmdoc.LineFeedAttrs(attributes)))
 		if err != nil {
 			return err
 		}

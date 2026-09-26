@@ -678,6 +678,12 @@ func (s *Service) rejectLiveTableAnchors(ctx context.Context, artifactID, axis s
 }
 
 func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
+	// Every text an operation writes - a replace's with, an insert's markdown, whether it becomes
+	// blocks or table rows, and a retype's attributes - reaches the document with line feeds
+	// alone (pmdoc.LineFeeds), before any check below reads it.
+	op.With = pmdoc.LineFeeds(op.With)
+	op.Markdown = pmdoc.LineFeeds(op.Markdown)
+	op.Attributes = pmdoc.LineFeedAttrs(op.Attributes)
 	switch op.Op {
 	case "replace":
 		if op.Find == "" {
@@ -1063,7 +1069,7 @@ func refuseUnreadableReplacement(before, after *pmdoc.Node, match pmdoc.Range, w
 	if err != nil || unreadable == nil {
 		return err
 	}
-	return &ErrInvalidOp{Field: "with", Reason: unreadableReason(before, after, match, with, unreadable)}
+	return &ErrInvalidOp{Field: "with", Reason: unreadableReason(with, unreadable)}
 }
 
 // refuseReshapedReplacement refuses a replace whose text the document reads back as blocks of
@@ -1097,46 +1103,7 @@ func replacementBroke(before, after *pmdoc.Node, match pmdoc.Range, check func(*
 }
 
 // unreadableReason says why a replace left its block unreadable and what to do instead, by cause.
-// An emptied paragraph is one the block holding it cannot be written without. The advice is the
-// delete that removes it: by find where deleting the text removes the emptied block
-// (pmdoc.DeleteTextblock), and otherwise by the id of the nearest block around the text that
-// pmdoc.DeleteBlock removes from the document as it was - the holder itself for a list item
-// holding more than the paragraph, and a block further out when
-// removing the holder would empty one that needs a block, such as a callout holding only it.
-func unreadableReason(before, after *pmdoc.Node, match pmdoc.Range, with string, unreadable error) string {
-	at, ok := pmdoc.ContainingTextblock(after, match.From)
-	if ok && emptyTextblock(at.Node) {
-		holder := strings.ReplaceAll(at.Ancestors[0].Type, "_", " ")
-		if _, removed, err := pmdoc.DeleteTextblock(before, match); err == nil && removed {
-			return fmt.Sprintf(
-				"with %q empties the paragraph this %s holds, and the %s cannot be written without it; to remove the text, delete it with delete and find, which removes the emptied %s too",
-				with, holder, holder, holder,
-			)
-		}
-		// A top-level block is always removable, since an emptied document keeps one empty
-		// paragraph, so the walk ends at the latest there.
-		blocks := append([]*pmdoc.Node{at.Node}, at.Ancestors[:len(at.Ancestors)-1]...)
-		target := blocks[len(blocks)-1]
-		for _, block := range blocks[:len(blocks)-1] {
-			if _, err := pmdoc.DeleteBlock(before, blockID(block)); err == nil {
-				target = block
-				break
-			}
-		}
-		var removal string
-		switch target {
-		case at.Node:
-			removal = "the paragraph"
-		case at.Ancestors[0]:
-			removal = "the whole " + holder
-		default:
-			removal = "the " + strings.ReplaceAll(target.Type, "_", " ") + " holding it"
-		}
-		return fmt.Sprintf(
-			"with %q empties the paragraph this %s holds, and the %s cannot be written without it; remove %s with delete {block:%q}, or give with some text",
-			with, holder, holder, removal, blockID(target),
-		)
-	}
+func unreadableReason(with string, unreadable error) string {
 	if errors.Is(unreadable, pmdoc.ErrBlockHTML) {
 		return fmt.Sprintf(
 			"with %q is HTML that opens a block where it lands, and the Proof schema carries no block HTML; keep the HTML inside a line, where it opens no block",
@@ -1144,16 +1111,6 @@ func unreadableReason(before, after *pmdoc.Node, match pmdoc.Range, with string,
 		)
 	}
 	return fmt.Sprintf("with %q leaves markdown the document cannot read back where it lands (%v); write it inside a line of text, or insert the block you mean as its own block", with, unreadable)
-}
-
-// emptyTextblock reports whether a textblock holds no text but whitespace.
-func emptyTextblock(textblock *pmdoc.Node) bool {
-	for _, child := range textblock.Children {
-		if child.Type != "text" || strings.TrimSpace(child.Text) != "" {
-			return false
-		}
-	}
-	return true
 }
 
 func blockID(block *pmdoc.Node) string {
@@ -1333,14 +1290,12 @@ func continueText(paragraph *pmdoc.Node, markdown string, edges textEdges) {
 }
 
 // markdownSpace is the whitespace a paragraph's parse strips from its edges.
-const markdownSpace = " \t\r\n"
+const markdownSpace = " \t\n"
 
-// edgeSpace is an edge's whitespace without its line breaks.
+// edgeSpace is an edge's whitespace without its line feeds.
 func edgeSpace(run string) string {
-	return lineBreaks.Replace(run)
+	return strings.ReplaceAll(run, "\n", "")
 }
-
-var lineBreaks = strings.NewReplacer("\r", "", "\n", "")
 
 func isInlineLeaf(node *pmdoc.Node) bool {
 	switch node.Type {

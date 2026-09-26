@@ -218,11 +218,7 @@ func (r *renderer) endLine(continues bool) {
 	if !candidate.atTypedPrefix || !closesTypedBlock(line, candidate.prefix) {
 		readFrom, before := lineFrom, ""
 		if candidate.afterLine && lineFrom > 0 {
-			lineBreak := lineFrom - 1
-			if lineBreak > 0 && written[lineBreak] == '\n' && written[lineBreak-1] == '\r' {
-				lineBreak--
-			}
-			readFrom = markdownLineStart(written, lineBreak)
+			readFrom = markdownLineStart(written, lineFrom-1)
 			before = string(written[readFrom:lineFrom])
 		}
 		offset := candidate.at - lineFrom
@@ -308,8 +304,7 @@ func inlineCodePadding(value string) bool {
 	if strings.HasPrefix(value, "`") || strings.HasSuffix(value, "`") {
 		return true
 	}
-	_, _, padded := codeSpanPadded(value)
-	return padded
+	return codeSpanPadded(value)
 }
 
 func (r *renderer) writeSyntax(value string) {
