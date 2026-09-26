@@ -757,9 +757,9 @@ test("an ask and a callout pasted together as plain text arrive as written", asy
 // one?" and a bare list, one pasted at its start stored "- BEnd." as the ask's last option, and a
 // callout stored "End.Careful." or "Careful.End." inside the callout.
 const loneAsk = ':::ask{#d2 urgency="med" multiple="false"}\nWhich one?\n\n- A\n- B\n:::\n';
-const loneAskStored = ":::ask\\{#d2 [^}]*\\}\\nWhich one\\?\\n\\n- A\\n- B\\n:::\\n";
+const loneAskStored = /:::ask\{#d2 [^}]*\}\nWhich one\?\n\n- A\n- B\n:::\n/.source;
 const loneCallout = ':::callout{#c2 kind="warning" title="Risk"}\nCareful.\n:::\n';
-const loneCalloutStored = ":::callout\\{#c2 [^}]*\\}\\nCareful\\.\\n:::\\n";
+const loneCalloutStored = /:::callout\{#c2 [^}]*\}\nCareful\.\n:::\n/.source;
 
 for (const [caret, where] of [
   ["end", "after"],
