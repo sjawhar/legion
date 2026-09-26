@@ -166,7 +166,7 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 			name:    "pull request closed",
 			subject: "notifications.github.sjawhar.legion.pr.42",
 			file:    "github/pr-closed.json",
-			want:    PullRequestClosed{Repo: "sjawhar/legion", Number: 42, UpdatedAt: updatedAt},
+			want:    PullRequestClosed{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head-captured", UpdatedAt: updatedAt},
 		},
 		{
 			name:    "pull request merged",
@@ -830,7 +830,8 @@ func TestApplyFactSerializesConcurrentFacts(t *testing.T) {
 }
 
 // A reopened pull request is open again, recorded as when it opened: a closed pull request's record
-// is dropped at the next re-admission, so one reopened in between must not stay closed.
+// is dropped at the next re-admission, so one reopened in between must not stay closed. The fact
+// says it is a reopen, since GitHub sends opened only once and a second one is a redelivery.
 func TestDecodeReopenedPullRequestAsOpened(t *testing.T) {
 	data, err := os.ReadFile("testdata/github/pr-opened.json")
 	if err != nil {
@@ -853,7 +854,7 @@ func TestDecodeReopenedPullRequestAsOpened(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode reopened: %v", err)
 	}
-	if opened, ok := got.Fact.(PullRequestOpened); !ok || opened.Number != 42 || opened.Branch != "legion/LEGION-208" || opened.HeadSHA != "head-captured" {
+	if opened, ok := got.Fact.(PullRequestOpened); !ok || opened.Number != 42 || opened.Branch != "legion/LEGION-208" || opened.HeadSHA != "head-captured" || !opened.Reopened {
 		t.Fatalf("reopened fact = %#v, want the pull request opened again", got.Fact)
 	}
 }

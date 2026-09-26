@@ -64,6 +64,9 @@ type PullRequestOpened struct {
 	Body      string
 	URL       string
 	UpdatedAt time.Time
+	// Reopened is GitHub's reopened action; false is opened, which GitHub sends once per pull
+	// request.
+	Reopened bool
 }
 
 func (PullRequestOpened) isFact() {}
@@ -122,11 +125,12 @@ type PullRequestMerged struct {
 
 func (PullRequestMerged) isFact() {}
 
-// PullRequestClosed records GitHub's unmerged close observation. UpdatedAt is the pull request's
-// updated_at, which orders it against a reopen.
+// PullRequestClosed records GitHub's unmerged close observation: the head the pull request closed
+// at, and its updated_at, which orders the close against a reopen and the synchronizes before it.
 type PullRequestClosed struct {
 	Repo      string
 	Number    int
+	HeadSHA   string
 	UpdatedAt time.Time
 }
 

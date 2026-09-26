@@ -50,8 +50,12 @@ func lateOpened(head string, at time.Time) intake.Fact {
 	return intake.PullRequestOpened{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: head, UpdatedAt: at}
 }
 
-func lateClosed(at time.Time) intake.Fact {
-	return intake.PullRequestClosed{Repo: "sjawhar/legion", Number: 42, UpdatedAt: at}
+func lateReopened(head string, at time.Time) intake.Fact {
+	return intake.PullRequestOpened{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: head, UpdatedAt: at, Reopened: true}
+}
+
+func lateClosed(head string, at time.Time) intake.Fact {
+	return intake.PullRequestClosed{Repo: "sjawhar/legion", Number: 42, HeadSHA: head, UpdatedAt: at}
 }
 
 // GitHub redelivers a failed delivery on request, hours late if need be, and nothing orders a
@@ -73,15 +77,20 @@ func TestALatePullRequestEventChangesNothing(t *testing.T) {
 	}{
 		{"a synchronize older than the head", record.PullRequestOpen, lateSync("head-b", earlier), kept},
 		{"an opened older than the head", record.PullRequestOpen, lateOpened("head-a", earlier), kept},
-		{"a close older than the reopen", record.PullRequestOpen, lateClosed(earlier), kept},
-		{"a reopen older than the close", record.PullRequestClosed, lateOpened("head-c", earlier), closed},
+		// GitHub sends opened once per pull request, so another one is a redelivery whatever its
+		// clock: an opened and a synchronize can share GitHub's one-second clock.
+		{"an opened at the same clock as the head", record.PullRequestOpen, lateOpened("head-a", lateApplied), kept},
+		{"an opened newer than the head", record.PullRequestOpen, lateOpened("head-a", later), kept},
+		{"a close older than the reopen", record.PullRequestOpen, lateClosed("head-c", earlier), kept},
+		{"a reopen older than the close", record.PullRequestClosed, lateReopened("head-c", earlier), closed},
 
 		{"a newer synchronize", record.PullRequestOpen, lateSync("head-d", later), pullRequestView{head: "head-d", state: record.PullRequestOpen}},
 		{"a synchronize at the same clock", record.PullRequestOpen, lateSync("head-d", lateApplied), pullRequestView{head: "head-d", state: record.PullRequestOpen}},
 		{"a synchronize with no clock", record.PullRequestOpen, lateSync("head-d", time.Time{}), pullRequestView{head: "head-d", state: record.PullRequestOpen}},
-		{"a newer close", record.PullRequestOpen, lateClosed(later), closed},
-		{"a close with no clock", record.PullRequestOpen, lateClosed(time.Time{}), closed},
-		{"a newer reopen", record.PullRequestClosed, lateOpened("head-c", later), pullRequestView{head: "head-c", state: record.PullRequestOpen}},
+		{"a newer close", record.PullRequestOpen, lateClosed("head-c", later), closed},
+		{"a close with no clock", record.PullRequestOpen, lateClosed("head-c", time.Time{}), closed},
+		{"a newer reopen", record.PullRequestClosed, lateReopened("head-c", later), pullRequestView{head: "head-c", state: record.PullRequestOpen}},
+		{"a reopen at the same clock as the close", record.PullRequestClosed, lateReopened("head-c", lateApplied), pullRequestView{head: "head-c", state: record.PullRequestOpen}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := afterEvents(t, tc.seed, tc.fact); got != tc.want {
@@ -105,13 +114,38 @@ func TestAnEventWithNoClockKeepsTheLatestClock(t *testing.T) {
 		{"a synchronize with no clock, then an older one",
 			[]intake.Fact{lateSync("head-d", later), lateSync("head-e", time.Time{}), lateSync("head-b", lateApplied)}, "head-e", record.PullRequestOpen},
 		{"a reopen with no clock, then an older synchronize",
-			[]intake.Fact{lateOpened("head-c", time.Time{}), lateSync("head-b", earlier)}, "head-c", record.PullRequestOpen},
+			[]intake.Fact{lateReopened("head-c", time.Time{}), lateSync("head-b", earlier)}, "head-c", record.PullRequestOpen},
 		{"a close with no clock, then an older reopen",
-			[]intake.Fact{lateClosed(time.Time{}), lateOpened("head-c", earlier)}, "head-c", record.PullRequestClosed},
+			[]intake.Fact{lateClosed("head-c", time.Time{}), lateReopened("head-c", earlier)}, "head-c", record.PullRequestClosed},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := afterEvents(t, record.PullRequestOpen, tc.facts...); got.head != tc.head || got.state != tc.state {
 				t.Fatalf("pull request at %s, %s; want %s, %s", got.head, got.state, tc.head, tc.state)
+			}
+		})
+	}
+}
+
+// GitHub's close and reopen payloads carry the head every synchronize before them left, so a close
+// or reopen that is not late records that head with its clock. A synchronize older than the close,
+// delivered after it, is late and changes nothing, and the pull request still ends at the head
+// GitHub ended at.
+func TestACloseOrReopenCarriesItsHead(t *testing.T) {
+	synchronized, finished := lateApplied.Add(time.Minute), lateApplied.Add(2*time.Minute)
+	for _, tc := range []struct {
+		name  string
+		seed  record.PullRequestState
+		facts []intake.Fact
+		want  pullRequestView
+	}{
+		{"a close delivered before the synchronize it followed", record.PullRequestOpen,
+			[]intake.Fact{lateClosed("head-d", finished), lateSync("head-d", synchronized)}, pullRequestView{head: "head-d", state: record.PullRequestClosed}},
+		{"a reopen delivered before the synchronize it followed", record.PullRequestClosed,
+			[]intake.Fact{lateReopened("head-e", finished), lateSync("head-e", synchronized)}, pullRequestView{head: "head-e", state: record.PullRequestOpen}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := afterEvents(t, tc.seed, tc.facts...); got != tc.want {
+				t.Fatalf("pull request %+v, want %+v", got, tc.want)
 			}
 		})
 	}
