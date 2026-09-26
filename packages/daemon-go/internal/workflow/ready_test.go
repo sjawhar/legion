@@ -158,6 +158,44 @@ func TestAnApprovalOnALingeringTreeAdvancesNoMember(t *testing.T) {
 	}
 }
 
+// A child's merger still in its turn when the root closes can send its READY after the tree
+// lingers, with the gate open. Linger holds every member where it stood, so that completion is
+// refused and moves nothing: the child stays in merging, its packet is not kept, and nothing is
+// posted on Dispatch or published to the merge queue for a closed tree.
+func TestAMergersREADYOnALingeringTreeIsRefused(t *testing.T) {
+	pool := migratedPool(t)
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"})
+	parent := "LEGION-208"
+	seedIssue(t, pool, record.Issue{Key: "LEGION-209", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent, Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "V"})
+	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 4, ApprovedVersion: new(4)})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-209", Role: claim.RoleMerger, Claim: "merger-claim"})
+	engine := readyEngine("merge-queue")
+	apply := func(id string, fact intake.Fact) intake.Result {
+		t.Helper()
+		result, err := intake.ApplyFact(context.Background(), pool, "api", id, fact, engine, admissionStub{})
+		if err != nil {
+			t.Fatalf("ApplyFact %s: %v", id, err)
+		}
+		return result
+	}
+
+	apply("close-root", intake.DispatchIssue{Key: "LEGION-208", Seq: 2, Type: "issue.closed", Status: "done", Title: "root", Rank: "U"})
+	if result := apply("ready", intake.HandoffComplete{Issue: "LEGION-209", Role: claim.RoleMerger, Claim: "merger-claim", Generation: 1, Ready: true, Summary: readyPacket, Commit: "head"}); result.Refusal == nil || result.Refusal.Code != "TREE_LINGERING" {
+		t.Fatalf("the child's READY on the lingering tree = %#v, want TREE_LINGERING", result.Refusal)
+	}
+	var got phase.Phase
+	var summary string
+	if err := pool.QueryRow(t.Context(), "select i.phase, p.summary from issues i join phases p on p.issue = i.key and p.role = 'merger' where i.key = 'LEGION-209'").Scan(&got, &summary); err != nil || got != phase.Merging || summary != "" {
+		t.Fatalf("the lingering tree's LEGION-209 = %q with a %d-byte packet, %v; want it held in merging with nothing kept", got, len(summary), err)
+	}
+	if got := messageBodies(t, pool); len(got) != 0 {
+		t.Fatalf("Dispatch messages = %q, want no READY for a closed tree", got)
+	}
+	if got := mergeQueuePublishes(t, pool); len(got) != 0 {
+		t.Fatalf("merge queue publishes = %v, want none for a closed tree", got)
+	}
+}
+
 func readyEngine(mergeQueue string) *Engine {
 	return New(record.NewStore(), Config{
 		Project: "LEGION", DesignGate: config.DesignGateRootIssues, MergeQueueRole: mergeQueue, Linger: time.Hour,

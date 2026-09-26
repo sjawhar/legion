@@ -314,6 +314,20 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 	if RoleFor(issue.Phase) != fact.Role {
 		return refused("HANDOFF_NOT_CURRENT_PHASE", fmt.Sprintf("the %s does not run phase %s of %s; this completion changed nothing", fact.Role, issue.Phase, issue.Key)), nil
 	}
+	// A tree that lingers has left the workflow, and linger holds each member where it stood. A
+	// worker still in its turn when the root closed can yet complete, and that completion moves
+	// nothing: a child's merger would otherwise have its READY posted and published for a closed
+	// tree, the same READY an approval reaching the lingering root's gate does not advance.
+	root := issue
+	if !claim.IsTreeRoot(issue.Key, issue.Tree) {
+		if root, err = e.store.Issue(ctx, tx, issue.Tree); err != nil {
+			return intake.Result{}, err
+		}
+	}
+	if root != nil && root.LingerUntil != nil {
+		return refused("TREE_LINGERING", fmt.Sprintf("the tree %s is lingering after it left the workflow, so the %s's completion of phase %s of %s changed nothing",
+			root.Key, fact.Role, issue.Phase, issue.Key)), nil
+	}
 	if issue.Phase == phase.Merging && !fact.Ready {
 		return refused("READY_REQUIRED", "the merger's completion is READY: call the legion tool's handoff_complete with ready: true; this completion changed nothing"), nil
 	}
