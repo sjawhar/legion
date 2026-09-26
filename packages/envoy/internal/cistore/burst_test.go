@@ -129,13 +129,15 @@ func wrapStore(t testing.TB, conn *natsgo.Conn, delay time.Duration) (*Store, *w
 	return s, kv
 }
 
-// record records one observation of a head as the webhook handler does: a check when CheckName is
-// set, a suite otherwise.
+// record records one observation of a head as the webhook handler does, a check when CheckName is
+// set and a suite otherwise, failing after 10 s rather than hanging (within).
 func record(s *Store, observation contracts.CIObservation) error {
-	if observation.CheckName == "" {
-		return s.RecordSuite(observation)
-	}
-	return s.Record(observation)
+	return within(func() error {
+		if observation.CheckName == "" {
+			return s.RecordSuite(observation)
+		}
+		return s.Record(observation)
+	})
 }
 
 type head struct{ owner, repo, number, sha string }
@@ -179,7 +181,7 @@ func waitQueued(t *testing.T, s *Store, key string, n int) {
 }
 
 // waitAll waits up to 10 s for every call started on wg, failing the test if one hangs.
-func waitAll(t *testing.T, wg *sync.WaitGroup, what string) {
+func waitAll(t testing.TB, wg *sync.WaitGroup, what string) {
 	t.Helper()
 	done := make(chan struct{})
 	go func() {
@@ -392,8 +394,10 @@ func TestBatchedObservationsSettleAsSerialWritesInArrivalOrder(t *testing.T) {
 }
 
 // recordBurst records n distinct completed checks of h concurrently, released together, as a
-// check_run burst delivers them, and returns each call's error.
-func recordBurst(s *Store, h head, n int) []error {
+// check_run burst delivers them, and returns each call's error; a call still waiting after 10 s
+// fails the test.
+func recordBurst(t testing.TB, s *Store, h head, n int) []error {
+	t.Helper()
 	errs := make([]error, n)
 	start := make(chan struct{})
 	var wg sync.WaitGroup
@@ -406,7 +410,7 @@ func recordBurst(s *Store, h head, n int) []error {
 		}()
 	}
 	close(start)
-	wg.Wait()
+	waitAll(t, &wg, "the burst")
 	return errs
 }
 
@@ -421,7 +425,7 @@ func TestABurstOfObservationsOnOneHeadIsRecordedUnderSlowWrites(t *testing.T) {
 	const n = 200
 	h := head{"example-org", "example-repo", "42", "0123456789abcdef0123456789abcdef01234567"}
 
-	errs := recordBurst(s, h, n)
+	errs := recordBurst(t, s, h, n)
 
 	writes := len(kv.states(h.key()))
 	failed := 0
@@ -570,7 +574,7 @@ func TestALostCompareAndSwapRetriesTheWholeBatch(t *testing.T) {
 	s, kv := wrapStore(t, conn, 0)
 	// The other task writes the bucket directly, outside this store.
 	other := kv.KeyValue
-	if err := s.Record(h.check("seed", 400, "completed", "success", "2026-09-24T01:00:00Z")); err != nil {
+	if err := record(s, h.check("seed", 400, "completed", "success", "2026-09-24T01:00:00Z")); err != nil {
 		t.Fatalf("seed the record: %v", err)
 	}
 	entered, release := make(chan struct{}), make(chan struct{})
@@ -674,7 +678,7 @@ func BenchmarkRecordBurst(b *testing.B) {
 			b.ResetTimer()
 			for i := range b.N {
 				h := head{"example-org", "example-repo", "42", fmt.Sprintf("%040x", i+1)}
-				for _, err := range recordBurst(s, h, bc.n) {
+				for _, err := range recordBurst(b, s, h, bc.n) {
 					if err != nil {
 						b.Fatalf("record: %v", err)
 					}
