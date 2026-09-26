@@ -69,6 +69,12 @@ func refused(code, message string) intake.Result {
 	return intake.Result{Refusal: &intake.Refusal{Status: 409, Code: code, Message: message}}
 }
 
+// refusedLingering refuses a worker's request on issue while its tree lingers: linger holds the
+// member where it stood (treeLingers), so the request changed nothing.
+func refusedLingering(issue record.Issue, request string) intake.Result {
+	return refused("TREE_LINGERING", fmt.Sprintf("the tree %s is lingering after it left the workflow, so %s of %s changed nothing", issue.Tree, request, issue.Key))
+}
+
 // clearHandoff empties the handoff a role reported for its previous phase — its commit, verdict,
 // and summary — keeping its claim and the review rounds, when a transition starts it on a new
 // phase. A role's recorded handoff is then always its current phase's: the implementer's round-1

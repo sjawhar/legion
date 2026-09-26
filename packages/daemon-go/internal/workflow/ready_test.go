@@ -225,29 +225,36 @@ func TestAMergersREADYOnALingeringTreeIsRefused(t *testing.T) {
 	}
 }
 
-// No fact moves a member of a lingering tree or starts a worker in it, whichever path it takes: a
-// merge at awaiting_merge, an approval or green checks on a reviewing child's head, a worker's
-// backward move, or the architect's retry of a held phase. The close suspended the tree's claims,
-// and a start would resume one inside a tree that has left the workflow.
+// Linger holds every member of a closed tree where it stood, whichever path a fact takes: no
+// approval, green checks, changes requested, backward move, retry of a held phase or failed claim
+// moves a member, counts a review round, posts or notifies, or starts a worker, whose start would
+// resume a suspended claim inside a tree that has left the workflow. A worker's own request is
+// refused, so it is told nothing moved. A merge is the one fact GitHub never sends again: it moves
+// the child on to its production check, and still starts nobody.
 func TestNoFactMovesAMemberOfALingeringTree(t *testing.T) {
 	heldFrom := phase.Testing
 	for _, tc := range []struct {
 		name     string
-		at       phase.Phase
+		at, want phase.Phase
 		heldFrom *phase.Phase
 		pr       record.PullRequest
 		fact     intake.Fact
+		refusal  string
 	}{
-		{name: "a merge at awaiting_merge", at: phase.AwaitingMerge,
+		{name: "a merge at awaiting_merge", at: phase.AwaitingMerge, want: phase.ProductionCheck,
 			fact: intake.PullRequestMerged{Repo: "sjawhar/legion", Number: 42, MergeSHA: "merge"}},
 		{name: "an approval of a green head", at: phase.Reviewing, pr: record.PullRequest{Verdict: "green"},
 			fact: intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head", HeadSHA: "head"}},
 		{name: "green checks on an approved head", at: phase.Reviewing, pr: record.PullRequest{ReviewDecision: "approved"},
 			fact: intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, Snapshot: "green-1", Verdict: "green", Failing: []string{}}},
-		{name: "the worker's backward move", at: phase.Testing,
+		{name: "changes requested at the round cap", at: phase.Reviewing,
+			fact: intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "changes_requested", CommitID: "head", HeadSHA: "head", Body: "fix it"}},
+		{name: "the worker's backward move", at: phase.Testing, refusal: "TREE_LINGERING",
 			fact: intake.BackwardMove{Issue: "LEGION-209", Requester: claim.RoleTester, To: phase.Implementing, Reason: "the head changed"}},
 		{name: "the architect's retry of a held phase", at: phase.Held, heldFrom: &heldFrom,
 			fact: intake.RetryOrEscalate{Issue: "LEGION-209", Decision: intake.RetryDecision}},
+		{name: "a failed claim", at: phase.Testing,
+			fact: intake.ClaimFailed{Issue: "LEGION-209", Role: claim.RoleTester}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
@@ -258,21 +265,42 @@ func TestNoFactMovesAMemberOfALingeringTree(t *testing.T) {
 			pr.State, pr.Issue, pr.Repo, pr.Number, pr.Branch, pr.HeadSHA = record.PullRequestOpen, "LEGION-209", "sjawhar/legion", 42, "legion/LEGION-209", "head"
 			pr.Failing, pr.FailingStatuses = []string{}, []string{}
 			seedPR(t, pool, pr)
-			for _, role := range []claim.Role{claim.RoleImplementer, claim.RoleTester, claim.RoleReviewer} {
-				seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-209", Role: role, Claim: claim.Token(string(role) + "-claim")})
+			// The implementer is one round short of the review round cap, so a counted round would
+			// post the cap message and notify the architect.
+			for _, row := range []record.PhaseRow{{Role: claim.RoleImplementer, Rounds: 2}, {Role: claim.RoleTester}, {Role: claim.RoleReviewer}} {
+				row.Issue, row.Claim = "LEGION-209", claim.Token(string(row.Role)+"-claim")
+				seedPhase(t, pool, row)
 			}
 			apply := applyFacts(t, pool, readyEngine(""))
 
 			apply("close-root", intake.DispatchIssue{Key: "LEGION-208", Seq: 2, Type: "issue.closed", Status: "done", Title: "root", Rank: "U"})
-			apply("fact", tc.fact)
+			result := apply("fact", tc.fact)
+			if code := refusalCode(result); code != tc.refusal {
+				t.Fatalf("refusal = %q, want %q", code, tc.refusal)
+			}
+			want := tc.want
+			if want == "" {
+				want = tc.at
+			}
 			var got phase.Phase
-			var starts int
-			if err := pool.QueryRow(t.Context(), `select phase, (select count(*) from outbox where issue = 'LEGION-209' and kind = 'supervise' and payload->>'op' = 'start')
-				from issues where key = 'LEGION-209'`).Scan(&got, &starts); err != nil || got != tc.at || starts != 0 {
-				t.Fatalf("the lingering tree's LEGION-209 = %q with %d worker starts, %v; want it held in %s with none", got, starts, err, tc.at)
+			var starts, rounds, told int
+			if err := pool.QueryRow(t.Context(), `select phase,
+				(select count(*) from outbox where issue = 'LEGION-209' and kind = 'supervise' and payload->>'op' = 'start'),
+				(select rounds from phases where issue = 'LEGION-209' and role = 'implementer'),
+				(select count(*) from outbox where issue = 'LEGION-209' and kind in ('dispatch_message', 'notice'))
+				from issues where key = 'LEGION-209'`).Scan(&got, &starts, &rounds, &told); err != nil || got != want || starts != 0 || rounds != 2 || told != 0 {
+				t.Fatalf("the lingering tree's LEGION-209 = %q, %d worker starts, %d rounds, %d messages and notices, %v; want %s, none, 2, none", got, starts, rounds, told, err, want)
 			}
 		})
 	}
+}
+
+// refusalCode is the code of a fact's refusal, or "" when it was not refused.
+func refusalCode(result intake.Result) string {
+	if result.Refusal == nil {
+		return ""
+	}
+	return result.Refusal.Code
 }
 
 func readyEngine(mergeQueue string) *Engine {

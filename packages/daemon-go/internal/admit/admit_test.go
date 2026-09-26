@@ -231,6 +231,48 @@ func TestReadmissionStartsTheTreesMidPhaseChildren(t *testing.T) {
 	})
 }
 
+// A merge is the one fact GitHub never sends again, and a child whose READY was posted can be
+// merged after its root closed. The lingering tree starts no worker, but the child moves on to its
+// production check, so re-admission, which keeps no merged pull request, starts its implementer
+// there instead of leaving it in awaiting_merge, where no role could move it.
+func TestAMergeWhileTheTreeLingersIsTheChildsProductionCheckOnceTheTreeRunsAgain(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	until := fixedNow.Add(time.Hour)
+	root := record.Issue{Key: "LEGION-208", Project: "LEGION", Title: "root", Tree: "LEGION-208", Phase: phase.Done, Generation: 1, Status: "done", Rank: "A", LingerUntil: &until, LastDispatchSeq: 1}
+	putIssue(t, pool, root)
+	parentKey := root.Key
+	putIssue(t, pool, record.Issue{Key: "LEGION-209", Project: "LEGION", Title: "merged child", Tree: root.Key, Parent: &parentKey,
+		Phase: phase.AwaitingMerge, Generation: 1, Status: "in_progress", Rank: "B", LastDispatchSeq: 1})
+	inTx(t, pool, func(tx pgx.Tx) {
+		if err := record.NewStore().PutPullRequest(context.Background(), tx, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-209", Repo: "sjawhar/legion", Number: 42,
+			Branch: "legion/LEGION-209", HeadSHA: "head", Failing: []string{}, FailingStatuses: []string{}}); err != nil {
+			t.Fatalf("seed pull request: %v", err)
+		}
+	})
+	implementerStarts := func() int {
+		t.Helper()
+		var starts int
+		if err := pool.QueryRow(context.Background(), `select count(*) from outbox where issue = 'LEGION-209' and kind = 'supervise'
+			and payload->>'op' = 'start' and payload->>'role' = 'implementer' and payload->>'phase' = 'production_check'`).Scan(&starts); err != nil {
+			t.Fatalf("count the child's starts: %v", err)
+		}
+		return starts
+	}
+
+	if _, err := intake.ApplyFact(context.Background(), pool, "github", "merged", intake.PullRequestMerged{Repo: "sjawhar/legion", Number: 42, MergeSHA: "merge"}, engine, admission); err != nil {
+		t.Fatalf("ApplyFact merge: %v", err)
+	}
+	if got, starts := issue(t, pool, "LEGION-209"), implementerStarts(); got.Phase != phase.ProductionCheck || starts != 0 {
+		t.Fatalf("the merged child while its tree lingers = %s with %d implementer starts, want production_check with none", got.Phase, starts)
+	}
+	apply(t, pool, admission, "readmit", intake.DispatchIssue{Key: root.Key, Seq: 2, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: root.Rank}, engine)
+	if got, starts := issue(t, pool, "LEGION-209"), implementerStarts(); got.Phase != phase.ProductionCheck || starts != 1 {
+		t.Fatalf("the merged child after re-admission = %s with %d implementer starts, want production_check with its implementer started", got.Phase, starts)
+	}
+}
+
 // Every newer Dispatch observation is recorded, not only a status change: re-ranking a waiting
 // root, renaming it, or re-parenting it arrives as an issue.updated at the same status, and the
 // waiting line has to follow Dispatch rank order at once, not after the next boot's read. It runs

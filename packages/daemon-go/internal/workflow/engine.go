@@ -312,8 +312,7 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 		return intake.Result{}, err
 	}
 	if lingers {
-		return refused("TREE_LINGERING", fmt.Sprintf("the tree %s is lingering after it left the workflow, so the %s's completion of phase %s of %s changed nothing",
-			issue.Tree, fact.Role, issue.Phase, issue.Key)), nil
+		return refusedLingering(*issue, fmt.Sprintf("the %s's completion of phase %s", fact.Role, issue.Phase)), nil
 	}
 	if issue.Phase == phase.Merging && !fact.Ready {
 		return refused("READY_REQUIRED", "the merger's completion is READY: call the legion tool's handoff_complete with ready: true; this completion changed nothing"), nil
@@ -499,6 +498,9 @@ func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestR
 		return intake.Result{}, err
 	}
 	if pr.ReviewDecision == "changes_requested" {
+		if lingers, err := e.treeLingers(ctx, tx, issue.Tree); err != nil || lingers {
+			return intake.Result{}, err
+		}
 		if err := e.recordRound(ctx, tx, issue.Key); err != nil {
 			return intake.Result{}, err
 		}
@@ -528,7 +530,10 @@ func (e *Engine) advanceApproved(ctx context.Context, tx pgx.Tx, pr record.PullR
 // merged records the pull request merged, whatever the issue's phase, and advances an issue that
 // awaited the merge. A merge before awaiting_merge is the architect's to act on, as the shipped
 // daemon routes it: it is told, and the issue moves on to the production check once it reaches
-// awaiting_merge (transition). A redelivered merge changes nothing.
+// awaiting_merge (transition). A redelivered merge changes nothing. A merge is the one fact GitHub
+// never sends again, so one that lands while the tree lingers still moves the issue on to its
+// production check, and starts nobody: re-admission starts its implementer there
+// (admit's startMidPhaseChildren), as it does for every mid-phase child.
 func (e *Engine) merged(ctx context.Context, tx pgx.Tx, fact intake.PullRequestMerged) (intake.Result, error) {
 	pr, err := e.pullRequest(ctx, tx, fact.Repo, fact.Number)
 	if err != nil || pr == nil || pr.State == record.PullRequestMerged {
@@ -543,7 +548,18 @@ func (e *Engine) merged(ctx context.Context, tx pgx.Tx, fact intake.PullRequestM
 		return intake.Result{}, err
 	}
 	if issue.Phase == phase.AwaitingMerge {
-		return intake.Result{}, e.transition(ctx, tx, *issue, TriggerPullRequestMerged, "", record.PhaseRow{}, pr, "")
+		lingers, err := e.treeLingers(ctx, tx, issue.Tree)
+		if err != nil {
+			return intake.Result{}, err
+		}
+		if !lingers {
+			return intake.Result{}, e.transition(ctx, tx, *issue, TriggerPullRequestMerged, "", record.PhaseRow{}, pr, "")
+		}
+		issue.Phase = phase.ProductionCheck
+		if err := e.store.PutIssue(ctx, tx, *issue); err != nil {
+			return intake.Result{}, err
+		}
+		return intake.Result{}, e.clearHandoff(ctx, tx, issue.Key, claim.RoleImplementer)
 	}
 	return intake.Result{}, e.notice(ctx, tx, issue.Key, record.Notice{Kind: "pr-merged", Role: claim.RoleArchitect,
 		Reason: fmt.Sprintf("pull request #%d merged while %s was in %s, not awaiting_merge", pr.Number, issue.Key, issue.Phase)})
@@ -572,6 +588,9 @@ func (e *Engine) closed(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 func (e *Engine) claimFailed(ctx context.Context, tx pgx.Tx, fact intake.ClaimFailed) (intake.Result, error) {
 	issue, err := e.store.Issue(ctx, tx, fact.Issue)
 	if err != nil || issue == nil || issue.Phase == phase.Held || RoleFor(issue.Phase) != fact.Role {
+		return intake.Result{}, err
+	}
+	if lingers, err := e.treeLingers(ctx, tx, issue.Tree); err != nil || lingers {
 		return intake.Result{}, err
 	}
 	from := issue.Phase
@@ -614,6 +633,13 @@ func (e *Engine) backward(ctx context.Context, tx pgx.Tx, fact intake.BackwardMo
 	}
 	if RoleFor(issue.Phase) == "" || RoleFor(issue.Phase) != fact.Requester || phaseIndex(fact.To) >= phaseIndex(issue.Phase) || phaseIndex(fact.To) < 0 {
 		return intake.Result{Refusal: &intake.Refusal{Status: 409, Code: "BACKWARD_REFUSED", Message: "backward moves require the current role and an earlier workflow phase"}}, nil
+	}
+	lingers, err := e.treeLingers(ctx, tx, issue.Tree)
+	if err != nil {
+		return intake.Result{}, err
+	}
+	if lingers {
+		return refusedLingering(*issue, fmt.Sprintf("the %s's backward move to %s", fact.Requester, fact.To)), nil
 	}
 	row, err := e.phaseRow(ctx, tx, issue.Key, fact.Requester)
 	if err != nil {
