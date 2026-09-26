@@ -52,7 +52,8 @@ const typedBlockHeader = "section[data-proof-block-type] > header[data-proof-blo
  * header `renderTypedBlock` draws: a typed block's parse rule reads every child of its section as
  * content, so a copied header came back as the block's first paragraphs (a pasted decision's
  * question read as its attribute list). Pasted HTML that still carries the header, as a tab on an
- * older build copies it, has the header removed first.
+ * older build copies it, has the header removed first, after the editor's own cleanup of pasted
+ * HTML (a Google Docs wrapper, for one) has run.
  */
 export function installTypedBlockClipboard(view: EditorView): void {
   const rendered = DOMSerializer.fromSchema(view.state.schema);
@@ -62,9 +63,11 @@ export function installTypedBlockClipboard(view: EditorView): void {
       (node: ProseMirrorNode) => withoutTypedBlockHeader(render(node)),
     ])
   );
+  const previous = view.props.transformPastedHTML;
   view.setProps({
     clipboardSerializer: new DOMSerializer(nodes, rendered.marks),
-    transformPastedHTML: (html) => {
+    transformPastedHTML: (pasted, pastedView) => {
+      const html = previous ? previous(pasted, pastedView) : pasted;
       const template = view.dom.ownerDocument.createElement("template");
       template.innerHTML = html;
       const headers = template.content.querySelectorAll(typedBlockHeader);

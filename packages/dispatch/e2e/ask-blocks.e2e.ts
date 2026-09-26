@@ -7,6 +7,7 @@ import {
   createIssueArtifact,
   createProject,
   editArtifact,
+  getArtifactText,
   getAsk,
   getIssue,
   patchIssue,
@@ -667,12 +668,52 @@ test("a copy of an answered decision pasted above it leaves the answer on the or
       .toEqual(["Which one?"]);
     const copy = (await getIssue(issue.key)).open_asks[0];
     expect(copy?.block_id).not.toBe("decision");
+    // Both asks read "Which one?", so only the stored order tells the copy from the original.
+    const stored = (await getArtifactText(issue.primary_artifact_id)).markdown;
+    expect([...stored.matchAll(/:::ask\{#([^ }]+)/g)].map((match) => match[1])).toEqual([
+      copy?.block_id,
+      "decision",
+    ]);
     const held = (await getAsk(blockAsk.id)).ask;
     expect({ block: held.block_id, question: held.question, state: held.state }).toEqual({
       block: "decision",
       question: "Which one?",
       state: "answered",
     });
+  } finally {
+    await alice.close();
+  }
+});
+
+// The editor's own HTML cleanup still runs on a paste: a paste from Google Docs arrives wrapped in
+// <b id="docs-internal-guid-…">, which the editor unwraps, so the text pastes as written rather
+// than bold. The typed-block header strip runs after it and replaced it once.
+test("a paste from Google Docs keeps the editor's own cleanup of its wrapper", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", spec: "End.\n", title: "Pasted wrapper" });
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}`);
+    await selectEditorText(page, "End.");
+    await page.keyboard.press("ArrowRight");
+    await documentEditor(page).evaluate((root) => {
+      const data = new DataTransfer();
+      data.setData(
+        "text/html",
+        '<b id="docs-internal-guid-4a1b2c3d-7fff"><p>Wrapped words</p></b>'
+      );
+      data.setData("text/plain", "Wrapped words");
+      root.dispatchEvent(
+        new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: data })
+      );
+    });
+
+    await expect
+      .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
+      .toBe("End.Wrapped words\n");
   } finally {
     await alice.close();
   }
