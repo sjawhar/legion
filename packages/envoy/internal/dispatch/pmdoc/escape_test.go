@@ -89,6 +89,44 @@ func TestRenderKeepsTheBlocksAfterALineThatWouldOpenAFenceOrCloseATypedBlock(t *
 	}
 }
 
+// A rule that opens the document is written `---`, which the front-matter reader takes as an
+// opener when any later line is also `---`: a second rule or a code line that is just `---`
+// closes it, and everything up to there - the rule, the text, a fence - is read as front matter.
+// A document with no such line keeps the `---` it has always been written with.
+func TestRenderKeepsALeadingRuleFromReadingAsFrontMatter(t *testing.T) {
+	text := func(value string) *Node { return &Node{Type: "text", Text: value} }
+	paragraph := func(value string) *Node { return &Node{Type: "paragraph", Children: []*Node{text(value)}} }
+	rule := func() *Node { return &Node{Type: "hr"} }
+	code := &Node{Type: "code_block", Attrs: Attrs{"language": ""}, Children: []*Node{text("---")}}
+	for name, doc := range map[string]*Node{
+		"a second rule":     {Type: "doc", Children: []*Node{rule(), paragraph("x"), rule(), paragraph("y")}},
+		"a code line ---":   {Type: "doc", Children: []*Node{rule(), paragraph("x"), code}},
+		"no later --- line": {Type: "doc", Children: []*Node{rule(), paragraph("x")}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			markdown := mustRender(t, doc)
+			back, err := Parse(markdown)
+			if err != nil {
+				t.Fatalf("Parse(%q) = %v", markdown, err)
+			}
+			if len(back.Children) != len(doc.Children) {
+				t.Fatalf("Parse(%q) = %q, want every block back", markdown, mustRender(t, back))
+			}
+			for index, block := range doc.Children {
+				if back.Children[index].Type != block.Type {
+					t.Fatalf("Parse(%q) block %d is a %s, want a %s", markdown, index, back.Children[index].Type, block.Type)
+				}
+			}
+			if again := mustRender(t, back); again != markdown {
+				t.Fatalf("Render(Parse(%q)) = %q", markdown, again)
+			}
+		})
+	}
+	if got := mustRender(t, &Node{Type: "doc", Children: []*Node{rule(), paragraph("x")}}); got != "---\n\nx\n" {
+		t.Fatalf("a leading rule with no later --- line = %q, want main's %q", got, "---\n\nx\n")
+	}
+}
+
 // A paragraph's second line of dashes or equals signs underlines its first into a heading, so
 // the escape applies to a marker line anywhere in the paragraph, not only its first.
 func TestRenderEscapesSetextUnderlinesInsideParagraphs(t *testing.T) {

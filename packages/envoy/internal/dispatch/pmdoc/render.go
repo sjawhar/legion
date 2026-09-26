@@ -80,6 +80,13 @@ func render(doc *Node) (*renderer, error) {
 	if r.err != nil {
 		return nil, r.err
 	}
+	// A rule opening the document is written `---`, which the front-matter reader takes as an
+	// opener when any later line is also `---` - a second rule, a code line - and reads everything
+	// up to that line as front matter. It is written `***` there, the same length, and `---`
+	// everywhere else, as it has always been written.
+	if doc.Children[0].Type == "hr" && parseFrontmatterBlock(r.b.Bytes()) != nil {
+		copy(r.b.Bytes(), "***")
+	}
 	return r, nil
 }
 
