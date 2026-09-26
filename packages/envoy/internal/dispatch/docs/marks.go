@@ -307,6 +307,9 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		if err != nil {
 			return err
 		}
+		if err := pmdoc.RepeatedBlockID(tree, next, replacement); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidMarkdown, err)
+		}
 		var updateErr error
 		transact(func(txn *crdt.Transaction) {
 			updateErr = pmdoc.Update(txn, fragment, next)
