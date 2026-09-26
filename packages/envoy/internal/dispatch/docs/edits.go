@@ -1181,8 +1181,8 @@ var thematicBreakLine = regexp.MustCompile(`^(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}
 // An emptied paragraph is one the block holding it cannot be written without. The advice is the
 // delete that removes it: by find where deleting the text removes the emptied block
 // (pmdoc.DeleteTextblock), and otherwise by the id of the nearest block around the text that
-// pmdoc.DeleteBlock removes from the document as it was - the holder itself for a footnote
-// definition or a list item holding more than the paragraph, and a block further out when
+// pmdoc.DeleteBlock removes from the document as it was - the holder itself for a list item
+// holding more than the paragraph, and a block further out when
 // removing the holder would empty one that needs a block, such as a callout holding only it.
 func unreadableReason(before, after *pmdoc.Node, match pmdoc.Range, with string, unreadable error) string {
 	at, ok := pmdoc.ContainingTextblock(after, match.From)

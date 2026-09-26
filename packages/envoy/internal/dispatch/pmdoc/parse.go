@@ -140,7 +140,8 @@ func BlockShapeError(block *Node) error {
 // shapeDifference names the first block of want that got holds as another kind, or holds where
 // want has none, or lacks; both are empty when the two have the same shape. An empty paragraph is
 // not written, so it is not expected back - except in a table cell, which is written with its
-// paragraph however little it holds, and reads back holding one.
+// paragraph however little it holds, and a footnote definition holding only that paragraph, which
+// reads back holding an empty one as a cell does.
 func shapeDifference(want, got *Node) (string, string) {
 	if want.Type != got.Type {
 		return blockName(want.Type), blockName(got.Type)
@@ -148,10 +149,10 @@ func shapeDifference(want, got *Node) (string, string) {
 	if isTextblock(want.Type) {
 		return "", ""
 	}
-	cell := want.Type == "table_cell" || want.Type == "table_header"
+	keep := want.Type == "table_cell" || want.Type == "table_header" || (want.Type == "footnote_definition" && len(want.Children) == 1)
 	written := make([]*Node, 0, len(want.Children))
 	for _, child := range want.Children {
-		if cell || child.Type != "paragraph" || len(child.Children) != 0 {
+		if keep || child.Type != "paragraph" || len(child.Children) != 0 {
 			written = append(written, child)
 		}
 	}
@@ -458,9 +459,9 @@ func parseBlocks(parent ast.Node, source []byte, footnotes map[int]string) ([]*N
 			continue
 		}
 		// Goldmark puts a footnote's backlink after a definition's last block when that block is
-		// not a paragraph, which this parser does not read.
-		if _, ok := child.(*extensionast.FootnoteBacklink); ok && len(children) > 0 {
-			return nil, fmt.Errorf("%w: a footnote definition that ends in %s rather than a paragraph", ErrSchema, blockName(children[len(children)-1].Type))
+		// not a paragraph; it is the HTML renderer's decoration, not content.
+		if _, ok := child.(*extensionast.FootnoteBacklink); ok {
+			continue
 		}
 		parsed, err := parseBlock(child, source, footnotes)
 		if err != nil {

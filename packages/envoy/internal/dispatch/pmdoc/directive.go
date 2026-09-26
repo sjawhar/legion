@@ -72,7 +72,10 @@ func (p *typedDirectiveParser) Continue(node ast.Node, reader gmtext.Reader, _ p
 	}
 	line, _ := reader.PeekLine()
 	indent, offset := util.IndentWidth(line, reader.LineOffset())
-	if indent == directive.indent && offset < len(line) && strings.TrimSpace(string(line[offset:])) == ":::" {
+	// A fence closes the typed block when it is indented no further than the opener. The opener
+	// of a typed block that begins a footnote definition stands after the definition's `]: `, one
+	// column past where the definition's later lines start.
+	if indent <= directive.indent && offset < len(line) && strings.TrimSpace(string(line[offset:])) == ":::" {
 		directive.Closed = true
 		reader.AdvanceToEOL()
 		return parser.Close

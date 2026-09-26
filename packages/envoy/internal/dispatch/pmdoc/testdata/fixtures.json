@@ -853,6 +853,229 @@
     "rendered_by_milkdown": "[https://example.com/x](https://example.com/x \"title\")\n"
   },
   {
+    "name": "footnote-ending-in-a-block",
+    "markdown": "Code[^1], a list[^2], a quote[^3] and a callout[^4].\n\n[^1]: Note.\n\n    ```\n    code\n    ```\n\n[^2]: Note.\n\n    - item\n\n[^3]: Note.\n\n    > quoted\n\n[^4]: :::callout{#footnote-callout kind=\"note\" title=\"In a footnote\"}\n    Body.\n    :::\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Code"
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "1"
+              }
+            },
+            {
+              "type": "text",
+              "text": ", a list"
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "2"
+              }
+            },
+            {
+              "type": "text",
+              "text": ", a quote"
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "3"
+              }
+            },
+            {
+              "type": "text",
+              "text": " and a callout"
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "4"
+              }
+            },
+            {
+              "type": "text",
+              "text": "."
+            }
+          ]
+        },
+        {
+          "type": "footnote_definition",
+          "attrs": {
+            "label": "1",
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000003"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Note."
+                }
+              ]
+            },
+            {
+              "type": "code_block",
+              "attrs": {
+                "language": null,
+                "blockId": "b-000004"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "code"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "footnote_definition",
+          "attrs": {
+            "label": "2",
+            "blockId": "b-000005"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000006"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Note."
+                }
+              ]
+            },
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false,
+                "blockId": "b-000007"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000008"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000009"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "item"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "footnote_definition",
+          "attrs": {
+            "label": "3",
+            "blockId": "b-000010"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000011"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Note."
+                }
+              ]
+            },
+            {
+              "type": "blockquote",
+              "attrs": {
+                "blockId": "b-000012"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000013"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "quoted"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "footnote_definition",
+          "attrs": {
+            "label": "4",
+            "blockId": "b-000014"
+          },
+          "content": [
+            {
+              "type": "callout",
+              "attrs": {
+                "kind": "note",
+                "title": "In a footnote",
+                "blockId": "footnote-callout"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000015"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "Body."
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AUoBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQEEQ29kZYcBAQMSZm9vdG5vdGVfcmVmZXJlbmNlKAABBgVsYWJlbAF3ATGHAQYGBAABCAgsIGEgbGlzdIcBCAMSZm9vdG5vdGVfcmVmZXJlbmNlKAABEQVsYWJlbAF3ATKHAREGBAABEwksIGEgcXVvdGWHARMDEmZvb3Rub3RlX3JlZmVyZW5jZSgAAR0FbGFiZWwBdwEzhwEdBgQAAR8OIGFuZCBhIGNhbGxvdXSHAR8DEmZvb3Rub3RlX3JlZmVyZW5jZSgAAS4FbGFiZWwBdwE0hwEuBgQAATABLigAAQAHYmxvY2tJZAF3CGItMDAwMDAxhwEAAxNmb290bm90ZV9kZWZpbml0aW9uBwABMwMJcGFyYWdyYXBoBwABNAYEAAE1BU5vdGUuKAABNAdibG9ja0lkAXcIYi0wMDAwMDOHATQDCmNvZGVfYmxvY2sHAAE8BgQAAT0EY29kZSgAATwHYmxvY2tJZAF3CGItMDAwMDA0KAABMwVsYWJlbAF3ATEoAAEzB2Jsb2NrSWQBdwhiLTAwMDAwMocBMwMTZm9vdG5vdGVfZGVmaW5pdGlvbgcAAUUDCXBhcmFncmFwaAcAAUYGBAABRwVOb3RlLigAAUYHYmxvY2tJZAF3CGItMDAwMDA2hwFGAwtidWxsZXRfbGlzdAcAAU4DCWxpc3RfaXRlbQcAAU8DCXBhcmFncmFwaAcAAVAGBAABUQRpdGVtKAABUAdibG9ja0lkAXcIYi0wMDAwMDkoAAFPBWxhYmVsAXcD4oCiKAABTwhsaXN0VHlwZQF3BmJ1bGxldCgAAU8Gc3ByZWFkAXkoAAFPB2Jsb2NrSWQBdwhiLTAwMDAwOCgAAU4Gc3ByZWFkAXkoAAFOB2Jsb2NrSWQBdwhiLTAwMDAwNygAAUUFbGFiZWwBdwEyKAABRQdibG9ja0lkAXcIYi0wMDAwMDWHAUUDE2Zvb3Rub3RlX2RlZmluaXRpb24HAAFfAwlwYXJhZ3JhcGgHAAFgBgQAAWEFTm90ZS4oAAFgB2Jsb2NrSWQBdwhiLTAwMDAxMYcBYAMKYmxvY2txdW90ZQcAAWgDCXBhcmFncmFwaAcAAWkGBAABagZxdW90ZWQoAAFpB2Jsb2NrSWQBdwhiLTAwMDAxMygAAWgHYmxvY2tJZAF3CGItMDAwMDEyKAABXwVsYWJlbAF3ATMoAAFfB2Jsb2NrSWQBdwhiLTAwMDAxMIcBXwMTZm9vdG5vdGVfZGVmaW5pdGlvbgcAAXUDB2NhbGxvdXQHAAF2AwlwYXJhZ3JhcGgHAAF3BgQAAXgFQm9keS4oAAF3B2Jsb2NrSWQBdwhiLTAwMDAxNSgAAXYEa2luZAF3BG5vdGUoAAF2BXRpdGxlAXcNSW4gYSBmb290bm90ZSgAAXYHYmxvY2tJZAF3EGZvb3Rub3RlLWNhbGxvdXQoAAF1BWxhYmVsAXcBNCgAAXUHYmxvY2tJZAF3CGItMDAwMDE0AA==",
+    "rendered_by_milkdown": "Code[^1], a list[^2], a quote[^3] and a callout[^4].\n\n[^1]: Note.\n\n    ```\n    code\n    ```\n\n[^2]: Note.\n\n    * item\n\n[^3]: Note.\n\n    > quoted\n\n[^4]: :::callout{#footnote-callout kind=\"note\" title=\"In a footnote\"}\n    Body.\n    :::\n"
+  },
+  {
     "name": "footnote",
     "markdown": "A footnote reference.[^fixture]\n\n[^fixture]: Footnote definition.\n",
     "pm_json": {
