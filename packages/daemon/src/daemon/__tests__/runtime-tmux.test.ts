@@ -134,7 +134,7 @@ describe("TmuxRuntime.scrubServerEnvironment", () => {
       {
         HOME: "/home/legion",
         SSH_AUTH_SOCK: "/tmp/ssh-x/agent.1",
-        SSH_CONNECTION: "100.100.92.97 57158 100.113.243.90 22",
+        SSH_CONNECTION: "192.0.2.10 57158 192.0.2.20 22",
       },
       ["DISPLAY", "XAUTHORITY"]
     );

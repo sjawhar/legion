@@ -750,9 +750,9 @@ func (r *liveRig) checkReAdopt() error {
 		if !ok || alive.Kind != runtime.Alive || !sameLocator(alive.Locator, loc) {
 			return fmt.Errorf("%s's first observation after re-adoption is %+v, want alive with its recorded %s", c.name, alive, loc.Incarnation)
 		}
-		reg, ok := r.reg.await(c.token, c.gen, restarted, 2*time.Minute)
-		if !ok || reg.hash != tokenHash(c.bootToken) {
-			return fmt.Errorf("%s's shim did not say hello again with its generation-%d token", c.name, c.gen)
+		reg, err := r.awaitHelloAgain(c, restarted)
+		if err != nil {
+			return err
 		}
 		uid, err := r.kubectl("get", "pod", SandboxName(c.token), "-o", "jsonpath={.metadata.uid}")
 		if err != nil {
@@ -777,8 +777,11 @@ func (r *liveRig) checkReAdopt() error {
 	return nil
 }
 
-// orphan-sweep: a Sandbox of the project that no claim records survives a sweep inside the grace
-// and is deleted by one past it; a suspended claim's Sandbox survives both.
+// orphan-sweep: a Sandbox of the project that no claim records survives a sweep inside the grace;
+// past it, it survives while it is this runtime's own unreleased launch (a claim launched after
+// the daemon read the claims it sweeps with), and is deleted once a fresh runtime, which never
+// launched it, sweeps: what a crash between creating it and persisting its claim leaves. A
+// suspended claim's Sandbox survives every sweep.
 func (r *liveRig) checkOrphanSweep() error {
 	orphan, suspended := r.claim("orphan"), r.claim("second")
 	if err := r.ensureRunning(r.claim("root")); err != nil {
@@ -805,6 +808,19 @@ func (r *liveRig) checkOrphanSweep() error {
 	if err := r.rt.ReconcileOrphans(r.ctx, r.known(orphan), time.Second); err != nil {
 		return err
 	}
+	if s, err := r.getSandbox(name); err != nil || s.DeletionTimestamp != nil {
+		return fmt.Errorf("the runtime's own unreleased launch %s did not survive a sweep past the grace: %v", name, err)
+	}
+	note("runtime", "sweep with grace 1s by the runtime that launched it: %s survives", name)
+	r.stopRuntime()
+	restarted := time.Now()
+	if err := r.startRuntime(); err != nil {
+		return err
+	}
+	note("runtime", "listener and runtime replaced, as a crash before the claim was persisted would")
+	if err := r.rt.ReconcileOrphans(r.ctx, r.known(orphan), time.Second); err != nil {
+		return err
+	}
 	if err := r.poll(liveGoneLimit, "orphan Sandbox "+name+" to be deleted", func() (bool, error) {
 		_, err := r.getSandbox(name)
 		return apierrors.IsNotFound(err), ignoreNotFound(err)
@@ -822,6 +838,11 @@ func (r *liveRig) checkOrphanSweep() error {
 	}
 	note("runtime", "sweep with grace 1s: %s deleted; every known claim's Sandbox, the suspended %s included, survives", name, keep)
 	orphan.loc, orphan.state = nil, stateReleased
+	for _, c := range r.live() {
+		if _, err := r.awaitHelloAgain(c, restarted); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

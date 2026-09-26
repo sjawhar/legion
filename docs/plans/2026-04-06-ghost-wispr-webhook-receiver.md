@@ -9,7 +9,7 @@ Previous workers (architect + implementer) have completed ~95% of this work. Thi
 ## Assumptions
 
 1. Ghost Wispr webhook push capability exists and sends the documented payload format to a configured URL.
-2. The Ghost Wispr machine (`ghost-wispr`, Tailscale IP `100.103.243.89`) already runs the Envoy listener and has SSH access configured.
+2. The Ghost Wispr machine (`ghost-wispr`, Tailscale IP `<tailscale-ip>`) already runs the Envoy listener and has SSH access configured.
 3. Port 9012 is used for the receiver (following GitHub=9010, Slack=9011).
 4. The signing secret is optional — when `ENVOY_GHOSTWISPR_SIGNING_SECRET` env var is empty/unset, signature verification is skipped. Deliberate: Ghost Wispr runs on localhost behind Tailscale.
 5. Session IDs from Ghost Wispr are timestamp strings like `20260326041405` — safe for NATS subject segments.

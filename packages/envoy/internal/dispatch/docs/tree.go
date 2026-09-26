@@ -23,8 +23,15 @@ func parseInput(markdown string) (*pmdoc.Node, error) {
 		}
 		return nil, err
 	}
-	pmdoc.StripServerOwnedAttrs(tree)
-	return pmdoc.StripAnchorMarks(tree), nil
+	return asUploaded(tree), nil
+}
+
+// asUploaded is a copy of tree as an upload is taken: without anchor marks, and with every
+// server-owned typed-block attribute at its default, since the server owns those.
+func asUploaded(tree *pmdoc.Node) *pmdoc.Node {
+	out := pmdoc.StripAnchorMarks(tree)
+	pmdoc.StripServerOwnedAttrs(out)
+	return out
 }
 
 // errDocUnloaded is returned for a room whose live document is not resident (evicted, or never

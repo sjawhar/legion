@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -308,5 +309,34 @@ func TestPutDeliveryRefusesAClaimTheStoreDoesNotHold(t *testing.T) {
 		supervise.Delivery{ID: "delivery-1", Task: "t", QueuedAt: at(7)})
 	if err == nil {
 		t.Fatal("put a delivery for a claim the store does not hold")
+	}
+}
+
+// A confirmation writes the claim and its delivery together. The delivery write failing must take
+// the claim's with it: a stored claim recorded as working whose delivery never landed is a task
+// the shim has already answered and nothing sends again.
+func TestPutClaimAndDeliveryWritesBothOrNeither(t *testing.T) {
+	ctx := context.Background()
+	store := migratedStore(t)
+	c := tmuxClaim("legion-LEGION-212-tester")
+	c.State = supervise.StateIdle
+	if err := store.PutClaim(ctx, c); err != nil {
+		t.Fatalf("put claim: %v", err)
+	}
+
+	working := c
+	working.State = supervise.StateWorking
+	// A generation no bigint holds: the delivery's write is refused, inside the transaction that
+	// carries the claim's.
+	confirmed := supervise.Delivery{ID: "delivery-1", Task: "test it", QueuedAt: at(1),
+		DeliveredAt: at(2), ConfirmedAt: at(3), Generation: math.MaxUint64}
+	if err := store.PutClaimAndDelivery(ctx, working, confirmed); err == nil {
+		t.Fatal("wrote a delivery whose generation no bigint holds")
+	}
+
+	stored := onlyClaim(t, store)
+	if stored.State != supervise.StateIdle || stored.Pending != nil {
+		t.Fatalf("claim read back = %s with pending %+v, want the idle row it was, unchanged",
+			stored.State, stored.Pending)
 	}
 }
