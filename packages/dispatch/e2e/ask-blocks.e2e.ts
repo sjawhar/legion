@@ -903,6 +903,47 @@ test("a lone ask pasted as plain text into an ask's question joins the question"
   }
 });
 
+// A list or a table pasted into an ask's question, as plain text or as HTML, joins the question as
+// text too: the ask already holds its one options list and can't hold a table. It once split the
+// ask the same way, the question keeping the first item and the ask's own options moving to a new
+// ask under an empty question.
+for (const [shape, clipboard, question] of [
+  ["a list as plain text", { html: "", text: "- x\n- y\n" }, "Which here?x y"],
+  ["a list as HTML", { html: "<ul><li>x</li><li>y</li></ul>", text: "x\ny" }, "Which here?x y"],
+  [
+    "a table as HTML",
+    {
+      html: "<table><tr><th>one</th><th>two</th></tr><tr><td>1</td><td>2</td></tr></table>",
+      text: "one\ttwo\n1\t2",
+    },
+    "Which here?one two 1 2",
+  ],
+] as const) {
+  test(`${shape} pasted into an ask's question joins the question`, async ({ browser }) => {
+    const { alice, issue, page } = await openWithCaret(
+      browser,
+      "Paste into a question",
+      ':::ask{#q1 urgency="med" multiple="false"}\nWhich here?\n\n- X\n- Y\n:::\n',
+      "Which here?",
+      "end"
+    );
+    try {
+      await paste(page, clipboard);
+
+      await expect
+        .poll(async () =>
+          withoutAttributes((await getArtifactText(issue.primary_artifact_id)).markdown)
+        )
+        .toBe(`:::ask{#q1}\n${question}\n\n- X\n- Y\n:::\n`);
+      await expect
+        .poll(async () => (await getIssue(issue.key)).open_asks.map((ask) => ask.block_id))
+        .toEqual(["q1"]);
+    } finally {
+      await alice.close();
+    }
+  });
+}
+
 // Plain text that holds no typed block pastes as it always has: its first paragraph or list item
 // joins the text before the caret and its last one the text after it.
 for (const [caret, text, stored] of [
