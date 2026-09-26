@@ -403,9 +403,6 @@ func TestAcceptingASuggestionRefusesAReplacementTheDocumentCannotCarryBack(t *te
 	}
 }
 
-// A code block's text is literal, so a replace there writes with exactly as sent - whitespace at
-// its edges, markdown syntax, a reference, a tab - through the edits route and through an
-// accepted suggestion alike.
 // An empty accept inside a typed block must never store a block its own schema cannot carry.
 // Callout uses block+ in every placement; ask is its other schema type (paragraph+ bullet_list?).
 func TestAcceptingAnEmptySuggestionRefusesAnUnreadableTypedBlock(t *testing.T) {
@@ -454,6 +451,9 @@ func TestAcceptingAnEmptySuggestionRefusesAnUnreadableTypedBlock(t *testing.T) {
 	}
 }
 
+// A code block's text is literal, so a replace there writes with exactly as sent - whitespace at
+// its edges, markdown syntax, a reference, a tab - through the edits route and through an
+// accepted suggestion alike.
 func TestDocumentEditsReplaceInACodeBlockWritesWithAsSent(t *testing.T) {
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {

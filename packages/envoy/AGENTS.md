@@ -226,11 +226,13 @@ one rule (`docs.opensDocument`).
 
 Accepting a suggestion (`POST /api/v1/comments/{id}/accept`, `docs/marks.go` `applySuggestion`)
 splices its `replace_with`, which unlike an edit's `with` may be blocks, with ProseMirror's range
-fitting (`pmdoc.Splice`). A replacement fitted into a typed block stays inside it, and a fit never
-replaces the typed block it lands in: a callout takes what its content rule allows, a code block
-included (the engine oracle's `callout-paragraph-and-code` case), and an ask takes any block at this
-step, since `Validate` lets an ask hold other blocks while a browser edit passes through. The one
-exception is a replacement holding exactly one block of the typed block's own type under its id,
+fitting (`pmdoc.Splice`). A non-empty replacement fitted into a typed block stays inside it, and a
+fit never replaces the typed block it lands in: a callout takes what its content rule allows, a
+code block included (the engine oracle's `callout-paragraph-and-code` case), and an ask takes any
+block at this step, since `Validate` lets an ask hold other blocks while a browser edit passes
+through. An empty callout is refused by the document-level shape check: its empty paragraph is a
+block in the live tree but renders to no content, which the callout's `block+` rule cannot carry
+back. The one exception is a replacement holding exactly one block of the typed block's own type under its id,
 at any depth, which is that block rewritten: it replaces the block in place rather than nesting
 inside it, and the replacement's other blocks, and any it sits inside (a blockquote, a list item,
 a typed block under another id), go in the same parent, where they stand in the replacement.
