@@ -540,6 +540,21 @@ another block after it does not render, and an edit that would leave one is refu
 An empty list item that would interrupt a paragraph is not opened, as that parser reads it on the
 whole line (`emptyItemGuard`): after `- a`, the line `  - -` is an item holding the text `-`.
 
+A document holding one of those shapes, or a footnote definition that ends in a block other than
+a paragraph, has its lists' spacing read as that parser reads it (`browserListSpacing`): outside
+quotes and footnote definitions a blank line between two items spreads the list, and one between
+an item's blocks spreads the item; in a footnote definition a list is never spread and only an
+item's own blank lines spread it; in a quote a list is read only when no blank line lies at or
+after it but the one before flow content the quote goes on with, and then nothing is spread. Where
+that parser's spread depends on more - a blank line after an item in a footnote definition, any
+other blank line in a quote, a typed block holding one in a list item - the document is refused,
+and so it is where goldmark reads its blocks otherwise: an empty list item and a blank line before
+a block its outer item holds, and a footnote definition inside another block, ahead of another
+block, out of the order of its first references, or referred to by nothing, which goldmark moves
+or drops. Every other document keeps goldmark's looseness - a loose list's items holding more
+than one block are spread, the list when none is - which is how the documents Dispatch stores were
+read.
+
 A typed block renders its `blockId`, defaulted attributes, and every explicitly set optional
 attribute. Parsing mints an omitted id, while live document reads and writes validate each node
 against its schema content rule. Schema changes are additive: add a type, add a defaulted

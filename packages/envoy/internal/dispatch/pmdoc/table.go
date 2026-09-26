@@ -38,7 +38,7 @@ func (t lazyTableRows) Transform(node *ast.Paragraph, reader gmtext.Reader, pc p
 	source := reader.Source()
 	lazy := lazyLines(node.Lines(), source)
 	if lazy == nil && !holdsLonePipeLine(node.Lines(), source) {
-		t.table.Transform(node, reader, pc)
+		t.transform(node, reader, pc)
 		return
 	}
 	// Read the paragraph as a table apart from the document to see which lines would be its
@@ -67,7 +67,30 @@ func (t lazyTableRows) Transform(node *ast.Paragraph, reader gmtext.Reader, pc p
 			}
 		}
 	}
+	t.transform(node, reader, pc)
+}
+
+// transform is goldmark's table transformer. A table that takes the paragraph's first line takes
+// the paragraph's place, starting where its text does and after the blank line before it if there
+// was one; goldmark gives it neither. The browser list spacing reads both, the blank line through
+// blankAfterAttr, since goldmark's looseness, which reads HasBlankPreviousLines, has never seen it.
+func (t lazyTableRows) transform(node *ast.Paragraph, reader gmtext.Reader, pc parser.Context) {
+	first := node.Lines().At(0)
+	start := first.TrimLeftSpace(reader.Source()).Start
+	blank := node.HasBlankPreviousLines()
+	parent, previous := node.Parent(), node.PreviousSibling()
 	t.table.Transform(node, reader, pc)
+	if node.Parent() != nil {
+		return
+	}
+	place := parent.FirstChild()
+	if previous != nil {
+		place = previous.NextSibling()
+	}
+	if table, ok := place.(*extensionast.Table); ok {
+		table.SetPos(start)
+		table.SetAttribute(blankAfterAttr, blank)
+	}
 }
 
 // holdsLonePipeLine reports whether one of a paragraph's lines holds one pipe and nothing else but

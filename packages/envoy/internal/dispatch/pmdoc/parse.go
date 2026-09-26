@@ -137,6 +137,9 @@ func parseUnstamped(markdown string) (*Node, error) {
 	front, rest := parseFrontmatterBlock(source)
 	source = source[rest:]
 	root := blockReader.parse(source)
+	if err := browserListSpacing(root, source); err != nil {
+		return nil, err
+	}
 	doc, err := parseBlock(root, source, footnoteLabels(root))
 	if err != nil {
 		return nil, err
@@ -588,9 +591,16 @@ func parseTypedDirective(directive *typedDirective, source []byte, footnotes map
 	return &Node{Type: directive.Name, Attrs: attrs, Children: emptyParagraphFirst(children, false)}, nil
 }
 
+// parseList reads a list's and its items' spread as browserListSpacing recorded them, or, where it
+// recorded none, from goldmark's looseness: a loose list's items holding more than one block are
+// spread, and the list is spread when none of them is.
 func parseList(list *ast.List, source []byte, footnotes map[int]string) (*Node, error) {
 	nodeType := "bullet_list"
+	browserSpread, browser := list.Attribute(browserSpreadAttr)
 	attrs := Attrs{"spread": !list.IsTight}
+	if browser {
+		attrs["spread"] = browserSpread
+	}
 	if list.IsOrdered() {
 		nodeType = "ordered_list"
 		attrs["order"] = list.Start
@@ -605,9 +615,13 @@ func parseList(list *ast.List, source []byte, footnotes map[int]string) (*Node, 
 		if err != nil {
 			return nil, err
 		}
-		parsed.Attrs["spread"] = !list.IsTight && item.ChildCount() > 1
-		if parsed.Attrs["spread"] == true {
-			attrs["spread"] = false
+		if browser {
+			parsed.Attrs["spread"], _ = item.Attribute(browserSpreadAttr)
+		} else {
+			parsed.Attrs["spread"] = !list.IsTight && item.ChildCount() > 1
+			if parsed.Attrs["spread"] == true {
+				attrs["spread"] = false
+			}
 		}
 		children = append(children, parsed)
 	}

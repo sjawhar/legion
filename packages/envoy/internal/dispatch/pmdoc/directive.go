@@ -21,6 +21,8 @@ type typedDirective struct {
 	Name   string
 	Attrs  Attrs
 	Closed bool
+	// closer is where the line of the fence that closed the typed block starts, once Closed.
+	closer int
 	indent int
 	// fence is the number of colons the directive opened with; only a line of exactly as many
 	// closes it, so a typed block written with a longer fence holds one written with a shorter.
@@ -73,13 +75,14 @@ func (p *typedDirectiveParser) Continue(node ast.Node, reader gmtext.Reader, _ p
 	if !ok {
 		return parser.Close
 	}
-	line, _ := reader.PeekLine()
+	line, segment := reader.PeekLine()
 	indent, offset := util.IndentWidth(line, reader.LineOffset())
 	// A fence closes the typed block when it is indented no further than the opener. The opener
 	// of a typed block that begins a footnote definition stands after the definition's `]: `, one
 	// column past where the definition's later lines start.
 	if indent <= directive.indent && offset < len(line) && fenceColons(string(line[offset:])) == directive.fence {
 		directive.Closed = true
+		directive.closer = segment.Start
 		reader.AdvanceToEOL()
 		return parser.Close
 	}

@@ -144,9 +144,29 @@ func (taskMarkerParser) Parse(parent ast.Node, block gmtext.Reader, _ parser.Con
 	return extensionast.NewTaskCheckBox(line[1] == 'x' || line[1] == 'X')
 }
 
+// openedDefinitionsKey holds every footnote definition the parser opens while a document parses,
+// and openedDefinitionsAttr on the document root afterwards (withLineStarts): goldmark's
+// transformer moves each referenced definition to the document's end and drops the rest.
+var (
+	openedDefinitionsKey  = parser.NewContextKey()
+	openedDefinitionsAttr = []byte("pmdoc-opened-definitions")
+)
+
+// openedDefinition is a footnote definition as the parser opened it: nested when it opened inside
+// another block rather than at the document's level.
+type openedDefinition struct {
+	node   ast.Node
+	nested bool
+}
+
 func (p footnoteDefinitionParser) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
 	node, state := p.BlockParser.Open(parent, reader, pc)
-	if node != nil && state&parser.HasChildren != 0 {
+	if node == nil {
+		return node, state
+	}
+	opened, _ := pc.Get(openedDefinitionsKey).([]openedDefinition)
+	pc.Set(openedDefinitionsKey, append(opened, openedDefinition{node, parent.Kind() != ast.KindDocument}))
+	if state&parser.HasChildren != 0 {
 		line, _ := reader.PeekLine()
 		skip := 0
 		for skip < len(line) && (line[skip] == ' ' || line[skip] == '\t') {
@@ -201,12 +221,15 @@ func recordLine(line gmtext.Segment, source []byte, pc parser.Context) {
 	recorded[line.TrimLeftSpace(source).Start] = line
 }
 
-// withLineStarts parses source with context and leaves the lines lineRecordingParagraph recorded on
-// the document root.
+// withLineStarts parses source with context and leaves the lines lineRecordingParagraph recorded
+// and the footnote definitions footnoteDefinitionParser opened on the document root.
 func withLineStarts(p parser.Parser, source []byte, context parser.Context) ast.Node {
 	root := p.Parse(gmtext.NewReader(source), parser.WithContext(context))
 	if recorded := context.Get(untrimmedLinesKey); recorded != nil {
 		root.SetAttribute(untrimmedLinesAttr, recorded)
+	}
+	if opened := context.Get(openedDefinitionsKey); opened != nil {
+		root.SetAttribute(openedDefinitionsAttr, opened)
 	}
 	return root
 }
