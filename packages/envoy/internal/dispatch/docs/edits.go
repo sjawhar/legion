@@ -1104,7 +1104,11 @@ func acceptRefusal(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.Textbl
 	}
 	if emptyTextblock(replacement.Children[0]) && (!found || emptied) {
 		advice := "reject the suggestion, or delete the " + holder + " in the document"
-		if len(at.Ancestors[0].Children) > 1 {
+		switch {
+		case at.Ancestors[0].Type == "footnote_definition" && len(at.Ancestors[0].Children) == 1:
+			// A definition goes only with its reference, which would otherwise read as text.
+			advice = "reject the suggestion, or delete the footnote in the document, its reference along with this definition"
+		case len(at.Ancestors[0].Children) > 1:
 			advice = "reject the suggestion, since the rest of the " + holder + " cannot be written without this paragraph"
 			if _, err := pmdoc.DeleteBlock(before, blockID(at.Node)); err == nil {
 				advice = "reject the suggestion, or delete the paragraph in the document, which leaves the rest of the " + holder

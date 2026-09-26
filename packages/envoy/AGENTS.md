@@ -170,7 +170,8 @@ the refusal (`acceptRefusal`) says what the text writes where it lands and names
 do (reject the suggestion, or reply asking for text the block can hold), never an edit-route
 operation; it says the text empties a paragraph only when the text renders no content, and then
 offers deleting the paragraph only where the rest of its block stands without it, and the whole
-block only where the paragraph is all it holds. A reject is not checked, since it gives back the
+block only where the paragraph is all it holds - a footnote definition together with its
+reference, which would otherwise read as text. A reject is not checked, since it gives back the
 text the insert started from. Neither route can see a lone carriage return, which this parser
 reads as text where CommonMark and the browser editor end the line. Everywhere else `replace` is
 inline: `with` parses through `pmdoc.ParseInline` (paragraph-only block grammar), so a multi-paragraph
