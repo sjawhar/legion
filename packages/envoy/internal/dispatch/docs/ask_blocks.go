@@ -296,11 +296,15 @@ func askFingerprints(tree *pmdoc.Node, fingerprint func(*pmdoc.Node) (string, er
 	return held, err
 }
 
-// askMarkdown is what a document's markdown carries of an ask: its rendering alone, without the
-// anchor marks and the attributes a reader's browser derives, which no rendering writes. A new
-// version is markdown, so this is how a version says it carries an ask unchanged.
+// askMarkdown is what an uploaded version can say of an ask: its rendering alone, normalized as
+// parseInput normalizes an upload - without anchor marks, and with its server-owned attributes
+// (`state`, the answer, `invalid`) at their defaults, since an upload's are discarded for the ask
+// row's. The attributes a reader's browser derives are never rendered. A new version is markdown,
+// so this is how a version says it carries an ask unchanged.
 func askMarkdown(ask *pmdoc.Node) (string, error) {
-	return pmdoc.Render(&pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{ask}})
+	doc := pmdoc.StripAnchorMarks(&pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{ask}})
+	pmdoc.StripServerOwnedAttrs(doc)
+	return pmdoc.Render(doc)
 }
 
 func collectAskBlocksForSettlement(tree *pmdoc.Node) ([]askBlock, []invalidAskBlock, error) {

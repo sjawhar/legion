@@ -298,6 +298,25 @@ func TestSettlementMarksUnsupportedAskBodyInvalid(t *testing.T) {
 }
 
 // appendToAsk is a browser edit that appends block to the document's first ask.
+// setAskAttrs sets attributes on the document's first ask, as settlement or an answer does.
+func setAskAttrs(attrs pmdoc.Attrs) func(*pmdoc.Node) *pmdoc.Node {
+	return func(tree *pmdoc.Node) *pmdoc.Node {
+		for _, child := range tree.Children {
+			if child.Type == "ask" {
+				for name, value := range attrs {
+					child.Attrs[name] = value
+				}
+				return tree
+			}
+		}
+		panic("no ask to set attributes on")
+	}
+}
+
+func codeBlockNode(text string) *pmdoc.Node {
+	return &pmdoc.Node{Type: "code_block", Attrs: pmdoc.Attrs{"language": nil}, Children: []*pmdoc.Node{{Type: "text", Text: text}}}
+}
+
 func appendToAsk(block *pmdoc.Node) func(*pmdoc.Node) *pmdoc.Node {
 	return func(tree *pmdoc.Node) *pmdoc.Node {
 		for _, child := range tree.Children {
@@ -310,9 +329,10 @@ func appendToAsk(block *pmdoc.Node) func(*pmdoc.Node) *pmdoc.Node {
 	}
 }
 
-// A version's markdown carries what a rendering writes, so an unreadable ask it carries through
-// unchanged is taken whatever the live ask holds that no rendering writes: a comment's anchor mark
-// in its text, or the id a reader's browser derives for a heading in it.
+// A version's markdown carries what a rendering writes, and an upload's server-owned ask
+// attributes are discarded for the ask row's, so an unreadable ask it carries through unchanged is
+// taken whatever the live ask holds besides: a comment's anchor mark in its text, the id a
+// reader's browser derives for a heading in it, or the answer or resolution the ask was given.
 func TestReplaceCarriesAnUnreadableAskWithWhatNoRenderingWrites(t *testing.T) {
 	const ask = "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nShould we ship this week?\n:::\n"
 	actor := model.Actor{Kind: "user", ID: "alice"}
@@ -328,6 +348,14 @@ func TestReplaceCarriesAnUnreadableAskWithWhatNoRenderingWrites(t *testing.T) {
 		}},
 		{"a heading with the id a browser derived", func(t *testing.T, service *Service, artifactID string) {
 			editLiveTree(t, service, artifactID, appendToAsk(&pmdoc.Node{Type: "heading", Attrs: pmdoc.Attrs{"level": float64(2), "id": "decision"}, Children: []*pmdoc.Node{{Type: "text", Text: "Decision"}}}))
+		}},
+		{"an answered ask", func(t *testing.T, service *Service, artifactID string) {
+			editLiveTree(t, service, artifactID, setAskAttrs(pmdoc.Attrs{"state": "answered", "answered_by": "alice", "answered_at": "2026-09-12T13:20:00Z", "selected": []string{"Ship"}, "answer": "Ship it."}))
+			editLiveTree(t, service, artifactID, appendToAsk(codeBlockNode("code")))
+		}},
+		{"a resolved ask", func(t *testing.T, service *Service, artifactID string) {
+			editLiveTree(t, service, artifactID, setAskAttrs(pmdoc.Attrs{"state": "resolved"}))
+			editLiveTree(t, service, artifactID, appendToAsk(codeBlockNode("code")))
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
