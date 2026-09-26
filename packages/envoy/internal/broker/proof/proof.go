@@ -19,16 +19,18 @@ type Verifier struct {
 	Replay func(ctx context.Context, jti string, expires time.Time) (fresh bool, err error)
 }
 
-// Verify returns the enrollment id a proof authenticates. Every failure is ErrInvalid wrapped
-// with a reason that never quotes the proof or the key.
+// Verify returns the enrollment id a proof authenticates. Lookup and Replay errors are returned
+// unwrapped (never ErrInvalid) so callers can distinguish an internal failure from an invalid
+// proof; every other failure is ErrInvalid wrapped with a reason that never quotes the proof or
+// the key.
 func (v *Verifier) Verify(ctx context.Context, compact, method, url string, now time.Time) (string, error) {
 	sig, err := jose.ParseSigned(compact, []jose.SignatureAlgorithm{jose.ES256})
 	if err != nil || len(sig.Signatures) != 1 {
 		return "", fmt.Errorf("%w: not a single ES256 JWS", ErrInvalid)
 	}
-	header := sig.Signatures[0].Header
-	if typ, _ := header.ExtraHeaders[jose.HeaderType].(string); typ != TypeHeader {
-		return "", fmt.Errorf("%w: typ is not %s", ErrInvalid, TypeHeader)
+	header := sig.Signatures[0].Protected
+	if typ, _ := header.ExtraHeaders[jose.HeaderType].(string); typ != typeHeader {
+		return "", fmt.Errorf("%w: typ is not %s", ErrInvalid, typeHeader)
 	}
 	if header.JSONWebKey == nil {
 		return "", fmt.Errorf("%w: no embedded key", ErrInvalid)

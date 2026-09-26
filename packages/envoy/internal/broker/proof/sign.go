@@ -13,7 +13,7 @@ import (
 	"github.com/google/uuid"
 )
 
-const TypeHeader = "agent-secrets-proof+jwt"
+const typeHeader = "agent-secrets-proof+jwt"
 
 type claims struct {
 	JTI          string `json:"jti"`
@@ -44,7 +44,7 @@ func thumbprintOf(jwk jose.JSONWebKey) (string, error) {
 func Sign(key *ecdsa.PrivateKey, enrollmentID, method, url string, now time.Time) (string, error) {
 	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: key}, &jose.SignerOptions{
 		EmbedJWK:     true,
-		ExtraHeaders: map[jose.HeaderKey]any{jose.HeaderType: TypeHeader},
+		ExtraHeaders: map[jose.HeaderKey]any{jose.HeaderType: typeHeader},
 	})
 	if err != nil {
 		return "", err
