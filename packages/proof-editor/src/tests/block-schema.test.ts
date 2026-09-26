@@ -1,6 +1,9 @@
 // @ts-nocheck — verbatim proof-sdk source. The fork emits this tree's declarations with
 // `noCheck` (its tsconfig.lib.json), so it has never type-checked; see AGENTS.md.
 import { test } from './harness.js';
+import { Schema } from '@milkdown/kit/prose/model';
+
+import { typedBlockSpec, type BlockTypeSchema } from '../block-schema.js';
 import { createHeadlessProof } from '../lib-headless.js';
 
 function assert(condition: boolean, message: string): void {
@@ -256,4 +259,88 @@ await test('headless Proof rejects a content rule naming an unknown node type', 
     thrown instanceof Error && thrown.message.includes("No node type or group 'unknown_block'"),
     `unknown content rule error = ${(thrown as Error).message}`,
   );
+});
+
+const decision: BlockTypeSchema = {
+  name: 'ask',
+  content: 'paragraph+',
+  render: 'host',
+  attributes: {
+    urgency: { kind: 'enum', choices: ['low', 'med', 'high'], default: 'med' },
+    multiple: { kind: 'bool', default: false },
+    state: { kind: 'enum', choices: ['open', 'answered'], default: 'open', server: true },
+    selected: { kind: 'string[]', default: [], server: true },
+  },
+};
+
+/** A schema holding the typed block `type`, its spec built with `renderBlock` when given. */
+function typedSchema(type: BlockTypeSchema, renderBlock?: Parameters<typeof typedBlockSpec>[1]) {
+  return new Schema({
+    nodes: {
+      doc: { content: 'block+' },
+      paragraph: { content: 'text*', group: 'block', toDOM: () => ['p', 0] },
+      text: {},
+      [type.name]: typedBlockSpec(type, renderBlock),
+    },
+  });
+}
+
+/** The attributes a rendered DOMOutputSpec array puts on its outermost element. */
+function outerAttrs(spec: unknown): Record<string, unknown> {
+  assert(Array.isArray(spec) && typeof spec[1] === 'object', `toDOM = ${JSON.stringify(spec)}`);
+  return (spec as [string, Record<string, unknown>])[1];
+}
+
+/** A stand-in for the pasted section element parseDOM reads. */
+function section(attrs: Record<string, string>) {
+  return { getAttribute: (name: string) => attrs[name] ?? null } as unknown as HTMLElement;
+}
+
+await test('a typed block carries its client-owned attributes through HTML, and never its server-owned ones', async () => {
+  const host = (node: { type: { name: string } }) => ['section', { 'data-proof-block-type': node.type.name, class: 'host' }, ['header', {}, 'chrome'], ['div', {}, 0]] as never;
+  for (const renderBlock of [undefined, host]) {
+    const schema = typedSchema(decision, renderBlock);
+    const node = schema.nodes.ask.create(
+      { urgency: 'high', multiple: true, state: 'answered', selected: ['A'], blockId: 'decision' },
+      schema.nodes.paragraph.create(null, schema.text('Which one?')),
+    );
+    const attrs = outerAttrs(schema.nodes.ask.spec.toDOM!(node));
+    const label = renderBlock ? 'host renderer' : 'default renderer';
+    assert(attrs['data-proof-block-attr-urgency'] === 'high', `${label}: urgency DOM attr = ${JSON.stringify(attrs)}`);
+    assert(attrs['data-proof-block-attr-multiple'] === 'true', `${label}: multiple DOM attr = ${JSON.stringify(attrs)}`);
+    assert(!('data-proof-block-attr-state' in attrs) && !('data-proof-block-attr-selected' in attrs), `${label}: server-owned attrs reached the DOM: ${JSON.stringify(attrs)}`);
+    assert(attrs['data-block-id'] === 'decision', `${label}: block id DOM attr = ${JSON.stringify(attrs)}`);
+  }
+
+  const rule = typedSchema(decision).nodes.ask.spec.parseDOM![0] as { getAttrs: (dom: HTMLElement) => Record<string, unknown> | false | null };
+  const parsed = rule.getAttrs(section({
+    'data-proof-block-attr-urgency': 'high',
+    'data-proof-block-attr-multiple': 'true',
+    'data-proof-block-attr-state': 'answered',
+    'data-proof-block-attr-selected': '["A"]',
+  }));
+  assert(parsed !== false && parsed !== null, 'the typed block rule did not match its own section');
+  assert(parsed!.urgency === 'high' && parsed!.multiple === true, `parsed client attrs = ${JSON.stringify(parsed)}`);
+  assert(!('state' in parsed!) && !('selected' in parsed!), `parsed server-owned attrs from HTML: ${JSON.stringify(parsed)}`);
+  const bare = rule.getAttrs(section({}));
+  assert(bare !== false && bare !== null && !('urgency' in bare), `a section with no attrs parsed as ${JSON.stringify(bare)}`);
+  assert(rule.getAttrs(section({ 'data-proof-block-attr-urgency': 'urgent' })) === false, 'a value the schema refuses was parsed as the typed block');
+});
+
+await test('a pasted rendered typed block reads its content hole, not its header', async () => {
+  const header = { textContent: 'ask urgency med multiple false' } as unknown as HTMLElement;
+  const content = { textContent: 'Which one?' } as unknown as HTMLElement;
+  const rendered = {
+    children: [header, content],
+    querySelector: (selector: string) => selector === '[data-proof-block-content]' ? content : null,
+  } as unknown as HTMLElement;
+  const legacy = {
+    querySelector: () => null,
+  } as unknown as HTMLElement;
+  const rule = typedSchema(decision).nodes.ask.spec.parseDOM![0] as {
+    contentElement?: (dom: HTMLElement) => HTMLElement;
+  };
+  assert(typeof rule.contentElement === 'function', 'the typed block parse rule has no contentElement');
+  assert(rule.contentElement!(rendered) === content, 'the pasted typed block read its header as content');
+  assert(rule.contentElement!(legacy) === legacy, 'a typed block without a content hole did not read its section');
 });

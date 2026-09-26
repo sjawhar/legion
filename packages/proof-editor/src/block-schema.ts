@@ -4,6 +4,7 @@ import { $nodeSchema } from '@milkdown/kit/utils';
 import type { DOMOutputSpec, Node as ProseMirrorNode, NodeSpec } from '@milkdown/kit/prose/model';
 
 import { withBlockIdSpec } from './editor/schema/block-ids.js';
+import { withDomAttributes } from './editor/schema/dom-attributes.js';
 
 export type BlockAttributeKind = 'string' | 'bool' | 'enum' | 'string[]' | 'actor' | 'timestamp';
 
@@ -121,6 +122,11 @@ function directiveAttrs(type: BlockTypeSchema, attrs: Record<string, string> | u
   return parsed;
 }
 
+/** An attribute value as markdown and HTML carry it, the inverse of `parseAttribute`. */
+function attributeText(attribute: BlockAttributeSchema, value: unknown): string {
+  return attribute.kind === 'bool' ? String(value) : attribute.kind === 'string[]' ? JSON.stringify(value) : String(value);
+}
+
 function markdownAttrs(type: BlockTypeSchema, node: ProseMirrorNode): Record<string, string> {
   const attributes: Record<string, string> = {};
   const blockId = node.attrs.blockId;
@@ -129,52 +135,98 @@ function markdownAttrs(type: BlockTypeSchema, node: ProseMirrorNode): Record<str
   for (const [name, definition] of Object.entries(type.attributes)) {
     const value = node.attrs[name];
     if (value === undefined) continue;
-    attributes[name] = definition.kind === 'bool' ? String(value) : definition.kind === 'string[]' ? JSON.stringify(value) : String(value);
+    attributes[name] = attributeText(definition, value);
   }
   return attributes;
 }
 
+/** The DOM attribute that carries a typed block's attribute `name` through HTML. */
+function domAttributeName(name: string): string {
+  return `data-proof-block-attr-${name}`;
+}
+
+/**
+ * A typed block's client-owned attributes as DOM attributes, so the block's HTML - a copy on the
+ * clipboard - carries them back. A server-owned attribute is the server's to set, and a copy of a
+ * block is a new block, so none is written.
+ */
+function domAttrs(type: BlockTypeSchema, node: ProseMirrorNode): Record<string, string> {
+  const attributes: Record<string, string> = {};
+  for (const [name, definition] of Object.entries(type.attributes)) {
+    const value = node.attrs[name];
+    if (definition.server || value === undefined || value === null) continue;
+    attributes[domAttributeName(name)] = attributeText(definition, value);
+  }
+  return attributes;
+}
+
+/**
+ * The client-owned attributes a typed block's section carries, parsed as its markdown would be;
+ * the others keep their defaults. A section whose attribute the schema refuses is not read as the
+ * typed block at all (the rule does not match), since this editor never writes one.
+ */
+function parsedDomAttrs(type: BlockTypeSchema, dom: HTMLElement): Record<string, unknown> | false {
+  const attributes: Record<string, unknown> = {};
+  for (const [name, definition] of Object.entries(type.attributes)) {
+    if (definition.server) continue;
+    const value = dom.getAttribute(domAttributeName(name));
+    if (value === null) continue;
+    try {
+      attributes[name] = parseAttribute(type.name, name, definition, value);
+    } catch {
+      return false;
+    }
+  }
+  return attributes;
+}
+
+/** The ProseMirror node spec of the typed block `type`, drawn by `renderBlock` when given. */
+export function typedBlockSpec(type: BlockTypeSchema, renderBlock?: HostBlockRenderer): NodeSpec {
+  return withBlockIdSpec({
+    attrs: schemaAttrs(type),
+    content: type.content,
+    group: 'block',
+    defining: true,
+    isolating: true,
+    parseDOM: [{
+      tag: `section[data-proof-block-type="${type.name}"]`,
+      getAttrs: (dom) => parsedDomAttrs(type, dom),
+      contentElement: (dom) => dom.querySelector('[data-proof-block-content]') ?? dom,
+    }],
+    toDOM: (node) => withDomAttributes(renderBlock?.(node, type) ?? [
+      'section',
+      {
+        class: `proof-typed-block proof-typed-block-${type.name}`,
+        'data-proof-block-type': type.name,
+      },
+      0,
+    ], domAttrs(type, node)),
+    parseMarkdown: {
+      match: (node) => (node as MarkdownNode).type === 'containerDirective' && (node as MarkdownNode).name === type.name,
+      runner: (state, node, nodeType) => {
+        const directive = node as MarkdownNode;
+        state.openNode(nodeType, directiveAttrs(type, directive.attributes));
+        state.next(directive.children);
+        state.closeNode();
+      },
+    },
+    toMarkdown: {
+      match: (node) => node.type.name === type.name,
+      runner: (state, node) => {
+        state.openNode('containerDirective', undefined, {
+          name: type.name,
+          attributes: markdownAttrs(type, node),
+        });
+        state.next(node.content);
+        state.closeNode();
+      },
+    },
+  });
+}
+
 export function blockSchemaPlugins(schema: BlockSchema, renderBlock?: HostBlockRenderer) {
   validateBlockSchema(schema);
-  return schema.types.map((type) => $nodeSchema(type.name, () => {
-    const spec: NodeSpec = withBlockIdSpec({
-      attrs: schemaAttrs(type),
-      content: type.content,
-      group: 'block',
-      defining: true,
-      isolating: true,
-      parseDOM: [{ tag: `section[data-proof-block-type="${type.name}"]` }],
-      toDOM: (node) => renderBlock?.(node, type) ?? [
-        'section',
-        {
-          class: `proof-typed-block proof-typed-block-${type.name}`,
-          'data-proof-block-type': type.name,
-        },
-        0,
-      ],
-      parseMarkdown: {
-        match: (node) => (node as MarkdownNode).type === 'containerDirective' && (node as MarkdownNode).name === type.name,
-        runner: (state, node, nodeType) => {
-          const directive = node as MarkdownNode;
-          state.openNode(nodeType, directiveAttrs(type, directive.attributes));
-          state.next(directive.children);
-          state.closeNode();
-        },
-      },
-      toMarkdown: {
-        match: (node) => node.type.name === type.name,
-        runner: (state, node) => {
-          state.openNode('containerDirective', undefined, {
-            name: type.name,
-            attributes: markdownAttrs(type, node),
-          });
-          state.next(node.content);
-          state.closeNode();
-        },
-      },
-    });
-    return spec;
-  }));
+  return schema.types.map((type) => $nodeSchema(type.name, () => typedBlockSpec(type, renderBlock)));
 }
 
 function visit(node: MarkdownNode, schema: BlockSchema): void {
