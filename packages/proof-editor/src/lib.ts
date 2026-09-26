@@ -62,7 +62,8 @@ import { remarkProofMarksPlugin } from 'proof-sdk-upstream/src/editor/schema/rem
 import { proofMarkHandler } from 'proof-sdk-upstream/src/formats/remark-proof-marks';
 
 import { authoredTrackerPlugin } from 'proof-sdk-upstream/src/editor/plugins/authored-tracker';
-import { heatmapPlugin, heatmapCtx, type HeatMapMode } from 'proof-sdk-upstream/src/editor/plugins/heatmap-decorations';
+import { heatmapPlugin, heatmapCtx } from 'proof-sdk-upstream/src/editor/plugins/heatmap-decorations';
+import type { HeatMapMode } from './upstream-types';
 import { agentCursorPlugin, agentCursorCtx } from 'proof-sdk-upstream/src/editor/plugins/agent-cursor';
 import { setCurrentActor } from 'proof-sdk-upstream/src/editor/actor';
 import { suggestionsPlugins } from 'proof-sdk-upstream/src/editor/plugins/suggestions';

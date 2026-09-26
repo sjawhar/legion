@@ -35,25 +35,36 @@ test("the pinned dependency arrives with the Dark Reader patch applied", () => {
   expect(cursors).toContain("proof-collab-selection-styles");
 });
 
-test("src/upstream-types.ts still describes the pinned formats/marks.ts", () => {
-  const pinned = readFileSync(join(upstreamSrc, "formats/marks.ts"), "utf8");
+test("src/upstream-types.ts still describes the files it was copied from", () => {
   const copied = readFileSync(join(import.meta.dir, "..", "src", "upstream-types.ts"), "utf8");
-  const region = copied.split("/* --- copied from")[1]?.split("/* --- end copy --- */")[0];
-  if (region === undefined) {
-    throw new Error("src/upstream-types.ts lost its copied-region markers");
+  const regions = [
+    ...copied.matchAll(
+      /\/\* --- copied from proof-sdk src\/(\S+) @ 24a5fc94 --- \*\/([\s\S]*?)\/\* --- end copy --- \*\//g
+    ),
+  ];
+  const named: Record<string, string[]> = {};
+  for (const [, path, body] of regions) {
+    const declarations = (body ?? "")
+      .split(/\n(?=export (?:type|interface) )/)
+      .slice(1)
+      .map((block) => block.trimEnd());
+    named[path ?? ""] = declarations.map((block) => block.split("\n")[0] ?? "");
+    const pinned = readFileSync(join(upstreamSrc, path ?? ""), "utf8");
+    for (const declaration of declarations) {
+      expect(pinned).toContain(declaration);
+    }
   }
-  const declarations = region
-    .split(/\n(?=export (?:type|interface) )/)
-    .slice(1)
-    .map((block) => block.trimEnd());
-  expect(declarations.map((block) => block.split("\n")[0])).toEqual([
-    "export type MarkKind =",
-    "export type SuggestionStatus = 'pending' | 'accepted' | 'rejected';",
-    "export interface MarkRange {",
-    "export interface CommentReply {",
-    "export interface StoredMark {",
-  ]);
-  for (const declaration of declarations) {
-    expect(pinned).toContain(declaration);
-  }
+  // Losing a region's markers would silently stop checking it, so the set is pinned by name.
+  expect(named).toEqual({
+    "editor/plugins/heatmap-decorations.ts": [
+      "export type HeatMapMode = 'hidden' | 'subtle' | 'background' | 'full';",
+    ],
+    "formats/marks.ts": [
+      "export type MarkKind =",
+      "export type SuggestionStatus = 'pending' | 'accepted' | 'rejected';",
+      "export interface MarkRange {",
+      "export interface CommentReply {",
+      "export interface StoredMark {",
+    ],
+  });
 });

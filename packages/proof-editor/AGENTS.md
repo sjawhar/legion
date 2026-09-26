@@ -24,21 +24,31 @@ byte for byte:
 | `src/editor/schema/block-ids.ts` | Block ids: minting, the DOM attribute, the duplicate-id repair rule |
 | `src/lib.css` | The editor stylesheet |
 | `src/tests/*.test.ts` | The suites that came with those files |
-| `src/upstream-types.ts` | The upstream types the public surface names, copied from the pin's `src/formats/marks.ts` so a consumer sees a real shape rather than `any` |
 
-Three kinds of edit are allowed in that copy, and no others: the import specifiers of upstream
-modules; `bun test` registration in the suites (`src/tests/harness.ts` replaces each file's own
-`test()` tally and its `process.exit` tail); and `src/tests/headless-no-dom.test.ts`, whose entry
-named the fork's built `dist/headless.js` and now names `../lib-headless.js` — its banner, the
-comment beside that import and the case's own name follow, since this package has no build and
-there is no distribution left to name. Every
-copied file also carries a `// @ts-nocheck` banner (below). To check
-one, diff it against `jj --ignore-working-copy -R <proof-sdk> file show -r 24a5fc94
-root:src/<file>`; the only lines that differ should be those.
+`src/upstream-types.ts` sits beside them but is not one of them: it holds the upstream types
+this package's public surface names, gathered from more than one pinned file, so it has no
+counterpart path in the fork and the file-by-file audit below does not reach it.
+
+Four kinds of edit are allowed in the copied files, and no others: the import specifiers of
+upstream modules, including `src/lib.ts`'s `StoredMark` re-export and the `HeatMapMode` type
+pulled out of its heatmap import, which now name `./upstream-types` (`export type` and `import
+type` both erase, so neither reaches runtime); `bun test` registration in the suites
+(`src/tests/harness.ts` replaces each file's own `test()` tally and its `process.exit` tail);
+`src/tests/headless-no-dom.test.ts`, whose entry named the fork's built `dist/headless.js` and
+now names `../lib-headless.js` — its banner, the comment beside that import and the case's own
+name follow, since this package has no build and there is no distribution left to name; and a
+`// @ts-nocheck` banner on every one of them (below).
+
+To audit a copied file, diff it against `jj --ignore-working-copy -R <proof-sdk> file show -r
+24a5fc94 root:src/<file>`; every file in the table above has that counterpart, and the only
+lines that differ should be the four kinds. `src/upstream-types.ts` is checked the other way,
+by `tests/upstream-pin.test.ts`, which reads each of its copied regions out of the pinned file
+that region names.
 
 `tests/` is legion's own, and is linted and type-checked like any other package's.
 `tests/upstream-pin.test.ts` is the guard on everything above: it reads the installed dependency
-and fails when the patch is not applied or when `src/upstream-types.ts` stops matching the pin.
+and fails when the patch is not applied, or when a region of `src/upstream-types.ts` stops
+matching the pinned file it was copied from.
 
 ## The upstream boundary
 
@@ -59,12 +69,12 @@ consumer that resolved them would inherit ~55 errors it cannot fix. `tsconfig.ch
 `bun run typecheck` reads — drops the `paths` so the specifiers stay unresolved, and every file
 copied from the fork carries `// @ts-nocheck` so no consumer reports them either.
 
-An upstream type reached through that boundary is therefore `any`, which is why the one type the
-public surface names — `StoredMark`, re-exported by `src/lib.ts` — is declared in
-`src/upstream-types.ts` instead, copied from the pin and type-checked, with
-`tests/upstream-pin.test.ts` failing when the two stop agreeing. `HeatMapMode`, which
-`CreateProofEditorOptions.heatMapMode` names, is still `any`: `src/lib.ts` imports it alongside
-two values in one statement, and rewriting that statement is more than an import-specifier edit.
+An upstream type reached through that boundary is therefore `any`, so no type on the public
+surface reaches a consumer that way. `StoredMark`, which `src/lib.ts` re-exports, and
+`HeatMapMode`, which `CreateProofEditorOptions.heatMapMode` names, are both declared in
+`src/upstream-types.ts` instead — copied from the pin, type-checked, and held to it by
+`tests/upstream-pin.test.ts`. A type added to that surface belongs there too; reaching for
+`proof-sdk-upstream/src/…` in an exported signature silently makes it `any`.
 
 `patches/proof-sdk-upstream@24a5fc94.patch` keeps peer-cursor colours and mark decorations out of
 inline `style` attributes: Dark Reader rewrites inline colours inside the contenteditable and
