@@ -19,13 +19,29 @@ import (
 var anchorAttribute = regexp.MustCompile(`([a-zA-Z0-9_-]+)="([^"]*)"`)
 
 // markdownReader is the one goldmark configuration Dispatch reads markdown with. Its only way in
-// is parse. Front matter is
-// read apart from it (parseFrontmatterBlock), so an unclosed opener is ordinary markdown.
+// is parse. Front matter is read apart from it (parseFrontmatterBlock), so an unclosed opener is
+// ordinary markdown. Its list parser opens no empty item that would interrupt a paragraph
+// (emptyItemGuard).
 type markdownReader struct {
 	md goldmark.Markdown
 }
 
 var blockReader = markdownReader{md: goldmark.New(
+	goldmark.WithParser(parser.NewParser(
+		parser.WithBlockParsers(
+			util.Prioritized(parser.NewSetextHeadingParser(), 100),
+			util.Prioritized(parser.NewThematicBreakParser(), 200),
+			util.Prioritized(emptyItemGuard{parser.NewListParser()}, 300),
+			util.Prioritized(parser.NewListItemParser(), 400),
+			util.Prioritized(parser.NewCodeBlockParser(), 500),
+			util.Prioritized(parser.NewATXHeadingParser(), 600),
+			util.Prioritized(parser.NewFencedCodeBlockParser(), 700),
+			util.Prioritized(parser.NewBlockquoteParser(), 800),
+			util.Prioritized(parser.NewHTMLBlockParser(), 900),
+		),
+		parser.WithInlineParsers(parser.DefaultInlineParsers()...),
+		parser.WithParagraphTransformers(parser.DefaultParagraphTransformers()...),
+	)),
 	goldmark.WithExtensions(extension.Linkify, lazyAwareTable{}, extension.Strikethrough, taskList{}, footnotes{}),
 	goldmark.WithParserOptions(
 		parser.WithBlockParsers(
@@ -52,7 +68,7 @@ func Parse(markdown string) (*Node, error) {
 // whole, or nil for a fragment or a new document: a repeat live already carries is not refused
 // (RepeatedBlockID), and the repair keeps it for its first block, as settlement would.
 func ParseForWrite(markdown string, live *Node) (*Node, error) {
-	doc, err := parseUnstamped(markdown)
+	doc, err := parseUnstamped(LineFeeds(markdown))
 	if err != nil {
 		return nil, err
 	}
@@ -61,6 +77,17 @@ func ParseForWrite(markdown string, live *Node) (*Node, error) {
 	}
 	EnsureBlockIDs(doc)
 	return doc, nil
+}
+
+// LineFeeds is text with each CR LF and each lone carriage return written as a line feed. Both
+// end a line in CommonMark and in the browser editor, so text a caller writes into a document is
+// converted where it enters (ParseForWrite, ParseInline, and the server's other writes of caller
+// text), and the parser and the renderer see line feeds alone.
+func LineFeeds(text string) string {
+	if !strings.Contains(text, "\r") {
+		return text
+	}
+	return strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n")
 }
 
 // parseUnstamped is Parse before EnsureBlockIDs: blocks keep the ids their markdown names, and a
@@ -151,7 +178,7 @@ func referencedLabels(nodes []*Node) []string {
 // nodes. Markdown that forms more than one paragraph, or holds text after its
 // paragraph's last line, is ErrSchema.
 func ParseInline(markdown string) ([]*Node, error) {
-	source := []byte(markdown)
+	source := []byte(LineFeeds(markdown))
 	root := withLineStarts(inlineMarkdownParser, source, parser.NewContext())
 	if root.ChildCount() > 1 {
 		return nil, fmt.Errorf("%w: inline markdown forms %d paragraphs", ErrSchema, root.ChildCount())
@@ -417,7 +444,7 @@ func parseBlock(node ast.Node, source []byte, footnotes map[int]string) (*Node, 
 		if err != nil {
 			return nil, err
 		}
-		return &Node{Type: "blockquote", Children: children}, nil
+		return &Node{Type: "blockquote", Children: emptyParagraphFirst(children, false)}, nil
 	case *ast.List:
 		return parseList(current, source, footnotes)
 	case *ast.ListItem:
@@ -449,10 +476,7 @@ func parseBlock(node ast.Node, source []byte, footnotes map[int]string) (*Node, 
 		if err != nil {
 			return nil, err
 		}
-		if len(children) == 0 {
-			children = []*Node{{Type: "paragraph"}}
-		}
-		return &Node{Type: "footnote_definition", Attrs: Attrs{"label": string(current.Ref)}, Children: children}, nil
+		return &Node{Type: "footnote_definition", Attrs: Attrs{"label": string(current.Ref)}, Children: emptyParagraphFirst(children, false)}, nil
 	case *typedDirective:
 		return parseTypedDirective(current, source, footnotes)
 	case *unsupportedDirective:
@@ -519,7 +543,7 @@ func parseTypedDirective(directive *typedDirective, source []byte, footnotes map
 	if err != nil {
 		return nil, err
 	}
-	return &Node{Type: directive.Name, Attrs: attrs, Children: children}, nil
+	return &Node{Type: directive.Name, Attrs: attrs, Children: emptyParagraphFirst(children, false)}, nil
 }
 
 func parseList(list *ast.List, source []byte, footnotes map[int]string) (*Node, error) {
@@ -559,7 +583,17 @@ func parseListItem(item *ast.ListItem, source []byte, footnotes map[int]string) 
 	if err != nil {
 		return nil, err
 	}
-	return &Node{Type: "list_item", Attrs: attrs, Children: children}, nil
+	return &Node{Type: "list_item", Attrs: attrs, Children: emptyParagraphFirst(children, true)}, nil
+}
+
+// emptyParagraphFirst is a container's blocks as the browser editor's parser reads them: a
+// container that holds nothing holds one empty paragraph, as does a list item that opens with
+// another block (firstParagraph), ahead of it (`- # h`). The Proof schema needs both.
+func emptyParagraphFirst(children []*Node, firstParagraph bool) []*Node {
+	if len(children) == 0 || firstParagraph && children[0].Type != "paragraph" {
+		return append([]*Node{{Type: "paragraph"}}, children...)
+	}
+	return children
 }
 
 func codeBlockText(lines *gmtext.Segments, source []byte) []*Node {
@@ -589,6 +623,10 @@ func parseTable(table *extensionast.Table, source []byte, footnotes map[int]stri
 		default:
 			return nil, fmt.Errorf("%w: unsupported table child %s", ErrSchema, child.Kind())
 		}
+	}
+	// A table with no body row holds one empty row, as the browser editor's parser reads it.
+	if len(children) == 1 {
+		children = append(children, &Node{Type: "table_row"})
 	}
 	return &Node{Type: "table", Children: children}, nil
 }

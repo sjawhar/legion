@@ -1,6 +1,8 @@
 package pmdoc
 
 import (
+	"bytes"
+
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/extension"
@@ -11,7 +13,7 @@ import (
 )
 
 // lazyAwareTable is goldmark's table extension with its paragraph transformer held off lazy
-// continuation lines (lazyTableRows).
+// continuation lines and off a header line holding one pipe alone (lazyTableRows).
 type lazyAwareTable struct{}
 
 func (lazyAwareTable) Extend(m goldmark.Markdown) {
@@ -21,17 +23,21 @@ func (lazyAwareTable) Extend(m goldmark.Markdown) {
 	)
 }
 
-// lazyTableRows keeps a table's header and delimiter rows off lazy continuation lines. In GFM, and
-// in the browser editor's parser, a line that continues a paragraph in a list item, a quote or a
+// lazyTableRows keeps a table's header and delimiter rows off lazy continuation lines, and opens
+// no table whose header line holds one pipe and nothing else but spaces and tabs. In GFM, and in
+// the browser editor's parser, a line that continues a paragraph in a list item, a quote or a
 // footnote definition without that container's prefix only continues the paragraph; goldmark's
 // transformer reads a paragraph's lines as rows wherever they came from, so `- a\n|-|` became a
 // table in the list item. A lazy line is one the reader began at its line start although the
-// paragraph's first line began after a container's prefix.
+// paragraph's first line began after a container's prefix. The browser editor's parser reads a
+// header line of a lone `|` as text, so `|\n-|` is the paragraph `| -|`, where goldmark read a
+// table of one empty cell.
 type lazyTableRows struct{ table parser.ParagraphTransformer }
 
 func (t lazyTableRows) Transform(node *ast.Paragraph, reader gmtext.Reader, pc parser.Context) {
-	lazy := lazyLines(node.Lines(), reader.Source())
-	if lazy == nil {
+	source := reader.Source()
+	lazy := lazyLines(node.Lines(), source)
+	if lazy == nil && !holdsLonePipeLine(node.Lines(), source) {
 		t.table.Transform(node, reader, pc)
 		return
 	}
@@ -52,12 +58,33 @@ func (t lazyTableRows) Transform(node *ast.Paragraph, reader gmtext.Reader, pc p
 			continue
 		}
 		for index := 0; index+1 < node.Lines().Len(); index++ {
-			if node.Lines().At(index).Start == table.FirstChild().Pos() && (lazy[index] || lazy[index+1]) {
+			line := node.Lines().At(index)
+			if line.Start != table.FirstChild().Pos() {
+				continue
+			}
+			if lazy != nil && (lazy[index] || lazy[index+1]) || lonePipe(source[line.Start:line.Stop]) {
 				return
 			}
 		}
 	}
 	t.table.Transform(node, reader, pc)
+}
+
+// holdsLonePipeLine reports whether one of a paragraph's lines holds one pipe and nothing else but
+// spaces and tabs (lonePipe).
+func holdsLonePipeLine(lines *gmtext.Segments, source []byte) bool {
+	for index := 0; index < lines.Len(); index++ {
+		if line := lines.At(index); lonePipe(source[line.Start:line.Stop]) {
+			return true
+		}
+	}
+	return false
+}
+
+// lonePipe reports whether line holds one pipe and nothing else but spaces, tabs and its line
+// ending.
+func lonePipe(line []byte) bool {
+	return string(bytes.Trim(line, " \t\n")) == "|"
 }
 
 // lazyLines reports which of a paragraph's lines are lazy continuation lines, or nil when none is.

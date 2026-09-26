@@ -158,8 +158,8 @@ paragraph it is written the same way, since an empty paragraph is not written. E
 inline: `with` parses through `pmdoc.ParseInline` (paragraph-only block grammar), so a multi-paragraph
 `with` is `INVALID_OP`, so is any non-empty `with` that renders to no inline content (a line
 indented four spaces or a tab, which markdown reads as a code block, or whitespace alone — an
-empty `with` deletes the match on purpose, except where the block holding it cannot be written
-without that paragraph, which is refused naming the `delete` that removes it instead; refusing the rest is LEGION-280, since
+empty `with` deletes the match on purpose, and a container left holding only the emptied paragraph
+reads back holding it; refusing the rest is LEGION-280, since
 splicing nothing over the match silently deleted the caller's text), and a leading marker of a
 *different* kind from the matched block's own is
 literal escaped text. A `with` opening with a marker of the *same* kind as that block's own would
@@ -486,12 +486,17 @@ no whitespace between `name` and `{`; Pandoc fenced divs, leaf directives, and t
 invalid outside code blocks. An unclosed typed block at document level is rejected, while one nested
 inside another block runs to that parent’s end.
 
-A carriage return that no line feed follows is text here, as goldmark reads it and as the writer
-writes it, though CommonMark and the browser editor's parser end a line at one. A code span keeps the whitespace that
+Text a caller writes reaches the parser with line feeds alone: `pmdoc.LineFeeds` writes each CR LF
+and each lone carriage return as a line feed, as CommonMark and the browser editor's parser read
+both, in `ParseForWrite` (a spec, an upload, an insert), in `ParseInline` (a replace or an accepted
+suggestion in text), in a replace's `with` in code (`codeReplacement`), in a suggestion's
+`replace_with` when it is created, and in a block ask's edited question and options. No stored
+document holds a carriage return. A code span keeps the whitespace that
 starts each of its later lines past the prefix of the containers around it, as the browser editor's
 parser reads it, a line holding only whitespace before the closer included; goldmark's paragraph
-trims it (`lineRecordingParagraph`, `multilineCodeSpanText`). A space, a line feed, or a carriage
-return and line feed together is the padding such a span sheds at each end. A lazy continuation line - one that
+trims it (`lineRecordingParagraph`, `multilineCodeSpanText`). A space or a line feed is the padding
+such a span sheds at each end (`codeSpanPadded`), and the writer pads a span whose text starts and
+ends with one. A lazy continuation line - one that
 continues a paragraph in a list item, a quote or a footnote definition without the container's
 prefix - is never a table's header or delimiter row (`lazyTableRows`), as in GFM.
 A task list item's marker (`[ ]`, `[x]` or `[X]` opening a list item's first paragraph) is read as
@@ -509,6 +514,18 @@ document's level in the rest. So the renderer writes a rule that opens a documen
 `---` would be misread - a later `---` line would close front matter, or the document holds a
 list, quote or footnote definition at its level (`holdsAContainerTheBrowserDrops`) - and `---`
 everywhere else.
+
+A container that holds nothing is read as the browser editor's parser reads it, holding one empty
+paragraph (`emptyParagraphFirst`): an empty list item (`-`), quote (`>`), typed block or footnote
+definition, and a list item that opens with another block (`- # h`) holds an empty paragraph ahead
+of it. A table with no body row holds one empty row, which the renderer writes as nothing. The
+renderer writes a list item's empty first paragraph as nothing, with the next block on the
+marker's line, a rule there as `***` (`- ---` is a thematic break at the list's level). A task
+item cannot be written so, since its marker's line would carry the next block as the task's text
+and the browser reads no other form of it as a task: a task item whose emptied first paragraph has
+another block after it does not render, and an edit that would leave one is refused.
+An empty list item that would interrupt a paragraph is not opened, as that parser reads it on the
+whole line (`emptyItemGuard`): after `- a`, the line `  - -` is an item holding the text `-`.
 
 A typed block renders its `blockId`, defaulted attributes, and every explicitly set optional
 attribute. Parsing mints an omitted id, while live document reads and writes validate each node

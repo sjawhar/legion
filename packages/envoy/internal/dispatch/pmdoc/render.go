@@ -269,12 +269,27 @@ func (r *renderer) list(n *Node, prefix string) {
 			}
 		}
 		indent := prefix + strings.Repeat(" ", len(marker))
-		for childIndex, child := range item.Children {
+		// An empty first paragraph is written as nothing, with the next block on the marker's line:
+		// a blank line after an empty marker line would end the item, and both parsers read an item
+		// that opens with another block as holding an empty paragraph first (`- # h`). A rule there
+		// is written `***`, since `- ---` is a thematic break at the list's level. A task item cannot
+		// be written so: its marker's line would carry the next block as the task's text, and the
+		// browser editor reads no other form of it as a task.
+		children := item.Children
+		skipped := len(children) > 1 && children[0].Type == "paragraph" && len(children[0].Children) == 0
+		if skipped {
+			if _, task := item.Attrs["checked"].(bool); task {
+				r.err = fmt.Errorf("%w: a task item whose first paragraph is empty cannot hold another block after it; the browser editor reads no such item as a task", ErrSchema)
+				return
+			}
+			children = children[1:]
+		}
+		for childIndex, child := range children {
 			// A tight item writes its blocks on consecutive lines, where a paragraph would run on
 			// into a paragraph after it and underline itself with a rule's `---`. The browser
 			// editor's writer puts a blank line between two paragraphs (the item then reads back
 			// spread) and writes a rule `***`, and so does this renderer.
-			afterParagraph := childIndex > 0 && item.Children[childIndex-1].Type == "paragraph"
+			afterParagraph := childIndex > 0 && children[childIndex-1].Type == "paragraph"
 			if childIndex > 0 {
 				if item.Attrs["spread"] == true || afterParagraph && child.Type == "paragraph" {
 					r.writeSyntax("\n" + strings.TrimRight(prefix, " ") + "\n" + indent)
@@ -282,7 +297,7 @@ func (r *renderer) list(n *Node, prefix string) {
 					r.writeSyntax("\n" + indent)
 				}
 			}
-			r.asteriskRule = child.Type == "hr" && afterParagraph && item.Attrs["spread"] != true
+			r.asteriskRule = child.Type == "hr" && (afterParagraph && item.Attrs["spread"] != true || skipped && childIndex == 0)
 			r.block(child, indent)
 		}
 	}
@@ -304,6 +319,11 @@ func (r *renderer) table(table *Node, prefix string) {
 	}
 	r.writeSyntax(" |")
 	for _, row := range table.Children[1:] {
+		// A row with no cells is written as nothing: a table with only such rows reads back
+		// holding one, as the browser editor's parser reads a table with no body row.
+		if len(row.Children) == 0 {
+			continue
+		}
 		r.writeSyntax("\n" + prefix)
 		r.tableRow(row, false, prefix)
 	}
