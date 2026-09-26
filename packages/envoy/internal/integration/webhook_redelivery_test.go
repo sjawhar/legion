@@ -197,3 +197,83 @@ func streamDedupeKeys(t *testing.T, env *testEnv, subject string) []string {
 	}
 	return keys
 }
+
+// The case the MsgId exists for, end to end: a fan-out whose second publish fails. The first topic
+// is already on the stream, the rest are never attempted, and the handler answers 503, which is
+// what GitHub records as a failed delivery. Its redelivery must add nothing to the topic that
+// landed and must publish the ones that did not, so the event ends up on each of its topics
+// exactly once. Without the MsgId the first topic holds two copies of one delivery.
+func TestWebhookRedelivery_AFanOutThatFailedPartWayIsCompletedByTheRedelivery(t *testing.T) {
+	env := setupTestEnv(t)
+	body := `{
+		"action": "created",
+		"repository": {"name": "widgets", "owner": {"login": "acme"}, "full_name": "acme/widgets"},
+		"issue": {"number": 9, "title": "Widget", "pull_request": {"url": "https://api.github.com/repos/acme/widgets/pulls/9"}},
+		"comment": {"body": "@legion please look", "user": {"login": "author"}},
+		"sender": {"login": "author", "type": "User"}
+	}`
+	topics := []string{
+		"notifications.github.acme.widgets.pr.9.mention",
+		"notifications.github.acme.widgets.mention",
+		"notifications.github.acme.widgets.pr.9.comment",
+	}
+
+	// The first attempt publishes the first topic and fails on the second.
+	failing := &failAfter{inner: env.client, after: 1}
+	partial := webhook.GitHubHandler(redeliverySecret, "@legion", "", failing, unusedCIRecorder(t))
+	postGitHubExpecting(t, partial, "issue_comment", "delivery-partial", body, http.StatusServiceUnavailable)
+	if failing.published != 1 {
+		t.Fatalf("the first attempt published %d envelopes, want the one before the failure", failing.published)
+	}
+	if got, want := streamDedupeKeys(t, env, topics[0]), []string{"github.delivery-partial"}; !slices.Equal(got, want) {
+		t.Fatalf("stream holds %v on %s after the partial attempt, want %v", got, topics[0], want)
+	}
+	for _, topic := range topics[1:] {
+		if got := streamDedupeKeys(t, env, topic); len(got) != 0 {
+			t.Fatalf("stream holds %v on %s after the partial attempt, want nothing", got, topic)
+		}
+	}
+
+	// GitHub redelivers the failed delivery, now against a listener whose publishes all succeed.
+	whole := webhook.GitHubHandler(redeliverySecret, "@legion", "", env.client, unusedCIRecorder(t))
+	postGitHub(t, whole, "issue_comment", "delivery-partial", body)
+
+	for _, topic := range topics {
+		if got, want := streamDedupeKeys(t, env, topic), []string{"github.delivery-partial"}; !slices.Equal(got, want) {
+			t.Errorf("stream holds %v on %s after the redelivery, want %v", got, topic, want)
+		}
+	}
+}
+
+// failAfter publishes the first after envelopes through inner and fails every one beyond that, as
+// a listener does when NATS goes away part way through a fan-out.
+type failAfter struct {
+	inner     webhook.Publisher
+	after     int
+	published int
+}
+
+func (p *failAfter) Publish(item contracts.Envelope) error {
+	if p.published >= p.after {
+		return fmt.Errorf("publish refused after %d envelopes", p.after)
+	}
+	if err := p.inner.Publish(item); err != nil {
+		return err
+	}
+	p.published++
+	return nil
+}
+
+// postGitHubExpecting posts a signed GitHub delivery and requires the handler's own status.
+func postGitHubExpecting(t *testing.T, handler http.Handler, event, delivery, body string, want int) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/webhook/github", strings.NewReader(body))
+	req.Header.Set("X-GitHub-Delivery", delivery)
+	req.Header.Set("X-GitHub-Event", event)
+	req.Header.Set("X-Hub-Signature-256", "sha256="+hmacHex(redeliverySecret, body))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != want {
+		t.Fatalf("%s answered %d %q, want %d", req.URL.Path, rec.Code, rec.Body.String(), want)
+	}
+}
