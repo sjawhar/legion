@@ -19,10 +19,10 @@ const bodyFirstRead = 512
 // room, and one that trickles its body holds at most twice what it has sent, never what it
 // declared. A request whose next piece does not fit waits for room, except one request at a time,
 // which may take the total past the limit. That right goes to a request whose piece does not fit
-// while no other holds it or while the total is within the limit, so another request can take it
-// whenever the total is back within the limit, and a request waits on the holder only while the
-// total is past it. The holder can take the total past the limit by at most its own body (twice
-// its buffer for the moment the buffer grows).
+// while the total is within the limit, which is every moment no request holds it, so another
+// request can take it as soon as the total is back within the limit, and a request waits on the
+// holder only while the total is past it. The holder can take the total past the limit by at most
+// its own body (twice its buffer for the moment the buffer grows).
 //
 // The holder need not be reading. A connection that has sent nothing never asks for room, but a
 // request asks as soon as its buffer is full, before its next byte arrives, and any sender can
@@ -62,14 +62,16 @@ func (b *bodyBudget) begin() *bodyRead {
 }
 
 // charge waits until n more bytes fit the budget or this read may go past the limit, then holds
-// them. A read whose n does not fit takes the right to go past the limit when no other read holds
-// it or the total is within the limit.
+// them. A read whose n does not fit takes the right to go past the limit when the total is within
+// the limit, or when it already holds the right. A free right needs no case of its own: only the
+// holder's own charge takes the total past the limit, and release gives that charge back before it
+// gives the right back, so the total is within the limit whenever no read holds it.
 func (r *bodyRead) charge(ctx context.Context, n int64) error {
 	b := r.budget
 	for {
 		b.mu.Lock()
 		fits := b.held+n <= b.limit
-		if !fits && (b.over == nil || b.over == r || b.held <= b.limit) {
+		if !fits && (b.over == r || b.held <= b.limit) {
 			b.over = r
 			fits = true
 		}
