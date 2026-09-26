@@ -120,7 +120,13 @@ func TestRenderTableCellParagraph(t *testing.T) {
 	}
 }
 
+// typedFenceRun is a typed block's fence, whose length is syntax: the engine writes three colons
+// around a callout whose code holds a `:::` line, which its own parser then reads as the callout's
+// end, where the renderer writes the longer fence both parsers read.
+var typedFenceRun = regexp.MustCompile(`(?m)^(\s*):{3,}`)
+
 func plain(markdown string) string {
+	markdown = typedFenceRun.ReplaceAllString(markdown, "$1:::")
 	markdown = html.UnescapeString(markdown)
 	markdown = orderedMarker.ReplaceAllString(markdown, "")
 	markdown = spanTag.ReplaceAllString(markdown, "")
@@ -761,5 +767,119 @@ func TestRenderIsTheSameWhereverAnAnchorMarkSplitsText(t *testing.T) {
 				t.Fatalf("Render() = %q, want %q", markdown, test.want)
 			}
 		})
+	}
+}
+
+// A tight list item writes its blocks on consecutive lines, but a paragraph followed by another
+// paragraph, or by a rule written `---`, would read back as one paragraph or a setext heading. The
+// browser editor's writer puts a blank line between two paragraphs, which the item then reads back
+// as spread, and writes a rule `***`; so does this renderer, and every block reads back.
+func TestRenderKeepsTheBlocksOfATightListItem(t *testing.T) {
+	paragraph := func(value string) *Node {
+		return &Node{Type: "paragraph", Children: []*Node{{Type: "text", Text: value}}}
+	}
+	item := func(children ...*Node) *Node {
+		return &Node{Type: "doc", Children: []*Node{{Type: "bullet_list", Attrs: Attrs{"spread": false}, Children: []*Node{
+			{Type: "list_item", Attrs: Attrs{"spread": false}, Children: children},
+			{Type: "list_item", Attrs: Attrs{"spread": false}, Children: []*Node{paragraph("next")}},
+		}}}}
+	}
+	for name, test := range map[string]struct {
+		doc  *Node
+		want []string
+	}{
+		"two paragraphs":      {item(paragraph("a"), paragraph("b")), []string{"paragraph", "paragraph"}},
+		"three paragraphs":    {item(paragraph("a"), paragraph("b"), paragraph("c")), []string{"paragraph", "paragraph", "paragraph"}},
+		"a paragraph, a rule": {item(paragraph("a"), &Node{Type: "hr"}), []string{"paragraph", "hr"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			markdown := mustRender(t, test.doc)
+			back, err := Parse(markdown)
+			if err != nil {
+				t.Fatalf("Parse(%q) = %v", markdown, err)
+			}
+			list := back.Children[0]
+			if len(back.Children) != 1 || list.Type != "bullet_list" || len(list.Children) != 2 {
+				t.Fatalf("Render() = %q, which reads back as %q", markdown, mustRender(t, back))
+			}
+			var got []string
+			for _, child := range list.Children[0].Children {
+				got = append(got, child.Type)
+			}
+			if strings.Join(got, ",") != strings.Join(test.want, ",") {
+				t.Fatalf("Render() = %q, whose first item reads back holding %v, want %v", markdown, got, test.want)
+			}
+		})
+	}
+}
+
+// A footnote reference reads as one only when its label is defined, so text shaped like one - `[^1]`
+// where the document defines `1` - is written with its bracket escaped, and a run beside a
+// reference is read back with its definition, so delimiters that pair around the reference are
+// escaped as they are anywhere else.
+func TestRenderKeepsTextAroundFootnoteReferences(t *testing.T) {
+	definition := func(label string) *Node {
+		return &Node{Type: "footnote_definition", Attrs: Attrs{"label": label}, Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: "x"}}}}}
+	}
+	text := func(value string) *Node { return &Node{Type: "text", Text: value} }
+	reference := func(label string) *Node { return &Node{Type: "footnote_reference", Attrs: Attrs{"label": label}} }
+	paragraph := func(children ...*Node) *Node { return &Node{Type: "paragraph", Children: children} }
+	for name, doc := range map[string]*Node{
+		"reference-shaped text":             {Type: "doc", Children: []*Node{paragraph(text("see [^1] here"), reference("1")), definition("1")}},
+		"reference-shaped text, other case": {Type: "doc", Children: []*Node{paragraph(text("[^Note]"), reference("note")), definition("note")}},
+		"reference-shaped text in its definition": {Type: "doc", Children: []*Node{paragraph(text("a"), reference("1")),
+			{Type: "footnote_definition", Attrs: Attrs{"label": "1"}, Children: []*Node{paragraph(text("[^1]"))}}}},
+		"asterisks before a reference":   {Type: "doc", Children: []*Node{paragraph(text("*-*"), reference("1")), definition("1")}},
+		"underscores around a reference": {Type: "doc", Children: []*Node{paragraph(text("_a"), reference("1"), text("b_")), definition("1")}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			markdown := mustRender(t, doc)
+			back, err := Parse(markdown)
+			if err != nil {
+				t.Fatalf("Parse(%q) = %v", markdown, err)
+			}
+			if !back.Equal(doc) {
+				t.Fatalf("Render() = %q, which reads back as %q", markdown, mustRender(t, back))
+			}
+		})
+	}
+	undefined := &Node{Type: "doc", Children: []*Node{paragraph(text("[^2] stays"), reference("1")), definition("1")}}
+	if got := mustRender(t, undefined); !strings.HasPrefix(got, "[^2] stays") {
+		t.Fatalf("Render() = %q, want text naming an undefined label written as main writes it", got)
+	}
+}
+
+// Both parsers keep the whitespace of a blank line in code inside a footnote definition, whose
+// indentation a blank line does not take, so a blank code line there is written without the
+// definition's indentation; elsewhere it keeps the prefix it has always been written with.
+func TestRenderKeepsBlankCodeLinesInFootnoteDefinitions(t *testing.T) {
+	paragraph := func(value string) *Node {
+		return &Node{Type: "paragraph", Children: []*Node{{Type: "text", Text: value}}}
+	}
+	code := func(value string) *Node {
+		return &Node{Type: "code_block", Attrs: Attrs{"language": nil}, Children: []*Node{{Type: "text", Text: value}}}
+	}
+	for name, block := range map[string]*Node{
+		"code":           code("a\n\nb"),
+		"a quote's code": {Type: "blockquote", Children: []*Node{code("a\n\nb")}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			doc := &Node{Type: "doc", Children: []*Node{
+				{Type: "paragraph", Children: []*Node{{Type: "text", Text: "Ref"}, {Type: "footnote_reference", Attrs: Attrs{"label": "1"}}}},
+				{Type: "footnote_definition", Attrs: Attrs{"label": "1"}, Children: []*Node{paragraph("x"), block}},
+			}}
+			markdown := mustRender(t, doc)
+			back, err := Parse(markdown)
+			if err != nil {
+				t.Fatalf("Parse(%q) = %v", markdown, err)
+			}
+			if !back.Equal(doc) {
+				t.Fatalf("Render() = %q, which reads back as %q", markdown, mustRender(t, back))
+			}
+		})
+	}
+	quoted := &Node{Type: "doc", Children: []*Node{{Type: "blockquote", Children: []*Node{code("a\n\nb")}}}}
+	if got, want := mustRender(t, quoted), "> ```\n> a\n> \n> b\n> ```\n"; got != want {
+		t.Fatalf("Render() = %q, want the bytes main writes, %q", got, want)
 	}
 }

@@ -1564,7 +1564,6 @@ func TestApplyOperationReplaceKeepsAMarkAroundTextEndingInABackslash(t *testing.
 		t.Fatalf("the bold is gone: %q (%#v)", markdown, first)
 	}
 }
-
 func TestApplyOperationReplaceRejectsBlockReplacements(t *testing.T) {
 	// The refusal is where an agent learns what to do instead, and each half of it is for a
 	// different `with`: paragraphs are rewritten one replace each, keeping their block ids - so a
@@ -2180,6 +2179,7 @@ func TestApplyOperationReplaceWithNothingEmptiesTheParagraph(t *testing.T) {
 		{"an ask's question", "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nBody.\n\n- A\n- B\n:::\n"},
 		{"a footnote definition's first paragraph of two", "x[^1]\n\n[^1]: Body.\n\n    More.\n"},
 		{"a table body cell", "Intro.\n\n| h |\n| --- |\n| Body. |\n"},
+		{"a footnote definition's only paragraph", "x[^1]\n\n[^1]: Body.\n"},
 		{"a table header cell", "Intro.\n\n| Body. |\n| --- |\n| c |\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -2228,6 +2228,85 @@ func TestApplyOperationReplaceWithNothingEmptiesTheParagraph(t *testing.T) {
 	}
 	if back, err := parseInput(markdown); err != nil || !back.Equal(next) {
 		t.Fatalf("replace leaving \"---\" stored %q, which does not read back as written (%v)", markdown, err)
+	}
+}
+
+// Emptying the paragraph a callout holding only it in a footnote definition is refused, and the
+// advice is to delete the callout: the definition is then left holding an empty paragraph, which
+// reads back, so its reference stays a footnote reference rather than literal text.
+func TestApplyOperationEmptyingACalloutInAFootnoteAdvisesDeletingTheCallout(t *testing.T) {
+	tree, err := parseInput("x[^1]\n\n[^1]: :::callout{#c1 kind=\"note\" title=\"T\"}\n    Body.\n    :::\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pmdoc.EnsureBlockIDs(tree)
+	_, err = applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: ""})
+	var invalid *ErrInvalidOp
+	if !errors.As(err, &invalid) || !strings.Contains(invalid.Reason, `delete {block:"c1"}`) {
+		t.Fatalf("emptying the callout's paragraph = %v, want INVALID_OP advising delete {block:\"c1\"}", err)
+	}
+	next, err := applyOperation(tree, model.EditOp{Op: "delete", Block: "c1"})
+	if err != nil {
+		t.Fatalf("the advised delete = %v", err)
+	}
+	markdown, err := renderTree(next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := parseInput(markdown)
+	if err != nil {
+		t.Fatalf("after the advised delete, %q does not read back: %v", markdown, err)
+	}
+	var references int
+	pmdoc.Walk(back, func(node *pmdoc.Node) bool {
+		if node.Type == "footnote_reference" {
+			references++
+		}
+		return true
+	})
+	if references != 1 {
+		t.Fatalf("after the advised delete, %q holds %d footnote references, want 1", markdown, references)
+	}
+}
+
+// A code span keeps the whitespace that starts its next line, as the browser editor's parser reads
+// it; only the prefix of the containers around it is not the code's. A replace writing one stores
+// that code and reads it back.
+func TestApplyOperationReplaceKeepsACodeSpansLineIndent(t *testing.T) {
+	for _, test := range []struct{ name, markdown, with, code string }{
+		{"after a line feed", "Intro.\n\nBody.\n\nAfter.\n", "x `a\n  b` y", "a\n  b"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tree, err := parseInput(test.markdown)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pmdoc.EnsureBlockIDs(tree)
+			next, err := applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
+			if err != nil {
+				t.Fatalf("replace with %q = %v, want it taken", test.with, err)
+			}
+			markdown, err := renderTree(next)
+			if err != nil {
+				t.Fatal(err)
+			}
+			back, err := parseInput(markdown)
+			if err != nil || !back.Equal(next) {
+				t.Fatalf("replace with %q stored %q, which does not read back as written (%v)", test.with, markdown, err)
+			}
+			var code []string
+			pmdoc.Walk(back, func(node *pmdoc.Node) bool {
+				for _, mark := range node.Marks {
+					if node.Type == "text" && mark.Type == "inlineCode" {
+						code = append(code, node.Text)
+					}
+				}
+				return true
+			})
+			if len(code) != 1 || code[0] != test.code {
+				t.Fatalf("replace with %q stored %q, whose code reads back %q, want %q", test.with, markdown, code, test.code)
+			}
+		})
 	}
 }
 

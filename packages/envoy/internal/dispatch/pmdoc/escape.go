@@ -2,12 +2,11 @@ package pmdoc
 
 import (
 	"fmt"
-	"regexp"
 	"slices"
 	"strings"
 
 	"github.com/yuin/goldmark/ast"
-	gmtext "github.com/yuin/goldmark/text"
+	extensionast "github.com/yuin/goldmark/extension/ast"
 )
 
 // The renderer's escape rules. Paragraph text is written so the parser reads it back as the same
@@ -23,6 +22,8 @@ import (
 
 // escapeContext is what one character's escape depends on beyond the text itself.
 type escapeContext struct {
+	// footnoteLabels is every footnote label the document defines, lowercased.
+	footnoteLabels map[string]bool
 	// textLineStart is where the character's line of text begins inside this node, or -1 when it
 	// began in an earlier one: the writer's long-standing list, heading, quote and ordered-list
 	// escapes are judged here, in headings, cells and inside marks as well, so that the markdown
@@ -40,6 +41,20 @@ type escapeContext struct {
 	// link's `]`, a hard break's backslash, the next node's first character. A block-final
 	// backslash reads back as itself and is left as written.
 	followed bool
+	// delimiters is which of the text's delimiter characters are escaped beyond the rules, because
+	// the run they are in does not read back with them as written (inlineWithEscapes).
+	delimiters delimiterEscapes
+	// heading reports whether the text is a heading's.
+	heading bool
+	// marked reports whether the text is written inside a mark's syntax, where the parser keeps
+	// whitespace at its edges.
+	marked bool
+	// afterMarker reports whether a mark's marker is written on the character's line before it,
+	// so that the character does not begin the line's text as the parser trims it.
+	afterMarker bool
+	// opener and closer are the delimiter character (`*` or `~`) of the mark written right
+	// before the text and of the one written right after it, or 0 when that is no delimiter.
+	opener, closer byte
 }
 
 // needsInlineEscape decides one character from the text alone.
@@ -47,20 +62,28 @@ func needsInlineEscape(value string, offset int, char rune, context escapeContex
 	textLineStart := context.textLineStart
 	switch char {
 	case '\\':
+		// Before whitespace written as a reference, a backslash would escape its `&`; before a
+		// line ending it would be a hard break.
 		return offset+1 < len(value) && isASCIIPunctuation(value[offset+1]) ||
-			offset+1 == len(value) && context.followed
+			offset+1 < len(value) && value[offset+1] == '\n' ||
+			offset+1 == len(value) && context.followed ||
+			offset+1 < len(value) && (value[offset+1] == ' ' || value[offset+1] == '\t') &&
+				needsInlineEscape(value, offset+1, rune(value[offset+1]), context)
 	case '*':
 		return (blockStart(value, textLineStart, offset) && markerTerminator(value, offset+1)) ||
-			emphasisDelimiter(value, offset, '*')
+			emphasisDelimiter(value, offset, '*') || besideDelimiter(value, offset, '*', context) ||
+			context.delimiters == delimitersAll
 	case '_':
-		return emphasisDelimiter(value, offset, '_')
+		return emphasisDelimiter(value, offset, '_') || context.delimiters == delimitersAll
 	case '`':
 		return true
+	case '~':
+		return context.delimiters >= delimitersTildes
 	case '[':
 		// A label whose brackets cannot pair as written escapes them all: a stray `]` closes it
 		// early, and a `[` left raw would then pair with its own closer.
 		return context.label == labelBracketsEscaped ||
-			context.label != labelBracketsWritten && linkOpener(value, offset)
+			context.label != labelBracketsWritten && (linkOpener(value, offset) || footnoteReferenceText(value, offset, context.footnoteLabels))
 	case '(':
 		return offset > 0 && value[offset-1] == ']'
 	case ']':
@@ -70,7 +93,8 @@ func needsInlineEscape(value string, offset int, char rune, context escapeContex
 	case '&':
 		return entityReference(value, offset)
 	case '#':
-		return blockStart(value, textLineStart, offset) && atxHeadingRun(value, offset)
+		return blockStart(value, textLineStart, offset) && atxHeadingRun(value, offset) ||
+			context.heading && !context.followed && closingSequence(value, offset)
 	case '>':
 		return blockStart(value, textLineStart, offset)
 	case '-', '+':
@@ -79,6 +103,17 @@ func needsInlineEscape(value string, offset int, char rune, context escapeContex
 		return context.tableCell
 	case ':':
 		return context.urlSchemes && urlSchemeColon(value, offset)
+	case ' ', '\t':
+		// The parser trims whitespace that begins a line of a textblock's text, ends one before a
+		// line ending (where two spaces are a hard break) or ends the textblock, and a delimiter
+		// beside whitespace opens or closes no mark, so the first of a leading run and the last of
+		// a trailing one are written as the references it keeps, which the delimiter rule does not
+		// read as whitespace.
+		return offset == textLineStart && !context.afterMarker && !context.marked ||
+			offset+1 == len(value) && !context.followed ||
+			offset+1 < len(value) && value[offset+1] == '\n' ||
+			offset == 0 && context.opener != 0 ||
+			offset+1 == len(value) && context.closer != 0
 	case '.', ')':
 		return orderedListMarkerPunctuation(value, offset, textLineStart)
 	default:
@@ -86,10 +121,190 @@ func needsInlineEscape(value string, offset int, char rune, context escapeContex
 	}
 }
 
-// lineStartMarker reports whether char, first in a line's text, can begin a block form that only
-// the whole line decides.
-func lineStartMarker(char rune) bool {
+// escaped is how an escaped character is written: `&` as the `&amp;` reference; whitespace, which
+// takes no backslash, as the numeric reference the parser decodes back to it, which it neither
+// trims nor reads as the indentation that opens indented code; and anything else behind a
+// backslash.
+func escaped(char rune) string {
+	switch char {
+	case '&':
+		return "&amp;"
+	case ' ', '\t':
+		return numericEntity(char)
+	default:
+		return "\\" + string(char)
+	}
+}
+
+// textEscape is how the text writer spells an escaped character: a tilde as its numeric
+// reference, since the strikethrough parser refuses a delimiter run right after a tilde even when
+// a backslash escapes it, and anything else as escaped spells it.
+func textEscape(char rune) string {
+	if char == '~' {
+		return numericEntity(char)
+	}
+	return escaped(char)
+}
+
+// delimiterEscapes is which delimiter characters in text the writer escapes beyond its rules.
+type delimiterEscapes int
+
+const (
+	// delimitersAsRuled: only where the rules escape them.
+	delimitersAsRuled delimiterEscapes = iota
+	// delimitersTildes: every tilde as well.
+	delimitersTildes
+	// delimitersAll: every tilde, asterisk and underscore.
+	delimitersAll
+)
+
+// delimitersInText is the first escape a run's text could need: delimitersTildes when a text node
+// outside a code span holds a tilde; delimitersAll when asterisks or underscores could pair - two
+// free runs of one of them, or one free run of asterisks beside bold or italic text, whose markers
+// are asterisks too; and delimitersAsRuled otherwise, when nothing is read back.
+func delimitersInText(nodes []*Node) delimiterEscapes {
+	stars, underscores := 0, 0
+	for _, node := range nodes {
+		if node.Type != "text" || nodeHasMark(node, "inlineCode") {
+			continue
+		}
+		if strings.ContainsRune(node.Text, '~') {
+			return delimitersTildes
+		}
+		stars += freeDelimiterRuns(node.Text, '*')
+		underscores += freeDelimiterRuns(node.Text, '_')
+		if nodeHasMark(node, "strong") || nodeHasMark(node, "emphasis") {
+			stars++
+		}
+	}
+	if stars >= 2 || underscores >= 2 {
+		return delimitersAll
+	}
+	return delimitersAsRuled
+}
+
+// freeDelimiterRuns counts the runs of delimiter in text that the rules leave unescaped and that
+// could still open or close emphasis: no letter or digit beside them, which the rules escape,
+// and not whitespace on both sides, which can do neither. A text's edge may be anything.
+func freeDelimiterRuns(text string, delimiter byte) int {
+	runs := 0
+	for start := 0; start < len(text); start++ {
+		if text[start] != delimiter {
+			continue
+		}
+		end := start + 1
+		for end < len(text) && text[end] == delimiter {
+			end++
+		}
+		before, after := byte('!'), byte('!')
+		if start > 0 {
+			before = text[start-1]
+		}
+		if end < len(text) {
+			after = text[end]
+		}
+		if !isASCIIAlphaNumeric(before) && !isASCIIAlphaNumeric(after) && !(isLineWhitespace(before) && isLineWhitespace(after)) {
+			runs++
+		}
+		start = end - 1
+	}
+	return runs
+}
+
+func isLineWhitespace(value byte) bool {
+	return value == ' ' || value == '\t' || value == '\n'
+}
+
+// inlineSignature describes inline nodes as the reader sees them: each run of text with the marks
+// it renders, merged across nodes that carry the same marks, and every other node by its type and
+// what it writes.
+func inlineSignature(nodes []*Node) []string {
+	var signature []string
+	lastMarks := ""
+	for _, node := range nodes {
+		if node.Type != "text" {
+			value, _ := node.Attrs["value"].(string)
+			src, _ := node.Attrs["src"].(string)
+			label, _ := node.Attrs["label"].(string)
+			signature = append(signature, node.Type+"|"+value+"|"+src+"|"+label)
+			lastMarks = "\x00"
+			continue
+		}
+		var marks []string
+		for _, mark := range visibleMarks(node.Marks) {
+			href, _ := mark.Attrs["href"].(string)
+			title, _ := mark.Attrs["title"].(string)
+			marks = append(marks, mark.Type+"|"+href+"|"+title)
+		}
+		key := strings.Join(marks, ",")
+		if len(signature) > 0 && key == lastMarks {
+			signature[len(signature)-1] += node.Text
+			continue
+		}
+		signature = append(signature, key+"\x00"+node.Text)
+		lastMarks = key
+	}
+	return signature
+}
+
+// lineStartVerdict is what the writer does with a character at the start of a line of its own.
+type lineStartVerdict int
+
+const (
+	// lineStartUndecided: the character is indentation the parser skips, and a later one decides.
+	lineStartUndecided lineStartVerdict = iota
+	// lineStartAsIs: the line's text begins with a character no line-wide block form begins with,
+	// or one the rules that read the text alone already escape.
+	lineStartAsIs
+	// lineStartEscaped: whitespace that would open indented code, which the rules that read the
+	// text alone already escape where the parser would trim it.
+	lineStartEscaped
+	// lineStartHeld: a character only the whole line decides, held until the line is written.
+	lineStartHeld
+)
+
+// lineStartOf decides the character at offset, on a line of its own whose text begins at
+// lineStart; escape is what the rules that read the text alone decided for it.
+func lineStartOf(value string, lineStart, offset int, char rune, escape bool) lineStartVerdict {
+	switch {
+	case offset == lineStart && (char == ' ' || char == '\t') && indentedCodeRun(value, offset):
+		if escape {
+			return lineStartEscaped
+		}
+		return lineStartHeld
+	case char != ' ' && char != '\t' && blockStart(value, lineStart, offset):
+		if !escape && lineStartMarker(value, offset, char) {
+			return lineStartHeld
+		}
+		return lineStartAsIs
+	case !blockStart(value, lineStart, offset):
+		return lineStartAsIs
+	}
+	return lineStartUndecided
+}
+
+// lineStartMarker reports whether char, first in a line's text, can begin a form that only the
+// whole line decides: a block form, or, for `[`, the task checkbox a list item's text would open
+// with `[ ]` or `[x]`.
+func lineStartMarker(value string, offset int, char rune) bool {
+	if char == '[' {
+		return taskCheckboxText(value, offset)
+	}
 	return strings.ContainsRune("-*_=~:<|", char)
+}
+
+// taskCheckboxText reports whether the text at offset is `[ ]`, `[x]` or `[X]` followed by a
+// space, a tab, a line ending or its end.
+func taskCheckboxText(value string, offset int) bool {
+	rest := value[offset:]
+	return len(rest) >= 3 && rest[0] == '[' && strings.ContainsRune(" xX", rune(rest[1])) && rest[2] == ']' &&
+		(len(rest) == 3 || strings.IndexByte(" \t\r\n", rest[3]) >= 0)
+}
+
+// closesTypedBlock reports whether line, written at the prefix of the typed block around it, is
+// the lone `:::` that closes the block, which the line read on its own cannot show.
+func closesTypedBlock(line, prefix string) bool {
+	return strings.TrimSpace(strings.TrimPrefix(line, prefix)) == ":::"
 }
 
 // lineReadsAsText reports whether a written line reads the same with its text's first character
@@ -97,30 +312,60 @@ func lineStartMarker(char rune) bool {
 // the line continues the same textblock, where a setext underline or a table delimiter row reads
 // differently, and empty otherwise: a line of another block, read without the lines above it, can
 // make a block of its own - a previous list item's `---` or `<br>` - that is no reason to escape
-// anything here. The lines are read without the list indentation they share, up to the
-// indentation of their prefix, so a deeply nested item is not read as indented code while text
-// that is itself indented still is.
-func lineReadsAsText(before, line, escaped, prefix string) bool {
-	indentation := len(prefix) - len(strings.TrimLeft(prefix, " "))
-	written, rewritten := dedent(before+line, indentation), dedent(before+escaped, indentation)
-	// The parser drops a footnote definition nothing refers to, so a definition's line is read
-	// after a reference to it.
-	if label := footnoteDefinitionLabel.FindString(written); label != "" {
-		reference := "x" + strings.TrimSuffix(label, ":") + "\n\n"
+// anything here. The lines are read as the content of the blockquotes their prefix opens, without
+// the list indentation they share up to the indentation of that prefix, so a deeply nested item
+// is not read as indented code while text that is itself indented still is. footnote is the
+// label, as written, of the footnote definition the read begins with, or empty: the parser drops a
+// definition nothing refers to, so the lines are read after a reference to it.
+func lineReadsAsText(before, line, rewrittenLine, prefix, footnote string) bool {
+	quote, indentation := splitPrefix(prefix)
+	written := dedent(unquote(before+line, quote), indentation)
+	rewritten := dedent(unquote(before+rewrittenLine, quote), indentation)
+	if footnote != "" {
+		reference := "x[^" + footnote + "]\n\n"
 		written, rewritten = reference+written, reference+rewritten
 	}
 	return slices.Equal(blockKinds(written), blockKinds(rewritten))
 }
 
-// footnoteDefinitionLabel matches the `[^label]:` that opens a footnote definition's first line.
-var footnoteDefinitionLabel = regexp.MustCompile(`^\[\^[^\]]+\]:`)
+// splitPrefix splits a textblock's line prefix into the blockquote markers it opens with - up to
+// its last `>` and the one space after it - and the indentation of the list items inside them.
+func splitPrefix(prefix string) (quote string, indentation int) {
+	if last := strings.LastIndexByte(prefix, '>'); last >= 0 {
+		quote, prefix = prefix[:last+1], prefix[last+1:]
+		if strings.HasPrefix(prefix, " ") {
+			quote, prefix = quote+" ", prefix[1:]
+		}
+	}
+	return quote, len(prefix) - len(strings.TrimLeft(prefix, " "))
+}
+
+// unquote drops quote from the start of each line that carries it, or its trimmed form from a
+// blank quoted line.
+func unquote(lines, quote string) string {
+	if quote == "" {
+		return lines
+	}
+	blank := strings.TrimRight(quote, " ")
+	parts := strings.Split(lines, "\n")
+	for index, line := range parts {
+		if strings.HasPrefix(line, quote) {
+			parts[index] = line[len(quote):]
+		} else if strings.HasPrefix(line, blank) {
+			parts[index] = line[len(blank):]
+		}
+	}
+	return strings.Join(parts, "\n")
+}
 
 // blockKinds is the kinds of the blocks the parser reads markdown as, in document order.
 func blockKinds(markdown string) []ast.NodeKind {
-	root := unfrontmatteredParser.Parser().Parse(gmtext.NewReader([]byte(markdown)))
+	source := []byte(markdown)
+	root := blockReader.parse(source)
 	var kinds []ast.NodeKind
 	_ = ast.Walk(root, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
-		if entering && node.Type() == ast.TypeBlock {
+		// A task checkbox is inline, but it is the list item's syntax, not its text.
+		if entering && (node.Type() == ast.TypeBlock || node.Kind() == extensionast.KindTaskCheckBox) {
 			kinds = append(kinds, node.Kind())
 		}
 		return ast.WalkContinue, nil
@@ -189,6 +434,16 @@ func atxHeadingRun(value string, offset int) bool {
 	return hashes <= 6 && markerTerminator(value, offset+hashes)
 }
 
+// closingSequence reports whether offset starts a heading's closing sequence: a run of `#` at the
+// start of the heading's text or after a space or a tab, with nothing after it but spaces and
+// tabs. The parser drops it from the heading's text; escaping its first `#` keeps it as text.
+func closingSequence(value string, offset int) bool {
+	if offset > 0 && value[offset-1] != ' ' && value[offset-1] != '\t' {
+		return false
+	}
+	return strings.Trim(value[offset+markerRun(value, offset):], " \t") == ""
+}
+
 // markerRun is how many times the character at offset repeats from there.
 func markerRun(value string, offset int) int {
 	marker := value[offset]
@@ -227,6 +482,19 @@ func numericEntity(char rune) string {
 	return fmt.Sprintf("&#%d;", char)
 }
 
+// besideDelimiter reports whether the run of delimiter holding offset touches a mark's run of the
+// same character, which it would join.
+func besideDelimiter(value string, offset int, delimiter byte, context escapeContext) bool {
+	start, end := offset, offset+1
+	for start > 0 && value[start-1] == delimiter {
+		start--
+	}
+	for end < len(value) && value[end] == delimiter {
+		end++
+	}
+	return start == 0 && context.opener == delimiter || end == len(value) && context.closer == delimiter
+}
+
 func emphasisDelimiter(value string, offset int, delimiter byte) bool {
 	start, end := offset, offset+1
 	for start > 0 && value[start-1] == delimiter {
@@ -238,6 +506,16 @@ func emphasisDelimiter(value string, offset int, delimiter byte) bool {
 	before := start > 0 && isASCIIAlphaNumeric(value[start-1])
 	after := end < len(value) && isASCIIAlphaNumeric(value[end])
 	return (delimiter != '_' || !before || !after) && (before || after)
+}
+
+// footnoteReferenceText reports whether the text at offset, a `[`, reads as a reference to one of
+// labels, the document's defined footnote labels lowercased: `[^label]`.
+func footnoteReferenceText(value string, offset int, labels map[string]bool) bool {
+	if offset+1 >= len(value) || value[offset+1] != '^' {
+		return false
+	}
+	closing := strings.IndexByte(value[offset+2:], ']')
+	return closing > 0 && labels[strings.ToLower(value[offset+2:offset+2+closing])]
 }
 
 func linkOpener(value string, offset int) bool {
@@ -382,4 +660,71 @@ func orderedListMarkerPunctuation(value string, offset int, lineStart int) bool 
 		start--
 	}
 	return start < offset && blockStart(value, lineStart, start)
+}
+
+// imageAlt is how an image's alt text is written. The parser reads it as the plain text of the
+// label, so a bracket, a backslash, emphasis, a code span, a reference or a tag in it changes the
+// text or ends the image, and a line ending ends a table row or starts a line that can open a
+// block. The alt text is written with its `]` escaped, as it always was, where that reads back,
+// and otherwise with every ASCII punctuation character escaped as the text writer escapes it and
+// each line feed and carriage return written as a character reference, which both parsers read
+// back as the character. That is kept only if it reads back, so an alt that fails for another
+// reason keeps the bytes it had, as inlineWithEscapes does.
+func imageAlt(alt string, context inlineContext) string {
+	written := escapeTablePipes(strings.ReplaceAll(alt, "]", "\\]"), context.tableCell)
+	if altReadsBack(written, alt, context) {
+		return written
+	}
+	var out strings.Builder
+	for index := 0; index < len(alt); index++ {
+		switch {
+		case alt[index] == '\n':
+			out.WriteString("&#10;")
+		case alt[index] == '\r':
+			out.WriteString("&#13;")
+		case isASCIIPunctuation(alt[index]) && (alt[index] != '|' || !context.tableCell):
+			out.WriteString(escaped(rune(alt[index])))
+		default:
+			// A pipe in a table cell is escaped with the others below.
+			out.WriteByte(alt[index])
+		}
+	}
+	if fallback := escapeTablePipes(out.String(), context.tableCell); altReadsBack(fallback, alt, context) {
+		return fallback
+	}
+	return written
+}
+
+// altReadsBack reports whether an image label written as written reads back as the alt text alt,
+// read in the block it is written in: a table cell, where the cell takes its escaped pipes first
+// and a line ending ends the row; a heading, which a line ending ends; or a paragraph, where a
+// line of the label can open a block.
+func altReadsBack(written, alt string, context inlineContext) bool {
+	image := "![" + written + "](u)"
+	var markdown string
+	switch {
+	case context.tableCell:
+		markdown = "| h |\n| - |\n| " + image + " |\n"
+	case context.heading:
+		markdown = "# " + image + "\n"
+	default:
+		markdown = image + "\n"
+	}
+	doc, err := Parse(markdown)
+	if err != nil || len(doc.Children) != 1 {
+		return false
+	}
+	block := doc.Children[0]
+	if context.tableCell {
+		if block.Type != "table" || len(block.Children) != 2 {
+			return false
+		}
+		block = block.Children[1].Children[0].Children[0]
+	}
+	nodes := block.Children
+	if len(nodes) != 1 || nodes[0].Type != "image" {
+		return false
+	}
+	got, _ := nodes[0].Attrs["alt"].(string)
+	return got == alt
 }

@@ -143,10 +143,11 @@ function quotePosition(doc: ProseMirrorNode, quote: string): number {
   return result;
 }
 // Where the browser editor's parser ends a typed block. Each case is a tree and the markdown the Go
-// renderer writes for it: a callout, alone or inside a blockquote, a list item or a footnote
-// definition, whose code holds a line of colons, inside the container the case names. The engine reads whether the markdown keeps the tree's blocks - the callout holding its
-// code - or ends the callout at the line. pmdoc's TypedFenceLineInCode is held to these verdicts
-// (directive_fence_test.go).
+// renderer writes for it: a callout, alone or inside a blockquote, a list item, a footnote
+// definition or another callout, whose code holds a line of colons, inside the container the case
+// names. The engine reads whether the markdown keeps the tree's blocks - the callout holding its
+// code - or ends a typed block at the line. The renderer's fences are held to keeping every case
+// whole (directive_fence_test.go).
 type TreeJSON = { type: string; content?: TreeJSON[]; text?: string };
 const treeShape = (node: TreeJSON): string =>
   node.type === "code_block"

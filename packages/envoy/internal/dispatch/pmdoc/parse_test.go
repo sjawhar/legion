@@ -90,9 +90,12 @@ func TestParsePreservesInlineHTMLAtom(t *testing.T) {
 }
 
 // A document opening with `---` and no closing line is ordinary markdown, so its first line is
-// a thematic break. Goldmark's front-matter extension instead consumes an unclosed opener to the
-// end of the input, which lost every block after it: an `insert` of "---\n\nTwo." wrote nothing
-// and reported itself unchanged.
+// a thematic break and the text after it a paragraph, as the browser editor's parser reads it.
+// Goldmark's front-matter extension instead consumed an unclosed opener to the end of the input,
+// which lost every block after it: an `insert` of "---\n\nTwo." wrote nothing and reported
+// itself unchanged. (That parser, having tried the front matter to the end, then reads no list,
+// quote or footnote definition in the rest; the renderer never writes such a document, since a
+// rule opening one is written `***`.)
 func TestParseUnclosedFrontmatterOpenerIsAThematicBreak(t *testing.T) {
 	for _, test := range []struct {
 		markdown string
@@ -101,6 +104,8 @@ func TestParseUnclosedFrontmatterOpenerIsAThematicBreak(t *testing.T) {
 		{markdown: "---", kinds: []string{"hr"}},
 		{markdown: "---\n\nTwo.", kinds: []string{"hr", "paragraph"}},
 		{markdown: "---\ntitle: x\n\nBody.\n", kinds: []string{"hr", "paragraph", "paragraph"}},
+		{markdown: "---\ntext\n", kinds: []string{"hr", "paragraph"}},
+		{markdown: "---\ntext\n\nMore.\n", kinds: []string{"hr", "paragraph", "paragraph"}},
 	} {
 		t.Run(test.markdown, func(t *testing.T) {
 			tree, err := Parse(test.markdown)
@@ -170,5 +175,40 @@ func TestParseJoinsSoftLineBreaksWithSpaces(t *testing.T) {
 	}
 	if strings.Contains(strings.TrimSuffix(md, "\n"), "\n") {
 		t.Fatalf("Render(soft break) re-wrapped the paragraph: %q", md)
+	}
+}
+
+// Goldmark appends a footnote's backlink to its last paragraph, or, when the definition ends in
+// another block, as a block after it. The backlink is the HTML renderer's decoration, not document
+// content, so a definition ending in code, a list, a quote, a rule or a typed block reads as the
+// blocks it holds and writes back the same.
+func TestParseReadsAFootnoteDefinitionEndingInABlock(t *testing.T) {
+	for _, test := range []struct{ name, markdown, last string }{
+		{"code", "x[^1]\n\n[^1]: Note.\n\n    ```\n    code\n    ```\n", "code_block"},
+		{"a list", "x[^1]\n\n[^1]: Note.\n\n    - item\n", "bullet_list"},
+		{"a quote", "x[^1]\n\n[^1]: Note.\n\n    > quoted\n", "blockquote"},
+		{"a rule", "x[^1]\n\n[^1]: Note.\n\n    ***\n", "hr"},
+		{"a callout", "x[^1]\n\n[^1]: Note.\n\n    :::callout{#c1 kind=\"note\" title=\"T\"}\n    Body.\n    :::\n", "callout"},
+		{"only a callout", "x[^1]\n\n[^1]: :::callout{#c1 kind=\"note\" title=\"T\"}\n    Body.\n    :::\n", "callout"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			doc, err := Parse(test.markdown)
+			if err != nil {
+				t.Fatalf("Parse(%q): %v", test.markdown, err)
+			}
+			definition := doc.Children[len(doc.Children)-1]
+			if definition.Type != "footnote_definition" || definition.Children[len(definition.Children)-1].Type != test.last {
+				json, _ := doc.JSON()
+				t.Fatalf("Parse(%q) = %s, want a footnote definition ending in a %s", test.markdown, json, test.last)
+			}
+			markdown, err := Render(doc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			back, err := Parse(markdown)
+			if err != nil || !back.Equal(doc) {
+				t.Fatalf("Render(Parse(%q)) = %q, which does not read back the same (%v)", test.markdown, markdown, err)
+			}
+		})
 	}
 }

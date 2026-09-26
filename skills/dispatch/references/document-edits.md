@@ -69,12 +69,10 @@ alone. An empty `with` deletes the matched text on purpose; where the block hold
 paragraph, the replace is `INVALID_OP`, and the refusal names the `delete` that removes it instead. Inside a code
 block none of this applies: `with` is the code's literal text, written as sent, whitespace, markdown syntax and
 references included, except that line breaks at the end of the code's text, and a line holding only whitespace in a
-list item's code, do not survive the next read; and a line of three or more colons in code inside a typed block,
-indented less than four columns from where the typed block's lines start, is `INVALID_OP`, since the browser editor
-ends the typed block there - indent it four or more spaces (a tab reaches only the next tab stop, which inside a list
-item or a blockquote can be two columns away), or move the code block out of the typed block. Text a `replace` writes
-that would read as block syntax at a line start is stored escaped and reads back as the characters you sent: `---` over
-a paragraph is stored `\---`, not a rule, so to add a rule, `insert` it beside the paragraph (`insert` with markdown
+list item's code, do not survive the next read. A line of colons in code inside a typed block is kept: Dispatch writes
+that typed block's fence longer than any such line the browser editor would end it at. Text a `replace` writes that
+would read as block syntax at a line start is stored escaped and reads back as the characters you sent: `---` over a
+paragraph is stored `\---`, not a rule, so to add a rule, `insert` it beside the paragraph (`insert` with markdown
 `***`). Use zero-based
 `occurrence` for a
 repeated target; re-read a missing or ambiguous target before retrying. Pass `summary` to name the version when recording a decision.

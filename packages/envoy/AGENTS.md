@@ -142,19 +142,19 @@ Document edits (`POST /api/v1/artifacts/{id}/edits`, `docs/edits.go` `applyOpera
 block a `replace`, like an accepted suggestion, writes `with` as the code's literal text
 (`codeReplacement`), and none of the rules below apply. Markdown cannot carry two things there: line
 breaks at the end of the code's text and a line holding only whitespace in a list item's code read
-back without them; and a line of three or more colons in code inside a typed block, starting less
-than four columns past the column the typed block's own lines start at on the written line, is
-refused (`refuseCodeThatEndsItsBlock`), because the browser editor's parser ends the typed block at
-it even inside fenced code. That measure counts the width of the list markers and `> ` around the
-code, advances a tab to the next multiple of four from the column it stands at, so a tab in a
-callout two columns in advances two, trims only spaces, tabs and a line-ending carriage return around
-the colons, and finds nothing closing in a blockquote inside the typed block (`pmdoc.TypedFenceLineInCode`, held to the engine's
-own verdicts in `pmdoc/testdata/typed-fence-lines.json`, which the fixture generator writes for a
-callout at the top and inside a blockquote, list items and a footnote definition); the advice is
-four spaces, which no layout closes. Text a `replace` writes that would read as block syntax at a
-line start is written escaped, so it reads back as the characters: `---`, `***`, `~~~` or `::::`
-over a paragraph is stored `\---` and so on (the renderer's line-start escapes), beside an
-emptied paragraph as anywhere else, since an empty paragraph is not written. Everywhere else `replace` is
+back without them. A line of colons in code inside a typed block is kept: the browser editor's
+parser ends a typed block at a line of at least its fence's colons, with spaces, tabs and a
+line-ending carriage return around them, starting less than four columns
+past where the typed block's own lines start on the written line, even inside fenced code -
+counting the width of the list markers and `> ` around the code, advancing a tab to the next
+multiple of four from the column it stands at, and finding nothing closing in a blockquote inside
+the typed block - so the renderer writes the typed block's fence longer than every such line
+(below). The engine's reading of each shape is `pmdoc/testdata/typed-fence-lines.json`, which the
+fixture generator writes for a callout at the top and inside a blockquote, list items, a footnote
+definition and another callout. Text a `replace` writes that would read as block syntax at a line
+start is written escaped, so it reads back as the characters: `---`, `***`, `~~~` or `::::` over a
+paragraph is stored `\---` and so on (the renderer's line-start escapes). Beside an emptied
+paragraph it is written the same way, since an empty paragraph is not written. Everywhere else `replace` is
 inline: `with` parses through `pmdoc.ParseInline` (paragraph-only block grammar), so a multi-paragraph
 `with` is `INVALID_OP`, so is any non-empty `with` that renders to no inline content (a line
 indented four spaces or a tab, which markdown reads as a code block, or whitespace alone — an
@@ -190,7 +190,9 @@ prose off them. `delete` takes `find` or
 (`pmdoc.DeleteTextblock`: it also drops a list, list item, or blockquote it empties, hoists a nested
 list into the place of a bullet whose text goes, and refuses a bullet with other content with
 `ErrListItemContent` naming `delete {block:"<item id>"}`; `pmdoc.DeleteBlock` serves `block` and
-reports any emptied container's content rule as `INVALID_OP`). `move` relocates the block with
+reports any emptied container's content rule as `INVALID_OP`; both leave an emptied footnote
+definition holding one empty paragraph, which both parsers read back as the definition, so its
+reference stays a reference). `move` relocates the block with
 `block` to the document-level boundary of an insert anchor (`pmdoc.MoveBlock`); insert and move
 anchors are a quote, `start`, `end`, `heading:<title>`, or `block:<id>`.
 
@@ -472,10 +474,41 @@ exists, and refuses to run without `dispatch.server_url`.
 Typed document blocks are declared only in `internal/dispatch/pmdoc/schema/blocks.json`. The
 embedded file is the server-owned schema, `GET /api/v1/schema/blocks` returns its exact JSON, and
 the fixture generator reads that checked-in file. A typed block is CommonMark generic-directive
-syntax: `:::name{#block-id key="value"}` followed by block children and a matching `:::`. There is
+syntax: `:::name{#block-id key="value"}` followed by block children and a closing line of exactly as
+many colons as the opener. The browser editor's parser closes it at a line of at least as many
+colons indented less than four columns, even inside a fenced code block it holds, so the renderer
+writes three colons, or one more than the longest such line inside the typed block
+(`closingColons`): a nested typed block's fence, or a line of code, measured in the written line's
+columns - the width of the list markers and `> ` around it, and a tab advancing to the next
+multiple of four from the column it stands at. A callout nested directly in a callout is written `::::callout{…}` …
+`::::`, as the browser editor writes it. There is
 no whitespace between `name` and `{`; Pandoc fenced divs, leaf directives, and text directives are
 invalid outside code blocks. An unclosed typed block at document level is rejected, while one nested
 inside another block runs to that parent’s end.
+
+A carriage return that no line feed follows is text here, as goldmark reads it and as the writer
+writes it, though CommonMark and the browser editor's parser end a line at one. A code span keeps the whitespace that
+starts each of its later lines past the prefix of the containers around it, as the browser editor's
+parser reads it, a line holding only whitespace before the closer included; goldmark's paragraph
+trims it (`lineRecordingParagraph`, `multilineCodeSpanText`). A space, a line feed, or a carriage
+return and line feed together is the padding such a span sheds at each end. A lazy continuation line - one that
+continues a paragraph in a list item, a quote or a footnote definition without the container's
+prefix - is never a table's header or delimiter row (`lazyTableRows`), as in GFM.
+A task list item's marker (`[ ]`, `[x]` or `[X]` opening a list item's first paragraph) is read as
+the browser editor's parser reads it (`taskList`): followed by a space or a tab and then more text on
+the line, or by a line ending the paragraph continues past, and it takes only the one character
+after it. Goldmark's took the marker with anything after it, so it read a link opening a list item
+(`- [x](https://…)`) as a checked task.
+
+Front matter is read as the browser editor's parser reads it (`pmdoc.parseFrontmatterBlock`): a
+first line that is `---`, with any spaces or tabs after it, opens it, the first later line that is
+the same closes it, and its text is stored between plain `---` fences with line feeds between its
+lines. A `---` opener nothing closes is a thematic break. That parser, having tried such an opener
+as front matter to the document's end, reads no list, quote or footnote definition at the
+document's level in the rest. So the renderer writes a rule that opens a document as `***` where
+`---` would be misread - a later `---` line would close front matter, or the document holds a
+list, quote or footnote definition at its level (`holdsAContainerTheBrowserDrops`) - and `---`
+everywhere else.
 
 A typed block renders its `blockId`, defaulted attributes, and every explicitly set optional
 attribute. Parsing mints an omitted id, while live document reads and writes validate each node

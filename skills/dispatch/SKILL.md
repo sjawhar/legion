@@ -575,7 +575,9 @@ with the document's reference.
 
 The server declares typed document blocks at `GET /api/v1/schema/blocks`. Write one only with the
 container-directive form `:::name{#block-id key="value"}` on its own line, ordinary block children,
-and a closing `:::` at the same nesting. An unclosed typed block at document level is rejected. For
+and a closing line of as many colons at the same nesting. A typed block directly inside another needs the outer
+one's fence a colon longer (`::::callout{…}` around a `:::callout{…}`), and so does one whose code holds a `:::` line;
+Dispatch writes its fences that way. An unclosed typed block at document level is rejected. For
 a new typed block, omit `#block-id`; Dispatch mints it. When editing an existing typed block, retain
 its id and every rendered attribute. Never copy an existing block's id into new markdown: an id
 names one block, so an insert, upload or suggestion whose markdown names an id the document holds

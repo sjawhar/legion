@@ -112,9 +112,9 @@ func TableDescendantIDs(doc *Node) (map[string][]string, error) {
 }
 
 // DeleteBlock returns a copy of doc without the block carrying blockID. A list,
-// list item, or blockquote the removal empties goes with it and an emptied
-// document keeps one empty paragraph; any other container the removal leaves
-// outside its content rule rejects the delete with that rule.
+// list item, or blockquote the removal empties goes with it, and an emptied
+// document or footnote definition keeps one empty paragraph; any other container
+// the removal leaves outside its content rule rejects the delete with that rule.
 func DeleteBlock(doc *Node, blockID string) (*Node, error) {
 	if err := wantDocument(doc, "DeleteBlock"); err != nil {
 		return nil, err
@@ -363,6 +363,11 @@ func removeAtPath(root *Node, path []int) {
 		switch parent.Type {
 		case "bullet_list", "ordered_list", "list_item", "blockquote":
 			path = path[:len(path)-1]
+		case "footnote_definition":
+			// Both parsers read `[^1]: ` as a definition holding one empty paragraph, so an
+			// emptied definition keeps one, and its reference stays a footnote reference.
+			parent.Children = []*Node{{Type: "paragraph"}}
+			return
 		default:
 			return
 		}

@@ -715,7 +715,7 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 			return nil, err
 		}
 		if code {
-			return next, refuseCodeThatEndsItsBlock(tree, next, r, at, "with", op.With)
+			return next, refuseCodeThatReshapesItsBlock(tree, next, r, at, "with", op.With)
 		}
 		return next, refuseUnreadableReplacement(tree, next, r, op.With)
 	case "delete":
@@ -1081,8 +1081,8 @@ func replacementBroke(before, after *pmdoc.Node, match pmdoc.Range, check func(*
 // An emptied paragraph is one the block holding it cannot be written without. The advice is the
 // delete that removes it: by find where deleting the text removes the emptied block
 // (pmdoc.DeleteTextblock), and otherwise by the id of the nearest block around the text that
-// pmdoc.DeleteBlock removes from the document as it was - the holder itself for a footnote
-// definition or a list item holding more than the paragraph, and a block further out when
+// pmdoc.DeleteBlock removes from the document as it was - the holder itself for a list item
+// holding more than the paragraph, and a block further out when
 // removing the holder would empty one that needs a block, such as a callout holding only it.
 func unreadableReason(before, after *pmdoc.Node, match pmdoc.Range, with string, unreadable error) string {
 	at, ok := pmdoc.ContainingTextblock(after, match.From)
@@ -1244,15 +1244,15 @@ func inlineAware(markdown string, edges textEdges) (*pmdoc.Node, error) {
 	return tree, nil
 }
 
-// refuseCodeThatEndsItsBlock refuses a replacement into a code block that leaves the
-// document-level block holding it reading back as blocks of another shape. The directive parser -
-// the browser editor's as well as this one - ends a typed block at a line that is `:::` even inside
-// a fenced code block it holds, so such a line in code directly inside a callout cuts the callout
-// short on the next read, and the rest of the code and everything after it leave the callout. Code
-// that only reads back with different whitespace keeps its shape and is not refused.
-func refuseCodeThatEndsItsBlock(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.TextblockAt, field, with string) error {
-	broke, err := replacementBroke(before, after, match, codeFenceOrShape)
-	if err != nil || broke == nil {
+// refuseCodeThatReshapesItsBlock refuses a replacement into a code block that leaves the
+// document-level block holding it reading back as blocks of another shape. A code block's text is
+// literal, so only the lines around it could read it differently, and the renderer writes a typed
+// block's fence longer than any line of colons in its code that the browser editor's parser, or
+// this one, could read as that fence (pmdoc's typedFence). Code that only reads back with
+// different whitespace keeps its shape and is not refused.
+func refuseCodeThatReshapesItsBlock(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.TextblockAt, field, with string) error {
+	reshaped, err := replacementBroke(before, after, match, pmdoc.BlockShapeError)
+	if err != nil || reshaped == nil {
 		return err
 	}
 	holder := "block"
@@ -1262,33 +1262,10 @@ func refuseCodeThatEndsItsBlock(before, after *pmdoc.Node, match pmdoc.Range, at
 			break
 		}
 	}
-	var fence fenceLineInCode
-	if errors.As(broke, &fence) {
-		return &ErrInvalidOp{Field: field, Reason: fmt.Sprintf(
-			"%s %q puts the line %q in code the %s around it reads as its closing fence: the browser editor ends a typed block at a line of three or more colons indented less than four columns from where the typed block's own lines start, even inside fenced code, so the %s would end there and the code after it would leave it; indent that line four or more spaces, or move the code block out of the %s",
-			field, with, fence.line, holder, holder, holder,
-		)}
-	}
 	return &ErrInvalidOp{Field: field, Reason: fmt.Sprintf(
 		"%s %q changes how the %s holding this code block reads back (%v); move the code block out of the %s",
-		field, with, holder, broke, holder,
+		field, with, holder, reshaped, holder,
 	)}
-}
-
-// fenceLineInCode is a line of code the browser editor's parser reads as a typed block's fence.
-type fenceLineInCode struct{ line string }
-
-func (f fenceLineInCode) Error() string {
-	return fmt.Sprintf("the code line %q reads as a typed block's closing fence", f.line)
-}
-
-// codeFenceOrShape is what keeps a block holding edited code from reading back as it was written:
-// a code line the browser editor ends a typed block at, or, failing that, another shape on read.
-func codeFenceOrShape(block *pmdoc.Node) error {
-	if line, ok := pmdoc.TypedFenceLineInCode(block); ok {
-		return fenceLineInCode{line: line}
-	}
-	return pmdoc.BlockShapeError(block)
 }
 
 // codeReplacement is what a replacement landing in a code block splices in: a code block's text
