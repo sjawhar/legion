@@ -148,27 +148,29 @@ func TestStartingGate_Closed_Returns503(t *testing.T) {
 }
 
 // TestOpenListener_PublishesOnlyOnceTheRoutesServe holds the order /healthz depends on: the
-// dependencies are published, which turns /healthz healthy, only after the gate serves every route,
-// so a probe that reads healthy never meets a 503 "service starting" from a webhook or /v1.
+// dependencies are published, which turns /healthz healthy, only after both gates serve their
+// routes, so a probe that reads healthy never meets a 503 "service starting" from a webhook or /v1.
 func TestOpenListener_PublishesOnlyOnceTheRoutesServe(t *testing.T) {
-	var gate startingGate
-	hooks := []webhookRoute{{"/webhook/github", func(*listenerDeps) http.Handler {
+	var webhookGate, v1Gate startingGate
+	hooks := []webhookRoute{{"/webhook/github", func(*bus.Client, *cistore.Store) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	}}}
+	openWebhooks(&webhookGate, hooks, nil, nil)
 	published := false
-	openListener(&gate, hooks, &listenerDeps{}, "test-machine", logging.New("test"), func(*listenerDeps) {
+	openListener(&v1Gate, &listenerDeps{}, "test-machine", logging.New("test"), func(*listenerDeps) {
 		published = true
 		// A real /v1 route answers a wrong method with 405 before it reads any dependency; a
 		// mux without the /v1 routes would answer 404, and a gate that has not opened answers 503.
 		for _, probe := range []struct {
+			gate         *startingGate
 			method, path string
 			want         int
 		}{
-			{http.MethodPost, "/webhook/github", http.StatusOK},
-			{http.MethodGet, "/v1/interests/unsubscribe", http.StatusMethodNotAllowed},
+			{&webhookGate, http.MethodPost, "/webhook/github", http.StatusOK},
+			{&v1Gate, http.MethodGet, "/v1/interests/unsubscribe", http.StatusMethodNotAllowed},
 		} {
 			recorder := httptest.NewRecorder()
-			gate.ServeHTTP(recorder, httptest.NewRequest(probe.method, probe.path, nil))
+			probe.gate.ServeHTTP(recorder, httptest.NewRequest(probe.method, probe.path, nil))
 			if recorder.Code != probe.want {
 				t.Errorf("%s %s when the dependencies were published: status = %d, want %d; body = %s", probe.method, probe.path, recorder.Code, probe.want, recorder.Body.String())
 			}
