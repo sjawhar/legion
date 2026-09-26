@@ -86,6 +86,10 @@ collect_transcripts() {
 cleanup() {
   local p
   set +e
+  # Teardown is best effort, and errexit off does not turn the ERR trap off: a command that fails
+  # here is a warning about the teardown, never a check's FAIL line, and the run's exit status is
+  # left as the checks set it.
+  trap 'printf "cleanup warning: line %s exited %s: %s\n" "$LINENO" "$?" "$BASH_COMMAND" >&2' ERR
   if [ -z "${ok:-}" ] && [ -z "$audited" ] && [ -n "$prod_baseline" ]; then
     printf 'production audit after failure:\n' >&2
     production_audit >&2
