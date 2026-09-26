@@ -23,8 +23,6 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/testcontainers/testcontainers-go"
-	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/appauth"
@@ -35,6 +33,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/testnats"
 )
 
 const testOperatorToken = "operator-bearer-for-daemon-tests"
@@ -933,34 +932,17 @@ func (r *workflowTokenRecorder) Roles() []appauth.AppRole {
 
 func workflowNATS(t *testing.T) string {
 	t.Helper()
-	ctx := context.Background()
-	container, err := tcnats.Run(ctx, "nats:2.10")
-	testcontainers.CleanupContainer(t, container)
+	url := testnats.URL(t)
+	conn, err := nats.Connect(url, nats.Timeout(time.Second))
 	if err != nil {
-		t.Fatalf("start NATS JetStream: %v", err)
-	}
-	url, err := container.ConnectionString(ctx)
-	if err != nil {
-		t.Fatalf("NATS connection string: %v", err)
-	}
-	var conn *nats.Conn
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		conn, err = nats.Connect(url, nats.Timeout(time.Second))
-		if err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("connect NATS after its container started: %v", err)
-		}
-		time.Sleep(50 * time.Millisecond)
+		t.Fatalf("connect NATS: %v", err)
 	}
 	t.Cleanup(conn.Close)
 	js, err := jetstream.New(conn)
 	if err != nil {
 		t.Fatalf("open JetStream: %v", err)
 	}
-	if _, err := js.CreateStream(ctx, jetstream.StreamConfig{Name: "ENVOY_NOTIFICATIONS", Subjects: []string{"notifications.>"}}); err != nil {
+	if _, err := js.CreateStream(t.Context(), jetstream.StreamConfig{Name: "ENVOY_NOTIFICATIONS", Subjects: []string{"notifications.>"}}); err != nil {
 		t.Fatalf("create notification stream: %v", err)
 	}
 	return url
