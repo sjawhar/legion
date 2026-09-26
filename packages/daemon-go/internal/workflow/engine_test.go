@@ -198,7 +198,7 @@ func TestAReopenedPullRequestKeepsItsAttemptCounters(t *testing.T) {
 
 	if _, err := intake.ApplyFact(ctx, pool, "github", "reopened", intake.PullRequestOpened{
 		Repo: "acme/widgets", Number: 7, Branch: "legion/LEGION-208", HeadSHA: "new",
-		UpdatedAt: time.Date(2026, 9, 25, 0, 0, 0, 0, time.UTC),
+		UpdatedAt: time.Date(2026, 9, 25, 0, 0, 0, 0, time.UTC), Reopened: true,
 	}, engine, admissionStub{}); err != nil {
 		t.Fatalf("ApplyFact reopened: %v", err)
 	}
