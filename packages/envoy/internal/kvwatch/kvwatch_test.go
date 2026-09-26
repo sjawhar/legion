@@ -413,6 +413,10 @@ func TestAReplacedWatchersBufferedEntryIsDropped(t *testing.T) {
 
 	var mu sync.Mutex
 	counts := map[string]int{}
+	// appliedBeforeSwitch counts queued keys applied while late1 has been applied once: the first
+	// watcher's applies before the switch. After it, that watcher's entries are dropped and the new
+	// watcher's scan applies late1 first, so the count is final at the switch.
+	appliedBeforeSwitch := 0
 	count := func(key string) int {
 		mu.Lock()
 		defer mu.Unlock()
@@ -435,6 +439,9 @@ func TestAReplacedWatchersBufferedEntryIsDropped(t *testing.T) {
 			time.Sleep(10 * time.Millisecond)
 		}
 		mu.Lock()
+		if entry.Key() != "late1" && counts["late1"] == 1 {
+			appliedBeforeSwitch++
+		}
 		counts[entry.Key()]++
 		mu.Unlock()
 	}
@@ -482,16 +489,12 @@ func TestAReplacedWatchersBufferedEntryIsDropped(t *testing.T) {
 		t.Fatal("Rewatch never returned")
 	}
 	// The premise the lock wait sets up: the switch came while the first watcher still held most of
-	// its queue. Read at the switch, since the new watcher's scan takes 40 x 10 ms to apply every key
-	// again; if the wait released late1 before the Rewatch was parked on applyMu, the first watcher
-	// applied the whole queue first and nothing below would test the dropped entries.
-	appliedBeforeSwitch := 0
-	for _, key := range keys {
-		if count(key) > 0 {
-			appliedBeforeSwitch++
-		}
-	}
-	if appliedBeforeSwitch == queued {
+	// its queue. If the wait released late1 before the Rewatch was parked on applyMu, the first
+	// watcher applied the whole queue first and nothing below would test the dropped entries.
+	mu.Lock()
+	allBeforeSwitch := appliedBeforeSwitch == queued
+	mu.Unlock()
+	if allBeforeSwitch {
 		t.Fatalf("all %d queued keys were applied before the Rewatch switched: the lock wait did not hold late1 until the Rewatch was parked on applyMu", queued)
 	}
 
@@ -754,6 +757,10 @@ func TestAReplacedWatchersSentinelDoesNotReleaseReadiness(t *testing.T) {
 	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
 	var slow atomic.Bool
 	var k0 atomic.Int32
+	// firstScanApplied counts k001..k009 applied while k000 has been applied once: the first
+	// watcher's applies before the switch. After it, that watcher's entries are dropped and the
+	// current watcher's scan applies k000 first, so the count is final at the switch.
+	var firstScanApplied atomic.Int32
 	into := newSeen()
 	apply := func(entry natsgo.KeyValueEntry) {
 		if entry.Key() == "k000" && k0.Add(1) == 1 {
@@ -762,6 +769,9 @@ func TestAReplacedWatchersSentinelDoesNotReleaseReadiness(t *testing.T) {
 		}
 		if slow.Load() {
 			time.Sleep(10 * time.Millisecond)
+		}
+		if key := entry.Key(); key > "k000" && key < "k010" && k0.Load() == 1 {
+			firstScanApplied.Add(1)
 		}
 		into.apply(entry)
 	}
@@ -791,18 +801,10 @@ func TestAReplacedWatchersSentinelDoesNotReleaseReadiness(t *testing.T) {
 		t.Fatalf("rewatch: %v", err)
 	}
 	// The premise the lock wait sets up: the switch came while the first watcher still held the rest
-	// of its scan. Read at the switch, before the current watcher's scan (10 ms a key) re-applies
-	// them. If the wait released k000 before the Rewatch was parked on applyMu, the first watcher
-	// applied k001..k009 and read its own sentinel while it was still current, and the assertion
-	// below would pass without testing the sentinel at all.
-	premise := false
-	for i := 1; i < 10; i++ {
-		if !into.has(fmt.Sprintf("k%03d", i)) {
-			premise = true
-			break
-		}
-	}
-	if !premise {
+	// of its scan. If the wait released k000 before the Rewatch was parked on applyMu, the first
+	// watcher applied k001..k009 and read its own sentinel while it was still current, and the
+	// assertion below would pass without testing the sentinel at all.
+	if firstScanApplied.Load() == 9 {
 		t.Fatal("the first watcher applied all of k001..k009 before the Rewatch switched: the lock wait did not hold k000 until the Rewatch was parked on applyMu")
 	}
 	eventually(t, "readiness", w.Ready)
