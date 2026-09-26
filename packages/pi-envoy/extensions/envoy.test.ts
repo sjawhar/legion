@@ -272,7 +272,9 @@ beforeEach(() => {
   delete process.env.TMUX_PANE;
 });
 
-afterEach(() => {
+afterEach(async () => {
+  // A managed-timer callback that rejects fails the test that scheduled it.
+  await Promise.all(contextTimers.splice(0));
   if (originalNatsUrl === undefined) delete process.env.ENVOY_NATS_URL;
   else process.env.ENVOY_NATS_URL = originalNatsUrl;
   if (originalEnvoyUrl === undefined) delete process.env.ENVOY_URL;
@@ -358,6 +360,9 @@ function createPi(options: { readonly clipboardError?: Error; readonly zod?: typ
   };
 }
 
+/** Every callback the default `sessionContext()` timer ran, awaited after each test. */
+const contextTimers: Promise<void>[] = [];
+
 // The session-manager surface `isSubagentSession` reads. No transcript path reads as a
 // top-level session, so every fixture here registers unless a test supplies a transcript that
 // sits inside a parent's directory.
@@ -372,6 +377,9 @@ function sessionContext(sessionID = "ses_omp", hasUI = true): SessionContext {
     hasUI,
     sessionManager: { ...topLevelSession, getSessionId: () => sessionID },
     setInterval: () => undefined,
+    setTimeout: (callback) => {
+      contextTimers.push(Promise.resolve().then(callback));
+    },
     ui: {
       notify: () => undefined,
       onTerminalInput: () => () => undefined,
@@ -531,17 +539,20 @@ async function bootAskNudge(
     /** Awaited before the stop-time query answers, to hold its round trip open. */
     readonly holdStopQuery?: () => Promise<void>;
     /**
-     * How the host answers the hidden self-check; `null` is a host with no `pi.askEphemeral`
-     * at all, which is every OMP build that cannot serve a Dispatch BTW either. A host
-     * initialised without the capability installs a stub that throws synchronously instead of
-     * rejecting, so this may throw rather than return a promise.
+     * How the host answers the hidden self-check. A host initialised without the capability
+     * installs a stub that throws synchronously instead of rejecting, so this may throw rather
+     * than return a promise.
      */
-    readonly selfCheck?:
-      | ((input: {
-          readonly prompt: string;
-          readonly signal?: AbortSignal;
-        }) => Promise<{ readonly replyText: string }>)
-      | null;
+    readonly selfCheck?: (input: {
+      readonly prompt: string;
+      readonly signal?: AbortSignal;
+    }) => Promise<{ readonly replyText: string }>;
+    /**
+     * Where the host serves its side turn: `pi.askEphemeral` (the fork's releases before
+     * Oh My Pi 18.3, the default), the extension context's `runEphemeralTurn` (18.3 on), or
+     * nowhere, which is a host that cannot serve a Dispatch BTW either.
+     */
+    readonly sideTurn?: "askEphemeral" | "runEphemeralTurn" | "none";
     /**
      * A fresh TUI, whose session id the host mints only after `session_start`: the extension's
      * own `sessionID` stays empty until the registration heartbeat heals the drift.
@@ -549,6 +560,8 @@ async function bootAskNudge(
     readonly lazySessionID?: boolean;
     /** `ENVOY_SELF_CHECK_TIMEOUT_MS` for this instance, so a hung host is bounded in ms. */
     readonly selfCheckTimeoutMs?: number;
+    /** Queue the managed timer's callbacks instead of running them, until `runHeldTimers()`. */
+    readonly holdTimers?: boolean;
   } = {}
 ) {
   const branch = options.branch ?? [];
@@ -556,6 +569,10 @@ async function bootAskNudge(
   // snapshot it was taken from: a regression that pinned it to the arming turn, or that failed
   // to move it, shows up in the `since=` of a later stop.
   let asOfCalls = 0;
+  // Set by `holdNextArming()`: the next arming read signals `out` and waits for `gate`.
+  let armingHold:
+    | { readonly out: PromiseWithResolvers<void>; readonly gate: PromiseWithResolvers<void> }
+    | undefined;
   let lastAsOf = "";
   process.env.DISPATCH_URL = "http://dispatch.test";
   process.env.DISPATCH_TOKEN = "token";
@@ -580,6 +597,12 @@ async function bootAskNudge(
     if (url.pathname !== "/api/v1/asks/open") return responseWithRegistration(input, init, {});
     queries.push(url.search);
     if (url.search.includes("since=")) await options.holdStopQuery?.();
+    else if (armingHold !== undefined) {
+      const hold = armingHold;
+      armingHold = undefined;
+      hold.out.resolve();
+      await hold.gate.promise;
+    }
     const open = snapshot(url.searchParams.get("since") ?? undefined);
     asOfCalls += 1;
     lastAsOf = open.as_of ?? `2026-09-13T00:00:0${asOfCalls}Z`;
@@ -602,25 +625,25 @@ async function bootAskNudge(
   const selfCheck = options.selfCheck;
   if (options.selfCheckTimeoutMs === undefined) delete process.env.ENVOY_SELF_CHECK_TIMEOUT_MS;
   else process.env.ENVOY_SELF_CHECK_TIMEOUT_MS = String(options.selfCheckTimeoutMs);
-  envoyExtension(
-    selfCheck === null
-      ? fixture.pi
-      : {
-          ...fixture.pi,
-          // Deliberately not an `async` wrapper: a host stub that throws synchronously must
-          // reach the extension as a synchronous throw, which is the whole of that case.
-          askEphemeral: (input) => {
-            asked.push(input);
-            return selfCheck === undefined
-              ? Promise.resolve({ replyText: "WAITING" })
-              : selfCheck(input);
-          },
-        }
-  );
+  // Deliberately not an `async` wrapper: a host stub that throws synchronously must reach the
+  // extension as a synchronous throw, which is the whole of that case.
+  const answer = (input: { readonly prompt: string; readonly signal?: AbortSignal }) => {
+    asked.push(input);
+    return selfCheck === undefined ? Promise.resolve({ replyText: "WAITING" }) : selfCheck(input);
+  };
+  const host = options.sideTurn ?? "askEphemeral";
+  envoyExtension(host === "askEphemeral" ? { ...fixture.pi, askEphemeral: answer } : fixture.pi);
   // A fresh TUI has no session yet at `session_start`; the host mints the id before the first
   // turn, and the extension's own `sessionID` heals only on the next heartbeat.
   let live = options.lazySessionID === true ? "" : sessionID;
   const intervals: (() => void)[] = [];
+  // The stop-time check runs on the host's managed timer once `agent_end` returns; a stop is
+  // over when every timer it scheduled has run.
+  const timers: Promise<void>[] = [];
+  const held: (() => void | Promise<void>)[] = [];
+  const drainTimers = async (): Promise<void> => {
+    while (timers.length > 0) await timers.shift();
+  };
   const context: SessionContext = {
     ...sessionContext(sessionID, options.hasUI ?? true),
     sessionManager: {
@@ -629,6 +652,15 @@ async function bootAskNudge(
       getBranch: () => branch,
     },
     setInterval: (callback) => intervals.push(callback),
+    setTimeout: (callback) => {
+      if (options.holdTimers === true) held.push(callback);
+      else timers.push(Promise.resolve().then(callback));
+    },
+    ...(host === "runEphemeralTurn"
+      ? {
+          runEphemeralTurn: ({ promptText, signal }) => answer({ prompt: promptText, signal }),
+        }
+      : {}),
   };
   await fixture.handlers.get("session_start")?.({}, context);
   live = sessionID;
@@ -678,19 +710,41 @@ async function bootAskNudge(
     },
     /** A run the user did not type: an Envoy delivery, or another extension's continuation. */
     runStart: () => agentStart({}, context),
-    /** A stop defaults to a normal settle: the run's last reply ended `stopReason: "stop"`. */
-    stop: (
+    /**
+     * Holds the next turn's arming read open: `out` resolves once that read is in flight, and
+     * the read answers when `release()` is called.
+     */
+    holdNextArming: () => {
+      const hold = {
+        out: Promise.withResolvers<void>(),
+        gate: Promise.withResolvers<void>(),
+      };
+      armingHold = hold;
+      return { out: hold.out.promise, release: () => hold.gate.resolve() };
+    },
+    /** Runs, in order, every timer callback `holdTimers` queued, each to completion. */
+    runHeldTimers: async () => {
+      for (const callback of held.splice(0)) await callback();
+    },
+    /**
+     * A stop defaults to a normal settle: the run's last reply ended `stopReason: "stop"`. It
+     * resolves once the check the stop scheduled has finished, or at once under `holdTimers`.
+     */
+    stop: async (
       event: {
         readonly willContinue?: boolean;
         readonly messages?: readonly { readonly role?: string; readonly stopReason?: string }[];
       } = {}
-    ) => agentEnd({ messages: [{ role: "assistant", stopReason: "stop" }], ...event }, context),
+    ) => {
+      await agentEnd({ messages: [{ role: "assistant", stopReason: "stop" }], ...event }, context);
+      await drainTimers();
+    },
     toolResult: (event: Record<string, unknown>) => toolResult(event, context),
   };
 }
 
 /**
- * The same host with the run-end self-check available. Without `askEphemeral` the nudge has no
+ * The same host with the run-end self-check available. Without a side turn the nudge has no
  * trigger at all, so neither lifecycle edge reads Dispatch.
  */
 function withSelfCheck(pi: TestPi): TestPi {
@@ -885,6 +939,87 @@ describe("envoy OMP extension", () => {
     expect(session.asked[0]?.signal?.aborted).toBe(false);
     // The arming period lives in memory only: nothing about it reaches the transcript.
     expect(session.fixture.entries).toEqual([]);
+  });
+
+  test("runs the self-check through the session context's runEphemeralTurn on an upstream host", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-context");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_context", () => ({}), {
+      sideTurn: "runEphemeralTurn",
+    });
+
+    await session.userTurn();
+    await session.stop();
+
+    expect(session.fixture.deliveries).toMatchObject([
+      { customType: "dispatch-ask-reminder", options: { deliverAs: "steer", triggerTurn: true } },
+    ]);
+    // The self-check goes out in the /btw wrapper `pi.askEphemeral` used to add, with the
+    // extension's own abort signal.
+    expect(session.asked.map((ask) => ask.prompt)).toEqual([
+      expect.stringMatching(/^<btw>\n[\s\S]*WAITING or PROCEEDING[\s\S]*\n<\/btw>$/),
+    ]);
+    expect(session.asked[0]?.signal?.aborted).toBe(false);
+  });
+
+  test("runs the stop-time check on the managed timer, after agent_end has returned", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-after-handler");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_after_handler", () => ({}), {
+      sideTurn: "runEphemeralTurn",
+      holdTimers: true,
+    });
+
+    await session.userTurn();
+    await session.stop();
+    // On Oh My Pi 18.3 a side turn started inside the handler would carry the handler's 30 s
+    // abort, so nothing about the check may have happened by the time it returns.
+    expect(session.queries).toEqual(["?author_session=ses_nudge_after_handler"]);
+    expect(session.asked).toEqual([]);
+
+    await session.runHeldTimers();
+    expect(session.asked).toHaveLength(1);
+    expect(session.fixture.deliveries).toMatchObject([{ customType: "dispatch-ask-reminder" }]);
+  });
+
+  test("a user turn between a stop and its timer leaves that stop unchecked", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-turn-before-timer");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_turn_before_timer", () => ({}), {
+      holdTimers: true,
+    });
+
+    await session.userTurn();
+    await session.stop();
+    // The user types, and the timer fires while the turn's arming read is still out: no run has
+    // started, so only the turn's generation says the stop has been overtaken.
+    const arming = session.holdNextArming();
+    const typed = session.userTurn("the next thing");
+    await arming.out;
+    await session.runHeldTimers();
+    arming.release();
+    await typed;
+
+    // Only the two arming reads: the stop's check never read Dispatch or asked the model.
+    expect(session.queries).toEqual([
+      "?author_session=ses_nudge_turn_before_timer",
+      "?author_session=ses_nudge_turn_before_timer",
+    ]);
+    expect(session.asked).toEqual([]);
+    expect(session.fixture.deliveries).toEqual([]);
+  });
+
+  test("a woken run between a stop and its timer leaves that stop unchecked", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-run-before-timer");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_run_before_timer", () => ({}), {
+      holdTimers: true,
+    });
+
+    await session.userTurn();
+    await session.stop();
+    await session.runStart();
+    await session.runHeldTimers();
+
+    // The stop is about a run the session has moved past, so its check reads nothing.
+    expect(session.queries).toEqual(["?author_session=ses_nudge_run_before_timer"]);
+    expect(session.asked).toEqual([]);
   });
 
   test("stays silent when the self-check answers PROCEEDING", async () => {
@@ -1304,7 +1439,7 @@ describe("envoy OMP extension", () => {
     // The same OMP builds that cannot serve a Dispatch BTW: with no self-check there is no
     // trigger, so the session does not pay the arming round trip either.
     const session = await bootAskNudge(envoyExtension, "ses_nudge_no_ephemeral", () => ({}), {
-      selfCheck: null,
+      sideTurn: "none",
     });
 
     await session.userTurn();
@@ -1516,15 +1651,64 @@ describe("envoy OMP extension", () => {
     ).toHaveLength(1);
   });
 
+  test("a recorded settle is not re-checked while the turn that overtook it is still arming", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-settle-arming");
+    const { promise: held, resolve: release } = Promise.withResolvers<void>();
+    const started = Promise.withResolvers<void>();
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_settle_arming", () => ({}), {
+      selfCheck: async () => {
+        started.resolve();
+        await held;
+        return { replyText: "WAITING" };
+      },
+    });
+
+    await session.userTurn();
+    const first = session.stop();
+    await started.promise;
+    // A woken run works and settles inside the check's window, so its stop is recorded…
+    await session.runStart();
+    await session.toolResult({
+      toolName: "bash",
+      toolCallId: "call-1",
+      input: {},
+      details: {},
+      isError: false,
+    });
+    const woken = session.stop();
+    // …then the user types, and the check comes back while that turn's arming read is still
+    // out. No run has started, so only the turn's generation marks the recorded stop as
+    // overtaken; re-checking it would steer into the turn just typed.
+    const arming = session.holdNextArming();
+    const typed = session.userTurn("actually, do this instead");
+    await arming.out;
+    release();
+    await Promise.all([first, woken]);
+    arming.release();
+    await typed;
+
+    expect(session.asked).toHaveLength(1);
+    expect(
+      session.fixture.deliveries.filter((delivery) => delivery.customType === ASK_REMINDER_TYPE)
+    ).toEqual([]);
+    expect(session.queries).toHaveLength(3);
+  });
+
   test("a run that starts while Dispatch answers the stop pays for no check", async () => {
     const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-run-during-query");
     const query = Promise.withResolvers<void>();
+    const queryOut = Promise.withResolvers<void>();
     const session = await bootAskNudge(envoyExtension, "ses_nudge_run_during_query", () => ({}), {
-      holdStopQuery: () => query.promise,
+      holdStopQuery: () => {
+        queryOut.resolve();
+        return query.promise;
+      },
     });
 
     await session.userTurn();
     const stopped = session.stop();
+    // The run starts only once the stop's query is out: a run before it is the pre-flight's case.
+    await queryOut.promise;
     await session.runStart();
     query.resolve();
     await stopped;
@@ -4332,6 +4516,146 @@ describe("envoy OMP extension", () => {
       },
     ]);
     expect(fixture.deliveries).toEqual([]);
+  });
+
+  test("answers a targeted BTW through the session context's runEphemeralTurn in the /btw prompt", async () => {
+    process.env.DISPATCH_URL = "http://dispatch.test";
+    process.env.DISPATCH_TOKEN = "dispatch-token";
+    const registrations: unknown[] = [];
+    const replies: unknown[] = [];
+    const posted = Promise.withResolvers<void>();
+    globalThis.fetch = async (input, init) => {
+      const path = new URL(input.toString()).pathname;
+      if (path === "/v1/interests/subscribe") {
+        registrations.push(JSON.parse(init?.body?.toString() ?? "{}"));
+      }
+      if (path === "/api/v1/messages/11111111-1111-4111-8111-111111111111/reply") {
+        replies.push(JSON.parse(init?.body?.toString() ?? "{}"));
+        posted.resolve();
+      }
+      return responseWithRegistration(input, init, {});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?targeted-btw-context");
+    const fixture = createPi();
+    const prompts: string[] = [];
+    // An upstream host: the side turn is on the extension context, and `pi.askEphemeral` does
+    // not exist.
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.(
+      {},
+      {
+        ...sessionContext("ses_delivery"),
+        runEphemeralTurn: async ({ promptText }) => {
+          prompts.push(promptText);
+          return { replyText: "Yes, ship it." };
+        },
+      }
+    );
+    const agent = natsState.controls.get("notifications.agent.ses_delivery");
+    if (agent === undefined) throw new Error("agent subject was not subscribed");
+
+    agent.push(targetedDispatchEnvelope("btw", "targeted-context"));
+    await posted.promise;
+
+    expect(registrations).toMatchObject([{ capabilities: ["aside", "btw", "steer"] }]);
+    // The host sends the prompt as given, so the question goes out in the /btw wrapper the
+    // older `pi.askEphemeral` added itself.
+    expect(prompts).toEqual([
+      expect.stringMatching(/^<btw>\n[\s\S]*\nDelivery btw targeted-context\n<\/btw>$/),
+    ]);
+    expect(replies).toEqual([
+      { actor: { id: "ses_delivery", kind: "session" }, attempt: 1, body: "Yes, ship it." },
+    ]);
+    expect(fixture.deliveries).toEqual([]);
+  });
+
+  test("prefers the session context's runEphemeralTurn over pi.askEphemeral", async () => {
+    process.env.DISPATCH_URL = "http://dispatch.test";
+    process.env.DISPATCH_TOKEN = "dispatch-token";
+    const posted = Promise.withResolvers<void>();
+    globalThis.fetch = async (input, init) => {
+      if (
+        new URL(input.toString()).pathname ===
+        "/api/v1/messages/11111111-1111-4111-8111-111111111111/reply"
+      ) {
+        posted.resolve();
+      }
+      return responseWithRegistration(input, init, {});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?targeted-btw-precedence");
+    const fixture = createPi();
+    const calls: string[] = [];
+    envoyExtension({
+      ...fixture.pi,
+      askEphemeral: async () => {
+        calls.push("askEphemeral");
+        return { replyText: "from askEphemeral" };
+      },
+    });
+    await fixture.handlers.get("session_start")?.(
+      {},
+      {
+        ...sessionContext("ses_delivery"),
+        runEphemeralTurn: async () => {
+          calls.push("runEphemeralTurn");
+          return { replyText: "from runEphemeralTurn" };
+        },
+      }
+    );
+    const agent = natsState.controls.get("notifications.agent.ses_delivery");
+    if (agent === undefined) throw new Error("agent subject was not subscribed");
+
+    agent.push(targetedDispatchEnvelope("btw", "targeted-precedence"));
+    await posted.promise;
+
+    expect(calls).toEqual(["runEphemeralTurn"]);
+  });
+
+  test("refuses a BTW that drains in during session_shutdown without starting a side turn", async () => {
+    process.env.DISPATCH_URL = "http://dispatch.test";
+    process.env.DISPATCH_TOKEN = "dispatch-token";
+    const replies: unknown[] = [];
+    const posted = Promise.withResolvers<void>();
+    // Deregistration hangs, so the shutdown handler is still running when the frame arrives.
+    const deregistration = Promise.withResolvers<Response>();
+    globalThis.fetch = async (input, init) => {
+      const path = new URL(input.toString()).pathname;
+      if (path === "/v1/sessions/ses_delivery") return deregistration.promise;
+      if (path === "/api/v1/messages/11111111-1111-4111-8111-111111111111/reply") {
+        replies.push(JSON.parse(init?.body?.toString() ?? "{}"));
+        posted.resolve();
+      }
+      return responseWithRegistration(input, init, {});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?targeted-btw-shutdown");
+    const fixture = createPi();
+    const calls: string[] = [];
+    envoyExtension(fixture.pi);
+    const context: SessionContext = {
+      ...sessionContext("ses_delivery"),
+      runEphemeralTurn: async () => {
+        calls.push("runEphemeralTurn");
+        return { replyText: "too late" };
+      },
+    };
+    await fixture.handlers.get("session_start")?.({}, context);
+    const agent = natsState.controls.get("notifications.agent.ses_delivery");
+    if (agent === undefined) throw new Error("agent subject was not subscribed");
+
+    const shutdown = fixture.handlers.get("session_shutdown")?.({}, context);
+    agent.push(targetedDispatchEnvelope("btw", "targeted-shutdown"));
+    await posted.promise;
+    deregistration.resolve(response({}));
+    await shutdown;
+
+    expect(replies).toEqual([
+      {
+        actor: { id: "ses_delivery", kind: "session" },
+        attempt: 1,
+        error: "This OMP session is shutting down",
+      },
+    ]);
+    expect(calls).toEqual([]);
   });
 
   test("fails closed for a malformed targeted frame and reports the error to Dispatch", async () => {

@@ -9,6 +9,7 @@ function context(sessionId = "ses_208"): SessionContext {
     cwd: "/workspace",
     hasUI: true,
     setInterval: () => undefined,
+    setTimeout: () => undefined,
     sessionManager: {
       getSessionId: () => sessionId,
       getSessionFile: () => "/sessions/208.jsonl",

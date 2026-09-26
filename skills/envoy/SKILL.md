@@ -131,7 +131,7 @@ Each session row from `envoy_sessions` carries `capabilities`, the targeted-deli
 session's host honours: `aside` (a message queued beside the model's work), `btw` (an ephemeral
 question the host answers without disturbing the current turn), and `steer` (an interjection at
 the next tool boundary). An OMP session advertises `aside`, `btw`, and `steer` (`aside` and
-`steer` on a host without `askEphemeral`); a Claude Code session advertises `aside` only, because
+`steer` on a host that cannot run a side turn); a Claude Code session advertises `aside` only, because
 its channel notifications queue for the next turn. Target a session only with a mode it
 advertises.
 
