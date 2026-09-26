@@ -615,3 +615,62 @@ func waitFor(t *testing.T, timeout time.Duration, description string, condition 
 	}
 	t.Fatalf("timed out waiting for %s", description)
 }
+
+// repeatLiveBlockID gives the live document's second paragraph the first one's block id, as a
+// browser write can before settlement's id repair runs.
+func repeatLiveBlockID(t *testing.T, service *Service, artifactID string) {
+	t.Helper()
+	err := service.srv.Apply(context.Background(), artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		fragment := doc.GetXmlFragment(fragmentName)
+		tree, err := treeOf(doc)
+		if err != nil {
+			t.Errorf("read live tree: %v", err)
+			return
+		}
+		tree.Children[1].Attrs[pmdoc.BlockIDAttr] = tree.Children[0].Attrs[pmdoc.BlockIDAttr]
+		transact(func(txn *crdt.Transaction) {
+			if err := pmdoc.Update(txn, fragment, tree); err != nil {
+				t.Errorf("repeat a live block id: %v", err)
+			}
+		})
+	})
+	if err != nil {
+		t.Fatalf("apply the repeated id: %v", err)
+	}
+}
+
+// A repeat the live document already holds is settlement's to repair, not the suggestion's: an
+// accept whose replacement names no held id, and the reject of a browser insert, are taken beside
+// it as they were before the repeated-id check.
+func TestSuggestionActionsBesideALiveRepeatedBlockIDAreTaken(t *testing.T) {
+	for _, test := range []struct {
+		name, want string
+		act        func(*Service, string) error
+	}{
+		{name: "an accept", want: "The quick red fox", act: func(service *Service, artifactID string) error {
+			if _, err := service.MarkQuote(context.Background(), artifactID, MarkSpec{
+				Kind: MarkSuggestion, ID: "rep", By: model.Actor{Kind: "session", ID: "s1"},
+			}, "brown", nil); err != nil {
+				return err
+			}
+			return service.AcceptSuggestion(context.Background(), artifactID, "rep", "red", model.Actor{Kind: "user", ID: "alice"})
+		}},
+		{name: "the reject of a browser insert", want: "The brown fox", act: func(service *Service, artifactID string) error {
+			browserMarkWithAttrs(t, service, artifactID, "proofSuggestion", "quick ", pmdoc.Attrs{
+				"id": "ins", "by": "user:bob", "kind": "insert",
+			})
+			return service.RejectSuggestion(context.Background(), artifactID, "ins", model.Actor{Kind: "user", ID: "alice"})
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			service.settle = time.Hour
+			seedServiceText(t, service, artifactID, "First.\n\nSecond.\n\nThe quick brown fox\n")
+			repeatLiveBlockID(t, service, artifactID)
+			if err := test.act(service, artifactID); err != nil {
+				t.Fatalf("%s beside a live repeated id: %v", test.name, err)
+			}
+			waitForDocumentText(t, service, artifactID, "First.\n\nSecond.\n\n"+test.want+"\n")
+		})
+	}
+}

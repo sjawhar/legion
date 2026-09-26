@@ -42,9 +42,14 @@ block ids, so a write never repeats one itself: a block written ahead of an answ
 its id would leave the ask's row and answer on that block, and the question would come back as a
 fresh open ask. Markdown a caller writes (a spec seeded at issue creation, an uploaded document or
 version, an edit's `insert`, an accepted suggestion) is parsed with `pmdoc.ParseForWrite`, which
-refuses an id it names on two blocks (`400 INVALID_MARKDOWN`), and an `insert` or accept whose
-markdown names an id the document already holds is `400 INVALID_OP` on `markdown` or
-`replace_with` (`pmdoc.RepeatedBlockID`). Only a typed block's markdown can name its id. Document
+refuses an id it names on two blocks, and an `insert` or accept whose markdown names an id the
+document already holds is refused too (`pmdoc.RepeatedBlockID`). The codes follow the route: an
+`insert` is `400 INVALID_OP` on `markdown` either way; an accept is `400 INVALID_OP` on
+`replace_with` for an id the document holds and `400 INVALID_MARKDOWN` for a replacement naming one
+id twice within itself; a seed or an upload is `400 INVALID_MARKDOWN`. The accept judges held ids
+against the live tree after `EnsureBlockIDs`, as an edit does, so a repeat a browser write left for
+settlement to repair refuses nothing, and a reject is not checked. Only a typed block's markdown can
+name its id. Document
 settlement is two-phase: it first applies `EnsureBlockIDs` in one Yjs transaction and persists that
 captured update in the same Postgres transaction as any resulting version and event, then renders
 and compares canonical markdown. `envoy-dispatch backfill-block-ids` runs that closure across every
