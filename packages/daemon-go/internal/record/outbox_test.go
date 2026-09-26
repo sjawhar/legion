@@ -25,6 +25,7 @@ func TestOutboxPayloadsRoundTripThroughPostgres(t *testing.T) {
 		StatusWrite{Status: "testing", ObservedStatus: "in_progress"},
 		MessagePost{Body: "Pull request checks are blocked."},
 		Notice{Kind: "phase-finished", Role: claim.RoleTester, Phase: phase.Testing, Summary: "Tests passed", Version: 4, Reason: ""},
+		ControllerNotice{Kind: "held", Role: claim.RolePlanner, Phase: phase.Planning, Reason: "escalated"},
 		SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RoleArchitect, Task: "Write the spec."},
 		GateSeed{ArtifactID: "artifact-208", Version: 4},
 		LingerClose{Generation: 7},

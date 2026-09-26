@@ -32,6 +32,7 @@ events to the right session.
 | Topic matching         | `internal/routing/match.go`               | wildcard matching                                  |
 | Envelope normalization | `internal/contracts/*.go`                 | generated contract + source-specific normalization |
 | Native Dispatch workspace | `cmd/dispatch/`, `internal/dispatch/` | HTTP API, Postgres store, documents, and event outbox |
+| GitHub webhook redelivery | `internal/dispatch/redeliver/`, `cmd/dispatch/redeliver.go` | Dispatch's sweep of the App webhook's failed deliveries; `internal/dispatch/githubapp/githubapptest` fakes GitHub's delivery API |
 | Document tree (Proof schema) | `internal/dispatch/pmdoc/` | render/parse/diff of Proof documents; fixtures from the fork's headless engine |
 | Deploy/runtime         | `deploy/`                                 | compose, rollout scripts, NATS peer setup          |
 
@@ -195,6 +196,42 @@ list into the place of a bullet whose text goes, and refuses a bullet with other
 reports any emptied container's content rule as `INVALID_OP`). `move` relocates the block with
 `block` to the document-level boundary of an insert anchor (`pmdoc.MoveBlock`); insert and move
 anchors are a quote, `start`, `end`, `heading:<title>`, or `block:<id>`.
+
+Accepting a suggestion (`POST /api/v1/comments/{id}/accept`, `docs/marks.go` `applySuggestion`)
+splices its `replace_with`, which unlike an edit's `with` may be blocks, with ProseMirror's range
+fitting (`pmdoc.Splice`). A replacement fitted into a typed block stays inside it, and a fit never
+replaces the typed block it lands in: a callout takes what its content rule allows, a code block
+included (the engine oracle's `callout-paragraph-and-code` case), and an ask takes any block at this
+step, since `Validate` lets an ask hold other blocks while a browser edit passes through. The one
+exception is a replacement holding exactly one block of the typed block's own type under its id,
+at any depth, which is that block rewritten: it replaces the block in place rather than nesting
+inside it, and the replacement's other blocks, and any it sits inside (a blockquote, a list item,
+a typed block under another id), go in the same parent, where they stand in the replacement.
+The same type under another id, or under none, is a new block and lands inside like
+any other. The accept
+then reads each ask by its id before and after the splice (`docs/ask_blocks.go` `askReadability`,
+`docs/marks.go` `refuseBrokenAsks`): an ask is unreadable when settlement's parse fails, when its
+children break the content rule `paragraph+ bullet_list?` (`pmdoc.AskContentError`: a paragraph
+after its options or a second bullet list parses, but the browser editor drops such an ask from the
+shared document when it renders it, and settlement then retracts it), or when it repeats an earlier
+ask's id. The first ask left unreadable whose id was readable before is `400 INVALID_ASK_BLOCK` with
+that reason, so a question given a code block, a paragraph after the options, a second list or an
+emptied question is refused. An ask under a held id is refused one step earlier, by the write's
+block-id check (`400 INVALID_MARKDOWN`, the block-id paragraph above). An id the document already held unreadable
+(a browser edit can leave one, and an upload can carry it on) does not refuse an accept, whether the
+accept leaves that ask alone or writes into it, unless the accept adds a second ask under it: an id
+that gains an ask is refused whatever it held, since the id repair would hand the held ask's row
+and answer to whichever comes first. A reject's asks (`POST /api/v1/comments/{id}/reject`,
+the same `applySuggestion`) are never checked, since removing the text a browser insert added gives
+back the document the insert started from. A replacement no level of the document can hold where
+the suggestion sits, such as a code block over a table cell's whole text, is `400 INVALID_OP` on
+`replace_with` (`pmdoc.ErrReplacementDoesNotFit`), and inline text over a range that runs into an
+ask or callout from the text before it, at any depth (inside a blockquote, a list item or another
+callout too), is `400 INVALID_OP` on `anchor` (`pmdoc.ErrJoinEmptiesTypedBlock`): ProseMirror's
+join would leave that block empty, and the browser editor drops it, which for an ask retracts it. A refused accept writes nothing, and the
+suggestion stays open; the dashboard's margin shows the refusal's message and offers no Retry for
+`INVALID_ASK_BLOCK`, `INVALID_MARKDOWN` or `INVALID_OP` (`useCommentActionQueue` `actionFailure`),
+since the same accept is refused every time.
 
 `delete_row` and `delete_column` each take a table `block` id and a zero-based `index`, and mutate
 the table in place. Row `0` is the header; deleting it promotes the first body row into the header,
@@ -700,9 +737,11 @@ the synchronous listener call records the sent or failed attempt instead of blin
   `pr.<n>.checks` when the head's checks settle. Check settlement is at-least-once: a settlement can be followed by a `superseded_settlement: "true"` payload. Every settlement carries its attempt set `check_runs` — the latest GitHub check-run id per check name, sorted by name — plus the listener's `generation` (the record's state version, which rises with every write that changes the record's snapshot, once per write however many observations that write folds in) and `snapshot` (the record's hash). Consumers order same-head settlements by the attempt set, compared per shared name: no id lower and some id higher (or a new name — a new name counts as higher) is newer; every shared id equal and no new name is the same set; no id higher, no new name, and some id lower is older; anything else (a higher or new alongside a lower) is a mixed view and is dropped as a conflict (names only in the stored set are ignored — a check can vanish from GitHub's view, and a record recreated after the seven-day KV TTL starts sparse). Within one producer record per-name ids never decrease, and a consumer's fence is the per-name maximum over every view it has accepted — an accepted set merges into the fence, nothing is pruned — so the fence never decreases either: a newer attempt is newer whatever its completion time, no timestamps take part in ordering, and a name an incomplete view omitted cannot later reappear as new. At the same set the listener's `generation` orders its own settlements: lower is stale; equal is a duplicate when the `snapshot` matches and otherwise a conflict (an equal pair with a different snapshot cannot occur within one record's lifetime; a recreated record may reuse one and is dropped). A live settlement is a possibly incomplete view of the head (a missed webhook, a record recreated after the KV TTL): it decides the outcome of every name it reports — at any id the ordering accepted, including the same run observed in place — and says nothing about the rest: a known failure among them stands (the consumer keeps failure names, not a per-name status map), and the head is red while any failure remains. A consumer that reconciles a verdict from GitHub's rollup compares the rollup's attempt set the same way, but GitHub's read is complete: its failing check runs and failing commit statuses replace the stored ones wholesale. Statuses have no check run and the listener never sees them, so a consumer keeps them apart from check-run failures: a check run that shares a status's name cannot retire it — only GitHub does (likewise a deleted check's failure). A newer rollup set merges into the fence and takes the identity (no listener generation); the same set applies GitHub's verdict and keeps the listener identity for duplicate detection; an older, mixed, or empty-over-fenced set is ignored. A terminal read (green or red) then holds the tie at that set: a live settlement at the same set is accepted only if its effective outcome — the check-run failures it reports plus the stored ones it omits and the stored commit-status failures — agrees with the reconciled verdict, refreshing the listener identity without releasing GitHub's authority; a disagreeing one is stale whatever its generation until the set advances; a pending or cancelled-only read uncertifies a green head, leaves a red one untouched, and holds nothing — it releases any authority held at that set — so the terminal live settlement that follows applies at once, subject to the ordinary generation and duplicate rules (a replay or a lower generation still does not apply). Pending is therefore not a commutative join: a pending read after a live green uncertifies it until the next terminal view. Two remainders. An in-place conclusion change on an existing run id: GitHub's view stands and the listener's is recovered by the next successful, non-skipped read at that set — the dropped delivery is not replayed. A check whose highest run is deleted on GitHub: the fence keeps that id, so a rollup reporting a lower run under the same name is older until a newer run appears. A consumer that orders head changes by the PR's `updated_at` (GitHub's second resolution) accepts a read of a different head at an equal clock — a stale read returning the previous head within the same second as its replacement rewinds that consumer until its next accurate, non-skipped read. A head publishes only when at least one check has a positive run id; legacy checks without one remain in the status groups and failing names but not in `check_runs`. A legacy in-progress check whose completion is never observed holds the head unsettled until it reruns; rerun the affected check to release it. `workflow.<file>.<action>` carries only runs without an associated
   pull request.
 - A branch or tag push publishes `push.branch.<ref>` / `push.tag.<ref>` with the payload fields
-  `kind: "push"`, `repo`, `ref`, `after`, `before`, `pusher`, `head_subject`, `commit_count`,
-  `compare_url`, `changed_paths` (the unique paths across every pushed commit's `added`,
-  `removed`, and `modified` lists, in first-seen order, newline-separated, at most 100; omitted
+  `kind: "push"`, `repo`, `ref`, `after`, `before`, `pusher`, `head_subject` (the head commit's
+  first non-empty message line, capped at 2,048 runes with a trailing `…` so the envelope stays
+  under NATS's max payload), `commit_count`, `compare_url`, `changed_paths` (the unique paths
+  across every pushed commit's `added`, `removed`, and `modified` lists, in first-seen order,
+  newline-separated, at most 100; omitted
   when no commit is listed, since the payload drops empty strings), and `changed_paths_truncated`
   (`"true"` when more than 100 unique paths were seen, else `"false"` — present on every push, so
   its absence alone tells a consumer the listener predates the field), and `forced` (`"true"` or
