@@ -1108,8 +1108,13 @@ export default function envoyExtension(pi: PiApi): void {
   // next-turn context instead of a turn of its own, consumed when the user next prompts.
   pi.on("agent_end", async (event, context) => {
     const id = context.sessionManager.getSessionId();
+    // Only a run that settled normally is nudged: steering an interrupt (`aborted`), a provider
+    // failure (`error`), a truncation, or a run with no reply of its own answers the user's cancel,
+    // or a failure, with a turn nobody asked for.
+    const lastReply = event.messages?.findLast((message) => message.role === "assistant");
     if (
       event.willContinue === true ||
+      lastReply?.stopReason !== "stop" ||
       shuttingDown ||
       !context.hasUI ||
       id === "" ||

@@ -87,9 +87,19 @@ export interface ToolResultEvent {
   readonly isError: boolean;
 }
 
+/** One of a run's messages, as far as an `agent_end` handler reads it. */
+export interface AgentEndMessage {
+  readonly role?: string;
+  /** How an assistant reply ended: `stop` settled normally, `aborted` was an interrupt, `error` a
+   * provider failure, `length` a truncation. */
+  readonly stopReason?: string;
+}
+
 export interface AgentEndEvent {
   /** Set when OMP has already scheduled a continuation, so the turn is not settling. */
   readonly willContinue?: boolean;
+  /** The run's messages; the last assistant entry says how the run ended. */
+  readonly messages?: readonly AgentEndMessage[];
 }
 
 /** A message entering the session: a user prompt (the daemon's RPC `prompt` among them), a custom

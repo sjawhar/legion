@@ -255,10 +255,12 @@ Dispatch execution; the shared client also imposes a 60-second HTTP deadline.
 turn carrying the user's own text, the snapshot's `as_of` becoming the baseline. It runs that query only for a
 session the stop could actually nudge — the host awaits this handler, so a session that is excluded below would
 otherwise pay up to `OPEN_ASKS_TIMEOUT_MS` at the head of every turn for an answer nothing reads. `agent_end` is
-the nudge's stop signal — the bare one, carrying no message, so the trigger is Dispatch state and never the shape
-of what the agent last said: a session that settles (`willContinue` unset) with nothing open, nothing opened
-since the turn's baseline, and no ask of its own opened during the turn gets one hidden `dispatch-ask-reminder`
-steer with `triggerTurn`, telling it to open an ask if it is waiting on a human and otherwise carry on. One per
+the nudge's stop signal, and the trigger is how the run ended plus Dispatch state, never the text of what the
+agent last said: a session whose run settles normally (`willContinue` unset and the last assistant reply ended
+`stopReason: "stop"` — an interrupt, a provider error, a truncation, or a run with no reply of its own is never
+nudged, and asks Dispatch nothing) with nothing open, nothing opened since the turn's baseline, and no ask of its
+own opened during the turn gets one hidden `dispatch-ask-reminder` steer with `triggerTurn`, telling it to open an
+ask if it is waiting on a human and otherwise carry on. One per
 stop: firing latches the arming period, and only a turn carrying the user's own text arms the next one, so the
 nudge's own continuation — which re-enters no `before_agent_start` at all — cannot arm anything
 (`extensions/legion-phase-stall-omp.test.ts` holds the host to that on the pinned binary, since without it a

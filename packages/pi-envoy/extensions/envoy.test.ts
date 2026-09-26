@@ -579,7 +579,13 @@ async function bootAskNudge(
     fixture,
     queries,
     userTurn: (prompt = "finish the task") => beforeAgentStart({ prompt }, context),
-    stop: (event: { readonly willContinue?: boolean } = {}) => agentEnd(event, context),
+    /** A stop defaults to a normal settle: the run's last reply ended `stopReason: "stop"`. */
+    stop: (
+      event: {
+        readonly willContinue?: boolean;
+        readonly messages?: readonly { readonly role?: string; readonly stopReason?: string }[];
+      } = {}
+    ) => agentEnd({ messages: [{ role: "assistant", stopReason: "stop" }], ...event }, context),
     toolResult: (event: Record<string, unknown>) => toolResult(event, context),
   };
 }
@@ -956,6 +962,32 @@ describe("envoy OMP extension", () => {
     expect(session.fixture.deliveries).toEqual([]);
     // Neither edge asks Dispatch anything: a headless run does not pay the arming round trip.
     expect(session.queries).toEqual([]);
+  });
+
+  test("never nudges a stop the run did not settle normally", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-unsettled");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_unsettled", () => ({}));
+
+    await session.userTurn();
+    // An interrupt, a provider failure, a truncation, and a run with no reply of its own:
+    // steering any of them answers the user's cancel, or a failure, with a turn nobody asked for.
+    for (const messages of [
+      [{ role: "assistant", stopReason: "aborted" }],
+      [
+        { role: "assistant", stopReason: "stop" },
+        { role: "assistant", stopReason: "error" },
+      ],
+      [{ role: "assistant", stopReason: "length" }],
+      [{ role: "user" }],
+    ]) {
+      await session.stop({ messages });
+    }
+    expect(session.fixture.deliveries).toEqual([]);
+    // Only the arming query ran: an unsettled stop asks Dispatch nothing and latches nothing.
+    expect(session.queries).toHaveLength(1);
+
+    await session.stop();
+    expect(session.fixture.deliveries).toHaveLength(1);
   });
 
   test("registers the shared eight-tool contract and delegates HTTP operations to EnvoyClient", async () => {
