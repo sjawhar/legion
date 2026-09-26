@@ -68,7 +68,7 @@ func (e *Engine) beginLinger(ctx context.Context, tx pgx.Tx, root record.Issue) 
 
 func (e *Engine) lingerExpired(ctx context.Context, tx pgx.Tx, fact intake.LingerExpired) (intake.Result, error) {
 	issue, err := e.store.Issue(ctx, tx, fact.Issue)
-	if err != nil || issue == nil || issue.Generation != fact.Generation || issue.LingerUntil == nil {
+	if err != nil || issue == nil || issue.Generation != fact.Generation || !issue.Lingers() {
 		return intake.Result{}, err
 	}
 	members, err := e.treeMembers(ctx, tx, *issue)

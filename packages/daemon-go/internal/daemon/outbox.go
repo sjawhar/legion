@@ -347,11 +347,11 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		// start that reaches its claim after the close (queued before it and backing off) finishes
 		// without acting and records no start, so the close's suspend still applies. Re-admission
 		// starts the member again (admit's startMidPhaseChildren).
-		lingers, err := r.treeLingers(ctx, issue)
+		root, err := r.root(ctx, issue)
 		if err != nil {
 			return err
 		}
-		if lingers {
+		if root != nil && root.Lingers() {
 			r.log.Info("outbox start of a member of a lingering tree; finished without acting", "row", row.ID, "issue", issue.Key,
 				"tree", issue.Tree, "role", payload.Role)
 			return nil
@@ -411,7 +411,7 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		// released and spawned again, after this start, so the row's task goes in its place.
 		held := machine.Claim()
 		if pending := held.Pending; (payload.ResumeTask || state == supervise.StateFailed) && pending != nil && payload.Phase != "" &&
-			pending.Generation == payload.Generation && pending.Phase == payload.Phase && (pending.ConfirmedAt.IsZero() || held.State == supervise.StateWorking) {
+			pending.StillWorked(payload.Generation, payload.Phase, held.State) {
 			r.log.Info("outbox start of a claim that holds its phase's task; not delivered again", "row", row.ID, "issue", issue.Key,
 				"role", payload.Role, "phase", payload.Phase, "held", pending.ID)
 			return nil
@@ -472,12 +472,6 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 	}
 }
 
-// treeLingers says whether issue's tree lingers after its close (record.TreeLingers), read in a
-// transaction of its own just before the executor acts on the row.
-func (r *outbox) treeLingers(ctx context.Context, issue record.Issue) (bool, error) {
-	return r.readTree(ctx, issue, func(tx pgx.Tx) (bool, error) { return record.TreeLingers(ctx, r.records, tx, issue.Tree) })
-}
-
 // root is issue's tree root as recorded, nil when it is not, read in a transaction of its own
 // just before the executor acts on a row.
 func (r *outbox) root(ctx context.Context, issue record.Issue) (*record.Issue, error) {
@@ -490,24 +484,6 @@ func (r *outbox) root(ctx context.Context, issue record.Issue) (*record.Issue, e
 		return nil, fmt.Errorf("read the tree root of %s: %w", issue.Key, err)
 	}
 	return root, nil
-}
-
-// treeLingersAt says whether issue's tree lingers after the close of root generation linger
-// (record.TreeLingersAt), the linger a close or a workspace removal row expires.
-func (r *outbox) treeLingersAt(ctx context.Context, issue record.Issue, linger uint64) (bool, error) {
-	return r.readTree(ctx, issue, func(tx pgx.Tx) (bool, error) { return record.TreeLingersAt(ctx, r.records, tx, issue.Tree, linger) })
-}
-
-func (r *outbox) readTree(ctx context.Context, issue record.Issue, read func(pgx.Tx) (bool, error)) (bool, error) {
-	var lingers bool
-	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
-		var err error
-		lingers, err = read(tx)
-		return err
-	}); err != nil {
-		return false, fmt.Errorf("read whether the tree of %s lingers: %w", issue.Key, err)
-	}
-	return lingers, nil
 }
 
 // podsProvision is whether the runtime provisions each claim's workspace in the claim's own pod
@@ -589,11 +565,11 @@ func (r *outbox) removeWorkspace(ctx context.Context, row record.OutboxRow, payl
 	// The removal belongs to the linger it expired, the root generation it names. Once
 	// re-admission ends that linger, the tree's new run may already work in the workspace again,
 	// even in a later linger of the tree, so a removal still backing off finishes without acting.
-	lingers, err := r.treeLingersAt(ctx, issue, payload.Linger)
+	root, err := r.root(ctx, issue)
 	if err != nil {
 		return err
 	}
-	if !lingers {
+	if root == nil || !root.LingersAt(payload.Linger) {
 		r.log.Info("outbox workspace removal of a linger that has ended; finished without acting", "row", row.ID, "issue", issue.Key,
 			"tree", issue.Tree, "linger", payload.Linger)
 		return nil

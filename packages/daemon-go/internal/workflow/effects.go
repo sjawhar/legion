@@ -50,10 +50,9 @@ func SuspendApplies(leaves, current phase.Phase) bool {
 // StopActs is whether a queued stop, row id, still acts on its claim when the outbox runs it, with
 // the issue in phase current, lastStart the newest start the outbox ran against the claim (its
 // last_start_row), and root the issue's tree root as recorded, read only for a tree close. The
-// outbox executor asks it of every suspend, and StartFor of every queued stop, so both read one
-// rule. A tree close acts while its tree lingers at the root generation it names
-// (record.Issue.LingersAt, which the executor reads through record.TreeLingersAt): never once
-// re-admission has moved the root on. A suspend acts unless the issue is back in a phase its role
+// outbox executor asks it of every suspend and every tree close, and StartFor of every queued
+// stop, so all read one rule. A tree close acts while its tree lingers at the root generation it
+// names (record.Issue.LingersAt): never once re-admission has moved the root on. A suspend acts unless the issue is back in a phase its role
 // works (SuspendApplies), or a newer start has already run: that start replaced the run the stop
 // was written for, so acting would suspend the run it began and retire the task with it, whatever
 // the retry timing was. A row with no id is not older than anything: the store gives every row
@@ -103,7 +102,7 @@ func StartFor(run record.RoleRun, root record.Issue, generation uint64, current 
 	if stop != 0 || held == nil {
 		return true
 	}
-	holds := held.Pending && held.PendingGeneration == generation && held.PendingPhase == current
+	holds := held.Pending != nil && held.Pending.StillWorked(generation, current, held.State)
 	return !slices.Contains(supervise.LiveStates(), held.State) && !(holds && held.State == supervise.StateLaunchUncertain)
 }
 

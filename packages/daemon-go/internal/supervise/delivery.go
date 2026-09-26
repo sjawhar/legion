@@ -58,6 +58,14 @@ type Delivery struct {
 	Interrupted bool
 }
 
+// StillWorked says whether a claim in state will still work this task as the task of generation's
+// run in phase p: it is that run's task for that phase, and either not yet confirmed (sent once the
+// claim is ready, a task a death took back included) or confirmed in the turn the claim is working.
+// A confirmed task on a claim not working is over: the claim's next decision retires it.
+func (d Delivery) StillWorked(generation uint64, p phase.Phase, state ClaimState) bool {
+	return d.Generation == generation && d.Phase == p && (d.ConfirmedAt.IsZero() || state == StateWorking)
+}
+
 // message is the prompt a delivery is sent as: its task, behind interruptedTask once a process
 // died in a turn of it.
 func (d Delivery) message() string {

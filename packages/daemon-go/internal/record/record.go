@@ -181,30 +181,20 @@ type QueuedSupervise struct {
 }
 
 // RoleClaim is a claim as RoleRun reads it: its state, the newest start the outbox ran against it
-// (last_start_row), and whether it holds a task undelivered or unconfirmed, with that task's
-// generation and phase.
+// (last_start_row), and the task it holds, nil for none, with the task's generation, phase and
+// confirmation.
 type RoleClaim struct {
-	State             supervise.ClaimState
-	LastStartRow      int64
-	Pending           bool
-	PendingGeneration uint64
-	PendingPhase      phase.Phase
+	State        supervise.ClaimState
+	LastStartRow int64
+	Pending      *supervise.Delivery
 }
 
 // TreeLingers says whether tree lingers after its close: its root is recorded with a linger
 // deadline, which re-admission clears. Linger holds every member where it stood, so nothing in such
 // a tree transitions, starts a worker, or records a completion.
 func TreeLingers(ctx context.Context, store Store, tx pgx.Tx, tree string) (bool, error) {
-	root, err := lingeringRoot(ctx, store, tx, tree)
-	return root != nil, err
-}
-
-// TreeLingersAt says whether tree lingers after the close of its root's generation: a row a
-// linger's expiry wrote acts in that linger only, not in the tree's next run nor in a later linger
-// after re-admission, where the root's generation has moved on.
-func TreeLingersAt(ctx context.Context, store Store, tx pgx.Tx, tree string, generation uint64) (bool, error) {
-	root, err := lingeringRoot(ctx, store, tx, tree)
-	return root != nil && root.LingersAt(generation), err
+	root, err := store.Issue(ctx, tx, tree)
+	return root != nil && root.Lingers(), err
 }
 
 // Lingers says whether the root lingers after its close: its linger deadline is set, and
@@ -212,18 +202,10 @@ func TreeLingersAt(ctx context.Context, store Store, tx pgx.Tx, tree string, gen
 func (i Issue) Lingers() bool { return i.LingerUntil != nil }
 
 // LingersAt says whether the root lingers after the close of its generation: it lingers, and
-// re-admission has not moved it to a later generation.
+// re-admission has not moved it to a later generation. A row a linger's expiry wrote acts in that
+// linger only, not in the tree's next run nor in a later linger of it.
 func (i Issue) LingersAt(generation uint64) bool {
 	return i.Lingers() && i.Generation == generation
-}
-
-// lingeringRoot is tree's root while it lingers, and nil when the tree runs or is not recorded.
-func lingeringRoot(ctx context.Context, store Store, tx pgx.Tx, tree string) (*Issue, error) {
-	root, err := store.Issue(ctx, tx, tree)
-	if err != nil || root == nil || !root.Lingers() {
-		return nil, err
-	}
-	return root, nil
 }
 
 // ParentOf is an observed parent key as a record holds it: nil for none. Dispatch says "no parent"

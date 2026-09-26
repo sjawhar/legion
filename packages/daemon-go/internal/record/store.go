@@ -14,6 +14,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
 const maxInt64 = uint64(^uint64(0) >> 1)
@@ -470,7 +471,7 @@ func (s *Postgres) RetryOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseTo
 
 // RoleRun reads one role's run of an issue generation as the store holds it: the role's supervise
 // rows for the generation still queued, oldest first, and the claim with token (this daemon's own
-// claim on the role), with the task it holds undelivered or unconfirmed. It decides nothing:
+// claim on the role), with the task it holds. It decides nothing:
 // workflow.StartFor reads it.
 func (s *Postgres) RoleRun(ctx context.Context, tx pgx.Tx, token claim.Token, issue string, role claim.Role, generation uint64) (RoleRun, error) {
 	rows, err := tx.Query(ctx, `select `+outboxColumns+` from outbox
@@ -500,15 +501,23 @@ func (s *Postgres) RoleRun(ctx context.Context, tx pgx.Tx, token claim.Token, is
 		return RoleRun{}, fmt.Errorf("read the queued %s rows of %s: %w", role, issue, err)
 	}
 	var held RoleClaim
-	err = tx.QueryRow(ctx, `select c.state, c.last_start_row, d.claim_token is not null, coalesce(d.generation, 0), coalesce(d.phase, '')
-		from claims c left join pending_task_deliveries d on d.claim_token = c.token and d.confirmed_at is null
-		where c.token = $1`, string(token)).
-		Scan(&held.State, &held.LastStartRow, &held.Pending, &held.PendingGeneration, &held.PendingPhase)
+	var pending bool
+	var task supervise.Delivery
+	var confirmed *time.Time
+	err = tx.QueryRow(ctx, `select c.state, c.last_start_row, d.claim_token is not null, coalesce(d.generation, 0), coalesce(d.phase, ''), d.confirmed_at
+		from claims c left join pending_task_deliveries d on d.claim_token = c.token where c.token = $1`, string(token)).
+		Scan(&held.State, &held.LastStartRow, &pending, &task.Generation, &task.Phase, &confirmed)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 	case err != nil:
 		return RoleRun{}, fmt.Errorf("read claim %s: %w", token, err)
 	default:
+		if pending {
+			if confirmed != nil {
+				task.ConfirmedAt = *confirmed
+			}
+			held.Pending = &task
+		}
 		run.Claim = &held
 	}
 	return run, nil
