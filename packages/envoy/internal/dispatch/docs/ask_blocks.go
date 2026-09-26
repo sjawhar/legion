@@ -30,7 +30,9 @@ type settlementReconciliation struct {
 	events  []model.Event
 }
 
-// ErrInvalidAskBlock rejects an agent edit that would leave an indexed ask malformed.
+// ErrInvalidAskBlock refuses a write that would leave an ask it writes or changes unreadable: an
+// upload (a spec at issue creation, a new document or version) or an edit whose ask breaks the
+// content rule paragraph+ bullet_list?, or an edit whose ask settlement cannot read.
 type ErrInvalidAskBlock struct {
 	Reason error
 }
@@ -219,17 +221,85 @@ type invalidAskBlock struct {
 	reason error
 }
 
-// validateAskBlocks reports the first reason a document's ask blocks cannot be settled: a
-// duplicate block id, then the first invalid block's reason.
-func validateAskBlocks(tree *pmdoc.Node) error {
-	_, invalidBlocks, err := collectAskBlocksForSettlement(tree)
-	if err != nil {
+// validateEditedAskBlocks refuses an edit that leaves an ask unreadable - breaking its content
+// rule, or holding what settlement cannot read - when the edit wrote or changed it.
+func validateEditedAskBlocks(before, after *pmdoc.Node) error {
+	return refuseChangedAsks(before, after, func(ask *pmdoc.Node) error {
+		if err := pmdoc.AskContentError(ask); err != nil {
+			return err
+		}
+		_, err := parseAskBlock(ask)
 		return err
+	}, nodeToken)
+}
+
+// refuseChangedAsks is the first reason check gives against an ask in after that before does not
+// hold as it is - an ask after wrote or changed - or nil. Two asks are the same when fingerprint
+// gives both the same value. An ask a browser edit already left unreadable,
+// which the write carries through unchanged, is not the write's to refuse: refusing it would refuse
+// every write to the document until someone repairs that ask in the browser, and settlement flags
+// it `invalid` meanwhile.
+func refuseChangedAsks(before, after *pmdoc.Node, check func(*pmdoc.Node) error, fingerprint func(*pmdoc.Node) (string, error)) error {
+	var held map[string]string
+	var refusal, walkErr error
+	pmdoc.Walk(after, func(node *pmdoc.Node) bool {
+		if refusal != nil || walkErr != nil {
+			return false
+		}
+		if node.Type != "ask" {
+			return true
+		}
+		reason := check(node)
+		if reason == nil {
+			return true
+		}
+		if held == nil {
+			if held, walkErr = askFingerprints(before, fingerprint); walkErr != nil {
+				return false
+			}
+		}
+		value, err := fingerprint(node)
+		if err != nil {
+			walkErr = err
+			return false
+		}
+		if id, _ := node.Attrs[pmdoc.BlockIDAttr].(string); held[id] == value {
+			return true
+		}
+		refusal = reason
+		return false
+	})
+	if walkErr != nil {
+		return walkErr
 	}
-	if len(invalidBlocks) > 0 {
-		return invalidBlocks[0].reason
-	}
-	return nil
+	return refusal
+}
+
+// askFingerprints is each ask in tree by its block id, as fingerprint gives it.
+func askFingerprints(tree *pmdoc.Node, fingerprint func(*pmdoc.Node) (string, error)) (map[string]string, error) {
+	held := make(map[string]string)
+	var err error
+	pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
+		if err != nil {
+			return false
+		}
+		if node.Type != "ask" {
+			return true
+		}
+		id, _ := node.Attrs[pmdoc.BlockIDAttr].(string)
+		held[id], err = fingerprint(node)
+		return true
+	})
+	return held, err
+}
+
+// askMarkdown is what an uploaded version can say of an ask: its rendering alone, taken as an
+// upload is (asUploaded) - without anchor marks, and with its server-owned attributes (`state`,
+// the answer, `invalid`) at their defaults, since an upload's are discarded for the ask row's. The
+// attributes a reader's browser derives are never rendered. A new version is markdown, so this is
+// how a version says it carries an ask unchanged.
+func askMarkdown(ask *pmdoc.Node) (string, error) {
+	return pmdoc.Render(asUploaded(&pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{ask}}))
 }
 
 func collectAskBlocksForSettlement(tree *pmdoc.Node) ([]askBlock, []invalidAskBlock, error) {

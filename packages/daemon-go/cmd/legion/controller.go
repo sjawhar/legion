@@ -29,6 +29,11 @@ import (
 
 const controllerUsage = "usage: legion controller start --config <controller.yaml> [--daemon-url <url>]"
 
+// controllerSecretVariable names the controller capability's secret: its file is written under it,
+// and the session finds that file through the variable with "_FILE" appended, as every pane finds
+// a secret file.
+const controllerSecretVariable = "LEGION_CONTROLLER_SECRET"
+
 func runController(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || args[0] != "start" {
 		fmt.Fprintln(stderr, controllerUsage)
@@ -54,7 +59,7 @@ func runController(ctx context.Context, args []string, stdout, stderr io.Writer)
 
 // controllerStart is `legion controller start`, the operator's side of a controller the daemon
 // cannot launch itself (LEGION-206 Requirement 11; the shipped cmdControllerStart,
-// packages/daemon/src/cli/controller-start.ts:262-384). In order, and nothing is kept, and nothing
+// packages/daemon/src/cli/controller-start.ts). In order, and nothing is kept, and nothing
 // but the probe is launched, until the daemon has answered: read the strict operator-side file;
 // refuse an operator token file others can read, and a blank or unreadable Envoy or Dispatch token
 // file, a role-prompt bundle missing a file, an instructions file that is missing or blank, and an
@@ -145,7 +150,7 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 		return 0, err
 	}
 
-	if _, err := runtime.WriteSecretFile(stateDir, token, "LEGION_CONTROLLER_SECRET", secret); err != nil {
+	if _, err := runtime.WriteSecretFile(stateDir, token, controllerSecretVariable, secret); err != nil {
 		return 0, fmt.Errorf("write the controller secret: %w", err)
 	}
 	executable, err := os.Executable()
@@ -219,7 +224,7 @@ func controllerEnvironment(cfg config.ControllerConfig, stateDir, token, secretF
 	if cfg.DispatchURL != "" {
 		env = append(env, [2]string{"DISPATCH_URL", cfg.DispatchURL}, [2]string{"DISPATCH_TOKEN_FILE", cfg.DispatchTokenFile})
 	}
-	env = append(env, [2]string{"LEGION_CONTROLLER_SECRET_FILE", secretFile})
+	env = append(env, [2]string{controllerSecretVariable + "_FILE", secretFile})
 	if cfg.EnvoyTokenFile != "" {
 		env = append(env, [2]string{"ENVOY_TOKEN_FILE", cfg.EnvoyTokenFile})
 	}
@@ -261,7 +266,8 @@ func removeDirs(created []string) {
 
 // fetchControllerSecret is `POST /legion/v1/controller/secret` with the operator token as a
 // bearer. A failed request names the daemon URL and never tries another address; a refusal
-// quotes the daemon's `error` (packages/daemon/src/cli/controller-start.ts:214-260).
+// quotes the daemon's `error` (the shipped fetchControllerSecret,
+// packages/daemon/src/cli/controller-start.ts).
 func fetchControllerSecret(ctx context.Context, daemonURL, operatorToken string) (string, error) {
 	const route = "/legion/v1/controller/secret"
 	status, body, err := operator{base: daemonURL, bearer: operatorToken}.do(ctx, http.MethodPost, route, struct{}{})

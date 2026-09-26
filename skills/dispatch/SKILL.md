@@ -688,7 +688,10 @@ its authoritative value at settlement.
 
 Questions about a document must be `ask` blocks, never an `Open questions` prose section. An ask
 body is one or more question paragraphs followed by an optional bullet list of options, where each
-item is `Label: description`. For example:
+item is `Label: description`. A spec, an uploaded document or an uploaded version holding an ask that
+breaks that shape - a code block, heading or quote in it, a paragraph after its options, a second
+list - is refused with `INVALID_ASK_BLOCK`; so is an edit that writes one. An ask someone left
+unreadable in the browser refuses nothing it is carried through unchanged by. For example:
 
 ```md
 :::ask{urgency="high" multiple="false"}

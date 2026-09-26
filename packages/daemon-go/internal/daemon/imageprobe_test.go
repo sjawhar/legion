@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -163,6 +164,11 @@ func TestProbeImageLoadsThePluginTheWayAPodDoes(t *testing.T) {
 	argv := f.read(t, "load.argv.1")
 	if !strings.Contains(argv, "--no-extensions ") || !strings.Contains(argv, "--extension "+root+" ") {
 		t.Errorf("the load probe ran `omp %s`, want it to run as a pod does: --no-extensions with %s as an explicit extension", strings.TrimSpace(argv), root)
+	}
+	// The plugin root is also the one extension root the probe's own discovery of task agents and
+	// skills reads: exported as the root, never as the probe's own path.
+	if env := f.read(t, "load.env.1"); !slices.Contains(strings.Split(env, "\n"), "LEGION_PROMPT_ROOT="+root) {
+		t.Errorf("the load probe's environment has no LEGION_PROMPT_ROOT=%s, the plugin root:\n%s", root, env)
 	}
 	// Without a plugin root the image probe has no lane a pod uses, and is refused before any probe
 	// runs.
