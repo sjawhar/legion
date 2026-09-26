@@ -329,18 +329,28 @@ const interruptedTask = "Your previous turn on this task was interrupted when yo
 // interrupted takes back the pending task whose turn the claim's dead process was running, so the
 // relaunched agent's ready sends it again: Oh My Pi does not resume the turn itself. The turn ran,
 // so the agent read the task and it keeps its read mark; it goes back unconfirmed under a new id
-// (takeBackPending), marked Interrupted, so it is sent behind interruptedTask. It is neither
-// retired nor its run marked served, since the turn never finished. A task with no turn running
-// is left as it is: the relaunch sends it as it was.
+// the new process's shim has no record of, marked Interrupted, so it is sent behind
+// interruptedTask. It is neither retired nor its run marked served, since the turn never
+// finished. A task with no turn running is left as it is: the relaunch sends it as it was.
+//
+// The taken-back task becomes the claim's only once its write has landed. A write that fails
+// leaves the task confirmed in memory as in the store, and the process is still recorded, so the
+// sweep finds it gone again and this takes the task back then — where a task taken back in memory
+// alone would be skipped by that death, relaunched from a store still holding it confirmed, and
+// retired as served by a restart.
 func (m *Machine) interrupted(ctx context.Context) error {
 	p := m.claim.Pending
 	if p == nil || p.ConfirmedAt.IsZero() {
 		return nil
 	}
 	m.log.Warn("supervise: the process died in the task's turn; the task waits for the relaunch", "delivery", p.ID)
-	next := m.takenBack(taskRead)
-	next.Interrupted = true
-	return m.putTakenBack(ctx, next, taskRead)
+	next := *p
+	next.ID, next.ConfirmedAt, next.Interrupted = rand.Text(), time.Time{}, true
+	if err := m.deps.Store.PutDelivery(ctx, m.claim.Token, next); err != nil {
+		return err
+	}
+	*p = next
+	return nil
 }
 
 // taskRead and taskUnread say whether the agent may have read a task being taken back: the task
@@ -376,39 +386,28 @@ func (m *Machine) markUnread(ctx context.Context) error {
 	return m.deps.Store.PutDelivery(ctx, m.claim.Token, *p)
 }
 
-// takeBackPending returns the pending delivery to waiting: unconfirmed if a turn had confirmed
-// it, under a new id so the retry is a new prompt rather than an echo the shim answers from its
-// record, and with the wait for its turn disarmed. A task taken back unread loses the mark, so
-// nothing the worker reports from whatever turn follows belongs to it.
+// takeBackPending returns the pending delivery to waiting after a prompt came to nothing:
+// unconfirmed if a turn had confirmed it, under a new id so the retry is a new prompt rather than
+// an echo the shim answers from its record, and with the wait for its turn disarmed. A task taken
+// back unread loses the mark, so nothing the worker reports from whatever turn follows belongs to
+// it.
+//
+// The refusal or timeout behind it arrives once, and settle and ServingRun read the claim as memory
+// holds it, so what it established — not confirmed, and not read when taken back unread — holds at
+// once, whether or not the write recording it lands. Only the new id waits for the write, so the
+// claim's id is always one the store holds.
 func (m *Machine) takeBackPending(ctx context.Context, read bool) error {
-	return m.putTakenBack(ctx, m.takenBack(read), read)
-}
-
-// takenBack is the pending delivery as taking it back leaves it, not yet the claim's: under a new
-// id, unconfirmed, and without its read mark when it is taken back unread.
-func (m *Machine) takenBack(read bool) Delivery {
-	next := *m.claim.Pending
-	next.ID, next.ConfirmedAt = rand.Text(), time.Time{}
-	if !read {
-		next.DeliveredAt = time.Time{}
-	}
-	return next
-}
-
-// putTakenBack writes next, the pending delivery taken back, and makes it the claim's only once the
-// write has landed: a write that fails leaves the pending task as it was — confirmed, if a turn had
-// confirmed it — so the next decision that meets the task takes it back again rather than finding
-// it already done in memory while the store still holds the confirmed delivery. The mark next was
-// taken back without goes through clearReadMark, with the prompt that set it.
-func (m *Machine) putTakenBack(ctx context.Context, next Delivery, read bool) error {
 	m.disarm(TimerTurn)
-	if err := m.deps.Store.PutDelivery(ctx, m.claim.Token, next); err != nil {
-		return err
-	}
 	p := m.claim.Pending
-	*p = next
+	p.ConfirmedAt = time.Time{}
 	if !read {
 		m.clearReadMark(p)
 	}
+	next := *p
+	next.ID = rand.Text()
+	if err := m.deps.Store.PutDelivery(ctx, m.claim.Token, next); err != nil {
+		return err
+	}
+	p.ID = next.ID
 	return nil
 }
