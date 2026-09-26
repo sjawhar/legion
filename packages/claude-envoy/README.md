@@ -51,9 +51,13 @@ events and sends them to the current Claude Code session as supported
 - `/clear` mints a new Claude session id, but a stdio MCP server keeps the `CLAUDE_CODE_SESSION_ID`
   it was spawned with. The SessionStart hook writes the current id to
   `${CLAUDE_PLUGIN_DATA}/sessions/<claude-pid>/session-id` (keyed by the `claude` process both the
-  hook and the server are children of, so concurrent sessions never share a file), and on each
-  heartbeat the server follows a changed id: it subscribes the new direct subject first, deregisters
-  the old id, registers the new one, drops the old subject, and moves a held role by soft claim.
+  hook and the server are children of, so concurrent sessions never share a file). The server
+  polls that file every 250 ms and follows a changed id within that time, with the heartbeat as the
+  fallback: it subscribes the new direct subject first, deregisters the old id, drops the old
+  subject, registers the new one, and moves a held role by soft claim. The listener merges
+  registered topics into the entry and never removes one, so the old subject goes before the
+  registration, and the server sends its registry writes one at a time, each registration reading
+  the id and topics when it runs.
   Asks authored before `/clear` carry the old Dispatch actor id and drop out of the open-asks
   summary (the same shape as OMP on fork). `ENVOY_SESSION_ID` (QA override) disables the handoff.
 - `envoy_inbox` is local recovery state: the most recent 50 event summaries, with no envelope
@@ -203,6 +207,21 @@ marketplace with a `command` source in copy mode whose command prints a staged c
 (without `node_modules`), install `claude-envoy@<dev-marketplace>`, and run the smoke against
 that entry. Never `claude plugin marketplace add sjawhar/legion#<branch>`: the marketplace name comes
 from the repository's `marketplace.json` and would replace the real `legion-plugins` registration.
+
+`smoke-clear-rebind.sh` checks the `/clear` handoff against the live listener. It starts Claude
+Code with user settings left out (`--setting-sources project,local`) and the build under test from
+`--plugin-dir` (`CLAUDE_PLUGIN_DIR`, default: this package, which runs its committed `dist/`, so run
+`bun run build` first), sends `/clear`, and passes when the registry entry has moved to the new
+session id, lists the new direct subject, and still lacks the old one two heartbeats later. It also
+fails when the entry moves later than the handoff poll allows; with `ENVOY_HEARTBEAT_MS=60000` that
+checks the poll rather than a heartbeat that happened to fall soon after `/clear`. It needs
+`tmux`, `curl`, `jq`, an authenticated `claude`, and the listener and NATS; it sends no prompt to the
+model and removes both ids' registry entries when it exits. Pointed at an older build (an installed
+plugin cache directory), it reproduces the stale subject that build leaves behind:
+
+```bash
+ENVOY_NATS_URL=nats://127.0.0.1:4222 packages/claude-envoy/scripts/smoke-clear-rebind.sh
+```
 
 ## Local checks
 

@@ -70,3 +70,19 @@ test("closes all NATS subscriptions and the connection during channel shutdown",
     await broker.stop()
   }
 })
+
+test("unfollow drops a topic from topics() before it waits for the drain", async () => {
+  const broker = new FakeNatsServer()
+  const connection = await connect({ servers: broker.url })
+  const forwarder = createChannelForwarder(connection, { deliver: async () => undefined })
+
+  try {
+    forwarder.follow(COMMENT)
+    const dropping = forwarder.unfollow([COMMENT])
+    expect(forwarder.topics()).toEqual([])
+    await dropping
+  } finally {
+    await forwarder.close()
+    await broker.stop()
+  }
+})
