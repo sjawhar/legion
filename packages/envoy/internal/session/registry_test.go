@@ -17,6 +17,7 @@ import (
 
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/kvwatch"
 	"github.com/sjawhar/envoy/internal/testnats"
 	"github.com/testcontainers/testcontainers-go"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
@@ -184,30 +185,6 @@ func TestSessionRegistry_Delete(t *testing.T) {
 	}
 }
 
-func TestSessionRegistry_NilPutReturnsErrNoKV(t *testing.T) {
-	var reg *SessionRegistry
-	err := reg.Put("ses_test", SessionEntry{Port: 1234})
-	if err != ErrNoKV {
-		t.Fatalf("expected ErrNoKV, got: %v", err)
-	}
-}
-
-func TestSessionRegistry_NilGetReturnsErrNoKV(t *testing.T) {
-	var reg *SessionRegistry
-	_, err := reg.Get("ses_test")
-	if err != ErrNoKV {
-		t.Fatalf("expected ErrNoKV, got: %v", err)
-	}
-}
-
-func TestSessionRegistry_NilDeleteReturnsErrNoKV(t *testing.T) {
-	var reg *SessionRegistry
-	err := reg.Delete("ses_test")
-	if err != ErrNoKV {
-		t.Fatalf("expected ErrNoKV, got: %v", err)
-	}
-}
-
 func TestSessionRegistry_Ping_Healthy(t *testing.T) {
 	client := setupNATS(t)
 	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))
@@ -235,13 +212,6 @@ func TestSessionRegistry_Ping_ClosedConnReturnsError(t *testing.T) {
 
 	if err := reg.Ping(); err == nil {
 		t.Fatal("Ping after conn close should return error")
-	}
-}
-
-func TestSessionRegistry_Ping_NilReceiver(t *testing.T) {
-	var reg *SessionRegistry
-	if err := reg.Ping(); err != ErrNoKV {
-		t.Fatalf("expected ErrNoKV, got %v", err)
 	}
 }
 
@@ -315,7 +285,7 @@ func TestSessionRegistryWatcherEvictsMalformedValue(t *testing.T) {
 	if err := reg.Put(sessionID, SessionEntry{Port: 13381, MachineID: "example-host", Dir: "/example"}); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	revision, err := reg.kv.Put(sessionID, []byte("{"))
+	revision, err := reg.watcher.KV().Put(sessionID, []byte("{"))
 	if err != nil {
 		t.Fatalf("put malformed value: %v", err)
 	}
@@ -346,8 +316,8 @@ func TestSessionRegistryPutDoesNotOverwriteNewerWatcherValue(t *testing.T) {
 	}
 
 	const sessionID = "ses_revision"
-	raw := reg.kv
-	reg.kv = &interleavingSessionPutKeyValue{
+	raw := reg.watcher.KV()
+	useKV(t, reg, &interleavingSessionPutKeyValue{
 		KeyValue: raw,
 		afterFirstPut: func() {
 			remote := SessionEntry{Port: 13382, MachineID: "remote-host", Dir: "/remote", Driving: true}
@@ -363,7 +333,7 @@ func TestSessionRegistryPutDoesNotOverwriteNewerWatcherValue(t *testing.T) {
 				return err == nil && got.Port == remote.Port
 			})
 		},
-	}
+	})
 	if err := reg.Put(sessionID, SessionEntry{Port: 13381, MachineID: "local-host", Dir: "/local", Driving: true}); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
@@ -394,14 +364,14 @@ func TestSessionRegistryDeleteHistoryFailureSuppressesStaleWatcherUpdate(t *test
 	if err := reg.Put(sessionID, item); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	entry, err := reg.kv.Get(sessionID)
+	entry, err := reg.watcher.KV().Get(sessionID)
 	if err != nil {
 		t.Fatalf("Get seeded entry: %v", err)
 	}
-	reg.kv = &historyFailSessionKeyValue{
-		KeyValue: reg.kv,
+	useKV(t, reg, &historyFailSessionKeyValue{
+		KeyValue: reg.watcher.KV(),
 		err:      errors.New("injected history failure"),
-	}
+	})
 	if err := reg.Delete(sessionID); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
@@ -411,6 +381,20 @@ func TestSessionRegistryDeleteHistoryFailureSuppressesStaleWatcherUpdate(t *test
 	reg.mu.Unlock()
 	if _, err := reg.Get(sessionID); err == nil {
 		t.Fatal("Get returned a session restored by a stale watcher update")
+	}
+}
+
+// useKV rebuilds the registry's watcher over kv, a wrapper of its bucket handle, so the registry writes
+// through kv from here on. The replaced watcher is stopped first.
+func useKV(t *testing.T, r *SessionRegistry, kv natsgo.KeyValue) {
+	t.Helper()
+	r.watcher.Stop()
+	r.watcher = kvwatch.New("session registry", kv, r.applyWatched, r.resetCache)
+	r.watcher.Start()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := r.WaitForCacheReady(ctx); err != nil {
+		t.Fatalf("wait for the rebuilt watcher: %v", err)
 	}
 }
 

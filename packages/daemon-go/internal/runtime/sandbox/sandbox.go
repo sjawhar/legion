@@ -206,21 +206,11 @@ func (r *Runtime) start(ctx context.Context, dyn dynamic.Interface, kube kuberne
 	r.pods = r.informer(&r.podFeed, kube, &corev1.Pod{},
 		func(ctx context.Context, o metav1.ListOptions) (k8sruntime.Object, error) { return pods.List(ctx, o) },
 		func(ctx context.Context, o metav1.ListOptions) (watch.Interface, error) { return pods.Watch(ctx, o) })
-	failed := make(chan error, 1)
 	for _, informer := range []cache.SharedIndexInformer{r.sandboxes, r.pods} {
 		if _, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 			AddFunc:    func(obj any) { r.notify(obj) },
 			UpdateFunc: func(_, obj any) { r.notify(obj) },
 			DeleteFunc: func(obj any) { r.notify(obj) },
-		}); err != nil {
-			return fmt.Errorf("sandbox runtime: %w", err)
-		}
-		if err := informer.SetWatchErrorHandler(func(_ *cache.Reflector, err error) {
-			r.log.Warn("sandbox runtime: list or watch failed", "err", err)
-			select {
-			case failed <- err:
-			default:
-			}
 		}); err != nil {
 			return fmt.Errorf("sandbox runtime: %w", err)
 		}
@@ -230,16 +220,22 @@ func (r *Runtime) start(ctx context.Context, dyn dynamic.Interface, kube kuberne
 	go r.pods.RunWithContext(running)
 	tick := time.NewTicker(50 * time.Millisecond)
 	defer tick.Stop()
+	// Whether the stores are being fed is the feeds' answer, not client-go's watch-error handler:
+	// the reflector retries a refused list or watch itself and never calls that handler, so a boot
+	// that waited on it sat until its own deadline with two stores nothing was filling. Each list
+	// and watch records its outcome in its feed, and a feed that is failing here refuses the boot
+	// naming the request that failed.
 	for !r.synced() {
 		select {
 		case <-ctx.Done():
 			stop()
 			return fmt.Errorf("sandbox runtime: the informers did not sync: %w", ctx.Err())
-		case err := <-failed:
-			stop()
-			return fmt.Errorf("sandbox runtime: listing the namespace %s's Sandboxes and pods failed before the stores synced: %w",
-				r.namespace, err)
 		case <-tick.C:
+			if err := errors.Join(r.sandboxFeed.check(), r.podFeed.check()); err != nil {
+				stop()
+				return fmt.Errorf("sandbox runtime: listing the namespace %s's Sandboxes and pods failed before the stores synced: %w",
+					r.namespace, err)
+			}
 		}
 	}
 	context.AfterFunc(ctx, stop)

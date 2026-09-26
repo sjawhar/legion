@@ -180,6 +180,33 @@ func TestApprovalBeforeGreenChecksAdvancesWhenTheChecksSettle(t *testing.T) {
 	assertPhase(t, pool, phase.Retro)
 }
 
+// The fix that exhausted the count can pass: a green settlement on it is no blocked pull request,
+// and only a red one publishes pr-blocked, once for the count.
+func TestAnExhaustedCountPublishesPRBlockedOnlyOnARedSettlement(t *testing.T) {
+	pool := migratedPool(t)
+	ctx := context.Background()
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U"})
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Failing: []string{}, FailingStatuses: []string{}, FixAttempts: 3, HeadCounted: "head"})
+	engine := testEngine()
+	settle := func(eventID string, generation int64, verdict string, failing []string) {
+		t.Helper()
+		if _, err := intake.ApplyFact(ctx, pool, "github", eventID, intake.PullRequestChecks{
+			Repo: "sjawhar/legion", Number: 42, HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: "ci", ID: generation}}, Generation: generation, Snapshot: eventID, Verdict: verdict, Failing: failing,
+		}, engine, admissionStub{}); err != nil {
+			t.Fatalf("ApplyFact %s: %v", eventID, err)
+		}
+	}
+
+	settle("checks-green", 1, "green", []string{})
+	if kinds := noticeKinds(t, pool, "LEGION-208"); len(kinds) != 0 {
+		t.Fatalf("notices after a green settlement at an exhausted count = %v, want none", kinds)
+	}
+	settle("checks-red", 2, "red", []string{"ci"})
+	if kinds := noticeKinds(t, pool, "LEGION-208"); len(kinds) != 1 || kinds[0] != "pr-blocked" {
+		t.Fatalf("notices after a red settlement at the exhausted count = %v, want one pr-blocked", kinds)
+	}
+}
+
 // A file-backed phase's completion carries the commit that last changed the role's handoff. When a
 // role reports, in a later phase, the same carrying commit it reported before, it wrote and
 // committed no handoff since its previous phase ended: the completion is refused.

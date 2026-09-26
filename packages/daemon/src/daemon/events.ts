@@ -20,6 +20,7 @@ import {
   type EnvelopeJson,
   effectiveOutcome,
   type LegionEventPayload,
+  type ReducerConfig,
   reduceDispatchEvent,
   reduceGithubEvent,
   refreshCiIdentity,
@@ -147,7 +148,7 @@ export interface EventPumpDeps {
   /** Overridable for tests; the real bounded backoff (`drainControllerNoticesLocked`'s doc
    * comment) is 1s doubling to a 60s ceiling, which no test should have to wait out for real. */
   controllerNoticeRetryDelayMs?(attempt: number): number;
-  config: DaemonConfig;
+  config: DaemonConfig & ReducerConfig;
 }
 
 /** A core-NATS role-lane delivery exception, decoded from

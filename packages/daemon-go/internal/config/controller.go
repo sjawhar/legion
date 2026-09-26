@@ -41,7 +41,7 @@ type ControllerConfig struct {
 	DispatchTokenFile string
 	InstructionsPath  string
 	// OmpInvocation is the invocation as configured, "" when the file sets none; the command
-	// resolves it as the daemon resolves its own (tmux.ResolveOmpInvocation), with no pinned
+	// resolves it as the daemon resolves its own (omplaunch.ResolveInvocation), with no pinned
 	// default in Go.
 	OmpInvocation   string
 	OmpLaunchPrefix []string

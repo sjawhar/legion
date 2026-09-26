@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 )
@@ -657,7 +658,7 @@ func TestASuspensionWhoseTaskCannotBeRetiredStillRevokesTheCapability(t *testing
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarnessOf(t, tc.c)
 			h.reach(StateReady)
-			h.must(RequestDeliver{Claim: h.token, Task: "the finished phase's task"})
+			h.must(RequestDeliver{Claim: h.token, Task: "the finished phase's task", Phase: phase.Implementing})
 			h.wantPrompts(1)
 			h.store.fail("RetireDelivery", errBoom)
 

@@ -14,6 +14,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
 
 // Admission assigns root issues and orphans to the configured number of architect slots.
@@ -79,6 +80,12 @@ func (a *Admission) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (int
 
 // Reconcile applies the bounded Dispatch boot read to existing records, then fills newly available
 // capacity using the same promotion effects Apply emits. It performs no Dispatch I/O itself.
+//
+// The read is a snapshot with no actor on it: in it, an agent's own status write during a restart
+// looks exactly like a human's move. Dispatch says how far each issue's event log has run, so a
+// record behind that sequence is left alone — the stream still holds those events, and delivers
+// them with the actor that made each one. A record level with Dispatch has nothing coming, and is
+// reconciled here.
 func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []dispatch.IssueSummary) error {
 	slots, err := a.store.Slots(ctx, tx)
 	if err != nil {
@@ -105,6 +112,11 @@ func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []dispat
 			}
 			continue
 		}
+		if summary.LastSeq > stored.LastDispatchSeq {
+			a.log.Info("admission reconcile: the stream holds newer events for this issue; leaving it to them",
+				"issue", stored.Key, "applied", stored.LastDispatchSeq, "dispatch", summary.LastSeq)
+			continue
+		}
 
 		if summary.Status == "todo" && readmittable(*stored) {
 			if err := a.readmit(ctx, tx, *stored, summary.Title, deref(summary.Parent), summary.Rank, stored.LastDispatchSeq); err != nil {
@@ -117,15 +129,11 @@ func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []dispat
 				continue
 			}
 		}
-		if stored.Status == summary.Status && stored.Title == summary.Title && stored.Rank == summary.Rank && sameParent(stored.Parent, summary.Parent) {
-			continue
-		}
-		stored.Status = summary.Status
-		stored.Title = summary.Title
-		stored.Rank = summary.Rank
-		stored.Parent = copyParent(summary.Parent)
-		if err := a.store.PutIssue(ctx, tx, *stored); err != nil {
-			return fmt.Errorf("update reconciled issue %s: %w", summary.Key, err)
+		if err := a.recordObservation(ctx, tx, *stored, observed{
+			Title: summary.Title, Parent: deref(summary.Parent), Rank: summary.Rank,
+			Status: summary.Status, Seq: stored.LastDispatchSeq,
+		}); err != nil {
+			return err
 		}
 	}
 
@@ -141,7 +149,7 @@ func (a *Admission) putNewRoot(ctx context.Context, tx pgx.Tx, observation intak
 		Tree:            observation.Key,
 		Project:         a.project,
 		Title:           observation.Title,
-		Parent:          parent(observation.Parent),
+		Parent:          record.ParentOf(observation.Parent),
 		Phase:           phase.Admitted,
 		Generation:      1,
 		Status:          "todo",
@@ -174,13 +182,35 @@ func (a *Admission) applyObservation(ctx context.Context, tx pgx.Tx, stored reco
 		a.log.Info("admission orphan", "issue", stored.Key, "parent", observation.Parent)
 		return a.readmit(ctx, tx, stored, observation.Title, observation.Parent, observation.Rank, observation.Seq)
 	}
-	stored.Title = observation.Title
-	stored.Parent = parent(observation.Parent)
-	stored.Rank = observation.Rank
-	stored.Status = observation.Status
-	stored.LastDispatchSeq = observation.Seq
+	return a.recordObservation(ctx, tx, stored, observed{
+		Title: observation.Title, Parent: observation.Parent, Rank: observation.Rank,
+		Status: observation.Status, Seq: observation.Seq,
+	})
+}
+
+// observed is what one Dispatch observation of an issue says about it, from a live event or from
+// the boot read.
+type observed struct {
+	Title, Parent, Rank, Status string
+	Seq                         int64
+}
+
+// recordObservation is the one place a Dispatch observation reaches an issue record: a live
+// event's and the boot read's, so a rename, a re-rank, a re-parent or a status change is written
+// the same way whichever brought it. Each caller owns its own guards — the stream's sequence
+// fence, the boot read's — and this writes what they let through.
+func (a *Admission) recordObservation(ctx context.Context, tx pgx.Tx, stored record.Issue, o observed) error {
+	if stored.Title == o.Title && stored.Rank == o.Rank && stored.Status == o.Status &&
+		sameParent(stored.Parent, record.ParentOf(o.Parent)) && stored.LastDispatchSeq == o.Seq {
+		return nil
+	}
+	stored.Title = o.Title
+	stored.Parent = record.ParentOf(o.Parent)
+	stored.Rank = o.Rank
+	stored.Status = o.Status
+	stored.LastDispatchSeq = o.Seq
 	if err := a.store.PutIssue(ctx, tx, stored); err != nil {
-		return fmt.Errorf("record observation of %s: %w", observation.Key, err)
+		return fmt.Errorf("record observation of %s: %w", stored.Key, err)
 	}
 	return nil
 }
@@ -201,7 +231,7 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 	}
 	stored.Project = a.project
 	stored.Title = title
-	stored.Parent = parent(parentKey)
+	stored.Parent = record.ParentOf(parentKey)
 	stored.Tree = stored.Key
 	stored.Phase = phase.Admitted
 	stored.Generation++
@@ -214,7 +244,9 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 	if err := a.store.PutIssue(ctx, tx, stored); err != nil {
 		return fmt.Errorf("record re-admission %s: %w", stored.Key, err)
 	}
-	return a.store.ClearGeneration(ctx, tx, stored.Key)
+	// A root set back to todo is a new generation of the whole tree, so the old generation's pull
+	// request, gate and handoffs go for every issue of it, not only the root's.
+	return a.store.ClearTreeGeneration(ctx, tx, stored.Tree)
 }
 
 func (a *Admission) releaseDoneSlots(ctx context.Context, tx pgx.Tx) error {
@@ -300,6 +332,9 @@ func (a *Admission) promote(ctx context.Context, tx pgx.Tx) error {
 		if err := a.enqueue(ctx, tx, candidate.Key, record.SuperviseRequest{Op: "start", Tree: candidate.Tree, Role: claim.RoleArchitect, Generation: candidate.Generation}, now); err != nil {
 			return err
 		}
+		if err := a.startMidPhaseChildren(ctx, tx, candidate, issues, now); err != nil {
+			return err
+		}
 		slots, own = append(slots, slot), append(own, slot)
 	}
 	return nil
@@ -320,6 +355,31 @@ func ownSlots(issues []record.Issue, slots []record.Slot) []record.Slot {
 		}
 	}
 	return own
+}
+
+// startMidPhaseChildren starts the worker of every child of the admitted tree that a previous run
+// left mid-phase. A tree that closed retired every member's claim, and a re-admitted root only
+// brings back its own architect: a child left in testing has no worker, only its worker's handoff
+// moves it, and the architect cannot release a child already in the workflow. Each start carries
+// the child's own generation and phase, which is what the outbox fences it against, and the task
+// that says to carry the phase on: a start with no task leaves the resumed agent holding its old
+// transcript with nothing asked of it, and only its own handoff moves the phase.
+func (a *Admission) startMidPhaseChildren(ctx context.Context, tx pgx.Tx, root record.Issue, issues []record.Issue, now time.Time) error {
+	for _, child := range issues {
+		if child.Key == root.Key || child.Tree != root.Tree {
+			continue
+		}
+		role := workflow.RoleFor(child.Phase)
+		if role == "" || record.OutOfWorkflow(child.Status) {
+			continue
+		}
+		payload := record.SuperviseRequest{Op: "start", Tree: child.Tree, Role: role, Generation: child.Generation,
+			Phase: child.Phase, Task: workflow.ResumePhaseTask(child)}
+		if err := a.enqueue(ctx, tx, child.Key, payload, now); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (a *Admission) enqueue(ctx context.Context, tx pgx.Tx, issue string, payload record.OutboxPayload, now time.Time) error {
@@ -343,21 +403,6 @@ func nextSlotIndex(slots []record.Slot) int {
 			return index
 		}
 	}
-}
-
-func parent(key string) *string {
-	if key == "" {
-		return nil
-	}
-	return &key
-}
-
-func copyParent(value *string) *string {
-	if value == nil {
-		return nil
-	}
-	copy := *value
-	return &copy
 }
 
 func sameParent(left, right *string) bool {

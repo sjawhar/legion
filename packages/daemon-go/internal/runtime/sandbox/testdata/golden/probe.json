@@ -32,7 +32,9 @@
               "3",
               "--plugin-root",
               "/opt/legion/pi-legion-envoy",
-              "--pod-safety"
+              "--pod-safety",
+              "--role-references",
+              "{\"LEGION_PROMPT_AGENTS\":{\"oracle\":[\"roles/core/planner.md\"]},\"LEGION_PROMPT_SKILLS\":{}}"
             ],
             "image": "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
             "name": "probe",

@@ -9,8 +9,10 @@
 #
 # Every pod carries the operator fixture's pod (scripts/e2e/fixtures/operator-route/pod.yml): its
 # model route, overlay, ServiceAccount and projected token. Legion holds none of it. The run
-# creates its own copy of the ConfigMap the fixture mounts, named for the run's project, before the
-# harness runs; the teardown deletes it with the rest of the run's objects.
+# creates its own copy of the ConfigMap the fixture mounts, named for the run's project, its
+# models.yml pointed at LEGION_E2E_MODEL_GATEWAY_URL, and its own providers Secret
+# (legion-<project>-providers, one key provider_keys names), before the harness runs; the teardown
+# deletes both with the rest of the run's objects.
 #
 # Everything the run creates carries its own project label, s4a-<run id>, and lib/namespace-rig.sh
 # owns it: on any exit the teardown deletes by exact name every Sandbox the harness recorded, then
@@ -21,6 +23,8 @@
 # Inputs: LEGION_E2E_RUNTIME_CONTEXT (required) and LEGION_E2E_RUNTIME_KUBECONFIG (default
 # ~/.kube/legion-daemon-production) name the restricted identity; LEGION_E2E_OPERATOR_CONTEXT
 # (default production) the admin one; LEGION_E2E_IMAGE (required) the worker image by digest;
+# LEGION_E2E_MODEL_GATEWAY_URL (required) the model gateway's Anthropic endpoint, the route the
+# fixture's models.yml names;
 # STAGE4A_FROM a development entry point, which is never the proof; STAGE4A_EVIDENCE_DIR where the
 # transcript and the runtime's log go (default a fresh /tmp directory, kept and printed).
 set -euo pipefail
@@ -42,6 +46,7 @@ project_prefix=s4a-
 project="${project_prefix}$(date -u +%Y%m%d%H%M%S)-$(od -An -N2 -tx1 /dev/urandom | tr -d ' \n')"
 fixture=$root/scripts/e2e/fixtures/operator-route
 route_configmap=legion-operator-route-$project
+providers_secret=legion-$project-providers
 record=$work/sandboxes
 check=setup
 torn_down=
@@ -85,6 +90,8 @@ for tool in go kubectl aws curl ss secrets diff; do command -v "$tool" >/dev/nul
 [ -n "$runtime_context" ] || fail "LEGION_E2E_RUNTIME_CONTEXT is unset: the runtime must run as the Legion daemon's restricted identity, never the operator's"
 [ -r "$runtime_kubeconfig" ] || fail "the runtime kubeconfig $runtime_kubeconfig is not readable"
 case "$image" in *@sha256:*) ;; *) fail "LEGION_E2E_IMAGE must be the worker image pinned by digest (…@sha256:…), not '$image'" ;; esac
+gateway=$(bash "$root/scripts/e2e/lib/model-gateway-url.sh") ||
+  fail "LEGION_E2E_MODEL_GATEWAY_URL is not a model gateway URL the fixture's models.yml can name (the reason is above)"
 imds=$(curl -sf -m 5 -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60') ||
   fail "instance metadata is unreachable; the harness binds the devbox's private address, read from it"
 host=$(curl -sf -m 5 -H "X-aws-ec2-metadata-token: $imds" http://169.254.169.254/latest/meta-data/local-ipv4) ||
@@ -111,10 +118,22 @@ snapshotted=1
 note "[operator] $(wc -l <"$evidence/namespace-before.txt") objects in $namespace carry no project label or project $project"
 
 begin operator-route
-op create configmap "$route_configmap" --from-file=models.yml="$fixture/models.yml" --from-file=overlay.yml="$fixture/overlay.yml" \
+# shellcheck disable=SC2016  # the fixture's literal placeholder, not an expansion
+placeholder='${LEGION_E2E_MODEL_GATEWAY_URL}'
+models=$(<"$fixture/models.yml")
+printf '%s\n' "${models//"$placeholder"/"$gateway"}" >"$work/models.yml"
+grep -qFx "    baseUrl: $gateway" "$work/models.yml" || fail "the fixture's models.yml has no baseUrl $placeholder to point at the gateway"
+op create configmap "$route_configmap" --from-file=models.yml="$work/models.yml" --from-file=overlay.yml="$fixture/overlay.yml" \
   --dry-run=client -o yaml | kubectl label --local -f - "legion.dev/project=$project" -o yaml | op create -f - >/dev/null ||
   fail "the operator could not create ConfigMap $route_configmap"
-note "[operator] ConfigMap $route_configmap: models.yml and overlay.yml from $fixture, label legion.dev/project=$project"
+note "[operator] ConfigMap $route_configmap: models.yml (baseUrl from LEGION_E2E_MODEL_GATEWAY_URL) and overlay.yml from $fixture, label legion.dev/project=$project"
+# The run's providers Secret, named as the runtime names it (ProvidersSecretName), holding one key no
+# model route reads: provider_keys hands it to every agent's Oh My Pi, and provider-key checks where
+# it arrives.
+op create secret generic "$providers_secret" --from-literal=stage4a="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')" \
+  --dry-run=client -o yaml | kubectl label --local -f - "legion.dev/project=$project" -o yaml | op create -f - >/dev/null ||
+  fail "the operator could not create Secret $providers_secret"
+note "[operator] Secret $providers_secret: one key, stage4a (a random value no route reads), label legion.dev/project=$project"
 pass
 
 begin build

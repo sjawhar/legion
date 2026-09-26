@@ -61,7 +61,7 @@ boot, and requires `agent-models=resolved`: each agent's model resolves, with a 
 tool resolves a subagent's (`packages/daemon-go/internal/runtime/sandbox/probe.go`). To run them yourself:
 `docker run --rm --entrypoint legion ghcr.io/sjawhar/legion-worker@sha256:… probe-image`, and
 `docker run --rm --entrypoint /opt/legion/go/bin/legion ghcr.io/sjawhar/legion-worker@sha256:… probe-image --plugin-root /opt/legion/pi-legion-envoy --skip-agent-models`
-(the plugin root a Sandbox pod loads the plugin from, so the Go probe loads it the same way; without
+(`--plugin-root` is required: the plugin root a Sandbox pod loads the plugin from, so the Go probe loads it the same way; without
 `--skip-agent-models` it also resolves each agent's model, which needs the operator's model roles).
 
 ### Pin by digest, never by tag
@@ -320,12 +320,13 @@ unspecified host (`packages/daemon-go/internal/config/kubernetes.go`). It also r
 `runtime.kubernetes.pod` — `env`, `volumes` (each one `secret`, `config_map`, or `projected`
 source), `volume_mounts` (read-only unless `read_only: false`), and `service_account` — which it
 adds to every pod, the image probe's included, refusing any name or path of Legion's own or the
-worker image's; and under it `provider_keys` maps each variable Oh My Pi reads to a key of the
+worker image's; and the top-level `provider_keys` maps each variable Oh My Pi reads to a key of the
 providers Secret below, which every pod then mounts, those keys alone, for the shim to export.
 Legion holds no model route: everything a pod's Oh My Pi needs to reach a model — a `models.yml`,
 a settings overlay in `PI_CONFIG_FILES`, a token — is the operator's, through `pod` and
 `provider_keys`. `scripts/e2e/fixtures/operator-route/` is one such operator's (the Go live
-harnesses': the Hawk model gateway, keyed by a projected ServiceAccount token).
+harnesses': the Hawk model gateway, keyed by a projected ServiceAccount token). [Operator
+configuration](#operator-configuration) is what an operator gives it.
 
 `runtime` is either the scalar `tmux` (the default) or a mapping whose single key selects the
 Kubernetes runtime and carries its settings:
@@ -415,6 +416,69 @@ Four prerequisites and caveats the configuration cannot check for you:
   switch does the same with pod locators — a working copy on the daemon host and one on a PVC are
   never the same files. Start the other runtime on a new `state_dir` (or after every tree has closed),
   and never point the two at one state directory.
+
+### Operator configuration
+
+The Go coordinator's. Legion holds no model, provider or route. Everything a pod's Oh My Pi needs to
+reach a model is the operator's, and the daemon hands the same pieces to every pod it runs: each
+claim's pod and the image probe's.
+
+- **`runtime.kubernetes.pod`** has four keys. `env` is variables set in the agent's container.
+  `volumes` are each one `secret`, `config_map`, or `projected` source; a projected
+  `service_account_token` must last at least 600 s, the least the API server issues. `volume_mounts`
+  are read-only unless `read_only: false`, and may use `sub_path`. `service_account` is the pods'
+  ServiceAccount; unset, pods run as the namespace's `default` ServiceAccount. A name or path that
+  collides with Legion's own is refused at load, naming both: a variable the runtime, the worker
+  image's `ENV` or every launch sets, a volume name Legion uses, or a mount at, under or above a path
+  Legion mounts, the image owns, or a tool runs from. `legion start --check-config` runs the same
+  check. [`scripts/e2e/fixtures/operator-route/pod.yml`](../scripts/e2e/fixtures/operator-route/pod.yml)
+  is a complete one, the live harnesses': a `models.yml` and a settings overlay from a ConfigMap, and
+  a projected token its key command reads.
+- **`provider_keys`** (top-level) maps each variable Oh My Pi reads to a key of
+  [the providers Secret](#the-providers-secret), `legion-<project>-providers`, which the operator
+  creates. Every pod mounts those keys alone, and the shim exports each into Oh My Pi's environment,
+  never its own. A Secret or key the kubelet cannot mount is refused at boot by the image probe,
+  naming the Secret and keys. A `provider_keys` variable that anything else in the pod sets is
+  refused at load.
+- **Settings order.** Oh My Pi reads `PI_CONFIG_FILES` in order, each overlay outranking the ones
+  before it and all of them outranking a repository's `.omp/config.yml`. Legion writes the pod
+  baseline's overlay (remote compaction, memory backends, image URLs and dev auto-QA off) and names
+  it first, ahead of the operator's, so the operator's overlay outranks it. The baseline also sets
+  `OTEL_SDK_DISABLED=true` and `PI_AUTO_QA=0` unless the pod sets them, and keeps the operator's value
+  when it does. It sets `PI_CONFIG_DIR=.omp` and `OMP_SESSION_STORAGE=file`, which an operator's pod
+  may not set, since they decide where Oh My Pi keeps the session a resume reads.
+- **Model roles.** Legion's shipped agents dispatch by role alias: `oracle` as `@oracle`, both
+  review agents as `@review`. The boot gate refuses, by agent, any whose role the operator's
+  settings (`modelRoles`, or `task.agentModelOverrides`) leave unconfigured, or whose model's key
+  does not work, because Oh My Pi's task tool would quietly run it on the parent session's model.
+  The bundled agents Legion's prompts also dispatch use Oh My Pi's built-in roles: `scout` is
+  `@smol` and `reviewer` is `@slow`. `smol` and `slow`, left unset in every layer, inherit the
+  default role's model, which the gate accepts (no other role inherits it). Settings records merge
+  key by key across layers, though, so a role the operator's overlay does not name can be named by a
+  repository's `.omp/config.yml`. Name each role those agents use (`review`, `oracle`, `smol`,
+  `slow`) to keep the choice the operator's.
+- **The repository `.env`.** Oh My Pi's runtime loads the working directory's `.env` into its
+  environment at start, filling every variable the pod left unset. A repository can therefore set
+  anything Oh My Pi reads from its environment: a provider's API key, `PI_SMOL_MODEL`,
+  `PI_SLOW_MODEL` and `PI_PLAN_MODEL` (which override those roles), and `CLAUDE_CODE_USE_FOUNDRY`
+  with `FOUNDRY_BASE_URL` (Anthropic Foundry, which takes a model's endpoint). Set every such
+  variable your route depends on in `pod.env`, where the pod's value outranks `.env`. The fixture
+  sets `CLAUDE_CODE_USE_FOUNDRY: "0"` for this reason.
+- **Providers the route does not use.** Oh My Pi falls back from a failing provider to any other
+  enabled provider it holds a key for, without a word. Legion names no provider, so the operator's
+  overlay disables every provider its route does not use (`disabledProviders`), and can hold every
+  session to the route's models (`enabledModels`). The fixture's overlay disables Bedrock twice (a
+  node's instance role is its key), Google, and the local servers that need no key. A provider a key
+  could turn on, such as `cursor` through a repository's `CURSOR_ACCESS_TOKEN`, belongs on the list
+  when the route does not use it.
+- **A key that fails at boot refuses the boot.** The image probe runs every provider key command the
+  agents' models need, at every boot. A command that fails is "no working credentials", whether the
+  cause is a revoked token or a network blip: the gate cannot tell the two apart, and passing on a
+  failed key is the fallback the gate exists to stop. Nothing restarts the Go daemon on its own: it
+  runs off the cluster, and whoever started it starts it again (the in-cluster Deployment runs the
+  TypeScript daemon). On the devbox harness, Stage 3 at `6963c3d6` ran the gateway's key command 29
+  times: it minted one key, served the rest from its cache, and failed none
+  (`scripts/e2e/lib/install-model-gateway.sh`'s key log).
 
 ### Cutting over an instance from tmux to pods
 

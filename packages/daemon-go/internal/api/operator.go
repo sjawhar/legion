@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
@@ -66,11 +67,15 @@ type BudgetsView struct {
 // DeliveryView is the claim's pending task (`supervise.Delivery`): DeliveredAt is the latest
 // send's acknowledgement, ConfirmedAt the turn it started; each absent until it happens.
 type DeliveryView struct {
-	ID          string     `json:"id"`
-	Task        string     `json:"task"`
-	QueuedAt    time.Time  `json:"queuedAt"`
-	DeliveredAt *time.Time `json:"deliveredAt,omitempty"`
-	ConfirmedAt *time.Time `json:"confirmedAt,omitempty"`
+	ID   string `json:"id"`
+	Task string `json:"task"`
+	// Phase is the issue phase the task was queued for, and empty for a task of no phase — an
+	// operator's own, an architect's. It is what says whether a pending task is still the work to
+	// do, so an operator reading a claim can see it rather than infer it from the task's prose.
+	Phase       phase.Phase `json:"phase,omitempty"`
+	QueuedAt    time.Time   `json:"queuedAt"`
+	DeliveredAt *time.Time  `json:"deliveredAt,omitempty"`
+	ConfirmedAt *time.Time  `json:"confirmedAt,omitempty"`
 }
 
 // OperatorClaims is the list route's answer, in token order.
@@ -108,7 +113,7 @@ func operatorView(c supervise.Claim) OperatorClaim {
 	}
 	if p := c.Pending; p != nil {
 		view.Pending = &DeliveryView{
-			ID: p.ID, Task: p.Task, QueuedAt: p.QueuedAt,
+			ID: p.ID, Task: p.Task, Phase: p.Phase, QueuedAt: p.QueuedAt,
 			DeliveredAt: instant(p.DeliveredAt), ConfirmedAt: instant(p.ConfirmedAt),
 		}
 	}
@@ -239,8 +244,12 @@ func stopEvent(_ http.ResponseWriter, _ *http.Request, c supervise.Claim) (super
 // would stay for good. A workflow issue's tree is the workflow's to close, and a worker's claim is
 // stopped, not closed.
 //
-// The root goes first, since its close is where the supervisor's TreeClosable answers whether a
-// workflow issue backs the tree: a refused close stops nothing. Then every other claim of the tree
+// The root goes first, since its close is where the supervisor answers both of the questions that
+// decide it — whether a workflow issue backs the tree, and whether this claim is its tree's root
+// at all — where the answers and the close they decide sit together; a refused close stops
+// nothing, and the refusal an operator sees is the machine's. A close of a tree already retired
+// answers 200: the operator asked for an outcome that holds, and a retry after a timeout is not a
+// failure. Then every other claim of the tree
 // that has not retired is stopped, as tree_close stops each, so no worker is left on a tree volume
 // that is being deleted (Kubernetes deletes the volume once no pod mounts it). A claim of the tree
 // left running is named in a 500 with its reason, and the root is already closed by then. A stop
@@ -257,10 +266,6 @@ func (s *server) closeTree(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c := root.Claim()
-	if !claim.IsTreeArchitect(c.Role, c.Issue, c.Tree) {
-		writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf("close refused: %s is not its tree's root claim; stop it instead", token)))
-		return
-	}
 	ctx := context.WithoutCancel(r.Context())
 	if err := root.Handle(ctx, supervise.RequestOperatorClose{Claim: token}); err != nil {
 		s.operatorFailure(w, "close", token, err)

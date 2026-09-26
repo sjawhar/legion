@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
 // DesignGate is the human design-review policy the workflow applies to root issues.
@@ -42,8 +44,9 @@ type GitHubApp struct {
 	Installations     map[string]string
 }
 
-// GitHubApps holds the two App identities Legion needs. Review and implement are distinct because
-// the implement App's roles are the ones the workflow lets push and resolve review threads.
+// GitHubApps holds the two App identities Legion needs: the implement App acts for the implementer
+// and the merger, the review App for every other role, so a review never comes from the account
+// that wrote the change.
 type GitHubApps struct {
 	Implement GitHubApp
 	Review    GitHubApp
@@ -108,20 +111,11 @@ func readProject(value *yaml.Node, key string) (Project, error) {
 	if project.MergeQueueRole, err = stringOf(role, key+".merge_queue_role"); err != nil {
 		return Project{}, err
 	}
-	if strings.Count(project.Repo, "/") != 1 || strings.HasPrefix(project.Repo, "/") || strings.HasSuffix(project.Repo, "/") {
-		got := project.Repo
-		if got == "" {
-			got = "undefined"
-		}
-		return Project{}, fmt.Errorf(`%s.repo must be "owner/name" (got %q)`, key, got)
+	if project.Repo == "" {
+		return Project{}, fmt.Errorf(`%s.repo must be "owner/name" (got "undefined")`, key)
 	}
-	owner, name, _ := strings.Cut(project.Repo, "/")
-	for _, segment := range []string{owner, name} {
-		if segment == "." || segment == ".." {
-			// Every path Legion derives from the repository joins these two names under the state
-			// directory, and a dot segment would name another directory than the repository's.
-			return Project{}, fmt.Errorf(`%s.repo %q has a %q segment, which names no GitHub owner or repository`, key, project.Repo, segment)
-		}
+	if _, _, err := ghrepo.Split(key+".repo", project.Repo); err != nil {
+		return Project{}, err
 	}
 	if project.MergeQueueRole != "" && !roleNamePattern.MatchString(project.MergeQueueRole) {
 		return Project{}, fmt.Errorf("%s.merge_queue_role is a bare role name (no notifications.role. prefix)", key)

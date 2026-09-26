@@ -18,13 +18,6 @@ import (
 // the Dockerfile.
 var imageEnv = []string{"HOME", "LEGION_OMP_PATH", "LEGION_ROLE_PROMPTS_DIR", "OMP_PROFILE", "PATH"}
 
-// sessionPlacing are the pod baseline's variables (internal/podsafety) that decide where Oh My Pi
-// keeps a session: PI_CONFIG_DIR names the config root the profile's agent directory, and its
-// sessions, sit under, and OMP_SESSION_STORAGE whether a session is a file at all. A pod keeps its
-// sessions as files on the tree volume, where a resume reads them, so the operator may not set
-// them as it may the rest of the baseline.
-var sessionPlacing = []string{"OMP_SESSION_STORAGE", "PI_CONFIG_DIR"}
-
 // setter is who sets a variable a worker's Oh My Pi starts with, and whether the operator's pod
 // env may set it too: the pod baseline yields to the operator's own value, and the operator's
 // variables are its own.
@@ -57,11 +50,12 @@ func podVariables(pod Pod, launchSecrets []string) map[string]setter {
 	for _, name := range launchSecrets {
 		add(name+"_FILE", "every launch sets (the pointer to the launch secret "+name+")", false)
 	}
-	for _, name := range sessionPlacing {
-		add(name, "the pod baseline sets, and it decides where Oh My Pi keeps the session a resume reads", false)
-	}
-	for _, name := range podsafety.Variables() {
-		add(name, "the pod baseline sets (internal/podsafety)", true)
+	for _, v := range podsafety.Variables() {
+		if v.Reserved != "" {
+			add(v.Name, "the pod baseline sets, and "+v.Reserved, false)
+		} else {
+			add(v.Name, "the pod baseline sets (internal/podsafety)", true)
+		}
 	}
 	for name := range pod.Env {
 		add(name, "runtime.kubernetes.pod.env sets", true)

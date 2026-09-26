@@ -42,9 +42,9 @@ const (
 )
 
 type Registry struct {
-	// kvMu guards kv and roleKV, which Rewatch moves to a replacement connection.
+	// kvMu guards roleKV, which Rewatch moves to a replacement connection. The interest bucket's
+	// handle is the watcher's (kvwatch.Watcher.KV).
 	kvMu                  sync.RWMutex
-	kv                    nats.KeyValue
 	roleKV                nats.KeyValue
 	now                   func() time.Time
 	openedAt              time.Time
@@ -105,7 +105,6 @@ func Open(conn *nats.Conn, options ...OpenOption) (*Registry, error) {
 		return nil, err
 	}
 	r := &Registry{
-		kv:                    kv,
 		roleKV:                roleKV,
 		cache:                 map[string]Interest{},
 		cacheRevisions:        map[string]uint64{},
@@ -126,7 +125,7 @@ func Open(conn *nats.Conn, options ...OpenOption) (*Registry, error) {
 // listener monitor use failures to report an unavailable dependency while NATS
 // reconnects.
 func (r *Registry) Ping() error {
-	if err := r.watcher.Check(r.interests()); err != nil {
+	if err := r.watcher.Check(); err != nil {
 		return err
 	}
 	if _, err := r.roles().Status(); err != nil {
@@ -147,9 +146,7 @@ func (r *Registry) StopWatch() {
 }
 
 func (r *Registry) interests() nats.KeyValue {
-	r.kvMu.RLock()
-	defer r.kvMu.RUnlock()
-	return r.kv
+	return r.watcher.KV()
 }
 
 func (r *Registry) roles() nats.KeyValue {
@@ -292,12 +289,10 @@ func (r *Registry) Rewatch(conn *nats.Conn) error {
 	if err != nil {
 		return fmt.Errorf("open role KV bucket: %w", err)
 	}
-	kv, err := r.watcher.Rewatch(conn)
-	if err != nil {
+	if err := r.watcher.Rewatch(conn); err != nil {
 		return err
 	}
 	r.kvMu.Lock()
-	r.kv = kv
 	r.roleKV = roleKV
 	r.kvMu.Unlock()
 	return nil

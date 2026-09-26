@@ -83,8 +83,8 @@ it without anyone editing a line of the branch:
   two differed by exactly the merged sentences.
 - **Unchanged under a CI-forced rebase, then changed in exactly one hunk under a conflict-forced
   one (LEGION-131, #1106).** Rebase 1 (`239aaa28 → 31a29f24`) was forced by CI, not a conflict:
-  #1103 had committed the Claude bridge's bundles, which inline `@legion/contracts`
-  ([`committed-bridge-bundles-inline-contracts-so-every-contracts-change-carries-a-dist-commit.md`](committed-bridge-bundles-inline-contracts-so-every-contracts-change-carries-a-dist-commit.md)).
+  #1103 had committed the Claude plugin's bundles, which inline `@legion/contracts`
+  ([`committed-plugin-bundles-inline-contracts-so-every-contracts-change-carries-a-dist-commit.md`](committed-plugin-bundles-inline-contracts-so-every-contracts-change-carries-a-dist-commit.md)).
   With `packages/claude-envoy-bridge/dist` added to the exclusion the hash was equal
   (`0e332ee2…28ed` both sides; the two stripped diffs line-identical) — the generated files are
   proven by `check-dist`, not by the fingerprint, so exclude them and say so. The architect
@@ -99,16 +99,17 @@ it without anyone editing a line of the branch:
   interdiff is what earns the narrower route: a changed hash with an empty or fully explained
   interdiff is a confirmation scoped to the listed hunks; an unexplained one is a round.
 - **Changed through release-managed files only (LEGION-25 #1110, rebase 2, `74871c03 → 386f3562`,
-  `2d54b573… → 8dd84c1f…`).** A branch that bumps the daemon API contract *must* touch three
-  files `main`'s release commits rewrite on every release: `packages/pi-envoy/package.json` (the
+  `2d54b573… → 8dd84c1f…`).** A branch that bumps the daemon API contract *must* touch three files
+  `main`'s release commits rewrite on every release: `packages/pi-envoy/package.json` (the
   `legion.daemonApiVersion` field sits beside the `version` the release bumps),
   `packages/pi-envoy/CHANGELOG.md` (the contract line under Unreleased, which the release
-  re-heads), and `packages/claude-envoy-bridge/dist/*.js` (the committed bundle embeds
-  `@legion/contracts`, so `check-dist` forces a rebuild). Every `chore: release …` on `main` is
-  therefore a `CONFLICTING` for that branch — #1110 was flagged three times in one PR life, twice
-  by release commits alone. Resolve by taking `main`'s version and re-adding the field and line;
-  rebuild the bundle on the pinned Bun (1.3.14) inside its own commit; the fingerprint changes
-  through those files and nothing else. Keeping the three in one one-concern commit
+  re-heads), and `packages/claude-envoy-bridge/dist/*.js` (today
+  `packages/claude-envoy/dist/*.js`; the committed bundle embeds `@legion/contracts`, so
+  `check-dist` forces a rebuild). Every `chore: release …` on `main` is therefore a `CONFLICTING`
+  for that branch — #1110 was flagged three times in one PR life, twice by release commits alone.
+  Resolve by taking `main`'s version and re-adding the field and line; rebuild the bundle on the
+  pinned Bun (1.3.14) inside its own commit; the fingerprint changes through those files and
+  nothing else. Keeping the three in one one-concern commit
   (`chore(claude-envoy-bridge): rebuild …`) is what made each such rebase a mechanical resolve.
 - **Changed through documentation rows another PR also edited (rebase 3, `e91450b4 → 86bcf5e8`,
   `8dd84c1f… → b383c0c5…`).** LEGION-81 (#1108) landed underneath, editing the same two
@@ -148,8 +149,7 @@ the rebase comment.
 1. Before rebasing: `jj git fetch`, then hash the current tip with the one-fileset command and
    keep the number.
 2. `jj rebase -s 'roots(main@origin..@)' -d main@origin` — the whole chain, so the tester's and
-   reviewer's local handoff commits move with yours (only the implementer pushes, and its push
-   carries them).
+   reviewer's handoff commits move with yours.
 3. Resolve each conflicted commit at the commit that owns the file (`jj new <rev>`, edit the
    file to the resolved text, `jj squash`), first conflicted commit first; the descendants
    re-apply and often clear several commits at once. A later commit that rewrote the same
@@ -163,7 +163,9 @@ the rebase comment.
 5. Hash the new tip; post one PR comment (Legion footer) in the form
    `rebase <old> → <new>; fingerprint <before> → <after>; unchanged|changed`, with the per-file
    attribution when changed.
-6. Bookmark with `-r @- --allow-backwards`, push, re-read `mergeable,mergeStateStatus` — `main`
+6. Push with `skills/legion-worker/SKILL.md`'s push procedure (record the pushed tip before step 1's rebase, as its *Rewriting
+   pushed commits* says, so the push is refused if another role pushed meanwhile), then re-read
+   `mergeable,mergeStateStatus` — `main`
    can move again while CI queues (rebase 2 here was reported `CONFLICTING` within a minute of
    the round-4 push).
 
@@ -171,7 +173,7 @@ the rebase comment.
 
 - `conflict-only-rebases-keep-the-diff-auditable.md` — the added/removed-line identity check
   this fingerprint mechanises, and the rules for what a resolution may contain.
-- `committed-bridge-bundles-inline-contracts-so-every-contracts-change-carries-a-dist-commit.md`
+- `committed-plugin-bundles-inline-contracts-so-every-contracts-change-carries-a-dist-commit.md`
   — a generated-output directory that must be excluded from the fileset, and the CI-forced
   rebase that is not a conflict but is still necessary.
 - `handoff-file-conflicts-during-rebases.md` — the bottom-up edit-and-squash procedure for

@@ -189,13 +189,13 @@ on turns up 506 errors and 1,240 warnings from every other project-domain rule, 
 pushes the cycle past Biome's 20-diagnostic cap: measured with a planted cycle, `domains` on
 reports the cycle 0 times at either severity, while `domains` off reports it twice at both.
 
-`packages/claude-envoy-bridge/biome.json` carries `"root": false` for this: it is a nested
+`packages/claude-envoy/biome.json` carries `"root": false` for this: it is a nested
 config under the root one, and without that line any invocation that starts Biome's project
 scanner aborts with `Found a nested root configuration` before linting anything. The rule is
 **unscoped** — no `overrides` glob, because a glob gives the guard an edge and SPA code that
 later lands outside it is unguarded by a diff nobody connects to a lint override. Every
 package is covered, and it takes two entries rather than one: the root rule covers the seven
-packages that have no config of their own, and `claude-envoy-bridge` repeats
+packages that have no config of their own, and `claude-envoy` repeats
 `"noImportCycles": "error"` in its own `biome.json`, because a nested config replaces the
 root's rules for its subtree instead of adding to them. Its planted-cycle proof is its own
 recipe (`bunx biome check --max-diagnostics=none src/ hooks/ scripts/` → 2 errors, exit 1;
@@ -204,7 +204,7 @@ entry to the widest path that is still clean, not the narrowest that suffices, a
 where the guard stops.
 
 By convention — enforced by review, since nothing fails when it is omitted — **a new nested
-`biome.json` declares `"extends": "//"`** (the bridge's predates this and repeats the one
+`biome.json` declares `"extends": "//"`** (claude-envoy's predates this and repeats the one
 rule instead, to avoid inheriting the root formatter over its ten files). Without it the file replaces the
 root's rule set for its subtree rather than adding to it, cycle detection included, and does
 so quietly: measured on 2.4.11, a `web/biome.json` that is a faithful copy of the root minus

@@ -394,3 +394,123 @@ func TestTxRollsBackWhatTheFunctionWroteBeforeFailing(t *testing.T) {
 		t.Errorf("boots count = %d, want 0 after a rolled-back transaction", count)
 	}
 }
+
+// migrateThrough applies every embedded migration up to and including version, as an older
+// daemon's database stands.
+func migrateThrough(t *testing.T, store *Store, version int) {
+	t.Helper()
+	ctx := context.Background()
+	all, err := migrations.All()
+	if err != nil {
+		t.Fatalf("read the embedded migrations: %v", err)
+	}
+	for _, migration := range all {
+		if migration.Version > version {
+			return
+		}
+		if _, err := store.apply(ctx, migration); err != nil {
+			t.Fatalf("apply %s: %v", migration.Name, err)
+		}
+	}
+}
+
+// A daemon upgraded in place has workers holding tasks delivered before the delivery carried its
+// run. A completion attributed to no run is refused, so those phases would stall until every
+// worker happened to be handed a new task: 0011 gives each such delivery the run its issue is on,
+// and leaves a claim on an issue no workflow records — an operator's own (LEGION-272) — at zero.
+func TestTheDeliveryGenerationBackfillsFromTheIssuesRun(t *testing.T) {
+	ctx := context.Background()
+	store := emptyStore(t)
+	migrateThrough(t, store, 10)
+
+	for _, row := range []struct{ token, role, issue string }{
+		{token: "tok-tester", role: "tester", issue: "LEGION-208"},
+		{token: "tok-operator", role: "implementer", issue: "LEGION-UNRECORDED"},
+	} {
+		if _, err := store.pool.Exec(ctx, `insert into claims (token, project, tree, issue, role, generation, session,
+			session_file, state, launch_failures, prompt_failures, prompt_retires, uncertain_streak)
+			values ($1, 'LEGION', 'LEGION-208', $2, $3, 1, '', '', 'working', 0, 0, 0, 0)`,
+			row.token, row.issue, row.role); err != nil {
+			t.Fatalf("seed the %s claim: %v", row.role, err)
+		}
+		if _, err := store.pool.Exec(ctx, `insert into pending_task_deliveries (claim_token, delivery_id, task, queued_at, confirmed_at)
+			values ($1, 'delivery-'||$1, 'the task', now(), now())`, row.token); err != nil {
+			t.Fatalf("seed the %s delivery: %v", row.role, err)
+		}
+	}
+	if _, err := store.pool.Exec(ctx, `insert into issues (key, tree, project, title, phase, generation, status, rank, last_dispatch_seq)
+		values ('LEGION-208', 'LEGION-208', 'LEGION', 'LEGION-208', 'testing', 3, 'in_progress', 'V', 0)`); err != nil {
+		t.Fatalf("seed the issue: %v", err)
+	}
+
+	if _, err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate the rest: %v", err)
+	}
+
+	for _, want := range []struct {
+		token      string
+		generation int64
+	}{
+		{token: "tok-tester", generation: 3},
+		{token: "tok-operator", generation: 0},
+	} {
+		var generation int64
+		if err := store.pool.QueryRow(ctx, "select generation from pending_task_deliveries where claim_token = $1",
+			want.token).Scan(&generation); err != nil {
+			t.Fatalf("read %s's delivery: %v", want.token, err)
+		}
+		if generation != want.generation {
+			t.Fatalf("%s's delivery carries run %d, want %d", want.token, generation, want.generation)
+		}
+	}
+}
+
+// A worker between turns at an in-place upgrade holds no delivery at all, so nothing tells the
+// daemon which run it is working and its next completion is refused: 0012 gives each live claim
+// the run its issue is on. A claim whose process is gone is left at zero — it is relaunched, and
+// the task its new process is given carries its own run — as is one on an issue no workflow
+// records.
+func TestTheServingRunBackfillsForClaimsBetweenTurns(t *testing.T) {
+	ctx := context.Background()
+	store := emptyStore(t)
+	migrateThrough(t, store, 10)
+
+	for _, row := range []struct{ token, issue, state string }{
+		{token: "tok-idle", issue: "LEGION-208", state: "idle"},
+		{token: "tok-retired", issue: "LEGION-208", state: "retired"},
+		{token: "tok-unrecorded", issue: "LEGION-UNRECORDED", state: "idle"},
+	} {
+		if _, err := store.pool.Exec(ctx, `insert into claims (token, project, tree, issue, role, generation, session,
+			session_file, state, launch_failures, prompt_failures, prompt_retires, uncertain_streak)
+			values ($1, 'LEGION', 'LEGION-208', $2, 'tester', 1, '', '', $3, 0, 0, 0, 0)`,
+			row.token, row.issue, row.state); err != nil {
+			t.Fatalf("seed the %s claim: %v", row.token, err)
+		}
+	}
+	if _, err := store.pool.Exec(ctx, `insert into issues (key, tree, project, title, phase, generation, status, rank, last_dispatch_seq)
+		values ('LEGION-208', 'LEGION-208', 'LEGION', 'LEGION-208', 'testing', 5, 'in_progress', 'V', 0)`); err != nil {
+		t.Fatalf("seed the issue: %v", err)
+	}
+
+	if _, err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate the rest: %v", err)
+	}
+
+	for _, want := range []struct {
+		token   string
+		serving int64
+	}{
+		{token: "tok-idle", serving: 5},
+		{token: "tok-retired", serving: 0},
+		{token: "tok-unrecorded", serving: 0},
+	} {
+		var serving int64
+		if err := store.pool.QueryRow(ctx, "select serving_generation from claims where token = $1",
+			want.token).Scan(&serving); err != nil {
+			t.Fatalf("read %s: %v", want.token, err)
+		}
+		if serving != want.serving {
+			t.Fatalf("%s serves run %d, want %d", want.token, serving, want.serving)
+		}
+	}
+}

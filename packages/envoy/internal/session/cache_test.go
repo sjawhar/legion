@@ -228,7 +228,7 @@ func TestSessionWatch_PropagatesExternalPut(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if _, err := reg.kv.Put("ses_ext", buf); err != nil {
+	if _, err := reg.watcher.KV().Put("ses_ext", buf); err != nil {
 		t.Fatalf("kv put: %v", err)
 	}
 	entries := pollSessionList(t, reg, 1, 5*time.Second)
@@ -250,7 +250,7 @@ func TestSessionWatch_PropagatesDelete(t *testing.T) {
 
 	// Delete directly via KV (bypassing write-through) so we exercise the
 	// watcher's delete handling specifically.
-	if err := reg.kv.Delete("ses_d"); err != nil {
+	if err := reg.watcher.KV().Delete("ses_d"); err != nil {
 		t.Fatalf("kv delete: %v", err)
 	}
 	pollSessionList(t, reg, 0, 5*time.Second)
@@ -267,7 +267,7 @@ func TestSessionWatch_PropagatesPurge(t *testing.T) {
 	}
 	pollSessionList(t, reg, 1, 5*time.Second)
 
-	if err := reg.kv.Purge("ses_p"); err != nil {
+	if err := reg.watcher.KV().Purge("ses_p"); err != nil {
 		t.Fatalf("kv purge: %v", err)
 	}
 	pollSessionList(t, reg, 0, 5*time.Second)

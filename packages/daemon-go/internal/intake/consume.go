@@ -11,6 +11,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go/jetstream"
 	"golang.org/x/sync/errgroup"
+
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
 const notificationStream = "ENVOY_NOTIFICATIONS"
@@ -183,9 +185,8 @@ func normalizedSpec(spec ConsumerSpec) (ConsumerSpec, error) {
 		return ConsumerSpec{}, fmt.Errorf("intake consumer repositories are required")
 	}
 	for _, repo := range spec.Repositories {
-		owner, name, ok := strings.Cut(repo, "/")
-		if !ok || owner == "" || name == "" || strings.Contains(name, "/") {
-			return ConsumerSpec{}, fmt.Errorf("intake consumer repository %q must be owner/repository", repo)
+		if _, _, err := ghrepo.Split("intake consumer repository", repo); err != nil {
+			return ConsumerSpec{}, err
 		}
 	}
 	if spec.AckWait <= 0 {

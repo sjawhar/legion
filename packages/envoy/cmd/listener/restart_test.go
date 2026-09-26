@@ -23,8 +23,7 @@ import (
 func TestListenerFollowsTheInterestRegistryAcrossNATSRestarts(t *testing.T) {
 	ctr, uri := testnats.StartRestartable(t)
 	listener := startListenerProcess(t, buildListener(t), uri, "restart-test")
-	port, cmd, output, exited := listener.port, listener.cmd, listener.output, listener.exited
-	waitHealthy(t, port, cmd, output)
+	listener.waitHealthy(t)
 
 	for restart := 1; restart <= 3; restart++ {
 		testnats.Stop(t, ctr)
@@ -32,9 +31,9 @@ func TestListenerFollowsTheInterestRegistryAcrossNATSRestarts(t *testing.T) {
 			t.Fatalf("restart %d: start NATS again: %v", restart, err)
 		}
 		deadline := time.Now().Add(30 * time.Second)
-		for strings.Count(output.String(), "envoy nats reconnected") < restart {
+		for strings.Count(listener.output.String(), "envoy nats reconnected") < restart {
 			if time.Now().After(deadline) {
-				t.Fatalf("restart %d: the listener never reconnected:\n%s", restart, output.String())
+				t.Fatalf("restart %d: the listener never reconnected:\n%s", restart, listener.output.String())
 			}
 			time.Sleep(100 * time.Millisecond)
 		}
@@ -51,7 +50,7 @@ func TestListenerFollowsTheInterestRegistryAcrossNATSRestarts(t *testing.T) {
 		}
 		writer.Close()
 		deadline = time.Now().Add(3 * time.Second)
-		for !listsInterest(t, port, sessionID) {
+		for !listsInterest(t, listener.port, sessionID) {
 			if time.Now().After(deadline) {
 				t.Fatalf("restart %d: %s after the listener reconnected, its interest cache still missed a subscription another listener wrote", restart, time.Since(reconnectedAt).Round(time.Millisecond))
 			}
@@ -59,18 +58,14 @@ func TestListenerFollowsTheInterestRegistryAcrossNATSRestarts(t *testing.T) {
 		}
 	}
 
-	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+	if err := listener.cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatalf("SIGTERM: %v", err)
 	}
-	select {
-	case <-exited:
-	case <-time.After(30 * time.Second):
-		t.Fatalf("the listener did not exit after SIGTERM:\n%s", output.String())
+	listener.waitExit(t, "SIGTERM")
+	if !strings.Contains(listener.output.String(), "envoy-listener shutdown complete") {
+		t.Fatalf("the listener did not finish its ordered shutdown:\n%s", listener.output.String())
 	}
-	if !strings.Contains(output.String(), "envoy-listener shutdown complete") {
-		t.Fatalf("the listener did not finish its ordered shutdown:\n%s", output.String())
-	}
-	for _, line := range strings.Split(output.String(), "\n") {
+	for _, line := range strings.Split(listener.output.String(), "\n") {
 		if errorLine.MatchString(line) {
 			t.Fatalf("NATS restarts and the shutdown after them logged an error: %s", line)
 		}
