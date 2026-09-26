@@ -415,7 +415,7 @@ type pausedListing struct {
 	entered, release chan struct{}
 }
 
-func (p pausedListing) Deliveries(context.Context, time.Time) ([]githubapp.Delivery, error) {
+func (p pausedListing) Deliveries(context.Context, time.Time, func() error) ([]githubapp.Delivery, error) {
 	close(p.entered)
 	<-p.release
 	return nil, nil
@@ -458,6 +458,65 @@ func TestASweepClearsOnlyTheRateLimitItRead(t *testing.T) {
 	}
 	if !third.RateLimitedUntil.Equal(limited.RateLimitedUntil) {
 		t.Fatalf("the third sweeper saw a limit until %s, want the second's %s", third.RateLimitedUntil, limited.RateLimitedUntil)
+	}
+}
+
+// pausedClaim is the sweep's state bucket, whose first Create (a sweeper claiming a delivery)
+// waits to be released once it is written: a sweeper preempted between its claim and its request.
+type pausedClaim struct {
+	natsgo.KeyValue
+	once             sync.Once
+	entered, release chan struct{}
+}
+
+func (p *pausedClaim) Create(key string, value []byte) (uint64, error) {
+	revision, err := p.KeyValue.Create(key, value)
+	p.once.Do(func() {
+		close(p.entered)
+		<-p.release
+	})
+	return revision, err
+}
+
+// A sweeper reads the shared rate limit again right before each request it sends GitHub, so one
+// that claimed a delivery before another sweeper recorded a limit sends nothing once it is in
+// force, and undoes its claim.
+func TestASweepPausedBeforeItsRequestSendsNothingUnderANewLimit(t *testing.T) {
+	h := newHarness(t)
+	h.fail("guid-older", http.StatusServiceUnavailable, 2*time.Minute)
+	h.fail("guid-newer", http.StatusServiceUnavailable, time.Minute)
+	h.webhook.Limit(http.MethodPost, http.StatusTooManyRequests, http.Header{"Retry-After": {"60"}})
+
+	paused := &pausedClaim{KeyValue: h.state, entered: make(chan struct{}), release: make(chan struct{})}
+	second := h.sweeper()
+	second.State = paused
+	reports := make(chan redeliver.Report, 1)
+	go func() {
+		report, err := second.Sweep(context.Background(), redeliver.Options{})
+		if err != nil {
+			t.Errorf("the paused sweeper: %v", err)
+		}
+		reports <- report
+	}()
+	<-paused.entered // it has claimed guid-newer and not yet asked GitHub for it
+	first := h.sweep(redeliver.Options{})
+	if first.RateLimitedUntil.IsZero() || len(h.requests()) != 1 {
+		t.Fatalf("the first sweeper sent %d requests and recorded no limit: %+v", len(h.requests()), first)
+	}
+	close(paused.release)
+	report := <-reports
+	if got := len(h.requests()); got != 1 {
+		t.Fatalf("redelivery requests %d, want 1: the paused sweeper asked GitHub inside the new limit", got)
+	}
+	if report.Complete || !report.RateLimitedUntil.Equal(first.RateLimitedUntil) {
+		t.Fatalf("the paused sweeper reported complete=%t until %s, want it stopped at %s", report.Complete, report.RateLimitedUntil, first.RateLimitedUntil)
+	}
+
+	// Its claim was undone: once the limit passes, guid-newer is asked for as its first attempt.
+	h.webhook.Limit(http.MethodPost, 0, nil)
+	h.clock.advance(2*time.Minute + time.Second)
+	if got := outcome(h.sweep(redeliver.Options{}), "guid-newer"); got != redeliver.Redelivered {
+		t.Fatalf("after the limit: guid-newer outcome %q, want %q", got, redeliver.Redelivered)
 	}
 }
 

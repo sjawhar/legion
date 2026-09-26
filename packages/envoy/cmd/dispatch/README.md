@@ -87,7 +87,9 @@ reach the stream adds nothing to the stream.
 - A rate-limited answer (403 or 429, as GitHub's REST rate-limit documentation describes one)
   stops the sweep and counts nothing against the delivery. No sweep sends GitHub anything until
   the time GitHub gave (`Retry-After`, or `x-ratelimit-reset` when no requests remain), and at
-  least one minute, doubling while limits follow one another. It logs
+  least one minute, doubling while limits follow one another. Each sweep reads the recorded limit
+  again right before every request it sends, so one limit stops every sweeper at its next request;
+  a request already sent when another sweeper records a limit is not recalled. It logs
   `level=WARN msg="webhook redelivery rate-limited by GitHub"`. Redelivery requests go a second
   apart, as GitHub asks of a large number of POSTs.
 - A delivery the listener answered with 4xx is never redelivered: the listener refused the

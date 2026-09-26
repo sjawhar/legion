@@ -42,7 +42,7 @@ func TestDeliveriesPagesNewestFirstAndStopsAtSince(t *testing.T) {
 	}
 	since := base.Add(100 * time.Second)
 
-	got, err := client.Deliveries(context.Background(), since)
+	got, err := client.Deliveries(context.Background(), since, nil)
 	if err != nil {
 		t.Fatalf("deliveries: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestRedeliverRequestsTheAttemptAndReportsARefusal(t *testing.T) {
 // A client with no App key cannot sign the JWT these endpoints require.
 func TestDeliveriesWithoutAnAppKeyAreErrNoAppKey(t *testing.T) {
 	var client *githubapp.Client
-	if _, err := client.Deliveries(context.Background(), time.Now()); !errors.Is(err, githubapp.ErrNoAppKey) {
+	if _, err := client.Deliveries(context.Background(), time.Now(), nil); !errors.Is(err, githubapp.ErrNoAppKey) {
 		t.Fatalf("list without a key: got %v, want ErrNoAppKey", err)
 	}
 	if err := client.Redeliver(context.Background(), 1); !errors.Is(err, githubapp.ErrNoAppKey) {

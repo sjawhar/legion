@@ -66,7 +66,8 @@ const (
 
 // GitHub is the App webhook delivery API the sweep reads and asks.
 type GitHub interface {
-	Deliveries(ctx context.Context, since time.Time) ([]githubapp.Delivery, error)
+	// Deliveries calls before ahead of each page's request and stops at its error.
+	Deliveries(ctx context.Context, since time.Time, before func() error) ([]githubapp.Delivery, error)
 	Redeliver(ctx context.Context, deliveryID int64) error
 }
 
@@ -278,9 +279,14 @@ func (s *Sweeper) Sweep(ctx context.Context, opts Options) (Report, error) {
 	}
 
 	var limited *githubapp.RateLimitError
-	listed, err := s.GitHub.Deliveries(ctx, since)
+	var inForce *limitInForce
+	listed, err := s.GitHub.Deliveries(ctx, since, s.checkLimit)
 	if errors.As(err, &limited) {
 		s.rateLimited(&report, limited, limit, now, opts.DryRun)
+		return report, nil
+	}
+	if errors.As(err, &inForce) {
+		report.Complete, report.RateLimitedUntil = false, inForce.until
 		return report, nil
 	}
 	if err != nil {
@@ -323,6 +329,11 @@ func (s *Sweeper) Sweep(ctx context.Context, opts Options) (Report, error) {
 		if errors.As(err, &limited) {
 			report.Decisions = append(report.Decisions, decision)
 			s.rateLimited(&report, limited, limit, now, opts.DryRun)
+			return report, nil
+		}
+		if errors.As(err, &inForce) {
+			report.Decisions = append(report.Decisions, decision)
+			report.Complete, report.RateLimitedUntil = false, inForce.until
 			return report, nil
 		}
 		if err != nil {
@@ -499,13 +510,17 @@ func (s *Sweeper) decide(ctx context.Context, guid string, attempts []githubapp.
 		decision.Outcome = ClaimedElsewhere
 		return decision, false, nil
 	}
+	// Another sweeper may have recorded a limit since this one read it; nothing is sent under it.
+	if err := s.checkLimit(); err != nil {
+		s.undoClaim(guid, current, claimRevision, decision)
+		decision.Outcome = RateLimited
+		return decision, false, err
+	}
 	err = s.GitHub.Redeliver(ctx, newest.ID)
 	var limited *githubapp.RateLimitError
 	if errors.As(err, &limited) {
-		// GitHub refused to take the request at all: the delivery stands as it was before the claim.
-		if !s.writeRecord(guid, current, claimRevision) {
-			s.Logger.Error("webhook redelivery claim not undone after a rate limit; the delivery reads as pending", s.attrs(decision)...)
-		}
+		// GitHub refused to take the request at all.
+		s.undoClaim(guid, current, claimRevision, decision)
 		decision.Outcome = RateLimited
 		return decision, true, err
 	}
@@ -524,6 +539,35 @@ func (s *Sweeper) decide(ctx context.Context, guid string, attempts []githubapp.
 	decision.Outcome = Redelivered
 	s.Logger.Info("webhook redelivered", append(s.attrs(decision), "attempt", claim.Attempts)...)
 	return decision, true, nil
+}
+
+// undoClaim puts a delivery's record back as it was before this sweep claimed it, when the
+// request was never taken: nothing counts against the delivery.
+func (s *Sweeper) undoClaim(guid string, before record, claimRevision uint64, decision Decision) {
+	if !s.writeRecord(guid, before, claimRevision) {
+		s.Logger.Error("webhook redelivery claim not undone after a rate limit; the delivery reads as pending", s.attrs(decision)...)
+	}
+}
+
+// limitInForce is a rate limit another sweeper recorded, found right before a request.
+type limitInForce struct{ until time.Time }
+
+func (e *limitInForce) Error() string {
+	return "GitHub rate-limited the App until " + e.until.Format(time.RFC3339)
+}
+
+// checkLimit reads the shared rate limit again right before a request to GitHub, since another
+// sweeper may have recorded one after this sweep started. It is a *limitInForce while one is.
+// A request already sent when another sweeper records a limit is not recalled.
+func (s *Sweeper) checkLimit() error {
+	limit, _, err := s.readLimit()
+	if err != nil {
+		return err
+	}
+	if s.now().Before(limit.Until) {
+		return &limitInForce{until: limit.Until}
+	}
+	return nil
 }
 
 func (s *Sweeper) attrs(decision Decision) []any {

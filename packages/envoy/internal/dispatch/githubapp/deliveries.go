@@ -33,14 +33,20 @@ type Delivery struct {
 // 400 to 599, which leaves out an attempt that got no HTTP answer. It follows the Link header's
 // cursor from page to page and stops at the first attempt older than since. GitHub keeps three
 // days of attempts; nothing older is listed whatever since says. A rate-limited answer is a
-// *RateLimitError.
-func (c *Client) Deliveries(ctx context.Context, since time.Time) ([]Delivery, error) {
+// *RateLimitError. before, when set, runs ahead of each page's request, and its error ends the
+// listing: the sweep uses it to check a shared rate limit before every request.
+func (c *Client) Deliveries(ctx context.Context, since time.Time, before func() error) ([]Delivery, error) {
 	if c == nil {
 		return nil, ErrNoAppKey
 	}
 	var listed []Delivery
 	target := c.base + "/app/hook/deliveries?per_page=100"
 	for target != "" {
+		if before != nil {
+			if err := before(); err != nil {
+				return nil, err
+			}
+		}
 		jwt, err := c.appJWT()
 		if err != nil {
 			return nil, err
