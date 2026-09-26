@@ -368,6 +368,47 @@ func TestOutboxStartRelaunchesAFailedClaim(t *testing.T) {
 	}
 }
 
+// A claim held after its agent kept dying in a turn of its task keeps that task, and the retry's
+// relaunch sends it, behind the sentence saying its turn was interrupted. The architect's retry
+// writes a start of its own for the same phase and run: its task would come behind the kept one as
+// a second prompt for work already under way, so the row relaunches the claim and delivers nothing.
+func TestOutboxRetryOfAClaimThatKeptItsPhasesTaskDeliversNothingMore(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	ctx := context.Background()
+	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Implementing, Generation: 1, Status: "in_progress"}
+	putOutboxIssue(t, pool, records, issue)
+	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
+	token, err := claim.NewToken("legion", issue.Key, claim.RoleImplementer)
+	if err != nil {
+		t.Fatalf("claim token: %v", err)
+	}
+	kept := supervise.Delivery{ID: "kept-task", Task: "Continue Workflow. Issue: LEGION-208. Phase: implementing.",
+		Phase: phase.Implementing, Generation: issue.Generation, QueuedAt: time.Now(), Interrupted: true}
+	machine, _, err := sup.Create(ctx, supervise.Claim{
+		Token: token, Project: "legion", Tree: issue.Tree, Issue: issue.Key, Role: claim.RoleImplementer, State: supervise.StateFailed,
+		Generation: 3, Session: "ses-impl", SessionFile: "/tmp/impl.jsonl", Budgets: supervise.Budgets{Deaths: 3}, Pending: &kept,
+	}, "")
+	if err != nil {
+		t.Fatalf("create the held implementer: %v", err)
+	}
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets"}
+	row := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RoleImplementer,
+		Task: "Continue Workflow. Reason: retry held phase.", Phase: phase.Implementing, Generation: issue.Generation}, time.Now())
+	row.ID = 92
+
+	if err := runner.execute(ctx, row); err != nil {
+		t.Fatalf("start the held claim: %v", err)
+	}
+	got := machine.Claim()
+	if got.State != supervise.StateLaunching || got.Budgets != (supervise.Budgets{}) || len(rt.CallsOf("Resume")) != 1 {
+		t.Fatalf("retried claim = %+v after %d resumes, want its session relaunched once with fresh budgets", got, len(rt.CallsOf("Resume")))
+	}
+	if got.Pending == nil || got.Pending.ID != kept.ID || got.Pending.Task != kept.Task {
+		t.Fatalf("retried claim pending %+v, want the kept task alone", got.Pending)
+	}
+}
+
 // The architect's retry of a held phase writes a start carrying the retry task. The relaunched
 // claim still holds the task it was started with, so the retry task waits behind it and its row
 // is retried until that task's turn is over. That turn can finish the phase: the implementer
