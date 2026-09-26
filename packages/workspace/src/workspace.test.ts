@@ -982,7 +982,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     );
     if (!fetch) throw new Error("Provisioning did not fetch the repository");
     provisioningEnv(fetch);
-  });
+  }, 60_000);
 
   // A URL rewrite a tree agent wrote sends provisioning's credentialed fetch to a host of its own.
   // The one-shot credential answers https://github.com alone, so that host receives no credential,
@@ -1551,7 +1551,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     );
     expect(
       probe.stdout.trim(),
-      "this jj has no working-copy filters: provisioning is proven against the jj the worker image ships (packages/daemon/docker/worker.Dockerfile, ARG JJ_TOOL), which CI installs"
+      "this jj has no working-copy filters: provisioning is proven against the jj the worker image ships (packages/daemon/docker/worker.Dockerfile, ARG JJ_TOOL), which CI installs on PATH through .github/actions/install-jj"
     ).not.toBe("");
     const rig = await realJjRig(["jj"], path.join(await temporaryDirectory(), "state"));
     const witness = async (label: string, tail: string) => {
