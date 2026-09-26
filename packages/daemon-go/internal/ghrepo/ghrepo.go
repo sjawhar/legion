@@ -64,10 +64,10 @@ func MustParse(repository string) Repository {
 // must be exactly `<owner>/<name>`, both names non-empty and neither holding whitespace; neither
 // may be `.` or `..`, which joined under a state directory would name another directory than the
 // repository's (and provisioning removes an incomplete clone at that path); and each must be one
-// GitHub allows. That last rule keeps out what a GitHub name never holds but a path, a URL, a NATS
-// subject or a terminal would act on: control bytes, `#` and `?`, a hyphen that begins an owner, a name longer than GitHub's limit, and the NATS
-// wildcards `*` and `>`, with which intake's `notifications.github.<owner>.<name>.>` filter would
-// match other repositories' events.
+// GitHub serves. That last rule keeps out what a GitHub name never holds but a path, a URL, a NATS
+// subject or a terminal would act on: control bytes, `#` and `?`, a hyphen or underscore beginning
+// an owner, a name past GitHub's length limit, and the NATS wildcards `*` and `>`, with which
+// intake's `notifications.github.<owner>.<name>.>` filter would match other repositories' events.
 func Parse(what, repository string) (Repository, error) {
 	owner, name, found := strings.Cut(repository, "/")
 	if !found || owner == "" || name == "" || strings.Contains(name, "/") {
