@@ -178,6 +178,15 @@ func askIDFromRef(ref string) string {
 	return ref[i+len("/ask/"):]
 }
 
+// redactSecrets replaces every value this suite's fake secrets store hands out with a
+// placeholder before it is used in a t.Fatalf diagnostic. Comparisons and control flow always
+// use the real value; this project's rule against a secret ever reaching logs, audit, or error
+// messages carries no test-only carve-out, so nothing this suite prints on failure may contain
+// one either, even a fake, fixture-only value.
+func redactSecrets(s string) string {
+	return strings.NewReplacer("deel-v1", "[REDACTED]", "auto-v1", "[REDACTED]").Replace(s)
+}
+
 // mintPodToken mints a projected service-account token bound to podUID, the shape
 // enroll.K8sPodVerifier.Verify reads — the same pattern as enroll/enroll_test.go's helper of the
 // same name, copied here because Go test helpers are not exported across packages.
@@ -572,7 +581,7 @@ func TestSpikeContract(t *testing.T) {
 			t.Fatalf("ask question must name the secret and the operator, got %q", question)
 		}
 		if strings.Contains(question, "deel-v1") {
-			t.Fatalf("ask question must never carry the secret's value, got %q", question)
+			t.Fatalf("ask question contained the secret's value")
 		}
 	})
 
@@ -609,7 +618,7 @@ func TestSpikeContract(t *testing.T) {
 			}
 			got, _ := values["values"].(map[string]any)
 			if got["DEEL_API_KEY"] != "deel-v1" {
-				t.Fatalf("grant values read %d: want deel-v1, got %v", i, got)
+				t.Fatalf("grant values read %d: DEEL_API_KEY did not match the fake secrets store's value", i)
 			}
 		}
 		if fd.askCount() != 1 {
@@ -751,16 +760,24 @@ func TestSpikeContract(t *testing.T) {
 		if status != http.StatusOK || got["state"] != "cancelled" || got["grant_id"] != nil {
 			t.Fatalf("approving a cancelled request must never grant it, got %d %v", status, got)
 		}
+		var grantCount int
+		if err := env1.machine.Store.Pool.QueryRow(ctx, `select count(*) from grants where request_id=$1`, reqID3).Scan(&grantCount); err != nil {
+			t.Fatalf("count grants: %v", err)
+		}
+		if grantCount != 0 {
+			t.Fatalf("approving a cancelled request must create zero grant rows, got %d", grantCount)
+		}
 
 		status = deleteEnrollment(t, env1.srv, launcherToken, enrA.id)
 		if status != http.StatusNoContent {
 			t.Fatalf("delete enrollment A: want 204, got %d", status)
 		}
 		var combinedReqID, combinedGrantID string
-		// Scoped by enrollment_id, not ask_id alone: this suite's fake Dispatch mints small
-		// sequential ask ids ("ask-2") that are only unique within one test run, and this shared
-		// Postgres instance retains requests from every prior run. enrA.id is a fresh uuid this
-		// run alone minted, so the pair together can only match this run's own row.
+		// Scoped by enrollment_id, not ask_id alone: enrA.id is a fresh uuid this run alone
+		// minted, and combinedAskID is itself a globally unique uuid (fakeDispatch mints one via
+		// uuid.NewString() per ask, never a small reused string), so either one alone already
+		// identifies this run's own row in this shared, never-truncated Postgres instance; the
+		// pair together makes that explicit rather than relying on just one of them.
 		if err := env1.machine.Store.Pool.QueryRow(ctx, `select id from requests where ask_id=$1 and enrollment_id=$2`, combinedAskID, enrA.id).Scan(&combinedReqID); err != nil {
 			t.Fatalf("look up C06's combined request: %v", err)
 		}
@@ -863,17 +880,17 @@ func TestSpikeContract(t *testing.T) {
 		t.Log("RAN: C12 - the agent-secrets child sees the granted secret in its environment; the parent test process never does")
 		for _, e := range os.Environ() {
 			if strings.HasPrefix(e, "DEEL_API_KEY=") {
-				t.Fatalf("the parent test process must never carry DEEL_API_KEY in its own environment: %s", e)
+				t.Fatalf("the parent test process must never carry DEEL_API_KEY in its own environment")
 			}
 		}
 		keyDir := writeKeyDir(t, enrB)
 		stdout, stderr, exit := runAgentSecrets(t, agentSecretsBin, env2.srv.URL, keyDir,
 			"DEEL_API_KEY", "--", "sh", "-c", `printf 'child-sees:%s\n' "$DEEL_API_KEY"`)
 		if exit != 0 {
-			t.Fatalf("exit = %d, want 0: stdout=%q stderr=%q", exit, stdout, stderr)
+			t.Fatalf("exit = %d, want 0: stdout=%q stderr=%q", exit, redactSecrets(stdout), redactSecrets(stderr))
 		}
 		if !strings.Contains(stdout, "child-sees:deel-v1") {
-			t.Fatalf("child did not see the granted value: stdout=%q", stdout)
+			t.Fatalf("child did not see the granted value: stdout=%q", redactSecrets(stdout))
 		}
 	})
 
