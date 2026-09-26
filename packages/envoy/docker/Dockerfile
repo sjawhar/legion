@@ -22,11 +22,14 @@ COPY packages/daemon/package.json packages/daemon/package.json
 COPY packages/envoy-plugin/package.json packages/envoy-plugin/package.json
 COPY packages/claude-envoy/package.json packages/claude-envoy/package.json
 COPY packages/dispatch/package.json packages/dispatch/package.json
+COPY packages/proof-editor/package.json packages/proof-editor/package.json
+COPY packages/envoy/internal/dispatch/pmdoc/gen/package.json packages/envoy/internal/dispatch/pmdoc/gen/package.json
 COPY packages/workspace/package.json packages/workspace/package.json
 RUN bun install --frozen-lockfile
 
 COPY packages/contracts packages/contracts
 COPY packages/dispatch packages/dispatch
+COPY packages/proof-editor packages/proof-editor
 RUN cd packages/contracts && bun run gen:go
 RUN cd packages/dispatch && bun run build:web
 

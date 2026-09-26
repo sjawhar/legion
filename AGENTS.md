@@ -104,6 +104,7 @@ projects:
 | Operator controller configuration (Kubernetes) | `deploy/kubernetes/daemon/controller.yaml.example` | The operator-side file `legion controller start` reads. See `docs/kubernetes.md` "Operator-launched controller" |
 | Prove the Kubernetes runtime live | `scripts/e2e/stage4a-sandbox-runtime.sh` | The Go Agent Sandbox runtime on the production cluster; `scripts/e2e/README.md` |
 | Native Dispatch workspace | `packages/dispatch/`, `packages/envoy/cmd/dispatch/` | React SPA and native Dispatch server |
+| Dispatch's document editor | `packages/proof-editor/` | The editor entry, typed blocks and block ids, source-only. Copied from the `sjawhar/proof-sdk` fork at the commit a git dependency pins; the upstream editor modules stay there. See @packages/proof-editor/AGENTS.md |
 | Go coordinator (in progress) | `packages/daemon-go/` | LEGION-208's Go rewrite: a separate module bound by the root `go.work`, sharing no file with `packages/daemon`, which stays the shipped daemon until Stage 7. `cmd/legion` is its CLI, `internal/api/state.go` owns its wire shape, `packages/contracts/src/legion-go-api.ts` mirrors it, `scripts/e2e/` holds each stage's live proof |
 
 ## Conventions
