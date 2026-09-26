@@ -382,13 +382,19 @@ log_lines() { jq -R -c --arg m "$1" 'fromjson? | select(.msg == $m)' "$daemon_lo
 driver_action() { printf '%s %s %s\n' "$1" "$2" "$(date -u +%FT%T.%3NZ)" >>"$evidence/driver-actions.txt"; }
 # end_claim_pod ISSUE ROLE kill|delete: ends the pod ISSUE's ROLE claim runs on - `kill` signals its
 # worker's PID 1, `delete` deletes the pod object - records the action, and returns only once that
-# death is observable: the pod's Sandbox reports Finished, the claim moved to another incarnation, or
-# the issue is held. Sets `ended_pod_uid` and `ended_pod` for the caller's later assertions.
+# death is observable: the pod's Sandbox reports Finished for its current generation, the claim moved
+# to another incarnation, or the issue is held. Sets `ended_pod_uid` and `ended_pod` for the
+# caller's later assertions.
+# Finished is read as the daemon reads a condition (runtime/sandbox/types.go, condition): only when
+# the controller wrote it for the Sandbox's current generation, since every relaunch bumps the
+# generation and leaves the previous pod's Finished on the object. It is the one arm that says the
+# pod died whether or not the daemon has reacted yet, so a kill that lands on a daemon that never
+# reacts fails at the caller's wait for the daemon, not here.
 # A claim takes its pod's uid the moment the pod is created, before any container of it runs, so a
-# kill issued in that window reaches no worker container and ends nothing, and the run then reads its
-# own silence as a daemon that never reacted (the controller checkpoint, 2026-09-26). `kill` therefore
-# refuses a claim that has not registered from the pod it names; a site that means to end a pod before
-# its worker registers passes `delete`, which is what lands on a pod that is still starting.
+# kill issued in that window reaches no worker container and ends nothing, and the run would read
+# its own silence as a daemon that never reacted. `kill` therefore refuses a claim that has not
+# registered from the pod it names; a site that means to end a pod before its worker registers
+# passes `delete`, which is what lands on a pod that is still starting.
 end_claim_pod() {
   local issue=$1 role=$2 method=$3 claim state bound exec_out
   claim=$(claim_view "$issue" "$role")
@@ -418,7 +424,7 @@ end_claim_pod() {
     *) fail "end_claim_pod: unknown method $method" ;;
   esac
   until_true "$bound" "the $method of pod $ended_pod_uid to land" sh -c \
-    "timeout 120 kubectl --context '$operator' -n '$namespace' get sandbox '$ended_pod' -o json | jq -e '.status.conditions[]? | select(.type == \"Finished\" and .status == \"True\")' >/dev/null || '$work/legion' state --json --config '$work/legion.yaml' | jq -e --arg i '$issue' --arg r '$role' --arg u '$ended_pod_uid' '.issues[\$i].phase == \"held\" or (((if \$r == \"architect\" then .issues[\$i].architect else .issues[\$i].workers[\$r].claim end).locator.incarnation // \"\") as \$n | \$n != \"\" and \$n != \$u)' >/dev/null"
+    "timeout 120 kubectl --context '$operator' -n '$namespace' get sandbox '$ended_pod' -o json | jq -e '.metadata.generation as \$g | .status.conditions[]? | select(.type == \"Finished\" and .status == \"True\" and .observedGeneration == \$g)' >/dev/null || '$work/legion' state --json --config '$work/legion.yaml' | jq -e --arg i '$issue' --arg r '$role' --arg u '$ended_pod_uid' '.issues[\$i].phase == \"held\" or (((if \$r == \"architect\" then .issues[\$i].architect else .issues[\$i].workers[\$r].claim end).locator.incarnation // \"\") as \$n | \$n != \"\" and \$n != \$u)' >/dev/null"
 }
 # pod_watch_verdict WATCH ACTIONS DAEMONLOG prints every pod of the run the node ended (Evicted, or
 # a container OOMKilled), and every claim process the daemon found dead (`supervise: process died`,
