@@ -130,13 +130,13 @@ func TestCreateWorkspaceRefusesAMainAtOriginConcurrentFetchesConflicted(t *testi
 
 	before = len(run.Calls())
 	_, err = Provision(context.Background(), run, req)
-	untracked := "Bookmark main is not tracked in the shared clone " + clone + ", where main@origin is at " + elsewhere + " untracked; workspace " + workspace.Dir + " was not created. Track it: `jj bookmark track main@origin --ignore-working-copy -R " + shellprefix.Word(clone) + "`, and the next provisioning starts there"
+	untracked := "Bookmark main is not tracked in the shared clone " + clone + ", where main@origin is at " + elsewhere + " untracked; workspace " + workspace.Dir + " was not created. Track it: `jj bookmark track 'main@origin' --ignore-working-copy '--color=never' -R " + shellprefix.Word(clone) + "`, and the next provisioning starts there"
 	if err == nil || err.Error() != untracked {
 		t.Fatalf("provision again: %v\nwant %q", err, untracked)
 	}
 	nothingProvisioned(t, run, before, workspace, "provisioning again", "jj", "bookmark", "track")
 	l := lostWorkspace{run: run, req: req, first: first, clone: clone}
-	command := l.runWayOut(t, err.Error(), "jj bookmark track main@origin", "")
+	command := l.runWayOut(t, err.Error(), "jj bookmark track", "")
 	working, err := Provision(context.Background(), run, req)
 	if err != nil {
 		t.Fatalf("provision after %q: %v", command, err)
@@ -167,7 +167,7 @@ func TestAForgottenMainsWayOutRunsAsPrintedFromAStateDirectoryHoldingASpace(t *t
 	if err == nil {
 		t.Fatal("provisioning with main forgotten succeeded; want the untracked main@origin refusal")
 	}
-	command := codeSpan(t, err.Error(), "jj bookmark track main@origin")
+	command := codeSpan(t, err.Error(), "jj bookmark track")
 	runSetup(t, t.TempDir(), "sh", "-c", command)
 	working, err := Provision(context.Background(), run, req)
 	if err != nil {
@@ -696,13 +696,13 @@ func TestProvisionRefusesAWorkspaceWithNoBranchWhenMainDoesNotResolve(t *testing
 		{"main deleted in the shared clone", func(t *testing.T, run *recordingRunner, clone string) []string {
 			origin := commitOf(t, clone, "main@origin")
 			runSetup(t, clone, "jj", "bookmark", "delete", "main", "--ignore-working-copy", "-R", clone)
-			return []string{"Bookmark main was deleted in the shared clone " + clone + " while main@origin is tracked at " + origin + "; workspace {dir} was not created. Restore it: `jj bookmark set main -r main@origin --ignore-working-copy -R " + shellprefix.Word(clone) + "`, and the next provisioning starts there"}
+			return []string{"Bookmark main was deleted in the shared clone " + clone + " while main@origin is tracked at " + origin + "; workspace {dir} was not created. Restore it: `jj bookmark set main -r 'main@origin' --ignore-working-copy '--color=never' -R " + shellprefix.Word(clone) + "`, and the next provisioning starts there"}
 		}, "jj bookmark set main"},
 		{"main forgotten in the shared clone", func(t *testing.T, run *recordingRunner, clone string) []string {
 			origin := commitOf(t, clone, "main@origin")
 			runSetup(t, clone, "jj", "bookmark", "forget", "main", "--ignore-working-copy", "-R", clone)
-			return []string{"Bookmark main is not tracked in the shared clone " + clone + ", where main@origin is at " + origin + " untracked; workspace {dir} was not created. Track it: `jj bookmark track main@origin --ignore-working-copy -R " + shellprefix.Word(clone) + "`, and the next provisioning starts there"}
-		}, "jj bookmark track main@origin"},
+			return []string{"Bookmark main is not tracked in the shared clone " + clone + ", where main@origin is at " + origin + " untracked; workspace {dir} was not created. Track it: `jj bookmark track 'main@origin' --ignore-working-copy '--color=never' -R " + shellprefix.Word(clone) + "`, and the next provisioning starts there"}
+		}, "jj bookmark track"},
 		{"main conflicted by two local moves", func(t *testing.T, run *recordingRunner, clone string) []string {
 			base := commitOf(t, clone, "main")
 			var sides []string
@@ -716,7 +716,7 @@ func TestProvisionRefusesAWorkspaceWithNoBranchWhenMainDoesNotResolve(t *testing
 			}
 			var refusals []string
 			for _, adds := range [][]string{sides, {sides[1], sides[0]}} {
-				refusals = append(refusals, "Bookmark main is conflicted (adds "+strings.Join(adds, ", ")+"; removes "+base+"); workspace {dir} was not created. Keep origin's: `jj bookmark set main -r main@origin --allow-backwards --ignore-working-copy -R "+shellprefix.Word(clone)+"`, and the next provisioning starts there")
+				refusals = append(refusals, "Bookmark main is conflicted (adds "+strings.Join(adds, ", ")+"; removes "+base+"); workspace {dir} was not created. Keep origin's: `jj bookmark set main -r 'main@origin' --allow-backwards --ignore-working-copy '--color=never' -R "+shellprefix.Word(clone)+"`, and the next provisioning starts there")
 			}
 			return refusals
 		}, "jj bookmark set main"},
