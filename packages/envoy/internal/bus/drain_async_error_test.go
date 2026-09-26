@@ -2,6 +2,7 @@ package bus_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"log/slog"
 	"strings"
@@ -72,9 +73,101 @@ func TestADrainThatFindsItsConsumerGoneWarns(t *testing.T) {
 	if err := client.Drain(5 * time.Second); err != nil {
 		t.Fatalf("drain: %v", err)
 	}
+	if got, want := awaitAsyncErrorReports(&records, 5*time.Second), "WARN nats: consumer not found"; got != want {
+		t.Fatalf("the drain's async error reports = %q, want %q", got, want)
+	}
+}
+
+// nats.go runs every async callback on one goroutine, the bus's reconnect hooks included (they run
+// inside ReconnectedCB), and closing the connection does not wait for that goroutine. So when a
+// shutdown drain finds a watcher's consumer gone while a reconnect hook is still running -- the
+// case the test above names: the last reconnect has not yet replaced that watcher -- the drain's
+// report runs only after the hook returns, on a connection the drain has already closed. It is
+// the same report and stays a warning.
+func TestADrainWhoseReportRunsAfterTheConnectionClosedStillWarns(t *testing.T) {
+	ctr, uri := testnats.StartRestartable(t)
+	var records lockedBuffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&records, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	client, err := bus.Connect([]string{uri}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var enter, unblock sync.Once
+	t.Cleanup(func() { unblock.Do(func() { close(release) }) })
+	client.AddReconnectHook(func(*natsgo.Conn) error {
+		enter.Do(func() { close(entered) })
+		<-release
+		return nil
+	})
+	js, err := client.Conn.JetStream()
+	if err != nil {
+		t.Fatalf("JetStream: %v", err)
+	}
+	kv, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: "drain_after_close"})
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	watcher, err := kv.WatchAll()
+	if err != nil {
+		t.Fatalf("watch: %v", err)
+	}
+	select {
+	case <-watcher.Updates():
+	case <-time.After(5 * time.Second):
+		t.Fatal("the watcher never finished its initial scan")
+	}
+	go func() {
+		for range watcher.Updates() {
+		}
+	}()
+
+	testnats.Stop(t, ctr)
+	if err := ctr.Start(context.Background()); err != nil {
+		t.Fatalf("restart NATS: %v", err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the client never reconnected")
+	}
+	// The restart can already have lost the watcher's ephemeral consumer; whatever is left goes,
+	// so the drain's delete finds none.
+	admin := testnats.Connect(t, uri)
+	adminJS, err := admin.JetStream()
+	if err != nil {
+		t.Fatalf("admin JetStream: %v", err)
+	}
+	for name := range adminJS.ConsumerNames("KV_drain_after_close") {
+		if err := adminJS.DeleteConsumer("KV_drain_after_close", name); err != nil {
+			t.Fatalf("delete the watcher's consumer %s: %v", name, err)
+		}
+	}
+
+	if err := client.Drain(5 * time.Second); err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	if !client.Conn.IsClosed() {
+		t.Fatal("the drain returned with the connection still open")
+	}
+	if got := awaitAsyncErrorReports(&records, time.Second); got != "" {
+		t.Fatalf("an async error was reported while the reconnect hook still ran: %q", got)
+	}
+	unblock.Do(func() { close(release) })
+	if got, want := awaitAsyncErrorReports(&records, 5*time.Second), "WARN nats: consumer not found"; got != want {
+		t.Fatalf("the drain's async error reports = %q, want %q", got, want)
+	}
+}
+
+// awaitAsyncErrorReports returns the bus's async error reports logged so far, as "LEVEL error"
+// joined by ", ", once there is at least one or `within` has passed.
+func awaitAsyncErrorReports(records *lockedBuffer, within time.Duration) string {
 	var reports []string
-	deadline := time.Now().Add(5 * time.Second)
-	for len(reports) == 0 && time.Now().Before(deadline) {
+	for deadline := time.Now().Add(within); len(reports) == 0 && time.Now().Before(deadline); {
 		time.Sleep(50 * time.Millisecond)
 		for _, line := range strings.Split(strings.TrimSpace(records.String()), "\n") {
 			var record struct {
@@ -87,9 +180,7 @@ func TestADrainThatFindsItsConsumerGoneWarns(t *testing.T) {
 			}
 		}
 	}
-	if got, want := strings.Join(reports, ", "), "WARN nats: consumer not found"; got != want {
-		t.Fatalf("the drain's async error reports = %q, want %q", got, want)
-	}
+	return strings.Join(reports, ", ")
 }
 
 type lockedBuffer struct {

@@ -123,14 +123,17 @@ func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB 
 	opts.AsyncErrorCB = func(nc *nats.Conn, sub *nats.Subscription, err error) {
 		level := slog.LevelError
 		switch {
-		case errors.Is(err, nats.ErrConsumerNotFound) && nc != nil && nc.IsDraining():
+		case err == nats.ErrConsumerNotFound && nc != nil && (nc.IsDraining() || nc.IsClosed()):
 			// A drain ends each subscription whose consumer nats.go created, then deletes that
 			// consumer. At shutdown the listener leaves a KV watcher the last reconnect has not yet
 			// replaced for the drain to end, and the server can already have dropped that watcher's
 			// ephemeral consumer (after a NATS restart, once no interest outlasts its inactive
-			// threshold), so the delete finds it gone: the state the delete was for. The one other
-			// report of this error, an ordered consumer nats.go failed to recreate, arrives on a
-			// connected connection and stays an ERROR.
+			// threshold), so the delete finds it gone: the state the delete was for. The report can
+			// run after the drain has closed the connection: nats.go runs it on the goroutine that
+			// also runs ReconnectedCB, and so the bus's reconnect hooks, and the close does not wait
+			// for a hook still running. DeleteConsumer returns the sentinel itself; the one other
+			// report of this error, an ordered consumer nats.go failed to recreate, wraps it, and
+			// stays an ERROR in any connection state.
 			level = slog.LevelWarn
 		case errors.Is(err, nats.ErrConsumerNotActive):
 			// Every consumer Envoy runs with idle heartbeats is a KV watcher's ordered consumer,
