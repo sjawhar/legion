@@ -1096,15 +1096,32 @@ func refuseUnreadableReplacement(before, after *pmdoc.Node, match pmdoc.Range, w
 
 // refuseReshapedReplacement refuses a replace whose text the document reads back as blocks of
 // another kind where it lands - a paragraph whose new text is `---` reads back as a horizontal
-// rule - since a replace writes text and the document could not carry it back as text.
+// rule - since a replace writes text and the document could not carry it back as text. An empty
+// with that empties its paragraph deletes the text on purpose, so the block and its id stay,
+// holding nothing, though an empty paragraph is not written; one that leaves text reading back as
+// another block is refused naming that text.
 func refuseReshapedReplacement(before, after *pmdoc.Node, match pmdoc.Range, with string) error {
+	at, ok := pmdoc.ContainingTextblock(after, match.From)
+	if !ok {
+		return fmt.Errorf("no textblock holds the replaced range at %d", match.From)
+	}
+	if with == "" && emptyTextblock(at.Node) {
+		return nil
+	}
 	reshaped, err := replacementBroke(before, after, match, pmdoc.BlockShapeError)
 	if err != nil || reshaped == nil {
 		return err
 	}
+	if with == "" {
+		left := nodeText(at.Node)
+		return &ErrInvalidOp{Field: "with", Reason: fmt.Sprintf(
+			"with \"\" leaves %q, text the document reads back as another block where it lands (%v); %s",
+			left, reshaped, blockSyntaxAdvice(left, inFootnoteDefinition(at)),
+		)}
+	}
 	return &ErrInvalidOp{Field: "with", Reason: fmt.Sprintf(
 		"with %q is text the document reads back as another block where it lands (%v); %s",
-		with, reshaped, blockSyntaxAdvice(with),
+		with, reshaped, blockSyntaxAdvice(with, inFootnoteDefinition(at)),
 	)}
 }
 
@@ -1125,18 +1142,41 @@ func replacementBroke(before, after *pmdoc.Node, match pmdoc.Range, check func(*
 
 // blockSyntaxAdvice says what to do with text that reads as block syntax where it lands: a line
 // of only `-`, `*` or `_` is a horizontal rule and a line of only colons a typed block's fence,
-// and anything else is left to the reader of the reason before it.
-func blockSyntaxAdvice(with string) string {
+// and anything else is left to the reader of the reason before it. The block the caller probably
+// meant is inserted beside the one holding the text, except in a footnote definition: the document
+// reads a definition at its end, so a block added beside one reads back ahead of it, and the text
+// stays the only way to keep what the caller wrote there.
+func blockSyntaxAdvice(with string, footnote bool) string {
 	for _, line := range strings.Split(strings.ReplaceAll(with, "\\\n", "\n"), "\n") {
 		line = strings.TrimSpace(strings.TrimSuffix(line, "  "))
+		var reads, insert string
 		switch {
 		case thematicBreakLine.MatchString(line):
-			return fmt.Sprintf("the line %q reads as a horizontal rule; to add a rule, insert it as its own block beside this one (insert with markdown %q), and to keep the characters as text, put other text on that line", line, "***")
+			reads, insert = "a horizontal rule", fmt.Sprintf("to add a rule, insert it as its own block beside this one (insert with markdown %q)", "***")
 		case line != "" && strings.Trim(line, ":") == "" && len(line) >= 3:
-			return fmt.Sprintf("the line %q reads as a typed block's fence; to add a typed block, insert it as its own block beside this one, and to keep the characters as text, put other text on that line", line)
+			reads, insert = "a typed block's fence", "to add a typed block, insert it as its own block beside this one"
+		default:
+			continue
 		}
+		if footnote {
+			return fmt.Sprintf("the line %q reads as %s; to keep the characters as text, put other text on that line (a footnote definition is read at the document's end, so a block added beside it reads back ahead of it)", line, reads)
+		}
+		return fmt.Sprintf("the line %q reads as %s; %s, and to keep the characters as text, put other text on that line", line, reads, insert)
+	}
+	if footnote {
+		return "write it inside a line of text"
 	}
 	return "write it inside a line of text, or insert the block you mean as its own block"
+}
+
+// inFootnoteDefinition reports whether a textblock is inside a footnote definition.
+func inFootnoteDefinition(at pmdoc.TextblockAt) bool {
+	for _, ancestor := range at.Ancestors {
+		if ancestor.Type == "footnote_definition" {
+			return true
+		}
+	}
+	return false
 }
 
 // thematicBreakLine is a line CommonMark reads as a thematic break: three or more of one of
@@ -1151,7 +1191,8 @@ var thematicBreakLine = regexp.MustCompile(`^(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}
 // definition or a list item holding more than the paragraph, and a block further out when
 // removing the holder would empty one that needs a block, such as a callout holding only it.
 func unreadableReason(before, after *pmdoc.Node, match pmdoc.Range, with string, unreadable error) string {
-	if at, ok := pmdoc.ContainingTextblock(after, match.From); ok && emptyTextblock(at.Node) {
+	at, ok := pmdoc.ContainingTextblock(after, match.From)
+	if ok && emptyTextblock(at.Node) {
 		holder := strings.ReplaceAll(at.Ancestors[0].Type, "_", " ")
 		if _, removed, err := pmdoc.DeleteTextblock(before, match); err == nil && removed {
 			return fmt.Sprintf(
@@ -1189,7 +1230,7 @@ func unreadableReason(before, after *pmdoc.Node, match pmdoc.Range, with string,
 			with,
 		)
 	}
-	return fmt.Sprintf("with %q leaves markdown the document cannot read back where it lands (%v); %s", with, unreadable, blockSyntaxAdvice(with))
+	return fmt.Sprintf("with %q leaves markdown the document cannot read back where it lands (%v); %s", with, unreadable, blockSyntaxAdvice(with, ok && inFootnoteDefinition(at)))
 }
 
 // emptyTextblock reports whether a textblock holds no text but whitespace.
@@ -1330,7 +1371,7 @@ func refuseCodeThatEndsItsBlock(before, after *pmdoc.Node, match pmdoc.Range, at
 	var fence fenceLineInCode
 	if errors.As(broke, &fence) {
 		return &ErrInvalidOp{Field: field, Reason: fmt.Sprintf(
-			"%s %q puts the line %q in code the %s around it reads as its closing fence: the browser editor ends a typed block at a line of three or more colons indented less than four spaces, even inside fenced code, so the %s would end there and the code after it would leave it; indent that line four or more spaces or a tab, or move the code block out of the %s",
+			"%s %q puts the line %q in code the %s around it reads as its closing fence: the browser editor ends a typed block at a line of three or more colons indented less than four columns from where the typed block's own lines start, even inside fenced code, so the %s would end there and the code after it would leave it; indent that line four or more spaces, or move the code block out of the %s",
 			field, with, fence.line, holder, holder, holder,
 		)}
 	}

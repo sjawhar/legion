@@ -2065,23 +2065,90 @@ func TestApplyOpsDeletingAnOpenAskBlockByIDRetractsItsAsk(t *testing.T) {
 	}
 }
 
+// An empty with deletes the matched text on purpose. Where it empties a whole paragraph the block
+// and its id stay, holding nothing, whatever blocks are around it; where the text it leaves reads
+// back as another block, the replace is refused naming that text.
+func TestApplyOperationReplaceWithNothingEmptiesTheParagraph(t *testing.T) {
+	for _, test := range []struct{ name, markdown string }{
+		{"before a list", "Intro.\n\nBody.\n\n- a\n"},
+		{"after a list", "- a\n\nBody.\n\nAfter.\n"},
+		{"before a fence", "Intro.\n\nBody.\n\n```\ncode\n```\n"},
+		{"after a fence", "```\ncode\n```\n\nBody.\n"},
+		{"before a heading", "Intro.\n\nBody.\n\n# Title\n"},
+		{"after a heading", "# Title\n\nBody.\n"},
+		{"before a table", "Intro.\n\nBody.\n\n| h |\n| --- |\n| c |\n"},
+		{"before indented code", "Intro.\n\nBody.\n\n    code\n"},
+		{"before a rule", "Intro.\n\nBody.\n\n***\n"},
+		{"between paragraphs", "Intro.\n\nBody.\n\nAfter.\n"},
+		{"a blockquote's paragraph before its list", "Intro.\n\n> Body.\n>\n> - a\n"},
+		{"an ask's question", "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nBody.\n\n- A\n- B\n:::\n"},
+		{"a footnote definition's first paragraph of two", "x[^1]\n\n[^1]: Body.\n\n    More.\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tree, err := parseInput(test.markdown)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pmdoc.EnsureBlockIDs(tree)
+			var id string
+			pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
+				if node.Type == "paragraph" && nodeText(node) == "Body." {
+					id = blockID(node)
+				}
+				return true
+			})
+			next, err := applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: ""})
+			if err != nil {
+				t.Fatalf("replace with nothing = %v, want the paragraph emptied", err)
+			}
+			var emptied *pmdoc.Node
+			pmdoc.Walk(next, func(node *pmdoc.Node) bool {
+				if blockID(node) == id {
+					emptied = node
+				}
+				return true
+			})
+			if emptied == nil || emptied.Type != "paragraph" || nodeText(emptied) != "" {
+				t.Fatalf("after replacing with nothing, block %q = %+v, want an empty paragraph", id, emptied)
+			}
+		})
+	}
+	tree, err := parseInput("Intro.\n\n--- x\n\nAfter.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = applyOperation(tree, model.EditOp{Op: "replace", Find: " x", With: ""})
+	var invalid *ErrInvalidOp
+	if !errors.As(err, &invalid) || invalid.Field != "with" || !strings.Contains(invalid.Reason, `leaves "---"`) || !strings.Contains(invalid.Reason, `the line "---" reads as a horizontal rule`) {
+		t.Fatalf("replace leaving \"---\" = %v, want INVALID_OP on with naming the text it leaves", err)
+	}
+}
+
 // A replace writes text. Text that reads back as another block where it lands - a line of dashes
 // becomes a horizontal rule, a line of colons a typed block's fence - is refused with that cause,
 // whatever the block around it, and the advice is the insert that adds the block the caller
-// probably meant. The reason names the block the text reads back as, read in place, not at a
+// probably meant, except in a footnote definition: the document reads a definition at its end, so
+// a block inserted beside one reads back ahead of it, and the advice there is only to keep the
+// characters as text. The reason names the block the text reads back as, read in place, not at a
 // document's start, where a `---` line would open front matter.
 func TestApplyOperationReplaceRefusesTextThatReadsBackAsAnotherBlock(t *testing.T) {
+	const footnote = "x[^1]\n\n[^1]: Body.\n"
 	for _, test := range []struct {
 		name, markdown, with string
 		want                 []string
+		insert               bool
 	}{
-		{"a paragraph", "Intro.\n\nBody.\n\nAfter.\n", "---", []string{"a horizontal rule", `insert with markdown "***"`}},
-		{"a blockquote", "Intro.\n\n> Body.\n", "---", []string{"a horizontal rule", "insert"}},
-		{"a callout", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n", "---", []string{"a horizontal rule", "insert"}},
-		{"a list item", "Intro.\n\n- Body.\n- two\n", "***", []string{"horizontal rule", "insert"}},
-		{"a footnote definition", "x[^1]\n\n[^1]: Body.\n", "---", []string{"horizontal rule", "insert"}},
-		{"a callout, with colons", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n", ":::", []string{"typed block's fence", "insert"}},
-		{"a paragraph, a colon line then text", "Intro.\n\nBody.\n\nAfter.\n", ":::\nb", []string{"typed block's fence", "insert"}},
+		{"a paragraph", "Intro.\n\nBody.\n\nAfter.\n", "---", []string{"a horizontal rule", `insert with markdown "***"`}, true},
+		{"a blockquote", "Intro.\n\n> Body.\n", "---", []string{"a horizontal rule"}, true},
+		{"a callout", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n", "---", []string{"a horizontal rule"}, true},
+		{"a list item", "Intro.\n\n- Body.\n- two\n", "***", []string{"horizontal rule"}, true},
+		{"a callout, with colons", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n", ":::", []string{"typed block's fence"}, true},
+		{"a paragraph, a colon line then text", "Intro.\n\nBody.\n\nAfter.\n", ":::\nb", []string{"typed block's fence"}, true},
+		{"a paragraph, after a hard break", "Intro.\n\nBody.\n\nAfter.\n", "x\\\n***", []string{"the document's end reads back as a horizontal rule"}, true},
+		{"a footnote definition", footnote, "---", []string{"horizontal rule", "other text on that line"}, false},
+		{"a footnote definition, with asterisks", footnote, "***", []string{"horizontal rule", "other text on that line"}, false},
+		{"a footnote definition, a colon line then text", footnote, ":::\nb", []string{"typed block's fence", "other text on that line"}, false},
+		{"a footnote definition's first paragraph of two", "x[^1]\n\n[^1]: Body.\n\n    More.\n", "---", []string{"a horizontal rule", "other text on that line"}, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			tree, err := parseInput(test.markdown)
@@ -2101,6 +2168,12 @@ func TestApplyOperationReplaceRefusesTextThatReadsBackAsAnotherBlock(t *testing.
 			}
 			if strings.Contains(invalid.Reason, "requires block children") {
 				t.Fatalf("reason %q names the document-start reading", invalid.Reason)
+			}
+			if offers := strings.Contains(invalid.Reason, "insert"); offers != test.insert {
+				t.Fatalf("reason %q offers an insert: %v, want %v", invalid.Reason, offers, test.insert)
+			}
+			if strings.Contains(invalid.Reason, "the a ") {
+				t.Fatalf("reason %q names a block twice over", invalid.Reason)
 			}
 		})
 	}

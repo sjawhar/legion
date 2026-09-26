@@ -84,34 +84,36 @@ func (p *typedDirectiveParser) Close(_ ast.Node, _ gmtext.Reader, _ parser.Conte
 
 // TypedFenceLineInCode returns a line of code inside a typed block that the browser editor's
 // parser reads as the typed block's closing fence, and false when block holds none. That parser
-// ends a typed block at a line of three or more colons indented at most three spaces from the
-// typed block's own prefix, even inside a fenced code block it holds, so a code line is measured
-// with the indentation the list items around it add, a tab counting four; a line in a blockquote
-// begins with its `>` and closes nothing outside it.
+// ends a typed block at a line of three or more colons, with spaces or tabs around them, whose text
+// starts at most three columns past the typed block's own content column, even inside a fenced code
+// block it holds. Columns are the written line's: a blockquote's `> ` adds two, a list marker its
+// width, a footnote definition four, and a tab advances to the next multiple of four from the column
+// it stands at. A line inside a blockquote begins with its `>`, so it closes no typed block outside
+// that blockquote.
 func TypedFenceLineInCode(block *Node) (string, bool) {
-	const quoted = 1 << 20
-	var find func(node *Node, indent int, typed bool) (string, bool)
-	find = func(node *Node, indent int, typed bool) (string, bool) {
+	// fence is the content column of the nearest typed block a line could close, or -1.
+	var find func(node *Node, column, fence int) (string, bool)
+	find = func(node *Node, column, fence int) (string, bool) {
 		if _, ok := typedBlock(node.Type); ok {
-			indent, typed = 0, true
+			fence = column
 		}
 		switch node.Type {
 		case "code_block":
-			if !typed {
+			if fence < 0 {
 				return "", false
 			}
 			for _, text := range node.Children {
 				for _, line := range strings.Split(text.Text, "\n") {
-					if indent+leadingColumns(line) <= 3 && colonLine(strings.TrimSpace(line)) >= 3 {
+					if colonLine(strings.Trim(line, " \t")) >= 3 && textColumn(line, column)-fence <= 3 {
 						return line, true
 					}
 				}
 			}
 			return "", false
 		case "blockquote":
-			indent = quoted
+			column, fence = column+2, -1
 		case "footnote_definition":
-			indent += 4
+			column += 4
 		case "bullet_list", "ordered_list":
 			start := int(num(node.Attrs["order"], 1))
 			for index, item := range node.Children {
@@ -120,7 +122,7 @@ func TypedFenceLineInCode(block *Node) (string, bool) {
 					marker = len(strconv.Itoa(start+index)) + 2
 				}
 				for _, child := range item.Children {
-					if line, ok := find(child, indent+marker, typed); ok {
+					if line, ok := find(child, column+marker, fence); ok {
 						return line, true
 					}
 				}
@@ -128,29 +130,29 @@ func TypedFenceLineInCode(block *Node) (string, bool) {
 			return "", false
 		}
 		for _, child := range node.Children {
-			if line, ok := find(child, indent, typed); ok {
+			if line, ok := find(child, column, fence); ok {
 				return line, true
 			}
 		}
 		return "", false
 	}
-	return find(block, 0, false)
+	return find(block, 0, -1)
 }
 
-// leadingColumns is how far a line's text is indented, a tab counting four columns.
-func leadingColumns(line string) int {
-	columns := 0
+// textColumn is the column a line's text starts at when the line is written from column, a tab
+// advancing to the next multiple of four.
+func textColumn(line string, column int) int {
 	for _, char := range line {
 		switch char {
 		case ' ':
-			columns++
+			column++
 		case '\t':
-			columns += 4
+			column += 4 - column%4
 		default:
-			return columns
+			return column
 		}
 	}
-	return columns
+	return column
 }
 
 // colonLine is the length of line when it is colons alone, and 0 otherwise.

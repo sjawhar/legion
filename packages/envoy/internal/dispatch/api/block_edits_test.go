@@ -175,6 +175,10 @@ func TestDocumentEditsRefuseCodeThatWouldEndItsTypedBlock(t *testing.T) {
 		listItem = "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n- item\n  ```\n  Body.\n  ```\n:::\n\nAfter.\n"
 		quoted   = "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n> ```\n> Body.\n> ```\n:::\n\nAfter.\n"
 		outside  = "Intro.\n\n```\nBody.\n```\n\nAfter.\n"
+		// A callout inside a blockquote or a list item starts two columns in, where a tab in its
+		// code advances only two columns.
+		calloutInQuote = "Intro.\n\n> :::callout{#c1 kind=\"note\" title=\"T\"}\n> ```\n> Body.\n> ```\n> :::\n\nAfter.\n"
+		calloutInItem  = "Intro.\n\n- item\n\n  :::callout{#c1 kind=\"note\" title=\"T\"}\n  ```\n  Body.\n  ```\n  :::\n\nAfter.\n"
 	)
 	text := func(artifactID string) string {
 		markdown, err := documentService.Text(context.Background(), artifactID)
@@ -193,6 +197,9 @@ func TestDocumentEditsRefuseCodeThatWouldEndItsTypedBlock(t *testing.T) {
 		{"four colons", direct, "a\n::::\nb"},
 		{"in a list item's code", listItem, "a\n:::\nb"},
 		{"indented one space in a list item's code", listItem, "a\n :::\nb"},
+		{"a tab in code in a callout in a blockquote", calloutInQuote, "a\n\t:::\nb"},
+		{"a tab in code in a callout in a list item", calloutInItem, "a\n\t:::\nb"},
+		{"a space and a tab in code in a callout in a list item", calloutInItem, "a\n \t:::\nb"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			issue := createInteractionIssue(t, handler, "E"+string(rune('A'+index)), "closer in code", test.spec)
@@ -200,7 +207,7 @@ func TestDocumentEditsRefuseCodeThatWouldEndItsTypedBlock(t *testing.T) {
 			edited := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
 				"ops": []map[string]any{{"op": "replace", "find": "Body.", "with": test.with}},
 			}, "alice")
-			if body := edited.Body.String(); edited.Code != http.StatusBadRequest || !strings.Contains(body, `"code":"INVALID_OP"`) || !strings.Contains(body, "four or more spaces or a tab") || !strings.Contains(body, "out of the callout") {
+			if body := edited.Body.String(); edited.Code != http.StatusBadRequest || !strings.Contains(body, `"code":"INVALID_OP"`) || !strings.Contains(body, "indent that line four or more spaces, or move") || !strings.Contains(body, "out of the callout") {
 				t.Fatalf("replace: status=%d body=%s", edited.Code, body)
 			}
 			if after := text(issue.PrimaryArtifactID); after != before {
@@ -215,7 +222,7 @@ func TestDocumentEditsRefuseCodeThatWouldEndItsTypedBlock(t *testing.T) {
 			}
 			comment := decodeBody[model.Comment](t, created)
 			accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
-			if body := accepted.Body.String(); accepted.Code != http.StatusBadRequest || !strings.Contains(body, `"code":"INVALID_OP"`) || !strings.Contains(body, "four or more spaces or a tab") {
+			if body := accepted.Body.String(); accepted.Code != http.StatusBadRequest || !strings.Contains(body, `"code":"INVALID_OP"`) || !strings.Contains(body, "indent that line four or more spaces, or move") {
 				t.Fatalf("accept: status=%d body=%s", accepted.Code, body)
 			}
 			if after := text(issue.PrimaryArtifactID); after != before {
@@ -226,6 +233,7 @@ func TestDocumentEditsRefuseCodeThatWouldEndItsTypedBlock(t *testing.T) {
 	for index, test := range []struct{ name, spec, with string }{
 		{"indented four spaces", direct, "a\n    :::\nb"},
 		{"indented a tab", direct, "a\n\t:::\nb"},
+		{"a no-break space after the colons in a list item's code", listItem, "a\n:::\u00a0\nb"},
 		{"indented two spaces in a list item's code", listItem, "a\n  :::\nb"},
 		{"in a blockquote's code", quoted, "a\n:::\nb"},
 		{"in code outside a typed block", outside, "a\n:::\nb"},

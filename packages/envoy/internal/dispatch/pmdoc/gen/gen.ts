@@ -143,24 +143,42 @@ function quotePosition(doc: ProseMirrorNode, quote: string): number {
   return result;
 }
 // Where the browser editor's parser ends a typed block. Each case is a tree and the markdown the Go
-// renderer writes for it: a callout whose code holds a line of colons, inside the container the
-// case names. The
-// engine reads whether the callout keeps that code - the document still reading as the paragraph
-// before it, the callout and the paragraph after it - or ends at the line. pmdoc's
-// TypedFenceLineInCode is held to these verdicts (directive_test.go).
+// renderer writes for it: a callout, alone or inside a blockquote, a list item, a footnote
+// definition or another callout, whose code holds a line of colons, inside the container the case
+// names. The engine reads whether the markdown keeps the tree's blocks - the callout holding its
+// code - or ends the callout at the line. pmdoc's TypedFenceLineInCode is held to these verdicts
+// (directive_fence_test.go).
+type TreeJSON = { type: string; content?: TreeJSON[]; text?: string };
+const treeShape = (node: TreeJSON): string =>
+  node.type === "code_block"
+    ? `code_block${JSON.stringify((node.content ?? []).map((child) => child.text ?? "").join(""))}`
+    : node.type === "text" || node.type === "hardbreak" || node.type === "footnote_reference"
+      ? ""
+      : `${node.type}(${(node.content ?? []).map(treeShape).filter(Boolean).join(",")})`;
+const docShape = (node: ProseMirrorNode): string => {
+  if (node.type.name === "code_block") return `code_block${JSON.stringify(node.textContent)}`;
+  if (node.isInline) return "";
+  const children: string[] = [];
+  node.forEach((child) => {
+    const shape = docShape(child);
+    if (shape) children.push(shape);
+  });
+  return `${node.type.name}(${children.join(",")})`;
+};
 const fenceOut = join(here, "..", "testdata", "typed-fence-lines.json");
-const fenceCases: { name: string; tree: unknown; markdown: string }[] = JSON.parse(readFileSync(fenceOut, "utf8"));
-const nextFences =
-  JSON.stringify(
-    fenceCases.map(({ name, tree, markdown }) => {
-      const doc = engine.parseMarkdown(markdown);
-      const keeps =
-        doc.childCount === 3 && doc.child(1).type.name === "callout" && doc.child(2).textContent === "After.";
-      return { name, tree, markdown, engine_closes: !keeps };
-    }),
-    null,
-    2
-  ) + "\n";
+const fenceCases: { name: string; tree: TreeJSON; markdown: string }[] = JSON.parse(readFileSync(fenceOut, "utf8"));
+// One case per line, so a changed verdict is one changed line.
+const nextFences = `[\n${fenceCases
+  .map(({ name, tree, markdown }) =>
+    JSON.stringify({
+      name,
+      tree,
+      markdown,
+      engine_closes: docShape(engine.parseMarkdown(markdown)) !== treeShape(tree),
+    })
+  )
+  .map((line) => `  ${line}`)
+  .join(",\n")}\n]\n`;
 
 const next = JSON.stringify(fixtures, null, 2) + "\n";
 if (check) {

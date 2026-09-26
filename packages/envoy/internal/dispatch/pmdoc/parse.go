@@ -128,7 +128,7 @@ func shapeDifference(want, got *Node) (string, string) {
 	for index := 0; index < max(len(want.Children), len(got.Children)); index++ {
 		switch {
 		case index >= len(want.Children):
-			return "the " + blockName(want.Type) + "'s end", blockName(got.Children[index].Type)
+			return endOf(want.Type), blockName(got.Children[index].Type)
 		case index >= len(got.Children):
 			return blockName(want.Children[index].Type), "nothing"
 		}
@@ -137,6 +137,14 @@ func shapeDifference(want, got *Node) (string, string) {
 		}
 	}
 	return "", ""
+}
+
+// endOf names where a block's children end, as a reader names it.
+func endOf(nodeType string) string {
+	if nodeType == "doc" {
+		return "the document's end"
+	}
+	return "the " + strings.ReplaceAll(nodeType, "_", " ") + "'s end"
 }
 
 // blockName is a block type as a reader names it.
