@@ -55,6 +55,9 @@ func TestNotifySendsTargetSessionPayloadAndBearerToken(t *testing.T) {
 	if gotBody.TargetSession != "sess-123" {
 		t.Fatalf("target_session: got %q, want %q", gotBody.TargetSession, "sess-123")
 	}
+	if gotBody.Source != "envoy" {
+		t.Fatalf("source: got %q, want %q (contracts.Envelope.Validate's enum has no agent-secrets entry)", gotBody.Source, "envoy")
+	}
 
 	var payload secretRequestPayload
 	if err := json.Unmarshal([]byte(gotBody.Payload), &payload); err != nil {
