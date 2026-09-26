@@ -380,6 +380,46 @@ log_lines() { jq -R -c --arg m "$1" 'fromjson? | select(.msg == $m)' "$daemon_lo
 
 # driver_action KIND UID: the driver itself ended pod UID; the watch's checker matches it.
 driver_action() { printf '%s %s %s\n' "$1" "$2" "$(date -u +%FT%T.%3NZ)" >>"$evidence/driver-actions.txt"; }
+# end_claim_pod ISSUE ROLE kill|delete: ends the pod ISSUE's ROLE claim runs on - `kill` signals its
+# worker's PID 1, `delete` deletes the pod object - records the action, and returns only once that
+# death is observable: the pod's Sandbox reports Finished, the claim moved to another incarnation, or
+# the issue is held. Sets `ended_pod_uid` and `ended_pod` for the caller's later assertions.
+# A claim takes its pod's uid the moment the pod is created, before any container of it runs, so a
+# kill issued in that window reaches no worker container and ends nothing, and the run then reads its
+# own silence as a daemon that never reacted (the controller checkpoint, 2026-09-26). `kill` therefore
+# refuses a claim that has not registered from the pod it names; a site that means to end a pod before
+# its worker registers passes `delete`, which is what lands on a pod that is still starting.
+end_claim_pod() {
+  local issue=$1 role=$2 method=$3 claim state bound exec_out
+  claim=$(claim_view "$issue" "$role")
+  ended_pod_uid=$(jq -r '.locator.incarnation // empty' <<<"$claim")
+  ended_pod=$(jq -r '.locator.sandbox.name // empty' <<<"$claim")
+  [ -n "$ended_pod_uid" ] && [ -n "$ended_pod" ] || fail "the $role claim of $issue names no pod to end: $claim"
+  state=$(jq -r '.state // "none"' <<<"$claim")
+  case $method in
+    kill)
+      case $state in
+        ready | working | idle) ;;
+        *) fail "the $role claim of $issue is $state on pod $ended_pod_uid, not registered from it: a kill would reach no worker container (delete it instead)" ;;
+      esac
+      driver_action "$method" "$ended_pod_uid"
+      # Killing PID 1 ends the container the exec runs in, so kubectl's own exit says nothing either
+      # way; it is recorded here, and the wait below is what says the kill landed.
+      exec_out=$(op exec "$ended_pod" -c worker -- sh -c 'kill 1' 2>&1) ||
+        note "the kill exec of $ended_pod answered: $(printf '%s' "$exec_out" | tr '\n' ' ' | cut -c1-200)"
+      bound=300
+      ;;
+    delete)
+      driver_action "$method" "$ended_pod_uid"
+      op delete pod "$ended_pod" --wait=false >/dev/null
+      # A deleted pod waits out its termination grace before the runtime launches its replacement.
+      bound=600
+      ;;
+    *) fail "end_claim_pod: unknown method $method" ;;
+  esac
+  until_true "$bound" "the $method of pod $ended_pod_uid to land" sh -c \
+    "timeout 120 kubectl --context '$operator' -n '$namespace' get sandbox '$ended_pod' -o json | jq -e '.status.conditions[]? | select(.type == \"Finished\" and .status == \"True\")' >/dev/null || '$work/legion' state --json --config '$work/legion.yaml' | jq -e --arg i '$issue' --arg r '$role' --arg u '$ended_pod_uid' '.issues[\$i].phase == \"held\" or (((if \$r == \"architect\" then .issues[\$i].architect else .issues[\$i].workers[\$r].claim end).locator.incarnation // \"\") as \$n | \$n != \"\" and \$n != \$u)' >/dev/null"
+}
 # pod_watch_verdict WATCH ACTIONS DAEMONLOG prints every pod of the run the node ended (Evicted, or
 # a container OOMKilled), and every claim process the daemon found dead (`supervise: process died`,
 # naming the pod uid as the incarnation) that no driver action ended, and exits 1 when there is any.
@@ -1300,13 +1340,10 @@ pass
 begin kill-pod-resume
 # merging launches the merger; its pod must be running before the kill reaches PID 1.
 wait_for_worker "$tree1" merger
-pod=$(claim_sandbox "$tree1" merger)
-uid=$(claim_pod_uid "$tree1" merger)
 session=$(claim_view "$tree1" merger | jq -r .session)
-driver_action kill "$uid"
-op exec "$pod" -c worker -- sh -c 'kill 1' >/dev/null 2>&1 || true
-until_true 300 "the merger's Sandbox to report Finished for pod $uid" sh -c \
-  "timeout 120 kubectl --context '$operator' -n '$namespace' get sandbox '$pod' -o json | jq -e '.status.conditions[]? | select(.type == \"Finished\" and .status == \"True\")' >/dev/null || { inc=\$('$work/legion' state --json --config '$work/legion.yaml' | jq -r --arg i '$tree1' '.issues[\$i].workers.merger.claim.locator.incarnation // empty'); [ -n \"\$inc\" ] && [ \"\$inc\" != '$uid' ]; }"
+end_claim_pod "$tree1" merger kill
+pod=$ended_pod
+uid=$ended_pod_uid
 # The claim has no incarnation between the process's death and its relaunch, so moving off the
 # old pod means a new incarnation, never an empty one.
 until_true 600 "the merger to relaunch with a new pod" sh -c \
@@ -1321,15 +1358,12 @@ pass
 begin fence
 # (a) A pod the controller recreates on its own is never adopted: the daemon suspends it, and the
 # claim relaunches with a third uid.
-uid=$(claim_pod_uid "$tree1" merger)
 # (b) needs the boot token of the generation (a) replaces, so it is read before the delete.
 boot_token() { op get secret "$pod-boot" -o json | jq -er '.data.LEGION_BOOT_TOKEN // empty | @base64d' | grep .; }
 old_token=$(boot_token) || blocked "the merger's boot Secret $pod-boot has no LEGION_BOOT_TOKEN"
 (umask 077 && printf '%s' "$old_token" >"$work/old-boot-token")
-driver_action delete "$uid"
-op delete pod "$pod" --wait=false >/dev/null
-until_true 600 "the merger's claim to move off pod $uid" sh -c \
-  "inc=\$('$work/legion' state --json --config '$work/legion.yaml' | jq -r --arg i '$tree1' '.issues[\$i].workers.merger.claim.locator.incarnation // empty'); [ -n \"\$inc\" ] && [ \"\$inc\" != '$uid' ]"
+end_claim_pod "$tree1" merger delete
+uid=$ended_pod_uid
 third=$(claim_pod_uid "$tree1" merger)
 [ "$third" != "$new_uid" ] && [ "$third" != "$uid" ] || fail "the merger's third incarnation $third repeats an earlier uid"
 grep -q '"msg":"supervise: dropped a stale event"' "$daemon_log" || note "no stale event was dropped in this run (the recreated pod's events arrived after the claim moved)"
@@ -1403,20 +1437,21 @@ drive_spec "$tree3"
 wait_for_worker "$tree3" planner
 killed=" "
 kills=0
-# new_planner_pod: tree 3's planner claim runs a pod none of the kills took. It runs in this shell:
-# the killed list is a here-string, which the sh of an `sh -c` (dash) refuses as a syntax error.
+# new_planner_pod: tree 3's planner claim runs a pod none of the kills took, and its worker has
+# registered from it: the claim takes the pod's incarnation at launch, before the pod runs, and an
+# exec's kill of a pod whose worker has not started reaches nothing. It runs in this shell: the
+# killed list is a here-string, which the sh of an `sh -c` (dash) refuses as a syntax error.
 new_planner_pod() {
-  local inc
-  inc=$("$work/legion" state --json --config "$work/legion.yaml" | jq -r --arg i "$tree3" '.issues[$i].workers.planner.claim.locator.incarnation // empty')
-  [ -n "$inc" ] && ! grep -qF " $inc " <<<"$killed"
+  local claim inc
+  claim=$("$work/legion" state --json --config "$work/legion.yaml" | jq -c --arg i "$tree3" '.issues[$i].workers.planner.claim // {}')
+  inc=$(jq -r '.locator.incarnation // empty' <<<"$claim")
+  [ -n "$inc" ] && ! grep -qF " $inc " <<<"$killed" && jq -e '.state | IN("ready", "working", "idle")' <<<"$claim" >/dev/null
 }
 until issue_phase "$tree3" held >/dev/null 2>&1; do
   [ "$kills" -lt 8 ] || fail "$tree3 was not held after $kills killed planner launches"
-  until_true 600 "a new planner pod on $tree3" new_planner_pod
-  uid=$(claim_pod_uid "$tree3" planner)
-  pod=$(claim_sandbox "$tree3" planner)
-  driver_action kill "$uid"
-  op exec "$pod" -c worker -- sh -c 'kill 1' >/dev/null 2>&1 || true
+  until_true 600 "a new planner pod on $tree3 to register" new_planner_pod
+  end_claim_pod "$tree3" planner kill
+  uid=$ended_pod_uid
   killed="$killed$uid "
   kills=$((kills + 1))
   note "killed planner launch $kills of $tree3 (uid $uid)"
