@@ -487,12 +487,99 @@ func TestAfterARestartTheMarkingPromptsRefusalStillClearsTheMark(t *testing.T) {
 	}
 
 	h.restart()
-	h.must(StreamLateRefusal{Claim: testToken, DeliveryID: first.DeliveryID, Error: "the model provider refused the request"})
+	h.must(StreamLateRefusal{Claim: testToken, DeliveryID: first.DeliveryID, Error: "the model provider refused the request", Replayed: true})
 
 	if p := h.pending(); !p.DeliveredAt.IsZero() {
 		t.Fatalf("pending after the refusal on the restarted daemon = %+v, want its read mark gone", p)
 	}
 	if run := h.claim().ServingRun(); run != 0 {
 		t.Fatalf("the claim serves run %d, want none: nobody read the task", run)
+	}
+}
+
+// A refusal replayed from the shim's backlog answers a prompt an earlier connection sent - after a
+// restart, possibly of the very delivery the restarted daemon is re-sending under the same id. It
+// may clear the mark that prompt set and nothing more: the re-send in flight is a new prompt, so
+// the task is prompted once, its acknowledgement marks the task again, and the turn it starts
+// serves the task's run.
+func TestAReplayedRefusalOnlyClearsTheMarkItsPromptSet(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateReady)
+	h.must(RequestDeliver{Claim: testToken, Task: "the task", Generation: 7})
+	first := h.wantPrompts(1)[0]
+
+	h.restart()
+	gated := newGatedConn()
+	h.conns.Register(testToken, gated)
+	if err := h.m.Handle(h.ctx, StreamHello{Claim: testToken, Generation: h.generation()}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the re-send", gated.entered)
+	// The backlog is read before the re-send is answered.
+	if err := h.m.Handle(h.ctx, StreamLateRefusal{Claim: testToken, DeliveryID: first.DeliveryID,
+		Error: "Agent is already processing. Use steer() or followUp() to queue messages, or wait for completion.", Replayed: true}); err != nil {
+		t.Fatal(err)
+	}
+	gated.release <- struct{}{}
+	h.m.Wait()
+
+	if sent := gated.Prompts(); len(sent) != 1 || sent[0].DeliveryID != first.DeliveryID {
+		t.Fatalf("prompts after the restart = %+v, want the one re-send of %s", sent, first.DeliveryID)
+	}
+	if p := h.pending(); p.ID != first.DeliveryID || p.DeliveredAt.IsZero() {
+		t.Fatalf("pending after the re-send was acknowledged = %+v, want it marked by the re-send", p)
+	}
+	h.must(StreamTurnStart{Claim: testToken})
+	if run := h.claim().ServingRun(); run != 7 {
+		t.Fatalf("the claim serves run %d, want the task's 7", run)
+	}
+}
+
+// Oh My Pi answers a delivery's prompt once, and the shim fans that answer out to every request
+// of the delivery: the re-send this connection is waiting on, and the earlier request whose send
+// was lost in transit, which the shim replays. The re-send's refusal charges the prompt; the
+// replayed copy of the same answer charges nothing more.
+func TestAReplayedCopyOfAnAnsweredRefusalChargesNothing(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateReady)
+	h.conn.FailPrompt(errBoom)
+	h.must(RequestDeliver{Claim: testToken, Task: "the task", Generation: 7})
+	first := h.wantPrompts(1)[0]
+	h.conn.RefusePrompt("the model provider refused the request")
+	h.observe(runtime.Alive)
+	if second := h.wantPrompts(2)[1]; second.DeliveryID != first.DeliveryID {
+		t.Fatalf("the re-send went under %s, want the lost send's %s", second.DeliveryID, first.DeliveryID)
+	}
+	charged := h.claim().Budgets
+
+	h.must(StreamLateRefusal{Claim: testToken, DeliveryID: first.DeliveryID, Error: "the model provider refused the request", Replayed: true})
+
+	if got := h.claim().Budgets; got != charged {
+		t.Fatalf("budgets after the replayed copy = %+v, want %+v: one refusal is one charge", got, charged)
+	}
+}
+
+// A replayed refusal is judged only against the prompt that set the mark, never against the
+// pending id: the wait for a turn re-queued the task under a new id, keeping the mark the first
+// prompt's acknowledgement set, and the new id's first send was lost in transit. A refusal of that
+// lost send, replayed on the next connection, says nothing about the first prompt, so the mark
+// stands.
+func TestAReplayedRefusalOfTheReSentDeliveryLeavesTheEarlierMark(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateReady)
+	h.must(RequestDeliver{Claim: testToken, Task: "the task", Generation: 7})
+	first := h.wantPrompts(1)[0]
+	h.advance(2 * testRPC)
+	h.conn.FailPrompt(errBoom)
+	h.observe(runtime.Alive)
+	resent := h.wantPrompts(2)[1]
+	if p := h.pending(); p.ID != resent.DeliveryID || p.MarkedBy != first.DeliveryID {
+		t.Fatalf("pending after the lost re-send = %+v, want %s pending under %s's mark", p, resent.DeliveryID, first.DeliveryID)
+	}
+
+	h.must(StreamLateRefusal{Claim: testToken, DeliveryID: resent.DeliveryID, Error: "Agent is busy", Replayed: true})
+
+	if p := h.pending(); p.DeliveredAt.IsZero() || p.MarkedBy != first.DeliveryID {
+		t.Fatalf("pending after the replayed refusal = %+v, want the first prompt's mark standing", p)
 	}
 }

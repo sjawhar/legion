@@ -46,6 +46,9 @@ type LateRefusal struct {
 	Claim      claim.Token
 	DeliveryID string
 	Error      string
+	// Replayed is a refusal for a prompt this connection did not send, read from the shim's
+	// backlog: it answers a prompt an earlier connection sent.
+	Replayed bool
 }
 
 // Closed is a registered connection gone, whichever side ended it. It is emitted exactly once

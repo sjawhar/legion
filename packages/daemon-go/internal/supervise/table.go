@@ -47,6 +47,11 @@ type StreamLateRefusal struct {
 	Claim      claim.Token
 	DeliveryID string
 	Error      string
+	// Replayed is a refusal the connection did not send the prompt for: the shim's backlog
+	// replaying what Oh My Pi answered while no daemon was connected. It answers an earlier prompt,
+	// possibly of the very delivery this connection is re-sending, so it may only clear the mark
+	// that prompt set, never charge or take back the task.
+	Replayed bool
 }
 
 // PromptAcked is a send's prompt acknowledged, posted by the send's own goroutine.
@@ -606,6 +611,34 @@ func refused(m *Machine, ctx context.Context, ev Event) error {
 	return nil
 }
 
+// replayedRefusal is a refusal the shim replayed from its backlog: it answers a prompt an earlier
+// connection sent, and the fence let it through only because it names the prompt that set the
+// read mark. It clears that mark and nothing else - no charge, no take-back - since the task may be
+// the very delivery this connection is re-sending, whose own answer is still to come.
+func replayedRefusal(m *Machine, ctx context.Context, r StreamLateRefusal) error {
+	m.log.Warn("supervise: a replayed refusal names the prompt that marked the task; the mark is cleared",
+		"delivery", r.DeliveryID, "error", r.Error)
+	return m.markUnread(ctx)
+}
+
+// refusedUnprompted is a refusal landing while the claim cannot be prompted: relaunching after the
+// process that refused died, or stopped. Nothing is charged or re-sent here, since the process that
+// refused is not the one that will be prompted next. It still says the prompt never ran, so the
+// mark it set goes; a task still carrying that prompt's id also goes back under a new one, so the
+// next send is a new prompt that no refusal of the old one can name.
+func refusedUnprompted(m *Machine, ctx context.Context, ev Event) error {
+	r := ev.(StreamLateRefusal)
+	if r.Replayed {
+		return replayedRefusal(m, ctx, r)
+	}
+	m.log.Warn("supervise: a prompt was refused while no process can be prompted; the mark it set is cleared",
+		"delivery", r.DeliveryID, "state", string(m.claim.State), "error", r.Error)
+	if r.DeliveryID == m.claim.Pending.ID {
+		return m.takeBackPending(ctx, taskUnread)
+	}
+	return m.markUnread(ctx)
+}
+
 // lateRefused is the agent refusing a prompt it had acknowledged. OMP answers that way when it
 // finds a turn it did not start — a notice delivered to the pane, a human's steer — and by the
 // same route when the prompt fails before any turn begins, a provider answering "No API key
@@ -624,23 +657,11 @@ func refused(m *Machine, ctx context.Context, ev Event) error {
 // that becomes no turn, and the retry waits for the sweep that follows, so a refusal that never
 // stops walks the budget to its end — a relaunch, and then the retirement — instead of looping
 // on the spot for ever against an agent that cannot start a turn at all.
-// refusedUnprompted is a refusal landing while the claim cannot be prompted: relaunching after the
-// process that refused died, or stopped. Nothing is charged or re-sent here, since the process that
-// refused is not the one that will be prompted next. It still says the prompt never ran, so the
-// mark it set goes; a task still carrying that prompt's id also goes back under a new one, so the
-// next send is a new prompt that no refusal of the old one can name.
-func refusedUnprompted(m *Machine, ctx context.Context, ev Event) error {
-	r := ev.(StreamLateRefusal)
-	m.log.Warn("supervise: a prompt was refused while no process can be prompted; the mark it set is cleared",
-		"delivery", r.DeliveryID, "state", string(m.claim.State), "error", r.Error)
-	if r.DeliveryID == m.claim.Pending.ID {
-		return m.takeBackPending(ctx, taskUnread)
-	}
-	return m.markUnread(ctx)
-}
-
 func lateRefused(m *Machine, ctx context.Context, ev Event) error {
 	r := ev.(StreamLateRefusal)
+	if r.Replayed {
+		return replayedRefusal(m, ctx, r)
+	}
 	// A refusal naming the prompt whose acknowledgement marked the task, where that is no longer the
 	// pending id, says that prompt never ran, so the task loses its read mark — and nothing else.
 	// The wait that gave up on it already re-queued the task under a new id and charged the prompt;

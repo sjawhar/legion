@@ -423,7 +423,7 @@ func (c *Conn) answer(response shimwire.Response) {
 	case earlier != "":
 		c.log.Warn("worker-stream: a refusal replayed from an earlier connection names its delivery",
 			"claim", c.claim, "deliveryId", earlier, "error", response.Error)
-		c.events.push(LateRefusal{Claim: c.claim, DeliveryID: earlier, Error: response.Error})
+		c.events.push(LateRefusal{Claim: c.claim, DeliveryID: earlier, Error: response.Error, Replayed: true})
 	case response.Command == shimwire.TypePrompt && !response.Success:
 		c.log.Warn("worker-stream: refusal for a prompt request this connection is not waiting on",
 			"claim", c.claim, "request", response.ID, "error", response.Error)

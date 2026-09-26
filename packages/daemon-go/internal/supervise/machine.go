@@ -495,7 +495,11 @@ func (m *Machine) fence(ctx context.Context, ev Event) (bool, error) {
 			return false, nil
 		}
 	case StreamLateRefusal:
-		if pending == nil || (pending.ID != ev.DeliveryID && (pending.MarkedBy == "" || pending.MarkedBy != ev.DeliveryID)) {
+		// A refusal naming the prompt that set the mark always reaches the table. One naming the
+		// pending id does only when this connection sent that prompt: a replayed refusal answers an
+		// earlier send, and the pending id may be the one being re-sent.
+		named := pending != nil && pending.MarkedBy != "" && pending.MarkedBy == ev.DeliveryID
+		if pending == nil || !(named || (!ev.Replayed && pending.ID == ev.DeliveryID)) {
 			m.dropStale("StreamLateRefusal", "delivery", ev.DeliveryID, pendingID(pending))
 			return false, nil
 		}
