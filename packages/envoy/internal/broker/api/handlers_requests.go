@@ -19,6 +19,19 @@ type createRequestBody struct {
 	SessionID *string  `json:"session_id"`
 }
 
+// createRequestResponse is POST /v1/requests's exact wire shape: request_id, state, secrets,
+// grant_id, ask — nothing else. requests.Request itself carries additional fields (decided_at,
+// decided_by, detail, coalesced) that this route's contract does not define, so the handler below
+// builds this dedicated response rather than marshaling the Request it gets back from
+// Machine.Create directly.
+type createRequestResponse struct {
+	RequestID string                    `json:"request_id"`
+	State     string                    `json:"state"`
+	Secrets   []requests.SecretDecision `json:"secrets"`
+	GrantID   *string                   `json:"grant_id"`
+	AskRef    *string                   `json:"ask"`
+}
+
 // createRequest reads the enrollment id from ctx (the proof-verified caller), never from the
 // request body: a session may only ever request secrets for itself.
 func (s *server) createRequest(w http.ResponseWriter, r *http.Request) {
@@ -50,7 +63,13 @@ func (s *server) createRequest(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "create request failed")
 		return
 	}
-	writeJSON(w, http.StatusOK, req)
+	writeJSON(w, http.StatusOK, createRequestResponse{
+		RequestID: req.ID,
+		State:     req.State,
+		Secrets:   req.Secrets,
+		GrantID:   req.GrantID,
+		AskRef:    req.AskRef,
+	})
 }
 
 // requestDecision is GET /v1/requests/{id}'s nested "decision" object: who decided the request

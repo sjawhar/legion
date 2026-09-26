@@ -99,14 +99,7 @@ func (s *Service) AuthenticateLauncher(ctx context.Context, bearer string) (Cred
 }
 
 func (s *Service) Create(ctx context.Context, cred Credential, in Enrollment) (Enrollment, error) {
-	// An operator's credential enrols that operator's boxes and host sessions; a service credential
-	// (operator null, service set) enrols pods only, with no operator. Nothing else is accepted.
-	switch {
-	case cred.Operator != nil && (in.Operator == nil || *in.Operator != *cred.Operator):
-		return Enrollment{}, ErrOperatorMismatch
-	case cred.Operator != nil && in.Kind == "pod":
-		return Enrollment{}, ErrOperatorMismatch
-	case cred.Operator == nil && (in.Kind != "pod" || in.Operator != nil):
+	if !authorized(cred, in.Kind, in.Operator) {
 		return Enrollment{}, ErrOperatorMismatch
 	}
 	if in.Kind == "pod" {
@@ -180,7 +173,6 @@ func (s *Service) createAttempt(ctx context.Context, cred Credential, in Enrollm
 	}
 	return in, false, tx.Commit(ctx)
 }
-
 func (s *Service) Renew(ctx context.Context, id string) (time.Time, error) {
 	expires := time.Now().Add(s.Lease)
 	tag, err := s.Store.Pool.Exec(ctx, `update enrollments set lease_expires_at=$2 where id=$1 and revoked_at is null and lease_expires_at > now()`, id, expires)
@@ -193,22 +185,58 @@ func (s *Service) Renew(ctx context.Context, id string) (time.Time, error) {
 	return expires, nil
 }
 
-// Revoke ends the enrollment and every live grant under it in one transaction. It returns
-// ErrNotLive, changing nothing, when the enrollment does not exist or is already revoked — the
-// guard that keeps the audit trail honest: without it a no-op call would still revoke grants and
-// write an "enrollment.revoked" audit row for an enrollment that never transitioned.
-func (s *Service) Revoke(ctx context.Context, id, by string) error {
+// authorized reports whether cred may act on an enrollment of the given kind and operator — the
+// trust boundary both Create (when creating one) and Revoke (when ending one) enforce: an
+// operator credential may only act on that same operator's own non-pod enrollments; a service
+// credential (no operator) may only act on pod enrollments, which never carry an operator.
+func authorized(cred Credential, kind string, operator *string) bool {
+	switch {
+	case cred.Operator != nil && (operator == nil || *operator != *cred.Operator):
+		return false
+	case cred.Operator != nil && kind == "pod":
+		return false
+	case cred.Operator == nil && (kind != "pod" || operator != nil):
+		return false
+	}
+	return true
+}
+
+// Revoke ends the enrollment and every live grant under it in one transaction. cred must be
+// authorized for the target enrollment's own kind and operator — the same trust boundary Create
+// enforces — checked before anything else, so a wrong-operator or wrong-kind caller can never
+// revoke an enrollment it doesn't own, whether that enrollment is live, already revoked, or (were
+// its id guessed rather than read back) merely plausible-looking. A row that does not exist at
+// all has no operator/kind to check ownership against, so that case alone falls through to
+// ErrNotLive below rather than ErrOperatorMismatch. Once ownership passes, Revoke returns
+// ErrNotLive, changing nothing, when the enrollment is already revoked — the guard that keeps the
+// audit trail honest: without it a no-op call would still revoke grants and write an
+// "enrollment.revoked" audit row for an enrollment that never transitioned.
+func (s *Service) Revoke(ctx context.Context, cred Credential, id, by string) error {
 	tx, err := s.Store.Pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	tag, err := tx.Exec(ctx, `update enrollments set revoked_at=now() where id=$1 and revoked_at is null`, id)
+
+	var operator *string
+	var kind string
+	var revokedAt *time.Time
+	err = tx.QueryRow(ctx, `select operator, kind, revoked_at from enrollments where id=$1 for update`, id).Scan(&operator, &kind, &revokedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotLive
+	}
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() != 1 {
+	if !authorized(cred, kind, operator) {
+		return ErrOperatorMismatch
+	}
+	if revokedAt != nil {
 		return ErrNotLive
+	}
+
+	if _, err := tx.Exec(ctx, `update enrollments set revoked_at=now() where id=$1`, id); err != nil {
+		return err
 	}
 	if _, err := tx.Exec(ctx, `update grants set revoked_at=now(), revoked_by=$2 where enrollment_id=$1 and revoked_at is null`, id, by); err != nil {
 		return err

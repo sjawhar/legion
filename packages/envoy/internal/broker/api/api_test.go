@@ -60,9 +60,11 @@ func signProof(t *testing.T, enr enrolledAgent, method, url string) string {
 
 // fixture wires api.Register onto a real httptest.Server backed by a migrated Postgres store and
 // enrolls two live sessions (A, B) with their own signing keys, so a test can sign proofs with
-// proof.Sign and exercise the broker end to end over real HTTP. It returns the machine too, so a
-// test can move a pending request straight to granted with ApplyAnswer without a real Dispatch.
-func fixture(t *testing.T) (srv *httptest.Server, enrA, enrB enrolledAgent, launcherToken string, machine *requests.Machine) {
+// proof.Sign and exercise the broker end to end over real HTTP. It returns the machine and the
+// enroll.Service too: a test can move a pending request straight to granted with ApplyAnswer
+// without a real Dispatch, and can mint a second operator's launcher credential to test
+// cross-operator authorization.
+func fixture(t *testing.T) (srv *httptest.Server, enrA, enrB enrolledAgent, launcherToken string, machine *requests.Machine, enr *enroll.Service) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -75,7 +77,7 @@ func fixture(t *testing.T) (srv *httptest.Server, enrA, enrB enrolledAgent, laun
 		t.Fatalf("migrate: %v", err)
 	}
 
-	enr := &enroll.Service{Store: st, Lease: time.Hour}
+	enr = &enroll.Service{Store: st, Lease: time.Hour}
 	_, launcherToken, err = enr.MintLauncherCredential(ctx, str("sjawhar"), nil, "devbox", "ask-enroll")
 	if err != nil {
 		t.Fatalf("MintLauncherCredential: %v", err)
@@ -139,7 +141,7 @@ func fixture(t *testing.T) (srv *httptest.Server, enrA, enrB enrolledAgent, laun
 		Proof:     &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, Replay: enr.Replay},
 		Dispatch:  dispatch.New("http://127.0.0.1:0", "unused-in-these-tests", http.DefaultClient),
 	})
-	return srv, enrA, enrB, launcherToken, machine
+	return srv, enrA, enrB, launcherToken, machine, enr
 }
 
 func decodeJSON(t *testing.T, resp *http.Response, out any) {
@@ -181,7 +183,7 @@ func createPendingRequest(t *testing.T, srv *httptest.Server, enr enrolledAgent)
 // TestCreateRequestPendingWithValidProof is Step 1's first assertion: POST /v1/requests with A's
 // proof -> 200 pending, with the contract's secrets/grant_id/ask shape.
 func TestCreateRequestPendingWithValidProof(t *testing.T) {
-	srv, enrA, _, _, _ := fixture(t)
+	srv, enrA, _, _, _, _ := fixture(t)
 	url := srv.URL + "/v1/requests"
 	body := `{"secrets":["DEEL_API_KEY"],"reason":"need it","issue":null,"session_id":null}`
 	req, _ := http.NewRequest(http.MethodPost, url, bytes.NewReader([]byte(body)))
@@ -208,12 +210,21 @@ func TestCreateRequestPendingWithValidProof(t *testing.T) {
 	if !ok || len(secretsOut) != 1 {
 		t.Fatalf("secrets = %v, want one decision", out["secrets"])
 	}
+	wantKeys := map[string]bool{"request_id": true, "state": true, "secrets": true, "grant_id": true, "ask": true}
+	if len(out) != len(wantKeys) {
+		t.Fatalf("response keys = %v, want exactly %v (contract defines no other top-level fields)", out, wantKeys)
+	}
+	for k := range out {
+		if !wantKeys[k] {
+			t.Fatalf("response carries unexpected key %q: %v, want exactly %v", k, out, wantKeys)
+		}
+	}
 }
 
 // TestCancelOtherSessionsRequestForbidden is Step 1's second assertion: B's proof cancelling A's
 // request_id -> 403 NOT_YOURS.
 func TestCancelOtherSessionsRequestForbidden(t *testing.T) {
-	srv, enrA, enrB, _, _ := fixture(t)
+	srv, enrA, enrB, _, _, _ := fixture(t)
 	requestID := createPendingRequest(t, srv, enrA)
 
 	url := srv.URL + "/v1/requests/" + requestID + "/cancel"
@@ -236,7 +247,7 @@ func TestCancelOtherSessionsRequestForbidden(t *testing.T) {
 // TestNoProofHeaderUnauthorized is Step 1's third assertion: a request with no Proof header ->
 // 401 PROOF_INVALID.
 func TestNoProofHeaderUnauthorized(t *testing.T) {
-	srv, _, _, _, _ := fixture(t)
+	srv, _, _, _, _, _ := fixture(t)
 	resp, err := srv.Client().Get(srv.URL + "/v1/enrollments/self")
 	if err != nil {
 		t.Fatalf("do request: %v", err)
@@ -254,7 +265,7 @@ func TestNoProofHeaderUnauthorized(t *testing.T) {
 // TestProofForDifferentURLUnauthorized is Step 1's fourth assertion: a proof signed for one URL
 // used against another -> 401 (htm/htu mismatch).
 func TestProofForDifferentURLUnauthorized(t *testing.T) {
-	srv, enrA, _, _, _ := fixture(t)
+	srv, enrA, _, _, _, _ := fixture(t)
 	signedFor := srv.URL + "/v1/enrollments/self"
 	usedOn := srv.URL + "/v1/requests"
 	tok := signProof(t, enrA, http.MethodGet, signedFor)
@@ -279,7 +290,7 @@ func TestProofForDifferentURLUnauthorized(t *testing.T) {
 // /v1/enrollments/{A} with A's launcher token -> 204, then A's proof -> 401 (enrollment not
 // live).
 func TestDeleteEnrollmentThenProofUnauthorized(t *testing.T) {
-	srv, enrA, _, launcherToken, _ := fixture(t)
+	srv, enrA, _, launcherToken, _, _ := fixture(t)
 
 	delReq, _ := http.NewRequest(http.MethodDelete, srv.URL+"/v1/enrollments/"+enrA.id, nil)
 	delReq.Header.Set("Authorization", "Bearer "+launcherToken)
@@ -319,10 +330,52 @@ func TestDeleteEnrollmentThenProofUnauthorized(t *testing.T) {
 	}
 }
 
+// TestDeleteEnrollmentRefusesOtherOperatorsCredential is the regression for the review's Critical
+// finding: deleteEnrollment authenticated a launcher credential but never checked it owned the
+// enrollment being revoked, so any live launcher bearer for ANY operator could revoke ANY other
+// operator's enrollment just by knowing its id. Operator "bob"'s launcher token must not be able
+// to revoke operator A's ("sjawhar") enrollment: 403 OPERATOR_MISMATCH, and A's enrollment must
+// remain live (its proof still verifies) afterward.
+func TestDeleteEnrollmentRefusesOtherOperatorsCredential(t *testing.T) {
+	srv, enrA, _, _, _, enr := fixture(t)
+
+	_, bobToken, err := enr.MintLauncherCredential(context.Background(), str("bob"), nil, "bobs-box", "ask-bob")
+	if err != nil {
+		t.Fatalf("MintLauncherCredential(bob): %v", err)
+	}
+
+	delReq, _ := http.NewRequest(http.MethodDelete, srv.URL+"/v1/enrollments/"+enrA.id, nil)
+	delReq.Header.Set("Authorization", "Bearer "+bobToken)
+	delResp, err := srv.Client().Do(delReq)
+	if err != nil {
+		t.Fatalf("DELETE: %v", err)
+	}
+	if delResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("DELETE (bob's token, A's enrollment) status = %d, want 403", delResp.StatusCode)
+	}
+	var out map[string]string
+	decodeJSON(t, delResp, &out)
+	if out["code"] != "OPERATOR_MISMATCH" {
+		t.Fatalf("code = %q, want OPERATOR_MISMATCH", out["code"])
+	}
+
+	// A's enrollment must still be live: its own proof still verifies.
+	selfURL := srv.URL + "/v1/enrollments/self"
+	selfReq, _ := http.NewRequest(http.MethodGet, selfURL, nil)
+	selfReq.Header.Set("Proof", signProof(t, enrA, http.MethodGet, selfURL))
+	selfResp, err := srv.Client().Do(selfReq)
+	if err != nil {
+		t.Fatalf("GET self: %v", err)
+	}
+	if selfResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET self (after refused cross-operator revoke) status = %d, want 200", selfResp.StatusCode)
+	}
+}
+
 // TestCreateEnrollmentBadBearerUnauthorized is Step 1's sixth assertion: POST /v1/enrollments
 // with a bad bearer -> 401 LAUNCHER_INVALID.
 func TestCreateEnrollmentBadBearerUnauthorized(t *testing.T) {
-	srv, _, _, _, _ := fixture(t)
+	srv, _, _, _, _, _ := fixture(t)
 	body := `{"kind":"box","runtime_id":"box-x","operator":"sjawhar","approver":{"kind":"operator"},"thumbprint":"tp-x"}`
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/enrollments", bytes.NewReader([]byte(body)))
 	req.Header.Set("Authorization", "Bearer not-a-real-token")
@@ -343,7 +396,7 @@ func TestCreateEnrollmentBadBearerUnauthorized(t *testing.T) {
 // TestCreateEnrollmentSucceedsAndIsIdempotent exercises createEnrollment's own body decoding and
 // the 201-vs-200 Existing distinction, beyond what Step 1's launcher-auth-only test covers.
 func TestCreateEnrollmentSucceedsAndIsIdempotent(t *testing.T) {
-	srv, _, _, launcherToken, _ := fixture(t)
+	srv, _, _, launcherToken, _, _ := fixture(t)
 	body := `{"kind":"box","runtime_id":"box-fresh","operator":"sjawhar","approver":{"kind":"operator"},"thumbprint":"tp-fresh"}`
 
 	post := func() *http.Response {
@@ -380,7 +433,7 @@ func TestCreateEnrollmentSucceedsAndIsIdempotent(t *testing.T) {
 // TestReadRequestShapeAndOwnership covers GET /v1/requests/{id}'s reshaped response (nested
 // "decision" rather than top-level decided_by/detail) and its 403 ownership check.
 func TestReadRequestShapeAndOwnership(t *testing.T) {
-	srv, enrA, enrB, _, _ := fixture(t)
+	srv, enrA, enrB, _, _, _ := fixture(t)
 	requestID := createPendingRequest(t, srv, enrA)
 
 	getURL := srv.URL + "/v1/requests/" + requestID
@@ -420,7 +473,7 @@ func TestReadRequestShapeAndOwnership(t *testing.T) {
 // automatic secret (granted immediately, no ask), read its values, revoke the grant through the
 // session's own proof, then confirm a second values read is refused as GRANT_NOT_LIVE.
 func TestGrantValuesAndRevoke(t *testing.T) {
-	srv, enrA, _, _, _ := fixture(t)
+	srv, enrA, _, _, _, _ := fixture(t)
 	createURL := srv.URL + "/v1/requests"
 	body := `{"secrets":["AUTO_TOKEN"],"reason":"need it","issue":null,"session_id":null}`
 	req, _ := http.NewRequest(http.MethodPost, createURL, bytes.NewReader([]byte(body)))
@@ -487,7 +540,7 @@ func TestGrantValuesAndRevoke(t *testing.T) {
 // lease/grants) and the renew route's own-id-only design: a proof for A used against B's URL is
 // refused as NOT_YOURS, and A renewing itself extends its own lease.
 func TestReadSelfListsGrantsAndRenewEnforcesOwnID(t *testing.T) {
-	srv, enrA, enrB, _, _ := fixture(t)
+	srv, enrA, enrB, _, _, _ := fixture(t)
 
 	createURL := srv.URL + "/v1/requests"
 	body := `{"secrets":["AUTO_TOKEN"],"reason":"need it","issue":null,"session_id":null}`
@@ -556,7 +609,7 @@ func TestReadSelfListsGrantsAndRenewEnforcesOwnID(t *testing.T) {
 // authNone routes are registered (routes_table.go names them) and answer a clear 501 rather than
 // panicking, since launcher.Service (Task 12) is not wired into Deps by anything in this task.
 func TestLauncherCredentialRoutesAnswerNotImplemented(t *testing.T) {
-	srv, _, _, _, _ := fixture(t)
+	srv, _, _, _, _, _ := fixture(t)
 
 	presp, err := srv.Client().Post(srv.URL+"/v1/launcher-credentials", "application/json", bytes.NewReader([]byte(`{}`)))
 	if err != nil {

@@ -89,9 +89,17 @@ func (s *server) createEnrollment(w http.ResponseWriter, r *http.Request) {
 // still answers 204. enroll.Service.Revoke returns ErrNotLive for exactly that no-op case (by
 // design, so it never writes a spurious audit row for an enrollment that never transitioned);
 // DELETE's own idempotent semantics mean the caller doesn't need to know or care which happened.
+// Ownership is checked first: a launcher credential may only revoke an enrollment of its own
+// operator (or, for a service credential, any pod enrollment) — the same trust boundary
+// enroll.Service.Create enforces when creating one — so a mismatch is always 403
+// OPERATOR_MISMATCH, never a no-op 204, regardless of whether the target enrollment is live.
 func (s *server) deleteEnrollment(w http.ResponseWriter, r *http.Request) {
 	cred, _ := r.Context().Value(ctxLauncher).(enroll.Credential)
-	err := s.deps.Enroll.Revoke(r.Context(), r.PathValue("id"), "launcher:"+cred.ID.String())
+	err := s.deps.Enroll.Revoke(r.Context(), cred, r.PathValue("id"), "launcher:"+cred.ID.String())
+	if errors.Is(err, enroll.ErrOperatorMismatch) {
+		writeError(w, http.StatusForbidden, "OPERATOR_MISMATCH", err.Error())
+		return
+	}
 	if err != nil && !errors.Is(err, enroll.ErrNotLive) {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "revoke enrollment failed")
 		return

@@ -262,7 +262,7 @@ func TestRevokeThenLookupReportsNotLive(t *testing.T) {
 		t.Fatalf("Lookup(before revoke) = live=%v err=%v, want live=true", live, err)
 	}
 
-	if err := svc.Revoke(ctx, enr.ID.String(), "sjawhar"); err != nil {
+	if err := svc.Revoke(ctx, cred, enr.ID.String(), "sjawhar"); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
 
@@ -278,7 +278,7 @@ func TestRevokeNonexistentEnrollmentReturnsErrNotLive(t *testing.T) {
 	ctx := context.Background()
 	id := uuid.New().String()
 
-	if err := svc.Revoke(ctx, id, "sjawhar"); !errors.Is(err, ErrNotLive) {
+	if err := svc.Revoke(ctx, Credential{}, id, "sjawhar"); !errors.Is(err, ErrNotLive) {
 		t.Fatalf("Revoke(nonexistent) = %v, want ErrNotLive", err)
 	}
 
@@ -312,10 +312,10 @@ func TestRevokeTwiceReturnsErrNotLive(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	if err := svc.Revoke(ctx, enr.ID.String(), "sjawhar"); err != nil {
+	if err := svc.Revoke(ctx, cred, enr.ID.String(), "sjawhar"); err != nil {
 		t.Fatalf("Revoke(first): %v", err)
 	}
-	if err := svc.Revoke(ctx, enr.ID.String(), "sjawhar"); !errors.Is(err, ErrNotLive) {
+	if err := svc.Revoke(ctx, cred, enr.ID.String(), "sjawhar"); !errors.Is(err, ErrNotLive) {
 		t.Fatalf("Revoke(second) = %v, want ErrNotLive", err)
 	}
 
@@ -362,7 +362,7 @@ func TestRevokeRevokesLiveGrantsUnderEnrollment(t *testing.T) {
 		t.Fatalf("insert grant fixture: %v", err)
 	}
 
-	if err := svc.Revoke(ctx, enr.ID.String(), "sjawhar"); err != nil {
+	if err := svc.Revoke(ctx, cred, enr.ID.String(), "sjawhar"); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
 
@@ -373,6 +373,119 @@ func TestRevokeRevokesLiveGrantsUnderEnrollment(t *testing.T) {
 	}
 	if revokedAt == nil || revokedBy == nil || *revokedBy != "sjawhar" {
 		t.Fatalf("grant revoked_at=%v revoked_by=%v, want both set with revoked_by=sjawhar", revokedAt, revokedBy)
+	}
+}
+
+// TestRevokeRefusesWrongOperator is the regression for the review's Critical finding: Revoke had
+// no ownership check at all, so any live launcher credential could revoke any enrollment by
+// guessing or knowing its id. An operator A credential must not be able to revoke operator B's
+// enrollment, and the enrollment must remain untouched (still live) afterward.
+func TestRevokeRefusesWrongOperator(t *testing.T) {
+	svc := newService(t)
+	ctx := context.Background()
+
+	_, tokenB, err := svc.MintLauncherCredential(ctx, str("bob"), nil, "bobs-box", "ask-b")
+	if err != nil {
+		t.Fatalf("MintLauncherCredential(bob): %v", err)
+	}
+	credB, err := svc.AuthenticateLauncher(ctx, tokenB)
+	if err != nil {
+		t.Fatalf("AuthenticateLauncher(bob): %v", err)
+	}
+	enrB, err := svc.Create(ctx, credB, Enrollment{
+		Kind: "box", RuntimeID: "box-bob-1", Operator: str("bob"),
+		ApproverKind: "operator", Thumbprint: "tp-bob",
+	})
+	if err != nil {
+		t.Fatalf("Create(bob's enrollment): %v", err)
+	}
+
+	_, tokenA, err := svc.MintLauncherCredential(ctx, str("alice"), nil, "alices-box", "ask-a")
+	if err != nil {
+		t.Fatalf("MintLauncherCredential(alice): %v", err)
+	}
+	credA, err := svc.AuthenticateLauncher(ctx, tokenA)
+	if err != nil {
+		t.Fatalf("AuthenticateLauncher(alice): %v", err)
+	}
+
+	if err := svc.Revoke(ctx, credA, enrB.ID.String(), "alice"); !errors.Is(err, ErrOperatorMismatch) {
+		t.Fatalf("Revoke(alice's credential, bob's enrollment) = %v, want ErrOperatorMismatch", err)
+	}
+
+	if _, live, err := svc.Lookup(ctx, enrB.ID.String()); err != nil || !live {
+		t.Fatalf("Lookup(bob's enrollment after refused cross-operator revoke) = live=%v err=%v, want live=true", live, err)
+	}
+}
+
+// TestRevokeAllowsServiceCredentialForAnyPodEnrollment mirrors Create's own trust boundary: a
+// service credential (no operator) may revoke any pod enrollment, since pod enrollments never
+// carry an operator to distinguish between service credentials.
+func TestRevokeAllowsServiceCredentialForAnyPodEnrollment(t *testing.T) {
+	svc := newService(t)
+	ctx := context.Background()
+	issuer, key := withPodVerifier(t, svc)
+	_, token, err := svc.MintLauncherCredential(ctx, nil, str("legion-daemon"), "cluster", "ask-pod-revoke")
+	if err != nil {
+		t.Fatalf("MintLauncherCredential: %v", err)
+	}
+	cred, err := svc.AuthenticateLauncher(ctx, token)
+	if err != nil {
+		t.Fatalf("AuthenticateLauncher: %v", err)
+	}
+	enr, err := svc.Create(ctx, cred, Enrollment{
+		Kind: "pod", RuntimeID: "pod-revoke-1", ApproverKind: "operator", Thumbprint: "tp-pod-revoke",
+		PodToken: mintPodToken(t, issuer, key, "system:serviceaccount:legion:worker", "pod-revoke-1"),
+	})
+	if err != nil {
+		t.Fatalf("Create(pod): %v", err)
+	}
+
+	if err := svc.Revoke(ctx, cred, enr.ID.String(), "legion-daemon"); err != nil {
+		t.Fatalf("Revoke(service credential, pod enrollment) = %v, want nil", err)
+	}
+	if _, live, err := svc.Lookup(ctx, enr.ID.String()); err != nil || live {
+		t.Fatalf("Lookup(after revoke) = live=%v err=%v, want live=false", live, err)
+	}
+}
+
+// TestRevokeRefusesOperatorCredentialForPodEnrollment mirrors Create's own refusal
+// (TestOperatorCredentialRefusesPodEnrollment): an operator credential may not revoke a pod
+// enrollment, symmetrically with being unable to create one.
+func TestRevokeRefusesOperatorCredentialForPodEnrollment(t *testing.T) {
+	svc := newService(t)
+	ctx := context.Background()
+	issuer, key := withPodVerifier(t, svc)
+	_, serviceToken, err := svc.MintLauncherCredential(ctx, nil, str("legion-daemon"), "cluster", "ask-pod-2")
+	if err != nil {
+		t.Fatalf("MintLauncherCredential(service): %v", err)
+	}
+	serviceCred, err := svc.AuthenticateLauncher(ctx, serviceToken)
+	if err != nil {
+		t.Fatalf("AuthenticateLauncher(service): %v", err)
+	}
+	enr, err := svc.Create(ctx, serviceCred, Enrollment{
+		Kind: "pod", RuntimeID: "pod-revoke-2", ApproverKind: "operator", Thumbprint: "tp-pod-revoke-2",
+		PodToken: mintPodToken(t, issuer, key, "system:serviceaccount:legion:worker", "pod-revoke-2"),
+	})
+	if err != nil {
+		t.Fatalf("Create(pod): %v", err)
+	}
+
+	_, opToken, err := svc.MintLauncherCredential(ctx, str("sjawhar"), nil, "devbox", "ask-pod-3")
+	if err != nil {
+		t.Fatalf("MintLauncherCredential(operator): %v", err)
+	}
+	opCred, err := svc.AuthenticateLauncher(ctx, opToken)
+	if err != nil {
+		t.Fatalf("AuthenticateLauncher(operator): %v", err)
+	}
+
+	if err := svc.Revoke(ctx, opCred, enr.ID.String(), "sjawhar"); !errors.Is(err, ErrOperatorMismatch) {
+		t.Fatalf("Revoke(operator credential, pod enrollment) = %v, want ErrOperatorMismatch", err)
+	}
+	if _, live, err := svc.Lookup(ctx, enr.ID.String()); err != nil || !live {
+		t.Fatalf("Lookup(pod enrollment after refused revoke) = live=%v err=%v, want live=true", live, err)
 	}
 }
 
@@ -462,7 +575,7 @@ func TestCreateRetriesWhenConflictingRowIsRevokedBeforeRecovery(t *testing.T) {
 		if hookCalls > 1 {
 			return // already revoked on the first call; nothing left to race against.
 		}
-		if err := svc.Revoke(ctx, first.ID.String(), "race-test"); err != nil {
+		if err := svc.Revoke(ctx, cred, first.ID.String(), "race-test"); err != nil {
 			t.Fatalf("Revoke inside hook: %v", err)
 		}
 	}
