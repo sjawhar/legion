@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -646,23 +645,11 @@ func TestLocationMatchesProvisionedWorkspacePath(t *testing.T) {
 
 // A `.` or `..` segment would put the shared clone somewhere else under the state directory, and
 // provisioning removes an incomplete clone there: `--repo ../..` once removed the tree volume's
-// root. A Repository cannot hold one. Parse refuses every such input; the type's names are
-// unexported, so no caller builds a Repository that Parse did not return; and the one value a
-// caller can build, the zero Repository, is refused by Provision and Fetch before either runs a
-// command or touches the state directory.
-func TestARepositoryWithADotSegmentNeverReachesTheVolume(t *testing.T) {
-	for _, repo := range []string{"../..", "../x", "acme/..", "./..", "acme/."} {
-		if parsed, err := ghrepo.Parse("--repo", repo); err == nil {
-			t.Errorf("ghrepo.Parse(%q) = %s, want a refusal", repo, parsed)
-		}
-	}
-	repository := reflect.TypeFor[ghrepo.Repository]()
-	for i := range repository.NumField() {
-		if field := repository.Field(i); field.IsExported() {
-			t.Errorf("ghrepo.Repository exports its field %s: any caller can build a Repository Parse would refuse, and Location joins its names under the state directory", field.Name)
-		}
-	}
-
+// root. A Repository cannot hold one: Parse refuses every such input, and only Parse makes a
+// non-zero Repository (ghrepo's TestParse and TestRepositoryExportsNoField). The one value a caller
+// can build, the zero Repository, is refused by Provision and Fetch before either runs a command or
+// touches the state directory.
+func TestAZeroRepositoryNeverReachesTheVolume(t *testing.T) {
 	state := t.TempDir()
 	if err := os.WriteFile(filepath.Join(state, "volume-root.txt"), []byte("the tree volume's root\n"), 0o600); err != nil {
 		t.Fatal(err)

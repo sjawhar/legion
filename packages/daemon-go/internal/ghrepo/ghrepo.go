@@ -26,6 +26,10 @@ func (r Repository) Owner() string { return r.owner }
 // Name is the repository's own name, the one after the slash.
 func (r Repository) Name() string { return r.name }
 
+// IsZero is whether r is the zero Repository, no repository. Every other Repository is one Parse
+// returned, so a carrier that refuses the zero value holds only parsed repositories.
+func (r Repository) IsZero() bool { return r == Repository{} }
+
 // String is the repository as GitHub names it, `<owner>/<name>`.
 func (r Repository) String() string {
 	return r.owner + "/" + r.name

@@ -436,6 +436,17 @@ func TestConsumeCommitsRefusalAndAcknowledges(t *testing.T) {
 	assertNoAckPending(t, stream, dispatchConsumerName(spec.Project))
 }
 
+// Every carrier of a ghrepo.Repository refuses the zero value, and intake is one: a zero
+// repository would subscribe to `notifications.github...>`, a subject no repository publishes on,
+// and intake would wait on it silently. The spec is refused by name before any consumer opens.
+func TestOpenConsumersRefusesAZeroRepository(t *testing.T) {
+	spec := consumerSpec(&lockedBuffer{})
+	spec.Repositories = append(spec.Repositories, ghrepo.Repository{})
+	if _, err := normalizedSpec(spec); err == nil || err.Error() != "intake consumer repository is required" {
+		t.Fatalf("normalizedSpec with a zero repository = %v, want \"intake consumer repository is required\"", err)
+	}
+}
+
 func consumerSpec(logs *lockedBuffer) ConsumerSpec {
 	return ConsumerSpec{
 		Project:      "CAPTURE",

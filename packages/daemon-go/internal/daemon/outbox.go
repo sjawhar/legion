@@ -453,7 +453,7 @@ func (r *outbox) provisionWorkspace(ctx context.Context, issue record.Issue) err
 	if r.tokens == nil {
 		return errors.New("supervise executor has no GitHub App token manager")
 	}
-	if r.repo == (ghrepo.Repository{}) {
+	if r.repo.IsZero() {
 		return errors.New("workspace provisioning has no configured repository")
 	}
 	lease, err := r.tokens.Token(ctx, appauth.Implement, r.repo.Owner())
@@ -511,7 +511,7 @@ func (r *outbox) removeWorkspace(ctx context.Context, row record.OutboxRow, payl
 	if r.podsProvision() {
 		return nil
 	}
-	if r.repo == (ghrepo.Repository{}) {
+	if r.repo.IsZero() {
 		return errors.New("workspace removal has no configured repository")
 	}
 	issue, err := r.issue(ctx, row.Issue)

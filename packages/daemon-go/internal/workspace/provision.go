@@ -82,7 +82,7 @@ func Bookmark(issue string) string { return "legion/" + issue }
 // issue is refused: joined under the repository's workspaces directory it names that directory,
 // or its owner's, and Remove deletes a workspace directory whole.
 func Location(stateDir string, repository ghrepo.Repository, issue string) (Workspace, error) {
-	if repository == (ghrepo.Repository{}) {
+	if repository.IsZero() {
 		return Workspace{}, errors.New("workspace repository is required")
 	}
 	if stateDir == "" {

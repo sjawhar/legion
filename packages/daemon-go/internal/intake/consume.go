@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -183,6 +184,9 @@ func normalizedSpec(spec ConsumerSpec) (ConsumerSpec, error) {
 	}
 	if len(spec.Repositories) == 0 {
 		return ConsumerSpec{}, fmt.Errorf("intake consumer repositories are required")
+	}
+	if slices.ContainsFunc(spec.Repositories, ghrepo.Repository.IsZero) {
+		return ConsumerSpec{}, fmt.Errorf("intake consumer repository is required")
 	}
 	if spec.AckWait <= 0 {
 		spec.AckWait = defaultAckWait

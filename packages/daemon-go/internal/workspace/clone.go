@@ -166,7 +166,7 @@ func (s gitHubSource) open(ghrepo.Repository, string) (remote, error) {
 // Source clones and fetches it from. The zero repository is refused, as Location refuses it: it
 // names the feed's own `.git`.
 func feedRepository(feed string, repository ghrepo.Repository) (string, error) {
-	if repository == (ghrepo.Repository{}) {
+	if repository.IsZero() {
 		return "", errors.New("workspace repository is required")
 	}
 	if feed == "" {
