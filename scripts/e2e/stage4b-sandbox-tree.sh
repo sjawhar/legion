@@ -46,7 +46,7 @@
 set -Eeuo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
-work=$(mktemp -d /tmp/legion-e2e4b.XXXXXXXX)
+work=$(mktemp -d "/tmp/legion-e2e4b.$$.XXXXXXXX")
 evidence=${STAGE4B_EVIDENCE_DIR:-$(mktemp -d /tmp/legion-e2e4b-evidence.XXXXXXXX)}
 mkdir -p "$evidence/logs" "$evidence/transcripts" "$evidence/pods" "$evidence/controls"
 # tee shares the driver's process group, so a signal to the group (Ctrl-C, a closed pane, timeout's
@@ -164,6 +164,8 @@ blocked() {
 . "$root/scripts/e2e/lib/workflow.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/namespace-rig.sh
 . "$root/scripts/e2e/lib/namespace-rig.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/leftovers.sh
+. "$root/scripts/e2e/lib/leftovers.sh"
 
 
 rk() { timeout --foreground 300 kubectl --kubeconfig "$runtime_kubeconfig" --context "$runtime_context" "$@"; }
@@ -912,7 +914,7 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT
-trap 'echo "CHECK $check: FAIL: line $LINENO exited $?: $BASH_COMMAND"' ERR
+trap 'echo "CHECK $check: FAIL: line $LINENO exited $?: $BASH_COMMAND" >&2' ERR
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -1104,7 +1106,7 @@ audit_verdict() { [ "$(jq -c . "$1")" = "[]" ] && [ "$(jq -c . "$2")" = "[]" ]; 
 # ==== checkpoints ===================================================================================
 
 begin prerequisites
-for tool in go docker jq curl ss kubectl aws gh bun jj mise shellcheck secrets; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+for tool in go docker jq curl ss kubectl aws gh bun jj mise shellcheck secrets setpriv pgrep; do command -v "$tool" >/dev/null || fail "$tool is required"; done
 [ -n "$runtime_context" ] || fail "LEGION_E2E_RUNTIME_CONTEXT is unset: the daemon runs as the Legion daemon's restricted identity, never the operator's"
 [ -r "$runtime_kubeconfig" ] || fail "the runtime kubeconfig $runtime_kubeconfig is not readable"
 case "$image" in *@sha256:*) ;; *) fail "LEGION_E2E_IMAGE must be the worker image by digest (…@sha256:…), not '$image'" ;; esac
@@ -1126,6 +1128,7 @@ service_hosts=("${dispatch_base#https://}" "${envoy_url#*://}" "$nats_host" "${g
 mkdir -p "$(dirname "$lock")"
 exec 9>"$lock"
 flock -n 9 || fail "another Stage 4b run holds $lock: one run at a time"
+refuse_leftovers legion-e2e4b
 for port in "$port_daemon" "$port_worker_stream"; do
   [ -z "$(ss -Hltn "sport = :$port")" ] || fail "port $port is taken on the devbox: $(ss -Hltnp "sport = :$port")"
 done
@@ -1884,7 +1887,7 @@ note "workspace-fetch per pod (started, finished) and node ephemeral-storage use
 pass
 
 begin pod-watch-verdict
-stop_pid "$shape_pid"
+stop_tree "$shape_pid"
 shape_pid=
 missing=$(stream_missing "$evidence/pod-watch.json")
 [ -z "$missing" ] || fail "the pod watch never recorded pods the run knows from other sources: $(tr '\n' ' ' <<<"$missing")"

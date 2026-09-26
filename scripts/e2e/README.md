@@ -980,9 +980,32 @@ timed-out wait runs before it fails), and defines `note` and `fail`, which exits
 | `start_process NAME CMD…` | starts CMD in the background, appending to NAME's log, and sets `NAME_pid` |
 | `log_size NAME` | the size of NAME's log, the offset `await_start` reads a start's own lines from |
 | `await_start NAME PID OFFSET SECONDS WHAT CMD…` | waits, bounded, for CMD to succeed while PID lives. It returns 2 when the service exited on `address already in use` after OFFSET, the one race a pick before the bind cannot close, so the caller picks again; any other exit fails naming the log |
-| `stop_pid PID` | TERM, then KILL after 10 s; best effort, so a failed cleanup never hides the check that failed |
-| `stop_tree PID` | stops a background loop with every process under it: it freezes the loop, stops each child the same way, then kills the loop, so the `kubectl`, `jq` or `sleep` the loop was waiting on goes with it. Stage 3's and Stage 4b's watchers are stopped with it |
+| `stop_pid PID` | TERM, then KILL after 10 s; best effort, so a failed cleanup never hides the check that failed. An empty PID does nothing; a PID that cannot name one process of the run (0 however spelled, so any value with a leading zero, 1, a negative or non-numeric value, the calling shell or its process group's leader) is refused with a printed line, since `kill 0` signals the caller's whole process group |
+| `stop_tree PID` | stops a background loop with every process under it: it freezes the loop, stops each child the same way, then kills the loop, so the `kubectl`, `jq` or `sleep` the loop was waiting on goes with it. It signals a pid only while its parent is the calling shell, so a pid the watcher left and another process reused is never hit, and refuses the same pids `stop_pid` does: `kill -STOP 0` would freeze the whole driver and a later `kill -KILL 0` end it. Stage 3's and Stage 4b's watchers are stopped with it |
 | `run_processes` | prints every pid whose working directory or command line names `$work` |
+
+## lib/leftovers.sh
+
+A driver that dies with no chance to clean up (SIGKILL, a crashed host) leaves its daemon, listener,
+agents and containers running. `refuse_leftovers PREFIX` is how the next run of the same stage
+notices: Stage 2 (`legion-e2e2`), Stage 3 (`legion-e2e3`), Stage 4b (`legion-e2e4b`) and the
+controller proof (`legion-e2e-controller`) run it before they start anything.
+
+```sh
+. "$root/scripts/e2e/lib/leftovers.sh"     # sourced, never run
+refuse_leftovers legion-e2e3
+```
+
+Everything a run starts carries its driver's pid: each container is named `<prefix>-<role>-<pid>`,
+and every process of the run holds its work directory, `/tmp/<prefix>.<pid>.<random>`, in its argv,
+its working directory (an agent) or its environment (a bridge handed the run's state directories).
+The check fails, through the caller's `fail`, naming each container and process whose driver is no
+longer alive and the command that removes it (`docker rm -f -v <name>`, `kill <pid>`). A driver
+counts as alive only while its pid is a live, non-zombie process that started no later than the
+container or process it would own, since pids are reused. Only processes in the caller's own pid
+namespace are read, since a pid means nothing across namespaces (an agent box's run is its own).
+What a live run started is left alone, since Stages 2 and 3 take no lock and two lanes may run one
+at once.
 
 ## lib/workflow.sh
 
