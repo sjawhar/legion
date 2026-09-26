@@ -45,6 +45,12 @@ type escapeContext struct {
 	tildes bool
 	// heading reports whether the text is a heading's.
 	heading bool
+	// marked reports whether the text is written inside a mark's syntax, where the parser keeps
+	// whitespace at its edges.
+	marked bool
+	// afterMarker reports whether a mark's marker is written on the character's line before it,
+	// so that the character does not begin the line's text as the parser trims it.
+	afterMarker bool
 }
 
 // needsInlineEscape decides one character from the text alone.
@@ -52,8 +58,11 @@ func needsInlineEscape(value string, offset int, char rune, context escapeContex
 	textLineStart := context.textLineStart
 	switch char {
 	case '\\':
+		// Before whitespace written as a reference, a backslash would escape its `&`.
 		return offset+1 < len(value) && isASCIIPunctuation(value[offset+1]) ||
-			offset+1 == len(value) && context.followed
+			offset+1 == len(value) && context.followed ||
+			offset+1 < len(value) && (value[offset+1] == ' ' || value[offset+1] == '\t') &&
+				needsInlineEscape(value, offset+1, rune(value[offset+1]), context)
 	case '*':
 		return (blockStart(value, textLineStart, offset) && markerTerminator(value, offset+1)) ||
 			emphasisDelimiter(value, offset, '*')
@@ -87,6 +96,12 @@ func needsInlineEscape(value string, offset int, char rune, context escapeContex
 		return context.tableCell
 	case ':':
 		return context.urlSchemes && urlSchemeColon(value, offset)
+	case ' ', '\t':
+		// The parser trims whitespace that begins a line of a textblock's text or ends the
+		// textblock, so the first of a leading run and the last of a trailing one are written
+		// as the references it keeps.
+		return offset == textLineStart && !context.marked && !context.afterMarker ||
+			offset+1 == len(value) && !context.followed
 	case '.', ')':
 		return orderedListMarkerPunctuation(value, offset, textLineStart)
 	default:
@@ -94,10 +109,10 @@ func needsInlineEscape(value string, offset int, char rune, context escapeContex
 	}
 }
 
-// escaped is how an escaped character is written: `&` as the `&amp;` reference; leading
-// whitespace, which takes no backslash, as the numeric reference the parser decodes back to it,
-// which keeps the line a paragraph instead of the indented code block four spaces or a tab would
-// open; and anything else behind a backslash.
+// escaped is how an escaped character is written: `&` as the `&amp;` reference; whitespace, which
+// takes no backslash, as the numeric reference the parser decodes back to it, which it neither
+// trims nor reads as the indentation that opens indented code; and anything else behind a
+// backslash.
 func escaped(char rune) string {
 	switch char {
 	case '&':
@@ -170,9 +185,8 @@ const (
 	// lineStartAsIs: the line's text begins with a character no line-wide block form begins with,
 	// or one the rules that read the text alone already escape.
 	lineStartAsIs
-	// lineStartEscaped: whitespace that would open indented code, on a textblock's first line with
-	// no mark's marker before it, where the parser strips it even when no block opens - after a
-	// list marker, say - so it is escaped at once.
+	// lineStartEscaped: whitespace that would open indented code, which the rules that read the
+	// text alone already escape where the parser would trim it.
 	lineStartEscaped
 	// lineStartHeld: a character only the whole line decides, held until the line is written.
 	lineStartHeld
@@ -180,10 +194,10 @@ const (
 
 // lineStartOf decides the character at offset, on a line of its own whose text begins at
 // lineStart; escape is what the rules that read the text alone decided for it.
-func lineStartOf(value string, lineStart, offset int, char rune, escape, afterLine, afterMarker bool) lineStartVerdict {
+func lineStartOf(value string, lineStart, offset int, char rune, escape bool) lineStartVerdict {
 	switch {
 	case offset == lineStart && (char == ' ' || char == '\t') && indentedCodeRun(value, offset):
-		if !afterLine && !afterMarker {
+		if escape {
 			return lineStartEscaped
 		}
 		return lineStartHeld

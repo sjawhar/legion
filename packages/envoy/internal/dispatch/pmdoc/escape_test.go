@@ -254,6 +254,57 @@ func flatText(node *Node) string {
 	return out.String()
 }
 
+// The parser trims whitespace at the start of a textblock's line and at the end of the
+// textblock, so text that begins or ends with it lost it. The first leading and the last trailing
+// whitespace character are written as references; whitespace inside a mark or a link keeps the
+// bytes main writes, since the parser keeps it there.
+func TestRenderKeepsWhitespaceAtATextblocksEdges(t *testing.T) {
+	text := func(value string, marks ...Mark) *Node { return &Node{Type: "text", Text: value, Marks: marks} }
+	hardBreak := &Node{Type: "hardbreak", Attrs: Attrs{"isInline": false}}
+	doc := func(block *Node) *Node { return &Node{Type: "doc", Children: []*Node{block}} }
+	paragraph := func(children ...*Node) *Node { return &Node{Type: "paragraph", Children: children} }
+	cell := func(kind, value string) *Node { return &Node{Type: kind, Children: []*Node{paragraph(text(value))}} }
+	for name, tree := range map[string]*Node{
+		"a paragraph's leading space":   doc(paragraph(text(" x"))),
+		"three leading spaces":          doc(paragraph(text("   x"))),
+		"a paragraph's trailing spaces": doc(paragraph(text("x  "))),
+		"a leading tab":                 doc(paragraph(text("\tx"))),
+		"a backslash before the last":   doc(paragraph(text("a\\ "))),
+		"after a hard break":            doc(paragraph(text("a"), hardBreak, text(" b"))),
+		"a heading's edges":             doc(&Node{Type: "heading", Attrs: Attrs{"level": 2}, Children: []*Node{text(" x ")}}),
+		"a table cell's edges": doc(&Node{Type: "table", Children: []*Node{
+			{Type: "table_header_row", Children: []*Node{cell("table_header", "h")}},
+			{Type: "table_row", Children: []*Node{cell("table_cell", " x ")}},
+		}}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			markdown := mustRender(t, tree)
+			back, err := Parse(markdown)
+			if err != nil {
+				t.Fatalf("Parse(%q) = %v", markdown, err)
+			}
+			if flatText(back) != flatText(tree) {
+				t.Fatalf("Parse(%q) has text %q, want %q", markdown, flatText(back), flatText(tree))
+			}
+			if again := mustRender(t, back); again != markdown {
+				t.Fatalf("Render(Parse(%q)) = %q", markdown, again)
+			}
+		})
+	}
+	link := Mark{Type: "link", Attrs: Attrs{"href": "https://x.test"}}
+	for _, test := range []struct {
+		tree *Node
+		want string
+	}{
+		{doc(paragraph(text(" x", link))), "[ x](https://x.test)\n"},
+		{doc(paragraph(text("a  b"))), "a  b\n"},
+	} {
+		if got := mustRender(t, test.tree); got != test.want {
+			t.Fatalf("Render() = %q, want the bytes main writes, %q", got, test.want)
+		}
+	}
+}
+
 // A paragraph's second line of dashes or equals signs underlines its first into a heading, so
 // the escape applies to a marker line anywhere in the paragraph, not only its first.
 func TestRenderEscapesSetextUnderlinesInsideParagraphs(t *testing.T) {

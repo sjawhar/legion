@@ -161,7 +161,8 @@ func TestRejectSuggestionIsKindAware(t *testing.T) {
 	if err := service.RejectSuggestion(context.Background(), artifactID, "ins", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatal(err)
 	}
-	waitForDocumentText(t, service, artifactID, "keep this and drop \n")
+	// The space the rejected insert leaves at the paragraph's end is kept, as a reference.
+	waitForDocumentText(t, service, artifactID, "keep this and drop&#32;\n")
 	if len(pmdoc.ListMarks(liveTree(t, service, artifactID))) != 0 {
 		t.Fatal("marks survived reject")
 	}

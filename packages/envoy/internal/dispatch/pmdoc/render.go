@@ -420,6 +420,7 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 				followed:   index+1 < len(nodes) || len(next) > 0,
 				tildes:     tildes,
 				heading:    context.heading,
+				marked:     len(next) > 0,
 			})
 		case "hardbreak":
 			r.closeMarks(active, escapePipes)
@@ -653,9 +654,10 @@ func (r *renderer) writeInlineText(node *Node, position *inlinePosition, prefix 
 	for byteOffset, char := range value {
 		width := utf8.RuneLen(char)
 		context.textLineStart = textLineStart
+		context.afterMarker = position.afterMarker
 		escape := needsInlineEscape(value, byteOffset, char, context)
 		if lineStart >= 0 && r.heldLineStart == nil {
-			switch lineStartOf(value, lineStart, byteOffset, char, escape, position.afterLine, position.afterMarker) {
+			switch lineStartOf(value, lineStart, byteOffset, char, escape) {
 			case lineStartEscaped:
 				escape = true
 				lineStart = -1
