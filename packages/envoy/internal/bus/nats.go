@@ -120,9 +120,19 @@ func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB 
 			closedCB()
 		}
 	}
-	opts.AsyncErrorCB = func(_ *nats.Conn, sub *nats.Subscription, err error) {
+	opts.AsyncErrorCB = func(nc *nats.Conn, sub *nats.Subscription, err error) {
 		level := slog.LevelError
-		if errors.Is(err, nats.ErrConsumerNotActive) {
+		switch {
+		case errors.Is(err, nats.ErrConsumerNotFound) && nc != nil && nc.IsDraining():
+			// A drain ends each subscription whose consumer nats.go created, then deletes that
+			// consumer. At shutdown the listener leaves a KV watcher the last reconnect has not yet
+			// replaced for the drain to end, and the server can already have dropped that watcher's
+			// ephemeral consumer (after a NATS restart, once no interest outlasts its inactive
+			// threshold), so the delete finds it gone: the state the delete was for. The one other
+			// report of this error, an ordered consumer nats.go failed to recreate, arrives on a
+			// connected connection and stays an ERROR.
+			level = slog.LevelWarn
+		case errors.Is(err, nats.ErrConsumerNotActive):
 			// Every consumer Envoy runs with idle heartbeats is a KV watcher's ordered consumer,
 			// which reports missed heartbeats only while the connection is not connected; once it
 			// is connected again, nats.go resets the consumer instead. The report restates the
