@@ -18,13 +18,26 @@ type AttemptRun struct {
 	ID   int64  `json:"id"`
 }
 
-// PendingPush is the branch push still waiting to be classified.
-type PendingPush struct {
-	SHA         string `json:"sha"`
+// ClassifiedPush is one branch push as its changed paths classify it: a fact about two commits,
+// the head it replaced (Before) and the head it left (SHA), true whenever it is learned.
+type ClassifiedPush struct {
+	SHA string `json:"sha"`
+	// Before is the head the push replaced, empty when the push did not say.
+	Before      string `json:"before,omitempty"`
 	HandoffOnly bool   `json:"handoffOnly"`
 	Unknown     string `json:"unknown,omitempty"`
 	// ByReviewApp is whether the push was the review App's (its pusher is the review App's bot login).
 	ByReviewApp bool `json:"byReviewApp,omitempty"`
+	// Forced is a push that rewrote history, or did not say whether it did. Its changed paths list
+	// the commits it added since the merge base, not what it did to the head it replaced, so it
+	// never carries an approval across.
+	Forced bool `json:"forced,omitempty"`
+}
+
+// MayChangeCode is whether the push may have changed anything outside .legion/ in the head it
+// replaced.
+func (p ClassifiedPush) MayChangeCode() bool {
+	return !p.HandoffOnly || p.Forced
 }
 
 // Issue is one durable workflow record. Status is the last Dispatch status the daemon observed.
@@ -56,6 +69,24 @@ type PhaseRow struct {
 	// HandoffCommit it survives the next phase's start, so a completion reporting it again is known
 	// to carry no handoff written since.
 	LastHandoff string
+	// Decision is the review round's decision, on the reviewer's row: the newest review GitHub
+	// reported for the round that carried one, kept until the round ends, since the reviewer's
+	// completion can come after the review it posted. Nil until a review decides.
+	Decision *ReviewDecision
+	// ReviewSeen is the id of the newest deciding review (changes requested or approved) GitHub
+	// reported for the issue, on the reviewer's row and kept across rounds: a deciding review no
+	// newer than it was written before one already processed, and records nothing. A comment
+	// decides nothing and leaves it as it is.
+	ReviewSeen int64
+}
+
+// ReviewDecision is what one review decided: its state (changes_requested or approved), its body,
+// handed to the next implementer, and the head it was written on, whose code an approval approves.
+type ReviewDecision struct {
+	State string `json:"state"`
+	Body  string `json:"body,omitempty"`
+	Head  string `json:"head,omitempty"`
+	ID    int64  `json:"id,omitempty"`
 }
 
 // PullRequest is the daemon's latest GitHub observation for one issue's pull request.
@@ -70,15 +101,17 @@ type PullRequest struct {
 	Verdict             string
 	Failing             []string
 	FailingStatuses     []string
-	ReviewDecision      string
 	FixAttempts         int
 	BlockedAttempts     int
 	CheckRuns           []AttemptRun
 	Generation          int64
 	Snapshot            string
 	Reconciled          bool
-	PendingPush         *PendingPush
-	HeadCounted         string
+	// Pushes are the branch's pushes as they were classified: every push that changed only .legion/
+	// and said which head it replaced, which carry an approval across, and the pushes whose heads
+	// have not arrived yet. A push that may change code is spent once its head arrives.
+	Pushes      []ClassifiedPush
+	HeadCounted string
 	// PlannedRed is whether the newest head that changed a path outside .legion/ was the review
 	// App's (the tester's red tests): a red on it is planned, so the next head is not a fix attempt.
 	PlannedRed bool

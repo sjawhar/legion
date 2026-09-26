@@ -271,7 +271,7 @@ func TestReadmissionStartsTheNewGenerationWithoutTheOldGenerationsFacts(t *testi
 		if err := records.PutGate(ctx, tx, record.DesignGate{Issue: key, ArtifactID: artifact, LatestVersion: 1, ApprovedVersion: &approved}); err != nil {
 			t.Fatalf("seed gate: %v", err)
 		}
-		if err := records.PutPullRequest(ctx, tx, record.PullRequest{State: record.PullRequestMerged, Issue: key, Repo: "sjawhar/legion", Number: 86, Branch: "legion/" + key, HeadSHA: "merged", Verdict: "green", ReviewDecision: "approved", Failing: []string{}, FailingStatuses: []string{}}); err != nil {
+		if err := records.PutPullRequest(ctx, tx, record.PullRequest{State: record.PullRequestMerged, Issue: key, Repo: "sjawhar/legion", Number: 86, Branch: "legion/" + key, HeadSHA: "merged", Verdict: "green", Failing: []string{}, FailingStatuses: []string{}}); err != nil {
 			t.Fatalf("seed pull request: %v", err)
 		}
 		if err := records.PutPhase(ctx, tx, record.PhaseRow{Issue: key, Role: claim.RoleImplementer, Claim: "implementer", HandoffCommit: "gen1-handoff", LastHandoff: "gen1-handoff", Rounds: 2}); err != nil {
@@ -510,12 +510,12 @@ func TestReadmissionClearsTheGenerationOfEveryIssueOfTheTree(t *testing.T) {
 		if err := records.PutPhase(context.Background(), tx, record.PhaseRow{Issue: "LEGION-CHILD", Role: claim.RoleImplementer, Claim: "implementer-claim", HandoffCommit: "abc123", Rounds: 2, Verdict: "pass"}); err != nil {
 			t.Fatalf("seed the child's handoff: %v", err)
 		}
-		// An open pull request survives the new generation; the verdict and review decision it
-		// carried are the last generation's reading of a head nobody has reviewed since.
+		// An open pull request survives the new generation; the verdict it carried is the last
+		// generation's reading of a head nobody has judged since.
 		if err := records.PutPullRequest(context.Background(), tx, record.PullRequest{
 			Issue: "LEGION-CHILD", Repo: "acme/widgets", Number: 9, Branch: "legion/LEGION-CHILD", HeadSHA: "abc",
 			HeadUpdatedAt: fixedNow, HeadUpdatedAtSource: "webhook", Failing: []string{}, FailingStatuses: []string{},
-			Verdict: "failing", ReviewDecision: "CHANGES_REQUESTED", FixAttempts: 2, State: record.PullRequestOpen,
+			Verdict: "failing", FixAttempts: 2, State: record.PullRequestOpen,
 		}); err != nil {
 			t.Fatalf("seed the child's open pull request: %v", err)
 		}
@@ -548,7 +548,7 @@ func TestReadmissionClearsTheGenerationOfEveryIssueOfTheTree(t *testing.T) {
 		if pr == nil {
 			t.Fatal("the child's open pull request went with the generation; an open one is kept")
 		}
-		if pr.Verdict != "" || pr.ReviewDecision != "" || pr.FixAttempts != 0 {
+		if pr.Verdict != "" || pr.FixAttempts != 0 {
 			t.Errorf("the kept pull request carried the last generation's reading: %#v", pr)
 		}
 	})
