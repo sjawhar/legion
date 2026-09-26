@@ -10,7 +10,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"unicode"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
@@ -1192,29 +1191,40 @@ func inlineAware(markdown string) (*pmdoc.Node, error) {
 	return tree, nil
 }
 
-// continueText restores the leading and trailing whitespace markdown parsing
-// drops so a replacement can continue the text around it.
+// continueText restores the spaces and tabs parsing strips from a replacement's edges, so the
+// replacement continues the text around it. They go in unmarked text at the paragraph's own
+// edges - ` **x**` is a space and then bold, not a bold ` x`, and ` `c` ` leaves the code span's
+// text alone. A line break at an edge is no part of an inline replacement and is not restored,
+// and whitespace the parser keeps, such as a no-break space, is in the text already.
 func continueText(paragraph *pmdoc.Node, markdown string) {
-	leading := markdown[:len(markdown)-len(strings.TrimLeftFunc(markdown, unicode.IsSpace))]
-	trailing := markdown[len(strings.TrimRightFunc(markdown, unicode.IsSpace)):]
-	if leading == "" && trailing == "" {
+	if len(paragraph.Children) == 0 {
 		return
 	}
-	var first, last *pmdoc.Node
-	for _, child := range paragraph.Children {
-		if child.Type == "text" {
-			if first == nil {
-				first = child
-			}
-			last = child
+	if leading := edgeSpace(markdown[:len(markdown)-len(strings.TrimLeft(markdown, markdownSpace))]); leading != "" {
+		if first := paragraph.Children[0]; first.Type == "text" && len(first.Marks) == 0 {
+			first.Text = leading + first.Text
+		} else {
+			paragraph.Children = append([]*pmdoc.Node{{Type: "text", Text: leading}}, paragraph.Children...)
 		}
 	}
-	if first == nil {
-		return
+	if trailing := edgeSpace(markdown[len(strings.TrimRight(markdown, markdownSpace)):]); trailing != "" {
+		if last := paragraph.Children[len(paragraph.Children)-1]; last.Type == "text" && len(last.Marks) == 0 {
+			last.Text += trailing
+		} else {
+			paragraph.Children = append(paragraph.Children, &pmdoc.Node{Type: "text", Text: trailing})
+		}
 	}
-	first.Text = leading + first.Text
-	last.Text += trailing
 }
+
+// markdownSpace is the whitespace a paragraph's parse strips from its edges.
+const markdownSpace = " \t\r\n"
+
+// edgeSpace is an edge's whitespace without its line breaks.
+func edgeSpace(run string) string {
+	return lineBreaks.Replace(run)
+}
+
+var lineBreaks = strings.NewReplacer("\r", "", "\n", "")
 
 func isInlineLeaf(node *pmdoc.Node) bool {
 	switch node.Type {

@@ -1368,6 +1368,44 @@ func TestApplyOperationReplaceRefusesAWithItWouldCutShort(t *testing.T) {
 	}
 }
 
+// A replace continues the text around it with the spaces and tabs at the edges of its `with`,
+// which parsing strips: once, outside any mark, and without the line breaks, which an inline
+// replacement cannot carry. Each of these once wrote something else - a bold that no longer reads
+// as bold, a code span or link whose text gained the space, a no-break space written twice, a
+// blank line that split the paragraph.
+func TestApplyOperationReplaceKeepsItsEdgeWhitespaceOnceOutsideTheMarks(t *testing.T) {
+	for _, test := range []struct{ with, want string }{
+		{with: " **x**", want: "foo  **x** bar"},
+		{with: "**x** ", want: "foo **x**  bar"},
+		{with: " `c` ", want: "foo  `c`  bar"},
+		{with: " [l](https://x.test) ", want: "foo  [l](https://x.test)  bar"},
+		{with: " <b>x</b>", want: "foo  <b>x</b> bar"},
+		{with: " ![a](u)", want: "foo  ![a](u) bar"},
+		{with: "\u00a0x", want: "foo \u00a0x bar"},
+		{with: "x\u3000", want: "foo x\u3000 bar"},
+		{with: "x\n\n", want: "foo x bar"},
+		{with: "\n x", want: "foo  x bar"},
+	} {
+		t.Run(test.with, func(t *testing.T) {
+			tree, err := parseInput("Intro.\n\nfoo Body. bar\n")
+			if err != nil {
+				t.Fatal(err)
+			}
+			out, err := applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
+			if err != nil {
+				t.Fatal(err)
+			}
+			markdown, err := pmdoc.Render(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := "Intro.\n\n" + test.want + "\n"; markdown != want {
+				t.Fatalf("replace with %q wrote %q, want %q", test.with, markdown, want)
+			}
+		})
+	}
+}
+
 func TestApplyOperationReplaceRejectsBlockReplacements(t *testing.T) {
 	// The refusal is where an agent learns what to do instead, and each half of it is for a
 	// different `with`: paragraphs are rewritten one replace each, keeping their block ids - so a
