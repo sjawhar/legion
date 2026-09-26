@@ -99,7 +99,7 @@ export type {
   BlockTypeSchema,
   HostBlockRenderer,
 } from './block-schema';
-export type { StoredMark } from 'proof-sdk-upstream/src/editor/plugins/marks';
+export type { StoredMark } from './upstream-types';
 export { BLOCK_ID_ATTR, BLOCK_ID_DOM_ATTR, blockIdOf, isIdentifiedBlock, setBlockIdGenerator } from './editor/schema/block-ids';
 export { createTypedBlockCommands } from './typed-block-commands';
 export type {

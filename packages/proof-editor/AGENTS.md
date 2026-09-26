@@ -8,7 +8,11 @@ release, an npm publish and a pin bump.
 ## Where the code came from
 
 `src/` is proof-sdk's source at **24a5fc94915cda5704897c497af6312c140db40d** (the `library`
-branch's v0.3.13 — what production ran before the move), copied byte for byte:
+branch's v0.3.13; `main` pinned the npm package at 0.3.12, so the copy also brings 64dc42ed with
+it — a duplicated block id now stays with the block that held it, where 0.3.12 kept the first
+occurrence in document order, which is still what the server's `EnsureBlockIDs` does; legion
+#1434 moves `main` to 0.3.13 and this paragraph loses its middle clause when it lands), copied
+byte for byte:
 
 | File | What it is |
 | --- | --- |
@@ -20,12 +24,21 @@ branch's v0.3.13 — what production ran before the move), copied byte for byte:
 | `src/editor/schema/block-ids.ts` | Block ids: minting, the DOM attribute, the duplicate-id repair rule |
 | `src/lib.css` | The editor stylesheet |
 | `src/tests/*.test.ts` | The suites that came with those files |
+| `src/upstream-types.ts` | The upstream types the public surface names, copied from the pin's `src/formats/marks.ts` so a consumer sees a real shape rather than `any` |
 
-The only edits to that copy are the import specifiers of upstream modules, plus `bun test`
-registration in the suites (`src/tests/harness.ts`). `jj --ignore-working-copy -R <proof-sdk> diff
---git -r 24a5fc94 --to 24a5fc94` is not how you check it; diff a file against
-`jj --ignore-working-copy -R <proof-sdk> file show -r 24a5fc94 root:src/<file>` and the only lines
-that differ should be those.
+Three kinds of edit are allowed in that copy, and no others: the import specifiers of upstream
+modules; `bun test` registration in the suites (`src/tests/harness.ts` replaces each file's own
+`test()` tally and its `process.exit` tail); and `src/tests/headless-no-dom.test.ts`, whose entry
+named the fork's built `dist/headless.js` and now names `../lib-headless.js` — its banner, the
+comment beside that import and the case's own name follow, since this package has no build and
+there is no distribution left to name. Every
+copied file also carries a `// @ts-nocheck` banner (below). To check
+one, diff it against `jj --ignore-working-copy -R <proof-sdk> file show -r 24a5fc94
+root:src/<file>`; the only lines that differ should be those.
+
+`tests/` is legion's own, and is linted and type-checked like any other package's.
+`tests/upstream-pin.test.ts` is the guard on everything above: it reads the installed dependency
+and fails when the patch is not applied or when `src/upstream-types.ts` stops matching the pin.
 
 ## The upstream boundary
 
@@ -44,15 +57,23 @@ needs telling, because proof-sdk's `package.json` `exports` publishes only its b
 `noCheck` (its `tsconfig.lib.json`), so neither its tree nor this copy of it type-checks; a
 consumer that resolved them would inherit ~55 errors it cannot fix. `tsconfig.check.json` — what
 `bun run typecheck` reads — drops the `paths` so the specifiers stay unresolved, and every file
-copied from the fork carries `// @ts-nocheck` so no consumer reports them either. Upstream types
-therefore reach a consumer as `any`; `StoredMark`, which `src/lib.ts` re-exports, is the one that
-crosses into Dispatch. Typing this boundary is open work, recorded on LEGION-287.
+copied from the fork carries `// @ts-nocheck` so no consumer reports them either.
+
+An upstream type reached through that boundary is therefore `any`, which is why the one type the
+public surface names — `StoredMark`, re-exported by `src/lib.ts` — is declared in
+`src/upstream-types.ts` instead, copied from the pin and type-checked, with
+`tests/upstream-pin.test.ts` failing when the two stop agreeing. `HeatMapMode`, which
+`CreateProofEditorOptions.heatMapMode` names, is still `any`: `src/lib.ts` imports it alongside
+two values in one statement, and rewriting that statement is more than an import-specifier edit.
 
 `patches/proof-sdk-upstream@24a5fc94.patch` keeps peer-cursor colours and mark decorations out of
 inline `style` attributes: Dark Reader rewrites inline colours inside the contenteditable and
 ProseMirror reads those writes as content mutations, an endless redraw that wedges the tab
 (legion #1234). It is that fix moved from the published `dist` onto the fork's source, which does
-not carry it.
+not carry it. A `patchedDependencies` key that stops matching applies nothing, with no warning
+and exit 0, so `tests/upstream-pin.test.ts` reads the installed files and fails instead. Moving
+the pin means editing all three of: the key in the root `package.json`, the dependency in
+`package.json`, and the patch file (whose hunks are line-anchored in the fork's source).
 
 ## No build step
 
@@ -62,13 +83,16 @@ TypeScript, Vite compiles it. There is no `dist` and nothing to build before usi
 ## Commands
 
 ```bash
-bun test src/tests     # the moved suites, through src/tests/harness.ts
-bun run typecheck      # tsc against tsconfig.check.json
-bun run lint           # Biome, over what legion wrote (biome.json excludes the copied tree)
+bun run test           # the moved suites through src/tests/harness.ts, plus tests/
+bun run typecheck      # tsc against tsconfig.check.json (src/ and tests/)
+bun run lint           # Biome over the package; the root biome.json turns it off for the copy
 ```
 
 ## Conventions
 
-The copied tree keeps proof-sdk's style — single quotes, its own line width — and Biome is turned
-off over it in the root `biome.json`, so a diff against the pinned commit stays readable. Anything
-legion writes here follows the repo's conventions and is checked.
+The copied tree keeps proof-sdk's style — single quotes, its own line width — and Biome's
+formatter, linter and `assist` are all turned off over it in the root `biome.json`, so a diff
+against the pinned commit stays readable. `assist` matters as much as the other two: its
+`organizeImports` is a safe fix, so one `biome check --write` or an editor with organize-on-save
+would reorder the copy's imports. Anything legion writes here — `tests/`, `src/tests/harness.ts`
+— follows the repo's conventions and is checked.

@@ -16,5 +16,5 @@
       "proof-sdk-upstream/src/*": ["./node_modules/proof-sdk-upstream/src/*"]
     }
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts", "tests/**/*.ts"]
 }

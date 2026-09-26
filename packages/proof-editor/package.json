@@ -20,8 +20,8 @@
   "types": "src/lib.ts",
   "scripts": {
     "typecheck": "bunx tsc --noEmit -p tsconfig.check.json",
-    "test": "bun test src/tests",
-    "lint": "bunx biome check src/tests/harness.ts"
+    "test": "bun test src/tests tests",
+    "lint": "bunx biome check ."
   },
   "dependencies": {
     "@milkdown/core": "^7.5.0",
