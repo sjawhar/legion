@@ -35,12 +35,18 @@ function recordedSessions(): Map<string, string> {
 }
 
 /**
- * Publish this top-level session's id, replacing whatever this instance recorded before.
+ * Publish this top-level session, replacing whatever this instance recorded before.
  *
  * Returns the key written, which the caller hands back as `previousKey` next time: a session
  * whose id or transcript path changes (`/fork`, `/handoff`, `/new`, a resume) must leave no
  * entry behind under its old key, or a later subagent walking that path up would be handed an
- * id its parent has retired. A session with no id yet records nothing.
+ * id its parent has retired. The same call with no transcript and no id — what
+ * `session_shutdown` makes — deletes the entry and records nothing, so a subagent that outlives
+ * its parent names no dead session.
+ *
+ * A session whose host has not minted its id yet is still recorded, under its transcript path,
+ * with the empty id it has: its subagents must resolve *it* and report no address until the
+ * heartbeat's drift heal fills the id in, rather than fall through to another live session.
  */
 export function recordEnvoySession(entry: {
   readonly previousKey: string | undefined;
@@ -49,9 +55,13 @@ export function recordEnvoySession(entry: {
 }): string | undefined {
   const sessions = recordedSessions();
   // A transcript path is absolute, so the id-based key of a session with no transcript on disk
-  // (SQL storage, `--no-session`) can never be mistaken for one a walk-up would produce.
-  const key = entry.sessionID === "" ? undefined : (entry.sessionFile ?? `session:${entry.sessionID}`);
-  if (entry.previousKey !== undefined && entry.previousKey !== key) sessions.delete(entry.previousKey);
+  // (SQL storage, `--no-session`) can never be mistaken for one a walk-up would produce. With
+  // neither a transcript nor an id there is nothing to key on, and nothing to record.
+  const key =
+    entry.sessionFile ?? (entry.sessionID === "" ? undefined : `session:${entry.sessionID}`);
+  if (entry.previousKey !== undefined && entry.previousKey !== key) {
+    sessions.delete(entry.previousKey);
+  }
   if (key === undefined) return undefined;
   sessions.set(key, entry.sessionID);
   return key;
@@ -66,10 +76,10 @@ export function recordEnvoySession(entry: {
  * the transcript's directory and appends `.jsonl` until a recorded session matches.
  *
  * When that resolves nothing — no transcript path at all, or no recorded session along it — one
- * recorded session is used only when it is the only one in the process, where there is nothing
- * it could be confused with. Anything else reports no address: a subagent that names an
- * unrelated live session sends its peers to a session that never spawned it, which is worse
- * than a subagent that admits it has no reply address.
+ * recorded session is used only when it is the only one in the process and it has an id, where
+ * there is nothing it could be confused with. Anything else reports no address: a subagent that
+ * names an unrelated live session sends its peers to a session that never spawned it, which is
+ * worse than a subagent that admits it has no reply address.
  */
 export function resolveEnvoySession(sessionFile: string | undefined): string {
   const sessions = recordedSessions();

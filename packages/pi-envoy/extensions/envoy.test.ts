@@ -4834,6 +4834,69 @@ describe("envoy OMP extension", () => {
     }
   });
 
+  test("a subagent of a session whose host mints its id later reports no address", async () => {
+    const fixture = transcriptFixture();
+    try {
+      const posted = recordingMessages();
+      // A fresh TUI fires session_start before its id exists and heals by drift up to a
+      // heartbeat later. Its subagent must resolve that session and find no id yet, never fall
+      // through to whichever other top-level session this process is running.
+      const host = await subagentProcess("lazy-id", "", fixture.transcript);
+      const child = await host.boot(
+        "ses_child",
+        fixture.transcript("2026-09-23T00-00-00-000Z_/Scout.jsonl")
+      );
+      await host.boot("ses_b", fixture.transcript("2026-09-23T00-02-00-000Z_ses_b.jsonl"));
+
+      const whoami = child.tools.find((tool) => tool.name === "envoy_whoami");
+      const result = await whoami?.execute("call-1", {}, undefined, undefined, child.context);
+      expect(result?.details).toMatchObject({ sessionID: "" });
+      await child.tools
+        .find((tool) => tool.name === "envoy_send")
+        ?.execute(
+          "call-send",
+          { session_id: "ses_target", message: "before the id exists" },
+          undefined,
+          undefined,
+          child.context
+        );
+      expect(posted[0]?.body).not.toHaveProperty("source_session");
+    } finally {
+      fixture.remove();
+    }
+  });
+
+  test("a subagent that outlives its session's shutdown reports no address", async () => {
+    const fixture = transcriptFixture();
+    try {
+      const posted = recordingMessages();
+      const host = await subagentProcess("shutdown-parent", "ses_parent", fixture.transcript);
+      const child = await host.boot(
+        "ses_child",
+        fixture.transcript("2026-09-23T00-00-00-000Z_ses_parent/Scout.jsonl")
+      );
+      // The session deregisters with the listener here, so it is no longer an address a reply
+      // reaches — the `no live session` failure this whole record exists to stop.
+      await host.parent.handlers.get("session_shutdown")?.({}, host.parent.context);
+
+      const whoami = child.tools.find((tool) => tool.name === "envoy_whoami");
+      const result = await whoami?.execute("call-1", {}, undefined, undefined, child.context);
+      expect(result?.details).toMatchObject({ sessionID: "" });
+      await child.tools
+        .find((tool) => tool.name === "envoy_send")
+        ?.execute(
+          "call-send",
+          { session_id: "ses_target", message: "after the parent went away" },
+          undefined,
+          undefined,
+          child.context
+        );
+      expect(posted[0]?.body).not.toHaveProperty("source_session");
+    } finally {
+      fixture.remove();
+    }
+  });
+
   test("a subagent's publish to a role its own parent holds says it was not delivered", async () => {
     const fixture = transcriptFixture();
     try {

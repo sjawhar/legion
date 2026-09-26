@@ -1141,6 +1141,14 @@ export default function envoyExtension(pi: PiApi): void {
     shuttingDown = true;
     const bound = bridge.instances.indexOf(claimInstance);
     if (bound !== -1) bridge.instances.splice(bound, 1);
+    // This session is about to deregister with the listener, so it stops being an address a
+    // reply can reach: a subagent still running in this process must report none rather than
+    // name it, and a dead entry must not be what makes some other session ambiguous.
+    recordedSessionKey = recordEnvoySession({
+      previousKey: recordedSessionKey,
+      sessionFile: undefined,
+      sessionID: "",
+    });
     const deadline = Promise.withResolvers<void>();
     const timer = setTimeout(deadline.resolve, 1_000);
     try {
