@@ -25,7 +25,7 @@ import {
   type DispatchConfigResolution,
   resolveDispatchConfig,
 } from "@legion/envoy-client/dispatch-config";
-import { executeDispatchTool, formatOpenAsksSummary } from "@legion/envoy-client/dispatch-execute";
+import { executeDispatchTool } from "@legion/envoy-client/dispatch-execute";
 import { DispatchClient } from "@legion/envoy-client/dispatch-http";
 import {
   createFollowAnnouncer,
@@ -83,6 +83,54 @@ const CAPABILITIES_WITHOUT_BTW: readonly DeliveryCapability[] = DELIVERY_CAPABIL
 const ROLE_CLAIM_ENTRY = "envoy-role-claim";
 
 const OPEN_ASKS_TIMEOUT_MS = 3_000;
+
+/**
+ * Transcript entry marking a session Legion drives. The process-wide bridge knows the same
+ * thing until the process ends; this is what a resumed session reads.
+ */
+const LEGION_MANAGED_ENTRY = "legion-managed-session";
+
+/** Custom-message type of the run-end nudge itself; never displayed. */
+const ASK_REMINDER_MESSAGE = "dispatch-ask-reminder";
+
+const OPEN_ASKS_REMINDER =
+  "You have no unanswered asks in Dispatch. If you are waiting for human input, open an ask. Otherwise ignore this reminder and continue with any remaining work. Do not reply just to acknowledge this reminder.";
+
+/** Tools whose success means the agent opened the ask itself, so the nudge has nothing to say. */
+const ASK_OPENING_TOOLS: readonly string[] = ["dispatch_ask", "dispatch_request_approval"];
+
+/**
+ * One arming period of the run-end nudge. A genuine user turn arms a period; the nudge fires
+ * at most once in it (`fired`), and not at all once the agent opened an ask itself (`saw_ask`).
+ * `baseline_as_of` is the server clock the period started at, so the stop-time query can tell
+ * an ask opened during the period from one that was already open.
+ *
+ * In-memory only, for the life of this process's session. A cold start or a session switch
+ * begins at period 0, which the stop guard refuses, so nothing nudges before the next genuine
+ * user turn arms a period — no transcript entry buys anything beyond that.
+ */
+interface AskAwarenessState {
+  readonly session_id: string;
+  readonly period: number;
+  readonly baseline_as_of: string | null;
+  readonly fired: boolean;
+  readonly saw_ask: boolean;
+}
+
+interface LegionManagedEntry {
+  readonly type: "custom";
+  readonly customType: typeof LEGION_MANAGED_ENTRY;
+  readonly data: { readonly session_id: string };
+}
+
+function isLegionManagedEntry(entry: unknown): entry is LegionManagedEntry {
+  if (typeof entry !== "object" || entry === null) return false;
+  if (!("type" in entry) || entry.type !== "custom") return false;
+  if (!("customType" in entry) || entry.customType !== LEGION_MANAGED_ENTRY) return false;
+  if (!("data" in entry) || typeof entry.data !== "object" || entry.data === null) return false;
+  return "session_id" in entry.data && typeof entry.data.session_id === "string";
+}
+
 interface RoleClaimEntry {
   readonly type: "custom";
   readonly customType: typeof ROLE_CLAIM_ENTRY;
@@ -165,6 +213,34 @@ export default function envoyExtension(pi: PiApi): void {
     summary: string;
   }[] = [];
 
+  let askAwareness: AskAwarenessState = {
+    session_id: "",
+    period: 0,
+    baseline_as_of: null,
+    fired: false,
+    saw_ask: false,
+  };
+  // Bumped by everything that invalidates a stop-time check already in flight: a new arming
+  // period, and a session rebind. The period alone cannot carry that — a rebound session's
+  // restored period may equal the one the pending check read.
+  let awarenessGeneration = 0;
+  // One stop-time check at a time. `agent_end` handlers are not awaited by the host, so a second
+  // stop can arrive while the first one's Dispatch round trip is open — it clears every guard
+  // below, because `fired` is not written until the answer comes back. The re-check after the
+  // await then makes it silent, but only after it has spent a round trip on an answer that can
+  // change nothing. This makes "one check per stop window" the structure rather than an ordering
+  // the re-check happens to win: held from before the query until after `fired` is written.
+  let askCheckInFlight = false;
+  // Whether this session's transcript records Legion driving it. Not matched against the id the
+  // guard runs under: `/fork` and `/handoff` mint a new id and carry the transcript, and the
+  // session stays Legion-driven across one — the role-claim reader beside it is id-agnostic for
+  // the same reason. `/new` and `/resume` install a transcript that is their own, so an empty or
+  // replaced branch still reads as not-managed.
+  let legionManagedTranscript = false;
+  /** The bridge set is the process-local record; the transcript is what a fresh process reads. */
+  const legionManaged = (id: string): boolean =>
+    legionManagedTranscript || legionRoleClaimBridge().managedSessions.has(id);
+
   const availabilityWarningSessionIDs = new Set<string>();
 
   const warnAskAvailability = (context: SessionContext, error: unknown): void => {
@@ -172,13 +248,14 @@ export default function envoyExtension(pi: PiApi): void {
     if (availabilityWarningSessionIDs.has(sessionID)) return;
     availabilityWarningSessionIDs.add(sessionID);
     context.ui.notify(
-      `envoy: Dispatch open-ask check unavailable (${messageFor(error)}); summary unavailable`,
+      `envoy: Dispatch open-ask check unavailable (${messageFor(error)}); the stop-time ask reminder is off until it recovers`,
       "warning"
     );
   };
 
   const queryOpenAsks = async (
-    requestedSessionID: string
+    requestedSessionID: string,
+    since?: string
   ): Promise<{ readonly snapshot: OpenAsksResponse; readonly url: string } | null> => {
     const config = activeDispatchConfig();
     if (config === null) return null;
@@ -187,15 +264,32 @@ export default function envoyExtension(pi: PiApi): void {
       config.token,
       fetch,
       AbortSignal.timeout(OPEN_ASKS_TIMEOUT_MS)
-    ).openAsks(requestedSessionID);
+    ).openAsks(requestedSessionID, since);
     availabilityWarningSessionIDs.delete(requestedSessionID);
     return { snapshot, url: config.url };
+  };
+
+  const markLegionManagedSession = (targetSessionID: string): void => {
+    legionRoleClaimBridge().managedSessions.add(targetSessionID);
+    if (legionManagedTranscript) return;
+    legionManagedTranscript = true;
+    pi.appendEntry(LEGION_MANAGED_ENTRY, { session_id: targetSessionID });
   };
 
   const restoreLocalSessionState = (context: SessionContext): void => {
     sessionDirectory = context.cwd;
     sessionID = context.sessionManager.getSessionId();
     activeSessionContext = context;
+    const branch = context.sessionManager.getBranch?.() ?? [];
+    askAwareness = {
+      session_id: sessionID,
+      period: 0,
+      baseline_as_of: null,
+      fired: false,
+      saw_ask: false,
+    };
+    legionManagedTranscript = branch.some(isLegionManagedEntry);
+    awarenessGeneration++;
   };
 
   pi.on("resources_discover", async () => ({ skillPaths: [SKILLS_DIRECTORY] }));
@@ -738,6 +832,10 @@ export default function envoyExtension(pi: PiApi): void {
     if (context === undefined || context.sessionManager.getSessionId() !== targetSessionID) {
       throw new Error(`Envoy has no active session for Legion role claim: ${targetSessionID}`);
     }
+    // Legion drives this session from here on, and the run-end ask nudge stays out of it.
+    // Recorded before the claim runs: a claim that fails midway leaves the session just as
+    // Legion-driven as one that succeeds.
+    markLegionManagedSession(targetSessionID);
     if (sessionID !== targetSessionID) await establishSession(context);
     // The listener rejects a claim from a session it does not currently know
     // (its registration may have expired), so register before claiming.
@@ -745,10 +843,16 @@ export default function envoyExtension(pi: PiApi): void {
     await setEnvoyRole(role);
   };
 
-  const subscribeNotice: LegionNoticeSubscription = async (targetSessionID, topic, callerContext) => {
+  const subscribeNotice: LegionNoticeSubscription = async (
+    targetSessionID,
+    topic,
+    callerContext
+  ) => {
     const context = callerContext ?? activeSessionContext;
     if (context === undefined || context.sessionManager.getSessionId() !== targetSessionID) {
-      throw new Error(`Envoy has no active session for Legion notice subscription: ${targetSessionID}`);
+      throw new Error(
+        `Envoy has no active session for Legion notice subscription: ${targetSessionID}`
+      );
     }
     if (sessionID !== targetSessionID) await establishSession(context);
     await subscribe(topic);
@@ -949,30 +1053,120 @@ export default function envoyExtension(pi: PiApi): void {
 
   registerEnvoyWhoamiCommand(pi, () => sessionID);
 
-  pi.on("before_agent_start", async (_event, context) => {
+  // Turn start injects nothing into the conversation; its open-asks query only arms the run-end
+  // nudge below, the snapshot's `as_of` becoming the period's baseline. A session the stop can
+  // never nudge does not pay for it: the host awaits this handler, so a slow or unreachable
+  // Dispatch would add up to `OPEN_ASKS_TIMEOUT_MS` to the head of each of its turns and then
+  // warn it about a reminder it never gets. `id === sessionID` is deliberately not one of the
+  // conditions — a fresh TUI mints its id lazily and heals by drift, so it would drop the first
+  // turn's arming.
+  pi.on("before_agent_start", async (event, context) => {
     const id = context.sessionManager.getSessionId();
-    if (id === "") return undefined;
+    if (id === "" || event.prompt.trim() === "" || !context.hasUI || legionManaged(id)) {
+      return undefined;
+    }
+    // Memoized per instance: one transcript stat for the life of the session.
+    if (await isSubagent(context)) return undefined;
     try {
       const open = await queryOpenAsks(id);
-      if (open === null) return undefined;
-      return {
-        message: {
-          customType: "dispatch-open-asks",
-          content: `Dispatch authored-ask summary:\n${formatOpenAsksSummary(open.snapshot, open.url)}`,
-          display: false,
-          attribution: "agent",
-        },
-      };
+      if (open !== null) armAskAwareness(id, event.prompt, open.snapshot.as_of);
     } catch (error) {
       warnAskAvailability(context, error);
-      return {
-        message: {
-          customType: "dispatch-open-asks",
-          content: `Dispatch authored-ask summary unavailable: ${messageFor(error)}`,
-          display: false,
-          attribution: "agent",
-        },
-      };
+    }
+    return undefined;
+  });
+
+  // Arms one nudge period. A genuine user turn is the only thing that arms one: this handler
+  // runs for an ordinary prompt and for a steering batch carrying the user's own text, and
+  // `prompt` is that text. A `triggerTurn` continuation of an agent-attributed custom message —
+  // which is what the nudge below is — never reaches this handler at all (measured on OMP
+  // 18.2.9: one before_agent_start for the user's prompt, none for the continuation), so the
+  // nudge cannot re-arm itself, and one stop can produce at most one of them.
+  function armAskAwareness(id: string, prompt: string, asOf: string): void {
+    if (prompt.trim() === "") return;
+    awarenessGeneration++;
+    askAwareness = {
+      session_id: id,
+      period: (askAwareness.session_id === id ? askAwareness.period : 0) + 1,
+      baseline_as_of: asOf,
+      fired: false,
+      saw_ask: false,
+    };
+  }
+
+  // The run-end nudge. `agent_end` is the bare stop signal — no message, no shape to read —
+  // so the trigger is Dispatch state alone: the agent stopped, this period opened no ask, and
+  // none is open. The nudge is one steered turn; `fired` then latches the period, so the next
+  // one needs a genuine user turn to arm.
+  //
+  // A run with no UI (`omp -p`, and any other headless launch) never gets it: the host disposes
+  // the session at the end of that one run, and its output is already printed, so the steered
+  // continuation either races dispose and is recorded aborted with no provider reply, or wins
+  // and bills a whole turn whose text nobody reads. Both were measured on OMP 18.2.9. An RPC
+  // host — every Legion pane — carries a UI context and is nudged as a terminal is. So does an
+  // ACP host, but a client that defers agent-initiated turns gets the steer queued as hidden
+  // next-turn context instead of a turn of its own, consumed when the user next prompts.
+  pi.on("agent_end", async (event, context) => {
+    const id = context.sessionManager.getSessionId();
+    // Only a run that settled normally is nudged: steering an interrupt (`aborted`), a provider
+    // failure (`error`), a truncation, or a run with no reply of its own answers the user's cancel,
+    // or a failure, with a turn nobody asked for.
+    const lastReply = event.messages?.findLast((message) => message.role === "assistant");
+    if (
+      event.willContinue === true ||
+      lastReply?.stopReason !== "stop" ||
+      shuttingDown ||
+      !context.hasUI ||
+      id === "" ||
+      id !== sessionID ||
+      legionManaged(id) ||
+      askAwareness.session_id !== id ||
+      askAwareness.period === 0 ||
+      askAwareness.fired ||
+      askAwareness.saw_ask ||
+      askAwareness.baseline_as_of === null ||
+      askCheckInFlight
+    ) {
+      return;
+    }
+    const period = askAwareness.period;
+    const generation = awarenessGeneration;
+    askCheckInFlight = true;
+    try {
+      let open: { readonly snapshot: OpenAsksResponse; readonly url: string } | null;
+      try {
+        open = await queryOpenAsks(id, askAwareness.baseline_as_of);
+      } catch (error) {
+        if (generation === awarenessGeneration) warnAskAvailability(context, error);
+        return;
+      }
+      // The query is a network round trip: a new user turn may have armed another period, or a
+      // switch may have moved the session, while it was in flight.
+      if (
+        open === null ||
+        shuttingDown ||
+        generation !== awarenessGeneration ||
+        sessionID !== id ||
+        context.sessionManager.getSessionId() !== id ||
+        legionManaged(id) ||
+        askAwareness.session_id !== id ||
+        askAwareness.period !== period ||
+        askAwareness.fired ||
+        askAwareness.saw_ask
+      ) {
+        return;
+      }
+      if (open.snapshot.count > 0 || open.snapshot.opened_since) return;
+      askAwareness = { ...askAwareness, fired: true };
+      // `deliverAs: "nextTurn"` with `triggerTurn` is the host's documented form for a message
+      // sent during prompt teardown; on the pin this steer produced exactly one continuation in
+      // every interactive and RPC run, so it stays the channel `deliver` already uses.
+      pi.sendMessage(
+        { customType: ASK_REMINDER_MESSAGE, content: OPEN_ASKS_REMINDER, display: false },
+        { deliverAs: "steer", triggerTurn: true }
+      );
+    } finally {
+      askCheckInFlight = false;
     }
   });
 
@@ -988,6 +1182,14 @@ export default function envoyExtension(pi: PiApi): void {
   });
   pi.on("tool_result", async (event) => {
     if (event.isError) return;
+    if (
+      ASK_OPENING_TOOLS.includes(event.toolName) &&
+      askAwareness.session_id === sessionID &&
+      askAwareness.period > 0 &&
+      !askAwareness.saw_ask
+    ) {
+      askAwareness = { ...askAwareness, saw_ask: true };
+    }
     announceFollow(event.details);
   });
 

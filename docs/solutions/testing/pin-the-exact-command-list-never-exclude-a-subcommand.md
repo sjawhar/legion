@@ -83,7 +83,7 @@ working copy, and never fold one into a commit.
   into a pinned stream, the fix is more entries, never a narrower predicate. Excluding a
   subcommand (`cmd[2] !== "set"`) or a key excludes the very shape the test defends against.
 - **Argv helpers make the entries cheap.** One `xxxCommand(repoCloneDir)` per production command,
-  beside the existing helpers (`resolveBookmarkCommand`, `identityProbe`), so every pinned list
+  beside the existing helpers (`bookmarkRowsCommand`, `identityProbe`), so every pinned list
   spells the same argv and a change to the production argv is a one-helper edit.
 - **Mutation-test any assertion you weakened to make a rebase green.** Insert the plausible wrong
   behaviour the test was written for — here, a `config set` of an identity key — and confirm the

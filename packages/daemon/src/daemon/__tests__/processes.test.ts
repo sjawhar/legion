@@ -993,12 +993,12 @@ describe("ProcessManager", () => {
       ["jj", "git", "fetch", "-R", repo],
       [
         "jj",
-        "log",
-        "-r",
-        "bookmarks(exact:legion/LEGION-42)",
-        "--no-graph",
+        "bookmark",
+        "list",
+        "--all-remotes",
+        "exact:legion/LEGION-42",
         "-T",
-        'commit_id ++ "\n"',
+        'if(remote, remote, "local") ++ "|" ++ if(present, "1", "0") ++ "|" ++ if(conflict, "1", "0") ++ "|" ++ if(tracked, "1", "0") ++ "|" ++ added_targets.map(|c| c.commit_id()).join(",") ++ "|" ++ removed_targets.map(|c| c.commit_id()).join(",") ++ "\\n"',
         "--ignore-working-copy",
         "-R",
         repo,
@@ -2738,6 +2738,8 @@ describe("ProcessManager", () => {
         if (command[3] === "list-panes" && command.includes("%7")) {
           return { stdout: "%7 12345\n", exitCode: 0 };
         }
+        // Provisioning's commands: no bookmark rows, so the workspace starts at main.
+        if (command[0] === "jj" || command[0] === "git") return { stdout: "", exitCode: 0 };
         return { stdout: "sjawhar-legion-42\n", exitCode: 0 };
       },
     });
@@ -20930,10 +20932,14 @@ describe("ProcessManager", () => {
           resyncIntervalMs: 600_000,
           projects: { LEGION: { repo: "sjawhar/legion" } },
           maxFixAttempts: 3,
+          reviewAppLogin: "legion-reviewer[bot]",
         },
         dispatchClient: fakeDispatchClient(),
         saveState: async () => {},
         fetchCiStatusBatch: async () => ({}),
+        compareChangedPaths: async () => {
+          throw new Error("no compare expected in this test");
+        },
         now: () => Date.parse("2026-08-24T00:00:00.000Z"),
         applyEffects: async (effects) => {
           for (const effect of effects) {
@@ -21076,10 +21082,14 @@ describe("ProcessManager", () => {
           resyncIntervalMs: 600_000,
           projects: { LEGION: { repo: "sjawhar/legion" } },
           maxFixAttempts: 3,
+          reviewAppLogin: "legion-reviewer[bot]",
         },
         dispatchClient: fakeDispatchClient(),
         saveState: async () => {},
         fetchCiStatusBatch: async () => ({}),
+        compareChangedPaths: async () => {
+          throw new Error("no compare expected in this test");
+        },
         now: () => Date.parse("2026-08-24T00:00:00.000Z"),
         applyEffects: async (effects) => {
           dispatched.push(effects);
@@ -21123,10 +21133,14 @@ describe("ProcessManager", () => {
           resyncIntervalMs: 600_000,
           projects: { LEGION: { repo: "sjawhar/legion" } },
           maxFixAttempts: 3,
+          reviewAppLogin: "legion-reviewer[bot]",
         },
         dispatchClient: fakeDispatchClient(),
         saveState: async () => {},
         fetchCiStatusBatch: async () => ({}),
+        compareChangedPaths: async () => {
+          throw new Error("no compare expected in this test");
+        },
         now: () => Date.parse("2026-08-24T00:00:00.000Z"),
         applyEffects: async () => {},
         reconcileAdmissionDrift: () => processes.reconcileAdmissionDrift(),

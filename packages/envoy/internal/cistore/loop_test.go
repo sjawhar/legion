@@ -143,7 +143,7 @@ func waitCacheStateMissing(t *testing.T, s *Store, owner, repo, number, sha stri
 func setLastEventAt(t *testing.T, store *Store, owner, repo, number, sha string, at int64) {
 	t.Helper()
 	key := Key(owner, repo, number, sha)
-	entry, err := store.kv.Get(key)
+	entry, err := store.watcher.KV().Get(key)
 	if err != nil {
 		t.Fatalf("get state: %v", err)
 	}
@@ -156,7 +156,7 @@ func setLastEventAt(t *testing.T, store *Store, owner, repo, number, sha string,
 	if err != nil {
 		t.Fatalf("encode state: %v", err)
 	}
-	if _, err := store.kv.Update(key, raw, entry.Revision()); err != nil {
+	if _, err := store.watcher.KV().Update(key, raw, entry.Revision()); err != nil {
 		t.Fatalf("set last event at: %v", err)
 	}
 	deadline := time.After(5 * time.Second)
@@ -180,7 +180,7 @@ func setLastEventAt(t *testing.T, store *Store, owner, repo, number, sha string,
 func setClaim(t *testing.T, store *Store, owner, repo, number, sha string, claim *SettlementClaim) {
 	t.Helper()
 	key := Key(owner, repo, number, sha)
-	entry, err := store.kv.Get(key)
+	entry, err := store.watcher.KV().Get(key)
 	if err != nil {
 		t.Fatalf("get state: %v", err)
 	}
@@ -193,7 +193,7 @@ func setClaim(t *testing.T, store *Store, owner, repo, number, sha string, claim
 	if err != nil {
 		t.Fatalf("encode state: %v", err)
 	}
-	if _, err := store.kv.Update(key, raw, entry.Revision()); err != nil {
+	if _, err := store.watcher.KV().Update(key, raw, entry.Revision()); err != nil {
 		t.Fatalf("set claim: %v", err)
 	}
 	deadline := time.After(5 * time.Second)
@@ -279,9 +279,9 @@ func TestSummaryTickDoesNotPublishWhenHeadMovesBeforeClaim(t *testing.T) {
 	waitCacheChecks(t, store, owner, repo, pr, shaA, 1)
 
 	key := Key(owner, repo, pr, shaA)
-	originalKV := store.kv
+	originalKV := store.watcher.KV()
 	var moved sync.Once
-	store.kv = &interleavingKV{
+	useKV(t, store, &interleavingKV{
 		KeyValue: originalKV,
 		afterGet: func(got string) {
 			if got != key {
@@ -301,8 +301,8 @@ func TestSummaryTickDoesNotPublishWhenHeadMovesBeforeClaim(t *testing.T) {
 				}
 			})
 		},
-	}
-	t.Cleanup(func() { store.kv = originalKV })
+	})
+	t.Cleanup(func() { useKV(t, store, originalKV) })
 
 	runSummaryTick(store, pub, 0, logging.New("test"))
 	if got := pub.count(); got != 0 {
@@ -581,7 +581,7 @@ func TestSummaryTickKeepsLegacyFailureAfterFreshCheckArrives(t *testing.T) {
 	waitHead(t, store, owner, repo, number, sha)
 	legacy := []byte(`{"owner":"example-org","repo":"example-repo","number":"42","sha":"abcdef1234567890abcdef1234567890abcdef12",` +
 		`"checks":{"build":{"status":"completed","conclusion":"failure"},"lint":{"status":"in_progress"}}}`)
-	if _, err := store.kv.Create(Key(owner, repo, number, sha), legacy); err != nil {
+	if _, err := store.watcher.KV().Create(Key(owner, repo, number, sha), legacy); err != nil {
 		t.Fatalf("write deployed-listener state: %v", err)
 	}
 	if err := recordCheck(store, owner, repo, number, sha, "lint", "901", "https://example.test/901", "completed", "success", "2026-09-07T03:01:00Z"); err != nil {
@@ -888,7 +888,7 @@ func TestSummaryTickUsesLatestCheckRunIDAfterStateExpiration(t *testing.T) {
 	}
 
 	key := Key(owner, repo, number, sha)
-	if err := store.kv.Delete(key); err != nil {
+	if err := store.watcher.KV().Delete(key); err != nil {
 		t.Fatalf("delete expired state: %v", err)
 	}
 	waitCacheStateMissing(t, store, owner, repo, number, sha)
@@ -1027,9 +1027,9 @@ func TestSummaryTickRefusesReclaimedClaimWhoseSnapshotWasReplaced(t *testing.T) 
 		releaseAOnce.Do(func() { close(releaseA) })
 		releaseBOnce.Do(func() { close(releaseB) })
 	})
-	originalKV := replicaA.kv
+	originalKV := replicaA.watcher.KV()
 	var keyGets int
-	replicaA.kv = &interleavingKV{
+	useKV(t, replicaA, &interleavingKV{
 		KeyValue: originalKV,
 		beforeGet: func(got string) {
 			if got != key {
@@ -1041,8 +1041,8 @@ func TestSummaryTickRefusesReclaimedClaimWhoseSnapshotWasReplaced(t *testing.T) 
 				<-releaseA
 			}
 		},
-	}
-	t.Cleanup(func() { replicaA.kv = originalKV })
+	})
+	t.Cleanup(func() { useKV(t, replicaA, originalKV) })
 
 	bPublished := make(chan struct{})
 	pub := &recPub{onPublish: func(contracts.Envelope) {
@@ -1164,14 +1164,14 @@ func TestSummaryTickSkipsClaimRearmedBeforePublish(t *testing.T) {
 	gen0 := getState(t, store, owner, repo, number, sha).Generation
 
 	key := Key(owner, repo, number, sha)
-	originalKV := store.kv
+	originalKV := store.watcher.KV()
 	claimUpdated := make(chan struct{})
 	releaseClaim := make(chan struct{})
 	var claimGate struct {
 		sync.Mutex
 		blocked bool
 	}
-	store.kv = &interleavingKV{
+	useKV(t, store, &interleavingKV{
 		KeyValue: originalKV,
 		afterUpdate: func(updatedKey string, _ []byte, _ uint64) {
 			claimGate.Lock()
@@ -1184,7 +1184,7 @@ func TestSummaryTickSkipsClaimRearmedBeforePublish(t *testing.T) {
 			claimGate.Unlock()
 			<-releaseClaim
 		},
-	}
+	})
 
 	tickDone := make(chan struct{})
 	go func() {
@@ -1205,7 +1205,7 @@ func TestSummaryTickSkipsClaimRearmedBeforePublish(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("summary tick did not resume")
 	}
-	store.kv = originalKV
+	useKV(t, store, originalKV)
 
 	if got := pub.count(); got != 0 {
 		t.Fatalf("rearmed claim published %d stale envelopes, want 0", got)
@@ -1252,14 +1252,14 @@ func TestSummaryTickSkipsSettlementWhenDurableHeadMovesBeforePublish(t *testing.
 	setLastEventAt(t, store, owner, repo, number, oldSHA, 0)
 
 	key := Key(owner, repo, number, oldSHA)
-	originalKV := store.kv
+	originalKV := store.watcher.KV()
 	claimUpdated := make(chan struct{})
 	releaseClaim := make(chan struct{})
 	var claimGate struct {
 		sync.Mutex
 		blocked bool
 	}
-	store.kv = &interleavingKV{
+	useKV(t, store, &interleavingKV{
 		KeyValue: originalKV,
 		afterUpdate: func(updatedKey string, _ []byte, _ uint64) {
 			claimGate.Lock()
@@ -1272,7 +1272,7 @@ func TestSummaryTickSkipsSettlementWhenDurableHeadMovesBeforePublish(t *testing.
 			claimGate.Unlock()
 			<-releaseClaim
 		},
-	}
+	})
 
 	tickDone := make(chan struct{})
 	go func() {
@@ -1293,7 +1293,7 @@ func TestSummaryTickSkipsSettlementWhenDurableHeadMovesBeforePublish(t *testing.
 	case <-time.After(5 * time.Second):
 		t.Fatal("summary tick did not resume")
 	}
-	store.kv = originalKV
+	useKV(t, store, originalKV)
 
 	if got := pub.count(); got != 0 {
 		t.Fatalf("old head published %d settlements after the durable head moved", got)
@@ -1587,7 +1587,7 @@ func TestSummaryTickPublishesLegacyResettledRecordWithoutTimestamps(t *testing.T
 		},
 		"resettled":true
 	}`)
-	if _, err := store.kv.Put(Key(owner, repo, number, sha), legacy); err != nil {
+	if _, err := store.watcher.KV().Put(Key(owner, repo, number, sha), legacy); err != nil {
 		t.Fatalf("store legacy state: %v", err)
 	}
 	waitCacheChecks(t, store, owner, repo, number, sha, 1)

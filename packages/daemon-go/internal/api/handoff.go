@@ -52,6 +52,41 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusInternalServerError, "FACTS_UNAVAILABLE", "fact intake is unavailable")
 		return
 	}
+	machine, running := s.supervisor.Machine(grant.Claim)
+	if !running {
+		writeFailure(w, http.StatusConflict, "HANDOFF_NO_CLAIM", "the daemon supervises no claim for this grant")
+		return
+	}
+	// The run this completion belongs to is the run of the task the worker took: the delivery
+	// whose turn is running, or — after that turn ends, which retires the delivery — the run the
+	// claim is left serving. The pending delivery alone would not do: a worker told to wait is
+	// woken by a notice, whose turn no delivery backs, and its completion still belongs to the run
+	// whose task it took. The claim's field alone would not do either: an operator's task carries
+	// no run, and a confirmation a busy refusal took back never ran. The pane's own environment
+	// cannot say it at all — LEGION_GENERATION is the claim's launch counter, and a live worker is
+	// handed the next run's task without being relaunched.
+	held := machine.Claim()
+	serving := held.ServingGeneration
+	if p := held.Pending; p != nil && p.Generation != 0 {
+		// A task whose turn is running is the run being worked. A task the agent may have read —
+		// delivered, and its turn never seen to start — is one too, when the claim has retired no
+		// confirmed task of a run: Oh My Pi's own agent_start names no prompt, so a turn starting
+		// after the five-second bound is indistinguishable from a foreign one and confirms
+		// nothing, and the worker of a first task would otherwise have its completion refused.
+		// A claim serving no run is not a session that has done no work — it may have worked
+		// tasks whose turns were never confirmed — but it is one this daemon has seen take no
+		// other run's task, so there is no other run this could belong to. A task refused in a
+		// turn of the agent's own is not read at all: that take-back drops the delivered mark,
+		// and a completion from that foreign turn falls through to the run the claim serves.
+		if !p.ConfirmedAt.IsZero() || (serving == 0 && !p.DeliveredAt.IsZero()) {
+			serving = p.Generation
+		}
+	}
+	if serving == 0 {
+		writeFailure(w, http.StatusConflict, "HANDOFF_NO_RUN",
+			"this completion belongs to no task: this claim has taken none, so the run it reports cannot be told")
+		return
+	}
 	issue, round, err := s.handoffPosition(r.Context(), grant.Issue)
 	if err != nil {
 		writeFailure(w, http.StatusInternalServerError, "RECORD_UNAVAILABLE", "could not read the issue record")
@@ -69,8 +104,13 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	// refusal is recorded as processed. The position is read before the fact's own transaction:
 	// should the issue move in between, the engine re-reads it there and refuses a completion whose
 	// role no longer owns the phase.
-	eventID := fmt.Sprintf("handoff:%s:%d:%s:%s:%d:%s:%s:%t", grant.Issue, issue.Generation, grant.Role, issue.Phase, round, req.Commit, req.Verdict, req.Ready)
-	result, err := intake.ApplyFact(r.Context(), s.pool, "api", eventID, intake.HandoffComplete{Issue: grant.Issue, Role: grant.Role, Claim: grant.Claim, Summary: req.Summary, Verdict: req.Verdict, Ready: req.Ready, Commit: req.Commit}, s.handlers...)
+	//
+	// The run the completion is attributed to is part of the key, because a refusal is recorded
+	// under it: a stale completion of the run that is over would otherwise take the key of the new
+	// run's completion of the same phase at the same commit, and the real one would be answered
+	// ALREADY_RECORDED and never reach the workflow.
+	eventID := fmt.Sprintf("handoff:%s:%d:%d:%s:%s:%d:%s:%s:%t", grant.Issue, issue.Generation, serving, grant.Role, issue.Phase, round, req.Commit, req.Verdict, req.Ready)
+	result, err := intake.ApplyFact(r.Context(), s.pool, "api", eventID, intake.HandoffComplete{Generation: serving, Issue: grant.Issue, Role: grant.Role, Claim: grant.Claim, Summary: req.Summary, Verdict: req.Verdict, Ready: req.Ready, Commit: req.Commit}, s.handlers...)
 	if err != nil {
 		writeFailure(w, http.StatusInternalServerError, "FACT_APPLY_FAILED", "could not apply handoff fact")
 		return

@@ -112,7 +112,7 @@ func (s *memoryClaims) PutDelivery(context.Context, legionclaim.Token, supervise
 	return nil
 }
 
-func (s *memoryClaims) RetireDelivery(context.Context, legionclaim.Token, string) error { return nil }
+func (s *memoryClaims) RetireDelivery(context.Context, supervise.Claim, string) error { return nil }
 
 func (s *memoryClaims) ClaimByBootTokenHash(_ context.Context, hash []byte) (supervise.Claim, bool, error) {
 	s.rowsMu.Lock()

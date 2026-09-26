@@ -132,6 +132,11 @@ func handoffDaemon(t *testing.T) *[]map[string]any {
 		t.Fatalf("unset LEGION_GRANT_FILE: %v", err)
 	}
 	t.Setenv("LEGION_GRANT", "grant-1")
+	// The pane's identity is the one the daemon puts on it; a caller's exported JJ_USER/JJ_EMAIL
+	// would otherwise be what `ownHandoff` compares the commit's author against, so whether these
+	// tests pass would depend on the shell that ran them.
+	t.Setenv("JJ_USER", "")
+	t.Setenv("JJ_EMAIL", "")
 	return bodies
 }
 
@@ -180,6 +185,31 @@ func TestHandoffCompleteReadyForTheMergerNeedsNoHandoffFile(t *testing.T) {
 	}
 	if len(*bodies) != 1 || (*bodies)[0]["ready"] != true || (*bodies)[0]["commit"] != "beef" {
 		t.Fatalf("daemon read %v, want one READY naming commit beef", *bodies)
+	}
+}
+
+// The completion names no run: the pane's own LEGION_GENERATION is the claim's launch counter,
+// which moves on every relaunch within one run, and a live worker is handed the next run's task
+// without being relaunched at all. The daemon attributes the completion to the delivery whose
+// turn is running (internal/api's TestHandoffCompleteCarriesTheRunOfTheTaskBeingWorked), so the
+// CLI sends exactly the fields the grant does not already carry.
+func TestHandoffCompleteSendsNoGeneration(t *testing.T) {
+	workspace := t.TempDir()
+	t.Setenv("LEGION_ROLE", "merger")
+	t.Setenv("LEGION_GENERATION", "7")
+	t.Setenv("LEGION_JJ_PATH", fakeHandoffJJ(t, "beef"))
+	bodies := handoffDaemon(t)
+	var out, errb bytes.Buffer
+
+	if code := run(context.Background(), []string{"legion", "handoff", "complete", "--workspace", workspace, "--summary", "gate facts hold", "--ready"}, &out, &errb); code != 0 {
+		t.Fatalf("handoff complete = %d, stderr %q", code, errb.String())
+	}
+
+	if len(*bodies) != 1 {
+		t.Fatalf("daemon read %v, want one completion", *bodies)
+	}
+	if _, sent := (*bodies)[0]["generation"]; sent {
+		t.Fatalf("the completion carries %v, want no generation: the daemon reads the run from the delivery", (*bodies)[0]["generation"])
 	}
 }
 
@@ -408,6 +438,11 @@ func handoffDaemonInPhase(t *testing.T, issue string, p phase.Phase) *[]map[stri
 		t.Fatalf("unset LEGION_GRANT_FILE: %v", err)
 	}
 	t.Setenv("LEGION_GRANT", "grant-1")
+	// The pane's identity is the one the daemon puts on it; a caller's exported JJ_USER/JJ_EMAIL
+	// would otherwise be what `ownHandoff` compares the commit's author against, so whether these
+	// tests pass would depend on the shell that ran them.
+	t.Setenv("JJ_USER", "")
+	t.Setenv("JJ_EMAIL", "")
 	return bodies
 }
 
@@ -493,9 +528,10 @@ func TestHandoffCompleteRefusesAHandoffCommitAnotherAppAuthored(t *testing.T) {
 			as("commit", "-m", "test: record handoff")
 			t.Setenv("LEGION_ROLE", "tester")
 			t.Setenv("LEGION_JJ_PATH", jj)
+			bodies := handoffDaemon(t)
+			// After the harness, which clears whatever identity the calling shell exported.
 			t.Setenv("JJ_USER", "legion-reviewer[bot]")
 			t.Setenv("JJ_EMAIL", "bot@example.invalid")
-			bodies := handoffDaemon(t)
 			var out, errb bytes.Buffer
 			code := run(context.Background(), []string{"legion", "handoff", "complete", "--summary", "tests pass", "--verdict", "pass"}, &out, &errb)
 			if tc.ok {

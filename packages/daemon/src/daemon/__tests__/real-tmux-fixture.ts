@@ -6,7 +6,7 @@ import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { type DaemonConfig, repoForIssue } from "../config";
+import { type DaemonConfig, type GitHubAppRole, repoForIssue } from "../config";
 import type { LegionState } from "../legion-state";
 import { locatorsForIssue, type ProcessManagerDeps } from "../processes";
 import { TmuxRuntime, type TmuxRuntimeDeps } from "../runtime-tmux";
@@ -203,11 +203,11 @@ export function realProcessManagerDeps(
       runner: async () => ({ stdout: "[]", stderr: "", exitCode: 0 }),
       baseEnv: {},
       tokenManager: {
-        getToken: async () => ({
+        getToken: async (role: GitHubAppRole) => ({
           token: "worker-token",
           expiresAt: "2099-01-01T00:00:00.000Z",
           gitIdentity: {
-            name: "legion-implement[bot]",
+            name: role === "review" ? "legion-review[bot]" : "legion-implement[bot]",
             email: "implement@users.noreply.github.com",
           },
         }),

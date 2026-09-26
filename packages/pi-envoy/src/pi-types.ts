@@ -12,6 +12,15 @@ import type { Component } from "@oh-my-pi/pi-tui";
 
 export interface SessionContext {
   readonly cwd: string;
+  /**
+   * Whether the host gave this run a UI context. Measured on the pinned build: false for
+   * `omp -p` and any other headless launch, true for a terminal and for an RPC host (every
+   * Legion pane). A run with no UI is disposed when its one run ends, so nothing can act on a
+   * message an extension sends at the stop. ACP supplies one too; there, a client that defers
+   * agent-initiated turns has the host queue such a message as hidden next-turn context rather
+   * than run a turn for it.
+   */
+  readonly hasUI: boolean;
   readonly taskDepth?: number;
   readonly sessionManager: {
     readonly getSessionId: () => string;
@@ -78,9 +87,19 @@ export interface ToolResultEvent {
   readonly isError: boolean;
 }
 
+/** One of a run's messages, as far as an `agent_end` handler reads it. */
+export interface AgentEndMessage {
+  readonly role?: string;
+  /** How an assistant reply ended: `stop` settled normally, `aborted` was an interrupt, `error` a
+   * provider failure, `length` a truncation. */
+  readonly stopReason?: string;
+}
+
 export interface AgentEndEvent {
   /** Set when OMP has already scheduled a continuation, so the turn is not settling. */
   readonly willContinue?: boolean;
+  /** The run's messages; the last assistant entry says how the run ended. */
+  readonly messages?: readonly AgentEndMessage[];
 }
 
 /** A message entering the session: a user prompt (the daemon's RPC `prompt` among them), a custom

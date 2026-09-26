@@ -1,0 +1,42 @@
+{
+  "name": "@sjawhar/claude-envoy",
+  "version": "0.3.0",
+  "description": "Claude Code channel plugin for Legion's Envoy bus",
+  "type": "module",
+  "files": [
+    ".claude-plugin/**",
+    ".mcp.json",
+    "bin/**",
+    "dist/**",
+    "hooks/**",
+    "scripts/**",
+    "src/**",
+    "README.md",
+    "AGENTS.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sjawhar/legion"
+  },
+  "scripts": {
+    "channel": "bun bin/envoy-channel.ts",
+    "build": "bun scripts/build.ts",
+    "check-dist": "bun scripts/build.ts --check",
+    "typecheck": "bunx tsc --noEmit",
+    "test": "bun test",
+    "lint": "bunx biome check src/ hooks/ scripts/"
+  },
+  "dependencies": {
+    "@legion/contracts": "workspace:*",
+    "@legion/envoy-client": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "ky": "^2.0.2",
+    "nats": "^2.29.2",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.3.14",
+    "bun-types": "latest",
+    "typescript": "^5.3.0"
+  }
+}

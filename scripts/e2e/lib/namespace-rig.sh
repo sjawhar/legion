@@ -17,6 +17,8 @@
 #                    (stage4b's legsmoke, a Dispatch project's token), which it owns while it holds
 #                    that proof's run lock; the teardown refuses any other
 #   record           a file holding one Sandbox name per line, each deleted by name
+#   providers_secret (optional) the providers Secret the operator created for the run, deleted by
+#                    name; unset or empty when the run creates none
 #   work, evidence   the run's scratch and evidence directories
 #   torn_down, compared   empty
 # and defines begin, note, pass and fail (which exits).
@@ -25,8 +27,8 @@
 # run's process group, where a Ctrl-C reaches it).
 op() { timeout --foreground 300 kubectl --context "$operator" -n "$namespace" "$@"; }
 
-# kinds are what a run creates: the runtime's Sandboxes, their Secrets, PVCs and pods, and the
-# ConfigMaps an operator's pod mounts.
+# kinds are what a run creates: the runtime's Sandboxes, their Secrets, PVCs and pods, the
+# ConfigMaps an operator's pod mounts, and the operator's providers Secret when the run has one.
 kinds=sandboxes,secrets,pvc,pods,configmaps
 
 # snapshot FILE: the namespace's objects of those kinds that carry this run's project label or no
@@ -64,8 +66,11 @@ teardown() {
     done < <(sort -u "$record")
   fi
   op delete sandboxes -l "legion.dev/project=$run_label" --ignore-not-found --wait=false || true
-  # No Sandbox owns an operator's ConfigMap; a pod still mounting it keeps its files until it goes.
+  # No Sandbox owns an operator's ConfigMap or providers Secret; a pod still mounting one keeps its
+  # files until it goes. The Secret goes by name, so the runtime's own Secrets still go with their
+  # Sandboxes first.
   op delete configmaps -l "legion.dev/project=$run_label" --ignore-not-found --wait=false || true
+  [ -z "${providers_secret:-}" ] || op delete secret "$providers_secret" --ignore-not-found --wait=false || true
   for i in $(seq 1 150); do
     if ! left=$(op get "$kinds" -l "legion.dev/project=$run_label" -o name 2>"$work/teardown.err"); then
       # A transient API error is waited out; three in a row mean the context cannot answer.

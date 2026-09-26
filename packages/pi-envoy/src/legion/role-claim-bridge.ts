@@ -52,6 +52,12 @@ export type LegionRoleClaimBridge = {
   /** Every live instance in bind order; an instance removes itself on `session_shutdown`. */
   readonly instances: LegionRoleClaimInstance[];
   /**
+   * Sessions Legion drives: every id `claimEnvoyRole` has claimed a role for, in this process.
+   * envoy.ts's run-end ask nudge skips them — a phase worker already answers to the design
+   * gate and its architect, and a reminder to open an ask is noise in a pane nobody watches.
+   */
+  readonly managedSessions: Set<string>;
+  /**
    * legion.ts's regain hook. One slot — unlike `instances` — because several legion.ts
    * instances share a process (OMP re-binds every extension factory for each in-process `task`
    * subagent) but only an instance that has established a Legion identity registers here, so
@@ -76,6 +82,7 @@ export function legionRoleClaimBridge(): LegionRoleClaimBridge {
 
   const createdBridge: LegionRoleClaimBridge = {
     instances: [],
+    managedSessions: new Set(),
     regained: undefined,
   };
   store[LEGION_ROLE_CLAIM_BRIDGE] = createdBridge;
@@ -91,6 +98,7 @@ export function legionRoleClaimBridge(): LegionRoleClaimBridge {
 export function resetLegionRoleClaimBridgeForTests(): void {
   const bridge = legionRoleClaimBridge();
   bridge.instances.length = 0;
+  bridge.managedSessions.clear();
   bridge.regained = undefined;
 }
 
@@ -110,6 +118,7 @@ export async function claimEnvoyRole(
   context?: SessionContext
 ): Promise<void> {
   const bridge = legionRoleClaimBridge();
+  bridge.managedSessions.add(sessionID);
   const instance =
     bridge.instances.findLast((candidate) => candidate.sessionID() === sessionID) ??
     bridge.instances.at(-1);

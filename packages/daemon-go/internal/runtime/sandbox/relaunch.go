@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -238,7 +239,32 @@ func (r *Runtime) awaitNewPod(ctx context.Context, s *sandbox, old map[types.UID
 		found = pod
 		return true, nil
 	})
+	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		return nil, fmt.Errorf("%w; %s", err, r.waitedOut(s))
+	}
 	return found, err
+}
+
+// waitedOut is what the daemon's own stores say about a launch that ran out of time: the Sandbox's
+// Ready condition, where the controller reports why it made no pod, and the pod's phase where one
+// exists and the wait was for something else. A timeout that says only how long it waited sends an
+// operator to the cluster for a condition the daemon was already holding.
+func (r *Runtime) waitedOut(s *sandbox) string {
+	stored, err := r.storedSandbox(s.Name)
+	switch {
+	case err != nil:
+		return fmt.Sprintf("the Sandbox store could not be read for %s: %v", s.Name, err)
+	case stored == nil:
+		return fmt.Sprintf("the Sandbox store holds no %s", s.Name)
+	}
+	detail := fmt.Sprintf("sandbox %s is %s at generation %d", s.Name, stored.mode(), stored.Generation)
+	if ready := stored.condition(conditionReady); ready != nil {
+		detail += fmt.Sprintf("; Ready=%s %s: %s", ready.Status, ready.Reason, ready.Message)
+	}
+	if pod := r.storedPod(s.Name); ownedBy(pod, s.UID) {
+		return detail + fmt.Sprintf("; its pod %s is %s", pod.UID, phaseOf(pod))
+	}
+	return detail + "; it has no pod"
 }
 
 // writeSecret makes the claim's Secret hold this launch's provisioning token and its secrets, the

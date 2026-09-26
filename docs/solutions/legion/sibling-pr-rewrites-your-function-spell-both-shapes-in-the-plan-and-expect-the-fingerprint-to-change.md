@@ -78,8 +78,9 @@ cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch
 jj -R "$LEGION_WORKSPACE" rebase -s 'roots(main@origin..@)' -d main@origin   # the whole chain
 ```
 
-The chain included the tester's and reviewer's local handoff commits (only the implementer
-pushes, so they ride on its next push) and an undescribed working-copy commit. In
+The chain included the tester's and reviewer's local handoff commits (the review App could not
+push then, so they rode on the implementer's next push) and an undescribed working-copy commit. (2026-09-25, LEGION-285: the review App's roles now push their own commits;
+`packages/daemon/src/daemon/AGENTS.md`, GitHub Apps.) In
 this historical rebase, before LEGION-58, that commit held `.omp/config.yml`. Two files
 conflicted; resolve each in the working copy, then squash into the commit that owns the file so
 the descendants re-apply:
@@ -92,7 +93,9 @@ jj -R "$LEGION_WORKSPACE" squash --into <docs change id>   packages/daemon/src/d
 Run only the plan's named test file (`reducers.test.ts`: 103 pass), set the bookmark on `@-`
 with `--allow-backwards` (it sits on `@` after every split), push, and read
 `legion gh -- pr view <n> --json mergeable,mergeStateStatus` again — GitHub recomputes lazily,
-so give it a few seconds.
+so give it a few seconds. Today the rebase and squash above rewrite pushed commits, so record the
+pushed tip before the rebase and push with the procedure in `skills/legion-worker/SKILL.md`
+(*Rewriting pushed commits*).
 
 ## 3. Reading jj's conflict display when one side is a diff
 

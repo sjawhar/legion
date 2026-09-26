@@ -33,7 +33,7 @@ func TestReleaseRefusesALocatorOfAnotherClaim(t *testing.T) {
 		Runtime: runtime.RuntimeTmux, Claim: "legion-omp-LEGION-43-reviewer", Incarnation: "4242:77",
 		Tmux: &runtime.TmuxLocator{Window: "@1", Pane: "%1"},
 	}
-	err = rt.Release(context.Background(), runtime.Known{Claim: "legion-omp-LEGION-43-tester", Locator: &other})
+	err = rt.Release(context.Background(), runtime.Known{Claim: "legion-omp-legion-43-tester", Locator: &other})
 	if err == nil || !strings.Contains(err.Error(), "legion-omp-LEGION-43-reviewer") {
 		t.Fatalf("Release = %v, want a refusal naming the locator's claim", err)
 	}

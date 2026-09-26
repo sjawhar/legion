@@ -1,7 +1,7 @@
 # Envoy client
 
-Shared HTTP transport, tool contract, and inbound delivery renderer for Envoy hosts. Pi and the
-Claude bridge consume these modules rather than maintaining host-specific envelope parsers.
+Shared HTTP transport, tool contract, and inbound delivery renderer for Envoy hosts. pi-envoy and
+claude-envoy consume these modules rather than maintaining host-specific envelope parsers.
 
 ## Inbound delivery
 

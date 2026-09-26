@@ -3,6 +3,8 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"github.com/sjawhar/legion/daemon/internal/bootprobe"
+	"github.com/sjawhar/legion/daemon/internal/testomp"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -19,13 +21,7 @@ import (
 // is an operator's provider nothing listens on, so no credential the machine carries decides the
 // run (no probe here makes a model call).
 func TestThePromptReferenceProbeOnTheRealOhMyPi(t *testing.T) {
-	omp := os.Getenv("LEGION_TEST_OMP")
-	switch {
-	case omp == "" && os.Getenv("GITHUB_ACTIONS") == "true":
-		t.Fatal("LEGION_TEST_OMP is unset on GitHub Actions: name the pinned Oh My Pi binary (the daemon-go job installs it)")
-	case omp == "":
-		t.Skip("LEGION_TEST_OMP names no Oh My Pi binary")
-	}
+	omp := testomp.Binary(t)
 	noAgent := "finds no task agent thermonuclear-deep-review (dispatched by dist/skills/legion-worker/SKILL.md)"
 	noRubric := "finds no skill thermonuclear-deep-review (loaded by agents/thermonuclear-deep-review.md)"
 	for _, testCase := range []struct {
@@ -50,7 +46,7 @@ func TestThePromptReferenceProbeOnTheRealOhMyPi(t *testing.T) {
 			dir := t.TempDir()
 			home := filepath.Join(dir, "home")
 			mkdir(t, home)
-			root := testPlugin(t, dir, testCase.agent, testCase.rubric)
+			root := referencePlugin(t, dir, testCase.agent, testCase.rubric)
 			agentDir := filepath.Join(home, ".omp", "profiles", "legion", "agent")
 			mkdir(t, agentDir)
 			for name, content := range map[string]string{
@@ -80,18 +76,21 @@ func TestThePromptReferenceProbeOnTheRealOhMyPi(t *testing.T) {
 				name, value, _ := strings.Cut(pair, "=")
 				env[name] = value
 			}
-			probe := ImageProbe{Omp: omp, Contract: 3, Env: env, WorkDir: dir, Log: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))}
+			log := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+			var err error
 			if testCase.onPod {
-				probe.PluginRoot = root
+				err = ProbeImage(context.Background(), ImageProbe{Omp: omp, Contract: 3, Env: env, WorkDir: dir, PluginRoot: root, Log: log})
 			} else {
 				install := exec.Command(omp, "plugin", "install", root)
 				install.Env = environ
 				if out, err := install.CombinedOutput(); err != nil {
 					t.Fatalf("omp plugin install: %v\n%s", err, out)
 				}
+				// A pane loads the plugin through discovery, as the daemon's boot gate on tmux
+				// probes it.
+				err = pluginGate{env: env, workDir: dir, invocation: omp, timeout: defaultProbeTimeout, retry: bootprobe.Image,
+					contract: 3, log: log}.verify(context.Background())
 			}
-
-			err := ProbeImage(context.Background(), probe)
 
 			switch {
 			case testCase.refusal == "" && err != nil:

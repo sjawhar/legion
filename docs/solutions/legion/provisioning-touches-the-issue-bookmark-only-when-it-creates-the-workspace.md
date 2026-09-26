@@ -49,19 +49,70 @@ creates it when there is something to push.
 Only `createWorkspace` touches the bookmark, and it runs only when the workspace directory does
 not exist. In order:
 
-1. **Resolve first, before any other command:**
-   `jj log -r 'bookmarks(exact:legion/<KEY>)' --no-graph -T 'commit_id ++ "\n"' --ignore-working-copy -R <clone>`
-   — one commit id per line. A nonzero exit or more than one line throws, naming the bookmark and
-   the ids (`Bookmark legion/<KEY> is conflicted (<id>, <id>); workspace <dir> was not created.
-   Resolve it with \`jj bookmark set legion/<KEY> -r <commit> -R <clone>\`.`), with **no prune, no
-   add, nothing registered** — the failure repeats on every resume until a human resolves the
-   bookmark. See the companion table in
-   `jj-bookmark-facts-verified-on-0-44-0-and-0-45-1.md` for why this revset and not `present()` or
-   `jj bookmark list`.
-2. Exactly one commit is the add revision — `jj workspace add … --revision <commit id>`, **the id,
-   never the name**. None means `main`.
+1. **Resolve first, before any other command:** one templated read,
+   `jj bookmark list --all-remotes exact:legion/<KEY> -T <BOOKMARK_ROWS> --ignore-working-copy -R <clone>`,
+   prints every row of the bookmark as `<where>|<present>|<conflict>|<tracked>|<adds>|<removes>`,
+   the Go twin's template byte for byte, reading no `normal_target` (LEGION-286). One chain
+   decides, in the Go twin's order. Each refusal throws, naming the bookmark, with **no prune, no
+   add, nothing registered**, so it repeats on every resume until a human acts:
+   - a nonzero exit (`Bookmark legion/<KEY> could not be resolved; workspace <dir> was not
+     created.`), or a row that is not the template's shape (`Bookmark legion/<KEY>'s row "<row>" is
+     not the shape <list command> prints; workspace <dir> was not created.`);
+   - a conflicted local bookmark, including a conflict with a deleted side (a local deletion never
+     pushed, then origin's branch moved; or a local move never pushed, then the branch deleted on
+     GitHub): `Bookmark legion/<KEY> is conflicted (adds <ids>; removes <ids>)[, one side a
+     deletion]; workspace <dir> was not created. Keep its added commit: \`jj bookmark set
+     legion/<KEY> -r <commit> -R <clone>\`. Start from main instead: <when origin has the branch,
+     delete it on GitHub and run \`jj bookmark delete legion/<KEY> -R <clone>\`; else that
+     \`jj bookmark delete\` alone>, and the next provisioning starts at main.` With two added
+     commits (a local move never pushed while origin's branch moved) the GitHub deletion alone
+     leaves the local side in conflict with a deletion, which the next provisioning refuses again;
+   - a local bookmark on one commit is where the workspace starts, whatever origin's row is,
+     including a row tracked with no commit (tracked before the first push, or left after GitHub
+     deleted a branch the local bookmark moved on from);
+   - with no local bookmark, a conflicted origin row, which concurrent fetches leave:
+     `Remote bookmark legion/<KEY>@origin is conflicted (…), which concurrent fetches leave;
+     workspace <dir> was not created. Provision again: the next provisioning's fetch sets the row
+     to origin's branch as it is then.`;
+   - with no local bookmark, a tracked origin row: a deletion never pushed, from a
+     `jj bookmark delete` or a `jj abandon` of the bookmark's commit. The refusal names the tracked
+     commit and three ways out: restore it (`jj bookmark set legion/<KEY> -r legion/<KEY>@origin`),
+     cancel the deletion so the next provisioning adopts origin's branch
+     (`jj bookmark forget legion/<KEY>`), or start from main by deleting the branch on GitHub (the
+     pull request's Delete branch button, or
+     `gh api -X DELETE repos/<owner>/<repo>/git/refs/heads/legion/<KEY>`);
+   - with no local bookmark, an untracked origin row is tracked, and the bookmark is read again:
+     a fetch that moved the row in between is refused (`Bookmark legion/<KEY>@origin moved from
+     <listed> to <now> while it was being tracked; workspace <dir> was not created. Provision
+     again: the next provisioning starts at origin's branch as it is then.`).
+
+   The Go twin's printed ways out carry `--ignore-working-copy` (`jj bookmark set|delete|forget
+   … --ignore-working-copy -R <clone>`), so an operator running one from their shell takes no
+   snapshot of the shared clone and runs no working-copy filter a tree planted there; the
+   TypeScript twin, which no deployment runs, keeps the text without it. In Go, a local bookmark
+   conflicted with a deletion, whose origin row is tracked with no commit (GitHub deleted
+   the branch after the bookmark moved on without a push), is set aside instead of refused when no
+   commit in `<removed>..<added>` is described: main is resolved first (step 2), so a main that
+   does not resolve refuses before anything is set aside; then the local bookmark is deleted, one
+   line logs the set-aside ids (they stay visible, the clone never abandoning unreachable
+   commits), and the workspace starts at main. See the companion table in `jj-bookmark-facts-verified-on-0-44-0-and-0-45-1.md` for why this read and
+   not `bookmarks(exact:…)`, `present()`, a bare `jj bookmark list`, or any template that reads
+   `normal_target`.
+2. The add revision, as `jj workspace add … --revision <commit id>`, **the id, never the name**:
+   - the local bookmark's commit when it has one;
+   - with no local bookmark and an **untracked** origin row (a fresh clone tracks `main` alone,
+     so a branch another clone pushed is only such a row), that row's commit, after
+     `jj bookmark track legion/<KEY>@origin` and the read that confirms it;
+   - with neither (a brand-new issue, or a merged branch GitHub deleted), `main`: in Go, read with
+     the same template and added by its commit id, and refused by name when it does not resolve:
+     conflicted (keep origin's: `jj bookmark set main -r main@origin --allow-backwards
+     --ignore-working-copy -R <clone>`, since jj refuses a sideways move off two local moves);
+     deleted in the shared clone while `main@origin` is tracked (restore it: the same command
+     without `--allow-backwards`); or absent (a repository whose default branch is another).
+     TypeScript still adds `main` by name.
 3. `git worktree prune`, then the add. On `already registered|exists` (jj still registers the
-   workspace but its directory is gone): flag-free `jj workspace forget <name> -R <clone>`, prune,
+   workspace but its directory is gone): `jj workspace forget <name> -R <clone>` (Go adds
+   `--ignore-working-copy`), prune,
    the same add again at the same revision. A brand-new workspace and a forgotten registration
    start from the same resolution — the two paths no longer differ in where they start.
 4. `jj bookmark set legion/<KEY> -r @` in the new workspace **only when nothing resolved**; one
@@ -115,6 +166,14 @@ From the spec's Rejected list (v8):
 - `jj bookmark create` instead of `set` on the fresh path: `create` refuses a pre-existing local
   bookmark on a workspace jj does not know; `set` moves it forward or refuses sideways. The spec
   names `set`; with v8's resolve-first rule the set only ever runs when no bookmark exists.
+- `bookmarks(exact:legion/<KEY>)` as the resolution (#1023 until LEGION-286): it lists a conflict
+  whose other side is a deletion as one commit, the same as a healthy bookmark, so a bookmark
+  deleted locally and then moved on origin was added at as if nothing were wrong.
+- A push from the shared clone as the way to start from main after a deletion never pushed
+  (LEGION-286's spec v5): the clone's only credential helper is `legion credential`, which needs a
+  tree's grant, so the push cannot authenticate from an operator's shell or the controller; and
+  `jj git push --deleted` would push every pending deletion in the clone, closing other issues'
+  pull requests.
 
 ## Checking it in production
 

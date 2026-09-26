@@ -69,9 +69,7 @@ stops — never retries, never rewrites the handoff. On LEGION-11 the architect 
 putting "your `legion handoff complete` may 409 (LEGION-37) — use `envoy_publish` either way" in
 the assignment, which removed the decision from the worker entirely.
 
-**The reviewer's local commits ride on the implementer's next push.** No role acting as the review
-App pushes (the workflow's rule; App 3202653 holds `contents: write` as of 2026-09-25), so
-`.legion/review.json` sits unpushed on the shared workspace's chain.
+**The reviewer's commits were on the implementer's chain.** **Superseded 2026-09-25 (LEGION-285):** every role now pushes its own commits (`skills/legion-worker/SKILL.md`; the Apps' permissions are in `packages/daemon/src/daemon/AGENTS.md`, GitHub Apps). What follows records the earlier workflow. Before it, `.legion/review.json` sat unpushed on the shared workspace's chain.
 The implementer builds on it (confirm with `jj log -r '<sha> & ancestors(@-)'` before pushing)
 and the deletion commit removes it with the rest. Rebasing the whole chain
 (`jj rebase -s 'roots(main@origin..@)' -d main@origin`) keeps those commits in order.
@@ -83,7 +81,10 @@ and the deletion commit removes it with the rest. Rebasing the whole chain
 2. Every assignment and every completion summary names the head SHA it refers to.
 3. Append keyed round objects to your phase's handoff; never overwrite a prior round.
 4. 202: stop. 409: one `envoy_publish` to the architect's role topic, then stop.
-5. Build on and carry other roles' unpushed commits; never rebase only your own.
+5. Build on other roles' commits, and push only from a head that descends from
+   `legion/<KEY>@origin` (the push procedure in `skills/legion-worker/SKILL.md` checks it); when a
+   rebase is needed, rebase the whole chain, never only your own commits, and record the pushed
+   tip before it so the push of the rebased chain is checked against that tip.
 
 ## Related
 

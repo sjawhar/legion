@@ -38,7 +38,7 @@ func TestAChildLeavingTheWorkflowNeverClosesItsTree(t *testing.T) {
 			seedIssue(t, pool, record.Issue{Key: "LEGION-209", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent, Phase: phase.ProductionCheck, Generation: 7, Status: "retro", Rank: "V", LastDispatchSeq: 1})
 			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implementer"})
 			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-209", Role: claim.RoleImplementer, Claim: "child-implementer", HandoffCommit: "production-check", LastHandoff: "production-check"})
-			engine := New(record.NewStore(), Config{Project: "LEGION", LingerHours: time.Hour, Clock: func() time.Time { return now }}, nil)
+			engine := New(record.NewStore(), Config{Project: "LEGION", Linger: time.Hour, Clock: func() time.Time { return now }}, nil)
 
 			result, err := intake.ApplyFact(context.Background(), pool, "api", "child-leaves", tc.fact, engine, admissionStub{})
 			if err != nil || result.Refusal != nil {
@@ -79,7 +79,7 @@ func TestARootMovedToTriageLingersItsTree(t *testing.T) {
 	pool := migratedPool(t)
 	now := time.Date(2026, 9, 23, 4, 0, 0, 0, time.UTC)
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 7, Status: "in_progress", Rank: "U", LastDispatchSeq: 1})
-	engine := New(record.NewStore(), Config{Project: "LEGION", LingerHours: time.Hour, Clock: func() time.Time { return now }}, nil)
+	engine := New(record.NewStore(), Config{Project: "LEGION", Linger: time.Hour, Clock: func() time.Time { return now }}, nil)
 	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "root-triage", intake.DispatchIssue{Key: "LEGION-208", Seq: 2, Type: "issue.updated", Status: "triage", Title: "root", Rank: "U"}, engine, admissionStub{}); err != nil {
 		t.Fatalf("ApplyFact: %v", err)
 	}

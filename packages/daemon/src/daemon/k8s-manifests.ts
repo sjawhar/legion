@@ -161,7 +161,10 @@ export interface PodManifestInput {
    * Under `session_store: postgres` the transcript is a database row the init container cannot
    * stat, so the runtime passes none here while `ompArgv` still carries `--resume`. */
   resumeSessionFile?: string;
-  /** The issue bookmark from which a volume-loss recovery provisions this workspace. */
+  /** The issue bookmark a volume-loss recovery names in the workspace's recovery marker. The fresh
+   * volume's clone knows a branch the tree pushed only as an origin row, which provisioning adopts,
+   * so the workspace starts on that branch; one the tree never pushed starts at `main`
+   * (`provisionIssueWorkspace`). */
   recoveredFromRef?: string;
 }
 

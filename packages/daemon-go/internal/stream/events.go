@@ -35,7 +35,8 @@ type TurnEnd struct {
 }
 
 // LateRefusal is OMP answering `{success:false}` for a prompt it had already answered
-// `{success:true}` — "Agent is busy" once it finds a turn it did not start
+// `{success:true}` — "Agent is already processing…" once it finds a turn it did not start, and
+// whatever a prompt that failed before any turn began says
 // (worker-rpc.ts:359-368). DeliveryID is the delivery that prompt carried, so a delivery the
 // supervisor counted as started by a turn that was never its own can be taken back. Error is
 // OMP's reason, verbatim.

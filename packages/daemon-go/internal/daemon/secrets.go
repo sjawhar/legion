@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/runtime/tmux"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
@@ -45,7 +45,7 @@ func (s pruningStore) PutClaim(ctx context.Context, c supervise.Claim) error {
 // daemon's own Dispatch token file outlives every claim.
 func pruneAllBut(dir string, claims []supervise.Claim, log *slog.Logger) {
 	removeSecretFiles(dir, log, func(name string) bool {
-		if name == tmux.DispatchTokenFileName {
+		if name == runtime.DispatchTokenFileName {
 			return false
 		}
 		for _, c := range claims {

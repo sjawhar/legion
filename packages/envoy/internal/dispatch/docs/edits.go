@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -1027,7 +1028,7 @@ func inlineReplacement(markdown string) (*pmdoc.Node, error) {
 	inline, err := pmdoc.ParseInline(markdown)
 	if err != nil {
 		if errors.Is(err, pmdoc.ErrSchema) {
-			return nil, &ErrInvalidOp{Field: "with", Reason: fmt.Sprintf("replace is inline; %v (delete the block and insert new blocks instead)", err)}
+			return nil, &ErrInvalidOp{Field: "with", Reason: fmt.Sprintf("replace is inline; %v (paragraphs: give each one its own replace, then insert any extra paragraphs after the last one you rewrote; a heading, list, table or code fence: replace keeps a block's kind, so insert it beside a paragraph you replace, and delete the old block only when no paragraph of the new text is left to take its place)", err)}
 		}
 		return nil, err
 	}
@@ -1041,9 +1042,60 @@ func inlineReplacement(markdown string) (*pmdoc.Node, error) {
 			markdown,
 		)}
 	}
+	if marker, kind := blockMarkerAfterHardBreak(inline); marker != "" {
+		return nil, &ErrInvalidOp{Field: "with", Reason: fmt.Sprintf(
+			"with continues after a hard line break with %q, a block marker (%s), and replace is inline: that line stays inside the matched block, where the marker is written as escaped literal text and never opens the %s it names — a backslash before it parses to the same text, so escaping it changes nothing; use insert, plus delete for the text it replaces, to add the block, or a plain newline, which renders as a space, to keep the text in this block",
+			marker, kind, kind,
+		)}
+	}
 	paragraph := &pmdoc.Node{Type: "paragraph", Children: inline}
 	continueText(paragraph, markdown)
 	return pmdoc.StripAnchorMarks(&pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{paragraph}}), nil
+}
+
+// hardBreakOrderedMarker and hardBreakBlockquoteMarker are the two block markers
+// pmdoc.LeadingBlockMarker cannot answer for a line after a hard break. An ordered item may
+// interrupt a paragraph only when its start number is 1, so LeadingBlockMarker's any-digit-run
+// pattern would refuse `2024. was a year`, which stays prose. Leading zeros do not change that
+// start number, so `01.` and `001)` interrupt exactly as `1.` does, while `02.` (start number 2)
+// and `10.` (start number 10) do not — which is why the digit run must end at the `1`. The zero
+// run is bounded at eight because a start number is at most nine digits, so `0000000001.` is a
+// tenth digit past that cap and opens no list at all: the bound is what keeps this pattern the
+// exact start-number-1 set the parser reads rather than a superset that refuses prose. A
+// blockquote's `>` is no textblock's own marker, so pmdoc has no MarkerKind for it.
+var (
+	hardBreakOrderedMarker    = regexp.MustCompile(`^[ \t]*0{0,8}1[.)][ \t]`)
+	hardBreakBlockquoteMarker = regexp.MustCompile(`^[ \t]*>`)
+)
+
+// blockMarkerAfterHardBreak reports the block marker a `with` opens a line with after a hard line
+// break, and the kind of block that marker names. A hard break puts what follows it at a true
+// line start, where a marker is as ambiguous as it is at position 0 — and replace is inline, so
+// the marker can only be written as escaped text continuing the matched block, never as the block
+// the caller wrote it for. A bare newline is a soft break, which renders as a space and reaches no
+// line start, so goldmark's own hardbreak nodes are the whole population; a following text node
+// carrying marks opens with its mark's delimiter rather than the marker, so it is prose either way.
+func blockMarkerAfterHardBreak(inline []*pmdoc.Node) (marker, kind string) {
+	for index, node := range inline {
+		if node.Type != "hardbreak" || index+1 == len(inline) {
+			continue
+		}
+		next := inline[index+1]
+		if next.Type != "text" || len(next.Marks) != 0 {
+			continue
+		}
+		switch written, width := pmdoc.LeadingBlockMarker(next.Text); written.Kind {
+		case pmdoc.MarkerHeading, pmdoc.MarkerBullet:
+			return next.Text[:width], string(written.Kind)
+		}
+		if match := hardBreakOrderedMarker.FindString(next.Text); match != "" {
+			return match, string(pmdoc.MarkerOrdered)
+		}
+		if match := hardBreakBlockquoteMarker.FindString(next.Text); match != "" {
+			return match, "blockquote"
+		}
+	}
+	return "", ""
 }
 
 // inlineAware parses a suggestion's replacement as blocks, keeping the edge

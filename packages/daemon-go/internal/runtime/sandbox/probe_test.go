@@ -157,13 +157,17 @@ func (g *probeRig) containerAndCollector() {
 	}
 }
 
+// testRoleReferences are role prompts' references as promptrefs.Roles encodes them: the daemon
+// always hands the probe some.
+const testRoleReferences = `{"LEGION_PROMPT_AGENTS":{"oracle":["roles/core/planner.md"]},"LEGION_PROMPT_SKILLS":{}}`
+
 // probeOptions allow two attempts, so a definitive verdict shows as one attempt and a transient one
 // as two. Each attempt's budget is long enough that a pod the stand-ins answer at once is judged
 // within it on a loaded machine too; an attempt ends as soon as the pod answers, so it costs a
 // passing test nothing. A test whose attempt must run out sets unfinishedBudget.
 func probeOptions(t *testing.T) ImageProbe {
 	return ImageProbe{
-		Contract: 3, Budget: 10 * time.Second,
+		Contract: 3, Budget: 10 * time.Second, RoleReferences: testRoleReferences,
 		Retry: bootprobe.Retry{Initial: time.Millisecond, Max: time.Millisecond, Attempts: 2},
 	}
 }
@@ -241,12 +245,12 @@ func TestProbeImageRefusesWhatTheProbePodAnswered(t *testing.T) {
 			[]string{"confirmed Go daemon API contract 2, this daemon requires 3"}},
 		{"a CLI that predates the agent-model check", func(g *probeRig) {
 			g.succeeds("probe-image: OK (/opt/omp/bin/omp) session-storage=probed go-daemon-api-version=3")
-		}, []string{"without resolving the prompt-named agents' models: the worker image predates the agent-model check (LEGION-270)"}},
+		}, []string{"without resolving the prompt-named agents' models (its OK line's agent-models mark: none, where the daemon's probe requires resolved)"}},
 		{"a CLI that predates a flag the probe passes", func(g *probeRig) {
 			g.fails("flag provided but not defined: -role-references\nUsage of legion probe-image:")
-		}, []string{"Failed (container probe terminated", "its legion CLI has no -role-references, a flag this daemon's probe passes, so the worker image predates this daemon"}},
+		}, []string{"Failed (container probe terminated", "its legion CLI has no -role-references, a flag this daemon's probe passes: build the image from this daemon's commit"}},
 		{"a build-time probe's result", func(g *probeRig) { g.succeeds(bootprobe.OKLine("/opt/omp/bin/omp", 3, bootprobe.AgentModelsSkipped)) },
-			[]string{"with the agents' models skipped: a build-time probe's result reached boot"}},
+			[]string{"without resolving the prompt-named agents' models (its OK line's agent-models mark: skipped, where the daemon's probe requires resolved)"}},
 		{"an image name the kubelet cannot use", func(g *probeRig) { g.waits("InvalidImageName") },
 			[]string{"container probe waiting: InvalidImageName"}},
 		{"an image the node may never pull", func(g *probeRig) { g.waits("ErrImageNeverPull") },
@@ -500,6 +504,7 @@ func TestProbeImageRefusesAProvidersSecretThePodCannotMount(t *testing.T) {
 		refused       bool
 	}{
 		{"the Secret missing", mount + `secret "` + ProvidersSecretName(testProject) + `" not found`, true},
+		{"the Secret missing, as the API server says it", mount + `secrets "` + ProvidersSecretName(testProject) + `" not found`, true},
 		{"a key missing", mount + "references non-existent secret key: ANTHROPIC_API_KEY", true},
 		{"the kubelet's secret cache not synced", mount + "failed to sync secret cache: timed out waiting for the condition", false},
 	} {
@@ -536,20 +541,16 @@ func TestProbeImageRefusesAProvidersSecretThePodCannotMount(t *testing.T) {
 	}
 }
 
-// The probe runs as a worker runs: with provider keys configured it exports the providers Secret's
-// keys as the worker's shim does, and given the daemon's role prompts' references it resolves
-// those; with neither, its command carries neither flag.
+// The probe runs as a worker runs: it resolves the daemon's role prompts' references, always, and
+// with provider keys configured it exports the providers Secret's keys as the worker's shim does.
 func TestTheProbeRunsAsAWorkerRuns(t *testing.T) {
-	const references = `{"LEGION_PROMPT_AGENTS":{"oracle":["roles/core/planner.md"]}}`
 	for _, testCase := range []struct {
-		name       string
-		keys       map[string]string
-		references string
-		want       []string
+		name string
+		keys map[string]string
+		want []string
 	}{
-		{"neither", nil, "", nil},
-		{"provider keys", map[string]string{"ANTHROPIC_API_KEY": "anthropic"}, "", []string{"--provider-env-dir", ProvidersDir}},
-		{"role references", nil, references, []string{"--role-references", references}},
+		{"no provider keys", nil, []string{"--role-references", testRoleReferences}},
+		{"provider keys", map[string]string{"ANTHROPIC_API_KEY": "anthropic"}, []string{"--provider-env-dir", ProvidersDir, "--role-references", testRoleReferences}},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			opts := goldenOptions()
@@ -558,7 +559,7 @@ func TestTheProbeRunsAsAWorkerRuns(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			command := r.probeManifest(probeSandboxName, ImageProbe{Contract: 3, RoleReferences: testCase.references}, time.Now()).Spec.PodTemplate.Spec.Containers[0].Command
+			command := r.probeManifest(probeSandboxName, ImageProbe{Contract: 3, RoleReferences: testRoleReferences}, time.Now()).Spec.PodTemplate.Spec.Containers[0].Command
 			base := []string{opts.Tools.Legion, "probe-image", "--go-daemon-api-version", "3", "--plugin-root", legionPlugin, "--pod-safety"}
 			if want := append(base, testCase.want...); !slices.Equal(command, want) {
 				t.Errorf("the probe's command = %q, want %q", command, want)
@@ -606,7 +607,7 @@ func TestProbeManifestGoldenAndSchema(t *testing.T) {
 		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m"), corev1.ResourceMemory: resource.MustParse("1Gi")},
 		Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("2Gi")},
 	}
-	u, err := encodeProbe(r.probeManifest(probeSandboxName, ImageProbe{Contract: 3, Resources: small}, time.Date(2026, 9, 23, 12, 5, 30, 0, time.UTC)))
+	u, err := encodeProbe(r.probeManifest(probeSandboxName, ImageProbe{Contract: 3, Resources: small, RoleReferences: testRoleReferences}, time.Date(2026, 9, 23, 12, 5, 30, 0, time.UTC)))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -714,12 +714,23 @@ closed=$(claims close --json --claim "$c1") || fail "the operator's close of S2-
 jq -e '.state == "retired"' <<<"$closed" >/dev/null || fail "the close of S2-1 left its root claim $(jq -c '{state, generation}' <<<"$closed")"
 claim_is "$c2" '.state == "retired"' || fail "the close of S2-1 left its worker $c2 $(claim_json "$c2" | jq -c '{state}'): a worker on a closed tree"
 until_true 30 "the worker's pane $worker_pane to be gone" pane_gone "$worker_pane"
+# The close names a claim, and only a tree's root closes its tree. The worker the close just
+# retired is not one: answered as the close that succeeded, it would run the fan-out again from a
+# claim that never held the tree. A retired claim is refused where a live one is.
+if close_refusal=$(claims close --claim "$c2" 2>&1 >/dev/null); then
+  fail "the operator's close of the retired worker $c2 was taken, not refused"
+fi
+case $close_refusal in
+*"409 Conflict: close refused: $c2 is not its tree's root claim; stop it instead"*) ;;
+*) fail "the close of the retired worker was refused with '$close_refusal', not the non-root rule" ;;
+esac
 timeout_hook=
 legion stop --config "$work/legion.yaml" >/dev/null
 stop_daemon "$daemon_pid" "legion stop"
 daemon_pid=
 note "the root's stop was refused, generation and pane unchanged ($root_after): $refusal"
 note "the root suspended; the operator's stop of the second worker $c3 retired it and its pane $stopped_pane is gone"
+note "a second close, naming the retired worker $c2, was refused: $close_refusal"
 note "the operator's close of S2-1, with its worker $c2 still live in pane $worker_pane, retired the root and the worker, and the pane is gone; the daemon stopped with exit 0"
 pass
 

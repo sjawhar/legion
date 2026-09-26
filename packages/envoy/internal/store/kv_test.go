@@ -172,7 +172,7 @@ func TestMatch_MultipleTopicsOnOneEntry(t *testing.T) {
 //
 // Regression coverage for the silent-fallback bug that caused Atlas's pr.11416.>
 // subscription to be silently truncated to [agent-self] across 235 dropped events:
-// when r.kv.Get() returned a transient error, the original Upsert silently
+// when the interest bucket's Get returned a transient error, the original Upsert silently
 // treated it the same as ErrKeyNotFound and clobbered durable state with whatever
 // the heartbeat sent (only the agent topic).
 
@@ -589,7 +589,7 @@ func coldRegistry(t *testing.T, conn *natsgo.Conn) (*Registry, natsgo.KeyValue) 
 	if err != nil {
 		t.Fatalf("failed to create role KV bucket: %v", err)
 	}
-	r := &Registry{kv: kv, roleKV: roleKV, now: time.Now, cache: map[string]Interest{}, cacheRevisions: map[string]uint64{}}
+	r := &Registry{roleKV: roleKV, now: time.Now, cache: map[string]Interest{}, cacheRevisions: map[string]uint64{}}
 	r.watcher = kvwatch.New("interest registry", kv, r.applyWatched, r.resetCache)
 	return r, kv
 }
@@ -649,7 +649,7 @@ func TestGet_ColdCacheMissReturnsError(t *testing.T) {
 }
 
 func TestUpsert_TransientGetErrorPropagatesAndDoesNotClobber(t *testing.T) {
-	// Integration regression for the Atlas dropout bug: when r.kv.Get fails
+	// Integration regression for the Atlas dropout bug: when the interest bucket's Get fails
 	// transiently (not ErrKeyNotFound), Upsert MUST return the error rather
 	// than silently writing a truncated state to KV.
 	conn, cleanup := connectNATS(t)
@@ -665,7 +665,7 @@ func TestUpsert_TransientGetErrorPropagatesAndDoesNotClobber(t *testing.T) {
 
 	// Close the NATS connection BEFORE the cache has been warmed for this key.
 	// coldRegistry skips the eager load, so the cache is empty and Upsert will
-	// fall through to r.kv.Get, which now returns a transient error.
+	// fall through to the interest bucket's Get, which now returns a transient error.
 	conn.Close()
 
 	_, err := reg.Upsert(
@@ -1049,11 +1049,11 @@ func TestReapKeepsRoleClaimsForSessionRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal stale interest: %v", err)
 	}
-	entry, err := reg.kv.Get(sessionID)
+	entry, err := reg.watcher.KV().Get(sessionID)
 	if err != nil {
 		t.Fatalf("get durable interest: %v", err)
 	}
-	revision, err := reg.kv.Update(sessionID, raw, entry.Revision())
+	revision, err := reg.watcher.KV().Update(sessionID, raw, entry.Revision())
 	if err != nil {
 		t.Fatalf("make interest stale: %v", err)
 	}
@@ -1439,11 +1439,11 @@ func TestSetRoleRollsBackWhenInterestUpsertFails(t *testing.T) {
 		t.Fatalf("seed role claim: %v", err)
 	}
 
-	reg.kv = &failingKeyValue{
+	useKV(t, reg, &failingKeyValue{
 		KeyValue:  kv,
 		failPutAt: 1,
 		err:       errors.New("injected interest write failure"),
-	}
+	})
 	if _, err := reg.SetRole(newSession, "example-host", role, false); err == nil {
 		t.Fatal("SetRole must return the failed interest upsert")
 	}
@@ -1530,11 +1530,11 @@ func TestSetRoleReturnsErrorAfterOldHolderCleanupFails(t *testing.T) {
 		t.Fatalf("seed role claim: %v", err)
 	}
 
-	reg.kv = &failingKeyValue{
+	useKV(t, reg, &failingKeyValue{
 		KeyValue:  kv,
 		failPutAt: 2,
 		err:       errors.New("injected old-holder cleanup failure"),
-	}
+	})
 	if _, err := reg.SetRole(newSession, "example-host", role, false); err == nil {
 		t.Fatal("SetRole must return the failed old-holder cleanup")
 	}
@@ -1575,7 +1575,7 @@ func TestWatcherEvictsMalformedValue(t *testing.T) {
 	}
 	pollMatch(t, reg, machineID, topic, 1, 5*time.Second)
 
-	revision, err := reg.kv.Put(sessionID, []byte("{"))
+	revision, err := reg.watcher.KV().Put(sessionID, []byte("{"))
 	if err != nil {
 		t.Fatalf("put malformed value: %v", err)
 	}
@@ -1594,6 +1594,20 @@ func TestWatcherEvictsMalformedValue(t *testing.T) {
 		})
 	}
 	t.Logf("interest watcher malformed-value warning: %s", strings.TrimSpace(logs.String()))
+}
+
+// useKV rebuilds the registry's watcher over kv, a wrapper of its interest bucket handle, so the
+// registry writes interests through kv from here on. The replaced watcher is stopped first.
+func useKV(t *testing.T, r *Registry, kv natsgo.KeyValue) {
+	t.Helper()
+	r.watcher.Stop()
+	r.watcher = kvwatch.New("interest registry", kv, r.applyWatched, r.resetCache)
+	r.watcher.Start()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := r.WaitForCacheReady(ctx); err != nil {
+		t.Fatalf("wait for the rebuilt watcher: %v", err)
+	}
 }
 
 type failingKeyValue struct {
@@ -1864,8 +1878,8 @@ func TestRemoveDoesNotOverwriteNewerWatcherValue(t *testing.T) {
 	}
 	pollMatch(t, reg, machineID, "notifications.a", 1, 5*time.Second)
 
-	interestKV := reg.kv
-	reg.kv = &interleavingPutKeyValue{
+	interestKV := reg.watcher.KV()
+	useKV(t, reg, &interleavingPutKeyValue{
 		KeyValue: interestKV,
 		afterFirstPut: func() {
 			putInterest(t, interestKV, Interest{
@@ -1875,7 +1889,7 @@ func TestRemoveDoesNotOverwriteNewerWatcherValue(t *testing.T) {
 			})
 			pollMatch(t, reg, machineID, "notifications.remote", 1, 5*time.Second)
 		},
-	}
+	})
 	if err := reg.Remove(sessionID, []string{"notifications.b"}); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
@@ -1961,10 +1975,10 @@ func TestDeleteHistoryFailureSuppressesStaleWatcherUpdate(t *testing.T) {
 		t.Fatalf("Get seeded interest: %v", err)
 	}
 
-	reg.kv = &historyFailKeyValue{
+	useKV(t, reg, &historyFailKeyValue{
 		KeyValue: kv,
 		err:      errors.New("injected history failure"),
-	}
+	})
 	if err := reg.removeInterestTopics(sessionID, nil); err != nil {
 		t.Fatalf("remove all: %v", err)
 	}

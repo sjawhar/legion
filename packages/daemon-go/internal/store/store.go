@@ -224,6 +224,11 @@ type queryRower interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
+// execer is the part of a pool and of a transaction this package writes through.
+type execer interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
 func schemaVersionExists(ctx context.Context, db queryRower) (bool, error) {
 	var exists bool
 	if err := db.QueryRow(ctx, "select to_regclass('schema_version') is not null").Scan(&exists); err != nil {

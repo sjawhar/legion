@@ -350,11 +350,15 @@ Every pod carries the operator fixture's pod,
 [`fixtures/operator-route/pod.yml`](fixtures/operator-route/pod.yml), read through the daemon's
 own loader (`config.ReadPodFile`): ServiceAccount `legion-worker`, one projected token for
 audience `middleman-legion`, and a ConfigMap holding the fixture's `models.yml` (anthropic through
-production's middleman, keyed by that token) and `overlay.yml` (the roles, and every other
-provider disabled). Legion holds none of it. Before the harness runs, the script creates the
+production's middleman, keyed by that token) and `overlay.yml` (every role Legion's prompts
+reach, `enabledModels` holding each session to the gateway's aliases, and each provider a pod could
+reach without the gateway disabled). Legion holds none of it. Before the harness runs, the script creates the
 run's own copy of that ConfigMap as the operator, `legion-operator-route-<project>`, labelled
 with the run's project; the harness points the pods at it, so another run in the namespace can
-neither see nor delete this one's route.
+neither see nor delete this one's route. It also creates the run's providers Secret,
+`legion-<project>-providers`, with one key (`stage4a`, a random value no model route reads) that the
+harness's `provider_keys` hands every agent as `STAGE4A_PROVIDER_KEY`, so every pod and the probe run
+with the providers Secret mounted, as a deployment with `provider_keys` does.
 
 | input | default | meaning |
 | :--- | :--- | :--- |
@@ -390,12 +394,13 @@ The checks, in order, each printing what it observed and then `CHECK <name>: PAS
 | `identity` | refuses to start unless the runtime context is set and authenticates as someone other than the operator; a SelfSubjectReview shows the assumed `…legion-daemon` role in group `legion-daemon`; `list secrets -n legion` is 403; a SelfSubjectRulesReview (`can-i --list`) in every namespace finds no grant beyond the plan's; access reviews, which reach EKS's webhook authorizer that a rules review cannot enumerate, deny every kind of impersonation, `serviceaccounts/token`, pod create and exec, secret list and create, PVC get, nodes, RBAC create/update/patch/escalate/bind, and Sandboxes outside `legion`, beside two positive controls |
 | `installed` | `CheckInstalled` with production's `InstallRef` passes under the `resourceNames` grants |
 | `boot-refusal-negative` | `CheckInstalled` naming `legion-no-such-controller` refuses, naming that Deployment and the 403 the `resourceNames` grant answers, without blaming the CRD |
-| `image-probe` | `ProbeImage` on the image under test, its probe pod carrying the operator's pod, passes; its log confirms `go-daemon-api-version` equal to the daemon's contract and `agent-models=resolved` (every task agent the prompts dispatch resolved its model under the operator's pod), and the probe Sandbox is deleted |
+| `image-probe` | `ProbeImage` on the image under test, with the daemon's own probe command (`--role-references` with the checkout's role prompts' references, and `--provider-env-dir`, the run having a provider key), its probe pod carrying the operator's pod, passes; its log confirms `go-daemon-api-version` equal to the daemon's contract and `agent-models=resolved` (every task agent the prompts dispatch resolved its model under the operator's pod), and the probe Sandbox is deleted |
 | `image-probe-negative` | with `modelRoles.oracle` removed from the run's ConfigMap, `ProbeImage` on the same image is refused naming `task agent oracle` and `role oracle is not configured`; the ConfigMap is restored before the check ends, so every later check boots on it |
 | `root-ready` | Spawn of the root: its Sandbox Ready, the returned incarnation the pod's uid, the init log (`pods/log`) carrying `workspace-init: /legion/workspaces/sjawhar/legion-smoke/s4a-1 on legion/S4A-1`, and a hello registered at generation 1 with that generation's token |
 | `gvisor` | `uname -r` in the root pod is gVisor's emulated kernel (`…-gvisor`), not the node's, and the pod's `runtimeClassName` is `gvisor` |
 | `operator-token` | the root pod runs as the fixture's ServiceAccount with `automountServiceAccountToken: false` and no API server token; the fixture's one projected token, at its mount, is a JWT for the fixture's audience, subject the pod's ServiceAccount, and exactly the fixture's lifetime, read into the harness's memory and only its claims printed |
 | `pod-baseline` | the stub agent the root's shim started (read from `/proc/<pid>/environ`) has `PI_CONFIG_FILES` = the pod baseline's overlay on the state volume, then the operator's; `OTEL_SDK_DISABLED=true`, `PI_AUTO_QA=0`, `PI_CONFIG_DIR=.omp`, `OMP_SESSION_STORAGE=file`, and the operator's other variables; the shim itself (pid 1) has the operator's `PI_CONFIG_FILES` alone; the overlay is mode `444`; and the image's `omp config get compaction.remoteEndpoint`, run under the agent's environment in a repository whose `.omp/config.yml` sets it, reads `""` |
+| `provider-key` | the stub agent's environment (`/proc/<pid>/environ`) carries `STAGE4A_PROVIDER_KEY` equal to the run's providers Secret's `stage4a` key, read back through the admin context and never printed; the shim's (pid 1) carries no such variable |
 | `adopt-working-copy` | `AdoptWorkingCopy` with the implement App's bot identity; `jj log -r @ -T author` in `$LEGION_WORKSPACE` shows it |
 | `worker-colocated` | a worker spawned while the root runs requires the tree's node (podAffinity on `legion.dev/tree`, topology `kubernetes.io/hostname`) and runs there |
 | `suspend` | Suspend of the worker: when it returns the runtime's watch no longer holds the claim; Sandbox `Suspended`, pod gone, tree PVC `Bound`, `Probe(recorded)` gone; over the settle window Observe delivers no observation of the worker evaluated after Suspend returned (an observation's `At` is stamped as its evaluation ends, and Observe re-reads the recorded incarnation before it sends) |
@@ -408,7 +413,7 @@ The checks, in order, each printing what it observed and then `CHECK <name>: PAS
 | `concurrent-provision` | a new tree's root and a child worker spawned at once: both provision their workspace, the two `workspace-init` runs do not overlap (the runtime serializes them; `flock` does not reach across gVisor pods), and the volume holds one clone, with both jj workspaces, that passes `git fsck --connectivity-only` |
 | `re-adopt` | the listener and runtime closed, one worker killed while none runs, then a fresh listener and `sandbox.New` with `ReconcileOrphans(known)`: the living claims are alive with their recorded incarnations and unchanged pods and Sandbox generations, the killed one is gone with its recorded uid, and every living shim says hello again with its current token |
 | `orphan-sweep` | a running claim left out of `known` survives a sweep with a 1-hour grace and is deleted by one with a 1-second grace; the suspended claim's Sandbox and every known one survive both |
-| `release-tree` | Release of every claim, the suspended one with a nil locator: no Sandbox, `-boot` Secret, pod, or tree PVC of the run is left |
+| `release-tree` | Release of every claim, the suspended one with a nil locator: no Sandbox, `-boot` Secret, pod, or tree PVC of the run is left (the operator's providers Secret stays for the teardown: Release never deletes an operator's object) |
 | `namespace-clean` | the script's last step, after the teardown and outside the harness: the namespace's Sandboxes, Secrets, PVCs, pods and ConfigMaps that carry the run's project label or none are exactly the snapshot taken before the run |
 
 Everything the run creates carries the project label `s4a-<UTC timestamp>-<4 hex>`, and the
@@ -416,8 +421,9 @@ claim tokens carry the same value without its dashes. The harness appends each S
 a record before the Sandbox can exist. On any exit the `EXIT` trap runs
 [`lib/namespace-rig.sh`](#libnamespace-rigsh)'s teardown: it refuses to act on a project without
 the `s4a-` prefix, deletes every recorded Sandbox by its exact name and then the Sandboxes
-labelled with that exact project (never by label existence) and the run's ConfigMap by the same
-label, waits for the owned Secrets, pods and PVCs to follow, deletes by the same exact label any Secret or PVC still left after 90
+labelled with that exact project (never by label existence), the run's ConfigMap by the same
+label and its providers Secret by name, waits for the owned Secrets, pods and PVCs to follow,
+deletes by the same exact label any Secret or PVC still left after 90
 listings, and runs `namespace-clean` when the harness did not get to it. Nothing outside `legion`
 is touched.
 

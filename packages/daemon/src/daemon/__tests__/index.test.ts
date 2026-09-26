@@ -6,6 +6,7 @@ import path from "node:path";
 import {
   controllerToken,
   type DaemonStateResponse,
+  type IssueKey,
   LEGION_DAEMON_API_VERSION,
   roleToken,
   roleTopic,
@@ -33,7 +34,7 @@ import {
   schedulingFingerprint,
 } from "../worker-image-probe";
 import type { WorkerRpcClient } from "../worker-rpc";
-import { fakeDispatchClient, procStatLine } from "./ci-fixtures";
+import { checkPr, fakeDispatchClient, procStatLine } from "./ci-fixtures";
 import { createFakeK8sApi, type FakeK8sApi } from "./fake-k8s-api";
 import { fakeWorkerRpcClient } from "./fake-runtime";
 
@@ -231,11 +232,11 @@ function daemonTestDependencies(
       },
       dispatchClient: fakeDispatchClient(),
       tokenManager: {
-        getToken: async () => ({
+        getToken: async (role: GitHubAppRole) => ({
           token: "test-token",
           expiresAt: "2026-08-25T00:00:00.000Z",
           gitIdentity: {
-            name: "legion-implement[bot]",
+            name: role === "review" ? "legion-review[bot]" : "legion-implement[bot]",
             email: "1+legion-implement[bot]@users.noreply.github.com",
           },
         }),
@@ -464,6 +465,51 @@ describe("startDaemon", () => {
     ]);
   });
 
+  it("reads GitHub's compare for resync with the repository owner's implementer App token", async () => {
+    const commands: Array<{ command: string[]; token: string | undefined }> = [];
+    const runner: CommandRunner = async (command, options) => {
+      commands.push({ command, token: options?.env?.GH_TOKEN });
+      return {
+        stdout: JSON.stringify({
+          files: [{ filename: "src/fix.ts" }],
+          commits: [{ author: { login: "legion-implement[bot]" } }],
+          total_commits: 1,
+        }),
+        stderr: "",
+        exitCode: 0,
+      };
+    };
+    const tokenCalls: Array<{ role: string; owner: string }> = [];
+    const tokenManager = {
+      getToken: async (role: "implement" | "review", owner: string) => {
+        tokenCalls.push({ role, owner });
+        return {
+          token: `ghs_${owner}_${role}_token`,
+          expiresAt: "2099-01-01T00:00:00.000Z",
+          gitIdentity: { name: `legion-${role}[bot]`, email: `${role}@users.noreply.github.com` },
+        };
+      },
+    };
+
+    const compared = await daemonIndex.createCompareReader(tokenManager, runner, {
+      PATH: "/pane/bin",
+    })("acme/api", "base-sha", "head-sha");
+
+    expect(compared).toEqual({
+      paths: ["src/fix.ts"],
+      truncated: false,
+      authors: ["legion-implement[bot]"],
+      commitsTruncated: false,
+    });
+    expect(tokenCalls).toEqual([{ role: "implement", owner: "acme" }]);
+    expect(commands).toEqual([
+      {
+        command: ["gh", "api", "repos/acme/api/compare/base-sha...head-sha"],
+        token: "ghs_acme_implement_token",
+      },
+    ]);
+  });
+
   it("the CI status fetcher spawns gh with the daemon's pane environment as its base, never process.env", async () => {
     const commandOptions: CommandRunnerOptions[] = [];
     const runner: CommandRunner = async (_command, options) => {
@@ -475,11 +521,11 @@ describe("startDaemon", () => {
       };
     };
     const tokenManager = {
-      getToken: async () => ({
+      getToken: async (role: GitHubAppRole) => ({
         token: "ghs_acme_app_token",
         expiresAt: "2099-01-01T00:00:00.000Z",
         gitIdentity: {
-          name: "legion-implement[bot]",
+          name: role === "review" ? "legion-review[bot]" : "legion-implement[bot]",
           email: "3202636+legion-implement[bot]@users.noreply.github.com",
         },
       }),
@@ -575,11 +621,11 @@ describe("startDaemon", () => {
           envoyPublish: async () => {},
           dispatchClient: fakeDispatchClient(),
           tokenManager: {
-            getToken: async () => ({
+            getToken: async (role: GitHubAppRole) => ({
               token: "test-token",
               expiresAt: "2026-08-25T00:00:00.000Z",
               gitIdentity: {
-                name: "legion-implement[bot]",
+                name: role === "review" ? "legion-review[bot]" : "legion-implement[bot]",
                 email: "1+legion-implement[bot]@users.noreply.github.com",
               },
             }),
@@ -852,11 +898,11 @@ describe("startDaemon", () => {
           dispatchClient: fakeDispatchClient(),
           readPluginManifest: async () => validLegionPluginManifest,
           tokenManager: {
-            getToken: async () => ({
+            getToken: async (role: GitHubAppRole) => ({
               token: "test-token",
               expiresAt: "2026-08-25T00:00:00.000Z",
               gitIdentity: {
-                name: "legion-implement[bot]",
+                name: role === "review" ? "legion-review[bot]" : "legion-implement[bot]",
                 email: "1+legion-implement[bot]@users.noreply.github.com",
               },
             }),
@@ -978,11 +1024,11 @@ describe("startDaemon", () => {
           },
           dispatchClient: fakeDispatchClient(),
           tokenManager: {
-            getToken: async () => ({
+            getToken: async (role: GitHubAppRole) => ({
               token: "test-token",
               expiresAt: "2026-08-25T00:00:00.000Z",
               gitIdentity: {
-                name: "legion-implement[bot]",
+                name: role === "review" ? "legion-review[bot]" : "legion-implement[bot]",
                 email: "1+legion-implement[bot]@users.noreply.github.com",
               },
             }),
@@ -1329,11 +1375,11 @@ describe("startDaemon", () => {
           },
           dispatchClient: fakeDispatchClient(),
           tokenManager: {
-            getToken: async () => ({
+            getToken: async (role: GitHubAppRole) => ({
               token: "test-token",
               expiresAt: "2026-08-25T00:00:00.000Z",
               gitIdentity: {
-                name: "legion-implement[bot]",
+                name: role === "review" ? "legion-review[bot]" : "legion-implement[bot]",
                 email: "1+legion-implement[bot]@users.noreply.github.com",
               },
             }),
@@ -1534,11 +1580,11 @@ describe("startDaemon", () => {
             },
           }),
           tokenManager: {
-            getToken: async () => ({
+            getToken: async (role: GitHubAppRole) => ({
               token: "test-token",
               expiresAt: "2026-08-25T00:00:00.000Z",
               gitIdentity: {
-                name: "legion-implement[bot]",
+                name: role === "review" ? "legion-review[bot]" : "legion-implement[bot]",
                 email: "1+legion-implement[bot]@users.noreply.github.com",
               },
             }),
@@ -1716,11 +1762,11 @@ describe("startDaemon", () => {
           envoyPublish: async () => {},
           dispatchClient: fakeDispatchClient(),
           tokenManager: {
-            getToken: async () => ({
+            getToken: async (role: GitHubAppRole) => ({
               token: "test-token",
               expiresAt: "2026-08-25T00:00:00.000Z",
               gitIdentity: {
-                name: "legion-implement[bot]",
+                name: role === "review" ? "legion-review[bot]" : "legion-implement[bot]",
                 email: "1+legion-implement[bot]@users.noreply.github.com",
               },
             }),
@@ -1913,13 +1959,13 @@ describe("startDaemon", () => {
           envoyPublish: async () => {},
           dispatchClient: fakeDispatchClient(),
           tokenManager: {
-            getToken: async () => {
+            getToken: async (role: GitHubAppRole) => {
               if (booted) throw new Error("GitHub App token request failed");
               return {
                 token: "test-token",
                 expiresAt: "2026-08-25T00:00:00.000Z",
                 gitIdentity: {
-                  name: "legion-implement[bot]",
+                  name: role === "review" ? "legion-review[bot]" : "legion-implement[bot]",
                   email: "1+legion-implement[bot]@users.noreply.github.com",
                 },
               };
@@ -2353,11 +2399,11 @@ describe("startDaemon", () => {
           envoyPublish: async () => {},
           dispatchClient: fakeDispatchClient(),
           tokenManager: {
-            getToken: async () => ({
+            getToken: async (role: GitHubAppRole) => ({
               token: "test-token",
               expiresAt: "2026-08-25T00:00:00.000Z",
               gitIdentity: {
-                name: "legion-implement[bot]",
+                name: role === "review" ? "legion-review[bot]" : "legion-implement[bot]",
                 email: "1+legion-implement[bot]@users.noreply.github.com",
               },
             }),
@@ -2425,11 +2471,11 @@ describe("startDaemon", () => {
           envoyPublish: async () => {},
           dispatchClient: fakeDispatchClient(),
           tokenManager: {
-            getToken: async () => ({
+            getToken: async (role: GitHubAppRole) => ({
               token: "test-token",
               expiresAt: "2026-08-25T00:00:00.000Z",
               gitIdentity: {
-                name: "legion-implement[bot]",
+                name: role === "review" ? "legion-review[bot]" : "legion-implement[bot]",
                 email: "1+legion-implement[bot]@users.noreply.github.com",
               },
             }),
@@ -2880,11 +2926,11 @@ describe("startDaemon", () => {
           dispatchClient: fakeDispatchClient(),
           readPluginManifest: async () => validLegionPluginManifest,
           tokenManager: {
-            getToken: async () => ({
+            getToken: async (role: GitHubAppRole) => ({
               token: "test-token",
               expiresAt: "2099-01-01T00:00:00.000Z",
               gitIdentity: {
-                name: "legion-implement[bot]",
+                name: role === "review" ? "legion-review[bot]" : "legion-implement[bot]",
                 email: "1+legion-implement[bot]@users.noreply.github.com",
               },
             }),
@@ -3006,11 +3052,11 @@ describe("startDaemon", () => {
           dispatchClient: fakeDispatchClient(),
           readPluginManifest: async () => validLegionPluginManifest,
           tokenManager: {
-            getToken: async () => ({
+            getToken: async (role: GitHubAppRole) => ({
               token: "test-token",
               expiresAt: "2099-01-01T00:00:00.000Z",
               gitIdentity: {
-                name: "legion-implement[bot]",
+                name: role === "review" ? "legion-review[bot]" : "legion-implement[bot]",
                 email: "1+legion-implement[bot]@users.noreply.github.com",
               },
             }),
@@ -3189,11 +3235,11 @@ describe("startDaemon", () => {
         envoyPublish: async () => {},
         dispatchClient: fakeDispatchClient(),
         tokenManager: {
-          getToken: async () => ({
+          getToken: async (role: GitHubAppRole) => ({
             token: "test-token",
             expiresAt: "2026-08-25T00:00:00.000Z",
             gitIdentity: {
-              name: "legion-implement[bot]",
+              name: role === "review" ? "legion-review[bot]" : "legion-implement[bot]",
               email: "1+legion-implement[bot]@users.noreply.github.com",
             },
           }),
@@ -3257,11 +3303,11 @@ describe("startDaemon", () => {
           envoyPublish: async () => {},
           dispatchClient: fakeDispatchClient(),
           tokenManager: {
-            getToken: async () => ({
+            getToken: async (role: GitHubAppRole) => ({
               token: "test-token",
               expiresAt: "2026-08-25T00:00:00.000Z",
               gitIdentity: {
-                name: "legion-implement[bot]",
+                name: role === "review" ? "legion-review[bot]" : "legion-implement[bot]",
                 email: "1+legion-implement[bot]@users.noreply.github.com",
               },
             }),
@@ -3367,11 +3413,11 @@ describe("startDaemon", () => {
           envoyPublish: async () => {},
           dispatchClient: fakeDispatchClient(),
           tokenManager: {
-            getToken: async () => ({
+            getToken: async (role: GitHubAppRole) => ({
               token: "test-token",
               expiresAt: "2026-08-25T00:00:00.000Z",
               gitIdentity: {
-                name: "legion-implement[bot]",
+                name: role === "review" ? "legion-review[bot]" : "legion-implement[bot]",
                 email: "1+legion-implement[bot]@users.noreply.github.com",
               },
             }),
@@ -3457,11 +3503,11 @@ describe("startDaemon", () => {
           envoyPublish: async () => {},
           dispatchClient: fakeDispatchClient(),
           tokenManager: {
-            getToken: async () => ({
+            getToken: async (role: GitHubAppRole) => ({
               token: "test-token",
               expiresAt: "2026-08-25T00:00:00.000Z",
               gitIdentity: {
-                name: "legion-implement[bot]",
+                name: role === "review" ? "legion-review[bot]" : "legion-implement[bot]",
                 email: "1+legion-implement[bot]@users.noreply.github.com",
               },
             }),
@@ -3644,11 +3690,11 @@ describe("startDaemon", () => {
         envoyPublish: async () => {},
         dispatchClient: fakeDispatchClient(),
         tokenManager: {
-          getToken: async () => ({
+          getToken: async (role: GitHubAppRole) => ({
             token: "test-token",
             expiresAt: "2026-08-25T00:00:00.000Z",
             gitIdentity: {
-              name: "legion-implement[bot]",
+              name: role === "review" ? "legion-review[bot]" : "legion-implement[bot]",
               email: "1+legion-implement[bot]@users.noreply.github.com",
             },
           }),
@@ -3775,6 +3821,146 @@ describe("startDaemon", () => {
     }
   });
 
+  /** A booted daemon on `state` whose token leases name `logins[owner]` for the review App. */
+  async function bootWithReviewLogins(
+    daemonConfig: DaemonConfig,
+    state: LegionState,
+    nats: FakeNats,
+    reviewLogin: (owner: string) => string
+  ) {
+    return startDaemon(daemonConfig, {
+      deps: {
+        loadState: async () => state,
+        saveState: async () => {},
+        createNatsTransport: async () => nats,
+        runner: async (command) =>
+          command[0] === "sh"
+            ? {
+                stdout: "[]",
+                stderr: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+                exitCode: 0,
+              }
+            : { stdout: "", stderr: "", exitCode: 0 },
+        resolveDaemonEnvironment: environmentResolver(daemonEnvironment),
+        statPrompt: async () => {},
+        readProcessStat: fakeProcStat,
+        readPluginManifest: async () => validLegionPluginManifest,
+        envoyPublish: async () => {},
+        dispatchClient: fakeDispatchClient(),
+        tokenManager: {
+          getToken: async (role: "implement" | "review", owner: string) => ({
+            token: "test-token",
+            expiresAt: "2026-08-25T00:00:00.000Z",
+            gitIdentity: {
+              name: role === "review" ? reviewLogin(owner) : "legion-implement[bot]",
+              email: `1+${role}@users.noreply.github.com`,
+            },
+          }),
+        },
+        setTimeout: () => 1 as never,
+        clearTimeout: () => {},
+        setInterval: () => 1 as never,
+        clearInterval: () => {},
+        onSignal: () => {},
+        exit: () => {},
+        now: () => Date.parse("2026-08-24T00:00:00.000Z"),
+      },
+    });
+  }
+
+  for (const [pusher, attempts] of [
+    ["legion-review-boot[bot]", 0],
+    ["legion-implement[bot]", 1],
+  ] as const) {
+    it(`judges a push onto a red head by the review App login its boot lease named (${pusher}: ${attempts} fix attempt)`, async () => {
+      const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+      const daemonConfig = config(stateDir);
+      const nats = new FakeNats();
+      const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+      const branch = "legion/WIDGETS-9";
+      state.prs["acme/widgets#9"] = checkPr("WIDGETS-9" as IssueKey, {
+        number: 9,
+        headSha: "red-sha",
+        verdict: "red",
+        failing: ["test"],
+        ciSettledAt: 1,
+      });
+      state.prByBranch[`acme/widgets@${branch}`] = "acme/widgets#9";
+      const daemon = await bootWithReviewLogins(
+        daemonConfig,
+        state,
+        nats,
+        () => "legion-review-boot[bot]"
+      );
+      const envelope = (id: string, topic: string, payload: Record<string, unknown>) =>
+        JSON.stringify({
+          event_id: id,
+          source: "github",
+          source_event_id: id,
+          topic,
+          dedupe_key: id,
+          issued_at: 1_000,
+          payload_summary: id,
+          payload: JSON.stringify(payload),
+          trace_id: id,
+        });
+
+      try {
+        nats.emit(
+          `notifications.github.acme.widgets.push.branch.${branch}`,
+          envelope("push-1", `notifications.github.acme.widgets.push.branch.${branch}`, {
+            kind: "push",
+            repo: "acme/widgets",
+            ref: `refs/heads/${branch}`,
+            before: "red-sha",
+            after: "next-sha",
+            pusher,
+            head_subject: "next",
+            commit_count: "1",
+            compare_url: "u",
+            changed_paths: "src/widget.test.ts",
+            changed_paths_truncated: "false",
+          })
+        );
+        nats.emit(
+          "notifications.github.acme.widgets.pull_request.synchronize",
+          envelope("sync-1", "notifications.github.acme.widgets.pull_request.synchronize", {
+            kind: "pr",
+            action: "synchronize",
+            repo: "acme/widgets",
+            number: "9",
+            head_ref: branch,
+            head_sha: "next-sha",
+          })
+        );
+        await daemon.drain();
+
+        expect(state.prs["acme/widgets#9"]).toMatchObject({
+          headSha: "next-sha",
+          fixAttempts: attempts,
+        });
+      } finally {
+        await daemon.stop();
+        await rm(stateDir, { recursive: true, force: true });
+      }
+    });
+  }
+
+  it("refuses to start when one App is configured for both roles", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+    try {
+      await expect(
+        bootWithReviewLogins(daemonConfig, state, new FakeNats(), () => "legion-implement[bot]")
+      ).rejects.toThrow(
+        `the review App's token lease names bot login "legion-implement[bot]" and the implement App's "legion-implement[bot]"; the reducers need two different Apps`
+      );
+    } finally {
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
   it("closes API and NATS while surfacing a rejected tracked event during stop", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = config(stateDir);
@@ -3802,11 +3988,11 @@ describe("startDaemon", () => {
         },
         dispatchClient: fakeDispatchClient(),
         tokenManager: {
-          getToken: async () => ({
+          getToken: async (role: GitHubAppRole) => ({
             token: "test-token",
             expiresAt: "2026-08-25T00:00:00.000Z",
             gitIdentity: {
-              name: "legion-implement[bot]",
+              name: role === "review" ? "legion-review[bot]" : "legion-implement[bot]",
               email: "1+legion-implement[bot]@users.noreply.github.com",
             },
           }),
@@ -3876,11 +4062,11 @@ describe("startDaemon", () => {
       envoyPublish: async () => {},
       dispatchClient: fakeDispatchClient(),
       tokenManager: {
-        getToken: async () => ({
+        getToken: async (role: GitHubAppRole) => ({
           token: "test-token",
           expiresAt: "2026-08-25T00:00:00.000Z",
           gitIdentity: {
-            name: "legion-implement[bot]",
+            name: role === "review" ? "legion-review[bot]" : "legion-implement[bot]",
             email: "1+legion-implement[bot]@users.noreply.github.com",
           },
         }),

@@ -3,6 +3,8 @@ package sandbox
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"sync"
@@ -14,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/rest"
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -363,6 +366,79 @@ func TestALaunchThatFailsAfterRunningLeavesItsSandboxSuspended(t *testing.T) {
 	expectSteps(t, steps(t, g.writes(), name), "create sandbox", "create secret", "run", "suspend")
 	if mode := g.sandbox(name).mode(); mode != modeSuspended {
 		t.Fatalf("the failed launch left its sandbox %s", mode)
+	}
+}
+
+// A launch whose pod never comes said only that it timed out, which tells an operator nothing
+// about why: the Sandbox controller records that in the Sandbox's own Ready condition, and the
+// probe path already reads it. The timeout carries it too, so the operator reads one line instead
+// of going to the cluster for the condition the daemon had in its store all along.
+func TestALaunchThatWaitsOutItsPodSaysWhatTheSandboxReports(t *testing.T) {
+	blocked := metav1.Condition{
+		Type: conditionReady, Status: metav1.ConditionFalse, Reason: "PodSchedulingBlocked",
+		Message: "no node satisfies the tree's required anti-affinity",
+	}
+	g := newRig(t, nil, withOptions(func(o *Options) { o.BootTimeout = 300 * time.Millisecond }))
+	g.hold.Store(true)
+	// The controller reports on the generation it observed, and a condition of an earlier one is
+	// not read as this launch's, so the rig writes it as the controller would: after the Running
+	// patch, against the generation that patch produced.
+	apply := k8stesting.ObjectReaction(g.dyn.Tracker())
+	g.dyn.PrependReactor("patch", "sandboxes", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
+		handled, object, err := apply(a)
+		if !handled || err != nil || !modePatched(t, string(a.(k8stesting.PatchAction).GetPatch()), modeRunning) {
+			return handled, object, err
+		}
+		patched := object.(*unstructured.Unstructured)
+		s, err := decodeSandbox(patched)
+		if err != nil {
+			return true, object, err
+		}
+		blocked.ObservedGeneration = s.Generation
+		status := map[string]any{"conditions": []any{map[string]any{
+			"type": blocked.Type, "status": string(blocked.Status), "reason": blocked.Reason,
+			"message": blocked.Message, "observedGeneration": blocked.ObservedGeneration,
+			"lastTransitionTime": metav1.NewTime(rigNow).Format(time.RFC3339),
+		}}}
+		if err := unstructured.SetNestedMap(patched.Object, status, "status"); err != nil {
+			return true, object, err
+		}
+		return true, patched, g.dyn.Tracker().Update(sandboxGVR, patched, testNamespace)
+	})
+
+	_, err := g.r.Spawn(g.ctx, workerSpec(t))
+
+	if err == nil {
+		t.Fatal("Spawn returned no error though its pod never came")
+	}
+	for _, want := range []string{"wait for its new pod", "PodSchedulingBlocked", "no node satisfies the tree's required anti-affinity"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Spawn error = %q, want it to name %q", err, want)
+		}
+	}
+}
+
+// A runtime whose API server refuses connections cannot see its Sandboxes, so boot refuses and
+// says which store and which request failed. The refusal comes from the informers' own list and
+// watch calls, recorded per feed, not from client-go's watch-error handler: the reflector retries
+// a refused watch itself without ever calling that handler, so a runtime that trusted it could
+// boot with two stores nothing was feeding.
+func TestBootRefusesWhenTheAPIServerRefusesTheConnection(t *testing.T) {
+	dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	address := dead.URL
+	dead.Close()
+	boot, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, err := New(boot, &rest.Config{Host: address}, testOptions())
+
+	if err == nil {
+		t.Fatal("New returned a runtime though every list its informers made was refused")
+	}
+	for _, want := range []string{"sandbox runtime", "store may be stale", "connection refused"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("New = %q, want it to name %q", err, want)
+		}
 	}
 }
 
