@@ -156,8 +156,8 @@ func TestRunLaunchesWithThePromptInstructionsAndSecretsItWasGiven(t *testing.T) 
 }
 
 // A default operator claim has no arbitrary prompt file. It must receive the shared role prompt
-// followed by the Go daemon part, so tmux can concatenate both before addressing and deployment
-// instructions into its single OMP flag.
+// followed by the Go daemon parts, the role's own and the one every architect shares, so tmux can
+// concatenate them before addressing and deployment instructions into its single OMP flag.
 func TestRunLaunchesTheComposedGoRolePromptWhenSpawnHasNoPromptFile(t *testing.T) {
 	cfg := testConfig(t)
 	rt := fake.NewRuntime()
@@ -172,6 +172,7 @@ func TestRunLaunchesTheComposedGoRolePromptWhenSpawnHasNoPromptFile(t *testing.T
 	want := []string{
 		filepath.Join(rolesDir, "architect-root.md"),
 		filepath.Join(cfg.StateDir, "prompts", "go", "architect-root.md"),
+		filepath.Join(cfg.StateDir, "prompts", "go", "architect-common.md"),
 	}
 	if !reflect.DeepEqual(spec.Prompt.RolePromptPaths, want) {
 		t.Fatalf("RolePromptPaths = %q, want %q", spec.Prompt.RolePromptPaths, want)

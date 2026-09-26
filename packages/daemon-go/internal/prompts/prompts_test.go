@@ -15,8 +15,10 @@ import (
 
 // A broken role sequence drops the shared core, uses a root prompt for a child, or makes the Go
 // daemon's instructions win before the shared role instructions. The prompt paths are what the
-// tmux runtime gives OMP in one --append-system-prompt word, so their order is the contract.
-func TestComposeOrdersSharedRolePartsBeforeTheGoDaemonPart(t *testing.T) {
+// tmux runtime gives OMP in one --append-system-prompt word, so their order is the contract. The
+// Go daemon's text is the role's own part, then the part every architect or every phase worker
+// shares.
+func TestComposeOrdersSharedRolePartsBeforeTheGoDaemonParts(t *testing.T) {
 	rolesDir := completeRolesDir(t)
 	stateDir := t.TempDir()
 	composer, err := New(rolesDir, stateDir)
@@ -32,43 +34,48 @@ func TestComposeOrdersSharedRolePartsBeforeTheGoDaemonPart(t *testing.T) {
 		role     claim.Role
 		isRoot   bool
 		shared   []string
-		goPart   string
+		goParts  []string
 		contains []string
 	}{
-		{"root architect", claim.RoleArchitect, true, []string{"architect-root.md"}, "architect-root.md", append([]string{"Do not schedule a phase or call `spawn_worker`", "`register_gate`"}, architectOperations...)},
-		{"sub-architect", claim.RoleArchitect, false, []string{"architect.md"}, "architect.md", append([]string{"Do not schedule a phase or call `spawn_worker`", "`register_gate` refuses a child issue"}, architectOperations...)},
-		{"planner", claim.RolePlanner, false, []string{"core/common.md", "core/planner.md", "mechanics/headless.md", "planner.md"}, "planner.md", []string{`op: "handoff_complete"`}},
-		{"implementer", claim.RoleImplementer, false, []string{"core/common.md", "core/implementer.md", "mechanics/headless.md", "implementer.md"}, "implementer.md", []string{`op: "handoff_complete"`}},
-		{"tester", claim.RoleTester, false, []string{"core/common.md", "core/tester.md", "mechanics/headless.md", "tester.md"}, "tester.md", []string{`op: "handoff_complete"`, `verdict: "pass"`, `verdict: "fail"`}},
-		{"reviewer", claim.RoleReviewer, false, []string{"core/common.md", "core/reviewer.md", "mechanics/headless.md", "reviewer.md"}, "reviewer.md", []string{`op: "handoff_complete"`}},
+		{"root architect", claim.RoleArchitect, true, []string{"architect-root.md"}, []string{"architect-root.md", "architect-common.md"}, append([]string{"Do not schedule a phase or call `spawn_worker`", "`register_gate`"}, architectOperations...)},
+		{"sub-architect", claim.RoleArchitect, false, []string{"architect.md"}, []string{"architect.md", "architect-common.md"}, append([]string{"Do not schedule a phase or call `spawn_worker`", "`register_gate` refuses a child issue"}, architectOperations...)},
+		{"planner", claim.RolePlanner, false, []string{"core/common.md", "core/planner.md", "mechanics/headless.md", "planner.md"}, []string{"planner.md", "worker-common.md"}, []string{`op: "handoff_complete"`}},
+		{"implementer", claim.RoleImplementer, false, []string{"core/common.md", "core/implementer.md", "mechanics/headless.md", "implementer.md"}, []string{"implementer.md", "worker-common.md"}, []string{`op: "handoff_complete"`}},
+		{"tester", claim.RoleTester, false, []string{"core/common.md", "core/tester.md", "mechanics/headless.md", "tester.md"}, []string{"tester.md", "worker-common.md"}, []string{`op: "handoff_complete"`, `verdict: "pass"`, `verdict: "fail"`}},
+		{"reviewer", claim.RoleReviewer, false, []string{"core/common.md", "core/reviewer.md", "mechanics/headless.md", "reviewer.md"}, []string{"reviewer.md", "worker-common.md"}, []string{`op: "handoff_complete"`}},
 		// The packet limit the merger is told is the one the handoff route enforces.
-		{"merger", claim.RoleMerger, false, []string{"mechanics/headless.md", "merger.md"}, "merger.md", []string{`op: "handoff_complete"`, "`ready: true`", fmt.Sprintf("at most %d characters", record.MessagePostLimit)}},
+		{"merger", claim.RoleMerger, false, []string{"mechanics/headless.md", "merger.md"}, []string{"merger.md", "worker-common.md"}, []string{`op: "handoff_complete"`, "`ready: true`", fmt.Sprintf("at most %d characters", record.MessagePostLimit)}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			parts, err := composer.Compose(tc.role, tc.isRoot)
 			if err != nil {
 				t.Fatalf("Compose: %v", err)
 			}
-			want := make([]string, 0, len(tc.shared)+1)
+			want := make([]string, 0, len(tc.shared)+len(tc.goParts))
 			for _, part := range tc.shared {
 				want = append(want, filepath.Join(rolesDir, part))
 			}
-			want = append(want, filepath.Join(stateDir, "prompts", "go", tc.goPart))
+			for _, part := range tc.goParts {
+				want = append(want, filepath.Join(stateDir, "prompts", "go", part))
+			}
 			if !reflect.DeepEqual(parts.RolePromptPaths, want) {
 				t.Fatalf("RolePromptPaths = %q, want %q", parts.RolePromptPaths, want)
 			}
-			body, err := os.ReadFile(parts.RolePromptPaths[len(parts.RolePromptPaths)-1])
-			if err != nil {
-				t.Fatalf("read Go daemon part: %v", err)
+			var text strings.Builder
+			for _, path := range parts.RolePromptPaths[len(tc.shared):] {
+				body, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatalf("read Go daemon part: %v", err)
+				}
+				text.Write(body)
 			}
-			text := string(body)
 			for _, requirement := range append([]string{
 				"This Go daemon advances phases",
 				"re-read your issue record with `legion state`",
 				"notifications.legion.<project>.<issue>",
 			}, tc.contains...) {
-				if !strings.Contains(text, requirement) {
-					t.Errorf("Go daemon part %s omits %q", tc.goPart, requirement)
+				if !strings.Contains(text.String(), requirement) {
+					t.Errorf("Go daemon parts %q omit %q", tc.goParts, requirement)
 				}
 			}
 		})

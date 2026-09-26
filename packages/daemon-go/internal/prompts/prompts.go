@@ -119,7 +119,12 @@ func New(rolesDir, stateDir string) (*Composer, error) {
 	if err := os.MkdirAll(goDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create Go daemon prompt directory %s: %w", goDir, err)
 	}
-	for _, name := range []string{"architect-root.md", "architect.md", "planner.md", "implementer.md", "tester.md", "reviewer.md", "merger.md"} {
+	entries, err := goParts.ReadDir("go")
+	if err != nil {
+		return nil, fmt.Errorf("list embedded Go daemon prompts: %w", err)
+	}
+	for _, entry := range entries {
+		name := entry.Name()
 		body, err := goParts.ReadFile(filepath.Join("go", name))
 		if err != nil {
 			return nil, fmt.Errorf("read embedded Go daemon prompt %s: %w", name, err)
@@ -138,35 +143,38 @@ func New(rolesDir, stateDir string) (*Composer, error) {
 	return &Composer{rolesDir: rolesDir, goDir: goDir}, nil
 }
 
-// Compose returns the shipped daemon's shared role parts followed by this daemon's role-specific
-// override. The runtime appends addressing and deployment instructions after these paths.
+// Compose returns the shipped daemon's shared role parts followed by this daemon's parts: the
+// role's own, then the text every architect (architect-common.md) or every phase worker
+// (worker-common.md) shares. The runtime appends addressing and deployment instructions after
+// these paths.
 func (c *Composer) Compose(role claim.Role, isRoot bool) (Parts, error) {
 	if c == nil {
 		return Parts{}, fmt.Errorf("compose role prompt: nil composer")
 	}
-	var shared []string
-	var goPart string
+	var shared, daemonParts []string
 	switch role {
 	case claim.RoleArchitect:
+		name := "architect.md"
 		if isRoot {
-			shared, goPart = []string{"architect-root.md"}, "architect-root.md"
-		} else {
-			shared, goPart = []string{"architect.md"}, "architect.md"
+			name = "architect-root.md"
 		}
+		shared, daemonParts = []string{name}, []string{name, "architect-common.md"}
 	case claim.RolePlanner, claim.RoleImplementer, claim.RoleTester, claim.RoleReviewer:
 		name := string(role)
 		shared = []string{"core/common.md", filepath.Join("core", name+".md"), "mechanics/headless.md", name + ".md"}
-		goPart = name + ".md"
+		daemonParts = []string{name + ".md", "worker-common.md"}
 	case claim.RoleMerger:
-		shared, goPart = []string{"mechanics/headless.md", "merger.md"}, "merger.md"
+		shared, daemonParts = []string{"mechanics/headless.md", "merger.md"}, []string{"merger.md", "worker-common.md"}
 	default:
 		return Parts{}, fmt.Errorf("compose role prompt: unsupported role %q", role)
 	}
 
-	paths := make([]string, 0, len(shared)+1)
+	paths := make([]string, 0, len(shared)+len(daemonParts))
 	for _, part := range shared {
 		paths = append(paths, filepath.Join(c.rolesDir, part))
 	}
-	paths = append(paths, filepath.Join(c.goDir, goPart))
+	for _, part := range daemonParts {
+		paths = append(paths, filepath.Join(c.goDir, part))
+	}
 	return Parts{RolePromptPaths: slices.Clone(paths)}, nil
 }
