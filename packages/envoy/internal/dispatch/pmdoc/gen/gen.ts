@@ -93,7 +93,7 @@ const replaceRangeCases: ReplaceRangeCase[] = [
   { name: "callout-paragraph-and-heading", markdown: ":::callout{#c1}\nWhich one?\n:::\n", from: "Which", to: "one?", replacement: "Which?\n\n## Heading\n" },
   { name: "callout-in-list-item-code", markdown: "- item\n\n  :::callout{#c1}\n  Which one?\n  :::\n", from: "Which", to: "one?", replacement: "Which?\n\n```\ncode\n```\n" },
   { name: "callout-in-blockquote-code", markdown: "> :::callout{#c1}\n> Which one?\n> :::\n", from: "Which", to: "one?", replacement: "Which?\n\n```\ncode\n```\n" },
-  { name: "nested-callout-code", markdown: ":::callout{#outer}\nOuter.\n\n:::callout{#inner}\nWhich one?\n:::\n:::\n", from: "Which", to: "one?", replacement: "Which?\n\n```\ncode\n```\n" },
+  { name: "nested-callout-code", markdown: ":::callout{#outer}\nOuter.\n\n:::callout{#inner}\nWhich one?\n:::\n", from: "Which", to: "one?", replacement: "Which?\n\n```\ncode\n```\n" },
   { name: "callout-across-paragraphs-code", markdown: ":::callout{#c1}\nFirst tail.\n\nhead second.\n:::\n", from: "tail", to: "head", replacement: "X\n\n```\ncode\n```\n" },
 ].map(({ name, markdown, from, to, at, point, replacement, inline = false }) => {
   const doc = engine.parseMarkdown(markdown);

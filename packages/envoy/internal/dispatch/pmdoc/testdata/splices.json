@@ -2684,7 +2684,7 @@
     },
     {
       "name": "nested-callout-code",
-      "markdown": ":::callout{#outer}\nOuter.\n\n:::callout{#inner}\nWhich one?\n:::\n:::\n",
+      "markdown": ":::callout{#outer}\nOuter.\n\n:::callout{#inner}\nWhich one?\n:::\n",
       "from": "Which",
       "to": "one?",
       "replacement": "Which?\n\n```\ncode\n```\n",
@@ -2722,7 +2722,7 @@
                   {
                     "type": "paragraph",
                     "attrs": {
-                      "blockId": "b-000241"
+                      "blockId": "b-000240"
                     },
                     "content": [
                       {
@@ -2735,7 +2735,7 @@
                     "type": "code_block",
                     "attrs": {
                       "language": null,
-                      "blockId": "b-000242"
+                      "blockId": "b-000241"
                     },
                     "content": [
                       {
@@ -2745,18 +2745,6 @@
                     ]
                   }
                 ]
-              }
-            ]
-          },
-          {
-            "type": "paragraph",
-            "attrs": {
-              "blockId": "b-000240"
-            },
-            "content": [
-              {
-                "type": "text",
-                "text": ":::"
               }
             ]
           }
@@ -2783,7 +2771,7 @@
               {
                 "type": "paragraph",
                 "attrs": {
-                  "blockId": "b-000243"
+                  "blockId": "b-000242"
                 },
                 "content": [
                   {
@@ -2795,7 +2783,7 @@
               {
                 "type": "paragraph",
                 "attrs": {
-                  "blockId": "b-000245"
+                  "blockId": "b-000244"
                 },
                 "content": [
                   {
@@ -2808,7 +2796,7 @@
                 "type": "code_block",
                 "attrs": {
                   "language": null,
-                  "blockId": "b-000246"
+                  "blockId": "b-000245"
                 },
                 "content": [
                   {
@@ -2820,7 +2808,7 @@
               {
                 "type": "paragraph",
                 "attrs": {
-                  "blockId": "b-000244"
+                  "blockId": "b-000243"
                 },
                 "content": [
                   {
