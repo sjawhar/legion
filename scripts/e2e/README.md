@@ -933,6 +933,7 @@ timed-out wait runs before it fails), and defines `note` and `fail`, which exits
 | `log_size NAME` | the size of NAME's log, the offset `await_start` reads a start's own lines from |
 | `await_start NAME PID OFFSET SECONDS WHAT CMD…` | waits, bounded, for CMD to succeed while PID lives. It returns 2 when the service exited on `address already in use` after OFFSET, the one race a pick before the bind cannot close, so the caller picks again; any other exit fails naming the log |
 | `stop_pid PID` | TERM, then KILL after 10 s; best effort, so a failed cleanup never hides the check that failed |
+| `stop_tree PID` | stops a background loop with every process under it: it freezes the loop, stops each child the same way, then kills the loop, so the `kubectl`, `jq` or `sleep` the loop was waiting on goes with it. Stage 3's and Stage 4b's watchers are stopped with it |
 | `run_processes` | prints every pid whose working directory or command line names `$work` |
 
 ## lib/workflow.sh
