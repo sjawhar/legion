@@ -228,6 +228,9 @@ type Store interface {
 	FinishOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) error
 	RetryOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string, nextAt time.Time, lastErr string) error
 	PendingStatusWrites(ctx context.Context, tx pgx.Tx, project string) ([]OutboxRow, error)
+	// EarlierNotices is every unfinished notice row of tree's issues written before row id, oldest
+	// first: the notices a later one of the tree must not overtake for the architect they share.
+	EarlierNotices(ctx context.Context, tx pgx.Tx, tree string, id int64) ([]OutboxRow, error)
 }
 
 // ParentOf is an observed parent key as a record holds it: nil for none. Dispatch says "no parent"

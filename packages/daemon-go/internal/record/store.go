@@ -415,11 +415,8 @@ func (s *Postgres) Enqueue(ctx context.Context, tx pgx.Tx, row OutboxRow) error 
 // project's row from its own daemon. An issue's Dispatch status writes run one at a time in the
 // order they were made: a status row waits while an older one for the same issue is unfinished,
 // because each carries the status its predecessor leaves, and a newer write run first would find the
-// board short of it and finish unwritten as though a human had moved it. A tree's notices run one
-// at a time in the order they were made, for the same reason: each goes to its issue's owning
-// architect, an architect of the tree, and one held while that architect holds no role waits for
-// it (daemon's notice executor), so a newer notice run first would reach the architect ahead of
-// the one written before it. Supervise rows need no such rule: a stop names the run it ends through the claim's own record of the newest start run
+// board short of it and finish unwritten as though a human had moved it. Supervise rows need no
+// such rule: a stop names the run it ends through the claim's own record of the newest start run
 // against it (claims.last_start_row), so ordering them here would buy nothing that survives a
 // retry the runtime delayed.
 func (s *Postgres) ClaimDue(ctx context.Context, tx pgx.Tx, project string, now time.Time, limit int, leaseFor time.Duration) ([]OutboxRow, error) {
@@ -433,12 +430,8 @@ func (s *Postgres) ClaimDue(ctx context.Context, tx pgx.Tx, project string, now 
 		where split_part(issue, '-', 1) = $4 and next_at <= $1 and (lease_until is null or lease_until <= $1)
 		and not (kind = $3 and exists (select 1 from outbox older
 			where older.kind = $3 and older.issue = outbox.issue and older.id < outbox.id))
-		and not (kind = $5 and exists (select 1 from outbox older
-			join issues older_issue on older_issue.key = older.issue
-			join issues row_issue on row_issue.key = outbox.issue
-			where older.kind = $5 and older_issue.tree = row_issue.tree and older.id < outbox.id))
 		order by next_at, id limit $2 for update skip locked`,
-		now, limit, string(OutboxKindDispatchStatus), project, string(OutboxKindNotice))
+		now, limit, string(OutboxKindDispatchStatus), project)
 	if err != nil {
 		return nil, fmt.Errorf("claim due outbox rows: %w", err)
 	}
@@ -466,6 +459,28 @@ func (s *Postgres) ClaimDue(ctx context.Context, tx pgx.Tx, project string, now 
 		claimed[i].LeaseToken, claimed[i].LeaseUntil = token, &until
 	}
 	return claimed, nil
+}
+
+func (s *Postgres) EarlierNotices(ctx context.Context, tx pgx.Tx, tree string, id int64) ([]OutboxRow, error) {
+	rows, err := tx.Query(ctx, `select `+outboxColumns+` from outbox
+		where kind = $1 and id < $2 and issue in (select key from issues where tree = $3)
+		order by id`, string(OutboxKindNotice), id, tree)
+	if err != nil {
+		return nil, fmt.Errorf("read the notices of %s before row %d: %w", tree, id, err)
+	}
+	defer rows.Close()
+	earlier := []OutboxRow{}
+	for rows.Next() {
+		row, err := scanOutbox(rows)
+		if err != nil {
+			return nil, fmt.Errorf("read the notices of %s before row %d: %w", tree, id, err)
+		}
+		earlier = append(earlier, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read the notices of %s before row %d: %w", tree, id, err)
+	}
+	return earlier, nil
 }
 
 func (s *Postgres) FinishOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) error {
