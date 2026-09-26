@@ -2276,6 +2276,44 @@ func TestApplyOperationReplaceWithNothingEmptiesTheParagraph(t *testing.T) {
 	}
 }
 
+// Emptying the paragraph a callout holding only it in a footnote definition is refused, and the
+// advice is to delete the callout: the definition is then left holding an empty paragraph, which
+// reads back, so its reference stays a footnote reference rather than literal text.
+func TestApplyOperationEmptyingACalloutInAFootnoteAdvisesDeletingTheCallout(t *testing.T) {
+	tree, err := parseInput("x[^1]\n\n[^1]: :::callout{#c1 kind=\"note\" title=\"T\"}\n    Body.\n    :::\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pmdoc.EnsureBlockIDs(tree)
+	_, err = applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: ""})
+	var invalid *ErrInvalidOp
+	if !errors.As(err, &invalid) || !strings.Contains(invalid.Reason, `delete {block:"c1"}`) {
+		t.Fatalf("emptying the callout's paragraph = %v, want INVALID_OP advising delete {block:\"c1\"}", err)
+	}
+	next, err := applyOperation(tree, model.EditOp{Op: "delete", Block: "c1"})
+	if err != nil {
+		t.Fatalf("the advised delete = %v", err)
+	}
+	markdown, err := renderTree(next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := parseInput(markdown)
+	if err != nil {
+		t.Fatalf("after the advised delete, %q does not read back: %v", markdown, err)
+	}
+	var references int
+	pmdoc.Walk(back, func(node *pmdoc.Node) bool {
+		if node.Type == "footnote_reference" {
+			references++
+		}
+		return true
+	})
+	if references != 1 {
+		t.Fatalf("after the advised delete, %q holds %d footnote references, want 1", markdown, references)
+	}
+}
+
 // A lone carriage return ends a line, as in the browser editor. A replace carrying one is taken
 // where the text after it reads back where it was written - lazily continuing a paragraph, or in
 // code, under the prefix and a fence written past it - and refused where the line it starts would
