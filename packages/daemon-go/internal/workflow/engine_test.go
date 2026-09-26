@@ -127,7 +127,7 @@ func TestRefusedReadyIsCommittedAndApprovalAdvancesWithoutSecondReady(t *testing
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim"})
 	engine := testEngine()
 
-	result, err := intake.ApplyFact(ctx, pool, "api", "ready", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim", Ready: true}, engine, admissionStub{})
+	result, err := intake.ApplyFact(ctx, pool, "api", "ready", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim", Ready: true, Summary: readyPacket}, engine, admissionStub{})
 	if err != nil {
 		t.Fatalf("ApplyFact READY: %v", err)
 	}
@@ -224,7 +224,7 @@ func TestRefusedReadyAdvancesWhenTheGateReopensAtALaterVersion(t *testing.T) {
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim"})
 	engine := testEngine()
 
-	if _, err := intake.ApplyFact(ctx, pool, "api", "ready", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim", Ready: true}, engine, admissionStub{}); err != nil {
+	if _, err := intake.ApplyFact(ctx, pool, "api", "ready", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim", Ready: true, Summary: readyPacket}, engine, admissionStub{}); err != nil {
 		t.Fatalf("ApplyFact READY: %v", err)
 	}
 	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "version-5", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactVersion, Version: 5}, engine, admissionStub{}); err != nil {
@@ -387,15 +387,44 @@ func TestProductionCheckCompletionTellsTheArchitectAndAwaitsSignOff(t *testing.T
 	assertOutboxKinds(t, pool, []string{"notice"})
 }
 
+// The architect learns what a phase produced from its phase-finished notice: the worker's own
+// summary, and beside it the verdict the tester gave. Neither stands in for the other; a notice
+// that carried the verdict in its summary told the architect "pass" and nothing the tester wrote.
+func TestAPhaseFinishedNoticeCarriesTheWorkersSummaryAndItsVerdict(t *testing.T) {
+	pool := migratedPool(t)
+	ctx := context.Background()
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim"})
+
+	if _, err := intake.ApplyFact(ctx, pool, "api", "tester-passed", intake.HandoffComplete{
+		Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim", Generation: 1, Summary: "twelve scenarios pass against the head", Verdict: "pass", Commit: "test-handoff",
+	}, testEngine(), admissionStub{}); err != nil {
+		t.Fatalf("ApplyFact tester completion: %v", err)
+	}
+	var payload []byte
+	if err := pool.QueryRow(ctx, "select payload from outbox where kind = 'notice' and payload->>'kind' = 'phase-finished'").Scan(&payload); err != nil {
+		t.Fatalf("read the phase-finished notice: %v", err)
+	}
+	var notice map[string]any
+	if err := json.Unmarshal(payload, &notice); err != nil {
+		t.Fatalf("decode notice %s: %v", payload, err)
+	}
+	if notice["role"] != "tester" || notice["phase"] != "testing" || notice["summary"] != "twelve scenarios pass against the head" || notice["verdict"] != "pass" {
+		t.Fatalf("phase-finished notice = %s, want the tester's summary and its verdict pass", payload)
+	}
+}
+
 // Linger suspends, and its expiry stops, every claim the tree holds — the root architect admission
 // started and a worker that never reported a handoff included, neither of which has a phase row.
+// Every expiry row names the root generation whose linger it expires, a child's too, which keeps
+// the earlier generation of the run that admitted it.
 func TestSignOffLingersOnceAndExpiryStopsTreeAndRemovesEveryWorkspace(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
 	now := time.Date(2026, 9, 23, 4, 0, 0, 0, time.UTC)
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.ProductionCheck, Generation: 7, Status: "retro", Rank: "U"})
 	parent := "LEGION-208"
-	seedIssue(t, pool, record.Issue{Key: "LEGION-209", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent, Phase: phase.Implementing, Generation: 7, Status: "in_progress", Rank: "V"})
+	seedIssue(t, pool, record.Issue{Key: "LEGION-209", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent, Phase: phase.Implementing, Generation: 3, Status: "in_progress", Rank: "V"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implementer", HandoffCommit: "production-check"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-209", Role: claim.RoleImplementer, Claim: "child-implementer"})
 	engine := New(record.NewStore(), Config{Project: "LEGION", Linger: time.Hour, Clock: func() time.Time { return now }}, nil)
@@ -438,6 +467,11 @@ func TestSignOffLingersOnceAndExpiryStopsTreeAndRemovesEveryWorkspace(t *testing
 		t.Fatalf("linger expiry stopped %v, want each tree claim once: %v", stopped, everyClaim)
 	}
 	assertOutboxCount(t, pool, "workspace_remove", 2)
+	var other int
+	if err := pool.QueryRow(ctx, `select count(*) from outbox where (kind = 'workspace_remove' or (kind = 'supervise' and payload->>'op' = 'tree_close'))
+		and payload->>'linger' is distinct from '7'`).Scan(&other); err != nil || other != 0 {
+		t.Fatalf("expiry rows naming another linger than the root's generation 7 = %d, %v; want none", other, err)
+	}
 }
 
 // superviseRequests counts the enqueued supervise requests of one operation by issue/role.
@@ -542,9 +576,9 @@ func TestRemainingForwardRowsApplyThroughIntake(t *testing.T) {
 				seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact", LatestVersion: 1, ApprovedVersion: new(1)})
 			},
 			fact: func() intake.Fact {
-				return intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "claim", Ready: true}
+				return intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "claim", Ready: true, Summary: "READY #42 at head (approved at head) for LEGION-208 (https://github.com/sjawhar/legion/pull/42)"}
 			},
-			wantPhase: phase.AwaitingMerge, wantStatus: "retro", wantOutbox: []string{"supervise", "notice"},
+			wantPhase: phase.AwaitingMerge, wantStatus: "retro", wantOutbox: []string{"supervise", "notice", "dispatch_message"},
 		},
 		{
 			name: "merged pull request", current: phase.AwaitingMerge,

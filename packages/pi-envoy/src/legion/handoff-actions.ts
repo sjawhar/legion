@@ -44,7 +44,8 @@ export function handoffSchemaFields(z: PiZod): Readonly<Record<string, unknown>>
 /** The handoff actions' part of the tool description. */
 export const HANDOFF_DESCRIPTION =
   "Handoff actions (phase workers and sub-architects): handoff_write writes this phase's handoff " +
-  "(`phase`, and `data`: the phase-specific fields as a JSON object) to `.legion/<phase>.json` in " +
+  "(`phase`, and `data`: the phase-specific fields as a JSON object, never the schemaVersion, " +
+  "phase and completed the command writes itself) to `.legion/<phase>.json` in " +
   "the issue workspace; handoff_read returns the handoffs (every phase, or `phase`); " +
   "handoff_complete reports this phase complete to the daemon (`summary`: two sentences for the " +
   "architect; `verdict` pass|fail when your role's instructions require one; `ready: true` for " +
@@ -52,19 +53,21 @@ export const HANDOFF_DESCRIPTION =
   "returns the command's output; a failed action changed nothing. What a later phase needs goes " +
   "in your handoff; a question for another live role goes to its role topic with envoy_publish.";
 
-/** The handoff phase each role writes, by the pane's LEGION_ROLE in either vocabulary, as the Go
- * CLI's `handoffFiles` maps it (`packages/daemon-go/cmd/legion/handoff.go`). The merger writes no
- * handoff. */
+/** Why a root architect, which runs no phase, cannot call a handoff action, and the one route it
+ * has: its bash admits a single `legion` command, so it reads handoffs with `legion handoff read`. */
+export function rootArchitectHandoffRefusal(operation: string): string {
+  return `${operation} is not available to a root architect session; a root architect reads handoffs with \`legion handoff read [--phase <phase>]\` from bash`;
+}
+
+/** The handoff phase each role writes, by the pane's LEGION_ROLE (always a claim role): the phase
+ * word of the file-backed phase it runs, the file the Go daemon's `phase.HandoffFile` names for that
+ * phase (`packages/daemon-go/internal/phase/phase.go`). The merger writes no handoff. */
 const ROLE_HANDOFF_PHASE: Readonly<Record<string, string>> = {
   architect: "architect",
   planner: "plan",
-  plan: "plan",
   implementer: "implement",
-  implement: "implement",
   tester: "test",
-  test: "test",
   reviewer: "review",
-  review: "review",
 };
 
 /** The bash tool's default timeout, which bounded these commands when they ran through bash. */

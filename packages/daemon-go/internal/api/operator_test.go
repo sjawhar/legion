@@ -183,7 +183,8 @@ func TestDeliverQueuesATaskOnTheClaim(t *testing.T) {
 // suspend, resume, and stop are the machine's requests: each answers the claim as the request
 // left it, the machine's refusal when its state does not allow the request, and 404 for a claim
 // the daemon does not hold. The tree's root claim ends only when its tree closes, so the operator's
-// stop of it is refused and names suspend; a worker's claim it stops.
+// stop of it is refused, names suspend, and, since no workflow issue backs this tree, names the
+// close that ends it; a worker's claim it stops.
 func TestSuspendResumeAndStopDriveTheClaimsMachine(t *testing.T) {
 	h := newHarness(t)
 	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
@@ -236,7 +237,7 @@ func TestSuspendResumeAndStopDriveTheClaimsMachine(t *testing.T) {
 		t.Errorf("released %s, want %s", releases[0].Released.Claim, workerToken)
 	}
 	wantRefusal(t, h.operator(http.MethodPost, route(architectToken, "stop"), nil), http.StatusConflict,
-		"stop refused: the tree's root claim ends only when its tree closes; suspend it to stop its process once its agent has registered")
+		"stop refused: the tree's root claim ends only when its tree closes; suspend it to stop its process once its agent has registered; no workflow issue backs its tree, so legion claims close ends it")
 	if releases := h.runtime.CallsOf("Release"); len(releases) != 1 {
 		t.Errorf("the refused stop of the root reached the runtime: %+v", releases)
 	}

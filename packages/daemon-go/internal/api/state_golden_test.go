@@ -331,4 +331,6 @@ func TestTask310RouteGoldens(t *testing.T) {
 	golden(t, "phase-backward.json", PhaseBackwardResponse{})
 	golden(t, "phase-retry.json", PhaseRetryResponse{})
 	golden(t, "signoff.json", SignOffResponse{})
+	golden(t, "child-park.json", EmptyResponse{})
+	golden(t, "child-rerun.json", EmptyResponse{})
 }

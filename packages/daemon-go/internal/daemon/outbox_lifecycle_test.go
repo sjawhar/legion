@@ -633,6 +633,29 @@ func TestARetryOfAClaimThatKeptItsPhasesTaskDeliversNothingMore(t *testing.T) {
 	}
 }
 
+// A held claim can keep a confirmed task only when the write retiring it failed: its turn is over,
+// and the relaunch's first decision retires it. The retry's own task then goes in its place, where
+// a check made before the relaunch, seeing the task still held, would relaunch the claim with
+// nothing to do.
+func TestARetryOfAClaimWhoseKeptTasksTurnWasOverDeliversItsTask(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Implementing, Generation: 1, Status: "in_progress"}
+	putOutboxIssue(t, pool, records, issue)
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	kept := supervise.Delivery{ID: "kept-task", Task: "Continue Workflow. Issue: LEGION-208. Phase: implementing.",
+		Phase: phase.Implementing, Generation: issue.Generation, QueuedAt: time.Now(), DeliveredAt: time.Now(), ConfirmedAt: time.Now()}
+	machine := heldImplementer(t, sup, issue, kept)
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets")}
+
+	if err := runner.execute(context.Background(), retryHeldPhase(t, issue)); err != nil {
+		t.Fatalf("start the held claim: %v", err)
+	}
+	if got := machine.Claim().Pending; got == nil || got.ID != "outbox:92" {
+		t.Fatalf("retried claim pending %+v, want the retry's own task", got)
+	}
+}
+
 // A kept task of another phase or another run is not the retry's work, so the start still hands
 // the claim its own task: the delivery waits behind the kept task (the claim refuses a second
 // pending one), and the row is retried until it goes.

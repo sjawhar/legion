@@ -72,6 +72,13 @@ type SignOffRequest struct {
 // SignOffResponse confirms the sign-off fact committed.
 type SignOffResponse struct{}
 
+// ChildRequest names the child of the architect's tree that park_child takes out of the workflow
+// or rerun_child runs again.
+type ChildRequest struct {
+	GrantID string `json:"grantId"`
+	Issue   string `json:"issue"`
+}
+
 func (s *server) architectGrant(w http.ResponseWriter, id string) (credential.Grant, bool) {
 	grant, ok := s.redeem(w, id)
 	if !ok {
@@ -409,6 +416,93 @@ func (s *server) signOff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.applyFact(w, r, requestFactID("signoff"), intake.SignOff{Issue: req.Issue}, SignOffResponse{})
+}
+
+// parkChild takes a running child of the architect's tree out of the workflow by moving it to
+// backlog in Dispatch, the move a human would make. The move's event parks it as it parks any child
+// leaving the workflow (the workflow's leave): its workers are suspended and its phase parked, and
+// the architect is told. rerun_child, or release_children on the backlog child, runs it again.
+func (s *server) parkChild(w http.ResponseWriter, r *http.Request) {
+	child, ok := s.childOfTree(w, r)
+	if !ok {
+		return
+	}
+	if child.Phase == phase.Done {
+		writeFailure(w, http.StatusConflict, "CHILD_NOT_RUNNING", fmt.Sprintf("%s is already out of the workflow; rerun_child runs it again", child.Key))
+		return
+	}
+	if s.setDispatchStatus(w, r, child.Key, "backlog") {
+		writeJSON(w, http.StatusOK, EmptyResponse{})
+	}
+}
+
+// rerunChild runs a child of the architect's tree again once it is out of the workflow, parked or
+// signed off, by moving it to todo in Dispatch, the move a human would make. The move's event starts
+// the child's next run under the tree from planning (the workflow's reenterChild). A running child
+// is parked first, and a lingering tree runs nothing more; a todo it reached anyway would admit the
+// child as an orphan root of its own.
+func (s *server) rerunChild(w http.ResponseWriter, r *http.Request) {
+	child, ok := s.childOfTree(w, r)
+	if !ok {
+		return
+	}
+	if child.Phase != phase.Done {
+		writeFailure(w, http.StatusConflict, "CHILD_RUNNING", fmt.Sprintf("%s is in phase %s; park_child takes it out of the workflow before rerun_child runs it again", child.Key, child.Phase))
+		return
+	}
+	root, err := s.recordedIssue(r.Context(), child.Tree)
+	if err != nil || root == nil {
+		writeFailure(w, http.StatusInternalServerError, "RECORD_UNAVAILABLE", "could not read the tree root")
+		return
+	}
+	if root.Lingers() {
+		writeFailure(w, http.StatusConflict, "TREE_LINGERING", fmt.Sprintf("the tree %s is lingering after it left the workflow, so %s cannot run in it again", root.Key, child.Key))
+		return
+	}
+	if s.setDispatchStatus(w, r, child.Key, "todo") {
+		writeJSON(w, http.StatusOK, EmptyResponse{})
+	}
+}
+
+// childOfTree reads a ChildRequest and authorizes it: an architect's grant, and an issue of its tree
+// other than the tree root, which leaves the workflow only with the whole tree.
+func (s *server) childOfTree(w http.ResponseWriter, r *http.Request) (record.Issue, bool) {
+	var req ChildRequest
+	if !readBody(w, r, &req) || !requireFailureFields(w, field{"grantId", req.GrantID}, field{"issue", req.Issue}) {
+		return record.Issue{}, false
+	}
+	if !claim.IsIssueKey(req.Issue) {
+		writeFailure(w, http.StatusBadRequest, "INVALID_ISSUE", "issue is not an issue key")
+		return record.Issue{}, false
+	}
+	_, child, ok := s.architectForIssue(w, r, req.GrantID, req.Issue)
+	if !ok {
+		return record.Issue{}, false
+	}
+	if claim.IsTreeRoot(child.Key, child.Tree) {
+		writeFailure(w, http.StatusForbidden, "CHILD_REQUIRED", fmt.Sprintf("%s is the tree root; park_child and rerun_child take a child of it", child.Key))
+		return record.Issue{}, false
+	}
+	return child, true
+}
+
+// setDispatchStatus writes an issue's status in Dispatch, answering a refused or failed write 502.
+func (s *server) setDispatchStatus(w http.ResponseWriter, r *http.Request, issue, status string) bool {
+	if s.dispatch == nil {
+		writeFailure(w, http.StatusInternalServerError, "DISPATCH_UNAVAILABLE", "Dispatch is unavailable")
+		return false
+	}
+	err := s.dispatch.SetStatus(r.Context(), issue, status)
+	var dispatchError *dispatch.Error
+	switch {
+	case errors.As(err, &dispatchError):
+		writeFailure(w, http.StatusBadGateway, dispatchError.Code, dispatchError.Message)
+		return false
+	case err != nil:
+		writeFailure(w, http.StatusBadGateway, "DISPATCH_FAILED", "Dispatch status update failed")
+		return false
+	}
+	return true
 }
 
 func validPhase(value phase.Phase) bool {

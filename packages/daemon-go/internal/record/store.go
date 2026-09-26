@@ -7,12 +7,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
 const maxInt64 = uint64(^uint64(0) >> 1)
@@ -114,7 +116,7 @@ func scanIssue(row scanner) (*Issue, error) {
 }
 
 func (s *Postgres) Phases(ctx context.Context, tx pgx.Tx, issue string) ([]PhaseRow, error) {
-	rows, err := tx.Query(ctx, `select issue, role, claim, handoff_commit, rounds, verdict, last_handoff from phases
+	rows, err := tx.Query(ctx, `select issue, role, claim, handoff_commit, rounds, verdict, summary, last_handoff from phases
 		where issue = $1 order by role`, issue)
 	if err != nil {
 		return nil, fmt.Errorf("list phases for %s: %w", issue, err)
@@ -135,12 +137,12 @@ func (s *Postgres) Phases(ctx context.Context, tx pgx.Tx, issue string) ([]Phase
 }
 
 func (s *Postgres) PutPhase(ctx context.Context, tx pgx.Tx, phase PhaseRow) error {
-	_, err := tx.Exec(ctx, `insert into phases (issue, role, claim, handoff_commit, rounds, verdict, last_handoff)
-		values ($1, $2, $3, $4, $5, $6, $7)
+	_, err := tx.Exec(ctx, `insert into phases (issue, role, claim, handoff_commit, rounds, verdict, summary, last_handoff)
+		values ($1, $2, $3, $4, $5, $6, $7, $8)
 		on conflict (issue, role) do update set claim = excluded.claim,
 		handoff_commit = excluded.handoff_commit, rounds = excluded.rounds, verdict = excluded.verdict,
-		last_handoff = excluded.last_handoff`,
-		phase.Issue, string(phase.Role), string(phase.Claim), phase.HandoffCommit, phase.Rounds, phase.Verdict, phase.LastHandoff,
+		summary = excluded.summary, last_handoff = excluded.last_handoff`,
+		phase.Issue, string(phase.Role), string(phase.Claim), phase.HandoffCommit, phase.Rounds, phase.Verdict, phase.Summary, phase.LastHandoff,
 	)
 	if err != nil {
 		return fmt.Errorf("put %s phase on %s: %w", phase.Role, phase.Issue, err)
@@ -151,7 +153,7 @@ func (s *Postgres) PutPhase(ctx context.Context, tx pgx.Tx, phase PhaseRow) erro
 func scanPhase(row scanner) (PhaseRow, error) {
 	var phase PhaseRow
 	var role, token string
-	if err := row.Scan(&phase.Issue, &role, &token, &phase.HandoffCommit, &phase.Rounds, &phase.Verdict, &phase.LastHandoff); err != nil {
+	if err := row.Scan(&phase.Issue, &role, &token, &phase.HandoffCommit, &phase.Rounds, &phase.Verdict, &phase.Summary, &phase.LastHandoff); err != nil {
 		return PhaseRow{}, err
 	}
 	phase.Role, phase.Claim = claim.Role(role), claim.Token(token)
@@ -250,20 +252,24 @@ func (s *Postgres) SessionClaimsTree(ctx context.Context, tx pgx.Tx, tree, sessi
 }
 
 // ClearGeneration empties one issue's generation-scoped facts: a merged or closed pull request,
-// the counters of one still open, its design gate and its recorded handoffs.
+// the counters of one still open, its design gate, its recorded handoffs and a READY the gate
+// refused.
 func (s *Postgres) ClearGeneration(ctx context.Context, tx pgx.Tx, issue string) error {
-	return clearGeneration(ctx, tx, "issue = $1", issue, fmt.Sprintf("clear the generation of %s", issue))
+	return clearGeneration(ctx, tx, "issue = $1", "key = $1", issue, fmt.Sprintf("clear the generation of %s", issue))
 }
 
 // ClearTreeGeneration empties them for every issue of the tree. A root set back to todo starts a
 // new generation of the whole tree, and its children carried the old one's pull request, gate and
-// handoffs into it — a child re-entered at the new generation read a handoff of the last.
+// handoffs into it — a child re-entered at the new generation read a handoff of the last — and a
+// child's READY the old gate refused would wait on a packet cleared with those handoffs.
 func (s *Postgres) ClearTreeGeneration(ctx context.Context, tx pgx.Tx, tree string) error {
-	return clearGeneration(ctx, tx, "issue in (select key from issues where tree = $1)", tree,
+	return clearGeneration(ctx, tx, "issue in (select key from issues where tree = $1)", "tree = $1", tree,
 		fmt.Sprintf("clear the generation of tree %s", tree))
 }
 
-func clearGeneration(ctx context.Context, tx pgx.Tx, where string, key string, describe string) error {
+// clearGeneration runs each statement with key as $1: where selects the cleared issues' rows by
+// their issue column, and issues selects the same issues in the issues table.
+func clearGeneration(ctx context.Context, tx pgx.Tx, where, issues, key, describe string) error {
 	for _, statement := range []string{
 		"delete from pull_requests where " + where + " and state <> 'open'",
 		// An open pull request is kept across a new generation, but the last one's reading of it is
@@ -273,7 +279,9 @@ func clearGeneration(ctx context.Context, tx pgx.Tx, where string, key string, d
 			"planned_red = false, verdict = '', review_decision = '', failing = '[]'::jsonb, " +
 			"failing_statuses = '[]'::jsonb, check_runs = '[]'::jsonb, reconciled = false where " + where,
 		"delete from design_gates where " + where,
-		"update phases set handoff_commit = '', rounds = 0, verdict = '' where " + where,
+		"update phases set handoff_commit = '', rounds = 0, verdict = '', summary = '' where " + where,
+		// A READY the gate refused waits on the merger's packet, which the statement above clears.
+		"update issues set ready_pending_version = null where " + issues,
 	} {
 		if _, err := tx.Exec(ctx, statement, key); err != nil {
 			return fmt.Errorf("%s: %w", describe, err)
@@ -459,6 +467,60 @@ func (s *Postgres) RetryOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseTo
 		return fmt.Errorf("retry outbox row %d: %w", id, err)
 	}
 	return nil
+}
+
+// RoleRun reads one role's run of an issue generation as the store holds it: the role's supervise
+// rows for the generation still queued, oldest first, and the claim with token (this daemon's own
+// claim on the role), with the task it holds. It decides nothing:
+// workflow.StartFor reads it.
+func (s *Postgres) RoleRun(ctx context.Context, tx pgx.Tx, token claim.Token, issue string, role claim.Role, generation uint64) (RoleRun, error) {
+	rows, err := tx.Query(ctx, `select `+outboxColumns+` from outbox
+		where issue = $1 and kind = $2 and payload->>'role' = $3 and payload->>'generation' = $4 order by id`,
+		issue, string(OutboxKindSupervise), string(role), strconv.FormatUint(generation, 10))
+	if err != nil {
+		return RoleRun{}, fmt.Errorf("read the queued %s rows of %s: %w", role, issue, err)
+	}
+	defer rows.Close()
+	var run RoleRun
+	for rows.Next() {
+		row, err := scanOutbox(rows)
+		if err != nil {
+			return RoleRun{}, fmt.Errorf("read the queued %s rows of %s: %w", role, issue, err)
+		}
+		payload, err := DecodeOutboxPayload(row)
+		if err != nil {
+			return RoleRun{}, err
+		}
+		request, ok := payload.(SuperviseRequest)
+		if !ok {
+			return RoleRun{}, fmt.Errorf("outbox row %d of kind %s decodes to %T", row.ID, row.Kind, payload)
+		}
+		run.Queued = append(run.Queued, QueuedSupervise{ID: row.ID, Request: request})
+	}
+	if err := rows.Err(); err != nil {
+		return RoleRun{}, fmt.Errorf("read the queued %s rows of %s: %w", role, issue, err)
+	}
+	var held RoleClaim
+	var pending bool
+	var task supervise.Delivery
+	var confirmed *time.Time
+	err = tx.QueryRow(ctx, `select c.state, c.last_start_row, d.claim_token is not null, coalesce(d.generation, 0), coalesce(d.phase, ''), d.confirmed_at
+		from claims c left join pending_task_deliveries d on d.claim_token = c.token where c.token = $1`, string(token)).
+		Scan(&held.State, &held.LastStartRow, &pending, &task.Generation, &task.Phase, &confirmed)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+	case err != nil:
+		return RoleRun{}, fmt.Errorf("read claim %s: %w", token, err)
+	default:
+		if pending {
+			if confirmed != nil {
+				task.ConfirmedAt = *confirmed
+			}
+			held.Pending = &task
+		}
+		run.Claim = &held
+	}
+	return run, nil
 }
 
 // PendingStatusWrites lists every Dispatch status write of project's issues the outbox has not

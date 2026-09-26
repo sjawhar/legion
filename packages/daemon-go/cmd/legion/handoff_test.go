@@ -74,13 +74,36 @@ func TestHandoffWriteReadsAPayloadOverTheArgvCapFromStdin(t *testing.T) {
 	}
 }
 
-func TestHandoffCompleteRefusesUncommittedOrMissingPhaseFileBeforeHTTP(t *testing.T) {
+// The command writes a handoff's schemaVersion, phase and completed itself. A payload carrying them
+// — an agent copying handoff_read's output into data — is refused naming every one it carries and
+// that the command writes them, so the next call succeeds; nothing is written.
+func TestHandoffWriteRefusesTheFieldsItWritesNamingEach(t *testing.T) {
 	workspace := t.TempDir()
+	var out, errb bytes.Buffer
+	code := run(context.Background(), []string{"legion", "handoff", "write", "--workspace", workspace, "--phase", "implement",
+		"--data", `{"schemaVersion":1,"completed":"2026-09-25T00:00:00Z","proof":["ran it"]}`}, &out, &errb)
+	// The refusal's fixed parenthetical names every reserved field, so the carried list is asserted
+	// where the refusal lists what the data carries.
+	refusal := errb.String()
+	if code != 1 || !strings.Contains(refusal, "data carries schemaVersion, completed, which this command writes itself") {
+		t.Fatalf("handoff write with schemaVersion and completed in data = %d, stderr %q; want one refusal naming both and that the command writes them", code, refusal)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, ".legion")); !os.IsNotExist(err) {
+		t.Fatalf(".legion after the refused write: %v, want none", err)
+	}
+}
+
+// A tester whose handoff is missing is refused before any request, and the refusal names the file
+// its phase ends with, .legion/test.json.
+func TestHandoffCompleteRefusesAMissingPhaseFileBeforeTheRequest(t *testing.T) {
+	workspace, jj := handoffRepo(t)
 	t.Setenv("LEGION_ROLE", "tester")
+	t.Setenv("LEGION_JJ_PATH", jj)
+	bodies := handoffDaemon(t, phase.Testing)
 	var out, errb bytes.Buffer
 	code := run(context.Background(), []string{"legion", "handoff", "complete", "--workspace", workspace, "--summary", "tests passed", "--verdict", "pass"}, &out, &errb)
-	if code != 1 || !strings.Contains(errb.String(), filepath.Join(".legion", "test.json")) {
-		t.Fatalf("handoff complete = %d, stderr %q; want a refusal naming the tester's handoff file, .legion/test.json", code, errb.String())
+	if code != 1 || len(*bodies) != 0 || !strings.Contains(errb.String(), filepath.Join(".legion", "test.json")) {
+		t.Fatalf("handoff complete = %d, daemon read %v, stderr %q; want a refusal naming the tester's handoff file, .legion/test.json, before any request", code, *bodies, errb.String())
 	}
 }
 
@@ -108,25 +131,36 @@ esac
 	return path
 }
 
-// handoffDaemon answers /legion/v1/handoff/complete and hands back the request bodies it read.
-func handoffDaemon(t *testing.T) *[]map[string]any {
+// handoffDaemon is the daemon a pane completes its phase with: it serves the daemon's state
+// document (GET /legion/v1/state, internal/api/state.go) with the pane's issue, THIS-1, in phase p,
+// answers /legion/v1/handoff/complete, and hands back the completion bodies it read.
+func handoffDaemon(t *testing.T, p phase.Phase) *[]map[string]any {
 	t.Helper()
 	bodies := &[]map[string]any{}
+	state := api.State{Issues: map[string]api.Issue{
+		"THIS-1":  {Key: "THIS-1", Generation: 1, Phase: p},
+		"OTHER-2": {Key: "OTHER-2", Generation: 1, Phase: phase.Merging},
+	}}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/legion/v1/handoff/complete" {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/legion/v1/state":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(state)
+		case r.Method == http.MethodPost && r.URL.Path == "/legion/v1/handoff/complete":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			*bodies = append(*bodies, body)
+			_, _ = w.Write([]byte("{}"))
+		default:
 			http.NotFound(w, r)
-			return
 		}
-		var body map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		*bodies = append(*bodies, body)
-		_, _ = w.Write([]byte("{}"))
 	}))
 	t.Cleanup(server.Close)
 	t.Setenv("LEGION_DAEMON_URL", server.URL)
+	t.Setenv("LEGION_ISSUE", "THIS-1")
 	t.Setenv("LEGION_GRANT_FILE", "")
 	if err := os.Unsetenv("LEGION_GRANT_FILE"); err != nil {
 		t.Fatalf("unset LEGION_GRANT_FILE: %v", err)
@@ -152,7 +186,7 @@ func TestHandoffCompleteResolvesTheCommitWithTheJJBootResolved(t *testing.T) {
 	}
 	t.Setenv("LEGION_ROLE", "tester")
 	jj := fakeHandoffJJ(t, "c0ffee")
-	bodies := handoffDaemon(t)
+	bodies := handoffDaemon(t, phase.Testing)
 	args := []string{"legion", "handoff", "complete", "--workspace", workspace, "--summary", "tests passed", "--verdict", "pass"}
 
 	t.Setenv("LEGION_JJ_PATH", "")
@@ -178,7 +212,7 @@ func TestHandoffCompleteReadyForTheMergerNeedsNoHandoffFile(t *testing.T) {
 	workspace := t.TempDir()
 	t.Setenv("LEGION_ROLE", "merger")
 	t.Setenv("LEGION_JJ_PATH", fakeHandoffJJ(t, "beef"))
-	bodies := handoffDaemon(t)
+	bodies := handoffDaemon(t, phase.Merging)
 	var out, errb bytes.Buffer
 	if code := run(context.Background(), []string{"legion", "handoff", "complete", "--workspace", workspace, "--summary", "gate facts hold", "--ready"}, &out, &errb); code != 0 {
 		t.Fatalf("merger handoff complete --ready = %d, stderr %q", code, errb.String())
@@ -198,7 +232,7 @@ func TestHandoffCompleteSendsNoGeneration(t *testing.T) {
 	t.Setenv("LEGION_ROLE", "merger")
 	t.Setenv("LEGION_GENERATION", "7")
 	t.Setenv("LEGION_JJ_PATH", fakeHandoffJJ(t, "beef"))
-	bodies := handoffDaemon(t)
+	bodies := handoffDaemon(t, phase.Merging)
 	var out, errb bytes.Buffer
 
 	if code := run(context.Background(), []string{"legion", "handoff", "complete", "--workspace", workspace, "--summary", "gate facts hold", "--ready"}, &out, &errb); code != 0 {
@@ -254,11 +288,14 @@ func writeHandoffFile(t *testing.T, workspace, name, content string) {
 // follows its prompt from its workspace and commits the handoff must be able to complete its
 // phase, reporting the commit that carries that handoff.
 func TestHandoffCompleteAcceptsTheHandoffItsRolePromptWrites(t *testing.T) {
-	for _, tc := range []struct{ role, phase, verdict string }{
-		{"planner", "plan", ""},
-		{"implementer", "implement", ""},
-		{"tester", "test", "pass"},
-		{"reviewer", "review", ""},
+	for _, tc := range []struct {
+		role, phase, verdict string
+		current              phase.Phase
+	}{
+		{"planner", "plan", "", phase.Planning},
+		{"implementer", "implement", "", phase.Implementing},
+		{"tester", "test", "pass", phase.Testing},
+		{"reviewer", "review", "", phase.Reviewing},
 	} {
 		t.Run(tc.role, func(t *testing.T) {
 			workspace, jj := handoffRepo(t)
@@ -271,7 +308,7 @@ func TestHandoffCompleteAcceptsTheHandoffItsRolePromptWrites(t *testing.T) {
 			carrying := handoffJJ(t, jj, workspace, "log", "-r", "@-", "--no-graph", "-T", "commit_id")
 			t.Setenv("LEGION_ROLE", tc.role)
 			t.Setenv("LEGION_JJ_PATH", jj)
-			bodies := handoffDaemon(t)
+			bodies := handoffDaemon(t, tc.current)
 			args := []string{"legion", "handoff", "complete", "--summary", "phase done"}
 			if tc.verdict != "" {
 				args = append(args, "--verdict", tc.verdict)
@@ -309,7 +346,7 @@ func TestHandoffCompleteRefusesWhenOnlyAStaleBaseHandoffIsCommitted(t *testing.T
 	}
 	t.Setenv("LEGION_ROLE", "implementer")
 	t.Setenv("LEGION_JJ_PATH", jj)
-	bodies := handoffDaemon(t)
+	bodies := handoffDaemon(t, phase.Implementing)
 	errb.Reset()
 	code := run(context.Background(), []string{"legion", "handoff", "complete", "--summary", "implemented"}, &out, &errb)
 	if code != 1 || len(*bodies) != 0 {
@@ -319,18 +356,16 @@ func TestHandoffCompleteRefusesWhenOnlyAStaleBaseHandoffIsCommitted(t *testing.T
 
 // --workspace names the pane workspace from any directory. A handoff committed there completes the
 // phase whatever the caller's working directory: the committed-handoff check must not resolve the
-// handoff path against the caller's directory. The handoff is committed under both the phase and
-// the role word so this test is independent of which one the check reads.
+// handoff path against the caller's directory.
 func TestHandoffCompleteWithWorkspaceFlagIgnoresTheCallersDirectory(t *testing.T) {
 	workspace, jj := handoffRepo(t)
 	writeHandoffFile(t, workspace, "implement.json", `{"issue":"THIS-1"}`+"\n")
-	writeHandoffFile(t, workspace, "implementer.json", `{"issue":"THIS-1"}`+"\n")
 	handoffJJ(t, jj, workspace, "commit", "-m", "implement: record handoff")
 	carrying := handoffJJ(t, jj, workspace, "log", "-r", "@-", "--no-graph", "-T", "commit_id")
 	t.Chdir(t.TempDir())
 	t.Setenv("LEGION_ROLE", "implementer")
 	t.Setenv("LEGION_JJ_PATH", jj)
-	bodies := handoffDaemon(t)
+	bodies := handoffDaemon(t, phase.Implementing)
 	var out, errb bytes.Buffer
 	if code := run(context.Background(), []string{"legion", "handoff", "complete", "--workspace", workspace, "--summary", "implemented"}, &out, &errb); code != 0 {
 		t.Fatalf("handoff complete --workspace %s from another directory = %d, stderr %q", workspace, code, errb.String())
@@ -362,7 +397,7 @@ func TestHandoffCompleteRefusesAHandoffOnlyTheOriginsMainCarries(t *testing.T) {
 	t.Chdir(workspace)
 	t.Setenv("LEGION_ROLE", "implementer")
 	t.Setenv("LEGION_JJ_PATH", jj)
-	bodies := handoffDaemon(t)
+	bodies := handoffDaemon(t, phase.Implementing)
 	var out, errb bytes.Buffer
 	code := run(context.Background(), []string{"legion", "handoff", "complete", "--summary", "implemented"}, &out, &errb)
 	if code != 1 || len(*bodies) != 0 || !strings.Contains(errb.String(), "only the base branch carries it") {
@@ -396,9 +431,8 @@ func TestHandoffCompleteReportsTheProductionCheckOnTheMergedMain(t *testing.T) {
 	}
 	t.Chdir(workspace)
 	t.Setenv("LEGION_ROLE", "implementer")
-	t.Setenv("LEGION_ISSUE", "THIS-1")
 	t.Setenv("LEGION_JJ_PATH", jj)
-	bodies := handoffDaemonInPhase(t, "THIS-1", phase.ProductionCheck)
+	bodies := handoffDaemon(t, phase.ProductionCheck)
 	var out, errb bytes.Buffer
 	if code := run(context.Background(), []string{"legion", "handoff", "complete", "--summary", "production check verified"}, &out, &errb); code != 0 {
 		t.Fatalf("implementer handoff complete in production_check on the merged main = %d, stderr %q", code, errb.String())
@@ -408,42 +442,74 @@ func TestHandoffCompleteReportsTheProductionCheckOnTheMergedMain(t *testing.T) {
 	}
 }
 
-// handoffDaemonInPhase is handoffDaemon that also serves the daemon's state document
-// (GET /legion/v1/state, internal/api/state.go) with ISSUE in phase P.
-func handoffDaemonInPhase(t *testing.T, issue string, p phase.Phase) *[]map[string]any {
-	t.Helper()
-	bodies := &[]map[string]any{}
-	state := api.State{Issues: map[string]api.Issue{issue: {Key: issue, Generation: 1, Phase: p}}}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/legion/v1/state":
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(state)
-		case r.Method == http.MethodPost && r.URL.Path == "/legion/v1/handoff/complete":
-			var body map[string]any
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				w.WriteHeader(http.StatusBadRequest)
-				return
+// The phase decides what a completion reports, and it is read before anything else. Retro writes
+// no handoff, so the implementer's retro reports the commit its workspace stands on, never the
+// commit that carried its last implementing handoff: that one was already reported, and the same
+// commit in a file-backed phase would be refused as not new. A role reporting a phase it does not
+// run — a tester whose issue moved on to reviewing — is not told to write another role's handoff:
+// its completion reaches the daemon, which answers whose phase it is.
+func TestHandoffCompleteReadsThePhaseBeforeTheHandoff(t *testing.T) {
+	for _, tc := range []struct {
+		name, role string
+		current    phase.Phase
+	}{
+		{name: "the implementer's retro", role: "implementer", current: phase.Retro},
+		{name: "a tester after its phase", role: "tester", current: phase.Reviewing},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workspace, jj := handoffRepo(t)
+			t.Chdir(workspace)
+			writeHandoffFile(t, workspace, "implement.json", `{"issue":"THIS-1"}`+"\n")
+			handoffJJ(t, jj, workspace, "commit", "-m", "implement: record handoff")
+			if err := os.WriteFile(filepath.Join(workspace, "docs.md"), []byte("learning\n"), 0o644); err != nil {
+				t.Fatal(err)
 			}
-			*bodies = append(*bodies, body)
-			_, _ = w.Write([]byte("{}"))
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	t.Cleanup(server.Close)
-	t.Setenv("LEGION_DAEMON_URL", server.URL)
-	t.Setenv("LEGION_GRANT_FILE", "")
-	if err := os.Unsetenv("LEGION_GRANT_FILE"); err != nil {
-		t.Fatalf("unset LEGION_GRANT_FILE: %v", err)
+			handoffJJ(t, jj, workspace, "commit", "-m", "docs: the retro's learning")
+			standing := handoffJJ(t, jj, workspace, "log", "-r", "@-", "--no-graph", "-T", "commit_id")
+			t.Setenv("LEGION_ROLE", tc.role)
+			t.Setenv("LEGION_JJ_PATH", jj)
+			bodies := handoffDaemon(t, tc.current)
+			args := []string{"legion", "handoff", "complete", "--summary", "done"}
+			if tc.role == "tester" {
+				args = append(args, "--verdict", "pass")
+			}
+			var out, errb bytes.Buffer
+			if code := run(context.Background(), args, &out, &errb); code != 0 {
+				t.Fatalf("%s handoff complete in %s = %d, stderr %q", tc.role, tc.current, code, errb.String())
+			}
+			if len(*bodies) != 1 || (*bodies)[0]["commit"] != standing {
+				t.Fatalf("daemon read %v, want one completion naming %s, the commit the workspace stands on", *bodies, standing)
+			}
+		})
 	}
-	t.Setenv("LEGION_GRANT", "grant-1")
-	// The pane's identity is the one the daemon puts on it; a caller's exported JJ_USER/JJ_EMAIL
-	// would otherwise be what `ownHandoff` compares the commit's author against, so whether these
-	// tests pass would depend on the shell that ran them.
-	t.Setenv("JJ_USER", "")
-	t.Setenv("JJ_EMAIL", "")
-	return bodies
+}
+
+// A handoff is written under its phase word, the one every role prompt passes to the legion tool's
+// handoff_write (plan, implement, test, review, and the sub-architect's architect), and a pane's
+// LEGION_ROLE is its claim role. A role word as a phase would write a file nothing reads, and a
+// phase word as the role names no claim, so each is refused.
+func TestHandoffTakesPhaseWordsForPhasesAndRolesForRoles(t *testing.T) {
+	workspace := t.TempDir()
+	var out, errb bytes.Buffer
+	for _, args := range [][]string{
+		{"write", "--phase", "planner", "--data", `{"summary":"done"}`},
+		{"write", "--phase", "merge", "--data", `{"summary":"done"}`},
+		{"read", "--phase", "implementer"},
+	} {
+		errb.Reset()
+		if code := run(context.Background(), append([]string{"legion", "handoff", args[0], "--workspace", workspace}, args[1:]...), &out, &errb); code != 2 {
+			t.Fatalf("legion handoff %v = %d, stderr %q; want the usage refusal", args, code, errb.String())
+		}
+	}
+	if entries, err := os.ReadDir(filepath.Join(workspace, ".legion")); !os.IsNotExist(err) {
+		t.Fatalf(".legion after the refused writes: %v %v, want none", entries, err)
+	}
+	t.Setenv("LEGION_ROLE", "test")
+	bodies := handoffDaemon(t, phase.Testing)
+	errb.Reset()
+	if code := run(context.Background(), []string{"legion", "handoff", "complete", "--workspace", workspace, "--summary", "done", "--verdict", "pass"}, &out, &errb); code != 1 || len(*bodies) != 0 || !strings.Contains(errb.String(), "LEGION_ROLE") {
+		t.Fatalf("handoff complete with LEGION_ROLE=test = %d, daemon read %v, stderr %q; want a refusal naming LEGION_ROLE", code, *bodies, errb.String())
+	}
 }
 
 // The end game every clean review round ends in (skills/legion-worker/SKILL.md: the reviewer
@@ -455,9 +521,12 @@ func handoffDaemonInPhase(t *testing.T, issue string, p phase.Phase) *[]map[stri
 // packages/pi-envoy/roles/implementer.md and tester.md say the same). The commit that deleted the
 // handoff is the last commit on the branch that changed it, and the completion reports it.
 func TestHandoffCompleteAfterTheLegionDeletionRecreatesNothing(t *testing.T) {
-	for _, tc := range []struct{ role, verdict string }{
-		{"implementer", ""},
-		{"tester", "pass"},
+	for _, tc := range []struct {
+		role, verdict string
+		current       phase.Phase
+	}{
+		{"implementer", "", phase.Implementing},
+		{"tester", "pass", phase.Testing},
 	} {
 		t.Run(tc.role, func(t *testing.T) {
 			workspace, jj := handoffRepo(t)
@@ -477,7 +546,7 @@ func TestHandoffCompleteAfterTheLegionDeletionRecreatesNothing(t *testing.T) {
 			deletion := handoffJJ(t, jj, workspace, "log", "-r", "@-", "--no-graph", "-T", "commit_id")
 			t.Setenv("LEGION_ROLE", tc.role)
 			t.Setenv("LEGION_JJ_PATH", jj)
-			bodies := handoffDaemon(t)
+			bodies := handoffDaemon(t, tc.current)
 			args := []string{"legion", "handoff", "complete", "--summary", "the .legion/ deletion is pushed"}
 			if tc.verdict != "" {
 				args = append(args, "--verdict", tc.verdict)
@@ -528,7 +597,7 @@ func TestHandoffCompleteRefusesAHandoffCommitAnotherAppAuthored(t *testing.T) {
 			as("commit", "-m", "test: record handoff")
 			t.Setenv("LEGION_ROLE", "tester")
 			t.Setenv("LEGION_JJ_PATH", jj)
-			bodies := handoffDaemon(t)
+			bodies := handoffDaemon(t, phase.Testing)
 			// After the harness, which clears whatever identity the calling shell exported.
 			t.Setenv("JJ_USER", "legion-reviewer[bot]")
 			t.Setenv("JJ_EMAIL", "bot@example.invalid")

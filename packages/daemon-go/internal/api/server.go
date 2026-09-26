@@ -134,6 +134,8 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 	mux.HandleFunc("POST /legion/v1/phase/backward", s.phaseBackward)
 	mux.HandleFunc("POST /legion/v1/phase/retry", s.phaseRetry)
 	mux.HandleFunc("POST /legion/v1/signoff", s.signOff)
+	mux.HandleFunc("POST /legion/v1/children/park", s.parkChild)
+	mux.HandleFunc("POST /legion/v1/children/rerun", s.rerunChild)
 
 	mux.HandleFunc("POST /legion/v1/operator/claims", s.operator(s.spawn))
 	mux.HandleFunc("GET /legion/v1/operator/claims", s.operator(s.list))

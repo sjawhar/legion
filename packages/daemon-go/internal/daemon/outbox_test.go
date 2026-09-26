@@ -20,6 +20,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -166,6 +167,47 @@ func TestOutboxNoticeReturnsPublisherFailure(t *testing.T) {
 	}
 }
 
+// The READY packet reaches the project's merge queue role as the message of one publish to its
+// role topic, keyed by the row so a retried row is one delivery.
+func TestOutboxMergeQueuePublishSendsThePacketToTheRole(t *testing.T) {
+	row := mustOutboxRow(t, "LEGION-2", record.MergeQueuePublish{Role: "merge-queue", Packet: "READY #7 at abc (approved at abc) for LEGION-2 (https://example.test/7)"}, time.Now())
+	row.ID = 57
+	publisher, client := &outboxPublisher{}, &outboxDispatch{}
+
+	if err := (&outbox{notices: publisher, dispatch: client}).execute(context.Background(), row); err != nil {
+		t.Fatalf("execute merge queue publish: %v", err)
+	}
+	if got := publisher.publishes(); len(got) != 1 || got[0] != (outboxPublish{topic: "notifications.role.merge-queue", message: "READY #7 at abc (approved at abc) for LEGION-2 (https://example.test/7)", key: "legion-outbox:57"}) {
+		t.Fatalf("publishes = %#v, want the packet on the merge queue role's topic once", got)
+	}
+	if len(client.messages) != 0 {
+		t.Fatalf("Dispatch messages = %q, want none when the role took the packet", client.messages)
+	}
+}
+
+// A merge queue role with no live holder cannot take the packet, and waiting would retry forever:
+// the Dispatch message already carries it, so the issue is told the role had no holder, as the
+// shared merger prompt has the merger say, and the row is done.
+func TestOutboxMergeQueueWithNoLiveHolderSaysSoOnTheIssue(t *testing.T) {
+	row := mustOutboxRow(t, "LEGION-2", record.MergeQueuePublish{Role: "merge-queue", Packet: "READY #7"}, time.Now())
+	row.ID = 58
+	publisher := &outboxPublisher{err: fmt.Errorf("publish notice to notifications.role.merge-queue: %w: no holder for role merge-queue", notify.ErrNoHolder)}
+	client := &outboxDispatch{}
+	runner := &outbox{notices: publisher, dispatch: client, now: func() time.Time { return time.Date(2026, 9, 25, 3, 4, 5, 0, time.UTC) }}
+
+	if err := runner.execute(context.Background(), row); err != nil {
+		t.Fatalf("execute merge queue publish with no holder: %v", err)
+	}
+	if got := client.messages; len(got) != 1 || !strings.HasPrefix(got[0], "merge queue role merge-queue had no live holder at 2026-09-25T03:04:05Z") || !strings.HasSuffix(got[0], "<!-- legion-outbox:58 -->") {
+		t.Fatalf("Dispatch messages = %q, want one naming the role with no live holder", got)
+	}
+
+	publisher.err = errors.New("listener unavailable")
+	if err := runner.execute(context.Background(), row); err == nil || !strings.Contains(err.Error(), "listener unavailable") {
+		t.Fatalf("merge queue publish failure = %v, want the listener failure, retried", err)
+	}
+}
+
 func TestOutboxGateSeedAppliesApprovedFactAndReturnsApprovalFailure(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
@@ -243,14 +285,16 @@ func TestOutboxLingerAppliesExpirationAndReturnsHandlerFailure(t *testing.T) {
 func TestOutboxWorkspaceRemovalUsesDeterministicLocationAndReturnsFailure(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
-	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Done, Generation: 2, Status: "done"}
+	// A workspace removal is the expiry of the tree's linger, so the tree lingers when it runs.
+	until := time.Now().Add(-time.Minute)
+	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Done, Generation: 2, Status: "done", LingerUntil: &until}
 	putOutboxIssue(t, pool, records, issue)
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
-	row := mustOutboxRow(t, issue.Key, record.WorkspaceRemove{Generation: issue.Generation}, time.Now())
+	row := mustOutboxRow(t, issue.Key, record.WorkspaceRemove{Linger: issue.Generation}, time.Now())
 	var removed workspace.Workspace
 	runner := &outbox{
 		dispatchProject: "LEGION",
-		pool:            pool, records: records, supervisor: sup, log: quietLogger(),
+		pool:            pool, records: records, supervisor: sup, project: "legion", log: quietLogger(),
 		stateDir: t.TempDir(),
 		repo:     ghrepo.MustParse("acme/widgets"),
 		remove: func(_ context.Context, got workspace.Workspace) error {
@@ -325,11 +369,60 @@ func TestOutboxSuperviseStartsResumesSuspendsStopsAndDeduplicatesDelivery(t *tes
 	if len(runtime.CallsOf("Resume")) != 1 {
 		t.Fatalf("resume calls = %d, want one", len(runtime.CallsOf("Resume")))
 	}
-	if err := runner.execute(context.Background(), mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "tree_close", Tree: issue.Tree, Role: claim.RolePlanner, Generation: issue.Generation}, time.Now())); err != nil {
+	// A tree's close is the expiry of its linger.
+	until := time.Now().Add(-time.Minute)
+	issue.Phase, issue.Status, issue.LingerUntil = phase.Done, "done", &until
+	putOutboxIssue(t, pool, records, issue)
+	if err := runner.execute(context.Background(), mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "tree_close", Tree: issue.Tree, Role: claim.RolePlanner, Generation: issue.Generation, Linger: issue.Generation}, time.Now())); err != nil {
 		t.Fatalf("close the planner's tree: %v", err)
 	}
 	if got := machine.Claim().State; got != supervise.StateRetired {
 		t.Fatalf("claim state after its tree's close = %s, want retired", got)
+	}
+}
+
+// A start queued before its tree closed, backing off, reaches its claim after the close's suspend.
+// Linger holds the member where it stood, so the start finishes without resuming the worker, and
+// records no start, so the close's suspend still applies if it runs later. Once re-admission ends
+// the linger, the same start resumes the worker.
+func TestAStartOnALingeringTreeResumesNothing(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	ctx := context.Background()
+	until := time.Now().Add(time.Hour)
+	root := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "root", Phase: phase.Done, Generation: 1, Status: "done", Rank: "U", LingerUntil: &until}
+	putOutboxIssue(t, pool, records, root)
+	parent := root.Key
+	child := record.Issue{Key: "LEGION-209", Project: "LEGION", Tree: root.Key, Parent: &parent, Title: "child", Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "V"}
+	putOutboxIssue(t, pool, records, child)
+	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
+	token, err := claim.NewToken("legion", child.Key, claim.RoleTester)
+	if err != nil {
+		t.Fatal(err)
+	}
+	machine, _, err := sup.Create(ctx, supervise.Claim{Token: token, Project: "legion", Tree: root.Key, Issue: child.Key, Role: claim.RoleTester, Generation: 1,
+		State: supervise.StateSuspended, Session: "ses_tester", SessionFile: "/sessions/tester.jsonl"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), log: quietLogger(), now: time.Now}
+	start := mustOutboxRow(t, child.Key, record.SuperviseRequest{Op: "start", Tree: root.Key, Role: claim.RoleTester, Generation: 1, Phase: phase.Testing, Task: "Carry on testing."}, time.Now())
+	start.ID = 57
+
+	if err := runner.execute(ctx, start); err != nil {
+		t.Fatalf("start on the lingering tree = %v, want finished without acting", err)
+	}
+	if got := machine.Claim(); got.State != supervise.StateSuspended || got.LastStartRow != 0 || len(rt.CallsOf("Resume")) != 0 {
+		t.Fatalf("tester after a start on the lingering tree = %s with last start %d and %d resumes, want suspended, no start recorded, none",
+			got.State, got.LastStartRow, len(rt.CallsOf("Resume")))
+	}
+	root.LingerUntil = nil
+	putOutboxIssue(t, pool, records, root)
+	if err := runner.execute(ctx, start); err != nil {
+		t.Fatalf("start once the tree runs again: %v", err)
+	}
+	if got := machine.Claim(); got.LastStartRow != 57 || len(rt.CallsOf("Resume")) != 1 {
+		t.Fatalf("tester once the tree runs again = %s with last start %d and %d resumes, want resumed by row 57", got.State, got.LastStartRow, len(rt.CallsOf("Resume")))
 	}
 }
 
@@ -366,6 +459,357 @@ func TestOutboxStartRelaunchesAFailedClaim(t *testing.T) {
 	}
 	if got := machine.Claim(); got.State != supervise.StateLaunching || got.Budgets != (supervise.Budgets{}) || got.Pending == nil || got.Pending.ID != "outbox:91" {
 		t.Fatalf("retried claim = %+v, want launching with fresh budgets and the retry task pending", got)
+	}
+}
+
+// A claim that holds its phase's task when a re-admitted tree's promotion starts it (its launches
+// failed, the tree's close retired it, or it never got past queued) is given that task once it is
+// ready. The promotion's start carries the phase's resume task, which is not delivered as well,
+// whichever of the start and the close's queued suspend runs first: one prompt, not two.
+func TestAResumeStartGivesAClaimHoldingThePhasesTaskThatTaskOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		hold func(t *testing.T, machine *supervise.Machine, token claim.Token, rt *fake.Runtime)
+	}{
+		{name: "failed", hold: failTheClaim},
+		{name: "retired by the tree's close", hold: func(t *testing.T, machine *supervise.Machine, token claim.Token, rt *fake.Runtime) {
+			failTheClaim(t, machine, token, rt)
+			if err := machine.Handle(context.Background(), supervise.RequestTreeClose{Claim: token}); err != nil {
+				t.Fatalf("close the failed claim's tree: %v", err)
+			}
+		}},
+		{name: "booting", hold: func(*testing.T, *supervise.Machine, claim.Token, *fake.Runtime) {}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			records := record.NewStore()
+			ctx := context.Background()
+			issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Testing, Generation: 1, Status: "testing"}
+			putOutboxIssue(t, pool, records, issue)
+			sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
+			token, err := claim.NewToken("legion", issue.Key, claim.RoleTester)
+			if err != nil {
+				t.Fatal(err)
+			}
+			machine, _, err := sup.Create(ctx, supervise.Claim{Token: token, Project: "legion", Tree: issue.Tree, Issue: issue.Key, Role: claim.RoleTester, State: supervise.StateQueued}, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := machine.Handle(ctx, supervise.RequestDeliver{Claim: token, Task: "Test it.", ID: "outbox:40", Phase: phase.Testing, Generation: 1}); err != nil {
+				t.Fatalf("queue the tester's task: %v", err)
+			}
+			tc.hold(t, machine, token, rt)
+			if got := machine.Claim().Pending; got == nil || got.ID != "outbox:40" {
+				t.Fatalf("tester's pending task = %+v, want it holding outbox:40", got)
+			}
+			runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
+				provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
+					return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-208"}, nil
+				},
+			}
+			suspend := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "suspend", Tree: issue.Tree, Role: claim.RoleTester, Generation: 1}, time.Now())
+			suspend.ID = 60
+			start := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RoleTester, Generation: 1, Phase: phase.Testing,
+				Task: "Carry on testing.", ResumeTask: true}, time.Now())
+			start.ID = 92
+
+			// The close's suspend may run first: it finishes without acting on a claim that runs
+			// nothing, and a booting claim refuses it until its agent registers.
+			_ = runner.execute(ctx, suspend)
+			if err := runner.execute(ctx, start); err != nil {
+				t.Fatalf("resume start = %v, want it finished with the held task left to go", err)
+			}
+			if err := runner.execute(ctx, suspend); err != nil {
+				t.Fatalf("the close's suspend after the start = %v, want it finished as superseded", err)
+			}
+			if got := machine.Claim(); got.State != supervise.StateLaunching || got.Pending == nil || got.Pending.ID != "outbox:40" || got.Pending.Task != "Test it." {
+				t.Fatalf("tester after the resume start = %s holding %+v, want launching holding outbox:40 alone", got.State, got.Pending)
+			}
+		})
+	}
+}
+
+// failTheClaim fails a queued claim's launches until it is failed.
+func failTheClaim(t *testing.T, machine *supervise.Machine, token claim.Token, rt *fake.Runtime) {
+	t.Helper()
+	rt.ScriptSpawn(fake.SpawnResult{Err: errors.New("pane launch failed")}, fake.SpawnResult{Err: errors.New("pane launch failed")})
+	_ = machine.Handle(context.Background(), supervise.RequestSpawn{Claim: token})
+	if got := machine.Claim().State; got != supervise.StateFailed {
+		t.Fatalf("tester after its launches failed = %s, want failed", got)
+	}
+}
+
+// A resume start holds back its task only for a held task the claim will still work: one of the
+// same generation and phase, not yet confirmed or confirmed in the turn the claim is working. A
+// held task of an earlier phase or generation is not the phase's task, and a confirmed task on a
+// launch whose outcome was uncertain is over (its relaunch retires it). In each of those the start
+// tries to deliver its own task, and its row is retried until the claim can take it.
+func TestAResumeStartDeliversItsTaskUnlessTheClaimHoldsTheOneItResumes(t *testing.T) {
+	confirmed := time.Now().Add(-time.Minute)
+	for _, tc := range []struct {
+		name  string
+		claim supervise.Claim
+	}{
+		{name: "a held task of an earlier phase", claim: supervise.Claim{State: supervise.StateQueued,
+			Pending: &supervise.Delivery{ID: "outbox:30", Task: "Implement it.", Generation: 1, Phase: phase.Implementing}}},
+		{name: "a held task of an earlier generation", claim: supervise.Claim{State: supervise.StateQueued,
+			Pending: &supervise.Delivery{ID: "outbox:30", Task: "Check it.", Generation: 0, Phase: phase.ProductionCheck}}},
+		{name: "a confirmed task on an uncertain launch", claim: supervise.Claim{State: supervise.StateLaunchUncertain, Session: "ses_impl", SessionFile: "/sessions/impl.jsonl",
+			Pending: &supervise.Delivery{ID: "outbox:30", Task: "Check it.", Generation: 1, Phase: phase.ProductionCheck, ConfirmedAt: confirmed}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			records := record.NewStore()
+			ctx := context.Background()
+			issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.ProductionCheck, Generation: 1, Status: "in_progress"}
+			putOutboxIssue(t, pool, records, issue)
+			sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+			token, err := claim.NewToken("legion", issue.Key, claim.RoleImplementer)
+			if err != nil {
+				t.Fatal(err)
+			}
+			held := tc.claim
+			held.Token, held.Project, held.Tree, held.Issue, held.Role = token, "legion", issue.Tree, issue.Key, claim.RoleImplementer
+			if _, _, err := sup.Create(ctx, held, ""); err != nil {
+				t.Fatal(err)
+			}
+			runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets")}
+			start := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RoleImplementer, Generation: 1, Phase: phase.ProductionCheck,
+				Task: "Carry on the production check.", ResumeTask: true}, time.Now())
+			start.ID = 92
+
+			if err := runner.execute(ctx, start); err == nil || !strings.Contains(err.Error(), "deliver to claim") {
+				t.Fatalf("resume start = %v, want it to deliver its own task and be retried until the claim takes it", err)
+			}
+		})
+	}
+}
+
+// A death in a turn takes the task back unconfirmed and marked interrupted, for the relaunch to
+// send behind the sentence saying so; one that keeps dying is held (failed) with that task. When a
+// re-admitted tree's promotion then starts the claim, its resume task is the same work, so the
+// start delivers nothing more: the claim, relaunched, holds the interrupted task alone.
+func TestAResumeStartMeetingATaskADeathTookBackDeliversNothingMore(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		state supervise.ClaimState
+	}{
+		{name: "relaunching after the death", state: supervise.StateLaunching},
+		{name: "held after deaths kept coming", state: supervise.StateFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			records := record.NewStore()
+			ctx := context.Background()
+			issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Implementing, Generation: 2, Status: "in_progress"}
+			putOutboxIssue(t, pool, records, issue)
+			sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+			token, err := claim.NewToken("legion", issue.Key, claim.RoleImplementer)
+			if err != nil {
+				t.Fatal(err)
+			}
+			interrupted := supervise.Delivery{ID: "interrupted-task", Task: "Implement it.", Phase: phase.Implementing, Generation: issue.Generation,
+				QueuedAt: time.Now(), DeliveredAt: time.Now(), Interrupted: true}
+			held := supervise.Claim{Token: token, Project: "legion", Tree: issue.Tree, Issue: issue.Key, Role: claim.RoleImplementer, State: tc.state,
+				Generation: 3, Session: "ses-impl", SessionFile: "/tmp/impl.jsonl", Pending: &interrupted}
+			if tc.state == supervise.StateFailed {
+				held.Budgets = supervise.Budgets{Deaths: 3}
+			}
+			machine, _, err := sup.Create(ctx, held, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets")}
+			start := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RoleImplementer, Generation: issue.Generation, Phase: phase.Implementing,
+				Task: "Carry on implementing.", ResumeTask: true}, time.Now())
+			start.ID = 92
+
+			if err := runner.execute(ctx, start); err != nil {
+				t.Fatalf("resume start = %v, want it finished with the interrupted task left to go", err)
+			}
+			if got := machine.Claim(); got.State != supervise.StateLaunching || got.Pending == nil || got.Pending.ID != interrupted.ID || !got.Pending.Interrupted {
+				t.Fatalf("implementer after the resume start = %s holding %+v, want launching with the interrupted task alone", got.State, got.Pending)
+			}
+		})
+	}
+}
+
+// A resume start holds back its task for a confirmed task of its generation and phase while the
+// claim is working that task's turn: the claim is doing the work the resume task asks for.
+func TestAResumeStartHoldsBackItsTaskForTheTurnTheClaimIsWorking(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	ctx := context.Background()
+	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.ProductionCheck, Generation: 1, Status: "in_progress"}
+	putOutboxIssue(t, pool, records, issue)
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	token, err := claim.NewToken("legion", issue.Key, claim.RoleImplementer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	machine, _, err := sup.Create(ctx, supervise.Claim{Token: token, Project: "legion", Tree: issue.Tree, Issue: issue.Key, Role: claim.RoleImplementer,
+		State: supervise.StateWorking, Session: "ses_impl", SessionFile: "/sessions/impl.jsonl",
+		Pending: &supervise.Delivery{ID: "outbox:30", Task: "Check it.", Generation: 1, Phase: phase.ProductionCheck, ConfirmedAt: time.Now().Add(-time.Minute)}}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets")}
+	start := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RoleImplementer, Generation: 1, Phase: phase.ProductionCheck,
+		Task: "Carry on the production check.", ResumeTask: true}, time.Now())
+	start.ID = 92
+
+	if err := runner.execute(ctx, start); err != nil {
+		t.Fatalf("resume start = %v, want it finished with the working turn's task left alone", err)
+	}
+	if got := machine.Claim(); got.State != supervise.StateWorking || got.Pending == nil || got.Pending.ID != "outbox:30" {
+		t.Fatalf("implementer after the resume start = %s holding %+v, want working on outbox:30", got.State, got.Pending)
+	}
+}
+
+// A tree's close and its workspace removal belong to the linger they expired. A row still backing
+// off when re-admission ends the linger (a release the runtime refused) finishes without acting:
+// it neither retires the claim the tree's new run relaunched, with the task it holds, nor removes
+// the workspace that run works in.
+func TestALingerExpiryRowAfterReadmissionActsOnNothing(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	ctx := context.Background()
+	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Testing, Generation: 1, Status: "testing"}
+	putOutboxIssue(t, pool, records, issue)
+	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
+	removals := 0
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
+		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
+			return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-208"}, nil
+		},
+		remove: func(context.Context, workspace.Workspace) error { removals++; return nil },
+	}
+	if err := runner.execute(ctx, mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RoleTester, Generation: 1, Phase: phase.Testing,
+		Task: "Carry on testing.", ResumeTask: true}, time.Now())); err != nil {
+		t.Fatalf("the new run's start: %v", err)
+	}
+	token, err := claim.NewToken("legion", issue.Key, claim.RoleTester)
+	if err != nil {
+		t.Fatal(err)
+	}
+	machine, _ := sup.Machine(token)
+
+	if err := runner.execute(ctx, mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "tree_close", Tree: issue.Tree, Role: claim.RoleTester, Generation: 1, Linger: 1}, time.Now())); err != nil {
+		t.Fatalf("the late tree close = %v, want it finished without acting", err)
+	}
+	if got := machine.Claim(); got.State != supervise.StateLaunching || got.Pending == nil || len(rt.CallsOf("Release")) != 0 {
+		t.Fatalf("tester after the late tree close = %s holding %+v with %d releases, want launching with its task, none", got.State, got.Pending, len(rt.CallsOf("Release")))
+	}
+	if err := runner.execute(ctx, mustOutboxRow(t, issue.Key, record.WorkspaceRemove{Linger: 1}, time.Now())); err != nil {
+		t.Fatalf("the late workspace removal = %v, want it finished without acting", err)
+	}
+	if removals != 0 {
+		t.Fatalf("workspace removals after re-admission = %d, want none", removals)
+	}
+}
+
+// A child keeps its generation across re-admission, so a linger's expiry rows name the root
+// generation whose linger they expire. When the re-admitted tree is closed again, a row the first
+// linger's expiry wrote, still backing off, acts on nothing in the second linger: it neither
+// retires the relaunched worker nor removes its workspace. The second linger's own rows do.
+func TestAnEarlierLingersRowsActOnNothingInALaterLinger(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	ctx := context.Background()
+	until := time.Now().Add(2 * time.Hour)
+	root := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "root", Phase: phase.Done, Generation: 4, Status: "done", Rank: "U", LingerUntil: &until}
+	putOutboxIssue(t, pool, records, root)
+	parent := root.Key
+	child := record.Issue{Key: "LEGION-209", Project: "LEGION", Tree: root.Key, Parent: &parent, Title: "child", Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "V"}
+	putOutboxIssue(t, pool, records, child)
+	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
+	token, err := claim.NewToken("legion", child.Key, claim.RoleTester)
+	if err != nil {
+		t.Fatal(err)
+	}
+	machine, _, err := sup.Create(ctx, supervise.Claim{Token: token, Project: "legion", Tree: root.Key, Issue: child.Key, Role: claim.RoleTester, State: supervise.StateQueued}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	removals := 0
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
+		remove: func(context.Context, workspace.Workspace) error { removals++; return nil },
+	}
+	closeOf := func(linger uint64) record.OutboxRow {
+		return mustOutboxRow(t, child.Key, record.SuperviseRequest{Op: "tree_close", Tree: root.Key, Role: claim.RoleTester, Generation: child.Generation, Linger: linger}, time.Now())
+	}
+	removalOf := func(linger uint64) record.OutboxRow {
+		return mustOutboxRow(t, child.Key, record.WorkspaceRemove{Linger: linger}, time.Now())
+	}
+
+	for _, row := range []record.OutboxRow{closeOf(3), removalOf(3)} {
+		if err := runner.execute(ctx, row); err != nil {
+			t.Fatalf("the first linger's %s row in the second linger = %v, want it finished without acting", row.Kind, err)
+		}
+	}
+	if got := machine.Claim().State; got != supervise.StateQueued || removals != 0 || len(rt.CallsOf("Release")) != 0 {
+		t.Fatalf("after the first linger's rows: tester %s, %d removals, %d releases; want it untouched", got, removals, len(rt.CallsOf("Release")))
+	}
+	for _, row := range []record.OutboxRow{closeOf(4), removalOf(4)} {
+		if err := runner.execute(ctx, row); err != nil {
+			t.Fatalf("the second linger's %s row: %v", row.Kind, err)
+		}
+	}
+	if got := machine.Claim().State; got != supervise.StateRetired || removals != 1 {
+		t.Fatalf("after the second linger's rows: tester %s, %d removals; want retired and the workspace removed", got, removals)
+	}
+}
+
+// A linger's workspace removal waits until the close has retired every claim of the issue. A
+// worker whose release the runtime refused still runs in that workspace, and if the tree is
+// re-admitted before its close lands, it goes on there: the removal then finishes without acting,
+// so no worker is left on a removed workspace.
+func TestAWorkspaceIsRemovedOnlyOnceTheCloseRetiredEveryClaim(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	ctx := context.Background()
+	until := time.Now().Add(-time.Minute)
+	root := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "root", Phase: phase.Done, Generation: 3, Status: "done", Rank: "U", LingerUntil: &until}
+	putOutboxIssue(t, pool, records, root)
+	parent := root.Key
+	child := record.Issue{Key: "LEGION-209", Project: "LEGION", Tree: root.Key, Parent: &parent, Title: "child", Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "V"}
+	putOutboxIssue(t, pool, records, child)
+	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
+	token, err := claim.NewToken("legion", child.Key, claim.RoleTester)
+	if err != nil {
+		t.Fatal(err)
+	}
+	machine, _, err := sup.Create(ctx, supervise.Claim{Token: token, Project: "legion", Tree: root.Key, Issue: child.Key, Role: claim.RoleTester, State: supervise.StateQueued}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := machine.Handle(ctx, supervise.RequestSpawn{Claim: token}); err != nil {
+		t.Fatalf("launch the tester: %v", err)
+	}
+	rt.FailReleaseOf(token, errors.New("the pane did not exit"))
+	removals := 0
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
+		remove: func(context.Context, workspace.Workspace) error { removals++; return nil },
+	}
+	closeRow := mustOutboxRow(t, child.Key, record.SuperviseRequest{Op: "tree_close", Tree: root.Key, Role: claim.RoleTester, Generation: 1, Linger: 3}, time.Now())
+	removal := mustOutboxRow(t, child.Key, record.WorkspaceRemove{Linger: 3}, time.Now())
+
+	if err := runner.execute(ctx, closeRow); err == nil {
+		t.Fatal("the close with the release refused = nil, want the refusal so the row retries")
+	}
+	if err := runner.execute(ctx, removal); err == nil || removals != 0 {
+		t.Fatalf("the removal with the tester still %s = %v after %d removals, want it waiting for the close", machine.Claim().State, err, removals)
+	}
+	root.Generation, root.Phase, root.Status, root.LingerUntil = 4, phase.Admitted, "in_progress", nil
+	putOutboxIssue(t, pool, records, root)
+	rt.FailReleaseOf(token, nil)
+	for _, row := range []record.OutboxRow{removal, closeRow} {
+		if err := runner.execute(ctx, row); err != nil {
+			t.Fatalf("the ended linger's %s row after re-admission = %v, want it finished without acting", row.Kind, err)
+		}
+	}
+	if got := machine.Claim().State; got != supervise.StateLaunching || removals != 0 {
+		t.Fatalf("after re-admission: tester %s, %d removals; want it still launching in its workspace", got, removals)
 	}
 }
 
@@ -807,14 +1251,20 @@ type outboxPublisher struct {
 }
 
 type outboxPublish struct {
-	topic, key string
+	topic, message, key string
 }
 
-func (p *outboxPublisher) Publish(_ context.Context, topic, _ string, _ any, key string) error {
+func (p *outboxPublisher) Publish(_ context.Context, topic, message string, _ any, key string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.publish = append(p.publish, outboxPublish{topic: topic, key: key})
+	p.publish = append(p.publish, outboxPublish{topic: topic, message: message, key: key})
 	return p.err
+}
+
+func (p *outboxPublisher) publishes() []outboxPublish {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]outboxPublish(nil), p.publish...)
 }
 
 func (p *outboxPublisher) topics() []string {
@@ -932,8 +1382,7 @@ func TestAClosedTreeSetBackToTodoRelaunchesItsArchitect(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	ctx := context.Background()
-	until := time.Now().Add(-time.Minute)
-	root := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Done, Generation: 3, Status: "done", Rank: "U", LingerUntil: &until, LastDispatchSeq: 5}
+	root := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Done, Generation: 3, Status: "done", Rank: "U", LastDispatchSeq: 5}
 	putOutboxIssue(t, pool, records, root)
 	sup, runtime := newOutboxSupervisor(t, "legion", t.TempDir())
 	provisioned, removed := 0, 0
@@ -964,7 +1413,10 @@ func TestAClosedTreeSetBackToTodoRelaunchesItsArchitect(t *testing.T) {
 		t.Fatalf("register the architect: %v", err)
 	}
 
-	// Linger expires: every claim stops and the workspace goes.
+	// The tree closes and lingers, then its linger expires: every claim stops and the workspace goes.
+	until := time.Now().Add(-time.Minute)
+	root.LingerUntil = &until
+	putOutboxIssue(t, pool, records, root)
 	if _, err := intake.ApplyFact(ctx, pool, "outbox", "linger:LEGION-208:3", intake.LingerExpired{Issue: root.Key, Generation: 3}, engine, admission); err != nil {
 		t.Fatalf("apply linger expiry: %v", err)
 	}
@@ -994,7 +1446,9 @@ func TestAClosedTreeSetBackToTodoRelaunchesItsArchitect(t *testing.T) {
 
 // A tree's workspace removal serves the generation whose linger expired. One still waiting out its
 // backoff when the tree is re-admitted finishes without acting: the workspace there now is the next
-// generation's, just provisioned for the relaunched architect.
+// generation's, just provisioned for the relaunched architect. That holds even when the re-admitted
+// generation has closed and lingers in turn before the old removal retries (its backoff can reach
+// 64 seconds): the tree lingers again, but the removal serves the earlier generation.
 func TestAnEarlierGenerationsWorkspaceRemovalLeavesTheReadmittedTreesWorkspace(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
@@ -1037,6 +1491,20 @@ func TestAnEarlierGenerationsWorkspaceRemovalLeavesTheReadmittedTreesWorkspace(t
 	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "todo-again", intake.DispatchIssue{Key: root.Key, Seq: 6, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: root.Rank}, engine, admission); err != nil {
 		t.Fatalf("apply the todo: %v", err)
 	}
+	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		readmitted, err := records.Issue(ctx, tx, root.Key)
+		if err != nil || readmitted == nil {
+			return err
+		}
+		if readmitted.Generation != 4 {
+			t.Errorf("re-admitted generation = %d, want 4", readmitted.Generation)
+		}
+		lingering := time.Now().Add(time.Hour)
+		readmitted.Phase, readmitted.Status, readmitted.LingerUntil = phase.Done, "done", &lingering
+		return records.PutIssue(ctx, tx, *readmitted)
+	}); err != nil {
+		t.Fatalf("close the re-admitted generation: %v", err)
+	}
 	clock = clock.Add(2 * time.Minute)
 	if err := runner.RunOnce(ctx); err != nil {
 		t.Fatalf("run the re-admission effects: %v", err)
@@ -1072,12 +1540,19 @@ func TestARuntimeThatProvisionsInItsPodsLeavesTheHostWithoutWorkspaces(t *testin
 	if err := runner.execute(ctx, mustOutboxRow(t, issue.Key, start, time.Now())); err != nil {
 		t.Fatalf("start the architect: %v", err)
 	}
-	if err := runner.execute(ctx, mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "tree_close", Tree: issue.Tree, Role: claim.RoleArchitect, Generation: issue.Generation}, time.Now())); err != nil {
+	// The tree's linger expires: its close and its workspace removal run while it lingers.
+	until := time.Now().Add(-time.Minute)
+	issue.LingerUntil = &until
+	putOutboxIssue(t, pool, records, issue)
+	if err := runner.execute(ctx, mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "tree_close", Tree: issue.Tree, Role: claim.RoleArchitect, Generation: issue.Generation, Linger: issue.Generation}, time.Now())); err != nil {
 		t.Fatalf("close the tree: %v", err)
 	}
-	if err := runner.execute(ctx, mustOutboxRow(t, issue.Key, record.WorkspaceRemove{Generation: issue.Generation}, time.Now())); err != nil {
+	if err := runner.execute(ctx, mustOutboxRow(t, issue.Key, record.WorkspaceRemove{Linger: issue.Generation}, time.Now())); err != nil {
 		t.Fatalf("remove the workspace: %v", err)
 	}
+	// Re-admission ends the linger, and the retired architect is relaunched.
+	issue.LingerUntil = nil
+	putOutboxIssue(t, pool, records, issue)
 	if err := runner.execute(ctx, mustOutboxRow(t, issue.Key, start, time.Now())); err != nil {
 		t.Fatalf("relaunch the retired architect: %v", err)
 	}

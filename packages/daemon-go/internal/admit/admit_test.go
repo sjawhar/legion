@@ -229,8 +229,258 @@ func TestReadmissionStartsTheTreesMidPhaseChildren(t *testing.T) {
 		{kind: record.OutboxKindDispatchStatus, issue: root.Key, payload: record.StatusWrite{Status: "in_progress", ObservedStatus: "todo"}},
 		{kind: record.OutboxKindSupervise, issue: root.Key, payload: record.SuperviseRequest{Op: "start", Tree: root.Key, Role: claim.RoleArchitect, Generation: 2}},
 		{kind: record.OutboxKindSupervise, issue: "LEGION-209", payload: record.SuperviseRequest{Op: "start", Tree: root.Key, Role: claim.RoleTester, Generation: 1, Phase: phase.Testing,
-			Task: "Continue mid-phase child. Issue: LEGION-209. Phase: testing. Resume the existing phase work."}},
+			Task: "Continue mid-phase child. Issue: LEGION-209. Phase: testing. Resume the existing phase work.", ResumeTask: true}},
 	})
+}
+
+// A merge is the one fact GitHub never sends again, and a child whose READY was posted can be
+// merged after its root closed. The lingering tree starts no worker, but the child moves on to its
+// production check, so re-admission, which keeps no merged pull request, starts its implementer
+// there instead of leaving it in awaiting_merge, where no role could move it.
+func TestAMergeWhileTheTreeLingersIsTheChildsProductionCheckOnceTheTreeRunsAgain(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	until := fixedNow.Add(time.Hour)
+	root := record.Issue{Key: "LEGION-208", Project: "LEGION", Title: "root", Tree: "LEGION-208", Phase: phase.Done, Generation: 1, Status: "done", Rank: "A", LingerUntil: &until, LastDispatchSeq: 1}
+	putIssue(t, pool, root)
+	parentKey := root.Key
+	putIssue(t, pool, record.Issue{Key: "LEGION-209", Project: "LEGION", Title: "merged child", Tree: root.Key, Parent: &parentKey,
+		Phase: phase.AwaitingMerge, Generation: 1, Status: "in_progress", Rank: "B", LastDispatchSeq: 1})
+	inTx(t, pool, func(tx pgx.Tx) {
+		if err := record.NewStore().PutPullRequest(context.Background(), tx, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-209", Repo: "sjawhar/legion", Number: 42,
+			Branch: "legion/LEGION-209", HeadSHA: "head", Failing: []string{}, FailingStatuses: []string{}}); err != nil {
+			t.Fatalf("seed pull request: %v", err)
+		}
+	})
+	implementerStarts := func() int {
+		t.Helper()
+		var starts int
+		if err := pool.QueryRow(context.Background(), `select count(*) from outbox where issue = 'LEGION-209' and kind = 'supervise'
+			and payload->>'op' = 'start' and payload->>'role' = 'implementer' and payload->>'phase' = 'production_check'`).Scan(&starts); err != nil {
+			t.Fatalf("count the child's starts: %v", err)
+		}
+		return starts
+	}
+
+	if _, err := intake.ApplyFact(context.Background(), pool, "github", "merged", intake.PullRequestMerged{Repo: "sjawhar/legion", Number: 42, MergeSHA: "merge"}, engine, admission); err != nil {
+		t.Fatalf("ApplyFact merge: %v", err)
+	}
+	if got, starts := issue(t, pool, "LEGION-209"), implementerStarts(); got.Phase != phase.ProductionCheck || starts != 0 {
+		t.Fatalf("the merged child while its tree lingers = %s with %d implementer starts, want production_check with none", got.Phase, starts)
+	}
+	apply(t, pool, admission, "readmit", intake.DispatchIssue{Key: root.Key, Seq: 2, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: root.Rank}, engine)
+	if got, starts := issue(t, pool, "LEGION-209"), implementerStarts(); got.Phase != phase.ProductionCheck || starts != 1 {
+		t.Fatalf("the merged child after re-admission = %s with %d implementer starts, want production_check with its implementer started", got.Phase, starts)
+	}
+}
+
+// A re-admitted root that waits for a slot no longer lingers, so a fact in that window can move a
+// child and start its worker. The root's promotion then starts its mid-phase children: a child's
+// worker is started unless the newest of its role's operations that will still act is a start.
+// Each row is the child tester's outbox and claim when the root is promoted, and how many starts
+// the promotion adds: a second start would give the same task twice, and a missing one leaves the
+// child mid-phase with nobody working it once a queued stop suspends its worker.
+func TestPromotionStartsAChildUnlessItsWorkerIsStartedForTheRun(t *testing.T) {
+	type seed struct {
+		enqueue func(op record.SuperviseOp, generation uint64) int64
+		claim   func(state string, serving uint64, lastStart int64)
+		// pending gives the claim a task it holds undelivered or unconfirmed.
+		pending func(generation uint64, p phase.Phase)
+		// confirmedPending gives the claim a task whose turn already started.
+		confirmedPending func(generation uint64, p phase.Phase)
+		// otherClaim records a claim on the same issue and role under another daemon's project token.
+		otherClaim func(state string, lastStart int64)
+		// suspendLeaving queues a transition's suspend, which ends phase leaves.
+		suspendLeaving func(leaves phase.Phase)
+	}
+	for _, tc := range []struct {
+		name  string
+		setup func(s seed)
+		want  int
+	}{
+		{name: "no worker", setup: func(seed) {}, want: 1},
+		{name: "the window's start still queued", setup: func(s seed) { s.enqueue("start", 1) }, want: 0},
+		{name: "a live claim the window's start resumed", setup: func(s seed) { s.claim("working", 1, 7) }, want: 0},
+		{name: "a claim new to the run, its first task not yet confirmed", setup: func(s seed) { s.claim("ready", 0, 7) }, want: 0},
+		{name: "a live claim the close's suspend will still stop", setup: func(s seed) {
+			s.claim("working", 1, 0)
+			s.enqueue("suspend", 1)
+		}, want: 1},
+		{name: "a live claim whose window start superseded the close's suspend", setup: func(s seed) {
+			s.claim("working", 1, s.enqueue("suspend", 1)+1)
+		}, want: 0},
+		{name: "a start queued before the close's suspend", setup: func(s seed) {
+			s.claim("working", 1, 0)
+			s.enqueue("start", 1)
+			s.enqueue("suspend", 1)
+		}, want: 1},
+		{name: "a start queued after the close's suspend", setup: func(s seed) {
+			s.claim("working", 1, 0)
+			s.enqueue("suspend", 1)
+			s.enqueue("start", 1)
+		}, want: 0},
+		{name: "a live claim with the ended linger's tree close still queued", setup: func(s seed) {
+			s.claim("working", 1, 0)
+			s.enqueue("tree_close", 1)
+		}, want: 0},
+		{name: "a live claim with only an earlier generation's suspend queued", setup: func(s seed) {
+			s.claim("working", 1, 0)
+			s.enqueue("suspend", 0)
+		}, want: 0},
+		{name: "a suspended claim serving the generation", setup: func(s seed) { s.claim("suspended", 1, 7) }, want: 1},
+		{name: "a failed claim serving the generation", setup: func(s seed) { s.claim("failed", 1, 7) }, want: 1},
+		{name: "a launch-uncertain claim holding the phase's task", setup: func(s seed) {
+			s.claim("launch_uncertain", 1, 7)
+			s.pending(1, phase.Testing)
+		}, want: 0},
+		{name: "a launch-uncertain claim holding the phase's task confirmed", setup: func(s seed) {
+			s.claim("launch_uncertain", 1, 7)
+			s.confirmedPending(1, phase.Testing)
+		}, want: 1},
+		{name: "a launch-uncertain claim holding an earlier phase's task", setup: func(s seed) {
+			s.claim("launch_uncertain", 1, 7)
+			s.pending(1, phase.Implementing)
+		}, want: 1},
+		{name: "a claim holding the phase's task that the close's suspend will still stop", setup: func(s seed) {
+			s.claim("launch_uncertain", 1, 0)
+			s.pending(1, phase.Testing)
+			s.enqueue("suspend", 1)
+		}, want: 1},
+		{name: "a failed claim holding the phase's task", setup: func(s seed) {
+			s.claim("failed", 1, 7)
+			s.pending(1, phase.Testing)
+		}, want: 1},
+		{name: "a retired claim holding the phase's task", setup: func(s seed) {
+			s.claim("retired", 1, 7)
+			s.pending(1, phase.Testing)
+		}, want: 1},
+		{name: "a suspended claim holding the phase's task", setup: func(s seed) {
+			s.claim("suspended", 1, 7)
+			s.pending(1, phase.Testing)
+		}, want: 1},
+		{name: "a queued claim holding the phase's task", setup: func(s seed) {
+			s.claim("queued", 1, 7)
+			s.pending(1, phase.Testing)
+		}, want: 1},
+		{name: "another daemon's live claim on the same issue and role", setup: func(s seed) { s.otherClaim("working", 0) }, want: 1},
+		{name: "another daemon's claim beside this daemon's, with the close's suspend queued", setup: func(s seed) {
+			s.claim("working", 1, 0)
+			s.otherClaim("working", 0)
+			s.enqueue("suspend", 1)
+		}, want: 1},
+		{name: "a live claim with only a suspend of the phase the child is back in queued", setup: func(s seed) {
+			s.claim("working", 1, 0)
+			s.suspendLeaving(phase.Testing)
+		}, want: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+			seedSlotted(t, pool, "LEGION-100", "A")
+			root := record.Issue{Key: "LEGION-208", Project: "LEGION", Title: "root", Tree: "LEGION-208", Phase: phase.Admitted, Generation: 2, Status: "todo", Rank: "B", LastDispatchSeq: 2}
+			putIssue(t, pool, root)
+			parentKey := root.Key
+			child := record.Issue{Key: "LEGION-209", Project: "LEGION", Title: "child", Tree: root.Key, Parent: &parentKey,
+				Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "C", LastDispatchSeq: 1}
+			putIssue(t, pool, child)
+			project, err := claim.ProjectToken(testProject)
+			if err != nil {
+				t.Fatal(err)
+			}
+			token, err := claim.NewToken(project, child.Key, claim.RoleTester)
+			if err != nil {
+				t.Fatal(err)
+			}
+			enqueueRequest := func(payload record.SuperviseRequest) int64 {
+				t.Helper()
+				row, err := record.NewOutboxRow(child.Key, payload, fixedNow)
+				if err != nil {
+					t.Fatal(err)
+				}
+				inTx(t, pool, func(tx pgx.Tx) {
+					if err := record.NewStore().Enqueue(context.Background(), tx, row); err != nil {
+						t.Fatalf("enqueue %s: %v", payload.Op, err)
+					}
+				})
+				var id int64
+				if err := pool.QueryRow(context.Background(), `select max(id) from outbox`).Scan(&id); err != nil {
+					t.Fatalf("read the %s row's id: %v", payload.Op, err)
+				}
+				return id
+			}
+			putClaim := func(token claim.Token, project, state string, serving uint64, lastStart int64) {
+				t.Helper()
+				if _, err := pool.Exec(context.Background(), `insert into claims (token, project, tree, issue, role, generation, session, session_file, state,
+					launch_failures, prompt_failures, prompt_retires, uncertain_streak, serving_generation, last_start_row)
+					values ($1, $2, 'LEGION-208', 'LEGION-209', 'tester', 1, 'ses_tester', '', $3, 0, 0, 0, 0, $4, $5)`,
+					string(token), project, state, int64(serving), lastStart); err != nil {
+					t.Fatalf("record the %s claim %s: %v", state, token, err)
+				}
+			}
+			putPending := func(generation uint64, p phase.Phase, confirmedAt *time.Time) {
+				t.Helper()
+				if _, err := pool.Exec(context.Background(), `insert into pending_task_deliveries (claim_token, delivery_id, task, queued_at, generation, phase, confirmed_at)
+					values ($1, 'outbox:7', 'Carry on.', now(), $2, $3, $4)`, string(token), int64(generation), string(p), confirmedAt); err != nil {
+					t.Fatalf("record the pending task: %v", err)
+				}
+			}
+			tc.setup(seed{
+				enqueue: func(op record.SuperviseOp, generation uint64) int64 {
+					payload := record.SuperviseRequest{Op: op, Tree: root.Key, Role: claim.RoleTester, Generation: generation}
+					switch op {
+					case "start":
+						payload.Phase, payload.Task = child.Phase, workflow.ResumePhaseTask(child)
+					case "tree_close":
+						// The close of the linger the re-admission ended: the root's generation 1.
+						payload.Linger = 1
+					}
+					return enqueueRequest(payload)
+				},
+				claim: func(state string, serving uint64, lastStart int64) {
+					putClaim(token, project, state, serving, lastStart)
+				},
+				pending: func(generation uint64, p phase.Phase) {
+					putPending(generation, p, nil)
+				},
+				confirmedPending: func(generation uint64, p phase.Phase) {
+					confirmed := fixedNow
+					putPending(generation, p, &confirmed)
+				},
+				otherClaim: func(state string, lastStart int64) {
+					other, err := claim.NewToken("otherlegion", child.Key, claim.RoleTester)
+					if err != nil {
+						t.Fatal(err)
+					}
+					putClaim(other, "otherlegion", state, 1, lastStart)
+				},
+				suspendLeaving: func(leaves phase.Phase) {
+					enqueueRequest(record.SuperviseRequest{Op: "suspend", Tree: root.Key, Role: claim.RoleTester, Generation: child.Generation, Leaves: leaves})
+				},
+			})
+			// resumes counts the starts that carry the phase's task marked as its resume task.
+			testerStarts := func() (starts, resumes int) {
+				t.Helper()
+				if err := pool.QueryRow(context.Background(), `select count(*), count(*) filter (where coalesce(payload->>'task', '') <> '' and payload->>'resumeTask' = 'true') from outbox
+					where issue = 'LEGION-209' and kind = 'supervise' and payload->>'op' = 'start' and payload->>'role' = 'tester' and payload->>'phase' = 'testing'`).
+					Scan(&starts, &resumes); err != nil {
+					t.Fatalf("count the child's starts: %v", err)
+				}
+				return starts, resumes
+			}
+			before, beforeResumes := testerStarts()
+
+			apply(t, pool, admission, "free-the-slot", intake.DispatchIssue{Key: "LEGION-100", Seq: 2, Type: "issue.closed", Status: "done", Title: "LEGION-100", Rank: "A"}, engine)
+			if slotted := issue(t, pool, root.Key); slotted.Status != "in_progress" {
+				t.Fatalf("the waiting root after the slot freed = %s, want it promoted", slotted.Status)
+			}
+			after, afterResumes := testerStarts()
+			if added, addedResumes := after-before, afterResumes-beforeResumes; added != tc.want || addedResumes != tc.want {
+				t.Fatalf("tester starts the promotion added = %d, %d of them with the phase's resume task; want %d, each with it", added, addedResumes, tc.want)
+			}
+		})
+	}
 }
 
 // Every newer Dispatch observation is recorded, not only a status change: re-ranking a waiting
@@ -257,7 +507,9 @@ func TestApplyFactRecordsRankTitleAndParentChangesAtTheSameStatus(t *testing.T) 
 // two review rounds in, a READY pending, and an approved design gate; the re-admitted generation 2
 // starts with none of them. Its architect registers the spec again, the approval opens the gate,
 // and planning moves it to implementing, where the implementer's first handoff waits for its own
-// pull request instead of starting the tester on generation 1's.
+// pull request instead of starting the tester on generation 1's. A child's READY the old gate
+// refused goes with the rest: its packet is cleared with the handoffs, so the new gate's approval
+// neither posts a READY with no packet nor moves the child on.
 func TestReadmissionStartsTheNewGenerationWithoutTheOldGenerationsFacts(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -265,6 +517,9 @@ func TestReadmissionStartsTheNewGenerationWithoutTheOldGenerationsFacts(t *testi
 	const key, artifact = "LEGION-LINGER", "4f2a9c1e-8b3d-4e7f-9a60-2c5d8e1b7f34"
 	until, pending, approved := fixedNow.Add(time.Hour), 1, 1
 	putIssue(t, pool, record.Issue{Key: key, Project: "LEGION", Title: "lingering", Tree: key, Phase: phase.Done, Generation: 1, Status: "done", Rank: "A", LingerUntil: &until, LastDispatchSeq: 1, ReadyPendingVersion: &pending})
+	const child = "LEGION-2"
+	parent := key
+	putIssue(t, pool, record.Issue{Key: child, Project: "LEGION", Title: "child", Tree: key, Parent: &parent, Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "B", LastDispatchSeq: 1, ReadyPendingVersion: &pending})
 	inTx(t, pool, func(tx pgx.Tx) {
 		records := record.NewStore()
 		ctx := context.Background()
@@ -277,12 +532,18 @@ func TestReadmissionStartsTheNewGenerationWithoutTheOldGenerationsFacts(t *testi
 		if err := records.PutPhase(ctx, tx, record.PhaseRow{Issue: key, Role: claim.RoleImplementer, Claim: "implementer", HandoffCommit: "gen1-handoff", LastHandoff: "gen1-handoff", Rounds: 2}); err != nil {
 			t.Fatalf("seed implementer: %v", err)
 		}
+		if err := records.PutPhase(ctx, tx, record.PhaseRow{Issue: child, Role: claim.RoleMerger, Claim: "merger", Summary: "READY #85 at gen1 (approved at gen1) for " + child}); err != nil {
+			t.Fatalf("seed the child's merger: %v", err)
+		}
 	})
 
 	apply(t, pool, admission, "readmit", intake.DispatchIssue{Key: key, Seq: 2, Type: "issue.updated", Status: "todo", Title: "lingering", Rank: "A"}, engine)
 	readmitted := issue(t, pool, key)
 	if readmitted.Generation != 2 || readmitted.Phase != phase.Admitted || readmitted.ReadyPendingVersion != nil {
 		t.Fatalf("readmitted = %#v, want generation 2, admitted, no READY pending", readmitted)
+	}
+	if got := issue(t, pool, child); got.ReadyPendingVersion != nil {
+		t.Fatalf("the child's READY pending after re-admission = %d, want none", *got.ReadyPendingVersion)
 	}
 	inTx(t, pool, func(tx pgx.Tx) {
 		records := record.NewStore()
@@ -318,6 +579,13 @@ func TestReadmissionStartsTheNewGenerationWithoutTheOldGenerationsFacts(t *testi
 	}
 	if got := issue(t, pool, key); got.Phase != phase.Implementing {
 		t.Fatalf("generation 2 phase = %s, want implementing until its own pull request opens", got.Phase)
+	}
+	var messages int
+	if err := pool.QueryRow(context.Background(), "select count(*) from outbox where issue = $1 and kind = 'dispatch_message'", child).Scan(&messages); err != nil || messages != 0 {
+		t.Fatalf("the child's Dispatch messages = %d, %v; want no READY posted by generation 2's approval", messages, err)
+	}
+	if got := issue(t, pool, child); got.Phase != phase.Merging {
+		t.Fatalf("the child is in %s, want it left in merging", got.Phase)
 	}
 }
 

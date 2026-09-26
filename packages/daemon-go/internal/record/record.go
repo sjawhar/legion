@@ -10,6 +10,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
 // AttemptRun is the latest check-run id the daemon observed for one check name.
@@ -52,6 +53,9 @@ type PhaseRow struct {
 	HandoffCommit string
 	Rounds        int
 	Verdict       string
+	// Summary is what the role reported with its completion. The merger's is its READY packet,
+	// which the daemon posts when the issue reaches awaiting_merge.
+	Summary string
 	// LastHandoff is the carrying commit the role last reported for a file-backed phase. Unlike
 	// HandoffCommit it survives the next phase's start, so a completion reporting it again is known
 	// to carry no handoff written since.
@@ -141,9 +145,9 @@ type Store interface {
 	SessionClaimsTree(ctx context.Context, tx pgx.Tx, tree, session string) (bool, error)
 	// ClearGeneration drops the facts one generation of an issue owns: a merged or closed pull
 	// request, the fix-attempt counts and planned mark of a still-open one (the next generation runs on the same
-	// branch and pull request), its design gate, and each role's handoff, review rounds, and
-	// verdict. Each role keeps its claim and its last handoff, so a commit an earlier generation
-	// reported is never new again.
+	// branch and pull request), its design gate, each role's handoff, review rounds, verdict and
+	// summary, and a READY the gate refused. Each role keeps its claim and its last handoff, so a
+	// commit an earlier generation reported is never new again.
 	ClearGeneration(ctx context.Context, tx pgx.Tx, issue string) error
 	ClearTreeGeneration(ctx context.Context, tx pgx.Tx, tree string) error
 	Gate(ctx context.Context, tx pgx.Tx, issue string) (*DesignGate, error)
@@ -156,6 +160,52 @@ type Store interface {
 	FinishOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) error
 	RetryOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string, nextAt time.Time, lastErr string) error
 	PendingStatusWrites(ctx context.Context, tx pgx.Tx, project string) ([]OutboxRow, error)
+	// RoleRun reads one role's run of an issue generation: its queued supervise rows and the claim
+	// with token.
+	RoleRun(ctx context.Context, tx pgx.Tx, token claim.Token, issue string, role claim.Role, generation uint64) (RoleRun, error)
+}
+
+// RoleRun is what the store holds of one role's run of an issue generation: the role's supervise
+// rows for the generation still queued, oldest first (finishing deletes a row, so each is one the
+// outbox has not run), and this daemon's claim on the role, nil when it has none.
+type RoleRun struct {
+	Queued []QueuedSupervise
+	Claim  *RoleClaim
+}
+
+// QueuedSupervise is one queued supervise row: its id, which orders it against the others and
+// against the newest start run on the claim, and its request.
+type QueuedSupervise struct {
+	ID      int64
+	Request SuperviseRequest
+}
+
+// RoleClaim is a claim as RoleRun reads it: its state, the newest start the outbox ran against it
+// (last_start_row), and the task it holds, nil for none, with the task's generation, phase and
+// confirmation.
+type RoleClaim struct {
+	State        supervise.ClaimState
+	LastStartRow int64
+	Pending      *supervise.Delivery
+}
+
+// TreeLingers says whether tree lingers after its close: its root is recorded with a linger
+// deadline, which re-admission clears. Linger holds every member where it stood, so nothing in such
+// a tree transitions, starts a worker, or records a completion.
+func TreeLingers(ctx context.Context, store Store, tx pgx.Tx, tree string) (bool, error) {
+	root, err := store.Issue(ctx, tx, tree)
+	return root != nil && root.Lingers(), err
+}
+
+// Lingers says whether the root lingers after its close: its linger deadline is set, and
+// re-admission clears it.
+func (i Issue) Lingers() bool { return i.LingerUntil != nil }
+
+// LingersAt says whether the root lingers after the close of its generation: it lingers, and
+// re-admission has not moved it to a later generation. A row a linger's expiry wrote acts in that
+// linger only, not in the tree's next run nor in a later linger of it.
+func (i Issue) LingersAt(generation uint64) bool {
+	return i.Lingers() && i.Generation == generation
 }
 
 // ParentOf is an observed parent key as a record holds it: nil for none. Dispatch says "no parent"

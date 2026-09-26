@@ -221,6 +221,8 @@ func (r *outbox) execute(ctx context.Context, row record.OutboxRow) error {
 		return r.linger(ctx, row, value)
 	case record.WorkspaceRemove:
 		return r.removeWorkspace(ctx, row, value)
+	case record.MergeQueuePublish:
+		return r.mergeQueue(ctx, row, value)
 	default:
 		return fmt.Errorf("outbox row %d: no executor for %T", row.ID, payload)
 	}
@@ -250,7 +252,7 @@ func (r *outbox) message(ctx context.Context, row record.OutboxRow, payload reco
 	if r.dispatch == nil {
 		return errors.New("dispatch message executor has no Dispatch client")
 	}
-	marker := fmt.Sprintf("<!-- legion-outbox:%d -->", row.ID)
+	marker := record.MessageMarker(row.ID)
 	bodies, err := r.dispatch.MessageBodiesSince(ctx, row.Issue, row.CreatedAt.Add(-messageReadSkew))
 	if err != nil {
 		return fmt.Errorf("read Dispatch messages for %s: %w", row.Issue, err)
@@ -260,7 +262,7 @@ func (r *outbox) message(ctx context.Context, row record.OutboxRow, payload reco
 			return nil
 		}
 	}
-	if err := r.dispatch.PostMessage(ctx, row.Issue, payload.Body+"\n\n"+marker); err != nil {
+	if err := r.dispatch.PostMessage(ctx, row.Issue, payload.Posted(row.ID)); err != nil {
 		return fmt.Errorf("post Dispatch message for %s: %w", row.Issue, err)
 	}
 	return nil
@@ -294,6 +296,25 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 	return nil
 }
 
+// mergeQueue publishes the merger's READY packet to the project's merge queue role, keyed by the
+// row so a retried row is one delivery. A role with no live holder refuses every attempt until
+// someone claims it, so waiting would retry forever; the Dispatch message the same READY posted
+// already carries the packet, so the issue is told the role had no holder, as the shared merger
+// prompt has the merger say (packages/pi-envoy/roles/merger.md step 4), and the row is done.
+func (r *outbox) mergeQueue(ctx context.Context, row record.OutboxRow, payload record.MergeQueuePublish) error {
+	if r.notices == nil {
+		return errors.New("merge queue executor has no Envoy publisher")
+	}
+	err := r.notices.Publish(ctx, roleTopicPrefix+payload.Role, payload.Packet, payload.Packet, fmt.Sprintf("legion-outbox:%d", row.ID))
+	if errors.Is(err, notify.ErrNoHolder) {
+		return r.message(ctx, row, record.MessagePost{Body: fmt.Sprintf("merge queue role %s had no live holder at %s", payload.Role, r.now().UTC().Format(time.RFC3339))})
+	}
+	if err != nil {
+		return fmt.Errorf("publish READY for %s to merge queue role %s: %w", row.Issue, payload.Role, err)
+	}
+	return nil
+}
+
 func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload record.SuperviseRequest) error {
 	if r.supervisor == nil {
 		return errors.New("supervise executor has no claim supervisor")
@@ -322,6 +343,19 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 	machine, found := r.supervisor.Machine(token)
 	switch payload.Op {
 	case "start":
+		// A tree that lingers has left the workflow, and linger holds each member where it stood: a
+		// start that reaches its claim after the close (queued before it and backing off) finishes
+		// without acting and records no start, so the close's suspend still applies. Re-admission
+		// starts the member again (admit's startMidPhaseChildren).
+		root, err := r.root(ctx, issue)
+		if err != nil {
+			return err
+		}
+		if root != nil && root.Lingers() {
+			r.log.Info("outbox start of a member of a lingering tree; finished without acting", "row", row.ID, "issue", issue.Key,
+				"tree", issue.Tree, "role", payload.Role)
+			return nil
+		}
 		if !found {
 			if err := r.provisionWorkspace(ctx, issue); err != nil {
 				return err
@@ -353,18 +387,8 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		case supervise.StateFailed:
 			// Only the workflow starts a role whose claim failed: the architect retrying the
 			// held phase, or a later transition that needs the role again.
-			kept := machine.Claim().Pending
 			if err := machine.Handle(ctx, supervise.RequestRetry{Claim: token}); err != nil {
 				return fmt.Errorf("retry claim %s: %w", token, err)
-			}
-			// A failed claim keeps the task it held, and its relaunch sends it: held after its agent
-			// kept dying in a turn of it, that task goes behind the sentence saying so. When it is
-			// this row's phase and run, the row's own task would follow it as a second prompt for
-			// work already under way, so the row is done once the claim is relaunched.
-			if kept != nil && payload.Phase != "" && kept.Phase == payload.Phase && kept.Generation == payload.Generation {
-				r.log.Info("outbox retry of a claim that kept its phase's task; relaunched without a second delivery", "row", row.ID,
-					"issue", issue.Key, "role", payload.Role, "phase", payload.Phase, "delivery", kept.ID)
-				return nil
 			}
 		case supervise.StateRetired:
 			// A retired claim's tree closed, and its linger removed the workspace; the tree was
@@ -375,6 +399,22 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 			if err := machine.Handle(ctx, supervise.RequestRetry{Claim: token}); err != nil {
 				return fmt.Errorf("relaunch retired claim %s: %w", token, err)
 			}
+		}
+		// A claim that, once relaunched, still holds a task of this row's phase and run that it will
+		// work is given that task: one not yet confirmed (a failed claim keeps the task it held, and a
+		// death in a turn takes the task back unconfirmed, behind the sentence saying so), or one
+		// confirmed in the turn the claim is working. The row's own task would follow it as a second
+		// prompt for work already under way, so it is not delivered when it is the phase's resume task
+		// (promotion's) or the row relaunched a failed claim (the architect's retry of the held phase,
+		// or a later transition). A confirmed task on a claim not working is over: the relaunch's
+		// decision retired it here, or retires it first when a launch whose outcome was uncertain is
+		// released and spawned again, after this start, so the row's task goes in its place.
+		held := machine.Claim()
+		if pending := held.Pending; (payload.ResumeTask || state == supervise.StateFailed) && pending != nil && payload.Phase != "" &&
+			pending.StillWorked(payload.Generation, payload.Phase, held.State) {
+			r.log.Info("outbox start of a claim that holds its phase's task; not delivered again", "row", row.ID, "issue", issue.Key,
+				"role", payload.Role, "phase", payload.Phase, "held", pending.ID)
+			return nil
 		}
 		if payload.Task != "" {
 			// The row's phase, already held to the issue's above, travels with the delivery: it is
@@ -389,29 +429,17 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		if !found {
 			return nil
 		}
-		// A transition's suspend, retried after the issue came back to a phase its role works,
-		// would stop the worker in the phase it now serves. The phase is read before the suspend
-		// acts, not in one transaction with it: a transition committing in between costs one
-		// suspend, which that transition's own start then resumes.
-		if !workflow.SuspendApplies(payload.Leaves, issue.Phase) {
-			r.log.Info("outbox suspend of a role the issue is back in; finished without acting", "row", row.ID, "issue", issue.Key,
-				"leaves", payload.Leaves, "phase", issue.Phase, "role", payload.Role)
-			return nil
-		}
 		switch machine.Claim().State {
 		case supervise.StateFailed, supervise.StateRetired:
 			// The claim runs nothing, so there is nothing to suspend.
 			return nil
 		}
-		// A stop ends the run it was written for. A newer start has already replaced that run, so
-		// this stop is superseded: acting on it would suspend the run that start began and retire
-		// the task with it, leaving the phase with nobody in it. It is finished instead, whatever
-		// the retry timing was — the runtime may have refused it for minutes. A row with no id of
-		// its own is not older than anything: the store gives every row one, and an unknown id
-		// must not silently drop a stop.
-		if last := machine.Claim().LastStartRow; row.ID > 0 && row.ID < last {
-			r.log.Info("outbox stop superseded by a newer start; finished without acting",
-				"row", row.ID, "issue", issue.Key, "role", payload.Role, "start-row", last)
+		// Whether the suspend still acts is workflow.StopActs's rule, which promotion reads too. The
+		// phase is read before the suspend acts, not in one transaction with it: a transition
+		// committing in between costs one suspend, which that transition's own start then resumes.
+		if last := machine.Claim().LastStartRow; !workflow.StopActs(row.ID, payload, issue.Phase, last, nil) {
+			r.log.Info("outbox suspend no longer acts: its role's phase is back, or a newer start superseded it; finished without acting",
+				"row", row.ID, "issue", issue.Key, "role", payload.Role, "leaves", payload.Leaves, "phase", issue.Phase, "start-row", last)
 			return nil
 		}
 		if err := machine.Handle(ctx, supervise.RequestSuspend{Claim: token}); err != nil {
@@ -422,6 +450,19 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		if !found {
 			return nil
 		}
+		// The close belongs to the linger it expired, the root generation it names
+		// (workflow.StopActs). Once re-admission ends that linger, a close still backing off (a
+		// release the runtime refused) would retire the claim the tree's new run relaunched, and the
+		// task it holds with it, even in a later linger of the tree; it finishes without acting.
+		root, err := r.root(ctx, issue)
+		if err != nil {
+			return err
+		}
+		if !workflow.StopActs(row.ID, payload, issue.Phase, machine.Claim().LastStartRow, root) {
+			r.log.Info("outbox tree close of a linger that has ended; finished without acting", "row", row.ID, "issue", issue.Key,
+				"tree", issue.Tree, "role", payload.Role, "linger", payload.Linger)
+			return nil
+		}
 		if err := machine.Handle(ctx, supervise.RequestTreeClose{Claim: token}); err != nil {
 			return fmt.Errorf("close the tree of claim %s: %w", token, err)
 		}
@@ -429,6 +470,20 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 	default:
 		return fmt.Errorf("outbox row %d has unknown supervise operation %q", row.ID, payload.Op)
 	}
+}
+
+// root is issue's tree root as recorded, nil when it is not, read in a transaction of its own
+// just before the executor acts on a row.
+func (r *outbox) root(ctx context.Context, issue record.Issue) (*record.Issue, error) {
+	var root *record.Issue
+	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+		var err error
+		root, err = r.records.Issue(ctx, tx, issue.Tree)
+		return err
+	}); err != nil {
+		return nil, fmt.Errorf("read the tree root of %s: %w", issue.Key, err)
+	}
+	return root, nil
 }
 
 // podsProvision is whether the runtime provisions each claim's workspace in the claim's own pod
@@ -507,10 +562,29 @@ func (r *outbox) removeWorkspace(ctx context.Context, row record.OutboxRow, payl
 	if err != nil {
 		return err
 	}
-	if payload.Generation != issue.Generation {
-		r.log.Info("outbox workspace removal serves an earlier generation; finished without acting", "row", row.ID, "issue", issue.Key,
-			"generation", payload.Generation, "current", issue.Generation)
+	// The removal belongs to the linger it expired, the root generation it names. Once
+	// re-admission ends that linger, the tree's new run may already work in the workspace again,
+	// even in a later linger of the tree, so a removal still backing off finishes without acting.
+	root, err := r.root(ctx, issue)
+	if err != nil {
+		return err
+	}
+	if root == nil || !root.LingersAt(payload.Linger) {
+		r.log.Info("outbox workspace removal of a linger that has ended; finished without acting", "row", row.ID, "issue", issue.Key,
+			"tree", issue.Tree, "linger", payload.Linger)
 		return nil
+	}
+	// The workspace goes only once the close has retired every claim of the issue: a claim whose
+	// release the runtime refused still runs there, and one that is re-admitted before its close
+	// lands goes on in it. A retired claim's relaunch provisions the workspace again.
+	for _, role := range claim.Roles {
+		token, err := claim.NewToken(r.project, row.Issue, role)
+		if err != nil {
+			return fmt.Errorf("derive claim for outbox row %d: %w", row.ID, err)
+		}
+		if machine, found := r.supervisor.Machine(token); found && machine.Claim().State != supervise.StateRetired {
+			return fmt.Errorf("workspace removal of %s waits for the tree's close to retire claim %s (%s)", row.Issue, token, machine.Claim().State)
+		}
 	}
 	working, err := workspace.Location(r.stateDir, r.repo, row.Issue)
 	if err != nil {

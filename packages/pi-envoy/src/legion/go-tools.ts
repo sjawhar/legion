@@ -7,6 +7,7 @@ import {
   HANDOFF_OPERATIONS,
   handoffSchemaFields,
   isHandoffOperation,
+  rootArchitectHandoffRefusal,
   runHandoffAction,
 } from "./handoff-actions";
 
@@ -27,6 +28,8 @@ const OPERATIONS: Readonly<Record<GoLegionToolRole, readonly string[]>> = {
     "request_backward_move",
     "retry_or_escalate",
     "sign_off",
+    "park_child",
+    "rerun_child",
     "read_record",
   ],
   "phase-worker": ["request_backward_move", "read_record"],
@@ -38,6 +41,8 @@ const OPERATION_FIELDS: Readonly<Record<string, readonly string[]>> = {
   request_backward_move: ["to", "reason"],
   retry_or_escalate: ["issue", "decision"],
   sign_off: ["issue"],
+  park_child: ["issue"],
+  rerun_child: ["issue"],
   read_record: ["issue"],
 };
 
@@ -53,6 +58,8 @@ function toolSchema(pi: PiApi): unknown {
       "request_backward_move",
       "retry_or_escalate",
       "sign_off",
+      "park_child",
+      "rerun_child",
       "read_record",
       ...HANDOFF_OPERATIONS,
     ]),
@@ -130,7 +137,7 @@ export function createGoLegionTool(deps: {
         const operation = requiredString(parameters, "legion", "op");
         if (isHandoffOperation(operation)) {
           if (active.kind === "architect" && active.issue === active.tree) {
-            throw new Error(`${operation} is not available to a root architect session`);
+            throw new Error(rootArchitectHandoffRefusal(operation));
           }
           return await runHandoffAction({
             operation,
@@ -204,6 +211,13 @@ export function createGoLegionTool(deps: {
               grantId,
               issue: requiredString(parameters, operation, "issue"),
             });
+            return jsonSuccess({});
+          }
+          case "park_child":
+          case "rerun_child": {
+            const grantId = await grantFor(client, active);
+            const request = { grantId, issue: requiredString(parameters, operation, "issue") };
+            await (operation === "park_child" ? client.childPark(request) : client.childRerun(request));
             return jsonSuccess({});
           }
           default:

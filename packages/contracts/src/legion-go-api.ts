@@ -363,3 +363,9 @@ export const LegionGoSignOffRequest = z.strictObject({
   grantId: nonEmptyString,
   issue: nonEmptyString,
 });
+
+/** `api.ChildRequest`, the architect's park_child or rerun_child of one child of its tree. */
+export const LegionGoChildRequest = z.strictObject({
+  grantId: nonEmptyString,
+  issue: nonEmptyString,
+});

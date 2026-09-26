@@ -41,6 +41,8 @@ test("the Go Legion tool exposes only the workflow operations each role owns", a
         "phaseBackward",
         "phaseRetry",
         "signOff",
+        "childPark",
+        "childRerun",
         "issueStatus",
       ].map((name) => [
         name,
@@ -119,12 +121,22 @@ test("the Go Legion tool exposes only the workflow operations each role owns", a
     details: {},
   });
   expect(calls.at(-1)).toEqual(["signOff", { grantId: "grant-208", issue: "LEGION-208" }]);
+  await expect(run("architect", { op: "park_child", issue: "LEGION-209" })).resolves.toMatchObject({
+    details: {},
+  });
+  expect(calls.at(-1)).toEqual(["childPark", { grantId: "grant-208", issue: "LEGION-209" }]);
+  await expect(run("architect", { op: "rerun_child", issue: "LEGION-209" })).resolves.toMatchObject({
+    details: {},
+  });
+  expect(calls.at(-1)).toEqual(["childRerun", { grantId: "grant-208", issue: "LEGION-209" }]);
   await expect(run("architect", { op: "read_record", issue: "LEGION-208" })).resolves.toMatchObject({
     details: { record: state.issues["LEGION-208"] },
   });
-  await expect(run("phase-worker", { op: "sign_off", issue: "LEGION-208" })).resolves.toMatchObject({
-    isError: true,
-  });
+  for (const op of ["sign_off", "park_child", "rerun_child"]) {
+    await expect(run("phase-worker", { op, issue: "LEGION-208" })).resolves.toMatchObject({
+      isError: true,
+    });
+  }
   await expect(run("architect", { op: "spawn_worker", issue: "LEGION-208" })).resolves.toMatchObject({
     isError: true,
   });

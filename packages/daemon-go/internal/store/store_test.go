@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/store/migrations"
 )
 
@@ -513,6 +514,87 @@ func TestTheServingRunBackfillsForClaimsBetweenTurns(t *testing.T) {
 		if serving != want.serving {
 			t.Fatalf("%s serves run %d, want %d", want.token, serving, want.serving)
 		}
+	}
+}
+
+// A tree close and a workspace removal name the root generation of the linger they expire, and
+// the outbox decodes rows strictly. 0016 gives each one queued in the older shape (a close naming
+// no linger, a removal naming its issue's generation) the generation of its tree's root when that
+// root still lingers, so the row goes on to expire that linger, and deletes the rest: their linger
+// has ended, and a row that never decodes would fail every tick and every promotion of its tree.
+func TestQueuedLingerRowsOfTheOlderShapeNameTheirLingerOrGo(t *testing.T) {
+	ctx := context.Background()
+	store := emptyStore(t)
+	migrateThrough(t, store, 13)
+
+	for _, issue := range []struct {
+		key, tree  string
+		generation int
+		lingers    bool
+	}{
+		{key: "LEGION-208", tree: "LEGION-208", generation: 4, lingers: true},
+		{key: "LEGION-209", tree: "LEGION-208", generation: 1},
+		{key: "LEGION-300", tree: "LEGION-300", generation: 2},
+		{key: "LEGION-301", tree: "LEGION-300", generation: 1},
+	} {
+		var lingerUntil *time.Time
+		if issue.lingers {
+			until := time.Now().Add(time.Hour)
+			lingerUntil = &until
+		}
+		if _, err := store.pool.Exec(ctx, `insert into issues (key, tree, project, title, phase, generation, status, rank, linger_until, last_dispatch_seq)
+			values ($1, $2, 'LEGION', $1, 'testing', $3, 'in_progress', 'V', $4, 0)`, issue.key, issue.tree, issue.generation, lingerUntil); err != nil {
+			t.Fatalf("seed %s: %v", issue.key, err)
+		}
+	}
+	type row struct{ kind, issue, payload string }
+	for _, seeded := range []row{
+		{kind: "supervise", issue: "LEGION-209", payload: `{"op": "tree_close", "tree": "LEGION-208", "role": "tester", "generation": 1}`},
+		{kind: "workspace_remove", issue: "LEGION-209", payload: `{"generation": 1}`},
+		{kind: "supervise", issue: "LEGION-301", payload: `{"op": "tree_close", "tree": "LEGION-300", "role": "tester", "generation": 1}`},
+		{kind: "workspace_remove", issue: "LEGION-301", payload: `{"generation": 1}`},
+		{kind: "supervise", issue: "LEGION-301", payload: `{"op": "start", "tree": "LEGION-300", "role": "tester", "generation": 1, "phase": "testing", "task": "Test it."}`},
+	} {
+		if _, err := store.pool.Exec(ctx, `insert into outbox (kind, issue, payload, attempts, next_at, last_error) values ($1, $2, $3, 0, now(), '')`,
+			seeded.kind, seeded.issue, seeded.payload); err != nil {
+			t.Fatalf("seed the %s row of %s: %v", seeded.kind, seeded.issue, err)
+		}
+	}
+
+	if _, err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate the rest: %v", err)
+	}
+
+	rows, err := store.pool.Query(ctx, "select id, kind, issue, payload from outbox order by id")
+	if err != nil {
+		t.Fatalf("read the outbox: %v", err)
+	}
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var queued record.OutboxRow
+		var kind string
+		if err := rows.Scan(&queued.ID, &kind, &queued.Issue, &queued.Payload); err != nil {
+			t.Fatalf("scan an outbox row: %v", err)
+		}
+		queued.Kind = record.OutboxKind(kind)
+		payload, err := record.DecodeOutboxPayload(queued)
+		if err != nil {
+			t.Fatalf("the migrated %s row of %s does not decode: %v", kind, queued.Issue, err)
+		}
+		switch value := payload.(type) {
+		case record.SuperviseRequest:
+			got = append(got, fmt.Sprintf("%s %s linger=%d", queued.Issue, value.Op, value.Linger))
+		case record.WorkspaceRemove:
+			got = append(got, fmt.Sprintf("%s workspace_remove linger=%d", queued.Issue, value.Linger))
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read the outbox: %v", err)
+	}
+	want := []string{"LEGION-209 tree_close linger=4", "LEGION-209 workspace_remove linger=4", "LEGION-301 start linger=0"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("outbox after 0016 = %q, want %q", got, want)
 	}
 }
 

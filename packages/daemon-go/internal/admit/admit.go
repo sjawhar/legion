@@ -218,7 +218,7 @@ func (a *Admission) recordObservation(ctx context.Context, tx pgx.Tx, stored rec
 // readmittable says whether a todo on this record starts a new generation of its tree: it is a
 // root, and its tree lingers after its sign-off or was closed. A child's done is only the child's.
 func readmittable(stored record.Issue) bool {
-	return claim.IsTreeRoot(stored.Key, stored.Tree) && (stored.LingerUntil != nil || stored.Phase == phase.Done)
+	return claim.IsTreeRoot(stored.Key, stored.Tree) && (stored.Lingers() || stored.Phase == phase.Done)
 }
 
 // readmit records a lingering or closed root's todo as a new generation waiting for a slot. The new
@@ -239,13 +239,12 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 	stored.Rank = rank
 	stored.LingerUntil = nil
 	stored.HeldFrom = nil
-	stored.ReadyPendingVersion = nil
 	stored.LastDispatchSeq = seq
 	if err := a.store.PutIssue(ctx, tx, stored); err != nil {
 		return fmt.Errorf("record re-admission %s: %w", stored.Key, err)
 	}
 	// A root set back to todo is a new generation of the whole tree, so the old generation's pull
-	// request, gate and handoffs go for every issue of it, not only the root's.
+	// request, gate, handoffs and pending READY go for every issue of it, not only the root's.
 	return a.store.ClearTreeGeneration(ctx, tx, stored.Tree)
 }
 
@@ -363,8 +362,19 @@ func ownSlots(issues []record.Issue, slots []record.Slot) []record.Slot {
 // moves it, and the architect cannot release a child already in the workflow. Each start carries
 // the child's own generation and phase, which is what the outbox fences it against, and the task
 // that says to carry the phase on: a start with no task leaves the resumed agent holding its old
-// transcript with nothing asked of it, and only its own handoff moves the phase.
+// transcript with nothing asked of it, and only its own handoff moves the phase. The task is marked
+// as the phase's resume task, so the executor does not deliver it to a claim that still holds a
+// task for the same generation and phase when the start runs: that claim is given the one it holds
+// once it is ready. A child whose worker is already started for this run (a fact moved it while
+// the root waited for its slot, and that start is queued or has run) is not started a second time.
+// A child whose claim a stop from the tree's close will still suspend is started, so this start
+// ends last or supersedes the stop (workflow.StartFor, over the role's queued rows and this
+// daemon's own claim).
 func (a *Admission) startMidPhaseChildren(ctx context.Context, tx pgx.Tx, root record.Issue, issues []record.Issue, now time.Time) error {
+	project, err := claim.ProjectToken(a.project)
+	if err != nil {
+		return err
+	}
 	for _, child := range issues {
 		if child.Key == root.Key || child.Tree != root.Tree {
 			continue
@@ -373,8 +383,19 @@ func (a *Admission) startMidPhaseChildren(ctx context.Context, tx pgx.Tx, root r
 		if role == "" || record.OutOfWorkflow(child.Status) {
 			continue
 		}
-		payload := record.SuperviseRequest{Op: "start", Tree: child.Tree, Role: role, Generation: child.Generation,
-			Phase: child.Phase, Task: workflow.ResumePhaseTask(child)}
+		token, err := claim.NewToken(project, child.Key, role)
+		if err != nil {
+			return err
+		}
+		run, err := a.store.RoleRun(ctx, tx, token, child.Key, role, child.Generation)
+		if err != nil {
+			return err
+		}
+		if !workflow.StartFor(run, root, child.Generation, child.Phase) {
+			continue
+		}
+		payload := record.SuperviseRequest{Op: "start", Tree: child.Tree, Role: role, Generation: child.Generation, Phase: child.Phase,
+			Task: workflow.ResumePhaseTask(child), ResumeTask: true}
 		if err := a.enqueue(ctx, tx, child.Key, payload, now); err != nil {
 			return err
 		}
