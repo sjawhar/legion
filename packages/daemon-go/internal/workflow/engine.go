@@ -539,8 +539,12 @@ func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestR
 		return intake.Result{}, err
 	}
 	row.Decision = &record.ReviewDecision{State: state, Body: fact.Body, Head: fact.CommitID}
-	if err := e.store.PutPhase(ctx, tx, row); err != nil || held {
+	if err := e.store.PutPhase(ctx, tx, row); err != nil {
 		return intake.Result{}, err
+	}
+	if held {
+		// The retry puts the issue back in reviewing, and the reviewer's completion ends the round.
+		return intake.Result{}, nil
 	}
 	return intake.Result{}, e.advanceReview(ctx, tx, *issue, pr)
 }

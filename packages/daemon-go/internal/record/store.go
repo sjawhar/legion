@@ -320,7 +320,6 @@ func scanPullRequest(row scanner) (*PullRequest, error) {
 	if err := json.Unmarshal(pushes, &pr.Pushes); err != nil {
 		return nil, fmt.Errorf("decode pushes: %w", err)
 	}
-	pr.ReviewSeen.SubmittedAt = pr.ReviewSeen.SubmittedAt.UTC()
 	return &pr, nil
 }
 
