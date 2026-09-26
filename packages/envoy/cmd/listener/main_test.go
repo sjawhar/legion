@@ -873,9 +873,9 @@ func TestPublishHandler_SourceFieldWithNATS(t *testing.T) {
 }
 
 func TestSendHandler_RejectsUnknownTarget(t *testing.T) {
-	_, sessions := setupSessionsTest(t, nil, nil)
+	registry, sessions := setupSessionsTest(t, nil, nil)
 	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{sessions: sessions})
+	state.Store(&listenerDeps{registry: registry, sessions: sessions})
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(
@@ -960,9 +960,9 @@ func TestSendHandler_RejectsInvalidSource(t *testing.T) {
 
 func TestSendHandler_AcceptsHumanSource(t *testing.T) {
 	client := setupPublishTestClient(t)
-	_, sessions := setupSessionsTest(t, nil, map[string]int{"ses_target": 1})
+	registry, sessions := setupSessionsTest(t, nil, map[string]int{"ses_target": 1})
 	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: client, sessions: sessions})
+	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions})
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(
@@ -1027,12 +1027,6 @@ func TestIsValidRole(t *testing.T) {
 		if isValidRole(role) {
 			t.Fatalf("expected role %q to be invalid", role)
 		}
-	}
-}
-
-func TestSessionHealthFields_NilReturnsNil(t *testing.T) {
-	if sessionHealthFields(nil) != nil {
-		t.Fatal("expected nil fields for nil session registry")
 	}
 }
 
@@ -1530,19 +1524,6 @@ func TestSessionsHandler_ReportsSelfSubscribedSession(t *testing.T) {
 	}
 }
 
-func TestSessionsHandler_NilSessionRegistry(t *testing.T) {
-	// When session registry is nil, endpoint returns 503
-	handler := sessionsHandler(nil, nil)
-
-	req := httptest.NewRequest(http.MethodGet, "/v1/sessions", nil)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("expected 503, got %d: %s", rec.Code, rec.Body.String())
-	}
-}
-
 func TestSessionsHandler_MethodNotAllowed(t *testing.T) {
 	handler := sessionsHandler(nil, nil)
 
@@ -1648,9 +1629,9 @@ func TestSessionsHandler_NoInterestsData(t *testing.T) {
 
 func TestIdempotencyKey_Send(t *testing.T) {
 	client := setupPublishTestClient(t)
-	_, sessions := setupSessionsTest(t, nil, map[string]int{"tgt1": 1})
+	registry, sessions := setupSessionsTest(t, nil, map[string]int{"tgt1": 1})
 	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: client, sessions: sessions})
+	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions})
 	handler := sendHandler(&state)
 
 	request := `{"source_session":"src1","target_session":"tgt1","message":"hello","idempotency_key":"retry-abc"}`
@@ -3882,8 +3863,16 @@ func TestHealthzAnswersUnhealthyWhileTheInterestWatcherIsDead(t *testing.T) {
 	if err := registry.WaitForCacheReady(readyCtx); err != nil {
 		t.Fatalf("wait for interest cache: %v", err)
 	}
+	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1))
+	if err != nil {
+		t.Fatalf("open session registry: %v", err)
+	}
+	t.Cleanup(sessions.StopWatch)
+	if err := sessions.WaitForCacheReady(readyCtx); err != nil {
+		t.Fatalf("wait for session cache: %v", err)
+	}
 	var state atomic.Pointer[listenerDeps]
-	state.Store(&listenerDeps{client: client, registry: registry, caches: []listenerCache{{name: "interest", cache: registry}}, consumer: "listener-healthz-interest"})
+	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions, caches: []listenerCache{{name: "interest", cache: registry}, {name: "session", cache: sessions}}, consumer: "listener-healthz-interest"})
 	get := func() (int, map[string]any) {
 		recorder := httptest.NewRecorder()
 		healthzHandler(&state).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/healthz", nil))

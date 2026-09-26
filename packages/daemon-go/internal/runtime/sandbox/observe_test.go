@@ -231,7 +231,7 @@ type breakablePods struct {
 func withBreakablePods(b *breakablePods) rigOption {
 	return func(g *rig, _ *Options) {
 		b.g = g
-		refused := errors.New("dial tcp 10.1.0.1:443: connect: connection refused")
+		refused := errors.New("dial tcp 192.0.2.1:443: connect: connection refused")
 		g.kube.PrependReactor("list", "pods", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
 			if b.broken.Load() {
 				return true, nil, refused

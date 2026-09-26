@@ -25,6 +25,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	legionstore "github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
@@ -478,11 +479,11 @@ func TestOutboxRunSurvivesAFailedClaimAndAFailedFinish(t *testing.T) {
 		close(done)
 	}()
 
-	eventually(t, "the row executed and its finish failed", func() bool { return client.count() == 1 && records.failedFinishes() == 1 })
+	testwait.Eventually(t, "the row executed and its finish failed", func() bool { return client.count() == 1 && records.failedFinishes() == 1 })
 	mu.Lock()
 	now = now.Add(outboxLease + time.Second)
 	mu.Unlock()
-	eventually(t, "the row finished after its lease expired", func() bool { return outboxRows(t, pool) == 0 })
+	testwait.Eventually(t, "the row finished after its lease expired", func() bool { return outboxRows(t, pool) == 0 })
 	cancel()
 	<-done
 	if got := client.count(); got != 2 {
@@ -665,7 +666,7 @@ func TestAWorkflowTaskIsDroppedAfterItsRetryRewritesTheDelivery(t *testing.T) {
 			t.Fatalf("handle %T: %v", ev, err)
 		}
 	}
-	eventually(t, "the phase's task to be acknowledged", func() bool {
+	testwait.Eventually(t, "the phase's task to be acknowledged", func() bool {
 		p := machine.Claim().Pending
 		return p != nil && !p.DeliveredAt.IsZero()
 	})

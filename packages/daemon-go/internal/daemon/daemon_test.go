@@ -35,6 +35,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 const testOperatorToken = "operator-bearer-for-daemon-tests"
@@ -530,26 +531,6 @@ func (d *daemon) spawn(req api.SpawnRequest) claim.Token {
 	return spawned.Token
 }
 
-// eventually waits, boundedly, for what the daemon does on its own goroutines.
-// eventually polls until the condition holds. What it waits for is something the daemon reaches on
-// its own — a delivery, the transaction that answers it — so the wait is bounded by this test
-// binary's own deadline rather than a fixed span: on a loaded machine a step that is merely slow
-// is not a failure, and a condition that never holds still fails here, naming what it waited for.
-func eventually(t *testing.T, what string, done func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(time.Minute)
-	if testDeadline, ok := t.Deadline(); ok && testDeadline.Add(-time.Second).Before(deadline) {
-		deadline = testDeadline.Add(-time.Second)
-	}
-	for time.Now().Before(deadline) {
-		if done() {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for %s", what)
-}
-
 // lastLaunch is the spec of the claim's latest launch — the boot token its pane carries.
 func lastLaunch(t *testing.T, rt *fake.Runtime, token claim.Token) runtime.SpawnSpec {
 	t.Helper()
@@ -835,7 +816,7 @@ func TestRunStopsWithTheErrorWhenItsIntakeEnds(t *testing.T) {
 		t.Fatalf("open the notification stream: %v", err)
 	}
 	consumer := "legion-go-" + cfg.Project + "-dispatch"
-	eventually(t, "intake pulling from the durable Dispatch consumer", func() bool {
+	testwait.Eventually(t, "intake pulling from the durable Dispatch consumer", func() bool {
 		durable, err := stream.Consumer(context.Background(), consumer)
 		if err != nil {
 			return false

@@ -3,6 +3,7 @@ package sandbox
 import (
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -165,8 +166,9 @@ func TestReleaseRefusesALocatorOfAnotherClaim(t *testing.T) {
 
 // A Release whose delete failed keeps the claim in the watch, so its Sandbox is still observed,
 // and leaves the Sandbox to the orphan sweep once the daemon has retired the claim: the sweep
-// protects the daemon's known claims, never the watch, so nothing a failed release leaves is
-// left unowned. While the claim is still known the Sandbox stays.
+// protects the daemon's known claims and the launches this runtime has not released, never the
+// watch, and a release, failed or not, has released the launch, so nothing a failed release leaves
+// is left unowned. While the claim is still known the Sandbox stays.
 func TestAFailedReleaseLeavesTheSandboxToTheSweep(t *testing.T) {
 	g := newRig(t, nil)
 	loc := g.spawn(workerSpec(t))
@@ -196,6 +198,91 @@ func TestAFailedReleaseLeavesTheSandboxToTheSweep(t *testing.T) {
 	}
 	if g.sandbox(name) != nil {
 		t.Fatal("the retired claim's sandbox outlived the sweep")
+	}
+}
+
+// The daemon reads its claims before it sweeps, and a retry after boot sweeps at a grace of 0
+// while it launches claims, so a claim launched after that read is missing from known. Its
+// Sandbox is this runtime's own launch, not what a crash left: the sweep keeps it, whether the
+// launch has finished or is still waiting for its pod.
+func TestTheOrphanSweepKeepsWhatThisRuntimeLaunchedSinceTheClaimsWereRead(t *testing.T) {
+	g := newRig(t, nil)
+	var known []runtime.Known // read before either launch
+	g.spawn(workerSpec(t))
+	g.hold.Store(true)
+	launching := make(chan error, 1)
+	go func() {
+		_, err := g.r.Spawn(g.ctx, rootSpec(t))
+		launching <- err
+	}()
+	g.eventually("the launching root's sandbox in the runtime's store", func() bool {
+		_, ok, _ := g.r.sandboxes.GetStore().GetByKey(testNamespace + "/" + SandboxName(rootToken))
+		return ok
+	})
+	if err := g.r.ReconcileOrphans(g.ctx, known, 0); err != nil {
+		t.Fatal(err)
+	}
+	if g.sandbox(SandboxName(workerToken)) == nil {
+		t.Fatal("a sandbox launched after the claims were read was swept as an orphan")
+	}
+	if g.sandbox(SandboxName(rootToken)) == nil {
+		t.Fatal("a sandbox still launching was swept as an orphan, and the tree volume with it")
+	}
+	g.hold.Store(false)
+	if err := <-launching; err != nil {
+		t.Fatalf("the root's launch: %v", err)
+	}
+}
+
+// A launch of a claim that begins while the sweep deletes a leftover Sandbox under the claim's
+// name waits for that delete, then launches into a Sandbox of its own: it never takes up the
+// leftover the delete then takes from under it, which would cost the claim a launch.
+func TestALaunchBegunDuringAnOrphansDeleteWaitsForIt(t *testing.T) {
+	leftover := SandboxName(workerToken)
+	var armed atomic.Bool
+	got := make(chan struct{}, 1)
+	launching := make(chan error, 1)
+	var g *rig
+	hooks := &sandboxHooks{
+		beforeDelete: func(name string) {
+			if name != leftover || !armed.CompareAndSwap(true, false) {
+				return
+			}
+			go func() {
+				_, err := g.r.Spawn(g.ctx, workerSpec(t))
+				launching <- err
+			}()
+			// The launch reads the claim's Sandbox as soon as nothing holds it back; give it the
+			// chance before this delete goes ahead.
+			select {
+			case <-got:
+			case <-time.After(time.Second):
+			}
+		},
+		afterGet: func(name string) {
+			if name == leftover {
+				select {
+				case got <- struct{}{}:
+				default:
+				}
+			}
+		},
+	}
+	g = newRig(t, []k8sruntime.Object{
+		sandboxObject(t, leftover, "uid-sandbox-leftover", modeSuspended, claimLabels(claim.RoleTester)),
+	}, withSandboxHooks(hooks))
+	armed.Store(true)
+	if err := g.r.ReconcileOrphans(g.ctx, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	if armed.Load() {
+		t.Fatal("the sweep never deleted the leftover")
+	}
+	if err := <-launching; err != nil {
+		t.Fatalf("the launch begun during the leftover's delete: %v", err)
+	}
+	if s := g.sandbox(leftover); s == nil || s.UID == "uid-sandbox-leftover" {
+		t.Fatalf("the claim's sandbox after its launch is %+v, want one of its own", s)
 	}
 }
 

@@ -156,8 +156,8 @@ func (w *Watcher) Err() error {
 	return w.err
 }
 
-// Ready reports whether the cache is ready: the first watcher delivered every key's current value,
-// or it ended or failed to start.
+// Ready reports whether the cache is ready: the current watcher delivered every key's current
+// value or ended on its own, or the first start failed with no watcher current.
 func (w *Watcher) Ready() bool {
 	select {
 	case <-w.ready:
@@ -201,9 +201,6 @@ func (w *Watcher) Stop() {
 // healthy watcher's is discarded, and that watcher stays. After Stop it arms nothing and only
 // moves the handle.
 func (w *Watcher) watch(kv nats.KeyValue) error {
-	if kv == nil {
-		return errors.New(w.name + ": KV unavailable")
-	}
 	w.mu.Lock()
 	stopped := w.stopped
 	if stopped {
@@ -233,14 +230,15 @@ func (w *Watcher) watch(kv nats.KeyValue) error {
 		discard(watcher)
 		return nil
 	}
-	if w.watcher != nil && w.err == nil && !w.stream.IsZero() && stream.Before(w.stream) {
+	if w.err == nil && stream.Before(w.stream) {
 		// A newer watch already switched to a recreated bucket and its watcher is running. This
 		// watcher may be on the old stream, so installing it would reset the cache the current
 		// watcher filled and feed it the old bucket's keys. The rule holds only against a live,
-		// healthy watcher: creation times do not always grow (a JetStream restore keeps the
-		// snapshot's, and a recreate can follow a clock step back), so when the current watcher
-		// has ended or Check has flagged its bucket, the watch installs and resets as usual, and
-		// if it did read the old stream the next Check flags that too.
+		// healthy watcher (an installed stream with no recorded error has one running): creation
+		// times do not always grow (a JetStream restore keeps the snapshot's, and a recreate can
+		// follow a clock step back), so when the current watcher has ended or Check has flagged
+		// its bucket, the watch installs and resets as usual, and if it did read the old stream
+		// the next Check flags that too.
 		w.mu.Unlock()
 		w.applyMu.Unlock()
 		discard(watcher)
@@ -278,10 +276,7 @@ func (w *Watcher) consume(watcher nats.KeyWatcher, generation uint64) {
 			// WatchAll emits a nil sentinel once it has delivered the current value of every key.
 			// Only the current watcher's releases readiness: a replaced one's scan says nothing
 			// about what the current watcher has delivered.
-			w.mu.RLock()
-			current := generation == w.generation
-			w.mu.RUnlock()
-			if current {
+			if w.current(generation) {
 				w.signalReady()
 			}
 			continue
@@ -308,12 +303,16 @@ func (w *Watcher) consume(watcher nats.KeyWatcher, generation uint64) {
 func (w *Watcher) applyCurrent(entry nats.KeyValueEntry, generation uint64) {
 	w.applyMu.Lock()
 	defer w.applyMu.Unlock()
-	w.mu.RLock()
-	current := generation == w.generation
-	w.mu.RUnlock()
-	if current {
+	if w.current(generation) {
 		w.apply(entry)
 	}
+}
+
+// current reports whether generation is still the current watcher's.
+func (w *Watcher) current(generation uint64) bool {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return generation == w.generation
 }
 
 // discard reads and drops a watcher's entries until it ends. nats.go blocks a watcher whose
